@@ -2,18 +2,28 @@
   "trading_params": {
     "TAKE_PROFIT_PCT": 0.004,
     "STOP_LOSS_PCT": 0.010,
-    "TRAILING_STOP_ACTIVATION": 0.0030,
-    "TRAILING_STOP_PCT": 0.0080,
+    "TRAILING_STOP_ACTIVATION": 0.003,
+    "TRAILING_STOP_PCT": 0.008,
     "POSITION_SIZING_PCT": 0.3
   },
-  "technical_params": {
-    "RSI_MIN": 35,
-    "RSI_MAX": 65,
-    "EMA_SHORT": 12,
-    "EMA_LONG": 26,
-    "MACD_FAST": 8,
-    "MACD_SLOW": 21,
-    "MACD_SIGNAL": 8,
-    "VOLUME_RATIO_MIN": 0.9
+  "timeframe_15m": {
+    "RSI_MIN_15M": 45,
+    "RSI_MAX_15M": 65,
+    "EMA_SHORT_15M": 20,
+    "EMA_LONG_15M": 50,
+    "MACD_FAST_15M": 12,
+    "MACD_SLOW_15M": 26,
+    "MACD_SIGNAL_15M": 9,
+    "VOLUME_RATIO_MIN_15M": 1.0
+  },
+  "timeframe_5m": {
+    "RSI_MIN_5M": 43,
+    "RSI_MAX_5M": 55,
+    "EMA_SHORT_5M": 20,
+    "EMA_LONG_5M": 50,
+    "MACD_FAST_5M": 12,
+    "MACD_SLOW_5M": 26,
+    "MACD_SIGNAL_5M": 9,
+    "VOLUME_RATIO_MIN_5M": 1.1
   }
 }
