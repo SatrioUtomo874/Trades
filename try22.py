@@ -2077,4 +2077,5 @@ if __name__ == "__main__":
         print(f"💀 Fatal error: {e}")
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
-    print("✅ Bot shutdown complete"
+    print("✅ Bot shutdown complete")
+
