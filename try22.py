@@ -543,10 +543,10 @@ def handle_sell_command(command, chat_id):
                     send_telegram_message(f"❌ <b>TAKE PROFIT HARUS DI ATAS HARGA BELI</b>\nHarga beli: ${entry_price:.6f}\nTP yang diminta: ${price_value:.6f}")
                     return
         
-        old_tp = active_position['take_profit']
-        active_position['take_profit'] = price_value
-        send_telegram_message(f"✅ <b>TAKE PROFIT DIPERBARUI</b>\n{symbol}\nTP sebelumnya: ${old_tp:.6f}\nTP baru: <b>${price_value:.6f}</b>")
-        print(f"✅ TP updated for {symbol}: {price_value}")
+                old_tp = active_position['take_profit']
+                active_position['take_profit'] = price_value
+                send_telegram_message(f"✅ <b>TAKE PROFIT DIPERBARUI</b>\n{symbol}\nTP sebelumnya: ${old_tp:.6f}\nTP baru: <b>${price_value:.6f}</b>")
+                print(f"✅ TP updated for {symbol}: {price_value}")
                 
             elif action == 'sl':
                 if price_value >= entry_price:
@@ -2067,4 +2067,5 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
+
 
