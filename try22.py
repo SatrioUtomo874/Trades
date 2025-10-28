@@ -12,36 +12,17 @@ from collections import deque
 from dotenv import load_dotenv
 import threading
 import websocket
+from flask import Flask
 
 # Load environment variables
 load_dotenv()
 warnings.filterwarnings('ignore')
 
 # ==================== KONFIGURASI ====================
-# Multiple API Keys untuk fallback
-API_KEYS = [
-    {
-        'key': os.getenv('BINANCE_API_KEY_1'),
-        'secret': os.getenv('BINANCE_API_SECRET_1')
-    },
-    {
-        'key': os.getenv('BINANCE_API_KEY_2'), 
-        'secret': os.getenv('BINANCE_API_SECRET_2')
-    },
-    {
-        'key': os.getenv('BINANCE_API_KEY_3'),
-        'secret': os.getenv('BINANCE_API_SECRET_3')
-    }
-]
+# Gunakan API key dari environment variables
+API_KEY = os.getenv('BINANCE_API_KEY')
+API_SECRET = os.getenv('BINANCE_API_SECRET')
 
-# Default ke API key lama untuk kompatibilitas
-if not API_KEYS[0]['key']:
-    API_KEYS[0] = {
-        'key': os.getenv('BINANCE_API_KEY'),
-        'secret': os.getenv('BINANCE_API_SECRET')
-    }
-
-CURRENT_API_INDEX = 0
 INITIAL_INVESTMENT = float(os.getenv('INITIAL_INVESTMENT', '5.5'))
 ORDER_RUN = os.getenv('ORDER_RUN', 'False').lower() == 'true'
 
@@ -53,22 +34,14 @@ TRAILING_STOP_PCT = 0.0080
 POSITION_SIZING_PCT = 0.4
 
 # Technical Parameters
-RSI_MIN_15M = 35
-RSI_MAX_15M = 65
-EMA_SHORT_15M = 12
-EMA_LONG_15M = 26
-MACD_FAST_15M = 7
-MACD_SLOW_15M = 21
-MACD_SIGNAL_15M = 7
-
-RSI_MIN_5M = 35
-RSI_MAX_5M = 68
-EMA_SHORT_5M = 5
-EMA_LONG_5M = 20
-MACD_FAST_5M = 8
-MACD_SLOW_5M = 21
-MACD_SIGNAL_5M = 8
-
+RSI_MIN = 35
+RSI_MAX = 65
+EMA_SHORT = 12
+EMA_LONG = 26
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+VOLUME_PERIOD = 20
 VOLUME_RATIO_MIN = 0.8
 
 # Telegram Configuration
@@ -87,15 +60,13 @@ CONFIG_FILE = 'bot_config.json'
 # File Configuration
 LOG_FILE = 'trading_log1.txt'
 TRADE_HISTORY_FILE = 'trade_history1.json'
-BOT_STATE_FILE = 'bot_state1.json'
 
-# Coin List
+# Coin List (disederhanakan untuk testing)
 COINS = [
     'PENGUUSDT','WALUSDT','MIRAUSDT','HEMIUSDT','PUMPUSDT','TRXUSDT','LTCUSDT','FFUSDT',
     'SUIUSDT','ASTERUSDT','ZECUSDT','CAKEUSDT','BNBUSDT','AVNTUSDT','DOGEUSDT','ADAUSDT',
     'XPLUSDT','XRPUSDT','DASHUSDT','SOLUSDT','LINKUSDT','AVAXUSDT', 'PEPEUSDT'
 ]
-
 # ==================== VARIABEL GLOBAL ====================
 current_investment = INITIAL_INVESTMENT
 active_position = None
@@ -113,30 +84,77 @@ performance_state = {
     'consecutive_losses': 0
 }
 
+# ==================== HEALTH ENDPOINT ====================
+def create_health_endpoint():
+    """Health endpoint untuk Render dengan port yang benar"""
+    try:
+        app = Flask(__name__)
+        
+        @app.route('/')
+        def health_check():
+            return {
+                'status': 'running', 
+                'timestamp': datetime.now().isoformat(),
+                'bot_running': BOT_RUNNING,
+                'coins_monitored': len(COINS)
+            }
+        
+        @app.route('/health')
+        def health():
+            return {'status': 'healthy'}
+        
+        # Gunakan port dari environment variable PORT, default 8080
+        port = int(os.environ.get('PORT', 8080))
+        
+        def run_flask():
+            print(f"🌐 Starting health endpoint on port {port}")
+            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+        
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        print(f"✅ Health endpoint started on port {port}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Health endpoint error: {e}")
+        return False
+
 # ==================== WEB SOCKET MANAGER ====================
 class BinanceWebSocketManager:
     def __init__(self):
         self.ws = None
         self.connected = False
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
         
     def start_kline_stream(self, symbols, interval='5m'):
-        """Start WebSocket for kline data"""
-        streams = [f"{symbol.lower()}@kline_{interval}" for symbol in symbols]
-        stream_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
-        
-        self.ws = websocket.WebSocketApp(
-            stream_url,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close,
-            on_open=self.on_open
-        )
-        
-        def run_websocket():
-            self.ws.run_forever()
+        """Start WebSocket for kline data dengan reconnection logic"""
+        try:
+            streams = [f"{symbol.lower()}@kline_{interval}" for symbol in symbols]
+            stream_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
             
-        ws_thread = threading.Thread(target=run_websocket, daemon=True)
-        ws_thread.start()
+            print(f"🔗 Connecting WebSocket for {len(symbols)} symbols...")
+            
+            self.ws = websocket.WebSocketApp(
+                stream_url,
+                on_message=self.on_message,
+                on_error=self.on_error,
+                on_close=self.on_close,
+                on_open=self.on_open
+            )
+            
+            def run_websocket():
+                try:
+                    self.ws.run_forever()
+                except Exception as e:
+                    print(f"WebSocket run_forever error: {e}")
+                    self.schedule_reconnect()
+            
+            ws_thread = threading.Thread(target=run_websocket, daemon=True)
+            ws_thread.start()
+            
+        except Exception as e:
+            print(f"WebSocket connection error: {e}")
+            self.schedule_reconnect()
         
     def on_message(self, ws, message):
         """Handle incoming WebSocket messages"""
@@ -157,37 +175,93 @@ class BinanceWebSocketManager:
                         'timestamp': deque(maxlen=100)
                     }
                 
-                # Update WebSocket data
+                # Always update current price
+                current_price = float(kline['c'])
+                price_data[symbol] = current_price
+                
+                # Update historical data only when kline is closed
                 if kline['x']:  # Kline is closed
-                    websocket_data[symbol]['close'].append(float(kline['c']))
+                    websocket_data[symbol]['close'].append(current_price)
                     websocket_data[symbol]['high'].append(float(kline['h']))
                     websocket_data[symbol]['low'].append(float(kline['l']))
                     websocket_data[symbol]['volume'].append(float(kline['v']))
                     websocket_data[symbol]['timestamp'].append(kline['t'])
-                
-                # Update current price
-                price_data[symbol] = float(kline['c'])
                 
         except Exception as e:
             print(f"WebSocket message error: {e}")
 
     def on_error(self, ws, error):
         print(f"WebSocket error: {error}")
+        self.connected = False
 
     def on_close(self, ws, close_status_code, close_msg):
         print("WebSocket closed")
         self.connected = False
-        # Attempt reconnect after 10 seconds
-        threading.Timer(10, self.reconnect).start()
+        self.schedule_reconnect()
 
     def on_open(self, ws):
-        print("WebSocket connected")
+        print("✅ WebSocket connected successfully")
         self.connected = True
+        self.reconnect_attempts = 0  # Reset reconnect attempts on successful connection
+
+    def schedule_reconnect(self):
+        """Schedule WebSocket reconnection"""
+        if self.reconnect_attempts < self.max_reconnect_attempts:
+            self.reconnect_attempts += 1
+            delay = min(30, 5 * self.reconnect_attempts)  # Exponential backoff: 5, 10, 15, 20, 30 seconds
+            print(f"🔄 Attempting WebSocket reconnect #{self.reconnect_attempts} in {delay} seconds...")
+            threading.Timer(delay, self.reconnect).start()
+        else:
+            print("❌ Max reconnection attempts reached. WebSocket connection failed.")
 
     def reconnect(self):
         """Reconnect WebSocket"""
         print("Attempting to reconnect WebSocket...")
         self.start_kline_stream(COINS)
+
+# ==================== BINANCE CLIENT MANAGEMENT ====================
+def initialize_binance_client():
+    """Initialize Binance client dengan error handling"""
+    global client
+    
+    if not ORDER_RUN:
+        print("🔄 Simulation mode - No Binance client needed")
+        return True
+        
+    try:
+        if not API_KEY or not API_SECRET:
+            print("❌ API key or secret not found")
+            return False
+            
+        print("🔧 Initializing Binance client...")
+        
+        # Gunakan timeout yang lebih pendek dan configuration yang lebih aman
+        client = Client(
+            API_KEY, 
+            API_SECRET, 
+            {
+                "timeout": 15,
+                "requests_params": {"timeout": 15}
+            }
+        )
+        
+        # Test connection dengan method yang lebih ringan
+        server_time = client.get_server_time()
+        print(f"✅ Binance client initialized successfully. Server time: {server_time['serverTime']}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Binance client initialization failed: {e}")
+        
+        # Jika terkena IP ban, gunakan mode simulasi
+        if "IP banned" in str(e) or "too much request" in str(e):
+            print("🚫 IP Banned detected. Switching to simulation mode...")
+            global ORDER_RUN
+            ORDER_RUN = False
+            send_telegram_message("⚠️ <b>IP BAN DETECTED</b>\nSwitching to simulation mode automatically.")
+            return True
+            
+        return False
 
 # ==================== TELEGRAM COMMAND SYSTEM ====================
 def send_telegram_message(message):
@@ -206,7 +280,7 @@ def send_telegram_message(message):
             'parse_mode': 'HTML',
             'disable_web_page_preview': True
         }
-        response = requests.post(url, data=payload, timeout=5)
+        response = requests.post(url, data=payload, timeout=10)
         return response.status_code == 200
     except Exception as e:
         print(f"❌ Telegram error: {e}")
@@ -218,7 +292,7 @@ def handle_telegram_command():
     
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
@@ -480,23 +554,14 @@ def handle_set_command(command, chat_id):
             'TRAILING_STOP_ACTIVATION': ('trading_params', float),
             'TRAILING_STOP_PCT': ('trading_params', float),
             'POSITION_SIZING_PCT': ('trading_params', float),
-            
-            'RSI_MIN_15M': ('timeframe_params', int),
-            'RSI_MAX_15M': ('timeframe_params', int),
-            'EMA_SHORT_15M': ('timeframe_params', int),
-            'EMA_LONG_15M': ('timeframe_params', int),
-            'MACD_FAST_15M': ('timeframe_params', int),
-            'MACD_SLOW_15M': ('timeframe_params', int),
-            'MACD_SIGNAL_15M': ('timeframe_params', int),
-            
-            'RSI_MIN_5M': ('timeframe_params', int),
-            'RSI_MAX_5M': ('timeframe_params', int),
-            'EMA_SHORT_5M': ('timeframe_params', int),
-            'EMA_LONG_5M': ('timeframe_params', int),
-            'MACD_FAST_5M': ('timeframe_params', int),
-            'MACD_SLOW_5M': ('timeframe_params', int),
-            'MACD_SIGNAL_5M': ('timeframe_params', int),
-            'VOLUME_RATIO_MIN': ('timeframe_params', float)
+            'RSI_MIN': ('technical_params', int),
+            'RSI_MAX': ('technical_params', int),
+            'EMA_SHORT': ('technical_params', int),
+            'EMA_LONG': ('technical_params', int),
+            'MACD_FAST': ('technical_params', int),
+            'MACD_SLOW': ('technical_params', int),
+            'MACD_SIGNAL': ('technical_params', int),
+            'VOLUME_RATIO_MIN': ('technical_params', float)
         }
         
         if param_name in valid_params:
@@ -555,7 +620,7 @@ def send_bot_status(chat_id):
         f"Modal: ${current_investment:.2f}\n"
         f"Total Trade: {len(trade_history)}\n"
         f"Win Rate: {winrate:.1f}%\n"
-        f"API Key: {CURRENT_API_INDEX + 1}\n"
+        f"Mode: {'LIVE' if ORDER_RUN else 'SIMULATION'}\n"
     )
     
     if active_position:
@@ -585,15 +650,10 @@ def send_current_config(chat_id):
         f"│ Trailing Act: {TRAILING_STOP_ACTIVATION*100:.2f}%\n"
         f"│ Trailing SL: {TRAILING_STOP_PCT*100:.2f}%\n"
         f"├────────────────────────────┤\n"
-        f"│ <b>M15 PARAMS</b>\n"
-        f"│ RSI: {RSI_MIN_15M}-{RSI_MAX_15M}\n"
-        f"│ EMA: {EMA_SHORT_15M}/{EMA_LONG_15M}\n"
-        f"│ MACD: {MACD_FAST_15M}/{MACD_SLOW_15M}/{MACD_SIGNAL_15M}\n"
-        f"├────────────────────────────┤\n"
-        f"│ <b>M5 PARAMS</b>\n"
-        f"│ RSI: {RSI_MIN_5M}-{RSI_MAX_5M}\n"
-        f"│ EMA: {EMA_SHORT_5M}/{EMA_LONG_5M}\n"
-        f"│ MACD: {MACD_FAST_5M}/{MACD_SLOW_5M}/{MACD_SIGNAL_5M}\n"
+        f"│ <b>TECHNICAL PARAMS</b>\n"
+        f"│ RSI: {RSI_MIN}-{RSI_MAX}\n"
+        f"│ EMA: {EMA_SHORT}/{EMA_LONG}\n"
+        f"│ MACD: {MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL}\n"
         f"│ Volume Ratio: {VOLUME_RATIO_MIN}\n"
         f"└────────────────────────────┘\n"
         f"Gunakan /set [parameter] [value] untuk mengubah konfigurasi"
@@ -626,7 +686,7 @@ def send_help_message(chat_id):
         f"│ /set [param] [value]\n"
         f"│ Contoh:\n"
         f"│ /set TAKE_PROFIT_PCT 0.008\n"
-        f"│ /set RSI_MIN_15M 30\n"
+        f"│ /set RSI_MIN 30\n"
         f"│ /set POSITION_SIZING_PCT 0.3\n"
         f"├────────────────────────────┤\n"
         f"│ <b>KELOLA COIN</b>\n"
@@ -660,13 +720,14 @@ def load_config():
             'TRAILING_STOP_PCT': TRAILING_STOP_PCT,
             'POSITION_SIZING_PCT': POSITION_SIZING_PCT
         },
-        'timeframe_params': {
-            'RSI_MIN_15M': RSI_MIN_15M, 'RSI_MAX_15M': RSI_MAX_15M,
-            'EMA_SHORT_15M': EMA_SHORT_15M, 'EMA_LONG_15M': EMA_LONG_15M,
-            'MACD_FAST_15M': MACD_FAST_15M, 'MACD_SLOW_15M': MACD_SLOW_15M, 'MACD_SIGNAL_15M': MACD_SIGNAL_15M,
-            'RSI_MIN_5M': RSI_MIN_5M, 'RSI_MAX_5M': RSI_MAX_5M,
-            'EMA_SHORT_5M': EMA_SHORT_5M, 'EMA_LONG_5M': EMA_LONG_5M,
-            'MACD_FAST_5M': MACD_FAST_5M, 'MACD_SLOW_5M': MACD_SLOW_5M, 'MACD_SIGNAL_5M': MACD_SIGNAL_5M,
+        'technical_params': {
+            'RSI_MIN': RSI_MIN,
+            'RSI_MAX': RSI_MAX,
+            'EMA_SHORT': EMA_SHORT,
+            'EMA_LONG': EMA_LONG,
+            'MACD_FAST': MACD_FAST,
+            'MACD_SLOW': MACD_SLOW,
+            'MACD_SIGNAL': MACD_SIGNAL,
             'VOLUME_RATIO_MIN': VOLUME_RATIO_MIN
         }
     }
@@ -695,12 +756,11 @@ def save_config(config):
 def update_global_variables_from_config():
     """Update global variables dari config file"""
     global TAKE_PROFIT_PCT, STOP_LOSS_PCT, TRAILING_STOP_ACTIVATION, TRAILING_STOP_PCT, POSITION_SIZING_PCT
-    global RSI_MIN_15M, RSI_MAX_15M, EMA_SHORT_15M, EMA_LONG_15M, MACD_FAST_15M, MACD_SLOW_15M, MACD_SIGNAL_15M
-    global RSI_MIN_5M, RSI_MAX_5M, EMA_SHORT_5M, EMA_LONG_5M, MACD_FAST_5M, MACD_SLOW_5M, MACD_SIGNAL_5M, VOLUME_RATIO_MIN
+    global RSI_MIN, RSI_MAX, EMA_SHORT, EMA_LONG, MACD_FAST, MACD_SLOW, MACD_SIGNAL, VOLUME_RATIO_MIN
     
     config = load_config()
     trading_params = config['trading_params']
-    timeframe_params = config['timeframe_params']
+    technical_params = config['technical_params']
     
     TAKE_PROFIT_PCT = trading_params['TAKE_PROFIT_PCT']
     STOP_LOSS_PCT = trading_params['STOP_LOSS_PCT']
@@ -708,22 +768,14 @@ def update_global_variables_from_config():
     TRAILING_STOP_PCT = trading_params['TRAILING_STOP_PCT']
     POSITION_SIZING_PCT = trading_params['POSITION_SIZING_PCT']
     
-    RSI_MIN_15M = timeframe_params['RSI_MIN_15M']
-    RSI_MAX_15M = timeframe_params['RSI_MAX_15M']
-    EMA_SHORT_15M = timeframe_params['EMA_SHORT_15M']
-    EMA_LONG_15M = timeframe_params['EMA_LONG_15M']
-    MACD_FAST_15M = timeframe_params['MACD_FAST_15M']
-    MACD_SLOW_15M = timeframe_params['MACD_SLOW_15M']
-    MACD_SIGNAL_15M = timeframe_params['MACD_SIGNAL_15M']
-    
-    RSI_MIN_5M = timeframe_params['RSI_MIN_5M']
-    RSI_MAX_5M = timeframe_params['RSI_MAX_5M']
-    EMA_SHORT_5M = timeframe_params['EMA_SHORT_5M']
-    EMA_LONG_5M = timeframe_params['EMA_LONG_5M']
-    MACD_FAST_5M = timeframe_params['MACD_FAST_5M']
-    MACD_SLOW_5M = timeframe_params['MACD_SLOW_5M']
-    MACD_SIGNAL_5M = timeframe_params['MACD_SIGNAL_5M']
-    VOLUME_RATIO_MIN = timeframe_params['VOLUME_RATIO_MIN']
+    RSI_MIN = technical_params['RSI_MIN']
+    RSI_MAX = technical_params['RSI_MAX']
+    EMA_SHORT = technical_params['EMA_SHORT']
+    EMA_LONG = technical_params['EMA_LONG']
+    MACD_FAST = technical_params['MACD_FAST']
+    MACD_SLOW = technical_params['MACD_SLOW']
+    MACD_SIGNAL = technical_params['MACD_SIGNAL']
+    VOLUME_RATIO_MIN = technical_params['VOLUME_RATIO_MIN']
 
 # ==================== DATA MANAGEMENT ====================
 def load_trade_history():
@@ -830,21 +882,21 @@ def analyze_symbol(symbol):
         current_price = price_data.get(symbol, closes[-1] if closes else 0)
         
         # Calculate indicators from WebSocket data
-        ema_short_15m = calculate_ema(closes, EMA_SHORT_15M)
-        ema_long_15m = calculate_ema(closes, EMA_LONG_15M)
-        rsi_15m = calculate_rsi(closes)
-        macd_line_15m, macd_signal_15m, _ = calculate_macd(closes, MACD_FAST_15M, MACD_SLOW_15M, MACD_SIGNAL_15M)
+        ema_short = calculate_ema(closes, EMA_SHORT)
+        ema_long = calculate_ema(closes, EMA_LONG)
+        rsi = calculate_rsi(closes)
+        macd_line, macd_signal, _ = calculate_macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
         volume_ratio = calculate_volume_ratio(volumes)
         
-        if any(x is None for x in [ema_short_15m, ema_long_15m, rsi_15m, macd_line_15m]):
+        if any(x is None for x in [ema_short, ema_long, rsi, macd_line]):
             return None
         
         # Trading conditions
-        price_above_ema_short = current_price > ema_short_15m
-        price_above_ema_long = current_price > ema_long_15m
-        ema_bullish = ema_short_15m > ema_long_15m
-        rsi_ok = RSI_MIN_15M <= rsi_15m <= RSI_MAX_15M
-        macd_bullish = macd_line_15m > macd_signal_15m if macd_signal_15m else False
+        price_above_ema_short = current_price > ema_short
+        price_above_ema_long = current_price > ema_long
+        ema_bullish = ema_short > ema_long
+        rsi_ok = RSI_MIN <= rsi <= RSI_MAX
+        macd_bullish = macd_line > macd_signal if macd_signal else False
         volume_ok = volume_ratio > VOLUME_RATIO_MIN
         
         # Calculate confidence score
@@ -864,9 +916,9 @@ def analyze_symbol(symbol):
             'buy_signal': buy_signal,
             'confidence': min(score, 100),
             'current_price': current_price,
-            'rsi': rsi_15m,
-            'ema_short': ema_short_15m,
-            'ema_long': ema_long_15m,
+            'rsi': rsi,
+            'ema_short': ema_short,
+            'ema_long': ema_long,
             'volume_ratio': volume_ratio
         }
         
@@ -875,86 +927,7 @@ def analyze_symbol(symbol):
         return None
 
 # ==================== ORDER MANAGEMENT ====================
-def get_precise_quantity(symbol, investment_amount):
-    """Dapatkan quantity yang tepat"""
-    try:
-        current_price = price_data.get(symbol)
-        if not current_price or current_price <= 0:
-            return None
-            
-        theoretical_quantity = investment_amount / current_price
-        
-        if theoretical_quantity <= 0:
-            return None
-            
-        if not ORDER_RUN:
-            return round(theoretical_quantity * 0.998, 6)
-            
-        precise_quantity = round_step_size(theoretical_quantity, symbol)
-        return precise_quantity
-        
-    except Exception as e:
-        print(f"❌ Error di get_precise_quantity: {e}")
-        return None
-
-def round_step_size(quantity, symbol):
-    """Round quantity ke step size yang tepat"""
-    try:
-        if quantity <= 0:
-            return None
-            
-        symbol_info = get_symbol_info(symbol)
-        if not symbol_info:
-            return math.floor(quantity * 1000000) / 1000000
-            
-        for filter in symbol_info['filters']:
-            if filter['filterType'] == 'LOT_SIZE':
-                step_size = float(filter['stepSize'])
-                min_qty = float(filter.get('minQty', step_size))
-                if quantity < min_qty:
-                    return None
-                
-                precision = int(round(-math.log(step_size, 10), 0))
-                rounded_qty = math.floor(quantity / step_size) * step_size
-                rounded_qty = round(rounded_qty, precision)
-                
-                if rounded_qty <= 0 or rounded_qty < min_qty:
-                    return None
-                    
-                return float(rounded_qty)
-                
-        return math.floor(quantity * 1000000) / 1000000
-        
-    except Exception as e:
-        print(f"❌ Error in round_step_size for {symbol}: {e}")
-        return math.floor(quantity * 1000000) / 1000000
-
-def get_symbol_info(symbol):
-    """Get symbol information"""
-    try:
-        info = client.get_symbol_info(symbol)
-        return info
-    except Exception as e:
-        print(f"❌ Error getting symbol info: {e}")
-        return None
-
-def get_min_notional(symbol):
-    """Get minimum notional requirement"""
-    try:
-        symbol_info = client.get_symbol_info(symbol)
-        if symbol_info:
-            for f in symbol_info['filters']:
-                if f['filterType'] == 'MIN_NOTIONAL':
-                    min_notional = float(f.get('minNotional', 10.0))
-                    return min_notional
-                elif f['filterType'] == 'NOTIONAL':
-                    min_notional = float(f.get('minNotional', 10.0))
-                    return min_notional
-        return 10.0
-    except Exception as e:
-        return 10.0
-
-def calculate_position_size(symbol):
+def calculate_position_size():
     """Hitung ukuran position"""
     global current_investment
     
@@ -979,17 +952,6 @@ def place_market_buy_order(symbol, investment_amount):
     try:
         print(f"🔹 BUY ORDER: {symbol}")
         
-        free_balance = 0
-        if ORDER_RUN:
-            try:
-                balance = client.get_asset_balance(asset='USDT')
-                free_balance = float(balance['free'])
-                if free_balance < investment_amount:
-                    print(f"❌ Insufficient balance. Need: ${investment_amount:.2f}, Available: ${free_balance:.2f}")
-                    return None
-            except Exception as e:
-                free_balance = investment_amount * 2
-        
         current_price = price_data.get(symbol)
         if not current_price or current_price <= 0:
             return None
@@ -998,17 +960,6 @@ def place_market_buy_order(symbol, investment_amount):
         
         if theoretical_quantity <= 0:
             return None
-
-        min_notional = get_min_notional(symbol)
-        calculated_value = theoretical_quantity * current_price
-        
-        required_minimum = max(min_notional, INITIAL_INVESTMENT)
-        if calculated_value < required_minimum:
-            required_investment = required_minimum * 1.02
-            theoretical_quantity = required_investment / current_price
-            
-            if ORDER_RUN and required_investment > free_balance:
-                return None
 
         if not ORDER_RUN:
             precise_quantity = round(theoretical_quantity, 6)
@@ -1021,30 +972,35 @@ def place_market_buy_order(symbol, investment_amount):
             }
             return simulated_order
 
-        precise_quantity = round_step_size(theoretical_quantity, symbol)
-        
-        if not precise_quantity:
-            return None
+        # Live trading
+        try:
+            # Get balance
+            balance = client.get_asset_balance(asset='USDT')
+            free_balance = float(balance['free'])
             
-        final_order_value = precise_quantity * current_price
-        
-        if final_order_value < required_minimum:
-            return None
-        
-        order = client.order_market_buy(
-            symbol=symbol,
-            quantity=precise_quantity
-        )
-        
-        if order and order.get('status') == 'FILLED':
-            print(f"✅ BUY order executed for {symbol}")
-            return order
-        else:
-            print(f"❌ BUY order failed for {symbol}")
+            if free_balance < investment_amount:
+                print(f"❌ Insufficient balance. Need: ${investment_amount:.2f}, Available: ${free_balance:.2f}")
+                return None
+                
+            # Place order
+            order = client.order_market_buy(
+                symbol=symbol,
+                quoteOrderQty=investment_amount  # Use quote order quantity for precise amount
+            )
+            
+            if order and order.get('status') == 'FILLED':
+                print(f"✅ BUY order executed for {symbol}")
+                return order
+            else:
+                print(f"❌ BUY order failed for {symbol}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ BUY error: {e}")
             return None
             
     except Exception as e:
-        print(f"❌ BUY error: {e}")
+        print(f"❌ BUY execution error: {e}")
         return None
 
 def execute_market_sell(symbol, quantity, entry_price, exit_type):
@@ -1056,54 +1012,51 @@ def execute_market_sell(symbol, quantity, entry_price, exit_type):
         
         current_price = price_data.get(symbol, entry_price)
 
-        if ORDER_RUN:
-            asset = symbol.replace('USDT', '')
-            try:
-                balance_info = client.get_asset_balance(asset=asset)
-                if balance_info:
-                    available_balance = float(balance_info['free'])
-                    
-                    if available_balance <= 0:
-                        active_position = None
-                        return False
-                        
-                    if quantity > available_balance:
-                        quantity = available_balance
-            except Exception as e:
-                print(f"   ⚠️ Balance check error: {e}")
-
         if not ORDER_RUN:
             log_position_closed(symbol, entry_price, current_price, quantity, exit_type)
             active_position = None
             return True
 
-        precise_quantity = round_step_size(quantity, symbol)
-        if not precise_quantity:
-            precise_quantity = round(quantity, 6)
+        # Live trading
+        try:
+            # Get balance
+            asset = symbol.replace('USDT', '')
+            balance_info = client.get_asset_balance(asset=asset)
+            if balance_info:
+                available_balance = float(balance_info['free'])
+                
+                if available_balance <= 0:
+                    active_position = None
+                    return False
+                    
+                if quantity > available_balance:
+                    quantity = available_balance
 
-        if precise_quantity <= 0:
+            # Place sell order
+            sell_order = client.order_market_sell(
+                symbol=symbol,
+                quantity=round(quantity, 6)  # Simple rounding for demo
+            )
+
+            if sell_order and sell_order.get('status') == 'FILLED':
+                executed_qty = float(sell_order.get('executedQty', 0))
+                exit_price = current_price
+                
+                if sell_order.get('fills') and len(sell_order['fills']) > 0:
+                    exit_price = float(sell_order['fills'][0]['price'])
+                
+                log_position_closed(symbol, entry_price, exit_price, executed_qty, exit_type)
+                active_position = None
+                print(f"   ✅ SELL successful: {executed_qty} {symbol} at ${exit_price}")
+                return True
+                
             active_position = None
             return False
 
-        sell_order = client.order_market_sell(
-            symbol=symbol,
-            quantity=precise_quantity
-        )
-
-        if sell_order and sell_order.get('status') == 'FILLED':
-            executed_qty = float(sell_order.get('executedQty', 0))
-            exit_price = current_price
-            
-            if sell_order.get('fills') and len(sell_order['fills']) > 0:
-                exit_price = float(sell_order['fills'][0]['price'])
-            
-            log_position_closed(symbol, entry_price, exit_price, executed_qty, exit_type)
+        except Exception as e:
+            print(f"❌ SELL execution error: {e}")
             active_position = None
-            print(f"   ✅ SELL successful: {executed_qty} {symbol} at ${exit_price}")
-            return True
-            
-        active_position = None
-        return False
+            return False
 
     except Exception as e:
         print(f"❌ SELL error: {e}")
@@ -1261,55 +1214,44 @@ def check_position_exit():
     except Exception as e:
         print(f"❌ Error checking position exit: {e}")
 
-# ==================== BINANCE CLIENT MANAGEMENT ====================
-def initialize_binance_client():
-    """Initialize Binance client dengan API key yang aktif"""
-    global client, CURRENT_API_INDEX
-    
-    try:
-        api_key = API_KEYS[CURRENT_API_INDEX]['key']
-        api_secret = API_KEYS[CURRENT_API_INDEX]['secret']
-        
-        if not api_key or not api_secret:
-            print(f"❌ API key {CURRENT_API_INDEX} tidak valid")
-            return False
-            
-        client = Client(api_key, api_secret, {"timeout": 20})
-        print(f"✅ Binance client initialized dengan API key {CURRENT_API_INDEX + 1}")
-        
-        # Test connection
-        client.ping()
-        print(f"✅ Binance connection test successful dengan API key {CURRENT_API_INDEX + 1}")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Failed to initialize Binance client dengan API key {CURRENT_API_INDEX + 1}: {e}")
-        return False
-
 # ==================== MAIN BOT LOGIC ====================
 def main():
     global BOT_RUNNING, current_investment, active_position
     
     print("🚀 Starting BOT - WebSocket Version")
     
+    # Start health endpoint first
+    create_health_endpoint()
+    
+    # Load configuration and data
     update_global_variables_from_config()
     load_trade_history()
     
+    # Initialize Binance client (only if ORDER_RUN is True)
     if not initialize_binance_client():
-        return
+        print("❌ Failed to initialize Binance client. Continuing in simulation mode...")
+        global ORDER_RUN
+        ORDER_RUN = False
     
     # Initialize WebSocket
     ws_manager = BinanceWebSocketManager()
     ws_manager.start_kline_stream(COINS)
     
     # Wait for WebSocket to connect and collect initial data
-    print("⏳ Collecting initial market data...")
-    time.sleep(30)
+    print("⏳ Collecting initial market data (30 seconds)...")
+    for i in range(30):
+        if not BOT_RUNNING:
+            break
+        time.sleep(1)
+        if (i + 1) % 10 == 0:
+            print(f"   {i + 1}/30 seconds...")
+    
+    connected_symbols = len([s for s in COINS if s in websocket_data])
+    print(f"✅ WebSocket data collected for {connected_symbols}/{len(COINS)} symbols")
     
     startup_msg = (f"🤖 <b>BOT STARTED - WebSocket MODE</b>\n"
-                  f"Coins: {len(COINS)}\n"
+                  f"Coins: {len(COINS)} ({connected_symbols} connected)\n"
                   f"Mode: {'LIVE' if ORDER_RUN else 'SIMULATION'}\n"
-                  f"API Key: {CURRENT_API_INDEX + 1}\n"
                   f"Modal: ${current_investment:.2f}\n"
                   f"Status: MENUNGGU PERINTAH /start")
     send_telegram_message(startup_msg)
@@ -1341,6 +1283,7 @@ def main():
                 print("🔍 Scanning for signals...")
                 
                 best_signal = None
+                signals_found = 0
                 
                 for symbol in COINS:
                     if not BOT_RUNNING:
@@ -1349,13 +1292,14 @@ def main():
                     analysis = analyze_symbol(symbol)
                     
                     if analysis and analysis['buy_signal']:
+                        signals_found += 1
                         if not best_signal or analysis['confidence'] > best_signal['confidence']:
                             best_signal = analysis
                 
                 if best_signal and best_signal['confidence'] > 60:
                     print(f"🎯 Signal found: {best_signal['symbol']} (Confidence: {best_signal['confidence']:.1f}%)")
                     
-                    investment_amount = calculate_position_size(best_signal['symbol'])
+                    investment_amount = calculate_position_size()
                     buy_order = place_market_buy_order(best_signal['symbol'], investment_amount)
                     
                     if buy_order and buy_order.get('status') == 'FILLED':
@@ -1385,6 +1329,7 @@ def main():
                         
                         log_position_opened(best_signal['symbol'], entry_price, executed_qty, take_profit, stop_loss, best_signal['confidence'])
                 
+                print(f"📊 Scan complete: {signals_found} signals found")
                 last_scan_time = current_time
             
             time.sleep(1)
