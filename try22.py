@@ -34,16 +34,27 @@ TRAILING_STOP_ACTIVATION = 0.0040
 TRAILING_STOP_PCT = 0.0080
 POSITION_SIZING_PCT = 0.4
 
-# Technical Parameters
-RSI_MIN = 35
-RSI_MAX = 65
-EMA_SHORT = 12
-EMA_LONG = 26
-MACD_FAST = 12
-MACD_SLOW = 26
-MACD_SIGNAL = 9
-VOLUME_PERIOD = 20
-VOLUME_RATIO_MIN = 0.8
+# Technical Parameters untuk 15m
+RSI_MIN_15M = 35
+RSI_MAX_15M = 65
+EMA_SHORT_15M = 12
+EMA_LONG_15M = 26
+MACD_FAST_15M = 7
+MACD_SLOW_15M = 21
+MACD_SIGNAL_15M = 7
+VOLUME_PERIOD_15M = 20
+VOLUME_RATIO_MIN_15M = 0.8
+
+# Technical Parameters untuk 5m
+RSI_MIN_5M = 35
+RSI_MAX_5M = 68
+EMA_SHORT_5M = 5
+EMA_LONG_5M = 20
+MACD_FAST_5M = 8
+MACD_SLOW_5M = 21
+MACD_SIGNAL_5M = 8
+VOLUME_PERIOD_5M = 10
+VOLUME_RATIO_MIN_5M = 0.8
 
 # Telegram Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -62,20 +73,22 @@ CONFIG_FILE = 'bot_config.json'
 LOG_FILE = 'trading_log1.txt'
 TRADE_HISTORY_FILE = 'trade_history1.json'
 
-# Coin List (disederhanakan untuk testing)
+# Coin List
 COINS = [
     'PENGUUSDT','WALUSDT','MIRAUSDT','HEMIUSDT','PUMPUSDT','TRXUSDT','LTCUSDT','FFUSDT',
     'SUIUSDT','ASTERUSDT','ZECUSDT','CAKEUSDT','BNBUSDT','AVNTUSDT','DOGEUSDT','ADAUSDT',
     'XPLUSDT','XRPUSDT','DASHUSDT','SOLUSDT','LINKUSDT','AVAXUSDT', 'PEPEUSDT'
 ]
+
 # ==================== VARIABEL GLOBAL ====================
 current_investment = INITIAL_INVESTMENT
 active_position = None
 trade_history = []
 client = None
 
-# WebSocket Data Storage
-websocket_data = {}
+# WebSocket Data Storage untuk kedua timeframe
+websocket_data_5m = {}
+websocket_data_15m = {}
 price_data = {}
 
 # Performance tracking
@@ -121,19 +134,24 @@ def create_health_endpoint():
 
 # ==================== WEB SOCKET MANAGER ====================
 class BinanceWebSocketManager:
-    def __init__(self):
+    def __init__(self, interval='5m'):
         self.ws = None
         self.connected = False
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
+        self.interval = interval
+        self.data_storage = websocket_data_5m if interval == '5m' else websocket_data_15m
         
-    def start_kline_stream(self, symbols, interval='5m'):
+    def start_kline_stream(self, symbols, interval=None):
         """Start WebSocket for kline data dengan reconnection logic"""
+        if interval is None:
+            interval = self.interval
+            
         try:
             streams = [f"{symbol.lower()}@kline_{interval}" for symbol in symbols]
             stream_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
             
-            print(f"🔗 Connecting WebSocket for {len(symbols)} symbols...")
+            print(f"🔗 Connecting WebSocket for {len(symbols)} symbols ({interval})...")
             
             self.ws = websocket.WebSocketApp(
                 stream_url,
@@ -167,8 +185,8 @@ class BinanceWebSocketManager:
                 symbol = stream.split('@')[0].upper()
                 kline = data['data']['k']
                 
-                if symbol not in websocket_data:
-                    websocket_data[symbol] = {
+                if symbol not in self.data_storage:
+                    self.data_storage[symbol] = {
                         'close': deque(maxlen=100),
                         'high': deque(maxlen=100),
                         'low': deque(maxlen=100),
@@ -182,11 +200,11 @@ class BinanceWebSocketManager:
                 
                 # Update historical data only when kline is closed
                 if kline['x']:  # Kline is closed
-                    websocket_data[symbol]['close'].append(current_price)
-                    websocket_data[symbol]['high'].append(float(kline['h']))
-                    websocket_data[symbol]['low'].append(float(kline['l']))
-                    websocket_data[symbol]['volume'].append(float(kline['v']))
-                    websocket_data[symbol]['timestamp'].append(kline['t'])
+                    self.data_storage[symbol]['close'].append(current_price)
+                    self.data_storage[symbol]['high'].append(float(kline['h']))
+                    self.data_storage[symbol]['low'].append(float(kline['l']))
+                    self.data_storage[symbol]['volume'].append(float(kline['v']))
+                    self.data_storage[symbol]['timestamp'].append(kline['t'])
                 
         except Exception as e:
             print(f"WebSocket message error: {e}")
@@ -201,7 +219,7 @@ class BinanceWebSocketManager:
         self.schedule_reconnect()
 
     def on_open(self, ws):
-        print("✅ WebSocket connected successfully")
+        print(f"✅ WebSocket connected successfully ({self.interval})")
         self.connected = True
         self.reconnect_attempts = 0  # Reset reconnect attempts on successful connection
 
@@ -312,7 +330,7 @@ def handle_telegram_command():
 
 def process_telegram_command(command, chat_id, update_id):
     """Process individual Telegram commands"""
-    global BOT_RUNNING, COINS, current_investment
+    global BOT_RUNNING, COINS, current_investment, ORDER_RUN
     
     try:
         if command == '/start':
@@ -354,6 +372,27 @@ def process_telegram_command(command, chat_id, update_id):
             
         elif command.startswith('/modal'):
             handle_modal_command(command, chat_id)
+
+        # TAMBAHAN: Command untuk ganti mode trading
+        elif command == '/real_on':
+            if BOT_RUNNING:
+                send_telegram_message("❌ <b>BOT MASIH BERJALAN</b>\nHentikan bot terlebih dahulu dengan /stop sebelum mengubah mode.")
+            else:
+                ORDER_RUN = True
+                send_telegram_message("🔴 <b>REAL TRADING MODE DIHIDUPKAN</b>\nBot akan trading dengan uang sungguhan! 💰\nGunakan /start untuk mulai.")
+                print("✅ Mode changed to REAL TRADING")
+
+        elif command == '/simulasi_on':
+            if BOT_RUNNING:
+                send_telegram_message("❌ <b>BOT MASIH BERJALAN</b>\nHentikan bot terlebih dahulu dengan /stop sebelum mengubah mode.")
+            else:
+                ORDER_RUN = False
+                send_telegram_message("🟢 <b>SIMULATION MODE DIHIDUPKAN</b>\nBot trading dengan uang virtual. 🎯\nGunakan /start untuk mulai.")
+                print("✅ Mode changed to SIMULATION")
+
+        elif command == '/mode_status':
+            mode_text = "REAL TRADING 🔴" if ORDER_RUN else "SIMULATION 🟢"
+            send_telegram_message(f"📊 <b>MODE SAAT INI:</b> {mode_text}")
 
         mark_update_processed(update_id)
         
@@ -554,14 +593,26 @@ def handle_set_command(command, chat_id):
             'TRAILING_STOP_ACTIVATION': ('trading_params', float),
             'TRAILING_STOP_PCT': ('trading_params', float),
             'POSITION_SIZING_PCT': ('trading_params', float),
-            'RSI_MIN': ('technical_params', int),
-            'RSI_MAX': ('technical_params', int),
-            'EMA_SHORT': ('technical_params', int),
-            'EMA_LONG': ('technical_params', int),
-            'MACD_FAST': ('technical_params', int),
-            'MACD_SLOW': ('technical_params', int),
-            'MACD_SIGNAL': ('technical_params', int),
-            'VOLUME_RATIO_MIN': ('technical_params', float)
+            
+            # Parameters untuk 15m
+            'RSI_MIN_15M': ('timeframe_15m', int),
+            'RSI_MAX_15M': ('timeframe_15m', int),
+            'EMA_SHORT_15M': ('timeframe_15m', int),
+            'EMA_LONG_15M': ('timeframe_15m', int),
+            'MACD_FAST_15M': ('timeframe_15m', int),
+            'MACD_SLOW_15M': ('timeframe_15m', int),
+            'MACD_SIGNAL_15M': ('timeframe_15m', int),
+            'VOLUME_RATIO_MIN_15M': ('timeframe_15m', float),
+            
+            # Parameters untuk 5m
+            'RSI_MIN_5M': ('timeframe_5m', int),
+            'RSI_MAX_5M': ('timeframe_5m', int),
+            'EMA_SHORT_5M': ('timeframe_5m', int),
+            'EMA_LONG_5M': ('timeframe_5m', int),
+            'MACD_FAST_5M': ('timeframe_5m', int),
+            'MACD_SLOW_5M': ('timeframe_5m', int),
+            'MACD_SIGNAL_5M': ('timeframe_5m', int),
+            'VOLUME_RATIO_MIN_5M': ('timeframe_5m', float)
         }
         
         if param_name in valid_params:
@@ -610,17 +661,17 @@ def handle_set_command(command, chat_id):
 
 def send_bot_status(chat_id):
     """Send current bot status"""
-    global BOT_RUNNING, active_position, current_investment, trade_history
+    global BOT_RUNNING, active_position, current_investment, trade_history, ORDER_RUN
     
     winrate = calculate_winrate()
     
     status_msg = (
         f"🤖 <b>BOT STATUS</b>\n"
         f"Status: {'🟢 BERJALAN' if BOT_RUNNING else '🔴 BERHENTI'}\n"
+        f"Mode: {'🔴 REAL TRADING' if ORDER_RUN else '🟢 SIMULATION'}\n"
         f"Modal: ${current_investment:.2f}\n"
         f"Total Trade: {len(trade_history)}\n"
         f"Win Rate: {winrate:.1f}%\n"
-        f"Mode: {'LIVE' if ORDER_RUN else 'SIMULATION'}\n"
     )
     
     if active_position:
@@ -650,11 +701,17 @@ def send_current_config(chat_id):
         f"│ Trailing Act: {TRAILING_STOP_ACTIVATION*100:.2f}%\n"
         f"│ Trailing SL: {TRAILING_STOP_PCT*100:.2f}%\n"
         f"├────────────────────────────┤\n"
-        f"│ <b>TECHNICAL PARAMS</b>\n"
-        f"│ RSI: {RSI_MIN}-{RSI_MAX}\n"
-        f"│ EMA: {EMA_SHORT}/{EMA_LONG}\n"
-        f"│ MACD: {MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL}\n"
-        f"│ Volume Ratio: {VOLUME_RATIO_MIN}\n"
+        f"│ <b>15M PARAMS</b>\n"
+        f"│ RSI: {RSI_MIN_15M}-{RSI_MAX_15M}\n"
+        f"│ EMA: {EMA_SHORT_15M}/{EMA_LONG_15M}\n"
+        f"│ MACD: {MACD_FAST_15M}/{MACD_SLOW_15M}/{MACD_SIGNAL_15M}\n"
+        f"│ Volume Ratio: {VOLUME_RATIO_MIN_15M}\n"
+        f"├────────────────────────────┤\n"
+        f"│ <b>5M PARAMS</b>\n"
+        f"│ RSI: {RSI_MIN_5M}-{RSI_MAX_5M}\n"
+        f"│ EMA: {EMA_SHORT_5M}/{EMA_LONG_5M}\n"
+        f"│ MACD: {MACD_FAST_5M}/{MACD_SLOW_5M}/{MACD_SIGNAL_5M}\n"
+        f"│ Volume Ratio: {VOLUME_RATIO_MIN_5M}\n"
         f"└────────────────────────────┘\n"
         f"Gunakan /set [parameter] [value] untuk mengubah konfigurasi"
     )
@@ -674,6 +731,11 @@ def send_help_message(chat_id):
         f"│ /modal - Ubah modal (saat bot berhenti)\n"
         f"│ /info - Tampilkan daftar coin\n"
         f"├────────────────────────────┤\n"
+        f"│ <b>MODE TRADING</b>\n"
+        f"│ /real_on - Switch ke REAL TRADING\n"
+        f"│ /simulasi_on - Switch ke SIMULATION\n"
+        f"│ /mode_status - Cek mode saat ini\n"
+        f"├────────────────────────────┤\n"
         f"│ <b>SELL COMMANDS</b>\n"
         f"│ /sell - Jual posisi aktif (manual)\n"
         f"│ /sell tp [harga] - Ubah Take Profit\n"
@@ -686,7 +748,7 @@ def send_help_message(chat_id):
         f"│ /set [param] [value]\n"
         f"│ Contoh:\n"
         f"│ /set TAKE_PROFIT_PCT 0.008\n"
-        f"│ /set RSI_MIN 30\n"
+        f"│ /set RSI_MIN_15M 30\n"
         f"│ /set POSITION_SIZING_PCT 0.3\n"
         f"├────────────────────────────┤\n"
         f"│ <b>KELOLA COIN</b>\n"
@@ -720,15 +782,25 @@ def load_config():
             'TRAILING_STOP_PCT': TRAILING_STOP_PCT,
             'POSITION_SIZING_PCT': POSITION_SIZING_PCT
         },
-        'technical_params': {
-            'RSI_MIN': RSI_MIN,
-            'RSI_MAX': RSI_MAX,
-            'EMA_SHORT': EMA_SHORT,
-            'EMA_LONG': EMA_LONG,
-            'MACD_FAST': MACD_FAST,
-            'MACD_SLOW': MACD_SLOW,
-            'MACD_SIGNAL': MACD_SIGNAL,
-            'VOLUME_RATIO_MIN': VOLUME_RATIO_MIN
+        'timeframe_15m': {
+            'RSI_MIN_15M': RSI_MIN_15M,
+            'RSI_MAX_15M': RSI_MAX_15M,
+            'EMA_SHORT_15M': EMA_SHORT_15M,
+            'EMA_LONG_15M': EMA_LONG_15M,
+            'MACD_FAST_15M': MACD_FAST_15M,
+            'MACD_SLOW_15M': MACD_SLOW_15M,
+            'MACD_SIGNAL_15M': MACD_SIGNAL_15M,
+            'VOLUME_RATIO_MIN_15M': VOLUME_RATIO_MIN_15M
+        },
+        'timeframe_5m': {
+            'RSI_MIN_5M': RSI_MIN_5M,
+            'RSI_MAX_5M': RSI_MAX_5M,
+            'EMA_SHORT_5M': EMA_SHORT_5M,
+            'EMA_LONG_5M': EMA_LONG_5M,
+            'MACD_FAST_5M': MACD_FAST_5M,
+            'MACD_SLOW_5M': MACD_SLOW_5M,
+            'MACD_SIGNAL_5M': MACD_SIGNAL_5M,
+            'VOLUME_RATIO_MIN_5M': VOLUME_RATIO_MIN_5M
         }
     }
     
@@ -756,11 +828,13 @@ def save_config(config):
 def update_global_variables_from_config():
     """Update global variables dari config file"""
     global TAKE_PROFIT_PCT, STOP_LOSS_PCT, TRAILING_STOP_ACTIVATION, TRAILING_STOP_PCT, POSITION_SIZING_PCT
-    global RSI_MIN, RSI_MAX, EMA_SHORT, EMA_LONG, MACD_FAST, MACD_SLOW, MACD_SIGNAL, VOLUME_RATIO_MIN
+    global RSI_MIN_15M, RSI_MAX_15M, EMA_SHORT_15M, EMA_LONG_15M, MACD_FAST_15M, MACD_SLOW_15M, MACD_SIGNAL_15M, VOLUME_RATIO_MIN_15M
+    global RSI_MIN_5M, RSI_MAX_5M, EMA_SHORT_5M, EMA_LONG_5M, MACD_FAST_5M, MACD_SLOW_5M, MACD_SIGNAL_5M, VOLUME_RATIO_MIN_5M
     
     config = load_config()
     trading_params = config['trading_params']
-    technical_params = config['technical_params']
+    timeframe_15m = config['timeframe_15m']
+    timeframe_5m = config['timeframe_5m']
     
     TAKE_PROFIT_PCT = trading_params['TAKE_PROFIT_PCT']
     STOP_LOSS_PCT = trading_params['STOP_LOSS_PCT']
@@ -768,14 +842,23 @@ def update_global_variables_from_config():
     TRAILING_STOP_PCT = trading_params['TRAILING_STOP_PCT']
     POSITION_SIZING_PCT = trading_params['POSITION_SIZING_PCT']
     
-    RSI_MIN = technical_params['RSI_MIN']
-    RSI_MAX = technical_params['RSI_MAX']
-    EMA_SHORT = technical_params['EMA_SHORT']
-    EMA_LONG = technical_params['EMA_LONG']
-    MACD_FAST = technical_params['MACD_FAST']
-    MACD_SLOW = technical_params['MACD_SLOW']
-    MACD_SIGNAL = technical_params['MACD_SIGNAL']
-    VOLUME_RATIO_MIN = technical_params['VOLUME_RATIO_MIN']
+    RSI_MIN_15M = timeframe_15m['RSI_MIN_15M']
+    RSI_MAX_15M = timeframe_15m['RSI_MAX_15M']
+    EMA_SHORT_15M = timeframe_15m['EMA_SHORT_15M']
+    EMA_LONG_15M = timeframe_15m['EMA_LONG_15M']
+    MACD_FAST_15M = timeframe_15m['MACD_FAST_15M']
+    MACD_SLOW_15M = timeframe_15m['MACD_SLOW_15M']
+    MACD_SIGNAL_15M = timeframe_15m['MACD_SIGNAL_15M']
+    VOLUME_RATIO_MIN_15M = timeframe_15m['VOLUME_RATIO_MIN_15M']
+    
+    RSI_MIN_5M = timeframe_5m['RSI_MIN_5M']
+    RSI_MAX_5M = timeframe_5m['RSI_MAX_5M']
+    EMA_SHORT_5M = timeframe_5m['EMA_SHORT_5M']
+    EMA_LONG_5M = timeframe_5m['EMA_LONG_5M']
+    MACD_FAST_5M = timeframe_5m['MACD_FAST_5M']
+    MACD_SLOW_5M = timeframe_5m['MACD_SLOW_5M']
+    MACD_SIGNAL_5M = timeframe_5m['MACD_SIGNAL_5M']
+    VOLUME_RATIO_MIN_5M = timeframe_5m['VOLUME_RATIO_MIN_5M']
 
 # ==================== DATA MANAGEMENT ====================
 def load_trade_history():
@@ -870,34 +953,56 @@ def calculate_volume_ratio(volumes, period=20):
     except:
         return 1.0
 
-# ==================== TRADING LOGIC (WebSocket-based) ====================
-def analyze_symbol(symbol):
-    """Analyze symbol menggunakan data WebSocket"""
-    if symbol not in websocket_data or len(websocket_data[symbol]['close']) < 26:
+# ==================== TRADING LOGIC (Dual Timeframe) ====================
+def analyze_timeframe(symbol, data_storage, timeframe):
+    """Analyze satu timeframe (15m atau 5m)"""
+    if symbol not in data_storage or len(data_storage[symbol]['close']) < 26:
         return None
     
     try:
-        closes = list(websocket_data[symbol]['close'])
-        volumes = list(websocket_data[symbol]['volume'])
+        closes = list(data_storage[symbol]['close'])
+        volumes = list(data_storage[symbol]['volume'])
         current_price = price_data.get(symbol, closes[-1] if closes else 0)
         
-        # Calculate indicators from WebSocket data
-        ema_short = calculate_ema(closes, EMA_SHORT)
-        ema_long = calculate_ema(closes, EMA_LONG)
-        rsi = calculate_rsi(closes)
-        macd_line, macd_signal, _ = calculate_macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-        volume_ratio = calculate_volume_ratio(volumes)
+        # Pilih parameter berdasarkan timeframe
+        if timeframe == '15m':
+            rsi_min = RSI_MIN_15M
+            rsi_max = RSI_MAX_15M
+            ema_short = EMA_SHORT_15M
+            ema_long = EMA_LONG_15M
+            macd_fast = MACD_FAST_15M
+            macd_slow = MACD_SLOW_15M
+            macd_signal = MACD_SIGNAL_15M
+            volume_ratio_min = VOLUME_RATIO_MIN_15M
+            volume_period = VOLUME_PERIOD_15M
+        else:  # 5m
+            rsi_min = RSI_MIN_5M
+            rsi_max = RSI_MAX_5M
+            ema_short = EMA_SHORT_5M
+            ema_long = EMA_LONG_5M
+            macd_fast = MACD_FAST_5M
+            macd_slow = MACD_SLOW_5M
+            macd_signal = MACD_SIGNAL_5M
+            volume_ratio_min = VOLUME_RATIO_MIN_5M
+            volume_period = VOLUME_PERIOD_5M
         
-        if any(x is None for x in [ema_short, ema_long, rsi, macd_line]):
+        # Calculate indicators from WebSocket data
+        ema_short_val = calculate_ema(closes, ema_short)
+        ema_long_val = calculate_ema(closes, ema_long)
+        rsi = calculate_rsi(closes)
+        macd_line, macd_signal_val, _ = calculate_macd(closes, macd_fast, macd_slow, macd_signal)
+        volume_ratio = calculate_volume_ratio(volumes, volume_period)
+        
+        if any(x is None for x in [ema_short_val, ema_long_val, rsi, macd_line]):
             return None
         
         # Trading conditions
-        price_above_ema_short = current_price > ema_short
-        price_above_ema_long = current_price > ema_long
-        ema_bullish = ema_short > ema_long
-        rsi_ok = RSI_MIN <= rsi <= RSI_MAX
-        macd_bullish = macd_line > macd_signal if macd_signal else False
-        volume_ok = volume_ratio > VOLUME_RATIO_MIN
+        price_above_ema_short = current_price > ema_short_val
+        price_above_ema_long = current_price > ema_long_val
+        ema_bullish = ema_short_val > ema_long_val
+        rsi_ok = rsi_min <= rsi <= rsi_max
+        macd_bullish = macd_line > macd_signal_val if macd_signal_val else False
+        volume_ok = volume_ratio > volume_ratio_min
         
         # Calculate confidence score
         score = 0
@@ -912,19 +1017,44 @@ def analyze_symbol(symbol):
                      ema_bullish and rsi_ok and macd_bullish and volume_ok)
         
         return {
-            'symbol': symbol,
             'buy_signal': buy_signal,
             'confidence': min(score, 100),
             'current_price': current_price,
             'rsi': rsi,
-            'ema_short': ema_short,
-            'ema_long': ema_long,
+            'ema_short': ema_short_val,
+            'ema_long': ema_long_val,
             'volume_ratio': volume_ratio
         }
         
     except Exception as e:
-        print(f"Analysis error for {symbol}: {e}")
+        print(f"Analysis error for {symbol} ({timeframe}): {e}")
         return None
+
+def analyze_symbol(symbol):
+    """Analyze symbol menggunakan kedua timeframe (15m dan 5m) dengan bobot seimbang"""
+    # Analisis kedua timeframe
+    analysis_15m = analyze_timeframe(symbol, websocket_data_15m, '15m')
+    analysis_5m = analyze_timeframe(symbol, websocket_data_5m, '5m')
+    
+    if analysis_15m is None or analysis_5m is None:
+        return None
+    
+    # Gabungkan confidence dengan bobot seimbang (50% each)
+    confidence_final = (analysis_15m['confidence'] * 0.5) + (analysis_5m['confidence'] * 0.5)
+    
+    # Signal buy jika KEDUA timeframe memberikan sinyal buy
+    buy_signal = analysis_15m['buy_signal'] and analysis_5m['buy_signal']
+    
+    return {
+        'symbol': symbol,
+        'buy_signal': buy_signal,
+        'confidence': confidence_final,
+        'current_price': analysis_5m['current_price'],  # Gunakan harga dari 5m (lebih update)
+        'confidence_15m': analysis_15m['confidence'],
+        'confidence_5m': analysis_5m['confidence'],
+        'rsi_15m': analysis_15m['rsi'],
+        'rsi_5m': analysis_5m['rsi']
+    }
 
 # ==================== ORDER MANAGEMENT ====================
 def calculate_position_size():
@@ -1130,13 +1260,13 @@ def log_position_closed(symbol, entry_price, exit_price, quantity, exit_type):
     except Exception as e:
         print(f"❌ Error logging position close: {e}")
 
-def log_position_opened(symbol, entry_price, quantity, take_profit, stop_loss, confidence):
+def log_position_opened(symbol, entry_price, quantity, take_profit, stop_loss, confidence, confidence_15m, confidence_5m):
     """Log ketika position opened"""
     try:
         log_entry = (f"📈 POSITION OPENED | {symbol} | "
                     f"Entry: ${entry_price:.6f} | Qty: {quantity:.6f} | "
                     f"TP: ${take_profit:.6f} | SL: ${stop_loss:.6f} | "
-                    f"Confidence: {confidence:.1f}%")
+                    f"Confidence: {confidence:.1f}% (15m: {confidence_15m:.1f}%, 5m: {confidence_5m:.1f}%)")
         
         write_log(log_entry)
         
@@ -1147,6 +1277,7 @@ def log_position_opened(symbol, entry_price, quantity, take_profit, stop_loss, c
                       f"Take Profit: ${take_profit:.6f}\n"
                       f"Stop Loss: ${stop_loss:.6f}\n"
                       f"Confidence: {confidence:.1f}%\n"
+                      f"15m: {confidence_15m:.1f}% | 5m: {confidence_5m:.1f}%\n"
                       f"Gunakan /sell tp [harga] untuk ubah TP\n"
                       f"Gunakan /sell sl [harga] untuk ubah SL")
         
@@ -1218,7 +1349,7 @@ def check_position_exit():
 def main():
     global BOT_RUNNING, current_investment, active_position, ORDER_RUN
     
-    print("🚀 Starting BOT - WebSocket Version")
+    print("🚀 Starting BOT - Dual Timeframe WebSocket Version")
     
     # Start health endpoint first
     create_health_endpoint()
@@ -1230,15 +1361,17 @@ def main():
     # Initialize Binance client (only if ORDER_RUN is True)
     if not initialize_binance_client():
         print("❌ Failed to initialize Binance client. Continuing in simulation mode...")
-        global ORDER_RUN
         ORDER_RUN = False
     
-    # Initialize WebSocket
-    ws_manager = BinanceWebSocketManager()
-    ws_manager.start_kline_stream(COINS)
+    # Initialize WebSocket untuk kedua timeframe
+    ws_manager_5m = BinanceWebSocketManager('5m')
+    ws_manager_15m = BinanceWebSocketManager('15m')
+    
+    ws_manager_5m.start_kline_stream(COINS, '5m')
+    ws_manager_15m.start_kline_stream(COINS, '15m')
     
     # Wait for WebSocket to connect and collect initial data
-    print("⏳ Collecting initial market data (30 seconds)...")
+    print("⏳ Collecting initial market data for both timeframes (30 seconds)...")
     for i in range(30):
         if not BOT_RUNNING:
             break
@@ -1246,11 +1379,14 @@ def main():
         if (i + 1) % 10 == 0:
             print(f"   {i + 1}/30 seconds...")
     
-    connected_symbols = len([s for s in COINS if s in websocket_data])
-    print(f"✅ WebSocket data collected for {connected_symbols}/{len(COINS)} symbols")
+    connected_symbols_5m = len([s for s in COINS if s in websocket_data_5m])
+    connected_symbols_15m = len([s for s in COINS if s in websocket_data_15m])
+    print(f"✅ WebSocket data collected - 5m: {connected_symbols_5m}/{len(COINS)}, 15m: {connected_symbols_15m}/{len(COINS)} symbols")
     
-    startup_msg = (f"🤖 <b>BOT STARTED - WebSocket MODE</b>\n"
-                  f"Coins: {len(COINS)} ({connected_symbols} connected)\n"
+    startup_msg = (f"🤖 <b>BOT STARTED - DUAL TIMEFRAME MODE</b>\n"
+                  f"Coins: {len(COINS)}\n"
+                  f"5m Data: {connected_symbols_5m} symbols\n"
+                  f"15m Data: {connected_symbols_15m} symbols\n"
                   f"Mode: {'LIVE' if ORDER_RUN else 'SIMULATION'}\n"
                   f"Modal: ${current_investment:.2f}\n"
                   f"Status: MENUNGGU PERINTAH /start")
@@ -1280,7 +1416,7 @@ def main():
             
             # Scan for new signals
             if current_time - last_scan_time >= scan_interval:
-                print("🔍 Scanning for signals...")
+                print("🔍 Scanning for signals (Dual Timeframe)...")
                 
                 best_signal = None
                 signals_found = 0
@@ -1297,7 +1433,8 @@ def main():
                             best_signal = analysis
                 
                 if best_signal and best_signal['confidence'] > 60:
-                    print(f"🎯 Signal found: {best_signal['symbol']} (Confidence: {best_signal['confidence']:.1f}%)")
+                    print(f"🎯 Dual Timeframe Signal found: {best_signal['symbol']} (Confidence: {best_signal['confidence']:.1f}%)")
+                    print(f"   15m: {best_signal['confidence_15m']:.1f}%, 5m: {best_signal['confidence_5m']:.1f}%")
                     
                     investment_amount = calculate_position_size()
                     buy_order = place_market_buy_order(best_signal['symbol'], investment_amount)
@@ -1327,9 +1464,10 @@ def main():
                             'timestamp': time.time()
                         }
                         
-                        log_position_opened(best_signal['symbol'], entry_price, executed_qty, take_profit, stop_loss, best_signal['confidence'])
+                        log_position_opened(best_signal['symbol'], entry_price, executed_qty, take_profit, stop_loss, 
+                                          best_signal['confidence'], best_signal['confidence_15m'], best_signal['confidence_5m'])
                 
-                print(f"📊 Scan complete: {signals_found} signals found")
+                print(f"📊 Dual Timeframe Scan complete: {signals_found} signals found")
                 last_scan_time = current_time
             
             time.sleep(1)
@@ -1347,7 +1485,7 @@ def main():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 ADVANCED TRADING BOT - WebSocket VERSION")
+    print("🚀 ADVANCED TRADING BOT - DUAL TIMEFRAME WebSocket VERSION")
     print("=" * 60)
     
     try:
@@ -1360,7 +1498,3 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
-
-
-
-
