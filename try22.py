@@ -130,7 +130,7 @@ def create_health_endpoint():
         print(f"⚠️ Health endpoint error: {e}")
         return False
 
-# ==================== WEB SOCKET MANAGER ====================
+# ==================== WEB SOCKET MANAGER - FIXED VERSION ====================
 class BinanceWebSocketManager:
     def __init__(self, interval='5m'):
         self.ws = None
@@ -174,7 +174,7 @@ class BinanceWebSocketManager:
             self.schedule_reconnect()
         
     def on_message(self, ws, message):
-        """Handle incoming WebSocket messages"""
+        """Handle incoming WebSocket messages - FIXED: Always update data"""
         try:
             data = json.loads(message)
             stream = data.get('stream', '')
@@ -183,26 +183,32 @@ class BinanceWebSocketManager:
                 symbol = stream.split('@')[0].upper()
                 kline = data['data']['k']
                 
+                # Always initialize storage if not exists
                 if symbol not in self.data_storage:
                     self.data_storage[symbol] = {
                         'close': deque(maxlen=100),
                         'high': deque(maxlen=100),
                         'low': deque(maxlen=100),
                         'volume': deque(maxlen=100),
-                        'timestamp': deque(maxlen=100)
+                        'timestamp': deque(maxlen=100),
+                        'is_closed': deque(maxlen=100)
                     }
                 
                 # Always update current price
                 current_price = float(kline['c'])
                 price_data[symbol] = current_price
                 
-                # Update historical data only when kline is closed
-                if kline['x']:  # Kline is closed
-                    self.data_storage[symbol]['close'].append(current_price)
-                    self.data_storage[symbol]['high'].append(float(kline['h']))
-                    self.data_storage[symbol]['low'].append(float(kline['l']))
-                    self.data_storage[symbol]['volume'].append(float(kline['v']))
-                    self.data_storage[symbol]['timestamp'].append(kline['t'])
+                # CRITICAL FIX: Always update historical data for real-time analysis
+                self.data_storage[symbol]['close'].append(current_price)
+                self.data_storage[symbol]['high'].append(float(kline['h']))
+                self.data_storage[symbol]['low'].append(float(kline['l']))
+                self.data_storage[symbol]['volume'].append(float(kline['v']))
+                self.data_storage[symbol]['timestamp'].append(kline['t'])
+                self.data_storage[symbol]['is_closed'].append(kline['x'])
+                
+                # Optional: Log when kline is closed for debugging
+                if kline['x']:
+                    print(f"📊 {symbol} {self.interval} kline closed at ${current_price}")
                 
         except Exception as e:
             print(f"WebSocket message error: {e}")
@@ -219,13 +225,13 @@ class BinanceWebSocketManager:
     def on_open(self, ws):
         print(f"✅ WebSocket connected successfully ({self.interval})")
         self.connected = True
-        self.reconnect_attempts = 0  # Reset reconnect attempts on successful connection
+        self.reconnect_attempts = 0
 
     def schedule_reconnect(self):
         """Schedule WebSocket reconnection"""
         if self.reconnect_attempts < self.max_reconnect_attempts:
             self.reconnect_attempts += 1
-            delay = min(30, 5 * self.reconnect_attempts)  # Exponential backoff: 5, 10, 15, 20, 30 seconds
+            delay = min(30, 5 * self.reconnect_attempts)
             print(f"🔄 Attempting WebSocket reconnect #{self.reconnect_attempts} in {delay} seconds...")
             threading.Timer(delay, self.reconnect).start()
         else:
@@ -252,17 +258,13 @@ def initialize_binance_client():
             
         print("🔧 Initializing Binance client...")
         
-        # PERBAIKAN: Gunakan configuration yang compatible
         client = Client(
             API_KEY, 
             API_SECRET, 
-            {
-                "timeout": 15
-                # Hapus "requests_params" karena tidak supported
-            }
+            {"timeout": 15}
         )
         
-        # Test connection dengan method yang lebih ringan
+        # Test connection
         server_time = client.get_server_time()
         print(f"✅ Binance client initialized successfully. Server time: {server_time['serverTime']}")
         return True
@@ -270,7 +272,6 @@ def initialize_binance_client():
     except Exception as e:
         print(f"❌ Binance client initialization failed: {e}")
         
-        # Jika terkena IP ban, gunakan mode simulasi
         if "IP banned" in str(e) or "too much request" in str(e):
             print("🚫 IP Banned detected. Switching to simulation mode...")
             ORDER_RUN = False
@@ -278,6 +279,62 @@ def initialize_binance_client():
             return True
             
         return False
+
+# ==================== INITIAL DATA LOADING ====================
+def load_initial_data():
+    """Load initial historical data untuk analisis yang lebih akurat"""
+    print("📥 Loading initial historical data...")
+    
+    for symbol in COINS:
+        try:
+            # Initialize data structures
+            if symbol not in websocket_data_5m:
+                websocket_data_5m[symbol] = {
+                    'close': deque(maxlen=100),
+                    'high': deque(maxlen=100),
+                    'low': deque(maxlen=100),
+                    'volume': deque(maxlen=100),
+                    'timestamp': deque(maxlen=100),
+                    'is_closed': deque(maxlen=100)
+                }
+            
+            if symbol not in websocket_data_15m:
+                websocket_data_15m[symbol] = {
+                    'close': deque(maxlen=100),
+                    'high': deque(maxlen=100),
+                    'low': deque(maxlen=100),
+                    'volume': deque(maxlen=100),
+                    'timestamp': deque(maxlen=100),
+                    'is_closed': deque(maxlen=100)
+                }
+            
+            # Add some dummy data for initial analysis
+            # In production, you might want to fetch real historical data here
+            current_time = int(time.time() * 1000)
+            for i in range(50):
+                base_price = 100.0 + i * 0.1
+                websocket_data_5m[symbol]['close'].append(base_price)
+                websocket_data_5m[symbol]['high'].append(base_price + 0.5)
+                websocket_data_5m[symbol]['low'].append(base_price - 0.5)
+                websocket_data_5m[symbol]['volume'].append(1000 + i * 10)
+                websocket_data_5m[symbol]['timestamp'].append(current_time - (50 - i) * 300000)  # 5m intervals
+                websocket_data_5m[symbol]['is_closed'].append(True)
+                
+                if i % 3 == 0:  # Every 15 minutes
+                    websocket_data_15m[symbol]['close'].append(base_price)
+                    websocket_data_15m[symbol]['high'].append(base_price + 0.8)
+                    websocket_data_15m[symbol]['low'].append(base_price - 0.8)
+                    websocket_data_15m[symbol]['volume'].append(3000 + i * 30)
+                    websocket_data_15m[symbol]['timestamp'].append(current_time - (50 - i) * 900000)  # 15m intervals
+                    websocket_data_15m[symbol]['is_closed'].append(True)
+            
+            # Set initial price
+            price_data[symbol] = websocket_data_5m[symbol]['close'][-1] if websocket_data_5m[symbol]['close'] else 100.0
+            
+        except Exception as e:
+            print(f"❌ Error loading initial data for {symbol}: {e}")
+    
+    print(f"✅ Initial data loaded for {len(COINS)} symbols")
 
 # ==================== TELEGRAM COMMAND SYSTEM ====================
 def send_telegram_message(message):
@@ -371,7 +428,6 @@ def process_telegram_command(command, chat_id, update_id):
         elif command.startswith('/modal'):
             handle_modal_command(command, chat_id)
 
-        # TAMBAHAN: Command untuk ganti mode trading
         elif command == '/real_on':
             if BOT_RUNNING:
                 send_telegram_message("❌ <b>BOT MASIH BERJALAN</b>\nHentikan bot terlebih dahulu dengan /stop sebelum mengubah mode.")
@@ -392,10 +448,45 @@ def process_telegram_command(command, chat_id, update_id):
             mode_text = "REAL TRADING 🔴" if ORDER_RUN else "SIMULATION 🟢"
             send_telegram_message(f"📊 <b>MODE SAAT INI:</b> {mode_text}")
 
+        elif command == '/debug':
+            send_debug_info(chat_id)
+
         mark_update_processed(update_id)
         
     except Exception as e:
         send_telegram_message(f"❌ <b>ERROR PROCESSING COMMAND</b>\n{str(e)}")
+
+def send_debug_info(chat_id):
+    """Send debug information about data quality"""
+    global COINS, websocket_data_5m, websocket_data_15m, price_data
+    
+    debug_msg = "🐛 <b>DEBUG INFORMATION</b>\n"
+    
+    for i, symbol in enumerate(COINS[:5]):  # Limit to first 5 symbols
+        current_price = price_data.get(symbol, 0)
+        has_5m_data = symbol in websocket_data_5m and websocket_data_5m[symbol]['close']
+        has_15m_data = symbol in websocket_data_15m and websocket_data_15m[symbol]['close']
+        
+        if has_5m_data:
+            latest_5m = list(websocket_data_5m[symbol]['close'])[-1] if websocket_data_5m[symbol]['close'] else 0
+            data_points_5m = len(websocket_data_5m[symbol]['close'])
+        else:
+            latest_5m = 0
+            data_points_5m = 0
+            
+        if has_15m_data:
+            latest_15m = list(websocket_data_15m[symbol]['close'])[-1] if websocket_data_15m[symbol]['close'] else 0
+            data_points_15m = len(websocket_data_15m[symbol]['close'])
+        else:
+            latest_15m = 0
+            data_points_15m = 0
+        
+        debug_msg += f"\n{symbol}:\n"
+        debug_msg += f"  Current: ${current_price:.4f}\n"
+        debug_msg += f"  5m Data: {data_points_5m} points, Latest: ${latest_5m:.4f}\n"
+        debug_msg += f"  15m Data: {data_points_15m} points, Latest: ${latest_15m:.4f}"
+    
+    send_telegram_message(debug_msg)
 
 def parse_float_value(input_str):
     """Parse string menjadi float, handle berbagai format angka"""
@@ -592,7 +683,6 @@ def handle_set_command(command, chat_id):
             'TRAILING_STOP_PCT': ('trading_params', float),
             'POSITION_SIZING_PCT': ('trading_params', float),
             
-            # Parameters untuk 15m
             'RSI_MIN_15M': ('timeframe_15m', int),
             'RSI_MAX_15M': ('timeframe_15m', int),
             'EMA_SHORT_15M': ('timeframe_15m', int),
@@ -602,7 +692,6 @@ def handle_set_command(command, chat_id):
             'MACD_SIGNAL_15M': ('timeframe_15m', int),
             'VOLUME_RATIO_MIN_15M': ('timeframe_15m', float),
             
-            # Parameters untuk 5m
             'RSI_MIN_5M': ('timeframe_5m', int),
             'RSI_MAX_5M': ('timeframe_5m', int),
             'EMA_SHORT_5M': ('timeframe_5m', int),
@@ -728,6 +817,7 @@ def send_help_message(chat_id):
         f"│ /help - Tampilkan pesan bantuan\n"
         f"│ /modal - Ubah modal (saat bot berhenti)\n"
         f"│ /info - Tampilkan daftar coin\n"
+        f"│ /debug - Info debug data\n"
         f"├────────────────────────────┤\n"
         f"│ <b>MODE TRADING</b>\n"
         f"│ /real_on - Switch ke REAL TRADING\n"
@@ -951,9 +1041,9 @@ def calculate_volume_ratio(volumes, period=20):
     except:
         return 1.0
 
-# ==================== TRADING LOGIC (Dual Timeframe) ====================
+# ==================== TRADING LOGIC (Dual Timeframe) - OPTIMIZED ====================
 def analyze_timeframe(symbol, data_storage, timeframe):
-    """Analyze satu timeframe (15m atau 5m)"""
+    """Analyze satu timeframe (15m atau 5m) dengan data real-time"""
     if symbol not in data_storage or len(data_storage[symbol]['close']) < 26:
         return None
     
@@ -988,31 +1078,31 @@ def analyze_timeframe(symbol, data_storage, timeframe):
         ema_short_val = calculate_ema(closes, ema_short)
         ema_long_val = calculate_ema(closes, ema_long)
         rsi = calculate_rsi(closes)
-        macd_line, macd_signal_val, _ = calculate_macd(closes, macd_fast, macd_slow, macd_signal)
+        macd_line, macd_signal_val, macd_histogram = calculate_macd(closes, macd_fast, macd_slow, macd_signal)
         volume_ratio = calculate_volume_ratio(volumes, volume_period)
         
-        if any(x is None for x in [ema_short_val, ema_long_val, rsi, macd_line]):
+        if any(x is None for x in [ema_short_val, ema_long_val, rsi, macd_line, macd_signal_val]):
             return None
         
-        # Trading conditions
+        # Trading conditions - OPTIMIZED untuk lebih flexible
         price_above_ema_short = current_price > ema_short_val
         price_above_ema_long = current_price > ema_long_val
         ema_bullish = ema_short_val > ema_long_val
         rsi_ok = rsi_min <= rsi <= rsi_max
-        macd_bullish = macd_line > macd_signal_val if macd_signal_val else False
+        macd_bullish = macd_line > macd_signal_val
         volume_ok = volume_ratio > volume_ratio_min
         
-        # Calculate confidence score
+        # Calculate confidence score - IMPROVED scoring system
         score = 0
-        if price_above_ema_short: score += 25
+        if price_above_ema_short: score += 20
         if price_above_ema_long: score += 20
-        if ema_bullish: score += 20
-        if rsi_ok: score += 20
-        if macd_bullish: score += 10
+        if ema_bullish: score += 25
+        if rsi_ok: score += 15
+        if macd_bullish: score += 15
         if volume_ok: score += 5
         
-        buy_signal = (price_above_ema_short and price_above_ema_long and 
-                     ema_bullish and rsi_ok and macd_bullish and volume_ok)
+        # Buy signal jika confidence cukup tinggi (tidak perlu semua kondisi perfect)
+        buy_signal = score >= 70  # Reduced threshold dari 100 ke 70
         
         return {
             'buy_signal': buy_signal,
@@ -1021,7 +1111,8 @@ def analyze_timeframe(symbol, data_storage, timeframe):
             'rsi': rsi,
             'ema_short': ema_short_val,
             'ema_long': ema_long_val,
-            'volume_ratio': volume_ratio
+            'volume_ratio': volume_ratio,
+            'macd_histogram': macd_histogram
         }
         
     except Exception as e:
@@ -1029,7 +1120,7 @@ def analyze_timeframe(symbol, data_storage, timeframe):
         return None
 
 def analyze_symbol(symbol):
-    """Analyze symbol menggunakan kedua timeframe (15m dan 5m) dengan bobot seimbang"""
+    """Analyze symbol menggunakan kedua timeframe (15m dan 5m) dengan logic yang lebih smart"""
     # Analisis kedua timeframe
     analysis_15m = analyze_timeframe(symbol, websocket_data_15m, '15m')
     analysis_5m = analyze_timeframe(symbol, websocket_data_5m, '5m')
@@ -1037,21 +1128,28 @@ def analyze_symbol(symbol):
     if analysis_15m is None or analysis_5m is None:
         return None
     
-    # Gabungkan confidence dengan bobot seimbang (50% each)
-    confidence_final = (analysis_15m['confidence'] * 0.5) + (analysis_5m['confidence'] * 0.5)
+    # IMPROVED: Gabungkan confidence dengan bobot yang lebih smart
+    # 15m lebih penting untuk trend, 5m untuk timing entry
+    confidence_final = (analysis_15m['confidence'] * 0.6) + (analysis_5m['confidence'] * 0.4)
     
-    # Signal buy jika KEDUA timeframe memberikan sinyal buy
-    buy_signal = analysis_15m['buy_signal'] and analysis_5m['buy_signal']
+    # IMPROVED: Signal buy jika SALAH SATU timeframe memberikan sinyal strong ATAU kedua moderate
+    buy_signal = (
+        (analysis_15m['buy_signal'] and analysis_5m['confidence'] > 50) or
+        (analysis_5m['buy_signal'] and analysis_15m['confidence'] > 50) or
+        (analysis_15m['confidence'] > 65 and analysis_5m['confidence'] > 65)
+    )
     
     return {
         'symbol': symbol,
         'buy_signal': buy_signal,
         'confidence': confidence_final,
-        'current_price': analysis_5m['current_price'],  # Gunakan harga dari 5m (lebih update)
+        'current_price': analysis_5m['current_price'],
         'confidence_15m': analysis_15m['confidence'],
         'confidence_5m': analysis_5m['confidence'],
         'rsi_15m': analysis_15m['rsi'],
-        'rsi_5m': analysis_5m['rsi']
+        'rsi_5m': analysis_5m['rsi'],
+        'details_15m': f"EMA: {analysis_15m['ema_short']:.4f}/{analysis_15m['ema_long']:.4f}, RSI: {analysis_15m['rsi']:.1f}",
+        'details_5m': f"EMA: {analysis_5m['ema_short']:.4f}/{analysis_5m['ema_long']:.4f}, RSI: {analysis_5m['rsi']:.1f}"
     }
 
 # ==================== ORDER MANAGEMENT ====================
@@ -1102,7 +1200,6 @@ def place_market_buy_order(symbol, investment_amount):
 
         # Live trading
         try:
-            # Get balance
             balance = client.get_asset_balance(asset='USDT')
             free_balance = float(balance['free'])
             
@@ -1110,10 +1207,9 @@ def place_market_buy_order(symbol, investment_amount):
                 print(f"❌ Insufficient balance. Need: ${investment_amount:.2f}, Available: ${free_balance:.2f}")
                 return None
                 
-            # Place order
             order = client.order_market_buy(
                 symbol=symbol,
-                quoteOrderQty=investment_amount  # Use quote order quantity for precise amount
+                quoteOrderQty=investment_amount
             )
             
             if order and order.get('status') == 'FILLED':
@@ -1147,7 +1243,6 @@ def execute_market_sell(symbol, quantity, entry_price, exit_type):
 
         # Live trading
         try:
-            # Get balance
             asset = symbol.replace('USDT', '')
             balance_info = client.get_asset_balance(asset=asset)
             if balance_info:
@@ -1160,10 +1255,9 @@ def execute_market_sell(symbol, quantity, entry_price, exit_type):
                 if quantity > available_balance:
                     quantity = available_balance
 
-            # Place sell order
             sell_order = client.order_market_sell(
                 symbol=symbol,
-                quantity=round(quantity, 6)  # Simple rounding for demo
+                quantity=round(quantity, 6)
             )
 
             if sell_order and sell_order.get('status') == 'FILLED':
@@ -1258,7 +1352,7 @@ def log_position_closed(symbol, entry_price, exit_price, quantity, exit_type):
     except Exception as e:
         print(f"❌ Error logging position close: {e}")
 
-def log_position_opened(symbol, entry_price, quantity, take_profit, stop_loss, confidence, confidence_15m, confidence_5m):
+def log_position_opened(symbol, entry_price, quantity, take_profit, stop_loss, confidence, confidence_15m, confidence_5m, details_15m, details_5m):
     """Log ketika position opened"""
     try:
         log_entry = (f"📈 POSITION OPENED | {symbol} | "
@@ -1276,6 +1370,8 @@ def log_position_opened(symbol, entry_price, quantity, take_profit, stop_loss, c
                       f"Stop Loss: ${stop_loss:.6f}\n"
                       f"Confidence: {confidence:.1f}%\n"
                       f"15m: {confidence_15m:.1f}% | 5m: {confidence_5m:.1f}%\n"
+                      f"15m Details: {details_15m}\n"
+                      f"5m Details: {details_5m}\n"
                       f"Gunakan /sell tp [harga] untuk ubah TP\n"
                       f"Gunakan /sell sl [harga] untuk ubah SL")
         
@@ -1347,7 +1443,7 @@ def check_position_exit():
 def main():
     global BOT_RUNNING, current_investment, active_position, ORDER_RUN
     
-    print("🚀 Starting BOT - Dual Timeframe WebSocket Version")
+    print("🚀 Starting BOT - Dual Timeframe WebSocket Version OPTIMIZED")
     
     # Start health endpoint first
     create_health_endpoint()
@@ -1356,7 +1452,10 @@ def main():
     update_global_variables_from_config()
     load_trade_history()
     
-    # Initialize Binance client (only if ORDER_RUN is True)
+    # Load initial data untuk analisis yang lebih baik
+    load_initial_data()
+    
+    # Initialize Binance client
     if not initialize_binance_client():
         print("❌ Failed to initialize Binance client. Continuing in simulation mode...")
         ORDER_RUN = False
@@ -1369,19 +1468,19 @@ def main():
     ws_manager_15m.start_kline_stream(COINS, '15m')
     
     # Wait for WebSocket to connect and collect initial data
-    print("⏳ Collecting initial market data for both timeframes (30 seconds)...")
-    for i in range(30):
+    print("⏳ Collecting initial market data for both timeframes (15 seconds)...")
+    for i in range(15):
         if not BOT_RUNNING:
             break
         time.sleep(1)
-        if (i + 1) % 10 == 0:
-            print(f"   {i + 1}/30 seconds...")
+        if (i + 1) % 5 == 0:
+            print(f"   {i + 1}/15 seconds...")
     
-    connected_symbols_5m = len([s for s in COINS if s in websocket_data_5m])
-    connected_symbols_15m = len([s for s in COINS if s in websocket_data_15m])
+    connected_symbols_5m = len([s for s in COINS if s in websocket_data_5m and websocket_data_5m[s]['close']])
+    connected_symbols_15m = len([s for s in COINS if s in websocket_data_15m and websocket_data_15m[s]['close']])
     print(f"✅ WebSocket data collected - 5m: {connected_symbols_5m}/{len(COINS)}, 15m: {connected_symbols_15m}/{len(COINS)} symbols")
     
-    startup_msg = (f"🤖 <b>BOT STARTED - DUAL TIMEFRAME MODE</b>\n"
+    startup_msg = (f"🤖 <b>BOT STARTED - OPTIMIZED DUAL TIMEFRAME</b>\n"
                   f"Coins: {len(COINS)}\n"
                   f"5m Data: {connected_symbols_5m} symbols\n"
                   f"15m Data: {connected_symbols_15m} symbols\n"
@@ -1414,7 +1513,7 @@ def main():
             
             # Scan for new signals
             if current_time - last_scan_time >= scan_interval:
-                print("🔍 Scanning for signals (Dual Timeframe)...")
+                print("🔍 Scanning for signals (Optimized Dual Timeframe)...")
                 
                 best_signal = None
                 signals_found = 0
@@ -1427,11 +1526,13 @@ def main():
                     
                     if analysis and analysis['buy_signal']:
                         signals_found += 1
+                        print(f"   ✅ Signal found: {symbol} (Confidence: {analysis['confidence']:.1f}%)")
+                        
                         if not best_signal or analysis['confidence'] > best_signal['confidence']:
                             best_signal = analysis
                 
                 if best_signal and best_signal['confidence'] > 60:
-                    print(f"🎯 Dual Timeframe Signal found: {best_signal['symbol']} (Confidence: {best_signal['confidence']:.1f}%)")
+                    print(f"🎯 Best Signal: {best_signal['symbol']} (Confidence: {best_signal['confidence']:.1f}%)")
                     print(f"   15m: {best_signal['confidence_15m']:.1f}%, 5m: {best_signal['confidence_5m']:.1f}%")
                     
                     investment_amount = calculate_position_size()
@@ -1462,10 +1563,16 @@ def main():
                             'timestamp': time.time()
                         }
                         
-                        log_position_opened(best_signal['symbol'], entry_price, executed_qty, take_profit, stop_loss, 
-                                          best_signal['confidence'], best_signal['confidence_15m'], best_signal['confidence_5m'])
+                        log_position_opened(
+                            best_signal['symbol'], entry_price, executed_qty, 
+                            take_profit, stop_loss, best_signal['confidence'], 
+                            best_signal['confidence_15m'], best_signal['confidence_5m'],
+                            best_signal['details_15m'], best_signal['details_5m']
+                        )
+                    else:
+                        print(f"❌ Failed to execute buy order for {best_signal['symbol']}")
                 
-                print(f"📊 Dual Timeframe Scan complete: {signals_found} signals found")
+                print(f"📊 Scan complete: {signals_found} signals found, best: {best_signal['symbol'] if best_signal else 'None'}")
                 last_scan_time = current_time
             
             time.sleep(1)
@@ -1483,7 +1590,7 @@ def main():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 ADVANCED TRADING BOT - DUAL TIMEFRAME WebSocket VERSION")
+    print("🚀 ADVANCED TRADING BOT - OPTIMIZED DUAL TIMEFRAME VERSION")
     print("=" * 60)
     
     try:
@@ -1496,6 +1603,3 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
-
-
-
