@@ -100,14 +100,7 @@ BOT_STATE_FILE = 'bot_state1.json'
 COINS = [
     'PENGUUSDT','WALUSDT','MIRAUSDT','HEMIUSDT','PUMPUSDT','TRXUSDT','LTCUSDT','FFUSDT',
     'SUIUSDT','ASTERUSDT','ZECUSDT','CAKEUSDT','BNBUSDT','AVNTUSDT','DOGEUSDT','ADAUSDT',
-    'XPLUSDT','XRPUSDT','DASHUSDT','SOLUSDT','LINKUSDT','AVAXUSDT', 'PEPEUSDT', 
-    'FORMUSDT', 'TRUMPUSDT', 'WIFUSDT', 'NEARUSDT', 'WBETHUSDT', 'SHIBUSDT',
-    '2ZUSDT', 'LINEAUSDT', 'APEUSDT', 'HBARUSDT', 'DOTUSDT', 'EULUSDT', 'HEIUSDT',  
-    'AAVEUSDT', 'ALICEUSDT', 'ENAUSDT', 'BATUSDT', 'HOLOUSDT', 'WLFIUSDT', 'POLUSDT',
-    'SNXUSDT', 'TRBUSDT', 'SOMIUSDT', 'ICPUSDT', 'ARPAUSDT', 'EDUUSDT', 'MAGICUSDT', 'OMUSDT',
-    'BELUSDT' , 'PHBUSDT', 'APTUSDT', 'DEGOUSDT', 'PROVEUSDT', 'YGGUSDT', 'AMPUSDT', 
-    'FTTUSDT', 'LAUSDT', 'SYRUPUSDT', 'AIUSDT', 'RSRUSDT', 'CYBERUSDT', 'OGUSDT', 'PAXGUSDT',
-    'AUDIOUSDT', 'ZKCUSDT', 'CTKUSDT', 'ACAUSDT', 'DEXEUSDT'
+    'XPLUSDT','XRPUSDT','DASHUSDT','SOLUSDT','LINKUSDT','AVAXUSDT', 'PEPEUSDT'
 ]
 
 # ==================== INISIALISASI VARIABEL GLOBAL ====================
@@ -276,22 +269,44 @@ def initialize_binance_client():
         return False
 
 def handle_binance_error():
-    """Handle error Binance dan rotate API key"""
-    global BOT_RUNNING
-    
+    """Handle error Binance dan rotate API key dengan auto-retry"""
+    global BOT_RUNNING, CURRENT_API_INDEX, client
+
     print("🔴 Binance error detected, attempting API key rotation...")
-    
-    # Coba rotate API key
+    send_telegram_message("⚠️ <b>BINANCE ERROR TERDETEKSI</b>\nMencoba ganti API key secara otomatis...")
+
+    # Coba semua API key satu per satu
     for attempt in range(len(API_KEYS)):
         if rotate_api_key():
             print("✅ API key rotation successful, continuing operations...")
+            send_telegram_message(f"✅ <b>API KEY BERHASIL DIPINDAHKAN</b>\nSekarang menggunakan API key {CURRENT_API_INDEX + 1}")
             return True
-    
+        time.sleep(3)
+
     # Jika semua API key gagal
-    print("❌ All API keys failed, stopping bot...")
-    send_telegram_message("🔴 <b>SEMUA API KEY GAGAL</b>\nBot dihentikan otomatis.")
+    print("❌ All API keys failed, entering recovery mode...")
+    send_telegram_message(
+        "🔴 <b>SEMUA API KEY GAGAL</b>\nBot akan berhenti sementara selama 1 menit dan mencoba ulang otomatis."
+    )
+
+    # Pause sementara (tanpa mematikan bot)
     BOT_RUNNING = False
-    return False
+    time.sleep(60)  # 1 menit delay
+
+    # Reset ke API key pertama dan coba lagi
+    CURRENT_API_INDEX = 0
+    if initialize_binance_client():
+        BOT_RUNNING = True
+        send_telegram_message("🔁 <b>RECONNECT BERHASIL</b>\nBot kembali berjalan dengan API key 1.")
+        print("✅ Bot recovered using API key 1.")
+        return True
+    else:
+        print("⚠️ Recovery gagal, coba lagi nanti...")
+        send_telegram_message("⚠️ <b>RECONNECT GAGAL</b>\nAkan mencoba lagi dalam 1 menit.")
+        # Jadwalkan retry lagi (tanpa menghentikan program)
+        threading.Timer(60, handle_binance_error).start()
+        return False
+
 
 # ==================== TELEGRAM & LOGGING ====================
 def load_config():
@@ -2087,5 +2102,6 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
+
 
 
