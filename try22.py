@@ -223,7 +223,7 @@ class BinanceWebSocketManager:
 # ==================== BINANCE CLIENT MANAGEMENT ====================
 def initialize_binance_client():
     """Initialize Binance client dengan error handling"""
-    global client
+    global client, ORDER_RUN
     
     if not ORDER_RUN:
         print("🔄 Simulation mode - No Binance client needed")
@@ -1217,7 +1217,7 @@ def check_position_exit():
 
 # ==================== MAIN BOT LOGIC ====================
 def main():
-    global BOT_RUNNING, current_investment, active_position
+    global BOT_RUNNING, current_investment, active_position, ORDER_RUN
     
     print("🚀 Starting BOT - WebSocket Version")
     
@@ -1361,5 +1361,6 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
+
 
 
