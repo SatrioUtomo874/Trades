@@ -443,8 +443,9 @@ def process_telegram_command(command, chat_id, update_id):
         elif command == '/info':
             handle_info_command(chat_id)
             
-        elif command == '/modal':
+        elif command.startswith('/modal'):
             handle_modal_command(command, chat_id)
+
             
         mark_update_processed(update_id)
         
@@ -1114,20 +1115,23 @@ def trade_performance_feedback_loop():
 
         print(f"[FEEDBACK] Winrate: {rolling_winrate:.1%}, Avg PnL: {avg_pnl:.3f}%, Loss Streak: {performance_state['loss_streak']}")
 
+        # Adaptasi saat loss streak
         if (performance_state['loss_streak'] >= LOSS_STREAK_LIMIT and 
-            now - performance_state.get('last_adaptation_time', 0) > 120):
+            now - performance_state.get('last_adaptation_time', 0) > 120 and
+            not performance_state.get('adaptation_triggered', False)):
             
             old_threshold = dynamic_threshold
             old_position_size = POSITION_SIZING_PCT
-            
+        
             dynamic_threshold = dynamic_threshold + LOSS_STREAK_THRESHOLD_INCREASE
             new_pos_size = max(MIN_POSITION_SIZING, POSITION_SIZING_PCT * LOSS_STREAK_POSITION_SIZER_MULT)
             max_allowed_reduction = POSITION_SIZING_PCT * (1 - MAX_ADAPTATION_PERCENT)
             POSITION_SIZING_PCT = max(new_pos_size, max_allowed_reduction)
-            
+        
             performance_state['paused_until'] = now + LOSS_STREAK_COOLDOWN
             performance_state['last_adaptation_time'] = now
-
+            performance_state['adaptation_triggered'] = True   # ✅ Tambahkan flag agar hanya sekali per streak
+        
             adaptation_msg = (
                 f"⚠️ <b>ADAPTATION TRIGGERED - LOSS STREAK</b>\n"
                 f"Loss Streak: {performance_state['loss_streak']}\n"
@@ -1135,6 +1139,11 @@ def trade_performance_feedback_loop():
                 f"Position Size: {old_position_size:.1%} → {POSITION_SIZING_PCT:.1%}"
             )
             send_telegram_message(adaptation_msg)
+        
+        # Reset flag jika sudah tidak loss streak lagi
+        if performance_state['loss_streak'] == 0:
+            performance_state['adaptation_triggered'] = False
+
 
         if (performance_state['win_streak'] >= WIN_STREAK_LIMIT and 
             now - performance_state.get('last_adaptation_time', 0) > 120) and not performance_state.get('reward_triggered', False):
@@ -2078,4 +2087,5 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
+
 
