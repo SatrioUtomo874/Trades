@@ -100,7 +100,14 @@ BOT_STATE_FILE = 'bot_state1.json'
 COINS = [
     'PENGUUSDT','WALUSDT','MIRAUSDT','HEMIUSDT','PUMPUSDT','TRXUSDT','LTCUSDT','FFUSDT',
     'SUIUSDT','ASTERUSDT','ZECUSDT','CAKEUSDT','BNBUSDT','AVNTUSDT','DOGEUSDT','ADAUSDT',
-    'XPLUSDT','XRPUSDT','DASHUSDT','SOLUSDT','LINKUSDT','AVAXUSDT', 'PEPEUSDT'
+    'XPLUSDT','XRPUSDT','DASHUSDT','SOLUSDT','LINKUSDT','AVAXUSDT', 'PEPEUSDT', 
+    'FORMUSDT', 'TRUMPUSDT', 'WIFUSDT', 'NEARUSDT', 'WBETHUSDT', 'SHIBUSDT',
+    '2ZUSDT', 'LINEAUSDT', 'APEUSDT', 'HBARUSDT', 'DOTUSDT', 'EULUSDT', 'HEIUSDT',  
+    'AAVEUSDT', 'ALICEUSDT', 'ENAUSDT', 'BATUSDT', 'HOLOUSDT', 'WLFIUSDT', 'POLUSDT',
+    'SNXUSDT', 'TRBUSDT', 'SOMIUSDT', 'ICPUSDT', 'ARPAUSDT', 'EDUUSDT', 'MAGICUSDT', 'OMUSDT',
+    'BELUSDT' , 'PHBUSDT', 'APTUSDT', 'DEGOUSDT', 'PROVEUSDT', 'YGGUSDT', 'AMPUSDT', 
+    'FTTUSDT', 'LAUSDT', 'SYRUPUSDT', 'AIUSDT', 'RSRUSDT', 'CYBERUSDT', 'OGUSDT', 'PAXGUSDT',
+    'AUDIOUSDT', 'ZKCUSDT', 'CTKUSDT', 'ACAUSDT', 'DEXEUSDT'
 ]
 
 # ==================== INISIALISASI VARIABEL GLOBAL ====================
@@ -444,6 +451,22 @@ def process_telegram_command(command, chat_id, update_id):
     except Exception as e:
         send_telegram_message(f"❌ <b>ERROR PROCESSING COMMAND</b>\n{str(e)}")
 
+def parse_float_value(input_str):
+    """Parse string menjadi float, handle berbagai format angka"""
+    try:
+        # Ganti koma dengan titik dan hapus spasi
+        cleaned = input_str.replace(',', '.').replace(' ', '')
+        
+        # Validasi bahwa string hanya berisi digit dan titik
+        if not cleaned.replace('.', '').isdigit():
+            return None
+            
+        # Parse ke float
+        value = float(cleaned)
+        return value
+    except (ValueError, AttributeError):
+        return None
+
 def handle_modal_command(command, chat_id):
     """Handle /modal command untuk mengubah modal"""
     global current_investment, BOT_RUNNING
@@ -458,19 +481,11 @@ def handle_modal_command(command, chat_id):
             send_telegram_message(f"❌ Format: /modal [jumlah_usdt]\nContoh: /modal 10.5\nModal saat ini: ${current_investment:.2f}")
             return
             
-        # Handle berbagai format angka
-        modal_str = parts[1].replace(',', '.')  # Ganti koma dengan titik
-        # Hapus karakter non-digit kecuali titik
-        modal_str = ''.join(c for c in modal_str if c.isdigit() or c == '.')
+        # Parse nilai modal
+        new_investment = parse_float_value(parts[1])
         
-        if not modal_str or modal_str == '.':
-            send_telegram_message("❌ Format angka tidak valid. Contoh: /modal 5.4")
-            return
-        
-        new_investment = float(modal_str)
-
-        if new_investment <= 0:  # Untuk modal command  
-            send_telegram_message("❌ Modal harus lebih besar dari 0")
+        if new_investment is None:
+            send_telegram_message("❌ Format angka tidak valid. Gunakan angka dengan titik atau koma.\nContoh: /modal 5.4 atau /modal 5,4")
             return
         
         if new_investment <= 0:
@@ -483,8 +498,6 @@ def handle_modal_command(command, chat_id):
         send_telegram_message(f"✅ <b>MODAL DIPERBARUI</b>\nModal sebelumnya: ${old_investment:.2f}\nModal baru: <b>${current_investment:.2f}</b>")
         print(f"✅ Investment updated: ${old_investment:.2f} -> ${current_investment:.2f}")
         
-    except ValueError:
-        send_telegram_message("❌ Format angka tidak valid. Gunakan format: /modal 10.5")
     except Exception as e:
         send_telegram_message(f"❌ Error mengubah modal: {str(e)}")
 
@@ -522,46 +535,36 @@ def handle_sell_command(command, chat_id):
     elif len(parts) >= 3:
         # /sell dengan parameter (tp/sl dan harga)
         action = parts[1].lower()
-        try:
-            # Handle berbagai format angka (5.4, 5,4, dll)
-            price_str = parts[2].replace(',', '.')  # Ganti koma dengan titik
-            # Hapus karakter non-digit kecuali titik
-            price_str = ''.join(c for c in price_str if c.isdigit() or c == '.')
-            
-            if not price_str or price_str == '.':
-                send_telegram_message("❌ Format harga tidak valid. Contoh: /sell tp 0.153420")
-                return
-                
-            price_value = float(price_str)
-            
-            if price_value <= 0:  # Untuk sell command
-                send_telegram_message("❌ Harga harus lebih besar dari 0")
-                return
-            
-            if action == 'tp':
-                if price_value <= entry_price:
-                    send_telegram_message(f"❌ <b>TAKE PROFIT HARUS DI ATAS HARGA BELI</b>\nHarga beli: ${entry_price:.6f}\nTP yang diminta: ${price_value:.6f}")
-                    return
         
-                old_tp = active_position['take_profit']
-                active_position['take_profit'] = price_value
-                send_telegram_message(f"✅ <b>TAKE PROFIT DIPERBARUI</b>\n{symbol}\nTP sebelumnya: ${old_tp:.6f}\nTP baru: <b>${price_value:.6f}</b>")
-                print(f"✅ TP updated for {symbol}: {price_value}")
-                
-            elif action == 'sl':
-                if price_value >= entry_price:
-                    send_telegram_message(f"❌ <b>STOP LOSS HARUS DI BAWAH HARGA BELI</b>\nHarga beli: ${entry_price:.6f}\nSL yang diminta: ${price_value:.6f}")
-                    return
-                
-                active_position['stop_loss'] = price_value
-                send_telegram_message(f"✅ <b>STOP LOSS DIPERBARUI</b>\n{symbol}\nSL sebelumnya: ${active_position.get('stop_loss_old', 'N/A'):.6f}\nSL baru: <b>${price_value:.6f}</b>")
-                print(f"✅ SL updated for {symbol}: {price_value}")
-                
-            else:
-                send_telegram_message("❌ Format: /sell [tp/sl] [harga]\nContoh: /sell tp 2.987\n/sell sl 2.500")
-                
-        except ValueError:
-            send_telegram_message("❌ Format harga tidak valid. Gunakan angka.\nContoh: /sell tp 2.987")
+        # Parse harga
+        price_value = parse_float_value(parts[2])
+        
+        if price_value is None:
+            send_telegram_message("❌ Format harga tidak valid. Gunakan angka dengan titik atau koma.\nContoh: /sell sl 0.0539 atau /sell sl 0,0539")
+            return
+            
+        if action == 'tp':
+            if price_value <= entry_price:
+                send_telegram_message(f"❌ <b>TAKE PROFIT HARUS DI ATAS HARGA BELI</b>\nHarga beli: ${entry_price:.6f}\nTP yang diminta: ${price_value:.6f}")
+                return
+            
+            old_tp = active_position['take_profit']
+            active_position['take_profit'] = price_value
+            send_telegram_message(f"✅ <b>TAKE PROFIT DIPERBARUI</b>\n{symbol}\nTP sebelumnya: ${old_tp:.6f}\nTP baru: <b>${price_value:.6f}</b>")
+            print(f"✅ TP updated for {symbol}: {price_value}")
+            
+        elif action == 'sl':
+            if price_value >= entry_price:
+                send_telegram_message(f"❌ <b>STOP LOSS HARUS DI BAWAH HARGA BELI</b>\nHarga beli: ${entry_price:.6f}\nSL yang diminta: ${price_value:.6f}")
+                return
+            
+            old_sl = active_position['stop_loss']
+            active_position['stop_loss'] = price_value
+            send_telegram_message(f"✅ <b>STOP LOSS DIPERBARUI</b>\n{symbol}\nSL sebelumnya: ${old_sl:.6f}\nSL baru: <b>${price_value:.6f}</b>")
+            print(f"✅ SL updated for {symbol}: {price_value}")
+            
+        else:
+            send_telegram_message("❌ Format: /sell [tp/sl] [harga]\nContoh: /sell tp 2.987\n/sell sl 2.500")
     else:
         send_telegram_message("❌ Format: /sell [tp/sl] [harga]\nContoh: /sell tp 2.987\n/sell sl 2.500\n/sell (untuk jual manual)")
 
@@ -700,7 +703,15 @@ def handle_set_command(command, chat_id):
                         send_telegram_message(f"❌ Nilai boolean tidak valid: {param_value}\nGunakan: true/false, yes/no, 1/0")
                         return
                 else:
-                    new_value = value_type(param_value)
+                    # Parse angka dengan fungsi yang sama
+                    if value_type == float:
+                        parsed_value = parse_float_value(param_value)
+                        if parsed_value is None:
+                            send_telegram_message(f"❌ Format angka tidak valid untuk {param_name}\nGunakan titik atau koma sebagai desimal")
+                            return
+                        new_value = parsed_value
+                    else:
+                        new_value = value_type(param_value)
                 
                 # Validasi nilai
                 if param_name.endswith('_PCT') and new_value <= 0:
@@ -2066,6 +2077,4 @@ if __name__ == "__main__":
         print(f"💀 Fatal error: {e}")
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
-    print("✅ Bot shutdown complete")
-
-
+    print("✅ Bot shutdown complete"
