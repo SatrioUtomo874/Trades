@@ -252,13 +252,13 @@ def initialize_binance_client():
             
         print("🔧 Initializing Binance client...")
         
-        # Gunakan timeout yang lebih pendek dan configuration yang lebih aman
+        # PERBAIKAN: Gunakan configuration yang compatible
         client = Client(
             API_KEY, 
             API_SECRET, 
             {
-                "timeout": 15,
-                "requests_params": {"timeout": 15}
+                "timeout": 15
+                # Hapus "requests_params" karena tidak supported
             }
         )
         
@@ -1496,5 +1496,6 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
+
 
 
