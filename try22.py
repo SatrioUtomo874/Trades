@@ -257,7 +257,6 @@ def initialize_binance_client():
         # Jika terkena IP ban, gunakan mode simulasi
         if "IP banned" in str(e) or "too much request" in str(e):
             print("🚫 IP Banned detected. Switching to simulation mode...")
-            global ORDER_RUN
             ORDER_RUN = False
             send_telegram_message("⚠️ <b>IP BAN DETECTED</b>\nSwitching to simulation mode automatically.")
             return True
@@ -1361,6 +1360,7 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
+
 
 
 
