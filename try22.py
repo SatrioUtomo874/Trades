@@ -75,9 +75,7 @@ TRADE_HISTORY_FILE = 'trade_history1.json'
 
 # Coin List
 COINS = [
-    'PENGUUSDT','WALUSDT','MIRAUSDT','HEMIUSDT','PUMPUSDT','TRXUSDT','LTCUSDT','FFUSDT',
-    'SUIUSDT','ASTERUSDT','ZECUSDT','CAKEUSDT','BNBUSDT','AVNTUSDT','DOGEUSDT','ADAUSDT',
-    'XPLUSDT','XRPUSDT','DASHUSDT','SOLUSDT','LINKUSDT','AVAXUSDT',
+    'SOLUSDT', 'BNBUSDT', 'TURTLEUSDT', 'FUSDT', 'PEPEUSDT', 'XRPUSDT', 'LPTUSDT', 'ASTERUSDT', 'SUIUSDT', 'DOGEUSDT'
 ]
 
 # ==================== VARIABEL GLOBAL ====================
@@ -1498,4 +1496,5 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
+
 
