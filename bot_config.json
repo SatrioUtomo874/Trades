@@ -8,7 +8,7 @@
     "MAX_DRAWDOWN_PCT": 0.6,
     "ADAPTIVE_CONFIDENCE": true
   },
-  "timeframe_params": {
+  "technical_params": {
     "RSI_MIN_15M": 30,
     "RSI_MAX_15M": 70,
     "EMA_SHORT_15M": 12,
@@ -31,3 +31,4 @@
   }
 
 }
+
