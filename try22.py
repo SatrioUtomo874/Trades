@@ -25,6 +25,7 @@ API_SECRET = os.getenv('BINANCE_API_SECRET')
 
 INITIAL_INVESTMENT = float(os.getenv('INITIAL_INVESTMENT', '5.5'))
 ORDER_RUN = os.getenv('ORDER_RUN', 'False').lower() == 'true'
+global ORDER_RUN
 
 # Trading Parameters
 TAKE_PROFIT_PCT = 0.0062
@@ -1360,3 +1361,4 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
+
