@@ -1630,7 +1630,7 @@ def analyze_coin_fast(symbol):
         if current_price is None:
             return None
         
-        buy_signal = (m15_ok or m5_ok) and confidence >= dynamic_threshold
+        buy_signal = (m15_ok and m5_ok) and confidence >= dynamic_threshold
         
         return {
             'symbol': symbol,
@@ -2170,5 +2170,6 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
+
 
 
