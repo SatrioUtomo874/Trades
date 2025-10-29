@@ -1,29 +1,32 @@
 {
   "trading_params": {
-    "TAKE_PROFIT_PCT": 0.004,
-    "STOP_LOSS_PCT": 0.010,
+    "TAKE_PROFIT_PCT": 0.005,
+    "STOP_LOSS_PCT": 0.01,
     "TRAILING_STOP_ACTIVATION": 0.003,
     "TRAILING_STOP_PCT": 0.008,
-    "POSITION_SIZING_PCT": 0.3
+    "POSITION_SIZING_PCT": 0.3,
+    "MAX_DRAWDOWN_PCT": 0.4,
+    "ADAPTIVE_CONFIDENCE": true
   },
-  "timeframe_15m": {
+  "timeframe_params": {
     "RSI_MIN_15M": 45,
-    "RSI_MAX_15M": 65,
+    "RSI_MAX_15M": 60,
     "EMA_SHORT_15M": 20,
     "EMA_LONG_15M": 50,
-    "MACD_FAST_15M": 12,
-    "MACD_SLOW_15M": 26,
-    "MACD_SIGNAL_15M": 9,
-    "VOLUME_RATIO_MIN_15M": 1.0
-  },
-  "timeframe_5m": {
+    "MACD_FAST_15M": 8,
+    "MACD_SLOW_15M": 21,
+    "MACD_SIGNAL_15M": 7,
+    "LRO_PERIOD_15M": 120,
+    "VOLUME_PERIOD_15M": 20,
     "RSI_MIN_5M": 43,
     "RSI_MAX_5M": 55,
     "EMA_SHORT_5M": 20,
     "EMA_LONG_5M": 50,
-    "MACD_FAST_5M": 12,
-    "MACD_SLOW_5M": 26,
-    "MACD_SIGNAL_5M": 9,
-    "VOLUME_RATIO_MIN_5M": 1.1
+    "MACD_FAST_5M": 8,
+    "MACD_SLOW_5M": 21,
+    "MACD_SIGNAL_5M": 8,
+    "LRO_PERIOD_5M": 100,
+    "VOLUME_PERIOD_5M": 20,
+    "VOLUME_RATIO_MIN": 1.1
   }
 }
