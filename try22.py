@@ -1,5 +1,3 @@
-[file name]: try22 (7).py
-[file content begin]
 import numpy as np
 from binance.client import Client
 import time
@@ -2172,4 +2170,4 @@ if __name__ == "__main__":
         send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
     
     print("✅ Bot shutdown complete")
-[file content end]
+
