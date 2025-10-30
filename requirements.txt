@@ -2,7 +2,6 @@ python-binance
 python-telegram-bot
 pandas
 numpy
-ta
 python-dotenv
 websockets
 aiohttp
