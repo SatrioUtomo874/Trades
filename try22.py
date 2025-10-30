@@ -1,2175 +1,890 @@
-import numpy as np
-from binance.client import Client
-import time
 import os
-from datetime import datetime, timedelta
-import warnings
-import math
-import requests
-import json
+import asyncio
+import logging
 import pandas as pd
-from collections import deque
+import numpy as np
+from datetime import datetime, timezone
+from binance import AsyncClient, BinanceSocketManager
+from telegram import Bot
+from telegram.error import TelegramError
 from dotenv import load_dotenv
-import threading
+from typing import Dict, List, Tuple, Optional
+import ta
 
-# Load environment variables dari file .env
+# Load environment variables
 load_dotenv()
-warnings.filterwarnings('ignore')
 
-# ==================== KONFIGURASI ====================
-# Multiple API Keys untuk fallback
-API_KEYS = [
-    {
-        'key': os.getenv('BINANCE_API_KEY_1'),
-        'secret': os.getenv('BINANCE_API_SECRET_1')
-    },
-    {
-        'key': os.getenv('BINANCE_API_KEY_2'), 
-        'secret': os.getenv('BINANCE_API_SECRET_2')
-    },
-    {
-        'key': os.getenv('BINANCE_API_KEY_3'),
-        'secret': os.getenv('BINANCE_API_SECRET_3')
-    }
-]
-
-# Default ke API key lama untuk kompatibilitas
-if not API_KEYS[0]['key']:
-    API_KEYS[0] = {
-        'key': os.getenv('BINANCE_API_KEY'),
-        'secret': os.getenv('BINANCE_API_SECRET')
-    }
-
-CURRENT_API_INDEX = 0
-INITIAL_INVESTMENT = float(os.getenv('INITIAL_INVESTMENT', '5.5'))
-ORDER_RUN = os.getenv('ORDER_RUN', 'False').lower() == 'true'
-
-# Trading Parameters - SESUAI PERMINTAAN
-TAKE_PROFIT_PCT = 0.0062  # 0.62%
-STOP_LOSS_PCT = 0.0160    # 1.6%
-TRAILING_STOP_ACTIVATION = 0.0040
-TRAILING_STOP_PCT = 0.0080
-
-# Risk Management
-POSITION_SIZING_PCT = 0.4
-MAX_DRAWDOWN_PCT = 0.6
-ADAPTIVE_CONFIDENCE = True
-
-# PARAMETER TIMEFRAME - SESUAI PERMINTAAN
-RSI_MIN_15M = 35
-RSI_MAX_15M = 65
-EMA_SHORT_15M = 12
-EMA_LONG_15M = 26
-MACD_FAST_15M = 7
-MACD_SLOW_15M = 21
-MACD_SIGNAL_15M = 7
-LRO_PERIOD_15M = 20
-VOLUME_PERIOD_15M = 15
-
-RSI_MIN_5M = 35
-RSI_MAX_5M = 68
-EMA_SHORT_5M = 5
-EMA_LONG_5M = 20
-MACD_FAST_5M = 8
-MACD_SLOW_5M = 21
-MACD_SIGNAL_5M = 8
-LRO_PERIOD_5M = 20
-VOLUME_PERIOD_5M = 10
-
-VOLUME_RATIO_MIN = 0.8
-
-# Telegram Configuration
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-SEND_TELEGRAM_NOTIFICATIONS = True
-
-# ==================== TELEGRAM CONTROL SYSTEM ====================
-TELEGRAM_CONTROL_ENABLED = True
-BOT_RUNNING = False
-ADMIN_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-
-# Configuration file
-CONFIG_FILE = 'bot_config.json'
-
-# File Configuration
-LOG_FILE = 'trading_log1.txt'
-TRADE_HISTORY_FILE = 'trade_history1.json'
-BOT_STATE_FILE = 'bot_state1.json'
-
-# Coin List - dipersingkat untuk testing
-COINS = [
-    'PENGUUSDT','WALUSDT','MIRAUSDT','HEMIUSDT','PUMPUSDT','TRXUSDT','LTCUSDT','FFUSDT',
-    'SUIUSDT','ASTERUSDT','ZECUSDT','CAKEUSDT','BNBUSDT','AVNTUSDT','DOGEUSDT','ADAUSDT',
-    'XPLUSDT','XRPUSDT','DASHUSDT','SOLUSDT','LINKUSDT','AVAXUSDT', 'PEPEUSDT'
-]
-
-# ==================== INISIALISASI VARIABEL GLOBAL ====================
-current_investment = INITIAL_INVESTMENT
-active_position = None
-buy_signals = []
-trade_history = []
-client = None
-
-coin_performance = {}
-dynamic_threshold = 30
-recent_trades = deque(maxlen=10)
-failed_coins = {}
-
-performance_state = {
-    'ema_pnl': 0.0,
-    'loss_streak': 0,
-    'win_streak': 0,
-    'paused_until': 0,
-    'last_adaptation_time': 0,
-    'total_trades': 0,
-    'total_wins': 0
-}
-
-# Hyperparameters untuk Feedback Loop
-RECENT_WINDOW = 10
-LOSS_STREAK_LIMIT = 2
-LOSS_STREAK_THRESHOLD_INCREASE = 8
-LOSS_STREAK_POSITION_SIZER_MULT = 0.7
-LOSS_STREAK_COOLDOWN = 600
-WIN_STREAK_LIMIT = 3
-WIN_STREAK_THRESHOLD_DECREASE = 5
-EMA_ALPHA = 0.3
-MIN_POSITION_SIZING = 0.1
-MAX_ADAPTATION_PERCENT = 0.25
-
-# ==================== DELAY CONFIGURATION ====================
-DELAY_BETWEEN_COINS = 0.3
-DELAY_BETWEEN_REQUESTS = 0.1
-DELAY_AFTER_ERROR = 1.0
-DELAY_BETWEEN_SCANS = 3.0
-DELAY_WHEN_PAUSED = 1.0
-
-# Rate limiting
-LAST_REQUEST_TIME = 0
-MIN_REQUEST_INTERVAL = 0.2
-
-if os.environ.get('RENDER'):
-    DELAY_BETWEEN_COINS = 0.5
-    DELAY_BETWEEN_REQUESTS = 0.2
-    DELAY_BETWEEN_SCANS = 5.0
-
-# ==================== FUNGSI UTAMA ====================
-def get_public_ip():
-    """Mendapatkan IP publik"""
-    try:
-        services = ['https://api.ipify.org', 'https://ident.me', 'https://checkip.amazonaws.com']
-        
-        for service in services:
-            try:
-                response = requests.get(service, timeout=5)
-                if response.status_code == 200:
-                    ip = response.text.strip()
-                    print(f"✅ Public IP: {ip}")
-                    return ip
-            except:
-                continue
-        return None
-    except Exception as e:
-        print(f"❌ Error getting public IP: {e}")
-        return None
-
-def rate_limit():
-    """Rate limiting untuk menghindari ban Binance"""
-    global LAST_REQUEST_TIME
-    current_time = time.time()
-    elapsed = current_time - LAST_REQUEST_TIME
+# Configuration
+class Config:
+    BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
+    BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
+    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
+    TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+    UPDATE_INTERVAL_HOURS = int(os.getenv('UPDATE_INTERVAL_HOURS', '4'))
     
-    if elapsed < MIN_REQUEST_INTERVAL:
-        sleep_time = MIN_REQUEST_INTERVAL - elapsed
-        time.sleep(sleep_time)
+    # Get all USDT pairs excluding BTC and ETH
+    PAIR_LIST = []  # Will be populated dynamically
     
-    LAST_REQUEST_TIME = time.time()
-
-def create_simple_health_endpoint():
-    """Health endpoint untuk Render"""
-    try:
-        from flask import Flask
-        app = Flask(__name__)
-        
-        @app.route('/')
-        def health_check():
-            return {'status': 'running', 'timestamp': datetime.now().isoformat()}
-        
-        @app.route('/health')
-        def health():
-            return {'status': 'healthy'}
-        
-        port = int(os.environ.get('PORT', 5000))
-        
-        def run_flask():
-            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-        
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        return True
-    except ImportError:
-        return False
-    except Exception as e:
-        print(f"⚠️ Health endpoint error: {e}")
-        return False
-
-def check_render_environment():
-    """Check jika running di Render"""
-    return os.environ.get('RENDER', False)
-
-def check_binance_connection():
-    """Test koneksi ke Binance"""
-    try:
-        client.ping()
-        print("✅ Binance connection test: SUCCESS")
-        return True
-    except Exception as e:
-        print(f"❌ Binance connection test failed: {e}")
-        return False
-
-# ==================== MULTIPLE API KEY MANAGEMENT ====================
-def rotate_api_key():
-    """Rotate ke API key berikutnya"""
-    global CURRENT_API_INDEX, client
+    # Indicator parameters
+    EMA_FAST = 50
+    EMA_SLOW = 200
+    RSI_PERIOD = 14
+    MACD_FAST = 12
+    MACD_SLOW = 26
+    MACD_SIGNAL = 9
+    ATR_PERIOD = 14
     
-    old_index = CURRENT_API_INDEX
-    CURRENT_API_INDEX = (CURRENT_API_INDEX + 1) % len(API_KEYS)
-    
-    print(f"🔄 Rotating API key: {old_index} -> {CURRENT_API_INDEX}")
-    
-    if initialize_binance_client():
-        send_telegram_message(f"🔄 <b>API KEY DIPERBARUI</b>\nBerpindah ke API key {CURRENT_API_INDEX + 1}")
-        return True
-    else:
-        print(f"❌ Failed to rotate to API key {CURRENT_API_INDEX}")
-        return False
+    # Confidence weights
+    WEIGHT_TREND = 0.4
+    WEIGHT_RSI = 0.2
+    WEIGHT_MACD = 0.2
+    WEIGHT_VOLUME = 0.2
 
-def initialize_binance_client():
-    """Initialize Binance client dengan API key yang aktif"""
-    global client, CURRENT_API_INDEX, ORDER_RUN
+class SmartMoneyAnalyzer:
+    """Class untuk analisis Smart Money Concept"""
     
-    try:
-        api_key = API_KEYS[CURRENT_API_INDEX]['key']
-        api_secret = API_KEYS[CURRENT_API_INDEX]['secret']
+    @staticmethod
+    def find_support_resistance(df: pd.DataFrame, lookback: int = 100) -> Tuple[float, float, List[float], List[float]]:
+        """Temukan level support dan resistance menggunakan swing points"""
+        highs = df['high'].tail(lookback)
+        lows = df['low'].tail(lookback)
         
-        if not api_key or not api_secret:
-            print(f"❌ API key {CURRENT_API_INDEX} tidak valid")
-            return False
+        # Find swing highs and lows
+        resistance_levels = []
+        support_levels = []
+        
+        for i in range(2, len(highs)-2):
+            if (highs.iloc[i] > highs.iloc[i-1] and 
+                highs.iloc[i] > highs.iloc[i-2] and
+                highs.iloc[i] > highs.iloc[i+1] and
+                highs.iloc[i] > highs.iloc[i+2]):
+                resistance_levels.append(highs.iloc[i])
             
-        client = Client(api_key, api_secret, {"timeout": 20})
-        print(f"✅ Binance client initialized dengan API key {CURRENT_API_INDEX + 1}")
+            if (lows.iloc[i] < lows.iloc[i-1] and 
+                lows.iloc[i] < lows.iloc[i-2] and
+                lows.iloc[i] < lows.iloc[i+1] and
+                lows.iloc[i] < lows.iloc[i+2]):
+                support_levels.append(lows.iloc[i])
         
-        # Test connection
-        client.ping()
-        print(f"✅ Binance connection test successful dengan API key {CURRENT_API_INDEX + 1}")
-        return True
+        # Get the most relevant levels (closest to current price)
+        current_price = df['close'].iloc[-1]
         
-    except Exception as e:
-        print(f"❌ Failed to initialize Binance client dengan API key {CURRENT_API_INDEX + 1}: {e}")
+        # Filter support levels below current price and resistance above
+        valid_support = [s for s in support_levels if s < current_price]
+        valid_resistance = [r for r in resistance_levels if r > current_price]
         
-        # Otomatis switch ke mode simulasi jika koneksi gagal
-        if ORDER_RUN:
-            ORDER_RUN = False
-            print("🔄 Otomatis beralih ke mode SIMULASI karena koneksi Binance gagal")
-            send_telegram_message(
-                f"🔄 <b>OTOMATIS BERALIH KE MODE SIMULASI</b>\n"
-                f"Koneksi Binance gagal dengan API key {CURRENT_API_INDEX + 1}\n"
-                f"Bot akan berjalan dalam mode simulasi untuk sementara.\n"
-                f"Gunakan /mode true untuk kembali ke live trading setelah masalah teratasi."
-            )
-        
-        return False
-
-def handle_binance_error():
-    """Handle error Binance dan rotate API key dengan auto-retry"""
-    global BOT_RUNNING, CURRENT_API_INDEX, client, ORDER_RUN
-
-    print("🔴 Binance error detected, attempting API key rotation...")
-    send_telegram_message("⚠️ <b>BINANCE ERROR TERDETEKSI</b>\nMencoba ganti API key secara otomatis...")
-
-    # Coba semua API key satu per satu
-    for attempt in range(len(API_KEYS)):
-        if rotate_api_key():
-            print("✅ API key rotation successful, continuing operations...")
-            send_telegram_message(f"✅ <b>API KEY BERHASIL DIPINDAHKAN</b>\nSekarang menggunakan API key {CURRENT_API_INDEX + 1}")
-            return True
-        time.sleep(3)
-
-    # Jika semua API key gagal, switch ke mode simulasi
-    print("❌ All API keys failed, switching to SIMULATION mode...")
-    
-    if ORDER_RUN:
-        ORDER_RUN = False
-        send_telegram_message(
-            "🔄 <b>SEMUA API KEY GAGAL - BERALIH KE MODE SIMULASI</b>\n"
-            "Semua koneksi Binance gagal.\n"
-            "Bot akan berjalan dalam mode simulasi untuk sementara.\n"
-            "Gunakan /mode true untuk kembali ke live trading setelah masalah teratasi."
-        )
-        return True  # Kembali ke operasi dalam mode simulasi
-    else:
-        print("⚠️ Already in simulation mode, continuing...")
-        return True  # Tetap lanjut dalam mode simulasi
-
-
-# ==================== TELEGRAM & LOGGING ====================
-def load_config():
-    """Load configuration dari file"""
-    default_config = {
-        'trading_params': {
-            'TAKE_PROFIT_PCT': 0.0062,
-            'STOP_LOSS_PCT': 0.0160,
-            'TRAILING_STOP_ACTIVATION': 0.0040,
-            'TRAILING_STOP_PCT': 0.0080,
-            'POSITION_SIZING_PCT': 0.4,
-            'MAX_DRAWDOWN_PCT': 0.6,
-            'ADAPTIVE_CONFIDENCE': True
-        },
-        'timeframe_params': {
-            'RSI_MIN_15M': 35, 'RSI_MAX_15M': 65, 'EMA_SHORT_15M': 12, 'EMA_LONG_15M': 26,
-            'MACD_FAST_15M': 7, 'MACD_SLOW_15M': 21, 'MACD_SIGNAL_15M': 7,
-            'LRO_PERIOD_15M': 20, 'VOLUME_PERIOD_15M': 15,
-            'RSI_MIN_5M': 35, 'RSI_MAX_5M': 68, 'EMA_SHORT_5M': 5, 'EMA_LONG_5M': 20,
-            'MACD_FAST_5M': 8, 'MACD_SLOW_5M': 21, 'MACD_SIGNAL_5M': 8,
-            'LRO_PERIOD_5M': 20, 'VOLUME_PERIOD_5M': 10, 'VOLUME_RATIO_MIN': 0.8
-        }
-    }
-    
-    try:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r') as f:
-                return json.load(f)
+        if valid_support:
+            relevant_support = max(valid_support)  # Highest support below current price
         else:
-            save_config(default_config)
-            return default_config
-    except Exception as e:
-        print(f"❌ Error loading config: {e}")
-        return default_config
-
-def save_config(config):
-    """Save configuration ke file"""
-    try:
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(config, f, indent=2)
-        return True
-    except Exception as e:
-        print(f"❌ Error saving config: {e}")
-        return False
-
-def update_global_variables_from_config():
-    """Update global variables dari config file"""
-    global TAKE_PROFIT_PCT, STOP_LOSS_PCT, TRAILING_STOP_ACTIVATION, TRAILING_STOP_PCT
-    global POSITION_SIZING_PCT, MAX_DRAWDOWN_PCT, ADAPTIVE_CONFIDENCE
-    global RSI_MIN_15M, RSI_MAX_15M, EMA_SHORT_15M, EMA_LONG_15M, MACD_FAST_15M, MACD_SLOW_15M, MACD_SIGNAL_15M
-    global LRO_PERIOD_15M, VOLUME_PERIOD_15M, RSI_MIN_5M, RSI_MAX_5M, EMA_SHORT_5M, EMA_LONG_5M
-    global MACD_FAST_5M, MACD_SLOW_5M, MACD_SIGNAL_5M, LRO_PERIOD_5M, VOLUME_PERIOD_5M, VOLUME_RATIO_MIN
-    
-    config = load_config()
-    trading_params = config['trading_params']
-    timeframe_params = config['timeframe_params']
-    
-    TAKE_PROFIT_PCT = trading_params['TAKE_PROFIT_PCT']
-    STOP_LOSS_PCT = trading_params['STOP_LOSS_PCT']
-    TRAILING_STOP_ACTIVATION = trading_params['TRAILING_STOP_ACTIVATION']
-    TRAILING_STOP_PCT = trading_params['TRAILING_STOP_PCT']
-    POSITION_SIZING_PCT = trading_params['POSITION_SIZING_PCT']
-    MAX_DRAWDOWN_PCT = trading_params['MAX_DRAWDOWN_PCT']
-    ADAPTIVE_CONFIDENCE = trading_params['ADAPTIVE_CONFIDENCE']
-    
-    RSI_MIN_15M = timeframe_params['RSI_MIN_15M']
-    RSI_MAX_15M = timeframe_params['RSI_MAX_15M']
-    EMA_SHORT_15M = timeframe_params['EMA_SHORT_15M']
-    EMA_LONG_15M = timeframe_params['EMA_LONG_15M']
-    MACD_FAST_15M = timeframe_params['MACD_FAST_15M']
-    MACD_SLOW_15M = timeframe_params['MACD_SLOW_15M']
-    MACD_SIGNAL_15M = timeframe_params['MACD_SIGNAL_15M']
-    LRO_PERIOD_15M = timeframe_params['LRO_PERIOD_15M']
-    VOLUME_PERIOD_15M = timeframe_params['VOLUME_PERIOD_15M']
-    RSI_MIN_5M = timeframe_params['RSI_MIN_5M']
-    RSI_MAX_5M = timeframe_params['RSI_MAX_5M']
-    EMA_SHORT_5M = timeframe_params['EMA_SHORT_5M']
-    EMA_LONG_5M = timeframe_params['EMA_LONG_5M']
-    MACD_FAST_5M = timeframe_params['MACD_FAST_5M']
-    MACD_SLOW_5M = timeframe_params['MACD_SLOW_5M']
-    MACD_SIGNAL_5M = timeframe_params['MACD_SIGNAL_5M']
-    LRO_PERIOD_5M = timeframe_params['LRO_PERIOD_5M']
-    VOLUME_PERIOD_5M = timeframe_params['VOLUME_PERIOD_5M']
-    VOLUME_RATIO_MIN = timeframe_params['VOLUME_RATIO_MIN']
-
-def handle_telegram_command():
-    """Check untuk Telegram commands"""
-    global BOT_RUNNING
-    
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-        response = requests.get(url, timeout=5)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data['ok'] and data['result']:
-                for update in data['result']:
-                    if 'message' in update and 'text' in update['message']:
-                        message = update['message']['text']
-                        chat_id = update['message']['chat']['id']
-                        
-                        if str(chat_id) != ADMIN_CHAT_ID:
-                            continue
-                            
-                        if message.startswith('/'):
-                            process_telegram_command(message, chat_id, update['update_id'])
-    except Exception as e:
-        print(f"❌ Telegram command error: {e}")
-
-def process_telegram_command(command, chat_id, update_id):
-    """Process individual Telegram commands"""
-    global BOT_RUNNING
-    
-    try:
-        if command == '/start':
-            if not BOT_RUNNING:
-                BOT_RUNNING = True
-                send_telegram_message("🤖 <b>BOT DIAKTIFKAN</b>\nBot trading sekarang berjalan.")
-                print("✅ Bot started via Telegram command")
-            else:
-                send_telegram_message("⚠️ Bot sudah berjalan.")
-                
-        elif command == '/stop':
-            if BOT_RUNNING:
-                BOT_RUNNING = False
-                send_telegram_message("🛑 <b>BOT DIHENTIKAN</b>\nTrading dihentikan.")
-                print("🛑 Bot stopped via Telegram command")
-            else:
-                send_telegram_message("⚠️ Bot sudah dalam keadaan berhenti.")
-                
-        elif command == '/status':
-            send_bot_status(chat_id)
+            # Fallback: use recent low as support
+            relevant_support = lows.tail(20).min()
             
-        elif command == '/config':
-            send_current_config(chat_id)
-            
-        elif command.startswith('/set '):
-            handle_set_command(command, chat_id)
-            
-        elif command == '/help':
-            send_help_message(chat_id)
-            
-        elif command.startswith('/sell'):
-            handle_sell_command(command, chat_id)
-            
-        elif command.startswith('/coins '):
-            handle_coins_command(command, chat_id)
-            
-        elif command == '/info':
-            handle_info_command(chat_id)
-            
-        elif command.startswith('/modal'):
-            handle_modal_command(command, chat_id)
-
-        elif command.startswith('/mode'):
-            handle_mode_command(command, chat_id)
-
-            
-        mark_update_processed(update_id)
-        
-    except Exception as e:
-        send_telegram_message(f"❌ <b>ERROR PROCESSING COMMAND</b>\n{str(e)}")
-
-def handle_mode_command(command, chat_id):
-    """Handle /mode command untuk mengubah antara live trading dan simulasi"""
-    global ORDER_RUN, BOT_RUNNING, client
-    
-    if BOT_RUNNING:
-        send_telegram_message("❌ <b>BOT MASIH BERJALAN</b>\nHentikan bot terlebih dahulu dengan /stop sebelum mengubah mode trading.")
-        return
-    
-    try:
-        parts = command.split()
-        if len(parts) < 2:
-            current_mode = "LIVE TRADING" if ORDER_RUN else "SIMULASI"
-            send_telegram_message(f"📊 <b>MODE SAAT INI</b>\nMode: {current_mode}\n\nGunakan:\n/mode true - untuk Live Trading\n/mode false - untuk Simulasi")
-            return
-            
-        mode_value = parts[1].lower()
-        
-        if mode_value in ['true', '1', 'yes', 'y', 'live', 'real']:
-            new_mode = True
-            mode_name = "LIVE TRADING"
-            # Coba inisialisasi client untuk live trading
-            if not initialize_binance_client():
-                send_telegram_message("❌ <b>GAGAL BERALIH KE LIVE TRADING</b>\nKoneksi Binance gagal. Periksa API key dan koneksi internet.")
-                return
-        elif mode_value in ['false', '0', 'no', 'n', 'sim', 'simulation']:
-            new_mode = False
-            mode_name = "SIMULASI"
+        if valid_resistance:
+            relevant_resistance = min(valid_resistance)  # Lowest resistance above current price
         else:
-            send_telegram_message("❌ Format: /mode [true/false]\nContoh: /mode true\n/mode false")
-            return
+            # Fallback: use recent high as resistance
+            relevant_resistance = highs.tail(20).max()
         
-        old_mode = ORDER_RUN
-        ORDER_RUN = new_mode
-        
-        mode_msg = (
-            f"🔄 <b>MODE TRADING DIPERBARUI</b>\n"
-            f"Mode sebelumnya: {'LIVE TRADING' if old_mode else 'SIMULASI'}\n"
-            f"Mode baru: <b>{mode_name}</b>\n"
-        )
-        
-        if ORDER_RUN:
-            mode_msg += f"API Key: {CURRENT_API_INDEX + 1}\n"
-            mode_msg += "⚠️ <i>Bot akan melakukan trading REAL dengan uang sungguhan</i>"
-        else:
-            mode_msg += "✅ <i>Bot akan berjalan dalam mode simulasi (aman)</i>"
-        
-        send_telegram_message(mode_msg)
-        print(f"✅ Trading mode updated: {mode_name}")
-        
-    except Exception as e:
-        send_telegram_message(f"❌ Error mengubah mode trading: {str(e)}")
-
-def parse_float_value(input_str):
-    """Parse string menjadi float, handle berbagai format angka"""
-    try:
-        # Ganti koma dengan titik dan hapus spasi
-        cleaned = input_str.replace(',', '.').replace(' ', '')
-        
-        # Validasi bahwa string hanya berisi digit dan titik
-        if not cleaned.replace('.', '').isdigit():
+        return relevant_support, relevant_resistance, support_levels, resistance_levels
+    
+    @staticmethod
+    def calculate_fair_value_gap(df: pd.DataFrame) -> Optional[float]:
+        """Hitung Fair Value Gap untuk entry optimal"""
+        if len(df) < 3:
             return None
             
-        # Parse ke float
-        value = float(cleaned)
-        return value
-    except (ValueError, AttributeError):
+        current = df.iloc[-1]
+        prev1 = df.iloc[-2]
+        prev2 = df.iloc[-3]
+        
+        # Bullish FVG detection (price gap down)
+        if (prev1['high'] < prev2['low'] and 
+            current['low'] > prev1['high']):
+            return (prev1['high'] + current['low']) / 2
+        
         return None
+    
+    @staticmethod
+    def find_liquidity_zones(df: pd.DataFrame) -> Tuple[List[float], List[float]]:
+        """Temukan zona liquidity (equal highs/lows)"""
+        highs = df['high'].tail(50)
+        lows = df['low'].tail(50)
+        
+        # Find equal highs (liquidity above)
+        equal_highs = []
+        for i in range(len(highs)):
+            for j in range(i+1, len(highs)):
+                if abs(highs.iloc[i] - highs.iloc[j]) / highs.iloc[i] < 0.002:  # 0.2% tolerance
+                    equal_highs.append((highs.iloc[i] + highs.iloc[j]) / 2)
+        
+        # Find equal lows (liquidity below)
+        equal_lows = []
+        for i in range(len(lows)):
+            for j in range(i+1, len(lows)):
+                if abs(lows.iloc[i] - lows.iloc[j]) / lows.iloc[i] < 0.002:  # 0.2% tolerance
+                    equal_lows.append((lows.iloc[i] + lows.iloc[j]) / 2)
+        
+        return equal_lows, equal_highs
 
-def handle_modal_command(command, chat_id):
-    """Handle /modal command untuk mengubah modal"""
-    global current_investment, BOT_RUNNING
-    
-    if BOT_RUNNING:
-        send_telegram_message("❌ <b>BOT MASIH BERJALAN</b>\nHentikan bot terlebih dahulu dengan /stop sebelum mengubah modal.")
-        return
-    
-    try:
-        parts = command.split()
-        if len(parts) < 2:
-            send_telegram_message(f"❌ Format: /modal [jumlah_usdt]\nContoh: /modal 10.5\nModal saat ini: ${current_investment:.2f}")
-            return
-            
-        # Parse nilai modal
-        new_investment = parse_float_value(parts[1])
+    @staticmethod
+    def calculate_price_targets(df: pd.DataFrame, entry: float, support: float, resistance: float, atr: float) -> Tuple[float, float, float]:
+        """Hitung target harga berdasarkan struktur market dan volatilitas"""
+        current_price = df['close'].iloc[-1]
+        recent_high = df['high'].tail(20).max()
+        recent_low = df['low'].tail(20).min()
         
-        if new_investment is None:
-            send_telegram_message("❌ Format angka tidak valid. Gunakan angka dengan titik atau koma.\nContoh: /modal 5.4 atau /modal 5,4")
-            return
+        # Method 1: Berdasarkan resistance levels
+        resistance_target = resistance
         
-        if new_investment <= 0:
-            send_telegram_message("❌ Modal harus lebih besar dari 0")
-            return
+        # Method 2: Berdasarkan ATR (volatilitas)
+        atr_target_1 = entry + (atr * 1.5)
+        atr_target_2 = entry + (atr * 2.5)
         
-        old_investment = current_investment
-        current_investment = new_investment
+        # Method 3: Berdasarkan recent swing high
+        swing_high_target = recent_high
         
-        send_telegram_message(f"✅ <b>MODAL DIPERBARUI</b>\nModal sebelumnya: ${old_investment:.2f}\nModal baru: <b>${current_investment:.2f}</b>")
-        print(f"✅ Investment updated: ${old_investment:.2f} -> ${current_investment:.2f}")
+        # Method 4: Fibonacci extension (simplified)
+        fib_target = entry + ((resistance - support) * 0.618)
         
-    except Exception as e:
-        send_telegram_message(f"❌ Error mengubah modal: {str(e)}")
+        # Kombinasi semua method untuk mendapatkan target yang realistis
+        tp1 = min(resistance_target, atr_target_1, swing_high_target, fib_target)
+        tp2 = max(resistance_target, atr_target_2, swing_high_target, fib_target)
+        
+        # Pastikan TP reasonable
+        min_profit = entry * 1.01  # Minimal 1% profit
+        max_profit = entry * 1.10  # Maksimal 10% profit untuk TP1
+        
+        tp1 = max(min(tp1, max_profit), min_profit)
+        tp2 = max(tp2, tp1 * 1.02)  # TP2 minimal 2% di atas TP1
+        
+        return tp1, tp2
 
-def handle_sell_command(command, chat_id):
-    """Handle /sell command untuk menjual posisi aktif atau mengubah TP/SL"""
-    global active_position, BOT_RUNNING
+class TechnicalAnalyzer:
+    """Class untuk menghitung indikator teknikal"""
     
-    if not active_position:
-        send_telegram_message("❌ <b>TIDAK ADA POSISI AKTIF</b>\nTidak ada posisi yang bisa dijual atau diubah.")
-        return
+    def __init__(self):
+        self.smart_money = SmartMoneyAnalyzer()
     
-    if not BOT_RUNNING:
-        send_telegram_message("❌ <b>BOT SEDANG BERHENTI</b>\nAktifkan bot terlebih dahulu dengan /start.")
-        return
+    @staticmethod
+    def calculate_ema(data: pd.DataFrame, period: int) -> pd.Series:
+        return ta.trend.EMAIndicator(data['close'], window=period).ema_indicator()
     
-    symbol = active_position['symbol']
-    quantity = active_position['quantity']
-    entry_price = active_position['entry_price']
-    current_price = get_current_price(symbol)
+    @staticmethod
+    def calculate_rsi(data: pd.DataFrame, period: int) -> pd.Series:
+        return ta.momentum.RSIIndicator(data['close'], window=period).rsi()
     
-    # Parse command
-    parts = command.split()
+    @staticmethod
+    def calculate_macd(data: pd.DataFrame) -> Tuple[pd.Series, pd.Series, pd.Series]:
+        macd = ta.trend.MACD(data['close'])
+        return macd.macd(), macd.macd_signal(), macd.macd_diff()
     
-    if len(parts) == 1:
-        # Hanya /sell - execute manual sell
-        send_telegram_message(f"🔄 <b>MENJALANKAN SELL MANUAL</b>\nSymbol: {symbol}\nQuantity: {quantity:.6f}")
-        
-        success = execute_market_sell(symbol, quantity, entry_price, "MANUAL SELL")
-        
-        if success:
-            send_telegram_message(f"✅ <b>SELL MANUAL BERHASIL</b>\n{symbol} telah dijual.")
-        else:
-            send_telegram_message(f"❌ <b>SELL MANUAL GAGAL</b>\nGagal menjual {symbol}.")
+    @staticmethod
+    def calculate_atr(data: pd.DataFrame, period: int) -> pd.Series:
+        return ta.volatility.AverageTrueRange(
+            data['high'], data['low'], data['close'], window=period
+        ).average_true_range()
     
-    elif len(parts) >= 3:
-        # /sell dengan parameter (tp/sl dan harga)
-        action = parts[1].lower()
-        
-        # Parse harga
-        price_value = parse_float_value(parts[2])
-        
-        if price_value is None:
-            send_telegram_message("❌ Format harga tidak valid. Gunakan angka dengan titik atau koma.\nContoh: /sell sl 0.0539 atau /sell sl 0,0539")
-            return
-            
-        if action == 'tp':
-            if price_value <= entry_price:
-                send_telegram_message(f"❌ <b>TAKE PROFIT HARUS DI ATAS HARGA BELI</b>\nHarga beli: ${entry_price:.6f}\nTP yang diminta: ${price_value:.6f}")
-                return
-            
-            old_tp = active_position['take_profit']
-            active_position['take_profit'] = price_value
-            send_telegram_message(f"✅ <b>TAKE PROFIT DIPERBARUI</b>\n{symbol}\nTP sebelumnya: ${old_tp:.6f}\nTP baru: <b>${price_value:.6f}</b>")
-            print(f"✅ TP updated for {symbol}: {price_value}")
-            
-        elif action == 'sl':
-            if price_value >= entry_price:
-                send_telegram_message(f"❌ <b>STOP LOSS HARUS DI BAWAH HARGA BELI</b>\nHarga beli: ${entry_price:.6f}\nSL yang diminta: ${price_value:.6f}")
-                return
-            
-            old_sl = active_position['stop_loss']
-            active_position['stop_loss'] = price_value
-            send_telegram_message(f"✅ <b>STOP LOSS DIPERBARUI</b>\n{symbol}\nSL sebelumnya: ${old_sl:.6f}\nSL baru: <b>${price_value:.6f}</b>")
-            print(f"✅ SL updated for {symbol}: {price_value}")
-            
-        else:
-            send_telegram_message("❌ Format: /sell [tp/sl] [harga]\nContoh: /sell tp 2.987\n/sell sl 2.500")
-    else:
-        send_telegram_message("❌ Format: /sell [tp/sl] [harga]\nContoh: /sell tp 2.987\n/sell sl 2.500\n/sell (untuk jual manual)")
+    @staticmethod
+    def calculate_volume_sma(data: pd.DataFrame, period: int) -> pd.Series:
+        return data['volume'].rolling(window=period).mean()
+    
+    @staticmethod
+    def calculate_obv(data: pd.DataFrame) -> pd.Series:
+        return ta.volume.OnBalanceVolumeIndicator(data['close'], data['volume']).on_balance_volume()
 
-def handle_coins_command(command, chat_id):
-    """Handle /coins command untuk menambah/hapus coin"""
-    global BOT_RUNNING, COINS
+class SignalAnalyzer:
+    """Class untuk menganalisis sinyal trading dengan Smart Money Concept"""
     
-    if BOT_RUNNING:
-        send_telegram_message("❌ <b>BOT MASIH BERJALAN</b>\nHentikan bot terlebih dahulu dengan /stop sebelum mengubah daftar coin.")
-        return
+    def __init__(self):
+        self.tech_analyzer = TechnicalAnalyzer()
     
-    try:
-        parts = command.split()
-        if len(parts) < 3:
-            send_telegram_message("❌ Format: /coins [add/del] [coin_name]\nContoh: /coins add BTCUSDT")
-            return
-            
-        action = parts[1].lower()
-        coin_name = parts[2].upper()
-        
-        if not coin_name.endswith('USDT'):
-            coin_name += 'USDT'
-        
-        if action == 'add':
-            if coin_name in COINS:
-                send_telegram_message(f"⚠️ <b>COIN SUDAH ADA</b>\n{coin_name} sudah ada dalam daftar.")
-            else:
-                COINS.append(coin_name)
-                send_telegram_message(f"✅ <b>COIN DITAMBAHKAN</b>\n{coin_name} telah ditambahkan ke daftar.\nTotal coin: {len(COINS)}")
-                print(f"✅ Coin added: {coin_name}")
+    async def analyze_pair(self, client: AsyncClient, pair: str) -> Optional[Dict]:
+        """Analisis satu pair untuk sinyal BUY dengan Smart Money Concept"""
+        try:
+            # Skip excluded pairs
+            excluded_pairs = ['FDUSDT', 'USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'USDPUSDT', 'USTUSDT']
+            if pair in excluded_pairs:
+                return None
                 
-        elif action == 'del' or action == 'remove':
-            if coin_name in COINS:
-                COINS.remove(coin_name)
-                send_telegram_message(f"✅ <b>COIN DIHAPUS</b>\n{coin_name} telah dihapus dari daftar.\nTotal coin: {len(COINS)}")
-                print(f"✅ Coin removed: {coin_name}")
-            else:
-                send_telegram_message(f"❌ <b>COIN TIDAK DITEMUKAN</b>\n{coin_name} tidak ada dalam daftar.")
+            # Ambil data multi-timeframe
+            timeframes = ['1d', '4h', '1h']
+            all_data = {}
+            
+            for tf in timeframes:
+                klines = await client.get_klines(
+                    symbol=pair,
+                    interval=tf,
+                    limit=300
+                )
                 
-        else:
-            send_telegram_message("❌ Format: /coins [add/del] [coin_name]\nContoh: /coins add BTCUSDT")
-            
-    except Exception as e:
-        send_telegram_message(f"❌ Error mengubah daftar coin: {str(e)}")
-
-def handle_info_command(chat_id):
-    """Handle /info command untuk menampilkan daftar coin"""
-    global COINS
-    
-    coins_count = len(COINS)
-    
-    # Format daftar coin untuk tampilan yang rapi
-    if coins_count <= 20:
-        coins_list = "\n".join([f"• {coin}" for coin in sorted(COINS)])
-    else:
-        # Tampilkan sebagian saja jika terlalu banyak
-        coins_list = "\n".join([f"• {coin}" for coin in sorted(COINS)[:20]]) + f"\n• ... dan {coins_count - 20} coin lainnya"
-    
-    info_msg = (
-        f"📊 <b>INFORMASI COIN</b>\n"
-        f"Total Coin: {coins_count}\n"
-        f"────────────────────\n"
-        f"{coins_list}"
-    )
-    
-    send_telegram_message(info_msg)
-
-def handle_set_command(command, chat_id):
-    """Handle /set command untuk mengubah konfigurasi"""
-    global BOT_RUNNING
-    
-    # Cek apakah bot sedang berjalan
-    if BOT_RUNNING:
-        send_telegram_message("❌ <b>BOT MASIH BERJALAN</b>\nHentikan bot terlebih dahulu dengan /stop sebelum mengubah konfigurasi.")
-        return
-    
-    try:
-        parts = command.split()
-        if len(parts) < 3:
-            send_telegram_message("❌ Format: /set [parameter] [value]\nContoh: /set TAKE_PROFIT_PCT 0.008")
-            return
-            
-        param_name = parts[1]
-        param_value = ' '.join(parts[2:])
-        
-        config = load_config()
-        updated = False
-        
-        # Daftar parameter yang valid
-        valid_params = {
-            # Trading parameters
-            'TAKE_PROFIT_PCT': ('trading_params', float),
-            'STOP_LOSS_PCT': ('trading_params', float),
-            'TRAILING_STOP_ACTIVATION': ('trading_params', float),
-            'TRAILING_STOP_PCT': ('trading_params', float),
-            'POSITION_SIZING_PCT': ('trading_params', float),
-            'MAX_DRAWDOWN_PCT': ('trading_params', float),
-            'ADAPTIVE_CONFIDENCE': ('trading_params', bool),
-            
-            # 15M timeframe parameters
-            'RSI_MIN_15M': ('timeframe_params', int),
-            'RSI_MAX_15M': ('timeframe_params', int),
-            'EMA_SHORT_15M': ('timeframe_params', int),
-            'EMA_LONG_15M': ('timeframe_params', int),
-            'MACD_FAST_15M': ('timeframe_params', int),
-            'MACD_SLOW_15M': ('timeframe_params', int),
-            'MACD_SIGNAL_15M': ('timeframe_params', int),
-            'LRO_PERIOD_15M': ('timeframe_params', int),
-            'VOLUME_PERIOD_15M': ('timeframe_params', int),
-            
-            # 5M timeframe parameters
-            'RSI_MIN_5M': ('timeframe_params', int),
-            'RSI_MAX_5M': ('timeframe_params', int),
-            'EMA_SHORT_5M': ('timeframe_params', int),
-            'EMA_LONG_5M': ('timeframe_params', int),
-            'MACD_FAST_5M': ('timeframe_params', int),
-            'MACD_SLOW_5M': ('timeframe_params', int),
-            'MACD_SIGNAL_5M': ('timeframe_params', int),
-            'LRO_PERIOD_5M': ('timeframe_params', int),
-            'VOLUME_PERIOD_5M': ('timeframe_params', int),
-            'VOLUME_RATIO_MIN': ('timeframe_params', float)
-        }
-        
-        if param_name in valid_params:
-            section, value_type = valid_params[param_name]
-            old_value = config[section][param_name]
-            
-            try:
-                # Convert value ke tipe yang sesuai
-                if value_type == bool:
-                    if param_value.lower() in ('true', '1', 'yes', 'y', 'ya'):
-                        new_value = True
-                    elif param_value.lower() in ('false', '0', 'no', 'n', 'tidak'):
-                        new_value = False
-                    else:
-                        send_telegram_message(f"❌ Nilai boolean tidak valid: {param_value}\nGunakan: true/false, yes/no, 1/0")
-                        return
-                else:
-                    # Parse angka dengan fungsi yang sama
-                    if value_type == float:
-                        parsed_value = parse_float_value(param_value)
-                        if parsed_value is None:
-                            send_telegram_message(f"❌ Format angka tidak valid untuk {param_name}\nGunakan titik atau koma sebagai desimal")
-                            return
-                        new_value = parsed_value
-                    else:
-                        new_value = value_type(param_value)
-                
-                # Validasi nilai
-                if param_name.endswith('_PCT') and new_value <= 0:
-                    send_telegram_message(f"❌ Nilai {param_name} harus lebih besar dari 0")
-                    return
-                elif param_name.startswith('RSI_') and (new_value < 0 or new_value > 100):
-                    send_telegram_message(f"❌ Nilai {param_name} harus antara 0-100")
-                    return
-                elif param_name.startswith(('EMA_', 'MACD_', 'LRO_', 'VOLUME_')) and new_value <= 0:
-                    send_telegram_message(f"❌ Nilai {param_name} harus lebih besar dari 0")
-                    return
-                
-                config[section][param_name] = new_value
-                updated = True
-                
-            except ValueError:
-                send_telegram_message(f"❌ Format nilai tidak valid untuk {param_name}\nTipe yang diharapkan: {value_type.__name__}")
-                return
-        
-        if updated:
-            if save_config(config):
-                update_global_variables_from_config()
-                send_telegram_message(f"✅ <b>KONFIGURASI DIPERBARUI</b>\n{param_name}: {old_value} → {new_value}")
-                print(f"✅ Configuration updated: {param_name} = {new_value}")
-            else:
-                send_telegram_message("❌ Gagal menyimpan konfigurasi.")
-        else:
-            send_telegram_message(f"❌ Parameter '{param_name}' tidak ditemukan.\nGunakan /config untuk melihat parameter yang tersedia.")
-            
-    except Exception as e:
-        send_telegram_message(f"❌ Error mengubah konfigurasi: {str(e)}")
-
-def send_bot_status(chat_id):
-    """Send current bot status"""
-    global BOT_RUNNING, active_position, current_investment, trade_history, ORDER_RUN
-    
-    status_msg = (
-        f"🤖 <b>BOT STATUS</b>\n"
-        f"Status: {'🟢 BERJALAN' if BOT_RUNNING else '🔴 BERHENTI'}\n"
-        f"Mode: {'🟢 LIVE TRADING' if ORDER_RUN else '🟡 SIMULASI'}\n"
-        f"Modal: ${current_investment:.2f}\n"
-        f"Total Trade: {len(trade_history)}\n"
-        f"Win Rate: {calculate_winrate():.1f}%\n"
-        f"API Key: {CURRENT_API_INDEX + 1}\n"
-    )
-    
-    if active_position:
-        current_price = get_current_price(active_position['symbol'])
-        if current_price:
-            pnl_pct = (current_price - active_position['entry_price']) / active_position['entry_price'] * 100
-            status_msg += f"Posisi Aktif: {active_position['symbol']}\n"
-            status_msg += f"Entry: ${active_position['entry_price']:.6f}\n"
-            status_msg += f"Current: ${current_price:.6f}\n"
-            status_msg += f"TP: ${active_position['take_profit']:.6f}\n"
-            status_msg += f"SL: ${active_position['stop_loss']:.6f}\n"
-            status_msg += f"PnL: {pnl_pct:+.2f}%\n"
-            status_msg += f"Gunakan /sell untuk close manual\n"
-            status_msg += f"Gunakan /sell tp [harga] untuk ubah TP\n"
-            status_msg += f"Gunakan /sell sl [harga] untuk ubah SL\n"
-    else:
-        status_msg += "Posisi Aktif: Tidak ada\n"
-    
-    send_telegram_message(status_msg)
-
-def send_current_config(chat_id):
-    """Send current configuration"""
-    config = load_config()
-    trading_params = config['trading_params']
-    timeframe_params = config['timeframe_params']
-    
-    config_msg = (
-        f"⚙️ <b>KONFIGURASI SAAT INI</b>\n"
-        f"┌────────────────────────────┐\n"
-        f"│ <b>TRADING PARAMS</b>\n"
-        f"│ TP: {trading_params['TAKE_PROFIT_PCT']*100:.2f}%\n"
-        f"│ SL: {trading_params['STOP_LOSS_PCT']*100:.2f}%\n"
-        f"│ Position: {trading_params['POSITION_SIZING_PCT']*100:.1f}%\n"
-        f"│ Trailing Act: {trading_params['TRAILING_STOP_ACTIVATION']*100:.2f}%\n"
-        f"│ Trailing SL: {trading_params['TRAILING_STOP_PCT']*100:.2f}%\n"
-        f"│ Adaptive: {trading_params['ADAPTIVE_CONFIDENCE']}\n"
-        f"├────────────────────────────┤\n"
-        f"│ <b>M15 PARAMS</b>\n"
-        f"│ RSI: {timeframe_params['RSI_MIN_15M']}-{timeframe_params['RSI_MAX_15M']}\n"
-        f"│ EMA: {timeframe_params['EMA_SHORT_15M']}/{timeframe_params['EMA_LONG_15M']}\n"
-        f"│ MACD: {timeframe_params['MACD_FAST_15M']}/{timeframe_params['MACD_SLOW_15M']}/{timeframe_params['MACD_SIGNAL_15M']}\n"
-        f"│ LRO: {timeframe_params['LRO_PERIOD_15M']}\n"
-        f"│ Volume: {timeframe_params['VOLUME_PERIOD_15M']}\n"
-        f"├────────────────────────────┤\n"
-        f"│ <b>M5 PARAMS</b>\n"
-        f"│ RSI: {timeframe_params['RSI_MIN_5M']}-{timeframe_params['RSI_MAX_5M']}\n"
-        f"│ EMA: {timeframe_params['EMA_SHORT_5M']}/{timeframe_params['EMA_LONG_5M']}\n"
-        f"│ MACD: {timeframe_params['MACD_FAST_5M']}/{timeframe_params['MACD_SLOW_5M']}/{timeframe_params['MACD_SIGNAL_5M']}\n"
-        f"│ LRO: {timeframe_params['LRO_PERIOD_5M']}\n"
-        f"│ Volume: {timeframe_params['VOLUME_PERIOD_5M']}\n"
-        f"│ Volume Ratio: {timeframe_params['VOLUME_RATIO_MIN']}\n"
-        f"└────────────────────────────┘\n"
-        f"Gunakan /set [parameter] [value] untuk mengubah konfigurasi"
-    )
-    
-    send_telegram_message(config_msg)
-
-def send_help_message(chat_id):
-    """Send help message"""
-    help_msg = (
-        f"📖 <b>BOT TRADING COMMANDS</b>\n"
-        f"┌────────────────────────────┐\n"
-        f"│ /start - Mulai bot trading\n"
-        f"│ /stop - Hentikan bot\n"
-        f"│ /status - Status bot saat ini\n"
-        f"│ /config - Tampilkan konfigurasi\n"
-        f"│ /help - Tampilkan pesan bantuan\n"
-        f"│ /mode - Ubah mode trading (live/simulasi)\n"
-        f"│ /modal - Ubah modal (saat bot berhenti)\n"
-        f"│ /info - Tampilkan daftar coin\n"
-        f"├────────────────────────────┤\n"
-        f"│ <b>SELL COMMANDS</b>\n"
-        f"│ /sell - Jual posisi aktif (manual)\n"
-        f"│ /sell tp [harga] - Ubah Take Profit\n"
-        f"│ /sell sl [harga] - Ubah Stop Loss\n"
-        f"│ Contoh:\n"
-        f"│ /sell tp 2.987\n"
-        f"│ /sell sl 2.500\n"
-        f"├────────────────────────────┤\n"
-        f"│ <b>UBAH KONFIGURASI</b>\n"
-        f"│ /set [param] [value]\n"
-        f"│ Contoh:\n"
-        f"│ /set TAKE_PROFIT_PCT 0.008\n"
-        f"│ /set RSI_MIN_15M 30\n"
-        f"│ /set POSITION_SIZING_PCT 0.3\n"
-        f"│ /set ADAPTIVE_CONFIDENCE false\n"
-        f"├────────────────────────────┤\n"
-        f"│ <b>KELOLA COIN</b>\n"
-        f"│ /coins [add/del] [coin_name]\n"
-        f"│ Contoh:\n"
-        f"│ /coins add BTCUSDT\n"
-        f"│ /coins del ETHUSDT\n"
-        f"└────────────────────────────┘\n"
-        f"<i>Hanya bisa diubah saat bot berhenti</i>"
-    )
-    
-    send_telegram_message(help_msg)
-
-def mark_update_processed(update_id):
-    """Mark Telegram update as processed"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-        params = {'offset': update_id + 1}
-        requests.get(url, params=params, timeout=3)
-    except:
-        pass
-
-def send_telegram_message(message):
-    """Send notification ke Telegram"""
-    if not SEND_TELEGRAM_NOTIFICATIONS:
-        return False
-        
-    try:
-        if len(message) > 4000:
-            message = message[:4000] + "\n... (message truncated)"
-            
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            'chat_id': ADMIN_CHAT_ID,
-            'text': message,
-            'parse_mode': 'HTML',
-            'disable_web_page_preview': True
-        }
-        response = requests.post(url, data=payload, timeout=5)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"❌ Telegram error: {e}")
-        return False
-
-def write_log(entry):
-    """Write trading log ke file"""
-    try:
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        log_entry = f"[{timestamp}] {entry}"
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(log_entry + '\n')
-        print(log_entry)
-    except Exception as e:
-        print(f"❌ Error writing to log file: {e}")
-
-def initialize_logging():
-    """Initialize log file"""
-    try:
-        if not os.path.exists(LOG_FILE):
-            with open(LOG_FILE, 'w', encoding='utf-8') as f:
-                f.write("🚀 ADVANCED TRADING BOT\n")
-                f.write(f"Bot Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"Initial Capital: ${INITIAL_INVESTMENT}\n")
-            print(f"✅ Log file initialized: {LOG_FILE}")
-    except Exception as e:
-        print(f"❌ Error initializing log file: {e}")
-
-def log_position_closed(symbol, entry_price, exit_price, quantity, exit_type):
-    """Log ketika position closed"""
-    global current_investment, trade_history
-    
-    try:
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        pnl = (exit_price - entry_price) * quantity
-        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
-        
-        current_investment += pnl
-        
-        trade_record = {
-            'timestamp': timestamp,
-            'symbol': symbol,
-            'entry_price': entry_price,
-            'exit_price': exit_price,
-            'quantity': quantity,
-            'pnl': pnl,
-            'pnl_pct': pnl_pct,
-            'exit_type': exit_type,
-            'capital_after': current_investment
-        }
-        trade_history.append(trade_record)
-        
-        recent_trades.append(pnl_pct)
-        update_dynamic_threshold()
-        trade_performance_feedback_loop()
-        save_trade_history()
-        
-        winrate = calculate_winrate()
-        total_trades = len(trade_history)
-        
-        log_entry = (f"📉 POSITION CLOSED | {symbol} | Exit: {exit_type} | "
-                    f"Entry: ${entry_price:.6f} | Exit: ${exit_price:.6f} | "
-                    f"PnL: ${pnl:.4f} ({pnl_pct:+.2f}%) | New Capital: ${current_investment:.2f}")
-        
-        write_log(log_entry)
-        
-        telegram_msg = (f"📉 <b>POSITION CLOSED - {exit_type}</b>\n"
-                      f"Symbol: {symbol}\n"
-                      f"Entry: ${entry_price:.6f} | Exit: ${exit_price:.6f}\n"
-                      f"PnL: <b>{pnl_pct:+.2f}%</b> | Amount: ${pnl:.4f}\n"
-                      f"New Capital: <b>${current_investment:.2f}</b>\n"
-                      f"Win Rate: {winrate:.1f}% ({total_trades} trades)")
-        
-        send_telegram_message(telegram_msg)
-        
-    except Exception as e:
-        print(f"❌ Error logging position close: {e}")
-
-def log_position_opened(symbol, entry_price, quantity, take_profit, stop_loss, confidence):
-    """Log ketika position opened"""
-    try:
-        log_entry = (f"📈 POSITION OPENED | {symbol} | "
-                    f"Entry: ${entry_price:.6f} | Qty: {quantity:.6f} | "
-                    f"TP: ${take_profit:.6f} | SL: ${stop_loss:.6f} | "
-                    f"Confidence: {confidence:.1f}%")
-        
-        write_log(log_entry)
-        
-        telegram_msg = (f"📈 <b>POSITION OPENED</b>\n"
-                      f"Symbol: {symbol}\n"
-                      f"Entry: ${entry_price:.6f}\n"
-                      f"Quantity: {quantity:.6f}\n"
-                      f"Take Profit: ${take_profit:.6f}\n"
-                      f"Stop Loss: ${stop_loss:.6f}\n"
-                      f"Confidence: {confidence:.1f}%\n"
-                      f"Gunakan /sell tp [harga] untuk ubah TP\n"
-                      f"Gunakan /sell sl [harga] untuk ubah SL")
-        
-        send_telegram_message(telegram_msg)
-        
-    except Exception as e:
-        print(f"❌ Error logging position open: {e}")
-
-# ==================== MANAJEMEN DATA ====================
-def load_trade_history():
-    """Load trade history dari file"""
-    global trade_history
-    try:
-        if os.path.exists(TRADE_HISTORY_FILE):
-            with open(TRADE_HISTORY_FILE, 'r') as f:
-                trade_history = json.load(f)
-            print(f"✅ Loaded {len(trade_history)} previous trades")
-    except Exception as e:
-        print(f"❌ Error loading trade history: {e}")
-        trade_history = []
-
-def save_trade_history():
-    """Save trade history ke file"""
-    try:
-        with open(TRADE_HISTORY_FILE, 'w') as f:
-            json.dump(trade_history, f, indent=2)
-    except Exception as e:
-        print(f"❌ Error saving trade history: {e}")
-
-def calculate_winrate():
-    """Calculate winrate dari trade history"""
-    if not trade_history:
-        return 0.0
-    
-    wins = sum(1 for trade in trade_history if trade.get('pnl_pct', 0) > 0)
-    return (wins / len(trade_history)) * 100
-
-def load_bot_state():
-    """Load bot state"""
-    global coin_performance, dynamic_threshold, recent_trades, failed_coins, performance_state
-    
-    try:
-        if os.path.exists(BOT_STATE_FILE):
-            with open(BOT_STATE_FILE, 'r') as f:
-                state = json.load(f)
-                
-            coin_performance = state.get('coin_performance', {})
-            dynamic_threshold = max(30, state.get('dynamic_threshold', 30))
-            recent_trades = deque(state.get('recent_trades', []), maxlen=10)
-            performance_state = state.get('performance_state', performance_state)
-            
-            current_time = time.time()
-            failed_coins = {
-                coin: timestamp for coin, timestamp in state.get('failed_coins', {}).items()
-                if current_time - timestamp < 86400
-            }
-            
-            print(f"✅ Loaded bot state: threshold: {dynamic_threshold}")
-    except Exception as e:
-        print(f"❌ Error loading bot state: {e}")
-
-def save_bot_state():
-    """Save bot state"""
-    try:
-        state = {
-            'coin_performance': coin_performance,
-            'dynamic_threshold': dynamic_threshold,
-            'recent_trades': list(recent_trades),
-            'failed_coins': failed_coins,
-            'performance_state': performance_state,
-            'last_update': time.time()
-        }
-        
-        with open(BOT_STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=2)
-    except Exception as e:
-        print(f"❌ Error saving bot state: {e}")
-
-def update_dynamic_threshold():
-    """Update confidence threshold berdasarkan recent performance"""
-    global dynamic_threshold
-    
-    if len(recent_trades) < 5:
-        return
-    
-    wins = sum(1 for trade in recent_trades if trade > 0)
-    winrate = wins / len(recent_trades)
-    
-    if winrate < 0.5:
-        dynamic_threshold = min(40, dynamic_threshold + 2)
-        print(f"📊 Winrate rendah ({winrate:.1%}), naikkan threshold ke {dynamic_threshold}")
-    elif winrate > 0.7:
-        dynamic_threshold = max(30, dynamic_threshold - 1)
-        print(f"📊 Winrate tinggi ({winrate:.1%}), turunkan threshold ke {dynamic_threshold}")
-
-# ==================== BINANCE UTILITIES ====================
-def trade_performance_feedback_loop():
-    """Adaptive feedback loop"""
-    global recent_trades, performance_state, dynamic_threshold, POSITION_SIZING_PCT
-
-    try:
-        now = time.time()
-        
-        if len(recent_trades) < 2:
-            return
-
-        recent = list(recent_trades)
-        wins = sum(1 for v in recent if v > 0)
-        losses = sum(1 for v in recent if v <= 0)
-        rolling_winrate = wins / len(recent) if recent else 0
-        avg_pnl = sum(recent) / len(recent) if recent else 0
-
-        ema_prev = performance_state.get('ema_pnl', 0.0)
-        ema_new = EMA_ALPHA * avg_pnl + (1 - EMA_ALPHA) * ema_prev
-        performance_state['ema_pnl'] = ema_new
-
-        if trade_history:
-            loss_streak = 0
-            win_streak = 0
-            
-            for trade in reversed(trade_history[-5:]):
-                pnl_pct = trade.get('pnl_pct', 0)
-                if pnl_pct <= 0:
-                    if win_streak == 0:
-                        loss_streak += 1
-                    else:
-                        break
-                else:
-                    if loss_streak == 0:
-                        win_streak += 1
-                    else:
-                        break
-            
-            performance_state['loss_streak'] = loss_streak
-            performance_state['win_streak'] = win_streak
-            performance_state['total_trades'] = len(trade_history)
-            performance_state['total_wins'] = wins
-
-        print(f"[FEEDBACK] Winrate: {rolling_winrate:.1%}, Avg PnL: {avg_pnl:.3f}%, Loss Streak: {performance_state['loss_streak']}")
-
-        # Adaptasi saat loss streak
-        if (performance_state['loss_streak'] >= LOSS_STREAK_LIMIT and 
-            now - performance_state.get('last_adaptation_time', 0) > 120 and
-            not performance_state.get('adaptation_triggered', False)):
-            
-            old_threshold = dynamic_threshold
-            old_position_size = POSITION_SIZING_PCT
-        
-            dynamic_threshold = dynamic_threshold + LOSS_STREAK_THRESHOLD_INCREASE
-            new_pos_size = max(MIN_POSITION_SIZING, POSITION_SIZING_PCT * LOSS_STREAK_POSITION_SIZER_MULT)
-            max_allowed_reduction = POSITION_SIZING_PCT * (1 - MAX_ADAPTATION_PERCENT)
-            POSITION_SIZING_PCT = max(new_pos_size, max_allowed_reduction)
-        
-            performance_state['paused_until'] = now + LOSS_STREAK_COOLDOWN
-            performance_state['last_adaptation_time'] = now
-            performance_state['adaptation_triggered'] = True   # ✅ Tambahkan flag agar hanya sekali per streak
-        
-            adaptation_msg = (
-                f"⚠️ <b>ADAPTATION TRIGGERED - LOSS STREAK</b>\n"
-                f"Loss Streak: {performance_state['loss_streak']}\n"
-                f"Threshold: {old_threshold} → {dynamic_threshold}\n"
-                f"Position Size: {old_position_size:.1%} → {POSITION_SIZING_PCT:.1%}"
-            )
-            send_telegram_message(adaptation_msg)
-        
-        # Reset flag jika sudah tidak loss streak lagi
-        if performance_state['loss_streak'] == 0:
-            performance_state['adaptation_triggered'] = False
-
-
-        if (performance_state['win_streak'] >= WIN_STREAK_LIMIT and 
-            now - performance_state.get('last_adaptation_time', 0) > 120) and not performance_state.get('reward_triggered', False):
-            
-            old_threshold = dynamic_threshold
-            old_position_size = POSITION_SIZING_PCT
-            
-            dynamic_threshold = max(30, dynamic_threshold - WIN_STREAK_THRESHOLD_DECREASE)
-            new_pos_size = min(0.6, POSITION_SIZING_PCT * 1.15)
-            max_allowed_increase = POSITION_SIZING_PCT * (1 + MAX_ADAPTATION_PERCENT)
-            POSITION_SIZING_PCT = min(new_pos_size, max_allowed_increase)
-            
-            performance_state['last_adaptation_time'] = now
-            performance_state['reward_triggered'] = True
-
-            reward_msg = (
-                f"✅ <b>PERFORMANCE REWARD - WIN STREAK</b>\n"
-                f"Win Streak: {performance_state['win_streak']}\n"
-                f"Threshold: {old_threshold} → {dynamic_threshold}\n"
-                f"Position Size: {old_position_size:.1%} → {POSITION_SIZING_PCT:.1%}"
-            )
-            send_telegram_message(reward_msg)
-
-        if (len(recent_trades) >= 5 and rolling_winrate < 0.2 and 
-            now - performance_state.get('last_adaptation_time', 0) > 300):
-            
-            performance_state['paused_until'] = now + 1800
-            emergency_msg = (
-                f"🛑 <b>EMERGENCY STOP - POOR PERFORMANCE</b>\n"
-                f"Win Rate: {rolling_winrate:.1%}\n"
-                f"Bot paused for 30 minutes"
-            )
-            send_telegram_message(emergency_msg)
-
-        save_bot_state()
-
-    except Exception as e:
-        print(f"❌ Feedback loop error: {e}")
-
-def is_trading_paused():
-    """Cek jika trading sedang dipause"""
-    global performance_state
-    
-    now = time.time()
-    paused_until = performance_state.get('paused_until', 0)
-    
-    if now < paused_until:
-        remaining = paused_until - now
-        if remaining > 60:
-            print(f"🔒 Trading paused. Resuming in {int(remaining/60)} minutes")
-        return True
-    
-    return False
-
-def get_symbol_info(symbol):
-    """Get symbol information"""
-    try:
-        rate_limit()
-        info = client.get_symbol_info(symbol)
-        return info
-    except Exception as e:
-        print(f"❌ Error getting symbol info: {e}")
-        return None
-
-def get_price_precision(symbol):
-    """Get price precision untuk symbol"""
-    try:
-        info = get_symbol_info(symbol)
-        if info:
-            for f in info['filters']:
-                if f['filterType'] == 'PRICE_FILTER':
-                    tick_size = float(f['tickSize'])
-                    precision = 0
-                    while tick_size < 1:
-                        tick_size *= 10
-                        precision += 1
-                    return precision
-        return 6
-    except Exception as e:
-        return 6
-
-def get_quantity_precision(symbol):
-    """Get quantity precision untuk symbol"""
-    try:
-        info = get_symbol_info(symbol)
-        if info:
-            for f in info['filters']:
-                if f['filterType'] == 'LOT_SIZE':
-                    step_size = float(f['stepSize'])
-                    precision = 0
-                    while step_size < 1:
-                        step_size *= 10
-                        precision += 1
-                    return precision
-        return 2
-    except Exception as e:
-        return 2
-
-def get_min_notional(symbol):
-    """Get minimum notional requirement"""
-    try:
-        symbol_info = client.get_symbol_info(symbol)
-        if symbol_info:
-            for f in symbol_info['filters']:
-                if f['filterType'] == 'MIN_NOTIONAL':
-                    min_notional = float(f.get('minNotional', 10.0))
-                    return min_notional
-                elif f['filterType'] == 'NOTIONAL':
-                    min_notional = float(f.get('minNotional', 10.0))
-                    return min_notional
-        return 10.0
-    except Exception as e:
-        return 10.0
-
-def round_step_size(quantity, symbol):
-    """Round quantity ke step size yang tepat"""
-    try:
-        if quantity <= 0:
-            return None
-            
-        symbol_info = get_symbol_info(symbol)
-        if not symbol_info:
-            return math.floor(quantity * 1000000) / 1000000
-            
-        for filter in symbol_info['filters']:
-            if filter['filterType'] == 'LOT_SIZE':
-                step_size = float(filter['stepSize'])
-                min_qty = float(filter.get('minQty', step_size))
-                if quantity < min_qty:
+                # Check if we got enough data
+                if len(klines) < 100:
+                    logging.warning(f"Insufficient data for {pair} on {tf} timeframe")
                     return None
                 
-                precision = int(round(-math.log(step_size, 10), 0))
-                rounded_qty = math.floor(quantity / step_size) * step_size
-                rounded_qty = round(rounded_qty, precision)
+                df = pd.DataFrame(klines, columns=[
+                    'open_time', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_asset_volume', 'number_of_trades',
+                    'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+                ])
                 
-                if rounded_qty <= 0 or rounded_qty < min_qty:
+                # Convert to float
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                
+                # Remove any NaN values
+                df = df.dropna()
+                
+                if len(df) < 100:
+                    logging.warning(f"Not enough valid data for {pair} on {tf}")
                     return None
-                    
-                return float(rounded_qty)
                 
-        return math.floor(quantity * 1000000) / 1000000
-        
-    except Exception as e:
-        print(f"❌ Error in round_step_size for {symbol}: {e}")
-        return math.floor(quantity * 1000000) / 1000000
-
-def get_current_price(symbol):
-    """Get current price"""
-    try:
-        rate_limit()
-        ticker = client.get_symbol_ticker(symbol=symbol)
-        price = float(ticker['price'])
-        precision = get_price_precision(symbol)
-        return round(price, precision)
-    except Exception as e:
-        print(f"❌ Error getting current price for {symbol}: {e}")
-        return None
-
-# ==================== INDIKATOR TEKNIKAL ====================
-def calculate_ema(prices, period):
-    """Calculate EMA"""
-    if prices is None or len(prices) < period:
-        return None
+                all_data[tf] = df
+            
+            return self._generate_smart_money_signal(pair, all_data)
+            
+        except Exception as e:
+            logging.error(f"Error analyzing {pair}: {str(e)}")
+            return None
     
-    try:
-        series = pd.Series(prices)
-        ema = series.ewm(span=period, adjust=False).mean()
-        return ema.iloc[-1] if not ema.empty else None
-    except Exception as e:
-        print(f"❌ EMA calculation error: {e}")
-        return None
-
-def calculate_rsi(prices, period=14):
-    """Calculate RSI"""
-    if len(prices) < period + 1:
-        return None
-    
-    try:
-        deltas = np.diff(prices)
-        gains = np.where(deltas > 0, deltas, 0)
-        losses = np.where(deltas < 0, -deltas, 0)
+    def _generate_smart_money_signal(self, pair: str, data: Dict) -> Dict:
+        """Generate sinyal dengan Smart Money Concept"""
+        df_1d = data['1d']
+        df_4h = data['4h']
+        df_1h = data['1h']
         
-        avg_gains = pd.Series(gains).rolling(window=period).mean()
-        avg_losses = pd.Series(losses).rolling(window=period).mean()
+        # Hitung indikator untuk timeframe 4h (utama)
+        try:
+            ema_fast_4h = self.tech_analyzer.calculate_ema(df_4h, Config.EMA_FAST)
+            ema_slow_4h = self.tech_analyzer.calculate_ema(df_4h, Config.EMA_SLOW)
+            rsi_4h = self.tech_analyzer.calculate_rsi(df_4h, Config.RSI_PERIOD)
+            macd_4h, macd_signal_4h, macd_hist_4h = self.tech_analyzer.calculate_macd(df_4h)
+            atr_4h = self.tech_analyzer.calculate_atr(df_4h, Config.ATR_PERIOD)
+            volume_sma_4h = self.tech_analyzer.calculate_volume_sma(df_4h, 20)
+            obv_4h = self.tech_analyzer.calculate_obv(df_4h)
+        except Exception as e:
+            logging.error(f"Error calculating indicators for {pair}: {str(e)}")
+            return None
         
-        rs = avg_gains / avg_losses
-        rsi = 100 - (100 / (1 + rs))
+        # Check for NaN values in indicators
+        if (ema_fast_4h.isna().iloc[-1] or ema_slow_4h.isna().iloc[-1] or 
+            rsi_4h.isna().iloc[-1] or atr_4h.isna().iloc[-1]):
+            logging.warning(f"NaN values in indicators for {pair}")
+            return None
         
-        return rsi.iloc[-1] if not rsi.empty else 50
-    except Exception as e:
-        return 50
-
-def calculate_macd(prices, fast=12, slow=26, signal=9):
-    """Calculate MACD"""
-    if len(prices) < slow:
-        return None, None, None
-    
-    try:
-        ema_fast = pd.Series(prices).ewm(span=fast, adjust=False).mean()
-        ema_slow = pd.Series(prices).ewm(span=slow, adjust=False).mean()
+        # Data terbaru
+        current_close = df_4h['close'].iloc[-1]
+        current_rsi = rsi_4h.iloc[-1]
+        current_atr = atr_4h.iloc[-1]
+        current_volume = df_4h['volume'].iloc[-1]
+        avg_volume = volume_sma_4h.iloc[-1] if not volume_sma_4h.isna().iloc[-1] else current_volume
+        current_obv = obv_4h.iloc[-1]
+        obv_trend = obv_4h.iloc[-1] > obv_4h.iloc[-5]  # OBV naik dalam 5 periode
         
-        macd_line = ema_fast - ema_slow
-        macd_signal = macd_line.ewm(span=signal, adjust=False).mean()
-        macd_histogram = macd_line - macd_signal
+        # Smart Money Analysis
+        support, resistance, all_supports, all_resistances = self.tech_analyzer.smart_money.find_support_resistance(df_4h)
+        fvg_entry = self.tech_analyzer.smart_money.calculate_fair_value_gap(df_4h)
+        liquidity_below, liquidity_above = self.tech_analyzer.smart_money.find_liquidity_zones(df_4h)
         
-        return (
-            macd_line.iloc[-1] if not macd_line.empty else None,
-            macd_signal.iloc[-1] if not macd_signal.empty else None,
-            macd_histogram.iloc[-1] if not macd_histogram.empty else None
+        # Trend analysis
+        trend_direction = self._get_trend_direction(ema_fast_4h, ema_slow_4h)
+        macd_signal = self._get_macd_signal(macd_4h, macd_signal_4h)
+        rsi_signal = self._get_rsi_signal(current_rsi)
+        volume_signal = current_volume > avg_volume * 1.2
+        
+        # Smart Money Conditions
+        smart_money_conditions = self._check_smart_money_conditions(
+            df_4h, current_close, support, resistance, obv_trend
         )
-    except Exception as e:
-        return None, None, None
-
-def calculate_linear_regression(prices, period=20):
-    """Calculate Linear Regression Oscillator"""
-    if len(prices) < period:
-        return 0
-    
-    try:
-        x = np.arange(period)
-        y = prices[-period:]
         
-        A = np.vstack([x, np.ones(len(x))]).T
-        m, b = np.linalg.lstsq(A, y, rcond=None)[0]
+        # Hitung confidence score dengan tambahan smart money factors
+        confidence = self._calculate_smart_money_confidence(
+            trend_direction, rsi_signal, macd_signal, volume_signal, smart_money_conditions
+        )
         
-        regression_line = m * x + b
-        current_regression = regression_line[-1]
-        current_price = prices[-1]
-        
-        lro = ((current_price - current_regression) / abs(current_regression)) * 100 if current_regression != 0 else 0
-        
-        return lro
-    except Exception as e:
-        return 0
-
-def calculate_volume_profile(volumes, period=20):
-    """Calculate volume profile"""
-    if len(volumes) < period:
-        return 1.0
-    
-    try:
-        current_volume = volumes[-1] if volumes else 0
-        avg_volume = np.mean(volumes[-period:]) if len(volumes) >= period else current_volume
-        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
-        return volume_ratio
-    except Exception as e:
-        return 1.0
-
-# ==================== DATA FETCHING ====================
-def get_klines_data_fast(symbol, interval, limit=50):
-    """Get klines data dengan cepat"""
-    try:
-        rate_limit()
-        
-        for attempt in range(2):
-            try:
-                klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-                if klines and len(klines) >= 20:
-                    closes = [float(kline[4]) for kline in klines]
-                    highs = [float(kline[2]) for kline in klines]
-                    lows = [float(kline[3]) for kline in klines]
-                    volumes = [float(kline[5]) for kline in klines]
-                    
-                    return {
-                        'close': closes,
-                        'high': highs,
-                        'low': lows,
-                        'volume': volumes
-                    }
-                else:
-                    time.sleep(0.5)
-            except Exception as e:
-                if attempt == 0:
-                    print(f"   ⚠️ Attempt {attempt + 1} failed: {e}")
-                time.sleep(0.5)
-        
-        return None
-    except Exception as e:
-        print(f"❌ Error get_klines_data_fast untuk {symbol}: {str(e)}")
-        return None
-
-def get_two_timeframe_data_fast(symbol):
-    """Get data kedua timeframe"""
-    try:
-        test_price = get_current_price(symbol)
-        if not test_price:
-            return None, None
-        
-        data_15m = get_klines_data_fast(symbol, Client.KLINE_INTERVAL_15MINUTE, 40)
-        data_5m = get_klines_data_fast(symbol, Client.KLINE_INTERVAL_5MINUTE, 40)
-        
-        if data_15m is None or data_5m is None:
-            return None, None
-            
-        min_data_points = 20
-        if (len(data_15m['close']) < min_data_points or 
-            len(data_5m['close']) < min_data_points):
-            return None, None
-            
-        return data_15m, data_5m
-        
-    except Exception as e:
-        print(f"❌ Error get_two_timeframe_data_fast untuk {symbol}: {e}")
-        return None, None
-
-# ==================== SISTEM SINYAL ====================
-def analyze_timeframe_fast(data, timeframe, symbol):
-    """Analisis timeframe dengan cepat"""
-    if data is None:
-        return False, 0
-        
-    if not isinstance(data, dict):
-        return False, 0
-        
-    required_keys = ['close', 'high', 'low', 'volume']
-    for key in required_keys:
-        if key not in data or data[key] is None or len(data[key]) < 20:
-            return False, 0
-
-    try:
-        closes = data['close']
-
-        if timeframe == '15m':
-            ema_short_period = EMA_SHORT_15M
-            ema_long_period = EMA_LONG_15M
-            rsi_min = RSI_MIN_15M
-            rsi_max = RSI_MAX_15M
-            macd_fast = MACD_FAST_15M
-            macd_slow = MACD_SLOW_15M
-            macd_signal = MACD_SIGNAL_15M
-            lro_period = LRO_PERIOD_15M
-            volume_period = VOLUME_PERIOD_15M
-        else:
-            ema_short_period = EMA_SHORT_5M
-            ema_long_period = EMA_LONG_5M
-            rsi_min = RSI_MIN_5M
-            rsi_max = RSI_MAX_5M
-            macd_fast = MACD_FAST_5M
-            macd_slow = MACD_SLOW_5M
-            macd_signal = MACD_SIGNAL_5M
-            lro_period = LRO_PERIOD_5M
-            volume_period = VOLUME_PERIOD_5M
-
-        ema_short = calculate_ema(closes, ema_short_period)
-        ema_long = calculate_ema(closes, ema_long_period)
-        rsi = calculate_rsi(closes, 14)
-        macd_line, macd_signal, macd_histogram = calculate_macd(closes, macd_fast, macd_slow, macd_signal)
-        lro = calculate_linear_regression(closes, lro_period)
-        volume_ratio = calculate_volume_profile(data['volume'], volume_period)
-
-        if any(x is None for x in [ema_short, ema_long, rsi, macd_line]):
-            return False, 0
-
-        current_price = closes[-1] if closes else 0
-
-        price_above_ema_short = current_price > ema_short if ema_short is not None else False
-        price_above_ema_long = current_price > ema_long if ema_long is not None else False
-        ema_bullish = ema_short > ema_long if (ema_short is not None and ema_long is not None) else False
-        
-        rsi_ok = (rsi_min <= rsi <= rsi_max) if rsi is not None else False
-        macd_bullish = macd_line > macd_signal if (macd_signal is not None and macd_line is not None) else False
-        volume_ok = volume_ratio > VOLUME_RATIO_MIN if volume_ratio is not None else False
-        lro_positive = lro > -2 if lro is not None else False
-
-        score = 0
-        if price_above_ema_short: score += 20
-        if price_above_ema_long: score += 15
-        if ema_bullish: score += 15
-        if rsi_ok: score += 20
-        if macd_bullish: score += 15
-        if volume_ok: score += 10
-        if lro_positive: score += 5
-
-        signal_ok = (price_above_ema_short and rsi_ok and macd_bullish and 
-                    volume_ok and lro_positive)
-
-        return signal_ok, min(score, 100)
-
-    except Exception as e:
-        print(f"❌ Error in analyze_timeframe_fast for {symbol} ({timeframe}): {str(e)}")
-        return False, 0
-
-def analyze_coin_fast(symbol):
-    """Analisis coin dengan cepat"""
-    if symbol in failed_coins:
-        fail_time = failed_coins[symbol]
-        if time.time() - fail_time < 300:
-            return None
-        else:
-            failed_coins.pop(symbol, None)
-    
-    try:
-        data_15m, data_5m = get_two_timeframe_data_fast(symbol)
-        
-        if data_15m is None or data_5m is None:
+        # Hanya proses jika confidence cukup tinggi
+        if confidence < 0.7:  # Increased threshold for better signals
             return None
         
-        m15_ok, m15_score = analyze_timeframe_fast(data_15m, '15m', symbol)
-        m5_ok, m5_score = analyze_timeframe_fast(data_5m, '5m', symbol)
+        # Kalkulasi level trading dengan Smart Money Concept
+        entry, sl, tp1, tp2, rr_ratio = self._calculate_dynamic_levels(
+            df_4h, current_close, current_atr, trend_direction, 
+            support, resistance, all_supports, all_resistances
+        )
         
-        if m15_score is None: m15_score = 0
-        if m5_score is None: m5_score = 0
+        # Validasi: SL harus selalu di bawah entry
+        if sl >= entry:
+            logging.warning(f"Invalid SL for {pair}: SL {sl} >= Entry {entry}. Adjusting...")
+            # Adjust SL berdasarkan ATR
+            sl = entry - (current_atr * 1.5)
+            if sl >= entry:
+                sl = entry * 0.98  # Fallback 2% di bawah entry
         
-        confidence = (m15_score * 0.6) + (m5_score * 0.4)
-        confidence = min(95, max(confidence, 0))
-        
-        current_price = get_current_price(symbol)
-        if current_price is None:
-            return None
-        
-        buy_signal = (m15_ok and m5_ok) and confidence >= dynamic_threshold
+        # Validasi ulang TP
+        if tp1 <= entry:
+            tp1 = entry * 1.02
+        if tp2 <= tp1:
+            tp2 = tp1 * 1.02
         
         return {
-            'symbol': symbol,
-            'buy_signal': buy_signal,
-            'confidence': confidence,
-            'current_price': current_price,
-            'm15_signal': m15_ok,
-            'm5_signal': m5_ok,
-            'm15_score': m15_score,
-            'm5_score': m5_score
+            'pair': pair,
+            'trend': trend_direction,
+            'rsi': round(current_rsi, 2),
+            'macd_signal': macd_signal,
+            'entry': round(entry, 4),
+            'stop_loss': round(sl, 4),
+            'take_profit_1': round(tp1, 4),
+            'take_profit_2': round(tp2, 4),
+            'confidence': round(confidence * 100),
+            'volume_boost': volume_signal,
+            'support_level': round(support, 4),
+            'resistance_level': round(resistance, 4),
+            'obv_bullish': obv_trend,
+            'timestamp': datetime.now(timezone.utc),
+            'risk_reward': f'1:{rr_ratio:.1f}',
+            'atr_percentage': round((current_atr / current_close) * 100, 2)
+        }
+    
+    def _calculate_dynamic_levels(self, df: pd.DataFrame, current_close: float, 
+                                atr: float, trend: str, support: float, 
+                                resistance: float, all_supports: List[float], 
+                                all_resistances: List[float]) -> Tuple[float, float, float, float, float]:
+        """Hitung level trading dinamis berdasarkan struktur market"""
+        
+        # Hitung entry price
+        if trend == "Bullish":
+            # Untuk trend bullish, entry di pullback ke support atau FVG
+            entry = max(support * 1.005, current_close * 0.995)
+        else:
+            # Untuk sideways/bearish, entry lebih konservatif
+            entry = current_close * 0.99
+        
+        # Hitung Stop Loss berdasarkan multiple factors
+        sl = self._calculate_dynamic_sl(entry, support, all_supports, atr, current_close)
+        
+        # Hitung Take Profit berdasarkan multiple factors
+        tp1, tp2 = self._calculate_dynamic_tp(entry, resistance, all_resistances, atr, current_close, sl)
+        
+        # Hitung risk-reward ratio
+        risk = entry - sl
+        if risk > 0:
+            reward = tp1 - entry
+            rr_ratio = round(reward / risk, 1)
+        else:
+            rr_ratio = 2.0  # Default
+        
+        return entry, sl, tp1, tp2, rr_ratio
+    
+    def _calculate_dynamic_sl(self, entry: float, support: float, all_supports: List[float], 
+                            atr: float, current_close: float) -> float:
+        """Hitung Stop Loss dinamis berdasarkan multiple factors"""
+        
+        # Factor 1: Di bawah support terdekat
+        sl_support = support * 0.995
+        
+        # Factor 2: Berdasarkan ATR (volatilitas)
+        sl_atr = entry - (atr * 1.5)
+        
+        # Factor 3: Berdasarkan support level berikutnya (jika ada)
+        if all_supports:
+            # Cari support di bawah support saat ini
+            lower_supports = [s for s in all_supports if s < support]
+            if lower_supports:
+                sl_next_support = max(lower_supports) * 0.995
+            else:
+                sl_next_support = support * 0.99
+        else:
+            sl_next_support = support * 0.99
+        
+        # Factor 4: Maximum risk (5% dari entry)
+        sl_max_risk = entry * 0.95
+        
+        # Factor 5: Minimum risk (1% dari entry)
+        sl_min_risk = entry * 0.99
+        
+        # Kombinasikan semua factors, pilih yang terbaik (paling aman)
+        sl_candidates = [sl_support, sl_atr, sl_next_support, sl_max_risk]
+        valid_sl_candidates = [sl for sl in sl_candidates if sl < entry]
+        
+        if valid_sl_candidates:
+            sl = max(valid_sl_candidates)  # Pilih SL tertinggi yang masih di bawah entry
+        else:
+            sl = sl_min_risk
+        
+        # Pastikan SL reasonable
+        if sl > sl_min_risk:
+            sl = sl_min_risk
+        if sl < sl_max_risk:
+            sl = sl_max_risk
+        
+        return sl
+    
+    def _calculate_dynamic_tp(self, entry: float, resistance: float, all_resistances: List[float],
+                            atr: float, current_close: float, sl: float) -> Tuple[float, float]:
+        """Hitung Take Profit dinamis berdasarkan multiple factors"""
+        
+        # Factor 1: Resistance terdekat
+        tp_resistance = resistance * 0.995  # Slight buffer
+        
+        # Factor 2: Berdasarkan ATR (volatilitas)
+        tp_atr_1 = entry + (atr * 2.0)
+        tp_atr_2 = entry + (atr * 3.0)
+        
+        # Factor 3: Berdasarkan risk-reward ratio
+        risk = entry - sl
+        tp_rr_1 = entry + (risk * 2.0)
+        tp_rr_2 = entry + (risk * 3.0)
+        
+        # Factor 4: Berdasarkan resistance level berikutnya
+        if all_resistances:
+            # Cari resistance di atas resistance saat ini
+            higher_resistances = [r for r in all_resistances if r > resistance]
+            if higher_resistances:
+                tp_next_resistance = min(higher_resistances) * 0.995
+            else:
+                tp_next_resistance = resistance * 1.02
+        else:
+            tp_next_resistance = resistance * 1.02
+        
+        # Factor 5: Berdasarkan persentase profit wajar
+        tp_percent_1 = entry * 1.03  # 3% profit
+        tp_percent_2 = entry * 1.06  # 6% profit
+        
+        # Kombinasikan semua factors untuk TP1
+        tp1_candidates = [tp_resistance, tp_atr_1, tp_rr_1, tp_percent_1, tp_next_resistance]
+        valid_tp1_candidates = [tp for tp in tp1_candidates if tp > entry]
+        
+        if valid_tp1_candidates:
+            tp1 = min(valid_tp1_candidates)  # Pilih TP1 terendah yang realistis
+        else:
+            tp1 = tp_percent_1
+        
+        # Kombinasikan semua factors untuk TP2
+        tp2_candidates = [tp_atr_2, tp_rr_2, tp_percent_2, tp_next_resistance * 1.02]
+        valid_tp2_candidates = [tp for tp in tp2_candidates if tp > tp1]
+        
+        if valid_tp2_candidates:
+            tp2 = min(valid_tp2_candidates)
+        else:
+            tp2 = tp1 * 1.03  # 3% di atas TP1
+        
+        # Pastikan TP reasonable
+        max_tp = current_close * 1.15  # Maksimal 15% profit
+        tp1 = min(tp1, max_tp)
+        tp2 = min(tp2, max_tp * 1.05)
+        
+        return tp1, tp2
+    
+    def _check_smart_money_conditions(self, df: pd.DataFrame, current_price: float, 
+                                    support: float, resistance: float, obv_trend: bool) -> Dict:
+        """Cek kondisi Smart Money"""
+        conditions = {
+            'near_support': current_price <= support * 1.02,  # Dalam 2% dari support
+            'obv_bullish': obv_trend,
+            'volume_spike': df['volume'].iloc[-1] > df['volume'].iloc[-5:].mean() * 1.5,
+            'price_above_ema': current_price > df['close'].rolling(50).mean().iloc[-1]
         }
         
-    except Exception as e:
-        print(f"❌ Error in analyze_coin_fast for {symbol}: {str(e)}")
-        failed_coins[symbol] = time.time()
-        return None
-
-# ==================== ORDER MANAGEMENT ====================
-def get_precise_quantity(symbol, investment_amount):
-    """Dapatkan quantity yang tepat"""
-    try:
-        current_price = get_current_price(symbol)
-        if not current_price or current_price <= 0:
-            return None
-            
-        theoretical_quantity = investment_amount / current_price
+        # Hitung score kondisi
+        score = sum(conditions.values())
+        conditions['score'] = score
         
-        if theoretical_quantity <= 0:
-            return None
-            
-        if not ORDER_RUN:
-            return round(theoretical_quantity * 0.998, 6)
-            
-        precise_quantity = round_step_size(theoretical_quantity, symbol)
-        return precise_quantity
-        
-    except Exception as e:
-        print(f"❌ Error di get_precise_quantity: {e}")
-        return None
-
-def calculate_position_size(symbol):
-    """Hitung ukuran position"""
-    global current_investment
+        return conditions
     
-    position_value = current_investment * POSITION_SIZING_PCT
-    
-    if position_value < INITIAL_INVESTMENT:
-        position_value = INITIAL_INVESTMENT
-    
-    max_position = current_investment * 0.6
-    if position_value > max_position:
-        position_value = max_position
-    
-    if position_value > current_investment:
-        position_value = current_investment
-    
-    return position_value
-
-def place_market_buy_order(symbol, investment_amount):
-    """Place market buy order"""
-    global current_investment
-    
-    try:
-        print(f"🔹 BUY ORDER: {symbol}")
-        
-        free_balance = 0
-        if ORDER_RUN:
-            try:
-                rate_limit()
-                balance = client.get_asset_balance(asset='USDT')
-                free_balance = float(balance['free'])
-                if free_balance < investment_amount:
-                    print(f"❌ Insufficient balance. Need: ${investment_amount:.2f}, Available: ${free_balance:.2f}")
-                    return None
-            except Exception as e:
-                free_balance = investment_amount * 2
-        
-        current_price = get_current_price(symbol)
-        if not current_price or current_price <= 0:
-            return None
-
-        theoretical_quantity = investment_amount / current_price
-        
-        if theoretical_quantity <= 0:
-            return None
-
-        min_notional = get_min_notional(symbol)
-        calculated_value = theoretical_quantity * current_price
-        
-        required_minimum = max(min_notional, INITIAL_INVESTMENT)
-        if calculated_value < required_minimum:
-            required_investment = required_minimum * 1.02
-            theoretical_quantity = required_investment / current_price
+    def _get_trend_direction(self, ema_fast: pd.Series, ema_slow: pd.Series) -> str:
+        """Tentukan arah trend"""
+        if len(ema_fast) < 2 or len(ema_slow) < 2:
+            return "Unknown"
             
-            if ORDER_RUN and required_investment > free_balance:
-                return None
-
-        if not ORDER_RUN:
-            precise_quantity = round(theoretical_quantity, 6)
-            
-            simulated_order = {
-                'status': 'FILLED',
-                'symbol': symbol,
-                'executedQty': str(precise_quantity),
-                'fills': [{'price': str(current_price), 'qty': str(precise_quantity)}]
-            }
-            return simulated_order
-
-        precise_quantity = round_step_size(theoretical_quantity, symbol)
+        fast_current = ema_fast.iloc[-1]
+        fast_prev = ema_fast.iloc[-2]
+        slow_current = ema_slow.iloc[-1]
         
-        if not precise_quantity:
-            return None
-            
-        final_order_value = precise_quantity * current_price
-        
-        if final_order_value < required_minimum:
-            return None
-        
-        rate_limit()
-        order = client.order_market_buy(
-            symbol=symbol,
-            quantity=precise_quantity
-        )
-        
-        if order and order.get('status') == 'FILLED':
-            print(f"✅ BUY order executed for {symbol}")
-            return order
+        if fast_current > slow_current and fast_prev <= slow_current:
+            return "Bullish Cross"
+        elif fast_current > slow_current:
+            return "Bullish"
+        elif fast_current < slow_current and fast_prev >= slow_current:
+            return "Bearish Cross"
         else:
-            print(f"❌ BUY order failed for {symbol}")
-            return None
-            
-    except Exception as e:
-        print(f"❌ BUY error: {e}")
-        return None
-
-def execute_market_sell(symbol, quantity, entry_price, exit_type):
-    """Execute market sell order"""
-    global current_investment, active_position
+            return "Bearish"
     
-    try:
-        print(f"🔹 SELL: {symbol} ({exit_type})")
+    def _get_macd_signal(self, macd: pd.Series, macd_signal: pd.Series) -> str:
+        """Analisis sinyal MACD"""
+        if len(macd) < 2 or len(macd_signal) < 2:
+            return "Unknown"
+            
+        macd_current = macd.iloc[-1]
+        macd_prev = macd.iloc[-2]
+        signal_current = macd_signal.iloc[-1]
         
-        current_price = get_current_price(symbol)
-        if not current_price:
-            return False
-
-        if ORDER_RUN:
-            asset = symbol.replace('USDT', '')
-            try:
-                rate_limit()
-                balance_info = client.get_asset_balance(asset=asset)
-                if balance_info:
-                    available_balance = float(balance_info['free'])
-                    
-                    if available_balance <= 0:
-                        active_position = None
-                        return False
-                        
-                    if quantity > available_balance:
-                        quantity = available_balance
-            except Exception as e:
-                print(f"   ⚠️ Balance check error: {e}")
-
-        if not ORDER_RUN:
-            log_position_closed(symbol, entry_price, current_price, quantity, exit_type)
-            active_position = None
-            return True
-
-        precise_quantity = round_step_size(quantity, symbol)
-        if not precise_quantity:
-            precise_quantity = round(quantity, 6)
-
-        if precise_quantity <= 0:
-            active_position = None
-            return False
-
-        rate_limit()
-        sell_order = client.order_market_sell(
-            symbol=symbol,
-            quantity=precise_quantity
-        )
-
-        if sell_order and sell_order.get('status') == 'FILLED':
-            executed_qty = float(sell_order.get('executedQty', 0))
-            exit_price = current_price
-            
-            if sell_order.get('fills') and len(sell_order['fills']) > 0:
-                exit_price = float(sell_order['fills'][0]['price'])
-            
-            log_position_closed(symbol, entry_price, exit_price, executed_qty, exit_type)
-            active_position = None
-            print(f"   ✅ SELL successful: {executed_qty} {symbol} at ${exit_price}")
-            return True
-            
-        active_position = None
-        return False
-
-    except Exception as e:
-        print(f"❌ SELL error: {e}")
-        active_position = None
-        return False
-
-# ==================== MONITORING & EXECUTION ====================
-def monitor_coins_until_signal():
-    """Monitor coins sampai menemukan sinyal buy"""
-    global buy_signals, BOT_RUNNING
+        if macd_current > signal_current and macd_prev <= signal_current:
+            return "Cross UP"
+        elif macd_current < signal_current and macd_prev >= signal_current:
+            return "Cross DOWN"
+        elif macd_current > signal_current:
+            return "Above Signal"
+        else:
+            return "Below Signal"
     
-    try:
-        client.ping()
-        print(f"\n🔍 SCANNING coins until signal found...")
-    except Exception as e:
-        print(f"❌ BINANCE CONNECTION ERROR: {e}")
-        if not handle_binance_error():
-            return []
+    def _get_rsi_signal(self, rsi: float) -> bool:
+        """Cek kondisi RSI untuk entry"""
+        return 40 <= rsi <= 60  # RSI di area netral untuk accumulation
     
-    buy_signals = []
-    
-    for i, coin in enumerate(COINS):
-        if not BOT_RUNNING:
-            print("🛑 Scanning interrupted by /stop command")
-            return []
+    def _calculate_smart_money_confidence(self, trend: str, rsi_signal: bool, 
+                                        macd_signal: str, volume_signal: bool,
+                                        smart_conditions: Dict) -> float:
+        """Hitung confidence score dengan Smart Money factors"""
+        confidence = 0.0
         
+        # Trend weight
+        if "Bullish" in trend:
+            confidence += Config.WEIGHT_TREND
+        
+        # RSI weight
+        if rsi_signal:
+            confidence += Config.WEIGHT_RSI
+        
+        # MACD weight
+        if "Cross UP" in macd_signal or "Above Signal" in macd_signal:
+            confidence += Config.WEIGHT_MACD
+        
+        # Volume weight
+        if volume_signal:
+            confidence += Config.WEIGHT_VOLUME
+        
+        # Smart Money conditions (additional points)
+        smart_money_score = smart_conditions['score'] * 0.1  # Convert to 0-0.4 scale
+        confidence += min(smart_money_score, 0.4)
+        
+        return min(confidence, 1.0)  # Cap at 100%
+
+# [TelegramNotifier, BinanceDataManager, dan AISignalBot classes tetap sama seperti sebelumnya]
+# ... (kode untuk class-class tersebut tidak berubah)
+
+class TelegramNotifier:
+    """Class untuk mengirim notifikasi ke Telegram"""
+    
+    def __init__(self):
+        self.bot = Bot(token=Config.TELEGRAM_BOT_TOKEN)
+        self.chat_id = Config.TELEGRAM_CHAT_ID
+    
+    async def send_signal(self, signal: Dict):
+        """Kirim sinyal ke Telegram"""
         try:
-            analysis = analyze_coin_fast(coin)
+            message = self._format_smart_money_signal(signal)
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode='HTML'
+            )
+            logging.info(f"Smart Money Signal sent to Telegram for {signal['pair']}")
+        except TelegramError as e:
+            logging.error(f"Failed to send Telegram message: {str(e)}")
+    
+    def _format_smart_money_signal(self, signal: Dict) -> str:
+        """Format pesan sinyal Smart Money untuk Telegram"""
+        volume_icon = "📈" if signal['volume_boost'] else "📊"
+        obv_icon = "🟢" if signal['obv_bullish'] else "🔴"
+        
+        # Calculate risk percentage
+        risk_pct = ((signal['entry'] - signal['stop_loss']) / signal['entry']) * 100
+        profit_pct_1 = ((signal['take_profit_1'] - signal['entry']) / signal['entry']) * 100
+        profit_pct_2 = ((signal['take_profit_2'] - signal['entry']) / signal['entry']) * 100
+        
+        return f"""
+🎯 <b>DYNAMIC SMART MONEY SIGNAL</b> 🎯
+
+🪙 <b>Coin:</b> {signal['pair']}
+📊 <b>Trend:</b> {signal['trend']}
+{volume_icon} <b>RSI:</b> {signal['rsi']}
+⚡ <b>MACD:</b> {signal['macd_signal']}
+{obv_icon} <b>OBV:</b> {'Bullish' if signal['obv_bullish'] else 'Bearish'}
+📈 <b>ATR Volatility:</b> {signal['atr_percentage']}%
+
+💎 <b>KEY LEVELS:</b>
+🏠 <b>Support:</b> {signal['support_level']}
+🚧 <b>Resistance:</b> {signal['resistance_level']}
+
+🎯 <b>TRADING PLAN:</b>
+💰 <b>Entry:</b> {signal['entry']}
+🛑 <b>SL:</b> {signal['stop_loss']} ({risk_pct:.2f}%)
+🎯 <b>TP1:</b> {signal['take_profit_1']} (+{profit_pct_1:.2f}%)
+🎯 <b>TP2:</b> {signal['take_profit_2']} (+{profit_pct_2:.2f}%)
+
+💪 <b>Confidence:</b> {signal['confidence']}%
+⚖️ <b>Risk/Reward:</b> {signal['risk_reward']}
+📅 <b>Time:</b> {signal['timestamp'].strftime('%Y-%m-%d %H:%M UTC')}
+
+<i>Dynamic Smart Money Concept - Adaptif terhadap market conditions</i>
+"""
+    
+    async def send_alert(self, message: str):
+        """Kirim alert umum ke Telegram"""
+        try:
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"⚠️ <b>DYNAMIC SMART MONEY BOT ALERT</b> ⚠️\n\n{message}",
+                parse_mode='HTML'
+            )
+        except TelegramError as e:
+            logging.error(f"Failed to send alert: {str(e)}")
+    
+    async def send_summary(self, signals: List[Dict]):
+        """Kirim summary 3 sinyal terbaik"""
+        if not signals:
+            await self.send_alert("📊 Analysis Complete: No high-quality signals found.")
+            return
             
-            if not BOT_RUNNING:
-                print("🛑 Analysis interrupted by /stop command")
-                return []
+        try:
+            summary_message = "🚀 <b>TOP 3 DYNAMIC SMART MONEY SIGNALS</b> 🚀\n\n"
             
-            if analysis and analysis['buy_signal']:
-                print(f"   🚨 SIGNAL FOUND: {coin} - Confidence: {analysis['confidence']:.1f}%")
-                buy_signals.append(analysis)
+            for i, signal in enumerate(signals[:3], 1):
+                risk_pct = ((signal['entry'] - signal['stop_loss']) / signal['entry']) * 100
+                profit_pct_1 = ((signal['take_profit_1'] - signal['entry']) / signal['entry']) * 100
                 
-                telegram_msg = f"🚨 <b>BUY SIGNAL DETECTED</b>\n• {coin}: {analysis['confidence']:.1f}%\n• Price: ${analysis['current_price']:.6f}"
-                send_telegram_message(telegram_msg)
-                
-                print(f"   ⚡ STOPPING SCAN - Processing {coin} immediately")
-                return buy_signals
+                summary_message += f"{i}. <b>{signal['pair']}</b> - Confidence: {signal['confidence']}%\n"
+                summary_message += f"   📍 Entry: {signal['entry']} | SL: {signal['stop_loss']} ({risk_pct:.2f}%)\n"
+                summary_message += f"   🎯 TP1: {signal['take_profit_1']} (+{profit_pct_1:.2f}%)\n"
+                summary_message += f"   📊 RSI: {signal['rsi']} | Trend: {signal['trend']}\n"
+                summary_message += f"   ⚖️ R/R: {signal['risk_reward']} | ATR: {signal['atr_percentage']}%\n\n"
             
-            elif analysis:
-                print(f"   ❌ {coin}: No signal ({analysis['confidence']:.1f}%)")
-            else:
-                print(f"   💀 {coin}: No data")
+            summary_message += f"📈 Total pairs scanned: {len(Config.PAIR_LIST)}\n"
+            summary_message += f"✅ Quality signals found: {len(signals)}\n"
+            summary_message += f"⏰ Next update in {Config.UPDATE_INTERVAL_HOURS} hours"
             
-            if TELEGRAM_CONTROL_ENABLED:
-                handle_telegram_command()
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=summary_message,
+                parse_mode='HTML'
+            )
             
-            if i < len(COINS) - 1:
-                time.sleep(DELAY_BETWEEN_COINS)
+        except TelegramError as e:
+            logging.error(f"Failed to send summary: {str(e)}")
+
+# [BinanceDataManager dan AISignalBot classes tetap sama]
+# ... (kode untuk class-class tersebut tidak berubah)
+
+class BinanceDataManager:
+    """Manager untuk koneksi dan data Binance"""
+    
+    def __init__(self):
+        self.client = None
+        self.bm = None
+    
+    async def initialize(self):
+        """Initialize koneksi Binance"""
+        try:
+            self.client = await AsyncClient.create(
+                Config.BINANCE_API_KEY,
+                Config.BINANCE_API_SECRET
+            )
+            self.bm = BinanceSocketManager(self.client)
+            
+            # Get all USDT pairs excluding BTC and ETH
+            await self._load_all_usdt_pairs()
+            
+            logging.info("Binance client initialized successfully")
+        except Exception as e:
+            logging.error(f"Failed to initialize Binance client: {str(e)}")
+            raise
+    
+    async def _load_all_usdt_pairs(self):
+        """Load semua pair USDT kecuali BTC, ETH, dan pair yang dikecualikan"""
+        try:
+            exchange_info = await self.client.get_exchange_info()
+            usdt_pairs = []
+            
+            # Pair yang dikecualikan
+            excluded_pairs = ['BTCUSDT', 'ETHUSDT', 'FDUSDT', 'USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'USDPUSDT', 'USTUSDT']
+            
+            for symbol in exchange_info['symbols']:
+                if (symbol['symbol'].endswith('USDT') and 
+                    symbol['status'] == 'TRADING' and
+                    symbol['symbol'] not in excluded_pairs):
+                    usdt_pairs.append(symbol['symbol'])
+            
+            # Sort by volume and take top 50 for efficiency
+            tickers = await self.client.get_ticker()
+            volume_data = []
+            
+            for ticker in tickers:
+                if ticker['symbol'] in usdt_pairs:
+                    volume = float(ticker['quoteVolume'])
+                    volume_data.append((ticker['symbol'], volume))
+            
+            # Sort by volume descending
+            volume_data.sort(key=lambda x: x[1], reverse=True)
+            
+            # Take top 50 pairs by volume
+            Config.PAIR_LIST = [pair for pair, volume in volume_data[:50]]
+            
+            logging.info(f"Loaded {len(Config.PAIR_LIST)} trading pairs (excluding BTC/ETH/Stablecoins)")
             
         except Exception as e:
-            print(f"   ⚠️ {coin}: Error - {e}")
-            time.sleep(DELAY_AFTER_ERROR)
-            
-            if not BOT_RUNNING:
-                print("🛑 Error handling interrupted by /stop command")
-                return []
+            logging.error(f"Error loading USDT pairs: {str(e)}")
+            # Fallback to some popular pairs (excluding the ones we don't want)
+            Config.PAIR_LIST = [
+                'SOLUSDT', 'BNBUSDT', 'AVAXUSDT', 'ADAUSDT', 'DOTUSDT',
+                'MATICUSDT', 'LINKUSDT', 'UNIUSDT', 'XRPUSDT', 'DOGEUSDT',
+                'ATOMUSDT', 'FTMUSDT', 'NEARUSDT', 'CAKEUSDT', 'SUIUSDT',
+                'LTCUSDT', 'XLMUSDT', 'ALGOUSDT', 'VETUSDT', 'THETAUSDT'
+            ]
     
-    print(f"\n📊 SCAN COMPLETE: No signals found in {len(COINS)} coins")
-    return []
+    async def close(self):
+        """Tutup koneksi Binance"""
+        if self.client:
+            await self.client.close_connection()
 
-def fast_execute_signal(signal):
-    """Execute trade dengan cepat"""
-    global active_position
-
-    if not BOT_RUNNING:
-        return False
+class AISignalBot:
+    """Main class untuk AI Signal Bot dengan Smart Money"""
     
-    symbol = signal['symbol']
-    confidence = signal['confidence']
-    current_price = signal['current_price']
-    
-    print(f"⚡ EXECUTION: {symbol} (Confidence: {confidence:.1f}%)")
-    
-    print(f"   🔍 Quick re-confirmation...")
-    quick_check = analyze_coin_fast(symbol)
-
-    if not BOT_RUNNING:
-        return False
-    
-    if not quick_check or not quick_check['buy_signal']:
-        print(f"   ❌ Signal disappeared, aborting...")
-        failed_coins[symbol] = time.time()
-        return False
-    
-    investment_amount = calculate_position_size(symbol)
-    
-    if not investment_amount:
-        return False
-    
-    buy_order = place_market_buy_order(symbol, investment_amount)
-    
-    if buy_order and buy_order.get('status') == 'FILLED':
-        executed_qty = float(buy_order.get('executedQty', 0))
+    def __init__(self):
+        self.data_manager = BinanceDataManager()
+        self.analyzer = SignalAnalyzer()
+        self.notifier = TelegramNotifier()
+        self.is_running = False
         
-        if buy_order.get('fills') and len(buy_order['fills']) > 0:
-            entry_price = float(buy_order['fills'][0]['price'])
-        else:
-            entry_price = current_price
+        # Setup logging
+        self._setup_logging()
+    
+    def _setup_logging(self):
+        """Setup logging configuration"""
+        os.makedirs('logs', exist_ok=True)
         
-        price_precision = get_price_precision(symbol)
-        entry_price = round(entry_price, price_precision)
-        take_profit = round(entry_price * (1 + TAKE_PROFIT_PCT), price_precision)
-        stop_loss = round(entry_price * (1 - STOP_LOSS_PCT), price_precision)
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler('logs/dynamic_smart_money_signals.txt', encoding='utf-8'),
+                logging.StreamHandler()
+            ]
+        )
+    
+    async def analyze_all_pairs(self):
+        """Analisis semua pair yang ditentukan"""
+        signals = []
+        analyzed_count = 0
         
-        active_position = {
-            'symbol': symbol,
-            'entry_price': entry_price,
-            'quantity': executed_qty,
-            'take_profit': take_profit,
-            'stop_loss': stop_loss,
-            'highest_price': entry_price,
-            'trailing_active': False,
-            'confidence': confidence,
-            'timestamp': time.time()
-        }
+        logging.info(f"Starting Dynamic Smart Money analysis for {len(Config.PAIR_LIST)} pairs...")
         
-        log_position_opened(symbol, entry_price, executed_qty, take_profit, stop_loss, confidence)
-        
-        print(f"   ✅ EXECUTION COMPLETE: {symbol}")
-        return True
-    
-    print(f"   ❌ Execution failed for {symbol}")
-    failed_coins[symbol] = time.time()
-    return False
-
-# ==================== POSITION MONITORING ====================
-def update_trailing_stop(current_price):
-    """Update trailing stop"""
-    global active_position
-    
-    if not active_position:
-        return
-    
-    entry_price = active_position['entry_price']
-    highest_price = active_position.get('highest_price', entry_price)
-    
-    if current_price > highest_price:
-        active_position['highest_price'] = current_price
-        highest_price = current_price
-    
-    price_increase_pct = (highest_price - entry_price) / entry_price
-    
-    if price_increase_pct >= TRAILING_STOP_ACTIVATION:
-        new_stop_loss = highest_price * (1 - TRAILING_STOP_PCT)
-        
-        if new_stop_loss > active_position['stop_loss']:
-            active_position['stop_loss'] = new_stop_loss
-            active_position['trailing_active'] = True
-
-def check_position_exit():
-    """Check jika position perlu di-exit"""
-    global active_position
-    
-    if not active_position:
-        return
-    
-    symbol = active_position['symbol']
-    
-    try:
-        current_price = get_current_price(symbol)
-        
-        if not current_price:
-            return
-        
-        entry_price = active_position['entry_price']
-        quantity = active_position['quantity']
-        
-        update_trailing_stop(current_price)
-        
-        stop_loss = active_position['stop_loss']
-        take_profit = active_position['take_profit']
-        
-        if current_price <= stop_loss:
-            print(f"🛑 Stop Loss hit for {symbol} at ${current_price:.6f}")
-            execute_market_sell(symbol, quantity, entry_price, "STOP LOSS")
-            return
-        
-        if current_price >= take_profit:
-            print(f"🎯 Take Profit hit for {symbol} at ${current_price:.6f}")
-            execute_market_sell(symbol, quantity, entry_price, "TAKE PROFIT")
-            return
-    except Exception as e:
-        print(f"❌ Error checking position exit: {e}")
-
-# ==================== MAIN BOT LOGIC ====================
-def main_improved_fast():
-    """Main bot function"""
-    global current_investment, active_position, BOT_RUNNING
-    
-    print("🚀 Starting BOT - API ONLY VERSION")
-
-    update_global_variables_from_config()
-    initialize_logging()
-    load_trade_history()
-    load_bot_state()
-    
-    # Initialize Binance client - jika gagal akan otomatis switch ke simulasi
-    initialize_binance_client()
-    
-    startup_msg = (
-        f"🤖 <b>BOT STARTED</b>\n"
-        f"Mode: {'🟢 LIVE TRADING' if ORDER_RUN else '🟡 SIMULASI'}\n"
-        f"Coins: {len(COINS)}\n"
-        f"API Key: {CURRENT_API_INDEX + 1}\n"
-        f"Modal: ${current_investment:.2f}\n"
-        f"Status: MENUNGGU PERINTAH /start"
-    )
-    send_telegram_message(startup_msg)
-    
-    consecutive_errors = 0
-    last_feedback_check = 0
-    
-    print("✅ Bot siap. Gunakan Telegram untuk mengontrol (/start untuk mulai)")
-    
-    while True:
-        try:
-            if TELEGRAM_CONTROL_ENABLED:
-                handle_telegram_command()
-            
-            if not BOT_RUNNING:
-                time.sleep(0.5)
-                continue
-            
-            if is_trading_paused():
-                time.sleep(DELAY_WHEN_PAUSED)
-                continue
-            
+        for pair in Config.PAIR_LIST:
             try:
-                client.ping()
-                consecutive_errors = 0
+                signal = await self.analyzer.analyze_pair(self.data_manager.client, pair)
+                analyzed_count += 1
+                
+                if signal:
+                    # Validasi tambahan: pastikan SL < Entry dan TP > Entry
+                    if (signal['stop_loss'] < signal['entry'] and 
+                        signal['take_profit_1'] > signal['entry'] and
+                        signal['take_profit_2'] > signal['take_profit_1']):
+                        signals.append(signal)
+                        logging.info(f"🎯 Dynamic Signal for {pair}: Confidence {signal['confidence']}%, R/R {signal['risk_reward']}")
+                    else:
+                        logging.warning(f"❌ Rejected {pair}: Invalid levels")
+                else:
+                    logging.debug(f"❌ No quality signal for {pair}")
+                    
+                # Small delay to avoid rate limiting
+                await asyncio.sleep(0.1)
+                    
             except Exception as e:
-                consecutive_errors += 1
-                print(f"❌ Koneksi error #{consecutive_errors}: {e}")
-                if consecutive_errors >= 3:
-                    if not handle_binance_error():
-                        break
-                time.sleep(5)
+                logging.error(f"Error analyzing {pair}: {str(e)}")
                 continue
-            
-            current_time = time.time()
-            if current_time - last_feedback_check > 300:
-                trade_performance_feedback_loop()
-                last_feedback_check = current_time
-            
-            if active_position:
-                check_position_exit()
-                time.sleep(1)
-                continue
-            
-            print(f"\n🕐 Scanning for signals... (Threshold: {dynamic_threshold}%)")
-            signals = monitor_coins_until_signal()
+        
+        # Sort by confidence dan ambil top 3
+        signals.sort(key=lambda x: x['confidence'], reverse=True)
+        top_signals = signals[:3]
+        
+        logging.info(f"Dynamic analysis complete: {analyzed_count} pairs analyzed, {len(signals)} quality signals found")
+        
+        return top_signals
+    
+    async def run_analysis_cycle(self):
+        """Jalankan satu siklus analisis"""
+        logging.info("Starting Dynamic Smart Money analysis cycle...")
+        
+        try:
+            signals = await self.analyze_all_pairs()
             
             if signals:
-                signal = signals[0]
-                if fast_execute_signal(signal):
-                    print("✅ Trade executed successfully!")
-            
-            time.sleep(DELAY_BETWEEN_SCANS)
+                # Kirim summary dulu
+                await self.notifier.send_summary(signals)
+                await asyncio.sleep(2)
                 
-            save_bot_state()
-                
-        except KeyboardInterrupt:
-            print(f"\n🛑 Bot stopped by user")
-            send_telegram_message("🛑 <b>BOT DIHENTIKAN OLEH PENGGUNA</b>")
-            BOT_RUNNING = False
-            break
-        except Exception as e:
-            print(f"❌ Main loop error: {e}")
-            time.sleep(5)
-    
-    save_bot_state()
-    print("✅ Bot stopped completely")
-
-def main():
-    main_improved_fast()
-
-def keep_alive_ping():
-    """Keep-alive ping untuk Render"""
-    while True:
-        try:
-            requests.get("http://localhost:5000/health", timeout=5)
-        except:
-            print("💓 Keep-alive heartbeat - Bot still running")
-        time.sleep(300)
-
-def safe_run_worker():
-    """Loop utama bot dengan proteksi error"""
-    print("🔄 Running trading bot worker (safe mode)...")
-    
-    restart_count = 0
-    max_restarts = 5
-    
-    while restart_count < max_restarts:
-        try:
-            print(f"🔄 Starting bot iteration #{restart_count + 1}")
-            main_improved_fast()
-            
-            if not BOT_RUNNING:
-                print("🛑 Bot stopped normally via command")
-                break
+                # Kirim sinyal individual untuk 3 terbaik
+                for signal in signals:
+                    if signal['confidence'] >= 70:  # Higher threshold for quality
+                        await self.notifier.send_signal(signal)
+                        await asyncio.sleep(2)  # Delay antar pesan
+            else:
+                logging.info("No quality signals generated in this cycle")
+                await self.notifier.send_alert("📊 Analysis Complete: No high-quality signals found in this cycle.")
                 
         except Exception as e:
-            restart_count += 1
-            print(f"⚠️ Worker crashed (attempt {restart_count}/{max_restarts}): {e}")
-            time.sleep(10)
+            logging.error(f"Error in analysis cycle: {str(e)}")
+            await self.notifier.send_alert(f"Error in analysis cycle: {str(e)}")
+    
+    async def start(self):
+        """Start the Dynamic Smart Money Bot"""
+        logging.info("Starting Dynamic Smart Money Signal Bot...")
         
-        BOT_RUNNING = False
-        
-    if restart_count >= max_restarts:
-        error_msg = f"🔴 <b>BOT CRASHED TOO MANY TIMES</b>\nRestarted {max_restarts} times."
-        send_telegram_message(error_msg)
+        try:
+            # Initialize connections
+            await self.data_manager.initialize()
+            await self.notifier.send_alert("🤖 DYNAMIC SMART MONEY BOT Started Successfully!\n\n"
+                                         "🔍 Scanning all USDT pairs (excluding BTC/ETH/Stablecoins)\n"
+                                         "🎯 Using Dynamic Smart Money Concept + Adaptive Risk Management\n"
+                                         "📊 Multiple factors: Support/Resistance, ATR, Market Structure\n"
+                                         "⏰ Updates every 4 hours")
+            
+            self.is_running = True
+            
+            # Main loop
+            while self.is_running:
+                try:
+                    await self.run_analysis_cycle()
+                    
+                    # Tunggu untuk interval berikutnya
+                    logging.info(f"Waiting {Config.UPDATE_INTERVAL_HOURS} hours for next analysis...")
+                    await asyncio.sleep(Config.UPDATE_INTERVAL_HOURS * 3600)
+                    
+                except Exception as e:
+                    logging.error(f"Error in main loop: {str(e)}")
+                    await asyncio.sleep(60)
+                    
+        except Exception as e:
+            logging.error(f"Failed to start bot: {str(e)}")
+        finally:
+            await self.stop()
+    
+    async def stop(self):
+        """Stop the bot"""
+        self.is_running = False
+        await self.data_manager.close()
+        logging.info("Dynamic Smart Money Bot stopped")
 
-if __name__ == "__main__":
-    print("=" * 60)
-    print("🚀 ADVANCED TRADING BOT - API ONLY VERSION")
-    print("=" * 60)
-    
-    is_render = check_render_environment()
-    
-    if is_render:
-        health_thread = threading.Thread(target=create_simple_health_endpoint, daemon=True)
-        health_thread.start()
-        print("🌐 Health endpoint started")
-    
-    keep_alive_thread = threading.Thread(target=keep_alive_ping, daemon=True)
-    keep_alive_thread.start()
-    print("💓 Keep-alive thread started")
+async def main():
+    """Main function"""
+    bot = AISignalBot()
     
     try:
-        safe_run_worker()
+        await bot.start()
     except KeyboardInterrupt:
-        print("\n🛑 Bot shutdown requested")
-        BOT_RUNNING = False
+        logging.info("Received interrupt signal, shutting down...")
     except Exception as e:
-        print(f"💀 Fatal error: {e}")
-        send_telegram_message(f"🔴 <b>FATAL ERROR</b>\n{str(e)}")
+        logging.error(f"Unexpected error: {str(e)}")
+    finally:
+        await bot.stop()
+
+if __name__ == "__main__":
+    # Check environment variables
+    required_vars = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
     
-    print("✅ Bot shutdown complete")
-
-
-
+    if missing_vars:
+        print(f"Error: Missing environment variables: {', '.join(missing_vars)}")
+        print("Please check your .env file")
+        exit(1)
+    
+    asyncio.run(main())
