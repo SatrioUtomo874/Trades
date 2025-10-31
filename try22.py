@@ -11,6 +11,9 @@ import pandas as pd
 from collections import deque
 from dotenv import load_dotenv
 import threading
+from flask import Flask
+import signal
+import sys
 
 # Load environment variables
 load_dotenv()
@@ -58,6 +61,32 @@ active_position = None
 trade_history = []
 client = None
 BOT_RUNNING = False
+
+# Flask app untuk health check
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    """Health check endpoint untuk Render"""
+    return {
+        'status': 'running',
+        'service': 'Trading Bot Signal',
+        'timestamp': datetime.now().isoformat(),
+        'message': 'Bot is scanning for trading signals'
+    }
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return {'status': 'healthy', 'timestamp': datetime.now().isoformat()}
+
+def start_web_server():
+    """Start simple web server untuk health checks"""
+    port = int(os.environ.get('PORT', 5000))
+    print(f"🌐 Starting health check server on port {port}")
+    # Run in background thread agar tidak blocking main bot
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=port)
 
 # ==================== INISIALISASI CLIENT ====================
 def initialize_binance_client():
@@ -137,7 +166,10 @@ def filter_quality_coins():
     
     print(f"🔍 Filtering {len(all_coins)} coins based on volume and liquidity...")
     
-    for coin in all_coins[:100]:  # Batasi untuk menghindari rate limit
+    # Batasi jumlah koin yang di-scan untuk menghindari rate limit
+    coins_to_scan = all_coins[:50]  # Scan 50 koin pertama untuk efisiensi
+    
+    for coin in coins_to_scan:
         try:
             # Gunakan get_ticker() yang benar
             rate_limit()
@@ -158,25 +190,18 @@ def filter_quality_coins():
             if (volume >= MIN_24H_VOLUME and 
                 spread <= MAX_SPREAD_PCT and
                 abs(price_change) < 25.0 and  # Tidak terlalu volatil
-                current_price > 0.001 and     # Harga tidak terlalu rendah
-                coin not in ['FDUSDT', 'USDCUSDT', 'BUSDUSDT', 'TUSDUSDT']):
+                current_price > 0.001):       # Harga tidak terlalu rendah
                 
                 quality_coins.append(coin)
                 print(f"✅ {coin}: Volume=${volume:,.0f}, Spread={spread:.3f}%, Price=${current_price:.6f}")
-            else:
-                if volume < MIN_24H_VOLUME:
-                    print(f"❌ {coin} rejected - Low Volume: ${volume:,.0f}")
-                elif spread > MAX_SPREAD_PCT:
-                    print(f"❌ {coin} rejected - High Spread: {spread:.3f}%")
-                elif abs(price_change) >= 25.0:
-                    print(f"❌ {coin} rejected - High Volatility: {price_change:.1f}%")
                     
         except Exception as e:
             # Skip error untuk koin tertentu, lanjut ke koin berikutnya
+            print(f"⚠️  Skip {coin}: {e}")
             continue
     
-    # Urutkan berdasarkan volume (descending) dan ambil top 30
-    quality_coins = get_sorted_coins_by_volume(quality_coins)[:30]
+    # Urutkan berdasarkan volume (descending) dan ambil top 20
+    quality_coins = get_sorted_coins_by_volume(quality_coins)[:20]
     
     print(f"🎯 Quality coins selected: {len(quality_coins)}")
     return quality_coins
@@ -296,15 +321,13 @@ def analyze_coin_improved(symbol):
     try:
         # Ambil data multi-timeframe
         data_15m = get_klines_data_fast(symbol, Client.KLINE_INTERVAL_15MINUTE, 100)
-        data_5m = get_klines_data_fast(symbol, Client.KLINE_INTERVAL_5MINUTE, 100)
         data_1h = get_klines_data_fast(symbol, Client.KLINE_INTERVAL_1HOUR, 100)
         
-        if not data_15m or not data_5m or not data_1h:
+        if not data_15m or not data_1h:
             return None
         
         # Extract data
         closes_15m = data_15m['close']
-        closes_5m = data_5m['close']
         closes_1h = data_1h['close']
         highs_15m = data_15m['high']
         lows_15m = data_15m['low']
@@ -321,7 +344,6 @@ def analyze_coin_improved(symbol):
         
         # RSI
         rsi_15m = calculate_rsi(closes_15m, 14)
-        rsi_5m = calculate_rsi(closes_5m, 14)
         
         # MACD
         macd_15m, macd_signal_15m, macd_hist_15m = calculate_macd(closes_15m, 12, 26, 9)
@@ -331,8 +353,6 @@ def analyze_coin_improved(symbol):
         
         # Volume analysis
         volume_ratio = calculate_volume_profile(volumes_15m, 20)
-        current_volume = volumes_15m[-1] if volumes_15m else 0
-        avg_volume = np.mean(volumes_15m[-20:]) if len(volumes_15m) >= 20 else current_volume
         
         # Support Resistance
         support, resistance = calculate_support_resistance(highs_15m, lows_15m, closes_15m, 50)
@@ -350,17 +370,16 @@ def analyze_coin_improved(symbol):
                         current_price > ema_9_15m)
         
         # 3. RSI kondisi ideal (momentum baik)
-        rsi_ok = (rsi_15m > 45 and rsi_15m < 70 and 
-                 rsi_5m > 40 and rsi_5m < 75)
+        rsi_ok = (rsi_15m > 45 and rsi_15m < 70)
         
         # 4. MACD bullish
-        macd_bullish = (macd_hist_15m > 0 and macd_15m > macd_signal_15m)
+        macd_bullish = (macd_hist_15m > 0 and macd_15m > macd_signal_15m) if macd_hist_15m else False
         
         # 5. MFI tidak overbought
         mfi_ok = mfi_15m < 80
         
         # 6. Volume konfirmasi
-        volume_ok = volume_ratio > 1.0 and current_volume > avg_volume * 0.7
+        volume_ok = volume_ratio > 1.0
         
         # 7. Price position (di atas support)
         price_position_ok = support and (current_price > support * 1.01)
@@ -385,7 +404,6 @@ def analyze_coin_improved(symbol):
             'confidence': confidence,
             'current_price': current_price,
             'rsi_15m': rsi_15m,
-            'rsi_5m': rsi_5m,
             'mfi_15m': mfi_15m,
             'volume_ratio': volume_ratio,
             'support': support,
@@ -403,7 +421,7 @@ def analyze_coin_improved(symbol):
 # ==================== FUNGSI YANG SUDAH ADA (dengan minor improvements) ====================
 def rate_limit():
     """Rate limiting"""
-    time.sleep(0.1)
+    time.sleep(0.2)  # Increased to avoid rate limits
 
 def get_klines_data_fast(symbol, interval, limit=100):
     """Get klines data"""
@@ -616,11 +634,6 @@ def improved_main_loop():
             scan_count += 1
             print(f"\n=== SCAN #{scan_count} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
             
-            if active_position:
-                # Monitor posisi aktif (jika ada trading real)
-                time.sleep(1)
-                continue
-            
             # Scan untuk sinyal berkualitas
             signals = scan_for_signals_improved()
             
@@ -631,12 +644,12 @@ def improved_main_loop():
                     execute_improved_trade(best_signal)
             
             # Delay antara scan - lebih panjang untuk menghindari rate limit
-            print(f"⏳ Waiting 30 seconds before next scan...")
-            time.sleep(30)
+            print(f"⏳ Waiting 60 seconds before next scan...")
+            time.sleep(60)
             
         except Exception as e:
             print(f"❌ Main loop error: {e}")
-            time.sleep(30)  # Delay lebih panjang jika error
+            time.sleep(60)  # Delay lebih panjang jika error
 
 def send_telegram_message(message):
     """Send Telegram message"""
@@ -662,11 +675,29 @@ def send_telegram_message(message):
         print(f"❌ Error sending Telegram message: {e}")
         return False
 
+def signal_handler(sig, frame):
+    """Handle shutdown signals"""
+    global BOT_RUNNING
+    print(f"\n🛑 Received shutdown signal...")
+    BOT_RUNNING = False
+    if SEND_TELEGRAM_NOTIFICATIONS:
+        send_telegram_message("🛑 <b>TRADING BOT STOPPED</b>\n• Shutdown signal received")
+    time.sleep(2)
+    sys.exit(0)
+
 # ==================== START BOT ====================
 if __name__ == "__main__":
     print("=" * 60)
     print("🎯 IMPROVED TRADING BOT - QUALITY TELEGRAM SIGNALS")
     print("=" * 60)
+    
+    # Register signal handlers untuk graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Start web server in background thread untuk health checks
+    web_thread = threading.Thread(target=start_web_server, daemon=True)
+    web_thread.start()
     
     try:
         improved_main_loop()
