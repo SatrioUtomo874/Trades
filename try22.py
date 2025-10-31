@@ -9,7 +9,6 @@ from telegram import Bot
 from telegram.error import TelegramError
 from dotenv import load_dotenv
 from typing import Dict, List, Tuple, Optional
-import ta
 
 # Load environment variables
 load_dotenv()
@@ -39,6 +38,65 @@ class Config:
     WEIGHT_RSI = 0.2
     WEIGHT_MACD = 0.2
     WEIGHT_VOLUME = 0.2
+
+class TechnicalIndicators:
+    """Class untuk menghitung indikator teknikal manual tanpa library ta"""
+    
+    @staticmethod
+    def calculate_ema(data: pd.Series, period: int) -> pd.Series:
+        """Hitung Exponential Moving Average"""
+        return data.ewm(span=period, adjust=False).mean()
+    
+    @staticmethod
+    def calculate_rsi(data: pd.Series, period: int = 14) -> pd.Series:
+        """Hitung Relative Strength Index"""
+        delta = data.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    @staticmethod
+    def calculate_macd(data: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[pd.Series, pd.Series, pd.Series]:
+        """Hitung MACD"""
+        ema_fast = data.ewm(span=fast, adjust=False).mean()
+        ema_slow = data.ewm(span=slow, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        macd_signal = macd.ewm(span=signal, adjust=False).mean()
+        macd_histogram = macd - macd_signal
+        return macd, macd_signal, macd_histogram
+    
+    @staticmethod
+    def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+        """Hitung Average True Range"""
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        return atr
+    
+    @staticmethod
+    def calculate_volume_sma(volume: pd.Series, period: int) -> pd.Series:
+        """Hitung Simple Moving Average untuk volume"""
+        return volume.rolling(window=period).mean()
+    
+    @staticmethod
+    def calculate_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+        """Hitung On Balance Volume"""
+        obv = pd.Series(index=close.index, dtype=float)
+        obv.iloc[0] = volume.iloc[0]
+        
+        for i in range(1, len(close)):
+            if close.iloc[i] > close.iloc[i-1]:
+                obv.iloc[i] = obv.iloc[i-1] + volume.iloc[i]
+            elif close.iloc[i] < close.iloc[i-1]:
+                obv.iloc[i] = obv.iloc[i-1] - volume.iloc[i]
+            else:
+                obv.iloc[i] = obv.iloc[i-1]
+        
+        return obv
 
 class SmartMoneyAnalyzer:
     """Class untuk analisis Smart Money Concept"""
@@ -126,71 +184,30 @@ class SmartMoneyAnalyzer:
         
         return equal_lows, equal_highs
 
-    @staticmethod
-    def calculate_price_targets(df: pd.DataFrame, entry: float, support: float, resistance: float, atr: float) -> Tuple[float, float, float]:
-        """Hitung target harga berdasarkan struktur market dan volatilitas"""
-        current_price = df['close'].iloc[-1]
-        recent_high = df['high'].tail(20).max()
-        recent_low = df['low'].tail(20).min()
-        
-        # Method 1: Berdasarkan resistance levels
-        resistance_target = resistance
-        
-        # Method 2: Berdasarkan ATR (volatilitas)
-        atr_target_1 = entry + (atr * 1.5)
-        atr_target_2 = entry + (atr * 2.5)
-        
-        # Method 3: Berdasarkan recent swing high
-        swing_high_target = recent_high
-        
-        # Method 4: Fibonacci extension (simplified)
-        fib_target = entry + ((resistance - support) * 0.618)
-        
-        # Kombinasi semua method untuk mendapatkan target yang realistis
-        tp1 = min(resistance_target, atr_target_1, swing_high_target, fib_target)
-        tp2 = max(resistance_target, atr_target_2, swing_high_target, fib_target)
-        
-        # Pastikan TP reasonable
-        min_profit = entry * 1.01  # Minimal 1% profit
-        max_profit = entry * 1.10  # Maksimal 10% profit untuk TP1
-        
-        tp1 = max(min(tp1, max_profit), min_profit)
-        tp2 = max(tp2, tp1 * 1.02)  # TP2 minimal 2% di atas TP1
-        
-        return tp1, tp2
-
 class TechnicalAnalyzer:
     """Class untuk menghitung indikator teknikal"""
     
     def __init__(self):
         self.smart_money = SmartMoneyAnalyzer()
+        self.indicators = TechnicalIndicators()
     
-    @staticmethod
-    def calculate_ema(data: pd.DataFrame, period: int) -> pd.Series:
-        return ta.trend.EMAIndicator(data['close'], window=period).ema_indicator()
+    def calculate_ema(self, data: pd.DataFrame, period: int) -> pd.Series:
+        return self.indicators.calculate_ema(data['close'], period)
     
-    @staticmethod
-    def calculate_rsi(data: pd.DataFrame, period: int) -> pd.Series:
-        return ta.momentum.RSIIndicator(data['close'], window=period).rsi()
+    def calculate_rsi(self, data: pd.DataFrame, period: int) -> pd.Series:
+        return self.indicators.calculate_rsi(data['close'], period)
     
-    @staticmethod
-    def calculate_macd(data: pd.DataFrame) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        macd = ta.trend.MACD(data['close'])
-        return macd.macd(), macd.macd_signal(), macd.macd_diff()
+    def calculate_macd(self, data: pd.DataFrame) -> Tuple[pd.Series, pd.Series, pd.Series]:
+        return self.indicators.calculate_macd(data['close'], Config.MACD_FAST, Config.MACD_SLOW, Config.MACD_SIGNAL)
     
-    @staticmethod
-    def calculate_atr(data: pd.DataFrame, period: int) -> pd.Series:
-        return ta.volatility.AverageTrueRange(
-            data['high'], data['low'], data['close'], window=period
-        ).average_true_range()
+    def calculate_atr(self, data: pd.DataFrame, period: int) -> pd.Series:
+        return self.indicators.calculate_atr(data['high'], data['low'], data['close'], period)
     
-    @staticmethod
-    def calculate_volume_sma(data: pd.DataFrame, period: int) -> pd.Series:
-        return data['volume'].rolling(window=period).mean()
+    def calculate_volume_sma(self, data: pd.DataFrame, period: int) -> pd.Series:
+        return self.indicators.calculate_volume_sma(data['volume'], period)
     
-    @staticmethod
-    def calculate_obv(data: pd.DataFrame) -> pd.Series:
-        return ta.volume.OnBalanceVolumeIndicator(data['close'], data['volume']).on_balance_volume()
+    def calculate_obv(self, data: pd.DataFrame) -> pd.Series:
+        return self.indicators.calculate_obv(data['close'], data['volume'])
 
 class SignalAnalyzer:
     """Class untuk menganalisis sinyal trading dengan Smart Money Concept"""
@@ -559,8 +576,8 @@ class SignalAnalyzer:
         
         return min(confidence, 1.0)  # Cap at 100%
 
-# [TelegramNotifier, BinanceDataManager, dan AISignalBot classes tetap sama seperti sebelumnya]
-# ... (kode untuk class-class tersebut tidak berubah)
+# [TelegramNotifier, BinanceDataManager, dan AISignalBot classes tetap sama]
+# ... (kode untuk class-class tersebut sama seperti sebelumnya)
 
 class TelegramNotifier:
     """Class untuk mengirim notifikasi ke Telegram"""
@@ -661,9 +678,6 @@ class TelegramNotifier:
             
         except TelegramError as e:
             logging.error(f"Failed to send summary: {str(e)}")
-
-# [BinanceDataManager dan AISignalBot classes tetap sama]
-# ... (kode untuk class-class tersebut tidak berubah)
 
 class BinanceDataManager:
     """Manager untuk koneksi dan data Binance"""
