@@ -48,7 +48,8 @@ COINS = [
     'SOLUSDT', 'BNBUSDT', 'AVAXUSDT', 'ADAUSDT', 'MATICUSDT', 
     'DOTUSDT', 'LINKUSDT', 'UNIUSDT', 'XRPUSDT', 'DOGEUSDT',
     'ATOMUSDT', 'FTMUSDT', 'NEARUSDT', 'ALGOUSDT', 'SANDUSDT',
-    'MANAUSDT', 'GALAUSDT', 'ENJUSDT', 'CHZUSDT', 'APEUSDT'
+    'MANAUSDT', 'GALAUSDT', 'ENJUSDT', 'CHZUSDT', 'APEUSDT', 'PENGUUSDT',
+    'CAKEUSDT', 'XPLUSDT', 'DASHUSDT', 'PAXGUSDT', 'FFUSDT'
 ]
 
 # Telegram Configuration
@@ -556,3 +557,4 @@ if __name__ == "__main__":
     print("=" * 60)
     
     improved_main_loop()
+
