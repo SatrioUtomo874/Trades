@@ -43,15 +43,6 @@ ADAPTIVE_CONFIDENCE = True
 MIN_24H_VOLUME = 5000000  # $5 juta volume minimum
 MAX_SPREAD_PCT = 0.15     # Spread maksimal 0.15%
 
-# Daftar koin yang lebih berkualitas
-COINS = [
-    'SOLUSDT', 'BNBUSDT', 'AVAXUSDT', 'ADAUSDT', 'MATICUSDT', 
-    'DOTUSDT', 'LINKUSDT', 'UNIUSDT', 'XRPUSDT', 'DOGEUSDT',
-    'ATOMUSDT', 'FTMUSDT', 'NEARUSDT', 'ALGOUSDT', 'SANDUSDT',
-    'MANAUSDT', 'GALAUSDT', 'ENJUSDT', 'CHZUSDT', 'APEUSDT', 'PENGUUSDT',
-    'CAKEUSDT', 'XPLUSDT', 'DASHUSDT', 'PAXGUSDT', 'FFUSDT'
-]
-
 # Telegram Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -90,7 +81,45 @@ def initialize_binance_client():
         print("💡 Pastikan API Key dan Secret benar, dan koneksi internet stabil")
         return False
 
-# ==================== FUNGSI FILTER KOIN ====================
+# ==================== FUNGSI UNTUK MENDAPATKAN SEMUA KOIN ====================
+def get_all_quality_coins():
+    """Dapatkan semua koin USDT dari Binance kecuali yang dikecualikan"""
+    global client
+    
+    if client is None:
+        print("❌ Client Binance belum diinisialisasi")
+        return []
+    
+    try:
+        print("🔄 Mengambil semua koin dari Binance...")
+        
+        # Dapatkan info semua trading pairs
+        exchange_info = client.get_exchange_info()
+        all_symbols = exchange_info['symbols']
+        
+        # Filter hanya USDT pairs yang aktif trading
+        usdt_pairs = []
+        excluded_symbols = ['BTCUSDT', 'ETHUSDT', 'FDUSDT', 'USDCUSDT', 'FDUSUSDT', 'BUSDUSDT', 'TUSDUSDT']
+        
+        for symbol_info in all_symbols:
+            symbol = symbol_info['symbol']
+            status = symbol_info['status']
+            
+            # Filter kriteria
+            if (symbol.endswith('USDT') and 
+                status == 'TRADING' and 
+                symbol not in excluded_symbols and
+                not any(excluded in symbol for excluded in ['UP', 'DOWN', 'BEAR', 'BULL'])):  # Exclude leveraged tokens
+                usdt_pairs.append(symbol)
+        
+        print(f"📊 Ditemukan {len(usdt_pairs)} koin USDT")
+        return usdt_pairs
+        
+    except Exception as e:
+        print(f"❌ Error mendapatkan daftar koin: {e}")
+        return []
+
+# ==================== FUNGSI FILTER KOIN YANG DIPERBAIKI ====================
 def filter_quality_coins():
     """Filter koin berdasarkan volume, spread, dan likuiditas"""
     global client
@@ -100,16 +129,22 @@ def filter_quality_coins():
         print("❌ Client Binance belum diinisialisasi")
         return quality_coins
     
-    print("🔍 Filtering quality coins based on volume and liquidity...")
+    # Dapatkan semua koin USDT
+    all_coins = get_all_quality_coins()
+    if not all_coins:
+        print("❌ Tidak ada koin yang ditemukan")
+        return quality_coins
     
-    for coin in COINS:
+    print(f"🔍 Filtering {len(all_coins)} coins based on volume and liquidity...")
+    
+    for coin in all_coins[:100]:  # Batasi untuk menghindari rate limit
         try:
-            # Cek apakah koin ada dan aktif
+            # Gunakan get_ticker() yang benar
             rate_limit()
-            ticker = client.get_24hr_ticker(symbol=coin)
+            ticker = client.get_ticker(symbol=coin)
             volume = float(ticker['quoteVolume'])
             
-            # Cek spread bid-ask
+            # Cek spread bid-ask menggunakan order book
             book = client.get_order_book(symbol=coin, limit=5)
             bid_price = float(book['bids'][0][0])
             ask_price = float(book['asks'][0][0])
@@ -117,22 +152,52 @@ def filter_quality_coins():
             
             # Cek price change untuk volatilitas
             price_change = float(ticker['priceChangePercent'])
+            current_price = float(ticker['lastPrice'])
             
-            # Filter kondisi
+            # Filter kondisi - LEBIH KETAT
             if (volume >= MIN_24H_VOLUME and 
                 spread <= MAX_SPREAD_PCT and
-                abs(price_change) < 20.0 and  # Tidak terlalu volatil
+                abs(price_change) < 25.0 and  # Tidak terlalu volatil
+                current_price > 0.001 and     # Harga tidak terlalu rendah
                 coin not in ['FDUSDT', 'USDCUSDT', 'BUSDUSDT', 'TUSDUSDT']):
-                quality_coins.append(coin)
-                print(f"✅ {coin}: Volume=${volume:,.0f}, Spread={spread:.3f}%")
-            else:
-                print(f"❌ {coin} rejected - Vol:${volume:,.0f}, Spread:{spread:.3f}%")
                 
+                quality_coins.append(coin)
+                print(f"✅ {coin}: Volume=${volume:,.0f}, Spread={spread:.3f}%, Price=${current_price:.6f}")
+            else:
+                if volume < MIN_24H_VOLUME:
+                    print(f"❌ {coin} rejected - Low Volume: ${volume:,.0f}")
+                elif spread > MAX_SPREAD_PCT:
+                    print(f"❌ {coin} rejected - High Spread: {spread:.3f}%")
+                elif abs(price_change) >= 25.0:
+                    print(f"❌ {coin} rejected - High Volatility: {price_change:.1f}%")
+                    
         except Exception as e:
-            print(f"❌ Skip {coin}: {e}")
+            # Skip error untuk koin tertentu, lanjut ke koin berikutnya
+            continue
     
-    print(f"🎯 Quality coins selected: {len(quality_coins)}/{len(COINS)}")
+    # Urutkan berdasarkan volume (descending) dan ambil top 30
+    quality_coins = get_sorted_coins_by_volume(quality_coins)[:30]
+    
+    print(f"🎯 Quality coins selected: {len(quality_coins)}")
     return quality_coins
+
+def get_sorted_coins_by_volume(coins):
+    """Urutkan koin berdasarkan volume 24h"""
+    global client
+    coin_volumes = []
+    
+    for coin in coins:
+        try:
+            rate_limit()
+            ticker = client.get_ticker(symbol=coin)
+            volume = float(ticker['quoteVolume'])
+            coin_volumes.append((coin, volume))
+        except:
+            continue
+    
+    # Urutkan berdasarkan volume descending
+    coin_volumes.sort(key=lambda x: x[1], reverse=True)
+    return [coin for coin, volume in coin_volumes]
 
 # ==================== INDIKATOR TEKNIKAL YANG DIPERBAIKI ====================
 def calculate_mfi(highs, lows, closes, volumes, period=14):
@@ -434,6 +499,10 @@ def scan_for_signals_improved():
     # Filter koin berkualitas
     quality_coins = filter_quality_coins()
     
+    if not quality_coins:
+        print("❌ Tidak ada koin berkualitas yang ditemukan")
+        return []
+    
     signals = []
     for coin in quality_coins:
         if not BOT_RUNNING:
@@ -459,16 +528,17 @@ def scan_for_signals_improved():
             signals.append(analysis)
             
             # Kirim notifikasi Telegram
-            telegram_msg = (
-                f"🚨 <b>QUALITY BUY SIGNAL</b>\n"
-                f"• {coin}: {analysis['confidence']:.1f}%\n"
-                f"• Price: ${analysis['current_price']:.6f}\n"
-                f"• RSI: {analysis['rsi_15m']:.1f}\n"
-                f"• Volume: {analysis['volume_ratio']:.2f}x\n"
-                f"• Support: ${analysis['support']:.6f}\n"
-                f"• ATR Stop: ${analysis['atr_value']:.6f}"
-            )
-            send_telegram_message(telegram_msg)
+            if SEND_TELEGRAM_NOTIFICATIONS:
+                telegram_msg = (
+                    f"🚨 <b>QUALITY BUY SIGNAL</b>\n"
+                    f"• {coin}: {analysis['confidence']:.1f}%\n"
+                    f"• Price: ${analysis['current_price']:.6f}\n"
+                    f"• RSI: {analysis['rsi_15m']:.1f}\n"
+                    f"• Volume: {analysis['volume_ratio']:.2f}x\n"
+                    f"• Support: ${analysis['support']:.6f if analysis['support'] else 'N/A'}\n"
+                    f"• ATR Stop: ${analysis['atr_value']:.6f if analysis['atr_value'] else 'N/A'}"
+                )
+                send_telegram_message(telegram_msg)
     
     print(f"📊 Scan complete: {len(signals)} quality signals found")
     return signals
@@ -493,17 +563,41 @@ def execute_improved_trade(signal):
         stop_loss = current_price * (1 - STOP_LOSS_PCT)
         take_profit = current_price * (1 + TAKE_PROFIT_PCT)
     
-    # Place buy order (simulasi atau real)
-    # ... (implementasi order placement sama seperti sebelumnya)
+    # Simulasi trade execution (untuk sinyal telegram only)
+    trade_info = {
+        'symbol': symbol,
+        'entry_price': current_price,
+        'stop_loss': stop_loss,
+        'take_profit': take_profit,
+        'confidence': confidence,
+        'timestamp': datetime.now().isoformat()
+    }
     
-    print(f"✅ Trade executed with improved risk management")
+    print(f"✅ Trade signal generated for {symbol}")
+    print(f"   Entry: ${current_price:.6f}")
+    print(f"   Stop Loss: ${stop_loss:.6f}")
+    print(f"   Take Profit: ${take_profit:.6f}")
+    
+    # Kirim detail trade ke Telegram
+    if SEND_TELEGRAM_NOTIFICATIONS:
+        trade_msg = (
+            f"📈 <b>TRADE EXECUTED</b>\n"
+            f"• {symbol}\n"
+            f"• Entry: ${current_price:.6f}\n"
+            f"• Stop Loss: ${stop_loss:.6f}\n"
+            f"• Take Profit: ${take_profit:.6f}\n"
+            f"• Confidence: {confidence:.1f}%\n"
+            f"• Risk/Reward: 1:2"
+        )
+        send_telegram_message(trade_msg)
+    
     return True
 
 def improved_main_loop():
     """Main loop yang diperbaiki"""
     global BOT_RUNNING, active_position, client
     
-    print("🚀 STARTING IMPROVED TRADING BOT")
+    print("🚀 STARTING IMPROVED TRADING BOT - TELEGRAM SIGNALS ONLY")
     
     # Initialize Binance client
     if not initialize_binance_client():
@@ -512,10 +606,18 @@ def improved_main_loop():
     
     BOT_RUNNING = True
     
+    # Kirim notifikasi start bot
+    if SEND_TELEGRAM_NOTIFICATIONS:
+        send_telegram_message("🤖 <b>TRADING BOT STARTED</b>\n• Mode: Telegram Signals Only\n• Scanning for quality buy signals...")
+    
+    scan_count = 0
     while BOT_RUNNING:
         try:
+            scan_count += 1
+            print(f"\n=== SCAN #{scan_count} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+            
             if active_position:
-                # Monitor posisi aktif
+                # Monitor posisi aktif (jika ada trading real)
                 time.sleep(1)
                 continue
             
@@ -525,18 +627,22 @@ def improved_main_loop():
             if signals:
                 # Execute sinyal terbaik
                 best_signal = max(signals, key=lambda x: x['confidence'])
-                execute_improved_trade(best_signal)
+                if best_signal['confidence'] >= 75:  # Minimum confidence threshold
+                    execute_improved_trade(best_signal)
             
-            time.sleep(10)  # Delay antara scan
+            # Delay antara scan - lebih panjang untuk menghindari rate limit
+            print(f"⏳ Waiting 30 seconds before next scan...")
+            time.sleep(30)
             
         except Exception as e:
             print(f"❌ Main loop error: {e}")
-            time.sleep(5)
+            time.sleep(30)  # Delay lebih panjang jika error
 
 def send_telegram_message(message):
     """Send Telegram message"""
     try:
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            print("❌ Telegram bot token atau chat ID tidak ditemukan")
             return False
             
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -545,16 +651,30 @@ def send_telegram_message(message):
             'text': message,
             'parse_mode': 'HTML'
         }
-        response = requests.post(url, data=payload, timeout=5)
-        return response.status_code == 200
-    except:
+        response = requests.post(url, data=payload, timeout=10)
+        if response.status_code == 200:
+            print("✅ Telegram message sent")
+            return True
+        else:
+            print(f"❌ Failed to send Telegram message: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Error sending Telegram message: {e}")
         return False
 
 # ==================== START BOT ====================
 if __name__ == "__main__":
     print("=" * 60)
-    print("🎯 IMPROVED TRADING BOT - QUALITY SIGNALS")
+    print("🎯 IMPROVED TRADING BOT - QUALITY TELEGRAM SIGNALS")
     print("=" * 60)
     
-    improved_main_loop()
-
+    try:
+        improved_main_loop()
+    except KeyboardInterrupt:
+        print("\n🛑 Bot dihentikan oleh user")
+        if SEND_TELEGRAM_NOTIFICATIONS:
+            send_telegram_message("🛑 <b>TRADING BOT STOPPED</b>\n• Stopped by user")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        if SEND_TELEGRAM_NOTIFICATIONS:
+            send_telegram_message(f"❌ <b>BOT CRASHED</b>\n• Error: {str(e)}")
