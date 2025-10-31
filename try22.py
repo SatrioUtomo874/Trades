@@ -19,7 +19,7 @@ import sys
 load_dotenv()
 warnings.filterwarnings('ignore')
 
-# ==================== KONFIGURASI YANG DIPERBAIKI ====================
+# ==================== KONFIGURASI YANG LEBIH AGRESIF ====================
 API_KEYS = [
     {
         'key': os.getenv('BINANCE_API_KEY'),
@@ -31,20 +31,20 @@ CURRENT_API_INDEX = 0
 INITIAL_INVESTMENT = float(os.getenv('INITIAL_INVESTMENT', '10.0'))
 ORDER_RUN = os.getenv('ORDER_RUN', 'False').lower() == 'true'
 
-# Trading Parameters - LEBIH KONSERVATIF
-TAKE_PROFIT_PCT = 0.015  # 1.5%
-STOP_LOSS_PCT = 0.008    # 0.8%
-TRAILING_STOP_ACTIVATION = 0.008
-TRAILING_STOP_PCT = 0.006
+# Trading Parameters - LEBIH AGRESIF TAPI MASIH AMAN
+TAKE_PROFIT_PCT = 0.025  # 2.5% (naik dari 1.5%)
+STOP_LOSS_PCT = 0.012    # 1.2% (naik dari 0.8%)
+TRAILING_STOP_ACTIVATION = 0.012
+TRAILING_STOP_PCT = 0.008
 
 # Risk Management
-POSITION_SIZING_PCT = 0.3  # Lebih kecil untuk risk management
+POSITION_SIZING_PCT = 0.4  # Lebih besar untuk agresif
 MAX_DRAWDOWN_PCT = 0.4
 ADAPTIVE_CONFIDENCE = True
 
-# Filter Koin
-MIN_24H_VOLUME = 5000000  # $5 juta volume minimum
-MAX_SPREAD_PCT = 0.15     # Spread maksimal 0.15%
+# Filter Koin - LEBIH FLEKSIBEL
+MIN_24H_VOLUME = 3000000  # $3 juta volume minimum (turun dari $5 juta)
+MAX_SPREAD_PCT = 0.2      # Spread maksimal 0.2% (naik dari 0.15%)
 
 # Telegram Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -52,8 +52,8 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 SEND_TELEGRAM_NOTIFICATIONS = True
 
 # File Configuration
-LOG_FILE = 'improved_trading_log.txt'
-TRADE_HISTORY_FILE = 'improved_trade_history.json'
+LOG_FILE = 'aggressive_trading_log.txt'
+TRADE_HISTORY_FILE = 'aggressive_trade_history.json'
 
 # Global variables
 current_investment = INITIAL_INVESTMENT
@@ -61,6 +61,7 @@ active_position = None
 trade_history = []
 client = None
 BOT_RUNNING = False
+last_signal_time = {}
 
 # Flask app untuk health check
 app = Flask(__name__)
@@ -70,9 +71,9 @@ def health_check():
     """Health check endpoint untuk Render"""
     return {
         'status': 'running',
-        'service': 'Trading Bot Signal',
+        'service': 'Aggressive Trading Bot Signal',
         'timestamp': datetime.now().isoformat(),
-        'message': 'Bot is scanning for trading signals'
+        'message': 'Bot is aggressively scanning for trading signals'
     }
 
 @app.route('/health')
@@ -134,7 +135,7 @@ def get_all_quality_coins():
             symbol = symbol_info['symbol']
             status = symbol_info['status']
             
-            # Filter kriteria
+            # Filter kriteria - LEBIH FLEKSIBEL
             if (symbol.endswith('USDT') and 
                 status == 'TRADING' and 
                 symbol not in excluded_symbols and
@@ -148,9 +149,9 @@ def get_all_quality_coins():
         print(f"❌ Error mendapatkan daftar koin: {e}")
         return []
 
-# ==================== FUNGSI FILTER KOIN YANG DIPERBAIKI ====================
+# ==================== FUNGSI FILTER KOIN YANG LEBIH FLEKSIBEL ====================
 def filter_quality_coins():
-    """Filter koin berdasarkan volume, spread, dan likuiditas"""
+    """Filter koin berdasarkan volume, spread, dan likuiditas - LEBIH FLEKSIBEL"""
     global client
     quality_coins = []
     
@@ -167,7 +168,7 @@ def filter_quality_coins():
     print(f"🔍 Filtering {len(all_coins)} coins based on volume and liquidity...")
     
     # Batasi jumlah koin yang di-scan untuk menghindari rate limit
-    coins_to_scan = all_coins[:50]  # Scan 50 koin pertama untuk efisiensi
+    coins_to_scan = all_coins[:80]  # Scan 80 koin pertama (lebih banyak)
     
     for coin in coins_to_scan:
         try:
@@ -186,11 +187,11 @@ def filter_quality_coins():
             price_change = float(ticker['priceChangePercent'])
             current_price = float(ticker['lastPrice'])
             
-            # Filter kondisi - LEBIH KETAT
+            # Filter kondisi - LEBIH FLEKSIBEL
             if (volume >= MIN_24H_VOLUME and 
                 spread <= MAX_SPREAD_PCT and
-                abs(price_change) < 25.0 and  # Tidak terlalu volatil
-                current_price > 0.001):       # Harga tidak terlalu rendah
+                abs(price_change) < 30.0 and  # Lebih toleran terhadap volatilitas
+                current_price > 0.0005):      # Harga minimum lebih rendah
                 
                 quality_coins.append(coin)
                 print(f"✅ {coin}: Volume=${volume:,.0f}, Spread={spread:.3f}%, Price=${current_price:.6f}")
@@ -200,8 +201,8 @@ def filter_quality_coins():
             print(f"⚠️  Skip {coin}: {e}")
             continue
     
-    # Urutkan berdasarkan volume (descending) dan ambil top 20
-    quality_coins = get_sorted_coins_by_volume(quality_coins)[:20]
+    # Urutkan berdasarkan volume (descending) dan ambil top 30
+    quality_coins = get_sorted_coins_by_volume(quality_coins)[:30]
     
     print(f"🎯 Quality coins selected: {len(quality_coins)}")
     return quality_coins
@@ -224,7 +225,7 @@ def get_sorted_coins_by_volume(coins):
     coin_volumes.sort(key=lambda x: x[1], reverse=True)
     return [coin for coin, volume in coin_volumes]
 
-# ==================== INDIKATOR TEKNIKAL YANG DIPERBAIKI ====================
+# ==================== INDIKATOR TEKNIKAL YANG LEBIH SENSITIF ====================
 def calculate_mfi(highs, lows, closes, volumes, period=14):
     """Calculate Money Flow Index"""
     if len(closes) < period + 1:
@@ -309,9 +310,30 @@ def calculate_atr_stop_loss(highs, lows, closes, period=14, multiplier=2):
         print(f"❌ ATR calculation error: {e}")
         return None
 
-# ==================== SISTEM ANALISIS YANG DIPERBAIKI ====================
-def analyze_coin_improved(symbol):
-    """Analisis koin dengan kriteria yang lebih ketat"""
+def calculate_momentum(closes, period=10):
+    """Calculate price momentum"""
+    if len(closes) < period:
+        return 0
+    try:
+        momentum = ((closes[-1] - closes[-period]) / closes[-period]) * 100
+        return momentum
+    except:
+        return 0
+
+def calculate_volatility(closes, period=20):
+    """Calculate price volatility"""
+    if len(closes) < period:
+        return 0
+    try:
+        returns = np.diff(closes) / closes[:-1]
+        volatility = np.std(returns) * 100
+        return volatility
+    except:
+        return 0
+
+# ==================== SISTEM ANALISIS YANG LEBIH AGRESIF ====================
+def analyze_coin_aggressive(symbol):
+    """Analisis koin dengan kriteria yang lebih agresif"""
     global client
     
     if client is None:
@@ -321,13 +343,15 @@ def analyze_coin_improved(symbol):
     try:
         # Ambil data multi-timeframe
         data_15m = get_klines_data_fast(symbol, Client.KLINE_INTERVAL_15MINUTE, 100)
+        data_5m = get_klines_data_fast(symbol, Client.KLINE_INTERVAL_5MINUTE, 100)
         data_1h = get_klines_data_fast(symbol, Client.KLINE_INTERVAL_1HOUR, 100)
         
-        if not data_15m or not data_1h:
+        if not data_15m or not data_5m or not data_1h:
             return None
         
         # Extract data
         closes_15m = data_15m['close']
+        closes_5m = data_5m['close']
         closes_1h = data_1h['close']
         highs_15m = data_15m['high']
         lows_15m = data_15m['low']
@@ -336,67 +360,89 @@ def analyze_coin_improved(symbol):
         # Hitung semua indikator
         current_price = closes_15m[-1]
         
-        # EMA Multi-timeframe
+        # EMA Multi-timeframe - PERIODE LEBIH PENDEK UNTUK RESPONSIF
+        ema_5_15m = calculate_ema(closes_15m, 5)
         ema_9_15m = calculate_ema(closes_15m, 9)
         ema_21_15m = calculate_ema(closes_15m, 21)
         ema_50_15m = calculate_ema(closes_15m, 50)
-        ema_200_1h = calculate_ema(closes_1h, 200)
+        ema_100_1h = calculate_ema(closes_1h, 100)  # EMA lebih pendek untuk trend
         
-        # RSI
+        # RSI - RANGE LEBIH LUAS
         rsi_15m = calculate_rsi(closes_15m, 14)
+        rsi_5m = calculate_rsi(closes_5m, 14)
         
         # MACD
-        macd_15m, macd_signal_15m, macd_hist_15m = calculate_macd(closes_15m, 12, 26, 9)
+        macd_15m, macd_signal_15m, macd_hist_15m = calculate_macd(closes_15m, 8, 21, 9)  # MACD lebih sensitif
         
-        # MFI (Money Flow Index)
+        # MFI (Money Flow Index) - RANGE LEBIH LUAS
         mfi_15m = calculate_mfi(highs_15m, lows_15m, closes_15m, volumes_15m, 14)
         
-        # Volume analysis
+        # Volume analysis - LEBIH FLEKSIBEL
         volume_ratio = calculate_volume_profile(volumes_15m, 20)
+        current_volume = volumes_15m[-1] if volumes_15m else 0
+        avg_volume = np.mean(volumes_15m[-20:]) if len(volumes_15m) >= 20 else current_volume
         
         # Support Resistance
         support, resistance = calculate_support_resistance(highs_15m, lows_15m, closes_15m, 50)
         
         # ATR untuk stop loss
-        atr_value = calculate_atr_stop_loss(highs_15m, lows_15m, closes_15m, 14, 2)
+        atr_value = calculate_atr_stop_loss(highs_15m, lows_15m, closes_15m, 14, 1.8)  # Multiplier lebih kecil
         
-        # ========== KRITERIA SINYAL YANG LEBIH KETAT ==========
+        # Momentum dan Volatility
+        momentum_15m = calculate_momentum(closes_15m, 10)
+        volatility_15m = calculate_volatility(closes_15m, 20)
         
-        # 1. Trend utama bullish (harga di atas EMA 200 1H)
-        trend_bullish = current_price > ema_200_1h if ema_200_1h else False
+        # ========== KRITERIA SINYAL YANG LEBIH AGRESIF ==========
         
-        # 2. EMA alignment bullish
-        ema_alignment = (ema_9_15m > ema_21_15m > ema_50_15m and 
-                        current_price > ema_9_15m)
+        # 1. Trend utama bullish (harga di atas EMA 100 1H) - LEBIH FLEKSIBEL
+        trend_bullish = current_price > ema_100_1h if ema_100_1h else True  # Tidak wajib
         
-        # 3. RSI kondisi ideal (momentum baik)
-        rsi_ok = (rsi_15m > 45 and rsi_15m < 70)
+        # 2. EMA alignment bullish - LEBIH FLEKSIBEL
+        ema_alignment = (ema_5_15m > ema_9_15m and ema_9_15m > ema_21_15m and
+                        current_price > ema_5_15m)
         
-        # 4. MACD bullish
-        macd_bullish = (macd_hist_15m > 0 and macd_15m > macd_signal_15m) if macd_hist_15m else False
+        # 3. RSI kondisi ideal (momentum baik) - RANGE LEBIH LUAS
+        rsi_ok = (rsi_15m > 40 and rsi_15m < 75 and 
+                 rsi_5m > 35 and rsi_5m < 80)
         
-        # 5. MFI tidak overbought
-        mfi_ok = mfi_15m < 80
+        # 4. MACD bullish - LEBIH SENSITIF
+        macd_bullish = (macd_hist_15m > 0 or (macd_15m > macd_signal_15m))
         
-        # 6. Volume konfirmasi
-        volume_ok = volume_ratio > 1.0
+        # 5. MFI tidak overbought - RANGE LEBIH LUAS
+        mfi_ok = mfi_15m < 85
         
-        # 7. Price position (di atas support)
-        price_position_ok = support and (current_price > support * 1.01)
+        # 6. Volume konfirmasi - LEBIH FLEKSIBEL
+        volume_ok = volume_ratio > 0.8 or current_volume > avg_volume * 0.6
         
-        # Hitung confidence score
+        # 7. Price position (di atas support) - LEBIH FLEKSIBEL
+        price_position_ok = (support is None) or (current_price > support * 1.005)
+        
+        # 8. Momentum positif
+        momentum_ok = momentum_15m > -2.0  # Boleh sedikit negatif
+        
+        # 9. Volatility acceptable
+        volatility_ok = volatility_15m < 8.0  # Volatilitas tidak terlalu tinggi
+        
+        # Hitung confidence score - BOBOT LEBIH SEIMBANG
         confidence = 0
-        if trend_bullish: confidence += 20
-        if ema_alignment: confidence += 25
+        if trend_bullish: confidence += 15
+        if ema_alignment: confidence += 20
         if rsi_ok: confidence += 15
         if macd_bullish: confidence += 15
         if mfi_ok: confidence += 10
         if volume_ok: confidence += 10
         if price_position_ok: confidence += 5
+        if momentum_ok: confidence += 5
+        if volatility_ok: confidence += 5
         
-        # Sinyal buy hanya jika kriteria utama terpenuhi
-        buy_signal = (trend_bullish and ema_alignment and rsi_ok and 
-                     macd_bullish and mfi_ok and confidence >= 75)
+        # Sinyal buy dengan kriteria lebih fleksibel
+        required_criteria = 5  # Minimal 5 dari 9 kriteria terpenuhi
+        criteria_met = sum([
+            trend_bullish, ema_alignment, rsi_ok, macd_bullish, 
+            mfi_ok, volume_ok, price_position_ok, momentum_ok, volatility_ok
+        ])
+        
+        buy_signal = (criteria_met >= required_criteria and confidence >= 65)
         
         return {
             'symbol': symbol,
@@ -404,24 +450,28 @@ def analyze_coin_improved(symbol):
             'confidence': confidence,
             'current_price': current_price,
             'rsi_15m': rsi_15m,
+            'rsi_5m': rsi_5m,
             'mfi_15m': mfi_15m,
             'volume_ratio': volume_ratio,
             'support': support,
             'resistance': resistance,
             'atr_value': atr_value,
+            'momentum': momentum_15m,
+            'volatility': volatility_15m,
             'trend_bullish': trend_bullish,
             'ema_alignment': ema_alignment,
-            'macd_bullish': macd_bullish
+            'macd_bullish': macd_bullish,
+            'criteria_met': f"{criteria_met}/9"
         }
         
     except Exception as e:
-        print(f"❌ Error in improved analysis for {symbol}: {e}")
+        print(f"❌ Error in aggressive analysis for {symbol}: {e}")
         return None
 
 # ==================== FUNGSI YANG SUDAH ADA (dengan minor improvements) ====================
 def rate_limit():
     """Rate limiting"""
-    time.sleep(0.2)  # Increased to avoid rate limits
+    time.sleep(0.15)  # Sedikit lebih cepat untuk scanning agresif
 
 def get_klines_data_fast(symbol, interval, limit=100):
     """Get klines data"""
@@ -507,12 +557,12 @@ def calculate_volume_profile(volumes, period=20):
     except:
         return 1.0
 
-# ==================== MAIN BOT LOGIC YANG DIPERBAIKI ====================
-def scan_for_signals_improved():
-    """Scan untuk sinyal dengan koin yang sudah difilter"""
-    global BOT_RUNNING
+# ==================== MAIN BOT LOGIC YANG LEBIH AGRESIF ====================
+def scan_for_signals_aggressive():
+    """Scan untuk sinyal dengan pendekatan lebih agresif"""
+    global BOT_RUNNING, last_signal_time
     
-    print("\n🎯 IMPROVED SCANNING - Looking for quality signals...")
+    print("\n🎯 AGGRESSIVE SCANNING - Looking for frequent signals...")
     
     # Filter koin berkualitas
     quality_coins = filter_quality_coins()
@@ -527,10 +577,18 @@ def scan_for_signals_improved():
             break
             
         print(f"🔍 Analyzing {coin}...")
-        analysis = analyze_coin_improved(coin)
+        analysis = analyze_coin_aggressive(coin)
         
         if analysis and analysis['buy_signal']:
-            print(f"🚨 QUALITY SIGNAL: {coin} - Confidence: {analysis['confidence']:.1f}%")
+            # Cek cooldown untuk coin yang sama (5 menit)
+            current_time = time.time()
+            last_time = last_signal_time.get(coin, 0)
+            
+            if current_time - last_time < 300:  # 5 menit cooldown
+                print(f"⏳ Skip {coin} - dalam cooldown period")
+                continue
+                
+            print(f"🚨 AGGRESSIVE SIGNAL: {coin} - Confidence: {analysis['confidence']:.1f}%")
             
             # Log detail sinyal
             signal_info = (
@@ -538,31 +596,35 @@ def scan_for_signals_improved():
                 f"• RSI 15m: {analysis['rsi_15m']:.1f}\n"
                 f"• MFI: {analysis['mfi_15m']:.1f}\n"
                 f"• Volume Ratio: {analysis['volume_ratio']:.2f}\n"
+                f"• Momentum: {analysis['momentum']:.2f}%\n"
+                f"• Criteria Met: {analysis['criteria_met']}\n"
                 f"• Trend: {'Bullish' if analysis['trend_bullish'] else 'Bearish'}\n"
                 f"• EMA Alignment: {'Yes' if analysis['ema_alignment'] else 'No'}"
             )
             print(signal_info)
             
             signals.append(analysis)
+            last_signal_time[coin] = current_time
             
             # Kirim notifikasi Telegram
             if SEND_TELEGRAM_NOTIFICATIONS:
                 telegram_msg = (
-                    f"🚨 <b>QUALITY BUY SIGNAL</b>\n"
+                    f"🚨 <b>AGGRESSIVE BUY SIGNAL</b>\n"
                     f"• {coin}: {analysis['confidence']:.1f}%\n"
                     f"• Price: ${analysis['current_price']:.6f}\n"
                     f"• RSI: {analysis['rsi_15m']:.1f}\n"
                     f"• Volume: {analysis['volume_ratio']:.2f}x\n"
-                    f"• Support: ${analysis['support']:.6f if analysis['support'] else 'N/A'}\n"
+                    f"• Momentum: {analysis['momentum']:.2f}%\n"
+                    f"• Criteria: {analysis['criteria_met']}\n"
                     f"• ATR Stop: ${analysis['atr_value']:.6f if analysis['atr_value'] else 'N/A'}"
                 )
                 send_telegram_message(telegram_msg)
     
-    print(f"📊 Scan complete: {len(signals)} quality signals found")
+    print(f"📊 Scan complete: {len(signals)} aggressive signals found")
     return signals
 
-def execute_improved_trade(signal):
-    """Execute trade dengan risk management yang lebih baik"""
+def execute_aggressive_trade(signal):
+    """Execute trade dengan approach lebih agresif"""
     global active_position
     
     symbol = signal['symbol']
@@ -570,12 +632,12 @@ def execute_improved_trade(signal):
     current_price = signal['current_price']
     atr_value = signal['atr_value']
     
-    print(f"⚡ EXECUTING IMPROVED TRADE: {symbol}")
+    print(f"⚡ EXECUTING AGGRESSIVE TRADE: {symbol}")
     
     # Gunakan ATR untuk stop loss jika available
     if atr_value and atr_value > 0:
         stop_loss = current_price - atr_value
-        take_profit = current_price + (atr_value * 2)  # Risk:Reward 1:2
+        take_profit = current_price + (atr_value * 2.5)  # Risk:Reward 1:2.5
     else:
         # Fallback ke percentage-based
         stop_loss = current_price * (1 - STOP_LOSS_PCT)
@@ -599,23 +661,23 @@ def execute_improved_trade(signal):
     # Kirim detail trade ke Telegram
     if SEND_TELEGRAM_NOTIFICATIONS:
         trade_msg = (
-            f"📈 <b>TRADE EXECUTED</b>\n"
+            f"📈 <b>AGGRESSIVE TRADE EXECUTED</b>\n"
             f"• {symbol}\n"
             f"• Entry: ${current_price:.6f}\n"
             f"• Stop Loss: ${stop_loss:.6f}\n"
             f"• Take Profit: ${take_profit:.6f}\n"
             f"• Confidence: {confidence:.1f}%\n"
-            f"• Risk/Reward: 1:2"
+            f"• Risk/Reward: 1:2.5"
         )
         send_telegram_message(trade_msg)
     
     return True
 
-def improved_main_loop():
-    """Main loop yang diperbaiki"""
+def aggressive_main_loop():
+    """Main loop yang lebih agresif"""
     global BOT_RUNNING, active_position, client
     
-    print("🚀 STARTING IMPROVED TRADING BOT - TELEGRAM SIGNALS ONLY")
+    print("🚀 STARTING AGGRESSIVE TRADING BOT - FREQUENT TELEGRAM SIGNALS")
     
     # Initialize Binance client
     if not initialize_binance_client():
@@ -626,30 +688,31 @@ def improved_main_loop():
     
     # Kirim notifikasi start bot
     if SEND_TELEGRAM_NOTIFICATIONS:
-        send_telegram_message("🤖 <b>TRADING BOT STARTED</b>\n• Mode: Telegram Signals Only\n• Scanning for quality buy signals...")
+        send_telegram_message("🤖 <b>AGGRESSIVE TRADING BOT STARTED</b>\n• Mode: Frequent Telegram Signals\n• Aggressively scanning for buy signals...")
     
     scan_count = 0
     while BOT_RUNNING:
         try:
             scan_count += 1
-            print(f"\n=== SCAN #{scan_count} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+            print(f"\n=== AGGRESSIVE SCAN #{scan_count} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
             
             # Scan untuk sinyal berkualitas
-            signals = scan_for_signals_improved()
+            signals = scan_for_signals_aggressive()
             
             if signals:
-                # Execute sinyal terbaik
-                best_signal = max(signals, key=lambda x: x['confidence'])
-                if best_signal['confidence'] >= 75:  # Minimum confidence threshold
-                    execute_improved_trade(best_signal)
+                # Execute semua sinyal yang memenuhi kriteria (tidak hanya yang terbaik)
+                for signal in signals:
+                    if signal['confidence'] >= 65:  # Minimum confidence threshold lebih rendah
+                        execute_aggressive_trade(signal)
+                        time.sleep(2)  # Delay kecil antara eksekusi
             
-            # Delay antara scan - lebih panjang untuk menghindari rate limit
-            print(f"⏳ Waiting 60 seconds before next scan...")
-            time.sleep(60)
+            # Delay antara scan - lebih pendek untuk scanning lebih sering
+            print(f"⏳ Waiting 30 seconds before next aggressive scan...")
+            time.sleep(30)
             
         except Exception as e:
             print(f"❌ Main loop error: {e}")
-            time.sleep(60)  # Delay lebih panjang jika error
+            time.sleep(30)  # Delay lebih pendek jika error
 
 def send_telegram_message(message):
     """Send Telegram message"""
@@ -681,14 +744,14 @@ def signal_handler(sig, frame):
     print(f"\n🛑 Received shutdown signal...")
     BOT_RUNNING = False
     if SEND_TELEGRAM_NOTIFICATIONS:
-        send_telegram_message("🛑 <b>TRADING BOT STOPPED</b>\n• Shutdown signal received")
+        send_telegram_message("🛑 <b>AGGRESSIVE TRADING BOT STOPPED</b>\n• Shutdown signal received")
     time.sleep(2)
     sys.exit(0)
 
 # ==================== START BOT ====================
 if __name__ == "__main__":
     print("=" * 60)
-    print("🎯 IMPROVED TRADING BOT - QUALITY TELEGRAM SIGNALS")
+    print("🎯 AGGRESSIVE TRADING BOT - FREQUENT TELEGRAM SIGNALS")
     print("=" * 60)
     
     # Register signal handlers untuk graceful shutdown
@@ -700,7 +763,7 @@ if __name__ == "__main__":
     web_thread.start()
     
     try:
-        improved_main_loop()
+        aggressive_main_loop()
     except KeyboardInterrupt:
         print("\n🛑 Bot dihentikan oleh user")
         if SEND_TELEGRAM_NOTIFICATIONS:
