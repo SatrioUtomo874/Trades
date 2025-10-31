@@ -67,10 +67,37 @@ trade_history = []
 client = None
 BOT_RUNNING = False
 
+# ==================== INISIALISASI CLIENT ====================
+def initialize_binance_client():
+    """Initialize Binance client dengan error handling"""
+    global client
+    
+    try:
+        if not API_KEYS[0]['key'] or not API_KEYS[0]['secret']:
+            print("❌ API Key atau Secret tidak ditemukan. Cek file .env")
+            return False
+            
+        client = Client(API_KEYS[0]['key'], API_KEYS[0]['secret'])
+        
+        # Test connection
+        client.get_account()
+        print("✅ Binance client berhasil diinisialisasi")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Gagal menginisialisasi Binance client: {e}")
+        print("💡 Pastikan API Key dan Secret benar, dan koneksi internet stabil")
+        return False
+
 # ==================== FUNGSI FILTER KOIN ====================
 def filter_quality_coins():
     """Filter koin berdasarkan volume, spread, dan likuiditas"""
+    global client
     quality_coins = []
+    
+    if client is None:
+        print("❌ Client Binance belum diinisialisasi")
+        return quality_coins
     
     print("🔍 Filtering quality coins based on volume and liquidity...")
     
@@ -194,6 +221,12 @@ def calculate_atr_stop_loss(highs, lows, closes, period=14, multiplier=2):
 # ==================== SISTEM ANALISIS YANG DIPERBAIKI ====================
 def analyze_coin_improved(symbol):
     """Analisis koin dengan kriteria yang lebih ketat"""
+    global client
+    
+    if client is None:
+        print("❌ Client Binance belum diinisialisasi")
+        return None
+        
     try:
         # Ambil data multi-timeframe
         data_15m = get_klines_data_fast(symbol, Client.KLINE_INTERVAL_15MINUTE, 100)
@@ -308,6 +341,12 @@ def rate_limit():
 
 def get_klines_data_fast(symbol, interval, limit=100):
     """Get klines data"""
+    global client
+    
+    if client is None:
+        print("❌ Client Binance belum diinisialisasi")
+        return None
+        
     try:
         rate_limit()
         klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
@@ -461,16 +500,13 @@ def execute_improved_trade(signal):
 
 def improved_main_loop():
     """Main loop yang diperbaiki"""
-    global BOT_RUNNING, active_position
+    global BOT_RUNNING, active_position, client
     
     print("🚀 STARTING IMPROVED TRADING BOT")
     
-    # Initialize
-    try:
-        client = Client(API_KEYS[0]['key'], API_KEYS[0]['secret'])
-        print("✅ Binance client initialized")
-    except Exception as e:
-        print(f"❌ Binance initialization failed: {e}")
+    # Initialize Binance client
+    if not initialize_binance_client():
+        print("❌ Tidak dapat melanjutkan tanpa koneksi Binance")
         return
     
     BOT_RUNNING = True
