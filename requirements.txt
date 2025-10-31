@@ -1,7 +1,7 @@
-python-binance
-python-telegram-bot
-pandas
+binance
 numpy
+pandas
 python-dotenv
-websockets
-aiohttp
+requests
+flask
+waitress
