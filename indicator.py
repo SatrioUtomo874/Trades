@@ -337,7 +337,7 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price = get_current_price(client, symbol)
 
         # Entry + TP + SL + percent
-        trade_levels = get_trade_levels_with_percent(client, symbol, "4h")
+        trade_levels = get_trade_levels_with_percent(client, symbol, "5m")
         
         # Format output rapi
         message = f"📊 *{symbol} Analysis*\n"
@@ -401,7 +401,6 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -----------------------------
 def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    await update.message.reply_text("Bot sudah di-start!")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("sto", stop))
