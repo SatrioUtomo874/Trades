@@ -9,9 +9,14 @@ import time
 import logging
 import asyncio
 import threading
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -25,7 +30,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # Inisialisasi Binance client dengan error handling
 try:
-    client = Client(api_key=API_KEY, api_secret=API_SECRET)
+    client = Client(api_key=API_KEY, api_secret=API_SECRET, testnet=False)
     logger.info("✅ Binance client initialized successfully")
 except Exception as e:
     logger.error(f"❌ Failed to initialize Binance client: {e}")
@@ -47,10 +52,9 @@ def get_klines(symbol: str, interval: str, limit: int = 500):
             "qav","num_trades","taker_base_vol","taker_quote_vol","ignore"
         ])
 
-        df["open"] = df["open"].astype(float)
-        df["high"] = df["high"].astype(float)
-        df["low"] = df["low"].astype(float)
-        df["close"] = df["close"].astype(float)
+        # Convert to float
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
 
         return df
     except Exception as e:
@@ -62,8 +66,8 @@ def get_klines(symbol: str, interval: str, limit: int = 500):
 # -------------------------------------------------------------------
 def get_trend(symbol: str, interval: str = "1h", limit: int = 500):
     df = get_klines(symbol, interval, limit)
-    if df is None or len(df) == 0:
-        return "ERROR"
+    if df is None or len(df) < 200:
+        return "ERROR: Insufficient data"
 
     try:
         df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
@@ -73,28 +77,28 @@ def get_trend(symbol: str, interval: str = "1h", limit: int = 500):
         ema200 = df["ema200"].iloc[-1]
 
         if ema50 > ema200 * 1.01:
-            return "UPTREND"
+            return "🟢 UPTREND"
         elif ema50 < ema200 * 0.99:
-            return "DOWNTREND"
+            return "🔴 DOWNTREND"
         else:
-            return "SIDEWAYS"
+            return "🟡 SIDEWAYS"
     except Exception as e:
         logger.error(f"Error calculating trend for {symbol}: {e}")
-        return "ERROR"
+        return f"ERROR: {str(e)}"
 
 # -------------------------------------------------------------------
 # ✅ 2. RSI (default RSI-14)
 # -------------------------------------------------------------------
 def get_rsi(symbol: str, interval: str = "1h", period: int = 14, limit: int = 200):
     df = get_klines(symbol, interval, limit)
-    if df is None or len(df) == 0:
+    if df is None or len(df) < period:
         return 50  # Default value jika error
 
     try:
         delta = df["close"].diff()
 
-        gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
 
         RS = gain / loss
         RSI = 100 - (100 / (1 + RS))
@@ -167,7 +171,7 @@ def detect_structure(df, swing_high, swing_low):
 def get_trend_smc(symbol: str, interval: str = "1h", limit: int = 500):
     df = get_klines(symbol, interval, limit)
     if df is None or len(df) == 0:
-        return "ERROR"
+        return "ERROR: No data"
 
     try:
         swing_high, swing_low = find_swing_high_low(df)
@@ -175,24 +179,21 @@ def get_trend_smc(symbol: str, interval: str = "1h", limit: int = 500):
 
         # Priority: CHoCH > BOS > Sideways
         if choch == "CHOCH_UP":
-            return "UPTREND (CHOCH-UP)"
+            return "🟢 UPTREND (CHOCH-UP)"
         if choch == "CHOCH_DOWN":
-            return "DOWNTREND (CHOCH-DOWN)"
-
+            return "🔴 DOWNTREND (CHOCH-DOWN)"
         if bos == "BOS_UP":
-            return "UPTREND"
+            return "🟢 UPTREND"
         if bos == "BOS_DOWN":
-            return "DOWNTREND"
+            return "🔴 DOWNTREND"
 
-        return "SIDEWAYS"
+        return "🟡 SIDEWAYS"
     except Exception as e:
         logger.error(f"Error calculating SMC trend for {symbol}: {e}")
-        return "ERROR"
+        return f"ERROR: {str(e)}"
 
 def get_support_resistance(symbol: str, interval: str = "1h", lookback: int = 50):
-    """
-    Cari support & resistance dari swing high & low
-    """
+    """Cari support & resistance dari swing high & low"""
     df = get_klines(symbol, interval, lookback)
     if df is None or len(df) == 0:
         return None
@@ -201,19 +202,19 @@ def get_support_resistance(symbol: str, interval: str = "1h", lookback: int = 50
         highs = df["high"].values
         lows = df["low"].values
 
-        resistance = np.max(highs)  # titik tertinggi → resistance
-        support = np.min(lows)      # titik terendah → support
+        resistance = np.max(highs)
+        support = np.min(lows)
 
-        return {"support": support, "resistance": resistance}
+        return {
+            "support": round(support, 4),
+            "resistance": round(resistance, 4)
+        }
     except Exception as e:
         logger.error(f"Error calculating support/resistance for {symbol}: {e}")
         return None
 
 def get_volume(symbol: str, interval: str = "1h", limit: int = 1):
-    """
-    Mengambil volume terakhir dari symbol di timeframe tertentu.
-    Return: float (volume)
-    """
+    """Mengambil volume terakhir dari symbol"""
     df = get_klines(symbol, interval, limit)
     if df is None or len(df) == 0:
         return None
@@ -225,9 +226,7 @@ def get_volume(symbol: str, interval: str = "1h", limit: int = 1):
         return None
 
 def get_volume_average(symbol: str, interval: str = "1h", limit: int = 20):
-    """
-    Mengambil rata-rata volume untuk perbandingan
-    """
+    """Mengambil rata-rata volume untuk perbandingan"""
     df = get_klines(symbol, interval, limit)
     if df is None or len(df) == 0:
         return None
@@ -240,10 +239,7 @@ def get_volume_average(symbol: str, interval: str = "1h", limit: int = 20):
         return None
 
 def get_current_price(symbol: str):
-    """
-    Ambil harga terakhir (last price) dari symbol
-    Return: float
-    """
+    """Ambil harga terakhir (last price) dari symbol"""
     if client is None:
         return None
         
@@ -254,249 +250,352 @@ def get_current_price(symbol: str):
         logger.error(f"Error getting price for {symbol}: {e}")
         return None
 
-def get_trade_levels_with_percent(symbol: str, interval: str = "15m", buffer=0.001, sl_buffer=0.0015):
-    """
-    Hitung entry, TP, SL untuk scalping dengan pendekatan realistis
-    """
+def calculate_confidence(symbol: str, trend: str, smc: str, rsi: float, volume: float):
+    """Hitung confidence level untuk trading"""
+    confidence = 0
+    
     try:
-        df = get_klines(symbol, interval, limit=100)
-        if df is None or len(df) == 0:
-            return {
-                "entry_price": None,
-                "take_profit": None,
-                "stop_loss": None,
-                "tp_percent": None,
-                "sl_percent": None,
-                "direction": "ERROR"
-            }
+        # 1️⃣ Trend EMA (30 points)
+        if "UPTREND" in trend:
+            confidence += 30
+        elif "DOWNTREND" in trend:
+            confidence += 20
+
+        # 2️⃣ Trend SMC (30 points)
+        if "UPTREND" in smc:
+            confidence += 30
+        elif "DOWNTREND" in smc:
+            confidence += 15
+
+        # 3️⃣ Volume (20 points)
+        avg_volume = get_volume_average(symbol, "4h", limit=20)
+        if volume and avg_volume:
+            if volume >= avg_volume * 1.2:  # Volume 20% di atas rata-rata
+                confidence += 20
+            elif volume >= avg_volume * 0.8:  # Volume minimal 80% dari rata-rata
+                confidence += 15
+            else:
+                confidence += 5
+
+        # 4️⃣ RSI (20 points)
+        if rsi < 30:  # oversold
+            confidence += 5
+        elif rsi > 70:  # overbought
+            confidence -= 5
+        elif 40 <= rsi <= 60:  # zona netral optimal
+            confidence += 20
+        else:
+            confidence += 10
+
+        # Clamp antara 0 - 100
+        confidence = max(0, min(confidence, 100))
+        
+    except Exception as e:
+        logger.error(f"Error calculating confidence: {e}")
+        confidence = 50  # Default
+        
+    return confidence
+
+def get_trade_levels(symbol: str, interval: str = "15m"):
+    """Hitung entry, TP, SL untuk trading"""
+    try:
+        current_price = get_current_price(symbol)
+        if current_price is None:
+            return error_trade_levels()
 
         trend = get_trend(symbol, interval)
         smc = get_trend_smc(symbol, interval)
-        current_price = get_current_price(symbol)
-        
-        if current_price is None:
-            return {
-                "entry_price": None,
-                "take_profit": None,
-                "stop_loss": None,
-                "tp_percent": None,
-                "sl_percent": None,
-                "direction": "ERROR"
-            }
 
-        # Tentukan level sederhana berdasarkan trend
+        # Tentukan arah trading
         if "UPTREND" in trend or "UPTREND" in smc:
-            entry = current_price * (1 + buffer)
-            tp = current_price * 1.005  # 0.5% profit
-            sl = current_price * (1 - sl_buffer)  # 0.15% stop loss
             direction = "LONG"
+            entry = current_price * 1.001  # 0.1% di atas current price
+            tp = current_price * 1.015    # 1.5% profit
+            sl = current_price * 0.995    # 0.5% stop loss
         elif "DOWNTREND" in trend or "DOWNTREND" in smc:
-            entry = current_price * (1 - buffer)
-            tp = current_price * 0.995  # 0.5% profit  
-            sl = current_price * (1 + sl_buffer)  # 0.15% stop loss
-            direction = "SHORT"
+            direction = "SHORT" 
+            entry = current_price * 0.999  # 0.1% di bawah current price
+            tp = current_price * 0.985    # 1.5% profit
+            sl = current_price * 1.005    # 0.5% stop loss
         else:
-            entry = current_price
-            tp = current_price * 1.002  # small profit for sideways
-            sl = current_price * 0.998  # small stop loss for sideways
             direction = "SIDEWAYS"
+            entry = current_price
+            tp = current_price * 1.008    # 0.8% profit kecil
+            sl = current_price * 0.992    # 0.8% stop loss
 
-        tp_percent = ((tp - entry) / entry * 100) if tp else None
-        sl_percent = ((entry - sl) / entry * 100) if sl else None
-        if direction == "SHORT":
-            tp_percent = ((entry - tp) / entry * 100) if tp else None
-            sl_percent = ((sl - entry) / entry * 100) if sl else None
+        # Hitung persentase
+        if direction == "LONG":
+            tp_percent = ((tp - entry) / entry) * 100
+            sl_percent = ((entry - sl) / entry) * 100
+        else:  # SHORT
+            tp_percent = ((entry - tp) / entry) * 100
+            sl_percent = ((sl - entry) / entry) * 100
 
         return {
-            "entry_price": round(entry, 8) if entry else None,
-            "take_profit": round(tp, 8) if tp else None,
-            "stop_loss": round(sl, 8) if sl else None,
-            "tp_percent": round(tp_percent, 2) if tp_percent else None,
-            "sl_percent": round(sl_percent, 2) if sl_percent else None,
-            "direction": direction
+            "entry_price": round(entry, 4),
+            "take_profit": round(tp, 4),
+            "stop_loss": round(sl, 4),
+            "tp_percent": round(tp_percent, 2),
+            "sl_percent": round(sl_percent, 2),
+            "direction": direction,
+            "success": True
         }
+        
     except Exception as e:
         logger.error(f"Error calculating trade levels for {symbol}: {e}")
-        return {
-            "entry_price": None,
-            "take_profit": None,
-            "stop_loss": None,
-            "tp_percent": None,
-            "sl_percent": None,
-            "direction": "ERROR"
-        }
+        return error_trade_levels()
+
+def error_trade_levels():
+    """Return trade levels ketika error"""
+    return {
+        "entry_price": None,
+        "take_profit": None,
+        "stop_loss": None,
+        "tp_percent": None,
+        "sl_percent": None,
+        "direction": "ERROR",
+        "success": False
+    }
 
 # -------------------------------------------------------------------
 # Telegram Bot Functions
 # -------------------------------------------------------------------
-def run_telegram_bot():
-    """Jalankan Telegram bot dalam thread terpisah"""
-    if not BOT_TOKEN:
-        logger.warning("❌ BOT_TOKEN tidak ditemukan, Telegram bot tidak dijalankan")
-        return
+class TelegramBot:
+    def __init__(self):
+        self.application = None
+        self.is_running = False
+        
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /start"""
+        welcome_text = """
+🤖 **Crypto Trading Bot Aktif!**
 
-    try:
-        from telegram import Update
-        from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-        
-        logger.info("🔄 Memulai Telegram bot...")
-        
-        # Buat application untuk bot
-        application = ApplicationBuilder().token(BOT_TOKEN).build()
-        
-        async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            """Handler untuk command /start"""
+**Perintah yang tersedia:**
+/coin [SYMBOL] - Analisis trading lengkap
+/price [SYMBOL] - Cek harga saat ini  
+/trend [SYMBOL] - Analisis trend
+/help - Menampilkan bantuan
+
+**Contoh:**
+`/coin BTCUSDT`
+`/price ETHUSDT`
+`/trend ADAUSDT`
+
+Bot ini memberikan analisis teknikal berdasarkan:
+• Trend EMA (50 vs 200)
+• RSI (14 period)
+• Smart Money Concept (SMC)
+• Support & Resistance
+        """
+        await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /help"""
+        help_text = """
+📖 **Panduan Penggunaan Bot**
+
+**1. Analisis Coin (/coin)**
+Memberikan analisis lengkap untuk trading:
+- Trend berdasarkan EMA dan SMC
+- Level RSI saat ini
+- Support & Resistance
+- Rekomendasi entry, TP, SL
+- Confidence level
+
+**2. Cek Harga (/price)**
+Menampilkan harga real-time coin
+
+**3. Analisis Trend (/trend)**
+Analisis trend teknikal singkat
+
+**Format Symbol:** BTCUSDT, ETHUSDT, ADAUSDT, dll.
+        """
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+    
+    async def coin_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /coin"""
+        if not context.args:
             await update.message.reply_text(
-                "🤖 **Crypto Trading Bot Aktif!**\n\n"
-                "Gunakan perintah:\n"
-                "• /coin [SYMBOL] - Analisis trading coin\n"
-                "• /price [SYMBOL] - Cek harga saat ini\n"
-                "• /trend [SYMBOL] - Analisis trend\n\n"
+                "❌ **Format salah!**\n"
+                "Gunakan: `/coin [SYMBOL]`\n"
                 "Contoh: `/coin BTCUSDT`",
                 parse_mode='Markdown'
             )
+            return
         
-        async def coin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            """Handler untuk command /coin"""
-            if not context.args:
-                await update.message.reply_text(
-                    "❌ **Usage:** `/coin [SYMBOL]`\n"
-                    "Contoh: `/coin BTCUSDT` atau `/coin ETHUSDT`",
-                    parse_mode='Markdown'
-                )
-                return
+        symbol = context.args[0].upper().strip()
+        
+        try:
+            # Kirim pesan sedang memproses
+            processing_msg = await update.message.reply_text(f"🔍 Menganalisis **{symbol}**...", parse_mode='Markdown')
             
-            symbol = context.args[0].upper()
+            # Ambil data
+            trend_ema = get_trend(symbol, "1h")
+            rsi = get_rsi(symbol, "15m")
+            trend_smc = get_trend_smc(symbol, "4h")
+            volume = get_volume(symbol, "1h")
+            sr_levels = get_support_resistance(symbol, "4h")
+            current_price = get_current_price(symbol)
+            trade_levels = get_trade_levels(symbol, "15m")
             
-            try:
-                # Kirim pesan sedang memproses
-                processing_msg = await update.message.reply_text(f"🔄 Menganalisis {symbol}...")
-                
-                # Ambil data
-                trend = get_trend(symbol, "1d")
-                rsi = get_rsi(symbol, "15m")
-                smc = get_trend_smc(symbol, "4h")
-                volume = get_volume(symbol, "15m")
-                sr_levels = get_support_resistance(symbol, "4h")
-                price = get_current_price(symbol)
-                trade_levels = get_trade_levels_with_percent(symbol, "5m")
-                
-                # Hitung confidence
-                confidence = 0
-                
-                # 1️⃣ Trend EMA
-                if "UPTREND" in trend:
-                    confidence += 30
-                elif "DOWNTREND" in trend:
-                    confidence += 20
-
-                # 2️⃣ Trend SMC
-                if "UPTREND" in smc:
-                    confidence += 30
-                elif "DOWNTREND" in smc:
-                    confidence += 15
-
-                # 3️⃣ Volume (dibandingkan rata-rata historis)
-                avg_volume = get_volume_average(symbol, "4h", limit=20)
-                if volume and avg_volume and volume >= avg_volume * 0.8:
-                    confidence += 20
-                elif volume and avg_volume:
-                    confidence += 15
-
-                # 4️⃣ RSI
-                if rsi < 30:  # oversold
-                    confidence += 5
-                elif rsi > 70:  # overbought
-                    confidence -= 5
-                else:
-                    confidence += 15  # netral, aman untuk masuk
-
-                # Clamp confidence antara 0 - 100
-                confidence = max(0, min(confidence, 100))
-                
-                # Format output untuk Telegram
-                message = f"📊 **{symbol} ANALYSIS**\n\n"
-                message += f"💰 **Current Price:** ${price:,.2f}\n\n"
-                
-                message += f"**TREND ANALYSIS**\n"
-                message += f"• EMA Trend: {trend}\n"
-                message += f"• SMC Trend: {smc}\n"
-                message += f"• RSI (14): {rsi:.2f}\n"
-                message += f"• Volume: {volume:.2f}\n\n"
-                
-                message += f"**SUPPORT & RESISTANCE**\n"
-                message += f"• Support: ${sr_levels['support']:,.2f}\n" if sr_levels else "• Support: N/A\n"
-                message += f"• Resistance: ${sr_levels['resistance']:,.2f}\n\n" if sr_levels else "• Resistance: N/A\n\n"
-                
-                message += f"**TRADE SETUP** ({trade_levels['direction']})\n"
-                message += f"• Entry: ${trade_levels['entry_price']:.2f}\n"
-                if trade_levels['take_profit']:
-                    message += f"• Take Profit: ${trade_levels['take_profit']:.2f} ({trade_levels['tp_percent']}%)\n"
-                if trade_levels['stop_loss']:
-                    message += f"• Stop Loss: ${trade_levels['stop_loss']:.2f} ({trade_levels['sl_percent']}%)\n"
-                
-                message += f"\n**CONFIDENCE LEVEL:** {confidence}%"
-                
-                # Hapus pesan processing dan kirim hasil
-                await processing_msg.delete()
-                await update.message.reply_text(message, parse_mode='Markdown')
-                
-            except Exception as e:
-                error_msg = f"❌ Error analyzing {symbol}: {str(e)}"
-                await update.message.reply_text(error_msg)
-                logger.error(f"Telegram bot error: {e}")
-        
-        async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            """Handler untuk command /price"""
-            if not context.args:
-                await update.message.reply_text("❌ Usage: /price [SYMBOL]")
-                return
+            # Hitung confidence
+            confidence = calculate_confidence(symbol, trend_ema, trend_smc, rsi, volume)
             
-            symbol = context.args[0].upper()
-            try:
-                price = get_current_price(symbol)
-                if price:
-                    await update.message.reply_text(f"💰 **{symbol} Price:** ${price:,.2f}", parse_mode='Markdown')
-                else:
-                    await update.message.reply_text(f"❌ Cannot get price for {symbol}")
-            except Exception as e:
-                await update.message.reply_text(f"❌ Error: {str(e)}")
-        
-        async def trend_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            """Handler untuk command /trend"""
-            if not context.args:
-                await update.message.reply_text("❌ Usage: /trend [SYMBOL]")
-                return
+            # Format output untuk Telegram
+            message = f"📊 **ANALISIS {symbol}**\n\n"
             
-            symbol = context.args[0].upper()
-            try:
-                trend_ema = get_trend(symbol, "1h")
-                trend_smc = get_trend_smc(symbol, "1h")
-                rsi = get_rsi(symbol, "1h")
+            # Harga saat ini
+            if current_price:
+                message += f"💰 **Harga Saat Ini:** `${current_price:,.4f}`\n\n"
+            
+            # Analisis Teknikal
+            message += f"**📈 ANALISIS TEKNIKAL**\n"
+            message += f"• **Trend EMA:** {trend_ema}\n"
+            message += f"• **Trend SMC:** {trend_smc}\n"
+            message += f"• **RSI (14):** `{rsi:.2f}`"
+            
+            # Warna RSI
+            if rsi < 30:
+                message += " 🟢 (Oversold)\n"
+            elif rsi > 70:
+                message += " 🔴 (Overbought)\n"
+            else:
+                message += " 🟡 (Netral)\n"
                 
-                message = f"📈 **{symbol} TREND ANALYSIS**\n\n"
-                message += f"• EMA Trend: {trend_ema}\n"
-                message += f"• SMC Trend: {trend_smc}\n"
-                message += f"• RSI: {rsi:.2f}"
-                
-                await update.message.reply_text(message, parse_mode='Markdown')
-            except Exception as e:
-                await update.message.reply_text(f"❌ Error: {str(e)}")
+            if volume:
+                message += f"• **Volume:** `{volume:,.0f}`\n"
+            
+            # Support & Resistance
+            if sr_levels:
+                message += f"• **Support:** `${sr_levels['support']}`\n"
+                message += f"• **Resistance:** `${sr_levels['resistance']}`\n"
+            
+            message += f"\n**🎯 SETUP TRADING**\n"
+            message += f"• **Arah:** {trade_levels['direction']}\n"
+            
+            if trade_levels['success']:
+                message += f"• **Entry:** `${trade_levels['entry_price']}`\n"
+                message += f"• **TP:** `${trade_levels['take_profit']}` (+{trade_levels['tp_percent']}%)\n"
+                message += f"• **SL:** `${trade_levels['stop_loss']}` (-{trade_levels['sl_percent']}%)\n"
+            
+            # Confidence Level
+            message += f"\n**📊 CONFIDENCE LEVEL**\n"
+            if confidence >= 70:
+                message += f"🟢 **{confidence}%** (Tinggi)\n"
+            elif confidence >= 50:
+                message += f"🟡 **{confidence}%** (Sedang)\n"
+            else:
+                message += f"🔴 **{confidence}%** (Rendah)\n"
+            
+            # Risk Disclaimer
+            message += f"\n___\n"
+            message += f"⚠️ *Disclaimer: Ini bukan financial advice. Trading mengandung risiko.*"
+            
+            # Hapus pesan processing dan kirim hasil
+            await processing_msg.delete()
+            await update.message.reply_text(message, parse_mode='Markdown')
+            
+        except Exception as e:
+            error_msg = f"❌ **Error menganalisis {symbol}:**\n`{str(e)}`"
+            await update.message.reply_text(error_msg, parse_mode='Markdown')
+            logger.error(f"Telegram bot error in coin_analysis: {e}")
+    
+    async def price_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /price"""
+        if not context.args:
+            await update.message.reply_text("❌ Gunakan: `/price [SYMBOL]`", parse_mode='Markdown')
+            return
         
-        # Tambahkan handlers
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("coin", coin_command))
-        application.add_handler(CommandHandler("price", price_command))
-        application.add_handler(CommandHandler("trend", trend_command))
+        symbol = context.args[0].upper().strip()
+        try:
+            price = get_current_price(symbol)
+            if price:
+                # Dapatkan perubahan harga 24 jam
+                try:
+                    ticker = client.get_24hr_ticker(symbol=symbol)
+                    price_change = float(ticker['priceChange'])
+                    price_change_percent = float(ticker['priceChangePercent'])
+                    
+                    change_emoji = "🟢" if price_change >= 0 else "🔴"
+                    change_text = f"{change_emoji} {price_change_percent:+.2f}% (24h)"
+                    
+                    await update.message.reply_text(
+                        f"💰 **{symbol}**\n"
+                        f"**Harga:** `${price:,.4f}`\n"
+                        f"**Perubahan:** {change_text}",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    await update.message.reply_text(f"💰 **{symbol}:** `${price:,.4f}`", parse_mode='Markdown')
+            else:
+                await update.message.reply_text(f"❌ Tidak dapat mengambil harga untuk {symbol}")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: `{str(e)}`", parse_mode='Markdown')
+    
+    async def trend_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /trend"""
+        if not context.args:
+            await update.message.reply_text("❌ Gunakan: `/trend [SYMBOL]`", parse_mode='Markdown')
+            return
         
-        # Jalankan bot
-        logger.info("✅ Telegram bot started successfully")
-        application.run_polling()
+        symbol = context.args[0].upper().strip()
+        try:
+            processing_msg = await update.message.reply_text(f"🔍 Menganalisis trend **{symbol}**...", parse_mode='Markdown')
+            
+            trend_ema = get_trend(symbol, "1h")
+            trend_smc = get_trend_smc(symbol, "4h")
+            rsi = get_rsi(symbol, "1h")
+            current_price = get_current_price(symbol)
+            
+            message = f"📈 **TREND ANALYSIS - {symbol}**\n\n"
+            
+            if current_price:
+                message += f"💰 **Harga:** `${current_price:,.4f}`\n\n"
+            
+            message += f"**Trend Indicators:**\n"
+            message += f"• **EMA (1h):** {trend_ema}\n"
+            message += f"• **SMC (4h):** {trend_smc}\n"
+            message += f"• **RSI (1h):** `{rsi:.2f}`"
+            
+            # Analisis sederhana
+            if "UPTREND" in trend_ema and "UPTREND" in trend_smc:
+                message += f"\n\n🎯 **Kesimpulan:** Trend Naik kuat"
+            elif "DOWNTREND" in trend_ema and "DOWNTREND" in trend_smc:
+                message += f"\n\n🎯 **Kesimpulan:** Trend Turun kuat"
+            else:
+                message += f"\n\n🎯 **Kesimpulan:** Market Sideways/Ranging"
+            
+            await processing_msg.delete()
+            await update.message.reply_text(message, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: `{str(e)}`", parse_mode='Markdown')
+    
+    def run_bot(self):
+        """Jalankan Telegram bot"""
+        if not BOT_TOKEN:
+            logger.warning("❌ BOT_TOKEN tidak ditemukan, Telegram bot tidak dijalankan")
+            return
         
-    except ImportError as e:
-        logger.error(f"❌ Telegram library not installed: {e}")
-    except Exception as e:
-        logger.error(f"❌ Telegram bot error: {e}")
+        try:
+            # Buat application untuk bot
+            self.application = ApplicationBuilder().token(BOT_TOKEN).build()
+            
+            # Tambahkan handlers
+            self.application.add_handler(CommandHandler("start", self.start))
+            self.application.add_handler(CommandHandler("help", self.help_command))
+            self.application.add_handler(CommandHandler("coin", self.coin_analysis))
+            self.application.add_handler(CommandHandler("price", self.price_check))
+            self.application.add_handler(CommandHandler("trend", self.trend_analysis))
+            
+            # Jalankan bot
+            logger.info("✅ Telegram bot started successfully")
+            self.is_running = True
+            self.application.run_polling()
+            
+        except Exception as e:
+            logger.error(f"❌ Telegram bot error: {e}")
+            self.is_running = False
 
 # -------------------------------------------------------------------
 # Flask Routes untuk Web Service
@@ -522,7 +621,7 @@ def health():
         "status": status,
         "timestamp": time.time(),
         "binance_connected": client is not None,
-        "telegram_bot": BOT_TOKEN is not None
+        "telegram_bot_available": BOT_TOKEN is not None
     })
 
 @app.route('/analysis/<symbol>')
@@ -530,60 +629,26 @@ def analysis(symbol):
     try:
         symbol = symbol.upper()
         
-        # Ambil data dengan error handling
-        trend = get_trend(symbol, "1d")
+        # Ambil data
+        trend_ema = get_trend(symbol, "1h")
         rsi = get_rsi(symbol, "15m")
-        smc = get_trend_smc(symbol, "4h")
-        volume = get_volume(symbol, "15m")
+        trend_smc = get_trend_smc(symbol, "4h")
+        volume = get_volume(symbol, "1h")
         sr_levels = get_support_resistance(symbol, "4h")
-        price = get_current_price(symbol)
-        trade_levels = get_trade_levels_with_percent(symbol, "5m")
+        current_price = get_current_price(symbol)
+        trade_levels = get_trade_levels(symbol, "15m")
         
         # Hitung confidence
-        confidence = 0
-        
-        try:
-            # 1️⃣ Trend EMA
-            if "UPTREND" in trend:
-                confidence += 30
-            elif "DOWNTREND" in trend:
-                confidence += 20
-
-            # 2️⃣ Trend SMC
-            if "UPTREND" in smc:
-                confidence += 30
-            elif "DOWNTREND" in smc:
-                confidence += 15
-
-            # 3️⃣ Volume (dibandingkan rata-rata historis)
-            avg_volume = get_volume_average(symbol, "4h", limit=20)
-            if volume and avg_volume and volume >= avg_volume * 0.8:
-                confidence += 20
-            elif volume and avg_volume:
-                confidence += 15
-
-            # 4️⃣ RSI
-            if rsi < 30:  # oversold
-                confidence += 5
-            elif rsi > 70:  # overbought
-                confidence -= 5
-            else:
-                confidence += 15  # netral, aman untuk masuk
-
-            # Clamp confidence antara 0 - 100
-            confidence = max(0, min(confidence, 100))
-        except Exception as e:
-            logger.error(f"Error calculating confidence for {symbol}: {e}")
-            confidence = 50  # Default confidence
+        confidence = calculate_confidence(symbol, trend_ema, trend_smc, rsi, volume)
         
         response = {
             "symbol": symbol,
             "analysis": {
-                "trend_ema": trend,
+                "trend_ema": trend_ema,
                 "rsi": round(rsi, 2) if rsi else None,
-                "trend_smc": smc,
+                "trend_smc": trend_smc,
                 "volume": volume,
-                "current_price": price,
+                "current_price": current_price,
                 "support": sr_levels["support"] if sr_levels else None,
                 "resistance": sr_levels["resistance"] if sr_levels else None
             },
@@ -623,7 +688,7 @@ def price(symbol):
 def trend(symbol):
     try:
         trend_ema = get_trend(symbol.upper(), "1h")
-        trend_smc = get_trend_smc(symbol.upper(), "1h")
+        trend_smc = get_trend_smc(symbol.upper(), "4h")
         rsi = get_rsi(symbol.upper(), "1h")
         
         return jsonify({
@@ -643,9 +708,8 @@ def trend(symbol):
 
 @app.route('/test')
 def test():
-    """Endpoint untuk testing koneksi dan fungsi dasar"""
+    """Endpoint untuk testing koneksi"""
     try:
-        # Test Binance connection
         price = get_current_price("BTCUSDT")
         
         return jsonify({
@@ -668,10 +732,9 @@ def test():
 def main():
     port = int(os.environ.get("PORT", 5000))
     
-    # Test connection
+    # Test koneksi Binance
     try:
         if client:
-            # Simple API call to test connection
             client.get_symbol_ticker(symbol="BTCUSDT")
             logger.info("✅ Binance connection successful")
         else:
@@ -682,7 +745,8 @@ def main():
     # Jalankan Telegram bot di thread terpisah
     if BOT_TOKEN:
         try:
-            bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
+            telegram_bot = TelegramBot()
+            bot_thread = threading.Thread(target=telegram_bot.run_bot, daemon=True)
             bot_thread.start()
             logger.info("✅ Telegram bot started in separate thread")
         except Exception as e:
