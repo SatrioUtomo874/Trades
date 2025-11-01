@@ -18,6 +18,28 @@ client = Spot(api_key="YOUR_API_KEY", api_secret="YOUR_API_SECRET", base_url="ht
 
 
 
+# -----------------------------
+# ✅ Dummy Web Server for Render
+# -----------------------------
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+def start_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    print(f"Web server running on port {port}")
+    server.serve_forever()
+
+# Jalankan web server di thread terpisah
+threading.Thread(target=start_web_server, daemon=True).start()
+
 # -------------------------------------------------------------------
 # ✅ Helper — Fetch klines
 # -------------------------------------------------------------------
@@ -414,3 +436,4 @@ run_bot()
 # print("EMA Trend:", trend)
 # print("RSI:", rsi)
 # print("SMC Trend:", smc)
+
