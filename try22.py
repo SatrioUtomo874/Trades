@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify
 import time
 import logging
+import asyncio
+import threading
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -325,6 +327,178 @@ def get_trade_levels_with_percent(symbol: str, interval: str = "15m", buffer=0.0
         }
 
 # -------------------------------------------------------------------
+# Telegram Bot Functions
+# -------------------------------------------------------------------
+def run_telegram_bot():
+    """Jalankan Telegram bot dalam thread terpisah"""
+    if not BOT_TOKEN:
+        logger.warning("❌ BOT_TOKEN tidak ditemukan, Telegram bot tidak dijalankan")
+        return
+
+    try:
+        from telegram import Update
+        from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+        
+        logger.info("🔄 Memulai Telegram bot...")
+        
+        # Buat application untuk bot
+        application = ApplicationBuilder().token(BOT_TOKEN).build()
+        
+        async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            """Handler untuk command /start"""
+            await update.message.reply_text(
+                "🤖 **Crypto Trading Bot Aktif!**\n\n"
+                "Gunakan perintah:\n"
+                "• /coin [SYMBOL] - Analisis trading coin\n"
+                "• /price [SYMBOL] - Cek harga saat ini\n"
+                "• /trend [SYMBOL] - Analisis trend\n\n"
+                "Contoh: `/coin BTCUSDT`",
+                parse_mode='Markdown'
+            )
+        
+        async def coin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            """Handler untuk command /coin"""
+            if not context.args:
+                await update.message.reply_text(
+                    "❌ **Usage:** `/coin [SYMBOL]`\n"
+                    "Contoh: `/coin BTCUSDT` atau `/coin ETHUSDT`",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            symbol = context.args[0].upper()
+            
+            try:
+                # Kirim pesan sedang memproses
+                processing_msg = await update.message.reply_text(f"🔄 Menganalisis {symbol}...")
+                
+                # Ambil data
+                trend = get_trend(symbol, "1d")
+                rsi = get_rsi(symbol, "15m")
+                smc = get_trend_smc(symbol, "4h")
+                volume = get_volume(symbol, "15m")
+                sr_levels = get_support_resistance(symbol, "4h")
+                price = get_current_price(symbol)
+                trade_levels = get_trade_levels_with_percent(symbol, "5m")
+                
+                # Hitung confidence
+                confidence = 0
+                
+                # 1️⃣ Trend EMA
+                if "UPTREND" in trend:
+                    confidence += 30
+                elif "DOWNTREND" in trend:
+                    confidence += 20
+
+                # 2️⃣ Trend SMC
+                if "UPTREND" in smc:
+                    confidence += 30
+                elif "DOWNTREND" in smc:
+                    confidence += 15
+
+                # 3️⃣ Volume (dibandingkan rata-rata historis)
+                avg_volume = get_volume_average(symbol, "4h", limit=20)
+                if volume and avg_volume and volume >= avg_volume * 0.8:
+                    confidence += 20
+                elif volume and avg_volume:
+                    confidence += 15
+
+                # 4️⃣ RSI
+                if rsi < 30:  # oversold
+                    confidence += 5
+                elif rsi > 70:  # overbought
+                    confidence -= 5
+                else:
+                    confidence += 15  # netral, aman untuk masuk
+
+                # Clamp confidence antara 0 - 100
+                confidence = max(0, min(confidence, 100))
+                
+                # Format output untuk Telegram
+                message = f"📊 **{symbol} ANALYSIS**\n\n"
+                message += f"💰 **Current Price:** ${price:,.2f}\n\n"
+                
+                message += f"**TREND ANALYSIS**\n"
+                message += f"• EMA Trend: {trend}\n"
+                message += f"• SMC Trend: {smc}\n"
+                message += f"• RSI (14): {rsi:.2f}\n"
+                message += f"• Volume: {volume:.2f}\n\n"
+                
+                message += f"**SUPPORT & RESISTANCE**\n"
+                message += f"• Support: ${sr_levels['support']:,.2f}\n" if sr_levels else "• Support: N/A\n"
+                message += f"• Resistance: ${sr_levels['resistance']:,.2f}\n\n" if sr_levels else "• Resistance: N/A\n\n"
+                
+                message += f"**TRADE SETUP** ({trade_levels['direction']})\n"
+                message += f"• Entry: ${trade_levels['entry_price']:.2f}\n"
+                if trade_levels['take_profit']:
+                    message += f"• Take Profit: ${trade_levels['take_profit']:.2f} ({trade_levels['tp_percent']}%)\n"
+                if trade_levels['stop_loss']:
+                    message += f"• Stop Loss: ${trade_levels['stop_loss']:.2f} ({trade_levels['sl_percent']}%)\n"
+                
+                message += f"\n**CONFIDENCE LEVEL:** {confidence}%"
+                
+                # Hapus pesan processing dan kirim hasil
+                await processing_msg.delete()
+                await update.message.reply_text(message, parse_mode='Markdown')
+                
+            except Exception as e:
+                error_msg = f"❌ Error analyzing {symbol}: {str(e)}"
+                await update.message.reply_text(error_msg)
+                logger.error(f"Telegram bot error: {e}")
+        
+        async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            """Handler untuk command /price"""
+            if not context.args:
+                await update.message.reply_text("❌ Usage: /price [SYMBOL]")
+                return
+            
+            symbol = context.args[0].upper()
+            try:
+                price = get_current_price(symbol)
+                if price:
+                    await update.message.reply_text(f"💰 **{symbol} Price:** ${price:,.2f}", parse_mode='Markdown')
+                else:
+                    await update.message.reply_text(f"❌ Cannot get price for {symbol}")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error: {str(e)}")
+        
+        async def trend_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            """Handler untuk command /trend"""
+            if not context.args:
+                await update.message.reply_text("❌ Usage: /trend [SYMBOL]")
+                return
+            
+            symbol = context.args[0].upper()
+            try:
+                trend_ema = get_trend(symbol, "1h")
+                trend_smc = get_trend_smc(symbol, "1h")
+                rsi = get_rsi(symbol, "1h")
+                
+                message = f"📈 **{symbol} TREND ANALYSIS**\n\n"
+                message += f"• EMA Trend: {trend_ema}\n"
+                message += f"• SMC Trend: {trend_smc}\n"
+                message += f"• RSI: {rsi:.2f}"
+                
+                await update.message.reply_text(message, parse_mode='Markdown')
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error: {str(e)}")
+        
+        # Tambahkan handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("coin", coin_command))
+        application.add_handler(CommandHandler("price", price_command))
+        application.add_handler(CommandHandler("trend", trend_command))
+        
+        # Jalankan bot
+        logger.info("✅ Telegram bot started successfully")
+        application.run_polling()
+        
+    except ImportError as e:
+        logger.error(f"❌ Telegram library not installed: {e}")
+    except Exception as e:
+        logger.error(f"❌ Telegram bot error: {e}")
+
+# -------------------------------------------------------------------
 # Flask Routes untuk Web Service
 # -------------------------------------------------------------------
 @app.route('/')
@@ -347,7 +521,8 @@ def health():
     return jsonify({
         "status": status,
         "timestamp": time.time(),
-        "binance_connected": client is not None
+        "binance_connected": client is not None,
+        "telegram_bot": BOT_TOKEN is not None
     })
 
 @app.route('/analysis/<symbol>')
@@ -476,6 +651,7 @@ def test():
         return jsonify({
             "status": "success",
             "binance_connected": client is not None,
+            "telegram_bot_available": BOT_TOKEN is not None,
             "btc_price": price,
             "timestamp": time.time()
         })
@@ -502,6 +678,17 @@ def main():
             logger.warning("⚠️ Binance client not available")
     except Exception as e:
         logger.error(f"❌ Binance connection failed: {e}")
+    
+    # Jalankan Telegram bot di thread terpisah
+    if BOT_TOKEN:
+        try:
+            bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
+            bot_thread.start()
+            logger.info("✅ Telegram bot started in separate thread")
+        except Exception as e:
+            logger.error(f"❌ Failed to start Telegram bot: {e}")
+    else:
+        logger.warning("⚠️ BOT_TOKEN not found, Telegram bot disabled")
     
     # Jalankan Flask app
     logger.info(f"🚀 Starting Flask web service on port {port}")
