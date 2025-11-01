@@ -3,5 +3,5 @@ numpy
 python-binance
 python-telegram-bot
 python-dotenv
-ta
 flask
+pandas-ta
