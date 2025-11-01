@@ -364,62 +364,58 @@ class TelegramBot:
     def __init__(self):
         self.application = None
         self.is_running = False
-        
+
+    # /start
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler untuk command /start"""
-        welcome_text = """
-🤖 **Crypto Trading Bot Aktif!**
+        welcome_text = (
+            "<b>🤖 Crypto Trading Bot Aktif!</b>\n\n"
+            "<b>Perintah yang tersedia:</b>\n"
+            "/coin SYMBOL - Analisis trading lengkap\n"
+            "/price SYMBOL - Cek harga saat ini\n"
+            "/trend SYMBOL - Analisis trend\n"
+            "/help - Menampilkan bantuan\n\n"
+            "<b>Contoh:</b>\n"
+            "<code>/coin BTCUSDT</code>\n"
+            "<code>/price ETHUSDT</code>\n"
+            "<code>/trend ADAUSDT</code>\n\n"
+            "<b>Bot ini memakai indikator:</b>\n"
+            "- Trend EMA\n"
+            "- RSI\n"
+            "- Smart Money Concept (SMC)\n"
+            "- Support & Resistance\n"
+        )
+        await update.message.reply_text(welcome_text, parse_mode='HTML')
 
-**Perintah yang tersedia:**
-/coin [SYMBOL] - Analisis trading lengkap
-/price [SYMBOL] - Cek harga saat ini  
-/trend [SYMBOL] - Analisis trend
-/help - Menampilkan bantuan
-
-**Contoh:**
-`/coin BTCUSDT`
-`/price ETHUSDT`
-`/trend ADAUSDT`
-
-Bot ini memberikan analisis teknikal berdasarkan:
-• Trend EMA (50 vs 200)
-• RSI (14 period)
-• Smart Money Concept (SMC)
-• Support & Resistance
-        """
-        await update.message.reply_text(welcome_text, parse_mode='Markdown')
-    
+    # /help
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler untuk command /help"""
-        help_text = """
-📖 **Panduan Penggunaan Bot**
+        help_text = (
+            "<b>📖 Panduan Penggunaan Bot</b>\n\n"
+            "<b>1. /coin SYMBOL</b>\n"
+            "Analisis lengkap, meliputi:\n"
+            "- Trend EMA\n"
+            "- Trend SMC\n"
+            "- RSI\n"
+            "- Volume\n"
+            "- Support / Resistance\n"
+            "- Entry / TP / SL\n"
+            "- Confidence level\n\n"
+            "<b>2. /price SYMBOL</b>\n"
+            "Melihat harga realtime sebuah coin.\n\n"
+            "<b>3. /trend SYMBOL</b>\n"
+            "Analisis trend cepat berdasarkan EMA, SMC, dan RSI.\n"
+        )
+        await update.message.reply_text(help_text, parse_mode='HTML')
 
-**1. Analisis Coin (/coin)**
-Memberikan analisis lengkap untuk trading:
-- Trend berdasarkan EMA dan SMC
-- Level RSI saat ini
-- Support & Resistance
-- Rekomendasi entry, TP, SL
-- Confidence level
-
-**2. Cek Harga (/price)**
-Menampilkan harga real-time coin
-
-**3. Analisis Trend (/trend)**
-Analisis trend teknikal singkat
-
-**Format Symbol:** BTCUSDT, ETHUSDT, ADAUSDT, dll.
-        """
-        await update.message.reply_text(help_text, parse_mode='Markdown')
     
     async def coin_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler untuk command /coin"""
         if not context.args:
             await update.message.reply_text(
-                "❌ **Format salah!**\n"
-                "Gunakan: `/coin [SYMBOL]`\n"
-                "Contoh: `/coin BTCUSDT`",
-                parse_mode='Markdown'
+                <b>Format salah!</b>
+                <code>/coin BTCUSDT</code>
+                <code>/price ETHUSDT</code>
+                <code>/trend ADAUSDT</code>,
+                parse_mode='HTML'
             )
             return
         
@@ -427,7 +423,7 @@ Analisis trend teknikal singkat
         
         try:
             # Kirim pesan sedang memproses
-            processing_msg = await update.message.reply_text(f"🔍 Menganalisis **{symbol}**...", parse_mode='Markdown')
+            processing_msg = await update.message.reply_text(f"🔍 Menganalisis **{symbol}**...", parse_mode='HTML')
             
             # Ambil data
             trend_ema = get_trend(symbol, "1h")
@@ -442,17 +438,17 @@ Analisis trend teknikal singkat
             confidence = calculate_confidence(symbol, trend_ema, trend_smc, rsi, volume)
             
             # Format output untuk Telegram
-            message = f"📊 **ANALISIS {symbol}**\n\n"
+            message = f"📊 <b>ANALISIS {symbol}</b>\n\n"
             
             # Harga saat ini
             if current_price:
-                message += f"💰 **Harga Saat Ini:** `${current_price:,.4f}`\n\n"
+                message += f"💰 <b>Harga Saat Ini:</b> `${current_price:,.4f}`\n\n"
             
             # Analisis Teknikal
-            message += f"**📈 ANALISIS TEKNIKAL**\n"
-            message += f"• **Trend EMA:** {trend_ema}\n"
-            message += f"• **Trend SMC:** {trend_smc}\n"
-            message += f"• **RSI (14):** `{rsi:.2f}`"
+            message += f"<b>📈 ANALISIS TEKNIKAL</b>\n"
+            message += f"• <b>Trend EMA:</b> {trend_ema}\n"
+            message += f"• <b>Trend SMC:</b> {trend_smc}\n"
+            message += f"• <b>RSI (14):</b> `{rsi:.2f}`"
             
             # Warna RSI
             if rsi < 30:
@@ -463,29 +459,29 @@ Analisis trend teknikal singkat
                 message += " 🟡 (Netral)\n"
                 
             if volume:
-                message += f"• **Volume:** `{volume:,.0f}`\n"
+                message += <code>{volume:,.0f}</code>
             
             # Support & Resistance
             if sr_levels:
-                message += f"• **Support:** `${sr_levels['support']}`\n"
-                message += f"• **Resistance:** `${sr_levels['resistance']}`\n"
+                message += f"• <b>Support:</b> `${sr_levels['support']}`\n"
+                message += f"• <b>Resistance:</b> `${sr_levels['resistance']}`\n"
             
-            message += f"\n**🎯 SETUP TRADING**\n"
-            message += f"• **Arah:** {trade_levels['direction']}\n"
+            message += f"\n<b>🎯 SETUP TRADING</b>\n"
+            message += f"• <b>Arah:</b> {trade_levels['direction']}\n"
             
             if trade_levels['success']:
-                message += f"• **Entry:** `${trade_levels['entry_price']}`\n"
-                message += f"• **TP:** `${trade_levels['take_profit']}` (+{trade_levels['tp_percent']}%)\n"
-                message += f"• **SL:** `${trade_levels['stop_loss']}` (-{trade_levels['sl_percent']}%)\n"
+                message += <code>{trade_levels['entry_price']}</code>
+                message += f"• <b>TP:</b> `${trade_levels['take_profit']}` (+{trade_levels['tp_percent']}%)\n"
+                message += f"• <b>SL:</b> `${trade_levels['stop_loss']}` (-{trade_levels['sl_percent']}%)\n"
             
             # Confidence Level
-            message += f"\n**📊 CONFIDENCE LEVEL**\n"
+            message += f"\n<b>📊 CONFIDENCE LEVEL</b>\n"
             if confidence >= 70:
-                message += f"🟢 **{confidence}%** (Tinggi)\n"
+                message += f"🟢 <b>{confidence}%</b> (Tinggi)\n"
             elif confidence >= 50:
-                message += f"🟡 **{confidence}%** (Sedang)\n"
+                message += f"🟡 <b>{confidence}%</b> (Sedang)\n"
             else:
-                message += f"🔴 **{confidence}%** (Rendah)\n"
+                message += f"🔴 <b>{confidence}%</b> (Rendah)\n"
             
             # Risk Disclaimer
             message += f"\n___\n"
@@ -493,17 +489,17 @@ Analisis trend teknikal singkat
             
             # Hapus pesan processing dan kirim hasil
             await processing_msg.delete()
-            await update.message.reply_text(message, parse_mode='Markdown')
+            await update.message.reply_text(message, parse_mode='HTML')
             
         except Exception as e:
             error_msg = f"❌ **Error menganalisis {symbol}:**\n`{str(e)}`"
-            await update.message.reply_text(error_msg, parse_mode='Markdown')
+            await update.message.reply_text(error_msg, parse_mode='HTML')
             logger.error(f"Telegram bot error in coin_analysis: {e}")
     
     async def price_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler untuk command /price"""
         if not context.args:
-            await update.message.reply_text("❌ Gunakan: `/price [SYMBOL]`", parse_mode='Markdown')
+            await update.message.reply_text("❌ Gunakan: `/price [SYMBOL]`", parse_mode='HTML')
             return
         
         symbol = context.args[0].upper().strip()
@@ -520,56 +516,56 @@ Analisis trend teknikal singkat
                     change_text = f"{change_emoji} {price_change_percent:+.2f}% (24h)"
                     
                     await update.message.reply_text(
-                        f"💰 **{symbol}**\n"
-                        f"**Harga:** `${price:,.4f}`\n"
-                        f"**Perubahan:** {change_text}",
-                        parse_mode='Markdown'
+                        f"💰 <b>{symbol}</b>\n"
+                        f"<b>Harga:</b> `${price:,.4f}`\n"
+                        f"<b>Perubahan:</b> {change_text}",
+                        parse_mode='HTML'
                     )
                 except:
-                    await update.message.reply_text(f"💰 **{symbol}:** `${price:,.4f}`", parse_mode='Markdown')
+                    await update.message.reply_text(f"💰 **{symbol}:** `${price:,.4f}`", parse_mode='HTML')
             else:
                 await update.message.reply_text(f"❌ Tidak dapat mengambil harga untuk {symbol}")
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: `{str(e)}`", parse_mode='Markdown')
+            await update.message.reply_text(f"❌ Error: `{str(e)}`", parse_mode='HTML')
     
     async def trend_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler untuk command /trend"""
         if not context.args:
-            await update.message.reply_text("❌ Gunakan: `/trend [SYMBOL]`", parse_mode='Markdown')
+            await update.message.reply_text("❌ Gunakan: `/trend [SYMBOL]`", parse_mode='HTML')
             return
         
         symbol = context.args[0].upper().strip()
         try:
-            processing_msg = await update.message.reply_text(f"🔍 Menganalisis trend **{symbol}**...", parse_mode='Markdown')
+            processing_msg = await update.message.reply_text(f"🔍 Menganalisis trend **{symbol}**...", parse_mode='HTML')
             
             trend_ema = get_trend(symbol, "1h")
             trend_smc = get_trend_smc(symbol, "4h")
             rsi = get_rsi(symbol, "1h")
             current_price = get_current_price(symbol)
             
-            message = f"📈 **TREND ANALYSIS - {symbol}**\n\n"
+            message = f"📈 <b>TREND ANALYSIS - {symbol}</b>\n\n"
             
             if current_price:
-                message += f"💰 **Harga:** `${current_price:,.4f}`\n\n"
+                message += f"💰 <b>Harga:</b> `${current_price:,.4f}`\n\n"
             
             message += f"**Trend Indicators:**\n"
-            message += f"• **EMA (1h):** {trend_ema}\n"
-            message += f"• **SMC (4h):** {trend_smc}\n"
-            message += f"• **RSI (1h):** `{rsi:.2f}`"
+            message += f"• <b>EMA (1h):</b> {trend_ema}\n"
+            message += f"• <b>SMC (4h):</b> {trend_smc}\n"
+            message += <code>{rsi:.2f}</code>
             
             # Analisis sederhana
             if "UPTREND" in trend_ema and "UPTREND" in trend_smc:
-                message += f"\n\n🎯 **Kesimpulan:** Trend Naik kuat"
+                message += f"\n\n🎯 <b>Kesimpulan:</b> Trend Naik kuat"
             elif "DOWNTREND" in trend_ema and "DOWNTREND" in trend_smc:
-                message += f"\n\n🎯 **Kesimpulan:** Trend Turun kuat"
+                message += f"\n\n🎯 <b>Kesimpulan:</b> Trend Turun kuat"
             else:
-                message += f"\n\n🎯 **Kesimpulan:** Market Sideways/Ranging"
+                message += f"\n\n🎯 <b>Kesimpulan:</b> Market Sideways/Ranging"
             
             await processing_msg.delete()
-            await update.message.reply_text(message, parse_mode='Markdown')
+            await update.message.reply_text(message, parse_mode='HTML')
             
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: `{str(e)}`", parse_mode='Markdown')
+            await update.message.reply_text(f"❌ Error: `{str(e)}`", parse_mode='HTML')
     
     def run_bot(self):
         """Jalankan Telegram bot"""
@@ -746,3 +742,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
