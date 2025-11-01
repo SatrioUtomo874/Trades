@@ -1,7 +1,5 @@
-pandas
-numpy
-python-binance
+binance-connector
 python-telegram-bot
 python-dotenv
-flask
-gunicorn
+pandas
+numpy
