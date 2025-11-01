@@ -9,7 +9,7 @@ from telegram import Bot
 from telegram.error import TelegramError
 from dotenv import load_dotenv
 from typing import Dict, List, Tuple, Optional
-import ta
+import pandas_ta as ta  # Ganti dari ta ke pandas_ta
 import signal
 import sys
 
@@ -162,29 +162,29 @@ class SmartMoneyAnalyzer:
         return tp1, tp2
 
 class TechnicalAnalyzer:
-    """Class untuk menghitung indikator teknikal"""
+    """Class untuk menghitung indikator teknikal dengan pandas_ta"""
     
     def __init__(self):
         self.smart_money = SmartMoneyAnalyzer()
     
     @staticmethod
     def calculate_ema(data: pd.DataFrame, period: int) -> pd.Series:
-        return ta.trend.EMAIndicator(data['close'], window=period).ema_indicator()
+        return ta.ema(data['close'], length=period)
     
     @staticmethod
     def calculate_rsi(data: pd.DataFrame, period: int) -> pd.Series:
-        return ta.momentum.RSIIndicator(data['close'], window=period).rsi()
+        return ta.rsi(data['close'], length=period)
     
     @staticmethod
     def calculate_macd(data: pd.DataFrame) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        macd = ta.trend.MACD(data['close'])
-        return macd.macd(), macd.macd_signal(), macd.macd_diff()
+        macd_result = ta.macd(data['close'], fast=12, slow=26, signal=9)
+        if macd_result is not None:
+            return macd_result.iloc[:, 0], macd_result.iloc[:, 1], macd_result.iloc[:, 2]
+        return None, None, None
     
     @staticmethod
     def calculate_atr(data: pd.DataFrame, period: int) -> pd.Series:
-        return ta.volatility.AverageTrueRange(
-            data['high'], data['low'], data['close'], window=period
-        ).average_true_range()
+        return ta.atr(data['high'], data['low'], data['close'], length=period)
     
     @staticmethod
     def calculate_volume_sma(data: pd.DataFrame, period: int) -> pd.Series:
@@ -192,7 +192,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def calculate_obv(data: pd.DataFrame) -> pd.Series:
-        return ta.volume.OnBalanceVolumeIndicator(data['close'], data['volume']).on_balance_volume()
+        return ta.obv(data['close'], data['volume'])
 
 class SignalAnalyzer:
     """Class untuk menganalisis sinyal trading dengan Smart Money Concept"""
@@ -269,7 +269,9 @@ class SignalAnalyzer:
             return None
         
         # Check for NaN values in indicators
-        if (ema_fast_4h.isna().iloc[-1] or ema_slow_4h.isna().iloc[-1] or 
+        if (ema_fast_4h is None or ema_slow_4h is None or rsi_4h is None or 
+            macd_4h is None or atr_4h is None or 
+            ema_fast_4h.isna().iloc[-1] or ema_slow_4h.isna().iloc[-1] or 
             rsi_4h.isna().iloc[-1] or atr_4h.isna().iloc[-1]):
             logging.warning(f"NaN values in indicators for {pair}")
             return None
@@ -280,8 +282,8 @@ class SignalAnalyzer:
         current_atr = atr_4h.iloc[-1]
         current_volume = df_4h['volume'].iloc[-1]
         avg_volume = volume_sma_4h.iloc[-1] if not volume_sma_4h.isna().iloc[-1] else current_volume
-        current_obv = obv_4h.iloc[-1]
-        obv_trend = obv_4h.iloc[-1] > obv_4h.iloc[-5]  # OBV naik dalam 5 periode
+        current_obv = obv_4h.iloc[-1] if obv_4h is not None else 0
+        obv_trend = current_obv > obv_4h.iloc[-5] if obv_4h is not None and len(obv_4h) > 5 else False
         
         # Smart Money Analysis
         support, resistance, all_supports, all_resistances = self.tech_analyzer.smart_money.find_support_resistance(df_4h)
@@ -495,7 +497,7 @@ class SignalAnalyzer:
     
     def _get_trend_direction(self, ema_fast: pd.Series, ema_slow: pd.Series) -> str:
         """Tentukan arah trend"""
-        if len(ema_fast) < 2 or len(ema_slow) < 2:
+        if ema_fast is None or ema_slow is None or len(ema_fast) < 2 or len(ema_slow) < 2:
             return "Unknown"
             
         fast_current = ema_fast.iloc[-1]
@@ -513,7 +515,7 @@ class SignalAnalyzer:
     
     def _get_macd_signal(self, macd: pd.Series, macd_signal: pd.Series) -> str:
         """Analisis sinyal MACD"""
-        if len(macd) < 2 or len(macd_signal) < 2:
+        if macd is None or macd_signal is None or len(macd) < 2 or len(macd_signal) < 2:
             return "Unknown"
             
         macd_current = macd.iloc[-1]
@@ -560,6 +562,9 @@ class SignalAnalyzer:
         confidence += min(smart_money_score, 0.4)
         
         return min(confidence, 1.0)  # Cap at 100%
+
+# ... (TelegramNotifier, BinanceDataManager, AISignalBot classes tetap sama seperti sebelumnya)
+# Hanya mengganti import dan TechnicalAnalyzer saja
 
 class TelegramNotifier:
     """Class untuk mengirim notifikasi ke Telegram"""
