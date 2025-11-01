@@ -395,6 +395,7 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -----------------------------
 def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    await update.message.reply_text("Bot sudah di-start!")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("sto", stop))
