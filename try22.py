@@ -432,5 +432,14 @@ def main():
     except Exception as e:
         logger.error(f"❌ Telegram bot error: {e}")
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    import threading
+    from webserver import app
+
+    # Jalankan webserver di thread terpisah
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
+
+    # Jalankan bot Telegram
+    run_bot()
+
+
