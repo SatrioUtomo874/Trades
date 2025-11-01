@@ -328,16 +328,16 @@ async def coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         symbol = context.args[0].upper()
 
         # Ambil data
-        trend = get_trend(client, symbol, "4h")
+        trend = get_trend(client, symbol, "1d")
         rsi = get_rsi(client, symbol, "15m")
         smc = get_trend_smc(client, symbol, "4h")
         volume = get_volume(client, symbol, "15m")
-        support = get_support_resistance(client, symbol, "15m")["support"]
-        resistance = get_support_resistance(client, symbol, "15m")["resistance"]
+        support = get_support_resistance(client, symbol, "1h")["support"]
+        resistance = get_support_resistance(client, symbol, "1h")["resistance"]
         price = get_current_price(client, symbol)
 
         # Entry + TP + SL + percent
-        trade_levels = get_trade_levels_with_percent(client, symbol, "15m")
+        trade_levels = get_trade_levels_with_percent(client, symbol, "4h")
         
         # Format output rapi
         message = f"📊 *{symbol} Analysis*\n"
