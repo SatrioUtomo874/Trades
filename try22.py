@@ -4,6 +4,14 @@ import threading
 import os
 import asyncio
 
+import pandas as pd
+import numpy as np
+from binance.spot import Spot
+import os
+from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
 from indicator import run_bot  # pastikan fungsi run_bot() di file mu
 
 app = FastAPI()
@@ -22,3 +30,4 @@ threading.Thread(target=start_telegram_bot).start()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
