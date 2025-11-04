@@ -1,7 +1,5 @@
 python-binance
-python-telegram-bot
+python-telegram-bot==20.7
 pandas
 numpy
-pandas_ta
 flask
-gunicorn
