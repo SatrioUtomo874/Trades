@@ -3,16 +3,11 @@ import asyncio
 import pandas as pd
 import numpy as np
 from binance.client import Client
-from binance import AsyncClient, BinanceSocketManager
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import flask
 from flask import request
 import threading
-import ta
-from ta.trend import EMAIndicator, SMAIndicator
-from ta.momentum import RSIIndicator
-from ta.volume import VolumeWeightedAveragePrice
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -23,6 +18,10 @@ app = flask.Flask(__name__)
 def index():
     return "Bot Trading is Running!"
 
+@app.route('/health')
+def health():
+    return "OK"
+
 # Konfigurasi
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', 'your_api_key_here')
 BINANCE_SECRET_KEY = os.getenv('BINANCE_SECRET_KEY', 'your_secret_key_here')
@@ -31,21 +30,52 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'your_telegram_bot_token_he
 # Inisialisasi client Binance
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
+class TechnicalIndicators:
+    @staticmethod
+    def ema(data, period):
+        """Menghitung Exponential Moving Average"""
+        return data.ewm(span=period, adjust=False).mean()
+    
+    @staticmethod
+    def sma(data, period):
+        """Menghitung Simple Moving Average"""
+        return data.rolling(window=period).mean()
+    
+    @staticmethod
+    def rsi(data, period=14):
+        """Menghitung Relative Strength Index"""
+        delta = data.diff()
+        gain = (delta.where(delta > 0, 0)).fillna(0)
+        loss = (-delta.where(delta < 0, 0)).fillna(0)
+        
+        avg_gain = gain.rolling(window=period).mean()
+        avg_loss = loss.rolling(window=period).mean()
+        
+        # Handle division by zero
+        rs = avg_gain / avg_loss
+        rs = rs.replace([np.inf, -np.inf], np.nan).fillna(0)
+        
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.fillna(50)  # Default to 50 if NaN
+
 class TradingAnalyzer:
     def __init__(self):
         self.timeframes = ['1W', '4H', '1H', '30M']
+        self.indicators = TechnicalIndicators()
         
     def get_data(self, symbol, timeframe):
         """Mengambil data dari Binance"""
         try:
-            if timeframe == '1W':
-                klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1WEEK, limit=100)
-            elif timeframe == '4H':
-                klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_4HOUR, limit=100)
-            elif timeframe == '1H':
-                klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=100)
-            elif timeframe == '30M':
-                klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_30MINUTE, limit=100)
+            # Map timeframe ke interval Binance
+            timeframe_map = {
+                '1W': Client.KLINE_INTERVAL_1WEEK,
+                '4H': Client.KLINE_INTERVAL_4HOUR,
+                '1H': Client.KLINE_INTERVAL_1HOUR,
+                '30M': Client.KLINE_INTERVAL_30MINUTE
+            }
+            
+            interval = timeframe_map.get(timeframe, Client.KLINE_INTERVAL_1HOUR)
+            klines = client.get_klines(symbol=symbol, interval=interval, limit=100)
             
             df = pd.DataFrame(klines, columns=[
                 'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -65,26 +95,27 @@ class TradingAnalyzer:
             return None
 
     def calculate_indicators(self, df):
-        """Menghitung semua indikator teknikal"""
+        """Menghitung semua indikator teknikal secara manual"""
         if df is None or len(df) < 20:
             return None
             
         try:
             # EMA
-            df['ema_9'] = EMAIndicator(close=df['close'], window=9).ema_indicator()
-            df['ema_21'] = EMAIndicator(close=df['close'], window=21).ema_indicator()
-            df['ema_50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
+            df['ema_9'] = self.indicators.ema(df['close'], 9)
+            df['ema_21'] = self.indicators.ema(df['close'], 21)
+            df['ema_50'] = self.indicators.ema(df['close'], 50)
             
             # RSI
-            df['rsi'] = RSIIndicator(close=df['close'], window=14).rsi()
+            df['rsi'] = self.indicators.rsi(df['close'], 14)
             
             # Moving Averages
-            df['ma_5'] = SMAIndicator(close=df['close'], window=5).sma_indicator()
-            df['ma_10'] = SMAIndicator(close=df['close'], window=10).sma_indicator()
+            df['ma_5'] = self.indicators.sma(df['close'], 5)
+            df['ma_10'] = self.indicators.sma(df['close'], 10)
             
             # Volume
-            df['volume_sma'] = SMAIndicator(close=df['volume'], window=20).sma_indicator()
+            df['volume_sma'] = self.indicators.sma(df['volume'], 20)
             df['volume_ratio'] = df['volume'] / df['volume_sma']
+            df['volume_ratio'] = df['volume_ratio'].replace([np.inf, -np.inf], 1).fillna(1)
             
             return df
         except Exception as e:
@@ -98,22 +129,25 @@ class TradingAnalyzer:
             fvg_bearish = []
             
             for i in range(2, min(lookback, len(df))):
+                current_idx = -i
+                prev_idx = -(i-1)
+                
                 # Bullish FVG: Candle bearish diikuti candle bullish dengan gap
-                if (df['close'].iloc[-i] < df['open'].iloc[-i] and  # Bearish candle
-                    df['close'].iloc[-(i-1)] > df['open'].iloc[-(i-1)] and  # Bullish candle
-                    df['low'].iloc[-(i-1)] > df['high'].iloc[-i]):  # Gap
+                if (df['close'].iloc[current_idx] < df['open'].iloc[current_idx] and  # Bearish candle
+                    df['close'].iloc[prev_idx] > df['open'].iloc[prev_idx] and  # Bullish candle berikutnya
+                    df['low'].iloc[prev_idx] > df['high'].iloc[current_idx]):  # Gap
                     fvg_bullish.append({
-                        'price_level': (df['high'].iloc[-i] + df['low'].iloc[-(i-1)]) / 2,
-                        'strength': abs(df['close'].iloc[-(i-1)] - df['open'].iloc[-(i-1)])
+                        'price_level': (df['high'].iloc[current_idx] + df['low'].iloc[prev_idx]) / 2,
+                        'strength': abs(df['close'].iloc[prev_idx] - df['open'].iloc[prev_idx])
                     })
                 
                 # Bearish FVG: Candle bullish diikuti candle bearish dengan gap
-                elif (df['close'].iloc[-i] > df['open'].iloc[-i] and  # Bullish candle
-                      df['close'].iloc[-(i-1)] < df['open'].iloc[-(i-1)] and  # Bearish candle
-                      df['high'].iloc[-(i-1)] < df['low'].iloc[-i]):  # Gap
+                elif (df['close'].iloc[current_idx] > df['open'].iloc[current_idx] and  # Bullish candle
+                      df['close'].iloc[prev_idx] < df['open'].iloc[prev_idx] and  # Bearish candle berikutnya
+                      df['high'].iloc[prev_idx] < df['low'].iloc[current_idx]):  # Gap
                     fvg_bearish.append({
-                        'price_level': (df['low'].iloc[-i] + df['high'].iloc[-(i-1)]) / 2,
-                        'strength': abs(df['close'].iloc[-(i-1)] - df['open'].iloc[-(i-1)])
+                        'price_level': (df['low'].iloc[current_idx] + df['high'].iloc[prev_idx]) / 2,
+                        'strength': abs(df['close'].iloc[prev_idx] - df['open'].iloc[prev_idx])
                     })
             
             return fvg_bullish[-3:], fvg_bearish[-3:]  # Return 3 terbaru
@@ -127,31 +161,34 @@ class TradingAnalyzer:
             sweeps = []
             
             for i in range(2, min(lookback, len(df))):
-                current_high = df['high'].iloc[-i]
-                current_low = df['low'].iloc[-i]
+                current_idx = -i
+                current_high = df['high'].iloc[current_idx]
+                current_low = df['low'].iloc[current_idx]
+                current_open = df['open'].iloc[current_idx]
+                current_close = df['close'].iloc[current_idx]
                 prev_high = df['high'].iloc[-(i+1)]
                 prev_low = df['low'].iloc[-(i+1)]
                 
                 # Sweep ke atas
                 if (current_high > prev_high and 
-                    df['close'].iloc[-i] < df['open'].iloc[-i] and  # Bearish rejection
-                    (current_high - max(df['open'].iloc[-i], df['close'].iloc[-i])) > 
-                    (max(df['open'].iloc[-i], df['close'].iloc[-i]) - current_low) * 1.5):
+                    current_close < current_open and  # Bearish rejection
+                    (current_high - max(current_open, current_close)) > 
+                    (max(current_open, current_close) - current_low) * 1.5):
                     sweeps.append({
                         'type': 'bullish_sweep',
                         'level': current_high,
-                        'timestamp': df['timestamp'].iloc[-i]
+                        'timestamp': df['timestamp'].iloc[current_idx]
                     })
                 
                 # Sweep ke bawah
                 elif (current_low < prev_low and 
-                      df['close'].iloc[-i] > df['open'].iloc[-i] and  # Bullish rejection
-                      (min(df['open'].iloc[-i], df['close'].iloc[-i]) - current_low) > 
-                      (current_high - min(df['open'].iloc[-i], df['close'].iloc[-i])) * 1.5):
+                      current_close > current_open and  # Bullish rejection
+                      (min(current_open, current_close) - current_low) > 
+                      (current_high - min(current_open, current_close)) * 1.5):
                     sweeps.append({
                         'type': 'bearish_sweep',
                         'level': current_low,
-                        'timestamp': df['timestamp'].iloc[-i]
+                        'timestamp': df['timestamp'].iloc[current_idx]
                     })
             
             return sweeps[-2:]  # Return 2 terbaru
@@ -165,26 +202,29 @@ class TradingAnalyzer:
             order_blocks = []
             
             for i in range(2, min(lookback, len(df))):
+                current_idx = -i
+                next_idx = -(i-1)
+                
                 # Bullish order block: Bearish candle diikuti bullish candle
-                if (df['close'].iloc[-i] < df['open'].iloc[-i] and  # Bearish
-                    df['close'].iloc[-(i-1)] > df['open'].iloc[-(i-1)] and  # Bullish berikutnya
-                    df['low'].iloc[-(i-1)] > df['low'].iloc[-i]):  # Higher low
+                if (df['close'].iloc[current_idx] < df['open'].iloc[current_idx] and  # Bearish
+                    df['close'].iloc[next_idx] > df['open'].iloc[next_idx] and  # Bullish berikutnya
+                    df['low'].iloc[next_idx] > df['low'].iloc[current_idx]):  # Higher low
                     order_blocks.append({
                         'type': 'bullish',
-                        'high': df['high'].iloc[-i],
-                        'low': df['low'].iloc[-i],
-                        'strength': abs(df['close'].iloc[-i] - df['open'].iloc[-i])
+                        'high': df['high'].iloc[current_idx],
+                        'low': df['low'].iloc[current_idx],
+                        'strength': abs(df['close'].iloc[current_idx] - df['open'].iloc[current_idx])
                     })
                 
                 # Bearish order block: Bullish candle diikuti bearish candle
-                elif (df['close'].iloc[-i] > df['open'].iloc[-i] and  # Bullish
-                      df['close'].iloc[-(i-1)] < df['open'].iloc[-(i-1)] and  # Bearish berikutnya
-                      df['high'].iloc[-(i-1)] < df['high'].iloc[-i]):  # Lower high
+                elif (df['close'].iloc[current_idx] > df['open'].iloc[current_idx] and  # Bullish
+                      df['close'].iloc[next_idx] < df['open'].iloc[next_idx] and  # Bearish berikutnya
+                      df['high'].iloc[next_idx] < df['high'].iloc[current_idx]):  # Lower high
                     order_blocks.append({
                         'type': 'bearish',
-                        'high': df['high'].iloc[-i],
-                        'low': df['low'].iloc[-i],
-                        'strength': abs(df['close'].iloc[-i] - df['open'].iloc[-i])
+                        'high': df['high'].iloc[current_idx],
+                        'low': df['low'].iloc[current_idx],
+                        'strength': abs(df['close'].iloc[current_idx] - df['open'].iloc[current_idx])
                     })
             
             return order_blocks[-3:]  # Return 3 terbaru
@@ -196,6 +236,9 @@ class TradingAnalyzer:
         """Analisis pola candlestick"""
         try:
             patterns = []
+            if len(df) < 2:
+                return patterns
+                
             current_close = df['close'].iloc[-1]
             current_open = df['open'].iloc[-1]
             current_high = df['high'].iloc[-1]
@@ -212,14 +255,16 @@ class TradingAnalyzer:
                 patterns.append("DOJI")
             
             # Hammer
-            lower_shadow = current_close - current_low if current_close > current_open else current_open - current_low
-            upper_shadow = current_high - current_close if current_close > current_open else current_high - current_open
-            if lower_shadow > 2 * body and upper_shadow < body * 0.5:
-                patterns.append("HAMMER")
-            
-            # Shooting Star
-            if upper_shadow > 2 * body and lower_shadow < body * 0.5:
-                patterns.append("SHOOTING_STAR")
+            if body > 0 and total_range > 0:
+                lower_shadow = current_close - current_low if current_close > current_open else current_open - current_low
+                upper_shadow = current_high - current_close if current_close > current_open else current_high - current_open
+                
+                if lower_shadow > 2 * body and upper_shadow < body * 0.5:
+                    patterns.append("HAMMER")
+                
+                # Shooting Star
+                if upper_shadow > 2 * body and lower_shadow < body * 0.5:
+                    patterns.append("SHOOTING_STAR")
             
             # Engulfing
             if (current_close > current_open and prev_close < prev_open and
@@ -237,6 +282,9 @@ class TradingAnalyzer:
     def detect_double_top_bottom(self, df, lookback=30):
         """Mendeteksi Double Top/Bottom"""
         try:
+            if len(df) < lookback:
+                return False, False
+                
             highs = df['high'].tail(lookback)
             lows = df['low'].tail(lookback)
             
@@ -272,10 +320,13 @@ class TradingAnalyzer:
     def analyze_trend(self, df):
         """Analisis trend berdasarkan EMA"""
         try:
+            if len(df) < 2:
+                return "UNKNOWN"
+                
             current_price = df['close'].iloc[-1]
-            ema_9 = df['ema_9'].iloc[-1]
-            ema_21 = df['ema_21'].iloc[-1]
-            ema_50 = df['ema_50'].iloc[-1]
+            ema_9 = df['ema_9'].iloc[-1] if not pd.isna(df['ema_9'].iloc[-1]) else current_price
+            ema_21 = df['ema_21'].iloc[-1] if not pd.isna(df['ema_21'].iloc[-1]) else current_price
+            ema_50 = df['ema_50'].iloc[-1] if not pd.isna(df['ema_50'].iloc[-1]) else current_price
             
             if current_price > ema_9 > ema_21 > ema_50:
                 return "STRONG_BULLISH"
@@ -287,7 +338,8 @@ class TradingAnalyzer:
                 return "BEARISH"
             else:
                 return "SIDEWAYS"
-        except:
+        except Exception as e:
+            print(f"Error analyzing trend: {e}")
             return "UNKNOWN"
 
     def generate_analysis(self, symbol):
@@ -295,7 +347,7 @@ class TradingAnalyzer:
         analysis_result = f"📊 **ANALYSIS FOR {symbol}**\n\n"
         
         for timeframe in self.timeframes:
-            analysis_result += f"**{timeframe} TIMEFRAME**\n"
+            analysis_result += f"**⏰ {timeframe} TIMEFRAME**\n"
             analysis_result += "─" * 40 + "\n"
             
             # Get data
@@ -323,18 +375,18 @@ class TradingAnalyzer:
                 analysis_result += f"📈 Trend: {trend_emoji} {trend}\n"
                 
                 # RSI
-                rsi = df['rsi'].iloc[-1]
+                rsi = df['rsi'].iloc[-1] if not pd.isna(df['rsi'].iloc[-1]) else 50
                 rsi_status = "OVERSOLD" if rsi < 30 else "OVERBOUGHT" if rsi > 70 else "NEUTRAL"
                 analysis_result += f"📊 RSI: {rsi:.1f} ({rsi_status})\n"
                 
                 # Moving Averages
-                ma_5 = df['ma_5'].iloc[-1]
-                ma_10 = df['ma_10'].iloc[-1]
+                ma_5 = df['ma_5'].iloc[-1] if not pd.isna(df['ma_5'].iloc[-1]) else current_price
+                ma_10 = df['ma_10'].iloc[-1] if not pd.isna(df['ma_10'].iloc[-1]) else current_price
                 analysis_result += f"📏 MA5: ${ma_5:.4f} | MA10: ${ma_10:.4f}\n"
                 
                 # Volume
-                volume_ratio = df['volume_ratio'].iloc[-1]
-                volume_status = "HIGH" if volume_ratio > 1.5 else "LOW" if volume_ratio < 0.5 else "NORMAL"
+                volume_ratio = df['volume_ratio'].iloc[-1] if not pd.isna(df['volume_ratio'].iloc[-1]) else 1
+                volume_status = "HIGH 📈" if volume_ratio > 1.5 else "LOW 📉" if volume_ratio < 0.5 else "NORMAL ➡️"
                 analysis_result += f"📦 Volume: {volume_status} ({volume_ratio:.2f}x)\n"
                 
                 # Smart Money Concepts
@@ -389,8 +441,8 @@ Example: /coin BTCUSDT ETHUSDT ADAUSDT
 Supported timeframes: 1W, 4H, 1H, 30M
 
 Indicators included:
-• EMA Trend Analysis
-• RSI
+• EMA Trend Analysis (9, 21, 50)
+• RSI (14)
 • Moving Averages (MA5, MA10)
 • Volume Analysis
 • Smart Money Concepts:
@@ -438,7 +490,7 @@ async def analyze_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def run_flask():
     """Jalankan Flask server"""
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 async def main():
     """Main function"""
@@ -459,4 +511,7 @@ async def main():
     await application.run_polling()
 
 if __name__ == "__main__":
+    # Untuk kompatibilitas dengan Render.com
+    port = int(os.environ.get('PORT', 5000))
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)).start()
     asyncio.run(main())
