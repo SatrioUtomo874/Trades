@@ -2,6 +2,6 @@ python-binance
 python-telegram-bot
 pandas
 numpy
-ta==0.10.2
+pandas_ta
 flask
 gunicorn
