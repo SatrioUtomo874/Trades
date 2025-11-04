@@ -1,459 +1,462 @@
-# bot.py - Telegram Bot (Jalankan di lokal/VPS terpisah)
+import os
+import asyncio
 import pandas as pd
 import numpy as np
 from binance.client import Client
-import os
-from dotenv import load_dotenv
-import time
-import logging
-import asyncio
+from binance import AsyncClient, BinanceSocketManager
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
+import flask
+from flask import request
+import threading
+import ta
+from ta.trend import EMAIndicator, SMAIndicator
+from ta.momentum import RSIIndicator
+from ta.volume import VolumeWeightedAveragePrice
+import warnings
+warnings.filterwarnings('ignore')
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Flask app untuk render.com
+app = flask.Flask(__name__)
 
-load_dotenv()
+@app.route('/')
+def index():
+    return "Bot Trading is Running!"
 
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Konfigurasi
+BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', 'your_api_key_here')
+BINANCE_SECRET_KEY = os.getenv('BINANCE_SECRET_KEY', 'your_secret_key_here')
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'your_telegram_bot_token_here')
 
-# Inisialisasi Binance client
-try:
-    client = Client(api_key=API_KEY, api_secret=API_SECRET, testnet=False)
-    logger.info("✅ Binance client initialized successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to initialize Binance client: {e}")
-    client = None
+# Inisialisasi client Binance
+client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
-# -------------------------------------------------------------------
-# FUNGSI ANALISIS (Sama seperti di app.py)
-# -------------------------------------------------------------------
-def get_klines(symbol: str, interval: str, limit: int = 500):
-    if client is None:
-        return None
+class TradingAnalyzer:
+    def __init__(self):
+        self.timeframes = ['1W', '4H', '1H', '30M']
         
-    try:
-        raw = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-        df = pd.DataFrame(raw, columns=[
-            "open_time","open","high","low","close","volume","close_time",
-            "qav","num_trades","taker_base_vol","taker_quote_vol","ignore"
-        ])
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = df[col].astype(float)
-        return df
-    except Exception as e:
-        logger.error(f"Error getting klines for {symbol}: {e}")
-        return None
+    def get_data(self, symbol, timeframe):
+        """Mengambil data dari Binance"""
+        try:
+            if timeframe == '1W':
+                klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1WEEK, limit=100)
+            elif timeframe == '4H':
+                klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_4HOUR, limit=100)
+            elif timeframe == '1H':
+                klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=100)
+            elif timeframe == '30M':
+                klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_30MINUTE, limit=100)
+            
+            df = pd.DataFrame(klines, columns=[
+                'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+            ])
+            
+            # Konversi tipe data
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = pd.to_numeric(df[col])
+                
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            return df
+            
+        except Exception as e:
+            print(f"Error getting data for {symbol} {timeframe}: {e}")
+            return None
 
-def get_trend(symbol: str, interval: str = "1h", limit: int = 500):
-    df = get_klines(symbol, interval, limit)
-    if df is None or len(df) < 200:
-        return "ERROR: Insufficient data"
-    try:
-        df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
-        df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
-        ema50 = df["ema50"].iloc[-1]
-        ema200 = df["ema200"].iloc[-1]
-        if ema50 > ema200 * 1.01:
-            return "🟢 UPTREND"
-        elif ema50 < ema200 * 0.99:
-            return "🔴 DOWNTREND"
-        else:
-            return "🟡 SIDEWAYS"
-    except Exception as e:
-        return f"ERROR: {str(e)}"
+    def calculate_indicators(self, df):
+        """Menghitung semua indikator teknikal"""
+        if df is None or len(df) < 20:
+            return None
+            
+        try:
+            # EMA
+            df['ema_9'] = EMAIndicator(close=df['close'], window=9).ema_indicator()
+            df['ema_21'] = EMAIndicator(close=df['close'], window=21).ema_indicator()
+            df['ema_50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
+            
+            # RSI
+            df['rsi'] = RSIIndicator(close=df['close'], window=14).rsi()
+            
+            # Moving Averages
+            df['ma_5'] = SMAIndicator(close=df['close'], window=5).sma_indicator()
+            df['ma_10'] = SMAIndicator(close=df['close'], window=10).sma_indicator()
+            
+            # Volume
+            df['volume_sma'] = SMAIndicator(close=df['volume'], window=20).sma_indicator()
+            df['volume_ratio'] = df['volume'] / df['volume_sma']
+            
+            return df
+        except Exception as e:
+            print(f"Error calculating indicators: {e}")
+            return None
 
-def get_rsi(symbol: str, interval: str = "1h", period: int = 14, limit: int = 200):
-    df = get_klines(symbol, interval, limit)
-    if df is None or len(df) < period:
-        return 50
-    try:
-        delta = df["close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        RS = gain / loss
-        RSI = 100 - (100 / (1 + RS))
-        return float(RSI.iloc[-1])
-    except Exception as e:
-        return 50
+    def detect_fvg(self, df, lookback=10):
+        """Mendeteksi Fair Value Gap"""
+        try:
+            fvg_bullish = []
+            fvg_bearish = []
+            
+            for i in range(2, min(lookback, len(df))):
+                # Bullish FVG: Candle bearish diikuti candle bullish dengan gap
+                if (df['close'].iloc[-i] < df['open'].iloc[-i] and  # Bearish candle
+                    df['close'].iloc[-(i-1)] > df['open'].iloc[-(i-1)] and  # Bullish candle
+                    df['low'].iloc[-(i-1)] > df['high'].iloc[-i]):  # Gap
+                    fvg_bullish.append({
+                        'price_level': (df['high'].iloc[-i] + df['low'].iloc[-(i-1)]) / 2,
+                        'strength': abs(df['close'].iloc[-(i-1)] - df['open'].iloc[-(i-1)])
+                    })
+                
+                # Bearish FVG: Candle bullish diikuti candle bearish dengan gap
+                elif (df['close'].iloc[-i] > df['open'].iloc[-i] and  # Bullish candle
+                      df['close'].iloc[-(i-1)] < df['open'].iloc[-(i-1)] and  # Bearish candle
+                      df['high'].iloc[-(i-1)] < df['low'].iloc[-i]):  # Gap
+                    fvg_bearish.append({
+                        'price_level': (df['low'].iloc[-i] + df['high'].iloc[-(i-1)]) / 2,
+                        'strength': abs(df['close'].iloc[-(i-1)] - df['open'].iloc[-(i-1)])
+                    })
+            
+            return fvg_bullish[-3:], fvg_bearish[-3:]  # Return 3 terbaru
+        except Exception as e:
+            print(f"Error detecting FVG: {e}")
+            return [], []
 
-def get_trend_smc(symbol: str, interval: str = "1h", limit: int = 500):
-    df = get_klines(symbol, interval, limit)
-    if df is None or len(df) == 0:
-        return "ERROR: No data"
-    try:
-        highs = df["high"].values
-        lows = df["low"].values
-        closes = df["close"].values
-        
-        if len(closes) >= 3:
-            if closes[-1] > closes[-2] > closes[-3] and lows[-1] > lows[-2]:
-                return "🟢 UPTREND"
-            elif closes[-1] < closes[-2] < closes[-3] and highs[-1] < highs[-2]:
-                return "🔴 DOWNTREND"
-        return "🟡 SIDEWAYS"
-    except Exception as e:
-        return f"ERROR: {str(e)}"
+    def detect_liquidity_sweep(self, df, lookback=20):
+        """Mendeteksi Liquidity Sweep"""
+        try:
+            sweeps = []
+            
+            for i in range(2, min(lookback, len(df))):
+                current_high = df['high'].iloc[-i]
+                current_low = df['low'].iloc[-i]
+                prev_high = df['high'].iloc[-(i+1)]
+                prev_low = df['low'].iloc[-(i+1)]
+                
+                # Sweep ke atas
+                if (current_high > prev_high and 
+                    df['close'].iloc[-i] < df['open'].iloc[-i] and  # Bearish rejection
+                    (current_high - max(df['open'].iloc[-i], df['close'].iloc[-i])) > 
+                    (max(df['open'].iloc[-i], df['close'].iloc[-i]) - current_low) * 1.5):
+                    sweeps.append({
+                        'type': 'bullish_sweep',
+                        'level': current_high,
+                        'timestamp': df['timestamp'].iloc[-i]
+                    })
+                
+                # Sweep ke bawah
+                elif (current_low < prev_low and 
+                      df['close'].iloc[-i] > df['open'].iloc[-i] and  # Bullish rejection
+                      (min(df['open'].iloc[-i], df['close'].iloc[-i]) - current_low) > 
+                      (current_high - min(df['open'].iloc[-i], df['close'].iloc[-i])) * 1.5):
+                    sweeps.append({
+                        'type': 'bearish_sweep',
+                        'level': current_low,
+                        'timestamp': df['timestamp'].iloc[-i]
+                    })
+            
+            return sweeps[-2:]  # Return 2 terbaru
+        except Exception as e:
+            print(f"Error detecting liquidity sweep: {e}")
+            return []
 
-def get_support_resistance(symbol: str, interval: str = "1h", lookback: int = 50):
-    df = get_klines(symbol, interval, lookback)
-    if df is None or len(df) == 0:
-        return None
-    try:
-        highs = df["high"].values
-        lows = df["low"].values
-        return {
-            "support": round(np.min(lows), 4),
-            "resistance": round(np.max(highs), 4)
-        }
-    except Exception as e:
-        return None
+    def detect_order_block(self, df, lookback=20):
+        """Mendeteksi Order Block"""
+        try:
+            order_blocks = []
+            
+            for i in range(2, min(lookback, len(df))):
+                # Bullish order block: Bearish candle diikuti bullish candle
+                if (df['close'].iloc[-i] < df['open'].iloc[-i] and  # Bearish
+                    df['close'].iloc[-(i-1)] > df['open'].iloc[-(i-1)] and  # Bullish berikutnya
+                    df['low'].iloc[-(i-1)] > df['low'].iloc[-i]):  # Higher low
+                    order_blocks.append({
+                        'type': 'bullish',
+                        'high': df['high'].iloc[-i],
+                        'low': df['low'].iloc[-i],
+                        'strength': abs(df['close'].iloc[-i] - df['open'].iloc[-i])
+                    })
+                
+                # Bearish order block: Bullish candle diikuti bearish candle
+                elif (df['close'].iloc[-i] > df['open'].iloc[-i] and  # Bullish
+                      df['close'].iloc[-(i-1)] < df['open'].iloc[-(i-1)] and  # Bearish berikutnya
+                      df['high'].iloc[-(i-1)] < df['high'].iloc[-i]):  # Lower high
+                    order_blocks.append({
+                        'type': 'bearish',
+                        'high': df['high'].iloc[-i],
+                        'low': df['low'].iloc[-i],
+                        'strength': abs(df['close'].iloc[-i] - df['open'].iloc[-i])
+                    })
+            
+            return order_blocks[-3:]  # Return 3 terbaru
+        except Exception as e:
+            print(f"Error detecting order block: {e}")
+            return []
 
-def get_volume(symbol: str, interval: str = "1h", limit: int = 1):
-    df = get_klines(symbol, interval, limit)
-    if df is None or len(df) == 0:
-        return None
-    try:
-        return float(df["volume"].iloc[-1])
-    except Exception as e:
-        return None
+    def analyze_candlestick_patterns(self, df):
+        """Analisis pola candlestick"""
+        try:
+            patterns = []
+            current_close = df['close'].iloc[-1]
+            current_open = df['open'].iloc[-1]
+            current_high = df['high'].iloc[-1]
+            current_low = df['low'].iloc[-1]
+            prev_close = df['close'].iloc[-2]
+            prev_open = df['open'].iloc[-2]
+            prev_high = df['high'].iloc[-2]
+            prev_low = df['low'].iloc[-2]
+            
+            # Doji
+            body = abs(current_close - current_open)
+            total_range = current_high - current_low
+            if total_range > 0 and body / total_range < 0.1:
+                patterns.append("DOJI")
+            
+            # Hammer
+            lower_shadow = current_close - current_low if current_close > current_open else current_open - current_low
+            upper_shadow = current_high - current_close if current_close > current_open else current_high - current_open
+            if lower_shadow > 2 * body and upper_shadow < body * 0.5:
+                patterns.append("HAMMER")
+            
+            # Shooting Star
+            if upper_shadow > 2 * body and lower_shadow < body * 0.5:
+                patterns.append("SHOOTING_STAR")
+            
+            # Engulfing
+            if (current_close > current_open and prev_close < prev_open and
+                current_open < prev_close and current_close > prev_open):
+                patterns.append("BULLISH_ENGULFING")
+            elif (current_close < current_open and prev_close > prev_open and
+                  current_open > prev_close and current_close < prev_open):
+                patterns.append("BEARISH_ENGULFING")
+            
+            return patterns
+        except Exception as e:
+            print(f"Error analyzing candlestick patterns: {e}")
+            return []
 
-def get_volume_average(symbol: str, interval: str = "1h", limit: int = 20):
-    df = get_klines(symbol, interval, limit)
-    if df is None or len(df) == 0:
-        return None
-    try:
-        volumes = df["volume"].astype(float)
-        return float(volumes.mean())
-    except Exception as e:
-        return None
+    def detect_double_top_bottom(self, df, lookback=30):
+        """Mendeteksi Double Top/Bottom"""
+        try:
+            highs = df['high'].tail(lookback)
+            lows = df['low'].tail(lookback)
+            
+            # Cari local maxima dan minima
+            local_max = []
+            local_min = []
+            
+            for i in range(1, len(highs)-1):
+                if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
+                    local_max.append(highs.iloc[i])
+                if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]:
+                    local_min.append(lows.iloc[i])
+            
+            # Double Top
+            double_top = False
+            if len(local_max) >= 2:
+                max1, max2 = sorted(local_max[-2:], reverse=True)
+                if abs(max1 - max2) / max1 < 0.02:  # Dalam 2%
+                    double_top = True
+            
+            # Double Bottom
+            double_bottom = False
+            if len(local_min) >= 2:
+                min1, min2 = sorted(local_min[-2:])
+                if abs(min1 - min2) / min1 < 0.02:  # Dalam 2%
+                    double_bottom = True
+            
+            return double_top, double_bottom
+        except Exception as e:
+            print(f"Error detecting double top/bottom: {e}")
+            return False, False
 
-def get_current_price(symbol: str):
-    if client is None:
-        return None
-    try:
-        data = client.get_symbol_ticker(symbol=symbol)
-        return float(data['price'])
-    except Exception as e:
-        return None
-
-def calculate_confidence(symbol: str, trend: str, smc: str, rsi: float, volume: float):
-    confidence = 0
-    try:
-        if "UPTREND" in trend:
-            confidence += 30
-        elif "DOWNTREND" in trend:
-            confidence += 20
-
-        if "UPTREND" in smc:
-            confidence += 30
-        elif "DOWNTREND" in smc:
-            confidence += 15
-
-        avg_volume = get_volume_average(symbol, "4h", limit=20)
-        if volume and avg_volume:
-            if volume >= avg_volume * 1.2:
-                confidence += 20
-            elif volume >= avg_volume * 0.8:
-                confidence += 15
+    def analyze_trend(self, df):
+        """Analisis trend berdasarkan EMA"""
+        try:
+            current_price = df['close'].iloc[-1]
+            ema_9 = df['ema_9'].iloc[-1]
+            ema_21 = df['ema_21'].iloc[-1]
+            ema_50 = df['ema_50'].iloc[-1]
+            
+            if current_price > ema_9 > ema_21 > ema_50:
+                return "STRONG_BULLISH"
+            elif current_price < ema_9 < ema_21 < ema_50:
+                return "STRONG_BEARISH"
+            elif ema_9 > ema_21 > ema_50:
+                return "BULLISH"
+            elif ema_9 < ema_21 < ema_50:
+                return "BEARISH"
             else:
-                confidence += 5
+                return "SIDEWAYS"
+        except:
+            return "UNKNOWN"
 
-        if rsi < 30:
-            confidence += 5
-        elif rsi > 70:
-            confidence -= 5
-        elif 40 <= rsi <= 60:
-            confidence += 20
-        else:
-            confidence += 10
+    def generate_analysis(self, symbol):
+        """Generate analisis lengkap untuk semua timeframe"""
+        analysis_result = f"📊 **ANALYSIS FOR {symbol}**\n\n"
+        
+        for timeframe in self.timeframes:
+            analysis_result += f"**{timeframe} TIMEFRAME**\n"
+            analysis_result += "─" * 40 + "\n"
+            
+            # Get data
+            df = self.get_data(symbol, timeframe)
+            if df is None or len(df) < 50:
+                analysis_result += "❌ Data tidak cukup untuk analisis\n\n"
+                continue
+                
+            # Calculate indicators
+            df = self.calculate_indicators(df)
+            if df is None:
+                analysis_result += "❌ Error dalam perhitungan indikator\n\n"
+                continue
+            
+            try:
+                # Current price info
+                current_price = df['close'].iloc[-1]
+                price_change = ((current_price - df['close'].iloc[-2]) / df['close'].iloc[-2]) * 100
+                
+                analysis_result += f"💰 Price: ${current_price:.4f} ({price_change:+.2f}%)\n"
+                
+                # Trend Analysis
+                trend = self.analyze_trend(df)
+                trend_emoji = "🟢" if "BULL" in trend else "🔴" if "BEAR" in trend else "🟡"
+                analysis_result += f"📈 Trend: {trend_emoji} {trend}\n"
+                
+                # RSI
+                rsi = df['rsi'].iloc[-1]
+                rsi_status = "OVERSOLD" if rsi < 30 else "OVERBOUGHT" if rsi > 70 else "NEUTRAL"
+                analysis_result += f"📊 RSI: {rsi:.1f} ({rsi_status})\n"
+                
+                # Moving Averages
+                ma_5 = df['ma_5'].iloc[-1]
+                ma_10 = df['ma_10'].iloc[-1]
+                analysis_result += f"📏 MA5: ${ma_5:.4f} | MA10: ${ma_10:.4f}\n"
+                
+                # Volume
+                volume_ratio = df['volume_ratio'].iloc[-1]
+                volume_status = "HIGH" if volume_ratio > 1.5 else "LOW" if volume_ratio < 0.5 else "NORMAL"
+                analysis_result += f"📦 Volume: {volume_status} ({volume_ratio:.2f}x)\n"
+                
+                # Smart Money Concepts
+                fvg_bullish, fvg_bearish = self.detect_fvg(df)
+                if fvg_bullish:
+                    analysis_result += f"🟢 FVG Bullish: {len(fvg_bullish)} terdeteksi\n"
+                if fvg_bearish:
+                    analysis_result += f"🔴 FVG Bearish: {len(fvg_bearish)} terdeteksi\n"
+                
+                liquidity_sweeps = self.detect_liquidity_sweep(df)
+                if liquidity_sweeps:
+                    analysis_result += f"💧 Liquidity Sweep: {len(liquidity_sweeps)} terdeteksi\n"
+                
+                order_blocks = self.detect_order_block(df)
+                if order_blocks:
+                    bull_blocks = len([ob for ob in order_blocks if ob['type'] == 'bullish'])
+                    bear_blocks = len([ob for ob in order_blocks if ob['type'] == 'bearish'])
+                    analysis_result += f"📦 Order Blocks: 🟢{bull_blocks} 🔴{bear_blocks}\n"
+                
+                # Candlestick Patterns
+                patterns = self.analyze_candlestick_patterns(df)
+                if patterns:
+                    analysis_result += f"🕯️ Patterns: {', '.join(patterns)}\n"
+                
+                # Double Top/Bottom
+                double_top, double_bottom = self.detect_double_top_bottom(df)
+                if double_top:
+                    analysis_result += "⛰️ DOUBLE TOP Terdeteksi\n"
+                if double_bottom:
+                    analysis_result += "🏞️ DOUBLE BOTTOM Terdeteksi\n"
+                
+                analysis_result += "\n"
+                
+            except Exception as e:
+                analysis_result += f"❌ Error dalam analisis: {str(e)}\n\n"
+                continue
+        
+        return analysis_result
 
-        confidence = max(0, min(confidence, 100))
-    except Exception as e:
-        confidence = 50
-    return confidence
+# Global analyzer instance
+analyzer = TradingAnalyzer()
 
-def get_trade_levels(symbol: str, interval: str = "15m"):
-    try:
-        current_price = get_current_price(symbol)
-        if current_price is None:
-            return {"direction": "ERROR", "success": False}
-
-        trend = get_trend(symbol, interval)
-        smc = get_trend_smc(symbol, interval)
-
-        if "UPTREND" in trend or "UPTREND" in smc:
-            direction = "LONG"
-            entry = current_price * 1.001
-            tp = current_price * 1.015
-            sl = current_price * 0.995
-        elif "DOWNTREND" in trend or "DOWNTREND" in smc:
-            direction = "SHORT" 
-            entry = current_price * 0.999
-            tp = current_price * 0.985
-            sl = current_price * 1.005
-        else:
-            direction = "SIDEWAYS"
-            entry = current_price
-            tp = current_price * 1.008
-            sl = current_price * 0.992
-
-        if direction == "LONG":
-            tp_percent = ((tp - entry) / entry) * 100
-            sl_percent = ((entry - sl) / entry) * 100
-        else:
-            tp_percent = ((entry - tp) / entry) * 100
-            sl_percent = ((sl - entry) / entry) * 100
-
-        return {
-            "entry_price": round(entry, 4),
-            "take_profit": round(tp, 4),
-            "stop_loss": round(sl, 4),
-            "tp_percent": round(tp_percent, 2),
-            "sl_percent": round(sl_percent, 2),
-            "direction": direction,
-            "success": True
-        }
-    except Exception as e:
-        return {"direction": "ERROR", "success": False}
-
-# -------------------------------------------------------------------
-# TELEGRAM BOT HANDLERS
-# -------------------------------------------------------------------
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /start"""
     welcome_text = """
-🤖 **Crypto Trading Bot Aktif!**
+🤖 **Binance Trading Bot**
 
-**Perintah yang tersedia:**
-/coin [SYMBOL] - Analisis trading lengkap
-/price [SYMBOL] - Cek harga saat ini  
-/trend [SYMBOL] - Analisis trend
-/help - Menampilkan bantuan
+Commands:
+/coin [symbol1] [symbol2] ... - Analisis multiple coins
+Example: /coin BTCUSDT ETHUSDT ADAUSDT
 
-**Contoh:**
-`/coin BTCUSDT`
-`/price ETHUSDT`
-`/trend ADAUSDT`
+Supported timeframes: 1W, 4H, 1H, 30M
 
-Bot ini memberikan analisis teknikal berdasarkan:
-• Trend EMA (50 vs 200)
-• RSI (14 period)
-• Smart Money Concept (SMC)
-• Support & Resistance
+Indicators included:
+• EMA Trend Analysis
+• RSI
+• Moving Averages (MA5, MA10)
+• Volume Analysis
+• Smart Money Concepts:
+  - Fair Value Gap (FVG)
+  - Liquidity Sweep
+  - Order Blocks
+• Candlestick Patterns
+• Double Top/Bottom
     """
-    
-    await update.message.reply_text(escape_md(welcome_text), parse_mode="MarkdownV2")
+    await update.message.reply_text(welcome_text)
 
-
-
-import re
-
-def escape_md(text: str) -> str:
-    """
-    Escape karakter khusus MarkdownV2 agar Telegram ga error parsing.
-    Semua karakter seperti _ * [ ] ( ) ~ ` > # + - = | { } . ! akan di-escape.
-    """
-    if not text:
-        return ""
-    return re.sub(r'([_\*\[\]\(\)~`>#+\-=|{}.!])', r'\\\1', str(text))
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
-📖 **Panduan Penggunaan Bot**
-
-**1. Analisis Coin (/coin)**
-Memberikan analisis lengkap untuk trading:
-- Trend berdasarkan EMA dan SMC
-- Level RSI saat ini
-- Support & Resistance
-- Rekomendasi entry, TP, SL
-- Confidence level
-
-**2. Cek Harga (/price)**
-Menampilkan harga real-time coin
-
-**3. Analisis Trend (/trend)**
-Analisis trend teknikal singkat
-
-**Format Symbol:** BTCUSDT, ETHUSDT, ADAUSDT, dll.
-    """
-    await update.message.reply_text(escape_md(help_text), parse_mode='MarkdownV2')
-
-
-async def coin_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def analyze_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk command /coin"""
     if not context.args:
-        await update.message.reply_text(
-            escape_md("❌ **Format salah!**\nGunakan: `/coin [SYMBOL]`\nContoh: `/coin BTCUSDT`"),
-            parse_mode='MarkdownV2'
-        )
+        await update.message.reply_text("❌ Please provide coin symbols. Example: /coin BTCUSDT ETHUSDT")
         return
     
-    symbol = context.args[0].upper().strip()
+    symbols = [sym.upper() for sym in context.args]
     
-    try:
-        processing_msg = await update.message.reply_text(
-            escape_md(f"🔍 Menganalisis **{symbol}**..."),
-            parse_mode='MarkdownV2'
-        )
-        
-        trend_ema = get_trend(symbol, "1h")
-        rsi = get_rsi(symbol, "15m")
-        trend_smc = get_trend_smc(symbol, "4h")
-        volume = get_volume(symbol, "1h")
-        sr_levels = get_support_resistance(symbol, "4h")
-        current_price = get_current_price(symbol)
-        trade_levels = get_trade_levels(symbol, "15m")
-        confidence = calculate_confidence(symbol, trend_ema, trend_smc, rsi, volume)
-        
-        message = f"📊 **ANALISIS {symbol}**\n\n"
-        
-        if current_price:
-            message += f"💰 **Harga Saat Ini:** `${current_price:,.4f}`\n\n"
-        
-        message += f"**📈 ANALISIS TEKNIKAL**\n"
-        message += f"• **Trend EMA:** {trend_ema}\n"
-        message += f"• **Trend SMC:** {trend_smc}\n"
-        message += f"• **RSI (14):** `{rsi:.2f}`"
-        if rsi < 30: message += " 🟢 (Oversold)\n"
-        elif rsi > 70: message += " 🔴 (Overbought)\n"
-        else: message += " 🟡 (Netral)\n"
-        
-        if volume: message += f"• **Volume:** `{volume:,.0f}`\n"
-        if sr_levels:
-            message += f"• **Support:** `${sr_levels['support']}`\n"
-            message += f"• **Resistance:** `${sr_levels['resistance']}`\n"
-        
-        message += f"\n**🎯 SETUP TRADING**\n• **Arah:** {trade_levels['direction']}\n"
-        if trade_levels['success']:
-            message += f"• **Entry:** `${trade_levels['entry_price']}`\n"
-            message += f"• **TP:** `${trade_levels['take_profit']}` (+{trade_levels['tp_percent']}%)\n"
-            message += f"• **SL:** `${trade_levels['stop_loss']}` (-{trade_levels['sl_percent']}%)\n"
-        else:
-            message += "• **Entry:** `N/A`\n"
-        
-        message += f"\n**📊 CONFIDENCE LEVEL**\n"
-        if confidence >= 70: message += f"🟢 **{confidence}%** (Tinggi)\n"
-        elif confidence >= 50: message += f"🟡 **{confidence}%** (Sedang)\n"
-        else: message += f"🔴 **{confidence}%** (Rendah)\n"
-        
-        message += f"\n___\n⚠️ *Disclaimer: Ini bukan financial advice. Trading mengandung risiko.*"
-        
-        await processing_msg.delete()
-        await update.message.reply_text(escape_md(message), parse_mode='MarkdownV2')
-        
-    except Exception as e:
-        await update.message.reply_text(
-            escape_md(f"❌ **Error menganalisis {symbol}:**\n`{str(e)}`"),
-            parse_mode='MarkdownV2'
-        )
-        logger.error(f"Telegram bot error in coin_analysis: {e}")
+    for symbol in symbols:
+        try:
+            # Validasi symbol
+            client.get_symbol_ticker(symbol=symbol)
+            
+            await update.message.reply_text(f"🔄 Analyzing {symbol}...")
+            
+            # Generate analysis
+            analysis = analyzer.generate_analysis(symbol)
+            
+            # Split long messages (Telegram limit)
+            if len(analysis) > 4096:
+                for i in range(0, len(analysis), 4096):
+                    await update.message.reply_text(analysis[i:i+4096])
+                    await asyncio.sleep(0.5)
+            else:
+                await update.message.reply_text(analysis)
+                
+            await asyncio.sleep(1)  # Delay antara coins
+            
+        except Exception as e:
+            error_msg = f"❌ Error analyzing {symbol}: {str(e)}"
+            await update.message.reply_text(error_msg)
+            continue
 
+def run_flask():
+    """Jalankan Flask server"""
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
 
-async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk command /price"""
-    if not context.args:
-        await update.message.reply_text("❌ Gunakan: `/price [SYMBOL]`", parse_mode='markdownV2')
-        return
+async def main():
+    """Main function"""
+    # Jalankan Flask di thread terpisah
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
     
-    symbol = context.args[0].upper().strip()
-    try:
-        price = get_current_price(symbol)
-        if price:
-            await update.message.reply_text(
-            escape_md(f"💰 **{symbol}:** `${price:,.4f}`"), parse_mode='MarkdownV2')
-        else:
-            await update.message.reply_text(escape_md(f"❌ Tidak dapat mengambil harga untuk {symbol}"), parse_mode='MarkdownV2')
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: `{str(e)}`", parse_mode='markdownV2')
-
-async def trend_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk command /trend"""
-    if not context.args:
-        await update.message.reply_text("❌ Gunakan: `/trend [SYMBOL]`", parse_mode='markdownV2')
-        return
+    # Inisialisasi bot Telegram
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    symbol = context.args[0].upper().strip()
-    try:
-        processing_msg = await update.message.reply_text(f"🔍 Menganalisis trend **{symbol}**...", parse_mode='markdownV2')
-        
-        trend_ema = get_trend(symbol, "1h")
-        trend_smc = get_trend_smc(symbol, "4h")
-        rsi = get_rsi(symbol, "1h")
-        current_price = get_current_price(symbol)
-        
-        message = f"📈 **TREND ANALYSIS - {symbol}**\n\n"
-        
-        if current_price is not None:
-            message += f"💰 **Harga Saat Ini:** `${current_price:,.4f}`\n\n"
-        else:
-            message += "💰 **Harga Saat Ini:** `N/A`\n\n"
-        
-        message += f"**Trend Indicators:**\n"
-        message += f"• **EMA (1h):** {trend_ema}\n"
-        message += f"• **SMC (4h):** {trend_smc}\n"
-        message += f"• **RSI (1h):** `{rsi:.2f}`"
-        
-        if "UPTREND" in trend_ema and "UPTREND" in trend_smc:
-            message += f"\n\n🎯 **Kesimpulan:** Trend Naik kuat"
-        elif "DOWNTREND" in trend_ema and "DOWNTREND" in trend_smc:
-            message += f"\n\n🎯 **Kesimpulan:** Trend Turun kuat"
-        else:
-            message += f"\n\n🎯 **Kesimpulan:** Market Sideways/Ranging"
-        
-        await processing_msg.delete()
-        await update.message.reply_text(escape_md(message), parse_mode='MarkdownV2')
-
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: `{str(e)}`", parse_mode='markdownV2')
-
-# -------------------------------------------------------------------
-# MAIN BOT FUNCTION
-# -------------------------------------------------------------------
-def main():
-    if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN tidak ditemukan!")
-        return
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("coin", analyze_coin))
     
-    try:
-        # Buat application untuk bot
-        application = ApplicationBuilder().token(BOT_TOKEN).build()
-        
-        # Tambahkan handlers
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("coin", coin_analysis))
-        application.add_handler(CommandHandler("price", price_check))
-        application.add_handler(CommandHandler("trend", trend_analysis))
-        
-        # Jalankan bot
-        logger.info("✅ Telegram bot started successfully")
-        print("Bot sedang berjalan... Tekan Ctrl+C untuk menghentikan.")
-        application.run_polling()
-        
-    except Exception as e:
-        logger.error(f"❌ Telegram bot error: {e}")
+    # Start bot
+    print("Bot started!")
+    await application.run_polling()
 
 if __name__ == "__main__":
-    import threading
-    from webserver import app
-
-    # Jalankan webserver di thread terpisah
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
-
-    # Jalankan bot Telegram
-    main()
-
-
-
-
+    asyncio.run(main())
