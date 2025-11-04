@@ -1,5 +1,7 @@
-binance-connector
+python-binance
 python-telegram-bot
-python-dotenv
 pandas
 numpy
+ta==0.10.2
+flask
+gunicorn
