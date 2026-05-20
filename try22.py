@@ -51,32 +51,42 @@ def send_telegram(msg):
 
 # ---------- BINANCE REST SIGNATURE ----------
 def signed_request(endpoint, params, method="GET"):
-    """Tambah signature & kirim request ke fapi.binance.com."""
+    """Tambah signature & kirim request ke fapi.binance.com. Kirim detail error ke Telegram jika gagal."""
     if not API_KEY or not SECRET_KEY:
         send_telegram("❌ API Key/Secret belum diisi di environment variable Render.")
         return None
 
     params["timestamp"] = int(time.time() * 1000)
+    # Buat query string tanpa signature dulu
     query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    # Tanda tangan
     signature = hmac.new(SECRET_KEY.encode(), query_string.encode(), hashlib.sha256).hexdigest()
-    query_string += f"&signature={signature}"
-    url = f"https://fapi.binance.com{endpoint}?{query_string}"
+    full_url = f"https://fapi.binance.com{endpoint}?{query_string}&signature={signature}"
 
     try:
-        resp = requests.get(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10) if method == "GET" else None
-        # Untuk POST / DELETE, kita perlu kirim body, tapi kita gunakan GET untuk order cancel? 
-        # Sebenarnya DELETE juga bisa lewat query string, Binance menerima.
-        # Kita buat fleksibel: jika method != GET, kita bisa gunakan requests.post/delete dengan params di URL.
-        if method != "GET":
-            # Kirim sebagai POST/DELETE dengan params di URL (tanda tangan sudah di query string)
-            full_url = url
-            if method == "POST":
-                resp = requests.post(full_url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-            else:
-                resp = requests.delete(full_url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-        return resp.json() if resp.status_code == 200 else None
+        if method == "GET":
+            resp = requests.get(full_url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+        elif method == "POST":
+            resp = requests.post(full_url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+        elif method == "DELETE":
+            resp = requests.delete(full_url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+        else:
+            return None
+
+        # Jika sukses, kembalikan JSON
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            # Gagal → kirim detail ke Telegram
+            try:
+                err_json = resp.json()
+                err_msg = err_json.get("msg", "Tidak ada pesan error")
+            except:
+                err_msg = resp.text
+            send_telegram(f"❌ API Error {resp.status_code} pada {endpoint}\n{err_msg}")
+            return None
     except Exception as e:
-        send_telegram(f"⚠️ Network error: {e}")
+        send_telegram(f"⚠️ Network/Exception: {e}")
         return None
 
 # ---------- DATA FETCHER (seperti sebelumnya) ----------
