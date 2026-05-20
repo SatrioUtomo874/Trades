@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-SIGNAL BROADCASTER – Render Web Service
-Loop nonstop + Flask untuk health-check.
+AUTO TRADING BOT – Render Web Service
+Menggunakan API Binance Futures (Stop-Limit Order)
+IP dinamis Render → kirim log error ke Telegram jika API menolak.
 """
 
 import os
 import time
+import hmac
+import hashlib
+import json
 import threading
 import requests
 import pandas as pd
@@ -16,9 +20,19 @@ from flask import Flask
 # ================== KONFIGURASI ==================
 TELEGRAM_TOKEN = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
 CHAT_ID = "8041197505"
-TP_PERCENT = 0.6
-SL_PERCENT = 0.85
+
+# Parameter trading
+TP_PERCENT = 0.6      # 0.6%
+SL_PERCENT = 0.85     # 0.85%
 MIN_CONFIDENCE = 65
+LEVERAGE = 5
+TIMEOUT_MINUTES = 15
+SCAN_INTERVAL = 60    # jeda antar siklus (detik)
+MAX_PRICE_USDT = 50.0  # hanya koin ≤ $50
+
+# API Binance (diisi dari environment variable Render)
+API_KEY = os.environ.get("BINANCE_API_KEY", "")
+SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
 # =================================================
 
 app = Flask(__name__)
@@ -27,6 +41,7 @@ app = Flask(__name__)
 def home():
     return "Bot is alive", 200
 
+# ---------- TELEGRAM ----------
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -34,12 +49,40 @@ def send_telegram(msg):
     except:
         pass
 
-# -------------------------------------------------------------------
-# Data & Indikator (sama persis seperti sebelumnya, tidak diubah)
-# -------------------------------------------------------------------
+# ---------- BINANCE REST SIGNATURE ----------
+def signed_request(endpoint, params, method="GET"):
+    """Tambah signature & kirim request ke fapi.binance.com."""
+    if not API_KEY or not SECRET_KEY:
+        send_telegram("❌ API Key/Secret belum diisi di environment variable Render.")
+        return None
+
+    params["timestamp"] = int(time.time() * 1000)
+    query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    signature = hmac.new(SECRET_KEY.encode(), query_string.encode(), hashlib.sha256).hexdigest()
+    query_string += f"&signature={signature}"
+    url = f"https://fapi.binance.com{endpoint}?{query_string}"
+
+    try:
+        resp = requests.get(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10) if method == "GET" else None
+        # Untuk POST / DELETE, kita perlu kirim body, tapi kita gunakan GET untuk order cancel? 
+        # Sebenarnya DELETE juga bisa lewat query string, Binance menerima.
+        # Kita buat fleksibel: jika method != GET, kita bisa gunakan requests.post/delete dengan params di URL.
+        if method != "GET":
+            # Kirim sebagai POST/DELETE dengan params di URL (tanda tangan sudah di query string)
+            full_url = url
+            if method == "POST":
+                resp = requests.post(full_url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+            else:
+                resp = requests.delete(full_url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+        return resp.json() if resp.status_code == 200 else None
+    except Exception as e:
+        send_telegram(f"⚠️ Network error: {e}")
+        return None
+
+# ---------- DATA FETCHER (seperti sebelumnya) ----------
 def fetch_klines(symbol, interval, limit=100):
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    for attempt in range(3):
+    for _ in range(3):
         try:
             resp = requests.get(url, timeout=8)
             data = resp.json()
@@ -185,7 +228,7 @@ def generate_signal(df_h1, df_m15, df_m5):
     }
 
 def get_coins_by_volume(top=50, max_price=50.0):
-    for attempt in range(3):
+    for _ in range(3):
         try:
             resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=10)
             tickers = [t for t in resp.json() if t["symbol"].endswith("USDT")]
@@ -201,10 +244,75 @@ def get_coins_by_volume(top=50, max_price=50.0):
             time.sleep(10)
     return []
 
-def main_scan():
-    coins = get_coins_by_volume(50, 50.0)
+# ---------- TRADING FUNCTIONS ----------
+def get_mark_price(symbol):
+    try:
+        resp = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}", timeout=5)
+        return float(resp.json()["price"])
+    except:
+        return None
+
+def get_min_quantity(symbol):
+    """Ambil quantity minimum dari exchange info."""
+    try:
+        resp = requests.get("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10)
+        data = resp.json()
+        for s in data["symbols"]:
+            if s["symbol"] == symbol:
+                for f in s["filters"]:
+                    if f["filterType"] == "MIN_NOTIONAL":
+                        min_notional = float(f["notional"])
+                        return min_notional
+        return 5.0  # default
+    except:
+        return 5.0
+
+def set_leverage(symbol, leverage):
+    params = {"symbol": symbol, "leverage": leverage}
+    res = signed_request("/fapi/v1/leverage", params, method="POST")
+    if res is None:
+        send_telegram(f"⚠️ Gagal set leverage {symbol}. API mungkin menolak (cek IP).")
+
+def place_stop_limit_order(symbol, side, quantity, entry_price):
+    """Pasang stop-limit order di entry_price."""
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "STOP",
+        "quantity": quantity,
+        "price": entry_price,
+        "stopPrice": entry_price,
+        "timeInForce": "GTC"
+    }
+    res = signed_request("/fapi/v1/order", params, method="POST")
+    if res and "orderId" in res:
+        return res["orderId"]
+    else:
+        if res and "msg" in res:
+            send_telegram(f"❌ Order gagal: {res['msg']} (mungkin IP ditolak)")
+        else:
+            send_telegram("❌ Order gagal tanpa pesan. Cek API key/IP.")
+        return None
+
+def cancel_order(symbol, order_id):
+    params = {"symbol": symbol, "orderId": order_id}
+    res = signed_request("/fapi/v1/order", params, method="DELETE")
+    return res is not None
+
+def check_order_status(symbol, order_id):
+    """Return status: NEW, FILLED, CANCELED, EXPIRED, atau None jika error."""
+    params = {"symbol": symbol, "orderId": order_id}
+    res = signed_request("/fapi/v1/order", params, method="GET")
+    if res and "status" in res:
+        return res["status"]
+    return None
+
+# ---------- MAIN TRADING CYCLE ----------
+def trading_cycle():
+    """Satu siklus: scan sinyal terbaik → eksekusi → monitoring."""
+    coins = get_coins_by_volume(50, MAX_PRICE_USDT)
     if not coins:
-        send_telegram("❌ Gagal mengambil daftar koin setelah 3 percobaan.")
+        send_telegram("❌ Gagal ambil daftar koin.")
         return
 
     signals = []
@@ -225,33 +333,119 @@ def main_scan():
 
     if not signals:
         send_telegram("❌ Tidak ada sinyal dengan Confidence ≥ 65%")
+        return
+
+    # Pilih sinyal confidence tertinggi
+    best = max(signals, key=lambda x: x["confidence"])
+    symbol = best["symbol"]
+    side = "BUY" if best["signal"] == "BUY" else "SELL"
+    entry = best["entry_signal"]
+    confidence = best["confidence"]
+
+    # Hitung TP & SL
+    if side == "BUY":
+        tp = round(entry * (1 + TP_PERCENT/100), 6)
+        sl = round(entry * (1 - SL_PERCENT/100), 6)
     else:
-        send_telegram(f"🔔 Ditemukan {len(signals)} sinyal (Conf ≥ 65%):")
-        for sig in signals:
-            tp_val = round(sig["entry_signal"] * (1 + TP_PERCENT/100), 6) if sig["signal"]=="BUY" else round(sig["entry_signal"] * (1 - TP_PERCENT/100), 6)
-            sl_val = round(sig["entry_signal"] * (1 - SL_PERCENT/100), 6) if sig["signal"]=="BUY" else round(sig["entry_signal"] * (1 + SL_PERCENT/100), 6)
-            msg = (
-                f"<b>📊 {sig['signal']} {sig['symbol']}</b>\n"
-                f"Entry: {sig['entry_signal']}\n"
-                f"TP: {tp_val} (+{TP_PERCENT}%) | SL: {sl_val} (∓{SL_PERCENT}%)\n"
-                f"Confidence: {sig['confidence']}%"
-            )
-            send_telegram(msg)
+        tp = round(entry * (1 - TP_PERCENT/100), 6)
+        sl = round(entry * (1 + SL_PERCENT/100), 6)
+
+    # Ambil mark price terbaru untuk validasi stopPrice
+    mark = get_mark_price(symbol)
+    if mark is None:
+        send_telegram("❌ Gagal ambil harga pasar.")
+        return
+
+    # Validasi stopPrice (harus di atas mark untuk BUY, di bawah mark untuk SELL)
+    if side == "BUY" and entry <= mark:
+        send_telegram(f"⚠️ Entry {entry} ≤ mark {mark}, stopPrice tidak valid. Skip.")
+        return
+    if side == "SELL" and entry >= mark:
+        send_telegram(f"⚠️ Entry {entry} ≥ mark {mark}, stopPrice tidak valid. Skip.")
+        return
+
+    # Hitung quantity minimum
+    min_notional = get_min_quantity(symbol)
+    quantity = max(min_notional / entry, 0.001)  # minimal 0.001 untuk keamanan
+    # Ambil step size dari exchange info? Kita sederhanakan: bulatkan ke 1 desimal, atau gunakan quantity mentah.
+    # Untuk kebanyakan pair, quantity bisa 1 desimal. Untuk aman, kita bulatkan ke 3 desimal.
+    quantity = round(quantity, 3)
+
+    # Set leverage
+    set_leverage(symbol, LEVERAGE)
+
+    # Pasang order
+    send_telegram(f"📊 {best['signal']} {symbol}\nEntry: {entry}\nTP: {tp} | SL: {sl}\nConf: {confidence}%\nQty: {quantity}")
+    order_id = place_stop_limit_order(symbol, side, quantity, entry)
+    if not order_id:
+        send_telegram(f"❌ Gagal pasang order {symbol}.")
+        return
+
+    send_telegram(f"✅ Stop-Limit Order terpasang (ID: {order_id})")
+
+    # Monitoring loop
+    start_time = time.time()
+    last_notify = time.time()
+    while True:
+        time.sleep(1)
+        mark = get_mark_price(symbol)
+        if mark is None:
+            continue
+
+        # Cek TP / SL sebelum entry
+        if side == "BUY":
+            if mark >= tp:
+                cancel_order(symbol, order_id)
+                send_telegram(f"⚠️ {symbol} TP ({tp}) tersentuh sebelum entry. Order dibatalkan.")
+                return
+            if mark <= sl:
+                cancel_order(symbol, order_id)
+                send_telegram(f"⚠️ {symbol} SL ({sl}) tersentuh sebelum entry. Order dibatalkan.")
+                return
+        else:
+            if mark <= tp:
+                cancel_order(symbol, order_id)
+                send_telegram(f"⚠️ {symbol} TP ({tp}) tersentuh sebelum entry. Order dibatalkan.")
+                return
+            if mark >= sl:
+                cancel_order(symbol, order_id)
+                send_telegram(f"⚠️ {symbol} SL ({sl}) tersentuh sebelum entry. Order dibatalkan.")
+                return
+
+        # Cek status order
+        status = check_order_status(symbol, order_id)
+        if status == "FILLED":
+            send_telegram(f"🏆 Order {symbol} terisi di {mark:.6f}. Manajemen risiko oleh platform.")
+            return
+        elif status in ("CANCELED", "EXPIRED"):
+            send_telegram(f"⚠️ Order {symbol} {status} sebelum sempat terisi.")
+            return
+
+        # Notifikasi tiap 3 menit
+        if time.time() - last_notify >= 180:
+            send_telegram(f"⏳ {symbol} {side} LIMIT\nEntry: {entry}\nCurrent: {mark:.6f}\nTP: {tp} | SL: {sl}")
+            last_notify = time.time()
+
+        # Timeout
+        if time.time() - start_time > TIMEOUT_MINUTES * 60:
+            cancel_order(symbol, order_id)
+            send_telegram(f"⏰ Timeout {TIMEOUT_MINUTES} menit, order {symbol} dibatalkan.")
+            return
 
 def run_loop():
     while True:
         try:
-            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Memulai scan...")
-            main_scan()
+            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Siklus auto-trading...")
+            trading_cycle()
         except Exception as e:
-            print(f"Error: {e}")
             send_telegram(f"⚠️ Bot error: {e}")
-        time.sleep(60)
+        time.sleep(SCAN_INTERVAL)
 
 if __name__ == "__main__":
-    # Jalankan loop di thread terpisah
+    if not API_KEY or not SECRET_KEY:
+        send_telegram("❌ API Key/Secret belum diset di environment Render.")
+    # Jalankan trading loop di thread terpisah
     t = threading.Thread(target=run_loop, daemon=True)
     t.start()
-    # Jalankan Flask
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
