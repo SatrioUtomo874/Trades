@@ -1,8 +1,4 @@
-python-binance
-python-telegram-bot
 pandas
-numpy
-Flask
-python-dotenv
 requests
-urllib3
+numpy
+flask
