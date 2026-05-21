@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 AUTO TRADING BOT – LIMIT ORDER + AUTO TP/SL + BAN 20 SIKLUS + NOTIFIKASI SALDO
-- Min Confidence 60 → lebih banyak sinyal
-- Filter volatilitas dihapus → lebih banyak peluang
+- Min Confidence 60
 - Scan 80 koin
-- Jika saldo tidak cukup, kirim detail saldo & posisi ke Telegram
+- Pastikan notional order minimal 5 USDT
 """
 
 import os, time, hmac, hashlib, math, threading, requests, pandas as pd, numpy as np
@@ -16,7 +15,7 @@ TELEGRAM_TOKEN = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
 CHAT_ID = "8041197505"
 TP_PERCENT = 0.6
 SL_PERCENT = 0.8
-MIN_CONFIDENCE = 60        # DIturunkan dari 65 ke 60
+MIN_CONFIDENCE = 60
 LEVERAGE = 5
 TIMEOUT_MINUTES = 15
 SCAN_INTERVAL = 60
@@ -75,7 +74,6 @@ def signed_request(endpoint, params, method="GET"):
             try: msg = r.json().get("msg","")
             except: msg = r.text
             send_telegram(f"❌ API Error {r.status_code}\n{msg}")
-            # Kembalikan response mentah agar pemanggil bisa mengecek teks error
             return {"error": True, "msg": msg}
     except Exception as e:
         send_telegram(f"⚠️ Network: {e}"); return None
@@ -152,10 +150,6 @@ def generate_signal(df_h1, df_m15, df_m5):
     df_h1 = add_indicators(df_h1); df_m15 = add_indicators(df_m15); df_m5 = add_indicators(df_m5)
     if df_h1 is None or df_m15 is None or df_m5 is None: return None
 
-    # Filter volatilitas DIHAPUS agar lebih banyak sinyal
-    # atr_now = df_m15["atr"].iloc[-2]; atr_mean = df_m15["atr"].rolling(50).mean().iloc[-2]
-    # if pd.notna(atr_mean) and atr_now > 2.5*atr_mean: return None
-
     struct_h1 = market_structure(df_h1,5)
     if struct_h1=="ranging": return None
     bias_bull = struct_h1=="bullish"; direction = "buy" if bias_bull else "sell"
@@ -198,14 +192,18 @@ def get_symbol_filters(symbol):
         resp = requests.get("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10)
         for s in resp.json()["symbols"]:
             if s["symbol"]==symbol:
-                f = {}
+                f = {"minNotional": 5.0}  # default
                 for fl in s["filters"]:
                     if fl["filterType"]=="PRICE_FILTER": f["tickSize"] = float(fl["tickSize"])
-                    elif fl["filterType"]=="LOT_SIZE": f["stepSize"] = float(fl["stepSize"]); f["minQty"] = float(fl["minQty"])
-                    elif fl["filterType"]=="MIN_NOTIONAL": f["minNotional"] = float(fl["notional"])
-                symbol_filters_cache[symbol]=f; return f
+                    elif fl["filterType"]=="LOT_SIZE":
+                        f["stepSize"] = float(fl["stepSize"])
+                        f["minQty"] = float(fl["minQty"])
+                    elif fl["filterType"]=="MIN_NOTIONAL":
+                        f["minNotional"] = float(fl["notional"])
+                symbol_filters_cache[symbol]=f
+                return f
     except: pass
-    return None
+    return {"tickSize": 0.01, "stepSize": 0.001, "minQty": 0.001, "minNotional": 5.0}
 
 def round_to_tick(v, tick):
     if tick==0: return v
@@ -273,7 +271,6 @@ def place_tp_sl_algo(symbol, side, quantity, stop_loss_price, take_profit_price)
 
 # ---------- FUNGSI SALDO & POSISI ----------
 def get_account_balance():
-    """Ambil total saldo USDT."""
     try:
         res = signed_request("/fapi/v2/balance", {"timestamp": int(time.time()*1000)}, method="GET")
         if res and not res.get("error"):
@@ -285,7 +282,6 @@ def get_account_balance():
         return None
 
 def get_open_positions():
-    """Ambil semua posisi terbuka."""
     try:
         res = signed_request("/fapi/v2/positionRisk", {"timestamp": int(time.time()*1000)}, method="GET")
         if res and not res.get("error"):
@@ -308,7 +304,7 @@ def get_open_positions():
 def trading_cycle():
     update_banned()
 
-    coins = get_coins_by_volume(80, MAX_PRICE_USDT)  # 80 koin
+    coins = get_coins_by_volume(80, MAX_PRICE_USDT)
     if not coins:
         send_telegram("❌ Gagal ambil daftar koin."); return
 
@@ -332,7 +328,10 @@ def trading_cycle():
 
     filters = get_symbol_filters(symbol)
     if not filters: send_telegram("❌ Gagal ambil filter."); return
-    tick = filters["tickSize"]; step = filters["stepSize"]; min_qty = filters["minQty"]; min_notional = filters["minNotional"]
+    tick = filters.get("tickSize", 0.01)
+    step = filters.get("stepSize", 0.001)
+    min_qty = filters.get("minQty", 0.001)
+    min_notional = filters.get("minNotional", 5.0)
 
     entry = round_to_tick(entry_raw, tick)
     if side=="BUY":
@@ -341,11 +340,16 @@ def trading_cycle():
         tp_raw = entry*(1-TP_PERCENT/100); sl_raw = entry*(1+SL_PERCENT/100)
     tp = round_to_tick(tp_raw, tick); sl = round_to_tick(sl_raw, tick)
 
-    raw_qty = max(min_notional/entry, min_qty)
+    # Hitung quantity dengan jaminan notional >= 5
+    raw_qty = max(min_notional / entry, min_qty)
     qty = round_to_step(raw_qty, step)
+    # Pastikan notional >= 5, jika belum tambah step sampai cukup
+    while entry * qty < 5.0:
+        qty += step
+        qty = round_to_step(qty, step)
+    # Final check min_qty
     if qty < min_qty:
-        qty = min_qty; qty = round_to_step(qty, step)
-        if qty < min_qty: qty += step; qty = round_to_step(qty, step)
+        qty = min_qty
 
     entry_str = fmt_tick(entry, tick); tp_str = fmt_tick(tp, tick); sl_str = fmt_tick(sl, tick); qty_str = fmt_step(qty, step)
 
@@ -356,13 +360,7 @@ def trading_cycle():
     # Langsung pasang limit order
     order_id = place_limit_order(symbol, side, qty_str, entry_str)
     if not order_id:
-        # Cek apakah error karena saldo tidak cukup
-        # place_limit_order sudah memanggil signed_request yang mengirim error ke Telegram
-        # Kita ingin memberi info tambahan saldo jika error mengandung "insufficient balance"
-        # Tapi kita perlu teks error pastinya. Kita modifikasi signed_request agar mengembalikan teks error.
-        # Kita panggil ulang? Lebih baik kita cek di sini.
-        # Karena kita tidak tahu pasti teks error, kita bisa cek saldo jika order gagal.
-        # Tapi biar tidak redundan, kita panggil fungsi saldo & posisi lalu kirim.
+        # Cek saldo jika gagal
         balance = get_account_balance()
         positions = get_open_positions()
         msg = "⚠️ Gagal memasang order. Kemungkinan saldo tidak cukup.\n"
