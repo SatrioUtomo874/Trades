@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-AUTO TRADING BOT – LIMIT ORDER + AUTO TP/SL + BAN 20 SIKLUS + LOGIKA KETAT
-- Min Confidence 70
-- Filter volatilitas aktif
-- Filter momentum M5 (MACD diff)
-- Filter RSI
-- Filter volume
-- Zona premium/discount wajib
+AUTO TRADING BOT – LIMIT ORDER + AUTO TP/SL + BAN 20 SIKLUS + FREKUENSI TINGGI
+- Min Confidence 65
+- Filter volatilitas OFF
+- Filter momentum M5 hanya EMA
+- Filter RSI longgar
+- Filter volume OFF
+- Zona discount/premium WAJIB
+- SL 0.8%
 """
 
 import os, time, hmac, hashlib, math, threading, requests, pandas as pd, numpy as np
@@ -17,8 +18,8 @@ from flask import Flask
 TELEGRAM_TOKEN = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
 CHAT_ID = "8041197505"
 TP_PERCENT = 0.6
-SL_PERCENT = 0.8
-MIN_CONFIDENCE = 64          # Dinaikkan ke 70
+SL_PERCENT = 0.8          # Diubah menjadi 0.8%
+MIN_CONFIDENCE = 65       # Diturunkan ke 65
 LEVERAGE = 5
 TIMEOUT_MINUTES = 15
 SCAN_INTERVAL = 60
@@ -103,10 +104,6 @@ def add_indicators(df):
     df["atr"] = df["high"].sub(df["low"]).rolling(14).mean()
     delta = df["close"].diff(); gain = delta.clip(lower=0).rolling(14).mean(); loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain/loss; df["rsi"] = 100 - (100/(1+rs))
-    df["macd"] = df["ema12"] - df["ema26"]
-    df["macd_signal"] = df["macd"].ewm(span=9).mean()
-    df["macd_diff"] = df["macd"] - df["macd_signal"]
-    df["vol_avg20"] = df["volume"].rolling(20).mean()
     return df
 
 def market_structure(df, w=3):
@@ -155,42 +152,31 @@ def generate_signal(df_h1, df_m15, df_m5):
     df_h1 = add_indicators(df_h1); df_m15 = add_indicators(df_m15); df_m5 = add_indicators(df_m5)
     if df_h1 is None or df_m15 is None or df_m5 is None: return None
 
-    # --- 1. Filter volatilitas (AKTIF) ---
-    atr_now = df_m15["atr"].iloc[-2]
-    atr_mean = df_m15["atr"].rolling(50).mean().iloc[-2]
-    if pd.notna(atr_mean) and atr_now > 2.0 * atr_mean:
-        return None
+    # --- Filter volatilitas OFF ---
 
-    # --- 2. Struktur H1 trending ---
     struct_h1 = market_structure(df_h1, 5)
     if struct_h1 == "ranging": return None
     bias_bull = struct_h1 == "bullish"
     direction = "buy" if bias_bull else "sell"
 
-    # --- 3. Filter momentum M5 (EMA + MACD) ---
+    # --- Filter momentum M5 (hanya EMA) ---
     last_m5 = df_m5.iloc[-2]
-    if bias_bull and (last_m5["ema12"] <= last_m5["ema26"] or last_m5["macd_diff"] <= 0):
-        return None
-    if not bias_bull and (last_m5["ema12"] >= last_m5["ema26"] or last_m5["macd_diff"] >= 0):
-        return None
+    if bias_bull and last_m5["ema12"] <= last_m5["ema26"]: return None
+    if not bias_bull and last_m5["ema12"] >= last_m5["ema26"]: return None
 
-    # --- 4. Filter RSI M15 ---
+    # --- Filter RSI longgar ---
     last_m15 = df_m15.iloc[-2]
-    if bias_bull and last_m15["rsi"] >= 60:   # BUY hanya jika RSI < 60
-        return None
-    if not bias_bull and last_m15["rsi"] <= 40: # SELL hanya jika RSI > 40
-        return None
+    if bias_bull and last_m15["rsi"] >= 70: return None   # hanya tolak kalau sudah overbought
+    if not bias_bull and last_m15["rsi"] <= 30: return None # hanya tolak kalau sudah oversold
 
-    # --- 5. Filter volume ---
-    if last_m15["volume"] <= last_m15["vol_avg20"]:
-        return None
+    # --- Filter volume OFF ---
 
-    # --- 6. Zona discount/premium WAJIB ---
+    # --- Zona discount/premium WAJIB ---
     zone = premium_discount_zone(df_m15)
     if bias_bull and zone != "discount": return None
     if not bias_bull and zone != "premium": return None
 
-    # --- 7. Skor sinyal (sudah termasuk sweep dan OB/FVG) ---
+    # --- Skor sinyal ---
     score = 0.25
     sweep_ok, _ = liquidity_sweep(df_m15, direction)
     if not sweep_ok: return None
@@ -199,8 +185,7 @@ def generate_signal(df_h1, df_m15, df_m5):
     area_ok, _ = order_block_or_fvg(df_m15, direction)
     if area_ok: score += 0.15
 
-    # Zona sudah terverifikasi di atas, jadi tambahan poin
-    score += 0.1
+    score += 0.1  # zona sudah terverifikasi
 
     struct_m5 = market_structure(df_m5, 2)
     if (bias_bull and struct_m5 == "bullish") or (not bias_bull and struct_m5 == "bearish"): score += 0.1
@@ -349,7 +334,7 @@ def trading_cycle():
         time.sleep(0.03)
 
     if not signals:
-        send_telegram("❌ Tidak ada sinyal dengan Confidence ≥ 70%"); return
+        send_telegram("❌ Tidak ada sinyal dengan Confidence ≥ 65%"); return
 
     best = max(signals, key=lambda x: x["confidence"])
     symbol = best["symbol"]; side = "BUY" if best["signal"]=="BUY" else "SELL"
@@ -433,7 +418,7 @@ def run_loop():
 
 if __name__ == "__main__":
     ip = get_public_ip()
-    send_telegram(f"🚀 Bot Auto-Trading (Logika Ketat) dimulai!\nIP: {ip}\nPastikan IP di-whitelist.")
+    send_telegram(f"🚀 Bot Auto-Trading (Frekuensi Tinggi) dimulai!\nIP: {ip}\nPastikan IP di-whitelist.")
     if not API_KEY or not SECRET_KEY:
         send_telegram("❌ API Key/Secret belum diset di environment.")
     else:
