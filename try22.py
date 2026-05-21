@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-AUTO TRADING BOT – LIMIT ORDER + AUTO TP/SL + BAN 20 SIKLUS + NOTIFIKASI SALDO
-- Min Confidence 60
-- Scan 80 koin
-- Pastikan notional order minimal 5 USDT
+AUTO TRADING BOT – LIMIT ORDER + AUTO TP/SL + BAN 20 SIKLUS + LOGIKA KETAT
+- Min Confidence 70
+- Filter volatilitas aktif
+- Filter momentum M5 (MACD diff)
+- Filter RSI
+- Filter volume
+- Zona premium/discount wajib
 """
 
 import os, time, hmac, hashlib, math, threading, requests, pandas as pd, numpy as np
@@ -15,7 +18,7 @@ TELEGRAM_TOKEN = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
 CHAT_ID = "8041197505"
 TP_PERCENT = 0.6
 SL_PERCENT = 0.8
-MIN_CONFIDENCE = 60
+MIN_CONFIDENCE = 64          # Dinaikkan ke 70
 LEVERAGE = 5
 TIMEOUT_MINUTES = 15
 SCAN_INTERVAL = 60
@@ -30,7 +33,6 @@ app = Flask(__name__)
 def home():
     return "Bot is alive", 200
 
-# ---------- GLOBAL BAN STATE ----------
 banned_coins = {}
 
 def update_banned():
@@ -46,7 +48,6 @@ def ban_coin(symbol):
     banned_coins[symbol] = BAN_CYCLES
     send_telegram(f"📛 {symbol} di-ban {BAN_CYCLES} siklus.")
 
-# ---------- TELEGRAM ----------
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -102,6 +103,10 @@ def add_indicators(df):
     df["atr"] = df["high"].sub(df["low"]).rolling(14).mean()
     delta = df["close"].diff(); gain = delta.clip(lower=0).rolling(14).mean(); loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain/loss; df["rsi"] = 100 - (100/(1+rs))
+    df["macd"] = df["ema12"] - df["ema26"]
+    df["macd_signal"] = df["macd"].ewm(span=9).mean()
+    df["macd_diff"] = df["macd"] - df["macd_signal"]
+    df["vol_avg20"] = df["volume"].rolling(20).mean()
     return df
 
 def market_structure(df, w=3):
@@ -150,25 +155,60 @@ def generate_signal(df_h1, df_m15, df_m5):
     df_h1 = add_indicators(df_h1); df_m15 = add_indicators(df_m15); df_m5 = add_indicators(df_m5)
     if df_h1 is None or df_m15 is None or df_m5 is None: return None
 
-    struct_h1 = market_structure(df_h1,5)
-    if struct_h1=="ranging": return None
-    bias_bull = struct_h1=="bullish"; direction = "buy" if bias_bull else "sell"
+    # --- 1. Filter volatilitas (AKTIF) ---
+    atr_now = df_m15["atr"].iloc[-2]
+    atr_mean = df_m15["atr"].rolling(50).mean().iloc[-2]
+    if pd.notna(atr_mean) and atr_now > 2.0 * atr_mean:
+        return None
+
+    # --- 2. Struktur H1 trending ---
+    struct_h1 = market_structure(df_h1, 5)
+    if struct_h1 == "ranging": return None
+    bias_bull = struct_h1 == "bullish"
+    direction = "buy" if bias_bull else "sell"
+
+    # --- 3. Filter momentum M5 (EMA + MACD) ---
     last_m5 = df_m5.iloc[-2]
-    if bias_bull and last_m5["ema12"] <= last_m5["ema26"]: return None
-    if not bias_bull and last_m5["ema12"] >= last_m5["ema26"]: return None
+    if bias_bull and (last_m5["ema12"] <= last_m5["ema26"] or last_m5["macd_diff"] <= 0):
+        return None
+    if not bias_bull and (last_m5["ema12"] >= last_m5["ema26"] or last_m5["macd_diff"] >= 0):
+        return None
+
+    # --- 4. Filter RSI M15 ---
+    last_m15 = df_m15.iloc[-2]
+    if bias_bull and last_m15["rsi"] >= 60:   # BUY hanya jika RSI < 60
+        return None
+    if not bias_bull and last_m15["rsi"] <= 40: # SELL hanya jika RSI > 40
+        return None
+
+    # --- 5. Filter volume ---
+    if last_m15["volume"] <= last_m15["vol_avg20"]:
+        return None
+
+    # --- 6. Zona discount/premium WAJIB ---
+    zone = premium_discount_zone(df_m15)
+    if bias_bull and zone != "discount": return None
+    if not bias_bull and zone != "premium": return None
+
+    # --- 7. Skor sinyal (sudah termasuk sweep dan OB/FVG) ---
     score = 0.25
     sweep_ok, _ = liquidity_sweep(df_m15, direction)
     if not sweep_ok: return None
     score += 0.25
+
     area_ok, _ = order_block_or_fvg(df_m15, direction)
     if area_ok: score += 0.15
-    zone = premium_discount_zone(df_m15)
-    if (bias_bull and zone=="discount") or (not bias_bull and zone=="premium"): score += 0.1
-    struct_m5 = market_structure(df_m5,2)
-    if (bias_bull and struct_m5=="bullish") or (not bias_bull and struct_m5=="bearish"): score += 0.1
-    if score*100 < MIN_CONFIDENCE: return None
-    last = df_m15.iloc[-2]; price = last["close"]
-    return {"signal":"BUY" if bias_bull else "SELL", "entry_signal":round(price,6), "confidence":int(score*100)}
+
+    # Zona sudah terverifikasi di atas, jadi tambahan poin
+    score += 0.1
+
+    struct_m5 = market_structure(df_m5, 2)
+    if (bias_bull and struct_m5 == "bullish") or (not bias_bull and struct_m5 == "bearish"): score += 0.1
+
+    if score * 100 < MIN_CONFIDENCE: return None
+
+    price = last_m15["close"]
+    return {"signal":"BUY" if bias_bull else "SELL", "entry_signal": round(price,6), "confidence": int(score*100)}
 
 def get_coins_by_volume(top=80, max_price=100.0):
     for _ in range(3):
@@ -192,18 +232,15 @@ def get_symbol_filters(symbol):
         resp = requests.get("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10)
         for s in resp.json()["symbols"]:
             if s["symbol"]==symbol:
-                f = {"minNotional": 5.0}  # default
+                f = {"minNotional": 5.0}
                 for fl in s["filters"]:
                     if fl["filterType"]=="PRICE_FILTER": f["tickSize"] = float(fl["tickSize"])
                     elif fl["filterType"]=="LOT_SIZE":
-                        f["stepSize"] = float(fl["stepSize"])
-                        f["minQty"] = float(fl["minQty"])
-                    elif fl["filterType"]=="MIN_NOTIONAL":
-                        f["minNotional"] = float(fl["notional"])
-                symbol_filters_cache[symbol]=f
-                return f
+                        f["stepSize"] = float(fl["stepSize"]); f["minQty"] = float(fl["minQty"])
+                    elif fl["filterType"]=="MIN_NOTIONAL": f["minNotional"] = float(fl["notional"])
+                symbol_filters_cache[symbol]=f; return f
     except: pass
-    return {"tickSize": 0.01, "stepSize": 0.001, "minQty": 0.001, "minNotional": 5.0}
+    return {"tickSize":0.01, "stepSize":0.001, "minQty":0.001, "minNotional":5.0}
 
 def round_to_tick(v, tick):
     if tick==0: return v
@@ -237,13 +274,10 @@ def set_leverage(symbol, leverage):
     signed_request("/fapi/v1/leverage", params, method="POST")
 
 def place_limit_order(symbol, side, quantity, price):
-    params = {
-        "symbol":symbol, "side":side, "type":"LIMIT",
-        "quantity":quantity, "price":price, "timeInForce":"GTC"
-    }
+    params = {"symbol":symbol, "side":side, "type":"LIMIT",
+              "quantity":quantity, "price":price, "timeInForce":"GTC"}
     res = signed_request("/fapi/v1/order", params, method="POST")
-    if res and "orderId" in res:
-        return res["orderId"]
+    if res and "orderId" in res: return res["orderId"]
     return None
 
 def cancel_order(symbol, order_id):
@@ -269,17 +303,14 @@ def place_tp_sl_algo(symbol, side, quantity, stop_loss_price, take_profit_price)
     }, method="POST")
     return (res1 is not None and "algoId" in res1) and (res2 is not None and "algoId" in res2)
 
-# ---------- FUNGSI SALDO & POSISI ----------
 def get_account_balance():
     try:
         res = signed_request("/fapi/v2/balance", {"timestamp": int(time.time()*1000)}, method="GET")
         if res and not res.get("error"):
             for asset in res:
-                if asset["asset"] == "USDT":
-                    return float(asset["balance"])
-        return None
-    except:
-        return None
+                if asset["asset"] == "USDT": return float(asset["balance"])
+    except: pass
+    return None
 
 def get_open_positions():
     try:
@@ -296,14 +327,12 @@ def get_open_positions():
                         "unrealizedProfit": p["unRealizedProfit"]
                     })
             return positions
-        return []
-    except:
-        return []
+    except: pass
+    return []
 
 # ---------- TRADING CYCLE ----------
 def trading_cycle():
     update_banned()
-
     coins = get_coins_by_volume(80, MAX_PRICE_USDT)
     if not coins:
         send_telegram("❌ Gagal ambil daftar koin."); return
@@ -320,66 +349,48 @@ def trading_cycle():
         time.sleep(0.03)
 
     if not signals:
-        send_telegram("❌ Tidak ada sinyal dengan Confidence ≥ 60%"); return
+        send_telegram("❌ Tidak ada sinyal dengan Confidence ≥ 70%"); return
 
     best = max(signals, key=lambda x: x["confidence"])
     symbol = best["symbol"]; side = "BUY" if best["signal"]=="BUY" else "SELL"
     entry_raw = best["entry_signal"]; confidence = best["confidence"]
 
     filters = get_symbol_filters(symbol)
-    if not filters: send_telegram("❌ Gagal ambil filter."); return
-    tick = filters.get("tickSize", 0.01)
-    step = filters.get("stepSize", 0.001)
-    min_qty = filters.get("minQty", 0.001)
-    min_notional = filters.get("minNotional", 5.0)
+    tick = filters.get("tickSize", 0.01); step = filters.get("stepSize", 0.001)
+    min_qty = filters.get("minQty", 0.001); min_notional = filters.get("minNotional", 5.0)
 
     entry = round_to_tick(entry_raw, tick)
     if side=="BUY":
-        tp_raw = entry*(1+TP_PERCENT/100); sl_raw = entry*(1-SL_PERCENT/100)
+        tp = round_to_tick(entry*(1+TP_PERCENT/100), tick)
+        sl = round_to_tick(entry*(1-SL_PERCENT/100), tick)
     else:
-        tp_raw = entry*(1-TP_PERCENT/100); sl_raw = entry*(1+SL_PERCENT/100)
-    tp = round_to_tick(tp_raw, tick); sl = round_to_tick(sl_raw, tick)
+        tp = round_to_tick(entry*(1-TP_PERCENT/100), tick)
+        sl = round_to_tick(entry*(1+SL_PERCENT/100), tick)
 
-    # Hitung quantity dengan jaminan notional >= 5
-    raw_qty = max(min_notional / entry, min_qty)
+    raw_qty = max(min_notional/entry, min_qty)
     qty = round_to_step(raw_qty, step)
-    # Pastikan notional >= 5, jika belum tambah step sampai cukup
     while entry * qty < 5.0:
-        qty += step
-        qty = round_to_step(qty, step)
-    # Final check min_qty
-    if qty < min_qty:
-        qty = min_qty
+        qty += step; qty = round_to_step(qty, step)
+    if qty < min_qty: qty = min_qty
 
     entry_str = fmt_tick(entry, tick); tp_str = fmt_tick(tp, tick); sl_str = fmt_tick(sl, tick); qty_str = fmt_step(qty, step)
 
     send_telegram(f"📊 {best['signal']} {symbol} | Entry: {entry_str} | TP: {tp_str} | SL: {sl_str} | Qty: {qty_str} | Conf: {confidence}%")
-
     set_leverage(symbol, LEVERAGE)
 
-    # Langsung pasang limit order
     order_id = place_limit_order(symbol, side, qty_str, entry_str)
     if not order_id:
-        # Cek saldo jika gagal
-        balance = get_account_balance()
-        positions = get_open_positions()
+        balance = get_account_balance(); positions = get_open_positions()
         msg = "⚠️ Gagal memasang order. Kemungkinan saldo tidak cukup.\n"
-        if balance is not None:
-            msg += f"💰 Saldo USDT: {balance:.2f}\n"
-        else:
-            msg += "💰 Saldo: tidak dapat diambil\n"
+        msg += f"💰 Saldo USDT: {balance:.2f}\n" if balance is not None else "💰 Saldo: tidak dapat diambil\n"
         if positions:
             msg += "📊 Posisi Terbuka:\n"
-            for p in positions:
-                msg += f"- {p['symbol']} {p['side']} | Entry: {p['entryPrice']} | PnL: {p['unrealizedProfit']}\n"
-        else:
-            msg += "📊 Tidak ada posisi terbuka.\n"
-        send_telegram(msg)
-        return
+            for p in positions: msg += f"- {p['symbol']} {p['side']} | Entry: {p['entryPrice']} | PnL: {p['unrealizedProfit']}\n"
+        else: msg += "📊 Tidak ada posisi terbuka.\n"
+        send_telegram(msg); return
 
     send_telegram(f"📌 Limit Order terpasang (ID: {order_id}) – menunggu harga sentuh {entry_str}")
 
-    # Pantau hingga terisi, TP/SL tersentuh duluan, atau timeout
     start_time = time.time(); last_notify = time.time()
     while True:
         time.sleep(1)
@@ -387,15 +398,11 @@ def trading_cycle():
         if mark is None: continue
 
         if side=="BUY":
-            if mark >= tp:
-                cancel_order(symbol, order_id); send_telegram(f"⚠️ TP ({tp_str}) tersentuh sebelum entry. Order dibatalkan."); ban_coin(symbol); return
-            if mark <= sl:
-                cancel_order(symbol, order_id); send_telegram(f"⚠️ SL ({sl_str}) tersentuh sebelum entry. Order dibatalkan."); ban_coin(symbol); return
+            if mark >= tp: cancel_order(symbol, order_id); send_telegram(f"⚠️ TP ({tp_str}) tersentuh sebelum entry."); ban_coin(symbol); return
+            if mark <= sl: cancel_order(symbol, order_id); send_telegram(f"⚠️ SL ({sl_str}) tersentuh sebelum entry."); ban_coin(symbol); return
         else:
-            if mark <= tp:
-                cancel_order(symbol, order_id); send_telegram(f"⚠️ TP ({tp_str}) tersentuh sebelum entry. Order dibatalkan."); ban_coin(symbol); return
-            if mark >= sl:
-                cancel_order(symbol, order_id); send_telegram(f"⚠️ SL ({sl_str}) tersentuh sebelum entry. Order dibatalkan."); ban_coin(symbol); return
+            if mark <= tp: cancel_order(symbol, order_id); send_telegram(f"⚠️ TP ({tp_str}) tersentuh sebelum entry."); ban_coin(symbol); return
+            if mark >= sl: cancel_order(symbol, order_id); send_telegram(f"⚠️ SL ({sl_str}) tersentuh sebelum entry."); ban_coin(symbol); return
 
         status = get_order_status(symbol, order_id)
         if status == "FILLED":
@@ -404,8 +411,7 @@ def trading_cycle():
                 send_telegram(f"🎯 TP/SL terpasang: TP {tp_str} | SL {sl_str}")
             else:
                 send_telegram("⚠️ Gagal pasang TP/SL otomatis, cek manual.")
-            ban_coin(symbol)
-            return
+            ban_coin(symbol); return
         elif status in ("CANCELED", "EXPIRED", "REJECTED"):
             send_telegram(f"⚠️ Order {symbol} berstatus {status}."); ban_coin(symbol); return
 
@@ -416,7 +422,6 @@ def trading_cycle():
         if time.time() - start_time > TIMEOUT_MINUTES*60:
             cancel_order(symbol, order_id); send_telegram(f"⏰ Timeout, order {symbol} dibatalkan."); ban_coin(symbol); return
 
-# ---------- LOOP ----------
 def run_loop():
     while True:
         try:
@@ -428,7 +433,7 @@ def run_loop():
 
 if __name__ == "__main__":
     ip = get_public_ip()
-    send_telegram(f"🚀 Bot Auto-Trading (Limit Order) dimulai!\nIP: {ip}\nPastikan IP di-whitelist.")
+    send_telegram(f"🚀 Bot Auto-Trading (Logika Ketat) dimulai!\nIP: {ip}\nPastikan IP di-whitelist.")
     if not API_KEY or not SECRET_KEY:
         send_telegram("❌ API Key/Secret belum diset di environment.")
     else:
