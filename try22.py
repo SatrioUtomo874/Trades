@@ -365,14 +365,10 @@ def trading_cycle():
 
     order_id = place_limit_order(symbol, side, qty_str, entry_str)
     if not order_id:
-        balance = get_account_balance(); positions = get_open_positions()
-        msg = "⚠️ Gagal memasang order. Kemungkinan saldo tidak cukup.\n"
-        msg += f"💰 Saldo USDT: {balance:.2f}\n" if balance is not None else "💰 Saldo: tidak dapat diambil\n"
-        if positions:
-            msg += "📊 Posisi Terbuka:\n"
-            for p in positions: msg += f"- {p['symbol']} {p['side']} | Entry: {p['entryPrice']} | PnL: {p['unrealizedProfit']}\n"
-        else: msg += "📊 Tidak ada posisi terbuka.\n"
-        send_telegram(msg); return
+        # Gagal order → ban koin agar tidak terulang terus
+        ban_coin(symbol)
+        send_telegram(f"📛 {symbol} di-ban karena order gagal (cek error di atas).")
+        return
 
     send_telegram(f"📌 Limit Order terpasang (ID: {order_id}) – menunggu harga sentuh {entry_str}")
 
