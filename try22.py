@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-AUTO TRADING BOT – LIMIT ORDER + AUTO TP/SL + BAN 20 SIKLUS
-Langsung pasang limit order, setelah terisi pasang TP/SL, lalu lanjut scan.
+AUTO TRADING BOT – LIMIT ORDER + AUTO TP/SL + BAN 20 SIKLUS + NOTIFIKASI SALDO
+- Min Confidence 60 → lebih banyak sinyal
+- Filter volatilitas dihapus → lebih banyak peluang
+- Scan 80 koin
+- Jika saldo tidak cukup, kirim detail saldo & posisi ke Telegram
 """
 
 import os, time, hmac, hashlib, math, threading, requests, pandas as pd, numpy as np
@@ -12,8 +15,8 @@ from flask import Flask
 TELEGRAM_TOKEN = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
 CHAT_ID = "8041197505"
 TP_PERCENT = 0.6
-SL_PERCENT = 0.85
-MIN_CONFIDENCE = 65
+SL_PERCENT = 0.8
+MIN_CONFIDENCE = 60        # DIturunkan dari 65 ke 60
 LEVERAGE = 5
 TIMEOUT_MINUTES = 15
 SCAN_INTERVAL = 60
@@ -29,7 +32,7 @@ def home():
     return "Bot is alive", 200
 
 # ---------- GLOBAL BAN STATE ----------
-banned_coins = {}  # {symbol: cycles_left}
+banned_coins = {}
 
 def update_banned():
     to_delete = []
@@ -72,7 +75,8 @@ def signed_request(endpoint, params, method="GET"):
             try: msg = r.json().get("msg","")
             except: msg = r.text
             send_telegram(f"❌ API Error {r.status_code}\n{msg}")
-            return None
+            # Kembalikan response mentah agar pemanggil bisa mengecek teks error
+            return {"error": True, "msg": msg}
     except Exception as e:
         send_telegram(f"⚠️ Network: {e}"); return None
 
@@ -147,8 +151,11 @@ def premium_discount_zone(df):
 def generate_signal(df_h1, df_m15, df_m5):
     df_h1 = add_indicators(df_h1); df_m15 = add_indicators(df_m15); df_m5 = add_indicators(df_m5)
     if df_h1 is None or df_m15 is None or df_m5 is None: return None
-    atr_now = df_m15["atr"].iloc[-2]; atr_mean = df_m15["atr"].rolling(50).mean().iloc[-2]
-    if pd.notna(atr_mean) and atr_now > 2.5*atr_mean: return None
+
+    # Filter volatilitas DIHAPUS agar lebih banyak sinyal
+    # atr_now = df_m15["atr"].iloc[-2]; atr_mean = df_m15["atr"].rolling(50).mean().iloc[-2]
+    # if pd.notna(atr_mean) and atr_now > 2.5*atr_mean: return None
+
     struct_h1 = market_structure(df_h1,5)
     if struct_h1=="ranging": return None
     bias_bull = struct_h1=="bullish"; direction = "buy" if bias_bull else "sell"
@@ -169,7 +176,7 @@ def generate_signal(df_h1, df_m15, df_m5):
     last = df_m15.iloc[-2]; price = last["close"]
     return {"signal":"BUY" if bias_bull else "SELL", "entry_signal":round(price,6), "confidence":int(score*100)}
 
-def get_coins_by_volume(top=50, max_price=100.0):
+def get_coins_by_volume(top=80, max_price=100.0):
     for _ in range(3):
         try:
             resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=10)
@@ -237,7 +244,8 @@ def place_limit_order(symbol, side, quantity, price):
         "quantity":quantity, "price":price, "timeInForce":"GTC"
     }
     res = signed_request("/fapi/v1/order", params, method="POST")
-    if res and "orderId" in res: return res["orderId"]
+    if res and "orderId" in res:
+        return res["orderId"]
     return None
 
 def cancel_order(symbol, order_id):
@@ -251,7 +259,6 @@ def get_order_status(symbol, order_id):
     return None
 
 def place_tp_sl_algo(symbol, side, quantity, stop_loss_price, take_profit_price):
-    # SL: STOP_MARKET, TP: TAKE_PROFIT_MARKET
     res1 = signed_request("/fapi/v1/algoOrder", {
         "algoType":"CONDITIONAL","symbol":symbol,"side":"SELL" if side=="BUY" else "BUY",
         "type":"STOP_MARKET","quantity":quantity,"triggerPrice":stop_loss_price,
@@ -264,17 +271,50 @@ def place_tp_sl_algo(symbol, side, quantity, stop_loss_price, take_profit_price)
     }, method="POST")
     return (res1 is not None and "algoId" in res1) and (res2 is not None and "algoId" in res2)
 
+# ---------- FUNGSI SALDO & POSISI ----------
+def get_account_balance():
+    """Ambil total saldo USDT."""
+    try:
+        res = signed_request("/fapi/v2/balance", {"timestamp": int(time.time()*1000)}, method="GET")
+        if res and not res.get("error"):
+            for asset in res:
+                if asset["asset"] == "USDT":
+                    return float(asset["balance"])
+        return None
+    except:
+        return None
+
+def get_open_positions():
+    """Ambil semua posisi terbuka."""
+    try:
+        res = signed_request("/fapi/v2/positionRisk", {"timestamp": int(time.time()*1000)}, method="GET")
+        if res and not res.get("error"):
+            positions = []
+            for p in res:
+                if float(p["positionAmt"]) != 0:
+                    positions.append({
+                        "symbol": p["symbol"],
+                        "side": "LONG" if float(p["positionAmt"]) > 0 else "SHORT",
+                        "amount": p["positionAmt"],
+                        "entryPrice": p["entryPrice"],
+                        "unrealizedProfit": p["unRealizedProfit"]
+                    })
+            return positions
+        return []
+    except:
+        return []
+
 # ---------- TRADING CYCLE ----------
 def trading_cycle():
-    update_banned()  # Kurangi hitungan ban
+    update_banned()
 
-    coins = get_coins_by_volume(50, MAX_PRICE_USDT)
+    coins = get_coins_by_volume(80, MAX_PRICE_USDT)  # 80 koin
     if not coins:
         send_telegram("❌ Gagal ambil daftar koin."); return
 
     signals = []
     for sym in coins:
-        if sym in banned_coins: continue  # skip koin yang sedang diban
+        if sym in banned_coins: continue
         try:
             h1 = fetch_klines(sym, "1h", 100); m15 = fetch_klines(sym, "15m", 100); m5 = fetch_klines(sym, "5m", 100)
             if not all([h1 is not None, m15 is not None, m5 is not None]): continue
@@ -284,7 +324,7 @@ def trading_cycle():
         time.sleep(0.03)
 
     if not signals:
-        send_telegram("❌ Tidak ada sinyal dengan Confidence ≥ 65%"); return
+        send_telegram("❌ Tidak ada sinyal dengan Confidence ≥ 60%"); return
 
     best = max(signals, key=lambda x: x["confidence"])
     symbol = best["symbol"]; side = "BUY" if best["signal"]=="BUY" else "SELL"
@@ -316,7 +356,29 @@ def trading_cycle():
     # Langsung pasang limit order
     order_id = place_limit_order(symbol, side, qty_str, entry_str)
     if not order_id:
-        send_telegram("❌ Gagal pasang Limit Order."); return
+        # Cek apakah error karena saldo tidak cukup
+        # place_limit_order sudah memanggil signed_request yang mengirim error ke Telegram
+        # Kita ingin memberi info tambahan saldo jika error mengandung "insufficient balance"
+        # Tapi kita perlu teks error pastinya. Kita modifikasi signed_request agar mengembalikan teks error.
+        # Kita panggil ulang? Lebih baik kita cek di sini.
+        # Karena kita tidak tahu pasti teks error, kita bisa cek saldo jika order gagal.
+        # Tapi biar tidak redundan, kita panggil fungsi saldo & posisi lalu kirim.
+        balance = get_account_balance()
+        positions = get_open_positions()
+        msg = "⚠️ Gagal memasang order. Kemungkinan saldo tidak cukup.\n"
+        if balance is not None:
+            msg += f"💰 Saldo USDT: {balance:.2f}\n"
+        else:
+            msg += "💰 Saldo: tidak dapat diambil\n"
+        if positions:
+            msg += "📊 Posisi Terbuka:\n"
+            for p in positions:
+                msg += f"- {p['symbol']} {p['side']} | Entry: {p['entryPrice']} | PnL: {p['unrealizedProfit']}\n"
+        else:
+            msg += "📊 Tidak ada posisi terbuka.\n"
+        send_telegram(msg)
+        return
+
     send_telegram(f"📌 Limit Order terpasang (ID: {order_id}) – menunggu harga sentuh {entry_str}")
 
     # Pantau hingga terisi, TP/SL tersentuh duluan, atau timeout
@@ -344,8 +406,8 @@ def trading_cycle():
                 send_telegram(f"🎯 TP/SL terpasang: TP {tp_str} | SL {sl_str}")
             else:
                 send_telegram("⚠️ Gagal pasang TP/SL otomatis, cek manual.")
-            ban_coin(symbol)  # ban setelah order terisi
-            return  # Langsung lanjut scan (siklus selesai)
+            ban_coin(symbol)
+            return
         elif status in ("CANCELED", "EXPIRED", "REJECTED"):
             send_telegram(f"⚠️ Order {symbol} berstatus {status}."); ban_coin(symbol); return
 
