@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-AUTO TRADING BOT – Render Web Service
-Menggunakan API Binance Futures (Stop-Limit Order)
-IP dinamis Render → kirim log error ke Telegram jika API menolak.
+AUTO TRADING BOT – Order Bersyarat (Algo) + Notifikasi IP
+Logika persilangan: tunggu harga valid, pasang STOP order, monitoring TP/SL.
 """
 
 import os
@@ -11,6 +10,7 @@ import hmac
 import hashlib
 import json
 import threading
+import socket
 import requests
 import pandas as pd
 import numpy as np
@@ -21,16 +21,14 @@ from flask import Flask
 TELEGRAM_TOKEN = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
 CHAT_ID = "8041197505"
 
-# Parameter trading
-TP_PERCENT = 0.6      # 0.6%
-SL_PERCENT = 0.85     # 0.85%
+TP_PERCENT = 0.6
+SL_PERCENT = 0.85
 MIN_CONFIDENCE = 65
 LEVERAGE = 5
 TIMEOUT_MINUTES = 15
-SCAN_INTERVAL = 60    # jeda antar siklus (detik)
-MAX_PRICE_USDT = 50.0  # hanya koin ≤ $50
+SCAN_INTERVAL = 60
+MAX_PRICE_USDT = 50.0
 
-# API Binance (diisi dari environment variable Render)
 API_KEY = os.environ.get("BINANCE_API_KEY", "")
 SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
 # =================================================
@@ -49,17 +47,21 @@ def send_telegram(msg):
     except:
         pass
 
-# ---------- BINANCE REST SIGNATURE ----------
+# ---------- IP PUBLIK ----------
+def get_public_ip():
+    try:
+        return requests.get("https://api.ipify.org", timeout=5).text.strip()
+    except:
+        return "Tidak dapat mendeteksi IP"
+
+# ---------- BINANCE SIGNED REQUEST (dengan debug ke Telegram) ----------
 def signed_request(endpoint, params, method="GET"):
-    """Tambah signature & kirim request ke fapi.binance.com. Kirim detail error ke Telegram jika gagal."""
     if not API_KEY or not SECRET_KEY:
-        send_telegram("❌ API Key/Secret belum diisi di environment variable Render.")
+        send_telegram("❌ API Key/Secret belum diisi.")
         return None
 
     params["timestamp"] = int(time.time() * 1000)
-    # Buat query string tanpa signature dulu
     query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-    # Tanda tangan
     signature = hmac.new(SECRET_KEY.encode(), query_string.encode(), hashlib.sha256).hexdigest()
     full_url = f"https://fapi.binance.com{endpoint}?{query_string}&signature={signature}"
 
@@ -73,23 +75,21 @@ def signed_request(endpoint, params, method="GET"):
         else:
             return None
 
-        # Jika sukses, kembalikan JSON
         if resp.status_code == 200:
             return resp.json()
         else:
-            # Gagal → kirim detail ke Telegram
             try:
-                err_json = resp.json()
-                err_msg = err_json.get("msg", "Tidak ada pesan error")
+                err = resp.json()
+                msg = err.get("msg", "Tidak ada pesan error")
             except:
-                err_msg = resp.text
-            send_telegram(f"❌ API Error {resp.status_code} pada {endpoint}\n{err_msg}")
+                msg = resp.text
+            send_telegram(f"❌ API Error {resp.status_code} pada {endpoint}\n{msg}")
             return None
     except Exception as e:
-        send_telegram(f"⚠️ Network/Exception: {e}")
+        send_telegram(f"⚠️ Network error: {e}")
         return None
 
-# ---------- DATA FETCHER (seperti sebelumnya) ----------
+# ---------- DATA FETCHER (seperti biasa) ----------
 def fetch_klines(symbol, interval, limit=100):
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
     for _ in range(3):
@@ -254,7 +254,7 @@ def get_coins_by_volume(top=50, max_price=50.0):
             time.sleep(10)
     return []
 
-# ---------- TRADING FUNCTIONS ----------
+# ---------- FUNGSI ALGO ORDER ----------
 def get_mark_price(symbol):
     try:
         resp = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}", timeout=5)
@@ -262,64 +262,54 @@ def get_mark_price(symbol):
     except:
         return None
 
+def set_leverage(symbol, leverage):
+    params = {"symbol": symbol, "leverage": leverage}
+    signed_request("/fapi/v1/leverage", params, method="POST")
+
 def get_min_quantity(symbol):
-    """Ambil quantity minimum dari exchange info."""
     try:
         resp = requests.get("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10)
-        data = resp.json()
-        for s in data["symbols"]:
+        for s in resp.json()["symbols"]:
             if s["symbol"] == symbol:
                 for f in s["filters"]:
                     if f["filterType"] == "MIN_NOTIONAL":
-                        min_notional = float(f["notional"])
-                        return min_notional
-        return 5.0  # default
+                        return float(f["notional"])
+        return 5.0
     except:
         return 5.0
 
-def set_leverage(symbol, leverage):
-    params = {"symbol": symbol, "leverage": leverage}
-    res = signed_request("/fapi/v1/leverage", params, method="POST")
-    if res is None:
-        send_telegram(f"⚠️ Gagal set leverage {symbol}. API mungkin menolak (cek IP).")
-
-def place_stop_limit_order(symbol, side, quantity, entry_price):
-    """Pasang stop-limit order di entry_price."""
+def place_algo_stop_order(symbol, side, quantity, trigger_price, limit_price):
+    """Pasang Order Bersyarat (STOP) via Algo Service."""
     params = {
+        "algoType": "CONDITIONAL",
         "symbol": symbol,
         "side": side,
         "type": "STOP",
         "quantity": quantity,
-        "price": entry_price,
-        "stopPrice": entry_price,
-        "timeInForce": "GTC"
+        "triggerPrice": trigger_price,
+        "price": limit_price,
+        "timeInForce": "GTC",
+        "workingType": "MARK_PRICE"
     }
-    res = signed_request("/fapi/v1/order", params, method="POST")
-    if res and "orderId" in res:
-        return res["orderId"]
-    else:
-        if res and "msg" in res:
-            send_telegram(f"❌ Order gagal: {res['msg']} (mungkin IP ditolak)")
-        else:
-            send_telegram("❌ Order gagal tanpa pesan. Cek API key/IP.")
-        return None
-
-def cancel_order(symbol, order_id):
-    params = {"symbol": symbol, "orderId": order_id}
-    res = signed_request("/fapi/v1/order", params, method="DELETE")
-    return res is not None
-
-def check_order_status(symbol, order_id):
-    """Return status: NEW, FILLED, CANCELED, EXPIRED, atau None jika error."""
-    params = {"symbol": symbol, "orderId": order_id}
-    res = signed_request("/fapi/v1/order", params, method="GET")
-    if res and "status" in res:
-        return res["status"]
+    res = signed_request("/fapi/v1/algoOrder", params, method="POST")
+    if res and "algoId" in res:
+        return res["algoId"]
     return None
 
-# ---------- MAIN TRADING CYCLE ----------
+def cancel_algo_order(symbol, algo_id):
+    params = {"symbol": symbol, "algoId": algo_id}
+    return signed_request("/fapi/v1/algoOrder", params, method="DELETE") is not None
+
+def get_algo_order_status(symbol, algo_id):
+    """Ambil status satu algo order. Return status string atau None jika error/tidak ditemukan."""
+    params = {"symbol": symbol, "algoId": algo_id}
+    res = signed_request("/fapi/v1/algoOrder", params, method="GET")
+    if res and "algoStatus" in res:
+        return res["algoStatus"]
+    return None
+
+# ---------- SIKLUS TRADING (LOGIKA PERSILANGAN) ----------
 def trading_cycle():
-    """Satu siklus: scan sinyal terbaik → eksekusi → monitoring."""
     coins = get_coins_by_volume(50, MAX_PRICE_USDT)
     if not coins:
         send_telegram("❌ Gagal ambil daftar koin.")
@@ -342,17 +332,15 @@ def trading_cycle():
         time.sleep(0.03)
 
     if not signals:
-        send_telegram("❌ Tidak ada sinyal dengan Confidence ≥ 65%")
+        send_telegram("❌ Tidak ada sinyal.")
         return
 
-    # Pilih sinyal confidence tertinggi
     best = max(signals, key=lambda x: x["confidence"])
     symbol = best["symbol"]
     side = "BUY" if best["signal"] == "BUY" else "SELL"
     entry = best["entry_signal"]
     confidence = best["confidence"]
 
-    # Hitung TP & SL
     if side == "BUY":
         tp = round(entry * (1 + TP_PERCENT/100), 6)
         sl = round(entry * (1 - SL_PERCENT/100), 6)
@@ -360,41 +348,67 @@ def trading_cycle():
         tp = round(entry * (1 - TP_PERCENT/100), 6)
         sl = round(entry * (1 + SL_PERCENT/100), 6)
 
-    # Ambil mark price terbaru untuk validasi stopPrice
-    mark = get_mark_price(symbol)
-    if mark is None:
-        send_telegram("❌ Gagal ambil harga pasar.")
+    send_telegram(f"📊 {best['signal']} {symbol} | Entry: {entry} | TP: {tp} | SL: {sl} | Conf: {confidence}%")
+
+    # --- TUNGGU HARGA VALID UNTUK STOP ORDER ---
+    send_telegram(f"⏳ Menunggu posisi valid untuk {side} {symbol}...")
+    start_time = time.time()
+    last_notify = time.time()
+    order_algo_id = None
+
+    while time.time() - start_time < TIMEOUT_MINUTES * 60:
+        mark = get_mark_price(symbol)
+        if mark is None:
+            time.sleep(1)
+            continue
+
+        # Cek TP/SL sebelum order terpasang
+        if side == "BUY":
+            if mark >= tp:
+                send_telegram(f"⚠️ TP ({tp}) tersentuh sebelum entry.")
+                return
+            if mark <= sl:
+                send_telegram(f"⚠️ SL ({sl}) tersentuh sebelum entry.")
+                return
+            # Kondisi valid: harga di bawah entry (agar trigger buy bekerja)
+            if mark < entry:
+                send_telegram(f"✅ Harga di bawah entry ({mark:.6f}). Memasang STOP BUY order...")
+                break
+        else:  # SELL
+            if mark <= tp:
+                send_telegram(f"⚠️ TP ({tp}) tersentuh sebelum entry.")
+                return
+            if mark >= sl:
+                send_telegram(f"⚠️ SL ({sl}) tersentuh sebelum entry.")
+                return
+            if mark > entry:
+                send_telegram(f"✅ Harga di atas entry ({mark:.6f}). Memasang STOP SELL order...")
+                break
+
+        if time.time() - last_notify >= 180:
+            send_telegram(f"⏳ {symbol} | Current: {mark:.6f} | Entry: {entry}")
+            last_notify = time.time()
+
+        time.sleep(1)
+
+    if time.time() - start_time >= TIMEOUT_MINUTES * 60:
+        send_telegram(f"⏰ Timeout menunggu posisi valid. Siklus selesai.")
         return
 
-    # Validasi stopPrice (harus di atas mark untuk BUY, di bawah mark untuk SELL)
-    if side == "BUY" and entry <= mark:
-        send_telegram(f"⚠️ Entry {entry} ≤ mark {mark}, stopPrice tidak valid. Skip.")
-        return
-    if side == "SELL" and entry >= mark:
-        send_telegram(f"⚠️ Entry {entry} ≥ mark {mark}, stopPrice tidak valid. Skip.")
-        return
-
-    # Hitung quantity minimum
+    # --- PASANG ORDER ---
     min_notional = get_min_quantity(symbol)
-    quantity = max(min_notional / entry, 0.001)  # minimal 0.001 untuk keamanan
-    # Ambil step size dari exchange info? Kita sederhanakan: bulatkan ke 1 desimal, atau gunakan quantity mentah.
-    # Untuk kebanyakan pair, quantity bisa 1 desimal. Untuk aman, kita bulatkan ke 3 desimal.
+    quantity = max(min_notional / entry, 0.001)
     quantity = round(quantity, 3)
 
-    # Set leverage
     set_leverage(symbol, LEVERAGE)
-
-    # Pasang order
-    send_telegram(f"📊 {best['signal']} {symbol}\nEntry: {entry}\nTP: {tp} | SL: {sl}\nConf: {confidence}%\nQty: {quantity}")
-    order_id = place_stop_limit_order(symbol, side, quantity, entry)
-    if not order_id:
-        send_telegram(f"❌ Gagal pasang order {symbol}.")
+    algo_id = place_algo_stop_order(symbol, side, quantity, entry, entry)
+    if not algo_id:
+        send_telegram("❌ Gagal pasang Order Bersyarat.")
         return
 
-    send_telegram(f"✅ Stop-Limit Order terpasang (ID: {order_id})")
+    send_telegram(f"🎯 Order Bersyarat terpasang (ID: {algo_id})")
 
-    # Monitoring loop
-    start_time = time.time()
+    # --- MONITORING ---
     last_notify = time.time()
     while True:
         time.sleep(1)
@@ -402,60 +416,64 @@ def trading_cycle():
         if mark is None:
             continue
 
-        # Cek TP / SL sebelum entry
+        # TP/SL setelah order
         if side == "BUY":
             if mark >= tp:
-                cancel_order(symbol, order_id)
-                send_telegram(f"⚠️ {symbol} TP ({tp}) tersentuh sebelum entry. Order dibatalkan.")
+                cancel_algo_order(symbol, algo_id)
+                send_telegram(f"🛑 TP ({tp}) tercapai, order dibatalkan.")
                 return
             if mark <= sl:
-                cancel_order(symbol, order_id)
-                send_telegram(f"⚠️ {symbol} SL ({sl}) tersentuh sebelum entry. Order dibatalkan.")
+                cancel_algo_order(symbol, algo_id)
+                send_telegram(f"🛑 SL ({sl}) tercapai, order dibatalkan.")
                 return
         else:
             if mark <= tp:
-                cancel_order(symbol, order_id)
-                send_telegram(f"⚠️ {symbol} TP ({tp}) tersentuh sebelum entry. Order dibatalkan.")
+                cancel_algo_order(symbol, algo_id)
+                send_telegram(f"🛑 TP ({tp}) tercapai, order dibatalkan.")
                 return
             if mark >= sl:
-                cancel_order(symbol, order_id)
-                send_telegram(f"⚠️ {symbol} SL ({sl}) tersentuh sebelum entry. Order dibatalkan.")
+                cancel_algo_order(symbol, algo_id)
+                send_telegram(f"🛑 SL ({sl}) tercapai, order dibatalkan.")
                 return
 
         # Cek status order
-        status = check_order_status(symbol, order_id)
+        status = get_algo_order_status(symbol, algo_id)
         if status == "FILLED":
-            send_telegram(f"🏆 Order {symbol} terisi di {mark:.6f}. Manajemen risiko oleh platform.")
+            send_telegram(f"✅ Order {symbol} terisi di {mark:.6f}")
             return
-        elif status in ("CANCELED", "EXPIRED"):
-            send_telegram(f"⚠️ Order {symbol} {status} sebelum sempat terisi.")
+        elif status in ("CANCELED", "REJECTED", "EXPIRED"):
+            send_telegram(f"⚠️ Order {symbol} berstatus {status}.")
             return
 
-        # Notifikasi tiap 3 menit
         if time.time() - last_notify >= 180:
-            send_telegram(f"⏳ {symbol} {side} LIMIT\nEntry: {entry}\nCurrent: {mark:.6f}\nTP: {tp} | SL: {sl}")
+            send_telegram(f"⏳ {symbol} | Mark: {mark:.6f} | TP: {tp} | SL: {sl}")
             last_notify = time.time()
 
-        # Timeout
         if time.time() - start_time > TIMEOUT_MINUTES * 60:
-            cancel_order(symbol, order_id)
-            send_telegram(f"⏰ Timeout {TIMEOUT_MINUTES} menit, order {symbol} dibatalkan.")
+            cancel_algo_order(symbol, algo_id)
+            send_telegram(f"⏰ Timeout, order dibatalkan.")
             return
 
+# ---------- LOOP UTAMA ----------
 def run_loop():
     while True:
         try:
-            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Siklus auto-trading...")
+            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Siklus trading...")
             trading_cycle()
         except Exception as e:
             send_telegram(f"⚠️ Bot error: {e}")
         time.sleep(SCAN_INTERVAL)
 
 if __name__ == "__main__":
+    # Kirim IP publik ke Telegram saat start
+    ip = get_public_ip()
+    send_telegram(f"🚀 Bot Auto-Trading dimulai!\nIP Publik Render: {ip}\nPastikan IP ini sudah di-whitelist di Binance.")
+
     if not API_KEY or not SECRET_KEY:
         send_telegram("❌ API Key/Secret belum diset di environment Render.")
-    # Jalankan trading loop di thread terpisah
-    t = threading.Thread(target=run_loop, daemon=True)
-    t.start()
+    else:
+        t = threading.Thread(target=run_loop, daemon=True)
+        t.start()
+
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
