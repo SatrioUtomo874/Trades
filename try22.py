@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-SIGNAL BROADCASTER – Binance / Bybit Dual API
+SIGNAL BROADCASTER OPTIMIZED – Dual API (Binance/Bybit)
 Analisa Multi-Timeframe SMC (D1, H4, H1, M15, M5)
-Fallback otomatis jika salah satu API error.
-Flask health-check untuk Render Web Service.
+- Entry lebih valid (jarak aman ke TP)
+- SL berbasis H1 (kuat)
+- RR ≥ 1.8
+- Confidence ≥ 70%
 """
 
 import time
@@ -18,7 +20,7 @@ from flask import Flask
 # ================== KONFIGURASI ==================
 TELEGRAM_TOKEN = "8094484109:AAF9Z3lQUxdQFqqeG6NKV9O1EC0vrxzJy0U"
 CHAT_ID = "8041197505"
-MIN_CONFIDENCE = 65
+MIN_CONFIDENCE = 70          # Dinaikkan ke 70
 MAX_PRICE = 100.0
 BAN_CYCLES = 20
 SCAN_INTERVAL = 60
@@ -27,7 +29,6 @@ TOP_COINS = 50
 
 banned = {}
 
-# ---------- TELEGRAM ----------
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -37,7 +38,6 @@ def send_telegram(msg):
 
 # ========== BINANCE FUNCTIONS ==========
 def get_coins_binance(limit=50, max_price=100.0):
-    """Ambil daftar simbol USDT dari Binance Futures, urutkan berdasarkan volume."""
     try:
         url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
         data = requests.get(url, timeout=15).json()
@@ -58,7 +58,6 @@ def get_coins_binance(limit=50, max_price=100.0):
         return None
 
 def fetch_klines_binance(symbol, interval, limit=200):
-    """Ambil candlestick dari Binance Futures."""
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
         resp = requests.get(url, timeout=15)
@@ -88,7 +87,6 @@ INTERVAL_MAP = {
 }
 
 def get_coins_bybit(limit=50, max_price=100.0):
-    """Ambil daftar simbol USDT dari Bybit Futures (linear), urutkan volume."""
     try:
         url = "https://api.bybit.com/v5/market/tickers?category=linear"
         data = requests.get(url, timeout=15).json()
@@ -112,7 +110,6 @@ def get_coins_bybit(limit=50, max_price=100.0):
         return None
 
 def fetch_klines_bybit(symbol, interval, limit=200):
-    """Ambil candlestick dari Bybit Futures (linear)."""
     bybit_interval = INTERVAL_MAP.get(interval, "60")
     url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={bybit_interval}&limit={limit}"
     try:
@@ -122,7 +119,7 @@ def fetch_klines_bybit(symbol, interval, limit=200):
         rows = data["result"]["list"]
         if not rows:
             return None
-        rows = rows[::-1]  # Bybit descending → ascending
+        rows = rows[::-1]
         df = pd.DataFrame(rows, columns=["timestamp","open","high","low","close","volume","turnover"])
         df["timestamp"] = pd.to_datetime(df["timestamp"].astype(int), unit="ms")
         for c in ["open","high","low","close","volume"]:
@@ -239,9 +236,8 @@ def get_nearest_levels(df):
     resistances = sorted([v for v in swings_high if v > current])
     return supports, resistances
 
-# ========== ANALISA SINYAL (pakai fungsi fetch yang diberikan) ==========
+# ========== ANALISA SINYAL (OPTIMIZED) ==========
 def analyze_signal(symbol, fetch_klines_func):
-    """Analisa satu symbol menggunakan fungsi pengambil data tertentu."""
     df_d1 = fetch_klines_func(symbol, "1d", 200)
     df_h4 = fetch_klines_func(symbol, "4h", 200)
     df_h1 = fetch_klines_func(symbol, "1h", 150)
@@ -260,7 +256,7 @@ def analyze_signal(symbol, fetch_klines_func):
     if any([df_d1 is None, df_h4 is None, df_h1 is None, df_m15 is None, df_m5 is None]):
         return None
 
-    # D1 trend
+    # 1. D1 trend
     struct_d1 = market_structure(df_d1, window=5)
     if struct_d1 == "ranging":
         return None
@@ -274,12 +270,13 @@ def analyze_signal(symbol, fetch_klines_func):
     elif not bias_bull and last_d1["close"] < last_d1["ema50"]:
         score += 0.15
 
+    # RSI D1
     if bias_bull and 40 < last_d1["rsi"] < 70:
         score += 0.05
     elif not bias_bull and 30 < last_d1["rsi"] < 60:
         score += 0.05
 
-    # H4
+    # 2. H4 konfirmasi
     struct_h4 = market_structure(df_h4, window=3)
     if struct_h4 != struct_d1:
         return None
@@ -293,17 +290,25 @@ def analyze_signal(symbol, fetch_klines_func):
     if ob_h4_high is not None:
         score += 0.10
 
-    # H1
+    # 3. H1 validasi + filter baru
     struct_h1 = market_structure(df_h1, window=2)
     if struct_h1 != struct_d1:
         return None
     score += 0.10
 
     last_h1 = df_h1.iloc[-2]
-    if last_h1["volume"] > last_h1["vol_avg20"]:
-        score += 0.05
+    # Volume H1 harus > 1.5x rata-rata
+    if last_h1["volume"] <= 1.5 * last_h1["vol_avg20"]:
+        return None
+    score += 0.05
 
-    # M15
+    # RSI H1
+    if bias_bull and last_h1["rsi"] >= 60:
+        return None
+    if not bias_bull and last_h1["rsi"] <= 40:
+        return None
+
+    # 4. M15 trigger + filter jarak TP
     last_m15 = df_m15.iloc[-2]
     if bias_bull and last_m15["ema12"] > last_m15["ema26"]:
         score += 0.10
@@ -313,15 +318,17 @@ def analyze_signal(symbol, fetch_klines_func):
         return None
 
     sweep_m15, _ = detect_liquidity_sweep(df_m15, "buy" if bias_bull else "sell")
-    if sweep_m15:
-        score += 0.15
+    if not sweep_m15:   # sweep wajib di M15
+        return None
+    score += 0.15
 
+    # RSI M15
     if bias_bull and last_m15["rsi"] < 65:
         score += 0.05
     elif not bias_bull and last_m15["rsi"] > 35:
         score += 0.05
 
-    # M5
+    # 5. M5 konfirmasi akhir
     last_m5 = df_m5.iloc[-2]
     if bias_bull and last_m5["close"] > last_m5["ema12"]:
         score += 0.05
@@ -330,29 +337,71 @@ def analyze_signal(symbol, fetch_klines_func):
     else:
         return None
 
-    # TP / SL
-    supports, resistances = get_nearest_levels(df_m15)
+    # 6. Hitung TP/SL dengan prioritas level H1
+    supports_h1, resistances_h1 = get_nearest_levels(df_h1)
+    supports_m15, resistances_m15 = get_nearest_levels(df_m15)
+
     entry = round(last_m15["close"], 6)
     atr = last_m15["atr"] if not np.isnan(last_m15["atr"]) else entry * 0.002
 
+    # Tentukan level support/resistance untuk SL (pakai H1 jika ada, jika tidak M15)
     if direction == "BUY":
-        nearest_support = supports[0] if supports else entry - atr * 1.5
-        sl = round(nearest_support - atr * 0.3, 6)
-        nearest_resistance = resistances[0] if resistances else entry + atr * 2.0
-        tp = round(nearest_resistance * 0.998, 6)
+        # Support untuk SL: cari dari H1 dulu
+        if supports_h1:
+            sl_base = supports_h1[0]
+        elif supports_m15:
+            sl_base = supports_m15[0]
+        else:
+            sl_base = entry - atr * 1.5
+
+        sl = round(sl_base - atr * 0.5, 6)  # buffer di bawah support
+
+        # Resistance untuk TP: H1 dulu
+        if resistances_h1:
+            tp_base = resistances_h1[0]
+        elif resistances_m15:
+            tp_base = resistances_m15[0]
+        else:
+            tp_base = entry + atr * 2.0
+
+        # Kurangi sedikit untuk keamanan
+        tp = round(tp_base * 0.998, 6)
+
+        # Validasi jarak minimum ke TP (2x ATR)
+        if tp - entry < 2.0 * atr:
+            return None
+
         risk = entry - sl
         reward = tp - entry
-        if reward / risk < 1.5:
-            tp = round(entry + risk * 1.5, 6)
+        # RR minimal 1.8
+        if reward / risk < 1.8:
+            tp = round(entry + risk * 1.8, 6)  # paksa TP agar RR 1.8
     else:
-        nearest_resistance = resistances[0] if resistances else entry + atr * 1.5
-        sl = round(nearest_resistance + atr * 0.3, 6)
-        nearest_support = supports[0] if supports else entry - atr * 2.0
-        tp = round(nearest_support * 1.002, 6)
+        if resistances_h1:
+            sl_base = resistances_h1[0]
+        elif resistances_m15:
+            sl_base = resistances_m15[0]
+        else:
+            sl_base = entry + atr * 1.5
+
+        sl = round(sl_base + atr * 0.5, 6)
+
+        if supports_h1:
+            tp_base = supports_h1[0]
+        elif supports_m15:
+            tp_base = supports_m15[0]
+        else:
+            tp_base = entry - atr * 2.0
+
+        tp = round(tp_base * 1.002, 6)
+
+        if entry - tp < 2.0 * atr:
+            return None
+
         risk = sl - entry
         reward = entry - tp
-        if reward / risk < 1.5:
-            tp = round(entry - risk * 1.5, 6)
+        if reward / risk < 1.8:
+            tp = round(entry - risk * 1.8, 6)
 
     confidence = min(int(score * 100), 95)
     if confidence < MIN_CONFIDENCE:
@@ -373,33 +422,27 @@ def analyze_signal(symbol, fetch_klines_func):
 def main_loop():
     global banned
     while True:
-        # Update ban
         to_del = [k for k, v in banned.items() if v <= 0]
         for k in to_del:
             del banned[k]
         for k in list(banned.keys()):
             banned[k] -= 1
 
-        # --- Tentukan sumber data ---
         coins = None
         fetch_func = None
         api_source = ""
 
-        # 1. Coba Binance
         coins = get_coins_binance(TOP_COINS, MAX_PRICE)
         if coins:
             fetch_func = fetch_klines_binance
             api_source = "Binance"
         else:
-            # 2. Coba Bybit
             coins = get_coins_bybit(TOP_COINS, MAX_PRICE)
             if coins:
                 fetch_func = fetch_klines_bybit
                 api_source = "Bybit"
             else:
-                # 3. Fallback statis + coba Binance/Bybit
                 coins = FALLBACK_SYMBOLS[:TOP_COINS]
-                # Coba Binance dulu, kalau gagal Bybit
                 test_df = fetch_klines_binance(coins[0], "1h", 10)
                 if test_df is not None:
                     fetch_func = fetch_klines_binance
@@ -458,10 +501,10 @@ def run_flask():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  SIGNAL BROADCASTER – Dual API (Binance/Bybit)")
-    print(f"  Min Confidence: {MIN_CONFIDENCE}% | Ban: {BAN_CYCLES} siklus")
+    print("  SIGNAL BROADCASTER OPTIMIZED")
+    print(f"  Min Confidence: {MIN_CONFIDENCE}% | RR ≥ 1.8 | SL berbasis H1")
     print("=" * 60)
-    send_telegram("🚀 <b>Signal Broadcaster (Binance/Bybit) dimulai!</b>")
+    send_telegram("🚀 <b>Signal Broadcaster Optimized dimulai!</b>")
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
