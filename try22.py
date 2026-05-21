@@ -1,423 +1,469 @@
 #!/usr/bin/env python3
 """
-AUTO TRADING BOT – LIMIT ORDER + AUTO TP/SL + BAN 20 SIKLUS + FREKUENSI TINGGI
-- Min Confidence 65
-- Filter volatilitas OFF
-- Filter momentum M5 hanya EMA
-- Filter RSI longgar
-- Filter volume OFF
-- Zona discount/premium WAJIB
-- SL 0.8%
+SIGNAL BROADCASTER – Binance / Bybit Dual API
+Analisa Multi-Timeframe SMC (D1, H4, H1, M15, M5)
+Fallback otomatis jika salah satu API error.
+Flask health-check untuk Render Web Service.
 """
 
-import os, time, hmac, hashlib, math, threading, requests, pandas as pd, numpy as np
+import time
+import random
+import threading
+import requests
+import pandas as pd
+import numpy as np
 from datetime import datetime
 from flask import Flask
 
 # ================== KONFIGURASI ==================
-TELEGRAM_TOKEN = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
+TELEGRAM_TOKEN = "8094484109:AAF9Z3lQUxdQFqqeG6NKV9O1EC0vrxzJy0U"
 CHAT_ID = "8041197505"
-TP_PERCENT = 0.6
-SL_PERCENT = 0.8          # Diubah menjadi 0.8%
-MIN_CONFIDENCE = 59       # Diturunkan ke 65
-LEVERAGE = 5
-TIMEOUT_MINUTES = 15
-SCAN_INTERVAL = 60
-MAX_PRICE_USDT = 100.0
+MIN_CONFIDENCE = 65
+MAX_PRICE = 100.0
 BAN_CYCLES = 20
-API_KEY = os.environ.get("BINANCE_API_KEY", "")
-SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
+SCAN_INTERVAL = 60
+TOP_COINS = 50
 # =================================================
 
-app = Flask(__name__)
-@app.route('/')
-def home():
-    return "Bot is alive", 200
+banned = {}
 
-banned_coins = {}
-
-def update_banned():
-    to_delete = []
-    for sym in list(banned_coins.keys()):
-        banned_coins[sym] -= 1
-        if banned_coins[sym] <= 0:
-            to_delete.append(sym)
-    for sym in to_delete:
-        del banned_coins[sym]
-
-def ban_coin(symbol):
-    banned_coins[symbol] = BAN_CYCLES
-    send_telegram(f"📛 {symbol} di-ban {BAN_CYCLES} siklus.")
-
+# ---------- TELEGRAM ----------
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=8)
-    except: pass
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
+    except:
+        pass
 
-def get_public_ip():
-    try: return requests.get("https://api.ipify.org", timeout=5).text.strip()
-    except: return "IP tidak terdeteksi"
-
-def signed_request(endpoint, params, method="GET"):
-    if not API_KEY or not SECRET_KEY:
-        send_telegram("❌ API Key/Secret belum diisi."); return None
-    params["timestamp"] = int(time.time()*1000)
-    qs = "&".join([f"{k}={v}" for k,v in sorted(params.items())])
-    sig = hmac.new(SECRET_KEY.encode(), qs.encode(), hashlib.sha256).hexdigest()
-    url = f"https://fapi.binance.com{endpoint}?{qs}&signature={sig}"
+# ========== BINANCE FUNCTIONS ==========
+def get_coins_binance(limit=50, max_price=100.0):
+    """Ambil daftar simbol USDT dari Binance Futures, urutkan berdasarkan volume."""
     try:
-        if method=="GET": r = requests.get(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-        elif method=="POST": r = requests.post(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-        elif method=="DELETE": r = requests.delete(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-        else: return None
-        if r.status_code==200: return r.json()
-        else:
-            try: msg = r.json().get("msg","")
-            except: msg = r.text
-            send_telegram(f"❌ API Error {r.status_code}\n{msg}")
-            return {"error": True, "msg": msg}
+        url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        data = requests.get(url, timeout=15).json()
+        if not isinstance(data, list):
+            return None
+        tickers = [t for t in data if t["symbol"].endswith("USDT")]
+        tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
+        res = []
+        for t in tickers:
+            price = float(t["lastPrice"])
+            if price <= max_price:
+                res.append(t["symbol"])
+            if len(res) >= limit:
+                break
+        return res if res else None
     except Exception as e:
-        send_telegram(f"⚠️ Network: {e}"); return None
+        print(f"  ⚠️ Binance get_coins error: {e}")
+        return None
 
-# ---------- DATA ----------
-def fetch_klines(symbol, interval, limit=100):
+def fetch_klines_binance(symbol, interval, limit=200):
+    """Ambil candlestick dari Binance Futures."""
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    for _ in range(3):
-        try:
-            resp = requests.get(url, timeout=8); data = resp.json()
-            if isinstance(data, dict) and "code" in data: return None
-            df = pd.DataFrame(data, columns=["timestamp","open","high","low","close","volume","close_time","quote_volume","trades","taker_buy_base","taker_buy_quote","ignore"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-            for c in ["open","high","low","close","volume"]: df[c] = pd.to_numeric(df[c], errors="coerce")
-            df.set_index("timestamp", inplace=True)
-            return df[["open","high","low","close","volume"]]
-        except: time.sleep(10)
-    return None
+    try:
+        resp = requests.get(url, timeout=15)
+        data = resp.json()
+        if isinstance(data, dict) and "code" in data:
+            return None
+        df = pd.DataFrame(data, columns=[
+            "timestamp","open","high","low","close","volume",
+            "close_time","quote_volume","trades","taker_buy_base","taker_buy_quote","ignore"
+        ])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        for c in ["open","high","low","close","volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df.set_index("timestamp", inplace=True)
+        return df[["open","high","low","close","volume"]]
+    except Exception as e:
+        print(f"  ⚠️ Binance fetch_klines error: {e}")
+        return None
 
-def add_indicators(df):
-    if len(df)<80: return None
+# ========== BYBIT FUNCTIONS ==========
+INTERVAL_MAP = {
+    "1d": "D",
+    "4h": "240",
+    "1h": "60",
+    "15m": "15",
+    "5m": "5"
+}
+
+def get_coins_bybit(limit=50, max_price=100.0):
+    """Ambil daftar simbol USDT dari Bybit Futures (linear), urutkan volume."""
+    try:
+        url = "https://api.bybit.com/v5/market/tickers?category=linear"
+        data = requests.get(url, timeout=15).json()
+        if data.get("retCode") != 0:
+            return None
+        tickers = data["result"]["list"]
+        filtered = []
+        for t in tickers:
+            if t["symbol"].endswith("USDT"):
+                try:
+                    price = float(t["lastPrice"])
+                    if price <= max_price:
+                        filtered.append(t)
+                except:
+                    pass
+        filtered.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
+        res = [t["symbol"] for t in filtered[:limit]]
+        return res if res else None
+    except Exception as e:
+        print(f"  ⚠️ Bybit get_coins error: {e}")
+        return None
+
+def fetch_klines_bybit(symbol, interval, limit=200):
+    """Ambil candlestick dari Bybit Futures (linear)."""
+    bybit_interval = INTERVAL_MAP.get(interval, "60")
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={bybit_interval}&limit={limit}"
+    try:
+        data = requests.get(url, timeout=15).json()
+        if data.get("retCode") != 0:
+            return None
+        rows = data["result"]["list"]
+        if not rows:
+            return None
+        rows = rows[::-1]  # Bybit descending → ascending
+        df = pd.DataFrame(rows, columns=["timestamp","open","high","low","close","volume","turnover"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(int), unit="ms")
+        for c in ["open","high","low","close","volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df.set_index("timestamp", inplace=True)
+        return df[["open","high","low","close","volume"]]
+    except Exception as e:
+        print(f"  ⚠️ Bybit fetch_klines error: {e}")
+        return None
+
+# ========== FALLBACK STATIS ==========
+FALLBACK_SYMBOLS = [
+    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT",
+    "AVAXUSDT","DOTUSDT","LINKUSDT","MATICUSDT","UNIUSDT","ATOMUSDT","LTCUSDT",
+    "ETCUSDT","OPUSDT","ARBUSDT","INJUSDT","TIAUSDT","SUIUSDT","SEIUSDT",
+    "NEARUSDT","APTUSDT","RNDRUSDT","FETUSDT","AGIXUSDT","OCEANUSDT","GRTUSDT",
+    "THETAUSDT","SANDUSDT","MANAUSDT","GALAUSDT","AXSUSDT","CHZUSDT","FLOWUSDT",
+    "EGLDUSDT","QNTUSDT","SNXUSDT","CRVUSDT","COMPUSDT","AAVEUSDT","MKRUSDT",
+    "RUNEUSDT","LDOUSDT","FXSUSDT","1INCHUSDT","ZRXUSDT","BATUSDT","ENJUSDT",
+    "ANKRUSDT"
+]
+
+# ========== INDIKATOR & SMC TOOLS ==========
+def add_all_indicators(df):
+    if len(df) < 80:
+        return None
     df["ema12"] = df["close"].ewm(span=12).mean()
     df["ema26"] = df["close"].ewm(span=26).mean()
     df["ema50"] = df["close"].ewm(span=50).mean()
-    df["ema200"] = df["close"].ewm(span=200).mean() if len(df)>=200 else df["ema50"]
-    df["atr"] = df["high"].sub(df["low"]).rolling(14).mean()
-    delta = df["close"].diff(); gain = delta.clip(lower=0).rolling(14).mean(); loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain/loss; df["rsi"] = 100 - (100/(1+rs))
+    df["ema200"] = df["close"].ewm(span=200).mean() if len(df) >= 200 else df["ema50"]
+    df["tr"] = np.maximum(df["high"] - df["low"],
+                          np.maximum(abs(df["high"] - df["close"].shift()),
+                                     abs(df["low"] - df["close"].shift())))
+    df["atr"] = df["tr"].rolling(14).mean()
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss
+    df["rsi"] = 100 - (100 / (1 + rs))
+    df["macd"] = df["ema12"] - df["ema26"]
+    df["macd_signal"] = df["macd"].ewm(span=9).mean()
+    df["macd_diff"] = df["macd"] - df["macd_signal"]
+    df["vol_avg20"] = df["volume"].rolling(20).mean()
     return df
 
-def market_structure(df, w=3):
-    if len(df)<w*2+2: return "ranging"
-    h,l = df["high"], df["low"]; sh,sl = [],[]
-    for i in range(w, len(df)-w):
-        if h.iloc[i]==h.iloc[i-w:i+w+1].max(): sh.append(h.iloc[i])
-        if l.iloc[i]==l.iloc[i-w:i+w+1].min(): sl.append(l.iloc[i])
-    if len(sh)<2 or len(sl)<2: return "ranging"
-    hh = sh[-1]>sh[-2]; hl = sl[-1]>sl[-2]; lh = sh[-1]<sh[-2]; ll = sl[-1]<sl[-2]
+def find_swings(df, window=2):
+    df = df.copy()
+    df["swing_high"] = False
+    df["swing_low"] = False
+    for i in range(window, len(df) - window):
+        if df["high"].iloc[i] == df["high"].iloc[i-window:i+window+1].max():
+            df.loc[df.index[i], "swing_high"] = True
+        if df["low"].iloc[i] == df["low"].iloc[i-window:i+window+1].min():
+            df.loc[df.index[i], "swing_low"] = True
+    return df
+
+def market_structure(df, window=3):
+    if len(df) < window*2+2:
+        return "ranging"
+    df_swing = find_swings(df, window)
+    swing_highs = df_swing[df_swing["swing_high"]]["high"]
+    swing_lows = df_swing[df_swing["swing_low"]]["low"]
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return "ranging"
+    hh = swing_highs.iloc[-1] > swing_highs.iloc[-2]
+    hl = swing_lows.iloc[-1] > swing_lows.iloc[-2]
+    lh = swing_highs.iloc[-1] < swing_highs.iloc[-2]
+    ll = swing_lows.iloc[-1] < swing_lows.iloc[-2]
     if hh and hl: return "bullish"
     if lh and ll: return "bearish"
     return "ranging"
 
-def liquidity_sweep(df, direction):
+def detect_liquidity_sweep(df, direction):
     last = df.iloc[-2]
-    if direction=="buy":
-        for i in range(len(df)-4,3,-1):
-            if df["low"].iloc[i]==df["low"].iloc[i-3:i+4].min():
-                if last["low"] < df["low"].iloc[i] and last["close"] > df["low"].iloc[i]: return True, df["low"].iloc[i]
+    if direction == "buy":
+        for i in range(len(df)-5, 3, -1):
+            if df["low"].iloc[i] == df["low"].iloc[i-3:i+4].min():
+                if last["low"] < df["low"].iloc[i] and last["close"] > df["low"].iloc[i]:
+                    return True, df["low"].iloc[i]
     else:
-        for i in range(len(df)-4,3,-1):
-            if df["high"].iloc[i]==df["high"].iloc[i-3:i+4].max():
-                if last["high"] > df["high"].iloc[i] and last["close"] < df["high"].iloc[i]: return True, df["high"].iloc[i]
+        for i in range(len(df)-5, 3, -1):
+            if df["high"].iloc[i] == df["high"].iloc[i-3:i+4].max():
+                if last["high"] > df["high"].iloc[i] and last["close"] < df["high"].iloc[i]:
+                    return True, df["high"].iloc[i]
     return False, None
 
-def order_block_or_fvg(df, direction):
-    last_idx = len(df)-2; last_close = df["close"].iloc[last_idx]
-    if direction=="buy":
-        for i in range(last_idx-1, max(last_idx-20,0),-1):
+def find_order_block(df, direction):
+    last_idx = len(df) - 2
+    last_close = df["close"].iloc[last_idx]
+    if direction == "buy":
+        for i in range(last_idx-1, max(last_idx-20, 0), -1):
             if df["close"].iloc[i] < df["open"].iloc[i]:
-                if i+1<=last_idx and df["close"].iloc[i+1] > df["open"].iloc[i+1] and last_close > df["high"].iloc[i]: return True, df["high"].iloc[i]
-        if last_idx>=2 and df["low"].iloc[last_idx] > df["high"].iloc[last_idx-2]: return True, df["high"].iloc[last_idx-2]
+                if i+1 <= last_idx and df["close"].iloc[i+1] > df["open"].iloc[i+1]:
+                    if last_close > df["high"].iloc[i]:
+                        return df["high"].iloc[i], df["low"].iloc[i]
+        if last_idx >= 2 and df["low"].iloc[last_idx] > df["high"].iloc[last_idx-2]:
+            return df["high"].iloc[last_idx-2], df["low"].iloc[last_idx]
     else:
-        for i in range(last_idx-1, max(last_idx-20,0),-1):
+        for i in range(last_idx-1, max(last_idx-20, 0), -1):
             if df["close"].iloc[i] > df["open"].iloc[i]:
-                if i+1<=last_idx and df["close"].iloc[i+1] < df["open"].iloc[i+1] and last_close < df["low"].iloc[i]: return True, df["low"].iloc[i]
-        if last_idx>=2 and df["high"].iloc[last_idx] < df["low"].iloc[last_idx-2]: return True, df["low"].iloc[last_idx-2]
-    return False, None
+                if i+1 <= last_idx and df["close"].iloc[i+1] < df["open"].iloc[i+1]:
+                    if last_close < df["low"].iloc[i]:
+                        return df["high"].iloc[i], df["low"].iloc[i]
+        if last_idx >= 2 and df["high"].iloc[last_idx] < df["low"].iloc[last_idx-2]:
+            return df["high"].iloc[last_idx], df["low"].iloc[last_idx-2]
+    return None, None
 
-def premium_discount_zone(df):
-    mid = (df["high"].max() + df["low"].min())/2
-    return "premium" if df["close"].iloc[-2] > mid else "discount"
+def get_nearest_levels(df):
+    df_swing = find_swings(df, window=2)
+    swings_low = df_swing[df_swing["swing_low"]]["low"]
+    swings_high = df_swing[df_swing["swing_high"]]["high"]
+    current = df["close"].iloc[-2]
+    supports = sorted([v for v in swings_low if v < current], reverse=True)
+    resistances = sorted([v for v in swings_high if v > current])
+    return supports, resistances
 
-def generate_signal(df_h1, df_m15, df_m5):
-    df_h1 = add_indicators(df_h1); df_m15 = add_indicators(df_m15); df_m5 = add_indicators(df_m5)
-    if df_h1 is None or df_m15 is None or df_m5 is None: return None
+# ========== ANALISA SINYAL (pakai fungsi fetch yang diberikan) ==========
+def analyze_signal(symbol, fetch_klines_func):
+    """Analisa satu symbol menggunakan fungsi pengambil data tertentu."""
+    df_d1 = fetch_klines_func(symbol, "1d", 200)
+    df_h4 = fetch_klines_func(symbol, "4h", 200)
+    df_h1 = fetch_klines_func(symbol, "1h", 150)
+    df_m15 = fetch_klines_func(symbol, "15m", 150)
+    df_m5 = fetch_klines_func(symbol, "5m", 150)
 
-    # --- Filter volatilitas OFF ---
+    if any([df_d1 is None, df_h4 is None, df_h1 is None, df_m15 is None, df_m5 is None]):
+        return None
 
-    struct_h1 = market_structure(df_h1, 5)
-    if struct_h1 == "ranging": return None
-    bias_bull = struct_h1 == "bullish"
-    direction = "buy" if bias_bull else "sell"
+    df_d1 = add_all_indicators(df_d1)
+    df_h4 = add_all_indicators(df_h4)
+    df_h1 = add_all_indicators(df_h1)
+    df_m15 = add_all_indicators(df_m15)
+    df_m5 = add_all_indicators(df_m5)
 
-    # --- Filter momentum M5 (hanya EMA) ---
-    last_m5 = df_m5.iloc[-2]
-    if bias_bull and last_m5["ema12"] <= last_m5["ema26"]: return None
-    if not bias_bull and last_m5["ema12"] >= last_m5["ema26"]: return None
+    if any([df_d1 is None, df_h4 is None, df_h1 is None, df_m15 is None, df_m5 is None]):
+        return None
 
-    # --- Filter RSI longgar ---
+    # D1 trend
+    struct_d1 = market_structure(df_d1, window=5)
+    if struct_d1 == "ranging":
+        return None
+    bias_bull = struct_d1 == "bullish"
+    direction = "BUY" if bias_bull else "SELL"
+    score = 0
+
+    last_d1 = df_d1.iloc[-1]
+    if bias_bull and last_d1["close"] > last_d1["ema50"]:
+        score += 0.15
+    elif not bias_bull and last_d1["close"] < last_d1["ema50"]:
+        score += 0.15
+
+    if bias_bull and 40 < last_d1["rsi"] < 70:
+        score += 0.05
+    elif not bias_bull and 30 < last_d1["rsi"] < 60:
+        score += 0.05
+
+    # H4
+    struct_h4 = market_structure(df_h4, window=3)
+    if struct_h4 != struct_d1:
+        return None
+    score += 0.10
+
+    sweep_h4, _ = detect_liquidity_sweep(df_h4, "buy" if bias_bull else "sell")
+    if sweep_h4:
+        score += 0.10
+
+    ob_h4_high, _ = find_order_block(df_h4, "buy" if bias_bull else "sell")
+    if ob_h4_high is not None:
+        score += 0.10
+
+    # H1
+    struct_h1 = market_structure(df_h1, window=2)
+    if struct_h1 != struct_d1:
+        return None
+    score += 0.10
+
+    last_h1 = df_h1.iloc[-2]
+    if last_h1["volume"] > last_h1["vol_avg20"]:
+        score += 0.05
+
+    # M15
     last_m15 = df_m15.iloc[-2]
-    if bias_bull and last_m15["rsi"] >= 70: return None   # hanya tolak kalau sudah overbought
-    if not bias_bull and last_m15["rsi"] <= 30: return None # hanya tolak kalau sudah oversold
-
-    # --- Filter volume OFF ---
-
-    # --- Zona discount/premium WAJIB ---
-    zone = premium_discount_zone(df_m15)
-    if bias_bull and zone != "discount": return None
-    if not bias_bull and zone != "premium": return None
-
-    # --- Skor sinyal ---
-    score = 0.25
-    sweep_ok, _ = liquidity_sweep(df_m15, direction)
-    if not sweep_ok: return None
-    score += 0.25
-
-    area_ok, _ = order_block_or_fvg(df_m15, direction)
-    if area_ok: score += 0.15
-
-    score += 0.1  # zona sudah terverifikasi
-
-    struct_m5 = market_structure(df_m5, 2)
-    if (bias_bull and struct_m5 == "bullish") or (not bias_bull and struct_m5 == "bearish"): score += 0.1
-
-    if score * 100 < MIN_CONFIDENCE: return None
-
-    price = last_m15["close"]
-    return {"signal":"BUY" if bias_bull else "SELL", "entry_signal": round(price,6), "confidence": int(score*100)}
-
-def get_coins_by_volume(top=80, max_price=100.0):
-    for _ in range(3):
-        try:
-            resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=10)
-            tickers = [t for t in resp.json() if t["symbol"].endswith("USDT")]
-            tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
-            res = []
-            for t in tickers:
-                if float(t["lastPrice"]) <= max_price: res.append(t["symbol"])
-                if len(res)>=top: break
-            return res
-        except: time.sleep(10)
-    return []
-
-# ---------- PRESISI ----------
-symbol_filters_cache = {}
-def get_symbol_filters(symbol):
-    if symbol in symbol_filters_cache: return symbol_filters_cache[symbol]
-    try:
-        resp = requests.get("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10)
-        for s in resp.json()["symbols"]:
-            if s["symbol"]==symbol:
-                f = {"minNotional": 5.0}
-                for fl in s["filters"]:
-                    if fl["filterType"]=="PRICE_FILTER": f["tickSize"] = float(fl["tickSize"])
-                    elif fl["filterType"]=="LOT_SIZE":
-                        f["stepSize"] = float(fl["stepSize"]); f["minQty"] = float(fl["minQty"])
-                    elif fl["filterType"]=="MIN_NOTIONAL": f["minNotional"] = float(fl["notional"])
-                symbol_filters_cache[symbol]=f; return f
-    except: pass
-    return {"tickSize":0.01, "stepSize":0.001, "minQty":0.001, "minNotional":5.0}
-
-def round_to_tick(v, tick):
-    if tick==0: return v
-    prec = int(round(-math.log10(tick),0))
-    return round(round(v/tick)*tick, prec)
-
-def round_to_step(v, step):
-    if step==0: return v
-    prec = int(round(-math.log10(step),0))
-    return round(round(v/step)*step, prec)
-
-def fmt_tick(v, tick):
-    if tick==0: return str(v)
-    prec = int(round(-math.log10(tick),0))
-    return f"{v:.{prec}f}"
-
-def fmt_step(v, step):
-    if step==0: return str(v)
-    prec = int(round(-math.log10(step),0))
-    return f"{v:.{prec}f}"
-
-# ---------- ORDER FUNCTIONS ----------
-def get_mark_price(symbol):
-    try:
-        r = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}", timeout=5)
-        return float(r.json()["price"])
-    except: return None
-
-def set_leverage(symbol, leverage):
-    params = {"symbol":symbol, "leverage":leverage}
-    signed_request("/fapi/v1/leverage", params, method="POST")
-
-def place_limit_order(symbol, side, quantity, price):
-    params = {"symbol":symbol, "side":side, "type":"LIMIT",
-              "quantity":quantity, "price":price, "timeInForce":"GTC"}
-    res = signed_request("/fapi/v1/order", params, method="POST")
-    if res and "orderId" in res: return res["orderId"]
-    return None
-
-def cancel_order(symbol, order_id):
-    params = {"symbol":symbol, "orderId":order_id}
-    return signed_request("/fapi/v1/order", params, method="DELETE") is not None
-
-def get_order_status(symbol, order_id):
-    params = {"symbol":symbol, "orderId":order_id}
-    res = signed_request("/fapi/v1/order", params, method="GET")
-    if res and "status" in res: return res["status"]
-    return None
-
-def place_tp_sl_algo(symbol, side, quantity, stop_loss_price, take_profit_price):
-    res1 = signed_request("/fapi/v1/algoOrder", {
-        "algoType":"CONDITIONAL","symbol":symbol,"side":"SELL" if side=="BUY" else "BUY",
-        "type":"STOP_MARKET","quantity":quantity,"triggerPrice":stop_loss_price,
-        "workingType":"MARK_PRICE"
-    }, method="POST")
-    res2 = signed_request("/fapi/v1/algoOrder", {
-        "algoType":"CONDITIONAL","symbol":symbol,"side":"SELL" if side=="BUY" else "BUY",
-        "type":"TAKE_PROFIT_MARKET","quantity":quantity,"triggerPrice":take_profit_price,
-        "workingType":"MARK_PRICE"
-    }, method="POST")
-    return (res1 is not None and "algoId" in res1) and (res2 is not None and "algoId" in res2)
-
-def get_account_balance():
-    try:
-        res = signed_request("/fapi/v2/balance", {"timestamp": int(time.time()*1000)}, method="GET")
-        if res and not res.get("error"):
-            for asset in res:
-                if asset["asset"] == "USDT": return float(asset["balance"])
-    except: pass
-    return None
-
-def get_open_positions():
-    try:
-        res = signed_request("/fapi/v2/positionRisk", {"timestamp": int(time.time()*1000)}, method="GET")
-        if res and not res.get("error"):
-            positions = []
-            for p in res:
-                if float(p["positionAmt"]) != 0:
-                    positions.append({
-                        "symbol": p["symbol"],
-                        "side": "LONG" if float(p["positionAmt"]) > 0 else "SHORT",
-                        "amount": p["positionAmt"],
-                        "entryPrice": p["entryPrice"],
-                        "unrealizedProfit": p["unRealizedProfit"]
-                    })
-            return positions
-    except: pass
-    return []
-
-# ---------- TRADING CYCLE ----------
-def trading_cycle():
-    update_banned()
-    coins = get_coins_by_volume(80, MAX_PRICE_USDT)
-    if not coins:
-        send_telegram("❌ Gagal ambil daftar koin."); return
-
-    signals = []
-    for sym in coins:
-        if sym in banned_coins: continue
-        try:
-            h1 = fetch_klines(sym, "1h", 100); m15 = fetch_klines(sym, "15m", 100); m5 = fetch_klines(sym, "5m", 100)
-            if not all([h1 is not None, m15 is not None, m5 is not None]): continue
-            sig = generate_signal(h1, m15, m5)
-            if sig: sig["symbol"]=sym; signals.append(sig)
-        except: pass
-        time.sleep(0.03)
-
-    if not signals:
-        send_telegram("❌ Tidak ada sinyal dengan Confidence ≥ 65%"); return
-
-    best = max(signals, key=lambda x: x["confidence"])
-    symbol = best["symbol"]; side = "BUY" if best["signal"]=="BUY" else "SELL"
-    entry_raw = best["entry_signal"]; confidence = best["confidence"]
-
-    filters = get_symbol_filters(symbol)
-    tick = filters.get("tickSize", 0.01); step = filters.get("stepSize", 0.001)
-    min_qty = filters.get("minQty", 0.001); min_notional = filters.get("minNotional", 5.0)
-
-    entry = round_to_tick(entry_raw, tick)
-    if side=="BUY":
-        tp = round_to_tick(entry*(1+TP_PERCENT/100), tick)
-        sl = round_to_tick(entry*(1-SL_PERCENT/100), tick)
+    if bias_bull and last_m15["ema12"] > last_m15["ema26"]:
+        score += 0.10
+    elif not bias_bull and last_m15["ema12"] < last_m15["ema26"]:
+        score += 0.10
     else:
-        tp = round_to_tick(entry*(1-TP_PERCENT/100), tick)
-        sl = round_to_tick(entry*(1+SL_PERCENT/100), tick)
+        return None
 
-    raw_qty = max(min_notional/entry, min_qty)
-    qty = round_to_step(raw_qty, step)
-    while entry * qty < 5.0:
-        qty += step; qty = round_to_step(qty, step)
-    if qty < min_qty: qty = min_qty
+    sweep_m15, _ = detect_liquidity_sweep(df_m15, "buy" if bias_bull else "sell")
+    if sweep_m15:
+        score += 0.15
 
-    entry_str = fmt_tick(entry, tick); tp_str = fmt_tick(tp, tick); sl_str = fmt_tick(sl, tick); qty_str = fmt_step(qty, step)
+    if bias_bull and last_m15["rsi"] < 65:
+        score += 0.05
+    elif not bias_bull and last_m15["rsi"] > 35:
+        score += 0.05
 
-    send_telegram(f"📊 {best['signal']} {symbol} | Entry: {entry_str} | TP: {tp_str} | SL: {sl_str} | Qty: {qty_str} | Conf: {confidence}%")
-    set_leverage(symbol, LEVERAGE)
+    # M5
+    last_m5 = df_m5.iloc[-2]
+    if bias_bull and last_m5["close"] > last_m5["ema12"]:
+        score += 0.05
+    elif not bias_bull and last_m5["close"] < last_m5["ema12"]:
+        score += 0.05
+    else:
+        return None
 
-    order_id = place_limit_order(symbol, side, qty_str, entry_str)
-    if not order_id:
-        # Gagal order → ban koin agar tidak terulang terus
-        ban_coin(symbol)
-        send_telegram(f"📛 {symbol} di-ban karena order gagal (cek error di atas).")
-        return
+    # TP / SL
+    supports, resistances = get_nearest_levels(df_m15)
+    entry = round(last_m15["close"], 6)
+    atr = last_m15["atr"] if not np.isnan(last_m15["atr"]) else entry * 0.002
 
-    send_telegram(f"📌 Limit Order terpasang (ID: {order_id}) – menunggu harga sentuh {entry_str}")
+    if direction == "BUY":
+        nearest_support = supports[0] if supports else entry - atr * 1.5
+        sl = round(nearest_support - atr * 0.3, 6)
+        nearest_resistance = resistances[0] if resistances else entry + atr * 2.0
+        tp = round(nearest_resistance * 0.998, 6)
+        risk = entry - sl
+        reward = tp - entry
+        if reward / risk < 1.5:
+            tp = round(entry + risk * 1.5, 6)
+    else:
+        nearest_resistance = resistances[0] if resistances else entry + atr * 1.5
+        sl = round(nearest_resistance + atr * 0.3, 6)
+        nearest_support = supports[0] if supports else entry - atr * 2.0
+        tp = round(nearest_support * 1.002, 6)
+        risk = sl - entry
+        reward = entry - tp
+        if reward / risk < 1.5:
+            tp = round(entry - risk * 1.5, 6)
 
-    start_time = time.time(); last_notify = time.time()
+    confidence = min(int(score * 100), 95)
+    if confidence < MIN_CONFIDENCE:
+        return None
+
+    return {
+        "symbol": symbol,
+        "signal": direction,
+        "entry": entry,
+        "tp": tp,
+        "sl": sl,
+        "confidence": confidence,
+        "atr": round(atr, 6),
+        "rr": round(abs(tp - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0
+    }
+
+# ========== LOOP UTAMA ==========
+def main_loop():
+    global banned
     while True:
-        time.sleep(1)
-        mark = get_mark_price(symbol)
-        if mark is None: continue
+        # Update ban
+        to_del = [k for k, v in banned.items() if v <= 0]
+        for k in to_del:
+            del banned[k]
+        for k in list(banned.keys()):
+            banned[k] -= 1
 
-        if side=="BUY":
-            if mark >= tp: cancel_order(symbol, order_id); send_telegram(f"⚠️ TP ({tp_str}) tersentuh sebelum entry."); ban_coin(symbol); return
-            if mark <= sl: cancel_order(symbol, order_id); send_telegram(f"⚠️ SL ({sl_str}) tersentuh sebelum entry."); ban_coin(symbol); return
+        # --- Tentukan sumber data ---
+        coins = None
+        fetch_func = None
+        api_source = ""
+
+        # 1. Coba Binance
+        coins = get_coins_binance(TOP_COINS, MAX_PRICE)
+        if coins:
+            fetch_func = fetch_klines_binance
+            api_source = "Binance"
         else:
-            if mark <= tp: cancel_order(symbol, order_id); send_telegram(f"⚠️ TP ({tp_str}) tersentuh sebelum entry."); ban_coin(symbol); return
-            if mark >= sl: cancel_order(symbol, order_id); send_telegram(f"⚠️ SL ({sl_str}) tersentuh sebelum entry."); ban_coin(symbol); return
-
-        status = get_order_status(symbol, order_id)
-        if status == "FILLED":
-            send_telegram(f"✅ Limit Order {symbol} terisi di {entry_str}. Memasang TP/SL...")
-            if place_tp_sl_algo(symbol, side, qty_str, sl_str, tp_str):
-                send_telegram(f"🎯 TP/SL terpasang: TP {tp_str} | SL {sl_str}")
+            # 2. Coba Bybit
+            coins = get_coins_bybit(TOP_COINS, MAX_PRICE)
+            if coins:
+                fetch_func = fetch_klines_bybit
+                api_source = "Bybit"
             else:
-                send_telegram("⚠️ Gagal pasang TP/SL otomatis, cek manual.")
-            ban_coin(symbol); return
-        elif status in ("CANCELED", "EXPIRED", "REJECTED"):
-            send_telegram(f"⚠️ Order {symbol} berstatus {status}."); ban_coin(symbol); return
+                # 3. Fallback statis + coba Binance/Bybit
+                coins = FALLBACK_SYMBOLS[:TOP_COINS]
+                # Coba Binance dulu, kalau gagal Bybit
+                test_df = fetch_klines_binance(coins[0], "1h", 10)
+                if test_df is not None:
+                    fetch_func = fetch_klines_binance
+                    api_source = "Fallback + Binance"
+                else:
+                    fetch_func = fetch_klines_bybit
+                    api_source = "Fallback + Bybit"
 
-        if time.time() - last_notify >= 180:
-            send_telegram(f"⏳ {symbol} | Mark: {mark:.6f} | Limit: {entry_str} | TP: {tp_str} | SL: {sl_str}")
-            last_notify = time.time()
+        if not coins or not fetch_func:
+            send_telegram("❌ Semua API tidak tersedia. Coba lagi nanti.")
+            time.sleep(SCAN_INTERVAL)
+            continue
 
-        if time.time() - start_time > TIMEOUT_MINUTES*60:
-            cancel_order(symbol, order_id); send_telegram(f"⏰ Timeout, order {symbol} dibatalkan."); ban_coin(symbol); return
+        print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] Scan {len(coins)} koin ({api_source})... (banned: {len(banned)})")
+        signals = []
+        for sym in coins:
+            if sym in banned:
+                continue
+            try:
+                sig = analyze_signal(sym, fetch_func)
+                if sig:
+                    signals.append(sig)
+            except Exception as e:
+                print(f"  ⚠️ Error {sym}: {e}")
+            time.sleep(0.02)
 
-def run_loop():
-    while True:
-        try:
-            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Siklus...")
-            trading_cycle()
-        except Exception as e:
-            send_telegram(f"⚠️ Bot error: {e}")
+        if not signals:
+            send_telegram("❌ Tidak ada sinyal ditemukan.")
+            time.sleep(SCAN_INTERVAL)
+            continue
+
+        send_telegram(f"🔔 <b>Ditemukan {len(signals)} sinyal ({api_source}):</b>")
+        for sig in signals:
+            msg = (
+                f"<b>📊 {sig['signal']} {sig['symbol']}</b>\n"
+                f"Entry: {sig['entry']}\n"
+                f"TP: {sig['tp']} | SL: {sig['sl']}\n"
+                f"Confidence: {sig['confidence']}%\n"
+                f"RR: 1:{sig['rr']} | ATR: {sig['atr']}"
+            )
+            send_telegram(msg)
+            banned[sig["symbol"]] = BAN_CYCLES
+
+        send_telegram(f"📛 {len(signals)} koin di-ban {BAN_CYCLES} siklus.")
         time.sleep(SCAN_INTERVAL)
 
+# ========== FLASK APP ==========
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is alive", 200
+
+def run_flask():
+    app.run(host="0.0.0.0", port=8080)
+
 if __name__ == "__main__":
-    ip = get_public_ip()
-    send_telegram(f"🚀 Bot Auto-Trading (Frekuensi Tinggi) dimulai!\nIP: {ip}\nPastikan IP di-whitelist.")
-    if not API_KEY or not SECRET_KEY:
-        send_telegram("❌ API Key/Secret belum diset di environment.")
-    else:
-        t = threading.Thread(target=run_loop, daemon=True); t.start()
-    port = int(os.environ.get("PORT",8080))
-    app.run(host="0.0.0.0", port=port)
+    print("=" * 60)
+    print("  SIGNAL BROADCASTER – Dual API (Binance/Bybit)")
+    print(f"  Min Confidence: {MIN_CONFIDENCE}% | Ban: {BAN_CYCLES} siklus")
+    print("=" * 60)
+    send_telegram("🚀 <b>Signal Broadcaster (Binance/Bybit) dimulai!</b>")
+
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    main_loop()
