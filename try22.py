@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 SIGNAL BROADCASTER OPTIMIZED – Dual API (Binance/Bybit)
-Analisa Multi-Timeframe SMC (D1, H4, H1, M15, M5)
-- Entry lebih valid (jarak aman ke TP)
-- SL berbasis H1 (kuat)
-- RR ≥ 1.8
-- Confidence ≥ 70%
+Dengan adjustable aggression level via Telegram:
+  /up   -> perketat sinyal (confidence naik, RR naik, volume naik)
+  /down -> longgarkan sinyal (confidence turun, RR turun, volume turun)
+  /status -> tampilkan level saat ini
 """
 
 import time
@@ -20,15 +19,120 @@ from flask import Flask
 # ================== KONFIGURASI ==================
 TELEGRAM_TOKEN = "8094484109:AAF9Z3lQUxdQFqqeG6NKV9O1EC0vrxzJy0U"
 CHAT_ID = "8041197505"
-MIN_CONFIDENCE = 70          # Dinaikkan ke 70
 MAX_PRICE = 100.0
 BAN_CYCLES = 20
 SCAN_INTERVAL = 60
 TOP_COINS = 50
 # =================================================
 
-banned = {}
+# ---------- ADJUSTABLE AGGRESSION ----------
+# Level: 0 = normal, positif = lebih ketat, negatif = lebih longgar
+AGGRESSION_LEVEL = 0
+LEVEL_LOCK = threading.Lock()
 
+def get_aggression_params():
+    """Kembalikan parameter berdasarkan level agresi saat ini."""
+    with LEVEL_LOCK:
+        lvl = AGGRESSION_LEVEL
+
+    # Base normal
+    base = {
+        "min_confidence": 70,
+        "min_rr": 1.8,
+        "volume_mult": 1.5,
+        "tp_distance_atr": 2.0
+    }
+
+    if lvl > 0:  # lebih ketat
+        base["min_confidence"] += 5 * lvl
+        base["min_rr"] += 0.2 * lvl
+        base["volume_mult"] += 0.5 * lvl
+        base["tp_distance_atr"] += 0.5 * lvl
+    elif lvl < 0:  # lebih longgar
+        base["min_confidence"] += 5 * lvl  # lvl negatif → confidence turun
+        base["min_rr"] += 0.2 * lvl
+        base["volume_mult"] += 0.3 * lvl
+        base["tp_distance_atr"] += 0.5 * lvl
+
+    # Batas aman
+    base["min_confidence"] = max(55, min(85, base["min_confidence"]))
+    base["min_rr"] = max(1.2, min(2.5, base["min_rr"]))
+    base["volume_mult"] = max(0.8, min(3.0, base["volume_mult"]))
+    base["tp_distance_atr"] = max(1.0, min(4.0, base["tp_distance_atr"]))
+
+    return base
+
+def set_aggression(direction):
+    """Ubah level agresi. direction: 'up' atau 'down'"""
+    global AGGRESSION_LEVEL
+    with LEVEL_LOCK:
+        old = AGGRESSION_LEVEL
+        if direction == "up":
+            AGGRESSION_LEVEL = min(2, AGGRESSION_LEVEL + 1)  # max +2
+        else:
+            AGGRESSION_LEVEL = max(-3, AGGRESSION_LEVEL - 1)  # max -3
+        new = AGGRESSION_LEVEL
+
+    # Kirim notifikasi
+    if old != new:
+        params = get_aggression_params()
+        msg = (
+            f"🔧 <b>Level Agresi Berubah</b>\n"
+            f"Dari level {old} → {new}\n"
+            f"Confidence min: {params['min_confidence']}%\n"
+            f"RR min: 1:{params['min_rr']}\n"
+            f"Volume min: {params['volume_mult']}x\n"
+            f"Jarak TP min: {params['tp_distance_atr']}x ATR"
+        )
+        send_telegram(msg)
+    else:
+        send_telegram(f"ℹ️ Level sudah di batas {'atas' if direction=='up' else 'bawah'} (level {new}).")
+
+# ---------- TELEGRAM POLLING ----------
+def telegram_polling():
+    """Thread terpisah: poll update dari Telegram untuk perintah /up /down /status"""
+    offset = None
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+            params = {"timeout": 30, "offset": offset}
+            resp = requests.get(url, params=params, timeout=35)
+            data = resp.json()
+            if not data.get("ok"):
+                time.sleep(5)
+                continue
+
+            for update in data["result"]:
+                offset = update["update_id"] + 1
+                msg = update.get("message")
+                if not msg:
+                    continue
+                text = msg.get("text", "")
+                chat_id = str(msg["chat"]["id"])
+
+                # Hanya proses perintah dari CHAT_ID yang terdaftar
+                if chat_id != CHAT_ID:
+                    continue
+
+                if text == "/up":
+                    set_aggression("up")
+                elif text == "/down":
+                    set_aggression("down")
+                elif text == "/status":
+                    params = get_aggression_params()
+                    send_telegram(
+                        f"📊 <b>Level Saat Ini: {AGGRESSION_LEVEL}</b>\n"
+                        f"Confidence: {params['min_confidence']}%\n"
+                        f"RR: 1:{params['min_rr']}\n"
+                        f"Volume: {params['volume_mult']}x\n"
+                        f"Jarak TP: {params['tp_distance_atr']}x ATR"
+                    )
+            time.sleep(1)
+        except Exception as e:
+            print(f"Polling error: {e}")
+            time.sleep(5)
+
+# ---------- TELEGRAM SEND ----------
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -53,8 +157,7 @@ def get_coins_binance(limit=50, max_price=100.0):
             if len(res) >= limit:
                 break
         return res if res else None
-    except Exception as e:
-        print(f"  ⚠️ Binance get_coins error: {e}")
+    except:
         return None
 
 def fetch_klines_binance(symbol, interval, limit=200):
@@ -73,18 +176,11 @@ def fetch_klines_binance(symbol, interval, limit=200):
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df.set_index("timestamp", inplace=True)
         return df[["open","high","low","close","volume"]]
-    except Exception as e:
-        print(f"  ⚠️ Binance fetch_klines error: {e}")
+    except:
         return None
 
 # ========== BYBIT FUNCTIONS ==========
-INTERVAL_MAP = {
-    "1d": "D",
-    "4h": "240",
-    "1h": "60",
-    "15m": "15",
-    "5m": "5"
-}
+INTERVAL_MAP = {"1d":"D","4h":"240","1h":"60","15m":"15","5m":"5"}
 
 def get_coins_bybit(limit=50, max_price=100.0):
     try:
@@ -103,10 +199,8 @@ def get_coins_bybit(limit=50, max_price=100.0):
                 except:
                     pass
         filtered.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
-        res = [t["symbol"] for t in filtered[:limit]]
-        return res if res else None
-    except Exception as e:
-        print(f"  ⚠️ Bybit get_coins error: {e}")
+        return [t["symbol"] for t in filtered[:limit]]
+    except:
         return None
 
 def fetch_klines_bybit(symbol, interval, limit=200):
@@ -126,11 +220,9 @@ def fetch_klines_bybit(symbol, interval, limit=200):
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df.set_index("timestamp", inplace=True)
         return df[["open","high","low","close","volume"]]
-    except Exception as e:
-        print(f"  ⚠️ Bybit fetch_klines error: {e}")
+    except:
         return None
 
-# ========== FALLBACK STATIS ==========
 FALLBACK_SYMBOLS = [
     "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT",
     "AVAXUSDT","DOTUSDT","LINKUSDT","MATICUSDT","UNIUSDT","ATOMUSDT","LTCUSDT",
@@ -138,8 +230,7 @@ FALLBACK_SYMBOLS = [
     "NEARUSDT","APTUSDT","RNDRUSDT","FETUSDT","AGIXUSDT","OCEANUSDT","GRTUSDT",
     "THETAUSDT","SANDUSDT","MANAUSDT","GALAUSDT","AXSUSDT","CHZUSDT","FLOWUSDT",
     "EGLDUSDT","QNTUSDT","SNXUSDT","CRVUSDT","COMPUSDT","AAVEUSDT","MKRUSDT",
-    "RUNEUSDT","LDOUSDT","FXSUSDT","1INCHUSDT","ZRXUSDT","BATUSDT","ENJUSDT",
-    "ANKRUSDT"
+    "RUNEUSDT","LDOUSDT","FXSUSDT","1INCHUSDT","ZRXUSDT","BATUSDT","ENJUSDT","ANKRUSDT"
 ]
 
 # ========== INDIKATOR & SMC TOOLS ==========
@@ -159,9 +250,6 @@ def add_all_indicators(df):
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
-    df["macd"] = df["ema12"] - df["ema26"]
-    df["macd_signal"] = df["macd"].ewm(span=9).mean()
-    df["macd_diff"] = df["macd"] - df["macd_signal"]
     df["vol_avg20"] = df["volume"].rolling(20).mean()
     return df
 
@@ -236,8 +324,14 @@ def get_nearest_levels(df):
     resistances = sorted([v for v in swings_high if v > current])
     return supports, resistances
 
-# ========== ANALISA SINYAL (OPTIMIZED) ==========
+# ========== ANALISA SINYAL (ADJUSTABLE) ==========
 def analyze_signal(symbol, fetch_klines_func):
+    params = get_aggression_params()
+    min_conf = params["min_confidence"]
+    min_rr = params["min_rr"]
+    vol_mult = params["volume_mult"]
+    tp_dist = params["tp_distance_atr"]
+
     df_d1 = fetch_klines_func(symbol, "1d", 200)
     df_h4 = fetch_klines_func(symbol, "4h", 200)
     df_h1 = fetch_klines_func(symbol, "1h", 150)
@@ -256,7 +350,7 @@ def analyze_signal(symbol, fetch_klines_func):
     if any([df_d1 is None, df_h4 is None, df_h1 is None, df_m15 is None, df_m5 is None]):
         return None
 
-    # 1. D1 trend
+    # D1
     struct_d1 = market_structure(df_d1, window=5)
     if struct_d1 == "ranging":
         return None
@@ -270,13 +364,12 @@ def analyze_signal(symbol, fetch_klines_func):
     elif not bias_bull and last_d1["close"] < last_d1["ema50"]:
         score += 0.15
 
-    # RSI D1
     if bias_bull and 40 < last_d1["rsi"] < 70:
         score += 0.05
     elif not bias_bull and 30 < last_d1["rsi"] < 60:
         score += 0.05
 
-    # 2. H4 konfirmasi
+    # H4
     struct_h4 = market_structure(df_h4, window=3)
     if struct_h4 != struct_d1:
         return None
@@ -290,25 +383,23 @@ def analyze_signal(symbol, fetch_klines_func):
     if ob_h4_high is not None:
         score += 0.10
 
-    # 3. H1 validasi + filter baru
+    # H1
     struct_h1 = market_structure(df_h1, window=2)
     if struct_h1 != struct_d1:
         return None
     score += 0.10
 
     last_h1 = df_h1.iloc[-2]
-    # Volume H1 harus > 1.5x rata-rata
-    if last_h1["volume"] <= 1.5 * last_h1["vol_avg20"]:
+    if last_h1["volume"] <= vol_mult * last_h1["vol_avg20"]:
         return None
     score += 0.05
 
-    # RSI H1
     if bias_bull and last_h1["rsi"] >= 60:
         return None
     if not bias_bull and last_h1["rsi"] <= 40:
         return None
 
-    # 4. M15 trigger + filter jarak TP
+    # M15
     last_m15 = df_m15.iloc[-2]
     if bias_bull and last_m15["ema12"] > last_m15["ema26"]:
         score += 0.10
@@ -318,17 +409,16 @@ def analyze_signal(symbol, fetch_klines_func):
         return None
 
     sweep_m15, _ = detect_liquidity_sweep(df_m15, "buy" if bias_bull else "sell")
-    if not sweep_m15:   # sweep wajib di M15
+    if not sweep_m15:
         return None
     score += 0.15
 
-    # RSI M15
     if bias_bull and last_m15["rsi"] < 65:
         score += 0.05
     elif not bias_bull and last_m15["rsi"] > 35:
         score += 0.05
 
-    # 5. M5 konfirmasi akhir
+    # M5
     last_m5 = df_m5.iloc[-2]
     if bias_bull and last_m5["close"] > last_m5["ema12"]:
         score += 0.05
@@ -337,16 +427,14 @@ def analyze_signal(symbol, fetch_klines_func):
     else:
         return None
 
-    # 6. Hitung TP/SL dengan prioritas level H1
+    # TP/SL dengan parameter adjustable
     supports_h1, resistances_h1 = get_nearest_levels(df_h1)
     supports_m15, resistances_m15 = get_nearest_levels(df_m15)
 
     entry = round(last_m15["close"], 6)
     atr = last_m15["atr"] if not np.isnan(last_m15["atr"]) else entry * 0.002
 
-    # Tentukan level support/resistance untuk SL (pakai H1 jika ada, jika tidak M15)
     if direction == "BUY":
-        # Support untuk SL: cari dari H1 dulu
         if supports_h1:
             sl_base = supports_h1[0]
         elif supports_m15:
@@ -354,9 +442,8 @@ def analyze_signal(symbol, fetch_klines_func):
         else:
             sl_base = entry - atr * 1.5
 
-        sl = round(sl_base - atr * 0.5, 6)  # buffer di bawah support
+        sl = round(sl_base - atr * 0.5, 6)
 
-        # Resistance untuk TP: H1 dulu
         if resistances_h1:
             tp_base = resistances_h1[0]
         elif resistances_m15:
@@ -364,18 +451,15 @@ def analyze_signal(symbol, fetch_klines_func):
         else:
             tp_base = entry + atr * 2.0
 
-        # Kurangi sedikit untuk keamanan
         tp = round(tp_base * 0.998, 6)
 
-        # Validasi jarak minimum ke TP (2x ATR)
-        if tp - entry < 2.0 * atr:
+        if tp - entry < tp_dist * atr:
             return None
 
         risk = entry - sl
         reward = tp - entry
-        # RR minimal 1.8
-        if reward / risk < 1.8:
-            tp = round(entry + risk * 1.8, 6)  # paksa TP agar RR 1.8
+        if reward / risk < min_rr:
+            tp = round(entry + risk * min_rr, 6)
     else:
         if resistances_h1:
             sl_base = resistances_h1[0]
@@ -395,16 +479,16 @@ def analyze_signal(symbol, fetch_klines_func):
 
         tp = round(tp_base * 1.002, 6)
 
-        if entry - tp < 2.0 * atr:
+        if entry - tp < tp_dist * atr:
             return None
 
         risk = sl - entry
         reward = entry - tp
-        if reward / risk < 1.8:
-            tp = round(entry - risk * 1.8, 6)
+        if reward / risk < min_rr:
+            tp = round(entry - risk * min_rr, 6)
 
     confidence = min(int(score * 100), 95)
-    if confidence < MIN_CONFIDENCE:
+    if confidence < min_conf:
         return None
 
     return {
@@ -419,6 +503,8 @@ def analyze_signal(symbol, fetch_klines_func):
     }
 
 # ========== LOOP UTAMA ==========
+banned = {}
+
 def main_loop():
     global banned
     while True:
@@ -456,7 +542,8 @@ def main_loop():
             time.sleep(SCAN_INTERVAL)
             continue
 
-        print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] Scan {len(coins)} koin ({api_source})... (banned: {len(banned)})")
+        params = get_aggression_params()
+        print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] Scan {len(coins)} koin ({api_source}) | Level {AGGRESSION_LEVEL}")
         signals = []
         for sym in coins:
             if sym in banned:
@@ -465,12 +552,12 @@ def main_loop():
                 sig = analyze_signal(sym, fetch_func)
                 if sig:
                     signals.append(sig)
-            except Exception as e:
-                print(f"  ⚠️ Error {sym}: {e}")
+            except:
+                pass
             time.sleep(0.02)
 
         if not signals:
-            send_telegram("❌ Tidak ada sinyal ditemukan.")
+            send_telegram(f"❌ Tidak ada sinyal (Conf ≥ {params['min_confidence']}%, RR ≥ 1:{params['min_rr']})")
             time.sleep(SCAN_INTERVAL)
             continue
 
@@ -501,12 +588,18 @@ def run_flask():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  SIGNAL BROADCASTER OPTIMIZED")
-    print(f"  Min Confidence: {MIN_CONFIDENCE}% | RR ≥ 1.8 | SL berbasis H1")
+    print("  SIGNAL BROADCASTER OPTIMIZED – ADJUSTABLE")
+    print("  /up (ketat) | /down (longgar) | /status")
     print("=" * 60)
-    send_telegram("🚀 <b>Signal Broadcaster Optimized dimulai!</b>")
+    send_telegram("🚀 <b>Signal Broadcaster Adjustable dimulai!</b>\nKetik /up, /down, atau /status di sini.")
 
+    # Thread Flask
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
+    # Thread polling Telegram
+    polling_thread = threading.Thread(target=telegram_polling, daemon=True)
+    polling_thread.start()
+
+    # Loop utama
     main_loop()
