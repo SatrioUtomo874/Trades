@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-AUTO TRADING BOT – Order Bersyarat (Algo) + Presisi Harga/Quantity
+AUTO TRADING BOT – Order Bersyarat (Algo) + Presisi Harga/Quantity Fix
+Max price $100 | Confidence ≥65% | Log detail sebelum order
 """
 
 import os
 import time
 import hmac
 import hashlib
-import json
+import math
 import threading
 import requests
 import pandas as pd
@@ -20,19 +21,18 @@ TELEGRAM_TOKEN = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
 CHAT_ID = "8041197505"
 
 TP_PERCENT = 0.6
-SL_PERCENT = 0.80
-MIN_CONFIDENCE = 60
+SL_PERCENT = 0.85
+MIN_CONFIDENCE = 65
 LEVERAGE = 5
 TIMEOUT_MINUTES = 15
 SCAN_INTERVAL = 60
-MAX_PRICE_USDT = 100.0
+MAX_PRICE_USDT = 100.0   # dinaikkan menjadi $100
 
 API_KEY = os.environ.get("BINANCE_API_KEY", "")
 SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
 # =================================================
 
 app = Flask(__name__)
-
 @app.route('/')
 def home():
     return "Bot is alive", 200
@@ -51,7 +51,7 @@ def get_public_ip():
     except:
         return "IP tidak terdeteksi"
 
-# ---------- BINANCE SIGNED REQUEST ----------
+# ---------- SIGNED REQUEST ----------
 def signed_request(endpoint, params, method="GET"):
     if not API_KEY or not SECRET_KEY:
         send_telegram("❌ API Key/Secret belum diisi.")
@@ -234,7 +234,7 @@ def generate_signal(df_h1, df_m15, df_m5):
         "confidence": int(score * 100),
     }
 
-def get_coins_by_volume(top=50, max_price=50.0):
+def get_coins_by_volume(top=50, max_price=100.0):
     for _ in range(3):
         try:
             resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=10)
@@ -251,7 +251,7 @@ def get_coins_by_volume(top=50, max_price=50.0):
             time.sleep(10)
     return []
 
-# ---------- PRESISI HARGA & QUANTITY ----------
+# ---------- PRESISI HARGA & QUANTITY (FIX) ----------
 symbol_filters_cache = {}
 
 def get_symbol_filters(symbol):
@@ -277,10 +277,32 @@ def get_symbol_filters(symbol):
     return None
 
 def round_to_tick(value, tick_size):
-    return round(value / tick_size) * tick_size
+    """Bulatkan nilai harga ke tick terdekat."""
+    if tick_size == 0:
+        return value
+    precision = int(round(-math.log10(tick_size), 0))
+    return round(round(value / tick_size) * tick_size, precision)
 
 def round_to_step(value, step_size):
-    return round(value / step_size) * step_size
+    """Bulatkan quantity ke step terdekat."""
+    if step_size == 0:
+        return value
+    precision = int(round(-math.log10(step_size), 0))
+    return round(round(value / step_size) * step_size, precision)
+
+def format_to_tick(value, tick_size):
+    """Format harga menjadi string dengan jumlah desimal yang tepat."""
+    if tick_size == 0:
+        return str(value)
+    precision = int(round(-math.log10(tick_size), 0))
+    return f"{value:.{precision}f}"
+
+def format_to_step(value, step_size):
+    """Format quantity menjadi string dengan jumlah desimal yang tepat."""
+    if step_size == 0:
+        return str(value)
+    precision = int(round(-math.log10(step_size), 0))
+    return f"{value:.{precision}f}"
 
 # ---------- ALGO ORDER FUNCTIONS ----------
 def get_mark_price(symbol):
@@ -295,14 +317,15 @@ def set_leverage(symbol, leverage):
     signed_request("/fapi/v1/leverage", params, method="POST")
 
 def place_algo_stop_order(symbol, side, quantity, trigger_price, limit_price):
+    # Kirim nilai dalam string untuk presisi sempurna
     params = {
         "algoType": "CONDITIONAL",
         "symbol": symbol,
         "side": side,
         "type": "STOP",
-        "quantity": quantity,
-        "triggerPrice": trigger_price,
-        "price": limit_price,
+        "quantity": quantity,          # sudah string
+        "triggerPrice": trigger_price, # sudah string
+        "price": limit_price,          # sudah string
         "timeInForce": "GTC",
         "workingType": "MARK_PRICE"
     }
@@ -322,7 +345,7 @@ def get_algo_order_status(symbol, algo_id):
         return res["algoStatus"]
     return None
 
-# ---------- SIKLUS TRADING (LOGIKA PERSILANGAN + PRESISI) ----------
+# ---------- SIKLUS TRADING ----------
 def trading_cycle():
     coins = get_coins_by_volume(50, MAX_PRICE_USDT)
     if not coins:
@@ -346,7 +369,7 @@ def trading_cycle():
         time.sleep(0.03)
 
     if not signals:
-        send_telegram("❌ Tidak ada sinyal.")
+        send_telegram("❌ Tidak ada sinyal dengan Confidence ≥ 65%")
         return
 
     best = max(signals, key=lambda x: x["confidence"])
@@ -355,7 +378,6 @@ def trading_cycle():
     entry_raw = best["entry_signal"]
     confidence = best["confidence"]
 
-    # Ambil filter presisi
     filters = get_symbol_filters(symbol)
     if not filters:
         send_telegram("❌ Gagal ambil filter presisi.")
@@ -365,17 +387,14 @@ def trading_cycle():
     min_qty = filters["minQty"]
     min_notional = filters["minNotional"]
 
-    # Bulatkan entry
+    # Hitung dan bulatkan harga
     entry = round_to_tick(entry_raw, tick)
-
-    # Hitung TP & SL dari entry yang sudah dibulatkan
     if side == "BUY":
         tp_raw = entry * (1 + TP_PERCENT/100)
         sl_raw = entry * (1 - SL_PERCENT/100)
     else:
         tp_raw = entry * (1 - TP_PERCENT/100)
         sl_raw = entry * (1 + SL_PERCENT/100)
-
     tp = round_to_tick(tp_raw, tick)
     sl = round_to_tick(sl_raw, tick)
 
@@ -399,7 +418,7 @@ def trading_cycle():
             if mark <= sl:
                 send_telegram(f"⚠️ SL ({sl}) tersentuh sebelum entry.")
                 return
-            if mark < entry:   # harga di bawah entry → valid untuk BUY STOP
+            if mark < entry:   # valid
                 send_telegram(f"✅ Harga di bawah entry ({mark:.6f}). Memasang STOP BUY...")
                 break
         else:
@@ -409,7 +428,7 @@ def trading_cycle():
             if mark >= sl:
                 send_telegram(f"⚠️ SL ({sl}) tersentuh sebelum entry.")
                 return
-            if mark > entry:   # harga di atas entry → valid untuk SELL STOP
+            if mark > entry:   # valid
                 send_telegram(f"✅ Harga di atas entry ({mark:.6f}). Memasang STOP SELL...")
                 break
 
@@ -423,22 +442,30 @@ def trading_cycle():
         send_telegram(f"⏰ Timeout menunggu posisi valid.")
         return
 
-    # --- HITUNG QUANTITY DENGAN PRESISI ---
+    # --- HITUNG QUANTITY & FORMAT STRING ---
     raw_qty = max(min_notional / entry, min_qty)
     qty = round_to_step(raw_qty, step)
     if qty < min_qty:
         qty = min_qty
-        qty = round_to_step(qty, step)  # pastikan kelipatan
-    # Jika masih di bawah min_qty setelah round, naikkan satu step
-    if qty < min_qty:
-        qty += step
         qty = round_to_step(qty, step)
+        if qty < min_qty:
+            qty += step
+            qty = round_to_step(qty, step)
+
+    # Format ke string presisi
+    entry_str = format_to_tick(entry, tick)
+    tp_str = format_to_tick(tp, tick)
+    sl_str = format_to_tick(sl, tick)
+    qty_str = format_to_step(qty, step)
+
+    # Log detail sebelum order
+    send_telegram(f"🔧 Order Detail:\nSymbol: {symbol}\nSide: {side}\nQty: {qty_str}\nTrigger: {entry_str}\nPrice: {entry_str}\nTick: {tick} Step: {step}")
 
     # Set leverage
     set_leverage(symbol, LEVERAGE)
 
     # Pasang order
-    algo_id = place_algo_stop_order(symbol, side, qty, entry, entry)
+    algo_id = place_algo_stop_order(symbol, side, qty_str, entry_str, entry_str)
     if not algo_id:
         send_telegram("❌ Gagal pasang Order Bersyarat.")
         return
@@ -453,7 +480,6 @@ def trading_cycle():
         if mark is None:
             continue
 
-        # Cek TP/SL setelah order
         if side == "BUY":
             if mark >= tp:
                 cancel_algo_order(symbol, algo_id)
@@ -473,7 +499,6 @@ def trading_cycle():
                 send_telegram(f"🛑 SL ({sl}) tercapai, order dibatalkan.")
                 return
 
-        # Cek status order
         status = get_algo_order_status(symbol, algo_id)
         if status == "FILLED":
             send_telegram(f"✅ Order {symbol} terisi di {mark:.6f}")
