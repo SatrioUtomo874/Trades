@@ -43,7 +43,7 @@ def get_aggression_params():
         "require_h1_structure": True,
         "sweep_mode": "m15",
         "entry_shift_pips": 0,
-        "require_confirmation": True,   # konfirmasi candlestick wajib di level normal
+        "require_confirmation": True,
     }
     if lvl > 0:
         p["min_confidence"] += 5 * lvl
@@ -68,7 +68,7 @@ def get_aggression_params():
             p["require_h4_structure"] = False
             p["require_h1_structure"] = False
             p["sweep_mode"] = "any"
-            p["require_confirmation"] = False  # di level -3, konfirmasi tidak wajib
+            p["require_confirmation"] = False
         elif lvl == -1:
             p["entry_shift_pips"] = 2
             p["require_h4_structure"] = True
@@ -130,9 +130,84 @@ def telegram_polling():
         except Exception as e:
             print(f"Polling error: {e}"); time.sleep(5)
 
-# ========== BINANCE / BYBIT FUNCTIONS (sama seperti sebelumnya) ==========
-# ... (gunakan kode yang sudah ada, tidak diubah)
-# Untuk ringkas, saya tidak menyalin ulang. Asumsikan fungsi get_coins_* dan fetch_klines_* sudah ada.
+# ========== BINANCE FUNCTIONS ==========
+def get_coins_binance(limit=50, max_price=100.0):
+    try:
+        url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        data = requests.get(url, timeout=15).json()
+        if not isinstance(data, list): return None
+        tickers = [t for t in data if t["symbol"].endswith("USDT")]
+        tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
+        res = []
+        for t in tickers:
+            if float(t["lastPrice"]) <= max_price:
+                res.append(t["symbol"])
+            if len(res) >= limit: break
+        return res if res else None
+    except: return None
+
+def fetch_klines_binance(symbol, interval, limit=200):
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    try:
+        resp = requests.get(url, timeout=15)
+        data = resp.json()
+        if isinstance(data, dict) and "code" in data: return None
+        df = pd.DataFrame(data, columns=[
+            "timestamp","open","high","low","close","volume",
+            "close_time","quote_volume","trades","taker_buy_base","taker_buy_quote","ignore"
+        ])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        for c in ["open","high","low","close","volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df.set_index("timestamp", inplace=True)
+        return df[["open","high","low","close","volume"]]
+    except: return None
+
+# ========== BYBIT FUNCTIONS ==========
+INTERVAL_MAP = {"1d":"D","4h":"240","1h":"60","15m":"15","5m":"5"}
+
+def get_coins_bybit(limit=50, max_price=100.0):
+    try:
+        url = "https://api.bybit.com/v5/market/tickers?category=linear"
+        data = requests.get(url, timeout=15).json()
+        if data.get("retCode") != 0: return None
+        tickers = data["result"]["list"]
+        filtered = []
+        for t in tickers:
+            if t["symbol"].endswith("USDT"):
+                try:
+                    if float(t["lastPrice"]) <= max_price: filtered.append(t)
+                except: pass
+        filtered.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
+        return [t["symbol"] for t in filtered[:limit]]
+    except: return None
+
+def fetch_klines_bybit(symbol, interval, limit=200):
+    bybit_interval = INTERVAL_MAP.get(interval, "60")
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={bybit_interval}&limit={limit}"
+    try:
+        data = requests.get(url, timeout=15).json()
+        if data.get("retCode") != 0: return None
+        rows = data["result"]["list"]
+        if not rows: return None
+        rows = rows[::-1]
+        df = pd.DataFrame(rows, columns=["timestamp","open","high","low","close","volume","turnover"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(int), unit="ms")
+        for c in ["open","high","low","close","volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df.set_index("timestamp", inplace=True)
+        return df[["open","high","low","close","volume"]]
+    except: return None
+
+FALLBACK_SYMBOLS = [
+    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT",
+    "AVAXUSDT","DOTUSDT","LINKUSDT","MATICUSDT","UNIUSDT","ATOMUSDT","LTCUSDT",
+    "ETCUSDT","OPUSDT","ARBUSDT","INJUSDT","TIAUSDT","SUIUSDT","SEIUSDT",
+    "NEARUSDT","APTUSDT","RNDRUSDT","FETUSDT","AGIXUSDT","OCEANUSDT","GRTUSDT",
+    "THETAUSDT","SANDUSDT","MANAUSDT","GALAUSDT","AXSUSDT","CHZUSDT","FLOWUSDT",
+    "EGLDUSDT","QNTUSDT","SNXUSDT","CRVUSDT","COMPUSDT","AAVEUSDT","MKRUSDT",
+    "RUNEUSDT","LDOUSDT","FXSUSDT","1INCHUSDT","ZRXUSDT","BATUSDT","ENJUSDT","ANKRUSDT"
+]
 
 # ========== INDIKATOR & SMC TOOLS ==========
 def add_all_indicators(df):
@@ -151,7 +226,6 @@ def add_all_indicators(df):
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
     df["vol_avg20"] = df["volume"].rolling(20).mean()
-    # MACD
     df["macd"] = df["ema12"] - df["ema26"]
     df["macd_signal"] = df["macd"].ewm(span=9).mean()
     df["macd_diff"] = df["macd"] - df["macd_signal"]
@@ -186,14 +260,11 @@ def detect_liquidity_sweep(df, direction):
 
 # ---------- KONFIRMASI CANDLESTICK ----------
 def has_bullish_confirmation(df):
-    """Candle terakhir (M15) adalah bullish engulfing atau bullish pin bar."""
-    last = df.iloc[-2]  # closed candle
+    last = df.iloc[-2]
     prev = df.iloc[-3]
-    # Bullish engulfing: prev bearish, last bullish, last close > prev open, last open < prev close
     if prev["close"] < prev["open"] and last["close"] > last["open"]:
         if last["close"] > prev["open"] and last["open"] < prev["close"]:
             return True
-    # Bullish pin bar: long lower shadow, small body, close near high
     body = abs(last["close"] - last["open"])
     lower_shadow = min(last["open"], last["close"]) - last["low"]
     upper_shadow = last["high"] - max(last["open"], last["close"])
@@ -204,11 +275,9 @@ def has_bullish_confirmation(df):
 def has_bearish_confirmation(df):
     last = df.iloc[-2]
     prev = df.iloc[-3]
-    # Bearish engulfing
     if prev["close"] > prev["open"] and last["close"] < last["open"]:
         if last["open"] > prev["close"] and last["close"] < prev["open"]:
             return True
-    # Bearish pin bar
     body = abs(last["close"] - last["open"])
     upper_shadow = last["high"] - max(last["open"], last["close"])
     lower_shadow = min(last["open"], last["close"]) - last["low"]
@@ -236,18 +305,16 @@ def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr,
     shift = shift_pct * entry_raw if p["entry_shift_pips"] > 0 else 0
 
     if bias_bull:
-        # Entry: di atas support terdekat, tapi tidak terlalu jauh
         nearest_support = None
         for sup in all_supports:
             if sup < entry_raw:
                 nearest_support = sup
                 break
         if nearest_support is not None:
-            final_entry = round(nearest_support + atr * 0.2 + shift, 6)  # sedikit di atas support
+            final_entry = round(nearest_support + atr * 0.2 + shift, 6)
         else:
             final_entry = entry_raw + shift
 
-        # SL: di bawah support terkuat (cari 2 level jika ada)
         sl_candidates = []
         if sweep_level and sweep_level < final_entry:
             sl_candidates.append(sweep_level - atr * 0.3)
@@ -259,9 +326,8 @@ def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr,
                 if count >= 2: break
         if not sl_candidates:
             sl_candidates.append(final_entry - atr * 1.2)
-        sl = round(min(sl_candidates), 6)  # SL terendah
+        sl = round(min(sl_candidates), 6)
 
-        # TP: resistance terdekat di atas
         tp = None
         for res in all_resistances:
             if res > final_entry:
@@ -270,11 +336,9 @@ def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr,
         if tp is None or tp <= final_entry:
             tp = round(final_entry + atr * 2.0, 6)
 
-        # Pastikan RR minimal (tidak memaksa TP, hanya cek)
         risk = final_entry - sl
         reward = tp - final_entry
         if reward / risk < p["min_rr"]:
-            # Coba resistance berikutnya
             for i, res in enumerate(all_resistances):
                 if res > final_entry and i > 0:
                     tp = round(res * 0.999, 6)
@@ -323,7 +387,6 @@ def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr,
                     if reward / risk >= p["min_rr"]:
                         break
 
-    # Safety check
     if bias_bull:
         if sl >= final_entry: sl = round(final_entry - atr * 1.0, 6)
         if tp <= final_entry: tp = round(final_entry + atr * 0.5, 6)
@@ -351,7 +414,6 @@ def analyze_signal(symbol, fetch_func):
     df_m5 = add_all_indicators(df_m5)
     if any(d is None for d in [df_d1, df_h4, df_h1, df_m15, df_m5]): return None
 
-    # D1
     struct_d1 = market_structure(df_d1, 5)
     if struct_d1 == "ranging": return None
     bias_bull = struct_d1 == "bullish"
@@ -364,14 +426,12 @@ def analyze_signal(symbol, fetch_func):
     if bias_bull and 40 < last_d1["rsi"] < 70: score += 0.05
     elif not bias_bull and 30 < last_d1["rsi"] < 60: score += 0.05
 
-    # H4
     struct_h4 = market_structure(df_h4, 3)
     if p["require_h4_structure"] and struct_h4 != struct_d1: return None
     if struct_h4 == struct_d1: score += 0.10
     sweep_h4, _ = detect_liquidity_sweep(df_h4, "buy" if bias_bull else "sell")
     if sweep_h4: score += 0.10
 
-    # H1
     struct_h1 = market_structure(df_h1, 2)
     if p["require_h1_structure"] and struct_h1 != struct_d1: return None
     if struct_h1 == struct_d1: score += 0.10
@@ -381,7 +441,6 @@ def analyze_signal(symbol, fetch_func):
     if bias_bull and last_h1["rsi"] >= p["rsi_h1_buy_max"]: return None
     if not bias_bull and last_h1["rsi"] <= p["rsi_h1_sell_min"]: return None
 
-    # M15
     last_m15 = df_m15.iloc[-2]
     if bias_bull and last_m15["ema12"] > last_m15["ema26"]: score += 0.10
     elif not bias_bull and last_m15["ema12"] < last_m15["ema26"]: score += 0.10
@@ -398,13 +457,11 @@ def analyze_signal(symbol, fetch_func):
     if bias_bull and last_m15["rsi"] < 65: score += 0.05
     elif not bias_bull and last_m15["rsi"] > 35: score += 0.05
 
-    # Konfirmasi candlestick (jika diwajibkan)
     if p["require_confirmation"]:
         if bias_bull and not has_bullish_confirmation(df_m15): return None
         if not bias_bull and not has_bearish_confirmation(df_m15): return None
-        score += 0.05  # bonus jika ada konfirmasi
+        score += 0.05
 
-    # M5
     last_m5 = df_m5.iloc[-2]
     if bias_bull and last_m5["close"] > last_m5["ema12"]: score += 0.05
     elif not bias_bull and last_m5["close"] < last_m5["ema12"]: score += 0.05
@@ -435,7 +492,7 @@ def analyze_signal(symbol, fetch_func):
         "rr": round(abs(tp - final_entry) / abs(final_entry - sl), 2) if abs(final_entry - sl) > 0 else 0
     }
 
-# ========== LOOP UTAMA (tidak berubah) ==========
+# ========== LOOP UTAMA ==========
 banned = {}
 
 def main_loop():
