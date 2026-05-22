@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-SIGNAL BROADCASTER – High Winrate Entry Logic
-- Entry dari level teknikal + konfirmasi candlestick
-- SL diperkuat multi-level
-- Agresi adjustable (level -3 lebih berani, level 0 normal)
+SIGNAL BROADCASTER – Two‑Level Aggression (0 = Perfect, -1 = High Frequency)
+Logika entry/TP/SL dari level teknikal terbaik.
 """
 
 import time
@@ -23,88 +21,75 @@ SCAN_INTERVAL = 60
 TOP_COINS = 50
 # =================================================
 
-# ---------- ADJUSTABLE AGGRESSION ----------
+# ---------- AGGRESSION (hanya 0 dan -1) ----------
 AGGRESSION_LEVEL = 0
 LEVEL_LOCK = threading.Lock()
 
 def get_aggression_params():
     with LEVEL_LOCK:
         lvl = AGGRESSION_LEVEL
-    p = {
-        "min_confidence": 70,
-        "min_rr": 1.8,
-        "volume_mult": 1.5,
-        "tp_distance_atr": 2.0,
-        "rsi_h1_buy_max": 60,
-        "rsi_h1_sell_min": 40,
-        "rsi_m15_buy_max": 65,
-        "rsi_m15_sell_min": 35,
-        "require_h4_structure": True,
-        "require_h1_structure": True,
-        "sweep_mode": "m15",
-        "entry_shift_pips": 0,
-        "require_confirmation": True,
-    }
-    if lvl > 0:
-        p["min_confidence"] += 5 * lvl
-        p["min_rr"] += 0.2 * lvl
-        p["volume_mult"] += 0.5 * lvl
-        p["tp_distance_atr"] += 0.5 * lvl
-        p["rsi_h1_buy_max"] -= 5 * lvl
-        p["rsi_h1_sell_min"] += 5 * lvl
-        p["rsi_m15_buy_max"] -= 5 * lvl
-        p["rsi_m15_sell_min"] += 5 * lvl
-    elif lvl < 0:
-        p["min_confidence"] += 5 * lvl
-        p["min_rr"] += 0.2 * lvl
-        p["volume_mult"] += 0.3 * lvl
-        p["tp_distance_atr"] += 0.5 * lvl
-        p["rsi_h1_buy_max"] -= 5 * lvl
-        p["rsi_h1_sell_min"] += 5 * lvl
-        p["rsi_m15_buy_max"] -= 5 * lvl
-        p["rsi_m15_sell_min"] += 5 * lvl
-        if lvl <= -2:
-            p["entry_shift_pips"] = 4
-            p["require_h4_structure"] = False
-            p["require_h1_structure"] = False
-            p["sweep_mode"] = "any"
-            p["require_confirmation"] = False
-        elif lvl == -1:
-            p["entry_shift_pips"] = 2
-            p["require_h4_structure"] = True
-            p["require_h1_structure"] = False
-            p["sweep_mode"] = "any"
-            p["require_confirmation"] = False
-    # Batas aman
-    p["min_confidence"] = max(50, min(85, p["min_confidence"]))
-    p["min_rr"] = max(1.2, min(2.5, p["min_rr"]))
-    p["volume_mult"] = max(0.0, min(3.0, p["volume_mult"]))
-    p["tp_distance_atr"] = max(0.0, min(4.0, p["tp_distance_atr"]))
-    p["rsi_h1_buy_max"] = max(60, min(100, p["rsi_h1_buy_max"]))
-    p["rsi_h1_sell_min"] = max(0, min(40, p["rsi_h1_sell_min"]))
-    p["rsi_m15_buy_max"] = max(65, min(100, p["rsi_m15_buy_max"]))
-    p["rsi_m15_sell_min"] = max(0, min(35, p["rsi_m15_sell_min"]))
-    return p
+
+    # Level 0: sempurna
+    if lvl == 0:
+        return {
+            "min_confidence": 75,
+            "min_rr": 2.0,
+            "volume_mult": 2.0,
+            "tp_distance_atr": 2.5,
+            "rsi_h1_buy_max": 50,
+            "rsi_h1_sell_min": 50,
+            "rsi_m15_buy_max": 60,
+            "rsi_m15_sell_min": 40,
+            "require_h4_structure": True,
+            "require_h1_structure": True,
+            "sweep_mode": "m15",
+            "entry_shift_pips": 0,
+            "require_confirmation": True,
+        }
+    # Level -1: longgar, frekuensi tinggi
+    else:
+        return {
+            "min_confidence": 60,
+            "min_rr": 1.5,
+            "volume_mult": 1.0,
+            "tp_distance_atr": 1.5,
+            "rsi_h1_buy_max": 65,
+            "rsi_h1_sell_min": 35,
+            "rsi_m15_buy_max": 70,
+            "rsi_m15_sell_min": 30,
+            "require_h4_structure": False,
+            "require_h1_structure": False,
+            "sweep_mode": "any",
+            "entry_shift_pips": 2,
+            "require_confirmation": False,
+        }
 
 def set_aggression(direction):
     global AGGRESSION_LEVEL
     with LEVEL_LOCK:
         old = AGGRESSION_LEVEL
-        if direction == "up": AGGRESSION_LEVEL = min(2, AGGRESSION_LEVEL + 1)
-        else: AGGRESSION_LEVEL = max(-3, AGGRESSION_LEVEL - 1)
+        if direction == "up":
+            AGGRESSION_LEVEL = 0
+        else:  # down
+            AGGRESSION_LEVEL = -1
         new = AGGRESSION_LEVEL
     if old != new:
         p = get_aggression_params()
-        send_telegram(f"🔧 Level {old} → {new}\nConf: {p['min_confidence']}% | RR: 1:{p['min_rr']} | Vol: {p['volume_mult']}x | Confirm: {p['require_confirmation']}")
+        send_telegram(
+            f"🔧 Level berubah ke {new}\n"
+            f"Conf: {p['min_confidence']}% | RR: 1:{p['min_rr']} | Vol: {p['volume_mult']}x\n"
+            f"TP dist: {p['tp_distance_atr']}xATR | Confirm: {p['require_confirmation']}"
+        )
     else:
-        send_telegram(f"ℹ️ Level sudah di batas ({new}).")
+        send_telegram(f"ℹ️ Sudah di level {new}.")
 
 # ---------- TELEGRAM ----------
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
-    except: pass
+    except:
+        pass
 
 def telegram_polling():
     offset = None
@@ -114,23 +99,34 @@ def telegram_polling():
             params = {"timeout": 30, "offset": offset}
             resp = requests.get(url, params=params, timeout=35)
             data = resp.json()
-            if not data.get("ok"): continue
+            if not data.get("ok"):
+                time.sleep(5)
+                continue
             for update in data["result"]:
                 offset = update["update_id"] + 1
                 msg = update.get("message")
-                if not msg: continue
+                if not msg:
+                    continue
                 text = msg.get("text", "")
-                if str(msg["chat"]["id"]) != CHAT_ID: continue
-                if text == "/up": set_aggression("up")
-                elif text == "/down": set_aggression("down")
+                if str(msg["chat"]["id"]) != CHAT_ID:
+                    continue
+                if text == "/up":
+                    set_aggression("up")
+                elif text == "/down":
+                    set_aggression("down")
                 elif text == "/status":
                     p = get_aggression_params()
-                    send_telegram(f"📊 Level {AGGRESSION_LEVEL}\nConf: {p['min_confidence']}% | RR: 1:{p['min_rr']} | Confirm: {p['require_confirmation']}")
+                    send_telegram(
+                        f"📊 Level {AGGRESSION_LEVEL}\n"
+                        f"Conf: {p['min_confidence']}% | RR: 1:{p['min_rr']} | Vol: {p['volume_mult']}x\n"
+                        f"TP dist: {p['tp_distance_atr']}xATR | Confirm: {p['require_confirmation']}"
+                    )
             time.sleep(1)
         except Exception as e:
-            print(f"Polling error: {e}"); time.sleep(5)
+            print(f"Polling error: {e}")
+            time.sleep(5)
 
-# ========== BINANCE FUNCTIONS ==========
+# ========== BINANCE / BYBIT FUNCTIONS ==========
 def get_coins_binance(limit=50, max_price=100.0):
     try:
         url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
@@ -163,7 +159,6 @@ def fetch_klines_binance(symbol, interval, limit=200):
         return df[["open","high","low","close","volume"]]
     except: return None
 
-# ========== BYBIT FUNCTIONS ==========
 INTERVAL_MAP = {"1d":"D","4h":"240","1h":"60","15m":"15","5m":"5"}
 
 def get_coins_bybit(limit=50, max_price=100.0):
@@ -258,7 +253,6 @@ def detect_liquidity_sweep(df, direction):
                     return True, df["high"].iloc[i]
     return False, None
 
-# ---------- KONFIRMASI CANDLESTICK ----------
 def has_bullish_confirmation(df):
     last = df.iloc[-2]
     prev = df.iloc[-3]
@@ -285,7 +279,6 @@ def has_bearish_confirmation(df):
         return True
     return False
 
-# ---------- ENTRY/TP/SL DARI LEVEL TEKNIKAL (DIPERBAIKI) ----------
 def get_levels(df):
     highs, lows = df["high"], df["low"]
     sh, sl = [], []
@@ -297,7 +290,6 @@ def get_levels(df):
 def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr, p):
     supports_h1, resistances_h1 = get_levels(df_h1)
     supports_m15, resistances_m15 = get_levels(df_m15)
-
     all_supports = sorted(supports_h1 + supports_m15, reverse=True)
     all_resistances = sorted(resistances_h1 + resistances_m15)
 
@@ -310,10 +302,7 @@ def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr,
             if sup < entry_raw:
                 nearest_support = sup
                 break
-        if nearest_support is not None:
-            final_entry = round(nearest_support + atr * 0.2 + shift, 6)
-        else:
-            final_entry = entry_raw + shift
+        final_entry = round(nearest_support + atr * 0.2 + shift, 6) if nearest_support else entry_raw + shift
 
         sl_candidates = []
         if sweep_level and sweep_level < final_entry:
@@ -351,10 +340,7 @@ def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr,
             if res > entry_raw:
                 nearest_resistance = res
                 break
-        if nearest_resistance is not None:
-            final_entry = round(nearest_resistance - atr * 0.2 - shift, 6)
-        else:
-            final_entry = entry_raw - shift
+        final_entry = round(nearest_resistance - atr * 0.2 - shift, 6) if nearest_resistance else entry_raw - shift
 
         sl_candidates = []
         if sweep_level and sweep_level > final_entry:
@@ -396,7 +382,6 @@ def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr,
 
     return final_entry, tp, sl
 
-# ========== ANALISA SINYAL (DENGAN PERBAIKAN) ==========
 def analyze_signal(symbol, fetch_func):
     p = get_aggression_params()
 
@@ -572,9 +557,9 @@ def run_flask(): app.run(host="0.0.0.0", port=8080)
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  HIGH WINRATE SIGNAL BROADCASTER")
+    print("  TWO-LEVEL SIGNAL BROADCASTER")
     print("=" * 60)
-    send_telegram("🚀 <b>Bot High Winrate siap!</b> /up /down /status")
+    send_telegram("🚀 <b>Bot Sinyal Sempurna siap!</b>\nLevel 0 (sempurna) | /down ke -1 (frekuensi tinggi) | /up kembali ke 0")
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=telegram_polling, daemon=True).start()
     main_loop()
