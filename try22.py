@@ -33,17 +33,17 @@ def get_aggression_params():
 
     p = {
         "min_confidence": 70,
-        "min_rr": 1.8,                # Batas minimal RR
+        "min_rr": 1.8,
         "volume_mult": 1.5,
-        "tp_distance_atr": 2.0,      # Jarak minimal entry ke TP (0 = nonaktif)
+        "tp_distance_atr": 2.0,
         "rsi_h1_buy_max": 60,
         "rsi_h1_sell_min": 40,
         "rsi_m15_buy_max": 65,
         "rsi_m15_sell_min": 35,
         "require_h4_structure": True,
         "require_h1_structure": True,
-        "sweep_mode": "m15",         # "m15" atau "any"
-        "entry_shift_pips": 0,       # Berapa pips menggeser entry (BUY naik, SELL turun)
+        "sweep_mode": "m15",
+        "entry_shift_pips": 0,
     }
 
     if lvl > 0:
@@ -65,7 +65,6 @@ def get_aggression_params():
         p["rsi_m15_buy_max"] -= 5 * lvl
         p["rsi_m15_sell_min"] += 5 * lvl
 
-        # Level -2 ke bawah: entry lebih berani
         if lvl <= -2:
             p["entry_shift_pips"] = 4
             p["require_h4_structure"] = False
@@ -77,7 +76,6 @@ def get_aggression_params():
             p["require_h1_structure"] = False
             p["sweep_mode"] = "any"
 
-    # Batas aman
     p["min_confidence"] = max(50, min(85, p["min_confidence"]))
     p["min_rr"] = max(1.2, min(2.5, p["min_rr"]))
     p["volume_mult"] = max(0.0, min(3.0, p["volume_mult"]))
@@ -92,16 +90,29 @@ def set_aggression(direction):
     global AGGRESSION_LEVEL
     with LEVEL_LOCK:
         old = AGGRESSION_LEVEL
-        if direction == "up": AGGRESSION_LEVEL = min(2, AGGRESSION_LEVEL + 1)
-        else: AGGRESSION_LEVEL = max(-3, AGGRESSION_LEVEL - 1)
+        if direction == "up":
+            AGGRESSION_LEVEL = min(2, AGGRESSION_LEVEL + 1)
+        else:
+            AGGRESSION_LEVEL = max(-3, AGGRESSION_LEVEL - 1)
         new = AGGRESSION_LEVEL
     if old != new:
         p = get_aggression_params()
-        send_telegram(f"🔧 Level {old} → {new}\nConf: {p['min_confidence']}% | RR min: 1:{p['min_rr']} | Vol: {p['volume_mult']}x\nTP dist: {p['tp_distance_atr']}xATR | Entry shift: {p['entry_shift_pips']} pips")
+        send_telegram(
+            f"🔧 Level {old} → {new}\n"
+            f"Conf: {p['min_confidence']}% | RR min: 1:{p['min_rr']} | Vol: {p['volume_mult']}x\n"
+            f"TP dist: {p['tp_distance_atr']}xATR | Entry shift: {p['entry_shift_pips']} pips"
+        )
     else:
         send_telegram(f"ℹ️ Level sudah di batas ({new}).")
 
 # ---------- TELEGRAM ----------
+def send_telegram(msg):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
+    except:
+        pass
+
 def telegram_polling():
     offset = None
     while True:
@@ -110,109 +121,252 @@ def telegram_polling():
             params = {"timeout": 30, "offset": offset}
             resp = requests.get(url, params=params, timeout=35)
             data = resp.json()
-            if not data.get("ok"): continue
+            if not data.get("ok"):
+                time.sleep(5)
+                continue
             for update in data["result"]:
                 offset = update["update_id"] + 1
                 msg = update.get("message")
-                if not msg: continue
+                if not msg:
+                    continue
                 text = msg.get("text", "")
-                if str(msg["chat"]["id"]) != CHAT_ID: continue
-                if text == "/up": set_aggression("up")
-                elif text == "/down": set_aggression("down")
+                if str(msg["chat"]["id"]) != CHAT_ID:
+                    continue
+                if text == "/up":
+                    set_aggression("up")
+                elif text == "/down":
+                    set_aggression("down")
                 elif text == "/status":
                     p = get_aggression_params()
-                    send_telegram(f"📊 Level {AGGRESSION_LEVEL}\nConf: {p['min_confidence']}% | RR: 1:{p['min_rr']} | Vol: {p['volume_mult']}x\nTP dist: {p['tp_distance_atr']}xATR | Entry shift: {p['entry_shift_pips']}pips")
+                    send_telegram(
+                        f"📊 Level {AGGRESSION_LEVEL}\n"
+                        f"Conf: {p['min_confidence']}% | RR: 1:{p['min_rr']} | Vol: {p['volume_mult']}x\n"
+                        f"TP dist: {p['tp_distance_atr']}xATR | Entry shift: {p['entry_shift_pips']}pips"
+                    )
             time.sleep(1)
         except Exception as e:
-            print(f"Polling error: {e}"); time.sleep(5)
+            print(f"Polling error: {e}")
+            time.sleep(5)
 
-def send_telegram(msg):
+# ========== BINANCE FUNCTIONS ==========
+def get_coins_binance(limit=50, max_price=100.0):
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
-    except: pass
+        url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        data = requests.get(url, timeout=15).json()
+        if not isinstance(data, list):
+            return None
+        tickers = [t for t in data if t["symbol"].endswith("USDT")]
+        tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
+        res = []
+        for t in tickers:
+            if float(t["lastPrice"]) <= max_price:
+                res.append(t["symbol"])
+            if len(res) >= limit:
+                break
+        return res if res else None
+    except Exception as e:
+        print(f"  ⚠️ Binance get_coins error: {e}")
+        return None
 
-# ========== BINANCE / BYBIT FUNCTIONS (persis sama seperti sebelumnya) ==========
-# ... (sama persis dengan kode terakhir, tidak diubah) ...
-# Karena panjang, saya hanya mencantumkan placeholder. Asumsikan fungsi-fungsi fetch dan get_coins sudah ada.
-# (Untuk menghemat tempat, gunakan kode yang sudah ada sebelumnya.)
+def fetch_klines_binance(symbol, interval, limit=200):
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    try:
+        resp = requests.get(url, timeout=15)
+        data = resp.json()
+        if isinstance(data, dict) and "code" in data:
+            return None
+        df = pd.DataFrame(data, columns=[
+            "timestamp", "open", "high", "low", "close", "volume",
+            "close_time", "quote_volume", "trades",
+            "taker_buy_base", "taker_buy_quote", "ignore"
+        ])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        for c in ["open", "high", "low", "close", "volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df.set_index("timestamp", inplace=True)
+        return df[["open", "high", "low", "close", "volume"]]
+    except Exception as e:
+        print(f"  ⚠️ Binance fetch_klines error: {e}")
+        return None
 
-# ========== FUNGSI BARU: MENENTUKAN ENTRY, TP, SL DARI LEVEL TEKNIKAL ==========
+# ========== BYBIT FUNCTIONS ==========
+INTERVAL_MAP = {"1d": "D", "4h": "240", "1h": "60", "15m": "15", "5m": "5"}
+
+def get_coins_bybit(limit=50, max_price=100.0):
+    try:
+        url = "https://api.bybit.com/v5/market/tickers?category=linear"
+        data = requests.get(url, timeout=15).json()
+        if data.get("retCode") != 0:
+            return None
+        tickers = data["result"]["list"]
+        filtered = []
+        for t in tickers:
+            if t["symbol"].endswith("USDT"):
+                try:
+                    if float(t["lastPrice"]) <= max_price:
+                        filtered.append(t)
+                except:
+                    pass
+        filtered.sort(key=lambda x: float(x.get("turnover24h", 0)), reverse=True)
+        return [t["symbol"] for t in filtered[:limit]]
+    except Exception as e:
+        print(f"  ⚠️ Bybit get_coins error: {e}")
+        return None
+
+def fetch_klines_bybit(symbol, interval, limit=200):
+    bybit_interval = INTERVAL_MAP.get(interval, "60")
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={bybit_interval}&limit={limit}"
+    try:
+        data = requests.get(url, timeout=15).json()
+        if data.get("retCode") != 0:
+            return None
+        rows = data["result"]["list"]
+        if not rows:
+            return None
+        rows = rows[::-1]
+        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(int), unit="ms")
+        for c in ["open", "high", "low", "close", "volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df.set_index("timestamp", inplace=True)
+        return df[["open", "high", "low", "close", "volume"]]
+    except Exception as e:
+        print(f"  ⚠️ Bybit fetch_klines error: {e}")
+        return None
+
+FALLBACK_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT",
+    "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT",
+    "ETCUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "TIAUSDT", "SUIUSDT", "SEIUSDT",
+    "NEARUSDT", "APTUSDT", "RNDRUSDT", "FETUSDT", "AGIXUSDT", "OCEANUSDT", "GRTUSDT",
+    "THETAUSDT", "SANDUSDT", "MANAUSDT", "GALAUSDT", "AXSUSDT", "CHZUSDT", "FLOWUSDT",
+    "EGLDUSDT", "QNTUSDT", "SNXUSDT", "CRVUSDT", "COMPUSDT", "AAVEUSDT", "MKRUSDT",
+    "RUNEUSDT", "LDOUSDT", "FXSUSDT", "1INCHUSDT", "ZRXUSDT", "BATUSDT", "ENJUSDT", "ANKRUSDT"
+]
+
+# ========== INDIKATOR & SMC TOOLS ==========
+def add_all_indicators(df):
+    if len(df) < 80:
+        return None
+    df["ema12"] = df["close"].ewm(span=12).mean()
+    df["ema26"] = df["close"].ewm(span=26).mean()
+    df["ema50"] = df["close"].ewm(span=50).mean()
+    df["ema200"] = df["close"].ewm(span=200).mean() if len(df) >= 200 else df["ema50"]
+    df["tr"] = np.maximum(df["high"] - df["low"],
+                          np.maximum(abs(df["high"] - df["close"].shift()),
+                                     abs(df["low"] - df["close"].shift())))
+    df["atr"] = df["tr"].rolling(14).mean()
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss
+    df["rsi"] = 100 - (100 / (1 + rs))
+    df["vol_avg20"] = df["volume"].rolling(20).mean()
+    return df
+
+def market_structure(df, window=3):
+    if len(df) < window*2+2:
+        return "ranging"
+    highs, lows = df["high"], df["low"]
+    sh, sl = [], []
+    for i in range(window, len(df)-window):
+        if highs.iloc[i] == highs.iloc[i-window:i+window+1].max():
+            sh.append(highs.iloc[i])
+        if lows.iloc[i] == lows.iloc[i-window:i+window+1].min():
+            sl.append(lows.iloc[i])
+    if len(sh) < 2 or len(sl) < 2:
+        return "ranging"
+    hh = sh[-1] > sh[-2]
+    hl = sl[-1] > sl[-2]
+    lh = sh[-1] < sh[-2]
+    ll = sl[-1] < sl[-2]
+    if hh and hl:
+        return "bullish"
+    if lh and ll:
+        return "bearish"
+    return "ranging"
+
+def detect_liquidity_sweep(df, direction):
+    last = df.iloc[-2]
+    if direction == "buy":
+        for i in range(len(df)-5, 3, -1):
+            if df["low"].iloc[i] == df["low"].iloc[i-3:i+4].min():
+                if last["low"] < df["low"].iloc[i] and last["close"] > df["low"].iloc[i]:
+                    return True, df["low"].iloc[i]
+    else:
+        for i in range(len(df)-5, 3, -1):
+            if df["high"].iloc[i] == df["high"].iloc[i-3:i+4].max():
+                if last["high"] > df["high"].iloc[i] and last["close"] < df["high"].iloc[i]:
+                    return True, df["high"].iloc[i]
+    return False, None
+
+# ---------- MENENTUKAN ENTRY/TP/SL DARI LEVEL TEKNIKAL ----------
+def get_levels(df):
+    highs = df["high"]
+    lows = df["low"]
+    swing_highs = []
+    swing_lows = []
+    for i in range(2, len(df)-2):
+        if highs.iloc[i] == highs.iloc[i-2:i+3].max():
+            swing_highs.append(highs.iloc[i])
+        if lows.iloc[i] == lows.iloc[i-2:i+3].min():
+            swing_lows.append(lows.iloc[i])
+    return sorted(swing_lows, reverse=True), sorted(swing_highs)
+
 def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr, p):
-    """
-    Mengembalikan (final_entry, final_tp, final_sl) berdasarkan:
-    - Support/resistance H1 & M15
-    - EMA (200, 50)
-    - Liquidity sweep level
-    - Agresi (entry shift)
-    """
-    # Dapatkan level support/resistance dari swing points
-    def get_levels(df):
-        highs = df["high"]; lows = df["low"]
-        swing_highs = []; swing_lows = []
-        for i in range(2, len(df)-2):
-            if highs.iloc[i] == highs.iloc[i-2:i+3].max(): swing_highs.append(highs.iloc[i])
-            if lows.iloc[i] == lows.iloc[i-2:i+3].min(): swing_lows.append(lows.iloc[i])
-        return sorted(swing_lows, reverse=True), sorted(swing_highs)
-
     supports_h1, resistances_h1 = get_levels(df_h1)
     supports_m15, resistances_m15 = get_levels(df_m15)
 
-    # Gabungkan dan urutkan (prioritas H1 lebih tinggi, tapi M15 juga dipakai)
     all_supports = sorted(supports_h1 + supports_m15, reverse=True)
     all_resistances = sorted(resistances_h1 + resistances_m15)
 
     current_price = entry_raw
-    shift = p["entry_shift_pips"] * 0.0001  # pips ke desimal (1 pip ≈ 0.0001 untuk kebanyakan pair)
-    # Untuk koin dengan harga kecil (< 1), 1 pip mungkin 0.0001 atau 0.001, kita sesuaikan nanti.
+    # Interpretasi pips: untuk koin < $1, 1 pip = 0.0001; untuk > $1, 1 pip = 0.01. Kita gunakan persentase.
+    shift_pct = p["entry_shift_pips"] * 0.0001  # 1 pip ≈ 0.0001 untuk koin > $1, tapi akan kita kalikan dengan harga
+    shift = shift_pct * current_price
 
-    # Tentukan entry
     if bias_bull:
-        # Entry dinaikkan sedikit (lebih berani)
-        final_entry = round(current_price + shift * current_price, 6) if shift > 0 else current_price
-        # Cari support terkuat untuk SL
-        # SL harus di bawah liquidity sweep level (jika ada), atau di bawah support terdekat
+        final_entry = round(current_price + shift, 6) if p["entry_shift_pips"] > 0 else current_price
+
+        # SL: di bawah sweep level (jika ada) atau support terdekat
         sl_candidates = []
-        # 1. Gunakan sweep_level jika tersedia dan di bawah entry
         if sweep_level is not None and sweep_level < final_entry:
             sl_candidates.append(sweep_level - atr * 0.3)
-        # 2. Support dari H1/M15 yang di bawah final_entry
         for sup in all_supports:
             if sup < final_entry:
                 sl_candidates.append(sup - atr * 0.3)
                 break
-        # Jika tidak ada, fallback ke ATR
         if not sl_candidates:
             sl_candidates.append(final_entry - atr * 1.2)
-        sl = round(min(sl_candidates), 6)  # SL terendah (terjauh dari entry)
+        sl = round(min(sl_candidates), 6)
 
-        # Cari TP dari resistance
-        tp_candidates = []
+        # TP: resistance terdekat di atas entry
+        tp = None
         for res in all_resistances:
             if res > final_entry:
-                tp_candidates.append(res)
-        if tp_candidates:
-            # Ambil resistance terdekat
-            tp = round(tp_candidates[0] * 0.999, 6)  # kurangi sedikit
-        else:
-            # Fallback: gunakan EMA 200 atau 1.5x ATR
-            tp = round(final_entry + atr * 1.5, 6)
+                tp = round(res * 0.999, 6)
+                break
+        if tp is None:
+            tp = round(final_entry + atr * 2.0, 6)
 
-        # Cek RR minimal
+        # Jika RR kurang dari minimal, coba resistance berikutnya
         risk = final_entry - sl
         reward = tp - final_entry
         if reward / risk < p["min_rr"]:
-            # Cari resistance berikutnya
-            if len(tp_candidates) > 1:
-                tp = round(tp_candidates[1] * 0.999, 6)
-                reward = tp - final_entry
-            # Jika masih kurang, terpaksa abaikan RR (biarkan sinyal tetap muncul dengan RR rendah)
-            # Tapi user bilang jangan paksa TP dari RR, jadi kita tetap ambil TP teknikal itu.
-            # Kita hanya akan menambahkan peringatan di Telegram nanti (di luar fungsi ini).
+            # Cari resistance kedua
+            found = False
+            for i, res in enumerate(all_resistances):
+                if res > final_entry and i > 0:  # bukan yang pertama
+                    tp = round(res * 0.999, 6)
+                    reward = tp - final_entry
+                    if reward / risk >= p["min_rr"]:
+                        found = True
+                        break
+            # Jika masih kurang, tetap pakai tp yang sudah ada (tidak dipaksa dari RR)
 
     else:  # SELL
-        final_entry = round(current_price - shift * current_price, 6) if shift > 0 else current_price
-        # Cari resistance terdekat untuk SL
+        final_entry = round(current_price - shift, 6) if p["entry_shift_pips"] > 0 else current_price
+
         sl_candidates = []
         if sweep_level is not None and sweep_level > final_entry:
             sl_candidates.append(sweep_level + atr * 0.3)
@@ -224,30 +378,39 @@ def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr,
             sl_candidates.append(final_entry + atr * 1.2)
         sl = round(max(sl_candidates), 6)
 
-        tp_candidates = []
+        tp = None
         for sup in all_supports:
             if sup < final_entry:
-                tp_candidates.append(sup)
-        if tp_candidates:
-            tp = round(tp_candidates[0] * 1.001, 6)
-        else:
-            tp = round(final_entry - atr * 1.5, 6)
+                tp = round(sup * 1.001, 6)
+                break
+        if tp is None:
+            tp = round(final_entry - atr * 2.0, 6)
 
         risk = sl - final_entry
         reward = final_entry - tp
         if reward / risk < p["min_rr"]:
-            if len(tp_candidates) > 1:
-                tp = round(tp_candidates[1] * 1.001, 6)
+            found = False
+            for i, sup in enumerate(all_supports):
+                if sup < final_entry and i > 0:
+                    tp = round(sup * 1.001, 6)
+                    reward = final_entry - tp
+                    if reward / risk >= p["min_rr"]:
+                        found = True
+                        break
 
-    # Pastikan TP dan SL masuk akal
-    if tp <= final_entry and bias_bull: tp = round(final_entry + atr * 0.5, 6)
-    if tp >= final_entry and not bias_bull: tp = round(final_entry - atr * 0.5, 6)
-    if sl >= final_entry and bias_bull: sl = round(final_entry - atr * 1.0, 6)
-    if sl <= final_entry and not bias_bull: sl = round(final_entry + atr * 1.0, 6)
+    # Safety: pastikan TP > entry (BUY) atau TP < entry (SELL)
+    if bias_bull and tp <= final_entry:
+        tp = round(final_entry + atr * 0.5, 6)
+    if not bias_bull and tp >= final_entry:
+        tp = round(final_entry - atr * 0.5, 6)
+    if bias_bull and sl >= final_entry:
+        sl = round(final_entry - atr * 1.0, 6)
+    if not bias_bull and sl <= final_entry:
+        sl = round(final_entry + atr * 1.0, 6)
 
     return final_entry, tp, sl
 
-# ========== ANALISA SINYAL (DENGAN ENTRY/TP/SL BARU) ==========
+# ========== ANALISA SINYAL ==========
 def analyze_signal(symbol, fetch_func):
     p = get_aggression_params()
 
@@ -256,85 +419,113 @@ def analyze_signal(symbol, fetch_func):
     df_h1 = fetch_func(symbol, "1h", 150)
     df_m15 = fetch_func(symbol, "15m", 150)
     df_m5 = fetch_func(symbol, "5m", 150)
-    if any(d is None for d in [df_d1, df_h4, df_h1, df_m15, df_m5]): return None
+    if any(d is None for d in [df_d1, df_h4, df_h1, df_m15, df_m5]):
+        return None
 
     df_d1 = add_all_indicators(df_d1)
     df_h4 = add_all_indicators(df_h4)
     df_h1 = add_all_indicators(df_h1)
     df_m15 = add_all_indicators(df_m15)
     df_m5 = add_all_indicators(df_m5)
-    if any(d is None for d in [df_d1, df_h4, df_h1, df_m15, df_m5]): return None
+    if any(d is None for d in [df_d1, df_h4, df_h1, df_m15, df_m5]):
+        return None
 
-    # D1 wajib trending
     struct_d1 = market_structure(df_d1, 5)
-    if struct_d1 == "ranging": return None
+    if struct_d1 == "ranging":
+        return None
     bias_bull = struct_d1 == "bullish"
     direction = "BUY" if bias_bull else "SELL"
     score = 0
 
     last_d1 = df_d1.iloc[-1]
-    if bias_bull and last_d1["close"] > last_d1["ema50"]: score += 0.15
-    elif not bias_bull and last_d1["close"] < last_d1["ema50"]: score += 0.15
+    if bias_bull and last_d1["close"] > last_d1["ema50"]:
+        score += 0.15
+    elif not bias_bull and last_d1["close"] < last_d1["ema50"]:
+        score += 0.15
 
-    if bias_bull and 40 < last_d1["rsi"] < 70: score += 0.05
-    elif not bias_bull and 30 < last_d1["rsi"] < 60: score += 0.05
+    if bias_bull and 40 < last_d1["rsi"] < 70:
+        score += 0.05
+    elif not bias_bull and 30 < last_d1["rsi"] < 60:
+        score += 0.05
 
-    # H4
     struct_h4 = market_structure(df_h4, 3)
-    if p["require_h4_structure"] and struct_h4 != struct_d1: return None
-    if struct_h4 == struct_d1: score += 0.10
+    if p["require_h4_structure"] and struct_h4 != struct_d1:
+        return None
+    if struct_h4 == struct_d1:
+        score += 0.10
+
     sweep_h4, _ = detect_liquidity_sweep(df_h4, "buy" if bias_bull else "sell")
-    if sweep_h4: score += 0.10
+    if sweep_h4:
+        score += 0.10
 
-    # H1
     struct_h1 = market_structure(df_h1, 2)
-    if p["require_h1_structure"] and struct_h1 != struct_d1: return None
-    if struct_h1 == struct_d1: score += 0.10
-    last_h1 = df_h1.iloc[-2]
-    if p["volume_mult"] > 0 and last_h1["volume"] <= p["volume_mult"] * last_h1["vol_avg20"]: return None
-    if last_h1["volume"] > last_h1["vol_avg20"]: score += 0.05
-    if bias_bull and last_h1["rsi"] >= p["rsi_h1_buy_max"]: return None
-    if not bias_bull and last_h1["rsi"] <= p["rsi_h1_sell_min"]: return None
+    if p["require_h1_structure"] and struct_h1 != struct_d1:
+        return None
+    if struct_h1 == struct_d1:
+        score += 0.10
 
-    # M15
+    last_h1 = df_h1.iloc[-2]
+    if p["volume_mult"] > 0 and last_h1["volume"] <= p["volume_mult"] * last_h1["vol_avg20"]:
+        return None
+    if last_h1["volume"] > last_h1["vol_avg20"]:
+        score += 0.05
+
+    if bias_bull and last_h1["rsi"] >= p["rsi_h1_buy_max"]:
+        return None
+    if not bias_bull and last_h1["rsi"] <= p["rsi_h1_sell_min"]:
+        return None
+
     last_m15 = df_m15.iloc[-2]
-    if bias_bull and last_m15["ema12"] > last_m15["ema26"]: score += 0.10
-    elif not bias_bull and last_m15["ema12"] < last_m15["ema26"]: score += 0.10
-    else: return None
+    if bias_bull and last_m15["ema12"] > last_m15["ema26"]:
+        score += 0.10
+    elif not bias_bull and last_m15["ema12"] < last_m15["ema26"]:
+        score += 0.10
+    else:
+        return None
 
     sweep_m15, sweep_level = detect_liquidity_sweep(df_m15, "buy" if bias_bull else "sell")
-    if p["sweep_mode"] == "m15" and not sweep_m15: return None
-    if p["sweep_mode"] == "any" and not (sweep_m15 or sweep_h4): return None
-    if sweep_m15: score += 0.15
-    elif sweep_h4: score += 0.10
+    if p["sweep_mode"] == "m15" and not sweep_m15:
+        return None
+    if p["sweep_mode"] == "any" and not (sweep_m15 or sweep_h4):
+        return None
+    if sweep_m15:
+        score += 0.15
+    elif sweep_h4:
+        score += 0.10
 
-    if bias_bull and last_m15["rsi"] >= p["rsi_m15_buy_max"]: return None
-    if not bias_bull and last_m15["rsi"] <= p["rsi_m15_sell_min"]: return None
-    if bias_bull and last_m15["rsi"] < 65: score += 0.05
-    elif not bias_bull and last_m15["rsi"] > 35: score += 0.05
+    if bias_bull and last_m15["rsi"] >= p["rsi_m15_buy_max"]:
+        return None
+    if not bias_bull and last_m15["rsi"] <= p["rsi_m15_sell_min"]:
+        return None
+    if bias_bull and last_m15["rsi"] < 65:
+        score += 0.05
+    elif not bias_bull and last_m15["rsi"] > 35:
+        score += 0.05
 
-    # M5 konfirmasi
     last_m5 = df_m5.iloc[-2]
-    if bias_bull and last_m5["close"] > last_m5["ema12"]: score += 0.05
-    elif not bias_bull and last_m5["close"] < last_m5["ema12"]: score += 0.05
-    else: return None
+    if bias_bull and last_m5["close"] > last_m5["ema12"]:
+        score += 0.05
+    elif not bias_bull and last_m5["close"] < last_m5["ema12"]:
+        score += 0.05
+    else:
+        return None
 
     atr = last_m15["atr"] if not np.isnan(last_m15["atr"]) else last_m15["close"] * 0.002
     entry_raw = round(last_m15["close"], 6)
 
-    # Panggil fungsi baru untuk menghitung entry, tp, sl
     final_entry, tp, sl = find_best_entry_tp_sl(
         df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr, p
     )
 
-    # Cek jarak TP (jika diatur > 0)
     if p["tp_distance_atr"] > 0:
-        if bias_bull and (tp - final_entry) < p["tp_distance_atr"] * atr: return None
-        if not bias_bull and (final_entry - tp) < p["tp_distance_atr"] * atr: return None
+        if bias_bull and (tp - final_entry) < p["tp_distance_atr"] * atr:
+            return None
+        if not bias_bull and (final_entry - tp) < p["tp_distance_atr"] * atr:
+            return None
 
-    # Confidence
     confidence = min(int(score * 100), 95)
-    if confidence < p["min_confidence"]: return None
+    if confidence < p["min_confidence"]:
+        return None
 
     return {
         "symbol": symbol,
@@ -347,15 +538,17 @@ def analyze_signal(symbol, fetch_func):
         "rr": round(abs(tp - final_entry) / abs(final_entry - sl), 2) if abs(final_entry - sl) > 0 else 0
     }
 
-# ========== LOOP UTAMA (dengan statistik fetch) ==========
+# ========== LOOP UTAMA ==========
 banned = {}
 
 def main_loop():
     global banned
     while True:
         to_del = [k for k, v in banned.items() if v <= 0]
-        for k in to_del: del banned[k]
-        for k in list(banned.keys()): banned[k] -= 1
+        for k in to_del:
+            del banned[k]
+        for k in list(banned.keys()):
+            banned[k] -= 1
 
         coins = get_coins_binance(TOP_COINS, MAX_PRICE)
         fetch_func = fetch_klines_binance
@@ -384,14 +577,15 @@ def main_loop():
         fetch_ok = 0
         fetch_fail = 0
         for sym in coins:
-            if sym in banned: continue
+            if sym in banned:
+                continue
             try:
                 sig = analyze_signal(sym, fetch_func)
                 if sig:
                     signals.append(sig)
                     fetch_ok += 1
                 else:
-                    fetch_ok += 1  # berhasil fetch meski tidak ada sinyal
+                    fetch_ok += 1
             except Exception as e:
                 fetch_fail += 1
                 print(f"  ⚠️ Error {sym}: {e}")
@@ -426,6 +620,7 @@ def main_loop():
 
 # ========== FLASK ==========
 app = Flask(__name__)
+
 @app.route('/')
 def home():
     return "Bot is alive", 200
@@ -434,9 +629,9 @@ def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
 if __name__ == "__main__":
-    print("="*60)
+    print("=" * 60)
     print("  SIGNAL BROADCASTER – Teknikal Entry/TP/SL")
-    print("="*60)
+    print("=" * 60)
     send_telegram("🚀 <b>Bot Teknikal siap!</b> /up /down /status")
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=telegram_polling, daemon=True).start()
