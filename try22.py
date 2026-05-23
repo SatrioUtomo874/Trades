@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SIGNAL BROADCASTER – Two‑Level Aggression (0 = Perfect, -1 = High Frequency)
+SIGNAL BROADCASTER – Three‑Level Aggression (0 = Perfect, -1 = High Freq, -2 = Ultra Freq)
 Logika entry/TP/SL dari level teknikal terbaik.
 """
 
@@ -21,7 +21,7 @@ SCAN_INTERVAL = 60
 TOP_COINS = 50
 # =================================================
 
-# ---------- AGGRESSION (hanya 0 dan -1) ----------
+# ---------- AGGRESSION (0, -1, -2) ----------
 AGGRESSION_LEVEL = 0
 LEVEL_LOCK = threading.Lock()
 
@@ -29,7 +29,6 @@ def get_aggression_params():
     with LEVEL_LOCK:
         lvl = AGGRESSION_LEVEL
 
-    # Level 0: sempurna
     if lvl == 0:
         return {
             "min_confidence": 75,
@@ -46,8 +45,7 @@ def get_aggression_params():
             "entry_shift_pips": 0,
             "require_confirmation": True,
         }
-    # Level -1: longgar, frekuensi tinggi
-    else:
+    elif lvl == -1:
         return {
             "min_confidence": 60,
             "min_rr": 1.5,
@@ -63,15 +61,31 @@ def get_aggression_params():
             "entry_shift_pips": 2,
             "require_confirmation": False,
         }
+    else:  # -2
+        return {
+            "min_confidence": 50,
+            "min_rr": 1.2,
+            "volume_mult": 0.5,
+            "tp_distance_atr": 1.0,
+            "rsi_h1_buy_max": 70,
+            "rsi_h1_sell_min": 30,
+            "rsi_m15_buy_max": 75,
+            "rsi_m15_sell_min": 25,
+            "require_h4_structure": False,
+            "require_h1_structure": False,
+            "sweep_mode": "any",
+            "entry_shift_pips": 4,
+            "require_confirmation": False,
+        }
 
 def set_aggression(direction):
     global AGGRESSION_LEVEL
     with LEVEL_LOCK:
         old = AGGRESSION_LEVEL
         if direction == "up":
-            AGGRESSION_LEVEL = 0
+            AGGRESSION_LEVEL = min(0, AGGRESSION_LEVEL + 1)
         else:  # down
-            AGGRESSION_LEVEL = -1
+            AGGRESSION_LEVEL = max(-2, AGGRESSION_LEVEL - 1)
         new = AGGRESSION_LEVEL
     if old != new:
         p = get_aggression_params()
@@ -557,9 +571,9 @@ def run_flask(): app.run(host="0.0.0.0", port=8080)
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  TWO-LEVEL SIGNAL BROADCASTER")
+    print("  THREE-LEVEL SIGNAL BROADCASTER")
     print("=" * 60)
-    send_telegram("🚀 <b>Bot Sinyal Sempurna siap!</b>\nLevel 0 (sempurna) | /down ke -1 (frekuensi tinggi) | /up kembali ke 0")
+    send_telegram("🚀 <b>Bot Sinyal 3-Level siap!</b>\nLevel 0 (sempurna) | /down → -1 (frekuensi) | /down → -2 (ultra) | /up untuk naik")
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=telegram_polling, daemon=True).start()
     main_loop()
