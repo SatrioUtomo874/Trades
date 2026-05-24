@@ -106,27 +106,71 @@ def telegram_polling():
 # ---------- BINANCE API (dengan anti‑banned) ----------
 def signed_request(endpoint, params=None, method="GET"):
     if params is None: params = {}
-    params["timestamp"] = int(time.time() * 1000)
+    
+    # Sinkronisasi waktu dengan Binance (ambil waktu server)
+    try:
+        server_time = requests.get("https://fapi.binance.com/fapi/v1/time", timeout=5).json()
+        binance_time = server_time["serverTime"]
+        # Hitung selisih dengan waktu lokal (hanya untuk info)
+        local_time = int(time.time() * 1000)
+        diff = abs(local_time - binance_time)
+        if diff > 5000:
+            log_activity(f"⚠️ Selisih waktu lokal & Binance: {diff}ms. Gunakan waktu Binance.")
+        # Gunakan waktu Binance + sedikit buffer
+        current_time = binance_time
+    except:
+        current_time = int(time.time() * 1000)
+    
+    params["timestamp"] = current_time
+    params["recvWindow"] = 10000  # 10 detik toleransi (lebih besar)
+    
     qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
     signature = hmac.new(SECRET_KEY.encode(), qs.encode(), hashlib.sha256).hexdigest()
     url = f"https://fapi.binance.com{endpoint}?{qs}&signature={signature}"
+
     for attempt in range(3):
         try:
-            if method == "GET": r = requests.get(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-            elif method == "POST": r = requests.post(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-            else: r = requests.delete(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-            if r.status_code == 200: return r.json()
+            if method == "GET":
+                r = requests.get(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+            elif method == "POST":
+                r = requests.post(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+            else:
+                r = requests.delete(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+
+            if r.status_code == 200:
+                return r.json()
             elif r.status_code == 418:
                 log_activity("⛔ IP dibanned! Bot berhenti 10 menit.")
-                time.sleep(600); continue
+                time.sleep(600)
+                continue
             elif r.status_code == 429:
-                time.sleep(5); continue
+                time.sleep(5)
+                continue
             else:
-                try: err = r.json(); log_activity(f"❌ API Error {r.status_code}: {err.get('msg','')}")
-                except: log_activity(f"❌ API Error {r.status_code}: {r.text}")
+                try:
+                    err = r.json()
+                    # Jika error timestamp, coba lagi dengan waktu yang baru
+                    if "Timestamp" in err.get("msg", ""):
+                        log_activity(f"⏰ Error timestamp, mencoba sinkron ulang...")
+                        time.sleep(1)
+                        # Ambil ulang waktu server
+                        try:
+                            new_time = requests.get("https://fapi.binance.com/fapi/v1/time", timeout=5).json()
+                            params["timestamp"] = new_time["serverTime"]
+                            # Update URL dengan timestamp baru
+                            qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+                            signature = hmac.new(SECRET_KEY.encode(), qs.encode(), hashlib.sha256).hexdigest()
+                            url = f"https://fapi.binance.com{endpoint}?{qs}&signature={signature}"
+                            continue  # retry
+                        except:
+                            pass
+                    log_activity(f"❌ API Error {r.status_code}: {err.get('msg','')}")
+                except:
+                    log_activity(f"❌ API Error {r.status_code}: {r.text}")
                 return None
         except Exception as e:
-            log_activity(f"⚠️ Network: {e}"); time.sleep(5)
+            log_activity(f"⚠️ Network: {e}")
+            time.sleep(5)
     return None
 
 def get_open_positions():
