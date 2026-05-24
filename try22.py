@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SIGNAL BROADCASTER + ORDER EXECUTION - FULL CODE
+SIGNAL BROADCASTER + ORDER EXECUTION - FULL CODE (FIXED)
 Bybit untuk data, Binance untuk order
 """
 
@@ -71,14 +71,14 @@ def get_coins_bybit():
                     filtered.append((sym, float(t.get("turnover24h", 0))))
             except: pass
         filtered.sort(key=lambda x: x[1], reverse=True)
-        return [x[0] for x in filtered[:settings["top_coins"]]]
+        return [x[0] for x in filtered[:int(settings["top_coins"])]]
     except: return None
 
 def get_coins():
     coins = get_coins_bybit()
     if coins: return coins
     log_activity("🔄 Fallback ke daftar koin statis...")
-    return [c for c in FALLBACK_COINS if c not in perma_banned][:settings["top_coins"]]
+    return [c for c in FALLBACK_COINS if c not in perma_banned][:int(settings["top_coins"])]
 
 # ---------- BINANCE ORDER FUNCTIONS ----------
 def binance_request(endpoint, params=None, method="GET"):
