@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-FULL AUTO TRADING BOT - Final Stable Version
+FULL AUTO TRADING BOT - Hybrid REST + WebSocket
+Stabil, real-time, anti-banned.
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
 from datetime import datetime
 from flask import Flask
+import websocket
 
 # ================== KONFIGURASI ==================
 TELEGRAM_TOKEN = "8094484109:AAF9Z3lQUxdQFqqeG6NKV9O1EC0vrxzJy0U"
@@ -20,13 +22,19 @@ settings = {
     "max_price": 100.0,
     "min_confidence": 55,
     "ban_cycles": 20,
-    "scan_interval": 3,   # jeda antar koin saat scanning
-    "top_coins": 30,      # dikurangi untuk keamanan
+    "scan_interval": 3,
+    "top_coins": 30,
 }
 
 banned = {}
 perma_banned = set()
 tracking_orders = {}
+
+# WebSocket global
+ws = None
+ws_lock = threading.Lock()
+listen_key = None
+last_listen_key_update = 0
 
 app = Flask(__name__)
 @app.route('/')
@@ -42,11 +50,10 @@ def send_telegram(msg):
 def log_activity(msg):
     send_telegram(f"📋 {msg}")
 
-# ---------- BINANCE API SUPER STABLE ----------
+# ---------- BINANCE REST API (STABLE) ----------
 def binance_request(endpoint, params=None, method="GET", auth=True):
     if params is None: params = {}
     if auth:
-        # Sinkronkan waktu dengan server Binance SEKALI di awal
         try:
             server_time = requests.get("https://fapi.binance.com/fapi/v1/time", timeout=5).json()["serverTime"]
         except:
@@ -64,7 +71,6 @@ def binance_request(endpoint, params=None, method="GET", auth=True):
     headers = {"X-MBX-APIKEY": API_KEY} if auth else {}
     for attempt in range(5):
         try:
-            # Jeda bertahap untuk menghormati Binance
             time.sleep(0.3 * (attempt + 1))
             if method == "GET": r = requests.get(url, headers=headers, timeout=15)
             elif method == "POST": r = requests.post(url, headers=headers, timeout=15)
@@ -82,7 +88,6 @@ def binance_request(endpoint, params=None, method="GET", auth=True):
                 time.sleep(wait)
                 continue
             else:
-                # Error lain, log dan lanjutkan
                 try:
                     err = r.json()
                     log_activity(f"❌ API {r.status_code}: {err.get('msg','')}")
@@ -94,9 +99,71 @@ def binance_request(endpoint, params=None, method="GET", auth=True):
             time.sleep(5)
     return None
 
+# ---------- WEBSOCKET MANAJEMEN ----------
+def get_listen_key():
+    global listen_key, last_listen_key_update
+    res = binance_request("/fapi/v1/listenKey", method="POST")
+    if res and "listenKey" in res:
+        listen_key = res["listenKey"]
+        last_listen_key_update = time.time()
+        log_activity("🔑 Listen key diperoleh.")
+        return listen_key
+    log_activity("❌ Gagal mendapatkan listen key.")
+    return None
+
+def keep_alive_listen_key():
+    global listen_key, last_listen_key_update
+    while True:
+        time.sleep(1800)  # setiap 30 menit
+        if listen_key:
+            binance_request("/fapi/v1/listenKey", {"listenKey": listen_key}, method="PUT")
+            last_listen_key_update = time.time()
+            log_activity("🔄 Listen key diperpanjang.")
+
+def on_message(ws, message):
+    """Callback WebSocket: menerima data real-time."""
+    data = json.loads(message)
+    if "e" in data:
+        if data["e"] == "ACCOUNT_UPDATE":
+            # Posisi berubah (TP/SL tersentuh, order terisi)
+            log_activity(f"📡 Update akun: {data['a']['P']}")
+        elif data["e"] == "ORDER_TRADE_UPDATE":
+            # Order terisi atau dibatalkan
+            log_activity(f"📡 Update order: {data['o']['s']} {data['o']['X']}")
+
+def on_error(ws, error):
+    log_activity(f"⚠️ WebSocket error: {error}")
+
+def on_close(ws, close_status_code, close_msg):
+    log_activity("🔌 WebSocket terputus. Mencoba reconnect...")
+    time.sleep(1)
+    connect_websocket()
+
+def on_open(ws):
+    log_activity("🔗 WebSocket terhubung.")
+
+def connect_websocket():
+    global ws
+    with ws_lock:
+        if listen_key is None:
+            get_listen_key()
+        if listen_key is None:
+            log_activity("❌ Tidak bisa connect WebSocket tanpa listen key.")
+            return
+        ws_url = f"wss://fstream.binance.com/ws/{listen_key}"
+        ws = websocket.WebSocketApp(
+            ws_url,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+            on_open=on_open
+        )
+        wst = threading.Thread(target=ws.run_forever, daemon=True)
+        wst.start()
+
 # ---------- BINANCE HELPERS ----------
 def get_open_positions():
-    raw = binance_request("/fapi/v1/positionRisk")  # pakai v1 yang lebih stabil
+    raw = binance_request("/fapi/v1/positionRisk")
     if not raw or not isinstance(raw, list): return []
     positions = []
     for p in raw:
@@ -187,14 +254,13 @@ def fmt_qty(v, step):
     prec = int(round(-math.log10(step), 0))
     return f"{v:.{prec}f}"
 
-# ---------- DATA & INDIKATOR (SEMUA FUNGSI LENGKAP) ----------
+# ---------- ANALISA TEKNIKAL (FULL) ----------
 # (Semua fungsi teknikal: fetch_klines, add_indicators, market_structure, 
 #  detect_liquidity_sweep, find_fvg, find_order_block, get_levels, 
 #  has_bullish_confirmation, has_bearish_confirmation, 
 #  find_best_entry_tp_sl, analyze_signal – sama persis dengan yang ada 
 #  di kode terakhir. Untuk menghemat ruang, tidak ditulis ulang di sini,
 #  tapi pastikan sudah ada di file Anda.)
-
 
 # ---------- DATA & INDIKATOR ----------
 def fetch_klines(symbol, interval, limit=200):
@@ -464,7 +530,7 @@ def main_loop():
             # 6. IF masih ada slot, cari sinyal sampai dapat
             if total_active < settings["max_positions"]:
                 while True:
-                    # Ambil daftar koin (public API, tidak perlu auth)
+                    # Ambil daftar koin
                     try:
                         r = requests.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=15)
                         data = r.json()
@@ -492,7 +558,7 @@ def main_loop():
                                 if best_signal is None or sig["confidence"] > best_signal["confidence"]:
                                     best_signal = sig
                         except: pass
-                        time.sleep(settings["scan_interval"])  # jeda SABAR
+                        time.sleep(settings["scan_interval"])
 
                     if best_signal:
                         # Eksekusi
@@ -598,7 +664,14 @@ if __name__ == "__main__":
     if not API_KEY or not SECRET_KEY:
         log_activity("❌ API Key/Secret belum diset.")
     else:
+        # Mulai WebSocket
+        get_listen_key()
+        connect_websocket()
+        # Thread perpanjang listen key
+        threading.Thread(target=keep_alive_listen_key, daemon=True).start()
+        # Thread Telegram polling
         threading.Thread(target=telegram_polling, daemon=True).start()
-        threading.Thread(target=main_loop, daemon=True).start()
+        # Loop utama
+        main_loop()
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
