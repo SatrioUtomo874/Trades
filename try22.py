@@ -5,6 +5,7 @@ FULL AUTO TRADING BOT – Binance Futures + Real‑time Telegram Log
 - Anti‑banned: jeda antar request, retry dengan backoff
 - Manajemen posisi, TP/SL teknikal, sinyal SMC, order tracking
 - Konfigurasi via /set, /ban, /unban, /menu
+- Port binding untuk Render sudah diperbaiki
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
@@ -23,7 +24,7 @@ settings = {
     "min_confidence": 60,
     "ban_cycles": 20,
     "scan_interval": 10,
-    "top_coins": 50,          # dikurangi untuk menghindari ban
+    "top_coins": 50,
 }
 API_KEY = os.environ.get("BINANCE_API_KEY", "")
 SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
@@ -43,11 +44,9 @@ def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
-    except:
-        pass
+    except: pass
 
 def log_activity(msg):
-    """Kirim log aktivitas ke Telegram (ringan, tanpa parse_mode HTML jika tidak perlu)."""
     send_telegram(f"📋 {msg}")
 
 def telegram_polling():
@@ -58,18 +57,13 @@ def telegram_polling():
             params = {"timeout": 30, "offset": offset}
             resp = requests.get(url, params=params, timeout=35)
             data = resp.json()
-            if not data.get("ok"):
-                time.sleep(5)
-                continue
+            if not data.get("ok"): continue
             for update in data["result"]:
                 offset = update["update_id"] + 1
                 msg = update.get("message")
-                if not msg:
-                    continue
+                if not msg: continue
                 text = msg.get("text", "")
-                if str(msg["chat"]["id"]) != CHAT_ID:
-                    continue
-                # Command handler sama seperti sebelumnya
+                if str(msg["chat"]["id"]) != CHAT_ID: continue
                 if text.startswith("/set "):
                     parts = text.split()
                     if len(parts) == 3:
@@ -79,10 +73,8 @@ def telegram_polling():
                             if key in settings:
                                 settings[key] = value
                                 send_telegram(f"⚙️ {key} diset ke {value}")
-                            else:
-                                send_telegram(f"❌ Key tidak dikenal: {key}")
-                        except ValueError:
-                            send_telegram("❌ Value harus berupa angka.")
+                            else: send_telegram(f"❌ Key tidak dikenal: {key}")
+                        except ValueError: send_telegram("❌ Value harus berupa angka.")
                 elif text == "/settings":
                     send_telegram(f"<pre>{json.dumps(settings, indent=2)}</pre>")
                 elif text == "/status":
@@ -109,8 +101,7 @@ def telegram_polling():
 /menu - Tampilkan menu""")
             time.sleep(1)
         except Exception as e:
-            print(f"Polling error: {e}")
-            time.sleep(5)
+            print(f"Polling error: {e}"); time.sleep(5)
 
 # ---------- BINANCE API (dengan anti‑banned) ----------
 def signed_request(endpoint, params=None, method="GET"):
@@ -119,41 +110,39 @@ def signed_request(endpoint, params=None, method="GET"):
     qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
     signature = hmac.new(SECRET_KEY.encode(), qs.encode(), hashlib.sha256).hexdigest()
     url = f"https://fapi.binance.com{endpoint}?{qs}&signature={signature}"
-
     for attempt in range(3):
         try:
-            if method == "GET":
-                r = requests.get(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-            elif method == "POST":
-                r = requests.post(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-            else:
-                r = requests.delete(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-
-            if r.status_code == 200:
-                return r.json()
+            if method == "GET": r = requests.get(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+            elif method == "POST": r = requests.post(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+            else: r = requests.delete(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+            if r.status_code == 200: return r.json()
             elif r.status_code == 418:
                 log_activity("⛔ IP dibanned! Bot berhenti 10 menit.")
-                time.sleep(600)
-                continue
+                time.sleep(600); continue
             elif r.status_code == 429:
-                wait = 5 * (attempt + 1)
-                log_activity(f"⏳ Rate limited, tunggu {wait}s...")
-                time.sleep(wait)
-                continue
+                time.sleep(5); continue
             else:
-                try:
-                    err = r.json()
-                    log_activity(f"❌ API Error {r.status_code}: {err.get('msg','')}")
-                except:
-                    log_activity(f"❌ API Error {r.status_code}: {r.text}")
+                try: err = r.json(); log_activity(f"❌ API Error {r.status_code}: {err.get('msg','')}")
+                except: log_activity(f"❌ API Error {r.status_code}: {r.text}")
                 return None
         except Exception as e:
-            log_activity(f"⚠️ Network error: {e}")
-            time.sleep(5)
+            log_activity(f"⚠️ Network: {e}"); time.sleep(5)
     return None
 
 def get_open_positions():
-    return signed_request("/fapi/v2/positionRisk", method="GET") or []
+    raw = signed_request("/fapi/v2/positionRisk", method="GET")
+    if not raw or not isinstance(raw, list): return []
+    positions = []
+    for p in raw:
+        amt = float(p.get("positionAmt", 0))
+        if amt != 0:
+            positions.append({
+                "symbol": p["symbol"],
+                "side": "LONG" if amt > 0 else "SHORT",
+                "amount": abs(amt),
+                "entryPrice": float(p["entryPrice"]),
+            })
+    return positions
 
 def get_open_orders():
     orders = []
@@ -180,25 +169,18 @@ def place_market_order(symbol, side, quantity):
     return res["orderId"] if res and "orderId" in res else None
 
 def place_tp_sl_for_position(symbol, side, quantity, sl_price, tp_price):
-    tp_side = "SELL" if side == "LONG" else "BUY"
-    sl_side = "SELL" if side == "LONG" else "BUY"
-    tp_res = signed_request("/fapi/v1/algoOrder", {
+    tp_side = sl_side = "SELL" if side == "LONG" else "BUY"
+    tp = signed_request("/fapi/v1/algoOrder", {
         "algoType":"CONDITIONAL","symbol":symbol,"side":tp_side,"type":"TAKE_PROFIT_MARKET",
-        "quantity":quantity,"triggerPrice":tp_price,"workingType":"MARK_PRICE"
-    }, method="POST")
-    sl_res = signed_request("/fapi/v1/algoOrder", {
+        "quantity":quantity,"triggerPrice":tp_price,"workingType":"MARK_PRICE"}, method="POST")
+    sl = signed_request("/fapi/v1/algoOrder", {
         "algoType":"CONDITIONAL","symbol":symbol,"side":sl_side,"type":"STOP_MARKET",
-        "quantity":quantity,"triggerPrice":sl_price,"workingType":"MARK_PRICE"
-    }, method="POST")
-    return tp_res is not None and sl_res is not None
+        "quantity":quantity,"triggerPrice":sl_price,"workingType":"MARK_PRICE"}, method="POST")
+    return tp is not None and sl is not None
 
-def set_leverage(symbol, leverage):
-    signed_request("/fapi/v1/leverage", {"symbol":symbol,"leverage":leverage}, method="POST")
-
+def set_leverage(symbol, lev): signed_request("/fapi/v1/leverage", {"symbol":symbol,"leverage":lev}, method="POST")
 def get_mark_price(symbol):
-    try:
-        r = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}", timeout=5)
-        return float(r.json()["price"])
+    try: return float(requests.get(f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}", timeout=5).json()["price"])
     except: return None
 
 def get_symbol_filters(symbol):
@@ -220,21 +202,24 @@ def round_to_step(v, step): return round(round(v/step)*step, int(round(-math.log
 def format_price(v, tick): return f"{v:.{int(round(-math.log10(tick),0))}f}" if tick else str(v)
 def format_qty(v, step): return f"{v:.{int(round(-math.log10(step),0))}f}" if step else str(v)
 
-# ---------- INDIKATOR & SMC (fungsi lengkap) ----------
+# ---------- INDIKATOR & SMC (FULL) ----------
 def fetch_klines(symbol, interval, limit=200):
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
     for _ in range(3):
         try:
-            time.sleep(0.2)
-            r = requests.get(url, timeout=15)
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, dict): return None
-                df = pd.DataFrame(data, columns=["timestamp","open","high","low","close","volume","close_time","quote_volume","trades","taker_buy_base","taker_buy_quote","ignore"])
-                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-                for c in ["open","high","low","close","volume"]: df[c] = pd.to_numeric(df[c], errors="coerce")
-                df.set_index("timestamp", inplace=True)
-                return df[["open","high","low","close","volume"]]
+            time.sleep(0.3)
+            resp = requests.get(url, timeout=15)
+            if resp.status_code != 200: continue
+            data = resp.json()
+            if isinstance(data, dict) and "code" in data: return None
+            df = pd.DataFrame(data, columns=[
+                "timestamp","open","high","low","close","volume",
+                "close_time","quote_volume","trades","taker_buy_base","taker_buy_quote","ignore"
+            ])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            for c in ["open","high","low","close","volume"]: df[c] = pd.to_numeric(df[c], errors="coerce")
+            df.set_index("timestamp", inplace=True)
+            return df[["open","high","low","close","volume"]]
         except: time.sleep(5)
     return None
 
@@ -319,7 +304,6 @@ def has_bearish_confirmation(df):
     return upper>body*1.5 and lower<body*0.5
 
 def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr):
-    # (fungsi ini sudah dioptimasi di kode sebelumnya, tetap sama)
     supports_h1, resistances_h1 = get_levels(df_h1)
     supports_m15, resistances_m15 = get_levels(df_m15)
     all_supports = sorted(supports_h1+supports_m15, reverse=True)
@@ -367,8 +351,8 @@ def find_best_entry_tp_sl(df_h1, df_m15, bias_bull, entry_raw, sweep_level, atr)
     return final_entry, tp, sl
 
 def analyze_signal(symbol):
-    # (fungsi ini sudah dioptimasi, sama)
-    df_d1 = fetch_klines(symbol,"1d",200); df_h4 = fetch_klines(symbol,"4h",200); df_h1 = fetch_klines(symbol,"1h",150); df_m15 = fetch_klines(symbol,"15m",150); df_m5 = fetch_klines(symbol,"5m",150)
+    df_d1 = fetch_klines(symbol,"1d",200); df_h4 = fetch_klines(symbol,"4h",200)
+    df_h1 = fetch_klines(symbol,"1h",150); df_m15 = fetch_klines(symbol,"15m",150); df_m5 = fetch_klines(symbol,"5m",150)
     if any(x is None for x in [df_d1,df_h4,df_h1,df_m15,df_m5]): return None
     df_d1=add_all_indicators(df_d1); df_h4=add_all_indicators(df_h4); df_h1=add_all_indicators(df_h1); df_m15=add_all_indicators(df_m15); df_m5=add_all_indicators(df_m5)
     if any(x is None for x in [df_d1,df_h4,df_h1,df_m15,df_m5]): return None
@@ -421,23 +405,21 @@ def analyze_signal(symbol):
     return {"symbol":symbol,"signal":direction,"entry":final_entry,"tp":tp,"sl":sl,"confidence":confidence,"atr":round(atr,6),"rr":round(reward/risk,2) if risk>0 else 0}
 
 # ---------- MANAJEMEN POSISI & ORDER ----------
-def manage_existing_positions():
+def manage_positions():
     positions = get_open_positions()
-    if not positions:
-        log_activity("Tidak ada posisi aktif.")
-        return
-    log_activity(f"Memeriksa {len(positions)} posisi aktif...")
+    log_activity(f"🔍 Posisi aktif: {len(positions)}")
     for pos in positions:
         sym = pos["symbol"]
         orders = get_open_orders()
         has_tp = any(o["symbol"]==sym and o.get("type") in ("TAKE_PROFIT_MARKET","STOP_MARKET") for o in orders)
         if has_tp: continue
         side = "buy" if pos["side"]=="LONG" else "sell"
-        df_h1 = fetch_klines(sym,"1h",150); df_h4 = fetch_klines(sym,"4h",150)
-        if df_h1 is None or df_h4 is None: continue
-        df_h1=add_all_indicators(df_h1); df_h4=add_all_indicators(df_h4)
+        df_h1 = fetch_klines(sym,"1h",150)
         if df_h1 is None: continue
-        entry = pos["entryPrice"]; atr = df_h1["atr"].iloc[-1] if not np.isnan(df_h1["atr"].iloc[-1]) else entry*0.002
+        df_h1 = add_all_indicators(df_h1)
+        if df_h1 is None: continue
+        entry = pos["entryPrice"]
+        atr = df_h1["atr"].iloc[-1] if not np.isnan(df_h1["atr"].iloc[-1]) else entry*0.002
         supports, resistances = get_levels(df_h1)
         if side=="buy":
             tp = round(min([r for r in resistances if r>entry])*0.999,6) if any(r>entry for r in resistances) else round(entry*1.006,6)
@@ -445,9 +427,9 @@ def manage_existing_positions():
         else:
             tp = round(max([s for s in supports if s<entry])*1.001,6) if any(s<entry for s in supports) else round(entry*0.994,6)
             sl = round(min([r for r in resistances if r>entry])+atr*0.3,6) if any(r>entry for r in resistances) else round(entry*1.008,6)
-        filters = get_symbol_filters(sym); tick=filters.get("tickSize",0.01); step=filters.get("stepSize",0.001)
-        qty = pos["amount"]
-        tp_str=format_price(tp,tick); sl_str=format_price(sl,tick); qty_str=format_qty(qty,step)
+        filters = get_symbol_filters(sym)
+        tick = filters.get("tickSize",0.01); step = filters.get("stepSize",0.001)
+        tp_str = format_price(tp,tick); sl_str = format_price(sl,tick); qty_str = format_qty(pos["amount"],step)
         if place_tp_sl_for_position(sym, pos["side"], qty_str, sl_str, tp_str):
             log_activity(f"🛡️ TP/SL {sym} dipasang: TP {tp_str} | SL {sl_str}")
 
@@ -456,10 +438,9 @@ def cleanup_orphan_orders():
     positions = get_open_positions()
     syms = {p["symbol"] for p in positions}
     for o in orders:
-        if o.get("type") in ("TAKE_PROFIT_MARKET","STOP_MARKET"):
-            if o["symbol"] not in syms:
-                cancel_order(o["symbol"], o.get("orderId") or o.get("algoId"))
-                log_activity(f"🧹 Orphan order {o['symbol']} dibatalkan.")
+        if o.get("type") in ("TAKE_PROFIT_MARKET","STOP_MARKET") and o["symbol"] not in syms:
+            cancel_order(o["symbol"], o.get("orderId") or o.get("algoId"))
+            log_activity(f"🧹 Orphan order {o['symbol']} dibatalkan.")
 
 def cancel_orders_half_tp():
     to_cancel = []
@@ -476,7 +457,7 @@ def cancel_orders_half_tp():
         info = tracking_orders[oid]
         cancel_order(info["symbol"], oid)
         del tracking_orders[oid]
-        log_activity(f"🧹 Limit order {info['symbol']} dibatalkan (harga setengah jalan ke TP).")
+        log_activity(f"🧹 Limit order {info['symbol']} dibatalkan (setengah jalan ke TP).")
 
 # ---------- SCANNING & EKSEKUSI ----------
 def get_coins():
@@ -517,7 +498,7 @@ def scan_signals():
                 sig["symbol"] = sym
                 signals.append(sig)
         except: pass
-        time.sleep(0.5)  # jeda penting anti‑banned
+        time.sleep(0.5)
     if signals:
         best = max(signals, key=lambda x: x["confidence"])
         log_activity(f"🏆 Sinyal terbaik: {best['signal']} {best['symbol']} (Conf: {best['confidence']}%)")
@@ -526,11 +507,9 @@ def scan_signals():
 
 def execute_signal(sig):
     symbol = sig["symbol"]; side = "BUY" if sig["signal"]=="BUY" else "SELL"
-    entry = sig["entry"]; tp = sig["tp"]; sl = sig["sl"]
+    entry, tp, sl = sig["entry"], sig["tp"], sig["sl"]
     filters = get_symbol_filters(symbol); tick=filters.get("tickSize",0.01); step=filters.get("stepSize",0.001)
     min_notional = max(filters.get("minNotional",5.0), settings["min_order_usd"])
-    mark = get_mark_price(symbol)
-    if mark is None: log_activity("❌ Gagal ambil harga pasar."); return None
     qty = round_to_step(min_notional/entry, step)
     if entry*qty < min_notional: qty = round_to_step(qty+step, step)
     entry_str=format_price(entry,tick); qty_str=format_qty(qty,step)
@@ -550,10 +529,8 @@ def execute_signal(sig):
         tracking_orders[order_id] = {"symbol":symbol,"entry":entry,"tp":tp,"sl":sl,"side":side}
         log_activity(f"✅ Order {side} {symbol} terpasang (ID: {order_id})")
         banned[symbol] = settings["ban_cycles"]
-        return order_id
     else:
         log_activity(f"❌ Gagal eksekusi order {symbol}")
-        return None
 
 # ---------- MAIN LOOP ----------
 def main_loop():
@@ -562,28 +539,29 @@ def main_loop():
         try:
             log_activity("--- SIKLUS BARU ---")
             update_banned()
-            manage_existing_positions()
+            # 1. Kelola posisi
+            manage_positions()
+            # 2. Bersihkan orphan
             cleanup_orphan_orders()
+            # 3. Batalkan limit order setengah jalan
             cancel_orders_half_tp()
-
+            # 4. Hitung kapasitas
             positions = get_open_positions()
             limit_orders = [o for o in get_open_orders() if o.get("type")=="LIMIT"]
             total_active = len(positions) + len(limit_orders)
-            log_activity(f"📊 Posisi Aktif: {len(positions)} | Limit Orders: {len(limit_orders)} | Maks: {settings['max_positions']}")
-
+            log_activity(f"📊 Posisi: {len(positions)} | Limit: {len(limit_orders)} | Maks: {settings['max_positions']}")
             if total_active >= settings["max_positions"]:
                 log_activity("🛑 Kapasitas penuh, menunggu...")
                 time.sleep(settings["scan_interval"])
                 continue
-
-            while True:
-                signals = scan_signals()
-                if signals: break
-                log_activity("😴 Tidak ada sinyal, jeda sebentar...")
+            # 5. Cari sinyal
+            signals = scan_signals()
+            if not signals:
+                log_activity("😴 Tidak ada sinyal, jeda...")
                 time.sleep(settings["scan_interval"])
-
-            best_sig = signals[0]
-            execute_signal(best_sig)
+                continue
+            # 6. Eksekusi
+            execute_signal(signals[0])
             time.sleep(2)
         except Exception as e:
             log_activity(f"⚠️ Error loop: {e}")
@@ -598,7 +576,11 @@ if __name__ == "__main__":
     if not API_KEY or not SECRET_KEY:
         log_activity("❌ API Key/Secret belum diset.")
     else:
+        # Jalankan Telegram polling di thread
         threading.Thread(target=telegram_polling, daemon=True).start()
-        main_loop()
+        # Jalankan loop trading di thread terpisah
+        threading.Thread(target=main_loop, daemon=True).start()
+
+    # Flask untuk Render (harus di thread utama)
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
