@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-SIGNAL BROADCASTER + SIMPLE ORDER EXECUTION (FIXED SCANNING)
+SIGNAL BROADCASTER + ORDER EXECUTION - FULL CODE
+Bybit untuk data, Binance untuk order
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
@@ -40,56 +41,80 @@ def send_telegram(msg):
 def log_activity(msg):
     send_telegram(f"📋 {msg}")
 
-# ---------- BINANCE REST API (STABLE) ----------
-def binance_request(endpoint, params=None, method="GET", auth=True):
+# ---------- FALLBACK COINS ----------
+FALLBACK_COINS = [
+    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT",
+    "AVAXUSDT","DOTUSDT","LINKUSDT","MATICUSDT","UNIUSDT","ATOMUSDT","LTCUSDT",
+    "ETCUSDT","OPUSDT","ARBUSDT","INJUSDT","TIAUSDT","SUIUSDT","SEIUSDT",
+    "NEARUSDT","APTUSDT","RNDRUSDT","FETUSDT","AGIXUSDT","OCEANUSDT","GRTUSDT",
+    "THETAUSDT","SANDUSDT","MANAUSDT","GALAUSDT","AXSUSDT","CHZUSDT","FLOWUSDT",
+    "EGLDUSDT","QNTUSDT","SNXUSDT","CRVUSDT","COMPUSDT","AAVEUSDT","MKRUSDT",
+    "RUNEUSDT","LDOUSDT","FXSUSDT","1INCHUSDT","ZRXUSDT","BATUSDT","ENJUSDT","ANKRUSDT"
+]
+
+# ---------- BYBIT PUBLIC API ----------
+def get_coins_bybit():
+    try:
+        url = "https://api.bybit.com/v5/market/tickers?category=linear"
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200: return None
+        data = r.json()
+        if data.get("retCode") != 0: return None
+        tickers = data["result"]["list"]
+        filtered = []
+        for t in tickers:
+            sym = t["symbol"]
+            if sym in perma_banned or not sym.endswith("USDT"): continue
+            try:
+                price = float(t["lastPrice"])
+                if price <= settings["max_price"]:
+                    filtered.append((sym, float(t.get("turnover24h", 0))))
+            except: pass
+        filtered.sort(key=lambda x: x[1], reverse=True)
+        return [x[0] for x in filtered[:settings["top_coins"]]]
+    except: return None
+
+def get_coins():
+    coins = get_coins_bybit()
+    if coins: return coins
+    log_activity("🔄 Fallback ke daftar koin statis...")
+    return [c for c in FALLBACK_COINS if c not in perma_banned][:settings["top_coins"]]
+
+# ---------- BINANCE ORDER FUNCTIONS ----------
+def binance_request(endpoint, params=None, method="GET"):
     if params is None: params = {}
-    if auth:
+    try:
+        server_time = requests.get("https://fapi.binance.com/fapi/v1/time", timeout=5).json()["serverTime"]
+    except:
+        server_time = int(time.time() * 1000)
+    params["timestamp"] = server_time
+    params["recvWindow"] = 10000
+    qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    signature = hmac.new(SECRET_KEY.encode(), qs.encode(), hashlib.sha256).hexdigest()
+    url = f"https://fapi.binance.com{endpoint}?{qs}&signature={signature}"
+    for attempt in range(3):
         try:
-            server_time = requests.get("https://fapi.binance.com/fapi/v1/time", timeout=5).json()["serverTime"]
-        except:
-            server_time = int(time.time() * 1000)
-        params["timestamp"] = server_time
-        params["recvWindow"] = 10000
-        qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-        signature = hmac.new(SECRET_KEY.encode(), qs.encode(), hashlib.sha256).hexdigest()
-        url = f"https://fapi.binance.com{endpoint}?{qs}&signature={signature}"
-    else:
-        url = f"https://fapi.binance.com{endpoint}"
-        if params:
-            url += "?" + "&".join([f"{k}={v}" for k, v in params.items()])
-
-    headers = {"X-MBX-APIKEY": API_KEY} if auth else {}
-    for attempt in range(5):
-        try:
-            time.sleep(0.3 * (attempt + 1))
-            if method == "GET": r = requests.get(url, headers=headers, timeout=15)
-            elif method == "POST": r = requests.post(url, headers=headers, timeout=15)
-            elif method == "DELETE": r = requests.delete(url, headers=headers, timeout=15)
-            else: return None
-
+            time.sleep(0.5 * (attempt + 1))
+            if method == "GET": r = requests.get(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=15)
+            elif method == "POST": r = requests.post(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=15)
+            else: r = requests.delete(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=15)
             if r.status_code == 200: return r.json()
             elif r.status_code == 418:
-                log_activity("⛔ IP dibanned! Bot berhenti 15 menit.")
-                time.sleep(900)
-                continue
+                log_activity("⛔ IP dibanned! Order gagal.")
+                return None
             elif r.status_code == 429:
-                wait = 15 * (attempt + 1)
-                log_activity(f"⏳ Rate limited, tunggu {wait}s")
-                time.sleep(wait)
-                continue
+                time.sleep(10); continue
             else:
                 try:
                     err = r.json()
-                    log_activity(f"❌ API {r.status_code}: {err.get('msg','')}")
-                except:
-                    log_activity(f"❌ API {r.status_code}")
+                    log_activity(f"❌ Order error: {err.get('msg','')}")
+                except: log_activity(f"❌ Order error {r.status_code}")
                 return None
         except Exception as e:
             log_activity(f"⚠️ Network: {e}")
-            time.sleep(5)
+            time.sleep(3)
     return None
 
-# ---------- ORDER FUNCTIONS ----------
 def place_limit_order(symbol, side, quantity, price):
     params = {"symbol":symbol,"side":side,"type":"LIMIT","quantity":quantity,"price":price,"timeInForce":"GTC"}
     res = binance_request("/fapi/v1/order", params, method="POST")
@@ -143,22 +168,31 @@ def fmt_qty(v, step):
     prec = int(round(-math.log10(step), 0))
     return f"{v:.{prec}f}"
 
-# ---------- ANALISA TEKNIKAL LENGKAP ----------
+# ---------- BYBIT KLINE FETCH ----------
+INTERVAL_MAP = {"1d":"D","4h":"240","1h":"60","15m":"15","5m":"5"}
+
 def fetch_klines(symbol, interval, limit=200):
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    bybit_interval = INTERVAL_MAP.get(interval, "60")
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={bybit_interval}&limit={limit}"
     for _ in range(3):
         try:
             time.sleep(0.5)
-            data = binance_request(f"/fapi/v1/klines", {"symbol":symbol,"interval":interval,"limit":limit}, auth=False)
-            if not data or isinstance(data, dict): return None
-            df = pd.DataFrame(data, columns=["timestamp","open","high","low","close","volume","close_time","quote_volume","trades","taker_buy_base","taker_buy_quote","ignore"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            r = requests.get(url, timeout=15)
+            if r.status_code != 200: continue
+            data = r.json()
+            if data.get("retCode") != 0: continue
+            rows = data["result"]["list"]
+            if not rows: continue
+            rows = rows[::-1]
+            df = pd.DataFrame(rows, columns=["timestamp","open","high","low","close","volume","turnover"])
+            df["timestamp"] = pd.to_datetime(df["timestamp"].astype(int), unit="ms")
             for c in ["open","high","low","close","volume"]: df[c] = pd.to_numeric(df[c], errors="coerce")
             df.set_index("timestamp", inplace=True)
             return df[["open","high","low","close","volume"]]
         except: time.sleep(5)
     return None
 
+# ---------- ANALISA TEKNIKAL (FULL) ----------
 def add_indicators(df):
     if len(df) < 80: return None
     df["ema12"] = df["close"].ewm(span=12).mean()
@@ -340,33 +374,7 @@ def analyze_signal(symbol):
     if risk>0 and reward/risk<1.3: return None
     return {"symbol":symbol,"signal":direction,"entry":final_entry,"tp":tp,"sl":sl,"confidence":confidence,"atr":round(atr,6),"rr":round(reward/risk,2) if risk>0 else 0}
 
-# ---------- SCANNING (DIPERBAIKI) ----------
-def get_coins():
-    try:
-        r = requests.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=15)
-        if r.status_code != 200:
-            log_activity(f"⚠️ Gagal ambil daftar koin (HTTP {r.status_code})")
-            return None
-        data = r.json()
-        if not isinstance(data, list) or len(data) == 0:
-            log_activity("⚠️ Data koin kosong.")
-            return None
-        tickers = [t for t in data if t["symbol"].endswith("USDT")]
-        tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
-        res = []
-        for t in tickers:
-            sym = t["symbol"]
-            if sym in perma_banned: continue
-            if float(t["lastPrice"]) <= settings["max_price"]:
-                res.append(sym)
-            if len(res) >= settings["top_coins"]: break
-        if not res:
-            log_activity("⚠️ Tidak ada koin yang memenuhi filter harga.")
-        return res
-    except Exception as e:
-        log_activity(f"❌ Error ambil daftar koin: {e}")
-        return None
-
+# ---------- SCANNING ----------
 def update_banned():
     to_del = [k for k,v in banned.items() if v<=0]
     for k in to_del: del banned[k]
@@ -375,13 +383,9 @@ def update_banned():
 def scan_signals():
     update_banned()
     coins = get_coins()
-    if coins is None:
-        log_activity("😴 Gagal ambil koin, jeda 30 detik...")
+    if not coins:
+        log_activity("😴 Tidak ada koin, jeda 30 detik...")
         time.sleep(30)
-        return []
-    if len(coins) == 0:
-        log_activity("😴 Tidak ada koin tersedia, jeda 10 detik...")
-        time.sleep(10)
         return []
     log_activity(f"🔍 Scanning {len(coins)} koin...")
     signals = []
@@ -444,7 +448,7 @@ def main_loop():
                 signals = scan_signals()
                 if signals:
                     execute_signal(signals[0])
-                time.sleep(2)  # jeda kecil setelah siklus
+                time.sleep(2)
             except Exception as e:
                 log_activity(f"⚠️ Error: {e}")
                 time.sleep(10)
@@ -509,7 +513,7 @@ if __name__ == "__main__":
         log_activity(f"🚀 Bot dimulai!\nIP: {ip}\nPastikan IP di-whitelist di Binance.")
     except: log_activity("🚀 Bot dimulai! (IP tidak terdeteksi)")
     if not API_KEY or not SECRET_KEY:
-        log_activity("❌ API Key/Secret belum diset.")
+        log_activity("❌ API Key/Secret belum diset. Bot hanya bisa scanning tanpa eksekusi.")
     threading.Thread(target=telegram_polling, daemon=True).start()
     threading.Thread(target=main_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 8080))
