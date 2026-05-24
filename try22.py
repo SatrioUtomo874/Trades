@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-SIGNAL BROADCASTER + SIMPLE ORDER EXECUTION
-Tanpa cek posisi / order aktif. Scan sinyal -> eksekusi order.
-Perintah Telegram: /start, /stop, /set, /settings, /status
+SIGNAL BROADCASTER + SIMPLE ORDER EXECUTION (FIXED SCANNING)
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
@@ -24,17 +22,15 @@ settings = {
     "top_coins": 30,
 }
 
-# State
 banned = {}
 perma_banned = set()
-bot_running = True  # flag untuk /stop dan /start
+bot_running = True
 
 app = Flask(__name__)
 @app.route('/')
 def home():
     return "Bot is alive", 200
 
-# ---------- TELEGRAM ----------
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -344,12 +340,17 @@ def analyze_signal(symbol):
     if risk>0 and reward/risk<1.3: return None
     return {"symbol":symbol,"signal":direction,"entry":final_entry,"tp":tp,"sl":sl,"confidence":confidence,"atr":round(atr,6),"rr":round(reward/risk,2) if risk>0 else 0}
 
-# ---------- SCANNING ----------
+# ---------- SCANNING (DIPERBAIKI) ----------
 def get_coins():
     try:
         r = requests.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=15)
+        if r.status_code != 200:
+            log_activity(f"⚠️ Gagal ambil daftar koin (HTTP {r.status_code})")
+            return None
         data = r.json()
-        if not isinstance(data, list): return None
+        if not isinstance(data, list) or len(data) == 0:
+            log_activity("⚠️ Data koin kosong.")
+            return None
         tickers = [t for t in data if t["symbol"].endswith("USDT")]
         tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
         res = []
@@ -359,8 +360,12 @@ def get_coins():
             if float(t["lastPrice"]) <= settings["max_price"]:
                 res.append(sym)
             if len(res) >= settings["top_coins"]: break
-        return res if res else None
-    except: return None
+        if not res:
+            log_activity("⚠️ Tidak ada koin yang memenuhi filter harga.")
+        return res
+    except Exception as e:
+        log_activity(f"❌ Error ambil daftar koin: {e}")
+        return None
 
 def update_banned():
     to_del = [k for k,v in banned.items() if v<=0]
@@ -370,7 +375,14 @@ def update_banned():
 def scan_signals():
     update_banned()
     coins = get_coins()
-    if not coins: return []
+    if coins is None:
+        log_activity("😴 Gagal ambil koin, jeda 30 detik...")
+        time.sleep(30)
+        return []
+    if len(coins) == 0:
+        log_activity("😴 Tidak ada koin tersedia, jeda 10 detik...")
+        time.sleep(10)
+        return []
     log_activity(f"🔍 Scanning {len(coins)} koin...")
     signals = []
     for sym in coins:
@@ -413,7 +425,6 @@ def execute_signal(sig):
     if order_id:
         log_activity(f"✅ Order {side} {symbol} terpasang (ID: {order_id})")
         banned[symbol] = 20
-        # Kirim sinyal lengkap ke Telegram
         msg = (
             f"<b>📊 {sig['signal']} {symbol}</b>\n"
             f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
@@ -433,14 +444,12 @@ def main_loop():
                 signals = scan_signals()
                 if signals:
                     execute_signal(signals[0])
-                else:
-                    log_activity("😴 Tidak ada sinyal, jeda 5 detik...")
-                time.sleep(5)
+                time.sleep(2)  # jeda kecil setelah siklus
             except Exception as e:
                 log_activity(f"⚠️ Error: {e}")
                 time.sleep(10)
         else:
-            time.sleep(5)
+            time.sleep(2)
 
 # ---------- TELEGRAM POLLING ----------
 def telegram_polling():
@@ -500,7 +509,7 @@ if __name__ == "__main__":
         log_activity(f"🚀 Bot dimulai!\nIP: {ip}\nPastikan IP di-whitelist di Binance.")
     except: log_activity("🚀 Bot dimulai! (IP tidak terdeteksi)")
     if not API_KEY or not SECRET_KEY:
-        log_activity("❌ API Key/Secret belum diset. Bot hanya bisa scanning tanpa eksekusi.")
+        log_activity("❌ API Key/Secret belum diset.")
     threading.Thread(target=telegram_polling, daemon=True).start()
     threading.Thread(target=main_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 8080))
