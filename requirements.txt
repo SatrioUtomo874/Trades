@@ -2,3 +2,4 @@ pandas
 requests
 numpy
 flask
+websocket-client
