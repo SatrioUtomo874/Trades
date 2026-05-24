@@ -888,7 +888,8 @@ if __name__ == "__main__":
         send_telegram("❌ API Key/Secret belum diset di environment.")
     else:
         threading.Thread(target=telegram_polling, daemon=True).start()
-        main_loop()
+        threading.Thread(target=main_loop, daemon=True).start()
 
+    # PENTING: Gunakan PORT dari environment variable Render
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
