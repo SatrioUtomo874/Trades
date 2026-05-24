@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
 FULL AUTO TRADING BOT – Binance Futures + Real‑time Telegram Log
-- Semua langkah penting dikirim ke Telegram
-- Anti‑banned: jeda antar request, retry dengan backoff
+- Loop scanning terus-menerus hingga sinyal muncul (selama kapasitas < max)
+- Anti‑banned: sinkronisasi waktu, recvWindow, jeda aman
 - Manajemen posisi, TP/SL teknikal, sinyal SMC, order tracking
-- Konfigurasi via /set, /ban, /unban, /menu
-- Port binding untuk Render sudah diperbaiki
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
@@ -17,13 +15,13 @@ TELEGRAM_TOKEN = "8094484109:AAF9Z3lQUxdQFqqeG6NKV9O1EC0vrxzJy0U"
 CHAT_ID = "8041197505"
 
 settings = {
-    "max_positions": 4,
-    "leverage": 8,
+    "max_positions": 5,
+    "leverage": 5,
     "min_order_usd": 1.0,
     "max_price": 100.0,
-    "min_confidence": 60,
+    "min_confidence": 55,
     "ban_cycles": 20,
-    "scan_interval": 10,
+    "scan_interval": 2,   # jeda antar koin saat scanning (detik)
     "top_coins": 50,
 }
 API_KEY = os.environ.get("BINANCE_API_KEY", "")
@@ -103,74 +101,53 @@ def telegram_polling():
         except Exception as e:
             print(f"Polling error: {e}"); time.sleep(5)
 
-# ---------- BINANCE API (dengan anti‑banned) ----------
+# ---------- BINANCE API (sinkronisasi waktu) ----------
 def signed_request(endpoint, params=None, method="GET"):
     if params is None: params = {}
     
-    # Sinkronisasi waktu dengan Binance (ambil waktu server)
+    # Ambil waktu server Binance
     try:
         server_time = requests.get("https://fapi.binance.com/fapi/v1/time", timeout=5).json()
-        binance_time = server_time["serverTime"]
-        # Hitung selisih dengan waktu lokal (hanya untuk info)
-        local_time = int(time.time() * 1000)
-        diff = abs(local_time - binance_time)
-        if diff > 5000:
-            log_activity(f"⚠️ Selisih waktu lokal & Binance: {diff}ms. Gunakan waktu Binance.")
-        # Gunakan waktu Binance + sedikit buffer
-        current_time = binance_time
+        current_time = server_time["serverTime"]
     except:
         current_time = int(time.time() * 1000)
     
     params["timestamp"] = current_time
-    params["recvWindow"] = 10000  # 10 detik toleransi (lebih besar)
+    params["recvWindow"] = 10000  # toleransi 10 detik
     
     qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
     signature = hmac.new(SECRET_KEY.encode(), qs.encode(), hashlib.sha256).hexdigest()
     url = f"https://fapi.binance.com{endpoint}?{qs}&signature={signature}"
 
-    for attempt in range(3):
+    for attempt in range(4):
         try:
-            if method == "GET":
-                r = requests.get(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-            elif method == "POST":
-                r = requests.post(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-            else:
-                r = requests.delete(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-
-            if r.status_code == 200:
-                return r.json()
+            if method == "GET": r = requests.get(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+            elif method == "POST": r = requests.post(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+            else: r = requests.delete(url, headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
+            
+            if r.status_code == 200: return r.json()
             elif r.status_code == 418:
-                log_activity("⛔ IP dibanned! Bot berhenti 10 menit.")
-                time.sleep(600)
-                continue
+                log_activity("⛔ IP dibanned! Bot berhenti 15 menit.")
+                time.sleep(900); continue
             elif r.status_code == 429:
-                time.sleep(5)
-                continue
+                wait = 5 * (attempt + 1)
+                time.sleep(wait); continue
             else:
-                try:
-                    err = r.json()
-                    # Jika error timestamp, coba lagi dengan waktu yang baru
-                    if "Timestamp" in err.get("msg", ""):
-                        log_activity(f"⏰ Error timestamp, mencoba sinkron ulang...")
-                        time.sleep(1)
-                        # Ambil ulang waktu server
-                        try:
-                            new_time = requests.get("https://fapi.binance.com/fapi/v1/time", timeout=5).json()
-                            params["timestamp"] = new_time["serverTime"]
-                            # Update URL dengan timestamp baru
-                            qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-                            signature = hmac.new(SECRET_KEY.encode(), qs.encode(), hashlib.sha256).hexdigest()
-                            url = f"https://fapi.binance.com{endpoint}?{qs}&signature={signature}"
-                            continue  # retry
-                        except:
-                            pass
-                    log_activity(f"❌ API Error {r.status_code}: {err.get('msg','')}")
-                except:
-                    log_activity(f"❌ API Error {r.status_code}: {r.text}")
+                try: err = r.json(); log_activity(f"❌ API Error {r.status_code}: {err.get('msg','')}")
+                except: log_activity(f"❌ API Error {r.status_code}: {r.text}")
+                # Jika error timestamp, retry dengan waktu baru
+                if "Timestamp" in str(err.get("msg","")):
+                    try:
+                        new_time = requests.get("https://fapi.binance.com/fapi/v1/time", timeout=5).json()
+                        params["timestamp"] = new_time["serverTime"]
+                        qs = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+                        signature = hmac.new(SECRET_KEY.encode(), qs.encode(), hashlib.sha256).hexdigest()
+                        url = f"https://fapi.binance.com{endpoint}?{qs}&signature={signature}"
+                        continue
+                    except: pass
                 return None
         except Exception as e:
-            log_activity(f"⚠️ Network: {e}")
-            time.sleep(5)
+            log_activity(f"⚠️ Network: {e}"); time.sleep(5)
     return None
 
 def get_open_positions():
@@ -245,6 +222,7 @@ def round_to_tick(v, tick): return round(round(v/tick)*tick, int(round(-math.log
 def round_to_step(v, step): return round(round(v/step)*step, int(round(-math.log10(step),0))) if step else v
 def format_price(v, tick): return f"{v:.{int(round(-math.log10(tick),0))}f}" if tick else str(v)
 def format_qty(v, step): return f"{v:.{int(round(-math.log10(step),0))}f}" if step else str(v)
+
 
 # ---------- INDIKATOR & SMC (FULL) ----------
 def fetch_klines(symbol, interval, limit=200):
@@ -449,6 +427,7 @@ def analyze_signal(symbol):
     return {"symbol":symbol,"signal":direction,"entry":final_entry,"tp":tp,"sl":sl,"confidence":confidence,"atr":round(atr,6),"rr":round(reward/risk,2) if risk>0 else 0}
 
 # ---------- MANAJEMEN POSISI & ORDER ----------
+# ---------- MANAJEMEN POSISI & ORDER ----------
 def manage_positions():
     positions = get_open_positions()
     log_activity(f"🔍 Posisi aktif: {len(positions)}")
@@ -542,7 +521,7 @@ def scan_signals():
                 sig["symbol"] = sym
                 signals.append(sig)
         except: pass
-        time.sleep(0.5)
+        time.sleep(settings["scan_interval"])  # jeda penting
     if signals:
         best = max(signals, key=lambda x: x["confidence"])
         log_activity(f"🏆 Sinyal terbaik: {best['signal']} {best['symbol']} (Conf: {best['confidence']}%)")
@@ -576,37 +555,38 @@ def execute_signal(sig):
     else:
         log_activity(f"❌ Gagal eksekusi order {symbol}")
 
-# ---------- MAIN LOOP ----------
+# ---------- MAIN LOOP (SCANNING TERUS-MENERUS) ----------
 def main_loop():
     log_activity("🔄 Bot memasuki loop utama...")
     while True:
         try:
             log_activity("--- SIKLUS BARU ---")
             update_banned()
-            # 1. Kelola posisi
             manage_positions()
-            # 2. Bersihkan orphan
             cleanup_orphan_orders()
-            # 3. Batalkan limit order setengah jalan
             cancel_orders_half_tp()
-            # 4. Hitung kapasitas
-            positions = get_open_positions()
-            limit_orders = [o for o in get_open_orders() if o.get("type")=="LIMIT"]
-            total_active = len(positions) + len(limit_orders)
-            log_activity(f"📊 Posisi: {len(positions)} | Limit: {len(limit_orders)} | Maks: {settings['max_positions']}")
-            if total_active >= settings["max_positions"]:
-                log_activity("🛑 Kapasitas penuh, menunggu...")
-                time.sleep(settings["scan_interval"])
-                continue
-            # 5. Cari sinyal
-            signals = scan_signals()
-            if not signals:
-                log_activity("😴 Tidak ada sinyal, jeda...")
-                time.sleep(settings["scan_interval"])
-                continue
-            # 6. Eksekusi
-            execute_signal(signals[0])
-            time.sleep(2)
+
+            # Hitung kapasitas
+            while True:
+                positions = get_open_positions()
+                limit_orders = [o for o in get_open_orders() if o.get("type")=="LIMIT"]
+                total_active = len(positions) + len(limit_orders)
+                log_activity(f"📊 Posisi: {len(positions)} | Limit: {len(limit_orders)} | Maks: {settings['max_positions']}")
+                
+                if total_active >= settings["max_positions"]:
+                    log_activity("🛑 Kapasitas penuh, menunggu 30 detik...")
+                    time.sleep(30)
+                    continue  # cek lagi kapasitas
+                else:
+                    # Cari sinyal terus-menerus sampai dapat
+                    while True:
+                        signals = scan_signals()
+                        if signals:
+                            execute_signal(signals[0])
+                            break  # keluar dari loop scanning, kembali ke siklus baru
+                        log_activity("😴 Tidak ada sinyal, coba lagi...")
+                        time.sleep(5)  # jeda sebelum scanning ulang
+                    break  # keluar dari loop kapasitas, kembali ke siklus baru
         except Exception as e:
             log_activity(f"⚠️ Error loop: {e}")
             time.sleep(30)
@@ -620,11 +600,8 @@ if __name__ == "__main__":
     if not API_KEY or not SECRET_KEY:
         log_activity("❌ API Key/Secret belum diset.")
     else:
-        # Jalankan Telegram polling di thread
         threading.Thread(target=telegram_polling, daemon=True).start()
-        # Jalankan loop trading di thread terpisah
         threading.Thread(target=main_loop, daemon=True).start()
 
-    # Flask untuk Render (harus di thread utama)
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
