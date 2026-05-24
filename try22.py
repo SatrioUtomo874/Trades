@@ -30,13 +30,13 @@ TELEGRAM_TOKEN = "8094484109:AAF9Z3lQUxdQFqqeG6NKV9O1EC0vrxzJy0U"
 CHAT_ID = "8041197505"
 
 settings = {
-    "max_positions": 5,
-    "leverage": 5,
+    "max_positions": 4,
+    "leverage": 8,
     "min_order_usd": 1.0,
     "max_price": 100.0,
-    "min_confidence": 55,
+    "min_confidence": 60,
     "ban_cycles": 20,
-    "scan_interval": 10,   # detik antar siklus jika tidak ada sinyal
+    "scan_interval": 5,   # detik antar siklus jika tidak ada sinyal
     "top_coins": 80,
 }
 
