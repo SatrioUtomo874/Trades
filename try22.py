@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-SIGNAL BROADCASTER – Single Mode Adjustable (Full Code)
-Longgar secara default (seperti level -2). Semua parameter bisa diubah via /set.
+SIGNAL BROADCASTER – H4 Trend + FVG/OB Zone + M15/M5 Support Entry
+Default longgar, adjustable via /set. Bonus poin, sweep wajib.
 """
 
 import time
 import threading
+import json
 import requests
 import pandas as pd
 import numpy as np
@@ -21,20 +22,26 @@ SCAN_INTERVAL = 60
 TOP_COINS = 50
 # =================================================
 
-# ---------- SETTINGS DEFAULT (LONGGAR) ----------
 settings = {
-    "min_confidence": 50,          # minimal confidence %
-    "min_rr": 1.3,                 # risk/reward minimal
-    "base_score": 60,              # skor awal
-    "h1_penalty": 5,               # penalti jika H1 melawan tren
-    "entry_shift_pips": 4,         # pergeseran entry (agresif)
-    "rsi_h1_buy_max": 70,         # batas RSI H1 untuk BUY
-    "rsi_h1_sell_min": 30,        # batas RSI H1 untuk SELL
-    "rsi_m15_buy_max": 75,        # batas RSI M15 untuk BUY
-    "rsi_m15_sell_min": 25,       # batas RSI M15 untuk SELL
+    "min_confidence": 50,
+    "min_rr": 1.3,
+    "base_score": 60,
+    "h1_penalty": 5,
+    "entry_shift_pips": 4,
+    "rsi_h1_buy_max": 70,
+    "rsi_h1_sell_min": 30,
+    "rsi_m15_buy_max": 75,
+    "rsi_m15_sell_min": 25,
 }
 
-# ---------- TELEGRAM ----------
+banned = {}
+perma_banned = set()
+
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "Bot is alive", 200
+
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -56,7 +63,6 @@ def telegram_polling():
                 if not msg: continue
                 text = msg.get("text", "")
                 if str(msg["chat"]["id"]) != CHAT_ID: continue
-
                 if text.startswith("/set "):
                     parts = text.split()
                     if len(parts) == 3:
@@ -174,9 +180,6 @@ def add_all_indicators(df):
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
     df["vol_avg20"] = df["volume"].rolling(20).mean()
-    df["macd"] = df["ema12"] - df["ema26"]
-    df["macd_signal"] = df["macd"].ewm(span=9).mean()
-    df["macd_diff"] = df["macd"] - df["macd_signal"]
     return df
 
 def market_structure(df, window=3):
@@ -261,24 +264,22 @@ def get_levels(df):
 
 # ========== ANALISA SINYAL ==========
 def analyze_signal(symbol, fetch_func):
-    df_d1 = fetch_func(symbol, "1d", 200)
     df_h4 = fetch_func(symbol, "4h", 200)
     df_h1 = fetch_func(symbol, "1h", 150)
     df_m15 = fetch_func(symbol, "15m", 150)
     df_m5 = fetch_func(symbol, "5m", 150)
-    if any(d is None for d in [df_d1, df_h4, df_h1, df_m15, df_m5]): return None
+    if any(d is None for d in [df_h4, df_h1, df_m15, df_m5]): return None
 
-    df_d1 = add_all_indicators(df_d1)
     df_h4 = add_all_indicators(df_h4)
     df_h1 = add_all_indicators(df_h1)
     df_m15 = add_all_indicators(df_m15)
     df_m5 = add_all_indicators(df_m5)
-    if any(d is None for d in [df_d1, df_h4, df_h1, df_m15, df_m5]): return None
+    if any(d is None for d in [df_h4, df_h1, df_m15, df_m5]): return None
 
-    # 1. D1 trend (wajib)
-    struct_d1 = market_structure(df_d1, 5)
-    if struct_d1 == "ranging": return None
-    bias_bull = struct_d1 == "bullish"
+    # 1. H4 trend (wajib)
+    struct_h4 = market_structure(df_h4, 5)
+    if struct_h4 == "ranging": return None
+    bias_bull = struct_h4 == "bullish"
     direction = "BUY" if bias_bull else "SELL"
     score = settings["base_score"]
 
@@ -289,30 +290,26 @@ def analyze_signal(symbol, fetch_func):
     if sweep_m15: score += 15
     else: score += 8
 
-    # 3. D1 bonus
-    last_d1 = df_d1.iloc[-1]
-    if bias_bull and last_d1["close"] > last_d1["ema50"]: score += 5
-    elif not bias_bull and last_d1["close"] < last_d1["ema50"]: score += 5
-    if bias_bull and 40 < last_d1["rsi"] < 70: score += 3
-    elif not bias_bull and 30 < last_d1["rsi"] < 60: score += 3
+    # 3. H4 zone (FVG/OB)
+    ob_h4 = find_order_block(df_h4, "buy" if bias_bull else "sell")
+    fvg_h4 = find_fvg(df_h4, "buy" if bias_bull else "sell")
+    zone_high = None
+    zone_low = None
+    if ob_h4:
+        zone_high, zone_low = ob_h4
+    elif fvg_h4:
+        zone_high, zone_low = fvg_h4
 
-    # 4. H4 bonus
-    struct_h4 = market_structure(df_h4, 3)
-    if struct_h4 == struct_d1: score += 8
-    elif has_bullish_confirmation(df_h4) if bias_bull else has_bearish_confirmation(df_h4): score += 4
-    if sweep_h4: score += 5
-
-    # 5. H1 penalti & bonus
+    # 4. H1 penalti & bonus
     struct_h1 = market_structure(df_h1, 2)
-    if struct_h1 == struct_d1: score += 8
+    if struct_h1 == struct_h4: score += 8
     else: score -= settings["h1_penalty"]
-
     last_h1 = df_h1.iloc[-2]
     if last_h1["volume"] > last_h1["vol_avg20"]: score += 5
     if bias_bull and last_h1["rsi"] < settings["rsi_h1_buy_max"]: score += 3
     elif not bias_bull and last_h1["rsi"] > settings["rsi_h1_sell_min"]: score += 3
 
-    # 6. M15 bonus
+    # 5. M15 momentum (wajib)
     last_m15 = df_m15.iloc[-2]
     if bias_bull and last_m15["ema12"] > last_m15["ema26"]: score += 8
     elif not bias_bull and last_m15["ema12"] < last_m15["ema26"]: score += 8
@@ -321,17 +318,17 @@ def analyze_signal(symbol, fetch_func):
     if bias_bull and last_m15["rsi"] < settings["rsi_m15_buy_max"]: score += 3
     elif not bias_bull and last_m15["rsi"] > settings["rsi_m15_sell_min"]: score += 3
 
-    # 7. Konfirmasi candlestick bonus
+    # 6. Konfirmasi candle M15
     if bias_bull and has_bullish_confirmation(df_m15): score += 5
     elif not bias_bull and has_bearish_confirmation(df_m15): score += 5
 
-    # 8. OB/FVG bonus
+    # 7. OB/FVG M15 sebagai bonus
     ob_m15 = find_order_block(df_m15, "buy" if bias_bull else "sell")
     fvg_m15 = find_fvg(df_m15, "buy" if bias_bull else "sell")
     if ob_m15: score += 5
     elif fvg_m15: score += 5
 
-    # 9. M5 konfirmasi
+    # 8. M5 konfirmasi (wajib)
     last_m5 = df_m5.iloc[-2]
     if bias_bull and last_m5["close"] > last_m5["ema12"]: score += 3
     elif not bias_bull and last_m5["close"] < last_m5["ema12"]: score += 3
@@ -340,14 +337,19 @@ def analyze_signal(symbol, fetch_func):
     confidence = min(score, 100)
     if confidence < settings["min_confidence"]: return None
 
+    # ---- ENTRY, TP, SL ----
     atr = last_m15["atr"] if not np.isnan(last_m15["atr"]) else last_m15["close"] * 0.002
     entry_raw = round(last_m15["close"], 6)
 
-    supports, resistances = get_levels(df_h1 if struct_h1 == struct_d1 else df_m15)
-    sweep_level = sweep_level_m15 if sweep_m15 else None
-    sup_cand = [s for s in supports if s < entry_raw]
-    res_cand = [r for r in resistances if r > entry_raw]
+    # Kumpulkan support/resistance dari M15/M5
+    supports_m15, resistances_m15 = get_levels(df_m15)
+    supports_m5, resistances_m5 = get_levels(df_m5)
+    all_supports = sorted(supports_m15 + supports_m5, reverse=True)
+    all_resistances = sorted(resistances_m15 + resistances_m5)
 
+    # Tambahkan OB/FVG M15 jika ada
+    sup_cand = [s for s in all_supports if s < entry_raw]
+    res_cand = [r for r in all_resistances if r > entry_raw]
     if ob_m15:
         if bias_bull: sup_cand.append(ob_m15[0])
         else: res_cand.append(ob_m15[1])
@@ -355,19 +357,40 @@ def analyze_signal(symbol, fetch_func):
         if bias_bull: sup_cand.append(fvg_m15[0])
         else: res_cand.append(fvg_m15[1])
 
+    # Filter support/resistance berdasarkan zona H4 (jika ada)
+    if zone_high is not None and zone_low is not None:
+        if bias_bull:
+            # Support harus di dalam zona H4 (antara zone_low dan zone_high)
+            sup_cand = [s for s in sup_cand if zone_low <= s <= zone_high]
+        else:
+            # Resistance harus di dalam zona H4
+            res_cand = [r for r in res_cand if zone_low <= r <= zone_high]
+
     shift_pct = settings["entry_shift_pips"] * 0.0001
     shift = shift_pct * entry_raw if settings["entry_shift_pips"] > 0 else 0
 
     if bias_bull:
         best_support = max(sup_cand) if sup_cand else entry_raw - atr
         final_entry = round(best_support + atr * 0.2 + shift, 6)
-        sl = round(min(sup_cand + [sweep_level] if sweep_level else sup_cand) - atr * 0.5, 6) if sup_cand else round(final_entry - atr * 1.5, 6)
-        tp = round(min(res_cand) * 0.999, 6) if res_cand else round(final_entry + atr * 2.0, 6)
+
+        # SL: semua level support di bawah entry, termasuk level sweep
+        all_sl_candidates = sup_cand + [sweep_level_m15] if sweep_m15 else sup_cand
+        valid_sl = [s for s in all_sl_candidates if s < final_entry]
+        sl = round(min(valid_sl) - atr * 0.5, 6) if valid_sl else round(final_entry - atr * 1.5, 6)
+
+        # TP: resistance terdekat di atas entry
+        tp_cand = [r for r in res_cand if r > final_entry]
+        tp = round(min(tp_cand) * 0.999, 6) if tp_cand else round(final_entry + atr * 2.0, 6)
     else:
         best_resistance = min(res_cand) if res_cand else entry_raw + atr
         final_entry = round(best_resistance - atr * 0.2 - shift, 6)
-        sl = round(max(res_cand + [sweep_level] if sweep_level else res_cand) + atr * 0.5, 6) if res_cand else round(final_entry + atr * 1.5, 6)
-        tp = round(max(sup_cand) * 1.001, 6) if sup_cand else round(final_entry - atr * 2.0, 6)
+
+        all_sl_candidates = res_cand + [sweep_level_m15] if sweep_m15 else res_cand
+        valid_sl = [r for r in all_sl_candidates if r > final_entry]
+        sl = round(max(valid_sl) + atr * 0.5, 6) if valid_sl else round(final_entry + atr * 1.5, 6)
+
+        tp_cand = [s for s in sup_cand if s < final_entry]
+        tp = round(max(tp_cand) * 1.001, 6) if tp_cand else round(final_entry - atr * 2.0, 6)
 
     risk = abs(final_entry - sl)
     reward = abs(tp - final_entry)
@@ -385,8 +408,6 @@ def analyze_signal(symbol, fetch_func):
     }
 
 # ========== LOOP UTAMA ==========
-banned = {}
-
 def main_loop():
     global banned
     while True:
@@ -419,7 +440,7 @@ def main_loop():
         print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] {api_source} | {len(coins)} koin")
         signals = []
         for sym in coins:
-            if sym in banned: continue
+            if sym in banned or sym in perma_banned: continue
             try:
                 sig = analyze_signal(sym, fetch_func)
                 if sig:
@@ -445,16 +466,11 @@ def main_loop():
         time.sleep(SCAN_INTERVAL)
 
 # ========== FLASK ==========
-app = Flask(__name__)
-@app.route('/')
-def home(): return "Bot is alive", 200
-def run_flask(): app.run(host="0.0.0.0", port=8080)
-
 if __name__ == "__main__":
     print("=" * 60)
-    print("  SIGNAL BROADCASTER – Single Adjustable Mode (Full)")
+    print("  SIGNAL BROADCASTER – H4 Zone + M15/M5 Entry")
     print("=" * 60)
-    send_telegram("🚀 <b>Bot Sinyal Adjustable siap!</b>\nGunakan /set key value untuk mengubah parameter.\n/menu untuk bantuan.")
-    threading.Thread(target=run_flask, daemon=True).start()
+    send_telegram("🚀 <b>Bot Sinyal H4 Zone siap!</b>\nGunakan /set key value untuk mengubah parameter.\n/menu untuk bantuan.")
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     threading.Thread(target=telegram_polling, daemon=True).start()
     main_loop()
