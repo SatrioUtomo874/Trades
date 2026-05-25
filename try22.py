@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-SIGNAL BROADCASTER – Three‑Level Aggression (Bonus Points System)
-Hampir tanpa penolakan, semua kondisi menjadi bonus/penalti poin.
-Hanya D1 ranging & tidak ada sweep yang menolak sinyal.
+SIGNAL BROADCASTER – Single Mode Adjustable (Full Code)
+Longgar secara default (seperti level -2). Semua parameter bisa diubah via /set.
 """
 
 import time
@@ -22,65 +21,18 @@ SCAN_INTERVAL = 60
 TOP_COINS = 50
 # =================================================
 
-AGGRESSION_LEVEL = 0
-LEVEL_LOCK = threading.Lock()
-
-def get_aggression_params():
-    with LEVEL_LOCK:
-        lvl = AGGRESSION_LEVEL
-
-    # Basis poin dan batas confidence untuk setiap level
-    if lvl == 0:
-        return {
-            "min_confidence": 75,       # Harus sangat kuat
-            "min_rr": 2.0,
-            "base_score": 40,           # Mulai dari 40, butuh banyak bonus
-            "h1_penalty": 20,           # Penalti besar jika H1 melawan
-            "rsi_h1_buy_max": 55,
-            "rsi_h1_sell_min": 45,
-            "rsi_m15_buy_max": 60,
-            "rsi_m15_sell_min": 40,
-            "entry_shift_pips": 0,
-        }
-    elif lvl == -1:
-        return {
-            "min_confidence": 60,
-            "min_rr": 1.5,
-            "base_score": 50,
-            "h1_penalty": 10,
-            "rsi_h1_buy_max": 62,
-            "rsi_h1_sell_min": 38,
-            "rsi_m15_buy_max": 68,
-            "rsi_m15_sell_min": 32,
-            "entry_shift_pips": 2,
-        }
-    else:  # -2
-        return {
-            "min_confidence": 50,
-            "min_rr": 1.3,
-            "base_score": 60,           # Mulai tinggi, mudah lolos
-            "h1_penalty": 5,
-            "rsi_h1_buy_max": 70,
-            "rsi_h1_sell_min": 30,
-            "rsi_m15_buy_max": 75,
-            "rsi_m15_sell_min": 25,
-            "entry_shift_pips": 4,
-        }
-
-def set_aggression(direction):
-    global AGGRESSION_LEVEL
-    with LEVEL_LOCK:
-        old = AGGRESSION_LEVEL
-        if direction == "up":
-            AGGRESSION_LEVEL = min(0, AGGRESSION_LEVEL + 1)
-        else:
-            AGGRESSION_LEVEL = max(-2, AGGRESSION_LEVEL - 1)
-        new = AGGRESSION_LEVEL
-    if old != new:
-        p = get_aggression_params()
-        send_telegram(f"🔧 Level {old} → {new}\nConf min: {p['min_confidence']}% | Base score: {p['base_score']}")
-    else:
-        send_telegram(f"ℹ️ Sudah di level {new}.")
+# ---------- SETTINGS DEFAULT (LONGGAR) ----------
+settings = {
+    "min_confidence": 50,          # minimal confidence %
+    "min_rr": 1.3,                 # risk/reward minimal
+    "base_score": 60,              # skor awal
+    "h1_penalty": 5,               # penalti jika H1 melawan tren
+    "entry_shift_pips": 4,         # pergeseran entry (agresif)
+    "rsi_h1_buy_max": 70,         # batas RSI H1 untuk BUY
+    "rsi_h1_sell_min": 30,        # batas RSI H1 untuk SELL
+    "rsi_m15_buy_max": 75,        # batas RSI M15 untuk BUY
+    "rsi_m15_sell_min": 25,       # batas RSI M15 untuk SELL
+}
 
 # ---------- TELEGRAM ----------
 def send_telegram(msg):
@@ -104,16 +56,33 @@ def telegram_polling():
                 if not msg: continue
                 text = msg.get("text", "")
                 if str(msg["chat"]["id"]) != CHAT_ID: continue
-                if text == "/up": set_aggression("up")
-                elif text == "/down": set_aggression("down")
+
+                if text.startswith("/set "):
+                    parts = text.split()
+                    if len(parts) == 3:
+                        key = parts[1]
+                        try:
+                            value = float(parts[2])
+                            if key in settings:
+                                settings[key] = value
+                                send_telegram(f"⚙️ {key} diset ke {value}")
+                            else:
+                                send_telegram(f"❌ Key tidak dikenal: {key}\nGunakan: {', '.join(settings.keys())}")
+                        except ValueError:
+                            send_telegram("❌ Value harus berupa angka.")
                 elif text == "/status":
-                    p = get_aggression_params()
-                    send_telegram(f"📊 Level {AGGRESSION_LEVEL}\nConf min: {p['min_confidence']}% | Base score: {p['base_score']}")
+                    s = "\n".join([f"{k}: {v}" for k, v in settings.items()])
+                    send_telegram(f"📊 <b>Pengaturan Saat Ini:</b>\n<pre>{s}</pre>")
+                elif text == "/menu":
+                    send_telegram("""<b>Command List:</b>
+/status - Lihat pengaturan
+/set key value - Ubah pengaturan
+/menu - Tampilkan menu""")
             time.sleep(1)
         except Exception as e:
             print(f"Polling error: {e}"); time.sleep(5)
 
-# ========== BINANCE / BYBIT FUNCTIONS (TIDAK BERUBAH) ==========
+# ========== BINANCE / BYBIT DATA FUNCTIONS ==========
 def get_coins_binance(limit=50, max_price=100.0):
     try:
         url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
@@ -188,7 +157,7 @@ FALLBACK_SYMBOLS = [
     "RUNEUSDT","LDOUSDT","FXSUSDT","1INCHUSDT","ZRXUSDT","BATUSDT","ENJUSDT","ANKRUSDT"
 ]
 
-# ========== INDIKATOR & SMC TOOLS (TIDAK BERUBAH) ==========
+# ========== INDIKATOR & SMC TOOLS ==========
 def add_all_indicators(df):
     if len(df) < 80: return None
     df["ema12"] = df["close"].ewm(span=12).mean()
@@ -290,10 +259,8 @@ def get_levels(df):
         if lows.iloc[i] == lows.iloc[i-2:i+3].min(): sl.append(lows.iloc[i])
     return sorted(sl, reverse=True), sorted(sh)
 
-# ========== ANALISA SINYAL DENGAN BONUS POIN ==========
+# ========== ANALISA SINYAL ==========
 def analyze_signal(symbol, fetch_func):
-    p = get_aggression_params()
-
     df_d1 = fetch_func(symbol, "1d", 200)
     df_h4 = fetch_func(symbol, "4h", 200)
     df_h1 = fetch_func(symbol, "1h", 150)
@@ -308,76 +275,74 @@ def analyze_signal(symbol, fetch_func):
     df_m5 = add_all_indicators(df_m5)
     if any(d is None for d in [df_d1, df_h4, df_h1, df_m15, df_m5]): return None
 
-    # ===== 1. D1 TREND (WAJIB) =====
+    # 1. D1 trend (wajib)
     struct_d1 = market_structure(df_d1, 5)
     if struct_d1 == "ranging": return None
     bias_bull = struct_d1 == "bullish"
     direction = "BUY" if bias_bull else "SELL"
-    score = p["base_score"]
+    score = settings["base_score"]
 
-    # ===== 2. LIKUIDITAS SWEEP (WAJIB) =====
+    # 2. Sweep (wajib)
     sweep_m15, sweep_level_m15 = detect_liquidity_sweep(df_m15, "buy" if bias_bull else "sell")
     sweep_h4, _ = detect_liquidity_sweep(df_h4, "buy" if bias_bull else "sell")
     if not (sweep_m15 or sweep_h4): return None
     if sweep_m15: score += 15
     else: score += 8
 
-    # ===== 3. D1 BONUS =====
+    # 3. D1 bonus
     last_d1 = df_d1.iloc[-1]
     if bias_bull and last_d1["close"] > last_d1["ema50"]: score += 5
     elif not bias_bull and last_d1["close"] < last_d1["ema50"]: score += 5
     if bias_bull and 40 < last_d1["rsi"] < 70: score += 3
     elif not bias_bull and 30 < last_d1["rsi"] < 60: score += 3
 
-    # ===== 4. H4 BONUS =====
+    # 4. H4 bonus
     struct_h4 = market_structure(df_h4, 3)
     if struct_h4 == struct_d1: score += 8
     elif has_bullish_confirmation(df_h4) if bias_bull else has_bearish_confirmation(df_h4): score += 4
     if sweep_h4: score += 5
 
-    # ===== 5. H1 PENALTI & BONUS =====
+    # 5. H1 penalti & bonus
     struct_h1 = market_structure(df_h1, 2)
     if struct_h1 == struct_d1: score += 8
-    else: score -= p["h1_penalty"]
+    else: score -= settings["h1_penalty"]
 
     last_h1 = df_h1.iloc[-2]
     if last_h1["volume"] > last_h1["vol_avg20"]: score += 5
-    if bias_bull and last_h1["rsi"] < p["rsi_h1_buy_max"]: score += 3
-    elif not bias_bull and last_h1["rsi"] > p["rsi_h1_sell_min"]: score += 3
+    if bias_bull and last_h1["rsi"] < settings["rsi_h1_buy_max"]: score += 3
+    elif not bias_bull and last_h1["rsi"] > settings["rsi_h1_sell_min"]: score += 3
 
-    # ===== 6. M15 BONUS =====
+    # 6. M15 bonus
     last_m15 = df_m15.iloc[-2]
     if bias_bull and last_m15["ema12"] > last_m15["ema26"]: score += 8
     elif not bias_bull and last_m15["ema12"] < last_m15["ema26"]: score += 8
-    else: return None  # Momentum M15 wajib
+    else: return None
 
-    if bias_bull and last_m15["rsi"] < p["rsi_m15_buy_max"]: score += 3
-    elif not bias_bull and last_m15["rsi"] > p["rsi_m15_sell_min"]: score += 3
+    if bias_bull and last_m15["rsi"] < settings["rsi_m15_buy_max"]: score += 3
+    elif not bias_bull and last_m15["rsi"] > settings["rsi_m15_sell_min"]: score += 3
 
-    # ===== 7. KONFIRMASI CANDLESTICK (BONUS) =====
+    # 7. Konfirmasi candlestick bonus
     if bias_bull and has_bullish_confirmation(df_m15): score += 5
     elif not bias_bull and has_bearish_confirmation(df_m15): score += 5
 
-    # ===== 8. ORDER BLOCK / FVG (BONUS) =====
+    # 8. OB/FVG bonus
     ob_m15 = find_order_block(df_m15, "buy" if bias_bull else "sell")
     fvg_m15 = find_fvg(df_m15, "buy" if bias_bull else "sell")
     if ob_m15: score += 5
     elif fvg_m15: score += 5
 
-    # ===== 9. M5 KONFIRMASI =====
+    # 9. M5 konfirmasi
     last_m5 = df_m5.iloc[-2]
     if bias_bull and last_m5["close"] > last_m5["ema12"]: score += 3
     elif not bias_bull and last_m5["close"] < last_m5["ema12"]: score += 3
-    else: return None  # M5 wajib
+    else: return None
 
-    # ===== 10. CONFIDENCE & ENTRY =====
     confidence = min(score, 100)
-    if confidence < p["min_confidence"]: return None
+    if confidence < settings["min_confidence"]: return None
 
     atr = last_m15["atr"] if not np.isnan(last_m15["atr"]) else last_m15["close"] * 0.002
     entry_raw = round(last_m15["close"], 6)
 
-    # Penentuan entry, TP, SL dengan prioritas FVG/OB
     supports, resistances = get_levels(df_h1 if struct_h1 == struct_d1 else df_m15)
     sweep_level = sweep_level_m15 if sweep_m15 else None
     sup_cand = [s for s in supports if s < entry_raw]
@@ -390,21 +355,23 @@ def analyze_signal(symbol, fetch_func):
         if bias_bull: sup_cand.append(fvg_m15[0])
         else: res_cand.append(fvg_m15[1])
 
+    shift_pct = settings["entry_shift_pips"] * 0.0001
+    shift = shift_pct * entry_raw if settings["entry_shift_pips"] > 0 else 0
+
     if bias_bull:
         best_support = max(sup_cand) if sup_cand else entry_raw - atr
-        final_entry = round(best_support + atr * 0.2, 6)
+        final_entry = round(best_support + atr * 0.2 + shift, 6)
         sl = round(min(sup_cand + [sweep_level] if sweep_level else sup_cand) - atr * 0.5, 6) if sup_cand else round(final_entry - atr * 1.5, 6)
         tp = round(min(res_cand) * 0.999, 6) if res_cand else round(final_entry + atr * 2.0, 6)
     else:
         best_resistance = min(res_cand) if res_cand else entry_raw + atr
-        final_entry = round(best_resistance - atr * 0.2, 6)
+        final_entry = round(best_resistance - atr * 0.2 - shift, 6)
         sl = round(max(res_cand + [sweep_level] if sweep_level else res_cand) + atr * 0.5, 6) if res_cand else round(final_entry + atr * 1.5, 6)
         tp = round(max(sup_cand) * 1.001, 6) if sup_cand else round(final_entry - atr * 2.0, 6)
 
-    # Validasi RR
     risk = abs(final_entry - sl)
     reward = abs(tp - final_entry)
-    if risk > 0 and reward / risk < p["min_rr"]: return None
+    if risk > 0 and reward / risk < settings["min_rr"]: return None
 
     return {
         "symbol": symbol,
@@ -417,7 +384,7 @@ def analyze_signal(symbol, fetch_func):
         "rr": round(reward/risk, 2) if risk > 0 else 0
     }
 
-# ========== LOOP UTAMA (TIDAK BERUBAH) ==========
+# ========== LOOP UTAMA ==========
 banned = {}
 
 def main_loop():
@@ -449,31 +416,19 @@ def main_loop():
             time.sleep(SCAN_INTERVAL)
             continue
 
-        print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] {api_source} | Level {AGGRESSION_LEVEL} | {len(coins)} koin")
+        print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] {api_source} | {len(coins)} koin")
         signals = []
-        fetch_ok = fetch_fail = 0
         for sym in coins:
             if sym in banned: continue
             try:
                 sig = analyze_signal(sym, fetch_func)
                 if sig:
                     signals.append(sig)
-                    fetch_ok += 1
-                else: fetch_ok += 1
-            except Exception as e:
-                fetch_fail += 1
-                print(f"  ⚠️ Error {sym}: {e}")
+            except: pass
             time.sleep(0.02)
 
-        if fetch_fail > 0: send_telegram(f"⚠️ {fetch_fail} koin gagal fetch.")
-        if fetch_ok == 0 and fetch_fail == len(coins):
-            send_telegram("❌ Semua koin gagal fetch.")
-            time.sleep(SCAN_INTERVAL)
-            continue
-
         if not signals:
-            p = get_aggression_params()
-            send_telegram(f"❌ Tidak ada sinyal (Conf ≥ {p['min_confidence']}%)")
+            send_telegram(f"❌ Tidak ada sinyal (Conf ≥ {settings['min_confidence']}%)")
             time.sleep(SCAN_INTERVAL)
             continue
 
@@ -497,9 +452,9 @@ def run_flask(): app.run(host="0.0.0.0", port=8080)
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  SIGNAL BROADCASTER – Bonus Points System")
+    print("  SIGNAL BROADCASTER – Single Adjustable Mode (Full)")
     print("=" * 60)
-    send_telegram("🚀 <b>Bot Sinyal dengan Sistem Bonus Poin siap!</b> /up /down /status")
+    send_telegram("🚀 <b>Bot Sinyal Adjustable siap!</b>\nGunakan /set key value untuk mengubah parameter.\n/menu untuk bantuan.")
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=telegram_polling, daemon=True).start()
     main_loop()
