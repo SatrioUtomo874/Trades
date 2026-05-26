@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AUTO TRADING BOT – Single Level + Order Execution
-Default settings sesuai permintaan. Fix leverage error.
+Jika leverage gagal, tetap kirim sinyal tapi tidak eksekusi order.
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
@@ -112,10 +112,8 @@ def place_market_order(symbol, side, quantity):
     return res["orderId"] if res and "orderId" in res else None
 
 def set_leverage(symbol, lev):
-    # Kirim leverage sebagai INTEGER
     res = binance_request("/fapi/v1/leverage", {"symbol": symbol, "leverage": int(lev)}, method="POST")
-    if res is None:
-        log_activity(f"⚠️ Gagal set leverage {symbol} ke {int(lev)}x")
+    return res is not None and "leverage" in res
 
 def get_mark_price(symbol):
     try:
@@ -528,7 +526,21 @@ def execute_signal(sig):
     entry_str = fmt_price(entry, tick)
     qty_str = fmt_qty(qty, step)
 
-    set_leverage(symbol, settings["leverage"])
+    # Coba set leverage
+    lev_ok = set_leverage(symbol, settings["leverage"])
+    if not lev_ok:
+        log_activity(f"⚠️ Gagal set leverage {symbol}, sinyal tetap dikirim tanpa order.")
+        # Tetap kirim sinyal ke Telegram
+        msg = (
+            f"<b>📊 {sig['signal']} {symbol} (NO ORDER)</b>\n"
+            f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
+            f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}\n"
+            f"⚠️ Order tidak dipasang karena leverage gagal."
+        )
+        send_telegram(msg)
+        banned[symbol] = settings["ban_cycles"]
+        return
+
     log_activity(f"🚀 {side} {symbol} Entry: {entry_str} Qty: {qty_str} Conf: {sig['confidence']}%")
 
     order_id = place_limit_order(symbol, side, qty_str, entry_str)
