@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AUTO TRADING BOT – Single Level + Order Execution
-Jika leverage gagal, tetap kirim sinyal tapi tidak eksekusi order.
+Limit order gagal → cek harga: hanya market order jika harga menguntungkan.
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
@@ -504,7 +504,7 @@ def scan_signals():
         return [best]
     return []
 
-# ========== EKSEKUSI ORDER ==========
+# ========== EKSEKUSI ORDER (DENGAN PENGECEKAN HARGA) ==========
 def execute_signal(sig):
     symbol = sig["symbol"]
     side = "BUY" if sig["signal"]=="BUY" else "SELL"
@@ -514,7 +514,7 @@ def execute_signal(sig):
     step = filters.get("stepSize", 0.001)
     min_notional = max(filters.get("minNotional", 5.0), settings["min_order_usd"])
 
-    # Auto quantity: di ATAS min_order_usd
+    # Auto quantity: pastikan notional ≥ min_notional
     qty = round_to_step(min_notional / entry, step)
     while entry * qty < min_notional:
         qty += step
@@ -529,13 +529,12 @@ def execute_signal(sig):
     # Coba set leverage
     lev_ok = set_leverage(symbol, settings["leverage"])
     if not lev_ok:
-        log_activity(f"⚠️ Gagal set leverage {symbol}, sinyal tetap dikirim tanpa order.")
-        # Tetap kirim sinyal ke Telegram
+        log_activity(f"⚠️ Leverage gagal, sinyal dikirim tanpa order.")
         msg = (
             f"<b>📊 {sig['signal']} {symbol} (NO ORDER)</b>\n"
             f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
             f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}\n"
-            f"⚠️ Order tidak dipasang karena leverage gagal."
+            f"⚠️ Leverage gagal."
         )
         send_telegram(msg)
         banned[symbol] = settings["ban_cycles"]
@@ -543,16 +542,9 @@ def execute_signal(sig):
 
     log_activity(f"🚀 {side} {symbol} Entry: {entry_str} Qty: {qty_str} Conf: {sig['confidence']}%")
 
+    # Coba pasang limit order
     order_id = place_limit_order(symbol, side, qty_str, entry_str)
-    if not order_id:
-        current = get_mark_price(symbol)
-        if current:
-            if (side == "BUY" and current < entry) or (side == "SELL" and current > entry):
-                order_id = place_market_order(symbol, side, qty_str)
-                log_activity(f"⚠️ Limit gagal, Market Order di {current}")
-            else:
-                order_id = place_market_order(symbol, side, qty_str)
-                log_activity(f"⚠️ Limit gagal, Market Order fallback")
+
     if order_id:
         log_activity(f"✅ Order {side} {symbol} terpasang (ID: {order_id})")
         banned[symbol] = settings["ban_cycles"]
@@ -562,8 +554,57 @@ def execute_signal(sig):
             f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}"
         )
         send_telegram(msg)
+        return
+
+    # Limit order gagal → cek harga pasar saat ini
+    current = get_mark_price(symbol)
+    if current is None:
+        log_activity(f"⚠️ Gagal ambil harga pasar, sinyal dikirim tanpa order.")
+        msg = (
+            f"<b>📊 {sig['signal']} {symbol} (NO ORDER)</b>\n"
+            f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
+            f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}\n"
+            f"⚠️ Tidak bisa cek harga pasar."
+        )
+        send_telegram(msg)
+        banned[symbol] = settings["ban_cycles"]
+        return
+
+    # Tentukan apakah harga menguntungkan untuk market order
+    favorable = (side == "BUY" and current < entry) or (side == "SELL" and current > entry)
+
+    if favorable:
+        log_activity(f"🔄 Harga menguntungkan (current={current}), coba market order...")
+        order_id = place_market_order(symbol, side, qty_str)
+        if order_id:
+            log_activity(f"✅ Market order {side} {symbol} terpasang di {current}")
+            banned[symbol] = settings["ban_cycles"]
+            msg = (
+                f"<b>📊 {sig['signal']} {symbol} (MARKET)</b>\n"
+                f"Entry: {current}\nTP: {tp} | SL: {sl}\n"
+                f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}"
+            )
+            send_telegram(msg)
+        else:
+            log_activity(f"❌ Market order juga gagal.")
+            msg = (
+                f"<b>📊 {sig['signal']} {symbol} (NO ORDER)</b>\n"
+                f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
+                f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}\n"
+                f"⚠️ Market order gagal."
+            )
+            send_telegram(msg)
+            banned[symbol] = settings["ban_cycles"]
     else:
-        log_activity(f"❌ Gagal eksekusi order {symbol}")
+        log_activity(f"ℹ️ Harga tidak menguntungkan (current={current}), market order dibatalkan.")
+        msg = (
+            f"<b>📊 {sig['signal']} {symbol} (NO ORDER)</b>\n"
+            f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
+            f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}\n"
+            f"⚠️ Limit gagal, harga tidak menguntungkan untuk market order."
+        )
+        send_telegram(msg)
+        banned[symbol] = settings["ban_cycles"]
 
 # ========== LOOP UTAMA ==========
 def main_loop():
