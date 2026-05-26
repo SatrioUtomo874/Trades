@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AUTO TRADING BOT – Single Level + Order Execution
-Limit order gagal → cek harga: hanya market order jika harga menguntungkan.
+Perbaikan: log notional, /stop berfungsi.
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
@@ -52,7 +52,7 @@ def send_telegram(msg):
 def log_activity(msg):
     send_telegram(f"📋 {msg}")
 
-# ========== BINANCE API (STABLE) ==========
+# ========== BINANCE API ==========
 def binance_request(endpoint, params=None, method="GET", auth=True):
     if params is None: params = {}
     if auth:
@@ -155,7 +155,7 @@ def fmt_qty(v, step):
     prec = int(round(-math.log10(step), 0))
     return f"{v:.{prec}f}"
 
-# ========== BYBIT DATA (PUBLIC) ==========
+# ========== DATA PUBLIK ==========
 def get_coins_bybit():
     try:
         url = "https://api.bybit.com/v5/market/tickers?category=linear"
@@ -193,7 +193,7 @@ def get_coins():
     log_activity("🔄 Fallback ke daftar koin statis...")
     return [c for c in FALLBACK_COINS if c not in perma_banned][:int(settings["top_coins"])]
 
-# ========== BYBIT KLINE ==========
+# ========== KLINE BYBIT ==========
 INTERVAL_MAP = {"1d":"D","4h":"240","1h":"60","15m":"15","5m":"5"}
 
 def fetch_klines(symbol, interval, limit=200):
@@ -504,7 +504,7 @@ def scan_signals():
         return [best]
     return []
 
-# ========== EKSEKUSI ORDER (DENGAN PENGECEKAN HARGA) ==========
+# ========== EKSEKUSI ORDER ==========
 def execute_signal(sig):
     symbol = sig["symbol"]
     side = "BUY" if sig["signal"]=="BUY" else "SELL"
@@ -513,8 +513,8 @@ def execute_signal(sig):
     tick = filters.get("tickSize", 0.01)
     step = filters.get("stepSize", 0.001)
     min_notional = max(filters.get("minNotional", 5.0), settings["min_order_usd"])
+    log_activity(f"ℹ️ {symbol} minNotional: {min_notional} USD (exchange: {filters.get('minNotional', 5.0)}, setting: {settings['min_order_usd']})")
 
-    # Auto quantity: pastikan notional ≥ min_notional
     qty = round_to_step(min_notional / entry, step)
     while entry * qty < min_notional:
         qty += step
@@ -526,7 +526,6 @@ def execute_signal(sig):
     entry_str = fmt_price(entry, tick)
     qty_str = fmt_qty(qty, step)
 
-    # Coba set leverage
     lev_ok = set_leverage(symbol, settings["leverage"])
     if not lev_ok:
         log_activity(f"⚠️ Leverage gagal, sinyal dikirim tanpa order.")
@@ -542,9 +541,7 @@ def execute_signal(sig):
 
     log_activity(f"🚀 {side} {symbol} Entry: {entry_str} Qty: {qty_str} Conf: {sig['confidence']}%")
 
-    # Coba pasang limit order
     order_id = place_limit_order(symbol, side, qty_str, entry_str)
-
     if order_id:
         log_activity(f"✅ Order {side} {symbol} terpasang (ID: {order_id})")
         banned[symbol] = settings["ban_cycles"]
@@ -556,7 +553,6 @@ def execute_signal(sig):
         send_telegram(msg)
         return
 
-    # Limit order gagal → cek harga pasar saat ini
     current = get_mark_price(symbol)
     if current is None:
         log_activity(f"⚠️ Gagal ambil harga pasar, sinyal dikirim tanpa order.")
@@ -570,9 +566,7 @@ def execute_signal(sig):
         banned[symbol] = settings["ban_cycles"]
         return
 
-    # Tentukan apakah harga menguntungkan untuk market order
     favorable = (side == "BUY" and current < entry) or (side == "SELL" and current > entry)
-
     if favorable:
         log_activity(f"🔄 Harga menguntungkan (current={current}), coba market order...")
         order_id = place_market_order(symbol, side, qty_str)
