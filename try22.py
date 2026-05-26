@@ -604,23 +604,24 @@ def execute_signal(sig):
     side = "BUY" if sig["signal"]=="BUY" else "SELL"
     entry, tp, sl = sig["entry"], sig["tp"], sig["sl"]
     filters = get_symbol_filters(symbol)
-    tick = filters.get("tickSize", 0.01)
-    step = filters.get("stepSize", 0.001)
-    min_notional = max(filters.get("minNotional", 5.0), settings["min_order_usd"])
+ tick = filters.get("tickSize", 0.01)
+ step = filters.get("stepSize", 0.001)
+ exchange_min_notional = filters.get("minNotional", 5.0)
+# Pastikan minimal $5 digunakan jika exchange tidak memberikan angka
+ if exchange_min_notional < 5.0:
+     exchange_min_notional = 5.0
+ min_notional = max(exchange_min_notional, settings["min_order_usd"])
+ log_activity(f"ℹ️ {symbol} minNotional: {min_notional} USD (exchange: {exchange_min_notional}, setting: {settings['min_order_usd']})")
 
-    qty = round_to_step(min_notional / entry, step)
-    while entry * qty < min_notional:
-        qty += step
-        qty = round_to_step(qty, step)
-    if qty < filters.get("minQty", 0.001):
-        qty = filters["minQty"]
-        qty = round_to_step(qty, step)
-
-    entry_str = fmt_price(entry, tick)
-    qty_str = fmt_qty(qty, step)
-
-    lev_ok = set_leverage(symbol, settings["leverage"])
-    if not lev_ok:
+ qty = round_to_step(min_notional / entry, step)
+ while entry * qty < min_notional:
+     qty += step
+     qty = round_to_step(qty, step)
+ if qty < filters.get("minQty", 0.001):
+     qty = filters["minQty"]
+     qty = round_to_step(qty, step)
+     lev_ok = set_leverage(symbol, settings["leverage"])
+ if not lev_ok:
         log_activity(f"⚠️ Leverage gagal, sinyal dikirim tanpa order.")
         msg = (
             f"<b>📊 {sig['signal']} {symbol} (NO ORDER)</b>\n"
