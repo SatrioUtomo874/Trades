@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-AUTO TRADING BOT – Single Level (Level -2) + Order Execution
-Confidence ≥ 65%, limit order + fallback market order, auto quantity, IP notif.
-Semua log ke Telegram.
+AUTO TRADING BOT – Single Level + Order Execution
+Default settings sesuai permintaan. Fix leverage error.
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
@@ -16,11 +15,11 @@ API_KEY = os.environ.get("BINANCE_API_KEY", "")
 SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "")
 
 settings = {
-    "leverage": 5,
+    "leverage": 8,
     "min_order_usd": 1.0,
-    "max_price": 100.0,
-    "min_confidence": 65,
-    "min_rr": 1.3,
+    "max_price": 50.0,
+    "min_confidence": 40,
+    "min_rr": 1.6,
     "entry_shift_pips": 5,
     "volume_mult": 0.0,
     "tp_distance_atr": 0.0,
@@ -32,7 +31,7 @@ settings = {
     "require_confirmation": False,
     "ban_cycles": 20,
     "scan_interval": 3,
-    "top_coins": 30,
+    "top_coins": 50,
 }
 
 banned = {}
@@ -113,7 +112,10 @@ def place_market_order(symbol, side, quantity):
     return res["orderId"] if res and "orderId" in res else None
 
 def set_leverage(symbol, lev):
-    binance_request("/fapi/v1/leverage", {"symbol":symbol,"leverage":lev}, method="POST")
+    # Kirim leverage sebagai INTEGER
+    res = binance_request("/fapi/v1/leverage", {"symbol": symbol, "leverage": int(lev)}, method="POST")
+    if res is None:
+        log_activity(f"⚠️ Gagal set leverage {symbol} ke {int(lev)}x")
 
 def get_mark_price(symbol):
     try:
@@ -519,7 +521,6 @@ def execute_signal(sig):
     while entry * qty < min_notional:
         qty += step
         qty = round_to_step(qty, step)
-    # Pastikan tidak kurang dari minQty
     if qty < filters.get("minQty", 0.001):
         qty = filters["minQty"]
         qty = round_to_step(qty, step)
