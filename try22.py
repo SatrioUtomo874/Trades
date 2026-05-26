@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-FULL AUTO TRADING BOT – Alur Lengkap
-Manajemen posisi aktif, TP/SL otomatis, limit order tracking,
-scanning sinyal SMC, eksekusi order, pengaturan via /set.
+AUTO TRADING BOT – Single Level + Order Execution
+Perbaikan: min_order_usd dihormati, /stop benar-benar berhenti.
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
@@ -33,13 +32,11 @@ settings = {
     "ban_cycles": 20,
     "scan_interval": 3,
     "top_coins": 50,
-    "max_positions": 4,
 }
 
 banned = {}
 perma_banned = set()
 bot_running = True
-tracking_orders = {}  # order_id -> {symbol, entry, tp, sl, side}
 
 app = Flask(__name__)
 @app.route('/')
@@ -104,36 +101,6 @@ def binance_request(endpoint, params=None, method="GET", auth=True):
             time.sleep(5)
     return None
 
-# ---------- Order & Account Helpers ----------
-def get_open_positions():
-    raw = binance_request("/fapi/v2/positionRisk")
-    if not raw or not isinstance(raw, list): return []
-    positions = []
-    for p in raw:
-        amt = float(p.get("positionAmt", 0))
-        if amt != 0:
-            positions.append({
-                "symbol": p["symbol"],
-                "side": "LONG" if amt > 0 else "SHORT",
-                "amount": abs(amt),
-                "entryPrice": float(p["entryPrice"]),
-            })
-    return positions
-
-def get_open_orders():
-    orders = []
-    lim = binance_request("/fapi/v1/openOrders")
-    if lim and isinstance(lim, list): orders.extend(lim)
-    algo = binance_request("/fapi/v1/algoOpenOrders")
-    if algo and isinstance(algo, list): orders.extend(algo)
-    return orders
-
-def cancel_order(symbol, order_id):
-    r = binance_request("/fapi/v1/order", {"symbol": symbol, "orderId": order_id}, method="DELETE")
-    if r and r.get("status") == "CANCELED": return True
-    r = binance_request("/fapi/v1/algoOrder", {"symbol": symbol, "algoId": order_id}, method="DELETE")
-    return r is not None
-
 def place_limit_order(symbol, side, quantity, price):
     params = {"symbol":symbol,"side":side,"type":"LIMIT","quantity":quantity,"price":price,"timeInForce":"GTC"}
     res = binance_request("/fapi/v1/order", params, method="POST")
@@ -143,16 +110,6 @@ def place_market_order(symbol, side, quantity):
     params = {"symbol":symbol,"side":side,"type":"MARKET","quantity":quantity}
     res = binance_request("/fapi/v1/order", params, method="POST")
     return res["orderId"] if res and "orderId" in res else None
-
-def place_tp_sl_for_position(symbol, side, quantity, sl_price, tp_price):
-    close_side = "SELL" if side == "LONG" else "BUY"
-    tp = binance_request("/fapi/v1/algoOrder", {
-        "algoType":"CONDITIONAL","symbol":symbol,"side":close_side,"type":"TAKE_PROFIT_MARKET",
-        "quantity":quantity,"triggerPrice":tp_price,"workingType":"MARK_PRICE"}, method="POST")
-    sl = binance_request("/fapi/v1/algoOrder", {
-        "algoType":"CONDITIONAL","symbol":symbol,"side":close_side,"type":"STOP_MARKET",
-        "quantity":quantity,"triggerPrice":sl_price,"workingType":"MARK_PRICE"}, method="POST")
-    return tp is not None and sl is not None
 
 def set_leverage(symbol, lev):
     res = binance_request("/fapi/v1/leverage", {"symbol": symbol, "leverage": int(lev)}, method="POST")
@@ -517,53 +474,6 @@ def analyze_signal(symbol):
         "rr": round(abs(tp - final_entry) / abs(final_entry - sl), 2) if abs(final_entry - sl) > 0 else 0
     }
 
-# ========== MANAJEMEN POSISI AKTIF ==========
-def manage_positions():
-    positions = get_open_positions()
-    if not positions:
-        log_activity("ℹ️ Tidak ada posisi aktif.")
-        return
-    log_activity(f"🔍 Memeriksa {len(positions)} posisi...")
-    for pos in positions:
-        sym = pos["symbol"]
-        orders = get_open_orders()
-        has_tp_sl = any(o["symbol"]==sym and o.get("type") in ("TAKE_PROFIT_MARKET","STOP_MARKET") for o in orders)
-        if has_tp_sl:
-            continue
-        # Analisa untuk TP/SL posisi
-        side = "buy" if pos["side"]=="LONG" else "sell"
-        df_h1 = fetch_klines(sym,"1h",150)
-        df_h4 = fetch_klines(sym,"4h",200)
-        if df_h1 is None or df_h4 is None:
-            continue
-        df_h1 = add_all_indicators(df_h1)
-        df_h4 = add_all_indicators(df_h4)
-        if df_h1 is None:
-            continue
-        entry = pos["entryPrice"]
-        atr = df_h1["atr"].iloc[-1] if not np.isnan(df_h1["atr"].iloc[-1]) else entry*0.002
-        supports, resistances = get_levels(df_h1)
-        if side=="buy":
-            tp_cand = [r for r in resistances if r>entry]
-            tp = round(min(tp_cand)*0.999,6) if tp_cand else round(entry*1.01,6)
-            sl_cand = [s for s in supports if s<entry]
-            sl = round(max(sl_cand)-atr*0.3,6) if sl_cand else round(entry*0.99,6)
-        else:
-            tp_cand = [s for s in supports if s<entry]
-            tp = round(max(tp_cand)*1.001,6) if tp_cand else round(entry*0.99,6)
-            sl_cand = [r for r in resistances if r>entry]
-            sl = round(min(sl_cand)+atr*0.3,6) if sl_cand else round(entry*1.01,6)
-        filters = get_symbol_filters(sym)
-        tick = filters.get("tickSize",0.01)
-        step = filters.get("stepSize",0.001)
-        qty_str = fmt_qty(pos["amount"], step)
-        tp_str = fmt_price(tp, tick)
-        sl_str = fmt_price(sl, tick)
-        if place_tp_sl_for_position(sym, pos["side"], qty_str, sl_str, tp_str):
-            log_activity(f"🛡️ TP/SL {sym} dipasang: TP {tp_str} | SL {sl_str}")
-        else:
-            log_activity(f"⚠️ Gagal pasang TP/SL {sym}")
-
 # ========== SCANNING ==========
 def update_banned():
     to_del = [k for k,v in banned.items() if v<=0]
@@ -571,7 +481,7 @@ def update_banned():
     for k in list(banned.keys()): banned[k] -= 1
 
 def scan_signals():
-    if not bot_running:
+    if not bot_running:  # <-- tambahan: jangan scan jika bot dihentikan
         return []
     update_banned()
     coins = get_coins()
@@ -582,7 +492,7 @@ def scan_signals():
     log_activity(f"🔍 Scanning {len(coins)} koin...")
     signals = []
     for sym in coins:
-        if not bot_running: break
+        if not bot_running: break  # <-- berhenti jika /stop ditekan
         if sym in banned or sym in perma_banned: continue
         try:
             sig = analyze_signal(sym)
@@ -599,18 +509,16 @@ def scan_signals():
 
 # ========== EKSEKUSI ORDER ==========
 def execute_signal(sig):
-    if not bot_running: return
+    if not bot_running: return  # <-- jangan eksekusi jika bot dihentikan
     symbol = sig["symbol"]
     side = "BUY" if sig["signal"]=="BUY" else "SELL"
     entry, tp, sl = sig["entry"], sig["tp"], sig["sl"]
     filters = get_symbol_filters(symbol)
     tick = filters.get("tickSize", 0.01)
     step = filters.get("stepSize", 0.001)
-    exchange_min_notional = filters.get("minNotional", 5.0)
-    if exchange_min_notional < 5.0:
-        exchange_min_notional = 5.0
-    min_notional = max(exchange_min_notional, settings["min_order_usd"])
-    log_activity(f"ℹ️ {symbol} minNotional: {min_notional} USD (exchange: {exchange_min_notional}, setting: {settings['min_order_usd']})")
+    # Gunakan nilai terbesar antara exchange minNotional dan setting min_order_usd
+    min_notional = max(filters.get("minNotional", 5.0), settings["min_order_usd"])
+    log_activity(f"ℹ️ {symbol} minNotional: {min_notional} USD (exchange: {filters.get('minNotional', 5.0)}, setting: {settings['min_order_usd']})")
 
     qty = round_to_step(min_notional / entry, step)
     while entry * qty < min_notional:
@@ -639,36 +547,7 @@ def execute_signal(sig):
     log_activity(f"🚀 {side} {symbol} Entry: {entry_str} Qty: {qty_str} Conf: {sig['confidence']}%")
 
     order_id = place_limit_order(symbol, side, qty_str, entry_str)
-    if not order_id:
-        current = get_mark_price(symbol)
-        if current:
-            if (side == "BUY" and current < entry) or (side == "SELL" and current > entry):
-                order_id = place_market_order(symbol, side, qty_str)
-                if order_id:
-                    log_activity(f"⚠️ Limit gagal, Market Order di {current}")
-                    entry = current  # update entry untuk tracking
-                else:
-                    log_activity(f"❌ Market order juga gagal.")
-            else:
-                log_activity(f"ℹ️ Harga tidak menguntungkan, limit order batal.")
-                msg = (
-                    f"<b>📊 {sig['signal']} {symbol} (NO ORDER)</b>\n"
-                    f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
-                    f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}\n"
-                    f"⚠️ Limit gagal, harga tidak menguntungkan."
-                )
-                send_telegram(msg)
-                banned[symbol] = settings["ban_cycles"]
-                return
-
     if order_id:
-        tracking_orders[order_id] = {
-            "symbol": symbol,
-            "entry": entry,
-            "tp": tp,
-            "sl": sl,
-            "side": side,
-        }
         log_activity(f"✅ Order {side} {symbol} terpasang (ID: {order_id})")
         banned[symbol] = settings["ban_cycles"]
         msg = (
@@ -677,67 +556,71 @@ def execute_signal(sig):
             f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}"
         )
         send_telegram(msg)
-    else:
-        log_activity(f"❌ Gagal eksekusi order {symbol}")
+        return
 
-# ========== PEMBATALAN ORDER TRACKING ==========
-def cancel_tracked_orders():
-    to_cancel = []
-    for oid, info in list(tracking_orders.items()):
-        symbol = info["symbol"]
-        tp = info["tp"]
-        mark = get_mark_price(symbol)
-        if mark is None: continue
-        if info["side"] == "BUY" and mark >= tp:
-            to_cancel.append(oid)
-        elif info["side"] == "SELL" and mark <= tp:
-            to_cancel.append(oid)
-    for oid in to_cancel:
-        info = tracking_orders[oid]
-        cancel_order(info["symbol"], oid)
-        log_activity(f"🧹 Limit order {info['symbol']} dibatalkan (TP tercapai).")
-        del tracking_orders[oid]
+    current = get_mark_price(symbol)
+    if current is None:
+        log_activity(f"⚠️ Gagal ambil harga pasar, sinyal dikirim tanpa order.")
+        msg = (
+            f"<b>📊 {sig['signal']} {symbol} (NO ORDER)</b>\n"
+            f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
+            f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}\n"
+            f"⚠️ Tidak bisa cek harga pasar."
+        )
+        send_telegram(msg)
+        banned[symbol] = settings["ban_cycles"]
+        return
+
+    favorable = (side == "BUY" and current < entry) or (side == "SELL" and current > entry)
+    if favorable:
+        log_activity(f"🔄 Harga menguntungkan (current={current}), coba market order...")
+        order_id = place_market_order(symbol, side, qty_str)
+        if order_id:
+            log_activity(f"✅ Market order {side} {symbol} terpasang di {current}")
+            banned[symbol] = settings["ban_cycles"]
+            msg = (
+                f"<b>📊 {sig['signal']} {symbol} (MARKET)</b>\n"
+                f"Entry: {current}\nTP: {tp} | SL: {sl}\n"
+                f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}"
+            )
+            send_telegram(msg)
+        else:
+            log_activity(f"❌ Market order juga gagal.")
+            msg = (
+                f"<b>📊 {sig['signal']} {symbol} (NO ORDER)</b>\n"
+                f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
+                f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}\n"
+                f"⚠️ Market order gagal."
+            )
+            send_telegram(msg)
+            banned[symbol] = settings["ban_cycles"]
+    else:
+        log_activity(f"ℹ️ Harga tidak menguntungkan (current={current}), market order dibatalkan.")
+        msg = (
+            f"<b>📊 {sig['signal']} {symbol} (NO ORDER)</b>\n"
+            f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
+            f"Conf: {sig['confidence']}% | RR: 1:{sig['rr']} | ATR: {sig['atr']}\n"
+            f"⚠️ Limit gagal, harga tidak menguntungkan untuk market order."
+        )
+        send_telegram(msg)
+        banned[symbol] = settings["ban_cycles"]
 
 # ========== LOOP UTAMA ==========
 def main_loop():
     global bot_running
-    log_activity("🔄 Bot mulai full auto trading...")
+    log_activity("🔄 Bot mulai scanning & eksekusi...")
     while True:
-        if not bot_running:
-            time.sleep(2)
-            continue
-        try:
-            # 1. Manajemen posisi aktif
-            manage_positions()
-            # 2. Cek posisi aktif & limit order
-            positions = get_open_positions()
-            pos_count = len(positions)
-            limit_orders = [o for o in get_open_orders() if o.get("type") == "LIMIT"]
-            limit_count = len(limit_orders)
-            total_active = pos_count + limit_count
-            log_activity(f"📊 Posisi: {pos_count} | Limit: {limit_count} | Max: {settings['max_positions']}")
-
-            # 3. Bersihkan order yang TP-nya sudah tercapai
-            cancel_tracked_orders()
-
-            # 4. Jika kapasitas penuh, tunggu
-            if total_active >= settings["max_positions"]:
-                log_activity("🛑 Kapasitas penuh, menunggu...")
-                time.sleep(30)
-                continue
-
-            # 5. Scanning sinyal sampai dapat
-            while True:
-                if not bot_running: break
+        if bot_running:
+            try:
                 signals = scan_signals()
                 if signals:
                     execute_signal(signals[0])
-                    break  # kembali ke awal setelah eksekusi
-                time.sleep(5)
-
-        except Exception as e:
-            log_activity(f"⚠️ Error: {e}")
-            time.sleep(10)
+                time.sleep(2)
+            except Exception as e:
+                log_activity(f"⚠️ Error: {e}")
+                time.sleep(10)
+        else:
+            time.sleep(2)
 
 # ========== TELEGRAM POLLING ==========
 def telegram_polling():
