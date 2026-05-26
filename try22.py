@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AUTO TRADING BOT – Single Level + Order Execution
-Perbaikan: log notional, /stop berfungsi.
+Perbaikan: min_order_usd dihormati, /stop benar-benar berhenti.
 """
 
 import os, time, hmac, hashlib, math, threading, json, requests, pandas as pd, numpy as np
@@ -481,6 +481,8 @@ def update_banned():
     for k in list(banned.keys()): banned[k] -= 1
 
 def scan_signals():
+    if not bot_running:  # <-- tambahan: jangan scan jika bot dihentikan
+        return []
     update_banned()
     coins = get_coins()
     if not coins:
@@ -490,6 +492,7 @@ def scan_signals():
     log_activity(f"🔍 Scanning {len(coins)} koin...")
     signals = []
     for sym in coins:
+        if not bot_running: break  # <-- berhenti jika /stop ditekan
         if sym in banned or sym in perma_banned: continue
         try:
             sig = analyze_signal(sym)
@@ -498,7 +501,7 @@ def scan_signals():
                 signals.append(sig)
         except: pass
         time.sleep(settings["scan_interval"])
-    if signals:
+    if signals and bot_running:
         best = max(signals, key=lambda x: x["confidence"])
         log_activity(f"🏆 Sinyal terbaik: {best['signal']} {best['symbol']} (Conf: {best['confidence']}%)")
         return [best]
@@ -506,12 +509,14 @@ def scan_signals():
 
 # ========== EKSEKUSI ORDER ==========
 def execute_signal(sig):
+    if not bot_running: return  # <-- jangan eksekusi jika bot dihentikan
     symbol = sig["symbol"]
     side = "BUY" if sig["signal"]=="BUY" else "SELL"
     entry, tp, sl = sig["entry"], sig["tp"], sig["sl"]
     filters = get_symbol_filters(symbol)
     tick = filters.get("tickSize", 0.01)
     step = filters.get("stepSize", 0.001)
+    # Gunakan nilai terbesar antara exchange minNotional dan setting min_order_usd
     min_notional = max(filters.get("minNotional", 5.0), settings["min_order_usd"])
     log_activity(f"ℹ️ {symbol} minNotional: {min_notional} USD (exchange: {filters.get('minNotional', 5.0)}, setting: {settings['min_order_usd']})")
 
