@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-SIMULATION SCALPING BOT – Improved Winrate
-Lebih ketat dari sebelumnya, tetap fokus pada FVG/OB + Sweep.
-Min Confidence 30, RR 1.4, filter EMA50 M15, halfway validation.
+SIMULATION SCALPING BOT – Improved Entry Logic
+Timeout 5 menit, market order jika harga sudah lewat, halfway check tetap ada.
 """
+
 import os
 import time
 import threading
@@ -226,7 +226,7 @@ def analyze_signal(symbol):
     elif fvg_h4:
         zone_high, zone_low = fvg_h4
 
-    # 4. Filter EMA50 M15 (baru)
+    # 4. Filter EMA50 M15
     last_m15 = df_m15.iloc[-2]
     if bias_bull and last_m15["close"] <= last_m15["ema50"]: return None
     if not bias_bull and last_m15["close"] >= last_m15["ema50"]: return None
@@ -249,7 +249,7 @@ def analyze_signal(symbol):
     if bias_bull:
         if zone_low is not None:
             final_entry = round(zone_low + atr * 0.3 + shift, 6)
-            sl = round(zone_low - atr * 0.7, 6)  # SL lebih lebar
+            sl = round(zone_low - atr * 0.7, 6)
         else:
             final_entry = round(entry_raw + shift, 6)
             sl = round(final_entry - atr * 1.5, 6)
@@ -280,11 +280,6 @@ def analyze_signal(symbol):
     if risk <= 0 or reward / risk < settings["min_rr"]:
         return None
 
-    # Validasi halfway: pastikan jarak entry ke halfway cukup (min 1.5x ATR)
-    halfway = final_entry + (tp - final_entry) / 2 if bias_bull else final_entry - (final_entry - tp) / 2
-    if abs(halfway - final_entry) < atr * 1.5:
-        return None
-
     confidence = min(score, 100)
     if confidence < settings["min_confidence"]: return None
 
@@ -299,7 +294,7 @@ def analyze_signal(symbol):
         "rr": round(reward/risk, 2),
     }
 
-# ========== SIMULATION ENGINE ==========
+# ========== SIMULATION ENGINE (IMPROVED ENTRY) ==========
 def simulate_trade(sig):
     symbol = sig["symbol"]
     direction = sig["signal"]
@@ -319,48 +314,64 @@ def simulate_trade(sig):
     halfway = entry + (tp - entry) / 2 if direction == "BUY" else entry - (entry - tp) / 2
     log_activity(f"⏳ Memantau {symbol} (halfway: {halfway:.6f})...")
 
-    # Fase 1: tunggu entry (timeout 2 menit)
-    start_time = time.time()
-    last_notify = time.time()
-    entry_hit = False
-    while time.time() - start_time < 120:
-        price = get_mark_price(symbol)
-        if price is None:
-            time.sleep(1)
-            continue
-
-        if time.time() - last_notify >= 300:
-            log_activity(f"⏳ {symbol} | Price: {price:.6f} | Entry: {entry:.6f} | Halfway: {halfway:.6f}")
-            last_notify = time.time()
-
-        # Check halfway
-        if direction == "BUY" and price >= halfway:
-            log_activity(f"⚠️ Halfway tercapai sebelum entry. No Entry.")
-            settings["no_entry"] += 1
-            return "NO_ENTRY"
-        if direction == "SELL" and price <= halfway:
-            log_activity(f"⚠️ Halfway tercapai sebelum entry. No Entry.")
-            settings["no_entry"] += 1
-            return "NO_ENTRY"
-
-        # Check entry
-        if direction == "BUY" and price <= entry:
-            entry_hit = True
-            log_activity(f"✅ Entry di {price}")
-            break
-        if direction == "SELL" and price >= entry:
-            entry_hit = True
-            log_activity(f"✅ Entry di {price}")
-            break
-        time.sleep(1)
-
-    if not entry_hit:
-        log_activity(f"⏰ Timeout 2 menit. No Entry.")
-        settings["no_entry"] += 1
+    # Cek harga saat ini
+    current = get_mark_price(symbol)
+    if current is None:
+        log_activity("❌ Gagal ambil harga, skip.")
         return "NO_ENTRY"
 
+    # Jika harga sudah di bawah entry (BUY) atau di atas entry (SELL), langsung eksekusi di harga saat ini
+    if direction == "BUY" and current < entry:
+        log_activity(f"⚡ Harga sudah di bawah entry ({current:.6f}), eksekusi market order simulasi.")
+        entry = current
+    elif direction == "SELL" and current > entry:
+        log_activity(f"⚡ Harga sudah di atas entry ({current:.6f}), eksekusi market order simulasi.")
+        entry = current
+    else:
+        # Fase 1: tunggu entry (timeout 5 menit)
+        start_time = time.time()
+        last_notify = time.time()
+        entry_hit = False
+        while time.time() - start_time < 300:
+            price = get_mark_price(symbol)
+            if price is None:
+                time.sleep(1)
+                continue
+
+            if time.time() - last_notify >= 300:
+                log_activity(f"⏳ {symbol} | Price: {price:.6f} | Entry: {entry:.6f} | Halfway: {halfway:.6f}")
+                last_notify = time.time()
+
+            # Check halfway
+            if direction == "BUY" and price >= halfway:
+                log_activity(f"⚠️ Halfway tercapai sebelum entry. No Entry.")
+                settings["no_entry"] += 1
+                return "NO_ENTRY"
+            if direction == "SELL" and price <= halfway:
+                log_activity(f"⚠️ Halfway tercapai sebelum entry. No Entry.")
+                settings["no_entry"] += 1
+                return "NO_ENTRY"
+
+            # Check entry
+            if direction == "BUY" and price <= entry:
+                entry = price
+                entry_hit = True
+                log_activity(f"✅ Entry di {price}")
+                break
+            if direction == "SELL" and price >= entry:
+                entry = price
+                entry_hit = True
+                log_activity(f"✅ Entry di {price}")
+                break
+            time.sleep(1)
+
+        if not entry_hit:
+            log_activity(f"⏰ Timeout 5 menit. No Entry.")
+            settings["no_entry"] += 1
+            return "NO_ENTRY"
+
     # Fase 2: pantau TP/SL
-    log_activity(f"🔄 Memantau TP/SL...")
+    log_activity(f"🔄 Memantau TP/SL (Entry: {entry})...")
     last_notify = time.time()
     while True:
         price = get_mark_price(symbol)
@@ -427,7 +438,7 @@ def scan_signals():
 # ========== MAIN LOOP ==========
 def main_loop():
     global bot_running
-    log_activity("🔄 Bot simulasi (improved) mulai...")
+    log_activity("🔄 Bot simulasi (improved entry) mulai...")
     while True:
         if not bot_running:
             time.sleep(2)
