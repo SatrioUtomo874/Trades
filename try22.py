@@ -4,7 +4,7 @@ SIMULATION SCALPING BOT – Ultra Aggressive SMC (H4–M5)
 Frekuensi tinggi, analisa tetap berdasarkan FVG/OB + Sweep.
 Notifikasi setiap 5 menit selama pemantauan.
 """
-
+import os
 import time
 import threading
 import json
