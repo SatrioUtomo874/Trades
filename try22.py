@@ -4,7 +4,7 @@ SIMULATION SCALPING BOT – Improved Winrate
 Lebih ketat dari sebelumnya, tetap fokus pada FVG/OB + Sweep.
 Min Confidence 30, RR 1.4, filter EMA50 M15, halfway validation.
 """
-
+import os
 import time
 import threading
 import json
