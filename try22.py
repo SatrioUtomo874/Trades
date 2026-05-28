@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-SIMULATION SCALPING BOT – Improved Entry Logic
-Timeout 5 menit, market order jika harga sudah lewat, halfway check tetap ada.
+SIMULATION SCALPING BOT – Revised Logic
+Better balance between frequency and winrate.
 """
 
 import os
@@ -19,9 +19,9 @@ TELEGRAM_TOKEN = "8094484109:AAF9Z3lQUxdQFqqeG6NKV9O1EC0vrxzJy0U"
 CHAT_ID = "8041197505"
 
 settings = {
-    "min_confidence": 30,
-    "min_rr": 1.4,
-    "entry_shift_pips": 4,
+    "min_confidence": 25,
+    "min_rr": 1.2,
+    "entry_shift_pips": 3,
     "max_price": 100.0,
     "scan_interval": 2,
     "top_coins": 80,
@@ -208,13 +208,13 @@ def analyze_signal(symbol):
     if struct_h4 == "ranging": return None
     bias_bull = struct_h4 == "bullish"
     direction = "BUY" if bias_bull else "SELL"
-    score = 50
+    score = 40  # base lebih rendah
 
     # 2. Sweep (wajib)
     sweep_m15, sweep_level_m15 = detect_liquidity_sweep(df_m15, "buy" if bias_bull else "sell")
     sweep_h4, _ = detect_liquidity_sweep(df_h4, "buy" if bias_bull else "sell")
     if not (sweep_m15 or sweep_h4): return None
-    if sweep_m15: score += 20
+    if sweep_m15: score += 15
     else: score += 10
 
     # 3. FVG/OB H4 sebagai zona
@@ -234,11 +234,13 @@ def analyze_signal(symbol):
     # 5. M15 momentum
     if bias_bull and last_m15["ema12"] > last_m15["ema26"]: score += 10
     elif not bias_bull and last_m15["ema12"] < last_m15["ema26"]: score += 10
+    else: return None
 
     # 6. M5 konfirmasi
     last_m5 = df_m5.iloc[-2]
     if bias_bull and last_m5["close"] > last_m5["ema12"]: score += 5
     elif not bias_bull and last_m5["close"] < last_m5["ema12"]: score += 5
+    else: return None
 
     atr = last_m15["atr"] if not np.isnan(last_m15["atr"]) else last_m15["close"] * 0.002
     entry_raw = round(last_m15["close"], 6)
@@ -246,38 +248,60 @@ def analyze_signal(symbol):
     shift_pct = settings["entry_shift_pips"] * 0.0001
     shift = shift_pct * entry_raw if settings["entry_shift_pips"] > 0 else 0
 
+    # Gunakan support/resistance M15 sebagai acuan entry
+    supports_m15, resistances_m15 = get_levels(df_m15)
+
     if bias_bull:
+        # Cari support terdekat di bawah harga saat ini, tapi masih di atas zona H4 (jika ada)
+        valid_supports = [s for s in supports_m15 if s < entry_raw]
         if zone_low is not None:
+            valid_supports = [s for s in valid_supports if s >= zone_low]
+        if valid_supports:
+            best_support = max(valid_supports)
+            final_entry = round(best_support + atr * 0.3 + shift, 6)
+        elif zone_low is not None:
             final_entry = round(zone_low + atr * 0.3 + shift, 6)
-            sl = round(zone_low - atr * 0.7, 6)
         else:
             final_entry = round(entry_raw + shift, 6)
-            sl = round(final_entry - atr * 1.5, 6)
 
-        _, resistances_m15 = get_levels(df_m15)
+        # SL: di bawah support terkuat atau zona, ditambah buffer
+        sl_candidates = [s - atr * 0.5 for s in valid_supports] if valid_supports else []
+        if sweep_level_m15: sl_candidates.append(sweep_level_m15 - atr * 0.5)
+        if zone_low: sl_candidates.append(zone_low - atr * 0.5)
+        sl = round(min(sl_candidates), 6) if sl_candidates else round(final_entry - atr * 1.5, 6)
+
+        # TP: resistance terdekat
         tp_cand = [r for r in resistances_m15 if r > final_entry]
-        if tp_cand:
-            tp = round(min(tp_cand) * 1.001, 6)
-        else:
-            tp = round(final_entry + atr * 2.5, 6)
+        tp = round(min(tp_cand) * 1.001, 6) if tp_cand else round(final_entry + atr * 2.5, 6)
     else:
+        valid_resistances = [r for r in resistances_m15 if r > entry_raw]
         if zone_high is not None:
+            valid_resistances = [r for r in valid_resistances if r <= zone_high]
+        if valid_resistances:
+            best_resistance = min(valid_resistances)
+            final_entry = round(best_resistance - atr * 0.3 - shift, 6)
+        elif zone_high is not None:
             final_entry = round(zone_high - atr * 0.3 - shift, 6)
-            sl = round(zone_high + atr * 0.7, 6)
         else:
             final_entry = round(entry_raw - shift, 6)
-            sl = round(final_entry + atr * 1.5, 6)
 
-        supports_m15, _ = get_levels(df_m15)
+        sl_candidates = [r + atr * 0.5 for r in valid_resistances] if valid_resistances else []
+        if sweep_level_m15: sl_candidates.append(sweep_level_m15 + atr * 0.5)
+        if zone_high: sl_candidates.append(zone_high + atr * 0.5)
+        sl = round(max(sl_candidates), 6) if sl_candidates else round(final_entry + atr * 1.5, 6)
+
         tp_cand = [s for s in supports_m15 if s < final_entry]
-        if tp_cand:
-            tp = round(max(tp_cand) * 0.999, 6)
-        else:
-            tp = round(final_entry - atr * 2.5, 6)
+        tp = round(max(tp_cand) * 0.999, 6) if tp_cand else round(final_entry - atr * 2.5, 6)
 
+    # Validasi RR
     risk = abs(final_entry - sl)
     reward = abs(tp - final_entry)
     if risk <= 0 or reward / risk < settings["min_rr"]:
+        return None
+
+    # Pastikan ada jarak cukup dari entry ke halfway (min 1x ATR)
+    halfway = final_entry + (tp - final_entry) / 2 if bias_bull else final_entry - (final_entry - tp) / 2
+    if abs(halfway - final_entry) < atr:
         return None
 
     confidence = min(score, 100)
@@ -294,7 +318,7 @@ def analyze_signal(symbol):
         "rr": round(reward/risk, 2),
     }
 
-# ========== SIMULATION ENGINE (IMPROVED ENTRY) ==========
+# ========== SIMULATION ENGINE ==========
 def simulate_trade(sig):
     symbol = sig["symbol"]
     direction = sig["signal"]
@@ -438,7 +462,7 @@ def scan_signals():
 # ========== MAIN LOOP ==========
 def main_loop():
     global bot_running
-    log_activity("🔄 Bot simulasi (improved entry) mulai...")
+    log_activity("🔄 Bot simulasi revised mulai...")
     while True:
         if not bot_running:
             time.sleep(2)
@@ -515,7 +539,7 @@ def telegram_polling():
 
 # ========== STARTUP ==========
 if __name__ == "__main__":
-    log_activity("🤖 Bot simulasi improved starting...")
+    log_activity("🤖 Bot simulasi revised starting...")
     try:
         ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
         log_activity(f"🚀 IP: {ip}")
