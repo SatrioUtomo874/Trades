@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-SIMULATION TRADING BOT – FVG/SMC Logic + Real‑time Monitoring
-Notifikasi Telegram setiap 5 menit saat memantau harga.
-No RSI, no API keys. Uses Bybit public data.
-Stats tracking (TP/SL/NO_ENTRY), adjustable via /set.
-Runs 24/7 on Render.
+SIMULATION SCALPING BOT – Ultra Aggressive SMC (H4–M5)
+Frekuensi tinggi, analisa tetap berdasarkan FVG/OB + Sweep.
+Notifikasi setiap 5 menit selama pemantauan.
 """
 
-import os
 import time
 import threading
 import json
@@ -22,14 +19,13 @@ TELEGRAM_TOKEN = "8094484109:AAF9Z3lQUxdQFqqeG6NKV9O1EC0vrxzJy0U"
 CHAT_ID = "8041197505"
 
 settings = {
-    "min_confidence": 40,
-    "min_rr": 1.6,
-    "entry_shift_pips": 5,
-    "max_price": 50.0,
-    "scan_interval": 3,
-    "top_coins": 50,
-    "ban_cycles": 20,
-    # stats
+    "min_confidence": 20,          # sangat rendah agar banyak sinyal
+    "min_rr": 1.2,                 # RR longgar
+    "entry_shift_pips": 6,         # agresif
+    "max_price": 100.0,            # naikkan batas harga
+    "scan_interval": 2,            # jeda antar koin dipercepat
+    "top_coins": 80,               # lebih banyak koin
+    "ban_cycles": 10,              # ban lebih singkat
     "tp": 0,
     "sl": 0,
     "no_entry": 0,
@@ -48,8 +44,7 @@ def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
-    except:
-        pass
+    except: pass
 
 def log_activity(msg):
     send_telegram(f"📋 {msg}")
@@ -93,7 +88,6 @@ def get_coins():
     return [c for c in FALLBACK_COINS if c not in perma_banned][:int(settings["top_coins"])]
 
 def get_mark_price(symbol):
-    """Ambil harga mark dari Bybit public API."""
     try:
         url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
         r = requests.get(url, timeout=5)
@@ -105,12 +99,12 @@ def get_mark_price(symbol):
 
 INTERVAL_MAP = {"1d":"D","4h":"240","1h":"60","15m":"15","5m":"5"}
 
-def fetch_klines(symbol, interval, limit=200):
+def fetch_klines(symbol, interval, limit=120):
     bybit_interval = INTERVAL_MAP.get(interval, "60")
     url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={bybit_interval}&limit={limit}"
-    for _ in range(3):
+    for _ in range(2):
         try:
-            time.sleep(0.5)
+            time.sleep(0.3)
             r = requests.get(url, timeout=15)
             if r.status_code != 200: continue
             data = r.json()
@@ -123,21 +117,19 @@ def fetch_klines(symbol, interval, limit=200):
             for c in ["open","high","low","close","volume"]: df[c] = pd.to_numeric(df[c], errors="coerce")
             df.set_index("timestamp", inplace=True)
             return df[["open","high","low","close","volume"]]
-        except: time.sleep(5)
+        except: time.sleep(3)
     return None
 
-# ========== SMC INDICATORS (NO RSI) ==========
+# ========== SMC INDICATORS (SIMPLE) ==========
 def add_all_indicators(df):
-    if len(df) < 80: return None
+    if len(df) < 50: return None
     df["ema12"] = df["close"].ewm(span=12).mean()
     df["ema26"] = df["close"].ewm(span=26).mean()
     df["ema50"] = df["close"].ewm(span=50).mean()
-    df["ema200"] = df["close"].ewm(span=200).mean() if len(df) >= 200 else df["ema50"]
     df["tr"] = np.maximum(df["high"] - df["low"],
                           np.maximum(abs(df["high"] - df["close"].shift()),
                                      abs(df["low"] - df["close"].shift())))
     df["atr"] = df["tr"].rolling(14).mean()
-    df["vol_avg20"] = df["volume"].rolling(20).mean()
     return df
 
 def market_structure(df, window=3):
@@ -156,13 +148,13 @@ def market_structure(df, window=3):
 def detect_liquidity_sweep(df, direction):
     last = df.iloc[-2]
     if direction == "buy":
-        for i in range(len(df)-5, 3, -1):
-            if df["low"].iloc[i] == df["low"].iloc[i-3:i+4].min():
+        for i in range(len(df)-4, 2, -1):
+            if df["low"].iloc[i] == df["low"].iloc[i-2:i+3].min():
                 if last["low"] < df["low"].iloc[i] and last["close"] > df["low"].iloc[i]:
                     return True, df["low"].iloc[i]
     else:
-        for i in range(len(df)-5, 3, -1):
-            if df["high"].iloc[i] == df["high"].iloc[i-3:i+4].max():
+        for i in range(len(df)-4, 2, -1):
+            if df["high"].iloc[i] == df["high"].iloc[i-2:i+3].max():
                 if last["high"] > df["high"].iloc[i] and last["close"] < df["high"].iloc[i]:
                     return True, df["high"].iloc[i]
     return False, None
@@ -181,12 +173,12 @@ def find_fvg(df, direction):
 def find_order_block(df, direction):
     last_idx = len(df) - 2; last_close = df["close"].iloc[last_idx]
     if direction == "buy":
-        for i in range(last_idx-1, max(last_idx-20, 0), -1):
+        for i in range(last_idx-1, max(last_idx-15, 0), -1):
             if df["close"].iloc[i] < df["open"].iloc[i]:
                 if i+1 <= last_idx and df["close"].iloc[i+1] > df["open"].iloc[i+1] and last_close > df["high"].iloc[i]:
                     return df["high"].iloc[i], df["low"].iloc[i]
     else:
-        for i in range(last_idx-1, max(last_idx-20, 0), -1):
+        for i in range(last_idx-1, max(last_idx-15, 0), -1):
             if df["close"].iloc[i] > df["open"].iloc[i]:
                 if i+1 <= last_idx and df["close"].iloc[i+1] < df["open"].iloc[i+1] and last_close < df["low"].iloc[i]:
                     return df["high"].iloc[i], df["low"].iloc[i]
@@ -201,51 +193,31 @@ def get_levels(df):
     return sorted(sl, reverse=True), sorted(sh)
 
 def analyze_signal(symbol):
-    df_d1 = fetch_klines(symbol,"1d",200); df_h4 = fetch_klines(symbol,"4h",200)
-    df_h1 = fetch_klines(symbol,"1h",150); df_m15 = fetch_klines(symbol,"15m",150); df_m5 = fetch_klines(symbol,"5m",150)
-    if any(d is None for d in [df_d1,df_h4,df_h1,df_m15,df_m5]): return None
+    df_h4 = fetch_klines(symbol,"4h",100)
+    df_h1 = fetch_klines(symbol,"1h",100)
+    df_m15 = fetch_klines(symbol,"15m",100)
+    df_m5 = fetch_klines(symbol,"5m",100)
+    if any(d is None for d in [df_h4, df_h1, df_m15, df_m5]): return None
 
-    df_d1 = add_all_indicators(df_d1); df_h4 = add_all_indicators(df_h4)
-    df_h1 = add_all_indicators(df_h1); df_m15 = add_all_indicators(df_m15); df_m5 = add_all_indicators(df_m5)
-    if any(d is None for d in [df_d1,df_h4,df_h1,df_m15,df_m5]): return None
+    df_h4 = add_all_indicators(df_h4); df_h1 = add_all_indicators(df_h1)
+    df_m15 = add_all_indicators(df_m15); df_m5 = add_all_indicators(df_m5)
+    if any(d is None for d in [df_h4, df_h1, df_m15, df_m5]): return None
 
-    struct_d1 = market_structure(df_d1, 5)
-    if struct_d1 == "ranging": return None
-    bias_bull = struct_d1 == "bullish"
+    # 1. H4 trend (wajib tidak ranging)
+    struct_h4 = market_structure(df_h4, 5)
+    if struct_h4 == "ranging": return None
+    bias_bull = struct_h4 == "bullish"
     direction = "BUY" if bias_bull else "SELL"
-    score = 0
+    score = 50  # base score tinggi
 
-    last_d1 = df_d1.iloc[-1]
-    if bias_bull and last_d1["close"] > last_d1["ema50"]: score += 10
-    elif not bias_bull and last_d1["close"] < last_d1["ema50"]: score += 10
-
-    struct_h4 = market_structure(df_h4, 3)
-    if struct_h4 == struct_d1: score += 10
-    sweep_h4, _ = detect_liquidity_sweep(df_h4, "buy" if bias_bull else "sell")
-    if sweep_h4: score += 10
-
-    struct_h1 = market_structure(df_h1, 2)
-    if struct_h1 == struct_d1: score += 10
-
-    last_m15 = df_m15.iloc[-2]
-    if bias_bull and last_m15["ema12"] > last_m15["ema26"]: score += 10
-    elif not bias_bull and last_m15["ema12"] < last_m15["ema26"]: score += 10
-    else: return None
-
+    # 2. Sweep di H4 atau M15 (wajib)
     sweep_m15, sweep_level_m15 = detect_liquidity_sweep(df_m15, "buy" if bias_bull else "sell")
+    sweep_h4, _ = detect_liquidity_sweep(df_h4, "buy" if bias_bull else "sell")
     if not (sweep_m15 or sweep_h4): return None
-    if sweep_m15: score += 15
+    if sweep_m15: score += 20
     else: score += 10
 
-    last_m5 = df_m5.iloc[-2]
-    if bias_bull and last_m5["close"] > last_m5["ema12"]: score += 5
-    elif not bias_bull and last_m5["close"] < last_m5["ema12"]: score += 5
-    else: return None
-
-    atr = last_m15["atr"] if not np.isnan(last_m15["atr"]) else last_m15["close"] * 0.002
-    entry_raw = round(last_m15["close"], 6)
-
-    # ---- Entry/TP/SL based on H4 FVG/OB + M15 support ----
+    # 3. Cari FVG/OB di H4 sebagai zona entry
     ob_h4 = find_order_block(df_h4, "buy" if bias_bull else "sell")
     fvg_h4 = find_fvg(df_h4, "buy" if bias_bull else "sell")
     zone_high = None; zone_low = None
@@ -254,48 +226,49 @@ def analyze_signal(symbol):
     elif fvg_h4:
         zone_high, zone_low = fvg_h4
 
-    supports_m15, resistances_m15 = get_levels(df_m15)
-    supports_m5, resistances_m5 = get_levels(df_m5)
-    all_supports = sorted(supports_m15 + supports_m5, reverse=True)
-    all_resistances = sorted(resistances_m15 + resistances_m5)
+    # 4. M15 momentum
+    last_m15 = df_m15.iloc[-2]
+    if bias_bull and last_m15["ema12"] > last_m15["ema26"]: score += 10
+    elif not bias_bull and last_m15["ema12"] < last_m15["ema26"]: score += 10
 
+    # 5. M5 konfirmasi
+    last_m5 = df_m5.iloc[-2]
+    if bias_bull and last_m5["close"] > last_m5["ema12"]: score += 5
+    elif not bias_bull and last_m5["close"] < last_m5["ema12"]: score += 5
+
+    atr = last_m15["atr"] if not np.isnan(last_m15["atr"]) else last_m15["close"] * 0.002
+    entry_raw = round(last_m15["close"], 6)
+
+    # ---- Entry/TP/SL ----
     shift_pct = settings["entry_shift_pips"] * 0.0001
     shift = shift_pct * entry_raw if settings["entry_shift_pips"] > 0 else 0
 
+    # Gunakan zona H4 sebagai acuan utama
     if bias_bull:
-        sup_cand = [s for s in all_supports if s < entry_raw]
         if zone_low is not None:
-            sup_cand = [s for s in sup_cand if s >= zone_low]
-        best_support = max(sup_cand) if sup_cand else (zone_low if zone_low else entry_raw - atr)
-        final_entry = round(best_support + atr * 0.2 + shift, 6)
+            final_entry = round(zone_low + atr * 0.3 + shift, 6)
+            sl = round(zone_low - atr * 0.5, 6)
+        else:
+            final_entry = round(entry_raw + shift, 6)
+            sl = round(final_entry - atr * 1.5, 6)
 
-        sl_candidates = []
-        if sweep_level_m15: sl_candidates.append(sweep_level_m15)
-        if zone_low: sl_candidates.append(zone_low)
-        if sup_cand: sl_candidates.append(min(sup_cand))
-        sl_base = min(sl_candidates) if sl_candidates else (final_entry - atr * 1.5)
-        sl = round(sl_base - atr * 0.5, 6)
-
-        res_cand = [r for r in all_resistances if r > final_entry]
-        tp = round(min(res_cand) * 0.999, 6) if res_cand else round(final_entry + atr * 2.0, 6)
-
+        # TP: resistance terdekat dari M15
+        _, resistances_m15 = get_levels(df_m15)
+        tp_cand = [r for r in resistances_m15 if r > final_entry]
+        tp = round(min(tp_cand) * 1.001, 6) if tp_cand else round(final_entry + atr * 2.5, 6)
     else:
-        res_cand = [r for r in all_resistances if r > entry_raw]
         if zone_high is not None:
-            res_cand = [r for r in res_cand if r <= zone_high]
-        best_resistance = min(res_cand) if res_cand else (zone_high if zone_high else entry_raw + atr)
-        final_entry = round(best_resistance - atr * 0.2 - shift, 6)
+            final_entry = round(zone_high - atr * 0.3 - shift, 6)
+            sl = round(zone_high + atr * 0.5, 6)
+        else:
+            final_entry = round(entry_raw - shift, 6)
+            sl = round(final_entry + atr * 1.5, 6)
 
-        sl_candidates = []
-        if sweep_level_m15: sl_candidates.append(sweep_level_m15)
-        if zone_high: sl_candidates.append(zone_high)
-        if res_cand: sl_candidates.append(max(res_cand))
-        sl_base = max(sl_candidates) if sl_candidates else (final_entry + atr * 1.5)
-        sl = round(sl_base + atr * 0.5, 6)
+        supports_m15, _ = get_levels(df_m15)
+        tp_cand = [s for s in supports_m15 if s < final_entry]
+        tp = round(max(tp_cand) * 0.999, 6) if tp_cand else round(final_entry - atr * 2.5, 6)
 
-        sup_cand = [s for s in all_supports if s < final_entry]
-        tp = round(max(sup_cand) * 1.001, 6) if sup_cand else round(final_entry - atr * 2.0, 6)
-
+    # RR check longgar
     risk = abs(final_entry - sl)
     reward = abs(tp - final_entry)
     if risk > 0 and reward / risk < settings["min_rr"]:
@@ -326,7 +299,7 @@ def simulate_trade(sig):
     rr = sig["rr"]
 
     msg = (
-        f"<b>📊 {direction} {symbol} (SIMULATION)</b>\n"
+        f"<b>📊 {direction} {symbol} (SIM)</b>\n"
         f"Entry: {entry}\nTP: {tp} | SL: {sl}\n"
         f"Conf: {confidence}% | RR: 1:{rr} | ATR: {sig['atr']}"
     )
@@ -339,50 +312,46 @@ def simulate_trade(sig):
 
     log_activity(f"⏳ Memantau {symbol} (halfway: {halfway:.6f})...")
 
-    # ---- FASE 1: TUNGGU ENTRY ----
+    # Fase 1: tunggu entry
     start_time = time.time()
     last_notify = time.time()
     entry_hit = False
-    while time.time() - start_time < 300:  # timeout 5 menit
+    while time.time() - start_time < 120:  # timeout 2 menit
         price = get_mark_price(symbol)
         if price is None:
             time.sleep(1)
             continue
 
-        # Notifikasi tiap 5 menit
         if time.time() - last_notify >= 300:
             log_activity(f"⏳ {symbol} | Price: {price:.6f} | Entry: {entry:.6f} | Halfway: {halfway:.6f}")
             last_notify = time.time()
 
-        # Check halfway BEFORE entry
         if direction == "BUY" and price >= halfway:
-            log_activity(f"⚠️ Harga mencapai halfway ({halfway}) sebelum entry. No Entry.")
+            log_activity(f"⚠️ Halfway tercapai sebelum entry. No Entry.")
             settings["no_entry"] += 1
             return "NO_ENTRY"
         if direction == "SELL" and price <= halfway:
-            log_activity(f"⚠️ Harga mencapai halfway ({halfway}) sebelum entry. No Entry.")
+            log_activity(f"⚠️ Halfway tercapai sebelum entry. No Entry.")
             settings["no_entry"] += 1
             return "NO_ENTRY"
 
-        # Check entry
         if direction == "BUY" and price <= entry:
             entry_hit = True
-            log_activity(f"✅ Entry {symbol} tercapai di {price}")
+            log_activity(f"✅ Entry di {price}")
             break
         if direction == "SELL" and price >= entry:
             entry_hit = True
-            log_activity(f"✅ Entry {symbol} tercapai di {price}")
+            log_activity(f"✅ Entry di {price}")
             break
-
         time.sleep(1)
 
     if not entry_hit:
-        log_activity(f"⏰ Timeout 5 menit, harga tidak menyentuh entry. No Entry.")
+        log_activity(f"⏰ Timeout 2 menit. No Entry.")
         settings["no_entry"] += 1
         return "NO_ENTRY"
 
-    # ---- FASE 2: PANTAU TP/SL ----
-    log_activity(f"🔄 Memantau TP/SL {symbol}...")
+    # Fase 2: pantau TP/SL
+    log_activity(f"🔄 Memantau TP/SL...")
     last_notify = time.time()
     while True:
         price = get_mark_price(symbol)
@@ -390,27 +359,26 @@ def simulate_trade(sig):
             time.sleep(1)
             continue
 
-        # Notifikasi tiap 5 menit
         if time.time() - last_notify >= 300:
             log_activity(f"⏳ {symbol} | Price: {price:.6f} | TP: {tp:.6f} | SL: {sl:.6f}")
             last_notify = time.time()
 
         if direction == "BUY":
             if price <= sl:
-                log_activity(f"❌ Stop Loss tercapai di {price}")
+                log_activity(f"❌ SL di {price}")
                 settings["sl"] += 1
                 return "SL"
             if price >= tp:
-                log_activity(f"🏆 Take Profit tercapai di {price}")
+                log_activity(f"🏆 TP di {price}")
                 settings["tp"] += 1
                 return "TP"
         else:
             if price >= sl:
-                log_activity(f"❌ Stop Loss tercapai di {price}")
+                log_activity(f"❌ SL di {price}")
                 settings["sl"] += 1
                 return "SL"
             if price <= tp:
-                log_activity(f"🏆 Take Profit tercapai di {price}")
+                log_activity(f"🏆 TP di {price}")
                 settings["tp"] += 1
                 return "TP"
         time.sleep(1)
@@ -426,7 +394,7 @@ def scan_signals():
     update_banned()
     coins = get_coins()
     if not coins:
-        log_activity("😴 Tidak ada koin, jeda 30 detik...")
+        log_activity("😴 Tidak ada koin.")
         time.sleep(30)
         return []
     log_activity(f"🔍 Scanning {len(coins)} koin...")
@@ -443,14 +411,14 @@ def scan_signals():
         time.sleep(settings["scan_interval"])
     if signals and bot_running:
         best = max(signals, key=lambda x: x["confidence"])
-        log_activity(f"🏆 Sinyal terbaik: {best['signal']} {best['symbol']} (Conf: {best['confidence']}%)")
+        log_activity(f"🏆 {best['signal']} {best['symbol']} (Conf: {best['confidence']}%)")
         return [best]
     return []
 
 # ========== MAIN LOOP ==========
 def main_loop():
     global bot_running
-    log_activity("🔄 Bot simulasi mulai...")
+    log_activity("🔄 Bot simulasi agresif mulai...")
     while True:
         if not bot_running:
             time.sleep(2)
@@ -524,12 +492,12 @@ def telegram_polling():
 
 # ========== STARTUP ==========
 if __name__ == "__main__":
-    log_activity("🤖 Bot simulasi starting...")
+    log_activity("🤖 Bot simulasi agresif starting...")
     try:
         ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
-        log_activity(f"🚀 Bot dimulai!\nIP: {ip}")
+        log_activity(f"🚀 IP: {ip}")
     except:
-        log_activity("🚀 Bot dimulai! (IP tidak terdeteksi)")
+        log_activity("🚀 Bot dimulai!")
     threading.Thread(target=telegram_polling, daemon=True).start()
     threading.Thread(target=main_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 8080))
