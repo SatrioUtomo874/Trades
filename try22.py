@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-SIMULATION SCALPING BOT – Ultra Aggressive SMC (H4–M5)
-Frekuensi tinggi, analisa tetap berdasarkan FVG/OB + Sweep.
-Notifikasi setiap 5 menit selama pemantauan.
+SIMULATION SCALPING BOT – Improved Winrate
+Lebih ketat dari sebelumnya, tetap fokus pada FVG/OB + Sweep.
+Min Confidence 30, RR 1.4, filter EMA50 M15, halfway validation.
 """
-import os
+
 import time
 import threading
 import json
@@ -19,13 +19,13 @@ TELEGRAM_TOKEN = "8094484109:AAF9Z3lQUxdQFqqeG6NKV9O1EC0vrxzJy0U"
 CHAT_ID = "8041197505"
 
 settings = {
-    "min_confidence": 20,          # sangat rendah agar banyak sinyal
-    "min_rr": 1.2,                 # RR longgar
-    "entry_shift_pips": 6,         # agresif
-    "max_price": 100.0,            # naikkan batas harga
-    "scan_interval": 2,            # jeda antar koin dipercepat
-    "top_coins": 80,               # lebih banyak koin
-    "ban_cycles": 10,              # ban lebih singkat
+    "min_confidence": 30,
+    "min_rr": 1.4,
+    "entry_shift_pips": 4,
+    "max_price": 100.0,
+    "scan_interval": 2,
+    "top_coins": 80,
+    "ban_cycles": 10,
     "tp": 0,
     "sl": 0,
     "no_entry": 0,
@@ -120,7 +120,7 @@ def fetch_klines(symbol, interval, limit=120):
         except: time.sleep(3)
     return None
 
-# ========== SMC INDICATORS (SIMPLE) ==========
+# ========== SMC INDICATORS ==========
 def add_all_indicators(df):
     if len(df) < 50: return None
     df["ema12"] = df["close"].ewm(span=12).mean()
@@ -203,21 +203,21 @@ def analyze_signal(symbol):
     df_m15 = add_all_indicators(df_m15); df_m5 = add_all_indicators(df_m5)
     if any(d is None for d in [df_h4, df_h1, df_m15, df_m5]): return None
 
-    # 1. H4 trend (wajib tidak ranging)
+    # 1. H4 trend (wajib)
     struct_h4 = market_structure(df_h4, 5)
     if struct_h4 == "ranging": return None
     bias_bull = struct_h4 == "bullish"
     direction = "BUY" if bias_bull else "SELL"
-    score = 50  # base score tinggi
+    score = 50
 
-    # 2. Sweep di H4 atau M15 (wajib)
+    # 2. Sweep (wajib)
     sweep_m15, sweep_level_m15 = detect_liquidity_sweep(df_m15, "buy" if bias_bull else "sell")
     sweep_h4, _ = detect_liquidity_sweep(df_h4, "buy" if bias_bull else "sell")
     if not (sweep_m15 or sweep_h4): return None
     if sweep_m15: score += 20
     else: score += 10
 
-    # 3. Cari FVG/OB di H4 sebagai zona entry
+    # 3. FVG/OB H4 sebagai zona
     ob_h4 = find_order_block(df_h4, "buy" if bias_bull else "sell")
     fvg_h4 = find_fvg(df_h4, "buy" if bias_bull else "sell")
     zone_high = None; zone_low = None
@@ -226,12 +226,16 @@ def analyze_signal(symbol):
     elif fvg_h4:
         zone_high, zone_low = fvg_h4
 
-    # 4. M15 momentum
+    # 4. Filter EMA50 M15 (baru)
     last_m15 = df_m15.iloc[-2]
+    if bias_bull and last_m15["close"] <= last_m15["ema50"]: return None
+    if not bias_bull and last_m15["close"] >= last_m15["ema50"]: return None
+
+    # 5. M15 momentum
     if bias_bull and last_m15["ema12"] > last_m15["ema26"]: score += 10
     elif not bias_bull and last_m15["ema12"] < last_m15["ema26"]: score += 10
 
-    # 5. M5 konfirmasi
+    # 6. M5 konfirmasi
     last_m5 = df_m5.iloc[-2]
     if bias_bull and last_m5["close"] > last_m5["ema12"]: score += 5
     elif not bias_bull and last_m5["close"] < last_m5["ema12"]: score += 5
@@ -239,39 +243,46 @@ def analyze_signal(symbol):
     atr = last_m15["atr"] if not np.isnan(last_m15["atr"]) else last_m15["close"] * 0.002
     entry_raw = round(last_m15["close"], 6)
 
-    # ---- Entry/TP/SL ----
     shift_pct = settings["entry_shift_pips"] * 0.0001
     shift = shift_pct * entry_raw if settings["entry_shift_pips"] > 0 else 0
 
-    # Gunakan zona H4 sebagai acuan utama
     if bias_bull:
         if zone_low is not None:
             final_entry = round(zone_low + atr * 0.3 + shift, 6)
-            sl = round(zone_low - atr * 0.5, 6)
+            sl = round(zone_low - atr * 0.7, 6)  # SL lebih lebar
         else:
             final_entry = round(entry_raw + shift, 6)
             sl = round(final_entry - atr * 1.5, 6)
 
-        # TP: resistance terdekat dari M15
         _, resistances_m15 = get_levels(df_m15)
         tp_cand = [r for r in resistances_m15 if r > final_entry]
-        tp = round(min(tp_cand) * 1.001, 6) if tp_cand else round(final_entry + atr * 2.5, 6)
+        if tp_cand:
+            tp = round(min(tp_cand) * 1.001, 6)
+        else:
+            tp = round(final_entry + atr * 2.5, 6)
     else:
         if zone_high is not None:
             final_entry = round(zone_high - atr * 0.3 - shift, 6)
-            sl = round(zone_high + atr * 0.5, 6)
+            sl = round(zone_high + atr * 0.7, 6)
         else:
             final_entry = round(entry_raw - shift, 6)
             sl = round(final_entry + atr * 1.5, 6)
 
         supports_m15, _ = get_levels(df_m15)
         tp_cand = [s for s in supports_m15 if s < final_entry]
-        tp = round(max(tp_cand) * 0.999, 6) if tp_cand else round(final_entry - atr * 2.5, 6)
+        if tp_cand:
+            tp = round(max(tp_cand) * 0.999, 6)
+        else:
+            tp = round(final_entry - atr * 2.5, 6)
 
-    # RR check longgar
     risk = abs(final_entry - sl)
     reward = abs(tp - final_entry)
-    if risk > 0 and reward / risk < settings["min_rr"]:
+    if risk <= 0 or reward / risk < settings["min_rr"]:
+        return None
+
+    # Validasi halfway: pastikan jarak entry ke halfway cukup (min 1.5x ATR)
+    halfway = final_entry + (tp - final_entry) / 2 if bias_bull else final_entry - (final_entry - tp) / 2
+    if abs(halfway - final_entry) < atr * 1.5:
         return None
 
     confidence = min(score, 100)
@@ -285,10 +296,10 @@ def analyze_signal(symbol):
         "sl": sl,
         "confidence": confidence,
         "atr": round(atr, 6),
-        "rr": round(reward/risk, 2) if risk > 0 else 0,
+        "rr": round(reward/risk, 2),
     }
 
-# ========== SIMULATION ENGINE (WITH 5-MIN NOTIFICATIONS) ==========
+# ========== SIMULATION ENGINE ==========
 def simulate_trade(sig):
     symbol = sig["symbol"]
     direction = sig["signal"]
@@ -305,18 +316,14 @@ def simulate_trade(sig):
     )
     log_activity(msg)
 
-    if direction == "BUY":
-        halfway = entry + (tp - entry) / 2
-    else:
-        halfway = entry - (entry - tp) / 2
-
+    halfway = entry + (tp - entry) / 2 if direction == "BUY" else entry - (entry - tp) / 2
     log_activity(f"⏳ Memantau {symbol} (halfway: {halfway:.6f})...")
 
-    # Fase 1: tunggu entry
+    # Fase 1: tunggu entry (timeout 2 menit)
     start_time = time.time()
     last_notify = time.time()
     entry_hit = False
-    while time.time() - start_time < 120:  # timeout 2 menit
+    while time.time() - start_time < 120:
         price = get_mark_price(symbol)
         if price is None:
             time.sleep(1)
@@ -326,6 +333,7 @@ def simulate_trade(sig):
             log_activity(f"⏳ {symbol} | Price: {price:.6f} | Entry: {entry:.6f} | Halfway: {halfway:.6f}")
             last_notify = time.time()
 
+        # Check halfway
         if direction == "BUY" and price >= halfway:
             log_activity(f"⚠️ Halfway tercapai sebelum entry. No Entry.")
             settings["no_entry"] += 1
@@ -335,6 +343,7 @@ def simulate_trade(sig):
             settings["no_entry"] += 1
             return "NO_ENTRY"
 
+        # Check entry
         if direction == "BUY" and price <= entry:
             entry_hit = True
             log_activity(f"✅ Entry di {price}")
@@ -418,7 +427,7 @@ def scan_signals():
 # ========== MAIN LOOP ==========
 def main_loop():
     global bot_running
-    log_activity("🔄 Bot simulasi agresif mulai...")
+    log_activity("🔄 Bot simulasi (improved) mulai...")
     while True:
         if not bot_running:
             time.sleep(2)
@@ -474,15 +483,18 @@ def telegram_polling():
                 elif text == "/settings":
                     send_telegram(f"<pre>{json.dumps(settings, indent=2)}</pre>")
                 elif text == "/status":
+                    total = settings["tp"] + settings["sl"] + settings["no_entry"]
+                    wr = f"{(settings['tp']/total*100):.1f}%" if total > 0 else "N/A"
                     send_telegram(
                         f"📊 Bot: {'Running' if bot_running else 'Stopped'}\n"
-                        f"TP: {settings['tp']} | SL: {settings['sl']} | No Entry: {settings['no_entry']}"
+                        f"TP: {settings['tp']} | SL: {settings['sl']} | No Entry: {settings['no_entry']}\n"
+                        f"Total: {total} | WR: {wr}"
                     )
                 elif text == "/menu":
                     send_telegram("""<b>Command List:</b>
 /start - Mulai bot
 /stop - Hentikan bot
-/status - Statistik TP/SL/No Entry
+/status - Statistik TP/SL/No Entry & Winrate
 /settings - Lihat pengaturan
 /set key value - Ubah pengaturan
 /menu - Tampilkan menu""")
@@ -492,7 +504,7 @@ def telegram_polling():
 
 # ========== STARTUP ==========
 if __name__ == "__main__":
-    log_activity("🤖 Bot simulasi agresif starting...")
+    log_activity("🤖 Bot simulasi improved starting...")
     try:
         ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
         log_activity(f"🚀 IP: {ip}")
