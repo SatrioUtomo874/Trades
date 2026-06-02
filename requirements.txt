@@ -1,5 +1,7 @@
+python-telegram-bot>=20.0
 pandas
-requests
 numpy
+mplfinance
+matplotlib
+requests
 flask
-websocket-client
