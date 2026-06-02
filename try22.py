@@ -16,7 +16,6 @@ import random
 import asyncio
 import logging
 import threading
-import signal
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
@@ -60,6 +59,10 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     return "Bot is alive", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
 
 # ================== FUNGSI DATA ==================
 def fetch_klines(symbol: str, interval: str, limit: int = 500) -> Optional[pd.DataFrame]:
@@ -406,16 +409,6 @@ async def tf_switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_session(user_id, session)
     await kirim_chart(update, context, session, extra_text=f"⏱ Timeframe: {new_tf}")
 
-async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk pesan /start yang belum memulai game."""
-    await update.message.reply_text(
-        "🎮 <b>Selamat datang di Trading Simulator Bot!</b>\n\n"
-        "Bot ini akan membantu Anda berlatih analisa teknikal dengan data historis nyata dari Binance.\n\n"
-        "Gunakan /start untuk memulai sesi permainan baru.\n"
-        "Ketik /help untuk melihat semua perintah.",
-        parse_mode=ParseMode.HTML
-    )
-
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎮 <b>Trading Simulator Bot</b>\n\n"
@@ -433,7 +426,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ================== MAIN ==================
-def run_bot():
+def main():
     """Jalankan bot di thread utama."""
     app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -446,25 +439,25 @@ def run_bot():
     app_bot.add_handler(CommandHandler("tf", tf_switch))
     app_bot.add_handler(CommandHandler("help", help_cmd))
 
-    # Kirim welcome message ke chat ID spesifik
+    # Kirim welcome message
     async def send_welcome():
-        await app_bot.bot.send_message(chat_id=CHAT_ID, text="🎮 <b>Bot Simulasi Trading siap digunakan!</b>\n\nGunakan /start untuk memulai sesi permainan baru.\nKetik /help untuk bantuan.", parse_mode=ParseMode.HTML)
+        await app_bot.bot.send_message(
+            chat_id=CHAT_ID,
+            text="🎮 <b>Bot Simulasi Trading siap digunakan!</b>\n\nGunakan /start untuk memulai sesi permainan baru.\nKetik /help untuk bantuan.",
+            parse_mode=ParseMode.HTML
+        )
 
-    # Buat event loop untuk bot
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
-    # Kirim welcome
     loop.run_until_complete(send_welcome())
 
     # Mulai polling
     app_bot.run_polling()
 
 if __name__ == "__main__":
-    # Jalankan bot di thread terpisah
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    # Jalankan Flask di thread terpisah
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
 
-    # Flask untuk health check Render
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    # Bot berjalan di thread utama
+    main()
