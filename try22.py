@@ -30,7 +30,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 
 # ================== CONFIG ==================
-TELEGRAM_TOKEN = "8094484109:AAF9Z3lQUxdQFqqeG6NKV9O1EC0vrxzJy0U"
+TELEGRAM_TOKEN = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
 BINANCE_API = "https://api.binance.com/api/v3/klines"
 CACHE_DIR = "cache"
 SESSIONS_FILE = "sessions.json"
