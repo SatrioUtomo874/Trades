@@ -16,6 +16,7 @@ import random
 import asyncio
 import logging
 import threading
+import signal
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
@@ -31,6 +32,7 @@ from telegram.constants import ParseMode
 
 # ================== CONFIG ==================
 TELEGRAM_TOKEN = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
+CHAT_ID = "8041197505"
 BINANCE_API = "https://api.binance.com/api/v3/klines"
 CACHE_DIR = "cache"
 SESSIONS_FILE = "sessions.json"
@@ -404,6 +406,16 @@ async def tf_switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_session(user_id, session)
     await kirim_chart(update, context, session, extra_text=f"⏱ Timeframe: {new_tf}")
 
+async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk pesan /start yang belum memulai game."""
+    await update.message.reply_text(
+        "🎮 <b>Selamat datang di Trading Simulator Bot!</b>\n\n"
+        "Bot ini akan membantu Anda berlatih analisa teknikal dengan data historis nyata dari Binance.\n\n"
+        "Gunakan /start untuk memulai sesi permainan baru.\n"
+        "Ketik /help untuk melihat semua perintah.",
+        parse_mode=ParseMode.HTML
+    )
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎮 <b>Trading Simulator Bot</b>\n\n"
@@ -422,7 +434,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== MAIN ==================
 def run_bot():
-    """Jalankan bot di event loop sendiri."""
+    """Jalankan bot di thread utama."""
     app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app_bot.add_handler(CommandHandler("start", start))
@@ -434,6 +446,18 @@ def run_bot():
     app_bot.add_handler(CommandHandler("tf", tf_switch))
     app_bot.add_handler(CommandHandler("help", help_cmd))
 
+    # Kirim welcome message ke chat ID spesifik
+    async def send_welcome():
+        await app_bot.bot.send_message(chat_id=CHAT_ID, text="🎮 <b>Bot Simulasi Trading siap digunakan!</b>\n\nGunakan /start untuk memulai sesi permainan baru.\nKetik /help untuk bantuan.", parse_mode=ParseMode.HTML)
+
+    # Buat event loop untuk bot
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Kirim welcome
+    loop.run_until_complete(send_welcome())
+
+    # Mulai polling
     app_bot.run_polling()
 
 if __name__ == "__main__":
