@@ -1,45 +1,66 @@
 #!/usr/bin/env python3
 """
-SMC Signal Broadcasting Bot — Render.com Ready
-Start command: python main.py
+SMC Signal Bot — Simulasi Trading
+Render.com Web Service | python main.py
 """
 
 # ─────────────────────────────────────────────
-# KONFIGURASI
-# ─────────────────────────────────────────────
 TELEGRAM_TOKEN  = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
 ALLOWED_USER_ID = 8041197505
-
-MAX_PRICE      = 80.0
-TOP_N_COINS    = 50
-TOP_SIGNALS    = 3
-LOOP_INTERVAL  = 300  # detik
-MIN_RR         = 2.0  # minimum RR untuk setup valid
+MAX_PRICE       = 80.0
+TOP_N_COINS     = 50
+LOOP_INTERVAL   = 300   # detik antar scan
+MIN_RR          = 2.0
+MONITOR_SLEEP   = 2     # detik antar cek harga saat monitoring
+ENTRY_TIMEOUT   = 3600  # detik maks tunggu limit order (1 jam)
 # ─────────────────────────────────────────────
 
 import os, time, logging, threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests, pandas as pd, numpy as np, urllib3
 from flask import Flask
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
-auto_mode      = False
-auto_thread    = None
-active_chat_id = None
-FAPI           = "https://fapi.binance.com"
+# ── State global ──────────────────────────────
+auto_mode       = False
+auto_thread     = None
+active_chat_id  = None
+timeout_flag    = False   # /timeout → hentikan monitoring sekarang
 
-# ─── Flask (wajib untuk Render) ───────────────
+# ── Statistik simulasi ────────────────────────
+stat_lock = threading.Lock()
+stats = {"tp": 0, "sl": 0, "no_entry": 0, "total": 0}
+
+# ── Daftar ban koin ───────────────────────────
+ban_lock    = threading.Lock()
+banned_coins: set = set()
+
+FAPI = "https://fapi.binance.com"
+
+# ── Flask ─────────────────────────────────────
 app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return f"SMC Bot OK | Auto: {auto_mode}", 200
+    with stat_lock:
+        total = stats["total"]
+        tp    = stats["tp"]
+        sl    = stats["sl"]
+        ne    = stats["no_entry"]
+    pct_tp = f"{tp/total*100:.1f}%" if total else "–"
+    pct_sl = f"{sl/total*100:.1f}%" if total else "–"
+    banned = len(banned_coins)
+    return (
+        f"<h3>SMC Sim Bot</h3>"
+        f"<p>Auto: {auto_mode} | Banned: {banned}</p>"
+        f"<p>Total: {total} | TP: {tp} ({pct_tp}) | "
+        f"SL: {sl} ({pct_sl}) | No Entry: {ne}</p>"
+    ), 200
 
 @app.route("/health")
 def health():
@@ -67,7 +88,7 @@ def tg_updates(offset=None):
     try:
         r = requests.get(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-            params={"timeout": 10, "offset": offset}, timeout=15)
+            params={"timeout": 8, "offset": offset}, timeout=12)
         d = r.json()
         return d.get("result", []) if d.get("ok") else []
     except Exception as e:
@@ -81,7 +102,8 @@ def tg_updates(offset=None):
 def fapi_get(path, params=None):
     for i in range(3):
         try:
-            r = requests.get(f"{FAPI}{path}", params=params, timeout=10, verify=False)
+            r = requests.get(f"{FAPI}{path}", params=params,
+                             timeout=10, verify=False)
             d = r.json()
             if isinstance(d, dict) and "code" in d:
                 raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
@@ -90,6 +112,15 @@ def fapi_get(path, params=None):
             log.warning(f"[fapi] {i+1}/3: {e}")
             time.sleep(2)
     raise ConnectionError(f"fapi gagal: {path}")
+
+def get_price(symbol: str) -> float | None:
+    """Ambil harga terkini satu koin — ringan, cepat."""
+    try:
+        d = fapi_get("/fapi/v1/ticker/price", {"symbol": symbol})
+        return float(d["price"])
+    except Exception as e:
+        log.warning(f"[get_price] {symbol}: {e}")
+        return None
 
 def get_klines(symbol, interval, limit=200):
     raw = fapi_get("/fapi/v1/klines",
@@ -106,10 +137,15 @@ def get_klines(symbol, interval, limit=200):
 
 def get_top_coins():
     tickers = fapi_get("/fapi/v1/ticker/24hr")
-    usdt = [t for t in tickers
-            if t["symbol"].endswith("USDT")
-            and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
-            and float(t["quoteVolume"]) > 100_000]
+    with ban_lock:
+        current_ban = set(banned_coins)
+    usdt = [
+        t for t in tickers
+        if t["symbol"].endswith("USDT")
+        and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
+        and float(t["quoteVolume"]) > 100_000
+        and t["symbol"] not in current_ban
+    ]
     usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
     return [t["symbol"] for t in usdt[:TOP_N_COINS]]
 
@@ -131,7 +167,7 @@ def macd(s):
     sig  = ema(line, 9)
     return line, sig, line - sig
 
-def atr(df, n=14):
+def atr_series(df, n=14):
     tr = pd.concat([
         df["high"] - df["low"],
         (df["high"] - df["close"].shift()).abs(),
@@ -140,8 +176,7 @@ def atr(df, n=14):
     return tr.rolling(n).mean()
 
 def indicators(df):
-    if len(df) < 50:
-        return None
+    if len(df) < 50: return None
     df = df.copy()
     df["ema9"]   = ema(df["close"], 9)
     df["ema21"]  = ema(df["close"], 21)
@@ -149,7 +184,7 @@ def indicators(df):
     df["ema200"] = ema(df["close"], 200) if len(df)>=200 else ema(df["close"],50)
     df["rsi"]    = rsi(df["close"])
     df["macd_line"], df["macd_sig"], df["macd_hist"] = macd(df["close"])
-    df["atr"]    = atr(df)
+    df["atr"]    = atr_series(df)
     df["vol_sma"]= df["volume"].rolling(20).mean()
     bb_mid       = df["close"].rolling(20).mean()
     bb_std       = df["close"].rolling(20).std()
@@ -160,7 +195,7 @@ def indicators(df):
 
 
 # ═════════════════════════════════════════════
-# SMC HELPERS
+# SMC
 # ═════════════════════════════════════════════
 def swing_pts(df, lb=5):
     sh, sl = [], []
@@ -185,8 +220,7 @@ def find_ob(df, direction, lb=30):
     obs = []
     for i in range(1, len(sub)-1):
         c, nx = sub.iloc[i], sub.iloc[i+1]
-        body = abs(nx["close"]-nx["open"])
-        if body < avg*1.2: continue
+        if abs(nx["close"]-nx["open"]) < avg*1.2: continue
         if direction=="bull" and c["close"]<c["open"] and nx["close"]>nx["open"]:
             obs.append({"top":c["high"],"bot":c["low"]})
         if direction=="bear" and c["close"]>c["open"] and nx["close"]<nx["open"]:
@@ -228,360 +262,532 @@ def choch_bos(df, sh, sl):
 
 
 # ═════════════════════════════════════════════
-# SKOR ANALISIS — tidak ada batas minimum
-# Setiap koin selalu punya skor, kita ambil terbaik
+# SCORING
 # ═════════════════════════════════════════════
 def score_coin(df_h1, df_m15):
-    """
-    Kembalikan dict lengkap dengan skor dan arah.
-    Tidak ada filter ketat — semua koin dinilai, terbaik yang menang.
-    """
-    # ── Indikator ──────────────────────────────
     h1  = indicators(df_h1)
     m15 = indicators(df_m15)
-    if h1 is None or m15 is None:
-        return None
+    if h1 is None or m15 is None: return None
 
-    L1  = h1.iloc[-1];  P1  = h1.iloc[-2]
-    L15 = m15.iloc[-1]; P15 = m15.iloc[-2]
+    L1=h1.iloc[-1]; P1=h1.iloc[-2]
+    L15=m15.iloc[-1]; P15=m15.iloc[-2]
 
-    # ── Poin positif untuk bull / bear ─────────
-    # Tiap kriteria diberi bobot, dikumpul jadi skor 0–100
-    bull_pts = 0
-    bear_pts = 0
+    bull_pts = bear_pts = 0
 
-    # 1. EMA trend H1
-    if L1["ema9"] > L1["ema21"] > L1["ema50"]:   bull_pts += 15
-    elif L1["ema9"] > L1["ema21"]:                bull_pts += 8
-    if L1["ema9"] < L1["ema21"] < L1["ema50"]:   bear_pts += 15
-    elif L1["ema9"] < L1["ema21"]:                bear_pts += 8
+    # EMA H1
+    if L1["ema9"]>L1["ema21"]>L1["ema50"]:   bull_pts+=15
+    elif L1["ema9"]>L1["ema21"]:              bull_pts+=8
+    if L1["ema9"]<L1["ema21"]<L1["ema50"]:   bear_pts+=15
+    elif L1["ema9"]<L1["ema21"]:              bear_pts+=8
 
-    # 2. Harga vs EMA200 H1
-    if L1["close"] > L1["ema200"]:  bull_pts += 8
-    else:                            bear_pts += 8
+    # EMA200 H1
+    if L1["close"]>L1["ema200"]: bull_pts+=8
+    else:                         bear_pts+=8
 
-    # 3. RSI M15
-    rsi_v = L15["rsi"]
-    if rsi_v < 40:   bull_pts += 10   # oversold → potensi rebound
-    elif rsi_v < 50: bull_pts += 5
-    if rsi_v > 60:   bear_pts += 10   # overbought → potensi turun
-    elif rsi_v > 50: bear_pts += 5
+    # RSI M15
+    rv = L15["rsi"]
+    if rv<40:   bull_pts+=10
+    elif rv<50: bull_pts+=5
+    if rv>60:   bear_pts+=10
+    elif rv>50: bear_pts+=5
 
-    # 4. MACD M15
-    if L15["macd_hist"] > 0 and P15["macd_hist"] <= 0: bull_pts += 12  # crossover
-    elif L15["macd_hist"] > 0:                          bull_pts += 6
-    if L15["macd_hist"] < 0 and P15["macd_hist"] >= 0: bear_pts += 12
-    elif L15["macd_hist"] < 0:                          bear_pts += 6
+    # MACD M15
+    if L15["macd_hist"]>0 and P15["macd_hist"]<=0: bull_pts+=12
+    elif L15["macd_hist"]>0:                        bull_pts+=6
+    if L15["macd_hist"]<0 and P15["macd_hist"]>=0: bear_pts+=12
+    elif L15["macd_hist"]<0:                        bear_pts+=6
 
-    # 5. EMA alignment M15
-    if L15["ema9"] > L15["ema21"] > L15["ema50"]: bull_pts += 10
-    elif L15["ema9"] > L15["ema21"]:               bull_pts += 5
-    if L15["ema9"] < L15["ema21"] < L15["ema50"]: bear_pts += 10
-    elif L15["ema9"] < L15["ema21"]:               bear_pts += 5
+    # EMA M15
+    if L15["ema9"]>L15["ema21"]>L15["ema50"]: bull_pts+=10
+    elif L15["ema9"]>L15["ema21"]:             bull_pts+=5
+    if L15["ema9"]<L15["ema21"]<L15["ema50"]: bear_pts+=10
+    elif L15["ema9"]<L15["ema21"]:             bear_pts+=5
 
-    # 6. Bollinger posisi M15
-    if L15["close"] < L15["bb_lo"]:  bull_pts += 8  # di bawah lower → potential reversal
-    elif L15["close"] < L15["bb_mid"]: bull_pts += 3
-    if L15["close"] > L15["bb_up"]:  bear_pts += 8
-    elif L15["close"] > L15["bb_mid"]: bear_pts += 3
+    # Bollinger M15
+    if L15["close"]<L15["bb_lo"]:   bull_pts+=8
+    elif L15["close"]<L15["bb_mid"]:bull_pts+=3
+    if L15["close"]>L15["bb_up"]:   bear_pts+=8
+    elif L15["close"]>L15["bb_mid"]:bear_pts+=3
 
-    # 7. Volume konfirmasi M15
-    if L15["volume"] > L15["vol_sma"] * 1.3: 
-        # volume tinggi searah candle
-        if L15["close"] > L15["open"]: bull_pts += 7
-        else:                           bear_pts += 7
-    elif L15["volume"] > L15["vol_sma"]:
-        if L15["close"] > L15["open"]: bull_pts += 3
-        else:                           bear_pts += 3
+    # Volume M15
+    if L15["volume"]>L15["vol_sma"]*1.3:
+        if L15["close"]>L15["open"]: bull_pts+=7
+        else:                         bear_pts+=7
+    elif L15["volume"]>L15["vol_sma"]:
+        if L15["close"]>L15["open"]: bull_pts+=3
+        else:                         bear_pts+=3
 
-    # 8. Market structure H1
-    sh1, sl1   = swing_pts(h1, 5)
-    struct_h1  = mkt_struct(h1, sh1, sl1)
-    if struct_h1 == "bullish": bull_pts += 10
-    if struct_h1 == "bearish": bear_pts += 10
+    # Market structure H1
+    sh1,sl1  = swing_pts(h1,5)
+    struct_h1= mkt_struct(h1,sh1,sl1)
+    if struct_h1=="bullish": bull_pts+=10
+    if struct_h1=="bearish": bear_pts+=10
 
-    # 9. SMC M15
-    sh15, sl15 = swing_pts(m15, 5)
-    bos        = choch_bos(m15, sh15, sl15)
-    sw_bull, sw_bear = liq_sweep(m15, sh15, sl15)
-    obs_bull   = find_ob(m15, "bull")
-    obs_bear   = find_ob(m15, "bear")
-    fvg_bull   = find_fvg(m15, "bull")
-    fvg_bear   = find_fvg(m15, "bear")
+    # SMC M15
+    sh15,sl15    = swing_pts(m15,5)
+    bos          = choch_bos(m15,sh15,sl15)
+    sw_bull,sw_bear = liq_sweep(m15,sh15,sl15)
+    obs_bull = find_ob(m15,"bull"); obs_bear = find_ob(m15,"bear")
+    fvg_bull = find_fvg(m15,"bull"); fvg_bear= find_fvg(m15,"bear")
 
-    if bos["bos_bull"] or bos["choch_bull"]: bull_pts += 10
-    if bos["bos_bear"] or bos["choch_bear"]: bear_pts += 10
-    if sw_bull:   bull_pts += 8
-    if sw_bear:   bear_pts += 8
-    if obs_bull:  bull_pts += 7
-    if obs_bear:  bear_pts += 7
-    if fvg_bull:  bull_pts += 5
-    if fvg_bear:  bear_pts += 5
+    if bos["bos_bull"] or bos["choch_bull"]: bull_pts+=10
+    if bos["bos_bear"] or bos["choch_bear"]: bear_pts+=10
+    if sw_bull: bull_pts+=8
+    if sw_bear: bear_pts+=8
+    if obs_bull: bull_pts+=7
+    if obs_bear: bear_pts+=7
+    if fvg_bull: bull_pts+=5
+    if fvg_bear: bear_pts+=5
 
-    # ── Tentukan arah dominan ──────────────────
-    total = bull_pts + bear_pts
-    if total == 0:
-        return None
+    direction = "bull" if bull_pts>=bear_pts else "bear"
+    raw_conf  = bull_pts if direction=="bull" else bear_pts
+    confidence= min(int(raw_conf/130*100), 99)
 
-    if bull_pts >= bear_pts:
-        direction = "bull"
-        raw_conf  = bull_pts
-        obs       = obs_bull
-        fvgs      = fvg_bull
-    else:
-        direction = "bear"
-        raw_conf  = bear_pts
-        obs       = obs_bear
-        fvgs      = fvg_bear
+    obs  = obs_bull  if direction=="bull" else obs_bear
+    fvgs = fvg_bull  if direction=="bull" else fvg_bear
 
-    # Normalisasi skor ke 0–100 (max poin teoritis ~130)
-    confidence = min(int(raw_conf / 130 * 100), 99)
-
-    # ── Entry / SL / TP ───────────────────────
     price   = L15["close"]
-    atr_val = L15["atr"] if L15["atr"] > 0 else price * 0.005
+    atr_val = L15["atr"] if L15["atr"]>0 else price*0.005
 
-    entry, sl_p, tp_p, etype, conf_lvl = calc_setup(
-        m15, direction, price, atr_val, obs, fvgs, sh15, sl15
-    )
-    if entry is None:
-        return None
+    entry,sl_p,tp_p,etype,conf_lvl = calc_setup(
+        m15, direction, price, atr_val, obs, fvgs, sh15, sl15)
+    if entry is None: return None
 
-    risk   = abs(entry - sl_p)
-    reward = abs(tp_p - entry)
-    rr     = round(reward / risk, 2) if risk > 0 else 0
+    risk   = abs(entry-sl_p)
+    reward = abs(tp_p-entry)
+    rr     = round(reward/risk,2) if risk>0 else 0
 
-    # ── Narasi alasan ─────────────────────────
     why = []
-    if struct_h1 != "ranging":       why.append(f"H1:{struct_h1.upper()}")
-    if L1["close"] > L1["ema200"]:   why.append("Di atas EMA200")
-    elif L1["close"] < L1["ema200"]: why.append("Di bawah EMA200")
-    if bos["bos_bull"] or bos["bos_bear"]:          why.append("BOS✔")
-    if bos["choch_bull"] or bos["choch_bear"]:      why.append("CHoCH✔")
-    if sw_bull or sw_bear:                           why.append("LiqSweep✔")
+    if struct_h1!="ranging":       why.append(f"H1:{struct_h1.upper()}")
+    if L1["close"]>L1["ema200"]:   why.append("Above EMA200")
+    elif L1["close"]<L1["ema200"]: why.append("Below EMA200")
+    if bos["bos_bull"] or bos["bos_bear"]:     why.append("BOS✔")
+    if bos["choch_bull"] or bos["choch_bear"]: why.append("CHoCH✔")
+    if sw_bull or sw_bear:                      why.append("LiqSweep✔")
     if obs:  why.append(f"OB:{obs[-1]['bot']:.4g}–{obs[-1]['top']:.4g}")
     if fvgs: why.append(f"FVG:{fvgs[-1]['bot']:.4g}–{fvgs[-1]['top']:.4g}")
-    macd_cross = (direction=="bull" and L15["macd_hist"]>0 and P15["macd_hist"]<=0) or \
-                 (direction=="bear" and L15["macd_hist"]<0 and P15["macd_hist"]>=0)
-    if macd_cross: why.append("MACD Cross✔")
-    why.append(f"RSI:{rsi_v:.0f}")
+    mc = (direction=="bull" and L15["macd_hist"]>0 and P15["macd_hist"]<=0) or \
+         (direction=="bear" and L15["macd_hist"]<0 and P15["macd_hist"]>=0)
+    if mc: why.append("MACD Cross✔")
+    why.append(f"RSI:{rv:.0f}")
 
     return {
-        "decision"   : "BUY" if direction=="bull" else "SELL",
-        "confidence" : confidence,
-        "price"      : price,
-        "entry"      : round(entry, 8),
-        "sl"         : round(sl_p, 8),
-        "tp"         : round(tp_p, 8),
-        "rr"         : rr,
-        "etype"      : etype,
-        "conf_lvl"   : conf_lvl,
-        "reason"     : " | ".join(why),
-        "rsi"        : round(rsi_v, 1),
-        "bull_pts"   : bull_pts,
-        "bear_pts"   : bear_pts,
+        "decision":direction=="bull" and "BUY" or "SELL",
+        "confidence":confidence,
+        "price":price,
+        "entry":round(entry,8),
+        "sl":round(sl_p,8),
+        "tp":round(tp_p,8),
+        "rr":rr,
+        "etype":etype,
+        "conf_lvl":conf_lvl,
+        "reason":" | ".join(why),
+        "rsi":round(rv,1),
     }
 
 
 def calc_setup(df, direction, price, atr_val, obs, fvgs, sh, sl_pts):
-    """Hitung entry/SL/TP. Fallback ke ATR jika tidak ada OB/FVG."""
-
     def try_zone(ztop, zbot):
-        buf  = atr_val * 0.3
-        in_z = zbot <= price <= ztop
-        if direction == "bull":
+        buf  = atr_val*0.3
+        in_z = zbot<=price<=ztop
+        if direction=="bull":
             entry    = price if in_z else ztop
-            etype    = "MARKET" if in_z else "STOP LIMIT"
-            conf_lvl = None if in_z else round(ztop, 8)
-            sl_p     = zbot - buf
-            cands    = [df["high"].iloc[i] for i in sh if df["high"].iloc[i] > entry]
-            tp_p     = min(cands) if cands else entry + abs(entry-sl_p)*MIN_RR
+            etype    = "MARKET" if in_z else "LIMIT"
+            conf_lvl = None if in_z else round(ztop,8)
+            sl_p     = zbot-buf
+            cands    = [df["high"].iloc[i] for i in sh if df["high"].iloc[i]>entry]
+            tp_p     = min(cands) if cands else entry+abs(entry-sl_p)*MIN_RR
         else:
             entry    = price if in_z else zbot
-            etype    = "MARKET" if in_z else "STOP LIMIT"
-            conf_lvl = None if in_z else round(zbot, 8)
-            sl_p     = ztop + buf
-            cands    = [df["low"].iloc[i] for i in sl_pts if df["low"].iloc[i] < entry]
-            tp_p     = max(cands) if cands else entry - abs(sl_p-entry)*MIN_RR
-        risk = abs(entry-sl_p)
-        if risk == 0: return None
-        rr = abs(tp_p-entry)/risk
-        if rr < MIN_RR: return None
-        return entry, sl_p, tp_p, etype, conf_lvl
+            etype    = "MARKET" if in_z else "LIMIT"
+            conf_lvl = None if in_z else round(zbot,8)
+            sl_p     = ztop+buf
+            cands    = [df["low"].iloc[i] for i in sl_pts if df["low"].iloc[i]<entry]
+            tp_p     = max(cands) if cands else entry-abs(sl_p-entry)*MIN_RR
+        risk=abs(entry-sl_p)
+        if risk==0: return None
+        if abs(tp_p-entry)/risk<MIN_RR: return None
+        return entry,sl_p,tp_p,etype,conf_lvl
 
-    # Prioritas 1: OB + FVG
     for ob in reversed(obs):
         for fvg in reversed(fvgs):
-            ot = min(ob["top"], fvg["top"]); ob_ = max(ob["bot"], fvg["bot"])
-            if ot > ob_:
-                r = try_zone(ot, ob_)
+            ot=min(ob["top"],fvg["top"]); ob_=max(ob["bot"],fvg["bot"])
+            if ot>ob_:
+                r=try_zone(ot,ob_)
                 if r: return r
-
-    # Prioritas 2: OB
     for ob in reversed(obs):
-        r = try_zone(ob["top"], ob["bot"])
+        r=try_zone(ob["top"],ob["bot"])
         if r: return r
-
-    # Prioritas 3: FVG
     for fvg in reversed(fvgs):
-        r = try_zone(fvg["top"], fvg["bot"])
+        r=try_zone(fvg["top"],fvg["bot"])
         if r: return r
 
-    # Fallback: ATR-based setup (selalu ada)
-    if direction == "bull":
-        entry  = price
-        sl_p   = price - atr_val * 1.5
-        tp_p   = price + atr_val * 1.5 * MIN_RR
-        etype  = "MARKET"
+    # Fallback ATR
+    if direction=="bull":
+        entry=price; sl_p=price-atr_val*1.5; tp_p=price+atr_val*1.5*MIN_RR
     else:
-        entry  = price
-        sl_p   = price + atr_val * 1.5
-        tp_p   = price - atr_val * 1.5 * MIN_RR
-        etype  = "MARKET"
-
-    return entry, sl_p, tp_p, etype, None
+        entry=price; sl_p=price+atr_val*1.5; tp_p=price-atr_val*1.5*MIN_RR
+    return entry,sl_p,tp_p,"MARKET",None
 
 
-# ═════════════════════════════════════════════
-# ANALISIS SATU KOIN
-# ═════════════════════════════════════════════
 def analyze(symbol):
     try:
-        df_h1  = get_klines(symbol, "1h",  200)
-        df_m15 = get_klines(symbol, "15m", 200)
-        if df_h1.empty or df_m15.empty:
-            return None
-        result = score_coin(df_h1, df_m15)
-        if result:
-            result["symbol"] = symbol
-        return result
+        h1  = get_klines(symbol,"1h",200)
+        m15 = get_klines(symbol,"15m",200)
+        if h1.empty or m15.empty: return None
+        r = score_coin(h1, m15)
+        if r: r["symbol"]=symbol
+        return r
     except Exception as e:
         log.debug(f"[analyze] {symbol}: {e}")
         return None
 
 
 # ═════════════════════════════════════════════
-# FORMAT PESAN
+# SCAN — ambil 1 sinyal terbaik
 # ═════════════════════════════════════════════
-GREETING = (
-    "👋 <b>SMC Signal Bot — Aktif!</b>\n\n"
-    "Menscan <b>50 koin USDT Futures</b> volume tertinggi (harga &lt; $80)\n"
-    "Analisis: <b>SMC + Price Action + Multi-TF (H1 + M15)</b>\n\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "📌 <b>Perintah:</b>\n"
-    "/start  — Tampilkan pesan ini\n"
-    "/scan   — Scan manual sekarang\n"
-    "/auto   — Scan otomatis tiap 5 menit\n"
-    "/stop   — Hentikan scan otomatis\n"
-    "/status — Status bot\n"
-    "/info   — Detail metode analisis\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "⚠️ <i>Sinyal bersifat edukatif. Bukan saran finansial.</i>"
-)
-
-INFO_MSG = (
-    "ℹ️ <b>Metode Analisis</b>\n\n"
-    "Setiap koin dinilai dengan sistem poin:\n\n"
-    "• EMA 9/21/50/200 alignment (H1+M15)\n"
-    "• RSI 14 — oversold/overbought\n"
-    "• MACD crossover momentum\n"
-    "• Bollinger Bands posisi\n"
-    "• Volume vs rata-rata\n"
-    "• Market Structure H1 (HH/HL vs LH/LL)\n"
-    "• BOS + CHoCH (Break/Change of Structure)\n"
-    "• Order Block detection\n"
-    "• Fair Value Gap\n"
-    "• Liquidity Sweep\n\n"
-    "Semua poin dijumlah → 3 koin skor tertinggi\n"
-    "dikirim setiap putaran.\n\n"
-    f"⚖️ Min RR: 1:{MIN_RR} | Fallback: ATR-based setup"
-)
-
-
-def fmt_signals(results, scan_time, total):
-    lines = [
-        "📡 <b>SMC SIGNAL BROADCAST</b>",
-        f"🕐 {scan_time}  |  🔍 {total} koin discan\n",
-        "━━━━━━━━━━━━━━━━━━━━",
-    ]
-    for i, r in enumerate(results, 1):
-        em    = "🟢" if r["decision"]=="BUY" else "🔴"
-        bar   = "█" * (r["confidence"]//10) + "░" * (10 - r["confidence"]//10)
-        etype = (
-            f"⏳ <b>Tipe:</b> STOP LIMIT\n   ↳ Konfirmasi di <code>{r['conf_lvl']}</code>"
-            if r["etype"]=="STOP LIMIT" and r["conf_lvl"]
-            else "⚡ <b>Tipe:</b> MARKET"
-        )
-        lines.append(
-            f"\n{em} <b>#{i} {r['symbol']}</b>\n"
-            f"💰 Harga      : <code>{r['price']:.6g}</code>\n"
-            f"📊 Keputusan  : <b>{r['decision']}</b>\n"
-            f"📈 Confidence : <b>{r['confidence']}%</b> {bar}\n"
-            f"🎯 Entry      : <code>{r['entry']:.6g}</code>\n"
-            f"{etype}\n"
-            f"🛑 Stop Loss  : <code>{r['sl']:.6g}</code>\n"
-            f"✅ Take Profit: <code>{r['tp']:.6g}</code>\n"
-            f"⚖️ RR         : <b>1:{r['rr']}</b>\n"
-            f"📝 Analisis   : {r['reason']}"
-        )
-        lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("\n⚠️ <i>Edukatif — bukan saran finansial.</i>")
-    return "\n".join(lines)
-
-
-# ═════════════════════════════════════════════
-# SCAN RUNNER
-# ═════════════════════════════════════════════
-def run_scan(chat_id, silent=False):
-    scan_time = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
-    if not silent:
-        tg_send(chat_id, f"🔄 Scan {TOP_N_COINS} koin dimulai...")
-
+def run_scan_once(chat_id) -> dict | None:
+    """Scan 50 koin, kembalikan 1 sinyal terbaik atau None."""
+    tg_send(chat_id, f"🔍 Scanning {TOP_N_COINS} koin... mohon tunggu.")
     try:
         symbols = get_top_coins()
     except Exception as e:
-        tg_send(chat_id, f"⚠️ <b>Error Binance:</b> <code>{str(e)[:200]}</code>")
-        return
+        tg_send(chat_id, f"⚠️ Gagal ambil data Binance: <code>{str(e)[:200]}</code>")
+        return None
+
+    if not symbols:
+        tg_send(chat_id, "⚠️ Semua koin masuk daftar ban atau tidak ada data.")
+        return None
 
     results = []
     for idx, sym in enumerate(symbols, 1):
         log.info(f"[{idx:02d}/{len(symbols)}] {sym}")
         r = analyze(sym)
-        if r:
-            results.append(r)
+        if r: results.append(r)
         time.sleep(0.08)
 
     if not results:
-        tg_send(chat_id, f"⚠️ Tidak ada data valid dari {len(symbols)} koin.")
-        return
+        tg_send(chat_id, "⚠️ Tidak ada data valid dari semua koin.")
+        return None
 
-    # Ranking: confidence DESC → rr DESC
     results.sort(key=lambda x: (x["confidence"], x["rr"]), reverse=True)
-    top = results[:TOP_SIGNALS]
-
-    log.info(f"Scan selesai — {len(results)} valid, top {len(top)} dikirim.")
-    tg_send(chat_id, fmt_signals(top, scan_time, len(symbols)))
+    return results[0]
 
 
 # ═════════════════════════════════════════════
-# AUTO LOOP
+# MONITORING — cek harga tiap N detik
 # ═════════════════════════════════════════════
-def auto_loop(chat_id):
-    global auto_mode
+def monitor_trade(chat_id, signal: dict) -> str:
+    """
+    Monitor harga hingga TP/SL/timeout.
+    Return: 'tp' | 'sl' | 'timeout' | 'no_entry'
+    """
+    global timeout_flag
+    sym       = signal["symbol"]
+    direction = signal["decision"]   # "BUY" / "SELL"
+    entry     = signal["entry"]
+    sl_p      = signal["sl"]
+    tp_p      = signal["tp"]
+    etype     = signal["etype"]
+    is_buy    = direction == "BUY"
+
+    # ── LIMIT ORDER: tunggu harga menyentuh entry ──
+    if etype == "LIMIT":
+        tg_send(chat_id,
+            f"⏳ <b>Menunggu LIMIT entry</b>\n"
+            f"Koin    : <b>{sym}</b>\n"
+            f"Entry   : <code>{entry:.6g}</code>\n"
+            f"TP      : <code>{tp_p:.6g}</code>\n"
+            f"SL      : <code>{sl_p:.6g}</code>\n"
+            f"Timeout : {ENTRY_TIMEOUT//60} menit\n\n"
+            f"Ketik /timeout untuk lewati.")
+
+        start = time.time()
+        entry_hit = False
+        while time.time()-start < ENTRY_TIMEOUT:
+            if timeout_flag:
+                timeout_flag = False
+                tg_send(chat_id, f"⏭ <b>/timeout</b> — limit {sym} dibatalkan.")
+                return "timeout"
+
+            price = get_price(sym)
+            if price is None:
+                time.sleep(MONITOR_SLEEP)
+                continue
+
+            # Cek apakah TP sudah tersentuh sebelum entry → batalkan
+            if is_buy and price >= tp_p:
+                tg_send(chat_id,
+                    f"❌ <b>Entry Dibatalkan — {sym}</b>\n"
+                    f"TP <code>{tp_p:.6g}</code> tersentuh sebelum entry limit.\n"
+                    f"Harga sekarang: <code>{price:.6g}</code>")
+                return "no_entry"
+            if not is_buy and price <= tp_p:
+                tg_send(chat_id,
+                    f"❌ <b>Entry Dibatalkan — {sym}</b>\n"
+                    f"TP <code>{tp_p:.6g}</code> tersentuh sebelum entry limit.\n"
+                    f"Harga sekarang: <code>{price:.6g}</code>")
+                return "no_entry"
+
+            # Entry tersentuh?
+            if is_buy and price <= entry:
+                entry_hit = True; break
+            if not is_buy and price >= entry:
+                entry_hit = True; break
+
+            time.sleep(MONITOR_SLEEP)
+
+        if not entry_hit:
+            tg_send(chat_id,
+                f"⏰ <b>Limit timeout — {sym}</b>\n"
+                f"Entry <code>{entry:.6g}</code> tidak tercapai dalam "
+                f"{ENTRY_TIMEOUT//60} menit.")
+            return "no_entry"
+
+        tg_send(chat_id,
+            f"✅ <b>LIMIT ENTRY TERISI — {sym}</b>\n"
+            f"Entry : <code>{entry:.6g}</code>\n"
+            f"TP    : <code>{tp_p:.6g}</code>\n"
+            f"SL    : <code>{sl_p:.6g}</code>")
+
+    else:
+        # ── MARKET ORDER: langsung masuk ──────────
+        # Ambil harga aktual saat ini (bisa sedikit berbeda dari analisis)
+        actual_entry = get_price(sym) or entry
+        tg_send(chat_id,
+            f"⚡ <b>MARKET ENTRY — {sym}</b>\n"
+            f"Keputusan : <b>{direction}</b>\n"
+            f"Entry analisis: <code>{entry:.6g}</code>\n"
+            f"Entry aktual  : <code>{actual_entry:.6g}</code>\n"
+            f"TP    : <code>{tp_p:.6g}</code>\n"
+            f"SL    : <code>{sl_p:.6g}</code>\n"
+            f"RR    : 1:{signal['rr']}\n\n"
+            f"📡 Monitoring harga setiap {MONITOR_SLEEP} detik...\n"
+            f"Ketik /timeout untuk hentikan monitoring.")
+
+    # ── MONITORING setelah entry ───────────────────
+    log_interval = 60   # kirim update tiap N detik
+    last_log     = time.time()
+
+    while True:
+        if timeout_flag:
+            timeout_flag = False
+            price = get_price(sym) or 0
+            tg_send(chat_id,
+                f"⏭ <b>/timeout</b> — monitoring {sym} dihentikan.\n"
+                f"Harga terakhir: <code>{price:.6g}</code>")
+            return "timeout"
+
+        price = get_price(sym)
+        if price is None:
+            time.sleep(MONITOR_SLEEP)
+            continue
+
+        # Cek TP
+        if is_buy and price >= tp_p:
+            tg_send(chat_id,
+                f"🎯 <b>TAKE PROFIT — {sym}</b> 🎉\n"
+                f"TP tercapai: <code>{price:.6g}</code>\n"
+                f"Target TP : <code>{tp_p:.6g}</code>")
+            return "tp"
+
+        if not is_buy and price <= tp_p:
+            tg_send(chat_id,
+                f"🎯 <b>TAKE PROFIT — {sym}</b> 🎉\n"
+                f"TP tercapai: <code>{price:.6g}</code>\n"
+                f"Target TP : <code>{tp_p:.6g}</code>")
+            return "tp"
+
+        # Cek SL
+        if is_buy and price <= sl_p:
+            tg_send(chat_id,
+                f"🛑 <b>STOP LOSS — {sym}</b>\n"
+                f"SL tercapai: <code>{price:.6g}</code>\n"
+                f"Target SL : <code>{sl_p:.6g}</code>")
+            return "sl"
+
+        if not is_buy and price >= sl_p:
+            tg_send(chat_id,
+                f"🛑 <b>STOP LOSS — {sym}</b>\n"
+                f"SL tercapai: <code>{price:.6g}</code>\n"
+                f"Target SL : <code>{sl_p:.6g}</code>")
+            return "sl"
+
+        # Update berkala
+        if time.time()-last_log >= log_interval:
+            dist_tp = abs(tp_p-price)
+            dist_sl = abs(price-sl_p)
+            pct_tp  = dist_tp/abs(tp_p-entry)*100 if abs(tp_p-entry)>0 else 0
+            tg_send(chat_id,
+                f"📊 <b>Monitor {sym}</b>\n"
+                f"Harga  : <code>{price:.6g}</code>\n"
+                f"TP     : <code>{tp_p:.6g}</code> (sisa {pct_tp:.1f}%)\n"
+                f"SL     : <code>{sl_p:.6g}</code>")
+            last_log = time.time()
+
+        time.sleep(MONITOR_SLEEP)
+
+
+# ═════════════════════════════════════════════
+# STATISTIK
+# ═════════════════════════════════════════════
+def update_stats(result: str):
+    with stat_lock:
+        stats["total"] += 1
+        if result in ("tp","sl","no_entry","timeout"):
+            stats[result if result in stats else "no_entry"] += 1
+
+
+def fmt_stats() -> str:
+    with stat_lock:
+        total = stats["total"]
+        tp    = stats["tp"]
+        sl    = stats["sl"]
+        ne    = stats["no_entry"]
+        to    = stats.get("timeout", 0)
+    if total == 0:
+        return "Belum ada simulasi selesai."
+    pct_tp = tp/total*100
+    pct_sl = sl/total*100
+    return (
+        f"📊 <b>Statistik Simulasi</b>\n\n"
+        f"Total trade  : {total}\n"
+        f"✅ TP        : {tp} ({pct_tp:.1f}%)\n"
+        f"🛑 SL        : {sl} ({pct_sl:.1f}%)\n"
+        f"❌ No Entry  : {ne}\n"
+        f"⏭ Timeout   : {to}\n\n"
+        f"🚫 Koin diban: {len(banned_coins)}"
+    )
+
+
+def fmt_signal_msg(sig: dict) -> str:
+    em    = "🟢" if sig["decision"]=="BUY" else "🔴"
+    bar   = "█"*(sig["confidence"]//10) + "░"*(10-sig["confidence"]//10)
+    etype = (
+        f"⏳ LIMIT — tunggu harga menyentuh <code>{sig['conf_lvl']}</code>"
+        if sig["etype"]=="LIMIT" and sig.get("conf_lvl")
+        else "⚡ MARKET — entry sekarang"
+    )
+    return (
+        f"📡 <b>SINYAL TERBAIK</b>\n\n"
+        f"{em} <b>{sig['symbol']}</b>\n"
+        f"Keputusan   : <b>{sig['decision']}</b>\n"
+        f"Confidence  : <b>{sig['confidence']}%</b> {bar}\n"
+        f"Harga kini  : <code>{sig['price']:.6g}</code>\n"
+        f"🎯 Entry    : <code>{sig['entry']:.6g}</code>\n"
+        f"Tipe        : {etype}\n"
+        f"🛑 Stop Loss: <code>{sig['sl']:.6g}</code>\n"
+        f"✅ Take Profit: <code>{sig['tp']:.6g}</code>\n"
+        f"⚖️ RR       : <b>1:{sig['rr']}</b>\n"
+        f"📝 Analisis : {sig['reason']}"
+    )
+
+
+# ═════════════════════════════════════════════
+# AUTO LOOP SIMULASI
+# ═════════════════════════════════════════════
+def simulation_loop(chat_id):
+    global auto_mode, timeout_flag
+    tg_send(chat_id, "🤖 <b>Simulasi Trading dimulai!</b>\nBot akan scan → simulasi → scan → ...")
+
     while auto_mode:
-        run_scan(chat_id, silent=True)
-        for _ in range(LOOP_INTERVAL):
+        timeout_flag = False
+
+        # 1. SCAN — cari 1 sinyal terbaik
+        signal = run_scan_once(chat_id)
+
+        if not auto_mode: break
+
+        if signal is None:
+            tg_send(chat_id, "⚠️ Tidak ada sinyal valid. Scan ulang dalam 60 detik...")
+            for _ in range(60):
+                if not auto_mode: break
+                time.sleep(1)
+            continue
+
+        # 2. Tampilkan sinyal
+        tg_send(chat_id, fmt_signal_msg(signal))
+
+        # 3. Ban koin ini (tidak boleh masuk scan berikutnya)
+        sym = signal["symbol"]
+        with ban_lock:
+            banned_coins.add(sym)
+        log.info(f"[ban] {sym} ditambahkan. Total ban: {len(banned_coins)}")
+
+        # 4. SIMULASI TRADE — monitoring sampai TP/SL
+        result = monitor_trade(chat_id, signal)
+
+        # 5. Update statistik
+        update_stats(result)
+        with stat_lock:
+            stats.setdefault("timeout", 0)
+            if result == "timeout":
+                stats["timeout"] += 1
+
+        # 6. Kirim ringkasan trade ini + statistik kumulatif
+        result_emoji = {"tp":"🎯","sl":"🛑","no_entry":"❌","timeout":"⏭"}.get(result,"❓")
+        result_label = {"tp":"TAKE PROFIT","sl":"STOP LOSS",
+                        "no_entry":"NO ENTRY","timeout":"TIMEOUT"}.get(result,result.upper())
+        tg_send(chat_id,
+            f"{result_emoji} <b>Hasil: {result_label}</b> — {sym}\n\n"
+            + fmt_stats())
+
+        if not auto_mode: break
+
+        # 7. Jeda singkat sebelum scan berikutnya
+        tg_send(chat_id, "⏳ Scan berikutnya dalam 10 detik...")
+        for _ in range(10):
             if not auto_mode: break
             time.sleep(1)
 
+    tg_send(chat_id, "⏹ <b>Simulasi dihentikan.</b>\n\n" + fmt_stats())
+
 
 # ═════════════════════════════════════════════
-# BOT LOOP
+# PESAN STATIS
+# ═════════════════════════════════════════════
+GREETING = (
+    "👋 <b>SMC Simulasi Trading Bot</b>\n\n"
+    "Bot ini menscan koin → menemukan sinyal terbaik → mensimulasikan trade.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "📌 <b>Perintah:</b>\n"
+    "/start    — Pesan ini\n"
+    "/auto     — Mulai simulasi otomatis\n"
+    "/stop     — Hentikan simulasi\n"
+    "/timeout  — Skip monitoring saat ini, lanjut scan\n"
+    "/stats    — Lihat statistik TP/SL\n"
+    "/banned   — Lihat daftar koin yang diban\n"
+    "/resetban — Reset daftar ban\n"
+    "/info     — Detail metode analisis\n"
+    "━━━━━━━━━━━━━━━━━━━━\n\n"
+    "⚠️ <i>Ini adalah simulasi. Bukan saran finansial.</i>"
+)
+
+INFO_MSG = (
+    "ℹ️ <b>Metode Analisis</b>\n\n"
+    "• EMA 9/21/50/200 (H1 + M15)\n"
+    "• RSI 14 oversold/overbought\n"
+    "• MACD crossover\n"
+    "• Bollinger Bands posisi\n"
+    "• Volume vs rata-rata\n"
+    "• Market Structure H1 (HH/HL)\n"
+    "• BOS + CHoCH\n"
+    "• Order Block + FVG\n"
+    "• Liquidity Sweep\n\n"
+    "Entry: MARKET (langsung) atau LIMIT (tunggu zona)\n"
+    f"Min RR: 1:{MIN_RR} | Fallback: ATR-based\n\n"
+    "Alur simulasi:\n"
+    "Scan → Sinyal #1 → Ban koin → Monitor TP/SL → Stats → Scan lagi"
+)
+
+
+# ═════════════════════════════════════════════
+# BOT LOOP (command handler)
 # ═════════════════════════════════════════════
 def bot_loop():
-    global auto_mode, auto_thread, active_chat_id
+    global auto_mode, auto_thread, active_chat_id, timeout_flag
 
-    log.info("Test koneksi Binance Futures...")
+    log.info("Test koneksi Binance...")
     for i in range(10):
         try:
             fapi_get("/fapi/v1/ping")
@@ -595,7 +801,7 @@ def bot_loop():
         return
 
     offset = None
-    log.info("Menunggu perintah Telegram...")
+    log.info("Bot siap. Menunggu perintah Telegram...")
 
     while True:
         try:
@@ -619,36 +825,47 @@ def bot_loop():
                 elif text in ("/info","info"):
                     tg_send(chat_id, INFO_MSG)
 
-                elif text in ("/scan","scan"):
-                    threading.Thread(target=run_scan, args=(chat_id,), daemon=True).start()
+                elif text in ("/stats","stats"):
+                    tg_send(chat_id, fmt_stats())
+
+                elif text in ("/banned","banned"):
+                    with ban_lock:
+                        b = sorted(banned_coins)
+                    if b:
+                        tg_send(chat_id,
+                            f"🚫 <b>Koin diban ({len(b)}):</b>\n" + ", ".join(b))
+                    else:
+                        tg_send(chat_id, "✅ Belum ada koin yang diban.")
+
+                elif text in ("/resetban","resetban"):
+                    with ban_lock:
+                        n = len(banned_coins)
+                        banned_coins.clear()
+                    tg_send(chat_id, f"✅ Daftar ban direset. ({n} koin dihapus)")
 
                 elif text in ("/auto","auto"):
                     if auto_mode:
-                        tg_send(chat_id, "⚙️ Auto scan sudah aktif.")
+                        tg_send(chat_id, "⚙️ Simulasi sudah berjalan.")
                     else:
                         auto_mode   = True
                         auto_thread = threading.Thread(
-                            target=auto_loop, args=(chat_id,), daemon=True)
+                            target=simulation_loop, args=(chat_id,), daemon=True)
                         auto_thread.start()
-                        tg_send(chat_id,
-                            f"✅ Auto scan aktif — tiap {LOOP_INTERVAL//60} menit.\n"
-                            "Scan pertama dimulai sekarang...")
 
                 elif text in ("/stop","stop"):
                     if auto_mode:
-                        auto_mode = False
-                        tg_send(chat_id, "⏹ Auto scan dihentikan.")
+                        auto_mode    = False
+                        timeout_flag = True   # hentikan monitoring juga
+                        tg_send(chat_id, "⏹ Menghentikan simulasi...")
                     else:
-                        tg_send(chat_id, "ℹ️ Auto scan tidak aktif.")
+                        tg_send(chat_id, "ℹ️ Simulasi tidak sedang berjalan.")
 
-                elif text in ("/status","status"):
-                    tg_send(chat_id, (
-                        f"📶 <b>Status Bot</b>\n\n"
-                        f"Mode    : {'🟢 AUTO' if auto_mode else '⚪ Manual'}\n"
-                        f"Endpoint: Binance Futures\n"
-                        f"TF      : H1 + M15\n"
-                        f"Interval: {LOOP_INTERVAL//60} menit"
-                    ))
+                elif text in ("/timeout","timeout"):
+                    if auto_mode:
+                        timeout_flag = True
+                        tg_send(chat_id, "⏭ Timeout diterima — monitoring akan dilewati.")
+                    else:
+                        tg_send(chat_id, "ℹ️ Tidak ada monitoring aktif.")
 
                 else:
                     tg_send(chat_id, "❓ Tidak dikenal. Ketik /start.")
@@ -665,4 +882,4 @@ def bot_loop():
 # ═════════════════════════════════════════════
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
-    run_flask()  # main thread — wajib untuk Render
+    run_flask()
