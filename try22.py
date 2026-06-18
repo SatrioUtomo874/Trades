@@ -519,257 +519,278 @@ def score_direction(df_h1, df_m15):
 
 
 # ═════════════════════════════════════════════
-# TAHAP 2: ANALISIS ULANG — TP/SL PRESISI
+# TAHAP 2: ANALISIS ULANG — SL DULU, LALU TP
 # ═════════════════════════════════════════════
 def analyze_counter_setup(df_h1, df_m15, counter_dir, entry_price):
     """
-    TP/SL ditentukan murni dari struktur chart — tidak ada fallback RR arbitrary.
+    Urutan WAJIB:
+    1. Tentukan SL dulu berdasarkan LIQUIDITY POOL (equal highs/lows)
+       atau OB/supply-demand zone — bukan wick biasa yang mudah tersapu.
+       SL harus di level di mana jika harga sampai ke sana,
+       analisis counter sudah TERBUKTI SALAH.
 
-    Filosofi:
-    SL = tepat di luar struktur yang MEMBATALKAN posisi counter
-         → SELL counter: SL di atas wick tertinggi candle terakhir
-                         atau di atas OB/supply terdekat di atas entry
-         → BUY counter:  SL di bawah wick terendah candle terakhir
-                         atau di bawah demand/support terdekat di bawah entry
+    2. Hitung risk = abs(entry - SL)
 
-    TP = level nyata terdekat yang MENJADI TARGET harga
-         → Dipilih level yang paling dekat dan paling valid secara struktur
-         → Bukan target minimum berdasarkan RR
-         → RR dihitung dari kedua level, bukan sebaliknya
+    3. Iterasi TP candidates dari terdekat ke terjauh.
+       Ambil level pertama yang menghasilkan RR >= 2.0
+       Jika TP terdekat RR < 2.0 → lewati, cari level berikutnya.
+       TP tidak boleh asal, harus level nyata dari chart.
 
-    Prioritas TP/SL:
-    1. Candle structure (wick, body rejection)
-    2. Supply/Demand zone yang belum disentuh
-    3. Equal Highs/Lows (liquidity pool target)
-    4. FVG yang belum terisi
-    5. Swing high/low H1 (kerangka besar)
+    SL SELL counter: di atas equal highs / OB top / swing high — BUKAN wick 3 candle
+    SL BUY  counter: di bawah equal lows / demand bot / swing low
     """
     h1  = build_df(df_h1)
     m15 = build_df(df_m15)
     if h1 is None or m15 is None: return None
 
-    L15  = m15.iloc[-1]
-    L1   = h1.iloc[-1]
-    atr  = max(L15["atr"], entry_price * 0.002)  # ATR hanya sebagai buffer kecil
+    L15 = m15.iloc[-1]
+    atr = max(L15["atr"], entry_price * 0.002)
 
     sh15, sl15 = swing_pts(m15, lb=5)
     sh1,  sl1  = swing_pts(h1,  lb=5)
 
-    # ── Candle terakhir M15 untuk referensi wick ──────────────────────
-    last_candles = m15.iloc[-6:]   # 6 candle terakhir
-    recent_high  = last_candles["high"].max()
-    recent_low   = last_candles["low"].min()
-    last_wick_hi = m15.iloc[-1]["high"]
-    last_wick_lo = m15.iloc[-1]["low"]
+    # Kumpulkan semua level struktural
+    supply_zones = find_supply_demand(m15, "supply")
+    demand_zones = find_supply_demand(m15, "demand")
+    eq_highs     = find_equal_highs_lows(m15, "high", lb=80)
+    eq_lows      = find_equal_highs_lows(m15, "low",  lb=80)
+    fvg_bear     = find_fvg(m15, "bear")
+    fvg_bull     = find_fvg(m15, "bull")
 
-    # ── Supply/Demand zones ───────────────────────────────────────────
-    supply_zones  = find_supply_demand(m15, "supply")
-    demand_zones  = find_supply_demand(m15, "demand")
-    eq_highs      = find_equal_highs_lows(m15, "high")
-    eq_lows       = find_equal_highs_lows(m15, "low")
-    fvg_bear      = find_fvg(m15, "bear")
-    fvg_bull      = find_fvg(m15, "bull")
+    # H1 levels untuk konteks lebih besar
+    eq_highs_h1  = find_equal_highs_lows(h1, "high", lb=50)
+    eq_lows_h1   = find_equal_highs_lows(h1, "low",  lb=50)
+    supply_h1    = find_supply_demand(h1, "supply")
+    demand_h1    = find_supply_demand(h1, "demand")
 
-    reasons = []
+    sl_price = None
+    sl_label = ""
+    reasons  = []
 
-    # ══════════════════════════════════════════
-    # SELL COUNTER (chart bilang bull → kita sell)
-    # ══════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════
+    # SELL COUNTER — chart bull, kita SELL
+    # SL di atas liquidity pool / supply zone terdekat di atas entry
+    # ══════════════════════════════════════════════════════════════
     if counter_dir == "bear":
 
-        # ── SL: tepat di atas struktur yang membatalkan SELL ──────────
-        # Jika harga naik melampaui level ini, berarti bull confirmed → cut
-        sl_candidates = []
+        # Kumpulkan kandidat SL — level di atas entry
+        sl_pool = []
 
-        # 1. Wick tertinggi dari 3 candle terakhir + buffer kecil
-        #    Ini adalah SL paling ketat dan paling logis
-        sl_candidates.append(("wick_recent", recent_high + atr * 0.2))
+        # Prioritas 1: Equal highs M15 — ini zona liquidity sweep paling sering
+        # SL di ATAS equal highs agar tidak kena sweep
+        for eh in sorted(eq_highs):
+            if eh > entry_price + atr * 0.3:
+                sl_pool.append(("eq_high_m15", eh + atr * 0.25))
+                break  # ambil yang paling dekat
 
-        # 2. Supply zone terdekat di atas entry (top zona)
+        # Prioritas 2: Supply zone top M15 — level institusi jual
         for z in supply_zones:
-            if z["top"] > entry_price:
-                sl_candidates.append(("supply_zone", z["top"] + atr * 0.15))
+            if z["top"] > entry_price + atr * 0.2:
+                sl_pool.append(("supply_top_m15", z["top"] + atr * 0.2))
 
-        # 3. Equal highs terdekat di atas entry (liquidity)
-        for h in eq_highs:
-            if h > entry_price:
-                sl_candidates.append(("equal_high", h + atr * 0.15))
+        # Prioritas 3: Swing high M15 paling dekat di atas entry
+        sh_above = sorted([m15["high"].iloc[i] for i in sh15
+                           if m15["high"].iloc[i] > entry_price + atr * 0.2])
+        if sh_above:
+            sl_pool.append(("swing_h_m15", sh_above[0] + atr * 0.2))
 
-        # 4. Swing high M15 terdekat di atas entry
-        for i in sh15:
-            v = m15["high"].iloc[i]
-            if v > entry_price:
-                sl_candidates.append(("swing_h_m15", v + atr * 0.15))
+        # Prioritas 4: Equal highs H1 (level lebih kuat)
+        for eh in sorted(eq_highs_h1):
+            if eh > entry_price + atr * 0.5:
+                sl_pool.append(("eq_high_h1", eh + atr * 0.3))
+                break
 
-        # Pilih SL: yang paling dekat dengan entry (SL ketat = tidak buang risk)
-        sl_candidates_above = [(lbl, v) for lbl, v in sl_candidates
-                               if v > entry_price + atr * 0.1]
-        if sl_candidates_above:
-            sl_label, sl_price = min(sl_candidates_above, key=lambda x: x[1])
-            reasons.append(f"SL({sl_label}):{sl_price:.5g}")
+        # Prioritas 5: Supply zone H1
+        for z in supply_h1:
+            if z["top"] > entry_price + atr * 0.5:
+                sl_pool.append(("supply_top_h1", z["top"] + atr * 0.25))
+
+        # Pilih SL terdekat di atas entry dari pool
+        sl_pool_valid = [(lbl, v) for lbl, v in sl_pool
+                         if v > entry_price + atr * 0.15]
+        if not sl_pool_valid:
+            # Fallback: ATR-based jika tidak ada level struktural
+            sl_price = entry_price + atr * 2.0
+            sl_label = "atr_fallback"
         else:
-            sl_price = entry_price + atr * 1.5
-            reasons.append(f"SL(atr):{sl_price:.5g}")
+            sl_label, sl_price = min(sl_pool_valid, key=lambda x: x[1])
 
         risk = abs(sl_price - entry_price)
-        if risk < atr * 0.3:
-            sl_price = entry_price + atr * 1.0
-            risk = abs(sl_price - entry_price)
+        # SL minimum = 0.5 ATR agar tidak terlalu sempit
+        if risk < atr * 0.5:
+            sl_price = entry_price + atr * 1.5
+            risk = atr * 1.5
+            sl_label += "_expanded"
 
-        # ── TP: level nyata pertama yang menjadi target harga ─────────
-        # Untuk SELL, TP ada di bawah — cari yang paling dekat & valid
-        tp_candidates = []
+        reasons.append(f"SL@{sl_price:.5g}({sl_label})")
+        min_reward = risk * MIN_RR
 
-        # 1. Demand zone terdekat di bawah (top dari demand zone)
-        #    Harga sering berhenti di atas demand zone, bukan menembus
-        for z in reversed(demand_zones):
+        # Kumpulkan semua TP candidates di bawah entry, urutkan terdekat ke terjauh
+        tp_pool = []
+
+        # Equal lows M15 (liquidity target — sering menjadi tujuan harga)
+        for el in sorted(eq_lows, reverse=True):
+            if el < entry_price - atr * 0.5:
+                tp_pool.append(("eq_low_m15", el))
+
+        # Demand zone top M15 (harga sering berhenti di atas demand)
+        for z in sorted(demand_zones, key=lambda x: x["top"], reverse=True):
             if z["top"] < entry_price - atr * 0.5:
-                tp_candidates.append(("demand_top", z["top"]))
-                break  # ambil yang paling dekat saja
+                tp_pool.append(("demand_top_m15", z["top"]))
 
-        # 2. Equal lows terdekat (liquidity pool — target institusi)
-        for l in reversed(sorted(eq_lows)):
-            if l < entry_price - atr * 0.5:
-                tp_candidates.append(("eq_lows", l))
-                break
-
-        # 3. FVG bearish terdekat (mid FVG sebagai magnet harga)
-        for fvg in reversed(fvg_bear):
+        # FVG bear mid M15
+        for fvg in sorted(fvg_bear, key=lambda x: x["mid"], reverse=True):
             if fvg["mid"] < entry_price - atr * 0.5:
-                tp_candidates.append(("fvg_bear", fvg["mid"]))
+                tp_pool.append(("fvg_bear_m15", fvg["mid"]))
+
+        # Swing low M15
+        for v in sorted([m15["low"].iloc[i] for i in sl15], reverse=True):
+            if v < entry_price - atr * 0.5:
+                tp_pool.append(("sw_low_m15", v))
+
+        # Equal lows H1 (target lebih jauh)
+        for el in sorted(eq_lows_h1, reverse=True):
+            if el < entry_price - atr * 1.0:
+                tp_pool.append(("eq_low_h1", el))
+
+        # Demand zone H1
+        for z in sorted(demand_h1, key=lambda x: x["top"], reverse=True):
+            if z["top"] < entry_price - atr * 1.0:
+                tp_pool.append(("demand_top_h1", z["top"]))
+
+        # Swing low H1
+        for v in sorted([h1["low"].iloc[i] for i in sl1], reverse=True):
+            if v < entry_price - atr * 1.0:
+                tp_pool.append(("sw_low_h1", v))
+
+        # Iterasi dari terdekat ke terjauh — ambil yang pertama RR >= MIN_RR
+        tp_price = None
+        tp_label = ""
+        for lbl, v in sorted(tp_pool, key=lambda x: x[1], reverse=True):
+            rr_candidate = abs(entry_price - v) / risk
+            if rr_candidate >= MIN_RR:
+                tp_price = v
+                tp_label = lbl
                 break
 
-        # 4. Swing low M15 terdekat di bawah entry
-        sw_lows_below = sorted(
-            [m15["low"].iloc[i] for i in sl15
-             if m15["low"].iloc[i] < entry_price - atr * 0.5],
-            reverse=True
-        )
-        if sw_lows_below:
-            tp_candidates.append(("sw_low_m15", sw_lows_below[0]))
+        if tp_price is None:
+            return None  # tidak ada level TP yang menghasilkan RR >= 2
 
-        # 5. Swing low H1 terdekat (level lebih besar)
-        sw_lows_h1 = sorted(
-            [h1["low"].iloc[i] for i in sl1
-             if h1["low"].iloc[i] < entry_price - atr * 0.5],
-            reverse=True
-        )
-        if sw_lows_h1:
-            tp_candidates.append(("sw_low_h1", sw_lows_h1[0]))
+        reasons.append(f"TP@{tp_price:.5g}({tp_label})")
 
-        if not tp_candidates:
-            return None  # tidak ada level TP yang valid → skip koin ini
-
-        # Pilih TP: yang paling dekat dengan entry (realistis tercapai)
-        # Tapi harus di bawah entry
-        tp_candidates_valid = [(lbl, v) for lbl, v in tp_candidates
-                               if v < entry_price - atr * 0.3]
-        if not tp_candidates_valid:
-            return None
-
-        tp_label, tp_price = max(tp_candidates_valid, key=lambda x: x[1])
-        reasons.append(f"TP({tp_label}):{tp_price:.5g}")
-
-    # ══════════════════════════════════════════
-    # BUY COUNTER (chart bilang bear → kita buy)
-    # ══════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════
+    # BUY COUNTER — chart bear, kita BUY
+    # SL di bawah liquidity pool / demand zone terdekat di bawah entry
+    # ══════════════════════════════════════════════════════════════
     else:
 
-        # ── SL: tepat di bawah struktur yang membatalkan BUY ──────────
-        sl_candidates = []
+        sl_pool = []
 
-        # 1. Wick terendah dari 3 candle terakhir + buffer kecil
-        sl_candidates.append(("wick_recent", recent_low - atr * 0.2))
+        # Prioritas 1: Equal lows M15 — liquidity pool di bawah
+        for el in sorted(eq_lows, reverse=True):
+            if el < entry_price - atr * 0.3:
+                sl_pool.append(("eq_low_m15", el - atr * 0.25))
+                break
 
-        # 2. Demand zone terdekat di bawah entry (bot zona)
+        # Prioritas 2: Demand zone bot M15
         for z in demand_zones:
-            if z["bot"] < entry_price:
-                sl_candidates.append(("demand_zone", z["bot"] - atr * 0.15))
+            if z["bot"] < entry_price - atr * 0.2:
+                sl_pool.append(("demand_bot_m15", z["bot"] - atr * 0.2))
 
-        # 3. Equal lows terdekat di bawah entry
-        for l in eq_lows:
-            if l < entry_price:
-                sl_candidates.append(("equal_low", l - atr * 0.15))
+        # Prioritas 3: Swing low M15 paling dekat di bawah
+        sl_below = sorted([m15["low"].iloc[i] for i in sl15
+                           if m15["low"].iloc[i] < entry_price - atr * 0.2],
+                          reverse=True)
+        if sl_below:
+            sl_pool.append(("swing_l_m15", sl_below[0] - atr * 0.2))
 
-        # 4. Swing low M15 terdekat di bawah entry
-        for i in sl15:
-            v = m15["low"].iloc[i]
-            if v < entry_price:
-                sl_candidates.append(("swing_l_m15", v - atr * 0.15))
+        # Prioritas 4: Equal lows H1
+        for el in sorted(eq_lows_h1, reverse=True):
+            if el < entry_price - atr * 0.5:
+                sl_pool.append(("eq_low_h1", el - atr * 0.3))
+                break
 
-        # Pilih SL: yang paling dekat dengan entry
-        sl_candidates_below = [(lbl, v) for lbl, v in sl_candidates
-                               if v < entry_price - atr * 0.1]
-        if sl_candidates_below:
-            sl_label, sl_price = max(sl_candidates_below, key=lambda x: x[1])
-            reasons.append(f"SL({sl_label}):{sl_price:.5g}")
+        # Prioritas 5: Demand zone H1
+        for z in demand_h1:
+            if z["bot"] < entry_price - atr * 0.5:
+                sl_pool.append(("demand_bot_h1", z["bot"] - atr * 0.25))
+
+        sl_pool_valid = [(lbl, v) for lbl, v in sl_pool
+                         if v < entry_price - atr * 0.15]
+        if not sl_pool_valid:
+            sl_price = entry_price - atr * 2.0
+            sl_label = "atr_fallback"
         else:
-            sl_price = entry_price - atr * 1.5
-            reasons.append(f"SL(atr):{sl_price:.5g}")
+            sl_label, sl_price = max(sl_pool_valid, key=lambda x: x[1])
 
         risk = abs(entry_price - sl_price)
-        if risk < atr * 0.3:
-            sl_price = entry_price - atr * 1.0
-            risk = abs(entry_price - sl_price)
+        if risk < atr * 0.5:
+            sl_price = entry_price - atr * 1.5
+            risk = atr * 1.5
+            sl_label += "_expanded"
 
-        # ── TP: level nyata pertama di atas ───────────────────────────
-        tp_candidates = []
+        reasons.append(f"SL@{sl_price:.5g}({sl_label})")
+        min_reward = risk * MIN_RR
 
-        # 1. Supply zone terdekat di atas (bot dari supply zone)
-        for z in supply_zones:
+        # TP candidates di atas entry
+        tp_pool = []
+
+        # Equal highs M15
+        for eh in sorted(eq_highs):
+            if eh > entry_price + atr * 0.5:
+                tp_pool.append(("eq_high_m15", eh))
+
+        # Supply zone bot M15
+        for z in sorted(supply_zones, key=lambda x: x["bot"]):
             if z["bot"] > entry_price + atr * 0.5:
-                tp_candidates.append(("supply_bot", z["bot"]))
-                break
+                tp_pool.append(("supply_bot_m15", z["bot"]))
 
-        # 2. Equal highs terdekat (liquidity target)
-        for h in sorted(eq_highs):
-            if h > entry_price + atr * 0.5:
-                tp_candidates.append(("eq_highs", h))
-                break
-
-        # 3. FVG bullish terdekat
-        for fvg in fvg_bull:
+        # FVG bull mid M15
+        for fvg in sorted(fvg_bull, key=lambda x: x["mid"]):
             if fvg["mid"] > entry_price + atr * 0.5:
-                tp_candidates.append(("fvg_bull", fvg["mid"]))
+                tp_pool.append(("fvg_bull_m15", fvg["mid"]))
+
+        # Swing high M15
+        for v in sorted([m15["high"].iloc[i] for i in sh15]):
+            if v > entry_price + atr * 0.5:
+                tp_pool.append(("sw_high_m15", v))
+
+        # Equal highs H1
+        for eh in sorted(eq_highs_h1):
+            if eh > entry_price + atr * 1.0:
+                tp_pool.append(("eq_high_h1", eh))
+
+        # Supply zone H1
+        for z in sorted(supply_h1, key=lambda x: x["bot"]):
+            if z["bot"] > entry_price + atr * 1.0:
+                tp_pool.append(("supply_bot_h1", z["bot"]))
+
+        # Swing high H1
+        for v in sorted([h1["high"].iloc[i] for i in sh1]):
+            if v > entry_price + atr * 1.0:
+                tp_pool.append(("sw_high_h1", v))
+
+        # Iterasi dari terdekat ke terjauh — ambil yang pertama RR >= MIN_RR
+        tp_price = None
+        tp_label = ""
+        for lbl, v in sorted(tp_pool, key=lambda x: x[1]):
+            rr_candidate = abs(v - entry_price) / risk
+            if rr_candidate >= MIN_RR:
+                tp_price = v
+                tp_label = lbl
                 break
 
-        # 4. Swing high M15 terdekat
-        sw_highs_above = sorted(
-            [m15["high"].iloc[i] for i in sh15
-             if m15["high"].iloc[i] > entry_price + atr * 0.5]
-        )
-        if sw_highs_above:
-            tp_candidates.append(("sw_high_m15", sw_highs_above[0]))
-
-        # 5. Swing high H1
-        sw_highs_h1 = sorted(
-            [h1["high"].iloc[i] for i in sh1
-             if h1["high"].iloc[i] > entry_price + atr * 0.5]
-        )
-        if sw_highs_h1:
-            tp_candidates.append(("sw_high_h1", sw_highs_h1[0]))
-
-        if not tp_candidates:
+        if tp_price is None:
             return None
 
-        tp_candidates_valid = [(lbl, v) for lbl, v in tp_candidates
-                               if v > entry_price + atr * 0.3]
-        if not tp_candidates_valid:
-            return None
+        reasons.append(f"TP@{tp_price:.5g}({tp_label})")
 
-        tp_label, tp_price = min(tp_candidates_valid, key=lambda x: x[1])
-        reasons.append(f"TP({tp_label}):{tp_price:.5g}")
-
-    # ── Hitung RR final dari level nyata ──────────────────────────────
+    # ── Hitung RR final ───────────────────────────────────────────────
     risk   = abs(entry_price - sl_price)
     reward = abs(tp_price - entry_price)
     if risk == 0: return None
     rr = round(reward / risk, 2)
-
-    # Tidak ada filter RR minimum — TP/SL murni dari struktur
-    # RR rendah berarti TP dekat → valid, bukan dibuang
-    # RR terlalu kecil (<0.8) berarti setup tidak worth → skip
-    if rr < 0.8: return None
+    if rr < MIN_RR: return None
 
     return {
         "sl"    : round(sl_price, 8),
