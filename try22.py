@@ -82,10 +82,33 @@ def tg_updates(offset=None):
 
 
 # ═════════════════════════════════════════════
-# BINANCE
+# DATA LAYER — Binance utama, Bybit fallback
 # ═════════════════════════════════════════════
+BYBIT = "https://api.bybit.com"
+
+# Konversi interval Binance → Bybit
+INTERVAL_MAP = {
+    "1m":"1","3m":"3","5m":"5","15m":"15","30m":"30",
+    "1h":"60","2h":"120","4h":"240","1d":"D","1w":"W",
+}
+
+def _raw_get(url, params=None, retries=3):
+    """HTTP GET dengan retry — digunakan oleh kedua exchange."""
+    for i in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=10, verify=False)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            log.warning(f"[http] {i+1}/{retries} {url}: {e}")
+            time.sleep(2)
+    raise ConnectionError(f"GET gagal: {url}")
+
+
+# ── BINANCE ───────────────────────────────────
 def fapi_get(path, params=None):
-    for i in range(4):
+    """Binance Futures GET — tetap dipakai utama."""
+    for i in range(3):
         try:
             r = requests.get(f"{FAPI}{path}", params=params,
                              timeout=10, verify=False)
@@ -94,23 +117,14 @@ def fapi_get(path, params=None):
                 raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
             return d
         except Exception as e:
-            log.warning(f"[fapi] {i+1}/4: {e}")
-            time.sleep(3)
-    raise ConnectionError(f"fapi gagal: {path}")
+            log.warning(f"[binance] {i+1}/3: {e}")
+            time.sleep(2)
+    raise ConnectionError(f"Binance gagal: {path}")
 
-def get_price(symbol):
-    for _ in range(3):
-        try:
-            d = fapi_get("/fapi/v1/ticker/price", {"symbol": symbol})
-            return float(d["price"])
-        except:
-            time.sleep(1)
-    return None
-
-def get_klines(symbol, interval, limit=250):
+def _binance_klines(symbol, interval, limit):
     raw = fapi_get("/fapi/v1/klines",
                    {"symbol":symbol,"interval":interval,"limit":limit})
-    if not isinstance(raw,list) or len(raw)<40:
+    if not isinstance(raw, list) or len(raw) < 40:
         return pd.DataFrame()
     df = pd.DataFrame(raw, columns=[
         "ts","open","high","low","close","volume",
@@ -120,10 +134,12 @@ def get_klines(symbol, interval, limit=250):
     df.index = pd.to_datetime(df["ts"], unit="ms")
     return df[["open","high","low","close","volume"]].dropna()
 
-def get_top_coins():
+def _binance_price(symbol):
+    d = fapi_get("/fapi/v1/ticker/price", {"symbol": symbol})
+    return float(d["price"])
+
+def _binance_top_coins(cur_ban):
     tickers = fapi_get("/fapi/v1/ticker/24hr")
-    with ban_lock:
-        cur_ban = set(banned_coins)
     usdt = [
         t for t in tickers
         if t["symbol"].endswith("USDT")
@@ -133,6 +149,113 @@ def get_top_coins():
     ]
     usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
     return [t["symbol"] for t in usdt[:TOP_N_COINS]]
+
+
+# ── BYBIT FALLBACK ────────────────────────────
+def _bybit_klines(symbol, interval, limit):
+    """Bybit Linear (USDT Perpetual) klines."""
+    iv = INTERVAL_MAP.get(interval, "15")
+    d = _raw_get(f"{BYBIT}/v5/market/kline", {
+        "category":"linear","symbol":symbol,
+        "interval":iv,"limit":limit
+    })
+    if d.get("retCode", -1) != 0:
+        raise ValueError(f"Bybit kline error: {d.get('retMsg')}")
+    rows = d["result"]["list"]
+    if not rows or len(rows) < 40:
+        return pd.DataFrame()
+    # Bybit returns: [startTime, open, high, low, close, volume, turnover]
+    df = pd.DataFrame(rows, columns=["ts","open","high","low","close","volume","turnover"])
+    for c in ["open","high","low","close","volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df.index = pd.to_datetime(df["ts"].astype(float), unit="ms")
+    df = df.sort_index()   # Bybit returns newest-first
+    return df[["open","high","low","close","volume"]].dropna()
+
+def _bybit_price(symbol):
+    d = _raw_get(f"{BYBIT}/v5/market/tickers",
+                 {"category":"linear","symbol":symbol})
+    if d.get("retCode", -1) != 0:
+        raise ValueError(f"Bybit ticker error: {d.get('retMsg')}")
+    return float(d["result"]["list"][0]["lastPrice"])
+
+def _bybit_top_coins(cur_ban):
+    d = _raw_get(f"{BYBIT}/v5/market/tickers", {"category":"linear"})
+    if d.get("retCode", -1) != 0:
+        raise ValueError(f"Bybit tickers error: {d.get('retMsg')}")
+    items = d["result"]["list"]
+    usdt = [
+        t for t in items
+        if t["symbol"].endswith("USDT")
+        and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
+        and float(t.get("turnover24h","0")) > 100_000
+        and t["symbol"] not in cur_ban
+    ]
+    usdt.sort(key=lambda x: float(x.get("turnover24h","0")), reverse=True)
+    return [t["symbol"] for t in usdt[:TOP_N_COINS]]
+
+
+# ── PUBLIC API — digunakan oleh seluruh program ──
+def get_price(symbol):
+    """Ambil harga real-time. Binance dulu, fallback Bybit."""
+    # Binance
+    for _ in range(2):
+        try:
+            return _binance_price(symbol)
+        except Exception as e:
+            log.warning(f"[price/binance] {symbol}: {e}")
+            time.sleep(1)
+    # Bybit fallback
+    for _ in range(2):
+        try:
+            p = _bybit_price(symbol)
+            log.info(f"[price/bybit fallback] {symbol}: {p}")
+            return p
+        except Exception as e:
+            log.warning(f"[price/bybit] {symbol}: {e}")
+            time.sleep(1)
+    return None
+
+def get_klines(symbol, interval, limit=250):
+    """Ambil klines. Binance dulu, fallback Bybit."""
+    # Binance
+    try:
+        df = _binance_klines(symbol, interval, limit)
+        if not df.empty:
+            return df
+        log.warning(f"[klines/binance] {symbol} kosong, coba Bybit...")
+    except Exception as e:
+        log.warning(f"[klines/binance] {symbol}: {e} — coba Bybit...")
+    # Bybit fallback
+    try:
+        df = _bybit_klines(symbol, interval, limit)
+        if not df.empty:
+            log.info(f"[klines/bybit fallback] {symbol} {interval} OK")
+            return df
+    except Exception as e:
+        log.warning(f"[klines/bybit] {symbol}: {e}")
+    return pd.DataFrame()
+
+def get_top_coins():
+    """Ambil top coins. Binance dulu, fallback Bybit."""
+    with ban_lock:
+        cur_ban = set(banned_coins)
+    # Binance
+    try:
+        coins = _binance_top_coins(cur_ban)
+        if coins:
+            return coins
+        log.warning("[top_coins/binance] kosong, coba Bybit...")
+    except Exception as e:
+        log.warning(f"[top_coins/binance] {e} — coba Bybit...")
+    # Bybit fallback
+    try:
+        coins = _bybit_top_coins(cur_ban)
+        log.info(f"[top_coins/bybit fallback] {len(coins)} koin")
+        return coins
+    except Exception as e:
+        log.warning(f"[top_coins/bybit] {e}")
+    return []
 
 
 # ═════════════════════════════════════════════
@@ -396,169 +519,261 @@ def score_direction(df_h1, df_m15):
 
 
 # ═════════════════════════════════════════════
-# TAHAP 2: ANALISIS ULANG — cari TP/SL untuk
-#          posisi COUNTER (dibalik dari sinyal)
+# TAHAP 2: ANALISIS ULANG — TP/SL PRESISI
 # ═════════════════════════════════════════════
 def analyze_counter_setup(df_h1, df_m15, counter_dir, entry_price):
     """
-    Setelah menentukan counter direction, analisis ulang chart
-    untuk menemukan TP dan SL yang tepat berdasarkan:
-    - Support/Resistance (SNR)
-    - Supply/Demand zone (SND)
-    - FVG (Fair Value Gap)
-    - Equal Highs/Lows (liquidity pools)
-    - Swing structure
+    TP/SL ditentukan murni dari struktur chart — tidak ada fallback RR arbitrary.
 
-    counter_dir: "bull" (counter dari sinyal bear → kita BUY)
-                 "bear" (counter dari sinyal bull → kita SELL)
-    entry_price: harga aktual saat masuk
+    Filosofi:
+    SL = tepat di luar struktur yang MEMBATALKAN posisi counter
+         → SELL counter: SL di atas wick tertinggi candle terakhir
+                         atau di atas OB/supply terdekat di atas entry
+         → BUY counter:  SL di bawah wick terendah candle terakhir
+                         atau di bawah demand/support terdekat di bawah entry
+
+    TP = level nyata terdekat yang MENJADI TARGET harga
+         → Dipilih level yang paling dekat dan paling valid secara struktur
+         → Bukan target minimum berdasarkan RR
+         → RR dihitung dari kedua level, bukan sebaliknya
+
+    Prioritas TP/SL:
+    1. Candle structure (wick, body rejection)
+    2. Supply/Demand zone yang belum disentuh
+    3. Equal Highs/Lows (liquidity pool target)
+    4. FVG yang belum terisi
+    5. Swing high/low H1 (kerangka besar)
     """
-    h1=build_df(df_h1); m15=build_df(df_m15)
+    h1  = build_df(df_h1)
+    m15 = build_df(df_m15)
     if h1 is None or m15 is None: return None
 
-    L15=m15.iloc[-1]
-    atr_val=max(L15["atr"], entry_price*0.003)
-    sh15,sl15=swing_pts(m15,5)
-    sh1,sl1=swing_pts(h1,5)
+    L15  = m15.iloc[-1]
+    L1   = h1.iloc[-1]
+    atr  = max(L15["atr"], entry_price * 0.002)  # ATR hanya sebagai buffer kecil
 
-    reasons=[]
+    sh15, sl15 = swing_pts(m15, lb=5)
+    sh1,  sl1  = swing_pts(h1,  lb=5)
 
-    if counter_dir=="bear":
-        # Kita SELL di entry_price
-        # SL: di atas resistance/supply terdekat
-        # TP: support/demand terkuat di bawah
+    # ── Candle terakhir M15 untuk referensi wick ──────────────────────
+    last_candles = m15.iloc[-6:]   # 6 candle terakhir
+    recent_high  = last_candles["high"].max()
+    recent_low   = last_candles["low"].min()
+    last_wick_hi = m15.iloc[-1]["high"]
+    last_wick_lo = m15.iloc[-1]["low"]
 
-        # Cari SL: resistance terdekat di atas entry
-        # 1. Dari swing high M15
-        res_above=[df_m15["high"].iloc[i]
-                   for i in sh15
-                   if df_m15["high"].iloc[i] > entry_price]
-        # 2. Dari supply zone
-        supply_zones=find_supply_demand(m15,"supply")
+    # ── Supply/Demand zones ───────────────────────────────────────────
+    supply_zones  = find_supply_demand(m15, "supply")
+    demand_zones  = find_supply_demand(m15, "demand")
+    eq_highs      = find_equal_highs_lows(m15, "high")
+    eq_lows       = find_equal_highs_lows(m15, "low")
+    fvg_bear      = find_fvg(m15, "bear")
+    fvg_bull      = find_fvg(m15, "bull")
+
+    reasons = []
+
+    # ══════════════════════════════════════════
+    # SELL COUNTER (chart bilang bull → kita sell)
+    # ══════════════════════════════════════════
+    if counter_dir == "bear":
+
+        # ── SL: tepat di atas struktur yang membatalkan SELL ──────────
+        # Jika harga naik melampaui level ini, berarti bull confirmed → cut
+        sl_candidates = []
+
+        # 1. Wick tertinggi dari 3 candle terakhir + buffer kecil
+        #    Ini adalah SL paling ketat dan paling logis
+        sl_candidates.append(("wick_recent", recent_high + atr * 0.2))
+
+        # 2. Supply zone terdekat di atas entry (top zona)
         for z in supply_zones:
-            if z["high"]>entry_price:
-                res_above.append(z["high"])
-        # 3. Dari equal highs (liquidity)
-        eq_highs=find_equal_highs_lows(m15,"high")
-        res_above+=[h for h in eq_highs if h>entry_price]
-        # 4. Dari H1 swing high
-        res_above+=[df_h1["high"].iloc[i]
-                    for i in sh1
-                    if df_h1["high"].iloc[i]>entry_price]
+            if z["top"] > entry_price:
+                sl_candidates.append(("supply_zone", z["top"] + atr * 0.15))
 
-        if res_above:
-            nearest_res=min(res_above)
-            sl_price=nearest_res+atr_val*0.3
-            reasons.append(f"SL di atas resistance {nearest_res:.4g}")
+        # 3. Equal highs terdekat di atas entry (liquidity)
+        for h in eq_highs:
+            if h > entry_price:
+                sl_candidates.append(("equal_high", h + atr * 0.15))
+
+        # 4. Swing high M15 terdekat di atas entry
+        for i in sh15:
+            v = m15["high"].iloc[i]
+            if v > entry_price:
+                sl_candidates.append(("swing_h_m15", v + atr * 0.15))
+
+        # Pilih SL: yang paling dekat dengan entry (SL ketat = tidak buang risk)
+        sl_candidates_above = [(lbl, v) for lbl, v in sl_candidates
+                               if v > entry_price + atr * 0.1]
+        if sl_candidates_above:
+            sl_label, sl_price = min(sl_candidates_above, key=lambda x: x[1])
+            reasons.append(f"SL({sl_label}):{sl_price:.5g}")
         else:
-            sl_price=entry_price+atr_val*2.5
-            reasons.append("SL ATR-based (no resistance found)")
+            sl_price = entry_price + atr * 1.5
+            reasons.append(f"SL(atr):{sl_price:.5g}")
 
-        risk=abs(sl_price-entry_price)
-        min_tp=entry_price-risk*MIN_RR
+        risk = abs(sl_price - entry_price)
+        if risk < atr * 0.3:
+            sl_price = entry_price + atr * 1.0
+            risk = abs(sl_price - entry_price)
 
-        # Cari TP: support/demand terkuat di bawah
-        sup_below=[df_m15["low"].iloc[i]
-                   for i in sl15
-                   if df_m15["low"].iloc[i] < entry_price-risk*0.5]
-        # Demand zones
-        demand_zones=find_supply_demand(m15,"demand")
-        for z in demand_zones:
-            if z["bot"]<entry_price-risk*0.5:
-                sup_below.append(z["bot"])
-        # Equal lows (liquidity target)
-        eq_lows=find_equal_highs_lows(m15,"low")
-        sup_below+=[l for l in eq_lows if l<entry_price-risk*0.5]
-        # FVG bearish
-        fvgs=find_fvg(m15,"bear")
-        for fvg in fvgs:
-            if fvg["mid"]<entry_price-risk*0.5:
-                sup_below.append(fvg["mid"])
-        # H1 support
-        sup_below+=[df_h1["low"].iloc[i]
-                    for i in sl1
-                    if df_h1["low"].iloc[i]<entry_price-risk*0.5]
+        # ── TP: level nyata pertama yang menjadi target harga ─────────
+        # Untuk SELL, TP ada di bawah — cari yang paling dekat & valid
+        tp_candidates = []
 
-        if sup_below:
-            best_tp=max(sup_below)  # support terdekat di bawah
-            # Pastikan RR >= MIN_RR
-            if abs(best_tp-entry_price)/risk >= MIN_RR:
-                tp_price=best_tp
-                reasons.append(f"TP di support/demand {best_tp:.4g}")
-            else:
-                tp_price=min_tp
-                reasons.append(f"TP min RR 1:{MIN_RR}")
-        else:
-            tp_price=min_tp
-            reasons.append(f"TP min RR 1:{MIN_RR}")
+        # 1. Demand zone terdekat di bawah (top dari demand zone)
+        #    Harga sering berhenti di atas demand zone, bukan menembus
+        for z in reversed(demand_zones):
+            if z["top"] < entry_price - atr * 0.5:
+                tp_candidates.append(("demand_top", z["top"]))
+                break  # ambil yang paling dekat saja
 
+        # 2. Equal lows terdekat (liquidity pool — target institusi)
+        for l in reversed(sorted(eq_lows)):
+            if l < entry_price - atr * 0.5:
+                tp_candidates.append(("eq_lows", l))
+                break
+
+        # 3. FVG bearish terdekat (mid FVG sebagai magnet harga)
+        for fvg in reversed(fvg_bear):
+            if fvg["mid"] < entry_price - atr * 0.5:
+                tp_candidates.append(("fvg_bear", fvg["mid"]))
+                break
+
+        # 4. Swing low M15 terdekat di bawah entry
+        sw_lows_below = sorted(
+            [m15["low"].iloc[i] for i in sl15
+             if m15["low"].iloc[i] < entry_price - atr * 0.5],
+            reverse=True
+        )
+        if sw_lows_below:
+            tp_candidates.append(("sw_low_m15", sw_lows_below[0]))
+
+        # 5. Swing low H1 terdekat (level lebih besar)
+        sw_lows_h1 = sorted(
+            [h1["low"].iloc[i] for i in sl1
+             if h1["low"].iloc[i] < entry_price - atr * 0.5],
+            reverse=True
+        )
+        if sw_lows_h1:
+            tp_candidates.append(("sw_low_h1", sw_lows_h1[0]))
+
+        if not tp_candidates:
+            return None  # tidak ada level TP yang valid → skip koin ini
+
+        # Pilih TP: yang paling dekat dengan entry (realistis tercapai)
+        # Tapi harus di bawah entry
+        tp_candidates_valid = [(lbl, v) for lbl, v in tp_candidates
+                               if v < entry_price - atr * 0.3]
+        if not tp_candidates_valid:
+            return None
+
+        tp_label, tp_price = max(tp_candidates_valid, key=lambda x: x[1])
+        reasons.append(f"TP({tp_label}):{tp_price:.5g}")
+
+    # ══════════════════════════════════════════
+    # BUY COUNTER (chart bilang bear → kita buy)
+    # ══════════════════════════════════════════
     else:
-        # counter_dir=="bull" → kita BUY di entry_price
-        # SL: di bawah support/demand terdekat
-        # TP: resistance/supply terkuat di atas
 
-        sup_below=[df_m15["low"].iloc[i]
-                   for i in sl15
-                   if df_m15["low"].iloc[i]<entry_price]
-        demand_zones=find_supply_demand(m15,"demand")
+        # ── SL: tepat di bawah struktur yang membatalkan BUY ──────────
+        sl_candidates = []
+
+        # 1. Wick terendah dari 3 candle terakhir + buffer kecil
+        sl_candidates.append(("wick_recent", recent_low - atr * 0.2))
+
+        # 2. Demand zone terdekat di bawah entry (bot zona)
         for z in demand_zones:
-            if z["low"]<entry_price:
-                sup_below.append(z["low"])
-        eq_lows=find_equal_highs_lows(m15,"low")
-        sup_below+=[l for l in eq_lows if l<entry_price]
-        sup_below+=[df_h1["low"].iloc[i]
-                    for i in sl1
-                    if df_h1["low"].iloc[i]<entry_price]
+            if z["bot"] < entry_price:
+                sl_candidates.append(("demand_zone", z["bot"] - atr * 0.15))
 
-        if sup_below:
-            nearest_sup=max(sup_below)
-            sl_price=nearest_sup-atr_val*0.3
-            reasons.append(f"SL di bawah support {nearest_sup:.4g}")
+        # 3. Equal lows terdekat di bawah entry
+        for l in eq_lows:
+            if l < entry_price:
+                sl_candidates.append(("equal_low", l - atr * 0.15))
+
+        # 4. Swing low M15 terdekat di bawah entry
+        for i in sl15:
+            v = m15["low"].iloc[i]
+            if v < entry_price:
+                sl_candidates.append(("swing_l_m15", v - atr * 0.15))
+
+        # Pilih SL: yang paling dekat dengan entry
+        sl_candidates_below = [(lbl, v) for lbl, v in sl_candidates
+                               if v < entry_price - atr * 0.1]
+        if sl_candidates_below:
+            sl_label, sl_price = max(sl_candidates_below, key=lambda x: x[1])
+            reasons.append(f"SL({sl_label}):{sl_price:.5g}")
         else:
-            sl_price=entry_price-atr_val*2.5
-            reasons.append("SL ATR-based (no support found)")
+            sl_price = entry_price - atr * 1.5
+            reasons.append(f"SL(atr):{sl_price:.5g}")
 
-        risk=abs(entry_price-sl_price)
-        min_tp=entry_price+risk*MIN_RR
+        risk = abs(entry_price - sl_price)
+        if risk < atr * 0.3:
+            sl_price = entry_price - atr * 1.0
+            risk = abs(entry_price - sl_price)
 
-        res_above=[df_m15["high"].iloc[i]
-                   for i in sh15
-                   if df_m15["high"].iloc[i]>entry_price+risk*0.5]
-        supply_zones=find_supply_demand(m15,"supply")
+        # ── TP: level nyata pertama di atas ───────────────────────────
+        tp_candidates = []
+
+        # 1. Supply zone terdekat di atas (bot dari supply zone)
         for z in supply_zones:
-            if z["top"]>entry_price+risk*0.5:
-                res_above.append(z["top"])
-        eq_highs=find_equal_highs_lows(m15,"high")
-        res_above+=[h for h in eq_highs if h>entry_price+risk*0.5]
-        fvgs=find_fvg(m15,"bull")
-        for fvg in fvgs:
-            if fvg["mid"]>entry_price+risk*0.5:
-                res_above.append(fvg["mid"])
-        res_above+=[df_h1["high"].iloc[i]
-                    for i in sh1
-                    if df_h1["high"].iloc[i]>entry_price+risk*0.5]
+            if z["bot"] > entry_price + atr * 0.5:
+                tp_candidates.append(("supply_bot", z["bot"]))
+                break
 
-        if res_above:
-            best_tp=min(res_above)
-            if abs(best_tp-entry_price)/risk>=MIN_RR:
-                tp_price=best_tp
-                reasons.append(f"TP di resistance/supply {best_tp:.4g}")
-            else:
-                tp_price=min_tp
-                reasons.append(f"TP min RR 1:{MIN_RR}")
-        else:
-            tp_price=min_tp
-            reasons.append(f"TP min RR 1:{MIN_RR}")
+        # 2. Equal highs terdekat (liquidity target)
+        for h in sorted(eq_highs):
+            if h > entry_price + atr * 0.5:
+                tp_candidates.append(("eq_highs", h))
+                break
 
-    risk=abs(entry_price-sl_price)
-    reward=abs(tp_price-entry_price)
-    if risk==0: return None
-    rr=round(reward/risk,2)
-    if rr<MIN_RR: return None
+        # 3. FVG bullish terdekat
+        for fvg in fvg_bull:
+            if fvg["mid"] > entry_price + atr * 0.5:
+                tp_candidates.append(("fvg_bull", fvg["mid"]))
+                break
+
+        # 4. Swing high M15 terdekat
+        sw_highs_above = sorted(
+            [m15["high"].iloc[i] for i in sh15
+             if m15["high"].iloc[i] > entry_price + atr * 0.5]
+        )
+        if sw_highs_above:
+            tp_candidates.append(("sw_high_m15", sw_highs_above[0]))
+
+        # 5. Swing high H1
+        sw_highs_h1 = sorted(
+            [h1["high"].iloc[i] for i in sh1
+             if h1["high"].iloc[i] > entry_price + atr * 0.5]
+        )
+        if sw_highs_h1:
+            tp_candidates.append(("sw_high_h1", sw_highs_h1[0]))
+
+        if not tp_candidates:
+            return None
+
+        tp_candidates_valid = [(lbl, v) for lbl, v in tp_candidates
+                               if v > entry_price + atr * 0.3]
+        if not tp_candidates_valid:
+            return None
+
+        tp_label, tp_price = min(tp_candidates_valid, key=lambda x: x[1])
+        reasons.append(f"TP({tp_label}):{tp_price:.5g}")
+
+    # ── Hitung RR final dari level nyata ──────────────────────────────
+    risk   = abs(entry_price - sl_price)
+    reward = abs(tp_price - entry_price)
+    if risk == 0: return None
+    rr = round(reward / risk, 2)
+
+    # Tidak ada filter RR minimum — TP/SL murni dari struktur
+    # RR rendah berarti TP dekat → valid, bukan dibuang
+    # RR terlalu kecil (<0.8) berarti setup tidak worth → skip
+    if rr < 0.8: return None
 
     return {
-        "sl"    : round(sl_price,8),
-        "tp"    : round(tp_price,8),
+        "sl"    : round(sl_price, 8),
+        "tp"    : round(tp_price, 8),
         "rr"    : rr,
         "reason": " | ".join(reasons),
     }
