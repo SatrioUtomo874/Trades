@@ -30,8 +30,14 @@ auto_thread    = None
 active_chat_id = None
 timeout_flag   = False
 
+STARTING_BALANCE = 10.0   # modal awal simulasi dalam USD
+
 stat_lock = threading.Lock()
-stats = {"tp":0,"sl":0,"no_entry":0,"timeout":0,"total":0}
+stats = {
+    "tp":0, "sl":0, "no_entry":0, "timeout":0, "total":0,
+    "balance"    : STARTING_BALANCE,
+    "pnl_history": [],   # list dict {result, pnl_usd, pct, balance_after}
+}
 
 ban_lock = threading.Lock()
 banned_coins: set = set()
@@ -982,28 +988,92 @@ def monitor_trade(chat_id, signal):
 
 
 # ═════════════════════════════════════════════
-# STATISTIK
+# STATISTIK + BALANCE
 # ═════════════════════════════════════════════
-def update_stats(result):
+def update_stats(result, entry=None, sl_p=None, tp_p=None, actual_close=None):
+    """
+    Hitung P&L dalam USD berdasarkan persentase pergerakan harga.
+    Modal per trade = saldo saat ini (compound) atau fixed $10.
+    Pakai fixed risk per trade = 100% modal (simulasi sederhana).
+
+    pct_move = (close - entry) / entry * 100
+    Untuk SELL: pct_move dibalik
+    pnl_usd  = balance * (pct_move / 100)
+    """
     with stat_lock:
-        stats["total"]+=1
-        if result in stats: stats[result]+=1
+        stats["total"] += 1
+        if result in ("tp","sl","no_entry","timeout"):
+            stats[result] += 1
+
+        # Hitung P&L hanya untuk trade yang benar-benar masuk (tp atau sl)
+        if result in ("tp","sl") and entry and sl_p and tp_p:
+            balance = stats["balance"]
+
+            if result == "tp":
+                # Profit = jarak entry ke TP sebagai % dari entry
+                pct = abs(tp_p - entry) / entry * 100
+                pnl_usd = round(balance * pct / 100, 4)
+            else:
+                # Loss = jarak entry ke SL sebagai % dari entry
+                pct = abs(sl_p - entry) / entry * 100
+                pnl_usd = -round(balance * pct / 100, 4)
+
+            stats["balance"] = round(balance + pnl_usd, 4)
+            stats["pnl_history"].append({
+                "result"       : result,
+                "pct"          : round(pct * (1 if result=="tp" else -1), 3),
+                "pnl_usd"      : pnl_usd,
+                "balance_after": stats["balance"],
+            })
 
 def fmt_stats():
     with stat_lock:
-        t=stats["total"]; tp=stats["tp"]
-        sl=stats["sl"]; ne=stats["no_entry"]; to=stats["timeout"]
-    if t==0: return "Belum ada simulasi."
-    wr=tp/(tp+sl)*100 if (tp+sl)>0 else 0
+        t   = stats["total"]
+        tp  = stats["tp"]
+        sl  = stats["sl"]
+        ne  = stats["no_entry"]
+        to  = stats["timeout"]
+        bal = stats["balance"]
+        hist= list(stats["pnl_history"])
+
+    if t == 0:
+        return (f"📊 <b>Statistik Simulasi</b>\n\n"
+                f"Belum ada trade.\n"
+                f"💵 Modal awal: <b>${STARTING_BALANCE:.2f}</b>")
+
+    wr      = tp/(tp+sl)*100 if (tp+sl)>0 else 0
+    pnl_tot = round(bal - STARTING_BALANCE, 4)
+    pnl_pct = round(pnl_tot / STARTING_BALANCE * 100, 2)
+    pnl_em  = "📈" if pnl_tot >= 0 else "📉"
+    pnl_sgn = "+" if pnl_tot >= 0 else ""
+
+    # Riwayat 5 trade terakhir
+    recent = hist[-5:] if hist else []
+    hist_lines = []
+    for h in reversed(recent):
+        em  = "✅" if h["result"]=="tp" else "❌"
+        sgn = "+" if h["pnl_usd"] >= 0 else ""
+        hist_lines.append(
+            f"  {em} {sgn}{h['pct']:.2f}%  {sgn}${h['pnl_usd']:.4f}  "
+            f"→ ${h['balance_after']:.4f}"
+        )
+    hist_str = "\n".join(hist_lines) if hist_lines else "  (belum ada)"
+
     return (
         f"📊 <b>Statistik Simulasi</b>\n\n"
-        f"Total      : {t}\n"
-        f"🎯 TP      : {tp} ({tp/t*100:.1f}%)\n"
-        f"🛑 SL      : {sl} ({sl/t*100:.1f}%)\n"
-        f"❌ No Entry: {ne}\n"
-        f"⏭ Timeout : {to}\n"
-        f"📈 Win Rate: <b>{wr:.1f}%</b> (dari {tp+sl} trade)\n\n"
-        f"🚫 Banned  : {len(banned_coins)}"
+        f"Total trade  : {t}\n"
+        f"🎯 TP        : {tp} ({tp/t*100:.1f}%)\n"
+        f"🛑 SL        : {sl} ({sl/t*100:.1f}%)\n"
+        f"❌ No Entry  : {ne}\n"
+        f"⏭ Timeout   : {to}\n"
+        f"📈 Win Rate  : <b>{wr:.1f}%</b> (dari {tp+sl} trade)\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 <b>Modal Awal : ${STARTING_BALANCE:.2f}</b>\n"
+        f"💰 <b>Saldo Kini : ${bal:.4f}</b>\n"
+        f"{pnl_em} <b>Total P&L  : {pnl_sgn}${pnl_tot:.4f} "
+        f"({pnl_sgn}{pnl_pct:.2f}%)</b>\n\n"
+        f"📋 5 Trade Terakhir:\n{hist_str}\n\n"
+        f"🚫 Banned    : {len(banned_coins)}"
     )
 
 def fmt_signal_msg(sig):
@@ -1059,7 +1129,10 @@ def simulation_loop(chat_id):
             banned_coins.add(sym)
 
         result=monitor_trade(chat_id, signal)
-        update_stats(result)
+        update_stats(result,
+                     entry=signal.get("entry"),
+                     sl_p=signal.get("sl"),
+                     tp_p=signal.get("tp"))
 
         emoji={"tp":"🎯","sl":"🛑","no_entry":"❌","timeout":"⏭"}.get(result,"❓")
         label={"tp":"TAKE PROFIT","sl":"STOP LOSS",
@@ -1162,6 +1235,18 @@ def bot_loop():
                 elif text in ("/resetban","resetban"):
                     with ban_lock: n=len(banned_coins); banned_coins.clear()
                     tg_send(chat_id,f"✅ Ban direset ({n} dihapus).")
+                elif text in ("/resetbalance","resetbalance"):
+                    with stat_lock:
+                        stats["balance"]      = STARTING_BALANCE
+                        stats["pnl_history"]  = []
+                        stats["tp"]           = 0
+                        stats["sl"]           = 0
+                        stats["no_entry"]     = 0
+                        stats["timeout"]      = 0
+                        stats["total"]        = 0
+                    tg_send(chat_id,
+                        f"✅ Saldo & statistik direset.\n"
+                        f"💵 Modal awal: <b>${STARTING_BALANCE:.2f}</b>")
                 elif text in ("/auto","auto"):
                     if auto_mode:
                         tg_send(chat_id,"⚙️ Simulasi sudah berjalan.")
