@@ -827,18 +827,21 @@ def full_analyze(symbol):
 
         # Tahap 2: balik arah
         original_dir=score["direction"]
-        counter_dir="bear" if original_dir=="bull" else "bull"
-        counter_decision="SELL" if counter_dir=="bear" else "BUY"
-        entry_price=score["price"]
+        # Tahap 2: gunakan arah sinyal ASLI (tidak dibalik)
+        entry_price = score["price"]
+        decision    = "BUY" if original_dir == "bull" else "SELL"
+        # "bear" di sini artinya kita SELL → analyze_counter_setup
+        # dengan parameter arah asli
+        setup_dir   = original_dir  # "bull" = BUY, "bear" = SELL
 
-        # Tahap 3: analisis ulang untuk counter TP/SL
-        setup=analyze_counter_setup(df_h1,df_m15,counter_dir,entry_price)
+        # Tahap 3: analisis TP/SL berdasarkan arah asli
+        setup = analyze_counter_setup(df_h1, df_m15, setup_dir, entry_price)
         if setup is None: return None
 
         return {
             "symbol"       : symbol,
             "original_dir" : original_dir,
-            "decision"     : counter_decision,
+            "decision"     : decision,
             "confidence"   : score["confidence"],
             "price"        : entry_price,
             "entry"        : entry_price,
@@ -891,6 +894,8 @@ def run_scan_once(chat_id):
 # ═════════════════════════════════════════════
 # MONITORING
 # ═════════════════════════════════════════════
+def em_dir(decision): return "🟢" if decision=="BUY" else "🔴"
+
 def monitor_trade(chat_id, signal):
     global timeout_flag
     sym=signal["symbol"]
@@ -921,17 +926,17 @@ def monitor_trade(chat_id, signal):
     reward=abs(tp_p-actual)
     rr_now=round(reward/risk,2) if risk>0 else 0
 
-    orig_label="BULLISH" if signal["original_dir"]=="bull" else "BEARISH"
+    dir_label="BULLISH" if signal["original_dir"]=="bull" else "BEARISH"
 
     tg_send(chat_id,
-        f"⚡ <b>COUNTER ENTRY — {sym}</b>\n\n"
-        f"📊 Analisis chart: <b>{orig_label}</b>\n"
-        f"↩️ Eksekusi      : <b>{signal['decision']}</b> (dibalik)\n\n"
-        f"💰 Entry  : <code>{actual:.6g}</code>\n"
+        f"⚡ <b>ENTRY — {sym}</b>\n\n"
+        f"Arah      : {em_dir(signal['decision'])} <b>{signal['decision']}</b>\n"
+        f"Analisis  : <b>{dir_label}</b>\n"
+        f"Entry     : <code>{actual:.6g}</code>\n"
         f"✅ TP     : <code>{tp_p:.6g}</code>\n"
         f"🛑 SL     : <code>{sl_p:.6g}</code>\n"
-        f"⚖️ RR     : 1:{rr_now}\n\n"
-        f"📝 TP/SL basis:\n{signal['tp_sl_reason']}\n\n"
+        f"⚖️ RR     : 1:{rr_now}\n"
+        f"📝 Basis  : {signal['tp_sl_reason']}\n\n"
         f"📡 Monitor tiap {MONITOR_SLEEP}s... /timeout untuk skip.")
 
     last_log=time.time(); log_interval=90
@@ -1077,19 +1082,19 @@ def fmt_stats():
     )
 
 def fmt_signal_msg(sig):
-    em="🔴" if sig["decision"]=="SELL" else "🟢"
-    bar="█"*(sig["confidence"]//10)+"░"*(10-sig["confidence"]//10)
-    orig="BULLISH" if sig["original_dir"]=="bull" else "BEARISH"
+    em  = "🟢" if sig["decision"]=="BUY" else "🔴"
+    bar = "█"*(sig["confidence"]//10)+"░"*(10-sig["confidence"]//10)
+    dir_label = "BULLISH" if sig["original_dir"]=="bull" else "BEARISH"
     return (
-        f"📡 <b>COUNTER SIGNAL DITEMUKAN</b>\n\n"
-        f"Koin        : <b>{sig['symbol']}</b>\n"
-        f"Chart bicara: <b>{orig}</b> (confidence {sig['confidence']}% {bar})\n"
-        f"↩️ Eksekusi : {em} <b>{sig['decision']}</b> (counter)\n\n"
-        f"💰 Entry  : <code>{sig['entry']:.6g}</code>\n"
-        f"✅ TP     : <code>{sig['tp']:.6g}</code>\n"
-        f"🛑 SL     : <code>{sig['sl']:.6g}</code>\n"
-        f"⚖️ RR     : <b>1:{sig['rr']}</b>\n"
-        f"RSI         : {sig['rsi']} | H1: {sig['struct_h1'].upper()}\n\n"
+        f"📡 <b>SINYAL DITEMUKAN</b>\n\n"
+        f"Koin       : <b>{sig['symbol']}</b>\n"
+        f"Analisis   : <b>{dir_label}</b> (confidence {sig['confidence']}% {bar})\n"
+        f"Eksekusi   : {em} <b>{sig['decision']}</b>\n\n"
+        f"💰 Entry   : <code>{sig['entry']:.6g}</code>\n"
+        f"✅ TP      : <code>{sig['tp']:.6g}</code>\n"
+        f"🛑 SL      : <code>{sig['sl']:.6g}</code>\n"
+        f"⚖️ RR      : <b>1:{sig['rr']}</b>\n"
+        f"RSI        : {sig['rsi']} | H1: {sig['struct_h1'].upper()}\n\n"
         f"📝 Basis TP/SL:\n{sig['tp_sl_reason']}"
     )
 
@@ -1100,13 +1105,13 @@ def fmt_signal_msg(sig):
 def simulation_loop(chat_id):
     global auto_mode, timeout_flag
     tg_send(chat_id,
-        "🤖 <b>Counter Trading Simulasi dimulai!</b>\n\n"
+        "🤖 <b>Simulasi Trading dimulai!</b>\n\n"
         "Alur:\n"
-        "1. Scan & analisis 50 koin\n"
-        "2. Temukan sinyal terkuat (misal: BULL)\n"
-        "3. Balik arah → eksekusi SELL\n"
-        "4. Analisis ulang TP/SL via SNR/SND/SMC\n"
-        "5. Monitor hingga TP atau SL\n\n"
+        "1. Scan & scoring 50 koin\n"
+        "2. Ambil sinyal terkuat (BUY/SELL)\n"
+        "3. Tentukan SL dari struktur chart\n"
+        "4. Iterasi TP hingga RR ≥ 1:2\n"
+        "5. Monitor hingga TP / SL\n\n"
         "/stop untuk berhenti | /timeout untuk skip")
 
     while auto_mode:
@@ -1151,38 +1156,42 @@ def simulation_loop(chat_id):
 # PESAN STATIS
 # ═════════════════════════════════════════════
 GREETING=(
-    "👋 <b>SMC Counter Trading Bot v5</b>\n\n"
-    "Strategi: Analisis chart → temukan sinyal → BALIK arah\n"
-    "→ Cari TP/SL via SNR + SND + SMC + FVG\n\n"
+    "👋 <b>SMC Signal Trading Bot</b>\n\n"
+    "Scan koin → analisis sinyal → entry searah → TP/SL via SNR+SND+SMC\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
-    "/start    — Menu ini\n"
-    "/auto     — Mulai simulasi counter trading\n"
-    "/stop     — Hentikan simulasi\n"
-    "/timeout  — Skip monitoring, lanjut scan\n"
-    "/stats    — Statistik TP/SL/Winrate\n"
-    "/banned   — Daftar koin ban\n"
-    "/resetban — Hapus semua ban\n"
-    "/info     — Detail strategi\n"
+    "/start        — Menu ini\n"
+    "/auto         — Mulai simulasi otomatis\n"
+    "/stop         — Hentikan simulasi\n"
+    "/timeout      — Skip monitoring, lanjut scan\n"
+    "/stats        — Statistik + saldo\n"
+    "/banned       — Daftar koin ban\n"
+    "/resetban     — Hapus semua ban\n"
+    "/resetbalance — Reset saldo ke $10\n"
+    "/info         — Detail metode analisis\n"
     "━━━━━━━━━━━━━━━━━━━━\n\n"
     "⚠️ <i>Simulasi saja — bukan saran finansial.</i>"
 )
+
 INFO_MSG=(
-    "ℹ️ <b>Strategi Counter Trading v5</b>\n\n"
-    "<b>Kenapa dibalik?</b>\n"
-    "Ketika banyak indikator menunjuk BULL,\n"
-    "artinya retail trader sudah banyak BUY.\n"
-    "Institusi sering mengambil likuiditas mereka\n"
-    "dengan mendorong harga berlawanan dulu.\n\n"
-    "<b>Flow:</b>\n"
-    "1. Analisis normal → sinyal BULL/BEAR\n"
-    "2. Balik → eksekusi SELL/BUY\n"
-    "3. Analisis ulang untuk TP/SL:\n"
-    "   • SNR: Support & Resistance terdekat\n"
-    "   • SND: Supply & Demand zone\n"
-    "   • FVG: Fair Value Gap\n"
-    "   • Equal Highs/Lows: Liquidity pools\n"
-    "   • H1 swing structure\n\n"
-    f"Min RR: 1:{MIN_RR} | SL: di luar S/R struktural"
+    "ℹ️ <b>Metode Analisis</b>\n\n"
+    "<b>Tahap 1 — Scoring arah sinyal:</b>\n"
+    "• EMA 9/21/50/200 alignment (H1 + M15)\n"
+    "• RSI 14 oversold/overbought\n"
+    "• MACD crossover momentum\n"
+    "• Bollinger Bands posisi\n"
+    "• Volume vs rata-rata\n"
+    "• Market Structure H1 (HH/HL vs LH/LL)\n"
+    "• BOS + CHoCH (M15)\n"
+    "• Candle pattern (hammer, shooting star)\n\n"
+    "<b>Tahap 2 — Penentuan SL (prioritas):</b>\n"
+    "BUY: SL di bawah equal lows → demand zone → swing low\n"
+    "SELL: SL di atas equal highs → supply zone → swing high\n\n"
+    "<b>Tahap 3 — Iterasi TP:</b>\n"
+    "Dari level terdekat ke terjauh, ambil TP pertama\n"
+    "yang menghasilkan RR ≥ 1:2\n"
+    "Level TP: eq highs/lows, supply/demand, FVG, swing H1\n\n"
+    f"Min RR: 1:{MIN_RR} | TF: H1 (bias) + M15 (entry)\n"
+    f"Modal simulasi: ${STARTING_BALANCE:.2f}"
 )
 
 
