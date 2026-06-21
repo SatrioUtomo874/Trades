@@ -965,6 +965,7 @@ def monitor_trade(chat_id, signal):
             tg_send(chat_id,
                 f"⏭ <b>Timeout Manual</b> — {sym}\n"
                 f"Harga: <code>{price:.6g}</code>")
+            signal["timeout_close_price"] = None  # timeout manual, tidak ada profit
             return "timeout"
 
         price = get_price(sym)
@@ -1235,17 +1236,18 @@ def simulation_loop(chat_id):
         if not auto_mode: break
 
         if signal is None:
-            tg_send(chat_id,"⚠️ Tidak ada setup. Retry 30 detik...")
-            for _ in range(30):
+            tg_send(chat_id,"⚠️ Tidak ada setup. Retry 5 detik...")
+            for _ in range(5):
                 if not auto_mode: break
                 time.sleep(1)
             continue
 
         tg_send(chat_id, fmt_signal_msg(signal))
 
+        sym    = signal["symbol"]
         result = monitor_trade(chat_id, signal)
 
-        # Ban koin setelah trade selesai
+        # Ban koin setelah trade selesai (tp, sl, timeout — semua di-ban)
         with ban_lock:
             banned_coins[sym] = get_real_trade_count()
 
@@ -1268,9 +1270,7 @@ def simulation_loop(chat_id):
         tg_send(chat_id, f"{emoji} <b>{label}</b> — {sym}\n\n"+fmt_stats())
 
         if not auto_mode: break
-        for _ in range(5):
-            if not auto_mode: break
-            time.sleep(1)
+        # langsung lanjut scan tanpa jeda
 
     tg_send(chat_id,"⏹ <b>Simulasi dihentikan.</b>\n\n"+fmt_stats())
 
