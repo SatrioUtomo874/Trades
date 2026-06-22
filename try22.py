@@ -599,34 +599,34 @@ def analyze_counter_setup(df_h1, df_m15, counter_dir, entry_price):
         # Kumpulkan kandidat SL — level di atas entry
         sl_pool = []
 
-        # Prioritas 1: Equal highs M15 — ini zona liquidity sweep paling sering
-        # SL di ATAS equal highs agar tidak kena sweep
+        # Prioritas 1: Equal highs M15 — zona liquidity sweep paling sering
+        # SL di ATAS equal highs dengan buffer lebih besar agar tidak kena sweep
         for eh in sorted(eq_highs):
             if eh > entry_price + atr * 0.3:
-                sl_pool.append(("eq_high_m15", eh + atr * 0.25))
-                break  # ambil yang paling dekat
+                sl_pool.append(("eq_high_m15", eh + atr * 0.6))
+                break
 
-        # Prioritas 2: Supply zone top M15 — level institusi jual
+        # Prioritas 2: Supply zone top M15
         for z in supply_zones:
             if z["top"] > entry_price + atr * 0.2:
-                sl_pool.append(("supply_top_m15", z["top"] + atr * 0.2))
+                sl_pool.append(("supply_top_m15", z["top"] + atr * 0.5))
 
         # Prioritas 3: Swing high M15 paling dekat di atas entry
         sh_above = sorted([m15["high"].iloc[i] for i in sh15
                            if m15["high"].iloc[i] > entry_price + atr * 0.2])
         if sh_above:
-            sl_pool.append(("swing_h_m15", sh_above[0] + atr * 0.2))
+            sl_pool.append(("swing_h_m15", sh_above[0] + atr * 0.5))
 
         # Prioritas 4: Equal highs H1 (level lebih kuat)
         for eh in sorted(eq_highs_h1):
             if eh > entry_price + atr * 0.5:
-                sl_pool.append(("eq_high_h1", eh + atr * 0.3))
+                sl_pool.append(("eq_high_h1", eh + atr * 0.7))
                 break
 
         # Prioritas 5: Supply zone H1
         for z in supply_h1:
             if z["top"] > entry_price + atr * 0.5:
-                sl_pool.append(("supply_top_h1", z["top"] + atr * 0.25))
+                sl_pool.append(("supply_top_h1", z["top"] + atr * 0.6))
 
         # Pilih SL terdekat di atas entry dari pool
         sl_pool_valid = [(lbl, v) for lbl, v in sl_pool
@@ -711,33 +711,34 @@ def analyze_counter_setup(df_h1, df_m15, counter_dir, entry_price):
         sl_pool = []
 
         # Prioritas 1: Equal lows M15 — liquidity pool di bawah
+        # SL di BAWAH equal lows dengan buffer lebih besar agar tidak kena sweep
         for el in sorted(eq_lows, reverse=True):
             if el < entry_price - atr * 0.3:
-                sl_pool.append(("eq_low_m15", el - atr * 0.25))
+                sl_pool.append(("eq_low_m15", el - atr * 0.6))
                 break
 
         # Prioritas 2: Demand zone bot M15
         for z in demand_zones:
             if z["bot"] < entry_price - atr * 0.2:
-                sl_pool.append(("demand_bot_m15", z["bot"] - atr * 0.2))
+                sl_pool.append(("demand_bot_m15", z["bot"] - atr * 0.5))
 
         # Prioritas 3: Swing low M15 paling dekat di bawah
         sl_below = sorted([m15["low"].iloc[i] for i in sl15
                            if m15["low"].iloc[i] < entry_price - atr * 0.2],
                           reverse=True)
         if sl_below:
-            sl_pool.append(("swing_l_m15", sl_below[0] - atr * 0.2))
+            sl_pool.append(("swing_l_m15", sl_below[0] - atr * 0.5))
 
         # Prioritas 4: Equal lows H1
         for el in sorted(eq_lows_h1, reverse=True):
             if el < entry_price - atr * 0.5:
-                sl_pool.append(("eq_low_h1", el - atr * 0.3))
+                sl_pool.append(("eq_low_h1", el - atr * 0.7))
                 break
 
         # Prioritas 5: Demand zone H1
         for z in demand_h1:
             if z["bot"] < entry_price - atr * 0.5:
-                sl_pool.append(("demand_bot_h1", z["bot"] - atr * 0.25))
+                sl_pool.append(("demand_bot_h1", z["bot"] - atr * 0.6))
 
         sl_pool_valid = [(lbl, v) for lbl, v in sl_pool
                          if v < entry_price - atr * 0.15]
@@ -1048,13 +1049,36 @@ def monitor_trade(chat_id, signal):
             return "tp"
 
         if hit_sl:
-            pct = abs(price - actual) / actual * 100
+            # Konfirmasi sweep: tunggu 3 tick berturut-turut di luar SL
+            # Jika hanya wick/sweep sesaat, harga akan kembali dan tidak jadi SL
+            sweep_count = 0
             tg_send(chat_id,
-                f"🛑 <b>STOP LOSS — {sym}</b>\n"
-                f"Harga: <code>{price:.6g}</code>\n"
-                f"SL   : <code>{sl_p:.6g}</code>\n"
-                f"Loss : -{pct:.2f}%")
-            return "sl"
+                f"⚠️ <b>Harga menyentuh zona SL — {sym}</b>\n"
+                f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code>\n"
+                f"Menunggu konfirmasi (bukan liquidity sweep)...")
+            for _ in range(3):
+                time.sleep(MONITOR_SLEEP)
+                confirm_price = get_price(sym)
+                if confirm_price is None:
+                    continue
+                still_beyond = (confirm_price <= sl_p) if is_buy else (confirm_price >= sl_p)
+                if still_beyond:
+                    sweep_count += 1
+            if sweep_count >= 2:
+                # Benar-benar tembus SL, bukan sweep
+                pct = abs(price - actual) / actual * 100
+                tg_send(chat_id,
+                    f"🛑 <b>STOP LOSS CONFIRMED — {sym}</b>\n"
+                    f"Harga: <code>{price:.6g}</code>\n"
+                    f"SL   : <code>{sl_p:.6g}</code>\n"
+                    f"Loss : -{pct:.2f}%")
+                return "sl"
+            else:
+                # Sweep sesaat — harga sudah balik, lanjutkan monitoring
+                tg_send(chat_id,
+                    f"🔄 <b>Liquidity Sweep Terdeteksi — {sym}</b>\n"
+                    f"Harga sudah kembali ke dalam range. Lanjut monitor...")
+                continue
 
         # Update log berkala fase normal
         if time.time() - last_log >= log_interval:
