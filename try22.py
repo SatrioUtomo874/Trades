@@ -566,7 +566,12 @@ def analyze_counter_setup(df_h1, df_m15, counter_dir, entry_price):
     if h1 is None or m15 is None: return None
 
     L15 = m15.iloc[-1]
-    atr = max(L15["atr"], entry_price * 0.002)
+    L1  = h1.iloc[-1]
+    atr_m15 = max(L15["atr"], entry_price * 0.002)
+    atr_h1  = max(L1["atr"],  entry_price * 0.004)
+    # Pakai ATR H1 sebagai referensi minimum SL — lebih representatif dari volatilitas nyata
+    atr = atr_m15
+    sl_min = max(atr_h1 * 1.5, atr_m15 * 2.0)  # SL minimum: 1.5× H1 ATR atau 2× M15 ATR
 
     sh15, sl15 = swing_pts(m15, lb=5)
     sh1,  sl1  = swing_pts(h1,  lb=5)
@@ -632,17 +637,15 @@ def analyze_counter_setup(df_h1, df_m15, counter_dir, entry_price):
         sl_pool_valid = [(lbl, v) for lbl, v in sl_pool
                          if v > entry_price + atr * 0.15]
         if not sl_pool_valid:
-            # Fallback: ATR-based jika tidak ada level struktural
-            sl_price = entry_price + atr * 2.0
+            sl_price = entry_price + sl_min
             sl_label = "atr_fallback"
         else:
             sl_label, sl_price = min(sl_pool_valid, key=lambda x: x[1])
 
         risk = abs(sl_price - entry_price)
-        # SL minimum = 1.2 ATR agar tidak mudah tersapu noise intraday
-        if risk < atr * 1.2:
-            sl_price = entry_price + atr * 2.0
-            risk = atr * 2.0
+        if risk < sl_min:
+            sl_price = entry_price + sl_min
+            risk = sl_min
             sl_label += "_expanded"
 
         reasons.append(f"SL@{sl_price:.5g}({sl_label})")
@@ -743,16 +746,15 @@ def analyze_counter_setup(df_h1, df_m15, counter_dir, entry_price):
         sl_pool_valid = [(lbl, v) for lbl, v in sl_pool
                          if v < entry_price - atr * 0.15]
         if not sl_pool_valid:
-            sl_price = entry_price - atr * 2.0
+            sl_price = entry_price - sl_min
             sl_label = "atr_fallback"
         else:
             sl_label, sl_price = max(sl_pool_valid, key=lambda x: x[1])
 
         risk = abs(entry_price - sl_price)
-        # SL minimum = 1.2 ATR agar tidak mudah tersapu noise intraday
-        if risk < atr * 1.2:
-            sl_price = entry_price - atr * 2.0
-            risk = atr * 2.0
+        if risk < sl_min:
+            sl_price = entry_price - sl_min
+            risk = sl_min
             sl_label += "_expanded"
 
         reasons.append(f"SL@{sl_price:.5g}({sl_label})")
@@ -1446,3 +1448,4 @@ def bot_loop():
 if __name__=="__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
     run_flask()
+l
