@@ -30,6 +30,7 @@ auto_mode      = False
 auto_thread    = None
 active_chat_id = None
 timeout_flag   = False
+active_trade   = None   # dict posisi yang sedang dipantau, None jika tidak ada
 
 STARTING_BALANCE = 10.0   # modal awal simulasi dalam USD
 
@@ -951,6 +952,17 @@ def monitor_trade(chat_id, signal):
         f"📝 Basis  : {signal['tp_sl_reason']}\n\n"
         f"📡 Monitor tiap {MONITOR_SLEEP}s... /timeout untuk skip.")
 
+    global active_trade
+    active_trade = {
+        "symbol"   : sym,
+        "decision" : signal["decision"],
+        "entry"    : actual,
+        "tp"       : tp_p,
+        "sl"       : sl_p,
+        "rr"       : rr_now,
+        "entry_time": time.time(),
+    }
+
     last_log      = time.time()
     log_interval  = 90
     entry_time    = time.time()
@@ -968,7 +980,8 @@ def monitor_trade(chat_id, signal):
             tg_send(chat_id,
                 f"⏭ <b>Timeout Manual</b> — {sym}\n"
                 f"Harga: <code>{price:.6g}</code>")
-            signal["timeout_close_price"] = None  # timeout manual, tidak ada profit
+            signal["timeout_close_price"] = None
+            active_trade = None
             return "timeout"
 
         price = get_price(sym)
@@ -1009,6 +1022,7 @@ def monitor_trade(chat_id, signal):
                     f"karena harga kembali ke posisi profit.")
                 # Simpan harga penutupan ke signal agar simulation_loop bisa pakai
                 signal["timeout_close_price"] = price
+                active_trade = None
                 return "timeout"
 
             # Belum profit → cek SL masih berlaku
@@ -1048,6 +1062,7 @@ def monitor_trade(chat_id, signal):
                 f"Harga: <code>{price:.6g}</code>\n"
                 f"TP   : <code>{tp_p:.6g}</code>\n"
                 f"Profit: +{pct:.2f}%")
+            active_trade = None
             return "tp"
 
         if hit_sl:
@@ -1074,6 +1089,7 @@ def monitor_trade(chat_id, signal):
                     f"Harga: <code>{price:.6g}</code>\n"
                     f"SL   : <code>{sl_p:.6g}</code>\n"
                     f"Loss : -{pct:.2f}%")
+                active_trade = None
                 return "sl"
             else:
                 # Sweep sesaat — harga sudah balik, lanjutkan monitoring
@@ -1430,6 +1446,29 @@ def bot_loop():
                         tg_send(chat_id,"⏹ Menghentikan...")
                     else:
                         tg_send(chat_id,"ℹ️ Simulasi tidak berjalan.")
+                elif text in ("/trade","trade"):
+                    t = active_trade
+                    if t is None:
+                        tg_send(chat_id, "ℹ️ Tidak ada posisi yang sedang dipantau.")
+                    else:
+                        price_now = get_price(t["symbol"]) or 0
+                        elapsed   = time.time() - t["entry_time"]
+                        sisa_jam  = max(0, AUTO_TIMEOUT_HOURS * 3600 - elapsed) / 3600
+                        is_buy    = t["decision"] == "BUY"
+                        pnl_pct   = (price_now - t["entry"]) / t["entry"] * 100 * (1 if is_buy else -1)
+                        pnl_sign  = "+" if pnl_pct >= 0 else ""
+                        em        = "🟢" if is_buy else "🔴"
+                        tg_send(chat_id,
+                            f"📡 <b>Posisi Aktif</b>\n\n"
+                            f"Koin   : <b>{t['symbol']}</b>\n"
+                            f"Arah   : {em} {t['decision']}\n"
+                            f"Entry  : <code>{t['entry']:.6g}</code>\n"
+                            f"Harga  : <code>{price_now:.6g}</code>\n"
+                            f"TP     : <code>{t['tp']:.6g}</code>\n"
+                            f"SL     : <code>{t['sl']:.6g}</code>\n"
+                            f"RR     : 1:{t['rr']}\n"
+                            f"PnL    : <b>{pnl_sign}{pnl_pct:.2f}%</b>\n"
+                            f"⏰ Timeout dalam {sisa_jam:.1f} jam")
                 elif text in ("/timeout","timeout"):
                     if auto_mode:
                         timeout_flag=True
@@ -1448,4 +1487,3 @@ def bot_loop():
 if __name__=="__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
     run_flask()
-l
