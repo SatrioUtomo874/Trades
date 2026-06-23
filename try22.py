@@ -5,18 +5,24 @@ Logika: Analisis normal → temukan sinyal → BALIK arah → analisis ulang TP/
 Render.com | python main.py
 """
 
+import os, time, logging, threading
+from datetime import datetime
+
+from dotenv import load_dotenv
+load_dotenv()
+
 # ─────────────────────────────────────────────
-TELEGRAM_TOKEN  = "7585154530:AAHk9gwv8i2KnAf14kniYtBL9RclZt4Tt0o"
-ALLOWED_USER_ID = 8041197505
+TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 MAX_PRICE       = 80.0
 TOP_N_COINS     = 50
 MIN_RR              = 2.0
 MONITOR_SLEEP       = 2
-AUTO_TIMEOUT_HOURS  = 5      # otomatis timeout setelah 5 jam
+AUTO_TIMEOUT_HOURS  = 5
 # ─────────────────────────────────────────────
 
-import os, time, logging, threading
-from datetime import datetime
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN tidak ditemukan di environment. Cek file .env")
 
 import requests, pandas as pd, numpy as np, urllib3
 from flask import Flask
