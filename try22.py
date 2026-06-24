@@ -159,7 +159,8 @@ def _binance_top_coins(cur_ban):
         t for t in tickers
         if t["symbol"].endswith("USDT")
         and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
-        and float(t["quoteVolume"]) > 100_000
+        and float(t["quoteVolume"]) > 5_000_000          # min 5jt USDT/24j
+        and abs(float(t.get("priceChangePercent","0"))) < 15  # skip pump/dump ekstrem
         and t["symbol"] not in cur_ban
     ]
     usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
@@ -203,7 +204,8 @@ def _bybit_top_coins(cur_ban):
         t for t in items
         if t["symbol"].endswith("USDT")
         and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
-        and float(t.get("turnover24h","0")) > 100_000
+        and float(t.get("turnover24h","0")) > 5_000_000   # min 5jt USDT/24j
+        and abs(float(t.get("price24hPcnt","0"))) < 0.15  # skip pump/dump ekstrem
         and t["symbol"] not in cur_ban
     ]
     usdt.sort(key=lambda x: float(x.get("turnover24h","0")), reverse=True)
@@ -535,12 +537,39 @@ def score_direction(df_h1, df_m15):
     conf=min(int(raw/160*100),99)
     atr_val=max(L15["atr"], L15["close"]*0.003)
 
+    # ── Konfirmasi D1: jangan BUY di downtrend harian, jangan SELL di uptrend harian ──
+    d1_bias = "neutral"
+    try:
+        df_d1 = build_df(df_h1.resample("1D").agg({
+            "open":"first","high":"max","low":"min",
+            "close":"last","volume":"sum"
+        }).dropna())
+        if df_d1 is not None and len(df_d1) >= 10:
+            LD = df_d1.iloc[-1]
+            sh_d, sl_d = swing_pts(df_d1, lb=3)
+            struct_d1  = mkt_struct(df_d1, sh_d, sl_d)
+            # D1 bearish kuat: EMA9 < EMA21 < EMA50 DAN struktur bearish
+            if LD["ema9"] < LD["ema21"] < LD["ema50"] and struct_d1 == "bearish":
+                d1_bias = "bearish"
+            # D1 bullish kuat: EMA9 > EMA21 > EMA50 DAN struktur bullish
+            elif LD["ema9"] > LD["ema21"] > LD["ema50"] and struct_d1 == "bullish":
+                d1_bias = "bullish"
+    except Exception:
+        pass
+
+    # Blok sinyal berlawanan dengan D1
+    if d1_bias == "bearish" and direction == "bull":
+        conf = max(0, conf - 30)   # kurangi confidence drastis
+    if d1_bias == "bullish" and direction == "bear":
+        conf = max(0, conf - 30)
+
     return {
         "direction"  : direction,
         "confidence" : conf,
         "price"      : L15["close"],
         "atr"        : atr_val,
         "struct_h1"  : struct_h1,
+        "d1_bias"    : d1_bias,
         "rsi"        : round(rv,1),
         "bull_pts"   : bull,
         "bear_pts"   : bear,
@@ -879,6 +908,7 @@ def full_analyze(symbol):
             "rr"           : setup["rr"],
             "rsi"          : score["rsi"],
             "struct_h1"    : score["struct_h1"],
+            "d1_bias"      : score.get("d1_bias","neutral"),
             "tp_sl_reason" : setup["reason"],
         }
     except Exception as e:
@@ -1248,6 +1278,8 @@ def fmt_signal_msg(sig):
     em  = "🟢" if sig["decision"]=="BUY" else "🔴"
     bar = "█"*(sig["confidence"]//10)+"░"*(10-sig["confidence"]//10)
     dir_label = "BULLISH" if sig["original_dir"]=="bull" else "BEARISH"
+    d1_em = {"bullish":"📈","bearish":"📉","neutral":"➡️"}.get(sig.get("d1_bias","neutral"),"➡️")
+    d1_str = sig.get("d1_bias","neutral").upper()
     return (
         f"📡 <b>SINYAL DITEMUKAN</b>\n\n"
         f"Koin       : <b>{sig['symbol']}</b>\n"
@@ -1257,7 +1289,7 @@ def fmt_signal_msg(sig):
         f"✅ TP      : <code>{sig['tp']:.6g}</code>\n"
         f"🛑 SL      : <code>{sig['sl']:.6g}</code>\n"
         f"⚖️ RR      : <b>1:{sig['rr']}</b>\n"
-        f"RSI        : {sig['rsi']} | H1: {sig['struct_h1'].upper()}\n\n"
+        f"RSI        : {sig['rsi']} | H1: {sig['struct_h1'].upper()} | D1: {d1_em} {d1_str}\n\n"
         f"📝 Basis TP/SL:\n{sig['tp_sl_reason']}"
     )
 
