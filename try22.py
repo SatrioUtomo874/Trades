@@ -17,7 +17,7 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 MAX_PRICE       = 80.0
 TOP_N_COINS     = 50
 MIN_RR              = 2.0
-MONITOR_SLEEP       = 2
+MONITOR_SLEEP       = 10     # sesuai cache interval — tidak perlu lebih cepat
 AUTO_TIMEOUT_HOURS  = 5
 # ─────────────────────────────────────────────
 
@@ -212,21 +212,76 @@ def _bybit_top_coins(cur_ban):
     return [t["symbol"] for t in usdt[:TOP_N_COINS]]
 
 
-# ── PUBLIC API — digunakan oleh seluruh program ──
+# ── PRICE CACHE — satu thread terpusat, update tiap 10 detik ──
+# Menghindari IP ban akibat banyak request price per-posisi per-detik
+_price_cache: dict = {}          # {symbol: float}
+_price_cache_lock = threading.Lock()
+_PRICE_REFRESH_SEC = 10          # interval refresh cache (detik)
+
+def _price_cache_loop():
+    """
+    Thread tunggal yang refresh harga semua koin aktif + posisi terbuka
+    setiap _PRICE_REFRESH_SEC detik via satu batch request.
+    Jauh lebih hemat rate limit daripada per-posisi per-tick.
+    """
+    while True:
+        try:
+            # Kumpulkan semua simbol yang perlu dipantau
+            with positions_lock:
+                syms = set(positions.keys())
+
+            if syms:
+                # Binance batch: ambil semua sekaligus dalam satu request
+                try:
+                    data = fapi_get("/fapi/v1/ticker/price")
+                    if isinstance(data, list):
+                        batch = {d["symbol"]: float(d["price"]) for d in data}
+                        with _price_cache_lock:
+                            for s in syms:
+                                if s in batch:
+                                    _price_cache[s] = batch[s]
+                    else:
+                        raise ValueError("Format tidak dikenal")
+                except Exception as e:
+                    log.warning(f"[price_cache/binance] batch gagal: {e} — coba Bybit")
+                    # Bybit fallback: per-simbol (jarang terjadi)
+                    for s in syms:
+                        try:
+                            p = _bybit_price(s)
+                            with _price_cache_lock:
+                                _price_cache[s] = p
+                        except Exception:
+                            pass
+        except Exception as e:
+            log.error(f"[price_cache_loop] {e}")
+
+        time.sleep(_PRICE_REFRESH_SEC)
+
 def get_price(symbol):
-    """Ambil harga real-time. Binance dulu, fallback Bybit."""
-    # Binance
+    """
+    Ambil harga dari cache. Kalau belum ada (posisi baru), fetch sekali langsung.
+    Setelah itu cache_loop yang handle update berkala.
+    """
+    with _price_cache_lock:
+        cached = _price_cache.get(symbol)
+    if cached is not None:
+        return cached
+
+    # Fetch langsung untuk posisi yang baru masuk cache
     for _ in range(2):
         try:
-            return _binance_price(symbol)
+            p = _binance_price(symbol)
+            with _price_cache_lock:
+                _price_cache[symbol] = p
+            return p
         except Exception as e:
             log.warning(f"[price/binance] {symbol}: {e}")
             time.sleep(1)
-    # Bybit fallback
     for _ in range(2):
         try:
             p = _bybit_price(symbol)
-            log.info(f"[price/bybit fallback] {symbol}: {p}")
+            with _price_cache_lock:
+                _price_cache[symbol] = p
             return p
         except Exception as e:
             log.warning(f"[price/bybit] {symbol}: {e}")
@@ -1885,5 +1940,6 @@ def bot_loop():
 
 
 if __name__=="__main__":
+    threading.Thread(target=_price_cache_loop, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
     run_flask()
