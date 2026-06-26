@@ -1712,11 +1712,10 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
 
 def simulation_loop(chat_id):
     """
-    Broadcaster utama:
-    - Scan terus untuk cari sinyal baru
-    - Max 5 posisi berjalan bersamaan
-    - Tiap posisi dipantau oleh thread sendiri setiap 15 menit
-    - Scan berhenti saat 5 slot penuh, lanjut saat ada yang selesai
+    Broadcaster utama — non-blocking:
+    - Scan berjalan di thread terpisah agar tidak block loop utama
+    - Monitor per-posisi juga thread terpisah (sudah ada)
+    - Loop utama hanya koordinasi: cek slot, launch scan/monitor
     """
     global auto_mode
     tg_send(chat_id,
@@ -1727,68 +1726,75 @@ def simulation_loop(chat_id):
         "/stop untuk berhenti | /timeout SYMBOL untuk skip\n"
         "/trade untuk lihat semua posisi aktif")
 
+    scanning = False          # flag: apakah scan sedang berjalan
+    scan_lock = threading.Lock()
+
+    def _do_scan():
+        nonlocal scanning
+        try:
+            signal = run_scan_once(chat_id)
+            if not auto_mode or signal is None:
+                return
+
+            sym = signal["symbol"]
+            with positions_lock:
+                if sym in positions:
+                    return
+                if len(positions) >= MAX_POSITIONS:
+                    return
+
+            entry_price = get_price(sym) or signal["entry"]
+            pos = {
+                "signal"      : signal,
+                "entry"       : entry_price,
+                "chat_id"     : chat_id,
+                "entry_time"  : time.time(),
+                "timeout_flag": False,
+            }
+
+            with positions_lock:
+                positions[sym] = pos
+
+            tg_send(chat_id,
+                f"⚡ <b>ENTRY</b> — {sym}\n\n"
+                f"{fmt_signal_msg(signal)}\n\n"
+                f"💰 Entry aktual: <code>{entry_price:.6g}</code>\n"
+                f"📡 Dipantau tiap 15 menit...")
+
+            threading.Thread(
+                target=monitor_position,
+                args=(sym, pos),
+                daemon=True
+            ).start()
+
+        finally:
+            with scan_lock:
+                scanning = False
+
     while auto_mode:
         with positions_lock:
             n_pos = len(positions)
 
+        # Slot penuh — tunggu saja
         if n_pos >= MAX_POSITIONS:
             time.sleep(5)
             continue
 
-        # Scan cari sinyal baru
-        signal = run_scan_once(chat_id)
-        if not auto_mode: break
+        # Kalau scan sedang berjalan — jangan launch scan baru
+        with scan_lock:
+            already_scanning = scanning
+            if not already_scanning:
+                scanning = True
 
-        if signal is None:
+        if already_scanning:
             time.sleep(5)
             continue
 
-        sym = signal["symbol"]
+        # Launch scan di background
+        threading.Thread(target=_do_scan, daemon=True).start()
 
-        # Skip jika koin sudah ada di posisi aktif
-        with positions_lock:
-            if sym in positions:
-                continue
-
-        # Catat entry di harga sekarang
-        entry_price = get_price(sym) or signal["entry"]
-
-        pos = {
-            "signal"      : signal,
-            "entry"       : entry_price,
-            "chat_id"     : chat_id,
-            "entry_time"  : time.time(),
-            "timeout_flag": False,
-        }
-
-        with positions_lock:
-            positions[sym] = pos
-            global active_trade
-            active_trade = {
-                "symbol"    : sym,
-                "decision"  : signal["decision"],
-                "entry"     : entry_price,
-                "tp"        : signal["tp"],
-                "sl"        : signal["sl"],
-                "rr"        : signal["rr"],
-                "entry_time": pos["entry_time"],
-            }
-
-        # Notif entry
-        em = "🟢" if signal["decision"] == "BUY" else "🔴"
-        tg_send(chat_id,
-            f"⚡ <b>ENTRY</b> — {sym}\n\n"
-            f"{fmt_signal_msg(signal)}\n\n"
-            f"💰 Entry aktual: <code>{entry_price:.6g}</code>\n"
-            f"📡 Dipantau tiap 15 menit...")
-
-        # Jalankan thread monitor per posisi
-        t = threading.Thread(
-            target=monitor_position,
-            args=(sym, pos),
-            daemon=True
-        )
-        t.start()
+        # Jeda antar scan agar tidak langsung re-scan begitu selesai
+        time.sleep(5)
 
     tg_send(chat_id, "⏹ <b>Broadcaster dihentikan.</b>\n\n" + fmt_stats())
 
