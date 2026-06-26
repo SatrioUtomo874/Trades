@@ -32,6 +32,48 @@ logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
+
+class TelegramLogHandler(logging.Handler):
+    """
+    Forward log ERROR/CRITICAL ke Telegram.
+    Throttle: maks 1 pesan per 30 detik per pesan unik
+    agar tidak flood saat error berulang.
+    """
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self._last_sent: dict = {}   # {msg_key: timestamp}
+        self._throttle  = 30         # detik
+
+    def emit(self, record):
+        # Hindari rekursi (error saat kirim TG itu sendiri)
+        if "TG" in record.getMessage(): return
+        try:
+            msg_key = record.getMessage()[:80]
+            now = time.time()
+            if now - self._last_sent.get(msg_key, 0) < self._throttle:
+                return
+            self._last_sent[msg_key] = now
+
+            cid = active_chat_id
+            if not cid or not TELEGRAM_TOKEN: return
+
+            level_em = "🔴" if record.levelno >= logging.CRITICAL else "⚠️"
+            text = (
+                f"{level_em} <b>[{record.levelname}]</b>\n"
+                f"<code>{record.getMessage()[:400]}</code>"
+            )
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": cid, "text": text, "parse_mode": "HTML"},
+                timeout=5
+            )
+        except Exception:
+            pass   # jangan pernah raise dari handler log
+
+
+_tg_log_handler = TelegramLogHandler()
+log.addHandler(_tg_log_handler)
+
 auto_mode      = False
 auto_thread    = None
 active_chat_id = None
