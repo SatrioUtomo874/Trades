@@ -1583,6 +1583,9 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
     except Exception as e:
         log.debug(f"[check_tp_sl_order] {sym}: {e}")
     return None
+
+
+def monitor_position(sym, pos):
     """
     Thread per-posisi: cek TP/SL setiap 15 menit.
     Auto-timeout 5 jam: tunggu PnL positif lalu tutup.
@@ -1640,12 +1643,33 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
                     f"Profit: <b>+{pct:.2f}%</b>")
                 close_position(sym, "timeout", close_price=price)
                 return
+
             # SL tetap aktif saat wait_profit
             hit_sl = (price <= sl_p) if is_buy else (price >= sl_p)
             if hit_sl:
+                tg_send(chat_id,
+                    f"🛑 <b>SL saat Timeout</b> — {sym}\n"
+                    f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code>")
                 close_position(sym, "sl")
                 return
-            time.sleep(MONITOR_SLEEP)
+
+            # PnL masih negatif — notif dan tunggu 15 menit lagi
+            pnl_pct = (price - entry) / entry * 100 * (1 if is_buy else -1)
+            tg_send(chat_id,
+                f"⏳ <b>Timeout — Menunggu Profit</b> — {sym}\n"
+                f"Harga : <code>{price:.6g}</code>\n"
+                f"Entry : <code>{entry:.6g}</code>\n"
+                f"PnL   : <b>{pnl_pct:+.2f}%</b>\n"
+                f"SL    : <code>{sl_p:.6g}</code> (masih aktif)\n"
+                f"⏰ Cek lagi 15 menit...")
+
+            # Tunggu 15 menit, responsif terhadap timeout_flag
+            deadline = time.time() + MONITOR_INTERVAL
+            while time.time() < deadline:
+                with positions_lock:
+                    if sym not in positions: return
+                if pos.get("timeout_flag"): break
+                time.sleep(MONITOR_SLEEP)
             continue
 
         # ── Cek TP ─────────────────────────────────────────────────
@@ -1669,28 +1693,38 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
                 close_position(sym, "tp")
                 return
             else:
-                # SL — cek sweep dulu
-                tg_send(chat_id,
-                    f"⚠️ <b>Zona SL — {sym}</b>\n"
-                    f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code>\n"
-                    f"Konfirmasi via M1 + sweep check...")
-                sweep_count = 0
-                for _ in range(3):
-                    time.sleep(MONITOR_SLEEP)
-                    cp = get_price(sym)
-                    if cp and ((cp <= sl_p) if is_buy else (cp >= sl_p)):
-                        sweep_count += 1
-                if sweep_count >= 2:
+                # SL — verifikasi via M1 candle close, bukan hanya tick
+                # Cek apakah ada candle M1 yang CLOSE di bawah/atas SL (bukan hanya wick)
+                confirmed_sl = False
+                try:
+                    df_m1 = get_klines(sym, "1m", 5)
+                    if df_m1 is not None and not df_m1.empty:
+                        last_closes = df_m1["close"].tail(3)
+                        if is_buy:
+                            confirmed_sl = any(c <= sl_p for c in last_closes)
+                        else:
+                            confirmed_sl = any(c >= sl_p for c in last_closes)
+                except Exception:
+                    confirmed_sl = hit_sl  # fallback ke harga tick
+
+                if confirmed_sl:
+                    tg_send(chat_id,
+                        f"🛑 <b>STOP LOSS CONFIRMED</b> — {sym}\n"
+                        f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code>\n"
+                        f"<i>(Candle M1 close konfirmasi)</i>")
                     close_position(sym, "sl")
                     return
-                tg_send(chat_id,
-                    f"🔄 <b>Liquidity Sweep — {sym}</b>\n"
-                    f"Harga kembali. Lanjut monitor...")
-                continue
+                else:
+                    tg_send(chat_id,
+                        f"🔄 <b>Liquidity Sweep — {sym}</b>\n"
+                        f"Wick menyentuh SL tapi candle M1 belum close di sana.\n"
+                        f"Lanjut monitor...")
+                    continue
 
         # ── Update berkala tiap 15 menit ───────────────────────────
         sisa_jam = max(0, (auto_timeout_sec - elapsed) / 3600)
         pnl_pct  = (price - entry) / entry * 100 * (1 if is_buy else -1)
+        timeout_str = f"⏰ Timeout dalam {sisa_jam:.1f} jam" if sisa_jam > 0 else "⏰ Timeout aktif — menunggu profit"
         tg_send(chat_id,
             f"📊 <b>Update 15m — {sym}</b>\n"
             f"Arah  : {'🟢 BUY' if is_buy else '🔴 SELL'}\n"
@@ -1699,7 +1733,7 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
             f"TP    : <code>{tp_p:.6g}</code>\n"
             f"SL    : <code>{sl_p:.6g}</code>\n"
             f"PnL   : <b>{pnl_pct:+.2f}%</b>\n"
-            f"⏰ Timeout dalam {sisa_jam:.1f} jam")
+            f"{timeout_str}")
 
         # Tunggu 15 menit sambil tetap cek flag setiap 2 detik
         deadline = time.time() + MONITOR_INTERVAL
