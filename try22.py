@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-SMC Simulasi Trading Bot v5 — Counter Entry Strategy
-Logika: Analisis normal → temukan sinyal → BALIK arah → analisis ulang TP/SL
+SMC Signal Broadcaster — Forward Entry Strategy
+Logika: Analisis H1+M15+D1 → sinyal searah → entry diskon OB/FVG/Fib → TP/SL struktural
 Render.com | python main.py
 """
 
@@ -103,7 +103,7 @@ def index():
     with stat_lock:
         t=stats["total"]; tp=stats["tp"]; sl=stats["sl"]
     wr=f"{tp/(tp+sl)*100:.1f}%" if (tp+sl)>0 else "–"
-    return (f"<h3>SMC Counter Bot v5</h3>"
+    return (f"<h3>SMC Signal Broadcaster</h3>"
             f"<p>Auto:{auto_mode} | Banned:{len(banned_coins)}</p>"
             f"<p>Total:{t} TP:{tp} SL:{sl} WR:{wr}</p>"), 200
 
@@ -767,23 +767,19 @@ def score_direction(df_h1, df_m15):
 # ═════════════════════════════════════════════
 # TAHAP 2: ANALISIS ULANG — SL DULU, LALU TP
 # ═════════════════════════════════════════════
-def analyze_counter_setup(df_h1, df_m15, counter_dir, entry_price):
+def analyze_setup(df_h1, df_m15, direction, entry_price):
     """
+    Tentukan SL dan TP dari level struktural chart.
+
     Urutan WAJIB:
-    1. Tentukan SL dulu berdasarkan LIQUIDITY POOL (equal highs/lows)
-       atau OB/supply-demand zone — bukan wick biasa yang mudah tersapu.
-       SL harus di level di mana jika harga sampai ke sana,
-       analisis counter sudah TERBUKTI SALAH.
-
+    1. Tentukan SL dari LIQUIDITY POOL (equal highs/lows) atau OB/supply-demand zone.
+       SL harus di level di mana jika harga sampai ke sana, analisis sudah TERBUKTI SALAH.
     2. Hitung risk = abs(entry - SL)
-
     3. Iterasi TP candidates dari terdekat ke terjauh.
-       Ambil level pertama yang menghasilkan RR >= 2.0
-       Jika TP terdekat RR < 2.0 → lewati, cari level berikutnya.
-       TP tidak boleh asal, harus level nyata dari chart.
+       Ambil level pertama yang menghasilkan RR >= 2.0.
 
-    SL SELL counter: di atas equal highs / OB top / swing high — BUKAN wick 3 candle
-    SL BUY  counter: di bawah equal lows / demand bot / swing low
+    SELL: SL di atas equal highs / OB top / swing high
+    BUY : SL di bawah equal lows / demand bot / swing low
     """
     h1  = build_df(df_h1)
     m15 = build_df(df_m15)
@@ -823,7 +819,7 @@ def analyze_counter_setup(df_h1, df_m15, counter_dir, entry_price):
     # SL di atas liquidity pool / supply zone terdekat di atas entry
     # TP di bawah entry (demand zone / equal lows / swing low)
     # ══════════════════════════════════════════════════════════════
-    if counter_dir == "bear":
+    if direction == "bear":
 
         # Kumpulkan kandidat SL — level di atas entry
         sl_pool = []
@@ -1185,7 +1181,7 @@ def full_analyze(symbol):
             df_h1, df_m15, original_dir, current_price, atr_val)
 
         # SL/TP dihitung dari entry diskon
-        setup = analyze_counter_setup(df_h1, df_m15, original_dir, discount_entry)
+        setup = analyze_setup(df_h1, df_m15, original_dir, discount_entry)
         if setup is None: return None
 
         return {
@@ -1908,7 +1904,19 @@ def simulation_loop(chat_id):
                 actual_entry = get_price(sym) or current
                 _open_position(sym, signal, actual_entry, chat_id, "langsung")
             else:
-                # Launch pending di thread terpisah — scan tetap lanjut
+                # Daftarkan dulu sebagai pending agar tidak di-scan ulang
+                with positions_lock:
+                    if sym in positions: return
+                    if len(positions) >= MAX_POSITIONS: return
+                    positions[sym] = {
+                        "signal"      : signal,
+                        "entry"       : entry_target,
+                        "chat_id"     : chat_id,
+                        "entry_time"  : None,        # belum entry, set saat terpicu
+                        "timeout_flag": False,
+                        "status"      : "pending",
+                    }
+
                 dist_pct = abs(entry_target - current) / current * 100
                 tg_send(chat_id,
                     f"🎯 <b>PENDING ORDER</b> — {sym}\n\n"
@@ -1934,21 +1942,19 @@ def simulation_loop(chat_id):
         deadline     = time.time() + 4 * 3600
 
         while time.time() < deadline and auto_mode:
-            # Cek posisi masih tersedia
+            # Cek posisi belum dihapus dari luar (misal /timeout)
             with positions_lock:
-                if sym in positions: return
-                if len(positions) >= MAX_POSITIONS:
-                    time.sleep(30); continue
+                if sym not in positions: return
 
             price_now = get_price(sym)
             if price_now is None:
                 time.sleep(MONITOR_SLEEP); continue
 
-            # TP tersentuh sebelum entry → sinyal basi
-            # BUY: TP di atas entry, jadi kena kalau price >= tp
-            # SELL: TP di bawah entry, jadi kena kalau price <= tp
+            # TP tersentuh sebelum entry → sinyal basi, hapus pending
             tp_hit = (price_now >= tp_p) if is_buy else (price_now <= tp_p)
             if tp_hit:
+                with positions_lock:
+                    positions.pop(sym, None)
                 tg_send(chat_id,
                     f"⏭ <b>Pending Batal</b> — {sym}\n"
                     f"TP tersentuh sebelum entry. Skip.")
@@ -1965,24 +1971,22 @@ def simulation_loop(chat_id):
 
             time.sleep(MONITOR_SLEEP)
 
+        # Expired — hapus pending
+        with positions_lock:
+            positions.pop(sym, None)
         if auto_mode:
             tg_send(chat_id,
                 f"⏰ <b>Pending Expired</b> — {sym}\n"
                 f"Harga tidak mencapai zona entry dalam 4 jam. Skip.")
 
     def _open_position(sym, signal, actual_entry, chat_id, mode_label):
-        """Daftarkan posisi aktif dan mulai monitor."""
+        """Upgrade posisi dari pending ke aktif dan mulai monitor."""
         with positions_lock:
-            if sym in positions: return
-            if len(positions) >= MAX_POSITIONS: return
-            pos = {
-                "signal"      : signal,
-                "entry"       : actual_entry,
-                "chat_id"     : chat_id,
-                "entry_time"  : time.time(),
-                "timeout_flag": False,
-            }
-            positions[sym] = pos
+            if sym not in positions: return   # sudah dihapus (expired/batal)
+            pos = positions[sym]
+            pos["entry"]      = actual_entry
+            pos["entry_time"] = time.time()
+            pos["status"]     = "active"
 
         tg_send(chat_id,
             f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
@@ -2167,18 +2171,31 @@ def bot_loop():
                     else:
                         lines = [f"📡 <b>Posisi Aktif ({len(pos_list)}/{MAX_POSITIONS})</b>\n"]
                         for s, p in pos_list:
-                            pr  = get_price(s) or p["entry"]
-                            ib  = p["signal"]["decision"] == "BUY"
-                            pnl = (pr - p["entry"]) / p["entry"] * 100 * (1 if ib else -1)
-                            el  = time.time() - p["entry_time"]
-                            sj  = max(0, AUTO_TIMEOUT_HOURS * 3600 - el) / 3600
-                            em  = "🟢" if ib else "🔴"
-                            lines.append(
-                                f"\n{em} <b>{s}</b>\n"
-                                f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
-                                f"TP: <code>{p['signal']['tp']:.6g}</code> | SL: <code>{p['signal']['sl']:.6g}</code>\n"
-                                f"PnL: <b>{pnl:+.2f}%</b> | ⏰ {sj:.1f}j"
-                            )
+                            sig    = p["signal"]
+                            is_buy = sig["decision"] == "BUY"
+                            em     = "🟢" if is_buy else "🔴"
+                            status = p.get("status", "active")
+
+                            if status == "pending":
+                                pr       = get_price(s) or p["entry"]
+                                dist_pct = abs(p["entry"] - pr) / pr * 100
+                                lines.append(
+                                    f"\n⏳ <b>{s}</b> — PENDING\n"
+                                    f"{em} {sig['decision']} | Entry zone: <code>{p['entry']:.6g}</code>\n"
+                                    f"Harga kini: <code>{pr:.6g}</code> | Jarak: {dist_pct:.2f}%\n"
+                                    f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{sig['sl']:.6g}</code>"
+                                )
+                            else:
+                                pr  = get_price(s) or p["entry"]
+                                pnl = (pr - p["entry"]) / p["entry"] * 100 * (1 if is_buy else -1)
+                                el  = time.time() - p["entry_time"]
+                                sj  = max(0, AUTO_TIMEOUT_HOURS * 3600 - el) / 3600
+                                lines.append(
+                                    f"\n{em} <b>{s}</b> — AKTIF\n"
+                                    f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
+                                    f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{sig['sl']:.6g}</code>\n"
+                                    f"PnL: <b>{pnl:+.2f}%</b> | ⏰ {sj:.1f}j"
+                                )
                         tg_send(chat_id,"\n".join(lines))
                 elif text.startswith("/timeout") or (not text.startswith("/") and text.startswith("timeout")):
                     parts = text.split()
