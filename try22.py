@@ -1945,7 +1945,9 @@ def simulation_loop(chat_id):
                 time.sleep(MONITOR_SLEEP); continue
 
             # TP tersentuh sebelum entry → sinyal basi
-            tp_hit = (price_now <= tp_p) if is_buy else (price_now >= tp_p)
+            # BUY: TP di atas entry, jadi kena kalau price >= tp
+            # SELL: TP di bawah entry, jadi kena kalau price <= tp
+            tp_hit = (price_now >= tp_p) if is_buy else (price_now <= tp_p)
             if tp_hit:
                 tg_send(chat_id,
                     f"⏭ <b>Pending Batal</b> — {sym}\n"
