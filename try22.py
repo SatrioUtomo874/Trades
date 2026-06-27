@@ -1052,36 +1052,140 @@ def analyze_counter_setup(df_h1, df_m15, counter_dir, entry_price):
     }
 
 
+def find_ob(df, direction, lb=40):
+    """
+    Order Block (OB) — candle terakhir sebelum impulse move besar.
+    Bullish OB: candle bearish terakhir sebelum rally kuat ke atas.
+    Bearish OB: candle bullish terakhir sebelum drop kuat ke bawah.
+    Entry ideal ada di retrace ke zona OB.
+    """
+    sub = df.iloc[-lb:]
+    avg_body = (sub["close"] - sub["open"]).abs().mean()
+    obs = []
+    for i in range(1, len(sub) - 3):
+        c   = sub.iloc[i]
+        nx  = sub.iloc[i + 1]
+        nx2 = sub.iloc[i + 2]
+        impulse = abs(nx["close"] - nx["open"])
+        if impulse < avg_body * 1.5: continue
+        if direction == "bull":
+            if (c["close"] < c["open"] and
+                    nx["close"] > nx["open"] and
+                    nx2["close"] > nx2["open"]):
+                obs.append({"top": max(c["open"], c["close"]),
+                            "bot": min(c["open"], c["close"]),
+                            "mid": (c["open"] + c["close"]) / 2})
+        else:
+            if (c["close"] > c["open"] and
+                    nx["close"] < nx["open"] and
+                    nx2["close"] < nx2["open"]):
+                obs.append({"top": max(c["open"], c["close"]),
+                            "bot": min(c["open"], c["close"]),
+                            "mid": (c["open"] + c["close"]) / 2})
+    return obs[-3:] if obs else []
+
+
+def calc_discount_entry(df_h1, df_m15, direction, current_price, atr):
+    """
+    Hitung harga entry diskon dari zona struktural:
+    SELL → entry di zona premium (lebih tinggi) sebelum turun
+    BUY  → entry di zona diskon  (lebih rendah) sebelum naik
+
+    Preferensi (priority 1 = terbaik):
+    1. OB (Order Block)
+    2. FVG (Fair Value Gap)
+    3. Equal Highs/Lows
+    4. Fibonacci 50% retracement
+    """
+    m15 = build_df(df_m15)
+    if m15 is None: return current_price, "market"
+
+    sh15, sl15 = swing_pts(m15, lb=5)
+    eq_highs   = find_equal_highs_lows(m15, "high", lb=80)
+    eq_lows    = find_equal_highs_lows(m15, "low",  lb=80)
+    fvg_bear   = find_fvg(m15, "bear")
+    fvg_bull   = find_fvg(m15, "bull")
+    ob_bull    = find_ob(m15, "bull")
+    ob_bear    = find_ob(m15, "bear")
+    candidates = []
+
+    if direction == "bear":
+        for ob in reversed(ob_bear):
+            if ob["top"] > current_price + atr * 0.1:
+                candidates.append((ob["top"], "ob_bear_top", 1))
+            elif ob["mid"] > current_price + atr * 0.1:
+                candidates.append((ob["mid"], "ob_bear_mid", 1))
+        for fvg in reversed(fvg_bear):
+            if fvg["top"] > current_price + atr * 0.1:
+                candidates.append((fvg["mid"], "fvg_bear", 2))
+        for eh in sorted(eq_highs):
+            if current_price + atr * 0.2 < eh < current_price + atr * 3.0:
+                candidates.append((eh, "eq_high_m15", 3))
+                break
+        if len(sh15) >= 2 and len(sl15) >= 1:
+            fib50 = m15["low"].iloc[sl15[-1]] + (
+                m15["high"].iloc[sh15[-1]] - m15["low"].iloc[sl15[-1]]) * 0.5
+            if current_price + atr * 0.1 < fib50 < current_price + atr * 4.0:
+                candidates.append((fib50, "fib50", 4))
+        above = [(p, l, r) for p, l, r in candidates if p > current_price]
+        if above:
+            above.sort(key=lambda x: (x[2], x[0]))
+            return round(above[0][0], 8), above[0][1]
+    else:
+        for ob in reversed(ob_bull):
+            if ob["top"] < current_price - atr * 0.1:
+                candidates.append((ob["top"], "ob_bull_top", 1))
+            elif ob["mid"] < current_price - atr * 0.1:
+                candidates.append((ob["mid"], "ob_bull_mid", 1))
+        for fvg in reversed(fvg_bull):
+            if fvg["bot"] < current_price - atr * 0.1:
+                candidates.append((fvg["mid"], "fvg_bull", 2))
+        for el in sorted(eq_lows, reverse=True):
+            if current_price - atr * 3.0 < el < current_price - atr * 0.2:
+                candidates.append((el, "eq_low_m15", 3))
+                break
+        if len(sl15) >= 2 and len(sh15) >= 1:
+            fib50 = m15["high"].iloc[sh15[-1]] - (
+                m15["high"].iloc[sh15[-1]] - m15["low"].iloc[sl15[-1]]) * 0.5
+            if current_price - atr * 4.0 < fib50 < current_price - atr * 0.1:
+                candidates.append((fib50, "fib50", 4))
+        below = [(p, l, r) for p, l, r in candidates if p < current_price]
+        if below:
+            below.sort(key=lambda x: (x[2], -x[0]))
+            return round(below[0][0], 8), below[0][1]
+
+    return current_price, "market"
+
+
 # ═════════════════════════════════════════════
 # PIPELINE ANALISIS LENGKAP
 # ═════════════════════════════════════════════
 def full_analyze(symbol):
     """
-    1. Ambil data H1 + M15
-    2. Score arah sinyal normal
-    3. Gunakan arah sinyal SEARAH (BUY jika bull, SELL jika bear)
-    4. analyze_counter_setup menerima "bear" untuk SELL, "bull" untuk BUY
-       — nama fungsi dipertahankan, tapi sekarang dipakai searah sinyal
+    1. Score arah sinyal (H1 + M15 + D1 bias)
+    2. Hitung entry diskon dari OB/FVG/EQL/Fib
+    3. Hitung SL/TP dari entry diskon
+    Entry = zona struktural, bukan market price
     """
     try:
         df_h1  = get_klines(symbol, "1h",  250)
         df_m15 = get_klines(symbol, "15m", 250)
         if df_h1.empty or df_m15.empty: return None
 
-        # Tahap 1: scoring arah
         score = score_direction(df_h1, df_m15)
         if score is None: return None
 
-        original_dir = score["direction"]          # "bull" atau "bear"
-        entry_price  = score["price"]
+        original_dir  = score["direction"]
+        current_price = score["price"]
+        atr_val       = score["atr"]
+        decision      = "BUY"  if original_dir == "bull" else "SELL"
 
-        # BUY jika sinyal bull, SELL jika sinyal bear
-        decision  = "BUY"  if original_dir == "bull" else "SELL"
-        # analyze_counter_setup: blok "bear" = logika SELL, blok "bull" = logika BUY
-        setup_dir = original_dir   # "bull" → blok BUY, "bear" → blok SELL
+        # Entry diskon dari zona struktural
+        discount_entry, entry_label = calc_discount_entry(
+            df_h1, df_m15, original_dir, current_price, atr_val)
 
-        # Tahap 2: analisis TP/SL
-        setup = analyze_counter_setup(df_h1, df_m15, setup_dir, entry_price)
+        # SL/TP dihitung dari entry diskon
+        setup = analyze_counter_setup(df_h1, df_m15, original_dir, discount_entry)
         if setup is None: return None
 
         return {
@@ -1089,15 +1193,19 @@ def full_analyze(symbol):
             "original_dir" : original_dir,
             "decision"     : decision,
             "confidence"   : score["confidence"],
-            "price"        : entry_price,
-            "entry"        : entry_price,
+            "price"        : current_price,
+            "entry"        : discount_entry,
+            "entry_label"  : entry_label,
             "sl"           : setup["sl"],
             "tp"           : setup["tp"],
             "rr"           : setup["rr"],
             "rsi"          : score["rsi"],
             "struct_h1"    : score["struct_h1"],
-            "d1_bias"      : score.get("d1_bias","neutral"),
-            "tp_sl_reason" : setup["reason"],
+            "d1_bias"      : score.get("d1_bias", "neutral"),
+            "choch_m15"    : score.get("choch_m15", {}),
+            "choch_h1"     : score.get("choch_h1", {}),
+            "failed_retest": score.get("failed_retest", {}),
+            "tp_sl_reason" : f"Entry@{discount_entry:.5g}({entry_label}) | {setup['reason']}",
         }
     except Exception as e:
         log.debug(f"[full_analyze] {symbol}: {e}")
@@ -1469,7 +1577,6 @@ def fmt_signal_msg(sig):
     d1_em = {"bullish":"📈","bearish":"📉","neutral":"➡️"}.get(sig.get("d1_bias","neutral"),"➡️")
     d1_str = sig.get("d1_bias","neutral").upper()
 
-    # Trigger aktif
     triggers = []
     choch_m15 = sig.get("choch_m15", {})
     choch_h1  = sig.get("choch_h1", {})
@@ -1482,18 +1589,28 @@ def fmt_signal_msg(sig):
     if fr.get("failed_retest_buy"):     triggers.append("Failed Retest Buy")
     trigger_str = " | ".join(triggers) if triggers else "—"
 
+    entry_label = sig.get("entry_label", "market")
+    price_now   = sig.get("price", sig["entry"])
+    entry_zone  = sig["entry"]
+    entry_str = (
+        f"📍 Harga kini: <code>{price_now:.6g}</code>\n"
+        f"🎯 Entry zone: <code>{entry_zone:.6g}</code> ({entry_label})"
+        if abs(price_now - entry_zone) / max(price_now, 0.0001) > 0.002
+        else f"💰 Entry     : <code>{entry_zone:.6g}</code> ({entry_label})"
+    )
+
     return (
         f"📡 <b>SINYAL DITEMUKAN</b>\n\n"
         f"Koin       : <b>{sig['symbol']}</b>\n"
         f"Analisis   : <b>{dir_label}</b> (confidence {sig['confidence']}% {bar})\n"
         f"Eksekusi   : {em} <b>{sig['decision']}</b>\n\n"
-        f"💰 Entry   : <code>{sig['entry']:.6g}</code>\n"
+        f"{entry_str}\n"
         f"✅ TP      : <code>{sig['tp']:.6g}</code>\n"
         f"🛑 SL      : <code>{sig['sl']:.6g}</code>\n"
         f"⚖️ RR      : <b>1:{sig['rr']}</b>\n"
         f"RSI        : {sig['rsi']} | H1: {sig['struct_h1'].upper()} | D1: {d1_em} {d1_str}\n"
         f"🎯 Trigger : {trigger_str}\n\n"
-        f"📝 Basis TP/SL:\n{sig['tp_sl_reason']}"
+        f"📝 Basis:\n{sig['tp_sl_reason']}"
     )
 
 
@@ -1772,38 +1889,110 @@ def simulation_loop(chat_id):
 
             sym = signal["symbol"]
             with positions_lock:
-                if sym in positions:
-                    return
-                if len(positions) >= MAX_POSITIONS:
-                    return
+                if sym in positions: return
+                if len(positions) >= MAX_POSITIONS: return
 
-            entry_price = get_price(sym) or signal["entry"]
+            entry_target = signal["entry"]
+            current      = signal["price"]
+            is_buy       = signal["decision"] == "BUY"
+            tp_p         = signal["tp"]
+            entry_label  = signal.get("entry_label", "market")
+
+            already_at_entry = (
+                (is_buy     and current <= entry_target * 1.002) or
+                (not is_buy and current >= entry_target * 0.998)
+            )
+
+            if already_at_entry or entry_label == "market":
+                # Langsung masuk
+                actual_entry = get_price(sym) or current
+                _open_position(sym, signal, actual_entry, chat_id, "langsung")
+            else:
+                # Launch pending di thread terpisah — scan tetap lanjut
+                dist_pct = abs(entry_target - current) / current * 100
+                tg_send(chat_id,
+                    f"🎯 <b>PENDING ORDER</b> — {sym}\n\n"
+                    f"{fmt_signal_msg(signal)}\n\n"
+                    f"⏳ Menunggu harga ke zona entry\n"
+                    f"Harga kini : <code>{current:.6g}</code>\n"
+                    f"Entry zone : <code>{entry_target:.6g}</code> ({entry_label})\n"
+                    f"Jarak      : {dist_pct:.2f}%")
+                threading.Thread(
+                    target=_wait_entry,
+                    args=(sym, signal, chat_id),
+                    daemon=True
+                ).start()
+        finally:
+            with scan_lock:
+                scanning = False
+
+    def _wait_entry(sym, signal, chat_id):
+        """Thread terpisah — tunggu harga ke zona entry, scan tetap jalan."""
+        entry_target = signal["entry"]
+        is_buy       = signal["decision"] == "BUY"
+        tp_p         = signal["tp"]
+        deadline     = time.time() + 4 * 3600
+
+        while time.time() < deadline and auto_mode:
+            # Cek posisi masih tersedia
+            with positions_lock:
+                if sym in positions: return
+                if len(positions) >= MAX_POSITIONS:
+                    time.sleep(30); continue
+
+            price_now = get_price(sym)
+            if price_now is None:
+                time.sleep(MONITOR_SLEEP); continue
+
+            # TP tersentuh sebelum entry → sinyal basi
+            tp_hit = (price_now <= tp_p) if is_buy else (price_now >= tp_p)
+            if tp_hit:
+                tg_send(chat_id,
+                    f"⏭ <b>Pending Batal</b> — {sym}\n"
+                    f"TP tersentuh sebelum entry. Skip.")
+                return
+
+            # Harga mencapai zona entry
+            entry_hit = (
+                (is_buy     and price_now <= entry_target * 1.003) or
+                (not is_buy and price_now >= entry_target * 0.997)
+            )
+            if entry_hit:
+                _open_position(sym, signal, price_now, chat_id, "terpicu")
+                return
+
+            time.sleep(MONITOR_SLEEP)
+
+        if auto_mode:
+            tg_send(chat_id,
+                f"⏰ <b>Pending Expired</b> — {sym}\n"
+                f"Harga tidak mencapai zona entry dalam 4 jam. Skip.")
+
+    def _open_position(sym, signal, actual_entry, chat_id, mode_label):
+        """Daftarkan posisi aktif dan mulai monitor."""
+        with positions_lock:
+            if sym in positions: return
+            if len(positions) >= MAX_POSITIONS: return
             pos = {
                 "signal"      : signal,
-                "entry"       : entry_price,
+                "entry"       : actual_entry,
                 "chat_id"     : chat_id,
                 "entry_time"  : time.time(),
                 "timeout_flag": False,
             }
+            positions[sym] = pos
 
-            with positions_lock:
-                positions[sym] = pos
+        tg_send(chat_id,
+            f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
+            f"Entry aktual: <code>{actual_entry:.6g}</code>\n"
+            f"TP: <code>{signal['tp']:.6g}</code> | SL: <code>{signal['sl']:.6g}</code>\n"
+            f"📡 Dipantau tiap 15 menit...")
 
-            tg_send(chat_id,
-                f"⚡ <b>ENTRY</b> — {sym}\n\n"
-                f"{fmt_signal_msg(signal)}\n\n"
-                f"💰 Entry aktual: <code>{entry_price:.6g}</code>\n"
-                f"📡 Dipantau tiap 15 menit...")
-
-            threading.Thread(
-                target=monitor_position,
-                args=(sym, pos),
-                daemon=True
-            ).start()
-
-        finally:
-            with scan_lock:
-                scanning = False
+        threading.Thread(
+            target=monitor_position,
+            args=(sym, pos),
+            daemon=True
+        ).start()
 
     while auto_mode:
         with positions_lock:
