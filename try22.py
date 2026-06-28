@@ -1247,9 +1247,9 @@ def run_scan_once(chat_id):
         return None
 
     # Filter: hanya koin dengan confidence >= 55%
-    results = [r for r in results if r["confidence"] >= 55]
+    results = [r for r in results if r["confidence"] >= 40]
     if not results:
-        tg_send(chat_id,"⚠️ Tidak ada koin dengan confidence cukup (≥55%). Retry...")
+        tg_send(chat_id,"⚠️ Tidak ada koin dengan confidence cukup (≥40%). Retry...")
         return None
 
     # Ranking: confidence DESC → rr DESC
@@ -2083,7 +2083,7 @@ def get_info_msg():
         "Dari level terdekat ke terjauh, ambil TP pertama\n"
         "yang menghasilkan RR ≥ 1:2\n"
         "Level TP: eq highs/lows, supply/demand, FVG, swing H1\n\n"
-        f"Min RR: 1:{MIN_RR} | Min Confidence: 55%\n"
+        f"Min RR: 1:{MIN_RR} | Min Confidence: 40%\n"
         f"TF: H1 (bias) + M15 (entry)\n"
         f"Risk per trade: {RISK_PER_TRADE_PCT}% dari saldo\n"
         f"Modal simulasi: ${STARTING_BALANCE:.2f}"
