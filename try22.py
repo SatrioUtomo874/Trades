@@ -720,9 +720,9 @@ def score_direction(df_h1, df_m15):
 
     direction="bull" if bull>=bear else "bear"
     raw=bull if direction=="bull" else bear
-    conf=min(int(raw/230*100),99)  # dinaikkan denominator karena total poin lebih besar
+    conf=min(int(raw/230*100),99)
 
-    # ── Konfirmasi D1: jangan BUY di downtrend harian, jangan SELL di uptrend harian ──
+    # ── Konfirmasi D1 ──────────────────────────────────────────────
     d1_bias = "neutral"
     try:
         df_d1 = build_df(df_h1.resample("1D").agg({
@@ -733,20 +733,32 @@ def score_direction(df_h1, df_m15):
             LD = df_d1.iloc[-1]
             sh_d, sl_d = swing_pts(df_d1, lb=3)
             struct_d1  = mkt_struct(df_d1, sh_d, sl_d)
-            # D1 bearish kuat: EMA9 < EMA21 < EMA50 DAN struktur bearish
             if LD["ema9"] < LD["ema21"] < LD["ema50"] and struct_d1 == "bearish":
                 d1_bias = "bearish"
-            # D1 bullish kuat: EMA9 > EMA21 > EMA50 DAN struktur bullish
             elif LD["ema9"] > LD["ema21"] > LD["ema50"] and struct_d1 == "bullish":
                 d1_bias = "bullish"
     except Exception:
         pass
 
-    # Blok sinyal berlawanan dengan D1
-    if d1_bias == "bearish" and direction == "bull":
-        conf = max(0, conf - 30)   # kurangi confidence drastis
-    if d1_bias == "bullish" and direction == "bear":
-        conf = max(0, conf - 30)
+    # D1 berlawanan dengan sinyal → hard block, bukan hanya penalty
+    if d1_bias == "bearish" and direction == "bull": return None
+    if d1_bias == "bullish" and direction == "bear": return None
+
+    # CHoCH dan failed retest hanya valid jika searah H1 structure
+    # Sudah dihitung di atas — tapi kalau CHoCH berlawanan H1, kurangi bobotnya
+    if struct_h1 == "bearish" and choch["bullish_choch"]:
+        bull = max(0, bull - 20)
+    if struct_h1 == "bullish" and choch["bearish_choch"]:
+        bear = max(0, bear - 20)
+    if struct_h1 == "bearish" and choch_h1["bullish_choch"]:
+        bull = max(0, bull - 25)
+    if struct_h1 == "bullish" and choch_h1["bearish_choch"]:
+        bear = max(0, bear - 25)
+
+    # Recalc direction dan conf setelah koreksi
+    direction = "bull" if bull >= bear else "bear"
+    raw  = bull if direction == "bull" else bear
+    conf = min(int(raw / 230 * 100), 99)
 
     return {
         "direction"       : direction,
@@ -1234,10 +1246,10 @@ def run_scan_once(chat_id):
         tg_send(chat_id,"⚠️ Tidak ada setup valid dari semua koin.")
         return None
 
-    # Filter: hanya koin dengan confidence >= 45%
-    results = [r for r in results if r["confidence"] >= 45]
+    # Filter: hanya koin dengan confidence >= 55%
+    results = [r for r in results if r["confidence"] >= 55]
     if not results:
-        tg_send(chat_id,"⚠️ Tidak ada koin dengan confidence cukup (≥45%). Retry...")
+        tg_send(chat_id,"⚠️ Tidak ada koin dengan confidence cukup (≥55%). Retry...")
         return None
 
     # Ranking: confidence DESC → rr DESC
@@ -2071,7 +2083,7 @@ def get_info_msg():
         "Dari level terdekat ke terjauh, ambil TP pertama\n"
         "yang menghasilkan RR ≥ 1:2\n"
         "Level TP: eq highs/lows, supply/demand, FVG, swing H1\n\n"
-        f"Min RR: 1:{MIN_RR} | Min Confidence: 45%\n"
+        f"Min RR: 1:{MIN_RR} | Min Confidence: 55%\n"
         f"TF: H1 (bias) + M15 (entry)\n"
         f"Risk per trade: {RISK_PER_TRADE_PCT}% dari saldo\n"
         f"Modal simulasi: ${STARTING_BALANCE:.2f}"
