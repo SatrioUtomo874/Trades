@@ -17,8 +17,9 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 MAX_PRICE       = 80.0
 TOP_N_COINS     = 50
 MIN_RR              = 2.0
-MONITOR_SLEEP       = 10     # sesuai cache interval — tidak perlu lebih cepat
-AUTO_TIMEOUT_HOURS  = 5
+MONITOR_SLEEP       = 10
+MAX_POSITIONS       = 5
+MONITOR_INTERVAL    = 15 * 60
 # ─────────────────────────────────────────────
 
 if not TELEGRAM_TOKEN:
@@ -84,9 +85,9 @@ STARTING_BALANCE = 10.0   # modal awal simulasi dalam USD
 
 stat_lock = threading.Lock()
 stats = {
-    "tp":0, "sl":0, "timeout":0, "total":0,
+    "tp":0, "sl":0, "total":0,
     "balance"    : STARTING_BALANCE,
-    "pnl_history": [],   # list dict {result, pnl_usd, pct, balance_after}
+    "pnl_history": [],
 }
 
 ban_lock = threading.Lock()
@@ -351,9 +352,9 @@ def get_klines(symbol, interval, limit=250):
     return pd.DataFrame()
 
 def get_real_trade_count():
-    """Hitung trade nyata: tp + sl + timeout saja, tidak termasuk no_entry."""
+    """Hitung trade nyata: tp + sl saja."""
     with stat_lock:
-        return stats["tp"] + stats["sl"] + stats["timeout"]
+        return stats["tp"] + stats["sl"]
 
 def get_top_coins():
     """Ambil top coins. Binance dulu, fallback Bybit.
@@ -1260,218 +1261,22 @@ def run_scan_once(chat_id):
     return best
 
 
-# ═════════════════════════════════════════════
-# MONITORING
-# ═════════════════════════════════════════════
-def em_dir(decision): return "🟢" if decision=="BUY" else "🔴"
-
-def monitor_trade(chat_id, signal):
-    global timeout_flag
-    sym=signal["symbol"]
-    is_buy=signal["decision"]=="BUY"
-    entry=signal["entry"]
-    sl_p=signal["sl"]
-    tp_p=signal["tp"]
-
-    actual = get_price(sym) or entry
-
-    risk   = abs(actual - sl_p)
-    reward = abs(tp_p - actual)
-    rr_now = round(reward / risk, 2) if risk > 0 else 0
-
-    dir_label = "BULLISH" if signal["original_dir"] == "bull" else "BEARISH"
-
-    tg_send(chat_id,
-        f"⚡ <b>ENTRY — {sym}</b>\n\n"
-        f"Arah      : {em_dir(signal['decision'])} <b>{signal['decision']}</b>\n"
-        f"Analisis  : <b>{dir_label}</b>\n"
-        f"Entry     : <code>{actual:.6g}</code>\n"
-        f"✅ TP     : <code>{tp_p:.6g}</code>\n"
-        f"🛑 SL     : <code>{sl_p:.6g}</code>\n"
-        f"⚖️ RR     : 1:{rr_now}\n"
-        f"📝 Basis  : {signal['tp_sl_reason']}\n\n"
-        f"📡 Monitor tiap {MONITOR_SLEEP}s... /timeout untuk skip.")
-
-    global active_trade
-    active_trade = {
-        "symbol"   : sym,
-        "decision" : signal["decision"],
-        "entry"    : actual,
-        "tp"       : tp_p,
-        "sl"       : sl_p,
-        "rr"       : rr_now,
-        "entry_time": time.time(),
-    }
-
-    last_log      = time.time()
-    log_interval  = 90
-    entry_time    = time.time()
-    auto_timeout_sec = AUTO_TIMEOUT_HOURS * 3600
-
-    # fase: "normal" → setelah 5 jam berubah ke "wait_profit"
-    phase           = "normal"
-    notified_timeout = False   # pastikan notif timeout hanya dikirim sekali
-
-    while True:
-        # ── Manual timeout via /timeout ──────────────────────────────
-        if timeout_flag:
-            timeout_flag = False
-            price = get_price(sym) or 0
-            tg_send(chat_id,
-                f"⏭ <b>Timeout Manual</b> — {sym}\n"
-                f"Harga: <code>{price:.6g}</code>")
-            signal["timeout_close_price"] = None
-            active_trade = None
-            return "timeout"
-
-        price = get_price(sym)
-        if price is None:
-            time.sleep(MONITOR_SLEEP); continue
-
-        elapsed = time.time() - entry_time
-        is_profit = (price > actual) if is_buy else (price < actual)
-
-        # ── Cek apakah sudah melewati batas waktu auto-timeout ───────
-        if phase == "normal" and elapsed >= auto_timeout_sec:
-            phase = "wait_profit"
-            if not notified_timeout:
-                notified_timeout = True
-                pnl_pct = (price - actual) / actual * 100 * (1 if is_buy else -1)
-                pnl_sign = "+" if pnl_pct >= 0 else ""
-                tg_send(chat_id,
-                    f"⏰ <b>Auto-Timeout {AUTO_TIMEOUT_HOURS}j — {sym}</b>\n\n"
-                    f"Posisi  : {em_dir(signal['decision'])} {signal['decision']}\n"
-                    f"Entry   : <code>{actual:.6g}</code>\n"
-                    f"Harga   : <code>{price:.6g}</code>\n"
-                    f"PnL saat ini: <b>{pnl_sign}{pnl_pct:.3f}%</b>\n\n"
-                    f"{'✅ PnL positif — menutup posisi sekarang...' if is_profit else '⏳ PnL masih negatif — menahan posisi, tunggu harga kembali profit...'}")
-
-        # ── Fase wait_profit: tutup segera saat PnL pertama kali + ──
-        if phase == "wait_profit":
-            if is_profit:
-                close_pct = (price - actual) / actual * 100 * (1 if is_buy else -1)
-                # Hitung pnl_usd pakai harga close aktual (bukan tp_p)
-                # update_stats akan dipanggil dari simulation_loop, kita return
-                # "timeout" tapi sertakan close_price agar update_stats bisa hitung
-                tg_send(chat_id,
-                    f"⏱ <b>TIMEOUT — Posisi Ditutup (Profit)</b> — {sym} 💰\n\n"
-                    f"Entry   : <code>{actual:.6g}</code>\n"
-                    f"Tutup   : <code>{price:.6g}</code>\n"
-                    f"Profit  : <b>+{close_pct:.3f}%</b>\n\n"
-                    f"⏰ Ditutup otomatis setelah {AUTO_TIMEOUT_HOURS} jam\n"
-                    f"karena harga kembali ke posisi profit.")
-                # Simpan harga penutupan ke signal agar simulation_loop bisa pakai
-                signal["timeout_close_price"] = price
-                active_trade = None
-                return "timeout"
-
-            # Belum profit → cek SL masih berlaku
-            hit_sl = (price <= sl_p) if is_buy else (price >= sl_p)
-            if hit_sl:
-                pct = abs(price - actual) / actual * 100
-                tg_send(chat_id,
-                    f"🛑 <b>STOP LOSS — {sym}</b>\n"
-                    f"Harga: <code>{price:.6g}</code>\n"
-                    f"SL   : <code>{sl_p:.6g}</code>\n"
-                    f"Loss : -{pct:.2f}%\n"
-                    f"<i>(Timeout aktif, tapi SL tetap dihormati)</i>")
-                return "sl"
-
-            # Update log tiap 90 detik selama menunggu profit
-            if time.time() - last_log >= log_interval:
-                pnl_pct = (price - actual) / actual * 100 * (1 if is_buy else -1)
-                tg_send(chat_id,
-                    f"⏳ <b>Menunggu Profit — {sym}</b>\n"
-                    f"Harga : <code>{price:.6g}</code>\n"
-                    f"Entry : <code>{actual:.6g}</code>\n"
-                    f"PnL   : <b>{pnl_pct:+.3f}%</b>\n"
-                    f"SL    : <code>{sl_p:.6g}</code> (masih aktif)")
-                last_log = time.time()
-
-            time.sleep(MONITOR_SLEEP)
-            continue
-
-        # ── Fase normal: cek TP / SL biasa ───────────────────────────
-        hit_tp = (price >= tp_p) if is_buy else (price <= tp_p)
-        hit_sl = (price <= sl_p) if is_buy else (price >= sl_p)
-
-        if hit_tp:
-            pct = abs(price - actual) / actual * 100
-            tg_send(chat_id,
-                f"🎯 <b>TAKE PROFIT — {sym}</b> 🎉\n"
-                f"Harga: <code>{price:.6g}</code>\n"
-                f"TP   : <code>{tp_p:.6g}</code>\n"
-                f"Profit: +{pct:.2f}%")
-            active_trade = None
-            return "tp"
-
-        if hit_sl:
-            # Konfirmasi sweep: tunggu 3 tick berturut-turut di luar SL
-            # Jika hanya wick/sweep sesaat, harga akan kembali dan tidak jadi SL
-            sweep_count = 0
-            tg_send(chat_id,
-                f"⚠️ <b>Harga menyentuh zona SL — {sym}</b>\n"
-                f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code>\n"
-                f"Menunggu konfirmasi (bukan liquidity sweep)...")
-            for _ in range(3):
-                time.sleep(MONITOR_SLEEP)
-                confirm_price = get_price(sym)
-                if confirm_price is None:
-                    continue
-                still_beyond = (confirm_price <= sl_p) if is_buy else (confirm_price >= sl_p)
-                if still_beyond:
-                    sweep_count += 1
-            if sweep_count >= 2:
-                # Benar-benar tembus SL, bukan sweep
-                pct = abs(price - actual) / actual * 100
-                tg_send(chat_id,
-                    f"🛑 <b>STOP LOSS CONFIRMED — {sym}</b>\n"
-                    f"Harga: <code>{price:.6g}</code>\n"
-                    f"SL   : <code>{sl_p:.6g}</code>\n"
-                    f"Loss : -{pct:.2f}%")
-                active_trade = None
-                return "sl"
-            else:
-                # Sweep sesaat — harga sudah balik, lanjutkan monitoring
-                tg_send(chat_id,
-                    f"🔄 <b>Liquidity Sweep Terdeteksi — {sym}</b>\n"
-                    f"Harga sudah kembali ke dalam range. Lanjut monitor...")
-                continue
-
-        # Update log berkala fase normal
-        if time.time() - last_log >= log_interval:
-            pct_tp = abs(tp_p - price) / abs(tp_p - actual) * 100 if abs(tp_p - actual) > 0 else 0
-            sisa_jam = max(0, (auto_timeout_sec - elapsed) / 3600)
-            tg_send(chat_id,
-                f"📊 <b>Update {sym}</b>\n"
-                f"Harga : <code>{price:.6g}</code>\n"
-                f"TP    : <code>{tp_p:.6g}</code> (sisa {pct_tp:.1f}%)\n"
-                f"SL    : <code>{sl_p:.6g}</code>\n"
-                f"⏰ Auto-timeout dalam {sisa_jam:.1f} jam")
-            last_log = time.time()
-
-        time.sleep(MONITOR_SLEEP)
-
 
 # ═════════════════════════════════════════════
 # STATISTIK + BALANCE
 # ═════════════════════════════════════════════
 RISK_PER_TRADE_PCT = 2.0   # risiko maksimal per trade = 2% dari saldo
 
-def update_stats(result, entry=None, sl_p=None, tp_p=None, timeout_profit=False):
+def update_stats(result, entry=None, sl_p=None, tp_p=None):
     """
     Hitung P&L dalam USD berdasarkan fixed risk per trade.
     Risk per trade = RISK_PER_TRADE_PCT % dari saldo saat ini.
-
-    - tp      → profit  = risk × (tp_dist / sl_dist)
-    - sl      → loss    = -risk
-    - timeout + timeout_profit=True → profit = risk × (close_dist / sl_dist)
-                                      tp_p di sini = harga tutup aktual
-    - timeout biasa (manual /timeout) → tidak ada perubahan balance
+    - tp → profit = risk × (tp_dist / sl_dist)
+    - sl → loss   = -risk
     """
     with stat_lock:
         stats["total"] += 1
-        if result in ("tp", "sl", "timeout"):
+        if result in ("tp", "sl"):
             stats[result] += 1
 
         if result == "tp" and entry and sl_p and tp_p:
@@ -1484,10 +1289,8 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, timeout_profit=False)
             pct      = round(tp_dist / entry * 100, 3)
             stats["balance"] = round(balance + pnl_usd, 4)
             stats["pnl_history"].append({
-                "result"       : "tp",
-                "pct"          : pct,
-                "pnl_usd"      : pnl_usd,
-                "balance_after": stats["balance"],
+                "result": "tp", "pct": pct,
+                "pnl_usd": pnl_usd, "balance_after": stats["balance"],
             })
 
         elif result == "sl" and entry and sl_p:
@@ -1498,36 +1301,15 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, timeout_profit=False)
             pct      = -round(sl_dist / entry * 100, 3)
             stats["balance"] = round(balance + pnl_usd, 4)
             stats["pnl_history"].append({
-                "result"       : "sl",
-                "pct"          : pct,
-                "pnl_usd"      : pnl_usd,
-                "balance_after": stats["balance"],
+                "result": "sl", "pct": pct,
+                "pnl_usd": pnl_usd, "balance_after": stats["balance"],
             })
-
-        elif result == "timeout" and timeout_profit and entry and sl_p and tp_p:
-            # tp_p di sini = harga close aktual (bukan TP asli)
-            balance   = stats["balance"]
-            risk_usd  = round(balance * RISK_PER_TRADE_PCT / 100, 4)
-            sl_dist   = abs(entry - sl_p)
-            close_dist = abs(tp_p - entry)   # jarak entry → close price
-            rr_actual  = close_dist / sl_dist if sl_dist > 0 else 0.1
-            pnl_usd   = round(risk_usd * rr_actual, 4)
-            pct       = round(close_dist / entry * 100, 3)
-            stats["balance"] = round(balance + pnl_usd, 4)
-            stats["pnl_history"].append({
-                "result"       : "timeout",   # tetap timeout di history
-                "pct"          : pct,         # profit kecil tapi positif
-                "pnl_usd"      : pnl_usd,
-                "balance_after": stats["balance"],
-            })
-        # timeout manual → tidak ada entri pnl_history, balance tidak berubah
 
 def fmt_stats():
     with stat_lock:
         t   = stats["total"]
         tp  = stats["tp"]
         sl  = stats["sl"]
-        to  = stats["timeout"]
         bal = stats["balance"]
         hist= list(stats["pnl_history"])
 
@@ -1546,14 +1328,7 @@ def fmt_stats():
     recent = hist[-5:] if hist else []
     hist_lines = []
     for h in reversed(recent):
-        if h["result"] == "tp":
-            em = "✅"
-        elif h["result"] == "sl":
-            em = "❌"
-        elif h["result"] == "timeout":
-            em = "⏱✅" if h["pnl_usd"] > 0 else "⏱"
-        else:
-            em = "➖"
+        em = "✅" if h["result"] == "tp" else "❌"
         sgn = "+" if h["pnl_usd"] >= 0 else ""
         hist_lines.append(
             f"  {em} {sgn}{h['pct']:.2f}%  {sgn}${h['pnl_usd']:.4f}  "
@@ -1566,7 +1341,6 @@ def fmt_stats():
         f"Total trade  : {t}\n"
         f"🎯 TP        : {tp} ({tp/t*100:.1f}%)\n"
         f"🛑 SL        : {sl} ({sl/t*100:.1f}%)\n"
-        f"⏱ Timeout   : {to} ({to/t*100:.1f}%)\n"
         f"📈 Win Rate  : <b>{wr:.1f}%</b> (dari {tp+sl} trade)\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💵 <b>Modal Awal : ${STARTING_BALANCE:.2f}</b>\n"
@@ -1644,14 +1418,7 @@ def close_position(sym, result, close_price=None):
     tp_p  = sig["tp"]
     cid   = pos["chat_id"]
 
-    timeout_profit = (result == "timeout" and close_price is not None
-                      and close_price != entry)
-
-    if result == "timeout" and timeout_profit:
-        update_stats("timeout", entry=entry, sl_p=sl_p,
-                     tp_p=close_price, timeout_profit=True)
-    else:
-        update_stats(result, entry=entry, sl_p=sl_p, tp_p=tp_p)
+    update_stats(result, entry=entry, sl_p=sl_p, tp_p=tp_p)
 
     with ban_lock:
         banned_coins[sym] = get_real_trade_count()
@@ -1661,8 +1428,8 @@ def close_position(sym, result, close_price=None):
         if not positions:
             active_trade = None
 
-    emoji = {"tp":"🎯","sl":"🛑","timeout":"⏱"}.get(result,"❓")
-    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","timeout":"TIMEOUT"}.get(result, result.upper())
+    emoji = {"tp":"🎯","sl":"🛑"}.get(result,"❓")
+    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS"}.get(result, result.upper())
     tg_send(cid, f"{emoji} <b>{label}</b> — {sym}\n\n" + fmt_stats())
 
 
@@ -1713,99 +1480,40 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
 def monitor_position(sym, pos):
     """
     Thread per-posisi: cek TP/SL setiap 15 menit.
-    Auto-timeout 5 jam: tunggu PnL positif lalu tutup.
+    Posisi hanya ditutup saat TP atau SL — tidak ada timeout.
     """
-    sig        = pos["signal"]
-    chat_id    = pos["chat_id"]
-    entry      = pos["entry"]
-    tp_p       = sig["tp"]
-    sl_p       = sig["sl"]
-    is_buy     = sig["decision"] == "BUY"
-    entry_time = pos["entry_time"]
-    auto_timeout_sec = AUTO_TIMEOUT_HOURS * 3600
-    phase      = "normal"
-    notified_timeout = False
+    sig     = pos["signal"]
+    chat_id = pos["chat_id"]
+    entry   = pos["entry"]
+    tp_p    = sig["tp"]
+    sl_p    = sig["sl"]
+    is_buy  = sig["decision"] == "BUY"
 
     while True:
-        # Cek posisi masih ada (belum ditutup dari luar)
         with positions_lock:
             if sym not in positions: return
 
-        # Manual timeout
+        # Manual /timeout SYMBOL — tutup paksa
         if pos.get("timeout_flag"):
             pos["timeout_flag"] = False
             price = get_price(sym) or entry
             tg_send(chat_id,
-                f"⏭ <b>Timeout Manual</b> — {sym}\n"
-                f"Harga tutup: <code>{price:.6g}</code>")
-            close_position(sym, "timeout", close_price=price if price != entry else None)
+                f"⏭ <b>Ditutup Manual</b> — {sym}\n"
+                f"Harga: <code>{price:.6g}</code>")
+            close_position(sym, "sl")   # catat sebagai SL karena paksa tutup
             return
 
-        price   = get_price(sym)
+        price = get_price(sym)
         if price is None:
             time.sleep(MONITOR_SLEEP); continue
 
-        elapsed = time.time() - entry_time
-        is_profit = (price > entry) if is_buy else (price < entry)
-
-        # ── Auto-timeout 5 jam ──────────────────────────────────────
-        if phase == "normal" and elapsed >= auto_timeout_sec:
-            phase = "wait_profit"
-            if not notified_timeout:
-                notified_timeout = True
-                pnl_pct = (price - entry) / entry * 100 * (1 if is_buy else -1)
-                tg_send(chat_id,
-                    f"⏰ <b>Auto-Timeout {AUTO_TIMEOUT_HOURS}j — {sym}</b>\n"
-                    f"PnL saat ini: <b>{pnl_pct:+.2f}%</b>\n"
-                    f"{'✅ Profit — menutup...' if is_profit else '⏳ Menunggu profit...'}")
-
-        if phase == "wait_profit":
-            if is_profit:
-                pct = (price - entry) / entry * 100 * (1 if is_buy else -1)
-                tg_send(chat_id,
-                    f"⏱ <b>TIMEOUT — Profit Terkunci</b> — {sym}\n"
-                    f"Entry: <code>{entry:.6g}</code> → Tutup: <code>{price:.6g}</code>\n"
-                    f"Profit: <b>+{pct:.2f}%</b>")
-                close_position(sym, "timeout", close_price=price)
-                return
-
-            # SL tetap aktif saat wait_profit
-            hit_sl = (price <= sl_p) if is_buy else (price >= sl_p)
-            if hit_sl:
-                tg_send(chat_id,
-                    f"🛑 <b>SL saat Timeout</b> — {sym}\n"
-                    f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code>")
-                close_position(sym, "sl")
-                return
-
-            # PnL masih negatif — notif dan tunggu 15 menit lagi
-            pnl_pct = (price - entry) / entry * 100 * (1 if is_buy else -1)
-            tg_send(chat_id,
-                f"⏳ <b>Timeout — Menunggu Profit</b> — {sym}\n"
-                f"Harga : <code>{price:.6g}</code>\n"
-                f"Entry : <code>{entry:.6g}</code>\n"
-                f"PnL   : <b>{pnl_pct:+.2f}%</b>\n"
-                f"SL    : <code>{sl_p:.6g}</code> (masih aktif)\n"
-                f"⏰ Cek lagi 15 menit...")
-
-            # Tunggu 15 menit, responsif terhadap timeout_flag
-            deadline = time.time() + MONITOR_INTERVAL
-            while time.time() < deadline:
-                with positions_lock:
-                    if sym not in positions: return
-                if pos.get("timeout_flag"): break
-                time.sleep(MONITOR_SLEEP)
-            continue
-
-        # ── Cek TP ─────────────────────────────────────────────────
+        # ── Cek TP / SL — verifikasi via candle M1 ─────────────────
         hit_tp = (price >= tp_p) if is_buy else (price <= tp_p)
         hit_sl = (price <= sl_p) if is_buy else (price >= sl_p)
 
         if hit_tp or hit_sl:
-            # Verifikasi via M1: mana yang kena duluan dalam 15 menit terakhir?
             order = check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15)
             if order is None:
-                # M1 tidak konfirmasi — pakai harga sekarang sebagai penentu
                 order = "tp" if hit_tp else "sl"
 
             if order == "tp":
@@ -1813,43 +1521,36 @@ def monitor_position(sym, pos):
                 tg_send(chat_id,
                     f"🎯 <b>TAKE PROFIT</b> — {sym} 🎉\n"
                     f"TP: <code>{tp_p:.6g}</code>\n"
-                    f"Profit: +{pct:.2f}%\n"
-                    f"<i>(Dikonfirmasi via candle M1)</i>")
+                    f"Profit: +{pct:.2f}%")
                 close_position(sym, "tp")
                 return
             else:
-                # SL — verifikasi via M1 candle close, bukan hanya tick
-                # Cek apakah ada candle M1 yang CLOSE di bawah/atas SL (bukan hanya wick)
                 confirmed_sl = False
                 try:
                     df_m1 = get_klines(sym, "1m", 5)
                     if df_m1 is not None and not df_m1.empty:
                         last_closes = df_m1["close"].tail(3)
-                        if is_buy:
-                            confirmed_sl = any(c <= sl_p for c in last_closes)
-                        else:
-                            confirmed_sl = any(c >= sl_p for c in last_closes)
+                        confirmed_sl = any(
+                            (c <= sl_p) if is_buy else (c >= sl_p)
+                            for c in last_closes
+                        )
                 except Exception:
-                    confirmed_sl = hit_sl  # fallback ke harga tick
+                    confirmed_sl = hit_sl
 
                 if confirmed_sl:
                     tg_send(chat_id,
-                        f"🛑 <b>STOP LOSS CONFIRMED</b> — {sym}\n"
-                        f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code>\n"
-                        f"<i>(Candle M1 close konfirmasi)</i>")
+                        f"🛑 <b>STOP LOSS</b> — {sym}\n"
+                        f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code>")
                     close_position(sym, "sl")
                     return
                 else:
                     tg_send(chat_id,
                         f"🔄 <b>Liquidity Sweep — {sym}</b>\n"
-                        f"Wick menyentuh SL tapi candle M1 belum close di sana.\n"
-                        f"Lanjut monitor...")
+                        f"Wick menyentuh SL, candle M1 belum konfirmasi. Lanjut...")
                     continue
 
-        # ── Update berkala tiap 15 menit ───────────────────────────
-        sisa_jam = max(0, (auto_timeout_sec - elapsed) / 3600)
-        pnl_pct  = (price - entry) / entry * 100 * (1 if is_buy else -1)
-        timeout_str = f"⏰ Timeout dalam {sisa_jam:.1f} jam" if sisa_jam > 0 else "⏰ Timeout aktif — menunggu profit"
+        # ── Update 15 menit ────────────────────────────────────────
+        pnl_pct = (price - entry) / entry * 100 * (1 if is_buy else -1)
         tg_send(chat_id,
             f"📊 <b>Update 15m — {sym}</b>\n"
             f"Arah  : {'🟢 BUY' if is_buy else '🔴 SELL'}\n"
@@ -1857,10 +1558,8 @@ def monitor_position(sym, pos):
             f"Harga : <code>{price:.6g}</code>\n"
             f"TP    : <code>{tp_p:.6g}</code>\n"
             f"SL    : <code>{sl_p:.6g}</code>\n"
-            f"PnL   : <b>{pnl_pct:+.2f}%</b>\n"
-            f"{timeout_str}")
+            f"PnL   : <b>{pnl_pct:+.2f}%</b>")
 
-        # Tunggu 15 menit sambil tetap cek flag setiap 2 detik
         deadline = time.time() + MONITOR_INTERVAL
         while time.time() < deadline:
             with positions_lock:
@@ -1881,8 +1580,8 @@ def simulation_loop(chat_id):
         "🤖 <b>SMC Signal Broadcaster dimulai!</b>\n\n"
         "• Scan koin → catat sinyal → pantau tiap 15 menit\n"
         f"• Maks {MAX_POSITIONS} posisi bersamaan\n"
-        f"• Auto-timeout {AUTO_TIMEOUT_HOURS} jam per posisi\n\n"
-        "/stop untuk berhenti | /timeout SYMBOL untuk skip\n"
+        "• Posisi ditutup hanya saat TP atau SL\n\n"
+        "/stop untuk berhenti | /timeout SYMBOL untuk tutup paksa\n"
         "/trade untuk lihat semua posisi aktif")
 
     scanning = False          # flag: apakah scan sedang berjalan
@@ -2046,14 +1745,15 @@ def simulation_loop(chat_id):
 # ═════════════════════════════════════════════
 GREETING=(
     "👋 <b>SMC Signal Broadcaster</b>\n\n"
-    "Scan → sinyal → pantau max 5 posisi bersamaan (update tiap 15 menit)\n\n"
+    "Scan → sinyal → pantau max 5 posisi bersamaan (update tiap 15 menit)\n"
+    "Posisi ditutup hanya saat TP atau SL\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "/start               — Menu ini\n"
     "/auto                — Mulai broadcaster\n"
     "/stop                — Hentikan semua\n"
     "/trade               — Lihat semua posisi aktif\n"
-    "/timeout SYMBOL      — Skip posisi tertentu\n"
-    "/timeout             — Skip semua posisi\n"
+    "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
+    "/timeout             — Tutup paksa semua posisi\n"
     "/stats               — Statistik + saldo\n"
     "/banned              — Daftar koin ban\n"
     "/resetban            — Hapus semua ban\n"
@@ -2149,12 +1849,11 @@ def bot_loop():
                     tg_send(chat_id,f"✅ Ban direset ({n} dihapus).")
                 elif text in ("/resetbalance","resetbalance"):
                     with stat_lock:
-                        stats["balance"]      = STARTING_BALANCE
-                        stats["pnl_history"]  = []
-                        stats["tp"]           = 0
-                        stats["sl"]           = 0
-                        stats["timeout"]      = 0
-                        stats["total"]        = 0
+                        stats["balance"]     = STARTING_BALANCE
+                        stats["pnl_history"] = []
+                        stats["tp"]          = 0
+                        stats["sl"]          = 0
+                        stats["total"]       = 0
                     tg_send(chat_id,
                         f"✅ Saldo & statistik direset.\n"
                         f"💵 Modal awal: <b>${STARTING_BALANCE:.2f}</b>")
@@ -2201,12 +1900,12 @@ def bot_loop():
                                 pr  = get_price(s) or p["entry"]
                                 pnl = (pr - p["entry"]) / p["entry"] * 100 * (1 if is_buy else -1)
                                 el  = time.time() - p["entry_time"]
-                                sj  = max(0, AUTO_TIMEOUT_HOURS * 3600 - el) / 3600
+                                sj  = el / 3600
                                 lines.append(
                                     f"\n{em} <b>{s}</b> — AKTIF\n"
                                     f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
                                     f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{sig['sl']:.6g}</code>\n"
-                                    f"PnL: <b>{pnl:+.2f}%</b> | ⏰ {sj:.1f}j"
+                                    f"PnL: <b>{pnl:+.2f}%</b> | ⏱ {sj:.1f}j"
                                 )
                         tg_send(chat_id,"\n".join(lines))
                 elif text.startswith("/timeout") or (not text.startswith("/") and text.startswith("timeout")):
