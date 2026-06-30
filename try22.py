@@ -20,6 +20,7 @@ MIN_RR              = 2.0
 MONITOR_SLEEP       = 10
 MAX_POSITIONS       = 5
 MONITOR_INTERVAL    = 15 * 60
+SWEEP_PULL_FACTOR   = 0.5   # 0 = entry tetap di OB/FVG/EQL/Fib asli, 1 = entry persis di level Liquidity Sweep
 # ─────────────────────────────────────────────
 
 if not TELEGRAM_TOKEN:
@@ -1094,6 +1095,67 @@ def find_ob(df, direction, lb=40):
     return obs[-3:] if obs else []
 
 
+def _find_sweep_level(m15, h1, direction, ref_price, atr):
+    """
+    Cari level Liquidity Sweep RAW (tanpa buffer SL) terdekat di luar
+    ref_price — sumbernya sama persis dengan SL pool di analyze_setup():
+    eq highs/lows M15 → supply/demand zone M15 → swing M15
+    → eq highs/lows H1 → supply/demand H1
+
+    Ini level "mentah" tempat institusi biasa sweep liquidity retail —
+    BUKAN posisi SL final (SL final = level ini + buffer, tetap dihitung
+    terpisah di analyze_setup() dan tidak diubah oleh fungsi ini).
+
+    direction='bear' → cari level di ATAS ref_price (untuk tarik entry SELL)
+    direction='bull' → cari level di BAWAH ref_price (untuk tarik entry BUY)
+    """
+    if m15 is None: return None
+    sh15, sl15 = swing_pts(m15, lb=5)
+    levels = []
+
+    if direction == "bear":
+        for eh in sorted(find_equal_highs_lows(m15, "high", lb=80)):
+            if eh > ref_price + atr * 0.2:
+                levels.append(eh); break
+        for z in find_supply_demand(m15, "supply"):
+            if z["top"] > ref_price + atr * 0.2:
+                levels.append(z["top"])
+        sh_above = sorted([m15["high"].iloc[i] for i in sh15
+                           if m15["high"].iloc[i] > ref_price + atr * 0.2])
+        if sh_above:
+            levels.append(sh_above[0])
+        if h1 is not None:
+            for eh in sorted(find_equal_highs_lows(h1, "high", lb=50)):
+                if eh > ref_price + atr * 0.5:
+                    levels.append(eh); break
+            for z in find_supply_demand(h1, "supply"):
+                if z["top"] > ref_price + atr * 0.5:
+                    levels.append(z["top"])
+        levels = [v for v in levels if v > ref_price]
+        return min(levels) if levels else None
+
+    else:
+        for el in sorted(find_equal_highs_lows(m15, "low", lb=80), reverse=True):
+            if el < ref_price - atr * 0.2:
+                levels.append(el); break
+        for z in find_supply_demand(m15, "demand"):
+            if z["bot"] < ref_price - atr * 0.2:
+                levels.append(z["bot"])
+        sl_below = sorted([m15["low"].iloc[i] for i in sl15
+                           if m15["low"].iloc[i] < ref_price - atr * 0.2], reverse=True)
+        if sl_below:
+            levels.append(sl_below[0])
+        if h1 is not None:
+            for el in sorted(find_equal_highs_lows(h1, "low", lb=50), reverse=True):
+                if el < ref_price - atr * 0.5:
+                    levels.append(el); break
+            for z in find_supply_demand(h1, "demand"):
+                if z["bot"] < ref_price - atr * 0.5:
+                    levels.append(z["bot"])
+        levels = [v for v in levels if v < ref_price]
+        return max(levels) if levels else None
+
+
 def calc_discount_entry(df_h1, df_m15, direction, current_price, atr):
     """
     Hitung harga entry diskon dari zona struktural:
@@ -1105,8 +1167,24 @@ def calc_discount_entry(df_h1, df_m15, direction, current_price, atr):
     2. FVG (Fair Value Gap)
     3. Equal Highs/Lows
     4. Fibonacci 50% retracement
+
+    SWEEP PULL (tambahan):
+    Setelah kandidat terbaik (base_entry) ditemukan, entry ditarik
+    SWEEP_PULL_FACTOR dari jarak base_entry → level Liquidity Sweep
+    terdekat (level raw yang sama dipakai analyze_setup() untuk SL,
+    tapi di sini TANPA buffer SL). Alasannya: wick harga terbukti sering
+    sampai ke level sweep itu (lihat notif "Liquidity Sweep" berulang)
+    tanpa pernah dianggap entry — level yang sedikit lebih jauh ini
+    justru lebih sering tersentuh daripada base_entry (OB/FVG) yang
+    terlalu dekat dengan harga sekarang.
+    SL TIDAK diubah oleh ini — analyze_setup() tetap menaruh SL di level
+    sweep + buffernya sendiri, jadi urutannya selalu:
+    entry (baru) < level sweep < SL (untuk SELL, sebaliknya untuk BUY).
+    SL tidak pernah menyentuh level sweep karena bufer SL selalu
+    ditambahkan DI LUAR level itu.
     """
     m15 = build_df(df_m15)
+    h1  = build_df(df_h1)
     if m15 is None: return current_price, "market"
 
     sh15, sl15 = swing_pts(m15, lb=5)
@@ -1139,7 +1217,20 @@ def calc_discount_entry(df_h1, df_m15, direction, current_price, atr):
         above = [(p, l, r) for p, l, r in candidates if p > current_price]
         if above:
             above.sort(key=lambda x: (x[2], x[0]))
-            return round(above[0][0], 8), above[0][1]
+            base_entry, base_label = above[0][0], above[0][1]
+
+            sweep_level = _find_sweep_level(m15, h1, "bear", base_entry, atr)
+            if sweep_level is not None and sweep_level > base_entry + atr * 0.1:
+                pulled = base_entry + (sweep_level - base_entry) * SWEEP_PULL_FACTOR
+                return round(pulled, 8), f"{base_label}+sweep_pull"
+            return round(base_entry, 8), base_label
+
+        # Tidak ada kandidat OB/FVG/EQH/Fib valid — sebelum jatuh ke market,
+        # coba tarik dari current_price langsung ke arah level sweep terdekat.
+        sweep_level = _find_sweep_level(m15, h1, "bear", current_price, atr)
+        if sweep_level is not None and sweep_level > current_price + atr * 0.1:
+            pulled = current_price + (sweep_level - current_price) * SWEEP_PULL_FACTOR
+            return round(pulled, 8), "sweep_pull_only"
     else:
         for ob in reversed(ob_bull):
             if ob["top"] < current_price - atr * 0.1:
@@ -1161,7 +1252,20 @@ def calc_discount_entry(df_h1, df_m15, direction, current_price, atr):
         below = [(p, l, r) for p, l, r in candidates if p < current_price]
         if below:
             below.sort(key=lambda x: (x[2], -x[0]))
-            return round(below[0][0], 8), below[0][1]
+            base_entry, base_label = below[0][0], below[0][1]
+
+            sweep_level = _find_sweep_level(m15, h1, "bull", base_entry, atr)
+            if sweep_level is not None and sweep_level < base_entry - atr * 0.1:
+                pulled = base_entry - (base_entry - sweep_level) * SWEEP_PULL_FACTOR
+                return round(pulled, 8), f"{base_label}+sweep_pull"
+            return round(base_entry, 8), base_label
+
+        # Tidak ada kandidat OB/FVG/EQL/Fib valid — sebelum jatuh ke market,
+        # coba tarik dari current_price langsung ke arah level sweep terdekat.
+        sweep_level = _find_sweep_level(m15, h1, "bull", current_price, atr)
+        if sweep_level is not None and sweep_level < current_price - atr * 0.1:
+            pulled = current_price - (current_price - sweep_level) * SWEEP_PULL_FACTOR
+            return round(pulled, 8), "sweep_pull_only"
 
     return current_price, "market"
 
@@ -1544,10 +1648,23 @@ def monitor_position(sym, pos):
                     close_position(sym, "sl")
                     return
                 else:
-                    tg_send(chat_id,
-                        f"🔄 <b>Liquidity Sweep — {sym}</b>\n"
-                        f"Wick menyentuh SL, candle M1 belum konfirmasi. Lanjut...")
+                    # FIX: dulu di sini langsung `continue` tanpa sleep, jadi
+                    # selama wick masih menyentuh SL tapi candle M1 belum
+                    # konfirmasi, loop balik secepat CPU bisa jalan dan spam
+                    # notif "Liquidity Sweep" berkali-kali per detik.
+                    # Sekarang: notif cuma dikirim sekali per episode sweep
+                    # (flag direset begitu kondisi sweep hilang), dan loop
+                    # tetap istirahat MONITOR_SLEEP detik sebelum cek lagi.
+                    if not pos.get("sweep_notified"):
+                        tg_send(chat_id,
+                            f"🔄 <b>Liquidity Sweep — {sym}</b>\n"
+                            f"Wick menyentuh SL, candle M1 belum konfirmasi. Lanjut...")
+                        pos["sweep_notified"] = True
+                    time.sleep(MONITOR_SLEEP)
                     continue
+
+        # Harga sudah tidak lagi menyentuh SL → reset flag notif sweep
+        pos["sweep_notified"] = False
 
         # ── Update 15 menit ────────────────────────────────────────
         pnl_pct = (price - entry) / entry * 100 * (1 if is_buy else -1)
@@ -1646,13 +1763,21 @@ def simulation_loop(chat_id):
                 scanning = False
 
     def _wait_entry(sym, signal, chat_id):
-        """Thread terpisah — tunggu harga ke zona entry, scan tetap jalan."""
+        """Thread terpisah — tunggu harga ke zona entry, scan tetap jalan.
+
+        FIX: sebelumnya loop ini bergantung pada `auto_mode`, jadi begitu
+        /stop dipanggil, semua pending order ikut dibatalkan diam-diam
+        meski belum expired. Sekarang loop ini independen dari auto_mode:
+        /stop hanya menghentikan scan koin baru, sementara pending order
+        yang sudah terdaftar tetap ditunggu sampai entry tersentuh, TP
+        basi, atau expired (4 jam).
+        """
         entry_target = signal["entry"]
         is_buy       = signal["decision"] == "BUY"
         tp_p         = signal["tp"]
         deadline     = time.time() + 4 * 3600
 
-        while time.time() < deadline and auto_mode:
+        while time.time() < deadline:
             # Cek posisi belum dihapus dari luar (misal /timeout)
             with positions_lock:
                 if sym not in positions: return
@@ -1685,10 +1810,9 @@ def simulation_loop(chat_id):
         # Expired — hapus pending
         with positions_lock:
             positions.pop(sym, None)
-        if auto_mode:
-            tg_send(chat_id,
-                f"⏰ <b>Pending Expired</b> — {sym}\n"
-                f"Harga tidak mencapai zona entry dalam 4 jam. Skip.")
+        tg_send(chat_id,
+            f"⏰ <b>Pending Expired</b> — {sym}\n"
+            f"Harga tidak mencapai zona entry dalam 4 jam. Skip.")
 
     def _open_position(sym, signal, actual_entry, chat_id, mode_label):
         """Upgrade posisi dari pending ke aktif dan mulai monitor."""
@@ -1736,7 +1860,7 @@ def simulation_loop(chat_id):
         # Jeda antar scan agar tidak langsung re-scan begitu selesai
         time.sleep(5)
 
-    tg_send(chat_id, "⏹ <b>Broadcaster dihentikan.</b>\n\n" + fmt_stats())
+    tg_send(chat_id, "⏹ <b>Scanning dihentikan.</b>\n\n" + fmt_stats())
 
 
 
@@ -1750,7 +1874,7 @@ GREETING=(
     "━━━━━━━━━━━━━━━━━━━━\n"
     "/start               — Menu ini\n"
     "/auto                — Mulai broadcaster\n"
-    "/stop                — Hentikan semua\n"
+    "/stop                — Hentikan scanning (posisi aktif tetap dipantau)\n"
     "/trade               — Lihat semua posisi aktif\n"
     "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
     "/timeout             — Tutup paksa semua posisi\n"
@@ -1866,12 +1990,20 @@ def bot_loop():
                             target=simulation_loop,args=(chat_id,),daemon=True)
                         auto_thread.start()
                 elif text in ("/stop","stop"):
+                    # FIX: dulu /stop juga men-set timeout_flag = True ke semua
+                    # posisi aktif, yang membuat monitor_position menutupnya
+                    # secara paksa dan mencatatnya sebagai SL (loss). Sekarang
+                    # /stop HANYA mematikan auto_mode (stop scanning sinyal
+                    # baru) — posisi yang sudah berjalan tetap dipantau dan
+                    # baru ditutup saat benar-benar kena TP/SL alami.
                     if auto_mode:
                         auto_mode = False
                         with positions_lock:
-                            for s in list(positions.keys()):
-                                positions[s]["timeout_flag"] = True
-                        tg_send(chat_id,"⏹ Menghentikan broadcaster dan semua posisi...")
+                            n_active = len(positions)
+                        tg_send(chat_id,
+                            f"⏹ <b>Scanning dihentikan.</b>\n"
+                            f"Posisi aktif ({n_active}) tetap dipantau sampai TP/SL.\n"
+                            f"Pakai /timeout SYMBOL kalau mau tutup paksa.")
                     else:
                         tg_send(chat_id,"ℹ️ Broadcaster tidak berjalan.")
                 elif text in ("/trade","trade"):
