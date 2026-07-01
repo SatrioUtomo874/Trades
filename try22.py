@@ -1815,12 +1815,12 @@ def simulation_loop(chat_id):
         meski belum expired. Sekarang loop ini independen dari auto_mode:
         /stop hanya menghentikan scan koin baru, sementara pending order
         yang sudah terdaftar tetap ditunggu sampai entry tersentuh, TP
-        basi, atau expired (4 jam).
+        basi, atau expired (8 jam).
         """
         entry_target = signal["entry"]
         is_buy       = signal["decision"] == "BUY"
         tp_p         = signal["tp"]
-        deadline     = time.time() + 4 * 3600
+        deadline     = time.time() + 8 * 3600
 
         while time.time() < deadline:
             # Cek posisi belum dihapus dari luar (misal /timeout)
@@ -1857,7 +1857,7 @@ def simulation_loop(chat_id):
             positions.pop(sym, None)
         tg_send(chat_id,
             f"⏰ <b>Pending Expired</b> — {sym}\n"
-            f"Harga tidak mencapai zona entry dalam 4 jam. Skip.")
+            f"Harga tidak mencapai zona entry dalam 8 jam. Skip.")
 
     def _open_position(sym, signal, actual_entry, chat_id, mode_label):
         """Upgrade posisi dari pending ke aktif dan mulai monitor."""
