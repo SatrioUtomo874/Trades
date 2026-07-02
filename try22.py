@@ -18,7 +18,7 @@ MAX_PRICE       = 80.0
 TOP_N_COINS     = 50
 MIN_RR              = 2.0
 MONITOR_SLEEP       = 10
-MAX_POSITIONS       = 5
+MAX_POSITIONS       = 10
 MONITOR_INTERVAL    = 15 * 60
 SWEEP_PULL_FACTOR   = 0.5   # 0 = entry tetap di OB/FVG/EQL/Fib asli, 1 = entry persis di level Liquidity Sweep
 TP_MAX_RR_MULT      = 1.8   # batas atas pencarian TP "lebih kuat": RR boleh naik sampai MIN_RR × ini
@@ -1544,7 +1544,7 @@ def fmt_signal_msg(sig):
 # ═════════════════════════════════════════════
 # MULTI-POSITION BROADCASTER
 # ═════════════════════════════════════════════
-MAX_POSITIONS    = 5       # maks posisi dipantau bersamaan
+# MAX_POSITIONS dikontrol lewat /max — lihat konstanta di bagian atas file
 MONITOR_INTERVAL = 15 * 60  # cek posisi tiap 15 menit (detik)
 
 positions_lock = threading.Lock()
@@ -1931,13 +1931,14 @@ def simulation_loop(chat_id):
 # ═════════════════════════════════════════════
 GREETING=(
     "👋 <b>SMC Signal Broadcaster</b>\n\n"
-    "Scan → sinyal → pantau max 5 posisi bersamaan (update tiap 15 menit)\n"
+    f"Scan → sinyal → pantau max {MAX_POSITIONS} posisi bersamaan (update tiap 15 menit)\n"
     "Posisi ditutup hanya saat TP atau SL\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "/start               — Menu ini\n"
     "/auto                — Mulai broadcaster\n"
     "/stop                — Hentikan scanning (posisi aktif tetap dipantau)\n"
     "/trade               — Lihat semua posisi aktif\n"
+    "/max                 — Lihat/ubah max posisi + info batas API\n"
     "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
     "/timeout             — Tutup paksa semua posisi\n"
     "/stats               — Statistik + saldo\n"
@@ -1980,7 +1981,7 @@ def get_info_msg():
 # BOT LOOP
 # ═════════════════════════════════════════════
 def bot_loop():
-    global auto_mode, auto_thread, active_chat_id, timeout_flag
+    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS
 
     log.info("Test koneksi Binance...")
     for i in range(10):
@@ -2125,6 +2126,74 @@ def bot_loop():
                                 if s in positions:
                                     positions[s]["timeout_flag"] = True
                         tg_send(chat_id,f"⏭ Timeout semua ({len(syms)}) posisi.")
+                elif text.startswith("/max"):
+                    parts = text.split()
+                    # ── /max (tampilkan info) ──────────────────────────────
+                    if len(parts) == 1:
+                        # Estimasi beban API saat ini
+                        scan_weight_per_min  = 836   # ~100 kline req × weight5 / ~34s scan
+                        price_weight_per_min = 12    # 1 batch ticker/price tiap 10 detik
+                        total_weight         = scan_weight_per_min + price_weight_per_min
+                        binance_limit        = 2400
+                        usage_pct            = total_weight / binance_limit * 100
+                        headroom_pct         = 100 - usage_pct
+                        threads_now          = 4 + MAX_POSITIONS * 2   # bot+cache+flask+scan + monitor+wait_entry
+
+                        # Batas aman: scan mendominasi, bukan jumlah posisi
+                        # Posisi hanya menambah ~0.02 weight/mnt per posisi (SL check jarang)
+                        # Batas praktis sebelum scan overload:
+                        #   sisa headroom = 1552 weight/mnt, scan = 836/mnt
+                        #   bisa ~2 scan paralel tapi kode hanya 1 scan sekaligus → aman tak terbatas dari sisi API
+                        # Batas rekomendasi dari sisi KUALITAS SINYAL: ≤ 20
+                        tg_send(chat_id,
+                            f"⚙️ <b>Max Posisi</b>\n\n"
+                            f"Saat ini     : <b>{MAX_POSITIONS} posisi</b>\n\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📡 <b>Info Beban API (Binance Futures)</b>\n\n"
+                            f"Limit Binance    : <b>2.400 weight/mnt</b>\n"
+                            f"Scan 50 koin     : ~{scan_weight_per_min} weight/mnt\n"
+                            f"Price cache      : ~{price_weight_per_min} weight/mnt (1 batch/10 dtk)\n"
+                            f"Total dipakai    : ~{total_weight} weight/mnt "
+                            f"(<b>{usage_pct:.0f}%</b> dari limit)\n"
+                            f"Headroom tersisa : ~{headroom_pct:.0f}%\n\n"
+                            f"⚠️ <b>Penting:</b> MAX_POSITIONS <b>tidak</b> menambah beban\n"
+                            f"API secara signifikan. Beban didominasi scan koin,\n"
+                            f"bukan jumlah posisi yang dipantau.\n"
+                            f"Monitor thread baca harga dari cache lokal — bukan API.\n\n"
+                            f"🧵 Thread aktif est. : ~{threads_now}\n\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📊 <b>Batas yang Disarankan</b>\n\n"
+                            f"API weight  : ✅ aman hingga 50+ posisi\n"
+                            f"Thread      : ✅ aman hingga 50+ posisi\n"
+                            f"Kualitas sinyal: ⚠️  disarankan ≤ 20\n"
+                            f"  (lebih dari itu, scanner makin susah\n"
+                            f"  temukan setup berkualitas karena koin\n"
+                            f"  terbaik sudah terpakai)\n\n"
+                            f"<b>Ubah: /max 5 | /max 10 | /max 15 | /max 20</b>")
+                    # ── /max N (ubah nilai) ────────────────────────────────
+                    elif len(parts) == 2:
+                        try:
+                            n = int(parts[1])
+                            if n < 1 or n > 50:
+                                tg_send(chat_id,
+                                    f"❌ Nilai harus antara 1–50.\n"
+                                    f"Contoh: /max 10")
+                            else:
+                                old = MAX_POSITIONS
+                                MAX_POSITIONS = n
+                                with positions_lock:
+                                    n_active = len(positions)
+                                note = ""
+                                if n < n_active:
+                                    note = (f"\n\n⚠️ Ada {n_active} posisi aktif saat ini.\n"
+                                            f"Posisi yang sudah buka tetap dipantau.\n"
+                                            f"Scan baru berhenti sampai posisi tutup ke ≤ {n}.")
+                                tg_send(chat_id,
+                                    f"✅ Max posisi diubah: <b>{old} → {MAX_POSITIONS}</b>{note}")
+                        except ValueError:
+                            tg_send(chat_id,"❌ Format salah. Contoh: /max 10")
+                    else:
+                        tg_send(chat_id,"❌ Format: /max  atau  /max 10")
                 else:
                     tg_send(chat_id,"❓ Tidak dikenal. /start")
 
