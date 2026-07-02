@@ -361,6 +361,12 @@ def get_real_trade_count():
 def get_top_coins():
     """Ambil top coins. Binance dulu, fallback Bybit.
     Auto-unban koin yang sudah melewati UNBAN_AFTER_TRADES trade nyata.
+
+    Koin yang sedang pending ATAU aktif di posisi DIKELUARKAN dari pool
+    SEBELUM slicing ke TOP_N_COINS — bukan disaring setelahnya. Efeknya:
+    pool tetap genap TOP_N_COINS koin tradeable, koin peringkat ke-51,
+    52, dst otomatis naik menggantikan slot yang "diambil" oleh posisi
+    yang sedang berjalan.
     """
     with ban_lock:
         real_trades = get_real_trade_count()
@@ -371,9 +377,15 @@ def get_top_coins():
             del banned_coins[sym]
             log.info(f"[unban] {sym} kembali aktif setelah {UNBAN_AFTER_TRADES} trade")
         cur_ban = set(banned_coins.keys())
+
+    with positions_lock:
+        active_syms = set(positions.keys())   # pending + aktif
+
+    cur_exclude = cur_ban | active_syms
+
     # Binance
     try:
-        coins = _binance_top_coins(cur_ban)
+        coins = _binance_top_coins(cur_exclude)
         if coins:
             return coins
         log.warning("[top_coins/binance] kosong, coba Bybit...")
@@ -381,7 +393,7 @@ def get_top_coins():
         log.warning(f"[top_coins/binance] {e} — coba Bybit...")
     # Bybit fallback
     try:
-        coins = _bybit_top_coins(cur_ban)
+        coins = _bybit_top_coins(cur_exclude)
         log.info(f"[top_coins/bybit fallback] {len(coins)} koin")
         return coins
     except Exception as e:
@@ -854,7 +866,15 @@ def analyze_setup(df_h1, df_m15, direction, entry_price):
     atr_h1  = max(L1["atr"],  entry_price * 0.004)
     # Pakai ATR H1 sebagai referensi minimum SL — lebih representatif dari volatilitas nyata
     atr = atr_m15
-    sl_min = max(atr_h1 * 1.5, atr_m15 * 2.0)  # SL minimum: 1.5× H1 ATR atau 2× M15 ATR
+    # SL minimum HANYA sebagai jaring pengaman noise/spread, BUKAN acuan jarak SL.
+    # Sebelumnya nilai ini (1.5×ATR-H1 / 2×ATR-M15) nyaris SELALU lebih lebar
+    # dari level struktural + buffer wick-clearance (~0.5–0.7×ATR), sehingga
+    # SL asli dari analisis nyaris selalu dibuang dan diganti jarak ATR murni
+    # yang tidak terikat level chart manapun (98%+ kasus, terverifikasi via
+    # simulasi). Sekarang floor ini jauh lebih kecil — hanya turun tangan
+    # kalau level struktural yang ditemukan benar-benar terlalu mepet
+    # (rawan kena noise candle biasa, bukan pergerakan riil).
+    sl_min = max(atr_h1 * 0.3, atr_m15 * 0.6)
 
     sh15, sl15 = swing_pts(m15, lb=5)
     sh1,  sl1  = swing_pts(h1,  lb=5)
@@ -927,9 +947,13 @@ def analyze_setup(df_h1, df_m15, direction, entry_price):
 
         risk = abs(sl_price - entry_price)
         if risk < sl_min:
-            sl_price = entry_price + sl_min
+            # Level struktural terlalu mepet — TAMBAH jarak secukupnya di
+            # atas level itu (tetap dari analisa), bukan diganti angka ATR
+            # yang lepas dari chart. (Untuk kasus atr_fallback, risk sudah
+            # persis == sl_min sehingga baris ini tidak pernah tereksekusi.)
+            sl_price += (sl_min - risk)
             risk = sl_min
-            sl_label += "_expanded"
+            sl_label += "_topup"
 
         reasons.append(f"SL@{sl_price:.5g}({sl_label})")
         min_reward = risk * MIN_RR
@@ -1032,9 +1056,13 @@ def analyze_setup(df_h1, df_m15, direction, entry_price):
 
         risk = abs(entry_price - sl_price)
         if risk < sl_min:
-            sl_price = entry_price - sl_min
+            # Level struktural terlalu mepet — TAMBAH jarak secukupnya di
+            # bawah level itu (tetap dari analisa), bukan diganti angka
+            # ATR yang lepas dari chart. (Kasus atr_fallback: risk sudah
+            # persis == sl_min, baris ini tidak pernah tereksekusi.)
+            sl_price -= (sl_min - risk)
             risk = sl_min
-            sl_label += "_expanded"
+            sl_label += "_topup"
 
         reasons.append(f"SL@{sl_price:.5g}({sl_label})")
         min_reward = risk * MIN_RR
@@ -1410,28 +1438,38 @@ def run_scan_once(chat_id):
 # ═════════════════════════════════════════════
 # STATISTIK + BALANCE
 # ═════════════════════════════════════════════
-RISK_PER_TRADE_PCT = 2.0   # risiko maksimal per trade = 2% dari saldo
+POSITION_SIZE_PCT = 100.0  # ukuran posisi per trade = 100% saldo (setara 1× leverage)
+                            # P&L murni dari jarak SL/TP yang ditetapkan analisis:
+                            #   TP hit → gain = posisi × (tp_dist / entry)
+                            #   SL hit → loss = posisi × (sl_dist / entry)
+                            # Nilai ini TIDAK mempengaruhi PENEMPATAN SL/TP —
+                            # hanya memengaruhi simulasi saldo.
 
 def update_stats(result, entry=None, sl_p=None, tp_p=None):
     """
-    Hitung P&L dalam USD berdasarkan fixed risk per trade.
-    Risk per trade = RISK_PER_TRADE_PCT % dari saldo saat ini.
-    - tp → profit = risk × (tp_dist / sl_dist)
-    - sl → loss   = -risk
+    Hitung P&L simulasi murni dari jarak harga analisis.
+
+    Model: alokasikan POSITION_SIZE_PCT % dari saldo ke setiap trade.
+    Gain/loss = posisi × (jarak TP atau SL dari entry / entry).
+
+    Efek:
+    - SL dekat (tight, misal 0.8%) → loss kecil
+    - SL jauh  (wide, misal 4%)   → loss lebih besar
+    - Tidak ada lagi loss "flat -2%" — sepenuhnya dari analisis struktural.
     """
     with stat_lock:
         stats["total"] += 1
         if result in ("tp", "sl"):
             stats[result] += 1
 
+        balance      = stats["balance"]
+        position_usd = round(balance * POSITION_SIZE_PCT / 100, 6)
+
         if result == "tp" and entry and sl_p and tp_p:
-            balance  = stats["balance"]
-            risk_usd = round(balance * RISK_PER_TRADE_PCT / 100, 4)
-            sl_dist  = abs(entry - sl_p)
-            tp_dist  = abs(tp_p  - entry)
-            rr_actual = tp_dist / sl_dist if sl_dist > 0 else MIN_RR
-            pnl_usd  = round(risk_usd * rr_actual, 4)
-            pct      = round(tp_dist / entry * 100, 3)
+            tp_dist  = abs(tp_p - entry)
+            pnl_pct  = tp_dist / entry          # % gerakan harga nyata (dari analisis)
+            pnl_usd  = round(position_usd * pnl_pct, 4)
+            pct      = round(pnl_pct * 100, 3)
             stats["balance"] = round(balance + pnl_usd, 4)
             stats["pnl_history"].append({
                 "result": "tp", "pct": pct,
@@ -1439,11 +1477,10 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None):
             })
 
         elif result == "sl" and entry and sl_p:
-            balance  = stats["balance"]
-            risk_usd = round(balance * RISK_PER_TRADE_PCT / 100, 4)
             sl_dist  = abs(entry - sl_p)
-            pnl_usd  = -risk_usd
-            pct      = -round(sl_dist / entry * 100, 3)
+            pnl_pct  = sl_dist / entry          # % jarak SL dari entry (dari analisis)
+            pnl_usd  = -round(position_usd * pnl_pct, 4)
+            pct      = -round(pnl_pct * 100, 3)
             stats["balance"] = round(balance + pnl_usd, 4)
             stats["pnl_history"].append({
                 "result": "sl", "pct": pct,
@@ -1492,7 +1529,7 @@ def fmt_stats():
         f"💰 <b>Saldo Kini : ${bal:.4f}</b>\n"
         f"{pnl_em} <b>Total P&L  : {pnl_sgn}${pnl_tot:.4f} "
         f"({pnl_sgn}{pnl_pct:.2f}%)</b>\n"
-        f"⚠️ Risk/trade : {RISK_PER_TRADE_PCT}% saldo\n\n"
+        f"⚖️ Model P&L  : posisi {POSITION_SIZE_PCT:.0f}% saldo × % gerakan SL/TP\n\n"
         f"📋 5 Trade Terakhir:\n{hist_str}\n\n"
         f"🚫 Banned    : {len(banned_coins)}"
     )
@@ -1972,7 +2009,9 @@ def get_info_msg():
         "Level TP: eq highs/lows, supply/demand, FVG, swing H1\n\n"
         f"Min RR: 1:{MIN_RR} | Min Confidence: 40%\n"
         f"TF: H1 (bias) + M15 (entry)\n"
-        f"Risk per trade: {RISK_PER_TRADE_PCT}% dari saldo\n"
+        f"Model P&L   : posisi {POSITION_SIZE_PCT:.0f}% saldo × % jarak SL/TP aktual\n"
+        f"  → SL dekat (0.5%) = loss kecil | SL jauh (4%) = loss lebih besar\n"
+        f"  → P&L murni dari level struktural analisis, bukan fixed -2%\n"
         f"Modal simulasi: ${STARTING_BALANCE:.2f}"
     )
 
