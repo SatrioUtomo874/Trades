@@ -22,6 +22,17 @@ MAX_POSITIONS       = 10
 MONITOR_INTERVAL    = 15 * 60
 SWEEP_PULL_FACTOR   = 0.5   # 0 = entry tetap di OB/FVG/EQL/Fib asli, 1 = entry persis di level Liquidity Sweep
 TP_MAX_RR_MULT      = 1.8   # batas atas pencarian TP "lebih kuat": RR boleh naik sampai MIN_RR × ini
+# ── Fibonacci Extension TP (gated H4 confluence) ──
+# Dipakai HANYA saat level struktural biasa sudah habis diperiksa DAN
+# konteks H4 (trend besar) + RSI H4 (momentum belum jenuh) mendukung.
+# Bukan cabang "penyelamat" RR gagal — ini kandidat TP tambahan yang
+# dievaluasi berdampingan dengan level struktural lain di _select_best_tp.
+FIB_EXT_1           = 0.272  # ekstensi 1.272 — butuh H4 trend + RSI band saja
+FIB_EXT_2           = 0.618  # ekstensi 1.618 — butuh confluence penuh (+ CHoCH M15 searah)
+H4_RSI_BUY_MIN      = 45     # RSI H4 BUY: momentum sudah established (bukan baru mulai)
+H4_RSI_BUY_MAX      = 68     # tapi belum overbought / jenuh
+H4_RSI_SELL_MIN     = 32     # RSI H4 SELL: kebalikan dari BUY
+H4_RSI_SELL_MAX     = 55
 # ─────────────────────────────────────────────
 
 if not TELEGRAM_TOKEN:
@@ -805,7 +816,89 @@ TP_TIER = {
     "demand_top_m15": 2, "supply_bot_m15": 2, "demand_top_h1": 2, "supply_bot_h1": 2,
     "fvg_bear_m15": 3, "fvg_bull_m15": 3,
     "sw_low_m15": 4, "sw_high_m15": 4, "sw_low_h1": 4, "sw_high_h1": 4,
+    # 5-6 = proyeksi Fibonacci extension — level yang BELUM pernah "dibuktikan"
+    # market (beda dari swing yang memang sudah jadi titik balik harga
+    # sebelumnya). Sengaja ditandai paling lemah dan hanya aktif kalau
+    # gate H4 confluence lolos — lihat _h4_confluence().
+    "fib_ext_127": 5, "fib_ext_162": 6,
 }
+
+
+def _h4_confluence(df_h1, direction, choch_m15=None):
+    """
+    Konfirmasi H4 untuk membuka kandidat TP Fibonacci extension.
+    Resample dari H1 yang sudah di-fetch — TIDAK ada API call tambahan
+    (pola sama persis dengan d1_bias di score_direction()).
+
+    Syarat 'confluence' (unlock fib 1.272):
+      BUY  : EMA9>EMA21>EMA50 H4 + struktur H4 bullish + RSI H4 di [45,68]
+      SELL : EMA9<EMA21<EMA50 H4 + struktur H4 bearish + RSI H4 di [32,55]
+
+    Syarat 'full_confluence' (unlock fib 1.618, tambahan):
+      confluence di atas TERPENUHI + CHoCH M15 searah trade.
+      Ini level paling jauh/spekulatif — baru boleh dipakai kalau H4
+      DAN M15 dan RSI semuanya sepakat, bukan cuma H4 saja.
+
+    Return: {"confluence": bool, "full_confluence": bool}
+    """
+    result = {"confluence": False, "full_confluence": False}
+    try:
+        df_h4 = build_df(df_h1.resample("4h").agg({
+            "open":"first","high":"max","low":"min",
+            "close":"last","volume":"sum"
+        }).dropna())
+        if df_h4 is None or len(df_h4) < 20:
+            return result
+
+        L4 = df_h4.iloc[-1]
+        sh4, sl4 = swing_pts(df_h4, lb=3)
+        struct_h4 = mkt_struct(df_h4, sh4, sl4)
+        rsi_h4 = L4["rsi"]
+
+        if direction == "bull":
+            ema_ok = L4["ema9"] > L4["ema21"] > L4["ema50"]
+            struct_ok = struct_h4 == "bullish"
+            rsi_ok = H4_RSI_BUY_MIN <= rsi_h4 <= H4_RSI_BUY_MAX
+        else:
+            ema_ok = L4["ema9"] < L4["ema21"] < L4["ema50"]
+            struct_ok = struct_h4 == "bearish"
+            rsi_ok = H4_RSI_SELL_MIN <= rsi_h4 <= H4_RSI_SELL_MAX
+
+        result["confluence"] = bool(ema_ok and struct_ok and rsi_ok)
+
+        if result["confluence"] and choch_m15:
+            choch_agrees = (
+                (direction == "bull" and choch_m15.get("bullish_choch")) or
+                (direction == "bear" and choch_m15.get("bearish_choch"))
+            )
+            result["full_confluence"] = bool(choch_agrees)
+    except Exception:
+        pass
+    return result
+
+
+def _fib_extension_levels(h1, sh1, sl1, direction):
+    """
+    Proyeksi Fibonacci extension dari leg swing H1 terakhir (low→high untuk
+    BUY, high→low untuk SELL). Bukan angka dikarang — ini proyeksi dari
+    RENTANG pergerakan H1 yang sudah benar-benar terjadi di chart.
+
+    Return: (fib_127_price, fib_162_price) atau (None, None) kalau swing
+    H1 belum cukup terbentuk.
+    """
+    if not sh1 or not sl1:
+        return None, None
+    swing_high = h1["high"].iloc[sh1[-1]]
+    swing_low  = h1["low"].iloc[sl1[-1]]
+    leg = swing_high - swing_low
+    if leg <= 0:
+        return None, None
+
+    if direction == "bull":
+        return swing_high + leg * FIB_EXT_1, swing_high + leg * FIB_EXT_2
+    else:
+        return swing_low - leg * FIB_EXT_1, swing_low - leg * FIB_EXT_2
+
 
 def _select_best_tp(tp_pool, entry_price, risk):
     """
@@ -842,7 +935,7 @@ def _select_best_tp(tp_pool, entry_price, risk):
     return round(nearest[1], 8), nearest[0]
 
 
-def analyze_setup(df_h1, df_m15, direction, entry_price):
+def analyze_setup(df_h1, df_m15, direction, entry_price, score=None):
     """
     Tentukan SL dan TP dari level struktural chart.
 
@@ -855,6 +948,11 @@ def analyze_setup(df_h1, df_m15, direction, entry_price):
 
     SELL: SL di atas equal highs / OB top / swing high
     BUY : SL di bawah equal lows / demand bot / swing low
+
+    score (opsional): dict hasil score_direction() — dipakai untuk ambil
+    choch_m15 saat menentukan apakah fib extension 1.618 boleh dipakai
+    (full_confluence). Kalau None, fib 1.618 tidak akan pernah aktif
+    (fib 1.272 tetap bisa aktif dari H4 trend+RSI saja).
     """
     h1  = build_df(df_h1)
     m15 = build_df(df_m15)
@@ -892,6 +990,16 @@ def analyze_setup(df_h1, df_m15, direction, entry_price):
     eq_lows_h1   = find_equal_highs_lows(h1, "low",  lb=50)
     supply_h1    = find_supply_demand(h1, "supply")
     demand_h1    = find_supply_demand(h1, "demand")
+
+    # ── Fibonacci Extension TP (gated H4 confluence) ────────────────────
+    # Dihitung SEKALI di sini, dipakai kedua cabang (SELL/BUY) di bawah.
+    # h4_gate menentukan level mana yang BOLEH masuk tp_pool — bukan
+    # dipanggil hanya saat level struktural gagal (itu akan jadi bias
+    # seleksi/"penyelamat"). Kandidat ini selalu dievaluasi berdampingan
+    # dengan level struktural lain via _select_best_tp, untuk SEMUA sinyal.
+    choch_m15_for_gate = (score or {}).get("choch_m15", {})
+    h4_gate = _h4_confluence(df_h1, direction, choch_m15_for_gate)
+    fib_127, fib_162 = _fib_extension_levels(h1, sh1, sl1, direction)
 
     sl_price = None
     sl_label = ""
@@ -996,6 +1104,16 @@ def analyze_setup(df_h1, df_m15, direction, entry_price):
         for v in sorted([h1["low"].iloc[i] for i in sl1], reverse=True):
             if v < entry_price - atr * 1.0:
                 tp_pool.append(("sw_low_h1", v, TP_TIER["sw_low_h1"]))
+
+        # Fibonacci extension (bearish, proyeksi di bawah swing low H1) —
+        # HANYA masuk pool kalau gate H4 confluence lolos. Tetap dievaluasi
+        # lewat mekanisme nearest/tier-first yang sama seperti level lain.
+        if fib_127 is not None and fib_127 < entry_price - atr * 0.5:
+            if h4_gate["confluence"]:
+                tp_pool.append(("fib_ext_127", fib_127, TP_TIER["fib_ext_127"]))
+            if h4_gate["full_confluence"] and fib_162 is not None \
+               and fib_162 < entry_price - atr * 0.5:
+                tp_pool.append(("fib_ext_162", fib_162, TP_TIER["fib_ext_162"]))
 
         # Pilih TP: lolos RR >= MIN_RR WAJIB, tapi utamakan level paling kuat
         # (tier terendah) dalam batas RR wajar — RR bisa > MIN_RR kalau level
@@ -1105,6 +1223,16 @@ def analyze_setup(df_h1, df_m15, direction, entry_price):
         for v in sorted([h1["high"].iloc[i] for i in sh1]):
             if v > entry_price + atr * 1.0:
                 tp_pool.append(("sw_high_h1", v, TP_TIER["sw_high_h1"]))
+
+        # Fibonacci extension (bullish, proyeksi di atas swing high H1) —
+        # HANYA masuk pool kalau gate H4 confluence lolos. Tetap dievaluasi
+        # lewat mekanisme nearest/tier-first yang sama seperti level lain.
+        if fib_127 is not None and fib_127 > entry_price + atr * 0.5:
+            if h4_gate["confluence"]:
+                tp_pool.append(("fib_ext_127", fib_127, TP_TIER["fib_ext_127"]))
+            if h4_gate["full_confluence"] and fib_162 is not None \
+               and fib_162 > entry_price + atr * 0.5:
+                tp_pool.append(("fib_ext_162", fib_162, TP_TIER["fib_ext_162"]))
 
         # Pilih TP: lolos RR >= MIN_RR WAJIB, tapi utamakan level paling kuat
         # (tier terendah) dalam batas RR wajar — RR bisa > MIN_RR kalau level
@@ -1367,7 +1495,7 @@ def full_analyze(symbol):
             df_h1, df_m15, original_dir, current_price, atr_val)
 
         # SL/TP dihitung dari entry diskon
-        setup = analyze_setup(df_h1, df_m15, original_dir, discount_entry)
+        setup = analyze_setup(df_h1, df_m15, original_dir, discount_entry, score=score)
         if setup is None: return None
 
         return {
@@ -2003,12 +2131,16 @@ def get_info_msg():
         "BUY: SL di bawah equal lows → demand zone → swing low\n"
         "SELL: SL di atas equal highs → supply zone → swing high\n"
         "SL minimum: 1.2× ATR agar tidak kena noise\n\n"
-        "<b>Tahap 3 — Iterasi TP:</b>\n"
-        "Dari level terdekat ke terjauh, ambil TP pertama\n"
-        "yang menghasilkan RR ≥ 1:2\n"
-        "Level TP: eq highs/lows, supply/demand, FVG, swing H1\n\n"
+        "<b>Tahap 3 — Pemilihan TP (tier-based):</b>\n"
+        "RR ≥ 1:2 WAJIB, tapi utamakan level PALING KUAT:\n"
+        "1) eq highs/lows  2) supply/demand  3) FVG\n"
+        "4) swing H1  5-6) Fibonacci extension (1.272/1.618)*\n"
+        "*hanya aktif kalau H4 trend + RSI H4 + CHoCH M15 mendukung —\n"
+        " level ini belum 'terbukti' market, jadi paling lemah & butuh\n"
+        " konfirmasi ekstra. Selalu dievaluasi bareng level lain, bukan\n"
+        " cabang khusus penyelamat RR gagal.\n\n"
         f"Min RR: 1:{MIN_RR} | Min Confidence: 40%\n"
-        f"TF: H1 (bias) + M15 (entry)\n"
+        f"TF: H1 (bias) + M15 (entry) + H4 (fib gate)\n"
         f"Model P&L   : posisi {POSITION_SIZE_PCT:.0f}% saldo × % jarak SL/TP aktual\n"
         f"  → SL dekat (0.5%) = loss kecil | SL jauh (4%) = loss lebih besar\n"
         f"  → P&L murni dari level struktural analisis, bukan fixed -2%\n"
