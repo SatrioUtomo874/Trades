@@ -103,6 +103,20 @@ stats = {
     "pnl_history": [],
 }
 
+# Ban koin berbasis SCAN CYCLE (bukan jumlah trade nyata — koin yang selalu
+# ke-skip di tahap pending tidak pernah menambah hitungan trade, jadi ban
+# berbasis trade tidak akan pernah relevan untuk kasus itu).
+ban_lock = threading.Lock()
+banned_coins: dict = {}      # {symbol: scan_counter saat diban}
+scan_counter = 0             # bertambah 1 setiap get_top_coins() dipanggil
+BAN_DURATION_SCANS = 8
+
+def _ban_coin(sym, reason=""):
+    """Ban koin selama BAN_DURATION_SCANS siklus scan berikutnya."""
+    with ban_lock:
+        banned_coins[sym] = scan_counter
+    log.info(f"[ban] {sym} diban {BAN_DURATION_SCANS} scan" + (f" ({reason})" if reason else ""))
+
 FAPI = "https://fapi.binance.com"
 
 # ── Flask ─────────────────────────────────────
@@ -112,9 +126,11 @@ app = Flask(__name__)
 def index():
     with stat_lock:
         t=stats["total"]; tp=stats["tp"]; sl=stats["sl"]
+    with ban_lock:
+        n_banned = len(banned_coins)
     wr=f"{tp/(tp+sl)*100:.1f}%" if (tp+sl)>0 else "–"
     return (f"<h3>SMC Signal Broadcaster</h3>"
-            f"<p>Auto:{auto_mode}</p>"
+            f"<p>Auto:{auto_mode} | Banned:{n_banned}</p>"
             f"<p>Total:{t} TP:{tp} SL:{sl} WR:{wr}</p>"), 200
 
 @app.route("/health")
@@ -363,14 +379,26 @@ def get_klines(symbol, interval, limit=250):
 def get_top_coins():
     """Ambil top coins. Binance dulu, fallback Bybit.
 
-    Koin yang sedang pending ATAU aktif di posisi DIKELUARKAN dari pool
-    SEBELUM slicing ke TOP_N_COINS — bukan disaring setelahnya. Efeknya:
-    pool tetap genap TOP_N_COINS koin tradeable, koin peringkat ke-51,
-    52, dst otomatis naik menggantikan slot yang "diambil" oleh posisi
-    yang sedang berjalan.
+    Koin yang sedang pending/aktif di posisi, ATAU sedang diban (lihat
+    _ban_coin), DIKELUARKAN dari pool SEBELUM slicing ke TOP_N_COINS —
+    bukan disaring setelahnya. Efeknya: pool tetap genap TOP_N_COINS
+    koin tradeable, koin peringkat ke-51, 52, dst otomatis naik
+    menggantikan slot yang "diambil" oleh posisi/ban yang sedang berjalan.
     """
+    global scan_counter
+    with ban_lock:
+        scan_counter += 1
+        to_unban = [s for s, banned_at in banned_coins.items()
+                    if scan_counter - banned_at >= BAN_DURATION_SCANS]
+        for s in to_unban:
+            del banned_coins[s]
+            log.info(f"[unban] {s} kembali aktif setelah {BAN_DURATION_SCANS} scan")
+        cur_ban = set(banned_coins.keys())
+
     with positions_lock:
-        exclude_syms = set(positions.keys())   # pending + aktif
+        active_syms = set(positions.keys())   # pending + aktif
+
+    exclude_syms = cur_ban | active_syms
 
     # Binance
     try:
@@ -1638,7 +1666,8 @@ def fmt_stats():
         f"{pnl_em} <b>Total P&L  : {pnl_sgn}${pnl_tot:.4f} "
         f"({pnl_sgn}{pnl_pct:.2f}%)</b>\n"
         f"⚖️ Model P&L  : posisi {POSITION_SIZE_PCT:.0f}% saldo × % gerakan SL/TP\n\n"
-        f"📋 5 Trade Terakhir:\n{hist_str}"
+        f"📋 5 Trade Terakhir:\n{hist_str}\n\n"
+        f"🚫 Banned    : {len(banned_coins)}"
     )
 
 def fmt_signal_msg(sig):
@@ -1695,7 +1724,7 @@ positions_lock = threading.Lock()
 positions: dict = {}   # {sym: {signal, entry, tp, sl, entry_time, thread}}
 
 def close_position(sym, result, close_price=None):
-    """Tutup posisi, catat statistik, kirim notif."""
+    """Tutup posisi, catat statistik, ban koin sementara, kirim notif."""
     global active_trade
     with positions_lock:
         pos = positions.pop(sym, None)
@@ -1708,6 +1737,7 @@ def close_position(sym, result, close_price=None):
     cid   = pos["chat_id"]
 
     update_stats(result, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price)
+    _ban_coin(sym, f"trade closed ({result})")
 
     # Update active_trade jika ini yang sedang dipantau
     with positions_lock:
@@ -1973,6 +2003,7 @@ def simulation_loop(chat_id):
             if tp_hit:
                 with positions_lock:
                     positions.pop(sym, None)
+                _ban_coin(sym, "TP sebelum entry")
                 tg_send(chat_id,
                     f"⏭ <b>Pending Batal</b> — {sym}\n"
                     f"TP tersentuh sebelum entry. Skip.")
@@ -1986,6 +2017,7 @@ def simulation_loop(chat_id):
             if sl_hit:
                 with positions_lock:
                     positions.pop(sym, None)
+                _ban_coin(sym, "SL sebelum entry")
                 tg_send(chat_id,
                     f"⏭ <b>Pending Batal</b> — {sym}\n"
                     f"SL tersentuh sebelum entry. Skip.")
@@ -2005,6 +2037,7 @@ def simulation_loop(chat_id):
         # Expired — hapus pending
         with positions_lock:
             positions.pop(sym, None)
+        _ban_coin(sym, "pending expired")
         tg_send(chat_id,
             f"⏰ <b>Pending Expired</b> — {sym}\n"
             f"Harga tidak mencapai zona entry dalam 8 jam. Skip.")
@@ -2022,6 +2055,7 @@ def simulation_loop(chat_id):
         if not geometry_ok:
             with positions_lock:
                 positions.pop(sym, None)
+            _ban_coin(sym, "geometri invalid")
             tg_send(chat_id,
                 f"⚠️ <b>Skip {sym}</b> — Geometri SL/TP tidak valid di entry aktual\n"
                 f"Entry: <code>{actual_entry:.6g}</code> | "
@@ -2037,6 +2071,7 @@ def simulation_loop(chat_id):
         if actual_rr < MIN_RR:
             with positions_lock:
                 positions.pop(sym, None)
+            _ban_coin(sym, "RR gagal di entry aktual")
             tg_send(chat_id,
                 f"⚠️ <b>Skip {sym}</b> — RR tidak memenuhi di entry aktual\n"
                 f"Entry: <code>{actual_entry:.6g}</code> | "
@@ -2108,6 +2143,8 @@ GREETING=(
     "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
     "/timeout             — Tutup paksa semua posisi\n"
     "/stats               — Statistik + saldo\n"
+    "/banned              — Daftar koin ban\n"
+    "/resetban            — Hapus semua ban\n"
     "/resetbalance        — Reset saldo ke $10\n"
     "/info                — Detail metode analisis\n"
     "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -2188,6 +2225,22 @@ def bot_loop():
                     tg_send(chat_id,get_info_msg())
                 elif text in ("/stats","stats"):
                     tg_send(chat_id,fmt_stats())
+                elif text in ("/banned","banned"):
+                    with ban_lock:
+                        cur_scan = scan_counter
+                        b = sorted(banned_coins.items())
+                    if b:
+                        lines = []
+                        for sym, banned_at in b:
+                            remaining = max(0, BAN_DURATION_SCANS - (cur_scan - banned_at))
+                            lines.append(f"• {sym} (unban dalam {remaining} scan)")
+                        tg_send(chat_id,
+                            f"🚫 <b>Banned ({len(b)}):</b>\n" + "\n".join(lines))
+                    else:
+                        tg_send(chat_id, "✅ Belum ada ban.")
+                elif text in ("/resetban","resetban"):
+                    with ban_lock: n=len(banned_coins); banned_coins.clear()
+                    tg_send(chat_id,f"✅ Ban direset ({n} dihapus).")
                 elif text in ("/resetbalance","resetbalance"):
                     with stat_lock:
                         stats["balance"]     = STARTING_BALANCE
