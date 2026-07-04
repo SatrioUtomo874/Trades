@@ -18,10 +18,10 @@ MAX_PRICE       = 80.0
 TOP_N_COINS     = 50
 MIN_RR              = 2.0
 MONITOR_SLEEP       = 10
-MAX_POSITIONS       = 10
+MAX_POSITIONS       = 20
 MONITOR_INTERVAL    = 15 * 60
-SWEEP_PULL_FACTOR   = 0.5   # 0 = entry tetap di OB/FVG/EQL/Fib asli, 1 = entry persis di level Liquidity Sweep
-TP_MAX_RR_MULT      = 1.8   # batas atas pencarian TP "lebih kuat": RR boleh naik sampai MIN_RR × ini
+SWEEP_PULL_FACTOR   = 0.8   # 0 = entry tetap di OB/FVG/EQL/Fib asli, 1 = entry persis di level Liquidity Sweep
+TP_MAX_RR_MULT      = 2   # batas atas pencarian TP "lebih kuat": RR boleh naik sampai MIN_RR × ini
 # ── Fibonacci Extension TP (gated H4 confluence) ──
 # Dipakai HANYA saat level struktural biasa sudah habis diperiksa DAN
 # konteks H4 (trend besar) + RSI H4 (momentum belum jenuh) mendukung.
@@ -29,10 +29,10 @@ TP_MAX_RR_MULT      = 1.8   # batas atas pencarian TP "lebih kuat": RR boleh nai
 # dievaluasi berdampingan dengan level struktural lain di _select_best_tp.
 FIB_EXT_1           = 0.272  # ekstensi 1.272 — butuh H4 trend + RSI band saja
 FIB_EXT_2           = 0.618  # ekstensi 1.618 — butuh confluence penuh (+ CHoCH M15 searah)
-H4_RSI_BUY_MIN      = 45     # RSI H4 BUY: momentum sudah established (bukan baru mulai)
-H4_RSI_BUY_MAX      = 68     # tapi belum overbought / jenuh
-H4_RSI_SELL_MIN     = 32     # RSI H4 SELL: kebalikan dari BUY
-H4_RSI_SELL_MAX     = 55
+H4_RSI_BUY_MIN      = 35     # RSI H4 BUY: momentum sudah established (bukan baru mulai)
+H4_RSI_BUY_MAX      = 70     # tapi belum overbought / jenuh
+H4_RSI_SELL_MIN     = 35     # RSI H4 SELL: kebalikan dari BUY
+H4_RSI_SELL_MAX     = 70
 # ─────────────────────────────────────────────
 
 if not TELEGRAM_TOKEN:
@@ -1498,6 +1498,17 @@ def full_analyze(symbol):
         # SL/TP dihitung dari entry diskon
         setup = analyze_setup(df_h1, df_m15, original_dir, discount_entry, score=score)
         if setup is None: return None
+
+        # TP wajib MASIH di depan harga sekarang. Kalau entry diskon
+        # dihitung dari zona struktural yang sudah ditinggalkan jauh oleh
+        # rally/dump kuat (biasanya RSI sudah ekstrem), TP hasil analisa
+        # dari zona lama itu bisa sudah KELEWAT harga sekarang — sinyal
+        # ini mati sebelum pending order sempat dibuat. Tolak di sini,
+        # bukan menunggu pending-cancel logic menangkapnya belakangan.
+        if original_dir == "bull" and current_price >= setup["tp"]:
+            return None
+        if original_dir == "bear" and current_price <= setup["tp"]:
+            return None
 
         return {
             "symbol"       : symbol,
