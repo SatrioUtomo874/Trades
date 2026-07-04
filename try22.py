@@ -103,10 +103,6 @@ stats = {
     "pnl_history": [],
 }
 
-ban_lock = threading.Lock()
-banned_coins: dict = {}   # {symbol: trade_count_saat_ban}
-UNBAN_AFTER_TRADES = 5    # otomatis unban setelah N trade selesai
-
 FAPI = "https://fapi.binance.com"
 
 # ── Flask ─────────────────────────────────────
@@ -118,7 +114,7 @@ def index():
         t=stats["total"]; tp=stats["tp"]; sl=stats["sl"]
     wr=f"{tp/(tp+sl)*100:.1f}%" if (tp+sl)>0 else "–"
     return (f"<h3>SMC Signal Broadcaster</h3>"
-            f"<p>Auto:{auto_mode} | Banned:{len(banned_coins)}</p>"
+            f"<p>Auto:{auto_mode}</p>"
             f"<p>Total:{t} TP:{tp} SL:{sl} WR:{wr}</p>"), 200
 
 @app.route("/health")
@@ -209,7 +205,7 @@ def _binance_price(symbol):
     d = fapi_get("/fapi/v1/ticker/price", {"symbol": symbol})
     return float(d["price"])
 
-def _binance_top_coins(cur_ban):
+def _binance_top_coins(exclude_syms):
     tickers = fapi_get("/fapi/v1/ticker/24hr")
     usdt = [
         t for t in tickers
@@ -217,7 +213,7 @@ def _binance_top_coins(cur_ban):
         and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
         and float(t["quoteVolume"]) > 5_000_000          # min 5jt USDT/24j
         and abs(float(t.get("priceChangePercent","0"))) < 15  # skip pump/dump ekstrem
-        and t["symbol"] not in cur_ban
+        and t["symbol"] not in exclude_syms
     ]
     usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
     return [t["symbol"] for t in usdt[:TOP_N_COINS]]
@@ -251,7 +247,7 @@ def _bybit_price(symbol):
         raise ValueError(f"Bybit ticker error: {d.get('retMsg')}")
     return float(d["result"]["list"][0]["lastPrice"])
 
-def _bybit_top_coins(cur_ban):
+def _bybit_top_coins(exclude_syms):
     d = _raw_get(f"{BYBIT}/v5/market/tickers", {"category":"linear"})
     if d.get("retCode", -1) != 0:
         raise ValueError(f"Bybit tickers error: {d.get('retMsg')}")
@@ -262,7 +258,7 @@ def _bybit_top_coins(cur_ban):
         and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
         and float(t.get("turnover24h","0")) > 5_000_000   # min 5jt USDT/24j
         and abs(float(t.get("price24hPcnt","0"))) < 0.15  # skip pump/dump ekstrem
-        and t["symbol"] not in cur_ban
+        and t["symbol"] not in exclude_syms
     ]
     usdt.sort(key=lambda x: float(x.get("turnover24h","0")), reverse=True)
     return [t["symbol"] for t in usdt[:TOP_N_COINS]]
@@ -364,14 +360,8 @@ def get_klines(symbol, interval, limit=250):
         log.warning(f"[klines/bybit] {symbol}: {e}")
     return pd.DataFrame()
 
-def get_real_trade_count():
-    """Hitung trade nyata: tp + sl saja."""
-    with stat_lock:
-        return stats["tp"] + stats["sl"]
-
 def get_top_coins():
     """Ambil top coins. Binance dulu, fallback Bybit.
-    Auto-unban koin yang sudah melewati UNBAN_AFTER_TRADES trade nyata.
 
     Koin yang sedang pending ATAU aktif di posisi DIKELUARKAN dari pool
     SEBELUM slicing ke TOP_N_COINS — bukan disaring setelahnya. Efeknya:
@@ -379,24 +369,12 @@ def get_top_coins():
     52, dst otomatis naik menggantikan slot yang "diambil" oleh posisi
     yang sedang berjalan.
     """
-    with ban_lock:
-        real_trades = get_real_trade_count()
-        # Auto-unban koin yang sudah UNBAN_AFTER_TRADES trade nyata sejak diban
-        to_unban = [sym for sym, ban_at in banned_coins.items()
-                    if real_trades - ban_at >= UNBAN_AFTER_TRADES]
-        for sym in to_unban:
-            del banned_coins[sym]
-            log.info(f"[unban] {sym} kembali aktif setelah {UNBAN_AFTER_TRADES} trade")
-        cur_ban = set(banned_coins.keys())
-
     with positions_lock:
-        active_syms = set(positions.keys())   # pending + aktif
-
-    cur_exclude = cur_ban | active_syms
+        exclude_syms = set(positions.keys())   # pending + aktif
 
     # Binance
     try:
-        coins = _binance_top_coins(cur_exclude)
+        coins = _binance_top_coins(exclude_syms)
         if coins:
             return coins
         log.warning("[top_coins/binance] kosong, coba Bybit...")
@@ -404,7 +382,7 @@ def get_top_coins():
         log.warning(f"[top_coins/binance] {e} — coba Bybit...")
     # Bybit fallback
     try:
-        coins = _bybit_top_coins(cur_exclude)
+        coins = _bybit_top_coins(exclude_syms)
         log.info(f"[top_coins/bybit fallback] {len(coins)} koin")
         return coins
     except Exception as e:
@@ -1529,7 +1507,7 @@ def run_scan_once(chat_id):
         return None
 
     if not symbols:
-        tg_send(chat_id,"⚠️ Semua koin diban. /resetban untuk reset.")
+        tg_send(chat_id,"⚠️ Tidak ada koin tersedia untuk di-scan saat ini.")
         return None
 
     results=[]
@@ -1543,10 +1521,10 @@ def run_scan_once(chat_id):
         tg_send(chat_id,"⚠️ Tidak ada setup valid dari semua koin.")
         return None
 
-    # Filter: hanya koin dengan confidence >= 55%
-    results = [r for r in results if r["confidence"] >= 40]
+    # Filter: hanya koin dengan confidence >= 45%
+    results = [r for r in results if r["confidence"] >= 45]
     if not results:
-        tg_send(chat_id,"⚠️ Tidak ada koin dengan confidence cukup (≥40%). Retry...")
+        tg_send(chat_id,"⚠️ Tidak ada koin dengan confidence cukup (≥45%). Retry...")
         return None
 
     # Ranking: confidence DESC → rr DESC
@@ -1568,47 +1546,54 @@ POSITION_SIZE_PCT = 100.0  # ukuran posisi per trade = 100% saldo (setara 1× le
                             # Nilai ini TIDAK mempengaruhi PENEMPATAN SL/TP —
                             # hanya memengaruhi simulasi saldo.
 
-def update_stats(result, entry=None, sl_p=None, tp_p=None):
+def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None):
     """
     Hitung P&L simulasi murni dari jarak harga analisis.
 
     Model: alokasikan POSITION_SIZE_PCT % dari saldo ke setiap trade.
-    Gain/loss = posisi × (jarak TP atau SL dari entry / entry).
+    Gain/loss = posisi × (jarak harga tutup dari entry / entry).
 
-    Efek:
-    - SL dekat (tight, misal 0.8%) → loss kecil
-    - SL jauh  (wide, misal 4%)   → loss lebih besar
-    - Tidak ada lagi loss "flat -2%" — sepenuhnya dari analisis struktural.
+    close_price:
+      - None (TP/SL alami)  → P&L dihitung dari jarak penuh ke tp_p/sl_p,
+        sesuai hasilnya (result="tp" pakai tp_p, result="sl" pakai sl_p).
+      - Diberikan (mis. /timeout paksa) → P&L dihitung dari harga RIIL
+        saat ditutup, bukan target penuh — posisi yang belum sempat
+        capai TP/SL tidak dicatat seolah sudah full target.
+
+    result ("tp"/"sl") menentukan kategori statistik (counter tp/sl),
+    tapi arah gain/loss selalu disimpulkan dari posisi tp_p relatif ke
+    entry (BUY: tp_p > entry, SELL: tp_p < entry) — jadi tanda P&L tetap
+    benar untuk harga tutup manapun, tidak cuma pas persis di tp_p/sl_p.
     """
     with stat_lock:
         stats["total"] += 1
         if result in ("tp", "sl"):
             stats[result] += 1
 
+        if not entry or tp_p is None:
+            return
+
         balance      = stats["balance"]
         position_usd = round(balance * POSITION_SIZE_PCT / 100, 6)
+        direction_sign = 1 if tp_p > entry else -1
 
-        if result == "tp" and entry and sl_p and tp_p:
-            tp_dist  = abs(tp_p - entry)
-            pnl_pct  = tp_dist / entry          # % gerakan harga nyata (dari analisis)
-            pnl_usd  = round(position_usd * pnl_pct, 4)
-            pct      = round(pnl_pct * 100, 3)
-            stats["balance"] = round(balance + pnl_usd, 4)
-            stats["pnl_history"].append({
-                "result": "tp", "pct": pct,
-                "pnl_usd": pnl_usd, "balance_after": stats["balance"],
-            })
+        if close_price is not None:
+            ref_price = close_price
+        elif result == "tp":
+            ref_price = tp_p
+        elif result == "sl" and sl_p is not None:
+            ref_price = sl_p
+        else:
+            return
 
-        elif result == "sl" and entry and sl_p:
-            sl_dist  = abs(entry - sl_p)
-            pnl_pct  = sl_dist / entry          # % jarak SL dari entry (dari analisis)
-            pnl_usd  = -round(position_usd * pnl_pct, 4)
-            pct      = -round(pnl_pct * 100, 3)
-            stats["balance"] = round(balance + pnl_usd, 4)
-            stats["pnl_history"].append({
-                "result": "sl", "pct": pct,
-                "pnl_usd": pnl_usd, "balance_after": stats["balance"],
-            })
+        pnl_pct = (ref_price - entry) / entry * direction_sign
+        pnl_usd = round(position_usd * pnl_pct, 4)
+        pct     = round(pnl_pct * 100, 3)
+        stats["balance"] = round(balance + pnl_usd, 4)
+        stats["pnl_history"].append({
+            "result": result, "pct": pct,
+            "pnl_usd": pnl_usd, "balance_after": stats["balance"],
+        })
 
 def fmt_stats():
     with stat_lock:
@@ -1653,8 +1638,7 @@ def fmt_stats():
         f"{pnl_em} <b>Total P&L  : {pnl_sgn}${pnl_tot:.4f} "
         f"({pnl_sgn}{pnl_pct:.2f}%)</b>\n"
         f"⚖️ Model P&L  : posisi {POSITION_SIZE_PCT:.0f}% saldo × % gerakan SL/TP\n\n"
-        f"📋 5 Trade Terakhir:\n{hist_str}\n\n"
-        f"🚫 Banned    : {len(banned_coins)}"
+        f"📋 5 Trade Terakhir:\n{hist_str}"
     )
 
 def fmt_signal_msg(sig):
@@ -1711,7 +1695,7 @@ positions_lock = threading.Lock()
 positions: dict = {}   # {sym: {signal, entry, tp, sl, entry_time, thread}}
 
 def close_position(sym, result, close_price=None):
-    """Tutup posisi, catat statistik, kirim notif, ban koin."""
+    """Tutup posisi, catat statistik, kirim notif."""
     global active_trade
     with positions_lock:
         pos = positions.pop(sym, None)
@@ -1723,10 +1707,7 @@ def close_position(sym, result, close_price=None):
     tp_p  = sig["tp"]
     cid   = pos["chat_id"]
 
-    update_stats(result, entry=entry, sl_p=sl_p, tp_p=tp_p)
-
-    with ban_lock:
-        banned_coins[sym] = get_real_trade_count()
+    update_stats(result, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price)
 
     # Update active_trade jika ini yang sedang dipantau
     with positions_lock:
@@ -1798,14 +1779,21 @@ def monitor_position(sym, pos):
         with positions_lock:
             if sym not in positions: return
 
-        # Manual /timeout SYMBOL — tutup paksa
+        # Manual /timeout SYMBOL — tutup paksa sesuai PnL riil saat ini:
+        # floating positif dicatat sebagai TP, floating negatif sebagai SL.
+        # Bukan selalu "SL" — itu akan mencatat kerugian penuh meski posisi
+        # sedang untung saat ditutup.
         if pos.get("timeout_flag"):
             pos["timeout_flag"] = False
             price = get_price(sym) or entry
+            pnl_pct = (price - entry) / entry * (1 if is_buy else -1)
+            result  = "tp" if pnl_pct >= 0 else "sl"
+            emoji   = "🎯" if result == "tp" else "🛑"
             tg_send(chat_id,
-                f"⏭ <b>Ditutup Manual</b> — {sym}\n"
-                f"Harga: <code>{price:.6g}</code>")
-            close_position(sym, "sl")   # catat sebagai SL karena paksa tutup
+                f"⏭ <b>Ditutup Manual</b> — {sym} {emoji}\n"
+                f"Harga: <code>{price:.6g}</code> | PnL: <b>{pnl_pct*100:+.2f}%</b>\n"
+                f"Dicatat sebagai {result.upper()} (sesuai PnL riil saat ditutup)")
+            close_position(sym, result, close_price=price)
             return
 
         price = get_price(sym)
@@ -2120,8 +2108,6 @@ GREETING=(
     "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
     "/timeout             — Tutup paksa semua posisi\n"
     "/stats               — Statistik + saldo\n"
-    "/banned              — Daftar koin ban\n"
-    "/resetban            — Hapus semua ban\n"
     "/resetbalance        — Reset saldo ke $10\n"
     "/info                — Detail metode analisis\n"
     "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -2152,7 +2138,7 @@ def get_info_msg():
         " level ini belum 'terbukti' market, jadi paling lemah & butuh\n"
         " konfirmasi ekstra. Selalu dievaluasi bareng level lain, bukan\n"
         " cabang khusus penyelamat RR gagal.\n\n"
-        f"Min RR: 1:{MIN_RR} | Min Confidence: 40%\n"
+        f"Min RR: 1:{MIN_RR} | Min Confidence: 45%\n"
         f"TF: H1 (bias) + M15 (entry) + H4 (fib gate)\n"
         f"Model P&L   : posisi {POSITION_SIZE_PCT:.0f}% saldo × % jarak SL/TP aktual\n"
         f"  → SL dekat (0.5%) = loss kecil | SL jauh (4%) = loss lebih besar\n"
@@ -2202,22 +2188,6 @@ def bot_loop():
                     tg_send(chat_id,get_info_msg())
                 elif text in ("/stats","stats"):
                     tg_send(chat_id,fmt_stats())
-                elif text in ("/banned","banned"):
-                    with ban_lock:
-                        real_trades = get_real_trade_count()
-                        b = sorted(banned_coins.items())
-                    if b:
-                        lines = []
-                        for sym, ban_at in b:
-                            remaining = max(0, UNBAN_AFTER_TRADES - (real_trades - ban_at))
-                            lines.append(f"• {sym} (unban dalam {remaining} trade)")
-                        tg_send(chat_id,
-                            f"🚫 <b>Banned ({len(b)}):</b>\n" + "\n".join(lines))
-                    else:
-                        tg_send(chat_id, "✅ Belum ada ban.")
-                elif text in ("/resetban","resetban"):
-                    with ban_lock: n=len(banned_coins); banned_coins.clear()
-                    tg_send(chat_id,f"✅ Ban direset ({n} dihapus).")
                 elif text in ("/resetbalance","resetbalance"):
                     with stat_lock:
                         stats["balance"]     = STARTING_BALANCE
