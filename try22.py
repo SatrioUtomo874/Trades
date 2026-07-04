@@ -964,14 +964,9 @@ def analyze_setup(df_h1, df_m15, direction, entry_price, score=None):
     atr_h1  = max(L1["atr"],  entry_price * 0.004)
     # Pakai ATR H1 sebagai referensi minimum SL — lebih representatif dari volatilitas nyata
     atr = atr_m15
-    # SL minimum HANYA sebagai jaring pengaman noise/spread, BUKAN acuan jarak SL.
-    # Sebelumnya nilai ini (1.5×ATR-H1 / 2×ATR-M15) nyaris SELALU lebih lebar
-    # dari level struktural + buffer wick-clearance (~0.5–0.7×ATR), sehingga
-    # SL asli dari analisis nyaris selalu dibuang dan diganti jarak ATR murni
-    # yang tidak terikat level chart manapun (98%+ kasus, terverifikasi via
-    # simulasi). Sekarang floor ini jauh lebih kecil — hanya turun tangan
-    # kalau level struktural yang ditemukan benar-benar terlalu mepet
-    # (rawan kena noise candle biasa, bukan pergerakan riil).
+    # Jaring pengaman noise/spread saja, BUKAN acuan jarak SL — SL tetap
+    # harus datang dari level struktural, floor ini cuma turun tangan
+    # kalau level tersebut benar-benar terlalu mepet dari entry.
     sl_min = max(atr_h1 * 0.3, atr_m15 * 0.6)
 
     sh15, sl15 = swing_pts(m15, lb=5)
@@ -1858,13 +1853,9 @@ def monitor_position(sym, pos):
                     close_position(sym, "sl")
                     return
                 else:
-                    # FIX: dulu di sini langsung `continue` tanpa sleep, jadi
-                    # selama wick masih menyentuh SL tapi candle M1 belum
-                    # konfirmasi, loop balik secepat CPU bisa jalan dan spam
-                    # notif "Liquidity Sweep" berkali-kali per detik.
-                    # Sekarang: notif cuma dikirim sekali per episode sweep
-                    # (flag direset begitu kondisi sweep hilang), dan loop
-                    # tetap istirahat MONITOR_SLEEP detik sebelum cek lagi.
+                    # Notif dikirim sekali per episode sweep (flag reset
+                    # begitu kondisi sweep hilang), loop istirahat
+                    # MONITOR_SLEEP detik sebelum cek lagi.
                     if not pos.get("sweep_notified"):
                         tg_send(chat_id,
                             f"🔄 <b>Liquidity Sweep — {sym}</b>\n"
@@ -1973,22 +1964,15 @@ def simulation_loop(chat_id):
                 scanning = False
 
     def _wait_entry(sym, signal, chat_id):
-        """Thread terpisah — tunggu harga ke zona entry, scan tetap jalan.
-
-        FIX: sebelumnya loop ini bergantung pada `auto_mode`, jadi begitu
-        /stop dipanggil, semua pending order ikut dibatalkan diam-diam
-        meski belum expired. Sekarang loop ini independen dari auto_mode:
-        /stop hanya menghentikan scan koin baru, sementara pending order
-        yang sudah terdaftar tetap ditunggu sampai entry tersentuh, TP
-        basi, atau expired (8 jam).
-        """
+        """Thread terpisah — tunggu harga ke zona entry. /stop tidak
+        membatalkan pending; hanya menghentikan scan koin baru."""
         entry_target = signal["entry"]
         is_buy       = signal["decision"] == "BUY"
         tp_p         = signal["tp"]
+        sl_p         = signal["sl"]
         deadline     = time.time() + 8 * 3600
 
         while time.time() < deadline:
-            # Cek posisi belum dihapus dari luar (misal /timeout)
             with positions_lock:
                 if sym not in positions: return
 
@@ -2004,6 +1988,19 @@ def simulation_loop(chat_id):
                 tg_send(chat_id,
                     f"⏭ <b>Pending Batal</b> — {sym}\n"
                     f"TP tersentuh sebelum entry. Skip.")
+                return
+
+            # SL tersentuh/dilewati sebelum entry → setup sudah tidak valid
+            # (harga sudah membuktikan analisa salah sebelum posisi sempat
+            # dibuka). Tanpa cek ini, harga bisa gap lewat SL dan entry_hit
+            # tetap terpicu di harga yang geometrinya sudah rusak.
+            sl_hit = (price_now <= sl_p) if is_buy else (price_now >= sl_p)
+            if sl_hit:
+                with positions_lock:
+                    positions.pop(sym, None)
+                tg_send(chat_id,
+                    f"⏭ <b>Pending Batal</b> — {sym}\n"
+                    f"SL tersentuh sebelum entry. Skip.")
                 return
 
             # Harga mencapai zona entry
@@ -2026,11 +2023,28 @@ def simulation_loop(chat_id):
 
     def _open_position(sym, signal, actual_entry, chat_id, mode_label):
         """Upgrade posisi dari pending ke aktif dan mulai monitor."""
+        is_buy = signal["decision"] == "BUY"
+        sl_v, tp_v = signal["sl"], signal["tp"]
+
+        # Validasi geometri dulu — SL dan TP wajib di sisi yang benar dari
+        # entry aktual. Wajib dicek sebelum rasio RR, karena rasio abs(jarak)
+        # bisa tampak valid (>= MIN_RR) walau posisinya sebenarnya terbalik
+        # (mis. harga gap lewat SL sebelum entry sempat tersentuh).
+        geometry_ok = (sl_v < actual_entry < tp_v) if is_buy else (tp_v < actual_entry < sl_v)
+        if not geometry_ok:
+            with positions_lock:
+                positions.pop(sym, None)
+            tg_send(chat_id,
+                f"⚠️ <b>Skip {sym}</b> — Geometri SL/TP tidak valid di entry aktual\n"
+                f"Entry: <code>{actual_entry:.6g}</code> | "
+                f"TP: <code>{tp_v:.6g}</code> | SL: <code>{sl_v:.6g}</code>")
+            return
+
         # Verifikasi RR masih valid di harga entry aktual.
         # TP/SL dihitung dari discount_entry (analisis), tapi posisi
         # dibuka di harga nyata — selisihnya bisa membuat RR < MIN_RR.
-        sl_dist = abs(actual_entry - signal["sl"])
-        tp_dist = abs(signal["tp"] - actual_entry)
+        sl_dist = abs(actual_entry - sl_v)
+        tp_dist = abs(tp_v - actual_entry)
         actual_rr = tp_dist / sl_dist if sl_dist > 0 else 0
         if actual_rr < MIN_RR:
             with positions_lock:
@@ -2038,8 +2052,7 @@ def simulation_loop(chat_id):
             tg_send(chat_id,
                 f"⚠️ <b>Skip {sym}</b> — RR tidak memenuhi di entry aktual\n"
                 f"Entry: <code>{actual_entry:.6g}</code> | "
-                f"TP: <code>{signal['tp']:.6g}</code> | "
-                f"SL: <code>{signal['sl']:.6g}</code>\n"
+                f"TP: <code>{tp_v:.6g}</code> | SL: <code>{sl_v:.6g}</code>\n"
                 f"RR aktual: <b>1:{actual_rr:.2f}</b> (min 1:{MIN_RR})")
             return
 
@@ -2053,7 +2066,7 @@ def simulation_loop(chat_id):
         tg_send(chat_id,
             f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
             f"Entry aktual: <code>{actual_entry:.6g}</code>\n"
-            f"TP: <code>{signal['tp']:.6g}</code> | SL: <code>{signal['sl']:.6g}</code>\n"
+            f"TP: <code>{tp_v:.6g}</code> | SL: <code>{sl_v:.6g}</code>\n"
             f"RR: <b>1:{actual_rr:.2f}</b> | 📡 Dipantau tiap 15 menit...")
 
         threading.Thread(
@@ -2224,12 +2237,8 @@ def bot_loop():
                             target=simulation_loop,args=(chat_id,),daemon=True)
                         auto_thread.start()
                 elif text in ("/stop","stop"):
-                    # FIX: dulu /stop juga men-set timeout_flag = True ke semua
-                    # posisi aktif, yang membuat monitor_position menutupnya
-                    # secara paksa dan mencatatnya sebagai SL (loss). Sekarang
-                    # /stop HANYA mematikan auto_mode (stop scanning sinyal
-                    # baru) — posisi yang sudah berjalan tetap dipantau dan
-                    # baru ditutup saat benar-benar kena TP/SL alami.
+                    # /stop hanya mematikan scanning sinyal baru — posisi
+                    # yang sudah berjalan tetap dipantau sampai TP/SL alami.
                     if auto_mode:
                         auto_mode = False
                         with positions_lock:
