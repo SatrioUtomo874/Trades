@@ -5,7 +5,7 @@ Logika: Analisis H1+M15+D1 → sinyal searah → entry diskon OB/FVG/Fib → TP/
 Render.com | python main.py
 """
 
-import os, time, logging, threading
+import os, time, logging, threading, re
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
@@ -20,6 +20,8 @@ MIN_RR              = 2.0
 MONITOR_SLEEP       = 10
 MAX_POSITIONS       = 20
 MONITOR_INTERVAL    = 15 * 60
+KLINE_VERIFY_THROTTLE = 20  # detik — min jarak antar fetch klines verifikasi
+                            # SL saat sweep berkepanjangan (cegah hammering API)
 SWEEP_PULL_FACTOR   = 1     # 0 = entry tetap di OB/FVG/EQL/Fib asli, 1 = entry persis di level Liquidity Sweep
 MIN_CONFIDENCE      = 50    # ambang confidence minimum sinyal — diatur via /confidence_min
 TP_MAX_RR_MULT      = 1.8   # batas atas pencarian TP "lebih kuat": RR boleh naik sampai MIN_RR × ini
@@ -191,16 +193,54 @@ def _raw_get(url, params=None, retries=3):
 
 
 # ── BINANCE ───────────────────────────────────
+# Circuit-breaker global untuk ban IP (-1003). Binance memperpanjang durasi
+# ban setiap kali endpoint tetap dihantam SELAGI masih diban — jadi begitu
+# satu thread mendeteksi ban, SEMUA thread (price cache, scan, monitor,
+# startup ping) harus langsung tahu dan berhenti request ke Binance sampai
+# waktu ban lewat, bukan retry buta yang justru memperpanjang ban itu sendiri.
+_binance_ban_lock = threading.Lock()
+_binance_banned_until = 0.0   # epoch detik; 0 = tidak sedang diban
+
+def _binance_ban_remaining():
+    """Detik tersisa sebelum ban Binance berakhir (0 kalau tidak diban)."""
+    with _binance_ban_lock:
+        return max(0.0, _binance_banned_until - time.time())
+
+def _register_binance_ban(msg):
+    """Parse 'banned until <epoch_ms>' dari pesan error -1003 dan simpan
+    sebagai state global — tidak pernah memperpendek ban yang sudah ada."""
+    global _binance_banned_until
+    m = re.search(r"banned until (\d+)", msg or "")
+    if not m: return
+    until_s = int(m.group(1)) / 1000.0 + 1.0   # +1 detik buffer aman
+    with _binance_ban_lock:
+        if until_s > _binance_banned_until:
+            _binance_banned_until = until_s
+            log.warning(f"[binance] IP diban, semua request Binance "
+                        f"dihentikan selama {until_s - time.time():.0f}s")
+
 def fapi_get(path, params=None):
     """Binance Futures GET — tetap dipakai utama."""
+    remaining = _binance_ban_remaining()
+    if remaining > 0:
+        # Circuit breaker aktif — jangan hantam API sama sekali selagi
+        # ban masih berlaku. Biarkan caller fallback ke Bybit kalau ada.
+        raise ConnectionError(f"Binance masih diban {remaining:.0f}s lagi, skip.")
+
     for i in range(3):
         try:
             r = requests.get(f"{FAPI}{path}", params=params,
                              timeout=10, verify=False)
             d = r.json()
             if isinstance(d, dict) and "code" in d:
-                raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
+                msg = f"Binance {d['code']}: {d.get('msg')}"
+                if d["code"] == -1003:
+                    _register_binance_ban(d.get("msg", ""))
+                    raise ConnectionError(msg)   # jangan retry — endpoint lagi diban
+                raise ValueError(msg)
             return d
+        except ConnectionError:
+            raise   # ban terdeteksi, keluar langsung tanpa retry lagi
         except Exception as e:
             log.warning(f"[binance] {i+1}/3: {e}")
             time.sleep(2)
@@ -1762,15 +1802,21 @@ def close_position(sym, result, close_price=None):
     tg_send(cid, f"{emoji} <b>{label}</b> — {sym}\n\n" + fmt_stats())
 
 
-def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
+def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15, df=None):
     """
     Ambil candle M1 dalam N menit terakhir, periksa urutan:
     mana yang kena duluan — TP atau SL?
 
+    df (opsional): dataframe klines M1 yang SUDAH di-fetch caller —
+    dipakai supaya tidak fetch ulang candle yang sama dua kali (caller
+    sering butuh dataframe ini juga untuk keperluan lain, mis. verifikasi
+    confirmed_sl di monitor_position).
+
     Return: "tp", "sl", atau None (tidak ada yang tersentuh)
     """
     try:
-        df = get_klines(sym, "1m", lookback_min + 2)
+        if df is None:
+            df = get_klines(sym, "1m", lookback_min + 2)
         if df is None or df.empty: return None
 
         # Ambil hanya candle dalam lookback_min menit terakhir
@@ -1852,7 +1898,26 @@ def monitor_position(sym, pos):
         hit_sl = (price <= sl_p) if is_buy else (price >= sl_p)
 
         if hit_tp or hit_sl:
-            order = check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=3)
+            # Kalau masih dalam episode sweep yang sama (sudah kirim notif
+            # sekali) dan belum lewat KLINE_VERIFY_THROTTLE detik sejak
+            # verifikasi terakhir, JANGAN fetch klines lagi — cukup tunggu.
+            # Tanpa ini, selama harga grinding di SL, kode akan hammer
+            # Binance dengan 2 request klines setiap 10 detik tanpa henti.
+            now_ts = time.time()
+            last_check = pos.get("last_kline_check", 0)
+            if pos.get("sweep_notified") and (now_ts - last_check) < KLINE_VERIFY_THROTTLE:
+                time.sleep(MONITOR_SLEEP)
+                continue
+
+            pos["last_kline_check"] = now_ts
+            try:
+                df_m1 = get_klines(sym, "1m", 5)
+            except Exception:
+                df_m1 = None
+
+            # Satu fetch di atas dipakai ulang utk 2 keperluan (dulu fetch
+            # 2x terpisah untuk hal yang hampir identik):
+            order = check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=3, df=df_m1)
             if order is None:
                 order = "tp" if hit_tp else "sl"
 
@@ -1867,7 +1932,6 @@ def monitor_position(sym, pos):
             else:
                 confirmed_sl = False
                 try:
-                    df_m1 = get_klines(sym, "1m", 5)
                     if df_m1 is not None and not df_m1.empty:
                         last_closes = df_m1["close"].tail(3)
                         confirmed_sl = any(
@@ -1889,8 +1953,9 @@ def monitor_position(sym, pos):
                     return
                 else:
                     # Notif dikirim sekali per episode sweep (flag reset
-                    # begitu kondisi sweep hilang), loop istirahat
-                    # MONITOR_SLEEP detik sebelum cek lagi.
+                    # begitu kondisi sweep hilang). Iterasi berikutnya
+                    # dalam window throttle akan skip fetch sama sekali
+                    # (lihat pengecekan sweep_notified di atas).
                     if not pos.get("sweep_notified"):
                         tg_send(chat_id,
                             f"🔄 <b>Liquidity Sweep — {sym}</b>\n"
@@ -2209,6 +2274,12 @@ def bot_loop():
 
     log.info("Test koneksi Binance...")
     for i in range(10):
+        remaining = _binance_ban_remaining()
+        if remaining > 0:
+            wait = min(remaining + 2, 300)   # tunggu sesuai sisa ban, maks 5 menit per iterasi
+            log.warning(f"[startup] Binance masih diban {remaining:.0f}s — menunggu {wait:.0f}s...")
+            time.sleep(wait)
+            continue
         try:
             fapi_get("/fapi/v1/ping")
             log.info("Binance OK!")
@@ -2457,4 +2528,4 @@ def bot_loop():
 if __name__=="__main__":
     threading.Thread(target=_price_cache_loop, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    run_flask()
+    run_flask()0
