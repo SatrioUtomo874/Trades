@@ -6,7 +6,7 @@ Render.com | python main.py
 """
 
 import os, time, logging, threading
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -20,8 +20,10 @@ MIN_RR              = 2.0
 MONITOR_SLEEP       = 10
 MAX_POSITIONS       = 20
 MONITOR_INTERVAL    = 15 * 60
-SWEEP_PULL_FACTOR   = 0.8   # 0 = entry tetap di OB/FVG/EQL/Fib asli, 1 = entry persis di level Liquidity Sweep
-TP_MAX_RR_MULT      = 2   # batas atas pencarian TP "lebih kuat": RR boleh naik sampai MIN_RR × ini
+SWEEP_PULL_FACTOR   = 1     # 0 = entry tetap di OB/FVG/EQL/Fib asli, 1 = entry persis di level Liquidity Sweep
+MIN_CONFIDENCE      = 50    # ambang confidence minimum sinyal — diatur via /confidence_min
+TP_MAX_RR_MULT      = 1.8   # batas atas pencarian TP "lebih kuat": RR boleh naik sampai MIN_RR × ini
+WIB = timezone(timedelta(hours=7))   # untuk format jam entry di /trade
 # ── Fibonacci Extension TP (gated H4 confluence) ──
 # Dipakai HANYA saat level struktural biasa sudah habis diperiksa DAN
 # konteks H4 (trend besar) + RSI H4 (momentum belum jenuh) mendukung.
@@ -29,10 +31,10 @@ TP_MAX_RR_MULT      = 2   # batas atas pencarian TP "lebih kuat": RR boleh naik 
 # dievaluasi berdampingan dengan level struktural lain di _select_best_tp.
 FIB_EXT_1           = 0.272  # ekstensi 1.272 — butuh H4 trend + RSI band saja
 FIB_EXT_2           = 0.618  # ekstensi 1.618 — butuh confluence penuh (+ CHoCH M15 searah)
-H4_RSI_BUY_MIN      = 35     # RSI H4 BUY: momentum sudah established (bukan baru mulai)
-H4_RSI_BUY_MAX      = 70     # tapi belum overbought / jenuh
-H4_RSI_SELL_MIN     = 35     # RSI H4 SELL: kebalikan dari BUY
-H4_RSI_SELL_MAX     = 70
+H4_RSI_BUY_MIN      = 45     # RSI H4 BUY: momentum sudah established (bukan baru mulai)
+H4_RSI_BUY_MAX      = 68     # tapi belum overbought / jenuh
+H4_RSI_SELL_MIN     = 32     # RSI H4 SELL: kebalikan dari BUY
+H4_RSI_SELL_MAX     = 55
 # ─────────────────────────────────────────────
 
 if not TELEGRAM_TOKEN:
@@ -1560,10 +1562,10 @@ def run_scan_once(chat_id):
         tg_send(chat_id,"⚠️ Tidak ada setup valid dari semua koin.")
         return None
 
-    # Filter: hanya koin dengan confidence >= 45%
-    results = [r for r in results if r["confidence"] >= 45]
+    # Filter: hanya koin dengan confidence >= MIN_CONFIDENCE (diatur via /confidence_min)
+    results = [r for r in results if r["confidence"] >= MIN_CONFIDENCE]
     if not results:
-        tg_send(chat_id,"⚠️ Tidak ada koin dengan confidence cukup (≥45%). Retry...")
+        tg_send(chat_id,f"⚠️ Tidak ada koin dengan confidence cukup (≥{MIN_CONFIDENCE}%). Retry...")
         return None
 
     # Ranking: confidence DESC → rr DESC
@@ -1806,8 +1808,10 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
 
 def monitor_position(sym, pos):
     """
-    Thread per-posisi: cek TP/SL setiap 15 menit.
-    Posisi hanya ditutup saat TP atau SL — tidak ada timeout.
+    Thread per-posisi: cek harga/TP/SL setiap MONITOR_SLEEP (10 detik),
+    kirim pesan update ke Telegram tiap MONITOR_INTERVAL (15 menit) TANPA
+    pernah menghentikan pengecekan harga di antaranya.
+    Posisi hanya ditutup saat TP atau SL — tidak ada timeout otomatis.
     """
     sig     = pos["signal"]
     chat_id = pos["chat_id"]
@@ -1815,6 +1819,8 @@ def monitor_position(sym, pos):
     tp_p    = sig["tp"]
     sl_p    = sig["sl"]
     is_buy  = sig["decision"] == "BUY"
+
+    next_update_at = time.time() + MONITOR_INTERVAL
 
     while True:
         with positions_lock:
@@ -1846,7 +1852,7 @@ def monitor_position(sym, pos):
         hit_sl = (price <= sl_p) if is_buy else (price >= sl_p)
 
         if hit_tp or hit_sl:
-            order = check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15)
+            order = check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=3)
             if order is None:
                 order = "tp" if hit_tp else "sl"
 
@@ -1896,23 +1902,22 @@ def monitor_position(sym, pos):
         # Harga sudah tidak lagi menyentuh SL → reset flag notif sweep
         pos["sweep_notified"] = False
 
-        # ── Update 15 menit ────────────────────────────────────────
-        pnl_pct = (price - entry) / entry * 100 * (1 if is_buy else -1)
-        tg_send(chat_id,
-            f"📊 <b>Update 15m — {sym}</b>\n"
-            f"Arah  : {'🟢 BUY' if is_buy else '🔴 SELL'}\n"
-            f"Entry : <code>{entry:.6g}</code>\n"
-            f"Harga : <code>{price:.6g}</code>\n"
-            f"TP    : <code>{tp_p:.6g}</code>\n"
-            f"SL    : <code>{sl_p:.6g}</code>\n"
-            f"PnL   : <b>{pnl_pct:+.2f}%</b>")
+        # ── Update periodik — dikirim tanpa menghentikan pengecekan
+        # harga. Loop tetap kembali ke atas tiap MONITOR_SLEEP dan tetap
+        # mengecek TP/SL; hanya PESAN-nya yang dijadwalkan tiap 15 menit.
+        if time.time() >= next_update_at:
+            pnl_pct = (price - entry) / entry * 100 * (1 if is_buy else -1)
+            tg_send(chat_id,
+                f"📊 <b>Update 15m — {sym}</b>\n"
+                f"Arah  : {'🟢 BUY' if is_buy else '🔴 SELL'}\n"
+                f"Entry : <code>{entry:.6g}</code>\n"
+                f"Harga : <code>{price:.6g}</code>\n"
+                f"TP    : <code>{tp_p:.6g}</code>\n"
+                f"SL    : <code>{sl_p:.6g}</code>\n"
+                f"PnL   : <b>{pnl_pct:+.2f}%</b>")
+            next_update_at = time.time() + MONITOR_INTERVAL
 
-        deadline = time.time() + MONITOR_INTERVAL
-        while time.time() < deadline:
-            with positions_lock:
-                if sym not in positions: return
-            if pos.get("timeout_flag"): break
-            time.sleep(MONITOR_SLEEP)
+        time.sleep(MONITOR_SLEEP)
 
 
 def simulation_loop(chat_id):
@@ -2151,6 +2156,7 @@ GREETING=(
     "/stop                — Hentikan scanning (posisi aktif tetap dipantau)\n"
     "/trade               — Lihat semua posisi aktif\n"
     "/max                 — Lihat/ubah max posisi + info batas API\n"
+    "/confidence_min      — Lihat/ubah ambang confidence minimum\n"
     "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
     "/timeout             — Tutup paksa semua posisi\n"
     "/stats               — Statistik + saldo\n"
@@ -2186,7 +2192,7 @@ def get_info_msg():
         " level ini belum 'terbukti' market, jadi paling lemah & butuh\n"
         " konfirmasi ekstra. Selalu dievaluasi bareng level lain, bukan\n"
         " cabang khusus penyelamat RR gagal.\n\n"
-        f"Min RR: 1:{MIN_RR} | Min Confidence: 45%\n"
+        f"Min RR: 1:{MIN_RR} | Min Confidence: {MIN_CONFIDENCE}%\n"
         f"TF: H1 (bias) + M15 (entry) + H4 (fib gate)\n"
         f"Model P&L   : posisi {POSITION_SIZE_PCT:.0f}% saldo × % jarak SL/TP aktual\n"
         f"  → SL dekat (0.5%) = loss kecil | SL jauh (4%) = loss lebih besar\n"
@@ -2199,7 +2205,7 @@ def get_info_msg():
 # BOT LOOP
 # ═════════════════════════════════════════════
 def bot_loop():
-    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS
+    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, MIN_CONFIDENCE
 
     log.info("Test koneksi Binance...")
     for i in range(10):
@@ -2308,13 +2314,13 @@ def bot_loop():
                             else:
                                 pr  = get_price(s) or p["entry"]
                                 pnl = (pr - p["entry"]) / p["entry"] * 100 * (1 if is_buy else -1)
-                                el  = time.time() - p["entry_time"]
-                                sj  = el / 3600
+                                entry_clock = datetime.fromtimestamp(
+                                    p["entry_time"], tz=WIB).strftime("%H:%M")
                                 lines.append(
                                     f"\n{em} <b>{s}</b> — AKTIF\n"
                                     f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
                                     f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{sig['sl']:.6g}</code>\n"
-                                    f"PnL: <b>{pnl:+.2f}%</b> | ⏱ {sj:.1f}j"
+                                    f"PnL: <b>{pnl:+.2f}%</b> | 🕐 Entry jam {entry_clock}"
                                 )
                         tg_send(chat_id,"\n".join(lines))
                 elif text.startswith("/timeout") or (not text.startswith("/") and text.startswith("timeout")):
@@ -2385,7 +2391,7 @@ def bot_loop():
                             f"  terbaik sudah terpakai)\n\n"
                             f"<b>Ubah: /max 5 | /max 10 | /max 15 | /max 20</b>")
                     # ── /max N (ubah nilai) ────────────────────────────────
-                    elif len(parts) == 2:
+                                        elif len(parts) == 2:
                         try:
                             n = int(parts[1])
                             if n < 1 or n > 50:
@@ -2408,6 +2414,37 @@ def bot_loop():
                             tg_send(chat_id,"❌ Format salah. Contoh: /max 10")
                     else:
                         tg_send(chat_id,"❌ Format: /max  atau  /max 10")
+                elif text.startswith("/confidence_min"):
+                    parts = text.split()
+                    # ── /confidence_min (tampilkan nilai saat ini) ─────────
+                    if len(parts) == 1:
+                        tg_send(chat_id,
+                            f"🎯 <b>Confidence Minimum</b>\n\n"
+                            f"Saat ini: <b>{MIN_CONFIDENCE}%</b>\n\n"
+                            f"Sinyal dengan confidence di bawah angka ini akan\n"
+                            f"diabaikan sebelum masuk pertimbangan RR/entry.\n"
+                            f"Makin tinggi → sinyal lebih jarang tapi lebih\n"
+                            f"selektif. Makin rendah → sinyal lebih sering\n"
+                            f"tapi makin banyak setup lemah ikut lolos.\n\n"
+                            f"<b>Ubah: /confidence_min 50</b>")
+                    # ── /confidence_min N (ubah nilai) ─────────────────────
+                    elif len(parts) == 2:
+                        try:
+                            n = int(parts[1])
+                            if n < 0 or n > 99:
+                                tg_send(chat_id,
+                                    f"❌ Nilai harus antara 0–99.\n"
+                                    f"Contoh: /confidence_min 50")
+                            else:
+                                old = MIN_CONFIDENCE
+                                MIN_CONFIDENCE = n
+                                tg_send(chat_id,
+                                    f"✅ Confidence minimum diubah: "
+                                    f"<b>{old}% → {MIN_CONFIDENCE}%</b>")
+                        except ValueError:
+                            tg_send(chat_id,"❌ Format salah. Contoh: /confidence_min 50")
+                    else:
+                        tg_send(chat_id,"❌ Format: /confidence_min  atau  /confidence_min 50")
                 else:
                     tg_send(chat_id,"❓ Tidak dikenal. /start")
 
