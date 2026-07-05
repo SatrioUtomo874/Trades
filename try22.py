@@ -2391,7 +2391,7 @@ def bot_loop():
                             f"  terbaik sudah terpakai)\n\n"
                             f"<b>Ubah: /max 5 | /max 10 | /max 15 | /max 20</b>")
                     # ── /max N (ubah nilai) ────────────────────────────────
-                                        elif len(parts) == 2:
+                    elif len(parts) == 2:
                         try:
                             n = int(parts[1])
                             if n < 1 or n > 50:
