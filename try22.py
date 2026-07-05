@@ -2528,4 +2528,4 @@ def bot_loop():
 if __name__=="__main__":
     threading.Thread(target=_price_cache_loop, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
-    run_flask()0
+    run_flask()
