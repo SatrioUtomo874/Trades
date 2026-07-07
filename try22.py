@@ -111,7 +111,7 @@ stats = {
 ban_lock = threading.Lock()
 banned_coins: dict = {}      # {symbol: scan_counter saat diban}
 scan_counter = 0             # bertambah 1 setiap get_top_coins() dipanggil
-BAN_DURATION_SCANS = 8
+BAN_DURATION_SCANS = 15
 
 def _ban_coin(sym, reason=""):
     """Ban koin selama BAN_DURATION_SCANS siklus scan berikutnya."""
@@ -509,64 +509,90 @@ def find_snr_levels(df, lb=80):
         levels.append(("S", df["low"].iloc[i]))
     return levels
 
-def find_supply_demand(df, direction, lb=40):
+def find_zones(df, direction, lb=40, strict=False):
     """
-    Supply zone  = area di mana harga turun tajam (bearish OB)
-    Demand zone  = area di mana harga naik tajam (bullish OB)
-    Ini adalah zona institusi menempatkan order besar.
+    Deteksi ZONA TERPADU (Order Block = Supply/Demand Zone) — satu model
+    sesuai materi: OB pada dasarnya adalah versi "dasar/minimal" dari
+    Supply & Demand zone, bukan konsep terpisah. Fungsi ini menggantikan
+    find_supply_demand() dan find_ob() versi lama yang terpisah.
 
-    Setiap zona kini disertai atribut validasi 3-kriteria dari materi:
-    1. has_fvg    — ada Fair Value Gap yang menyertai impulse move
-    2. has_bos    — impulse move menghasilkan break of structure
-    3. is_fresh   — zona belum pernah disentuh ulang sejak terbentuk
-    Serta pola pembentukannya (RBR/DBR/DBD/RBD) dan strong_move_away
-    (candle impulse body besar, bukan sekadar candle korektif kecil —
-    penanda smart money benar-benar eksekusi order besar di sana).
+    direction: "bull"/"demand" → base candle bearish diikuti rally (cari
+               zona untuk BUY)
+               "bear"/"supply" → base candle bullish diikuti drop (cari
+               zona untuk SELL)
+    strict   : True  → wajib 2 candle konfirmasi lanjutan searah setelah
+                        impulse (perilaku find_ob lama, base candle lebih
+                        "murni"/sempit — dipakai untuk entry precision)
+               False → cukup 1 candle impulse (perilaku find_supply_demand
+                        lama, zona bisa sedikit lebih lebar — dipakai
+                        untuk SL/TP pool yang butuh lebih banyak kandidat)
+
+    Setiap zona disertai VALIDASI 3-KRITERIA dari materi (dianggap valid
+    kalau minimal salah satu terpenuhi, quality = jumlah yang terpenuhi):
+    1. has_fvg   — ada Fair Value Gap yang menyertai impulse move
+    2. has_bos   — impulse move menghasilkan break of structure
+    3. is_fresh  — zona belum pernah disentuh ulang sejak terbentuk
+    Plus:
+    - pattern         : RBR/DBR (demand) atau DBD/RBD (supply)
+    - strong_move_away: candle impulse body besar (bukan sekadar koreksi
+      kecil — penanda smart money benar2 eksekusi order besar di sana)
+    - fib_zone/fib_ratio/fib_aligned: posisi zona relatif ke range swing
+      lb candle terakhir. Zona demand/bull idealnya di DISKON, zona
+      supply/bear idealnya di PREMIUM (fib_aligned=True kalau selaras).
     """
+    is_demand = direction in ("bull", "demand")
     sub = df.iloc[-lb:]
-    base_offset = len(df) - len(sub)   # konversi index sub -> index df asli
+    base_offset = len(df) - len(sub)
     avg_body = (sub["close"] - sub["open"]).abs().mean()
+    swing_hi = sub["high"].max()
+    swing_lo = sub["low"].min()
     zones = []
     sh_all, sl_all = swing_pts(df, lb=5)
 
-    for i in range(1, len(sub) - 2):
-        c  = sub.iloc[i]
-        nx = sub.iloc[i + 1]
+    end_range = len(sub) - 3 if strict else len(sub) - 2
+    for i in range(1, end_range):
+        c   = sub.iloc[i]
+        nx  = sub.iloc[i + 1]
         nx2 = sub.iloc[i + 2] if i + 2 < len(sub) else None
-        body = abs(nx["close"] - nx["open"])
-        strong_move_away = body >= avg_body * 1.3
-        if body < avg_body * 1.3: continue
+        impulse_body = abs(nx["close"] - nx["open"])
+        strong_move_away = impulse_body >= avg_body * 1.3
+        min_impulse = avg_body * (1.5 if strict else 1.3)
+        if impulse_body < min_impulse:
+            continue
 
-        is_match = False
-        if direction == "supply":
-            is_match = c["close"] > c["open"] and nx["close"] < nx["open"]
-        else:
+        if is_demand:
             is_match = c["close"] < c["open"] and nx["close"] > nx["open"]
+            if strict and is_match:
+                is_match = nx2 is not None and nx2["close"] > nx2["open"]
+        else:
+            is_match = c["close"] > c["open"] and nx["close"] < nx["open"]
+            if strict and is_match:
+                is_match = nx2 is not None and nx2["close"] < nx2["open"]
         if not is_match:
             continue
 
         top = max(c["open"], c["close"])
         bot = min(c["open"], c["close"])
-        df_idx = base_offset + i   # index zona ini dalam df penuh
+        df_idx = base_offset + i
 
         # Kriteria 1: FVG menyertai impulse (celah antara c dan nx2)
         has_fvg = False
         if nx2 is not None:
-            if direction == "supply" and nx2["high"] < c["low"]:
+            if is_demand and nx2["low"] > c["high"]:
                 has_fvg = True
-            if direction == "demand" and nx2["low"] > c["high"]:
+            if (not is_demand) and nx2["high"] < c["low"]:
                 has_fvg = True
 
         # Kriteria 2: impulse ini menghasilkan BOS (harga break swing sebelumnya)
         has_bos = False
         try:
-            if direction == "supply" and len(sl_all) >= 1:
-                prior_lows = [df["low"].iloc[k] for k in sl_all if k < df_idx]
-                if prior_lows and nx["low"] < min(prior_lows[-1:] or [float("inf")]):
-                    has_bos = True
-            if direction == "demand" and len(sh_all) >= 1:
+            if is_demand and len(sh_all) >= 1:
                 prior_highs = [df["high"].iloc[k] for k in sh_all if k < df_idx]
                 if prior_highs and nx["high"] > max(prior_highs[-1:] or [float("-inf")]):
+                    has_bos = True
+            if (not is_demand) and len(sl_all) >= 1:
+                prior_lows = [df["low"].iloc[k] for k in sl_all if k < df_idx]
+                if prior_lows and nx["low"] < min(prior_lows[-1:] or [float("inf")]):
                     has_bos = True
         except Exception:
             has_bos = False
@@ -574,10 +600,15 @@ def find_supply_demand(df, direction, lb=40):
         # Kriteria 3: fresh — belum pernah disentuh ulang sejak terbentuk
         fresh = is_zone_fresh(df, top, bot, df_idx)
 
-        pattern = classify_sd_pattern(df, df_idx, direction)
+        pattern = classify_sd_pattern(df, df_idx, "demand" if is_demand else "supply")
+
+        fib = get_fib_zone((top + bot) / 2, swing_lo, swing_hi)
+        fib_aligned = fib["zone"] in (("discount", "equilibrium") if is_demand
+                                       else ("premium", "equilibrium"))
 
         zones.append({
             "top": top, "bot": bot,
+            "mid": (top + bot) / 2,
             "high": c["high"], "low": c["low"],
             "idx": df_idx,
             "has_fvg": bool(has_fvg),
@@ -585,10 +616,25 @@ def find_supply_demand(df, direction, lb=40):
             "is_fresh": bool(fresh),
             "strong_move_away": bool(strong_move_away),
             "pattern": pattern,
+            "fib_zone": fib["zone"],
+            "fib_ratio": fib["ratio"],
+            "fib_aligned": bool(fib_aligned),
             # quality: berapa dari 3 kriteria utama terpenuhi (fvg, bos, fresh)
             "quality": int(has_fvg) + int(has_bos) + int(fresh),
         })
     return zones[-3:] if zones else []
+
+
+def find_supply_demand(df, direction, lb=40):
+    """Kompatibilitas: alias tipis ke find_zones (mode non-strict/S&D)."""
+    return find_zones(df, "demand" if direction == "demand" else "supply", lb=lb, strict=False)
+
+
+def find_ob(df, direction, lb=40):
+    """Kompatibilitas: alias tipis ke find_zones (mode strict/OB murni)."""
+    return find_zones(df, direction, lb=lb, strict=True)
+
+
 
 def find_fvg(df, direction, lb=40):
     """
@@ -1111,7 +1157,33 @@ def detect_inducement_move(df, direction, atr, lookback=5):
 # ═════════════════════════════════════════════
 def score_direction(df_h1, df_m15):
     """
-    Analisis normal untuk menentukan arah dan koin terbaik.
+    Analisis HIERARKIS (bukan lagi additive scoring flat dari banyak
+    indikator lepas): sesuai filosofi price-action/SMC di materi —
+    tentukan BIAS dari struktur besar dulu, baru cari KONFIRMASI ENTRY
+    dari price-action M15. Bias dan konfirmasi yang berlawanan saling
+    melemahkan drastis (gate), bukan sekadar dijumlah rata.
+
+    LAYER 1 — BIAS (konteks arah, dari struktur & momentum besar):
+      • Market Structure H1 (HH/HL vs LH/LL) — bobot terbesar
+      • D1 bias (EMA + struktur harian) — konfirmasi/veto di layer akhir
+      • EMA H1 trend alignment
+      • RSI M15 (dipertahankan sesuai preferensi — momentum filter,
+        bukan sinyal SMC, tapi tetap berguna sebagai extra confluence)
+
+    LAYER 2 — SETUP/KONFIRMASI (price-action & SMC murni dari 10 materi):
+      • BOS (shadow) & CHoCH (wajib body-close) M15+H1
+      • Failed Retest M15+H1
+      • Validitas & tipe pullback (corrective/sweeping/aggressive)
+      • Pin bar rejection, pola Fakey
+      • Liquidity Run vs Sweep/Swift
+      • OTE 0.62-0.79 + FVG/CHoCH pendukung
+      • MACD/BB/Volume M15 — momentum confluence tambahan (ringan)
+
+    LAYER 3 — GATE: kalau LAYER 2 (konfirmasi entry) berlawanan arah
+    dengan LAYER 1 (bias struktural), konfirmasi itu dilemahkan drastis
+    alih-alih dijumlah rata — mencegah sinyal yang sebenarnya melawan
+    struktur besar tapi lolos hanya karena numpuk banyak micro-signal M15.
+
     Return: dict dengan symbol, direction asli, confidence, price
     """
     h1=build_df(df_h1); m15=build_df(df_m15)
@@ -1120,161 +1192,174 @@ def score_direction(df_h1, df_m15):
     L1=h1.iloc[-1]; P1=h1.iloc[-2]
     L15=m15.iloc[-1]; P15=m15.iloc[-2]
     rv=L15["rsi"]
-
-    bull=bear=0
-
-    # Trend H1
-    if L1["ema9"]>L1["ema21"]>L1["ema50"]:  bull+=15
-    elif L1["ema9"]>L1["ema21"]:             bull+=8
-    if L1["ema9"]<L1["ema21"]<L1["ema50"]:  bear+=15
-    elif L1["ema9"]<L1["ema21"]:             bear+=8
-    if L1["close"]>L1["ema200"]:             bull+=8
-    else:                                     bear+=8
-
-    # RSI M15
-    if rv<35:    bull+=12
-    elif rv<45:  bull+=6
-    if rv>65:    bear+=12
-    elif rv>55:  bear+=6
-
-    # MACD M15
-    if L15["mh"]>0 and P15["mh"]<=0:  bull+=12
-    elif L15["mh"]>0:                  bull+=5
-    if L15["mh"]<0 and P15["mh"]>=0:  bear+=12
-    elif L15["mh"]<0:                  bear+=5
-
-    # EMA M15
-    if L15["ema9"]>L15["ema21"]>L15["ema50"]: bull+=10
-    elif L15["ema9"]>L15["ema21"]:             bull+=5
-    if L15["ema9"]<L15["ema21"]<L15["ema50"]: bear+=10
-    elif L15["ema9"]<L15["ema21"]:             bear+=5
-
-    # Bollinger
-    if L15["close"]<=L15["bb_lo"]:    bull+=10
-    elif L15["close"]<L15["bb_mid"]:  bull+=4
-    if L15["close"]>=L15["bb_up"]:    bear+=10
-    elif L15["close"]>L15["bb_mid"]:  bear+=4
-
-    # Volume
-    if L15["volume"]>L15["vol_sma"]*1.5:
-        if L15["close"]>L15["open"]:  bull+=8
-        else:                          bear+=8
-    elif L15["volume"]>L15["vol_sma"]:
-        if L15["close"]>L15["open"]:  bull+=3
-        else:                          bear+=3
-
-    # Market Structure H1
-    sh1,sl1=swing_pts(h1,5)
-    struct_h1=mkt_struct(h1,sh1,sl1)
-    if struct_h1=="bullish": bull+=12
-    if struct_h1=="bearish": bear+=12
-
-    # SMC M15 — BOS / CHoCH
-    sh15,sl15=swing_pts(m15,5)
-    bos=detect_bos(m15,sh15,sl15)
-    if bos["bb"]: bull+=15
-    if bos["cb"]: bull+=10
-    if bos["bs"]: bear+=15
-    if bos["cs"]: bear+=10
-
-    # ── CHoCH M15 — bobot tinggi, ini konfirmasi perubahan arah nyata ──
     atr_val=max(L15["atr"], L15["close"]*0.003)
+
+    sh1,sl1   = swing_pts(h1,5)
+    sh15,sl15 = swing_pts(m15,5)
+    struct_h1 = mkt_struct(h1,sh1,sl1)
+    choch_h1  = detect_choch(h1, sh1, sl1)   # dihitung di sini krn ikut Layer 1
+
+    # ══════════════════════════════════════════════════════════════
+    # LAYER 1 — BIAS: arah besar dari struktur, bukan micro-indicator.
+    # CHoCH H1 dimasukkan di layer ini (bukan Layer 2/setup) karena
+    # secara konsep CHoCH = perubahan KARAKTER/BIAS pasar itu sendiri
+    # (lihat materi video #6), bukan sekadar trigger entry M15 seperti
+    # pin bar/fakey. struct_h1 dari swing HH/HL cenderung lagging —
+    # CHoCH H1 sering jadi sinyal PALING AWAL bahwa bias lama sudah
+    # tidak berlaku, jadi wajib ikut menentukan bias_dir, bukan cuma
+    # jadi setup yang dipotong buta kalau "melawan" struct_h1 yang
+    # sebenarnya sudah usang.
+    # ══════════════════════════════════════════════════════════════
+    bias_bull = bias_bear = 0
+
+    if struct_h1=="bullish": bias_bull += 30
+    if struct_h1=="bearish": bias_bear += 30
+
+    if choch_h1["bullish_choch"]: bias_bull += 26
+    if choch_h1["bearish_choch"]: bias_bear += 26
+
+    if L1["ema9"]>L1["ema21"]>L1["ema50"]:  bias_bull += 15
+    elif L1["ema9"]>L1["ema21"]:             bias_bull += 7
+    if L1["ema9"]<L1["ema21"]<L1["ema50"]:  bias_bear += 15
+    elif L1["ema9"]<L1["ema21"]:             bias_bear += 7
+    if L1["close"]>L1["ema200"]: bias_bull += 8
+    else:                          bias_bear += 8
+
+    # RSI M15 — dipertahankan sebagai momentum filter (bukan SMC, tapi
+    # tetap relevan): oversold/overbought memberi confluence ke bias.
+    if rv<35:    bias_bull += 12
+    elif rv<45:  bias_bull += 6
+    if rv>65:    bias_bear += 12
+    elif rv>55:  bias_bear += 6
+
+    bias_dir = "bull" if bias_bull >= bias_bear else "bear"
+
+    # ══════════════════════════════════════════════════════════════
+    # LAYER 2 — SETUP: konfirmasi entry price-action/SMC (10 materi)
+    # ══════════════════════════════════════════════════════════════
+    setup_bull = setup_bear = 0
+
+    # BOS (shadow cukup) & CHoCH (wajib body close) — inti SMC
+    bos = detect_bos(m15, sh15, sl15)
+    if bos["bb"]: setup_bull += 12
+    if bos["cb"]: setup_bull += 7
+    if bos["bs"]: setup_bear += 12
+    if bos["cs"]: setup_bear += 7
+
     choch = detect_choch(m15, sh15, sl15)
-    if choch["bullish_choch"]: bull+=20
-    if choch["bearish_choch"]: bear+=20
+    if choch["bullish_choch"]: setup_bull += 22
+    if choch["bearish_choch"]: setup_bear += 22
 
-    # ── CHoCH H1 — lebih kuat lagi ──
-    choch_h1 = detect_choch(h1, sh1, sl1)
-    if choch_h1["bullish_choch"]: bull+=25
-    if choch_h1["bearish_choch"]: bear+=25
+    # (CHoCH H1 sudah dihitung di Layer 1/bias di atas — lihat komentar
+    # di bagian bias_bull/bias_bear)
 
-    # ── Failed Retest M15 — trigger entry paling valid ──
+    # Failed Retest — trigger entry paling valid di SMC
     fr = detect_failed_retest(m15, sh15, sl15, atr_val)
-    if fr["failed_retest_sell"]: bear+=25
-    if fr["failed_retest_buy"]:  bull+=25
+    if fr["failed_retest_sell"]: setup_bear += 24
+    if fr["failed_retest_buy"]:  setup_bull += 24
 
-    # ── Failed Retest H1 ──
     fr_h1 = detect_failed_retest(h1, sh1, sl1, atr_val)
-    if fr_h1["failed_retest_sell"]: bear+=20
-    if fr_h1["failed_retest_buy"]:  bull+=20
+    if fr_h1["failed_retest_sell"]: setup_bear += 18
+    if fr_h1["failed_retest_buy"]:  setup_bull += 18
 
-    # Candle pattern
-    body=L15["close"]-L15["open"]
-    low_wick=min(L15["open"],L15["close"])-L15["low"]
-    up_wick=L15["high"]-max(L15["open"],L15["close"])
-    if low_wick>abs(body)*1.5: bull+=8  # hammer
-    if up_wick>abs(body)*1.5:  bear+=8  # shooting star
-
-    # ── Validitas & tipe pullback (M15) ──────────────────────────────
-    # Pullback valid = candle koreksi benar2 break high/low candle
-    # sebelumnya (bukan sekadar ganti warna). Tipe pullback menentukan
-    # probabilitas reaksi di zona: corrective=ideal, sweeping=ideal
-    # setelah sweep, aggressive=risiko tinggi, sebaiknya dikurangi bobot.
+    # Validitas & tipe pullback — corrective=ideal, sweeping=ideal
+    # setelah sweep, aggressive=risiko tinggi (bobot dikurangi)
     pullback_valid_bull = is_valid_pullback(m15, "bull")
     pullback_valid_bear = is_valid_pullback(m15, "bear")
     pullback_type_bull  = classify_pullback_type(m15, "bull", atr_val)
     pullback_type_bear  = classify_pullback_type(m15, "bear", atr_val)
 
     if pullback_valid_bull:
-        if pullback_type_bull == "aggressive": bull += 3   # tetap valid, tapi risiko lebih tinggi
-        elif pullback_type_bull == "sweeping":  bull += 12  # sweep + shift = probabilitas tinggi
-        else:                                    bull += 8   # corrective = ideal
+        if pullback_type_bull == "aggressive": setup_bull += 3
+        elif pullback_type_bull == "sweeping":  setup_bull += 14
+        else:                                    setup_bull += 9
     if pullback_valid_bear:
-        if pullback_type_bear == "aggressive": bear += 3
-        elif pullback_type_bear == "sweeping":  bear += 12
-        else:                                    bear += 8
+        if pullback_type_bear == "aggressive": setup_bear += 3
+        elif pullback_type_bear == "sweeping":  setup_bear += 14
+        else:                                    setup_bear += 9
 
-    # ── Pin bar rejection (M15) — konfirmasi price action di zona ────
+    # Pin bar rejection & pola Fakey — konfirmasi price action di zona
     pinbar = detect_pinbar(L15)
-    if pinbar["bullish_pinbar"]: bull += 10
-    if pinbar["bearish_pinbar"]: bear += 10
+    if pinbar["bullish_pinbar"]: setup_bull += 10
+    if pinbar["bearish_pinbar"]: setup_bear += 10
 
-    # ── Pola Fakey (false breakout dari inside bar) ──────────────────
     fakey = detect_fakey(m15)
-    if fakey["bullish_fakey"]: bull += 10
-    if fakey["bearish_fakey"]: bear += 10
+    if fakey["bullish_fakey"]: setup_bull += 10
+    if fakey["bearish_fakey"]: setup_bear += 10
 
-    # ── Liquidity Run vs Sweep/Swift ──────────────────────────────────
-    # Run (breakout bersih, close di luar swing) = konfirmasi kuat searah.
-    # Sweep (wick tembus tapi gagal close di luar) = liquidity grab, arah
-    # sebenarnya kemungkinan BERLAWANAN — beri bobot ke arah lawan.
+    # Liquidity Run vs Sweep/Swift
     liq_bull = detect_liquidity_run_or_sweep(m15, sh15, sl15, "bull")
     liq_bear = detect_liquidity_run_or_sweep(m15, sh15, sl15, "bear")
-    if liq_bull["type"] == "run":    bull += 10
-    elif liq_bull["type"] == "sweep": bear += 8   # gagal breakout naik → bias turun
-    if liq_bear["type"] == "run":    bear += 10
-    elif liq_bear["type"] == "sweep": bull += 8   # gagal breakout turun → bias naik
+    if liq_bull["type"] == "run":    setup_bull += 10
+    elif liq_bull["type"] == "sweep": setup_bear += 8
+    if liq_bear["type"] == "run":    setup_bear += 10
+    elif liq_bear["type"] == "sweep": setup_bull += 8
 
-    # ── Inducement check — flag saja, dipakai calc_discount_entry utk
-    # menunda entry alih-alih hard block skor di sini ──────────────────
+    # Inducement — flag saja, dipakai full_analyze/calc_discount_entry
+    # untuk menunda entry, bukan mengubah skor di sini.
     inducement_bull = detect_inducement_move(m15, "bull", atr_val)
     inducement_bear = detect_inducement_move(m15, "bear", atr_val)
 
-    # ── OTE (Optimal Trade Entry, 0.62-0.79 retracement) ─────────────
-    # OTE TIDAK boleh jadi sinyal berdiri sendiri (sesuai materi) —
-    # hanya diberi bonus kalau harga sekarang benar2 di zona 62-79%
-    # DAN ada minimal satu konfirmasi tambahan searah (CHoCH M15 atau
-    # FVG searah yang fresh).
+    # OTE (0.62-0.79) — TIDAK boleh berdiri sendiri, wajib CHoCH atau
+    # FVG fresh searah sebagai pendamping.
     ote_bull = ote_bear = False
     if len(sh15) >= 1 and len(sl15) >= 1:
         swing_hi_m15 = m15["high"].iloc[sh15[-1]]
         swing_lo_m15 = m15["low"].iloc[sl15[-1]]
         fib_now = get_fib_zone(L15["close"], swing_lo_m15, swing_hi_m15)
-        # Leg naik (retracement dari high ke arah low): OTE bull di ratio tinggi
-        # dekat swing_lo (posisi harga sudah retrace dalam ke arah low)
-        if 0.62 <= (1 - fib_now["ratio"]) <= 0.79:
-            ote_bull = True
-        if 0.62 <= fib_now["ratio"] <= 0.79:
-            ote_bear = True
+        if 0.62 <= (1 - fib_now["ratio"]) <= 0.79: ote_bull = True
+        if 0.62 <= fib_now["ratio"] <= 0.79:        ote_bear = True
 
     if ote_bull and (choch["bullish_choch"] or any(f.get("is_fresh") for f in find_fvg(m15, "bull", lb=30))):
-        bull += 10
+        setup_bull += 10
     if ote_bear and (choch["bearish_choch"] or any(f.get("is_fresh") for f in find_fvg(m15, "bear", lb=30))):
-        bear += 10
+        setup_bear += 10
+
+    # Candle pattern dasar (hammer/shooting star) — pelengkap price action
+    body=L15["close"]-L15["open"]
+    low_wick=min(L15["open"],L15["close"])-L15["low"]
+    up_wick=L15["high"]-max(L15["open"],L15["close"])
+    if low_wick>abs(body)*1.5: setup_bull += 6
+    if up_wick>abs(body)*1.5:  setup_bear += 6
+
+    # Momentum confluence ringan (MACD/BB/Volume M15) — bukan SMC, tapi
+    # masih dipakai selama relevan sesuai preferensi (bobot lebih kecil
+    # dari layer SMC di atas, hanya sebagai pelengkap).
+    if L15["mh"]>0 and P15["mh"]<=0:  setup_bull += 8
+    elif L15["mh"]>0:                  setup_bull += 3
+    if L15["mh"]<0 and P15["mh"]>=0:  setup_bear += 8
+    elif L15["mh"]<0:                  setup_bear += 3
+
+    if L15["close"]<=L15["bb_lo"]:    setup_bull += 7
+    elif L15["close"]<L15["bb_mid"]:  setup_bull += 3
+    if L15["close"]>=L15["bb_up"]:    setup_bear += 7
+    elif L15["close"]>L15["bb_mid"]:  setup_bear += 3
+
+    if L15["volume"]>L15["vol_sma"]*1.5:
+        if L15["close"]>L15["open"]:  setup_bull += 6
+        else:                          setup_bear += 6
+    elif L15["volume"]>L15["vol_sma"]:
+        if L15["close"]>L15["open"]:  setup_bull += 2
+        else:                          setup_bear += 2
+
+    # ══════════════════════════════════════════════════════════════
+    # LAYER 3 — GATE: konfirmasi yang BERLAWANAN dengan bias struktural
+    # dilemahkan drastis (dipotong separuh), bukan dijumlah rata.
+    # Ini yang membedakan dari additive scoring lama — struktur besar
+    # (bias) diperlakukan sebagai FILTER wajib, bukan sekadar satu
+    # sumber poin di antara puluhan sumber poin lain yang setara.
+    # ══════════════════════════════════════════════════════════════
+    if bias_dir == "bull":
+        setup_bear = setup_bear * 0.5
+    else:
+        setup_bull = setup_bull * 0.5
+
+    bull = bias_bull + setup_bull
+    bear = bias_bear + setup_bear
 
     direction="bull" if bull>=bear else "bear"
     raw=bull if direction=="bull" else bear
-    conf=min(int(raw/282*100),99)
+    conf=min(int(raw/240*100),99)
 
     # ── Konfirmasi D1 ──────────────────────────────────────────────
     d1_bias = "neutral"
@@ -1298,22 +1383,6 @@ def score_direction(df_h1, df_m15):
     if d1_bias == "bearish" and direction == "bull": return None
     if d1_bias == "bullish" and direction == "bear": return None
 
-    # CHoCH dan failed retest hanya valid jika searah H1 structure
-    # Sudah dihitung di atas — tapi kalau CHoCH berlawanan H1, kurangi bobotnya
-    if struct_h1 == "bearish" and choch["bullish_choch"]:
-        bull = max(0, bull - 20)
-    if struct_h1 == "bullish" and choch["bearish_choch"]:
-        bear = max(0, bear - 20)
-    if struct_h1 == "bearish" and choch_h1["bullish_choch"]:
-        bull = max(0, bull - 25)
-    if struct_h1 == "bullish" and choch_h1["bearish_choch"]:
-        bear = max(0, bear - 25)
-
-    # Recalc direction dan conf setelah koreksi
-    direction = "bull" if bull >= bear else "bear"
-    raw  = bull if direction == "bull" else bear
-    conf = min(int(raw / 282 * 100), 99)
-
     return {
         "direction"       : direction,
         "confidence"      : conf,
@@ -1324,6 +1393,7 @@ def score_direction(df_h1, df_m15):
         "rsi"             : round(rv,1),
         "bull_pts"        : bull,
         "bear_pts"        : bear,
+        "bias_dir"        : bias_dir,
         "choch_m15"       : choch,
         "choch_h1"        : choch_h1,
         "failed_retest"   : fr,
@@ -1799,73 +1869,6 @@ def analyze_setup(df_h1, df_m15, direction, entry_price, score=None):
         "rr"    : rr,
         "reason": " | ".join(reasons),
     }
-
-
-def find_ob(df, direction, lb=40):
-    """
-    Order Block (OB) — candle terakhir sebelum impulse move besar.
-    Bullish OB: candle bearish terakhir sebelum rally kuat ke atas.
-    Bearish OB: candle bullish terakhir sebelum drop kuat ke bawah.
-    Entry ideal ada di retrace ke zona OB.
-
-    Setiap OB kini disertai:
-    - is_fresh  : belum pernah disentuh ulang sejak terbentuk (OB yang
-                  sudah "dipakai"/termitigasi jauh lebih lemah)
-    - fib_zone  : posisi OB relatif ke range swing lb candle terakhir —
-                  dipakai untuk FILTER: OB bullish idealnya berada di
-                  area DISKON (<=0.618 dari atas), OB bearish idealnya
-                  di area PREMIUM. OB yang berada di sisi salah (mis.
-                  OB bullish di area premium) ditandai lemah, bukan
-                  otomatis dibuang, supaya caller tetap punya fallback.
-    """
-    sub = df.iloc[-lb:]
-    base_offset = len(df) - len(sub)
-    avg_body = (sub["close"] - sub["open"]).abs().mean()
-    swing_hi = sub["high"].max()
-    swing_lo = sub["low"].min()
-    obs = []
-    for i in range(1, len(sub) - 3):
-        c   = sub.iloc[i]
-        nx  = sub.iloc[i + 1]
-        nx2 = sub.iloc[i + 2]
-        impulse = abs(nx["close"] - nx["open"])
-        if impulse < avg_body * 1.5: continue
-
-        is_match = False
-        if direction == "bull":
-            is_match = (c["close"] < c["open"] and
-                        nx["close"] > nx["open"] and
-                        nx2["close"] > nx2["open"])
-        else:
-            is_match = (c["close"] > c["open"] and
-                        nx["close"] < nx["open"] and
-                        nx2["close"] < nx2["open"])
-        if not is_match:
-            continue
-
-        top = max(c["open"], c["close"])
-        bot = min(c["open"], c["close"])
-        df_idx = base_offset + i
-
-        fresh = is_zone_fresh(df, top, bot, df_idx)
-        fib = get_fib_zone((top + bot) / 2, swing_lo, swing_hi)
-
-        # OB bullish ideal di diskon, OB bearish ideal di premium
-        if direction == "bull":
-            fib_aligned = fib["zone"] in ("discount", "equilibrium")
-        else:
-            fib_aligned = fib["zone"] in ("premium", "equilibrium")
-
-        obs.append({
-            "top": top, "bot": bot,
-            "mid": (top + bot) / 2,
-            "idx": df_idx,
-            "is_fresh": bool(fresh),
-            "fib_zone": fib["zone"],
-            "fib_ratio": fib["ratio"],
-            "fib_aligned": bool(fib_aligned),
-        })
-    return obs[-3:] if obs else []
 
 
 def _find_sweep_level(m15, h1, direction, ref_price, atr):
@@ -2788,26 +2791,30 @@ GREETING=(
 def get_info_msg():
     return (
         "ℹ️ <b>Metode Analisis</b>\n\n"
-        "<b>Tahap 1 — Scoring arah sinyal:</b>\n"
-        "• EMA 9/21/50/200 alignment (H1 + M15)\n"
-        "• RSI 14 oversold/overbought\n"
-        "• MACD crossover momentum\n"
-        "• Bollinger Bands posisi\n"
-        "• Volume vs rata-rata\n"
-        "• Market Structure H1 (HH/HL vs LH/LL)\n"
-        "• BOS (shadow) + CHoCH (wajib body close) M15 & H1\n"
-        "• Failed Retest M15 & H1\n"
-        "• Candle pattern (hammer, shooting star, pin bar, fakey)\n"
+        "<b>Tahap 1 — BIAS (struktur besar dulu):</b>\n"
+        "• Market Structure H1 (HH/HL vs LH/LL) — bobot terbesar\n"
+        "• CHoCH H1 (wajib body close) — perubahan bias/karakter pasar\n"
+        "• EMA H1 trend alignment (9/21/50/200)\n"
+        "• RSI 14 M15 — momentum filter tambahan\n\n"
+        "<b>Tahap 2 — SETUP (konfirmasi entry price-action/SMC):</b>\n"
+        "• BOS (cukup shadow) + CHoCH M15 (wajib body close)\n"
+        "• Failed Retest M15 & H1 — trigger entry paling valid\n"
         "• Validitas & tipe pullback (corrective/sweeping/aggressive)\n"
+        "• Pin bar rejection + pola Fakey (false breakout)\n"
         "• Liquidity Run vs Sweep/Swift\n"
-        "• OTE 0.62-0.79 (hanya bonus, butuh CHoCH/FVG pendukung)\n"
-        "• Inducement-aware: turunkan confidence jika breakout baru\n"
-        "  terjadi tanpa CHoCH konfirmasi\n\n"
-        "<b>Tahap 2 — Penentuan SL (prioritas):</b>\n"
+        "• OTE 0.62-0.79 (hanya bonus, wajib CHoCH/FVG pendukung)\n"
+        "• MACD/Bollinger/Volume M15 — momentum confluence ringan\n\n"
+        "<b>Tahap 3 — GATE:</b>\n"
+        "Setup yang berlawanan arah dengan bias struktural dilemahkan\n"
+        "drastis (bukan dijumlah rata seperti indikator lepas biasa) —\n"
+        "struktur besar diperlakukan sebagai filter wajib.\n"
+        "Inducement-aware: turunkan confidence jika breakout baru\n"
+        "terjadi tanpa CHoCH konfirmasi.\n\n"
+        "<b>Tahap 4 — Penentuan SL (prioritas):</b>\n"
         "BUY: SL di bawah equal lows → demand zone → swing low\n"
         "SELL: SL di atas equal highs → supply zone → swing high\n"
         "SL minimum: 1.2× ATR agar tidak kena noise\n\n"
-        "<b>Tahap 3 — Pemilihan TP (tier-based):</b>\n"
+        "<b>Tahap 5 — Pemilihan TP (tier-based):</b>\n"
         "RR ≥ 1:2 WAJIB, tapi utamakan level PALING KUAT:\n"
         "1) eq highs/lows  2) supply/demand  3) FVG\n"
         "4) swing H1  5-6) Fibonacci extension (1.272/1.618)*\n"
@@ -2817,7 +2824,7 @@ def get_info_msg():
         " cabang khusus penyelamat RR gagal.\n"
         "Supply/demand & FVG diprioritaskan yang FRESH (belum tersentuh)\n"
         "dan FVG breakaway (candle-3 searah) di atas rejection.\n\n"
-        "<b>Tahap 4 — Entry diskon (prioritas):</b>\n"
+        "<b>Tahap 6 — Entry diskon (prioritas):</b>\n"
         "1) OB fresh & selaras fib diskon/premium  2) FVG breakaway/fresh\n"
         "3) Equal highs/lows  4) Fibonacci ADAPTIF (0.382-0.5 trend kuat,\n"
         "0.618-0.786 trend lemah) + tarikan ke level liquidity sweep\n\n"
