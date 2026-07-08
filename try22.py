@@ -1744,7 +1744,7 @@ def _fib_extension_levels(h1, sh1, sl1, direction):
         return swing_low - leg * (ext_lo - 1), swing_low - leg * (ext_hi - 1)
 
 
-TP_RR_CAP = MIN_RR * 3   # RR di atas ini ditarik mundur ke titik RR=cap, arah tetap ke level terkuat
+TP_RR_CAP = MIN_RR * 2   # RR di atas ini ditarik mundur ke titik RR=cap, arah tetap ke level terkuat
 
 def _select_best_tp(tp_pool, entry_price, risk):
     """
@@ -2560,19 +2560,24 @@ def simulation_loop(chat_id):
 
         # Verifikasi RR masih valid di harga entry aktual.
         # TP/SL dihitung dari discount_entry (analisis), tapi posisi
-        # dibuka di harga nyata — selisihnya bisa membuat RR < MIN_RR.
+        # dibuka di harga nyata — selisihnya bisa membuat RR < MIN_RR
+        # ATAU RR meledak tak masuk akal (SL nyaris tersentuh duluan saat
+        # harga bergerak menuju entry, risk jadi nyaris nol sementara
+        # reward/TP tetap dari rencana lama — geometri sudah tidak
+        # representatif dari analisa aslinya, bukan cuma RR kurang bagus).
         sl_dist = abs(actual_entry - sl_v)
         tp_dist = abs(tp_v - actual_entry)
-        actual_rr = tp_dist / sl_dist if sl_dist > 0 else 0
-        if actual_rr < MIN_RR:
+        actual_rr = tp_dist / sl_dist if sl_dist > 0 else float("inf")
+        rr_out_of_range = actual_rr < MIN_RR or actual_rr > TP_RR_CAP * 1.5
+        if rr_out_of_range:
             with positions_lock:
                 positions.pop(sym, None)
             _ban_coin(sym, "RR gagal di entry aktual")
             tg_send(chat_id,
-                f"⚠️ <b>Skip {sym}</b> — RR tidak memenuhi di entry aktual\n"
+                f"⚠️ <b>Skip {sym}</b> — RR tidak wajar di entry aktual\n"
                 f"Entry: <code>{actual_entry:.6g}</code> | "
                 f"TP: <code>{tp_v:.6g}</code> | SL: <code>{sl_v:.6g}</code>\n"
-                f"RR aktual: <b>1:{actual_rr:.2f}</b> (min 1:{MIN_RR})")
+                f"RR aktual: <b>1:{actual_rr:.2f}</b> (rentang wajar 1:{MIN_RR}\u20131:{TP_RR_CAP*1.5:.0f})")
             return
 
         with positions_lock:
