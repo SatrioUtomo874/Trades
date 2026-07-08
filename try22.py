@@ -6,6 +6,7 @@ Render.com | python main.py
 """
 
 import os, time, logging, threading
+from collections import deque
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
@@ -20,7 +21,6 @@ MIN_RR              = 2.0
 MONITOR_SLEEP       = 10
 MAX_POSITIONS       = 20
 MONITOR_INTERVAL    = 15 * 60
-SWEEP_PULL_FACTOR   = 1     # 0 = entry tetap di OB/FVG/EQL/Fib asli, 1 = entry persis di level Liquidity Sweep
 MIN_CONFIDENCE      = 50    # ambang confidence minimum sinyal — diatur via /confidence_min
 TP_MAX_RR_MULT      = 1.8   # batas atas pencarian TP "lebih kuat": RR boleh naik sampai MIN_RR × ini
 WIB = timezone(timedelta(hours=7))   # untuk format jam entry di /trade
@@ -102,7 +102,7 @@ stat_lock = threading.Lock()
 stats = {
     "tp":0, "sl":0, "total":0,
     "balance"    : STARTING_BALANCE,
-    "pnl_history": [],
+    "pnl_history": deque(maxlen=20),   # 20 trade terakhir untuk /backtest
 }
 
 # Ban koin berbasis SCAN CYCLE (bukan jumlah trade nyata — koin yang selalu
@@ -1412,23 +1412,6 @@ def score_direction(df_h1, df_m15):
 # ═════════════════════════════════════════════
 # ── Tier kekuatan level untuk pemilihan TP ──────────────────────────
 # Tier lebih rendah = level lebih kuat/reliable sebagai target liquidity.
-# 1=liquidity pool (eq highs/lows) — paling sering jadi tujuan harga institusi
-# 2=supply/demand zone — area order block besar
-# 3=FVG — gap yang cenderung "ditarik" tapi lebih lemah dari zone
-# 4=swing point — sekadar local extremum, paling lemah
-TP_TIER = {
-    "eq_low_m15": 1, "eq_high_m15": 1, "eq_low_h1": 1, "eq_high_h1": 1,
-    "demand_top_m15": 2, "supply_bot_m15": 2, "demand_top_h1": 2, "supply_bot_h1": 2,
-    "fvg_bear_m15": 3, "fvg_bull_m15": 3,
-    "sw_low_m15": 4, "sw_high_m15": 4, "sw_low_h1": 4, "sw_high_h1": 4,
-    # 5-6 = proyeksi Fibonacci extension — level yang BELUM pernah "dibuktikan"
-    # market (beda dari swing yang memang sudah jadi titik balik harga
-    # sebelumnya). Sengaja ditandai paling lemah dan hanya aktif kalau
-    # gate H4 confluence lolos — lihat _h4_confluence().
-    "fib_ext_127": 5, "fib_ext_162": 6,
-}
-
-
 def _h4_confluence(df_h1, direction, choch_m15=None):
     """
     Konfirmasi H4 untuk membuka kandidat TP Fibonacci extension.
@@ -1540,532 +1523,160 @@ def _select_best_tp(tp_pool, entry_price, risk):
     return round(nearest[1], 8), nearest[0]
 
 
-def analyze_setup(df_h1, df_m15, direction, entry_price, score=None):
+def _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1, h4_gate, fib_127, fib_162):
+    """TP pool searah entry (bear=bawah, bull=atas), tier makin kecil makin kuat."""
+    up = direction == "bull"
+    zones_m15 = find_zones(m15, "demand" if up else "supply")
+    zones_h1  = find_zones(h1, "demand" if up else "supply")
+    fvgs      = find_fvg(m15, "bull" if up else "bear")
+    eqs_m15   = find_equal_highs_lows(m15, "high" if up else "low", lb=80)
+    eqs_h1    = find_equal_highs_lows(h1, "high" if up else "low", lb=50)
+    sw_m15    = [m15["high" if up else "low"].iloc[i] for i in (sh15 if up else sl15)]
+    sw_h1     = [h1["high" if up else "low"].iloc[i] for i in (sh1 if up else sl1)]
+    sgn = 1 if up else -1
+    pool = []
+
+    for v in eqs_m15:
+        if sgn*(v - entry_price) > atr*0.5: pool.append(("eq_m15", v, 1))
+    for z in zones_m15:
+        edge = z["bot"] if up else z["top"]
+        if sgn*(edge - entry_price) > atr*0.5:
+            pool.append(("zone_m15", edge, 2 - (0.4 if z.get("is_fresh") else 0)))
+    for f in fvgs:
+        if sgn*(f["mid"] - entry_price) > atr*0.5:
+            t = 3 - (0.4 if f.get("candle3") == "breakaway" else 0) - (0.2 if f.get("is_fresh") else 0)
+            pool.append(("fvg_m15", f["mid"], t))
+    for v in sw_m15:
+        if sgn*(v - entry_price) > atr*0.5: pool.append(("sw_m15", v, 4))
+    for v in eqs_h1:
+        if sgn*(v - entry_price) > atr*1.0: pool.append(("eq_h1", v, 1.5))
+    for z in zones_h1:
+        edge = z["bot"] if up else z["top"]
+        if sgn*(edge - entry_price) > atr*1.0: pool.append(("zone_h1", edge, 2.5))
+    for v in sw_h1:
+        if sgn*(v - entry_price) > atr*1.0: pool.append(("sw_h1", v, 4.5))
+
+    fib = fib_127 if up else fib_127
+    if fib_127 is not None and sgn*(fib_127 - entry_price) > atr*0.5 and h4_gate["confluence"]:
+        pool.append(("fib127", fib_127, 5))
+        if h4_gate["full_confluence"] and fib_162 is not None and sgn*(fib_162 - entry_price) > atr*0.5:
+            pool.append(("fib162", fib_162, 6))
+    return pool
+
+
+def analyze_setup(df_h1, df_m15, direction, entry_price, score=None, invalid_level=None):
     """
-    Tentukan SL dan TP dari level struktural chart.
-
-    Urutan WAJIB:
-    1. Tentukan SL dari LIQUIDITY POOL (equal highs/lows) atau OB/supply-demand zone.
-       SL harus di level di mana jika harga sampai ke sana, analisis sudah TERBUKTI SALAH.
-    2. Hitung risk = abs(entry - SL)
-    3. Iterasi TP candidates dari terdekat ke terjauh.
-       Ambil level pertama yang menghasilkan RR >= 2.0.
-
-    SELL: SL di atas equal highs / OB top / swing high
-    BUY : SL di bawah equal lows / demand bot / swing low
-
-    score (opsional): dict hasil score_direction() — dipakai untuk ambil
-    choch_m15 saat menentukan apakah fib extension 1.618 boleh dipakai
-    (full_confluence). Kalau None, fib 1.618 tidak akan pernah aktif
-    (fib 1.272 tetap bisa aktif dari H4 trend+RSI saja).
+    SL = seberang titik entry itu sendiri (invalid_level dari
+    calc_discount_entry) + buffer noise kecil. Kalau harga sentuh SL,
+    itu artinya struktur di entry ini TERBUKTI invalid (bukan sekadar
+    "belum dikonfirmasi") — bukan liquidity pool berikutnya yang jauh.
+    Tidak ada level jelas → return None (skip, cari koin lain).
+    TP = tier pool terkuat dengan floor RR >= MIN_RR (lihat _select_best_tp).
     """
-    h1  = build_df(df_h1)
-    m15 = build_df(df_m15)
+    h1, m15 = build_df(df_h1), build_df(df_m15)
     if h1 is None or m15 is None: return None
 
-    L15 = m15.iloc[-1]
-    L1  = h1.iloc[-1]
-    atr_m15 = max(L15["atr"], entry_price * 0.002)
-    atr_h1  = max(L1["atr"],  entry_price * 0.004)
-    # Pakai ATR H1 sebagai referensi minimum SL — lebih representatif dari volatilitas nyata
-    atr = atr_m15
-    # Jaring pengaman noise/spread saja, BUKAN acuan jarak SL — SL tetap
-    # harus datang dari level struktural, floor ini cuma turun tangan
-    # kalau level tersebut benar-benar terlalu mepet dari entry.
-    sl_min = max(atr_h1 * 0.3, atr_m15 * 0.6)
+    atr = max(m15["atr"].iloc[-1], entry_price*0.002)
+    noise = atr * 0.25   # buffer kecil sekadar anti-noise, bukan anti-sweep
+
+    if invalid_level is None:
+        return None
+
+    sl_price = invalid_level + (noise if direction == "bear" else -noise)
+    risk = abs(sl_price - entry_price)
+    risk_floor = max(atr * 0.4, entry_price * 0.0015)   # jaring noise, bukan anti-sweep
+    if risk < risk_floor:
+        sl_price += (risk_floor - risk) * (1 if direction == "bear" else -1)
+        risk = risk_floor
+    if risk <= 0: return None
 
     sh15, sl15 = swing_pts(m15, lb=5)
-    sh1,  sl1  = swing_pts(h1,  lb=5)
-
-    # Kumpulkan semua level struktural
-    supply_zones = find_supply_demand(m15, "supply")
-    demand_zones = find_supply_demand(m15, "demand")
-    eq_highs     = find_equal_highs_lows(m15, "high", lb=80)
-    eq_lows      = find_equal_highs_lows(m15, "low",  lb=80)
-    fvg_bear     = find_fvg(m15, "bear")
-    fvg_bull     = find_fvg(m15, "bull")
-
-    # H1 levels untuk konteks lebih besar
-    eq_highs_h1  = find_equal_highs_lows(h1, "high", lb=50)
-    eq_lows_h1   = find_equal_highs_lows(h1, "low",  lb=50)
-    supply_h1    = find_supply_demand(h1, "supply")
-    demand_h1    = find_supply_demand(h1, "demand")
-
-    # ── Fibonacci Extension TP (gated H4 confluence) ────────────────────
-    # Dihitung SEKALI di sini, dipakai kedua cabang (SELL/BUY) di bawah.
-    # h4_gate menentukan level mana yang BOLEH masuk tp_pool — bukan
-    # dipanggil hanya saat level struktural gagal (itu akan jadi bias
-    # seleksi/"penyelamat"). Kandidat ini selalu dievaluasi berdampingan
-    # dengan level struktural lain via _select_best_tp, untuk SEMUA sinyal.
-    choch_m15_for_gate = (score or {}).get("choch_m15", {})
-    h4_gate = _h4_confluence(df_h1, direction, choch_m15_for_gate)
+    sh1, sl1   = swing_pts(h1, lb=5)
+    choch_m15  = (score or {}).get("choch_m15", {})
+    h4_gate    = _h4_confluence(df_h1, direction, choch_m15)
     fib_127, fib_162 = _fib_extension_levels(h1, sh1, sl1, direction)
 
-    sl_price = None
-    sl_label = ""
-    reasons  = []
+    tp_pool = _build_tp_pool(m15, h1, direction, entry_price, atr,
+                              sh15, sl15, sh1, sl1, h4_gate, fib_127, fib_162)
+    tp_price, tp_label = _select_best_tp(tp_pool, entry_price, risk)
+    if tp_price is None: return None
 
-    # ══════════════════════════════════════════════════════════════
-    # SELL — sinyal bear, kita SELL
-    # SL di atas liquidity pool / supply zone terdekat di atas entry
-    # TP di bawah entry (demand zone / equal lows / swing low)
-    # ══════════════════════════════════════════════════════════════
-    if direction == "bear":
-
-        # Kumpulkan kandidat SL — level di atas entry
-        sl_pool = []
-
-        # Prioritas 1: Equal highs M15 — zona liquidity sweep paling sering
-        # SL di ATAS equal highs dengan buffer lebih besar agar tidak kena sweep
-        for eh in sorted(eq_highs):
-            if eh > entry_price + atr * 0.3:
-                sl_pool.append(("eq_high_m15", eh + atr * 0.6))
-                break
-
-        # Prioritas 2: Supply zone top M15
-        for z in supply_zones:
-            if z["top"] > entry_price + atr * 0.2:
-                sl_pool.append(("supply_top_m15", z["top"] + atr * 0.5))
-
-        # Prioritas 3: Swing high M15 paling dekat di atas entry
-        sh_above = sorted([m15["high"].iloc[i] for i in sh15
-                           if m15["high"].iloc[i] > entry_price + atr * 0.2])
-        if sh_above:
-            sl_pool.append(("swing_h_m15", sh_above[0] + atr * 0.5))
-
-        # Prioritas 4: Equal highs H1 (level lebih kuat)
-        for eh in sorted(eq_highs_h1):
-            if eh > entry_price + atr * 0.5:
-                sl_pool.append(("eq_high_h1", eh + atr * 0.7))
-                break
-
-        # Prioritas 5: Supply zone H1
-        for z in supply_h1:
-            if z["top"] > entry_price + atr * 0.5:
-                sl_pool.append(("supply_top_h1", z["top"] + atr * 0.6))
-
-        # Pilih SL terdekat di atas entry dari pool
-        sl_pool_valid = [(lbl, v) for lbl, v in sl_pool
-                         if v > entry_price + atr * 0.15]
-        if not sl_pool_valid:
-            sl_price = entry_price + sl_min
-            sl_label = "atr_fallback"
-        else:
-            sl_label, sl_price = min(sl_pool_valid, key=lambda x: x[1])
-
-        risk = abs(sl_price - entry_price)
-        if risk < sl_min:
-            # Level struktural terlalu mepet — TAMBAH jarak secukupnya di
-            # atas level itu (tetap dari analisa), bukan diganti angka ATR
-            # yang lepas dari chart. (Untuk kasus atr_fallback, risk sudah
-            # persis == sl_min sehingga baris ini tidak pernah tereksekusi.)
-            sl_price += (sl_min - risk)
-            risk = sl_min
-            sl_label += "_topup"
-
-        reasons.append(f"SL@{sl_price:.5g}({sl_label})")
-        min_reward = risk * MIN_RR
-
-        # Kumpulkan semua TP candidates di bawah entry — setiap kandidat
-        # ditandai tier kekuatannya (lihat TP_TIER) untuk pemilihan TP
-        tp_pool = []
-
-        # Equal lows M15 (liquidity target — sering menjadi tujuan harga)
-        for el in sorted(eq_lows, reverse=True):
-            if el < entry_price - atr * 0.5:
-                tp_pool.append(("eq_low_m15", el, TP_TIER["eq_low_m15"]))
-
-        # Demand zone top M15 (harga sering berhenti di atas demand) —
-        # zona FRESH (belum termitigasi) diprioritaskan lewat tier lebih
-        # kuat (dikurangi 0.4), zona yang sudah dipakai dibiarkan di tier
-        # aslinya (masih dipertimbangkan, hanya kalah prioritas).
-        for z in sorted(demand_zones, key=lambda x: x["top"], reverse=True):
-            if z["top"] < entry_price - atr * 0.5:
-                tier = TP_TIER["demand_top_m15"] - (0.4 if z.get("is_fresh") else 0)
-                tp_pool.append(("demand_top_m15", z["top"], tier))
-
-        # FVG bear mid M15 — breakaway gap (candle-3 searah, impulsif)
-        # diprioritaskan atas rejection gap (candle-3 melawan arah)
-        for fvg in sorted(fvg_bear, key=lambda x: x["mid"], reverse=True):
-            if fvg["mid"] < entry_price - atr * 0.5:
-                tier = TP_TIER["fvg_bear_m15"]
-                if fvg.get("candle3") == "breakaway": tier -= 0.4
-                if fvg.get("is_fresh"): tier -= 0.2
-                tp_pool.append(("fvg_bear_m15", fvg["mid"], tier))
-
-        # Swing low M15
-        for v in sorted([m15["low"].iloc[i] for i in sl15], reverse=True):
-            if v < entry_price - atr * 0.5:
-                tp_pool.append(("sw_low_m15", v, TP_TIER["sw_low_m15"]))
-
-        # Equal lows H1 (target lebih jauh)
-        for el in sorted(eq_lows_h1, reverse=True):
-            if el < entry_price - atr * 1.0:
-                tp_pool.append(("eq_low_h1", el, TP_TIER["eq_low_h1"]))
-
-        # Demand zone H1
-        for z in sorted(demand_h1, key=lambda x: x["top"], reverse=True):
-            if z["top"] < entry_price - atr * 1.0:
-                tp_pool.append(("demand_top_h1", z["top"], TP_TIER["demand_top_h1"]))
-
-        # Swing low H1
-        for v in sorted([h1["low"].iloc[i] for i in sl1], reverse=True):
-            if v < entry_price - atr * 1.0:
-                tp_pool.append(("sw_low_h1", v, TP_TIER["sw_low_h1"]))
-
-        # Fibonacci extension (bearish, proyeksi di bawah swing low H1) —
-        # HANYA masuk pool kalau gate H4 confluence lolos. Tetap dievaluasi
-        # lewat mekanisme nearest/tier-first yang sama seperti level lain.
-        if fib_127 is not None and fib_127 < entry_price - atr * 0.5:
-            if h4_gate["confluence"]:
-                tp_pool.append(("fib_ext_127", fib_127, TP_TIER["fib_ext_127"]))
-            if h4_gate["full_confluence"] and fib_162 is not None \
-               and fib_162 < entry_price - atr * 0.5:
-                tp_pool.append(("fib_ext_162", fib_162, TP_TIER["fib_ext_162"]))
-
-        # Pilih TP: lolos RR >= MIN_RR WAJIB, tapi utamakan level paling kuat
-        # (tier terendah) dalam batas RR wajar — RR bisa > MIN_RR kalau level
-        # kuat itu ada lebih jauh, fallback ke nearest-qualifying kalau tidak.
-        tp_price, tp_label = _select_best_tp(tp_pool, entry_price, risk)
-
-        if tp_price is None:
-            return None  # tidak ada level TP yang menghasilkan RR >= 2
-
-        reasons.append(f"TP@{tp_price:.5g}({tp_label})")
-
-    # ══════════════════════════════════════════════════════════════
-    # BUY — sinyal bull, kita BUY
-    # SL di bawah liquidity pool / demand zone terdekat di bawah entry
-    # TP di atas entry (supply zone / equal highs / swing high)
-    # ══════════════════════════════════════════════════════════════
-    else:
-
-        sl_pool = []
-
-        # Prioritas 1: Equal lows M15 — liquidity pool di bawah
-        # SL di BAWAH equal lows dengan buffer lebih besar agar tidak kena sweep
-        for el in sorted(eq_lows, reverse=True):
-            if el < entry_price - atr * 0.3:
-                sl_pool.append(("eq_low_m15", el - atr * 0.6))
-                break
-
-        # Prioritas 2: Demand zone bot M15
-        for z in demand_zones:
-            if z["bot"] < entry_price - atr * 0.2:
-                sl_pool.append(("demand_bot_m15", z["bot"] - atr * 0.5))
-
-        # Prioritas 3: Swing low M15 paling dekat di bawah
-        sl_below = sorted([m15["low"].iloc[i] for i in sl15
-                           if m15["low"].iloc[i] < entry_price - atr * 0.2],
-                          reverse=True)
-        if sl_below:
-            sl_pool.append(("swing_l_m15", sl_below[0] - atr * 0.5))
-
-        # Prioritas 4: Equal lows H1
-        for el in sorted(eq_lows_h1, reverse=True):
-            if el < entry_price - atr * 0.5:
-                sl_pool.append(("eq_low_h1", el - atr * 0.7))
-                break
-
-        # Prioritas 5: Demand zone H1
-        for z in demand_h1:
-            if z["bot"] < entry_price - atr * 0.5:
-                sl_pool.append(("demand_bot_h1", z["bot"] - atr * 0.6))
-
-        sl_pool_valid = [(lbl, v) for lbl, v in sl_pool
-                         if v < entry_price - atr * 0.15]
-        if not sl_pool_valid:
-            sl_price = entry_price - sl_min
-            sl_label = "atr_fallback"
-        else:
-            sl_label, sl_price = max(sl_pool_valid, key=lambda x: x[1])
-
-        risk = abs(entry_price - sl_price)
-        if risk < sl_min:
-            # Level struktural terlalu mepet — TAMBAH jarak secukupnya di
-            # bawah level itu (tetap dari analisa), bukan diganti angka
-            # ATR yang lepas dari chart. (Kasus atr_fallback: risk sudah
-            # persis == sl_min, baris ini tidak pernah tereksekusi.)
-            sl_price -= (sl_min - risk)
-            risk = sl_min
-            sl_label += "_topup"
-
-        reasons.append(f"SL@{sl_price:.5g}({sl_label})")
-        min_reward = risk * MIN_RR
-
-        # TP candidates di atas entry — setiap kandidat ditandai tier
-        # kekuatannya (lihat TP_TIER) untuk pemilihan TP
-        tp_pool = []
-
-        # Equal highs M15
-        for eh in sorted(eq_highs):
-            if eh > entry_price + atr * 0.5:
-                tp_pool.append(("eq_high_m15", eh, TP_TIER["eq_high_m15"]))
-
-        # Supply zone bot M15 — zona FRESH diprioritaskan (tier dikurangi)
-        for z in sorted(supply_zones, key=lambda x: x["bot"]):
-            if z["bot"] > entry_price + atr * 0.5:
-                tier = TP_TIER["supply_bot_m15"] - (0.4 if z.get("is_fresh") else 0)
-                tp_pool.append(("supply_bot_m15", z["bot"], tier))
-
-        # FVG bull mid M15 — breakaway gap diprioritaskan atas rejection gap
-        for fvg in sorted(fvg_bull, key=lambda x: x["mid"]):
-            if fvg["mid"] > entry_price + atr * 0.5:
-                tier = TP_TIER["fvg_bull_m15"]
-                if fvg.get("candle3") == "breakaway": tier -= 0.4
-                if fvg.get("is_fresh"): tier -= 0.2
-                tp_pool.append(("fvg_bull_m15", fvg["mid"], tier))
-
-        # Swing high M15
-        for v in sorted([m15["high"].iloc[i] for i in sh15]):
-            if v > entry_price + atr * 0.5:
-                tp_pool.append(("sw_high_m15", v, TP_TIER["sw_high_m15"]))
-
-        # Equal highs H1
-        for eh in sorted(eq_highs_h1):
-            if eh > entry_price + atr * 1.0:
-                tp_pool.append(("eq_high_h1", eh, TP_TIER["eq_high_h1"]))
-
-        # Supply zone H1
-        for z in sorted(supply_h1, key=lambda x: x["bot"]):
-            if z["bot"] > entry_price + atr * 1.0:
-                tp_pool.append(("supply_bot_h1", z["bot"], TP_TIER["supply_bot_h1"]))
-
-        # Swing high H1
-        for v in sorted([h1["high"].iloc[i] for i in sh1]):
-            if v > entry_price + atr * 1.0:
-                tp_pool.append(("sw_high_h1", v, TP_TIER["sw_high_h1"]))
-
-        # Fibonacci extension (bullish, proyeksi di atas swing high H1) —
-        # HANYA masuk pool kalau gate H4 confluence lolos. Tetap dievaluasi
-        # lewat mekanisme nearest/tier-first yang sama seperti level lain.
-        if fib_127 is not None and fib_127 > entry_price + atr * 0.5:
-            if h4_gate["confluence"]:
-                tp_pool.append(("fib_ext_127", fib_127, TP_TIER["fib_ext_127"]))
-            if h4_gate["full_confluence"] and fib_162 is not None \
-               and fib_162 > entry_price + atr * 0.5:
-                tp_pool.append(("fib_ext_162", fib_162, TP_TIER["fib_ext_162"]))
-
-        # Pilih TP: lolos RR >= MIN_RR WAJIB, tapi utamakan level paling kuat
-        # (tier terendah) dalam batas RR wajar — RR bisa > MIN_RR kalau level
-        # kuat itu ada lebih jauh, fallback ke nearest-qualifying kalau tidak.
-        tp_price, tp_label = _select_best_tp(tp_pool, entry_price, risk)
-
-        if tp_price is None:
-            return None
-
-        reasons.append(f"TP@{tp_price:.5g}({tp_label})")
-
-    # ── Hitung RR final ───────────────────────────────────────────────
-    risk   = abs(entry_price - sl_price)
     reward = abs(tp_price - entry_price)
-    if risk == 0: return None
     rr = round(reward / risk, 2)
     if rr < MIN_RR: return None
 
     return {
-        "sl"    : round(sl_price, 8),
-        "tp"    : round(tp_price, 8),
-        "rr"    : rr,
-        "reason": " | ".join(reasons),
+        "sl": round(sl_price, 8), "tp": round(tp_price, 8), "rr": rr,
+        "reason": f"SL@{sl_price:.5g}(invalidation) | TP@{tp_price:.5g}({tp_label})",
     }
 
 
-def _find_sweep_level(m15, h1, direction, ref_price, atr):
+
+
+def _zone_score(z):
+    """Skor kekuatan zona OB/S&D: fresh + fvg + bos + breakaway fib align."""
+    return z.get("quality", 0) + int(z.get("fib_aligned", False))
+
+
+def _collect_entry_candidates(m15, direction, entry_ref, atr):
     """
-    Cari level Liquidity Sweep RAW (tanpa buffer SL) terdekat di luar
-    ref_price — sumbernya sama persis dengan SL pool di analyze_setup():
-    eq highs/lows M15 → supply/demand zone M15 → swing M15
-    → eq highs/lows H1 → supply/demand H1
-
-    Ini level "mentah" tempat institusi biasa sweep liquidity retail —
-    BUKAN posisi SL final (SL final = level ini + buffer, tetap dihitung
-    terpisah di analyze_setup() dan tidak diubah oleh fungsi ini).
-
-    direction='bear' → cari level di ATAS ref_price (untuk tarik entry SELL)
-    direction='bull' → cari level di BAWAH ref_price (untuk tarik entry BUY)
+    Kumpulkan semua kandidat entry (OB, FVG, sweep raw level) dengan skor
+    kekuatan masing-masing. direction: 'bull' cari di bawah entry_ref,
+    'bear' cari di atas entry_ref.
+    sweep_side: sisi zona yang jadi TITIK ENTRY (ujung sweep, dekat harga)
+    invalid_side: sisi seberang zona (dipakai sebagai basis SL nanti)
     """
-    if m15 is None: return None
-    sh15, sl15 = swing_pts(m15, lb=5)
-    levels = []
+    up = direction == "bear"
+    obs = find_zones(m15, direction, strict=True)
+    fvgs = find_fvg(m15, direction)
+    eqs = find_equal_highs_lows(m15, "high" if up else "low", lb=80)
+    cands = []
 
-    if direction == "bear":
-        for eh in sorted(find_equal_highs_lows(m15, "high", lb=80)):
-            if eh > ref_price + atr * 0.2:
-                levels.append(eh); break
-        for z in find_supply_demand(m15, "supply"):
-            if z["top"] > ref_price + atr * 0.2:
-                levels.append(z["top"])
-        sh_above = sorted([m15["high"].iloc[i] for i in sh15
-                           if m15["high"].iloc[i] > ref_price + atr * 0.2])
-        if sh_above:
-            levels.append(sh_above[0])
-        if h1 is not None:
-            for eh in sorted(find_equal_highs_lows(h1, "high", lb=50)):
-                if eh > ref_price + atr * 0.5:
-                    levels.append(eh); break
-            for z in find_supply_demand(h1, "supply"):
-                if z["top"] > ref_price + atr * 0.5:
-                    levels.append(z["top"])
-        levels = [v for v in levels if v > ref_price]
-        return min(levels) if levels else None
-
-    else:
-        for el in sorted(find_equal_highs_lows(m15, "low", lb=80), reverse=True):
-            if el < ref_price - atr * 0.2:
-                levels.append(el); break
-        for z in find_supply_demand(m15, "demand"):
-            if z["bot"] < ref_price - atr * 0.2:
-                levels.append(z["bot"])
-        sl_below = sorted([m15["low"].iloc[i] for i in sl15
-                           if m15["low"].iloc[i] < ref_price - atr * 0.2], reverse=True)
-        if sl_below:
-            levels.append(sl_below[0])
-        if h1 is not None:
-            for el in sorted(find_equal_highs_lows(h1, "low", lb=50), reverse=True):
-                if el < ref_price - atr * 0.5:
-                    levels.append(el); break
-            for z in find_supply_demand(h1, "demand"):
-                if z["bot"] < ref_price - atr * 0.5:
-                    levels.append(z["bot"])
-        levels = [v for v in levels if v < ref_price]
-        return max(levels) if levels else None
+    for z in obs:
+        entry_pt, invalid_pt = (z["top"], z["bot"]) if up else (z["bot"], z["top"])
+        if (up and entry_pt > entry_ref + atr*0.1) or (not up and entry_pt < entry_ref - atr*0.1):
+            cands.append({"price": entry_pt, "invalid": invalid_pt, "label": "ob",
+                           "score": 3 + _zone_score(z)})
+    for f in fvgs:
+        if (up and f["mid"] > entry_ref + atr*0.1) or (not up and f["mid"] < entry_ref - atr*0.1):
+            sc = 2 + int(f.get("is_fresh", False)) + 2*int(f.get("candle3") == "breakaway")
+            invalid_pt = f["top"] if up else f["bot"]
+            cands.append({"price": f["mid"], "invalid": invalid_pt, "label": "fvg", "score": sc})
+    eqs_sorted = sorted(eqs) if up else sorted(eqs, reverse=True)
+    for lv in eqs_sorted[:1]:
+        if (up and lv > entry_ref + atr*0.2) or (not up and lv < entry_ref - atr*0.2):
+            cands.append({"price": lv, "invalid": lv + (atr*0.6 if up else -atr*0.6),
+                           "label": "eq", "score": 2})
+    return cands
 
 
 def calc_discount_entry(df_h1, df_m15, direction, current_price, atr):
     """
-    Hitung harga entry diskon dari zona struktural:
-    SELL → entry di zona premium (lebih tinggi) sebelum turun
-    BUY  → entry di zona diskon  (lebih rendah) sebelum naik
-
-    Preferensi (priority 1 = terbaik):
-    1. OB (Order Block)
-    2. FVG (Fair Value Gap)
-    3. Equal Highs/Lows
-    4. Fibonacci 50% retracement
-
-    SWEEP PULL (tambahan):
-    Setelah kandidat terbaik (base_entry) ditemukan, entry ditarik
-    SWEEP_PULL_FACTOR dari jarak base_entry → level Liquidity Sweep
-    terdekat (level raw yang sama dipakai analyze_setup() untuk SL,
-    tapi di sini TANPA buffer SL). Alasannya: wick harga terbukti sering
-    sampai ke level sweep itu (lihat notif "Liquidity Sweep" berulang)
-    tanpa pernah dianggap entry — level yang sedikit lebih jauh ini
-    justru lebih sering tersentuh daripada base_entry (OB/FVG) yang
-    terlalu dekat dengan harga sekarang.
-    SL TIDAK diubah oleh ini — analyze_setup() tetap menaruh SL di level
-    sweep + buffernya sendiri, jadi urutannya selalu:
-    entry (baru) < level sweep < SL (untuk SELL, sebaliknya untuk BUY).
-    SL tidak pernah menyentuh level sweep karena bufer SL selalu
-    ditambahkan DI LUAR level itu.
+    Entry = kandidat terkuat (OB fresh > FVG breakaway > equal high/low),
+    dibandingkan lewat skor, bukan prioritas tetap. Fallback ke fib
+    adaptif atau market kalau tidak ada kandidat valid.
+    Return (entry_price, label, invalid_level) — invalid_level dipakai
+    analyze_setup() sebagai basis SL (seberang titik entry ini sendiri).
     """
     m15 = build_df(df_m15)
-    h1  = build_df(df_h1)
-    if m15 is None: return current_price, "market"
+    if m15 is None: return current_price, "market", None
+    cands = _collect_entry_candidates(m15, direction, current_price, atr)
+    if cands:
+        best = max(cands, key=lambda c: c["score"])
+        return round(best["price"], 8), best["label"], best["invalid"]
 
     sh15, sl15 = swing_pts(m15, lb=5)
-    eq_highs   = find_equal_highs_lows(m15, "high", lb=80)
-    eq_lows    = find_equal_highs_lows(m15, "low",  lb=80)
-    fvg_bear   = find_fvg(m15, "bear")
-    fvg_bull   = find_fvg(m15, "bull")
-    ob_bull    = find_ob(m15, "bull")
-    ob_bear    = find_ob(m15, "bear")
-    candidates = []
-
-    if direction == "bear":
-        for ob in reversed(ob_bear):
-            if ob["top"] > current_price + atr * 0.1:
-                # OB fresh & selaras fib premium (fib_aligned) diprioritaskan
-                # dengan priority number lebih kecil (lebih baik)
-                prio = 1 - (0.3 if ob.get("is_fresh") else 0) - (0.2 if ob.get("fib_aligned") else 0)
-                candidates.append((ob["top"], "ob_bear_top", prio))
-            elif ob["mid"] > current_price + atr * 0.1:
-                prio = 1 - (0.3 if ob.get("is_fresh") else 0) - (0.2 if ob.get("fib_aligned") else 0)
-                candidates.append((ob["mid"], "ob_bear_mid", prio))
-        for fvg in reversed(fvg_bear):
-            if fvg["top"] > current_price + atr * 0.1:
-                # FVG breakaway (candle-3 searah, impulsif) & fresh diprioritaskan
-                prio = 2 - (0.3 if fvg.get("candle3") == "breakaway" else 0) \
-                         - (0.2 if fvg.get("is_fresh") else 0)
-                candidates.append((fvg["mid"], "fvg_bear", prio))
-        for eh in sorted(eq_highs):
-            if current_price + atr * 0.2 < eh < current_price + atr * 3.0:
-                candidates.append((eh, "eq_high_m15", 3))
-                break
-        # Fibonacci retracement ADAPTIF (bukan fix 50%) — trend kuat pakai
-        # 0.382-0.5 (dangkal), trend lemah pakai 0.618-0.786 (dalam/OTE)
-        if len(sh15) >= 2 and len(sl15) >= 1:
-            fib_lo, fib_hi = adaptive_fib_target(m15, sh15, sl15, "bear")
-            swing_hi = m15["high"].iloc[sh15[-1]]
-            swing_lo = m15["low"].iloc[sl15[-1]]
-            leg = swing_hi - swing_lo
-            fib_mid_ratio = (fib_lo + fib_hi) / 2
-            fib_adaptive = swing_lo + leg * fib_mid_ratio
-            if current_price + atr * 0.1 < fib_adaptive < current_price + atr * 4.0:
-                candidates.append((fib_adaptive, "fib_adaptive", 4))
-        above = [(p, l, r) for p, l, r in candidates if p > current_price]
-        if above:
-            above.sort(key=lambda x: (x[2], x[0]))
-            base_entry, base_label = above[0][0], above[0][1]
-
-            sweep_level = _find_sweep_level(m15, h1, "bear", base_entry, atr)
-            if sweep_level is not None and sweep_level > base_entry + atr * 0.1:
-                pulled = base_entry + (sweep_level - base_entry) * SWEEP_PULL_FACTOR
-                return round(pulled, 8), f"{base_label}+sweep_pull"
-            return round(base_entry, 8), base_label
-
-        # Tidak ada kandidat OB/FVG/EQH/Fib valid — sebelum jatuh ke market,
-        # coba tarik dari current_price langsung ke arah level sweep terdekat.
-        sweep_level = _find_sweep_level(m15, h1, "bear", current_price, atr)
-        if sweep_level is not None and sweep_level > current_price + atr * 0.1:
-            pulled = current_price + (sweep_level - current_price) * SWEEP_PULL_FACTOR
-            return round(pulled, 8), "sweep_pull_only"
-    else:
-        for ob in reversed(ob_bull):
-            if ob["top"] < current_price - atr * 0.1:
-                prio = 1 - (0.3 if ob.get("is_fresh") else 0) - (0.2 if ob.get("fib_aligned") else 0)
-                candidates.append((ob["top"], "ob_bull_top", prio))
-            elif ob["mid"] < current_price - atr * 0.1:
-                prio = 1 - (0.3 if ob.get("is_fresh") else 0) - (0.2 if ob.get("fib_aligned") else 0)
-                candidates.append((ob["mid"], "ob_bull_mid", prio))
-        for fvg in reversed(fvg_bull):
-            if fvg["bot"] < current_price - atr * 0.1:
-                prio = 2 - (0.3 if fvg.get("candle3") == "breakaway" else 0) \
-                         - (0.2 if fvg.get("is_fresh") else 0)
-                candidates.append((fvg["mid"], "fvg_bull", prio))
-        for el in sorted(eq_lows, reverse=True):
-            if current_price - atr * 3.0 < el < current_price - atr * 0.2:
-                candidates.append((el, "eq_low_m15", 3))
-                break
-        # Fibonacci retracement ADAPTIF (bukan fix 50%)
-        if len(sl15) >= 2 and len(sh15) >= 1:
-            fib_lo, fib_hi = adaptive_fib_target(m15, sh15, sl15, "bull")
-            swing_hi = m15["high"].iloc[sh15[-1]]
-            swing_lo = m15["low"].iloc[sl15[-1]]
-            leg = swing_hi - swing_lo
-            fib_mid_ratio = (fib_lo + fib_hi) / 2
-            fib_adaptive = swing_hi - leg * fib_mid_ratio
-            if current_price - atr * 4.0 < fib_adaptive < current_price - atr * 0.1:
-                candidates.append((fib_adaptive, "fib_adaptive", 4))
-        below = [(p, l, r) for p, l, r in candidates if p < current_price]
-        if below:
-            below.sort(key=lambda x: (x[2], -x[0]))
-            base_entry, base_label = below[0][0], below[0][1]
-
-            sweep_level = _find_sweep_level(m15, h1, "bull", base_entry, atr)
-            if sweep_level is not None and sweep_level < base_entry - atr * 0.1:
-                pulled = base_entry - (base_entry - sweep_level) * SWEEP_PULL_FACTOR
-                return round(pulled, 8), f"{base_label}+sweep_pull"
-            return round(base_entry, 8), base_label
-
-        # Tidak ada kandidat OB/FVG/EQL/Fib valid — sebelum jatuh ke market,
-        # coba tarik dari current_price langsung ke arah level sweep terdekat.
-        sweep_level = _find_sweep_level(m15, h1, "bull", current_price, atr)
-        if sweep_level is not None and sweep_level < current_price - atr * 0.1:
-            pulled = current_price - (current_price - sweep_level) * SWEEP_PULL_FACTOR
-            return round(pulled, 8), "sweep_pull_only"
-
-    return current_price, "market"
+    up = direction == "bear"
+    if len(sh15) >= 1 and len(sl15) >= 1:
+        lo, hi = adaptive_fib_target(m15, sh15, sl15, direction)
+        swing_hi = m15["high"].iloc[sh15[-1]]
+        swing_lo = m15["low"].iloc[sl15[-1]]
+        leg = swing_hi - swing_lo
+        ratio = (lo + hi) / 2
+        px = (swing_lo + leg*ratio) if up else (swing_hi - leg*ratio)
+        if (up and px > current_price + atr*0.1) or (not up and px < current_price - atr*0.1):
+            return round(px, 8), "fib_adaptive", None
+    return current_price, "market", None
 
 
 # ═════════════════════════════════════════════
@@ -2114,11 +1725,12 @@ def full_analyze(symbol):
             confidence = max(0, confidence - 5)
 
         # Entry diskon dari zona struktural
-        discount_entry, entry_label = calc_discount_entry(
+        discount_entry, entry_label, invalid_level = calc_discount_entry(
             df_h1, df_m15, original_dir, current_price, atr_val)
 
         # SL/TP dihitung dari entry diskon
-        setup = analyze_setup(df_h1, df_m15, original_dir, discount_entry, score=score)
+        setup = analyze_setup(df_h1, df_m15, original_dir, discount_entry,
+                               score=score, invalid_level=invalid_level)
         if setup is None: return None
 
         # TP wajib MASIH di depan harga sekarang. Kalau entry diskon
@@ -2207,24 +1819,12 @@ POSITION_SIZE_PCT = 100.0  # ukuran posisi per trade = 100% saldo (setara 1× le
                             # Nilai ini TIDAK mempengaruhi PENEMPATAN SL/TP —
                             # hanya memengaruhi simulasi saldo.
 
-def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None):
+def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
+                 sym=None, decision=None, entry_time=None):
     """
-    Hitung P&L simulasi murni dari jarak harga analisis.
-
-    Model: alokasikan POSITION_SIZE_PCT % dari saldo ke setiap trade.
-    Gain/loss = posisi × (jarak harga tutup dari entry / entry).
-
-    close_price:
-      - None (TP/SL alami)  → P&L dihitung dari jarak penuh ke tp_p/sl_p,
-        sesuai hasilnya (result="tp" pakai tp_p, result="sl" pakai sl_p).
-      - Diberikan (mis. /timeout paksa) → P&L dihitung dari harga RIIL
-        saat ditutup, bukan target penuh — posisi yang belum sempat
-        capai TP/SL tidak dicatat seolah sudah full target.
-
-    result ("tp"/"sl") menentukan kategori statistik (counter tp/sl),
-    tapi arah gain/loss selalu disimpulkan dari posisi tp_p relatif ke
-    entry (BUY: tp_p > entry, SELL: tp_p < entry) — jadi tanda P&L tetap
-    benar untuk harga tutup manapun, tidak cuma pas persis di tp_p/sl_p.
+    Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
+    lama untuk detail model close_price). Tambahan: catat sym/decision/
+    entry_time/exit_time ke pnl_history untuk /backtest.
     """
     with stat_lock:
         stats["total"] += 1
@@ -2254,96 +1854,93 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None):
         stats["pnl_history"].append({
             "result": result, "pct": pct,
             "pnl_usd": pnl_usd, "balance_after": stats["balance"],
+            "symbol": sym, "decision": decision,
+            "entry_time": entry_time, "exit_time": time.time(),
         })
 
 def fmt_stats():
     with stat_lock:
-        t   = stats["total"]
-        tp  = stats["tp"]
-        sl  = stats["sl"]
-        bal = stats["balance"]
-        hist= list(stats["pnl_history"])
+        t, tp, sl, bal = stats["total"], stats["tp"], stats["sl"], stats["balance"]
+        hist = list(stats["pnl_history"])
 
     if t == 0:
-        return (f"📊 <b>Statistik Simulasi</b>\n\n"
-                f"Belum ada trade.\n"
-                f"💵 Modal awal: <b>${STARTING_BALANCE:.2f}</b>")
+        return f"📊 <b>Statistik</b>\nBelum ada trade. Modal: ${STARTING_BALANCE:.2f}"
 
-    wr      = tp/(tp+sl)*100 if (tp+sl)>0 else 0
-    pnl_tot = round(bal - STARTING_BALANCE, 4)
-    pnl_pct = round(pnl_tot / STARTING_BALANCE * 100, 2)
-    pnl_em  = "📈" if pnl_tot >= 0 else "📉"
-    pnl_sgn = "+" if pnl_tot >= 0 else ""
+    wr = tp/(tp+sl)*100 if (tp+sl) > 0 else 0
+    pnl = round(bal - STARTING_BALANCE, 4)
+    pnl_pct = round(pnl / STARTING_BALANCE * 100, 2)
+    sgn = "+" if pnl >= 0 else ""
 
-    # Riwayat 5 trade terakhir
-    recent = hist[-5:] if hist else []
-    hist_lines = []
-    for h in reversed(recent):
-        em = "✅" if h["result"] == "tp" else "❌"
-        sgn = "+" if h["pnl_usd"] >= 0 else ""
-        hist_lines.append(
-            f"  {em} {sgn}{h['pct']:.2f}%  {sgn}${h['pnl_usd']:.4f}  "
-            f"→ ${h['balance_after']:.4f}"
-        )
-    hist_str = "\n".join(hist_lines) if hist_lines else "  (belum ada)"
+    hist_str = "\n".join(
+        f"  {'✅' if h['result']=='tp' else '❌'} {'+' if h['pnl_usd']>=0 else ''}{h['pct']:.2f}% "
+        f"→ ${h['balance_after']:.4f}"
+        for h in reversed(hist[-5:])
+    ) or "  (belum ada)"
 
     return (
-        f"📊 <b>Statistik Simulasi</b>\n\n"
-        f"Total trade  : {t}\n"
-        f"🎯 TP        : {tp} ({tp/t*100:.1f}%)\n"
-        f"🛑 SL        : {sl} ({sl/t*100:.1f}%)\n"
-        f"📈 Win Rate  : <b>{wr:.1f}%</b> (dari {tp+sl} trade)\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💵 <b>Modal Awal : ${STARTING_BALANCE:.2f}</b>\n"
-        f"💰 <b>Saldo Kini : ${bal:.4f}</b>\n"
-        f"{pnl_em} <b>Total P&L  : {pnl_sgn}${pnl_tot:.4f} "
-        f"({pnl_sgn}{pnl_pct:.2f}%)</b>\n"
-        f"⚖️ Model P&L  : posisi {POSITION_SIZE_PCT:.0f}% saldo × % gerakan SL/TP\n\n"
-        f"📋 5 Trade Terakhir:\n{hist_str}\n\n"
-        f"🚫 Banned    : {len(banned_coins)}"
+        f"📊 <b>Statistik</b> — {t} trade | TP {tp} ({tp/t*100:.0f}%) SL {sl} ({sl/t*100:.0f}%)\n"
+        f"Win Rate: <b>{wr:.1f}%</b>\n\n"
+        f"Modal: ${STARTING_BALANCE:.2f} → Saldo: <b>${bal:.4f}</b> "
+        f"({sgn}{pnl_pct:.2f}%)\n\n"
+        f"5 terakhir:\n{hist_str}\n\n"
+        f"🚫 Banned: {len(banned_coins)}"
     )
+
+def fmt_backtest():
+    """20 trade terakhir: koin, arah, hasil, jam masuk-keluar — bahan evaluasi."""
+    with stat_lock:
+        hist = list(stats["pnl_history"])
+    if not hist:
+        return "📋 <b>Backtest</b>\nBelum ada trade."
+
+    lines = []
+    for h in reversed(hist):
+        em  = "✅" if h["result"] == "tp" else "❌"
+        dec = h.get("decision") or "?"
+        sym = h.get("symbol") or "?"
+        et  = h.get("entry_time")
+        xt  = h.get("exit_time")
+        t_in  = datetime.fromtimestamp(et, WIB).strftime("%H:%M") if et else "?"
+        t_out = datetime.fromtimestamp(xt, WIB).strftime("%H:%M") if xt else "?"
+        sgn = "+" if h["pnl_usd"] >= 0 else ""
+        lines.append(
+            f"{em} <b>{sym}</b> {dec} | {h['result'].upper()} {sgn}{h['pct']:.2f}% | "
+            f"{t_in}→{t_out}"
+        )
+    return f"📋 <b>Backtest ({len(hist)} trade terakhir)</b>\n\n" + "\n".join(lines)
 
 def fmt_signal_msg(sig):
     em  = "🟢" if sig["decision"]=="BUY" else "🔴"
     bar = "█"*(sig["confidence"]//10)+"░"*(10-sig["confidence"]//10)
     dir_label = "BULLISH" if sig["original_dir"]=="bull" else "BEARISH"
     d1_em = {"bullish":"📈","bearish":"📉","neutral":"➡️"}.get(sig.get("d1_bias","neutral"),"➡️")
-    d1_str = sig.get("d1_bias","neutral").upper()
 
     triggers = []
-    choch_m15 = sig.get("choch_m15", {})
-    choch_h1  = sig.get("choch_h1", {})
-    fr        = sig.get("failed_retest", {})
-    if choch_h1.get("bearish_choch"):   triggers.append("CHoCH Bearish H1")
-    if choch_h1.get("bullish_choch"):   triggers.append("CHoCH Bullish H1")
-    if choch_m15.get("bearish_choch"):  triggers.append("CHoCH Bearish M15")
-    if choch_m15.get("bullish_choch"):  triggers.append("CHoCH Bullish M15")
-    if fr.get("failed_retest_sell"):    triggers.append("Failed Retest Sell")
-    if fr.get("failed_retest_buy"):     triggers.append("Failed Retest Buy")
-    trigger_str = " | ".join(triggers) if triggers else "—"
+    ch15, ch1, fr = sig.get("choch_m15",{}), sig.get("choch_h1",{}), sig.get("failed_retest",{})
+    if ch1.get("bearish_choch"):  triggers.append("CHoCH Bear H1")
+    if ch1.get("bullish_choch"):  triggers.append("CHoCH Bull H1")
+    if ch15.get("bearish_choch"): triggers.append("CHoCH Bear M15")
+    if ch15.get("bullish_choch"): triggers.append("CHoCH Bull M15")
+    if fr.get("failed_retest_sell"): triggers.append("Failed Retest Sell")
+    if fr.get("failed_retest_buy"):  triggers.append("Failed Retest Buy")
 
     entry_label = sig.get("entry_label", "market")
-    price_now   = sig.get("price", sig["entry"])
-    entry_zone  = sig["entry"]
+    price_now, entry_zone = sig.get("price", sig["entry"]), sig["entry"]
     entry_str = (
-        f"📍 Harga kini: <code>{price_now:.6g}</code>\n"
-        f"🎯 Entry zone: <code>{entry_zone:.6g}</code> ({entry_label})"
+        f"📍 Harga: <code>{price_now:.6g}</code> → 🎯 Entry: <code>{entry_zone:.6g}</code> ({entry_label})"
         if abs(price_now - entry_zone) / max(price_now, 0.0001) > 0.002
-        else f"💰 Entry     : <code>{entry_zone:.6g}</code> ({entry_label})"
+        else f"💰 Entry: <code>{entry_zone:.6g}</code> ({entry_label})"
     )
 
     return (
-        f"📡 <b>SINYAL DITEMUKAN</b>\n\n"
-        f"Koin       : <b>{sig['symbol']}</b>\n"
-        f"Analisis   : <b>{dir_label}</b> (confidence {sig['confidence']}% {bar})\n"
-        f"Eksekusi   : {em} <b>{sig['decision']}</b>\n\n"
+        f"📡 <b>{sig['symbol']}</b> — {dir_label} ({sig['confidence']}% {bar})\n"
+        f"{em} <b>{sig['decision']}</b>\n"
         f"{entry_str}\n"
-        f"✅ TP      : <code>{sig['tp']:.6g}</code>\n"
-        f"🛑 SL      : <code>{sig['sl']:.6g}</code>\n"
-        f"⚖️ RR      : <b>1:{sig['rr']}</b>\n"
-        f"RSI        : {sig['rsi']} | H1: {sig['struct_h1'].upper()} | D1: {d1_em} {d1_str}\n"
-        f"🎯 Trigger : {trigger_str}\n\n"
-        f"📝 Basis:\n{sig['tp_sl_reason']}"
+        f"✅ TP: <code>{sig['tp']:.6g}</code>  🛑 SL: <code>{sig['sl']:.6g}</code>  "
+        f"⚖️ RR 1:{sig['rr']}\n"
+        f"RSI {sig['rsi']} | H1 {sig['struct_h1'].upper()} | D1 {d1_em}{sig.get('d1_bias','neutral').upper()}\n"
+        f"🎯 {' | '.join(triggers) if triggers else '—'}\n"
+        f"📝 {sig['tp_sl_reason']}"
     )
 
 
@@ -2369,7 +1966,8 @@ def close_position(sym, result, close_price=None):
     tp_p  = sig["tp"]
     cid   = pos["chat_id"]
 
-    update_stats(result, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price)
+    update_stats(result, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price,
+                 sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"))
     _ban_coin(sym, f"trade closed ({result})")
 
     # Update active_trade jika ini yang sedang dipantau
@@ -2583,8 +2181,21 @@ def simulation_loop(chat_id):
             )
 
             if already_at_entry or entry_label == "market":
-                # Langsung masuk
+                # Langsung masuk — daftarkan dulu di positions supaya
+                # _open_position (yang mengasumsikan entry sudah ada
+                # sebagai pending) tidak langsung return diam-diam.
                 actual_entry = get_price(sym) or current
+                with positions_lock:
+                    if sym in positions: return
+                    if len(positions) >= MAX_POSITIONS: return
+                    positions[sym] = {
+                        "signal"      : signal,
+                        "entry"       : entry_target,
+                        "chat_id"     : chat_id,
+                        "entry_time"  : None,
+                        "timeout_flag": False,
+                        "status"      : "pending",
+                    }
                 _open_position(sym, signal, actual_entry, chat_id, "langsung")
             else:
                 # Daftarkan dulu sebagai pending agar tidak di-scan ulang
@@ -2721,6 +2332,7 @@ def simulation_loop(chat_id):
             pos["entry"]      = actual_entry
             pos["entry_time"] = time.time()
             pos["status"]     = "active"
+            pos["timeout_flag"] = False   # reset — flag lama (saat masih pending) tidak boleh menutup posisi baru ini
 
         tg_send(chat_id,
             f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
@@ -2780,6 +2392,7 @@ GREETING=(
     "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
     "/timeout             — Tutup paksa semua posisi\n"
     "/stats               — Statistik + saldo\n"
+    "/backtest             — 20 trade terakhir (evaluasi)\n"
     "/banned              — Daftar koin ban\n"
     "/resetban            — Hapus semua ban\n"
     "/resetbalance        — Reset saldo ke $10\n"
@@ -2878,6 +2491,8 @@ def bot_loop():
                     tg_send(chat_id,get_info_msg())
                 elif text in ("/stats","stats"):
                     tg_send(chat_id,fmt_stats())
+                elif text in ("/backtest","backtest"):
+                    tg_send(chat_id,fmt_backtest())
                 elif text in ("/banned","banned"):
                     with ban_lock:
                         cur_scan = scan_counter
@@ -2897,7 +2512,7 @@ def bot_loop():
                 elif text in ("/resetbalance","resetbalance"):
                     with stat_lock:
                         stats["balance"]     = STARTING_BALANCE
-                        stats["pnl_history"] = []
+                        stats["pnl_history"] = deque(maxlen=20)
                         stats["tp"]          = 0
                         stats["sl"]          = 0
                         stats["total"]       = 0
