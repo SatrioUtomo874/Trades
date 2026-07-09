@@ -99,7 +99,7 @@ STARTING_BALANCE = 10.0   # modal awal simulasi dalam USD
 
 stat_lock = threading.Lock()
 stats = {
-    "tp":0, "sl":0, "total":0,
+    "tp":0, "sl":0, "trail":0, "total":0,
     "balance"    : STARTING_BALANCE,
     "pnl_history": deque(maxlen=20),   # 20 trade terakhir untuk /backtest
 }
@@ -108,15 +108,24 @@ stats = {
 # ke-skip di tahap pending tidak pernah menambah hitungan trade, jadi ban
 # berbasis trade tidak akan pernah relevan untuk kasus itu).
 ban_lock = threading.Lock()
-banned_coins: dict = {}      # {symbol: scan_counter saat diban}
+banned_coins: dict = {}      # {symbol: (scan_counter saat diban, durasi ban itu)}
 scan_counter = 0             # bertambah 1 setiap get_top_coins() dipanggil
 BAN_DURATION_SCANS = 15
+BAN_DURATION_TRADE_CLOSED = 600   # ban khusus setelah trade BENAR-BENAR closed (TP/SL/Trail)
 
-def _ban_coin(sym, reason=""):
-    """Ban koin selama BAN_DURATION_SCANS siklus scan berikutnya."""
+def _ban_coin(sym, reason="", duration=None):
+    """
+    Ban koin selama `duration` siklus scan berikutnya (default
+    BAN_DURATION_SCANS). Dipakai dengan duration=BAN_DURATION_TRADE_CLOSED
+    khusus di close_position() — trade yang benar-benar closed (TP/SL/
+    Trail) dibanned jauh lebih lama daripada kasus pending batal/RR
+    gagal/geometri invalid, supaya bot tidak langsung coba koin yang
+    sama lagi setelah baru saja selesai trade sungguhan.
+    """
+    d = duration if duration is not None else BAN_DURATION_SCANS
     with ban_lock:
-        banned_coins[sym] = scan_counter
-    log.info(f"[ban] {sym} diban {BAN_DURATION_SCANS} scan" + (f" ({reason})" if reason else ""))
+        banned_coins[sym] = (scan_counter, d)
+    log.info(f"[ban] {sym} diban {d} scan" + (f" ({reason})" if reason else ""))
 
 FAPI = "https://fapi.binance.com"
 
@@ -126,13 +135,14 @@ app = Flask(__name__)
 @app.route("/")
 def index():
     with stat_lock:
-        t=stats["total"]; tp=stats["tp"]; sl=stats["sl"]
+        t=stats["total"]; tp=stats["tp"]; sl=stats["sl"]; trail=stats.get("trail",0)
     with ban_lock:
         n_banned = len(banned_coins)
-    wr=f"{tp/(tp+sl)*100:.1f}%" if (tp+sl)>0 else "–"
+    wins = tp + trail
+    wr=f"{wins/(wins+sl)*100:.1f}%" if (wins+sl)>0 else "–"
     return (f"<h3>SMC Signal Broadcaster</h3>"
             f"<p>Auto:{auto_mode} | Banned:{n_banned}</p>"
-            f"<p>Total:{t} TP:{tp} SL:{sl} WR:{wr}</p>"), 200
+            f"<p>Total:{t} TP:{tp} SL:{sl} Trail:{trail} WR:{wr}</p>"), 200
 
 @app.route("/health")
 def health(): return "OK", 200
@@ -389,11 +399,12 @@ def get_top_coins():
     global scan_counter
     with ban_lock:
         scan_counter += 1
-        to_unban = [s for s, banned_at in banned_coins.items()
-                    if scan_counter - banned_at >= BAN_DURATION_SCANS]
+        to_unban = [s for s, (banned_at, dur) in banned_coins.items()
+                    if scan_counter - banned_at >= dur]
         for s in to_unban:
+            dur = banned_coins[s][1]
             del banned_coins[s]
-            log.info(f"[unban] {s} kembali aktif setelah {BAN_DURATION_SCANS} scan")
+            log.info(f"[unban] {s} kembali aktif setelah {dur} scan")
         cur_ban = set(banned_coins.keys())
 
     with positions_lock:
@@ -1198,6 +1209,35 @@ def score_direction(df_h1, df_m15):
     struct_h1 = mkt_struct(h1,sh1,sl1)
     choch_h1  = detect_choch(h1, sh1, sl1)   # dihitung di sini krn ikut Layer 1
 
+    # ── D1 bias — dihitung di awal supaya ikut Layer 1 scoring (bukan
+    # cuma hard-block di akhir seperti sebelumnya). Syarat dilonggarkan
+    # jadi OR (EMA alignment ATAU struct D1, tidak wajib bersamaan) —
+    # sebelumnya syarat AND terlalu ketat sehingga d1_bias hampir selalu
+    # "neutral" dan tidak pernah benar-benar berkontribusi ke arah,
+    # sehingga H1 jadi satu-satunya penentu bias tanpa konteks D1 sama
+    # sekali (H1 bisa saja cuma pullback minor dari downtrend D1 besar).
+    d1_bias = "neutral"
+    try:
+        df_d1 = build_df(df_h1.resample("1D").agg({
+            "open":"first","high":"max","low":"min",
+            "close":"last","volume":"sum"
+        }).dropna())
+        if df_d1 is not None and len(df_d1) >= 10:
+            LD = df_d1.iloc[-1]
+            sh_d, sl_d = swing_pts(df_d1, lb=3)
+            struct_d1  = mkt_struct(df_d1, sh_d, sl_d)
+            ema_bear_d1 = LD["ema9"] < LD["ema21"] < LD["ema50"]
+            ema_bull_d1 = LD["ema9"] > LD["ema21"] > LD["ema50"]
+            if struct_d1 == "bearish" or ema_bear_d1:
+                d1_bias = "bearish"
+            elif struct_d1 == "bullish" or ema_bull_d1:
+                d1_bias = "bullish"
+            # kalau struct_d1 dan ema saling kontradiksi (mis. struct
+            # bullish tapi ema bearish), biarkan struct_d1 menang karena
+            # itu representasi price action nyata, EMA cuma turunan lag.
+    except Exception:
+        pass
+
     # ══════════════════════════════════════════════════════════════
     # LAYER 1 — BIAS: arah besar dari struktur, bukan micro-indicator.
     # CHoCH H1 dimasukkan di layer ini (bukan Layer 2/setup) karena
@@ -1223,6 +1263,12 @@ def score_direction(df_h1, df_m15):
     elif L1["ema9"]<L1["ema21"]:             bias_bear += 7
     if L1["close"]>L1["ema200"]: bias_bull += 8
     else:                          bias_bear += 8
+
+    # D1 bias — bobot besar sengaja, karena ini representasi konteks
+    # MAKRO/harian yang H1 sendiri tidak bisa lihat (H1 rentan salah baca
+    # pullback lokal sebagai reversal, padahal trend besarnya masih sama).
+    if d1_bias == "bullish": bias_bull += 24
+    if d1_bias == "bearish": bias_bear += 24
 
     # RSI M15 — dipertahankan sebagai momentum filter (bukan SMC, tapi
     # tetap relevan): oversold/overbought memberi confluence ke bias.
@@ -1358,27 +1404,11 @@ def score_direction(df_h1, df_m15):
 
     direction="bull" if bull>=bear else "bear"
     raw=bull if direction=="bull" else bear
-    conf=min(int(raw/240*100),99)
+    conf=min(int(raw/264*100),99)
 
-    # ── Konfirmasi D1 ──────────────────────────────────────────────
-    d1_bias = "neutral"
-    try:
-        df_d1 = build_df(df_h1.resample("1D").agg({
-            "open":"first","high":"max","low":"min",
-            "close":"last","volume":"sum"
-        }).dropna())
-        if df_d1 is not None and len(df_d1) >= 10:
-            LD = df_d1.iloc[-1]
-            sh_d, sl_d = swing_pts(df_d1, lb=3)
-            struct_d1  = mkt_struct(df_d1, sh_d, sl_d)
-            if LD["ema9"] < LD["ema21"] < LD["ema50"] and struct_d1 == "bearish":
-                d1_bias = "bearish"
-            elif LD["ema9"] > LD["ema21"] > LD["ema50"] and struct_d1 == "bullish":
-                d1_bias = "bullish"
-    except Exception:
-        pass
-
-    # D1 berlawanan dengan sinyal → hard block, bukan hanya penalty
+    # D1 berlawanan TOTAL dengan sinyal akhir → tetap hard block (bukan
+    # cuma penalty scoring) — kalau sampai lolos scoring pun (krn Layer 2
+    # setup sangat kuat) tapi D1 benar2 berlawanan, lebih aman ditolak.
     if d1_bias == "bearish" and direction == "bull": return None
     if d1_bias == "bullish" and direction == "bear": return None
 
@@ -1824,11 +1854,16 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
     Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
     lama untuk detail model close_price). Tambahan: catat sym/decision/
     entry_time/exit_time ke pnl_history untuk /backtest.
+
+    result: "tp" | "sl" | "trail" — "trail" = trailing stop mengunci
+    profit (SL bergerak, tapi ditutup di atas entry utk BUY / di bawah
+    entry utk SELL). Dihitung terpisah dari "sl" murni supaya statistik
+    tidak salah mengira profit sebagai kerugian.
     """
     with stat_lock:
         stats["total"] += 1
-        if result in ("tp", "sl"):
-            stats[result] += 1
+        if result in ("tp", "sl", "trail"):
+            stats[result] = stats.get(result, 0) + 1
 
         if not entry or tp_p is None:
             return
@@ -1855,30 +1890,33 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
             "pnl_usd": pnl_usd, "balance_after": stats["balance"],
             "symbol": sym, "decision": decision,
             "entry_time": entry_time, "exit_time": time.time(),
+            "entry": entry, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
         })
 
 def fmt_stats():
     with stat_lock:
-        t, tp, sl, bal = stats["total"], stats["tp"], stats["sl"], stats["balance"]
+        t, tp, sl = stats["total"], stats["tp"], stats["sl"]
+        trail, bal = stats.get("trail", 0), stats["balance"]
         hist = list(stats["pnl_history"])
 
     if t == 0:
         return f"📊 <b>Statistik</b>\nBelum ada trade. Modal: ${STARTING_BALANCE:.2f}"
 
-    wr = tp/(tp+sl)*100 if (tp+sl) > 0 else 0
+    wins = tp + trail   # trailing stop yang mengunci profit dihitung menang
+    wr = wins/(wins+sl)*100 if (wins+sl) > 0 else 0
     pnl = round(bal - STARTING_BALANCE, 4)
     pnl_pct = round(pnl / STARTING_BALANCE * 100, 2)
     sgn = "+" if pnl >= 0 else ""
 
     hist_str = "\n".join(
-        f"  {'✅' if h['result']=='tp' else '❌'} {'+' if h['pnl_usd']>=0 else ''}{h['pct']:.2f}% "
+        f"  {'✅' if h['result'] in ('tp','trail') else '❌'} {'+' if h['pnl_usd']>=0 else ''}{h['pct']:.2f}% "
         f"→ ${h['balance_after']:.4f}"
         for h in reversed(hist[-5:])
     ) or "  (belum ada)"
 
     return (
-        f"📊 <b>Statistik</b> — {t} trade | TP {tp} ({tp/t*100:.0f}%) SL {sl} ({sl/t*100:.0f}%)\n"
-        f"Win Rate: <b>{wr:.1f}%</b>\n\n"
+        f"📊 <b>Statistik</b> — {t} trade | TP {tp} SL {sl} Trail {trail}\n"
+        f"Win Rate: <b>{wr:.1f}%</b> (TP+Trail vs SL)\n\n"
         f"Modal: ${STARTING_BALANCE:.2f} → Saldo: <b>${bal:.4f}</b> "
         f"({sgn}{pnl_pct:.2f}%)\n\n"
         f"5 terakhir:\n{hist_str}\n\n"
@@ -1886,7 +1924,7 @@ def fmt_stats():
     )
 
 def fmt_backtest():
-    """20 trade terakhir: koin, arah, hasil, jam masuk-keluar — bahan evaluasi."""
+    """20 trade terakhir: koin, arah, hasil, entry/TP/SL, jam masuk-keluar — bahan evaluasi."""
     with stat_lock:
         hist = list(stats["pnl_history"])
     if not hist:
@@ -1894,7 +1932,7 @@ def fmt_backtest():
 
     lines = []
     for h in reversed(hist):
-        em  = "✅" if h["result"] == "tp" else "❌"
+        em  = "✅" if h["result"] in ("tp", "trail") else "❌"
         dec = h.get("decision") or "?"
         sym = h.get("symbol") or "?"
         et  = h.get("entry_time")
@@ -1902,11 +1940,20 @@ def fmt_backtest():
         t_in  = datetime.fromtimestamp(et, WIB).strftime("%d/%m/%Y %H:%M") if et else "?"
         t_out = datetime.fromtimestamp(xt, WIB).strftime("%d/%m/%Y %H:%M") if xt else "?"
         sgn = "+" if h["pnl_usd"] >= 0 else ""
+        entry_v, tp_v, sl_v = h.get("entry"), h.get("tp"), h.get("sl")
+        # Untuk trade "trail", SL yang relevan ditampilkan adalah SL
+        # TRAILING aktual saat ditutup (exit_price), bukan SL original —
+        # supaya konsisten dgn PnL yang tercatat (sudah untung, bukan rugi).
+        sl_display = h.get("exit_price") if h.get("result") == "trail" else sl_v
+        levels = (f"Entry: <code>{entry_v:.6g}</code> | TP: <code>{tp_v:.6g}</code> | "
+                  f"SL: <code>{sl_display:.6g}</code>\n"
+                  if entry_v is not None and tp_v is not None and sl_display is not None else "")
         lines.append(
-            f"{em} <b>{sym}</b> {dec} | {h['result'].upper()} {sgn}{h['pct']:.2f}% | "
+            f"{em} <b>{sym}</b> {dec} | {h['result'].upper()} {sgn}{h['pct']:.2f}%\n"
+            f"{levels}"
             f"{t_in}→{t_out}"
         )
-    return f"📋 <b>Backtest ({len(hist)} trade terakhir)</b>\n\n" + "\n".join(lines)
+    return f"📋 <b>Backtest ({len(hist)} trade terakhir)</b>\n\n" + "\n\n".join(lines)
 
 def fmt_signal_msg(sig):
     em  = "🟢" if sig["decision"]=="BUY" else "🔴"
@@ -1967,15 +2014,15 @@ def close_position(sym, result, close_price=None):
 
     update_stats(result, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price,
                  sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"))
-    _ban_coin(sym, f"trade closed ({result})")
+    _ban_coin(sym, f"trade closed ({result})", duration=BAN_DURATION_TRADE_CLOSED)
 
     # Update active_trade jika ini yang sedang dipantau
     with positions_lock:
         if not positions:
             active_trade = None
 
-    emoji = {"tp":"🎯","sl":"🛑"}.get(result,"❓")
-    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS"}.get(result, result.upper())
+    emoji = {"tp":"🎯","sl":"🛑","trail":"🔒"}.get(result,"❓")
+    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(result, result.upper())
     tg_send(cid, f"{emoji} <b>{label}</b> — {sym}\n\n" + fmt_stats())
 
 
@@ -2029,13 +2076,20 @@ def monitor_position(sym, pos):
     kirim pesan update ke Telegram tiap MONITOR_INTERVAL (15 menit) TANPA
     pernah menghentikan pengecekan harga di antaranya.
     Posisi hanya ditutup saat TP atau SL — tidak ada timeout otomatis.
+
+    TRAILING STOP berjenjang tetap: tiap kelipatan +1% profit tercapai,
+    SL dinaikkan (BUY) / diturunkan (SELL) ke setengah dari level profit
+    itu — +1%->SL+0.5%, +2%->SL+1%, +3%->SL+1.5%, dst. SL trailing HANYA
+    boleh bergerak mengunci profit (searah entry->TP), tidak pernah mundur
+    mendekati entry lagi walau harga sempat retrace turun dulu.
     """
     sig     = pos["signal"]
     chat_id = pos["chat_id"]
     entry   = pos["entry"]
     tp_p    = sig["tp"]
-    sl_p    = sig["sl"]
+    sl_p    = sig["sl"]           # SL berjalan — bisa naik oleh trailing
     is_buy  = sig["decision"] == "BUY"
+    trail_step_reached = 0        # kelipatan +1% profit yang sudah dikunci
 
     next_update_at = time.time() + MONITOR_INTERVAL
 
@@ -2063,6 +2117,27 @@ def monitor_position(sym, pos):
         price = get_price(sym)
         if price is None:
             time.sleep(MONITOR_SLEEP); continue
+
+        # ── Trailing stop step tetap: tiap kelipatan +1% profit tercapai,
+        # kunci SL ke setengah level itu. Dicek SEBELUM cek TP/SL supaya
+        # SL yang baru langsung berlaku di iterasi yang sama.
+        pnl_pct_now = (price - entry) / entry * 100 * (1 if is_buy else -1)
+        step_now = int(pnl_pct_now // 1)   # kelipatan 1% penuh yang tercapai
+        if step_now > trail_step_reached and step_now >= 1:
+            trail_step_reached = step_now
+            locked_profit_pct = trail_step_reached * 0.5
+            new_sl = entry * (1 + locked_profit_pct/100) if is_buy else entry * (1 - locked_profit_pct/100)
+            # SL trailing cuma boleh mengunci profit (searah TP), tidak
+            # pernah mundur mendekati entry — dan tidak pernah melewati TP.
+            improves = (new_sl > sl_p) if is_buy else (new_sl < sl_p)
+            within_tp = (new_sl < tp_p) if is_buy else (new_sl > tp_p)
+            if improves and within_tp:
+                sl_p = new_sl
+                pos["current_sl"] = sl_p   # sync ke shared state utk /trade
+                tg_send(chat_id,
+                    f"🔒 <b>Trailing SL — {sym}</b>\n"
+                    f"Profit +{trail_step_reached}% tercapai → SL dikunci ke "
+                    f"<code>{sl_p:.6g}</code> (+{locked_profit_pct:.1f}%)")
 
         # ── Cek TP / SL — verifikasi via candle M1 ─────────────────
         hit_tp = (price >= tp_p) if is_buy else (price <= tp_p)
@@ -2099,10 +2174,20 @@ def monitor_position(sym, pos):
                     confirmed_sl = hit_sl
 
                 if confirmed_sl:
+                    pct_final = (sl_p - entry) / entry * 100 * (1 if is_buy else -1)
+                    is_profit_lock = pct_final >= 0
+                    result_final = "trail" if is_profit_lock else "sl"
+                    label = "TRAILING STOP (profit terkunci)" if is_profit_lock else "STOP LOSS"
+                    emoji = "🔒" if is_profit_lock else "🛑"
                     tg_send(chat_id,
-                        f"🛑 <b>STOP LOSS</b> — {sym}\n"
-                        f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code>")
-                    close_position(sym, "sl")
+                        f"{emoji} <b>{label}</b> — {sym}\n"
+                        f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code> | "
+                        f"PnL: <b>{pct_final:+.2f}%</b>")
+                    # close_price = sl_p (SL AKTUAL yang sudah di-trail),
+                    # bukan sig["sl"] asli — supaya P&L tercatat sesuai
+                    # level SL sebenarnya. result dibedakan "trail" vs "sl"
+                    # supaya win-rate tidak salah hitung profit sbg loss.
+                    close_position(sym, result_final, close_price=sl_p)
                     return
                 else:
                     # Notif dikirim sekali per episode sweep (flag reset
@@ -2332,6 +2417,7 @@ def simulation_loop(chat_id):
             pos["entry_time"] = time.time()
             pos["status"]     = "active"
             pos["timeout_flag"] = False   # reset — flag lama (saat masih pending) tidak boleh menutup posisi baru ini
+            pos["current_sl"] = sl_v      # SL awal = SL asli, akan naik oleh trailing di monitor_position
 
         tg_send(chat_id,
             f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
@@ -2406,6 +2492,9 @@ def get_info_msg():
         "<b>Tahap 1 — BIAS (struktur besar dulu):</b>\n"
         "• Market Structure H1 (HH/HL vs LH/LL) — bobot terbesar\n"
         "• CHoCH H1 (wajib body close) — perubahan bias/karakter pasar\n"
+        "• D1 bias (EMA ATAU struktur harian, salah satu cukup) — konteks\n"
+        "  makro yang H1 sendiri tak bisa lihat; ikut scoring + hard block\n"
+        "  kalau berlawanan total dengan arah akhir\n"
         "• EMA H1 trend alignment (9/21/50/200)\n"
         "• RSI 14 M15 — momentum filter tambahan\n\n"
         "<b>Tahap 2 — SETUP (konfirmasi entry price-action/SMC):</b>\n"
@@ -2442,6 +2531,12 @@ def get_info_msg():
         "1) OB fresh & selaras fib diskon/premium  2) FVG breakaway/fresh\n"
         "3) Equal highs/lows  4) Fibonacci ADAPTIF (0.382-0.5 trend kuat,\n"
         "0.618-0.786 trend lemah) + tarikan ke level liquidity sweep\n\n"
+        "<b>Tahap 7 — Trailing Stop (setelah posisi aktif):</b>\n"
+        "Tiap kelipatan +1% profit tercapai, SL dikunci ke setengahnya:\n"
+        "+1%→SL+0.5%, +2%→SL+1%, +3%→SL+1.5%, dst. SL trailing cuma\n"
+        "boleh mengunci profit (searah TP), tak pernah mundur ke entry.\n"
+        "Kalau SL trailing tersentuh dgn profit terkunci, dicatat 'Trail'\n"
+        "(bukan 'SL') — tetap dihitung menang di win-rate.\n\n"
         f"Min RR: 1:{MIN_RR} | Min Confidence: {MIN_CONFIDENCE}%\n"
         f"TF: H1 (bias) + M15 (entry) + H4 (fib gate)\n"
         f"Model P&L   : posisi {POSITION_SIZE_PCT:.0f}% saldo × % jarak SL/TP aktual\n"
@@ -2500,8 +2595,8 @@ def bot_loop():
                         b = sorted(banned_coins.items())
                     if b:
                         lines = []
-                        for sym, banned_at in b:
-                            remaining = max(0, BAN_DURATION_SCANS - (cur_scan - banned_at))
+                        for sym, (banned_at, dur) in b:
+                            remaining = max(0, dur - (cur_scan - banned_at))
                             lines.append(f"• {sym} (unban dalam {remaining} scan)")
                         tg_send(chat_id,
                             f"🚫 <b>Banned ({len(b)}):</b>\n" + "\n".join(lines))
@@ -2516,6 +2611,7 @@ def bot_loop():
                         stats["pnl_history"] = deque(maxlen=20)
                         stats["tp"]          = 0
                         stats["sl"]          = 0
+                        stats["trail"]       = 0
                         stats["total"]       = 0
                     tg_send(chat_id,
                         f"✅ Saldo & statistik direset.\n"
@@ -2568,10 +2664,12 @@ def bot_loop():
                                 pnl = (pr - p["entry"]) / p["entry"] * 100 * (1 if is_buy else -1)
                                 entry_clock = datetime.fromtimestamp(
                                     p["entry_time"], tz=WIB).strftime("%H:%M")
+                                cur_sl = p.get("current_sl", sig["sl"])
+                                trail_note = " 🔒trailing" if cur_sl != sig["sl"] else ""
                                 lines.append(
                                     f"\n{em} <b>{s}</b> — AKTIF\n"
                                     f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
-                                    f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{sig['sl']:.6g}</code>\n"
+                                    f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note}\n"
                                     f"PnL: <b>{pnl:+.2f}%</b> | 🕐 Entry jam {entry_clock}"
                                 )
                         tg_send(chat_id,"\n".join(lines))
