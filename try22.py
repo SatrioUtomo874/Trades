@@ -1564,15 +1564,26 @@ def analyze_setup(df_h1, df_m15, direction, entry_price, score=None, invalid_lev
     h1, m15 = build_df(df_h1), build_df(df_m15)
     if h1 is None or m15 is None: return None
 
-    atr = max(m15["atr"].iloc[-1], entry_price*0.002)
-    noise = atr * 0.25   # buffer kecil sekadar anti-noise, bukan anti-sweep
+    # ATR M15 saja bisa under-estimate kalau harga baru selesai fase
+    # spike/impulsif besar lalu masuk konsolidasi sempit (M15 "tenang"
+    # tapi itu semu — koin baru saja terbukti bisa bergerak liar).
+    # Pakai ATR H1 juga sebagai pembanding supaya buffer SL tetap
+    # proporsional terhadap volatilitas riil koin, bukan cuma window
+    # M15 saat ini yang mungkin kebetulan sempit.
+    atr_m15 = m15["atr"].iloc[-1]
+    atr_h1  = h1["atr"].iloc[-1] / 4   # ATR H1 diskalakan kasar ke basis M15
+    atr = max(atr_m15, atr_h1, entry_price * 0.002)
+    noise = atr * 0.6   # buffer anti-noise — dinaikkan dari 0.25x krn ATR
+                         # M15 sendirian gampang under-estimate saat harga
+                         # baru keluar dari candle spike besar (lihat kasus
+                         # KAITOUSDT: SL kena dlm 4 menit oleh wick biasa)
 
     if invalid_level is None:
         return None
 
     sl_price = invalid_level + (noise if direction == "bear" else -noise)
     risk = abs(sl_price - entry_price)
-    risk_floor = max(atr * 0.4, entry_price * 0.0015)   # jaring noise, bukan anti-sweep
+    risk_floor = max(atr * 0.8, entry_price * 0.003)   # dinaikkan dari 0.4x/0.0015
     if risk < risk_floor:
         sl_price += (risk_floor - risk) * (1 if direction == "bear" else -1)
         risk = risk_floor
@@ -2411,10 +2422,12 @@ def get_info_msg():
         "struktur besar diperlakukan sebagai filter wajib.\n"
         "Inducement-aware: turunkan confidence jika breakout baru\n"
         "terjadi tanpa CHoCH konfirmasi.\n\n"
-        "<b>Tahap 4 — Penentuan SL (prioritas):</b>\n"
-        "BUY: SL di bawah equal lows → demand zone → swing low\n"
-        "SELL: SL di atas equal highs → supply zone → swing high\n"
-        "SL minimum: 1.2× ATR agar tidak kena noise\n\n"
+        "<b>Tahap 4 — Penentuan SL (invalidation level):</b>\n"
+        "SL = seberang titik entry (OB/FVG) itu sendiri — kalau tersentuh,\n"
+        "struktur TERBUKTI gagal, bukan liquidity pool jauh.\n"
+        "Buffer noise dari ATR gabungan M15+H1 (bukan M15 saja) — mencegah\n"
+        "SL kena wick biasa saat harga baru keluar dari candle spike besar\n"
+        "lalu masuk fase konsolidasi sempit (M15 'tenang' tapi semu).\n\n"
         "<b>Tahap 5 — Pemilihan TP (tier-based):</b>\n"
         "RR ≥ 1:2 WAJIB, tapi utamakan level PALING KUAT:\n"
         "1) eq highs/lows  2) supply/demand  3) FVG\n"
