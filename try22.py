@@ -22,6 +22,11 @@ MONITOR_SLEEP       = 10
 MAX_POSITIONS       = 20
 MONITOR_INTERVAL    = 15 * 60
 MIN_CONFIDENCE      = 50    # ambang confidence minimum sinyal — diatur via /confidence_min
+MIN_CONFIDENCE      = 50    # ambang confidence minimum sinyal — diatur via /confidence_min
+# try23.py — VARIAN TANPA TRAILING STOP. Posisi HANYA ditutup di TP murni
+# atau SL murni hasil analisa (calc_discount_entry + analyze_setup), tidak
+# ada penguncian profit bertahap. TRAIL_PROFIT_STEP/TRAIL_LOCK_RATIO sudah
+# tidak dipakai lagi (lihat monitor_position).
 WIB = timezone(timedelta(hours=7))   # untuk format jam entry di /trade
 # ── Fibonacci Extension TP (gated H4 confluence) ──
 # Dipakai HANYA saat level struktural biasa sudah habis diperiksa DAN
@@ -111,7 +116,7 @@ ban_lock = threading.Lock()
 banned_coins: dict = {}      # {symbol: (scan_counter saat diban, durasi ban itu)}
 scan_counter = 0             # bertambah 1 setiap get_top_coins() dipanggil
 BAN_DURATION_SCANS = 15
-BAN_DURATION_TRADE_CLOSED = 600   # ban khusus setelah trade BENAR-BENAR closed (TP/SL/Trail)
+BAN_DURATION_TRADE_CLOSED = 500   # ban khusus setelah trade BENAR-BENAR closed (TP/SL/Trail)
 
 def _ban_coin(sym, reason="", duration=None):
     """
@@ -1165,7 +1170,7 @@ def detect_inducement_move(df, direction, atr, lookback=5):
 # ═════════════════════════════════════════════
 # TAHAP 1: SCORING NORMAL — cari sinyal terkuat
 # ═════════════════════════════════════════════
-def score_direction(df_h1, df_m15):
+def score_direction(df_h1, df_m15, df_d1=None):
     """
     Analisis HIERARKIS (bukan lagi additive scoring flat dari banyak
     indikator lepas): sesuai filosofi price-action/SMC di materi —
@@ -1194,6 +1199,14 @@ def score_direction(df_h1, df_m15):
     alih-alih dijumlah rata — mencegah sinyal yang sebenarnya melawan
     struktur besar tapi lolos hanya karena numpuk banyak micro-signal M15.
 
+    df_d1 (BARU): klines D1 ASLI (bukan hasil resample df_h1). df_h1 di
+    sini cuma window pendek (get_klines limit=250 ≈ 10 hari), resample
+    ke "1D" dari situ cuma menghasilkan ~10 bar harian — DI BAWAH syarat
+    minimum build_df (60 bar), jadi d1_bias SELALU "neutral" dan fitur
+    ini tidak pernah benar-benar berkontribusi (bug lama). Kalau df_d1
+    disediakan (fetch terpisah, histori panjang), d1_bias dihitung dari
+    situ — kalau tidak, fallback ke cara lama (tetap sering neutral).
+
     Return: dict dengan symbol, direction asli, confidence, price
     """
     h1=build_df(df_h1); m15=build_df(df_m15)
@@ -1218,14 +1231,18 @@ def score_direction(df_h1, df_m15):
     # sekali (H1 bisa saja cuma pullback minor dari downtrend D1 besar).
     d1_bias = "neutral"
     try:
-        df_d1 = build_df(df_h1.resample("1D").agg({
-            "open":"first","high":"max","low":"min",
-            "close":"last","volume":"sum"
-        }).dropna())
-        if df_d1 is not None and len(df_d1) >= 10:
-            LD = df_d1.iloc[-1]
-            sh_d, sl_d = swing_pts(df_d1, lb=3)
-            struct_d1  = mkt_struct(df_d1, sh_d, sl_d)
+        if df_d1 is not None and len(df_d1) >= 65:
+            df_d1_built = build_df(df_d1)
+        else:
+            # fallback lama (hampir selalu gagal krn window terlalu pendek)
+            df_d1_built = build_df(df_h1.resample("1D").agg({
+                "open":"first","high":"max","low":"min",
+                "close":"last","volume":"sum"
+            }).dropna())
+        if df_d1_built is not None and len(df_d1_built) >= 10:
+            LD = df_d1_built.iloc[-1]
+            sh_d, sl_d = swing_pts(df_d1_built, lb=3)
+            struct_d1  = mkt_struct(df_d1_built, sh_d, sl_d)
             ema_bear_d1 = LD["ema9"] < LD["ema21"] < LD["ema50"]
             ema_bull_d1 = LD["ema9"] > LD["ema21"] > LD["ema50"]
             if struct_d1 == "bearish" or ema_bear_d1:
@@ -1722,8 +1739,15 @@ def full_analyze(symbol):
         df_h1  = get_klines(symbol, "1h",  250)
         df_m15 = get_klines(symbol, "15m", 250)
         if df_h1.empty or df_m15.empty: return None
+        # D1 ASLI (histori panjang, bukan resample window 250-jam) —
+        # lihat catatan di score_direction(). 100 candle harian, no
+        # extra API load karena cuma dipanggil sekali per scan simbol.
+        try:
+            df_d1 = get_klines(symbol, "1d", 100)
+        except Exception:
+            df_d1 = None
 
-        score = score_direction(df_h1, df_m15)
+        score = score_direction(df_h1, df_m15, df_d1)
         if score is None: return None
 
         original_dir  = score["direction"]
@@ -2072,24 +2096,20 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
 
 def monitor_position(sym, pos):
     """
+    VERSI try23.py — TANPA TRAILING STOP SAMA SEKALI.
     Thread per-posisi: cek harga/TP/SL setiap MONITOR_SLEEP (10 detik),
     kirim pesan update ke Telegram tiap MONITOR_INTERVAL (15 menit) TANPA
     pernah menghentikan pengecekan harga di antaranya.
-    Posisi hanya ditutup saat TP atau SL — tidak ada timeout otomatis.
-
-    TRAILING STOP berjenjang tetap: tiap kelipatan +1% profit tercapai,
-    SL dinaikkan (BUY) / diturunkan (SELL) ke setengah dari level profit
-    itu — +1%->SL+0.5%, +2%->SL+1%, +3%->SL+1.5%, dst. SL trailing HANYA
-    boleh bergerak mengunci profit (searah entry->TP), tidak pernah mundur
-    mendekati entry lagi walau harga sempat retrace turun dulu.
+    Posisi HANYA ditutup saat TP murni atau SL murni (level asli dari
+    analisa/calc_discount_entry+analyze_setup) — tidak pernah bergeser,
+    tidak ada penguncian profit bertahap. TP/SL apa adanya dari analisa.
     """
     sig     = pos["signal"]
     chat_id = pos["chat_id"]
     entry   = pos["entry"]
     tp_p    = sig["tp"]
-    sl_p    = sig["sl"]           # SL berjalan — bisa naik oleh trailing
+    sl_p    = sig["sl"]           # FIXED — tidak pernah berubah di sini
     is_buy  = sig["decision"] == "BUY"
-    trail_step_reached = 0        # kelipatan +1% profit yang sudah dikunci
 
     next_update_at = time.time() + MONITOR_INTERVAL
 
@@ -2118,28 +2138,9 @@ def monitor_position(sym, pos):
         if price is None:
             time.sleep(MONITOR_SLEEP); continue
 
-        # ── Trailing stop step tetap: tiap kelipatan +1% profit tercapai,
-        # kunci SL ke setengah level itu. Dicek SEBELUM cek TP/SL supaya
-        # SL yang baru langsung berlaku di iterasi yang sama.
-        pnl_pct_now = (price - entry) / entry * 100 * (1 if is_buy else -1)
-        step_now = int(pnl_pct_now // 1)   # kelipatan 1% penuh yang tercapai
-        if step_now > trail_step_reached and step_now >= 1:
-            trail_step_reached = step_now
-            locked_profit_pct = trail_step_reached * 0.5
-            new_sl = entry * (1 + locked_profit_pct/100) if is_buy else entry * (1 - locked_profit_pct/100)
-            # SL trailing cuma boleh mengunci profit (searah TP), tidak
-            # pernah mundur mendekati entry — dan tidak pernah melewati TP.
-            improves = (new_sl > sl_p) if is_buy else (new_sl < sl_p)
-            within_tp = (new_sl < tp_p) if is_buy else (new_sl > tp_p)
-            if improves and within_tp:
-                sl_p = new_sl
-                pos["current_sl"] = sl_p   # sync ke shared state utk /trade
-                tg_send(chat_id,
-                    f"🔒 <b>Trailing SL — {sym}</b>\n"
-                    f"Profit +{trail_step_reached}% tercapai → SL dikunci ke "
-                    f"<code>{sl_p:.6g}</code> (+{locked_profit_pct:.1f}%)")
-
-        # ── Cek TP / SL — verifikasi via candle M1 ─────────────────
+        # ── Cek TP / SL murni — verifikasi via candle M1 (anti-whipsaw,
+        # BUKAN trailing — cuma menunda eksekusi SL sampai body candle M1
+        # benar2 konfirmasi, supaya tidak kena wick sesaat) ─────────────
         hit_tp = (price >= tp_p) if is_buy else (price <= tp_p)
         hit_sl = (price <= sl_p) if is_buy else (price >= sl_p)
 
@@ -2175,19 +2176,11 @@ def monitor_position(sym, pos):
 
                 if confirmed_sl:
                     pct_final = (sl_p - entry) / entry * 100 * (1 if is_buy else -1)
-                    is_profit_lock = pct_final >= 0
-                    result_final = "trail" if is_profit_lock else "sl"
-                    label = "TRAILING STOP (profit terkunci)" if is_profit_lock else "STOP LOSS"
-                    emoji = "🔒" if is_profit_lock else "🛑"
                     tg_send(chat_id,
-                        f"{emoji} <b>{label}</b> — {sym}\n"
+                        f"🛑 <b>STOP LOSS</b> — {sym}\n"
                         f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code> | "
                         f"PnL: <b>{pct_final:+.2f}%</b>")
-                    # close_price = sl_p (SL AKTUAL yang sudah di-trail),
-                    # bukan sig["sl"] asli — supaya P&L tercatat sesuai
-                    # level SL sebenarnya. result dibedakan "trail" vs "sl"
-                    # supaya win-rate tidak salah hitung profit sbg loss.
-                    close_position(sym, result_final, close_price=sl_p)
+                    close_position(sym, "sl", close_price=sl_p)
                     return
                 else:
                     # Notif dikirim sekali per episode sweep (flag reset
@@ -2417,7 +2410,7 @@ def simulation_loop(chat_id):
             pos["entry_time"] = time.time()
             pos["status"]     = "active"
             pos["timeout_flag"] = False   # reset — flag lama (saat masih pending) tidak boleh menutup posisi baru ini
-            pos["current_sl"] = sl_v      # SL awal = SL asli, akan naik oleh trailing di monitor_position
+            pos["current_sl"] = sl_v      # SL FIXED — tidak ada trailing di try23.py
 
         tg_send(chat_id,
             f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
@@ -2531,12 +2524,10 @@ def get_info_msg():
         "1) OB fresh & selaras fib diskon/premium  2) FVG breakaway/fresh\n"
         "3) Equal highs/lows  4) Fibonacci ADAPTIF (0.382-0.5 trend kuat,\n"
         "0.618-0.786 trend lemah) + tarikan ke level liquidity sweep\n\n"
-        "<b>Tahap 7 — Trailing Stop (setelah posisi aktif):</b>\n"
-        "Tiap kelipatan +1% profit tercapai, SL dikunci ke setengahnya:\n"
-        "+1%→SL+0.5%, +2%→SL+1%, +3%→SL+1.5%, dst. SL trailing cuma\n"
-        "boleh mengunci profit (searah TP), tak pernah mundur ke entry.\n"
-        "Kalau SL trailing tersentuh dgn profit terkunci, dicatat 'Trail'\n"
-        "(bukan 'SL') — tetap dihitung menang di win-rate.\n\n"
+        "<b>Tahap 7 — Exit (setelah posisi aktif):</b>\n"
+        "TANPA TRAILING STOP. Posisi cuma ditutup di TP murni atau SL\n"
+        "murni — level dari analisa struktural, tidak pernah bergeser\n"
+        "selama posisi berjalan.\n\n"
         f"Min RR: 1:{MIN_RR} | Min Confidence: {MIN_CONFIDENCE}%\n"
         f"TF: H1 (bias) + M15 (entry) + H4 (fib gate)\n"
         f"Model P&L   : posisi {POSITION_SIZE_PCT:.0f}% saldo × % jarak SL/TP aktual\n"
