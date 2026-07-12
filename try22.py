@@ -22,11 +22,51 @@ MONITOR_SLEEP       = 10
 MAX_POSITIONS       = 20
 MONITOR_INTERVAL    = 15 * 60
 MIN_CONFIDENCE      = 50    # ambang confidence minimum sinyal — diatur via /confidence_min
-MIN_CONFIDENCE      = 50    # ambang confidence minimum sinyal — diatur via /confidence_min
-# try23.py — VARIAN TANPA TRAILING STOP. Posisi HANYA ditutup di TP murni
-# atau SL murni hasil analisa (calc_discount_entry + analyze_setup), tidak
-# ada penguncian profit bertahap. TRAIL_PROFIT_STEP/TRAIL_LOCK_RATIO sudah
-# tidak dipakai lagi (lihat monitor_position).
+# Trailing stop — REDESIGN KE R-MULTIPLE (bukan persen absolut lagi).
+# Riwayat: step 1.0%/lock 50% → step 0.6%/lock 60% (naikkan WR di data
+# lama). TAPI analisa mendalam thd backtest_result_New.csv (543 trade
+# nyata + forward-replay harga asli di Datasheet.csv) menemukan step
+# PERSEN ABSOLUT itu sendiri cacat desain:
+#   • 51% dari SEMUA trade py risk (jarak SL) < 0.6% dari entry — utk
+#     trade begini, threshold step-1 lama (0.6% profit) = butuh >1R
+#     gerakan favorable dulu baru dapat proteksi APA PUN.
+#   • Dari 151 trade yg akhirnya SL: 80.8%-nya SEMPAT profit dulu
+#     (median 0.56R, avg 0.85R) sebelum berbalik ke SL — bukan salah
+#     arah, cuma tidak sempat terkunci krn ambang absolut kelewat jauh
+#     dari risk trade itu sendiri.
+#   • Dari 375 trade yg exit via Trail: 62.4% MEMANG akan balik ke SL
+#     asli kalau tidak ditrail (trail bekerja benar) — tapi 37.6% MALAH
+#     lanjut ke TP kalau tidak ditrail (rata2 +1.7%/trade hilang sia-sia).
+# Kesimpulannya BUKAN "hapus TP fokus trail" (TP cap bukan penyebab
+# trade Trail terpotong — Trail selalu terjadi SEBELUM harga sempat ke
+# TP), tapi trail-nya sendiri perlu disesuaikan RELATIF ke risk masing-
+# masing trade (R-multiple), bukan angka % absolut yang sama utk semua
+# trade padahal risk tiap trade beda-beda jauh. TRAIL_R_LADDER =
+# [(ambang_R, lock_ratio), ...] — begitu profit (dlm kelipatan risk R)
+# capai ambang, kunci lock_ratio dari level itu (dlm R juga). Tervalidasi
+# via replay 543 trade: WR 69.4%→82.1%, avg profit/trade tetap positif,
+# PnL total turun wajar (165%→154%, krn sebagian dulunya SL penuh
+# sekarang jadi trail kecil — trade-off yang sepadan utk win rate lebih
+# tinggi & lebih tahan ke setup risk-kecil yg dulu tidak terlindungi).
+TRAIL_R_LADDER = [
+    (0.5, 0.15),   # profit capai 0.5R → kunci 15% dari 0.5R
+    (1.0, 0.35),   # 1.0R → kunci 35%
+    (1.5, 0.50),   # 1.5R → kunci 50%
+    (2.2, 0.60),   # 2.2R → kunci 60%
+    (3.0, 0.70),   # 3.0R → kunci 70% (rata2 RR planned ~3.5-3.6R, jadi di
+                   #   titik ini biasanya sudah dekat TP — kunci besar wajar)
+]
+# Trailing stop — KOMPONEN STRUKTUR (tetap dipakai, TIDAK berubah dari
+# sebelumnya — divalidasi terpisah dan tetap jadi kandidat independen yg
+# dibandingkan dgn ladder R di atas, SL final = paling protektif dari
+# keduanya). Dibandingkan head-to-head di Datasheet.csv: fixed-pct
+# SENDIRIAN WR 70.7% PnL 131.44%; structure SENDIRIAN WR 40-49% PnL
+# 140-156% (lebih besar tapi jarang menang krn butuh lb*2+1 candle utk
+# konfirmasi swing pertama); KOMBO WR 70.3% PnL 137.82% — lebih tahan-
+# overfit krn separuh keputusan dari price action riil.
+STRUCT_TRAIL_LB       = 2       # swing pivot lookback (kanan-kiri) di M15
+STRUCT_TRAIL_BUF_PCT  = 0.0015  # buffer 0.15% di bawah/atas swing point
+STRUCT_TRAIL_LOOKBACK = 60      # jumlah candle M15 ke belakang utk deteksi swing
 WIB = timezone(timedelta(hours=7))   # untuk format jam entry di /trade
 # ── Fibonacci Extension TP (gated H4 confluence) ──
 # Dipakai HANYA saat level struktural biasa sudah habis diperiksa DAN
@@ -2096,20 +2136,43 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
 
 def monitor_position(sym, pos):
     """
-    VERSI try23.py — TANPA TRAILING STOP SAMA SEKALI.
     Thread per-posisi: cek harga/TP/SL setiap MONITOR_SLEEP (10 detik),
     kirim pesan update ke Telegram tiap MONITOR_INTERVAL (15 menit) TANPA
     pernah menghentikan pengecekan harga di antaranya.
-    Posisi HANYA ditutup saat TP murni atau SL murni (level asli dari
-    analisa/calc_discount_entry+analyze_setup) — tidak pernah bergeser,
-    tidak ada penguncian profit bertahap. TP/SL apa adanya dari analisa.
+    Posisi hanya ditutup saat TP atau SL — tidak ada timeout otomatis.
+
+    TRAILING STOP — DUA KOMPONEN, dipakai yang PALING PROTEKTIF:
+      A) R-multiple ladder (TRAIL_R_LADDER): tiap profit capai ambang R
+         tertentu (RELATIF ke risk trade itu sendiri, bukan persen
+         absolut), SL dikunci ke sebagian dari R yang tercapai — proteksi
+         cepat sejak awal, dicek tiap loop (tick-based). Redesign dari
+         versi persen absolut setelah analisa mendalam menemukan: 51%
+         trade py risk <0.6%, jadi threshold absolut lama butuh >1R dulu
+         baru dapat proteksi; sementara 80.8% trade yg akhirnya SL
+         SEMPAT profit dulu (median 0.56R) sebelum berbalik tanpa pernah
+         terlindungi. R-ladder relatif memperbaiki ini utk semua ukuran
+         risk sekaligus.
+      B) Structure (swing point M15): SL mengikuti higher-low (BUY) /
+         lower-high (SELL) terkonfirmasi terbaru — mengikuti price action
+         asli, tidak overfit ke satu angka. Dicek tiap ~2 menit (throttled
+         — swing point cuma berubah tiap candle M15 baru).
+    Analisa forward-replay 375 trade yg exit via Trail: 62.4% memang akan
+    balik ke SL asli kalau tidak ditrail (trail benar menyelamatkan),
+    37.6% malah lanjut ke TP kalau tidak ditrail — TP cap BUKAN penyebab
+    trade Trail terpotong (Trail selalu terjadi sebelum harga sempat ke
+    TP), makanya fix-nya di kalibrasi trail (R-relatif), bukan hapus TP.
+    SL trailing (dari kandidat manapun) HANYA boleh mengunci profit
+    (searah entry->TP), tidak pernah mundur mendekati entry lagi.
     """
     sig     = pos["signal"]
     chat_id = pos["chat_id"]
     entry   = pos["entry"]
     tp_p    = sig["tp"]
-    sl_p    = sig["sl"]           # FIXED — tidak pernah berubah di sini
+    sl_p    = sig["sl"]           # SL berjalan — bisa naik oleh trailing
     is_buy  = sig["decision"] == "BUY"
+    risk0   = abs(entry - sig["sl"])   # risk ASLI (SL awal, tidak ikut bergerak) — basis R-multiple
+    locked_r_reached   = 0.0      # R terbesar yang sudah dikunci via TRAIL_R_LADDER
+    next_struct_check  = 0.0      # throttle fetch M15 utk komponen structure
 
     next_update_at = time.time() + MONITOR_INTERVAL
 
@@ -2138,9 +2201,56 @@ def monitor_position(sym, pos):
         if price is None:
             time.sleep(MONITOR_SLEEP); continue
 
-        # ── Cek TP / SL murni — verifikasi via candle M1 (anti-whipsaw,
-        # BUKAN trailing — cuma menunda eksekusi SL sampai body candle M1
-        # benar2 konfirmasi, supaya tidak kena wick sesaat) ─────────────
+        # ── Kandidat A: R-multiple ladder (proteksi relatif ke risk trade
+        # ini sendiri, bukan persen absolut) — lihat catatan TRAIL_R_LADDER
+        # di atas utk alasan redesign ini. Dicek SEBELUM cek TP/SL supaya
+        # SL baru langsung berlaku di iterasi yang sama.
+        cand_a = None
+        proxy_now = price
+        pnl_r_now = (proxy_now - entry) / risk0 * (1 if is_buy else -1) if risk0 > 0 else 0
+        best_r = 0.0
+        for thr, lock in TRAIL_R_LADDER:
+            if pnl_r_now >= thr:
+                best_r = max(best_r, thr * lock)
+        if best_r > locked_r_reached:
+            locked_r_reached = best_r
+            cand_a = entry + best_r * risk0 * (1 if is_buy else -1)
+
+        # ── Kandidat B: structure (swing point M15), throttled ~2 menit ──
+        cand_b = None
+        if time.time() >= next_struct_check:
+            next_struct_check = time.time() + 120
+            try:
+                df_recent = get_klines(sym, "15m", STRUCT_TRAIL_LOOKBACK)
+                if df_recent is not None and len(df_recent) >= STRUCT_TRAIL_LB * 2 + 1:
+                    sh_r, sl_r = swing_pts(df_recent, lb=STRUCT_TRAIL_LB)
+                    if is_buy and sl_r:
+                        cand_b = float(df_recent["low"].iloc[sl_r[-1]]) - entry * STRUCT_TRAIL_BUF_PCT
+                    elif not is_buy and sh_r:
+                        cand_b = float(df_recent["high"].iloc[sh_r[-1]]) + entry * STRUCT_TRAIL_BUF_PCT
+            except Exception:
+                cand_b = None
+            pos["_struct_sl_cache"] = cand_b
+        else:
+            cand_b = pos.get("_struct_sl_cache")
+
+        # SL baru = kandidat PALING PROTEKTIF di antara A & B yang ada,
+        # cuma boleh mengunci profit (searah TP), tidak pernah melewati TP.
+        cands = [c for c in (cand_a, cand_b) if c is not None]
+        if cands:
+            new_sl = max(cands) if is_buy else min(cands)
+            improves = (new_sl > sl_p) if is_buy else (new_sl < sl_p)
+            within_tp = (new_sl < tp_p) if is_buy else (new_sl > tp_p)
+            if improves and within_tp:
+                sl_p = new_sl
+                pos["current_sl"] = sl_p   # sync ke shared state utk /trade
+                src = "R-ladder" if (cand_a is not None and new_sl == cand_a) else "structure"
+                tg_send(chat_id,
+                    f"🔒 <b>Trailing SL — {sym}</b> ({src})\n"
+                    f"SL dikunci ke <code>{sl_p:.6g}</code> "
+                    f"({(sl_p-entry)/entry*100*(1 if is_buy else -1):+.2f}%)")
+
+        # ── Cek TP / SL — verifikasi via candle M1 ─────────────────
         hit_tp = (price >= tp_p) if is_buy else (price <= tp_p)
         hit_sl = (price <= sl_p) if is_buy else (price >= sl_p)
 
@@ -2176,11 +2286,19 @@ def monitor_position(sym, pos):
 
                 if confirmed_sl:
                     pct_final = (sl_p - entry) / entry * 100 * (1 if is_buy else -1)
+                    is_profit_lock = pct_final >= 0
+                    result_final = "trail" if is_profit_lock else "sl"
+                    label = "TRAILING STOP (profit terkunci)" if is_profit_lock else "STOP LOSS"
+                    emoji = "🔒" if is_profit_lock else "🛑"
                     tg_send(chat_id,
-                        f"🛑 <b>STOP LOSS</b> — {sym}\n"
+                        f"{emoji} <b>{label}</b> — {sym}\n"
                         f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code> | "
                         f"PnL: <b>{pct_final:+.2f}%</b>")
-                    close_position(sym, "sl", close_price=sl_p)
+                    # close_price = sl_p (SL AKTUAL yang sudah di-trail),
+                    # bukan sig["sl"] asli — supaya P&L tercatat sesuai
+                    # level SL sebenarnya. result dibedakan "trail" vs "sl"
+                    # supaya win-rate tidak salah hitung profit sbg loss.
+                    close_position(sym, result_final, close_price=sl_p)
                     return
                 else:
                     # Notif dikirim sekali per episode sweep (flag reset
@@ -2307,12 +2425,28 @@ def simulation_loop(chat_id):
 
     def _wait_entry(sym, signal, chat_id):
         """Thread terpisah — tunggu harga ke zona entry. /stop tidak
-        membatalkan pending; hanya menghentikan scan koin baru."""
+        membatalkan pending; hanya menghentikan scan koin baru.
+
+        PATCH PENDING-CONFIRM: SL-sebelum-entry dulu dicek dari tick
+        price mentah tiap 10 detik (price_now<=sl_p) — terlalu sensitif.
+        sl_p di sini = level INVALIDASI ZONA itu sendiri (tepi jauh
+        OB/FVG + noise buffer kecil, lihat analyze_setup()), seringkali
+        cuma noise-buffer kecil (0.3-0.8×ATR) dari entry — wick sesaat
+        gampang menyentuhnya lalu balik lagi padahal zona sebenarnya
+        masih valid & akan terisi. Sekarang butuh KONFIRMASI CANDLE
+        CLOSE M15 (meniru proteksi anti-whipsaw yang sebelumnya cuma ada
+        di posisi aktif via check_tp_sl_order — sekarang juga berlaku di
+        fase pending). TP-before-entry & entry-fill TETAP tick-based
+        (permisif) — tidak ada ruginya di situ: TP kena berarti peluang
+        memang lewat, dan entry di sentuhan wick MENGUNTUNGKAN trader.
+        """
         entry_target = signal["entry"]
         is_buy       = signal["decision"] == "BUY"
         tp_p         = signal["tp"]
         sl_p         = signal["sl"]
         deadline     = time.time() + 8 * 3600
+        next_sl_check = 0.0        # throttle fetch M15 (candle baru tiap 15 menit)
+        last_m15_ts   = None
 
         while time.time() < deadline:
             with positions_lock:
@@ -2333,19 +2467,31 @@ def simulation_loop(chat_id):
                     f"TP tersentuh sebelum entry. Skip.")
                 return
 
-            # SL tersentuh/dilewati sebelum entry → setup sudah tidak valid
-            # (harga sudah membuktikan analisa salah sebelum posisi sempat
-            # dibuka). Tanpa cek ini, harga bisa gap lewat SL dan entry_hit
-            # tetap terpicu di harga yang geometrinya sudah rusak.
-            sl_hit = (price_now <= sl_p) if is_buy else (price_now >= sl_p)
-            if sl_hit:
-                with positions_lock:
-                    positions.pop(sym, None)
-                _ban_coin(sym, "SL sebelum entry")
-                tg_send(chat_id,
-                    f"⏭ <b>Pending Batal</b> — {sym}\n"
-                    f"SL tersentuh sebelum entry. Skip.")
-                return
+            # SL sebelum entry — BUTUH KONFIRMASI CANDLE CLOSE M15 (lihat
+            # docstring). Dicek setiap ~60 detik saja (cukup, candle M15
+            # baru muncul tiap 15 menit) supaya tidak fetch klines tiap
+            # 10 detik terus-menerus.
+            if time.time() >= next_sl_check:
+                next_sl_check = time.time() + 60
+                try:
+                    df_chk = get_klines(sym, "15m", 3)
+                    if df_chk is not None and len(df_chk) >= 2:
+                        closed_row = df_chk.iloc[-2]   # candle terakhir yg SUDAH close
+                        ts_closed  = df_chk.index[-2]
+                        if last_m15_ts is None or ts_closed != last_m15_ts:
+                            last_m15_ts = ts_closed
+                            close_v = float(closed_row["close"])
+                            sl_confirmed = (close_v <= sl_p) if is_buy else (close_v >= sl_p)
+                            if sl_confirmed:
+                                with positions_lock:
+                                    positions.pop(sym, None)
+                                _ban_coin(sym, "SL sebelum entry")
+                                tg_send(chat_id,
+                                    f"⏭ <b>Pending Batal</b> — {sym}\n"
+                                    f"Candle M15 close mengonfirmasi SL sebelum entry. Skip.")
+                                return
+                except Exception as e:
+                    log.debug(f"[_wait_entry sl-confirm] {sym}: {e}")
 
             # Harga mencapai zona entry
             entry_hit = (
@@ -2410,7 +2556,7 @@ def simulation_loop(chat_id):
             pos["entry_time"] = time.time()
             pos["status"]     = "active"
             pos["timeout_flag"] = False   # reset — flag lama (saat masih pending) tidak boleh menutup posisi baru ini
-            pos["current_sl"] = sl_v      # SL FIXED — tidak ada trailing di try23.py
+            pos["current_sl"] = sl_v      # SL awal = SL asli, akan naik oleh trailing di monitor_position
 
         tg_send(chat_id,
             f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
@@ -2524,10 +2670,15 @@ def get_info_msg():
         "1) OB fresh & selaras fib diskon/premium  2) FVG breakaway/fresh\n"
         "3) Equal highs/lows  4) Fibonacci ADAPTIF (0.382-0.5 trend kuat,\n"
         "0.618-0.786 trend lemah) + tarikan ke level liquidity sweep\n\n"
-        "<b>Tahap 7 — Exit (setelah posisi aktif):</b>\n"
-        "TANPA TRAILING STOP. Posisi cuma ditutup di TP murni atau SL\n"
-        "murni — level dari analisa struktural, tidak pernah bergeser\n"
-        "selama posisi berjalan.\n\n"
+        "<b>Tahap 7 — Trailing Stop (setelah posisi aktif):</b>\n"
+        "Dua komponen, dipakai yang PALING PROTEKTIF:\n"
+        "• R-ladder: 0.5R→kunci15% | 1.0R→35% | 1.5R→50% | 2.2R→60% |\n"
+        "  3.0R→70% (R = kelipatan risk/jarak-SL trade itu sendiri,\n"
+        "  BUKAN persen absolut — proteksi tetap dini walau SL rapat)\n"
+        "• Structure: SL mengikuti higher-low/lower-high M15 terbaru\n"
+        "SL trailing cuma boleh mengunci profit (searah TP), tak pernah\n"
+        "mundur ke entry. Kalau SL trailing tersentuh dgn profit terkunci,\n"
+        "dicatat 'Trail' (bukan 'SL') — tetap dihitung menang di win-rate.\n\n"
         f"Min RR: 1:{MIN_RR} | Min Confidence: {MIN_CONFIDENCE}%\n"
         f"TF: H1 (bias) + M15 (entry) + H4 (fib gate)\n"
         f"Model P&L   : posisi {POSITION_SIZE_PCT:.0f}% saldo × % jarak SL/TP aktual\n"
