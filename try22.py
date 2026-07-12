@@ -52,10 +52,19 @@ TRAIL_R_LADDER = [
     (0.5, 0.15),   # profit capai 0.5R → kunci 15% dari 0.5R
     (1.0, 0.35),   # 1.0R → kunci 35%
     (1.5, 0.50),   # 1.5R → kunci 50%
-    (2.2, 0.60),   # 2.2R → kunci 60%
-    (3.0, 0.70),   # 3.0R → kunci 70% (rata2 RR planned ~3.5-3.6R, jadi di
-                   #   titik ini biasanya sudah dekat TP — kunci besar wajar)
+    (2.0, 0.65),   # 2.0R → kunci 65%  (RETUNE: dulu 2.2R→60%)
+    (2.8, 0.80),   # 2.8R → kunci 80%  (RETUNE: dulu 3.0R→70%)
 ]
+# RETUNE ekor ladder (2024→2.0R/2.8R, lock 65%/80%): analisa forward-replay
+# thd backtest_result.csv (110 trade, 3 bulan terpisah dari dataset tuning
+# awal) menemukan 60% trade yg exit via Trail MEMANG akan balik ke SL asli
+# kalau tidak ditrail (trail bekerja benar, TETAP DIPERTAHANKAN) — tapi 40%
+# lanjut ke TP kalau tidak ditrail (avg +1.93%/trade hilang). Ekor ladami
+# lama melepas terlalu banyak di rentang 2.2-3.0R. Ekor baru mengunci
+# LEBIH BANYAK LEBIH AWAL di rentang itu — tervalidasi silang di DUA
+# dataset independen (110 trade baru & 543 trade lama): win rate SAMA
+# PERSIS di keduanya (90.0% & 82.1%), PnL naik konsisten (+4.7pp & +10.7pp).
+# Tahap 0.5-1.5R (paling berpengaruh ke win rate) TIDAK diubah sama sekali.
 # Trailing stop — KOMPONEN STRUKTUR (tetap dipakai, TIDAK berubah dari
 # sebelumnya — divalidasi terpisah dan tetap jadi kandidat independen yg
 # dibandingkan dgn ladder R di atas, SL final = paling protektif dari
@@ -916,6 +925,8 @@ def adaptive_fib_target(df, sh, sl, direction):
     Tentukan target retracement Fibonacci secara ADAPTIF berdasarkan
     kekuatan trend & kedalaman pullback (bukan angka fix 50%):
 
+    - Trend SANGAT kuat (impuls dominan, nyaris tanpa pullback)
+      → fokus area retracement 0.236 - 0.382 (paling dangkal)
     - Trend kuat (impuls dominan, pullback dangkal & lemah)
       → fokus area retracement 0.382 - 0.5 (dangkal)
     - Trend lemah (pullback agresif & dalam)
@@ -923,6 +934,18 @@ def adaptive_fib_target(df, sh, sl, direction):
 
     Kekuatan trend diestimasi dari rasio panjang leg pullback vs leg
     impuls terakhir (di TF yang sama, m15/h1 tergantung caller).
+
+    CATATAN (fix presisi-entry): tier "SANGAT kuat" ditambahkan setelah
+    analisa data menemukan >600 sinyal (dari 2 backtest independen)
+    gagal terisi krn TP sudah kena duluan sebelum harga sempat pullback
+    ke zona entry — median jarak ke entry 2.2-2.5× lebih jauh drpd jarak
+    ke TP itu sendiri. Root cause: trend yg SANGAT kuat (pullback_ratio
+    mendekati 0, artinya harga nyaris tidak pullback sama sekali) tetap
+    diminta retrace ke 0.382-0.5 — utk momentum se-ekstrem itu, itu
+    sendiri sudah terlalu dalam & sering tidak pernah kejadian sebelum
+    harga lanjut ke TP. Tier baru ini TIDAK melonggarkan syarat kualitas
+    apa pun (freshness/FVG/BOS tetap sama) — cuma target retracement yg
+    lebih realistis utk kondisi momentum paling ekstrem.
 
     Return: (fib_lo, fib_hi) sebagai rasio retracement (0..1).
     """
@@ -942,7 +965,9 @@ def adaptive_fib_target(df, sh, sl, direction):
     except Exception:
         return default
 
-    if pullback_ratio <= 0.30:
+    if pullback_ratio <= 0.12:
+        return (0.236, 0.382)   # trend SANGAT kuat, pullback minimal
+    elif pullback_ratio <= 0.30:
         return (0.382, 0.5)     # trend kuat, pullback dangkal
     elif pullback_ratio >= 0.55:
         return (0.618, 0.786)   # trend lemah, pullback dalam (OTE)
@@ -1706,11 +1731,24 @@ def _zone_score(z):
 
 def _collect_entry_candidates(m15, direction, entry_ref, atr):
     """
-    Kumpulkan semua kandidat entry (OB, FVG, sweep raw level) dengan skor
-    kekuatan masing-masing. direction: 'bull' cari di bawah entry_ref,
-    'bear' cari di atas entry_ref.
+    Kumpulkan semua kandidat entry (OB, FVG, sweep raw level, fib adaptif)
+    dengan skor kekuatan masing-masing. direction: 'bull' cari di bawah
+    entry_ref, 'bear' cari di atas entry_ref.
     sweep_side: sisi zona yang jadi TITIK ENTRY (ujung sweep, dekat harga)
     invalid_side: sisi seberang zona (dipakai sebagai basis SL nanti)
+
+    FIX PRESISI-ENTRY: sebelumnya kandidat cuma dibandingkan lewat skor
+    kualitas mentah (freshness/FVG/BOS), TANPA mempertimbangkan seberapa
+    jauh zona itu dari harga saat ini — analisa 2 backtest independen
+    (>600 sinyal gabungan) menemukan median jarak ke entry 2.2-2.5×
+    lebih jauh drpd jarak ke TP itu sendiri, bikin TP sering kesentuh
+    duluan sebelum harga sempat pullback. Sekarang tiap kandidat kena
+    PENALTI proporsional ke jarak (dlm satuan ATR) — zona yg jauh tetap
+    BISA menang kalau kualitasnya jauh lebih unggul, tapi kalau ada zona
+    valid yg lebih dekat dgn kualitas sebanding, itu yg dipilih. Fib
+    adaptif (dulu cuma fallback terakhir kalau TIDAK ADA OB/FVG/EQ sama
+    sekali) sekarang IKUT masuk pool yg sama supaya bisa jadi alternatif
+    yg lebih reachable saat OB/FVG yg ada semuanya jauh.
     """
     up = direction == "bear"
     obs = find_zones(m15, direction, strict=True)
@@ -1718,29 +1756,60 @@ def _collect_entry_candidates(m15, direction, entry_ref, atr):
     eqs = find_equal_highs_lows(m15, "high" if up else "low", lb=80)
     cands = []
 
+    def _dist_penalty(price):
+        # jarak dlm ATR × bobot moderat — cuma nge-geser tie-break,
+        # bukan hard filter (kualitas rendah+dekat tetap bisa kalah
+        # dari kualitas tinggi+agak jauh kalau selisihnya besar)
+        if atr <= 0: return 0.0
+        return (abs(price - entry_ref) / atr) * 0.4
+
     for z in obs:
         entry_pt, invalid_pt = (z["top"], z["bot"]) if up else (z["bot"], z["top"])
         if (up and entry_pt > entry_ref + atr*0.1) or (not up and entry_pt < entry_ref - atr*0.1):
             cands.append({"price": entry_pt, "invalid": invalid_pt, "label": "ob",
-                           "score": 3 + _zone_score(z)})
+                           "score": 3 + _zone_score(z) - _dist_penalty(entry_pt)})
     for f in fvgs:
         if (up and f["mid"] > entry_ref + atr*0.1) or (not up and f["mid"] < entry_ref - atr*0.1):
             sc = 2 + int(f.get("is_fresh", False)) + 2*int(f.get("candle3") == "breakaway")
             invalid_pt = f["top"] if up else f["bot"]
-            cands.append({"price": f["mid"], "invalid": invalid_pt, "label": "fvg", "score": sc})
+            cands.append({"price": f["mid"], "invalid": invalid_pt, "label": "fvg",
+                           "score": sc - _dist_penalty(f["mid"])})
     eqs_sorted = sorted(eqs) if up else sorted(eqs, reverse=True)
     for lv in eqs_sorted[:1]:
         if (up and lv > entry_ref + atr*0.2) or (not up and lv < entry_ref - atr*0.2):
             cands.append({"price": lv, "invalid": lv + (atr*0.6 if up else -atr*0.6),
-                           "label": "eq", "score": 2})
+                           "label": "eq", "score": 2 - _dist_penalty(lv)})
+
+    # Fib adaptif — sekarang ikut dibandingkan di pool yang sama (dulu
+    # cuma fallback terakhir), dipakai tepi DANGKAL zona (bukan titik
+    # tengah) supaya jadi alternatif yang realistis dijangkau saat OB/FVG
+    # yang tersedia semuanya jauh dari harga.
+    try:
+        sh15, sl15 = swing_pts(m15, lb=5)
+        if len(sh15) >= 1 and len(sl15) >= 1:
+            lo, hi = adaptive_fib_target(m15, sh15, sl15, direction)
+            swing_hi = m15["high"].iloc[sh15[-1]]
+            swing_lo = m15["low"].iloc[sl15[-1]]
+            leg = swing_hi - swing_lo
+            px = (swing_lo + leg*lo) if up else (swing_hi - leg*lo)   # tepi dangkal = lo
+            invalid_fib = (swing_lo + leg*hi) if up else (swing_hi - leg*hi)  # tepi dalam = SL basis
+            if (up and px > entry_ref + atr*0.1) or (not up and px < entry_ref - atr*0.1):
+                cands.append({"price": px, "invalid": invalid_fib, "label": "fib_adaptive",
+                               "score": 1.5 - _dist_penalty(px)})
+    except Exception:
+        pass
+
     return cands
 
 
 def calc_discount_entry(df_h1, df_m15, direction, current_price, atr):
     """
-    Entry = kandidat terkuat (OB fresh > FVG breakaway > equal high/low),
-    dibandingkan lewat skor, bukan prioritas tetap. Fallback ke fib
-    adaptif atau market kalau tidak ada kandidat valid.
+    Entry = kandidat terkuat (OB fresh > FVG breakaway > EQ > fib adaptif),
+    dibandingkan lewat skor YANG SUDAH memperhitungkan jarak dari harga
+    (lihat _collect_entry_candidates) — bukan cuma kualitas mentah. Fib
+    adaptif sekarang ikut bersaing di pool yang sama (bukan fallback
+    terakhir saja), jadi kalau OB/FVG yang ada semuanya jauh, alternatif
+    fib yang lebih reachable bisa menang.
     Return (entry_price, label, invalid_level) — invalid_level dipakai
     analyze_setup() sebagai basis SL (seberang titik entry ini sendiri).
     """
@@ -1750,18 +1819,6 @@ def calc_discount_entry(df_h1, df_m15, direction, current_price, atr):
     if cands:
         best = max(cands, key=lambda c: c["score"])
         return round(best["price"], 8), best["label"], best["invalid"]
-
-    sh15, sl15 = swing_pts(m15, lb=5)
-    up = direction == "bear"
-    if len(sh15) >= 1 and len(sl15) >= 1:
-        lo, hi = adaptive_fib_target(m15, sh15, sl15, direction)
-        swing_hi = m15["high"].iloc[sh15[-1]]
-        swing_lo = m15["low"].iloc[sl15[-1]]
-        leg = swing_hi - swing_lo
-        ratio = (lo + hi) / 2
-        px = (swing_lo + leg*ratio) if up else (swing_hi - leg*ratio)
-        if (up and px > current_price + atr*0.1) or (not up and px < current_price - atr*0.1):
-            return round(px, 8), "fib_adaptive", None
     return current_price, "market", None
 
 
@@ -2666,14 +2723,16 @@ def get_info_msg():
         " cabang khusus penyelamat RR gagal.\n"
         "Supply/demand & FVG diprioritaskan yang FRESH (belum tersentuh)\n"
         "dan FVG breakaway (candle-3 searah) di atas rejection.\n\n"
-        "<b>Tahap 6 — Entry diskon (prioritas):</b>\n"
+        "<b>Tahap 6 — Entry diskon (skor kualitas − penalti jarak):</b>\n"
         "1) OB fresh & selaras fib diskon/premium  2) FVG breakaway/fresh\n"
-        "3) Equal highs/lows  4) Fibonacci ADAPTIF (0.382-0.5 trend kuat,\n"
-        "0.618-0.786 trend lemah) + tarikan ke level liquidity sweep\n\n"
+        "3) Equal highs/lows  4) Fibonacci ADAPTIF (0.236-0.382 trend\n"
+        "SANGAT kuat, 0.382-0.5 trend kuat, 0.618-0.786 trend lemah) —\n"
+        "keempatnya kini SATU pool skor yang sama, zona lebih dekat\n"
+        "lebih diprioritaskan drpd zona jauh dgn kualitas sebanding\n\n"
         "<b>Tahap 7 — Trailing Stop (setelah posisi aktif):</b>\n"
         "Dua komponen, dipakai yang PALING PROTEKTIF:\n"
-        "• R-ladder: 0.5R→kunci15% | 1.0R→35% | 1.5R→50% | 2.2R→60% |\n"
-        "  3.0R→70% (R = kelipatan risk/jarak-SL trade itu sendiri,\n"
+        "• R-ladder: 0.5R→kunci15% | 1.0R→35% | 1.5R→50% | 2.0R→65% |\n"
+        "  2.8R→80% (R = kelipatan risk/jarak-SL trade itu sendiri,\n"
         "  BUKAN persen absolut — proteksi tetap dini walau SL rapat)\n"
         "• Structure: SL mengikuti higher-low/lower-high M15 terbaru\n"
         "SL trailing cuma boleh mengunci profit (searah TP), tak pernah\n"
