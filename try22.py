@@ -3053,21 +3053,42 @@ def get_info_msg():
 def bot_loop():
     global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, MIN_CONFIDENCE
 
-    log.info("Test koneksi Binance...")
-    for i in range(10):
-        try:
-            fapi_get("/fapi/v1/ping")
-            log.info("Binance OK!")
-            break
-        except Exception as e:
-            log.warning(f"Retry {i+1}/10: {e}")
-            time.sleep(10)
-    else:
-        log.critical("Binance tidak bisa dijangkau.")
-        return
+    # Set active_chat_id ke ALLOWED_USER_ID SEJAK AWAL — di chat pribadi
+    # Telegram, chat_id sama dengan user_id, jadi bot bisa kirim pesan
+    # proaktif (termasuk "Bot Siap" & notifikasi darurat) SEBELUM user
+    # mengirim perintah apa pun. Sebelumnya active_chat_id cuma None
+    # sampai user chat duluan, jadi notifikasi penting tidak pernah sampai.
+    if ALLOWED_USER_ID:
+        active_chat_id = ALLOWED_USER_ID
+
+    # Cek koneksi Binance dipindah ke THREAD TERPISAH di background —
+    # TIDAK BOLEH memblokir atau mematikan polling Telegram. SEBELUMNYA
+    # cek ini ada di jalur utama bot_loop(): kalau ping gagal 10x
+    # (mis. IP Render kena rate-limit/geo-block sementara oleh Binance),
+    # baris "return" bikin SELURUH bot_loop() — termasuk polling
+    # Telegram — berhenti total dan tidak pernah jalan lagi. Itulah
+    # penyebab utama bot "tidak bisa diakses lewat Telegram" sebelumnya.
+    def _check_binance():
+        for i in range(10):
+            try:
+                fapi_get("/fapi/v1/ping")
+                log.info("Binance OK!")
+                return
+            except Exception as e:
+                log.warning(f"[binance-ping] retry {i+1}/10: {e}")
+                time.sleep(10)
+        log.error("Binance tidak bisa dijangkau setelah 10x percobaan. "
+                   "Bot tetap jalan — scan & harga otomatis fallback ke "
+                   "Bybit/CoinGecko selama Binance bermasalah.")
+    threading.Thread(target=_check_binance, daemon=True).start()
 
     offset=None
     log.info("Bot siap.")
+    if ALLOWED_USER_ID:
+        tg_send(ALLOWED_USER_ID,
+            "✅ <b>Bot Siap</b>\n"
+            "Semua sistem sudah menyala dan siap menerima perintah.\n"
+            "Ketik /start untuk melihat menu.")
 
     while True:
         try:
