@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 main.py — Optimasi Parameter Backtest + Web Service untuk Render
-Mode CLI  : python main.py --evals 30 --csv crypto_m1_3bulan.csv
+Mode CLI  : python main.py --evals 30 --csv "crypto_m1_3bulan (1).csv.gz"
 Mode Web  : python main.py  (tanpa argumen) → jalankan Flask di PORT
 """
 
@@ -17,7 +17,7 @@ from functools import partial
 
 # --- Flask untuk web service ---
 try:
-    from flask import Flask, jsonify, request, render_template_string
+    from flask import Flask, jsonify, request, render_template_string, send_file
     FLASK_AVAILABLE = True
 except ImportError:
     FLASK_AVAILABLE = False
@@ -60,7 +60,7 @@ BEST_PARAMS_FILE = "best_params.json"
 _optimization_running = False
 _optimization_stop_flag = False
 
-# Definisi ruang parameter (sama seperti sebelumnya)
+# Definisi ruang parameter
 PARAM_SPACE = [
     ('min_conf', 'int', 30, 70, 45),
     ('struct_trail_lb', 'int', 1, 5, 2),
@@ -73,7 +73,7 @@ PARAM_SPACE = [
 ]
 
 # ============================================================
-# FUNGSI BANTU (sama seperti sebelumnya)
+# FUNGSI BANTU
 # ============================================================
 def build_params_from_args(args):
     min_conf = int(args[0])
@@ -100,19 +100,6 @@ def build_params_from_args(args):
         'trail_ladder': ladder,
         'dense_scan': dense_scan,
     }
-
-
-def params_to_tuple(params):
-    return (
-        params['min_conf'],
-        params['struct_trail_lb'],
-        params['struct_trail_buf_pct'],
-        params['trail_ladder'][0][0],
-        params['trail_ladder'][0][1],
-        params['trail_ladder'][1][0],
-        params['trail_ladder'][1][1],
-        1 if params['dense_scan'] else 0,
-    )
 
 
 def fitness(args, csv_path, verbose=False):
@@ -254,9 +241,11 @@ def run_optimization(csv_path, n_evals=N_EVALS, verbose=True, resume=True):
 
         @use_named_args(dimensions)
         def objective(**params):
+            nonlocal eval_counter   # <-- DEKLARASI NONLOCAL DI AWAL
+
             if _optimization_stop_flag:
                 print("🛑 Optimasi dihentikan oleh user.")
-                return 1e9  # nilai besar untuk stop
+                return 1e9
             args = [params.get(p[0]) for p in PARAM_SPACE]
             neg_score, log_entry = fitness(args, csv_path, verbose=verbose)
             if log_entry is not None:
@@ -270,8 +259,6 @@ def run_optimization(csv_path, n_evals=N_EVALS, verbose=True, resume=True):
                             best_so_far = best_data.get('score', -1e9)
                     if current_score > best_so_far:
                         save_best_params(build_params_from_args(args), current_score)
-            # update counter meski log_entry None (error)
-            nonlocal eval_counter
             eval_counter += 1
             return neg_score
 
@@ -283,12 +270,17 @@ def run_optimization(csv_path, n_evals=N_EVALS, verbose=True, resume=True):
                     best_log = max(logs, key=lambda x: x.get('score', -1e9))
                     print(f"\n🏆 Best score: {best_log['score']:.2f}")
                     print("   Parameter terbaik:")
-                    for k, v in build_params_from_args(
-                        (best_log['min_conf'], best_log['struct_lb'], best_log['struct_buf'],
-                         best_log['trail_th_05'], best_log['trail_lock_05'],
-                         best_log['trail_th_10'], best_log['trail_lock_10'],
-                         1 if best_log['dense_scan'] else 0)
-                    ).items():
+                    best_args = (
+                        best_log['min_conf'],
+                        best_log['struct_lb'],
+                        best_log['struct_buf'],
+                        best_log['trail_th_05'],
+                        best_log['trail_lock_05'],
+                        best_log['trail_th_10'],
+                        best_log['trail_lock_10'],
+                        1 if best_log['dense_scan'] else 0,
+                    )
+                    for k, v in build_params_from_args(best_args).items():
                         print(f"     {k}: {v}")
                 return
 
@@ -307,7 +299,7 @@ def run_optimization(csv_path, n_evals=N_EVALS, verbose=True, resume=True):
             best_score = -res.fun
         else:
             # Random search fallback
-            print("🔁 Menggunakan random search (100 titik acak)")
+            print("🔁 Menggunakan random search")
             best_score = -1e9
             best_args = None
             n_random = max(50, n_evals * 2)
@@ -369,7 +361,6 @@ def run_optimization(csv_path, n_evals=N_EVALS, verbose=True, resume=True):
 if FLASK_AVAILABLE:
     app = Flask(__name__)
 
-    # HTML sederhana untuk dashboard
     DASHBOARD_HTML = """
     <!DOCTYPE html>
     <html>
@@ -419,7 +410,6 @@ if FLASK_AVAILABLE:
         global _optimization_running
         if _optimization_running:
             return jsonify({"status": "error", "message": "Optimasi sudah berjalan"}), 400
-        # Jalankan di thread terpisah
         thread = threading.Thread(
             target=run_optimization,
             args=(DEFAULT_CSV, N_EVALS, True, True),
@@ -442,11 +432,15 @@ if FLASK_AVAILABLE:
         best = None
         if logs:
             best = max(logs, key=lambda x: x.get('score', -1e9))
+        best_params_data = None
+        if os.path.exists(BEST_PARAMS_FILE):
+            with open(BEST_PARAMS_FILE, 'r') as f:
+                best_params_data = json.load(f)
         return jsonify({
             "running": _optimization_running,
             "last_iteration": last_iter,
             "best_score": best.get('score') if best else None,
-            "best_params": json.load(open(BEST_PARAMS_FILE)) if os.path.exists(BEST_PARAMS_FILE) else None,
+            "best_params": best_params_data,
             "total_entries": len(logs),
         })
 
@@ -455,9 +449,6 @@ if FLASK_AVAILABLE:
         if os.path.exists(CHECKPOINT_FILE):
             return send_file(CHECKPOINT_FILE, as_attachment=True)
         return "Log file not found", 404
-
-    # Tambahkan send_file import
-    from flask import send_file
 
     def run_flask():
         port = int(os.environ.get('PORT', 8080))
@@ -487,11 +478,9 @@ def main_cli():
 # ENTRY POINT
 # ============================================================
 if __name__ == "__main__":
-    # Jika ada argumen, jalankan CLI
     if len(sys.argv) > 1:
         main_cli()
     else:
-        # Tidak ada argumen → mode web
         if FLASK_AVAILABLE:
             print("🌐 Menjalankan Flask web server...")
             print(f"   Akses dashboard di http://localhost:{os.environ.get('PORT', 8080)}")
