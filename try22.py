@@ -49,12 +49,24 @@ MIN_CONFIDENCE      = 50    # ambang confidence minimum sinyal — diatur via /c
 # sekarang jadi trail kecil — trade-off yang sepadan utk win rate lebih
 # tinggi & lebih tahan ke setup risk-kecil yg dulu tidak terlindungi).
 TRAIL_R_LADDER = [
-    (0.5, 0.15),   # profit capai 0.5R → kunci 15% dari 0.5R
-    (1.0, 0.35),   # 1.0R → kunci 35%
-    (1.5, 0.50),   # 1.5R → kunci 50%
-    (2.0, 0.65),   # 2.0R → kunci 65%  (RETUNE: dulu 2.2R→60%)
-    (2.8, 0.80),   # 2.8R → kunci 80%  (RETUNE: dulu 3.0R→70%)
+    (0.5, 0.18),   # profit capai 0.5R → kunci 18% dari 0.5R
+    (1.0, 0.38),   # 1.0R → kunci 38%
+    (1.5, 0.55),   # 1.5R → kunci 55%
+    (2.0, 0.70),   # 2.0R → kunci 70%
+    (2.8, 0.85),   # 2.8R → kunci 85%
 ]
+# RETUNE FINAL (validasi M1, resolusi penuh menit-per-menit — jauh lebih
+# presisi drpd validasi M15 sebelumnya): replay 356 trade nyata dari
+# backtest_result_m1.csv di data M1 asli (crypto_m1_3bulan.csv) — lock
+# ratio dinaikkan di semua tahap (threshold R TIDAK berubah dari retune
+# sebelumnya) menghasilkan win rate SAMA (71.1%) dgn PnL sedikit lebih
+# tinggi (66.98%→67.32%). Sudah dicoba juga menurunkan threshold R
+# pertama (banyak trade SL M1 cuma sempat MFE~0.28R, di bawah 0.5R) —
+# TERBUKTI menaikkan win rate signifikan (sampai 83%) TAPI selalu
+# mengorbankan PnL total (turun ke 51-64%) — tidak diambil krn tidak
+# ada bukti kuat itu "lebih baik", cuma trade-off WR-vs-PnL yang sudah
+# pernah dieksplorasi. RETUNE lama (2.2R/3.0R→2.0R/2.8R, lock 60/70%→
+# 65/80%) dipertahankan dari sini.
 # RETUNE ekor ladder (2024→2.0R/2.8R, lock 65%/80%): analisa forward-replay
 # thd backtest_result.csv (110 trade, 3 bulan terpisah dari dataset tuning
 # awal) menemukan 60% trade yg exit via Trail MEMANG akan balik ke SL asli
@@ -1737,18 +1749,19 @@ def _collect_entry_candidates(m15, direction, entry_ref, atr):
     sweep_side: sisi zona yang jadi TITIK ENTRY (ujung sweep, dekat harga)
     invalid_side: sisi seberang zona (dipakai sebagai basis SL nanti)
 
-    FIX PRESISI-ENTRY: sebelumnya kandidat cuma dibandingkan lewat skor
-    kualitas mentah (freshness/FVG/BOS), TANPA mempertimbangkan seberapa
-    jauh zona itu dari harga saat ini — analisa 2 backtest independen
-    (>600 sinyal gabungan) menemukan median jarak ke entry 2.2-2.5×
-    lebih jauh drpd jarak ke TP itu sendiri, bikin TP sering kesentuh
-    duluan sebelum harga sempat pullback. Sekarang tiap kandidat kena
-    PENALTI proporsional ke jarak (dlm satuan ATR) — zona yg jauh tetap
-    BISA menang kalau kualitasnya jauh lebih unggul, tapi kalau ada zona
-    valid yg lebih dekat dgn kualitas sebanding, itu yg dipilih. Fib
-    adaptif (dulu cuma fallback terakhir kalau TIDAK ADA OB/FVG/EQ sama
-    sekali) sekarang IKUT masuk pool yg sama supaya bisa jadi alternatif
-    yg lebih reachable saat OB/FVG yg ada semuanya jauh.
+    FIX PRESISI-ENTRY (v2, REBALANCED): sebelumnya kandidat cuma
+    dibandingkan lewat skor kualitas mentah (freshness/FVG/BOS), TANPA
+    mempertimbangkan seberapa jauh zona itu dari harga saat ini — analisa
+    2 backtest independen (>600 sinyal gabungan) menemukan median jarak
+    ke entry 2.2-2.5× lebih jauh drpd jarak ke TP itu sendiri, bikin TP
+    sering kesentuh duluan sebelum harga sempat pullback. v1 (penalti
+    jarak besar + fib_adaptive ikut bersaing bebas) TERBUKTI kelewatan:
+    trade naik 56% tapi SL naik 150%, Profit Factor nyaris separuh. v2
+    ini menurunkan bobot penalti jarak jadi cuma tie-break TIPIS antar
+    kandidat SEJENIS yang sudah sebanding kualitasnya, dan fib_adaptif
+    dikembalikan jadi last-resort murni (tapi bug invalid_level=None-nya
+    tetap diperbaiki, jadi minimal BISA menghasilkan trade saat memang
+    tidak ada OB/FVG/EQ sama sekali — dulu jalur itu mati total).
     """
     up = direction == "bear"
     obs = find_zones(m15, direction, strict=True)
@@ -1757,11 +1770,15 @@ def _collect_entry_candidates(m15, direction, entry_ref, atr):
     cands = []
 
     def _dist_penalty(price):
-        # jarak dlm ATR × bobot moderat — cuma nge-geser tie-break,
-        # bukan hard filter (kualitas rendah+dekat tetap bisa kalah
-        # dari kualitas tinggi+agak jauh kalau selisihnya besar)
+        # REBALANCE: bobot diturunkan 0.4→0.15 setelah data run pertama
+        # menunjukkan versi 0.4 terlalu agresif — SL naik 150% padahal
+        # trade cuma naik 56%, Profit Factor nyaris separuh (10.2→5.3).
+        # Sekarang cuma nge-geser tie-break TIPIS antar kandidat SEJENIS
+        # yang kualitasnya sudah sebanding (OB vs OB, FVG vs FVG dst),
+        # bukan lagi cukup besar utk bikin zona lemah-tapi-dekat ngalahin
+        # zona kuat-tapi-agak-jauh.
         if atr <= 0: return 0.0
-        return (abs(price - entry_ref) / atr) * 0.4
+        return (abs(price - entry_ref) / atr) * 0.15
 
     for z in obs:
         entry_pt, invalid_pt = (z["top"], z["bot"]) if up else (z["bot"], z["top"])
@@ -1780,24 +1797,32 @@ def _collect_entry_candidates(m15, direction, entry_ref, atr):
             cands.append({"price": lv, "invalid": lv + (atr*0.6 if up else -atr*0.6),
                            "label": "eq", "score": 2 - _dist_penalty(lv)})
 
-    # Fib adaptif — sekarang ikut dibandingkan di pool yang sama (dulu
-    # cuma fallback terakhir), dipakai tepi DANGKAL zona (bukan titik
-    # tengah) supaya jadi alternatif yang realistis dijangkau saat OB/FVG
-    # yang tersedia semuanya jauh dari harga.
-    try:
-        sh15, sl15 = swing_pts(m15, lb=5)
-        if len(sh15) >= 1 and len(sl15) >= 1:
-            lo, hi = adaptive_fib_target(m15, sh15, sl15, direction)
-            swing_hi = m15["high"].iloc[sh15[-1]]
-            swing_lo = m15["low"].iloc[sl15[-1]]
-            leg = swing_hi - swing_lo
-            px = (swing_lo + leg*lo) if up else (swing_hi - leg*lo)   # tepi dangkal = lo
-            invalid_fib = (swing_lo + leg*hi) if up else (swing_hi - leg*hi)  # tepi dalam = SL basis
-            if (up and px > entry_ref + atr*0.1) or (not up and px < entry_ref - atr*0.1):
-                cands.append({"price": px, "invalid": invalid_fib, "label": "fib_adaptive",
-                               "score": 1.5 - _dist_penalty(px)})
-    except Exception:
-        pass
+    # Fib adaptif — REBALANCE: dikembalikan jadi TRUE LAST RESORT (cuma
+    # dipakai kalau BENAR-BENAR tidak ada OB/FVG/EQ sama sekali), bukan
+    # ikut bersaing bebas di pool utama lagi. Data run pertama (versi
+    # "ikut bersaing") menunjukkan fib generik terlalu sering menang
+    # padahal secara struktural lebih lemah drpd OB/FVG asli — itu
+    # kontributor utama SL melonjak. Yang TETAP diperbaiki dari versi
+    # asli: dulu invalid_level selalu None di jalur ini → analyze_setup
+    # SELALU menolaknya (bug lama, fib_adaptive tidak pernah benar2
+    # menghasilkan trade). Sekarang dikasih invalid_level yang benar
+    # (tepi dalam zona) supaya minimal BISA dipakai saat memang tidak
+    # ada alternatif lain — lebih baik drpd skip sepenuhnya.
+    if not cands:
+        try:
+            sh15, sl15 = swing_pts(m15, lb=5)
+            if len(sh15) >= 1 and len(sl15) >= 1:
+                lo, hi = adaptive_fib_target(m15, sh15, sl15, direction)
+                swing_hi = m15["high"].iloc[sh15[-1]]
+                swing_lo = m15["low"].iloc[sl15[-1]]
+                leg = swing_hi - swing_lo
+                px = (swing_lo + leg*lo) if up else (swing_hi - leg*lo)   # tepi dangkal = lo
+                invalid_fib = (swing_lo + leg*hi) if up else (swing_hi - leg*hi)  # tepi dalam = SL basis
+                if (up and px > entry_ref + atr*0.1) or (not up and px < entry_ref - atr*0.1):
+                    cands.append({"price": px, "invalid": invalid_fib, "label": "fib_adaptive",
+                                   "score": 1.5})
+        except Exception:
+            pass
 
     return cands
 
@@ -2731,8 +2756,8 @@ def get_info_msg():
         "lebih diprioritaskan drpd zona jauh dgn kualitas sebanding\n\n"
         "<b>Tahap 7 — Trailing Stop (setelah posisi aktif):</b>\n"
         "Dua komponen, dipakai yang PALING PROTEKTIF:\n"
-        "• R-ladder: 0.5R→kunci15% | 1.0R→35% | 1.5R→50% | 2.0R→65% |\n"
-        "  2.8R→80% (R = kelipatan risk/jarak-SL trade itu sendiri,\n"
+        "• R-ladder: 0.5R→kunci18% | 1.0R→38% | 1.5R→55% | 2.0R→70% |\n"
+        "  2.8R→85% (R = kelipatan risk/jarak-SL trade itu sendiri,\n"
         "  BUKAN persen absolut — proteksi tetap dini walau SL rapat)\n"
         "• Structure: SL mengikuti higher-low/lower-high M15 terbaru\n"
         "SL trailing cuma boleh mengunci profit (searah TP), tak pernah\n"
