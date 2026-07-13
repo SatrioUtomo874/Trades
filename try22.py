@@ -22,61 +22,46 @@ MONITOR_SLEEP       = 10
 MAX_POSITIONS       = 20
 MONITOR_INTERVAL    = 15 * 60
 MIN_CONFIDENCE      = 50    # ambang confidence minimum sinyal — diatur via /confidence_min
-# Trailing stop — REDESIGN KE R-MULTIPLE (bukan persen absolut lagi).
-# Riwayat: step 1.0%/lock 50% → step 0.6%/lock 60% (naikkan WR di data
-# lama). TAPI analisa mendalam thd backtest_result_New.csv (543 trade
-# nyata + forward-replay harga asli di Datasheet.csv) menemukan step
-# PERSEN ABSOLUT itu sendiri cacat desain:
-#   • 51% dari SEMUA trade py risk (jarak SL) < 0.6% dari entry — utk
-#     trade begini, threshold step-1 lama (0.6% profit) = butuh >1R
-#     gerakan favorable dulu baru dapat proteksi APA PUN.
-#   • Dari 151 trade yg akhirnya SL: 80.8%-nya SEMPAT profit dulu
-#     (median 0.56R, avg 0.85R) sebelum berbalik ke SL — bukan salah
-#     arah, cuma tidak sempat terkunci krn ambang absolut kelewat jauh
-#     dari risk trade itu sendiri.
-#   • Dari 375 trade yg exit via Trail: 62.4% MEMANG akan balik ke SL
-#     asli kalau tidak ditrail (trail bekerja benar) — tapi 37.6% MALAH
-#     lanjut ke TP kalau tidak ditrail (rata2 +1.7%/trade hilang sia-sia).
-# Kesimpulannya BUKAN "hapus TP fokus trail" (TP cap bukan penyebab
-# trade Trail terpotong — Trail selalu terjadi SEBELUM harga sempat ke
-# TP), tapi trail-nya sendiri perlu disesuaikan RELATIF ke risk masing-
-# masing trade (R-multiple), bukan angka % absolut yang sama utk semua
-# trade padahal risk tiap trade beda-beda jauh. TRAIL_R_LADDER =
-# [(ambang_R, lock_ratio), ...] — begitu profit (dlm kelipatan risk R)
-# capai ambang, kunci lock_ratio dari level itu (dlm R juga). Tervalidasi
-# via replay 543 trade: WR 69.4%→82.1%, avg profit/trade tetap positif,
-# PnL total turun wajar (165%→154%, krn sebagian dulunya SL penuh
-# sekarang jadi trail kecil — trade-off yang sepadan utk win rate lebih
-# tinggi & lebih tahan ke setup risk-kecil yg dulu tidak terlindungi).
+# TRAIL_R_LADDER = [(ambang_R, lock_ratio), ...] — begitu profit (dlm
+# kelipatan risk R trade itu sendiri) capai ambang, kunci lock_ratio dari
+# level itu (dlm R juga). SL final = kandidat PALING PROTEKTIF antara
+# R-ladder ini vs komponen structure (swing-point) di bawah.
+#
+# RIWAYAT TUNING (evolusi, dari kecil ke besar sampel):
+#   v1 flat-percent (bukan R)         → banyak masalah, digantikan R-based
+#   v2 R-based (0.5/1.0/1.5/2.2/3.0R) → validasi 543 trade (M15 bar)
+#   v3 ekor diperketat (2.0/2.8R)     → validasi silang 110+543 trade (M15)
+#   v4 lock dinaikkan semua tahap     → validasi 356 trade (M1 presisi,
+#                                        5 koin) — TERNYATA overfit, PnL
+#                                        malah lebih rendah di sampel besar
+#   v5 FINAL — kembali ke lock v3 + tambah 1 tahap ekor (3.5R) → divalidasi
+#      di 1113 trade NYATA (15 koin, M1 presisi penuh menit-per-menit,
+#      dataset PALING BESAR & PALING AKURAT sejauh ini): win rate PERSIS
+#      SAMA (72.2%) dengan ladder v4, PnL lebih tinggi (144.35%→151.56%,
+#      +7.2pp) — dan SL count SAMA SEKALI TIDAK BERUBAH (309), artinya
+#      perbaikan ini murni menangkap lebih banyak upside dari trade yang
+#      memang sudah menang, BUKAN mengambil risiko baru.
+#
+# Pelajaran dari v4→v5: tuning di sampel kecil (356 trade) bisa menyesatkan
+# — begitu divalidasi ulang di sampel 3x lebih besar, hasilnya justru lebih
+# baik pakai parameter yang lebih dekat ke versi SEBELUM v4. Sampel besar
+# menang. Sudah dicoba juga menurunkan threshold R pertama (banyak trade
+# SL cuma sempat MFE 0.28-0.36R sebelum reversal, di bawah 0.5R) — TERBUKTI
+# menaikkan win rate signifikan (sampai 78-83%) TAPI PnL SELALU turun
+# (127-146%) — tidak diambil krn bukan perbaikan bersih di kedua sisi,
+# cuma trade-off WR-vs-PnL. Sudah dicoba juga grid search lebih luas di
+# tahap ekor (3.2R/3.5R/4.5R/5.0R dgn macam2 lock) — hasil konvergen di
+# kisaran 149-151.5%, F3b (di bawah) adalah titik terbaik yang ditemukan.
 TRAIL_R_LADDER = [
-    (0.5, 0.18),   # profit capai 0.5R → kunci 18% dari 0.5R
-    (1.0, 0.38),   # 1.0R → kunci 38%
-    (1.5, 0.55),   # 1.5R → kunci 55%
-    (2.0, 0.70),   # 2.0R → kunci 70%
-    (2.8, 0.85),   # 2.8R → kunci 85%
+    (0.5, 0.15),   # profit capai 0.5R → kunci 15% dari 0.5R
+    (1.0, 0.35),   # 1.0R → kunci 35%
+    (1.5, 0.50),   # 1.5R → kunci 50%
+    (2.0, 0.65),   # 2.0R → kunci 65%
+    (2.8, 0.80),   # 2.8R → kunci 80%
+    (3.5, 0.85),   # 3.5R → kunci 85% (tahap tambahan v5 — tangkap sisa upside
+                   #   trade yang sudah lari jauh, avg RR planned ~3.5-3.6R
+                   #   jadi di titik ini biasanya sudah dekat TP)
 ]
-# RETUNE FINAL (validasi M1, resolusi penuh menit-per-menit — jauh lebih
-# presisi drpd validasi M15 sebelumnya): replay 356 trade nyata dari
-# backtest_result_m1.csv di data M1 asli (crypto_m1_3bulan.csv) — lock
-# ratio dinaikkan di semua tahap (threshold R TIDAK berubah dari retune
-# sebelumnya) menghasilkan win rate SAMA (71.1%) dgn PnL sedikit lebih
-# tinggi (66.98%→67.32%). Sudah dicoba juga menurunkan threshold R
-# pertama (banyak trade SL M1 cuma sempat MFE~0.28R, di bawah 0.5R) —
-# TERBUKTI menaikkan win rate signifikan (sampai 83%) TAPI selalu
-# mengorbankan PnL total (turun ke 51-64%) — tidak diambil krn tidak
-# ada bukti kuat itu "lebih baik", cuma trade-off WR-vs-PnL yang sudah
-# pernah dieksplorasi. RETUNE lama (2.2R/3.0R→2.0R/2.8R, lock 60/70%→
-# 65/80%) dipertahankan dari sini.
-# RETUNE ekor ladder (2024→2.0R/2.8R, lock 65%/80%): analisa forward-replay
-# thd backtest_result.csv (110 trade, 3 bulan terpisah dari dataset tuning
-# awal) menemukan 60% trade yg exit via Trail MEMANG akan balik ke SL asli
-# kalau tidak ditrail (trail bekerja benar, TETAP DIPERTAHANKAN) — tapi 40%
-# lanjut ke TP kalau tidak ditrail (avg +1.93%/trade hilang). Ekor ladami
-# lama melepas terlalu banyak di rentang 2.2-3.0R. Ekor baru mengunci
-# LEBIH BANYAK LEBIH AWAL di rentang itu — tervalidasi silang di DUA
-# dataset independen (110 trade baru & 543 trade lama): win rate SAMA
-# PERSIS di keduanya (90.0% & 82.1%), PnL naik konsisten (+4.7pp & +10.7pp).
-# Tahap 0.5-1.5R (paling berpengaruh ke win rate) TIDAK diubah sama sekali.
 # Trailing stop — KOMPONEN STRUKTUR (tetap dipakai, TIDAK berubah dari
 # sebelumnya — divalidasi terpisah dan tetap jadi kandidat independen yg
 # dibandingkan dgn ladder R di atas, SL final = paling protektif dari
@@ -2756,9 +2741,9 @@ def get_info_msg():
         "lebih diprioritaskan drpd zona jauh dgn kualitas sebanding\n\n"
         "<b>Tahap 7 — Trailing Stop (setelah posisi aktif):</b>\n"
         "Dua komponen, dipakai yang PALING PROTEKTIF:\n"
-        "• R-ladder: 0.5R→kunci18% | 1.0R→38% | 1.5R→55% | 2.0R→70% |\n"
-        "  2.8R→85% (R = kelipatan risk/jarak-SL trade itu sendiri,\n"
-        "  BUKAN persen absolut — proteksi tetap dini walau SL rapat)\n"
+        "• R-ladder: 0.5R→kunci15% | 1.0R→35% | 1.5R→50% | 2.0R→65% |\n"
+        "  2.8R→80% | 3.5R→85% (R = kelipatan risk/jarak-SL trade itu\n"
+        "  sendiri, BUKAN persen absolut — proteksi tetap dini walau SL rapat)\n"
         "• Structure: SL mengikuti higher-low/lower-high M15 terbaru\n"
         "SL trailing cuma boleh mengunci profit (searah TP), tak pernah\n"
         "mundur ke entry. Kalau SL trailing tersentuh dgn profit terkunci,\n"
