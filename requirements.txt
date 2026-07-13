@@ -4,3 +4,7 @@ pandas
 numpy
 urllib3
 python-dotenv
+pandas
+numpy
+scikit-optimize
+matplotlib   # opsional, untuk plot (tidak wajib)
