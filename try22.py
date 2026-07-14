@@ -198,7 +198,7 @@ def index():
         n_banned = len(banned_coins)
     wins = tp + trail
     wr=f"{wins/(wins+sl)*100:.1f}%" if (wins+sl)>0 else "–"
-    ws_state = "LIVE (WS)" if ws_feed.is_fresh() else "FALLBACK (REST)"
+    ws_state = "REST (WS fallback siaga)" if ws_feed.is_fresh() else "REST (WS fallback belum siap)"
     return (f"<h3>SMC Signal Broadcaster</h3>"
             f"<p>Auto:{auto_mode} | Banned:{n_banned} | Data:{ws_state}</p>"
             f"<p>Total:{t} TP:{tp} SL:{sl} Trail:{trail} WR:{wr}</p>"), 200
@@ -236,19 +236,26 @@ def tg_updates(offset=None):
 
 
 # ═════════════════════════════════════════════
-# DATA LAYER — real-time via WebSocket, fallback berlapis kalau putus
-#   Tier 1: Binance Futures WebSocket   (real-time, live, hemat rate-limit)
-#   Tier 2: Binance Futures REST        (kalau WS belum siap / stale)
-#   Tier 3: Bybit REST                  (kalau Binance REST juga gagal)
+# DATA LAYER — REST sebagai sumber UTAMA, WS cuma fallback TERAKHIR
+#   Tier 1: Binance Futures REST        (sumber utama)
+#   Tier 2: Bybit REST                  (kalau Binance REST error/kena
+#           limit/ban — lihat fapi_get(): begitu Binance balas 418/429,
+#           retry ke Binance langsung dihentikan, tidak ditunggu2)
+#   Tier 3: Binance Futures WebSocket   (fallback TERAKHIR, dipakai hanya
+#           kalau Tier 1 & Tier 2 dua-duanya gagal. WS tetap disubscribe
+#           & di-backfill terus di background — lihat ensure_symbol_
+#           interval() — supaya buffernya SIAP dipakai sewaktu-waktu,
+#           tapi TIDAK dijadikan sumber utama krn koneksinya sering
+#           putus-nyambung di lingkungan hosting ini)
 #   Tier 4: CoinGecko REST — DARURAT, HARGA SAJA, hanya koin-koin di
 #           COINGECKO_ID_MAP. TIDAK dipakai untuk klines: granularitas
 #           candle CoinGecko (30m/4h/4hari tergantung rentang) tidak
 #           cocok dengan kebutuhan M1/M15/H1/D1 presisi bot ini — kalau
 #           dipaksakan, sinyal SMC yang butuh candle presisi (BOS/CHoCH/
-#           swing point) bisa salah baca. Kalau Binance+Bybit klines
-#           gagal total, get_klines() balikin DataFrame kosong (sama
-#           seperti perilaku lama) alih-alih pura-pura pakai data
-#           CoinGecko yang tidak akurat.
+#           swing point) bisa salah baca. Kalau semua REST+WS gagal
+#           total, get_klines() balikin DataFrame kosong (sama seperti
+#           perilaku lama) alih-alih pura-pura pakai data CoinGecko yang
+#           tidak akurat.
 # ═════════════════════════════════════════════
 BYBIT = "https://api.bybit.com"
 
@@ -291,10 +298,20 @@ def fapi_get(path, params=None):
         try:
             r = requests.get(f"{FAPI}{path}", params=params,
                              timeout=10, verify=False)
+            if r.status_code in (418, 429):
+                # Kena rate-limit/ban IP dari Binance — JANGAN retry lagi
+                # ke Binance (mengulang request saat sedang kena ban malah
+                # berisiko memperpanjang durasi ban). Langsung lempar ke
+                # caller supaya pindah ke tier fallback (Bybit → WS).
+                raise ConnectionError(
+                    f"Binance kena limit/ban (HTTP {r.status_code})")
             d = r.json()
             if isinstance(d, dict) and "code" in d:
                 raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
             return d
+        except ConnectionError as e:
+            log.warning(f"[binance] {e} — stop retry Binance, pindah fallback")
+            raise
         except Exception as e:
             log.warning(f"[binance] {i+1}/3: {e}")
             time.sleep(2)
@@ -641,12 +658,9 @@ ws_feed = BinanceWSFeed()
 # ── FUNGSI PUBLIK — signature SAMA PERSIS dgn sebelumnya, jadi seluruh
 #    kode bot (scoring, monitor posisi, dsb) TIDAK perlu diubah sama sekali ──
 def get_price(symbol):
-    """Tier1 WS realtime → Tier2 Binance REST → Tier3 Bybit REST →
-    Tier4 CoinGecko (darurat, hanya koin di COINGECKO_ID_MAP)."""
-    if ws_feed.is_fresh():
-        p = ws_feed.get_price(symbol)
-        if p is not None:
-            return p
+    """Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS (fallback TERAKHIR,
+    hanya dipakai kalau REST Binance & Bybit gagal/error/kena ban) →
+    Tier4 CoinGecko (darurat paling akhir, hanya koin di COINGECKO_ID_MAP)."""
     for _ in range(2):
         try:
             return _binance_price(symbol)
@@ -659,21 +673,24 @@ def get_price(symbol):
         except Exception as e:
             log.warning(f"[price/bybit] {symbol}: {e}")
             time.sleep(1)
+    if ws_feed.is_fresh():
+        p = ws_feed.get_price(symbol)
+        if p is not None:
+            log.warning(f"[price/ws fallback] {symbol} — REST Binance & Bybit gagal")
+            return p
     p = _coingecko_price(symbol)
     if p is not None:
-        log.warning(f"[price/coingecko DARURAT] {symbol} — Binance & Bybit gagal total")
+        log.warning(f"[price/coingecko DARURAT] {symbol} — semua sumber lain gagal")
         return p
     return None
 
 def get_klines(symbol, interval, limit=250):
-    """Tier1 buffer WS (sudah di-backfill sekali via ensure_symbol_interval)
-    → Tier2 Binance REST → Tier3 Bybit REST. (CoinGecko TIDAK dipakai utk
-    klines — lihat catatan di header section ini.)"""
+    """Tier1 Binance REST → Tier2 Bybit REST → Tier3 buffer WS (fallback
+    TERAKHIR, hanya dipakai kalau REST Binance & Bybit gagal/error/kena
+    ban). ensure_symbol_interval() tetap dipanggil di awal supaya WS terus
+    subscribe & backfill di background — bukan supaya jadi sumber utama,
+    tapi supaya buffer-nya SIAP dipakai sewaktu-waktu REST bermasalah."""
     ws_feed.ensure_symbol_interval(symbol, interval)
-    if ws_feed.is_fresh():
-        df = ws_feed.get_klines(symbol, interval, limit)
-        if df is not None:
-            return df
     try:
         df = _binance_klines(symbol, interval, limit)
         if not df.empty:
@@ -688,11 +705,18 @@ def get_klines(symbol, interval, limit=250):
             return df
     except Exception as e:
         log.warning(f"[klines/bybit] {symbol}: {e}")
+    if ws_feed.is_fresh():
+        df = ws_feed.get_klines(symbol, interval, limit)
+        if df is not None and not df.empty:
+            log.warning(f"[klines/ws fallback] {symbol} {interval} — REST Binance & Bybit gagal")
+            return df
     return pd.DataFrame()
 
 def get_top_coins():
-    """Ambil top coins. Tier1 WS ticker cache → Tier2 Binance REST →
-    Tier3 Bybit REST. Logika exclude/ban SAMA PERSIS seperti sebelumnya."""
+    """Ambil top coins. Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS
+    ticker cache (fallback TERAKHIR, hanya kalau REST Binance & Bybit
+    gagal/error/kena ban). Logika exclude/ban SAMA PERSIS seperti
+    sebelumnya."""
     global scan_counter
     with ban_lock:
         scan_counter += 1
@@ -709,6 +733,24 @@ def get_top_coins():
 
     exclude_syms = cur_ban | active_syms
 
+    # Binance REST
+    try:
+        coins = _binance_top_coins(exclude_syms)
+        if coins:
+            return coins
+        log.warning("[top_coins/binance] kosong, coba Bybit...")
+    except Exception as e:
+        log.warning(f"[top_coins/binance] {e} — coba Bybit...")
+    # Bybit fallback
+    try:
+        coins = _bybit_top_coins(exclude_syms)
+        if coins:
+            log.info(f"[top_coins/bybit fallback] {len(coins)} koin")
+            return coins
+        log.warning("[top_coins/bybit] kosong, coba WS...")
+    except Exception as e:
+        log.warning(f"[top_coins/bybit] {e} — coba WS...")
+    # WS fallback TERAKHIR
     if ws_feed.is_fresh():
         raw = ws_feed.get_top_coins_raw()
         usdt = [
@@ -721,23 +763,8 @@ def get_top_coins():
         ]
         if usdt:
             usdt.sort(key=lambda x: x["qvol"], reverse=True)
+            log.warning("[top_coins/ws fallback] REST Binance & Bybit gagal")
             return [t["symbol"] for t in usdt[:TOP_N_COINS]]
-
-    # Binance REST
-    try:
-        coins = _binance_top_coins(exclude_syms)
-        if coins:
-            return coins
-        log.warning("[top_coins/binance] kosong, coba Bybit...")
-    except Exception as e:
-        log.warning(f"[top_coins/binance] {e} — coba Bybit...")
-    # Bybit fallback
-    try:
-        coins = _bybit_top_coins(exclude_syms)
-        log.info(f"[top_coins/bybit fallback] {len(coins)} koin")
-        return coins
-    except Exception as e:
-        log.warning(f"[top_coins/bybit] {e}")
     return []
 
 
@@ -746,11 +773,14 @@ _PRICE_REFRESH_SEC = 10   # interval cek watchdog (detik)
 def _price_cache_loop():
     """
     DULU: thread polling REST batch tiap 10 detik utk cache harga posisi.
-    SEKARANG: harga real-time sudah dihandle BinanceWSFeed (!ticker@arr).
-    Fungsi ini (nama dipertahankan spy __main__ tak perlu diubah) jadi
-    watchdog: pantau kesehatan WS, kirim notifikasi TG sekali tiap kali
-    status berubah (live↔fallback), dan bersihkan stream kline yang
-    sudah tidak dipakai >30 menit.
+    SEKARANG: REST (Binance→Bybit) adalah sumber data UTAMA di get_price/
+    get_klines/get_top_coins; WS cuma buffer fallback TERAKHIR yang
+    disiapkan di background. Karena WS bukan sumber utama lagi, hidup-
+    matinya WS BUKAN kejadian penting bagi operasional bot — jadi TIDAK
+    lagi dikirim ke Telegram tiap kali flap (dulu ini yang bikin spam
+    notifikasi "WS pulih"/"WS terputus" berulang-ulang). Status WS tetap
+    dicatat di log untuk keperluan debug, dan stream kline yang sudah
+    tidak dipakai >30 menit tetap dibersihkan di sini.
     """
     was_fresh = None   # None = belum pernah dicek
     while True:
@@ -758,13 +788,9 @@ def _price_cache_loop():
             fresh = ws_feed.is_fresh()
             if was_fresh is not None and was_fresh != fresh:
                 if fresh:
-                    log.info("[ws-watchdog] WS pulih, kembali real-time")
-                    if active_chat_id:
-                        tg_send(active_chat_id, "✅ WS Binance pulih — data kembali real-time.")
+                    log.info("[ws-watchdog] WS fallback tersedia lagi (buffer siap)")
                 else:
-                    log.warning("[ws-watchdog] WS stale/terputus — fallback ke REST (Binance→Bybit→CoinGecko darurat)")
-                    if active_chat_id:
-                        tg_send(active_chat_id, "⚠️ WS Binance terputus/stale. Bot fallback ke REST sementara.")
+                    log.info("[ws-watchdog] WS fallback tidak tersedia — tidak masalah, REST tetap sumber utama")
             was_fresh = fresh
             ws_feed.cleanup_stale_streams()
         except Exception as e:
