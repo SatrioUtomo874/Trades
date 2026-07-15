@@ -12,6 +12,7 @@ from . import telegram_bot
 
 log = logging.getLogger(__name__)
 
+# ==================== KONSTANTA DEFAULT ====================
 DEFAULTS = {
     "MIN_CONFIDENCE": 50,
     "MIN_RR": 2.0,
@@ -24,14 +25,17 @@ DEFAULTS = {
     "STRUCT_TRAIL_LOOKBACK": 60,
 }
 
+# ==================== STATE GLOBAL ====================
 positions = {}
 positions_lock = threading.Lock()
 auto_mode = False
 auto_thread = None
 
+# Hook untuk strategy_logic
 strategy_logic = None
 WIB = timezone(timedelta(hours=7))
 
+# ==================== FUNGSI PUBLIK ====================
 def start_monitor(chat_id):
     global auto_mode, auto_thread
     if auto_mode:
@@ -65,6 +69,7 @@ def get_active_positions():
 def is_auto_running():
     return auto_mode
 
+# ==================== FUNGSI INTI ====================
 def close_position(sym, result, close_price=None):
     with positions_lock:
         pos = positions.pop(sym, None)
@@ -153,7 +158,7 @@ def monitor_position(sym, pos):
             time.sleep(DEFAULTS["MONITOR_SLEEP"])
             continue
 
-        # --- R-ladder ---
+        # --- Kandidat A: R-ladder ---
         cand_a = None
         if risk0 > 0:
             pnl_r_now = (price - entry) / risk0 * (1 if is_buy else -1)
@@ -165,7 +170,7 @@ def monitor_position(sym, pos):
                 locked_r_reached = best_r
                 cand_a = entry + best_r * risk0 * (1 if is_buy else -1)
 
-        # --- Structure ---
+        # --- Kandidat B: Structure ---
         cand_b = None
         if time.time() >= next_struct_check:
             next_struct_check = time.time() + 120
@@ -363,6 +368,7 @@ def _open_position(sym, signal, actual_entry, chat_id, mode_label):
 
     threading.Thread(target=monitor_position, args=(sym, pos), daemon=True).start()
 
+# ==================== SIMULATION LOOP ====================
 def _simulation_loop(chat_id):
     telegram_bot.tg_send(chat_id,
         "🤖 <b>SMC Signal Broadcaster dimulai!</b>\n\n"
@@ -384,72 +390,91 @@ def _simulation_loop(chat_id):
             with positions_lock:
                 active_syms = set(positions.keys())
             
-            # PERBAIKAN: pakai get_banned_set() bukan get_banned_coins()
             banned_set = api_client.get_banned_set()
             exclude = active_syms | banned_set
 
             symbols = api_client.get_top_coins(exclude_syms=exclude)
             if not symbols:
+                telegram_bot.tg_send(chat_id,
+                    "⚠️ <b>Tidak ada koin tersedia.</b>\n"
+                    "Semua koin mungkin sedang dalam masa ban atau API error.\n"
+                    "Cek /banned untuk melihat daftar ban.")
                 return
 
+            # Scan semua koin, kumpulkan sinyal valid
+            valid_signals = []
             for sym in symbols:
                 if not auto_mode:
                     return
                 signal = strategy_logic.full_analyze(sym)
                 if signal is None:
                     continue
-                if signal.get("confidence", 0) < DEFAULTS["MIN_CONFIDENCE"]:
-                    continue
+                if signal.get("confidence", 0) >= DEFAULTS["MIN_CONFIDENCE"]:
+                    valid_signals.append(signal)
 
-                with positions_lock:
-                    if sym in positions:
-                        continue
-                    if len(positions) >= DEFAULTS["MAX_POSITIONS"]:
-                        return
-
-                entry_target = signal["entry"]
-                current = signal["price"]
-                is_buy = signal["decision"] == "BUY"
-                entry_label = signal.get("entry_label", "market")
-
-                already_at_entry = (is_buy and current <= entry_target * 1.002) or (not is_buy and current >= entry_target * 0.998)
-
-                if already_at_entry or entry_label == "market":
-                    actual_entry = api_client.get_price(sym) or current
-                    with positions_lock:
-                        if sym in positions or len(positions) >= DEFAULTS["MAX_POSITIONS"]:
-                            return
-                        positions[sym] = {
-                            "signal": signal,
-                            "entry": entry_target,
-                            "chat_id": chat_id,
-                            "entry_time": None,
-                            "timeout_flag": False,
-                            "status": "pending",
-                        }
-                    _open_position(sym, signal, actual_entry, chat_id, "langsung")
-                else:
-                    with positions_lock:
-                        if sym in positions or len(positions) >= DEFAULTS["MAX_POSITIONS"]:
-                            return
-                        positions[sym] = {
-                            "signal": signal,
-                            "entry": entry_target,
-                            "chat_id": chat_id,
-                            "entry_time": None,
-                            "timeout_flag": False,
-                            "status": "pending",
-                        }
-                    dist_pct = abs(entry_target - current) / current * 100
-                    telegram_bot.tg_send(chat_id,
-                        f"🎯 <b>PENDING ORDER</b> — {sym}\n\n"
-                        f"{_fmt_signal_msg(signal)}\n\n"
-                        f"⏳ Menunggu harga ke zona entry\n"
-                        f"Harga kini : <code>{current:.6g}</code>\n"
-                        f"Entry zone : <code>{entry_target:.6g}</code> ({entry_label})\n"
-                        f"Jarak      : {dist_pct:.2f}%")
-                    threading.Thread(target=_wait_entry, args=(sym, signal, chat_id), daemon=True).start()
+            # --- NOTIFIKASI TIDAK ADA SINYAL ---
+            if not valid_signals:
+                # Kirim ringkasan ke Telegram (hanya sekali per scan cycle)
+                telegram_bot.tg_send(chat_id,
+                    f"🔍 <b>Scan selesai — Tidak ada sinyal</b>\n"
+                    f"Koin di-scan: {len(symbols)}\n"
+                    f"Min Confidence: {DEFAULTS['MIN_CONFIDENCE']}%\n"
+                    f"Tidak ada setup yang memenuhi kriteria.\n"
+                    f"Bot akan scan ulang dalam beberapa detik.")
                 return
+
+            # Ambil sinyal terbaik (confidence tertinggi, lalu RR tertinggi)
+            valid_signals.sort(key=lambda x: (x["confidence"], x["rr"]), reverse=True)
+            signal = valid_signals[0]
+
+            entry_target = signal["entry"]
+            current = signal["price"]
+            is_buy = signal["decision"] == "BUY"
+            entry_label = signal.get("entry_label", "market")
+
+            with positions_lock:
+                if signal["symbol"] in positions:
+                    return
+                if len(positions) >= DEFAULTS["MAX_POSITIONS"]:
+                    return
+
+            already_at_entry = (is_buy and current <= entry_target * 1.002) or (not is_buy and current >= entry_target * 0.998)
+
+            if already_at_entry or entry_label == "market":
+                actual_entry = api_client.get_price(signal["symbol"]) or current
+                with positions_lock:
+                    if signal["symbol"] in positions or len(positions) >= DEFAULTS["MAX_POSITIONS"]:
+                        return
+                    positions[signal["symbol"]] = {
+                        "signal": signal,
+                        "entry": entry_target,
+                        "chat_id": chat_id,
+                        "entry_time": None,
+                        "timeout_flag": False,
+                        "status": "pending",
+                    }
+                _open_position(signal["symbol"], signal, actual_entry, chat_id, "langsung")
+            else:
+                with positions_lock:
+                    if signal["symbol"] in positions or len(positions) >= DEFAULTS["MAX_POSITIONS"]:
+                        return
+                    positions[signal["symbol"]] = {
+                        "signal": signal,
+                        "entry": entry_target,
+                        "chat_id": chat_id,
+                        "entry_time": None,
+                        "timeout_flag": False,
+                        "status": "pending",
+                    }
+                dist_pct = abs(entry_target - current) / current * 100
+                telegram_bot.tg_send(chat_id,
+                    f"🎯 <b>PENDING ORDER</b> — {signal['symbol']}\n\n"
+                    f"{_fmt_signal_msg(signal)}\n\n"
+                    f"⏳ Menunggu harga ke zona entry\n"
+                    f"Harga kini : <code>{current:.6g}</code>\n"
+                    f"Entry zone : <code>{entry_target:.6g}</code> ({entry_label})\n"
+                    f"Jarak      : {dist_pct:.2f}%")
+                threading.Thread(target=_wait_entry, args=(signal["symbol"], signal, chat_id), daemon=True).start()
         finally:
             with scan_lock:
                 scanning = False
@@ -472,6 +497,7 @@ def _simulation_loop(chat_id):
 
     telegram_bot.tg_send(chat_id, "⏹ <b>Scanning dihentikan.</b>\n\n" + stats_keeper.fmt_stats())
 
+# ==================== HELPERS ====================
 def _fmt_signal_msg(sig):
     em = "🟢" if sig["decision"] == "BUY" else "🔴"
     bar = "█" * (sig["confidence"] // 10) + "░" * (10 - sig["confidence"] // 10)
