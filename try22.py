@@ -259,6 +259,49 @@ def tg_send_document(chat_id, file_path, caption=""):
 # TAMBAHAN BARU (END)
 # ============================================================
 
+
+# ============================================================
+# TAMBAHAN BARU (START) — GitHub API untuk /ganti
+# ============================================================
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+REPO_NAME = os.getenv("REPO_NAME")  # format: "username/repo"
+
+def _commit_to_github(content, path="strategy_logic.py", commit_msg="Update strategy_logic via Telegram /ganti"):
+    """Commit file ke GitHub menggunakan API."""
+    if not GITHUB_TOKEN or not REPO_NAME:
+        raise ValueError("GITHUB_TOKEN atau REPO_NAME tidak diset di environment.")
+    
+    url = f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    
+    # 1. Get current SHA (untuk update)
+    sha = None
+    try:
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            sha = resp.json().get("sha")
+    except Exception:
+        pass
+    
+    # 2. Commit baru
+    import base64
+    data = {
+        "message": commit_msg,
+        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+        "branch": "main"
+    }
+    if sha:
+        data["sha"] = sha
+    
+    resp = requests.put(url, headers=headers, json=data)
+    if resp.status_code not in (200, 201):
+        raise ValueError(f"GitHub commit gagal: {resp.status_code} {resp.text}")
+    
+    return True
+# ============================================================
+# TAMBAHAN BARU (END)
+# ============================================================
+
 def tg_updates(offset=None):
     try:
         r = requests.get(
@@ -3385,6 +3428,71 @@ def bot_loop():
 # ============================================================
 # TAMBAHAN BARU (END)
 # ============================================================
+                # ============================================================
+# TAMBAHAN BARU (START) — Handler /ganti (Upload Otak Baru via GitHub API)
+# ============================================================
+                elif text == "/ganti":
+                    doc = msg.get("document")
+                    if not doc:
+                        tg_send(chat_id, "📤 Kirim file strategy_logic.py sebagai dokumen dengan caption /ganti")
+                        continue
+                    
+                    file_name = doc.get("file_name", "")
+                    if not file_name.endswith(".py"):
+                        tg_send(chat_id, "❌ Harus file .py")
+                        continue
+                    
+                    try:
+                        # 1. Download file dari Telegram
+                        file_id = doc["file_id"]
+                        file_info = requests.get(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
+                            params={"file_id": file_id}, timeout=10
+                        ).json()
+                        file_path = file_info["result"]["file_path"]
+                        file_content = requests.get(
+                            f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
+                            timeout=10
+                        ).text
+                        
+                        # 2. Validasi sintaks
+                        try:
+                            compile(file_content, "strategy_logic.py", "exec")
+                        except SyntaxError as e:
+                            tg_send(chat_id, f"❌ Error sintaks di file:\n<code>{e}</code>")
+                            continue
+                        
+                        # 3. Commit ke GitHub via API
+                        try:
+                            _commit_to_github(file_content, "strategy_logic.py", f"Update strategy_logic via Telegram /ganti")
+                            tg_send(chat_id, "✅ File berhasil di-commit ke GitHub!")
+                        except Exception as e:
+                            tg_send(chat_id, f"❌ Gagal commit ke GitHub:\n<code>{str(e)[:200]}</code>")
+                            continue
+                        
+                        # 4. Reload modul strategy_logic dari disk (setelah commit, file sudah ter-update)
+                        import importlib
+                        import sys
+                        if 'strategy_logic' in sys.modules:
+                            importlib.reload(sys.modules['strategy_logic'])
+                        else:
+                            import strategy_logic
+                            importlib.reload(strategy_logic)
+                        
+                        # 5. Update global namespace try22.py dengan fungsi-fungsi baru
+                        for attr in dir(strategy_logic):
+                            if not attr.startswith("_"):
+                                globals()[attr] = getattr(strategy_logic, attr)
+                        
+                        tg_send(chat_id, "✅ Strategy logic berhasil di-reload dan AKTIF tanpa restart!")
+                        log.info("[OTAK] Strategy logic di-reload via /ganti (GitHub commit)")
+                        
+                    except Exception as e:
+                        log.error(f"[ganti] Error: {e}")
+                        tg_send(chat_id, f"❌ Gagal mengganti strategy_logic:\n<code>{str(e)[:200]}</code>")
+                # ============================================================
+                # TAMBAHAN BARU (END)
+                # ============================================================
                 elif text in ("/banned","banned"):
                     with ban_lock:
                         cur_scan = scan_counter
