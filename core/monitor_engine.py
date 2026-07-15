@@ -8,17 +8,17 @@ from datetime import datetime, timezone, timedelta
 
 from . import api_client
 from . import stats_keeper
+from . import telegram_bot   # <--- TAMBAHKAN IMPORT INI
 
 log = logging.getLogger(__name__)
 
 # ==================== KONSTANTA DEFAULT ====================
-# Nilai ini akan di-override oleh strategy_logic (jika ada)
 DEFAULTS = {
     "MIN_CONFIDENCE": 50,
     "MIN_RR": 2.0,
     "MAX_POSITIONS": 20,
     "MONITOR_SLEEP": 10,
-    "MONITOR_INTERVAL": 15 * 60,  # 15 menit
+    "MONITOR_INTERVAL": 15 * 60,
     "TRAIL_R_LADDER": [(0.5, 0.15), (1.0, 0.35), (1.5, 0.50), (2.0, 0.65), (2.8, 0.80), (3.5, 0.85)],
     "STRUCT_TRAIL_LB": 2,
     "STRUCT_TRAIL_BUF_PCT": 0.0015,
@@ -31,13 +31,12 @@ positions_lock = threading.Lock()
 auto_mode = False
 auto_thread = None
 
-# Hook untuk strategy_logic (di-inject oleh bootstrap.py)
+# Hook untuk strategy_logic
 strategy_logic = None
 WIB = timezone(timedelta(hours=7))
 
 # ==================== FUNGSI PUBLIK ====================
 def start_monitor(chat_id):
-    """Mulai scanner otomatis (broadcaster)."""
     global auto_mode, auto_thread
     if auto_mode:
         return "⚠️ Monitor sudah berjalan."
@@ -47,16 +46,11 @@ def start_monitor(chat_id):
     return "✅ Monitor dimulai."
 
 def stop_monitor():
-    """Hentikan scanner (posisi aktif tetap dipantau)."""
     global auto_mode
     auto_mode = False
     return "⏹️ Scanning dihentikan. Posisi aktif tetap dipantau."
 
 def timeout_position(sym=None):
-    """
-    Flag timeout untuk posisi tertentu atau semua posisi.
-    Posisi akan ditutup dengan PnL riil saat ini di loop berikutnya.
-    """
     with positions_lock:
         if sym:
             if sym in positions:
@@ -69,16 +63,14 @@ def timeout_position(sym=None):
             return f"⏭ Timeout semua ({len(positions)}) posisi."
 
 def get_active_positions():
-    """Ambil daftar posisi aktif (thread-safe)."""
     with positions_lock:
         return dict(positions)
 
 def is_auto_running():
     return auto_mode
 
-# ==================== FUNGSI INTI (DARI try22.py) ====================
+# ==================== FUNGSI INTI ====================
 def close_position(sym, result, close_price=None):
-    """Tutup posisi, catat statistik, ban koin."""
     with positions_lock:
         pos = positions.pop(sym, None)
     if pos is None:
@@ -97,20 +89,11 @@ def close_position(sym, result, close_price=None):
     )
     api_client.ban_coin(sym, f"trade closed ({result})", duration=api_client.BAN_DURATION_TRADE_CLOSED)
 
-    # Update active_trade jika ini yang sedang dipantau
-    with positions_lock:
-        if not positions:
-            pass  # active_trade tidak dipakai lagi
-
     emoji = {"tp": "🎯", "sl": "🛑", "trail": "🔒"}.get(result, "❓")
     label = {"tp": "TAKE PROFIT", "sl": "STOP LOSS", "trail": "TRAILING STOP"}.get(result, result.upper())
-    api_client.tg_send(cid, f"{emoji} <b>{label}</b> — {sym}\n\n{stats_keeper.fmt_stats()}")
+    telegram_bot.tg_send(cid, f"{emoji} <b>{label}</b> — {sym}\n\n{stats_keeper.fmt_stats()}")
 
 def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
-    """
-    Ambil candle M1 dalam N menit terakhir, periksa mana yang kena duluan.
-    Return: "tp", "sl", atau None.
-    """
     try:
         df = api_client.get_klines(sym, "1m", lookback_min + 2)
         if df is None or df.empty:
@@ -142,15 +125,11 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
     return None
 
 def monitor_position(sym, pos):
-    """
-    Thread per-posisi. Cek harga/TP/SL tiap MONITOR_SLEEP (10 detik).
-    Kirim update ke Telegram tiap MONITOR_INTERVAL (15 menit).
-    """
     sig = pos["signal"]
     chat_id = pos["chat_id"]
     entry = pos["entry"]
     tp_p = sig["tp"]
-    sl_p = sig["sl"]  # SL berjalan
+    sl_p = sig["sl"]
     is_buy = sig["decision"] == "BUY"
     risk0 = abs(entry - sig["sl"])
     locked_r_reached = 0.0
@@ -162,14 +141,13 @@ def monitor_position(sym, pos):
             if sym not in positions:
                 return
 
-        # Timeout manual
         if pos.get("timeout_flag"):
             pos["timeout_flag"] = False
             price = api_client.get_price(sym) or entry
             pnl_pct = (price - entry) / entry * (1 if is_buy else -1)
             result = "tp" if pnl_pct >= 0 else "sl"
             emoji = "🎯" if result == "tp" else "🛑"
-            api_client.tg_send(chat_id,
+            telegram_bot.tg_send(chat_id,
                 f"⏭ <b>Ditutup Manual</b> — {sym} {emoji}\n"
                 f"Harga: <code>{price:.6g}</code> | PnL: <b>{pnl_pct*100:+.2f}%</b>")
             close_position(sym, result, close_price=price)
@@ -192,7 +170,7 @@ def monitor_position(sym, pos):
                 locked_r_reached = best_r
                 cand_a = entry + best_r * risk0 * (1 if is_buy else -1)
 
-        # --- Kandidat B: Structure (swing point M15) ---
+        # --- Kandidat B: Structure ---
         cand_b = None
         if time.time() >= next_struct_check:
             next_struct_check = time.time() + 120
@@ -210,7 +188,6 @@ def monitor_position(sym, pos):
         else:
             cand_b = pos.get("_struct_sl_cache")
 
-        # SL baru = kandidat paling protektif, hanya boleh mengunci profit
         cands = [c for c in (cand_a, cand_b) if c is not None]
         if cands:
             new_sl = max(cands) if is_buy else min(cands)
@@ -220,7 +197,7 @@ def monitor_position(sym, pos):
                 sl_p = new_sl
                 pos["current_sl"] = sl_p
                 src = "R-ladder" if (cand_a is not None and new_sl == cand_a) else "structure"
-                api_client.tg_send(chat_id,
+                telegram_bot.tg_send(chat_id,
                     f"🔒 <b>Trailing SL — {sym}</b> ({src})\n"
                     f"SL dikunci ke <code>{sl_p:.6g}</code> "
                     f"({(sl_p-entry)/entry*100*(1 if is_buy else -1):+.2f}%)")
@@ -236,14 +213,13 @@ def monitor_position(sym, pos):
 
             if order == "tp":
                 pct = abs(tp_p - entry) / entry * 100
-                api_client.tg_send(chat_id,
+                telegram_bot.tg_send(chat_id,
                     f"🎯 <b>TAKE PROFIT</b> — {sym} 🎉\n"
                     f"TP: <code>{tp_p:.6g}</code>\n"
                     f"Profit: +{pct:.2f}%")
                 close_position(sym, "tp")
                 return
             else:
-                # Verifikasi SL via candle M1
                 confirmed_sl = False
                 try:
                     df_m1 = api_client.get_klines(sym, "1m", 5)
@@ -258,7 +234,7 @@ def monitor_position(sym, pos):
                     result_final = "trail" if is_profit_lock else "sl"
                     label = "TRAILING STOP (profit terkunci)" if is_profit_lock else "STOP LOSS"
                     emoji = "🔒" if is_profit_lock else "🛑"
-                    api_client.tg_send(chat_id,
+                    telegram_bot.tg_send(chat_id,
                         f"{emoji} <b>{label}</b> — {sym}\n"
                         f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code> | "
                         f"PnL: <b>{pct_final:+.2f}%</b>")
@@ -266,7 +242,7 @@ def monitor_position(sym, pos):
                     return
                 else:
                     if not pos.get("sweep_notified"):
-                        api_client.tg_send(chat_id,
+                        telegram_bot.tg_send(chat_id,
                             f"🔄 <b>Liquidity Sweep — {sym}</b>\n"
                             f"Wick menyentuh SL, candle M1 belum konfirmasi. Lanjut...")
                         pos["sweep_notified"] = True
@@ -275,10 +251,9 @@ def monitor_position(sym, pos):
 
         pos["sweep_notified"] = False
 
-        # Update periodik 15 menit
         if time.time() >= next_update_at:
             pnl_pct = (price - entry) / entry * 100 * (1 if is_buy else -1)
-            api_client.tg_send(chat_id,
+            telegram_bot.tg_send(chat_id,
                 f"📊 <b>Update 15m — {sym}</b>\n"
                 f"Arah  : {'🟢 BUY' if is_buy else '🔴 SELL'}\n"
                 f"Entry : <code>{entry:.6g}</code>\n"
@@ -291,7 +266,6 @@ def monitor_position(sym, pos):
         time.sleep(DEFAULTS["MONITOR_SLEEP"])
 
 def _wait_entry(sym, signal, chat_id):
-    """Thread tunggu harga ke zona entry (pending order)."""
     entry_target = signal["entry"]
     is_buy = signal["decision"] == "BUY"
     tp_p = signal["tp"]
@@ -310,16 +284,14 @@ def _wait_entry(sym, signal, chat_id):
             time.sleep(DEFAULTS["MONITOR_SLEEP"])
             continue
 
-        # TP tersentuh sebelum entry
         tp_hit = (price_now >= tp_p) if is_buy else (price_now <= tp_p)
         if tp_hit:
             with positions_lock:
                 positions.pop(sym, None)
             api_client.ban_coin(sym, "TP sebelum entry")
-            api_client.tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nTP tersentuh sebelum entry. Skip.")
+            telegram_bot.tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nTP tersentuh sebelum entry. Skip.")
             return
 
-        # SL sebelum entry (butuh konfirmasi candle M15)
         if time.time() >= next_sl_check:
             next_sl_check = time.time() + 60
             try:
@@ -335,12 +307,11 @@ def _wait_entry(sym, signal, chat_id):
                             with positions_lock:
                                 positions.pop(sym, None)
                             api_client.ban_coin(sym, "SL sebelum entry")
-                            api_client.tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nCandle M15 close mengonfirmasi SL. Skip.")
+                            telegram_bot.tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nCandle M15 close mengonfirmasi SL. Skip.")
                             return
             except Exception:
                 pass
 
-        # Entry hit
         entry_hit = (is_buy and price_now <= entry_target * 1.003) or (not is_buy and price_now >= entry_target * 0.997)
         if entry_hit:
             _open_position(sym, signal, price_now, chat_id, "terpicu")
@@ -348,29 +319,25 @@ def _wait_entry(sym, signal, chat_id):
 
         time.sleep(DEFAULTS["MONITOR_SLEEP"])
 
-    # Expired
     with positions_lock:
         positions.pop(sym, None)
     api_client.ban_coin(sym, "pending expired")
-    api_client.tg_send(chat_id, f"⏰ <b>Pending Expired</b> — {sym}\nHarga tidak mencapai zona entry dalam 8 jam. Skip.")
+    telegram_bot.tg_send(chat_id, f"⏰ <b>Pending Expired</b> — {sym}\nHarga tidak mencapai zona entry dalam 8 jam. Skip.")
 
 def _open_position(sym, signal, actual_entry, chat_id, mode_label):
-    """Upgrade posisi dari pending ke aktif."""
     is_buy = signal["decision"] == "BUY"
     sl_v, tp_v = signal["sl"], signal["tp"]
 
-    # Validasi geometri
     geometry_ok = (sl_v < actual_entry < tp_v) if is_buy else (tp_v < actual_entry < sl_v)
     if not geometry_ok:
         with positions_lock:
             positions.pop(sym, None)
         api_client.ban_coin(sym, "geometri invalid")
-        api_client.tg_send(chat_id,
+        telegram_bot.tg_send(chat_id,
             f"⚠️ <b>Skip {sym}</b> — Geometri SL/TP invalid\n"
             f"Entry: {actual_entry:.6g} | TP: {tp_v:.6g} | SL: {sl_v:.6g}")
         return
 
-    # Verifikasi RR aktual
     sl_dist = abs(actual_entry - sl_v)
     tp_dist = abs(tp_v - actual_entry)
     actual_rr = tp_dist / sl_dist if sl_dist > 0 else 0
@@ -378,7 +345,7 @@ def _open_position(sym, signal, actual_entry, chat_id, mode_label):
         with positions_lock:
             positions.pop(sym, None)
         api_client.ban_coin(sym, "RR gagal di entry aktual")
-        api_client.tg_send(chat_id,
+        telegram_bot.tg_send(chat_id,
             f"⚠️ <b>Skip {sym}</b> — RR tidak memenuhi di entry aktual\n"
             f"RR aktual: <b>1:{actual_rr:.2f}</b> (min 1:{DEFAULTS['MIN_RR']})")
         return
@@ -393,7 +360,7 @@ def _open_position(sym, signal, actual_entry, chat_id, mode_label):
         pos["timeout_flag"] = False
         pos["current_sl"] = sl_v
 
-    api_client.tg_send(chat_id,
+    telegram_bot.tg_send(chat_id,
         f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
         f"Entry: <code>{actual_entry:.6g}</code>\n"
         f"TP: <code>{tp_v:.6g}</code> | SL: <code>{sl_v:.6g}</code>\n"
@@ -403,8 +370,7 @@ def _open_position(sym, signal, actual_entry, chat_id, mode_label):
 
 # ==================== SIMULATION LOOP ====================
 def _simulation_loop(chat_id):
-    """Loop utama broadcaster."""
-    api_client.tg_send(chat_id,
+    telegram_bot.tg_send(chat_id,
         "🤖 <b>SMC Signal Broadcaster dimulai!</b>\n\n"
         f"• Scan 50 koin → catat sinyal → pantau tiap 15 menit\n"
         f"• Maks {DEFAULTS['MAX_POSITIONS']} posisi bersamaan\n"
@@ -417,33 +383,28 @@ def _simulation_loop(chat_id):
     def _do_scan():
         nonlocal scanning
         try:
-            # Panggil full_analyze dari strategy_logic
             if strategy_logic is None:
                 log.error("[scan] strategy_logic belum di-load!")
                 return
 
-            # Ambil 50 koin (minus banned + posisi aktif)
             with positions_lock:
                 active_syms = set(positions.keys())
-            banned = api_client.get_banned_coins()[1]  # (scan_counter, set)
+            banned = api_client.get_banned_coins()[1] if hasattr(api_client.get_banned_coins, '__call__') else set()
             exclude = active_syms | banned
 
             symbols = api_client.get_top_coins(exclude_syms=exclude)
             if not symbols:
                 return
 
-            # Scan sampai dapat sinyal atau habis
             for sym in symbols:
                 if not auto_mode:
                     return
                 signal = strategy_logic.full_analyze(sym)
                 if signal is None:
                     continue
-                # Cek confidence
                 if signal.get("confidence", 0) < DEFAULTS["MIN_CONFIDENCE"]:
                     continue
 
-                # Cek slot
                 with positions_lock:
                     if sym in positions:
                         continue
@@ -453,7 +414,6 @@ def _simulation_loop(chat_id):
                 entry_target = signal["entry"]
                 current = signal["price"]
                 is_buy = signal["decision"] == "BUY"
-                tp_p = signal["tp"]
                 entry_label = signal.get("entry_label", "market")
 
                 already_at_entry = (is_buy and current <= entry_target * 1.002) or (not is_buy and current >= entry_target * 0.998)
@@ -461,9 +421,7 @@ def _simulation_loop(chat_id):
                 if already_at_entry or entry_label == "market":
                     actual_entry = api_client.get_price(sym) or current
                     with positions_lock:
-                        if sym in positions:
-                            return
-                        if len(positions) >= DEFAULTS["MAX_POSITIONS"]:
+                        if sym in positions or len(positions) >= DEFAULTS["MAX_POSITIONS"]:
                             return
                         positions[sym] = {
                             "signal": signal,
@@ -476,9 +434,7 @@ def _simulation_loop(chat_id):
                     _open_position(sym, signal, actual_entry, chat_id, "langsung")
                 else:
                     with positions_lock:
-                        if sym in positions:
-                            return
-                        if len(positions) >= DEFAULTS["MAX_POSITIONS"]:
+                        if sym in positions or len(positions) >= DEFAULTS["MAX_POSITIONS"]:
                             return
                         positions[sym] = {
                             "signal": signal,
@@ -489,7 +445,7 @@ def _simulation_loop(chat_id):
                             "status": "pending",
                         }
                     dist_pct = abs(entry_target - current) / current * 100
-                    api_client.tg_send(chat_id,
+                    telegram_bot.tg_send(chat_id,
                         f"🎯 <b>PENDING ORDER</b> — {sym}\n\n"
                         f"{_fmt_signal_msg(signal)}\n\n"
                         f"⏳ Menunggu harga ke zona entry\n"
@@ -497,8 +453,7 @@ def _simulation_loop(chat_id):
                         f"Entry zone : <code>{entry_target:.6g}</code> ({entry_label})\n"
                         f"Jarak      : {dist_pct:.2f}%")
                     threading.Thread(target=_wait_entry, args=(sym, signal, chat_id), daemon=True).start()
-                return  # satu sinyal per scan
-
+                return
         finally:
             with scan_lock:
                 scanning = False
@@ -519,11 +474,10 @@ def _simulation_loop(chat_id):
         threading.Thread(target=_do_scan, daemon=True).start()
         time.sleep(5)
 
-    api_client.tg_send(chat_id, "⏹ <b>Scanning dihentikan.</b>\n\n" + stats_keeper.fmt_stats())
+    telegram_bot.tg_send(chat_id, "⏹ <b>Scanning dihentikan.</b>\n\n" + stats_keeper.fmt_stats())
 
 # ==================== HELPERS ====================
 def _fmt_signal_msg(sig):
-    """Format sinyal untuk Telegram (copy dari try22.py)."""
     em = "🟢" if sig["decision"] == "BUY" else "🔴"
     bar = "█" * (sig["confidence"] // 10) + "░" * (10 - sig["confidence"] // 10)
     dir_label = "BULLISH" if sig["original_dir"] == "bull" else "BEARISH"
@@ -536,7 +490,7 @@ def _fmt_signal_msg(sig):
     if ch15.get("bearish_choch"): triggers.append("CHoCH Bear M15")
     if ch15.get("bullish_choch"): triggers.append("CHoCH Bull M15")
     if fr.get("failed_retest_sell"): triggers.append("Failed Retest Sell")
-    if fr.get("failed_retest_buy"): triggers.append("Failed Retest Buy")
+    if fr.get("failed_retest_buy"):  triggers.append("Failed Retest Buy")
 
     entry_label = sig.get("entry_label", "market")
     price_now, entry_zone = sig.get("price", sig["entry"]), sig["entry"]
