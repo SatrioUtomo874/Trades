@@ -383,8 +383,9 @@ def _simulation_loop(chat_id):
 
             with positions_lock:
                 active_syms = set(positions.keys())
-            # Perbaikan: gunakan api_client.get_banned_coins() (return set)
-            banned_set = api_client.get_banned_coins()
+            
+            # PERBAIKAN: pakai get_banned_set() bukan get_banned_coins()
+            banned_set = api_client.get_banned_set()
             exclude = active_syms | banned_set
 
             symbols = api_client.get_top_coins(exclude_syms=exclude)
