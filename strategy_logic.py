@@ -1,14 +1,18 @@
 """
-STRATEGY LOGIC — KASET AI
+STRATEGY LOGIC — OTAK AI
 ============================================
-FILE INI DI-GENERATE OLEH AI LOKAL (QWEN 1.7B)
+FILE INI BERISI SEMUA FUNGSI ANALISA (INDIKATOR, SMC, SCORING, ENTRY, SL/TP)
+DI-GENERATE / DIUBAH OLEH AI LOKAL (QWEN 1.7B)
 AI BEBAS MENAMBAH, MENGURANGI, ATAU MENGUBAH FUNGSI DI BAWAH INI.
 ============================================
 """
 import pandas as pd
 import numpy as np
+import logging
+log = logging.getLogger(__name__)
 
 # ==================== PARAMETER OVERRIDE ====================
+# AI bisa mengubah nilai-nilai ini. try22.py akan membaca dan meng-override.
 MIN_CONFIDENCE = 50
 MIN_RR = 2.0
 MAX_POSITIONS = 20
@@ -20,6 +24,16 @@ TRAIL_R_LADDER = [
     (2.8, 0.80),
     (3.5, 0.85),
 ]
+FIB_EXT_1 = 0.272
+FIB_EXT_2 = 0.618
+H4_RSI_BUY_MIN = 45
+H4_RSI_BUY_MAX = 68
+H4_RSI_SELL_MIN = 32
+H4_RSI_SELL_MAX = 55
+TP_RR_CAP = 4.0
+STRUCT_TRAIL_LB = 2
+STRUCT_TRAIL_BUF_PCT = 0.0015
+STRUCT_TRAIL_LOOKBACK = 60
 
 # ==================== 1. INDIKATOR ====================
 def ema(s, n):
@@ -576,9 +590,6 @@ def score_direction(df_h1, df_m15, df_d1=None):
     elif liq_bear["type"] == "sweep":
         setup_bull += 8
 
-    inducement_bull = detect_inducement_move(m15, "bull", atr_val)
-    inducement_bear = detect_inducement_move(m15, "bear", atr_val)
-
     ote_bull = ote_bear = False
     if len(sh15) >= 1 and len(sl15) >= 1:
         swing_hi_m15 = m15["high"].iloc[sh15[-1]]
@@ -662,6 +673,9 @@ def score_direction(df_h1, df_m15, df_d1=None):
     }
 
 # ==================== 4. ENTRY & SL/TP ====================
+def _zone_score(z):
+    return z.get("quality", 0) + int(z.get("fib_aligned", False))
+
 def _collect_entry_candidates(m15, direction, entry_ref, atr):
     up = direction == "bear"
     obs = find_zones(m15, direction, strict=True)
@@ -675,7 +689,7 @@ def _collect_entry_candidates(m15, direction, entry_ref, atr):
     for z in obs:
         entry_pt, invalid_pt = (z["top"], z["bot"]) if up else (z["bot"], z["top"])
         if (up and entry_pt > entry_ref + atr * 0.1) or (not up and entry_pt < entry_ref - atr * 0.1):
-            cands.append({"price": entry_pt, "invalid": invalid_pt, "label": "ob", "score": 3 + z.get("quality", 0) - _dist_penalty(entry_pt)})
+            cands.append({"price": entry_pt, "invalid": invalid_pt, "label": "ob", "score": 3 + _zone_score(z) - _dist_penalty(entry_pt)})
     for f in fvgs:
         if (up and f["mid"] > entry_ref + atr * 0.1) or (not up and f["mid"] < entry_ref - atr * 0.1):
             sc = 2 + int(f.get("is_fresh", False)) + 2 * int(f.get("candle3") == "breakaway")
@@ -721,8 +735,6 @@ def _h4_confluence(df_h1, direction, choch_m15=None):
         sh4, sl4 = swing_pts(df_h4, lb=3)
         struct_h4 = mkt_struct(df_h4, sh4, sl4)
         rsi_h4 = L4["rsi"]
-        H4_RSI_BUY_MIN, H4_RSI_BUY_MAX = 45, 68
-        H4_RSI_SELL_MIN, H4_RSI_SELL_MAX = 32, 55
         if direction == "bull":
             ema_ok = L4["ema9"] > L4["ema21"] > L4["ema50"]
             struct_ok = struct_h4 == "bullish"
@@ -748,13 +760,11 @@ def _fib_extension_levels(h1, sh1, sl1, direction):
     leg = swing_high - swing_low
     if leg <= 0:
         return None, None
-    FIB_EXT_1, FIB_EXT_2 = 0.272, 0.618
     if direction == "bull":
         return swing_high + leg * FIB_EXT_1, swing_high + leg * FIB_EXT_2
     else:
         return swing_low - leg * FIB_EXT_1, swing_low - leg * FIB_EXT_2
 
-TP_RR_CAP = 4.0
 def _select_best_tp(tp_pool, entry_price, risk):
     qualifying = []
     for lbl, v, tier in tp_pool:
@@ -846,20 +856,40 @@ def analyze_setup(df_h1, df_m15, direction, entry_price, score=None, invalid_lev
 
 # ==================== 5. FULL ANALYZE (PIPELINE) ====================
 def full_analyze(symbol):
-    """Pipeline lengkap: fetch data → scoring → entry diskon → SL/TP."""
-    from core import api_client
+    """
+    1. Score arah sinyal (H1 + M15 + D1 bias)
+    2. Hitung entry diskon dari OB/FVG/EQL/Fib
+    3. Hitung SL/TP dari entry diskon
+    Entry = zona struktural, bukan market price
+    """
+    # Fungsi get_klines akan diambil dari namespace try22.py (karena di-import di sana)
+    # Ini adalah dependency ke TUBUH yang TIDAK BOLEH diubah.
     try:
-        df_h1 = api_client.get_klines(symbol, "1h", 250)
-        df_m15 = api_client.get_klines(symbol, "15m", 250)
+        # Cari get_klines di namespace global (dari try22.py)
+        import sys
+        get_klines = sys.modules['__main__'].get_klines
+    except (AttributeError, KeyError):
+        # Fallback: coba import dari module utama
+        try:
+            from __main__ import get_klines
+        except ImportError:
+            log.error("[OTAK] Gagal mengakses get_klines dari TUBUH!")
+            return None
+
+    try:
+        df_h1 = get_klines(symbol, "1h", 250)
+        df_m15 = get_klines(symbol, "15m", 250)
         if df_h1.empty or df_m15.empty:
             return None
         try:
-            df_d1 = api_client.get_klines(symbol, "1d", 100)
+            df_d1 = get_klines(symbol, "1d", 100)
         except Exception:
             df_d1 = None
+
         score = score_direction(df_h1, df_m15, df_d1)
         if score is None:
             return None
+
         original_dir = score["direction"]
         current_price = score["price"]
         atr_val = score["atr"]
@@ -870,6 +900,7 @@ def full_analyze(symbol):
             confidence = max(0, confidence - 8)
         if score.get("pullback_type") == "aggressive" and not choch_confirms:
             confidence = max(0, confidence - 5)
+
         discount_entry, entry_label, invalid_level = calc_discount_entry(
             df_h1, df_m15, original_dir, current_price, atr_val)
         setup = analyze_setup(df_h1, df_m15, original_dir, discount_entry, score=score, invalid_level=invalid_level)
@@ -879,6 +910,7 @@ def full_analyze(symbol):
             return None
         if original_dir == "bear" and current_price <= setup["tp"]:
             return None
+
         return {
             "symbol": symbol,
             "original_dir": original_dir,
@@ -899,4 +931,13 @@ def full_analyze(symbol):
             "tp_sl_reason": f"Entry@{discount_entry:.5g}({entry_label}) | {setup['reason']}",
         }
     except Exception as e:
+        log.debug(f"[OTAK full_analyze] {symbol}: {e}")
         return None
+
+# ==================== 6. PARAMETER OVERRIDE UNTUK TUBUH ====================
+# Parameter ini akan dibaca oleh try22.py (jika ada) untuk meng-override nilai default.
+# Nama variabel harus SAMA PERSIS dengan di try22.py.
+MIN_CONFIDENCE = MIN_CONFIDENCE
+MIN_RR = MIN_RR
+MAX_POSITIONS = MAX_POSITIONS
+TRAIL_R_LADDER = TRAIL_R_LADDER
