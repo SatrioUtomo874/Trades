@@ -8,11 +8,10 @@ from datetime import datetime, timezone, timedelta
 
 from . import api_client
 from . import stats_keeper
-from . import telegram_bot   # <--- TAMBAHKAN IMPORT INI
+from . import telegram_bot
 
 log = logging.getLogger(__name__)
 
-# ==================== KONSTANTA DEFAULT ====================
 DEFAULTS = {
     "MIN_CONFIDENCE": 50,
     "MIN_RR": 2.0,
@@ -25,17 +24,14 @@ DEFAULTS = {
     "STRUCT_TRAIL_LOOKBACK": 60,
 }
 
-# ==================== STATE GLOBAL ====================
 positions = {}
 positions_lock = threading.Lock()
 auto_mode = False
 auto_thread = None
 
-# Hook untuk strategy_logic
 strategy_logic = None
 WIB = timezone(timedelta(hours=7))
 
-# ==================== FUNGSI PUBLIK ====================
 def start_monitor(chat_id):
     global auto_mode, auto_thread
     if auto_mode:
@@ -69,7 +65,6 @@ def get_active_positions():
 def is_auto_running():
     return auto_mode
 
-# ==================== FUNGSI INTI ====================
 def close_position(sym, result, close_price=None):
     with positions_lock:
         pos = positions.pop(sym, None)
@@ -158,7 +153,7 @@ def monitor_position(sym, pos):
             time.sleep(DEFAULTS["MONITOR_SLEEP"])
             continue
 
-        # --- Kandidat A: R-ladder ---
+        # --- R-ladder ---
         cand_a = None
         if risk0 > 0:
             pnl_r_now = (price - entry) / risk0 * (1 if is_buy else -1)
@@ -170,7 +165,7 @@ def monitor_position(sym, pos):
                 locked_r_reached = best_r
                 cand_a = entry + best_r * risk0 * (1 if is_buy else -1)
 
-        # --- Kandidat B: Structure ---
+        # --- Structure ---
         cand_b = None
         if time.time() >= next_struct_check:
             next_struct_check = time.time() + 120
@@ -368,7 +363,6 @@ def _open_position(sym, signal, actual_entry, chat_id, mode_label):
 
     threading.Thread(target=monitor_position, args=(sym, pos), daemon=True).start()
 
-# ==================== SIMULATION LOOP ====================
 def _simulation_loop(chat_id):
     telegram_bot.tg_send(chat_id,
         "🤖 <b>SMC Signal Broadcaster dimulai!</b>\n\n"
@@ -389,8 +383,9 @@ def _simulation_loop(chat_id):
 
             with positions_lock:
                 active_syms = set(positions.keys())
-            _, banned = api_client.get_banned_coins_info()
-            exclude = active_syms | banned
+            # Perbaikan: gunakan api_client.get_banned_coins() (return set)
+            banned_set = api_client.get_banned_coins()
+            exclude = active_syms | banned_set
 
             symbols = api_client.get_top_coins(exclude_syms=exclude)
             if not symbols:
@@ -476,7 +471,6 @@ def _simulation_loop(chat_id):
 
     telegram_bot.tg_send(chat_id, "⏹ <b>Scanning dihentikan.</b>\n\n" + stats_keeper.fmt_stats())
 
-# ==================== HELPERS ====================
 def _fmt_signal_msg(sig):
     em = "🟢" if sig["decision"] == "BUY" else "🔴"
     bar = "█" * (sig["confidence"] // 10) + "░" * (10 - sig["confidence"] // 10)
