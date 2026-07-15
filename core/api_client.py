@@ -1,9 +1,5 @@
 """
 API Client - Binance REST (dengan throttle), Bybit Fallback, WebSocket, CoinGecko
-Tier 1: Binance Futures REST (dengan throttle weight)
-Tier 2: Bybit REST (prioritas untuk backfill berat)
-Tier 3: Binance WebSocket (fallback terakhir)
-Tier 4: CoinGecko (darurat harga saja)
 """
 import os, time, json, threading, logging
 from collections import deque
@@ -14,7 +10,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 log = logging.getLogger(__name__)
 
-# ==================== KONSTANTA ====================
 FAPI = "https://fapi.binance.com"
 BYBIT = "https://api.bybit.com"
 BINANCE_WS_URL = "wss://fstream.binance.com/ws"
@@ -26,48 +21,36 @@ _request_timestamps = deque(maxlen=100)
 _last_request_time = 0
 
 def _throttle(weight=1):
-    """
-    Jaga agar total weight per menit tidak melewati 2400 (Binance limit).
-    weight: estimasi weight request (klines=5, ticker=1, ping=1).
-    """
     global _last_request_time
     now = time.time()
-    # Bersihkan timestamp lebih dari 60 detik
     while _request_timestamps and now - _request_timestamps[0] > 60:
         _request_timestamps.popleft()
-    
-    # Estimasi weight yang sudah terpakai dalam 60 detik terakhir
-    # (dikalikan weight rata-rata 3 sebagai estimasi konservatif)
     used_weight = len(_request_timestamps) * 3
-    if used_weight >= 2000:  # sisakan 400 weight untuk safety
+    if used_weight >= 2000:
         wait = 60 - (now - _request_timestamps[0]) + 1
         if wait > 0:
             log.warning(f"[throttle] Rate limit mendekati batas ({used_weight}/2400), sleep {wait:.1f}s")
             time.sleep(wait)
-    
-    # Jeda minimal 0.05 detik antar request
     elapsed = now - _last_request_time
     if elapsed < 0.05:
         time.sleep(0.05 - elapsed)
-    
     _request_timestamps.append(now)
     _last_request_time = time.time()
 
 # ==================== BINANCE REST ====================
 def fapi_get(path, params=None, retries=2):
-    """Binance REST dengan deteksi 418/429 (langsung stop retry Binance)."""
     for i in range(retries):
         try:
             _throttle(weight=5 if "klines" in path else 1)
             r = requests.get(f"{FAPI}{path}", params=params, timeout=10, verify=False)
             if r.status_code in (418, 429):
-                raise ConnectionError(f"Binance rate limit/ban (HTTP {r.status_code}) — stop retry Binance")
+                raise ConnectionError(f"Binance rate limit/ban (HTTP {r.status_code})")
             d = r.json()
             if isinstance(d, dict) and "code" in d:
                 raise ValueError(f"Binance error {d['code']}: {d.get('msg')}")
             return d
         except ConnectionError:
-            raise  # langsung lempar ke caller untuk fallback
+            raise
         except Exception as e:
             log.warning(f"[binance] {i+1}/{retries}: {e}")
             time.sleep(2)
@@ -100,7 +83,7 @@ def _binance_top_coins(exclude_syms=()):
     usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
     return [t["symbol"] for t in usdt[:TOP_N_COINS]]
 
-# ==================== BYBIT REST (backfill berat) ====================
+# ==================== BYBIT REST ====================
 INTERVAL_MAP = {"1m":"1","15m":"15","1h":"60","4h":"240","1d":"D"}
 
 def _bybit_klines(symbol, interval, limit):
@@ -147,7 +130,7 @@ def _bybit_top_coins(exclude_syms=()):
     usdt.sort(key=lambda x: float(x.get("turnover24h", "0")), reverse=True)
     return [t["symbol"] for t in usdt[:TOP_N_COINS]]
 
-# ==================== COINGECKO (darurat harga) ====================
+# ==================== COINGECKO ====================
 COINGECKO_ID_MAP = {
     "BTCUSDT":"bitcoin", "ETHUSDT":"ethereum", "BNBUSDT":"binancecoin",
     "SOLUSDT":"solana", "XRPUSDT":"ripple", "ADAUSDT":"cardano",
@@ -176,11 +159,6 @@ except ImportError:
     _WS_LIB_OK = False
 
 class BinanceWSFeed:
-    """
-    Satu koneksi WS gabungan Binance Futures.
-    BUKAN sumber utama — hanya fallback terakhir.
-    Subscribe dinamis, cleanup stream idle >30 menit.
-    """
     KLINE_INTERVALS = ("1m", "15m", "1h", "1d")
     MAX_CANDLES = {"1m": 300, "15m": 300, "1h": 300, "1d": 150}
     STALE_AFTER_SEC = 30
@@ -189,9 +167,9 @@ class BinanceWSFeed:
     def __init__(self):
         self._lock = threading.Lock()
         self._send_lock = threading.Lock()
-        self._klines = {}      # {(sym,itv): deque}
-        self._ticker = {}      # {sym: {"symbol","price","qvol","chg"}}
-        self._last_used = {}   # {(sym,itv): timestamp}
+        self._klines = {}
+        self._ticker = {}
+        self._last_used = {}
         self._subscribed = set()
         self._ws = None
         self._last_msg = 0.0
@@ -201,7 +179,7 @@ class BinanceWSFeed:
 
     def start(self):
         if not _WS_LIB_OK:
-            log.error("[ws] Modul websocket-client tidak terpasang. WS fallback nonaktif.")
+            log.error("[ws] Modul websocket-client tidak terpasang.")
             return
         threading.Thread(target=self._run_forever, daemon=True).start()
 
@@ -227,8 +205,7 @@ class BinanceWSFeed:
             return None
         df = pd.DataFrame(rows)
         df.index = pd.to_datetime(df["t"], unit="ms")
-        return df[["o","h","l","c","v"]].rename(
-            columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"})
+        return df[["o","h","l","c","v"]].rename(columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"})
 
     def ensure_symbol_interval(self, symbol, interval):
         if not _WS_LIB_OK:
@@ -252,7 +229,6 @@ class BinanceWSFeed:
         if stale:
             log.info(f"[ws] cleanup {len(stale)} stream idle")
 
-    # --- internal ---
     def _run_forever(self):
         while not self._stop:
             try:
@@ -415,10 +391,12 @@ def ban_coin(sym, reason="", duration=None):
     log.info(f"[ban] {sym} diban {d} scan" + (f" ({reason})" if reason else ""))
 
 def get_banned_coins():
+    """Return set of currently banned symbols (without updating scan_counter)."""
     with ban_lock:
-        return dict(banned_coins)
+        return set(banned_coins.keys())
 
 def get_scan_counter():
+    """Return (current_scan_counter, banned_set) and unban expired coins."""
     global scan_counter
     with ban_lock:
         scan_counter += 1
@@ -431,7 +409,6 @@ def get_scan_counter():
 
 # ==================== PUBLIK ====================
 def get_price(symbol):
-    """Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS → Tier4 CoinGecko."""
     try:
         return _binance_price(symbol)
     except Exception:
@@ -450,10 +427,6 @@ def get_price(symbol):
     return None
 
 def get_klines(symbol, interval, limit=250):
-    """
-    Tier1 Bybit REST (prioritas untuk backfill berat) → Tier2 Binance REST → Tier3 WS.
-    Untuk /analyze backfill 3 bulan, Bybit jadi prioritas agar Binance tetap ringan.
-    """
     ws_feed.ensure_symbol_interval(symbol, interval)
     df = _bybit_klines(symbol, interval, limit)
     if not df.empty:
@@ -471,13 +444,10 @@ def get_klines(symbol, interval, limit=250):
     return pd.DataFrame()
 
 def get_top_coins(exclude_syms=()):
-    """
-    Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS.
-    exclude_syms: set koin yang tidak boleh dipilih (banned + posisi aktif).
-    """
-    cur_ban = get_banned_coins()[1] if hasattr(get_banned_coins, '__call__') else set()
-    # Gabungkan exclude_syms dengan banned
-    all_exclude = set(exclude_syms) | cur_ban
+    # Dapatkan banned set tanpa update scan_counter (gunakan get_banned_coins)
+    # Tapi kita perlu update scan_counter untuk unban, maka gunakan get_scan_counter
+    _, banned_set = get_scan_counter()
+    all_exclude = set(exclude_syms) | banned_set
     
     try:
         coins = _binance_top_coins(all_exclude)
@@ -506,13 +476,7 @@ def get_top_coins(exclude_syms=()):
             return [t["symbol"] for t in usdt[:TOP_N_COINS]]
     return []
 
-def get_banned_coins_info():
-    """Return (scan_counter, set of banned symbols)."""
-    with ban_lock:
-        return scan_counter, set(banned_coins.keys())
-
 def _price_cache_loop():
-    """Watchdog: cek WS freshness, cleanup stale streams."""
     while True:
         try:
             ws_feed.cleanup_stale_streams()
