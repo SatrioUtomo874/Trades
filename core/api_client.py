@@ -46,7 +46,6 @@ def is_valid_symbol(symbol):
 
 # ==================== BINANCE REST ====================
 def fapi_get(path, params=None, retries=1):
-    """Binance REST dengan deteksi 418/429 (langsung lempar error)."""
     for i in range(retries):
         try:
             _throttle(weight=5 if "klines" in path else 1)
@@ -78,7 +77,7 @@ def _binance_klines(symbol, interval, limit):
         df.index = pd.to_datetime(df["ts"], unit="ms")
         return df[["open","high","low","close","volume"]].dropna()
     except ConnectionError:
-        raise  # lempar ke caller untuk fallback
+        raise
     except Exception as e:
         log.warning(f"[binance/klines] {symbol}: {e}")
         return pd.DataFrame()
@@ -112,7 +111,7 @@ def _binance_top_coins(exclude_syms=()):
         usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
         return [t["symbol"] for t in usdt[:TOP_N_COINS]]
     except ConnectionError:
-        raise  # lempar ke caller untuk fallback
+        raise
     except Exception as e:
         log.warning(f"[binance/top] {e}")
         return []
@@ -198,96 +197,299 @@ def _coingecko_price(symbol):
     except Exception:
         return None
 
-# ==================== WEBSOCKET (FALLBACK TERAKHIR) ====================
-# ... (WebSocket class tetap sama seperti sebelumnya, tidak berubah)
+# ==================== WEBSOCKET ====================
+try:
+    import websocket
+    _WS_LIB_OK = True
+except ImportError:
+    _WS_LIB_OK = False
+
+class BinanceWSFeed:
+    KLINE_INTERVALS = ("1m", "15m", "1h", "1d")
+    MAX_CANDLES = {"1m": 300, "15m": 300, "1h": 300, "1d": 150}
+    STALE_AFTER_SEC = 30
+    STREAM_IDLE_SEC = 1800
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._send_lock = threading.Lock()
+        self._klines = {}
+        self._ticker = {}
+        self._last_used = {}
+        self._subscribed = set()
+        self._ws = None
+        self._last_msg = 0.0
+        self._connected = False
+        self._stop = False
+        self._backoff = 1
+
+    def start(self):
+        if not _WS_LIB_OK:
+            log.error("[ws] Modul websocket-client tidak terpasang.")
+            return
+        threading.Thread(target=self._run_forever, daemon=True).start()
+
+    def is_fresh(self):
+        return self._connected and (time.time() - self._last_msg) < self.STALE_AFTER_SEC
+
+    def get_price(self, symbol):
+        with self._lock:
+            d = self._ticker.get(symbol)
+            return d["price"] if d else None
+
+    def get_top_coins_raw(self):
+        with self._lock:
+            return list(self._ticker.values())
+
+    def get_klines(self, symbol, interval, limit):
+        with self._lock:
+            buf = self._klines.get((symbol, interval))
+            if not buf:
+                return None
+            rows = list(buf)[-limit:]
+        if len(rows) < min(limit, 40):
+            return None
+        df = pd.DataFrame(rows)
+        df.index = pd.to_datetime(df["t"], unit="ms")
+        return df[["o","h","l","c","v"]].rename(
+            columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"})
+
+    def ensure_symbol_interval(self, symbol, interval):
+        if not _WS_LIB_OK or not is_valid_symbol(symbol):
+            return
+        with self._lock:
+            have = (symbol, interval) in self._klines
+            self._last_used[(symbol, interval)] = time.time()
+        if not have:
+            self._backfill(symbol, interval)
+        self._subscribe_kline(symbol, interval)
+
+    def cleanup_stale_streams(self):
+        now = time.time()
+        with self._lock:
+            stale = [k for k, ts in self._last_used.items() if now - ts > self.STREAM_IDLE_SEC]
+        for sym, itv in stale:
+            self._unsubscribe_kline(sym, itv)
+            with self._lock:
+                self._klines.pop((sym, itv), None)
+                self._last_used.pop((sym, itv), None)
+        if stale:
+            log.info(f"[ws] cleanup {len(stale)} stream idle")
+
+    def _run_forever(self):
+        while not self._stop:
+            try:
+                self._connect()
+            except Exception as e:
+                log.warning(f"[ws] koneksi error: {e}")
+            self._connected = False
+            if self._stop:
+                break
+            time.sleep(self._backoff)
+            self._backoff = min(self._backoff * 2, 30)
+
+    def _connect(self):
+        self._ws = websocket.WebSocketApp(
+            BINANCE_WS_URL,
+            on_open=self._on_open,
+            on_message=self._on_message,
+            on_error=self._on_error,
+            on_close=self._on_close
+        )
+        self._ws.run_forever(ping_interval=180, ping_timeout=10)
+
+    def _on_open(self, ws):
+        self._connected = True
+        self._backoff = 1
+        self._last_msg = time.time()
+        log.info("[ws] Binance Futures WS terhubung")
+        self._send_subscribe(["!ticker@arr"])
+        with self._lock:
+            keys = list(self._klines.keys())
+        if keys:
+            streams = [f"{sym.lower()}@kline_{itv}" for sym, itv in keys]
+            self._send_subscribe(streams)
+
+    def _on_message(self, ws, raw):
+        self._last_msg = time.time()
+        try:
+            msg = json.loads(raw)
+        except Exception:
+            return
+        if isinstance(msg, list):
+            self._handle_ticker_array(msg)
+        elif isinstance(msg, dict) and msg.get("e") == "24hrTicker":
+            self._handle_ticker_array([msg])
+        elif isinstance(msg, dict) and msg.get("e") == "kline":
+            self._handle_kline(msg)
+
+    def _handle_ticker_array(self, arr):
+        with self._lock:
+            for t in arr:
+                try:
+                    sym = t["s"]
+                    if is_valid_symbol(sym):
+                        self._ticker[sym] = {
+                            "symbol": sym,
+                            "price": float(t["c"]),
+                            "qvol": float(t["q"]),
+                            "chg": float(t["P"]),
+                        }
+                except Exception:
+                    continue
+
+    def _handle_kline(self, msg):
+        k = msg["k"]
+        sym = msg["s"]
+        if not is_valid_symbol(sym):
+            return
+        itv = k["i"]
+        key = (sym, itv)
+        row = {"t": k["t"], "o": float(k["o"]), "h": float(k["h"]),
+               "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"])}
+        with self._lock:
+            buf = self._klines.get(key)
+            if buf is None:
+                return
+            if buf and buf[-1]["t"] == row["t"]:
+                buf[-1] = row
+            else:
+                buf.append(row)
+
+    def _on_error(self, ws, err):
+        log.warning(f"[ws] error: {err}")
+
+    def _on_close(self, ws, code, msg):
+        self._connected = False
+        log.warning(f"[ws] tertutup (code={code})")
+
+    def _send_subscribe(self, streams):
+        if not streams or not self._ws:
+            return
+        try:
+            with self._send_lock:
+                self._ws.send(json.dumps({
+                    "method": "SUBSCRIBE",
+                    "params": streams,
+                    "id": int(time.time()*1000) % 100000
+                }))
+            with self._lock:
+                self._subscribed |= set(streams)
+        except Exception as e:
+            log.warning(f"[ws] gagal subscribe: {e}")
+
+    def _subscribe_kline(self, symbol, interval):
+        stream = f"{symbol.lower()}@kline_{interval}"
+        with self._lock:
+            already = stream in self._subscribed
+        if not already:
+            self._send_subscribe([stream])
+
+    def _unsubscribe_kline(self, symbol, interval):
+        stream = f"{symbol.lower()}@kline_{interval}"
+        try:
+            with self._send_lock:
+                if self._ws:
+                    self._ws.send(json.dumps({
+                        "method": "UNSUBSCRIBE",
+                        "params": [stream],
+                        "id": int(time.time()*1000) % 100000
+                    }))
+            with self._lock:
+                self._subscribed.discard(stream)
+        except Exception:
+            pass
+
+    def _backfill(self, symbol, interval):
+        if not is_valid_symbol(symbol):
+            return
+        limit = self.MAX_CANDLES.get(interval, 250)
+        df = _binance_klines(symbol, interval, limit)
+        src = "binance"
+        if df.empty:
+            df = _bybit_klines(symbol, interval, limit)
+            src = "bybit"
+        if df.empty:
+            log.warning(f"[ws-backfill] {symbol} {interval} GAGAL")
+            return
+        rows = deque(maxlen=limit)
+        for ts, r in df.iterrows():
+            rows.append({
+                "t": int(ts.timestamp()*1000),
+                "o": float(r.open), "h": float(r.high),
+                "l": float(r.low), "c": float(r.close),
+                "v": float(r.volume)
+            })
+        with self._lock:
+            self._klines[(symbol, interval)] = rows
+        log.info(f"[ws-backfill] {symbol} {interval} OK via {src} ({len(rows)} candle)")
+
+# ==================== INISIALISASI WEBSOCKET ====================
+ws_feed = BinanceWSFeed()  # <-- INI PENTING!
+
+# ==================== BAN KOIN ====================
+ban_lock = threading.Lock()
+banned_coins = {}
+scan_counter = 0
+BAN_DURATION_SCANS = 15
+BAN_DURATION_TRADE_CLOSED = 500
+
+def ban_coin(sym, reason="", duration=None):
+    d = duration if duration is not None else BAN_DURATION_SCANS
+    with ban_lock:
+        banned_coins[sym] = (scan_counter, d)
+    log.info(f"[ban] {sym} diban {d} scan" + (f" ({reason})" if reason else ""))
+
+def get_banned_set():
+    with ban_lock:
+        now = scan_counter
+        to_unban = [s for s, (banned_at, dur) in banned_coins.items() if now - banned_at >= dur]
+        for s in to_unban:
+            del banned_coins[s]
+            log.info(f"[unban] {s} kembali aktif")
+        return set(banned_coins.keys())
+
+def get_scan_counter():
+    global scan_counter
+    with ban_lock:
+        scan_counter += 1
+        return scan_counter
 
 # ==================== PUBLIK ====================
-def get_top_coins(exclude_syms=()):
-    """
-    PRIORITAS: Binance REST -> Bybit REST -> (tidak ada WS untuk top coins)
-    Jika semua gagal, return []
-    """
-    banned_set = get_banned_set()
-    all_exclude = set(exclude_syms) | banned_set
-    
-    # 1. Coba Binance
-    try:
-        coins = _binance_top_coins(all_exclude)
-        if coins:
-            log.info(f"[top] Binance: {len(coins)} koin")
-            return coins
-    except ConnectionError as e:
-        log.warning(f"[top/binance] {e} — pindah Bybit")
-    except Exception as e:
-        log.warning(f"[top/binance] {e} — pindah Bybit")
-    
-    # 2. Fallback ke Bybit
-    try:
-        coins = _bybit_top_coins(all_exclude)
-        if coins:
-            log.info(f"[top] Bybit fallback: {len(coins)} koin")
-            return coins
-    except Exception as e:
-        log.warning(f"[top/bybit] {e}")
-    
-    # 3. Tidak ada fallback untuk top coins (WS tidak support)
-    log.error("[top] SEMUA SUMBER GAGAL! Tidak ada koin.")
-    return []
-
 def get_price(symbol):
-    """PRIORITAS: Binance -> Bybit -> WebSocket -> CoinGecko."""
+    """PRIORITAS: Binance REST -> Bybit REST -> WS -> CoinGecko."""
     if not is_valid_symbol(symbol):
         return None
-    
-    # 1. Binance
     try:
-        p = _binance_price(symbol)
-        if p is not None:
-            return p
-    except ConnectionError:
-        pass
+        return _binance_price(symbol)
     except Exception:
         pass
-    
-    # 2. Bybit
     try:
         p = _bybit_price(symbol)
         if p is not None:
             return p
     except Exception:
         pass
-    
-    # 3. WebSocket
     if ws_feed.is_fresh():
         p = ws_feed.get_price(symbol)
         if p is not None:
             return p
-    
-    # 4. CoinGecko (darurat)
     p = _coingecko_price(symbol)
     if p is not None:
         return p
-    
     return None
 
 def get_klines(symbol, interval, limit=250):
-    """PRIORITAS: Binance -> Bybit -> WebSocket."""
+    """PRIORITAS: Binance REST -> Bybit REST -> WS (fallback)."""
     if not is_valid_symbol(symbol):
         return pd.DataFrame()
-    
     ws_feed.ensure_symbol_interval(symbol, interval)
-    
-    # 1. Binance
     try:
         df = _binance_klines(symbol, interval, limit)
         if not df.empty:
             return df
-    except ConnectionError:
-        pass
     except Exception as e:
         log.warning(f"[klines/binance] {symbol}: {e}")
-    
-    # 2. Bybit
     try:
         df = _bybit_klines(symbol, interval, limit)
         if not df.empty:
@@ -295,11 +497,35 @@ def get_klines(symbol, interval, limit=250):
             return df
     except Exception as e:
         log.warning(f"[klines/bybit] {symbol}: {e}")
-    
-    # 3. WebSocket (fallback terakhir)
     if ws_feed.is_fresh():
         df = ws_feed.get_klines(symbol, interval, limit)
         if df is not None and not df.empty:
             return df
-    
     return pd.DataFrame()
+
+def get_top_coins(exclude_syms=()):
+    """PRIORITAS: Binance REST -> Bybit REST -> (tidak ada WS untuk top coins)."""
+    banned_set = get_banned_set()
+    all_exclude = set(exclude_syms) | banned_set
+    
+    try:
+        coins = _binance_top_coins(all_exclude)
+        if coins:
+            return coins
+    except Exception as e:
+        log.warning(f"[top/binance] {e}")
+    try:
+        coins = _bybit_top_coins(all_exclude)
+        if coins:
+            return coins
+    except Exception as e:
+        log.warning(f"[top/bybit] {e}")
+    return []
+
+def _price_cache_loop():
+    while True:
+        try:
+            ws_feed.cleanup_stale_streams()
+        except Exception as e:
+            log.error(f"[ws-watchdog] {e}")
+        time.sleep(10)
