@@ -1,11 +1,6 @@
-flask
-requests
-pandas
-numpy
-urllib3
-python-dotenv
-pandas
-numpy
-scikit-optimize
-matplotlib
-websocket-client
+Flask==2.3.3
+requests==2.31.0
+pandas==2.1.0
+numpy==1.25.0
+websocket-client==1.6.0
+python-dotenv==1.0.0
