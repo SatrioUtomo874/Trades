@@ -389,7 +389,7 @@ def _simulation_loop(chat_id):
 
             with positions_lock:
                 active_syms = set(positions.keys())
-            banned = api_client.get_banned_coins()[1] if hasattr(api_client.get_banned_coins, '__call__') else set()
+            _, banned = api_client.get_banned_coins_info()
             exclude = active_syms | banned
 
             symbols = api_client.get_top_coins(exclude_syms=exclude)
