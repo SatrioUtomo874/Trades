@@ -1,7 +1,7 @@
 """
-API Client - Binance REST (dengan throttle), Bybit Fallback, WebSocket, CoinGecko
+API Client - Binance REST (PRIORITAS UTAMA), Bybit Fallback, WebSocket, CoinGecko
 """
-import os, time, json, threading, logging
+import os, time, json, threading, logging, re
 from collections import deque
 import pandas as pd
 import requests
@@ -10,6 +10,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 log = logging.getLogger(__name__)
 
+# ==================== KONSTANTA ====================
 FAPI = "https://fapi.binance.com"
 BYBIT = "https://api.bybit.com"
 BINANCE_WS_URL = "wss://fstream.binance.com/ws"
@@ -37,7 +38,14 @@ def _throttle(weight=1):
     _request_timestamps.append(now)
     _last_request_time = time.time()
 
-# ==================== BINANCE REST ====================
+# ==================== VALIDASI SIMBOL ====================
+_VALID_SYMBOL_PATTERN = re.compile(r'^[A-Z0-9]+USDT$')
+
+def is_valid_symbol(symbol):
+    """Cek apakah simbol valid (hanya huruf besar + angka + USDT)."""
+    return bool(_VALID_SYMBOL_PATTERN.match(symbol))
+
+# ==================== BINANCE REST (PRIORITAS UTAMA) ====================
 def fapi_get(path, params=None, retries=2):
     for i in range(retries):
         try:
@@ -57,6 +65,9 @@ def fapi_get(path, params=None, retries=2):
     raise ConnectionError(f"Binance gagal: {path}")
 
 def _binance_klines(symbol, interval, limit):
+    if not is_valid_symbol(symbol):
+        log.warning(f"[binance] Simbol tidak valid: {symbol}")
+        return pd.DataFrame()
     raw = fapi_get("/fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit})
     if not raw or len(raw) < 10:
         return pd.DataFrame()
@@ -67,26 +78,33 @@ def _binance_klines(symbol, interval, limit):
     return df[["open","high","low","close","volume"]].dropna()
 
 def _binance_price(symbol):
+    if not is_valid_symbol(symbol):
+        return None
     d = fapi_get("/fapi/v1/ticker/price", {"symbol": symbol})
     return float(d["price"])
 
 def _binance_top_coins(exclude_syms=()):
     tickers = fapi_get("/fapi/v1/ticker/24hr")
-    usdt = [
-        t for t in tickers
-        if t["symbol"].endswith("USDT")
-        and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
-        and float(t["quoteVolume"]) > 5_000_000
-        and abs(float(t.get("priceChangePercent", "0"))) < 15
-        and t["symbol"] not in exclude_syms
-    ]
+    usdt = []
+    for t in tickers:
+        sym = t["symbol"]
+        if not is_valid_symbol(sym):
+            continue
+        if (sym.endswith("USDT") 
+            and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
+            and float(t["quoteVolume"]) > 5_000_000
+            and abs(float(t.get("priceChangePercent", "0"))) < 15
+            and sym not in exclude_syms):
+            usdt.append(t)
     usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
     return [t["symbol"] for t in usdt[:TOP_N_COINS]]
 
-# ==================== BYBIT REST ====================
+# ==================== BYBIT REST (FALLBACK) ====================
 INTERVAL_MAP = {"1m":"1","15m":"15","1h":"60","4h":"240","1d":"D"}
 
 def _bybit_klines(symbol, interval, limit):
+    if not is_valid_symbol(symbol):
+        return pd.DataFrame()
     iv = INTERVAL_MAP.get(interval, "15")
     try:
         r = requests.get(f"{BYBIT}/v5/market/kline",
@@ -109,36 +127,47 @@ def _bybit_klines(symbol, interval, limit):
         return pd.DataFrame()
 
 def _bybit_price(symbol):
-    r = requests.get(f"{BYBIT}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10)
-    d = r.json()
-    if d.get("retCode") != 0:
-        raise ValueError(f"Bybit ticker error: {d.get('retMsg')}")
-    return float(d["result"]["list"][0]["lastPrice"])
+    if not is_valid_symbol(symbol):
+        return None
+    try:
+        r = requests.get(f"{BYBIT}/v5/market/tickers", params={"category":"linear","symbol":symbol}, timeout=10)
+        d = r.json()
+        if d.get("retCode") != 0:
+            raise ValueError(f"Bybit ticker error: {d.get('retMsg')}")
+        return float(d["result"]["list"][0]["lastPrice"])
+    except Exception as e:
+        log.warning(f"[bybit/price] {symbol}: {e}")
+        return None
 
 def _bybit_top_coins(exclude_syms=()):
-    r = requests.get(f"{BYBIT}/v5/market/tickers", params={"category":"linear"}, timeout=10)
-    d = r.json()
-    items = d.get("result", {}).get("list", [])
-    usdt = [
-        t for t in items
-        if t["symbol"].endswith("USDT")
-        and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
-        and float(t.get("turnover24h", "0")) > 5_000_000
-        and abs(float(t.get("price24hPcnt", "0"))) < 0.15
-        and t["symbol"] not in exclude_syms
-    ]
-    usdt.sort(key=lambda x: float(x.get("turnover24h", "0")), reverse=True)
-    return [t["symbol"] for t in usdt[:TOP_N_COINS]]
+    try:
+        r = requests.get(f"{BYBIT}/v5/market/tickers", params={"category":"linear"}, timeout=10)
+        d = r.json()
+        items = d.get("result", {}).get("list", [])
+        usdt = []
+        for t in items:
+            sym = t["symbol"]
+            if not is_valid_symbol(sym):
+                continue
+            if (sym.endswith("USDT")
+                and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
+                and float(t.get("turnover24h", "0")) > 5_000_000
+                and abs(float(t.get("price24hPcnt", "0"))) < 0.15
+                and sym not in exclude_syms):
+                usdt.append(t)
+        usdt.sort(key=lambda x: float(x.get("turnover24h", "0")), reverse=True)
+        return [t["symbol"] for t in usdt[:TOP_N_COINS]]
+    except Exception as e:
+        log.warning(f"[bybit/top] {e}")
+        return []
 
-# ==================== COINGECKO ====================
+# ==================== COINGECKO (DARURAT) ====================
 COINGECKO_ID_MAP = {
     "BTCUSDT":"bitcoin", "ETHUSDT":"ethereum", "BNBUSDT":"binancecoin",
     "SOLUSDT":"solana", "XRPUSDT":"ripple", "ADAUSDT":"cardano",
     "DOGEUSDT":"dogecoin", "AVAXUSDT":"avalanche-2", "LINKUSDT":"chainlink",
     "DOTUSDT":"polkadot", "LTCUSDT":"litecoin", "TRXUSDT":"tron",
     "ATOMUSDT":"cosmos", "NEARUSDT":"near", "APTUSDT":"aptos",
-    "ARBUSDT":"arbitrum", "OPUSDT":"optimism", "SUIUSDT":"sui",
-    "TONUSDT":"the-open-network", "BCHUSDT":"bitcoin-cash",
 }
 def _coingecko_price(symbol):
     cid = COINGECKO_ID_MAP.get(symbol)
@@ -151,7 +180,7 @@ def _coingecko_price(symbol):
     except Exception:
         return None
 
-# ==================== WEBSOCKET FEED ====================
+# ==================== WEBSOCKET ====================
 try:
     import websocket
     _WS_LIB_OK = True
@@ -205,10 +234,11 @@ class BinanceWSFeed:
             return None
         df = pd.DataFrame(rows)
         df.index = pd.to_datetime(df["t"], unit="ms")
-        return df[["o","h","l","c","v"]].rename(columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"})
+        return df[["o","h","l","c","v"]].rename(
+            columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"})
 
     def ensure_symbol_interval(self, symbol, interval):
-        if not _WS_LIB_OK:
+        if not _WS_LIB_OK or not is_valid_symbol(symbol):
             return
         with self._lock:
             have = (symbol, interval) in self._klines
@@ -281,18 +311,21 @@ class BinanceWSFeed:
             for t in arr:
                 try:
                     sym = t["s"]
-                    self._ticker[sym] = {
-                        "symbol": sym,
-                        "price": float(t["c"]),
-                        "qvol": float(t["q"]),
-                        "chg": float(t["P"]),
-                    }
+                    if is_valid_symbol(sym):
+                        self._ticker[sym] = {
+                            "symbol": sym,
+                            "price": float(t["c"]),
+                            "qvol": float(t["q"]),
+                            "chg": float(t["P"]),
+                        }
                 except Exception:
                     continue
 
     def _handle_kline(self, msg):
         k = msg["k"]
         sym = msg["s"]
+        if not is_valid_symbol(sym):
+            return
         itv = k["i"]
         key = (sym, itv)
         row = {"t": k["t"], "o": float(k["o"]), "h": float(k["h"]),
@@ -351,15 +384,15 @@ class BinanceWSFeed:
             pass
 
     def _backfill(self, symbol, interval):
+        if not is_valid_symbol(symbol):
+            return
         limit = self.MAX_CANDLES.get(interval, 250)
-        df = _bybit_klines(symbol, interval, limit)
-        src = "bybit"
+        # PRIORITAS: Binance REST dulu (bukan Bybit)
+        df = _binance_klines(symbol, interval, limit)
+        src = "binance"
         if df.empty:
-            try:
-                df = _binance_klines(symbol, interval, limit)
-                src = "binance"
-            except Exception:
-                pass
+            df = _bybit_klines(symbol, interval, limit)
+            src = "bybit"
         if df.empty:
             log.warning(f"[ws-backfill] {symbol} {interval} GAGAL")
             return
@@ -390,31 +423,34 @@ def ban_coin(sym, reason="", duration=None):
         banned_coins[sym] = (scan_counter, d)
     log.info(f"[ban] {sym} diban {d} scan" + (f" ({reason})" if reason else ""))
 
-def get_banned_coins():
-    """Return set of currently banned symbols (without updating scan_counter)."""
+def get_banned_set():
     with ban_lock:
-        return set(banned_coins.keys())
-
-def get_scan_counter():
-    """Return (current_scan_counter, banned_set) and unban expired coins."""
-    global scan_counter
-    with ban_lock:
-        scan_counter += 1
         now = scan_counter
         to_unban = [s for s, (banned_at, dur) in banned_coins.items() if now - banned_at >= dur]
         for s in to_unban:
             del banned_coins[s]
             log.info(f"[unban] {s} kembali aktif")
-        return now, set(banned_coins.keys())
+        return set(banned_coins.keys())
+
+def get_scan_counter():
+    global scan_counter
+    with ban_lock:
+        scan_counter += 1
+        return scan_counter
 
 # ==================== PUBLIK ====================
 def get_price(symbol):
+    """PRIORITAS: Binance REST -> Bybit REST -> WS -> CoinGecko."""
+    if not is_valid_symbol(symbol):
+        return None
     try:
         return _binance_price(symbol)
     except Exception:
         pass
     try:
-        return _bybit_price(symbol)
+        p = _bybit_price(symbol)
+        if p is not None:
+            return p
     except Exception:
         pass
     if ws_feed.is_fresh():
@@ -427,16 +463,26 @@ def get_price(symbol):
     return None
 
 def get_klines(symbol, interval, limit=250):
+    """PRIORITAS: Binance REST -> Bybit REST -> WS (fallback)."""
+    if not is_valid_symbol(symbol):
+        return pd.DataFrame()
     ws_feed.ensure_symbol_interval(symbol, interval)
-    df = _bybit_klines(symbol, interval, limit)
-    if not df.empty:
-        return df
+    # Binance dulu
     try:
         df = _binance_klines(symbol, interval, limit)
         if not df.empty:
             return df
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"[klines/binance] {symbol}: {e}")
+    # Bybit fallback
+    try:
+        df = _bybit_klines(symbol, interval, limit)
+        if not df.empty:
+            log.info(f"[klines/bybit fallback] {symbol} {interval} OK")
+            return df
+    except Exception as e:
+        log.warning(f"[klines/bybit] {symbol}: {e}")
+    # WS fallback terakhir
     if ws_feed.is_fresh():
         df = ws_feed.get_klines(symbol, interval, limit)
         if df is not None and not df.empty:
@@ -444,28 +490,27 @@ def get_klines(symbol, interval, limit=250):
     return pd.DataFrame()
 
 def get_top_coins(exclude_syms=()):
-    # Dapatkan banned set tanpa update scan_counter (gunakan get_banned_coins)
-    # Tapi kita perlu update scan_counter untuk unban, maka gunakan get_scan_counter
-    _, banned_set = get_scan_counter()
+    """PRIORITAS: Binance REST -> Bybit REST -> WS."""
+    banned_set = get_banned_set()
     all_exclude = set(exclude_syms) | banned_set
     
     try:
         coins = _binance_top_coins(all_exclude)
         if coins:
             return coins
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"[top/binance] {e}")
     try:
         coins = _bybit_top_coins(all_exclude)
         if coins:
             return coins
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"[top/bybit] {e}")
     if ws_feed.is_fresh():
         raw = ws_feed.get_top_coins_raw()
         usdt = [
             t for t in raw
-            if t["symbol"].endswith("USDT")
+            if is_valid_symbol(t["symbol"])
             and 0.0001 < t["price"] < MAX_PRICE
             and t["qvol"] > 5_000_000
             and abs(t["chg"]) < 15
