@@ -9,6 +9,20 @@ import os, time, logging, threading
 from collections import deque
 from datetime import datetime, timezone, timedelta
 
+# ============================================================
+# TAMBAHAN BARU (START) — Import OTAK dari strategy_logic.py
+# ============================================================
+try:
+    from strategy_logic import *
+    log.info("[OTAK] Strategy logic loaded from external file.")
+except ImportError:
+    log.info("[OTAK] No external strategy_logic found, using built-in.")
+except Exception as e:
+    log.warning(f"[OTAK] Error loading strategy_logic: {e}, using built-in.")
+# ============================================================
+# TAMBAHAN BARU (END)
+# ============================================================
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -223,6 +237,27 @@ def tg_send(chat_id, text):
             timeout=10)
     except Exception as e:
         log.error(f"[TG] {e}")
+
+# ============================================================
+# TAMBAHAN BARU (START) — Helper kirim file ke Telegram
+# ============================================================
+def tg_send_document(chat_id, file_path, caption=""):
+    """Kirim file ke Telegram."""
+    if not chat_id or not TELEGRAM_TOKEN:
+        return
+    try:
+        with open(file_path, "rb") as f:
+            files = {"document": f}
+            data = {"chat_id": chat_id, "caption": caption}
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+                files=files, data=data, timeout=30
+            )
+    except Exception as e:
+        log.error(f"[TG doc] {e}")
+# ============================================================
+# TAMBAHAN BARU (END)
+# ============================================================
 
 def tg_updates(offset=None):
     try:
@@ -2402,6 +2437,179 @@ def fmt_backtest():
         )
     return f"📋 <b>Backtest ({len(hist)} trade terakhir)</b>\n\n" + "\n\n".join(lines)
 
+# ============================================================
+# TAMBAHAN BARU (START) — Fungsi Generator untuk /analyze
+# ============================================================
+
+def _generate_statistics_csv():
+    """Generate statistics.csv dari stats dictionary."""
+    with stat_lock:
+        s = stats
+        data = {
+            "total_trades": [s["total"]],
+            "tp": [s["tp"]],
+            "sl": [s["sl"]],
+            "trail": [s.get("trail", 0)],
+            "balance": [s["balance"]],
+            "starting_balance": [STARTING_BALANCE],
+            "win_rate": [
+                (s["tp"] + s.get("trail", 0)) / (s["total"]) * 100 if s["total"] > 0 else 0
+            ]
+        }
+        # Hitung profit factor
+        gross_profit = 0.0
+        gross_loss = 0.0
+        for h in s["pnl_history"]:
+            if h["pnl_usd"] >= 0:
+                gross_profit += h["pnl_usd"]
+            else:
+                gross_loss += abs(h["pnl_usd"])
+        data["gross_profit"] = [gross_profit]
+        data["gross_loss"] = [gross_loss]
+        data["profit_factor"] = [gross_profit / gross_loss if gross_loss > 0 else 0]
+        
+        df = pd.DataFrame(data)
+        path = "/tmp/statistics.csv"
+        df.to_csv(path, index=False)
+        return path
+
+def _generate_trade_csv():
+    """Generate trade.csv dari pnl_history."""
+    with stat_lock:
+        hist = list(stats["pnl_history"])
+    
+    if not hist:
+        df = pd.DataFrame(columns=["symbol", "decision", "result", "pnl_pct", "pnl_usd", 
+                                    "entry", "tp", "sl", "exit_price", "entry_time", "exit_time"])
+        path = "/tmp/trade.csv"
+        df.to_csv(path, index=False)
+        return path
+    
+    rows = []
+    for h in hist:
+        rows.append({
+            "symbol": h.get("symbol", ""),
+            "decision": h.get("decision", ""),
+            "result": h["result"],
+            "pnl_pct": h["pct"],
+            "pnl_usd": h["pnl_usd"],
+            "entry": h.get("entry", 0),
+            "tp": h.get("tp", 0),
+            "sl": h.get("sl", 0),
+            "exit_price": h.get("exit_price", 0),
+            "entry_time": datetime.fromtimestamp(h.get("entry_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if h.get("entry_time") else "",
+            "exit_time": datetime.fromtimestamp(h.get("exit_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if h.get("exit_time") else "",
+        })
+    df = pd.DataFrame(rows)
+    path = "/tmp/trade.csv"
+    df.to_csv(path, index=False)
+    return path
+
+def _generate_research_context():
+    """
+    Generate research_context.json — pengganti full chart M1.
+    Ambil 15 koin top × 3 bulan, hitung ringkasan statistik.
+    """
+    log.info("[research] Generating research_context.json...")
+    
+    # Ambil 15 koin teratas
+    try:
+        all_coins = get_top_coins()
+        coins = all_coins[:15] if all_coins else []
+    except Exception as e:
+        log.warning(f"[research] Gagal get_top_coins: {e}")
+        coins = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
+                 "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT"]
+    
+    result = {
+        "period": "90 hari terakhir",
+        "coins": {},
+        "performance_breakdown": {
+            "by_coin": {},
+            "by_session": {},
+            "by_volume_condition": {}
+        },
+        "worst_trades": [],
+        "best_trades": [],
+        "summary": {}
+    }
+    
+    # Ambil data M1 3 bulan untuk setiap koin
+    for sym in coins:
+        try:
+            df = get_klines(sym, "1m", 90 * 1440)  # 90 hari × 1440 menit
+            if df.empty:
+                continue
+            close = df["close"]
+            volume = df["volume"]
+            volatility = close.pct_change().std() * 100
+            result["coins"][sym] = {
+                "volatility_avg": round(volatility, 2),
+                "volume_avg": round(volume.mean(), 0),
+                "price_range": {
+                    "low": round(df["low"].min(), 6),
+                    "high": round(df["high"].max(), 6)
+                },
+                "close_price": round(close.iloc[-1], 6),
+                "candles": len(df)
+            }
+        except Exception as e:
+            log.warning(f"[research] Gagal fetch {sym}: {e}")
+    
+    # Analisis trade history
+    with stat_lock:
+        trade_hist = list(stats["pnl_history"])
+    
+    if trade_hist:
+        # Breakdown per coin
+        by_coin = {}
+        for t in trade_hist:
+            sym = t.get("symbol", "unknown")
+            if sym not in by_coin:
+                by_coin[sym] = {"total": 0, "wins": 0, "pnl": 0}
+            by_coin[sym]["total"] += 1
+            by_coin[sym]["pnl"] += t["pnl_usd"]
+            if t["result"] in ("tp", "trail"):
+                by_coin[sym]["wins"] += 1
+        
+        for sym, data in by_coin.items():
+            total = data["total"]
+            wins = data["wins"]
+            result["performance_breakdown"]["by_coin"][sym] = {
+                "total": total,
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+                "avg_pnl": round(data["pnl"] / total, 4) if total > 0 else 0
+            }
+        
+        # Best & worst trades
+        best = sorted([t for t in trade_hist if t["pnl_usd"] >= 0], 
+                      key=lambda x: x["pnl_usd"], reverse=True)[:3]
+        worst = sorted([t for t in trade_hist if t["pnl_usd"] < 0], 
+                       key=lambda x: x["pnl_usd"])[:3]
+        result["best_trades"] = [{"pnl": round(t["pnl_usd"], 4), "symbol": t.get("symbol"), "result": t["result"]} for t in best]
+        result["worst_trades"] = [{"pnl": round(t["pnl_usd"], 4), "symbol": t.get("symbol"), "result": t["result"]} for t in worst]
+        
+        # Summary
+        total = len(trade_hist)
+        wins = sum(1 for t in trade_hist if t["result"] in ("tp", "trail"))
+        result["summary"] = {
+            "total_trades": total,
+            "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+            "avg_pnl": round(sum(t["pnl_usd"] for t in trade_hist) / total, 4) if total > 0 else 0
+        }
+    
+    # Simpan ke JSON
+    path = "/tmp/research_context.json"
+    with open(path, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+    
+    log.info(f"[research] Selesai, disimpan ke {path}")
+    return path
+
+# ============================================================
+# TAMBAHAN BARU (END)
+# ============================================================
+
 def fmt_signal_msg(sig):
     em  = "🟢" if sig["decision"]=="BUY" else "🔴"
     bar = "█"*(sig["confidence"]//10)+"░"*(10-sig["confidence"]//10)
@@ -3137,6 +3345,46 @@ def bot_loop():
                     tg_send(chat_id,fmt_stats())
                 elif text in ("/backtest","backtest"):
                     tg_send(chat_id,fmt_backtest())
+                # ============================================================
+                # TAMBAHAN BARU (START) — Handler /analyze
+                # ============================================================
+                elif text in ("/analyze","analyze"):
+                    # Jalankan di background thread agar tidak block loop
+                    def _run_analyze(cid):
+                        try:
+                            tg_send(cid, "🔄 Memulai riset historis 15 koin (3 bulan)...\nIni bisa memakan waktu 3-5 menit.")
+                            
+                            # Generate 3 file
+                            stats_csv = _generate_statistics_csv()
+                            trade_csv = _generate_trade_csv()
+                            context_json = _generate_research_context()
+                            
+                            # Kirim ke Telegram
+                            tg_send(cid, "✅ Riset selesai! Mengirim file...")
+                            tg_send_document(cid, stats_csv, caption="📊 statistics.csv")
+                            tg_send_document(cid, trade_csv, caption="📋 trade.csv")
+                            tg_send_document(cid, context_json, caption="🧠 research_context.json")
+                            
+                            # Ringkasan
+                            with open(context_json, "r") as f:
+                                ctx = json.load(f)
+                            summary = ctx.get("summary", {})
+                            total = summary.get("total_trades", 0)
+                            wr = summary.get("win_rate", 0)
+                            tg_send(cid,
+                                f"📊 <b>Ringkasan Riset</b>\n"
+                                f"Total trade: {total}\n"
+                                f"Win Rate: {wr}%\n\n"
+                                f"File sudah dikirim. Jalankan researcher.py di laptop untuk analisis lebih lanjut.")
+                        except Exception as e:
+                            log.error(f"[analyze] Error: {e}")
+                            tg_send(cid, f"❌ Error saat menjalankan riset:\n<code>{str(e)[:200]}</code>")
+                    
+                    threading.Thread(target=_run_analyze, args=(chat_id,), daemon=True).start()
+                    tg_send(chat_id, "⏳ Riset dimulai di background. Anda akan menerima file dalam beberapa menit.")
+# ============================================================
+# TAMBAHAN BARU (END)
+# ============================================================
                 elif text in ("/banned","banned"):
                     with ban_lock:
                         cur_scan = scan_counter
