@@ -506,6 +506,11 @@ def get_top_coins(exclude_syms=()):
             return [t["symbol"] for t in usdt[:TOP_N_COINS]]
     return []
 
+def get_banned_coins_info():
+    """Return (scan_counter, set of banned symbols)."""
+    with ban_lock:
+        return scan_counter, set(banned_coins.keys())
+
 def _price_cache_loop():
     """Watchdog: cek WS freshness, cleanup stale streams."""
     while True:
