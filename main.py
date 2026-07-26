@@ -466,6 +466,7 @@ def place_market_order(symbol, side, quantity, reduce_only=False):
 
 
 def cancel_order(symbol, order_id):
+    """Cancel ORDER BIASA (limit/market entry) — bukan TP/SL, lihat cancel_algo_order."""
     if not order_id: return None
     try:
         return _binance_signed("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
@@ -486,24 +487,53 @@ def get_real_position(symbol):
     return None
 
 
+# ── TP/SL sekarang WAJIB lewat Algo Order API (Binance migrasi order kondisional
+# ke /fapi/v1/algoOrder per 9 Des 2025 — endpoint /fapi/v1/order lama menolaknya
+# dengan error -4120). Field beda dari order biasa: stopPrice->triggerPrice,
+# orderId->algoId, status->algoStatus. ──
+
 def place_sl_order(symbol, is_buy, sl_price):
     close_side = "SELL" if is_buy else "BUY"
     prec = get_symbol_filters(symbol)["pricePrecision"]
-    return _binance_signed("POST", "/fapi/v1/order", {
-        "symbol": symbol, "side": close_side, "type": "STOP_MARKET",
-        "stopPrice": round(sl_price, prec), "closePosition": "true", "workingType": "MARK_PRICE",
+    return _binance_signed("POST", "/fapi/v1/algoOrder", {
+        "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side, "type": "STOP_MARKET",
+        "triggerPrice": round(sl_price, prec), "closePosition": "true", "workingType": "MARK_PRICE",
     })
 
 
 def place_tp_sl(symbol, is_buy, tp_price, sl_price):
     close_side = "SELL" if is_buy else "BUY"
     prec = get_symbol_filters(symbol)["pricePrecision"]
-    tp = _binance_signed("POST", "/fapi/v1/order", {
-        "symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
-        "stopPrice": round(tp_price, prec), "closePosition": "true", "workingType": "MARK_PRICE",
+    tp = _binance_signed("POST", "/fapi/v1/algoOrder", {
+        "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
+        "triggerPrice": round(tp_price, prec), "closePosition": "true", "workingType": "MARK_PRICE",
     })
     sl = place_sl_order(symbol, is_buy, sl_price)
     return tp, sl
+
+
+def cancel_algo_order(algo_id):
+    if not algo_id: return None
+    try:
+        return _binance_signed("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+    except Exception as e:
+        log.warning(f"[cancel_algo_order] #{algo_id}: {e}")
+        return None
+
+
+def get_algo_order_status(algo_id):
+    return _binance_signed("GET", "/fapi/v1/algoOrder", {"algoId": algo_id})
+
+
+def cancel_all_algo_orders(symbol):
+    """Bersihkan SEMUA algo order (TP/SL) tersisa di suatu koin — dipakai
+    sebagai jaring pengaman setelah posisi closed, jaga-jaga salah satu
+    order (TP atau SL) belum ke-cancel otomatis oleh Binance."""
+    try:
+        return _binance_signed("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
+    except Exception as e:
+        log.warning(f"[cancel_all_algo_orders] {symbol}: {e}")
+        return None
 
 
 def get_real_balance():
@@ -1789,7 +1819,7 @@ def _open_position_real(sym, signal, actual_entry, chat_id, order_info):
     tp_order_id = sl_order_id = None
     try:
         tp_order, sl_order = place_tp_sl(sym, is_buy, tp_v, sl_v)
-        tp_order_id, sl_order_id = tp_order["orderId"], sl_order["orderId"]
+        tp_order_id, sl_order_id = tp_order["algoId"], sl_order["algoId"]
     except Exception as e:
         log.error(f"[open_position_real] gagal pasang TP/SL {sym}: {e}")
         tg_send(chat_id, f"⚠️ {sym}: posisi terbuka tapi GAGAL pasang TP/SL otomatis: {e}\nCek manual di Binance!")
@@ -1812,17 +1842,19 @@ def _open_position_real(sym, signal, actual_entry, chat_id, order_info):
     threading.Thread(target=monitor_position_real, args=(sym, pos), daemon=True).start()
 
 
-def _infer_close_reason(sym, tp_order_id, sl_order_id):
-    """Cek order mana yang FILLED untuk tahu sebab posisi closed (tp/sl)."""
+def _infer_close_reason(tp_algo_id, sl_algo_id):
+    """Cek algo order mana yang TRIGGERED/FINISHED untuk tahu sebab posisi
+    closed (tp/sl). TP/SL sekarang algo order (lihat place_tp_sl), jadi
+    query-nya lewat get_algo_order_status, bukan get_order_status biasa."""
     tp_status = sl_status = None
     try:
-        if tp_order_id: tp_status = get_order_status(sym, tp_order_id).get("status")
+        if tp_algo_id: tp_status = get_algo_order_status(tp_algo_id).get("algoStatus")
     except Exception: pass
     try:
-        if sl_order_id: sl_status = get_order_status(sym, sl_order_id).get("status")
+        if sl_algo_id: sl_status = get_algo_order_status(sl_algo_id).get("algoStatus")
     except Exception: pass
-    if tp_status == "FILLED": return "tp"
-    if sl_status == "FILLED": return "sl"
+    if tp_status in ("TRIGGERED", "FINISHED"): return "tp"
+    if sl_status in ("TRIGGERED", "FINISHED"): return "sl"
     return "unknown"
 
 
@@ -1853,7 +1885,7 @@ def monitor_position_real(sym, pos):
             pnl_pct = (price - entry) / entry * (1 if is_buy else -1)
             result = "tp" if pnl_pct >= 0 else "sl"
             try:
-                cancel_order(sym, tp_order_id); cancel_order(sym, sl_order_id)
+                cancel_algo_order(tp_order_id); cancel_algo_order(sl_order_id)
                 place_market_order(sym, "SELL" if is_buy else "BUY", qty, reduce_only=True)
             except Exception as e:
                 log.error(f"[monitor_real] gagal tutup manual {sym}: {e}")
@@ -1868,10 +1900,13 @@ def monitor_position_real(sym, pos):
             time.sleep(MONITOR_SLEEP); continue
 
         if real_pos is None:
-            reason = _infer_close_reason(sym, tp_order_id, sl_order_id)
+            reason = _infer_close_reason(tp_order_id, sl_order_id)
             if reason == "sl" and (sl_p >= entry if is_buy else sl_p <= entry):
                 reason = "trail"
             close_price = tp_p if reason == "tp" else sl_p
+            # Jaring pengaman: cek & bersihkan sisa algo order (TP atau SL)
+            # yang mungkin belum ke-cancel otomatis oleh Binance.
+            cancel_all_algo_orders(sym)
             close_position(sym, reason if reason != "unknown" else "sl", close_price=close_price)
             return
 
@@ -1905,9 +1940,9 @@ def monitor_position_real(sym, pos):
             within_tp = (proposed < tp_p) if is_buy else (proposed > tp_p)
             if improves and within_tp:
                 try:
-                    cancel_order(sym, sl_order_id)
+                    cancel_algo_order(sl_order_id)   # SL lama WAJIB dihapus dulu sebelum pasang yang baru
                     new_sl_order = place_sl_order(sym, is_buy, proposed)
-                    sl_order_id = new_sl_order["orderId"]
+                    sl_order_id = new_sl_order["algoId"]
                     sl_p = proposed
                     with positions_lock:
                         if sym in positions:
