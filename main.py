@@ -368,6 +368,7 @@ def fapi_get(path, params=None):
 # sinyal) supaya limit rate keduanya tidak bercampur.
 # ============================================================
 import hmac, hashlib, urllib.parse, math
+from decimal import Decimal, ROUND_HALF_UP
 
 def _binance_signed(method, path, params=None):
     if not REAL_TRADE_ENABLED:
@@ -409,12 +410,24 @@ def get_symbol_filters(symbol):
                 "stepSize": float(f["LOT_SIZE"]["stepSize"]),
                 "minQty": float(f["LOT_SIZE"]["minQty"]),
                 "minNotional": float(f.get("MIN_NOTIONAL", {}).get("notional", 5.0)),
+                "tickSize": float(f["PRICE_FILTER"]["tickSize"]),
                 "qtyPrecision": s["quantityPrecision"],
                 "pricePrecision": s["pricePrecision"],
             }
             _symbol_filters_cache[symbol] = info
             return info
     raise ValueError(f"{symbol} tidak ada di exchangeInfo")
+
+
+def round_to_tick(price, tick_size):
+    """Bulatkan ke kelipatan PERSIS tickSize (bukan cuma jumlah desimal —
+    dua hal beda, sumber error -4014 'Price not increased by tick size').
+    Pakai Decimal supaya tidak kena noise floating point (mis. 0.0005)."""
+    if not tick_size or tick_size <= 0:
+        return price
+    d_price, d_tick = Decimal(str(price)), Decimal(str(tick_size))
+    steps = (d_price / d_tick).to_integral_value(rounding=ROUND_HALF_UP)
+    return float(steps * d_tick)
 
 
 def calc_auto_quantity(symbol, entry_price, margin_usd, leverage):
@@ -451,10 +464,10 @@ def set_leverage(symbol, leverage):
 
 
 def place_limit_order(symbol, side, quantity, price):
-    prec = get_symbol_filters(symbol)["pricePrecision"]
+    tick = get_symbol_filters(symbol)["tickSize"]
     return _binance_signed("POST", "/fapi/v1/order", {
         "symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
-        "quantity": quantity, "price": round(price, prec),
+        "quantity": quantity, "price": round_to_tick(price, tick),
     })
 
 
@@ -494,19 +507,19 @@ def get_real_position(symbol):
 
 def place_sl_order(symbol, is_buy, sl_price):
     close_side = "SELL" if is_buy else "BUY"
-    prec = get_symbol_filters(symbol)["pricePrecision"]
+    tick = get_symbol_filters(symbol)["tickSize"]
     return _binance_signed("POST", "/fapi/v1/algoOrder", {
         "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side, "type": "STOP_MARKET",
-        "triggerPrice": round(sl_price, prec), "closePosition": "true", "workingType": "MARK_PRICE",
+        "triggerPrice": round_to_tick(sl_price, tick), "closePosition": "true", "workingType": "MARK_PRICE",
     })
 
 
 def place_tp_sl(symbol, is_buy, tp_price, sl_price):
     close_side = "SELL" if is_buy else "BUY"
-    prec = get_symbol_filters(symbol)["pricePrecision"]
+    tick = get_symbol_filters(symbol)["tickSize"]
     tp = _binance_signed("POST", "/fapi/v1/algoOrder", {
         "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
-        "triggerPrice": round(tp_price, prec), "closePosition": "true", "workingType": "MARK_PRICE",
+        "triggerPrice": round_to_tick(tp_price, tick), "closePosition": "true", "workingType": "MARK_PRICE",
     })
     sl = place_sl_order(symbol, is_buy, sl_price)
     return tp, sl
