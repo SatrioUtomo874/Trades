@@ -47,10 +47,15 @@ MIN_CONFIDENCE      = 50   # runtime via /confidence_min — jangan pindah ke st
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
 # ─────────────────────────────────────────────
 
-# Import OTAK — kalau gagal, fallback aman (no-op, tidak entry baru)
+# Import OTAK — kalau gagal ATAU full_analyze() tidak ada di dalamnya
+# (misal file strategy_logic.py yang salah/lama ke-upload), fallback aman.
 try:
     from strategy_logic import *
-    log.info("[OTAK] strategy_logic.py berhasil dimuat.")
+    if "full_analyze" not in dir() or not callable(full_analyze):
+        raise ImportError(
+            "strategy_logic.py ke-import tapi TIDAK ADA fungsi full_analyze() di dalamnya "
+            "— kemungkinan file yang salah/versi lama ter-upload.")
+    log.info("[OTAK] strategy_logic.py berhasil dimuat & full_analyze() terverifikasi ada.")
 except Exception as e:
     log.error(f"[OTAK] Gagal memuat strategy_logic.py ({e}) — fallback aman aktif.")
     MIN_RR = 2.0
@@ -62,6 +67,9 @@ except Exception as e:
     H4_RSI_SELL_MIN, H4_RSI_SELL_MAX = 32, 55
     def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
         return None  # fallback: tidak pernah hasilkan sinyal baru
+    _STRATEGY_LOAD_ERROR = str(e)
+else:
+    _STRATEGY_LOAD_ERROR = None
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN tidak ditemukan di environment. Cek file .env")
@@ -517,6 +525,7 @@ def get_public_ip():
         return "unknown"
 
 
+def _binance_klines(symbol, interval, limit):
     raw = fapi_get("/fapi/v1/klines",
                    {"symbol":symbol,"interval":interval,"limit":limit})
     if not isinstance(raw, list) or len(raw) < min(limit, 40):
@@ -2764,6 +2773,13 @@ if __name__=="__main__":
     ws_feed.start()
     threading.Thread(target=_price_cache_loop, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
+
+    if _STRATEGY_LOAD_ERROR and ALLOWED_USER_ID:
+        tg_send(ALLOWED_USER_ID,
+            f"🚨 <b>strategy_logic.py BERMASALAH</b>\n\n"
+            f"{_STRATEGY_LOAD_ERROR}\n\n"
+            f"Bot jalan pakai fallback AMAN (tidak akan cari/entry sinyal baru)\n"
+            f"sampai file yang benar di-upload lewat /ganti.")
 
     if REAL_TRADE_ENABLED and ALLOWED_USER_ID:
         ip = get_public_ip()
