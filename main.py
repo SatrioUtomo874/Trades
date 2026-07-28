@@ -1154,6 +1154,16 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
             "entry": entry, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
         })
 
+# Hitung alasan pending dibatalkan — biar bisa didiagnosis dari data,
+# bukan tebak-tebakan (mis. "kenapa banyak batal?" jadi terjawab dari /stats).
+pending_cancel_stats = {"tp_before_entry": 0, "expired": 0, "binance_reject": 0}
+pending_cancel_lock = threading.Lock()
+
+def _record_pending_cancel(reason_key):
+    with pending_cancel_lock:
+        pending_cancel_stats[reason_key] = pending_cancel_stats.get(reason_key, 0) + 1
+
+
 def fmt_stats():
     with stat_lock:
         t, tp, sl = stats["total"], stats["tp"], stats["sl"]
@@ -1175,6 +1185,15 @@ def fmt_stats():
         for h in reversed(hist[-5:])
     ) or "  (belum ada)"
 
+    with pending_cancel_lock:
+        pc = dict(pending_cancel_stats)
+    total_cancel = sum(pc.values())
+    cancel_line = ""
+    if total_cancel > 0:
+        cancel_line = (f"\n\n⏭ Pending batal: {total_cancel} total\n"
+                        f"  TP sebelum entry: {pc['tp_before_entry']} | "
+                        f"Expired: {pc['expired']} | Ditolak Binance: {pc['binance_reject']}")
+
     return (
         f"📊 <b>Statistik</b> — {t} trade | TP {tp} SL {sl} Trail {trail}\n"
         f"Win Rate: <b>{wr:.1f}%</b> (TP+Trail vs SL)\n\n"
@@ -1182,6 +1201,7 @@ def fmt_stats():
         f"({sgn}{pnl_pct:.2f}%)\n\n"
         f"5 terakhir:\n{hist_str}\n\n"
         f"🚫 Banned: {len(banned_coins)}"
+        f"{cancel_line}"
     )
 
 def fmt_backtest():
@@ -1438,9 +1458,17 @@ def close_position(sym, result, close_price=None):
         if not positions:
             active_trade = None
 
+    with stat_lock:
+        last = stats["pnl_history"][-1] if stats["pnl_history"] else None
+
     emoji = {"tp":"🎯","sl":"🛑","trail":"🔒"}.get(result,"❓")
     label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(result, result.upper())
-    tg_send(cid, f"{emoji} <b>{label}</b> — {sym}\n\n" + fmt_stats())
+    detail = ""
+    if last and last.get("symbol") == sym:
+        sgn = "+" if last["pct"] >= 0 else ""
+        detail = (f"Entry: <code>{last['entry']:.6g}</code> → Exit: <code>{last['exit_price']:.6g}</code>\n"
+                   f"Hasil: <b>{sgn}{last['pct']:.2f}%</b> (${sgn}{last['pnl_usd']:.4f})\n\n")
+    tg_send(cid, f"{emoji} <b>{label}</b> — {sym}\n\n{detail}" + fmt_stats())
 
 
 def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
@@ -1768,6 +1796,7 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
             with positions_lock:
                 positions.pop(sym, None)
             _ban_coin(sym, f"order {status.lower()}")
+            _record_pending_cancel("binance_reject")
             tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nStatus order: {status}")
             return
 
@@ -1779,6 +1808,7 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
                 with positions_lock:
                     positions.pop(sym, None)
                 _ban_coin(sym, "TP sebelum entry")
+                _record_pending_cancel("tp_before_entry")
                 tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nTP tersentuh sebelum entry, order dibatalkan.")
                 return
 
@@ -1788,6 +1818,7 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
     with positions_lock:
         positions.pop(sym, None)
     _ban_coin(sym, "pending expired")
+    _record_pending_cancel("expired")
     tg_send(chat_id, f"⏰ <b>Pending Expired</b> — {sym}\nOrder dibatalkan (8 jam tidak terisi).")
 
 
@@ -1914,13 +1945,20 @@ def monitor_position_real(sym, pos):
 
         if real_pos is None:
             reason = _infer_close_reason(tp_order_id, sl_order_id)
-            if reason == "sl" and (sl_p >= entry if is_buy else sl_p <= entry):
-                reason = "trail"
+            # Reklasifikasi jalan utk 'sl' MAUPUN 'unknown' (algoStatus query
+            # gagal/ambigu) — sebelumnya cuma dicek utk reason=='sl', jadi
+            # kasus 'unknown' lolos tanpa dicek & selalu jatuh ke label "sl"
+            # walau SL-nya sebenarnya sudah ke-trail ke zona untung.
+            if reason != "tp":
+                if sl_p >= entry if is_buy else sl_p <= entry:
+                    reason = "trail"
+                elif reason == "unknown":
+                    reason = "sl"   # fallback konservatif, masih rugi & status genuinely tidak jelas
             close_price = tp_p if reason == "tp" else sl_p
             # Jaring pengaman: cek & bersihkan sisa algo order (TP atau SL)
             # yang mungkin belum ke-cancel otomatis oleh Binance.
             cancel_all_algo_orders(sym)
-            close_position(sym, reason if reason != "unknown" else "sl", close_price=close_price)
+            close_position(sym, reason, close_price=close_price)
             return
 
         price = get_price(sym) or entry
@@ -1953,6 +1991,7 @@ def monitor_position_real(sym, pos):
             within_tp = (proposed < tp_p) if is_buy else (proposed > tp_p)
             if improves and within_tp:
                 try:
+                    old_sl = sl_p
                     cancel_algo_order(sl_order_id)   # SL lama WAJIB dihapus dulu sebelum pasang yang baru
                     new_sl_order = place_sl_order(sym, is_buy, proposed)
                     sl_order_id = new_sl_order["algoId"]
@@ -1961,6 +2000,11 @@ def monitor_position_real(sym, pos):
                         if sym in positions:
                             positions[sym]["current_sl"] = sl_p
                             positions[sym]["sl_order_id"] = sl_order_id
+                    locked_pct = (sl_p - entry) / entry * 100 * (1 if is_buy else -1)
+                    tg_send(chat_id,
+                        f"🔒 <b>TRAILING SL</b> — {sym}\n"
+                        f"SL digeser: <code>{old_sl:.6g}</code> → <code>{sl_p:.6g}</code>\n"
+                        f"Profit terkunci: <b>{locked_pct:+.2f}%</b>")
                 except Exception as e:
                     log.warning(f"[monitor_real trail] gagal update SL {sym}: {e}")
 
@@ -2366,7 +2410,7 @@ def get_info_msg():
 # BOT LOOP
 # ═════════════════════════════════════════════
 def bot_loop():
-    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, MIN_CONFIDENCE, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT
+    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, MIN_CONFIDENCE, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance
 
     # Set active_chat_id ke ALLOWED_USER_ID SEJAK AWAL — di chat pribadi
     # Telegram, chat_id sama dengan user_id, jadi bot bisa kirim pesan
@@ -2562,6 +2606,13 @@ def bot_loop():
                     if auto_mode:
                         tg_send(chat_id,"⚙️ Broadcaster sudah berjalan.")
                     else:
+                        # Reset referensi peak ke saldo SEKARANG — supaya drawdown
+                        # dihitung ulang dari titik ini, bukan dari peak lama yang
+                        # bikin auto-stop langsung kepicu lagi begitu /auto ditekan.
+                        if REAL_TRADE_ENABLED:
+                            _, total = get_real_balance()
+                            with autostop_lock:
+                                peak_real_balance = total
                         auto_mode=True
                         auto_thread=threading.Thread(
                             target=simulation_loop,args=(chat_id,),daemon=True)
