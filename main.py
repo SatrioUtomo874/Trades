@@ -1110,11 +1110,15 @@ POSITION_SIZE_PCT = 100.0  # ukuran posisi per trade = 100% saldo (setara 1× le
                             # hanya memengaruhi simulasi saldo.
 
 def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
-                 sym=None, decision=None, entry_time=None):
+                 sym=None, decision=None, entry_time=None,
+                 confidence=None, entry_label=None, rr=None, rsi=None,
+                 struct_h1=None, d1_bias=None):
     """
     Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
     lama untuk detail model close_price). Tambahan: catat sym/decision/
-    entry_time/exit_time ke pnl_history untuk /backtest.
+    entry_time/exit_time + detail sinyal (confidence/entry_label/rr/rsi/
+    struct_h1/d1_bias) ke pnl_history — bahan diagnosis strategy_logic.py
+    tanpa perlu data tambahan lain (lihat /analyze).
 
     result: "tp" | "sl" | "trail" — "trail" = trailing stop mengunci
     profit (SL bergerak, tapi ditutup di atas entry utk BUY / di bawah
@@ -1152,6 +1156,8 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
             "symbol": sym, "decision": decision,
             "entry_time": entry_time, "exit_time": time.time(),
             "entry": entry, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
+            "confidence": confidence, "entry_label": entry_label, "rr": rr,
+            "rsi": rsi, "struct_h1": struct_h1, "d1_bias": d1_bias,
         })
 
 # Hitung alasan pending dibatalkan — biar bisa didiagnosis dari data,
@@ -1305,13 +1311,17 @@ def _generate_statistics_csv():
     return path
 
 def _generate_trade_csv():
-    """Generate trade.csv dari pnl_history."""
+    """Generate trade.csv dari pnl_history — termasuk detail sinyal
+    (confidence/entry_label/rr/rsi/struct_h1) biar cukup buat diagnosis
+    strategy_logic.py tanpa perlu data tambahan."""
     with stat_lock:
         hist = list(stats["pnl_history"])
     
+    cols = ["symbol", "decision", "result", "pnl_pct", "pnl_usd",
+            "entry", "tp", "sl", "exit_price", "entry_time", "exit_time",
+            "confidence", "entry_label", "rr", "rsi", "struct_h1", "d1_bias"]
     if not hist:
-        df = pd.DataFrame(columns=["symbol", "decision", "result", "pnl_pct", "pnl_usd", 
-                                    "entry", "tp", "sl", "exit_price", "entry_time", "exit_time"])
+        df = pd.DataFrame(columns=cols)
         path = "/tmp/trade.csv"
         df.to_csv(path, index=False)
         return path
@@ -1330,15 +1340,31 @@ def _generate_trade_csv():
             "exit_price": h.get("exit_price", 0),
             "entry_time": datetime.fromtimestamp(h.get("entry_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if h.get("entry_time") else "",
             "exit_time": datetime.fromtimestamp(h.get("exit_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if h.get("exit_time") else "",
+            "confidence": h.get("confidence", ""),
+            "entry_label": h.get("entry_label", ""),
+            "rr": h.get("rr", ""),
+            "rsi": h.get("rsi", ""),
+            "struct_h1": h.get("struct_h1", ""),
+            "d1_bias": h.get("d1_bias", ""),
         })
     df = pd.DataFrame(rows)
     path = "/tmp/trade.csv"
     df.to_csv(path, index=False)
     return path
 
+def _confidence_bucket(c):
+    if c is None: return "unknown"
+    if c < 50: return "<50"
+    if c < 65: return "50-64"
+    if c < 80: return "65-79"
+    return "80+"
+
 def _generate_research_context():
     """
-    Generate research_context.json — analisa performa trading lengkap.
+    Generate research_context.json — analisa performa trading lengkap,
+    dilengkapi breakdown per entry_label & confidence, dan data pending-
+    cancel — supaya file ini SENDIRI cukup dipakai untuk review
+    strategy_logic.py tanpa perlu data tambahan lain.
     (Data chart M1 TIDAK di sini lagi — sudah ada sumber terpisah dari
     candle_fetcher.py, jadi tidak perlu fetch ulang & redundan.)
     """
@@ -1347,22 +1373,39 @@ def _generate_research_context():
     with stat_lock:
         trade_hist = list(stats["pnl_history"])
         balance = stats["balance"]
+    with pending_cancel_lock:
+        pc = dict(pending_cancel_stats)
 
     result = {
         "period": f"{len(trade_hist)} trade terakhir",
         "summary": _calc_full_metrics(trade_hist, STARTING_BALANCE),
-        "performance_breakdown": {"by_coin": {}, "by_session": {}},
+        "performance_breakdown": {"by_coin": {}, "by_session": {}, "by_entry_label": {}, "by_confidence": {}},
+        "pending_cancel": {**pc, "total": sum(pc.values())},
+        "data_quality_notes": [],
         "worst_trades": [],
         "best_trades": [],
     }
 
     if trade_hist:
-        by_coin = {}
-        by_session = {}
+        by_coin, by_session, by_label, by_conf = {}, {}, {}, {}
+        mislabeled = []
         for t in trade_hist:
             sym = t.get("symbol", "unknown")
             by_coin.setdefault(sym, []).append(t)
             by_session.setdefault(_session_of(t.get("entry_time")), []).append(t)
+            by_label.setdefault(t.get("entry_label") or "unknown", []).append(t)
+            by_conf.setdefault(_confidence_bucket(t.get("confidence")), []).append(t)
+            # Sanity check: result="sl" mestinya selalu pnl<0, "trail"/"tp" pnl>=0.
+            # Kalau tidak, kemungkinan data dari versi main.py lama (sebelum fix
+            # reklasifikasi trail-vs-sl) — jangan dipercaya labelnya mentah-mentah.
+            if t["result"] == "sl" and t["pnl_usd"] >= 0:
+                mislabeled.append(t.get("symbol"))
+
+        if mislabeled:
+            result["data_quality_notes"].append(
+                f"{len(mislabeled)} trade berlabel 'sl' tapi pnl positif ({', '.join(mislabeled)}) — "
+                f"kemungkinan dari versi main.py sebelum fix reklasifikasi trail-vs-sl. "
+                f"Jangan simpulkan pola menang/kalah dari label result mentah-mentah utk trade ini.")
 
         for sym, rows in by_coin.items():
             m = _calc_full_metrics(rows, STARTING_BALANCE)
@@ -1375,11 +1418,23 @@ def _generate_research_context():
             result["performance_breakdown"]["by_session"][sess] = {
                 "total": m["total_trades"], "win_rate": m["win_rate_pct"], "net_profit": m["net_profit"],
             }
+        for label, rows in by_label.items():
+            m = _calc_full_metrics(rows, STARTING_BALANCE)
+            result["performance_breakdown"]["by_entry_label"][label] = {
+                "total": m["total_trades"], "win_rate": m["win_rate_pct"], "net_profit": m["net_profit"],
+            }
+        for bucket, rows in by_conf.items():
+            m = _calc_full_metrics(rows, STARTING_BALANCE)
+            result["performance_breakdown"]["by_confidence"][bucket] = {
+                "total": m["total_trades"], "win_rate": m["win_rate_pct"], "net_profit": m["net_profit"],
+            }
 
         best  = sorted([t for t in trade_hist if t["pnl_usd"] >= 0], key=lambda x: x["pnl_usd"], reverse=True)[:3]
         worst = sorted([t for t in trade_hist if t["pnl_usd"] < 0], key=lambda x: x["pnl_usd"])[:3]
-        result["best_trades"]  = [{"pnl": round(t["pnl_usd"], 4), "symbol": t.get("symbol"), "result": t["result"]} for t in best]
-        result["worst_trades"] = [{"pnl": round(t["pnl_usd"], 4), "symbol": t.get("symbol"), "result": t["result"]} for t in worst]
+        result["best_trades"]  = [{"pnl": round(t["pnl_usd"], 4), "symbol": t.get("symbol"), "result": t["result"],
+                                    "entry_label": t.get("entry_label"), "confidence": t.get("confidence")} for t in best]
+        result["worst_trades"] = [{"pnl": round(t["pnl_usd"], 4), "symbol": t.get("symbol"), "result": t["result"],
+                                    "entry_label": t.get("entry_label"), "confidence": t.get("confidence")} for t in worst]
 
     path = "/tmp/research_context.json"
     with open(path, "w") as f:
@@ -1450,7 +1505,10 @@ def close_position(sym, result, close_price=None):
     cid   = pos["chat_id"]
 
     update_stats(result, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price,
-                 sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"))
+                 sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"),
+                 confidence=sig.get("confidence"), entry_label=sig.get("entry_label"),
+                 rr=sig.get("rr"), rsi=sig.get("rsi"), struct_h1=sig.get("struct_h1"),
+                 d1_bias=sig.get("d1_bias"))
     _ban_coin(sym, f"trade closed ({result})", duration=BAN_DURATION_TRADE_CLOSED)
 
     # Update active_trade jika ini yang sedang dipantau
@@ -2539,9 +2597,22 @@ def bot_loop():
                         
                         # 2. Validasi sintaks
                         try:
-                            compile(file_content, "strategy_logic.py", "exec")
+                            compiled = compile(file_content, "strategy_logic.py", "exec")
                         except SyntaxError as e:
                             tg_send(chat_id, f"❌ Error sintaks di file:\n<code>{e}</code>")
+                            continue
+
+                        # 2b. Validasi full_analyze() ADA di file baru — tolak dari awal
+                        # kalau tidak ada, jangan sampai ke-commit/reload file yang salah.
+                        check_ns = {}
+                        try:
+                            exec(compiled, check_ns)
+                        except Exception as e:
+                            tg_send(chat_id, f"❌ File error saat dijalankan (bukan cuma sintaks):\n<code>{e}</code>")
+                            continue
+                        if "full_analyze" not in check_ns or not callable(check_ns["full_analyze"]):
+                            tg_send(chat_id, "❌ File ini tidak punya fungsi full_analyze() — "
+                                              "ditolak, bukan strategy_logic.py yang valid.")
                             continue
                         
                         # 3. Commit ke GitHub via API
@@ -2551,23 +2622,32 @@ def bot_loop():
                         except Exception as e:
                             tg_send(chat_id, f"❌ Gagal commit ke GitHub:\n<code>{str(e)[:200]}</code>")
                             continue
-                        
-                        # 4. Reload modul strategy_logic dari disk (setelah commit, file sudah ter-update)
+
+                        # 4. Tulis ke file LOKAL yang sedang jalan di Render — WAJIB sebelum
+                        # reload, kalau tidak importlib.reload() cuma baca ulang isi lama
+                        # dari disk (ini penyebab /ganti kelihatan sukses tapi strategi
+                        # sebenarnya tidak pernah berubah).
+                        local_path = sys.modules["strategy_logic"].__file__ if "strategy_logic" in sys.modules \
+                                     else os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategy_logic.py")
+                        with open(local_path, "w", encoding="utf-8") as f:
+                            f.write(file_content)
+
+                        # 5. Reload modul strategy_logic dari disk (sekarang sudah ter-update)
                         import importlib
-                        import sys
-                        if 'strategy_logic' in sys.modules:
-                            importlib.reload(sys.modules['strategy_logic'])
+                        if "strategy_logic" in sys.modules:
+                            importlib.reload(sys.modules["strategy_logic"])
                         else:
                             import strategy_logic
                             importlib.reload(strategy_logic)
                         
-                        # 5. Update global namespace try22.py dengan fungsi-fungsi baru
-                        for attr in dir(strategy_logic):
+                        # 6. Update global namespace main.py dengan fungsi-fungsi baru
+                        strat_mod = sys.modules["strategy_logic"]
+                        for attr in dir(strat_mod):
                             if not attr.startswith("_"):
-                                globals()[attr] = getattr(strategy_logic, attr)
+                                globals()[attr] = getattr(strat_mod, attr)
                         
                         tg_send(chat_id, "✅ Strategy logic berhasil di-reload dan AKTIF tanpa restart!")
-                        log.info("[OTAK] Strategy logic di-reload via /ganti (GitHub commit)")
+                        log.info("[OTAK] Strategy logic di-reload via /ganti (GitHub commit + file lokal)")
                         
                     except Exception as e:
                         log.error(f"[ganti] Error: {e}")
