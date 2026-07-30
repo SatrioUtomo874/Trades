@@ -13,7 +13,7 @@ Diekstrak dari try22__2_.py, 3 perubahan:
 3. full_analyze() terima df_h1/df_m15/df_d1 langsung, bukan symbol.
 """
 
-import os, re, time, logging, threading
+import os, time, logging, threading
 from collections import deque
 from datetime import datetime, timezone, timedelta
 
@@ -143,38 +143,6 @@ BAN_DURATION_TRADE_CLOSED = 300   # ban khusus setelah trade BENAR-BENAR closed 
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 REAL_TRADE_ENABLED = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
-
-# ── API KEY 2 — fallback sebelum jeda saat key 1 kena limit/ban ──
-BINANCE_API_KEY_2    = os.getenv("BINANCE_API_KEY_2")
-BINANCE_API_SECRET_2 = os.getenv("BINANCE_API_SECRET_2")
-_HAS_KEY_2 = bool(BINANCE_API_KEY_2 and BINANCE_API_SECRET_2)
-
-# Per-key ban state: {key_num: epoch_float saat ban selesai, 0.0 = tidak kena ban}
-_api_key_lock        = threading.Lock()
-_api_key_banned_until: dict = {1: 0.0, 2: 0.0}
-
-def _mark_key_banned(key_num: int, until_ms: int | None = None, delay_sec: float = 60.0):
-    """
-    Tandai API key `key_num` sebagai kena rate-limit/ban.
-    - until_ms  : timestamp milidetik dari Binance ("banned until XXXXX")
-    - delay_sec : jeda fallback kalau until_ms tidak tersedia
-    """
-    with _api_key_lock:
-        if until_ms:
-            _api_key_banned_until[key_num] = until_ms / 1000.0
-        else:
-            _api_key_banned_until[key_num] = time.time() + delay_sec
-    ban_ends = datetime.fromtimestamp(_api_key_banned_until[key_num]).strftime("%H:%M:%S")
-    log.warning(f"[rate-limit] Key {key_num} ditandai ban sampai {ban_ends}")
-
-def _key_is_banned(key_num: int) -> bool:
-    with _api_key_lock:
-        return time.time() < _api_key_banned_until[key_num]
-
-def _parse_ban_until_ms(text: str) -> int | None:
-    """Ambil timestamp milidetik dari pesan Binance 'banned until XXXXXX'."""
-    m = re.search(r'banned until (\d{10,})', text)
-    return int(m.group(1)) if m else None
 
 LEVERAGE          = 5      # runtime, via /leverage
 MARGIN_USD        = 5.0    # runtime, via /margin
@@ -355,6 +323,37 @@ COINGECKO_ID_MAP = {
     "TONUSDT":"the-open-network", "BCHUSDT":"bitcoin-cash",
 }
 
+import re
+
+# ── State ban IP Binance — DIBAGI antara fapi_get (publik) & _binance_signed
+# (private), karena ban itu per-IP, bukan per-endpoint/per-key. Begitu satu
+# sisi kena ban, sisi lain juga harus tahu & berhenti nembak, bukan lanjut
+# jalan sendiri-sendiri (itu yang bikin log kebanjiran "Skip ... HTTP 418").
+_binance_ban_lock = threading.Lock()
+_binance_banned_until = 0.0   # unix timestamp detik; 0 = tidak sedang ban
+
+def _binance_wait_if_banned():
+    with _binance_ban_lock:
+        until = _binance_banned_until
+    remaining = until - time.time()
+    if remaining > 0:
+        log.warning(f"[binance] Masih dalam masa ban, menunggu {remaining:.0f} detik lagi sebelum request baru...")
+        time.sleep(remaining + 1)   # +1 detik buffer
+
+def _binance_register_ban(msg="", fallback_seconds=60):
+    """Catat waktu ban global. Coba parse 'banned until <ms epoch>' dari
+    pesan error Binance (paling akurat); kalau tidak ada, mundur konservatif
+    (fallback_seconds, makin lama tiap kena berturut-turut)."""
+    global _binance_banned_until
+    m = re.search(r"banned until (\d+)", msg)
+    until = int(m.group(1)) / 1000 if m else (time.time() + fallback_seconds)
+    with _binance_ban_lock:
+        if until > _binance_banned_until:
+            _binance_banned_until = until
+    wait = until - time.time()
+    log.error(f"[binance] Kena limit/ban — semua request Binance dijeda {max(wait,0):.0f} detik.")
+
+
 def _raw_get(url, params=None, retries=3):
     """HTTP GET dengan retry — digunakan oleh Bybit & CoinGecko."""
     for i in range(retries):
@@ -370,6 +369,7 @@ def _raw_get(url, params=None, retries=3):
 
 # ── BINANCE REST (backfill awal WS + fallback tier-2) ─────────────────
 def fapi_get(path, params=None):
+    _binance_wait_if_banned()
     for i in range(3):
         try:
             r = requests.get(f"{FAPI}{path}", params=params,
@@ -377,12 +377,20 @@ def fapi_get(path, params=None):
             if r.status_code in (418, 429):
                 # Kena rate-limit/ban IP dari Binance — JANGAN retry lagi
                 # ke Binance (mengulang request saat sedang kena ban malah
-                # berisiko memperpanjang durasi ban). Langsung lempar ke
-                # caller supaya pindah ke tier fallback (Bybit → WS).
+                # berisiko memperpanjang durasi ban). Catat state ban
+                # global (dipakai fapi_get & _binance_signed) lalu lempar
+                # ke caller supaya pindah ke tier fallback (Bybit → WS).
+                try:
+                    body_msg = r.text
+                except Exception:
+                    body_msg = ""
+                _binance_register_ban(body_msg)
                 raise ConnectionError(
                     f"Binance kena limit/ban (HTTP {r.status_code})")
             d = r.json()
             if isinstance(d, dict) and "code" in d:
+                if d["code"] == -1003:
+                    _binance_register_ban(d.get("msg", ""))
                 raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
             return d
         except ConnectionError as e:
@@ -402,159 +410,56 @@ def fapi_get(path, params=None):
 import hmac, hashlib, urllib.parse, math
 from decimal import Decimal, ROUND_HALF_UP
 
-# ── Throttle proaktif signed requests ─────────────────────────────────
-# Binance membatasi ~2400 "weight" per menit untuk signed endpoints.
-# Menjaga jarak minimum 0.55 detik antar request signed (≈1.8 req/s,
-# ≈108 req/menit) mencegah bot melampaui batas bahkan saat scan masif.
-_signed_throttle_lock = threading.Lock()
-_signed_last_request  = 0.0        # epoch float terakhir kali _binance_signed jalan
-_SIGNED_MIN_INTERVAL  = 0.55       # detik minimum antar request signed
-
-def _signed_throttle():
-    """Blokir sesaat kalau request sebelumnya kurang dari _SIGNED_MIN_INTERVAL lalu."""
-    global _signed_last_request
-    with _signed_throttle_lock:
-        now    = time.time()
-        gap    = now - _signed_last_request
-        if gap < _SIGNED_MIN_INTERVAL:
-            time.sleep(_SIGNED_MIN_INTERVAL - gap)
-        _signed_last_request = time.time()
-
 def _binance_signed(method, path, params=None):
-    """
-    Signed Binance Futures API request dengan:
-    - Throttle proaktif (≤1.8 req/s) agar tidak pernah melampaui limit
-    - Fallback dua API key saat kena rate-limit
-    - Jeda otomatis saat kena rate-limit (HTTP 418/429 atau error -1003)
-
-    Urutan:
-      1. Throttle — paksa jeda kalau request sebelumnya terlalu mepet
-      2. Coba Key 1 (kalau tidak sedang kena ban)
-      3. Fallback ke Key 2 (kalau tersedia & tidak kena ban)
-      4. Kalau dua-duanya kena ban: tunggu sampai ban key yang paling
-         cepat selesai (maks 5 menit), lalu coba lagi satu kali
-    """
-    _signed_throttle()   # ← proaktif: jaga jarak minimum antar request
-
     if not REAL_TRADE_ENABLED:
         raise RuntimeError("BINANCE_API_KEY/SECRET tidak diset")
-
-    # Susun daftar key yang akan dicoba (skip yang masih kena ban)
-    def _candidate_keys():
-        keys = []
-        if not _key_is_banned(1):
-            keys.append((1, BINANCE_API_KEY, BINANCE_API_SECRET))
-        if _HAS_KEY_2 and not _key_is_banned(2):
-            keys.append((2, BINANCE_API_KEY_2, BINANCE_API_SECRET_2))
-        return keys
-
-    candidates = _candidate_keys()
-
-    # Kalau semua key lagi kena ban, hitung jeda terpendek lalu tunggu
-    if not candidates:
-        with _api_key_lock:
-            waits = [max(0.0, _api_key_banned_until[1] - time.time())]
-            if _HAS_KEY_2:
-                waits.append(max(0.0, _api_key_banned_until[2] - time.time()))
-        wait_sec = min(waits)
-        capped   = min(wait_sec, 300.0)   # jeda maks 5 menit
-        log.warning(
-            f"[binance-signed] Semua API key kena ban — "
-            f"jeda {capped:.0f}s (ban berakhir dalam {wait_sec:.0f}s)"
-        )
-        time.sleep(capped)
-        candidates = _candidate_keys()
-        if not candidates:                # masih belum bebas → pakai key 1 paksa
-            candidates = [(1, BINANCE_API_KEY, BINANCE_API_SECRET)]
-
+    _binance_wait_if_banned()
+    params = dict(params or {})
+    params["timestamp"] = int(time.time() * 1000)
+    params["recvWindow"] = 5000
+    query = urllib.parse.urlencode(params, safe=",")
+    sig = hmac.new(BINANCE_API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
+    url = f"{FAPI}{path}?{query}&signature={sig}"
+    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     last_err = None
-    for key_num, api_key, api_secret in candidates:
-        p = dict(params or {})
-        p["timestamp"]  = int(time.time() * 1000)
-        p["recvWindow"] = 5000
-        query = urllib.parse.urlencode(p, safe=",")
-        sig   = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-        url   = f"{FAPI}{path}?{query}&signature={sig}"
-        headers = {"X-MBX-APIKEY": api_key}
-
-        key_hit_limit = False
-        for attempt in range(3):
-            try:
-                r = requests.request(method, url, headers=headers,
-                                     timeout=10, verify=False)
-
-                # ── Deteksi HTTP 418 / 429 (rate-limit / IP ban) ──
-                if r.status_code in (418, 429):
-                    try:
-                        body    = r.json()
-                        msg     = body.get("msg", "")
-                        ban_ms  = _parse_ban_until_ms(msg)
-                    except Exception:
-                        ban_ms  = None
-                    delay = 60.0 if r.status_code == 429 else 300.0
-                    _mark_key_banned(key_num, until_ms=ban_ms, delay_sec=delay)
-                    log.warning(
-                        f"[binance-signed] Key {key_num} HTTP {r.status_code} "
-                        f"({method} {path}) — coba key berikutnya / tunggu jeda"
-                    )
-                    key_hit_limit = True
-                    break   # keluar inner loop, coba key berikutnya
-
-                data = r.json()
-
-                # ── Deteksi error -1003 (IP/key rate-limit via JSON) ──
-                if isinstance(data, dict) and data.get("code") == -1003:
-                    msg    = data.get("msg", "")
-                    ban_ms = _parse_ban_until_ms(msg)
-                    _mark_key_banned(key_num, until_ms=ban_ms, delay_sec=300.0)
-                    log.warning(
-                        f"[binance-signed] Key {key_num} error -1003 "
-                        f"({method} {path}) — {msg[:120]}"
-                    )
-                    key_hit_limit = True
-                    break   # keluar inner loop, coba key berikutnya
-
-                if isinstance(data, dict) and "code" in data and data["code"] < 0:
-                    raise RuntimeError(f"Binance {data['code']}: {data.get('msg')}")
-                return data   # ✅ sukses
-
-            except RuntimeError:
-                raise
-            except Exception as e:
-                last_err = e
-                log.warning(
-                    f"[binance-signed] Key {key_num} {method} {path} "
-                    f"percobaan {attempt+1}: {e}"
-                )
-                time.sleep(1.5)
-
-        if key_hit_limit:
-            continue   # lanjut ke key berikutnya dalam daftar
-
-    # Semua key gagal (termasuk setelah jeda)
-    # Kalau semua kena limit, tambahkan jeda ringan sebelum melempar error
-    # supaya scan berikutnya tidak langsung picu ban lagi
-    if all(_key_is_banned(k) for k in ([1] + ([2] if _HAS_KEY_2 else []))):
-        with _api_key_lock:
-            waits = [max(0.0, _api_key_banned_until[1] - time.time())]
-            if _HAS_KEY_2:
-                waits.append(max(0.0, _api_key_banned_until[2] - time.time()))
-        jeda = min(min(waits), 300.0)
-        log.warning(f"[binance-signed] Semua key masih kena ban — jeda {jeda:.0f}s")
-        time.sleep(jeda)
+    for attempt in range(3):
+        try:
+            r = requests.request(method, url, headers=headers, timeout=10, verify=False)
+            if r.status_code in (418, 429):
+                _binance_register_ban(r.text)
+                raise RuntimeError(f"Binance kena limit/ban (HTTP {r.status_code})")
+            data = r.json()
+            if isinstance(data, dict) and "code" in data and data["code"] < 0:
+                if data["code"] == -1003:
+                    _binance_register_ban(data.get("msg", ""))
+                raise RuntimeError(f"Binance {data['code']}: {data.get('msg')}")
+            return data
+        except RuntimeError:
+            raise
+        except Exception as e:
+            last_err = e
+            log.warning(f"[binance-signed] {method} {path} percobaan {attempt+1}: {e}")
+            time.sleep(1.5)
     raise RuntimeError(f"Gagal request signed {method} {path}: {last_err}")
 
 
 _symbol_filters_cache = {}
+_exchange_info_cache = {"fetched_at": 0.0}
+_exchange_info_lock = threading.Lock()
 
-def get_symbol_filters(symbol):
-    if symbol in _symbol_filters_cache:
-        return _symbol_filters_cache[symbol]
-    data = fapi_get("/fapi/v1/exchangeInfo")
-    for s in data["symbols"]:
-        if s["symbol"] == symbol:
+def _load_all_symbol_filters():
+    """Fetch /fapi/v1/exchangeInfo SEKALI, parse SEMUA simbol sekaligus ke
+    cache — supaya koin baru berikutnya tidak perlu fetch ulang endpoint
+    berat ini. Refresh tiap 1 jam (filter simbol jarang berubah)."""
+    with _exchange_info_lock:
+        if time.time() - _exchange_info_cache["fetched_at"] < 3600 and _symbol_filters_cache:
+            return
+        data = fapi_get("/fapi/v1/exchangeInfo")
+        for s in data["symbols"]:
             f = {x["filterType"]: x for x in s["filters"]}
-            info = {
+            if "LOT_SIZE" not in f or "PRICE_FILTER" not in f:
+                continue
+            _symbol_filters_cache[s["symbol"]] = {
                 "stepSize": float(f["LOT_SIZE"]["stepSize"]),
                 "minQty": float(f["LOT_SIZE"]["minQty"]),
                 "minNotional": float(f.get("MIN_NOTIONAL", {}).get("notional", 5.0)),
@@ -562,9 +467,14 @@ def get_symbol_filters(symbol):
                 "qtyPrecision": s["quantityPrecision"],
                 "pricePrecision": s["pricePrecision"],
             }
-            _symbol_filters_cache[symbol] = info
-            return info
-    raise ValueError(f"{symbol} tidak ada di exchangeInfo")
+        _exchange_info_cache["fetched_at"] = time.time()
+
+def get_symbol_filters(symbol):
+    if symbol not in _symbol_filters_cache:
+        _load_all_symbol_filters()
+    if symbol not in _symbol_filters_cache:
+        raise ValueError(f"{symbol} tidak ada di exchangeInfo")
+    return _symbol_filters_cache[symbol]
 
 
 def round_to_tick(price, tick_size):
@@ -1226,7 +1136,7 @@ def run_scan_once(chat_id):
             log.debug(f"[scan] {sym}: {e}")
             r = None
         if r: results.append(r)
-        time.sleep(0.08)
+        time.sleep(0.15)
 
     if not results:
         tg_send(chat_id,"⚠️ Tidak ada setup valid dari semua koin.")
