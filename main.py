@@ -2397,6 +2397,14 @@ def simulation_loop(chat_id):
             daemon=True
         ).start()
 
+    SCAN_INTERVAL_SEC = 120   # jeda minimum antar SIKLUS scan penuh (50 koin).
+    # Sebelumnya cuma dikasih jeda 5 detik antar PERCOBAAN launch -- kalau satu
+    # scan selesai lebih cepat dari itu, langsung scan lagi nyaris tanpa henti
+    # (150+ request/scan × berkali-kali/menit). Ini penyebab utama sering kena
+    # limit/ban Binance. M15 candle baru cuma muncul tiap 15 menit, jadi scan
+    # tiap 2 menit sudah lebih dari cukup responsif tanpa membebani API.
+    last_scan_started_at = 0.0
+
     while auto_mode:
         with positions_lock:
             n_pos = len(positions)
@@ -2416,10 +2424,20 @@ def simulation_loop(chat_id):
             time.sleep(5)
             continue
 
+        # Jeda minimum antar SIKLUS scan (bukan cuma antar percobaan) —
+        # kalau belum waktunya, lepas flag scanning lagi & tunggu.
+        elapsed = time.time() - last_scan_started_at
+        if elapsed < SCAN_INTERVAL_SEC:
+            with scan_lock:
+                scanning = False
+            time.sleep(min(5, SCAN_INTERVAL_SEC - elapsed))
+            continue
+
         # Launch scan di background
+        last_scan_started_at = time.time()
         threading.Thread(target=_do_scan, daemon=True).start()
 
-        # Jeda antar scan agar tidak langsung re-scan begitu selesai
+        # Jeda antar percobaan launch (flag scanning yang cegah overlap)
         time.sleep(5)
 
     tg_send(chat_id, "⏹ <b>Scanning dihentikan.</b>\n\n" + fmt_stats())
