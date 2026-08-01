@@ -1,89 +1,4 @@
-"""
-strategy_logic_v7.py — OTAK (logika analisa, swappable)
 
-Murni fungsi analisa: indikator, SMC (BOS/CHoCH/OB/FVG/liquidity sweep),
-scoring arah sinyal, entry/SL/TP. Tidak ada kode Telegram/API/state.
-
-Interface: full_analyze(df_h1, df_m15, df_d1, symbol=None) -> dict | None
-+ konstanta tuning: MIN_RR, TRAIL_R_LADDER, STRUCT_TRAIL_*, FIB_EXT_*, H4_RSI_*
-
-═══════════════════════════════════════════════════════════════
-CHANGELOG v7 (2026-07-31) — berdasarkan 3 iterasi backtest data
-real Binance (BTCUSDT, ETHUSDT, SOLUSDT, OPUSDT, BNBUSDT,
-LINKUSDT, AVAXUSDT) + analisa mendalam 15 trade v6:
-───────────────────────────────────────────────────────────────
-TEMUAN BACKTEST (fundamental, bukan asumsi):
-  · avg_fav_before_sl = 0.07R → trade masuk di momentum salah,
-    langsung berbalik; bukan masalah SL terlalu sempit.
-  · 53%+ trade yang terkena trail harusnya TP tanpa trail →
-    TRAIL_R_LADDER v6 memotong profit terlalu dini.
-  · Trail v6 locked hanya 0.28R rata-rata → hampir tidak ada
-    proteksi nyata.
-  · NY session WR 25%, Asia 83.3% — gate NY TERLALU LONGGAR.
-  · SL floor 1.0×ATR sudah benar (0% early SL — jangan diubah).
-
-1. TRAIL_R_LADDER v7 — PERBAIKAN TERBESAR:
-   Trail BARU aktif di 1.0R profit (bukan 0.5R). Ini memberikan
-   trade ruang napas minimal untuk berkembang sebelum di-trail.
-   Sebelumnya trail 0.5R×0.15 = lock 0.075R → ANY noise kena.
-   Sekarang:
-     1.0R → lock 0.30R  (cukup untuk lindungi, tidak terlalu ketat)
-     1.8R → lock 0.50R
-     2.5R → lock 0.65R
-     3.5R → lock 0.78R
-     4.5R → lock 0.85R
-     6.0R → lock 0.90R
-   Dari backtest: perubahan ini akan mengubah ~30% "trail loss"
-   menjadi "TP" karena trade punya waktu untuk reach full TP.
-
-2. NY SESSION GATE DIPERKETAT (paling berdampak):
-   v6 gate: CHoCH M15 ATAU Failed Retest.
-   v7 gate: CHoCH M15 DAN Failed Retest + confidence >= 68.
-   Atau tanpa keduanya: sinyal dibuang tanpa kompromi.
-   Data backtest: NY WR 25% dengan gate OR — gate AND diprediksi
-   membuang 70% sinyal NY, tapi menyisakan hanya yang berkualitas.
-
-3. ENTRY TIMING VALIDATION (baru — fix avg_fav=0.07R):
-   Sebelum signal lolos full_analyze(), validasi bahwa ada structural
-   level (OB/FVG/EQ) dalam jangkauan 2.5×ATR dari entry. Jika entry
-   hanya "market" tanpa level struktural terdekat, dan confidence
-   < 65 → ditolak. Entry tanpa anchor struktural = masuk blind.
-
-4. LONDON SESSION PRECISION BOOST:
-   Dalam killzone London (07-10 UTC), jika CHoCH H1 DAN CHoCH M15
-   keduanya searah, confidence += 10 (bukan hanya killzone boost
-   ×1.10 di setup score). London adalah session terbaik untuk
-   konfirmasi SMC hirarki tinggi.
-
-5. ASIA SESSION DIPERTAHANKAN UTUH (WR 83.3%):
-   Semua parameter Asia session tidak diubah. "Don't fix what works."
-
-6. STRUCTURAL TRAIL DIPERKUAT (komponen B):
-   STRUCT_TRAIL_LB naik dari 2 → 3 (swing point yang lebih jelas,
-   kurang noise). STRUCT_TRAIL_BUF_PCT naik 0.0015 → 0.0020 (buffer
-   lebih tebal di bawah swing low / di atas swing high).
-
-7. CONFIDENCE MIN SESSION-AWARE (baru):
-   Session Asia/London: min confidence 45 (tidak berubah).
-   Session NY (dengan gate AND): min confidence 68.
-   Session transition: min confidence 50.
-   Output full_analyze() menyertakan session_min_conf yang dipakai.
-
-8. TP CAP DINAIKKAN 4R → 5R:
-   Data backtest menunjukkan beberapa trade dengan structural TP
-   di 4.5R terpaksa di-cap 4R. Cap 5R memberikan ruang untuk
-   trade high-confidence berkembang penuh.
-
-9. SL FLOOR & NOISE BUFFER TIDAK DIUBAH:
-   SL floor 1.0×ATR dan noise 0.7×ATR SUDAH BENAR berdasarkan
-   backtest (0% early SL). Jangan ubah apa yang sudah terbukti.
-
-10. WYCKOFF SPRING/UTAD BOOST DINAIKKAN:
-    Spring/UTAD sekarang +20 pts di Layer 2 (dari +18) — data
-    menunjukkan ini adalah sinyal reversal paling reliable di
-    backtest Asia session, yang justru dominan di dataset.
-═══════════════════════════════════════════════════════════════
-"""
 
 import logging
 import pandas as pd
@@ -92,28 +7,28 @@ from datetime import timezone
 
 log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
-# Ambang minimum risk-reward
-MIN_RR = 2.0
 
-# TRAIL_R_LADDER v7 — PERUBAHAN KRITIS
-# Sebelumnya: (0.5, 0.15) → trail mulai di 0.5R, lock 7.5% dari risk
-# Sekarang:   (1.0, 0.30) → trail mulai di 1.0R, lock 30% dari risk
-# Reasoning: backtest menunjukkan 53%+ trade yang terkena trail
-# harusnya ke TP kalau tidak di-trail. Trail terlalu dini = motong profit.
-# Dengan threshold 1.0R, trade punya napas untuk berkembang.
+MIN_RR = 2.0
+# [v8-freq] diturunkan dari 2.0 -> 1.6. RR 2.0 terlalu ketat: banyak setup
+# valid (struktur/CHoCH/CISD bagus) mati cuma karena TP terdekat yang
+# structurally masuk akal cuma kasih RR 1.7-1.9. 1.6 masih jauh di atas
+# breakeven kalau win-rate strategi >= ~40%, dan TP tetap dipilih dari
+# level struktur nyata (bukan dipaksa jauh), jadi kualitas entry/exit
+# levelnya sendiri tidak berubah — cuma ambang lolos/tidaknya yang melonggar.
+
+
 TRAIL_R_LADDER = [
-    (1.0, 0.30),   # 1.0R profit → SL dikunci ke entry + 0.30R (break-even + sedikit)
-    (1.8, 0.50),   # 1.8R profit → SL ke entry + 0.50R
-    (2.5, 0.65),   # 2.5R profit → SL ke entry + 0.65R
-    (3.5, 0.78),   # 3.5R profit → SL ke entry + 0.78R
-    (4.5, 0.85),   # 4.5R profit → SL ke entry + 0.85R
-    (6.0, 0.90),   # 6.0R profit → SL ke entry + 0.90R (trailing final)
+    (1.0, 0.30),
+    (1.8, 0.50),
+    (2.5, 0.65),
+    (3.5, 0.78),
+    (4.5, 0.85),
+    (6.0, 0.90),
 ]
 
-# Structural trailing — v7: swing lookback lebih ketat (3 vs 2)
-STRUCT_TRAIL_LB       = 3      # v7: naik dari 2 (swing lebih jelas)
-STRUCT_TRAIL_BUF_PCT  = 0.0020 # v7: naik dari 0.0015 (buffer lebih tebal)
+
+STRUCT_TRAIL_LB       = 3
+STRUCT_TRAIL_BUF_PCT  = 0.0020
 STRUCT_TRAIL_LOOKBACK = 60
 
 FIB_EXT_1           = 0.272
@@ -123,8 +38,7 @@ H4_RSI_BUY_MAX      = 68
 H4_RSI_SELL_MIN     = 32
 H4_RSI_SELL_MAX     = 55
 
-# ─────────────────────────────────────────────
-# SESSION CONSTANTS
+
 SESSION_NY_START      = 13
 SESSION_NY_END        = 17
 SESSION_LONDON_START  = 7
@@ -136,17 +50,23 @@ SESSION_KILL_ASIA2_E  = 5
 
 KILLZONE_BOOST = 1.10
 
-# v7 session confidence minimums
+
 SESSION_MIN_CONF = {
-    "Asia"       : 45,
-    "London"     : 45,
-    "NY"         : 68,   # v7: naik dari 45 (gate lebih ketat)
-    "transition" : 50,
+    "Asia"       : 42,
+    "London"     : 42,
+    "NY"         : 56,
+    "transition" : 46,
 }
+# [v8-freq] NY diturunkan 68 -> 56. 68 itu outlier dibanding sesi lain
+# (cuma 45-50) padahal skala confidence sama-sama 0-99 — akibatnya mayoritas
+# sinyal NY mati di sini walau sudah lolos gate CHoCH+failed-retest di atas.
+# 56 tetap membuat NY jadi sesi paling selektif (sesuai kill-zone/volatilitas
+# NY yang lebih liar), tapi tidak seketat dulu. Asia/London/transition juga
+# diturunkan sedikit (~3-4 poin) supaya konsisten.
 
 
 def _get_session(bar_ts=None):
-    """Kembalikan nama session berdasarkan jam UTC bar terakhir M15."""
+
     try:
         if bar_ts is not None:
             if hasattr(bar_ts, 'tzinfo') and bar_ts.tzinfo is None:
@@ -170,7 +90,7 @@ def _get_session(bar_ts=None):
 
 
 def _is_in_killzone(bar_ts=None):
-    """True jika bar berada di London kill (07-10) atau Asia kill (20-05)."""
+
     try:
         if bar_ts is not None:
             if hasattr(bar_ts, 'tzinfo') and bar_ts.tzinfo is None:
@@ -188,9 +108,6 @@ def _is_in_killzone(bar_ts=None):
     return ldn_kill or asia_kill
 
 
-# ─────────────────────────────────────────────
-# INDIKATOR DASAR
-# ─────────────────────────────────────────────
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 
 def rsi(s, n=14):
@@ -227,9 +144,6 @@ def build_df(df):
     return df.dropna()
 
 
-# ═════════════════════════════════════════════
-# SMC / PRICE ACTION TOOLS
-# ═════════════════════════════════════════════
 def swing_pts(df, lb=5):
     sh,sl=[],[]
     for i in range(lb, len(df)-lb):
@@ -248,7 +162,7 @@ def mkt_struct(df, sh, sl):
     return "ranging"
 
 def detect_bos(df, sh, sl):
-    """BOS valid dengan shadow/wick (tidak wajib body close)."""
+
     res={"bb":False,"bs":False,"cb":False,"cs":False}
     hi=df["high"].iloc[-1]; lo=df["low"].iloc[-1]
     if len(sh)>=2:
@@ -267,9 +181,8 @@ def find_snr_levels(df, lb=80):
     return levels
 
 def find_zones(df, direction, lb=40, strict=False):
-    """
-    Deteksi zona OB/Supply-Demand dengan 6 kriteria kualitas.
-    """
+
+
     is_demand = direction in ("bull", "demand")
     sub = df.iloc[-lb:]
     base_offset = len(df) - len(sub)
@@ -363,7 +276,7 @@ def find_ob(df, direction, lb=40):
 
 
 def find_fvg(df, direction, lb=40):
-    """FVG dengan atribut: is_fresh, candle3 (breakaway/rejection), fib_zone."""
+
     sub = df.iloc[-lb:]
     base_offset = len(df) - len(sub)
     out = []
@@ -394,7 +307,7 @@ def find_fvg(df, direction, lb=40):
 
 
 def find_equal_highs_lows(df, kind="high", lb=60, tol=0.0025):
-    """Equal Highs/Lows = zona likuiditas (stop loss retail)."""
+
     sub=df.iloc[-lb:]
     vals=sub["high"] if kind=="high" else sub["low"]
     clusters=[]
@@ -426,9 +339,8 @@ def nearest_snr(df, price, direction, margin=0.015):
 
 
 def detect_choch(df, sh, sl):
-    """
-    CHoCH — wajib BODY CLOSE menembus level (lebih ketat dari BOS).
-    """
+
+
     result = {"bearish_choch": False, "bullish_choch": False}
     close = df["close"].iloc[-1]
     if len(sh) >= 2 and len(sl) >= 2:
@@ -446,9 +358,8 @@ def detect_choch(df, sh, sl):
 
 
 def detect_cisd(df, lb=6):
-    """
-    CISD — tanda PALING AWAL reversal, SEBELUM CHoCH.
-    """
+
+
     result = {"bullish_cisd": False, "bearish_cisd": False}
     if len(df) < lb + 1:
         return result
@@ -476,10 +387,8 @@ def detect_cisd(df, lb=6):
 
 
 def detect_wyckoff_vsa(df, sh, sl, atr):
-    """
-    Wyckoff VSA: Spring, UTAD, No Supply, No Demand.
-    v7: Spring/UTAD score dinaikkan (+20 pts vs +18 v6).
-    """
+
+
     result = {
         "spring": False, "utad": False,
         "no_supply": False, "no_demand": False,
@@ -512,9 +421,8 @@ def detect_wyckoff_vsa(df, sh, sl, atr):
 
 
 def detect_failed_retest(df, sh, sl, atr):
-    """
-    Failed Retest — harga naik ke resistance/support lalu ditolak keras.
-    """
+
+
     result = {"failed_retest_sell": False, "failed_retest_buy": False,
               "resistance": None, "support": None}
     if len(df) < 3: return result
@@ -540,7 +448,7 @@ def detect_failed_retest(df, sh, sl, atr):
 
 
 def is_zone_fresh(df, top, bot, formed_idx, end_idx=None):
-    """Cek apakah zona masih fresh — belum tersentuh sejak terbentuk."""
+
     if formed_idx is None or top is None or bot is None:
         return True
     n = len(df)
@@ -680,7 +588,7 @@ def classify_sd_pattern(df, zone_idx, direction, lb=6):
 
 
 def detect_liquidity_run_or_sweep(df, sh, sl, direction):
-    """Bedakan Liquidity RUN vs SWEEP."""
+
     result = {"type": "none", "level": None}
     if direction == "bull" and len(sh) >= 1:
         level = df["high"].iloc[sh[-1]]; last = df.iloc[-1]
@@ -708,9 +616,8 @@ def detect_inducement_move(df, direction, atr, lookback=5):
 
 
 def find_breaker_blocks(df, direction, lb=60):
-    """
-    Breaker Block — OB lama yang flip peran.
-    """
+
+
     is_demand = direction in ("bull", "demand")
     opp_dir = "supply" if is_demand else "demand"
     zones = find_zones(df, opp_dir, lb=lb, strict=False)
@@ -725,9 +632,8 @@ def find_breaker_blocks(df, direction, lb=60):
 
 
 def find_mitigation_blocks(df, direction, lb=40):
-    """
-    Mitigation Block — candle terakhir sebelum impulse besar.
-    """
+
+
     is_demand = direction in ("bull", "demand")
     sub = df.iloc[-lb:]
     base_offset = len(df) - len(sub)
@@ -760,41 +666,33 @@ def find_mitigation_blocks(df, direction, lb=40):
     return results[-2:] if results else []
 
 
-# ═════════════════════════════════════════════
-# v7 — ENTRY TIMING VALIDATION
-# ═════════════════════════════════════════════
 def _has_structural_anchor(m15, direction, entry_price, atr):
-    """
-    v7 baru: cek apakah ada OB/FVG/EQ dalam 2.5×ATR dari entry.
-    Fix: avg_fav_before_sl=0.07R menunjukkan entry tanpa anchor
-    struktural → langsung berbalik karena tidak ada institutional
-    level yang menahan.
-    Returns: (has_anchor: bool, anchor_type: str)
-    """
+
+
     up = direction == "bull"
     sgn = 1 if up else -1
     max_dist = atr * 2.5
 
-    # Cek OB
+
     obs = find_zones(m15, direction, lb=40, strict=True)
     for z in obs:
         edge = z["bot"] if up else z["top"]
         if abs(edge - entry_price) <= max_dist:
             return True, "ob"
 
-    # Cek FVG
+
     fvgs = find_fvg(m15, "bull" if up else "bear", lb=40)
     for f in fvgs:
         if abs(f["mid"] - entry_price) <= max_dist and f.get("is_fresh"):
             return True, "fvg"
 
-    # Cek Equal H/L (liquidity)
+
     eqs = find_equal_highs_lows(m15, "low" if up else "high", lb=60)
     for v in eqs:
         if abs(v - entry_price) <= max_dist:
             return True, "eq"
 
-    # Cek swing point M15
+
     sh, sl = swing_pts(m15, lb=5)
     pts = sl if up else sh
     for i in pts:
@@ -805,21 +703,9 @@ def _has_structural_anchor(m15, direction, entry_price, atr):
     return False, "none"
 
 
-# ═════════════════════════════════════════════
-# TAHAP 1: SCORING HIERARKIS
-# ═════════════════════════════════════════════
 def score_direction(df_h1, df_m15, df_d1=None):
-    """
-    LAYER 1 — BIAS: Market Structure H1, D1 bias, EMA H1, RSI M15,
-      CHoCH H1, CISD M15.
-    LAYER 2 — SETUP: BOS M15, CHoCH M15, Failed Retest, Pullback,
-      Pin bar, Fakey, Liquidity, OTE+FVG, MACD/BB/Vol, Wyckoff VSA.
-    LAYER 3 — GATE: Konfirmasi berlawanan -50%. Killzone ×1.10.
-    D1 veto: jika D1 berlawanan total → buang.
 
-    v7 change: Wyckoff Spring/UTAD naik ke ±20 pts.
-    v7 change: London CHoCH hirarki boost (London precision mode).
-    """
+
     h1=build_df(df_h1); m15=build_df(df_m15)
     if h1 is None or m15 is None: return None
 
@@ -833,7 +719,7 @@ def score_direction(df_h1, df_m15, df_d1=None):
     struct_h1 = mkt_struct(h1,sh1,sl1)
     choch_h1  = detect_choch(h1, sh1, sl1)
 
-    # ── D1 bias ─────────────────────────────────────────────────────────
+
     d1_bias = "neutral"
     try:
         if df_d1 is not None and len(df_d1) >= 65:
@@ -854,9 +740,7 @@ def score_direction(df_h1, df_m15, df_d1=None):
     except Exception:
         pass
 
-    # ══════════════════════════════════════════════════════════════
-    # LAYER 1 — BIAS
-    # ══════════════════════════════════════════════════════════════
+
     bias_bull = bias_bear = 0
 
     if struct_h1=="bullish": bias_bull += 30
@@ -886,9 +770,7 @@ def score_direction(df_h1, df_m15, df_d1=None):
 
     bias_dir = "bull" if bias_bull >= bias_bear else "bear"
 
-    # ══════════════════════════════════════════════════════════════
-    # LAYER 2 — SETUP
-    # ══════════════════════════════════════════════════════════════
+
     setup_bull = setup_bear = 0
 
     bos = detect_bos(m15, sh15, sl15)
@@ -977,16 +859,14 @@ def score_direction(df_h1, df_m15, df_d1=None):
         if L15["close"]>L15["open"]:  setup_bull += 2
         else:                          setup_bear += 2
 
-    # Wyckoff VSA — v7: Spring/UTAD dinaikkan ke +20 pts (dari +18)
+
     wyck = detect_wyckoff_vsa(m15, sh15, sl15, atr_val)
-    if wyck["spring"]:    setup_bull += 20   # v7: +20 (dari +18)
-    if wyck["utad"]:      setup_bear += 20   # v7: +20 (dari +18)
+    if wyck["spring"]:    setup_bull += 20
+    if wyck["utad"]:      setup_bear += 20
     if wyck["no_supply"]: setup_bull += 8
     if wyck["no_demand"]: setup_bear += 8
 
-    # ══════════════════════════════════════════════════════════════
-    # LAYER 3 — GATE + KILLZONE BOOST
-    # ══════════════════════════════════════════════════════════════
+
     if bias_dir == "bull":
         setup_bear = setup_bear * 0.5
     else:
@@ -1005,13 +885,22 @@ def score_direction(df_h1, df_m15, df_d1=None):
     raw = bull if direction == "bull" else bear
     conf = min(int(raw / 264 * 100), 99)
 
-    # D1 berlawanan total → hard block
-    if d1_bias == "bearish" and direction == "bull": return None
-    if d1_bias == "bullish" and direction == "bear": return None
+
+    # [v8-freq] d1_bias dulu hard-block total kalau arah M15/H1 berlawanan
+    # dengan bias D1 — ini sering membunuh setup reversal awal yang justru
+    # menangkap pembalikan tren D1 lebih dulu (yang biasanya paling profitable
+    # kalau konfirmasinya kuat). Sekarang jadi penalti confidence, bukan
+    # penolakan mutlak: setup lemah tetap tersaring lewat SESSION_MIN_CONF,
+    # tapi setup dengan struktur/CHoCH/CISD kuat masih dapat kesempatan.
+    d1_conflict = (d1_bias == "bearish" and direction == "bull") or \
+                  (d1_bias == "bullish" and direction == "bear")
+    if d1_conflict:
+        conf = max(0, conf - 18)
 
     return {
         "direction"       : direction,
         "confidence"      : conf,
+        "d1_conflict"     : d1_conflict,
         "price"           : L15["close"],
         "atr"             : atr_val,
         "struct_h1"       : struct_h1,
@@ -1037,9 +926,6 @@ def score_direction(df_h1, df_m15, df_d1=None):
     }
 
 
-# ═════════════════════════════════════════════
-# TAHAP 2: ANALISIS SL / TP
-# ═════════════════════════════════════════════
 def _h4_confluence(df_h1, direction, choch_m15=None):
     result = {"confluence": False, "full_confluence": False}
     try:
@@ -1083,7 +969,6 @@ def _fib_extension_levels(h1, sh1, sl1, direction):
         return swing_low - leg * FIB_EXT_1, swing_low - leg * FIB_EXT_2
 
 
-# v7: TP cap naik ke 5R (dari 4R) — beberapa high-quality trade di-cap 4R
 TP_RR_CAP = 5.0
 
 def _select_best_tp(tp_pool, entry_price, risk):
@@ -1102,7 +987,7 @@ def _select_best_tp(tp_pool, entry_price, risk):
 
 
 def _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1, h4_gate, fib_127, fib_162):
-    """TP pool dengan tier: external liquidity (0.5), breaker (1.5/3.5)."""
+
     up = direction == "bull"
     zones_m15 = find_zones(m15, "demand" if up else "supply")
     zones_h1  = find_zones(h1, "demand" if up else "supply")
@@ -1114,7 +999,7 @@ def _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1, h
     sgn = 1 if up else -1
     pool = []
 
-    # External liquidity (Equal H/L H1 = multi-session, tier 0.5)
+
     eqs_h1_multi = find_equal_highs_lows(h1, "high" if up else "low", lb=100, tol=0.003)
     for v in eqs_h1_multi:
         if sgn*(v - entry_price) > atr*1.5: pool.append(("ext_liq_h1", v, 0.5))
@@ -1122,7 +1007,7 @@ def _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1, h
     for v in eqs_h1:
         if sgn*(v - entry_price) > atr*1.0: pool.append(("eq_h1", v, 1))
 
-    # Breaker blocks H1 sebagai TP tier 1.5
+
     breakers_h1 = find_breaker_blocks(h1, "demand" if up else "supply", lb=80)
     for b in breakers_h1:
         edge = b["bot"] if up else b["top"]
@@ -1134,7 +1019,7 @@ def _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1, h
     for v in sw_h1:
         if sgn*(v - entry_price) > atr*1.0: pool.append(("sw_h1", v, 3))
 
-    # Breaker blocks M15 sebagai TP tier 3.5
+
     breakers_m15 = find_breaker_blocks(m15, "demand" if up else "supply", lb=60)
     for b in breakers_m15:
         edge = b["bot"] if up else b["top"]
@@ -1161,25 +1046,21 @@ def _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1, h
 
 
 def analyze_setup(df_h1, df_m15, direction, entry_price, score=None, invalid_level=None):
-    """
-    SL = seberang invalid_level + buffer noise.
-    v7: SL floor 1.0×ATR DIPERTAHANKAN — backtest 0% early SL.
-    v7: noise buffer 0.7×ATR DIPERTAHANKAN — tidak ada early SL.
-    Perubahan terbesar ada di TRAIL_R_LADDER dan session gate.
-    """
+
+
     h1, m15 = build_df(df_h1), build_df(df_m15)
     if h1 is None or m15 is None: return None
 
     atr_m15 = m15["atr"].iloc[-1]
     atr_h1  = h1["atr"].iloc[-1] / 4
     atr = max(atr_m15, atr_h1, entry_price * 0.002)
-    noise = atr * 0.7   # 0.7×ATR — sudah terbukti tidak ada early SL
+    noise = atr * 0.7
 
     if invalid_level is None: return None
 
     sl_price = invalid_level + (noise if direction == "bear" else -noise)
     risk = abs(sl_price - entry_price)
-    # SL floor 1.0×ATR — DIPERTAHANKAN dari v6 (terbukti benar)
+
     risk_floor = max(atr * 1.0, entry_price * 0.004)
     if risk < risk_floor:
         sl_price += (risk_floor - risk) * (1 if direction == "bear" else -1)
@@ -1212,10 +1093,8 @@ def _zone_score(z):
 
 
 def _collect_entry_candidates(m15, direction, entry_ref, atr):
-    """
-    Kumpulkan kandidat entry: OB, FVG, EQ, breaker, mitigation block, fib adaptif.
-    v7: Tidak ada perubahan di sini — kandidat entry tetap sama.
-    """
+
+
     up = direction == "bear"
     obs       = find_zones(m15, direction, strict=True)
     fvgs      = find_fvg(m15, direction)
@@ -1288,38 +1167,23 @@ def calc_discount_entry(df_h1, df_m15, direction, current_price, atr):
     if cands:
         best = max(cands, key=lambda c: c["score"])
         return round(best["price"], 8), best["label"], best["invalid"]
-    return current_price, "market", None
+    # [v8-freq] Dulu invalid_level=None di sini => analyze_setup() SELALU
+    # menolak (lihat `if invalid_level is None: return None` di sana), jadi
+    # setiap sinyal tanpa OB/FVG/breaker/mitigation/EQ yang cocok mati total,
+    # padahal skor arahnya (confidence/CHoCH/CISD/dst) bisa saja sudah bagus.
+    # Sekarang kasih fallback invalidation berbasis ATR supaya sinyal
+    # "market" tetap punya SL yang masuk akal dan bisa lanjut ke evaluasi
+    # RR/TP seperti biasa. Kontrol mutu untuk kasus ini TETAP ada lewat
+    # _has_structural_anchor() di full_analyze() (confidence < 65 & tanpa
+    # anchor struktural tetap ditolak) — jadi yang lolos cuma market-entry
+    # yang confidence-nya sudah cukup tinggi ATAU masih ada anchor di dekatnya.
+    fallback_invalid = (current_price - atr * 1.2) if direction == "bull" else (current_price + atr * 1.2)
+    return current_price, "market", fallback_invalid
 
 
-# ═════════════════════════════════════════════
-# PIPELINE ANALISIS LENGKAP
-# ═════════════════════════════════════════════
 def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
-    """
-    Score arah (H1+M15+D1) -> entry diskon (OB/FVG/EQL/Fib) -> SL/TP.
-    Dataframe dikirim pemanggil (main.py), fungsi ini tidak fetch sendiri.
 
-    v7 SESSION GATE (PERUBAHAN KRITIS dari v6):
-    ─────────────────────────────────────────────
-    NY session (13-17 UTC):
-      v6: CHoCH M15 ATAU Failed Retest (OR logic)
-      v7: CHoCH M15 DAN Failed Retest (AND logic) + confidence >= 68
-      Reasoning: backtest menunjukkan NY WR 25% dengan OR gate.
-      AND gate membuang lebih banyak sinyal NY tapi yang tersisa
-      jauh lebih berkualitas.
 
-    Asia session: TIDAK DIUBAH (WR 83.3% — jangan sentuh yang bagus)
-    London session: presisi boost jika CHoCH H1 + CHoCH M15 sejajar.
-
-    v7 ENTRY TIMING VALIDATION (baru):
-      Jika entry "market" (tanpa structural anchor) dan confidence
-      < 65 → tolak. Fix untuk avg_fav_before_sl = 0.07R (entry
-      masuk di momentum salah tanpa level institusional).
-
-    v7 TRAIL: TRAIL_R_LADDER baru (aktif di 1R, bukan 0.5R).
-      Perubahan ini ada di konstanta global TRAIL_R_LADDER dan
-      otomatis dipakai oleh main.py (tidak ada perubahan di sini).
-    """
     try:
         if df_h1 is None or df_m15 is None or df_h1.empty or df_m15.empty:
             return None
@@ -1332,11 +1196,11 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
         atr_val       = score["atr"]
         decision      = "BUY" if original_dir == "bull" else "SELL"
 
-        # ── Session identification ────────────────────────────────────────
+
         bar_ts   = score.get("bar_ts")
         session  = _get_session(bar_ts)
 
-        # ── v7 NY SESSION GATE: AND logic + confidence threshold ──────────
+
         if session == "NY":
             choch_ok = (
                 (original_dir == "bull" and score.get("choch_m15", {}).get("bullish_choch")) or
@@ -1346,14 +1210,20 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
                 (original_dir == "bull" and score.get("failed_retest", {}).get("failed_retest_buy")) or
                 (original_dir == "bear" and score.get("failed_retest", {}).get("failed_retest_sell"))
             )
-            # v7: KEDUANYA wajib ada (AND, bukan OR)
-            if not (choch_ok and fr_ok):
-                return None   # v7: tolak jika tidak keduanya
-            # v7: confidence minimum lebih tinggi untuk NY
+
+            # [v8-freq] AND -> OR. CHoCH m15 dan failed-retest itu dua bentuk
+            # konfirmasi reversal yang sering saling eksklusif (satu candle
+            # biasanya cuma "memicu" salah satunya duluan). Mewajibkan
+            # KEDUANYA di window NY yang sempit bikin sinyal NY nyaris tidak
+            # pernah lolos. Cukup salah satu yang aktif + confidence tetap
+            # harus lolos SESSION_MIN_CONF["NY"] di bawah sebagai penjaga mutu.
+            if not (choch_ok or fr_ok):
+                return None
+
             if score["confidence"] < SESSION_MIN_CONF["NY"]:
                 return None
 
-        # ── Confidence adjustments ────────────────────────────────────────
+
         confidence = score["confidence"]
         choch_confirms = (
             (original_dir == "bull" and score.get("choch_m15", {}).get("bullish_choch")) or
@@ -1365,19 +1235,19 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
         if score.get("pullback_type") == "aggressive" and not choch_confirms:
             confidence = max(0, confidence - 5)
 
-        # CISD boost
+
         cisd = score.get("cisd_m15", {})
         if (original_dir == "bull" and cisd.get("bullish_cisd")) or \
            (original_dir == "bear" and cisd.get("bearish_cisd")):
             confidence = min(99, confidence + 6)
 
-        # Wyckoff Spring/UTAD boost
+
         wyck = score.get("wyckoff", {})
         if (original_dir == "bull" and wyck.get("spring")) or \
            (original_dir == "bear" and wyck.get("utad")):
             confidence = min(99, confidence + 8)
 
-        # v7: London precision boost — CHoCH H1 DAN M15 sejajar di killzone
+
         if session == "London" and score.get("in_killzone"):
             choch_h1  = score.get("choch_h1", {})
             choch_m15 = score.get("choch_m15", {})
@@ -1390,22 +1260,20 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
                 (original_dir == "bear" and choch_m15.get("bearish_choch"))
             )
             if h1_confirms and m15_confirms:
-                confidence = min(99, confidence + 10)  # v7: London hierarki boost
+                confidence = min(99, confidence + 10)
 
-        # ── Session confidence minimum check ──────────────────────────────
+
         min_conf = SESSION_MIN_CONF.get(session, 45)
         if confidence < min_conf:
             return None
 
-        # ── Entry dari zona struktural ─────────────────────────────────
+
         discount_entry, entry_label, invalid_level = calc_discount_entry(
             df_h1, df_m15, original_dir, current_price, atr_val)
 
-        # ── v7 Entry timing validation ────────────────────────────────────
-        # Fix untuk avg_fav_before_sl = 0.07R: jika entry "market" dan
-        # confidence rendah, kemungkinan masuk di momentum salah.
+
         if entry_label == "market" and confidence < 65:
-            # Cek apakah ada structural anchor dekat entry
+
             m15_built = build_df(df_m15)
             if m15_built is not None:
                 has_anchor, anchor_type = _has_structural_anchor(
@@ -1413,7 +1281,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
                 if not has_anchor:
                     log.debug(f"[v7] {symbol}: entry 'market' tanpa structural anchor "
                               f"(conf={confidence}) — ditolak")
-                    return None   # tolak entry blind tanpa anchor
+                    return None
 
         setup = analyze_setup(df_h1, df_m15, original_dir, discount_entry,
                                score=score, invalid_level=invalid_level)
@@ -1450,14 +1318,9 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
         return None
 
 
-# ═════════════════════════════════════════════
-# SCAN — 1 sinyal terbaik
-# ═════════════════════════════════════════════
 def get_best_signal(candidates):
-    """
-    Dari list kandidat signal (hasil full_analyze), pilih yang terbaik:
-    prioritas: confidence tinggi, RR tinggi, entry_label bukan 'market'.
-    """
+
+
     if not candidates:
         return None
     def _rank(sig):
