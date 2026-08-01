@@ -41,6 +41,12 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 MAX_PRICE       = 80.0
 TOP_N_COINS     = 50
 MONITOR_SLEEP       = 10
+# Polling API SIGNED (posisi/order real) sengaja lebih jarang dari MONITOR_SLEEP
+# biasa — TP/SL sudah dieksekusi Binance sendiri otomatis begitu tersentuh,
+# polling di sini cuma buat TAHU KAPAN itu terjadi (pencatatan), bukan buat
+# memicu eksekusinya. Terlalu sering polling = boros weight API tanpa manfaat
+# nyata, malah berisiko kena limit/ban (lihat _binance_wait_if_banned).
+REAL_TRADE_POLL_SLEEP = 30
 MAX_POSITIONS       = 20   # runtime via /max — jangan pindah ke strategy_logic
 MONITOR_INTERVAL    = 15 * 60
 MIN_CONFIDENCE      = 50   # runtime via /confidence_min — jangan pindah ke strategy_logic
@@ -492,9 +498,13 @@ def calc_auto_quantity(symbol, entry_price, margin_usd, leverage):
     """
     Quantity dari margin x leverage, dibulatkan ke stepSize Binance.
     Kalau di bawah minQty/minNotional (error -1013 LOT_SIZE / -4164
-    MIN_NOTIONAL), margin dinaikkan SEDIKIT (maks 1.5x) supaya order
-    tetap valid. Return (qty, margin_terpakai, dinaikkan?) atau
-    (None, None, False) kalau tetap gagal walau sudah disesuaikan.
+    MIN_NOTIONAL), margin dinaikkan SEDIKIT supaya order tetap valid.
+    Cap kenaikan = mana yang LEBIH BESAR antara 3x margin awal ATAU
+    margin awal + $5 — kombinasi ini supaya margin kecil (mis. $1) tetap
+    dapat headroom wajar (cuma 1.5x dari $1 = $1.5, kelewat sempit utk
+    banyak koin), sementara margin besar tidak melonjak tak terkendali.
+    Return (qty, margin_terpakai, dinaikkan?) atau (None, None, False)
+    kalau tetap gagal walau sudah disesuaikan.
     """
     info = get_symbol_filters(symbol)
     step, min_qty, min_notional = info["stepSize"], info["minQty"], info["minNotional"]
@@ -509,7 +519,10 @@ def calc_auto_quantity(symbol, entry_price, margin_usd, leverage):
 
     needed_notional = max(min_notional, min_qty * entry_price) * 1.01
     bumped_margin = needed_notional / leverage
-    if bumped_margin > margin_usd * 1.5:
+    cap = max(margin_usd * 3, margin_usd + 5)
+    if bumped_margin > cap:
+        log.warning(f"[calc_auto_quantity] {symbol}: butuh margin ${bumped_margin:.4f} "
+                    f"tapi cap cuma ${cap:.4f} (margin awal ${margin_usd:.2f}, leverage {leverage}x)")
         return None, None, False
     qty = qty_from_notional(needed_notional)
     if qty < min_qty or qty * entry_price < min_notional:
@@ -1901,7 +1914,7 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
             order = get_order_status(sym, order_id)
         except Exception as e:
             log.warning(f"[wait_entry_real] {sym}: {e}")
-            time.sleep(MONITOR_SLEEP); continue
+            time.sleep(REAL_TRADE_POLL_SLEEP); continue
 
         status = order.get("status")
         if status == "FILLED":
@@ -1928,7 +1941,7 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
                 tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nTP tersentuh sebelum entry, order dibatalkan.")
                 return
 
-        time.sleep(MONITOR_SLEEP)
+        time.sleep(REAL_TRADE_POLL_SLEEP)
 
     cancel_order(sym, order_id)
     with positions_lock:
@@ -1959,9 +1972,15 @@ def _open_position_real(sym, signal, actual_entry, chat_id, order_info):
         fallback_qty = positions.get(sym, {}).get("quantity", 0)
     qty = abs(float(order_info.get("executedQty", 0))) or fallback_qty
 
-    geometry_ok = (sl_v < actual_entry < tp_v) if is_buy else (tp_v < actual_entry < sl_v)
+    # Toleransi kecil (0.15%) sebelum dianggap "invalid" — batas tegas (<)
+    # gampang salah tangkap selisih pembulatan tick antara harga sinyal
+    # awal vs avgPrice hasil fill Binance, padahal setup-nya sebenarnya
+    # masih valid. Gap yang BENERAN besar tetap ke-tangkap normal.
+    tol = actual_entry * 0.0015
+    geometry_ok = (sl_v - tol < actual_entry < tp_v + tol) if is_buy else (tp_v - tol < actual_entry < sl_v + tol)
     if not geometry_ok:
-        _emergency_close(sym, is_buy, qty, chat_id, "geometri invalid setelah order terisi")
+        _emergency_close(sym, is_buy, qty, chat_id,
+            f"geometri invalid setelah order terisi (entry={actual_entry:.6g}, sl={sl_v:.6g}, tp={tp_v:.6g})")
         return
 
     # Fallback: harga sudah lewat SL sesaat setelah fill (gap/slippage buruk) ->
@@ -1976,13 +1995,30 @@ def _open_position_real(sym, signal, actual_entry, chat_id, order_info):
     tp_dist = abs(tp_v - actual_entry)
     actual_rr = tp_dist / sl_dist if sl_dist > 0 else 0
 
+    # KRITIS: posisi TIDAK BOLEH dibiarkan aktif tanpa SL terpasang di Binance.
+    # Coba 3x (kadang gagal transient), dan kalau tetap gagal semua, WAJIB
+    # auto-out — sebelumnya di sini cuma nge-warn lalu lanjut treat posisi
+    # sebagai aktif normal, padahal SL-nya nggak pernah benar-benar ada di
+    # Binance (ini penyebab kasus SL "hilang" & harga tembus tanpa nutup).
     tp_order_id = sl_order_id = None
-    try:
-        tp_order, sl_order = place_tp_sl(sym, is_buy, tp_v, sl_v)
-        tp_order_id, sl_order_id = tp_order["algoId"], sl_order["algoId"]
-    except Exception as e:
-        log.error(f"[open_position_real] gagal pasang TP/SL {sym}: {e}")
-        tg_send(chat_id, f"⚠️ {sym}: posisi terbuka tapi GAGAL pasang TP/SL otomatis: {e}\nCek manual di Binance!")
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            tp_order, sl_order = place_tp_sl(sym, is_buy, tp_v, sl_v)
+            tp_order_id, sl_order_id = tp_order["algoId"], sl_order["algoId"]
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            log.warning(f"[open_position_real] percobaan {attempt}/3 gagal pasang TP/SL {sym}: {e}")
+            if attempt < 3:
+                time.sleep(2)
+
+    if last_err is not None or sl_order_id is None:
+        tg_send(chat_id, f"🚨 {sym}: GAGAL pasang SL setelah 3x percobaan ({last_err}) — "
+                          f"posisi ditutup paksa, TIDAK dibiarkan tanpa proteksi.")
+        _emergency_close(sym, is_buy, qty, chat_id, f"gagal pasang SL setelah 3x percobaan ({last_err})")
+        return
 
     with positions_lock:
         if sym not in positions: return
@@ -2034,6 +2070,7 @@ def monitor_position_real(sym, pos):
     risk0 = abs(entry - sl_p)
     locked_r = 0.0
     next_struct_check = 0.0
+    next_sl_health_check = 0.0
 
     while True:
         with positions_lock:
@@ -2057,7 +2094,7 @@ def monitor_position_real(sym, pos):
             real_pos = get_real_position(sym)
         except Exception as e:
             log.warning(f"[monitor_real] {sym} cek posisi gagal: {e}")
-            time.sleep(MONITOR_SLEEP); continue
+            time.sleep(REAL_TRADE_POLL_SLEEP); continue
 
         if real_pos is None:
             reason = _infer_close_reason(tp_order_id, sl_order_id)
@@ -2076,6 +2113,38 @@ def monitor_position_real(sym, pos):
             cancel_all_algo_orders(sym)
             close_position(sym, reason, close_price=close_price)
             return
+
+        # ── Jaring pengaman: verifikasi berkala SL BENERAN masih aktif di
+        # Binance selagi posisi masih terbuka (bukan cuma pas awal buka).
+        # Kalau ternyata hilang (order ke-cancel sendiri oleh Binance,
+        # error yang tidak ketangkap sebelumnya, dsb) dan harga sudah
+        # lewat level SL, auto-out SEKARANG — jangan biarkan posisi
+        # tanpa proteksi sampai user sadar sendiri.
+        if time.time() >= next_sl_health_check:
+            next_sl_health_check = time.time() + 60
+            sl_missing = sl_order_id is None
+            if not sl_missing:
+                try:
+                    st = get_algo_order_status(sl_order_id).get("algoStatus")
+                    sl_missing = st not in ("NEW",)
+                except Exception as e:
+                    log.warning(f"[monitor_real sl-check] {sym}: {e}")
+            if sl_missing:
+                price_now = get_price(sym) or entry
+                sl_breached = (price_now <= sl_p) if is_buy else (price_now >= sl_p)
+                if sl_breached:
+                    tg_send(chat_id, f"🚨 <b>SL HILANG</b> — {sym}\nHarga sudah lewat level SL — auto-out sekarang.")
+                    _emergency_close(sym, is_buy, qty, chat_id, "SL hilang saat posisi aktif & harga sudah tembus")
+                    return
+                try:
+                    new_sl_order = place_sl_order(sym, is_buy, sl_p)
+                    sl_order_id = new_sl_order["algoId"]
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym]["sl_order_id"] = sl_order_id
+                    tg_send(chat_id, f"⚠️ <b>SL dipasang ulang</b> — {sym}\nSempat hilang, sudah dipasang ulang di <code>{sl_p:.6g}</code>.")
+                except Exception as e:
+                    tg_send(chat_id, f"🚨 <b>SL HILANG & GAGAL dipasang ulang</b> — {sym}: {e}\n❗ TUTUP MANUAL SEKARANG!")
 
         price = get_price(sym) or entry
         pnl_r_now = (price - entry) / risk0 * (1 if is_buy else -1) if risk0 > 0 else 0
@@ -2124,7 +2193,7 @@ def monitor_position_real(sym, pos):
                 except Exception as e:
                     log.warning(f"[monitor_real trail] gagal update SL {sym}: {e}")
 
-        time.sleep(MONITOR_SLEEP)
+        time.sleep(REAL_TRADE_POLL_SLEEP)
 
 
 def autostop_loop(chat_id):
