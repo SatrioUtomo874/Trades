@@ -2773,108 +2773,108 @@ def bot_loop():
                 # ============================================================
 # TAMBAHAN BARU (START) — Handler /ganti (Upload Otak Baru via GitHub API)
 # ============================================================
-            elif text in ("/ganti","ganti"):
-                doc = msg.get("document")
-                if not doc:
-                    tg_send(chat_id, "📤 Kirim file strategy_logic.py sebagai dokumen dengan caption /ganti")
-                    continue
-            
-                file_name = doc.get("file_name", "")
-                if not file_name.endswith(".py"):
-                    tg_send(chat_id, "❌ Harus file .py")
-                    continue
-            
-                try:
-                    # 1. Download file dari Telegram
-                    file_id = doc["file_id"]
-                    file_info = requests.get(
-                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
-                        params={"file_id": file_id}, timeout=10
-                    ).json()
-                    file_path = file_info["result"]["file_path"]
-                    file_content = requests.get(
-                        f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
-                        timeout=10
-                    ).text
-            
-                    # 2. Validasi sintaks
-                    try:
-                        compiled = compile(file_content, "strategy_logic.py", "exec")
-                    except SyntaxError as e:
-                        tg_send(chat_id, f"❌ Error sintaks di file:\n<code>{e}</code>")
-                        continue
-            
-                    # 3. Validasi full_analyze() ADA
-                    check_ns = {}
-                    try:
-                        exec(compiled, check_ns)
-                    except Exception as e:
-                        tg_send(chat_id, f"❌ File error saat dijalankan (bukan cuma sintaks):\n<code>{e}</code>")
-                        continue
-                    if "full_analyze" not in check_ns or not callable(check_ns["full_analyze"]):
-                        tg_send(chat_id, "❌ File ini tidak punya fungsi full_analyze() — ditolak.")
-                        continue
-            
-                    # 4. Commit ke GitHub
-                    try:
-                        _commit_to_github(file_content, "strategy_logic.py", f"Update strategy_logic via Telegram /ganti")
-                        tg_send(chat_id, "✅ File berhasil di-commit ke GitHub!")
-                    except Exception as e:
-                        tg_send(chat_id, f"❌ Gagal commit ke GitHub:\n<code>{str(e)[:200]}</code>")
-                        continue
-            
-                    # 5. Tulis ke file LOKAL
-                    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategy_logic.py")
-                    with open(local_path, "w", encoding="utf-8") as f:
-                        f.write(file_content)
-            
-                    # 6. ========== PERBAIKAN: Reload & Bind Ulang ==========
-                    import importlib
-                    import sys
-            
-                    # Hapus modul dari cache TERLEBIH DAHULU (supaya reload benar-benar dari disk)
-                    if "strategy_logic" in sys.modules:
-                        del sys.modules["strategy_logic"]
-            
-                    # Import ulang sebagai modul baru
-                    import strategy_logic as sl
-            
-                    # Bind ULANG semua fungsi yang dibutuhkan ke global namespace
-                    globals()["full_analyze"] = sl.full_analyze
-                    globals()["score_direction"] = sl.score_direction
-                    globals()["get_best_signal"] = sl.get_best_signal
-                    globals()["build_df"] = sl.build_df
-                    globals()["swing_pts"] = sl.swing_pts
-                    globals()["mkt_struct"] = sl.mkt_struct
-                    globals()["detect_choch"] = sl.detect_choch
-                    globals()["detect_cisd"] = sl.detect_cisd
-                    globals()["detect_fvg"] = sl.detect_fvg
-                    globals()["detect_order_block"] = sl.detect_order_block
-                    globals()["detect_liquidity_sweep"] = sl.detect_liquidity_sweep
-                    globals()["detect_failed_retest"] = sl.detect_failed_retest
-                    globals()["detect_equal_highs_lows"] = sl.detect_equal_highs_lows
-                    globals()["_collect_entry_candidates"] = sl._collect_entry_candidates
-                    globals()["analyze_setup"] = sl.analyze_setup
-                    # Kalau ada konstanta lain yang dipakai, bind juga
-                    globals()["MIN_RR"] = sl.MIN_RR
-                    globals()["MAX_RR"] = sl.MAX_RR
-                    globals()["TRAIL_R_LADDER"] = sl.TRAIL_R_LADDER
-                    globals()["STRUCT_TRAIL_LB"] = sl.STRUCT_TRAIL_LB
-                    globals()["STRUCT_TRAIL_BUF_PCT"] = sl.STRUCT_TRAIL_BUF_PCT
-                    globals()["STRUCT_TRAIL_LOOKBACK"] = sl.STRUCT_TRAIL_LOOKBACK
-                    globals()["FIB_EXT_1"] = sl.FIB_EXT_1
-                    globals()["FIB_EXT_2"] = sl.FIB_EXT_2
-            
-                    # 7. Update juga variabel global yang di-import dari strategy_logic
-                    # Ini penting karena main.py pake MIN_RR, TRAIL_R_LADDER, dll.
-                    log.info("[OTAK] Strategy logic berhasil di-reload dan di-bind ulang!")
-            
-                    tg_send(chat_id, "✅ Strategy logic berhasil di-reload dan AKTIF tanpa restart!")
-                    log.info("[OTAK] Strategy logic di-reload via /ganti (GitHub commit + bind ulang)")
-            
-                except Exception as e:
-                    log.error(f"[ganti] Error: {e}")
-                    tg_send(chat_id, f"❌ Gagal mengganti strategy_logic:\n<code>{str(e)[:200]}</code>")
+                elif text in ("/ganti","ganti"):
+                   doc = msg.get("document")
+                   if not doc:
+                       tg_send(chat_id, "📤 Kirim file strategy_logic.py sebagai dokumen dengan caption /ganti")
+                       continue
+               
+                   file_name = doc.get("file_name", "")
+                   if not file_name.endswith(".py"):
+                       tg_send(chat_id, "❌ Harus file .py")
+                       continue
+               
+                   try:
+                       # 1. Download file dari Telegram
+                       file_id = doc["file_id"]
+                       file_info = requests.get(
+                           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
+                           params={"file_id": file_id}, timeout=10
+                       ).json()
+                       file_path = file_info["result"]["file_path"]
+                       file_content = requests.get(
+                           f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
+                           timeout=10
+                       ).text
+               
+                       # 2. Validasi sintaks
+                       try:
+                           compiled = compile(file_content, "strategy_logic.py", "exec")
+                       except SyntaxError as e:
+                           tg_send(chat_id, f"❌ Error sintaks di file:\n<code>{e}</code>")
+                           continue
+               
+                       # 3. Validasi full_analyze() ADA
+                       check_ns = {}
+                       try:
+                           exec(compiled, check_ns)
+                       except Exception as e:
+                           tg_send(chat_id, f"❌ File error saat dijalankan (bukan cuma sintaks):\n<code>{e}</code>")
+                           continue
+                       if "full_analyze" not in check_ns or not callable(check_ns["full_analyze"]):
+                           tg_send(chat_id, "❌ File ini tidak punya fungsi full_analyze() — ditolak.")
+                           continue
+               
+                       # 4. Commit ke GitHub
+                       try:
+                           _commit_to_github(file_content, "strategy_logic.py", f"Update strategy_logic via Telegram /ganti")
+                           tg_send(chat_id, "✅ File berhasil di-commit ke GitHub!")
+                       except Exception as e:
+                           tg_send(chat_id, f"❌ Gagal commit ke GitHub:\n<code>{str(e)[:200]}</code>")
+                           continue
+               
+                       # 5. Tulis ke file LOKAL
+                       local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategy_logic.py")
+                       with open(local_path, "w", encoding="utf-8") as f:
+                           f.write(file_content)
+               
+                       # 6. ========== PERBAIKAN: Reload & Bind Ulang ==========
+                       import importlib
+                       import sys
+               
+                       # Hapus modul dari cache TERLEBIH DAHULU (supaya reload benar-benar dari disk)
+                       if "strategy_logic" in sys.modules:
+                           del sys.modules["strategy_logic"]
+               
+                       # Import ulang sebagai modul baru
+                       import strategy_logic as sl
+               
+                       # Bind ULANG semua fungsi yang dibutuhkan ke global namespace
+                       globals()["full_analyze"] = sl.full_analyze
+                       globals()["score_direction"] = sl.score_direction
+                       globals()["get_best_signal"] = sl.get_best_signal
+                       globals()["build_df"] = sl.build_df
+                       globals()["swing_pts"] = sl.swing_pts
+                       globals()["mkt_struct"] = sl.mkt_struct
+                       globals()["detect_choch"] = sl.detect_choch
+                       globals()["detect_cisd"] = sl.detect_cisd
+                       globals()["detect_fvg"] = sl.detect_fvg
+                       globals()["detect_order_block"] = sl.detect_order_block
+                       globals()["detect_liquidity_sweep"] = sl.detect_liquidity_sweep
+                       globals()["detect_failed_retest"] = sl.detect_failed_retest
+                       globals()["detect_equal_highs_lows"] = sl.detect_equal_highs_lows
+                       globals()["_collect_entry_candidates"] = sl._collect_entry_candidates
+                       globals()["analyze_setup"] = sl.analyze_setup
+                       # Kalau ada konstanta lain yang dipakai, bind juga
+                       globals()["MIN_RR"] = sl.MIN_RR
+                       globals()["MAX_RR"] = sl.MAX_RR
+                       globals()["TRAIL_R_LADDER"] = sl.TRAIL_R_LADDER
+                       globals()["STRUCT_TRAIL_LB"] = sl.STRUCT_TRAIL_LB
+                       globals()["STRUCT_TRAIL_BUF_PCT"] = sl.STRUCT_TRAIL_BUF_PCT
+                       globals()["STRUCT_TRAIL_LOOKBACK"] = sl.STRUCT_TRAIL_LOOKBACK
+                       globals()["FIB_EXT_1"] = sl.FIB_EXT_1
+                       globals()["FIB_EXT_2"] = sl.FIB_EXT_2
+               
+                       # 7. Update juga variabel global yang di-import dari strategy_logic
+                       # Ini penting karena main.py pake MIN_RR, TRAIL_R_LADDER, dll.
+                       log.info("[OTAK] Strategy logic berhasil di-reload dan di-bind ulang!")
+               
+                       tg_send(chat_id, "✅ Strategy logic berhasil di-reload dan AKTIF tanpa restart!")
+                       log.info("[OTAK] Strategy logic di-reload via /ganti (GitHub commit + bind ulang)")
+               
+                   except Exception as e:
+                       log.error(f"[ganti] Error: {e}")
+                       tg_send(chat_id, f"❌ Gagal mengganti strategy_logic:\n<code>{str(e)[:200]}</code>")
                 # ============================================================
                 # TAMBAHAN BARU (END)
                 # ============================================================
