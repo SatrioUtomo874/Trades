@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: smc-trade-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: ALLOWED_USER_ID
+        sync: false
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_API_SECRET
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: REPO_NAME
+        sync: false

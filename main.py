@@ -793,35 +793,21 @@ class BinanceWSFeed:
         with self._lock:
             return list(self._ticker.values())
 
-    def get_klines(symbol, interval, limit=250):
-       """Ambil data klines: REST Binance dulu (paling stabil)"""
-       # 1. Coba Binance REST dulu (sumber paling stabil)
-       try:
-           df = _binance_klines(symbol, interval, limit)
-           if df is not None and not df.empty:
-               return df
-       except Exception as e:
-           log.warning(f"[klines/binance] {symbol} {interval}: {e}")
-   
-       # 2. Coba Bybit REST
-       try:
-           df = _bybit_klines(symbol, interval, limit)
-           if df is not None and not df.empty:
-               log.info(f"[klines/bybit] {symbol} {interval} OK")
-               return df
-       except Exception as e:
-           log.warning(f"[klines/bybit] {symbol} {interval}: {e}")
-   
-       # 3. Terakhir, coba WS (kalau ada)
-       if ws_feed.is_fresh():
-           df = ws_feed.get_klines(symbol, interval, limit)
-           if df is not None and not df.empty:
-               log.warning(f"[klines/ws] {symbol} {interval} fallback")
-               return df
-   
-       # 4. Gagal total
-       log.warning(f"[klines] {symbol} {interval} GAGAL TOTAL")
-       return pd.DataFrame()
+    def get_klines(self, symbol, interval, limit=250):
+        """Return klines dari buffer WS internal (data yg sudah di-backfill & live-update).
+        Dipanggil dari module-level get_klines() sebagai fallback setelah REST gagal."""
+        with self._lock:
+            buf = self._klines.get((symbol, interval))
+            if not buf:
+                return pd.DataFrame()
+            rows = list(buf)[-limit:]
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        df.index = pd.to_datetime(df["t"], unit="ms")
+        df.rename(columns={"o": "open", "h": "high", "l": "low",
+                            "c": "close", "v": "volume"}, inplace=True)
+        return df[["open", "high", "low", "close", "volume"]]
 
     def ensure_symbol_interval(self, symbol, interval):
         """Dipanggil tiap get_klines() — backfill SEKALI kalau baru,
