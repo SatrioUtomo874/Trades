@@ -12,7 +12,7 @@ Diekstrak dari try22__2_.py, 3 perubahan:
    sudah terbuka tetap ke-trailing.
 3. full_analyze() terima df_h1/df_m15/df_d1 langsung, bukan symbol.
 """
-
+import sys
 import os, time, logging, threading
 from collections import deque
 from datetime import datetime, timezone, timedelta
