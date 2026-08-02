@@ -1007,12 +1007,19 @@ def get_price(symbol):
     return None
 
 def get_klines(symbol, interval, limit=250):
-    """Tier1 Binance REST → Tier2 Bybit REST → Tier3 buffer WS (fallback
-    TERAKHIR, hanya dipakai kalau REST Binance & Bybit gagal/error/kena
-    ban). ensure_symbol_interval() tetap dipanggil di awal supaya WS terus
-    subscribe & backfill di background — bukan supaya jadi sumber utama,
-    tapi supaya buffer-nya SIAP dipakai sewaktu-waktu REST bermasalah."""
+    """Tier1 buffer WS (GRATIS, live-updated di background) → Tier2 Binance
+    REST → Tier3 Bybit REST. Sebelumnya REST Binance dipanggil DULUAN tiap
+    kali (WS cuma fallback terakhir) — padahal WS-nya sudah jalan terus,
+    live, dan nol biaya rate-limit. Itu penyebab utama sering kena
+    limit/ban meski jumlah posisi cuma sedikit: setiap scan/monitor tetap
+    nembak REST walau datanya sebenarnya sudah ada gratis di buffer WS."""
     ws_feed.ensure_symbol_interval(symbol, interval)
+
+    if ws_feed.is_fresh():
+        df = ws_feed.get_klines(symbol, interval, limit)
+        if df is not None and not df.empty:
+            return df
+
     try:
         df = _binance_klines(symbol, interval, limit)
         if not df.empty:
@@ -1027,11 +1034,6 @@ def get_klines(symbol, interval, limit=250):
             return df
     except Exception as e:
         log.warning(f"[klines/bybit] {symbol}: {e}")
-    if ws_feed.is_fresh():
-        df = ws_feed.get_klines(symbol, interval, limit)
-        if df is not None and not df.empty:
-            log.warning(f"[klines/ws fallback] {symbol} {interval} — REST Binance & Bybit gagal")
-            return df
     return pd.DataFrame()
 
 def get_top_coins():
@@ -2186,10 +2188,11 @@ def monitor_position_real(sym, pos):
                             positions[sym]["current_sl"] = sl_p
                             positions[sym]["sl_order_id"] = sl_order_id
                     locked_pct = (sl_p - entry) / entry * 100 * (1 if is_buy else -1)
+                    label = "Profit terkunci" if locked_pct >= 0 else "Risiko dikurangi"
                     tg_send(chat_id,
                         f"🔒 <b>TRAILING SL</b> — {sym}\n"
                         f"SL digeser: <code>{old_sl:.6g}</code> → <code>{sl_p:.6g}</code>\n"
-                        f"Profit terkunci: <b>{locked_pct:+.2f}%</b>")
+                        f"{label}: <b>{locked_pct:+.2f}%</b>")
                 except Exception as e:
                     log.warning(f"[monitor_real trail] gagal update SL {sym}: {e}")
 
@@ -2659,7 +2662,12 @@ def bot_loop():
                 msg=upd.get("message",{})
                 uid=msg.get("from",{}).get("id")
                 chat_id=msg.get("chat",{}).get("id")
-                text=msg.get("text","").strip().lower()
+                # Pesan berisi DOKUMEN pakai field "caption", bukan "text" —
+                # "text" cuma ada di pesan teks polos tanpa lampiran. Sebelumnya
+                # cuma baca "text", jadi /ganti (dikirim sbg dokumen + caption)
+                # selalu ke-skip diam-diam di baris `if ... not text: continue`
+                # di bawah, sebelum sempat sampai ke handler manapun.
+                text=(msg.get("text") or msg.get("caption") or "").strip().lower()
                 if not uid or not chat_id or not text: continue
                 if uid!=ALLOWED_USER_ID:
                     tg_send(chat_id,"⛔ Akses ditolak."); continue
