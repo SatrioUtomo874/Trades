@@ -1036,7 +1036,23 @@ def get_klines(symbol, interval, limit=250):
         log.warning(f"[klines/bybit] {symbol}: {e}")
     return pd.DataFrame()
 
+last_scanned_coins = []
+last_scanned_at = None
+_last_scanned_lock = threading.Lock()
+
 def get_top_coins():
+    """Wrapper: panggil _get_top_coins_impl() lalu cache hasilnya ke
+    last_scanned_coins — dipakai command /koin supaya bisa nampilin daftar
+    koin yang di-scan TANPA perlu fetch ulang / ikut nambah scan_counter
+    (yang dipakai buat hitung durasi ban)."""
+    coins = _get_top_coins_impl()
+    global last_scanned_coins, last_scanned_at
+    with _last_scanned_lock:
+        last_scanned_coins = coins
+        last_scanned_at = time.time()
+    return coins
+
+def _get_top_coins_impl():
     """Ambil top coins. Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS
     ticker cache (fallback TERAKHIR, hanya kalau REST Binance & Bybit
     gagal/error/kena ban). Logika exclude/ban SAMA PERSIS seperti
@@ -2073,6 +2089,7 @@ def monitor_position_real(sym, pos):
     locked_r = 0.0
     next_struct_check = 0.0
     next_sl_health_check = 0.0
+    sl_replace_count = 0   # circuit-breaker: kalau kejadian "SL hilang" berulang terus, jangan spam selamanya
 
     while True:
         with positions_lock:
@@ -2132,6 +2149,12 @@ def monitor_position_real(sym, pos):
                 except Exception as e:
                     log.warning(f"[monitor_real sl-check] {sym}: {e}")
             if sl_missing:
+                sl_replace_count += 1
+                if sl_replace_count > 3:
+                    tg_send(chat_id, f"🚨 <b>SL berulang kali hilang</b> — {sym}\n"
+                                      f"Sudah {sl_replace_count}x, ada yang tidak beres — auto-out daripada terus berulang.")
+                    _emergency_close(sym, is_buy, qty, chat_id, f"SL hilang berulang {sl_replace_count}x (kemungkinan masalah lain)")
+                    return
                 price_now = get_price(sym) or entry
                 sl_breached = (price_now <= sl_p) if is_buy else (price_now >= sl_p)
                 if sl_breached:
@@ -2139,6 +2162,14 @@ def monitor_position_real(sym, pos):
                     _emergency_close(sym, is_buy, qty, chat_id, "SL hilang saat posisi aktif & harga sudah tembus")
                     return
                 try:
+                    # Cancel dulu yang lama SEBELUM pasang baru (jaga-jaga
+                    # ternyata masih ada & cuma keliru kedeteksi "hilang" —
+                    # kalau langsung pasang baru tanpa cancel, bisa ada 2 SL
+                    # order aktif barengan, salah satunya kena auto-cancel
+                    # Binance, lalu health-check berikutnya deteksi "hilang"
+                    # lagi -> siklus spam berulang. cancel_algo_order aman
+                    # dipanggil walau order-nya memang sudah tidak ada.
+                    cancel_algo_order(sl_order_id)
                     new_sl_order = place_sl_order(sym, is_buy, sl_p)
                     sl_order_id = new_sl_order["algoId"]
                     with positions_lock:
@@ -2537,7 +2568,8 @@ GREETING=(
     "/timeout             — Tutup paksa semua posisi\n"
     "/stats               — Statistik + saldo\n"
     "/backtest             — 20 trade terakhir (evaluasi)\n"
-    "/banned              — Daftar koin ban\n"
+    "/banned              — Daftar koin ban (+ SYMBOL utk ban permanen)\n"
+    "/koin                — Daftar koin yang sedang di-scan\n"
     "/resetban            — Hapus semua ban\n"
     "/resetbalance        — Reset saldo ke $10\n"
     "/info                — Detail metode analisis\n"
@@ -2808,19 +2840,43 @@ def bot_loop():
                 # ============================================================
                 # TAMBAHAN BARU (END)
                 # ============================================================
-                elif text in ("/banned","banned"):
-                    with ban_lock:
-                        cur_scan = scan_counter
-                        b = sorted(banned_coins.items())
-                    if b:
-                        lines = []
-                        for sym, (banned_at, dur) in b:
-                            remaining = max(0, dur - (cur_scan - banned_at))
-                            lines.append(f"• {sym} (unban dalam {remaining} scan)")
-                        tg_send(chat_id,
-                            f"🚫 <b>Banned ({len(b)}):</b>\n" + "\n".join(lines))
+                elif text.startswith("/banned") or text.startswith("banned"):
+                    parts = text.split()
+                    if len(parts) > 1:
+                        # /banned <koin> -> ban PERMANEN (duration=inf, tidak pernah auto-unban)
+                        target_sym = parts[1].upper()
+                        with ban_lock:
+                            banned_coins[target_sym] = (scan_counter, float("inf"))
+                        log.info(f"[ban] {target_sym} diban PERMANEN (manual via /banned)")
+                        tg_send(chat_id, f"🚫 <b>{target_sym} diban PERMANEN.</b>\nLepas lagi dengan /resetban.")
                     else:
-                        tg_send(chat_id, "✅ Belum ada ban.")
+                        with ban_lock:
+                            cur_scan = scan_counter
+                            b = sorted(banned_coins.items())
+                        if b:
+                            lines = []
+                            for sym, (banned_at, dur) in b:
+                                if dur == float("inf"):
+                                    lines.append(f"• {sym} (PERMANEN)")
+                                else:
+                                    remaining = max(0, dur - (cur_scan - banned_at))
+                                    lines.append(f"• {sym} (unban dalam {remaining} scan)")
+                            tg_send(chat_id,
+                                f"🚫 <b>Banned ({len(b)}):</b>\n" + "\n".join(lines) +
+                                f"\n\n<i>Ban permanen: /banned SYMBOL</i>")
+                        else:
+                            tg_send(chat_id, "✅ Belum ada ban.\n\n<i>Ban permanen: /banned SYMBOL</i>")
+                elif text in ("/koin","koin"):
+                    with _last_scanned_lock:
+                        coins = list(last_scanned_coins)
+                        scanned_at = last_scanned_at
+                    if not coins:
+                        tg_send(chat_id, "⏳ Belum ada data — tunggu siklus scan pertama selesai.")
+                    else:
+                        age_min = (time.time() - scanned_at) / 60 if scanned_at else 0
+                        tg_send(chat_id,
+                            f"📋 <b>Koin yang di-scan ({len(coins)})</b> — update {age_min:.0f} menit lalu:\n\n"
+                            + ", ".join(coins))
                 elif text in ("/resetban","resetban"):
                     with ban_lock: n=len(banned_coins); banned_coins.clear()
                     tg_send(chat_id,f"✅ Ban direset ({n} dihapus).")
