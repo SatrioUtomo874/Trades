@@ -601,6 +601,10 @@ def _detect_failed_retest(df: pd.DataFrame, sh: list, sl: list,
     return result
 
 
+# Alias publik — dipanggil main.py sebagai strategy_logic.detect_failed_retest
+detect_failed_retest = _detect_failed_retest
+
+
 # =============================================================================
 # SCORING — Confidence global tanpa bias sesi
 # =============================================================================
