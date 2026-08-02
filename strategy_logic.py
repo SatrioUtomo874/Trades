@@ -29,16 +29,20 @@ FIB_EXT_2 = 0.618
 # FUNGSI BANTU
 # ============================================================
 
-def ema(s, n): return s.ewm(span=n, adjust=False).mean()
+def ema(s, n):
+    return s.ewm(span=n, adjust=False).mean()
+
 def rsi(s, n=14):
     d = s.diff()
     g = d.clip(lower=0).rolling(n).mean()
     l = (-d.clip(upper=0)).rolling(n).mean()
     return 100 - 100 / (1 + g / l.replace(0, np.nan))
+
 def macd(s):
     line = ema(s, 12) - ema(s, 26)
     sig = ema(line, 9)
     return line, sig, line - sig
+
 def atr_fn(df, n=14):
     tr = pd.concat([
         df["high"] - df["low"],
@@ -76,13 +80,16 @@ def swing_pts(df, lb=5):
     return sh, sl
 
 def mkt_struct(df, sh, sl):
-    if len(sh) < 2 or len(sl) < 2: return "ranging"
+    if len(sh) < 2 or len(sl) < 2:
+        return "ranging"
     hh = df["high"].iloc[sh[-1]] > df["high"].iloc[sh[-2]]
     hl = df["low"].iloc[sl[-1]] > df["low"].iloc[sl[-2]]
     lh = df["high"].iloc[sh[-1]] < df["high"].iloc[sh[-2]]
     ll = df["low"].iloc[sl[-1]] < df["low"].iloc[sl[-2]]
-    if hh and hl: return "bullish"
-    if lh and ll: return "bearish"
+    if hh and hl:
+        return "bullish"
+    if lh and ll:
+        return "bearish"
     return "ranging"
 
 # ============================================================
@@ -90,12 +97,15 @@ def mkt_struct(df, sh, sl):
 # ============================================================
 
 def is_zone_fresh(df, top, bot, formed_idx, end_idx=None):
-    if formed_idx is None or formed_idx + 2 >= len(df): return True
+    if formed_idx is None or formed_idx + 2 >= len(df):
+        return True
     start = formed_idx + 2
     end_idx = end_idx if end_idx is not None else len(df) - 1
-    if start >= end_idx: return True
+    if start >= end_idx:
+        return True
     sub = df.iloc[start:end_idx]
-    if sub.empty: return True
+    if sub.empty:
+        return True
     touched = ((sub["low"] <= top) & (sub["high"] >= bot)).any()
     return not bool(touched)
 
@@ -124,7 +134,8 @@ def detect_break_of_structure(df, sh, sl, direction):
 
 def detect_choch(df, sh, sl):
     result = {"bearish_choch": False, "bullish_choch": False}
-    if len(sh) < 2 or len(sl) < 2: return result
+    if len(sh) < 2 or len(sl) < 2:
+        return result
     close = df["close"].iloc[-1]
     prev_high = df["high"].iloc[sh[-2]]
     last_high = df["high"].iloc[sh[-1]]
@@ -138,26 +149,34 @@ def detect_choch(df, sh, sl):
 
 def detect_cisd(df, lb=6):
     result = {"bullish_cisd": False, "bearish_cisd": False}
-    if len(df) < lb + 1: return result
+    if len(df) < lb + 1:
+        return result
     sub = df.iloc[-lb:]
     closes = sub["close"].values
     opens = sub["open"].values
     n = len(closes)
     last_bull = closes[-1] > opens[-1]
     last_bear = closes[-1] < opens[-1]
-    if not (last_bull or last_bear): return result
+    if not (last_bull or last_bear):
+        return result
     if last_bull:
         cnt = 0
-        for j in range(n-2, -1, -1):
-            if closes[j] < opens[j]: cnt += 1
-            else: break
-        if cnt >= 3: result["bullish_cisd"] = True
+        for j in range(n - 2, -1, -1):
+            if closes[j] < opens[j]:
+                cnt += 1
+            else:
+                break
+        if cnt >= 3:
+            result["bullish_cisd"] = True
     else:
         cnt = 0
-        for j in range(n-2, -1, -1):
-            if closes[j] > opens[j]: cnt += 1
-            else: break
-        if cnt >= 3: result["bearish_cisd"] = True
+        for j in range(n - 2, -1, -1):
+            if closes[j] > opens[j]:
+                cnt += 1
+            else:
+                break
+        if cnt >= 3:
+            result["bearish_cisd"] = True
     return result
 
 def detect_fvg(df, direction, lb=40):
@@ -165,7 +184,7 @@ def detect_fvg(df, direction, lb=40):
     base_offset = len(df) - len(sub)
     out = []
     for i in range(len(sub) - 2):
-        c0, c1, c2 = sub.iloc[i], sub.iloc[i+1], sub.iloc[i+2]
+        c0, c1, c2 = sub.iloc[i], sub.iloc[i + 1], sub.iloc[i + 2]
         gap = None
         if direction == "bull" and c2["low"] > c0["high"]:
             gap = {"top": c2["low"], "bot": c0["high"]}
@@ -186,28 +205,37 @@ def detect_order_block(df, direction, lb=40):
     zones = []
     for i in range(1, len(sub) - 2):
         c = sub.iloc[i]
-        nx = sub.iloc[i+1]
+        nx = sub.iloc[i + 1]
         impulse_body = abs(nx["close"] - nx["open"])
-        if impulse_body < avg_body * 1.3: continue
+        if impulse_body < avg_body * 1.3:
+            continue
         is_match = (c["close"] < c["open"] and nx["close"] > nx["open"]) if is_demand else (c["close"] > c["open"] and nx["close"] < nx["open"])
-        if not is_match: continue
+        if not is_match:
+            continue
         top = max(c["open"], c["close"])
         bot = min(c["open"], c["close"])
         df_idx = base_offset + i
         sh, sl = swing_pts(df, lb=5)
         has_fvg = False
         if i + 2 < len(sub):
-            c2 = sub.iloc[i+2]
-            if is_demand and c2["low"] > c["high"]: has_fvg = True
-            if not is_demand and c2["high"] < c["low"]: has_fvg = True
+            c2 = sub.iloc[i + 2]
+            if is_demand and c2["low"] > c["high"]:
+                has_fvg = True
+            if not is_demand and c2["high"] < c["low"]:
+                has_fvg = True
         has_bos = detect_break_of_structure(df, sh, sl, direction)
         fresh = is_zone_fresh(df, top, bot, df_idx)
         quality = int(has_fvg) + int(has_bos) + int(fresh)
         if quality >= 2:
             zones.append({
-                "top": top, "bot": bot, "mid": (top + bot) / 2,
-                "idx": df_idx, "has_fvg": has_fvg, "has_bos": has_bos,
-                "is_fresh": fresh, "quality": quality,
+                "top": top,
+                "bot": bot,
+                "mid": (top + bot) / 2,
+                "idx": df_idx,
+                "has_fvg": has_fvg,
+                "has_bos": has_bos,
+                "is_fresh": fresh,
+                "quality": quality,
             })
     return [z for z in zones if z["is_fresh"]][-3:] if zones else []
 
@@ -217,9 +245,10 @@ def detect_equal_highs_lows(df, kind="high", lb=60, tol=0.0025):
     clusters = []
     visited = set()
     for i in range(len(vals)):
-        if i in visited: continue
+        if i in visited:
+            continue
         group = [vals.iloc[i]]
-        for j in range(i+1, len(vals)):
+        for j in range(i + 1, len(vals)):
             if abs(vals.iloc[i] - vals.iloc[j]) / max(vals.iloc[i], 0.0001) < tol:
                 group.append(vals.iloc[j])
                 visited.add(j)
@@ -229,7 +258,8 @@ def detect_equal_highs_lows(df, kind="high", lb=60, tol=0.0025):
 
 def detect_failed_retest(df, sh, sl, atr):
     result = {"failed_retest_sell": False, "failed_retest_buy": False}
-    if len(df) < 3: return result
+    if len(df) < 3:
+        return result
     L = df.iloc[-1]
     P = df.iloc[-2]
     if len(sh) >= 2:
@@ -254,15 +284,20 @@ def detect_failed_retest(df, sh, sl, atr):
 
 def get_fib_zone(price, swing_low, swing_high):
     rng = swing_high - swing_low
-    if rng <= 0: return {"ratio": 0.5, "zone": "equilibrium"}
+    if rng <= 0:
+        return {"ratio": 0.5, "zone": "equilibrium"}
     ratio = (price - swing_low) / rng
-    if ratio <= 0.45: zone = "discount"
-    elif ratio >= 0.55: zone = "premium"
-    else: zone = "equilibrium"
+    if ratio <= 0.45:
+        zone = "discount"
+    elif ratio >= 0.55:
+        zone = "premium"
+    else:
+        zone = "equilibrium"
     return {"ratio": round(ratio, 4), "zone": zone}
 
 def is_in_ote(df, direction, sh, sl):
-    if len(sh) < 1 or len(sl) < 1: return False
+    if len(sh) < 1 or len(sl) < 1:
+        return False
     swing_high = df["high"].iloc[sh[-1]]
     swing_low = df["low"].iloc[sl[-1]]
     fib = get_fib_zone(df["close"].iloc[-1], swing_low, swing_high)
@@ -272,11 +307,13 @@ def is_in_ote(df, direction, sh, sl):
         return 0.62 <= fib["ratio"] <= 0.79
 
 def _fib_extension_levels(h1, sh1, sl1, direction):
-    if not sh1 or not sl1: return None, None
+    if not sh1 or not sl1:
+        return None, None
     swing_high = h1["high"].iloc[sh1[-1]]
     swing_low = h1["low"].iloc[sl1[-1]]
     leg = swing_high - swing_low
-    if leg <= 0: return None, None
+    if leg <= 0:
+        return None, None
     if direction == "bull":
         return swing_high + leg * FIB_EXT_1, swing_high + leg * FIB_EXT_2
     else:
@@ -302,15 +339,21 @@ def score_direction(df_h1, df_m15, df_d1=None):
 
     # BIAS H1
     bias_bull = bias_bear = 0
-    if struct_h1 == "bullish": bias_bull += 30
-    elif struct_h1 == "bearish": bias_bear += 30
+    if struct_h1 == "bullish":
+        bias_bull += 30
+    elif struct_h1 == "bearish":
+        bias_bear += 30
 
     choch_h1 = detect_choch(h1, sh1, sl1)
-    if choch_h1["bullish_choch"]: bias_bull += 20
-    if choch_h1["bearish_choch"]: bias_bear += 20
+    if choch_h1["bullish_choch"]:
+        bias_bull += 20
+    if choch_h1["bearish_choch"]:
+        bias_bear += 20
 
-    if L1["ema9"] > L1["ema21"] > L1["ema50"]: bias_bull += 10
-    elif L1["ema9"] < L1["ema21"] < L1["ema50"]: bias_bear += 10
+    if L1["ema9"] > L1["ema21"] > L1["ema50"]:
+        bias_bull += 10
+    elif L1["ema9"] < L1["ema21"] < L1["ema50"]:
+        bias_bear += 10
 
     # D1 BIAS
     d1_bias = "neutral"
@@ -327,36 +370,50 @@ def score_direction(df_h1, df_m15, df_d1=None):
             struct_d1 = mkt_struct(df_d1_built, sh_d, sl_d)
             ema_bear_d1 = LD["ema9"] < LD["ema21"] < LD["ema50"]
             ema_bull_d1 = LD["ema9"] > LD["ema21"] > LD["ema50"]
-            if struct_d1 == "bearish" or ema_bear_d1: d1_bias = "bearish"
-            elif struct_d1 == "bullish" or ema_bull_d1: d1_bias = "bullish"
+            if struct_d1 == "bearish" or ema_bear_d1:
+                d1_bias = "bearish"
+            elif struct_d1 == "bullish" or ema_bull_d1:
+                d1_bias = "bullish"
     except Exception:
         pass
 
-    if d1_bias == "bullish": bias_bull += 15
-    elif d1_bias == "bearish": bias_bear += 15
+    if d1_bias == "bullish":
+        bias_bull += 15
+    elif d1_bias == "bearish":
+        bias_bear += 15
 
     # SETUP M15
     setup_bull = setup_bear = 0
 
     choch_m15 = detect_choch(m15, sh15, sl15)
-    if choch_m15["bullish_choch"]: setup_bull += 30
-    if choch_m15["bearish_choch"]: setup_bear += 30
+    if choch_m15["bullish_choch"]:
+        setup_bull += 30
+    if choch_m15["bearish_choch"]:
+        setup_bear += 30
 
     cisd_m15 = detect_cisd(m15, lb=8)
-    if cisd_m15["bullish_cisd"]: setup_bull += 20
-    if cisd_m15["bearish_cisd"]: setup_bear += 20
+    if cisd_m15["bullish_cisd"]:
+        setup_bull += 20
+    if cisd_m15["bearish_cisd"]:
+        setup_bear += 20
 
     fr = detect_failed_retest(m15, sh15, sl15, atr_val)
-    if fr["failed_retest_sell"]: setup_bear += 25
-    if fr["failed_retest_buy"]: setup_bull += 25
+    if fr["failed_retest_sell"]:
+        setup_bear += 25
+    if fr["failed_retest_buy"]:
+        setup_bull += 25
 
     liq_bull = detect_liquidity_sweep(m15, sh15, sl15, "bull")
     liq_bear = detect_liquidity_sweep(m15, sh15, sl15, "bear")
-    if liq_bull["type"] == "sweep": setup_bull += 15
-    if liq_bear["type"] == "sweep": setup_bear += 15
+    if liq_bull["type"] == "sweep":
+        setup_bull += 15
+    if liq_bear["type"] == "sweep":
+        setup_bear += 15
 
-    if is_in_ote(m15, "bull", sh15, sl15): setup_bull += 10
-    if is_in_ote(m15, "bear", sh15, sl15): setup_bear += 10
+    if is_in_ote(m15, "bull", sh15, sl15):
+        setup_bull += 10
+    if is_in_ote(m15, "bear", sh15, sl15):
+        setup_bear += 10
 
     # Jika bias H1 dan setup M15 bertentangan, setup dikurangi 50%
     if struct_h1 == "bullish" and setup_bear > setup_bull:
@@ -517,10 +574,10 @@ def _select_best_tp(tp_pool, entry_price, risk):
     return None, None
 
 # ============================================================
-# SETUP: SL & TP
+# SETUP: SL & TP (DIPERBAIKI)
 # ============================================================
 
-def analyze_setup(df_h1, df_m15, direction, entry_price, invalid_level):
+def analyze_setup(df_h1, df_m15, direction, entry_price, invalid_level, score=None):
     h1, m15 = build_df(df_h1), build_df(df_m15)
     if h1 is None or m15 is None:
         return None
@@ -540,7 +597,13 @@ def analyze_setup(df_h1, df_m15, direction, entry_price, invalid_level):
     if risk <= 0:
         return None
 
-    sh15, sl15 = score.get("sh15", []), score.get("sl15", [])
+    # Ambil sh15/sl15 dari score jika ada
+    if score is not None:
+        sh15 = score.get("sh15", [])
+        sl15 = score.get("sl15", [])
+    else:
+        sh15, sl15 = [], []
+
     sh1, sl1 = swing_pts(h1, lb=5)
     tp_pool = _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1)
     tp_price, tp_label = _select_best_tp(tp_pool, entry_price, risk)
@@ -625,8 +688,8 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
                 log.info(f"[DEBUG] {symbol}: market entry ditolak (conf<65)")
             return None
 
-        # ----- SETUP SL/TP -----
-        setup = analyze_setup(df_h1, df_m15, direction, entry_price, invalid_level)
+        # ----- SETUP SL/TP (DI SINI BUG SEBELUMNYA) -----
+        setup = analyze_setup(df_h1, df_m15, direction, entry_price, invalid_level, score=score)
         if setup is None:
             if symbol:
                 log.warning(f"[DEBUG] {symbol}: analyze_setup None")
@@ -673,7 +736,8 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
         return None
 
 def get_best_signal(candidates):
-    if not candidates: return None
+    if not candidates:
+        return None
     def _rank(sig):
         label_bonus = 0 if sig.get("entry_label") in ["market", "fvg"] else 3
         return sig["confidence"] + label_bonus + sig["rr"] * 0.5
