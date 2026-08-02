@@ -6,59 +6,32 @@ from datetime import timezone
 log = logging.getLogger(__name__)
 
 # ============================================================
-# KONFIGURASI DASAR (Sesuai Panduan combined.txt)
+# KONFIGURASI GLOBAL
 # ============================================================
 
-MIN_RR = 1.5  # Dasar: 1:1.5 sudah cukup jika Win Rate > 50% & SL tepat
+MIN_RR = 2.0
+MAX_RR = 4.0
 
-# TRAILING STOP LADDER (R-Multiple)
-# Berdasarkan prinsip: Kunci profit secara bertahap
-# Saat profit mencapai 1R, kunci 30% dari profit tersebut, dst.
+# TRAILING: BUKAN LOCK PROFIT, TAPI VALIDASI STRUKTUR
+# Setiap level menandakan titik di mana struktur berubah
 TRAIL_R_LADDER = [
-    (0.5, 0.15),
-    (1.0, 0.35),
-    (1.5, 0.50),
-    (2.0, 0.65),
-    (3.0, 0.80),
-    (4.0, 0.90),
+    (1.0, 0.30),   # 1R: struktur mulai berubah
+    (2.0, 0.50),   # 2R: struktur berubah lebih dalam
+    (3.0, 0.65),   # 3R: hampir reversal
+    (4.0, 0.80),   # 4R: reversal terkonfirmasi
 ]
 
-# STRUCTURE TRAIL (Mengikuti Swing Point Terbaru)
+# STRUCTURE TRAIL: mengikuti swing point M15 terbaru
 STRUCT_TRAIL_LB = 3
-STRUCT_TRAIL_BUF_PCT = 0.002  # Buffer 0.2% dari harga agar tidak terlalu ketat
+STRUCT_TRAIL_BUF_PCT = 0.0015
 STRUCT_TRAIL_LOOKBACK = 60
 
-# FIBONACCI EXTENSION (Untuk TP jika level struktural kurang)
+# FIBONACCI EXTENSION (untuk TP jika level struktural habis)
 FIB_EXT_1 = 0.272
 FIB_EXT_2 = 0.618
 
-# H4 RSI GATE (Konfluensi tambahan untuk TP Fib)
-H4_RSI_BUY_MIN = 40
-H4_RSI_BUY_MAX = 65
-H4_RSI_SELL_MIN = 35
-H4_RSI_SELL_MAX = 60
-
-# SESSION TIMING (Killzone & Boost)
-SESSION_NY_START = 13
-SESSION_NY_END = 17
-SESSION_LONDON_START = 7
-SESSION_LONDON_END = 12
-SESSION_KILL_LDN_S = 7
-SESSION_KILL_LDN_E = 10
-SESSION_KILL_ASIA1_S = 20
-SESSION_KILL_ASIA2_E = 5
-KILLZONE_BOOST = 1.1
-
-# MINIMUM CONFIDENCE PER SESSION (Lebih longgar agar sinyal tidak mati total)
-SESSION_MIN_CONF = {
-    "Asia": 40,
-    "London": 45,
-    "NY": 50,
-    "transition": 40,
-}
-
 # ============================================================
-# FUNGSI BANTU (INDIKATOR & STRUKTUR)
+# FUNGSI BANTU
 # ============================================================
 
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
@@ -117,50 +90,21 @@ def mkt_struct(df, sh, sl):
     return "ranging"
 
 # ============================================================
-# FUNGSI UTAMA ANALISIS (Sesuai Panduan combined.txt)
+# DETEKSI STRUKTUR SMC
 # ============================================================
 
-def _get_session(bar_ts=None):
-    try:
-        if bar_ts is not None:
-            if hasattr(bar_ts, 'tzinfo') and bar_ts.tzinfo is None:
-                bar_ts = bar_ts.tz_localize("UTC")
-            elif hasattr(bar_ts, 'tzinfo') and bar_ts.tzinfo is not None:
-                bar_ts = bar_ts.tz_convert("UTC")
-            hour = bar_ts.hour
-        else:
-            from datetime import datetime
-            hour = datetime.now(timezone.utc).hour
-    except Exception:
-        return "transition"
-    if SESSION_NY_START <= hour < SESSION_NY_END: return "NY"
-    if SESSION_LONDON_START <= hour < SESSION_LONDON_END: return "London"
-    if hour >= SESSION_KILL_ASIA1_S or hour < SESSION_KILL_ASIA2_E: return "Asia"
-    return "transition"
-
-def _is_in_killzone(bar_ts=None):
-    try:
-        if bar_ts is not None:
-            if hasattr(bar_ts, 'tzinfo') and bar_ts.tzinfo is None:
-                bar_ts = bar_ts.tz_localize("UTC")
-            elif hasattr(bar_ts, 'tzinfo') and bar_ts.tzinfo is not None:
-                bar_ts = bar_ts.tz_convert("UTC")
-            hour = bar_ts.hour
-        else:
-            from datetime import datetime
-            hour = datetime.now(timezone.utc).hour
-    except Exception:
-        return False
-    ldn_kill = SESSION_KILL_LDN_S <= hour < SESSION_KILL_LDN_E
-    asia_kill = hour >= SESSION_KILL_ASIA1_S or hour < SESSION_KILL_ASIA2_E
-    return ldn_kill or asia_kill
-
-# ============================================================
-# DETEKSI STRUKTUR SMART MONEY (SMC)
-# ============================================================
+def is_zone_fresh(df, top, bot, formed_idx, end_idx=None):
+    if formed_idx is None or formed_idx + 2 >= len(df): return True
+    start = formed_idx + 2
+    end_idx = end_idx if end_idx is not None else len(df) - 1
+    if start >= end_idx: return True
+    sub = df.iloc[start:end_idx]
+    if sub.empty: return True
+    touched = ((sub["low"] <= top) & (sub["high"] >= bot)).any()
+    return not bool(touched)
 
 def detect_liquidity_sweep(df, sh, sl, direction):
-    """Deteksi Liquidity Sweep (External/Internal) sesuai combined.txt [15]"""
+    """Deteksi Liquidity Sweep (External) – kunci SMC"""
     result = {"type": "none", "level": None}
     if direction == "bull" and len(sl) >= 1:
         low = df["low"].iloc[sl[-1]]
@@ -173,7 +117,6 @@ def detect_liquidity_sweep(df, sh, sl, direction):
     return result
 
 def detect_break_of_structure(df, sh, sl, direction):
-    """Deteksi Break of Structure (BOS) yang valid"""
     if direction == "bull" and len(sh) >= 2:
         prev_high = df["high"].iloc[sh[-2]]
         if df["high"].iloc[-1] > prev_high:
@@ -185,7 +128,7 @@ def detect_break_of_structure(df, sh, sl, direction):
     return False
 
 def detect_choch(df, sh, sl):
-    """Change of Character (CHoCH) - Konfirmasi Body Close"""
+    """Change of Character – body close di luar struktur"""
     result = {"bearish_choch": False, "bullish_choch": False}
     if len(sh) < 2 or len(sl) < 2: return result
     close = df["close"].iloc[-1]
@@ -193,16 +136,14 @@ def detect_choch(df, sh, sl):
     last_high = df["high"].iloc[sh[-1]]
     prev_low = df["low"].iloc[sl[-2]]
     last_low = df["low"].iloc[sl[-1]]
-    # Bullish CHoCH: Higher High & Higher Low
     if last_high > prev_high and last_low > prev_low and close > prev_low:
         result["bullish_choch"] = True
-    # Bearish CHoCH: Lower High & Lower Low
     if last_high < prev_high and last_low < prev_low and close < prev_low:
         result["bearish_choch"] = True
     return result
 
 def detect_cisd(df, lb=6):
-    """Change in State of Delivery (CISD) - Sinyal Reversal Awal"""
+    """Change in State of Delivery – sinyal reversal paling awal"""
     result = {"bullish_cisd": False, "bearish_cisd": False}
     if len(df) < lb + 1: return result
     sub = df.iloc[-lb:]
@@ -227,7 +168,7 @@ def detect_cisd(df, lb=6):
     return result
 
 def detect_fvg(df, direction, lb=40):
-    """Fair Value Gap (FVG) - Ketidakseimbangan Harga"""
+    """Fair Value Gap – hanya fresh"""
     sub = df.iloc[-lb:]
     base_offset = len(df) - len(sub)
     out = []
@@ -243,10 +184,10 @@ def detect_fvg(df, direction, lb=40):
             gap["idx"] = base_offset + i + 2
             gap["is_fresh"] = is_zone_fresh(df, gap["top"], gap["bot"], gap["idx"])
             out.append(gap)
-    return out[-3:] if out else []
+    return [f for f in out if f["is_fresh"]][-3:] if out else []
 
 def detect_order_block(df, direction, lb=40):
-    """Order Block (OB) - Berdasarkan Panduan combined.txt [14] & [17]"""
+    """Order Block – fresh + BOS + FVG minimal 2 dari 3"""
     is_demand = direction == "bull"
     sub = df.iloc[-lb:]
     base_offset = len(df) - len(sub)
@@ -262,28 +203,24 @@ def detect_order_block(df, direction, lb=40):
         top = max(c["open"], c["close"])
         bot = min(c["open"], c["close"])
         df_idx = base_offset + i
-        # 1. Ada FVG?
+        sh, sl = swing_pts(df, lb=5)
         has_fvg = False
         if i + 2 < len(sub):
             c2 = sub.iloc[i+2]
             if is_demand and c2["low"] > c["high"]: has_fvg = True
             if not is_demand and c2["high"] < c["low"]: has_fvg = True
-        # 2. Ada BOS?
-        sh, sl = swing_pts(df, lb=5)
         has_bos = detect_break_of_structure(df, sh, sl, direction)
-        # 3. Fresh?
         fresh = is_zone_fresh(df, top, bot, df_idx)
         quality = int(has_fvg) + int(has_bos) + int(fresh)
-        if quality >= 2:  # Hanya OB berkualitas tinggi
+        if quality >= 2:
             zones.append({
                 "top": top, "bot": bot, "mid": (top + bot) / 2,
                 "idx": df_idx, "has_fvg": has_fvg, "has_bos": has_bos,
                 "is_fresh": fresh, "quality": quality,
             })
-    return zones[-3:] if zones else []
+    return [z for z in zones if z["is_fresh"]][-3:] if zones else []
 
 def detect_equal_highs_lows(df, kind="high", lb=60, tol=0.0025):
-    """Equal Highs/Lows (EQL/EQH) - Area Liquidity"""
     sub = df.iloc[-lb:]
     vals = sub["high"] if kind == "high" else sub["low"]
     clusters = []
@@ -300,7 +237,6 @@ def detect_equal_highs_lows(df, kind="high", lb=60, tol=0.0025):
     return sorted(clusters)
 
 def detect_failed_retest(df, sh, sl, atr):
-    """Failed Retest - Konfirmasi Rejection"""
     result = {"failed_retest_sell": False, "failed_retest_buy": False}
     if len(df) < 3: return result
     L = df.iloc[-1]
@@ -321,22 +257,11 @@ def detect_failed_retest(df, sh, sl, atr):
             result["failed_retest_buy"] = True
     return result
 
-def is_zone_fresh(df, top, bot, formed_idx, end_idx=None):
-    if formed_idx is None or formed_idx + 2 >= len(df): return True
-    start = formed_idx + 2
-    end_idx = end_idx if end_idx is not None else len(df) - 1
-    if start >= end_idx: return True
-    sub = df.iloc[start:end_idx]
-    if sub.empty: return True
-    touched = ((sub["low"] <= top) & (sub["high"] >= bot)).any()
-    return not bool(touched)
-
 # ============================================================
-# FIBONACCI & ENTRY/EXIT
+# FIBONACCI & OTE
 # ============================================================
 
 def get_fib_zone(price, swing_low, swing_high):
-    """Menentukan Premium/Discount Zone"""
     rng = swing_high - swing_low
     if rng <= 0: return {"ratio": 0.5, "zone": "equilibrium"}
     ratio = (price - swing_low) / rng
@@ -346,7 +271,6 @@ def get_fib_zone(price, swing_low, swing_high):
     return {"ratio": round(ratio, 4), "zone": zone}
 
 def is_in_ote(df, direction, sh, sl):
-    """Optimal Trade Entry (OTE) - 0.62 - 0.79 Fibonacci Retracement"""
     if len(sh) < 1 or len(sl) < 1: return False
     swing_high = df["high"].iloc[sh[-1]]
     swing_low = df["low"].iloc[sl[-1]]
@@ -367,63 +291,12 @@ def _fib_extension_levels(h1, sh1, sl1, direction):
     else:
         return swing_low - leg * FIB_EXT_1, swing_low - leg * FIB_EXT_2
 
-def adaptive_fib_target(df, sh, sl, direction):
-    """Adaptive Fib Target berdasarkan Pullback Depth"""
-    default = (0.5, 0.618)
-    if len(sh) < 2 or len(sl) < 2: return default
-    try:
-        if direction == "bull":
-            impulse_len = df["high"].iloc[sh[-1]] - df["low"].iloc[sl[-2]]
-            pullback_len = df["high"].iloc[sh[-1]] - df["close"].iloc[-1]
-        else:
-            impulse_len = df["high"].iloc[sh[-2]] - df["low"].iloc[sl[-1]]
-            pullback_len = df["close"].iloc[-1] - df["low"].iloc[sl[-1]]
-        if impulse_len <= 0: return default
-        pullback_ratio = abs(pullback_len) / impulse_len
-    except Exception:
-        return default
-    if pullback_ratio <= 0.12: return (0.236, 0.382)
-    elif pullback_ratio <= 0.30: return (0.382, 0.5)
-    elif pullback_ratio >= 0.55: return (0.618, 0.786)
-    else: return (0.5, 0.618)
-
 # ============================================================
-# SCORING & ANALISIS UTAMA (ITERASI 2 - FINAL)
+# SCORING – TANPA SESSION BIAS
 # ============================================================
-
-def _h4_confluence(df_h1, direction, choch_m15=None):
-    """H4 Gate - Konfluensi Tambahan untuk TP Fib Extension"""
-    result = {"confluence": False, "full_confluence": False}
-    try:
-        df_h4 = build_df(df_h1.resample("4h").agg({
-            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
-        }).dropna())
-        if df_h4 is None or len(df_h4) < 20: return result
-        L4 = df_h4.iloc[-1]
-        sh4, sl4 = swing_pts(df_h4, lb=3)
-        struct_h4 = mkt_struct(df_h4, sh4, sl4)
-        rsi_h4 = L4["rsi"]
-        if direction == "bull":
-            ema_ok = L4["ema9"] > L4["ema21"] > L4["ema50"]
-            struct_ok = struct_h4 == "bullish"
-            rsi_ok = H4_RSI_BUY_MIN <= rsi_h4 <= H4_RSI_BUY_MAX
-        else:
-            ema_ok = L4["ema9"] < L4["ema21"] < L4["ema50"]
-            struct_ok = struct_h4 == "bearish"
-            rsi_ok = H4_RSI_SELL_MIN <= rsi_h4 <= H4_RSI_SELL_MAX
-        result["confluence"] = bool(ema_ok and struct_ok and rsi_ok)
-        if result["confluence"] and choch_m15:
-            choch_agrees = (
-                (direction == "bull" and choch_m15.get("bullish_choch")) or
-                (direction == "bear" and choch_m15.get("bearish_choch"))
-            )
-            result["full_confluence"] = bool(choch_agrees)
-    except Exception:
-        pass
-    return result
 
 def score_direction(df_h1, df_m15, df_d1=None):
-    """Skor Arah: BIAS (H1) + SETUP (M15)"""
+    """Skor murni dari struktur chart, tanpa filter session"""
     h1 = build_df(df_h1)
     m15 = build_df(df_m15)
     if h1 is None or m15 is None: return None
@@ -436,7 +309,19 @@ def score_direction(df_h1, df_m15, df_d1=None):
     sh15, sl15 = swing_pts(m15, 5)
     struct_h1 = mkt_struct(h1, sh1, sl1)
 
-    # 1. BIAS D1 (Konteks Makro)
+    # ---- BIAS H1 ----
+    bias_bull = bias_bear = 0
+    if struct_h1 == "bullish": bias_bull += 30
+    elif struct_h1 == "bearish": bias_bear += 30
+
+    choch_h1 = detect_choch(h1, sh1, sl1)
+    if choch_h1["bullish_choch"]: bias_bull += 20
+    if choch_h1["bearish_choch"]: bias_bear += 20
+
+    if L1["ema9"] > L1["ema21"] > L1["ema50"]: bias_bull += 10
+    elif L1["ema9"] < L1["ema21"] < L1["ema50"]: bias_bear += 10
+
+    # ---- D1 BIAS (konteks makro) ----
     d1_bias = "neutral"
     try:
         if df_d1 is not None and len(df_d1) >= 65:
@@ -456,67 +341,43 @@ def score_direction(df_h1, df_m15, df_d1=None):
     except Exception:
         pass
 
-    # 2. SCORING BIAS (Struktur Besar)
-    bias_bull = bias_bear = 0
+    if d1_bias == "bullish": bias_bull += 15
+    elif d1_bias == "bearish": bias_bear += 15
 
-    # Struktur H1 (Bobot Tertinggi)
-    if struct_h1 == "bullish": bias_bull += 35
-    elif struct_h1 == "bearish": bias_bear += 35
-
-    # CHoCH H1 (Perubahan Karakter)
-    choch_h1 = detect_choch(h1, sh1, sl1)
-    if choch_h1["bullish_choch"]: bias_bull += 25
-    if choch_h1["bearish_choch"]: bias_bear += 25
-
-    # EMA H1 (Trend Alignment)
-    if L1["ema9"] > L1["ema21"] > L1["ema50"]: bias_bull += 15
-    elif L1["ema9"] < L1["ema21"] < L1["ema50"]: bias_bear += 15
-
-    # D1 Bias (Konteks Makro)
-    if d1_bias == "bullish": bias_bull += 20
-    elif d1_bias == "bearish": bias_bear += 20
-
-    # 3. SCORING SETUP (Konfirmasi M15)
+    # ---- SETUP M15 ----
     setup_bull = setup_bear = 0
 
-    # CHoCH M15 (Bobot Tertinggi untuk Entry)
+    # CHoCH M15 (bobot tinggi)
     choch_m15 = detect_choch(m15, sh15, sl15)
     if choch_m15["bullish_choch"]: setup_bull += 30
     if choch_m15["bearish_choch"]: setup_bear += 30
 
-    # CISD M15 (Sinyal Reversal Awal)
+    # CISD (sinyal reversal awal)
     cisd_m15 = detect_cisd(m15, lb=8)
     if cisd_m15["bullish_cisd"]: setup_bull += 20
     if cisd_m15["bearish_cisd"]: setup_bear += 20
 
-    # Failed Retest (Konfirmasi Rejection)
+    # Failed Retest (konfirmasi rejection)
     fr = detect_failed_retest(m15, sh15, sl15, atr_val)
     if fr["failed_retest_sell"]: setup_bear += 25
     if fr["failed_retest_buy"]: setup_bull += 25
 
-    # Liquidity Sweep (Konfirmasi Manipulasi)
+    # Liquidity Sweep (manipulasi)
     liq_bull = detect_liquidity_sweep(m15, sh15, sl15, "bull")
     liq_bear = detect_liquidity_sweep(m15, sh15, sl15, "bear")
     if liq_bull["type"] == "sweep": setup_bull += 15
     if liq_bear["type"] == "sweep": setup_bear += 15
 
-    # OTE (Optimal Trade Entry) - Bonus
+    # OTE (bonus)
     if is_in_ote(m15, "bull", sh15, sl15): setup_bull += 10
     if is_in_ote(m15, "bear", sh15, sl15): setup_bear += 10
 
-    # 4. KOMBINASI & FILTER
-    # Jika Bias H1 dan Setup M15 berlawanan, penalti 50%
-    if (struct_h1 == "bullish" and setup_bear > setup_bull):
+    # ---- KOMBINASI ----
+    # Jika bias H1 dan setup M15 bertentangan, setup dikurangi 50%
+    if struct_h1 == "bullish" and setup_bear > setup_bull:
         setup_bear = setup_bear * 0.5
-    elif (struct_h1 == "bearish" and setup_bull > setup_bear):
+    elif struct_h1 == "bearish" and setup_bull > setup_bear:
         setup_bull = setup_bull * 0.5
-
-    # Killzone Boost
-    bar_ts = m15.index[-1] if hasattr(m15.index, '__iter__') else None
-    in_killzone = _is_in_killzone(bar_ts)
-    if in_killzone:
-        if setup_bull > setup_bear: setup_bull *= KILLZONE_BOOST
-        else: setup_bear *= KILLZONE_BOOST
 
     total_bull = bias_bull + setup_bull
     total_bear = bias_bear + setup_bear
@@ -525,15 +386,9 @@ def score_direction(df_h1, df_m15, df_d1=None):
     raw = total_bull if direction == "bull" else total_bear
     conf = min(int(raw / 280 * 100), 99)
 
-    # Penalti D1 Conflict (Bukan Hard Block)
-    d1_conflict = (d1_bias == "bearish" and direction == "bull") or (d1_bias == "bullish" and direction == "bear")
-    if d1_conflict:
-        conf = max(0, conf - 15)
-
     return {
         "direction": direction,
         "confidence": conf,
-        "d1_conflict": d1_conflict,
         "price": L15["close"],
         "atr": atr_val,
         "struct_h1": struct_h1,
@@ -544,66 +399,85 @@ def score_direction(df_h1, df_m15, df_d1=None):
         "failed_retest": fr,
         "liquidity_bull": liq_bull,
         "liquidity_bear": liq_bear,
-        "in_killzone": in_killzone,
-        "bar_ts": bar_ts,
+        "sh15": sh15,
+        "sl15": sl15,
     }
 
-def _collect_entry_candidates(m15, direction, entry_ref, atr):
-    """Kandidat Entry: OB, FVG, EQH/EQL"""
-    up = direction == "bull"
-    obs = detect_order_block(m15, direction, lb=40)
-    fvgs = detect_fvg(m15, direction, lb=40)
-    eqs = detect_equal_highs_lows(m15, "low" if up else "high", lb=80)
+# ============================================================
+# ENTRY – PRIORITAS: OB > EQ > FVG > MARKET
+# ============================================================
 
+def _collect_entry_candidates(m15, direction, entry_ref, atr, score=None):
+    """Entry candidates: OB, Equal Highs/Lows, FVG (fresh), market fallback"""
+    up = direction == "bull"
     cands = []
+    max_dist = atr * 0.3  # dekat dengan harga
+
+    # 1. Order Block (prioritas tertinggi)
+    obs = detect_order_block(m15, direction, lb=40)
     for z in obs:
         entry_pt = z["top"] if not up else z["bot"]
         invalid_pt = z["bot"] if not up else z["top"]
-        if (up and entry_pt < entry_ref + atr * 0.5) or (not up and entry_pt > entry_ref - atr * 0.5):
+        # Entry hanya jika harga berada di dekat zona
+        if (up and entry_pt < entry_ref + max_dist) or (not up and entry_pt > entry_ref - max_dist):
             cands.append({
                 "price": entry_pt,
                 "invalid": invalid_pt,
                 "label": "ob",
-                "score": 3 + z["quality"]
+                "score": 5 + z["quality"]
             })
-    for f in fvgs:
-        entry_pt = f["mid"]
-        invalid_pt = f["top"] if up else f["bot"]
-        if (up and entry_pt < entry_ref + atr * 0.5) or (not up and entry_pt > entry_ref - atr * 0.5):
-            cands.append({
-                "price": entry_pt,
-                "invalid": invalid_pt,
-                "label": "fvg",
-                "score": 2 + int(f["is_fresh"])
-            })
+
+    # 2. Equal Highs/Lows
+    eqs = detect_equal_highs_lows(m15, "low" if up else "high", lb=80)
     for eq in eqs[:1]:
         invalid_pt = eq + atr * 0.6 if up else eq - atr * 0.6
         cands.append({
             "price": eq,
             "invalid": invalid_pt,
             "label": "eq",
-            "score": 2
+            "score": 4
         })
+
+    # 3. FVG (hanya jika fresh dan ada CISD)
+    fvgs = detect_fvg(m15, direction, lb=40)
+    for f in fvgs:
+        entry_pt = f["mid"]
+        invalid_pt = f["top"] if up else f["bot"]
+        if (up and entry_pt < entry_ref + max_dist) or (not up and entry_pt > entry_ref - max_dist):
+            cisd_support = False
+            if score and score.get("cisd_m15", {}).get("bullish_cisd" if up else "bearish_cisd"):
+                cisd_support = True
+            if cisd_support and f["is_fresh"]:
+                cands.append({
+                    "price": entry_pt,
+                    "invalid": invalid_pt,
+                    "label": "fvg",
+                    "score": 3
+                })
+
+    # 4. Market fallback (hanya jika confidence tinggi)
+    if not cands:
+        invalid_pt = entry_ref - atr * 1.2 if up else entry_ref + atr * 1.2
+        cands.append({
+            "price": entry_ref,
+            "invalid": invalid_pt,
+            "label": "market",
+            "score": 1
+        })
+
     return cands
 
-def _select_best_tp(tp_pool, entry_price, risk):
-    """Pilih TP Terbaik: Level Struktural Terdekat dengan RR >= MIN_RR"""
-    qualifying = []
-    for lbl, v, tier in tp_pool:
-        rr_c = abs(v - entry_price) / risk
-        if rr_c >= MIN_RR:
-            qualifying.append((lbl, v, tier, rr_c))
-    if not qualifying: return None, None
-    best_lbl, best_v, best_tier, best_rr = min(qualifying, key=lambda x: (x[2], -x[3]))
-    return round(best_v, 8), best_lbl
+# ============================================================
+# TP – MIN RR 2, MAX RR 4, CARI LEVEL LANJUTAN
+# ============================================================
 
-def _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1, h4_gate, fib_127, fib_162):
-    """Pool Level TP: EQH/EQL, OB, FVG, Swing H1, Fib Extension"""
+def _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1):
+    """Pool level TP: EQH/EQL, OB, FVG, Swing H1, Fib Extension"""
     up = direction == "bull"
     sgn = 1 if up else -1
     pool = []
 
-    # 1. Equal Highs/Lows (Prioritas Tertinggi)
+    # 1. Equal Highs/Lows H1 (terkuat)
     eqs_h1 = detect_equal_highs_lows(h1, "high" if up else "low", lb=100)
     for v in eqs_h1:
         if sgn * (v - entry_price) > atr * 0.5:
@@ -628,50 +502,96 @@ def _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1, h
         if sgn * (v - entry_price) > atr * 1.0:
             pool.append(("sw_h1", v, 4))
 
-    # 5. Fib Extension (Hanya jika H4 Gate)
-    if fib_127 is not None and sgn * (fib_127 - entry_price) > atr * 0.5 and h4_gate["confluence"]:
+    # 5. Fib Extension (level lanjutan)
+    fib_127, fib_162 = _fib_extension_levels(h1, sh1, sl1, direction)
+    if fib_127 is not None and sgn * (fib_127 - entry_price) > atr * 0.5:
         pool.append(("fib127", fib_127, 5))
-        if h4_gate["full_confluence"] and fib_162 is not None and sgn * (fib_162 - entry_price) > atr * 0.5:
-            pool.append(("fib162", fib_162, 6))
+    if fib_162 is not None and sgn * (fib_162 - entry_price) > atr * 0.5:
+        pool.append(("fib162", fib_162, 6))
 
+    # Urutkan berdasarkan jarak (prioritas terdekat)
+    pool.sort(key=lambda x: abs(x[1] - entry_price))
     return pool
 
-def analyze_setup(df_h1, df_m15, direction, entry_price, score=None, invalid_level=None):
-    """Analisis Akhir: SL, TP, RR"""
+def _select_best_tp(tp_pool, entry_price, risk):
+    """Pilih TP: cari RR >= 2 dan <= 4. Jika tidak ada, cari level lebih jauh lalu cap ke 4."""
+    if not tp_pool:
+        return None, None
+
+    # Kandidat RR 2-4
+    qualified = []
+    too_far = []
+    for lbl, v, tier in tp_pool:
+        rr_c = abs(v - entry_price) / risk
+        if rr_c >= MIN_RR:
+            if rr_c <= MAX_RR:
+                qualified.append((lbl, v, tier, rr_c))
+            else:
+                too_far.append((lbl, v, tier, rr_c))
+
+    if qualified:
+        # Pilih yang tier terendah (level terkuat) dan RR terkecil
+        best = min(qualified, key=lambda x: (x[2], x[3]))
+        return round(best[1], 8), best[0]
+
+    if too_far:
+        # Ambil yang RR terkecil di antara yang terlalu jauh, lalu cap ke MAX_RR
+        best = min(too_far, key=lambda x: x[3])
+        lbl, v, tier, rr = best
+        sgn = 1 if v > entry_price else -1
+        capped_price = entry_price + sgn * risk * MAX_RR
+        return round(capped_price, 8), lbl + "_capped"
+
+    return None, None
+
+# ============================================================
+# SETUP: SL = INVALIDATION LEVEL + NOISE
+# ============================================================
+
+def analyze_setup(df_h1, df_m15, direction, entry_price, invalid_level):
+    """Hitung SL dan TP berdasarkan invalid_level"""
     h1, m15 = build_df(df_h1), build_df(df_m15)
     if h1 is None or m15 is None: return None
 
     atr = max(m15["atr"].iloc[-1], h1["atr"].iloc[-1] / 4, entry_price * 0.002)
-    noise = atr * 0.5  # Buffer Noise Lebih Kecil
+    noise = atr * 0.5  # buffer tipis, karena invalid_level sudah di luar zona
 
     if invalid_level is None:
-        # Fallback Invalidation
         invalid_level = entry_price - atr * 1.2 if direction == "bull" else entry_price + atr * 1.2
 
-    # SL: Invalidation Level + Noise
     sl_price = invalid_level + (noise if direction == "bear" else -noise)
     risk = abs(sl_price - entry_price)
-    risk_floor = max(atr * 0.8, entry_price * 0.003)
+    risk_floor = max(atr * 0.6, entry_price * 0.002)
     if risk < risk_floor:
         sl_price += (risk_floor - risk) * (1 if direction == "bear" else -1)
         risk = risk_floor
     if risk <= 0: return None
 
     # TP Pool
-    sh15, sl15 = swing_pts(m15, lb=5)
+    sh15, sl15 = score.get("sh15", []), score.get("sl15", [])
     sh1, sl1 = swing_pts(h1, lb=5)
-    choch_m15 = (score or {}).get("choch_m15", {})
-    h4_gate = _h4_confluence(df_h1, direction, choch_m15)
-    fib_127, fib_162 = _fib_extension_levels(h1, sh1, sl1, direction)
-
-    tp_pool = _build_tp_pool(m15, h1, direction, entry_price, atr,
-                             sh15, sl15, sh1, sl1, h4_gate, fib_127, fib_162)
+    tp_pool = _build_tp_pool(m15, h1, direction, entry_price, atr, sh15, sl15, sh1, sl1)
     tp_price, tp_label = _select_best_tp(tp_pool, entry_price, risk)
-    if tp_price is None: return None
+
+    # Fallback: jika tidak ada level, buat TP dengan MIN_RR
+    if tp_price is None:
+        sgn = 1 if direction == "bull" else -1
+        tp_price = entry_price + sgn * risk * MIN_RR
+        tp_label = "fallback_rr"
 
     reward = abs(tp_price - entry_price)
     rr = round(reward / risk, 2)
-    if rr < MIN_RR: return None
+
+    # Jika RR masih di bawah MIN_RR, tolak
+    if rr < MIN_RR:
+        return None
+
+    # Jika RR > MAX_RR, cap
+    if rr > MAX_RR:
+        sgn = 1 if direction == "bull" else -1
+        tp_price = entry_price + sgn * risk * MAX_RR
+        tp_label = tp_label + "_capped"
+        rr = MAX_RR
 
     return {
         "sl": round(sl_price, 8),
@@ -681,11 +601,10 @@ def analyze_setup(df_h1, df_m15, direction, entry_price, score=None, invalid_lev
     }
 
 # ============================================================
-# FUNGSI UTAMA (DIPANGGIL main.py)
+# FUNGSI UTAMA – DIPANGGIL main.py
 # ============================================================
 
 def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
-    """Fungsi Utama: Entry Signal Generation"""
     try:
         if df_h1 is None or df_m15 is None or df_h1.empty or df_m15.empty:
             return None
@@ -698,45 +617,33 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
         atr = score["atr"]
         confidence = score["confidence"]
 
-        # 1. SESSION FILTER
-        bar_ts = score.get("bar_ts")
-        session = _get_session(bar_ts)
-        min_conf = SESSION_MIN_CONF.get(session, 45)
-        if confidence < min_conf:
+        # Filter: market harus bergerak (ATR > 0.3% dari harga)
+        if atr / current_price < 0.003:
             return None
 
-        # 2. KILLZONE NY: CHoCH ATAU Failed Retest (Tidak harus keduanya)
-        if session == "NY":
-            choch_ok = (
-                (direction == "bull" and score["choch_m15"].get("bullish_choch")) or
-                (direction == "bear" and score["choch_m15"].get("bearish_choch"))
-            )
-            fr_ok = (
-                (direction == "bull" and score["failed_retest"].get("failed_retest_buy")) or
-                (direction == "bear" and score["failed_retest"].get("failed_retest_sell"))
-            )
-            if not (choch_ok or fr_ok):
-                return None
-
-        # 3. ENTRY CANDIDATE (OB/FVG/EQ)
+        # Cari entry
         m15_built = build_df(df_m15)
-        cands = _collect_entry_candidates(m15_built, direction, current_price, atr)
+        cands = _collect_entry_candidates(m15_built, direction, current_price, atr, score=score)
         if not cands:
-            # Fallback: Market Entry dengan Invalidation ATR
-            invalid_level = current_price - atr * 1.2 if direction == "bull" else current_price + atr * 1.2
-            entry_price, entry_label = current_price, "market"
-        else:
-            best = max(cands, key=lambda c: c["score"])
-            entry_price, entry_label, invalid_level = best["price"], best["label"], best["invalid"]
+            return None
 
-        # 4. ANALYZE SETUP (SL/TP)
-        setup = analyze_setup(df_h1, df_m15, direction, entry_price,
-                              score=score, invalid_level=invalid_level)
-        if setup is None: return None
+        best = max(cands, key=lambda c: c["score"])
+        entry_price, entry_label, invalid_level = best["price"], best["label"], best["invalid"]
 
-        # 5. FINAL FILTER
-        if direction == "bull" and current_price >= setup["tp"]: return None
-        if direction == "bear" and current_price <= setup["tp"]: return None
+        # Jika entry_label == "market" dan confidence < 65, tolak
+        if entry_label == "market" and confidence < 65:
+            return None
+
+        # Setup SL/TP
+        setup = analyze_setup(df_h1, df_m15, direction, entry_price, invalid_level)
+        if setup is None:
+            return None
+
+        # Cegah TP sudah lewat
+        if direction == "bull" and current_price >= setup["tp"]:
+            return None
+        if direction == "bear" and current_price <= setup["tp"]:
+            return None
 
         return {
             "symbol": symbol,
@@ -756,8 +663,6 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
             "choch_h1": score["choch_h1"],
             "cisd_m15": score["cisd_m15"],
             "failed_retest": score["failed_retest"],
-            "session": session,
-            "in_killzone": score.get("in_killzone", False),
             "tp_sl_reason": f"Entry@{entry_price:.5g}({entry_label}) | {setup['reason']}",
         }
 
@@ -766,9 +671,8 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
         return None
 
 def get_best_signal(candidates):
-    """Pilih Sinyal Terbaik: Confidence + RR"""
     if not candidates: return None
     def _rank(sig):
-        label_bonus = 0 if sig.get("entry_label") == "market" else 3
+        label_bonus = 0 if sig.get("entry_label") in ["market", "fvg"] else 3
         return sig["confidence"] + label_bonus + sig["rr"] * 0.5
     return max(candidates, key=_rank)
