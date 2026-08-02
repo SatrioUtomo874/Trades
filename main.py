@@ -2773,7 +2773,7 @@ def bot_loop():
                 # ============================================================
 # TAMBAHAN BARU (START) — Handler /ganti (Upload Otak Baru via GitHub API)
 # ============================================================
-            elif text == "/ganti":
+            elif text in ("/ganti","ganti"):
                 doc = msg.get("document")
                 if not doc:
                     tg_send(chat_id, "📤 Kirim file strategy_logic.py sebagai dokumen dengan caption /ganti")
