@@ -2814,49 +2814,84 @@ def bot_loop():
                        with open(local_path, "w", encoding="utf-8") as f:
                            f.write(file_content)
                
-                       # 6. ========== PERBAIKAN: Reload & Bind Ulang ==========
-                       import importlib
-                       import sys
-               
-                       # Hapus modul dari cache TERLEBIH DAHULU (supaya reload benar-benar dari disk)
+                       # 6. ========== ADAPTIVE RELOAD: Bind apa yang ADA, pertahankan yang tidak ==========
+                       import importlib, sys
+
+                       # Hapus modul dari cache supaya reload benar-benar dari disk
                        if "strategy_logic" in sys.modules:
                            del sys.modules["strategy_logic"]
-               
-                       # Import ulang sebagai modul baru
+
                        import strategy_logic as sl
-               
-                       # Bind ULANG semua fungsi yang dibutuhkan ke global namespace
+
+                       # --- SENTINEL untuk membedakan "tidak ada" vs None ---
+                       _SL_SENTINEL = object()
+
+                       def _sl_bind(name):
+                           """Bind ke global HANYA kalau ada di modul baru.
+                           Kalau tidak ada -> global lama tetap aktif, return False."""
+                           val = getattr(sl, name, _SL_SENTINEL)
+                           if val is not _SL_SENTINEL:
+                               globals()[name] = val
+                               return True
+                           return False
+
+                       # WAJIB: full_analyze sudah divalidasi ada di atas
                        globals()["full_analyze"] = sl.full_analyze
-                       globals()["score_direction"] = sl.score_direction
-                       globals()["get_best_signal"] = sl.get_best_signal
-                       globals()["build_df"] = sl.build_df
-                       globals()["swing_pts"] = sl.swing_pts
-                       globals()["mkt_struct"] = sl.mkt_struct
-                       globals()["detect_choch"] = sl.detect_choch
-                       globals()["detect_cisd"] = sl.detect_cisd
-                       globals()["detect_fvg"] = sl.detect_fvg
-                       globals()["detect_order_block"] = sl.detect_order_block
-                       globals()["detect_liquidity_sweep"] = sl.detect_liquidity_sweep
-                       globals()["detect_failed_retest"] = sl.detect_failed_retest
-                       globals()["detect_equal_highs_lows"] = sl.detect_equal_highs_lows
-                       globals()["_collect_entry_candidates"] = sl._collect_entry_candidates
-                       globals()["analyze_setup"] = sl.analyze_setup
-                       # Kalau ada konstanta lain yang dipakai, bind juga
-                       globals()["MIN_RR"] = sl.MIN_RR
-                       globals()["MAX_RR"] = sl.MAX_RR
-                       globals()["TRAIL_R_LADDER"] = sl.TRAIL_R_LADDER
-                       globals()["STRUCT_TRAIL_LB"] = sl.STRUCT_TRAIL_LB
-                       globals()["STRUCT_TRAIL_BUF_PCT"] = sl.STRUCT_TRAIL_BUF_PCT
-                       globals()["STRUCT_TRAIL_LOOKBACK"] = sl.STRUCT_TRAIL_LOOKBACK
-                       globals()["FIB_EXT_1"] = sl.FIB_EXT_1
-                       globals()["FIB_EXT_2"] = sl.FIB_EXT_2
-               
-                       # 7. Update juga variabel global yang di-import dari strategy_logic
-                       # Ini penting karena main.py pake MIN_RR, TRAIL_R_LADDER, dll.
-                       log.info("[OTAK] Strategy logic berhasil di-reload dan di-bind ulang!")
-               
-                       tg_send(chat_id, "✅ Strategy logic berhasil di-reload dan AKTIF tanpa restart!")
-                       log.info("[OTAK] Strategy logic di-reload via /ganti (GitHub commit + bind ulang)")
+
+                       # -- Fungsi opsional --------------------------------------------------
+                       # Kalau tidak ada di file baru -> versi lama di global tetap aktif.
+                       # Kamu bebas ganti nama, tambah, atau hapus fungsi apapun
+                       # selama full_analyze() tetap ada.
+                       _OPT_FNS = [
+                           "score_direction", "get_best_signal", "build_df",
+                           "swing_pts", "mkt_struct",
+                           "detect_choch", "detect_bos", "detect_cisd",
+                           "detect_fvg", "detect_order_block",
+                           "detect_liquidity_sweep", "detect_failed_retest",
+                           "detect_equal_highs_lows", "detect_rsi_divergence",
+                           "_collect_entry_candidates", "_compute_sl", "_build_tp_pool",
+                           "_select_tp", "analyze_setup",
+                       ]
+                       _bound_fns, _kept_fns = [], []
+                       for _fn in _OPT_FNS:
+                           (_bound_fns if _sl_bind(_fn) else _kept_fns).append(_fn)
+
+                       # Tangkap semua public callable BARU yang tidak ada di daftar atas
+                       for _attr in dir(sl):
+                           if _attr.startswith("__"):
+                               continue
+                           if _attr not in _OPT_FNS and _attr != "full_analyze":
+                               _v = getattr(sl, _attr, None)
+                               if callable(_v):
+                                   globals()[_attr] = _v
+                                   if _attr not in _bound_fns:
+                                       _bound_fns.append(f"✨{_attr}")
+
+                       # -- Konstanta opsional -----------------------------------------------
+                       # Kalau tidak ada di file baru, nilai lama dipertahankan.
+                       _OPT_CONSTS = [
+                           "MIN_RR", "MAX_RR",
+                           "TRAIL_R_LADDER", "STRUCT_TRAIL_LB",
+                           "STRUCT_TRAIL_BUF_PCT", "STRUCT_TRAIL_LOOKBACK",
+                           "FIB_EXT_1", "FIB_EXT_2",
+                       ]
+                       _bound_consts, _kept_consts = [], []
+                       for _k in _OPT_CONSTS:
+                           (_bound_consts if _sl_bind(_k) else _kept_consts).append(_k)
+
+                       # -- Laporan ke user --------------------------------------------------
+                       _rpt = ["✅ <b>Strategy logic aktif!</b>"]
+                       if _bound_fns:
+                           _rpt.append(f"🔄 Diperbarui: <code>{', '.join(_bound_fns)}</code>")
+                       if _kept_fns:
+                           _rpt.append(f"♻️ Versi lama dipertahankan: <code>{', '.join(_kept_fns)}</code>")
+                       if _bound_consts:
+                           _rpt.append(f"📐 Konstanta diperbarui: <code>{', '.join(_bound_consts)}</code>")
+                       if _kept_consts:
+                           _rpt.append(f"📌 Konstanta lama dipertahankan: <code>{', '.join(_kept_consts)}</code>")
+
+                       log.info("[OTAK] Strategy logic di-reload (adaptive bind).")
+                       tg_send(chat_id, "\n".join(_rpt))
                
                    except Exception as e:
                        log.error(f"[ganti] Error: {e}")
