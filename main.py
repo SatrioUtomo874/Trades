@@ -2148,7 +2148,14 @@ def monitor_position_real(sym, pos):
             if not sl_missing:
                 try:
                     st = get_algo_order_status(sl_order_id).get("algoStatus")
-                    sl_missing = st not in ("NEW",)
+                    # Binance algo orders: NEW = baru dipasang, WORKING/RUNNING = aktif memantau
+                    # Hanya CANCELLED/TRIGGERED/FINISHED/None yang berarti "hilang".
+                    # Bug lama: hanya "NEW" dianggap valid → order yang sudah WORKING
+                    # langsung dikira hilang → cascade cancel+replace → auto-out.
+                    _ACTIVE_SL_STATUSES = ("NEW", "WORKING", "RUNNING", "MONITORING")
+                    sl_missing = st not in _ACTIVE_SL_STATUSES
+                    if sl_missing:
+                        log.warning(f"[sl-health] {sym}: algoStatus={st!r} → dianggap hilang")
                 except Exception as e:
                     log.warning(f"[monitor_real sl-check] {sym}: {e}")
             if sl_missing:

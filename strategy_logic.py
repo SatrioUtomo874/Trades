@@ -928,10 +928,22 @@ def _compute_sl(m15: pd.DataFrame, h1: pd.DataFrame, direction: str,
       3. Level yang disweep (jika ada LiqSweep sebelumnya)
       4. ATR fallback
     """
-    up         = direction == "bull"
-    sgn        = 1 if up else -1
-    ls_buffer  = atr * 0.35    # buffer agar LS normal tidak kena SL
-    min_risk   = atr * 0.8     # SL tidak boleh terlalu dekat (gampang kena noise)
+    up        = direction == "bull"
+    sgn       = 1 if up else -1
+
+    # Buffer anti-Liquidity-Sweep: dinaikkan 0.35→0.5 ATR.
+    # 0.35 terlalu tipis — wick crypto normal bisa mencapai 0.4–0.6 ATR
+    # tanpa harga benar-benar breakdown. 0.5 memberi ruang lebih lega
+    # tanpa mengorbankan terlalu banyak RR.
+    ls_buffer = atr * 0.5
+
+    # SL tidak boleh lebih dekat dari 1.0 ATR (naik dari 0.8).
+    # SL < 1 ATR dari entry hampir pasti terkena noise/spread harian.
+    min_risk  = atr * 1.0
+
+    # SL tidak boleh lebih jauh dari 4.5 ATR — di atas ini TP pool
+    # kemungkinan besar tidak bisa mencapai RR 2.0 (no viable targets).
+    max_risk  = atr * 4.5
 
     cands = []
 
@@ -939,7 +951,7 @@ def _compute_sl(m15: pd.DataFrame, h1: pd.DataFrame, direction: str,
     if invalid_level is not None:
         sl_raw = invalid_level + (-ls_buffer if up else ls_buffer)
         risk   = abs(sl_raw - entry)
-        if risk >= min_risk:
+        if min_risk <= risk <= max_risk:
             cands.append(("ob_invalid", sl_raw, risk))
 
     # Kandidat 2: M15 swing struktural
@@ -949,14 +961,14 @@ def _compute_sl(m15: pd.DataFrame, h1: pd.DataFrame, direction: str,
         if struct_low < entry:
             sl_raw = struct_low - ls_buffer
             risk   = abs(sl_raw - entry)
-            if risk >= min_risk:
+            if min_risk <= risk <= max_risk:
                 cands.append(("struct_m15", sl_raw, risk))
     elif not up and sh15:
         struct_high = float(m15["high"].iloc[sh15[-1]])
         if struct_high > entry:
             sl_raw = struct_high + ls_buffer
             risk   = abs(sl_raw - entry)
-            if risk >= min_risk:
+            if min_risk <= risk <= max_risk:
                 cands.append(("struct_m15", sl_raw, risk))
 
     # Kandidat 3: level yang disweep (jika ada LiqSweep)
@@ -965,38 +977,45 @@ def _compute_sl(m15: pd.DataFrame, h1: pd.DataFrame, direction: str,
         if up and lev < entry:
             sl_raw = lev - ls_buffer
             risk   = abs(sl_raw - entry)
-            if risk >= min_risk:
+            if min_risk <= risk <= max_risk:
                 cands.append(("ls_level", sl_raw, risk))
         elif not up and lev > entry:
             sl_raw = lev + ls_buffer
             risk   = abs(sl_raw - entry)
-            if risk >= min_risk:
+            if min_risk <= risk <= max_risk:
                 cands.append(("ls_level", sl_raw, risk))
 
-    # Kandidat 4: H1 structural swing (lebih luas, untuk SL lebih jauh jika perlu)
+    # Kandidat 4: H1 structural swing (lebih luas, lebih tahan noise)
     sh1, sl1 = swing_pts(h1, lb=5)
     if up and sl1:
         h1_low = float(h1["low"].iloc[sl1[-1]])
         if h1_low < entry:
             sl_raw = h1_low - ls_buffer
             risk   = abs(sl_raw - entry)
-            if risk >= min_risk:
+            if min_risk <= risk <= max_risk:
                 cands.append(("struct_h1", sl_raw, risk))
     elif not up and sh1:
         h1_high = float(h1["high"].iloc[sh1[-1]])
         if h1_high > entry:
             sl_raw = h1_high + ls_buffer
             risk   = abs(sl_raw - entry)
-            if risk >= min_risk:
+            if min_risk <= risk <= max_risk:
                 cands.append(("struct_h1", sl_raw, risk))
 
     if cands:
-        # Pilih yang paling ketat (risk terkecil) untuk RR terbaik
-        cands.sort(key=lambda x: x[2])
+        # Prioritas pemilihan SL (untuk meminimalkan false SL hit):
+        #   ob_invalid  — invalidasi teknikal paling presisi (OB/FVG rusak = thesis salah)
+        #   struct_h1   — swing H1 paling tahan noise (timeframe lebih tinggi)
+        #   ls_level    — level sweep = structural juga
+        #   struct_m15  — lebih rentan wick M15 daripada H1
+        # Dalam satu prioritas yang sama → ambil yang LEBIH LEBAR
+        # (lebih jauh dari entry = lebih tahan noise, lebih jarang false hit).
+        _PRIO = {"ob_invalid": 0, "struct_h1": 1, "ls_level": 2, "struct_m15": 3}
+        cands.sort(key=lambda x: (_PRIO.get(x[0], 9), -x[2]))   # priority asc, risk desc
         _, sl_price, risk = cands[0]
         return sl_price, risk
 
-    # Fallback ATR
+    # Fallback ATR (tidak ada kandidat struktural valid)
     sl_price = entry + (-min_risk if up else min_risk)
     return sl_price, min_risk
 
