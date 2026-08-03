@@ -682,7 +682,7 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     cisd_m15  = detect_cisd(m15, lb=8)
     liq_bull  = detect_liquidity_sweep(m15, sh15, sl15, "bull")
     liq_bear  = detect_liquidity_sweep(m15, sh15, sl15, "bear")
-    fr_m15    = _detect_failed_retest(m15, sh15, sl15, atr)
+    fr_m15    = detect_failed_retest(m15, sh15, sl15, atr)
 
     # ── Fibonacci M15 context ─────────────────────────────────────
     fib_sh = float(m15["high"].iloc[sh15[-1]]) if sh15 else None
