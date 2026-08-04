@@ -576,23 +576,53 @@ def get_real_position(symbol):
 # dengan error -4120). Field beda dari order biasa: stopPrice->triggerPrice,
 # orderId->algoId, status->algoStatus. ──
 
-def place_sl_order(symbol, is_buy, sl_price):
+def place_sl_order(symbol, is_buy, sl_price, quantity):
+    """
+    Pasang SL sebagai Conditional Algo Order di Binance Futures.
+
+    KENAPA quantity + reduceOnly, BUKAN closePosition=true:
+    ─────────────────────────────────────────────────────────
+    Binance Futures hanya mengizinkan SATU order dengan `closePosition=true`
+    per sisi (side) per simbol secara bersamaan. TP sudah dipasang dengan
+    `closePosition=true` (SELL untuk posisi BUY). Kalau SL juga pakai
+    `closePosition=true`, Binance otomatis mem-cancel salah satunya —
+    biasanya SL yang dipasang kedua. Inilah penyebab SL terus "hilang"
+    segera setelah dipasang ulang.
+
+    Solusi: SL pakai `quantity` (jumlah lot yang sama dengan posisi) +
+    `reduceOnly=true`. Ini setara dengan menutup seluruh posisi saat
+    ter-trigger, TANPA konflik dengan TP. Ketika TP atau SL ter-trigger,
+    Binance otomatis meng-cancel order lainnya (karena posisinya sudah nol
+    dan order reduce-only tidak punya posisi untuk di-reduce).
+    """
     close_side = "SELL" if is_buy else "BUY"
-    tick = get_symbol_filters(symbol)["tickSize"]
+    info = get_symbol_filters(symbol)
+    tick = info["tickSize"]
+    step = info["stepSize"]
+    qty_prec = info.get("qtyPrecision", 8)
+    qty_rounded = round(math.floor(float(quantity) / step) * step, qty_prec)
     return _binance_signed("POST", "/fapi/v1/algoOrder", {
         "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side, "type": "STOP_MARKET",
-        "triggerPrice": round_to_tick(sl_price, tick), "closePosition": "true", "workingType": "MARK_PRICE",
+        "triggerPrice": round_to_tick(sl_price, tick),
+        "quantity": qty_rounded,
+        "reduceOnly": "true",
+        "workingType": "MARK_PRICE",
     })
 
 
-def place_tp_sl(symbol, is_buy, tp_price, sl_price):
+def place_tp_sl(symbol, is_buy, tp_price, sl_price, quantity):
+    """
+    Pasang TP + SL sekaligus.
+    TP: closePosition=true (menutup seluruh posisi saat ter-trigger).
+    SL: quantity + reduceOnly=true (lihat komentar di place_sl_order).
+    """
     close_side = "SELL" if is_buy else "BUY"
     tick = get_symbol_filters(symbol)["tickSize"]
     tp = _binance_signed("POST", "/fapi/v1/algoOrder", {
         "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
         "triggerPrice": round_to_tick(tp_price, tick), "closePosition": "true", "workingType": "MARK_PRICE",
     })
-    sl = place_sl_order(symbol, is_buy, sl_price)
+    sl = place_sl_order(symbol, is_buy, sl_price, quantity)
     return tp, sl
 
 
@@ -2153,7 +2183,7 @@ def _open_position_real(sym, signal, actual_entry, chat_id, order_info):
     last_err = None
     for attempt in range(1, 4):
         try:
-            tp_order, sl_order = place_tp_sl(sym, is_buy, tp_v, sl_v)
+            tp_order, sl_order = place_tp_sl(sym, is_buy, tp_v, sl_v, qty)
             tp_order_id, sl_order_id = tp_order["algoId"], sl_order["algoId"]
             last_err = None
             break
@@ -2288,34 +2318,70 @@ def monitor_position_real(sym, pos):
                     log.warning(f"[monitor_real sl-check] {sym}: {e}")
             if sl_missing:
                 sl_replace_count += 1
-                if sl_replace_count > 3:
-                    tg_send(chat_id, f"🚨 <b>SL berulang kali hilang</b> — {sym}\n"
-                                      f"Sudah {sl_replace_count}x, ada yang tidak beres — auto-out daripada terus berulang.")
-                    _emergency_close(sym, is_buy, qty, chat_id, f"SL hilang berulang {sl_replace_count}x (kemungkinan masalah lain)")
-                    return
+
+                # ── CEK HARGA DULU SEBELUM KEPUTUSAN APA PUN ────────────────
+                # SL "hilang" dari Binance bisa karena:
+                #   a) API glitch / rate-limit sesaat → order sebenarnya aman
+                #   b) Trailing SL gagal place setelah cancel → sl_order_id
+                #      masih menunjuk ke order yang sudah di-cancel
+                #   c) Binance auto-cancel order karena konflik (2 closePosition=true)
+                #
+                # Yang penting: apakah HARGA sudah melewati SL?
+                # Kalau belum → posisi masih aman, jangan auto-out, pasang ulang saja.
+                # Kalau sudah → baru auto-out (ini satu-satunya alasan valid).
+                #
+                # TIDAK ADA auto-out hanya karena "SL hilang N kali" —
+                # itu justru merugikan: posisi yang sedang profit dipaksa tutup
+                # hanya karena masalah teknis API, bukan karena market bergerak.
                 price_now = get_price(sym) or entry
                 sl_breached = (price_now <= sl_p) if is_buy else (price_now >= sl_p)
+
                 if sl_breached:
-                    tg_send(chat_id, f"🚨 <b>SL HILANG</b> — {sym}\nHarga sudah lewat level SL — auto-out sekarang.")
-                    _emergency_close(sym, is_buy, qty, chat_id, "SL hilang saat posisi aktif & harga sudah tembus")
+                    # Harga sudah melewati SL dan tidak ada order yang melindungi
+                    # → satu-satunya kasus yang membenarkan auto-out dari sini
+                    tg_send(chat_id,
+                        f"🚨 <b>SL hilang & harga sudah melewati level SL</b> — {sym}\n"
+                        f"SL <code>{sl_p:.6g}</code> | Harga <code>{price_now:.6g}</code>\n"
+                        f"Posisi tidak terlindungi — auto-out sekarang.")
+                    _emergency_close(sym, is_buy, qty, chat_id,
+                        f"SL hilang ({sl_replace_count}x) & harga sudah lewat SL {sl_p:.6g}")
                     return
+
+                # Harga masih aman — coba pasang ulang SL
+                # (apapun jumlah kegagalannya, selama harga belum tembus SL,
+                #  posisi harus tetap dibiarkan hidup)
                 try:
-                    # Cancel dulu yang lama SEBELUM pasang baru (jaga-jaga
-                    # ternyata masih ada & cuma keliru kedeteksi "hilang" —
-                    # kalau langsung pasang baru tanpa cancel, bisa ada 2 SL
-                    # order aktif barengan, salah satunya kena auto-cancel
-                    # Binance, lalu health-check berikutnya deteksi "hilang"
-                    # lagi -> siklus spam berulang. cancel_algo_order aman
-                    # dipanggil walau order-nya memang sudah tidak ada.
+                    # cancel_algo_order aman dipanggil walau order sudah tidak ada —
+                    # ini memastikan tidak ada SL lama yang mungkin masih ada
+                    # (ghost order) yang akan konflik dengan yang baru.
                     cancel_algo_order(sl_order_id)
-                    new_sl_order = place_sl_order(sym, is_buy, sl_p)
+                    sl_order_id = None   # tandai sementara tidak ada SL
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym]["sl_order_id"] = None
+
+                    new_sl_order = place_sl_order(sym, is_buy, sl_p, qty)
                     sl_order_id = new_sl_order["algoId"]
                     with positions_lock:
                         if sym in positions:
                             positions[sym]["sl_order_id"] = sl_order_id
-                    tg_send(chat_id, f"⚠️ <b>SL dipasang ulang</b> — {sym}\nSempat hilang, sudah dipasang ulang di <code>{sl_p:.6g}</code>.")
+                    sl_replace_count = 0   # ← RESET setelah berhasil (bug lama: tidak pernah reset)
+                    tg_send(chat_id,
+                        f"⚠️ <b>SL dipasang ulang</b> — {sym}\n"
+                        f"Sempat hilang ({sl_replace_count + 1}x total), "
+                        f"sudah dipasang ulang di <code>{sl_p:.6g}</code>.\n"
+                        f"Harga saat ini <code>{price_now:.6g}</code> — posisi masih aman.")
                 except Exception as e:
-                    tg_send(chat_id, f"🚨 <b>SL HILANG & GAGAL dipasang ulang</b> — {sym}: {e}\n❗ TUTUP MANUAL SEKARANG!")
+                    # Gagal pasang SL tapi harga masih aman — jangan auto-out,
+                    # tunggu iterasi berikutnya untuk coba lagi.
+                    # sl_order_id sudah = None di atas → health check berikutnya
+                    # akan deteksi SL hilang dan coba pasang ulang lagi.
+                    log.warning(f"[sl-health] {sym}: gagal pasang ulang SL (coba #{sl_replace_count}): {e}")
+                    tg_send(chat_id,
+                        f"⚠️ <b>SL hilang, gagal dipasang ulang</b> — {sym} (percobaan #{sl_replace_count})\n"
+                        f"Error: <code>{e}</code>\n"
+                        f"Harga <code>{price_now:.6g}</code> masih aman dari SL <code>{sl_p:.6g}</code>.\n"
+                        f"Akan dicoba lagi otomatis. ❗ Pantau manual jika terus gagal.")
 
         price = get_price(sym) or entry
         pnl_r_now = (price - entry) / risk0 * (1 if is_buy else -1) if risk0 > 0 else 0
@@ -2348,8 +2414,27 @@ def monitor_position_real(sym, pos):
             if improves and within_tp:
                 try:
                     old_sl = sl_p
-                    cancel_algo_order(sl_order_id)   # SL lama WAJIB dihapus dulu sebelum pasang yang baru
-                    new_sl_order = place_sl_order(sym, is_buy, proposed)
+                    old_sl_id = sl_order_id
+
+                    # ── Tandai SL = None SEBELUM cancel + replace ────────────────
+                    # Bug lama: cancel_algo_order berhasil (SL lama dihapus),
+                    # lalu place_sl_order throw exception → sl_order_id masih
+                    # menunjuk ke algoId lama yang sudah di-cancel.
+                    # Health check 60s kemudian query algoId lama → algoStatus=
+                    # "CANCELLED" → dianggap "hilang" → sl_replace_count++ →
+                    # berulang 4x → auto-out.
+                    #
+                    # Fix: set sl_order_id = None SEGERA setelah cancel berhasil.
+                    # Kalau place_sl_order gagal, sl_order_id tetap None →
+                    # health check BENAR mendeteksi "hilang" dan akan pasang
+                    # ulang di sl_p (level lama), bukan auto-out.
+                    cancel_algo_order(old_sl_id)
+                    sl_order_id = None   # ← tandai tidak ada SL sebelum pasang baru
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym]["sl_order_id"] = None
+
+                    new_sl_order = place_sl_order(sym, is_buy, proposed, qty)
                     sl_order_id = new_sl_order["algoId"]
                     sl_p = proposed
                     with positions_lock:
@@ -2363,7 +2448,40 @@ def monitor_position_real(sym, pos):
                         f"SL digeser: <code>{old_sl:.6g}</code> → <code>{sl_p:.6g}</code>\n"
                         f"{label}: <b>{locked_pct:+.2f}%</b>")
                 except Exception as e:
-                    log.warning(f"[monitor_real trail] gagal update SL {sym}: {e}")
+                    # sl_order_id = None sudah tertulis di atas (setelah cancel).
+                    # Health check berikutnya akan deteksi hilang dan pasang
+                    # ulang SL di sl_p (nilai lama, belum di-update ke proposed).
+                    log.warning(f"[monitor_real trail] gagal update trailing SL {sym}: {e}")
+
+        # ══ SOFTWARE SL — LAPIS TERAKHIR ═════════════════════════════════════
+        # Beroperasi HANYA saat sl_order_id is None (tidak ada algo order aktif
+        # di Binance yang melindungi posisi). Algo order yang berfungsi normal
+        # sudah cukup — Binance eksekusi SL sendiri dan loop ini akan deteksi
+        # posisi tertutup via real_pos is None di iterasi berikutnya.
+        #
+        # Kasus yang ditangani di sini:
+        #   • place_sl_order berulang kali gagal (API error, rate limit, dsb)
+        #   • Trailing SL cancel order lama tapi gagal pasang yang baru
+        #   • Kondisi apapun yang membuat sl_order_id = None
+        #
+        # Selama sl_order_id tidak None, software SL ini TIDAK aktif — tidak
+        # ada interferensi dengan algo order yang bekerja normal.
+        if sl_order_id is None:
+            sw_price = get_price(sym) or entry
+            sw_sl_hit = (sw_price <= sl_p) if is_buy else (sw_price >= sl_p)
+            if sw_sl_hit:
+                log.warning(
+                    f"[software-sl] {sym}: harga {sw_price:.6g} melewati SL {sl_p:.6g} "
+                    f"(tidak ada algo order aktif) → tutup paksa"
+                )
+                tg_send(chat_id,
+                    f"🚨 <b>Software SL — {sym}</b>\n"
+                    f"Harga <code>{sw_price:.6g}</code> melewati SL <code>{sl_p:.6g}</code>.\n"
+                    f"Tidak ada algo order Binance yang aktif — posisi ditutup paksa "
+                    f"via market order (software SL fallback).")
+                _emergency_close(sym, is_buy, qty, chat_id,
+                    f"software SL: harga {sw_price:.6g} melewati SL {sl_p:.6g} tanpa algo order")
+                return
 
         time.sleep(REAL_TRADE_POLL_SLEEP)
 
