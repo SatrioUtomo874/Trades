@@ -2262,7 +2262,14 @@ def monitor_position_real(sym, pos):
     risk0 = abs(entry - sl_p)
     locked_r = 0.0
     next_struct_check = 0.0
-    next_sl_health_check = 0.0
+    # ── FIX: beri jeda SEBELUM health-check SL pertama, JANGAN langsung di
+    # iterasi pertama (dulu next_sl_health_check=0.0 → health-check jalan
+    # detik itu juga setelah entry). Algo order SL yang BARU SAJA dipasang
+    # butuh waktu singkat untuk ter-index & bisa di-query statusnya di sisi
+    # Binance. Health-check yang jalan terlalu cepat bisa salah baca status
+    # (mis. dapat None/status belum ke-propagate) dan langsung mengira SL
+    # "hilang" padahal order-nya sebenarnya ada & aktif — auto-out palsu.
+    next_sl_health_check = time.time() + 45
     sl_replace_count = 0   # circuit-breaker: kalau kejadian "SL hilang" berulang terus, jangan spam selamanya
 
     while True:
@@ -2335,20 +2342,52 @@ def monitor_position_real(sym, pos):
         if time.time() >= next_sl_health_check:
             next_sl_health_check = time.time() + 60
             sl_missing = sl_order_id is None
+            sl_already_executed = False
             if not sl_missing:
                 try:
                     st = get_algo_order_status(sl_order_id).get("algoStatus")
                     # Binance algo orders: NEW = baru dipasang, WORKING/RUNNING = aktif memantau
-                    # Hanya CANCELLED/TRIGGERED/FINISHED/None yang berarti "hilang".
-                    # Bug lama: hanya "NEW" dianggap valid → order yang sudah WORKING
-                    # langsung dikira hilang → cascade cancel+replace → auto-out.
                     _ACTIVE_SL_STATUSES = ("NEW", "WORKING", "RUNNING", "MONITORING")
-                    sl_missing = st not in _ACTIVE_SL_STATUSES
-                    if sl_missing:
-                        log.warning(f"[sl-health] {sym}: algoStatus={st!r} → dianggap hilang")
+                    # ── FIX KRITIS: TRIGGERED/FINISHED BUKAN "hilang" — itu
+                    # artinya SL SUDAH BEKERJA (order benar-benar tereksekusi
+                    # persis sesuai fungsinya). Bug lama menyamakan status ini
+                    # dengan "hilang", sehingga bot mengirim MARKET ORDER KEDUA
+                    # untuk "auto-out" di ATAS SL yang sebenarnya SUDAH menutup
+                    # posisi sendiri — inilah penyebab notifikasi 🚨 AUTO-OUT
+                    # yang muncul padahal SL aslinya bekerja normal (kadang
+                    # cuma soal timing: health-check query status algo order
+                    # tepat saat/detik SL baru saja trigger, race dengan
+                    # settlement posisi di sisi Binance).
+                    if st in ("TRIGGERED", "FINISHED"):
+                        sl_already_executed = True
+                    else:
+                        sl_missing = st not in _ACTIVE_SL_STATUSES
+                        if sl_missing:
+                            log.warning(f"[sl-health] {sym}: algoStatus={st!r} → dianggap hilang")
                 except Exception as e:
                     log.warning(f"[monitor_real sl-check] {sym}: {e}")
-            if sl_missing:
+
+            if sl_already_executed:
+                # SL sudah trigger sendiri di Binance — beri jeda singkat utk
+                # settlement posisi, lalu catat sebagai closure SL NORMAL.
+                # JANGAN kirim market order tambahan (itu akan jadi order
+                # kedua yang mubazir/berpotensi salah di atas posisi yang
+                # sudah/sedang ditutup Binance sendiri).
+                time.sleep(2)
+                try:
+                    still_open = get_real_position(sym)
+                except Exception as e:
+                    log.warning(f"[sl-health] {sym}: gagal verifikasi posisi setelah SL trigger: {e}")
+                    still_open = True   # tidak yakin → jangan asumsikan closed, biar loop berikutnya yg tentukan
+                if not still_open:
+                    cancel_all_algo_orders(sym)
+                    close_position(sym, "sl", close_price=sl_p)
+                    return
+                # Kalau masih kebaca terbuka (lag settlement) atau verifikasi
+                # gagal → jangan panik, jangan auto-out. Loop berikutnya (cek
+                # real_pos di atas) yang akan menangkap closure-nya dengan benar.
+
+            elif sl_missing:
                 sl_replace_count += 1
 
                 # ── CEK HARGA DULU SEBELUM KEPUTUSAN APA PUN ────────────────
