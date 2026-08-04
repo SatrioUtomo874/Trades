@@ -702,6 +702,26 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
     # ── Equal Highs/Lows ─────────────────────────────────────────────
     eqs = detect_equal_highs_lows(m15, "low" if up else "high", lb=80)
     for eq in eqs[:2]:
+        # ── Proximity filter: EQ entry harus REACHABLE dari harga sekarang.
+        #
+        # Bug asal: tidak ada filter proximity → EQ yang harganya sudah
+        # "tersapu" (liquidity sweep) tetap masuk sebagai kandidat entry.
+        # Akibatnya SELL limit dipasang DI BAWAH harga pasar → Binance langsung
+        # fill di harga pasar (slippage besar) → actual_entry > SL → geometri
+        # rusak → auto-out terpicu.
+        #
+        # SELL (not up): entry di equal HIGH → level harus ≥ current_price
+        #   supaya SELL limit menunggu harga naik ke sana, bukan fill sekarang.
+        #   Toleransi 0.3%: jika eq < current_price * 0.997 → sudah tersapu.
+        #
+        # BUY (up): entry di equal LOW → level harus ≤ current_price
+        #   supaya BUY limit menunggu harga turun ke sana, bukan fill sekarang.
+        #   Toleransi 0.3%: jika eq > current_price * 1.003 → sudah tersapu.
+        if not up and float(eq) < current_price * 0.997:
+            continue   # EQ high sudah di bawah harga pasar → skip
+        if up and float(eq) > current_price * 1.003:
+            continue   # EQ low sudah di atas harga pasar → skip
+
         invalid_pt = eq - atr * 0.8 if up else eq + atr * 0.8
         sc = 2
         if liq_ok: sc += 1
@@ -1014,6 +1034,62 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         if risk <= 0:
             return None
 
+        # ══ FILTER KRITIS #1 — SL vs HARGA PASAR SEKARANG ═══════════════════
+        # Ini adalah filter paling penting untuk mencegah auto-out.
+        # SL dihitung dari struktur (swing H1/M15), tapi harga bisa sudah
+        # bergerak sehingga current_price sudah melewati SL sebelum order
+        # bahkan terpasang. Kalau lolos di sini → order akan LANGSUNG auto-out
+        # setelah fill karena "harga sudah melewati SL".
+        #
+        #   BUY : current_price harus di ATAS SL  (kalau sudah di bawah → skip)
+        #   SELL: current_price harus di BAWAH SL (kalau sudah di atas → skip)
+        if up and cur_price <= sl_price:
+            if symbol:
+                log.debug(
+                    f"[{symbol}] DITOLAK (filter#1): BUY SL={sl_price:.6g} sudah "
+                    f"ditembus current={cur_price:.6g} — akan auto-out, skip"
+                )
+            return None
+        if not up and cur_price >= sl_price:
+            if symbol:
+                log.debug(
+                    f"[{symbol}] DITOLAK (filter#1): SELL SL={sl_price:.6g} sudah "
+                    f"ditembus current={cur_price:.6g} — akan auto-out, skip"
+                )
+            return None
+
+        # ══ FILTER KRITIS #2 — ENTRY vs HARGA PASAR (LIMIT ORDER REACHABILITY) ══
+        # Limit order harus MENUNGGU harga datang ke level entry, bukan
+        # langsung fill di harga pasar. Kalau entry sudah "di belakang" harga,
+        # Binance Futures fill langsung di harga pasar → actual_entry ≠ entry
+        # → SL/TP dihitung untuk entry lama → geometri rusak → auto-out.
+        #
+        #   SELL limit: entry_target harus ≥ current_price
+        #     (harga perlu NAIK dulu ke entry, baru fill)
+        #     Kalau entry < current * 0.995 → limit sell sudah di bawah market
+        #     → fill sekarang di harga pasar → actual_entry > SL → geometri rusak
+        #
+        #   BUY limit: entry_target harus ≤ current_price
+        #     (harga perlu TURUN dulu ke entry, baru fill)
+        #     Kalau entry > current * 1.005 → limit buy sudah di atas market
+        #     → fill sekarang di harga pasar → actual_entry < SL → geometri rusak
+        #
+        #   Toleransi 0.5% untuk pembulatan tick / lag data minor.
+        if not up and entry < cur_price * 0.995:
+            if symbol:
+                log.debug(
+                    f"[{symbol}] DITOLAK (filter#2): SELL entry={entry:.6g} di bawah "
+                    f"current={cur_price:.6g} — limit akan fill di harga salah, skip"
+                )
+            return None
+        if up and entry > cur_price * 1.005:
+            if symbol:
+                log.debug(
+                    f"[{symbol}] DITOLAK (filter#2): BUY entry={entry:.6g} di atas "
+                    f"current={cur_price:.6g} — limit akan fill di harga salah, skip"
+                )
+            return None
+
         if symbol:
             log.info(f"[{symbol}] SL={sl_price:.6f} risk={risk:.6f}")
 
@@ -1064,6 +1140,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "sl": round(sl_price, 8),
             "tp": round(tp_price, 8),
             "rr": rr,
+            "atr": round(atr, 8),
             "rsi": rsi_val,
             "struct_h1": score["struct_h1"],
             "d1_bias": score.get("d1_bias", "neutral"),
@@ -1094,3 +1171,118 @@ def get_best_signal(candidates: list) -> Optional[dict]:
         return sig["confidence"] + bonus + sig.get("rr", 0) * 0.5
 
     return max(candidates, key=_rank)
+
+
+# =============================================================================
+# VALIDASI PRE-ORDER & KOREKSI GEOMETRY (dipanggil oleh main.py)
+# =============================================================================
+
+def validate_and_adjust_geometry(
+    entry: float, sl: float, tp: float,
+    current_price: float, atr: float,
+    direction: str,
+) -> Optional[dict]:
+    """
+    Validasi dan (jika perlu) koreksi geometri entry/SL/TP sebelum order dipasang
+    atau setelah order terisi di harga yang berbeda dari target.
+
+    Mengapa fungsi ini penting:
+    ─────────────────────────────────────────────────────────────────────────────
+    Sinyal dihitung pada waktu T. Saat order terpasang (T+beberapa detik/menit),
+    harga pasar bisa sudah bergerak — khususnya:
+
+      • Kasus "geometri invalid setelah order terisi":
+        SELL limit di entry_target, tapi actual_fill = harga pasar (lebih tinggi
+        dari entry_target karena market sudah di atas limit sell). Akibatnya
+        actual_fill > SL → geometri rusak.
+
+      • Kasus "harga sudah melewati SL setelah order terisi":
+        Harga sedikit melampaui SL (Liquidity Sweep) sesaat setelah fill.
+        SL yang lama tidak relevan lagi, tapi kalau ini cuma sweep (< 3×ATR)
+        masih bisa diselamatkan dengan relokasi SL ke luar area sweep.
+
+    Logika:
+    ─────────────────────────────────────────────────────────────────────────────
+    1. Cek geometri dasar: SL di sisi yang benar dari entry, TP di sisi lain.
+    2. Cek SL belum ditembus current_price.
+    3. Jika SL ditembus tapi sweep-depth ≤ 3×ATR → relokasi SL ke luar sweep
+       (current_price + 0.5×ATR buffer).
+    4. Jika setelah relokasi SL geometri masih rusak → coba ganti entry ke
+       current_price (harga sekarang = zona entry baru).
+    5. Cek RR ≥ MIN_RR setelah semua penyesuaian.
+
+    Return:
+      dict  {entry, sl, tp, rr, adjusted} jika valid / bisa diselamatkan
+      None  jika tidak bisa diperbaiki → TOLAK sinyal / auto-out
+    """
+    up = direction == "bull"
+    ls_buf = atr * 0.5
+
+    def _geo_ok(e: float, s: float, t: float) -> bool:
+        return (s < e < t) if up else (t < e < s)
+
+    def _rr(e: float, s: float, t: float) -> float:
+        return abs(t - e) / max(abs(e - s), 1e-10)
+
+    sl_breached = (current_price <= sl) if up else (current_price >= sl)
+
+    # ─── Kasus 1: sudah valid ────────────────────────────────────────────────
+    if _geo_ok(entry, sl, tp) and not sl_breached:
+        rr = _rr(entry, sl, tp)
+        if rr < MIN_RR:
+            return None
+        return {"entry": entry, "sl": sl, "tp": tp, "rr": round(rr, 2), "adjusted": False}
+
+    # ─── Kasus 2: SL ditembus → cek apakah Liquidity Sweep ──────────────────
+    new_sl = sl
+    adjusted = False
+    if sl_breached:
+        sweep_depth = abs(current_price - sl)
+        if sweep_depth > atr * 3.0:
+            # Terlalu jauh — bukan sweep biasa → sinyal benar-benar invalid
+            log.debug(
+                f"[validate_geo] SL ditembus dalam ({sweep_depth:.6g} > 3×ATR {atr*3:.6g}) "
+                f"— sinyal ditolak"
+            )
+            return None
+        # Relokasi SL ke luar area sweep + buffer anti-re-sweep
+        new_sl = current_price + (ls_buf if not up else -ls_buf)
+        adjusted = True
+        log.info(
+            f"[validate_geo] Liquidity Sweep terdeteksi (depth={sweep_depth:.6g} ≤ 3×ATR) "
+            f"— SL direlokasi {sl:.6g} → {new_sl:.6g}"
+        )
+
+    # ─── Kasus 3: geometri setelah SL baru ──────────────────────────────────
+    if not _geo_ok(entry, new_sl, tp):
+        # Geometri masih rusak (entry di luar range SL–TP).
+        # Coba ganti entry ke current_price — harga sekarang sudah masuk zona.
+        new_entry = round(current_price, 8)
+        if _geo_ok(new_entry, new_sl, tp):
+            log.info(
+                f"[validate_geo] Entry digeser ke current_price "
+                f"{entry:.6g} → {new_entry:.6g} supaya geometri valid"
+            )
+            entry = new_entry
+            adjusted = True
+        else:
+            log.debug(
+                f"[validate_geo] Geometri tetap rusak setelah SL relokasi & entry shift "
+                f"(entry={new_entry:.6g}, sl={new_sl:.6g}, tp={tp:.6g}) — ditolak"
+            )
+            return None
+
+    rr = _rr(entry, new_sl, tp)
+    if rr < MIN_RR:
+        log.debug(
+            f"[validate_geo] RR={rr:.2f} < MIN_RR={MIN_RR} setelah koreksi — ditolak"
+        )
+        return None
+
+    return {
+        "entry": round(entry, 8),
+        "sl":    round(new_sl, 8),
+        "tp":    tp,
+        "rr":    round(rr, 2),
+        "adjusted": adjusted,
+    }

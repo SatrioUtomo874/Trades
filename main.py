@@ -1874,6 +1874,72 @@ def _open_pending_real(sym, signal, chat_id):
     entry_target = signal["entry"]
     side = "BUY" if is_buy else "SELL"
 
+    # ══ PAGAR TERAKHIR SEBELUM ORDER — HARD REJECT, NO ADJUSTMENT ═══════════
+    #
+    # Filosofi: LEBIH BAIK TIDAK ENTRY SAMA SEKALI daripada entry lalu auto-out.
+    #
+    # strategy_logic.full_analyze() sudah menyaring filter#1 dan filter#2 saat
+    # sinyal dibuat. Tapi ada jeda waktu antara sinyal dibuat dan order dipasang
+    # (beberapa detik), sehingga harga bisa bergerak lagi. Cek ini adalah
+    # lapisan kedua — kalau harga sudah bergerak melewati batas aman, batalkan
+    # order, ban koin sementara, dan cari koin lain. Tidak ada "koreksi" di sini.
+    #
+    # Cek A — SL vs harga sekarang:
+    #   BUY : current_price harus MASIH di atas SL
+    #   SELL: current_price harus MASIH di bawah SL
+    #
+    # Cek B — Entry vs harga sekarang (limit order reachability):
+    #   SELL: entry harus ≥ current_price * 0.995 (limit sell tidak langsung fill)
+    #   BUY : entry harus ≤ current_price * 1.005 (limit buy tidak langsung fill)
+    try:
+        price_now = get_price(sym) or entry_target
+        sl_v_pre  = signal["sl"]
+        tp_v_pre  = signal["tp"]
+
+        # Cek A: SL sudah ditembus?
+        sl_breached = (price_now <= sl_v_pre) if is_buy else (price_now >= sl_v_pre)
+        if sl_breached:
+            _ban_coin(sym, "SL sudah ditembus sebelum order dipasang")
+            tg_send(chat_id,
+                f"⏭ <b>Skip {sym}</b> — Tidak jadi order.\n"
+                f"SL <code>{sl_v_pre:.6g}</code> sudah ditembus harga "
+                f"<code>{price_now:.6g}</code>.\n"
+                f"Sinyal ini sudah kedaluwarsa — cari setup berikutnya.")
+            return
+
+        # Cek B: Entry masih reachable (limit tidak langsung fill di harga salah)?
+        entry_unreachable = (
+            (not is_buy and entry_target < price_now * 0.995) or   # SELL entry di bawah market
+            (is_buy     and entry_target > price_now * 1.005)       # BUY  entry di atas  market
+        )
+        if entry_unreachable:
+            _ban_coin(sym, "entry tidak reachable (limit fill langsung di harga salah)")
+            tg_send(chat_id,
+                f"⏭ <b>Skip {sym}</b> — Tidak jadi order.\n"
+                f"Entry <code>{entry_target:.6g}</code> sudah 'tersapu' "
+                f"(harga pasar <code>{price_now:.6g}</code>).\n"
+                f"{'SELL' if not is_buy else 'BUY'} limit di level ini akan fill "
+                f"sekarang di harga pasar → SL/TP tidak akan valid.\n"
+                f"Sinyal ini sudah kedaluwarsa — cari setup berikutnya.")
+            return
+
+        # Cek C: Geometri dasar masih valid?
+        geo_valid = (sl_v_pre < entry_target < tp_v_pre) if is_buy else (tp_v_pre < entry_target < sl_v_pre)
+        if not geo_valid:
+            _ban_coin(sym, "geometri entry/SL/TP tidak valid")
+            tg_send(chat_id,
+                f"⏭ <b>Skip {sym}</b> — Geometri tidak valid.\n"
+                f"Entry <code>{entry_target:.6g}</code> | "
+                f"SL <code>{sl_v_pre:.6g}</code> | "
+                f"TP <code>{tp_v_pre:.6g}</code>\n"
+                f"Urutan SL–Entry–TP tidak sesuai arah {'BUY' if is_buy else 'SELL'}.")
+            return
+
+    except Exception as _val_err:
+        # Kalau fetch harga gagal, biarkan lanjut — jangan batalkan order karena
+        # masalah koneksi sesaat (bukan karena sinyal yang buruk).
+        log.warning(f"[pre-order-gate] {sym}: {_val_err} — skip validasi, lanjut order")
+
     with positions_lock:
         if sym in positions: return
         if len(positions) >= MAX_POSITIONS: return
@@ -1993,24 +2059,86 @@ def _open_position_real(sym, signal, actual_entry, chat_id, order_info):
         fallback_qty = positions.get(sym, {}).get("quantity", 0)
     qty = abs(float(order_info.get("executedQty", 0))) or fallback_qty
 
-    # Toleransi kecil (0.15%) sebelum dianggap "invalid" — batas tegas (<)
-    # gampang salah tangkap selisih pembulatan tick antara harga sinyal
-    # awal vs avgPrice hasil fill Binance, padahal setup-nya sebenarnya
-    # masih valid. Gap yang BENERAN besar tetap ke-tangkap normal.
+    # ── Cek geometri setelah fill ────────────────────────────────────────────
+    # Toleransi 0.15% untuk selisih tick pembulatan.
     tol = actual_entry * 0.0015
     geometry_ok = (sl_v - tol < actual_entry < tp_v + tol) if is_buy else (tp_v - tol < actual_entry < sl_v + tol)
-    if not geometry_ok:
-        _emergency_close(sym, is_buy, qty, chat_id,
-            f"geometri invalid setelah order terisi (entry={actual_entry:.6g}, sl={sl_v:.6g}, tp={tp_v:.6g})")
-        return
 
-    # Fallback: harga sudah lewat SL sesaat setelah fill (gap/slippage buruk) ->
-    # jangan pasang SL yang sudah basi, langsung auto-out.
+    if not geometry_ok:
+        # ── BARU: Coba koreksi geometri dulu sebelum langsung auto-out ───────
+        # Penyebab paling umum: limit order fill di harga pasar (slippage)
+        # sehingga actual_entry ≠ signal_entry → SL/TP yang dihitung untuk
+        # signal_entry menjadi tidak valid untuk actual_entry.
+        # validate_and_adjust_geometry akan mencoba relokasi SL agar geometri
+        # kembali benar dan RR masih ≥ MIN_RR.
+        price_fresh = get_price(sym) or actual_entry
+        atr_val = signal.get("atr") or abs(actual_entry - sl_v)
+        adj = validate_and_adjust_geometry(
+            actual_entry, sl_v, tp_v, price_fresh,
+            atr_val, "bull" if is_buy else "bear",
+        )
+        if adj is None:
+            _emergency_close(sym, is_buy, qty, chat_id,
+                f"geometri invalid setelah order terisi dan tidak dapat dikoreksi "
+                f"(entry={actual_entry:.6g}, sl={sl_v:.6g}, tp={tp_v:.6g}, "
+                f"harga={price_fresh:.6g})")
+            return
+        # Koreksi berhasil → pakai nilai baru
+        old_sl, old_tp = sl_v, tp_v
+        sl_v = adj["sl"]
+        tp_v = adj["tp"]
+        log.warning(
+            f"[open_position_real] {sym}: geometri dikoreksi setelah fill — "
+            f"entry {actual_entry:.6g} (target {signal['entry']:.6g}), "
+            f"SL {old_sl:.6g}→{sl_v:.6g}, TP {old_tp:.6g}→{tp_v:.6g}, "
+            f"RR={adj['rr']:.2f}"
+        )
+        tg_send(chat_id,
+            f"⚠️ <b>Geometri dikoreksi setelah fill — {sym}</b>\n"
+            f"Fill di <code>{actual_entry:.6g}</code> "
+            f"(target <code>{signal['entry']:.6g}</code>)\n"
+            f"SL dikoreksi: <code>{old_sl:.6g}</code> → <code>{sl_v:.6g}</code>\n"
+            f"TP: <code>{tp_v:.6g}</code> | RR: {adj['rr']:.2f}\n"
+            f"Posisi tetap dilanjutkan dengan level yang sudah dikoreksi.")
+        signal = dict(signal)
+        signal["sl"] = sl_v
+        signal["tp"] = tp_v
+
+    # ── Cek SL sudah ditembus sesaat setelah fill ────────────────────────────
+    # Harga sudah melampaui SL (gap/slippage atau Liquidity Sweep singkat).
+    # BARU: Coba deteksi apakah ini hanya Liquidity Sweep (depth ≤ 3×ATR).
+    # Kalau iya, relokasi SL ke luar sweep dan lanjutkan posisi.
+    # Kalau terlalu dalam → memang auto-out.
     price_now = get_price(sym) or actual_entry
     sl_already_breached = (price_now <= sl_v) if is_buy else (price_now >= sl_v)
     if sl_already_breached:
-        _emergency_close(sym, is_buy, qty, chat_id, "harga sudah melewati SL segera setelah order terisi")
-        return
+        atr_val = signal.get("atr") or abs(actual_entry - sl_v)
+        adj = validate_and_adjust_geometry(
+            actual_entry, sl_v, tp_v, price_now,
+            atr_val, "bull" if is_buy else "bear",
+        )
+        if adj is None:
+            _emergency_close(sym, is_buy, qty, chat_id,
+                f"harga ({price_now:.6g}) sudah melewati SL ({sl_v:.6g}) terlalu dalam "
+                f"segera setelah order terisi — bukan Liquidity Sweep biasa, auto-out")
+            return
+        # Ini Liquidity Sweep yang bisa diselamatkan
+        old_sl = sl_v
+        sl_v = adj["sl"]
+        tp_v = adj["tp"]
+        log.warning(
+            f"[open_position_real] {sym}: Liquidity Sweep setelah fill, "
+            f"SL direlokasi {old_sl:.6g}→{sl_v:.6g}"
+        )
+        tg_send(chat_id,
+            f"⚠️ <b>Liquidity Sweep setelah fill — {sym}</b>\n"
+            f"Harga <code>{price_now:.6g}</code> sempat melewati SL asli "
+            f"<code>{old_sl:.6g}</code>.\n"
+            f"SL direlokasi ke <code>{sl_v:.6g}</code> | RR: {adj['rr']:.2f}\n"
+            f"Posisi dilanjutkan — sweep terdeteksi, bukan reversal.")
+        signal = dict(signal)
+        signal["sl"] = sl_v
+        signal["tp"] = tp_v
 
     sl_dist = abs(actual_entry - sl_v)
     tp_dist = abs(tp_v - actual_entry)
