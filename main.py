@@ -2170,6 +2170,19 @@ def _open_position_real(sym, signal, actual_entry, chat_id, order_info):
         signal["sl"] = sl_v
         signal["tp"] = tp_v
 
+    # ── FIX: bulatkan SL/TP ke tickSize Binance DI SINI, SEBELUM disimpan
+    # ke state internal (positions[sym]["current_sl"], dst) — bukan cuma
+    # saat dikirim ke API. Sebelumnya place_tp_sl() membulatkan angka HANYA
+    # untuk request ke Binance, sementara sl_v/tp_v mentah (belum dibulatkan)
+    # yang disimpan ke memory bot & ditampilkan di Telegram. Akibatnya nilai
+    # SL versi bot dan versi Binance beda sejak posisi baru dibuka (mis. bot
+    # mengira SL di 10.5501, padahal order asli di Binance persis di 10.55
+    # atau 10.6 sesuai tickSize) — inilah sumber "harga SL beda antara bot
+    # & Binance" yang dilaporkan.
+    _tick0 = get_symbol_filters(sym)["tickSize"]
+    sl_v = round_to_tick(sl_v, _tick0)
+    tp_v = round_to_tick(tp_v, _tick0)
+
     sl_dist = abs(actual_entry - sl_v)
     tp_dist = abs(tp_v - actual_entry)
     actual_rr = tp_dist / sl_dist if sl_dist > 0 else 0
@@ -2294,6 +2307,25 @@ def monitor_position_real(sym, pos):
             close_position(sym, reason, close_price=close_price)
             return
 
+        # ── FIX: sinkronkan qty dengan posisi REAL di Binance tiap iterasi.
+        # Sebelumnya `qty` cuma diambil SEKALI di awal fungsi dari
+        # pos["quantity"] dan tidak pernah di-refresh, padahal `real_pos`
+        # (jumlah lot SEBENARNYA di Binance) sudah di-fetch tiap loop persis
+        # di atas. Kalau qty lokal beda dari positionAmt riil (mis. akibat
+        # pembulatan stepSize yang berbeda saat cancel+replace, partial
+        # close, dsb), order SL reduceOnly berikutnya dikirim dengan
+        # quantity yang tidak cocok dengan posisi asli → Binance menolak
+        # (mis. -2022 ReduceOnly Order is rejected) → SL gagal dipasang ulang
+        # / trailing gagal ter-apply walau pesan Telegram sudah terlanjur
+        # terkirim. Selalu pakai angka LIVE dari Binance sebagai sumber
+        # kebenaran, bukan angka yang dihitung bot saat entry.
+        live_qty = abs(float(real_pos.get("positionAmt", 0)))
+        if live_qty > 0 and abs(live_qty - qty) > 1e-12:
+            qty = live_qty
+            with positions_lock:
+                if sym in positions:
+                    positions[sym]["quantity"] = qty
+
         # ── Jaring pengaman: verifikasi berkala SL BENERAN masih aktif di
         # Binance selagi posisi masih terbuka (bukan cuma pas awal buka).
         # Kalau ternyata hilang (order ke-cancel sendiri oleh Binance,
@@ -2408,7 +2440,23 @@ def monitor_position_real(sym, pos):
 
         cands = [c for c in (cand_a, cand_b) if c is not None]
         if cands:
-            proposed = max(cands) if is_buy else min(cands)
+            raw_proposed = max(cands) if is_buy else min(cands)
+            # ── FIX: bulatkan ke tickSize DI SINI — sebelum dibandingkan
+            # dan sebelum (nanti) disimpan sebagai sl_p — bukan cuma saat
+            # dikirim ke Binance di dalam place_sl_order(). Sebelumnya kode
+            # menyimpan `proposed` mentah (mis. 0.0912758) sebagai sl_p,
+            # padahal order yang benar-benar aktif di Binance ada di harga
+            # yang sudah dibulatkan (mis. 0.09128 atau malah 0.0913 kalau
+            # tickSize lebih kasar). Selisih ini bikin: (1) pesan Telegram
+            # menampilkan angka yang tidak sama dengan yang ada di Binance,
+            # (2) perbandingan improves/within_tp di iterasi berikutnya jadi
+            # berbasis angka yang salah, (3) kadang proposed mentah tidak
+            # valid di tickSize Binance (mis. butuh 10.55 tapi Binance cuma
+            # terima kelipatan 0.1 → 10.5/10.6) sehingga place_sl_order bisa
+            # gagal atau trailing terlihat "tidak update" walau logic-nya
+            # sebenarnya jalan.
+            tick = get_symbol_filters(sym)["tickSize"]
+            proposed = round_to_tick(raw_proposed, tick)
             improves = (proposed > sl_p) if is_buy else (proposed < sl_p)
             within_tp = (proposed < tp_p) if is_buy else (proposed > tp_p)
             if improves and within_tp:
