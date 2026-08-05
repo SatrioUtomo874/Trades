@@ -414,7 +414,7 @@ def fapi_get(path, params=None):
 # sinyal) supaya limit rate keduanya tidak bercampur.
 # ============================================================
 import hmac, hashlib, urllib.parse, math
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
 
 def _binance_signed(method, path, params=None):
     if not REAL_TRADE_ENABLED:
@@ -494,6 +494,37 @@ def round_to_tick(price, tick_size):
     return float(steps * d_tick)
 
 
+def round_qty(quantity, step, qty_prec, rounding=ROUND_HALF_UP):
+    """Bulatkan quantity ke kelipatan PERSIS stepSize pakai Decimal.
+
+    KENAPA INI PENTING (bug 'posisi tidak 100% tertutup saat SL'):
+    ─────────────────────────────────────────────────────────────
+    `math.floor(quantity / step) * step` pakai float biasa KENA noise
+    binary floating point. Contoh nyata: quantity=1.2, step=0.1 →
+    1.2/0.1 di Python = 11.999999999999998 (BUKAN 12.0), lalu
+    math.floor() membulatkannya jadi 11 → hasil 1.1, padahal quantity
+    aslinya 1.2. Order SL (reduceOnly=quantity) yang dipasang jadi
+    0.1 koin LEBIH KECIL dari posisi riil → saat SL ter-trigger, 0.1
+    koin itu TIDAK IKUT TERTUTUP dan posisi tersisa terbuka selamanya
+    (tanpa proteksi SL sama sekali untuk sisa itu).
+
+    Fix: pakai Decimal(str(...)) supaya representasi desimalnya EXACT
+    (bukan biner), dan default ROUND_HALF_UP (bulatkan ke kelipatan
+    step TERDEKAT) — karena quantity yang masuk ke sini (qty posisi
+    aktif) SEHARUSNYA sudah persis kelipatan step sejak awal dibuka
+    (lihat calc_auto_quantity), jadi tidak perlu di-floor lagi; floor
+    kedua itulah sumber bug di atas. Kalau memang perlu floor murni
+    (mis. saat menghitung qty MAKSIMUM yang boleh dibeli dari suatu
+    notional — lihat calc_auto_quantity), panggil dengan
+    rounding=ROUND_DOWN secara eksplisit.
+    """
+    if not step or step <= 0:
+        return round(quantity, qty_prec)
+    d_qty, d_step = Decimal(str(quantity)), Decimal(str(step))
+    steps = (d_qty / d_step).to_integral_value(rounding=rounding)
+    return float(round(steps * d_step, qty_prec))
+
+
 def calc_auto_quantity(symbol, entry_price, margin_usd, leverage):
     """
     Quantity dari margin x leverage, dibulatkan ke stepSize Binance.
@@ -510,8 +541,14 @@ def calc_auto_quantity(symbol, entry_price, margin_usd, leverage):
     step, min_qty, min_notional = info["stepSize"], info["minQty"], info["minNotional"]
 
     def qty_from_notional(notional):
-        q = math.floor((notional / entry_price) / step) * step
-        return round(q, info["qtyPrecision"])
+        # Sama seperti place_sl_order() — pakai Decimal (ROUND_DOWN, exact)
+        # bukan math.floor(float) supaya tidak kehilangan 1 step ekstra
+        # akibat noise floating point (mis. 1.2/0.1 = 11.999999999998 di
+        # Python murni). Floor tetap dipertahankan di sini (memang harus
+        # floor, bukan nearest) karena tujuannya membatasi qty MAKSIMUM
+        # yang boleh dibeli dari notional yang tersedia.
+        q = round_qty(notional / entry_price, step, info["qtyPrecision"], rounding=ROUND_DOWN)
+        return q
 
     qty = qty_from_notional(margin_usd * leverage)
     if qty >= min_qty and qty * entry_price >= min_notional:
@@ -600,7 +637,15 @@ def place_sl_order(symbol, is_buy, sl_price, quantity):
     tick = info["tickSize"]
     step = info["stepSize"]
     qty_prec = info.get("qtyPrecision", 8)
-    qty_rounded = round(math.floor(float(quantity) / step) * step, qty_prec)
+    # FIX bug "posisi tidak 100% tertutup saat SL": sebelumnya pakai
+    # math.floor(quantity/step)*step dengan float biasa, yang kena noise
+    # binary floating point (mis. 1.2/0.1 = 11.999999999998 → floor jadi
+    # 1.1, bukan 1.2) sehingga qty SL selalu bisa 1 step LEBIH KECIL dari
+    # posisi riil dan menyisakan sebagian posisi tanpa proteksi saat SL
+    # ter-trigger. round_qty() pakai Decimal (exact) + bulat ke TERDEKAT,
+    # bukan floor lagi — qty yang masuk ke sini sudah kelipatan step sejak
+    # awal (dari calc_auto_quantity), jadi tidak boleh di-floor kedua kali.
+    qty_rounded = round_qty(quantity, step, qty_prec)
     return _binance_signed("POST", "/fapi/v1/algoOrder", {
         "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side, "type": "STOP_MARKET",
         "triggerPrice": round_to_tick(sl_price, tick),
@@ -2001,7 +2046,8 @@ def _open_pending_real(sym, signal, chat_id):
         tg_send(chat_id,
             f"🎯 <b>PENDING ORDER REAL</b> — {sym}\n\n"
             f"{fmt_signal_msg(signal)}\n\n"
-            f"Qty: <code>{qty}</code> | Leverage: {LEVERAGE}x{note}\n"
+            f"Qty: <code>{qty}</code> | Margin: <b>${margin_used:.2f}</b> | "
+            f"Leverage: {LEVERAGE}x{note}\n"
             f"Order #{order_id} terpasang di Binance, menunggu terisi (maks 8 jam)")
 
         threading.Thread(target=_wait_entry_real, args=(sym, signal, chat_id, order_id), daemon=True).start()
@@ -2256,7 +2302,6 @@ def monitor_position_real(sym, pos):
     tp_p = sig["tp"]
     sl_p = pos["current_sl"]
     qty = pos["quantity"]
-    initial_qty = qty   # simpan qty asli utk deteksi dust (jangan pernah diubah)
     chat_id = pos["chat_id"]
     tp_order_id = pos.get("tp_order_id")
     sl_order_id = pos.get("sl_order_id")
@@ -2328,46 +2373,6 @@ def monitor_position_real(sym, pos):
         # terkirim. Selalu pakai angka LIVE dari Binance sebagai sumber
         # kebenaran, bukan angka yang dihitung bot saat entry.
         live_qty = abs(float(real_pos.get("positionAmt", 0)))
-
-        # ── FIX UTAMA: deteksi posisi "dust" (sisa kecil setelah TP/SL trigger)
-        # ──────────────────────────────────────────────────────────────────────
-        # Penyebab: Binance mengeksekusi algo order SL/TP dengan quantity dari
-        # order itu sendiri. Karena pembulatan stepSize, qty di order bisa
-        # sedikit kurang dari positionAmt asli, sehingga tersisa "dust" kecil
-        # (mis. 0.11 dari posisi 1.2 aslinya) yang tidak ikut ter-close.
-        # get_real_position() mengembalikan dust ini sebagai "masih terbuka"
-        # (positionAmt > 0), sehingga loop tak pernah memanggil close_position()
-        # dan notifikasi Telegram tidak terkirim.
-        # Solusi: kalau live_qty < 5% dari initial_qty, posisi DIANGGAP sudah
-        # tertutup — cek algoStatus untuk label, tutup dust via market order,
-        # lalu close_position() normal.
-        _DUST_RATIO = 0.05  # sisa < 5% dari qty awal = dust
-        if live_qty > 0 and live_qty < initial_qty * _DUST_RATIO:
-            reason = _infer_close_reason(tp_order_id, sl_order_id)
-            if reason != "tp":
-                if (sl_p >= entry) if is_buy else (sl_p <= entry):
-                    reason = "trail"
-                else:
-                    reason = "sl"
-            close_price = tp_p if reason == "tp" else sl_p
-            log.info(
-                f"[monitor_real] {sym}: dust terdeteksi "
-                f"(live_qty={live_qty} < {_DUST_RATIO*100:.0f}% dari initial_qty={initial_qty}) "
-                f"— dianggap tertutup ({reason}), tutup sisa via market order"
-            )
-            try:
-                place_market_order(sym, "SELL" if is_buy else "BUY", live_qty, reduce_only=True)
-                log.info(f"[monitor_real] {sym}: dust {live_qty} berhasil ditutup")
-            except Exception as _dust_err:
-                log.warning(f"[monitor_real] {sym}: gagal tutup dust {live_qty}: {_dust_err} — lanjut close_position() tetap")
-            cancel_all_algo_orders(sym)
-            tg_send(chat_id,
-                f"✅ <b>Posisi tertutup</b> — {sym}\n"
-                f"Sisa posisi kecil ({live_qty}) terdeteksi setelah TP/SL trigger.\n"
-                f"Ditutup otomatis. Hasil: <b>{reason.upper()}</b>")
-            close_position(sym, reason, close_price=close_price)
-            return
-
         if live_qty > 0 and abs(live_qty - qty) > 1e-12:
             qty = live_qty
             with positions_lock:
@@ -2417,15 +2422,6 @@ def monitor_position_real(sym, pos):
                 time.sleep(2)
                 try:
                     still_open = get_real_position(sym)
-                    # FIX: dust setelah SL trigger — kalau positionAmt sisa
-                    # < 5% dari qty awal, anggap sudah efektif tertutup
-                    # (sisa ini akan ditangani oleh blok dust detection di
-                    # iterasi live_qty di atas pada loop berikutnya, tapi
-                    # kita handle sekarang supaya lebih cepat terdeteksi).
-                    if still_open is not None:
-                        rem = abs(float(still_open.get("positionAmt", 0)))
-                        if rem < initial_qty * _DUST_RATIO:
-                            still_open = None  # perlakukan dust sebagai sudah closed
                 except Exception as e:
                     log.warning(f"[sl-health] {sym}: gagal verifikasi posisi setelah SL trigger: {e}")
                     still_open = True   # tidak yakin → jangan asumsikan closed, biar loop berikutnya yg tentukan
