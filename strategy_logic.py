@@ -1,13 +1,47 @@
 """
-strategy_logic.py — OTAK v2 (Revisi Berbasis Transkrip RUANG TRADER)
-=====================================================================
-Dibangun ulang dari 30 transkrip video SMC/ICT (channel RUANG TRADER) dengan
-penekanan pada:
-  • Entry yang presisi (OB di zona diskon/premium, Liquidity Sweep, ChoCH, OTE)
-  • SL struktural yang anti‑Liquidity Sweep (buffer + level M15/H1)
-  • TP dinamis: jika RR < 2.0, cari target lebih jauh (cap 4.0)
-  • Confidence global tunggal (tanpa bias sesi)
-  • Trail Ladder sebagai update SL struktural, BUKAN profit‑taker paksa
+strategy_logic.py — OTAK v3 (Revisi: Inducement, External Liquidity, Trail Struktural)
+========================================================================================
+Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
+market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
+CISD, OTE & Fibonacci, external vs internal liquidity, Wyckoff, dsb).
+
+Urutan proses tiap sinyal (SESUAI PERMINTAAN): Entry → SL → TP → Confidence
+global (tanpa bias sesi). Semua konsep tambahan dari transkrip ditambahkan
+sebagai BONUS SCORE saja — tidak ada filter baru yang memperketat/mengurangi
+frekuensi sinyal. Filter keras yang tetap ada hanya yang sudah terbukti perlu
+untuk validitas order (RR minimum, geometri entry/SL/TP, dan reachability
+limit order terhadap harga pasar).
+
+Poin revisi v3:
+  1) RR minimal 1:2, maksimal 1:4. Jika target RR<2 → JANGAN auto‑tolak,
+     dulu cari target lebih jauh dari pool TP (swing H1 lebih lama, EQ H1,
+     fib extension) sebelum menyerah; jika ada RR>4 → cap ke 4 (bukan tolak).
+  2) Entry presisi: OB/FVG/EQ dengan bonus konfluen HTF (overlap zona H1) dan
+     bonus Inducement (liquidity minor sudah disapu sebelum POI asli) —
+     sesuai transkrip "How the Market Traps Traders with Inducement" &
+     "trading strategy using inducement [SNIPER ENTRY]".
+  3) SL struktural anti‑Liquidity Sweep: SL ditaruh di luar invalidation
+     level (OB/struktur) + buffer, supaya jika benar‑benar tersentuh berarti
+     arah memang salah, bukan sekadar sweep likuiditas minor. Penanganan
+     "SL tersentuh tapi ternyata sweep" (harga lanjut sesuai arah semula)
+     ditangani di validate_and_adjust_geometry() (dipanggil main.py saat
+     order terisi/di-monitor) dan di monitor_position() main.py (verifikasi
+     candle M1 sebelum SL dikonfirmasi).
+  4) Trail Ladder: DIUBAH agar Trail bukan "profit‑taker" paksa. Rungs lama
+     yang mengunci profit di banyak level (0.5R..3.5R) dihapus; hanya
+     tersisa SATU rung breakeven di 1.0R sebagai jaring pengaman risiko
+     (bukan profit). Setelah breakeven, pergerakan SL sepenuhnya mengikuti
+     struktur M15 (swing terbaru, lihat STRUCT_TRAIL_*) — SL baru = "harga
+     tidak kuat lagi mengikuti trend", bukan target profit.
+  5) Proses per‑koin: Entry → SL → TP → confidence (global, tanpa sesi).
+  6) Tidak ada confidence per‑sesi — confidence murni dari kualitas
+     struktur+konfluensi chart (skema sama seperti v2, ditambah bonus baru).
+  7) Konsep tambahan (inducement, external/internal liquidity, konfluensi
+     HTF) masuk sebagai bonus skor kecil, TIDAK menambah filter penolakan,
+     supaya kuantitas sinyal tidak turun.
+  8) Tidak menambahkan logika scalping M1/Silver Bullet/killzone sesi yang
+     tidak relevan untuk swing H1/M15 — hanya diambil konsep yang dipakai
+     bot ini (structure, OB/FVG, liquidity, CISD, Fibonacci).
 
 Kompatibel dengan main.py:
   - full_analyze(df_h1, df_m15, df_d1=None, symbol=None) → dict | None
@@ -31,25 +65,34 @@ log = logging.getLogger(__name__)
 MIN_RR   = 2.0
 MAX_RR   = 4.0
 
-# Trail Ladder: (min_R_profit_untuk_aktif, fraksi_lock_dari_risk)
-# Digunakan sebagai update SL struktural, bukan profit‑taker.
+# ── Trail Ladder v3 ──────────────────────────────────────────────────────
+# HANYA breakeven di 1.0R. Ini bukan "pengaman profit" — cuma menghilangkan
+# risiko begitu trade sudah maju 1R, konsisten dengan permintaan: "Trail
+# jangan dipaksa profit". Setelah breakeven tercapai, seluruh pergeseran SL
+# selanjutnya murni mengikuti struktur M15 (lihat monitor_position main.py
+# yang memakai kandidat "paling protektif" antara ladder ini vs structure —
+# karena ladder cuma py 1 rung breakeven, structure yang akan mendominasi
+# di hampir semua kasus setelah 1R).
 TRAIL_R_LADDER = [
-    (0.5, 0.00),   # break-even
-    (1.0, 0.30),   # lock 0.3 R
-    (1.5, 0.50),   # lock 0.5 R
-    (2.0, 0.65),   # lock 0.65 R
-    (2.8, 0.80),   # lock 0.8 R
-    (3.5, 0.85),   # lock 0.85 R
+    (1.0, 0.00),   # breakeven only — bukan profit lock
 ]
 
-# Trailing struktural M15
+# Trailing struktural M15 — INI inti dari Trail (bukan ladder di atas).
+# "Ketika harga menyentuh Trail artinya harga tidak kuat mengikuti trend
+# sebelumnya" — SL baru = swing M15 terakhir (HL utk BUY / LH utk SELL)
+# + buffer supaya tidak kena liquidity sweep biasa.
 STRUCT_TRAIL_LB       = 3      # lookback swing_pts saat trailing
-STRUCT_TRAIL_BUF_PCT  = 0.002  # buffer 0.2% di luar swing agar tidak kena LS biasa
+STRUCT_TRAIL_BUF_PCT  = 0.0025 # buffer 0.25% di luar swing agar tidak kena LS biasa
 STRUCT_TRAIL_LOOKBACK = 60     # candle M15 untuk cari swing trailing
 
 # Fibonacci extension TP (level 1.272 dan 1.618 dari impulse leg)
 FIB_EXT_1 = 0.272   # 127.2%
 FIB_EXT_2 = 0.618   # 161.8%
+
+# ── Inducement & konfluensi (v3, konsep baru — bonus score saja) ─────────
+INDUCEMENT_LOOKBACK  = 40     # candle M15 untuk cari liquidity minor sebelum POI
+INDUCEMENT_MINOR_LB  = 2      # lookback swing_pts untuk swing "minor" (inducement)
+CONFLUENCE_BONUS      = 2     # bonus skor kalau OB/FVG M15 overlap dengan zona H1
 
 
 # =============================================================================
@@ -380,6 +423,58 @@ def detect_liquidity_sweep(df: pd.DataFrame, sh: list, sl: list,
             }
     return result
 
+def detect_inducement(df: pd.DataFrame, direction: str,
+                      lb: int = INDUCEMENT_LOOKBACK) -> dict:
+    """
+    Inducement (transkrip "How the Market Traps Traders with Inducement" &
+    "trading strategy using inducement [SNIPER ENTRY]").
+
+    Konsep: sebelum harga bereaksi di POI "asli" (OB/FVG yang lebih dalam),
+    market sering menyapu dulu liquidity pool MINOR (swing kecil) yang
+    memancing early entry ("inducement"). Kalau minor pool itu SUDAH disapu
+    (wick tembus, close kembali ke sisi yang benar) sebelum harga mendekati
+    POI kita, itu tanda bagus — bukan validasi wajib, cuma BONUS confidence,
+    supaya kuantitas sinyal tidak berkurang untuk koin yang tidak
+    menunjukkan pola ini secara eksplisit.
+
+    Return: {"found": bool, "level": float|None, "swept": bool}
+    """
+    out = {"found": False, "level": None, "swept": False}
+    if df is None or len(df) < lb + INDUCEMENT_MINOR_LB * 2 + 1:
+        return out
+    sub = df.iloc[-lb:].reset_index(drop=True)
+    sh_m, sl_m = swing_pts(sub, lb=INDUCEMENT_MINOR_LB)
+    try:
+        if direction == "bull" and sl_m:
+            idx = sl_m[-1]
+            if idx >= len(sub) - 2:
+                return out
+            level = float(sub["low"].iloc[idx])
+            after = sub.iloc[idx + 1:]
+            swept = bool((after["low"] < level).any() and
+                         float(after["close"].iloc[-1]) > level)
+            out = {"found": True, "level": level, "swept": swept}
+        elif direction == "bear" and sh_m:
+            idx = sh_m[-1]
+            if idx >= len(sub) - 2:
+                return out
+            level = float(sub["high"].iloc[idx])
+            after = sub.iloc[idx + 1:]
+            swept = bool((after["high"] > level).any() and
+                         float(after["close"].iloc[-1]) < level)
+            out = {"found": True, "level": level, "swept": swept}
+    except Exception:
+        return {"found": False, "level": None, "swept": False}
+    return out
+
+def zones_overlap(a_top: float, a_bot: float, b_top: float, b_bot: float) -> bool:
+    """True jika dua rentang harga [bot, top] saling overlap (dipakai untuk
+    cek konfluensi OB/FVG M15 dengan zona H1 — 'How to Choose the Best Order
+    Block When All Zones Look Valid')."""
+    lo = max(min(a_bot, a_top), min(b_bot, b_top))
+    hi = min(max(a_bot, a_top), max(b_bot, b_top))
+    return lo <= hi
+
 def detect_equal_highs_lows(df: pd.DataFrame, kind: str = "high",
                             lb: int = 80, tol: float = 0.003) -> list:
     """Equal Highs/Lows (transkrip 15, 24)."""
@@ -545,6 +640,10 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     rdiv_bull = detect_rsi_divergence(m15, "bull", lb=30)
     rdiv_bear = detect_rsi_divergence(m15, "bear", lb=30)
 
+    # ── Inducement (bonus, bukan filter) ───────────────────────────
+    induce_bull = detect_inducement(m15, "bull")
+    induce_bear = detect_inducement(m15, "bear")
+
     # ── Score BULL ───────────────────────────────────────────────
     bull = 0
     if d1_bias == "bullish":                    bull += 20
@@ -562,6 +661,7 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     if rdiv_bull.get("bull_div"):
         bull += 10 + (5 if rdiv_bull.get("strong") else 0)
     if fr_m15["failed_retest_buy"]:             bull += 10
+    if induce_bull.get("swept"):                bull += 8
 
     # ── Score BEAR ───────────────────────────────────────────────
     bear = 0
@@ -580,6 +680,7 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     if rdiv_bear.get("bear_div"):
         bear += 10 + (5 if rdiv_bear.get("strong") else 0)
     if fr_m15["failed_retest_sell"]:            bear += 10
+    if induce_bear.get("swept"):                bear += 8
 
     # ── Penalti cross-HTF ─────────────────────────────────────────
     if d1_bias == "bullish" and bear > bull:
@@ -589,7 +690,7 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
 
     direction = "bull" if bull >= bear else "bear"
     raw = bull if direction == "bull" else bear
-    MAX_SCORE = 165
+    MAX_SCORE = 173   # 165 (v2) + 8 (bonus inducement v3)
     confidence = min(int(raw / MAX_SCORE * 100), 99)
 
     return {
@@ -607,6 +708,8 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         "failed_retest": fr_m15,
         "liquidity_bull": liq_bull,
         "liquidity_bear": liq_bear,
+        "inducement_bull": induce_bull,
+        "inducement_bear": induce_bear,
         "sh15": sh15, "sl15": sl15,
         "sh1": sh1, "sl1": sl1,
         "fib_r": round(fib_r, 3),
@@ -648,6 +751,26 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
     fib_sh = float(m15["high"].iloc[score_ctx["sh15"][-1]]) if score_ctx.get("sh15") else None
     fib_sl = float(m15["low"].iloc[score_ctx["sl15"][-1]]) if score_ctx.get("sl15") else None
 
+    induce = score_ctx.get("inducement_bull" if up else "inducement_bear", {})
+    induce_ok = bool(induce.get("swept"))
+
+    # Zona H1 (OB + FVG searah) untuk cek konfluensi — "How to Choose the
+    # Best Order Block When All Zones Look Valid": OB M15 yang overlap
+    # dengan zona HTF lebih dipercaya daripada OB M15 berdiri sendiri.
+    htf_zones = []
+    try:
+        for z in detect_order_block(h1, direction, lb=80,
+                                    sh=score_ctx.get("sh1", []),
+                                    sl=score_ctx.get("sl1", [])):
+            htf_zones.append((z["top"], z["bot"]))
+        for f in detect_fvg(h1, direction, lb=60):
+            htf_zones.append((f["top"], f["bot"]))
+    except Exception:
+        htf_zones = []
+
+    def _htf_confluence(top: float, bot: float) -> bool:
+        return any(zones_overlap(top, bot, zt, zb) for zt, zb in htf_zones)
+
     # ── Order Block ──────────────────────────────────────────────────
     obs = detect_order_block(m15, direction, lb=60,
                              sh=score_ctx.get("sh15", []),
@@ -673,6 +796,10 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
             sc += 2
         if fib_sh and fib_sl and is_in_ote(entry_pt, fib_sl, fib_sh, direction):
             sc += 1
+        if _htf_confluence(z["top"], z["bot"]):
+            sc += CONFLUENCE_BONUS
+        if induce_ok:
+            sc += 1
 
         cands.append({
             "price": round(entry_pt, 8),
@@ -692,6 +819,10 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         if cisd_ok: sc += 2
         if liq_ok: sc += 2
         if choch_ok: sc += 1
+        if _htf_confluence(f["top"], f["bot"]):
+            sc += CONFLUENCE_BONUS
+        if induce_ok:
+            sc += 1
         cands.append({
             "price": round(entry_pt, 8),
             "invalid": round(invalid_pt, 8),
@@ -725,6 +856,7 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         invalid_pt = eq - atr * 0.8 if up else eq + atr * 0.8
         sc = 2
         if liq_ok: sc += 1
+        if induce_ok: sc += 1
         cands.append({
             "price": round(float(eq), 8),
             "invalid": round(float(invalid_pt), 8),
@@ -844,71 +976,91 @@ def _build_tp_pool(h1: pd.DataFrame, m15: pd.DataFrame, direction: str,
                    entry: float, atr: float,
                    sh1: list, sl1: list, sh15: list, sl15: list) -> list:
     """
-    Bangun pool target TP dari berbagai sumber, terurut terdekat ke terjauh.
+    Bangun pool target TP dari berbagai sumber, terurut kualitas draw‑on‑
+    liquidity (bukan cuma jarak). Prioritas EXTERNAL liquidity (level H1 —
+    biasanya jadi tujuan asli pergerakan harga) di atas INTERNAL liquidity
+    (EQ M15 — sering cuma disapu di tengah jalan, bukan tujuan akhir), sesuai
+    transkrip "The Secret of Price Movement: External vs Internal Liquidity"
+    & "3 Types of Liquidity Targeted by Smart Money". Tier lebih kecil =
+    lebih diutamakan saat beberapa target sama‑sama masuk rentang RR ideal.
+
     Sumber (tier):
-      1: EQ M15
-      2: OB H1 (arah berlawanan)
-      3: FVG H1
-      4: Swing H1
-      5: EQ H1
-      6: Fibonacci extension (1.272, 1.618)
-      7: Fibonacci extension (2.0, 2.414) untuk ekstensi
+      1: OB H1 (arah berlawanan) — external, presisi tinggi
+      2: FVG H1 — external
+      3: Swing H1 (swing terakhir) — external, struktur murni
+      4: EQ H1 — external, liquidity pool besar (klasik "draw on liquidity")
+      5: Swing H1 (swing sebelumnya, lebih jauh) — external, cadangan ekstensi
+      6: EQ M15 — internal, tetap dipakai sebagai target valid supaya
+         frekuensi sinyal tidak berkurang, tapi prioritas paling rendah
+         di antara level struktural
+      7: Fibonacci extension (1.272, 1.618)
+      8: Fibonacci extension (2.0, 2.414) — cadangan ekstensi jauh kalau
+         semua level struktural RR‑nya < 2.0
     """
     up = direction == "bull"
     sgn = 1 if up else -1
     pool = []
 
-    # Tier 1: EQ M15
-    eqs_m15 = detect_equal_highs_lows(m15, "high" if up else "low", lb=80)
-    for v in eqs_m15:
-        if sgn * (v - entry) > atr * 0.3:
-            pool.append(("eq_m15", v, 1))
-
-    # Tier 2: OB H1 (arah berlawanan = area resistance/support)
+    # Tier 1: OB H1 (arah berlawanan = area resistance/support, external)
     opp_dir = "bear" if up else "bull"
     obs_h1_opp = detect_order_block(h1, opp_dir, lb=80, sh=sh1, sl=sl1)
     for z in obs_h1_opp:
         edge = float(z["bot"]) if up else float(z["top"])
         if sgn * (edge - entry) > atr * 0.5:
-            pool.append(("ob_h1", edge, 2))
+            pool.append(("ob_h1", edge, 1))
 
-    # Tier 3: FVG H1
+    # Tier 2: FVG H1
     fvgs_h1 = detect_fvg(h1, opp_dir, lb=60)
     for f in fvgs_h1:
         if sgn * (f["mid"] - entry) > atr * 0.5:
-            pool.append(("fvg_h1", f["mid"], 3))
+            pool.append(("fvg_h1", f["mid"], 2))
 
-    # Tier 4: Swing H1
+    # Tier 3: Swing H1 terakhir
     sw_vals = ([float(h1["high"].iloc[i]) for i in sh1] if up
                else [float(h1["low"].iloc[i]) for i in sl1])
-    for v in sw_vals:
+    for v in sw_vals[-2:]:
         if sgn * (v - entry) > atr * 1.0:
-            pool.append(("sw_h1", v, 4))
+            pool.append(("sw_h1", v, 3))
 
-    # Tier 5: EQ H1
+    # Tier 4: EQ H1 (liquidity pool besar — external)
     eqs_h1 = detect_equal_highs_lows(h1, "high" if up else "low", lb=100)
     for v in eqs_h1:
         if sgn * (v - entry) > atr * 0.8:
-            pool.append(("eq_h1", v, 5))
+            pool.append(("eq_h1", v, 4))
 
-    # Tier 6 & 7: Fibonacci extensions
+    # Tier 5: swing H1 yang lebih tua/jauh — cadangan ekstensi kalau target
+    # dekat masih RR<2 (sesuai instruksi: jangan auto‑tolak, cari lebih jauh)
+    sw_all = ([float(h1["high"].iloc[i]) for i in sh1] if up
+              else [float(h1["low"].iloc[i]) for i in sl1])
+    for v in sw_all[:-2]:
+        if sgn * (v - entry) > atr * 1.0:
+            pool.append(("sw_h1_far", v, 5))
+
+    # Tier 6: EQ M15 (internal — tetap dimasukkan, prioritas rendah)
+    eqs_m15 = detect_equal_highs_lows(m15, "high" if up else "low", lb=80)
+    for v in eqs_m15:
+        if sgn * (v - entry) > atr * 0.3:
+            pool.append(("eq_m15", v, 6))
+
+    # Tier 7 & 8: Fibonacci extensions (cadangan ekstensi terjauh)
     if sh1 and sl1:
         sh_val = float(h1["high"].iloc[sh1[-1]])
         sl_val = float(h1["low"].iloc[sl1[-1]])
         leg = sh_val - sl_val
         if leg > 0:
             exts = [
-                (FIB_EXT_1, "fib127", 6),
-                (FIB_EXT_2, "fib162", 6),
-                (1.0, "fib200", 7),
-                (1.414, "fib241", 7),
+                (FIB_EXT_1, "fib127", 7),
+                (FIB_EXT_2, "fib162", 7),
+                (1.0, "fib200", 8),
+                (1.414, "fib241", 8),
             ]
             for ext, lbl, tier in exts:
                 tp_v = (sh_val + leg * ext) if up else (sl_val - leg * ext)
                 if sgn * (tp_v - entry) > atr * 0.5:
                     pool.append((lbl, tp_v, tier))
 
-    # Sort by distance from entry (terdekat dulu)
+    # Sort by distance from entry (terdekat dulu) — tier tetap dipakai oleh
+    # _select_tp() untuk menentukan prioritas kualitas, bukan urutan ini.
     pool.sort(key=lambda x: abs(x[1] - entry))
     return pool
 
