@@ -2256,6 +2256,7 @@ def monitor_position_real(sym, pos):
     tp_p = sig["tp"]
     sl_p = pos["current_sl"]
     qty = pos["quantity"]
+    initial_qty = qty   # simpan qty asli utk deteksi dust (jangan pernah diubah)
     chat_id = pos["chat_id"]
     tp_order_id = pos.get("tp_order_id")
     sl_order_id = pos.get("sl_order_id")
@@ -2327,6 +2328,46 @@ def monitor_position_real(sym, pos):
         # terkirim. Selalu pakai angka LIVE dari Binance sebagai sumber
         # kebenaran, bukan angka yang dihitung bot saat entry.
         live_qty = abs(float(real_pos.get("positionAmt", 0)))
+
+        # ── FIX UTAMA: deteksi posisi "dust" (sisa kecil setelah TP/SL trigger)
+        # ──────────────────────────────────────────────────────────────────────
+        # Penyebab: Binance mengeksekusi algo order SL/TP dengan quantity dari
+        # order itu sendiri. Karena pembulatan stepSize, qty di order bisa
+        # sedikit kurang dari positionAmt asli, sehingga tersisa "dust" kecil
+        # (mis. 0.11 dari posisi 1.2 aslinya) yang tidak ikut ter-close.
+        # get_real_position() mengembalikan dust ini sebagai "masih terbuka"
+        # (positionAmt > 0), sehingga loop tak pernah memanggil close_position()
+        # dan notifikasi Telegram tidak terkirim.
+        # Solusi: kalau live_qty < 5% dari initial_qty, posisi DIANGGAP sudah
+        # tertutup — cek algoStatus untuk label, tutup dust via market order,
+        # lalu close_position() normal.
+        _DUST_RATIO = 0.05  # sisa < 5% dari qty awal = dust
+        if live_qty > 0 and live_qty < initial_qty * _DUST_RATIO:
+            reason = _infer_close_reason(tp_order_id, sl_order_id)
+            if reason != "tp":
+                if (sl_p >= entry) if is_buy else (sl_p <= entry):
+                    reason = "trail"
+                else:
+                    reason = "sl"
+            close_price = tp_p if reason == "tp" else sl_p
+            log.info(
+                f"[monitor_real] {sym}: dust terdeteksi "
+                f"(live_qty={live_qty} < {_DUST_RATIO*100:.0f}% dari initial_qty={initial_qty}) "
+                f"— dianggap tertutup ({reason}), tutup sisa via market order"
+            )
+            try:
+                place_market_order(sym, "SELL" if is_buy else "BUY", live_qty, reduce_only=True)
+                log.info(f"[monitor_real] {sym}: dust {live_qty} berhasil ditutup")
+            except Exception as _dust_err:
+                log.warning(f"[monitor_real] {sym}: gagal tutup dust {live_qty}: {_dust_err} — lanjut close_position() tetap")
+            cancel_all_algo_orders(sym)
+            tg_send(chat_id,
+                f"✅ <b>Posisi tertutup</b> — {sym}\n"
+                f"Sisa posisi kecil ({live_qty}) terdeteksi setelah TP/SL trigger.\n"
+                f"Ditutup otomatis. Hasil: <b>{reason.upper()}</b>")
+            close_position(sym, reason, close_price=close_price)
+            return
+
         if live_qty > 0 and abs(live_qty - qty) > 1e-12:
             qty = live_qty
             with positions_lock:
@@ -2376,6 +2417,15 @@ def monitor_position_real(sym, pos):
                 time.sleep(2)
                 try:
                     still_open = get_real_position(sym)
+                    # FIX: dust setelah SL trigger — kalau positionAmt sisa
+                    # < 5% dari qty awal, anggap sudah efektif tertutup
+                    # (sisa ini akan ditangani oleh blok dust detection di
+                    # iterasi live_qty di atas pada loop berikutnya, tapi
+                    # kita handle sekarang supaya lebih cepat terdeteksi).
+                    if still_open is not None:
+                        rem = abs(float(still_open.get("positionAmt", 0)))
+                        if rem < initial_qty * _DUST_RATIO:
+                            still_open = None  # perlakukan dust sebagai sudah closed
                 except Exception as e:
                     log.warning(f"[sl-health] {sym}: gagal verifikasi posisi setelah SL trigger: {e}")
                     still_open = True   # tidak yakin → jangan asumsikan closed, biar loop berikutnya yg tentukan
