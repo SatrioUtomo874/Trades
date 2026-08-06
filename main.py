@@ -2836,6 +2836,21 @@ def simulation_loop(chat_id):
         while time.time() < deadline:
             with positions_lock:
                 if sym not in positions: return
+                # FIX: sama seperti bug di _wait_entry_real — /timeout cuma
+                # menyalakan flag ini, tapi loop penunggu entry versi
+                # SIMULASI ini tidak pernah membacanya, jadi pending order
+                # simulasi tidak pernah benar-benar dibatalkan oleh /timeout
+                # (cuma bakal hilang sendiri kalau TP/SL-before-entry
+                # kesentuh atau 8 jam habis). Sekarang dibaca & langsung
+                # dihentikan begitu flag ini di-set.
+                pending_timeout = positions[sym].get("timeout_flag")
+
+            if pending_timeout:
+                with positions_lock:
+                    positions.pop(sym, None)
+                tg_send(chat_id, f"⏭ <b>Pending dibatalkan</b> — {sym} (via /timeout, belum sempat entry).")
+                return
+
 
             price_now = get_price(sym)
             if price_now is None:
