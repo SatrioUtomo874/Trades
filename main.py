@@ -148,7 +148,13 @@ BAN_DURATION_TRADE_CLOSED = 300   # ban khusus setelah trade BENAR-BENAR closed 
 # ── REAL TRADE (Binance Futures) — aktif otomatis kalau API key/secret diset ──
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
-REAL_TRADE_ENABLED = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
+# BINANCE_KEYS_PRESENT: apakah kredensial ADA (tetap, tidak berubah runtime).
+# REAL_TRADE_ENABLED: mode AKTIF SEKARANG (bisa di-toggle runtime via /mode
+# on|off). Default = BINANCE_KEYS_PRESENT, sama seperti perilaku lama (kalau
+# key diset, langsung real trade) — supaya tidak ada perubahan perilaku
+# default untuk siapa pun yang belum pernah pakai /mode.
+BINANCE_KEYS_PRESENT = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
+REAL_TRADE_ENABLED   = BINANCE_KEYS_PRESENT
 
 LEVERAGE          = 5      # runtime, via /leverage
 MARGIN_USD        = 5.0    # runtime, via /margin
@@ -658,14 +664,34 @@ def place_sl_order(symbol, is_buy, sl_price, quantity):
 def place_tp_sl(symbol, is_buy, tp_price, sl_price, quantity):
     """
     Pasang TP + SL sekaligus.
-    TP: closePosition=true (menutup seluruh posisi saat ter-trigger).
-    SL: quantity + reduceOnly=true (lihat komentar di place_sl_order).
+
+    KEDUANYA quantity + reduceOnly=true (BUKAN closePosition=true untuk TP
+    lagi — lihat catatan di bawah). Simetris dengan place_sl_order().
+
+    ── KENAPA TP JUGA DIUBAH (bukan cuma SL) ──────────────────────────────
+    Sebelumnya cuma SL yang diubah ke quantity+reduceOnly, TP tetap pakai
+    closePosition=true, dengan asumsi itu sudah cukup untuk menghindari
+    konflik "1 closePosition per side". Tapi laporan user menunjukkan SL
+    tetap hilang berulang meski sudah dipisah begitu — artinya closePosition
+    di sisi TP kemungkinan MASIH bisa memicu Binance meng-cancel order lain
+    (mis. reduceOnly quantity yang jumlahnya persis = seluruh posisi bisa
+    tetap dianggap "menutup posisi penuh" oleh sebagian implementasi, sama
+    seperti closePosition). Fix paling aman & pasti tidak ambigu: TP dan SL
+    SAMA-SAMA quantity+reduceOnly biasa — tidak ada mekanisme closePosition
+    sama sekali di simbol ini, jadi tidak ada jalur bagi Binance untuk
+    menganggap salah satu order "menggantikan" yang lain.
     """
     close_side = "SELL" if is_buy else "BUY"
-    tick = get_symbol_filters(symbol)["tickSize"]
+    info = get_symbol_filters(symbol)
+    tick, step = info["tickSize"], info["stepSize"]
+    qty_prec = info.get("qtyPrecision", 8)
+    qty_rounded = round_qty(quantity, step, qty_prec)
     tp = _binance_signed("POST", "/fapi/v1/algoOrder", {
         "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
-        "triggerPrice": round_to_tick(tp_price, tick), "closePosition": "true", "workingType": "MARK_PRICE",
+        "triggerPrice": round_to_tick(tp_price, tick),
+        "quantity": qty_rounded,
+        "reduceOnly": "true",
+        "workingType": "MARK_PRICE",
     })
     sl = place_sl_order(symbol, is_buy, sl_price, quantity)
     return tp, sl
@@ -2072,6 +2098,24 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
     while time.time() < deadline:
         with positions_lock:
             if sym not in positions: return
+            # FIX: /timeout sebelumnya cuma menyetel flag ini, tapi loop
+            # penungguan entry (di sini) TIDAK PERNAH membacanya — jadi order
+            # limit entry yang masih pending TETAP nongkrong di Binance
+            # sampai 8 jam habis atau ke-fill sendiri, walau bot Telegram
+            # bilang "Timeout → SYMBOL". Sekarang loop ini ikut cek flag dan
+            # benar-benar membatalkan order limit-nya di Binance.
+            pending_timeout = positions[sym].get("timeout_flag")
+
+        if pending_timeout:
+            try:
+                cancel_order(sym, order_id)
+            except Exception as e:
+                log.warning(f"[wait_entry_real] {sym}: gagal cancel order pending saat /timeout: {e}")
+            cancel_all_algo_orders(sym)   # jaring pengaman: bersihkan sisa algo order kalau ada
+            with positions_lock:
+                positions.pop(sym, None)
+            tg_send(chat_id, f"⏭ <b>Order pending dibatalkan</b> — {sym} (via /timeout, belum sempat terisi).")
+            return
 
         try:
             order = get_order_status(sym, order_id)
@@ -2329,6 +2373,13 @@ def monitor_position_real(sym, pos):
             result = "tp" if pnl_pct >= 0 else "sl"
             try:
                 cancel_algo_order(tp_order_id); cancel_algo_order(sl_order_id)
+                # FIX: jangan cuma andalkan 2 algoId yang dicatat bot secara
+                # lokal (bisa saja stale kalau trailing sempat cancel+replace
+                # tanpa ID lokal ke-update, atau ada ghost order lain) —
+                # /timeout sekarang benar-benar membersihkan SEMUA algo order
+                # tersisa untuk simbol ini di Binance, bukan cuma 2 ID yang
+                # bot tahu.
+                cancel_all_algo_orders(sym)
                 place_market_order(sym, "SELL" if is_buy else "BUY", qty, reduce_only=True)
             except Exception as e:
                 log.error(f"[monitor_real] gagal tutup manual {sym}: {e}")
@@ -2392,24 +2443,33 @@ def monitor_position_real(sym, pos):
             if not sl_missing:
                 try:
                     st = get_algo_order_status(sl_order_id).get("algoStatus")
-                    # Binance algo orders: NEW = baru dipasang, WORKING/RUNNING = aktif memantau
-                    _ACTIVE_SL_STATUSES = ("NEW", "WORKING", "RUNNING", "MONITORING")
-                    # ── FIX KRITIS: TRIGGERED/FINISHED BUKAN "hilang" — itu
-                    # artinya SL SUDAH BEKERJA (order benar-benar tereksekusi
-                    # persis sesuai fungsinya). Bug lama menyamakan status ini
-                    # dengan "hilang", sehingga bot mengirim MARKET ORDER KEDUA
-                    # untuk "auto-out" di ATAS SL yang sebenarnya SUDAH menutup
-                    # posisi sendiri — inilah penyebab notifikasi 🚨 AUTO-OUT
-                    # yang muncul padahal SL aslinya bekerja normal (kadang
-                    # cuma soal timing: health-check query status algo order
-                    # tepat saat/detik SL baru saja trigger, race dengan
-                    # settlement posisi di sisi Binance).
-                    if st in ("TRIGGERED", "FINISHED"):
+                    # ── FIX: SEBELUMNYA whitelist status "aktif" (NEW/WORKING/
+                    # RUNNING/MONITORING) — kalau Binance mengembalikan label
+                    # status APA SAJA di luar 4 kata itu (mis. varian label lain
+                    # yang belum terdaftar), langsung dianggap "hilang" walau
+                    # order-nya sebenarnya masih hidup normal. Ini penyebab SL
+                    # "dipasang ulang" berkali-kali terus-menerus tiap 60 detik
+                    # padahal SL yang lama sebenarnya baik-baik saja — order
+                    # baru yang dipasang ulang pun kena masalah label yang sama
+                    # lagi di pengecekan berikutnya, jadi berulang selamanya.
+                    #
+                    # Dibalik jadi BLACKLIST status yang JELAS-JELAS mati saja
+                    # — jauh lebih aman: status baru/tidak dikenal dianggap
+                    # MASIH AKTIF (bukan default "hilang"), sehingga tidak ada
+                    # lagi false-positive spam untuk label status yang sekadar
+                    # belum terdaftar di kode.
+                    _TRIGGERED_SL_STATUSES = ("TRIGGERED", "FINISHED", "FILLED")
+                    _DEAD_SL_STATUSES = ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "FAILED")
+                    if st in _TRIGGERED_SL_STATUSES:
                         sl_already_executed = True
+                    elif st in _DEAD_SL_STATUSES:
+                        sl_missing = True
+                        log.warning(f"[sl-health] {sym}: algoStatus={st!r} → benar-benar hilang")
                     else:
-                        sl_missing = st not in _ACTIVE_SL_STATUSES
-                        if sl_missing:
-                            log.warning(f"[sl-health] {sym}: algoStatus={st!r} → dianggap hilang")
+                        sl_missing = False
+                        if st not in ("NEW", "WORKING", "RUNNING", "MONITORING"):
+                            log.info(f"[sl-health] {sym}: algoStatus={st!r} tidak dikenal, "
+                                     f"tapi bukan status mati → dianggap masih aktif (tidak spam re-place)")
                 except Exception as e:
                     log.warning(f"[monitor_real sl-check] {sym}: {e}")
 
@@ -2482,10 +2542,16 @@ def monitor_position_real(sym, pos):
                     with positions_lock:
                         if sym in positions:
                             positions[sym]["sl_order_id"] = sl_order_id
-                    sl_replace_count = 0   # ← RESET setelah berhasil (bug lama: tidak pernah reset)
+                    # FIX: tampilkan JUMLAH ASLI sebelum di-reset (sebelumnya
+                    # reset dilakukan DULU baru pesan dibuat pakai +1, jadi
+                    # pesan selalu bohong nampilkan "1x total" walau ini
+                    # sudah kejadian ke-13x beruntun — sekarang counter yang
+                    # sebenarnya ditampilkan, baru direset setelahnya).
+                    total_count = sl_replace_count
+                    sl_replace_count = 0   # reset setelah berhasil
                     tg_send(chat_id,
                         f"⚠️ <b>SL dipasang ulang</b> — {sym}\n"
-                        f"Sempat hilang ({sl_replace_count + 1}x total), "
+                        f"Sempat hilang ({total_count}x total), "
                         f"sudah dipasang ulang di <code>{sl_p:.6g}</code>.\n"
                         f"Harga saat ini <code>{price_now:.6g}</code> — posisi masih aman.")
                 except Exception as e:
@@ -2953,6 +3019,9 @@ GREETING=(
     "/leverage            — Lihat/ubah leverage (real trade)\n"
     "/margin              — Lihat/ubah margin awal per trade (real trade)\n"
     "/autostop            — Lihat/ubah threshold auto-stop drawdown\n"
+    "/mode                — Lihat mode aktif (real/simulasi)\n"
+    "/mode on             — Real trade (order sungguhan di Binance)\n"
+    "/mode off            — Simulasi (backtest strategy_logic saja)\n"
     "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
     "/timeout             — Tutup paksa semua posisi\n"
     "/stats               — Statistik + saldo\n"
@@ -3037,7 +3106,7 @@ def get_info_msg():
 # BOT LOOP
 # ═════════════════════════════════════════════
 def bot_loop():
-    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, MIN_CONFIDENCE, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance
+    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, MIN_CONFIDENCE, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance, REAL_TRADE_ENABLED
 
     # Set active_chat_id ke ALLOWED_USER_ID SEJAK AWAL — di chat pribadi
     # Telegram, chat_id sama dengan user_id, jadi bot bisa kirim pesan
@@ -3423,6 +3492,63 @@ def bot_loop():
                                 if s in positions:
                                     positions[s]["timeout_flag"] = True
                         tg_send(chat_id,f"⏭ Timeout semua ({len(syms)}) posisi.")
+                elif text.startswith("/mode"):
+                    # /mode          → tampilkan status sekarang
+                    # /mode on       → aktifkan REAL TRADE (butuh API key)
+                    # /mode off      → aktifkan mode SIMULASI (backtest strategy_logic)
+                    #
+                    # PENTING: toggle ini HANYA memengaruhi posisi BARU yang
+                    # dibuka SETELAH perintah ini. Posisi yang sudah terbuka
+                    # tetap dipantau oleh thread monitor yang sama seperti
+                    # saat dibuka (monitor_position untuk simulasi,
+                    # monitor_position_real untuk real trade) — thread itu
+                    # sudah "terkunci" ke fungsinya sejak posisi dibuat, jadi
+                    # toggle mode di tengah jalan TIDAK mengubah/mengganggu
+                    # posisi yang sedang berjalan sama sekali (tidak ada
+                    # posisi yang tiba-tiba pindah rezim atau kehilangan
+                    # monitoring). Pipeline pencarian sinyal, monitoring, dan
+                    # pencatatan statistik 100% sama persis di kedua mode —
+                    # satu-satunya cabang beda cuma di titik "buka posisi"
+                    # (line ~2742: REAL_TRADE_ENABLED → _open_pending_real
+                    # vs jalur simulasi), jadi tidak ada logic baru yang
+                    # perlu diduplikasi/di-maintain terpisah.
+                    parts = text.split()
+                    arg = parts[1].lower() if len(parts) > 1 else None
+                    with positions_lock:
+                        n_open = len(positions)
+                    if arg is None:
+                        status = "🔴 REAL TRADE (uang beneran)" if REAL_TRADE_ENABLED else "🧪 SIMULASI (backtest strategy_logic)"
+                        tg_send(chat_id,
+                            f"⚙️ Mode saat ini: <b>{status}</b>\n\n"
+                            f"Ganti dengan <code>/mode on</code> (real) atau "
+                            f"<code>/mode off</code> (simulasi).")
+                    elif arg == "on":
+                        if not BINANCE_KEYS_PRESENT:
+                            tg_send(chat_id,
+                                "❌ Tidak bisa aktifkan mode real — "
+                                "BINANCE_API_KEY/BINANCE_API_SECRET belum diset di server.")
+                        elif REAL_TRADE_ENABLED:
+                            tg_send(chat_id, "🔴 Mode real sudah aktif.")
+                        else:
+                            REAL_TRADE_ENABLED = True
+                            extra = (f"\n\nℹ️ {n_open} posisi simulasi yang sedang berjalan "
+                                     f"tetap dipantau sebagai simulasi sampai selesai (TP/SL/timeout) — "
+                                     f"tidak ikut berubah jadi real." if n_open else "")
+                            tg_send(chat_id, f"🔴 <b>Mode REAL TRADE diaktifkan.</b> "
+                                              f"Posisi baru mulai sekarang akan pakai uang beneran di Binance.{extra}")
+                    elif arg == "off":
+                        if not REAL_TRADE_ENABLED:
+                            tg_send(chat_id, "🧪 Mode simulasi sudah aktif.")
+                        else:
+                            REAL_TRADE_ENABLED = False
+                            extra = (f"\n\nℹ️ {n_open} posisi real yang sedang berjalan "
+                                     f"tetap dipantau & ditutup normal via Binance — "
+                                     f"tidak ikut berubah jadi simulasi." if n_open else "")
+                            tg_send(chat_id, f"🧪 <b>Mode SIMULASI diaktifkan.</b> "
+                                              f"Posisi baru mulai sekarang cuma backtest strategy_logic, "
+                                              f"tidak ada order sungguhan.{extra}")
+                    else:
+                        tg_send(chat_id, "❓ Pakai <code>/mode</code>, <code>/mode on</code>, atau <code>/mode off</code>.")
                 elif text.startswith("/max"):
                     parts = text.split()
                     # ── /max (tampilkan info) ──────────────────────────────
