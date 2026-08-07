@@ -192,6 +192,46 @@ def _market_structure(df: pd.DataFrame, sh: list, sl: list) -> str:
 
 mkt_struct = _market_structure  # alias
 
+def _macro_bias(df_btc_h1: Optional[pd.DataFrame]) -> str:
+    """
+    Bias arah MARKET SECARA KESELURUHAN (BTC H1 sebagai proxy), bukan
+    struktur per-koin. Dipakai untuk meredam sinyal BUY di altcoin saat
+    seluruh market lagi risk-off (dan sebaliknya) — analisa 7 Agu 2026:
+    4/4 sinyal BUY kena SL, total market cap crypto turun 0.5% & BTC di
+    bawah EMA50/EMA200 hari itu; satu-satunya SELL malah menang besar.
+    Struktur per-koin (OB/FVG M15) bisa kelihatan valid sendiri, tapi
+    kalah lawan gravitasi market kalau macro-nya jelas berlawanan.
+
+    Return "bullish" / "bearish" / "ranging" / "unknown" (kalau data BTC
+    tidak dikasih atau tidak cukup — caller HARUS treat "unknown" sebagai
+    no-op, jangan menghukum arah manapun).
+    """
+    if df_btc_h1 is None or len(df_btc_h1) < 60:
+        return "unknown"
+    try:
+        btc = build_df(df_btc_h1, interval_minutes=60)
+        if btc is None or len(btc) < 60:
+            return "unknown"
+        LB = btc.iloc[-1]
+        shb, slb = swing_pts(btc, lb=5)
+        struct_btc = _market_structure(btc, shb, slb)
+        ema_bull = LB["ema9"] > LB["ema21"] > LB["ema50"]
+        ema_bear = LB["ema9"] < LB["ema21"] < LB["ema50"]
+        if struct_btc == "bullish" or ema_bull:
+            return "bullish"
+        if struct_btc == "bearish" or ema_bear:
+            return "bearish"
+        return "ranging"
+    except Exception:
+        return "unknown"
+
+# Penalti/bonus macro — sengaja MODERAT (bukan veto keras seperti d1_bias
+# per-koin di atas), karena ini cuma satu lapis konteks tambahan. Tujuannya
+# NGE-REM sinyal yang jelas melawan arus market, BUKAN mematikannya —
+# kuantitas sinyal harus tetap terjaga (lihat instruksi awal strategy ini).
+MACRO_ALIGN_BONUS   = 8      # searah macro → bonus kecil
+MACRO_AGAINST_MULT  = 0.72   # berlawanan macro → skor sisi itu dikali ini (bukan 0)
+
 
 # =============================================================================
 # SMC / ICT DETECTORS (berdasarkan transkrip)
@@ -593,7 +633,8 @@ def detect_failed_retest(df: pd.DataFrame, sh: list, sl: list,
 # =============================================================================
 
 def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
-                    df_d1: Optional[pd.DataFrame] = None) -> Optional[dict]:
+                    df_d1: Optional[pd.DataFrame] = None,
+                    df_btc_h1: Optional[pd.DataFrame] = None) -> Optional[dict]:
     """
     Tentukan arah dan skor confidence global (tanpa bias sesi).
     Faktor scoring (max ~165):
@@ -723,11 +764,24 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     if fr_m15["failed_retest_sell"]:            bear += 10
     if induce_bear.get("swept"):                bear += 8
 
-    # ── Penalti cross-HTF ─────────────────────────────────────────
+    # ── Penalti cross-HTF (per-koin, D1) ────────────────────────────
     if d1_bias == "bullish" and bear > bull:
         bear = int(bear * 0.5)
     elif d1_bias == "bearish" and bull > bear:
         bull = int(bull * 0.5)
+
+    # ── Macro bias (BTC H1) — opsional, no-op kalau df_btc_h1 tidak
+    # dikasih main.py. Beda dari penalti d1_bias di atas: ini MODERAT
+    # (kali 0.72, bukan 0.5) dan berlaku ke KEDUA arah simetris, karena
+    # ini konteks tambahan bukan sinyal utama koin itu sendiri. ──
+    macro_bias = _macro_bias(df_btc_h1)
+    if macro_bias == "bullish":
+        bull += MACRO_ALIGN_BONUS
+        bear = int(bear * MACRO_AGAINST_MULT)
+    elif macro_bias == "bearish":
+        bear += MACRO_ALIGN_BONUS
+        bull = int(bull * MACRO_AGAINST_MULT)
+    # macro_bias == "ranging"/"unknown" → tidak ada perubahan sama sekali
 
     direction = "bull" if bull >= bear else "bear"
     raw = bull if direction == "bull" else bear
@@ -769,6 +823,7 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         "atr": atr,
         "struct_h1": struct_h1,
         "d1_bias": d1_bias,
+        "macro_bias": macro_bias,
         "choch_m15": choch_m15,
         "choch_h1": choch_h1,
         "cisd_m15": cisd_m15,
@@ -1192,9 +1247,16 @@ def _select_tp(pool: list, entry: float, risk: float,
 
 def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                  df_d1: Optional[pd.DataFrame] = None,
-                 symbol: Optional[str] = None) -> Optional[dict]:
+                 symbol: Optional[str] = None,
+                 df_btc_h1: Optional[pd.DataFrame] = None) -> Optional[dict]:
     """
     Analisa penuh satu koin: Entry → SL → TP.
+
+    df_btc_h1: candle H1 BTCUSDT, OPSIONAL — kalau dikasih, dipakai sebagai
+    filter macro (lihat _macro_bias) supaya sinyal yang jelas melawan arah
+    market keseluruhan sedikit diredam, bukan diloloskan mentah-mentah cuma
+    berdasar struktur koin itu sendiri. Kalau tidak dikasih (default None),
+    perilaku 100% sama seperti sebelumnya — tidak ada filter tambahan.
     """
     try:
         if df_h1 is None or df_m15 is None or df_h1.empty or df_m15.empty:
@@ -1203,7 +1265,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         if symbol:
             log.info(f"[{symbol}] h1={len(df_h1)} m15={len(df_m15)}")
 
-        score = score_direction(df_h1, df_m15, df_d1)
+        score = score_direction(df_h1, df_m15, df_d1, df_btc_h1)
         if score is None:
             if symbol:
                 log.debug(f"[{symbol}] score_direction=None (data kurang)")
@@ -1218,7 +1280,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         if symbol:
             log.info(
                 f"[{symbol}] dir={direction} conf={confidence}% "
-                f"struct_h1={score['struct_h1']} d1={score['d1_bias']}"
+                f"struct_h1={score['struct_h1']} d1={score['d1_bias']} "
+                f"macro={score.get('macro_bias', 'unknown')}"
             )
 
         h1 = build_df(df_h1, interval_minutes=60)
