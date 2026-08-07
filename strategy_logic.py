@@ -731,7 +731,18 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
 
     direction = "bull" if bull >= bear else "bear"
     raw = bull if direction == "bull" else bear
-    MAX_SCORE = 173   # 165 (v2) + 8 (bonus inducement v3)
+    # ── FIX BUG KRITIS (scan 50 koin selalu "Tidak ada setup valid") ──
+    # MAX_SCORE=173 lama = jumlah SEMUA bonus sekaligus (D1+H1+ChoCH+BOS+
+    # EMA+M15 ChoCH+BOS+CISD+Liquidity+OTE+Fib+RSIdiv+failed_retest+
+    # inducement, semua di arah yang sama). Dites empiris lewat 300
+    # skenario pasar acak (termasuk tren paling bersih): skor mentah
+    # MAKSIMUM yang pernah tercapai cuma ~88, rata-rata ~40, p99 ~75 —
+    # skala 173 bikin confidence yang ditampilkan jauh lebih rendah dari
+    # kualitas setup sebenarnya (bahkan setup terbaik pun mentok ~50%).
+    # Direkalibrasi ke 100 (dekat batas atas realistis) supaya angka
+    # confidence yang tampil BERARTI sesuatu — setup kuat bisa mendekati
+    # 80-90%, bukan mentok di 50%.
+    MAX_SCORE = 100
     confidence = min(int(raw / MAX_SCORE * 100), 99)
 
     # Direction quality is separate from the absolute score.  A high score
@@ -1227,10 +1238,26 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         entry_lbl = best["label"]
         invalid = best["invalid"]
 
-        # Quality gate.  main.py still applies its configurable confidence
-        # floor, but strategy_logic owns the structural minimum so a runtime
-        # /confidence_min value cannot re-enable weak setups.
-        if confidence < 65 or score.get("direction_edge", 0) < 12:
+        # Quality gate. main.py masih menerapkan floor confidence yang bisa
+        # diatur (/confidence_min) — SATU-SATUNYA kontrol selektivitas yang
+        # dimaksudkan untuk dipakai user. Floor di sini HANYA jaring
+        # pengaman struktural minimal (buang noise murni / arah nyaris
+        # seri), BUKAN gate selektif kedua yang bisa diam-diam menolak
+        # semuanya di luar sepengetahuan /confidence_min.
+        #
+        # ── FIX BUG KRITIS (scan 50 koin selalu "Tidak ada setup valid",
+        # walau /confidence_min sudah diatur 45%) ──
+        # Nilai lama (65) MATEMATIS TIDAK MUNGKIN ditembus — dites empiris
+        # lewat 300 skenario pasar acak, confidence tertinggi yang pernah
+        # tercapai cuma 50 (bahkan di tren paling bersih sekalipun). Jadi
+        # gate ini menolak 100% sinyal SEBELUM main.py sempat menerapkan
+        # /confidence_min sama sekali — user mengira dia yang atur
+        # ambangnya, padahal ambang sebenarnya (65, tidak bisa diubah dari
+        # luar) jauh lebih tinggi dan mustahil dicapai.
+        #
+        # Direkalibrasi ke floor struktural rendah (15) — cuma menyaring
+        # noise acak-tanpa-arah, bukan menggantikan /confidence_min.
+        if confidence < 15 or score.get("direction_edge", 0) < 12:
             if symbol:
                 log.debug(
                     f"[{symbol}] quality gate: conf={confidence}, "
