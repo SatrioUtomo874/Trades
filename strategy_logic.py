@@ -57,6 +57,27 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
+# API yang sengaja diekspor ke main.py.
+# main.py memakai `from strategy_logic import *`, jadi jangan biarkan
+# dependency internal (pd, np, Optional, Tuple, dll.) ikut menimpa namespace main.
+__all__ = [
+    "MIN_RR", "MAX_RR", "TRAIL_R_LADDER",
+    "STRUCT_TRAIL_LB", "STRUCT_TRAIL_BUF_PCT", "STRUCT_TRAIL_LOOKBACK",
+    "FIB_EXT_1", "FIB_EXT_2",
+    "full_analyze", "score_direction", "get_best_signal",
+    "build_df", "swing_pts", "mkt_struct",
+    "detect_choch", "detect_bos", "detect_cisd", "detect_fvg",
+    "detect_order_block", "detect_liquidity_sweep",
+    "detect_failed_retest", "detect_equal_highs_lows",
+    "detect_rsi_divergence", "detect_inducement",
+    "detect_entry_confirmation", "zones_overlap",
+    "is_zone_fresh", "fib_position", "is_in_ote",
+    "validate_and_adjust_geometry",
+    "_collect_entry_candidates", "_compute_sl",
+    "_build_tp_pool", "_select_tp", "analyze_setup",
+]
+
+
 # =============================================================================
 # KONFIGURASI — Diimpor langsung oleh main.py
 # =============================================================================
@@ -1758,3 +1779,16 @@ def validate_and_adjust_geometry(
         "rr":    round(rr, 2),
         "adjusted": False,
     }
+
+# =============================================================================
+# KOMPATIBILITAS main.py / hot-swap
+# =============================================================================
+def analyze_setup(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
+                  df_d1: Optional[pd.DataFrame] = None,
+                  symbol: Optional[str] = None) -> Optional[dict]:
+    """Alias kompatibilitas untuk caller lama/hot-swap.
+
+    Jalur resmi tetap full_analyze(); wrapper ini tidak membuat logika entry
+    kedua sehingga hasilnya konsisten dengan mesin utama.
+    """
+    return full_analyze(df_h1, df_m15, df_d1=df_d1, symbol=symbol)
