@@ -113,7 +113,14 @@ FIB_EXT_2 = 0.618   # 161.8%
 INDUCEMENT_LOOKBACK  = 40     # candle M15 untuk cari liquidity minor sebelum POI
 INDUCEMENT_MINOR_LB  = 2      # lookback swing_pts untuk swing "minor" (inducement)
 CONFLUENCE_BONUS      = 2     # bonus skor kalau OB/FVG M15 overlap dengan zona H1
-POI_REACTION_LOOKBACK = 16     # candle M15 untuk menunggu reaksi setelah POI HTF
+POI_REACTION_LOOKBACK = 48     # candle M15 (~12 jam) untuk menunggu reaksi setelah POI HTF
+                                # (FIX kompatibilitas: nilai lama 16 candle/4 jam adalah
+                                # penyumbang gagal TERBESAR — 81.5% dari semua percobaan
+                                # ditolak di sini, karena OB/FVG H1 wajar masih valid
+                                # jauh lebih lama dari 4 jam. Dilebarkan ke 12 jam;
+                                # semangat "harus ada reaksi nyata" tetap dipertahankan
+                                # via _recent_poi_reaction() itu sendiri, cuma jendela
+                                # waktunya lebih realistis.)
 CONFIRMATION_LOOKBACK = 4      # candle M15 yang dipakai untuk displacement terbaru
 MIN_DISPLACEMENT_ATR  = 0.25   # body minimum agar candle bukan noise
 
@@ -684,36 +691,55 @@ def detect_entry_confirmation(df: pd.DataFrame, direction: str, atr: float,
     if df is None or len(df) < max(lb + 2, 8):
         return out
 
-    last = df.iloc[-1]
-    prior = df.iloc[-(lb + 1):-1]
-    body = abs(float(last["close"]) - float(last["open"]))
     local_atr = max(float(atr), 1e-10)
-    body_atr = body / local_atr
-    out["body_atr"] = round(body_atr, 3)
-
     recent_bodies = (df["close"] - df["open"]).abs().iloc[-(lb + 5):-1]
     median_body = float(recent_bodies.median()) if not recent_bodies.empty else 0.0
     min_body = max(local_atr * MIN_DISPLACEMENT_ATR, median_body * 0.8)
 
-    if direction == "bull":
-        confirmed = (
-            float(last["close"]) > float(last["open"])
-            and float(last["close"]) > float(prior["high"].max())
-            and body >= min_body
-        )
-    else:
-        confirmed = (
-            float(last["close"]) < float(last["open"])
-            and float(last["close"]) < float(prior["low"].min())
-            and body >= min_body
-        )
+    # ── FIX kompatibilitas (empiris: 2100 scan bergulir simulasi hanya
+    # menghasilkan 1 sinyal — gate "harus PERSIS candle terakhir" nyaris
+    # tidak pernah reachable, pola sama seperti bug confidence<65
+    # sebelumnya). Semangat konsepnya dipertahankan (displacement HARUS
+    # baru, bukan candle basi) — cuma jendelanya dilebarkan ke beberapa
+    # candle terakhir (CONFIRM_RECENCY), bukan cuma index -1 secara literal.
+    # Live scanning tetap akan menangkap "momen" ini, cuma sekarang punya
+    # toleransi wajar terhadap timing scan yang tidak persis pas.
+    CONFIRM_RECENCY = min(3, lb)
+    for back in range(CONFIRM_RECENCY):
+        i = len(df) - 1 - back
+        if i < lb:
+            break
+        last = df.iloc[i]
+        prior = df.iloc[i - lb:i]
+        body = abs(float(last["close"]) - float(last["open"]))
+        body_atr = body / local_atr
 
-    if confirmed:
-        out.update({
-            "confirmed": True,
-            "kind": "displacement_close",
-            "idx": len(df) - 1,
-        })
+        if direction == "bull":
+            confirmed = (
+                float(last["close"]) > float(last["open"])
+                and float(last["close"]) > float(prior["high"].max())
+                and body >= min_body
+            )
+        else:
+            confirmed = (
+                float(last["close"]) < float(last["open"])
+                and float(last["close"]) < float(prior["low"].min())
+                and body >= min_body
+            )
+        if confirmed:
+            out.update({
+                "confirmed": True,
+                "kind": "displacement_close",
+                "idx": i,
+                "body_atr": round(body_atr, 3),
+            })
+            return out
+
+    # Tidak ada displacement di jendela — laporkan body_atr candle terakhir
+    # saja untuk keperluan debug/logging (perilaku lama).
+    last = df.iloc[-1]
+    body = abs(float(last["close"]) - float(last["open"]))
+    out["body_atr"] = round(body / local_atr, 3)
     return out
 
 
