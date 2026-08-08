@@ -49,7 +49,7 @@ MONITOR_SLEEP       = 10
 REAL_TRADE_POLL_SLEEP = 30
 MAX_POSITIONS       = 20   # runtime via /max — jangan pindah ke strategy_logic
 MONITOR_INTERVAL    = 15 * 60
-MIN_CONFIDENCE      = 50   # runtime via /confidence_min — jangan pindah ke strategy_logic
+MIN_CONFIDENCE      = 60   # runtime via /confidence_min — balance kualitas/frekuensi — jangan pindah ke strategy_logic
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
 # ─────────────────────────────────────────────
 
@@ -65,8 +65,7 @@ try:
 except Exception as e:
     log.error(f"[OTAK] Gagal memuat strategy_logic.py ({e}) — fallback aman aktif.")
     MIN_RR = 2.0
-    TRAIL_R_LADDER = [(0.5, 0.15), (1.0, 0.35), (1.5, 0.50),
-                       (2.0, 0.65), (2.8, 0.80), (3.5, 0.85)]
+    TRAIL_R_LADDER = []  # strategy trail = struktur M15, bukan profit ladder
     STRUCT_TRAIL_LB, STRUCT_TRAIL_BUF_PCT, STRUCT_TRAIL_LOOKBACK = 2, 0.0015, 60
     FIB_EXT_1, FIB_EXT_2 = 0.272, 0.618
     H4_RSI_BUY_MIN, H4_RSI_BUY_MAX = 45, 68
@@ -1242,8 +1241,49 @@ def _price_cache_loop():
         time.sleep(_PRICE_REFRESH_SEC)
 
 # ═════════════════════════════════════════════
-# INDIKATOR
+# ENTRY GATE — SATU GATE UNTUK SIMULASI & REAL
 # ═════════════════════════════════════════════
+def _validate_signal_before_entry(sym, signal):
+    """Validasi ulang signal tepat sebelum membuka pending/entry.
+
+    Jalur SIMULASI dan REAL wajib melewati fungsi yang sama. Perbedaan mode
+    hanya mekanisme fill: simulasi mendeteksi harga menyentuh limit, sedangkan
+    REAL memasang LIMIT order ke Binance. Tidak ada perubahan Entry/SL/TP/RR
+    khusus mode.
+    """
+    try:
+        price_now = get_price(sym) or float(signal["price"])
+        entry = float(signal["entry"])
+        sl = float(signal["sl"])
+        tp = float(signal["tp"])
+        atr = max(float(signal.get("atr") or 0.0), 1e-12)
+        is_buy = signal["decision"] == "BUY"
+
+        geo_ok = (sl < entry < tp) if is_buy else (tp < entry < sl)
+        if not geo_ok:
+            return False, "GEOMETRY_INVALID"
+
+        # Entry harus berupa retracement limit yang masih masuk akal.
+        # Jarak dinamis berbasis ATR agar koin volatil tidak dibuang hanya
+        # karena beda persen absolut, tetapi tetap mencegah pending absurd jauh.
+        if abs(price_now - entry) > atr * 1.50:
+            return False, "ENTRY_TOO_FAR"
+
+        # Harga tidak boleh sudah berada di sisi invalidation.
+        # Sweep sebelum fill bukan alasan untuk menggeser SL secara otomatis;
+        # tunggu setup baru agar thesis tidak berubah diam-diam.
+        if (price_now <= sl) if is_buy else (price_now >= sl):
+            return False, "SL_ALREADY_BREACHED"
+
+        rr = abs(tp - entry) / max(abs(entry - sl), 1e-12)
+        if rr < MIN_RR or rr > MAX_RR + 1e-9:
+            return False, f"RR_INVALID_{rr:.2f}"
+        return True, "OK"
+    except Exception as e:
+        log.warning(f"[pre-entry] {sym}: validasi gagal: {e}")
+        return False, "VALIDATION_ERROR"
+
+
 def run_scan_once(chat_id):
     tg_send(chat_id,f"🔍 Scanning {TOP_N_COINS} koin...")
     try:
@@ -2019,71 +2059,13 @@ def _open_pending_real(sym, signal, chat_id):
     entry_target = signal["entry"]
     side = "BUY" if is_buy else "SELL"
 
-    # ══ PAGAR TERAKHIR SEBELUM ORDER — HARD REJECT, NO ADJUSTMENT ═══════════
-    #
-    # Filosofi: LEBIH BAIK TIDAK ENTRY SAMA SEKALI daripada entry lalu auto-out.
-    #
-    # strategy_logic.full_analyze() sudah menyaring filter#1 dan filter#2 saat
-    # sinyal dibuat. Tapi ada jeda waktu antara sinyal dibuat dan order dipasang
-    # (beberapa detik), sehingga harga bisa bergerak lagi. Cek ini adalah
-    # lapisan kedua — kalau harga sudah bergerak melewati batas aman, batalkan
-    # order, ban koin sementara, dan cari koin lain. Tidak ada "koreksi" di sini.
-    #
-    # Cek A — SL vs harga sekarang:
-    #   BUY : current_price harus MASIH di atas SL
-    #   SELL: current_price harus MASIH di bawah SL
-    #
-    # Cek B — Entry vs harga sekarang (limit order reachability):
-    #   SELL: entry harus ≥ current_price * 0.995 (limit sell tidak langsung fill)
-    #   BUY : entry harus ≤ current_price * 1.005 (limit buy tidak langsung fill)
-    try:
-        price_now = get_price(sym) or entry_target
-        sl_v_pre  = signal["sl"]
-        tp_v_pre  = signal["tp"]
-
-        # Cek A: SL sudah ditembus?
-        sl_breached = (price_now <= sl_v_pre) if is_buy else (price_now >= sl_v_pre)
-        if sl_breached:
-            _ban_coin(sym, "SL sudah ditembus sebelum order dipasang")
-            tg_send(chat_id,
-                f"⏭ <b>Skip {sym}</b> — Tidak jadi order.\n"
-                f"SL <code>{sl_v_pre:.6g}</code> sudah ditembus harga "
-                f"<code>{price_now:.6g}</code>.\n"
-                f"Sinyal ini sudah kedaluwarsa — cari setup berikutnya.")
-            return
-
-        # Cek B: Entry masih reachable (limit tidak langsung fill di harga salah)?
-        entry_unreachable = (
-            (not is_buy and entry_target < price_now * 0.995) or   # SELL entry di bawah market
-            (is_buy     and entry_target > price_now * 1.005)       # BUY  entry di atas  market
-        )
-        if entry_unreachable:
-            _ban_coin(sym, "entry tidak reachable (limit fill langsung di harga salah)")
-            tg_send(chat_id,
-                f"⏭ <b>Skip {sym}</b> — Tidak jadi order.\n"
-                f"Entry <code>{entry_target:.6g}</code> sudah 'tersapu' "
-                f"(harga pasar <code>{price_now:.6g}</code>).\n"
-                f"{'SELL' if not is_buy else 'BUY'} limit di level ini akan fill "
-                f"sekarang di harga pasar → SL/TP tidak akan valid.\n"
-                f"Sinyal ini sudah kedaluwarsa — cari setup berikutnya.")
-            return
-
-        # Cek C: Geometri dasar masih valid?
-        geo_valid = (sl_v_pre < entry_target < tp_v_pre) if is_buy else (tp_v_pre < entry_target < sl_v_pre)
-        if not geo_valid:
-            _ban_coin(sym, "geometri entry/SL/TP tidak valid")
-            tg_send(chat_id,
-                f"⏭ <b>Skip {sym}</b> — Geometri tidak valid.\n"
-                f"Entry <code>{entry_target:.6g}</code> | "
-                f"SL <code>{sl_v_pre:.6g}</code> | "
-                f"TP <code>{tp_v_pre:.6g}</code>\n"
-                f"Urutan SL–Entry–TP tidak sesuai arah {'BUY' if is_buy else 'SELL'}.")
-            return
-
-    except Exception as _val_err:
-        # Kalau fetch harga gagal, biarkan lanjut — jangan batalkan order karena
-        # masalah koneksi sesaat (bukan karena sinyal yang buruk).
-        log.warning(f"[pre-order-gate] {sym}: {_val_err} — skip validasi, lanjut order")
+    # Gunakan gate yang SAMA persis dengan mode simulasi.
+    valid, reason = _validate_signal_before_entry(sym, signal)
+    if not valid:
+        _ban_coin(sym, reason)
+        tg_send(chat_id,
+            f"⏭ <b>Skip {sym}</b> — pre-entry gate: <code>{reason}</code>.")
+        return
 
     with positions_lock:
         if sym in positions: return
@@ -2180,18 +2162,9 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
             tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nStatus order: {status}")
             return
 
-        price_now = get_price(sym)
-        if price_now is not None and status in ("NEW", "PARTIALLY_FILLED"):
-            tp_hit = (price_now >= tp_p) if is_buy else (price_now <= tp_p)
-            if tp_hit:
-                cancel_order(sym, order_id)
-                with positions_lock:
-                    positions.pop(sym, None)
-                _ban_coin(sym, "TP sebelum entry")
-                _record_pending_cancel("tp_before_entry")
-                tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nTP tersentuh sebelum entry, order dibatalkan.")
-                return
-
+        # Pending REAL mengikuti aturan yang sama dengan simulasi: selama order
+        # belum fill dan belum timeout/manual cancel, biarkan LIMIT menunggu.
+        # Tidak ada TP/SL-before-entry veto terpisah di mode REAL.
         time.sleep(REAL_TRADE_POLL_SLEEP)
 
     cancel_order(sym, order_id)
@@ -2786,9 +2759,15 @@ def simulation_loop(chat_id):
                 if sym in positions: return
                 if len(positions) >= MAX_POSITIONS: return
 
-            # ── REAL TRADE: pasang limit order asli, exchange yang urus fill ──
-            # (tidak butuh split langsung/pending seperti simulasi — order
-            # limit otomatis fill instan kalau harga sudah di zona entry)
+            # SATU pre-entry gate untuk kedua mode. Setelah lolos, satu-satunya
+            # perbedaan adalah mekanisme fill: Binance LIMIT vs simulator.
+            valid, reason = _validate_signal_before_entry(sym, signal)
+            if not valid:
+                log.info(f"[pre-entry] {sym} REJECT: {reason}")
+                _ban_coin(sym, reason)
+                return
+
+            # ── REAL TRADE: pasang LIMIT asli. ─────────────────────────────
             if REAL_TRADE_ENABLED:
                 _open_pending_real(sym, signal, chat_id)
                 return
@@ -2900,44 +2879,7 @@ def simulation_loop(chat_id):
             if price_now is None:
                 time.sleep(MONITOR_SLEEP); continue
 
-            # TP tersentuh sebelum entry → sinyal basi, hapus pending
-            tp_hit = (price_now >= tp_p) if is_buy else (price_now <= tp_p)
-            if tp_hit:
-                with positions_lock:
-                    positions.pop(sym, None)
-                _ban_coin(sym, "TP sebelum entry")
-                tg_send(chat_id,
-                    f"⏭ <b>Pending Batal</b> — {sym}\n"
-                    f"TP tersentuh sebelum entry. Skip.")
-                return
-
-            # SL sebelum entry — BUTUH KONFIRMASI CANDLE CLOSE M15 (lihat
-            # docstring). Dicek setiap ~60 detik saja (cukup, candle M15
-            # baru muncul tiap 15 menit) supaya tidak fetch klines tiap
-            # 10 detik terus-menerus.
-            if time.time() >= next_sl_check:
-                next_sl_check = time.time() + 60
-                try:
-                    df_chk = get_klines(sym, "15m", 3)
-                    if df_chk is not None and len(df_chk) >= 2:
-                        closed_row = df_chk.iloc[-2]   # candle terakhir yg SUDAH close
-                        ts_closed  = df_chk.index[-2]
-                        if last_m15_ts is None or ts_closed != last_m15_ts:
-                            last_m15_ts = ts_closed
-                            close_v = float(closed_row["close"])
-                            sl_confirmed = (close_v <= sl_p) if is_buy else (close_v >= sl_p)
-                            if sl_confirmed:
-                                with positions_lock:
-                                    positions.pop(sym, None)
-                                _ban_coin(sym, "SL sebelum entry")
-                                tg_send(chat_id,
-                                    f"⏭ <b>Pending Batal</b> — {sym}\n"
-                                    f"Candle M15 close mengonfirmasi SL sebelum entry. Skip.")
-                                return
-                except Exception as e:
-                    log.debug(f"[_wait_entry sl-confirm] {sym}: {e}")
-
-            # Harga mencapai zona entry — SEMAKIN MIRIP LIMIT ORDER ASLI:
+            # Harga mencapai zona entry — SIMULASI mengikuti LIMIT order REAL:
             # ── FIX "buat semirip mungkin" ──────────────────────────────
             # Sebelumnya pakai toleransi 0.3% (price_now <= entry*1.003) —
             # simulasi bisa anggap "entry kena" walau harga BELUM PERNAH

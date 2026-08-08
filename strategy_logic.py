@@ -103,8 +103,9 @@ FIB_EXT_2 = 0.618   # 161.8%
 INDUCEMENT_LOOKBACK  = 40     # candle M15 untuk cari liquidity minor sebelum POI
 INDUCEMENT_MINOR_LB  = 2      # lookback swing_pts untuk swing "minor" (inducement)
 CONFLUENCE_BONUS      = 2     # bonus skor kalau OB/FVG M15 overlap dengan zona H1
-POI_REACTION_LOOKBACK = 16     # candle M15 untuk menunggu reaksi setelah POI HTF
-CONFIRMATION_LOOKBACK = 4      # candle M15 yang dipakai untuk displacement terbaru
+POI_REACTION_LOOKBACK = 24     # candle M15 untuk reaksi setelah POI HTF
+CONFIRMATION_LOOKBACK = 4      # candle M15 untuk displacement terbaru
+MAX_ENTRY_DISTANCE_ATR = 1.50  # pending entry boleh menunggu sampai 1.5 ATR; bukan market entry
 MIN_DISPLACEMENT_ATR  = 0.25   # body minimum agar candle bukan noise
 
 
@@ -1110,10 +1111,10 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         # Binance can fill those immediately at a different price, leaving
         # the original SL/TP geometry invalid.
         if up:
-            if current_price < z["bot"] or entry_pt > current_price * 1.001:
+            if current_price < z["bot"] or (current_price - entry_pt) > atr * MAX_ENTRY_DISTANCE_ATR:
                 continue
         else:
-            if current_price > z["top"] or entry_pt < current_price * 0.999:
+            if current_price > z["top"] or (entry_pt - current_price) > atr * MAX_ENTRY_DISTANCE_ATR:
                 continue
 
         sc = 3 + z["quality"]  # base 3 + quality
@@ -1148,10 +1149,10 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         entry_pt = f["mid"]
         invalid_pt = f["bot"] if up else f["top"]
         if up:
-            if current_price < f["bot"] or entry_pt > current_price * 1.001:
+            if current_price < f["bot"] or (current_price - entry_pt) > atr * MAX_ENTRY_DISTANCE_ATR:
                 continue
         else:
-            if current_price > f["top"] or entry_pt < current_price * 0.999:
+            if current_price > f["top"] or (entry_pt - current_price) > atr * MAX_ENTRY_DISTANCE_ATR:
                 continue
         sc = 3
         if cisd_ok: sc += 2
@@ -1186,10 +1187,10 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         # BUY (up): entry di equal LOW → level harus ≤ current_price
         #   supaya BUY limit menunggu harga turun ke sana, bukan fill sekarang.
         #   Toleransi 0.3%: jika eq > current_price * 1.003 → sudah tersapu.
-        if not up and float(eq) < current_price * 0.999:
-            continue   # EQ high sudah di bawah harga pasar → skip
-        if up and float(eq) > current_price * 1.001:
-            continue   # EQ low sudah di atas harga pasar → skip
+        if not up and (float(eq) < current_price or float(eq) - current_price > atr * MAX_ENTRY_DISTANCE_ATR):
+            continue
+        if up and (float(eq) > current_price or current_price - float(eq) > atr * MAX_ENTRY_DISTANCE_ATR):
+            continue
 
         invalid_pt = eq - atr * 0.8 if up else eq + atr * 0.8
         sc = 2
@@ -1485,7 +1486,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         cands = _collect_entry_candidates(m15, h1, direction, cur_price, atr, score)
         if not cands:
             if symbol:
-                log.debug(f"[{symbol}] no entry candidates")
+                log.info(f"[{symbol}] REJECT: NO_ENTRY_CANDIDATE")
             return None
 
         best = cands[0]
@@ -1497,8 +1498,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         # gate HTF/POI/confirmation di bawah dan floor confidence main.py.
         if confidence < 15 or score.get("direction_edge", 0) < 12:
             if symbol:
-                log.debug(
-                    f"[{symbol}] quality gate: conf={confidence}, "
+                log.info(
+                    f"[{symbol}] REJECT: LOW_DIRECTION_EDGE conf={confidence} "
                     f"edge={score.get('direction_edge', 0)}"
                 )
             return None
@@ -1507,20 +1508,50 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         # Zona yang masih fresh tidak berarti sudah siap dieksekusi; justru
         # setup ideal menunggu touch -> rejection -> displacement -> retest.
         htf_poi = _collect_htf_poi_zones(h1, direction, score)
-        if not htf_poi:
-            if symbol:
-                log.debug(f"[{symbol}] tidak ada POI H1 searah yang valid")
-            return None
-        poi_reacted = _recent_poi_reaction(m15, htf_poi, direction, atr)
-        if not poi_reacted:
-            if symbol:
-                log.debug(f"[{symbol}] POI H1 belum mendapat reaksi baru")
-            return None
-
         confirmation = score.get("entry_confirmation", {})
+        selected_sweep = bool(score.get("selected_sweep"))
+        selected_choch = bool(
+            score.get("choch_m15", {}).get("bullish_choch" if up else "bearish_choch")
+        )
+        selected_bos = bool(
+            score.get("bos_m15", {}).get("bullish_bos" if up else "bearish_bos")
+        )
+        selected_cisd = bool(
+            score.get("cisd_m15", {}).get("bullish_cisd" if up else "bearish_cisd")
+        )
+
+        # Entry tetap wajib punya displacement/structure confirmation.
+        # Liquidity sweep adalah lokasi/trigger yang sangat bernilai, tetapi
+        # tidak dipaksa muncul pada setiap setup. Minimal harus ada confirmation
+        # + satu bukti struktur/liquidity lain.
         if not confirmation.get("confirmed"):
             if symbol:
-                log.debug(f"[{symbol}] belum ada displacement close terbaru")
+                log.info(f"[{symbol}] REJECT: NO_M15_DISPLACEMENT")
+            return None
+
+        secondary_trigger = selected_sweep or selected_choch or selected_bos or selected_cisd
+        if not secondary_trigger:
+            if symbol:
+                log.info(f"[{symbol}] REJECT: NO_STRUCTURE_OR_LIQUIDITY_TRIGGER")
+            return None
+
+        # HTF POI tetap menjadi prioritas utama. Namun jangan membunuh setup
+        # hanya karena rejection terjadi beberapa candle lebih tua dari window,
+        # atau karena POI belum tercatat sebagai 'reaction' padahal kandidat
+        # entry sendiri overlap dengan POI + sweep + displacement sudah terjadi.
+        # Ini menjaga prinsip top-down tanpa membuat scan 50 koin kosong.
+        poi_reacted = _recent_poi_reaction(m15, htf_poi, direction, atr) if htf_poi else False
+        candidate_overlaps_htf = False
+        if htf_poi:
+            candidate_overlaps_htf = any(
+                zones_overlap(best["price"], best["price"], z["top"], z["bot"])
+                for z in htf_poi
+            )
+        poi_ready = poi_reacted or (candidate_overlaps_htf and selected_sweep and confirmation.get("confirmed"))
+        if not poi_ready:
+            if symbol:
+                reason = "NO_HTF_POI" if not htf_poi else "NO_POI_REACTION_OR_SWEEP_CONFIRM"
+                log.info(f"[{symbol}] REJECT: {reason}")
             return None
 
         selected_m15_struct = score.get("m15_struct", "ranging")
@@ -1528,15 +1559,12 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             (direction == "bull" and selected_m15_struct == "bearish") or
             (direction == "bear" and selected_m15_struct == "bullish")
         )
-        # Counter-trend entries are accepted only with a real reversal
-        # trigger, not because RSI/OTE bonuses happened to win the score.
-        if opposite_m15 and score.get("trigger_count", 0) < 2:
+        # Counter-trend M15 tetap butuh reversal evidence. Confirmation + sweep
+        # atau structure trigger sudah cukup; tidak lagi mewajibkan trigger_count
+        # mentah >=2 karena confirmation sendiri sudah salah satu trigger.
+        if opposite_m15 and not (selected_sweep or selected_choch or selected_bos or selected_cisd):
             if symbol:
-                log.debug(f"[{symbol}] M15 berlawanan tanpa reversal lengkap")
-            return None
-        if score.get("trigger_count", 0) < 2:
-            if symbol:
-                log.debug(f"[{symbol}] trigger M15 belum cukup kuat")
+                log.info(f"[{symbol}] REJECT: COUNTERTREND_WITHOUT_REVERSAL")
             return None
 
         if symbol:
@@ -1599,18 +1627,12 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         #     → fill sekarang di harga pasar → actual_entry < SL → geometri rusak
         #
         #   Toleransi 0.5% untuk pembulatan tick / lag data minor.
-        if not up and entry < cur_price * 0.995:
+        entry_distance = abs(cur_price - entry)
+        if entry_distance > atr * MAX_ENTRY_DISTANCE_ATR:
             if symbol:
-                log.debug(
-                    f"[{symbol}] DITOLAK (filter#2): SELL entry={entry:.6g} di bawah "
-                    f"current={cur_price:.6g} — limit akan fill di harga salah, skip"
-                )
-            return None
-        if up and entry > cur_price * 1.005:
-            if symbol:
-                log.debug(
-                    f"[{symbol}] DITOLAK (filter#2): BUY entry={entry:.6g} di atas "
-                    f"current={cur_price:.6g} — limit akan fill di harga salah, skip"
+                log.info(
+                    f"[{symbol}] REJECT: ENTRY_TOO_FAR distance={entry_distance:.6g} "
+                    f"> {MAX_ENTRY_DISTANCE_ATR:.2f}ATR"
                 )
             return None
 
@@ -1629,7 +1651,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
 
         if tp_price is None:
             if symbol:
-                log.debug(f"[{symbol}] tidak ada target struktur dengan RR memadai")
+                log.info(f"[{symbol}] REJECT: NO_TP_RR2")
             return None
 
         if symbol:
@@ -1637,16 +1659,16 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
 
         if up and cur_price >= tp_price:
             if symbol:
-                log.debug(f"[{symbol}] TP sudah lewat (price={cur_price:.6f})")
+                log.info(f"[{symbol}] REJECT: TP_ALREADY_PASSED")
             return None
         if not up and cur_price <= tp_price:
             if symbol:
-                log.debug(f"[{symbol}] TP sudah lewat")
+                log.info(f"[{symbol}] REJECT: TP_ALREADY_PASSED")
             return None
 
         if rr < MIN_RR:
             if symbol:
-                log.debug(f"[{symbol}] RR={rr:.2f} < {MIN_RR}, skip")
+                log.info(f"[{symbol}] REJECT: RR_BELOW_MIN rr={rr:.2f}")
             return None
 
         rsi_val = round(float(m15["rsi"].iloc[-1]), 1)
