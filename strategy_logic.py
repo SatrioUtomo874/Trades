@@ -1179,91 +1179,88 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
 
 def _compute_sl(m15: pd.DataFrame, h1: pd.DataFrame, direction: str,
                 entry: float, atr: float, liq_sweep: dict,
-                invalid_level: Optional[float] = None) -> Tuple[float, float]:
-    """
-    Hitung SL yang tepat secara struktural, ditempatkan sedemikian rupa
-    sehingga jika tersentuh berarti arah benar‑benar salah (bukan LS biasa).
-    Buffer anti‑Liquidity Sweep = 0.5 ATR.
-    Pilih kandidat dengan prioritas: ob_invalid > struct_h1 > ls_level > struct_m15,
-    dan di antara prioritas yang sama pilih yang LEBIH JAUH dari entry
-    (lebih tahan noise).
+                invalid_level: Optional[float] = None) -> Tuple[Optional[float], Optional[float]]:
+    """Cari invalidation struktural yang benar-benar membatalkan setup.
+
+    Prinsip penting:
+      * Jangan memperlebar SL hanya untuk mengejar RR.
+      * Untuk setup sell, invalidation harus berada di atas struktur/liq yang
+        membuat ide sell valid; untuk buy kebalikannya.
+      * Liquidity sweep level diprioritaskan sebagai referensi invalidation
+        bila sweep memang menjadi alasan setup.
+      * Jika kandidat entry menghasilkan invalidation terlalu jauh, return
+        (None, None). Caller boleh mencoba POI/entry candidate berikutnya.
     """
     up = direction == "bull"
-    ls_buffer = atr * 0.5
-    min_risk = atr * 1.0
-    # Wide structural stops were responsible for disproportionate losses on
-    # fast altcoins.  A setup whose invalidation is farther than 2.75 ATR is
-    # not an entry problem that a larger stop can solve; it is a skip.
-    max_risk = atr * 2.75
+    atr = max(float(atr), 1e-10)
+    # Buffer adaptif: cukup untuk wick/noise, tetapi tidak boleh mengubah
+    # invalidation menjadi stop yang jauh.  0.30 ATR lebih konservatif daripada
+    # versi lama 0.50 ATR dan menjaga SL tetap dekat struktur.
+    buffer = atr * 0.30
+    max_risk = atr * 2.25
+    min_risk = atr * 0.20
 
-    cands = []
+    candidates = []
 
-    # 1. invalid level dari OB/FVG
-    if invalid_level is not None:
-        sl_raw = invalid_level + (-ls_buffer if up else ls_buffer)
-        risk = abs(sl_raw - entry)
-        if min_risk <= risk <= max_risk:
-            cands.append(("ob_invalid", sl_raw, risk))
+    def add(label, level, priority, buffer_mult=1.0):
+        if level is None:
+            return
+        level = float(level)
+        sl = level - buffer * buffer_mult if up else level + buffer * buffer_mult
+        risk = abs(sl - entry)
+        if risk < min_risk or risk > max_risk:
+            return
+        if up and sl >= entry:
+            return
+        if not up and sl <= entry:
+            return
+        candidates.append((priority, risk, label, sl))
 
-    # 2. M15 swing (prioritas lebih rendah karena lebih rentan noise)
+    # 1) Gabungkan invalidation POI + sweep bila keduanya ada.
+    # Untuk SELL, invalidation harus DI ATAS keduanya; untuk BUY DI BAWAH
+    # keduanya. Ini mencegah stop ditempatkan di dalam liquidity sweep.
+    sweep_level = None
+    if liq_sweep and liq_sweep.get("type") == "sweep":
+        sweep_level = liq_sweep.get("level")
+    if invalid_level is not None and sweep_level is not None:
+        if up:
+            combined = min(float(invalid_level), float(sweep_level))
+        else:
+            combined = max(float(invalid_level), float(sweep_level))
+        add("poi_plus_sweep", combined, 0, 1.10)
+    else:
+        add("poi_invalid", invalid_level, 0)
+        if sweep_level is not None:
+            add("liquidity_sweep", sweep_level, 1, 1.10)
+
+    # 2) Swing M15 TERDEKAT yang relevan, bukan swing terakhir secara buta.
     sh15, sl15 = swing_pts(m15, lb=3)
-    if up and sl15:
-        struct_low = float(m15["low"].iloc[sl15[-1]])
-        if struct_low < entry:
-            sl_raw = struct_low - ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_m15", sl_raw, risk))
-    elif not up and sh15:
-        struct_high = float(m15["high"].iloc[sh15[-1]])
-        if struct_high > entry:
-            sl_raw = struct_high + ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_m15", sl_raw, risk))
+    if up:
+        levels = [float(m15["low"].iloc[i]) for i in sl15[-4:] if float(m15["low"].iloc[i]) < entry]
+    else:
+        levels = [float(m15["high"].iloc[i]) for i in sh15[-4:] if float(m15["high"].iloc[i]) > entry]
+    for lv in levels:
+        add("m15_invalidation", lv, 2)
 
-    # 3. level yang disweep
-    if liq_sweep and liq_sweep.get("type") == "sweep" and liq_sweep.get("level"):
-        lev = float(liq_sweep["level"])
-        if up and lev < entry:
-            sl_raw = lev - ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("ls_level", sl_raw, risk))
-        elif not up and lev > entry:
-            sl_raw = lev + ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("ls_level", sl_raw, risk))
-
-    # 4. H1 swing (lebih lebar, lebih tahan noise)
+    # 4) H1 hanya fallback bila memang masih compact. Jangan pakai H1 jauh
+    # hanya karena ia lebih "aman"; itu merusak RR dan kualitas setup.
     sh1, sl1 = swing_pts(h1, lb=5)
-    if up and sl1:
-        h1_low = float(h1["low"].iloc[sl1[-1]])
-        if h1_low < entry:
-            sl_raw = h1_low - ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_h1", sl_raw, risk))
-    elif not up and sh1:
-        h1_high = float(h1["high"].iloc[sh1[-1]])
-        if h1_high > entry:
-            sl_raw = h1_high + ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_h1", sl_raw, risk))
+    if up:
+        levels = [float(h1["low"].iloc[i]) for i in sl1[-3:] if float(h1["low"].iloc[i]) < entry]
+    else:
+        levels = [float(h1["high"].iloc[i]) for i in sh1[-3:] if float(h1["high"].iloc[i]) > entry]
+    for lv in levels:
+        add("h1_invalidation", lv, 3)
 
-    if cands:
-        # Prioritas: ob_invalid (paling presisi), struct_h1 (paling tahan),
-        # ls_level, struct_m15. Dalam prioritas sama, pilih risk terbesar.
-        _PRIO = {"ob_invalid": 0, "struct_h1": 1, "ls_level": 2, "struct_m15": 3}
-        cands.sort(key=lambda x: (_PRIO.get(x[0], 9), -x[2]))
-        _, sl_price, risk = cands[0]
-        return sl_price, risk
+    if not candidates:
+        return None, None
 
-    # Fallback ATR
-    sl_price = entry + (-min_risk if up else min_risk)
-    return sl_price, min_risk
+    # Untuk invalidation, pilih prioritas struktur terlebih dahulu. Jika dua
+    # kandidat sama-sama valid, pilih yang lebih jauh hanya dalam batas 2.25 ATR
+    # agar tidak gampang kena wick, bukan memperlebar tanpa batas.
+    candidates.sort(key=lambda x: (x[0], -x[1]))
+    _, risk, _, sl = candidates[0]
+    return float(sl), float(risk)
 
 
 # =============================================================================
@@ -1393,7 +1390,7 @@ def _select_tp(pool: list, entry: float, risk: float,
 
     # 1. Ada target di zona ideal
     if qualified:
-        best = min(qualified, key=lambda x: (x[3], x[2]))  # target pertama yang benar-benar >=2R
+        best = min(qualified, key=lambda x: (x[2], x[3]))  # tier, lalu RR terkecil
         return round(best[1], 8), best[0], round(best[3], 2)
 
     # 2. Ada target terlalu jauh → cap ke 4.0
@@ -1411,257 +1408,282 @@ def _select_tp(pool: list, entry: float, risk: float,
 # FUNGSI UTAMA — Dipanggil oleh main.py
 # =============================================================================
 
+def _setup_confidence(score: dict, entry_cand: dict, poi_reacted: bool,
+                      confirmation: dict, htf_overlap: bool,
+                      sweep: bool) -> int:
+    """Confidence final = kualitas arah + kualitas entry.
+
+    Confidence tidak lagi menjadi sekadar jumlah indikator. Komponen yang
+    benar-benar berhubungan dengan entry diberi bobot kecil namun nyata.
+    Tidak adanya satu komponen bukan hard reject.
+    """
+    conf = float(score.get("confidence", 0))
+    trigger_count = int(score.get("trigger_count", 0))
+    m15_struct = score.get("m15_struct", "ranging")
+    direction = score.get("direction")
+    opposite = (
+        (direction == "bull" and m15_struct == "bearish") or
+        (direction == "bear" and m15_struct == "bullish")
+    )
+
+    if htf_overlap:
+        conf += 4
+    if poi_reacted:
+        conf += 6
+    else:
+        conf -= 3
+    if confirmation.get("confirmed"):
+        conf += 7
+    else:
+        conf -= 4
+    if sweep:
+        conf += 8
+    else:
+        conf -= 2
+    if trigger_count >= 3:
+        conf += 4
+    elif trigger_count == 2:
+        conf += 2
+    elif trigger_count == 0:
+        conf -= 3
+    if opposite:
+        conf -= 6
+
+    # Entry model quality: FVG/OB lebih baik daripada EQ, tetapi bukan gate.
+    label_bonus = {"ob": 3, "fvg": 4, "eq": 1}
+    conf += label_bonus.get(entry_cand.get("label"), 0)
+    return max(1, min(int(round(conf)), 99))
+
+
+def _recent_sweep_context(m15: pd.DataFrame, direction: str,
+                          lookback: int = 6) -> dict:
+    """Cari sweep yang masih relevan beberapa candle terakhir.
+
+    detect_liquidity_sweep() lama hanya memeriksa candle terakhir. Untuk entry
+    berbasis retest, sweep yang terjadi 1–6 candle sebelumnya justru sering
+    menjadi konteks yang lebih masuk akal.
+    """
+    if m15 is None or len(m15) < 12:
+        return {"type": "none", "level": None, "strength": 0, "age": None}
+    start = max(5, len(m15) - lookback)
+    best = None
+    for i in range(start, len(m15)):
+        prior = m15.iloc[:i]
+        sh, sl = swing_pts(prior, lb=3)
+        if direction == "bull" and sl:
+            level = float(prior["low"].iloc[sl[-1]])
+            lo = float(m15["low"].iloc[i])
+            cl = float(m15["close"].iloc[i])
+            if lo < level and cl > level:
+                depth = (level - lo) / max(level, 1e-10)
+                cand = {"type": "sweep", "level": level,
+                        "strength": min(3, int(depth / 0.002) + 1),
+                        "age": len(m15) - 1 - i}
+                if best is None or cand["age"] < best["age"]:
+                    best = cand
+        elif direction == "bear" and sh:
+            level = float(prior["high"].iloc[sh[-1]])
+            hi = float(m15["high"].iloc[i])
+            cl = float(m15["close"].iloc[i])
+            if hi > level and cl < level:
+                depth = (hi - level) / max(level, 1e-10)
+                cand = {"type": "sweep", "level": level,
+                        "strength": min(3, int(depth / 0.002) + 1),
+                        "age": len(m15) - 1 - i}
+                if best is None or cand["age"] < best["age"]:
+                    best = cand
+    return best or {"type": "none", "level": None, "strength": 0, "age": None}
+
+
 def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                  df_d1: Optional[pd.DataFrame] = None,
                  symbol: Optional[str] = None,
                  df_btc_h1: Optional[pd.DataFrame] = None) -> Optional[dict]:
-    """
-    Analisa penuh satu koin: Entry → SL → TP.
+    """Analisa satu koin: ENTRY → SL → TP → CONFIDENCE.
 
-    df_btc_h1: candle H1 BTCUSDT, OPSIONAL — kalau dikasih, dipakai sebagai
-    filter macro (lihat _macro_bias) supaya sinyal yang jelas melawan arah
-    market keseluruhan sedikit diredam, bukan diloloskan mentah-mentah cuma
-    berdasar struktur koin itu sendiri. Kalau tidak dikasih (default None),
-    perilaku 100% sama seperti sebelumnya — tidak ada filter tambahan.
+    Perbaikan utama:
+      * Semua entry candidate dicoba, bukan hanya candidate dengan score POI
+        tertinggi. Candidate yang SL-nya terlalu lebar atau tidak punya target
+        2R diganti dengan candidate berikutnya.
+      * POI reaction, displacement, sweep, dan trigger menjadi confluence,
+        bukan hard reject individual.
+      * SL tidak boleh diperlebar demi RR; jika invalidation buruk, candidate
+        gugur dan candidate entry lain dicoba.
+      * TP tetap mencari target lanjutan sampai minimal 2R, lalu cap 4R.
     """
     try:
         if df_h1 is None or df_m15 is None or df_h1.empty or df_m15.empty:
             return None
 
-        if symbol:
-            log.info(f"[{symbol}] h1={len(df_h1)} m15={len(df_m15)}")
-
         score = score_direction(df_h1, df_m15, df_d1, df_btc_h1)
         if score is None:
-            if symbol:
-                log.debug(f"[{symbol}] score_direction=None (data kurang)")
             return None
 
         direction = score["direction"]
-        cur_price = score["price"]
-        atr = score["atr"]
-        confidence = score["confidence"]
+        cur_price = float(score["price"])
+        atr = max(float(score["atr"]), 1e-10)
         up = direction == "bull"
-
-        if symbol:
-            log.info(
-                f"[{symbol}] dir={direction} conf={confidence}% "
-                f"struct_h1={score['struct_h1']} d1={score['d1_bias']} "
-                f"macro={score.get('macro_bias', 'unknown')}"
-            )
 
         h1 = build_df(df_h1, interval_minutes=60)
         m15 = build_df(df_m15, interval_minutes=15)
         if h1 is None or m15 is None:
             return None
 
-        # ── STEP 1: ENTRY ────────────────────────────────────────
+        if symbol:
+            log.info(
+                f"[{symbol}] dir={direction} base_conf={score['confidence']}% "
+                f"struct_h1={score['struct_h1']} d1={score['d1_bias']} "
+                f"macro={score.get('macro_bias', 'unknown')}"
+            )
+
         cands = _collect_entry_candidates(m15, h1, direction, cur_price, atr, score)
         if not cands:
             if symbol:
-                log.debug(f"[{symbol}] no entry candidates")
+                log.info(f"[{symbol}] REJECT: NO_ENTRY_CANDIDATE")
             return None
 
-        best = cands[0]
-        entry = best["price"]
-        entry_lbl = best["label"]
-        invalid = best["invalid"]
-
-        # Jaring minimum untuk noise murni. Selektivitas entry utama ada pada
-        # gate HTF/POI/confirmation di bawah dan floor confidence main.py.
-        if confidence < 15 or score.get("direction_edge", 0) < 12:
-            if symbol:
-                log.debug(
-                    f"[{symbol}] quality gate: conf={confidence}, "
-                    f"edge={score.get('direction_edge', 0)}"
-                )
-            return None
-
-        # Confluence/confirmation adalah PENAMBAH KUALITAS, bukan hard gate.
-        # Entry/SL/TP yang benar tetap wajib, tetapi kurang satu trigger tidak
-        # membuat seluruh setup mati. Confidence dari score_direction() sudah
-        # memuat komponen-komponen struktur/liquidity; di sini hanya diberi
-        # penyesuaian kecil agar entry confirmation tetap punya pengaruh.
         htf_poi = _collect_htf_poi_zones(h1, direction, score)
-        poi_reacted = bool(htf_poi) and _recent_poi_reaction(m15, htf_poi, direction, atr)
+        poi_reacted = _recent_poi_reaction(m15, htf_poi, direction, atr) if htf_poi else False
         confirmation = score.get("entry_confirmation", {})
-        selected_m15_struct = score.get("m15_struct", "ranging")
-        trigger_count = int(score.get("trigger_count", 0) or 0)
-        opposite_m15 = (
-            (direction == "bull" and selected_m15_struct == "bearish") or
-            (direction == "bear" and selected_m15_struct == "bullish")
-        )
-        quality_bonus = 0
-        quality_notes = []
-        if htf_poi:
-            quality_bonus += 3; quality_notes.append("HTF_POI")
-        if poi_reacted:
-            quality_bonus += 5; quality_notes.append("POI_REACTION")
-        if confirmation.get("confirmed"):
-            quality_bonus += 7; quality_notes.append("DISPLACEMENT")
-        if trigger_count >= 1:
-            quality_bonus += 3
-            quality_notes.append("M15_TRIGGER")
-        if trigger_count >= 2:
-            quality_bonus += 3
-            quality_notes.append("2_TRIGGERS")
-        if opposite_m15:
-            quality_bonus -= 5
-            quality_notes.append("COUNTER_M15")
-        confidence = int(max(0, min(100, confidence + quality_bonus)))
-        if symbol:
-            log.info(f"[{symbol}] confluence={quality_bonus:+d} final_conf={confidence}% "
-                     f"parts={','.join(quality_notes) if quality_notes else 'BASE'}")
+        recent_sweep = _recent_sweep_context(m15, direction)
+        old_sweep = score.get("liquidity_bull" if up else "liquidity_bear", {})
+        sweep_ctx = recent_sweep if recent_sweep.get("type") == "sweep" else old_sweep
+        sweep_ok = sweep_ctx.get("type") == "sweep"
 
-        if symbol:
-            log.info(f"[{symbol}] ENTRY={entry:.6f} label={entry_lbl} score={best['score']}")
-
-        # ── STEP 2: SL ──────────────────────────────────────────
-        liq_ctx = score["liquidity_bull"] if up else score["liquidity_bear"]
-        sl_price, risk = _compute_sl(m15, h1, direction, entry, atr,
-                                     liq_ctx, invalid)
-
-        if up and sl_price >= entry:
-            if symbol:
-                log.debug(f"[{symbol}] SL={sl_price:.6f} ≥ entry={entry:.6f}, skip")
-            return None
-        if not up and sl_price <= entry:
-            if symbol:
-                log.debug(f"[{symbol}] SL={sl_price:.6f} ≤ entry={entry:.6f}, skip")
-            return None
-        if risk <= 0:
-            return None
-
-        # ══ FILTER KRITIS #1 — SL vs HARGA PASAR SEKARANG ═══════════════════
-        # Ini adalah filter paling penting untuk mencegah auto-out.
-        # SL dihitung dari struktur (swing H1/M15), tapi harga bisa sudah
-        # bergerak sehingga current_price sudah melewati SL sebelum order
-        # bahkan terpasang. Kalau lolos di sini → order akan LANGSUNG auto-out
-        # setelah fill karena "harga sudah melewati SL".
-        #
-        #   BUY : current_price harus di ATAS SL  (kalau sudah di bawah → skip)
-        #   SELL: current_price harus di BAWAH SL (kalau sudah di atas → skip)
-        if up and cur_price <= sl_price:
-            if symbol:
-                log.debug(
-                    f"[{symbol}] DITOLAK (filter#1): BUY SL={sl_price:.6g} sudah "
-                    f"ditembus current={cur_price:.6g} — akan auto-out, skip"
-                )
-            return None
-        if not up and cur_price >= sl_price:
-            if symbol:
-                log.debug(
-                    f"[{symbol}] DITOLAK (filter#1): SELL SL={sl_price:.6g} sudah "
-                    f"ditembus current={cur_price:.6g} — akan auto-out, skip"
-                )
-            return None
-
-        # ══ FILTER KRITIS #2 — ENTRY vs HARGA PASAR (LIMIT ORDER REACHABILITY) ══
-        # Limit order harus MENUNGGU harga datang ke level entry, bukan
-        # langsung fill di harga pasar. Kalau entry sudah "di belakang" harga,
-        # Binance Futures fill langsung di harga pasar → actual_entry ≠ entry
-        # → SL/TP dihitung untuk entry lama → geometri rusak → auto-out.
-        #
-        #   SELL limit: entry_target harus ≥ current_price
-        #     (harga perlu NAIK dulu ke entry, baru fill)
-        #     Kalau entry < current * 0.995 → limit sell sudah di bawah market
-        #     → fill sekarang di harga pasar → actual_entry > SL → geometri rusak
-        #
-        #   BUY limit: entry_target harus ≤ current_price
-        #     (harga perlu TURUN dulu ke entry, baru fill)
-        #     Kalau entry > current * 1.005 → limit buy sudah di atas market
-        #     → fill sekarang di harga pasar → actual_entry < SL → geometri rusak
-        #
-        #   Toleransi 0.5% untuk pembulatan tick / lag data minor.
-        # ENTRY EXECUTABILITY DITENTUKAN DI SCAN PER-KOIN.
-        # Jika harga sudah berada di sisi yang salah dari limit, setup ini
-        # berstatus WAIT/UNEXECUTABLE untuk scan ini dan TIDAK boleh sampai ke
-        # tahap ranking akhir. Ini bukan sinyal buruk; hanya belum bisa masuk.
-        # Dengan begitu kandidat koin lain yang sehat dan executable dapat
-        # menang tanpa perlu proses akhir memilih lalu membuang kandidat terbaik.
-        entry_tolerance = 0.005
-        executable = (
-            (up and entry <= cur_price * (1 + entry_tolerance)) or
-            ((not up) and entry >= cur_price * (1 - entry_tolerance))
-        )
-        if not executable:
-            if symbol:
-                log.info(
-                    f"[{symbol}] WAIT_ENTRY: entry={entry:.6g} current={cur_price:.6g}; "
-                    f"setup conf={confidence}% belum executable, tidak masuk ranking akhir"
-                )
-            return None
-
-        if symbol:
-            log.info(f"[{symbol}] SL={sl_price:.6f} risk={risk:.6f}")
-
-        # ── STEP 3: TP ──────────────────────────────────────────
         sh1 = score.get("sh1", [])
         sl1 = score.get("sl1", [])
         sh15 = score.get("sh15", [])
         sl15 = score.get("sl15", [])
 
-        tp_pool = _build_tp_pool(h1, m15, direction, entry, atr,
-                                 sh1, sl1, sh15, sl15)
-        tp_price, tp_lbl, rr = _select_tp(tp_pool, entry, risk, direction)
+        # Candidate loop: kualitas entry yang lebih tinggi tidak boleh mengalahkan
+        # entry yang secara struktur/SL/TP ternyata jelek.
+        for idx, cand in enumerate(cands[:8]):
+            entry = float(cand["price"])
+            entry_lbl = cand["label"]
+            invalid = cand.get("invalid")
 
-        if tp_price is None:
+            # Limit order harus masih berada di sisi yang bisa ditunggu.
+            # Jika terlalu jauh, tetap dikembalikan sebagai WAIT, bukan sinyal
+            # executable; main.py dapat memilih kandidat READY lain.
+            wait_entry = (not up and entry < cur_price) or (up and entry > cur_price)
+
+            # Cari overlap entry dengan POI H1.
+            htf_overlap = False
+            for z in htf_poi:
+                if zones_overlap(cand.get("price", entry), cand.get("price", entry),
+                                 z["top"], z["bot"]):
+                    htf_overlap = True
+                    break
+            # Untuk point-entry di dalam zona, cek juga label OB/FVG M15 yang
+            # overlap dengan HTF; invalid/entry point saja tidak selalu cukup.
+            if not htf_overlap:
+                try:
+                    if entry_lbl == "ob":
+                        for z in detect_order_block(m15, direction, lb=60,
+                                                    sh=sh15, sl=sl15):
+                            if abs(float(z["top"]) - entry) <= atr * 0.05 or abs(float(z["bot"]) - entry) <= atr * 0.05:
+                                htf_overlap = _collect_entry_candidates(m15, h1, direction, cur_price, atr, score)[idx].get("score", 0) >= 5 and any(
+                                    zones_overlap(z["top"], z["bot"], hz["top"], hz["bot"]) for hz in htf_poi
+                                )
+                                break
+                except Exception:
+                    pass
+
+            # Structural SL. Kalau tidak compact, jangan memaksa SL; coba entry
+            # candidate berikutnya.
+            sl_price, risk = _compute_sl(m15, h1, direction, entry, atr,
+                                         sweep_ctx, invalid)
+            if sl_price is None or risk is None:
+                if symbol:
+                    log.info(f"[{symbol}] candidate#{idx+1} {entry_lbl}: NO_COMPACT_SL")
+                continue
+
+            # Entry yang sudah melewati invalidation tidak valid.
+            if (up and cur_price <= sl_price) or ((not up) and cur_price >= sl_price):
+                if symbol:
+                    log.info(f"[{symbol}] candidate#{idx+1} {entry_lbl}: SL_ALREADY_BREACHED")
+                continue
+
+            tp_pool = _build_tp_pool(h1, m15, direction, entry, atr,
+                                     sh1, sl1, sh15, sl15)
+            tp_price, tp_lbl, rr = _select_tp(tp_pool, entry, risk, direction)
+            if tp_price is None or rr is None or rr < MIN_RR:
+                if symbol:
+                    log.info(f"[{symbol}] candidate#{idx+1} {entry_lbl}: NO_TARGET_2R (risk={risk:.6g})")
+                continue
+
+            # Jika TP sudah terlewati, candidate tersebut stale; coba candidate
+            # berikutnya. Jangan memaksa market entry.
+            if (up and cur_price >= tp_price) or ((not up) and cur_price <= tp_price):
+                if symbol:
+                    log.info(f"[{symbol}] candidate#{idx+1} {entry_lbl}: TP_ALREADY_PASSED")
+                continue
+
+            final_conf = _setup_confidence(
+                score, cand, poi_reacted, confirmation, htf_overlap, sweep_ok
+            )
+
+            # Confidence sangat rendah tidak layak dibawa ke ranking global.
+            # Ini bukan gate konfluensi; ini hanya floor kualitas keseluruhan.
+            if final_conf < 45:
+                if symbol:
+                    log.info(f"[{symbol}] candidate#{idx+1}: LOW_CONF {final_conf}%")
+                continue
+
+            # Catatan penting: WAIT_ENTRY tetap dikembalikan sebagai status
+            # analitis agar main.py bisa menyimpannya sebagai kandidat tunggu.
+            # Hanya READY yang seharusnya dipilih untuk eksekusi final.
+            state = "WAIT_ENTRY" if wait_entry else "READY"
+
             if symbol:
-                log.debug(f"[{symbol}] tidak ada target struktur dengan RR memadai")
-            return None
+                log.info(
+                    f"[{symbol}] candidate#{idx+1} {state} "
+                    f"entry={entry:.6g} SL={sl_price:.6g} TP={tp_price:.6g} "
+                    f"RR={rr:.2f} conf={final_conf}% "
+                    f"sweep={sweep_ok} poi={poi_reacted} disp={confirmation.get('confirmed', False)}"
+                )
+
+            rsi_val = round(float(m15["rsi"].iloc[-1]), 1)
+            return {
+                "symbol": symbol,
+                "original_dir": direction,
+                "decision": "BUY" if up else "SELL",
+                "confidence": final_conf,
+                "base_confidence": score.get("confidence", 0),
+                "price": cur_price,
+                "entry": round(entry, 8),
+                "entry_label": entry_lbl,
+                "entry_state": state,
+                "sl": round(sl_price, 8),
+                "tp": round(tp_price, 8),
+                "rr": rr,
+                "atr": round(atr, 8),
+                "risk_atr": round(risk / atr, 3),
+                "rsi": rsi_val,
+                "struct_h1": score["struct_h1"],
+                "d1_bias": score.get("d1_bias", "neutral"),
+                "choch_m15": score["choch_m15"],
+                "choch_h1": score["choch_h1"],
+                "cisd_m15": score["cisd_m15"],
+                "failed_retest": score.get("failed_retest", {}),
+                "htf_bias": score.get("htf_bias", "unknown"),
+                "h1_bias": score.get("h1_bias", "unknown"),
+                "poi_reacted": poi_reacted,
+                "htf_overlap": htf_overlap,
+                "entry_confirmation": confirmation,
+                "selected_sweep": sweep_ok,
+                "sweep_context": sweep_ctx,
+                "trigger_count": score.get("trigger_count", 0),
+                "tp_sl_reason": (
+                    f"Entry@{entry:.5g}({entry_lbl}) | "
+                    f"SL@{sl_price:.5g}(struct) | "
+                    f"TP@{tp_price:.5g}({tp_lbl}) | RR={rr:.2f}"
+                ),
+            }
 
         if symbol:
-            log.info(f"[{symbol}] TP={tp_price:.6f} label={tp_lbl} RR={rr:.2f}")
-
-        if up and cur_price >= tp_price:
-            if symbol:
-                log.debug(f"[{symbol}] TP sudah lewat (price={cur_price:.6f})")
-            return None
-        if not up and cur_price <= tp_price:
-            if symbol:
-                log.debug(f"[{symbol}] TP sudah lewat")
-            return None
-
-        if rr < MIN_RR:
-            if symbol:
-                log.debug(f"[{symbol}] RR={rr:.2f} < {MIN_RR}, skip")
-            return None
-
-        rsi_val = round(float(m15["rsi"].iloc[-1]), 1)
-
-        return {
-            "symbol": symbol,
-            "original_dir": direction,
-            "decision": "BUY" if up else "SELL",
-            "confidence": confidence,
-            "price": cur_price,
-            "entry": round(entry, 8),
-            "entry_label": entry_lbl,
-            "sl": round(sl_price, 8),
-            "tp": round(tp_price, 8),
-            "rr": rr,
-            "executable": True,
-            "status": "READY",
-            "atr": round(atr, 8),
-            "rsi": rsi_val,
-            "struct_h1": score["struct_h1"],
-            "d1_bias": score.get("d1_bias", "neutral"),
-            "choch_m15": score["choch_m15"],
-            "choch_h1": score["choch_h1"],
-            "cisd_m15": score["cisd_m15"],
-            "failed_retest": score.get("failed_retest", {}),
-            "htf_bias": score.get("htf_bias", "unknown"),
-            "h1_bias": score.get("h1_bias", "unknown"),
-            "poi_reacted": poi_reacted,
-            "entry_confirmation": confirmation,
-            "selected_sweep": score.get("selected_sweep", False),
-            "trigger_count": score.get("trigger_count", 0),
-            "tp_sl_reason": (
-                f"Entry@{entry:.5g}({entry_lbl}) | "
-                f"SL@{sl_price:.5g}(struct) | "
-                f"TP@{tp_price:.5g}({tp_lbl}) | RR={rr:.2f}"
-            ),
-        }
+            log.info(f"[{symbol}] REJECT: no candidate survived ENTRY→SL→TP")
+        return None
 
     except Exception as e:
         if symbol:
