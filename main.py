@@ -49,7 +49,7 @@ MONITOR_SLEEP       = 10
 REAL_TRADE_POLL_SLEEP = 30
 MAX_POSITIONS       = 20   # runtime via /max — jangan pindah ke strategy_logic
 MONITOR_INTERVAL    = 15 * 60
-MIN_CONFIDENCE      = 50   # runtime via /confidence_min — jangan pindah ke strategy_logic
+MIN_CONFIDENCE      = 60   # runtime via /confidence_min — balance kualitas/frekuensi — jangan pindah ke strategy_logic
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
 # ─────────────────────────────────────────────
 
@@ -65,8 +65,7 @@ try:
 except Exception as e:
     log.error(f"[OTAK] Gagal memuat strategy_logic.py ({e}) — fallback aman aktif.")
     MIN_RR = 2.0
-    TRAIL_R_LADDER = [(0.5, 0.15), (1.0, 0.35), (1.5, 0.50),
-                       (2.0, 0.65), (2.8, 0.80), (3.5, 0.85)]
+    TRAIL_R_LADDER = []  # strategy trail = struktur M15, bukan profit ladder
     STRUCT_TRAIL_LB, STRUCT_TRAIL_BUF_PCT, STRUCT_TRAIL_LOOKBACK = 2, 0.0015, 60
     FIB_EXT_1, FIB_EXT_2 = 0.272, 0.618
     H4_RSI_BUY_MIN, H4_RSI_BUY_MAX = 45, 68
@@ -710,6 +709,57 @@ def get_algo_order_status(algo_id):
     return _binance_signed("GET", "/fapi/v1/algoOrder", {"algoId": algo_id})
 
 
+def get_open_algo_orders(symbol):
+    """Return currently OPEN conditional algo orders for one symbol.
+
+    Binance's openAlgoOrders endpoint is the source of truth for whether a
+    conditional order is currently working.  Querying an old algoId alone can
+    produce a stale CANCELLED/EXPIRED result even though a replacement order
+    is already live.
+    """
+    rows = _binance_signed("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
+    return rows if isinstance(rows, list) else []
+
+
+def find_open_sl_order(symbol, is_buy, expected_sl=None, quantity=None):
+    """Find our currently-open protective STOP_MARKET order.
+
+    Matching is deliberately conservative: same symbol, closing side,
+    STOP_MARKET, and reduceOnly.  If several candidates exist (for example
+    during a cancel/replace race), choose the trigger closest to expected_sl.
+    """
+    close_side = "SELL" if is_buy else "BUY"
+    # Let API errors propagate.  An unavailable reconciliation endpoint must
+    # never be interpreted as "there is no SL" and trigger a replacement.
+    orders = get_open_algo_orders(symbol)
+    candidates = []
+    for o in orders:
+        if str(o.get("symbol", "")) != symbol:
+            continue
+        if str(o.get("type", "")).upper() != "STOP_MARKET":
+            continue
+        if str(o.get("side", "")).upper() != close_side:
+            continue
+        ro = o.get("reduceOnly")
+        if ro not in (True, "true", "TRUE", 1, "1"):
+            continue
+        try:
+            trig = float(o.get("triggerPrice"))
+        except (TypeError, ValueError):
+            continue
+        if trig <= 0:
+            continue
+        candidates.append((o, trig))
+
+    if not candidates:
+        return None
+
+    if expected_sl is not None:
+        return min(candidates, key=lambda x: abs(x[1] - float(expected_sl)))[0]
+
+    return candidates[0][0]
+
+
 def cancel_all_algo_orders(symbol):
     """Bersihkan SEMUA algo order (TP/SL) tersisa di suatu koin — dipakai
     sebagai jaring pengaman setelah posisi closed, jaga-jaga salah satu
@@ -1242,8 +1292,49 @@ def _price_cache_loop():
         time.sleep(_PRICE_REFRESH_SEC)
 
 # ═════════════════════════════════════════════
-# INDIKATOR
+# ENTRY GATE — SATU GATE UNTUK SIMULASI & REAL
 # ═════════════════════════════════════════════
+def _validate_signal_before_entry(sym, signal):
+    """Validasi ulang signal tepat sebelum membuka pending/entry.
+
+    Jalur SIMULASI dan REAL wajib melewati fungsi yang sama. Perbedaan mode
+    hanya mekanisme fill: simulasi mendeteksi harga menyentuh limit, sedangkan
+    REAL memasang LIMIT order ke Binance. Tidak ada perubahan Entry/SL/TP/RR
+    khusus mode.
+    """
+    try:
+        price_now = get_price(sym) or float(signal["price"])
+        entry = float(signal["entry"])
+        sl = float(signal["sl"])
+        tp = float(signal["tp"])
+        atr = max(float(signal.get("atr") or 0.0), 1e-12)
+        is_buy = signal["decision"] == "BUY"
+
+        geo_ok = (sl < entry < tp) if is_buy else (tp < entry < sl)
+        if not geo_ok:
+            return False, "GEOMETRY_INVALID"
+
+        # Entry harus berupa retracement limit yang masih masuk akal.
+        # Jarak dinamis berbasis ATR agar koin volatil tidak dibuang hanya
+        # karena beda persen absolut, tetapi tetap mencegah pending absurd jauh.
+        if abs(price_now - entry) > atr * 1.50:
+            return False, "ENTRY_TOO_FAR"
+
+        # Harga tidak boleh sudah berada di sisi invalidation.
+        # Sweep sebelum fill bukan alasan untuk menggeser SL secara otomatis;
+        # tunggu setup baru agar thesis tidak berubah diam-diam.
+        if (price_now <= sl) if is_buy else (price_now >= sl):
+            return False, "SL_ALREADY_BREACHED"
+
+        rr = abs(tp - entry) / max(abs(entry - sl), 1e-12)
+        if rr < MIN_RR or rr > MAX_RR + 1e-9:
+            return False, f"RR_INVALID_{rr:.2f}"
+        return True, "OK"
+    except Exception as e:
+        log.warning(f"[pre-entry] {sym}: validasi gagal: {e}")
+        return False, "VALIDATION_ERROR"
+
+
 def run_scan_once(chat_id):
     tg_send(chat_id,f"🔍 Scanning {TOP_N_COINS} koin...")
     try:
@@ -1283,19 +1374,10 @@ def run_scan_once(chat_id):
         tg_send(chat_id,f"⚠️ Tidak ada koin dengan confidence cukup (≥{MIN_CONFIDENCE}%). Retry...")
         return None
 
-    # Ranking akhir hanya berisi kandidat yang SUDAH EXECUTABLE.
-    # Entry reachability diselesaikan di strategy_logic saat scan per-koin,
-    # sehingga kandidat dengan confidence tinggi tetapi belum menyentuh entry
-    # tidak dapat mengalahkan koin lain yang sudah siap masuk.
-    results = [r for r in results if r.get("executable", True)]
-    if not results:
-        tg_send(chat_id,"⚠️ Tidak ada setup yang executable dari semua koin saat ini.")
-        return None
-
-    # Ranking: confidence DESC → RR DESC
+    # Ranking: confidence DESC → rr DESC
     results.sort(key=lambda x:(x["confidence"],x["rr"]),reverse=True)
     best=results[0]
-    log.info(f"Best EXECUTABLE: {best['symbol']} {best['decision']} "
+    log.info(f"Best: {best['symbol']} {best['decision']} "
              f"conf={best['confidence']}% RR=1:{best['rr']}")
     return best
 
@@ -2028,71 +2110,13 @@ def _open_pending_real(sym, signal, chat_id):
     entry_target = signal["entry"]
     side = "BUY" if is_buy else "SELL"
 
-    # ══ PAGAR TERAKHIR SEBELUM ORDER — HARD REJECT, NO ADJUSTMENT ═══════════
-    #
-    # Filosofi: LEBIH BAIK TIDAK ENTRY SAMA SEKALI daripada entry lalu auto-out.
-    #
-    # strategy_logic.full_analyze() sudah menyaring filter#1 dan filter#2 saat
-    # sinyal dibuat. Tapi ada jeda waktu antara sinyal dibuat dan order dipasang
-    # (beberapa detik), sehingga harga bisa bergerak lagi. Cek ini adalah
-    # lapisan kedua — kalau harga sudah bergerak melewati batas aman, batalkan
-    # order, ban koin sementara, dan cari koin lain. Tidak ada "koreksi" di sini.
-    #
-    # Cek A — SL vs harga sekarang:
-    #   BUY : current_price harus MASIH di atas SL
-    #   SELL: current_price harus MASIH di bawah SL
-    #
-    # Cek B — Entry vs harga sekarang (limit order reachability):
-    #   SELL: entry harus ≥ current_price * 0.995 (limit sell tidak langsung fill)
-    #   BUY : entry harus ≤ current_price * 1.005 (limit buy tidak langsung fill)
-    try:
-        price_now = get_price(sym) or entry_target
-        sl_v_pre  = signal["sl"]
-        tp_v_pre  = signal["tp"]
-
-        # Cek A: SL sudah ditembus?
-        sl_breached = (price_now <= sl_v_pre) if is_buy else (price_now >= sl_v_pre)
-        if sl_breached:
-            _ban_coin(sym, "SL sudah ditembus sebelum order dipasang")
-            tg_send(chat_id,
-                f"⏭ <b>Skip {sym}</b> — Tidak jadi order.\n"
-                f"SL <code>{sl_v_pre:.6g}</code> sudah ditembus harga "
-                f"<code>{price_now:.6g}</code>.\n"
-                f"Sinyal ini sudah kedaluwarsa — cari setup berikutnya.")
-            return
-
-        # Cek B: Entry masih reachable (limit tidak langsung fill di harga salah)?
-        entry_unreachable = (
-            (not is_buy and entry_target < price_now * 0.995) or   # SELL entry di bawah market
-            (is_buy     and entry_target > price_now * 1.005)       # BUY  entry di atas  market
-        )
-        if entry_unreachable:
-            _ban_coin(sym, "entry tidak reachable (limit fill langsung di harga salah)")
-            tg_send(chat_id,
-                f"⏭ <b>Skip {sym}</b> — Tidak jadi order.\n"
-                f"Entry <code>{entry_target:.6g}</code> sudah 'tersapu' "
-                f"(harga pasar <code>{price_now:.6g}</code>).\n"
-                f"{'SELL' if not is_buy else 'BUY'} limit di level ini akan fill "
-                f"sekarang di harga pasar → SL/TP tidak akan valid.\n"
-                f"Sinyal ini sudah kedaluwarsa — cari setup berikutnya.")
-            return
-
-        # Cek C: Geometri dasar masih valid?
-        geo_valid = (sl_v_pre < entry_target < tp_v_pre) if is_buy else (tp_v_pre < entry_target < sl_v_pre)
-        if not geo_valid:
-            _ban_coin(sym, "geometri entry/SL/TP tidak valid")
-            tg_send(chat_id,
-                f"⏭ <b>Skip {sym}</b> — Geometri tidak valid.\n"
-                f"Entry <code>{entry_target:.6g}</code> | "
-                f"SL <code>{sl_v_pre:.6g}</code> | "
-                f"TP <code>{tp_v_pre:.6g}</code>\n"
-                f"Urutan SL–Entry–TP tidak sesuai arah {'BUY' if is_buy else 'SELL'}.")
-            return
-
-    except Exception as _val_err:
-        # Kalau fetch harga gagal, biarkan lanjut — jangan batalkan order karena
-        # masalah koneksi sesaat (bukan karena sinyal yang buruk).
-        log.warning(f"[pre-order-gate] {sym}: {_val_err} — skip validasi, lanjut order")
+    # Gunakan gate yang SAMA persis dengan mode simulasi.
+    valid, reason = _validate_signal_before_entry(sym, signal)
+    if not valid:
+        _ban_coin(sym, reason)
+        tg_send(chat_id,
+            f"⏭ <b>Skip {sym}</b> — pre-entry gate: <code>{reason}</code>.")
+        return
 
     with positions_lock:
         if sym in positions: return
@@ -2189,18 +2213,9 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
             tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nStatus order: {status}")
             return
 
-        price_now = get_price(sym)
-        if price_now is not None and status in ("NEW", "PARTIALLY_FILLED"):
-            tp_hit = (price_now >= tp_p) if is_buy else (price_now <= tp_p)
-            if tp_hit:
-                cancel_order(sym, order_id)
-                with positions_lock:
-                    positions.pop(sym, None)
-                _ban_coin(sym, "TP sebelum entry")
-                _record_pending_cancel("tp_before_entry")
-                tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nTP tersentuh sebelum entry, order dibatalkan.")
-                return
-
+        # Pending REAL mengikuti aturan yang sama dengan simulasi: selama order
+        # belum fill dan belum timeout/manual cancel, biarkan LIMIT menunggu.
+        # Tidak ada TP/SL-before-entry veto terpisah di mode REAL.
         time.sleep(REAL_TRADE_POLL_SLEEP)
 
     cancel_order(sym, order_id)
@@ -2493,38 +2508,65 @@ def monitor_position_real(sym, pos):
             next_sl_health_check = time.time() + 60
             sl_missing = sl_order_id is None
             sl_already_executed = False
-            if not sl_missing:
-                try:
-                    st = get_algo_order_status(sl_order_id).get("algoStatus")
-                    # ── FIX: SEBELUMNYA whitelist status "aktif" (NEW/WORKING/
-                    # RUNNING/MONITORING) — kalau Binance mengembalikan label
-                    # status APA SAJA di luar 4 kata itu (mis. varian label lain
-                    # yang belum terdaftar), langsung dianggap "hilang" walau
-                    # order-nya sebenarnya masih hidup normal. Ini penyebab SL
-                    # "dipasang ulang" berkali-kali terus-menerus tiap 60 detik
-                    # padahal SL yang lama sebenarnya baik-baik saja — order
-                    # baru yang dipasang ulang pun kena masalah label yang sama
-                    # lagi di pengecekan berikutnya, jadi berulang selamanya.
-                    #
-                    # Dibalik jadi BLACKLIST status yang JELAS-JELAS mati saja
-                    # — jauh lebih aman: status baru/tidak dikenal dianggap
-                    # MASIH AKTIF (bukan default "hilang"), sehingga tidak ada
-                    # lagi false-positive spam untuk label status yang sekadar
-                    # belum terdaftar di kode.
-                    _TRIGGERED_SL_STATUSES = ("TRIGGERED", "FINISHED", "FILLED")
-                    _DEAD_SL_STATUSES = ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "FAILED")
-                    if st in _TRIGGERED_SL_STATUSES:
+
+            # IMPORTANT: reconcile by SYMBOL first.  Do not treat a stale
+            # algoId as proof that the protective SL disappeared. Binance
+            # provides /openAlgoOrders specifically for the currently-working
+            # conditional orders, and that is the correct source of truth here.
+            # This prevents the old-order -> CANCELLED -> re-place -> spam loop.
+            try:
+                open_sl = find_open_sl_order(
+                    sym, is_buy, expected_sl=sl_p, quantity=qty
+                )
+                if open_sl is not None:
+                    live_algo_id = open_sl.get("algoId")
+                    if live_algo_id is not None:
+                        live_algo_id = str(live_algo_id)
+                    if live_algo_id != sl_order_id:
+                        log.info(
+                            f"[sl-reconcile] {sym}: protective SL ditemukan aktif "
+                            f"di Binance (algoId={live_algo_id}, trigger="
+                            f"{float(open_sl.get('triggerPrice', sl_p)):.8g}); "
+                            f"state lokal disinkronkan."
+                        )
+                    sl_order_id = live_algo_id
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym]["sl_order_id"] = sl_order_id
+                            positions[sym]["current_sl"] = float(
+                                open_sl.get("triggerPrice", sl_p)
+                            )
+                    sl_p = float(open_sl.get("triggerPrice", sl_p))
+                    sl_missing = False
+                    sl_replace_count = 0
+                else:
+                    # No currently-open STOP_MARKET was found.  Query the old
+                    # id only as secondary evidence, not as the primary source.
+                    st = None
+                    if sl_order_id is not None:
+                        try:
+                            st = get_algo_order_status(sl_order_id).get("algoStatus")
+                        except Exception as e:
+                            log.warning(
+                                f"[sl-health] {sym}: status algoId #{sl_order_id} "
+                                f"gagal dibaca: {e}"
+                            )
+                    if st in ("TRIGGERED", "FINISHED", "FILLED"):
                         sl_already_executed = True
-                    elif st in _DEAD_SL_STATUSES:
-                        sl_missing = True
-                        log.warning(f"[sl-health] {sym}: algoStatus={st!r} → benar-benar hilang")
                     else:
-                        sl_missing = False
-                        if st not in ("NEW", "WORKING", "RUNNING", "MONITORING"):
-                            log.info(f"[sl-health] {sym}: algoStatus={st!r} tidak dikenal, "
-                                     f"tapi bukan status mati → dianggap masih aktif (tidak spam re-place)")
-                except Exception as e:
-                    log.warning(f"[monitor_real sl-check] {sym}: {e}")
+                        sl_missing = True
+                        sl_replace_count += 1
+                        log.warning(
+                            f"[sl-health] {sym}: tidak ada protective STOP_MARKET "
+                            f"aktif (oldAlgoId={sl_order_id}, status={st!r})"
+                        )
+
+            except Exception as e:
+                # A failed reconciliation is NOT evidence that the SL vanished.
+                # Keep the current state for this cycle; do not cancel/re-place
+                # blindly on an API/network glitch.
+                sl_missing = False
+                log.warning(f"[monitor_real sl-reconcile] {sym}: {e}")
 
             if sl_already_executed:
                 # SL sudah trigger sendiri di Binance — beri jeda singkat utk
@@ -2668,31 +2710,35 @@ def monitor_position_real(sym, pos):
                     old_sl = sl_p
                     old_sl_id = sl_order_id
 
-                    # ── Tandai SL = None SEBELUM cancel + replace ────────────────
-                    # Bug lama: cancel_algo_order berhasil (SL lama dihapus),
-                    # lalu place_sl_order throw exception → sl_order_id masih
-                    # menunjuk ke algoId lama yang sudah di-cancel.
-                    # Health check 60s kemudian query algoId lama → algoStatus=
-                    # "CANCELLED" → dianggap "hilang" → sl_replace_count++ →
-                    # berulang 4x → auto-out.
-                    #
-                    # Fix: set sl_order_id = None SEGERA setelah cancel berhasil.
-                    # Kalau place_sl_order gagal, sl_order_id tetap None →
-                    # health check BENAR mendeteksi "hilang" dan akan pasang
-                    # ulang di sl_p (level lama), bukan auto-out.
-                    cancel_algo_order(old_sl_id)
-                    sl_order_id = None   # ← tandai tidak ada SL sebelum pasang baru
-                    with positions_lock:
-                        if sym in positions:
-                            positions[sym]["sl_order_id"] = None
-
+                    # ── TRAIL SAFE REPLACE ─────────────────────────────────────
+                    # JANGAN cancel SL lama lebih dulu. Kalau POST SL baru gagal,
+                    # cancel-dulu akan meninggalkan posisi tanpa proteksi.
+                    # Pasang SL baru terlebih dahulu, baru hapus SL lama.
+                    # Keduanya reduceOnly, jadi overlap singkat tetap aman.
                     new_sl_order = place_sl_order(sym, is_buy, proposed, qty)
-                    sl_order_id = new_sl_order["algoId"]
+                    new_sl_id = new_sl_order["algoId"]
+
+                    # Order baru sudah diterima Binance. Jadikan ia sumber state
+                    # lokal sebelum mencoba menghapus order lama.
+                    sl_order_id = new_sl_id
                     sl_p = proposed
                     with positions_lock:
                         if sym in positions:
                             positions[sym]["current_sl"] = sl_p
                             positions[sym]["sl_order_id"] = sl_order_id
+
+                    try:
+                        if old_sl_id and str(old_sl_id) != str(new_sl_id):
+                            cancel_algo_order(old_sl_id)
+                    except Exception as cancel_err:
+                        # Jangan rollback ke SL lama hanya karena DELETE gagal.
+                        # SL baru sudah aktif; health reconciliation berikutnya
+                        # akan menemukan SL yang aktif lewat openAlgoOrders.
+                        log.warning(
+                            f"[monitor_real trail] {sym}: gagal membatalkan SL lama "
+                            f"#{old_sl_id}: {cancel_err}"
+                        )
+
                     locked_pct = (sl_p - entry) / entry * 100 * (1 if is_buy else -1)
                     label = "Profit terkunci" if locked_pct >= 0 else "Risiko dikurangi"
                     tg_send(chat_id,
@@ -2700,9 +2746,9 @@ def monitor_position_real(sym, pos):
                         f"SL digeser: <code>{old_sl:.6g}</code> → <code>{sl_p:.6g}</code>\n"
                         f"{label}: <b>{locked_pct:+.2f}%</b>")
                 except Exception as e:
-                    # sl_order_id = None sudah tertulis di atas (setelah cancel).
-                    # Health check berikutnya akan deteksi hilang dan pasang
-                    # ulang SL di sl_p (nilai lama, belum di-update ke proposed).
+                    # SL lama TIDAK disentuh jika POST SL baru gagal, sehingga
+                    # posisi tetap terlindungi. Health check tidak perlu spam
+                    # re-place karena sl_order_id masih menunjuk ke SL lama.
                     log.warning(f"[monitor_real trail] gagal update trailing SL {sym}: {e}")
 
         # ══ SOFTWARE SL — LAPIS TERAKHIR ═════════════════════════════════════
@@ -2795,9 +2841,15 @@ def simulation_loop(chat_id):
                 if sym in positions: return
                 if len(positions) >= MAX_POSITIONS: return
 
-            # ── REAL TRADE: pasang limit order asli, exchange yang urus fill ──
-            # (tidak butuh split langsung/pending seperti simulasi — order
-            # limit otomatis fill instan kalau harga sudah di zona entry)
+            # SATU pre-entry gate untuk kedua mode. Setelah lolos, satu-satunya
+            # perbedaan adalah mekanisme fill: Binance LIMIT vs simulator.
+            valid, reason = _validate_signal_before_entry(sym, signal)
+            if not valid:
+                log.info(f"[pre-entry] {sym} REJECT: {reason}")
+                _ban_coin(sym, reason)
+                return
+
+            # ── REAL TRADE: pasang LIMIT asli. ─────────────────────────────
             if REAL_TRADE_ENABLED:
                 _open_pending_real(sym, signal, chat_id)
                 return
@@ -2909,44 +2961,7 @@ def simulation_loop(chat_id):
             if price_now is None:
                 time.sleep(MONITOR_SLEEP); continue
 
-            # TP tersentuh sebelum entry → sinyal basi, hapus pending
-            tp_hit = (price_now >= tp_p) if is_buy else (price_now <= tp_p)
-            if tp_hit:
-                with positions_lock:
-                    positions.pop(sym, None)
-                _ban_coin(sym, "TP sebelum entry")
-                tg_send(chat_id,
-                    f"⏭ <b>Pending Batal</b> — {sym}\n"
-                    f"TP tersentuh sebelum entry. Skip.")
-                return
-
-            # SL sebelum entry — BUTUH KONFIRMASI CANDLE CLOSE M15 (lihat
-            # docstring). Dicek setiap ~60 detik saja (cukup, candle M15
-            # baru muncul tiap 15 menit) supaya tidak fetch klines tiap
-            # 10 detik terus-menerus.
-            if time.time() >= next_sl_check:
-                next_sl_check = time.time() + 60
-                try:
-                    df_chk = get_klines(sym, "15m", 3)
-                    if df_chk is not None and len(df_chk) >= 2:
-                        closed_row = df_chk.iloc[-2]   # candle terakhir yg SUDAH close
-                        ts_closed  = df_chk.index[-2]
-                        if last_m15_ts is None or ts_closed != last_m15_ts:
-                            last_m15_ts = ts_closed
-                            close_v = float(closed_row["close"])
-                            sl_confirmed = (close_v <= sl_p) if is_buy else (close_v >= sl_p)
-                            if sl_confirmed:
-                                with positions_lock:
-                                    positions.pop(sym, None)
-                                _ban_coin(sym, "SL sebelum entry")
-                                tg_send(chat_id,
-                                    f"⏭ <b>Pending Batal</b> — {sym}\n"
-                                    f"Candle M15 close mengonfirmasi SL sebelum entry. Skip.")
-                                return
-                except Exception as e:
-                    log.debug(f"[_wait_entry sl-confirm] {sym}: {e}")
-
-            # Harga mencapai zona entry — SEMAKIN MIRIP LIMIT ORDER ASLI:
+            # Harga mencapai zona entry — SIMULASI mengikuti LIMIT order REAL:
             # ── FIX "buat semirip mungkin" ──────────────────────────────
             # Sebelumnya pakai toleransi 0.3% (price_now <= entry*1.003) —
             # simulasi bisa anggap "entry kena" walau harga BELUM PERNAH
