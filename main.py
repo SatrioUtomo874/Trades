@@ -160,6 +160,10 @@ LEVERAGE          = 5      # runtime, via /leverage
 MARGIN_USD        = 5.0    # runtime, via /margin
 AUTOSTOP_PCT      = 3.0    # runtime, via /autostop
 peak_real_balance = None   # diisi saat fetch balance real pertama kali sukses
+peak_sim_balance  = None   # padanan peak_real_balance utk mode simulasi — supaya
+                            # auto-stop drawdown BERLAKU DI KEDUA MODE, bukan cuma
+                            # real trade (sebelumnya autostop_loop cuma jalan kalau
+                            # REAL_TRADE_ENABLED, simulasi tidak pernah dilindungi)
 autostop_lock     = threading.Lock()
 
 def _ban_coin(sym, reason="", duration=None):
@@ -1295,23 +1299,41 @@ def run_scan_once(chat_id):
 # ═════════════════════════════════════════════
 # STATISTIK + BALANCE
 # ═════════════════════════════════════════════
-POSITION_SIZE_PCT = 100.0  # ukuran posisi per trade = 100% saldo (setara 1× leverage)
-                            # P&L murni dari jarak SL/TP yang ditetapkan analisis:
-                            #   TP hit → gain = posisi × (tp_dist / entry)
-                            #   SL hit → loss = posisi × (sl_dist / entry)
-                            # Nilai ini TIDAK mempengaruhi PENEMPATAN SL/TP —
-                            # hanya memengaruhi simulasi saldo.
+# POSITION_SIZE_PCT DIHAPUS — model lama (posisi = 100% saldo, efektif 1x
+# leverage) tidak pernah cocok dengan real trade (qty dari MARGIN_USD ×
+# LEVERAGE via calc_auto_quantity). update_stats() sekarang pakai qty +
+# margin_used yang SAMA PERSIS dengan yang dipakai/dihitung real trade —
+# lihat simulation_loop._do_scan (qty dihitung di titik yang sama seperti
+# _open_pending_real: di harga entry_target, sebelum posisi terbentuk).
+
+# ── Fee trading — dipakai update_stats() untuk PnL simulasi & real ────────
+# Standar Binance USDT-M Futures VIP0, TANPA diskon BNB. SESUAIKAN kalau
+# tier akun kamu beda (VIP lebih tinggi / diskon BNB aktif / dsb) —
+# semakin akurat angka ini, semakin dekat statistik bot ke kenyataan.
+ENTRY_FEE_PCT = 0.0002   # 0.02% — entry via limit order (biasanya maker)
+EXIT_FEE_PCT  = 0.0005   # 0.05% — exit via SL/TP market-trigger (taker)
+                            # Fee dihitung dari NOTIONAL (qty × harga), sama
+                            # seperti Binance — bukan dari % saldo lagi.
 
 def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
                  sym=None, decision=None, entry_time=None,
                  confidence=None, entry_label=None, rr=None, rsi=None,
-                 struct_h1=None, d1_bias=None):
+                 struct_h1=None, d1_bias=None, qty=None, margin_used=None):
     """
-    Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
-    lama untuk detail model close_price). Tambahan: catat sym/decision/
-    entry_time/exit_time + detail sinyal (confidence/entry_label/rr/rsi/
-    struct_h1/d1_bias) ke pnl_history — bahan diagnosis strategy_logic.py
-    tanpa perlu data tambahan lain (lihat /analyze).
+    Hitung P&L dari qty & margin_used AKTUAL posisi (sama persis dgn model
+    real trade: qty = margin × leverage / entry, dibulatkan ke stepSize
+    Binance — lihat calc_auto_quantity). Dipakai baik untuk posisi
+    simulasi maupun real, supaya /stats, /backtest, dan /analyze
+    mencerminkan hasil leveraged yang sesungguhnya, bukan model lama
+    (posisi = 100% saldo, efektif selalu 1x leverage terlepas dari
+    LEVERAGE/MARGIN_USD yang diset user).
+
+    "pct" sekarang berarti ROI thd MARGIN yang dipakai (cara leveraged
+    trader biasa lihat untung/rugi), bukan lagi persen pergerakan harga
+    mentah. Tambahan: catat sym/decision/entry_time/exit_time + detail
+    sinyal (confidence/entry_label/rr/rsi/struct_h1/d1_bias) ke
+    pnl_history — bahan diagnosis strategy_logic.py tanpa perlu data
+    tambahan lain (lihat /analyze).
 
     result: "tp" | "sl" | "trail" — "trail" = trailing stop mengunci
     profit (SL bergerak, tapi ditutup di atas entry utk BUY / di bawah
@@ -1326,8 +1348,7 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
         if not entry or tp_p is None:
             return
 
-        balance      = stats["balance"]
-        position_usd = round(balance * POSITION_SIZE_PCT / 100, 6)
+        balance = stats["balance"]
         direction_sign = 1 if tp_p > entry else -1
 
         if close_price is not None:
@@ -1339,9 +1360,24 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
         else:
             return
 
-        pnl_pct = (ref_price - entry) / entry * direction_sign
-        pnl_usd = round(position_usd * pnl_pct, 4)
-        pct     = round(pnl_pct * 100, 3)
+        if qty and margin_used:
+            # ── Model REALISTIS (qty × leverage, sama dgn real trade) ──
+            price_diff_usd = (ref_price - entry) * direction_sign
+            notional_entry = qty * entry
+            notional_exit  = qty * ref_price
+            fee_usd = notional_entry * ENTRY_FEE_PCT + notional_exit * EXIT_FEE_PCT
+            pnl_usd = round(qty * price_diff_usd - fee_usd, 4)
+            pct     = round(pnl_usd / margin_used * 100, 3)   # ROI thd margin
+        else:
+            # Fallback kalau qty/margin_used tidak tersedia (jaring
+            # pengaman untuk caller lama) — tanpa leverage, cuma jarak
+            # harga murni dikurangi fee dalam %.
+            pnl_pct_raw = (ref_price - entry) / entry * direction_sign
+            fee_pct = ENTRY_FEE_PCT + EXIT_FEE_PCT
+            pnl_pct = pnl_pct_raw - fee_pct
+            pnl_usd = round(balance * pnl_pct, 4)
+            pct     = round(pnl_pct * 100, 3)
+
         stats["balance"] = round(balance + pnl_usd, 4)
         stats["pnl_history"].append({
             "result": result, "pct": pct,
@@ -1351,6 +1387,7 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
             "entry": entry, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
             "confidence": confidence, "entry_label": entry_label, "rr": rr,
             "rsi": rsi, "struct_h1": struct_h1, "d1_bias": d1_bias,
+            "qty": qty, "margin_used": margin_used,
         })
 
 # Hitung alasan pending dibatalkan — biar bisa didiagnosis dari data,
@@ -1510,7 +1547,7 @@ def _generate_trade_csv():
     with stat_lock:
         hist = list(stats["pnl_history"])
     
-    cols = ["symbol", "decision", "result", "pnl_pct", "pnl_usd",
+    cols = ["symbol", "decision", "result", "pnl_pct", "pnl_usd", "qty", "margin_used",
             "entry", "tp", "sl", "exit_price", "entry_time", "exit_time",
             "confidence", "entry_label", "rr", "rsi", "struct_h1", "d1_bias"]
     if not hist:
@@ -1527,6 +1564,8 @@ def _generate_trade_csv():
             "result": h["result"],
             "pnl_pct": h["pct"],
             "pnl_usd": h["pnl_usd"],
+            "qty": h.get("qty", ""),
+            "margin_used": h.get("margin_used", ""),
             "entry": h.get("entry", 0),
             "tp": h.get("tp", 0),
             "sl": h.get("sl", 0),
@@ -1701,7 +1740,8 @@ def close_position(sym, result, close_price=None):
                  sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"),
                  confidence=sig.get("confidence"), entry_label=sig.get("entry_label"),
                  rr=sig.get("rr"), rsi=sig.get("rsi"), struct_h1=sig.get("struct_h1"),
-                 d1_bias=sig.get("d1_bias"))
+                 d1_bias=sig.get("d1_bias"),
+                 qty=pos.get("quantity"), margin_used=pos.get("margin_used"))
     _ban_coin(sym, f"trade closed ({result})", duration=BAN_DURATION_TRADE_CLOSED)
 
     # Update active_trade jika ini yang sedang dipantau
@@ -1882,7 +1922,19 @@ def monitor_position(sym, pos):
                     f"SL dikunci ke <code>{sl_p:.6g}</code> "
                     f"({(sl_p-entry)/entry*100*(1 if is_buy else -1):+.2f}%)")
 
-        # ── Cek TP / SL — verifikasi via candle M1 ─────────────────
+        # ── Cek TP / SL ──────────────────────────────────────────────
+        # PENTING: real trade pasang TP/SL sbg algo order STOP_MARKET /
+        # TAKE_PROFIT_MARKET (workingType MARK_PRICE) — begitu harga
+        # menyentuh level itu, Binance EKSEKUSI LANGSUNG, tidak menunggu
+        # candle close dulu (tidak ada toleransi "liquidity sweep").
+        # Simulasi SEBELUMNYA beda: SL butuh konfirmasi candle M1 close
+        # dulu sebelum dianggap valid (anggapannya wick doang) — ini bikin
+        # simulasi lebih "toleran" dari eksekusi asli, jadi winrate/PnL
+        # simulasi bias lebih bagus drpd kenyataan. Dihapus supaya sinyal
+        # SL simulasi persis sama momennya dgn yang akan terjadi di real
+        # trade (sentuh level → langsung close). check_tp_sl_order() tetap
+        # dipakai — bukan utk toleransi, tapi utk urutan TP-vs-SL kalau
+        # keduanya kesentuh dalam satu jeda polling (10 detik).
         hit_tp = (price >= tp_p) if is_buy else (price <= tp_p)
         hit_sl = (price <= sl_p) if is_buy else (price >= sl_p)
 
@@ -1900,52 +1952,21 @@ def monitor_position(sym, pos):
                 close_position(sym, "tp")
                 return
             else:
-                confirmed_sl = False
-                try:
-                    df_m1 = get_klines(sym, "1m", 5)
-                    if df_m1 is not None and not df_m1.empty:
-                        last_closes = df_m1["close"].tail(3)
-                        confirmed_sl = any(
-                            (c <= sl_p) if is_buy else (c >= sl_p)
-                            for c in last_closes
-                        )
-                    else:
-                        # Tidak bisa fetch candle M1 — gunakan harga cache
-                        # sebagai fallback agar SL tetap bisa terpicu
-                        confirmed_sl = hit_sl
-                except Exception:
-                    confirmed_sl = hit_sl
-
-                if confirmed_sl:
-                    pct_final = (sl_p - entry) / entry * 100 * (1 if is_buy else -1)
-                    is_profit_lock = pct_final >= 0
-                    result_final = "trail" if is_profit_lock else "sl"
-                    label = "TRAILING STOP (profit terkunci)" if is_profit_lock else "STOP LOSS"
-                    emoji = "🔒" if is_profit_lock else "🛑"
-                    tg_send(chat_id,
-                        f"{emoji} <b>{label}</b> — {sym}\n"
-                        f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code> | "
-                        f"PnL: <b>{pct_final:+.2f}%</b>")
-                    # close_price = sl_p (SL AKTUAL yang sudah di-trail),
-                    # bukan sig["sl"] asli — supaya P&L tercatat sesuai
-                    # level SL sebenarnya. result dibedakan "trail" vs "sl"
-                    # supaya win-rate tidak salah hitung profit sbg loss.
-                    close_position(sym, result_final, close_price=sl_p)
-                    return
-                else:
-                    # Notif dikirim sekali per episode sweep (flag reset
-                    # begitu kondisi sweep hilang), loop istirahat
-                    # MONITOR_SLEEP detik sebelum cek lagi.
-                    if not pos.get("sweep_notified"):
-                        tg_send(chat_id,
-                            f"🔄 <b>Liquidity Sweep — {sym}</b>\n"
-                            f"Wick menyentuh SL, candle M1 belum konfirmasi. Lanjut...")
-                        pos["sweep_notified"] = True
-                    time.sleep(MONITOR_SLEEP)
-                    continue
-
-        # Harga sudah tidak lagi menyentuh SL → reset flag notif sweep
-        pos["sweep_notified"] = False
+                pct_final = (sl_p - entry) / entry * 100 * (1 if is_buy else -1)
+                is_profit_lock = pct_final >= 0
+                result_final = "trail" if is_profit_lock else "sl"
+                label = "TRAILING STOP (profit terkunci)" if is_profit_lock else "STOP LOSS"
+                emoji = "🔒" if is_profit_lock else "🛑"
+                tg_send(chat_id,
+                    f"{emoji} <b>{label}</b> — {sym}\n"
+                    f"Harga: <code>{price:.6g}</code> | SL: <code>{sl_p:.6g}</code> | "
+                    f"PnL: <b>{pct_final:+.2f}%</b>")
+                # close_price = sl_p (SL AKTUAL yang sudah di-trail),
+                # bukan sig["sl"] asli — supaya P&L tercatat sesuai
+                # level SL sebenarnya. result dibedakan "trail" vs "sl"
+                # supaya win-rate tidak salah hitung profit sbg loss.
+                close_position(sym, result_final, close_price=sl_p)
+                return
 
         # ── Update periodik — dikirim tanpa menghentikan pengecekan
         # harga. Loop tetap kembali ke atas tiap MONITOR_SLEEP dan tetap
@@ -1963,6 +1984,7 @@ def monitor_position(sym, pos):
             next_update_at = time.time() + MONITOR_INTERVAL
 
         time.sleep(MONITOR_SLEEP)
+
 
 
 # ============================================================
@@ -2686,8 +2708,13 @@ def monitor_position_real(sym, pos):
 
 
 def autostop_loop(chat_id):
-    """Background: pantau saldo real, auto /stop kalau drawdown dari peak > AUTOSTOP_PCT."""
-    global auto_mode, peak_real_balance
+    """Background: pantau saldo (real ATAU simulasi, ikut REAL_TRADE_ENABLED
+    SAAT ITU — dicek tiap iterasi karena bisa di-toggle runtime via /mode),
+    auto /stop kalau drawdown dari peak > AUTOSTOP_PCT. Dulu fungsi ini
+    HANYA jalan utk real trade (dan cuma di-start kalau REAL_TRADE_ENABLED
+    aktif saat boot) — simulasi tidak pernah punya proteksi drawdown sama
+    sekali. Sekarang selalu jalan, mode manapun."""
+    global auto_mode, peak_real_balance, peak_sim_balance
     while True:
         try:
             if REAL_TRADE_ENABLED:
@@ -2696,16 +2723,30 @@ def autostop_loop(chat_id):
                     with autostop_lock:
                         if peak_real_balance is None or total > peak_real_balance:
                             peak_real_balance = total
-                        drawdown_pct = (peak_real_balance - total) / peak_real_balance * 100 if peak_real_balance else 0
-                    if auto_mode and drawdown_pct >= AUTOSTOP_PCT:
-                        auto_mode = False
-                        tg_send(chat_id,
-                            f"🛑 <b>AUTO-STOP TERPICU</b>\n\n"
-                            f"Saldo turun <b>{drawdown_pct:.2f}%</b> dari peak "
-                            f"(${peak_real_balance:.2f} → ${total:.2f})\n"
-                            f"Threshold: {AUTOSTOP_PCT}%\n\n"
-                            f"Scan sinyal baru dihentikan. Posisi aktif tetap dipantau.\n"
-                            f"Jalankan lagi manual dengan /auto")
+                        peak = peak_real_balance
+                    drawdown_pct = (peak - total) / peak * 100 if peak else 0
+                    peak_txt = f"${peak:.2f} → ${total:.2f}"
+                else:
+                    drawdown_pct = 0
+            else:
+                with stat_lock:
+                    total = stats["balance"]
+                with autostop_lock:
+                    if peak_sim_balance is None or total > peak_sim_balance:
+                        peak_sim_balance = total
+                    peak = peak_sim_balance
+                drawdown_pct = (peak - total) / peak * 100 if peak else 0
+                peak_txt = f"${peak:.2f} → ${total:.2f} (simulasi)"
+
+            if auto_mode and drawdown_pct >= AUTOSTOP_PCT:
+                auto_mode = False
+                tg_send(chat_id,
+                    f"🛑 <b>AUTO-STOP TERPICU</b>\n\n"
+                    f"Saldo turun <b>{drawdown_pct:.2f}%</b> dari peak "
+                    f"({peak_txt})\n"
+                    f"Threshold: {AUTOSTOP_PCT}%\n\n"
+                    f"Scan sinyal baru dihentikan. Posisi aktif tetap dipantau.\n"
+                    f"Jalankan lagi manual dengan /auto")
         except Exception as e:
             log.warning(f"[autostop_loop] {e}")
         time.sleep(60)
@@ -2755,6 +2796,26 @@ def simulation_loop(chat_id):
             tp_p         = signal["tp"]
             entry_label  = signal.get("entry_label", "market")
 
+            # ── Qty & margin dihitung DI SINI, di harga entry_target — persis
+            # titik yang sama dgn real trade (_open_pending_real hitung qty
+            # SEBELUM limit order dipasang, di harga limit-nya, bukan di
+            # harga fill akhir). Ini bikin ukuran posisi simulasi ikut
+            # LEVERAGE/MARGIN_USD yang di-set user, bukan lagi flat 100%
+            # saldo — kalau qty gagal (di bawah minimum Binance meski
+            # margin sudah disesuaikan), skip persis seperti real trade.
+            try:
+                sim_qty, sim_margin, sim_bumped = calc_auto_quantity(
+                    sym, entry_target, MARGIN_USD, LEVERAGE)
+            except Exception as e:
+                sim_qty = None
+                log.debug(f"[sim qty] {sym}: {e}")
+            if sim_qty is None:
+                _ban_coin(sym, "quantity di bawah minimum Binance (simulasi)")
+                tg_send(chat_id,
+                    f"⚠️ <b>Skip {sym}</b> — Qty di bawah minimum Binance "
+                    f"utk margin ${MARGIN_USD:.2f} × {LEVERAGE}x, walau sudah disesuaikan.")
+                return
+
             already_at_entry = (
                 (is_buy     and current <= entry_target * 1.002) or
                 (not is_buy and current >= entry_target * 0.998)
@@ -2775,6 +2836,8 @@ def simulation_loop(chat_id):
                         "entry_time"  : None,
                         "timeout_flag": False,
                         "status"      : "pending",
+                        "quantity"    : sim_qty,
+                        "margin_used" : sim_margin,
                     }
                 _open_position(sym, signal, actual_entry, chat_id, "langsung")
             else:
@@ -2789,8 +2852,11 @@ def simulation_loop(chat_id):
                         "entry_time"  : None,        # belum entry, set saat terpicu
                         "timeout_flag": False,
                         "status"      : "pending",
+                        "quantity"    : sim_qty,
+                        "margin_used" : sim_margin,
                     }
 
+                note = f" (margin disesuaikan ${MARGIN_USD:.2f}→${sim_margin:.2f})" if sim_bumped else ""
                 dist_pct = abs(entry_target - current) / current * 100
                 tg_send(chat_id,
                     f"🎯 <b>PENDING ORDER</b> — {sym}\n\n"
@@ -2798,7 +2864,9 @@ def simulation_loop(chat_id):
                     f"⏳ Menunggu harga ke zona entry\n"
                     f"Harga kini : <code>{current:.6g}</code>\n"
                     f"Entry zone : <code>{entry_target:.6g}</code> ({entry_label})\n"
-                    f"Jarak      : {dist_pct:.2f}%")
+                    f"Jarak      : {dist_pct:.2f}%\n"
+                    f"Qty: <code>{sim_qty}</code> | Margin: <b>${sim_margin:.2f}</b> | "
+                    f"Leverage: {LEVERAGE}x{note}")
                 threading.Thread(
                     target=_wait_entry,
                     args=(sym, signal, chat_id),
@@ -2958,9 +3026,11 @@ def simulation_loop(chat_id):
             pos["timeout_flag"] = False   # reset — flag lama (saat masih pending) tidak boleh menutup posisi baru ini
             pos["current_sl"] = sl_v      # SL awal = SL asli, akan naik oleh trailing di monitor_position
 
+        qty_disp = pos.get("quantity")
         tg_send(chat_id,
             f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
-            f"Entry aktual: <code>{actual_entry:.6g}</code>\n"
+            f"Entry aktual: <code>{actual_entry:.6g}</code>"
+            + (f" | Qty: <code>{qty_disp}</code>" if qty_disp else "") + "\n"
             f"TP: <code>{tp_v:.6g}</code> | SL: <code>{sl_v:.6g}</code>\n"
             f"RR: <b>1:{actual_rr:.2f}</b> | 📡 Dipantau tiap 15 menit...")
 
@@ -3110,9 +3180,10 @@ def get_info_msg():
         "dicatat 'Trail' (bukan 'SL') — tetap dihitung menang di win-rate.\n\n"
         f"Min RR: 1:{MIN_RR} | Min Confidence: {MIN_CONFIDENCE}%\n"
         f"TF: H1 (bias) + M15 (entry) + H4 (fib gate)\n"
-        f"Model P&L   : posisi {POSITION_SIZE_PCT:.0f}% saldo × % jarak SL/TP aktual\n"
-        f"  → SL dekat (0.5%) = loss kecil | SL jauh (4%) = loss lebih besar\n"
-        f"  → P&L murni dari level struktural analisis, bukan fixed -2%\n"
+        f"Model P&L   : qty = margin (${MARGIN_USD:.2f}) × leverage ({LEVERAGE}x) / entry,\n"
+        f"  dibulatkan ke stepSize Binance — SAMA PERSIS dgn real trade\n"
+        f"  → SL dekat = loss kecil | SL jauh = loss lebih besar (leveraged)\n"
+        f"  → % di /stats & /backtest = ROI thd margin, bukan jarak harga\n"
         f"Modal simulasi: ${STARTING_BALANCE:.2f}"
     )
 
@@ -3121,7 +3192,7 @@ def get_info_msg():
 # BOT LOOP
 # ═════════════════════════════════════════════
 def bot_loop():
-    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, MIN_CONFIDENCE, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance, REAL_TRADE_ENABLED
+    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, MIN_CONFIDENCE, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance, peak_sim_balance, REAL_TRADE_ENABLED
 
     # Set active_chat_id ke ALLOWED_USER_ID SEJAK AWAL — di chat pribadi
     # Telegram, chat_id sama dengan user_id, jadi bot bisa kirim pesan
@@ -3417,6 +3488,8 @@ def bot_loop():
                         stats["sl"]          = 0
                         stats["trail"]       = 0
                         stats["total"]       = 0
+                    with autostop_lock:
+                        peak_sim_balance = STARTING_BALANCE
                     tg_send(chat_id,
                         f"✅ Saldo & statistik direset.\n"
                         f"💵 Modal awal: <b>${STARTING_BALANCE:.2f}</b>")
@@ -3427,10 +3500,16 @@ def bot_loop():
                         # Reset referensi peak ke saldo SEKARANG — supaya drawdown
                         # dihitung ulang dari titik ini, bukan dari peak lama yang
                         # bikin auto-stop langsung kepicu lagi begitu /auto ditekan.
+                        # Berlaku utk kedua mode (dulu cuma real trade).
                         if REAL_TRADE_ENABLED:
                             _, total = get_real_balance()
                             with autostop_lock:
                                 peak_real_balance = total
+                        else:
+                            with stat_lock:
+                                total = stats["balance"]
+                            with autostop_lock:
+                                peak_sim_balance = total
                         auto_mode=True
                         auto_thread=threading.Thread(
                             target=simulation_loop,args=(chat_id,),daemon=True)
@@ -3711,7 +3790,8 @@ def bot_loop():
                     parts = text.split()
                     if len(parts) == 1:
                         with autostop_lock:
-                            peak_txt = f"${peak_real_balance:.2f}" if peak_real_balance else "belum ada data"
+                            _peak = peak_real_balance if REAL_TRADE_ENABLED else peak_sim_balance
+                            peak_txt = f"${_peak:.2f}" if _peak else "belum ada data"
                         tg_send(chat_id,
                             f"⚙️ <b>Auto-Stop Drawdown</b>\n\nThreshold: <b>{AUTOSTOP_PCT}%</b>\n"
                             f"Peak saldo tercatat: {peak_txt}\n\n"
@@ -3763,6 +3843,12 @@ if __name__=="__main__":
             f"Whitelist IP ini di Binance API Management dulu kalau belum,\n"
             f"lalu kirim /auto untuk mulai. Bot TIDAK akan mulai cari sinyal\n"
             f"sampai kamu kirim /auto secara manual.")
+
+    # autostop_loop SEKARANG SELALU di-start (bukan cuma kalau
+    # REAL_TRADE_ENABLED saat boot) — dia sendiri cek REAL_TRADE_ENABLED
+    # tiap iterasi (live, ikut toggle /mode) dan punya jalur drawdown utk
+    # simulasi (peak_sim_balance) maupun real (peak_real_balance).
+    if ALLOWED_USER_ID:
         threading.Thread(target=autostop_loop, args=(ALLOWED_USER_ID,), daemon=True).start()
 
     # Semua thread di atas daemon=True — main thread harus tetap hidup,

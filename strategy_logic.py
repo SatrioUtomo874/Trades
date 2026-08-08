@@ -6,11 +6,10 @@ market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
 CISD, OTE & Fibonacci, external vs internal liquidity, Wyckoff, dsb).
 
 Urutan proses tiap sinyal (SESUAI PERMINTAAN): Entry → SL → TP → Confidence
-global (tanpa bias sesi). Semua konsep tambahan dari transkrip ditambahkan
-sebagai BONUS SCORE saja — tidak ada filter baru yang memperketat/mengurangi
-frekuensi sinyal. Filter keras yang tetap ada hanya yang sudah terbukti perlu
-untuk validitas order (RR minimum, geometri entry/SL/TP, dan reachability
-limit order terhadap harga pasar).
+global (tanpa bias sesi). Arah HTF adalah gate keputusan, bukan sekadar bonus
+skor. Setup lokal hanya boleh dipakai setelah POI HTF disentuh dan ada
+konfirmasi displacement/structure yang baru. Ini sengaja mengurangi sinyal:
+skor agregat lama dapat membuat OTE/RSI/sweep mengalahkan tren utama.
 
 Poin revisi v3:
   1) RR minimal 1:2, maksimal 1:4. Jika target RR<2 → JANGAN auto‑tolak,
@@ -89,10 +88,13 @@ STRUCT_TRAIL_LOOKBACK = 60     # candle M15 untuk cari swing trailing
 FIB_EXT_1 = 0.272   # 127.2%
 FIB_EXT_2 = 0.618   # 161.8%
 
-# ── Inducement & konfluensi (v3, konsep baru — bonus score saja) ─────────
+# ── Inducement & konfluensi ──────────────────────────────────────────────
 INDUCEMENT_LOOKBACK  = 40     # candle M15 untuk cari liquidity minor sebelum POI
 INDUCEMENT_MINOR_LB  = 2      # lookback swing_pts untuk swing "minor" (inducement)
 CONFLUENCE_BONUS      = 2     # bonus skor kalau OB/FVG M15 overlap dengan zona H1
+POI_REACTION_LOOKBACK = 16     # candle M15 untuk menunggu reaksi setelah POI HTF
+CONFIRMATION_LOOKBACK = 4      # candle M15 yang dipakai untuk displacement terbaru
+MIN_DISPLACEMENT_ATR  = 0.25   # body minimum agar candle bukan noise
 
 
 # =============================================================================
@@ -238,8 +240,14 @@ MACRO_AGAINST_MULT  = 0.72   # berlawanan macro → skor sisi itu dikali ini (bu
 # =============================================================================
 
 def is_zone_fresh(df: pd.DataFrame, top: float, bot: float,
-                  formed_idx: int, end_idx: Optional[int] = None) -> bool:
-    """True jika zona (OB/FVG) belum pernah ditembus setelah terbentuk."""
+                  formed_idx: int, end_idx: Optional[int] = None,
+                  direction: Optional[str] = None) -> bool:
+    """True jika zona masih aktif, bukan sekadar belum pernah disentuh.
+
+    Untuk zona berarah, retest tidak otomatis membatalkan zona. Invalidasi
+    terjadi bila candle close menembus sisi luar zona. Tanpa ``direction``
+    fungsi mempertahankan perilaku konservatif lama untuk caller generik.
+    """
     if formed_idx is None or formed_idx + 2 >= len(df):
         return True
     start = formed_idx + 2
@@ -247,6 +255,10 @@ def is_zone_fresh(df: pd.DataFrame, top: float, bot: float,
     if start >= end:
         return True
     sub = df.iloc[start:end]
+    if direction == "bull":
+        return not bool((sub["close"] < bot).any())
+    if direction == "bear":
+        return not bool((sub["close"] > top).any())
     touched = ((sub["low"] <= top) & (sub["high"] >= bot)).any()
     return not bool(touched)
 
@@ -290,7 +302,9 @@ def detect_fvg(df: pd.DataFrame, direction: str, lb: int = 50) -> list:
         if gap:
             gap["mid"] = (gap["top"] + gap["bot"]) / 2
             gap["idx"] = base + i + 2
-            gap["is_fresh"] = is_zone_fresh(df, gap["top"], gap["bot"], gap["idx"])
+            gap["is_fresh"] = is_zone_fresh(
+                df, gap["top"], gap["bot"], gap["idx"], direction=direction
+            )
             out.append(gap)
     fresh = [f for f in out if f["is_fresh"]]
     return fresh[-3:] if fresh else []
@@ -341,7 +355,9 @@ def detect_order_block(df: pd.DataFrame, direction: str, lb: int = 60,
         ob_bot = float(min(c["open"], c["close"]))
         df_idx = base + i
 
-        if not is_zone_fresh(df, ob_top, ob_bot, df_idx):
+        if not is_zone_fresh(
+            df, ob_top, ob_bot, df_idx, direction=direction
+        ):
             continue
 
         q = 0
@@ -628,6 +644,126 @@ def detect_failed_retest(df: pd.DataFrame, sh: list, sl: list,
     return result
 
 
+def detect_entry_confirmation(df: pd.DataFrame, direction: str, atr: float,
+                              lb: int = CONFIRMATION_LOOKBACK) -> dict:
+    """Konfirmasi displacement yang baru, bukan sekadar lokasi entry.
+
+    OTE, RSI divergence, discount/premium, dan sweep menjelaskan lokasi atau
+    kemungkinan reaksi. Mereka tidak membuktikan bahwa buyer/seller sudah
+    mengambil alih. Konfirmasi ini membutuhkan candle close searah yang
+    menembus range pendek sebelumnya dengan body yang cukup besar.
+    """
+    out = {
+        "confirmed": False,
+        "direction": direction,
+        "kind": "none",
+        "idx": None,
+        "body_atr": 0.0,
+    }
+    if df is None or len(df) < max(lb + 2, 8):
+        return out
+
+    last = df.iloc[-1]
+    prior = df.iloc[-(lb + 1):-1]
+    body = abs(float(last["close"]) - float(last["open"]))
+    local_atr = max(float(atr), 1e-10)
+    body_atr = body / local_atr
+    out["body_atr"] = round(body_atr, 3)
+
+    recent_bodies = (df["close"] - df["open"]).abs().iloc[-(lb + 5):-1]
+    median_body = float(recent_bodies.median()) if not recent_bodies.empty else 0.0
+    min_body = max(local_atr * MIN_DISPLACEMENT_ATR, median_body * 0.8)
+
+    if direction == "bull":
+        confirmed = (
+            float(last["close"]) > float(last["open"])
+            and float(last["close"]) > float(prior["high"].max())
+            and body >= min_body
+        )
+    else:
+        confirmed = (
+            float(last["close"]) < float(last["open"])
+            and float(last["close"]) < float(prior["low"].min())
+            and body >= min_body
+        )
+
+    if confirmed:
+        out.update({
+            "confirmed": True,
+            "kind": "displacement_close",
+            "idx": len(df) - 1,
+        })
+    return out
+
+
+def _collect_htf_poi_zones(h1: pd.DataFrame, direction: str,
+                           score_ctx: dict) -> list:
+    """Kumpulkan POI H1 searah untuk validasi reaksi sebelum entry."""
+    zones = []
+    try:
+        for z in detect_order_block(
+            h1, direction, lb=80,
+            sh=score_ctx.get("sh1", []),
+            sl=score_ctx.get("sl1", []),
+        ):
+            zones.append({
+                "top": float(z["top"]),
+                "bot": float(z["bot"]),
+                "kind": "ob_h1",
+            })
+        for f in detect_fvg(h1, direction, lb=60):
+            zones.append({
+                "top": float(f["top"]),
+                "bot": float(f["bot"]),
+                "kind": "fvg_h1",
+            })
+    except Exception:
+        return []
+    return zones
+
+
+def _recent_poi_reaction(m15: pd.DataFrame, zones: list, direction: str,
+                         atr: float,
+                         lookback: int = POI_REACTION_LOOKBACK) -> bool:
+    """Pastikan POI HTF sudah disentuh dan mendapat rejection baru.
+
+    Retest saja tidak cukup. Setelah harga masuk POI, harus ada close kembali
+    keluar dari sisi reaksi zona. Ini mencegah pending order dipasang hanya
+    karena OB/FVG lama masih terlihat fresh.
+    """
+    if m15 is None or m15.empty or not zones:
+        return False
+    start = max(0, len(m15) - lookback)
+    sub = m15.iloc[start:]
+    body_floor = max(float(atr) * MIN_DISPLACEMENT_ATR, 1e-10)
+
+    for zone in zones:
+        top, bot = float(zone["top"]), float(zone["bot"])
+        for i in range(len(sub)):
+            candle = sub.iloc[i]
+            touched = float(candle["low"]) <= top and float(candle["high"]) >= bot
+            if not touched:
+                continue
+            for j in range(i, min(i + 5, len(sub))):
+                reaction = sub.iloc[j]
+                body = abs(float(reaction["close"]) - float(reaction["open"]))
+                if direction == "bull":
+                    ok = (
+                        float(reaction["close"]) > top
+                        and float(reaction["close"]) > float(reaction["open"])
+                        and body >= body_floor
+                    )
+                else:
+                    ok = (
+                        float(reaction["close"]) < bot
+                        and float(reaction["close"]) < float(reaction["open"])
+                        and body >= body_floor
+                    )
+                if ok:
+                    return True
+    return False
+
+
 # =============================================================================
 # SCORING — Confidence global tanpa bias sesi
 # =============================================================================
@@ -722,9 +858,11 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     rdiv_bull = detect_rsi_divergence(m15, "bull", lb=30)
     rdiv_bear = detect_rsi_divergence(m15, "bear", lb=30)
 
-    # ── Inducement (bonus, bukan filter) ───────────────────────────
+    # ── Inducement dan konfirmasi entry ────────────────────────────
     induce_bull = detect_inducement(m15, "bull")
     induce_bear = detect_inducement(m15, "bear")
+    confirm_bull = detect_entry_confirmation(m15, "bull", atr)
+    confirm_bear = detect_entry_confirmation(m15, "bear", atr)
 
     # ── Score BULL ───────────────────────────────────────────────
     bull = 0
@@ -764,16 +902,7 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     if fr_m15["failed_retest_sell"]:            bear += 10
     if induce_bear.get("swept"):                bear += 8
 
-    # ── Penalti cross-HTF (per-koin, D1) ────────────────────────────
-    if d1_bias == "bullish" and bear > bull:
-        bear = int(bear * 0.5)
-    elif d1_bias == "bearish" and bull > bear:
-        bull = int(bull * 0.5)
-
-    # ── Macro bias (BTC H1) — opsional, no-op kalau df_btc_h1 tidak
-    # dikasih main.py. Beda dari penalti d1_bias di atas: ini MODERAT
-    # (kali 0.72, bukan 0.5) dan berlaku ke KEDUA arah simetris, karena
-    # ini konteks tambahan bukan sinyal utama koin itu sendiri. ──
+    # ── Macro bias (BTC H1) — konteks tambahan, bukan pengganti HTF koin ──
     macro_bias = _macro_bias(df_btc_h1)
     if macro_bias == "bullish":
         bull += MACRO_ALIGN_BONUS
@@ -783,7 +912,30 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         bull = int(bull * MACRO_AGAINST_MULT)
     # macro_bias == "ranging"/"unknown" → tidak ada perubahan sama sekali
 
-    direction = "bull" if bull >= bear else "bear"
+    # ── HTF direction gate ─────────────────────────────────────────
+    # D1 dan H1 bukan lagi bonus independen yang bisa dikalahkan oleh RSI,
+    # OTE, atau sweep. Jika keduanya berlawanan, market sedang tidak memiliki
+    # bias yang cukup jelas untuk limit order baru; tunggu alignment berikutnya.
+    h1_bias = "bullish" if struct_h1 == "bullish" else (
+        "bearish" if struct_h1 == "bearish" else "neutral"
+    )
+    if d1_bias in ("bullish", "bearish") and h1_bias in ("bullish", "bearish"):
+        htf_bias = d1_bias if d1_bias == h1_bias else "conflict"
+    elif d1_bias in ("bullish", "bearish"):
+        htf_bias = d1_bias
+    elif h1_bias in ("bullish", "bearish"):
+        htf_bias = h1_bias
+    else:
+        htf_bias = "neutral"
+
+    if htf_bias == "bullish":
+        direction = "bull"
+    elif htf_bias == "bearish":
+        direction = "bear"
+    elif htf_bias == "conflict":
+        return None
+    else:
+        direction = "bull" if bull >= bear else "bear"
     raw = bull if direction == "bull" else bear
     # ── FIX BUG KRITIS (scan 50 koin selalu "Tidak ada setup valid") ──
     # MAX_SCORE=173 lama = jumlah SEMUA bonus sekaligus (D1+H1+ChoCH+BOS+
@@ -806,9 +958,17 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     selected_choch = choch_m15["bullish_choch"] if direction == "bull" else choch_m15["bearish_choch"]
     selected_bos = bos_m15["bullish_bos"] if direction == "bull" else bos_m15["bearish_bos"]
     selected_cisd = cisd_m15["bullish_cisd"] if direction == "bull" else cisd_m15["bearish_cisd"]
-    selected_sweep = (liq_bull if direction == "bull" else liq_bear).get("type") == "sweep"
+    selected_confirm = (
+        confirm_bull if direction == "bull" else confirm_bear
+    )
+    selected_sweep = (
+        liq_bull if direction == "bull" else liq_bear
+    ).get("type") == "sweep"
+    # Sweep hanya lokasi liquidity, bukan bukti arah. Trigger utama harus
+    # berupa structure/displacement yang terjadi pada candle terbaru.
     trigger_count = sum(bool(x) for x in (
-        selected_choch, selected_bos, selected_cisd, selected_sweep
+        selected_choch, selected_bos, selected_cisd,
+        selected_confirm.get("confirmed"),
     ))
 
     return {
@@ -819,6 +979,12 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         "direction_edge": edge,
         "m15_struct": m15_struct,
         "trigger_count": trigger_count,
+        "htf_bias": htf_bias,
+        "h1_bias": h1_bias,
+        "entry_confirmation": selected_confirm,
+        "entry_confirmation_bull": confirm_bull,
+        "entry_confirmation_bear": confirm_bear,
+        "selected_sweep": selected_sweep,
         "price": float(L15["close"]),
         "atr": atr,
         "struct_h1": struct_h1,
@@ -1301,31 +1467,34 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         entry_lbl = best["label"]
         invalid = best["invalid"]
 
-        # Quality gate. main.py masih menerapkan floor confidence yang bisa
-        # diatur (/confidence_min) — SATU-SATUNYA kontrol selektivitas yang
-        # dimaksudkan untuk dipakai user. Floor di sini HANYA jaring
-        # pengaman struktural minimal (buang noise murni / arah nyaris
-        # seri), BUKAN gate selektif kedua yang bisa diam-diam menolak
-        # semuanya di luar sepengetahuan /confidence_min.
-        #
-        # ── FIX BUG KRITIS (scan 50 koin selalu "Tidak ada setup valid",
-        # walau /confidence_min sudah diatur 45%) ──
-        # Nilai lama (65) MATEMATIS TIDAK MUNGKIN ditembus — dites empiris
-        # lewat 300 skenario pasar acak, confidence tertinggi yang pernah
-        # tercapai cuma 50 (bahkan di tren paling bersih sekalipun). Jadi
-        # gate ini menolak 100% sinyal SEBELUM main.py sempat menerapkan
-        # /confidence_min sama sekali — user mengira dia yang atur
-        # ambangnya, padahal ambang sebenarnya (65, tidak bisa diubah dari
-        # luar) jauh lebih tinggi dan mustahil dicapai.
-        #
-        # Direkalibrasi ke floor struktural rendah (15) — cuma menyaring
-        # noise acak-tanpa-arah, bukan menggantikan /confidence_min.
+        # Jaring minimum untuk noise murni. Selektivitas entry utama ada pada
+        # gate HTF/POI/confirmation di bawah dan floor confidence main.py.
         if confidence < 15 or score.get("direction_edge", 0) < 12:
             if symbol:
                 log.debug(
                     f"[{symbol}] quality gate: conf={confidence}, "
                     f"edge={score.get('direction_edge', 0)}"
                 )
+            return None
+
+        # Reversal/continuation harus terjadi setelah harga bereaksi di POI H1.
+        # Zona yang masih fresh tidak berarti sudah siap dieksekusi; justru
+        # setup ideal menunggu touch -> rejection -> displacement -> retest.
+        htf_poi = _collect_htf_poi_zones(h1, direction, score)
+        if not htf_poi:
+            if symbol:
+                log.debug(f"[{symbol}] tidak ada POI H1 searah yang valid")
+            return None
+        poi_reacted = _recent_poi_reaction(m15, htf_poi, direction, atr)
+        if not poi_reacted:
+            if symbol:
+                log.debug(f"[{symbol}] POI H1 belum mendapat reaksi baru")
+            return None
+
+        confirmation = score.get("entry_confirmation", {})
+        if not confirmation.get("confirmed"):
+            if symbol:
+                log.debug(f"[{symbol}] belum ada displacement close terbaru")
             return None
 
         selected_m15_struct = score.get("m15_struct", "ranging")
@@ -1339,9 +1508,9 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             if symbol:
                 log.debug(f"[{symbol}] M15 berlawanan tanpa reversal lengkap")
             return None
-        if score.get("trigger_count", 0) < 1:
+        if score.get("trigger_count", 0) < 2:
             if symbol:
-                log.debug(f"[{symbol}] tidak ada trigger M15 yang terkonfirmasi")
+                log.debug(f"[{symbol}] trigger M15 belum cukup kuat")
             return None
 
         if symbol:
@@ -1475,6 +1644,12 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "choch_h1": score["choch_h1"],
             "cisd_m15": score["cisd_m15"],
             "failed_retest": score.get("failed_retest", {}),
+            "htf_bias": score.get("htf_bias", "unknown"),
+            "h1_bias": score.get("h1_bias", "unknown"),
+            "poi_reacted": poi_reacted,
+            "entry_confirmation": confirmation,
+            "selected_sweep": score.get("selected_sweep", False),
+            "trigger_count": score.get("trigger_count", 0),
             "tp_sl_reason": (
                 f"Entry@{entry:.5g}({entry_lbl}) | "
                 f"SL@{sl_price:.5g}(struct) | "
