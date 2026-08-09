@@ -111,6 +111,13 @@ ENTRY_SWING_NEAR_ATR = 0.55     # dekat swing adverse => kurangi kualitas
 RSI_TIMING_SLOPE = 1.5          # perubahan RSI minimum agar dianggap bermakna
 RSI_BUY_WEAK = 48.0              # BUY + RSI di bawah ini yang masih jatuh = tunggu
 RSI_SELL_WEAK = 52.0              # SELL + RSI di atas ini yang masih naik = tunggu
+# Counter-momentum timing: trend HTF boleh searah, tetapi M15 tidak boleh
+# sedang melakukan recovery kuat tanpa trigger searah. Ini penalty/ranking,
+# bukan veto keras, supaya frekuensi sinyal tetap sehat.
+M15_COUNTER_RSI_SLOPE = 2.0
+M15_COUNTER_PENALTY = 8
+M15_NO_TRIGGER_PENALTY = 5
+M15_EMA_RECOVERY_PENALTY = 4
 ENTRY_LOCATION_HARD_FLOOR = 30   # kandidat di bawah ini tidak executable
 
 
@@ -1033,6 +1040,40 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
 # ENTRY LOCATION + RSI TIMING
 # =============================================================================
 
+def _m15_counter_momentum(m15: pd.DataFrame, direction: str) -> dict:
+    """Deteksi recovery M15 yang berlawanan dengan arah HTF.
+
+    Ini sengaja bukan hard gate. Contoh GRVT: H1/D1 bearish tetap valid,
+    tetapi M15 sedang rebound (RSI naik + harga memulihkan EMA9). Dalam kondisi
+    seperti itu kita turunkan confidence/timing agar bot tidak menjual hanya
+    karena bias HTF benar.
+    """
+    if m15 is None or len(m15) < 4:
+        return {"counter": False, "rsi_slope": 0.0, "ema_recovery": False, "reason": "unknown"}
+    last = m15.iloc[-1]
+    prev = m15.iloc[-2]
+    rsi_slope = float(last["rsi"]) - float(m15["rsi"].iloc[-3])
+    ema9_now = float(last["ema9"])
+    ema9_prev = float(prev["ema9"])
+    close_now = float(last["close"])
+    close_prev = float(prev["close"])
+
+    if direction == "bear":
+        ema_recovery = close_now > ema9_now and ema9_now >= ema9_prev and close_now >= close_prev
+        counter = rsi_slope >= M15_COUNTER_RSI_SLOPE and ema_recovery
+        reason = "bear_counter_recovery" if counter else "aligned_or_neutral"
+    else:
+        ema_recovery = close_now < ema9_now and ema9_now <= ema9_prev and close_now <= close_prev
+        counter = rsi_slope <= -M15_COUNTER_RSI_SLOPE and ema_recovery
+        reason = "bull_counter_pullback" if counter else "aligned_or_neutral"
+    return {
+        "counter": bool(counter),
+        "rsi_slope": round(rsi_slope, 2),
+        "ema_recovery": bool(ema_recovery),
+        "reason": reason,
+    }
+
+
 def _entry_location_metrics(m15: pd.DataFrame, direction: str,
                             entry: float, atr: float) -> dict:
     """Nilai lokasi entry relatif terhadap range M15 + timing RSI.
@@ -1064,6 +1105,7 @@ def _entry_location_metrics(m15: pd.DataFrame, direction: str,
     slope = rsi_now - rsi_2
     rising = slope >= RSI_TIMING_SLOPE
     falling = slope <= -RSI_TIMING_SLOPE
+    counter_ctx = _m15_counter_momentum(m15, direction)
 
     # Adverse-side swing: BUY terlalu dekat high, SELL terlalu dekat low.
     recent = m15.iloc[-8:]
@@ -1121,6 +1163,16 @@ def _entry_location_metrics(m15: pd.DataFrame, direction: str,
         elif rising:
             score -= 5; notes.append("rsi_rising")
 
+    # Tambahan penting dari audit GRVT: HTF bearish + M15 recovery kuat
+    # seharusnya tidak diberi confidence penuh hanya karena trend besar benar.
+    # Tetap berupa penalty, bukan reject keras. Jika trigger bearish baru muncul,
+    # penalty kedua diperkecil agar continuation valid tetap bisa masuk.
+    counter_penalty = 0
+    if counter_ctx["counter"]:
+        counter_penalty += M15_COUNTER_PENALTY
+        notes.append("m15_counter_momentum")
+    score -= counter_penalty
+
     score = int(max(0, min(100, score)))
     # Hard block hanya untuk lokasi yang benar-benar mengejar harga.
     # RSI tetap menjadi penalty/confluence, bukan gate keras, supaya setup
@@ -1157,6 +1209,8 @@ def _entry_location_metrics(m15: pd.DataFrame, direction: str,
         "rsi_prev": round(rsi_1, 2),
         "rsi_slope": round(slope, 2),
         "rsi_timing": "rising" if rising else ("falling" if falling else "flat"),
+        "m15_counter_momentum": counter_ctx["counter"],
+        "m15_counter_reason": counter_ctx["reason"],
         "swing_dist_atr": round(swing_dist_atr, 3),
         "notes": notes,
         "hard_block": hard_block,
@@ -1740,7 +1794,17 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             # tetap dipertahankan terpisah dari execution quality.
             loc_score = int(loc.get("location_score", 50))
             location_adjust = int(round((loc_score - 50) * 0.30))
-            final_conf = max(0, min(99, base_confidence + location_adjust))
+
+            # Jika M15 benar-benar recovery melawan arah dan belum ada trigger
+            # searah yang baru, turunkan confidence sekali lagi. Begitu BOS/CHoCH/
+            # CISD/displacement muncul, setup continuation tetap punya ruang untuk
+            # lolos. Ini membedakan "trend benar" dari "timing entry benar".
+            timing_penalty = 0
+            if loc.get("m15_counter_momentum"):
+                timing_penalty += M15_COUNTER_PENALTY
+                if score.get("trigger_count", 0) == 0:
+                    timing_penalty += M15_NO_TRIGGER_PENALTY
+            final_conf = max(0, min(99, base_confidence + location_adjust - timing_penalty))
             execution_score = (
                 final_conf
                 + min(float(rr), MAX_RR) * 1.5
@@ -1805,6 +1869,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "entry_zone_high": loc.get("entry_zone_high"),
             "rsi_timing": loc.get("rsi_timing", "unknown"),
             "rsi_slope": loc.get("rsi_slope", 0.0),
+            "m15_counter_momentum": loc.get("m15_counter_momentum", False),
+            "m15_counter_reason": loc.get("m15_counter_reason", "unknown"),
             "entry": round(entry, 8),
             "price": cur_price,
             "entry_label": entry_lbl,
@@ -1830,7 +1896,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                 f"SL@{sl_price:.5g}(struct) | "
                 f"TP@{tp_price:.5g}({tp_lbl}) | RR={rr:.2f} | "
                 f"Loc={loc.get('location_score')}({loc.get('location_state')}) | "
-                f"RSI={rsi_val}/{loc.get('rsi_timing')}"
+                f"RSI={rsi_val}/{loc.get('rsi_timing')} | "
+                f"M15Counter={loc.get('m15_counter_momentum', False)}"
             ),
         }
 
