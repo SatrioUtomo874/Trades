@@ -1122,15 +1122,13 @@ def _entry_location_metrics(m15: pd.DataFrame, direction: str,
             score -= 5; notes.append("rsi_rising")
 
     score = int(max(0, min(100, score)))
-    hard_block = False
+    # Hard block hanya untuk lokasi yang benar-benar mengejar harga.
+    # RSI tetap menjadi penalty/confluence, bukan gate keras, supaya setup
+    # yang bagus tidak hilang hanya karena momentum belum ideal.
     if direction == "bull":
-        hard_block = (pos >= ENTRY_CHASE_HIGH) or (
-            rsi_now < RSI_BUY_WEAK and falling and pos > ENTRY_PREFERRED_BUY
-        )
+        hard_block = pos >= ENTRY_CHASE_HIGH
     else:
-        hard_block = (pos <= (1.0 - ENTRY_CHASE_HIGH)) or (
-            rsi_now > RSI_SELL_WEAK and rising and pos < ENTRY_PREFERRED_SELL
-        )
+        hard_block = pos <= (1.0 - ENTRY_CHASE_HIGH)
 
     # Zona entry berbasis range lokal, bukan titik matematis palsu.
     if direction == "bull":
@@ -1609,14 +1607,21 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         if symbol:
             log.info(f"[{symbol}] h1={len(df_h1)} m15={len(df_m15)}")
 
-        score = score_direction(df_h1, df_m15, df_d1, df_btc_h1)
+        # Structural analysis MUST use only fully closed candles.
+        # Keep the latest market price separately for execution/pending-entry
+        # geometry; the forming candle must not rewrite M15/H1 structure.
+        live_price = float(df_m15["close"].iloc[-1])
+        h1_closed = _closed_candles(df_h1, 60)
+        m15_closed = _closed_candles(df_m15, 15)
+        d1_closed = _closed_candles(df_d1, 1440) if df_d1 is not None else None
+        score = score_direction(h1_closed, m15_closed, d1_closed, df_btc_h1)
         if score is None:
             if symbol:
                 log.debug(f"[{symbol}] score_direction=None (data kurang)")
             return None
 
         direction = score["direction"]
-        cur_price = score["price"]
+        cur_price = live_price
         atr = score["atr"]
         confidence = score["confidence"]
         up = direction == "bull"
@@ -1628,8 +1633,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                 f"macro={score.get('macro_bias', 'unknown')}"
             )
 
-        h1 = build_df(df_h1, interval_minutes=60)
-        m15 = build_df(df_m15, interval_minutes=15)
+        h1 = build_df(h1_closed, interval_minutes=60)
+        m15 = build_df(m15_closed, interval_minutes=15)
         if h1 is None or m15 is None:
             return None
 

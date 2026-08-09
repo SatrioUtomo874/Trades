@@ -710,53 +710,46 @@ def get_algo_order_status(algo_id):
 
 
 def get_open_algo_orders(symbol):
-    """Return currently OPEN conditional algo orders for one symbol.
+    """Return currently OPEN Binance Futures Algo Orders for one symbol.
 
-    Binance's openAlgoOrders endpoint is the source of truth for whether a
-    conditional order is currently working.  Querying an old algoId alone can
-    produce a stale CANCELLED/EXPIRED result even though a replacement order
-    is already live.
+    The health check uses this exchange-side list as the source of truth
+    instead of trusting a cached algoId/status. This prevents a stale local
+    ID from creating a cancel/replace loop while another SL is already open.
     """
-    rows = _binance_signed("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
+    data = _binance_signed("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
+    if isinstance(data, dict):
+        rows = data.get("orders") or data.get("data") or []
+    else:
+        rows = data or []
     return rows if isinstance(rows, list) else []
 
 
-def find_open_sl_order(symbol, is_buy, expected_sl=None, quantity=None):
-    """Find our currently-open protective STOP_MARKET order.
-
-    Matching is deliberately conservative: same symbol, closing side,
-    STOP_MARKET, and reduceOnly.  If several candidates exist (for example
-    during a cancel/replace race), choose the trigger closest to expected_sl.
-    """
+def find_open_sl_order(symbol, is_buy, open_orders):
+    """Find the OPEN STOP_MARKET SL belonging to this position direction."""
     close_side = "SELL" if is_buy else "BUY"
-    # Let API errors propagate.  An unavailable reconciliation endpoint must
-    # never be interpreted as "there is no SL" and trigger a replacement.
-    orders = get_open_algo_orders(symbol)
     candidates = []
-    for o in orders:
-        if str(o.get("symbol", "")) != symbol:
+    for order in open_orders or []:
+        side = str(order.get("side", "")).upper()
+        typ = str(order.get("type") or order.get("orderType") or "").upper()
+        algo_type = str(order.get("algoType") or "").upper()
+        status = str(order.get("algoStatus") or order.get("status") or "").upper()
+        if side != close_side:
             continue
-        if str(o.get("type", "")).upper() != "STOP_MARKET":
+        if typ.startswith("TAKE_PROFIT"):
             continue
-        if str(o.get("side", "")).upper() != close_side:
+        if typ not in ("STOP_MARKET", "STOP") and algo_type not in ("CONDITIONAL", ""):
             continue
-        ro = o.get("reduceOnly")
-        if ro not in (True, "true", "TRUE", 1, "1"):
+        if status in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "FAILED", "TRIGGERED", "FINISHED", "FILLED"):
             continue
+        trigger = order.get("triggerPrice", order.get("stopPrice"))
         try:
-            trig = float(o.get("triggerPrice"))
+            trigger = float(trigger) if trigger is not None else None
         except (TypeError, ValueError):
-            continue
-        if trig <= 0:
-            continue
-        candidates.append((o, trig))
-
+            trigger = None
+        candidates.append((order, trigger))
     if not candidates:
         return None
-
-    if expected_sl is not None:
-        return min(candidates, key=lambda x: abs(x[1] - float(expected_sl)))[0]
-
+    candidates.sort(key=lambda x: (x[1] is None, -(float(x[0].get("createTime", 0) or 0))))
     return candidates[0][0]
 
 
@@ -1134,61 +1127,72 @@ ws_feed = BinanceWSFeed()
 # ── FUNGSI PUBLIK — signature SAMA PERSIS dgn sebelumnya, jadi seluruh
 #    kode bot (scoring, monitor posisi, dsb) TIDAK perlu diubah sama sekali ──
 def get_price(symbol):
-    """Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS (fallback TERAKHIR,
-    hanya dipakai kalau REST Binance & Bybit gagal/error/kena ban) →
-    Tier4 CoinGecko (darurat paling akhir, hanya koin di COINGECKO_ID_MAP)."""
-    for _ in range(2):
-        try:
-            return _binance_price(symbol)
-        except Exception as e:
-            log.warning(f"[price/binance] {symbol}: {e}")
-            time.sleep(1)
-    for _ in range(2):
-        try:
-            return _bybit_price(symbol)
-        except Exception as e:
-            log.warning(f"[price/bybit] {symbol}: {e}")
-            time.sleep(1)
+    """Harga live: WS ticker dulu; REST/Bybit hanya fallback."""
     if ws_feed.is_fresh():
         p = ws_feed.get_price(symbol)
         if p is not None:
-            log.warning(f"[price/ws fallback] {symbol} — REST Binance & Bybit gagal")
             return p
+    try:
+        return _binance_price(symbol)
+    except Exception as e:
+        log.warning(f"[price/binance] {symbol}: {e}")
+    try:
+        return _bybit_price(symbol)
+    except Exception as e:
+        log.warning(f"[price/bybit] {symbol}: {e}")
     p = _coingecko_price(symbol)
     if p is not None:
         log.warning(f"[price/coingecko DARURAT] {symbol} — semua sumber lain gagal")
         return p
     return None
 
-def get_klines(symbol, interval, limit=250):
-    """Tier1 buffer WS (GRATIS, live-updated di background) → Tier2 Binance
-    REST → Tier3 Bybit REST. Sebelumnya REST Binance dipanggil DULUAN tiap
-    kali (WS cuma fallback terakhir) — padahal WS-nya sudah jalan terus,
-    live, dan nol biaya rate-limit. Itu penyebab utama sering kena
-    limit/ban meski jumlah posisi cuma sedikit: setiap scan/monitor tetap
-    nembak REST walau datanya sebenarnya sudah ada gratis di buffer WS."""
-    ws_feed.ensure_symbol_interval(symbol, interval)
+def _seed_ws_from_df(symbol, interval, df):
+    """Seed histori REST ke buffer WS; setelah itu WS menjaga candle tetap update."""
+    if df is None or df.empty or not _WS_LIB_OK:
+        return
+    limit = ws_feed.MAX_CANDLES.get(interval, 250)
+    rows = deque(maxlen=limit)
+    for ts, r in df.tail(limit).iterrows():
+        rows.append({
+            "t": int(pd.Timestamp(ts).timestamp() * 1000),
+            "o": float(r.open), "h": float(r.high),
+            "l": float(r.low), "c": float(r.close), "v": float(r.volume)
+        })
+    with ws_feed._lock:
+        ws_feed._klines[(symbol, interval)] = rows
+        ws_feed._last_used[(symbol, interval)] = time.time()
+    ws_feed._subscribe_kline(symbol, interval)
 
+def get_klines(symbol, interval, limit=250):
+    """OHLCV lengkap: buffer WS → REST sekali → Bybit sekali.
+
+    Hasil REST langsung disimpan ke buffer WS, sehingga scan berikutnya tidak
+    mengulang request candle yang sama. Jika buffer tidak lengkap, jangan
+    menggunakannya untuk analisa; ambil histori baru.
+    """
     if ws_feed.is_fresh():
         df = ws_feed.get_klines(symbol, interval, limit)
-        if df is not None and not df.empty:
+        if df is not None and len(df) >= min(limit, 40):
             return df
 
     try:
         df = _binance_klines(symbol, interval, limit)
         if not df.empty:
+            _seed_ws_from_df(symbol, interval, df)
             return df
-        log.warning(f"[klines/binance] {symbol} kosong, coba Bybit...")
+        log.warning(f"[klines/binance] {symbol} {interval} kosong, coba Bybit...")
     except Exception as e:
-        log.warning(f"[klines/binance] {symbol}: {e} — coba Bybit...")
+        log.warning(f"[klines/binance] {symbol} {interval}: {e} — coba Bybit...")
     try:
         df = _bybit_klines(symbol, interval, limit)
         if not df.empty:
+            _seed_ws_from_df(symbol, interval, df)
             log.info(f"[klines/bybit fallback] {symbol} {interval} OK")
             return df
     except Exception as e:
-        log.warning(f"[klines/bybit] {symbol}: {e}")
+        log.warning(f"[klines/bybit] {symbol} {interval}: {e}")
     return pd.DataFrame()
+
 
 last_scanned_coins = []
 last_scanned_at = None
@@ -1227,7 +1231,23 @@ def _get_top_coins_impl():
 
     exclude_syms = cur_ban | active_syms
 
-    # Binance REST
+    # WS ticker memuat harga + volume 24h semua simbol. Gunakan untuk memilih
+    # 50 koin bila fresh agar endpoint /24hr tidak ditembak setiap scan.
+    if ws_feed.is_fresh():
+        raw = ws_feed.get_top_coins_raw()
+        usdt = [
+            t for t in raw
+            if t["symbol"].endswith("USDT")
+            and 0.0001 < t["price"] < MAX_PRICE
+            and t["qvol"] > 5_000_000
+            and abs(t["chg"]) < 15
+            and t["symbol"] not in exclude_syms
+        ]
+        if usdt:
+            usdt.sort(key=lambda x: x["qvol"], reverse=True)
+            return [t["symbol"] for t in usdt[:TOP_N_COINS]]
+
+    # REST fallback hanya jika ticker WS belum siap.
     try:
         coins = _binance_top_coins(exclude_syms)
         if coins:
@@ -1362,7 +1382,7 @@ def run_scan_once(chat_id):
             log.debug(f"[scan] {sym}: {e}")
             r = None
         if r: results.append(r)
-        time.sleep(0.15)
+        time.sleep(0.03)
 
     if not results:
         tg_send(chat_id,"⚠️ Tidak ada setup valid dari semua koin.")
@@ -2420,15 +2440,16 @@ def monitor_position_real(sym, pos):
     risk0 = abs(entry - sl_p)
     locked_r = 0.0
     next_struct_check = 0.0
-    # ── FIX: beri jeda SEBELUM health-check SL pertama, JANGAN langsung di
-    # iterasi pertama (dulu next_sl_health_check=0.0 → health-check jalan
-    # detik itu juga setelah entry). Algo order SL yang BARU SAJA dipasang
-    # butuh waktu singkat untuk ter-index & bisa di-query statusnya di sisi
-    # Binance. Health-check yang jalan terlalu cepat bisa salah baca status
-    # (mis. dapat None/status belum ke-propagate) dan langsung mengira SL
-    # "hilang" padahal order-nya sebenarnya ada & aktif — auto-out palsu.
+    # Health-check SL memakai rekonsiliasi exchange-side, bukan cached algoId.
+    # Ini mencegah false-positive yang berujung cancel/replace berulang.
     next_sl_health_check = time.time() + 45
-    sl_replace_count = 0   # circuit-breaker: kalau kejadian "SL hilang" berulang terus, jangan spam selamanya
+    sl_missing_since = None
+    sl_repair_attempts = 0
+    sl_last_repair_at = 0.0
+    sl_last_alert_at = 0.0
+    sl_recovery_streak = 0
+    SL_REPAIR_COOLDOWN = 30.0
+    SL_ALERT_COOLDOWN = 15 * 60.0
 
     while True:
         with positions_lock:
@@ -2498,168 +2519,135 @@ def monitor_position_real(sym, pos):
                 if sym in positions:
                     positions[sym]["quantity"] = qty
 
-        # ── Jaring pengaman: verifikasi berkala SL BENERAN masih aktif di
-        # Binance selagi posisi masih terbuka (bukan cuma pas awal buka).
-        # Kalau ternyata hilang (order ke-cancel sendiri oleh Binance,
-        # error yang tidak ketangkap sebelumnya, dsb) dan harga sudah
-        # lewat level SL, auto-out SEKARANG — jangan biarkan posisi
-        # tanpa proteksi sampai user sadar sendiri.
+        # ── Jaring pengaman SL: RECONCILIATION ke exchange ───────────────
+        # Sumber kebenaran = OPEN Algo Orders Binance. Cached algoId hanya
+        # dipakai sebagai state lokal/identifier, bukan bukti bahwa SL hilang.
         if time.time() >= next_sl_health_check:
             next_sl_health_check = time.time() + 60
-            sl_missing = sl_order_id is None
-            sl_already_executed = False
-
-            # IMPORTANT: reconcile by SYMBOL first.  Do not treat a stale
-            # algoId as proof that the protective SL disappeared. Binance
-            # provides /openAlgoOrders specifically for the currently-working
-            # conditional orders, and that is the correct source of truth here.
-            # This prevents the old-order -> CANCELLED -> re-place -> spam loop.
+            open_orders = None
             try:
-                open_sl = find_open_sl_order(
-                    sym, is_buy, expected_sl=sl_p, quantity=qty
-                )
-                if open_sl is not None:
-                    live_algo_id = open_sl.get("algoId")
-                    if live_algo_id is not None:
-                        live_algo_id = str(live_algo_id)
-                    if live_algo_id != sl_order_id:
-                        log.info(
-                            f"[sl-reconcile] {sym}: protective SL ditemukan aktif "
-                            f"di Binance (algoId={live_algo_id}, trigger="
-                            f"{float(open_sl.get('triggerPrice', sl_p)):.8g}); "
-                            f"state lokal disinkronkan."
-                        )
-                    sl_order_id = live_algo_id
-                    with positions_lock:
-                        if sym in positions:
-                            positions[sym]["sl_order_id"] = sl_order_id
-                            positions[sym]["current_sl"] = float(
-                                open_sl.get("triggerPrice", sl_p)
-                            )
-                    sl_p = float(open_sl.get("triggerPrice", sl_p))
-                    sl_missing = False
-                    sl_replace_count = 0
-                else:
-                    # No currently-open STOP_MARKET was found.  Query the old
-                    # id only as secondary evidence, not as the primary source.
-                    st = None
-                    if sl_order_id is not None:
-                        try:
-                            st = get_algo_order_status(sl_order_id).get("algoStatus")
-                        except Exception as e:
-                            log.warning(
-                                f"[sl-health] {sym}: status algoId #{sl_order_id} "
-                                f"gagal dibaca: {e}"
-                            )
-                    if st in ("TRIGGERED", "FINISHED", "FILLED"):
-                        sl_already_executed = True
-                    else:
-                        sl_missing = True
-                        sl_replace_count += 1
-                        log.warning(
-                            f"[sl-health] {sym}: tidak ada protective STOP_MARKET "
-                            f"aktif (oldAlgoId={sl_order_id}, status={st!r})"
-                        )
-
+                open_orders = get_open_algo_orders(sym)
             except Exception as e:
-                # A failed reconciliation is NOT evidence that the SL vanished.
-                # Keep the current state for this cycle; do not cancel/re-place
-                # blindly on an API/network glitch.
-                sl_missing = False
-                log.warning(f"[monitor_real sl-reconcile] {sym}: {e}")
+                # Query gagal != SL hilang. Jangan cancel/replace berdasarkan
+                # data yang tidak lengkap; tunggu health-check berikutnya.
+                log.warning(f"[sl-health] {sym}: gagal reconcile open algo orders: {e}")
 
-            if sl_already_executed:
-                # SL sudah trigger sendiri di Binance — beri jeda singkat utk
-                # settlement posisi, lalu catat sebagai closure SL NORMAL.
-                # JANGAN kirim market order tambahan (itu akan jadi order
-                # kedua yang mubazir/berpotensi salah di atas posisi yang
-                # sudah/sedang ditutup Binance sendiri).
-                time.sleep(2)
-                try:
-                    still_open = get_real_position(sym)
-                except Exception as e:
-                    log.warning(f"[sl-health] {sym}: gagal verifikasi posisi setelah SL trigger: {e}")
-                    still_open = True   # tidak yakin → jangan asumsikan closed, biar loop berikutnya yg tentukan
-                if not still_open:
-                    cancel_all_algo_orders(sym)
-                    close_position(sym, "sl", close_price=sl_p)
-                    return
-                # Kalau masih kebaca terbuka (lag settlement) atau verifikasi
-                # gagal → jangan panik, jangan auto-out. Loop berikutnya (cek
-                # real_pos di atas) yang akan menangkap closure-nya dengan benar.
+            if open_orders is not None:
+                active_sl = find_open_sl_order(sym, is_buy, open_orders)
 
-            elif sl_missing:
-                sl_replace_count += 1
+                if active_sl is not None:
+                    # Exchange mengonfirmasi SL aktif. Sinkronkan ID lokal.
+                    new_id = active_sl.get("algoId") or active_sl.get("orderId")
+                    if new_id is not None:
+                        sl_order_id = new_id
+                        with positions_lock:
+                            if sym in positions:
+                                positions[sym]["sl_order_id"] = sl_order_id
 
-                # ── CEK HARGA DULU SEBELUM KEPUTUSAN APA PUN ────────────────
-                # SL "hilang" dari Binance bisa karena:
-                #   a) API glitch / rate-limit sesaat → order sebenarnya aman
-                #   b) Trailing SL gagal place setelah cancel → sl_order_id
-                #      masih menunjuk ke order yang sudah di-cancel
-                #   c) Binance auto-cancel order karena konflik (2 closePosition=true)
-                #
-                # Yang penting: apakah HARGA sudah melewati SL?
-                # Kalau belum → posisi masih aman, jangan auto-out, pasang ulang saja.
-                # Kalau sudah → baru auto-out (ini satu-satunya alasan valid).
-                #
-                # TIDAK ADA auto-out hanya karena "SL hilang N kali" —
-                # itu justru merugikan: posisi yang sedang profit dipaksa tutup
-                # hanya karena masalah teknis API, bukan karena market bergerak.
+                    trigger = active_sl.get("triggerPrice", active_sl.get("stopPrice"))
+                    try:
+                        if trigger is not None:
+                            sl_p = float(trigger)
+                            with positions_lock:
+                                if sym in positions:
+                                    positions[sym]["current_sl"] = sl_p
+                    except (TypeError, ValueError):
+                        pass
+
+                    sl_recovery_streak += 1
+                    if sl_missing_since is not None and sl_recovery_streak >= 2:
+                        # Recovery hanya diberitahukan sekali per incident.
+                        now = time.time()
+                        if now - sl_last_alert_at >= SL_ALERT_COOLDOWN:
+                            tg_send(chat_id,
+                                f"✅ <b>SL protection normal kembali</b> — {sym}\n"
+                                f"SL aktif di <code>{sl_p:.6g}</code>.")
+                            sl_last_alert_at = now
+                        sl_missing_since = None
+                        sl_repair_attempts = 0
+                    continue
+
+                # Query berhasil dan tidak ada SL OPEN = missing yang nyata.
+                sl_recovery_streak = 0
+                if sl_missing_since is None:
+                    sl_missing_since = time.time()
+                    sl_repair_attempts = 0
+
                 price_now = get_price(sym) or entry
                 sl_breached = (price_now <= sl_p) if is_buy else (price_now >= sl_p)
 
                 if sl_breached:
-                    # Harga sudah melewati SL dan tidak ada order yang melindungi
-                    # → satu-satunya kasus yang membenarkan auto-out dari sini
                     tg_send(chat_id,
-                        f"🚨 <b>SL hilang & harga sudah melewati level SL</b> — {sym}\n"
+                        f"🚨 <b>SL protection hilang & harga sudah melewati SL</b> — {sym}\n"
                         f"SL <code>{sl_p:.6g}</code> | Harga <code>{price_now:.6g}</code>\n"
-                        f"Posisi tidak terlindungi — auto-out sekarang.")
+                        f"Posisi tidak terlindungi — emergency close.")
                     _emergency_close(sym, is_buy, qty, chat_id,
-                        f"SL hilang ({sl_replace_count}x) & harga sudah lewat SL {sl_p:.6g}")
+                                     f"SL hilang & harga sudah lewat SL {sl_p:.6g}")
                     return
 
-                # Harga masih aman — coba pasang ulang SL
-                # (apapun jumlah kegagalannya, selama harga belum tembus SL,
-                #  posisi harus tetap dibiarkan hidup)
-                try:
-                    # cancel_algo_order aman dipanggil walau order sudah tidak ada —
-                    # ini memastikan tidak ada SL lama yang mungkin masih ada
-                    # (ghost order) yang akan konflik dengan yang baru.
-                    cancel_algo_order(sl_order_id)
-                    sl_order_id = None   # tandai sementara tidak ada SL
-                    with positions_lock:
-                        if sym in positions:
-                            positions[sym]["sl_order_id"] = None
+                # Recovery idempotent + cooldown. Jangan cancel stale ID di sini:
+                # exchange sudah bilang tidak ada OPEN SL, jadi langsung pasang
+                # satu SL baru. Ini menghilangkan cancel/replace storm.
+                now = time.time()
+                if now - sl_last_repair_at < SL_REPAIR_COOLDOWN:
+                    continue
+                sl_last_repair_at = now
+                sl_repair_attempts += 1
 
+                try:
                     new_sl_order = place_sl_order(sym, is_buy, sl_p, qty)
-                    sl_order_id = new_sl_order["algoId"]
+                    candidate_id = new_sl_order.get("algoId") or new_sl_order.get("orderId")
+
+                    # WAJIB verifikasi ke exchange sebelum menganggap recovery
+                    # sukses. Kalau belum muncul di OPEN list, jangan spam
+                    # "berhasil" dan jangan reset incident.
+                    time.sleep(1.0)
+                    verify_orders = get_open_algo_orders(sym)
+                    verified_sl = find_open_sl_order(sym, is_buy, verify_orders)
+                    if verified_sl is None:
+                        sl_order_id = None
+                        with positions_lock:
+                            if sym in positions:
+                                positions[sym]["sl_order_id"] = None
+                        log.warning(
+                            f"[sl-health] {sym}: recovery attempt #{sl_repair_attempts} "
+                            f"belum terkonfirmasi sebagai OPEN SL")
+                        if now - sl_last_alert_at >= SL_ALERT_COOLDOWN:
+                            tg_send(chat_id,
+                                f"⚠️ <b>SL protection belum terkonfirmasi</b> — {sym}\n"
+                                f"Percobaan #{sl_repair_attempts}; retry otomatis tanpa spam.")
+                            sl_last_alert_at = now
+                        continue
+
+                    sl_order_id = verified_sl.get("algoId") or verified_sl.get("orderId") or candidate_id
+                    trigger = verified_sl.get("triggerPrice", verified_sl.get("stopPrice"))
+                    if trigger is not None:
+                        try:
+                            sl_p = float(trigger)
+                        except (TypeError, ValueError):
+                            pass
                     with positions_lock:
                         if sym in positions:
                             positions[sym]["sl_order_id"] = sl_order_id
-                    # FIX: tampilkan JUMLAH ASLI sebelum di-reset (sebelumnya
-                    # reset dilakukan DULU baru pesan dibuat pakai +1, jadi
-                    # pesan selalu bohong nampilkan "1x total" walau ini
-                    # sudah kejadian ke-13x beruntun — sekarang counter yang
-                    # sebenarnya ditampilkan, baru direset setelahnya).
-                    total_count = sl_replace_count
-                    sl_replace_count = 0   # reset setelah berhasil
-                    tg_send(chat_id,
-                        f"⚠️ <b>SL dipasang ulang</b> — {sym}\n"
-                        f"Sempat hilang ({total_count}x total), "
-                        f"sudah dipasang ulang di <code>{sl_p:.6g}</code>.\n"
-                        f"Harga saat ini <code>{price_now:.6g}</code> — posisi masih aman.")
+                            positions[sym]["current_sl"] = sl_p
+
+                    if now - sl_last_alert_at >= SL_ALERT_COOLDOWN:
+                        tg_send(chat_id,
+                            f"⚠️ <b>SL dipulihkan</b> — {sym}\n"
+                            f"SL aktif terkonfirmasi di <code>{sl_p:.6g}</code>.\n"
+                            f"Recovery ke-{sl_repair_attempts}; notifikasi di-throttle.")
+                        sl_last_alert_at = now
                 except Exception as e:
-                    # Gagal pasang SL tapi harga masih aman — jangan auto-out,
-                    # tunggu iterasi berikutnya untuk coba lagi.
-                    # sl_order_id sudah = None di atas → health check berikutnya
-                    # akan deteksi SL hilang dan coba pasang ulang lagi.
-                    log.warning(f"[sl-health] {sym}: gagal pasang ulang SL (coba #{sl_replace_count}): {e}")
-                    tg_send(chat_id,
-                        f"⚠️ <b>SL hilang, gagal dipasang ulang</b> — {sym} (percobaan #{sl_replace_count})\n"
-                        f"Error: <code>{e}</code>\n"
-                        f"Harga <code>{price_now:.6g}</code> masih aman dari SL <code>{sl_p:.6g}</code>.\n"
-                        f"Akan dicoba lagi otomatis. ❗ Pantau manual jika terus gagal.")
+                    sl_order_id = None
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym]["sl_order_id"] = None
+                    log.warning(f"[sl-health] {sym}: recovery attempt #{sl_repair_attempts} gagal: {e}")
+                    if now - sl_last_alert_at >= SL_ALERT_COOLDOWN:
+                        tg_send(chat_id,
+                            f"⚠️ <b>SL recovery gagal</b> — {sym}\n"
+                            f"Percobaan #{sl_repair_attempts}; retry otomatis tanpa spam.")
+                        sl_last_alert_at = now
 
         price = get_price(sym) or entry
         pnl_r_now = (price - entry) / risk0 * (1 if is_buy else -1) if risk0 > 0 else 0
@@ -2710,35 +2698,31 @@ def monitor_position_real(sym, pos):
                     old_sl = sl_p
                     old_sl_id = sl_order_id
 
-                    # ── TRAIL SAFE REPLACE ─────────────────────────────────────
-                    # JANGAN cancel SL lama lebih dulu. Kalau POST SL baru gagal,
-                    # cancel-dulu akan meninggalkan posisi tanpa proteksi.
-                    # Pasang SL baru terlebih dahulu, baru hapus SL lama.
-                    # Keduanya reduceOnly, jadi overlap singkat tetap aman.
-                    new_sl_order = place_sl_order(sym, is_buy, proposed, qty)
-                    new_sl_id = new_sl_order["algoId"]
+                    # ── Tandai SL = None SEBELUM cancel + replace ────────────────
+                    # Bug lama: cancel_algo_order berhasil (SL lama dihapus),
+                    # lalu place_sl_order throw exception → sl_order_id masih
+                    # menunjuk ke algoId lama yang sudah di-cancel.
+                    # Health check 60s kemudian query algoId lama → algoStatus=
+                    # "CANCELLED" → dianggap "hilang" → sl_replace_count++ →
+                    # berulang 4x → auto-out.
+                    #
+                    # Fix: set sl_order_id = None SEGERA setelah cancel berhasil.
+                    # Kalau place_sl_order gagal, sl_order_id tetap None →
+                    # health check BENAR mendeteksi "hilang" dan akan pasang
+                    # ulang di sl_p (level lama), bukan auto-out.
+                    cancel_algo_order(old_sl_id)
+                    sl_order_id = None   # ← tandai tidak ada SL sebelum pasang baru
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym]["sl_order_id"] = None
 
-                    # Order baru sudah diterima Binance. Jadikan ia sumber state
-                    # lokal sebelum mencoba menghapus order lama.
-                    sl_order_id = new_sl_id
+                    new_sl_order = place_sl_order(sym, is_buy, proposed, qty)
+                    sl_order_id = new_sl_order["algoId"]
                     sl_p = proposed
                     with positions_lock:
                         if sym in positions:
                             positions[sym]["current_sl"] = sl_p
                             positions[sym]["sl_order_id"] = sl_order_id
-
-                    try:
-                        if old_sl_id and str(old_sl_id) != str(new_sl_id):
-                            cancel_algo_order(old_sl_id)
-                    except Exception as cancel_err:
-                        # Jangan rollback ke SL lama hanya karena DELETE gagal.
-                        # SL baru sudah aktif; health reconciliation berikutnya
-                        # akan menemukan SL yang aktif lewat openAlgoOrders.
-                        log.warning(
-                            f"[monitor_real trail] {sym}: gagal membatalkan SL lama "
-                            f"#{old_sl_id}: {cancel_err}"
-                        )
-
                     locked_pct = (sl_p - entry) / entry * 100 * (1 if is_buy else -1)
                     label = "Profit terkunci" if locked_pct >= 0 else "Risiko dikurangi"
                     tg_send(chat_id,
@@ -2746,9 +2730,9 @@ def monitor_position_real(sym, pos):
                         f"SL digeser: <code>{old_sl:.6g}</code> → <code>{sl_p:.6g}</code>\n"
                         f"{label}: <b>{locked_pct:+.2f}%</b>")
                 except Exception as e:
-                    # SL lama TIDAK disentuh jika POST SL baru gagal, sehingga
-                    # posisi tetap terlindungi. Health check tidak perlu spam
-                    # re-place karena sl_order_id masih menunjuk ke SL lama.
+                    # sl_order_id = None sudah tertulis di atas (setelah cancel).
+                    # Health check berikutnya akan deteksi hilang dan pasang
+                    # ulang SL di sl_p (nilai lama, belum di-update ke proposed).
                     log.warning(f"[monitor_real trail] gagal update trailing SL {sym}: {e}")
 
         # ══ SOFTWARE SL — LAPIS TERAKHIR ═════════════════════════════════════
