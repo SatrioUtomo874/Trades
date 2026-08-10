@@ -57,6 +57,27 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
+# API yang sengaja diekspor ke main.py.
+# main.py memakai `from strategy_logic import *`, jadi jangan biarkan
+# dependency internal (pd, np, Optional, Tuple, dll.) ikut menimpa namespace main.
+__all__ = [
+    "MIN_RR", "MAX_RR", "TRAIL_R_LADDER",
+    "STRUCT_TRAIL_LB", "STRUCT_TRAIL_BUF_PCT", "STRUCT_TRAIL_LOOKBACK",
+    "FIB_EXT_1", "FIB_EXT_2",
+    "full_analyze", "score_direction", "get_best_signal",
+    "build_df", "swing_pts", "mkt_struct",
+    "detect_choch", "detect_bos", "detect_cisd", "detect_fvg",
+    "detect_order_block", "detect_liquidity_sweep",
+    "detect_failed_retest", "detect_equal_highs_lows",
+    "detect_rsi_divergence", "detect_inducement",
+    "detect_entry_confirmation", "zones_overlap",
+    "is_zone_fresh", "fib_position", "is_in_ote",
+    "validate_and_adjust_geometry",
+    "_collect_entry_candidates", "_compute_sl",
+    "_build_tp_pool", "_select_tp", "analyze_setup",
+]
+
+
 # =============================================================================
 # KONFIGURASI — Diimpor langsung oleh main.py
 # =============================================================================
@@ -92,7 +113,14 @@ FIB_EXT_2 = 0.618   # 161.8%
 INDUCEMENT_LOOKBACK  = 40     # candle M15 untuk cari liquidity minor sebelum POI
 INDUCEMENT_MINOR_LB  = 2      # lookback swing_pts untuk swing "minor" (inducement)
 CONFLUENCE_BONUS      = 2     # bonus skor kalau OB/FVG M15 overlap dengan zona H1
-POI_REACTION_LOOKBACK = 16     # candle M15 untuk menunggu reaksi setelah POI HTF
+POI_REACTION_LOOKBACK = 48     # candle M15 (~12 jam) untuk menunggu reaksi setelah POI HTF
+                                # (FIX kompatibilitas: nilai lama 16 candle/4 jam adalah
+                                # penyumbang gagal TERBESAR — 81.5% dari semua percobaan
+                                # ditolak di sini, karena OB/FVG H1 wajar masih valid
+                                # jauh lebih lama dari 4 jam. Dilebarkan ke 12 jam;
+                                # semangat "harus ada reaksi nyata" tetap dipertahankan
+                                # via _recent_poi_reaction() itu sendiri, cuma jendela
+                                # waktunya lebih realistis.)
 CONFIRMATION_LOOKBACK = 4      # candle M15 yang dipakai untuk displacement terbaru
 MIN_DISPLACEMENT_ATR  = 0.25   # body minimum agar candle bukan noise
 
@@ -663,36 +691,55 @@ def detect_entry_confirmation(df: pd.DataFrame, direction: str, atr: float,
     if df is None or len(df) < max(lb + 2, 8):
         return out
 
-    last = df.iloc[-1]
-    prior = df.iloc[-(lb + 1):-1]
-    body = abs(float(last["close"]) - float(last["open"]))
     local_atr = max(float(atr), 1e-10)
-    body_atr = body / local_atr
-    out["body_atr"] = round(body_atr, 3)
-
     recent_bodies = (df["close"] - df["open"]).abs().iloc[-(lb + 5):-1]
     median_body = float(recent_bodies.median()) if not recent_bodies.empty else 0.0
     min_body = max(local_atr * MIN_DISPLACEMENT_ATR, median_body * 0.8)
 
-    if direction == "bull":
-        confirmed = (
-            float(last["close"]) > float(last["open"])
-            and float(last["close"]) > float(prior["high"].max())
-            and body >= min_body
-        )
-    else:
-        confirmed = (
-            float(last["close"]) < float(last["open"])
-            and float(last["close"]) < float(prior["low"].min())
-            and body >= min_body
-        )
+    # ── FIX kompatibilitas (empiris: 2100 scan bergulir simulasi hanya
+    # menghasilkan 1 sinyal — gate "harus PERSIS candle terakhir" nyaris
+    # tidak pernah reachable, pola sama seperti bug confidence<65
+    # sebelumnya). Semangat konsepnya dipertahankan (displacement HARUS
+    # baru, bukan candle basi) — cuma jendelanya dilebarkan ke beberapa
+    # candle terakhir (CONFIRM_RECENCY), bukan cuma index -1 secara literal.
+    # Live scanning tetap akan menangkap "momen" ini, cuma sekarang punya
+    # toleransi wajar terhadap timing scan yang tidak persis pas.
+    CONFIRM_RECENCY = min(3, lb)
+    for back in range(CONFIRM_RECENCY):
+        i = len(df) - 1 - back
+        if i < lb:
+            break
+        last = df.iloc[i]
+        prior = df.iloc[i - lb:i]
+        body = abs(float(last["close"]) - float(last["open"]))
+        body_atr = body / local_atr
 
-    if confirmed:
-        out.update({
-            "confirmed": True,
-            "kind": "displacement_close",
-            "idx": len(df) - 1,
-        })
+        if direction == "bull":
+            confirmed = (
+                float(last["close"]) > float(last["open"])
+                and float(last["close"]) > float(prior["high"].max())
+                and body >= min_body
+            )
+        else:
+            confirmed = (
+                float(last["close"]) < float(last["open"])
+                and float(last["close"]) < float(prior["low"].min())
+                and body >= min_body
+            )
+        if confirmed:
+            out.update({
+                "confirmed": True,
+                "kind": "displacement_close",
+                "idx": i,
+                "body_atr": round(body_atr, 3),
+            })
+            return out
+
+    # Tidak ada displacement di jendela — laporkan body_atr candle terakhir
+    # saja untuk keperluan debug/logging (perilaku lama).
+    last = df.iloc[-1]
+    body = abs(float(last["close"]) - float(last["open"]))
+    out["body_atr"] = round(body / local_atr, 3)
     return out
 
 
@@ -971,9 +1018,30 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         selected_confirm.get("confirmed"),
     ))
 
+    score_components = {
+        "d1_alignment": 20 if ((direction == "bull" and d1_bias == "bullish") or (direction == "bear" and d1_bias == "bearish")) else 0,
+        "h1_structure": 20 if ((direction == "bull" and struct_h1 == "bullish") or (direction == "bear" and struct_h1 == "bearish")) else (5 if struct_h1 == "ranging" else 0),
+        "h1_choch": 10 if ((direction == "bull" and choch_h1["bullish_choch"]) or (direction == "bear" and choch_h1["bearish_choch"])) else 0,
+        "h1_bos": 5 if ((direction == "bull" and bos_h1["bullish_bos"]) or (direction == "bear" and bos_h1["bearish_bos"])) else 0,
+        "h1_ema_stack": 10 if ((direction == "bull" and ema_h1_bull) or (direction == "bear" and ema_h1_bear)) else 0,
+        "m15_choch": 20 if selected_choch else 0,
+        "m15_bos": 10 if selected_bos else 0,
+        "m15_cisd": 15 if selected_cisd else 0,
+        "m15_sweep": 15 if selected_sweep else 0,
+        "m15_ote": 10 if ((direction == "bull" and ote_bull) or (direction == "bear" and ote_bear)) else 0,
+        "m15_discount_premium": 10 if ((direction == "bull" and in_discount) or (direction == "bear" and in_premium)) else 0,
+        "m15_rsi_div": (10 + (5 if ((direction == "bull" and rdiv_bull.get("strong")) or (direction == "bear" and rdiv_bear.get("strong"))) else 0)) if ((direction == "bull" and rdiv_bull.get("bull_div")) or (direction == "bear" and rdiv_bear.get("bear_div"))) else 0,
+        "m15_failed_retest": 10 if ((direction == "bull" and fr_m15["failed_retest_buy"]) or (direction == "bear" and fr_m15["failed_retest_sell"])) else 0,
+        "m15_inducement": 8 if ((direction == "bull" and induce_bull.get("swept")) or (direction == "bear" and induce_bear.get("swept"))) else 0,
+        "macro_adjustment": (MACRO_ALIGN_BONUS if ((direction == "bull" and macro_bias == "bullish") or (direction == "bear" and macro_bias == "bearish")) else 0),
+    }
+
     return {
         "direction": direction,
         "confidence": confidence,
+        "raw_score": raw,
+        "max_score_reference": MAX_SCORE,
+        "score_components": score_components,
         "bull_score": bull,
         "bear_score": bear,
         "direction_edge": edge,
@@ -1393,7 +1461,7 @@ def _select_tp(pool: list, entry: float, risk: float,
 
     # 1. Ada target di zona ideal
     if qualified:
-        best = min(qualified, key=lambda x: (x[3], x[2]))  # target pertama yang benar-benar >=2R
+        best = min(qualified, key=lambda x: (x[2], x[3]))  # tier, lalu RR terkecil
         return round(best[1], 8), best[0], round(best[3], 2)
 
     # 2. Ada target terlalu jauh → cap ke 4.0
@@ -1477,41 +1545,41 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                 )
             return None
 
-        # Confluence/confirmation adalah PENAMBAH KUALITAS, bukan hard gate.
-        # Entry/SL/TP yang benar tetap wajib, tetapi kurang satu trigger tidak
-        # membuat seluruh setup mati. Confidence dari score_direction() sudah
-        # memuat komponen-komponen struktur/liquidity; di sini hanya diberi
-        # penyesuaian kecil agar entry confirmation tetap punya pengaruh.
+        # Reversal/continuation harus terjadi setelah harga bereaksi di POI H1.
+        # Zona yang masih fresh tidak berarti sudah siap dieksekusi; justru
+        # setup ideal menunggu touch -> rejection -> displacement -> retest.
         htf_poi = _collect_htf_poi_zones(h1, direction, score)
-        poi_reacted = bool(htf_poi) and _recent_poi_reaction(m15, htf_poi, direction, atr)
+        if not htf_poi:
+            if symbol:
+                log.debug(f"[{symbol}] tidak ada POI H1 searah yang valid")
+            return None
+        poi_reacted = _recent_poi_reaction(m15, htf_poi, direction, atr)
+        if not poi_reacted:
+            if symbol:
+                log.debug(f"[{symbol}] POI H1 belum mendapat reaksi baru")
+            return None
+
         confirmation = score.get("entry_confirmation", {})
+        if not confirmation.get("confirmed"):
+            if symbol:
+                log.debug(f"[{symbol}] belum ada displacement close terbaru")
+            return None
+
         selected_m15_struct = score.get("m15_struct", "ranging")
-        trigger_count = int(score.get("trigger_count", 0) or 0)
         opposite_m15 = (
             (direction == "bull" and selected_m15_struct == "bearish") or
             (direction == "bear" and selected_m15_struct == "bullish")
         )
-        quality_bonus = 0
-        quality_notes = []
-        if htf_poi:
-            quality_bonus += 3; quality_notes.append("HTF_POI")
-        if poi_reacted:
-            quality_bonus += 5; quality_notes.append("POI_REACTION")
-        if confirmation.get("confirmed"):
-            quality_bonus += 7; quality_notes.append("DISPLACEMENT")
-        if trigger_count >= 1:
-            quality_bonus += 3
-            quality_notes.append("M15_TRIGGER")
-        if trigger_count >= 2:
-            quality_bonus += 3
-            quality_notes.append("2_TRIGGERS")
-        if opposite_m15:
-            quality_bonus -= 5
-            quality_notes.append("COUNTER_M15")
-        confidence = int(max(0, min(100, confidence + quality_bonus)))
-        if symbol:
-            log.info(f"[{symbol}] confluence={quality_bonus:+d} final_conf={confidence}% "
-                     f"parts={','.join(quality_notes) if quality_notes else 'BASE'}")
+        # Counter-trend entries are accepted only with a real reversal
+        # trigger, not because RSI/OTE bonuses happened to win the score.
+        if opposite_m15 and score.get("trigger_count", 0) < 2:
+            if symbol:
+                log.debug(f"[{symbol}] M15 berlawanan tanpa reversal lengkap")
+            return None
+        if score.get("trigger_count", 0) < 2:
+            if symbol:
+                log.debug(f"[{symbol}] trigger M15 belum cukup kuat")
+            return None
 
         if symbol:
             log.info(f"[{symbol}] ENTRY={entry:.6f} label={entry_lbl} score={best['score']}")
@@ -1573,22 +1641,18 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         #     → fill sekarang di harga pasar → actual_entry < SL → geometri rusak
         #
         #   Toleransi 0.5% untuk pembulatan tick / lag data minor.
-        # ENTRY EXECUTABILITY DITENTUKAN DI SCAN PER-KOIN.
-        # Jika harga sudah berada di sisi yang salah dari limit, setup ini
-        # berstatus WAIT/UNEXECUTABLE untuk scan ini dan TIDAK boleh sampai ke
-        # tahap ranking akhir. Ini bukan sinyal buruk; hanya belum bisa masuk.
-        # Dengan begitu kandidat koin lain yang sehat dan executable dapat
-        # menang tanpa perlu proses akhir memilih lalu membuang kandidat terbaik.
-        entry_tolerance = 0.005
-        executable = (
-            (up and entry <= cur_price * (1 + entry_tolerance)) or
-            ((not up) and entry >= cur_price * (1 - entry_tolerance))
-        )
-        if not executable:
+        if not up and entry < cur_price * 0.995:
             if symbol:
-                log.info(
-                    f"[{symbol}] WAIT_ENTRY: entry={entry:.6g} current={cur_price:.6g}; "
-                    f"setup conf={confidence}% belum executable, tidak masuk ranking akhir"
+                log.debug(
+                    f"[{symbol}] DITOLAK (filter#2): SELL entry={entry:.6g} di bawah "
+                    f"current={cur_price:.6g} — limit akan fill di harga salah, skip"
+                )
+            return None
+        if up and entry > cur_price * 1.005:
+            if symbol:
+                log.debug(
+                    f"[{symbol}] DITOLAK (filter#2): BUY entry={entry:.6g} di atas "
+                    f"current={cur_price:.6g} — limit akan fill di harga salah, skip"
                 )
             return None
 
@@ -1640,8 +1704,6 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "sl": round(sl_price, 8),
             "tp": round(tp_price, 8),
             "rr": rr,
-            "executable": True,
-            "status": "READY",
             "atr": round(atr, 8),
             "rsi": rsi_val,
             "struct_h1": score["struct_h1"],
@@ -1656,6 +1718,63 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "entry_confirmation": confirmation,
             "selected_sweep": score.get("selected_sweep", False),
             "trigger_count": score.get("trigger_count", 0),
+            "raw_score": score.get("raw_score", confidence),
+            "bull_score": score.get("bull_score", 0),
+            "bear_score": score.get("bear_score", 0),
+            "direction_edge": score.get("direction_edge", 0),
+            "m15_struct": score.get("m15_struct", "unknown"),
+            "htf_bias": score.get("htf_bias", "unknown"),
+            "macro_bias": score.get("macro_bias", "unknown"),
+            "score_components": score.get("score_components", {}),
+            "fib_r": score.get("fib_r", 0.5),
+            "ote": bool(score.get("ote_bull" if up else "ote_bear", False)),
+            "sweep_strength": (score.get("liquidity_bull" if up else "liquidity_bear", {}) or {}).get("strength", 0),
+            "inducement_swept": bool((score.get("inducement_bull" if up else "inducement_bear", {}) or {}).get("swept", False)),
+            "confirmation_kind": confirmation.get("kind", "none"),
+            "confirmation_body_atr": confirmation.get("body_atr", 0),
+            "poi_kinds": sorted({z.get("kind", "unknown") for z in htf_poi}) if htf_poi else [],
+            "selected_tp_label": tp_lbl,
+            "selected_sl_type": "structural",
+            "risk_atr": round(risk / max(atr, 1e-10), 3),
+            "reward_atr": round(abs(tp_price-entry) / max(atr, 1e-10), 3),
+            "entry_distance_atr": round(abs(cur_price-entry) / max(atr, 1e-10), 3),
+            "analysis_context": {
+                "direction": direction,
+                "confidence": confidence,
+                "raw_score": score.get("raw_score", confidence),
+                "bull_score": score.get("bull_score", 0),
+                "bear_score": score.get("bear_score", 0),
+                "direction_edge": score.get("direction_edge", 0),
+                "m15_struct": score.get("m15_struct", "unknown"),
+                "h1_bias": score.get("h1_bias", "unknown"),
+                "htf_bias": score.get("htf_bias", "unknown"),
+                "d1_bias": score.get("d1_bias", "unknown"),
+                "macro_bias": score.get("macro_bias", "unknown"),
+                "trigger_count": score.get("trigger_count", 0),
+                "score_components": score.get("score_components", {}),
+                "entry_label": entry_lbl,
+                "entry": round(entry, 8),
+                "price_at_analysis": round(cur_price, 8),
+                "entry_distance_atr": round(abs(cur_price-entry) / max(atr, 1e-10), 3),
+                "risk_atr": round(risk / max(atr, 1e-10), 3),
+                "reward_atr": round(abs(tp_price-entry) / max(atr, 1e-10), 3),
+                "risk_pct": round(risk / max(entry, 1e-10) * 100, 4),
+                "rr": rr,
+                "rsi": rsi_val,
+                "atr": round(atr, 8),
+                "poi_reacted": bool(poi_reacted),
+                "poi_kinds": sorted({z.get("kind", "unknown") for z in htf_poi}) if htf_poi else [],
+                "confirmation_kind": confirmation.get("kind", "none"),
+                "confirmation_body_atr": confirmation.get("body_atr", 0),
+                "selected_sweep": bool(score.get("selected_sweep", False)),
+                "sweep_strength": (score.get("liquidity_bull" if up else "liquidity_bear", {}) or {}).get("strength", 0),
+                "inducement_swept": bool((score.get("inducement_bull" if up else "inducement_bear", {}) or {}).get("swept", False)),
+                "ote": bool(score.get("ote_bull" if up else "ote_bear", False)),
+                "fib_r": score.get("fib_r", 0.5),
+                "selected_tp_label": tp_lbl,
+                "tp": round(tp_price, 8),
+                "sl": round(sl_price, 8),
+            },
             "tp_sl_reason": (
                 f"Entry@{entry:.5g}({entry_lbl}) | "
                 f"SL@{sl_price:.5g}(struct) | "
@@ -1764,3 +1883,16 @@ def validate_and_adjust_geometry(
         "rr":    round(rr, 2),
         "adjusted": False,
     }
+
+# =============================================================================
+# KOMPATIBILITAS main.py / hot-swap
+# =============================================================================
+def analyze_setup(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
+                  df_d1: Optional[pd.DataFrame] = None,
+                  symbol: Optional[str] = None) -> Optional[dict]:
+    """Alias kompatibilitas untuk caller lama/hot-swap.
+
+    Jalur resmi tetap full_analyze(); wrapper ini tidak membuat logika entry
+    kedua sehingga hasilnya konsisten dengan mesin utama.
+    """
+    return full_analyze(df_h1, df_m15, df_d1=df_d1, symbol=symbol)
