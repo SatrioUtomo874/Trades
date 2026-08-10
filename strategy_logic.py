@@ -26,9 +26,12 @@ Poin revisi v3:
      ditangani di validate_and_adjust_geometry() (dipanggil main.py saat
      order terisi/di-monitor) dan di monitor_position() main.py (verifikasi
      candle M1 sebelum SL dikonfirmasi).
-  4) Trail: tidak memakai profit ladder. Pergeseran SL murni mengikuti
-     struktur M15 (HL untuk BUY / LH untuk SELL) dengan buffer anti-sweep.
-     Trail diperlakukan sebagai pembaruan invalidation, bukan target profit.
+  4) Trail Ladder: DIUBAH agar Trail bukan "profit‑taker" paksa. Rungs lama
+     yang mengunci profit di banyak level (0.5R..3.5R) dihapus; hanya
+     tersisa SATU rung breakeven di 1.0R sebagai jaring pengaman risiko
+     (bukan profit). Setelah breakeven, pergerakan SL sepenuhnya mengikuti
+     struktur M15 (swing terbaru, lihat STRUCT_TRAIL_*) — SL baru = "harga
+     tidak kuat lagi mengikuti trend", bukan target profit.
   5) Proses per‑koin: Entry → SL → TP → confidence (global, tanpa sesi).
   6) Tidak ada confidence per‑sesi — confidence murni dari kualitas
      struktur+konfluensi chart (skema sama seperti v2, ditambah bonus baru).
@@ -54,25 +57,6 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# API publik yang dipakai main.py dan hot-swap. Jangan expose dependency
-# internal lewat ``from strategy_logic import *``.
-__all__ = [
-    "MIN_RR", "MAX_RR", "TRAIL_R_LADDER",
-    "STRUCT_TRAIL_LB", "STRUCT_TRAIL_BUF_PCT", "STRUCT_TRAIL_LOOKBACK",
-    "FIB_EXT_1", "FIB_EXT_2",
-    "full_analyze", "score_direction", "get_best_signal",
-    "build_df", "swing_pts", "mkt_struct",
-    "detect_choch", "detect_bos", "detect_cisd", "detect_fvg",
-    "detect_order_block", "detect_liquidity_sweep",
-    "detect_failed_retest", "detect_equal_highs_lows",
-    "detect_rsi_divergence", "detect_inducement",
-    "detect_entry_confirmation", "zones_overlap",
-    "is_zone_fresh", "fib_position", "is_in_ote",
-    "validate_and_adjust_geometry",
-    "_collect_entry_candidates", "_compute_sl",
-    "_build_tp_pool", "_select_tp", "analyze_setup",
-]
-
 # =============================================================================
 # KONFIGURASI — Diimpor langsung oleh main.py
 # =============================================================================
@@ -81,11 +65,16 @@ MIN_RR   = 2.0
 MAX_RR   = 4.0
 
 # ── Trail Ladder v3 ──────────────────────────────────────────────────────
-# Tidak ada R-based profit ladder. main.py tetap menerima konstanta ini,
-# tetapi Trail sepenuhnya ditentukan oleh struktur M15. Dengan demikian SL
-# hanya bergeser ketika market membentuk struktur baru yang bisa menjadi
-# invalidation; bukan karena trade sudah mencapai persentase profit tertentu.
-TRAIL_R_LADDER = []  # trailing ditentukan murni oleh struktur M15; tidak dipaksa BE/profit
+# HANYA breakeven di 1.0R. Ini bukan "pengaman profit" — cuma menghilangkan
+# risiko begitu trade sudah maju 1R, konsisten dengan permintaan: "Trail
+# jangan dipaksa profit". Setelah breakeven tercapai, seluruh pergeseran SL
+# selanjutnya murni mengikuti struktur M15 (lihat monitor_position main.py
+# yang memakai kandidat "paling protektif" antara ladder ini vs structure —
+# karena ladder cuma py 1 rung breakeven, structure yang akan mendominasi
+# di hampir semua kasus setelah 1R).
+TRAIL_R_LADDER = [
+    (1.0, 0.00),   # breakeven only — bukan profit lock
+]
 
 # Trailing struktural M15 — INI inti dari Trail (bukan ladder di atas).
 # "Ketika harga menyentuh Trail artinya harga tidak kuat mengikuti trend
@@ -204,14 +193,6 @@ def _market_structure(df: pd.DataFrame, sh: list, sl: list) -> str:
     return "ranging"
 
 mkt_struct = _market_structure  # alias
-
-def mkt_struct(df: pd.DataFrame, lb: int = 5) -> str:
-    """Public compatibility alias for market-structure classification."""
-    if df is None or len(df) < lb * 2 + 1:
-        return "ranging"
-    sh, sl = swing_pts(df, lb=lb)
-    return _market_structure(df, sh, sl)
-
 
 def _macro_bias(df_btc_h1: Optional[pd.DataFrame]) -> str:
     """
@@ -509,51 +490,34 @@ def detect_cisd(df: pd.DataFrame, lb: int = 8) -> dict:
     return result
 
 def detect_liquidity_sweep(df: pd.DataFrame, sh: list, sl: list,
-                           direction: str, recent_bars: int = 8) -> dict:
-    """Detect a *closed-candle* liquidity sweep.
-
-    A sweep is not inferred from a wick alone: price must pierce a recent
-    swing-liquidity level and close back on the valid side of that level.
-    We inspect several recently closed M15 candles rather than only the
-    newest candle, because an entry setup can remain valid for a few candles
-    after the actual sweep.
+                           direction: str) -> dict:
     """
-    result = {"type": "none", "level": None, "strength": 0,
-              "bar_index": None, "close_back": False}
-    if df is None or len(df) < 10:
-        return result
-
-    look = max(1, min(int(recent_bars), len(df) - 1))
-    start = len(df) - look
-
-    # Use swings that existed before the candidate sweep candle. This avoids
-    # treating the sweep candle itself as the liquidity reference.
-    for i in range(len(df) - 1, start - 1, -1):
-        prior = df.iloc[:i]
-        if len(prior) < 7:
-            continue
-        p_sh, p_sl = swing_pts(prior, lb=3)
-        candle = df.iloc[i]
-
-        if direction == "bull" and p_sl:
-            level = float(prior["low"].iloc[p_sl[-1]])
-            if float(candle["low"]) < level and float(candle["close"]) > level:
-                depth = (level - float(candle["low"])) / max(level, 1e-10)
-                return {
-                    "type": "sweep", "level": level,
-                    "strength": min(3, max(1, int(depth / 0.002) + 1)),
-                    "bar_index": i, "close_back": True,
-                }
-
-        if direction == "bear" and p_sh:
-            level = float(prior["high"].iloc[p_sh[-1]])
-            if float(candle["high"]) > level and float(candle["close"]) < level:
-                depth = (float(candle["high"]) - level) / max(level, 1e-10)
-                return {
-                    "type": "sweep", "level": level,
-                    "strength": min(3, max(1, int(depth / 0.002) + 1)),
-                    "bar_index": i, "close_back": True,
-                }
+    Liquidity Sweep (transkrip 4, 9, 15, 18).
+    Valid: wick menembus swing, tapi close kembali di atas/bawah level.
+    """
+    result = {"type": "none", "level": None, "strength": 0}
+    if direction == "bull" and sl:
+        level = float(df["low"].iloc[sl[-1]])
+        last_low = float(df["low"].iloc[-1])
+        last_close = float(df["close"].iloc[-1])
+        if last_low < level and last_close > level:
+            depth = (level - last_low) / max(level, 1e-10)
+            result = {
+                "type": "sweep",
+                "level": level,
+                "strength": min(3, int(depth / 0.002) + 1),
+            }
+    elif direction == "bear" and sh:
+        level = float(df["high"].iloc[sh[-1]])
+        last_high = float(df["high"].iloc[-1])
+        last_close = float(df["close"].iloc[-1])
+        if last_high > level and last_close < level:
+            depth = (last_high - level) / max(level, 1e-10)
+            result = {
+                "type": "sweep",
+                "level": level,
+                "strength": min(3, int(depth / 0.002) + 1),
+            }
     return result
 
 def detect_inducement(df: pd.DataFrame, direction: str,
@@ -969,10 +933,7 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     elif htf_bias == "bearish":
         direction = "bear"
     elif htf_bias == "conflict":
-        # Conflict is a quality downgrade, not a hard reject.  The stronger
-        # side may still produce a valid local setup; full_analyze() will
-        # require stronger confirmation before allowing execution.
-        direction = "bull" if bull >= bear else "bear"
+        return None
     else:
         direction = "bull" if bull >= bear else "bear"
     raw = bull if direction == "bull" else bear
@@ -1113,10 +1074,10 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         # Binance can fill those immediately at a different price, leaving
         # the original SL/TP geometry invalid.
         if up:
-            if current_price < z["bot"] or entry_pt > current_price * 1.003:
+            if current_price < z["bot"] or entry_pt > current_price * 1.001:
                 continue
         else:
-            if current_price > z["top"] or entry_pt < current_price * 0.997:
+            if current_price > z["top"] or entry_pt < current_price * 0.999:
                 continue
 
         sc = 3 + z["quality"]  # base 3 + quality
@@ -1149,12 +1110,12 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         if not f["is_fresh"]:
             continue
         entry_pt = f["mid"]
-        invalid_pt = f["bot"] if up else f["top"]
+        invalid_pt = f["top"] if up else f["bot"]
         if up:
-            if current_price < f["bot"] or entry_pt > current_price * 1.003:
+            if current_price < f["bot"] or entry_pt > current_price * 1.001:
                 continue
         else:
-            if current_price > f["top"] or entry_pt < current_price * 0.997:
+            if current_price > f["top"] or entry_pt < current_price * 0.999:
                 continue
         sc = 3
         if cisd_ok: sc += 2
@@ -1189,9 +1150,9 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         # BUY (up): entry di equal LOW → level harus ≤ current_price
         #   supaya BUY limit menunggu harga turun ke sana, bukan fill sekarang.
         #   Toleransi 0.3%: jika eq > current_price * 1.003 → sudah tersapu.
-        if not up and float(eq) < current_price * 0.997:
+        if not up and float(eq) < current_price * 0.999:
             continue   # EQ high sudah di bawah harga pasar → skip
-        if up and float(eq) > current_price * 1.003:
+        if up and float(eq) > current_price * 1.001:
             continue   # EQ low sudah di atas harga pasar → skip
 
         invalid_pt = eq - atr * 0.8 if up else eq + atr * 0.8
@@ -1219,80 +1180,90 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
 def _compute_sl(m15: pd.DataFrame, h1: pd.DataFrame, direction: str,
                 entry: float, atr: float, liq_sweep: dict,
                 invalid_level: Optional[float] = None) -> Tuple[float, float]:
-    """Place SL beyond *invalidation*, not merely beyond the entry zone.
-
-    For BUY, every meaningful bearish-invalidation level (OB/FVG boundary,
-    swept sell-side liquidity, recent M15 swing low and H1 swing low) is
-    considered. The stop is placed beyond the deepest relevant level plus a
-    volatility buffer. SELL is mirrored.
-
-    This is deliberate: if price reaches this SL after the setup is filled,
-    the market has broken the structure that justified the trade. A wick that
-    merely takes a nearby liquidity pool should not be the stop itself. If the
-    required structural stop is unreasonably wide, the setup is rejected
-    rather than inventing a tighter stop that is likely to become liquidity.
+    """
+    Hitung SL yang tepat secara struktural, ditempatkan sedemikian rupa
+    sehingga jika tersentuh berarti arah benar‑benar salah (bukan LS biasa).
+    Buffer anti‑Liquidity Sweep = 0.5 ATR.
+    Pilih kandidat dengan prioritas: ob_invalid > struct_h1 > ls_level > struct_m15,
+    dan di antara prioritas yang sama pilih yang LEBIH JAUH dari entry
+    (lebih tahan noise).
     """
     up = direction == "bull"
-    buffer = max(atr * 0.50, entry * 0.0005)
-    min_risk = atr * 0.75
+    ls_buffer = atr * 0.5
+    min_risk = atr * 1.0
+    # Wide structural stops were responsible for disproportionate losses on
+    # fast altcoins.  A setup whose invalidation is farther than 2.75 ATR is
+    # not an entry problem that a larger stop can solve; it is a skip.
     max_risk = atr * 2.75
 
-    levels = []  # (name, invalidation_level)
+    cands = []
 
+    # 1. invalid level dari OB/FVG
     if invalid_level is not None:
-        levels.append(("poi_invalid", float(invalid_level)))
+        sl_raw = invalid_level + (-ls_buffer if up else ls_buffer)
+        risk = abs(sl_raw - entry)
+        if min_risk <= risk <= max_risk:
+            cands.append(("ob_invalid", sl_raw, risk))
 
-    if liq_sweep and liq_sweep.get("type") == "sweep" and liq_sweep.get("level") is not None:
-        levels.append(("sweep_level", float(liq_sweep["level"])))
-
+    # 2. M15 swing (prioritas lebih rendah karena lebih rentan noise)
     sh15, sl15 = swing_pts(m15, lb=3)
     if up and sl15:
-        levels.append(("m15_swing_low", float(m15["low"].iloc[sl15[-1]])))
+        struct_low = float(m15["low"].iloc[sl15[-1]])
+        if struct_low < entry:
+            sl_raw = struct_low - ls_buffer
+            risk = abs(sl_raw - entry)
+            if min_risk <= risk <= max_risk:
+                cands.append(("struct_m15", sl_raw, risk))
     elif not up and sh15:
-        levels.append(("m15_swing_high", float(m15["high"].iloc[sh15[-1]])))
+        struct_high = float(m15["high"].iloc[sh15[-1]])
+        if struct_high > entry:
+            sl_raw = struct_high + ls_buffer
+            risk = abs(sl_raw - entry)
+            if min_risk <= risk <= max_risk:
+                cands.append(("struct_m15", sl_raw, risk))
 
+    # 3. level yang disweep
+    if liq_sweep and liq_sweep.get("type") == "sweep" and liq_sweep.get("level"):
+        lev = float(liq_sweep["level"])
+        if up and lev < entry:
+            sl_raw = lev - ls_buffer
+            risk = abs(sl_raw - entry)
+            if min_risk <= risk <= max_risk:
+                cands.append(("ls_level", sl_raw, risk))
+        elif not up and lev > entry:
+            sl_raw = lev + ls_buffer
+            risk = abs(sl_raw - entry)
+            if min_risk <= risk <= max_risk:
+                cands.append(("ls_level", sl_raw, risk))
+
+    # 4. H1 swing (lebih lebar, lebih tahan noise)
     sh1, sl1 = swing_pts(h1, lb=5)
     if up and sl1:
-        levels.append(("h1_swing_low", float(h1["low"].iloc[sl1[-1]])))
+        h1_low = float(h1["low"].iloc[sl1[-1]])
+        if h1_low < entry:
+            sl_raw = h1_low - ls_buffer
+            risk = abs(sl_raw - entry)
+            if min_risk <= risk <= max_risk:
+                cands.append(("struct_h1", sl_raw, risk))
     elif not up and sh1:
-        levels.append(("h1_swing_high", float(h1["high"].iloc[sh1[-1]])))
+        h1_high = float(h1["high"].iloc[sh1[-1]])
+        if h1_high > entry:
+            sl_raw = h1_high + ls_buffer
+            risk = abs(sl_raw - entry)
+            if min_risk <= risk <= max_risk:
+                cands.append(("struct_h1", sl_raw, risk))
 
-    # Only levels on the invalid side of entry are meaningful. For BUY the
-    # deepest relevant low wins; for SELL the highest relevant high wins.
-    if up:
-        valid = [(n, v) for n, v in levels if v < entry]
-        if not valid:
-            return entry - min_risk, min_risk
-        deepest_name, deepest = min(valid, key=lambda x: x[1])
-        sl_price = deepest - buffer
-    else:
-        valid = [(n, v) for n, v in levels if v > entry]
-        if not valid:
-            return entry + min_risk, min_risk
-        deepest_name, deepest = max(valid, key=lambda x: x[1])
-        sl_price = deepest + buffer
+    if cands:
+        # Prioritas: ob_invalid (paling presisi), struct_h1 (paling tahan),
+        # ls_level, struct_m15. Dalam prioritas sama, pilih risk terbesar.
+        _PRIO = {"ob_invalid": 0, "struct_h1": 1, "ls_level": 2, "struct_m15": 3}
+        cands.sort(key=lambda x: (_PRIO.get(x[0], 9), -x[2]))
+        _, sl_price, risk = cands[0]
+        return sl_price, risk
 
-    risk = abs(entry - sl_price)
-    # A too-small structural stop is also dangerous: it tends to sit inside
-    # ordinary M15 noise. A too-wide stop means the setup geometry is poor.
-    if risk < min_risk:
-        sl_price = entry + (-min_risk if up else min_risk)
-        risk = min_risk
-
-    if risk > max_risk:
-        # Do NOT pull the stop closer just to satisfy RR. That would defeat
-        # the whole purpose of an invalidation-based SL. full_analyze() treats
-        # this as an invalid setup and returns no signal.
-        raise ValueError(
-            f"structural SL too wide ({risk:.6g} > {max_risk:.6g}); "
-            f"setup has no compact invalidation"
-        )
-
-    log.debug(
-        f"[SL] {direction} invalidation={deepest_name}@{deepest:.6g} "
-        f"buffer={buffer:.6g} risk={risk:.6g}"
-    )
-    return float(sl_price), float(risk)
+    # Fallback ATR
+    sl_price = entry + (-min_risk if up else min_risk)
+    return sl_price, min_risk
 
 
 # =============================================================================
@@ -1422,7 +1393,7 @@ def _select_tp(pool: list, entry: float, risk: float,
 
     # 1. Ada target di zona ideal
     if qualified:
-        best = min(qualified, key=lambda x: (x[2], x[3]))  # tier, lalu RR terkecil
+        best = min(qualified, key=lambda x: (x[3], x[2]))  # target pertama yang benar-benar >=2R
         return round(best[1], 8), best[0], round(best[3], 2)
 
     # 2. Ada target terlalu jauh → cap ke 4.0
@@ -1506,61 +1477,41 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                 )
             return None
 
-        # ── ENTRY QUALITY: soft gates, bukan gerbang bertumpuk ─────────────
-        # Arah 60-80% tidak boleh hilang hanya karena satu trigger belum muncul.
-        # Kita bedakan: POI reaction, displacement, sweep, dan structure adalah
-        # bukti yang saling melengkapi. Minimal satu bukti eksekusi harus ada,
-        # sedangkan kombinasi kuat mendapat confidence bonus.
+        # Confluence/confirmation adalah PENAMBAH KUALITAS, bukan hard gate.
+        # Entry/SL/TP yang benar tetap wajib, tetapi kurang satu trigger tidak
+        # membuat seluruh setup mati. Confidence dari score_direction() sudah
+        # memuat komponen-komponen struktur/liquidity; di sini hanya diberi
+        # penyesuaian kecil agar entry confirmation tetap punya pengaruh.
         htf_poi = _collect_htf_poi_zones(h1, direction, score)
-        poi_reacted = _recent_poi_reaction(m15, htf_poi, direction, atr) if htf_poi else False
+        poi_reacted = bool(htf_poi) and _recent_poi_reaction(m15, htf_poi, direction, atr)
         confirmation = score.get("entry_confirmation", {})
-        confirmed = bool(confirmation.get("confirmed"))
-        trigger_count = int(score.get("trigger_count", 0))
         selected_m15_struct = score.get("m15_struct", "ranging")
-        selected_sweep = bool(score.get("selected_sweep", False))
+        trigger_count = int(score.get("trigger_count", 0) or 0)
         opposite_m15 = (
             (direction == "bull" and selected_m15_struct == "bearish") or
             (direction == "bear" and selected_m15_struct == "bullish")
         )
-
-        # Execution evidence: salah satu harus ada.  Sweep sendiri boleh menjadi
-        # evidence jika POI/entry candidate sudah ada; tanpa POI candidate bot
-        # tidak akan sampai ke sini.
-        execution_evidence = any((
-            confirmed,
-            poi_reacted,
-            selected_sweep and trigger_count >= 1,
-            trigger_count >= 1 and selected_m15_struct != "ranging",
-        ))
-
-        if not execution_evidence:
-            if symbol:
-                log.debug(
-                    f"[{symbol}] WATCH: belum ada evidence entry "
-                    f"(trigger={trigger_count}, poi={poi_reacted}, "
-                    f"confirm={confirmed}, sweep={selected_sweep}, m15={selected_m15_struct})"
-                )
-            return None
-
-        # Counter-trend masih diperbolehkan hanya jika ada reversal evidence yang
-        # nyata. Ini mencegah confidence tinggi akibat RSI/OTE saja.
-        if opposite_m15 and not (confirmed and (poi_reacted or selected_sweep) and trigger_count >= 1):
-            if symbol:
-                log.debug(f"[{symbol}] WATCH: M15 berlawanan, reversal evidence belum lengkap")
-            return None
-
-        # Jika HTF conflict, minta kualitas lokal lebih kuat. Bukan veto total.
-        if score.get("htf_bias") == "conflict" and not (confirmed and selected_sweep and poi_reacted):
-            if symbol:
-                log.debug(f"[{symbol}] WATCH: HTF conflict, butuh sweep+POI+displacement")
-            return None
-
+        quality_bonus = 0
+        quality_notes = []
+        if htf_poi:
+            quality_bonus += 3; quality_notes.append("HTF_POI")
+        if poi_reacted:
+            quality_bonus += 5; quality_notes.append("POI_REACTION")
+        if confirmation.get("confirmed"):
+            quality_bonus += 7; quality_notes.append("DISPLACEMENT")
+        if trigger_count >= 1:
+            quality_bonus += 3
+            quality_notes.append("M15_TRIGGER")
+        if trigger_count >= 2:
+            quality_bonus += 3
+            quality_notes.append("2_TRIGGERS")
+        if opposite_m15:
+            quality_bonus -= 5
+            quality_notes.append("COUNTER_M15")
+        confidence = int(max(0, min(100, confidence + quality_bonus)))
         if symbol:
-            log.info(
-                f"[{symbol}] ENTRY-QUALITY evidence="
-                f"confirm:{confirmed} poi:{poi_reacted} sweep:{selected_sweep} "
-                f"trigger:{trigger_count} m15:{selected_m15_struct}"
-            )
+            log.info(f"[{symbol}] confluence={quality_bonus:+d} final_conf={confidence}% "
+                     f"parts={','.join(quality_notes) if quality_notes else 'BASE'}")
 
         if symbol:
             log.info(f"[{symbol}] ENTRY={entry:.6f} label={entry_lbl} score={best['score']}")
@@ -1622,18 +1573,22 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         #     → fill sekarang di harga pasar → actual_entry < SL → geometri rusak
         #
         #   Toleransi 0.5% untuk pembulatan tick / lag data minor.
-        if not up and entry < cur_price * 0.995:
+        # ENTRY EXECUTABILITY DITENTUKAN DI SCAN PER-KOIN.
+        # Jika harga sudah berada di sisi yang salah dari limit, setup ini
+        # berstatus WAIT/UNEXECUTABLE untuk scan ini dan TIDAK boleh sampai ke
+        # tahap ranking akhir. Ini bukan sinyal buruk; hanya belum bisa masuk.
+        # Dengan begitu kandidat koin lain yang sehat dan executable dapat
+        # menang tanpa perlu proses akhir memilih lalu membuang kandidat terbaik.
+        entry_tolerance = 0.005
+        executable = (
+            (up and entry <= cur_price * (1 + entry_tolerance)) or
+            ((not up) and entry >= cur_price * (1 - entry_tolerance))
+        )
+        if not executable:
             if symbol:
-                log.debug(
-                    f"[{symbol}] DITOLAK (filter#2): SELL entry={entry:.6g} di bawah "
-                    f"current={cur_price:.6g} — limit akan fill di harga salah, skip"
-                )
-            return None
-        if up and entry > cur_price * 1.005:
-            if symbol:
-                log.debug(
-                    f"[{symbol}] DITOLAK (filter#2): BUY entry={entry:.6g} di atas "
-                    f"current={cur_price:.6g} — limit akan fill di harga salah, skip"
+                log.info(
+                    f"[{symbol}] WAIT_ENTRY: entry={entry:.6g} current={cur_price:.6g}; "
+                    f"setup conf={confidence}% belum executable, tidak masuk ranking akhir"
                 )
             return None
 
@@ -1674,43 +1629,19 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
 
         rsi_val = round(float(m15["rsi"].iloc[-1]), 1)
 
-        # Confidence is a quality estimate, not a probability.  Apply only
-        # small, transparent adjustments for entry readiness; never hard-reject
-        # a setup solely because one optional confirmation is absent.
-        final_conf = int(confidence)
-        if poi_reacted:
-            final_conf += 3
-        if confirmed:
-            final_conf += 3
-        if selected_sweep:
-            final_conf += 2
-        if trigger_count >= 2:
-            final_conf += 2
-        if selected_m15_struct == "ranging":
-            final_conf -= 5
-        if opposite_m15:
-            final_conf -= 6
-        if score.get("htf_bias") == "conflict":
-            final_conf -= 8
-        final_conf = max(15, min(95, final_conf))
-
-        setup_grade = "A" if (poi_reacted and confirmed and trigger_count >= 2 and not opposite_m15) else (
-            "B" if execution_evidence and not opposite_m15 else "C"
-        )
-
         return {
             "symbol": symbol,
             "original_dir": direction,
             "decision": "BUY" if up else "SELL",
-            "confidence": final_conf,
-            "raw_confidence": confidence,
-            "setup_grade": setup_grade,
+            "confidence": confidence,
             "price": cur_price,
             "entry": round(entry, 8),
             "entry_label": entry_lbl,
             "sl": round(sl_price, 8),
             "tp": round(tp_price, 8),
             "rr": rr,
+            "executable": True,
+            "status": "READY",
             "atr": round(atr, 8),
             "rsi": rsi_val,
             "struct_h1": score["struct_h1"],
@@ -1725,15 +1656,6 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "entry_confirmation": confirmation,
             "selected_sweep": score.get("selected_sweep", False),
             "trigger_count": score.get("trigger_count", 0),
-            "entry_quality": {
-                "poi_reacted": bool(poi_reacted),
-                "displacement_confirmed": bool(confirmed),
-                "selected_sweep": bool(selected_sweep),
-                "m15_struct": selected_m15_struct,
-                "opposite_m15": bool(opposite_m15),
-                "htf_conflict": score.get("htf_bias") == "conflict",
-                "evidence_count": int(sum([bool(poi_reacted), bool(confirmed), bool(selected_sweep), trigger_count >= 2])),
-            },
             "tp_sl_reason": (
                 f"Entry@{entry:.5g}({entry_lbl}) | "
                 f"SL@{sl_price:.5g}(struct) | "
@@ -1768,91 +1690,77 @@ def validate_and_adjust_geometry(
     current_price: float, atr: float,
     direction: str,
 ) -> Optional[dict]:
-    """Validate filled-order geometry and cautiously handle a likely sweep.
+    """
+    Validasi dan (jika perlu) koreksi geometri entry/SL/TP sebelum order dipasang
+    atau setelah order terisi di harga yang berbeda dari target.
 
-    This function is intentionally conservative. A price merely touching an
-    SL is *not* enough to move the stop. The only recoverable case is when the
-    price has crossed the original SL by a shallow amount but has already
-    returned to the favorable side of the entry. That is a practical proxy for
-    a liquidity sweep because main.py supplies current price, while its M1
-    monitor supplies the later candle-close confirmation.
+    Mengapa fungsi ini penting:
+    ─────────────────────────────────────────────────────────────────────────────
+    Sinyal dihitung pada waktu T. Saat order terpasang (T+beberapa detik/menit),
+    harga pasar bisa sudah bergerak — khususnya:
 
-    We never move the entry. We never manufacture a 2R target. If the
-    geometry cannot be made structurally coherent, return None so main.py can
-    fail closed.
+      • Kasus "geometri invalid setelah order terisi":
+        SELL limit di entry_target, tapi actual_fill = harga pasar (lebih tinggi
+        dari entry_target karena market sudah di atas limit sell). Akibatnya
+        actual_fill > SL → geometri rusak.
+
+      • Kasus "harga sudah melewati SL setelah order terisi":
+        Sinyal sudah kedaluwarsa atau fill terjadi di sisi yang salah.
+        Posisi tidak boleh diselamatkan dengan menggeser entry/SL
+        secara retroaktif.
+
+    Logika:
+    ─────────────────────────────────────────────────────────────────────────────
+    1. Cek geometri dasar: SL di sisi yang benar dari entry, TP di sisi lain.
+    2. Cek SL belum ditembus current_price.
+    3. Jika SL ditembus atau geometri fill berubah, tolak posisi secara aman.
+       Wick M1 tidak cukup untuk membuktikan bahwa posisi masih valid.
+    4. Cek RR ≥ MIN_RR tanpa mengubah level trade.
+
+    Return:
+      dict  {entry, sl, tp, rr, adjusted} jika valid / bisa diselamatkan
+      None  jika tidak bisa diperbaiki → TOLAK sinyal / auto-out
     """
     up = direction == "bull"
-
     def _geo_ok(e: float, s: float, t: float) -> bool:
         return (s < e < t) if up else (t < e < s)
 
     def _rr(e: float, s: float, t: float) -> float:
         return abs(t - e) / max(abs(e - s), 1e-10)
 
+    sl_breached = (current_price <= sl) if up else (current_price >= sl)
+
+    # ─── Kasus 1: sudah valid ────────────────────────────────────────────────
+    if _geo_ok(entry, sl, tp) and not sl_breached:
+        rr = _rr(entry, sl, tp)
+        if rr < MIN_RR:
+            return None
+        return {"entry": entry, "sl": sl, "tp": tp, "rr": round(rr, 2), "adjusted": False}
+
+    # ─── Kasus 2: SL ditembus → fail closed ─────────────────────────────────
+    if sl_breached:
+        log.info(
+            f"[validate_geo] SL sudah ditembus sebelum validasi "
+            f"(entry={entry:.6g}, sl={sl:.6g}, price={current_price:.6g}) — ditolak"
+        )
+        return None
+
+    # Never move entry or SL after a fill. A changed geometry is a stale
+    # signal, not a new setup.
     if not _geo_ok(entry, sl, tp):
         return None
 
     rr = _rr(entry, sl, tp)
-    if rr < MIN_RR or rr > MAX_RR + 1e-9:
-        return None
-
-    sl_breached = (current_price <= sl) if up else (current_price >= sl)
-    if not sl_breached:
-        return {
-            "entry": round(entry, 8), "sl": round(sl, 8),
-            "tp": round(tp, 8), "rr": round(rr, 2), "adjusted": False,
-        }
-
-    # A sweep candidate must have returned to the favorable side of entry.
-    # If price is still beyond entry, the original directional thesis is not
-    # demonstrably recovered, so do not widen the risk.
-    favorable_return = current_price > entry if up else current_price < entry
-    breach = abs(current_price - sl)
-    max_sweep_depth = max(float(atr) * 0.75, entry * 0.001)
-    if not favorable_return or breach > max_sweep_depth:
-        log.info(
-            f"[validate_geo] SL breach is not a recoverable sweep: "
-            f"entry={entry:.6g}, sl={sl:.6g}, price={current_price:.6g}, "
-            f"depth={breach:.6g}, max={max_sweep_depth:.6g}"
+    if rr < MIN_RR:
+        log.debug(
+            f"[validate_geo] RR={rr:.2f} < MIN_RR={MIN_RR} setelah koreksi — ditolak"
         )
         return None
 
-    # Rebuild the stop on the ORIGINAL invalidation side, without forcing a
-    # profit lock. Keep it beyond the observed sweep by a smaller volatility
-    # buffer, but still on the losing side of entry.
-    sweep_buffer = max(float(atr) * 0.25, entry * 0.0005)
-    if up:
-        new_sl = min(entry - sweep_buffer, current_price - sweep_buffer)
-    else:
-        new_sl = max(entry + sweep_buffer, current_price + sweep_buffer)
-
-    new_risk = abs(entry - new_sl)
-    if new_risk <= 0 or new_risk > float(atr) * 3.0:
-        return None
-
-    new_rr = _rr(entry, new_sl, tp)
-    if new_rr < MIN_RR or new_rr > MAX_RR + 1e-9:
-        # The sweep-relocated SL may make the original TP geometry no longer
-        # adequate. Do not invent a new TP here: main.py must not silently
-        # change the trade thesis after fill.
-        return None
-
-    log.warning(
-        f"[validate_geo] probable liquidity sweep: SL {sl:.6g}->{new_sl:.6g}, "
-        f"price={current_price:.6g}, depth={breach:.6g}, RR={new_rr:.2f}"
-    )
     return {
-        "entry": round(entry, 8), "sl": round(new_sl, 8),
-        "tp": round(tp, 8), "rr": round(new_rr, 2), "adjusted": True,
-        "adjust_reason": "probable_liquidity_sweep",
+        "entry": round(entry, 8),
+        "sl":    round(sl, 8),
+        "tp":    tp,
+        "rr":    round(rr, 2),
+        "adjusted": False,
     }
-
-
-# =============================================================================
-# KOMPATIBILITAS main.py / hot-swap
-# =============================================================================
-def analyze_setup(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
-                  df_d1: Optional[pd.DataFrame] = None,
-                  symbol: Optional[str] = None) -> Optional[dict]:
-    """Alias kompatibilitas untuk caller lama/hot-swap."""
-    return full_analyze(df_h1, df_m15, df_d1=df_d1, symbol=symbol)
