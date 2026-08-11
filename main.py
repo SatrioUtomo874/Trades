@@ -49,7 +49,7 @@ MONITOR_SLEEP       = 10
 REAL_TRADE_POLL_SLEEP = 30
 MAX_POSITIONS       = 20   # runtime via /max — jangan pindah ke strategy_logic
 MONITOR_INTERVAL    = 15 * 60
-MIN_CONFIDENCE      = 50   # runtime via /confidence_min — jangan pindah ke strategy_logic
+MIN_CONFIDENCE      = 60   # runtime via /confidence_min — balance kualitas/frekuensi — jangan pindah ke strategy_logic
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
 # ─────────────────────────────────────────────
 
@@ -65,8 +65,7 @@ try:
 except Exception as e:
     log.error(f"[OTAK] Gagal memuat strategy_logic.py ({e}) — fallback aman aktif.")
     MIN_RR = 2.0
-    TRAIL_R_LADDER = [(0.5, 0.15), (1.0, 0.35), (1.5, 0.50),
-                       (2.0, 0.65), (2.8, 0.80), (3.5, 0.85)]
+    TRAIL_R_LADDER = []  # strategy trail = struktur M15, bukan profit ladder
     STRUCT_TRAIL_LB, STRUCT_TRAIL_BUF_PCT, STRUCT_TRAIL_LOOKBACK = 2, 0.0015, 60
     FIB_EXT_1, FIB_EXT_2 = 0.272, 0.618
     H4_RSI_BUY_MIN, H4_RSI_BUY_MAX = 45, 68
@@ -133,7 +132,7 @@ stat_lock = threading.Lock()
 stats = {
     "tp":0, "sl":0, "trail":0, "total":0,
     "balance"    : STARTING_BALANCE,
-    "pnl_history": deque(maxlen=5000),  # full research window; /backtest tetap menampilkan 20 terakhir
+    "pnl_history": deque(maxlen=20),   # 20 trade terakhir untuk /backtest
 }
 
 # Ban koin berbasis SCAN CYCLE (bukan jumlah trade nyata — koin yang selalu
@@ -343,27 +342,48 @@ import re
 # jalan sendiri-sendiri (itu yang bikin log kebanjiran "Skip ... HTTP 418").
 _binance_ban_lock = threading.Lock()
 _binance_banned_until = 0.0   # unix timestamp detik; 0 = tidak sedang ban
+_binance_last_ban_log_until = 0.0
+
+class BinanceCooldown(RuntimeError):
+    """Circuit-breaker lokal: jangan kirim request Binance selama cooldown."""
+
 
 def _binance_wait_if_banned():
+    """JANGAN tidur selama berjam-jam di sini.
+
+    Versi lama membuat banyak thread tidur sampai waktu ban habis lalu bangun
+    bersamaan dan menembak Binance lagi. Itu dapat memperpanjang ban.
+    Sekarang fungsi ini hanya memberi tahu caller bahwa Binance sedang cooldown
+    sehingga caller publik bisa langsung pindah ke Bybit/WS.
+    """
     with _binance_ban_lock:
         until = _binance_banned_until
     remaining = until - time.time()
     if remaining > 0:
-        log.warning(f"[binance] Masih dalam masa ban, menunggu {remaining:.0f} detik lagi sebelum request baru...")
-        time.sleep(remaining + 1)   # +1 detik buffer
+        raise BinanceCooldown(f"Binance cooldown aktif {remaining:.0f} detik")
+
 
 def _binance_register_ban(msg="", fallback_seconds=60):
     """Catat waktu ban global. Coba parse 'banned until <ms epoch>' dari
     pesan error Binance (paling akurat); kalau tidak ada, mundur konservatif
     (fallback_seconds, makin lama tiap kena berturut-turut)."""
-    global _binance_banned_until
+    global _binance_banned_until, _binance_last_ban_log_until
     m = re.search(r"banned until (\d+)", msg)
-    until = int(m.group(1)) / 1000 if m else (time.time() + fallback_seconds)
+    parsed_until = int(m.group(1)) / 1000 if m else None
+    now = time.time()
+    until = parsed_until if parsed_until and parsed_until > now else (now + fallback_seconds)
     with _binance_ban_lock:
+        # Jangan pernah memperpanjang cooldown hanya karena request lain yang
+        # terjadi SAAT cooldown aktif ikut menerima error yang sama.
         if until > _binance_banned_until:
             _binance_banned_until = until
-    wait = until - time.time()
-    log.error(f"[binance] Kena limit/ban — semua request Binance dijeda {max(wait,0):.0f} detik.")
+        effective_until = _binance_banned_until
+        should_log = effective_until > _binance_last_ban_log_until + 5
+        if should_log:
+            _binance_last_ban_log_until = effective_until
+    wait = effective_until - now
+    if should_log:
+        log.error(f"[binance] Rate-limit/ban terdeteksi — circuit breaker aktif {max(wait,0):.0f} detik. REST Binance dihentikan; fallback tetap boleh jalan.")
 
 
 def _raw_get(url, params=None, retries=3):
@@ -708,6 +728,50 @@ def cancel_algo_order(algo_id):
 
 def get_algo_order_status(algo_id):
     return _binance_signed("GET", "/fapi/v1/algoOrder", {"algoId": algo_id})
+
+
+def get_open_algo_orders(symbol):
+    """Return currently OPEN Binance Futures Algo Orders for one symbol.
+
+    The health check uses this exchange-side list as the source of truth
+    instead of trusting a cached algoId/status. This prevents a stale local
+    ID from creating a cancel/replace loop while another SL is already open.
+    """
+    data = _binance_signed("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
+    if isinstance(data, dict):
+        rows = data.get("orders") or data.get("data") or []
+    else:
+        rows = data or []
+    return rows if isinstance(rows, list) else []
+
+
+def find_open_sl_order(symbol, is_buy, open_orders):
+    """Find the OPEN STOP_MARKET SL belonging to this position direction."""
+    close_side = "SELL" if is_buy else "BUY"
+    candidates = []
+    for order in open_orders or []:
+        side = str(order.get("side", "")).upper()
+        typ = str(order.get("type") or order.get("orderType") or "").upper()
+        algo_type = str(order.get("algoType") or "").upper()
+        status = str(order.get("algoStatus") or order.get("status") or "").upper()
+        if side != close_side:
+            continue
+        if typ.startswith("TAKE_PROFIT"):
+            continue
+        if typ not in ("STOP_MARKET", "STOP") and algo_type not in ("CONDITIONAL", ""):
+            continue
+        if status in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "FAILED", "TRIGGERED", "FINISHED", "FILLED"):
+            continue
+        trigger = order.get("triggerPrice", order.get("stopPrice"))
+        try:
+            trigger = float(trigger) if trigger is not None else None
+        except (TypeError, ValueError):
+            trigger = None
+        candidates.append((order, trigger))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: (x[1] is None, -(float(x[0].get("createTime", 0) or 0))))
+    return candidates[0][0]
 
 
 def cancel_all_algo_orders(symbol):
@@ -1242,8 +1306,49 @@ def _price_cache_loop():
         time.sleep(_PRICE_REFRESH_SEC)
 
 # ═════════════════════════════════════════════
-# INDIKATOR
+# ENTRY GATE — SATU GATE UNTUK SIMULASI & REAL
 # ═════════════════════════════════════════════
+def _validate_signal_before_entry(sym, signal):
+    """Validasi ulang signal tepat sebelum membuka pending/entry.
+
+    Jalur SIMULASI dan REAL wajib melewati fungsi yang sama. Perbedaan mode
+    hanya mekanisme fill: simulasi mendeteksi harga menyentuh limit, sedangkan
+    REAL memasang LIMIT order ke Binance. Tidak ada perubahan Entry/SL/TP/RR
+    khusus mode.
+    """
+    try:
+        price_now = get_price(sym) or float(signal["price"])
+        entry = float(signal["entry"])
+        sl = float(signal["sl"])
+        tp = float(signal["tp"])
+        atr = max(float(signal.get("atr") or 0.0), 1e-12)
+        is_buy = signal["decision"] == "BUY"
+
+        geo_ok = (sl < entry < tp) if is_buy else (tp < entry < sl)
+        if not geo_ok:
+            return False, "GEOMETRY_INVALID"
+
+        # Entry harus berupa retracement limit yang masih masuk akal.
+        # Jarak dinamis berbasis ATR agar koin volatil tidak dibuang hanya
+        # karena beda persen absolut, tetapi tetap mencegah pending absurd jauh.
+        if abs(price_now - entry) > atr * 1.50:
+            return False, "ENTRY_TOO_FAR"
+
+        # Harga tidak boleh sudah berada di sisi invalidation.
+        # Sweep sebelum fill bukan alasan untuk menggeser SL secara otomatis;
+        # tunggu setup baru agar thesis tidak berubah diam-diam.
+        if (price_now <= sl) if is_buy else (price_now >= sl):
+            return False, "SL_ALREADY_BREACHED"
+
+        rr = abs(tp - entry) / max(abs(entry - sl), 1e-12)
+        if rr < MIN_RR or rr > MAX_RR + 1e-9:
+            return False, f"RR_INVALID_{rr:.2f}"
+        return True, "OK"
+    except Exception as e:
+        log.warning(f"[pre-entry] {sym}: validasi gagal: {e}")
+        return False, "VALIDATION_ERROR"
+
+
 def run_scan_once(chat_id):
     tg_send(chat_id,f"🔍 Scanning {TOP_N_COINS} koin...")
     try:
@@ -1283,19 +1388,10 @@ def run_scan_once(chat_id):
         tg_send(chat_id,f"⚠️ Tidak ada koin dengan confidence cukup (≥{MIN_CONFIDENCE}%). Retry...")
         return None
 
-    # Ranking akhir hanya berisi kandidat yang SUDAH EXECUTABLE.
-    # Entry reachability diselesaikan di strategy_logic saat scan per-koin,
-    # sehingga kandidat dengan confidence tinggi tetapi belum menyentuh entry
-    # tidak dapat mengalahkan koin lain yang sudah siap masuk.
-    results = [r for r in results if r.get("executable", True)]
-    if not results:
-        tg_send(chat_id,"⚠️ Tidak ada setup yang executable dari semua koin saat ini.")
-        return None
-
-    # Ranking: confidence DESC → RR DESC
+    # Ranking: confidence DESC → rr DESC
     results.sort(key=lambda x:(x["confidence"],x["rr"]),reverse=True)
     best=results[0]
-    log.info(f"Best EXECUTABLE: {best['symbol']} {best['decision']} "
+    log.info(f"Best: {best['symbol']} {best['decision']} "
              f"conf={best['confidence']}% RR=1:{best['rr']}")
     return best
 
@@ -1325,7 +1421,7 @@ POSITION_SIZE_PCT = 100.0  # DEPRECATED — lihat catatan di atas
 def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
                  sym=None, decision=None, entry_time=None,
                  confidence=None, entry_label=None, rr=None, rsi=None,
-                 struct_h1=None, d1_bias=None, signal_context=None, trail_events=None):
+                 struct_h1=None, d1_bias=None):
     """
     Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
     lama untuk detail model close_price). Tambahan: catat sym/decision/
@@ -1404,8 +1500,6 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
             "entry": entry, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
             "confidence": confidence, "entry_label": entry_label, "rr": rr,
             "rsi": rsi, "struct_h1": struct_h1, "d1_bias": d1_bias,
-            "signal_context": signal_context or {},
-            "trail_events": trail_events or [],
         })
 
 # Hitung alasan pending dibatalkan — biar bisa didiagnosis dari data,
@@ -1541,197 +1635,154 @@ def _calc_full_metrics(hist, starting_balance):
         "return_pct": round(net_profit / starting_balance * 100, 2),
     }
 
-def _safe_context(value, depth=0):
-    """JSON-safe context extractor; keeps strategy evidence but drops huge raw arrays."""
-    if depth > 4:
-        return str(value)
-    if isinstance(value, dict):
-        return {str(k): _safe_context(v, depth + 1) for k, v in value.items()
-                if str(k) not in {"sh15", "sl15", "sh1", "sl1"}}
-    if isinstance(value, (list, tuple)):
-        if len(value) > 40:
-            return {"count": len(value), "note": "truncated"}
-        return [_safe_context(v, depth + 1) for v in value]
-    if isinstance(value, (np.integer, np.floating)):
-        return value.item()
-    if isinstance(value, float):
-        return round(value, 8)
-    if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    return str(value)
-
-
-def _trade_dataset_row(t):
-    entry = t.get("entry")
-    sl = t.get("sl")
-    exit_p = t.get("exit_price")
-    direction = t.get("decision")
-    risk = abs(entry - sl) if entry is not None and sl is not None else None
-    if direction == "BUY":
-        realized_r = ((exit_p - entry) / risk) if risk and exit_p is not None else None
-    else:
-        realized_r = ((entry - exit_p) / risk) if risk and exit_p is not None else None
-    duration_min = None
-    if t.get("entry_time") and t.get("exit_time"):
-        duration_min = (t["exit_time"] - t["entry_time"]) / 60
-    ctx = _safe_context(t.get("signal_context", {}))
-    return {
-        "symbol": t.get("symbol", ""), "decision": direction, "result": t.get("result"),
-        "pnl_pct": t.get("pct", 0), "pnl_usd": t.get("pnl_usd", 0),
-        "balance_after": t.get("balance_after"), "entry": entry, "tp": t.get("tp"),
-        "initial_sl": sl, "exit_price": exit_p, "entry_time": t.get("entry_time"),
-        "exit_time": t.get("exit_time"), "duration_min": round(duration_min, 2) if duration_min is not None else None,
-        "confidence": t.get("confidence"), "entry_label": t.get("entry_label"), "rr": t.get("rr"),
-        "rsi": t.get("rsi"), "struct_h1": t.get("struct_h1"), "d1_bias": t.get("d1_bias"),
-        "realized_r": round(realized_r, 4) if realized_r is not None else None,
-        "trail_event_count": len(t.get("trail_events", [])),
-        "trail_events": _safe_context(t.get("trail_events", [])),
-        "context": ctx,
-    }
-
-
-def _calc_group_metrics(rows):
-    if not rows:
-        return {"total": 0}
-    wins = [r for r in rows if r.get("pnl_usd", 0) >= 0]
-    losses = [r for r in rows if r.get("pnl_usd", 0) < 0]
-    gp = sum(r.get("pnl_usd", 0) for r in wins)
-    gl = abs(sum(r.get("pnl_usd", 0) for r in losses))
-    return {
-        "total": len(rows), "wins": len(wins), "losses": len(losses),
-        "win_rate": round(len(wins) / len(rows) * 100, 2),
-        "net_profit": round(gp - gl, 6),
-        "profit_factor": round(gp / gl, 4) if gl else None,
-        "avg_pnl": round(sum(r.get("pnl_usd", 0) for r in rows) / len(rows), 6),
-        "avg_realized_r": round(sum((r.get("realized_r") or 0) for r in rows) / len(rows), 4),
-        "trail_rate": round(sum(1 for r in rows if r.get("result") == "trail") / len(rows) * 100, 2),
-    }
-
-
-def _group_by(rows, key_fn):
-    out = {}
-    for r in rows:
-        k = key_fn(r)
-        out.setdefault(str(k), []).append(r)
-    return {k: _calc_group_metrics(v) for k, v in out.items()}
-
-
-def _generate_statistics_csv(rows=None, requested_limit=None):
-    """Flat statistics + diagnostics so future strategy review does not depend on a 20-trade preview."""
+def _generate_statistics_csv():
+    """Generate statistics.csv — analisa performa lengkap (net profit, drawdown, sharpe, dst)."""
     with stat_lock:
-        hist = list(stats["pnl_history"]) if rows is None else list(rows)
-        if requested_limit is not None and rows is None:
-            hist = hist[-requested_limit:]
+        hist = list(stats["pnl_history"])
         balance = stats["balance"]
+
     metrics = _calc_full_metrics(hist, STARTING_BALANCE)
-    metrics.update({"balance": balance, "starting_balance": STARTING_BALANCE,
-                    "research_trades": len(hist), "trail_count": sum(1 for t in hist if t.get("result") == "trail")})
+    metrics["balance"] = balance
+    metrics["starting_balance"] = STARTING_BALANCE
+    if not metrics:
+        metrics = {"total_trades": 0, "balance": balance, "starting_balance": STARTING_BALANCE}
+
+    df = pd.DataFrame([metrics])
     path = "/tmp/statistics.csv"
-    pd.DataFrame([metrics]).to_csv(path, index=False)
+    df.to_csv(path, index=False)
     return path
 
-
-def _generate_trade_csv(rows=None, requested_limit=None):
-    """Every analyzed trade, flattened, including the full strategy context."""
+def _generate_trade_csv():
+    """Generate trade.csv dari pnl_history — termasuk detail sinyal
+    (confidence/entry_label/rr/rsi/struct_h1) biar cukup buat diagnosis
+    strategy_logic.py tanpa perlu data tambahan."""
     with stat_lock:
-        hist = list(stats["pnl_history"]) if rows is None else list(rows)
-        if requested_limit is not None and rows is None:
-            hist = hist[-requested_limit:]
-    dataset = [_trade_dataset_row(t) for t in hist]
-    flat = []
-    for r in dataset:
-        x = {k: v for k, v in r.items() if k not in ("context", "trail_events")}
-        for k, v in (r.get("context") or {}).items():
-            if isinstance(v, (dict, list)):
-                x[f"ctx_{k}"] = json.dumps(v, ensure_ascii=False, default=str)
-            else:
-                x[f"ctx_{k}"] = v
-        x["trail_events"] = json.dumps(r.get("trail_events", []), ensure_ascii=False, default=str)
-        flat.append(x)
+        hist = list(stats["pnl_history"])
+    
+    cols = ["symbol", "decision", "result", "pnl_pct", "pnl_usd",
+            "entry", "tp", "sl", "exit_price", "entry_time", "exit_time",
+            "confidence", "entry_label", "rr", "rsi", "struct_h1", "d1_bias"]
+    if not hist:
+        df = pd.DataFrame(columns=cols)
+        path = "/tmp/trade.csv"
+        df.to_csv(path, index=False)
+        return path
+    
+    rows = []
+    for h in hist:
+        rows.append({
+            "symbol": h.get("symbol", ""),
+            "decision": h.get("decision", ""),
+            "result": h["result"],
+            "pnl_pct": h["pct"],
+            "pnl_usd": h["pnl_usd"],
+            "entry": h.get("entry", 0),
+            "tp": h.get("tp", 0),
+            "sl": h.get("sl", 0),
+            "exit_price": h.get("exit_price", 0),
+            "entry_time": datetime.fromtimestamp(h.get("entry_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if h.get("entry_time") else "",
+            "exit_time": datetime.fromtimestamp(h.get("exit_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if h.get("exit_time") else "",
+            "confidence": h.get("confidence", ""),
+            "entry_label": h.get("entry_label", ""),
+            "rr": h.get("rr", ""),
+            "rsi": h.get("rsi", ""),
+            "struct_h1": h.get("struct_h1", ""),
+            "d1_bias": h.get("d1_bias", ""),
+        })
+    df = pd.DataFrame(rows)
     path = "/tmp/trade.csv"
-    pd.DataFrame(flat).to_csv(path, index=False)
+    df.to_csv(path, index=False)
     return path
 
+def _confidence_bucket(c):
+    if c is None: return "unknown"
+    if c < 50: return "<50"
+    if c < 65: return "50-64"
+    if c < 80: return "65-79"
+    return "80+"
 
-def _generate_research_context(rows=None, requested_limit=None):
-    """Full research dataset: ALL retained trades + context + breakdowns."""
+def _generate_research_context():
+    """
+    Generate research_context.json — analisa performa trading lengkap,
+    dilengkapi breakdown per entry_label & confidence, dan data pending-
+    cancel — supaya file ini SENDIRI cukup dipakai untuk review
+    strategy_logic.py tanpa perlu data tambahan lain.
+    (Data chart M1 TIDAK di sini lagi — sudah ada sumber terpisah dari
+    candle_fetcher.py, jadi tidak perlu fetch ulang & redundan.)
+    """
+    log.info("[research] Generating research_context.json...")
+
     with stat_lock:
-        all_hist = list(stats["pnl_history"])
+        trade_hist = list(stats["pnl_history"])
         balance = stats["balance"]
-    if requested_limit is not None:
-        hist = all_hist[-requested_limit:]
-    else:
-        hist = all_hist
-
-    dataset = [_trade_dataset_row(t) for t in hist]
-    result = {
-        "schema_version": 2,
-        "generated_at": datetime.now(WIB).isoformat(),
-        "scope": {
-            "available_retained_trades": len(all_hist),
-            "analyzed_trades": len(hist),
-            "limit_requested": requested_limit,
-            "oldest_entry": hist[0].get("entry_time") if hist else None,
-            "newest_exit": hist[-1].get("exit_time") if hist else None,
-            "history_capacity": 5000,
-        },
-        "summary": _calc_full_metrics(hist, STARTING_BALANCE),
-        "breakdowns": {
-            "result": _group_by(dataset, lambda r: r.get("result")),
-            "confidence_bucket": _group_by(dataset, lambda r: _confidence_bucket(r.get("confidence"))),
-            "entry_label": _group_by(dataset, lambda r: r.get("entry_label") or "unknown"),
-            "symbol": _group_by(dataset, lambda r: r.get("symbol") or "unknown"),
-            "decision": _group_by(dataset, lambda r: r.get("decision") or "unknown"),
-            "session": _group_by(dataset, lambda r: _session_of(r.get("entry_time"))),
-            "m15_structure": _group_by(dataset, lambda r: (r.get("context") or {}).get("m15_struct", "unknown")),
-            "htf_bias": _group_by(dataset, lambda r: (r.get("context") or {}).get("htf_bias", "unknown")),
-            "macro_bias": _group_by(dataset, lambda r: (r.get("context") or {}).get("macro_bias", "unknown")),
-            "confirmation": _group_by(dataset, lambda r: (r.get("context") or {}).get("confirmation_kind", "none")),
-            "tp_label": _group_by(dataset, lambda r: (r.get("context") or {}).get("selected_tp_label", "unknown")),
-        },
-        "pending_cancel": {},
-        "diagnostics": {
-            "confidence_calibration": {},
-            "trail": {},
-            "quality_flags": {},
-        },
-        "best_trades": sorted(dataset, key=lambda r: r.get("pnl_usd", 0), reverse=True)[:10],
-        "worst_trades": sorted(dataset, key=lambda r: r.get("pnl_usd", 0))[:10],
-        "trades": dataset,
-    }
-    # Confidence calibration by finer 5-point buckets.
-    conf_groups = {}
-    for r in dataset:
-        c = r.get("confidence")
-        if c is None: key = "unknown"
-        else:
-            lo = int(c // 5) * 5
-            key = f"{lo}-{lo+4}"
-        conf_groups.setdefault(key, []).append(r)
-    result["diagnostics"]["confidence_calibration"] = {k: _calc_group_metrics(v) for k, v in sorted(conf_groups.items())}
-
-    trail_rows = [r for r in dataset if r.get("trail_event_count", 0) > 0]
-    result["diagnostics"]["trail"] = {
-        "trades_with_trail": len(trail_rows),
-        "trail_win_rate": _calc_group_metrics(trail_rows).get("win_rate", 0) if trail_rows else 0,
-        "avg_trail_events": round(sum(r.get("trail_event_count", 0) for r in dataset) / len(dataset), 3) if dataset else 0,
-        "trail_trades": trail_rows,
-    }
-    # Flags that are useful when reviewing bad signals.
-    quality = {
-        "high_confidence_loss": [r for r in dataset if (r.get("confidence") or 0) >= 70 and r.get("pnl_usd", 0) < 0],
-        "wide_risk_loss": [r for r in dataset if (r.get("context") or {}).get("risk_atr", 0) >= 2.0 and r.get("pnl_usd", 0) < 0],
-        "counter_m15_loss": [r for r in dataset if (r.get("context") or {}).get("m15_struct") not in (None, "ranging") and r.get("pnl_usd", 0) < 0 and ((r.get("context") or {}).get("m15_struct") != (("bullish" if r.get("decision") == "BUY" else "bearish")))],
-        "large_entry_distance": [r for r in dataset if (r.get("context") or {}).get("entry_distance_atr", 0) > 1.0 and r.get("pnl_usd", 0) < 0],
-    }
-    result["diagnostics"]["quality_flags"] = {k: {"count": len(v), "trades": v[:50]} for k, v in quality.items()}
     with pending_cancel_lock:
         pc = dict(pending_cancel_stats)
-    result["pending_cancel"] = {**pc, "total": sum(pc.values())}
+
+    result = {
+        "period": f"{len(trade_hist)} trade terakhir",
+        "summary": _calc_full_metrics(trade_hist, STARTING_BALANCE),
+        "performance_breakdown": {"by_coin": {}, "by_session": {}, "by_entry_label": {}, "by_confidence": {}},
+        "pending_cancel": {**pc, "total": sum(pc.values())},
+        "data_quality_notes": [],
+        "worst_trades": [],
+        "best_trades": [],
+    }
+
+    if trade_hist:
+        by_coin, by_session, by_label, by_conf = {}, {}, {}, {}
+        mislabeled = []
+        for t in trade_hist:
+            sym = t.get("symbol", "unknown")
+            by_coin.setdefault(sym, []).append(t)
+            by_session.setdefault(_session_of(t.get("entry_time")), []).append(t)
+            by_label.setdefault(t.get("entry_label") or "unknown", []).append(t)
+            by_conf.setdefault(_confidence_bucket(t.get("confidence")), []).append(t)
+            # Sanity check: result="sl" mestinya selalu pnl<0, "trail"/"tp" pnl>=0.
+            # Kalau tidak, kemungkinan data dari versi main.py lama (sebelum fix
+            # reklasifikasi trail-vs-sl) — jangan dipercaya labelnya mentah-mentah.
+            if t["result"] == "sl" and t["pnl_usd"] >= 0:
+                mislabeled.append(t.get("symbol"))
+
+        if mislabeled:
+            result["data_quality_notes"].append(
+                f"{len(mislabeled)} trade berlabel 'sl' tapi pnl positif ({', '.join(mislabeled)}) — "
+                f"kemungkinan dari versi main.py sebelum fix reklasifikasi trail-vs-sl. "
+                f"Jangan simpulkan pola menang/kalah dari label result mentah-mentah utk trade ini.")
+
+        for sym, rows in by_coin.items():
+            m = _calc_full_metrics(rows, STARTING_BALANCE)
+            result["performance_breakdown"]["by_coin"][sym] = {
+                "total": m["total_trades"], "win_rate": m["win_rate_pct"],
+                "net_profit": m["net_profit"], "avg_pnl": round(m["net_profit"] / m["total_trades"], 4),
+            }
+        for sess, rows in by_session.items():
+            m = _calc_full_metrics(rows, STARTING_BALANCE)
+            result["performance_breakdown"]["by_session"][sess] = {
+                "total": m["total_trades"], "win_rate": m["win_rate_pct"], "net_profit": m["net_profit"],
+            }
+        for label, rows in by_label.items():
+            m = _calc_full_metrics(rows, STARTING_BALANCE)
+            result["performance_breakdown"]["by_entry_label"][label] = {
+                "total": m["total_trades"], "win_rate": m["win_rate_pct"], "net_profit": m["net_profit"],
+            }
+        for bucket, rows in by_conf.items():
+            m = _calc_full_metrics(rows, STARTING_BALANCE)
+            result["performance_breakdown"]["by_confidence"][bucket] = {
+                "total": m["total_trades"], "win_rate": m["win_rate_pct"], "net_profit": m["net_profit"],
+            }
+
+        best  = sorted([t for t in trade_hist if t["pnl_usd"] >= 0], key=lambda x: x["pnl_usd"], reverse=True)[:3]
+        worst = sorted([t for t in trade_hist if t["pnl_usd"] < 0], key=lambda x: x["pnl_usd"])[:3]
+        result["best_trades"]  = [{"pnl": round(t["pnl_usd"], 4), "symbol": t.get("symbol"), "result": t["result"],
+                                    "entry_label": t.get("entry_label"), "confidence": t.get("confidence")} for t in best]
+        result["worst_trades"] = [{"pnl": round(t["pnl_usd"], 4), "symbol": t.get("symbol"), "result": t["result"],
+                                    "entry_label": t.get("entry_label"), "confidence": t.get("confidence")} for t in worst]
 
     path = "/tmp/research_context.json"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False, default=str)
+    with open(path, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+
+    log.info(f"[research] Selesai, disimpan ke {path}")
     return path
 
 # ============================================================
@@ -1799,9 +1850,7 @@ def close_position(sym, result, close_price=None):
                  sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"),
                  confidence=sig.get("confidence"), entry_label=sig.get("entry_label"),
                  rr=sig.get("rr"), rsi=sig.get("rsi"), struct_h1=sig.get("struct_h1"),
-                 d1_bias=sig.get("d1_bias"),
-                 signal_context=sig.get("analysis_context", {}),
-                 trail_events=pos.get("trail_events", []))
+                 d1_bias=sig.get("d1_bias"))
     _ban_coin(sym, f"trade closed ({result})", duration=BAN_DURATION_TRADE_CLOSED)
 
     # Update active_trade jika ini yang sedang dipantau
@@ -1974,19 +2023,8 @@ def monitor_position(sym, pos):
             improves = (new_sl > sl_p) if is_buy else (new_sl < sl_p)
             within_tp = (new_sl < tp_p) if is_buy else (new_sl > tp_p)
             if improves and within_tp:
-                old_sl = sl_p
                 sl_p = new_sl
                 pos["current_sl"] = sl_p   # sync ke shared state utk /trade
-                try:
-                    with positions_lock:
-                        pos.setdefault("trail_events", []).append({
-                            "time": time.time(), "old_sl": old_sl, "new_sl": sl_p,
-                            "source": src, "price": price,
-                            "r_now": round(pnl_r_now, 3),
-                            "locked_r": round(best_r, 3),
-                        })
-                except Exception:
-                    pass
                 src = "R-ladder" if (cand_a is not None and new_sl == cand_a) else "structure"
                 tg_send(chat_id,
                     f"🔒 <b>Trailing SL — {sym}</b> ({src})\n"
@@ -2086,78 +2124,20 @@ def _open_pending_real(sym, signal, chat_id):
     entry_target = signal["entry"]
     side = "BUY" if is_buy else "SELL"
 
-    # ══ PAGAR TERAKHIR SEBELUM ORDER — HARD REJECT, NO ADJUSTMENT ═══════════
-    #
-    # Filosofi: LEBIH BAIK TIDAK ENTRY SAMA SEKALI daripada entry lalu auto-out.
-    #
-    # strategy_logic.full_analyze() sudah menyaring filter#1 dan filter#2 saat
-    # sinyal dibuat. Tapi ada jeda waktu antara sinyal dibuat dan order dipasang
-    # (beberapa detik), sehingga harga bisa bergerak lagi. Cek ini adalah
-    # lapisan kedua — kalau harga sudah bergerak melewati batas aman, batalkan
-    # order, ban koin sementara, dan cari koin lain. Tidak ada "koreksi" di sini.
-    #
-    # Cek A — SL vs harga sekarang:
-    #   BUY : current_price harus MASIH di atas SL
-    #   SELL: current_price harus MASIH di bawah SL
-    #
-    # Cek B — Entry vs harga sekarang (limit order reachability):
-    #   SELL: entry harus ≥ current_price * 0.995 (limit sell tidak langsung fill)
-    #   BUY : entry harus ≤ current_price * 1.005 (limit buy tidak langsung fill)
-    try:
-        price_now = get_price(sym) or entry_target
-        sl_v_pre  = signal["sl"]
-        tp_v_pre  = signal["tp"]
-
-        # Cek A: SL sudah ditembus?
-        sl_breached = (price_now <= sl_v_pre) if is_buy else (price_now >= sl_v_pre)
-        if sl_breached:
-            _ban_coin(sym, "SL sudah ditembus sebelum order dipasang")
-            tg_send(chat_id,
-                f"⏭ <b>Skip {sym}</b> — Tidak jadi order.\n"
-                f"SL <code>{sl_v_pre:.6g}</code> sudah ditembus harga "
-                f"<code>{price_now:.6g}</code>.\n"
-                f"Sinyal ini sudah kedaluwarsa — cari setup berikutnya.")
-            return
-
-        # Cek B: Entry masih reachable (limit tidak langsung fill di harga salah)?
-        entry_unreachable = (
-            (not is_buy and entry_target < price_now * 0.995) or   # SELL entry di bawah market
-            (is_buy     and entry_target > price_now * 1.005)       # BUY  entry di atas  market
-        )
-        if entry_unreachable:
-            _ban_coin(sym, "entry tidak reachable (limit fill langsung di harga salah)")
-            tg_send(chat_id,
-                f"⏭ <b>Skip {sym}</b> — Tidak jadi order.\n"
-                f"Entry <code>{entry_target:.6g}</code> sudah 'tersapu' "
-                f"(harga pasar <code>{price_now:.6g}</code>).\n"
-                f"{'SELL' if not is_buy else 'BUY'} limit di level ini akan fill "
-                f"sekarang di harga pasar → SL/TP tidak akan valid.\n"
-                f"Sinyal ini sudah kedaluwarsa — cari setup berikutnya.")
-            return
-
-        # Cek C: Geometri dasar masih valid?
-        geo_valid = (sl_v_pre < entry_target < tp_v_pre) if is_buy else (tp_v_pre < entry_target < sl_v_pre)
-        if not geo_valid:
-            _ban_coin(sym, "geometri entry/SL/TP tidak valid")
-            tg_send(chat_id,
-                f"⏭ <b>Skip {sym}</b> — Geometri tidak valid.\n"
-                f"Entry <code>{entry_target:.6g}</code> | "
-                f"SL <code>{sl_v_pre:.6g}</code> | "
-                f"TP <code>{tp_v_pre:.6g}</code>\n"
-                f"Urutan SL–Entry–TP tidak sesuai arah {'BUY' if is_buy else 'SELL'}.")
-            return
-
-    except Exception as _val_err:
-        # Kalau fetch harga gagal, biarkan lanjut — jangan batalkan order karena
-        # masalah koneksi sesaat (bukan karena sinyal yang buruk).
-        log.warning(f"[pre-order-gate] {sym}: {_val_err} — skip validasi, lanjut order")
+    # Gunakan gate yang SAMA persis dengan mode simulasi.
+    valid, reason = _validate_signal_before_entry(sym, signal)
+    if not valid:
+        _ban_coin(sym, reason)
+        tg_send(chat_id,
+            f"⏭ <b>Skip {sym}</b> — pre-entry gate: <code>{reason}</code>.")
+        return
 
     with positions_lock:
         if sym in positions: return
         if len(positions) >= MAX_POSITIONS: return
         positions[sym] = {
             "signal": signal, "entry": entry_target, "chat_id": chat_id,
-            "entry_time": None, "timeout_flag": False, "status": "pending", "trail_events": [],
+            "entry_time": None, "timeout_flag": False, "status": "pending",
         }
 
     try:
@@ -2247,18 +2227,9 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
             tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nStatus order: {status}")
             return
 
-        price_now = get_price(sym)
-        if price_now is not None and status in ("NEW", "PARTIALLY_FILLED"):
-            tp_hit = (price_now >= tp_p) if is_buy else (price_now <= tp_p)
-            if tp_hit:
-                cancel_order(sym, order_id)
-                with positions_lock:
-                    positions.pop(sym, None)
-                _ban_coin(sym, "TP sebelum entry")
-                _record_pending_cancel("tp_before_entry")
-                tg_send(chat_id, f"⏭ <b>Pending Batal</b> — {sym}\nTP tersentuh sebelum entry, order dibatalkan.")
-                return
-
+        # Pending REAL mengikuti aturan yang sama dengan simulasi: selama order
+        # belum fill dan belum timeout/manual cancel, biarkan LIMIT menunggu.
+        # Tidak ada TP/SL-before-entry veto terpisah di mode REAL.
         time.sleep(REAL_TRADE_POLL_SLEEP)
 
     cancel_order(sym, order_id)
@@ -2463,15 +2434,16 @@ def monitor_position_real(sym, pos):
     risk0 = abs(entry - sl_p)
     locked_r = 0.0
     next_struct_check = 0.0
-    # ── FIX: beri jeda SEBELUM health-check SL pertama, JANGAN langsung di
-    # iterasi pertama (dulu next_sl_health_check=0.0 → health-check jalan
-    # detik itu juga setelah entry). Algo order SL yang BARU SAJA dipasang
-    # butuh waktu singkat untuk ter-index & bisa di-query statusnya di sisi
-    # Binance. Health-check yang jalan terlalu cepat bisa salah baca status
-    # (mis. dapat None/status belum ke-propagate) dan langsung mengira SL
-    # "hilang" padahal order-nya sebenarnya ada & aktif — auto-out palsu.
+    # Health-check SL memakai rekonsiliasi exchange-side, bukan cached algoId.
+    # Ini mencegah false-positive yang berujung cancel/replace berulang.
     next_sl_health_check = time.time() + 45
-    sl_replace_count = 0   # circuit-breaker: kalau kejadian "SL hilang" berulang terus, jangan spam selamanya
+    sl_missing_since = None
+    sl_repair_attempts = 0
+    sl_last_repair_at = 0.0
+    sl_last_alert_at = 0.0
+    sl_recovery_streak = 0
+    SL_REPAIR_COOLDOWN = 30.0
+    SL_ALERT_COOLDOWN = 15 * 60.0
 
     while True:
         with positions_lock:
@@ -2541,141 +2513,135 @@ def monitor_position_real(sym, pos):
                 if sym in positions:
                     positions[sym]["quantity"] = qty
 
-        # ── Jaring pengaman: verifikasi berkala SL BENERAN masih aktif di
-        # Binance selagi posisi masih terbuka (bukan cuma pas awal buka).
-        # Kalau ternyata hilang (order ke-cancel sendiri oleh Binance,
-        # error yang tidak ketangkap sebelumnya, dsb) dan harga sudah
-        # lewat level SL, auto-out SEKARANG — jangan biarkan posisi
-        # tanpa proteksi sampai user sadar sendiri.
+        # ── Jaring pengaman SL: RECONCILIATION ke exchange ───────────────
+        # Sumber kebenaran = OPEN Algo Orders Binance. Cached algoId hanya
+        # dipakai sebagai state lokal/identifier, bukan bukti bahwa SL hilang.
         if time.time() >= next_sl_health_check:
             next_sl_health_check = time.time() + 60
-            sl_missing = sl_order_id is None
-            sl_already_executed = False
-            if not sl_missing:
-                try:
-                    st = get_algo_order_status(sl_order_id).get("algoStatus")
-                    # ── FIX: SEBELUMNYA whitelist status "aktif" (NEW/WORKING/
-                    # RUNNING/MONITORING) — kalau Binance mengembalikan label
-                    # status APA SAJA di luar 4 kata itu (mis. varian label lain
-                    # yang belum terdaftar), langsung dianggap "hilang" walau
-                    # order-nya sebenarnya masih hidup normal. Ini penyebab SL
-                    # "dipasang ulang" berkali-kali terus-menerus tiap 60 detik
-                    # padahal SL yang lama sebenarnya baik-baik saja — order
-                    # baru yang dipasang ulang pun kena masalah label yang sama
-                    # lagi di pengecekan berikutnya, jadi berulang selamanya.
-                    #
-                    # Dibalik jadi BLACKLIST status yang JELAS-JELAS mati saja
-                    # — jauh lebih aman: status baru/tidak dikenal dianggap
-                    # MASIH AKTIF (bukan default "hilang"), sehingga tidak ada
-                    # lagi false-positive spam untuk label status yang sekadar
-                    # belum terdaftar di kode.
-                    _TRIGGERED_SL_STATUSES = ("TRIGGERED", "FINISHED", "FILLED")
-                    _DEAD_SL_STATUSES = ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "FAILED")
-                    if st in _TRIGGERED_SL_STATUSES:
-                        sl_already_executed = True
-                    elif st in _DEAD_SL_STATUSES:
-                        sl_missing = True
-                        log.warning(f"[sl-health] {sym}: algoStatus={st!r} → benar-benar hilang")
-                    else:
-                        sl_missing = False
-                        if st not in ("NEW", "WORKING", "RUNNING", "MONITORING"):
-                            log.info(f"[sl-health] {sym}: algoStatus={st!r} tidak dikenal, "
-                                     f"tapi bukan status mati → dianggap masih aktif (tidak spam re-place)")
-                except Exception as e:
-                    log.warning(f"[monitor_real sl-check] {sym}: {e}")
+            open_orders = None
+            try:
+                open_orders = get_open_algo_orders(sym)
+            except Exception as e:
+                # Query gagal != SL hilang. Jangan cancel/replace berdasarkan
+                # data yang tidak lengkap; tunggu health-check berikutnya.
+                log.warning(f"[sl-health] {sym}: gagal reconcile open algo orders: {e}")
 
-            if sl_already_executed:
-                # SL sudah trigger sendiri di Binance — beri jeda singkat utk
-                # settlement posisi, lalu catat sebagai closure SL NORMAL.
-                # JANGAN kirim market order tambahan (itu akan jadi order
-                # kedua yang mubazir/berpotensi salah di atas posisi yang
-                # sudah/sedang ditutup Binance sendiri).
-                time.sleep(2)
-                try:
-                    still_open = get_real_position(sym)
-                except Exception as e:
-                    log.warning(f"[sl-health] {sym}: gagal verifikasi posisi setelah SL trigger: {e}")
-                    still_open = True   # tidak yakin → jangan asumsikan closed, biar loop berikutnya yg tentukan
-                if not still_open:
-                    cancel_all_algo_orders(sym)
-                    close_position(sym, "sl", close_price=sl_p)
-                    return
-                # Kalau masih kebaca terbuka (lag settlement) atau verifikasi
-                # gagal → jangan panik, jangan auto-out. Loop berikutnya (cek
-                # real_pos di atas) yang akan menangkap closure-nya dengan benar.
+            if open_orders is not None:
+                active_sl = find_open_sl_order(sym, is_buy, open_orders)
 
-            elif sl_missing:
-                sl_replace_count += 1
+                if active_sl is not None:
+                    # Exchange mengonfirmasi SL aktif. Sinkronkan ID lokal.
+                    new_id = active_sl.get("algoId") or active_sl.get("orderId")
+                    if new_id is not None:
+                        sl_order_id = new_id
+                        with positions_lock:
+                            if sym in positions:
+                                positions[sym]["sl_order_id"] = sl_order_id
 
-                # ── CEK HARGA DULU SEBELUM KEPUTUSAN APA PUN ────────────────
-                # SL "hilang" dari Binance bisa karena:
-                #   a) API glitch / rate-limit sesaat → order sebenarnya aman
-                #   b) Trailing SL gagal place setelah cancel → sl_order_id
-                #      masih menunjuk ke order yang sudah di-cancel
-                #   c) Binance auto-cancel order karena konflik (2 closePosition=true)
-                #
-                # Yang penting: apakah HARGA sudah melewati SL?
-                # Kalau belum → posisi masih aman, jangan auto-out, pasang ulang saja.
-                # Kalau sudah → baru auto-out (ini satu-satunya alasan valid).
-                #
-                # TIDAK ADA auto-out hanya karena "SL hilang N kali" —
-                # itu justru merugikan: posisi yang sedang profit dipaksa tutup
-                # hanya karena masalah teknis API, bukan karena market bergerak.
+                    trigger = active_sl.get("triggerPrice", active_sl.get("stopPrice"))
+                    try:
+                        if trigger is not None:
+                            sl_p = float(trigger)
+                            with positions_lock:
+                                if sym in positions:
+                                    positions[sym]["current_sl"] = sl_p
+                    except (TypeError, ValueError):
+                        pass
+
+                    sl_recovery_streak += 1
+                    if sl_missing_since is not None and sl_recovery_streak >= 2:
+                        # Recovery hanya diberitahukan sekali per incident.
+                        now = time.time()
+                        if now - sl_last_alert_at >= SL_ALERT_COOLDOWN:
+                            tg_send(chat_id,
+                                f"✅ <b>SL protection normal kembali</b> — {sym}\n"
+                                f"SL aktif di <code>{sl_p:.6g}</code>.")
+                            sl_last_alert_at = now
+                        sl_missing_since = None
+                        sl_repair_attempts = 0
+                    continue
+
+                # Query berhasil dan tidak ada SL OPEN = missing yang nyata.
+                sl_recovery_streak = 0
+                if sl_missing_since is None:
+                    sl_missing_since = time.time()
+                    sl_repair_attempts = 0
+
                 price_now = get_price(sym) or entry
                 sl_breached = (price_now <= sl_p) if is_buy else (price_now >= sl_p)
 
                 if sl_breached:
-                    # Harga sudah melewati SL dan tidak ada order yang melindungi
-                    # → satu-satunya kasus yang membenarkan auto-out dari sini
                     tg_send(chat_id,
-                        f"🚨 <b>SL hilang & harga sudah melewati level SL</b> — {sym}\n"
+                        f"🚨 <b>SL protection hilang & harga sudah melewati SL</b> — {sym}\n"
                         f"SL <code>{sl_p:.6g}</code> | Harga <code>{price_now:.6g}</code>\n"
-                        f"Posisi tidak terlindungi — auto-out sekarang.")
+                        f"Posisi tidak terlindungi — emergency close.")
                     _emergency_close(sym, is_buy, qty, chat_id,
-                        f"SL hilang ({sl_replace_count}x) & harga sudah lewat SL {sl_p:.6g}")
+                                     f"SL hilang & harga sudah lewat SL {sl_p:.6g}")
                     return
 
-                # Harga masih aman — coba pasang ulang SL
-                # (apapun jumlah kegagalannya, selama harga belum tembus SL,
-                #  posisi harus tetap dibiarkan hidup)
-                try:
-                    # cancel_algo_order aman dipanggil walau order sudah tidak ada —
-                    # ini memastikan tidak ada SL lama yang mungkin masih ada
-                    # (ghost order) yang akan konflik dengan yang baru.
-                    cancel_algo_order(sl_order_id)
-                    sl_order_id = None   # tandai sementara tidak ada SL
-                    with positions_lock:
-                        if sym in positions:
-                            positions[sym]["sl_order_id"] = None
+                # Recovery idempotent + cooldown. Jangan cancel stale ID di sini:
+                # exchange sudah bilang tidak ada OPEN SL, jadi langsung pasang
+                # satu SL baru. Ini menghilangkan cancel/replace storm.
+                now = time.time()
+                if now - sl_last_repair_at < SL_REPAIR_COOLDOWN:
+                    continue
+                sl_last_repair_at = now
+                sl_repair_attempts += 1
 
+                try:
                     new_sl_order = place_sl_order(sym, is_buy, sl_p, qty)
-                    sl_order_id = new_sl_order["algoId"]
+                    candidate_id = new_sl_order.get("algoId") or new_sl_order.get("orderId")
+
+                    # WAJIB verifikasi ke exchange sebelum menganggap recovery
+                    # sukses. Kalau belum muncul di OPEN list, jangan spam
+                    # "berhasil" dan jangan reset incident.
+                    time.sleep(1.0)
+                    verify_orders = get_open_algo_orders(sym)
+                    verified_sl = find_open_sl_order(sym, is_buy, verify_orders)
+                    if verified_sl is None:
+                        sl_order_id = None
+                        with positions_lock:
+                            if sym in positions:
+                                positions[sym]["sl_order_id"] = None
+                        log.warning(
+                            f"[sl-health] {sym}: recovery attempt #{sl_repair_attempts} "
+                            f"belum terkonfirmasi sebagai OPEN SL")
+                        if now - sl_last_alert_at >= SL_ALERT_COOLDOWN:
+                            tg_send(chat_id,
+                                f"⚠️ <b>SL protection belum terkonfirmasi</b> — {sym}\n"
+                                f"Percobaan #{sl_repair_attempts}; retry otomatis tanpa spam.")
+                            sl_last_alert_at = now
+                        continue
+
+                    sl_order_id = verified_sl.get("algoId") or verified_sl.get("orderId") or candidate_id
+                    trigger = verified_sl.get("triggerPrice", verified_sl.get("stopPrice"))
+                    if trigger is not None:
+                        try:
+                            sl_p = float(trigger)
+                        except (TypeError, ValueError):
+                            pass
                     with positions_lock:
                         if sym in positions:
                             positions[sym]["sl_order_id"] = sl_order_id
-                    # FIX: tampilkan JUMLAH ASLI sebelum di-reset (sebelumnya
-                    # reset dilakukan DULU baru pesan dibuat pakai +1, jadi
-                    # pesan selalu bohong nampilkan "1x total" walau ini
-                    # sudah kejadian ke-13x beruntun — sekarang counter yang
-                    # sebenarnya ditampilkan, baru direset setelahnya).
-                    total_count = sl_replace_count
-                    sl_replace_count = 0   # reset setelah berhasil
-                    tg_send(chat_id,
-                        f"⚠️ <b>SL dipasang ulang</b> — {sym}\n"
-                        f"Sempat hilang ({total_count}x total), "
-                        f"sudah dipasang ulang di <code>{sl_p:.6g}</code>.\n"
-                        f"Harga saat ini <code>{price_now:.6g}</code> — posisi masih aman.")
+                            positions[sym]["current_sl"] = sl_p
+
+                    if now - sl_last_alert_at >= SL_ALERT_COOLDOWN:
+                        tg_send(chat_id,
+                            f"⚠️ <b>SL dipulihkan</b> — {sym}\n"
+                            f"SL aktif terkonfirmasi di <code>{sl_p:.6g}</code>.\n"
+                            f"Recovery ke-{sl_repair_attempts}; notifikasi di-throttle.")
+                        sl_last_alert_at = now
                 except Exception as e:
-                    # Gagal pasang SL tapi harga masih aman — jangan auto-out,
-                    # tunggu iterasi berikutnya untuk coba lagi.
-                    # sl_order_id sudah = None di atas → health check berikutnya
-                    # akan deteksi SL hilang dan coba pasang ulang lagi.
-                    log.warning(f"[sl-health] {sym}: gagal pasang ulang SL (coba #{sl_replace_count}): {e}")
-                    tg_send(chat_id,
-                        f"⚠️ <b>SL hilang, gagal dipasang ulang</b> — {sym} (percobaan #{sl_replace_count})\n"
-                        f"Error: <code>{e}</code>\n"
-                        f"Harga <code>{price_now:.6g}</code> masih aman dari SL <code>{sl_p:.6g}</code>.\n"
-                        f"Akan dicoba lagi otomatis. ❗ Pantau manual jika terus gagal.")
+                    sl_order_id = None
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym]["sl_order_id"] = None
+                    log.warning(f"[sl-health] {sym}: recovery attempt #{sl_repair_attempts} gagal: {e}")
+                    if now - sl_last_alert_at >= SL_ALERT_COOLDOWN:
+                        tg_send(chat_id,
+                            f"⚠️ <b>SL recovery gagal</b> — {sym}\n"
+                            f"Percobaan #{sl_repair_attempts}; retry otomatis tanpa spam.")
+                        sl_last_alert_at = now
 
         price = get_price(sym) or entry
         pnl_r_now = (price - entry) / risk0 * (1 if is_buy else -1) if risk0 > 0 else 0
@@ -2751,12 +2717,6 @@ def monitor_position_real(sym, pos):
                         if sym in positions:
                             positions[sym]["current_sl"] = sl_p
                             positions[sym]["sl_order_id"] = sl_order_id
-                            positions[sym].setdefault("trail_events", []).append({
-                                "time": time.time(), "old_sl": old_sl, "new_sl": sl_p,
-                                "source": "R-ladder" if (cand_a is not None and proposed == cand_a) else "structure",
-                                "price": price,
-                                "locked_r": round(locked_r, 3),
-                            })
                     locked_pct = (sl_p - entry) / entry * 100 * (1 if is_buy else -1)
                     label = "Profit terkunci" if locked_pct >= 0 else "Risiko dikurangi"
                     tg_send(chat_id,
@@ -2859,9 +2819,15 @@ def simulation_loop(chat_id):
                 if sym in positions: return
                 if len(positions) >= MAX_POSITIONS: return
 
-            # ── REAL TRADE: pasang limit order asli, exchange yang urus fill ──
-            # (tidak butuh split langsung/pending seperti simulasi — order
-            # limit otomatis fill instan kalau harga sudah di zona entry)
+            # SATU pre-entry gate untuk kedua mode. Setelah lolos, satu-satunya
+            # perbedaan adalah mekanisme fill: Binance LIMIT vs simulator.
+            valid, reason = _validate_signal_before_entry(sym, signal)
+            if not valid:
+                log.info(f"[pre-entry] {sym} REJECT: {reason}")
+                _ban_coin(sym, reason)
+                return
+
+            # ── REAL TRADE: pasang LIMIT asli. ─────────────────────────────
             if REAL_TRADE_ENABLED:
                 _open_pending_real(sym, signal, chat_id)
                 return
@@ -2891,7 +2857,6 @@ def simulation_loop(chat_id):
                         "chat_id"     : chat_id,
                         "entry_time"  : None,
                         "timeout_flag": False,
-                        "trail_events": [],
                         "status"      : "pending",
                     }
                 _open_position(sym, signal, actual_entry, chat_id, "langsung")
@@ -2906,7 +2871,6 @@ def simulation_loop(chat_id):
                         "chat_id"     : chat_id,
                         "entry_time"  : None,        # belum entry, set saat terpicu
                         "timeout_flag": False,
-                        "trail_events": [],
                         "status"      : "pending",
                     }
 
@@ -2975,44 +2939,7 @@ def simulation_loop(chat_id):
             if price_now is None:
                 time.sleep(MONITOR_SLEEP); continue
 
-            # TP tersentuh sebelum entry → sinyal basi, hapus pending
-            tp_hit = (price_now >= tp_p) if is_buy else (price_now <= tp_p)
-            if tp_hit:
-                with positions_lock:
-                    positions.pop(sym, None)
-                _ban_coin(sym, "TP sebelum entry")
-                tg_send(chat_id,
-                    f"⏭ <b>Pending Batal</b> — {sym}\n"
-                    f"TP tersentuh sebelum entry. Skip.")
-                return
-
-            # SL sebelum entry — BUTUH KONFIRMASI CANDLE CLOSE M15 (lihat
-            # docstring). Dicek setiap ~60 detik saja (cukup, candle M15
-            # baru muncul tiap 15 menit) supaya tidak fetch klines tiap
-            # 10 detik terus-menerus.
-            if time.time() >= next_sl_check:
-                next_sl_check = time.time() + 60
-                try:
-                    df_chk = get_klines(sym, "15m", 3)
-                    if df_chk is not None and len(df_chk) >= 2:
-                        closed_row = df_chk.iloc[-2]   # candle terakhir yg SUDAH close
-                        ts_closed  = df_chk.index[-2]
-                        if last_m15_ts is None or ts_closed != last_m15_ts:
-                            last_m15_ts = ts_closed
-                            close_v = float(closed_row["close"])
-                            sl_confirmed = (close_v <= sl_p) if is_buy else (close_v >= sl_p)
-                            if sl_confirmed:
-                                with positions_lock:
-                                    positions.pop(sym, None)
-                                _ban_coin(sym, "SL sebelum entry")
-                                tg_send(chat_id,
-                                    f"⏭ <b>Pending Batal</b> — {sym}\n"
-                                    f"Candle M15 close mengonfirmasi SL sebelum entry. Skip.")
-                                return
-                except Exception as e:
-                    log.debug(f"[_wait_entry sl-confirm] {sym}: {e}")
-
-            # Harga mencapai zona entry — SEMAKIN MIRIP LIMIT ORDER ASLI:
+            # Harga mencapai zona entry — SIMULASI mengikuti LIMIT order REAL:
             # ── FIX "buat semirip mungkin" ──────────────────────────────
             # Sebelumnya pakai toleransi 0.3% (price_now <= entry*1.003) —
             # simulasi bisa anggap "entry kena" walau harga BELUM PERNAH
@@ -3327,48 +3254,40 @@ def bot_loop():
                 # ============================================================
                 # TAMBAHAN BARU (START) — Handler /analyze
                 # ============================================================
-                elif text.startswith("/analyze") or text == "analyze":
-                    # /analyze = seluruh history yang masih tersimpan (default 5000).
-                    # /analyze 500 = hanya 500 trade terakhir.
-                    parts = text.split()
-                    requested_limit = None
-                    if len(parts) > 1:
+                elif text in ("/analyze","analyze"):
+                    # Jalankan di background thread agar tidak block loop
+                    def _run_analyze(cid):
                         try:
-                            requested_limit = max(1, min(5000, int(parts[1])))
-                        except ValueError:
-                            requested_limit = None
-
-                    def _run_analyze(cid, limit):
-                        try:
-                            scope_text = "seluruh history tersimpan" if limit is None else f"{limit} trade terakhir"
-                            tg_send(cid, f"🔄 Menyiapkan riset lengkap — {scope_text}...")
-                            stats_csv = _generate_statistics_csv(requested_limit=limit)
-                            trade_csv = _generate_trade_csv(requested_limit=limit)
-                            context_json = _generate_research_context(requested_limit=limit)
-
-                            tg_send(cid, "✅ Riset selesai! Dataset lengkap dikirim.")
-                            tg_send_document(cid, stats_csv, caption="📊 statistics.csv — statistik agregat")
-                            tg_send_document(cid, trade_csv, caption="📋 trade.csv — 1 baris per trade + context strategy")
-                            tg_send_document(cid, context_json, caption="🧠 research_context.json — dataset + context + diagnostics")
-
-                            with open(context_json, "r", encoding="utf-8") as f:
+                            tg_send(cid, "🔄 Memulai riset historis 15 koin (3 bulan)...\nIni bisa memakan waktu 3-5 menit.")
+                            
+                            # Generate 3 file
+                            stats_csv = _generate_statistics_csv()
+                            trade_csv = _generate_trade_csv()
+                            context_json = _generate_research_context()
+                            
+                            # Kirim ke Telegram
+                            tg_send(cid, "✅ Riset selesai! Mengirim file...")
+                            tg_send_document(cid, stats_csv, caption="📊 statistics.csv")
+                            tg_send_document(cid, trade_csv, caption="📋 trade.csv")
+                            tg_send_document(cid, context_json, caption="🧠 research_context.json")
+                            
+                            # Ringkasan
+                            with open(context_json, "r") as f:
                                 ctx = json.load(f)
                             summary = ctx.get("summary", {})
-                            total = ctx.get("scope", {}).get("analyzed_trades", 0)
-                            wr = summary.get("win_rate_pct", 0)
-                            pf = summary.get("profit_factor", 0)
+                            total = summary.get("total_trades", 0)
+                            wr = summary.get("win_rate", 0)
                             tg_send(cid,
-                                f"📊 <b>Riset selesai</b>\n"
-                                f"Trade dianalisis: <b>{total}</b>\n"
-                                f"Win Rate: <b>{wr}%</b>\n"
-                                f"Profit Factor: <b>{pf}</b>\n\n"
-                                f"Dataset sekarang menyimpan context per-trade untuk upgrade strategy berikutnya.")
+                                f"📊 <b>Ringkasan Riset</b>\n"
+                                f"Total trade: {total}\n"
+                                f"Win Rate: {wr}%\n\n"
+                                f"File sudah dikirim. Jalankan researcher.py di laptop untuk analisis lebih lanjut.")
                         except Exception as e:
-                            log.error(f"[analyze] Error: {e}", exc_info=True)
-                            tg_send(cid, f"❌ Error saat menjalankan riset:\n<code>{str(e)[:300]}</code>")
-
-                    threading.Thread(target=_run_analyze, args=(chat_id, requested_limit), daemon=True).start()
-                    tg_send(chat_id, "⏳ Riset dimulai di background. /analyze = semua trade tersimpan; /analyze 500 = 500 terakhir.")
+                            log.error(f"[analyze] Error: {e}")
+                            tg_send(cid, f"❌ Error saat menjalankan riset:\n<code>{str(e)[:200]}</code>")
+                    
+                    threading.Thread(target=_run_analyze, args=(chat_id,), daemon=True).start()
+                    tg_send(chat_id, "⏳ Riset dimulai di background. Anda akan menerima file dalam beberapa menit.")
 # ============================================================
 # TAMBAHAN BARU (END)
 # ============================================================
@@ -3558,7 +3477,7 @@ def bot_loop():
                 elif text in ("/resetbalance","resetbalance"):
                     with stat_lock:
                         stats["balance"]     = STARTING_BALANCE
-                        stats["pnl_history"] = deque(maxlen=5000)
+                        stats["pnl_history"] = deque(maxlen=20)
                         stats["tp"]          = 0
                         stats["sl"]          = 0
                         stats["trail"]       = 0
