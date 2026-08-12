@@ -342,48 +342,27 @@ import re
 # jalan sendiri-sendiri (itu yang bikin log kebanjiran "Skip ... HTTP 418").
 _binance_ban_lock = threading.Lock()
 _binance_banned_until = 0.0   # unix timestamp detik; 0 = tidak sedang ban
-_binance_last_ban_log_until = 0.0
-
-class BinanceCooldown(RuntimeError):
-    """Circuit-breaker lokal: jangan kirim request Binance selama cooldown."""
-
 
 def _binance_wait_if_banned():
-    """JANGAN tidur selama berjam-jam di sini.
-
-    Versi lama membuat banyak thread tidur sampai waktu ban habis lalu bangun
-    bersamaan dan menembak Binance lagi. Itu dapat memperpanjang ban.
-    Sekarang fungsi ini hanya memberi tahu caller bahwa Binance sedang cooldown
-    sehingga caller publik bisa langsung pindah ke Bybit/WS.
-    """
     with _binance_ban_lock:
         until = _binance_banned_until
     remaining = until - time.time()
     if remaining > 0:
-        raise BinanceCooldown(f"Binance cooldown aktif {remaining:.0f} detik")
-
+        log.warning(f"[binance] Masih dalam masa ban, menunggu {remaining:.0f} detik lagi sebelum request baru...")
+        time.sleep(remaining + 1)   # +1 detik buffer
 
 def _binance_register_ban(msg="", fallback_seconds=60):
     """Catat waktu ban global. Coba parse 'banned until <ms epoch>' dari
     pesan error Binance (paling akurat); kalau tidak ada, mundur konservatif
     (fallback_seconds, makin lama tiap kena berturut-turut)."""
-    global _binance_banned_until, _binance_last_ban_log_until
+    global _binance_banned_until
     m = re.search(r"banned until (\d+)", msg)
-    parsed_until = int(m.group(1)) / 1000 if m else None
-    now = time.time()
-    until = parsed_until if parsed_until and parsed_until > now else (now + fallback_seconds)
+    until = int(m.group(1)) / 1000 if m else (time.time() + fallback_seconds)
     with _binance_ban_lock:
-        # Jangan pernah memperpanjang cooldown hanya karena request lain yang
-        # terjadi SAAT cooldown aktif ikut menerima error yang sama.
         if until > _binance_banned_until:
             _binance_banned_until = until
-        effective_until = _binance_banned_until
-        should_log = effective_until > _binance_last_ban_log_until + 5
-        if should_log:
-            _binance_last_ban_log_until = effective_until
-    wait = effective_until - now
-    if should_log:
-        log.error(f"[binance] Rate-limit/ban terdeteksi — circuit breaker aktif {max(wait,0):.0f} detik. REST Binance dihentikan; fallback tetap boleh jalan.")
+    wait = until - time.time()
+    log.error(f"[binance] Kena limit/ban — semua request Binance dijeda {max(wait,0):.0f} detik.")
 
 
 def _raw_get(url, params=None, retries=3):
@@ -1148,61 +1127,72 @@ ws_feed = BinanceWSFeed()
 # ── FUNGSI PUBLIK — signature SAMA PERSIS dgn sebelumnya, jadi seluruh
 #    kode bot (scoring, monitor posisi, dsb) TIDAK perlu diubah sama sekali ──
 def get_price(symbol):
-    """Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS (fallback TERAKHIR,
-    hanya dipakai kalau REST Binance & Bybit gagal/error/kena ban) →
-    Tier4 CoinGecko (darurat paling akhir, hanya koin di COINGECKO_ID_MAP)."""
-    for _ in range(2):
-        try:
-            return _binance_price(symbol)
-        except Exception as e:
-            log.warning(f"[price/binance] {symbol}: {e}")
-            time.sleep(1)
-    for _ in range(2):
-        try:
-            return _bybit_price(symbol)
-        except Exception as e:
-            log.warning(f"[price/bybit] {symbol}: {e}")
-            time.sleep(1)
+    """Harga live: WS ticker dulu; REST/Bybit hanya fallback."""
     if ws_feed.is_fresh():
         p = ws_feed.get_price(symbol)
         if p is not None:
-            log.warning(f"[price/ws fallback] {symbol} — REST Binance & Bybit gagal")
             return p
+    try:
+        return _binance_price(symbol)
+    except Exception as e:
+        log.warning(f"[price/binance] {symbol}: {e}")
+    try:
+        return _bybit_price(symbol)
+    except Exception as e:
+        log.warning(f"[price/bybit] {symbol}: {e}")
     p = _coingecko_price(symbol)
     if p is not None:
         log.warning(f"[price/coingecko DARURAT] {symbol} — semua sumber lain gagal")
         return p
     return None
 
-def get_klines(symbol, interval, limit=250):
-    """Tier1 buffer WS (GRATIS, live-updated di background) → Tier2 Binance
-    REST → Tier3 Bybit REST. Sebelumnya REST Binance dipanggil DULUAN tiap
-    kali (WS cuma fallback terakhir) — padahal WS-nya sudah jalan terus,
-    live, dan nol biaya rate-limit. Itu penyebab utama sering kena
-    limit/ban meski jumlah posisi cuma sedikit: setiap scan/monitor tetap
-    nembak REST walau datanya sebenarnya sudah ada gratis di buffer WS."""
-    ws_feed.ensure_symbol_interval(symbol, interval)
+def _seed_ws_from_df(symbol, interval, df):
+    """Seed histori REST ke buffer WS; setelah itu WS menjaga candle tetap update."""
+    if df is None or df.empty or not _WS_LIB_OK:
+        return
+    limit = ws_feed.MAX_CANDLES.get(interval, 250)
+    rows = deque(maxlen=limit)
+    for ts, r in df.tail(limit).iterrows():
+        rows.append({
+            "t": int(pd.Timestamp(ts).timestamp() * 1000),
+            "o": float(r.open), "h": float(r.high),
+            "l": float(r.low), "c": float(r.close), "v": float(r.volume)
+        })
+    with ws_feed._lock:
+        ws_feed._klines[(symbol, interval)] = rows
+        ws_feed._last_used[(symbol, interval)] = time.time()
+    ws_feed._subscribe_kline(symbol, interval)
 
+def get_klines(symbol, interval, limit=250):
+    """OHLCV lengkap: buffer WS → REST sekali → Bybit sekali.
+
+    Hasil REST langsung disimpan ke buffer WS, sehingga scan berikutnya tidak
+    mengulang request candle yang sama. Jika buffer tidak lengkap, jangan
+    menggunakannya untuk analisa; ambil histori baru.
+    """
     if ws_feed.is_fresh():
         df = ws_feed.get_klines(symbol, interval, limit)
-        if df is not None and not df.empty:
+        if df is not None and len(df) >= min(limit, 40):
             return df
 
     try:
         df = _binance_klines(symbol, interval, limit)
         if not df.empty:
+            _seed_ws_from_df(symbol, interval, df)
             return df
-        log.warning(f"[klines/binance] {symbol} kosong, coba Bybit...")
+        log.warning(f"[klines/binance] {symbol} {interval} kosong, coba Bybit...")
     except Exception as e:
-        log.warning(f"[klines/binance] {symbol}: {e} — coba Bybit...")
+        log.warning(f"[klines/binance] {symbol} {interval}: {e} — coba Bybit...")
     try:
         df = _bybit_klines(symbol, interval, limit)
         if not df.empty:
+            _seed_ws_from_df(symbol, interval, df)
             log.info(f"[klines/bybit fallback] {symbol} {interval} OK")
             return df
     except Exception as e:
-        log.warning(f"[klines/bybit] {symbol}: {e}")
+        log.warning(f"[klines/bybit] {symbol} {interval}: {e}")
     return pd.DataFrame()
+
 
 last_scanned_coins = []
 last_scanned_at = None
@@ -1241,7 +1231,23 @@ def _get_top_coins_impl():
 
     exclude_syms = cur_ban | active_syms
 
-    # Binance REST
+    # WS ticker memuat harga + volume 24h semua simbol. Gunakan untuk memilih
+    # 50 koin bila fresh agar endpoint /24hr tidak ditembak setiap scan.
+    if ws_feed.is_fresh():
+        raw = ws_feed.get_top_coins_raw()
+        usdt = [
+            t for t in raw
+            if t["symbol"].endswith("USDT")
+            and 0.0001 < t["price"] < MAX_PRICE
+            and t["qvol"] > 5_000_000
+            and abs(t["chg"]) < 15
+            and t["symbol"] not in exclude_syms
+        ]
+        if usdt:
+            usdt.sort(key=lambda x: x["qvol"], reverse=True)
+            return [t["symbol"] for t in usdt[:TOP_N_COINS]]
+
+    # REST fallback hanya jika ticker WS belum siap.
     try:
         coins = _binance_top_coins(exclude_syms)
         if coins:
@@ -1376,7 +1382,7 @@ def run_scan_once(chat_id):
             log.debug(f"[scan] {sym}: {e}")
             r = None
         if r: results.append(r)
-        time.sleep(0.15)
+        time.sleep(0.03)
 
     if not results:
         tg_send(chat_id,"⚠️ Tidak ada setup valid dari semua koin.")
