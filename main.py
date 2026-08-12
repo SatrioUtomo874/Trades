@@ -3655,11 +3655,9 @@ def bot_loop():
                             _, total = get_real_balance()
                             with autostop_lock:
                                 peak_real_balance = total
-                                autostop_cycle += 1
                         else:
                             with autostop_lock:
                                 peak_real_balance = None
-                                autostop_cycle += 1
                         auto_mode=True
                         auto_thread=threading.Thread(
                             target=simulation_loop,args=(chat_id,),daemon=True)
