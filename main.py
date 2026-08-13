@@ -178,6 +178,17 @@ def _ban_coin(sym, reason="", duration=None):
 FAPI = "https://fapi.binance.com"
 BINANCE_WS_URL = "wss://fstream.binance.com/ws"
 
+# API architecture: WebSocket is the realtime path; REST is deliberately
+# throttled and used for historical/backfill/reconciliation.  A Binance IP
+# ban must NEVER block the whole process or make threads sleep for hours.
+REST_KLINE_REFRESH = {"15m": 15*60, "1h": 60*60, "1d": 24*60*60}
+BINANCE_REST_MAX_COOLDOWN_LOG = 60.0
+BINANCE_NEW_ENTRY_BLOCK_ON_BAN = True
+
+class BinanceCircuitOpen(RuntimeError):
+    """Binance REST is temporarily unavailable; caller should use fallback."""
+    pass
+
 # ── Flask ─────────────────────────────────────
 app = Flask(__name__)
 
@@ -342,48 +353,41 @@ import re
 # jalan sendiri-sendiri (itu yang bikin log kebanjiran "Skip ... HTTP 418").
 _binance_ban_lock = threading.Lock()
 _binance_banned_until = 0.0   # unix timestamp detik; 0 = tidak sedang ban
-_binance_last_ban_log_until = 0.0
-
-class BinanceCooldown(RuntimeError):
-    """Circuit-breaker lokal: jangan kirim request Binance selama cooldown."""
-
 
 def _binance_wait_if_banned():
-    """JANGAN tidur selama berjam-jam di sini.
-
-    Versi lama membuat banyak thread tidur sampai waktu ban habis lalu bangun
-    bersamaan dan menembak Binance lagi. Itu dapat memperpanjang ban.
-    Sekarang fungsi ini hanya memberi tahu caller bahwa Binance sedang cooldown
-    sehingga caller publik bisa langsung pindah ke Bybit/WS.
-    """
+    # NEVER sleep here.  Sleeping inside a shared API helper was the reason a
+    # 17k-second ban could effectively freeze unrelated position threads.
     with _binance_ban_lock:
         until = _binance_banned_until
     remaining = until - time.time()
     if remaining > 0:
-        raise BinanceCooldown(f"Binance cooldown aktif {remaining:.0f} detik")
-
+        raise BinanceCircuitOpen(
+            f"Binance circuit breaker aktif ({remaining:.0f}s tersisa)")
 
 def _binance_register_ban(msg="", fallback_seconds=60):
-    """Catat waktu ban global. Coba parse 'banned until <ms epoch>' dari
-    pesan error Binance (paling akurat); kalau tidak ada, mundur konservatif
-    (fallback_seconds, makin lama tiap kena berturut-turut)."""
-    global _binance_banned_until, _binance_last_ban_log_until
-    m = re.search(r"banned until (\d+)", msg)
-    parsed_until = int(m.group(1)) / 1000 if m else None
+    """Register the exchange-provided ban, but never extend it from duplicate
+    responses.  The actual exchange ban is respected; the application simply
+    stops issuing requests instead of sleeping/retrying into the ban."""
+    global _binance_banned_until
+    m = re.search(r"banned until (\d+)", msg or "")
+    parsed_until = int(m.group(1)) / 1000 if m else (time.time() + fallback_seconds)
     now = time.time()
-    until = parsed_until if parsed_until and parsed_until > now else (now + fallback_seconds)
     with _binance_ban_lock:
-        # Jangan pernah memperpanjang cooldown hanya karena request lain yang
-        # terjadi SAAT cooldown aktif ikut menerima error yang sama.
-        if until > _binance_banned_until:
-            _binance_banned_until = until
-        effective_until = _binance_banned_until
-        should_log = effective_until > _binance_last_ban_log_until + 5
-        if should_log:
-            _binance_last_ban_log_until = effective_until
-    wait = effective_until - now
-    if should_log:
-        log.error(f"[binance] Rate-limit/ban terdeteksi — circuit breaker aktif {max(wait,0):.0f} detik. REST Binance dihentikan; fallback tetap boleh jalan.")
+        old = _binance_banned_until
+        if parsed_until > old:
+            _binance_banned_until = parsed_until
+        effective = _binance_banned_until
+    wait = max(0.0, effective - now)
+    # One notification per cooldown episode, not one per request/thread.
+    if old <= now:
+        log.error(
+            f"[binance] Rate-limit/ban terdeteksi — circuit breaker aktif "
+            f"{wait:.0f} detik. REST Binance dihentikan; fallback tetap boleh jalan.")
+    return effective
+
+def _binance_circuit_open():
+    with _binance_ban_lock:
+        return _binance_banned_until > time.time()
 
 
 def _raw_get(url, params=None, retries=3):
@@ -402,36 +406,28 @@ def _raw_get(url, params=None, retries=3):
 # ── BINANCE REST (backfill awal WS + fallback tier-2) ─────────────────
 def fapi_get(path, params=None):
     _binance_wait_if_banned()
-    for i in range(3):
+    last_err = None
+    for i in range(2):
         try:
             r = requests.get(f"{FAPI}{path}", params=params,
-                             timeout=10, verify=False)
+                              timeout=8, verify=False)
             if r.status_code in (418, 429):
-                # Kena rate-limit/ban IP dari Binance — JANGAN retry lagi
-                # ke Binance (mengulang request saat sedang kena ban malah
-                # berisiko memperpanjang durasi ban). Catat state ban
-                # global (dipakai fapi_get & _binance_signed) lalu lempar
-                # ke caller supaya pindah ke tier fallback (Bybit → WS).
-                try:
-                    body_msg = r.text
-                except Exception:
-                    body_msg = ""
-                _binance_register_ban(body_msg)
-                raise ConnectionError(
-                    f"Binance kena limit/ban (HTTP {r.status_code})")
+                _binance_register_ban(r.text)
+                raise BinanceCircuitOpen(f"Binance HTTP {r.status_code}")
             d = r.json()
-            if isinstance(d, dict) and "code" in d:
-                if d["code"] == -1003:
+            if isinstance(d, dict) and "code" in d and d.get("code") < 0:
+                if d.get("code") == -1003:
                     _binance_register_ban(d.get("msg", ""))
+                    raise BinanceCircuitOpen("Binance -1003 rate limit")
                 raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
             return d
-        except ConnectionError as e:
-            log.warning(f"[binance] {e} — stop retry Binance, pindah fallback")
+        except BinanceCircuitOpen:
             raise
-        except Exception as e:
-            log.warning(f"[binance] {i+1}/3: {e}")
-            time.sleep(2)
-    raise ConnectionError(f"Binance gagal: {path}")
+        except (requests.RequestException, ValueError, json.JSONDecodeError) as e:
+            last_err = e
+            if i == 0:
+                time.sleep(0.5)
+    raise ConnectionError(f"Binance gagal: {path}: {last_err}")
 
 
 # ============================================================
@@ -454,24 +450,25 @@ def _binance_signed(method, path, params=None):
     url = f"{FAPI}{path}?{query}&signature={sig}"
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     last_err = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            r = requests.request(method, url, headers=headers, timeout=10, verify=False)
+            r = requests.request(method, url, headers=headers, timeout=8, verify=False)
             if r.status_code in (418, 429):
                 _binance_register_ban(r.text)
-                raise RuntimeError(f"Binance kena limit/ban (HTTP {r.status_code})")
+                raise BinanceCircuitOpen(f"Binance HTTP {r.status_code}")
             data = r.json()
             if isinstance(data, dict) and "code" in data and data["code"] < 0:
                 if data["code"] == -1003:
                     _binance_register_ban(data.get("msg", ""))
+                    raise BinanceCircuitOpen("Binance -1003 rate limit")
                 raise RuntimeError(f"Binance {data['code']}: {data.get('msg')}")
             return data
-        except RuntimeError:
+        except BinanceCircuitOpen:
             raise
         except Exception as e:
             last_err = e
-            log.warning(f"[binance-signed] {method} {path} percobaan {attempt+1}: {e}")
-            time.sleep(1.5)
+            if attempt == 0:
+                time.sleep(0.5)
     raise RuntimeError(f"Gagal request signed {method} {path}: {last_err}")
 
 
@@ -1145,202 +1142,210 @@ class BinanceWSFeed:
 ws_feed = BinanceWSFeed()
 
 
-# ── PRIVATE USER DATA STREAM ───────────────────────────────────────────────
-# Market WS di atas hanya memberi harga/candle. Fill order real harus datang
-# dari User Data Stream supaya PENDING -> FILLED tidak bergantung pada polling
-# REST. Binance mengirim ORDER_TRADE_UPDATE secara real-time pada stream ini.
-_user_ws = None
-_user_ws_lock = threading.Lock()
-_user_ws_stop = False
-_user_ws_healthy = False
-_user_listen_key = None
-_user_last_msg = 0.0
-_user_fill_events = {}
-_user_fill_lock = threading.Lock()
+class BinanceUserWS:
+    """Private Futures user stream.
 
+    It is deliberately event-driven: ORDER_TRADE_UPDATE is used to notice
+    fills/closures without polling order status every 30 seconds.  REST is
+    still used for reconciliation and actual order placement, but a REST
+    outage no longer makes the local bot blind to an already-filled order.
+    """
+    def __init__(self):
+        self._thread = None
+        self._stop = False
+        self._listen_key = None
+        self._last_event = 0.0
+        self._backoff = 2
 
-def user_ws_healthy(max_age=30):
-    with _user_ws_lock:
-        return bool(_user_ws_healthy and _user_listen_key and (time.time() - _user_last_msg) < max_age)
+    def start(self):
+        if not REAL_TRADE_ENABLED or not _WS_LIB_OK:
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
+    def _get_listen_key(self):
+        # Binance Futures user-stream listenKey is a lightweight API-key
+        # endpoint.  If REST is circuit-open, simply retry later; do not block
+        # the rest of the trading engine.
+        if _binance_circuit_open():
+            raise BinanceCircuitOpen("REST circuit open; user stream listenKey deferred")
+        r = requests.post(
+            f"{FAPI}/fapi/v1/listenKey",
+            headers={"X-MBX-APIKEY": BINANCE_API_KEY}, timeout=8, verify=False)
+        if r.status_code in (418, 429):
+            _binance_register_ban(r.text)
+            raise BinanceCircuitOpen(f"listenKey HTTP {r.status_code}")
+        d = r.json()
+        key = d.get("listenKey")
+        if not key:
+            raise RuntimeError(f"listenKey gagal: {d}")
+        return key
 
-def _remember_fill(order_id, payload):
-    with _user_fill_lock:
-        _user_fill_events[str(order_id)] = payload
+    def _keepalive_loop(self, key):
+        while not self._stop and key == self._listen_key:
+            for _ in range(30):
+                if self._stop or key != self._listen_key:
+                    return
+                time.sleep(60)
+            if _binance_circuit_open():
+                continue
+            try:
+                r = requests.put(
+                    f"{FAPI}/fapi/v1/listenKey",
+                    headers={"X-MBX-APIKEY": BINANCE_API_KEY}, timeout=8, verify=False)
+                if r.status_code in (418, 429):
+                    _binance_register_ban(r.text)
+                    continue
+            except Exception as e:
+                log.debug(f"[user-ws] keepalive: {e}")
 
+    def _run(self):
+        while not self._stop:
+            try:
+                key = self._get_listen_key()
+                self._listen_key = key
+                threading.Thread(target=self._keepalive_loop, args=(key,), daemon=True).start()
+                url = f"{BINANCE_WS_URL}/{key}"
+                ws = websocket.WebSocketApp(
+                    url, on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close)
+                self._ws = ws
+                ws.run_forever(ping_interval=120, ping_timeout=20)
+            except BinanceCircuitOpen as e:
+                log.debug(f"[user-ws] {e}")
+            except Exception as e:
+                log.warning(f"[user-ws] reconnect: {e}")
+            self._listen_key = None
+            time.sleep(self._backoff)
+            self._backoff = min(self._backoff * 2, 60)
 
-def _take_fill(order_id):
-    with _user_fill_lock:
-        return _user_fill_events.pop(str(order_id), None)
+    def _on_open(self, ws):
+        self._backoff = 2
+        self._last_event = time.time()
+        log.info("[user-ws] Binance Futures user stream terhubung")
 
-
-def _user_stream_listen_key():
-    if not BINANCE_API_KEY:
-        return None
-    # listenKey creation is deliberately done only when starting/recovering the
-    # stream; it is NOT part of the per-position polling loop.
-    r = requests.post(f"{FAPI}/fapi/v1/listenKey",
-                      headers={"X-MBX-APIKEY": BINANCE_API_KEY},
-                      timeout=10, verify=False)
-    r.raise_for_status()
-    data = r.json()
-    return data.get("listenKey")
-
-
-def _user_stream_keepalive(key):
-    try:
-        _binance_wait_if_banned()
-        requests.put(f"{FAPI}/fapi/v1/listenKey",
-                     headers={"X-MBX-APIKEY": BINANCE_API_KEY},
-                     params={"listenKey": key}, timeout=10, verify=False)
-    except Exception as e:
-        log.warning(f"[user-ws] keepalive gagal: {e}")
-
-
-def _user_stream_on_message(ws, raw):
-    global _user_last_msg
-    _user_last_msg = time.time()
-    try:
-        msg = json.loads(raw)
-    except Exception:
-        return
-    if msg.get("e") != "ORDER_TRADE_UPDATE":
-        return
-    o = msg.get("o") or {}
-    status = o.get("X")
-    execution = o.get("x")
-    if status != "FILLED" and execution != "TRADE":
-        return
-    order_id = o.get("i")
-    symbol = o.get("s")
-    if not order_id or not symbol:
-        return
-    # Only consume fills belonging to a LIMIT entry that our local state knows.
-    with positions_lock:
-        pos = positions.get(symbol)
-        is_pending = bool(pos and pos.get("status") == "pending" and
-                          str(pos.get("order_id")) == str(order_id))
-    if not is_pending:
-        return
-    avg_price = float(o.get("ap") or o.get("L") or 0) or float(pos.get("entry", 0))
-    filled_qty = float(o.get("z") or o.get("l") or pos.get("quantity", 0))
-    payload = {"orderId": order_id, "status": "FILLED", "avgPrice": avg_price,
-               "executedQty": filled_qty, "source": "user_ws", "raw": o}
-    _remember_fill(order_id, payload)
-    log.info(f"[user-ws] FILLED {symbol} order=#{order_id} avg={avg_price:.8g}")
-
-
-def _user_stream_worker():
-    global _user_ws, _user_ws_healthy, _user_listen_key, _user_last_msg
-    if not _WS_LIB_OK or not BINANCE_API_KEY:
-        return
-    backoff = 2
-    while not _user_ws_stop:
+    def _on_message(self, ws, raw):
+        self._last_event = time.time()
         try:
-            key = _user_stream_listen_key()
-            if not key:
-                raise RuntimeError("listenKey kosong")
-            _user_listen_key = key
-            _user_last_msg = time.time()
-            url = f"{BINANCE_WS_URL}/{key}"
-            def _on_open(ws):
-                global _user_ws_healthy, _user_last_msg
-                _user_ws_healthy = True
-                _user_last_msg = time.time()
-                log.info("[user-ws] Binance User Data Stream terhubung")
-            _user_ws = websocket.WebSocketApp(
-                url,
-                on_open=_on_open,
-                on_message=_user_stream_on_message,
-                on_error=lambda ws, e: log.warning(f"[user-ws] error: {e}"),
-                on_close=lambda ws, code, msg: log.warning(f"[user-ws] tertutup code={code}"))
-            _user_ws_healthy = False
-            # keepalive thread for this listen key; it never polls positions.
-            def _ka(local_key=key):
-                while (not _user_ws_stop) and local_key == _user_listen_key:
-                    time.sleep(25 * 60)
-                    if not _user_ws_stop and local_key == _user_listen_key:
-                        _user_stream_keepalive(local_key)
-            threading.Thread(target=_ka, daemon=True).start()
-            _user_ws.run_forever(ping_interval=120, ping_timeout=10)
-        except Exception as e:
-            log.warning(f"[user-ws] koneksi gagal: {e}")
-        finally:
-            _user_ws_healthy = False
-            _user_listen_key = None
-        if not _user_ws_stop:
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+            msg = json.loads(raw)
+        except Exception:
+            return
+        event = msg.get("e")
+        if event == "ORDER_TRADE_UPDATE":
+            self._handle_order_update(msg.get("o", {}))
+        elif event == "ACCOUNT_UPDATE":
+            # Account event is a freshness signal.  Detailed reconciliation
+            # remains REST-based so one event cannot corrupt local state.
+            pass
 
+    def _handle_order_update(self, o):
+        sym = o.get("s")
+        status = o.get("X")
+        order_id = o.get("i")
+        order_type = o.get("o")
+        if not sym or not order_id:
+            return
+        with positions_lock:
+            pos = positions.get(sym)
+        if not pos:
+            return
 
-def start_user_data_stream():
-    if not REAL_TRADE_ENABLED or not _WS_LIB_OK or not BINANCE_API_KEY:
-        return
-    threading.Thread(target=_user_stream_worker, daemon=True, name="binance-user-ws").start()
+        # Entry limit order filled: trigger the exact same fill handler used
+        # by the REST poller.  A per-position guard prevents duplicate events.
+        if pos.get("status") == "pending" and str(order_id) == str(pos.get("order_id")):
+            if status == "FILLED":
+                with positions_lock:
+                    pos = positions.get(sym)
+                    if not pos or pos.get("fill_event_handled"):
+                        return
+                    pos["fill_event_handled"] = True
+                avg = float(o.get("ap") or o.get("L") or pos.get("entry") or 0)
+                info = {"executedQty": o.get("z") or pos.get("quantity", 0),
+                        "avgPrice": avg}
+                _open_position_real(sym, pos["signal"], avg, pos["chat_id"], info)
+            elif status in ("CANCELED", "EXPIRED", "REJECTED"):
+                with positions_lock:
+                    positions.pop(sym, None)
+                tg_send(pos["chat_id"], f"⏭ <b>Pending Batal</b> — {sym}\nStatus: {status}")
+            return
+
+        # Closing-order events are only treated as a freshness signal here.
+        # Exact TP/SL attribution remains in the reconciliation path so an
+        # event for a stale/replaced algo order cannot incorrectly close the
+        # local position twice.
+
+    def _on_error(self, ws, err):
+        log.debug(f"[user-ws] error: {err}")
+
+    def _on_close(self, ws, code, msg):
+        log.warning(f"[user-ws] tertutup ({code}) — reconnect otomatis")
+
+user_ws = BinanceUserWS()
 
 
 # ── FUNGSI PUBLIK — signature SAMA PERSIS dgn sebelumnya, jadi seluruh
 #    kode bot (scoring, monitor posisi, dsb) TIDAK perlu diubah sama sekali ──
-def get_price(symbol):
-    """Harga live: WS Binance dulu. REST hanya recovery.
+def _closed_only(df):
+    """Return only candles whose close time is already in the past."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    idx = pd.to_datetime(out.index, utc=True)
+    # Infer interval from timestamps; drop the last row when its interval is
+    # still open.  This is intentionally conservative.
+    if len(out) >= 2:
+        step = (idx[-1] - idx[-2]).total_seconds()
+        if step > 0 and idx[-1].timestamp() + step > time.time():
+            out = out.iloc[:-1]
+    return out
 
-    Ini penting untuk monitoring posisi: harga real-time tidak boleh ikut
-    terseret circuit breaker REST Binance."""
+def get_price(symbol):
+    """Realtime price path: Binance market WS first, then Bybit REST, then
+    Binance REST only as a recovery path.  Position monitoring therefore does
+    not consume Binance REST weight every 10/30 seconds."""
     if ws_feed.is_fresh():
         p = ws_feed.get_price(symbol)
         if p is not None:
             return p
-    for _ in range(1):
+    try:
+        return _bybit_price(symbol)
+    except Exception:
+        pass
+    if not _binance_circuit_open():
         try:
             return _binance_price(symbol)
-        except Exception as e:
-            log.warning(f"[price/binance] {symbol}: {e}")
-            time.sleep(1)
-    for _ in range(2):
-        try:
-            return _bybit_price(symbol)
-        except Exception as e:
-            log.warning(f"[price/bybit] {symbol}: {e}")
-            time.sleep(1)
-    if ws_feed.is_fresh():
-        p = ws_feed.get_price(symbol)
-        if p is not None:
-            log.warning(f"[price/ws fallback] {symbol} — REST Binance & Bybit gagal")
-            return p
+        except Exception:
+            pass
     p = _coingecko_price(symbol)
-    if p is not None:
-        log.warning(f"[price/coingecko DARURAT] {symbol} — semua sumber lain gagal")
-        return p
-    return None
+    return p
 
 def get_klines(symbol, interval, limit=250):
-    """Tier1 buffer WS (GRATIS, live-updated di background) → Tier2 Binance
-    REST → Tier3 Bybit REST. Sebelumnya REST Binance dipanggil DULUAN tiap
-    kali (WS cuma fallback terakhir) — padahal WS-nya sudah jalan terus,
-    live, dan nol biaya rate-limit. Itu penyebab utama sering kena
-    limit/ban meski jumlah posisi cuma sedikit: setiap scan/monitor tetap
-    nembak REST walau datanya sebenarnya sudah ada gratis di buffer WS."""
+    """Strategy candle path.  The WS buffer is the hot cache; REST is used
+    only when the cache is missing/stale.  Strategy callers receive closed
+    candles only, never the currently forming candle."""
     ws_feed.ensure_symbol_interval(symbol, interval)
+    df = ws_feed.get_klines(symbol, interval, limit)
+    if df is not None and not df.empty and ws_feed.is_fresh():
+        return _closed_only(df).tail(limit)
 
-    if ws_feed.is_fresh():
-        df = ws_feed.get_klines(symbol, interval, limit)
-        if df is not None and not df.empty:
-            return df
-
-    try:
-        df = _binance_klines(symbol, interval, limit)
-        if not df.empty:
-            return df
-        log.warning(f"[klines/binance] {symbol} kosong, coba Bybit...")
-    except Exception as e:
-        log.warning(f"[klines/binance] {symbol}: {e} — coba Bybit...")
+    # Recovery path: Binance only if its circuit is closed; otherwise Bybit.
+    if not _binance_circuit_open():
+        try:
+            df = _binance_klines(symbol, interval, limit)
+            if not df.empty:
+                return _closed_only(df).tail(limit)
+        except Exception as e:
+            log.debug(f"[klines/binance recovery] {symbol} {interval}: {e}")
     try:
         df = _bybit_klines(symbol, interval, limit)
         if not df.empty:
-            log.info(f"[klines/bybit fallback] {symbol} {interval} OK")
-            return df
+            return _closed_only(df).tail(limit)
     except Exception as e:
-        log.warning(f"[klines/bybit] {symbol}: {e}")
+        log.debug(f"[klines/bybit recovery] {symbol} {interval}: {e}")
     return pd.DataFrame()
 
 last_scanned_coins = []
@@ -2259,6 +2264,8 @@ def monitor_position(sym, pos):
 
 def _open_pending_real(sym, signal, chat_id):
     """Pasang LIMIT order asli di Binance untuk entry (real trade)."""
+    if BINANCE_NEW_ENTRY_BLOCK_ON_BAN and _binance_circuit_open():
+        raise BinanceCircuitOpen("Binance circuit breaker aktif — entry real ditahan")
     is_buy = signal["decision"] == "BUY"
     entry_target = signal["entry"]
     side = "BUY" if is_buy else "SELL"
@@ -2347,20 +2354,25 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
             tg_send(chat_id, f"⏭ <b>Order pending dibatalkan</b> — {sym} (via /timeout, belum sempat terisi).")
             return
 
-        # User WS adalah sumber utama status FILLED. REST hanya fallback.
-        ws_fill = _take_fill(order_id)
-        if ws_fill is not None:
-            _open_position_real(sym, signal, float(ws_fill.get("avgPrice") or entry_target), chat_id, ws_fill)
-            return
-
         try:
             order = get_order_status(sym, order_id)
+        except BinanceCircuitOpen as e:
+            # Do not hammer Binance while the circuit is open.  The local
+            # pending state remains intact and will be reconciled later.
+            log.debug(f"[wait_entry_real] {sym}: {e}")
+            time.sleep(max(REAL_TRADE_POLL_SLEEP, 30)); continue
         except Exception as e:
             log.warning(f"[wait_entry_real] {sym}: {e}")
             time.sleep(REAL_TRADE_POLL_SLEEP); continue
 
         status = order.get("status")
         if status == "FILLED":
+            with positions_lock:
+                p = positions.get(sym)
+                if p and p.get("fill_event_handled"):
+                    return
+                if p:
+                    p["fill_event_handled"] = True
             avg_price = float(order.get("avgPrice") or 0) or entry_target
             _open_position_real(sym, signal, avg_price, chat_id, order)
             return
@@ -2536,6 +2548,8 @@ def _open_position_real(sym, signal, actual_entry, chat_id, order_info):
             "entry": actual_entry, "entry_time": time.time(), "status": "active",
             "current_sl": sl_v, "quantity": qty,
             "tp_order_id": tp_order_id, "sl_order_id": sl_order_id,
+            "protection_state": "VERIFIED",
+            "last_exchange_sync": time.time(),
         })
 
     tg_send(chat_id,
@@ -2812,7 +2826,7 @@ def monitor_position_real(sym, pos):
                 log.debug(f"[monitor_real trail] {sym}: {e}")
 
         cands = [c for c in (cand_a, cand_b) if c is not None]
-        if cands:
+        if cands and not _binance_circuit_open():
             raw_proposed = max(cands) if is_buy else min(cands)
             # ── FIX: bulatkan ke tickSize DI SINI — sebelum dibandingkan
             # dan sebelum (nanti) disimpan sebagai sl_p — bukan cuma saat
@@ -2912,7 +2926,7 @@ def autostop_loop(chat_id):
     global auto_mode, peak_real_balance
     while True:
         try:
-            if REAL_TRADE_ENABLED:
+            if REAL_TRADE_ENABLED and not _binance_circuit_open():
                 _, total = get_real_balance()
                 if total is not None:
                     with autostop_lock:
@@ -2972,25 +2986,9 @@ def simulation_loop(chat_id):
                 _ban_coin(sym, reason)
                 return
 
-            # ── REAL TRADE: execution hanya boleh berjalan kalau private
-            # User Data Stream sehat. Tanpa jalur fill event, posisi LIMIT
-            # bisa berubah menjadi FILLED saat REST sedang cooldown dan
-            # protection pipeline tidak pernah dipanggil.
+            # ── REAL TRADE: pasang LIMIT asli. ─────────────────────────────
             if REAL_TRADE_ENABLED:
-                if not user_ws_healthy():
-                    log.warning(f"[execution-gate] {sym} ditunda: Binance User WS belum sehat")
-                    tg_send(chat_id, f"⏸ <b>Entry ditunda</b> — {sym}\nBinance User Data Stream belum sehat; scanner tidak akan memaksa entry real tanpa jalur fill/protection.")
-                    return
-                try:
-                    _open_pending_real(sym, signal, chat_id)
-                except BinanceCooldown as e:
-                    # Circuit breaker adalah kondisi execution unavailable,
-                    # bukan crash scanner. Jangan ban coin karena masalah API.
-                    log.warning(f"[execution-gate] {sym} ditunda: {e}")
-                    tg_send(chat_id, f"⏸ <b>Entry ditunda</b> — {sym}\nBinance REST sedang cooldown. Sinyal tetap valid, tetapi execution ditahan.")
-                except Exception as e:
-                    log.error(f"[execution] {sym} gagal: {e}")
-                    tg_send(chat_id, f"⚠️ <b>Execution gagal</b> — {sym}\n<code>{e}</code>")
+                _open_pending_real(sym, signal, chat_id)
                 return
 
             entry_target = signal["entry"]
@@ -3657,6 +3655,9 @@ def bot_loop():
                             _, total = get_real_balance()
                             with autostop_lock:
                                 peak_real_balance = total
+                        else:
+                            with autostop_lock:
+                                peak_real_balance = None
                         auto_mode=True
                         auto_thread=threading.Thread(
                             target=simulation_loop,args=(chat_id,),daemon=True)
@@ -3971,7 +3972,7 @@ if __name__=="__main__":
     # bind & terdeteksi Render, tidak menunggu inisialisasi bot/WS selesai.
     threading.Thread(target=run_flask, daemon=True).start()
     ws_feed.start()
-    start_user_data_stream()
+    user_ws.start()
     threading.Thread(target=_price_cache_loop, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
 
