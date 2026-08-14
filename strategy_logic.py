@@ -1,9 +1,31 @@
 """
-strategy_logic.py — OTAK v3 (Revisi: Inducement, External Liquidity, Trail Struktural)
+strategy_logic.py — OTAK v4 (Revisi: Trend Strength, Liquidity-Sweep Rescue)
 ========================================================================================
-Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
+Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~50 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
-CISD, OTE & Fibonacci, external vs internal liquidity, Wyckoff, dsb).
+CISD, OTE & Fibonacci, external vs internal liquidity, Wyckoff, kekuatan
+tren, dsb — lihat combined.txt).
+
+Poin revisi v4 (di atas v3, lihat changelog v3 di bawah untuk histori lama):
+  1) trend_strength(): mengimplementasikan konsep dari transkrip "The Secret
+     to Measuring Trend Strength That Traders Rarely Discuss" — kekuatan
+     uptrend diukur dari kemiringan garis PUNCAK berturut-turut (bukan garis
+     lembah — kesalahpahaman umum yang jadi topik utama video itu), dan
+     kekuatan downtrend dari kemiringan garis LEMBAH. Dipakai sebagai bonus/
+     penalti kecil (±6) di score_direction() ketika arah H1 sejalan dengan
+     tren yang sedang menguat/melemah — bukan filter keras, supaya frekuensi
+     sinyal tetap terjaga (konsisten dengan prinsip desain v3 poin 7).
+  2) validate_and_adjust_geometry(): sebelumnya SELALU menolak (return None)
+     begitu SL tersentuh setelah fill, walau docstring lama & komentar
+     main.py sudah menyebut fungsi ini seharusnya bisa merelokasi SL kalau
+     itu cuma Liquidity Sweep dangkal (≤3×ATR). Sekarang benar-benar
+     diimplementasikan: breach dangkal → SL direlokasi ke luar titik breach
+     + buffer 0.5×ATR, RR dihitung ulang terhadap TP asli (TP tidak pernah
+     digeser); breach dalam (>3×ATR) tetap ditolak sebagai invalidasi asli.
+     Konsep ini sesuai transkrip "How the Market Traps Traders with
+     Inducement" & "3 Types of Liquidity Targeted by Smart Money".
+
+--- Changelog v3 (histori, dipertahankan untuk konteks) ---
 
 Urutan proses tiap sinyal (SESUAI PERMINTAAN): Entry → SL → TP → Confidence
 global (tanpa bias sesi). Arah HTF adalah gate keputusan, bukan sekadar bonus
@@ -46,10 +68,13 @@ Poin revisi v3:
      tidak relevan untuk swing H1/M15 — hanya diambil konsep yang dipakai
      bot ini (structure, OB/FVG, liquidity, CISD, Fibonacci).
 
-Kompatibel dengan main.py:
+Kompatibel dengan main.py (dicek terhadap seluruh titik panggil di main.py,
+termasuk hot-swap /ganti yang hanya mewajibkan full_analyze()):
   - full_analyze(df_h1, df_m15, df_d1=None, symbol=None) → dict | None
   - score_direction(df_h1, df_m15, df_d1=None) → dict | None
   - swing_pts(df, lb) → (sh, sl)
+  - validate_and_adjust_geometry(entry, sl, tp, current_price, atr, direction)
+  - get_best_signal(candidates), build_df(df, interval_minutes)
   - TRAIL_R_LADDER, STRUCT_TRAIL_LB, STRUCT_TRAIL_BUF_PCT, STRUCT_TRAIL_LOOKBACK
   - MIN_RR, MAX_RR, FIB_EXT_1, FIB_EXT_2
 """
@@ -257,6 +282,86 @@ def _macro_bias(df_btc_h1: Optional[pd.DataFrame]) -> str:
 # kuantitas sinyal harus tetap terjaga (lihat instruksi awal strategy ini).
 MACRO_ALIGN_BONUS   = 8      # searah macro → bonus kecil
 MACRO_AGAINST_MULT  = 0.72   # berlawanan macro → skor sisi itu dikali ini (bukan 0)
+
+# ── Kekuatan Tren (transkrip "The Secret to Measuring Trend Strength That
+# Traders Rarely Discuss") ──────────────────────────────────────────────
+# Inti video: kekuatan uptrend BUKAN dilihat dari kemiringan garis lembah
+# (banyak trader salah kaprah di sini), melainkan dari kemiringan garis
+# yang menghubungkan PUNCAK-puncak baru — makin cepat & makin curam harga
+# mencetak puncak baru, makin besar tekanan beli (dan sebaliknya, downtrend
+# dinilai dari kemiringan garis LEMBAH). Garis yang makin landai dari waktu
+# ke waktu = HH/HL masih terbentuk secara nominal tapi tenaga sudah
+# berkurang → bukan sinyal auto-reject, tapi alasan untuk lebih konservatif
+# (video: "resikonya perlu dibuat konservatif"), makanya di sini dipakai
+# sebagai bonus/penalti kecil, bukan filter keras — konsisten dengan poin
+# desain awal strategy ini (tidak menambah penolakan, hanya bonus skor).
+TREND_STRENGTH_LB       = 5     # lookback swing_pts yang dipakai utk trend_strength (H1)
+TREND_STRENGTH_STRONG   = 1.15  # ratio slope_recent/slope_prior di atas ini = menguat
+TREND_STRENGTH_WEAK     = 0.85  # ratio di bawah ini = melemah
+TREND_STRENGTH_BONUS    = 6     # bonus skor kalau tren H1 searah & menguat
+TREND_STRENGTH_PENALTY  = 6     # penalti skor kalau tren H1 searah tapi melemah
+
+
+def trend_strength(df: pd.DataFrame, sh: list, sl: list, direction: str) -> dict:
+    """
+    Ukur apakah tren sedang MENGUAT atau MELEMAH dengan membandingkan
+    kemiringan (harga per candle) dua segmen terakhir dari garis yang
+    menghubungkan swing yang RELEVAN untuk arah tersebut:
+      - direction="bull" → garis PUNCAK (swing high) berturut-turut
+      - direction="bear" → garis LEMBAH (swing low) berturut-turut
+    BUKAN garis sisi berlawanan — itu justru kesalahpahaman umum yang
+    dibahas transkripnya (garis lembah pada uptrend bisa terlihat makin
+    landai padahal uptrend-nya sendiri sedang menguat).
+
+    slope_recent = kemiringan antara 2 swing TERAKHIR.
+    slope_prior  = kemiringan antara 2 swing SEBELUM itu.
+    ratio = slope_recent / slope_prior (dalam satuan searah tren, selalu
+    positif kalau tren masih valid pada arahnya).
+
+    Return dict: {"strength": "strengthening"|"weakening"|"flat"|"unknown",
+                  "slope_recent": float, "slope_prior": float, "ratio": float}
+    """
+    out = {"strength": "unknown", "slope_recent": 0.0, "slope_prior": 0.0, "ratio": 1.0}
+    pts = sh if direction == "bull" else sl
+    price_col = "high" if direction == "bull" else "low"
+    if not pts or len(pts) < 3 or df is None or len(df) == 0:
+        return out
+
+    def _slope(idx_a: int, idx_b: int) -> float:
+        if idx_b == idx_a:
+            return 0.0
+        pa = float(df[price_col].iloc[idx_a])
+        pb = float(df[price_col].iloc[idx_b])
+        return (pb - pa) / (idx_b - idx_a)  # perubahan harga per candle
+
+    slope_recent = _slope(pts[-2], pts[-1])
+    slope_prior = _slope(pts[-3], pts[-2])
+
+    # Untuk uptrend garis puncak harus naik (slope > 0); untuk downtrend
+    # garis lembah harus turun (slope < 0). Kalau slope malah berlawanan
+    # arah, itu bukan lagi "tren searah yang melemah" — biarkan "unknown"
+    # supaya caller tidak salah memberi bonus/penalti pada kondisi yang
+    # sebenarnya sudah mempertanyakan arah itu sendiri.
+    sign_ok = (slope_recent > 0 and slope_prior > 0) if direction == "bull" \
+        else (slope_recent < 0 and slope_prior < 0)
+    if not sign_ok:
+        out.update(slope_recent=round(slope_recent, 8), slope_prior=round(slope_prior, 8))
+        return out
+
+    ratio = abs(slope_recent) / max(abs(slope_prior), 1e-12)
+    if ratio >= TREND_STRENGTH_STRONG:
+        strength = "strengthening"
+    elif ratio <= TREND_STRENGTH_WEAK:
+        strength = "weakening"
+    else:
+        strength = "flat"
+
+    return {
+        "strength": strength,
+        "slope_recent": round(slope_recent, 8),
+        "slope_prior": round(slope_prior, 8),
+        "ratio": round(ratio, 3),
+    }
 
 
 # =============================================================================
@@ -828,6 +933,11 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     sh15, sl15 = swing_pts(m15, lb=5)
     struct_h1 = _market_structure(h1, sh1, sl1)
 
+    # ── Kekuatan tren H1 (lihat trend_strength()) — dihitung sekali per
+    # arah, dipakai sebagai bonus/penalti kecil di bawah, bukan filter. ──
+    ts_bull = trend_strength(h1, sh1, sl1, "bull")
+    ts_bear = trend_strength(h1, sh1, sl1, "bear")
+
     # ── D1 bias ──────────────────────────────────────────────────
     d1_bias = "neutral"
     try:
@@ -906,6 +1016,9 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         bull += 10 + (5 if rdiv_bull.get("strong") else 0)
     if fr_m15["failed_retest_buy"]:             bull += 10
     if induce_bull.get("swept"):                bull += 8
+    if struct_h1 == "bullish":
+        if ts_bull["strength"] == "strengthening":  bull += TREND_STRENGTH_BONUS
+        elif ts_bull["strength"] == "weakening":     bull -= TREND_STRENGTH_PENALTY
 
     # ── Score BEAR ───────────────────────────────────────────────
     bear = 0
@@ -925,6 +1038,12 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         bear += 10 + (5 if rdiv_bear.get("strong") else 0)
     if fr_m15["failed_retest_sell"]:            bear += 10
     if induce_bear.get("swept"):                bear += 8
+    if struct_h1 == "bearish":
+        if ts_bear["strength"] == "strengthening":  bear += TREND_STRENGTH_BONUS
+        elif ts_bear["strength"] == "weakening":     bear -= TREND_STRENGTH_PENALTY
+
+    bull = max(0, bull)
+    bear = max(0, bear)
 
     # ── Macro bias (BTC H1) — konteks tambahan, bukan pengganti HTF koin ──
     macro_bias = _macro_bias(df_btc_h1)
@@ -1033,6 +1152,9 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         "fib_r": round(fib_r, 3),
         "ote_bull": ote_bull,
         "ote_bear": ote_bear,
+        "trend_strength": ts_bull if direction == "bull" else ts_bear,
+        "trend_strength_bull": ts_bull,
+        "trend_strength_bear": ts_bear,
     }
 
 
@@ -1880,6 +2002,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "atr": round(atr, 8),
             "rsi": rsi_val,
             "struct_h1": score["struct_h1"],
+            "trend_strength": score.get("trend_strength", {}).get("strength", "unknown"),
             "d1_bias": score.get("d1_bias", "neutral"),
             "choch_m15": score["choch_m15"],
             "choch_h1": score["choch_h1"],
@@ -1897,7 +2020,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                 f"TP@{tp_price:.5g}({tp_lbl}) | RR={rr:.2f} | "
                 f"Loc={loc.get('location_score')}({loc.get('location_state')}) | "
                 f"RSI={rsi_val}/{loc.get('rsi_timing')} | "
-                f"M15Counter={loc.get('m15_counter_momentum', False)}"
+                f"M15Counter={loc.get('m15_counter_momentum', False)} | "
+                f"TrendH1={score.get('trend_strength', {}).get('strength', 'unknown')}"
             ),
         }
 
@@ -1923,6 +2047,19 @@ def get_best_signal(candidates: list) -> Optional[dict]:
 # VALIDASI PRE-ORDER & KOREKSI GEOMETRY (dipanggil oleh main.py)
 # =============================================================================
 
+# ── Liquidity-sweep rescue (validate_and_adjust_geometry) ──────────────────
+# "SL tersentuh tapi sebenarnya cuma sweep likuiditas minor, bukan
+# invalidasi" — konsep dari transkrip "How the Market Traps Traders with
+# Inducement", "3 Types of Liquidity Targeted by Smart Money", dan "Candle
+# Patterns and Liquidity: Smart Money's Way of Breaking Market Traps".
+# Dipakai HANYA di sini (setelah order benar-benar terisi / SL tersentuh
+# sesaat setelah fill) — bukan alasan untuk melonggarkan SL awal sebelum
+# entry. Kedalaman sweep dibatasi supaya breach yang dalam tetap dianggap
+# invalidasi struktural sungguhan, bukan diselamatkan.
+SWEEP_RESCUE_MAX_ATR    = 3.0   # breach lebih dalam dari ini = invalidasi asli, bukan sweep
+SWEEP_RESCUE_BUFFER_ATR = 0.5   # SL baru diletakkan sejauh ini di luar titik breach
+
+
 def validate_and_adjust_geometry(
     entry: float, sl: float, tp: float,
     current_price: float, atr: float,
@@ -1940,26 +2077,36 @@ def validate_and_adjust_geometry(
       • Kasus "geometri invalid setelah order terisi":
         SELL limit di entry_target, tapi actual_fill = harga pasar (lebih tinggi
         dari entry_target karena market sudah di atas limit sell). Akibatnya
-        actual_fill > SL → geometri rusak.
+        actual_fill > SL → geometri rusak. Tidak diselamatkan dengan
+        menggeser entry/SL secara retroaktif — sinyal dianggap basi.
 
       • Kasus "harga sudah melewati SL setelah order terisi":
-        Sinyal sudah kedaluwarsa atau fill terjadi di sisi yang salah.
-        Posisi tidak boleh diselamatkan dengan menggeser entry/SL
-        secara retroaktif.
+        Bisa berarti dua hal: (a) sinyal memang sudah invalid, atau
+        (b) hanya Liquidity Sweep dangkal (wick menyapu SL lalu balik
+        arah) — pola yang persis dibahas di corpus transkrip sebagai
+        cara Smart Money "menjebak" trader yang keluar terlalu cepat.
+        Poin (b) DIBEDAKAN dari (a) lewat kedalaman breach relatif
+        terhadap ATR (lihat SWEEP_RESCUE_MAX_ATR) — bukan tebakan buta.
 
     Logika:
     ─────────────────────────────────────────────────────────────────────────────
     1. Cek geometri dasar: SL di sisi yang benar dari entry, TP di sisi lain.
     2. Cek SL belum ditembus current_price.
-    3. Jika SL ditembus atau geometri fill berubah, tolak posisi secara aman.
-       Wick M1 tidak cukup untuk membuktikan bahwa posisi masih valid.
-    4. Cek RR ≥ MIN_RR tanpa mengubah level trade.
+    3a. Jika SL ditembus DANGKAL (≤ SWEEP_RESCUE_MAX_ATR × ATR): relokasi SL
+        sejauh SWEEP_RESCUE_BUFFER_ATR × ATR di luar titik breach terjauh,
+        lalu cek ulang RR ≥ MIN_RR terhadap TP asli (TP tidak pernah
+        digeser — target tidak berubah hanya karena SL diselamatkan).
+    3b. Jika SL ditembus DALAM (> SWEEP_RESCUE_MAX_ATR × ATR) atau geometri
+        fill berubah di sisi yang salah, tolak posisi secara aman.
+    4. Cek RR ≥ MIN_RR tanpa mengubah level TP.
 
     Return:
       dict  {entry, sl, tp, rr, adjusted} jika valid / bisa diselamatkan
       None  jika tidak bisa diperbaiki → TOLAK sinyal / auto-out
     """
     up = direction == "bull"
+    atr = max(float(atr), 1e-10)
+
     def _geo_ok(e: float, s: float, t: float) -> bool:
         return (s < e < t) if up else (t < e < s)
 
@@ -1975,13 +2122,49 @@ def validate_and_adjust_geometry(
             return None
         return {"entry": entry, "sl": sl, "tp": tp, "rr": round(rr, 2), "adjusted": False}
 
-    # ─── Kasus 2: SL ditembus → fail closed ─────────────────────────────────
+    # ─── Kasus 2: SL ditembus → cek apakah cuma Liquidity Sweep dangkal ──────
     if sl_breached:
-        log.info(
-            f"[validate_geo] SL sudah ditembus sebelum validasi "
-            f"(entry={entry:.6g}, sl={sl:.6g}, price={current_price:.6g}) — ditolak"
+        breach_depth = abs(current_price - sl)
+        if breach_depth > SWEEP_RESCUE_MAX_ATR * atr:
+            log.info(
+                f"[validate_geo] SL ditembus terlalu dalam "
+                f"({breach_depth / atr:.2f}×ATR > {SWEEP_RESCUE_MAX_ATR}×ATR) — "
+                f"invalidasi struktural, bukan sweep, ditolak"
+            )
+            return None
+
+        # Relokasi SL sejauh buffer di luar titik terjauh yang sudah
+        # disentuh harga (current_price), bukan di luar level SL lama —
+        # supaya wick yang sama tidak langsung mengenainya lagi.
+        buf = SWEEP_RESCUE_BUFFER_ATR * atr
+        new_sl = (current_price - buf) if up else (current_price + buf)
+
+        if not _geo_ok(entry, new_sl, tp):
+            log.info(
+                f"[validate_geo] Relokasi SL sweep gagal — geometri tetap invalid "
+                f"(entry={entry:.6g}, new_sl={new_sl:.6g}, tp={tp:.6g})"
+            )
+            return None
+
+        rr = _rr(entry, new_sl, tp)
+        if rr < MIN_RR:
+            log.info(
+                f"[validate_geo] Sweep bisa direlokasi tapi RR={rr:.2f} < "
+                f"MIN_RR={MIN_RR} — ditolak"
+            )
+            return None
+
+        log.warning(
+            f"[validate_geo] Liquidity Sweep terdeteksi ({breach_depth / atr:.2f}×ATR) — "
+            f"SL direlokasi {sl:.6g} → {new_sl:.6g}, RR baru {rr:.2f}"
         )
-        return None
+        return {
+            "entry": entry,
+            "sl": round(new_sl, 8),
+            "tp": tp,
+            "rr": round(rr, 2),
+            "adjusted": True,
+        }
 
     # Never move entry or SL after a fill. A changed geometry is a stale
     # signal, not a new setup.
