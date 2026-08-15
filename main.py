@@ -1,10 +1,11 @@
-#!/usr/bin/env python3
 # ============================================================
-# PATCH MARKER — LATEST REVISION
+# PATCH MARKER — MAIN(5).PY AUTO BINANCE COOLDOWN
 # Date: 15 August 2026
-# Time: 18:30 WIB (UTC+7)
-# Purpose: Binance API scanner hard-stop / rate-limit protection.
+# Time: 18:47 WIB (UTC+7)
+# Rule: when Binance circuit breaker is open, /auto stops NEW scanning;
+#       active positions continue monitoring through the existing WebSocket path.
 # ============================================================
+#!/usr/bin/env python3
 """
 main.py — MESIN (engine). Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
@@ -3297,6 +3298,12 @@ def simulation_loop(chat_id):
     last_scan_started_at = 0.0
 
     while auto_mode:
+        # BINANCE COOLDOWN: stop NEW SIGNAL scanning entirely until the
+        # exchange-provided circuit-breaker cooldown has ended.
+        # Active positions continue to be monitored by the existing WebSocket path.
+        if _binance_circuit_open():
+            time.sleep(1.0)
+            continue
         with positions_lock:
             n_pos = len(positions)
 
