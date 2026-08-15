@@ -1,3 +1,10 @@
+# ============================================================
+# PATCH MARKER — LATEST REVISION
+# Date: 15 August 2026
+# Time: 18:00 WIB (UTC+7)
+# Purpose: API scanner hard-stop / rate-limit protection revision.
+# ============================================================
+
 #!/usr/bin/env python3
 """
 main.py — MESIN (engine). Telegram handler, API client, monitoring,
