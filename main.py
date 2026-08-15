@@ -1,11 +1,10 @@
+#!/usr/bin/env python3
 # ============================================================
 # PATCH MARKER — LATEST REVISION
 # Date: 15 August 2026
-# Time: 18:00 WIB (UTC+7)
-# Purpose: API scanner hard-stop / rate-limit protection revision.
+# Time: 18:30 WIB (UTC+7)
+# Purpose: Binance API scanner hard-stop / rate-limit protection.
 # ============================================================
-
-#!/usr/bin/env python3
 """
 main.py — MESIN (engine). Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
