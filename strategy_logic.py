@@ -1,5 +1,5 @@
 """
-strategy_logic.py — OTAK v3 (Revisi: Inducement, External Liquidity, Trail Struktural)
+strategy_logic.py — OTAK v4 (Revisi: Inducement, External Liquidity, Trail Struktural)
 ========================================================================================
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
@@ -76,7 +76,7 @@ MAX_RR   = 4.0
 # yang memakai kandidat "paling protektif" antara ladder ini vs structure —
 # karena ladder cuma py 1 rung breakeven, structure yang akan mendominasi
 # di hampir semua kasus setelah 1R).
-TRAIL_R_LADDER = []  # Trail sepenuhnya struktural M15; tidak ada profit-lock ladder.
+TRAIL_R_LADDER = []  # v4: adaptive trend/RSI trail; no fixed profit ladder.
 
 # Trailing struktural M15 — INI inti dari Trail (bukan ladder di atas).
 # "Ketika harga menyentuh Trail artinya harga tidak kuat mengikuti trend
@@ -98,14 +98,6 @@ POI_REACTION_LOOKBACK = 16     # candle M15 untuk menunggu reaksi setelah POI HT
 CONFIRMATION_LOOKBACK = 4      # candle M15 yang dipakai untuk displacement terbaru
 MIN_DISPLACEMENT_ATR  = 0.25   # body minimum agar candle bukan noise
 
-# Reaction-aware LIMIT engine. Semua dihitung dari OHLCV yang sudah diterima;
-# tidak membuat request API tambahan dan tidak mengubah execution layer main.py.
-REACTION_LOOKBACK = 8
-REACTION_MIN_BODY_ATR = 0.25
-REACTION_RETRACE_MIN = 0.38
-REACTION_RETRACE_MAX = 0.68
-REACTION_ENTRY_WEIGHT = 0.65
-
 # Entry-location / RSI timing — ditambahkan setelah audit CAPUSDT.
 # Tujuannya bukan membuat bot anti-trade, tetapi mencegah BUY/SELL di lokasi
 # yang sudah terlalu dekat sisi salah dari range saat momentum M15 masih
@@ -125,6 +117,263 @@ ENTRY_LOCATION_HARD_FLOOR = 30   # kandidat di bawah ini tidak executable
 # strategy engine prevents full_analyze() from returning a candidate that the
 # execution gate will immediately reject as ENTRY_TOO_FAR.
 MAIN_ENTRY_MAX_ATR = 1.50
+
+
+
+# =============================================================================
+# ADAPTIVE TRAIL ENGINE v4
+# =============================================================================
+# Trail bukan lagi "latest swing = geser SL".
+# Semua metrik dihitung dari M15 OHLCV yang SUDAH tersedia.
+TRAIL_MIN_ACTIVATION_R = 0.90       # jangan kunci profit kecil terlalu dini
+TRAIL_SOFT_ACTIVATION_R = 1.15     # mulai memakai structure secara normal
+TRAIL_DECAY_TRIGGER = 0.68         # strength di bawah ini = trend mulai lemah
+TRAIL_STRONG_THRESHOLD = 0.78
+TRAIL_VERY_STRONG_THRESHOLD = 0.88
+TRAIL_MIN_LOCK_R = 0.18             # lock minimum setelah activation
+TRAIL_MAX_LOCK_R = 0.62             # jangan mengejar SL terlalu dekat
+TRAIL_SWING_LB = 3
+TRAIL_LOOKBACK = 60
+TRAIL_BUFFER_ATR_WEAK = 0.42
+TRAIL_BUFFER_ATR_NORMAL = 0.55
+TRAIL_BUFFER_ATR_STRONG = 0.72
+TRAIL_BUFFER_ATR_VERY_STRONG = 0.90
+
+def _clip01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+def _trend_strength_components(df: pd.DataFrame, direction: str,
+                               lookback: int = TRAIL_LOOKBACK) -> dict:
+    """Measure M15 trend health, not merely HH/HL existence.
+
+    Components:
+      - directional efficiency: net movement / total movement
+      - impulse quality: recent bodies relative to ATR
+      - pullback quality: depth of recent counter-move
+      - EMA slope/alignment
+      - RSI level + RSI slope
+      - RSI divergence penalty
+      - structure quality
+
+    Returns normalized 0..1 components and a 0..100 strength score.
+    """
+    if df is None or len(df) < 35:
+        return {"strength": 0.5, "regime": "unknown"}
+
+    d = df.tail(max(35, lookback)).copy()
+    close = d["close"].astype(float)
+    atr_s = d["atr"] if "atr" in d.columns else atr_fn(d)
+    atr_now = float(atr_s.iloc[-1]) if pd.notna(atr_s.iloc[-1]) else 0.0
+    if atr_now <= 0:
+        atr_now = max(float(close.iloc[-1]) * 0.001, 1e-10)
+
+    sign = 1.0 if direction == "bull" else -1.0
+    net = sign * (float(close.iloc[-1]) - float(close.iloc[-21]))
+    path = float(close.iloc[-20:].diff().abs().sum())
+    efficiency = _clip01(net / max(path, 1e-10))
+
+    bodies = (d["close"] - d["open"]).abs().tail(8)
+    atr_tail = atr_s.tail(8).replace(0, np.nan)
+    body_atr = (bodies / atr_tail).replace([np.inf, -np.inf], np.nan).dropna()
+    impulse = _clip01((float(body_atr.mean()) - 0.15) / 0.85) if not body_atr.empty else 0.5
+
+    # Pullback depth: compare the latest counter-move to the latest impulse.
+    w = d.tail(24)
+    sh, sl = swing_pts(d, lb=TRAIL_SWING_LB)
+    pullback_quality = 0.5
+    structure_quality = 0.5
+    if direction == "bull" and sl and sh:
+        last_low = float(d["low"].iloc[sl[-1]])
+        last_high = float(d["high"].iloc[sh[-1]])
+        prev_low = float(d["low"].iloc[sl[-2]]) if len(sl) >= 2 else last_low
+        prev_high = float(d["high"].iloc[sh[-2]]) if len(sh) >= 2 else last_high
+        impulse_leg = max(last_high - prev_low, atr_now)
+        pullback = max(0.0, last_high - last_low)
+        depth = _clip01(pullback / max(impulse_leg, atr_now))
+        pullback_quality = 1.0 - depth
+        hh = last_high > prev_high if len(sh) >= 2 else False
+        hl = last_low > prev_low if len(sl) >= 2 else False
+        structure_quality = 0.75 if (hh and hl) else (0.45 if (hh or hl) else 0.25)
+    elif direction == "bear" and sh and sl:
+        last_high = float(d["high"].iloc[sh[-1]])
+        last_low = float(d["low"].iloc[sl[-1]])
+        prev_high = float(d["high"].iloc[sh[-2]]) if len(sh) >= 2 else last_high
+        prev_low = float(d["low"].iloc[sl[-2]]) if len(sl) >= 2 else last_low
+        impulse_leg = max(prev_high - last_low, atr_now)
+        pullback = max(0.0, last_high - last_low)
+        depth = _clip01(pullback / max(impulse_leg, atr_now))
+        pullback_quality = 1.0 - depth
+        lh = last_high < prev_high if len(sh) >= 2 else False
+        ll = last_low < prev_low if len(sl) >= 2 else False
+        structure_quality = 0.75 if (lh and ll) else (0.45 if (lh or ll) else 0.25)
+
+    ema9 = float(d["ema9"].iloc[-1]) if "ema9" in d else float(ema(close, 9).iloc[-1])
+    ema21 = float(d["ema21"].iloc[-1]) if "ema21" in d else float(ema(close, 21).iloc[-1])
+    ema50 = float(d["ema50"].iloc[-1]) if "ema50" in d else float(ema(close, 50).iloc[-1])
+    ema21_prev = float(d["ema21"].iloc[-6]) if "ema21" in d and len(d) >= 6 else ema21
+    slope = sign * (ema21 - ema21_prev) / max(atr_now * 5.0, 1e-10)
+    ema_slope = _clip01(0.5 + slope)
+    ema_align = _clip01(
+        0.5
+        + sign * (ema9 - ema21) / max(atr_now * 2.0, 1e-10)
+        + sign * (ema21 - ema50) / max(atr_now * 4.0, 1e-10)
+    )
+    ema_quality = 0.55 * ema_slope + 0.45 * ema_align
+
+    rv = d["rsi"].astype(float) if "rsi" in d else rsi(close)
+    r_now = float(rv.iloc[-1])
+    r_prev = float(rv.iloc[-4]) if len(rv) >= 4 else r_now
+    r_slope = sign * (r_now - r_prev)
+    # Strong trend can stay overbought/oversold. Penalize only when RSI is
+    # actually decaying, not merely because it is extreme.
+    r_level = _clip01((sign * (r_now - 50.0) + 10.0) / 35.0)
+    r_momentum = _clip01(0.5 + r_slope / 12.0)
+
+    div = detect_rsi_divergence(d, direction, lb=min(30, len(d)-1))
+    divergence_penalty = 0.18 if div.get("strong") else (0.10 if (
+        div.get("bull_div") if direction == "bull" else div.get("bear_div")
+    ) else 0.0)
+
+    raw = (
+        0.20 * efficiency
+        + 0.16 * impulse
+        + 0.15 * pullback_quality
+        + 0.14 * structure_quality
+        + 0.15 * ema_quality
+        + 0.20 * r_momentum
+    )
+    strength = _clip01(raw - divergence_penalty)
+
+    # Require a meaningful directional RSI/price context before calling it strong.
+    if r_level < 0.35:
+        strength *= 0.90
+
+    if strength >= TRAIL_VERY_STRONG_THRESHOLD:
+        regime = "very_strong"
+    elif strength >= TRAIL_STRONG_THRESHOLD:
+        regime = "strong"
+    elif strength >= TRAIL_DECAY_TRIGGER:
+        regime = "healthy"
+    elif strength >= 0.48:
+        regime = "transition"
+    else:
+        regime = "weak"
+
+    return {
+        "strength": round(strength, 4),
+        "regime": regime,
+        "efficiency": round(efficiency, 4),
+        "impulse": round(impulse, 4),
+        "pullback_quality": round(pullback_quality, 4),
+        "structure_quality": round(structure_quality, 4),
+        "ema_quality": round(ema_quality, 4),
+        "rsi_level": round(r_level, 4),
+        "rsi_momentum": round(r_momentum, 4),
+        "rsi": round(r_now, 2),
+        "rsi_slope": round(r_slope, 2),
+        "rsi_divergence": bool(div.get("bull_div") if direction == "bull" else div.get("bear_div")),
+        "atr": atr_now,
+    }
+
+def adaptive_trailing_stop(df_m15: pd.DataFrame, entry: float,
+                           current_sl: float, direction: str,
+                           initial_risk: float, current_price: float,
+                           tp: Optional[float] = None) -> dict:
+    """Return an adaptive trailing candidate.
+
+    The function is deliberately conservative before ~0.9R so fees/noise do
+    not turn small floating profits into frequent tiny exits. Once active,
+    trend strength controls how much room the latest confirmed structure gets.
+    RSI is a momentum/decay sensor, never a standalone exit trigger.
+    """
+    if df_m15 is None or len(df_m15) < 35 or initial_risk <= 0:
+        return {"candidate": None, "strength": 0.0, "regime": "unknown", "reason": "insufficient_data"}
+
+    d = build_df(df_m15, interval_minutes=15)
+    if d is None or len(d) < 35:
+        return {"candidate": None, "strength": 0.0, "regime": "unknown", "reason": "insufficient_data"}
+
+    sign = 1 if direction == "bull" else -1
+    pnl_r = sign * (float(current_price) - float(entry)) / max(initial_risk, 1e-10)
+    metrics = _trend_strength_components(d, direction)
+    strength = metrics["strength"]
+    regime = metrics["regime"]
+
+    # No early micro-locks. A winner needs enough room to cover fees/slippage.
+    if pnl_r < TRAIL_MIN_ACTIVATION_R:
+        return {**metrics, "candidate": None, "reason": "below_activation"}
+
+    # Base profit protection rises slowly with R, but is never allowed to
+    # become the primary exit while trend strength is high.
+    if pnl_r < TRAIL_SOFT_ACTIVATION_R:
+        base_lock = TRAIL_MIN_LOCK_R
+    else:
+        # 0.18R at 1.15R -> ~0.45R at 2R -> cap 0.62R.
+        base_lock = min(TRAIL_MAX_LOCK_R, 0.18 + 0.27 * (pnl_r - TRAIL_SOFT_ACTIVATION_R))
+
+    # Strong/very-strong trends get a wider structural buffer and a smaller
+    # lock; decay/weak trends get a tighter buffer and preserve more profit.
+    if regime == "very_strong":
+        buffer_atr = TRAIL_BUFFER_ATR_VERY_STRONG
+        lock_scale = 0.65
+    elif regime == "strong":
+        buffer_atr = TRAIL_BUFFER_ATR_STRONG
+        lock_scale = 0.78
+    elif regime == "healthy":
+        buffer_atr = TRAIL_BUFFER_ATR_NORMAL
+        lock_scale = 0.92
+    elif regime == "transition":
+        buffer_atr = TRAIL_BUFFER_ATR_NORMAL * 0.82
+        lock_scale = 1.05
+    else:
+        buffer_atr = TRAIL_BUFFER_ATR_WEAK
+        lock_scale = 1.18
+
+    desired_lock_r = min(TRAIL_MAX_LOCK_R, max(TRAIL_MIN_LOCK_R, base_lock * lock_scale))
+    floor_sl = float(entry) + sign * desired_lock_r * initial_risk
+
+    sh, sl_pts = swing_pts(d, lb=TRAIL_SWING_LB)
+    structural = None
+    atr_now = metrics["atr"]
+    if direction == "bull" and sl_pts:
+        swing_low = float(d["low"].iloc[sl_pts[-1]])
+        structural = swing_low - buffer_atr * atr_now
+    elif direction == "bear" and sh:
+        swing_high = float(d["high"].iloc[sh[-1]])
+        structural = swing_high + buffer_atr * atr_now
+
+    # We want the most protective level that still respects the current trend.
+    # In a strong trend, structure dominates and floor only protects against
+    # catastrophic profit giveback. In decay, the floor becomes increasingly
+    # important.
+    if structural is None:
+        proposed = floor_sl
+    elif direction == "bull":
+        proposed = max(structural, floor_sl)
+    else:
+        proposed = min(structural, floor_sl)
+
+    # Never loosen the existing SL and never place it beyond TP.
+    if direction == "bull":
+        proposed = max(float(current_sl), proposed)
+        if tp is not None:
+            proposed = min(proposed, float(tp) - max(atr_now * 0.05, 1e-12))
+    else:
+        proposed = min(float(current_sl), proposed)
+        if tp is not None:
+            proposed = max(proposed, float(tp) + max(atr_now * 0.05, 1e-12))
+
+    improves = proposed > current_sl if direction == "bull" else proposed < current_sl
+    reason = f"{regime}|strength={strength:.2f}|r={pnl_r:.2f}|rsi={metrics.get('rsi',0):.1f}|rsi_slope={metrics.get('rsi_slope',0):+.2f}"
+    return {
+        **metrics,
+        "candidate": float(proposed) if improves else None,
+        "proposed": float(proposed),
+        "pnl_r": round(pnl_r, 3),
+        "lock_r": round(desired_lock_r, 3),
+        "buffer_atr": buffer_atr,
+        "reason": reason,
+    }
 
 
 # =============================================================================
@@ -1048,12 +1297,12 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
 
 def _entry_location_metrics(m15: pd.DataFrame, direction: str,
                             entry: float, atr: float) -> dict:
-    """Nilai lokasi LIMIT entry tanpa membuat confirmation API baru.
+    """Nilai lokasi entry relatif terhadap range M15 + timing RSI.
 
-    Location tetap menjadi ranking/context. Kita sengaja tidak menjadikan RSI,
-    H1 ranging, atau tidak adanya sweep sebagai hard reject karena target revisi
-    adalah mempertahankan frekuensi kandidat. Hard block hanya untuk LIMIT yang
-    secara geometris mengejar harga terlalu jauh di sisi yang salah.
+    Prinsip CAP: arah HTF boleh benar, tetapi entry di bagian atas range saat
+    M15 sedang melemah adalah entry yang buruk. Kita tidak memaksa harga
+    masuk di titik tertentu; kita hanya memberi ranking lebih tinggi pada
+    retracement yang sehat dan memblokir chase yang jelas.
     """
     if m15 is None or len(m15) < 8:
         return {
@@ -1061,7 +1310,6 @@ def _entry_location_metrics(m15: pd.DataFrame, direction: str,
             "range_position": 0.5, "rsi_timing": "unknown",
             "rsi": None, "rsi_slope": 0.0, "hard_block": False,
             "entry_zone_low": None, "entry_zone_high": None,
-            "reaction_state": "none",
         }
 
     n = min(ENTRY_LOCATION_LOOKBACK, len(m15))
@@ -1069,14 +1317,17 @@ def _entry_location_metrics(m15: pd.DataFrame, direction: str,
     rh = float(sub["high"].max())
     rl = float(sub["low"].min())
     width = max(rh - rl, max(float(atr), 1e-10))
-    pos = max(0.0, min(1.0, (float(entry) - rl) / width))
+    pos = (float(entry) - rl) / width
+    pos = max(0.0, min(1.0, pos))
 
     rsi_now = float(m15["rsi"].iloc[-1])
+    rsi_1 = float(m15["rsi"].iloc[-2])
     rsi_2 = float(m15["rsi"].iloc[-3])
     slope = rsi_now - rsi_2
     rising = slope >= RSI_TIMING_SLOPE
     falling = slope <= -RSI_TIMING_SLOPE
 
+    # Adverse-side swing: BUY terlalu dekat high, SELL terlalu dekat low.
     recent = m15.iloc[-8:]
     adverse_high = float(recent["high"].max())
     adverse_low = float(recent["low"].min())
@@ -1093,47 +1344,62 @@ def _entry_location_metrics(m15: pd.DataFrame, direction: str,
         elif pos <= ENTRY_PREFERRED_BUY:
             score += 10; notes.append("good_pullback")
         elif pos <= 0.70:
-            notes.append("mid_range")
+            score += 0; notes.append("mid_range")
         elif pos <= ENTRY_CHASE_HIGH:
-            score -= 8; notes.append("upper_range")
+            score -= 10; notes.append("upper_range")
         else:
-            score -= 18; notes.append("chasing_high")
+            score -= 22; notes.append("chasing_high")
+
         if swing_dist_atr <= ENTRY_SWING_NEAR_ATR:
             score -= 10; notes.append("near_swing_high")
         if 42 <= rsi_now <= 58 and rising:
             score += 10; notes.append("rsi_recovery")
         elif rsi_now > 68 and falling:
-            score -= 12; notes.append("rsi_exhaustion")
-        elif rsi_now < RSI_BUY_WEAK and falling:
-            score -= 8; notes.append("rsi_falling_oversold")
+            score -= 14; notes.append("rsi_exhaustion")
+        elif rsi_now < RSI_BUY_WEAK and falling and pos > ENTRY_PREFERRED_BUY:
+            score -= 18; notes.append("rsi_weak_while_high")
         elif falling:
-            score -= 4; notes.append("rsi_falling")
+            score -= 5; notes.append("rsi_falling")
     else:
         if pos >= 0.65:
             score += 15; notes.append("deep_premium")
         elif pos >= ENTRY_PREFERRED_SELL:
             score += 10; notes.append("good_pullback")
         elif pos >= 0.30:
-            notes.append("mid_range")
+            score += 0; notes.append("mid_range")
         elif pos >= (1.0 - ENTRY_CHASE_HIGH):
-            score -= 8; notes.append("lower_range")
+            score -= 10; notes.append("lower_range")
         else:
-            score -= 18; notes.append("chasing_low")
+            score -= 22; notes.append("chasing_low")
+
         if swing_dist_atr <= ENTRY_SWING_NEAR_ATR:
             score -= 10; notes.append("near_swing_low")
         if 42 <= rsi_now <= 58 and falling:
             score += 10; notes.append("rsi_recovery")
         elif rsi_now < 32 and rising:
             score -= 8; notes.append("rsi_bounce_against_sell")
-        elif rsi_now > RSI_SELL_WEAK and rising:
-            score -= 8; notes.append("rsi_rising_overbought")
+        elif rsi_now > RSI_SELL_WEAK and rising and pos < ENTRY_PREFERRED_SELL:
+            score -= 18; notes.append("rsi_weak_while_low")
         elif rising:
-            score -= 4; notes.append("rsi_rising")
+            score -= 5; notes.append("rsi_rising")
 
     score = int(max(0, min(100, score)))
-    # Hanya chase ekstrem yang diblokir. Ini menjaga frekuensi sementara
-    # reaction/FVG/OB LIMIT dapat memperbaiki entry price.
-    hard_block = (pos >= ENTRY_CHASE_HIGH) if direction == "bull" else (pos <= 1.0 - ENTRY_CHASE_HIGH)
+    # Hard block hanya untuk lokasi yang benar-benar mengejar harga.
+    # RSI tetap menjadi penalty/confluence, bukan gate keras, supaya setup
+    # yang bagus tidak hilang hanya karena momentum belum ideal.
+    if direction == "bull":
+        hard_block = pos >= ENTRY_CHASE_HIGH
+    else:
+        hard_block = pos <= (1.0 - ENTRY_CHASE_HIGH)
+
+    # Zona entry berbasis range lokal, bukan titik matematis palsu.
+    if direction == "bull":
+        zone_low = rl
+        zone_high = rl + width * 0.60
+    else:
+        zone_low = rl + width * 0.40
+        zone_high = rh
+
     if hard_block:
         state = "WAIT_ENTRY"
     elif score >= 70:
@@ -1144,73 +1410,19 @@ def _entry_location_metrics(m15: pd.DataFrame, direction: str,
         state = "WEAK"
 
     return {
-        "location_score": score, "location_state": state,
+        "location_score": score,
+        "location_state": state,
         "range_position": round(pos, 3),
         "range_low": rl, "range_high": rh,
-        "entry_zone_low": rl if direction == "bull" else rl + width * 0.40,
-        "entry_zone_high": rl + width * 0.60 if direction == "bull" else rh,
-        "rsi": round(rsi_now, 2), "rsi_prev": round(float(m15["rsi"].iloc[-2]), 2),
+        "entry_zone_low": zone_low, "entry_zone_high": zone_high,
+        "rsi": round(rsi_now, 2),
+        "rsi_prev": round(rsi_1, 2),
         "rsi_slope": round(slope, 2),
         "rsi_timing": "rising" if rising else ("falling" if falling else "flat"),
         "swing_dist_atr": round(swing_dist_atr, 3),
-        "notes": notes, "hard_block": hard_block,
-        "reaction_state": "none",
+        "notes": notes,
+        "hard_block": hard_block,
     }
-
-
-def _reaction_limit_plan(m15: pd.DataFrame, direction: str, atr: float, current_price: float) -> dict:
-    """Cari retracement LIMIT dari data candle yang sudah tersedia.
-
-    Tidak menunggu candle baru dan tidak melakukan request. Displacement terakhir
-    menjadi anchor; LIMIT ditempatkan pada retracement body/impulse yang masih
-    berada di sisi retracement yang benar. Jika tidak ada displacement, plan tetap
-    mengembalikan None sehingga kandidat OB/FVG/EQ lama tetap tersedia.
-    """
-    out = {"active": False, "entry": None, "label": None, "anchor": None, "quality": 0, "sweep": False}
-    if m15 is None or len(m15) < 6:
-        return out
-    sub = m15.iloc[-min(REACTION_LOOKBACK, len(m15)):]
-    local_atr = max(float(atr), 1e-10)
-    for i in range(len(sub) - 1, max(-1, len(sub) - CONFIRMATION_LOOKBACK - 1), -1):
-        row = sub.iloc[i]
-        body = abs(float(row["close"]) - float(row["open"]))
-        if body < local_atr * REACTION_MIN_BODY_ATR:
-            continue
-        bullish = float(row["close"]) > float(row["open"]) and direction == "bull"
-        bearish = float(row["close"]) < float(row["open"]) and direction == "bear"
-        if not (bullish or bearish):
-            continue
-        # Candle harus benar-benar displacement: close melewati range beberapa
-        # candle sebelumnya, sama dengan confirmation engine yang sudah ada.
-        prior = sub.iloc[max(0, i-3):i]
-        if len(prior) < 2:
-            continue
-        if direction == "bull":
-            if float(row["close"]) <= float(prior["high"].max()):
-                continue
-            lo, hi = float(row["open"]), float(row["close"])
-            # Limit di dalam body displacement, bukan di harga market.
-            entry = lo + (hi - lo) * 0.50
-            if entry >= current_price:
-                entry = lo + (hi - lo) * 0.38
-            if entry >= current_price:
-                continue
-            out.update({"active": True, "entry": entry, "label": "reaction_limit",
-                        "anchor": float(row["close"]), "quality": 10})
-            break
-        else:
-            if float(row["close"]) >= float(prior["low"].min()):
-                continue
-            lo, hi = float(row["close"]), float(row["open"])
-            entry = lo + (hi - lo) * 0.50
-            if entry <= current_price:
-                entry = lo + (hi - lo) * 0.62
-            if entry <= current_price:
-                continue
-            out.update({"active": True, "entry": entry, "label": "reaction_limit",
-                        "anchor": float(row["close"]), "quality": 10})
-            break
-    return out
 
 
 # =============================================================================
@@ -1220,104 +1432,161 @@ def _reaction_limit_plan(m15: pd.DataFrame, direction: str, atr: float, current_
 def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
                               direction: str, current_price: float,
                               atr: float, score_ctx: dict) -> list:
-    """Generate LIMIT candidates while keeping the old signal families alive.
-
-    Revisi utama: EQ/OB/FVG tetap menghasilkan kandidat sehingga frequency tidak
-    dipangkas. Jika candle yang SUDAH tersedia menunjukkan displacement, dibuat
-    kandidat tambahan ``reaction_limit`` pada retracement impulse. Semua ini
-    murni local processing; main.py tetap memasang LIMIT order yang sama.
+    """
+    Kumpulkan kandidat entry berdasarkan SMC/ICT.
+    Prioritas (score tertinggi):
+      1. OB + Liquidity Sweep (12–15)
+      2. OB + ChoCH (9–12)
+      3. OB + OTE (8–10)
+      4. OB saja (5–8)
+      5. FVG + CISD + LiqSweep (6–9)
+      6. FVG saja (3–5)
+      7. Equal Highs/Lows (2–4)
+      8. Market entry fallback (1)
     """
     up = direction == "bull"
     cands = []
+
     liq = score_ctx.get("liquidity_bull" if up else "liquidity_bear", {})
     choch = score_ctx.get("choch_m15", {})
     cisd = score_ctx.get("cisd_m15", {})
-    choch_ok = bool(choch.get("bullish_choch") if up else choch.get("bearish_choch"))
-    cisd_ok = bool(cisd.get("bullish_cisd") if up else cisd.get("bearish_cisd"))
+
+    choch_ok = choch.get("bullish_choch") if up else choch.get("bearish_choch")
+    cisd_ok = cisd.get("bullish_cisd") if up else cisd.get("bearish_cisd")
     liq_ok = liq.get("type") == "sweep"
-    induce = score_ctx.get("inducement_bull" if up else "inducement_bear", {})
-    induce_ok = bool(induce.get("swept"))
 
     fib_sh = float(m15["high"].iloc[score_ctx["sh15"][-1]]) if score_ctx.get("sh15") else None
     fib_sl = float(m15["low"].iloc[score_ctx["sl15"][-1]]) if score_ctx.get("sl15") else None
 
+    induce = score_ctx.get("inducement_bull" if up else "inducement_bear", {})
+    induce_ok = bool(induce.get("swept"))
+
+    # Zona H1 (OB + FVG searah) untuk cek konfluensi — "How to Choose the
+    # Best Order Block When All Zones Look Valid": OB M15 yang overlap
+    # dengan zona HTF lebih dipercaya daripada OB M15 berdiri sendiri.
     htf_zones = []
     try:
-        for z in detect_order_block(h1, direction, lb=80, sh=score_ctx.get("sh1", []), sl=score_ctx.get("sl1", [])):
+        for z in detect_order_block(h1, direction, lb=80,
+                                    sh=score_ctx.get("sh1", []),
+                                    sl=score_ctx.get("sl1", [])):
             htf_zones.append((z["top"], z["bot"]))
         for f in detect_fvg(h1, direction, lb=60):
             htf_zones.append((f["top"], f["bot"]))
     except Exception:
-        pass
-    def _htf_conf(top, bot):
+        htf_zones = []
+
+    def _htf_confluence(top: float, bot: float) -> bool:
         return any(zones_overlap(top, bot, zt, zb) for zt, zb in htf_zones)
 
-    def add(price, invalid, label, score, top=None, bot=None, mode="structural"):
-        price, invalid = float(price), float(invalid)
-        if not np.isfinite(price) or not np.isfinite(invalid) or price <= 0:
-            return
-        # LIMIT harus menunggu retracement: BUY limit <= market, SELL limit >= market.
-        if up and price > current_price * 1.0005:
-            return
-        if not up and price < current_price * 0.9995:
-            return
-        if top is not None and bot is not None and _htf_conf(float(top), float(bot)):
-            score += CONFLUENCE_BONUS + 2
-        if liq_ok: score += 2
-        if choch_ok: score += 2
-        if cisd_ok: score += 1
-        if induce_ok: score += 1
-        if fib_sh and fib_sl and is_in_ote(price, fib_sl, fib_sh, direction):
-            score += 1
-        cands.append({"price": round(price, 8), "invalid": round(invalid, 8),
-                      "label": label, "score": int(score), "entry_mode": mode})
-
-    # 1) OB LIMIT — tetap dipertahankan sebagai jalur frequency.
-    for z in detect_order_block(m15, direction, lb=60, sh=score_ctx.get("sh15", []), sl=score_ctx.get("sl15", [])):
+    # ── Order Block ──────────────────────────────────────────────────
+    obs = detect_order_block(m15, direction, lb=60,
+                             sh=score_ctx.get("sh15", []),
+                             sl=score_ctx.get("sl15", []))
+    for z in obs:
         entry_pt = float(z["top"]) if up else float(z["bot"])
         invalid_pt = float(z["bot"]) if up else float(z["top"])
-        if up and current_price < z["bot"]:
-            continue
-        if not up and current_price > z["top"]:
-            continue
-        add(entry_pt, invalid_pt, "ob", 3 + int(z.get("quality", 0)), z["top"], z["bot"], "ob_limit")
 
-    # 2) FVG LIMIT.
-    for f in detect_fvg(m15, direction, lb=50):
-        if not f.get("is_fresh"):
-            continue
-        entry_pt = float(f["mid"])
-        invalid_pt = float(f["top"]) if up else float(f["bot"])
-        if up and current_price < f["bot"]:
-            continue
-        if not up and current_price > f["top"]:
-            continue
-        add(entry_pt, invalid_pt, "fvg", 3 + (2 if cisd_ok else 0), f["top"], f["bot"], "fvg_limit")
-
-    # 3) EQ LIMIT — sengaja tidak dihapus. EQ sekarang adalah candidate location,
-    # bukan bukti reversal. Reaction candidate di bawah akan mengalahkannya jika
-    # market sudah benar-benar menunjukkan displacement.
-    for eq in detect_equal_highs_lows(m15, "low" if up else "high", lb=80)[:2]:
-        eq = float(eq)
-        if up and eq > current_price * 1.001:
-            continue
-        if not up and eq < current_price * 0.999:
-            continue
-        invalid_pt = eq - atr * 0.8 if up else eq + atr * 0.8
-        add(eq, invalid_pt, "eq", 2, eq + atr * 0.05, eq - atr * 0.05, "eq_limit")
-
-    # 4) Reaction LIMIT — confirmation dihitung dari candle yang SUDAH ada.
-    reaction = _reaction_limit_plan(m15, direction, atr, current_price)
-    if reaction.get("active"):
-        rp = float(reaction["entry"])
-        # Structural invalidation diambil dari sweep/impulse low/high terbaru.
-        look = m15.iloc[-min(REACTION_LOOKBACK, len(m15)):]
+        # A limit order must be a genuine retracement.  The previous 1%
+        # tolerance allowed a BUY above market or a SELL below market;
+        # Binance can fill those immediately at a different price, leaving
+        # the original SL/TP geometry invalid.
         if up:
-            invalid = min(float(look["low"].min()), rp - atr * 0.60)
+            if current_price < z["bot"] or entry_pt > current_price * 1.001:
+                continue
         else:
-            invalid = max(float(look["high"].max()), rp + atr * 0.60)
-        add(rp, invalid, "reaction_limit", reaction.get("quality", 10), mode="confirmed_retrace")
+            if current_price > z["top"] or entry_pt < current_price * 0.999:
+                continue
 
+        sc = 3 + z["quality"]  # base 3 + quality
+
+        if liq_ok:
+            sweep_lev = liq.get("level", 0)
+            if up and entry_pt >= float(sweep_lev) * 0.995:
+                sc += 3
+            elif not up and entry_pt <= float(sweep_lev) * 1.005:
+                sc += 3
+        if choch_ok:
+            sc += 2
+        if fib_sh and fib_sl and is_in_ote(entry_pt, fib_sl, fib_sh, direction):
+            sc += 1
+        if _htf_confluence(z["top"], z["bot"]):
+            sc += CONFLUENCE_BONUS
+        if induce_ok:
+            sc += 1
+
+        cands.append({
+            "price": round(entry_pt, 8),
+            "invalid": round(invalid_pt, 8),
+            "label": "ob",
+            "score": sc,
+        })
+
+    # ── FVG ──────────────────────────────────────────────────────────
+    fvgs = detect_fvg(m15, direction, lb=50)
+    for f in fvgs:
+        if not f["is_fresh"]:
+            continue
+        entry_pt = f["mid"]
+        invalid_pt = f["top"] if up else f["bot"]
+        if up:
+            if current_price < f["bot"] or entry_pt > current_price * 1.001:
+                continue
+        else:
+            if current_price > f["top"] or entry_pt < current_price * 0.999:
+                continue
+        sc = 3
+        if cisd_ok: sc += 2
+        if liq_ok: sc += 2
+        if choch_ok: sc += 1
+        if _htf_confluence(f["top"], f["bot"]):
+            sc += CONFLUENCE_BONUS
+        if induce_ok:
+            sc += 1
+        cands.append({
+            "price": round(entry_pt, 8),
+            "invalid": round(invalid_pt, 8),
+            "label": "fvg",
+            "score": sc,
+        })
+
+    # ── Equal Highs/Lows ─────────────────────────────────────────────
+    eqs = detect_equal_highs_lows(m15, "low" if up else "high", lb=80)
+    for eq in eqs[:2]:
+        # ── Proximity filter: EQ entry harus REACHABLE dari harga sekarang.
+        #
+        # Bug asal: tidak ada filter proximity → EQ yang harganya sudah
+        # "tersapu" (liquidity sweep) tetap masuk sebagai kandidat entry.
+        # Akibatnya SELL limit dipasang DI BAWAH harga pasar → Binance langsung
+        # fill di harga pasar (slippage besar) → actual_entry > SL → geometri
+        # rusak → auto-out terpicu.
+        #
+        # SELL (not up): entry di equal HIGH → level harus ≥ current_price
+        #   supaya SELL limit menunggu harga naik ke sana, bukan fill sekarang.
+        #   Toleransi 0.3%: jika eq < current_price * 0.997 → sudah tersapu.
+        #
+        # BUY (up): entry di equal LOW → level harus ≤ current_price
+        #   supaya BUY limit menunggu harga turun ke sana, bukan fill sekarang.
+        #   Toleransi 0.3%: jika eq > current_price * 1.003 → sudah tersapu.
+        if not up and float(eq) < current_price * 0.999:
+            continue   # EQ high sudah di bawah harga pasar → skip
+        if up and float(eq) > current_price * 1.001:
+            continue   # EQ low sudah di atas harga pasar → skip
+
+        invalid_pt = eq - atr * 0.8 if up else eq + atr * 0.8
+        sc = 2
+        if liq_ok: sc += 1
+        if induce_ok: sc += 1
+        cands.append({
+            "price": round(float(eq), 8),
+            "invalid": round(float(invalid_pt), 8),
+            "label": "eq",
+            "score": sc,
+        })
+
+    # No synthetic market entry. If no fresh/reachable POI exists, wait for
+    # price to come to a real zone.  Before ranking, evaluate LOCATION + RSI
+    # timing for every candidate so a good-direction but bad-location setup
+    # cannot become the best trade merely because its RR is attractive.
     enriched = []
     for c in cands:
         loc = _entry_location_metrics(m15, direction, c["price"], atr)
@@ -1328,12 +1597,13 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         c["rsi_timing"] = loc["rsi_timing"]
         c["hard_location_block"] = loc["hard_block"]
         c["reject_reason"] = "CHASE_LOCATION" if loc["hard_block"] else None
+
+        # Candidate-specific quality. Location is deliberately meaningful but
+        # not dominant: structure/POI can still win, while an obvious chase is
+        # removed before SL/TP are calculated.
+        c["score"] = int(c.get("score", 0) + round((loc["location_score"] - 50) * 0.35))
         if loc["hard_block"]:
             continue
-        # Reaction LIMIT mendapat bonus karena ia adalah entry setelah evidence,
-        # tetapi tidak menjadi hard requirement sehingga frequency tetap hidup.
-        mode_bonus = 8 if c.get("entry_mode") == "confirmed_retrace" else 0
-        c["score"] = int(c.get("score", 0) + mode_bonus + round((loc["location_score"] - 50) * 0.30))
         enriched.append(c)
 
     enriched.sort(key=lambda c: (-c["score"], -c.get("location_score", 0)))
@@ -1652,49 +1922,24 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             (direction == "bear" and selected_m15_struct == "bullish")
         )
 
-        # ------------------------------------------------------------------
-        # QUALITY SCORE v4 — bucketed, bukan additive confidence mentah.
-        # Tujuannya menghindari double-counting (EQ + discount + OTE + RSI)
-        # yang sebelumnya dapat membuat confidence 90-99 tanpa bukti reversal.
-        # Tidak ada hard gate baru di sini; ini hanya mengubah ranking kualitas.
-        # ------------------------------------------------------------------
-        edge = float(score.get("direction_edge", 0))
-        direction_quality = 28.0 + min(14.0, edge / 4.0)
-        if score.get("d1_bias") == ("bullish" if up else "bearish"):
-            direction_quality += 8.0
-        if score.get("struct_h1") == ("bullish" if up else "bearish"):
-            direction_quality += 8.0
-        elif score.get("struct_h1") == "ranging":
-            direction_quality += 3.0
-
-        liquidity_quality = 0.0
-        if score.get("selected_sweep"):
-            liquidity_quality += 10.0
-        if score.get("inducement_bull" if up else "inducement_bear", {}).get("swept"):
-            liquidity_quality += 3.0
-        # EQ/location sendiri hanya menjadi candidate context, bukan confirmation.
-
-        confirmation_quality = 0.0
-        if confirmation.get("confirmed"):
-            confirmation_quality += 15.0
-        if score.get("trigger_count", 0) >= 2:
-            confirmation_quality += 5.0
-        elif score.get("trigger_count", 0) == 1:
-            confirmation_quality += 2.0
-        if selected_m15_struct == ("bullish" if up else "bearish"):
-            confirmation_quality += 5.0
-        if opposite_m15:
-            confirmation_quality -= 5.0
+        confluence_bonus = 0
+        if htf_poi:
+            confluence_bonus += 5
         if poi_reacted:
-            confirmation_quality += 5.0
-
-        # Base 45 menjaga frequency: confidence tidak menjadi hard rejection baru.
-        # Nilai akhir akan ditambah location quality di level candidate.
-        base_confidence = int(max(0, min(99,
-            45.0 + direction_quality * 0.40
-            + liquidity_quality * 0.55
-            + confirmation_quality * 0.75
-        )))
+            confluence_bonus += 7
+        if confirmation.get("confirmed"):
+            confluence_bonus += 8
+        if score.get("selected_sweep"):
+            confluence_bonus += 9
+        if score.get("trigger_count", 0) >= 2:
+            confluence_bonus += 4
+        elif score.get("trigger_count", 0) == 1:
+            confluence_bonus += 2
+        if selected_m15_struct == ("bullish" if up else "bearish"):
+            confluence_bonus += 4
+        if opposite_m15:
+            confluence_bonus -= 6
+        base_confidence = max(0, min(99, confidence + confluence_bonus))
 
         liq_ctx = score["liquidity_bull"] if up else score["liquidity_bear"]
         sh1 = score.get("sh1", [])
@@ -1773,12 +2018,11 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             # tetap dipertahankan terpisah dari execution quality.
             loc_score = int(loc.get("location_score", 50))
             location_adjust = int(round((loc_score - 50) * 0.30))
-            reaction_adjust = 7 if candidate.get("entry_mode") == "confirmed_retrace" else 0
-            final_conf = max(0, min(99, base_confidence + location_adjust + reaction_adjust))
+            final_conf = max(0, min(99, base_confidence + location_adjust))
             execution_score = (
                 final_conf
                 + min(float(rr), MAX_RR) * 1.5
-                + candidate.get("score", 0) * 0.35
+                + candidate.get("score", 0) * 0.25
                 + loc_score * 0.20
             )
 
@@ -1845,7 +2089,6 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "entry": round(entry, 8),
             "price": cur_price,
             "entry_label": entry_lbl,
-            "entry_mode": best.get("entry_mode", "structural"),
             "sl": round(sl_price, 8),
             "tp": round(tp_price, 8),
             "rr": round(rr, 2),
@@ -1864,7 +2107,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "selected_sweep": score.get("selected_sweep", False),
             "trigger_count": score.get("trigger_count", 0),
             "tp_sl_reason": (
-                f"Entry@{entry:.5g}({entry_lbl}/{best.get('entry_mode', 'structural')}) | "
+                f"Entry@{entry:.5g}({entry_lbl}) | "
                 f"SL@{sl_price:.5g}(struct) | "
                 f"TP@{tp_price:.5g}({tp_lbl}) | RR={rr:.2f} | "
                 f"Loc={loc.get('location_score')}({loc.get('location_state')}) | "

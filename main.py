@@ -2079,7 +2079,7 @@ def monitor_position(sym, pos):
     pernah menghentikan pengecekan harga di antaranya.
     Posisi hanya ditutup saat TP atau SL — tidak ada timeout otomatis.
 
-    TRAILING STOP — DUA KOMPONEN, dipakai yang PALING PROTEKTIF:
+    TRAILING STOP — ADAPTIVE TREND ENGINE:
       A) R-multiple ladder (TRAIL_R_LADDER): tiap profit capai ambang R
          tertentu (RELATIF ke risk trade itu sendiri, bukan persen
          absolut), SL dikunci ke sebagian dari R yang tercapai — proteksi
@@ -2154,26 +2154,31 @@ def monitor_position(sym, pos):
             locked_r_reached = best_r
             cand_a = entry + best_r * risk0 * (1 if is_buy else -1)
 
-        # ── Kandidat B: structure (swing point M15), throttled ~2 menit ──
+        # ── Kandidat B: ADAPTIVE TREND/RSI TRAIL, throttled ~2 menit ──
+        # Tetap memakai M15 yang sama; tidak ada request konfirmasi tambahan.
         cand_b = None
+        trail_meta = {}
         if time.time() >= next_struct_check:
             next_struct_check = time.time() + 120
             try:
-                df_recent = get_klines(sym, "15m", STRUCT_TRAIL_LOOKBACK)
-                if df_recent is not None and len(df_recent) >= STRUCT_TRAIL_LB * 2 + 1:
-                    sh_r, sl_r = swing_pts(df_recent, lb=STRUCT_TRAIL_LB)
-                    if is_buy and sl_r:
-                        cand_b = float(df_recent["low"].iloc[sl_r[-1]]) - entry * STRUCT_TRAIL_BUF_PCT
-                    elif not is_buy and sh_r:
-                        cand_b = float(df_recent["high"].iloc[sh_r[-1]]) + entry * STRUCT_TRAIL_BUF_PCT
-            except Exception:
+                df_recent = get_klines(sym, "15m", TRAIL_LOOKBACK if "TRAIL_LOOKBACK" in globals() else STRUCT_TRAIL_LOOKBACK)
+                if df_recent is not None and len(df_recent) >= 35:
+                    trail_meta = adaptive_trailing_stop(
+                        df_recent, entry, sl_p, "bull" if is_buy else "bear",
+                        risk0, price, tp_p
+                    )
+                    cand_b = trail_meta.get("candidate")
+            except Exception as e:
+                log.debug(f"[adaptive trail] {sym}: {e}")
                 cand_b = None
-            pos["_struct_sl_cache"] = cand_b
+            pos["_adaptive_trail_cache"] = cand_b
+            pos["_adaptive_trail_meta"] = trail_meta
         else:
-            cand_b = pos.get("_struct_sl_cache")
+            cand_b = pos.get("_adaptive_trail_cache")
+            trail_meta = pos.get("_adaptive_trail_meta", {})
 
-        # SL baru = kandidat PALING PROTEKTIF di antara A & B yang ada,
-        # cuma boleh mengunci profit (searah TP), tidak pernah melewati TP.
+        # Fixed R-ladder is intentionally empty in v4. The adaptive engine
+        # handles protection only after sufficient R and lets strong trends run.
         cands = [c for c in (cand_a, cand_b) if c is not None]
         if cands:
             new_sl = max(cands) if is_buy else min(cands)
@@ -2181,12 +2186,17 @@ def monitor_position(sym, pos):
             within_tp = (new_sl < tp_p) if is_buy else (new_sl > tp_p)
             if improves and within_tp:
                 sl_p = new_sl
-                pos["current_sl"] = sl_p   # sync ke shared state utk /trade
-                src = "R-ladder" if (cand_a is not None and new_sl == cand_a) else "structure"
+                pos["current_sl"] = sl_p
+                src = "AdaptiveTrend" if cand_b is not None and new_sl == cand_b else "R-ladder"
+                meta = trail_meta
                 tg_send(chat_id,
-                    f"🔒 <b>Trailing SL — {sym}</b> ({src})\n"
-                    f"SL dikunci ke <code>{sl_p:.6g}</code> "
-                    f"({(sl_p-entry)/entry*100*(1 if is_buy else -1):+.2f}%)")
+                    f"🔒 <b>Adaptive Trailing SL — {sym}</b> ({src})\n"
+                    f"SL: <code>{sl_p:.6g}</code> | "
+                    f"R: {meta.get('pnl_r', 0):.2f} | "
+                    f"Strength: {meta.get('strength', 0):.2f} "
+                    f"({meta.get('regime', 'unknown')})\n"
+                    f"RSI: {meta.get('rsi', 0):.1f} "
+                    f"slope {meta.get('rsi_slope', 0):+.2f}")
 
         # ── Cek TP / SL — verifikasi via candle M1 ─────────────────
         hit_tp = (price >= tp_p) if is_buy else (price <= tp_p)
@@ -2897,17 +2907,19 @@ def monitor_position_real(sym, pos):
             locked_r = best_r
 
         cand_b = None
+        trail_meta = {}
         if time.time() >= next_struct_check:
             next_struct_check = time.time() + 120
             try:
-                df_m15 = get_klines(sym, "15m", STRUCT_TRAIL_LOOKBACK)
-                sh, sl_pts = swing_pts(df_m15, lb=STRUCT_TRAIL_LB)
-                if is_buy and sl_pts:
-                    cand_b = float(df_m15["low"].iloc[sl_pts[-1]]) - entry * STRUCT_TRAIL_BUF_PCT
-                elif not is_buy and sh:
-                    cand_b = float(df_m15["high"].iloc[sh[-1]]) + entry * STRUCT_TRAIL_BUF_PCT
+                df_m15 = get_klines(sym, "15m", TRAIL_LOOKBACK if "TRAIL_LOOKBACK" in globals() else STRUCT_TRAIL_LOOKBACK)
+                if df_m15 is not None and len(df_m15) >= 35:
+                    trail_meta = adaptive_trailing_stop(
+                        df_m15, entry, sl_p, "bull" if is_buy else "bear",
+                        risk0, price, tp_p
+                    )
+                    cand_b = trail_meta.get("candidate")
             except Exception as e:
-                log.debug(f"[monitor_real trail] {sym}: {e}")
+                log.debug(f"[monitor_real adaptive trail] {sym}: {e}")
 
         cands = [c for c in (cand_a, cand_b) if c is not None]
         if cands and not _binance_circuit_open():
