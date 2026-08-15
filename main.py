@@ -1493,23 +1493,8 @@ def _validate_signal_before_entry(sym, signal):
         return False, "VALIDATION_ERROR"
 
 
-# Telegram scan-status throttle: scanning may continue frequently, but Telegram
-# must not become a live log stream.  Detailed progress stays in Render logs.
-_scan_notice_lock = threading.Lock()
-_last_scan_notice_at = 0.0
-_SCAN_NOTICE_INTERVAL = 15 * 60
-
-def _announce_scan_cycle(chat_id):
-    global _last_scan_notice_at
-    now = time.time()
-    with _scan_notice_lock:
-        if now - _last_scan_notice_at < _SCAN_NOTICE_INTERVAL:
-            return
-        _last_scan_notice_at = now
-    tg_send(chat_id, f"🔍 Scanning {TOP_N_COINS} koin...")
-
 def run_scan_once(chat_id):
-    _announce_scan_cycle(chat_id)
+    tg_send(chat_id,f"🔍 Scanning {TOP_N_COINS} koin...")
     try:
         symbols=get_top_coins()
     except Exception as e:
@@ -1993,8 +1978,21 @@ positions_lock = threading.Lock()
 positions: dict = {}   # {sym: {signal, entry, tp, sl, entry_time, thread}}
 
 def close_position(sym, result, close_price=None):
-    """Tutup posisi, catat statistik, ban koin sementara, kirim notif."""
+    """Finalize a position exactly once and record the exit in statistics.
+
+    Exchange-side algo cleanup is attempted before local state is removed.
+    The function is idempotent: a second callback for the same symbol sees no
+    position and cannot create a duplicate statistics record.
+    """
     global active_trade
+    # Any exit path must try to remove orphan TP/SL orders before declaring
+    # the local trade closed.  If Binance is temporarily unavailable we still
+    # record the trade outcome, but leave an explicit cleanup warning for the
+    # reconciliation loop/logs rather than silently assuming success.
+    cleanup_ok, leftovers = _cleanup_algo_orders_verified(sym, retries=2, delay=0.5)
+    if not cleanup_ok:
+        log.error(f"[close_position] {sym} algo cleanup NOT confirmed; leftovers={len(leftovers)}")
+
     with positions_lock:
         pos = positions.pop(sym, None)
     if pos is None: return
@@ -2280,8 +2278,7 @@ def monitor_position(sym, pos):
 def _open_pending_real(sym, signal, chat_id):
     """Pasang LIMIT order asli di Binance untuk entry (real trade)."""
     if BINANCE_NEW_ENTRY_BLOCK_ON_BAN and _binance_circuit_open():
-        log.info(f"[entry] {sym} ditunda — Binance circuit breaker masih aktif")
-        return False
+        raise BinanceCircuitOpen("Binance circuit breaker aktif — entry real ditahan")
     is_buy = signal["decision"] == "BUY"
     entry_target = signal["entry"]
     side = "BUY" if is_buy else "SELL"
@@ -2330,15 +2327,7 @@ def _open_pending_real(sym, signal, chat_id):
             f"Order #{order_id} terpasang di Binance, menunggu terisi (maks 8 jam)")
 
         threading.Thread(target=_wait_entry_real, args=(sym, signal, chat_id, order_id), daemon=True).start()
-        return True
 
-    except BinanceCircuitOpen as e:
-        # System condition, not a bad signal. Keep this candidate out of the
-        # ban list and let a later cycle retry when Binance recovers.
-        with positions_lock:
-            positions.pop(sym, None)
-        log.info(f"[entry] {sym} ditunda — Binance circuit open: {e}")
-        return False
     except Exception as e:
         with positions_lock:
             positions.pop(sym, None)
@@ -2421,18 +2410,89 @@ def _wait_entry_real(sym, signal, chat_id, order_id):
     tg_send(chat_id, f"⏰ <b>Pending Expired</b> — {sym}\nOrder dibatalkan (8 jam tidak terisi).")
 
 
+def _cleanup_algo_orders_verified(sym, retries=3, delay=0.6):
+    """Best-effort exchange-side cleanup with verification.
+
+    Closing a local position is NOT considered complete merely because the
+    cancel request returned.  We cancel all open algo orders, then query the
+    exchange again.  This is deliberately idempotent so it is safe to call
+    from emergency close, timeout, and post-close reconciliation.
+    """
+    last_rows = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            cancel_all_algo_orders(sym)
+        except Exception as e:
+            log.warning(f"[cleanup] {sym} cancel attempt {attempt+1}: {e}")
+        try:
+            rows = get_open_algo_orders(sym)
+            last_rows = rows
+            if not rows:
+                return True, []
+        except Exception as e:
+            log.warning(f"[cleanup] {sym} verify attempt {attempt+1}: {e}")
+        if attempt + 1 < retries:
+            time.sleep(delay * (attempt + 1))
+    return False, (last_rows or [])
+
+
 def _emergency_close(sym, is_buy, qty, chat_id, reason):
-    """Auto-out: tutup posisi market SEKARANG. Fallback untuk kondisi
-    bahaya (geometri invalid / harga sudah lewat SL) setelah order FILLED."""
+    """Close a dangerous/invalid filled position safely and record it as SL.
+
+    IMPORTANT: never delete local state before the exchange-side close and
+    protection cleanup have been attempted.  This prevents orphan TP orders
+    and missing statistics after a software-SL/emergency exit.
+    """
+    close_side = "SELL" if is_buy else "BUY"
     try:
-        place_market_order(sym, "SELL" if is_buy else "BUY", qty, reduce_only=True)
-        tg_send(chat_id, f"🚨 <b>AUTO-OUT</b> — {sym}\nAlasan: {reason}\nPosisi ditutup market segera.")
+        # First remove TP/SL so a stale protection order cannot remain after
+        # the market close.  Verification is attempted before proceeding.
+        cleaned, leftovers = _cleanup_algo_orders_verified(sym)
+        if not cleaned:
+            log.warning(f"[emergency_close] {sym} algo cleanup not confirmed; leftovers={len(leftovers)}")
+
+        # Close the actual position.  Do not mutate local state yet.
+        place_market_order(sym, close_side, qty, reduce_only=True)
+
+        # Give Binance a brief moment to register the fill, then verify both
+        # position and protection state.
+        time.sleep(0.4)
+        try:
+            remaining_pos = get_real_position(sym)
+        except Exception:
+            remaining_pos = None
+        cleaned_after, leftovers_after = _cleanup_algo_orders_verified(sym)
+
+        if remaining_pos is not None:
+            raise RuntimeError(
+                f"market close submitted but position still appears open; remaining={remaining_pos}"
+            )
+        if not cleaned_after:
+            log.error(f"[emergency_close] {sym} protection cleanup not confirmed; leftovers={len(leftovers_after)}")
+
+        # Use the actual latest price when available for statistics.
+        exit_price = get_price(sym)
+        with positions_lock:
+            pos = positions.get(sym)
+        if pos is not None:
+            # Explicitly mark the exit as SL.  Software SL is a real stop-loss
+            # outcome and must be counted by /stats and downstream analytics.
+            close_position(sym, "sl", close_price=exit_price)
+
+        tg_send(chat_id,
+                f"🚨 <b>AUTO-OUT</b> — {sym}\n"
+                f"Alasan: {reason}\n"
+                f"Dicatat sebagai <b>SL</b>; posisi ditutup market.")
+        return True
+
     except Exception as e:
-        tg_send(chat_id, f"🚨 <b>GAGAL AUTO-OUT</b> — {sym}: {e}\n"
-                          f"❗ CEK MANUAL SEGERA DI BINANCE, posisi mungkin masih terbuka!")
-    with positions_lock:
-        positions.pop(sym, None)
-    _ban_coin(sym, reason)
+        # Critical rule: if the exchange cannot confirm the close, KEEP local
+        # state so the monitor/reconciliation loop can retry.
+        log.error(f"[emergency_close] {sym} gagal: {e}")
+        tg_send(chat_id,
+                f"🚨 <b>GAGAL AUTO-OUT</b> — {sym}: {e}\n"
+                f"❗ State posisi dipertahankan untuk recovery; cek Binance.")
+        return False
 
 
 def _open_position_real(sym, signal, actual_entry, chat_id, order_info):
@@ -2971,10 +3031,6 @@ def autostop_loop(chat_id):
         time.sleep(60)
 
 
-_auto_runtime_lock = threading.Lock()
-_auto_runtime_active = False
-_auto_runtime_generation = 0
-
 def simulation_loop(chat_id):
     """
     Broadcaster utama — non-blocking:
@@ -2982,18 +3038,6 @@ def simulation_loop(chat_id):
     - Monitor per-posisi juga thread terpisah (sudah ada)
     - Loop utama hanya koordinasi: cek slot, launch scan/monitor
     """
-    global auto_mode, _auto_runtime_active, _auto_runtime_generation
-
-    # Only ONE coordinator loop may exist.  A duplicate /auto race, webhook retry,
-    # or old coordinator must never create multiple scan producers.
-    with _auto_runtime_lock:
-        if _auto_runtime_active:
-            log.warning("[auto] duplicate simulation_loop suppressed")
-            return
-        _auto_runtime_active = True
-        _auto_runtime_generation += 1
-        runtime_generation = _auto_runtime_generation
-
     global auto_mode
     tg_send(chat_id,
         "🤖 <b>SMC Signal Broadcaster dimulai!</b>\n\n"
@@ -3086,19 +3130,6 @@ def simulation_loop(chat_id):
                     args=(sym, signal, chat_id),
                     daemon=True
                 ).start()
-        except BinanceCircuitOpen as e:
-            # A Binance circuit-open state is a normal deferred-entry condition,
-            # never a fatal scan-thread exception.  The scanner may still use
-            # fallback market data, but REAL entry must wait until Binance is healthy.
-            log.warning(f"[scan] Binance circuit open — entry ditunda: {e}")
-            # Do NOT ban the candidate: this is an exchange/system condition,
-            # not a bad signal.  Do NOT send the same warning every scan.
-            return
-        except Exception as e:
-            # Last-resort containment: one broken candidate/cycle must never kill
-            # the scan worker silently and leave its 'scanning' flag stuck.
-            log.exception(f"[scan] worker gagal tanpa mematikan scanner: {e}")
-            return
         finally:
             with scan_lock:
                 scanning = False
@@ -3291,8 +3322,7 @@ def simulation_loop(chat_id):
         time.sleep(5)
 
     tg_send(chat_id, "⏹ <b>Scanning dihentikan.</b>\n\n" + fmt_stats())
-    with _auto_runtime_lock:
-        _auto_runtime_active = False
+
 
 
 # ═════════════════════════════════════════════
