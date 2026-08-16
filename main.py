@@ -1,4 +1,11 @@
 # ============================================================
+# PATCH MARKER — BINANCE REST API PROTECTION
+# Date: 16 August 2026
+# Time: 19:22 WIB (UTC+7)
+# Rule: keep strategy unchanged; aggressively pace Binance REST in main.py.
+#       Active-position WebSocket monitoring remains unchanged.
+# ============================================================
+# ============================================================
 # PATCH MARKER — MAIN(5).PY AUTO BINANCE COOLDOWN
 # Date: 15 August 2026
 # Time: 18:47 WIB (UTC+7)
@@ -361,6 +368,24 @@ import re
 _binance_ban_lock = threading.Lock()
 _binance_banned_until = 0.0   # unix timestamp detik; 0 = tidak sedang ban
 
+# Global Binance REST pacing.  This is intentionally conservative because
+# Binance REQUEST_WEIGHT is IP-based and repeated 429 responses can escalate
+# into a 418 IP ban.  All public + signed Binance REST calls share this gate.
+BINANCE_REST_MIN_INTERVAL_SEC = 2.0
+BINANCE_REST_NETWORK_RETRY_DELAY_SEC = 5.0
+_binance_rest_gate_lock = threading.Lock()
+_binance_last_rest_at = 0.0
+
+def _binance_rest_gate():
+    """Serialize all Binance REST calls and enforce a hard minimum gap."""
+    global _binance_last_rest_at
+    with _binance_rest_gate_lock:
+        wait = BINANCE_REST_MIN_INTERVAL_SEC - (time.time() - _binance_last_rest_at)
+        if wait > 0:
+            time.sleep(wait)
+        _binance_last_rest_at = time.time()
+
+
 def _binance_wait_if_banned():
     # NEVER sleep here.  Sleeping inside a shared API helper was the reason a
     # 17k-second ban could effectively freeze unrelated position threads.
@@ -389,7 +414,7 @@ def _binance_register_ban(msg="", fallback_seconds=60):
     if old <= now:
         log.error(
             f"[binance] Rate-limit/ban terdeteksi — circuit breaker aktif "
-            f"{wait:.0f} detik. REST Binance dihentikan; fallback tetap boleh jalan.")
+            f"{wait:.0f} detik. REST Binance dihentikan; fallback hanya untuk kegagalan non-rate-limit; rate-limit menghentikan scan aktif.")
     return effective
 
 def _binance_circuit_open():
@@ -413,27 +438,60 @@ def _raw_get(url, params=None, retries=3):
 # ── BINANCE REST (backfill awal WS + fallback tier-2) ─────────────────
 def fapi_get(path, params=None):
     _binance_wait_if_banned()
+    _binance_rest_gate()
     last_err = None
-    for i in range(2):
+    try:
+        r = requests.get(f"{FAPI}{path}", params=params,
+                          timeout=8, verify=False)
+        if r.status_code in (418, 429):
+            retry_after = r.headers.get("Retry-After")
+            extra = 60
+            if retry_after:
+                try:
+                    extra = max(extra, float(retry_after))
+                except (TypeError, ValueError):
+                    pass
+            _binance_register_ban(r.text, fallback_seconds=extra)
+            raise BinanceCircuitOpen(f"Binance HTTP {r.status_code}")
+        d = r.json()
+        if isinstance(d, dict) and "code" in d and d.get("code") < 0:
+            if d.get("code") == -1003:
+                _binance_register_ban(d.get("msg", ""), fallback_seconds=60)
+                raise BinanceCircuitOpen("Binance -1003 rate limit")
+            raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
+        return d
+    except BinanceCircuitOpen:
+        raise
+    except (requests.RequestException, ValueError, json.JSONDecodeError) as e:
+        last_err = e
+        # A network/server failure gets ONE delayed retry, not a rapid retry burst.
+        time.sleep(BINANCE_REST_NETWORK_RETRY_DELAY_SEC)
+        _binance_wait_if_banned()
+        _binance_rest_gate()
         try:
             r = requests.get(f"{FAPI}{path}", params=params,
                               timeout=8, verify=False)
             if r.status_code in (418, 429):
-                _binance_register_ban(r.text)
+                retry_after = r.headers.get("Retry-After")
+                extra = 60
+                if retry_after:
+                    try:
+                        extra = max(extra, float(retry_after))
+                    except (TypeError, ValueError):
+                        pass
+                _binance_register_ban(r.text, fallback_seconds=extra)
                 raise BinanceCircuitOpen(f"Binance HTTP {r.status_code}")
             d = r.json()
             if isinstance(d, dict) and "code" in d and d.get("code") < 0:
                 if d.get("code") == -1003:
-                    _binance_register_ban(d.get("msg", ""))
+                    _binance_register_ban(d.get("msg", ""), fallback_seconds=60)
                     raise BinanceCircuitOpen("Binance -1003 rate limit")
                 raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
             return d
         except BinanceCircuitOpen:
             raise
-        except (requests.RequestException, ValueError, json.JSONDecodeError) as e:
-            last_err = e
-            if i == 0:
-                time.sleep(0.5)
+        except Exception as e2:
+            last_err = e2
     raise ConnectionError(f"Binance gagal: {path}: {last_err}")
 
 
@@ -449,6 +507,7 @@ def _binance_signed(method, path, params=None):
     if not REAL_TRADE_ENABLED:
         raise RuntimeError("BINANCE_API_KEY/SECRET tidak diset")
     _binance_wait_if_banned()
+    _binance_rest_gate()
     params = dict(params or {})
     params["timestamp"] = int(time.time() * 1000)
     params["recvWindow"] = 5000
@@ -457,25 +516,55 @@ def _binance_signed(method, path, params=None):
     url = f"{FAPI}{path}?{query}&signature={sig}"
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     last_err = None
-    for attempt in range(2):
+    try:
+        r = requests.request(method, url, headers=headers, timeout=8, verify=False)
+        if r.status_code in (418, 429):
+            retry_after = r.headers.get("Retry-After")
+            extra = 60
+            if retry_after:
+                try:
+                    extra = max(extra, float(retry_after))
+                except (TypeError, ValueError):
+                    pass
+            _binance_register_ban(r.text, fallback_seconds=extra)
+            raise BinanceCircuitOpen(f"Binance HTTP {r.status_code}")
+        data = r.json()
+        if isinstance(data, dict) and "code" in data and data["code"] < 0:
+            if data["code"] == -1003:
+                _binance_register_ban(data.get("msg", ""), fallback_seconds=60)
+                raise BinanceCircuitOpen("Binance -1003 rate limit")
+            raise RuntimeError(f"Binance {data['code']}: {data.get('msg')}")
+        return data
+    except BinanceCircuitOpen:
+        raise
+    except Exception as e:
+        last_err = e
+        time.sleep(BINANCE_REST_NETWORK_RETRY_DELAY_SEC)
+        _binance_wait_if_banned()
+        _binance_rest_gate()
         try:
             r = requests.request(method, url, headers=headers, timeout=8, verify=False)
             if r.status_code in (418, 429):
-                _binance_register_ban(r.text)
+                retry_after = r.headers.get("Retry-After")
+                extra = 60
+                if retry_after:
+                    try:
+                        extra = max(extra, float(retry_after))
+                    except (TypeError, ValueError):
+                        pass
+                _binance_register_ban(r.text, fallback_seconds=extra)
                 raise BinanceCircuitOpen(f"Binance HTTP {r.status_code}")
             data = r.json()
             if isinstance(data, dict) and "code" in data and data["code"] < 0:
                 if data["code"] == -1003:
-                    _binance_register_ban(data.get("msg", ""))
+                    _binance_register_ban(data.get("msg", ""), fallback_seconds=60)
                     raise BinanceCircuitOpen("Binance -1003 rate limit")
                 raise RuntimeError(f"Binance {data['code']}: {data.get('msg')}")
             return data
         except BinanceCircuitOpen:
             raise
-        except Exception as e:
-            last_err = e
-            if attempt == 0:
-                time.sleep(0.5)
+        except Exception as e2:
+            last_err = e2
     raise RuntimeError(f"Gagal request signed {method} {path}: {last_err}")
 
 
@@ -1013,6 +1102,8 @@ class BinanceWSFeed:
         try:
             df = _binance_klines(symbol, interval, limit)
             if not df.empty: src = "binance"
+        except BinanceCircuitOpen:
+            raise
         except Exception as e:
             log.warning(f"[ws-backfill/binance] {symbol} {interval}: {e}")
         if df.empty:
@@ -1340,13 +1431,16 @@ def get_klines(symbol, interval, limit=250):
         return _closed_only(df).tail(limit)
 
     # Recovery path: Binance only if its circuit is closed; otherwise Bybit.
-    if not _binance_circuit_open():
-        try:
-            df = _binance_klines(symbol, interval, limit)
-            if not df.empty:
-                return _closed_only(df).tail(limit)
-        except Exception as e:
-            log.debug(f"[klines/binance recovery] {symbol} {interval}: {e}")
+    if _binance_circuit_open():
+        raise BinanceCircuitOpen("Binance circuit breaker aktif — scan baru dihentikan")
+    try:
+        df = _binance_klines(symbol, interval, limit)
+        if not df.empty:
+            return _closed_only(df).tail(limit)
+    except BinanceCircuitOpen:
+        raise
+    except Exception as e:
+        log.debug(f"[klines/binance recovery] {symbol} {interval}: {e}")
     try:
         df = _bybit_klines(symbol, interval, limit)
         if not df.empty:
@@ -1358,6 +1452,9 @@ def get_klines(symbol, interval, limit=250):
 last_scanned_coins = []
 last_scanned_at = None
 _last_scanned_lock = threading.Lock()
+_top_coins_cache = {"symbols": [], "fetched_at": 0.0}
+_top_coins_cache_lock = threading.Lock()
+TOP_COINS_CACHE_SEC = 600
 
 def get_top_coins():
     """Wrapper: panggil _get_top_coins_impl() lalu cache hasilnya ke
@@ -1372,11 +1469,25 @@ def get_top_coins():
     return coins
 
 def _get_top_coins_impl():
-    """Ambil top coins. Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS
-    ticker cache (fallback TERAKHIR, hanya kalau REST Binance & Bybit
-    gagal/error/kena ban). Logika exclude/ban SAMA PERSIS seperti
-    sebelumnya."""
-    global scan_counter
+    """Ambil top coins dengan cache 10 menit. Binance tetap sumber utama;
+    cache mencegah request /24hr ticker berulang tiap siklus scan."""
+    global scan_counter, _top_coins_cache
+    now = time.time()
+    with _top_coins_cache_lock:
+        cached = list(_top_coins_cache.get("symbols", []))
+        fetched_at = float(_top_coins_cache.get("fetched_at", 0.0))
+
+    # Recompute exclusions every cycle even when using the cached top list.
+    with ban_lock:
+        cur_ban = set(banned_coins.keys())
+    with positions_lock:
+        active_syms = set(positions.keys())
+    exclude_syms = cur_ban | active_syms
+
+    if cached and (now - fetched_at) < TOP_COINS_CACHE_SEC:
+        filtered = [s for s in cached if s not in exclude_syms]
+        return filtered[:TOP_N_COINS]
+
     with ban_lock:
         scan_counter += 1
         to_unban = [s for s, (banned_at, dur) in banned_coins.items()
@@ -1389,27 +1500,31 @@ def _get_top_coins_impl():
 
     with positions_lock:
         active_syms = set(positions.keys())
-
     exclude_syms = cur_ban | active_syms
 
-    # Binance REST
+    # Binance REST. A circuit-open condition MUST abort the scan instead of
+    # falling through to Bybit and continuing a Binance-origin scan cycle.
     try:
         coins = _binance_top_coins(exclude_syms)
         if coins:
+            with _top_coins_cache_lock:
+                _top_coins_cache = {"symbols": list(coins), "fetched_at": time.time()}
             return coins
-        log.warning("[top_coins/binance] kosong, coba Bybit...")
+        log.warning("[top_coins/binance] kosong")
+    except BinanceCircuitOpen:
+        raise
     except Exception as e:
         log.warning(f"[top_coins/binance] {e} — coba Bybit...")
-    # Bybit fallback
+
+    # Non-Binance failure fallback retained.
     try:
         coins = _bybit_top_coins(exclude_syms)
         if coins:
             log.info(f"[top_coins/bybit fallback] {len(coins)} koin")
             return coins
-        log.warning("[top_coins/bybit] kosong, coba WS...")
     except Exception as e:
         log.warning(f"[top_coins/bybit] {e} — coba WS...")
-    # WS fallback TERAKHIR
+
     if ws_feed.is_fresh():
         raw = ws_feed.get_top_coins_raw()
         usdt = [
@@ -1520,14 +1635,19 @@ def run_scan_once(chat_id):
             df_m15 = get_klines(sym, "15m", 250)
             try:
                 df_d1 = get_klines(sym, "1d", 100)
+            except BinanceCircuitOpen:
+                raise
             except Exception:
                 df_d1 = None
             r = full_analyze(df_h1, df_m15, df_d1, symbol=sym)
+        except BinanceCircuitOpen:
+            log.warning(f"[scan] Binance cooldown aktif — scan dihentikan pada {sym}")
+            return None
         except Exception as e:
             log.debug(f"[scan] {sym}: {e}")
             r = None
         if r: results.append(r)
-        time.sleep(0.15)
+        time.sleep(0.75)
 
     if not results:
         tg_send(chat_id,"⚠️ Tidak ada setup valid dari semua koin.")
@@ -3289,7 +3409,7 @@ def simulation_loop(chat_id):
             daemon=True
         ).start()
 
-    SCAN_INTERVAL_SEC = 120   # jeda minimum antar SIKLUS scan penuh (50 koin).
+    SCAN_INTERVAL_SEC = 900   # 15 menit; mengikuti candle M15 dan mengurangi burst REST.
     # Sebelumnya cuma dikasih jeda 5 detik antar PERCOBAAN launch -- kalau satu
     # scan selesai lebih cepat dari itu, langsung scan lagi nyaris tanpa henti
     # (150+ request/scan × berkali-kali/menit). Ini penyebab utama sering kena
@@ -3302,7 +3422,9 @@ def simulation_loop(chat_id):
         # exchange-provided circuit-breaker cooldown has ended.
         # Active positions continue to be monitored by the existing WebSocket path.
         if _binance_circuit_open():
-            time.sleep(1.0)
+            # Hard pause: no new signal scan while Binance is rate-limited.
+            # Active positions continue via existing WebSocket monitoring.
+            time.sleep(5.0)
             continue
         with positions_lock:
             n_pos = len(positions)
