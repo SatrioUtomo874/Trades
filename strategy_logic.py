@@ -101,31 +101,12 @@ def atr_fn(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return tr.ewm(alpha=1 / n, adjust=False).mean()
 
 
-def _last_finite(series: pd.Series) -> Optional[float]:
-    """Return the latest finite numeric value, or None when unavailable."""
-    if series is None or len(series) == 0:
-        return None
-    s = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
-    if s.empty:
-        return None
-    return float(s.iloc[-1])
-
-
 def build_df(df: pd.DataFrame, interval_minutes: Optional[int] = None) -> Optional[pd.DataFrame]:
-    """Normalize OHLCV and compute indicators without crashing on sparse data.
-
-    A frame is considered usable only when there are at least 60 clean candles
-    after removing an active candle. Indicator warm-up NaNs are allowed in the
-    early rows; callers validate the final values they actually need.
-    """
     out = _ensure_ohlcv(df)
-    if out.empty:
-        return None
     if interval_minutes is not None:
         out = _closed_candles(out, interval_minutes)
-    if out is None or out.empty or len(out) < 60:
+    if len(out) < 60:
         return None
-
     out = out.copy()
     out["ema9"] = ema(out["close"], 9)
     out["ema21"] = ema(out["close"], 21)
@@ -133,19 +114,14 @@ def build_df(df: pd.DataFrame, interval_minutes: Optional[int] = None) -> Option
     out["ema200"] = ema(out["close"], 200) if len(out) >= 200 else ema(out["close"], 50)
     out["rsi"] = rsi(out["close"])
     out["atr"] = atr_fn(out)
-    out["vol_sma"] = out["volume"].rolling(20, min_periods=1).mean()
+    out["vol_sma"] = out["volume"].rolling(20).mean()
     out["vol_ratio"] = out["volume"] / out["vol_sma"].replace(0, np.nan)
     out["buy_volume_ratio"] = np.nan
     out = out.replace([np.inf, -np.inf], np.nan)
+    required = ["open", "high", "low", "close", "volume", "ema9", "ema21", "ema50", "ema200", "rsi", "atr", "vol_sma", "vol_ratio"]
+    out = out.dropna(subset=required)
+    return out if not out.empty else None
 
-    # Do NOT drop the entire frame just because volume-derived indicators are
-    # unavailable. Some exchange feeds legitimately contain zero/missing
-    # volume for a subset of symbols. Keep price/EMA/ATR data usable.
-    core = ["open", "high", "low", "close", "ema9", "ema21", "ema50", "ema200", "rsi", "atr"]
-    out = out.dropna(subset=core)
-    if out.empty:
-        return None
-    return out
 
 def swing_pts(df: pd.DataFrame, lb: int = 5):
     df = _ensure_ohlcv(df)
@@ -365,45 +341,156 @@ def detect_cisd(df: pd.DataFrame, lb:int=8) -> dict:
     return out
 
 
+def _displacement_at(df: pd.DataFrame, idx: int, direction: str, lookback: int = 4) -> dict:
+    """Historical version of _displacement used to anchor a trigger candle."""
+    if idx < lookback + 1 or idx >= len(df):
+        return {"confirmed": False, "body_atr": 0.0}
+    row = df.iloc[idx]
+    prior = df.iloc[idx - lookback:idx]
+    body = abs(float(row.close - row.open))
+    atr = max(float(row.atr), 1e-12)
+    body_atr = body / atr
+    if direction == "bull":
+        ok = row.close > row.open and row.close > prior.high.max() and body_atr >= 0.45
+    else:
+        ok = row.close < row.open and row.close < prior.low.min() and body_atr >= 0.45
+    return {"confirmed": bool(ok), "body_atr": round(body_atr, 3)}
+
+
+def _latest_structure_break(df: pd.DataFrame, idx: int, direction: str, lb: int = 3) -> bool:
+    """Checks whether candle idx breaks the most recent confirmed swing."""
+    if idx < lb * 2 + 2:
+        return False
+    left = df.iloc[:idx + 1]
+    sh, sl = swing_pts(left, lb)
+    if direction == "bull" and sh:
+        return float(df.high.iloc[idx]) > float(df.high.iloc[sh[-1]])
+    if direction == "bear" and sl:
+        return float(df.low.iloc[idx]) < float(df.low.iloc[sl[-1]])
+    return False
+
+
+def _latest_reaction_context(df: pd.DataFrame, direction: str, window: int = 18) -> dict:
+    """Find the most recent meaningful displacement / structure reaction.
+
+    This is intentionally permissive: a reaction can qualify via displacement,
+    structure break, or both. The purpose is to date the POI, not to hard-gate
+    every setup.
+    """
+    start = max(0, len(df) - window)
+    best = None
+    for i in range(start, len(df)):
+        disp = _displacement_at(df, i, direction)
+        bos = _latest_structure_break(df, i, direction, 3)
+        if disp["confirmed"] or bos:
+            strength = (2 if disp["confirmed"] else 0) + (1 if bos else 0)
+            if best is None or (i, strength) > (best["idx"], best["strength"]):
+                best = {"idx": i, "strength": strength, "displacement": disp["confirmed"], "bos": bos}
+    return best or {"idx": None, "strength": 0, "displacement": False, "bos": False}
+
+
 def _find_entry(m15: pd.DataFrame, h1: pd.DataFrame, direction: str, score: dict) -> Optional[dict]:
-    up=direction=="bull"; price=float(m15.close.iloc[-1]); atr=float(m15.atr.iloc[-1])
-    sweep=score["sweep"]
-    # First choice: FVG created by displacement after sweep / structure response.
-    fvgs=detect_fvg(m15,direction,70)
-    obs=detect_order_block(m15,direction,80,score.get("sh15"),score.get("sl15"))
-    candidates=[]
+    """V2.1 entry model: trigger -> pullback -> POI entry.
+
+    Key change from V1:
+    - A sweep is context, never a direct entry trigger.
+    - Prefer FVG/OB created by a recent displacement/structure reaction.
+    - Entry is placed at the POI midpoint only when the current price has
+      pulled back to the correct side of that POI.
+    - Continuation POIs remain available, so frequency is reduced only by
+      stale/poorly located POIs rather than by a hard 'perfect setup' gate.
+    """
+    up = direction == "bull"
+    price = float(m15.close.iloc[-1])
+    atr = max(float(m15.atr.iloc[-1]), 1e-12)
+    sweep = score["sweep"]
+
+    fvgs = detect_fvg(m15, direction, 70)
+    obs = detect_order_block(m15, direction, 80, score.get("sh15"), score.get("sl15"))
+    reaction = _latest_reaction_context(m15, direction, window=18)
+    trigger_idx = reaction.get("idx")
+
+    candidates = []
+
+    def _on_pullback(e: float) -> bool:
+        if up:
+            return e <= price and price - e <= ENTRY_MAX_ATR_DISTANCE * atr
+        return e >= price and e - price <= ENTRY_MAX_ATR_DISTANCE * atr
+
+    def _recent_poi(z: dict) -> bool:
+        if trigger_idx is None:
+            return True
+        # POI should be created shortly before / at the reaction that caused it.
+        return int(z.get("idx", -999999)) >= trigger_idx - 2
+
+    # FVG: strongest when the imbalance was created around the recent reaction.
     for z in fvgs:
-        e=z["mid"]
-        if (up and e<=price and e>=price-ENTRY_MAX_ATR_DISTANCE*atr) or (not up and e>=price and e<=price+ENTRY_MAX_ATR_DISTANCE*atr):
-            q=50
-            if sweep["type"]=="sweep": q+=20
-            if score["displacement"]["confirmed"]: q+=15
-            if score["inducement"]["swept"]: q+=5
-            candidates.append((q,e,z["bot"] if up else z["top"],"fvg"))
+        e = float(z["mid"])
+        if not _on_pullback(e):
+            continue
+        recent = _recent_poi(z)
+        q = 48
+        if recent:
+            q += 12
+        if reaction["displacement"]:
+            q += 10
+        if reaction["bos"]:
+            q += 5
+        if sweep["type"] == "sweep":
+            q += 10
+        if score["inducement"].get("swept"):
+            q += 4
+        # A POI touched before the current scan is a genuine pullback candidate;
+        # POIs ahead of price are not considered because _on_pullback rejects them.
+        candidates.append((q, e, float(z["bot"] if up else z["top"]), "fvg_retest", recent))
+
+    # OB: same concept, with slightly lower base score than an FVG.
     for z in obs:
-        e=z["mid"]
-        if (up and e<=price and e>=price-ENTRY_MAX_ATR_DISTANCE*atr) or (not up and e>=price and e<=price+ENTRY_MAX_ATR_DISTANCE*atr):
-            q=42
-            if sweep["type"]=="sweep": q+=18
-            if score["displacement"]["confirmed"]: q+=15
-            if score["inducement"]["swept"]: q+=5
-            candidates.append((q,e,z["bot"] if up else z["top"],"ob"))
-    # If a sweep just occurred, reclaim entry can be the level itself when no
-    # clean imbalance exists. This is still a limit/retest concept, not chase.
-    if sweep["type"]=="sweep":
-        e=float(sweep["level"])
-        if (up and e<=price and price-e<=ENTRY_MAX_ATR_DISTANCE*atr) or (not up and e>=price and e-price<=ENTRY_MAX_ATR_DISTANCE*atr):
-            candidates.append((55,e,float(sweep["extreme"]),"sweep_reclaim"))
+        e = float(z["mid"])
+        if not _on_pullback(e):
+            continue
+        recent = _recent_poi(z)
+        q = 44
+        if recent:
+            q += 12
+        if reaction["displacement"]:
+            q += 10
+        if reaction["bos"]:
+            q += 5
+        if sweep["type"] == "sweep":
+            q += 9
+        if score["inducement"].get("swept"):
+            q += 4
+        candidates.append((q, e, float(z["bot"] if up else z["top"]), "ob_retest", recent))
+
+    # Sweep + reclaim is now only a trigger context. Do NOT place the entry on
+    # the sweep level itself. We wait for an FVG/OB retest created by the reaction.
+    # This removes the high-loss direct sweep_reclaim branch from V1.
+
+    # Permissive continuation fallback: keep frequency alive when a fresh POI is
+    # available but no explicit displacement trigger was identified in the last
+    # 18 candles. This is still a pullback entry, never a market chase.
     if not candidates:
-        # Continuation setup: fresh POI aligned with H1, no synthetic market entry.
-        for z in obs+fvgs:
-            e=float(z.get("mid",(z["top"]+z["bot"])/2))
-            if (up and e<=price) or (not up and e>=price):
-                candidates.append((25,e,float(z["bot"] if up else z["top"]),"poi"))
-    if not candidates: return None
-    candidates.sort(key=lambda x:x[0],reverse=True)
-    q,e,invalid,label=candidates[0]
-    return {"entry":float(e),"invalid":float(invalid),"label":label,"quality":q}
+        for z in obs + fvgs:
+            e = float(z.get("mid", (z["top"] + z["bot"]) / 2))
+            if _on_pullback(e):
+                label = "ob_retest_fallback" if "mid" in z and z.get("idx", -1) in {x.get("idx") for x in obs} else "fvg_retest_fallback"
+                candidates.append((30, e, float(z["bot"] if up else z["top"]), label, False))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (x[0], x[4]), reverse=True)
+    q, e, invalid, label, recent = candidates[0]
+    return {
+        "entry": float(e),
+        "invalid": float(invalid),
+        "label": label,
+        "quality": int(q),
+        "trigger_idx": trigger_idx,
+        "reaction_displacement": bool(reaction["displacement"]),
+        "reaction_bos": bool(reaction["bos"]),
+    }
 
 
 def _compute_sl(m15,h1,direction,entry,atr,sweep,invalid=None):
@@ -488,8 +575,10 @@ def _confidence(direction, h1, m15, d1, score, entry, sl, tp, rr):
     if score["displacement"]["confirmed"]: points+=10
     if score["choch"]: points+=6
     if score["cisd"]: points+=4
-    if score["entry_label"]=="fvg": points+=4
-    elif score["entry_label"]=="ob": points+=3
+    if str(score["entry_label"]).startswith("fvg"):
+        points+=4
+    elif str(score["entry_label"]).startswith("ob"):
+        points+=3
     # Momentum 0..14
     if score["momentum"]["rsi_ok"]: points+=7
     if score["momentum"]["volume_ok"]: points+=7
@@ -514,18 +603,9 @@ def score_direction(df_h1, df_m15, df_d1=None, df_btc_h1=None):
         d1=build_df(d1,None)
     sh15,sl15=swing_pts(m15,3); sh1,sl1=swing_pts(h1,3)
     h1_struct=_structure(h1,3); d1_struct=_structure(d1,2) if d1 is not None else "ranging"
-
-    # Sparse/partial symbol feeds are normal in live scanning. Never index
-    # into an empty indicator series: return no signal instead of crashing the
-    # whole scan batch.
-    ema9 = _last_finite(h1["ema9"])
-    ema21 = _last_finite(h1["ema21"])
-    ema50 = _last_finite(h1["ema50"])
-    if ema9 is None or ema21 is None or ema50 is None:
-        return None
-
-    ema_bull=ema9>ema21>ema50
-    ema_bear=ema9<ema21<ema50
+    if h1.empty or len(h1) < 1: return None
+    ema_bull=h1.ema9.iloc[-1]>h1.ema21.iloc[-1]>h1.ema50.iloc[-1]
+    ema_bear=h1.ema9.iloc[-1]<h1.ema21.iloc[-1]<h1.ema50.iloc[-1]
     bull= (12 if ema_bull else 0)+(10 if h1_struct=="bullish" else 0)+(6 if d1_struct=="bullish" else 0)
     bear= (12 if ema_bear else 0)+(10 if h1_struct=="bearish" else 0)+(6 if d1_struct=="bearish" else 0)
     liq_b=detect_liquidity_sweep(m15,sh15,sl15,"bull"); liq_s=detect_liquidity_sweep(m15,sh15,sl15,"bear")
@@ -562,9 +642,6 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame, df_d1: Optional[pd.D
         if score is None: return None
         direction=score["direction"]; h1=build_df(df_h1,60); m15=build_df(df_m15,15)
         if h1 is None or h1.empty or m15 is None or m15.empty: return None
-        # Required live values must exist before any iloc[-1] access below.
-        if _last_finite(m15["close"]) is None or _last_finite(m15["atr"]) is None or _last_finite(m15["rsi"]) is None:
-            return None
         cand=_find_entry(m15,h1,direction,score)
         if cand is None: return None
         sl,risk,sl_reason=_compute_sl(m15,h1,direction,cand["entry"],score["atr"],score["sweep"],cand.get("invalid"))
@@ -572,6 +649,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame, df_d1: Optional[pd.D
         tp,tp_label,rr=_select_tp(_target_pool(h1,m15,direction,cand["entry"],score["atr"]),cand["entry"],risk,direction)
         if tp is None: return None
         score["entry_label"]=cand["label"]; score["risk_atr"]=risk/max(score["atr"],1e-12)
+        score["entry_trigger_idx"] = cand.get("trigger_idx")
+        score["entry_reaction"] = {"displacement": cand.get("reaction_displacement", False), "bos": cand.get("reaction_bos", False)}
         conf=_confidence(direction,h1,m15,df_d1,score,cand["entry"],sl,tp,rr or 0)
         # Keep a low-confidence setup observable; main.py decides whether it is
         # executable through MIN_CONFIDENCE.
@@ -588,6 +667,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame, df_d1: Optional[pd.D
             "inducement":score["inducement"],"entry_confirmation":score["displacement"],
             "momentum":score["momentum"],"trigger_count":int(score["displacement"]["confirmed"])+int(score["choch"])+int(score["cisd"]),
             "tp_sl_reason":f"Entry@{cand['entry']:.8g}({cand['label']}) | SL@{sl:.8g}({sl_reason}) | TP@{tp:.8g}({tp_label}) | RR={rr:.2f}",
+            "entry_trigger": {"idx": cand.get("trigger_idx"), "displacement": cand.get("reaction_displacement", False), "bos": cand.get("reaction_bos", False)},
         }
     except Exception as e:
         if symbol: log.exception("full_analyze %s failed",symbol)
