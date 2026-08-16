@@ -101,12 +101,31 @@ def atr_fn(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return tr.ewm(alpha=1 / n, adjust=False).mean()
 
 
+def _last_finite(series: pd.Series) -> Optional[float]:
+    """Return the latest finite numeric value, or None when unavailable."""
+    if series is None or len(series) == 0:
+        return None
+    s = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if s.empty:
+        return None
+    return float(s.iloc[-1])
+
+
 def build_df(df: pd.DataFrame, interval_minutes: Optional[int] = None) -> Optional[pd.DataFrame]:
+    """Normalize OHLCV and compute indicators without crashing on sparse data.
+
+    A frame is considered usable only when there are at least 60 clean candles
+    after removing an active candle. Indicator warm-up NaNs are allowed in the
+    early rows; callers validate the final values they actually need.
+    """
     out = _ensure_ohlcv(df)
+    if out.empty:
+        return None
     if interval_minutes is not None:
         out = _closed_candles(out, interval_minutes)
-    if len(out) < 60:
+    if out is None or out.empty or len(out) < 60:
         return None
+
     out = out.copy()
     out["ema9"] = ema(out["close"], 9)
     out["ema21"] = ema(out["close"], 21)
@@ -114,11 +133,19 @@ def build_df(df: pd.DataFrame, interval_minutes: Optional[int] = None) -> Option
     out["ema200"] = ema(out["close"], 200) if len(out) >= 200 else ema(out["close"], 50)
     out["rsi"] = rsi(out["close"])
     out["atr"] = atr_fn(out)
-    out["vol_sma"] = out["volume"].rolling(20).mean()
+    out["vol_sma"] = out["volume"].rolling(20, min_periods=1).mean()
     out["vol_ratio"] = out["volume"] / out["vol_sma"].replace(0, np.nan)
     out["buy_volume_ratio"] = np.nan
-    return out.dropna()
+    out = out.replace([np.inf, -np.inf], np.nan)
 
+    # Do NOT drop the entire frame just because volume-derived indicators are
+    # unavailable. Some exchange feeds legitimately contain zero/missing
+    # volume for a subset of symbols. Keep price/EMA/ATR data usable.
+    core = ["open", "high", "low", "close", "ema9", "ema21", "ema50", "ema200", "rsi", "atr"]
+    out = out.dropna(subset=core)
+    if out.empty:
+        return None
+    return out
 
 def swing_pts(df: pd.DataFrame, lb: int = 5):
     df = _ensure_ohlcv(df)
@@ -480,15 +507,25 @@ def _confidence(direction, h1, m15, d1, score, entry, sl, tp, rr):
 
 def score_direction(df_h1, df_m15, df_d1=None, df_btc_h1=None):
     h1=build_df(df_h1,60); m15=build_df(df_m15,15)
-    if h1 is None or m15 is None: return None
+    if h1 is None or h1.empty or m15 is None or m15.empty: return None
     d1=build_df(df_d1,1440) if df_d1 is not None and len(df_d1)>=20 else None
     if d1 is None:
         d1=h1.resample("1D").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
         d1=build_df(d1,None)
     sh15,sl15=swing_pts(m15,3); sh1,sl1=swing_pts(h1,3)
     h1_struct=_structure(h1,3); d1_struct=_structure(d1,2) if d1 is not None else "ranging"
-    ema_bull=h1.ema9.iloc[-1]>h1.ema21.iloc[-1]>h1.ema50.iloc[-1]
-    ema_bear=h1.ema9.iloc[-1]<h1.ema21.iloc[-1]<h1.ema50.iloc[-1]
+
+    # Sparse/partial symbol feeds are normal in live scanning. Never index
+    # into an empty indicator series: return no signal instead of crashing the
+    # whole scan batch.
+    ema9 = _last_finite(h1["ema9"])
+    ema21 = _last_finite(h1["ema21"])
+    ema50 = _last_finite(h1["ema50"])
+    if ema9 is None or ema21 is None or ema50 is None:
+        return None
+
+    ema_bull=ema9>ema21>ema50
+    ema_bear=ema9<ema21<ema50
     bull= (12 if ema_bull else 0)+(10 if h1_struct=="bullish" else 0)+(6 if d1_struct=="bullish" else 0)
     bear= (12 if ema_bear else 0)+(10 if h1_struct=="bearish" else 0)+(6 if d1_struct=="bearish" else 0)
     liq_b=detect_liquidity_sweep(m15,sh15,sl15,"bull"); liq_s=detect_liquidity_sweep(m15,sh15,sl15,"bear")
@@ -524,7 +561,10 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame, df_d1: Optional[pd.D
         score=score_direction(df_h1,df_m15,df_d1,df_btc_h1)
         if score is None: return None
         direction=score["direction"]; h1=build_df(df_h1,60); m15=build_df(df_m15,15)
-        if h1 is None or m15 is None: return None
+        if h1 is None or h1.empty or m15 is None or m15.empty: return None
+        # Required live values must exist before any iloc[-1] access below.
+        if _last_finite(m15["close"]) is None or _last_finite(m15["atr"]) is None or _last_finite(m15["rsi"]) is None:
+            return None
         cand=_find_entry(m15,h1,direction,score)
         if cand is None: return None
         sl,risk,sl_reason=_compute_sl(m15,h1,direction,cand["entry"],score["atr"],score["sweep"],cand.get("invalid"))
