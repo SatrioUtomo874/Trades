@@ -1,6 +1,6 @@
 """
-strategy_logic_terbaik.py
-=========================
+strategy_logic.py 1.2
+====================
 Research-built strategy layer for the supplied Binance M1 dataset and the
 SMC/ICT transcript corpus (combined.txt).
 
@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # Public contract expected by main.py
 # -----------------------------------------------------------------------------
+STRATEGY_VERSION = "1.2"
 MIN_RR = 2.0
 MAX_RR = 4.0
 TRAIL_R_LADDER = []
@@ -590,6 +591,60 @@ def strategy_trailing_stop(df_m15: pd.DataFrame, entry: float, current_sl: float
         candidate=anchor+atr*TRAIL_ATR_BUFFER
         if candidate<current_sl and candidate>current_price: return {"candidate":round(candidate,8),"reason":"new_LH"}
     return {"candidate":None,"reason":"structure_not_advanced"}
+
+
+
+def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
+                    df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> Optional[dict]:
+    """Single position-management contract used by main.py.
+
+    Strategy owns trailing decisions. The engine only executes the returned SL/close
+    instruction. Trail is structural invalidation, not a profit-lock ladder.
+    """
+    try:
+        if not isinstance(state, dict) or df_m15 is None or df_m15.empty:
+            return None
+        signal = state.get("signal") if isinstance(state.get("signal"), dict) else state
+        direction = str(signal.get("decision") or state.get("direction") or "").upper()
+        if direction not in ("BUY", "SELL"):
+            return None
+        entry = float(signal.get("entry", state.get("entry")))
+        current_sl = float(state.get("current_sl", signal.get("sl")))
+        tp = signal.get("tp", state.get("tp"))
+        tp = float(tp) if tp is not None else entry
+        current_price = state.get("current_price", state.get("price"))
+        if current_price is None:
+            current_price = float(df_m15["close"].iloc[-1])
+        else:
+            current_price = float(current_price)
+        atr = float(build_df(df_m15, 15)["atr"].iloc[-1]) if build_df(df_m15, 15) is not None else 0.0
+        risk = abs(entry - float(signal.get("sl", current_sl)))
+        out = strategy_trailing_stop(
+            df_m15=df_m15, entry=entry, current_sl=current_sl,
+            direction="bull" if direction == "BUY" else "bear",
+            risk=risk, current_price=current_price, tp=tp, position=state
+        )
+        cand = out.get("candidate") if isinstance(out, dict) else None
+        if cand is None:
+            return None
+        if direction == "BUY" and not (cand > current_sl and cand < current_price):
+            return None
+        if direction == "SELL" and not (cand < current_sl and cand > current_price):
+            return None
+        return {"sl": round(float(cand), 8), "reason": "trail", "trail_reason": out.get("reason", "structure")}
+    except Exception:
+        if symbol:
+            log.debug("manage_position %s failed", symbol, exc_info=True)
+        return None
+
+def select_best_signal(candidates: list) -> Optional[dict]:
+    """Compatibility helper; multi-signal main.py does not use this.
+
+    Kept so older callers can hot-swap this strategy without a missing symbol.
+    """
+    if not candidates:
+        return None
+    return max(candidates, key=lambda x: (float(x.get("confidence", 0)), float(x.get("rr", 0))))
 
 
 def analyze_setup(*args, **kwargs):
