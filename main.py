@@ -49,12 +49,15 @@ MONITOR_SLEEP       = 10
 REAL_TRADE_POLL_SLEEP = 30
 # Jeda minimum antar-request HTTP ke Binance agar scan tidak menghantam API beruntun.
 # 1 request / detik masih cukup untuk scan 50 koin tanpa burst besar.
-BINANCE_REQUEST_INTERVAL = 1.0
+BINANCE_REQUEST_INTERVAL = 2.5
+# Setelah cooldown/ban Binance selesai, tunggu tambahan 60 detik sebelum request pertama.
+BINANCE_POST_COOLDOWN_GRACE = 60.0
 _binance_request_lock = threading.Lock()
 _binance_last_request_at = 0.0
 MAX_POSITIONS       = 20   # runtime via /max — jangan pindah ke strategy_logic
 MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
+STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
 # ─────────────────────────────────────────────
 
@@ -342,14 +345,44 @@ import re
 # jalan sendiri-sendiri (itu yang bikin log kebanjiran "Skip ... HTTP 418").
 _binance_ban_lock = threading.Lock()
 _binance_banned_until = 0.0   # unix timestamp detik; 0 = tidak sedang ban
+_BINANCE_BAN_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".binance_ban_state.json")
+
+class BinanceCooldownError(ConnectionError):
+    """Tidak mengirim request Binance selama cooldown aktif."""
+
+
+def _load_binance_ban_state():
+    global _binance_banned_until
+    try:
+        with open(_BINANCE_BAN_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        until = float(data.get("banned_until", 0.0))
+        if until > time.time():
+            _binance_banned_until = until
+            log.warning(f"[binance] cooldown dipulihkan: {until-time.time():.0f} detik tersisa")
+    except Exception:
+        pass
+
+
+def _save_binance_ban_state(until):
+    try:
+        tmp = _BINANCE_BAN_STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"banned_until": float(until)}, f)
+        os.replace(tmp, _BINANCE_BAN_STATE_FILE)
+    except Exception as e:
+        log.debug(f"[binance] gagal simpan cooldown: {e}")
+
+_load_binance_ban_state()
 
 def _binance_wait_if_banned():
     with _binance_ban_lock:
         until = _binance_banned_until
     remaining = until - time.time()
     if remaining > 0:
-        log.warning(f"[binance] Masih dalam masa ban, menunggu {remaining:.0f} detik lagi sebelum request baru...")
-        time.sleep(remaining + 1)   # +1 detik buffer
+        log.warning(f"[binance] COOLDOWN AKTIF — request Binance DIBATALKAN, {remaining:.0f} detik tersisa. Gunakan fallback.")
+        raise BinanceCooldownError(f"Binance cooldown aktif {remaining:.0f}s")
+
 
 def _binance_register_ban(msg="", fallback_seconds=60):
     """Catat waktu ban global. Coba parse 'banned until <ms epoch>' dari
@@ -358,11 +391,19 @@ def _binance_register_ban(msg="", fallback_seconds=60):
     global _binance_banned_until
     m = re.search(r"banned until (\d+)", msg)
     until = int(m.group(1)) / 1000 if m else (time.time() + fallback_seconds)
+    # Jangan langsung menembak Binance ketika masa ban resmi berakhir.
+    # Tambahkan grace period 60 detik dan simpan juga ke state agar tetap berlaku
+    # setelah restart bot.
+    until += BINANCE_POST_COOLDOWN_GRACE
     with _binance_ban_lock:
         if until > _binance_banned_until:
             _binance_banned_until = until
-    wait = until - time.time()
-    log.error(f"[binance] Kena limit/ban — semua request Binance dijeda {max(wait,0):.0f} detik.")
+            current_until = _binance_banned_until
+        else:
+            current_until = _binance_banned_until
+    _save_binance_ban_state(current_until)
+    wait = current_until - time.time()
+    log.error(f"[binance] Kena limit/ban — request dijeda {max(wait,0):.0f} detik (termasuk grace 60 detik setelah cooldown).")
 
 
 def _binance_request_pause():
@@ -394,38 +435,26 @@ def _raw_get(url, params=None, retries=3):
 
 # ── BINANCE REST (backfill awal WS + fallback tier-2) ─────────────────
 def fapi_get(path, params=None):
+    # Satu request saja per pemanggilan. Retry REST publik ke Binance dihapus:
+    # saat gagal langsung gunakan fallback agar error tidak berubah menjadi burst.
     _binance_wait_if_banned()
-    for i in range(3):
-        try:
-            _binance_request_pause()
-            r = requests.get(f"{FAPI}{path}", params=params,
-                             timeout=10, verify=False)
-            if r.status_code in (418, 429):
-                # Kena rate-limit/ban IP dari Binance — JANGAN retry lagi
-                # ke Binance (mengulang request saat sedang kena ban malah
-                # berisiko memperpanjang durasi ban). Catat state ban
-                # global (dipakai fapi_get & _binance_signed) lalu lempar
-                # ke caller supaya pindah ke tier fallback (Bybit → WS).
-                try:
-                    body_msg = r.text
-                except Exception:
-                    body_msg = ""
-                _binance_register_ban(body_msg)
-                raise ConnectionError(
-                    f"Binance kena limit/ban (HTTP {r.status_code})")
-            d = r.json()
-            if isinstance(d, dict) and "code" in d:
-                if d["code"] == -1003:
-                    _binance_register_ban(d.get("msg", ""))
-                raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
-            return d
-        except ConnectionError as e:
-            log.warning(f"[binance] {e} — stop retry Binance, pindah fallback")
-            raise
-        except Exception as e:
-            log.warning(f"[binance] {i+1}/3: {e}")
-            time.sleep(2)
-    raise ConnectionError(f"Binance gagal: {path}")
+    try:
+        _binance_request_pause()
+        r = requests.get(f"{FAPI}{path}", params=params, timeout=10, verify=False)
+        if r.status_code in (418, 429):
+            _binance_register_ban(r.text or "")
+            raise BinanceCooldownError(f"Binance kena limit/ban (HTTP {r.status_code})")
+        d = r.json()
+        if isinstance(d, dict) and "code" in d:
+            if d["code"] == -1003:
+                _binance_register_ban(d.get("msg", ""))
+            raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
+        return d
+    except BinanceCooldownError:
+        raise
+    except Exception as e:
+        log.warning(f"[binance] {path} gagal: {e} — langsung fallback")
+        raise ConnectionError(f"Binance gagal: {path}: {e}") from e
 
 
 # ============================================================
@@ -1102,12 +1131,10 @@ def get_price(symbol):
     """Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS (fallback TERAKHIR,
     hanya dipakai kalau REST Binance & Bybit gagal/error/kena ban) →
     Tier4 CoinGecko (darurat paling akhir, hanya koin di COINGECKO_ID_MAP)."""
-    for _ in range(2):
-        try:
-            return _binance_price(symbol)
-        except Exception as e:
-            log.warning(f"[price/binance] {symbol}: {e}")
-            time.sleep(1)
+    try:
+        return _binance_price(symbol)
+    except Exception as e:
+        log.warning(f"[price/binance] {symbol}: {e} — fallback")
     for _ in range(2):
         try:
             return _bybit_price(symbol)
@@ -1260,34 +1287,58 @@ def _price_cache_loop():
 # INDIKATOR
 # ═════════════════════════════════════════════
 def run_scan_once(chat_id):
-    """Scanner + dispatcher. Strategy owns analysis and candidate selection."""
+    """
+    Scan seluruh universe dan kembalikan SEMUA setup yang lolos threshold.
+    main.py adalah tubuh/orchestrator: mengumpulkan hasil, menerapkan threshold,
+    lalu menyerahkan setiap setup valid ke execution. Semua keputusan market
+    (Entry/SL/TP/Trail/Confidence) tetap berasal dari strategy_logic.py.
+    """
     tg_send(chat_id, f"🔍 Scanning {TOP_N_COINS} koin...")
-    try: symbols = get_top_coins()
+    try:
+        symbols = get_top_coins()
     except Exception as e:
-        tg_send(chat_id, f"⚠️ Market data error: <code>{str(e)[:150]}</code>"); return None
+        tg_send(chat_id, f"⚠️ Market data error: <code>{str(e)[:150]}</code>")
+        return []
     if not symbols:
-        tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan."); return None
-    results=[]
-    for idx,sym in enumerate(symbols,1):
+        tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan.")
+        return []
+
+    results = []
+    for idx, sym in enumerate(symbols, 1):
         log.info(f"[{idx:02d}/{len(symbols)}] {sym}")
         try:
-            h1=get_klines(sym,"1h",250); m15=get_klines(sym,"15m",250)
-            try: d1=get_klines(sym,"1d",100)
-            except Exception: d1=None
-            r=full_analyze(h1,m15,d1,symbol=sym)
-            if r: results.append(r)
-        except Exception as e: log.debug(f"[scan] {sym}: {e}")
+            h1 = get_klines(sym, "1h", 250)
+            m15 = get_klines(sym, "15m", 250)
+            try:
+                d1 = get_klines(sym, "1d", 100)
+            except Exception:
+                d1 = None
+            r = full_analyze(h1, m15, d1, symbol=sym)
+            if isinstance(r, dict):
+                conf = float(r.get("confidence", 0) or 0)
+                if conf >= STRATEGY_CONFIDENCE_THRESHOLD:
+                    results.append(r)
+                    log.info(f"[SIGNAL] {sym} {r.get('decision')} confidence={conf:.1f}")
+                else:
+                    log.info(f"[FILTER] {sym} confidence={conf:.1f} < {STRATEGY_CONFIDENCE_THRESHOLD}")
+        except Exception as e:
+            log.debug(f"[scan] {sym}: {e}")
+
+        # Request throttle global sudah mengatur Binance; jeda kecil ini hanya
+        # memberi scheduler/thread lain kesempatan berjalan.
         time.sleep(0.15)
+
+    results.sort(key=lambda x: float(x.get("confidence", 0) or 0), reverse=True)
     if not results:
-        tg_send(chat_id,"⚠️ Strategy tidak menghasilkan setup."); return None
-    selector=globals().get("select_best_signal")
-    if not callable(selector):
-        if len(results)==1: return results[0]
-        tg_send(chat_id,"⚠️ Strategy belum menyediakan select_best_signal(); engine tidak memilih setup.")
-        return None
-    try: return selector(results)
-    except Exception as e:
-        log.error(f"[strategy/select] {e}"); return None
+        tg_send(chat_id, f"⚠️ Tidak ada setup dengan confidence ≥ {STRATEGY_CONFIDENCE_THRESHOLD}%.")
+        return []
+
+    summary = "\n".join(
+        f"• {r.get('symbol','?')} {r.get('decision','?')} — {float(r.get('confidence',0)):.0f}%"
+        for r in results
+    )
+    tg_send(chat_id, f"✅ <b>{len(results)} sinyal lolos</b> (threshold {STRATEGY_CONFIDENCE_THRESHOLD}%)\n\n{summary}")
+    return results
 
 
 
@@ -2056,27 +2107,47 @@ def simulation_loop(chat_id):
     def do_scan():
         nonlocal scanning
         try:
-            signal=run_scan_once(chat_id)
-            if not auto_mode or not signal:return
-            sym=signal["symbol"]
-            with positions_lock:
-                if sym in positions or len(positions)>=MAX_POSITIONS:return
-            if REAL_TRADE_ENABLED:
-                _open_pending_real(sym,signal,chat_id); return
-            price=signal.get("price") or get_price(sym); entry=signal.get("entry")
-            if price is None or entry is None:return
-            mode=str(signal.get("execution_mode","")).lower() or ("market" if signal.get("entry_label")=="market" else "limit")
-            with positions_lock:
-                if sym in positions or len(positions)>=MAX_POSITIONS:return
-                positions[sym]={"signal":signal,"entry":entry,"chat_id":chat_id,"entry_time":None,
-                                "timeout_flag":False,"status":"pending"}
-            if mode=="market":
-                _open_position(sym,signal,get_price(sym) or price,chat_id,"strategy")
-            else:
-                tg_send(chat_id,f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(signal)}")
-                threading.Thread(target=wait_entry,args=(sym,signal,chat_id),daemon=True).start()
+            signals = run_scan_once(chat_id)
+            if not auto_mode or not signals:
+                return
+
+            opened = 0
+            for signal in signals:
+                if not auto_mode:
+                    break
+                sym = signal.get("symbol")
+                if not sym:
+                    continue
+                with positions_lock:
+                    if sym in positions or len(positions) >= MAX_POSITIONS:
+                        continue
+
+                if REAL_TRADE_ENABLED:
+                    _open_pending_real(sym, signal, chat_id)
+                    opened += 1
+                    continue
+
+                price = signal.get("price") or get_price(sym)
+                entry = signal.get("entry")
+                if price is None or entry is None:
+                    continue
+                mode = str(signal.get("execution_mode", "")).lower() or ("market" if signal.get("entry_label") == "market" else "limit")
+                with positions_lock:
+                    if sym in positions or len(positions) >= MAX_POSITIONS:
+                        continue
+                    positions[sym] = {"signal": signal, "entry": entry, "chat_id": chat_id,
+                                      "entry_time": None, "timeout_flag": False, "status": "pending"}
+                if mode == "market":
+                    _open_position(sym, signal, get_price(sym) or price, chat_id, "strategy")
+                else:
+                    tg_send(chat_id, f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(signal)}")
+                    threading.Thread(target=wait_entry, args=(sym, signal, chat_id), daemon=True).start()
+                opened += 1
+
+            log.info(f"[scan] {len(signals)} signal lolos, {opened} dikirim ke execution")
         finally:
-            with scan_lock: scanning=False
+            with scan_lock:
+                scanning = False
 
     def wait_entry(sym,signal,chat_id):
         entry=signal["entry"]; buy=signal["decision"]=="BUY"; deadline=time.time()+8*3600
@@ -2163,26 +2234,7 @@ def bot_loop():
     if ALLOWED_USER_ID:
         active_chat_id = ALLOWED_USER_ID
 
-    # Cek koneksi Binance dipindah ke THREAD TERPISAH di background —
-    # TIDAK BOLEH memblokir atau mematikan polling Telegram. SEBELUMNYA
-    # cek ini ada di jalur utama bot_loop(): kalau ping gagal 10x
-    # (mis. IP Render kena rate-limit/geo-block sementara oleh Binance),
-    # baris "return" bikin SELURUH bot_loop() — termasuk polling
-    # Telegram — berhenti total dan tidak pernah jalan lagi. Itulah
-    # penyebab utama bot "tidak bisa diakses lewat Telegram" sebelumnya.
-    def _check_binance():
-        for i in range(10):
-            try:
-                fapi_get("/fapi/v1/ping")
-                log.info("Binance OK!")
-                return
-            except Exception as e:
-                log.warning(f"[binance-ping] retry {i+1}/10: {e}")
-                time.sleep(10)
-        log.error("Binance tidak bisa dijangkau setelah 10x percobaan. "
-                   "Bot tetap jalan — scan & harga otomatis fallback ke "
-                   "Bybit/CoinGecko selama Binance bermasalah.")
-    threading.Thread(target=_check_binance, daemon=True).start()
+    # Tidak ada startup ping Binance. Request hanya dilakukan saat benar-benar dibutuhkan.
 
     offset=None
     log.info("Bot siap.")
@@ -2343,7 +2395,8 @@ def bot_loop():
                        # -- Fungsi opsional --------------------------------------------------
                        # Kalau tidak ada di file baru -> versi lama di global tetap aktif.
                        # Kamu bebas ganti nama, tambah, atau hapus fungsi apapun
-                       # selama full_analyze() tetap ada.                        _OPT_FNS = ["select_best_signal", "manage_position"]
+                       # selama full_analyze() tetap ada.
+                       _OPT_FNS = ["manage_position"]
                        _bound_fns, _kept_fns = [], []
                        for _fn in _OPT_FNS:
                            (_bound_fns if _sl_bind(_fn) else _kept_fns).append(_fn)
@@ -2360,7 +2413,8 @@ def bot_loop():
                                        _bound_fns.append(f"✨{_attr}")
 
                        # -- Konstanta opsional -----------------------------------------------
-                       # Kalau tidak ada di file baru, nilai lama dipertahankan.                        _OPT_CONSTS = []
+                       # Kalau tidak ada di file baru, nilai lama dipertahankan.
+                       _OPT_CONSTS = []
                        _bound_consts, _kept_consts = [], []
                        for _k in _OPT_CONSTS:
                            (_bound_consts if _sl_bind(_k) else _kept_consts).append(_k)
