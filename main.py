@@ -47,6 +47,11 @@ MONITOR_SLEEP       = 10
 # memicu eksekusinya. Terlalu sering polling = boros weight API tanpa manfaat
 # nyata, malah berisiko kena limit/ban (lihat _binance_wait_if_banned).
 REAL_TRADE_POLL_SLEEP = 30
+# Jeda minimum antar-request HTTP ke Binance agar scan tidak menghantam API beruntun.
+# 1 request / detik masih cukup untuk scan 50 koin tanpa burst besar.
+BINANCE_REQUEST_INTERVAL = 1.0
+_binance_request_lock = threading.Lock()
+_binance_last_request_at = 0.0
 MAX_POSITIONS       = 20   # runtime via /max — jangan pindah ke strategy_logic
 MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
@@ -360,6 +365,20 @@ def _binance_register_ban(msg="", fallback_seconds=60):
     log.error(f"[binance] Kena limit/ban — semua request Binance dijeda {max(wait,0):.0f} detik.")
 
 
+def _binance_request_pause():
+    """Throttle SEMUA request HTTP ke Binance, publik maupun signed.
+    Satu global gate membuat beberapa thread tidak bisa menembak Binance
+    bersamaan. Cooldown ban tetap dipatuhi oleh _binance_wait_if_banned().
+    """
+    global _binance_last_request_at
+    now = time.monotonic()
+    with _binance_request_lock:
+        wait = BINANCE_REQUEST_INTERVAL - (now - _binance_last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _binance_last_request_at = time.monotonic()
+
+
 def _raw_get(url, params=None, retries=3):
     """HTTP GET dengan retry — digunakan oleh Bybit & CoinGecko."""
     for i in range(retries):
@@ -378,6 +397,7 @@ def fapi_get(path, params=None):
     _binance_wait_if_banned()
     for i in range(3):
         try:
+            _binance_request_pause()
             r = requests.get(f"{FAPI}{path}", params=params,
                              timeout=10, verify=False)
             if r.status_code in (418, 429):
@@ -430,6 +450,7 @@ def _binance_signed(method, path, params=None):
     last_err = None
     for attempt in range(3):
         try:
+            _binance_request_pause()
             r = requests.request(method, url, headers=headers, timeout=10, verify=False)
             if r.status_code in (418, 429):
                 _binance_register_ban(r.text)
