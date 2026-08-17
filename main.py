@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py V2 — MESIN (engine). Telegram handler, API client, monitoring,
+main.py V4 — MESIN (engine). Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
 strategy_logic.py ("Otak"), diimpor di bawah.
 
@@ -66,6 +66,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
+MAIN_ENGINE_VERSION = "V4"
 # ─────────────────────────────────────────────
 
 # Import OTAK — kalau gagal ATAU full_analyze() tidak ada di dalamnya
@@ -2317,83 +2318,125 @@ def _clear_pending_protection(sym):
 
 
 def _resume_binance_and_flush_pending(chat_id=None):
-    """Recovery atomik: remain paused through sync + pending-trail flush,
-    lalu baru aktifkan scanner."""
-    global _binance_recovering, _binance_scan_paused
+    'Strict Binance recovery. Scanner tetap PAUSED sampai seluruh recovery gate sukses.'
+    global _binance_recovering, _binance_scan_paused, _binance_pause_reason
     if _binance_cooldown_remaining() > 0:
         return False
     with _binance_pause_lock:
         _binance_recovering = True
         _binance_scan_paused = True
-    log.info("[BINANCE RESUME] Cooldown selesai + grace 60s. Sync sebelum scanner resume...")
+        _binance_pause_reason = 'recovery in progress'
+    log.info('[BINANCE RESUME] Cooldown + grace selesai. Strict sync & protection recovery dimulai...')
+    failures = []
     try:
+        # 1) STRICT POSITION SYNC
         with positions_lock:
             items = list(positions.items())
         for sym, pos in items:
-            if pos.get("status") != "active":
+            if pos.get('status') != 'active':
                 continue
             try:
                 real = get_real_position(sym)
-                if real is not None:
-                    pos["quantity"] = abs(float(real.get("positionAmt", pos.get("quantity",0))))
+                if real is None:
+                    failures.append(f'{sym}: position sync returned no position')
+                    log.error(f'[resume] SYNC GAGAL {sym}: posisi tidak terkonfirmasi')
+                    continue
+                live_qty = abs(float(real.get('positionAmt', 0)))
+                if live_qty <= 0:
+                    failures.append(f'{sym}: position quantity=0')
+                    log.error(f'[resume] SYNC GAGAL {sym}: quantity=0')
+                    continue
+                with positions_lock:
+                    if sym in positions:
+                        positions[sym]['quantity'] = live_qty
+                        positions[sym]['exchange_synced_at'] = time.time()
             except Exception as e:
-                log.warning(f"[resume] sync {sym}: {e}")
+                failures.append(f'{sym}: sync {e}')
+                log.error(f'[resume] SYNC GAGAL {sym}: {e}')
+
+        # 2) STRICT PENDING PROTECTION
         with _pending_protections_lock:
             protections = [(sym, dict(v)) for sym, v in _pending_protections.items()]
         for sym, pr in protections:
             try:
                 with positions_lock:
                     pos = positions.get(sym)
-                if not pos or pos.get("status") != "active":
-                    _clear_pending_protection(sym); continue
-                qty = pos.get("quantity") or pr.get("quantity")
-                buy = pr.get("side") == "BUY"
-                t, s = place_tp_sl(sym, buy, pr["tp"], pr["sl"], qty)
+                if not pos or pos.get('status') != 'active':
+                    _clear_pending_protection(sym)
+                    continue
+                qty = pos.get('quantity') or pr.get('quantity')
+                buy = pr.get('side') == 'BUY'
+                if not qty or pr.get('tp') is None or pr.get('sl') is None:
+                    raise RuntimeError('pending protection tidak lengkap')
+                t, s = place_tp_sl(sym, buy, pr['tp'], pr['sl'], qty)
                 with positions_lock:
                     if sym in positions:
-                        positions[sym].update({"tp_order_id": t["algoId"], "sl_order_id": s["algoId"]})
+                        positions[sym].update({'tp_order_id': t['algoId'], 'sl_order_id': s['algoId']})
                 _clear_pending_protection(sym)
-                log.info(f"[protection-resume] {sym} TP/SL berhasil dipasang kembali.")
+                log.info(f'[protection-resume] {sym} TP/SL berhasil dipasang kembali.')
             except Exception as e:
-                log.error(f"[protection-resume] {sym} gagal: {e}")
+                failures.append(f'{sym}: protection {e}')
+                log.error(f'[protection-resume] {sym} GAGAL: {e}')
+
+        # 3) STRICT PENDING TRAIL
         with _pending_trails_lock:
             pending = [(sym, dict(v)) for sym, v in _pending_trails.items()]
         for sym, tr in pending:
             try:
                 with positions_lock:
                     pos = positions.get(sym)
-                if not pos or pos.get("status") != "active":
-                    _clear_pending_trail(sym); continue
-                buy = pos["signal"]["decision"] == "BUY"
-                qty = pos.get("quantity") or tr.get("quantity")
-                tp = tr.get("tp") or pos["signal"].get("tp")
-                sl = tr.get("sl") or pos.get("current_sl")
-                if qty and sl is not None and tp is not None:
-                    cancel_algo_order(pos.get("tp_order_id")); cancel_algo_order(pos.get("sl_order_id"))
-                    t, s = place_tp_sl(sym, buy, tp, sl, qty)
-                    with positions_lock:
-                        if sym in positions:
-                            positions[sym].update({"tp_order_id": t["algoId"], "sl_order_id": s["algoId"]})
+                if not pos or pos.get('status') != 'active':
                     _clear_pending_trail(sym)
-                    log.info(f"[trail-resume] {sym} pending trail berhasil dipasang kembali.")
+                    continue
+                buy = pos['signal']['decision'] == 'BUY'
+                qty = pos.get('quantity') or tr.get('quantity')
+                tp = tr.get('tp') or pos['signal'].get('tp')
+                sl = tr.get('sl') or pos.get('current_sl')
+                if not qty or sl is None or tp is None:
+                    raise RuntimeError('pending trail tidak lengkap')
+                cancel_algo_order(pos.get('tp_order_id'))
+                cancel_algo_order(pos.get('sl_order_id'))
+                t, s = place_tp_sl(sym, buy, tp, sl, qty)
+                with positions_lock:
+                    if sym in positions:
+                        positions[sym].update({'tp_order_id': t['algoId'], 'sl_order_id': s['algoId'], 'exchange_synced_at': time.time()})
+                _clear_pending_trail(sym)
+                log.info(f'[trail-resume] {sym} pending trail berhasil dipasang kembali.')
             except Exception as e:
-                log.error(f"[trail-resume] {sym} gagal flush: {e}")
+                failures.append(f'{sym}: trail {e}')
+                log.error(f'[trail-resume] {sym} GAGAL: {e}')
+
+        # 4) HARD GATE: partial recovery tidak boleh menyalakan scanner.
+        if failures:
+            with _binance_pause_lock:
+                _binance_recovering = False
+                _binance_scan_paused = True
+                _binance_pause_reason = 'recovery incomplete'
+            msg = ' | '.join(failures[:6])
+            log.error(f'[BINANCE RECOVERY] BELUM SELESAI — scanner tetap PAUSED. {msg}')
+            if chat_id:
+                tg_send(chat_id, '⚠️ <b>Binance recovery belum selesai.</b>\nScanner tetap dihentikan karena sync/protection masih gagal.\nDetail: <code>' + msg[:500] + '</code>')
+            return False
+
+        # Semua gate sukses → scanner baru boleh resume.
         with _binance_pause_lock:
             _binance_recovering = False
             _binance_scan_paused = False
-            _binance_pause_reason = ""
+            _binance_pause_reason = ''
         if chat_id:
-            tg_send(chat_id, "✅ <b>Binance recovery selesai.</b> Pending trailing diproses, scanning boleh resume.")
+            tg_send(chat_id, '✅ <b>Binance recovery selesai.</b>\nSemua posisi berhasil disinkronkan dan pending protection/trailing berhasil diproses.\nScanning boleh resume.')
         return True
-    except Exception:
+
+    except Exception as e:
         with _binance_pause_lock:
             _binance_recovering = False
             _binance_scan_paused = True
-        raise
-
+            _binance_pause_reason = 'recovery exception'
+        log.error(f'[BINANCE RECOVERY] exception — scanner tetap PAUSED: {e}', exc_info=True)
+        return False
 
 def _binance_recovery_loop(chat_id_getter=lambda: active_chat_id):
-    """Watchdog global. Tidak scan saat paused; setelah cooldown+60s, sync lalu resume."""
+    """Watchdog global. Setelah cooldown+60s, lakukan strict recovery; scanner hanya resume jika seluruh gate sukses."""
     notified = False
     while True:
         try:
@@ -2623,7 +2666,7 @@ def bot_loop():
     _telegram_bootstrap()
     offset=None
     poll_backoff=1
-    log.info("Bot siap.")
+    log.info(f"Bot siap — main.py {MAIN_ENGINE_VERSION}.")
     if ALLOWED_USER_ID:
         tg_send(ALLOWED_USER_ID,
             "✅ <b>Bot Siap</b>\n"
