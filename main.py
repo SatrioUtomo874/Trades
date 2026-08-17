@@ -1531,208 +1531,227 @@ def fmt_backtest():
     return f"📋 <b>Backtest ({len(hist)} trade terakhir)</b>\n\n" + "\n\n".join(lines)
 
 # ============================================================
-# TAMBAHAN BARU (START) — Fungsi Generator untuk /analyze
+# ANALYZE — DIAGNOSTIC SNAPSHOT (DUA FILE: MD + CSV)
 # ============================================================
+def _json_compact(value):
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+        except Exception:
+            return str(value)
+    return value
 
-def _session_of(entry_time):
-    if not entry_time:
-        return "unknown"
-    h = datetime.fromtimestamp(entry_time, WIB).hour
-    if h < 8:  return "Asia"
-    if h < 16: return "London"
-    return "New York"
 
-def _calc_full_metrics(hist, starting_balance):
-    """Analisa lengkap dari pnl_history: profit factor, drawdown, expectancy, sharpe, dst."""
+def _analysis_row(symbol, sig=None, status="ok", error=""):
+    """Normalisasi hasil full_analyze() menjadi satu baris diagnostik."""
+    sig = sig if isinstance(sig, dict) else {}
+    row = {
+        "symbol": symbol,
+        "status": status,
+        "error": error,
+        "decision": sig.get("decision", ""),
+        "confidence": sig.get("confidence", ""),
+        "above_threshold": bool(
+            isinstance(sig.get("confidence"), (int, float))
+            and float(sig.get("confidence")) >= STRATEGY_CONFIDENCE_THRESHOLD
+        ),
+        "entry": sig.get("entry", ""),
+        "entry_label": sig.get("entry_label", ""),
+        "entry_state": sig.get("entry_state", ""),
+        "sl": sig.get("sl", ""),
+        "tp": sig.get("tp", ""),
+        "rr": sig.get("rr", ""),
+        "atr": sig.get("atr", ""),
+        "risk_atr": sig.get("risk_atr", ""),
+        "rsi": sig.get("rsi", ""),
+        "struct_h1": sig.get("struct_h1", ""),
+        "struct_m15": sig.get("struct_m15", ""),
+        "d1_bias": sig.get("d1_bias", ""),
+        "htf_bias": sig.get("htf_bias", ""),
+        "h1_bias": sig.get("h1_bias", ""),
+        "choch_m15": _json_compact(sig.get("choch_m15", {})),
+        "choch_h1": _json_compact(sig.get("choch_h1", {})),
+        "cisd_m15": _json_compact(sig.get("cisd_m15", {})),
+        "failed_retest": _json_compact(sig.get("failed_retest", {})),
+        "poi_reacted": sig.get("poi_reacted", ""),
+        "htf_overlap": sig.get("htf_overlap", ""),
+        "selected_sweep": sig.get("selected_sweep", ""),
+        "sweep_context": _json_compact(sig.get("sweep_context", {})),
+        "trigger_count": sig.get("trigger_count", ""),
+        "entry_confirmation": _json_compact(sig.get("entry_confirmation", {})),
+        "tp_sl_reason": sig.get("tp_sl_reason", ""),
+    }
+    return row
+
+
+def _analyze_snapshot():
+    """Scan satu universe sekali dan simpan SEMUA hasil strategy, termasuk yang di bawah threshold."""
+    try:
+        symbols = get_top_coins()
+    except Exception as e:
+        return [], [], f"market-data error: {e}"
+    if not symbols:
+        return [], [], "universe kosong"
+
+    rows = []
+    passing = []
+    for idx, sym in enumerate(symbols, 1):
+        log.info(f"[analyze {idx:02d}/{len(symbols)}] {sym}")
+        try:
+            h1 = get_klines(sym, "1h", 250)
+            m15 = get_klines(sym, "15m", 250)
+            try:
+                d1 = get_klines(sym, "1d", 100)
+            except Exception:
+                d1 = None
+            sig = full_analyze(h1, m15, d1, symbol=sym)
+            if isinstance(sig, dict):
+                row = _analysis_row(sym, sig)
+                rows.append(row)
+                if row["above_threshold"]:
+                    passing.append(sig)
+            else:
+                rows.append(_analysis_row(sym, status="no_setup"))
+        except Exception as e:
+            rows.append(_analysis_row(sym, status="error", error=str(e)[:250]))
+        time.sleep(0.15)
+    return rows, passing, ""
+
+
+def _analyze_runtime_stats():
+    with stat_lock:
+        hist = list(stats["pnl_history"])
+        balance = stats["balance"]
     if not hist:
-        return {}
-    n = len(hist)
-    wins   = [h["pnl_usd"] for h in hist if h["pnl_usd"] >= 0]
-    losses = [h["pnl_usd"] for h in hist if h["pnl_usd"] < 0]
+        return {
+            "trades": 0, "balance": balance, "net": 0.0, "win_rate": 0.0,
+            "profit_factor": 0.0, "max_dd": 0.0, "expectancy": 0.0,
+        }
+    wins = [float(t.get("pnl_usd", 0.0)) for t in hist if float(t.get("pnl_usd", 0.0)) >= 0]
+    losses = [float(t.get("pnl_usd", 0.0)) for t in hist if float(t.get("pnl_usd", 0.0)) < 0]
     gross_profit = sum(wins)
-    gross_loss   = abs(sum(losses))
-    net_profit   = gross_profit - gross_loss
-
-    equity = [starting_balance] + [h["balance_after"] for h in hist]
-    peak, max_dd_usd = equity[0], 0.0
+    gross_loss = abs(sum(losses))
+    equity = [STARTING_BALANCE] + [float(t.get("balance_after", STARTING_BALANCE)) for t in hist]
+    peak = equity[0]
+    max_dd = 0.0
     for e in equity:
         peak = max(peak, e)
-        max_dd_usd = max(max_dd_usd, peak - e)
-    max_dd_pct = (max_dd_usd / peak * 100) if peak > 0 else 0
-
-    returns = [h["pct"] for h in hist]
-    mean_r  = sum(returns) / n
-    std_r   = (sum((r - mean_r) ** 2 for r in returns) / n) ** 0.5 if n > 1 else 0
-
+        max_dd = max(max_dd, peak - e)
+    net = gross_profit - gross_loss
     return {
-        "total_trades": n,
-        "net_profit": round(net_profit, 4),
-        "gross_profit": round(gross_profit, 4),
-        "gross_loss": round(gross_loss, 4),
-        "profit_factor": round(gross_profit / gross_loss, 3) if gross_loss > 0 else 0,
-        "win_rate_pct": round(len(wins) / n * 100, 2),
-        "avg_win_usd": round(gross_profit / len(wins), 4) if wins else 0,
-        "avg_loss_usd": round(gross_loss / len(losses), 4) if losses else 0,
-        "expectancy_usd": round(net_profit / n, 4),
-        "max_drawdown_usd": round(max_dd_usd, 4),
-        "max_drawdown_pct": round(max_dd_pct, 2),
-        "recovery_factor": round(net_profit / max_dd_usd, 3) if max_dd_usd > 0 else 0,
-        "sharpe_ratio": round(mean_r / std_r, 3) if std_r > 0 else 0,
-        "return_pct": round(net_profit / starting_balance * 100, 2),
+        "trades": len(hist),
+        "balance": balance,
+        "net": net,
+        "win_rate": len(wins) / len(hist) * 100.0,
+        "profit_factor": gross_profit / gross_loss if gross_loss > 0 else 0.0,
+        "max_dd": max_dd,
+        "expectancy": net / len(hist),
     }
 
-def _generate_statistics_csv():
-    """Generate statistics.csv — analisa performa lengkap (net profit, drawdown, sharpe, dst)."""
-    with stat_lock:
-        hist = list(stats["pnl_history"])
-        balance = stats["balance"]
 
-    metrics = _calc_full_metrics(hist, STARTING_BALANCE)
-    metrics["balance"] = balance
-    metrics["starting_balance"] = STARTING_BALANCE
-    if not metrics:
-        metrics = {"total_trades": 0, "balance": balance, "starting_balance": STARTING_BALANCE}
-
-    df = pd.DataFrame([metrics])
-    path = "/tmp/statistics.csv"
-    df.to_csv(path, index=False)
+def _write_analyze_csv(rows):
+    path = "/tmp/analyze_data.csv"
+    cols = [
+        "symbol", "status", "error", "decision", "confidence", "above_threshold",
+        "entry", "entry_label", "entry_state", "sl", "tp", "rr", "atr", "risk_atr", "rsi",
+        "struct_h1", "struct_m15", "d1_bias", "htf_bias", "h1_bias", "choch_m15", "choch_h1",
+        "cisd_m15", "failed_retest", "poi_reacted", "htf_overlap", "selected_sweep", "sweep_context",
+        "trigger_count", "entry_confirmation", "tp_sl_reason",
+    ]
+    pd.DataFrame(rows, columns=cols).to_csv(path, index=False)
     return path
 
-def _generate_trade_csv():
-    """Generate trade.csv dari pnl_history — termasuk detail sinyal
-    (confidence/entry_label/rr/rsi/struct_h1) biar cukup buat diagnosis
-    strategy_logic.py tanpa perlu data tambahan."""
-    with stat_lock:
-        hist = list(stats["pnl_history"])
-    
-    cols = ["symbol", "decision", "result", "pnl_pct", "pnl_usd",
-            "entry", "tp", "sl", "exit_price", "entry_time", "exit_time",
-            "confidence", "entry_label", "rr", "rsi", "struct_h1", "d1_bias"]
-    if not hist:
-        df = pd.DataFrame(columns=cols)
-        path = "/tmp/trade.csv"
-        df.to_csv(path, index=False)
-        return path
-    
-    rows = []
-    for h in hist:
-        rows.append({
-            "symbol": h.get("symbol", ""),
-            "decision": h.get("decision", ""),
-            "result": h["result"],
-            "pnl_pct": h["pct"],
-            "pnl_usd": h["pnl_usd"],
-            "entry": h.get("entry", 0),
-            "tp": h.get("tp", 0),
-            "sl": h.get("sl", 0),
-            "exit_price": h.get("exit_price", 0),
-            "entry_time": datetime.fromtimestamp(h.get("entry_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if h.get("entry_time") else "",
-            "exit_time": datetime.fromtimestamp(h.get("exit_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if h.get("exit_time") else "",
-            "confidence": h.get("confidence", ""),
-            "entry_label": h.get("entry_label", ""),
-            "rr": h.get("rr", ""),
-            "rsi": h.get("rsi", ""),
-            "struct_h1": h.get("struct_h1", ""),
-            "d1_bias": h.get("d1_bias", ""),
-        })
-    df = pd.DataFrame(rows)
-    path = "/tmp/trade.csv"
-    df.to_csv(path, index=False)
-    return path
 
-def _confidence_bucket(c):
-    if c is None: return "unknown"
-    if c < 50: return "<50"
-    if c < 65: return "50-64"
-    if c < 80: return "65-79"
-    return "80+"
+def _write_analyze_report(rows, passing, universe_error=""):
+    path = "/tmp/analyze_report.md"
+    now = datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S WIB")
+    rt = _analyze_runtime_stats()
+    analyzed = len(rows)
+    setup_rows = [r for r in rows if r["status"] == "ok"]
+    errors = [r for r in rows if r["status"] == "error"]
+    no_setup = [r for r in rows if r["status"] == "no_setup"]
+    passing_sorted = sorted(passing, key=lambda x: float(x.get("confidence", 0) or 0), reverse=True)
 
-def _generate_research_context():
-    """
-    Generate research_context.json — analisa performa trading lengkap,
-    dilengkapi breakdown per entry_label & confidence, dan data pending-
-    cancel — supaya file ini SENDIRI cukup dipakai untuk review
-    strategy_logic.py tanpa perlu data tambahan lain.
-    (Data chart M1 TIDAK di sini lagi — sudah ada sumber terpisah dari
-    candle_fetcher.py, jadi tidak perlu fetch ulang & redundan.)
-    """
-    log.info("[research] Generating research_context.json...")
+    lines = [
+        "# SMCAutoTrade — Analysis Report",
+        "",
+        f"**Waktu snapshot:** {now}",
+        f"**Confidence threshold:** {STRATEGY_CONFIDENCE_THRESHOLD}%",
+        "**Mode:** Diagnostic snapshot saat ini; bukan backtest historis.",
+        "",
+        "## Ringkasan Market",
+        "",
+        "| Metrik | Nilai |",
+        "|---|---:|",
+        f"| Koin dipindai | {analyzed} |",
+        f"| Setup dari strategy | {len(setup_rows)} |",
+        f"| Lolos threshold | {len(passing_sorted)} |",
+        f"| Tidak ada setup | {len(no_setup)} |",
+        f"| Error analisis | {len(errors)} |",
+        f"| Threshold | {STRATEGY_CONFIDENCE_THRESHOLD}% |",
+        "",
+        "## Kandidat Lolos",
+        "",
+        "| Rank | Koin | Decision | Confidence | Entry | SL | TP | RR | Entry Type |",
+        "|---:|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    if passing_sorted:
+        for i, s in enumerate(passing_sorted, 1):
+            lines.append(
+                f"| {i} | {s.get('symbol','')} | {s.get('decision','')} | "
+                f"{float(s.get('confidence',0) or 0):.0f}% | {s.get('entry','')} | {s.get('sl','')} | "
+                f"{s.get('tp','')} | {float(s.get('rr',0) or 0):.2f} | {s.get('entry_label','')} |"
+            )
+    else:
+        lines.append("| — | Tidak ada | — | — | — | — | — | — | — |")
 
-    with stat_lock:
-        trade_hist = list(stats["pnl_history"])
-        balance = stats["balance"]
-    with pending_cancel_lock:
-        pc = dict(pending_cancel_stats)
+    lines += [
+        "",
+        "## Diagnostik Per Koin",
+        "",
+        "| Koin | Status | Direction | Conf. | D1 | H1 | M15 | Sweep | POI React | RSI | RR |",
+        "|---|---|---|---:|---|---|---|---|---|---:|---:|",
+    ]
+    for r in sorted(rows, key=lambda x: float(x.get("confidence") or -1), reverse=True):
+        lines.append(
+            f"| {r['symbol']} | {r['status']} | {r.get('decision','')} | "
+            f"{r.get('confidence','')} | {r.get('d1_bias','')} | {r.get('struct_h1','')} | "
+            f"{r.get('struct_m15','')} | {r.get('selected_sweep','')} | {r.get('poi_reacted','')} | "
+            f"{r.get('rsi','')} | {r.get('rr','')} |"
+        )
 
-    result = {
-        "period": f"{len(trade_hist)} trade terakhir",
-        "summary": _calc_full_metrics(trade_hist, STARTING_BALANCE),
-        "performance_breakdown": {"by_coin": {}, "by_session": {}, "by_entry_label": {}, "by_confidence": {}},
-        "pending_cancel": {**pc, "total": sum(pc.values())},
-        "data_quality_notes": [],
-        "worst_trades": [],
-        "best_trades": [],
-    }
-
-    if trade_hist:
-        by_coin, by_session, by_label, by_conf = {}, {}, {}, {}
-        mislabeled = []
-        for t in trade_hist:
-            sym = t.get("symbol", "unknown")
-            by_coin.setdefault(sym, []).append(t)
-            by_session.setdefault(_session_of(t.get("entry_time")), []).append(t)
-            by_label.setdefault(t.get("entry_label") or "unknown", []).append(t)
-            by_conf.setdefault(_confidence_bucket(t.get("confidence")), []).append(t)
-            # Sanity check: result="sl" mestinya selalu pnl<0, "trail"/"tp" pnl>=0.
-            # Kalau tidak, kemungkinan data dari versi main.py lama (sebelum fix
-            # reklasifikasi trail-vs-sl) — jangan dipercaya labelnya mentah-mentah.
-            if t["result"] == "sl" and t["pnl_usd"] >= 0:
-                mislabeled.append(t.get("symbol"))
-
-        if mislabeled:
-            result["data_quality_notes"].append(
-                f"{len(mislabeled)} trade berlabel 'sl' tapi pnl positif ({', '.join(mislabeled)}) — "
-                f"kemungkinan dari versi main.py sebelum fix reklasifikasi trail-vs-sl. "
-                f"Jangan simpulkan pola menang/kalah dari label result mentah-mentah utk trade ini.")
-
-        for sym, rows in by_coin.items():
-            m = _calc_full_metrics(rows, STARTING_BALANCE)
-            result["performance_breakdown"]["by_coin"][sym] = {
-                "total": m["total_trades"], "win_rate": m["win_rate_pct"],
-                "net_profit": m["net_profit"], "avg_pnl": round(m["net_profit"] / m["total_trades"], 4),
-            }
-        for sess, rows in by_session.items():
-            m = _calc_full_metrics(rows, STARTING_BALANCE)
-            result["performance_breakdown"]["by_session"][sess] = {
-                "total": m["total_trades"], "win_rate": m["win_rate_pct"], "net_profit": m["net_profit"],
-            }
-        for label, rows in by_label.items():
-            m = _calc_full_metrics(rows, STARTING_BALANCE)
-            result["performance_breakdown"]["by_entry_label"][label] = {
-                "total": m["total_trades"], "win_rate": m["win_rate_pct"], "net_profit": m["net_profit"],
-            }
-        for bucket, rows in by_conf.items():
-            m = _calc_full_metrics(rows, STARTING_BALANCE)
-            result["performance_breakdown"]["by_confidence"][bucket] = {
-                "total": m["total_trades"], "win_rate": m["win_rate_pct"], "net_profit": m["net_profit"],
-            }
-
-        best  = sorted([t for t in trade_hist if t["pnl_usd"] >= 0], key=lambda x: x["pnl_usd"], reverse=True)[:3]
-        worst = sorted([t for t in trade_hist if t["pnl_usd"] < 0], key=lambda x: x["pnl_usd"])[:3]
-        result["best_trades"]  = [{"pnl": round(t["pnl_usd"], 4), "symbol": t.get("symbol"), "result": t["result"],
-                                    "entry_label": t.get("entry_label"), "confidence": t.get("confidence")} for t in best]
-        result["worst_trades"] = [{"pnl": round(t["pnl_usd"], 4), "symbol": t.get("symbol"), "result": t["result"],
-                                    "entry_label": t.get("entry_label"), "confidence": t.get("confidence")} for t in worst]
-
-    path = "/tmp/research_context.json"
-    with open(path, "w") as f:
-        json.dump(result, f, indent=2, default=str)
-
-    log.info(f"[research] Selesai, disimpan ke {path}")
+    lines += [
+        "",
+        "## Runtime Trading Snapshot",
+        "",
+        "| Metrik | Nilai |",
+        "|---|---:|",
+        f"| Trade tercatat di runtime | {rt['trades']} |",
+        f"| Balance | ${rt['balance']:.4f} |",
+        f"| Net PnL | ${rt['net']:.4f} |",
+        f"| Win rate | {rt['win_rate']:.2f}% |",
+        f"| Profit factor | {rt['profit_factor']:.3f} |",
+        f"| Max drawdown | ${rt['max_dd']:.4f} |",
+        f"| Expectancy/trade | ${rt['expectancy']:.4f} |",
+        "",
+        "## Interpretasi",
+        "",
+        "- `Confidence` adalah output strategy; threshold hanya dipakai engine untuk menentukan setup yang layak diproses.",
+        "- `Entry`, `SL`, `TP`, dan Trail tetap berasal dari strategy; report ini tidak menghitung ulang level tersebut.",
+        "- Data diagnostik lengkap per koin tersedia di `analyze_data.csv`.",
+    ]
+    if universe_error:
+        lines += ["", f"> **Market data warning:** {universe_error}"]
+    if errors:
+        lines += ["", "## Error Analysis", ""]
+        for r in errors:
+            lines.append(f"- **{r['symbol']}**: {r['error']}")
+    path = "/tmp/analyze_report.md"
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
 # ============================================================
-# TAMBAHAN BARU (END)
+# END ANALYZE
 # ============================================================
 
 def fmt_signal_msg(sig):
@@ -2181,37 +2200,40 @@ def simulation_loop(chat_id):
 # ═════════════════════════════════════════════
 # PESAN STATIS
 # ═════════════════════════════════════════════
-GREETING=(
-    "👋 <b>SMC Signal Broadcaster</b>\n\n"
-    f"Scan → sinyal → pantau max {MAX_POSITIONS} posisi bersamaan (update tiap 15 menit)\n"
-    "Posisi ditutup hanya saat TP atau SL\n\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "/start               — Menu ini\n"
-    "/auto                — Mulai broadcaster\n"
-    "/stop                — Hentikan scanning (posisi aktif tetap dipantau)\n"
-    "/trade               — Lihat semua posisi aktif\n"
-    "/max                 — Lihat/ubah max posisi + info batas API\n"
-    "/confidence_min      — Lihat/ubah ambang confidence minimum\n"
-    "/leverage            — Lihat/ubah leverage (real trade)\n"
-    "/margin              — Lihat/ubah margin awal per trade (real trade)\n"
-    "/autostop            — Lihat/ubah threshold auto-stop drawdown\n"
-    "/mode                — Lihat mode aktif (real/simulasi)\n"
-    "/mode on             — Real trade (order sungguhan di Binance)\n"
-    "/mode off            — Simulasi (backtest strategy_logic saja)\n"
-    "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
-    "/timeout             — Tutup paksa semua posisi\n"
-    "/stats               — Statistik + saldo\n"
-    "/backtest             — 20 trade terakhir (evaluasi)\n"
-    "/banned              — Daftar koin ban (+ SYMBOL utk ban permanen)\n"
-    "/koin                — Daftar koin yang sedang di-scan\n"
-    "/resetban            — Hapus semua ban\n"
-    "/resetbalance        — Reset saldo ke $10\n"
-    "/info                — Detail metode analisis\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    + ("🔴 <b>REAL TRADE AKTIF</b> — order sungguhan di Binance Futures, uang beneran."
-       if REAL_TRADE_ENABLED else
-       "⚠️ <i>Simulasi saja — bukan saran finansial.</i>")
-)
+def get_start_msg():
+    return (
+        "👋 <b>SMC Signal Broadcaster</b>\n\n"
+        f"Scan → multi-signal → max {MAX_POSITIONS} posisi bersamaan\n"
+        f"Confidence minimum: <b>{STRATEGY_CONFIDENCE_THRESHOLD}%</b>\n"
+        "Posisi ditutup hanya saat TP, SL, atau keputusan Trail dari strategy\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "/start               — Menu + konfigurasi aktif\n"
+        "/auto                — Mulai broadcaster\n"
+        "/stop                — Hentikan scanning (posisi aktif tetap dipantau)\n"
+        "/trade               — Lihat semua posisi aktif\n"
+        "/max                 — Lihat/ubah max posisi\n"
+        "/confidence_min      — Lihat ambang confidence minimum\n"
+        "/confidence_min 70   — Ubah threshold menjadi 70%\n"
+        "/leverage            — Lihat/ubah leverage (real trade)\n"
+        "/margin              — Lihat/ubah margin awal per trade (real trade)\n"
+        "/autostop            — Lihat/ubah threshold auto-stop drawdown\n"
+        "/mode                — Lihat mode aktif (real/simulasi)\n"
+        "/mode on             — Real trade\n"
+        "/mode off            — Simulasi\n"
+        "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
+        "/timeout             — Tutup paksa semua posisi\n"
+        "/stats               — Statistik + saldo\n"
+        "/backtest            — 20 trade terakhir (evaluasi)\n"
+        "/banned              — Daftar koin ban\n"
+        "/koin                — Daftar koin yang sedang di-scan\n"
+        "/resetban            — Hapus semua ban\n"
+        "/resetbalance        — Reset saldo ke $10\n"
+        "/info                — Detail metode analisis\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        + ("🔴 <b>REAL TRADE AKTIF</b> — order sungguhan di Binance Futures, uang beneran."
+           if REAL_TRADE_ENABLED else
+           "⚠️ <i>Simulasi saja — bukan saran finansial.</i>")
+    )
 
 def get_info_msg():
     return ("ℹ️ <b>Engine</b>\n\n"
@@ -2224,7 +2246,7 @@ def get_info_msg():
 # BOT LOOP
 # ═════════════════════════════════════════════
 def bot_loop():
-    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance, REAL_TRADE_ENABLED
+    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance, REAL_TRADE_ENABLED, STRATEGY_CONFIDENCE_THRESHOLD
 
     # Set active_chat_id ke ALLOWED_USER_ID SEJAK AWAL — di chat pribadi
     # Telegram, chat_id sama dengan user_id, jadi bot bisa kirim pesan
@@ -2263,7 +2285,20 @@ def bot_loop():
                 active_chat_id=chat_id
 
                 if text in ("/start","start"):
-                    tg_send(chat_id,GREETING)
+                    tg_send(chat_id,get_start_msg())
+                elif text.startswith("/confidence_min") or text.startswith("confidence_min"):
+                    parts = text.split()
+                    if len(parts) == 1:
+                        tg_send(chat_id, f"🎯 <b>Confidence minimum:</b> {STRATEGY_CONFIDENCE_THRESHOLD}%\nGunakan <code>/confidence_min 70</code> untuk mengubahnya.")
+                    else:
+                        try:
+                            val = float(parts[1].replace("%", ""))
+                            if not (0 <= val <= 100):
+                                raise ValueError("rentang 0-100")
+                            STRATEGY_CONFIDENCE_THRESHOLD = int(round(val))
+                            tg_send(chat_id, f"✅ Confidence minimum diubah menjadi <b>{STRATEGY_CONFIDENCE_THRESHOLD}%</b>.")
+                        except Exception:
+                            tg_send(chat_id, "❌ Format salah. Gunakan <code>/confidence_min 70</code> (0-100).")
                 elif text in ("/info","info"):
                     tg_send(chat_id,get_info_msg())
                 elif text in ("/stats","stats"):
@@ -2274,39 +2309,31 @@ def bot_loop():
                 # TAMBAHAN BARU (START) — Handler /analyze
                 # ============================================================
                 elif text in ("/analyze","analyze"):
-                    # Jalankan di background thread agar tidak block loop
+                    # Diagnostic snapshot satu universe. Background supaya loop Telegram tetap responsif.
                     def _run_analyze(cid):
                         try:
-                            tg_send(cid, "🔄 Memulai riset historis 15 koin (3 bulan)...\nIni bisa memakan waktu 3-5 menit.")
-                            
-                            # Generate 3 file
-                            stats_csv = _generate_statistics_csv()
-                            trade_csv = _generate_trade_csv()
-                            context_json = _generate_research_context()
-                            
-                            # Kirim ke Telegram
-                            tg_send(cid, "✅ Riset selesai! Mengirim file...")
-                            tg_send_document(cid, stats_csv, caption="📊 statistics.csv")
-                            tg_send_document(cid, trade_csv, caption="📋 trade.csv")
-                            tg_send_document(cid, context_json, caption="🧠 research_context.json")
-                            
-                            # Ringkasan
-                            with open(context_json, "r") as f:
-                                ctx = json.load(f)
-                            summary = ctx.get("summary", {})
-                            total = summary.get("total_trades", 0)
-                            wr = summary.get("win_rate", 0)
                             tg_send(cid,
-                                f"📊 <b>Ringkasan Riset</b>\n"
-                                f"Total trade: {total}\n"
-                                f"Win Rate: {wr}%\n\n"
-                                f"File sudah dikirim. Jalankan researcher.py di laptop untuk analisis lebih lanjut.")
+                                f"🔎 <b>Mulai /analyze</b>\n"
+                                f"Scan hingga {TOP_N_COINS} koin + detail Entry/SL/TP/Structure/Liquidity/Confidence.\n"
+                                f"Threshold: {STRATEGY_CONFIDENCE_THRESHOLD}%\n"
+                                f"Dibuat menjadi 2 file: report Markdown + data CSV.")
+                            rows, passing, universe_error = _analyze_snapshot()
+                            report_path = _write_analyze_report(rows, passing, universe_error)
+                            csv_path = _write_analyze_csv(rows)
+
+                            tg_send(cid,
+                                f"✅ <b>/analyze selesai</b>\n"
+                                f"Koin dipindai: {len(rows)}\n"
+                                f"Lolos threshold: {len(passing)}\n\n"
+                                f"Mengirim 2 file...")
+                            tg_send_document(cid, report_path, caption="📊 analyze_report.md — diagnosis strategy & market snapshot")
+                            tg_send_document(cid, csv_path, caption="📋 analyze_data.csv — data lengkap per koin")
                         except Exception as e:
-                            log.error(f"[analyze] Error: {e}")
-                            tg_send(cid, f"❌ Error saat menjalankan riset:\n<code>{str(e)[:200]}</code>")
-                    
+                            log.error(f"[analyze] Error: {e}", exc_info=True)
+                            tg_send(cid, f"❌ Error saat /analyze:\n<code>{str(e)[:300]}</code>")
+
                     threading.Thread(target=_run_analyze, args=(chat_id,), daemon=True).start()
-                    tg_send(chat_id, "⏳ Riset dimulai di background. Anda akan menerima file dalam beberapa menit.")
+                    tg_send(chat_id, "⏳ /analyze berjalan di background. Bot tetap menerima perintah lain.")
 # ============================================================
 # TAMBAHAN BARU (END)
 # ============================================================
