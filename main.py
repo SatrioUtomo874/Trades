@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py — MESIN (engine). Telegram handler, API client, monitoring,
+main.py V2 — MESIN (engine). Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
 strategy_logic.py ("Otak"), diimpor di bawah.
 
@@ -346,6 +346,17 @@ import re
 _binance_ban_lock = threading.Lock()
 _binance_banned_until = 0.0   # unix timestamp detik; 0 = tidak sedang ban
 _BINANCE_BAN_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".binance_ban_state.json")
+# Global circuit breaker: saat Binance 429/418, NEW SCAN/ENTRY berhenti.
+# WS tetap hidup untuk memantau posisi aktif.
+_binance_scan_paused = False
+_binance_pause_reason = ""
+_binance_recovering = False
+_binance_pause_lock = threading.Lock()
+# Pending trail: satu state terbaru per simbol, bukan queue order lama berantai.
+_pending_trails = {}   # {symbol: {sl, tp, quantity, updated_at, reason, side}}
+_pending_trails_lock = threading.Lock()
+_pending_protections = {}  # filled position awaiting TP/SL after Binance recovery
+_pending_protections_lock = threading.Lock()
 
 class BinanceCooldownError(ConnectionError):
     """Tidak mengirim request Binance selama cooldown aktif."""
@@ -359,6 +370,9 @@ def _load_binance_ban_state():
         until = float(data.get("banned_until", 0.0))
         if until > time.time():
             _binance_banned_until = until
+            with _binance_pause_lock:
+                globals()["_binance_scan_paused"] = True
+                globals()["_binance_pause_reason"] = "persisted Binance cooldown"
             log.warning(f"[binance] cooldown dipulihkan: {until-time.time():.0f} detik tersisa")
     except Exception:
         pass
@@ -375,36 +389,80 @@ def _save_binance_ban_state(until):
 
 _load_binance_ban_state()
 
+
+def _binance_register_ban(msg="", fallback_seconds=60):
+    """Aktifkan circuit breaker global saat Binance rate-limit/ban."""
+    global _binance_banned_until, _binance_scan_paused, _binance_pause_reason
+    m = re.search(r"banned until (\d+)", msg or "")
+    until = int(m.group(1)) / 1000 if m else (time.time() + fallback_seconds)
+    until += BINANCE_POST_COOLDOWN_GRACE
+    with _binance_ban_lock:
+        _binance_banned_until = max(_binance_banned_until, until)
+        current_until = _binance_banned_until
+    with _binance_pause_lock:
+        _binance_scan_paused = True
+        _binance_pause_reason = (msg or "Binance rate limit / ban")[:180]
+    _save_binance_ban_state(current_until)
+    log.error(f"[BINANCE PAUSE] Scanner & entry BARU dihentikan selama {max(current_until-time.time(),0):.0f} detik. WS tetap memantau posisi.")
+
+
+def _binance_is_scan_paused():
+    with _binance_pause_lock:
+        paused = _binance_scan_paused or _binance_recovering
+    if paused:
+        return True
+    return _binance_cooldown_remaining() > 0
+
+
+def _binance_cooldown_remaining():
+    with _binance_ban_lock:
+        return max(0.0, _binance_banned_until - time.time())
+
+
+def _binance_try_resume():
+    global _binance_scan_paused, _binance_pause_reason
+    if _binance_cooldown_remaining() > 0:
+        return False
+    with _binance_pause_lock:
+        _binance_scan_paused = False
+        _binance_pause_reason = ""
+    return True
+
+
+def _queue_pending_trail(sym, new_sl, new_tp, qty, reason="strategy", side=None):
+    """Simpan state trail terbaru per simbol; order lama tidak ditumpuk."""
+    with _pending_trails_lock:
+        old = _pending_trails.get(sym)
+        if old is None:
+            _pending_trails[sym] = {
+                "sl": new_sl, "tp": new_tp, "quantity": qty,
+                "updated_at": time.time(), "reason": reason, "side": side,
+            }
+            return
+        buy = (side or old.get("side")) == "BUY"
+        old_sl = old.get("sl")
+        better_sl = (new_sl is not None and old_sl is None) or (new_sl is not None and ((new_sl > old_sl) if buy else (new_sl < old_sl)))
+        if better_sl or new_tp != old.get("tp") or (qty and qty != old.get("quantity")):
+            old.update({"sl": new_sl, "tp": new_tp, "quantity": qty, "updated_at": time.time(), "reason": reason, "side": side or old.get("side")})
+
+
+def _get_pending_trail(sym):
+    with _pending_trails_lock:
+        v = _pending_trails.get(sym)
+        return dict(v) if v else None
+
+
+def _clear_pending_trail(sym):
+    with _pending_trails_lock:
+        _pending_trails.pop(sym, None)
+
+
 def _binance_wait_if_banned():
     with _binance_ban_lock:
         until = _binance_banned_until
     remaining = until - time.time()
     if remaining > 0:
-        log.warning(f"[binance] COOLDOWN AKTIF — request Binance DIBATALKAN, {remaining:.0f} detik tersisa. Gunakan fallback.")
         raise BinanceCooldownError(f"Binance cooldown aktif {remaining:.0f}s")
-
-
-def _binance_register_ban(msg="", fallback_seconds=60):
-    """Catat waktu ban global. Coba parse 'banned until <ms epoch>' dari
-    pesan error Binance (paling akurat); kalau tidak ada, mundur konservatif
-    (fallback_seconds, makin lama tiap kena berturut-turut)."""
-    global _binance_banned_until
-    m = re.search(r"banned until (\d+)", msg)
-    until = int(m.group(1)) / 1000 if m else (time.time() + fallback_seconds)
-    # Jangan langsung menembak Binance ketika masa ban resmi berakhir.
-    # Tambahkan grace period 60 detik dan simpan juga ke state agar tetap berlaku
-    # setelah restart bot.
-    until += BINANCE_POST_COOLDOWN_GRACE
-    with _binance_ban_lock:
-        if until > _binance_banned_until:
-            _binance_banned_until = until
-            current_until = _binance_banned_until
-        else:
-            current_until = _binance_banned_until
-    _save_binance_ban_state(current_until)
-    wait = current_until - time.time()
-    log.error(f"[binance] Kena limit/ban — request dijeda {max(wait,0):.0f} detik (termasuk grace 60 detik setelah cooldown).")
-
 
 def _binance_request_pause():
     """Throttle SEMUA request HTTP ke Binance, publik maupun signed.
@@ -483,11 +541,12 @@ def _binance_signed(method, path, params=None):
             r = requests.request(method, url, headers=headers, timeout=10, verify=False)
             if r.status_code in (418, 429):
                 _binance_register_ban(r.text)
-                raise RuntimeError(f"Binance kena limit/ban (HTTP {r.status_code})")
+                raise BinanceCooldownError(f"Binance kena limit/ban (HTTP {r.status_code})")
             data = r.json()
             if isinstance(data, dict) and "code" in data and data["code"] < 0:
                 if data["code"] == -1003:
                     _binance_register_ban(data.get("msg", ""))
+                    raise BinanceCooldownError(f"Binance {data['code']}: {data.get('msg')}")
                 raise RuntimeError(f"Binance {data['code']}: {data.get('msg')}")
             return data
         except RuntimeError:
@@ -1128,13 +1187,16 @@ ws_feed = BinanceWSFeed()
 # ── FUNGSI PUBLIK — signature SAMA PERSIS dgn sebelumnya, jadi seluruh
 #    kode bot (scoring, monitor posisi, dsb) TIDAK perlu diubah sama sekali ──
 def get_price(symbol):
-    """Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS (fallback TERAKHIR,
-    hanya dipakai kalau REST Binance & Bybit gagal/error/kena ban) →
-    Tier4 CoinGecko (darurat paling akhir, hanya koin di COINGECKO_ID_MAP)."""
+    """Saat Binance pause: jangan hit REST fallback. Gunakan WS/local cache saja."""
+    if _binance_is_scan_paused():
+        p = ws_feed.get_price(symbol)
+        return p
     try:
         return _binance_price(symbol)
     except Exception as e:
         log.warning(f"[price/binance] {symbol}: {e} — fallback")
+        if _binance_is_scan_paused():
+            return ws_feed.get_price(symbol)
     for _ in range(2):
         try:
             return _bybit_price(symbol)
@@ -1144,35 +1206,32 @@ def get_price(symbol):
     if ws_feed.is_fresh():
         p = ws_feed.get_price(symbol)
         if p is not None:
-            log.warning(f"[price/ws fallback] {symbol} — REST Binance & Bybit gagal")
             return p
     p = _coingecko_price(symbol)
     if p is not None:
-        log.warning(f"[price/coingecko DARURAT] {symbol} — semua sumber lain gagal")
         return p
     return None
 
 def get_klines(symbol, interval, limit=250):
-    """Tier1 buffer WS (GRATIS, live-updated di background) → Tier2 Binance
-    REST → Tier3 Bybit REST. Sebelumnya REST Binance dipanggil DULUAN tiap
-    kali (WS cuma fallback terakhir) — padahal WS-nya sudah jalan terus,
-    live, dan nol biaya rate-limit. Itu penyebab utama sering kena
-    limit/ban meski jumlah posisi cuma sedikit: setiap scan/monitor tetap
-    nembak REST walau datanya sebenarnya sudah ada gratis di buffer WS."""
+    """WS-first. Saat Binance global pause, hanya buffer WS yang sudah ada dipakai.
+    Tidak boleh memicu backfill Binance/Bybit baru selama circuit breaker aktif.
+    """
+    if _binance_is_scan_paused():
+        df = ws_feed.get_klines(symbol, interval, limit) if ws_feed.is_fresh() else pd.DataFrame()
+        return df if df is not None else pd.DataFrame()
     ws_feed.ensure_symbol_interval(symbol, interval)
-
     if ws_feed.is_fresh():
         df = ws_feed.get_klines(symbol, interval, limit)
         if df is not None and not df.empty:
             return df
-
     try:
         df = _binance_klines(symbol, interval, limit)
         if not df.empty:
             return df
-        log.warning(f"[klines/binance] {symbol} kosong, coba Bybit...")
     except Exception as e:
-        log.warning(f"[klines/binance] {symbol}: {e} — coba Bybit...")
+        log.warning(f"[klines/binance] {symbol}: {e}")
+        if _binance_is_scan_paused():
+            return ws_feed.get_klines(symbol, interval, limit) if ws_feed.is_fresh() else pd.DataFrame()
     try:
         df = _bybit_klines(symbol, interval, limit)
         if not df.empty:
@@ -1199,10 +1258,12 @@ def get_top_coins():
     return coins
 
 def _get_top_coins_impl():
-    """Ambil top coins. Tier1 Binance REST → Tier2 Bybit REST → Tier3 WS
-    ticker cache (fallback TERAKHIR, hanya kalau REST Binance & Bybit
-    gagal/error/kena ban). Logika exclude/ban SAMA PERSIS seperti
-    sebelumnya."""
+    """Ambil top coins. Saat Binance pause, seluruh scan berhenti.
+    Fallback Bybit/WS hanya boleh dipakai ketika Binance tidak sedang dalam global pause.
+    """
+    if _binance_is_scan_paused():
+        log.warning(f"[scan] DITAHAN — Binance cooldown aktif {_binance_cooldown_remaining():.0f}s")
+        return []
     global scan_counter
     with ban_lock:
         scan_counter += 1
@@ -1226,7 +1287,9 @@ def _get_top_coins_impl():
             return coins
         log.warning("[top_coins/binance] kosong, coba Bybit...")
     except Exception as e:
-        log.warning(f"[top_coins/binance] {e} — coba Bybit...")
+        log.warning(f"[top_coins/binance] {e}")
+        if _binance_is_scan_paused():
+            return []
     # Bybit fallback
     try:
         coins = _bybit_top_coins(exclude_syms)
@@ -1293,7 +1356,12 @@ def run_scan_once(chat_id):
     lalu menyerahkan setiap setup valid ke execution. Semua keputusan market
     (Entry/SL/TP/Trail/Confidence) tetap berasal dari strategy_logic.py.
     """
+    if _binance_is_scan_paused():
+        tg_send(chat_id, f"⏸️ <b>SCAN PAUSED</b> — Binance sedang rate-limit/ban. Posisi aktif tetap dipantau via WS.")
+        return []
     tg_send(chat_id, f"🔍 Scanning {TOP_N_COINS} koin...")
+    if _binance_is_scan_paused():
+        return [], [], "Binance cooldown/rate-limit aktif — /analyze ditahan"
     try:
         symbols = get_top_coins()
     except Exception as e:
@@ -1305,6 +1373,9 @@ def run_scan_once(chat_id):
 
     results = []
     for idx, sym in enumerate(symbols, 1):
+        if _binance_is_scan_paused():
+            log.warning("[scan] Binance pause aktif — scan cycle dihentikan di tengah jalan.")
+            break
         log.info(f"[{idx:02d}/{len(symbols)}] {sym}")
         try:
             h1 = get_klines(sym, "1h", 250)
@@ -1859,6 +1930,8 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
 # ============================================================
 
 def _strategy_position_update(sym,pos):
+    if _binance_is_scan_paused():
+        return None
     manager=globals().get("manage_position")
     if not callable(manager): return None
     try:
@@ -1938,6 +2011,9 @@ def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
 # ============================================================
 
 def _open_pending_real(sym,signal,chat_id):
+    if _binance_is_scan_paused():
+        log.warning(f"[entry] {sym} ditahan — Binance pause aktif")
+        return
     buy=signal["decision"]=="BUY"; entry=signal["entry"]; sl=signal.get("sl"); tp=signal.get("tp")
     if sl is None or tp is None:
         _ban_coin(sym,"strategy tidak mengirim SL/TP"); return
@@ -2024,6 +2100,16 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
             last=e; log.warning(f"[open_position_real] proteksi {attempt}/3 gagal: {e}")
             if attempt<3: time.sleep(2)
     if last is not None or slo is None:
+        if isinstance(last, BinanceCooldownError):
+            with positions_lock:
+                if sym in positions:
+                    positions[sym].update({"entry": actual_entry, "entry_time": time.time(),
+                                           "status": "active", "current_sl": sl, "quantity": qty,
+                                           "tp_order_id": None, "sl_order_id": None})
+            _queue_pending_protection(sym, buy, sl, tp, qty)
+            tg_send(chat_id, f"⏸️ <b>PROTEKSI DITUNDA</b> — {sym}\nBinance sedang rate-limit/ban. TP/SL dicatat dan akan dipasang setelah recovery +60 detik.")
+            threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start()
+            return
         _emergency_close(sym,buy,qty,chat_id,f"gagal pasang SL ({last})"); return
     with positions_lock:
         if sym not in positions:return
@@ -2062,7 +2148,21 @@ def monitor_position_real(sym,pos):
             try: cancel_all_algo_orders(sym); place_market_order(sym,"SELL" if buy else "BUY",qty,reduce_only=True)
             except Exception as e: log.error(f"[monitor_real] manual close {sym}: {e}")
             close_position(sym,"strategy",close_price=price); return
+        if _binance_is_scan_paused():
+            # Saat Binance pause, hanya pantau harga dari WS. Jangan kirim/cancel/query REST.
+            price = get_price(sym)
+            if price is not None:
+                sig = pos["signal"]; buy = sig["decision"] == "BUY"
+                tp = sig.get("tp"); sl = pos.get("current_sl", sig.get("sl"))
+                hit_tp = tp is not None and ((price >= tp) if buy else (price <= tp))
+                hit_sl = sl is not None and ((price <= sl) if buy else (price >= sl))
+                if hit_tp or hit_sl:
+                    log.critical(f"[monitor_real] {sym} menyentuh level saat Binance pause; REST ditahan. Cek Binance/WebSocket/account state.")
+            time.sleep(MONITOR_SLEEP)
+            continue
         try: real=get_real_position(sym)
+        except BinanceCooldownError:
+            time.sleep(REAL_TRADE_POLL_SLEEP); continue
         except Exception as e: log.warning(f"[monitor_real] {sym}: {e}"); time.sleep(REAL_TRADE_POLL_SLEEP); continue
         if real is None:
             reason=_infer_close_reason(pos.get("tp_order_id"),pos.get("sl_order_id"))
@@ -2083,12 +2183,128 @@ def monitor_position_real(sym,pos):
                 newsl=pos.get("current_sl",pos["signal"].get("sl")); newtp=pos["signal"].get("tp")
                 if newsl!=oldsl or newtp!=oldtp:
                     try:
-                        cancel_algo_order(pos.get("tp_order_id")); cancel_algo_order(pos.get("sl_order_id"))
-                        t,s=place_tp_sl(sym,pos["signal"]["decision"]=="BUY",newtp,newsl,pos["quantity"])
-                        pos["tp_order_id"]=t["algoId"]; pos["sl_order_id"]=s["algoId"]
+                        if _binance_is_scan_paused():
+                            _queue_pending_trail(sym, newsl, newtp, pos.get("quantity",0), reason="strategy", side=pos["signal"]["decision"])
+                            log.warning(f"[trail] {sym} queued — Binance pause aktif; SL={newsl} TP={newtp}")
+                        else:
+                            cancel_algo_order(pos.get("tp_order_id")); cancel_algo_order(pos.get("sl_order_id"))
+                            t,s=place_tp_sl(sym,pos["signal"]["decision"]=="BUY",newtp,newsl,pos["quantity"])
+                            pos["tp_order_id"]=t["algoId"]; pos["sl_order_id"]=s["algoId"]
+                            _clear_pending_trail(sym)
+                    except BinanceCooldownError:
+                        _queue_pending_trail(sym, newsl, newtp, pos.get("quantity",0), reason="binance_cooldown", side=pos["signal"]["decision"])
                     except Exception as e: log.warning(f"[strategy/manage real] {sym}: {e}")
         time.sleep(REAL_TRADE_POLL_SLEEP)
 
+
+
+def _queue_pending_protection(sym, buy, sl, tp, qty):
+    with _pending_protections_lock:
+        _pending_protections[sym] = {
+            "side": "BUY" if buy else "SELL", "sl": sl, "tp": tp,
+            "quantity": qty, "updated_at": time.time()
+        }
+
+
+def _clear_pending_protection(sym):
+    with _pending_protections_lock:
+        _pending_protections.pop(sym, None)
+
+
+def _resume_binance_and_flush_pending(chat_id=None):
+    """Recovery atomik: remain paused through sync + pending-trail flush,
+    lalu baru aktifkan scanner."""
+    global _binance_recovering, _binance_scan_paused
+    if _binance_cooldown_remaining() > 0:
+        return False
+    with _binance_pause_lock:
+        _binance_recovering = True
+        _binance_scan_paused = True
+    log.info("[BINANCE RESUME] Cooldown selesai + grace 60s. Sync sebelum scanner resume...")
+    try:
+        with positions_lock:
+            items = list(positions.items())
+        for sym, pos in items:
+            if pos.get("status") != "active":
+                continue
+            try:
+                real = get_real_position(sym)
+                if real is not None:
+                    pos["quantity"] = abs(float(real.get("positionAmt", pos.get("quantity",0))))
+            except Exception as e:
+                log.warning(f"[resume] sync {sym}: {e}")
+        with _pending_protections_lock:
+            protections = [(sym, dict(v)) for sym, v in _pending_protections.items()]
+        for sym, pr in protections:
+            try:
+                with positions_lock:
+                    pos = positions.get(sym)
+                if not pos or pos.get("status") != "active":
+                    _clear_pending_protection(sym); continue
+                qty = pos.get("quantity") or pr.get("quantity")
+                buy = pr.get("side") == "BUY"
+                t, s = place_tp_sl(sym, buy, pr["tp"], pr["sl"], qty)
+                with positions_lock:
+                    if sym in positions:
+                        positions[sym].update({"tp_order_id": t["algoId"], "sl_order_id": s["algoId"]})
+                _clear_pending_protection(sym)
+                log.info(f"[protection-resume] {sym} TP/SL berhasil dipasang kembali.")
+            except Exception as e:
+                log.error(f"[protection-resume] {sym} gagal: {e}")
+        with _pending_trails_lock:
+            pending = [(sym, dict(v)) for sym, v in _pending_trails.items()]
+        for sym, tr in pending:
+            try:
+                with positions_lock:
+                    pos = positions.get(sym)
+                if not pos or pos.get("status") != "active":
+                    _clear_pending_trail(sym); continue
+                buy = pos["signal"]["decision"] == "BUY"
+                qty = pos.get("quantity") or tr.get("quantity")
+                tp = tr.get("tp") or pos["signal"].get("tp")
+                sl = tr.get("sl") or pos.get("current_sl")
+                if qty and sl is not None and tp is not None:
+                    cancel_algo_order(pos.get("tp_order_id")); cancel_algo_order(pos.get("sl_order_id"))
+                    t, s = place_tp_sl(sym, buy, tp, sl, qty)
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym].update({"tp_order_id": t["algoId"], "sl_order_id": s["algoId"]})
+                    _clear_pending_trail(sym)
+                    log.info(f"[trail-resume] {sym} pending trail berhasil dipasang kembali.")
+            except Exception as e:
+                log.error(f"[trail-resume] {sym} gagal flush: {e}")
+        with _binance_pause_lock:
+            _binance_recovering = False
+            _binance_scan_paused = False
+            _binance_pause_reason = ""
+        if chat_id:
+            tg_send(chat_id, "✅ <b>Binance recovery selesai.</b> Pending trailing diproses, scanning boleh resume.")
+        return True
+    except Exception:
+        with _binance_pause_lock:
+            _binance_recovering = False
+            _binance_scan_paused = True
+        raise
+
+
+def _binance_recovery_loop(chat_id_getter=lambda: active_chat_id):
+    """Watchdog global. Tidak scan saat paused; setelah cooldown+60s, sync lalu resume."""
+    notified = False
+    while True:
+        try:
+            if _binance_is_scan_paused():
+                if not notified:
+                    tg_send(chat_id_getter(), "⏸️ <b>Binance RATE LIMIT/BAN</b> — scanning & entry baru dihentikan. Posisi aktif tetap dipantau via WS.")
+                    notified = True
+                if _binance_cooldown_remaining() <= 0 and not _binance_recovering:
+                    if _resume_binance_and_flush_pending(chat_id_getter()):
+                        notified = False
+                else:
+                    time.sleep(5)
+                continue
+        except Exception as e:
+            log.warning(f"[binance-recovery] {e}")
+        time.sleep(5)
 
 
 def autostop_loop(chat_id):
@@ -2096,7 +2312,7 @@ def autostop_loop(chat_id):
     global auto_mode, peak_real_balance
     while True:
         try:
-            if REAL_TRADE_ENABLED:
+            if REAL_TRADE_ENABLED and not _binance_is_scan_paused():
                 _, total = get_real_balance()
                 if total is not None:
                     with autostop_lock:
@@ -2132,7 +2348,7 @@ def simulation_loop(chat_id):
 
             opened = 0
             for signal in signals:
-                if not auto_mode:
+                if not auto_mode or _binance_is_scan_paused():
                     break
                 sym = signal.get("symbol")
                 if not sym:
@@ -2183,6 +2399,9 @@ def simulation_loop(chat_id):
         _ban_coin(sym,"pending expired")
 
     while auto_mode:
+        if _binance_is_scan_paused():
+            time.sleep(5)
+            continue
         with positions_lock: full=len(positions)>=MAX_POSITIONS
         if full: time.sleep(5); continue
         with scan_lock:
@@ -2812,6 +3031,7 @@ if __name__=="__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     ws_feed.start()
     threading.Thread(target=_price_cache_loop, daemon=True).start()
+    threading.Thread(target=_binance_recovery_loop, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
 
     if _STRATEGY_LOAD_ERROR and ALLOWED_USER_ID:
