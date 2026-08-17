@@ -47,6 +47,13 @@ MONITOR_SLEEP       = 10
 # memicu eksekusinya. Terlalu sering polling = boros weight API tanpa manfaat
 # nyata, malah berisiko kena limit/ban (lihat _binance_wait_if_banned).
 REAL_TRADE_POLL_SLEEP = 30
+
+# Telegram long-polling / Render watchdog. Telegram polling harus tetap hidup
+# walaupun Binance sedang pause; error polling TIDAK boleh ditelan diam-diam.
+TELEGRAM_LONGPOLL_TIMEOUT = 20
+TELEGRAM_HTTP_TIMEOUT = 30
+TELEGRAM_ERROR_BACKOFF_MAX = 60
+TELEGRAM_KEEPALIVE_SEC = 300
 # Jeda minimum antar-request HTTP ke Binance agar scan tidak menghantam API beruntun.
 # 1 request / detik masih cukup untuk scan 50 koin tanpa burst besar.
 BINANCE_REQUEST_INTERVAL = 2.5
@@ -198,7 +205,23 @@ def index():
             f"<p>Total:{t} TP:{tp} SL:{sl} Trail:{trail} WR:{wr}</p>"), 200
 
 @app.route("/health")
-def health(): return "OK", 200
+@app.route("/healthz")
+def health():
+    # Endpoint ini sengaja TIDAK memanggil Binance/API eksternal.
+    # Aman dipakai Render/uptime monitor untuk menjaga service tetap hidup.
+    with _telegram_state_lock:
+        tg_ok = _telegram_polling_alive
+        tg_last = _telegram_last_success_at
+    with _binance_pause_lock:
+        paused = _binance_scan_paused or _binance_recovering
+    body = {
+        "status": "ok",
+        "telegram_polling": bool(tg_ok),
+        "telegram_last_success_age": (round(time.time()-tg_last, 1) if tg_last else None),
+        "binance_scan_paused": bool(paused),
+        "timestamp": time.time(),
+    }
+    return body, 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -211,12 +234,14 @@ def run_flask():
 # ═════════════════════════════════════════════
 def tg_send(chat_id, text):
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id":chat_id,"text":text,"parse_mode":"HTML"},
             timeout=10)
+        if r.status_code >= 400:
+            log.warning(f"[TG/sendMessage] HTTP {r.status_code}: {r.text[:300]}")
     except Exception as e:
-        log.error(f"[TG] {e}")
+        log.error(f"[TG/sendMessage] {e}")
 
 # ============================================================
 # TAMBAHAN BARU (START) — Helper kirim file ke Telegram
@@ -282,15 +307,95 @@ def _commit_to_github(content, path="strategy_logic.py", commit_msg="Update stra
 # TAMBAHAN BARU (END)
 # ============================================================
 
+# ── TELEGRAM POLLING STATE ───────────────────────────────────────────────
+_telegram_state_lock = threading.Lock()
+_telegram_polling_alive = False
+_telegram_last_success_at = 0.0
+_telegram_last_error_at = 0.0
+_telegram_last_conflict_alert_at = 0.0
+
+class TelegramPollingConflict(ConnectionError):
+    """Telegram 409: webhook/instance lain bentrok dengan getUpdates."""
+
+
+def _telegram_mark_success():
+    global _telegram_polling_alive, _telegram_last_success_at
+    with _telegram_state_lock:
+        _telegram_polling_alive = True
+        _telegram_last_success_at = time.time()
+
+
+def _telegram_mark_error():
+    global _telegram_polling_alive, _telegram_last_error_at
+    with _telegram_state_lock:
+        _telegram_polling_alive = False
+        _telegram_last_error_at = time.time()
+
+
+def _telegram_bootstrap():
+    """Pastikan token memakai long polling, bukan webhook lama yang tertinggal."""
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo",
+            timeout=10)
+        d = r.json()
+        if not d.get("ok"):
+            log.warning(f"[TG] getWebhookInfo gagal: {d}")
+            return
+        info = d.get("result", {})
+        url = info.get("url") or ""
+        if url:
+            log.warning(f"[TG] Webhook aktif ({url}) — hapus agar long polling tidak 409.")
+            rr = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
+                params={"drop_pending_updates": False}, timeout=10)
+            rd = rr.json()
+            if rd.get("ok"):
+                log.info("[TG] Webhook lama dihapus; long polling siap.")
+            else:
+                log.error(f"[TG] deleteWebhook gagal: {rd}")
+    except Exception as e:
+        log.warning(f"[TG] bootstrap error: {e}")
+
+
 def tg_updates(offset=None):
+    """Long poll Telegram dengan error visibility + backoff signal.
+
+    Tidak pernah mengembalikan [] secara diam-diam saat HTTP/JSON gagal, karena
+    itu membuat bot terlihat hidup padahal command tidak diterima.
+    """
     try:
         r = requests.get(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-            params={"timeout":8,"offset":offset}, timeout=12)
+            params={"timeout": TELEGRAM_LONGPOLL_TIMEOUT, "offset": offset},
+            timeout=TELEGRAM_HTTP_TIMEOUT)
+        if r.status_code == 409:
+            _telegram_mark_error()
+            raise TelegramPollingConflict(
+                "Telegram 409 Conflict: ada webhook atau instance bot lain yang memakai token ini.")
+        if r.status_code == 429:
+            _telegram_mark_error()
+            try:
+                d = r.json(); retry_after = int(d.get("parameters", {}).get("retry_after", 5))
+            except Exception:
+                retry_after = 5
+            raise ConnectionError(f"Telegram rate limit 429; retry_after={retry_after}s")
+        if r.status_code >= 500:
+            _telegram_mark_error()
+            raise ConnectionError(f"Telegram server HTTP {r.status_code}")
+        r.raise_for_status()
         d = r.json()
-        return d.get("result",[]) if d.get("ok") else []
-    except:
-        return []
+        if not d.get("ok"):
+            _telegram_mark_error()
+            raise ConnectionError(f"Telegram getUpdates error: {d}")
+        _telegram_mark_success()
+        return d.get("result", [])
+    except TelegramPollingConflict:
+        raise
+    except Exception as e:
+        _telegram_mark_error()
+        log.warning(f"[TG/getUpdates] {e}")
+        raise
 
 
 # ═════════════════════════════════════════════
@@ -2462,6 +2567,44 @@ def get_info_msg():
 
 
 # ═════════════════════════════════════════════
+# RENDER KEEP-ALIVE / TELEGRAM WATCHDOG
+# ═════════════════════════════════════════════
+def _render_keepalive_loop():
+    """Best-effort self health ping untuk mengurangi risiko Render Free idle.
+
+    Render_EXTERNAL_URL dipakai kalau tersedia. Endpoint /healthz tidak menyentuh
+    Binance, jadi loop ini tidak menambah Binance weight. Untuk jaminan terhadap
+    spin-down Free, external uptime monitor tetap lebih kuat; loop ini adalah
+    lapisan tambahan, bukan satu-satunya mekanisme.
+    """
+    base = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if not base:
+        log.info("[render] RENDER_EXTERNAL_URL tidak tersedia — keepalive internal off")
+        return
+    url = f"{base}/healthz"
+    while True:
+        try:
+            r = requests.get(url, timeout=10)
+            if r.ok:
+                log.debug("[render] keepalive OK")
+            else:
+                log.warning(f"[render] keepalive HTTP {r.status_code}")
+        except Exception as e:
+            log.debug(f"[render] keepalive gagal: {e}")
+        time.sleep(TELEGRAM_KEEPALIVE_SEC)
+
+
+def _telegram_watchdog_alert(cid, text):
+    global _telegram_last_conflict_alert_at
+    now = time.time()
+    if now - _telegram_last_conflict_alert_at < 300:
+        return
+    _telegram_last_conflict_alert_at = now
+    if cid:
+        tg_send(cid, text)
+
+
+# ═════════════════════════════════════════════
 # BOT LOOP
 # ═════════════════════════════════════════════
 def bot_loop():
@@ -2477,7 +2620,9 @@ def bot_loop():
 
     # Tidak ada startup ping Binance. Request hanya dilakukan saat benar-benar dibutuhkan.
 
+    _telegram_bootstrap()
     offset=None
+    poll_backoff=1
     log.info("Bot siap.")
     if ALLOWED_USER_ID:
         tg_send(ALLOWED_USER_ID,
@@ -2487,7 +2632,9 @@ def bot_loop():
 
     while True:
         try:
-            for upd in tg_updates(offset):
+            updates = tg_updates(offset)
+            poll_backoff = 1
+            for upd in updates:
                 offset=upd["update_id"]+1
                 msg=upd.get("message",{})
                 uid=msg.get("from",{}).get("id")
@@ -3019,10 +3166,21 @@ def bot_loop():
                 else:
                     tg_send(chat_id,"❓ Tidak dikenal. /start")
 
-            time.sleep(1)
+            time.sleep(0.2)
+        except TelegramPollingConflict as e:
+            log.error(f"[TG POLLING CONFLICT] {e}")
+            _telegram_watchdog_alert(
+                active_chat_id,
+                "🚨 <b>Telegram polling conflict</b>\n\n"
+                "Bot masih hidup, tetapi <code>getUpdates</code> bentrok. "
+                "Pastikan hanya 1 instance bot memakai TELEGRAM_TOKEN ini."
+            )
+            time.sleep(min(max(poll_backoff, 5), TELEGRAM_ERROR_BACKOFF_MAX))
+            poll_backoff = min(max(poll_backoff * 2, 5), TELEGRAM_ERROR_BACKOFF_MAX)
         except Exception as e:
-            log.error(f"[bot] {e}")
-            time.sleep(5)
+            log.error(f"[TG/BOT LOOP] {e}", exc_info=True)
+            time.sleep(min(max(poll_backoff, 2), TELEGRAM_ERROR_BACKOFF_MAX))
+            poll_backoff = min(max(poll_backoff * 2, 2), TELEGRAM_ERROR_BACKOFF_MAX)
 
 
 if __name__=="__main__":
@@ -3032,6 +3190,7 @@ if __name__=="__main__":
     ws_feed.start()
     threading.Thread(target=_price_cache_loop, daemon=True).start()
     threading.Thread(target=_binance_recovery_loop, daemon=True).start()
+    threading.Thread(target=_render_keepalive_loop, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
 
     if _STRATEGY_LOAD_ERROR and ALLOWED_USER_ID:
