@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py V4 — MESIN (engine). Telegram handler, API client, monitoring,
+main.py V5 — MESIN (engine). Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
 strategy_logic.py ("Otak"), diimpor di bawah.
 
@@ -59,14 +59,19 @@ TELEGRAM_KEEPALIVE_SEC = 300
 BINANCE_REQUEST_INTERVAL = 2.5
 # Setelah cooldown/ban Binance selesai, tunggu tambahan 60 detik sebelum request pertama.
 BINANCE_POST_COOLDOWN_GRACE = 60.0
+# Safety governor berbasis header usage; berhenti sebelum mendekati limit 1 menit.
+BINANCE_WEIGHT_SOFT_LIMIT = 1800
+BINANCE_WEIGHT_HARD_LIMIT = 2100
 _binance_request_lock = threading.Lock()
 _binance_last_request_at = 0.0
+_binance_weight_1m = None
+_binance_weight_seen_at = 0.0
 MAX_POSITIONS       = 20   # runtime via /max — jangan pindah ke strategy_logic
 MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V4"
+MAIN_ENGINE_VERSION = "V5"
 # ─────────────────────────────────────────────
 
 # Import OTAK — kalau gagal ATAU full_analyze() tidak ada di dalamnya
@@ -496,11 +501,21 @@ def _save_binance_ban_state(until):
 _load_binance_ban_state()
 
 
-def _binance_register_ban(msg="", fallback_seconds=60):
-    """Aktifkan circuit breaker global saat Binance rate-limit/ban."""
+def _binance_register_ban(msg="", fallback_seconds=60, retry_after=None):
+    """Aktifkan circuit breaker global saat Binance rate-limit/ban.
+    retry_after (detik) diprioritaskan bila tersedia dari header/API response.
+    """
     global _binance_banned_until, _binance_scan_paused, _binance_pause_reason
     m = re.search(r"banned until (\d+)", msg or "")
-    until = int(m.group(1)) / 1000 if m else (time.time() + fallback_seconds)
+    candidates = [time.time() + fallback_seconds]
+    if retry_after is not None:
+        try:
+            candidates.append(time.time() + max(float(retry_after), 0.0))
+        except (TypeError, ValueError):
+            pass
+    if m:
+        candidates.append(int(m.group(1)) / 1000)
+    until = max(candidates)
     until += BINANCE_POST_COOLDOWN_GRACE
     with _binance_ban_lock:
         _binance_banned_until = max(_binance_banned_until, until)
@@ -570,15 +585,41 @@ def _binance_wait_if_banned():
     if remaining > 0:
         raise BinanceCooldownError(f"Binance cooldown aktif {remaining:.0f}s")
 
+def _binance_update_weight_from_response(r):
+    """Catat request-weight 1m dari header Binance bila tersedia."""
+    global _binance_weight_1m, _binance_weight_seen_at
+    raw = None
+    for key in ("X-MBX-USED-WEIGHT-1M", "x-mbx-used-weight-1m"):
+        if key in r.headers:
+            raw = r.headers.get(key)
+            break
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    _binance_weight_1m = value
+    _binance_weight_seen_at = time.time()
+    return value
+
+
 def _binance_request_pause():
-    """Throttle SEMUA request HTTP ke Binance, publik maupun signed.
-    Satu global gate membuat beberapa thread tidak bisa menembak Binance
-    bersamaan. Cooldown ban tetap dipatuhi oleh _binance_wait_if_banned().
+    """Throttle semua request HTTP Binance + weight governor.
+    429/418 tidak pernah di-retry; hard/soft usage hanya untuk mencegah ban lebih awal.
     """
     global _binance_last_request_at
+    _binance_wait_if_banned()
     now = time.monotonic()
     with _binance_request_lock:
-        wait = BINANCE_REQUEST_INTERVAL - (now - _binance_last_request_at)
+        # Kalau observed 1m weight sudah tinggi, tunggu masuk window menit berikutnya.
+        # Ini jauh lebih aman daripada terus mengirim request sampai Binance yang 429.
+        if _binance_weight_1m is not None and _binance_weight_1m >= BINANCE_WEIGHT_SOFT_LIMIT:
+            wall_now = time.time()
+            wait_window = max(0.0, 62.0 - (wall_now % 60.0))
+            log.warning(f"[binance-weight] {_binance_weight_1m} weight/1m — throttle {wait_window:.1f}s ke window berikutnya.")
+            time.sleep(wait_window)
+        wait = BINANCE_REQUEST_INTERVAL - (time.monotonic() - _binance_last_request_at)
         if wait > 0:
             time.sleep(wait)
         _binance_last_request_at = time.monotonic()
@@ -605,13 +646,19 @@ def fapi_get(path, params=None):
     try:
         _binance_request_pause()
         r = requests.get(f"{FAPI}{path}", params=params, timeout=10, verify=False)
+        used = _binance_update_weight_from_response(r)
+        if used is not None and used >= BINANCE_WEIGHT_HARD_LIMIT:
+            log.warning(f"[binance-weight] {used} weight/1m — menahan request baru sampai window mereda.")
         if r.status_code in (418, 429):
-            _binance_register_ban(r.text or "")
+            retry_after = r.headers.get("Retry-After")
+            _binance_register_ban(r.text or "", retry_after=retry_after)
             raise BinanceCooldownError(f"Binance kena limit/ban (HTTP {r.status_code})")
         d = r.json()
         if isinstance(d, dict) and "code" in d:
             if d["code"] == -1003:
-                _binance_register_ban(d.get("msg", ""))
+                retry_after = None
+                _binance_register_ban(d.get("msg", ""), retry_after=retry_after)
+                raise BinanceCooldownError(f"Binance {d['code']}: {d.get('msg')}")
             raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
         return d
     except BinanceCooldownError:
@@ -645,8 +692,12 @@ def _binance_signed(method, path, params=None):
         try:
             _binance_request_pause()
             r = requests.request(method, url, headers=headers, timeout=10, verify=False)
+            used = _binance_update_weight_from_response(r)
+            if used is not None and used >= BINANCE_WEIGHT_HARD_LIMIT:
+                log.warning(f"[binance-weight] {used} weight/1m setelah signed {method} {path}")
             if r.status_code in (418, 429):
-                _binance_register_ban(r.text)
+                retry_after = r.headers.get("Retry-After")
+                _binance_register_ban(r.text, retry_after=retry_after)
                 raise BinanceCooldownError(f"Binance kena limit/ban (HTTP {r.status_code})")
             data = r.json()
             if isinstance(data, dict) and "code" in data and data["code"] < 0:
@@ -655,6 +706,9 @@ def _binance_signed(method, path, params=None):
                     raise BinanceCooldownError(f"Binance {data['code']}: {data.get('msg')}")
                 raise RuntimeError(f"Binance {data['code']}: {data.get('msg')}")
             return data
+        except BinanceCooldownError:
+            # WAJIB: 418/429 TIDAK PERNAH masuk retry loop.
+            raise
         except RuntimeError:
             raise
         except Exception as e:
@@ -1391,7 +1445,13 @@ def _get_top_coins_impl():
         coins = _binance_top_coins(exclude_syms)
         if coins:
             return coins
+        if _binance_is_scan_paused():
+            log.warning("[top_coins/binance] kosong karena circuit breaker aktif — TIDAK fallback.")
+            return []
         log.warning("[top_coins/binance] kosong, coba Bybit...")
+    except BinanceCooldownError:
+        log.warning("[top_coins/binance] rate-limit/ban — TIDAK fallback, scan cycle dihentikan.")
+        return []
     except Exception as e:
         log.warning(f"[top_coins/binance] {e}")
         if _binance_is_scan_paused():
@@ -1470,11 +1530,17 @@ def run_scan_once(chat_id):
         return [], [], "Binance cooldown/rate-limit aktif — /analyze ditahan"
     try:
         symbols = get_top_coins()
+    except BinanceCooldownError as e:
+        tg_send(chat_id, f"⏸️ <b>Scan dihentikan</b> — Binance rate-limit/ban aktif.\n<code>{str(e)[:180]}</code>")
+        return []
     except Exception as e:
         tg_send(chat_id, f"⚠️ Market data error: <code>{str(e)[:150]}</code>")
         return []
     if not symbols:
-        tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan.")
+        if _binance_is_scan_paused():
+            tg_send(chat_id, "⏸️ <b>Scan dihentikan</b> — Binance rate-limit/ban aktif. Posisi aktif tetap dipantau via WS.")
+        else:
+            tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan.")
         return []
 
     results = []
