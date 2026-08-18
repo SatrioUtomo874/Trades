@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-main.py V5 — MESIN (engine). Telegram handler, API client, monitoring,
+main.py V6 — MESIN (engine). Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
 strategy_logic.py ("Otak"), diimpor di bawah.
 
-Diekstrak dari try22__2_.py, 3 perubahan:
+V6: Binance execution safety + manual reconciliation + orphan-order cleanup.
 1. Setup logging dipindah ke awal (sebelumnya log dipanggil sebelum
    didefinisikan -> selalu NameError saat start).
 2. Fallback strategy_logic gagal load: full_analyze jadi no-op (tidak
@@ -71,7 +71,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V5"
+MAIN_ENGINE_VERSION = "V6"
 # ─────────────────────────────────────────────
 
 # Import OTAK — kalau gagal ATAU full_analyze() tidak ada di dalamnya
@@ -468,6 +468,14 @@ _pending_trails = {}   # {symbol: {sl, tp, quantity, updated_at, reason, side}}
 _pending_trails_lock = threading.Lock()
 _pending_protections = {}  # filled position awaiting TP/SL after Binance recovery
 _pending_protections_lock = threading.Lock()
+# V6: explicit emergency/cleanup state. These states are retained in /trade until
+# Binance confirms the exchange-side truth; API errors must never silently remove them.
+_pending_cleanup = {}          # {symbol: {reason, created_at, last_error}}
+_pending_cleanup_lock = threading.Lock()
+_binance_time_offset_ms = 0
+_binance_time_sync_at = 0.0
+_binance_time_sync_lock = threading.Lock()
+BINANCE_TIME_SYNC_TTL = 60.0
 
 class BinanceCooldownError(ConnectionError):
     """Tidak mengirim request Binance selama cooldown aktif."""
@@ -499,6 +507,83 @@ def _save_binance_ban_state(until):
         log.debug(f"[binance] gagal simpan cooldown: {e}")
 
 _load_binance_ban_state()
+
+
+def _binance_sync_time(force=False):
+    """Sync local clock against Binance server time for signed requests.
+    Public endpoint only; no API key required.
+    """
+    global _binance_time_offset_ms, _binance_time_sync_at
+    now = time.time()
+    with _binance_time_sync_lock:
+        if not force and (now - _binance_time_sync_at) < BINANCE_TIME_SYNC_TTL:
+            return _binance_time_offset_ms
+    local_send = int(time.time() * 1000)
+    try:
+        r = requests.get(f"{FAPI}/fapi/v1/time", timeout=5, verify=False)
+        r.raise_for_status()
+        server_ms = int(r.json()["serverTime"])
+        local_recv = int(time.time() * 1000)
+        midpoint = (local_send + local_recv) // 2
+        offset = server_ms - midpoint
+        with _binance_time_sync_lock:
+            _binance_time_offset_ms = int(offset)
+            _binance_time_sync_at = time.time()
+        log.info(f"[binance-time] sync OK offset={offset}ms")
+        return int(offset)
+    except Exception as e:
+        log.warning(f"[binance-time] sync gagal: {e}")
+        raise
+
+
+def _binance_timestamp_ms():
+    with _binance_time_sync_lock:
+        offset = _binance_time_offset_ms
+        synced_at = _binance_time_sync_at
+    if (time.time() - synced_at) >= BINANCE_TIME_SYNC_TTL:
+        try:
+            offset = _binance_sync_time(force=True)
+        except Exception:
+            pass
+    return int(time.time() * 1000) + int(offset)
+
+
+def _queue_pending_cleanup(sym, reason="orphan algo cleanup", error=None):
+    with _pending_cleanup_lock:
+        item = _pending_cleanup.get(sym) or {"reason": reason, "created_at": time.time()}
+        item.update({"reason": reason, "last_error": str(error)[:300] if error else item.get("last_error")})
+        _pending_cleanup[sym] = item
+
+
+def _clear_pending_cleanup(sym):
+    with _pending_cleanup_lock:
+        _pending_cleanup.pop(sym, None)
+
+
+def _get_pending_cleanup(sym):
+    with _pending_cleanup_lock:
+        v = _pending_cleanup.get(sym)
+        return dict(v) if v else None
+
+
+def _get_open_algo_orders(sym):
+    """Exchange-side verification of remaining Binance algo orders for symbol."""
+    data = _binance_signed("GET", "/fapi/v1/openAlgoOrders", {"symbol": sym})
+    if isinstance(data, dict):
+        rows = data.get("orders") or data.get("openOrders") or data.get("data") or []
+    else:
+        rows = data or []
+    return rows if isinstance(rows, list) else []
+
+
+def _cleanup_algo_orders_verified(sym):
+    """Cancel all algo orders and verify none remain."""
+    cancel_all_algo_orders(sym)
+    rows = _get_open_algo_orders(sym)
+    if rows:
+        raise RuntimeError(f"masih ada {len(rows)} algo order setelah cancel")
+    _clear_pending_cleanup(sym)
+    return True
 
 
 def _binance_register_ban(msg="", fallback_seconds=60, retry_after=None):
@@ -679,18 +764,21 @@ from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
 def _binance_signed(method, path, params=None):
     if not REAL_TRADE_ENABLED:
         raise RuntimeError("BINANCE_API_KEY/SECRET tidak diset")
-    _binance_wait_if_banned()
-    params = dict(params or {})
-    params["timestamp"] = int(time.time() * 1000)
-    params["recvWindow"] = 5000
-    query = urllib.parse.urlencode(params, safe=",")
-    sig = hmac.new(BINANCE_API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
-    url = f"{FAPI}{path}?{query}&signature={sig}"
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+    base_params = dict(params or {})
     last_err = None
+    time_resync_attempted = False
     for attempt in range(3):
+        _binance_wait_if_banned()
         try:
             _binance_request_pause()
+            # Timestamp MUST be created after throttle and for every attempt.
+            req = dict(base_params)
+            req["timestamp"] = _binance_timestamp_ms()
+            req["recvWindow"] = 10000
+            query = urllib.parse.urlencode(req, safe=",")
+            sig = hmac.new(BINANCE_API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
+            url = f"{FAPI}{path}?{query}&signature={sig}"
+            headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
             r = requests.request(method, url, headers=headers, timeout=10, verify=False)
             used = _binance_update_weight_from_response(r)
             if used is not None and used >= BINANCE_WEIGHT_HARD_LIMIT:
@@ -701,13 +789,21 @@ def _binance_signed(method, path, params=None):
                 raise BinanceCooldownError(f"Binance kena limit/ban (HTTP {r.status_code})")
             data = r.json()
             if isinstance(data, dict) and "code" in data and data["code"] < 0:
-                if data["code"] == -1003:
+                code = int(data["code"])
+                if code == -1003:
                     _binance_register_ban(data.get("msg", ""))
-                    raise BinanceCooldownError(f"Binance {data['code']}: {data.get('msg')}")
-                raise RuntimeError(f"Binance {data['code']}: {data.get('msg')}")
+                    raise BinanceCooldownError(f"Binance {code}: {data.get('msg')}")
+                if code == -1021:
+                    if time_resync_attempted:
+                        raise RuntimeError(f"Binance -1021 setelah resync: {data.get('msg')}")
+                    time_resync_attempted = True
+                    last_err = RuntimeError(f"Binance -1021: {data.get('msg')}")
+                    log.warning(f"[binance-time] -1021 pada {method} {path}; resync server time lalu retry dengan signature baru")
+                    _binance_sync_time(force=True)
+                    continue
+                raise RuntimeError(f"Binance {code}: {data.get('msg')}")
             return data
         except BinanceCooldownError:
-            # WAJIB: 418/429 TIDAK PERNAH masuk retry loop.
             raise
         except RuntimeError:
             raise
@@ -2240,17 +2336,36 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
 
 
 def _emergency_close(sym, is_buy, qty, chat_id, reason):
-    """Auto-out: tutup posisi market SEKARANG. Fallback untuk kondisi
-    bahaya (geometri invalid / harga sudah lewat SL) setelah order FILLED."""
+    """Emergency close. Never remove local state unless Binance confirms position=0.
+    On failure, keep the position visible as EMERGENCY until /ok SYMBOL reconciles it."""
     try:
         place_market_order(sym, "SELL" if is_buy else "BUY", qty, reduce_only=True)
-        tg_send(chat_id, f"🚨 <b>AUTO-OUT</b> — {sym}\nAlasan: {reason}\nPosisi ditutup market segera.")
+        # A successful HTTP response is not the same as confirmed position=0; verify first.
+        real = get_real_position(sym)
+        live_qty = abs(float(real.get("positionAmt", 0))) if real else 0.0
+        if live_qty <= 0:
+            try:
+                _cleanup_algo_orders_verified(sym)
+            except Exception as ce:
+                _queue_pending_cleanup(sym, "post-auto-out cleanup", ce)
+            close_position(sym, "strategy", close_price=get_price(sym) or positions.get(sym, {}).get("entry"))
+            tg_send(chat_id, f"✅ <b>AUTO-OUT</b> — {sym}\nPosisi Binance terkonfirmasi tertutup.")
+            return True
+        with positions_lock:
+            if sym in positions:
+                positions[sym]["status"] = "EMERGENCY"
+                positions[sym]["emergency_reason"] = "auto-out response OK but position still open"
+        tg_send(chat_id, f"🚨 <b>AUTO-OUT BELUM TUNTAS</b> — {sym}\nPosisi masih terbuka di Binance. Jalankan <code>/ok {sym}</code>.")
+        return False
     except Exception as e:
+        with positions_lock:
+            if sym in positions:
+                positions[sym]["status"] = "EMERGENCY"
+                positions[sym]["emergency_reason"] = reason
+                positions[sym]["emergency_error"] = str(e)[:300]
         tg_send(chat_id, f"🚨 <b>GAGAL AUTO-OUT</b> — {sym}: {e}\n"
-                          f"❗ CEK MANUAL SEGERA DI BINANCE, posisi mungkin masih terbuka!")
-    with positions_lock:
-        positions.pop(sym, None)
-    _ban_coin(sym, reason)
+                          f"⚠️ Posisi TETAP dicatat di /trade. Jalankan <code>/ok {sym}</code> untuk rekonsiliasi Binance.")
+        return False
 
 
 def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
@@ -2472,7 +2587,18 @@ def _resume_binance_and_flush_pending(chat_id=None):
                 failures.append(f'{sym}: trail {e}')
                 log.error(f'[trail-resume] {sym} GAGAL: {e}')
 
-        # 4) HARD GATE: partial recovery tidak boleh menyalakan scanner.
+        # 4) Pending orphan cleanup: do not resume scanner until cleanup queue is clear.
+        with _pending_cleanup_lock:
+            cleanup_items = list(_pending_cleanup.items())
+        for sym, item in cleanup_items:
+            try:
+                _cleanup_algo_orders_verified(sym)
+                log.info(f'[cleanup-resume] {sym} orphan algo orders sudah bersih.')
+            except Exception as e:
+                failures.append(f'{sym}: cleanup {e}')
+                log.error(f'[cleanup-resume] {sym} GAGAL: {e}')
+
+        # 5) HARD GATE: partial recovery tidak boleh menyalakan scanner.
         if failures:
             with _binance_pause_lock:
                 _binance_recovering = False
@@ -2490,7 +2616,7 @@ def _resume_binance_and_flush_pending(chat_id=None):
             _binance_scan_paused = False
             _binance_pause_reason = ''
         if chat_id:
-            tg_send(chat_id, '✅ <b>Binance recovery selesai.</b>\nSemua posisi berhasil disinkronkan dan pending protection/trailing berhasil diproses.\nScanning boleh resume.')
+            tg_send(chat_id, '✅ <b>Binance recovery selesai.</b>\nSemua posisi berhasil disinkronkan dan pending protection/trailing + cleanup berhasil diproses.\nScanning boleh resume.')
         return True
 
     except Exception as e:
@@ -2729,6 +2855,10 @@ def bot_loop():
 
     # Tidak ada startup ping Binance. Request hanya dilakukan saat benar-benar dibutuhkan.
 
+    try:
+        _binance_sync_time(force=True)
+    except Exception:
+        pass
     _telegram_bootstrap()
     offset=None
     poll_backoff=1
@@ -3046,16 +3176,84 @@ def bot_loop():
                                 pr  = get_price(s) or p["entry"]
                                 pnl = (pr - p["entry"]) / p["entry"] * 100 * (1 if is_buy else -1)
                                 entry_clock = datetime.fromtimestamp(
-                                    p["entry_time"], tz=WIB).strftime("%H:%M")
+                                    p["entry_time"], tz=WIB).strftime("%H:%M") if p.get("entry_time") else "?"
                                 cur_sl = p.get("current_sl", sig["sl"])
                                 trail_note = " 🔒trailing" if cur_sl != sig["sl"] else ""
-                                lines.append(
-                                    f"\n{em} <b>{s}</b> — AKTIF\n"
-                                    f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
-                                    f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note}\n"
-                                    f"PnL: <b>{pnl:+.2f}%</b> | 🕐 Entry jam {entry_clock}"
-                                )
+                                if status == "EMERGENCY":
+                                    lines.append(
+                                        f"\n🚨 <b>{s}</b> — EMERGENCY\n"
+                                        f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
+                                        f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note}\n"
+                                        f"PnL: <b>{pnl:+.2f}%</b>\n"
+                                        f"⚠️ {p.get('emergency_error','Posisi Binance belum terverifikasi')[:180]}\n"
+                                        f"➡️ Jalankan <code>/ok {s}</code>"
+                                    )
+                                else:
+                                    lines.append(
+                                        f"\n{em} <b>{s}</b> — AKTIF\n"
+                                        f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
+                                        f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note}\n"
+                                        f"PnL: <b>{pnl:+.2f}%</b> | 🕐 Entry jam {entry_clock}"
+                                    )
                         tg_send(chat_id,"\n".join(lines))
+                elif text.startswith("/ok") or (not text.startswith("/") and text.startswith("ok")):
+                    parts = text.split()
+                    target = parts[1].upper() if len(parts) > 1 else None
+                    if not target:
+                        tg_send(chat_id, "❌ Gunakan <code>/ok SYMBOL</code>, contoh <code>/ok HOMEUSDT</code>.")
+                        continue
+                    def _run_ok(cid, sym):
+                        try:
+                            with positions_lock:
+                                pos = positions.get(sym)
+                            if not pos:
+                                tg_send(cid, f"ℹ️ <b>{sym}</b> tidak ada di state /trade. Tidak ada yang direkonsiliasi.")
+                                return
+                            tg_send(cid, f"🔄 <b>RECONCILING {sym}...</b>\nMemeriksa posisi Binance + TP/SL + pending protection/trail.")
+                            _binance_sync_time(force=True)
+                            real = get_real_position(sym)
+                            live_qty = abs(float(real.get("positionAmt", 0))) if real else 0.0
+                            if live_qty <= 0:
+                                # Position closed: clean orphan algo orders, then remove local state.
+                                _cleanup_algo_orders_verified(sym)
+                                _clear_pending_trail(sym)
+                                _clear_pending_protection(sym)
+                                _clear_pending_cleanup(sym)
+                                close_position(sym, "strategy", close_price=get_price(sym) or pos.get("entry"))
+                                tg_send(cid, f"✅ <b>{sym} RECONCILED</b>\nPosition Binance = 0.\nOrphan TP/SL sudah dibersihkan.\nStatus: CLOSED.")
+                                return
+                            with positions_lock:
+                                if sym in positions:
+                                    positions[sym]["status"] = "active"
+                                    positions[sym]["quantity"] = live_qty
+                                    positions[sym]["exchange_synced_at"] = time.time()
+                                    positions[sym]["emergency_reason"] = None
+                            # If protection is missing/unknown, queue/restore it.
+                            sig = pos["signal"]; buy = sig["decision"] == "BUY"
+                            tp = sig.get("tp"); sl = pos.get("current_sl", sig.get("sl"))
+                            pending = _get_pending_trail(sym)
+                            if pending:
+                                tp = pending.get("tp") or tp
+                                sl = pending.get("sl") or sl
+                            # Reconcile atomically: remove stale protective algo orders before
+                            # placing the verified current TP/SL pair, preventing duplicates.
+                            cancel_all_algo_orders(sym)
+                            t, sl_order = place_tp_sl(sym, buy, tp, sl, live_qty)
+                            with positions_lock:
+                                if sym in positions:
+                                    positions[sym].update({"tp_order_id": t["algoId"], "sl_order_id": sl_order["algoId"], "protection_state": "VERIFIED", "exchange_synced_at": time.time()})
+                            _clear_pending_protection(sym)
+                            _clear_pending_trail(sym)
+                            _clear_pending_cleanup(sym)
+                            tg_send(cid, f"✅ <b>{sym} RECONCILED</b>\nPosition Binance masih terbuka: <code>{live_qty:.8g}</code>\nTP/SL terpasang ulang dan state kembali ACTIVE.")
+                        except Exception as e:
+                            with positions_lock:
+                                if sym in positions:
+                                    positions[sym]["status"] = "EMERGENCY"
+                                    positions[sym]["emergency_error"] = str(e)[:300]
+                            _queue_pending_cleanup(sym, "/ok gagal — retry manual", e)
+                            tg_send(cid, f"🚨 <b>{sym} RECONCILE GAGAL</b>\n<code>{str(e)[:350]}</code>\nPosisi tetap dipertahankan di /trade. Coba <code>/ok {sym}</code> lagi setelah Binance/API normal.")
+                    threading.Thread(target=_run_ok, args=(chat_id, target), daemon=True).start()
                 elif text.startswith("/timeout") or (not text.startswith("/") and text.startswith("timeout")):
                     parts = text.split()
                     target_sym = parts[1].upper() if len(parts) > 1 else None
