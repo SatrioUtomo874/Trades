@@ -1,5 +1,5 @@
 """
-strategy_logic.py — OTAK v3 (Revisi: Inducement, External Liquidity, Trail Struktural)
+strategy_logic.py — OTAK v4 (Adaptive RR + Context-Aware Trailing)
 ========================================================================================
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
@@ -66,7 +66,7 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 MIN_RR   = 2.0
-MAX_RR   = 4.0
+MAX_RR   = None  # unlimited RR; target tetap harus struktural/berbasis liquidity
 
 # ── Trail Ladder v3 ──────────────────────────────────────────────────────
 # HANYA breakeven di 1.0R. Ini bukan "pengaman profit" — cuma menghilangkan
@@ -85,6 +85,22 @@ TRAIL_R_LADDER = []  # Trail sepenuhnya struktural M15; tidak ada profit-lock la
 STRUCT_TRAIL_LB       = 3      # lookback swing_pts saat trailing
 STRUCT_TRAIL_BUF_PCT  = 0.0025 # buffer 0.25% di luar swing agar tidak kena LS biasa
 STRUCT_TRAIL_LOOKBACK = 60     # candle M15 untuk cari swing trailing
+
+# Adaptive trailing engine V4
+TRAIL_ENGINE_VERSION       = "4.0-adaptive"
+TRAIL_ARM_R                = 0.80
+TRAIL_PROTECT_R            = 1.00
+TRAIL_MATURE_R             = 1.50
+TRAIL_ATR_MULT             = 2.40
+TRAIL_ATR_TIGHT_MULT       = 1.65
+TRAIL_MIN_GAP_ATR          = 0.28
+TRAIL_BREAK_EVEN_OFFSET_R  = 0.02
+TRAIL_WEAKNESS_MODERATE    = 3
+TRAIL_WEAKNESS_STRONG      = 6
+TRAIL_LIQUIDITY_NEAR_R     = 0.75
+TRAIL_VOLUME_EXPANSION     = 1.30
+TRAIL_VOLUME_WEAK          = 0.75
+TRAIL_MIN_IMPROVEMENT_ATR  = 0.10
 
 # Fibonacci extension TP (level 1.272 dan 1.618 dari impulse leg)
 FIB_EXT_1 = 0.272   # 127.2%
@@ -1705,10 +1721,7 @@ def _select_tp(pool: list, entry: float, risk: float,
     # Cari target struktural pertama yang benar-benar memberi >=2R.
     for lbl, value, tier, rr in targets:
         if rr >= MIN_RR:
-            if rr <= MAX_RR:
-                return round(value, 8), lbl, round(rr, 2)
-            capped = entry + sgn * risk * MAX_RR
-            return round(capped, 8), lbl + "_capped_4R", MAX_RR
+            return round(value, 8), lbl, round(rr, 2)
 
     # Semua target nyata masih <2R. Jangan membuat target fiktif.
     return None, None, None
@@ -1891,7 +1904,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             )
             execution_score = (
                 final_conf
-                + min(float(rr), MAX_RR) * 1.5
+                + min(float(rr), 10.0) * 1.25 + max(0.0, float(rr) - 10.0) ** 0.5
                 + candidate.get("score", 0) * 0.25
                 + setup_quality * 0.20
             )
@@ -1965,6 +1978,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "price": cur_price,
             "entry_label": entry_lbl,
             "sl": round(sl_price, 8),
+            "initial_sl": round(sl_price, 8),
+            "initial_risk": round(abs(entry - sl_price), 8),
             "tp": round(tp_price, 8),
             "rr": round(rr, 2),
             "atr": round(atr, 8),
@@ -2006,6 +2021,279 @@ def get_best_signal(candidates: list) -> Optional[dict]:
         return sig["confidence"] + bonus + sig.get("rr", 0) * 0.5
 
     return max(candidates, key=_rank)
+
+
+# =============================================================================
+# ADAPTIVE POSITION MANAGEMENT — TRAILING BRAIN V4
+# =============================================================================
+
+def _relative_volume(df: pd.DataFrame, n: int = 20) -> float:
+    """Relative volume proxy dari data OHLCV yang SUDAH DIMILIKI bot."""
+    if df is None or df.empty or "volume" not in df.columns:
+        return 1.0
+    vol = pd.to_numeric(df["volume"], errors="coerce").dropna()
+    if len(vol) < n + 3:
+        return 1.0
+    base = float(vol.iloc[-n-1:-1].mean())
+    return float(vol.iloc[-1] / max(base, 1e-12))
+
+
+def _momentum_context(df: pd.DataFrame) -> dict:
+    """Momentum lokal: EMA slope + last/previous return, tanpa request API tambahan."""
+    if df is None or len(df) < 8:
+        return {"bull": False, "bear": False, "expanding": False, "slope_atr": 0.0}
+    close = df["close"].astype(float)
+    atr = max(float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0, 1e-12)
+    e9 = ema(close, 9)
+    slope = float(e9.iloc[-1] - e9.iloc[-4]) / atr
+    ret3 = float(close.iloc[-1] - close.iloc[-4]) / atr
+    last_body = abs(float(df["close"].iloc[-1] - df["open"].iloc[-1])) / atr
+    return {
+        "bull": slope > 0.20 and ret3 > 0.15,
+        "bear": slope < -0.20 and ret3 < -0.15,
+        "expanding": last_body >= 0.80,
+        "slope_atr": round(slope, 3),
+        "ret3_atr": round(ret3, 3),
+        "last_body_atr": round(last_body, 3),
+    }
+
+
+def _adaptive_trail_candidates(df_m15: pd.DataFrame, direction: str, entry: float,
+                              current_price: float, initial_risk: float,
+                              profit_r: float, weakness_score: int) -> dict:
+    """Generate عدة stop candidates; caller decides using market state."""
+    up = direction == "bull"
+    atr = max(float(df_m15["atr"].iloc[-1]), 1e-12)
+    sh, sl = swing_pts(df_m15.iloc[-TRAIL_LOOKBACK_CANDLES:], lb=STRUCT_TRAIL_LB) if len(df_m15) >= TRAIL_LOOKBACK_CANDLES else swing_pts(df_m15, lb=STRUCT_TRAIL_LB)
+    # translate local indices back into the sliced frame is unnecessary for values
+    recent = df_m15.iloc[-TRAIL_LOOKBACK_CANDLES:] if len(df_m15) >= TRAIL_LOOKBACK_CANDLES else df_m15
+    sh, sl = swing_pts(recent, lb=STRUCT_TRAIL_LB)
+
+    vol = _relative_volume(df_m15, 20)
+    mom = _momentum_context(df_m15)
+    adaptive_buffer = atr * (0.40 if weakness_score < TRAIL_WEAKNESS_MODERATE else 0.30)
+    if vol < TRAIL_VOLUME_WEAK:
+        adaptive_buffer *= 0.90
+    if vol > TRAIL_VOLUME_EXPANSION and ((up and mom["bull"]) or ((not up) and mom["bear"])):
+        adaptive_buffer *= 1.15
+
+    structure_stop = None
+    if up and sl:
+        structure_stop = float(recent["low"].iloc[sl[-1]]) - adaptive_buffer
+    elif (not up) and sh:
+        structure_stop = float(recent["high"].iloc[sh[-1]]) + adaptive_buffer
+
+    extreme_hi = float(recent["high"].max())
+    extreme_lo = float(recent["low"].min())
+    atr_mult = TRAIL_ATR_TIGHT_MULT if weakness_score >= TRAIL_WEAKNESS_STRONG else TRAIL_ATR_MULT
+    atr_stop = (extreme_hi - atr * atr_mult) if up else (extreme_lo + atr * atr_mult)
+
+    be_stop = entry + (initial_risk * TRAIL_BREAK_EVEN_OFFSET_R if up else -initial_risk * TRAIL_BREAK_EVEN_OFFSET_R)
+    min_gap = atr * TRAIL_MIN_GAP_ATR
+    # Ensure the candidate is not so close that normal noise immediately takes it.
+    if up:
+        max_usable = current_price - min_gap
+        structure_stop = min(structure_stop, max_usable) if structure_stop is not None else None
+        atr_stop = min(atr_stop, max_usable)
+        be_stop = min(be_stop, max_usable)
+    else:
+        min_usable = current_price + min_gap
+        structure_stop = max(structure_stop, min_usable) if structure_stop is not None else None
+        atr_stop = max(atr_stop, min_usable)
+        be_stop = max(be_stop, min_usable)
+
+    return {
+        "structure": structure_stop,
+        "atr": atr_stop,
+        "breakeven": be_stop,
+        "relative_volume": round(vol, 3),
+        "momentum": mom,
+        "atr": atr,
+        "buffer": adaptive_buffer,
+    }
+
+
+# Number of M15 candles examined by the trailing engine. Kept moderate to avoid
+# unnecessary CPU work while still covering several structural legs.
+TRAIL_LOOKBACK_CANDLES = STRUCT_TRAIL_LOOKBACK
+
+
+def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
+                    df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
+    """
+    Position-management brain V4.
+
+    Important: this function performs NO REST/WebSocket calls. It only processes
+    data already supplied by main.py and returns a decision. main.py remains the
+    sole execution layer.
+
+    Decision states:
+      HOLD      = trend is healthy; do not touch SL
+      PROTECT   = trade matured enough to consider BE/soft protection
+      TRAIL     = tighten SL using adaptive structure/ATR candidate
+      EXIT      = confirmed structural/momentum failure; main.py may close
+    """
+    if df_m15 is None or df_m15.empty:
+        return {"action": "HOLD", "state": "NO_DATA", "reason": ["M15 unavailable"]}
+
+    live_price = float(df_m15["close"].iloc[-1])
+    m15 = build_df(_closed_candles(df_m15, 15), interval_minutes=15)
+    if m15 is None or len(m15) < 55:
+        return {"action": "HOLD", "state": "NO_DATA", "reason": ["insufficient M15 data"]}
+
+    sig = state.get("signal", state) or {}
+    decision = str(sig.get("decision") or state.get("decision") or "BUY").upper()
+    direction = "bull" if decision == "BUY" else "bear"
+    entry = float(state.get("entry") or sig.get("entry") or m15["close"].iloc[-1])
+    current_price = float(state.get("current_price") or state.get("price") or live_price)
+    current_sl = float(state.get("current_sl") or sig.get("sl") or entry)
+    initial_sl = float(state.get("initial_sl") or sig.get("initial_sl") or sig.get("sl") or current_sl)
+    tp = sig.get("tp")
+    tp = float(tp) if tp is not None else None
+    initial_risk = max(abs(entry - initial_sl), 1e-12)
+    profit_r = ((current_price - entry) if direction == "bull" else (entry - current_price)) / initial_risk
+
+    sh, sl = swing_pts(m15, lb=STRUCT_TRAIL_LB)
+    structure = _market_structure(m15, sh, sl)
+    rdiv = detect_rsi_divergence(m15, direction, lb=30)
+    vol = _relative_volume(m15, 20)
+    mom = _momentum_context(m15)
+    atr = max(float(m15["atr"].iloc[-1]), 1e-12)
+
+    weakness = 0
+    reasons = []
+
+    # Structure is the primary authority. A healthy trend gives the trade room.
+    aligned_structure = structure == ("bullish" if direction == "bull" else "bearish")
+    opposite_structure = structure == ("bearish" if direction == "bull" else "bullish")
+    if aligned_structure:
+        reasons.append("structure_aligned")
+    elif opposite_structure:
+        weakness += 3
+        reasons.append("structure_opposite")
+    else:
+        reasons.append("structure_ranging")
+
+    # Momentum: strong aligned movement = patience; strong opposite movement = tighten.
+    if (direction == "bull" and mom["bull"]) or (direction == "bear" and mom["bear"]):
+        reasons.append("momentum_aligned")
+    elif (direction == "bull" and mom["bear"]) or (direction == "bear" and mom["bull"]):
+        weakness += 2
+        reasons.append("momentum_reversal")
+
+    # RSI divergence is a warning, not an automatic exit.
+    div = (direction == "bull" and rdiv.get("bear_div")) or (direction == "bear" and rdiv.get("bull_div"))
+    if div:
+        weakness += 2 if not rdiv.get("strong") else 3
+        reasons.append("rsi_divergence")
+
+    # Volume/price interaction. High aligned volume supports continuation; falling
+    # volume after extension is an exhaustion warning.
+    aligned = (direction == "bull" and mom["bull"]) or (direction == "bear" and mom["bear"])
+    if vol >= TRAIL_VOLUME_EXPANSION and aligned:
+        reasons.append("volume_supports_move")
+    elif vol <= TRAIL_VOLUME_WEAK and profit_r >= TRAIL_MATURE_R:
+        weakness += 1
+        reasons.append("volume_exhaustion")
+    elif vol >= TRAIL_VOLUME_EXPANSION and not aligned:
+        weakness += 2
+        reasons.append("counter_volume_expansion")
+
+    # If the intended target is close, protect more aggressively once there is
+    # evidence of rejection. Until then, allow the winner to complete its path.
+    target_near = False
+    if tp is not None and initial_risk > 0:
+        target_distance_r = abs(tp - current_price) / initial_risk
+        target_near = target_distance_r <= TRAIL_LIQUIDITY_NEAR_R
+        if target_near:
+            reasons.append("target_near")
+
+    # Major recent swing/liquidity was reached and rejected: treat as stronger warning.
+    recent_high = float(m15["high"].iloc[-20:].max())
+    recent_low = float(m15["low"].iloc[-20:].min())
+    last = m15.iloc[-1]
+    body_atr = abs(float(last["close"] - last["open"])) / atr
+    if direction == "bull" and float(last["high"]) >= recent_high * (1 - 1e-9) and float(last["close"]) < float(last["open"]) and body_atr >= 0.8:
+        weakness += 2
+        reasons.append("upper_liquidity_rejection")
+    if direction == "bear" and float(last["low"]) <= recent_low * (1 + 1e-9) and float(last["close"]) > float(last["open"]) and body_atr >= 0.8:
+        weakness += 2
+        reasons.append("lower_liquidity_rejection")
+
+    # Trade maturity changes how much weakness we tolerate.
+    if profit_r < TRAIL_ARM_R:
+        return {
+            "action": "HOLD", "state": "DEVELOPING", "profit_r": round(profit_r, 2),
+            "reason": reasons, "relative_volume": round(vol, 3),
+        }
+
+    candidates = _adaptive_trail_candidates(
+        m15, direction, entry, current_price, initial_risk, profit_r, weakness
+    )
+
+    # Strong continuation: don't crowd the trade. Only act if an objectively more
+    # protective candidate exists and profit has matured enough.
+    if aligned and weakness < TRAIL_WEAKNESS_MODERATE and profit_r < TRAIL_MATURE_R:
+        return {
+            "action": "PROTECT" if profit_r >= TRAIL_PROTECT_R else "HOLD",
+            "state": "TREND_HEALTHY",
+            "profit_r": round(profit_r, 2),
+            "reason": reasons + ["winner_allowed_room"],
+            "relative_volume": round(vol, 3),
+        }
+
+    # Choose the candidate that protects without sitting inside normal noise.
+    valid = []
+    for name, value in candidates.items():
+        if name in {"relative_volume", "momentum", "atr", "buffer"} or value is None:
+            continue
+        v = float(value)
+        if direction == "bull" and v < current_price:
+            if v > current_sl + atr * TRAIL_MIN_IMPROVEMENT_ATR:
+                valid.append((v, name))
+        elif direction == "bear" and v > current_price:
+            if v < current_sl - atr * TRAIL_MIN_IMPROVEMENT_ATR:
+                valid.append((v, name))
+
+    # On moderate weakness choose the tighter valid candidate; on strong weakness
+    # the same rule applies, but ATR multiplier has already contracted.
+    if valid:
+        if direction == "bull":
+            chosen, source = max(valid, key=lambda x: x[0])
+        else:
+            chosen, source = min(valid, key=lambda x: x[0])
+        state_name = "EXHAUSTION" if weakness >= TRAIL_WEAKNESS_STRONG else ("MATURE" if profit_r >= TRAIL_MATURE_R else "PROTECT")
+        action = "TRAIL"
+        return {
+            "action": action,
+            "state": state_name,
+            "sl": round(float(chosen), 10),
+            "profit_r": round(profit_r, 2),
+            "weakness_score": int(weakness),
+            "trail_source": source,
+            "relative_volume": round(vol, 3),
+            "reason": reasons + [f"adaptive_trail:{source}"]
+        }
+
+    # If trend has actually broken and no candidate can improve current SL, signal a
+    # controlled close only after multiple independent warnings agree.
+    if weakness >= TRAIL_WEAKNESS_STRONG and profit_r >= TRAIL_MATURE_R:
+        return {
+            "action": "EXIT",
+            "close": True,
+            "state": "EXIT_WARNING",
+            "profit_r": round(profit_r, 2),
+            "weakness_score": int(weakness),
+            "reason": reasons + ["multi-factor-structure-failure"]
+        }
+
+    return {
+        "action": "HOLD",
+        "state": "WAIT",
+        "profit_r": round(profit_r, 2),
+        "weakness_score": int(weakness),
+        "reason": reasons + ["no_better_stop_candidate"]
+    }
 
 
 # =============================================================================
