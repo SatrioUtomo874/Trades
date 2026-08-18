@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-main.py V6 — MESIN (engine). Telegram handler, API client, monitoring,
+main.py V6.1 — MESIN (engine). Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
 strategy_logic.py ("Otak"), diimpor di bawah.
 
-V6: Binance execution safety + manual reconciliation + orphan-order cleanup.
+V6.1: Binance execution safety + manual reconciliation + orphan-order cleanup + /analyze Path fix.
 1. Setup logging dipindah ke awal (sebelumnya log dipanggil sebelum
    didefinisikan -> selalu NameError saat start).
 2. Fallback strategy_logic gagal load: full_analyze jadi no-op (tidak
@@ -15,6 +15,7 @@ V6: Binance execution safety + manual reconciliation + orphan-order cleanup.
 import sys
 import os, time, logging, threading
 from collections import deque
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 import requests, pandas as pd, numpy as np, urllib3, json
