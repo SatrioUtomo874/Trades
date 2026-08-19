@@ -1,5 +1,5 @@
 """
-strategy_logic.py — OTAK v5 (Adaptive RR + Intelligent Target Selection + Context-Aware Trailing)
+strategy_logic.py — OTAK v6 (Adaptive RR + Intelligent Target Selection + Context-Aware Trailing)
 ========================================================================================
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
@@ -1037,6 +1037,11 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         "cisd_m15": cisd_m15,
         "bos_m15": bos_m15,
         "bos_h1": bos_h1,
+        "m15_rsi": float(L15["rsi"]),
+        "m15_rsi_slope": float(L15["rsi"] - m15["rsi"].iloc[-2]) if len(m15) >= 2 else 0.0,
+        "m15_relative_volume": _relative_volume(m15, 20) if len(m15) >= 23 else 1.0,
+        "m15_momentum_aligned": bool((direction == "bull" and _momentum_context(m15).get("bull")) or (direction == "bear" and _momentum_context(m15).get("bear"))),
+        "m15_divergence_against": bool((direction == "bull" and rdiv_bear.get("bear_div")) or (direction == "bear" and rdiv_bull.get("bull_div"))),
         "failed_retest": fr_m15,
         "liquidity_bull": liq_bull,
         "liquidity_bear": liq_bear,
@@ -1051,13 +1056,15 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
 
 
 # =============================================================================
-# CONFIDENCE CALIBRATION V2.2
+# CONFIDENCE CALIBRATION V3.0 — TRADEABILITY
 # =============================================================================
-CONFIDENCE_MODEL_VERSION = "2.2"
+CONFIDENCE_MODEL_VERSION = "3.0_tradeability"
 
 def _confidence_band(conf: int) -> str:
-    if conf >= 75:
+    if conf >= 85:
         return "ELITE"
+    if conf >= 75:
+        return "VERY_STRONG"
     if conf >= 65:
         return "STRONG"
     if conf >= 55:
@@ -1069,13 +1076,11 @@ def _confidence_band(conf: int) -> str:
 
 def _calibrate_confidence(base_confidence: int, score_ctx: dict, loc: dict,
                           candidate: dict, rr: float, htf_poi: list,
-                          poi_reacted: bool) -> tuple[int, int, dict]:
-    """V2.2 confidence = direction quality + independent execution quality.
+                          poi_reacted: bool, tp_diag: Optional[dict] = None) -> tuple[int, int, dict]:
+    """Confidence V3.0 = tradeability, not raw confluence count.
 
-    Tujuannya bukan menaikkan semua angka. Setup yang structurally coherent
-    mendapat lift walau raw direction score biasa saja; setup yang terlihat
-    tinggi karena bonus-bonus yang tidak cukup relevan bisa turun. Tidak ada
-    hard rejection di sini.
+    Direction establishes the thesis, but entry location and current-move health
+    have larger influence on the final number. RR is payoff, not probability.
     """
     direction = score_ctx.get("direction", "bull")
     htf_bias = score_ctx.get("htf_bias", "neutral")
@@ -1088,91 +1093,127 @@ def _calibrate_confidence(base_confidence: int, score_ctx: dict, loc: dict,
     candidate_score = float(candidate.get("score", 0) or 0)
     entry_label = str(candidate.get("label", ""))
 
-    # 1) STRUCTURE / CONTEXT (0-40)
-    structure = 0.0
+    # 1) DIRECTION / STRUCTURAL THESIS: 0-25
+    direction_q = 0.0
     if h1_bias == ("bullish" if direction == "bull" else "bearish"):
-        structure += 16
+        direction_q += 10
     elif h1_bias == "neutral":
-        structure += 7
+        direction_q += 6
     if htf_bias == ("bullish" if direction == "bull" else "bearish"):
-        structure += 10
+        direction_q += 9
     elif htf_bias == "neutral":
-        structure += 5
+        direction_q += 5
     elif htf_bias == "conflict":
-        structure -= 5
-
+        direction_q -= 4
     if m15_struct == ("bullish" if direction == "bull" else "bearish"):
-        structure += 12
+        direction_q += 6
     elif m15_struct == "ranging":
-        structure += 5
-    else:
-        structure += 1
-    structure = max(0.0, min(40.0, structure))
+        direction_q += 3
+    direction_q = max(0.0, min(25.0, direction_q))
 
-    # 2) TRIGGER QUALITY (0-25)
-    trigger = 5.0
-    trigger += min(trigger_count, 4) * 4.0
-    if selected_confirm.get("confirmed"):
-        trigger += 5.0
-    if selected_sweep:
-        trigger += 2.0
-    trigger = max(0.0, min(25.0, trigger))
-
-    # 3) ENTRY LOCATION / POI (0-20)
-    location = 0.0
-    location += max(0.0, min(12.0, (loc_score - 35) * 0.30))
+    # 2) ENTRY QUALITY: 0-30 -- deliberately larger than raw direction.
+    entry_q = 0.0
+    entry_q += max(0.0, min(18.0, (loc_score - 30) * 0.38))
     if htf_poi:
-        location += 3.0
+        entry_q += 3.0
     if poi_reacted:
-        location += 3.0
+        entry_q += 4.0
     if entry_label in ("ob", "ob_retest"):
-        location += 1.5
+        entry_q += 2.0
     elif entry_label in ("fvg", "fvg_retest"):
-        location += 1.0
-    location = max(0.0, min(20.0, location))
-
-    # 4) RISK / EXECUTION (0-15)
-    riskq = 5.0
-    if rr >= 2.5:
-        riskq += 4.0
-    elif rr >= 2.0:
-        riskq += 2.0
-    if candidate_score >= 8:
-        riskq += 3.0
-    elif candidate_score >= 6:
-        riskq += 2.0
-    if loc_score >= 70:
-        riskq += 2.0
-    riskq = max(0.0, min(15.0, riskq))
-
-    setup_quality = int(round(structure + trigger + location + riskq))
-    setup_quality = max(0, min(100, setup_quality))
-
-    # Base direction score tetap berpengaruh besar, tetapi bukan satu-satunya
-    # sumber angka. Ini memberi peluang setup raw 50-an yang structurally kuat
-    # untuk masuk ke 60-an, tanpa membuat setup ranging/noisy otomatis tinggi.
-    calibrated = int(round(0.50 * float(base_confidence) + 0.50 * setup_quality))
-
-    # Soft penalties: jangan hard block, hanya menjaga quality separation.
-    if m15_struct not in ("bullish" if direction == "bull" else "bearish", "ranging"):
-        calibrated -= 5
-    if htf_bias == "conflict":
-        calibrated -= 6
+        entry_q += 1.5
+    # Chase / bad location penalties.
     if loc_score < 45:
-        calibrated -= 4
-    calibrated = max(0, min(99, calibrated))
+        entry_q -= 4
+    if loc.get("location_state") in {"chase", "bad_location", "premium_chase", "discount_chase"}:
+        entry_q -= 4
+    entry_q = max(0.0, min(30.0, entry_q))
 
+    # 3) CURRENT MOVE HEALTH: 0-25
+    move_q = 12.0
+    rsi_val = float(loc.get("rsi", score_ctx.get("m15_rsi", 50.0)) or 50.0)
+    rv = float(score_ctx.get("m15_relative_volume", 1.0) or 1.0)
+    rsi_timing = str(loc.get("rsi_timing", "unknown"))
+    rsi_slope = float(loc.get("rsi_slope", score_ctx.get("m15_rsi_slope", 0.0)) or 0.0)
+    momentum_aligned = bool(score_ctx.get("m15_momentum_aligned", False))
+    divergence = bool(score_ctx.get("m15_divergence_against", False))
+
+    if momentum_aligned:
+        move_q += 6
+    if rv >= 1.30 and momentum_aligned:
+        move_q += 3
+    elif rv < 0.70 and rr >= 2.0:
+        move_q -= 2
+    if divergence:
+        move_q -= 5
+    if direction == "bull" and rsi_val >= 72:
+        move_q -= 4
+    elif direction == "bear" and rsi_val <= 28:
+        move_q -= 4
+    if rsi_timing in {"rising", "falling", "favorable"}:
+        move_q += 1
+    if direction == "bull" and rsi_slope < -1.5:
+        move_q -= 2
+    if direction == "bear" and rsi_slope > 1.5:
+        move_q -= 2
+    move_q = max(0.0, min(25.0, move_q))
+
+    # 4) TRIGGER / CONFIRMATION: 0-10
+    trigger_q = min(10.0, 2.0 + min(trigger_count, 3) * 1.5)
+    if selected_confirm.get("confirmed"):
+        trigger_q += 2.0
+    if selected_sweep:
+        trigger_q += 0.5
+    trigger_q = max(0.0, min(10.0, trigger_q))
+
+    # 5) TARGET / PAYOFF QUALITY: 0-10. RR is not treated as win probability.
+    target_q = 4.0
+    selected = (tp_diag or {}).get("selected") if isinstance(tp_diag, dict) else None
+    if selected:
+        reach = float(selected.get("reachability_proxy", 0.0) or 0.0)
+        path = float(selected.get("path_clear", 0.0) or 0.0)
+        tq = float(selected.get("target_quality", 0.0) or 0.0)
+        target_q = min(10.0, 2.0 + 3.0 * reach + 2.0 * path + 3.0 * tq)
+    elif rr >= 2.0:
+        target_q = 5.0
+    target_q = max(0.0, min(10.0, target_q))
+
+    # Direction should matter, but cannot dominate. This is the key change that
+    # addresses high-confidence SLs caused by strong HTF structure + poor timing.
+    calibrated = int(round(
+        0.25 * (base_confidence)
+        + 0.30 * (direction_q + 10 * 0)
+        + 0.30 * (entry_q / 30.0 * 100.0)
+        + 0.15 * ((move_q + trigger_q + target_q) / 45.0 * 100.0)
+    ))
+
+    # Harder contradiction penalties are still soft, so frequency does not collapse.
+    if htf_bias == "conflict":
+        calibrated -= 7
+    if m15_struct not in (("bullish" if direction == "bull" else "bearish"), "ranging"):
+        calibrated -= 4
+    if loc_score < 40:
+        calibrated -= 5
+    if divergence and (direction == "bull" and rsi_val >= 70 or direction == "bear" and rsi_val <= 30):
+        calibrated -= 3
+
+    calibrated = max(0, min(99, calibrated))
+    setup_quality = int(round(0.20 * direction_q + 0.40 * entry_q + 0.25 * move_q + 0.10 * trigger_q + 0.05 * target_q))
     diagnostics = {
         "model_version": CONFIDENCE_MODEL_VERSION,
         "direction_component": int(base_confidence),
-        "structure_quality": int(round(structure)),
-        "trigger_quality": int(round(trigger)),
-        "location_quality": int(round(location)),
-        "risk_execution_quality": int(round(riskq)),
-        "setup_quality": setup_quality,
+        "direction_quality": int(round(direction_q)),
+        "entry_quality": int(round(entry_q)),
+        "move_health": int(round(move_q)),
+        "trigger_quality": int(round(trigger_q)),
+        "target_quality": int(round(target_q)),
+        "setup_quality": max(0, min(100, setup_quality)),
+        "rsi": round(rsi_val, 1),
+        "relative_volume": round(rv, 3),
+        "divergence_against": bool(divergence),
         "confidence_band": _confidence_band(calibrated),
     }
-    return calibrated, setup_quality, diagnostics
+    return calibrated, max(0, min(100, setup_quality)), diagnostics
 
 
 # =============================================================================
@@ -2014,18 +2055,18 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             if not up and cur_price <= tp_price:
                 continue
 
-            # V2.2: confidence dikalibrasi ulang dari dua komponen: direction
-            # quality + execution/setup quality. Tidak ada hard gate tambahan;
-            # setup tetap dievaluasi, tetapi kualitas angka menjadi lebih informatif.
+            # V3.0: confidence menilai tradeability; entry location + move health lebih berat
+            # daripada raw structural confluence. Tidak ada hard rejection baru.
             loc_score = int(loc.get("location_score", 50))
             final_conf, setup_quality, conf_diag = _calibrate_confidence(
-                base_confidence, score, loc, candidate, float(rr), htf_poi, poi_reacted
+                base_confidence, score, loc, candidate, float(rr), htf_poi, poi_reacted, tp_diag=tp_diag
             )
+
             execution_score = (
                 final_conf
-                + min(float(rr), 10.0) * 1.25 + max(0.0, float(rr) - 10.0) ** 0.5
-                + candidate.get("score", 0) * 0.25
-                + setup_quality * 0.20
+                + min(float(rr), 6.0) * 0.45
+                + candidate.get("score", 0) * 0.20
+                + setup_quality * 0.35
             )
 
             evaluated.append({
@@ -2086,6 +2127,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "setup_quality": int(best_eval.get("setup_quality", 0)),
             "confidence_band": best_eval.get("confidence_diagnostics", {}).get("confidence_band", _confidence_band(confidence)),
             "confidence_diagnostics": best_eval.get("confidence_diagnostics", {}),
+            "confidence_model": CONFIDENCE_MODEL_VERSION,
             "entry_location_score": loc.get("location_score", 50),
             "entry_location_state": loc.get("location_state", "unknown"),
             "entry_range_position": loc.get("range_position", 0.5),
