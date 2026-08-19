@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-main.py V6.1 — MESIN (engine). Telegram handler, API client, monitoring,
+main.py V7 — MESIN (engine). Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
 strategy_logic.py ("Otak"), diimpor di bawah.
 
-V6.1: Binance execution safety + manual reconciliation + orphan-order cleanup + /analyze Path fix.
+V7: Binance execution safety retained; /analyze rebuilt as closed-trade research ledger; /resetbalance starts a fresh research run.
 1. Setup logging dipindah ke awal (sebelumnya log dipanggil sebelum
    didefinisikan -> selalu NameError saat start).
 2. Fallback strategy_logic gagal load: full_analyze jadi no-op (tidak
@@ -149,8 +149,16 @@ stat_lock = threading.Lock()
 stats = {
     "tp":0, "sl":0, "trail":0, "total":0,
     "balance"    : STARTING_BALANCE,
-    "pnl_history": deque(maxlen=20),   # 20 trade terakhir untuk /backtest
+    "pnl_history": deque(maxlen=20),   # compatibility /backtest view
 }
+
+# FULL CLOSED-TRADE LEDGER UNTUK RESEARCH /analyze.
+# Berbeda dari pnl_history yang sengaja hanya menyimpan 20 trade terakhir.
+# Ledger ini tumbuh sepanjang run dan dihapus oleh /resetbalance.
+trade_history_lock = threading.Lock()
+trade_history: list[dict] = []
+trade_sequence = 0
+research_run_id = datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
 
 # Ban koin berbasis SCAN CYCLE (bukan jumlah trade nyata — koin yang selalu
 # ke-skip di tahap pending tidak pernah menambah hitungan trade, jadi ban
@@ -1778,15 +1786,25 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
         pnl_usd = round(position_usd * pnl_pct, 4)
         pct     = round(pnl_pct * 100, 3)
         stats["balance"] = round(balance + pnl_usd, 4)
-        stats["pnl_history"].append({
+        exit_ts = time.time()
+        global trade_sequence
+        trade_sequence += 1
+        trade_record = {
+            "trade_id": trade_sequence,
+            "run_id": research_run_id,
             "result": result, "pct": pct,
             "pnl_usd": pnl_usd, "balance_after": stats["balance"],
             "symbol": sym, "decision": decision,
-            "entry_time": entry_time, "exit_time": time.time(),
+            "entry_time": entry_time, "exit_time": exit_ts,
             "entry": entry, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
             "confidence": confidence, "entry_label": entry_label, "rr": rr,
             "rsi": rsi, "struct_h1": struct_h1, "d1_bias": d1_bias,
-        })
+        }
+        # Full ledger: every closed trade in this research run.
+        with trade_history_lock:
+            trade_history.append(dict(trade_record))
+        # Backward-compatible 20-trade view for /backtest and existing UI.
+        stats["pnl_history"].append(dict(trade_record))
 
 # Hitung alasan pending dibatalkan — biar bisa didiagnosis dari data,
 # bukan tebak-tebakan (mis. "kenapa banyak batal?" jadi terjawab dari /stats).
@@ -1871,227 +1889,189 @@ def fmt_backtest():
     return f"📋 <b>Backtest ({len(hist)} trade terakhir)</b>\n\n" + "\n\n".join(lines)
 
 # ============================================================
-# ANALYZE — DIAGNOSTIC SNAPSHOT (DUA FILE: MD + CSV)
+# ANALYZE — CLOSED TRADE LEDGER (DUA FILE: MD + CSV)
 # ============================================================
-def _json_compact(value):
-    if isinstance(value, (dict, list, tuple)):
-        try:
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-        except Exception:
-            return str(value)
-    return value
-
-
-def _analysis_row(symbol, sig=None, status="ok", error=""):
-    """Normalisasi hasil full_analyze() menjadi satu baris diagnostik."""
-    sig = sig if isinstance(sig, dict) else {}
-    row = {
-        "symbol": symbol,
-        "status": status,
-        "error": error,
-        "decision": sig.get("decision", ""),
-        "confidence": sig.get("confidence", ""),
-        "above_threshold": bool(
-            isinstance(sig.get("confidence"), (int, float))
-            and float(sig.get("confidence")) >= STRATEGY_CONFIDENCE_THRESHOLD
-        ),
-        "entry": sig.get("entry", ""),
-        "entry_label": sig.get("entry_label", ""),
-        "entry_state": sig.get("entry_state", ""),
-        "sl": sig.get("sl", ""),
-        "tp": sig.get("tp", ""),
-        "rr": sig.get("rr", ""),
-        "atr": sig.get("atr", ""),
-        "risk_atr": sig.get("risk_atr", ""),
-        "rsi": sig.get("rsi", ""),
-        "struct_h1": sig.get("struct_h1", ""),
-        "struct_m15": sig.get("struct_m15", ""),
-        "d1_bias": sig.get("d1_bias", ""),
-        "htf_bias": sig.get("htf_bias", ""),
-        "h1_bias": sig.get("h1_bias", ""),
-        "choch_m15": _json_compact(sig.get("choch_m15", {})),
-        "choch_h1": _json_compact(sig.get("choch_h1", {})),
-        "cisd_m15": _json_compact(sig.get("cisd_m15", {})),
-        "failed_retest": _json_compact(sig.get("failed_retest", {})),
-        "poi_reacted": sig.get("poi_reacted", ""),
-        "htf_overlap": sig.get("htf_overlap", ""),
-        "selected_sweep": sig.get("selected_sweep", ""),
-        "sweep_context": _json_compact(sig.get("sweep_context", {})),
-        "trigger_count": sig.get("trigger_count", ""),
-        "entry_confirmation": _json_compact(sig.get("entry_confirmation", {})),
-        "tp_sl_reason": sig.get("tp_sl_reason", ""),
-    }
-    return row
-
-
-def _analyze_snapshot():
-    """Scan satu universe sekali dan simpan SEMUA hasil strategy, termasuk yang di bawah threshold."""
-    try:
-        symbols = get_top_coins()
-    except Exception as e:
-        return [], [], f"market-data error: {e}"
-    if not symbols:
-        return [], [], "universe kosong"
-
+def _trade_analysis_rows(hist):
     rows = []
-    passing = []
-    for idx, sym in enumerate(symbols, 1):
-        log.info(f"[analyze {idx:02d}/{len(symbols)}] {sym}")
-        try:
-            h1 = get_klines(sym, "1h", 250)
-            m15 = get_klines(sym, "15m", 250)
-            try:
-                d1 = get_klines(sym, "1d", 100)
-            except Exception:
-                d1 = None
-            sig = full_analyze(h1, m15, d1, symbol=sym)
-            if isinstance(sig, dict):
-                row = _analysis_row(sym, sig)
-                rows.append(row)
-                if row["above_threshold"]:
-                    passing.append(sig)
-            else:
-                rows.append(_analysis_row(sym, status="no_setup"))
-        except Exception as e:
-            rows.append(_analysis_row(sym, status="error", error=str(e)[:250]))
-        time.sleep(0.15)
-    return rows, passing, ""
+    for t in hist:
+        rows.append({
+            "trade_id": t.get("trade_id", ""),
+            "run_id": t.get("run_id", ""),
+            "symbol": t.get("symbol", ""),
+            "result": t.get("result", ""),
+            "decision": t.get("decision", ""),
+            "entry": t.get("entry", ""),
+            "sl": t.get("sl", ""),
+            "tp": t.get("tp", ""),
+            "exit_price": t.get("exit_price", ""),
+            "rr": t.get("rr", ""),
+            "confidence": t.get("confidence", ""),
+            "entry_label": t.get("entry_label", ""),
+            "rsi": t.get("rsi", ""),
+            "struct_h1": t.get("struct_h1", ""),
+            "d1_bias": t.get("d1_bias", ""),
+            "pct": t.get("pct", ""),
+            "pnl_usd": t.get("pnl_usd", ""),
+            "balance_after": t.get("balance_after", ""),
+            "entry_time": t.get("entry_time", ""),
+            "exit_time": t.get("exit_time", ""),
+        })
+    return rows
 
 
-def _analyze_runtime_stats():
-    with stat_lock:
-        hist = list(stats["pnl_history"])
-        balance = stats["balance"]
+def _analyze_trade_history():
+    with trade_history_lock:
+        hist = [dict(x) for x in trade_history]
     if not hist:
-        return {
-            "trades": 0, "balance": balance, "net": 0.0, "win_rate": 0.0,
-            "profit_factor": 0.0, "max_dd": 0.0, "expectancy": 0.0,
-        }
-    wins = [float(t.get("pnl_usd", 0.0)) for t in hist if float(t.get("pnl_usd", 0.0)) >= 0]
-    losses = [float(t.get("pnl_usd", 0.0)) for t in hist if float(t.get("pnl_usd", 0.0)) < 0]
-    gross_profit = sum(wins)
-    gross_loss = abs(sum(losses))
+        return [], {"trades": 0, "run_id": research_run_id}
+
+    winners = [t for t in hist if t.get("result") in ("tp", "trail")]
+    losers = [t for t in hist if t.get("result") == "sl"]
+    gross_profit = sum(max(float(t.get("pnl_usd", 0.0)), 0.0) for t in hist)
+    gross_loss = abs(sum(min(float(t.get("pnl_usd", 0.0)), 0.0) for t in hist))
+    total_pnl = sum(float(t.get("pnl_usd", 0.0)) for t in hist)
+    avg_pct = sum(float(t.get("pct", 0.0)) for t in hist) / len(hist)
     equity = [STARTING_BALANCE] + [float(t.get("balance_after", STARTING_BALANCE)) for t in hist]
     peak = equity[0]
     max_dd = 0.0
     for e in equity:
         peak = max(peak, e)
         max_dd = max(max_dd, peak - e)
-    net = gross_profit - gross_loss
-    return {
+
+    # Breakdown yang berguna untuk diagnosis strategy tanpa market rescan.
+    by_result = {}
+    by_symbol = {}
+    by_entry = {}
+    for t in hist:
+        r = str(t.get("result") or "unknown")
+        s = str(t.get("symbol") or "?")
+        el = str(t.get("entry_label") or "?")
+        for bucket, key in ((by_result, r), (by_symbol, s), (by_entry, el)):
+            b = bucket.setdefault(key, {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0})
+            b["trades"] += 1
+            b["pnl"] += float(t.get("pnl_usd", 0.0))
+            if float(t.get("pnl_usd", 0.0)) >= 0:
+                b["wins"] += 1
+            else:
+                b["losses"] += 1
+
+    summary = {
         "trades": len(hist),
-        "balance": balance,
-        "net": net,
-        "win_rate": len(wins) / len(hist) * 100.0,
-        "profit_factor": gross_profit / gross_loss if gross_loss > 0 else 0.0,
+        "run_id": hist[-1].get("run_id", research_run_id),
+        "balance": float(hist[-1].get("balance_after", STARTING_BALANCE)),
+        "net": total_pnl,
+        "win_rate": len(winners) / len(hist) * 100.0,
+        "profit_factor": gross_profit / gross_loss if gross_loss > 0 else float("inf"),
         "max_dd": max_dd,
-        "expectancy": net / len(hist),
+        "expectancy": total_pnl / len(hist),
+        "avg_pct": avg_pct,
+        "tp": sum(1 for t in hist if t.get("result") == "tp"),
+        "trail": sum(1 for t in hist if t.get("result") == "trail"),
+        "sl": sum(1 for t in hist if t.get("result") == "sl"),
+        "by_result": by_result,
+        "by_symbol": by_symbol,
+        "by_entry": by_entry,
+    }
+    return _trade_analysis_rows(hist), summary
+
+
+def _analyze_snapshot():
+    """Compatibility wrapper: /analyze TIDAK lagi scan market; membaca trade ledger."""
+    rows, summary = _analyze_trade_history()
+    return rows, summary, ""
+
+
+def _analyze_runtime_stats():
+    rows, summary, _ = _analyze_snapshot()
+    return {
+        "trades": summary.get("trades", 0),
+        "balance": summary.get("balance", STARTING_BALANCE),
+        "net": summary.get("net", 0.0),
+        "win_rate": summary.get("win_rate", 0.0),
+        "profit_factor": summary.get("profit_factor", 0.0),
+        "max_dd": summary.get("max_dd", 0.0),
+        "expectancy": summary.get("expectancy", 0.0),
     }
 
 
 def _write_analyze_csv(rows):
     path = "/tmp/analyze_data.csv"
     cols = [
-        "symbol", "status", "error", "decision", "confidence", "above_threshold",
-        "entry", "entry_label", "entry_state", "sl", "tp", "rr", "atr", "risk_atr", "rsi",
-        "struct_h1", "struct_m15", "d1_bias", "htf_bias", "h1_bias", "choch_m15", "choch_h1",
-        "cisd_m15", "failed_retest", "poi_reacted", "htf_overlap", "selected_sweep", "sweep_context",
-        "trigger_count", "entry_confirmation", "tp_sl_reason",
+        "trade_id", "run_id", "symbol", "result", "decision", "entry", "sl", "tp", "exit_price",
+        "rr", "confidence", "entry_label", "rsi", "struct_h1", "d1_bias", "pct", "pnl_usd",
+        "balance_after", "entry_time", "exit_time",
     ]
     pd.DataFrame(rows, columns=cols).to_csv(path, index=False)
     return path
 
 
-def _write_analyze_report(rows, passing, universe_error=""):
+def _write_analyze_report(rows, summary, unused=""):
     path = "/tmp/analyze_report.md"
     now = datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S WIB")
-    rt = _analyze_runtime_stats()
-    analyzed = len(rows)
-    setup_rows = [r for r in rows if r["status"] == "ok"]
-    errors = [r for r in rows if r["status"] == "error"]
-    no_setup = [r for r in rows if r["status"] == "no_setup"]
-    passing_sorted = sorted(passing, key=lambda x: float(x.get("confidence", 0) or 0), reverse=True)
+    if not rows:
+        Path(path).write_text(
+            "# SMCAutoTrade — Trade Analysis\n\n"
+            f"**Waktu:** {now}\n\n"
+            "Belum ada closed trade pada research run aktif.\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _pf(v):
+        return "∞" if v == float("inf") else f"{v:.3f}"
 
     lines = [
-        "# SMCAutoTrade — Analysis Report",
+        "# SMCAutoTrade — Trade Analysis",
         "",
-        f"**Waktu snapshot:** {now}",
-        f"**Confidence threshold:** {STRATEGY_CONFIDENCE_THRESHOLD}%",
-        "**Mode:** Diagnostic snapshot saat ini; bukan backtest historis.",
+        f"**Waktu analysis:** {now}",
+        f"**Research run:** `{summary.get('run_id', research_run_id)}`",
+        "**Sumber:** full closed-trade ledger dari `/stats`; tidak melakukan market scan.",
         "",
-        "## Ringkasan Market",
-        "",
-        "| Metrik | Nilai |",
-        "|---|---:|",
-        f"| Koin dipindai | {analyzed} |",
-        f"| Setup dari strategy | {len(setup_rows)} |",
-        f"| Lolos threshold | {len(passing_sorted)} |",
-        f"| Tidak ada setup | {len(no_setup)} |",
-        f"| Error analisis | {len(errors)} |",
-        f"| Threshold | {STRATEGY_CONFIDENCE_THRESHOLD}% |",
-        "",
-        "## Kandidat Lolos",
-        "",
-        "| Rank | Koin | Decision | Confidence | Entry | SL | TP | RR | Entry Type |",
-        "|---:|---|---|---:|---:|---:|---:|---:|---|",
-    ]
-    if passing_sorted:
-        for i, s in enumerate(passing_sorted, 1):
-            lines.append(
-                f"| {i} | {s.get('symbol','')} | {s.get('decision','')} | "
-                f"{float(s.get('confidence',0) or 0):.0f}% | {s.get('entry','')} | {s.get('sl','')} | "
-                f"{s.get('tp','')} | {float(s.get('rr',0) or 0):.2f} | {s.get('entry_label','')} |"
-            )
-    else:
-        lines.append("| — | Tidak ada | — | — | — | — | — | — | — |")
-
-    lines += [
-        "",
-        "## Diagnostik Per Koin",
-        "",
-        "| Koin | Status | Direction | Conf. | D1 | H1 | M15 | Sweep | POI React | RSI | RR |",
-        "|---|---|---|---:|---|---|---|---|---|---:|---:|",
-    ]
-    for r in sorted(rows, key=lambda x: float(x.get("confidence") or -1), reverse=True):
-        lines.append(
-            f"| {r['symbol']} | {r['status']} | {r.get('decision','')} | "
-            f"{r.get('confidence','')} | {r.get('d1_bias','')} | {r.get('struct_h1','')} | "
-            f"{r.get('struct_m15','')} | {r.get('selected_sweep','')} | {r.get('poi_reacted','')} | "
-            f"{r.get('rsi','')} | {r.get('rr','')} |"
-        )
-
-    lines += [
-        "",
-        "## Runtime Trading Snapshot",
+        "## Ringkasan",
         "",
         "| Metrik | Nilai |",
         "|---|---:|",
-        f"| Trade tercatat di runtime | {rt['trades']} |",
-        f"| Balance | ${rt['balance']:.4f} |",
-        f"| Net PnL | ${rt['net']:.4f} |",
-        f"| Win rate | {rt['win_rate']:.2f}% |",
-        f"| Profit factor | {rt['profit_factor']:.3f} |",
-        f"| Max drawdown | ${rt['max_dd']:.4f} |",
-        f"| Expectancy/trade | ${rt['expectancy']:.4f} |",
+        f"| Closed trades | {summary['trades']} |",
+        f"| TP | {summary['tp']} |",
+        f"| Trail | {summary['trail']} |",
+        f"| SL | {summary['sl']} |",
+        f"| Win rate | {summary['win_rate']:.2f}% |",
+        f"| Profit factor | {_pf(summary['profit_factor'])} |",
+        f"| Expectancy/trade | ${summary['expectancy']:.5f} |",
+        f"| Avg PnL/trade | {summary['avg_pct']:.3f}% |",
+        f"| Net PnL | ${summary['net']:.4f} |",
+        f"| Balance | ${summary['balance']:.4f} |",
+        f"| Max drawdown | ${summary['max_dd']:.4f} |",
         "",
-        "## Interpretasi",
+        "## Breakdown Result",
         "",
-        "- `Confidence` adalah output strategy; threshold hanya dipakai engine untuk menentukan setup yang layak diproses.",
-        "- `Entry`, `SL`, `TP`, dan Trail tetap berasal dari strategy; report ini tidak menghitung ulang level tersebut.",
-        "- Data diagnostik lengkap per koin tersedia di `analyze_data.csv`.",
+        "| Result | Trades | PnL |",
+        "|---|---:|---:|",
     ]
-    if universe_error:
-        lines += ["", f"> **Market data warning:** {universe_error}"]
-    if errors:
-        lines += ["", "## Error Analysis", ""]
-        for r in errors:
-            lines.append(f"- **{r['symbol']}**: {r['error']}")
-    path = "/tmp/analyze_report.md"
+    for k in ("tp", "trail", "sl"):
+        b = summary["by_result"].get(k, {"trades": 0, "pnl": 0.0})
+        lines.append(f"| {k.upper()} | {b['trades']} | ${b['pnl']:.4f} |")
+
+    lines += ["", "## Breakdown Entry Type", "", "| Entry | Trades | Wins | Losses | PnL |", "|---|---:|---:|---:|---:|"]
+    for key, b in sorted(summary["by_entry"].items(), key=lambda kv: kv[1]["pnl"], reverse=True):
+        lines.append(f"| {key} | {b['trades']} | {b['wins']} | {b['losses']} | ${b['pnl']:.4f} |")
+
+    lines += ["", "## Breakdown Symbol", "", "| Symbol | Trades | Wins | Losses | PnL |", "|---|---:|---:|---:|---:|"]
+    for key, b in sorted(summary["by_symbol"].items(), key=lambda kv: kv[1]["pnl"], reverse=True):
+        lines.append(f"| {key} | {b['trades']} | {b['wins']} | {b['losses']} | ${b['pnl']:.4f} |")
+
+    lines += [
+        "", "## Catatan", "",
+        "- `/analyze` sekarang hanya menganalisis trade yang benar-benar closed dan tercatat sejak `/resetbalance` terakhir.",
+        "- History penuh disimpan dalam memory `trade_history`; `/backtest` tetap menampilkan 20 trade terakhir untuk kompatibilitas UI.",
+        "- Jalankan `/resetbalance` untuk memulai research run baru dan mengosongkan ledger aktif.",
+    ]
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
 # ============================================================
 # END ANALYZE
+# ============================================================
 # ============================================================
 
 def fmt_signal_msg(sig):
@@ -2784,10 +2764,11 @@ def get_start_msg():
         "/timeout             — Tutup paksa semua posisi\n"
         "/stats               — Statistik + saldo\n"
         "/backtest            — 20 trade terakhir (evaluasi)\n"
+        "/analyze             — Analisis seluruh closed trade sejak /resetbalance\n"
         "/banned              — Daftar koin ban\n"
         "/koin                — Daftar koin yang sedang di-scan\n"
         "/resetban            — Hapus semua ban\n"
-        "/resetbalance        — Reset saldo ke $10\n"
+        "/resetbalance        — Reset saldo + kosongkan history trade research\n"
         "/info                — Detail metode analisis\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         + ("🔴 <b>REAL TRADE AKTIF</b> — order sungguhan di Binance Futures, uang beneran."
@@ -2915,31 +2896,33 @@ def bot_loop():
                 # TAMBAHAN BARU (START) — Handler /analyze
                 # ============================================================
                 elif text in ("/analyze","analyze"):
-                    # Diagnostic snapshot satu universe. Background supaya loop Telegram tetap responsif.
+                    # Research analysis dari FULL CLOSED-TRADE LEDGER; TIDAK scan Binance.
                     def _run_analyze(cid):
                         try:
+                            with trade_history_lock:
+                                trade_count = len(trade_history)
                             tg_send(cid,
                                 f"🔎 <b>Mulai /analyze</b>\n"
-                                f"Scan hingga {TOP_N_COINS} koin + detail Entry/SL/TP/Structure/Liquidity/Confidence.\n"
-                                f"Threshold: {STRATEGY_CONFIDENCE_THRESHOLD}%\n"
-                                f"Dibuat menjadi 2 file: report Markdown + data CSV.")
-                            rows, passing, universe_error = _analyze_snapshot()
-                            report_path = _write_analyze_report(rows, passing, universe_error)
+                                f"Menganalisis <b>{trade_count}</b> closed trade yang tercatat sejak /resetbalance terakhir.\n"
+                                f"Tidak melakukan scan market baru.\n"
+                                f"Dibuat: report Markdown + data CSV.")
+                            rows, summary, _ = _analyze_snapshot()
+                            report_path = _write_analyze_report(rows, summary)
                             csv_path = _write_analyze_csv(rows)
 
                             tg_send(cid,
                                 f"✅ <b>/analyze selesai</b>\n"
-                                f"Koin dipindai: {len(rows)}\n"
-                                f"Lolos threshold: {len(passing)}\n\n"
+                                f"Closed trade dianalisis: <b>{len(rows)}</b>\n"
+                                f"Run: <code>{summary.get('run_id', research_run_id)}</code>\n\n"
                                 f"Mengirim 2 file...")
-                            tg_send_document(cid, report_path, caption="📊 analyze_report.md — diagnosis strategy & market snapshot")
-                            tg_send_document(cid, csv_path, caption="📋 analyze_data.csv — data lengkap per koin")
+                            tg_send_document(cid, report_path, caption="📊 analyze_report.md — analisis trade aktual")
+                            tg_send_document(cid, csv_path, caption="📋 analyze_data.csv — seluruh closed trade")
                         except Exception as e:
                             log.error(f"[analyze] Error: {e}", exc_info=True)
                             tg_send(cid, f"❌ Error saat /analyze:\n<code>{str(e)[:300]}</code>")
 
                     threading.Thread(target=_run_analyze, args=(chat_id,), daemon=True).start()
-                    tg_send(chat_id, "⏳ /analyze berjalan di background. Bot tetap menerima perintah lain.")
+                    tg_send(chat_id, "⏳ /analyze berjalan di background berdasarkan history trade. Bot tetap menerima perintah lain.")
 # ============================================================
 # TAMBAHAN BARU (END)
 # ============================================================
@@ -3113,6 +3096,7 @@ def bot_loop():
                     with ban_lock: n=len(banned_coins); banned_coins.clear()
                     tg_send(chat_id,f"✅ Ban direset ({n} dihapus).")
                 elif text in ("/resetbalance","resetbalance"):
+                    global research_run_id, trade_sequence
                     with stat_lock:
                         stats["balance"]     = STARTING_BALANCE
                         stats["pnl_history"] = deque(maxlen=20)
@@ -3120,8 +3104,18 @@ def bot_loop():
                         stats["sl"]          = 0
                         stats["trail"]       = 0
                         stats["total"]       = 0
+                    with trade_history_lock:
+                        cleared = len(trade_history)
+                        trade_history.clear()
+                    trade_sequence = 0
+                    research_run_id = datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
+                    with pending_cancel_lock:
+                        pending_cancel_stats.clear()
+                        pending_cancel_stats.update({"tp_before_entry": 0, "expired": 0, "binance_reject": 0})
                     tg_send(chat_id,
-                        f"✅ Saldo & statistik direset.\n"
+                        f"✅ <b>Research run direset.</b>\n"
+                        f"Closed trade ledger dihapus: <b>{cleared}</b>\n"
+                        f"Run baru: <code>{research_run_id}</code>\n"
                         f"💵 Modal awal: <b>${STARTING_BALANCE:.2f}</b>")
                 elif text in ("/auto","auto"):
                     if auto_mode:
