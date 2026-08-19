@@ -1,5 +1,5 @@
 """
-strategy_logic.py — OTAK v4 (Adaptive RR + Context-Aware Trailing)
+strategy_logic.py — OTAK v5 (Adaptive RR + Intelligent Target Selection + Context-Aware Trailing)
 ========================================================================================
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
@@ -1594,137 +1594,256 @@ def _compute_sl(m15: pd.DataFrame, h1: pd.DataFrame, direction: str,
 # STEP 3 — TP POOL DAN SELEKSI (dengan ekstensi jika RR < 2.0)
 # =============================================================================
 
+def _target_context(h1: pd.DataFrame, m15: pd.DataFrame, direction: str,
+                    entry: float, atr: float) -> dict:
+    """Context lokal untuk menilai apakah target yang lebih jauh masih credible."""
+    up = direction == "bull"
+    sh1, sl1 = swing_pts(h1, lb=5)
+    struct_h1 = _market_structure(h1, sh1, sl1)
+    struct_m15 = _market_structure(m15, *swing_pts(m15, lb=5)) if len(m15) >= 12 else "ranging"
+    rsi_val = float(m15["rsi"].iloc[-1]) if ("rsi" in m15.columns and len(m15)) else 50.0
+    rv = _relative_volume(m15, 20) if len(m15) >= 23 else 1.0
+    mom = _momentum_context(m15) if len(m15) >= 8 else {"bull": False, "bear": False}
+    return {
+        "h1_structure": struct_h1,
+        "m15_structure": struct_m15,
+        "rsi": rsi_val,
+        "relative_volume": rv,
+        "momentum": mom,
+        "atr": max(float(atr), 1e-12),
+        "entry": float(entry),
+        "direction": direction,
+        "sh1": sh1,
+        "sl1": sl1,
+    }
+
+
 def _build_tp_pool(h1: pd.DataFrame, m15: pd.DataFrame, direction: str,
                    entry: float, atr: float,
                    sh1: list, sl1: list, sh15: list, sl15: list) -> list:
-    """
-    Bangun pool target TP dari berbagai sumber, terurut kualitas draw‑on‑
-    liquidity (bukan cuma jarak). Prioritas EXTERNAL liquidity (level H1 —
-    biasanya jadi tujuan asli pergerakan harga) di atas INTERNAL liquidity
-    (EQ M15 — sering cuma disapu di tengah jalan, bukan tujuan akhir), sesuai
-    transkrip "The Secret of Price Movement: External vs Internal Liquidity"
-    & "3 Types of Liquidity Targeted by Smart Money". Tier lebih kecil =
-    lebih diutamakan saat beberapa target sama‑sama masuk rentang RR ideal.
-
-    Sumber (tier):
-      1: OB H1 (arah berlawanan) — external, presisi tinggi
-      2: FVG H1 — external
-      3: Swing H1 (swing terakhir) — external, struktur murni
-      4: EQ H1 — external, liquidity pool besar (klasik "draw on liquidity")
-      5: Swing H1 (swing sebelumnya, lebih jauh) — external, cadangan ekstensi
-      6: EQ M15 — internal, tetap dipakai sebagai target valid supaya
-         frekuensi sinyal tidak berkurang, tapi prioritas paling rendah
-         di antara level struktural
-      7: Fibonacci extension (1.272, 1.618)
-      8: Fibonacci extension (2.0, 2.414) — cadangan ekstensi jauh kalau
-         semua level struktural RR‑nya < 2.0
-    """
+    """Build a rich target pool; selection is performed by _select_tp()."""
     up = direction == "bull"
     sgn = 1 if up else -1
     pool = []
 
-    # Tier 1: OB H1 (arah berlawanan = area resistance/support, external)
+    def add(value, label, tier, anchor_strength=1.0):
+        try:
+            v = float(value)
+        except Exception:
+            return
+        if sgn * (v - entry) <= atr * 0.35:
+            return
+        pool.append({
+            "value": v,
+            "label": str(label),
+            "tier": int(tier),
+            "anchor_strength": float(anchor_strength),
+        })
+
     opp_dir = "bear" if up else "bull"
-    obs_h1_opp = detect_order_block(h1, opp_dir, lb=80, sh=sh1, sl=sl1)
-    for z in obs_h1_opp:
+
+    # External liquidity / opposing HTF zones.
+    for z in detect_order_block(h1, opp_dir, lb=80, sh=sh1, sl=sl1):
         edge = float(z["bot"]) if up else float(z["top"])
-        if sgn * (edge - entry) > atr * 0.5:
-            pool.append(("ob_h1", edge, 1))
+        fresh = 1.0 if z.get("quality", 0) >= 4 else 0.75
+        add(edge, "ob_h1", 1, 1.10 * fresh)
 
-    # Tier 2: FVG H1
-    fvgs_h1 = detect_fvg(h1, opp_dir, lb=60)
-    for f in fvgs_h1:
-        if sgn * (f["mid"] - entry) > atr * 0.5:
-            pool.append(("fvg_h1", f["mid"], 2))
+    for f in detect_fvg(h1, opp_dir, lb=60):
+        add(float(f["mid"]), "fvg_h1", 2, 0.95 if f.get("is_fresh", False) else 0.75)
 
-    # Tier 3: Swing H1 terakhir
-    sw_vals = ([float(h1["high"].iloc[i]) for i in sh1] if up
-               else [float(h1["low"].iloc[i]) for i in sl1])
+    sw_vals = ([float(h1["high"].iloc[i]) for i in sh1]
+               if up else [float(h1["low"].iloc[i]) for i in sl1])
     for v in sw_vals[-2:]:
-        if sgn * (v - entry) > atr * 1.0:
-            pool.append(("sw_h1", v, 3))
+        add(v, "sw_h1", 3, 1.00)
 
-    # Tier 4: EQ H1 (liquidity pool besar — external)
-    eqs_h1 = detect_equal_highs_lows(h1, "high" if up else "low", lb=100)
-    for v in eqs_h1:
-        if sgn * (v - entry) > atr * 0.8:
-            pool.append(("eq_h1", v, 4))
+    for v in detect_equal_highs_lows(h1, "high" if up else "low", lb=100):
+        add(v, "eq_h1", 4, 1.08)
 
-    # Tier 5: swing H1 yang lebih tua/jauh — cadangan ekstensi kalau target
-    # dekat masih RR<2 (sesuai instruksi: jangan auto‑tolak, cari lebih jauh)
-    sw_all = ([float(h1["high"].iloc[i]) for i in sh1] if up
-              else [float(h1["low"].iloc[i]) for i in sl1])
+    sw_all = ([float(h1["high"].iloc[i]) for i in sh1]
+              if up else [float(h1["low"].iloc[i]) for i in sl1])
     for v in sw_all[:-2]:
-        if sgn * (v - entry) > atr * 1.0:
-            pool.append(("sw_h1_far", v, 5))
+        add(v, "sw_h1_far", 5, 0.82)
 
-    # Tier 6: EQ M15 (internal — tetap dimasukkan, prioritas rendah)
-    eqs_m15 = detect_equal_highs_lows(m15, "high" if up else "low", lb=80)
-    for v in eqs_m15:
-        if sgn * (v - entry) > atr * 0.3:
-            pool.append(("eq_m15", v, 6))
+    # Internal liquidity is useful as a waypoint/path obstacle, but may be a
+    # weaker final target than external H1 liquidity.
+    for v in detect_equal_highs_lows(m15, "high" if up else "low", lb=80):
+        add(v, "eq_m15", 6, 0.62)
 
-    # Tier 7 & 8: Fibonacci extensions (cadangan ekstensi terjauh)
+    # Extensions are valid farther targets, but start with lower credibility.
     if sh1 and sl1:
         sh_val = float(h1["high"].iloc[sh1[-1]])
         sl_val = float(h1["low"].iloc[sl1[-1]])
         leg = sh_val - sl_val
-        if leg > 0:
-            exts = [
-                (FIB_EXT_1, "fib127", 7),
-                (FIB_EXT_2, "fib162", 7),
-                (1.0, "fib200", 8),
-                (1.414, "fib241", 8),
-            ]
-            for ext, lbl, tier in exts:
+        if leg > atr * 0.8:
+            for ext, lbl, tier, strength in [
+                (FIB_EXT_1, "fib127", 7, 0.58),
+                (FIB_EXT_2, "fib162", 7, 0.48),
+                (1.0, "fib200", 8, 0.38),
+                (1.414, "fib241", 8, 0.30),
+            ]:
                 tp_v = (sh_val + leg * ext) if up else (sl_val - leg * ext)
-                if sgn * (tp_v - entry) > atr * 0.5:
-                    pool.append((lbl, tp_v, tier))
+                add(tp_v, lbl, tier, strength)
 
-    # Sort by distance from entry (terdekat dulu) — tier tetap dipakai oleh
-    # _select_tp() untuk menentukan prioritas kualitas, bukan urutan ini.
-    pool.sort(key=lambda x: abs(x[1] - entry))
-    return pool
+    # De-duplicate very close targets; preserve the strongest anchor.
+    pool.sort(key=lambda x: (x["value"], x["tier"]))
+    dedup = []
+    for item in pool:
+        if dedup:
+            last = dedup[-1]
+            if abs(item["value"] - last["value"]) <= atr * 0.12:
+                if item["anchor_strength"] > last["anchor_strength"]:
+                    dedup[-1] = item
+                continue
+        dedup.append(item)
+    return dedup
 
-def _select_tp(pool: list, entry: float, risk: float,
-               direction: str) -> Tuple[Optional[float], Optional[str], Optional[float]]:
-    """Pilih TP mengikuti aturan Entry -> SL -> TP.
 
-    Aturan:
-      * Target pertama <2R TIDAK langsung ditolak.
-      * Telusuri seluruh pool ke target yang lebih jauh sampai menemukan
-        target struktural/liquidity yang >=2R.
-      * Jika target valid berada >4R, TP dipotong tepat di 4R.
-      * Jika tidak ada target struktural >=2R sama sekali, tidak mengarang
-        target 2R. Setup baru boleh lanjut bila ada bukti target nyata.
+def _target_path_score(pool: list, target: dict, entry: float, direction: str,
+                       atr: float) -> tuple[float, int]:
+    """Score how clear the price path is before a proposed final target."""
+    sgn = 1 if direction == "bull" else -1
+    target_v = float(target["value"])
+    obstacles = 0
+    penalty = 0.0
+    for other in pool:
+        ov = float(other["value"])
+        if other is target:
+            continue
+        if sgn * (ov - entry) <= 0:
+            continue
+        if sgn * (target_v - ov) <= atr * 0.15:
+            strength = max(0.2, float(other.get("anchor_strength", 0.5)))
+            tier = int(other.get("tier", 8))
+            tier_w = 1.20 if tier <= 4 else (0.80 if tier <= 6 else 0.45)
+            distance = abs(ov - entry) / max(atr, 1e-12)
+            # Obstacles closer to entry are less damaging because they may be
+            # swept/consumed on the way; major levels close to target matter more.
+            target_proximity = 1.0 / (1.0 + abs(target_v - ov) / max(atr, 1e-12))
+            penalty += strength * tier_w * (0.55 + 0.90 * target_proximity)
+            obstacles += 1
+    return max(0.0, 1.0 - min(0.78, penalty * 0.10)), obstacles
+
+
+def _select_tp(pool: list, entry: float, risk: float, direction: str,
+               h1: Optional[pd.DataFrame] = None,
+               m15: Optional[pd.DataFrame] = None,
+               atr: Optional[float] = None) -> Tuple[Optional[float], Optional[str], Optional[float], dict]:
+    """Choose the target with the best risk-adjusted plausibility, not merely the first >=2R.
+
+    There is no artificial maximum RR. The engine prefers a target when its structural
+    quality, path clarity, market regime and distance form a better *expected-value proxy*.
+    The proxy is a ranking heuristic, not a calibrated probability.
     """
     if not pool or risk <= 0:
-        return None, None, None
+        return None, None, None, {}
 
+    atr_v = max(float(atr or risk), 1e-12)
+    ctx = _target_context(h1, m15, direction, entry, atr_v) if h1 is not None and m15 is not None else {
+        "h1_structure": "unknown", "m15_structure": "unknown", "rsi": 50.0,
+        "relative_volume": 1.0, "momentum": {"bull": False, "bear": False},
+        "atr": atr_v,
+    }
     sgn = 1 if direction == "bull" else -1
-    targets = []
-    for lbl, value, tier in pool:
-        value = float(value)
+    candidates = []
+
+    aligned_struct = ctx["h1_structure"] == ("bullish" if direction == "bull" else "bearish")
+    aligned_m15 = ctx["m15_structure"] == ("bullish" if direction == "bull" else "bearish")
+    momentum_aligned = ((direction == "bull" and ctx["momentum"].get("bull")) or
+                        (direction == "bear" and ctx["momentum"].get("bear")))
+    rsi = float(ctx["rsi"])
+    # RSI is soft context: avoid rewarding an already exhausted extreme.
+    rsi_support = 1.0
+    if direction == "bull" and rsi >= 75:
+        rsi_support = 0.78
+    elif direction == "bear" and rsi <= 25:
+        rsi_support = 0.78
+
+    for target in pool:
+        value = float(target["value"])
         distance = sgn * (value - entry)
         if distance <= 0:
             continue
         rr = distance / risk
-        targets.append((lbl, value, int(tier), rr))
+        if rr < MIN_RR:
+            continue
 
-    if not targets:
-        return None, None, None
+        path_clear, obstacles = _target_path_score(pool, target, entry, direction, atr_v)
+        quality = 0.50
+        quality += 0.12 * min(1.0, max(0.0, float(target.get("anchor_strength", 0.5))))
 
-    # Urutkan dari target terdekat ke terjauh. Ini membuat proses benar-benar
-    # "tarik TP" melewati target-target kecil sampai target >=2R ditemukan.
-    targets.sort(key=lambda x: x[3])
+        tier = int(target.get("tier", 8))
+        tier_base = {1: 0.14, 2: 0.12, 3: 0.13, 4: 0.15, 5: 0.09, 6: 0.04, 7: 0.02, 8: 0.0}.get(tier, 0.0)
+        quality += tier_base
+        quality += 0.10 if aligned_struct else (-0.05 if ctx["h1_structure"] in ("bullish", "bearish") else 0.0)
+        quality += 0.06 if aligned_m15 else (-0.04 if ctx["m15_structure"] in ("bullish", "bearish") else 0.0)
+        quality += 0.06 if momentum_aligned else 0.0
+        quality *= rsi_support
+        quality *= (0.88 + 0.16 * min(1.0, path_clear))
 
-    # Cari target struktural pertama yang benar-benar memberi >=2R.
-    for lbl, value, tier, rr in targets:
-        if rr >= MIN_RR:
-            return round(value, 8), lbl, round(rr, 2)
+        # Distance is valuable, but target reachability should decay as the
+        # requested move becomes increasingly remote. This prevents a raw
+        # "largest RR wins" behaviour while still allowing 6R+ targets when
+        # structure, momentum and path quality genuinely support them.
+        far_support = 0.0
+        if aligned_struct:
+            far_support += 0.35
+        if aligned_m15:
+            far_support += 0.20
+        if momentum_aligned:
+            far_support += 0.25
+        if path_clear > 0.85:
+            far_support += 0.20
+        decay = max(0.028, 0.085 - 0.055 * far_support)
+        distance_excess = max(0.0, rr - 3.0)
+        reachability = quality * np.exp(-decay * distance_excess)
+        reachability = max(0.06, min(0.93, reachability))
 
-    # Semua target nyata masih <2R. Jangan membuat target fiktif.
-    return None, None, None
+        # Expected-value proxy with diminishing reward. log(1+RR) prevents a
+        # mathematically huge target from dominating solely because it is far.
+        # It is a ranking tool, NOT a calibrated probability model.
+        ev_proxy = reachability * np.log1p(rr) - (1.0 - reachability) * 0.45
+        distance_bonus = 0.08 * min(1.0, max(0.0, rr - 2.0) / 4.0)
+        far_penalty = 0.0
+        if rr > 8.0 and far_support < 0.65:
+            far_penalty = min(0.25, (rr - 8.0) * 0.025)
+        score = ev_proxy + distance_bonus - far_penalty
+
+        # A target directly beyond several strong obstacles is less attractive.
+        score -= min(0.30, obstacles * 0.035)
+
+        candidates.append({
+            "label": target["label"],
+            "value": round(value, 10),
+            "rr": round(rr, 3),
+            "tier": tier,
+            "target_quality": round(quality, 4),
+            "path_clear": round(path_clear, 4),
+            "obstacles": int(obstacles),
+            "reachability_proxy": round(reachability, 4),
+            "ev_proxy": round(ev_proxy, 4),
+            "score": round(score, 4),
+        })
+
+    if not candidates:
+        return None, None, None, {}
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    best = candidates[0]
+    diagnostics = {
+        "selected": best,
+        "candidates": candidates[:12],
+        "context": {
+            "h1_structure": ctx["h1_structure"],
+            "m15_structure": ctx["m15_structure"],
+            "rsi": round(rsi, 1),
+            "relative_volume": round(float(ctx["relative_volume"]), 3),
+            "momentum_aligned": bool(momentum_aligned),
+            "min_rr": MIN_RR,
+            "max_rr": None,
+        },
+        "method": "structural_target_quality + path_clarity + regime/momentum context + diminishing_distance + EV_proxy",
+    }
+    return best["value"], best["label"], best["rr"], diagnostics
 
 
 # =============================================================================
@@ -1881,7 +2000,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             tp_pool = _build_tp_pool(
                 h1, m15, direction, entry, atr, sh1, sl1, sh15, sl15
             )
-            tp_price, tp_lbl, rr = _select_tp(tp_pool, entry, risk, direction)
+            tp_price, tp_lbl, rr, tp_diag = _select_tp(tp_pool, entry, risk, direction, h1=h1, m15=m15, atr=atr)
             if tp_price is None or rr is None or rr < MIN_RR:
                 if symbol:
                     log.debug(
@@ -2024,7 +2143,7 @@ def get_best_signal(candidates: list) -> Optional[dict]:
 
 
 # =============================================================================
-# ADAPTIVE POSITION MANAGEMENT — TRAILING BRAIN V4
+# ADAPTIVE POSITION MANAGEMENT — TRAILING BRAIN V5
 # =============================================================================
 
 def _relative_volume(df: pd.DataFrame, n: int = 20) -> float:
@@ -2157,7 +2276,7 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
     structure = _market_structure(m15, sh, sl)
     rdiv = detect_rsi_divergence(m15, direction, lb=30)
     vol = _relative_volume(m15, 20)
-    mom = _momentum_context(m15)
+    mom = _momentum_context(m15) if len(m15) >= 8 else {"bull": False, "bear": False}
     atr = max(float(m15["atr"].iloc[-1]), 1e-12)
 
     weakness = 0
