@@ -73,7 +73,64 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V9"
+MAIN_ENGINE_VERSION = "V11"
+
+# ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
+# Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
+# hanya dipakai oleh pipeline scan; execution/position monitoring tetap memakai
+# get_klines() normal sehingga tidak mengubah freshness data posisi.
+SCAN_KLINE_TTL = {
+    "15m": 8 * 60,      # refresh maksimum sekitar sekali per 8 menit
+    "1h": 30 * 60,      # tidak perlu REST berulang di antara candle 1h
+    "1d": 6 * 60 * 60,  # daily candle cukup direfresh berkala
+}
+_scan_kline_cache = {}          # {(symbol, interval): {df, fetched_at, source}}
+_scan_kline_cache_lock = threading.RLock()
+_scan_kline_fetch_locks = {}
+_scan_kline_fetch_locks_guard = threading.Lock()
+_scan_telemetry_lock = threading.Lock()
+_last_scan_telemetry = {}
+
+def _scan_key_lock(key):
+    with _scan_kline_fetch_locks_guard:
+        lock = _scan_kline_fetch_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _scan_kline_fetch_locks[key] = lock
+        return lock
+
+def _scan_cache_get(symbol, interval, limit):
+    key = (symbol, interval)
+    now = time.time()
+    with _scan_kline_cache_lock:
+        item = _scan_kline_cache.get(key)
+        if not item:
+            return None
+        age = now - item["fetched_at"]
+        ttl = SCAN_KLINE_TTL.get(interval, 10 * 60)
+        df = item["df"]
+        if age > ttl or df is None or df.empty or len(df) < min(limit, 40):
+            return None
+        return df.tail(limit).copy()
+
+def _scan_cache_put(symbol, interval, df, source):
+    if df is None or df.empty:
+        return
+    with _scan_kline_cache_lock:
+        _scan_kline_cache[(symbol, interval)] = {
+            "df": df.copy(), "fetched_at": time.time(), "source": source,
+        }
+
+def _scan_cache_stats():
+    now = time.time()
+    with _scan_kline_cache_lock:
+        total = len(_scan_kline_cache)
+        fresh = 0
+        for (sym, itv), item in _scan_kline_cache.items():
+            if now - item["fetched_at"] <= SCAN_KLINE_TTL.get(itv, 600):
+                fresh += 1
+    return total, fresh
+
 # ─────────────────────────────────────────────
 
 # Import OTAK — kalau gagal ATAU full_analyze() tidak ada di dalamnya
@@ -196,6 +253,8 @@ BINANCE_KEYS_PRESENT = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
 # REAL_TRADE_ENABLED: mode AKTIF SEKARANG (bisa di-toggle runtime via /mode
 # on|off). Default tetap mengikuti ketersediaan key saat startup.
 REAL_TRADE_ENABLED   = BINANCE_KEYS_PRESENT
+# Private Binance management remains permitted for existing real positions
+# even when REAL_TRADE_ENABLED=False (/mode off).
 
 LEVERAGE          = 5      # runtime, via /leverage
 MARGIN_USD        = 5.0    # runtime, via /margin
@@ -871,8 +930,12 @@ def _binance_signed(method, path, params=None):
         BINANCE_KEYS_PRESENT = True
     else:
         BINANCE_KEYS_PRESENT = False
-    if not REAL_TRADE_ENABLED:
-        raise RuntimeError("REAL_TRADE_DISABLED: Binance real-trade mode tidak aktif")
+    # PRIVATE ACCESS vs ENTRY MODE:
+    # REAL_TRADE_ENABLED hanya menentukan apakah ENTRY BARU boleh memakai
+    # uang sungguhan. Posisi real yang SUDAH TERBUKA tetap harus bisa
+    # dimonitor, direkonsiliasi, di-trail, dan ditutup walaupun /mode off.
+    # Karena itu signed API tidak lagi diblokir oleh REAL_TRADE_ENABLED.
+    # Gate entry tetap dilakukan di jalur _open_pending_real().
     if not BINANCE_KEYS_PRESENT:
         raise RuntimeError("BINANCE_API_KEY/SECRET tidak tersedia di runtime Render")
     base_params = dict(params or {})
@@ -1539,6 +1602,31 @@ class BinanceWSFeed:
                             "c": "close", "v": "volume"}, inplace=True)
         return df[["open", "high", "low", "close", "volume"]]
 
+    def seed_klines(self, symbol, interval, df):
+        """Masukkan histori yang SUDAH diperoleh scanner ke buffer WS.
+
+        Ini sengaja tidak melakukan REST request. Setelah seed, WS tinggal
+        melanjutkan candle secara live sehingga request histori tidak diulang.
+        """
+        if not _WS_LIB_OK or df is None or df.empty:
+            return
+        try:
+            rows = []
+            for idx, row in df.tail(self.MAX_CANDLES.get(interval, 250)).iterrows():
+                ts = int(pd.Timestamp(idx).timestamp() * 1000)
+                rows.append({
+                    "t": ts, "o": float(row["open"]), "h": float(row["high"]),
+                    "l": float(row["low"]), "c": float(row["close"]), "v": float(row["volume"]),
+                })
+            if not rows:
+                return
+            with self._lock:
+                self._klines[(symbol, interval)] = deque(rows, maxlen=self.MAX_CANDLES.get(interval, 250))
+                self._last_used[(symbol, interval)] = time.time()
+            self._subscribe_kline(symbol, interval)
+        except Exception as e:
+            log.warning(f"[ws-seed] {symbol} {interval}: {e}")
+
     def ensure_symbol_interval(self, symbol, interval):
         """Dipanggil tiap get_klines() — backfill SEKALI kalau baru,
         subscribe stream kalau belum, update timestamp pemakaian terakhir."""
@@ -1739,8 +1827,10 @@ def get_price(symbol):
     return None
 
 def get_klines(symbol, interval, limit=250):
-    """WS-first. Saat Binance global pause, hanya buffer WS yang sudah ada dipakai.
-    Tidak boleh memicu backfill Binance/Bybit baru selama circuit breaker aktif.
+    """Normal market-data accessor. Existing behavior retained for execution.
+
+    Scanner optimization lives in get_scan_klines(); it uses a dedicated
+    freshness cache and never forces a WS backfill synchronously.
     """
     if _binance_is_scan_paused():
         df = ws_feed.get_klines(symbol, interval, limit) if ws_feed.is_fresh() else pd.DataFrame()
@@ -1766,6 +1856,88 @@ def get_klines(symbol, interval, limit=250):
     except Exception as e:
         log.warning(f"[klines/bybit] {symbol}: {e}")
     return pd.DataFrame()
+
+def get_scan_klines(symbol, interval, limit=250):
+    """Scanner-only candle accessor: cache-first, single-flight, no duplicate backfill.
+
+    Prinsip utama V11: mempercepat scan dengan MENGURANGI request, bukan dengan
+    menaikkan concurrency/request rate. Jika cache masih fresh, tidak ada HTTP
+    request sama sekali. Jika cache miss, hanya satu fetch untuk key tersebut;
+    histori yang berhasil kemudian di-seed ke WS sehingga tidak di-backfill dua kali.
+    """
+    if _binance_is_scan_paused():
+        cached = _scan_cache_get(symbol, interval, limit)
+        if cached is not None:
+            return cached
+        df = ws_feed.get_klines(symbol, interval, limit) if ws_feed.is_fresh() else pd.DataFrame()
+        return df if df is not None else pd.DataFrame()
+
+    cached = _scan_cache_get(symbol, interval, limit)
+    if cached is not None:
+        return cached
+
+    key = (symbol, interval)
+    lock = _scan_key_lock(key)
+    with lock:
+        # Double-check after waiting for another worker/fetcher.
+        cached = _scan_cache_get(symbol, interval, limit)
+        if cached is not None:
+            return cached
+
+        # A pre-existing WS buffer is free data; promote it to scan cache.
+        if ws_feed.is_fresh():
+            ws_df = ws_feed.get_klines(symbol, interval, limit)
+            if ws_df is not None and not ws_df.empty and len(ws_df) >= min(limit, 40):
+                _scan_cache_put(symbol, interval, ws_df, "ws")
+                return ws_df.tail(limit).copy()
+
+        started = time.monotonic()
+        source = None
+        df = pd.DataFrame()
+
+        # Do NOT call ensure_symbol_interval() here. That would synchronously
+        # backfill through WS and then make the scanner wait on another REST path.
+        # Fetch exactly once, cache it, seed WS, and let WS maintain it thereafter.
+        try:
+            # If Binance weight is already near the soft governor, prefer the
+            # existing fallback instead of sleeping an entire minute inside a scan.
+            high_weight = (_binance_weight_1m is not None and
+                           _binance_weight_1m >= BINANCE_WEIGHT_SOFT_LIMIT)
+            if not high_weight:
+                df = _binance_klines(symbol, interval, limit)
+                if not df.empty:
+                    source = "binance"
+        except BinanceCooldownError:
+            raise
+        except Exception as e:
+            log.warning(f"[scan-data/binance] {symbol} {interval}: {e}")
+
+        if df.empty:
+            try:
+                df = _bybit_klines(symbol, interval, limit)
+                if not df.empty:
+                    source = "bybit"
+            except Exception as e:
+                log.warning(f"[scan-data/bybit] {symbol} {interval}: {e}")
+
+        if df.empty:
+            return pd.DataFrame()
+
+        _scan_cache_put(symbol, interval, df, source or "unknown")
+        # Seed WS from the same dataframe. This adds zero REST requests.
+        ws_feed.seed_klines(symbol, interval, df)
+        elapsed = time.monotonic() - started
+        log.info(f"[scan-data] {symbol} {interval} source={source} fetch={elapsed:.2f}s")
+        return df.tail(limit).copy()
+
+def _record_scan_telemetry(data):
+    global _last_scan_telemetry
+    with _scan_telemetry_lock:
+        _last_scan_telemetry = dict(data)
+
+def get_last_scan_telemetry():
+    with _scan_telemetry_lock:
+        return dict(_last_scan_telemetry)
 
 last_scanned_coins = []
 last_scanned_at = None
@@ -1882,12 +2054,13 @@ def _price_cache_loop():
 # INDIKATOR
 # ═════════════════════════════════════════════
 def run_scan_once(chat_id):
+    """Scan universe dengan pipeline market-data cache V11.
+
+    Tidak ada parallel burst ke Binance. Kecepatan berasal dari cache, WS seed,
+    dan penghapusan duplicate backfill. Analysis boleh berjalan setelah data
+    tersedia tanpa menambah request API.
     """
-    Scan seluruh universe dan kembalikan SEMUA setup yang lolos threshold.
-    main.py adalah tubuh/orchestrator: mengumpulkan hasil, menerapkan threshold,
-    lalu menyerahkan setiap setup valid ke execution. Semua keputusan market
-    (Entry/SL/TP/Trail/Confidence) tetap berasal dari strategy_logic.py.
-    """
+    scan_started = time.monotonic()
     if _binance_is_scan_paused():
         _notify_binance_pause_once(chat_id)
         return []
@@ -1910,19 +2083,30 @@ def run_scan_once(chat_id):
             tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan.")
         return []
 
+    data_started = time.monotonic()
     results = []
+    cache_hits = 0
+    cache_misses = 0
+    failed_symbols = 0
     for idx, sym in enumerate(symbols, 1):
         if _binance_is_scan_paused():
             log.warning("[scan] Binance pause aktif — scan cycle dihentikan di tengah jalan.")
             break
-        log.info(f"[{idx:02d}/{len(symbols)}] {sym}")
+        log.info(f"[scan {idx:02d}/{len(symbols)}] {sym}")
         try:
-            h1 = get_klines(sym, "1h", 250)
-            m15 = get_klines(sym, "15m", 250)
+            before = _scan_cache_stats()
+            h1 = get_scan_klines(sym, "1h", 250)
+            m15 = get_scan_klines(sym, "15m", 250)
             try:
-                d1 = get_klines(sym, "1d", 100)
+                d1 = get_scan_klines(sym, "1d", 100)
+            except BinanceCooldownError:
+                raise
             except Exception:
                 d1 = None
+            after = _scan_cache_stats()
+            # A new cache entry may have been created. This is approximate but
+            # sufficient for operator telemetry; no extra API call is involved.
+            cache_misses += max(0, after[0] - before[0])
             r = full_analyze(h1, m15, d1, symbol=sym)
             if isinstance(r, dict):
                 conf = float(r.get("confidence", 0) or 0)
@@ -1931,12 +2115,29 @@ def run_scan_once(chat_id):
                     log.info(f"[SIGNAL] {sym} {r.get('decision')} confidence={conf:.1f}")
                 else:
                     log.info(f"[FILTER] {sym} confidence={conf:.1f} < {STRATEGY_CONFIDENCE_THRESHOLD}")
+        except BinanceCooldownError:
+            log.warning(f"[scan] {sym}: Binance cooldown aktif — cycle dihentikan aman.")
+            break
         except Exception as e:
+            failed_symbols += 1
             log.debug(f"[scan] {sym}: {e}")
+        time.sleep(0.05)
 
-        # Request throttle global sudah mengatur Binance; jeda kecil ini hanya
-        # memberi scheduler/thread lain kesempatan berjalan.
-        time.sleep(0.15)
+    data_elapsed = time.monotonic() - data_started
+    total_elapsed = time.monotonic() - scan_started
+    cache_total, cache_fresh = _scan_cache_stats()
+    telemetry = {
+        "duration_sec": round(total_elapsed, 2),
+        "data_phase_sec": round(data_elapsed, 2),
+        "symbols_requested": len(symbols),
+        "results": len(results),
+        "failed_symbols": failed_symbols,
+        "cache_entries": cache_total,
+        "cache_fresh": cache_fresh,
+        "binance_weight_1m": _binance_weight_1m,
+    }
+    _record_scan_telemetry(telemetry)
+    log.info("[SCAN SUMMARY] " + " | ".join(f"{k}={v}" for k, v in telemetry.items()))
 
     results.sort(key=lambda x: float(x.get("confidence", 0) or 0), reverse=True)
     if not results:
@@ -1949,7 +2150,6 @@ def run_scan_once(chat_id):
     )
     tg_send(chat_id, f"✅ <b>{len(results)} sinyal lolos</b> (threshold {STRATEGY_CONFIDENCE_THRESHOLD}%)\n\n{summary}")
     return results
-
 
 
 
@@ -2823,6 +3023,8 @@ def _resume_binance_and_flush_pending(chat_id=None):
         # Credential gate: never loop through every local position with the same
         # missing-key error. Refresh once, fail once, keep the whole recovery
         # gate closed, and wait for the next recovery attempt.
+        # IMPORTANT: this gate is independent of REAL_TRADE_ENABLED because
+        # existing real positions must remain manageable after /mode off.
         global BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_KEYS_PRESENT
         key, secret = _read_binance_credentials()
         if not key or not secret:
