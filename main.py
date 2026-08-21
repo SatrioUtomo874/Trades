@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-main.py V9 — MESIN (engine). Telegram handler, API client, monitoring,
+main.py V15 — MESIN (engine).
+
+V15 HARDENED: verified real-order execution, no blind mutating retries, exchange/local state reconciliation, protection-pair verification, and fail-closed emergency handling. Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
 strategy_logic.py ("Otak"), diimpor di bawah.
 
@@ -73,7 +75,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V14"
+MAIN_ENGINE_VERSION = "V15"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -567,9 +569,20 @@ _binance_time_offset_ms = 0
 _binance_time_sync_at = 0.0
 _binance_time_sync_lock = threading.Lock()
 BINANCE_TIME_SYNC_TTL = 60.0
+_real_trade_preflight_cache = {"at": 0.0, "position_mode": None, "can_trade": None}
+_real_trade_preflight_lock = threading.Lock()
+REAL_TRADE_PREFLIGHT_TTL = 60.0
 
 class BinanceCooldownError(ConnectionError):
     """Tidak mengirim request Binance selama cooldown aktif."""
+
+
+class BinanceUnknownExecutionError(ConnectionError):
+    """Mutating Binance request may have reached the exchange but response is unknown.
+
+    IMPORTANT: callers must reconcile exchange state before submitting a duplicate
+    mutating request. This prevents blind duplicate entry/exit/protection orders.
+    """
 
 
 def _load_binance_ban_state():
@@ -670,10 +683,7 @@ def _get_open_algo_orders(sym):
 
 def _cleanup_algo_orders_verified(sym):
     """Cancel all algo orders and verify none remain."""
-    cancel_all_algo_orders(sym)
-    rows = _get_open_algo_orders(sym)
-    if rows:
-        raise RuntimeError(f"masih ada {len(rows)} algo order setelah cancel")
+    _cancel_all_algo_orders_verified(sym)
     _clear_pending_cleanup(sym)
     return True
 
@@ -920,32 +930,33 @@ import hmac, hashlib, urllib.parse, math
 from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
 
 def _binance_signed(method, path, params=None):
+    """Signed Binance request with strict handling for mutating requests.
+
+    GET requests may be retried after transient transport errors. Mutating
+    requests (POST/PUT/DELETE) are NEVER blindly retried after a transport
+    exception because Binance may have accepted the request even if the HTTP
+    response was lost. The caller must reconcile first.
+    """
     global BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_KEYS_PRESENT
-    # Re-read secrets immediately before a private request. This fixes the
-    # case where Render injects/updates secrets after module import and also
-    # prevents recovery from using stale None values.
     key, secret = _read_binance_credentials()
     if key and secret:
         BINANCE_API_KEY, BINANCE_API_SECRET = key, secret
         BINANCE_KEYS_PRESENT = True
     else:
         BINANCE_KEYS_PRESENT = False
-    # PRIVATE ACCESS vs ENTRY MODE:
-    # REAL_TRADE_ENABLED hanya menentukan apakah ENTRY BARU boleh memakai
-    # uang sungguhan. Posisi real yang SUDAH TERBUKA tetap harus bisa
-    # dimonitor, direkonsiliasi, di-trail, dan ditutup walaupun /mode off.
-    # Karena itu signed API tidak lagi diblokir oleh REAL_TRADE_ENABLED.
-    # Gate entry tetap dilakukan di jalur _open_pending_real().
     if not BINANCE_KEYS_PRESENT:
         raise RuntimeError("BINANCE_API_KEY/SECRET tidak tersedia di runtime Render")
+
     base_params = dict(params or {})
+    method = str(method).upper()
+    mutating = method in {"POST", "PUT", "DELETE"}
+    max_attempts = 1 if mutating else 3
     last_err = None
     time_resync_attempted = False
-    for attempt in range(3):
+
+    for attempt in range(max_attempts):
         _binance_wait_if_banned()
         try:
-            # Refresh server time before taking the request slot. The slot itself
-            # must never recursively call the time endpoint (deadlock risk).
             with _binance_time_sync_lock:
                 time_stale = (time.time() - _binance_time_sync_at) >= BINANCE_TIME_SYNC_TTL
             if time_stale:
@@ -953,7 +964,7 @@ def _binance_signed(method, path, params=None):
                     _binance_sync_time(force=True)
                 except Exception:
                     pass
-            # Timestamp MUST be created after throttle and for every attempt.
+
             with _binance_request_slot():
                 req = dict(base_params)
                 req["timestamp"] = _binance_timestamp_ms(sync_if_stale=False)
@@ -963,13 +974,16 @@ def _binance_signed(method, path, params=None):
                 url = f"{FAPI}{path}?{query}&signature={sig}"
                 headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
                 r = requests.request(method, url, headers=headers, timeout=10, verify=False)
+
             used = _binance_update_weight_from_response(r)
             if used is not None and used >= BINANCE_WEIGHT_HARD_LIMIT:
                 log.warning(f"[binance-weight] {used} weight/1m setelah signed {method} {path}")
+
             if r.status_code in (418, 429):
                 retry_after = r.headers.get("Retry-After")
                 _binance_register_ban(r.text, retry_after=retry_after)
                 raise BinanceCooldownError(f"Binance kena limit/ban (HTTP {r.status_code})")
+
             data = r.json()
             if isinstance(data, dict) and "code" in data and data["code"] < 0:
                 code = int(data["code"])
@@ -983,17 +997,34 @@ def _binance_signed(method, path, params=None):
                     last_err = RuntimeError(f"Binance -1021: {data.get('msg')}")
                     log.warning(f"[binance-time] -1021 pada {method} {path}; resync server time lalu retry dengan signature baru")
                     _binance_sync_time(force=True)
+                    # Safe to retry because the exchange explicitly rejected the request.
+                    if mutating and attempt + 1 >= max_attempts:
+                        max_attempts = 2
                     continue
                 raise RuntimeError(f"Binance {code}: {data.get('msg')}")
             return data
+
         except BinanceCooldownError:
             raise
         except RuntimeError:
             raise
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = e
+            if mutating:
+                raise BinanceUnknownExecutionError(
+                    f"Binance {method} {path} transport error; execution status unknown: {e}"
+                ) from e
+            log.warning(f"[binance-signed] GET {path} percobaan {attempt+1}: {e}")
+            time.sleep(1.0 + attempt)
         except Exception as e:
             last_err = e
-            log.warning(f"[binance-signed] {method} {path} percobaan {attempt+1}: {e}")
-            time.sleep(1.5)
+            if mutating:
+                raise BinanceUnknownExecutionError(
+                    f"Binance {method} {path} response error; execution status unknown: {e}"
+                ) from e
+            log.warning(f"[binance-signed] GET {path} percobaan {attempt+1}: {e}")
+            time.sleep(1.0 + attempt)
+
     raise RuntimeError(f"Gagal request signed {method} {path}: {last_err}")
 
 
@@ -1115,30 +1146,226 @@ def calc_auto_quantity(symbol, entry_price, margin_usd, leverage):
     return qty, round(bumped_margin, 4), True
 
 
+def _real_trade_preflight(force=False):
+    """Verify account canTrade and require One-way/BOTH position mode.
+
+    The engine intentionally does not auto-switch position mode because Binance
+    rejects that while positions/orders exist. Entries are blocked when the
+    account is in Hedge Mode, while existing positions remain manageable.
+    """
+    now = time.time()
+    with _real_trade_preflight_lock:
+        if (not force and now - _real_trade_preflight_cache["at"] < REAL_TRADE_PREFLIGHT_TTL
+                and _real_trade_preflight_cache["position_mode"] is not None):
+            if not _real_trade_preflight_cache["can_trade"]:
+                raise RuntimeError("Binance account canTrade=false")
+            if _real_trade_preflight_cache["position_mode"] is True:
+                raise RuntimeError("Binance Hedge Mode aktif; bot V15 membutuhkan One-way Mode (positionSide=BOTH)")
+            return dict(_real_trade_preflight_cache)
+
+    mode = _binance_signed("GET", "/fapi/v1/positionSide/dual", {})
+    acct = _binance_signed("GET", "/fapi/v2/account", {})
+    dual = bool(mode.get("dualSidePosition")) if isinstance(mode, dict) else False
+    can_trade = bool(acct.get("canTrade", True)) if isinstance(acct, dict) else True
+    with _real_trade_preflight_lock:
+        _real_trade_preflight_cache.update({"at": now, "position_mode": dual, "can_trade": can_trade})
+    if not can_trade:
+        raise RuntimeError("Binance account canTrade=false")
+    if dual:
+        raise RuntimeError("Binance Hedge Mode aktif; bot V15 membutuhkan One-way Mode (positionSide=BOTH)")
+    return dict(_real_trade_preflight_cache)
+
+
+def _new_client_id(prefix):
+    # Binance allows up to 36 chars: ^[\.A-Z\:/a-z0-9_-]{1,36}$
+    return f"{prefix}_{int(time.time()*1000)%10_000_000_000}_{threading.get_ident()%100000}"[:36]
+
+
+def _order_query_by_client_id(symbol, client_id):
+    try:
+        return _binance_signed("GET", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": client_id})
+    except Exception as e:
+        msg = str(e).lower()
+        if "order does not exist" in msg or "-2013" in msg:
+            return None
+        raise
+
+
+def _find_open_algo_by_client_id(symbol, client_algo_id):
+    for row in _get_open_algo_orders(symbol):
+        if str(row.get("clientAlgoId") or "") == str(client_algo_id):
+            return row
+    return None
+
+
+def _protection_matches(row, symbol, side, order_type, trigger_price, quantity, tick, step):
+    if not row or row.get("symbol") != symbol:
+        return False
+    if str(row.get("side")) != str(side):
+        return False
+    typ = str(row.get("orderType") or row.get("type") or "").upper()
+    expected = "TAKE_PROFIT" if order_type == "TAKE_PROFIT_MARKET" else "STOP"
+    if expected not in typ:
+        return False
+    try:
+        t_actual = round_to_tick(float(row.get("triggerPrice")), tick)
+        t_expected = round_to_tick(float(trigger_price), tick)
+        q_actual = round_qty(float(row.get("quantity")), step, 16)
+        q_expected = round_qty(float(quantity), step, 16)
+        return abs(t_actual - t_expected) <= max(tick, 1e-12) and abs(q_actual - q_expected) <= max(step, 1e-12) and bool(row.get("reduceOnly", False))
+    except Exception:
+        return False
+
+
+def _verify_protection_pair(symbol, is_buy, tp_price, sl_price, quantity):
+    info = get_symbol_filters(symbol)
+    tick, step = info["tickSize"], info["stepSize"]
+    qty = round_qty(quantity, step, info.get("qtyPrecision", 8))
+    rows = _get_open_algo_orders(symbol)
+    close_side = "SELL" if is_buy else "BUY"
+    tp_ok = any(_protection_matches(r, symbol, close_side, "TAKE_PROFIT_MARKET", tp_price, qty, tick, step) for r in rows)
+    sl_ok = any(_protection_matches(r, symbol, close_side, "STOP_MARKET", sl_price, qty, tick, step) for r in rows)
+    if not (tp_ok and sl_ok):
+        raise RuntimeError(f"protection verification gagal: TP={tp_ok}, SL={sl_ok}, algo={len(rows)}")
+    return rows
+
+
+def _reconcile_position_quantity(symbol):
+    real = get_real_position(symbol)
+    if not real:
+        return None
+    qty = abs(float(real.get("positionAmt", 0) or 0))
+    return (real, qty) if qty > 0 else (real, 0.0)
+
+
+def _verified_market_close(symbol, is_buy, reason, chat_id=None, max_retries=1):
+    """Close actual Binance position with reconcile-before-retry semantics."""
+    last_error = None
+    for attempt in range(max_retries + 1):
+        real_info = _reconcile_position_quantity(symbol)
+        if real_info is None:
+            return True, None
+        real, qty = real_info
+        if qty <= 0:
+            return True, None
+
+        side = "SELL" if is_buy else "BUY"
+        try:
+            resp = place_market_order(symbol, side, qty, reduce_only=True)
+        except BinanceUnknownExecutionError as e:
+            last_error = e
+            # Do NOT immediately send another order. Reconcile first.
+            try:
+                real_after = get_real_position(symbol)
+            except Exception:
+                real_after = None
+            if real_after is None or abs(float(real_after.get("positionAmt", 0) or 0)) <= 0:
+                return True, None
+            if attempt >= max_retries:
+                raise
+            continue
+        except Exception as e:
+            last_error = e
+            # Even a known/rejected response can race with an exchange-side fill.
+            # Reconcile actual position before declaring the close failed.
+            try:
+                real_after = get_real_position(symbol)
+                remaining_after = abs(float(real_after.get("positionAmt", 0) or 0)) if real_after else 0.0
+                if remaining_after <= 0:
+                    return True, None
+            except Exception:
+                pass
+            raise
+
+        try:
+            real_after = get_real_position(symbol)
+        except Exception as e:
+            last_error = e
+            if attempt >= max_retries:
+                raise RuntimeError(f"market close response received but position verification failed: {e}") from e
+            continue
+        remaining = abs(float(real_after.get("positionAmt", 0) or 0)) if real_after else 0.0
+        if remaining <= 0:
+            exit_price = None
+            if isinstance(resp, dict):
+                try:
+                    exit_price = float(resp.get("avgPrice") or 0) or None
+                except Exception:
+                    exit_price = None
+            return True, exit_price
+        if attempt >= max_retries:
+            raise RuntimeError(f"market close submitted but position remains open: {remaining}")
+
+    raise RuntimeError(f"market close failed: {last_error}")
+
+
+def set_leverage_verified(symbol, leverage):
+    """Set leverage, and reconcile if the POST response is unknown."""
+    try:
+        return set_leverage(symbol, leverage)
+    except BinanceUnknownExecutionError:
+        rows = _binance_signed("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+        for row in rows or []:
+            if row.get("symbol") == symbol and int(float(row.get("leverage", 0) or 0)) == int(leverage):
+                return {"verified": True, "leverage": leverage}
+        raise
+
+
 def set_leverage(symbol, leverage):
     return _binance_signed("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})
 
 
 def place_limit_order(symbol, side, quantity, price):
     tick = get_symbol_filters(symbol)["tickSize"]
-    return _binance_signed("POST", "/fapi/v1/order", {
+    client_id = _new_client_id("ENTRY")
+    params = {
         "symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
         "quantity": quantity, "price": round_to_tick(price, tick),
-    })
+        "newClientOrderId": client_id,
+    }
+    try:
+        result = _binance_signed("POST", "/fapi/v1/order", params)
+        if isinstance(result, dict):
+            result.setdefault("clientOrderId", client_id)
+        return result
+    except BinanceUnknownExecutionError as e:
+        reconciled = _order_query_by_client_id(symbol, client_id)
+        if reconciled is not None:
+            return reconciled
+        e.client_order_id = client_id
+        e.symbol = symbol
+        raise
 
 
 def place_market_order(symbol, side, quantity, reduce_only=False):
-    params = {"symbol": symbol, "side": side, "type": "MARKET", "quantity": quantity}
+    params = {
+        "symbol": symbol, "side": side, "type": "MARKET",
+        "quantity": quantity, "newOrderRespType": "RESULT",
+    }
     if reduce_only:
         params["reduceOnly"] = "true"
     return _binance_signed("POST", "/fapi/v1/order", params)
 
 
 def cancel_order(symbol, order_id):
-    """Cancel ORDER BIASA (limit/market entry) — bukan TP/SL, lihat cancel_algo_order."""
-    if not order_id: return None
+    """Cancel ordinary order. Unknown transport result is reconciled before reporting failure."""
+    if not order_id:
+        return None
     try:
         return _binance_signed("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+    except BinanceUnknownExecutionError as e:
+        try:
+            st = get_order_status(symbol, order_id)
+            status = str(st.get("status", "")).upper()
+            if status in {"CANCELED", "EXPIRED", "REJECTED"}:
+                return st
+            if status == "FILLED":
+                raise RuntimeError(f"cancel #{order_id} terlambat: order sudah FILLED")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+        raise
     except Exception as e:
         log.warning(f"[cancel_order] {symbol} #{order_id}: {e}")
         return None
@@ -1148,11 +1375,14 @@ def get_order_status(symbol, order_id):
     return _binance_signed("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
 
 
+
 def get_real_position(symbol):
     rows = _binance_signed("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     for p in rows:
-        if p["symbol"] == symbol and abs(float(p["positionAmt"])) > 0:
-            return p
+        if p["symbol"] == symbol:
+            if abs(float(p.get("positionAmt", 0) or 0)) > 0:
+                return p
+            return None
     return None
 
 def get_real_positions_all():
@@ -1179,58 +1409,93 @@ def get_open_algo_orders_all(symbol=None):
     return rows if isinstance(rows, list) else []
 
 
+def _cancel_all_ordinary_orders_verified(sym, retries=2):
+    """Cancel all ordinary orders for a symbol and verify exchange-side empty state.
+
+    A DELETE transport error is treated as unknown: query open orders first. Only
+    if orders are still present do we attempt another cancel.
+    """
+    last = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            _binance_signed("DELETE", "/fapi/v1/allOpenOrders", {"symbol": sym})
+        except BinanceUnknownExecutionError as e:
+            last = e
+        except Exception as e:
+            last = e
+        try:
+            rows = get_open_orders_all(sym)
+            if not rows:
+                return True
+        except Exception as e:
+            last = e
+        if attempt + 1 < retries:
+            time.sleep(0.35 * (attempt + 1))
+    raise RuntimeError(f"{sym}: ordinary order cleanup belum terverifikasi ({last})")
+
+
+
+def _cancel_all_algo_orders_verified(sym, retries=2):
+    """Cancel all algo orders, then verify exchange-side empty state.
+
+    A transport-unknown DELETE is reconciled by GET /openAlgoOrders before any
+    retry. This avoids both orphan protection and blind repeated cancels.
+    """
+    last = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            cancel_all_algo_orders(sym)
+        except BinanceUnknownExecutionError as e:
+            last = e
+        except Exception as e:
+            last = e
+        try:
+            rows = _get_open_algo_orders(sym)
+            if not rows:
+                _clear_pending_cleanup(sym)
+                return True
+        except Exception as e:
+            last = e
+        if attempt + 1 < retries:
+            time.sleep(0.35 * (attempt + 1))
+    raise RuntimeError(f"{sym}: algo cleanup belum terverifikasi ({last})")
+
+
 def _cancel_all_symbol_orders_verified(sym):
     """Cancel ordinary + algo orders for one symbol and verify both are empty."""
-    # Ordinary orders (LIMIT entry, etc.)
-    _binance_signed("DELETE", "/fapi/v1/allOpenOrders", {"symbol": sym})
-    # Conditional TP/SL/trailing orders
-    cancel_all_algo_orders(sym)
-
+    _cancel_all_ordinary_orders_verified(sym)
+    _cancel_all_algo_orders_verified(sym)
     ordinary = get_open_orders_all(sym)
     algo = _get_open_algo_orders(sym)
     if ordinary or algo:
-        raise RuntimeError(
-            f"{sym}: masih ada order setelah cancel (ordinary={len(ordinary)}, algo={len(algo)})"
-        )
+        raise RuntimeError(f"{sym}: masih ada order setelah cancel (ordinary={len(ordinary)}, algo={len(algo)})")
     return True
 
 
 def _verified_timeout_symbol(sym, chat_id, reason="manual timeout"):
-    """Hard cleanup for one symbol: cancel ALL Binance orders, close position, verify both."""
+    """Flatten one symbol and verify position + ordinary + algo orders are zero."""
     try:
-        # Cancel first so no pending entry/protection can create a new exposure.
         _cancel_all_symbol_orders_verified(sym)
-
         real = get_real_position(sym)
+        exit_price = None
         if real is not None:
-            qty = abs(float(real.get("positionAmt", 0) or 0))
-            is_buy = float(real.get("positionAmt", 0) or 0) > 0
-            if qty > 0:
-                place_market_order(sym, "SELL" if is_buy else "BUY", qty, reduce_only=True)
-
-        # Verify position is actually flat.
-        real_after = get_real_position(sym)
-        if real_after is not None and abs(float(real_after.get("positionAmt", 0) or 0)) > 0:
-            raise RuntimeError("posisi masih terbuka setelah MARKET reduce-only")
-
-        # Closing can create/leave no protection orders; verify again.
+            live_qty = abs(float(real.get("positionAmt", 0) or 0))
+            if live_qty > 0:
+                is_buy = float(real.get("positionAmt", 0) or 0) > 0
+                closed, exit_price = _verified_market_close(sym, is_buy, reason, chat_id=chat_id, max_retries=1)
+                if not closed:
+                    raise RuntimeError("market close belum terkonfirmasi")
         _cancel_all_symbol_orders_verified(sym)
-
         with positions_lock:
             local = positions.get(sym)
-        if local:
-            if local.get("status") == "pending" or local.get("entry_time") is None:
-                with positions_lock:
-                    positions.pop(sym, None)
-                _record_pending_cancel("manual_timeout")
-            else:
-                close_position(sym, "timeout", close_price=get_price(sym) or local.get("entry"))
+        if local and local.get("entry_time") is not None and local.get("status") != "pending":
+            close_position(sym, "timeout", close_price=exit_price or get_price(sym) or local.get("entry"))
+        elif local:
+            with positions_lock:
+                positions.pop(sym, None)
+            _record_pending_cancel("manual_timeout")
         _clear_pending_cleanup(sym)
-        tg_send(chat_id, f"✅ <b>TIMEOUT CLOSED</b> — {sym}\n"
-                        f"Posisi Binance: <b>0</b>\n"
-                        f"Order biasa: <b>0</b>\n"
-                        f"Algo TP/SL/Trail: <b>0</b>\n"
-                        f"Semua exposure {sym} sudah dibersihkan.")
+        tg_send(chat_id, f"✅ <b>TIMEOUT CLOSED</b> — {sym}\nPosisi Binance: <b>0</b>\nOrder biasa: <b>0</b>\nAlgo TP/SL/Trail: <b>0</b>\nSemua exposure {sym} sudah dibersihkan.")
         return True
     except Exception as e:
         with positions_lock:
@@ -1239,48 +1504,41 @@ def _verified_timeout_symbol(sym, chat_id, reason="manual timeout"):
                 positions[sym]["emergency_reason"] = reason
                 positions[sym]["emergency_error"] = str(e)[:300]
         _queue_pending_cleanup(sym, "timeout cleanup", e)
-        tg_send(chat_id, f"🚨 <b>TIMEOUT BELUM SELESAI</b> — {sym}\n"
-                        f"<code>{str(e)[:350]}</code>\n"
-                        f"Posisi tetap dipertahankan di /trade. Gunakan <code>/ok {sym}</code> setelah Binance/API normal.")
+        tg_send(chat_id, f"🚨 <b>TIMEOUT BELUM SELESAI</b> — {sym}\n<code>{str(e)[:350]}</code>\nPosisi tetap dipertahankan di /trade. Gunakan <code>/ok {sym}</code> setelah Binance/API normal.")
         return False
 
 
 def _verified_timeout_all(chat_id):
     """GLOBAL emergency cleanup: cancel every Binance order and flatten every position."""
     try:
-        # Snapshot exchange state first. Local positions are NOT authoritative.
         positions_remote = get_real_positions_all()
         ordinary = get_open_orders_all()
         algo = get_open_algo_orders_all()
-
         symbols = {str(p.get("symbol")) for p in positions_remote if p.get("symbol")}
         symbols.update(str(o.get("symbol")) for o in ordinary if o.get("symbol"))
         symbols.update(str(o.get("symbol")) for o in algo if o.get("symbol"))
 
-        # Cancel every symbol's ordinary + algo orders.
         for sym in sorted(symbols):
             _cancel_all_symbol_orders_verified(sym)
 
-        # Refresh positions after cancellations, then flatten every remaining position.
+        exit_prices = {}
         for p in get_real_positions_all():
             sym = p.get("symbol")
             qty = abs(float(p.get("positionAmt", 0) or 0))
             if not sym or qty <= 0:
                 continue
             is_buy = float(p.get("positionAmt", 0) or 0) > 0
-            place_market_order(sym, "SELL" if is_buy else "BUY", qty, reduce_only=True)
+            closed, exit_price = _verified_market_close(sym, is_buy, "manual timeout global", chat_id=chat_id, max_retries=1)
+            if not closed:
+                raise RuntimeError(f"{sym}: posisi global belum terkonfirmasi flat")
+            exit_prices[sym] = exit_price
 
-        # Final exchange-side verification.
         remaining_pos = get_real_positions_all()
         remaining_orders = get_open_orders_all()
         remaining_algo = get_open_algo_orders_all()
         if remaining_pos or remaining_orders or remaining_algo:
-            raise RuntimeError(
-                f"verifikasi global gagal: positions={len(remaining_pos)}, "
-                f"ordinary_orders={len(remaining_orders)}, algo_orders={len(remaining_algo)}"
-            )
+            raise RuntimeError(f"verifikasi global gagal: positions={len(remaining_pos)}, ordinary_orders={len(remaining_orders)}, algo_orders={len(remaining_algo)}")
 
-        # Only now clear local positions.
         with positions_lock:
             local_items = [(sym, dict(pos)) for sym, pos in positions.items()]
         for sym, pos in local_items:
@@ -1289,7 +1547,7 @@ def _verified_timeout_all(chat_id):
                     positions.pop(sym, None)
                 _record_pending_cancel("manual_timeout_global")
             else:
-                close_position(sym, "timeout", close_price=get_price(sym) or pos.get("entry"))
+                close_position(sym, "timeout", close_price=exit_prices.get(sym) or get_price(sym) or pos.get("entry"))
         with positions_lock:
             positions.clear()
         tg_send(chat_id, "✅ <b>TIMEOUT GLOBAL SELESAI</b>\n"
@@ -1298,7 +1556,6 @@ def _verified_timeout_all(chat_id):
                         "Semua posisi dan semua order Binance terverifikasi <b>0</b>.")
         return True
     except Exception as e:
-        # Never pretend the account is clean when verification failed.
         tg_send(chat_id, "🚨 <b>TIMEOUT GLOBAL BELUM SELESAI</b>\n"
                         f"<code>{str(e)[:500]}</code>\n"
                         "Scanner/entry baru tidak boleh dianggap aman. Cek Binance dan lakukan /ok SYMBOL untuk posisi yang masih tercatat.")
@@ -1311,81 +1568,60 @@ def _verified_timeout_all(chat_id):
 # dengan error -4120). Field beda dari order biasa: stopPrice->triggerPrice,
 # orderId->algoId, status->algoStatus. ──
 
-def place_sl_order(symbol, is_buy, sl_price, quantity):
-    """
-    Pasang SL sebagai Conditional Algo Order di Binance Futures.
-
-    KENAPA quantity + reduceOnly, BUKAN closePosition=true:
-    ─────────────────────────────────────────────────────────
-    Binance Futures hanya mengizinkan SATU order dengan `closePosition=true`
-    per sisi (side) per simbol secara bersamaan. TP sudah dipasang dengan
-    `closePosition=true` (SELL untuk posisi BUY). Kalau SL juga pakai
-    `closePosition=true`, Binance otomatis mem-cancel salah satunya —
-    biasanya SL yang dipasang kedua. Inilah penyebab SL terus "hilang"
-    segera setelah dipasang ulang.
-
-    Solusi: SL pakai `quantity` (jumlah lot yang sama dengan posisi) +
-    `reduceOnly=true`. Ini setara dengan menutup seluruh posisi saat
-    ter-trigger, TANPA konflik dengan TP. Ketika TP atau SL ter-trigger,
-    Binance otomatis meng-cancel order lainnya (karena posisinya sudah nol
-    dan order reduce-only tidak punya posisi untuk di-reduce).
-    """
+def place_sl_order(symbol, is_buy, sl_price, quantity, client_algo_id=None):
     close_side = "SELL" if is_buy else "BUY"
     info = get_symbol_filters(symbol)
-    tick = info["tickSize"]
-    step = info["stepSize"]
-    qty_prec = info.get("qtyPrecision", 8)
-    # FIX bug "posisi tidak 100% tertutup saat SL": sebelumnya pakai
-    # math.floor(quantity/step)*step dengan float biasa, yang kena noise
-    # binary floating point (mis. 1.2/0.1 = 11.999999999998 → floor jadi
-    # 1.1, bukan 1.2) sehingga qty SL selalu bisa 1 step LEBIH KECIL dari
-    # posisi riil dan menyisakan sebagian posisi tanpa proteksi saat SL
-    # ter-trigger. round_qty() pakai Decimal (exact) + bulat ke TERDEKAT,
-    # bukan floor lagi — qty yang masuk ke sini sudah kelipatan step sejak
-    # awal (dari calc_auto_quantity), jadi tidak boleh di-floor kedua kali.
+    tick = info["tickSize"]; step = info["stepSize"]; qty_prec = info.get("qtyPrecision", 8)
     qty_rounded = round_qty(quantity, step, qty_prec)
-    return _binance_signed("POST", "/fapi/v1/algoOrder", {
-        "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side, "type": "STOP_MARKET",
-        "triggerPrice": round_to_tick(sl_price, tick),
-        "quantity": qty_rounded,
-        "reduceOnly": "true",
-        "workingType": "MARK_PRICE",
-    })
+    client_algo_id = client_algo_id or _new_client_id("SL")
+    params = {
+        "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side,
+        "type": "STOP_MARKET", "triggerPrice": round_to_tick(sl_price, tick),
+        "quantity": qty_rounded, "reduceOnly": "true", "workingType": "MARK_PRICE",
+        "clientAlgoId": client_algo_id,
+    }
+    try:
+        return _binance_signed("POST", "/fapi/v1/algoOrder", params)
+    except BinanceUnknownExecutionError:
+        found = _find_open_algo_by_client_id(symbol, client_algo_id)
+        if found is not None:
+            return found
+        raise
 
 
 def place_tp_sl(symbol, is_buy, tp_price, sl_price, quantity):
-    """
-    Pasang TP + SL sekaligus.
-
-    KEDUANYA quantity + reduceOnly=true (BUKAN closePosition=true untuk TP
-    lagi — lihat catatan di bawah). Simetris dengan place_sl_order().
-
-    ── KENAPA TP JUGA DIUBAH (bukan cuma SL) ──────────────────────────────
-    Sebelumnya cuma SL yang diubah ke quantity+reduceOnly, TP tetap pakai
-    closePosition=true, dengan asumsi itu sudah cukup untuk menghindari
-    konflik "1 closePosition per side". Tapi laporan user menunjukkan SL
-    tetap hilang berulang meski sudah dipisah begitu — artinya closePosition
-    di sisi TP kemungkinan MASIH bisa memicu Binance meng-cancel order lain
-    (mis. reduceOnly quantity yang jumlahnya persis = seluruh posisi bisa
-    tetap dianggap "menutup posisi penuh" oleh sebagian implementasi, sama
-    seperti closePosition). Fix paling aman & pasti tidak ambigu: TP dan SL
-    SAMA-SAMA quantity+reduceOnly biasa — tidak ada mekanisme closePosition
-    sama sekali di simbol ini, jadi tidak ada jalur bagi Binance untuk
-    menganggap salah satu order "menggantikan" yang lain.
-    """
+    """Create verified TP+SL pair. On partial creation, clean up and fail closed."""
     close_side = "SELL" if is_buy else "BUY"
     info = get_symbol_filters(symbol)
     tick, step = info["tickSize"], info["stepSize"]
     qty_prec = info.get("qtyPrecision", 8)
     qty_rounded = round_qty(quantity, step, qty_prec)
-    tp = _binance_signed("POST", "/fapi/v1/algoOrder", {
-        "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
-        "triggerPrice": round_to_tick(tp_price, tick),
-        "quantity": qty_rounded,
-        "reduceOnly": "true",
-        "workingType": "MARK_PRICE",
-    })
-    sl = place_sl_order(symbol, is_buy, sl_price, quantity)
+    tp_client = _new_client_id("TP")
+    sl_client = _new_client_id("SL")
+    tp = None; sl = None
+    try:
+        tp = _binance_signed("POST", "/fapi/v1/algoOrder", {
+            "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side,
+            "type": "TAKE_PROFIT_MARKET", "triggerPrice": round_to_tick(tp_price, tick),
+            "quantity": qty_rounded, "reduceOnly": "true", "workingType": "MARK_PRICE",
+            "clientAlgoId": tp_client,
+        })
+    except BinanceUnknownExecutionError:
+        tp = _find_open_algo_by_client_id(symbol, tp_client)
+        if tp is None:
+            raise
+
+    try:
+        sl = place_sl_order(symbol, is_buy, sl_price, quantity, client_algo_id=sl_client)
+    except Exception:
+        # If TP exists, best-effort remove it so we never leave a half-protected pair.
+        try:
+            _cancel_all_algo_orders_verified(symbol)
+        finally:
+            raise
+
+    # Exchange-side verification is mandatory before local state is allowed to advance.
+    _verify_protection_pair(symbol, is_buy, tp_price, sl_price, qty_rounded)
     return tp, sl
 
 
@@ -1393,6 +1629,10 @@ def cancel_algo_order(algo_id):
     if not algo_id: return None
     try:
         return _binance_signed("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+    except BinanceUnknownExecutionError:
+        # Query-all-by-symbol is unavailable without symbol; caller verification
+        # is authoritative. Do not blindly repeat a cancel.
+        raise
     except Exception as e:
         log.warning(f"[cancel_algo_order] #{algo_id}: {e}")
         return None
@@ -1403,11 +1643,11 @@ def get_algo_order_status(algo_id):
 
 
 def cancel_all_algo_orders(symbol):
-    """Bersihkan SEMUA algo order (TP/SL) tersisa di suatu koin — dipakai
-    sebagai jaring pengaman setelah posisi closed, jaga-jaga salah satu
-    order (TP atau SL) belum ke-cancel otomatis oleh Binance."""
     try:
         return _binance_signed("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
+    except BinanceUnknownExecutionError:
+        # Verification immediately after the call determines whether cleanup happened.
+        raise
     except Exception as e:
         log.warning(f"[cancel_all_algo_orders] {symbol}: {e}")
         return None
@@ -2881,14 +3121,24 @@ def _open_pending_real(sym,signal,chat_id):
         positions[sym]={"signal":signal,"entry":entry,"chat_id":chat_id,"entry_time":None,
                         "timeout_flag":False,"status":"pending"}
     try:
+        _real_trade_preflight(force=False)
         avail,_=get_real_balance()
         if avail is not None and avail<MARGIN_USD: raise RuntimeError(f"saldo ${avail:.2f} < margin ${MARGIN_USD:.2f}")
         qty,margin,bumped=calc_auto_quantity(sym,entry,MARGIN_USD,LEVERAGE)
         if qty is None: raise RuntimeError("quantity di bawah minimum Binance")
-        set_leverage(sym,LEVERAGE); order=place_limit_order(sym,side,qty,entry)
+        set_leverage_verified(sym,LEVERAGE); order=place_limit_order(sym,side,qty,entry)
         with positions_lock: positions[sym].update({"order_id":order["orderId"],"quantity":qty,"margin_used":margin})
         tg_send(chat_id,f"🎯 <b>PENDING ORDER REAL</b> — {sym}\n\n{fmt_signal_msg(signal)}")
         threading.Thread(target=_wait_entry_real,args=(sym,signal,chat_id,order["orderId"]),daemon=True).start()
+    except BinanceUnknownExecutionError as e:
+        # The entry POST may have reached Binance even though its response was lost.
+        # Preserve the client order id so reconciliation can resolve the ambiguity.
+        with positions_lock:
+            if sym in positions:
+                positions[sym]["status"]="EMERGENCY"
+                positions[sym]["emergency_error"]=str(e)[:300]
+                positions[sym]["entry_client_order_id"]=getattr(e, "client_order_id", None)
+        tg_send(chat_id,f"🚨 <b>ENTRY STATUS UNKNOWN</b> — {sym}\n<code>{str(e)[:300]}</code>\nOrder tidak diulang secara buta. State dipertahankan untuk rekonsiliasi <code>/ok {sym}</code>.")
     except Exception as e:
         with positions_lock: positions.pop(sym,None)
         _ban_coin(sym,f"gagal pasang order real ({e})"); tg_send(chat_id,f"⚠️ <b>Skip {sym}</b> — {e}")
@@ -2901,13 +3151,27 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
         with positions_lock:
             if sym not in positions:return
             if positions[sym].get("timeout_flag"):
-                try: cancel_order(sym,order_id); cancel_all_algo_orders(sym)
-                except Exception: pass
-                positions.pop(sym,None); return
-        try: order=get_order_status(sym,order_id)
+                try:
+                    cancel_order(sym,order_id)
+                    time.sleep(0.2)
+                    st=get_order_status(sym,order_id)
+                    if str(st.get("status","")).upper()=="FILLED":
+                        actual=float(st.get("avgPrice") or 0) or signal["entry"]
+                        _open_position_real(sym,signal,actual,chat_id,st)
+                        return
+                    positions.pop(sym,None); return
+                except Exception as e:
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym]["status"]="EMERGENCY"
+                            positions[sym]["emergency_error"]=str(e)[:300]
+                    tg_send(chat_id, f"🚨 <b>ENTRY CANCEL BELUM TERKONFIRMASI</b> — {sym}\n<code>{str(e)[:300]}</code>\nPosisi tetap dipertahankan sampai <code>/ok {sym}</code>.")
+                    return
+        try:
+            order=get_order_status(sym,order_id)
         except Exception as e:
             log.warning(f"[wait_entry_real] {sym}: {e}"); time.sleep(REAL_TRADE_POLL_SLEEP); continue
-        status=order.get("status")
+        status=str(order.get("status","")).upper()
         if status=="FILLED":
             actual=float(order.get("avgPrice") or 0) or signal["entry"]
             _open_position_real(sym,signal,actual,chat_id,order); return
@@ -2915,43 +3179,48 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
             with positions_lock: positions.pop(sym,None)
             _ban_coin(sym,f"order {status.lower()}"); _record_pending_cancel("binance_reject"); return
         time.sleep(REAL_TRADE_POLL_SLEEP)
-    try: cancel_order(sym,order_id)
-    except Exception: pass
-    with positions_lock: positions.pop(sym,None)
-    _ban_coin(sym,"pending expired"); _record_pending_cancel("expired")
 
+    try:
+        cancel_order(sym,order_id)
+        st=get_order_status(sym,order_id)
+        if str(st.get("status","")).upper()=="FILLED":
+            actual=float(st.get("avgPrice") or 0) or signal["entry"]
+            _open_position_real(sym,signal,actual,chat_id,st); return
+        with positions_lock: positions.pop(sym,None)
+        _ban_coin(sym,"pending expired"); _record_pending_cancel("expired")
+    except Exception as e:
+        with positions_lock:
+            if sym in positions:
+                positions[sym]["status"]="EMERGENCY"
+                positions[sym]["emergency_error"]=str(e)[:300]
+        tg_send(chat_id, f"🚨 <b>PENDING ENTRY BELUM TERKONFIRMASI</b> — {sym}\n<code>{str(e)[:300]}</code>\nState tetap dipertahankan untuk <code>/ok {sym}</code>.")
 
 
 def _emergency_close(sym, is_buy, qty, chat_id, reason):
-    """Emergency close. Never remove local state unless Binance confirms position=0.
-    On failure, keep the position visible as EMERGENCY until /ok SYMBOL reconciles it."""
+    """Emergency flatten. Exchange confirmation is required before local close."""
     try:
-        place_market_order(sym, "SELL" if is_buy else "BUY", qty, reduce_only=True)
-        # A successful HTTP response is not the same as confirmed position=0; verify first.
-        real = get_real_position(sym)
-        live_qty = abs(float(real.get("positionAmt", 0))) if real else 0.0
-        if live_qty <= 0:
-            try:
-                _cleanup_algo_orders_verified(sym)
-            except Exception as ce:
-                _queue_pending_cleanup(sym, "post-auto-out cleanup", ce)
-            close_position(sym, "strategy", close_price=get_price(sym) or positions.get(sym, {}).get("entry"))
-            tg_send(chat_id, f"✅ <b>AUTO-OUT</b> — {sym}\nPosisi Binance terkonfirmasi tertutup.")
-            return True
+        closed, exit_price = _verified_market_close(sym, is_buy, reason, chat_id=chat_id, max_retries=1)
+        if not closed:
+            raise RuntimeError("posisi belum terkonfirmasi flat")
+        try:
+            _cleanup_algo_orders_verified(sym)
+        except Exception as ce:
+            _queue_pending_cleanup(sym, "post-auto-out cleanup", ce)
+            raise RuntimeError(f"posisi sudah flat tetapi cleanup protection belum terverifikasi: {ce}")
         with positions_lock:
-            if sym in positions:
-                positions[sym]["status"] = "EMERGENCY"
-                positions[sym]["emergency_reason"] = "auto-out response OK but position still open"
-        tg_send(chat_id, f"🚨 <b>AUTO-OUT BELUM TUNTAS</b> — {sym}\nPosisi masih terbuka di Binance. Jalankan <code>/ok {sym}</code>.")
-        return False
+            local_pos = positions.get(sym)
+        if local_pos is not None:
+            close_position(sym, "trail" if _classify_close_result("trail", local_pos.get("entry"), exit_price or get_price(sym), local_pos["signal"].get("decision")) == "trail" else "sl", close_price=exit_price or get_price(sym) or local_pos.get("entry"))
+        tg_send(chat_id, f"✅ <b>AUTO-OUT</b> — {sym}\nPosisi Binance terkonfirmasi tertutup dan protection dibersihkan.")
+        return True
     except Exception as e:
         with positions_lock:
             if sym in positions:
                 positions[sym]["status"] = "EMERGENCY"
                 positions[sym]["emergency_reason"] = reason
                 positions[sym]["emergency_error"] = str(e)[:300]
-        tg_send(chat_id, f"🚨 <b>GAGAL AUTO-OUT</b> — {sym}: {e}\n"
-                          f"⚠️ Posisi TETAP dicatat di /trade. Jalankan <code>/ok {sym}</code> untuk rekonsiliasi Binance.")
+        _queue_pending_cleanup(sym, "auto-out cleanup", e)
+        tg_send(chat_id, f"🚨 <b>GAGAL AUTO-OUT</b> — {sym}: {e}\n⚠️ Posisi TETAP dicatat di /trade. Jalankan <code>/ok {sym}</code> untuk rekonsiliasi Binance.")
         return False
 
 
@@ -2966,33 +3235,29 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
     if not valid:
         _emergency_close(sym,buy,qty,chat_id,"level strategy invalid setelah fill"); return
     tick=get_symbol_filters(sym)["tickSize"]; sl=round_to_tick(sl,tick); tp=round_to_tick(tp,tick)
-    last=None; tpo=slo=None
-    for attempt in range(1,4):
-        try:
-            t,s=place_tp_sl(sym,buy,tp,sl,qty); tpo=t["algoId"]; slo=s["algoId"]; last=None; break
-        except Exception as e:
-            last=e; log.warning(f"[open_position_real] proteksi {attempt}/3 gagal: {e}")
-            if attempt<3: time.sleep(2)
-    if last is not None or slo is None:
-        if isinstance(last, BinanceCooldownError):
-            with positions_lock:
-                if sym in positions:
-                    positions[sym].update({"entry": actual_entry, "entry_time": time.time(),
-                                           "status": "active", "current_sl": sl, "quantity": qty,
-                                           "tp_order_id": None, "sl_order_id": None})
-            _queue_pending_protection(sym, buy, sl, tp, qty)
-            tg_send(chat_id, f"⏸️ <b>PROTEKSI DITUNDA</b> — {sym}\nBinance sedang rate-limit/ban. TP/SL dicatat dan akan dipasang setelah recovery +60 detik.")
-            threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start()
-            return
-        _emergency_close(sym,buy,qty,chat_id,f"gagal pasang SL ({last})"); return
+    try:
+        # Protection must be verified on Binance before local state is promoted to ACTIVE.
+        t,s=place_tp_sl(sym,buy,tp,sl,qty)
+    except BinanceCooldownError:
+        with positions_lock:
+            if sym in positions:
+                positions[sym].update({"entry": actual_entry, "entry_time": time.time(), "status": "active", "current_sl": sl, "initial_sl": sl, "quantity": qty, "tp_order_id": None, "sl_order_id": None})
+        _queue_pending_protection(sym, buy, sl, tp, qty)
+        tg_send(chat_id, f"⏸️ <b>PROTEKSI DITUNDA</b> — {sym}\nBinance sedang rate-limit/ban. TP/SL dicatat dan akan dipasang setelah recovery +60 detik.")
+        threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start(); return
+    except BinanceUnknownExecutionError as e:
+        # place_tp_sl already reconciles algo client ids; if it still cannot prove the
+        # pair exists, fail closed and flatten the real position.
+        _emergency_close(sym,buy,qty,chat_id,f"status protection UNKNOWN setelah submit: {e}"); return
+    except Exception as e:
+        _emergency_close(sym,buy,qty,chat_id,f"gagal pasang protection ({e})"); return
+
     with positions_lock:
         if sym not in positions:return
         positions[sym].update({"entry":actual_entry,"entry_time":time.time(),"status":"active",
-                               "current_sl":sl,"quantity":qty,"tp_order_id":tpo,"sl_order_id":slo})
-    tg_send(chat_id,f"⚡ <b>ENTRY REAL</b> — {sym}\nEntry: <code>{actual_entry:.8g}</code>\n"
-                     f"TP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
+                               "current_sl":sl,"initial_sl":sl,"quantity":qty,"tp_order_id":t["algoId"],"sl_order_id":s["algoId"]})
+    tg_send(chat_id,f"⚡ <b>ENTRY REAL</b> — {sym}\nEntry: <code>{actual_entry:.8g}</code>\nTP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
     threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start()
-
 
 
 def _infer_close_reason(tp_algo_id, sl_algo_id):
@@ -3017,70 +3282,143 @@ def monitor_position_real(sym,pos):
         with positions_lock:
             if sym not in positions:return
             pos=positions[sym]
+
         if pos.get("timeout_flag"):
             _verified_timeout_symbol(sym, pos.get("chat_id") or active_chat_id, reason="manual timeout")
             return
+
         if _binance_is_scan_paused():
-            # Saat Binance pause, hanya pantau harga dari WS. Jangan kirim/cancel/query REST.
             price = get_price(sym)
             if price is not None:
                 _update_trade_path_metrics(pos, price)
-                sig = pos["signal"]; buy = sig["decision"] == "BUY"
-                tp = sig.get("tp"); sl = pos.get("current_sl", sig.get("sl"))
-                hit_tp = tp is not None and ((price >= tp) if buy else (price <= tp))
-                hit_sl = sl is not None and ((price <= sl) if buy else (price >= sl))
-                if hit_tp or hit_sl:
-                    log.critical(f"[monitor_real] {sym} menyentuh level saat Binance pause; REST ditahan. Cek Binance/WebSocket/account state.")
             time.sleep(MONITOR_SLEEP)
             continue
-        try: real=get_real_position(sym)
+
+        try:
+            real=get_real_position(sym)
         except BinanceCooldownError:
             time.sleep(REAL_TRADE_POLL_SLEEP); continue
-        except Exception as e: log.warning(f"[monitor_real] {sym}: {e}"); time.sleep(REAL_TRADE_POLL_SLEEP); continue
+        except Exception as e:
+            log.warning(f"[monitor_real] {sym}: {e}"); time.sleep(REAL_TRADE_POLL_SLEEP); continue
+
+        # Exchange is authoritative: if the position is already gone, determine
+        # TP/SL from algo status and only then commit local closure.
         if real is None:
             reason=_infer_close_reason(pos.get("tp_order_id"),pos.get("sl_order_id"))
-            sig=pos["signal"]; close= sig.get("tp") if reason=="tp" else pos.get("current_sl",sig.get("sl"))
-            cancel_all_algo_orders(sym); close_position(sym,reason if reason in ("tp","sl") else "strategy",close_price=close); return
-        live=abs(float(real.get("positionAmt",0)))
-        if live: pos["quantity"]=live
+            sig=pos["signal"]; price=get_price(sym) or pos.get("current_price") or pos["entry"]
+            try:
+                _cancel_all_algo_orders_verified(sym)
+            except Exception as e:
+                _queue_pending_cleanup(sym, "post-external-close cleanup", e)
+            if reason in ("tp", "sl"):
+                close_position(sym, reason, close_price=price)
+            else:
+                classified = "trail" if _classify_close_result("trail", pos.get("entry"), price, sig.get("decision")) == "trail" else "sl"
+                close_position(sym, classified, close_price=price)
+            return
+
+        live=abs(float(real.get("positionAmt",0) or 0))
+        if live <= 0:
+            continue
+        with positions_lock:
+            if sym in positions:
+                positions[sym]["quantity"]=live
+
         px=get_price(sym)
-        if px is not None: _update_trade_path_metrics(pos, px)
+        if px is not None:
+            _update_trade_path_metrics(pos, px)
+
         if time.time()>=next_strategy:
             upd=_strategy_position_update(sym,pos); next_strategy=time.time()+STRATEGY_MANAGE_INTERVAL
             if isinstance(upd,dict):
+                # Strategy-requested market exit: use the same verified close path.
                 if upd.get("close"):
-                    price=upd.get("close_price") or get_price(sym) or pos["entry"]; buy=pos["signal"]["decision"]=="BUY"
-                    try: cancel_all_algo_orders(sym); place_market_order(sym,"SELL" if buy else "BUY",pos["quantity"],reduce_only=True)
-                    except Exception as e: log.error(f"[strategy close] {sym}: {e}")
-                    close_position(sym,"trail" if upd.get("reason")=="trail" else "strategy",close_price=price); return
-                oldsl=pos.get("current_sl",pos["signal"].get("sl")); oldtp=pos["signal"].get("tp")
-                _apply_strategy_update(sym,pos,upd)
-                newsl=pos.get("current_sl",pos["signal"].get("sl")); newtp=pos["signal"].get("tp")
-                if newsl!=oldsl or newtp!=oldtp:
+                    price=upd.get("close_price") or px or pos["entry"]
+                    buy=pos["signal"]["decision"]=="BUY"
+                    closed, exit_price = _verified_market_close(sym, buy, "strategy close", chat_id=pos.get("chat_id") or active_chat_id, max_retries=1)
+                    if not closed:
+                        with positions_lock:
+                            if sym in positions:
+                                positions[sym]["status"]="EMERGENCY"
+                        return
                     try:
-                        pos["current_price"] = price or pos.get("current_price") or pos["entry"]
-                        if _binance_is_scan_paused():
-                            _queue_pending_trail(sym, newsl, newtp, pos.get("quantity",0), reason="strategy", side=pos["signal"]["decision"])
-                            log.warning(f"[trail] {sym} queued — Binance pause aktif; SL={newsl} TP={newtp}")
-                            if newsl != oldsl:
-                                _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, newsl, status="QUEUED")
-                        else:
-                            cancel_algo_order(pos.get("tp_order_id")); cancel_algo_order(pos.get("sl_order_id"))
-                            t,s=place_tp_sl(sym,pos["signal"]["decision"]=="BUY",newtp,newsl,pos["quantity"])
-                            pos["tp_order_id"]=t["algoId"]; pos["sl_order_id"]=s["algoId"]
-                            _clear_pending_trail(sym)
-                            if newsl != oldsl:
-                                _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, newsl, status="APPLIED")
-                    except BinanceCooldownError as e:
-                        _queue_pending_trail(sym, newsl, newtp, pos.get("quantity",0), reason="binance_cooldown", side=pos["signal"]["decision"])
-                        if newsl != oldsl:
-                            _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, newsl, status="QUEUED", error=e)
-                    except Exception as e:
-                        log.warning(f"[strategy/manage real] {sym}: {e}")
-                        if newsl != oldsl:
-                            _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, newsl, status="FAILED", error=e)
-        time.sleep(REAL_TRADE_POLL_SLEEP)
+                        _cleanup_algo_orders_verified(sym)
+                    except Exception as ce:
+                        _queue_pending_cleanup(sym, "strategy close cleanup", ce)
+                        with positions_lock:
+                            if sym in positions:
+                                positions[sym]["status"]="EMERGENCY"
+                        return
+                    result = "trail" if _classify_close_result("trail", pos.get("entry"), exit_price or price, pos["signal"].get("decision")) == "trail" else "sl"
+                    close_position(sym,result,close_price=exit_price or price); return
 
+                oldsl=pos.get("current_sl",pos["signal"].get("sl")); oldtp=pos["signal"].get("tp")
+                # Calculate candidates WITHOUT mutating local state.
+                candidate_tp = float(upd.get("tp")) if upd.get("tp") is not None else float(oldtp) if oldtp is not None else None
+                candidate_sl = float(upd.get("sl")) if upd.get("sl") is not None else float(oldsl) if oldsl is not None else None
+                if candidate_sl is not None:
+                    buy=pos["signal"]["decision"]=="BUY"
+                    if not ((candidate_sl > oldsl) if buy else (candidate_sl < oldsl)) and candidate_sl != oldsl:
+                        candidate_sl = oldsl
+
+                if candidate_sl != oldsl or candidate_tp != oldtp:
+                    current_price = px or get_price(sym) or pos["entry"]
+                    try:
+                        if _binance_is_scan_paused():
+                            _queue_pending_trail(sym, candidate_sl, candidate_tp, live, reason="strategy", side=pos["signal"]["decision"])
+                            if candidate_sl != oldsl:
+                                _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED")
+                        else:
+                            # Refresh quantity from exchange immediately before protection mutation.
+                            latest = get_real_position(sym)
+                            live_qty = abs(float(latest.get("positionAmt",0) or 0)) if latest else 0.0
+                            if live_qty <= 0:
+                                continue
+                            # Cancel existing protection, then create+verify new pair. If creation
+                            # fails, restore the old pair before declaring an emergency.
+                            _cancel_all_algo_orders_verified(sym)
+                            try:
+                                nt, ns = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", candidate_tp, candidate_sl, live_qty)
+                            except Exception as protect_err:
+                                restore_failed = False
+                                try:
+                                    rt, rs = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", oldtp, oldsl, live_qty)
+                                    _verify_protection_pair(sym, pos["signal"]["decision"]=="BUY", oldtp, oldsl, live_qty)
+                                except Exception as restore_err:
+                                    restore_failed = True
+                                    _queue_pending_cleanup(sym, "trail protection restore failed", restore_err)
+                                    log.critical(f"[trail] {sym}: restore old protection gagal: {restore_err}")
+                                if restore_failed:
+                                    with positions_lock:
+                                        if sym in positions:
+                                            positions[sym]["status"]="EMERGENCY"
+                                            positions[sym]["emergency_error"]=str(protect_err)[:300]
+                                    raise RuntimeError(f"trail update gagal dan protection lama tidak bisa dipulihkan: {protect_err}")
+                                raise
+                            with positions_lock:
+                                if sym in positions:
+                                    positions[sym]["current_sl"] = candidate_sl
+                                    positions[sym]["signal"]["sl"] = candidate_sl
+                                    if candidate_tp is not None:
+                                        positions[sym]["signal"]["tp"] = candidate_tp
+                                    positions[sym]["tp_order_id"] = nt["algoId"]
+                                    positions[sym]["sl_order_id"] = ns["algoId"]
+                                    positions[sym]["quantity"] = live_qty
+                                    positions[sym]["current_price"] = current_price
+                            _clear_pending_trail(sym)
+                            if candidate_sl != oldsl:
+                                _notify_trail_update(active_chat_id, sym, positions.get(sym, pos), upd, oldsl, candidate_sl, status="APPLIED")
+                    except BinanceCooldownError as e:
+                        _queue_pending_trail(sym, candidate_sl, candidate_tp, live, reason="binance_cooldown", side=pos["signal"]["decision"])
+                        if candidate_sl != oldsl:
+                            _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED", error=e)
+                    except Exception as e:
+                        log.error(f"[strategy/manage real] {sym}: {e}")
+                        if candidate_sl != oldsl:
+                            _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="FAILED", error=e)
+                        # Do not commit candidate local state on failure.
+
+        time.sleep(REAL_TRADE_POLL_SLEEP)
 
 
 def _queue_pending_protection(sym, buy, sl, tp, qty):
