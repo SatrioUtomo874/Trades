@@ -73,7 +73,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V11"
+MAIN_ENGINE_VERSION = "V14"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -225,7 +225,7 @@ ban_lock = threading.Lock()
 banned_coins: dict = {}      # {symbol: (scan_counter saat diban, durasi ban itu)}
 scan_counter = 0             # bertambah 1 setiap get_top_coins() dipanggil
 BAN_DURATION_SCANS = 15
-BAN_DURATION_TRADE_CLOSED = 300   # ban khusus setelah trade BENAR-BENAR closed (TP/SL/Trail)
+BAN_DURATION_TRADE_CLOSED = 100   # ban khusus setelah trade BENAR-BENAR closed (TP/SL/Trail/timeout)
 
 # ── REAL TRADE (Binance Futures) — aktif otomatis kalau API key/secret diset ──
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY")
@@ -1224,7 +1224,7 @@ def _verified_timeout_symbol(sym, chat_id, reason="manual timeout"):
                     positions.pop(sym, None)
                 _record_pending_cancel("manual_timeout")
             else:
-                close_position(sym, "strategy", close_price=get_price(sym) or local.get("entry"))
+                close_position(sym, "timeout", close_price=get_price(sym) or local.get("entry"))
         _clear_pending_cleanup(sym)
         tg_send(chat_id, f"✅ <b>TIMEOUT CLOSED</b> — {sym}\n"
                         f"Posisi Binance: <b>0</b>\n"
@@ -1289,7 +1289,7 @@ def _verified_timeout_all(chat_id):
                     positions.pop(sym, None)
                 _record_pending_cancel("manual_timeout_global")
             else:
-                close_position(sym, "strategy", close_price=get_price(sym) or pos.get("entry"))
+                close_position(sym, "timeout", close_price=get_price(sym) or pos.get("entry"))
         with positions_lock:
             positions.clear()
         tg_send(chat_id, "✅ <b>TIMEOUT GLOBAL SELESAI</b>\n"
@@ -2174,8 +2174,58 @@ EXIT_FEE_PCT  = 0.0005   # 0.05% — exit via SL/TP market-trigger (taker)
 # pakai MARGIN_USD × LEVERAGE (persis logika real trade), bukan ini lagi.
 POSITION_SIZE_PCT = 100.0  # DEPRECATED — lihat catatan di atas
 
+def _classify_close_result(result, entry=None, close_price=None, decision=None):
+    """Normalize close classification based on actual outcome.
+
+    Rules:
+      - TP remains TP when the TP path actually triggered.
+      - A Trail is a winning trail only when the realized price is profitable.
+      - A Trail/timeout that closes at a loss is recorded as SL.
+      - Other discretionary strategy closes keep their original label.
+    """
+    result = str(result or "strategy").lower()
+    if result == "tp":
+        return "tp"
+    if result not in ("trail", "timeout"):
+        return result
+    if entry is None or close_price is None:
+        # Conservatively treat an unmeasurable outcome as a loss-class exit.
+        return "sl"
+    try:
+        entry = float(entry)
+        close_price = float(close_price)
+        if entry <= 0:
+            return "sl"
+        side = str(decision or "BUY").upper()
+        pnl_raw = ((close_price - entry) / entry) * (1 if side == "BUY" else -1)
+        # Use the same net-PnL convention displayed by update_stats():
+        # gross movement minus the configured round-trip fee estimate.
+        net_pnl = pnl_raw - (ENTRY_FEE_PCT + EXIT_FEE_PCT)
+        return "trail" if net_pnl > 0 else "sl"
+    except Exception:
+        return "sl"
+
+
+def _update_trade_path_metrics(pos, price):
+    """Track MFE/MAE and time-to-R milestones in-memory without API calls."""
+    try:
+        entry=float(pos.get("entry")); sl=float(pos["signal"].get("sl")); price=float(price)
+        if entry <= 0: return
+        side=str(pos["signal"].get("decision") or "BUY").upper()
+        move=((price-entry)/entry*100.0) if side=="BUY" else ((entry-price)/entry*100.0)
+        risk_pct=(abs(entry-sl)/entry*100.0)
+        r=(move/risk_pct) if risk_pct else 0.0
+        pos.setdefault("mfe_pct", 0.0); pos.setdefault("mae_pct", 0.0); pos.setdefault("mfe_r", 0.0); pos.setdefault("mae_r", 0.0)
+        pos["mfe_pct"]=max(float(pos["mfe_pct"]), move); pos["mae_pct"]=min(float(pos["mae_pct"]), move)
+        pos["mfe_r"]=max(float(pos["mfe_r"]), r); pos["mae_r"]=min(float(pos["mae_r"]), r)
+        now=time.time(); start=pos.get("entry_time") or now; pos.setdefault("time_in_trade_sec", 0.0); pos["time_in_trade_sec"]=max(0.0, now-start)
+        if r>=1.0 and pos.get("time_to_1r_sec") is None: pos["time_to_1r_sec"]=now-start
+        if r>=2.0 and pos.get("time_to_2r_sec") is None: pos["time_to_2r_sec"]=now-start
+    except Exception:
+        return
+
 def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
-                 sym=None, decision=None, entry_time=None,
+                 sym=None, decision=None, entry_time=None, close_reason=None,
                  confidence=None, entry_label=None, rr=None, rsi=None,
                  struct_h1=None, d1_bias=None):
     """
@@ -2185,11 +2235,12 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
     struct_h1/d1_bias) ke pnl_history — bahan diagnosis strategy_logic.py
     tanpa perlu data tambahan lain (lihat /analyze).
 
-    result: "tp" | "sl" | "trail" — "trail" = trailing stop mengunci
-    profit (SL bergerak, tapi ditutup di atas entry utk BUY / di bawah
-    entry utk SELL). Dihitung terpisah dari "sl" murni supaya statistik
-    tidak salah mengira profit sebagai kerugian.
+    result: klasifikasi final yang sudah dinormalisasi. "trail" hanya dipakai
+    jika exit trailing benar-benar menghasilkan PnL positif; trailing yang
+    berakhir negatif dicatat sebagai "sl". "timeout" juga diklasifikasikan
+    menjadi "trail" bila positif dan "sl" bila negatif.
     """
+    result = _classify_close_result(result, entry=entry, close_price=close_price, decision=decision)
     with stat_lock:
         stats["total"] += 1
         if result in ("tp", "sl", "trail"):
@@ -2254,7 +2305,7 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
         trade_record = {
             "trade_id": trade_sequence,
             "run_id": research_run_id,
-            "result": result, "pct": pct,
+            "result": result, "close_reason": close_reason or result, "pct": pct,
             "pnl_usd": pnl_usd, "balance_after": stats["balance"],
             "symbol": sym, "decision": decision,
             "entry_time": entry_time, "exit_time": exit_ts,
@@ -2400,6 +2451,14 @@ def _analyze_trade_history():
         peak = max(peak, e)
         max_dd = max(max_dd, peak - e)
 
+    # Additional diagnostics derived from the closed-trade ledger.
+    for t in hist:
+        try:
+            entry=float(t.get("entry")); exit_price=float(t.get("exit_price")); sl=float(t.get("sl")); side=str(t.get("decision") or "BUY").upper(); risk=abs(entry-sl)
+            t["final_r"] = (((exit_price-entry)/risk) if side=="BUY" else ((entry-exit_price)/risk)) if risk else 0.0
+        except Exception:
+            t["final_r"] = None
+
     # Breakdown yang berguna untuk diagnosis strategy tanpa market rescan.
     by_result = {}
     by_symbol = {}
@@ -2522,6 +2581,25 @@ def _write_analyze_report(rows, summary, unused=""):
     for key, b in sorted(summary["by_symbol"].items(), key=lambda kv: kv[1]["pnl"], reverse=True):
         lines.append(f"| {key} | {b['trades']} | {b['wins']} | {b['losses']} | ${b['pnl']:.4f} |")
 
+    buckets=[(50,59),(60,69),(70,79),(80,89),(90,100)]
+    lines += ["", "## Breakdown Confidence", "", "| Bucket | Trades | Wins | Losses | Win Rate | Avg PnL | Avg R |", "|---|---:|---:|---:|---:|---:|---:|"]
+    for lo,hi in buckets:
+        bt=[t for t in hist if lo <= float(t.get("confidence",0) or 0) <= hi]
+        if not bt: continue
+        wins=sum(1 for t in bt if t.get("result") in ("tp","trail")); losses=len(bt)-wins
+        lines.append(f"| {lo}-{hi} | {len(bt)} | {wins} | {losses} | {wins/len(bt)*100:.1f}% | {sum(float(t.get('pct',0) or 0) for t in bt)/len(bt):.3f}% | {sum(float(t.get('final_r',0) or 0) for t in bt)/len(bt):.2f}R |")
+    lines += ["", "## Breakdown Entry Type", "", "| Entry | Trades | Wins | Losses | Win Rate | Avg PnL | Avg R |", "|---|---:|---:|---:|---:|---:|---:|"]
+    for key,b in sorted(summary["by_entry"].items(), key=lambda kv: kv[1]["pnl"], reverse=True):
+        bt=[t for t in hist if str(t.get("entry_label") or "?")==str(key)]
+        avgr=sum(float(t.get("final_r",0) or 0) for t in bt)/len(bt) if bt else 0
+        lines.append(f"| {key} | {b['trades']} | {b['wins']} | {b['losses']} | {(b['wins']/b['trades']*100 if b['trades'] else 0):.1f}% | {(b['pnl']/b['trades'] if b['trades'] else 0):.3f} | {avgr:.2f}R |")
+    path_rows=[t for t in hist if t.get("mfe_r") is not None or t.get("mae_r") is not None]
+    if path_rows:
+        mfe=sum(float(t.get("mfe_r",0) or 0) for t in path_rows)/len(path_rows); mae=sum(float(t.get("mae_r",0) or 0) for t in path_rows)/len(path_rows)
+        ds=[float(t.get("time_in_trade_sec")) for t in path_rows if t.get("time_in_trade_sec") not in (None, "")]
+        lines += ["", "## Path Analytics", "", f"- Trades tracked: **{len(path_rows)}**", f"- Avg MFE: **{mfe:.2f}R**", f"- Avg MAE: **{mae:.2f}R**"]
+        if ds: lines.append(f"- Avg time in trade: **{sum(ds)/len(ds)/60:.1f} minutes**")
+
     lines += [
         "", "## Catatan", "",
         "- `/analyze` sekarang hanya menganalisis trade yang benar-benar closed dan tercatat sejak `/resetbalance` terakhir.",
@@ -2553,7 +2631,7 @@ positions_lock = threading.Lock()
 positions: dict = {}   # {sym: {signal, entry, tp, sl, entry_time, thread}}
 
 def close_position(sym, result, close_price=None):
-    """Tutup posisi, catat statistik, ban koin sementara, kirim notif."""
+    """Close local position, normalize outcome, record stats, and ban the coin."""
     global active_trade
     with positions_lock:
         pos = positions.pop(sym, None)
@@ -2564,13 +2642,19 @@ def close_position(sym, result, close_price=None):
     sl_p  = sig["sl"]
     tp_p  = sig["tp"]
     cid   = pos["chat_id"]
+    classified = _classify_close_result(result, entry=entry, close_price=close_price, decision=sig.get("decision"))
 
-    update_stats(result, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price,
+    update_stats(classified, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price,
                  sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"),
+                 close_reason=result,
                  confidence=sig.get("confidence"), entry_label=sig.get("entry_label"),
                  rr=sig.get("rr"), rsi=sig.get("rsi"), struct_h1=sig.get("struct_h1"),
-                 d1_bias=sig.get("d1_bias"))
-    _ban_coin(sym, f"trade closed ({result})", duration=BAN_DURATION_TRADE_CLOSED)
+                 d1_bias=sig.get("d1_bias"),
+                 mfe_pct=pos.get("mfe_pct"), mae_pct=pos.get("mae_pct"),
+                 mfe_r=pos.get("mfe_r"), mae_r=pos.get("mae_r"),
+                 time_in_trade_sec=pos.get("time_in_trade_sec"),
+                 time_to_1r_sec=pos.get("time_to_1r_sec"), time_to_2r_sec=pos.get("time_to_2r_sec"))
+    _ban_coin(sym, f"trade closed ({classified}; reason={result})", duration=BAN_DURATION_TRADE_CLOSED)
 
     # Update active_trade jika ini yang sedang dipantau
     with positions_lock:
@@ -2580,6 +2664,7 @@ def close_position(sym, result, close_price=None):
     with stat_lock:
         last = stats["pnl_history"][-1] if stats["pnl_history"] else None
 
+    result = classified
     emoji = {"tp":"🎯","sl":"🛑","trail":"🔒"}.get(result,"❓")
     label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(result, result.upper())
     detail = ""
@@ -2728,8 +2813,7 @@ def monitor_position(sym,pos):
             pos=positions[sym]
         if pos.get("timeout_flag"):
             price=get_price(sym) or pos["entry"]; buy=pos["signal"]["decision"]=="BUY"
-            result="tp" if (price-pos["entry"])*(1 if buy else -1)>=0 else "sl"
-            close_position(sym,result,close_price=price); return
+            close_position(sym,"timeout",close_price=price); return
         if time.time()>=next_strategy:
             upd=_strategy_position_update(sym,pos); next_strategy=time.time()+STRATEGY_MANAGE_INTERVAL
             if isinstance(upd,dict):
@@ -2745,6 +2829,7 @@ def monitor_position(sym,pos):
                     _notify_trail_update(active_chat_id, sym, pos, upd, old_sl, new_sl, status="APPLIED")
         price=get_price(sym)
         if price is None: time.sleep(MONITOR_SLEEP); continue
+        _update_trade_path_metrics(pos, price)
         sig=pos["signal"]; buy=sig["decision"]=="BUY"; tp=sig.get("tp"); sl=pos.get("current_sl",sig.get("sl"))
         hit_tp=tp is not None and ((price>=tp) if buy else (price<=tp))
         hit_sl=sl is not None and ((price<=sl) if buy else (price>=sl))
@@ -2939,6 +3024,7 @@ def monitor_position_real(sym,pos):
             # Saat Binance pause, hanya pantau harga dari WS. Jangan kirim/cancel/query REST.
             price = get_price(sym)
             if price is not None:
+                _update_trade_path_metrics(pos, price)
                 sig = pos["signal"]; buy = sig["decision"] == "BUY"
                 tp = sig.get("tp"); sl = pos.get("current_sl", sig.get("sl"))
                 hit_tp = tp is not None and ((price >= tp) if buy else (price <= tp))
@@ -2957,6 +3043,8 @@ def monitor_position_real(sym,pos):
             cancel_all_algo_orders(sym); close_position(sym,reason if reason in ("tp","sl") else "strategy",close_price=close); return
         live=abs(float(real.get("positionAmt",0)))
         if live: pos["quantity"]=live
+        px=get_price(sym)
+        if px is not None: _update_trade_path_metrics(pos, px)
         if time.time()>=next_strategy:
             upd=_strategy_position_update(sym,pos); next_strategy=time.time()+STRATEGY_MANAGE_INTERVAL
             if isinstance(upd,dict):
@@ -3307,7 +3395,7 @@ def get_start_msg():
         "/trade               — Lihat semua posisi aktif/pending/emergency\n"
         "/ok SYMBOL           — Rekonsiliasi posisi Binance + TP/SL\n"
         "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
-        "/timeout             — Tutup paksa semua posisi\n\n"
+        "/timeout             — Tutup paksa semua posisi + semua order\n\n"
         "━━━━━━━━ <b>CONFIG</b> ━━━━━━━━━\n"
         "/mode                — Lihat mode aktif\n"
         "/mode on             — Aktifkan REAL TRADE\n"
