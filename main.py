@@ -2871,48 +2871,144 @@ positions_lock = threading.Lock()
 positions: dict = {}   # {sym: {signal, entry, tp, sl, entry_time, thread}}
 
 def close_position(sym, result, close_price=None):
-    """Close local position, normalize outcome, record stats, and ban the coin."""
+    """Finalize a position that is already confirmed flat on Binance.
+
+    This function is intentionally exception-safe: exchange-side closure must never be
+    lost merely because statistics/Telegram formatting encounters an unexpected error.
+    """
     global active_trade
     with positions_lock:
-        pos = positions.pop(sym, None)
-    if pos is None: return
+        pos = positions.get(sym)
+    if pos is None:
+        return False
 
-    sig   = pos["signal"]
-    entry = pos["entry"]
-    sl_p  = sig["sl"]
-    tp_p  = sig["tp"]
-    cid   = pos["chat_id"]
-    classified = _classify_close_result(result, entry=entry, close_price=close_price, decision=sig.get("decision"))
+    sig = pos.get("signal") or {}
+    entry = pos.get("entry")
+    sl_p = sig.get("sl")
+    tp_p = sig.get("tp")
+    cid = pos.get("chat_id") or active_chat_id
 
-    update_stats(classified, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price,
-                 sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"),
-                 close_reason=result,
-                 confidence=sig.get("confidence"), entry_label=sig.get("entry_label"),
-                 rr=sig.get("rr"), rsi=sig.get("rsi"), struct_h1=sig.get("struct_h1"),
-                 d1_bias=sig.get("d1_bias"),
-                 mfe_pct=pos.get("mfe_pct"), mae_pct=pos.get("mae_pct"),
-                 mfe_r=pos.get("mfe_r"), mae_r=pos.get("mae_r"),
-                 time_in_trade_sec=pos.get("time_in_trade_sec"),
-                 time_to_1r_sec=pos.get("time_to_1r_sec"), time_to_2r_sec=pos.get("time_to_2r_sec"))
-    _ban_coin(sym, f"trade closed ({classified}; reason={result})", duration=BAN_DURATION_TRADE_CLOSED)
+    # Final path metric update before the local state is removed.
+    try:
+        if close_price is not None:
+            _update_trade_path_metrics(pos, close_price)
+    except Exception:
+        pass
 
-    # Update active_trade jika ini yang sedang dipantau
+    classified = _classify_close_result(
+        result, entry=entry, close_price=close_price, decision=sig.get("decision")
+    )
+
+    # Remove local position exactly once. Exchange has already been confirmed flat by callers.
     with positions_lock:
+        popped = positions.pop(sym, None)
+        if popped is None:
+            return False
         if not positions:
             active_trade = None
 
-    with stat_lock:
-        last = stats["pnl_history"][-1] if stats["pnl_history"] else None
+    stats_error = None
+    try:
+        update_stats(
+            classified, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price,
+            sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"),
+            close_reason=result,
+            confidence=sig.get("confidence"), entry_label=sig.get("entry_label"),
+            rr=sig.get("rr"), rsi=sig.get("rsi"), struct_h1=sig.get("struct_h1"),
+            d1_bias=sig.get("d1_bias"),
+            mfe_pct=pos.get("mfe_pct"), mae_pct=pos.get("mae_pct"),
+            mfe_r=pos.get("mfe_r"), mae_r=pos.get("mae_r"),
+            time_in_trade_sec=pos.get("time_in_trade_sec"),
+            time_to_1r_sec=pos.get("time_to_1r_sec"), time_to_2r_sec=pos.get("time_to_2r_sec")
+        )
+    except Exception as e:
+        stats_error = e
+        log.exception(f"[close_position] stats gagal {sym}: {e}")
 
-    result = classified
-    emoji = {"tp":"🎯","sl":"🛑","trail":"🔒"}.get(result,"❓")
-    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(result, result.upper())
+    try:
+        _ban_coin(sym, f"trade closed ({classified}; reason={result})", duration=BAN_DURATION_TRADE_CLOSED)
+    except Exception as e:
+        log.warning(f"[close_position] gagal ban {sym}: {e}")
+
+    try:
+        with stat_lock:
+            last = stats["pnl_history"][-1] if stats["pnl_history"] else None
+    except Exception:
+        last = None
+
+    emoji = {"tp":"🎯","sl":"🛑","trail":"🔒"}.get(classified, "❓")
+    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(classified, classified.upper())
     detail = ""
     if last and last.get("symbol") == sym:
-        sgn = "+" if last["pct"] >= 0 else ""
-        detail = (f"Entry: <code>{last['entry']:.6g}</code> → Exit: <code>{last['exit_price']:.6g}</code>\n"
-                   f"Hasil: <b>{sgn}{last['pct']:.2f}%</b> (${sgn}{last['pnl_usd']:.4f})\n\n")
-    tg_send(cid, f"{emoji} <b>{label}</b> — {sym}\n\n{detail}" + fmt_stats())
+        sgn = "+" if last.get("pct", 0) >= 0 else ""
+        detail = (
+            f"Entry: <code>{last.get('entry', entry):.6g}</code> → Exit: <code>{last.get('exit_price', close_price):.6g}</code>\n"
+            f"Hasil: <b>{sgn}{last.get('pct', 0):.2f}%</b> (${sgn}{last.get('pnl_usd', 0):.4f})\n\n"
+        )
+    if stats_error:
+        detail += "⚠️ Statistik lokal mengalami error dan akan dicoba dipulihkan oleh audit/recovery.\n\n"
+    try:
+        tg_send(cid, f"{emoji} <b>{label}</b> — {sym}\n\n{detail}" + fmt_stats())
+    except Exception as e:
+        log.error(f"[close_position] notifikasi gagal {sym}: {e}")
+    return True
+
+
+def _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=None):
+    """Finalize an exchange-side close detected by positionAmt==0.
+
+    Binance positionRisk returning a symbol with positionAmt=0 is treated as a real close,
+    not as a still-open position. Cleanup is best-effort but tracked separately so a
+    transient API failure cannot erase the closed-trade record.
+    """
+    sig = pos.get("signal") or {}
+    price = exit_price
+    if price is None:
+        try:
+            price = get_price(sym)
+        except Exception:
+            price = None
+    if price is None:
+        price = pos.get("current_price") or pos.get("entry")
+
+    # Keep final MFE/MAE snapshot without another Binance request.
+    try:
+        if price is not None:
+            _update_trade_path_metrics(pos, price)
+    except Exception:
+        pass
+
+    reason = reason_hint if reason_hint in ("tp", "sl") else "unknown"
+    if reason == "unknown":
+        # A trailing SL that was moved to/above breakeven and then triggered is a Trail
+        # only if the realized outcome is positive; the common classifier below handles it.
+        reason = "trail"
+    elif reason == "sl":
+        # Preserve explicit SL when Binance's algo status confirms a stop. The final
+        # classifier will still convert it only when the caller marks it as trail/timeout.
+        pass
+
+    # Clean orphan protection. If Binance is temporarily unavailable, retain a pending
+    # cleanup marker but still finalize the already-flat trade locally.
+    try:
+        _cancel_all_algo_orders_verified(sym)
+    except Exception as e:
+        _queue_pending_cleanup(sym, "post-external-close cleanup", e)
+        log.warning(f"[external-close] {sym} cleanup tertunda: {e}")
+
+    # If the exchange explicitly told us TP/SL, preserve that reason. Otherwise classify
+    # from the realized exit outcome and trailing context.
+    if reason_hint == "tp":
+        final_result = "tp"
+    elif reason_hint == "sl":
+        # An SL trigger after a trailing move is a Trail only if the realized PnL is positive.
+        trail_candidate = bool(pos.get("current_sl") is not None and pos.get("entry") is not None)
+        final_result = "trail" if trail_candidate and _classify_close_result("trail", pos.get("entry"), price, sig.get("decision")) == "trail" else "sl"
+    else:
+        final_result = "trail" if _classify_close_result("trail", pos.get("entry"), price, sig.get("decision")) == "trail" else "sl"
+
+    closed = close_position(sym, final_result, close_price=price)
+    return closed
 
 
 def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
@@ -3279,147 +3375,163 @@ def _infer_close_reason(tp_algo_id, sl_algo_id):
 def monitor_position_real(sym,pos):
     next_strategy=0
     while True:
-        with positions_lock:
-            if sym not in positions:return
-            pos=positions[sym]
-
-        if pos.get("timeout_flag"):
-            _verified_timeout_symbol(sym, pos.get("chat_id") or active_chat_id, reason="manual timeout")
-            return
-
-        if _binance_is_scan_paused():
-            price = get_price(sym)
-            if price is not None:
-                _update_trade_path_metrics(pos, price)
-            time.sleep(MONITOR_SLEEP)
-            continue
-
         try:
-            real=get_real_position(sym)
-        except BinanceCooldownError:
-            time.sleep(REAL_TRADE_POLL_SLEEP); continue
-        except Exception as e:
-            log.warning(f"[monitor_real] {sym}: {e}"); time.sleep(REAL_TRADE_POLL_SLEEP); continue
+                with positions_lock:
+                    if sym not in positions:return
+                    pos=positions[sym]
 
-        # Exchange is authoritative: if the position is already gone, determine
-        # TP/SL from algo status and only then commit local closure.
-        if real is None:
-            reason=_infer_close_reason(pos.get("tp_order_id"),pos.get("sl_order_id"))
-            sig=pos["signal"]; price=get_price(sym) or pos.get("current_price") or pos["entry"]
-            try:
-                _cancel_all_algo_orders_verified(sym)
-            except Exception as e:
-                _queue_pending_cleanup(sym, "post-external-close cleanup", e)
-            if reason in ("tp", "sl"):
-                close_position(sym, reason, close_price=price)
-            else:
-                classified = "trail" if _classify_close_result("trail", pos.get("entry"), price, sig.get("decision")) == "trail" else "sl"
-                close_position(sym, classified, close_price=price)
-            return
+                if pos.get("timeout_flag"):
+                    _verified_timeout_symbol(sym, pos.get("chat_id") or active_chat_id, reason="manual timeout")
+                    return
 
-        live=abs(float(real.get("positionAmt",0) or 0))
-        if live <= 0:
-            continue
-        with positions_lock:
-            if sym in positions:
-                positions[sym]["quantity"]=live
+                if _binance_is_scan_paused():
+                    price = get_price(sym)
+                    if price is not None:
+                        _update_trade_path_metrics(pos, price)
+                    time.sleep(MONITOR_SLEEP)
+                    continue
 
-        px=get_price(sym)
-        if px is not None:
-            _update_trade_path_metrics(pos, px)
+                try:
+                    real=get_real_position(sym)
+                except BinanceCooldownError:
+                    time.sleep(REAL_TRADE_POLL_SLEEP); continue
+                except Exception as e:
+                    log.warning(f"[monitor_real] {sym}: {e}"); time.sleep(REAL_TRADE_POLL_SLEEP); continue
 
-        if time.time()>=next_strategy:
-            upd=_strategy_position_update(sym,pos); next_strategy=time.time()+STRATEGY_MANAGE_INTERVAL
-            if isinstance(upd,dict):
-                # Strategy-requested market exit: use the same verified close path.
-                if upd.get("close"):
-                    price=upd.get("close_price") or px or pos["entry"]
-                    buy=pos["signal"]["decision"]=="BUY"
-                    closed, exit_price = _verified_market_close(sym, buy, "strategy close", chat_id=pos.get("chat_id") or active_chat_id, max_retries=1)
-                    if not closed:
-                        with positions_lock:
-                            if sym in positions:
-                                positions[sym]["status"]="EMERGENCY"
-                        return
+                # Exchange is authoritative. get_real_position() returns None when the symbol's
+                # positionAmt is 0, which is a legitimate FILLED/closed state, not a reason to keep
+                # looping. Finalize it immediately so /stats, /analyze, ban, and Telegram all fire.
+                if real is None:
+                    reason = _infer_close_reason(pos.get("tp_order_id"), pos.get("sl_order_id"))
+                    price = None
                     try:
-                        _cleanup_algo_orders_verified(sym)
-                    except Exception as ce:
-                        _queue_pending_cleanup(sym, "strategy close cleanup", ce)
-                        with positions_lock:
-                            if sym in positions:
-                                positions[sym]["status"]="EMERGENCY"
-                        return
-                    result = "trail" if _classify_close_result("trail", pos.get("entry"), exit_price or price, pos["signal"].get("decision")) == "trail" else "sl"
-                    close_position(sym,result,close_price=exit_price or price); return
+                        price = get_price(sym)
+                    except Exception:
+                        price = None
+                    _finalize_external_close(sym, pos, reason_hint=reason, exit_price=price)
+                    return
 
-                oldsl=pos.get("current_sl",pos["signal"].get("sl")); oldtp=pos["signal"].get("tp")
-                # Calculate candidates WITHOUT mutating local state.
-                candidate_tp = float(upd.get("tp")) if upd.get("tp") is not None else float(oldtp) if oldtp is not None else None
-                candidate_sl = float(upd.get("sl")) if upd.get("sl") is not None else float(oldsl) if oldsl is not None else None
-                if candidate_sl is not None:
-                    buy=pos["signal"]["decision"]=="BUY"
-                    if not ((candidate_sl > oldsl) if buy else (candidate_sl < oldsl)) and candidate_sl != oldsl:
-                        candidate_sl = oldsl
-
-                if candidate_sl != oldsl or candidate_tp != oldtp:
-                    current_price = px or get_price(sym) or pos["entry"]
+                live=abs(float(real.get("positionAmt",0) or 0))
+                if live <= 0:
+                    # Defensive fallback for any future get_real_position() implementation that
+                    # returns the raw zero-quantity row instead of None. Do not leave zombie local state.
+                    reason = _infer_close_reason(pos.get("tp_order_id"), pos.get("sl_order_id"))
+                    price = None
                     try:
-                        if _binance_is_scan_paused():
-                            _queue_pending_trail(sym, candidate_sl, candidate_tp, live, reason="strategy", side=pos["signal"]["decision"])
-                            if candidate_sl != oldsl:
-                                _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED")
-                        else:
-                            # Refresh quantity from exchange immediately before protection mutation.
-                            latest = get_real_position(sym)
-                            live_qty = abs(float(latest.get("positionAmt",0) or 0)) if latest else 0.0
-                            if live_qty <= 0:
-                                continue
-                            # Cancel existing protection, then create+verify new pair. If creation
-                            # fails, restore the old pair before declaring an emergency.
-                            _cancel_all_algo_orders_verified(sym)
+                        price = get_price(sym)
+                    except Exception:
+                        price = None
+                    _finalize_external_close(sym, pos, reason_hint=reason, exit_price=price)
+                    return
+                with positions_lock:
+                    if sym in positions:
+                        positions[sym]["quantity"]=live
+
+                px=get_price(sym)
+                if px is not None:
+                    _update_trade_path_metrics(pos, px)
+
+                if time.time()>=next_strategy:
+                    upd=_strategy_position_update(sym,pos); next_strategy=time.time()+STRATEGY_MANAGE_INTERVAL
+                    if isinstance(upd,dict):
+                        # Strategy-requested market exit: use the same verified close path.
+                        if upd.get("close"):
+                            price=upd.get("close_price") or px or pos["entry"]
+                            buy=pos["signal"]["decision"]=="BUY"
+                            closed, exit_price = _verified_market_close(sym, buy, "strategy close", chat_id=pos.get("chat_id") or active_chat_id, max_retries=1)
+                            if not closed:
+                                with positions_lock:
+                                    if sym in positions:
+                                        positions[sym]["status"]="EMERGENCY"
+                                return
                             try:
-                                nt, ns = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", candidate_tp, candidate_sl, live_qty)
-                            except Exception as protect_err:
-                                restore_failed = False
-                                try:
-                                    rt, rs = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", oldtp, oldsl, live_qty)
-                                    _verify_protection_pair(sym, pos["signal"]["decision"]=="BUY", oldtp, oldsl, live_qty)
-                                except Exception as restore_err:
-                                    restore_failed = True
-                                    _queue_pending_cleanup(sym, "trail protection restore failed", restore_err)
-                                    log.critical(f"[trail] {sym}: restore old protection gagal: {restore_err}")
-                                if restore_failed:
+                                _cleanup_algo_orders_verified(sym)
+                            except Exception as ce:
+                                _queue_pending_cleanup(sym, "strategy close cleanup", ce)
+                                with positions_lock:
+                                    if sym in positions:
+                                        positions[sym]["status"]="EMERGENCY"
+                                return
+                            result = "trail" if _classify_close_result("trail", pos.get("entry"), exit_price or price, pos["signal"].get("decision")) == "trail" else "sl"
+                            close_position(sym,result,close_price=exit_price or price); return
+
+                        oldsl=pos.get("current_sl",pos["signal"].get("sl")); oldtp=pos["signal"].get("tp")
+                        # Calculate candidates WITHOUT mutating local state.
+                        candidate_tp = float(upd.get("tp")) if upd.get("tp") is not None else float(oldtp) if oldtp is not None else None
+                        candidate_sl = float(upd.get("sl")) if upd.get("sl") is not None else float(oldsl) if oldsl is not None else None
+                        if candidate_sl is not None:
+                            buy=pos["signal"]["decision"]=="BUY"
+                            if not ((candidate_sl > oldsl) if buy else (candidate_sl < oldsl)) and candidate_sl != oldsl:
+                                candidate_sl = oldsl
+
+                        if candidate_sl != oldsl or candidate_tp != oldtp:
+                            current_price = px or get_price(sym) or pos["entry"]
+                            try:
+                                if _binance_is_scan_paused():
+                                    _queue_pending_trail(sym, candidate_sl, candidate_tp, live, reason="strategy", side=pos["signal"]["decision"])
+                                    if candidate_sl != oldsl:
+                                        _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED")
+                                else:
+                                    # Refresh quantity from exchange immediately before protection mutation.
+                                    latest = get_real_position(sym)
+                                    live_qty = abs(float(latest.get("positionAmt",0) or 0)) if latest else 0.0
+                                    if live_qty <= 0:
+                                        continue
+                                    # Cancel existing protection, then create+verify new pair. If creation
+                                    # fails, restore the old pair before declaring an emergency.
+                                    _cancel_all_algo_orders_verified(sym)
+                                    try:
+                                        nt, ns = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", candidate_tp, candidate_sl, live_qty)
+                                    except Exception as protect_err:
+                                        restore_failed = False
+                                        try:
+                                            rt, rs = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", oldtp, oldsl, live_qty)
+                                            _verify_protection_pair(sym, pos["signal"]["decision"]=="BUY", oldtp, oldsl, live_qty)
+                                        except Exception as restore_err:
+                                            restore_failed = True
+                                            _queue_pending_cleanup(sym, "trail protection restore failed", restore_err)
+                                            log.critical(f"[trail] {sym}: restore old protection gagal: {restore_err}")
+                                        if restore_failed:
+                                            with positions_lock:
+                                                if sym in positions:
+                                                    positions[sym]["status"]="EMERGENCY"
+                                                    positions[sym]["emergency_error"]=str(protect_err)[:300]
+                                            raise RuntimeError(f"trail update gagal dan protection lama tidak bisa dipulihkan: {protect_err}")
+                                        raise
                                     with positions_lock:
                                         if sym in positions:
-                                            positions[sym]["status"]="EMERGENCY"
-                                            positions[sym]["emergency_error"]=str(protect_err)[:300]
-                                    raise RuntimeError(f"trail update gagal dan protection lama tidak bisa dipulihkan: {protect_err}")
-                                raise
-                            with positions_lock:
-                                if sym in positions:
-                                    positions[sym]["current_sl"] = candidate_sl
-                                    positions[sym]["signal"]["sl"] = candidate_sl
-                                    if candidate_tp is not None:
-                                        positions[sym]["signal"]["tp"] = candidate_tp
-                                    positions[sym]["tp_order_id"] = nt["algoId"]
-                                    positions[sym]["sl_order_id"] = ns["algoId"]
-                                    positions[sym]["quantity"] = live_qty
-                                    positions[sym]["current_price"] = current_price
-                            _clear_pending_trail(sym)
-                            if candidate_sl != oldsl:
-                                _notify_trail_update(active_chat_id, sym, positions.get(sym, pos), upd, oldsl, candidate_sl, status="APPLIED")
-                    except BinanceCooldownError as e:
-                        _queue_pending_trail(sym, candidate_sl, candidate_tp, live, reason="binance_cooldown", side=pos["signal"]["decision"])
-                        if candidate_sl != oldsl:
-                            _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED", error=e)
-                    except Exception as e:
-                        log.error(f"[strategy/manage real] {sym}: {e}")
-                        if candidate_sl != oldsl:
-                            _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="FAILED", error=e)
-                        # Do not commit candidate local state on failure.
+                                            positions[sym]["current_sl"] = candidate_sl
+                                            positions[sym]["signal"]["sl"] = candidate_sl
+                                            if candidate_tp is not None:
+                                                positions[sym]["signal"]["tp"] = candidate_tp
+                                            positions[sym]["tp_order_id"] = nt["algoId"]
+                                            positions[sym]["sl_order_id"] = ns["algoId"]
+                                            positions[sym]["quantity"] = live_qty
+                                            positions[sym]["current_price"] = current_price
+                                    _clear_pending_trail(sym)
+                                    if candidate_sl != oldsl:
+                                        _notify_trail_update(active_chat_id, sym, positions.get(sym, pos), upd, oldsl, candidate_sl, status="APPLIED")
+                            except BinanceCooldownError as e:
+                                _queue_pending_trail(sym, candidate_sl, candidate_tp, live, reason="binance_cooldown", side=pos["signal"]["decision"])
+                                if candidate_sl != oldsl:
+                                    _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED", error=e)
+                            except Exception as e:
+                                log.error(f"[strategy/manage real] {sym}: {e}")
+                                if candidate_sl != oldsl:
+                                    _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="FAILED", error=e)
+                                # Do not commit candidate local state on failure.
 
-        time.sleep(REAL_TRADE_POLL_SLEEP)
+                time.sleep(REAL_TRADE_POLL_SLEEP)
 
+        except Exception as e:
+            # Last-resort monitor guard: a single unexpected Python error must not silently
+            # kill the real-position watchdog. Keep the position visible and retry.
+            log.exception(f"[monitor_real] UNHANDLED {sym}: {e}")
+            with positions_lock:
+                if sym in positions:
+                    positions[sym]["status"] = positions[sym].get("status") or "active"
+                    positions[sym]["monitor_error"] = str(e)[:300]
+            time.sleep(REAL_TRADE_POLL_SLEEP)
 
 def _queue_pending_protection(sym, buy, sl, tp, qty):
     with _pending_protections_lock:
