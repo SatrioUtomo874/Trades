@@ -227,7 +227,7 @@ ban_lock = threading.Lock()
 banned_coins: dict = {}      # {symbol: (scan_counter saat diban, durasi ban itu)}
 scan_counter = 0             # bertambah 1 setiap get_top_coins() dipanggil
 BAN_DURATION_SCANS = 15
-BAN_DURATION_TRADE_CLOSED = 100   # ban khusus setelah trade BENAR-BENAR closed (TP/SL/Trail/timeout)
+BAN_DURATION_TRADE_CLOSED = 50   # ban khusus setelah trade BENAR-BENAR closed (TP/SL/Trail/timeout)
 
 # ── REAL TRADE (Binance Futures) — aktif otomatis kalau API key/secret diset ──
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY")
@@ -263,6 +263,46 @@ MARGIN_USD        = 5.0    # runtime, via /margin
 AUTOSTOP_PCT      = 3.0    # runtime, via /autostop
 peak_real_balance = None   # diisi saat fetch balance real pertama kali sukses
 autostop_lock     = threading.Lock()
+
+def _position_execution_mode(pos):
+    """Return the immutable execution class of a local position."""
+    if not isinstance(pos, dict):
+        return "SIMULATION"
+    mode = str(pos.get("execution_mode") or "").strip().upper()
+    if mode in {"REAL", "SIMULATION"}:
+        return mode
+    real_markers = ("order_id", "tp_order_id", "sl_order_id", "entry_client_order_id", "margin_used")
+    if any(pos.get(k) is not None for k in real_markers):
+        return "REAL"
+    if str(pos.get("status") or "").upper() == "EMERGENCY":
+        return "REAL"
+    return "SIMULATION"
+
+
+def _position_is_real(pos):
+    return _position_execution_mode(pos) == "REAL"
+
+
+def _has_real_recovery_work():
+    """True only when private Binance reconciliation/protection work is required."""
+    with positions_lock:
+        if any(_position_is_real(pos) for pos in positions.values()):
+            return True
+    with _pending_protections_lock:
+        if _pending_protections:
+            return True
+    with _pending_trails_lock:
+        if _pending_trails:
+            return True
+    with _pending_cleanup_lock:
+        if _pending_cleanup:
+            return True
+    return False
+
+
+_binance_recovery_notice_generation = -1
+_binance_recovery_notice_lock = threading.Lock()
+
 
 def _ban_coin(sym, reason="", duration=None):
     """
@@ -2467,7 +2507,9 @@ def _update_trade_path_metrics(pos, price):
 def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
                  sym=None, decision=None, entry_time=None, close_reason=None,
                  confidence=None, entry_label=None, rr=None, rsi=None,
-                 struct_h1=None, d1_bias=None):
+                 struct_h1=None, d1_bias=None,
+                 mfe_pct=None, mae_pct=None, mfe_r=None, mae_r=None,
+                 time_in_trade_sec=None, time_to_1r_sec=None, time_to_2r_sec=None):
     """
     Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
     lama untuk detail model close_price). Tambahan: catat sym/decision/
@@ -2552,6 +2594,13 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
             "entry": entry, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
             "confidence": confidence, "entry_label": entry_label, "rr": rr,
             "rsi": rsi, "struct_h1": struct_h1, "d1_bias": d1_bias,
+            "mfe_pct": mfe_pct,
+            "mae_pct": mae_pct,
+            "mfe_r": mfe_r,
+            "mae_r": mae_r,
+            "time_in_trade_sec": time_in_trade_sec,
+            "time_to_1r_sec": time_to_1r_sec,
+            "time_to_2r_sec": time_to_2r_sec,
         }
         # Full ledger: every closed trade in this research run.
         with trade_history_lock:
@@ -3190,7 +3239,7 @@ def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
         if sym not in positions:return
         pos=positions[sym]
         pos.update({"entry":actual_entry,"entry_time":time.time(),"status":"active",
-                    "timeout_flag":False,"current_sl":sl})
+                    "timeout_flag":False,"current_sl":sl,"execution_mode":"SIMULATION"})
     tg_send(chat_id,f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
                     f"Entry: <code>{actual_entry:.8g}</code>\n"
                     f"TP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
@@ -3215,7 +3264,7 @@ def _open_pending_real(sym,signal,chat_id):
     with positions_lock:
         if sym in positions or len(positions)>=MAX_POSITIONS:return
         positions[sym]={"signal":signal,"entry":entry,"chat_id":chat_id,"entry_time":None,
-                        "timeout_flag":False,"status":"pending"}
+                        "timeout_flag":False,"status":"pending","execution_mode":"REAL"}
     try:
         _real_trade_preflight(force=False)
         avail,_=get_real_balance()
@@ -3351,7 +3400,8 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
     with positions_lock:
         if sym not in positions:return
         positions[sym].update({"entry":actual_entry,"entry_time":time.time(),"status":"active",
-                               "current_sl":sl,"initial_sl":sl,"quantity":qty,"tp_order_id":t["algoId"],"sl_order_id":s["algoId"]})
+                               "current_sl":sl,"initial_sl":sl,"quantity":qty,"tp_order_id":t["algoId"],"sl_order_id":s["algoId"],
+                               "execution_mode":"REAL"})
     tg_send(chat_id,f"⚡ <b>ENTRY REAL</b> — {sym}\nEntry: <code>{actual_entry:.8g}</code>\nTP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
     threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start()
 
@@ -3547,160 +3597,122 @@ def _clear_pending_protection(sym):
 
 
 def _resume_binance_and_flush_pending(chat_id=None):
-    'Strict Binance recovery. Scanner tetap PAUSED sampai seluruh recovery gate sukses.'
+    """Recover Binance without treating simulation positions as real exposure."""
     global _binance_recovering, _binance_scan_paused, _binance_pause_reason
+    global _binance_recovery_notice_generation
     if _binance_cooldown_remaining() > 0:
         return False
     with _binance_pause_lock:
-        _binance_recovering = True
-        _binance_scan_paused = True
-        _binance_pause_reason = 'recovery in progress'
-    log.info('[BINANCE RESUME] Cooldown + grace selesai. Strict sync & protection recovery dimulai...')
-    failures = []
-    try:
-        # Credential gate: never loop through every local position with the same
-        # missing-key error. Refresh once, fail once, keep the whole recovery
-        # gate closed, and wait for the next recovery attempt.
-        # IMPORTANT: this gate is independent of REAL_TRADE_ENABLED because
-        # existing real positions must remain manageable after /mode off.
-        global BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_KEYS_PRESENT
-        key, secret = _read_binance_credentials()
-        if not key or not secret:
-            BINANCE_KEYS_PRESENT = False
-            with _binance_pause_lock:
-                _binance_recovering = False
-                _binance_scan_paused = True
-                _binance_pause_reason = 'Binance credentials unavailable'
-            msg = 'BINANCE_API_KEY/BINANCE_API_SECRET tidak tersedia di runtime Render'
-            log.error(f'[BINANCE RECOVERY] credential gate gagal: {msg}')
-            if chat_id:
-                tg_send(chat_id, '⚠️ <b>Binance recovery belum selesai.</b>\nScanner tetap dihentikan karena credential Binance belum tersedia di runtime.\nDetail: <code>' + msg + '</code>')
-            return False
-        BINANCE_API_KEY, BINANCE_API_SECRET = key, secret
-        BINANCE_KEYS_PRESENT = True
+        _binance_recovering=True; _binance_scan_paused=True; _binance_pause_reason='recovery in progress'
 
-        # 1) STRICT POSITION SYNC
+    # SIMULATION-only: no private Binance sync, no credential dependency, no extra requests.
+    # Existing REAL positions still force the real recovery path even if /mode is OFF.
+    if not _has_real_recovery_work():
+        with _binance_pause_lock:
+            _binance_recovering=False; _binance_scan_paused=False; _binance_pause_reason=''
+        log.info('[BINANCE RECOVERY] Simulation-only state; private Binance sync skipped. Scanner resumed.')
+        return True
+
+    failures=[]
+    try:
+        global BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_KEYS_PRESENT
+        key,secret=_read_binance_credentials()
+        if not key or not secret:
+            BINANCE_KEYS_PRESENT=False
+            with _binance_pause_lock:
+                _binance_recovering=False; _binance_scan_paused=True; _binance_pause_reason='Binance credentials unavailable'
+            log.error('[BINANCE RECOVERY] credential gate gagal: BINANCE_API_KEY/BINANCE_API_SECRET tidak tersedia di runtime Render')
+            return False
+        BINANCE_API_KEY, BINANCE_API_SECRET=key,secret; BINANCE_KEYS_PRESENT=True
+
+        # REAL position sync. None means a successful request found zero exposure.
         with positions_lock:
-            items = list(positions.items())
-        for sym, pos in items:
-            if pos.get('status') != 'active':
+            items=[(sym,dict(pos)) for sym,pos in positions.items() if _position_is_real(pos)]
+        for sym,pos in items:
+            if pos.get('status') not in ('active','EMERGENCY'):
                 continue
             try:
-                real = get_real_position(sym)
-                if real is None:
-                    failures.append(f'{sym}: position sync returned no position')
-                    log.error(f'[resume] SYNC GAGAL {sym}: posisi tidak terkonfirmasi')
+                real=get_real_position(sym)
+                if real is None or abs(float(real.get('positionAmt',0) or 0))<=0:
+                    price=pos.get('current_price') or pos.get('entry')
+                    try:
+                        _finalize_external_close(sym,pos,reason_hint='unknown',exit_price=price)
+                        log.info(f'[resume] {sym}: Binance flat -> local REAL position reconciled as closed.')
+                    except Exception as e:
+                        failures.append(f'{sym}: flat-position finalize {e}')
+                        log.error(f'[resume] FINALIZE GAGAL {sym}: {e}')
                     continue
-                live_qty = abs(float(real.get('positionAmt', 0)))
-                if live_qty <= 0:
-                    failures.append(f'{sym}: position quantity=0')
-                    log.error(f'[resume] SYNC GAGAL {sym}: quantity=0')
-                    continue
+                live_qty=abs(float(real.get('positionAmt',0) or 0))
                 with positions_lock:
                     if sym in positions:
-                        positions[sym]['quantity'] = live_qty
-                        positions[sym]['exchange_synced_at'] = time.time()
+                        positions[sym].update({'quantity':live_qty,'exchange_synced_at':time.time(),'execution_mode':'REAL'})
             except Exception as e:
                 failures.append(f'{sym}: sync {e}')
                 log.error(f'[resume] SYNC GAGAL {sym}: {e}')
 
-        # 2) STRICT PENDING PROTECTION
+        # Pending protection/trail/cleanup are real-only queues.
         with _pending_protections_lock:
-            protections = [(sym, dict(v)) for sym, v in _pending_protections.items()]
-        for sym, pr in protections:
+            protections=[(sym,dict(v)) for sym,v in _pending_protections.items()]
+        for sym,pr in protections:
             try:
+                with positions_lock: pos=positions.get(sym)
+                if not pos or not _position_is_real(pos) or pos.get('status')!='active':
+                    _clear_pending_protection(sym); continue
+                qty=pos.get('quantity') or pr.get('quantity'); buy=pr.get('side')=='BUY'
+                if not qty or pr.get('tp') is None or pr.get('sl') is None: raise RuntimeError('pending protection tidak lengkap')
+                t,s=place_tp_sl(sym,buy,pr['tp'],pr['sl'],qty)
                 with positions_lock:
-                    pos = positions.get(sym)
-                if not pos or pos.get('status') != 'active':
-                    _clear_pending_protection(sym)
-                    continue
-                qty = pos.get('quantity') or pr.get('quantity')
-                buy = pr.get('side') == 'BUY'
-                if not qty or pr.get('tp') is None or pr.get('sl') is None:
-                    raise RuntimeError('pending protection tidak lengkap')
-                t, s = place_tp_sl(sym, buy, pr['tp'], pr['sl'], qty)
-                with positions_lock:
-                    if sym in positions:
-                        positions[sym].update({'tp_order_id': t['algoId'], 'sl_order_id': s['algoId']})
+                    if sym in positions: positions[sym].update({'tp_order_id':t['algoId'],'sl_order_id':s['algoId'],'execution_mode':'REAL'})
                 _clear_pending_protection(sym)
-                log.info(f'[protection-resume] {sym} TP/SL berhasil dipasang kembali.')
             except Exception as e:
-                failures.append(f'{sym}: protection {e}')
-                log.error(f'[protection-resume] {sym} GAGAL: {e}')
+                failures.append(f'{sym}: protection {e}'); log.error(f'[protection-resume] {sym} GAGAL: {e}')
 
-        # 3) STRICT PENDING TRAIL
         with _pending_trails_lock:
-            pending = [(sym, dict(v)) for sym, v in _pending_trails.items()]
-        for sym, tr in pending:
+            pending=[(sym,dict(v)) for sym,v in _pending_trails.items()]
+        for sym,tr in pending:
             try:
+                with positions_lock: pos=positions.get(sym)
+                if not pos or not _position_is_real(pos) or pos.get('status')!='active':
+                    _clear_pending_trail(sym); continue
+                buy=pos['signal']['decision']=='BUY'; qty=pos.get('quantity') or tr.get('quantity')
+                tp=tr.get('tp') or pos['signal'].get('tp'); sl=tr.get('sl') or pos.get('current_sl')
+                if not qty or sl is None or tp is None: raise RuntimeError('pending trail tidak lengkap')
+                cancel_algo_order(pos.get('tp_order_id')); cancel_algo_order(pos.get('sl_order_id'))
+                t,s=place_tp_sl(sym,buy,tp,sl,qty)
                 with positions_lock:
-                    pos = positions.get(sym)
-                if not pos or pos.get('status') != 'active':
-                    _clear_pending_trail(sym)
-                    continue
-                buy = pos['signal']['decision'] == 'BUY'
-                qty = pos.get('quantity') or tr.get('quantity')
-                tp = tr.get('tp') or pos['signal'].get('tp')
-                sl = tr.get('sl') or pos.get('current_sl')
-                if not qty or sl is None or tp is None:
-                    raise RuntimeError('pending trail tidak lengkap')
-                cancel_algo_order(pos.get('tp_order_id'))
-                cancel_algo_order(pos.get('sl_order_id'))
-                t, s = place_tp_sl(sym, buy, tp, sl, qty)
-                with positions_lock:
-                    if sym in positions:
-                        positions[sym].update({'tp_order_id': t['algoId'], 'sl_order_id': s['algoId'], 'exchange_synced_at': time.time()})
+                    if sym in positions: positions[sym].update({'tp_order_id':t['algoId'],'sl_order_id':s['algoId'],'exchange_synced_at':time.time(),'execution_mode':'REAL'})
                 _clear_pending_trail(sym)
-                old_sl = float(pos.get("current_sl", pos["signal"].get("sl")))
-                new_sl = float(sl)
-                with positions_lock:
-                    if sym in positions:
-                        positions[sym]["current_price"] = get_price(sym) or positions[sym].get("current_price") or positions[sym]["entry"]
-                if new_sl != old_sl:
-                    _notify_trail_update(active_chat_id, sym, pos, {"state":"RECOVERY", "trail_source":"pending_trail", "reason":["pending trail flushed after Binance recovery"]}, old_sl, new_sl, status="APPLIED")
-                log.info(f'[trail-resume] {sym} pending trail berhasil dipasang kembali.')
             except Exception as e:
-                failures.append(f'{sym}: trail {e}')
-                log.error(f'[trail-resume] {sym} GAGAL: {e}')
+                failures.append(f'{sym}: trail {e}'); log.error(f'[trail-resume] {sym} GAGAL: {e}')
 
-        # 4) Pending orphan cleanup: do not resume scanner until cleanup queue is clear.
         with _pending_cleanup_lock:
-            cleanup_items = list(_pending_cleanup.items())
-        for sym, item in cleanup_items:
+            cleanup_items=list(_pending_cleanup.items())
+        for sym,item in cleanup_items:
             try:
                 _cleanup_algo_orders_verified(sym)
-                log.info(f'[cleanup-resume] {sym} orphan algo orders sudah bersih.')
             except Exception as e:
-                failures.append(f'{sym}: cleanup {e}')
-                log.error(f'[cleanup-resume] {sym} GAGAL: {e}')
+                failures.append(f'{sym}: cleanup {e}'); log.error(f'[cleanup-resume] {sym} GAGAL: {e}')
 
-        # 5) HARD GATE: partial recovery tidak boleh menyalakan scanner.
         if failures:
             with _binance_pause_lock:
-                _binance_recovering = False
-                _binance_scan_paused = True
-                _binance_pause_reason = 'recovery incomplete'
-            msg = ' | '.join(failures[:6])
+                _binance_recovering=False; _binance_scan_paused=True; _binance_pause_reason='recovery incomplete'; generation=_binance_pause_generation
+            msg=' | '.join(failures[:6])
             log.error(f'[BINANCE RECOVERY] BELUM SELESAI — scanner tetap PAUSED. {msg}')
-            if chat_id:
-                tg_send(chat_id, '⚠️ <b>Binance recovery belum selesai.</b>\nScanner tetap dihentikan karena sync/protection masih gagal.\nDetail: <code>' + msg[:500] + '</code>')
+            with _binance_recovery_notice_lock:
+                should_notify=generation!=_binance_recovery_notice_generation
+                if should_notify: _binance_recovery_notice_generation=generation
+            if chat_id and should_notify:
+                tg_send(chat_id,'⚠️ <b>Binance recovery belum selesai.</b>\nScanner tetap dihentikan karena sync/protection REAL masih gagal.\nDetail: <code>'+msg[:500]+'</code>')
             return False
 
-        # Semua gate sukses → scanner baru boleh resume.
         with _binance_pause_lock:
-            _binance_recovering = False
-            _binance_scan_paused = False
-            _binance_pause_reason = ''
-        if chat_id:
-            tg_send(chat_id, '✅ <b>Binance recovery selesai.</b>\nSemua posisi berhasil disinkronkan dan pending protection/trailing + cleanup berhasil diproses.\nScanning boleh resume.')
+            _binance_recovering=False; _binance_scan_paused=False; _binance_pause_reason=''
+        if chat_id: tg_send(chat_id,'✅ <b>Binance recovery selesai.</b>\nREAL position/protection state sudah konsisten. Scanning boleh resume.')
         return True
-
     except Exception as e:
         with _binance_pause_lock:
-            _binance_recovering = False
-            _binance_scan_paused = True
-            _binance_pause_reason = 'recovery exception'
-        log.error(f'[BINANCE RECOVERY] exception — scanner tetap PAUSED: {e}', exc_info=True)
+            _binance_recovering=False; _binance_scan_paused=True; _binance_pause_reason='recovery exception'
+        log.error(f'[BINANCE RECOVERY] exception — scanner tetap PAUSED: {e}',exc_info=True)
         return False
 
 def _binance_recovery_loop(chat_id_getter=lambda: active_chat_id):
@@ -3783,7 +3795,8 @@ def simulation_loop(chat_id):
                     if sym in positions or len(positions) >= MAX_POSITIONS:
                         continue
                     positions[sym] = {"signal": signal, "entry": entry, "chat_id": chat_id,
-                                      "entry_time": None, "timeout_flag": False, "status": "pending"}
+                                      "entry_time": None, "timeout_flag": False, "status": "pending",
+                                      "execution_mode": "SIMULATION"}
                 if mode == "market":
                     _open_position(sym, signal, get_price(sym) or price, chat_id, "strategy")
                 else:
