@@ -1,5 +1,5 @@
 """
-strategy_logic.py — OTAK v6 (Adaptive RR + Intelligent Target Selection + Context-Aware Trailing)
+strategy_logic.py — OTAK v7 (Adaptive RR + Intelligent Target Selection + Context-Aware Trailing)
 ========================================================================================
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
@@ -1058,7 +1058,98 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
 # =============================================================================
 # CONFIDENCE CALIBRATION V3.0 — TRADEABILITY
 # =============================================================================
-CONFIDENCE_MODEL_VERSION = "3.0_tradeability"
+CONFIDENCE_MODEL_VERSION = "4.0_calibrated_ready"
+
+def _rr_band(rr: float) -> str:
+    rr = float(rr or 0.0)
+    if rr < 3.0:
+        return "2-3R"
+    if rr < 5.0:
+        return "3-5R"
+    if rr < 7.0:
+        return "5-7R"
+    if rr < 9.0:
+        return "7-9R"
+    return "9R+"
+
+
+def calibrate_confidence_from_history(history, base_score: float, decision: str,
+                                      entry_label: str, rr: float, setup_quality: float) -> tuple[int, dict]:
+    """Empirical probability calibration hook.
+
+    `history` is optional and must contain closed trades with a numeric PnL or
+    a boolean `profitable`. With fewer observations the model falls back to the
+    structural score; it never pretends that a tiny sample is a precise probability.
+    Bayesian smoothing keeps sparse buckets conservative.
+    """
+    try:
+        rows = [r for r in (history or []) if isinstance(r, dict)]
+        if not rows:
+            return int(max(0, min(99, round(base_score)))), {
+                "calibration": "structural_fallback", "samples": 0,
+                "empirical_confidence": None, "calibration_weight": 0.0
+            }
+
+        rrband = _rr_band(rr)
+        direction = str(decision or "").upper()
+        label = str(entry_label or "").lower()
+        candidates = []
+        for r in rows:
+            d = str(r.get("decision", r.get("direction", ""))).upper()
+            el = str(r.get("entry_label", "")).lower()
+            rb = _rr_band(float(r.get("rr", 0) or 0))
+            profitable = r.get("profitable")
+            if profitable is None:
+                pnl = r.get("pnl", r.get("pnl_usd", r.get("net_pnl")))
+                try:
+                    profitable = float(pnl) > 0
+                except Exception:
+                    continue
+            # Hierarchical relevance: same direction + label + RR band is strongest.
+            match = 0.0
+            if d == direction: match += 0.35
+            if el == label: match += 0.30
+            if rb == rrband: match += 0.25
+            if match >= 0.35:
+                candidates.append((match, bool(profitable)))
+
+        if not candidates:
+            candidates = [(0.25, bool(r.get("profitable"))) for r in rows if "profitable" in r]
+
+        if not candidates:
+            return int(max(0, min(99, round(base_score)))), {
+                "calibration": "structural_fallback", "samples": 0,
+                "empirical_confidence": None, "calibration_weight": 0.0
+            }
+
+        # Weighted Beta posterior. Prior is intentionally neutral, not a claim of
+        # 60% win probability. More observations are required before it dominates.
+        alpha = beta = 2.0
+        weighted_n = 0.0
+        for w, win in candidates:
+            alpha += w if win else 0.0
+            beta += 0.0 if win else w
+            weighted_n += w
+        empirical = 100.0 * alpha / max(alpha + beta, 1e-9)
+        weight = min(0.70, weighted_n / 40.0)
+        calibrated = (1.0 - weight) * float(base_score) + weight * empirical
+        calibrated = max(0, min(99, int(round(calibrated))))
+        return calibrated, {
+            "calibration": "empirical_bayesian",
+            "samples": len(candidates),
+            "weighted_samples": round(weighted_n, 2),
+            "empirical_confidence": round(empirical, 2),
+            "calibration_weight": round(weight, 3),
+            "rr_band": rrband,
+            "direction": direction,
+            "entry_label": label,
+        }
+    except Exception:
+        return int(max(0, min(99, round(base_score)))), {
+            "calibration": "structural_fallback_error", "samples": 0,
+            "empirical_confidence": None, "calibration_weight": 0.0
+        }
+
 
 def _confidence_band(conf: int) -> str:
     if conf >= 85:
@@ -1178,6 +1269,18 @@ def _calibrate_confidence(base_confidence: int, score_ctx: dict, loc: dict,
         target_q = 5.0
     target_q = max(0.0, min(10.0, target_q))
 
+    # Research prior: OB was materially healthier than FVG/EQ in the supplied
+    # ledger, while SELL was weaker. These are soft penalties only; they are not
+    # hard filters and must be re-calibrated once a larger history is available.
+    if entry_label in ("fvg", "fvg_retest"):
+        entry_q -= 1.5
+    elif entry_label in ("eq", "equal", "equal_high", "equal_low"):
+        entry_q -= 3.0
+    if direction == "bear":
+        direction_q -= 2.0
+    entry_q = max(0.0, min(30.0, entry_q))
+    direction_q = max(0.0, min(25.0, direction_q))
+
     # Direction should matter, but cannot dominate. This is the key change that
     # addresses high-confidence SLs caused by strong HTF structure + poor timing.
     calibrated = int(round(
@@ -1208,6 +1311,8 @@ def _calibrate_confidence(base_confidence: int, score_ctx: dict, loc: dict,
         "trigger_quality": int(round(trigger_q)),
         "target_quality": int(round(target_q)),
         "setup_quality": max(0, min(100, setup_quality)),
+        "rr_band": _rr_band(rr),
+        "entry_type_prior": "OB_BASELINE" if entry_label in ("ob", "ob_retest") else ("FVG_SOFT_PENALTY" if entry_label in ("fvg", "fvg_retest") else "OTHER_SOFT_PENALTY"),
         "rsi": round(rsi_val, 1),
         "relative_volume": round(rv, 3),
         "divergence_against": bool(divergence),
@@ -1845,8 +1950,20 @@ def _select_tp(pool: list, entry: float, risk: float, direction: str,
         ev_proxy = reachability * np.log1p(rr) - (1.0 - reachability) * 0.45
         distance_bonus = 0.08 * min(1.0, max(0.0, rr - 2.0) / 4.0)
         far_penalty = 0.0
-        if rr > 8.0 and far_support < 0.65:
-            far_penalty = min(0.25, (rr - 8.0) * 0.025)
+        # Research showed the useful zone is not simply "lowest RR" or "highest RR".
+        # Keep unlimited RR, but require stronger path evidence for extreme targets.
+        if rr > 7.0:
+            evidence = far_support
+            if rr > 9.0:
+                far_penalty += min(0.38, 0.055 * (rr - 9.0))
+                if evidence < 0.80:
+                    far_penalty += min(0.22, (0.80 - evidence) * 0.55)
+            elif evidence < 0.60:
+                far_penalty += min(0.16, (0.60 - evidence) * 0.45)
+        # Prefer the empirically interesting middle-distance region when its
+        # structural/path quality is comparable, without hard-capping RR.
+        if 5.0 <= rr <= 8.5:
+            score += 0.035
         score = ev_proxy + distance_bonus - far_penalty
 
         # A target directly beyond several strong obstacles is less attractive.
@@ -1894,7 +2011,8 @@ def _select_tp(pool: list, entry: float, risk: float, direction: str,
 def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                  df_d1: Optional[pd.DataFrame] = None,
                  symbol: Optional[str] = None,
-                 df_btc_h1: Optional[pd.DataFrame] = None) -> Optional[dict]:
+                 df_btc_h1: Optional[pd.DataFrame] = None,
+                 trade_history: Optional[list] = None) -> Optional[dict]:
     """
     Analisa penuh satu koin: Entry → SL → TP.
 
@@ -1905,6 +2023,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     perilaku 100% sama seperti sebelumnya — tidak ada filter tambahan.
     """
     try:
+        trade_history = trade_history if isinstance(trade_history, list) else []
         if df_h1 is None or df_m15 is None or df_h1.empty or df_m15.empty:
             return None
 
@@ -2061,6 +2180,11 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             final_conf, setup_quality, conf_diag = _calibrate_confidence(
                 base_confidence, score, loc, candidate, float(rr), htf_poi, poi_reacted, tp_diag=tp_diag
             )
+            empirical_conf, empirical_diag = calibrate_confidence_from_history(
+                trade_history, final_conf, "BUY" if up else "SELL", entry_lbl, float(rr), setup_quality
+            )
+            final_conf = empirical_conf
+            conf_diag.update(empirical_diag)
 
             execution_score = (
                 final_conf
@@ -2128,6 +2252,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "confidence_band": best_eval.get("confidence_diagnostics", {}).get("confidence_band", _confidence_band(confidence)),
             "confidence_diagnostics": best_eval.get("confidence_diagnostics", {}),
             "confidence_model": CONFIDENCE_MODEL_VERSION,
+            "confidence_is_probability": bool(best_eval.get("confidence_diagnostics", {}).get("calibration") == "empirical_bayesian"),
+            "rr_band": _rr_band(rr),
             "entry_location_score": loc.get("location_score", 50),
             "entry_location_state": loc.get("location_state", "unknown"),
             "entry_range_position": loc.get("range_position", 0.5),
