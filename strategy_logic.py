@@ -1962,9 +1962,8 @@ def _select_tp(pool: list, entry: float, risk: float, direction: str,
                 far_penalty += min(0.16, (0.60 - evidence) * 0.45)
         # Prefer the empirically interesting middle-distance region when its
         # structural/path quality is comparable, without hard-capping RR.
-        if 5.0 <= rr <= 8.5:
-            score += 0.035
-        score = ev_proxy + distance_bonus - far_penalty
+        middle_rr_bonus = 0.035 if 5.0 <= rr <= 8.5 else 0.0
+        score = ev_proxy + distance_bonus + middle_rr_bonus - far_penalty
 
         # A target directly beyond several strong obstacles is less attractive.
         score -= min(0.30, obstacles * 0.035)
