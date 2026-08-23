@@ -101,6 +101,13 @@ TRAIL_LIQUIDITY_NEAR_R     = 0.75
 TRAIL_VOLUME_EXPANSION     = 1.30
 TRAIL_VOLUME_WEAK          = 0.75
 TRAIL_MIN_IMPROVEMENT_ATR  = 0.10
+# Execution-aware trailing safety. The strategy is the source of truth for
+# whether a candidate is executable; main.py only executes an accepted candidate.
+# Use the latest M15 close as the live-price proxy because main.py passes the
+# same 15m kline set to manage_position and does not pass a fresh ticker price
+# into the strategy dispatcher. Closed candles remain the analysis dataset.
+TRAIL_EXECUTION_BUFFER_ATR = 0.05
+TRAIL_MIN_MARKET_GAP_ATR = 0.32
 
 # Fibonacci extension TP (level 1.272 dan 1.618 dari impulse leg)
 FIB_EXT_1 = 0.272   # 127.2%
@@ -2661,6 +2668,60 @@ def _trail_stop_candidates(df_m15: pd.DataFrame, direction: str, entry: float,
     }
 
 
+def _validate_trail_candidate(candidate: Optional[float], direction: str,
+                              market_price: float, atr: float,
+                              current_sl: float, entry: float,
+                              bar_high: Optional[float] = None,
+                              bar_low: Optional[float] = None) -> tuple[Optional[float], Optional[str]]:
+    """Final strategy-side feasibility gate for a trailing SL.
+
+    This is deliberately kept in strategy_logic.py: a trail candidate is an
+    analytical proposal, not an order. The candidate must first be geometrically
+    valid for the current market and strictly improve the existing protection.
+    main.py should therefore never receive a known-wrong-side SL from the brain.
+    """
+    if candidate is None:
+        return None, "no_candidate"
+    try:
+        v = float(candidate)
+        px = float(market_price)
+        a = max(float(atr), 1e-12)
+        old = float(current_sl)
+        ent = float(entry)
+    except (TypeError, ValueError):
+        return None, "non_numeric"
+
+    gap = max(a * TRAIL_MIN_MARKET_GAP_ATR,
+              a * TRAIL_EXECUTION_BUFFER_ATR)
+
+    if direction == "bull":
+        # BUY protection must remain below market and below entry/price geometry.
+        if v >= px:
+            return None, "buy_sl_not_below_market"
+        if (px - v) < gap:
+            return None, "buy_sl_too_close_to_market"
+        if bar_low is not None and v >= float(bar_low):
+            return None, "buy_sl_inside_current_bar_range"
+        if v <= old:
+            return None, "buy_sl_not_improving"
+        if v >= ent and px <= ent:
+            return None, "buy_sl_above_entry_while_not_profitable"
+    else:
+        # SELL protection must remain above market and improve downward.
+        if v <= px:
+            return None, "sell_sl_not_above_market"
+        if (v - px) < gap:
+            return None, "sell_sl_too_close_to_market"
+        if bar_high is not None and v <= float(bar_high):
+            return None, "sell_sl_inside_current_bar_range"
+        if v >= old:
+            return None, "sell_sl_not_improving"
+        if v <= ent and px >= ent:
+            return None, "sell_sl_below_entry_while_not_profitable"
+
+    return v, None
+
+
 def _choose_trail_stop(candidates: dict, direction: str, current_price: float,
                        current_sl: float, atr: float, state: str) -> tuple[Optional[float], Optional[str]]:
     valid = []
@@ -2750,6 +2811,12 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
     if df_m15 is None or df_m15.empty:
         return {"action": "HOLD", "state": "NO_DATA", "reason": ["M15 unavailable"]}
 
+    # main.py supplies the current position state, but it does not inject a
+    # fresh ticker price into _strategy_position_update(). The latest kline close
+    # is therefore the only price shared by the strategy on every management
+    # cycle. Use it consistently for trail feasibility and profit-R; use CLOSED
+    # candles only for structural/momentum analysis below. Do not let a stale
+    # state["current_price"] become the reference price for a new stop.
     live_price = float(df_m15["close"].iloc[-1])
     m15 = build_df(_closed_candles(df_m15, 15), interval_minutes=15)
     if m15 is None or len(m15) < 55:
@@ -2759,7 +2826,7 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
     decision = str(sig.get("decision") or state.get("decision") or "BUY").upper()
     direction = "bull" if decision == "BUY" else "bear"
     entry = float(state.get("entry") or sig.get("entry") or m15["close"].iloc[-1])
-    current_price = float(state.get("current_price") or state.get("price") or live_price)
+    current_price = live_price
     current_sl = float(state.get("current_sl") or sig.get("sl") or entry)
     initial_sl = float(state.get("initial_sl") or sig.get("initial_sl") or sig.get("sl") or current_sl)
     tp = sig.get("tp")
@@ -2795,6 +2862,18 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
     chosen, source = _choose_trail_stop(
         candidates, direction, current_price, current_sl, atr, state_name
     )
+
+    # Final execution-feasibility gate. Never emit TRAIL merely because an
+    # analytical candidate exists. If the candidate is on the wrong side of the
+    # live market or too close to it, keep the existing protection instead.
+    current_bar_high = float(df_m15["high"].iloc[-1]) if "high" in df_m15.columns else None
+    current_bar_low = float(df_m15["low"].iloc[-1]) if "low" in df_m15.columns else None
+    chosen, invalid_reason = _validate_trail_candidate(
+        chosen, direction, current_price, atr, current_sl, entry,
+        bar_high=current_bar_high, bar_low=current_bar_low
+    )
+    if chosen is None:
+        source = None
 
     # Strong reversal: if a valid stop can lock meaningful profit, use it immediately.
     if chosen is not None:
@@ -2856,6 +2935,9 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
         }
 
     if state_name in {"REVERSAL", "REVERSAL_CONFIRMED", "WEAKENING"}:
+        safe_reason = "reversal_detected_but_no_safe_improvement"
+        if invalid_reason:
+            safe_reason = f"trail_candidate_rejected:{invalid_reason}"
         return {
             "action": "PROTECT",
             "state": state_name,
@@ -2863,7 +2945,9 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
             "weakness_score": int(analysis["score"]),
             "reversal_confirmations": int(analysis["confirmations"]),
             "reversal_diagnostics": analysis,
-            "reason": reasons + ["reversal_detected_but_no_safe_improvement"]
+            "trail_candidate_rejected": invalid_reason,
+            "market_price": round(current_price, 10),
+            "reason": reasons + [safe_reason]
         }
 
     return {
