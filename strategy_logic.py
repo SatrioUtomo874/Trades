@@ -1,5 +1,5 @@
 """
-strategy_logic.py — OTAK v7 (Adaptive RR + Intelligent Target Selection + Context-Aware Trailing)
+strategy_logic.py — OTAK v8 (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
 ========================================================================================
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
@@ -87,7 +87,7 @@ STRUCT_TRAIL_BUF_PCT  = 0.0025 # buffer 0.25% di luar swing agar tidak kena LS b
 STRUCT_TRAIL_LOOKBACK = 60     # candle M15 untuk cari swing trailing
 
 # Adaptive trailing engine V4
-TRAIL_ENGINE_VERSION       = "4.0-adaptive"
+TRAIL_ENGINE_VERSION       = "8.0-predictive-reversal"
 TRAIL_ARM_R                = 0.80
 TRAIL_PROTECT_R            = 1.00
 TRAIL_MATURE_R             = 1.50
@@ -2310,8 +2310,399 @@ def get_best_signal(candidates: list) -> Optional[dict]:
 
 
 # =============================================================================
-# ADAPTIVE POSITION MANAGEMENT — TRAILING BRAIN V5
+# ADAPTIVE POSITION MANAGEMENT — TRAILING BRAIN V8
 # =============================================================================
+# V8 design principle:
+#   Trail is not a static distance-from-price stop. It is a state machine that
+#   evaluates continuation health, momentum decay, structural failure,
+#   exhaustion and retracement depth before choosing a protection level.
+#
+# The goal is asymmetric:
+#   - healthy winner -> preserve room and avoid noise exits
+#   - weakening winner -> lock a meaningful portion of realized edge
+#   - confirmed reversal -> move protection close enough to avoid giving back
+#     the move, while still respecting the current candle/ATR noise envelope
+#
+# No API calls are made here. main.py remains the execution layer.
+
+TRAIL_LOOKBACK_CANDLES = STRUCT_TRAIL_LOOKBACK
+TRAIL_PREDICTIVE_VERSION = "5.0"
+TRAIL_MIN_PROFIT_TO_PROTECT_R = 0.55
+TRAIL_CAUTION_R = 0.90
+TRAIL_MATURE_R = 1.50
+TRAIL_REVERSAL_R = 1.00
+TRAIL_STRONG_REVERSAL_R = 1.75
+TRAIL_RETRACE_WARN_R = 0.30
+TRAIL_RETRACE_STRONG_R = 0.55
+TRAIL_LOCK_CAUTION_R = 0.12
+TRAIL_LOCK_WEAK_R = 0.28
+TRAIL_LOCK_STRONG_R = 0.55
+TRAIL_LOCK_REVERSAL_R = 0.80
+TRAIL_MIN_GAP_ATR_V8 = 0.32
+TRAIL_STRUCT_BUFFER_ATR = 0.36
+TRAIL_MOMENTUM_DECAY_ATR = 0.12
+TRAIL_OPPOSITE_BODY_ATR = 0.70
+TRAIL_REVERSAL_BODY_ATR = 0.95
+TRAIL_TWO_BAR_REVERSAL = True
+TRAIL_VOLUME_COUNTER = 1.20
+TRAIL_VOLUME_EXHAUSTION = 0.72
+TRAIL_PEAK_LOOKBACK = 40
+TRAIL_PROTECTED_SWING_LB = 3
+TRAIL_SCORE_CAUTION = 3
+TRAIL_SCORE_WEAK = 5
+TRAIL_SCORE_REVERSAL = 7
+TRAIL_SCORE_STRONG_REVERSAL = 9
+
+
+def _trail_directional_return(df: pd.DataFrame, direction: str, bars: int = 3) -> float:
+    if df is None or len(df) < bars + 1:
+        return 0.0
+    atr = max(float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0, 1e-12)
+    move = float(df["close"].iloc[-1] - df["close"].iloc[-1-bars])
+    return (move if direction == "bull" else -move) / atr
+
+
+def _trail_peak_metrics(df: pd.DataFrame, direction: str, entry: float,
+                        initial_risk: float) -> dict:
+    """Measure favorable excursion and give-back from the recent favorable extreme."""
+    recent = df.iloc[-min(len(df), TRAIL_PEAK_LOOKBACK):]
+    if recent.empty:
+        return {"peak_price": entry, "peak_r": 0.0, "giveback_r": 0.0, "retracement_r": 0.0}
+    peak_price = float(recent["high"].max()) if direction == "bull" else float(recent["low"].min())
+    peak_r = ((peak_price - entry) if direction == "bull" else (entry - peak_price)) / max(initial_risk, 1e-12)
+    current_price = float(df["close"].iloc[-1])
+    giveback_r = ((peak_price - current_price) if direction == "bull" else (current_price - peak_price)) / max(initial_risk, 1e-12)
+    retracement_r = max(0.0, giveback_r)
+    return {
+        "peak_price": peak_price,
+        "peak_r": round(peak_r, 3),
+        "giveback_r": round(giveback_r, 3),
+        "retracement_r": round(retracement_r, 3),
+    }
+
+
+def _trail_protected_swing(df: pd.DataFrame, direction: str, atr: float) -> Optional[float]:
+    """Return the nearest *confirmed* structural stop candidate."""
+    recent = df.iloc[-min(len(df), TRAIL_LOOKBACK_CANDLES):]
+    if len(recent) < TRAIL_PROTECTED_SWING_LB * 2 + 3:
+        return None
+    sh, sl = swing_pts(recent, lb=TRAIL_PROTECTED_SWING_LB)
+    buf = max(atr * TRAIL_STRUCT_BUFFER_ATR, 1e-12)
+    if direction == "bull" and sl:
+        return float(recent["low"].iloc[sl[-1]]) - buf
+    if direction == "bear" and sh:
+        return float(recent["high"].iloc[sh[-1]]) + buf
+    return None
+
+
+def _trail_reversal_analysis(df: pd.DataFrame, direction: str, entry: float,
+                             current_price: float, initial_risk: float,
+                             tp: Optional[float] = None) -> dict:
+    """Estimate continuation health vs. reversal risk from closed M15 candles.
+
+    This is deliberately a *risk-management classifier*, not a claim that the
+    market can be predicted perfectly. It looks for agreement across independent
+    signals before calling a move a reversal.
+    """
+    atr = max(float(df["atr"].iloc[-1]), 1e-12)
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else last
+    prev2 = df.iloc[-3] if len(df) >= 3 else prev
+    peak = _trail_peak_metrics(df, direction, entry, initial_risk)
+    structure = _market_structure(df, *swing_pts(df, lb=TRAIL_PROTECTED_SWING_LB))
+    aligned_structure = structure == ("bullish" if direction == "bull" else "bearish")
+    opposite_structure = structure == ("bearish" if direction == "bull" else "bullish")
+    mom = _momentum_context(df)
+    aligned_mom = (direction == "bull" and mom.get("bull")) or (direction == "bear" and mom.get("bear"))
+    opposite_mom = (direction == "bull" and mom.get("bear")) or (direction == "bear" and mom.get("bull"))
+    rdiv = detect_rsi_divergence(df, direction, lb=30)
+    divergence = ((direction == "bull" and rdiv.get("bear_div")) or
+                  (direction == "bear" and rdiv.get("bull_div")))
+    vol = _relative_volume(df, 20)
+
+    last_body_atr = abs(float(last["close"] - last["open"])) / atr
+    prev_body_atr = abs(float(prev["close"] - prev["open"])) / atr
+    opposite_last = (direction == "bull" and float(last["close"]) < float(last["open"])) or (direction == "bear" and float(last["close"]) > float(last["open"]))
+    opposite_prev = (direction == "bull" and float(prev["close"]) < float(prev["open"])) or (direction == "bear" and float(prev["close"]) > float(prev["open"]))
+    two_bar_opposite = opposite_last and opposite_prev if TRAIL_TWO_BAR_REVERSAL else False
+
+    # Directional return is measured in ATR units. A healthy trade should retain
+    # positive directional return over several lookbacks.
+    ret3 = _trail_directional_return(df, direction, 3)
+    ret5 = _trail_directional_return(df, direction, 5) if len(df) >= 6 else ret3
+    momentum_decay = (ret5 < TRAIL_MOMENTUM_DECAY_ATR and ret3 < 0.0)
+
+    # Detect a fresh opposite displacement / break of the short-term range.
+    look = df.iloc[-6:-1] if len(df) >= 7 else df.iloc[:-1]
+    prior_high = float(look["high"].max()) if not look.empty else float(prev["high"])
+    prior_low = float(look["low"].min()) if not look.empty else float(prev["low"])
+    opposite_break = ((direction == "bull" and float(last["close"]) < prior_low) or
+                      (direction == "bear" and float(last["close"]) > prior_high))
+
+    # Protected swing failure is stronger than a wick: the close must break the
+    # latest confirmed swing in the adverse direction.
+    sh, sl = swing_pts(df, lb=TRAIL_PROTECTED_SWING_LB)
+    protected_break = False
+    if direction == "bull" and sl:
+        protected_break = float(last["close"]) < float(df["low"].iloc[sl[-1]])
+    elif direction == "bear" and sh:
+        protected_break = float(last["close"]) > float(df["high"].iloc[sh[-1]])
+
+    # Liquidity rejection = extension followed by close back through the candle body.
+    recent_high = float(df["high"].iloc[-15:].max())
+    recent_low = float(df["low"].iloc[-15:].min())
+    liquidity_rejection = False
+    if direction == "bull":
+        liquidity_rejection = (float(last["high"]) >= recent_high * (1 - 1e-9)
+                               and opposite_last and last_body_atr >= TRAIL_OPPOSITE_BODY_ATR)
+    else:
+        liquidity_rejection = (float(last["low"]) <= recent_low * (1 + 1e-9)
+                               and opposite_last and last_body_atr >= TRAIL_OPPOSITE_BODY_ATR)
+
+    score = 0
+    reasons = []
+    confirmations = 0
+
+    if opposite_structure:
+        score += 3
+        confirmations += 1
+        reasons.append("opposite_structure")
+    elif not aligned_structure:
+        score += 1
+        reasons.append("structure_ranging")
+    else:
+        reasons.append("structure_aligned")
+
+    if opposite_mom:
+        score += 2
+        confirmations += 1
+        reasons.append("opposite_momentum")
+    elif aligned_mom:
+        reasons.append("momentum_aligned")
+    elif momentum_decay:
+        score += 1
+        reasons.append("momentum_decay")
+
+    if divergence:
+        score += 2 if not rdiv.get("strong") else 3
+        confirmations += 1
+        reasons.append("rsi_divergence")
+
+    if two_bar_opposite:
+        score += 2
+        confirmations += 1
+        reasons.append("two_bar_opposite")
+    elif opposite_last and last_body_atr >= TRAIL_OPPOSITE_BODY_ATR:
+        score += 1
+        reasons.append("opposite_candle")
+
+    if opposite_break:
+        score += 2
+        confirmations += 1
+        reasons.append("opposite_range_break")
+
+    if protected_break:
+        score += 3
+        confirmations += 1
+        reasons.append("protected_swing_break")
+
+    if liquidity_rejection:
+        score += 2
+        confirmations += 1
+        reasons.append("liquidity_rejection")
+
+    if vol >= TRAIL_VOLUME_COUNTER and opposite_last:
+        score += 2
+        confirmations += 1
+        reasons.append("counter_volume_expansion")
+    elif vol <= TRAIL_VOLUME_EXHAUSTION and peak["peak_r"] >= TRAIL_CAUTION_R:
+        score += 1
+        reasons.append("volume_exhaustion")
+
+    if peak["retracement_r"] >= TRAIL_RETRACE_WARN_R and peak["peak_r"] >= TRAIL_MIN_PROFIT_TO_PROTECT_R:
+        score += 2
+        reasons.append("meaningful_giveback")
+    if peak["retracement_r"] >= TRAIL_RETRACE_STRONG_R:
+        score += 2
+        confirmations += 1
+        reasons.append("deep_giveback")
+
+    if tp is not None:
+        target_distance_r = abs(float(tp) - current_price) / max(initial_risk, 1e-12)
+        if target_distance_r <= TRAIL_LIQUIDITY_NEAR_R:
+            score += 1
+            reasons.append("target_near")
+    else:
+        target_distance_r = None
+
+    strong_reversal = (protected_break and opposite_break and confirmations >= 3) or score >= TRAIL_SCORE_STRONG_REVERSAL
+    reversal = strong_reversal or (score >= TRAIL_SCORE_REVERSAL and confirmations >= 2)
+    weakening = reversal or score >= TRAIL_SCORE_WEAK or peak["retracement_r"] >= TRAIL_RETRACE_WARN_R
+    # Profit maturity arms the trailing engine, but is NOT itself evidence of
+    # reversal. A large floating profit with healthy structure must still be
+    # allowed to breathe.
+    caution = weakening or score >= TRAIL_SCORE_CAUTION
+
+    if strong_reversal:
+        state = "REVERSAL_CONFIRMED"
+    elif reversal:
+        state = "REVERSAL"
+    elif weakening:
+        state = "WEAKENING"
+    elif caution:
+        state = "CAUTION"
+    else:
+        state = "HEALTHY"
+
+    return {
+        "state": state,
+        "score": int(score),
+        "confirmations": int(confirmations),
+        "reasons": reasons,
+        "aligned_structure": bool(aligned_structure),
+        "opposite_structure": bool(opposite_structure),
+        "aligned_momentum": bool(aligned_mom),
+        "opposite_momentum": bool(opposite_mom),
+        "divergence": bool(divergence),
+        "protected_break": bool(protected_break),
+        "opposite_break": bool(opposite_break),
+        "liquidity_rejection": bool(liquidity_rejection),
+        "last_body_atr": round(last_body_atr, 3),
+        "prev_body_atr": round(prev_body_atr, 3),
+        "relative_volume": round(vol, 3),
+        "ret3_atr": round(ret3, 3),
+        "ret5_atr": round(ret5, 3),
+        "peak_price": round(peak["peak_price"], 10),
+        "peak_r": peak["peak_r"],
+        "giveback_r": peak["giveback_r"],
+        "target_distance_r": round(target_distance_r, 3) if target_distance_r is not None else None,
+    }
+
+
+def _trail_lock_floor(entry: float, initial_risk: float, state: str, direction: str) -> float:
+    lock_r = {
+        "CAUTION": TRAIL_LOCK_CAUTION_R,
+        "WEAKENING": TRAIL_LOCK_WEAK_R,
+        "REVERSAL": TRAIL_LOCK_REVERSAL_R,
+        "REVERSAL_CONFIRMED": TRAIL_LOCK_REVERSAL_R,
+    }.get(state, 0.0)
+    return entry + (initial_risk * lock_r if direction == "bull" else -initial_risk * lock_r)
+
+
+def _trail_stop_candidates(df_m15: pd.DataFrame, direction: str, entry: float,
+                           current_price: float, initial_risk: float,
+                           analysis: dict) -> dict:
+    """Build protection candidates from structure, retracement and momentum.
+
+    The candidates are *floors/ceilings*, not direct orders. manage_position()
+    selects the tightest candidate that remains outside the current noise band.
+    """
+    atr = max(float(df_m15["atr"].iloc[-1]), 1e-12)
+    state = analysis["state"]
+    peak_price = float(analysis["peak_price"])
+    weakness = int(analysis["score"])
+
+    structure_stop = _trail_protected_swing(df_m15, direction, atr)
+    min_gap = atr * TRAIL_MIN_GAP_ATR_V8
+
+    # Momentum stop is adaptive to weakness. More weakness => smaller distance
+    # from the favorable extreme, but never inside the current noise gap.
+    mult = 2.20
+    if state == "CAUTION":
+        mult = 1.80
+    elif state == "WEAKENING":
+        mult = 1.45
+    elif state == "REVERSAL":
+        mult = 1.10
+    elif state == "REVERSAL_CONFIRMED":
+        mult = 0.85
+    momentum_stop = (peak_price - atr * mult) if direction == "bull" else (peak_price + atr * mult)
+
+    # Retracement-based stop locks part of the move before a new confirmed swing
+    # is available. This is the key V8 addition: it can protect a winner *before*
+    # the market has completed a textbook BOS/ChoCH.
+    retrace_lock_r = {
+        "CAUTION": 0.05,
+        "WEAKENING": 0.18,
+        "REVERSAL": 0.38,
+        "REVERSAL_CONFIRMED": 0.55,
+    }.get(state, 0.0)
+    retrace_stop = (peak_price - max(initial_risk * retrace_lock_r, atr * 0.20)
+                    if direction == "bull"
+                    else peak_price + max(initial_risk * retrace_lock_r, atr * 0.20))
+
+    lock_floor = _trail_lock_floor(entry, initial_risk, state, direction)
+
+    # In a confirmed reversal, use the tighter of retracement and momentum stops.
+    # In healthy/caution phases structure remains the primary authority.
+    if direction == "bull":
+        usable_ceiling = current_price - min_gap
+        candidates = {
+            "structure": structure_stop,
+            "momentum": min(momentum_stop, usable_ceiling),
+            "retracement": min(retrace_stop, usable_ceiling),
+            "lock_floor": min(lock_floor, usable_ceiling),
+        }
+    else:
+        usable_floor = current_price + min_gap
+        candidates = {
+            "structure": structure_stop,
+            "momentum": max(momentum_stop, usable_floor),
+            "retracement": max(retrace_stop, usable_floor),
+            "lock_floor": max(lock_floor, usable_floor),
+        }
+
+    return {
+        "candidates": candidates,
+        "atr": atr,
+        "min_gap": min_gap,
+        "weakness_score": weakness,
+        "state": state,
+    }
+
+
+def _choose_trail_stop(candidates: dict, direction: str, current_price: float,
+                       current_sl: float, atr: float, state: str) -> tuple[Optional[float], Optional[str]]:
+    valid = []
+    for name, value in candidates.items():
+        if value is None:
+            continue
+        v = float(value)
+        if direction == "bull":
+            if current_sl < v < current_price - atr * 0.10:
+                valid.append((v, name))
+        else:
+            if current_price + atr * 0.10 < v < current_sl:
+                valid.append((v, name))
+
+    if not valid:
+        return None, None
+
+    # Healthy/caution: prefer structural integrity. Weak/reversal: prefer the
+    # tightest valid protection to minimize give-back.
+    priority = {"structure": 0, "momentum": 1, "retracement": 2, "lock_floor": 3}
+    if state in {"HEALTHY", "CAUTION"}:
+        # Healthy/caution is explicitly anti-overtrailing. Structure is preferred;
+        # when unavailable, use the wider momentum stop rather than a close
+        # retracement/lock candidate.
+        structural = [x for x in valid if x[1] == "structure"]
+        if structural:
+            return structural[0]
+        momentum = [x for x in valid if x[1] == "momentum"]
+        if momentum:
+            return (max(momentum, key=lambda x: x[0]) if direction == "bull"
+                    else min(momentum, key=lambda x: x[0]))
+        lock = [x for x in valid if x[1] == "lock_floor"]
+        if lock:
+            return (max(lock, key=lambda x: x[0]) if direction == "bull"
+                    else min(lock, key=lambda x: x[0]))
+        return (max(valid, key=lambda x: x[0]) if direction == "bull"
+                else min(valid, key=lambda x: x[0]))
+
+    if direction == "bull":
+        return max(valid, key=lambda x: x[0])
+    return min(valid, key=lambda x: x[0])
+
 
 def _relative_volume(df: pd.DataFrame, n: int = 20) -> float:
     """Relative volume proxy dari data OHLCV yang SUDAH DIMILIKI bot."""
@@ -2325,14 +2716,16 @@ def _relative_volume(df: pd.DataFrame, n: int = 20) -> float:
 
 
 def _momentum_context(df: pd.DataFrame) -> dict:
-    """Momentum lokal: EMA slope + last/previous return, tanpa request API tambahan."""
+    """Momentum lokal: EMA slope + multi-horizon return + candle expansion."""
     if df is None or len(df) < 8:
-        return {"bull": False, "bear": False, "expanding": False, "slope_atr": 0.0}
+        return {"bull": False, "bear": False, "expanding": False, "slope_atr": 0.0,
+                "ret3_atr": 0.0, "ret5_atr": 0.0, "last_body_atr": 0.0}
     close = df["close"].astype(float)
     atr = max(float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0, 1e-12)
     e9 = ema(close, 9)
     slope = float(e9.iloc[-1] - e9.iloc[-4]) / atr
     ret3 = float(close.iloc[-1] - close.iloc[-4]) / atr
+    ret5 = float(close.iloc[-1] - close.iloc[-6]) / atr if len(df) >= 6 else ret3
     last_body = abs(float(df["close"].iloc[-1] - df["open"].iloc[-1])) / atr
     return {
         "bull": slope > 0.20 and ret3 > 0.15,
@@ -2340,84 +2733,19 @@ def _momentum_context(df: pd.DataFrame) -> dict:
         "expanding": last_body >= 0.80,
         "slope_atr": round(slope, 3),
         "ret3_atr": round(ret3, 3),
+        "ret5_atr": round(ret5, 3),
         "last_body_atr": round(last_body, 3),
     }
 
 
-def _adaptive_trail_candidates(df_m15: pd.DataFrame, direction: str, entry: float,
-                              current_price: float, initial_risk: float,
-                              profit_r: float, weakness_score: int) -> dict:
-    """Generate عدة stop candidates; caller decides using market state."""
-    up = direction == "bull"
-    atr = max(float(df_m15["atr"].iloc[-1]), 1e-12)
-    sh, sl = swing_pts(df_m15.iloc[-TRAIL_LOOKBACK_CANDLES:], lb=STRUCT_TRAIL_LB) if len(df_m15) >= TRAIL_LOOKBACK_CANDLES else swing_pts(df_m15, lb=STRUCT_TRAIL_LB)
-    # translate local indices back into the sliced frame is unnecessary for values
-    recent = df_m15.iloc[-TRAIL_LOOKBACK_CANDLES:] if len(df_m15) >= TRAIL_LOOKBACK_CANDLES else df_m15
-    sh, sl = swing_pts(recent, lb=STRUCT_TRAIL_LB)
-
-    vol = _relative_volume(df_m15, 20)
-    mom = _momentum_context(df_m15)
-    adaptive_buffer = atr * (0.40 if weakness_score < TRAIL_WEAKNESS_MODERATE else 0.30)
-    if vol < TRAIL_VOLUME_WEAK:
-        adaptive_buffer *= 0.90
-    if vol > TRAIL_VOLUME_EXPANSION and ((up and mom["bull"]) or ((not up) and mom["bear"])):
-        adaptive_buffer *= 1.15
-
-    structure_stop = None
-    if up and sl:
-        structure_stop = float(recent["low"].iloc[sl[-1]]) - adaptive_buffer
-    elif (not up) and sh:
-        structure_stop = float(recent["high"].iloc[sh[-1]]) + adaptive_buffer
-
-    extreme_hi = float(recent["high"].max())
-    extreme_lo = float(recent["low"].min())
-    atr_mult = TRAIL_ATR_TIGHT_MULT if weakness_score >= TRAIL_WEAKNESS_STRONG else TRAIL_ATR_MULT
-    atr_stop = (extreme_hi - atr * atr_mult) if up else (extreme_lo + atr * atr_mult)
-
-    be_stop = entry + (initial_risk * TRAIL_BREAK_EVEN_OFFSET_R if up else -initial_risk * TRAIL_BREAK_EVEN_OFFSET_R)
-    min_gap = atr * TRAIL_MIN_GAP_ATR
-    # Ensure the candidate is not so close that normal noise immediately takes it.
-    if up:
-        max_usable = current_price - min_gap
-        structure_stop = min(structure_stop, max_usable) if structure_stop is not None else None
-        atr_stop = min(atr_stop, max_usable)
-        be_stop = min(be_stop, max_usable)
-    else:
-        min_usable = current_price + min_gap
-        structure_stop = max(structure_stop, min_usable) if structure_stop is not None else None
-        atr_stop = max(atr_stop, min_usable)
-        be_stop = max(be_stop, min_usable)
-
-    return {
-        "structure": structure_stop,
-        "atr": atr_stop,
-        "breakeven": be_stop,
-        "relative_volume": round(vol, 3),
-        "momentum": mom,
-        "atr": atr,
-        "buffer": adaptive_buffer,
-    }
-
-
-# Number of M15 candles examined by the trailing engine. Kept moderate to avoid
-# unnecessary CPU work while still covering several structural legs.
-TRAIL_LOOKBACK_CANDLES = STRUCT_TRAIL_LOOKBACK
-
-
 def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
                     df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
-    """
-    Position-management brain V4.
+    """Position-management brain V8 — predictive, stateful-in-time, execution-free.
 
-    Important: this function performs NO REST/WebSocket calls. It only processes
-    data already supplied by main.py and returns a decision. main.py remains the
-    sole execution layer.
-
-    Decision states:
-      HOLD      = trend is healthy; do not touch SL
-      PROTECT   = trade matured enough to consider BE/soft protection
-      TRAIL     = tighten SL using adaptive structure/ATR candidate
-      EXIT      = confirmed structural/momentum failure; main.py may close
+    The engine does not predict exact future prices. It detects when the evidence
+    for continuation is degrading and moves protection *before* a full reversal
+    is complete. This is intentionally asymmetric: healthy winners get room;
+    weakening/reversing winners surrender progressively less of the move.
     """
     if df_m15 is None or df_m15.empty:
         return {"action": "HOLD", "state": "NO_DATA", "reason": ["M15 unavailable"]}
@@ -2439,146 +2767,113 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
     initial_risk = max(abs(entry - initial_sl), 1e-12)
     profit_r = ((current_price - entry) if direction == "bull" else (entry - current_price)) / initial_risk
 
-    sh, sl = swing_pts(m15, lb=STRUCT_TRAIL_LB)
-    structure = _market_structure(m15, sh, sl)
-    rdiv = detect_rsi_divergence(m15, direction, lb=30)
-    vol = _relative_volume(m15, 20)
-    mom = _momentum_context(m15) if len(m15) >= 8 else {"bull": False, "bear": False}
-    atr = max(float(m15["atr"].iloc[-1]), 1e-12)
+    analysis = _trail_reversal_analysis(
+        m15, direction, entry, current_price, initial_risk, tp=tp
+    )
+    state_name = analysis["state"]
+    reasons = list(analysis["reasons"])
 
-    weakness = 0
-    reasons = []
-
-    # Structure is the primary authority. A healthy trend gives the trade room.
-    aligned_structure = structure == ("bullish" if direction == "bull" else "bearish")
-    opposite_structure = structure == ("bearish" if direction == "bull" else "bullish")
-    if aligned_structure:
-        reasons.append("structure_aligned")
-    elif opposite_structure:
-        weakness += 3
-        reasons.append("structure_opposite")
-    else:
-        reasons.append("structure_ranging")
-
-    # Momentum: strong aligned movement = patience; strong opposite movement = tighten.
-    if (direction == "bull" and mom["bull"]) or (direction == "bear" and mom["bear"]):
-        reasons.append("momentum_aligned")
-    elif (direction == "bull" and mom["bear"]) or (direction == "bear" and mom["bull"]):
-        weakness += 2
-        reasons.append("momentum_reversal")
-
-    # RSI divergence is a warning, not an automatic exit.
-    div = (direction == "bull" and rdiv.get("bear_div")) or (direction == "bear" and rdiv.get("bull_div"))
-    if div:
-        weakness += 2 if not rdiv.get("strong") else 3
-        reasons.append("rsi_divergence")
-
-    # Volume/price interaction. High aligned volume supports continuation; falling
-    # volume after extension is an exhaustion warning.
-    aligned = (direction == "bull" and mom["bull"]) or (direction == "bear" and mom["bear"])
-    if vol >= TRAIL_VOLUME_EXPANSION and aligned:
-        reasons.append("volume_supports_move")
-    elif vol <= TRAIL_VOLUME_WEAK and profit_r >= TRAIL_MATURE_R:
-        weakness += 1
-        reasons.append("volume_exhaustion")
-    elif vol >= TRAIL_VOLUME_EXPANSION and not aligned:
-        weakness += 2
-        reasons.append("counter_volume_expansion")
-
-    # If the intended target is close, protect more aggressively once there is
-    # evidence of rejection. Until then, allow the winner to complete its path.
-    target_near = False
-    if tp is not None and initial_risk > 0:
-        target_distance_r = abs(tp - current_price) / initial_risk
-        target_near = target_distance_r <= TRAIL_LIQUIDITY_NEAR_R
-        if target_near:
-            reasons.append("target_near")
-
-    # Major recent swing/liquidity was reached and rejected: treat as stronger warning.
-    recent_high = float(m15["high"].iloc[-20:].max())
-    recent_low = float(m15["low"].iloc[-20:].min())
-    last = m15.iloc[-1]
-    body_atr = abs(float(last["close"] - last["open"])) / atr
-    if direction == "bull" and float(last["high"]) >= recent_high * (1 - 1e-9) and float(last["close"]) < float(last["open"]) and body_atr >= 0.8:
-        weakness += 2
-        reasons.append("upper_liquidity_rejection")
-    if direction == "bear" and float(last["low"]) <= recent_low * (1 + 1e-9) and float(last["close"]) > float(last["open"]) and body_atr >= 0.8:
-        weakness += 2
-        reasons.append("lower_liquidity_rejection")
-
-    # Trade maturity changes how much weakness we tolerate.
-    if profit_r < TRAIL_ARM_R:
+    # Before enough profit exists, do not force a trail unless the price has already
+    # invalidated the thesis. We still return diagnostics so main.py can log why.
+    if profit_r < TRAIL_MIN_PROFIT_TO_PROTECT_R:
         return {
-            "action": "HOLD", "state": "DEVELOPING", "profit_r": round(profit_r, 2),
-            "reason": reasons, "relative_volume": round(vol, 3),
+            "action": "HOLD",
+            "state": "DEVELOPING",
+            "profit_r": round(profit_r, 2),
+            "weakness_score": analysis["score"],
+            "reversal_state": state_name,
+            "reversal_confirmations": analysis["confirmations"],
+            "reversal_diagnostics": analysis,
+            "reason": reasons + ["profit_not_mature_for_trail"],
         }
 
-    candidates = _adaptive_trail_candidates(
-        m15, direction, entry, current_price, initial_risk, profit_r, weakness
+    trail_pack = _trail_stop_candidates(
+        m15, direction, entry, current_price, initial_risk, analysis
+    )
+    candidates = trail_pack["candidates"]
+    atr = trail_pack["atr"]
+    chosen, source = _choose_trail_stop(
+        candidates, direction, current_price, current_sl, atr, state_name
     )
 
-    # Strong continuation: don't crowd the trade. Only act if an objectively more
-    # protective candidate exists and profit has matured enough.
-    if aligned and weakness < TRAIL_WEAKNESS_MODERATE and profit_r < TRAIL_MATURE_R:
-        return {
-            "action": "PROTECT" if profit_r >= TRAIL_PROTECT_R else "HOLD",
-            "state": "TREND_HEALTHY",
-            "profit_r": round(profit_r, 2),
-            "reason": reasons + ["winner_allowed_room"],
-            "relative_volume": round(vol, 3),
-        }
+    # Strong reversal: if a valid stop can lock meaningful profit, use it immediately.
+    if chosen is not None:
+        minimum_lock_r = TRAIL_LOCK_WEAK_R
+        if state_name == "CAUTION":
+            minimum_lock_r = TRAIL_LOCK_CAUTION_R
+        elif state_name == "WEAKENING":
+            minimum_lock_r = TRAIL_LOCK_WEAK_R
+        elif state_name == "REVERSAL":
+            minimum_lock_r = TRAIL_LOCK_REVERSAL_R * 0.65
+        elif state_name == "REVERSAL_CONFIRMED":
+            minimum_lock_r = TRAIL_LOCK_REVERSAL_R
 
-    # Choose the candidate that protects without sitting inside normal noise.
-    valid = []
-    for name, value in candidates.items():
-        if name in {"relative_volume", "momentum", "atr", "buffer"} or value is None:
-            continue
-        v = float(value)
-        if direction == "bull" and v < current_price:
-            if v > current_sl + atr * TRAIL_MIN_IMPROVEMENT_ATR:
-                valid.append((v, name))
-        elif direction == "bear" and v > current_price:
-            if v < current_sl - atr * TRAIL_MIN_IMPROVEMENT_ATR:
-                valid.append((v, name))
+        locked_r = ((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk
+        if locked_r < minimum_lock_r and state_name in {"REVERSAL", "REVERSAL_CONFIRMED"}:
+            # Fall back to the strongest valid candidate that actually preserves
+            # at least the minimum lock; if none exists, keep the previous SL.
+            eligible = []
+            for name, value in candidates.items():
+                if value is None:
+                    continue
+                v = float(value)
+                lr = ((v - entry) if direction == "bull" else (entry - v)) / initial_risk
+                if lr >= minimum_lock_r:
+                    if direction == "bull" and current_sl < v < current_price - atr * 0.10:
+                        eligible.append((v, name))
+                    elif direction == "bear" and current_price + atr * 0.10 < v < current_sl:
+                        eligible.append((v, name))
+            if eligible:
+                chosen, source = (max(eligible, key=lambda x: x[0]) if direction == "bull"
+                                  else min(eligible, key=lambda x: x[0]))
 
-    # On moderate weakness choose the tighter valid candidate; on strong weakness
-    # the same rule applies, but ATR multiplier has already contracted.
-    if valid:
-        if direction == "bull":
-            chosen, source = max(valid, key=lambda x: x[0])
-        else:
-            chosen, source = min(valid, key=lambda x: x[0])
-        state_name = "EXHAUSTION" if weakness >= TRAIL_WEAKNESS_STRONG else ("MATURE" if profit_r >= TRAIL_MATURE_R else "PROTECT")
-        action = "TRAIL"
         return {
-            "action": action,
+            "action": "TRAIL",
             "state": state_name,
             "sl": round(float(chosen), 10),
             "profit_r": round(profit_r, 2),
-            "weakness_score": int(weakness),
+            "locked_r": round((((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk), 3),
+            "weakness_score": int(analysis["score"]),
+            "reversal_confirmations": int(analysis["confirmations"]),
             "trail_source": source,
-            "relative_volume": round(vol, 3),
-            "reason": reasons + [f"adaptive_trail:{source}"]
+            "reversal_diagnostics": analysis,
+            "reason": reasons + [f"predictive_trail:{source}"],
         }
 
-    # If trend has actually broken and no candidate can improve current SL, signal a
-    # controlled close only after multiple independent warnings agree.
-    if weakness >= TRAIL_WEAKNESS_STRONG and profit_r >= TRAIL_MATURE_R:
+    # A confirmed reversal without an improvable stop is safer handled as a controlled
+    # exit once there is enough realized profit. This avoids holding a winner all the
+    # way back to its original SL just because no structural candidate exists.
+    if state_name == "REVERSAL_CONFIRMED" and profit_r >= TRAIL_STRONG_REVERSAL_R:
         return {
             "action": "EXIT",
             "close": True,
-            "state": "EXIT_WARNING",
+            "state": state_name,
             "profit_r": round(profit_r, 2),
-            "weakness_score": int(weakness),
-            "reason": reasons + ["multi-factor-structure-failure"]
+            "weakness_score": int(analysis["score"]),
+            "reversal_confirmations": int(analysis["confirmations"]),
+            "reversal_diagnostics": analysis,
+            "reason": reasons + ["confirmed_reversal_no_safe_trail"]
+        }
+
+    if state_name in {"REVERSAL", "REVERSAL_CONFIRMED", "WEAKENING"}:
+        return {
+            "action": "PROTECT",
+            "state": state_name,
+            "profit_r": round(profit_r, 2),
+            "weakness_score": int(analysis["score"]),
+            "reversal_confirmations": int(analysis["confirmations"]),
+            "reversal_diagnostics": analysis,
+            "reason": reasons + ["reversal_detected_but_no_safe_improvement"]
         }
 
     return {
-        "action": "HOLD",
-        "state": "WAIT",
+        "action": "PROTECT" if profit_r >= TRAIL_CAUTION_R else "HOLD",
+        "state": state_name,
         "profit_r": round(profit_r, 2),
-        "weakness_score": int(weakness),
-        "reason": reasons + ["no_better_stop_candidate"]
+        "weakness_score": int(analysis["score"]),
+        "reversal_confirmations": int(analysis["confirmations"]),
+        "reversal_diagnostics": analysis,
+        "reason": reasons + ["trend_still_healthy_or_no_better_stop"]
     }
 
 
