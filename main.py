@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py V15 — MESIN (engine).
+main.py V16 — MESIN (engine).
 
 V15 HARDENED: verified real-order execution, no blind mutating retries, exchange/local state reconciliation, protection-pair verification, and fail-closed emergency handling. Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
@@ -21,7 +21,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 
-import requests, pandas as pd, numpy as np, urllib3, json
+import requests, pandas as pd, numpy as np, urllib3, json, html
 from flask import Flask
 
 try:
@@ -75,7 +75,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V15"
+MAIN_ENGINE_VERSION = "V16"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -181,9 +181,10 @@ class TelegramLogHandler(logging.Handler):
             if not cid or not TELEGRAM_TOKEN: return
 
             level_em = "🔴" if record.levelno >= logging.CRITICAL else "⚠️"
+            safe_msg = html.escape(record.getMessage()[:400], quote=False)
             text = (
-                f"{level_em} <b>[{record.levelname}]</b>\n"
-                f"<code>{record.getMessage()[:400]}</code>"
+                f"{level_em} <b>[{html.escape(record.levelname)}]</b>\n"
+                f"<code>{safe_msg}</code>"
             )
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -2455,35 +2456,33 @@ EXIT_FEE_PCT  = 0.0005   # 0.05% — exit via SL/TP market-trigger (taker)
 POSITION_SIZE_PCT = 100.0  # DEPRECATED — lihat catatan di atas
 
 def _classify_close_result(result, entry=None, close_price=None, decision=None):
-    """Normalize close classification based on actual outcome.
+    """Classify a closed trade from the *realized price outcome*.
 
     Rules:
-      - TP remains TP when the TP path actually triggered.
-      - A Trail is a winning trail only when the realized price is profitable.
-      - A Trail/timeout that closes at a loss is recorded as SL.
-      - Other discretionary strategy closes keep their original label.
+      - Explicit TP remains TP because the exchange confirmed the TP path.
+      - Any non-TP exit (SL, Trail, timeout, recovery/manual close) is
+        classified by realized net PnL: positive -> Trail, non-positive -> SL.
+      - This is important when a trailing SL has moved above entry: Binance can
+        report the exit/order as an SL, while economically the trade is a win.
     """
     result = str(result or "strategy").lower()
     if result == "tp":
         return "tp"
-    if result not in ("trail", "timeout"):
-        return result
     if entry is None or close_price is None:
-        # Conservatively treat an unmeasurable outcome as a loss-class exit.
-        return "sl"
+        return "sl" if result in ("sl", "trail", "timeout") else result
     try:
-        entry = float(entry)
-        close_price = float(close_price)
+        entry = float(entry); close_price = float(close_price)
         if entry <= 0:
-            return "sl"
+            return "sl" if result in ("sl", "trail", "timeout") else result
         side = str(decision or "BUY").upper()
-        pnl_raw = ((close_price - entry) / entry) * (1 if side == "BUY" else -1)
-        # Use the same net-PnL convention displayed by update_stats():
-        # gross movement minus the configured round-trip fee estimate.
+        direction = 1 if side == "BUY" else -1
+        pnl_raw = ((close_price - entry) / entry) * direction
         net_pnl = pnl_raw - (ENTRY_FEE_PCT + EXIT_FEE_PCT)
-        return "trail" if net_pnl > 0 else "sl"
+        if result in ("sl", "trail", "timeout"):
+            return "trail" if net_pnl > 0 else "sl"
+        return result
     except Exception:
-        return "sl"
+        return "sl" if result in ("sl", "trail", "timeout") else result
 
 
 def _update_trade_path_metrics(pos, price):
@@ -2701,12 +2700,14 @@ def _trade_analysis_rows(hist):
             "run_id": t.get("run_id", ""),
             "symbol": t.get("symbol", ""),
             "result": t.get("result", ""),
+            "close_reason": t.get("close_reason", ""),
             "decision": t.get("decision", ""),
             "entry": t.get("entry", ""),
             "sl": t.get("sl", ""),
             "tp": t.get("tp", ""),
             "exit_price": t.get("exit_price", ""),
             "rr": t.get("rr", ""),
+            "final_r": t.get("final_r", ""),
             "confidence": t.get("confidence", ""),
             "entry_label": t.get("entry_label", ""),
             "rsi": t.get("rsi", ""),
@@ -2715,6 +2716,13 @@ def _trade_analysis_rows(hist):
             "pct": t.get("pct", ""),
             "pnl_usd": t.get("pnl_usd", ""),
             "balance_after": t.get("balance_after", ""),
+            "mfe_pct": t.get("mfe_pct", ""),
+            "mae_pct": t.get("mae_pct", ""),
+            "mfe_r": t.get("mfe_r", ""),
+            "mae_r": t.get("mae_r", ""),
+            "time_in_trade_sec": t.get("time_in_trade_sec", ""),
+            "time_to_1r_sec": t.get("time_to_1r_sec", ""),
+            "time_to_2r_sec": t.get("time_to_2r_sec", ""),
             "entry_time": t.get("entry_time", ""),
             "exit_time": t.get("exit_time", ""),
         })
@@ -2722,10 +2730,11 @@ def _trade_analysis_rows(hist):
 
 
 def _analyze_trade_history():
+    """Build one consistent, immutable-enough snapshot for the whole analysis pipeline."""
     with trade_history_lock:
         hist = [dict(x) for x in trade_history]
     if not hist:
-        return [], {"trades": 0, "run_id": research_run_id}
+        return [], {"trades": 0, "run_id": research_run_id}, []
 
     winners = [t for t in hist if t.get("result") in ("tp", "trail")]
     losers = [t for t in hist if t.get("result") == "sl"]
@@ -2782,17 +2791,17 @@ def _analyze_trade_history():
         "by_symbol": by_symbol,
         "by_entry": by_entry,
     }
-    return _trade_analysis_rows(hist), summary
+    return _trade_analysis_rows(hist), summary, hist
 
 
 def _analyze_snapshot():
-    """Compatibility wrapper: /analyze TIDAK lagi scan market; membaca trade ledger."""
-    rows, summary = _analyze_trade_history()
-    return rows, summary, ""
+    """Compatibility wrapper: /analyze tidak scan market; membaca satu ledger snapshot."""
+    rows, summary, hist = _analyze_trade_history()
+    return rows, summary, hist
 
 
 def _analyze_runtime_stats():
-    rows, summary, _ = _analyze_snapshot()
+    rows, summary, _hist = _analyze_snapshot()
     return {
         "trades": summary.get("trades", 0),
         "balance": summary.get("balance", STARTING_BALANCE),
@@ -2807,18 +2816,21 @@ def _analyze_runtime_stats():
 def _write_analyze_csv(rows):
     path = "/tmp/analyze_data.csv"
     cols = [
-        "trade_id", "run_id", "symbol", "result", "decision", "entry", "sl", "tp", "exit_price",
-        "rr", "confidence", "entry_label", "rsi", "struct_h1", "d1_bias", "pct", "pnl_usd",
-        "balance_after", "entry_time", "exit_time",
+        "trade_id", "run_id", "symbol", "result", "close_reason", "decision", "entry", "sl", "tp", "exit_price",
+        "rr", "final_r", "confidence", "entry_label", "rsi", "struct_h1", "d1_bias", "pct", "pnl_usd",
+        "balance_after", "mfe_pct", "mae_pct", "mfe_r", "mae_r", "time_in_trade_sec",
+        "time_to_1r_sec", "time_to_2r_sec", "entry_time", "exit_time",
     ]
     pd.DataFrame(rows, columns=cols).to_csv(path, index=False)
     return path
 
 
-def _write_analyze_report(rows, summary, unused=""):
+def _write_analyze_report(rows, summary, hist):
+    """Write the report from the SAME snapshot used to calculate summary."""
     path = "/tmp/analyze_report.md"
     now = datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S WIB")
-    if not rows:
+    hist = [dict(t) for t in (hist or [])]
+    if not rows or not hist:
         Path(path).write_text(
             "# SMCAutoTrade — Trade Analysis\n\n"
             f"**Waktu:** {now}\n\n"
@@ -2835,6 +2847,7 @@ def _write_analyze_report(rows, summary, unused=""):
         "",
         f"**Waktu analysis:** {now}",
         f"**Research run:** `{summary.get('run_id', research_run_id)}`",
+        f"**Snapshot:** {len(hist)} closed trade",
         "**Sumber:** full closed-trade ledger dari `/stats`; tidak melakukan market scan.",
         "",
         "## Ringkasan",
@@ -2889,9 +2902,15 @@ def _write_analyze_report(rows, summary, unused=""):
         lines += ["", "## Path Analytics", "", f"- Trades tracked: **{len(path_rows)}**", f"- Avg MFE: **{mfe:.2f}R**", f"- Avg MAE: **{mae:.2f}R**"]
         if ds: lines.append(f"- Avg time in trade: **{sum(ds)/len(ds)/60:.1f} minutes**")
 
+    # Guard against future regressions where summary and report receive different snapshots.
+    if int(summary.get("trades", 0) or 0) != len(hist):
+        raise RuntimeError(
+            f"analysis snapshot mismatch: summary={summary.get('trades')} hist={len(hist)}"
+        )
+
     lines += [
         "", "## Catatan", "",
-        "- `/analyze` sekarang hanya menganalisis trade yang benar-benar closed dan tercatat sejak `/resetbalance` terakhir.",
+        "- `/analyze` hanya menganalisis trade yang benar-benar closed dan tercatat sejak `/resetbalance` terakhir.",
         "- History penuh disimpan dalam memory `trade_history`; `/backtest` tetap menampilkan 20 trade terakhir untuk kompatibilitas UI.",
         "- Jalankan `/resetbalance` untuk memulai research run baru dan mengosongkan ledger aktif.",
     ]
@@ -2900,7 +2919,6 @@ def _write_analyze_report(rows, summary, unused=""):
 
 # ============================================================
 # END ANALYZE
-# ============================================================
 # ============================================================
 
 def fmt_signal_msg(sig):
@@ -4016,8 +4034,8 @@ def bot_loop():
                                 f"Menganalisis <b>{trade_count}</b> closed trade yang tercatat sejak /resetbalance terakhir.\n"
                                 f"Tidak melakukan scan market baru.\n"
                                 f"Dibuat: report Markdown + data CSV.")
-                            rows, summary, _ = _analyze_snapshot()
-                            report_path = _write_analyze_report(rows, summary)
+                            rows, summary, hist = _analyze_snapshot()
+                            report_path = _write_analyze_report(rows, summary, hist)
                             csv_path = _write_analyze_csv(rows)
 
                             tg_send(cid,
@@ -4597,6 +4615,7 @@ if __name__=="__main__":
     threading.Thread(target=_render_keepalive_loop, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
 
+    log.info(f"[ENGINE] {MAIN_ENGINE_VERSION} starting")
     if _STRATEGY_LOAD_ERROR and ALLOWED_USER_ID:
         tg_send(ALLOWED_USER_ID,
             f"🚨 <b>strategy_logic.py BERMASALAH</b>\n\n"
