@@ -87,7 +87,7 @@ STRUCT_TRAIL_BUF_PCT  = 0.0025 # buffer 0.25% di luar swing agar tidak kena LS b
 STRUCT_TRAIL_LOOKBACK = 60     # candle M15 untuk cari swing trailing
 
 # Adaptive trailing engine V4
-TRAIL_ENGINE_VERSION       = "8.0-predictive-reversal"
+TRAIL_ENGINE_VERSION       = "9.0-lifecycle-adaptive"
 TRAIL_ARM_R                = 0.80
 TRAIL_PROTECT_R            = 1.00
 TRAIL_MATURE_R             = 1.50
@@ -108,6 +108,27 @@ TRAIL_MIN_IMPROVEMENT_ATR  = 0.10
 # into the strategy dispatcher. Closed candles remain the analysis dataset.
 TRAIL_EXECUTION_BUFFER_ATR = 0.05
 TRAIL_MIN_MARKET_GAP_ATR = 0.32
+
+# V9 Trade-lifecycle / path-aware management. These are deliberately broad
+# guardrails, not hard profit targets. The bot learns from the path already
+# observed on the live position: current R, MFE, MAE and giveback.
+TRAIL_PROVING_R = 0.35
+TRAIL_WINNER_R = 0.80
+TRAIL_EXTENDED_R = 1.50
+TRAIL_GIVEBACK_WARN = 0.30
+TRAIL_GIVEBACK_TIGHT = 0.50
+TRAIL_GIVEBACK_CRITICAL = 0.70
+TRAIL_MFE_ARM_R = 0.60
+TRAIL_MFE_STRONG_R = 1.00
+TRAIL_MFE_EXTENDED_R = 1.50
+TRAIL_MIN_LOCK_AFTER_MFE_R = 0.05
+TRAIL_FAST_REVERSAL_R = 0.80
+TRAIL_SLOW_WINNER_GRACE_R = 0.90
+
+# Entry-quality diagnostics. They are used as context/weighting, not as a
+# binary veto, because the supplied research sample is only 14 trades.
+ENTRY_TYPE_WEIGHT = {"ob": 3, "fvg": 2, "eq": 1}
+STRUCTURE_WEIGHT = {"bullish": 2, "bearish": 2, "ranging": 1, "neutral": 0}
 
 # Fibonacci extension TP (level 1.272 dan 1.618 dari impulse leg)
 FIB_EXT_1 = 0.272   # 127.2%
@@ -2402,6 +2423,86 @@ def _trail_protected_swing(df: pd.DataFrame, direction: str, atr: float) -> Opti
     return None
 
 
+def _trade_lifecycle_context(state: dict, current_r: float, direction: str,
+                              entry: float, current_price: float,
+                              initial_risk: float) -> dict:
+    """Build a path-aware lifecycle from metrics maintained by main.py.
+
+    main.py already updates mfe_r/mae_r/time-to-R before dispatching the strategy.
+    V9 treats those fields as first-class evidence instead of recalculating a
+    trailing decision from weakness alone. If a field is unavailable (old/local
+    state), the function degrades safely to the current R observation.
+    """
+    try:
+        mfe_r = max(float(state.get("mfe_r", current_r)), current_r)
+    except Exception:
+        mfe_r = current_r
+    try:
+        mae_r = min(float(state.get("mae_r", current_r)), current_r)
+    except Exception:
+        mae_r = current_r
+    giveback_r = max(0.0, mfe_r - current_r)
+    giveback_ratio = giveback_r / max(abs(mfe_r), 0.25) if mfe_r > 0 else 0.0
+    if current_r < TRAIL_PROVING_R:
+        phase = "INITIAL"
+    elif current_r < TRAIL_WINNER_R and mfe_r < TRAIL_MFE_ARM_R:
+        phase = "PROVING"
+    elif mfe_r >= TRAIL_MFE_EXTENDED_R:
+        phase = "EXTENDED"
+    elif mfe_r >= TRAIL_MFE_ARM_R:
+        phase = "WINNER"
+    else:
+        phase = "PROVING"
+
+    if giveback_ratio >= TRAIL_GIVEBACK_CRITICAL:
+        distribution = "CRITICAL_GIVEBACK"
+    elif giveback_ratio >= TRAIL_GIVEBACK_TIGHT:
+        distribution = "DEEP_GIVEBACK"
+    elif giveback_ratio >= TRAIL_GIVEBACK_WARN:
+        distribution = "MEANINGFUL_GIVEBACK"
+    else:
+        distribution = "HEALTHY_GIVEBACK"
+
+    # A slow winner is not automatically weak. Time-to-1R is informational and
+    # only used to prevent premature tightening when structure remains healthy.
+    t1 = state.get("time_to_1r_sec")
+    slow_winner = bool(t1 is not None and float(t1) > 4 * 3600 and mfe_r >= TRAIL_MFE_ARM_R)
+    return {
+        "phase": phase,
+        "distribution": distribution,
+        "current_r": round(float(current_r), 4),
+        "mfe_r": round(float(mfe_r), 4),
+        "mae_r": round(float(mae_r), 4),
+        "giveback_r": round(float(giveback_r), 4),
+        "giveback_ratio": round(float(giveback_ratio), 4),
+        "time_to_1r_sec": float(t1) if t1 is not None else None,
+        "time_to_2r_sec": float(state.get("time_to_2r_sec")) if state.get("time_to_2r_sec") is not None else None,
+        "slow_winner": slow_winner,
+    }
+
+
+def _entry_quality_context(state: dict, direction: str) -> dict:
+    """Low-risk diagnostic quality score; never acts as a hard entry veto."""
+    sig = state.get("signal", state) or {}
+    label = str(sig.get("entry_label") or state.get("entry_label") or "").lower()
+    h1 = str(sig.get("struct_h1") or state.get("struct_h1") or "neutral").lower()
+    d1 = str(sig.get("d1_bias") or state.get("d1_bias") or "neutral").lower()
+    score = ENTRY_TYPE_WEIGHT.get(label, 0)
+    reasons = []
+    if label in ENTRY_TYPE_WEIGHT:
+        reasons.append(f"entry:{label}")
+    if (direction == "bull" and h1 == "bullish") or (direction == "bear" and h1 == "bearish"):
+        score += 2; reasons.append("h1_aligned")
+    elif h1 in {"bullish", "bearish"}:
+        score -= 1; reasons.append("h1_conflict")
+    if (direction == "bull" and d1 == "bullish") or (direction == "bear" and d1 == "bearish"):
+        score += 2; reasons.append("d1_aligned")
+    elif d1 in {"bullish", "bearish"}:
+        score -= 2; reasons.append("d1_conflict")
+    return {"score": int(score), "entry_label": label or None, "struct_h1": h1,
+            "d1_bias": d1, "reasons": reasons}
+
+
 def _trail_reversal_analysis(df: pd.DataFrame, direction: str, entry: float,
                              current_price: float, initial_risk: float,
                              tp: Optional[float] = None) -> dict:
@@ -2801,22 +2902,28 @@ def _momentum_context(df: pd.DataFrame) -> dict:
 
 def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
                     df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
-    """Position-management brain V8 — predictive, stateful-in-time, execution-free.
+    """V9 position-management brain: lifecycle + path + structure + execution safety.
 
-    The engine does not predict exact future prices. It detects when the evidence
-    for continuation is degrading and moves protection *before* a full reversal
-    is complete. This is intentionally asymmetric: healthy winners get room;
-    weakening/reversing winners surrender progressively less of the move.
+    Contract with main.py:
+      * returns only HOLD/PROTECT/TRAIL/EXIT decisions;
+      * TRAIL contains a strictly improving, strategy-validated ``sl``;
+      * main.py remains the execution/reconciliation layer;
+      * no Binance order is created here.
+
+    The decision hierarchy is intentionally conservative:
+      1. Establish the market/path context.
+      2. Classify lifecycle and giveback.
+      3. Classify structural/momentum weakness.
+      4. Generate candidate stops.
+      5. Reject candidates that are geometrically unsafe or fail to improve.
+      6. Tighten only when the observed path justifies it.
     """
     if df_m15 is None or df_m15.empty:
         return {"action": "HOLD", "state": "NO_DATA", "reason": ["M15 unavailable"]}
 
-    # main.py supplies the current position state, but it does not inject a
-    # fresh ticker price into _strategy_position_update(). The latest kline close
-    # is therefore the only price shared by the strategy on every management
-    # cycle. Use it consistently for trail feasibility and profit-R; use CLOSED
-    # candles only for structural/momentum analysis below. Do not let a stale
-    # state["current_price"] become the reference price for a new stop.
+    # main.py does not pass a ticker into strategy dispatch. The latest M15 close
+    # is therefore the shared market-price proxy. Structural analysis uses only
+    # completed candles when a datetime index is available.
     live_price = float(df_m15["close"].iloc[-1])
     m15 = build_df(_closed_candles(df_m15, 15), interval_minutes=15)
     if m15 is None or len(m15) < 55:
@@ -2834,130 +2941,139 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
     initial_risk = max(abs(entry - initial_sl), 1e-12)
     profit_r = ((current_price - entry) if direction == "bull" else (entry - current_price)) / initial_risk
 
-    analysis = _trail_reversal_analysis(
-        m15, direction, entry, current_price, initial_risk, tp=tp
-    )
+    lifecycle = _trade_lifecycle_context(state, profit_r, direction, entry, current_price, initial_risk)
+    quality = _entry_quality_context(state, direction)
+    analysis = _trail_reversal_analysis(m15, direction, entry, current_price, initial_risk, tp=tp)
+    analysis["lifecycle"] = lifecycle
+    analysis["entry_quality"] = quality
     state_name = analysis["state"]
     reasons = list(analysis["reasons"])
 
-    # Before enough profit exists, do not force a trail unless the price has already
-    # invalidated the thesis. We still return diagnostics so main.py can log why.
-    if profit_r < TRAIL_MIN_PROFIT_TO_PROTECT_R:
+    # INITIAL/PROVING trades are not allowed to become aggressively trailed just
+    # because a single weak candle appeared. A thesis can still be developing.
+    if profit_r < TRAIL_MIN_PROFIT_TO_PROTECT_R and lifecycle["mfe_r"] < TRAIL_MFE_ARM_R:
         return {
-            "action": "HOLD",
-            "state": "DEVELOPING",
-            "profit_r": round(profit_r, 2),
-            "weakness_score": analysis["score"],
-            "reversal_state": state_name,
+            "action": "HOLD", "state": "DEVELOPING", "profit_r": round(profit_r, 2),
+            "weakness_score": analysis["score"], "reversal_state": state_name,
             "reversal_confirmations": analysis["confirmations"],
             "reversal_diagnostics": analysis,
-            "reason": reasons + ["profit_not_mature_for_trail"],
+            "reason": reasons + ["lifecycle_not_mature_for_trail"],
         }
 
-    trail_pack = _trail_stop_candidates(
-        m15, direction, entry, current_price, initial_risk, analysis
-    )
+    trail_pack = _trail_stop_candidates(m15, direction, entry, current_price, initial_risk, analysis)
     candidates = trail_pack["candidates"]
     atr = trail_pack["atr"]
-    chosen, source = _choose_trail_stop(
-        candidates, direction, current_price, current_sl, atr, state_name
-    )
 
-    # Final execution-feasibility gate. Never emit TRAIL merely because an
-    # analytical candidate exists. If the candidate is on the wrong side of the
-    # live market or too close to it, keep the existing protection instead.
+    # Path-aware tightening: healthy winners get structure-first treatment. A
+    # large MFE with deep giveback allows the tighter candidates to compete.
+    giveback_ratio = lifecycle["giveback_ratio"]
+    path_state = lifecycle["distribution"]
+    effective_state = state_name
+    if path_state in {"DEEP_GIVEBACK", "CRITICAL_GIVEBACK"} and lifecycle["mfe_r"] >= TRAIL_MFE_ARM_R:
+        effective_state = "REVERSAL" if state_name == "HEALTHY" else state_name
+        if "deep_giveback" not in reasons and path_state == "DEEP_GIVEBACK":
+            reasons.append("path_deep_giveback")
+        if "critical_giveback" not in reasons and path_state == "CRITICAL_GIVEBACK":
+            reasons.append("path_critical_giveback")
+
+    chosen, source = _choose_trail_stop(candidates, direction, current_price, current_sl, atr, effective_state)
+
     current_bar_high = float(df_m15["high"].iloc[-1]) if "high" in df_m15.columns else None
     current_bar_low = float(df_m15["low"].iloc[-1]) if "low" in df_m15.columns else None
     chosen, invalid_reason = _validate_trail_candidate(
         chosen, direction, current_price, atr, current_sl, entry,
         bar_high=current_bar_high, bar_low=current_bar_low
     )
-    if chosen is None:
-        source = None
 
-    # Strong reversal: if a valid stop can lock meaningful profit, use it immediately.
+    # Candidate can be valid but still too ambitious for the observed path. Before
+    # ~0.8R, require a meaningful MFE and a real weakness/reversal signal. This
+    # prevents normal noise from repeatedly replacing protection.
+    if chosen is not None and profit_r < TRAIL_WINNER_R and lifecycle["mfe_r"] < TRAIL_MFE_ARM_R:
+        chosen, source = None, None
+        invalid_reason = "lifecycle_not_ready_for_stop_improvement"
+
+    # If the position is an extended winner, protect against giveback. The stop
+    # may not erase the existing protection and must still pass the final geometry gate.
+    if chosen is not None and lifecycle["mfe_r"] >= TRAIL_MFE_EXTENDED_R and giveback_ratio >= TRAIL_GIVEBACK_TIGHT:
+        tight = []
+        for name, value in candidates.items():
+            if value is None: continue
+            v = float(value)
+            if direction == "bull" and current_sl < v < current_price - atr * 0.10:
+                tight.append((v, name))
+            elif direction == "bear" and current_price + atr * 0.10 < v < current_sl:
+                tight.append((v, name))
+        if tight:
+            chosen, source = (max(tight, key=lambda x: x[0]) if direction == "bull" else min(tight, key=lambda x: x[0]))
+            chosen, invalid_reason = _validate_trail_candidate(
+                chosen, direction, current_price, atr, current_sl, entry,
+                bar_high=current_bar_high, bar_low=current_bar_low
+            )
+
     if chosen is not None:
-        minimum_lock_r = TRAIL_LOCK_WEAK_R
-        if state_name == "CAUTION":
-            minimum_lock_r = TRAIL_LOCK_CAUTION_R
-        elif state_name == "WEAKENING":
+        minimum_lock_r = TRAIL_LOCK_CAUTION_R
+        if effective_state == "WEAKENING":
             minimum_lock_r = TRAIL_LOCK_WEAK_R
-        elif state_name == "REVERSAL":
+        elif effective_state == "REVERSAL":
             minimum_lock_r = TRAIL_LOCK_REVERSAL_R * 0.65
-        elif state_name == "REVERSAL_CONFIRMED":
+        elif effective_state == "REVERSAL_CONFIRMED":
             minimum_lock_r = TRAIL_LOCK_REVERSAL_R
 
         locked_r = ((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk
-        if locked_r < minimum_lock_r and state_name in {"REVERSAL", "REVERSAL_CONFIRMED"}:
-            # Fall back to the strongest valid candidate that actually preserves
-            # at least the minimum lock; if none exists, keep the previous SL.
-            eligible = []
-            for name, value in candidates.items():
-                if value is None:
-                    continue
-                v = float(value)
-                lr = ((v - entry) if direction == "bull" else (entry - v)) / initial_risk
-                if lr >= minimum_lock_r:
-                    if direction == "bull" and current_sl < v < current_price - atr * 0.10:
-                        eligible.append((v, name))
-                    elif direction == "bear" and current_price + atr * 0.10 < v < current_sl:
-                        eligible.append((v, name))
-            if eligible:
-                chosen, source = (max(eligible, key=lambda x: x[0]) if direction == "bull"
-                                  else min(eligible, key=lambda x: x[0]))
+        # Do not force a profit lock that the market/path cannot safely support.
+        if effective_state in {"REVERSAL", "REVERSAL_CONFIRMED"} and locked_r < minimum_lock_r:
+            chosen, source = None, None
+            invalid_reason = "candidate_does_not_support_required_lock"
 
+    if chosen is not None:
+        locked_r = ((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk
         return {
             "action": "TRAIL",
             "state": state_name,
             "sl": round(float(chosen), 10),
             "profit_r": round(profit_r, 2),
-            "locked_r": round((((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk), 3),
+            "locked_r": round(locked_r, 3),
             "weakness_score": int(analysis["score"]),
             "reversal_confirmations": int(analysis["confirmations"]),
             "trail_source": source,
             "reversal_diagnostics": analysis,
+            "lifecycle": lifecycle,
+            "entry_quality": quality,
             "reason": reasons + [f"predictive_trail:{source}"],
         }
 
-    # A confirmed reversal without an improvable stop is safer handled as a controlled
-    # exit once there is enough realized profit. This avoids holding a winner all the
-    # way back to its original SL just because no structural candidate exists.
-    if state_name == "REVERSAL_CONFIRMED" and profit_r >= TRAIL_STRONG_REVERSAL_R:
+    # Confirmed reversal at a mature profit is the only case where the brain may
+    # request a market exit. This keeps main.py's verified-close path intact.
+    if state_name == "REVERSAL_CONFIRMED" and profit_r >= TRAIL_STRONG_REVERSAL_R and lifecycle["mfe_r"] >= TRAIL_MFE_EXTENDED_R:
         return {
-            "action": "EXIT",
-            "close": True,
-            "state": state_name,
-            "profit_r": round(profit_r, 2),
-            "weakness_score": int(analysis["score"]),
+            "action": "EXIT", "close": True, "state": state_name,
+            "profit_r": round(profit_r, 2), "weakness_score": int(analysis["score"]),
             "reversal_confirmations": int(analysis["confirmations"]),
-            "reversal_diagnostics": analysis,
-            "reason": reasons + ["confirmed_reversal_no_safe_trail"]
+            "reversal_diagnostics": analysis, "lifecycle": lifecycle,
+            "entry_quality": quality,
+            "reason": reasons + ["confirmed_reversal_mature_winner_no_safe_trail"],
         }
 
-    if state_name in {"REVERSAL", "REVERSAL_CONFIRMED", "WEAKENING"}:
-        safe_reason = "reversal_detected_but_no_safe_improvement"
-        if invalid_reason:
-            safe_reason = f"trail_candidate_rejected:{invalid_reason}"
+    if state_name in {"REVERSAL", "REVERSAL_CONFIRMED", "WEAKENING"} or giveback_ratio >= TRAIL_GIVEBACK_WARN:
+        safe_reason = invalid_reason or "weakness_detected_but_no_safe_improvement"
         return {
-            "action": "PROTECT",
-            "state": state_name,
-            "profit_r": round(profit_r, 2),
-            "weakness_score": int(analysis["score"]),
+            "action": "PROTECT", "state": state_name,
+            "profit_r": round(profit_r, 2), "weakness_score": int(analysis["score"]),
             "reversal_confirmations": int(analysis["confirmations"]),
-            "reversal_diagnostics": analysis,
-            "trail_candidate_rejected": invalid_reason,
+            "reversal_diagnostics": analysis, "lifecycle": lifecycle,
+            "entry_quality": quality, "trail_candidate_rejected": safe_reason,
             "market_price": round(current_price, 10),
-            "reason": reasons + [safe_reason]
+            "reason": reasons + [f"trail_not_executed:{safe_reason}"],
         }
 
     return {
         "action": "PROTECT" if profit_r >= TRAIL_CAUTION_R else "HOLD",
-        "state": state_name,
-        "profit_r": round(profit_r, 2),
+        "state": state_name, "profit_r": round(profit_r, 2),
         "weakness_score": int(analysis["score"]),
         "reversal_confirmations": int(analysis["confirmations"]),
-        "reversal_diagnostics": analysis,
-        "reason": reasons + ["trend_still_healthy_or_no_better_stop"]
+        "reversal_diagnostics": analysis, "lifecycle": lifecycle,
+        "entry_quality": quality,
+        "reason": reasons + ["trend_healthy_or_no_safe_better_stop"],
     }
 
 
