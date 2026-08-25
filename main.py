@@ -76,7 +76,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V20"
+MAIN_ENGINE_VERSION = "V20.2"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -588,16 +588,57 @@ def run_flask():
 # ═════════════════════════════════════════════
 # TELEGRAM
 # ═════════════════════════════════════════════
+def _tg_plain_fallback(text):
+    """Strip HTML markup for a guaranteed-safe Telegram fallback message."""
+    try:
+        # The normal path keeps rich HTML. This path is used only after Telegram
+        # rejects the markup, so sacrificing formatting is preferable to losing
+        # the operational message entirely.
+        plain = re.sub(r"<[^>]*>", "", str(text))
+        plain = html.unescape(plain)
+        return plain
+    except Exception:
+        return str(text)
+
+
 def tg_send(chat_id, text):
+    """Send Telegram HTML safely, retrying rejected HTML once as plain text."""
+    if not chat_id or not TELEGRAM_TOKEN:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id":chat_id,"text":text,"parse_mode":"HTML"},
+            url,
+            json={"chat_id":chat_id,"text":str(text),"parse_mode":"HTML"},
             timeout=10)
-        if r.status_code >= 400:
-            log.warning(f"[TG/sendMessage] HTTP {r.status_code}: {r.text[:300]}")
+        if r.status_code < 400:
+            return True
+
+        body = r.text[:500]
+        # Telegram 400s caused by malformed HTML must never become an operational
+        # failure. Retry exactly once without parse_mode. Do not retry arbitrary
+        # HTTP failures because that could amplify rate-limit/network problems.
+        if r.status_code == 400 and "can't parse entities" in body.lower():
+            fallback = _tg_plain_fallback(text)
+            try:
+                rr = requests.post(
+                    url,
+                    json={"chat_id":chat_id,"text":fallback},
+                    timeout=10)
+                if rr.status_code < 400:
+                    log.warning("[TG/sendMessage] HTML rejected; delivered plain-text fallback")
+                    return True
+                log.warning(f"[TG/sendMessage] HTML rejected and fallback failed: HTTP {rr.status_code}: {rr.text[:300]}")
+                return False
+            except Exception as e:
+                log.error(f"[TG/sendMessage] fallback error: {e}")
+                return False
+
+        log.warning(f"[TG/sendMessage] HTTP {r.status_code}: {body[:300]}")
+        return False
     except Exception as e:
         log.error(f"[TG/sendMessage] {e}")
+        return False
 
 # ============================================================
 # TAMBAHAN BARU (START) — Helper kirim file ke Telegram
@@ -2571,6 +2612,7 @@ def _price_cache_loop():
 # INDIKATOR
 # ═════════════════════════════════════════════
 def run_scan_once(chat_id):
+    global early_reject_remaining
     """Scan universe with cached market data and record rich market context.
 
     V19 adds *derived* market breadth/relative-strength/regime telemetry only.
@@ -4565,7 +4607,8 @@ def bot_loop():
                     if len(parts) > 1:
                         target_sym = parts[1].upper()
                         _ban_coin(target_sym, reason="manual", duration=float("inf"), kind="manual")
-                        tg_send(chat_id, f"🚫 <b>{target_sym} diban PERMANEN.</b>\nLepas dengan <code>/unban {target_sym}</code> atau <code>/resetban</code>.")
+                        safe_sym = html.escape(target_sym)
+                        tg_send(chat_id, f"🚫 <b>{safe_sym} diban PERMANEN.</b>\nLepas dengan <code>{safe_sym}</code> memakai /unban atau <code>/resetban</code>.")
                     else:
                         with ban_lock:
                             cur_scan = scan_counter
@@ -4581,21 +4624,25 @@ def bot_loop():
                                     kind = meta.get("kind", "short")
                                     c = meta.get("confidence")
                                     conf_txt = f" C{float(c):.0f}%" if c is not None else ""
+                                safe_sym = html.escape(str(sym))
+                                safe_reason = html.escape(str(reason), quote=False)
+                                safe_kind = html.escape(str(kind), quote=False)
+                                safe_conf = html.escape(str(conf_txt), quote=False)
                                 if dur == float("inf"):
-                                    lines.append(f"• {sym} (PERMANEN) | {kind} | {reason}")
+                                    lines.append(f"• {safe_sym} (PERMANEN) | {safe_kind} | {safe_reason}")
                                 else:
                                     remaining = max(0.0, float(dur) - (cur_scan - float(banned_at)))
-                                    lines.append(f"• {sym} ({remaining:g} scan) | {kind}{conf_txt} | {reason}")
+                                    lines.append(f"• {safe_sym} ({remaining:g} scan) | {safe_kind}{safe_conf} | {safe_reason}")
                             text_out = f"🚫 <b>Banned ({len(b)}):</b>\n" + "\n".join(lines)
                             lc=_low_conf_summary()
                             if lc:
-                                top="\n".join(f"• {x['symbol']} — {x['count']}x | avg C{x['avg']:.1f}% | min C{x['min']:.1f}%" for x in lc[:10])
+                                top="\n".join(f"• {html.escape(str(x['symbol']))} — {x['count']}x | avg C{x['avg']:.1f}% | min C{x['min']:.1f}%" for x in lc[:10])
                                 text_out += "\n\n🧠 <b>Low-confidence frequency:</b>\n" + top
                             tg_send(chat_id, text_out)
                         else:
                             lc=_low_conf_summary()
                             if lc:
-                                top="\n".join(f"• {x['symbol']} — {x['count']}x | avg C{x['avg']:.1f}% | min C{x['min']:.1f}%" for x in lc[:10])
+                                top="\n".join(f"• {html.escape(str(x['symbol']))} — {x['count']}x | avg C{x['avg']:.1f}% | min C{x['min']:.1f}%" for x in lc[:10])
                                 tg_send(chat_id,"✅ Tidak ada ban aktif.\n\n🧠 <b>Low-confidence frequency:</b>\n"+top)
                             else: tg_send(chat_id,"✅ Belum ada ban dan belum ada histori low-confidence.")
                 elif text.startswith("/unban") or text.startswith("unban"):
