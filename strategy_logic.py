@@ -1,6 +1,7 @@
 """
-strategy_logic.py — OTAK v10 (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
+strategy_logic.py — OTAK v11 (Evidence-Based Chart Brain) (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
 ========================================================================================
+V10 dianggap eksperimen over-filtering dan tidak dijadikan baseline. V11 dibangun sebagai evidence-based chart reasoning engine.
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
 CISD, OTE & Fibonacci, external vs internal liquidity, Wyckoff, dsb).
@@ -87,7 +88,7 @@ STRUCT_TRAIL_BUF_PCT  = 0.0025 # buffer 0.25% di luar swing agar tidak kena LS b
 STRUCT_TRAIL_LOOKBACK = 60     # candle M15 untuk cari swing trailing
 
 # Adaptive trailing engine V4
-TRAIL_ENGINE_VERSION       = "10.0-lifecycle-liquidity-pullback"
+TRAIL_ENGINE_VERSION       = "11.0-evidence-based-market-brain"
 TRAIL_ARM_R                = 0.80
 TRAIL_PROTECT_R            = 1.00
 TRAIL_MATURE_R             = 1.50
@@ -162,24 +163,29 @@ ENTRY_LOCATION_HARD_FLOOR = 30   # kandidat di bawah ini tidak executable
 # execution gate will immediately reject as ENTRY_TOO_FAR.
 MAIN_ENTRY_MAX_ATR = 1.50
 
-# V10 entry-quality controls derived from the latest 19-trade research run.
-# These are deliberately evidence-weighted and conservative; they are not
-# hard-coded win-rate assumptions.
-V10_TREND_LOOKBACK_FAST = 3
-V10_TREND_LOOKBACK_SLOW = 8
-V10_TREND_MIN_SCORE = 38
-V10_PULLBACK_MIN_SCORE = 42
-V10_POI_MIN_SCORE = 48
-V10_FVG_MIN_SCORE = 52
-V10_EARLY_FAIL_R = -0.65
-V10_EARLY_FAIL_MAE_R = -0.65
-V10_EARLY_FAIL_MAX_TRADE_MIN = 180.0
-V10_EXTERNAL_LIQ_NEAR_ATR = 1.25
-V10_EXTERNAL_LIQ_VERY_NEAR_ATR = 0.65
-V10_MAX_CONF_WITHOUT_PULLBACK = 56
-V10_MAX_CONF_WITH_WEAK_POI = 58
-V10_MAX_CONF_FVG = 61
-V10_MAX_CONF_EQ = 62
+# # V11 — evidence-based chart reasoning. These are soft weights/diagnostics, not
+# a pile of hard entry gates. The research sample showed that over-filtering
+# reduced opportunity without proving better outcomes, so V11 separates:
+#   1) market thesis, 2) setup evidence, 3) execution geometry.
+# Only execution-invalid conditions are hard rejects here.
+V11_TREND_LOOKBACK_FAST = 3
+V11_TREND_LOOKBACK_SLOW = 8
+V11_EARLY_FAIL_R = -0.75
+V11_EARLY_FAIL_MAE_R = -0.80
+V11_EARLY_FAIL_MAX_TRADE_MIN = 180.0
+V11_EXTERNAL_LIQ_NEAR_ATR = 1.25
+V11_EXTERNAL_LIQ_VERY_NEAR_ATR = 0.65
+V11_CONF_FLOOR = 40
+V11_EVIDENCE_NEUTRAL = 50.0
+V11_EVIDENCE_MAX_ADJUST = 10.0
+V11_TREND_WEIGHT = 0.22
+V11_PULLBACK_WEIGHT = 0.18
+V11_POI_WEIGHT = 0.22
+V11_LIQUIDITY_WEIGHT = 0.16
+V11_LOCATION_WEIGHT = 0.12
+V11_CONFIRMATION_WEIGHT = 0.10
+V11_FVG_PENALTY_WITHOUT_CONFIRMATION = 3
+V11_EQ_PENALTY_IN_UNCLEAR_CONTEXT = 2
 
 
 # =============================================================================
@@ -1063,16 +1069,8 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         selected_confirm.get("confirmed"),
     ))
 
-    # V10: a large raw confluence score cannot compensate for a fragile trend
-    # or an unconfirmed pullback. These are soft caps, not a global confidence
-    # threshold. The current research explicitly shows the 50-59 bucket is
-    # healthier than 60-69, so confidence is treated as quality, not a target.
-    if trend_metrics["score"] < V10_TREND_MIN_SCORE:
-        confidence = min(confidence, 58)
-    if pullback_metrics["score"] < V10_PULLBACK_MIN_SCORE and trigger_count == 0:
-        confidence = min(confidence, V10_MAX_CONF_WITHOUT_PULLBACK)
-    if liquidity_metrics["very_near"]:
-        confidence = min(confidence, 62)
+    # V11: market-health metrics are exposed as evidence; they do not hard-cap
+    # confidence here. The operator threshold remains external in main.py.
 
     return {
         "direction": direction,
@@ -1121,7 +1119,52 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
 
 
 # =============================================================================
-# V10 ENTRY INTELLIGENCE — TREND / PULLBACK / POI / LIQUIDITY
+# V11 MARKET-REGIME REASONER
+# =============================================================================
+def infer_market_regime(df_btc_h1: Optional[pd.DataFrame] = None) -> dict:
+    """Infer a soft crypto market regime from BTC H1 when supplied.
+
+    This is deliberately context, not a hard entry filter. It allows the same
+    strategy to reason differently in expansion, consolidation, exhaustion and
+    risk-off conditions without hard-coding today's price.  Current external
+    market research on 25 Aug 2026 describes BTC above $80k after a sharp rally,
+    with consolidation/high sentiment and elevated reversal risk; V11 therefore
+    treats strong expansion followed by exhaustion as a *caution signal*, not a
+    prohibition on trades.
+    """
+    if df_btc_h1 is None or df_btc_h1.empty or len(df_btc_h1) < 30:
+        return {"state": "UNKNOWN", "bias": "neutral", "score": 50.0,
+                "reason": "BTC H1 tidak tersedia; macro context non-blocking."}
+    try:
+        x = build_df(_closed_candles(df_btc_h1, 60), interval_minutes=60)
+        atr = max(float(x["atr"].iloc[-1]), 1e-12)
+        c = x["close"].astype(float)
+        fast = (float(c.iloc[-1] - c.iloc[-3]) / atr)
+        slow = (float(c.iloc[-1] - c.iloc[-10]) / atr)
+        ema20 = float(ema(c, 20).iloc[-1])
+        ema50 = float(ema(c, 50).iloc[-1]) if len(c) >= 50 else ema20
+        above = float(c.iloc[-1]) > ema20 > ema50
+        below = float(c.iloc[-1]) < ema20 < ema50
+        if above and fast > 0.6 and slow > 1.0:
+            state, bias, score = "EXPANSION_BULL", "bullish", 78.0
+        elif below and fast < -0.6 and slow < -1.0:
+            state, bias, score = "EXPANSION_BEAR", "bearish", 22.0
+        elif above and fast < 0:
+            state, bias, score = "BULLISH_EXHAUSTION", "bullish", 62.0
+        elif below and fast > 0:
+            state, bias, score = "BEARISH_EXHAUSTION", "bearish", 38.0
+        else:
+            state, bias, score = "CONSOLIDATION", "neutral", 50.0
+        return {"state": state, "bias": bias, "score": score,
+                "fast_atr": round(fast, 3), "slow_atr": round(slow, 3),
+                "ema20": ema20, "ema50": ema50}
+    except Exception as exc:
+        return {"state": "UNKNOWN", "bias": "neutral", "score": 50.0,
+                "reason": f"macro context unavailable: {exc}"}
+
+
+# =============================================================================
+# V11 ENTRY INTELLIGENCE — TREND / PULLBACK / POI / LIQUIDITY
 # =============================================================================
 
 def _trend_strength_metrics(m15: pd.DataFrame, direction: str, atr: Optional[float] = None) -> dict:
@@ -1132,7 +1175,7 @@ def _trend_strength_metrics(m15: pd.DataFrame, direction: str, atr: Optional[flo
     progress matters. This is used as a soft quality signal, not a standalone
     entry trigger.
     """
-    if m15 is None or len(m15) < max(V10_TREND_LOOKBACK_SLOW + 2, 12):
+    if m15 is None or len(m15) < max(V11_TREND_LOOKBACK_SLOW + 2, 12):
         return {"score": 0, "state": "UNKNOWN", "fast_atr": 0.0,
                 "slow_atr": 0.0, "efficiency": 0.0, "progress_ratio": 0.0}
     atr_v = max(float(atr if atr is not None else m15["atr"].iloc[-1]), 1e-12)
@@ -1148,10 +1191,10 @@ def _trend_strength_metrics(m15: pd.DataFrame, direction: str, atr: Optional[flo
         gross = float(seg.diff().abs().sum())
         return net / max(gross, 1e-12)
 
-    fast = _directional_move(V10_TREND_LOOKBACK_FAST) / atr_v
-    slow = _directional_move(V10_TREND_LOOKBACK_SLOW) / atr_v
-    eff = _efficiency(V10_TREND_LOOKBACK_SLOW)
-    bar_speed = max(0.0, slow) / max(V10_TREND_LOOKBACK_SLOW, 1)
+    fast = _directional_move(V11_TREND_LOOKBACK_FAST) / atr_v
+    slow = _directional_move(V11_TREND_LOOKBACK_SLOW) / atr_v
+    eff = _efficiency(V11_TREND_LOOKBACK_SLOW)
+    bar_speed = max(0.0, slow) / max(V11_TREND_LOOKBACK_SLOW, 1)
 
     sh, sl = swing_pts(m15, lb=3)
     structure_progress = False
@@ -1171,7 +1214,7 @@ def _trend_strength_metrics(m15: pd.DataFrame, direction: str, atr: Optional[flo
         state_name = "STRONG"
     elif score >= 52:
         state_name = "HEALTHY"
-    elif score >= V10_TREND_MIN_SCORE:
+    elif score >= 48:
         state_name = "WEAK"
     else:
         state_name = "FRAGILE"
@@ -1242,7 +1285,7 @@ def _pullback_quality_metrics(m15: pd.DataFrame, direction: str, atr: Optional[f
     score = max(0.0, min(100.0, score))
     if score >= 70:
         state_name = "VALID"
-    elif score >= V10_PULLBACK_MIN_SCORE:
+    elif score >= 45:
         state_name = "WEAK_VALID"
     else:
         state_name = "INVALID_OR_UNCONFIRMED"
@@ -1274,8 +1317,8 @@ def _liquidity_context_metrics(m15: pd.DataFrame, direction: str, atr: Optional[
         if lows:
             ext_dist = price - max(lows)
     dist_atr = ext_dist / atr_v if ext_dist is not None else None
-    near = bool(dist_atr is not None and dist_atr <= V10_EXTERNAL_LIQ_NEAR_ATR)
-    very_near = bool(dist_atr is not None and dist_atr <= V10_EXTERNAL_LIQ_VERY_NEAR_ATR)
+    near = bool(dist_atr is not None and dist_atr <= V11_EXTERNAL_LIQ_NEAR_ATR)
+    very_near = bool(dist_atr is not None and dist_atr <= V11_EXTERNAL_LIQ_VERY_NEAR_ATR)
     score = 0
     if liq.get("type") == "sweep": score += 45
     if ind.get("swept"): score += 25
@@ -1294,32 +1337,97 @@ def _liquidity_context_metrics(m15: pd.DataFrame, direction: str, atr: Optional[
 
 def _candidate_poi_quality(candidate: dict, m15: pd.DataFrame, h1: pd.DataFrame,
                            direction: str, score_ctx: dict) -> dict:
-    """Quality gate for OB/FVG/EQ candidates; distinguishes a POI from a mere zone."""
+    """Score a zone as evidence, not as a binary gate.
+
+    V11 treats OB/FVG/EQ as different setup archetypes. A zone becomes more
+    convincing when freshness, liquidity interaction, structural trigger, HTF
+    overlap and M15 confirmation agree, but one missing feature does not erase
+    an otherwise coherent setup.
+    """
     label = str(candidate.get("label", "")).lower()
-    score = float(candidate.get("score", 0))
+    raw = float(candidate.get("score", 0) or 0)
+    freshness = 1.0 if candidate.get("fresh", True) else 0.0
+    sweep = 1.0 if score_ctx.get("selected_sweep") else 0.0
+    trigger = min(1.0, int(score_ctx.get("trigger_count", 0) or 0) / 2.0)
+    confirmed = 1.0 if (score_ctx.get("entry_confirmation", {}) or {}).get("confirmed") else 0.0
+    htf_overlap = 1.0 if score_ctx.get("htf_poi_overlap") else 0.0
+
+    base = {"ob": 58.0, "fvg": 50.0, "eq": 47.0}.get(label, 45.0)
+    q = base + min(10.0, raw * 1.6) + 6.0 * freshness + 9.0 * sweep + 8.0 * trigger + 8.0 * confirmed + 6.0 * htf_overlap
     reasons = []
-    if label in ("ob", "ob_retest"):
-        score_q = 55.0 + min(20.0, score * 2.5)
-        if score_ctx.get("selected_sweep"): score_q += 10
-        if score_ctx.get("trigger_count", 0) >= 1: score_q += 8
-        if score_ctx.get("entry_confirmation", {}).get("confirmed"): score_q += 7
-        state = "STRONG_POI" if score_q >= 78 else "VALID_POI"
-        reasons = ["ob_structural_base"]
-    elif label in ("fvg", "fvg_retest"):
-        score_q = 42.0 + min(18.0, score * 2.0)
-        if score_ctx.get("selected_sweep"): score_q += 10
-        if score_ctx.get("trigger_count", 0) >= 1: score_q += 8
-        if score_ctx.get("entry_confirmation", {}).get("confirmed"): score_q += 8
-        state = "STRONG_FVG" if score_q >= 78 else "FVG_REQUIRES_CONFLUENCE"
-        reasons = ["fvg_needs_confirmation"]
-    else:
-        score_q = 40.0 + min(12.0, score * 2.0)
-        if score_ctx.get("selected_sweep"): score_q += 8
-        if score_ctx.get("trigger_count", 0) >= 2: score_q += 8
-        state = "EQ_CONFIRMED" if score_q >= 60 else "EQ_WEAK"
-        reasons = ["liquidity_level"]
-    return {"score": round(max(0.0, min(100.0, score_q)), 1),
-            "state": state, "reasons": reasons}
+    if label == "ob": reasons.append("structural_supply_demand_zone")
+    elif label == "fvg": reasons.append("imbalance_zone")
+    elif label == "eq": reasons.append("liquidity_level")
+    if sweep: reasons.append("liquidity_interaction")
+    if confirmed: reasons.append("entry_confirmation")
+    if htf_overlap: reasons.append("htf_overlap")
+    if freshness: reasons.append("fresh_zone")
+    state = "STRONG" if q >= 78 else "GOOD" if q >= 62 else "MIXED" if q >= 50 else "WEAK"
+    return {"score": round(max(0.0, min(100.0, q)), 1), "state": state, "reasons": reasons}
+
+
+def _v11_market_thesis(score: dict, trend: dict, pullback: dict, liquidity: dict, loc: dict, candidate: dict) -> dict:
+    """Human-like synthesis layer: compress many numeric features into an explainable thesis."""
+    direction = score.get("direction", "bull")
+    side = "BUY" if direction == "bull" else "SELL"
+    htf = score.get("htf_bias", "neutral")
+    h1 = score.get("h1_bias", "neutral")
+    tr = float(trend.get("score", 0) or 0)
+    pb = float(pullback.get("score", 0) or 0)
+    lq = float(liquidity.get("score", 0) or 0)
+    poi = float(candidate.get("poi_quality", 0) or 0)
+    locs = float(loc.get("location_score", 50) or 50)
+    evidence = {
+        "direction": side, "htf_alignment": htf, "h1_alignment": h1,
+        "trend_strength": tr, "pullback_quality": pb, "poi_quality": poi,
+        "liquidity_quality": lq, "location_quality": locs,
+    }
+    positives = []
+    cautions = []
+    if htf == ("bullish" if direction == "bull" else "bearish"): positives.append("HTF aligned")
+    elif htf == "conflict": cautions.append("HTF conflict")
+    if tr >= 65: positives.append("strong directional progress")
+    elif tr < 40: cautions.append("weak directional progress")
+    if pb >= 65: positives.append("clean pullback/continuation evidence")
+    elif pb < 40: cautions.append("pullback evidence is incomplete")
+    if poi >= 70: positives.append("high-quality reaction zone")
+    elif poi < 50: cautions.append("zone quality is ordinary")
+    if lq >= 60: positives.append("liquidity context supports the setup")
+    if locs >= 65: positives.append("entry is well located")
+    elif locs < 45: cautions.append("entry location is extended")
+    label = str(candidate.get("label", "")).lower()
+    if label == "ob": archetype = "ORDER_BLOCK_REACTION"
+    elif label == "fvg": archetype = "FVG_RETEST"
+    elif label == "eq": archetype = "LIQUIDITY_REACTION"
+    else: archetype = "STRUCTURE_REACTION"
+    if liquidity.get("swept") and pb >= 50: archetype = "LIQUIDITY_SWEEP_CONTINUATION"
+    if direction == "bull" and htf == "bearish": archetype = "COUNTER_TREND_LONG"
+    if direction == "bear" and htf == "bullish": archetype = "COUNTER_TREND_SHORT"
+    return {"archetype": archetype, "evidence": evidence, "positives": positives[:6], "cautions": cautions[:6]}
+
+
+def _v11_evidence_adjustment(trend: dict, pullback: dict, poi: dict, liquidity: dict, loc: dict, confirmation: dict, label: str, htf_bias: str, direction: str) -> tuple[float, dict]:
+    vals = {
+        "trend": float(trend.get("score", 50) or 50),
+        "pullback": float(pullback.get("score", 50) or 50),
+        "poi": float(poi.get("score", 50) or 50),
+        "liquidity": float(liquidity.get("score", 50) or 50),
+        "location": float(loc.get("location_score", 50) or 50),
+        "confirmation": 100.0 if confirmation.get("confirmed") else 50.0,
+    }
+    weights = {"trend": V11_TREND_WEIGHT, "pullback": V11_PULLBACK_WEIGHT, "poi": V11_POI_WEIGHT, "liquidity": V11_LIQUIDITY_WEIGHT, "location": V11_LOCATION_WEIGHT, "confirmation": V11_CONFIRMATION_WEIGHT}
+    raw = sum((vals[k] - 50.0) * weights[k] for k in vals) / 5.0
+    # Gentle context corrections, never enough to create a hard gate.
+    adj = raw
+    if label == "fvg" and not confirmation.get("confirmed"):
+        adj -= V11_FVG_PENALTY_WITHOUT_CONFIRMATION
+    if label == "eq" and htf_bias in {"conflict", "neutral"}:
+        adj -= V11_EQ_PENALTY_IN_UNCLEAR_CONTEXT
+    if htf_bias == "conflict":
+        adj -= 2.0
+    adj = max(-V11_EVIDENCE_MAX_ADJUST, min(V11_EVIDENCE_MAX_ADJUST, adj))
+    diag = {"components": vals, "weights": weights, "adjustment": round(adj, 2), "soft_only": True}
+    return adj, diag
 
 
 def _early_failure_context(state: dict, analysis: dict, lifecycle: dict,
@@ -1338,8 +1446,8 @@ def _early_failure_context(state: dict, analysis: dict, lifecycle: dict,
     weak_pullback = pullback.get("state") == "INVALID_OR_UNCONFIRMED"
     elapsed = float(state.get("time_in_trade_sec", 0) or 0) / 60.0
     evidence = sum(bool(x) for x in (protected_break, opposite_mom, opposite_break, fragile_trend, weak_pullback))
-    eligible = (current_r <= V10_EARLY_FAIL_R and mae_r <= V10_EARLY_FAIL_MAE_R
-                and evidence >= 3 and elapsed >= 5.0 and elapsed <= V10_EARLY_FAIL_MAX_TRADE_MIN
+    eligible = (current_r <= V11_EARLY_FAIL_R and mae_r <= V11_EARLY_FAIL_MAE_R
+                and evidence >= 3 and elapsed >= 5.0 and elapsed <= V11_EARLY_FAIL_MAX_TRADE_MIN
                 and confirmations >= 1)
     return {
         "eligible": bool(eligible), "evidence": int(evidence),
@@ -1351,7 +1459,7 @@ def _early_failure_context(state: dict, analysis: dict, lifecycle: dict,
 # =============================================================================
 # CONFIDENCE CALIBRATION V3.0 — TRADEABILITY
 # =============================================================================
-CONFIDENCE_MODEL_VERSION = "4.0_calibrated_ready"
+CONFIDENCE_MODEL_VERSION = "5.0_v11_evidence_brain"
 
 def _rr_band(rr: float) -> str:
     rr = float(rr or 0.0)
@@ -1931,13 +2039,9 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         c["score"] = int(c.get("score", 0) + round((loc["location_score"] - 50) * 0.35))
         if loc["hard_block"]:
             continue
-        # V10: distinguish a genuine POI from a merely visible zone.
-        # FVG/EQ need stronger evidence; OB gets the widest tolerance because
-        # the current research run shows OB is the healthiest entry family.
-        if c["poi_quality"] < V10_POI_MIN_SCORE:
-            continue
-        if c["label"] == "fvg" and c["poi_quality"] < V10_FVG_MIN_SCORE:
-            continue
+        # V11: POI quality is ranking evidence, not a hard gate. Keep all
+        # executable geometries so main.py's confidence threshold can choose the
+        # required breadth; bad geometry still gets rejected elsewhere.
         enriched.append(c)
 
     enriched.sort(key=lambda c: (-c["score"], -c.get("location_score", 0)))
@@ -2341,6 +2445,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         m15_closed = _closed_candles(df_m15, 15)
         d1_closed = _closed_candles(df_d1, 1440) if df_d1 is not None else None
         score = score_direction(h1_closed, m15_closed, d1_closed, df_btc_h1)
+        macro_regime = infer_market_regime(df_btc_h1)
         if score is None:
             if symbol:
                 log.debug(f"[{symbol}] score_direction=None (data kurang)")
@@ -2417,17 +2522,12 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             invalid = candidate.get("invalid")
             loc = candidate.get("location", {})
 
-            # V10 evidence gates. Direction alone is insufficient: prefer a real
-            # pullback/POI and require stronger confluence for FVG/EQ.
+            # V11: evidence is soft. Do not stack hard gates on trend/pullback/POI.
+            # The research showed that V11 became too sparse while confidence lost
+            # predictive meaning. Only execution geometry and impossible RR are hard rejects.
             trend_q = score.get("trend_strength", {})
             pullback_q = score.get("pullback_quality", {})
             liquidity_q = score.get("liquidity_context", {})
-            if pullback_q.get("state") == "INVALID_OR_UNCONFIRMED" and score.get("trigger_count", 0) == 0:
-                continue
-            if float(candidate.get("poi_quality", 0)) < V10_POI_MIN_SCORE:
-                continue
-            if entry_lbl == "fvg" and not (score.get("selected_sweep") or score.get("trigger_count", 0) >= 1 or candidate.get("poi_quality", 0) >= 70):
-                continue
 
             # Geometry checks per candidate.
             if up and entry > cur_price * 1.005:
@@ -2501,27 +2601,38 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             final_conf = empirical_conf
             conf_diag.update(empirical_diag)
 
-            # V10 quality caps: high raw score cannot override weak trend/pullback
-            # or a lower-quality entry family. This preserves the user's existing
-            # 50% threshold behavior while preventing artificial confidence inflation.
-            if pullback_q.get("state") == "INVALID_OR_UNCONFIRMED":
-                final_conf = min(final_conf, V10_MAX_CONF_WITHOUT_PULLBACK)
-            if candidate.get("poi_quality", 0) < 58:
-                final_conf = min(final_conf, V10_MAX_CONF_WITH_WEAK_POI)
-            if entry_lbl == "fvg":
-                final_conf = min(final_conf, V10_MAX_CONF_FVG)
-            elif entry_lbl == "eq":
-                final_conf = min(final_conf, V10_MAX_CONF_EQ)
+            poi_diag = _candidate_poi_quality(candidate, m15, h1, direction, {**score, "htf_poi_overlap": bool(htf_poi)})
+            candidate["poi_quality"] = poi_diag["score"]
+            candidate["poi_state"] = poi_diag["state"]
+            evidence_adj, evidence_diag = _v11_evidence_adjustment(
+                trend_q, pullback_q, poi_diag, liquidity_q, loc, confirmation, entry_lbl, score.get("htf_bias", "neutral"), direction
+            )
+            final_conf = int(max(0, min(99, round(final_conf + evidence_adj))))
             conf_diag["trend_strength"] = trend_q
             conf_diag["pullback_quality"] = pullback_q
             conf_diag["liquidity_context"] = liquidity_q
-            conf_diag["poi_quality"] = candidate.get("poi_quality")
+            conf_diag["poi_quality"] = poi_diag
+            conf_diag["v11_evidence"] = evidence_diag
 
+            thesis = _v11_market_thesis(score, trend_q, pullback_q, liquidity_q, loc, candidate)
+            conf_diag["market_thesis"] = thesis
+
+            # Ranking is a quality ranking, not another hard threshold. This lets
+            # the strongest coherent setup survive even when its raw confidence
+            # is modest, while preserving the main.py operator threshold.
+            evidence_quality = (
+                trend_q.get("score", 50) * 0.22
+                + pullback_q.get("score", 50) * 0.18
+                + poi_diag.get("score", 50) * 0.22
+                + liquidity_q.get("score", 50) * 0.16
+                + loc_score * 0.12
+                + (100.0 if confirmation.get("confirmed") else 50.0) * 0.10
+            )
             execution_score = (
-                final_conf
-                + min(float(rr), 6.0) * 0.45
-                + candidate.get("score", 0) * 0.20
-                + setup_quality * 0.35
+                final_conf * 0.55
+                + evidence_quality * 0.35
+                + min(float(rr), 6.0) * 1.0
+                + (3.0 if entry_lbl == "ob" else 1.5 if entry_lbl == "fvg" else 0.5)
             )
 
             evaluated.append({
@@ -2606,7 +2717,10 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "tp": round(tp_price, 8),
             "rr": round(rr, 2),
             "atr": round(atr, 8),
-            "v10_quality": {
+            "market_thesis": best_eval.get("confidence_diagnostics", {}).get("market_thesis", {}),
+            "market_regime": macro_regime,
+            "v11_evidence": best_eval.get("confidence_diagnostics", {}).get("v11_evidence", {}),
+            "v11_quality": {
                 "trend_strength": score.get("trend_strength", {}),
                 "pullback_quality": score.get("pullback_quality", {}),
                 "liquidity_context": score.get("liquidity_context", {}),
@@ -2656,7 +2770,7 @@ def get_best_signal(candidates: list) -> Optional[dict]:
 # =============================================================================
 # ADAPTIVE POSITION MANAGEMENT — TRAILING BRAIN V8
 # =============================================================================
-# V10 design principle:
+# V11 design principle:
 #   Trail is not a static distance-from-price stop. It is a state machine that
 #   evaluates continuation health, momentum decay, structural failure,
 #   exhaustion and retracement depth before choosing a protection level.
@@ -3274,7 +3388,7 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
     early_fail = _early_failure_context(state, analysis, lifecycle, trend_metrics, pullback_metrics, profit_r)
     analysis["early_failure"] = early_fail
 
-    # V10: early structural invalidation. This is intentionally rarer than the
+    # V11: early structural invalidation. This is intentionally rarer than the
     # normal SL and only fires when the thesis has accumulated independent failure
     # evidence. main.py already owns the verified market-close path.
     if early_fail["eligible"]:
