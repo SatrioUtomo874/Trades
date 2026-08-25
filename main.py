@@ -76,7 +76,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V19"
+MAIN_ENGINE_VERSION = "V20"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -4241,6 +4241,7 @@ def get_start_msg():
         "━━━━━━━━ <b>TOOLS</b> ━━━━━━━━━━\n"
         "/ganti               — Upload/ganti strategy_logic.py\n"
         "/info                — Detail engine & metode analisis\n"
+        "/IP                  — Lihat public IP Render saat ini\n"
         "/banned              — Lihat daftar koin yang diban\n"
         "/koin                — Lihat koin yang sedang/terakhir di-scan\n"
         "/resetban             — Hapus semua ban koin\n"
@@ -4329,6 +4330,18 @@ def bot_loop():
             "✅ <b>Bot Siap</b>\n"
             "Semua sistem sudah menyala dan siap menerima perintah.\n"
             "Ketik /start untuk melihat menu.")
+        # Always report the public Render IP at startup, regardless of trading mode.
+        # This is a non-Binance request and is best-effort only; failure must never
+        # prevent the bot from starting or receiving commands.
+        ip = get_public_ip()
+        if ip and ip != "unknown":
+            tg_send(ALLOWED_USER_ID,
+                    f"🌐 <b>Public IP Render</b>\n<code>{html.escape(ip)}</code>\n\n"
+                    "Whitelist IP ini di Binance API Management jika IP restriction aktif.")
+        else:
+            tg_send(ALLOWED_USER_ID,
+                    "⚠️ <b>Public IP Render</b>\nTidak berhasil diambil saat startup.\n"
+                    "Gunakan /IP untuk mencoba lagi.")
 
     while True:
         try:
@@ -4367,6 +4380,12 @@ def bot_loop():
                             tg_send(chat_id, "❌ Format salah. Gunakan <code>/confidence_min 70</code> (0-100).")
                 elif text in ("/info","info"):
                     tg_send(chat_id,get_info_msg())
+                elif text in ("/ip","ip"):
+                    ip = get_public_ip()
+                    if ip and ip != "unknown":
+                        tg_send(chat_id, f"🌐 <b>Public IP Render</b>\n<code>{html.escape(ip)}</code>\n\nGunakan IP ini untuk whitelist Binance API jika diperlukan.")
+                    else:
+                        tg_send(chat_id, "⚠️ Public IP Render tidak berhasil diambil dari layanan IP eksternal saat ini.")
                 elif text in ("/stats","stats"):
                     tg_send(chat_id,fmt_stats())
                 elif text in ("/backtest","backtest"):

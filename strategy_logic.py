@@ -1,6 +1,7 @@
 """
-strategy_logic.py — OTAK v8 (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
+strategy_logic.py — OTAK v11 (Evidence-Based Chart Brain) (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
 ========================================================================================
+V10 dianggap eksperimen over-filtering dan tidak dijadikan baseline. V11 dibangun sebagai evidence-based chart reasoning engine.
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
 CISD, OTE & Fibonacci, external vs internal liquidity, Wyckoff, dsb).
@@ -87,7 +88,7 @@ STRUCT_TRAIL_BUF_PCT  = 0.0025 # buffer 0.25% di luar swing agar tidak kena LS b
 STRUCT_TRAIL_LOOKBACK = 60     # candle M15 untuk cari swing trailing
 
 # Adaptive trailing engine V4
-TRAIL_ENGINE_VERSION       = "8.0-predictive-reversal"
+TRAIL_ENGINE_VERSION       = "11.0-evidence-based-market-brain"
 TRAIL_ARM_R                = 0.80
 TRAIL_PROTECT_R            = 1.00
 TRAIL_MATURE_R             = 1.50
@@ -108,6 +109,27 @@ TRAIL_MIN_IMPROVEMENT_ATR  = 0.10
 # into the strategy dispatcher. Closed candles remain the analysis dataset.
 TRAIL_EXECUTION_BUFFER_ATR = 0.05
 TRAIL_MIN_MARKET_GAP_ATR = 0.32
+
+# V9 Trade-lifecycle / path-aware management. These are deliberately broad
+# guardrails, not hard profit targets. The bot learns from the path already
+# observed on the live position: current R, MFE, MAE and giveback.
+TRAIL_PROVING_R = 0.35
+TRAIL_WINNER_R = 0.80
+TRAIL_EXTENDED_R = 1.50
+TRAIL_GIVEBACK_WARN = 0.30
+TRAIL_GIVEBACK_TIGHT = 0.50
+TRAIL_GIVEBACK_CRITICAL = 0.70
+TRAIL_MFE_ARM_R = 0.60
+TRAIL_MFE_STRONG_R = 1.00
+TRAIL_MFE_EXTENDED_R = 1.50
+TRAIL_MIN_LOCK_AFTER_MFE_R = 0.05
+TRAIL_FAST_REVERSAL_R = 0.80
+TRAIL_SLOW_WINNER_GRACE_R = 0.90
+
+# Entry-quality diagnostics. They are used as context/weighting, not as a
+# binary veto, because the supplied research sample is only 14 trades.
+ENTRY_TYPE_WEIGHT = {"ob": 3, "fvg": 2, "eq": 1}
+STRUCTURE_WEIGHT = {"bullish": 2, "bearish": 2, "ranging": 1, "neutral": 0}
 
 # Fibonacci extension TP (level 1.272 dan 1.618 dari impulse leg)
 FIB_EXT_1 = 0.272   # 127.2%
@@ -140,6 +162,30 @@ ENTRY_LOCATION_HARD_FLOOR = 30   # kandidat di bawah ini tidak executable
 # strategy engine prevents full_analyze() from returning a candidate that the
 # execution gate will immediately reject as ENTRY_TOO_FAR.
 MAIN_ENTRY_MAX_ATR = 1.50
+
+# # V11 — evidence-based chart reasoning. These are soft weights/diagnostics, not
+# a pile of hard entry gates. The research sample showed that over-filtering
+# reduced opportunity without proving better outcomes, so V11 separates:
+#   1) market thesis, 2) setup evidence, 3) execution geometry.
+# Only execution-invalid conditions are hard rejects here.
+V11_TREND_LOOKBACK_FAST = 3
+V11_TREND_LOOKBACK_SLOW = 8
+V11_EARLY_FAIL_R = -0.75
+V11_EARLY_FAIL_MAE_R = -0.80
+V11_EARLY_FAIL_MAX_TRADE_MIN = 180.0
+V11_EXTERNAL_LIQ_NEAR_ATR = 1.25
+V11_EXTERNAL_LIQ_VERY_NEAR_ATR = 0.65
+V11_CONF_FLOOR = 40
+V11_EVIDENCE_NEUTRAL = 50.0
+V11_EVIDENCE_MAX_ADJUST = 10.0
+V11_TREND_WEIGHT = 0.22
+V11_PULLBACK_WEIGHT = 0.18
+V11_POI_WEIGHT = 0.22
+V11_LIQUIDITY_WEIGHT = 0.16
+V11_LOCATION_WEIGHT = 0.12
+V11_CONFIRMATION_WEIGHT = 0.10
+V11_FVG_PENALTY_WITHOUT_CONFIRMATION = 3
+V11_EQ_PENALTY_IN_UNCLEAR_CONTEXT = 2
 
 
 # =============================================================================
@@ -1004,6 +1050,9 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     # assembled from unrelated bonuses is not enough when H1 and M15 disagree.
     edge = abs(bull - bear)
     m15_struct = _market_structure(m15, sh15, sl15)
+    trend_metrics = _trend_strength_metrics(m15, direction, atr)
+    pullback_metrics = _pullback_quality_metrics(m15, direction, atr)
+    liquidity_metrics = _liquidity_context_metrics(m15, direction, atr)
     selected_choch = choch_m15["bullish_choch"] if direction == "bull" else choch_m15["bearish_choch"]
     selected_bos = bos_m15["bullish_bos"] if direction == "bull" else bos_m15["bearish_bos"]
     selected_cisd = cisd_m15["bullish_cisd"] if direction == "bull" else cisd_m15["bearish_cisd"]
@@ -1019,6 +1068,9 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         selected_choch, selected_bos, selected_cisd,
         selected_confirm.get("confirmed"),
     ))
+
+    # V11: market-health metrics are exposed as evidence; they do not hard-cap
+    # confidence here. The operator threshold remains external in main.py.
 
     return {
         "direction": direction,
@@ -1049,6 +1101,9 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         "m15_relative_volume": _relative_volume(m15, 20) if len(m15) >= 23 else 1.0,
         "m15_momentum_aligned": bool((direction == "bull" and _momentum_context(m15).get("bull")) or (direction == "bear" and _momentum_context(m15).get("bear"))),
         "m15_divergence_against": bool((direction == "bull" and rdiv_bear.get("bear_div")) or (direction == "bear" and rdiv_bull.get("bull_div"))),
+        "trend_strength": trend_metrics,
+        "pullback_quality": pullback_metrics,
+        "liquidity_context": liquidity_metrics,
         "failed_retest": fr_m15,
         "liquidity_bull": liq_bull,
         "liquidity_bear": liq_bear,
@@ -1062,10 +1117,349 @@ def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     }
 
 
+
+# =============================================================================
+# V11 MARKET-REGIME REASONER
+# =============================================================================
+def infer_market_regime(df_btc_h1: Optional[pd.DataFrame] = None) -> dict:
+    """Infer a soft crypto market regime from BTC H1 when supplied.
+
+    This is deliberately context, not a hard entry filter. It allows the same
+    strategy to reason differently in expansion, consolidation, exhaustion and
+    risk-off conditions without hard-coding today's price.  Current external
+    market research on 25 Aug 2026 describes BTC above $80k after a sharp rally,
+    with consolidation/high sentiment and elevated reversal risk; V11 therefore
+    treats strong expansion followed by exhaustion as a *caution signal*, not a
+    prohibition on trades.
+    """
+    if df_btc_h1 is None or df_btc_h1.empty or len(df_btc_h1) < 30:
+        return {"state": "UNKNOWN", "bias": "neutral", "score": 50.0,
+                "reason": "BTC H1 tidak tersedia; macro context non-blocking."}
+    try:
+        x = build_df(_closed_candles(df_btc_h1, 60), interval_minutes=60)
+        atr = max(float(x["atr"].iloc[-1]), 1e-12)
+        c = x["close"].astype(float)
+        fast = (float(c.iloc[-1] - c.iloc[-3]) / atr)
+        slow = (float(c.iloc[-1] - c.iloc[-10]) / atr)
+        ema20 = float(ema(c, 20).iloc[-1])
+        ema50 = float(ema(c, 50).iloc[-1]) if len(c) >= 50 else ema20
+        above = float(c.iloc[-1]) > ema20 > ema50
+        below = float(c.iloc[-1]) < ema20 < ema50
+        if above and fast > 0.6 and slow > 1.0:
+            state, bias, score = "EXPANSION_BULL", "bullish", 78.0
+        elif below and fast < -0.6 and slow < -1.0:
+            state, bias, score = "EXPANSION_BEAR", "bearish", 22.0
+        elif above and fast < 0:
+            state, bias, score = "BULLISH_EXHAUSTION", "bullish", 62.0
+        elif below and fast > 0:
+            state, bias, score = "BEARISH_EXHAUSTION", "bearish", 38.0
+        else:
+            state, bias, score = "CONSOLIDATION", "neutral", 50.0
+        return {"state": state, "bias": bias, "score": score,
+                "fast_atr": round(fast, 3), "slow_atr": round(slow, 3),
+                "ema20": ema20, "ema50": ema50}
+    except Exception as exc:
+        return {"state": "UNKNOWN", "bias": "neutral", "score": 50.0,
+                "reason": f"macro context unavailable: {exc}"}
+
+
+# =============================================================================
+# V11 ENTRY INTELLIGENCE — TREND / PULLBACK / POI / LIQUIDITY
+# =============================================================================
+
+def _trend_strength_metrics(m15: pd.DataFrame, direction: str, atr: Optional[float] = None) -> dict:
+    """Measure trend strength as price progress per unit time + efficiency.
+
+    The research corpus emphasizes that trend strength is not merely the
+    presence of HH/HL or LL/LH; the *speed and efficiency* of directional
+    progress matters. This is used as a soft quality signal, not a standalone
+    entry trigger.
+    """
+    if m15 is None or len(m15) < max(V11_TREND_LOOKBACK_SLOW + 2, 12):
+        return {"score": 0, "state": "UNKNOWN", "fast_atr": 0.0,
+                "slow_atr": 0.0, "efficiency": 0.0, "progress_ratio": 0.0}
+    atr_v = max(float(atr if atr is not None else m15["atr"].iloc[-1]), 1e-12)
+    close = m15["close"].astype(float)
+
+    def _directional_move(n: int) -> float:
+        delta = float(close.iloc[-1] - close.iloc[-1-n])
+        return delta if direction == "bull" else -delta
+
+    def _efficiency(n: int) -> float:
+        seg = close.iloc[-n-1:]
+        net = abs(float(seg.iloc[-1] - seg.iloc[0]))
+        gross = float(seg.diff().abs().sum())
+        return net / max(gross, 1e-12)
+
+    fast = _directional_move(V11_TREND_LOOKBACK_FAST) / atr_v
+    slow = _directional_move(V11_TREND_LOOKBACK_SLOW) / atr_v
+    eff = _efficiency(V11_TREND_LOOKBACK_SLOW)
+    bar_speed = max(0.0, slow) / max(V11_TREND_LOOKBACK_SLOW, 1)
+
+    sh, sl = swing_pts(m15, lb=3)
+    structure_progress = False
+    if direction == "bull" and len(sh) >= 2 and len(sl) >= 2:
+        structure_progress = float(m15["high"].iloc[sh[-1]]) > float(m15["high"].iloc[sh[-2]])
+    elif direction == "bear" and len(sh) >= 2 and len(sl) >= 2:
+        structure_progress = float(m15["low"].iloc[sl[-1]]) < float(m15["low"].iloc[sl[-2]])
+
+    score = 0.0
+    score += min(35.0, max(0.0, fast * 18.0))
+    score += min(25.0, max(0.0, slow * 10.0))
+    score += min(25.0, eff * 25.0)
+    if structure_progress:
+        score += 15.0
+    score = max(0.0, min(100.0, score))
+    if score >= 70:
+        state_name = "STRONG"
+    elif score >= 52:
+        state_name = "HEALTHY"
+    elif score >= 48:
+        state_name = "WEAK"
+    else:
+        state_name = "FRAGILE"
+    return {
+        "score": round(score, 1),
+        "state": state_name,
+        "fast_atr": round(fast, 3),
+        "slow_atr": round(slow, 3),
+        "efficiency": round(eff, 3),
+        "progress_ratio": round(bar_speed, 4),
+        "structure_progress": bool(structure_progress),
+    }
+
+
+def _pullback_quality_metrics(m15: pd.DataFrame, direction: str, atr: Optional[float] = None) -> dict:
+    """Classify whether the current move is a real corrective pullback.
+
+    A pullback is stronger when there is an impulse, a meaningful but bounded
+    counter-move, and evidence that liquidity/structure was interacted with.
+    Merely seeing a few opposite candles is not enough.
+    """
+    if m15 is None or len(m15) < 20:
+        return {"score": 0, "state": "UNKNOWN", "impulse_atr": 0.0,
+                "retracement": 0.0, "counter_candles": 0, "swept_minor": False,
+                "continuation_trigger": False}
+    atr_v = max(float(atr if atr is not None else m15["atr"].iloc[-1]), 1e-12)
+    recent = m15.iloc[-12:].copy()
+    impulse_start = float(recent["close"].iloc[0])
+    impulse_end = float(recent["close"].iloc[-5])
+    impulse = (impulse_end - impulse_start) if direction == "bull" else (impulse_start - impulse_end)
+    impulse_atr = impulse / atr_v
+    tail = recent.iloc[-5:]
+    counter = 0
+    for _, r in tail.iterrows():
+        if direction == "bull" and float(r["close"]) < float(r["open"]):
+            counter += 1
+        elif direction == "bear" and float(r["close"]) > float(r["open"]):
+            counter += 1
+    if direction == "bull":
+        impulse_high = float(recent["high"].iloc[: -4].max())
+        current_low = float(recent["low"].iloc[-1])
+        pull = max(0.0, impulse_high - current_low) / max(abs(impulse), atr_v)
+        sh, sl = swing_pts(m15, lb=2)
+        swept_minor = bool(sl and float(recent["low"].iloc[-1]) <= float(m15["low"].iloc[sl[-1]]) )
+        continuation = bool(m15["close"].iloc[-1] > m15["high"].iloc[-2])
+    else:
+        impulse_low = float(recent["low"].iloc[: -4].min())
+        current_high = float(recent["high"].iloc[-1])
+        pull = max(0.0, current_high - impulse_low) / max(abs(impulse), atr_v)
+        sh, sl = swing_pts(m15, lb=2)
+        swept_minor = bool(sh and float(recent["high"].iloc[-1]) >= float(m15["high"].iloc[sh[-1]]) )
+        continuation = bool(m15["close"].iloc[-1] < m15["low"].iloc[-2])
+    score = 0.0
+    if impulse_atr >= 0.65:
+        score += 35
+    elif impulse_atr >= 0.35:
+        score += 20
+    if 0.10 <= pull <= 0.85:
+        score += 25
+    elif 0.85 < pull <= 1.15:
+        score += 12
+    if 1 <= counter <= 3:
+        score += 15
+    if swept_minor:
+        score += 15
+    if continuation:
+        score += 10
+    score = max(0.0, min(100.0, score))
+    if score >= 70:
+        state_name = "VALID"
+    elif score >= 45:
+        state_name = "WEAK_VALID"
+    else:
+        state_name = "INVALID_OR_UNCONFIRMED"
+    return {
+        "score": round(score, 1), "state": state_name,
+        "impulse_atr": round(impulse_atr, 3), "retracement": round(pull, 3),
+        "counter_candles": int(counter), "swept_minor": bool(swept_minor),
+        "continuation_trigger": bool(continuation),
+    }
+
+
+def _liquidity_context_metrics(m15: pd.DataFrame, direction: str, atr: Optional[float] = None) -> dict:
+    """Locate nearby external liquidity and recent sweep/inducement evidence."""
+    if m15 is None or len(m15) < 30:
+        return {"score": 0, "external_distance_atr": None, "near": False,
+                "very_near": False, "swept": False, "inducement": False}
+    atr_v = max(float(atr if atr is not None else m15["atr"].iloc[-1]), 1e-12)
+    sh, sl = swing_pts(m15, lb=3)
+    price = float(m15["close"].iloc[-1])
+    liq = detect_liquidity_sweep(m15, sh, sl, direction)
+    ind = detect_inducement(m15, direction)
+    ext_dist = None
+    if direction == "bull" and sh:
+        highs = [float(m15["high"].iloc[i]) for i in sh if float(m15["high"].iloc[i]) > price]
+        if highs:
+            ext_dist = min(highs) - price
+    elif direction == "bear" and sl:
+        lows = [float(m15["low"].iloc[i]) for i in sl if float(m15["low"].iloc[i]) < price]
+        if lows:
+            ext_dist = price - max(lows)
+    dist_atr = ext_dist / atr_v if ext_dist is not None else None
+    near = bool(dist_atr is not None and dist_atr <= V11_EXTERNAL_LIQ_NEAR_ATR)
+    very_near = bool(dist_atr is not None and dist_atr <= V11_EXTERNAL_LIQ_VERY_NEAR_ATR)
+    score = 0
+    if liq.get("type") == "sweep": score += 45
+    if ind.get("swept"): score += 25
+    if dist_atr is not None and dist_atr >= 1.5: score += 20
+    elif near: score += 10
+    if very_near: score -= 10
+    return {
+        "score": int(max(0, min(100, score))),
+        "external_distance_atr": round(dist_atr, 3) if dist_atr is not None else None,
+        "near": near, "very_near": very_near,
+        "swept": bool(liq.get("type") == "sweep"),
+        "inducement": bool(ind.get("swept")),
+        "sweep": liq,
+    }
+
+
+def _candidate_poi_quality(candidate: dict, m15: pd.DataFrame, h1: pd.DataFrame,
+                           direction: str, score_ctx: dict) -> dict:
+    """Score a zone as evidence, not as a binary gate.
+
+    V11 treats OB/FVG/EQ as different setup archetypes. A zone becomes more
+    convincing when freshness, liquidity interaction, structural trigger, HTF
+    overlap and M15 confirmation agree, but one missing feature does not erase
+    an otherwise coherent setup.
+    """
+    label = str(candidate.get("label", "")).lower()
+    raw = float(candidate.get("score", 0) or 0)
+    freshness = 1.0 if candidate.get("fresh", True) else 0.0
+    sweep = 1.0 if score_ctx.get("selected_sweep") else 0.0
+    trigger = min(1.0, int(score_ctx.get("trigger_count", 0) or 0) / 2.0)
+    confirmed = 1.0 if (score_ctx.get("entry_confirmation", {}) or {}).get("confirmed") else 0.0
+    htf_overlap = 1.0 if score_ctx.get("htf_poi_overlap") else 0.0
+
+    base = {"ob": 58.0, "fvg": 50.0, "eq": 47.0}.get(label, 45.0)
+    q = base + min(10.0, raw * 1.6) + 6.0 * freshness + 9.0 * sweep + 8.0 * trigger + 8.0 * confirmed + 6.0 * htf_overlap
+    reasons = []
+    if label == "ob": reasons.append("structural_supply_demand_zone")
+    elif label == "fvg": reasons.append("imbalance_zone")
+    elif label == "eq": reasons.append("liquidity_level")
+    if sweep: reasons.append("liquidity_interaction")
+    if confirmed: reasons.append("entry_confirmation")
+    if htf_overlap: reasons.append("htf_overlap")
+    if freshness: reasons.append("fresh_zone")
+    state = "STRONG" if q >= 78 else "GOOD" if q >= 62 else "MIXED" if q >= 50 else "WEAK"
+    return {"score": round(max(0.0, min(100.0, q)), 1), "state": state, "reasons": reasons}
+
+
+def _v11_market_thesis(score: dict, trend: dict, pullback: dict, liquidity: dict, loc: dict, candidate: dict) -> dict:
+    """Human-like synthesis layer: compress many numeric features into an explainable thesis."""
+    direction = score.get("direction", "bull")
+    side = "BUY" if direction == "bull" else "SELL"
+    htf = score.get("htf_bias", "neutral")
+    h1 = score.get("h1_bias", "neutral")
+    tr = float(trend.get("score", 0) or 0)
+    pb = float(pullback.get("score", 0) or 0)
+    lq = float(liquidity.get("score", 0) or 0)
+    poi = float(candidate.get("poi_quality", 0) or 0)
+    locs = float(loc.get("location_score", 50) or 50)
+    evidence = {
+        "direction": side, "htf_alignment": htf, "h1_alignment": h1,
+        "trend_strength": tr, "pullback_quality": pb, "poi_quality": poi,
+        "liquidity_quality": lq, "location_quality": locs,
+    }
+    positives = []
+    cautions = []
+    if htf == ("bullish" if direction == "bull" else "bearish"): positives.append("HTF aligned")
+    elif htf == "conflict": cautions.append("HTF conflict")
+    if tr >= 65: positives.append("strong directional progress")
+    elif tr < 40: cautions.append("weak directional progress")
+    if pb >= 65: positives.append("clean pullback/continuation evidence")
+    elif pb < 40: cautions.append("pullback evidence is incomplete")
+    if poi >= 70: positives.append("high-quality reaction zone")
+    elif poi < 50: cautions.append("zone quality is ordinary")
+    if lq >= 60: positives.append("liquidity context supports the setup")
+    if locs >= 65: positives.append("entry is well located")
+    elif locs < 45: cautions.append("entry location is extended")
+    label = str(candidate.get("label", "")).lower()
+    if label == "ob": archetype = "ORDER_BLOCK_REACTION"
+    elif label == "fvg": archetype = "FVG_RETEST"
+    elif label == "eq": archetype = "LIQUIDITY_REACTION"
+    else: archetype = "STRUCTURE_REACTION"
+    if liquidity.get("swept") and pb >= 50: archetype = "LIQUIDITY_SWEEP_CONTINUATION"
+    if direction == "bull" and htf == "bearish": archetype = "COUNTER_TREND_LONG"
+    if direction == "bear" and htf == "bullish": archetype = "COUNTER_TREND_SHORT"
+    return {"archetype": archetype, "evidence": evidence, "positives": positives[:6], "cautions": cautions[:6]}
+
+
+def _v11_evidence_adjustment(trend: dict, pullback: dict, poi: dict, liquidity: dict, loc: dict, confirmation: dict, label: str, htf_bias: str, direction: str) -> tuple[float, dict]:
+    vals = {
+        "trend": float(trend.get("score", 50) or 50),
+        "pullback": float(pullback.get("score", 50) or 50),
+        "poi": float(poi.get("score", 50) or 50),
+        "liquidity": float(liquidity.get("score", 50) or 50),
+        "location": float(loc.get("location_score", 50) or 50),
+        "confirmation": 100.0 if confirmation.get("confirmed") else 50.0,
+    }
+    weights = {"trend": V11_TREND_WEIGHT, "pullback": V11_PULLBACK_WEIGHT, "poi": V11_POI_WEIGHT, "liquidity": V11_LIQUIDITY_WEIGHT, "location": V11_LOCATION_WEIGHT, "confirmation": V11_CONFIRMATION_WEIGHT}
+    raw = sum((vals[k] - 50.0) * weights[k] for k in vals) / 5.0
+    # Gentle context corrections, never enough to create a hard gate.
+    adj = raw
+    if label == "fvg" and not confirmation.get("confirmed"):
+        adj -= V11_FVG_PENALTY_WITHOUT_CONFIRMATION
+    if label == "eq" and htf_bias in {"conflict", "neutral"}:
+        adj -= V11_EQ_PENALTY_IN_UNCLEAR_CONTEXT
+    if htf_bias == "conflict":
+        adj -= 2.0
+    adj = max(-V11_EVIDENCE_MAX_ADJUST, min(V11_EVIDENCE_MAX_ADJUST, adj))
+    diag = {"components": vals, "weights": weights, "adjustment": round(adj, 2), "soft_only": True}
+    return adj, diag
+
+
+def _early_failure_context(state: dict, analysis: dict, lifecycle: dict,
+                           trend: dict, pullback: dict, current_r: float) -> dict:
+    """Detect a failing thesis before a full initial SL is reached.
+
+    This is intentionally rare: it needs a meaningful adverse move plus at
+    least two independent signs that the original thesis is invalidating.
+    """
+    mae_r = float(lifecycle.get("mae_r", current_r) or current_r)
+    confirmations = int(analysis.get("confirmations", 0) or 0)
+    protected_break = bool(analysis.get("protected_break"))
+    opposite_mom = bool(analysis.get("opposite_momentum"))
+    opposite_break = bool(analysis.get("opposite_break"))
+    fragile_trend = float(trend.get("score", 0) or 0) < 42
+    weak_pullback = pullback.get("state") == "INVALID_OR_UNCONFIRMED"
+    elapsed = float(state.get("time_in_trade_sec", 0) or 0) / 60.0
+    evidence = sum(bool(x) for x in (protected_break, opposite_mom, opposite_break, fragile_trend, weak_pullback))
+    eligible = (current_r <= V11_EARLY_FAIL_R and mae_r <= V11_EARLY_FAIL_MAE_R
+                and evidence >= 3 and elapsed >= 5.0 and elapsed <= V11_EARLY_FAIL_MAX_TRADE_MIN
+                and confirmations >= 1)
+    return {
+        "eligible": bool(eligible), "evidence": int(evidence),
+        "protected_break": protected_break, "opposite_momentum": opposite_mom,
+        "opposite_break": opposite_break, "fragile_trend": fragile_trend,
+        "weak_pullback": weak_pullback, "elapsed_min": round(elapsed, 1),
+    }
+
 # =============================================================================
 # CONFIDENCE CALIBRATION V3.0 — TRADEABILITY
 # =============================================================================
-CONFIDENCE_MODEL_VERSION = "4.0_calibrated_ready"
+CONFIDENCE_MODEL_VERSION = "5.0_v11_evidence_brain"
 
 def _rr_band(rr: float) -> str:
     rr = float(rr or 0.0)
@@ -1634,6 +2028,10 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         c["rsi_timing"] = loc["rsi_timing"]
         c["hard_location_block"] = loc["hard_block"]
         c["reject_reason"] = "CHASE_LOCATION" if loc["hard_block"] else None
+        pq = _candidate_poi_quality(c, m15, h1, direction, score_ctx)
+        c["poi_quality"] = pq["score"]
+        c["poi_state"] = pq["state"]
+        c["poi_reasons"] = pq["reasons"]
 
         # Candidate-specific quality. Location is deliberately meaningful but
         # not dominant: structure/POI can still win, while an obvious chase is
@@ -1641,6 +2039,9 @@ def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
         c["score"] = int(c.get("score", 0) + round((loc["location_score"] - 50) * 0.35))
         if loc["hard_block"]:
             continue
+        # V11: POI quality is ranking evidence, not a hard gate. Keep all
+        # executable geometries so main.py's confidence threshold can choose the
+        # required breadth; bad geometry still gets rejected elsewhere.
         enriched.append(c)
 
     enriched.sort(key=lambda c: (-c["score"], -c.get("location_score", 0)))
@@ -2014,7 +2415,7 @@ def _select_tp(pool: list, entry: float, risk: float, direction: str,
 # FUNGSI UTAMA — Dipanggil oleh main.py
 # =============================================================================
 
-def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
+def _legacy_full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                  df_d1: Optional[pd.DataFrame] = None,
                  symbol: Optional[str] = None,
                  df_btc_h1: Optional[pd.DataFrame] = None,
@@ -2044,6 +2445,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         m15_closed = _closed_candles(df_m15, 15)
         d1_closed = _closed_candles(df_d1, 1440) if df_d1 is not None else None
         score = score_direction(h1_closed, m15_closed, d1_closed, df_btc_h1)
+        macro_regime = infer_market_regime(df_btc_h1)
         if score is None:
             if symbol:
                 log.debug(f"[{symbol}] score_direction=None (data kurang)")
@@ -2120,6 +2522,13 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             invalid = candidate.get("invalid")
             loc = candidate.get("location", {})
 
+            # V11: evidence is soft. Do not stack hard gates on trend/pullback/POI.
+            # The research showed that V11 became too sparse while confidence lost
+            # predictive meaning. Only execution geometry and impossible RR are hard rejects.
+            trend_q = score.get("trend_strength", {})
+            pullback_q = score.get("pullback_quality", {})
+            liquidity_q = score.get("liquidity_context", {})
+
             # Geometry checks per candidate.
             if up and entry > cur_price * 1.005:
                 continue
@@ -2192,11 +2601,38 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             final_conf = empirical_conf
             conf_diag.update(empirical_diag)
 
+            poi_diag = _candidate_poi_quality(candidate, m15, h1, direction, {**score, "htf_poi_overlap": bool(htf_poi)})
+            candidate["poi_quality"] = poi_diag["score"]
+            candidate["poi_state"] = poi_diag["state"]
+            evidence_adj, evidence_diag = _v11_evidence_adjustment(
+                trend_q, pullback_q, poi_diag, liquidity_q, loc, confirmation, entry_lbl, score.get("htf_bias", "neutral"), direction
+            )
+            final_conf = int(max(0, min(99, round(final_conf + evidence_adj))))
+            conf_diag["trend_strength"] = trend_q
+            conf_diag["pullback_quality"] = pullback_q
+            conf_diag["liquidity_context"] = liquidity_q
+            conf_diag["poi_quality"] = poi_diag
+            conf_diag["v11_evidence"] = evidence_diag
+
+            thesis = _v11_market_thesis(score, trend_q, pullback_q, liquidity_q, loc, candidate)
+            conf_diag["market_thesis"] = thesis
+
+            # Ranking is a quality ranking, not another hard threshold. This lets
+            # the strongest coherent setup survive even when its raw confidence
+            # is modest, while preserving the main.py operator threshold.
+            evidence_quality = (
+                trend_q.get("score", 50) * 0.22
+                + pullback_q.get("score", 50) * 0.18
+                + poi_diag.get("score", 50) * 0.22
+                + liquidity_q.get("score", 50) * 0.16
+                + loc_score * 0.12
+                + (100.0 if confirmation.get("confirmed") else 50.0) * 0.10
+            )
             execution_score = (
-                final_conf
-                + min(float(rr), 6.0) * 0.45
-                + candidate.get("score", 0) * 0.20
-                + setup_quality * 0.35
+                final_conf * 0.55
+                + evidence_quality * 0.35
+                + min(float(rr), 6.0) * 1.0
+                + (3.0 if entry_lbl == "ob" else 1.5 if entry_lbl == "fvg" else 0.5)
             )
 
             evaluated.append({
@@ -2262,6 +2698,11 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "rr_band": _rr_band(rr),
             "entry_location_score": loc.get("location_score", 50),
             "entry_location_state": loc.get("location_state", "unknown"),
+            "trend_strength": score.get("trend_strength", {}),
+            "pullback_quality": score.get("pullback_quality", {}),
+            "liquidity_context": score.get("liquidity_context", {}),
+            "poi_quality": best.get("poi_quality"),
+            "poi_state": best.get("poi_state"),
             "entry_range_position": loc.get("range_position", 0.5),
             "entry_zone_low": loc.get("entry_zone_low"),
             "entry_zone_high": loc.get("entry_zone_high"),
@@ -2276,6 +2717,16 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "tp": round(tp_price, 8),
             "rr": round(rr, 2),
             "atr": round(atr, 8),
+            "market_thesis": best_eval.get("confidence_diagnostics", {}).get("market_thesis", {}),
+            "market_regime": macro_regime,
+            "v11_evidence": best_eval.get("confidence_diagnostics", {}).get("v11_evidence", {}),
+            "v11_quality": {
+                "trend_strength": score.get("trend_strength", {}),
+                "pullback_quality": score.get("pullback_quality", {}),
+                "liquidity_context": score.get("liquidity_context", {}),
+                "poi_quality": best.get("poi_quality"),
+                "poi_state": best.get("poi_state"),
+            },
             "rsi": rsi_val,
             "struct_h1": score["struct_h1"],
             "d1_bias": score.get("d1_bias", "neutral"),
@@ -2319,7 +2770,7 @@ def get_best_signal(candidates: list) -> Optional[dict]:
 # =============================================================================
 # ADAPTIVE POSITION MANAGEMENT — TRAILING BRAIN V8
 # =============================================================================
-# V8 design principle:
+# V11 design principle:
 #   Trail is not a static distance-from-price stop. It is a state machine that
 #   evaluates continuation health, momentum decay, structural failure,
 #   exhaustion and retracement depth before choosing a protection level.
@@ -2400,6 +2851,86 @@ def _trail_protected_swing(df: pd.DataFrame, direction: str, atr: float) -> Opti
     if direction == "bear" and sh:
         return float(recent["high"].iloc[sh[-1]]) + buf
     return None
+
+
+def _trade_lifecycle_context(state: dict, current_r: float, direction: str,
+                              entry: float, current_price: float,
+                              initial_risk: float) -> dict:
+    """Build a path-aware lifecycle from metrics maintained by main.py.
+
+    main.py already updates mfe_r/mae_r/time-to-R before dispatching the strategy.
+    V9 treats those fields as first-class evidence instead of recalculating a
+    trailing decision from weakness alone. If a field is unavailable (old/local
+    state), the function degrades safely to the current R observation.
+    """
+    try:
+        mfe_r = max(float(state.get("mfe_r", current_r)), current_r)
+    except Exception:
+        mfe_r = current_r
+    try:
+        mae_r = min(float(state.get("mae_r", current_r)), current_r)
+    except Exception:
+        mae_r = current_r
+    giveback_r = max(0.0, mfe_r - current_r)
+    giveback_ratio = giveback_r / max(abs(mfe_r), 0.25) if mfe_r > 0 else 0.0
+    if current_r < TRAIL_PROVING_R:
+        phase = "INITIAL"
+    elif current_r < TRAIL_WINNER_R and mfe_r < TRAIL_MFE_ARM_R:
+        phase = "PROVING"
+    elif mfe_r >= TRAIL_MFE_EXTENDED_R:
+        phase = "EXTENDED"
+    elif mfe_r >= TRAIL_MFE_ARM_R:
+        phase = "WINNER"
+    else:
+        phase = "PROVING"
+
+    if giveback_ratio >= TRAIL_GIVEBACK_CRITICAL:
+        distribution = "CRITICAL_GIVEBACK"
+    elif giveback_ratio >= TRAIL_GIVEBACK_TIGHT:
+        distribution = "DEEP_GIVEBACK"
+    elif giveback_ratio >= TRAIL_GIVEBACK_WARN:
+        distribution = "MEANINGFUL_GIVEBACK"
+    else:
+        distribution = "HEALTHY_GIVEBACK"
+
+    # A slow winner is not automatically weak. Time-to-1R is informational and
+    # only used to prevent premature tightening when structure remains healthy.
+    t1 = state.get("time_to_1r_sec")
+    slow_winner = bool(t1 is not None and float(t1) > 4 * 3600 and mfe_r >= TRAIL_MFE_ARM_R)
+    return {
+        "phase": phase,
+        "distribution": distribution,
+        "current_r": round(float(current_r), 4),
+        "mfe_r": round(float(mfe_r), 4),
+        "mae_r": round(float(mae_r), 4),
+        "giveback_r": round(float(giveback_r), 4),
+        "giveback_ratio": round(float(giveback_ratio), 4),
+        "time_to_1r_sec": float(t1) if t1 is not None else None,
+        "time_to_2r_sec": float(state.get("time_to_2r_sec")) if state.get("time_to_2r_sec") is not None else None,
+        "slow_winner": slow_winner,
+    }
+
+
+def _entry_quality_context(state: dict, direction: str) -> dict:
+    """Low-risk diagnostic quality score; never acts as a hard entry veto."""
+    sig = state.get("signal", state) or {}
+    label = str(sig.get("entry_label") or state.get("entry_label") or "").lower()
+    h1 = str(sig.get("struct_h1") or state.get("struct_h1") or "neutral").lower()
+    d1 = str(sig.get("d1_bias") or state.get("d1_bias") or "neutral").lower()
+    score = ENTRY_TYPE_WEIGHT.get(label, 0)
+    reasons = []
+    if label in ENTRY_TYPE_WEIGHT:
+        reasons.append(f"entry:{label}")
+    if (direction == "bull" and h1 == "bullish") or (direction == "bear" and h1 == "bearish"):
+        score += 2; reasons.append("h1_aligned")
+    elif h1 in {"bullish", "bearish"}:
+        score -= 1; reasons.append("h1_conflict")
+    if (direction == "bull" and d1 == "bullish") or (direction == "bear" and d1 == "bearish"):
+        score += 2; reasons.append("d1_aligned")
+    elif d1 in {"bullish", "bearish"}:
+        score -= 2; reasons.append("d1_conflict")
+    return {"score": int(score), "entry_label": label or None, "struct_h1": h1,
+            "d1_bias": d1, "reasons": reasons}
 
 
 def _trail_reversal_analysis(df: pd.DataFrame, direction: str, entry: float,
@@ -2799,24 +3330,30 @@ def _momentum_context(df: pd.DataFrame) -> dict:
     }
 
 
-def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
+def _legacy_manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
                     df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
-    """Position-management brain V8 — predictive, stateful-in-time, execution-free.
+    """V9 position-management brain: lifecycle + path + structure + execution safety.
 
-    The engine does not predict exact future prices. It detects when the evidence
-    for continuation is degrading and moves protection *before* a full reversal
-    is complete. This is intentionally asymmetric: healthy winners get room;
-    weakening/reversing winners surrender progressively less of the move.
+    Contract with main.py:
+      * returns only HOLD/PROTECT/TRAIL/EXIT decisions;
+      * TRAIL contains a strictly improving, strategy-validated ``sl``;
+      * main.py remains the execution/reconciliation layer;
+      * no Binance order is created here.
+
+    The decision hierarchy is intentionally conservative:
+      1. Establish the market/path context.
+      2. Classify lifecycle and giveback.
+      3. Classify structural/momentum weakness.
+      4. Generate candidate stops.
+      5. Reject candidates that are geometrically unsafe or fail to improve.
+      6. Tighten only when the observed path justifies it.
     """
     if df_m15 is None or df_m15.empty:
         return {"action": "HOLD", "state": "NO_DATA", "reason": ["M15 unavailable"]}
 
-    # main.py supplies the current position state, but it does not inject a
-    # fresh ticker price into _strategy_position_update(). The latest kline close
-    # is therefore the only price shared by the strategy on every management
-    # cycle. Use it consistently for trail feasibility and profit-R; use CLOSED
-    # candles only for structural/momentum analysis below. Do not let a stale
-    # state["current_price"] become the reference price for a new stop.
+    # main.py does not pass a ticker into strategy dispatch. The latest M15 close
+    # is therefore the shared market-price proxy. Structural analysis uses only
+    # completed candles when a datetime index is available.
     live_price = float(df_m15["close"].iloc[-1])
     m15 = build_df(_closed_candles(df_m15, 15), interval_minutes=15)
     if m15 is None or len(m15) < 55:
@@ -2834,130 +3371,167 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
     initial_risk = max(abs(entry - initial_sl), 1e-12)
     profit_r = ((current_price - entry) if direction == "bull" else (entry - current_price)) / initial_risk
 
-    analysis = _trail_reversal_analysis(
-        m15, direction, entry, current_price, initial_risk, tp=tp
-    )
+    lifecycle = _trade_lifecycle_context(state, profit_r, direction, entry, current_price, initial_risk)
+    quality = _entry_quality_context(state, direction)
+    analysis = _trail_reversal_analysis(m15, direction, entry, current_price, initial_risk, tp=tp)
+    trend_metrics = _trend_strength_metrics(m15, direction)
+    pullback_metrics = _pullback_quality_metrics(m15, direction)
+    liquidity_metrics = _liquidity_context_metrics(m15, direction)
+    analysis["lifecycle"] = lifecycle
+    analysis["entry_quality"] = quality
+    analysis["trend_strength"] = trend_metrics
+    analysis["pullback_quality"] = pullback_metrics
+    analysis["liquidity_context"] = liquidity_metrics
     state_name = analysis["state"]
     reasons = list(analysis["reasons"])
 
-    # Before enough profit exists, do not force a trail unless the price has already
-    # invalidated the thesis. We still return diagnostics so main.py can log why.
-    if profit_r < TRAIL_MIN_PROFIT_TO_PROTECT_R:
+    early_fail = _early_failure_context(state, analysis, lifecycle, trend_metrics, pullback_metrics, profit_r)
+    analysis["early_failure"] = early_fail
+
+    # V11: early structural invalidation. This is intentionally rarer than the
+    # normal SL and only fires when the thesis has accumulated independent failure
+    # evidence. main.py already owns the verified market-close path.
+    if early_fail["eligible"]:
         return {
-            "action": "HOLD",
-            "state": "DEVELOPING",
+            "action": "EXIT", "close": True, "state": "EARLY_INVALIDATION",
             "profit_r": round(profit_r, 2),
-            "weakness_score": analysis["score"],
-            "reversal_state": state_name,
-            "reversal_confirmations": analysis["confirmations"],
-            "reversal_diagnostics": analysis,
-            "reason": reasons + ["profit_not_mature_for_trail"],
+            "weakness_score": int(analysis.get("score", 0)),
+            "reversal_confirmations": int(analysis.get("confirmations", 0)),
+            "reversal_diagnostics": analysis, "lifecycle": lifecycle,
+            "entry_quality": quality,
+            "reason": reasons + ["early_structural_invalidation", "loss_control_before_full_sl"],
         }
 
-    trail_pack = _trail_stop_candidates(
-        m15, direction, entry, current_price, initial_risk, analysis
-    )
+    # INITIAL/PROVING trades are not allowed to become aggressively trailed just
+    # because a single weak candle appeared. A thesis can still be developing.
+    if profit_r < TRAIL_MIN_PROFIT_TO_PROTECT_R and lifecycle["mfe_r"] < TRAIL_MFE_ARM_R:
+        return {
+            "action": "HOLD", "state": "DEVELOPING", "profit_r": round(profit_r, 2),
+            "weakness_score": analysis["score"], "reversal_state": state_name,
+            "reversal_confirmations": analysis["confirmations"],
+            "reversal_diagnostics": analysis,
+            "reason": reasons + ["lifecycle_not_mature_for_trail"],
+        }
+
+    trail_pack = _trail_stop_candidates(m15, direction, entry, current_price, initial_risk, analysis)
     candidates = trail_pack["candidates"]
     atr = trail_pack["atr"]
-    chosen, source = _choose_trail_stop(
-        candidates, direction, current_price, current_sl, atr, state_name
-    )
 
-    # Final execution-feasibility gate. Never emit TRAIL merely because an
-    # analytical candidate exists. If the candidate is on the wrong side of the
-    # live market or too close to it, keep the existing protection instead.
+    # Path-aware tightening: healthy winners get structure-first treatment. A
+    # large MFE with deep giveback allows the tighter candidates to compete.
+    giveback_ratio = lifecycle["giveback_ratio"]
+    path_state = lifecycle["distribution"]
+    effective_state = state_name
+    if path_state in {"DEEP_GIVEBACK", "CRITICAL_GIVEBACK"} and lifecycle["mfe_r"] >= TRAIL_MFE_ARM_R:
+        effective_state = "REVERSAL" if state_name == "HEALTHY" else state_name
+        if "deep_giveback" not in reasons and path_state == "DEEP_GIVEBACK":
+            reasons.append("path_deep_giveback")
+        if "critical_giveback" not in reasons and path_state == "CRITICAL_GIVEBACK":
+            reasons.append("path_critical_giveback")
+
+    chosen, source = _choose_trail_stop(candidates, direction, current_price, current_sl, atr, effective_state)
+
     current_bar_high = float(df_m15["high"].iloc[-1]) if "high" in df_m15.columns else None
     current_bar_low = float(df_m15["low"].iloc[-1]) if "low" in df_m15.columns else None
     chosen, invalid_reason = _validate_trail_candidate(
         chosen, direction, current_price, atr, current_sl, entry,
         bar_high=current_bar_high, bar_low=current_bar_low
     )
-    if chosen is None:
-        source = None
 
-    # Strong reversal: if a valid stop can lock meaningful profit, use it immediately.
+    # Candidate can be valid but still too ambitious for the observed path. Before
+    # ~0.8R, require a meaningful MFE and a real weakness/reversal signal. This
+    # prevents normal noise from repeatedly replacing protection.
+    if chosen is not None and profit_r < TRAIL_WINNER_R and lifecycle["mfe_r"] < TRAIL_MFE_ARM_R:
+        chosen, source = None, None
+        invalid_reason = "lifecycle_not_ready_for_stop_improvement"
+
+    # If the position is an extended winner, protect against giveback. The stop
+    # may not erase the existing protection and must still pass the final geometry gate.
+    if chosen is not None and lifecycle["mfe_r"] >= TRAIL_MFE_EXTENDED_R and giveback_ratio >= TRAIL_GIVEBACK_TIGHT:
+        tight = []
+        for name, value in candidates.items():
+            if value is None: continue
+            v = float(value)
+            if direction == "bull" and current_sl < v < current_price - atr * 0.10:
+                tight.append((v, name))
+            elif direction == "bear" and current_price + atr * 0.10 < v < current_sl:
+                tight.append((v, name))
+        if tight:
+            chosen, source = (max(tight, key=lambda x: x[0]) if direction == "bull" else min(tight, key=lambda x: x[0]))
+            chosen, invalid_reason = _validate_trail_candidate(
+                chosen, direction, current_price, atr, current_sl, entry,
+                bar_high=current_bar_high, bar_low=current_bar_low
+            )
+
     if chosen is not None:
-        minimum_lock_r = TRAIL_LOCK_WEAK_R
-        if state_name == "CAUTION":
-            minimum_lock_r = TRAIL_LOCK_CAUTION_R
-        elif state_name == "WEAKENING":
+        minimum_lock_r = TRAIL_LOCK_CAUTION_R
+        if effective_state == "WEAKENING":
             minimum_lock_r = TRAIL_LOCK_WEAK_R
-        elif state_name == "REVERSAL":
+        elif effective_state == "REVERSAL":
             minimum_lock_r = TRAIL_LOCK_REVERSAL_R * 0.65
-        elif state_name == "REVERSAL_CONFIRMED":
+        elif effective_state == "REVERSAL_CONFIRMED":
             minimum_lock_r = TRAIL_LOCK_REVERSAL_R
 
         locked_r = ((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk
-        if locked_r < minimum_lock_r and state_name in {"REVERSAL", "REVERSAL_CONFIRMED"}:
-            # Fall back to the strongest valid candidate that actually preserves
-            # at least the minimum lock; if none exists, keep the previous SL.
-            eligible = []
-            for name, value in candidates.items():
-                if value is None:
-                    continue
-                v = float(value)
-                lr = ((v - entry) if direction == "bull" else (entry - v)) / initial_risk
-                if lr >= minimum_lock_r:
-                    if direction == "bull" and current_sl < v < current_price - atr * 0.10:
-                        eligible.append((v, name))
-                    elif direction == "bear" and current_price + atr * 0.10 < v < current_sl:
-                        eligible.append((v, name))
-            if eligible:
-                chosen, source = (max(eligible, key=lambda x: x[0]) if direction == "bull"
-                                  else min(eligible, key=lambda x: x[0]))
+        # Do not force a profit lock that the market/path cannot safely support.
+        if effective_state in {"REVERSAL", "REVERSAL_CONFIRMED"} and locked_r < minimum_lock_r:
+            chosen, source = None, None
+            invalid_reason = "candidate_does_not_support_required_lock"
 
+    if chosen is not None:
+        locked_r = ((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk
         return {
             "action": "TRAIL",
             "state": state_name,
             "sl": round(float(chosen), 10),
             "profit_r": round(profit_r, 2),
-            "locked_r": round((((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk), 3),
+            "locked_r": round(locked_r, 3),
             "weakness_score": int(analysis["score"]),
             "reversal_confirmations": int(analysis["confirmations"]),
             "trail_source": source,
             "reversal_diagnostics": analysis,
+            "lifecycle": lifecycle,
+            "entry_quality": quality,
             "reason": reasons + [f"predictive_trail:{source}"],
         }
 
-    # A confirmed reversal without an improvable stop is safer handled as a controlled
-    # exit once there is enough realized profit. This avoids holding a winner all the
-    # way back to its original SL just because no structural candidate exists.
-    if state_name == "REVERSAL_CONFIRMED" and profit_r >= TRAIL_STRONG_REVERSAL_R:
+    # External liquidity very near means the current move has less room to run;
+    # once weakness is present, favor protection over an open-ended hold.
+    if liquidity_metrics.get("very_near") and lifecycle.get("mfe_r", 0) >= TRAIL_MFE_ARM_R and state_name in {"WEAKENING", "REVERSAL", "REVERSAL_CONFIRMED"}:
+        reasons.append("external_liquidity_near")
+
+    # Confirmed reversal at a mature profit is the only case where the brain may
+    # request a market exit. This keeps main.py's verified-close path intact.
+    if state_name == "REVERSAL_CONFIRMED" and profit_r >= TRAIL_STRONG_REVERSAL_R and lifecycle["mfe_r"] >= TRAIL_MFE_EXTENDED_R:
         return {
-            "action": "EXIT",
-            "close": True,
-            "state": state_name,
-            "profit_r": round(profit_r, 2),
-            "weakness_score": int(analysis["score"]),
+            "action": "EXIT", "close": True, "state": state_name,
+            "profit_r": round(profit_r, 2), "weakness_score": int(analysis["score"]),
             "reversal_confirmations": int(analysis["confirmations"]),
-            "reversal_diagnostics": analysis,
-            "reason": reasons + ["confirmed_reversal_no_safe_trail"]
+            "reversal_diagnostics": analysis, "lifecycle": lifecycle,
+            "entry_quality": quality,
+            "reason": reasons + ["confirmed_reversal_mature_winner_no_safe_trail"],
         }
 
-    if state_name in {"REVERSAL", "REVERSAL_CONFIRMED", "WEAKENING"}:
-        safe_reason = "reversal_detected_but_no_safe_improvement"
-        if invalid_reason:
-            safe_reason = f"trail_candidate_rejected:{invalid_reason}"
+    if state_name in {"REVERSAL", "REVERSAL_CONFIRMED", "WEAKENING"} or giveback_ratio >= TRAIL_GIVEBACK_WARN:
+        safe_reason = invalid_reason or "weakness_detected_but_no_safe_improvement"
         return {
-            "action": "PROTECT",
-            "state": state_name,
-            "profit_r": round(profit_r, 2),
-            "weakness_score": int(analysis["score"]),
+            "action": "PROTECT", "state": state_name,
+            "profit_r": round(profit_r, 2), "weakness_score": int(analysis["score"]),
             "reversal_confirmations": int(analysis["confirmations"]),
-            "reversal_diagnostics": analysis,
-            "trail_candidate_rejected": invalid_reason,
+            "reversal_diagnostics": analysis, "lifecycle": lifecycle,
+            "entry_quality": quality, "trail_candidate_rejected": safe_reason,
             "market_price": round(current_price, 10),
-            "reason": reasons + [safe_reason]
+            "reason": reasons + [f"trail_not_executed:{safe_reason}"],
         }
 
     return {
         "action": "PROTECT" if profit_r >= TRAIL_CAUTION_R else "HOLD",
-        "state": state_name,
-        "profit_r": round(profit_r, 2),
+        "state": state_name, "profit_r": round(profit_r, 2),
         "weakness_score": int(analysis["score"]),
         "reversal_confirmations": int(analysis["confirmations"]),
-        "reversal_diagnostics": analysis,
-        "reason": reasons + ["trend_still_healthy_or_no_better_stop"]
+        "reversal_diagnostics": analysis, "lifecycle": lifecycle,
+        "entry_quality": quality,
+        "reason": reasons + ["trend_healthy_or_no_safe_better_stop"],
     }
 
 
@@ -3044,3 +3618,358 @@ def validate_and_adjust_geometry(
         "rr":    round(rr, 2),
         "adjusted": False,
     }
+
+# =============================================================================
+# V12 AI-STYLE REASONING LAYER
+# =============================================================================
+# This layer deliberately wraps the proven V11 detectors instead of replacing
+# them. V10's lesson: adding hard gates made the scanner too sparse. V12 therefore
+# uses evidence voting, contradiction detection, setup archetypes, and bounded
+# confidence adjustments. Only execution geometry remains a hard reject.
+#
+# Optional cross-market context: V19 may pass a `market_context` dict to
+# full_analyze(..., market_context=...). The strategy remains fully compatible
+# with the existing main.py contract when that field is absent.
+
+V12_VERSION = "12.0-ai-context-reasoner"
+V12_CONFIDENCE_DELTA_CAP = 10
+V12_MIN_SAMPLE_FOR_HISTORY = 8
+V12_TRAIL_MIN_UPDATE_R = 0.08
+V12_TRAIL_MAX_CHURN = 6
+V12_GIVEBACK_WARN = 0.28
+V12_GIVEBACK_TIGHT = 0.45
+
+
+def _safe_float(x, default=None):
+    try:
+        v = float(x)
+        if np.isfinite(v):
+            return v
+    except Exception:
+        pass
+    return default
+
+
+def _market_snapshot_from_context(mc):
+    if not isinstance(mc, dict):
+        return {"available": False}
+    out = {"available": True}
+    for k in (
+        "market_regime", "breadth_score", "bullish_breadth_pct",
+        "bearish_breadth_pct", "neutral_breadth_pct", "median_price_1h_pct",
+        "median_price_4h_pct", "median_efficiency_4h",
+        "median_range_expansion_ratio", "avg_relative_volume",
+        "btc_price_1h_pct", "btc_price_4h_pct",
+        "relative_strength_1h_pct", "relative_strength_4h_pct",
+        "symbol_relative_strength_1h_pct", "symbol_relative_strength_4h_pct",
+    ):
+        if k in mc:
+            out[k] = mc[k]
+    # V19 exports per-symbol RS rows, while the future strategy bridge may
+    # provide the already-selected row fields directly.
+    if "symbol_relative_strength_1h_pct" not in out and "relative_strength_1h_pct" in out:
+        out["symbol_relative_strength_1h_pct"] = out.get("relative_strength_1h_pct")
+    if "symbol_relative_strength_4h_pct" not in out and "relative_strength_4h_pct" in out:
+        out["symbol_relative_strength_4h_pct"] = out.get("relative_strength_4h_pct")
+    return out
+
+
+def _local_market_state(df_h1, df_m15, df_d1=None):
+    """Derive a compact market state from already-available OHLCV."""
+    try:
+        h1 = build_df(_closed_candles(df_h1, 60), 60)
+        m15 = build_df(_closed_candles(df_m15, 15), 15)
+        if h1 is None or m15 is None or len(m15) < 40 or len(h1) < 30:
+            return {"state": "unknown", "score": 50}
+        atr = max(_safe_float(m15["atr"].iloc[-1], 0.0), 1e-12)
+        closes = m15["close"].astype(float)
+        window = max(12, min(32, len(closes) - 1))
+        net = (closes.iloc[-1] - closes.iloc[-window]) / max(atr * np.sqrt(window), 1e-12)
+        path = closes.diff().abs().iloc[-window:].sum()
+        efficiency = abs(closes.iloc[-1] - closes.iloc[-window]) / max(path, 1e-12)
+        rv = _safe_float(m15["volume"].iloc[-1] / max(m15["volume"].rolling(20).mean().iloc[-1], 1e-12), 1.0)
+        last_range = float(m15["high"].iloc[-1] - m15["low"].iloc[-1])
+        avg_range = float((m15["high"] - m15["low"]).rolling(20).mean().iloc[-1])
+        expansion = last_range / max(avg_range, 1e-12)
+        # Simple, explainable regime classifier. It is context, not a trading gate.
+        if abs(net) >= 2.0 and efficiency >= 0.55 and expansion >= 1.10:
+            state = "expansion_bull" if net > 0 else "expansion_bear"
+        elif efficiency <= 0.28 and expansion <= 0.90:
+            state = "compression_range"
+        elif abs(net) >= 0.8 and efficiency >= 0.42:
+            state = "trend_bull" if net > 0 else "trend_bear"
+        else:
+            state = "transition"
+        return {"state": state, "score": float(np.clip(50 + 20*min(abs(net)/2,1) + 20*efficiency + 5*min(rv,2), 0, 100)),
+                "net": net, "efficiency": efficiency, "relative_volume": rv,
+                "range_expansion": expansion}
+    except Exception:
+        return {"state": "unknown", "score": 50}
+
+
+def _setup_archetype(direction, entry_label, score, market_state, candidate):
+    bull = direction == "bull"
+    liq = score.get("selected_sweep", False)
+    conf = score.get("entry_confirmation", {}) or {}
+    choch = score.get("choch_m15", {}) or {}
+    cisd = score.get("cisd_m15", {}) or {}
+    label = str(entry_label or "").lower()
+    if liq and conf.get("confirmed"):
+        return "LIQUIDITY_SWEEP_RECLAIM"
+    if label == "ob" and (score.get("htf_poi") or score.get("poi_reacted")):
+        return "HTF_POI_OB_REACTION"
+    if label == "fvg":
+        return "FVG_RETEST_CONTINUATION"
+    selected_choch = choch.get("bullish_choch") if bull else choch.get("bearish_choch")
+    selected_cisd = cisd.get("bullish_cisd") if bull else cisd.get("bearish_cisd")
+    if selected_choch or selected_cisd:
+        return "STRUCTURE_SHIFT_CONTINUATION"
+    if market_state.get("state") == ("expansion_bull" if bull else "expansion_bear"):
+        return "MOMENTUM_CONTINUATION"
+    return "LOCATION_REVERSAL_OR_RANGE"
+
+
+def _reasoning_engine(base, score, market_state, market_context, candidate, rr, entry_label):
+    """Produce explainable evidence/votes rather than a binary indicator pile."""
+    direction = base["direction"]
+    bull = direction == "bull"
+    evidence = []
+    contradictions = []
+    points = 0.0
+
+    def vote(name, strength, reason, conflict=False):
+        nonlocal points
+        s = float(np.clip(strength, -1.0, 1.0))
+        points += s
+        if s >= 0.25:
+            evidence.append({"name": name, "strength": round(s,2), "reason": reason})
+        elif s <= -0.25 or conflict:
+            contradictions.append({"name": name, "strength": round(s,2), "reason": reason})
+
+    htf = score.get("htf_bias", "neutral")
+    vote("HTF", 0.65 if htf == ("bullish" if bull else "bearish") else -0.75 if htf == ("bearish" if bull else "bullish") else 0.0, f"HTF bias={htf}")
+    ts = score.get("trend_strength", {}) or {}
+    ps = score.get("pullback_quality", {}) or {}
+    lq = score.get("liquidity_context", {}) or {}
+    pq = candidate.get("poi_quality", score.get("poi_quality", 50)) if isinstance(candidate, dict) else score.get("poi_quality", 50)
+    vote("trend_strength", (float(ts.get("score",50))-50)/50, f"trend score={ts.get('score',50)}")
+    vote("pullback", (float(ps.get("score",50))-50)/50, f"pullback score={ps.get('score',50)}")
+    vote("liquidity", (float(lq.get("score",50))-50)/50, f"liquidity score={lq.get('score',50)}")
+    vote("POI", (float(pq)-50)/50, f"POI quality={pq}")
+
+    if market_context.get("available"):
+        regime = str(market_context.get("market_regime") or "unknown")
+        wanted = "bullish" if bull else "bearish"
+        opposing = "bearish" if bull else "bullish"
+        if wanted in regime:
+            vote("market_regime", 0.55, f"market regime={regime}")
+        elif opposing in regime:
+            vote("market_regime", -0.65, f"market regime conflicts: {regime}", conflict=True)
+        rs = _safe_float(market_context.get("symbol_relative_strength_4h_pct"), None)
+        if rs is not None:
+            if (bull and rs > 0.5) or ((not bull) and rs < -0.5):
+                vote("relative_strength", 0.55, f"4h relative strength={rs:.2f}%")
+            elif (bull and rs < -0.5) or ((not bull) and rs > 0.5):
+                vote("relative_strength", -0.55, f"4h relative strength conflicts={rs:.2f}%", conflict=True)
+        breadth = _safe_float(market_context.get("breadth_score"), None)
+        if breadth is not None:
+            if (bull and breadth > 0.15) or ((not bull) and breadth < -0.15):
+                vote("breadth", 0.35, f"breadth score={breadth:.2f}")
+            elif (bull and breadth < -0.15) or ((not bull) and breadth > 0.15):
+                vote("breadth", -0.35, f"breadth conflicts={breadth:.2f}", conflict=True)
+    else:
+        # No invented macro data: local state is the only context we have.
+        if market_state.get("state") == ("expansion_bull" if bull else "expansion_bear"):
+            vote("local_regime", 0.45, f"local regime={market_state.get('state')}")
+        elif market_state.get("state") == ("expansion_bear" if bull else "expansion_bull"):
+            vote("local_regime", -0.45, f"local regime conflicts={market_state.get('state')}", conflict=True)
+
+    if score.get("trigger_count", 0) >= 2:
+        vote("trigger_confluence", 0.45, f"{score.get('trigger_count')} aligned triggers")
+    elif score.get("trigger_count", 0) == 0:
+        vote("trigger_confluence", -0.45, "no fresh M15 trigger")
+
+    # Risk / target sanity is deliberately a soft vote: RR is hard-validated elsewhere.
+    if rr >= 2.5:
+        vote("reward_geometry", 0.25, f"RR={rr:.2f}")
+    elif rr < 2.0:
+        vote("reward_geometry", -0.35, f"marginal RR={rr:.2f}")
+
+    raw = 50 + 22 * np.tanh(points / 2.5)
+    confidence_adj = float(np.clip(raw - 50, -V12_CONFIDENCE_DELTA_CAP, V12_CONFIDENCE_DELTA_CAP))
+    archetype = _setup_archetype(direction, entry_label, score, market_state, candidate)
+    # A genuine hard conflict only vetoes when the candidate is structurally invalid.
+    # Otherwise contradictions lower confidence; they do not create V10-style over-filtering.
+    hard_conflict = any(x["name"] == "HTF" and x["strength"] <= -0.70 for x in contradictions)
+    return {
+        "archetype": archetype,
+        "evidence": evidence,
+        "contradictions": contradictions,
+        "evidence_balance": round(points, 3),
+        "confidence_adjustment": round(confidence_adj, 2),
+        "hard_conflict": hard_conflict,
+        "market_state": market_state,
+        "market_context_used": market_context.get("available", False),
+        "thesis": (
+            f"{archetype}: {direction.upper()} setup; "
+            + ("evidence aligned" if points >= 0.8 else "mixed evidence" if points > -0.8 else "evidence mostly conflicted")
+        ),
+    }
+
+
+def _confidence_band_v12(conf):
+    c=float(conf)
+    if c < 40: return "weak"
+    if c < 55: return "developing"
+    if c < 70: return "qualified"
+    if c < 82: return "strong"
+    return "exceptional"
+
+
+def _safe_market_context_arg(market_context):
+    return _market_snapshot_from_context(market_context)
+
+
+
+# =============================================================================
+# V12 PUBLIC API WRAPPERS
+# =============================================================================
+
+def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
+                 df_d1: Optional[pd.DataFrame] = None,
+                 symbol: Optional[str] = None,
+                 df_btc_h1: Optional[pd.DataFrame] = None,
+                 trade_history: Optional[list] = None,
+                 market_context: Optional[dict] = None) -> Optional[dict]:
+    """V12 reasoning wrapper around the proven V11 execution-compatible engine.
+
+    New input `market_context` is optional. V19 currently does not pass the
+    cross-market row into full_analyze, so the engine never invents it; local
+    market-state reasoning remains active and V12 is ready for the context when
+    the main bridge is enabled.
+    """
+    result = _legacy_full_analyze(df_h1, df_m15, df_d1, symbol, df_btc_h1, trade_history)
+    if not isinstance(result, dict):
+        return result
+
+    try:
+        direction = "bull" if result.get("decision") == "BUY" else "bear"
+        score = dict(result.get("confidence_diagnostics", {}).get("score_snapshot", {}) or {})
+        # Rebuild only the compact fields required by the reasoning layer from public output.
+        score.update({
+            "direction": direction,
+            "htf_bias": result.get("htf_bias", "neutral"),
+            "trend_strength": result.get("trend_strength", {}),
+            "pullback_quality": result.get("pullback_quality", {}),
+            "liquidity_context": result.get("liquidity_context", {}),
+            "trigger_count": result.get("v11_quality", {}).get("trigger_count", 0) if isinstance(result.get("v11_quality"), dict) else 0,
+            "entry_confirmation": result.get("entry_confirmation", {}),
+            "choch_m15": result.get("choch_m15", {}),
+            "cisd_m15": result.get("cisd_m15", {}),
+            "poi_quality": result.get("poi_quality", 50),
+            "poi_reacted": result.get("poi_reacted", False),
+            "selected_sweep": bool(result.get("liquidity_context", {}).get("swept", False)) if isinstance(result.get("liquidity_context"), dict) else False,
+        })
+        market_state = _local_market_state(df_h1, df_m15, df_d1)
+        mc = _safe_market_context_arg(market_context)
+        candidate = {"poi_quality": result.get("poi_quality", 50)}
+        rr = _safe_float(result.get("rr"), 2.0) or 2.0
+        reasoning = _reasoning_engine(result, score, market_state, mc, candidate, rr, result.get("entry_label"))
+
+        base_conf = int(round(float(result.get("confidence", 0))))
+        conf = int(np.clip(round(base_conf + reasoning["confidence_adjustment"]), 0, 99))
+        result["confidence_base"] = base_conf
+        result["confidence"] = conf
+        result["confidence_band"] = _confidence_band_v12(conf)
+        result["reasoning_engine"] = V12_VERSION
+        result["setup_archetype"] = reasoning["archetype"]
+        result["market_thesis"] = {
+            "summary": reasoning["thesis"],
+            "evidence": reasoning["evidence"],
+            "contradictions": reasoning["contradictions"],
+            "evidence_balance": reasoning["evidence_balance"],
+            "market_state": reasoning["market_state"],
+            "market_context_used": reasoning["market_context_used"],
+        }
+        result["decision_trace"] = {
+            "direction": direction,
+            "entry_label": result.get("entry_label"),
+            "rr": rr,
+            "confidence_base": base_conf,
+            "confidence_adjustment": reasoning["confidence_adjustment"],
+            "confidence_final": conf,
+            "hard_conflict": reasoning["hard_conflict"],
+        }
+        result["v12_context"] = {
+            "local_market_state": market_state,
+            "optional_market_context": mc,
+            "uses_new_external_data": False,
+        }
+        return result
+    except Exception as exc:
+        # Fail open to the proven V11 result rather than breaking scanning.
+        result["reasoning_engine"] = V12_VERSION
+        result["reasoning_warning"] = str(exc)[:240]
+        return result
+
+
+def _trail_path_state(state, current_price, current_sl):
+    try:
+        entry = float(state.get("entry")); initial_sl = float(state.get("initial_sl") or state.get("signal", {}).get("sl"));
+        risk = abs(entry - initial_sl)
+        side = str(state.get("signal", {}).get("decision") or "BUY").upper()
+        if risk <= 0:
+            return {"mfe_r": 0.0, "giveback_ratio": 0.0, "protected_r": 0.0, "trail_count": 0}
+        move = ((float(current_price)-entry) if side == "BUY" else (entry-float(current_price)))
+        r = move / risk
+        mfe = _safe_float(state.get("mfe_r"), max(r,0.0)) or 0.0
+        giveback = max(mfe - r, 0.0)
+        ratio = giveback / max(mfe, 0.25) if mfe > 0 else 0.0
+        protected = ((float(current_sl)-entry) if side == "BUY" else (entry-float(current_sl))) / risk
+        return {"mfe_r": mfe, "current_r": r, "giveback_ratio": ratio, "protected_r": protected,
+                "trail_count": int(state.get("trail_update_count", 0) or 0),
+                "trail_failed": int(state.get("trail_failed_count", 0) or 0)}
+    except Exception:
+        return {"mfe_r": 0.0, "current_r": 0.0, "giveback_ratio": 0.0, "protected_r": 0.0, "trail_count": 0, "trail_failed": 0}
+
+
+def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
+                    df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
+    """V12 path-aware trade manager. Preserves V11 execution contract."""
+    try:
+        current_price = _safe_float(state.get("current_price") or state.get("price"), None)
+        if current_price is None and df_m15 is not None and len(df_m15):
+            current_price = float(df_m15["close"].iloc[-1])
+        current_sl = _safe_float(state.get("current_sl") or state.get("signal", {}).get("sl"), None)
+        path = _trail_path_state(state, current_price, current_sl) if current_price is not None and current_sl is not None else {}
+        upd = _legacy_manage_position(state, df_m15, df_h1, df_d1, symbol)
+        if not isinstance(upd, dict):
+            return upd
+
+        upd.setdefault("reason", [])
+        reasons = upd["reason"] if isinstance(upd["reason"], list) else [upd["reason"]]
+        upd["path_context"] = path
+        upd["reasoning_engine"] = V12_VERSION
+
+        # Anti-churn: if the legacy engine proposes a tiny improvement after many
+        # successful updates, require another meaningful state change before sending it.
+        new_sl = _safe_float(upd.get("sl"), None)
+        if new_sl is not None and current_sl is not None and current_price is not None:
+            atr = _safe_float(upd.get("atr"), None) or _safe_float(df_m15["atr"].iloc[-1], 0.0)
+            improvement = abs(new_sl - current_sl) / max(atr or 0.0, 1e-12)
+            if path.get("trail_count", 0) >= V12_TRAIL_MAX_CHURN and improvement < V12_TRAIL_MIN_UPDATE_R:
+                upd["action"] = "PROTECT"
+                upd.pop("sl", None)
+                reasons.append("anti_churn_small_trail_update")
+
+        # Winner path logic: deep giveback gets priority, but healthy winners keep
+        # room and do not get locked merely because weakness score is nonzero.
+        if path.get("mfe_r", 0.0) >= 1.0 and path.get("giveback_ratio", 0.0) >= V12_GIVEBACK_WARN:
+            reasons.append("path_meaningful_giveback")
+        if path.get("mfe_r", 0.0) >= 1.5 and path.get("giveback_ratio", 0.0) >= V12_GIVEBACK_TIGHT:
+            reasons.append("path_deep_giveback")
+
+        upd["reason"] = reasons
+        return upd
+    except Exception as exc:
+        return {"action": "PROTECT", "reason": [f"v12_manager_fallback:{str(exc)[:160]}"], "reasoning_engine": V12_VERSION}
