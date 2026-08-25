@@ -2415,7 +2415,7 @@ def _select_tp(pool: list, entry: float, risk: float, direction: str,
 # FUNGSI UTAMA — Dipanggil oleh main.py
 # =============================================================================
 
-def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
+def _legacy_full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                  df_d1: Optional[pd.DataFrame] = None,
                  symbol: Optional[str] = None,
                  df_btc_h1: Optional[pd.DataFrame] = None,
@@ -3330,7 +3330,7 @@ def _momentum_context(df: pd.DataFrame) -> dict:
     }
 
 
-def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
+def _legacy_manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
                     df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
     """V9 position-management brain: lifecycle + path + structure + execution safety.
 
@@ -3618,3 +3618,358 @@ def validate_and_adjust_geometry(
         "rr":    round(rr, 2),
         "adjusted": False,
     }
+
+# =============================================================================
+# V12 AI-STYLE REASONING LAYER
+# =============================================================================
+# This layer deliberately wraps the proven V11 detectors instead of replacing
+# them. V10's lesson: adding hard gates made the scanner too sparse. V12 therefore
+# uses evidence voting, contradiction detection, setup archetypes, and bounded
+# confidence adjustments. Only execution geometry remains a hard reject.
+#
+# Optional cross-market context: V19 may pass a `market_context` dict to
+# full_analyze(..., market_context=...). The strategy remains fully compatible
+# with the existing main.py contract when that field is absent.
+
+V12_VERSION = "12.0-ai-context-reasoner"
+V12_CONFIDENCE_DELTA_CAP = 10
+V12_MIN_SAMPLE_FOR_HISTORY = 8
+V12_TRAIL_MIN_UPDATE_R = 0.08
+V12_TRAIL_MAX_CHURN = 6
+V12_GIVEBACK_WARN = 0.28
+V12_GIVEBACK_TIGHT = 0.45
+
+
+def _safe_float(x, default=None):
+    try:
+        v = float(x)
+        if np.isfinite(v):
+            return v
+    except Exception:
+        pass
+    return default
+
+
+def _market_snapshot_from_context(mc):
+    if not isinstance(mc, dict):
+        return {"available": False}
+    out = {"available": True}
+    for k in (
+        "market_regime", "breadth_score", "bullish_breadth_pct",
+        "bearish_breadth_pct", "neutral_breadth_pct", "median_price_1h_pct",
+        "median_price_4h_pct", "median_efficiency_4h",
+        "median_range_expansion_ratio", "avg_relative_volume",
+        "btc_price_1h_pct", "btc_price_4h_pct",
+        "relative_strength_1h_pct", "relative_strength_4h_pct",
+        "symbol_relative_strength_1h_pct", "symbol_relative_strength_4h_pct",
+    ):
+        if k in mc:
+            out[k] = mc[k]
+    # V19 exports per-symbol RS rows, while the future strategy bridge may
+    # provide the already-selected row fields directly.
+    if "symbol_relative_strength_1h_pct" not in out and "relative_strength_1h_pct" in out:
+        out["symbol_relative_strength_1h_pct"] = out.get("relative_strength_1h_pct")
+    if "symbol_relative_strength_4h_pct" not in out and "relative_strength_4h_pct" in out:
+        out["symbol_relative_strength_4h_pct"] = out.get("relative_strength_4h_pct")
+    return out
+
+
+def _local_market_state(df_h1, df_m15, df_d1=None):
+    """Derive a compact market state from already-available OHLCV."""
+    try:
+        h1 = build_df(_closed_candles(df_h1, 60), 60)
+        m15 = build_df(_closed_candles(df_m15, 15), 15)
+        if h1 is None or m15 is None or len(m15) < 40 or len(h1) < 30:
+            return {"state": "unknown", "score": 50}
+        atr = max(_safe_float(m15["atr"].iloc[-1], 0.0), 1e-12)
+        closes = m15["close"].astype(float)
+        window = max(12, min(32, len(closes) - 1))
+        net = (closes.iloc[-1] - closes.iloc[-window]) / max(atr * np.sqrt(window), 1e-12)
+        path = closes.diff().abs().iloc[-window:].sum()
+        efficiency = abs(closes.iloc[-1] - closes.iloc[-window]) / max(path, 1e-12)
+        rv = _safe_float(m15["volume"].iloc[-1] / max(m15["volume"].rolling(20).mean().iloc[-1], 1e-12), 1.0)
+        last_range = float(m15["high"].iloc[-1] - m15["low"].iloc[-1])
+        avg_range = float((m15["high"] - m15["low"]).rolling(20).mean().iloc[-1])
+        expansion = last_range / max(avg_range, 1e-12)
+        # Simple, explainable regime classifier. It is context, not a trading gate.
+        if abs(net) >= 2.0 and efficiency >= 0.55 and expansion >= 1.10:
+            state = "expansion_bull" if net > 0 else "expansion_bear"
+        elif efficiency <= 0.28 and expansion <= 0.90:
+            state = "compression_range"
+        elif abs(net) >= 0.8 and efficiency >= 0.42:
+            state = "trend_bull" if net > 0 else "trend_bear"
+        else:
+            state = "transition"
+        return {"state": state, "score": float(np.clip(50 + 20*min(abs(net)/2,1) + 20*efficiency + 5*min(rv,2), 0, 100)),
+                "net": net, "efficiency": efficiency, "relative_volume": rv,
+                "range_expansion": expansion}
+    except Exception:
+        return {"state": "unknown", "score": 50}
+
+
+def _setup_archetype(direction, entry_label, score, market_state, candidate):
+    bull = direction == "bull"
+    liq = score.get("selected_sweep", False)
+    conf = score.get("entry_confirmation", {}) or {}
+    choch = score.get("choch_m15", {}) or {}
+    cisd = score.get("cisd_m15", {}) or {}
+    label = str(entry_label or "").lower()
+    if liq and conf.get("confirmed"):
+        return "LIQUIDITY_SWEEP_RECLAIM"
+    if label == "ob" and (score.get("htf_poi") or score.get("poi_reacted")):
+        return "HTF_POI_OB_REACTION"
+    if label == "fvg":
+        return "FVG_RETEST_CONTINUATION"
+    selected_choch = choch.get("bullish_choch") if bull else choch.get("bearish_choch")
+    selected_cisd = cisd.get("bullish_cisd") if bull else cisd.get("bearish_cisd")
+    if selected_choch or selected_cisd:
+        return "STRUCTURE_SHIFT_CONTINUATION"
+    if market_state.get("state") == ("expansion_bull" if bull else "expansion_bear"):
+        return "MOMENTUM_CONTINUATION"
+    return "LOCATION_REVERSAL_OR_RANGE"
+
+
+def _reasoning_engine(base, score, market_state, market_context, candidate, rr, entry_label):
+    """Produce explainable evidence/votes rather than a binary indicator pile."""
+    direction = base["direction"]
+    bull = direction == "bull"
+    evidence = []
+    contradictions = []
+    points = 0.0
+
+    def vote(name, strength, reason, conflict=False):
+        nonlocal points
+        s = float(np.clip(strength, -1.0, 1.0))
+        points += s
+        if s >= 0.25:
+            evidence.append({"name": name, "strength": round(s,2), "reason": reason})
+        elif s <= -0.25 or conflict:
+            contradictions.append({"name": name, "strength": round(s,2), "reason": reason})
+
+    htf = score.get("htf_bias", "neutral")
+    vote("HTF", 0.65 if htf == ("bullish" if bull else "bearish") else -0.75 if htf == ("bearish" if bull else "bullish") else 0.0, f"HTF bias={htf}")
+    ts = score.get("trend_strength", {}) or {}
+    ps = score.get("pullback_quality", {}) or {}
+    lq = score.get("liquidity_context", {}) or {}
+    pq = candidate.get("poi_quality", score.get("poi_quality", 50)) if isinstance(candidate, dict) else score.get("poi_quality", 50)
+    vote("trend_strength", (float(ts.get("score",50))-50)/50, f"trend score={ts.get('score',50)}")
+    vote("pullback", (float(ps.get("score",50))-50)/50, f"pullback score={ps.get('score',50)}")
+    vote("liquidity", (float(lq.get("score",50))-50)/50, f"liquidity score={lq.get('score',50)}")
+    vote("POI", (float(pq)-50)/50, f"POI quality={pq}")
+
+    if market_context.get("available"):
+        regime = str(market_context.get("market_regime") or "unknown")
+        wanted = "bullish" if bull else "bearish"
+        opposing = "bearish" if bull else "bullish"
+        if wanted in regime:
+            vote("market_regime", 0.55, f"market regime={regime}")
+        elif opposing in regime:
+            vote("market_regime", -0.65, f"market regime conflicts: {regime}", conflict=True)
+        rs = _safe_float(market_context.get("symbol_relative_strength_4h_pct"), None)
+        if rs is not None:
+            if (bull and rs > 0.5) or ((not bull) and rs < -0.5):
+                vote("relative_strength", 0.55, f"4h relative strength={rs:.2f}%")
+            elif (bull and rs < -0.5) or ((not bull) and rs > 0.5):
+                vote("relative_strength", -0.55, f"4h relative strength conflicts={rs:.2f}%", conflict=True)
+        breadth = _safe_float(market_context.get("breadth_score"), None)
+        if breadth is not None:
+            if (bull and breadth > 0.15) or ((not bull) and breadth < -0.15):
+                vote("breadth", 0.35, f"breadth score={breadth:.2f}")
+            elif (bull and breadth < -0.15) or ((not bull) and breadth > 0.15):
+                vote("breadth", -0.35, f"breadth conflicts={breadth:.2f}", conflict=True)
+    else:
+        # No invented macro data: local state is the only context we have.
+        if market_state.get("state") == ("expansion_bull" if bull else "expansion_bear"):
+            vote("local_regime", 0.45, f"local regime={market_state.get('state')}")
+        elif market_state.get("state") == ("expansion_bear" if bull else "expansion_bull"):
+            vote("local_regime", -0.45, f"local regime conflicts={market_state.get('state')}", conflict=True)
+
+    if score.get("trigger_count", 0) >= 2:
+        vote("trigger_confluence", 0.45, f"{score.get('trigger_count')} aligned triggers")
+    elif score.get("trigger_count", 0) == 0:
+        vote("trigger_confluence", -0.45, "no fresh M15 trigger")
+
+    # Risk / target sanity is deliberately a soft vote: RR is hard-validated elsewhere.
+    if rr >= 2.5:
+        vote("reward_geometry", 0.25, f"RR={rr:.2f}")
+    elif rr < 2.0:
+        vote("reward_geometry", -0.35, f"marginal RR={rr:.2f}")
+
+    raw = 50 + 22 * np.tanh(points / 2.5)
+    confidence_adj = float(np.clip(raw - 50, -V12_CONFIDENCE_DELTA_CAP, V12_CONFIDENCE_DELTA_CAP))
+    archetype = _setup_archetype(direction, entry_label, score, market_state, candidate)
+    # A genuine hard conflict only vetoes when the candidate is structurally invalid.
+    # Otherwise contradictions lower confidence; they do not create V10-style over-filtering.
+    hard_conflict = any(x["name"] == "HTF" and x["strength"] <= -0.70 for x in contradictions)
+    return {
+        "archetype": archetype,
+        "evidence": evidence,
+        "contradictions": contradictions,
+        "evidence_balance": round(points, 3),
+        "confidence_adjustment": round(confidence_adj, 2),
+        "hard_conflict": hard_conflict,
+        "market_state": market_state,
+        "market_context_used": market_context.get("available", False),
+        "thesis": (
+            f"{archetype}: {direction.upper()} setup; "
+            + ("evidence aligned" if points >= 0.8 else "mixed evidence" if points > -0.8 else "evidence mostly conflicted")
+        ),
+    }
+
+
+def _confidence_band_v12(conf):
+    c=float(conf)
+    if c < 40: return "weak"
+    if c < 55: return "developing"
+    if c < 70: return "qualified"
+    if c < 82: return "strong"
+    return "exceptional"
+
+
+def _safe_market_context_arg(market_context):
+    return _market_snapshot_from_context(market_context)
+
+
+
+# =============================================================================
+# V12 PUBLIC API WRAPPERS
+# =============================================================================
+
+def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
+                 df_d1: Optional[pd.DataFrame] = None,
+                 symbol: Optional[str] = None,
+                 df_btc_h1: Optional[pd.DataFrame] = None,
+                 trade_history: Optional[list] = None,
+                 market_context: Optional[dict] = None) -> Optional[dict]:
+    """V12 reasoning wrapper around the proven V11 execution-compatible engine.
+
+    New input `market_context` is optional. V19 currently does not pass the
+    cross-market row into full_analyze, so the engine never invents it; local
+    market-state reasoning remains active and V12 is ready for the context when
+    the main bridge is enabled.
+    """
+    result = _legacy_full_analyze(df_h1, df_m15, df_d1, symbol, df_btc_h1, trade_history)
+    if not isinstance(result, dict):
+        return result
+
+    try:
+        direction = "bull" if result.get("decision") == "BUY" else "bear"
+        score = dict(result.get("confidence_diagnostics", {}).get("score_snapshot", {}) or {})
+        # Rebuild only the compact fields required by the reasoning layer from public output.
+        score.update({
+            "direction": direction,
+            "htf_bias": result.get("htf_bias", "neutral"),
+            "trend_strength": result.get("trend_strength", {}),
+            "pullback_quality": result.get("pullback_quality", {}),
+            "liquidity_context": result.get("liquidity_context", {}),
+            "trigger_count": result.get("v11_quality", {}).get("trigger_count", 0) if isinstance(result.get("v11_quality"), dict) else 0,
+            "entry_confirmation": result.get("entry_confirmation", {}),
+            "choch_m15": result.get("choch_m15", {}),
+            "cisd_m15": result.get("cisd_m15", {}),
+            "poi_quality": result.get("poi_quality", 50),
+            "poi_reacted": result.get("poi_reacted", False),
+            "selected_sweep": bool(result.get("liquidity_context", {}).get("swept", False)) if isinstance(result.get("liquidity_context"), dict) else False,
+        })
+        market_state = _local_market_state(df_h1, df_m15, df_d1)
+        mc = _safe_market_context_arg(market_context)
+        candidate = {"poi_quality": result.get("poi_quality", 50)}
+        rr = _safe_float(result.get("rr"), 2.0) or 2.0
+        reasoning = _reasoning_engine(result, score, market_state, mc, candidate, rr, result.get("entry_label"))
+
+        base_conf = int(round(float(result.get("confidence", 0))))
+        conf = int(np.clip(round(base_conf + reasoning["confidence_adjustment"]), 0, 99))
+        result["confidence_base"] = base_conf
+        result["confidence"] = conf
+        result["confidence_band"] = _confidence_band_v12(conf)
+        result["reasoning_engine"] = V12_VERSION
+        result["setup_archetype"] = reasoning["archetype"]
+        result["market_thesis"] = {
+            "summary": reasoning["thesis"],
+            "evidence": reasoning["evidence"],
+            "contradictions": reasoning["contradictions"],
+            "evidence_balance": reasoning["evidence_balance"],
+            "market_state": reasoning["market_state"],
+            "market_context_used": reasoning["market_context_used"],
+        }
+        result["decision_trace"] = {
+            "direction": direction,
+            "entry_label": result.get("entry_label"),
+            "rr": rr,
+            "confidence_base": base_conf,
+            "confidence_adjustment": reasoning["confidence_adjustment"],
+            "confidence_final": conf,
+            "hard_conflict": reasoning["hard_conflict"],
+        }
+        result["v12_context"] = {
+            "local_market_state": market_state,
+            "optional_market_context": mc,
+            "uses_new_external_data": False,
+        }
+        return result
+    except Exception as exc:
+        # Fail open to the proven V11 result rather than breaking scanning.
+        result["reasoning_engine"] = V12_VERSION
+        result["reasoning_warning"] = str(exc)[:240]
+        return result
+
+
+def _trail_path_state(state, current_price, current_sl):
+    try:
+        entry = float(state.get("entry")); initial_sl = float(state.get("initial_sl") or state.get("signal", {}).get("sl"));
+        risk = abs(entry - initial_sl)
+        side = str(state.get("signal", {}).get("decision") or "BUY").upper()
+        if risk <= 0:
+            return {"mfe_r": 0.0, "giveback_ratio": 0.0, "protected_r": 0.0, "trail_count": 0}
+        move = ((float(current_price)-entry) if side == "BUY" else (entry-float(current_price)))
+        r = move / risk
+        mfe = _safe_float(state.get("mfe_r"), max(r,0.0)) or 0.0
+        giveback = max(mfe - r, 0.0)
+        ratio = giveback / max(mfe, 0.25) if mfe > 0 else 0.0
+        protected = ((float(current_sl)-entry) if side == "BUY" else (entry-float(current_sl))) / risk
+        return {"mfe_r": mfe, "current_r": r, "giveback_ratio": ratio, "protected_r": protected,
+                "trail_count": int(state.get("trail_update_count", 0) or 0),
+                "trail_failed": int(state.get("trail_failed_count", 0) or 0)}
+    except Exception:
+        return {"mfe_r": 0.0, "current_r": 0.0, "giveback_ratio": 0.0, "protected_r": 0.0, "trail_count": 0, "trail_failed": 0}
+
+
+def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
+                    df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
+    """V12 path-aware trade manager. Preserves V11 execution contract."""
+    try:
+        current_price = _safe_float(state.get("current_price") or state.get("price"), None)
+        if current_price is None and df_m15 is not None and len(df_m15):
+            current_price = float(df_m15["close"].iloc[-1])
+        current_sl = _safe_float(state.get("current_sl") or state.get("signal", {}).get("sl"), None)
+        path = _trail_path_state(state, current_price, current_sl) if current_price is not None and current_sl is not None else {}
+        upd = _legacy_manage_position(state, df_m15, df_h1, df_d1, symbol)
+        if not isinstance(upd, dict):
+            return upd
+
+        upd.setdefault("reason", [])
+        reasons = upd["reason"] if isinstance(upd["reason"], list) else [upd["reason"]]
+        upd["path_context"] = path
+        upd["reasoning_engine"] = V12_VERSION
+
+        # Anti-churn: if the legacy engine proposes a tiny improvement after many
+        # successful updates, require another meaningful state change before sending it.
+        new_sl = _safe_float(upd.get("sl"), None)
+        if new_sl is not None and current_sl is not None and current_price is not None:
+            atr = _safe_float(upd.get("atr"), None) or _safe_float(df_m15["atr"].iloc[-1], 0.0)
+            improvement = abs(new_sl - current_sl) / max(atr or 0.0, 1e-12)
+            if path.get("trail_count", 0) >= V12_TRAIL_MAX_CHURN and improvement < V12_TRAIL_MIN_UPDATE_R:
+                upd["action"] = "PROTECT"
+                upd.pop("sl", None)
+                reasons.append("anti_churn_small_trail_update")
+
+        # Winner path logic: deep giveback gets priority, but healthy winners keep
+        # room and do not get locked merely because weakness score is nonzero.
+        if path.get("mfe_r", 0.0) >= 1.0 and path.get("giveback_ratio", 0.0) >= V12_GIVEBACK_WARN:
+            reasons.append("path_meaningful_giveback")
+        if path.get("mfe_r", 0.0) >= 1.5 and path.get("giveback_ratio", 0.0) >= V12_GIVEBACK_TIGHT:
+            reasons.append("path_deep_giveback")
+
+        upd["reason"] = reasons
+        return upd
+    except Exception as exc:
+        return {"action": "PROTECT", "reason": [f"v12_manager_fallback:{str(exc)[:160]}"], "reasoning_engine": V12_VERSION}

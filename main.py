@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-main.py V16 — MESIN (engine).
+main.py V19 — MESIN (engine).
 
 V15 HARDENED: verified real-order execution, no blind mutating retries, exchange/local state reconciliation, protection-pair verification, and fail-closed emergency handling. Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
 strategy_logic.py ("Otak"), diimpor di bawah.
 
-V7: Binance execution safety retained; /analyze rebuilt as closed-trade research ledger; /resetbalance starts a fresh research run.
+V19: V18 observability retained; derived market-context telemetry added from existing cached M15/H1/D1 data with zero additional Binance requests. Adds breadth, relative strength vs BTC, efficiency, volume participation, volatility/regime descriptors, and market-context research export.
 1. Setup logging dipindah ke awal (sebelumnya log dipanggil sebelum
    didefinisikan -> selalu NameError saat start).
 2. Fallback strategy_logic gagal load: full_analyze jadi no-op (tidak
@@ -63,6 +63,7 @@ TELEGRAM_KEEPALIVE_SEC = 300
 BINANCE_REQUEST_INTERVAL = 2.5
 # Setelah cooldown/ban Binance selesai, tunggu tambahan 60 detik sebelum request pertama.
 BINANCE_POST_COOLDOWN_GRACE = 60.0
+MAX_MARGIN_MULTIPLIER = 1.50  # HARD SAFETY CAP relative to configured MARGIN_USD
 # Safety governor berbasis header usage; berhenti sebelum mendekati limit 1 menit.
 BINANCE_WEIGHT_SOFT_LIMIT = 1800
 BINANCE_WEIGHT_HARD_LIMIT = 2100
@@ -75,7 +76,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V16"
+MAIN_ENGINE_VERSION = "V19"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -200,11 +201,18 @@ log.addHandler(_tg_log_handler)
 
 auto_mode      = False
 auto_thread    = None
+autostop_thread = None
 active_chat_id = None
 timeout_flag   = False
 active_trade   = None   # dict posisi yang sedang dipantau, None jika tidak ada
 
 STARTING_BALANCE = 10.0   # modal awal simulasi dalam USD
+
+# Research/UI balance state. /mode on snapshots Binance balance once; /mode off
+# restores the simulation anchor to $10. /resetstats NEVER changes this balance.
+real_balance_snapshot = None
+real_balance_snapshot_at = 0.0
+real_balance_lock = threading.Lock()
 
 stat_lock = threading.Lock()
 stats = {
@@ -215,20 +223,38 @@ stats = {
 
 # FULL CLOSED-TRADE LEDGER UNTUK RESEARCH /analyze.
 # Berbeda dari pnl_history yang sengaja hanya menyimpan 20 trade terakhir.
-# Ledger ini tumbuh sepanjang run dan dihapus oleh /resetbalance.
+# Ledger ini tumbuh sepanjang research run dan dihapus oleh /resetstats.
 trade_history_lock = threading.Lock()
 trade_history: list[dict] = []
 trade_sequence = 0
 research_run_id = datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
 
-# Ban koin berbasis SCAN CYCLE (bukan jumlah trade nyata — koin yang selalu
-# ke-skip di tahap pending tidak pernah menambah hitungan trade, jadi ban
-# berbasis trade tidak akan pernah relevan untuk kasus itu).
+# Research warmup: beberapa kandidat sinyal pertama setelah /resetstats sengaja
+# ditolak tanpa dianggap trade gagal dan tanpa mengubah ban state.
+EARLY_REJECT_DEFAULT = 5
+early_reject_configured = EARLY_REJECT_DEFAULT
+early_reject_remaining = EARLY_REJECT_DEFAULT
+early_reject_lock = threading.Lock()
+
+# Ban koin berbasis SCAN CYCLE.
+# SHORT ban = pending/no-trade + low-confidence. CLOSED ban tetap terpisah.
 ban_lock = threading.Lock()
-banned_coins: dict = {}      # {symbol: (scan_counter saat diban, durasi ban itu)}
+banned_coins: dict = {}      # {symbol: {banned_at, duration, reason, kind, confidence}}
 scan_counter = 0             # bertambah 1 setiap get_top_coins() dipanggil
-BAN_DURATION_SCANS = 15
-BAN_DURATION_TRADE_CLOSED = 50   # ban khusus setelah trade BENAR-BENAR closed (TP/SL/Trail/timeout)
+BAN_DURATION_SCANS = 15.0
+BAN_DURATION_TRADE_CLOSED = 50.0   # setelah trade BENAR-BENAR closed
+
+# Research observability state. Low-confidence history intentionally survives
+# /resetstats; use /resetlowconf to clear it explicitly.
+low_conf_history_lock = threading.Lock()
+low_conf_history: list[dict] = []
+trail_events_lock = threading.Lock()
+trail_events: list[dict] = []
+trail_event_sequence = 0
+scan_quality_lock = threading.Lock()
+scan_quality_history: list[dict] = []
+market_context_lock = threading.Lock()
+market_context_history: list[dict] = []
 
 # ── REAL TRADE (Binance Futures) — aktif otomatis kalau API key/secret diset ──
 BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY")
@@ -255,9 +281,10 @@ def _read_binance_credentials():
 BINANCE_KEYS_PRESENT = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
 # REAL_TRADE_ENABLED: mode AKTIF SEKARANG (bisa di-toggle runtime via /mode
 # on|off). Default tetap mengikuti ketersediaan key saat startup.
-REAL_TRADE_ENABLED   = BINANCE_KEYS_PRESENT
-# Private Binance management remains permitted for existing real positions
-# even when REAL_TRADE_ENABLED=False (/mode off).
+REAL_TRADE_ENABLED   = False
+# New real trading is OFF until the operator explicitly runs /mode on.
+# Existing REAL positions remain manageable even while the mode flag is OFF.
+
 
 LEVERAGE          = 5      # runtime, via /leverage
 MARGIN_USD        = 5.0    # runtime, via /margin
@@ -305,19 +332,214 @@ _binance_recovery_notice_generation = -1
 _binance_recovery_notice_lock = threading.Lock()
 
 
-def _ban_coin(sym, reason="", duration=None):
-    """
-    Ban koin selama `duration` siklus scan berikutnya (default
-    BAN_DURATION_SCANS). Dipakai dengan duration=BAN_DURATION_TRADE_CLOSED
-    khusus di close_position() — trade yang benar-benar closed (TP/SL/
-    Trail) dibanned jauh lebih lama daripada kasus pending batal/RR
-    gagal/geometri invalid, supaya bot tidak langsung coba koin yang
-    sama lagi setelah baru saja selesai trade sungguhan.
-    """
-    d = duration if duration is not None else BAN_DURATION_SCANS
+def _ban_coin(sym, reason="", duration=None, kind="short", confidence=None):
+    """Ban a symbol for scan cycles with explicit reason/kind metadata."""
+    d = float(BAN_DURATION_SCANS if duration is None else duration)
+    kind = str(kind or "short").lower()
     with ban_lock:
-        banned_coins[sym] = (scan_counter, d)
-    log.info(f"[ban] {sym} diban {d} scan" + (f" ({reason})" if reason else ""))
+        banned_coins[sym] = {
+            "banned_at": float(scan_counter),
+            "duration": d,
+            "reason": str(reason or ""),
+            "kind": kind,
+            "confidence": (float(confidence) if confidence is not None else None),
+        }
+    log.info(f"[ban] {sym} diban {d:g} scan ({kind})" + (f" [{reason}]" if reason else ""))
+
+def _unban_coin(sym):
+    with ban_lock:
+        existed = sym in banned_coins
+        if existed:
+            del banned_coins[sym]
+    if existed:
+        log.info(f"[unban] {sym} dihapus dari ban manual/operator")
+    return existed
+
+def _ban_remaining(sym, current_scan=None):
+    cur = float(scan_counter if current_scan is None else current_scan)
+    with ban_lock:
+        b = banned_coins.get(sym)
+        if not b:
+            return None
+        if isinstance(b, tuple):
+            banned_at, dur = b
+            return max(0.0, float(dur) - (cur - float(banned_at)))
+        return max(0.0, float(b["duration"]) - (cur - float(b["banned_at"])))
+
+
+def _record_low_confidence_event(sym, confidence, cutoff, direction=None, entry_label=None):
+    event = {
+        "event_time": time.time(), "run_id": research_run_id, "scan_counter": scan_counter,
+        "symbol": str(sym), "confidence": float(confidence),
+        "confidence_min": float(STRATEGY_CONFIDENCE_THRESHOLD), "cutoff": float(cutoff),
+        "decision": direction, "entry_label": entry_label,
+    }
+    with low_conf_history_lock: low_conf_history.append(event)
+
+def _low_conf_summary():
+    with low_conf_history_lock: rows=[dict(x) for x in low_conf_history]
+    g={}
+    for r in rows:
+        sym=str(r.get("symbol") or "?"); c=float(r.get("confidence",0) or 0)
+        x=g.setdefault(sym,{"symbol":sym,"count":0,"sum":0.0,"min":None,"max":None,"last":0.0})
+        x["count"]+=1; x["sum"]+=c; x["min"]=c if x["min"] is None else min(x["min"],c); x["max"]=c if x["max"] is None else max(x["max"],c); x["last"]=max(x["last"],float(r.get("event_time") or 0))
+    out=[]
+    for x in g.values():
+        x["avg"]=x["sum"]/x["count"] if x["count"] else 0.0; out.append(x)
+    out.sort(key=lambda x:(-x["count"],x["avg"],x["symbol"]))
+    return out
+
+def _record_scan_quality(row):
+    with scan_quality_lock: scan_quality_history.append(dict(row))
+
+def _market_feature_row(sym, h1, m15, analysis):
+    """Derive chart-context features from already-fetched scan data.
+
+    This function intentionally performs ZERO Binance requests. It is a feature
+    extraction layer for future strategy_logic versions: price velocity,
+    directional efficiency, ATR/volatility regime, volume participation and
+    structure/decision labels are recorded while the scanner already has the
+    candles in memory.
+    """
+    def _safe_float(v, default=None):
+        try:
+            x=float(v)
+            return x if np.isfinite(x) else default
+        except Exception:
+            return default
+
+    out={"symbol":str(sym),"decision":(analysis or {}).get("decision"),
+         "confidence":_safe_float((analysis or {}).get("confidence")),
+         "entry_label":(analysis or {}).get("entry_label"),
+         "struct_h1":(analysis or {}).get("struct_h1") or (analysis or {}).get("structure"),
+         "d1_bias":(analysis or {}).get("d1_bias")}
+    try:
+        c=pd.to_numeric(m15["close"], errors="coerce").dropna()
+        v=pd.to_numeric(m15["volume"], errors="coerce").fillna(0.0)
+        atr_col=pd.to_numeric(m15.get("atr", pd.Series(index=m15.index,dtype=float)), errors="coerce")
+        if len(c)<20:
+            return out
+        last=float(c.iloc[-1]);
+        out["price_1h_pct"]=(float(c.iloc[-1]/c.iloc[-5]-1.0)*100.0) if c.iloc[-5] else None
+        out["price_4h_pct"]=(float(c.iloc[-1]/c.iloc[-17]-1.0)*100.0) if c.iloc[-17] else None
+        diffs=c.diff().abs().iloc[-17:].sum()
+        out["efficiency_4h"]=float(abs(c.iloc[-1]-c.iloc[-17])/diffs) if diffs and np.isfinite(diffs) else 0.0
+        atr_last=_safe_float(atr_col.iloc[-1])
+        out["atr_pct"]=(atr_last/last*100.0) if atr_last and last else None
+        vol_base=float(v.iloc[-21:-1].mean()) if len(v)>=21 else float(v.iloc[:-1].mean())
+        out["relative_volume"]=(float(v.iloc[-1])/vol_base) if vol_base>0 else None
+        true_range=np.maximum(pd.to_numeric(m15["high"],errors="coerce")-pd.to_numeric(m15["low"],errors="coerce"),
+                              np.maximum((pd.to_numeric(m15["high"],errors="coerce")-pd.to_numeric(m15["close"].shift(1),errors="coerce")).abs(),
+                                         (pd.to_numeric(m15["low"],errors="coerce")-pd.to_numeric(m15["close"].shift(1),errors="coerce")).abs()))
+        tr=pd.Series(true_range,index=m15.index).replace([np.inf,-np.inf],np.nan).dropna()
+        if len(tr)>=20:
+            recent=float(tr.iloc[-4:].mean()); baseline=float(tr.iloc[-20:-4].median())
+            out["range_expansion_ratio"]=recent/baseline if baseline>0 else None
+        atr_series=atr_col.dropna()
+        if len(atr_series)>=30 and atr_last is not None:
+            med=float(atr_series.iloc[-31:-1].median())
+            out["volatility_ratio"]=atr_last/med if med>0 else None
+        # Simple, robust regime label derived from the same chart data. It is a
+        # descriptor, not a trade rule.
+        r1=out.get("price_1h_pct") or 0.0; eff=out.get("efficiency_4h") or 0.0
+        rr=out.get("range_expansion_ratio") or 1.0
+        if eff>=0.55 and rr>=1.15:
+            regime="expansion"
+        elif eff<=0.30 and rr<=1.10:
+            regime="range/compression"
+        elif eff>=0.45:
+            regime="trend"
+        else:
+            regime="transition"
+        out["chart_regime"]=regime
+        out["directional_bias"]="bullish" if r1>0.15 else "bearish" if r1<-0.15 else "neutral"
+    except Exception:
+        pass
+    return out
+
+
+def _record_market_context(rows):
+    if not rows:
+        return
+    with market_context_lock:
+        market_context_history.extend(dict(x) for x in rows)
+
+
+def _market_context_snapshot(run_id=None):
+    with market_context_lock:
+        rows=[dict(x) for x in market_context_history]
+    return [x for x in rows if run_id is None or x.get("run_id")==run_id]
+
+
+def _summarize_market_context(rows):
+    rows=[dict(x) for x in (rows or [])]
+    analyzed=len(rows)
+    bull=sum(1 for x in rows if str(x.get("decision") or "").upper()=="BUY")
+    bear=sum(1 for x in rows if str(x.get("decision") or "").upper()=="SELL")
+    neutral=max(0, analyzed-bull-bear)
+    def med(key):
+        vals=[float(x[key]) for x in rows if x.get(key) is not None]
+        return float(np.median(vals)) if vals else None
+    breadth=(bull-bear)/analyzed if analyzed else 0.0
+    eff=med("efficiency_4h") or 0.0
+    rr=med("range_expansion_ratio") or 1.0
+    avg_rv=float(np.mean([float(x["relative_volume"]) for x in rows if x.get("relative_volume") is not None])) if any(x.get("relative_volume") is not None for x in rows) else None
+    med_r1=med("price_1h_pct")
+    med_r4=med("price_4h_pct")
+    if analyzed==0:
+        regime="unknown"
+    elif abs(breadth)>=0.35 and eff>=0.45:
+        regime="bullish expansion" if breadth>0 else "bearish expansion"
+    elif abs(breadth)<=0.15 and eff<=0.35:
+        regime="range/compression"
+    elif abs(breadth)>=0.20:
+        regime="bullish trend" if breadth>0 else "bearish trend"
+    else:
+        regime="transition"
+    btc=[x for x in rows if str(x.get("symbol"))=="BTCUSDT"]
+    btc1=btc[0].get("price_1h_pct") if btc else None
+    btc4=btc[0].get("price_4h_pct") if btc else None
+    return {"market_regime":regime,"bullish_breadth_pct":100*bull/analyzed if analyzed else None,"bearish_breadth_pct":100*bear/analyzed if analyzed else None,"neutral_breadth_pct":100*neutral/analyzed if analyzed else None,"breadth_score":breadth,"median_price_1h_pct":med_r1,"median_price_4h_pct":med_r4,"median_efficiency_4h":eff,"median_range_expansion_ratio":rr,"avg_relative_volume":avg_rv,"btc_price_1h_pct":btc1,"btc_price_4h_pct":btc4,"analyzed_symbols":analyzed}
+
+def _record_trail_event(sym, pos, update, old_sl, new_sl, status="APPLIED", error=None):
+    global trail_event_sequence
+    if old_sl is None or new_sl is None: return None
+    try:
+        sig=pos.get("signal",{}); entry=float(pos.get("entry") or sig.get("entry") or 0); initial_sl=float(pos.get("initial_sl") or sig.get("initial_sl") or old_sl); risk=abs(entry-initial_sl)
+        side=str(sig.get("decision") or "BUY").upper(); price=float(pos.get("current_price") or pos.get("price") or entry)
+        current_r=(((price-entry)/risk) if side=="BUY" else ((entry-price)/risk)) if risk else 0.0
+        mfe=float(pos.get("mfe_r",0) or 0); mae=float(pos.get("mae_r",0) or 0); give=max(0.0,mfe-current_r); gr=(give/mfe) if mfe>0 else 0.0
+        atr=float(sig.get("atr") or 0); protected=(((float(new_sl)-entry)/risk) if side=="BUY" else ((entry-float(new_sl))/risk)) if risk else 0.0
+        reasons=update.get("reason",[]) if isinstance(update,dict) else []
+        if isinstance(reasons,str): reasons=[reasons]
+        now=time.time(); event={
+            "event_id":None,"trade_uid":pos.get("trade_uid"),"run_id":research_run_id,"event_time":now,"symbol":sym,"decision":side,
+            "entry":entry,"initial_sl":initial_sl,"old_sl":float(old_sl),"new_sl":float(new_sl),"tp":sig.get("tp"),"current_price":price,
+            "current_r":current_r,"mfe_r":mfe,"mae_r":mae,"giveback_r":give,"giveback_ratio":gr,"protected_r":protected,
+            "atr":atr,"sl_distance_atr":(abs(price-float(new_sl))/atr if atr>0 else None),
+            "weakness_score":update.get("weakness_score") if isinstance(update,dict) else None,"state":update.get("state","TRAIL") if isinstance(update,dict) else "TRAIL",
+            "trade_phase":update.get("trade_phase") if isinstance(update,dict) else pos.get("trade_phase"),
+            "trail_source":(update.get("trail_source") or update.get("source") or "adaptive") if isinstance(update,dict) else "adaptive",
+            "reasons":" | ".join(str(x) for x in reasons[:10]),"relative_volume":update.get("relative_volume") if isinstance(update,dict) else None,
+            "candidate_type":update.get("candidate_type") if isinstance(update,dict) else None,"status":status,
+            "error_code":None,"error_message":str(error)[:400] if error else "","time_since_entry_sec":max(0.0,now-float(pos.get("entry_time") or now)),
+            "time_since_previous_trail_sec":None,"distance_to_tp_r":None}
+        if sig.get("tp") is not None and risk:
+            tp_r=(((float(sig["tp"])-entry)/risk) if side=="BUY" else ((entry-float(sig["tp"]))/risk)); event["distance_to_tp_r"]=tp_r-current_r
+        with trail_events_lock:
+            trail_event_sequence+=1; event["event_id"]=trail_event_sequence
+            prev=next((x for x in reversed(trail_events) if x.get("trade_uid")==pos.get("trade_uid") and x.get("symbol")==sym),None)
+            if prev: event["time_since_previous_trail_sec"]=max(0.0,now-float(prev.get("event_time") or now))
+            trail_events.append(event)
+        pos["trail_update_count"]=int(pos.get("trail_update_count",0))+1
+        pos["trail_applied_count"]=int(pos.get("trail_applied_count",0))+(status=="APPLIED")
+        pos["trail_failed_count"]=int(pos.get("trail_failed_count",0))+(status=="FAILED")
+        pos["trail_queued_count"]=int(pos.get("trail_queued_count",0))+(status=="QUEUED")
+        if pos.get("first_trail_r") is None: pos["first_trail_r"]=current_r
+        pos["last_trail_r"]=current_r; pos["max_protected_r"]=max(float(pos.get("max_protected_r",-999)),protected)
+        return event
+    except Exception as e:
+        log.debug(f"[trail-observe] {sym}: {e}"); return None
 
 FAPI = "https://fapi.binance.com"
 BINANCE_WS_URL = "wss://fstream.binance.com/ws"
@@ -1172,19 +1394,26 @@ def calc_auto_quantity(symbol, entry_price, margin_usd, leverage):
 
     qty = qty_from_notional(margin_usd * leverage)
     if qty >= min_qty and qty * entry_price >= min_notional:
-        return qty, margin_usd, False
+        actual_margin = (qty * entry_price) / max(float(leverage), 1e-12)
+        hard_cap = float(margin_usd) * MAX_MARGIN_MULTIPLIER
+        if actual_margin > hard_cap + 1e-9:
+            log.warning(f"[calc_auto_quantity] {symbol}: computed margin ${actual_margin:.4f} > hard cap ${hard_cap:.4f}")
+            return None, None, False
+        return qty, float(margin_usd), False
 
+    # Minimum-notional compensation is allowed only inside the hard cap.
     needed_notional = max(min_notional, min_qty * entry_price) * 1.01
-    bumped_margin = needed_notional / leverage
-    cap = max(margin_usd * 3, margin_usd + 5)
+    bumped_margin = needed_notional / max(float(leverage), 1e-12)
+    cap = float(margin_usd) * MAX_MARGIN_MULTIPLIER
     if bumped_margin > cap:
-        log.warning(f"[calc_auto_quantity] {symbol}: butuh margin ${bumped_margin:.4f} "
-                    f"tapi cap cuma ${cap:.4f} (margin awal ${margin_usd:.2f}, leverage {leverage}x)")
+        log.warning(f"[calc_auto_quantity] {symbol}: minimum notional needs ${bumped_margin:.4f} "
+                    f"but hard cap is ${cap:.4f} (base margin ${margin_usd:.2f}, leverage {leverage}x)")
         return None, None, False
     qty = qty_from_notional(needed_notional)
-    if qty < min_qty or qty * entry_price < min_notional:
+    actual_margin = (qty * entry_price) / max(float(leverage), 1e-12)
+    if qty < min_qty or qty * entry_price < min_notional or actual_margin > cap + 1e-9:
         return None, None, False
-    return qty, round(bumped_margin, 4), True
+    return qty, round(actual_margin, 4), True
 
 
 def _real_trade_preflight(force=False):
@@ -2246,12 +2475,19 @@ def _get_top_coins_impl():
     global scan_counter
     with ban_lock:
         scan_counter += 1
-        to_unban = [s for s, (banned_at, dur) in banned_coins.items()
-                    if scan_counter - banned_at >= dur]
-        for s in to_unban:
-            dur = banned_coins[s][1]
-            del banned_coins[s]
-            log.info(f"[unban] {s} kembali aktif setelah {dur} scan")
+        to_unban = []
+        for sym, meta in list(banned_coins.items()):
+            if isinstance(meta, tuple):
+                banned_at, dur = meta
+                expired = scan_counter - banned_at >= dur
+            else:
+                expired = scan_counter - float(meta.get("banned_at", scan_counter)) >= float(meta.get("duration", 0))
+            if expired and meta != "PERMANENT":
+                to_unban.append(sym)
+        for sym in to_unban:
+            meta = banned_coins.pop(sym, {})
+            dur = meta[1] if isinstance(meta, tuple) else meta.get("duration", 0)
+            log.info(f"[unban] {sym} kembali aktif setelah {float(dur):g} scan")
         cur_ban = set(banned_coins.keys())
 
     with positions_lock:
@@ -2335,103 +2571,101 @@ def _price_cache_loop():
 # INDIKATOR
 # ═════════════════════════════════════════════
 def run_scan_once(chat_id):
-    """Scan universe dengan pipeline market-data cache V11.
+    """Scan universe with cached market data and record rich market context.
 
-    Tidak ada parallel burst ke Binance. Kecepatan berasal dari cache, WS seed,
-    dan penghapusan duplicate backfill. Analysis boleh berjalan setelah data
-    tersedia tanpa menambah request API.
+    V19 adds *derived* market breadth/relative-strength/regime telemetry only.
+    It does not add a Binance endpoint or a new request: the M15/H1/D1 frames
+    already fetched for strategy analysis are reused in memory.
     """
-    scan_started = time.monotonic()
+    scan_started=time.monotonic()
     if _binance_is_scan_paused():
-        _notify_binance_pause_once(chat_id)
-        return []
+        _notify_binance_pause_once(chat_id); return []
     tg_send(chat_id, f"🔍 Scanning {TOP_N_COINS} koin...")
     if _binance_is_scan_paused():
-        _notify_binance_pause_once(chat_id)
-        return []
+        _notify_binance_pause_once(chat_id); return []
     try:
-        symbols = get_top_coins()
+        symbols=get_top_coins()
     except BinanceCooldownError as e:
-        tg_send(chat_id, f"⏸️ <b>Scan dihentikan</b> — Binance rate-limit/ban aktif.\n<code>{str(e)[:180]}</code>")
-        return []
+        tg_send(chat_id, f"⏸️ <b>Scan dihentikan</b> — Binance rate-limit/ban aktif.\n<code>{str(e)[:180]}</code>"); return []
     except Exception as e:
-        tg_send(chat_id, f"⚠️ Market data error: <code>{str(e)[:150]}</code>")
-        return []
+        tg_send(chat_id, f"⚠️ Market data error: <code>{str(e)[:150]}</code>"); return []
     if not symbols:
-        if _binance_is_scan_paused():
-            _notify_binance_pause_once(chat_id)
-        else:
-            tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan.")
-        return []
+        tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan."); return []
 
-    data_started = time.monotonic()
-    results = []
-    cache_hits = 0
-    cache_misses = 0
-    failed_symbols = 0
-    for idx, sym in enumerate(symbols, 1):
+    data_started=time.monotonic(); results=[]; all_scan_confidences=[]; market_rows=[]
+    analyzed_symbols=cache_hits=cache_misses=failed_symbols=low_conf_count=below_threshold_count=0
+    for idx,sym in enumerate(symbols,1):
         if _binance_is_scan_paused():
-            log.warning("[scan] Binance pause aktif — scan cycle dihentikan di tengah jalan.")
-            break
+            log.warning("[scan] Binance pause aktif — scan cycle dihentikan di tengah jalan."); break
         log.info(f"[scan {idx:02d}/{len(symbols)}] {sym}")
         try:
-            before = _scan_cache_stats()
-            h1 = get_scan_klines(sym, "1h", 250)
-            m15 = get_scan_klines(sym, "15m", 250)
-            try:
-                d1 = get_scan_klines(sym, "1d", 100)
-            except BinanceCooldownError:
-                raise
-            except Exception:
-                d1 = None
-            after = _scan_cache_stats()
-            # A new cache entry may have been created. This is approximate but
-            # sufficient for operator telemetry; no extra API call is involved.
-            cache_misses += max(0, after[0] - before[0])
-            r = full_analyze(h1, m15, d1, symbol=sym)
-            if isinstance(r, dict):
-                conf = float(r.get("confidence", 0) or 0)
-                if conf >= STRATEGY_CONFIDENCE_THRESHOLD:
-                    results.append(r)
-                    log.info(f"[SIGNAL] {sym} {r.get('decision')} confidence={conf:.1f}")
+            before=_scan_cache_stats()
+            h1=get_scan_klines(sym,"1h",250); m15=get_scan_klines(sym,"15m",250)
+            try: d1=get_scan_klines(sym,"1d",100)
+            except BinanceCooldownError: raise
+            except Exception: d1=None
+            after=_scan_cache_stats(); cache_misses += max(0,after[0]-before[0])
+            r=full_analyze(h1,m15,d1,symbol=sym)
+            if isinstance(r,dict):
+                analyzed_symbols+=1; conf=float(r.get("confidence",0) or 0); all_scan_confidences.append(conf)
+                row=_market_feature_row(sym,h1,m15,r)
+                row.update({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter})
+                market_rows.append(row)
+                cutoff=float(STRATEGY_CONFIDENCE_THRESHOLD)/2.0
+                if conf<=cutoff:
+                    low_conf_count+=1; _record_low_confidence_event(sym,conf,cutoff,r.get("decision"),r.get("entry_label"))
+                    _ban_coin(sym,reason=f"low confidence {conf:.1f} <= {cutoff:.1f}",duration=BAN_DURATION_SCANS,kind="low_confidence",confidence=conf)
+                if conf<STRATEGY_CONFIDENCE_THRESHOLD: below_threshold_count+=1
+                if conf>=STRATEGY_CONFIDENCE_THRESHOLD:
+                    r["market_context"]={k:v for k,v in row.items() if k not in {"scan_time","run_id","scan_counter"}}
+                    results.append(r); log.info(f"[SIGNAL] {sym} {r.get('decision')} confidence={conf:.1f}")
                 else:
                     log.info(f"[FILTER] {sym} confidence={conf:.1f} < {STRATEGY_CONFIDENCE_THRESHOLD}")
         except BinanceCooldownError:
-            log.warning(f"[scan] {sym}: Binance cooldown aktif — cycle dihentikan aman.")
-            break
+            log.warning(f"[scan] {sym}: Binance cooldown aktif — scan cycle dihentikan aman."); break
         except Exception as e:
-            failed_symbols += 1
-            log.debug(f"[scan] {sym}: {e}")
+            failed_symbols+=1; log.debug(f"[scan] {sym}: {e}")
         time.sleep(0.05)
 
-    data_elapsed = time.monotonic() - data_started
-    total_elapsed = time.monotonic() - scan_started
-    cache_total, cache_fresh = _scan_cache_stats()
-    telemetry = {
-        "duration_sec": round(total_elapsed, 2),
-        "data_phase_sec": round(data_elapsed, 2),
-        "symbols_requested": len(symbols),
-        "results": len(results),
-        "failed_symbols": failed_symbols,
-        "cache_entries": cache_total,
-        "cache_fresh": cache_fresh,
-        "binance_weight_1m": _binance_weight_1m,
-    }
+    # Enrich per-symbol rows with relative strength vs BTC without a new request.
+    btc_row=next((x for x in market_rows if x.get("symbol")=="BTCUSDT"),None)
+    btc_r1=btc_row.get("price_1h_pct") if btc_row else None; btc_r4=btc_row.get("price_4h_pct") if btc_row else None
+    for row in market_rows:
+        row["relative_strength_1h_pct"]=(row.get("price_1h_pct")-btc_r1) if btc_r1 is not None and row.get("price_1h_pct") is not None else None
+        row["relative_strength_4h_pct"]=(row.get("price_4h_pct")-btc_r4) if btc_r4 is not None and row.get("price_4h_pct") is not None else None
+        if row.get("symbol")=="BTCUSDT":
+            row["relative_strength_1h_pct"]=0.0; row["relative_strength_4h_pct"]=0.0
+    _record_market_context(market_rows)
+    mc=_summarize_market_context(market_rows)
+
+    data_elapsed=time.monotonic()-data_started; total_elapsed=time.monotonic()-scan_started
+    cache_total,cache_fresh=_scan_cache_stats(); avg_conf=(sum(all_scan_confidences)/len(all_scan_confidences)) if all_scan_confidences else None
+    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct")}
     _record_scan_telemetry(telemetry)
-    log.info("[SCAN SUMMARY] " + " | ".join(f"{k}={v}" for k, v in telemetry.items()))
+    _record_scan_quality({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc})
+    log.info("[SCAN SUMMARY] " + " | ".join(f"{k}={v}" for k,v in telemetry.items()))
 
-    results.sort(key=lambda x: float(x.get("confidence", 0) or 0), reverse=True)
+    rejected_warmup=[]
+    with early_reject_lock:
+        remaining=int(early_reject_remaining)
+        if remaining>0 and results:
+            take=min(remaining,len(results)); rejected_warmup=results[:take]; results=results[take:]; early_reject_remaining-=take
+    for r in rejected_warmup: log.info(f"[EARLY-REJECT] {r.get('symbol','?')} confidence={float(r.get('confidence',0) or 0):.1f}")
+    with scan_quality_lock:
+        if scan_quality_history and scan_quality_history[-1].get("run_id")==research_run_id and scan_quality_history[-1].get("scan_counter")==scan_counter:
+            scan_quality_history[-1]["early_rejected_count"]=len(rejected_warmup)
+
+    results.sort(key=lambda x:float(x.get("confidence",0) or 0),reverse=True)
+    avg_txt=f"{avg_conf:.1f}%" if avg_conf is not None else "—"
+    breadth_txt=(f"📈 Breadth BUY <b>{mc['bullish_breadth_pct']:.1f}%</b> | SELL <b>{mc['bearish_breadth_pct']:.1f}%</b> | Regime: <b>{mc['market_regime']}</b>" if mc.get('bullish_breadth_pct') is not None else "📈 Market context: <b>insufficient data</b>")
+    rs_txt=(f"\n₿ BTC 1h: <b>{mc['btc_price_1h_pct']:+.2f}%</b> | BTC 4h: <b>{mc['btc_price_4h_pct']:+.2f}%</b>" if mc.get('btc_price_1h_pct') is not None else "")
+    scan_meta=f"\n\n📊 Rata-rata confidence scan: <b>{avg_txt}</b> ({analyzed_symbols}/{len(symbols)} dianalisis)\n{breadth_txt}{rs_txt}"
+    if rejected_warmup: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> sinyal awal"
     if not results:
-        tg_send(chat_id, f"⚠️ Tidak ada setup dengan confidence ≥ {STRATEGY_CONFIDENCE_THRESHOLD}%.")
-        return []
-
-    summary = "\n".join(
-        f"• {r.get('symbol','?')} {r.get('decision','?')} — {float(r.get('confidence',0)):.0f}%"
-        for r in results
-    )
-    tg_send(chat_id, f"✅ <b>{len(results)} sinyal lolos</b> (threshold {STRATEGY_CONFIDENCE_THRESHOLD}%)\n\n{summary}")
+        tg_send(chat_id,f"⚠️ Tidak ada setup dengan confidence ≥ {STRATEGY_CONFIDENCE_THRESHOLD}%."+scan_meta); return []
+    summary="\n".join(f"• {r.get('symbol','?')} {r.get('decision','?')} — {float(r.get('confidence',0) or 0):.0f}%" for r in results)
+    tg_send(chat_id,f"✅ <b>{len(results)} sinyal lolos</b> (threshold {STRATEGY_CONFIDENCE_THRESHOLD}%)\n\n{summary}{scan_meta}")
     return results
-
 
 
 # ═════════════════════════════════════════════
@@ -2508,7 +2742,10 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
                  confidence=None, entry_label=None, rr=None, rsi=None,
                  struct_h1=None, d1_bias=None,
                  mfe_pct=None, mae_pct=None, mfe_r=None, mae_r=None,
-                 time_in_trade_sec=None, time_to_1r_sec=None, time_to_2r_sec=None):
+                 time_in_trade_sec=None, time_to_1r_sec=None, time_to_2r_sec=None,
+                 execution_mode=None, balance_anchor=None, trade_uid=None,
+                 trail_update_count=0, trail_applied_count=0, trail_failed_count=0, trail_queued_count=0,
+                 first_trail_r=None, last_trail_r=None, max_protected_r=None):
     """
     Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
     lama untuk detail model close_price). Tambahan: catat sym/decision/
@@ -2584,8 +2821,7 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
         global trade_sequence
         trade_sequence += 1
         trade_record = {
-            "trade_id": trade_sequence,
-            "run_id": research_run_id,
+            "trade_id": trade_sequence, "run_id": research_run_id, "trade_uid": trade_uid,
             "result": result, "close_reason": close_reason or result, "pct": pct,
             "pnl_usd": pnl_usd, "balance_after": stats["balance"],
             "symbol": sym, "decision": decision,
@@ -2600,6 +2836,10 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
             "time_in_trade_sec": time_in_trade_sec,
             "time_to_1r_sec": time_to_1r_sec,
             "time_to_2r_sec": time_to_2r_sec,
+            "execution_mode": execution_mode, "balance_anchor": balance_anchor,
+            "trail_update_count": int(trail_update_count or 0), "trail_applied_count": int(trail_applied_count or 0),
+            "trail_failed_count": int(trail_failed_count or 0), "trail_queued_count": int(trail_queued_count or 0),
+            "first_trail_r": first_trail_r, "last_trail_r": last_trail_r, "max_protected_r": max_protected_r,
         }
         # Full ledger: every closed trade in this research run.
         with trade_history_lock:
@@ -2617,75 +2857,99 @@ def _record_pending_cancel(reason_key):
         pending_cancel_stats[reason_key] = pending_cancel_stats.get(reason_key, 0) + 1
 
 
+def _avg_conf_for_result(hist, result_key):
+    vals = []
+    for row in hist:
+        if str(row.get("result", "")).lower() == result_key:
+            try:
+                vals.append(float(row.get("confidence")))
+            except (TypeError, ValueError):
+                pass
+    return (sum(vals) / len(vals)) if vals else None
+
 def fmt_stats():
     with stat_lock:
         t, tp, sl = stats["total"], stats["tp"], stats["sl"]
         trail, bal = stats.get("trail", 0), stats["balance"]
         hist = list(stats["pnl_history"])
-
-    if t == 0:
-        return f"📊 <b>Statistik</b>\nBelum ada trade. Modal: ${STARTING_BALANCE:.2f}"
-
-    wins = tp + trail   # trailing stop yang mengunci profit dihitung menang
+    with trade_history_lock:
+        full_hist = [dict(x) for x in trade_history]
+    wins = tp + trail
     wr = wins/(wins+sl)*100 if (wins+sl) > 0 else 0
-    pnl = round(bal - STARTING_BALANCE, 4)
-    pnl_pct = round(pnl / STARTING_BALANCE * 100, 2)
+    base = STARTING_BALANCE if not REAL_TRADE_ENABLED else (real_balance_snapshot if real_balance_snapshot is not None else bal)
+    pnl = round(bal - base, 4)
+    pnl_pct = round((pnl / base * 100), 2) if base else 0.0
     sgn = "+" if pnl >= 0 else ""
-
     hist_str = "\n".join(
-        f"  {'✅' if h['result'] in ('tp','trail') else '❌'} {'+' if h['pnl_usd']>=0 else ''}{h['pct']:.2f}% "
-        f"→ ${h['balance_after']:.4f}"
+        f"  {'✅' if h['result'] in ('tp','trail') else '❌'} {'+' if h['pnl_usd']>=0 else ''}{h['pct']:.2f}% → ${h['balance_after']:.4f} | C{float(h.get('confidence',0) or 0):.0f}%"
         for h in reversed(hist[-5:])
     ) or "  (belum ada)"
-
+    avg_all = None
+    conf_vals = []
+    for h in full_hist:
+        try: conf_vals.append(float(h.get("confidence")))
+        except (TypeError, ValueError): pass
+    if conf_vals: avg_all = sum(conf_vals)/len(conf_vals)
+    avg_tp = _avg_conf_for_result(full_hist, "tp")
+    avg_trail = _avg_conf_for_result(full_hist, "trail")
+    avg_sl = _avg_conf_for_result(full_hist, "sl")
     with pending_cancel_lock:
         pc = dict(pending_cancel_stats)
     total_cancel = sum(pc.values())
     cancel_line = ""
     if total_cancel > 0:
         cancel_line = (f"\n\n⏭ Pending batal: {total_cancel} total\n"
-                        f"  TP sebelum entry: {pc['tp_before_entry']} | "
-                        f"Expired: {pc['expired']} | Ditolak Binance: {pc['binance_reject']}")
-
+                       f"  TP sebelum entry: {pc['tp_before_entry']} | "
+                       f"Expired: {pc['expired']} | Ditolak Binance: {pc['binance_reject']}")
+    with ban_lock:
+        banned_n = len(banned_coins)
+    with early_reject_lock:
+        reject_rem = early_reject_remaining
+    lc=_low_conf_summary(); top_lc=", ".join(f"{x['symbol']}({x['count']}x)" for x in lc[:5]) if lc else "—"
+    mode_label = "🔴 REAL" if REAL_TRADE_ENABLED else "🧪 SIMULASI"
+    avg_line = f"{avg_all:.1f}%" if avg_all is not None else "—"
+    tp_line = f"{avg_tp:.1f}%" if avg_tp is not None else "—"
+    trail_line = f"{avg_trail:.1f}%" if avg_trail is not None else "—"
+    sl_line = f"{avg_sl:.1f}%" if avg_sl is not None else "—"
     return (
         f"📊 <b>Statistik</b> — {t} trade | TP {tp} SL {sl} Trail {trail}\n"
-        f"Win Rate: <b>{wr:.1f}%</b> (TP+Trail vs SL)\n\n"
-        f"Modal: ${STARTING_BALANCE:.2f} → Saldo: <b>${bal:.4f}</b> "
-        f"({sgn}{pnl_pct:.2f}%)\n\n"
-        f"5 terakhir:\n{hist_str}\n\n"
-        f"🚫 Banned: {len(banned_coins)}"
+        f"Mode: <b>{mode_label}</b>\n"
+        f"Win Rate: <b>{wr:.1f}%</b> (TP+Trail vs SL)\n"
+        f"\nModal anchor: <b>${base:.4f}</b> → Saldo statistik: <b>${bal:.4f}</b> "
+        f"({sgn}{pnl_pct:.2f}%)\n"
+        f"\nConfidence rata-rata closed: <b>{avg_line}</b>\n"
+        f"🎯 TP: <b>{tp_line}</b> | 🔒 Trail: <b>{trail_line}</b> | 🛑 SL: <b>{sl_line}</b>\n"
+        f"\n5 terakhir:\n{hist_str}\n\n"
+        f"🚫 Banned: {banned_n} | 🧠 Low-conf teratas: {top_lc} | 🛡️ Early reject tersisa: {reject_rem}"
         f"{cancel_line}"
     )
 
 def fmt_backtest():
-    """20 trade terakhir: koin, arah, hasil, entry/TP/SL, jam masuk-keluar — bahan evaluasi."""
+    """20 trade terakhir dengan confidence per trade."""
     with stat_lock:
         hist = list(stats["pnl_history"])
     if not hist:
         return "📋 <b>Backtest</b>\nBelum ada trade."
-
     lines = []
     for h in reversed(hist):
         em  = "✅" if h["result"] in ("tp", "trail") else "❌"
         dec = h.get("decision") or "?"
         sym = h.get("symbol") or "?"
-        et  = h.get("entry_time")
-        xt  = h.get("exit_time")
+        et  = h.get("entry_time"); xt = h.get("exit_time")
         t_in  = datetime.fromtimestamp(et, WIB).strftime("%d/%m/%Y %H:%M") if et else "?"
         t_out = datetime.fromtimestamp(xt, WIB).strftime("%d/%m/%Y %H:%M") if xt else "?"
         sgn = "+" if h["pnl_usd"] >= 0 else ""
         entry_v, tp_v, sl_v = h.get("entry"), h.get("tp"), h.get("sl")
-        # Untuk trade "trail", SL yang relevan ditampilkan adalah SL
-        # TRAILING aktual saat ditutup (exit_price), bukan SL original —
-        # supaya konsisten dgn PnL yang tercatat (sudah untung, bukan rugi).
         sl_display = h.get("exit_price") if h.get("result") == "trail" else sl_v
-        levels = (f"Entry: <code>{entry_v:.6g}</code> | TP: <code>{tp_v:.6g}</code> | "
-                  f"SL: <code>{sl_display:.6g}</code>\n"
+        levels = (f"Entry: <code>{entry_v:.6g}</code> | TP: <code>{tp_v:.6g}</code> | SL: <code>{sl_display:.6g}</code>\n"
                   if entry_v is not None and tp_v is not None and sl_display is not None else "")
+        try:
+            conf_txt = f"{float(h.get('confidence')):.0f}%"
+        except (TypeError, ValueError):
+            conf_txt = "—"
         lines.append(
-            f"{em} <b>{sym}</b> {dec} | {h['result'].upper()} {sgn}{h['pct']:.2f}%\n"
-            f"{levels}"
-            f"{t_in}→{t_out}"
+            f"{em} <b>{sym}</b> {dec} | {h['result'].upper()} {sgn}{h['pct']:.2f}% | Confidence: <b>{conf_txt}</b>\n"
+            f"{levels}{t_in}→{t_out}"
         )
     return f"📋 <b>Backtest ({len(hist)} trade terakhir)</b>\n\n" + "\n\n".join(lines)
 
@@ -2723,8 +2987,10 @@ def _trade_analysis_rows(hist):
             "time_in_trade_sec": t.get("time_in_trade_sec", ""),
             "time_to_1r_sec": t.get("time_to_1r_sec", ""),
             "time_to_2r_sec": t.get("time_to_2r_sec", ""),
-            "entry_time": t.get("entry_time", ""),
-            "exit_time": t.get("exit_time", ""),
+            "execution_mode": t.get("execution_mode", ""), "balance_anchor": t.get("balance_anchor", ""), "trade_uid": t.get("trade_uid", ""),
+            "trail_update_count": t.get("trail_update_count",0), "trail_applied_count": t.get("trail_applied_count",0), "trail_failed_count": t.get("trail_failed_count",0), "trail_queued_count": t.get("trail_queued_count",0),
+            "first_trail_r": t.get("first_trail_r", ""), "last_trail_r": t.get("last_trail_r", ""), "max_protected_r": t.get("max_protected_r", ""),
+            "entry_time": t.get("entry_time", ""), "exit_time": t.get("exit_time", ""),
         })
     return rows
 
@@ -2742,7 +3008,13 @@ def _analyze_trade_history():
     gross_loss = abs(sum(min(float(t.get("pnl_usd", 0.0)), 0.0) for t in hist))
     total_pnl = sum(float(t.get("pnl_usd", 0.0)) for t in hist)
     avg_pct = sum(float(t.get("pct", 0.0)) for t in hist) / len(hist)
-    equity = [STARTING_BALANCE] + [float(t.get("balance_after", STARTING_BALANCE)) for t in hist]
+    anchors=[]
+    for t in hist:
+        try:
+            if t.get("balance_anchor") is not None: anchors.append(float(t.get("balance_anchor")))
+        except (TypeError,ValueError): pass
+    run_anchor = anchors[0] if anchors else STARTING_BALANCE
+    equity = [run_anchor] + [float(t.get("balance_after", run_anchor)) for t in hist]
     peak = equity[0]
     max_dd = 0.0
     for e in equity:
@@ -2777,8 +3049,8 @@ def _analyze_trade_history():
     summary = {
         "trades": len(hist),
         "run_id": hist[-1].get("run_id", research_run_id),
-        "balance": float(hist[-1].get("balance_after", STARTING_BALANCE)),
-        "net": total_pnl,
+        "balance": float(hist[-1].get("balance_after", run_anchor)),
+        "balance_anchor": run_anchor, "net": total_pnl,
         "win_rate": len(winners) / len(hist) * 100.0,
         "profit_factor": gross_profit / gross_loss if gross_loss > 0 else float("inf"),
         "max_dd": max_dd,
@@ -2818,12 +3090,56 @@ def _write_analyze_csv(rows):
     cols = [
         "trade_id", "run_id", "symbol", "result", "close_reason", "decision", "entry", "sl", "tp", "exit_price",
         "rr", "final_r", "confidence", "entry_label", "rsi", "struct_h1", "d1_bias", "pct", "pnl_usd",
-        "balance_after", "mfe_pct", "mae_pct", "mfe_r", "mae_r", "time_in_trade_sec",
-        "time_to_1r_sec", "time_to_2r_sec", "entry_time", "exit_time",
+        "balance_after", "balance_anchor", "execution_mode", "mfe_pct", "mae_pct", "mfe_r", "mae_r", "time_in_trade_sec",
+        "time_to_1r_sec", "time_to_2r_sec", "trail_update_count", "trail_applied_count", "trail_failed_count", "trail_queued_count",
+        "first_trail_r", "last_trail_r", "max_protected_r", "trade_uid", "entry_time", "exit_time",
     ]
     pd.DataFrame(rows, columns=cols).to_csv(path, index=False)
     return path
 
+
+def _trail_events_snapshot(run_id=None):
+    with trail_events_lock: rows=[dict(x) for x in trail_events]
+    return [x for x in rows if run_id is None or x.get("run_id")==run_id]
+
+def _scan_quality_snapshot(run_id=None):
+    with scan_quality_lock: rows=[dict(x) for x in scan_quality_history]
+    return [x for x in rows if run_id is None or x.get("run_id")==run_id]
+
+def _low_conf_snapshot():
+    with low_conf_history_lock: return [dict(x) for x in low_conf_history]
+
+
+def _write_research_support_files(summary):
+    run_id=summary.get("run_id",research_run_id); events=_trail_events_snapshot(run_id); scans=_scan_quality_snapshot(run_id); lows=_low_conf_snapshot()
+    trail_cols=["event_id","trade_uid","run_id","event_time","symbol","decision","entry","initial_sl","old_sl","new_sl","tp","current_price","current_r","mfe_r","mae_r","giveback_r","giveback_ratio","protected_r","atr","sl_distance_atr","weakness_score","state","trade_phase","trail_source","reasons","relative_volume","candidate_type","status","error_code","error_message","time_since_entry_sec","time_since_previous_trail_sec","distance_to_tp_r"]
+    pd.DataFrame(events,columns=trail_cols).to_csv('/tmp/trail_events.csv',index=False)
+    groups={}
+    for e in events:
+        uid=e.get('trade_uid') or f"{e.get('symbol','?')}|{e.get('entry','')}"
+        g=groups.setdefault(uid,{"trade_uid":uid,"symbol":e.get('symbol'),"trail_updates":0,"trail_applied":0,"trail_failed":0,"trail_queued":0,"first_trail_r":None,"max_protected_r":None,"max_mfe_at_trail":None,"max_giveback_ratio":None,"final_new_sl":None,"_d":[]})
+        g['trail_updates']+=1; st=str(e.get('status') or ''); g['trail_applied']+=int(st=='APPLIED'); g['trail_failed']+=int(st=='FAILED'); g['trail_queued']+=int(st=='QUEUED')
+        if g['first_trail_r'] is None and e.get('current_r') not in (None,''): g['first_trail_r']=float(e['current_r'])
+        if e.get('protected_r') not in (None,''): g['max_protected_r']=float(e['protected_r']) if g['max_protected_r'] is None else max(g['max_protected_r'],float(e['protected_r']))
+        if e.get('mfe_r') not in (None,''): g['max_mfe_at_trail']=float(e['mfe_r']) if g['max_mfe_at_trail'] is None else max(g['max_mfe_at_trail'],float(e['mfe_r']))
+        if e.get('giveback_ratio') not in (None,''): g['max_giveback_ratio']=float(e['giveback_ratio']) if g['max_giveback_ratio'] is None else max(g['max_giveback_ratio'],float(e['giveback_ratio']))
+        if e.get('sl_distance_atr') not in (None,''): g['_d'].append(float(e['sl_distance_atr']))
+        g['final_new_sl']=e.get('new_sl')
+    out=[]
+    for g in groups.values():
+        ds=g.pop('_d',[])
+        g['avg_sl_distance_atr']=(sum(ds)/len(ds)) if ds else None
+        out.append(g)
+    trail_summary_cols=["trade_uid","symbol","trail_updates","trail_applied","trail_failed","trail_queued","first_trail_r","max_protected_r","max_mfe_at_trail","max_giveback_ratio","avg_sl_distance_atr","final_new_sl"]
+    pd.DataFrame(out,columns=trail_summary_cols).to_csv('/tmp/trail_summary.csv',index=False)
+    scan_cols=["scan_time","run_id","scan_counter","symbols_requested","symbols_analyzed","failed_symbols","avg_confidence","min_confidence","max_confidence","low_confidence_count","below_threshold_count","qualified_count","early_rejected_count","cache_entries","cache_fresh","market_regime","bullish_breadth_pct","bearish_breadth_pct","neutral_breadth_pct","breadth_score","median_price_1h_pct","median_price_4h_pct","median_efficiency_4h","median_range_expansion_ratio","avg_relative_volume","btc_price_1h_pct","btc_price_4h_pct"]
+    pd.DataFrame(scans,columns=scan_cols).to_csv('/tmp/scan_quality.csv',index=False)
+    low_cols=["event_time","run_id","scan_counter","symbol","confidence","confidence_min","cutoff","decision","entry_label"]
+    pd.DataFrame(lows,columns=low_cols).to_csv('/tmp/low_confidence_bans.csv',index=False)
+    market_rows=_market_context_snapshot(run_id)
+    market_cols=["scan_time","run_id","scan_counter","symbol","decision","confidence","entry_label","struct_h1","d1_bias","price_1h_pct","price_4h_pct","efficiency_4h","atr_pct","relative_volume","range_expansion_ratio","volatility_ratio","chart_regime","directional_bias","relative_strength_1h_pct","relative_strength_4h_pct"]
+    pd.DataFrame(market_rows,columns=market_cols).to_csv('/tmp/market_context.csv',index=False)
+    return ['/tmp/trail_events.csv','/tmp/trail_summary.csv','/tmp/scan_quality.csv','/tmp/low_confidence_bans.csv','/tmp/market_context.csv']
 
 def _write_analyze_report(rows, summary, hist):
     """Write the report from the SAME snapshot used to calculate summary."""
@@ -2908,11 +3224,28 @@ def _write_analyze_report(rows, summary, hist):
             f"analysis snapshot mismatch: summary={summary.get('trades')} hist={len(hist)}"
         )
 
+    trail_rows=_trail_events_snapshot(summary.get("run_id",research_run_id)); low_summary=_low_conf_summary(); scan_rows=_scan_quality_snapshot(summary.get("run_id",research_run_id))
+    if trail_rows:
+        protected=[float(x["protected_r"]) for x in trail_rows if x.get("protected_r") not in (None,"")]; give=[float(x["giveback_ratio"]) for x in trail_rows if x.get("giveback_ratio") not in (None,"")]
+        lines += ["","## Trail Effectiveness","",f"- Trail events: **{len(trail_rows)}**",f"- Applied: **{sum(x.get('status')=='APPLIED' for x in trail_rows)}** | Queued: **{sum(x.get('status')=='QUEUED' for x in trail_rows)}** | Failed: **{sum(x.get('status')=='FAILED' for x in trail_rows)}**",f"- Avg protected R: **{(sum(protected)/len(protected) if protected else 0):.2f}R**",f"- Avg giveback ratio: **{(sum(give)/len(give)*100 if give else 0):.1f}%**"]
+    if low_summary:
+        lines += ["","## Low Confidence Ban Frequency","","| Symbol | Ban Count | Avg Conf | Min | Max |","|---|---:|---:|---:|---:|"]
+        for g in low_summary[:20]: lines.append(f"| {g['symbol']} | {g['count']} | {g['avg']:.1f}% | {g['min']:.1f}% | {g['max']:.1f}% |")
+    if scan_rows:
+        av=[float(x['avg_confidence']) for x in scan_rows if x.get('avg_confidence') is not None]
+        lines += ["","## Scan Quality","",f"- Scan cycles: **{len(scan_rows)}**",f"- Avg confidence by scan: **{(sum(av)/len(av) if av else 0):.2f}%**",f"- Total qualified signals: **{sum(int(x.get('qualified_count',0) or 0) for x in scan_rows)}**"]
+        last_scan=scan_rows[-1]
+        lines += [f"- Latest market regime: **{last_scan.get('market_regime','unknown')}**",f"- Latest breadth: **BUY {float(last_scan.get('bullish_breadth_pct',0) or 0):.1f}% / SELL {float(last_scan.get('bearish_breadth_pct',0) or 0):.1f}%**",f"- Latest median 4h efficiency: **{float(last_scan.get('median_efficiency_4h',0) or 0):.2f}**"]
+    market_rows=_market_context_snapshot(summary.get("run_id",research_run_id))
+    if market_rows:
+        rs1=[float(x['relative_strength_1h_pct']) for x in market_rows if x.get('relative_strength_1h_pct') is not None and x.get('symbol')!='BTCUSDT']
+        rv=[float(x['relative_volume']) for x in market_rows if x.get('relative_volume') is not None]
+        lines += ["","## Market Context","",f"- Symbol-context observations: **{len(market_rows)}**",f"- Avg relative strength vs BTC (1h): **{(sum(rs1)/len(rs1) if rs1 else 0):+.2f}%**",f"- Avg relative volume: **{(sum(rv)/len(rv) if rv else 0):.2f}x**"]
     lines += [
         "", "## Catatan", "",
-        "- `/analyze` hanya menganalisis trade yang benar-benar closed dan tercatat sejak `/resetbalance` terakhir.",
+        "- `/analyze` hanya menganalisis trade yang benar-benar closed dan tercatat sejak `/resetstats` terakhir.",
         "- History penuh disimpan dalam memory `trade_history`; `/backtest` tetap menampilkan 20 trade terakhir untuk kompatibilitas UI.",
-        "- Jalankan `/resetbalance` untuk memulai research run baru dan mengosongkan ledger aktif.",
+        "- Jalankan `/resetstats` untuk memulai research run baru dan mengosongkan ledger aktif.",
     ]
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -2986,14 +3319,18 @@ def close_position(sym, result, close_price=None):
             mfe_pct=pos.get("mfe_pct"), mae_pct=pos.get("mae_pct"),
             mfe_r=pos.get("mfe_r"), mae_r=pos.get("mae_r"),
             time_in_trade_sec=pos.get("time_in_trade_sec"),
-            time_to_1r_sec=pos.get("time_to_1r_sec"), time_to_2r_sec=pos.get("time_to_2r_sec")
+            time_to_1r_sec=pos.get("time_to_1r_sec"), time_to_2r_sec=pos.get("time_to_2r_sec"),
+            execution_mode=pos.get("execution_mode"), balance_anchor=(real_balance_snapshot if str(pos.get("execution_mode") or "").upper()=="REAL" else STARTING_BALANCE),
+            trade_uid=pos.get("trade_uid"), trail_update_count=pos.get("trail_update_count",0), trail_applied_count=pos.get("trail_applied_count",0),
+            trail_failed_count=pos.get("trail_failed_count",0), trail_queued_count=pos.get("trail_queued_count",0), first_trail_r=pos.get("first_trail_r"),
+            last_trail_r=pos.get("last_trail_r"), max_protected_r=(pos.get("max_protected_r") if pos.get("max_protected_r",-999)>-998 else None)
         )
     except Exception as e:
         stats_error = e
         log.exception(f"[close_position] stats gagal {sym}: {e}")
 
     try:
-        _ban_coin(sym, f"trade closed ({classified}; reason={result})", duration=BAN_DURATION_TRADE_CLOSED)
+        _ban_coin(sym, f"trade closed ({classified}; reason={result})", duration=BAN_DURATION_TRADE_CLOSED, kind="closed")
     except Exception as e:
         log.warning(f"[close_position] gagal ban {sym}: {e}")
 
@@ -3146,6 +3483,7 @@ def _notify_trail_update(chat_id, sym, pos, update, old_sl, new_sl, status="APPL
     if not chat_id or new_sl is None or old_sl is None:
         return
     try:
+        _record_trail_event(sym,pos,update if isinstance(update,dict) else {},old_sl,new_sl,status=status,error=error)
         sig = pos.get("signal", {})
         entry = float(pos.get("entry") or sig.get("entry") or 0.0)
         decision = str(sig.get("decision") or "BUY").upper()
@@ -3256,8 +3594,10 @@ def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
     with positions_lock:
         if sym not in positions:return
         pos=positions[sym]
-        pos.update({"entry":actual_entry,"entry_time":time.time(),"status":"active",
-                    "timeout_flag":False,"current_sl":sl,"execution_mode":"SIMULATION"})
+        now=time.time()
+        pos.update({"entry":actual_entry,"entry_time":now,"status":"active","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
+                    "timeout_flag":False,"current_sl":sl,"initial_sl":sl,"execution_mode":"SIMULATION",
+                    "trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
     tg_send(chat_id,f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
                     f"Entry: <code>{actual_entry:.8g}</code>\n"
                     f"TP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
@@ -3281,7 +3621,7 @@ def _open_pending_real(sym,signal,chat_id):
     side="BUY" if buy else "SELL"
     with positions_lock:
         if sym in positions or len(positions)>=MAX_POSITIONS:return
-        positions[sym]={"signal":signal,"entry":entry,"chat_id":chat_id,"entry_time":None,
+        positions[sym]={"signal":signal,"entry":entry,"chat_id":chat_id,"entry_time":None,"trade_uid":f"{research_run_id}:{sym}:pending:{int(time.time()*1000)}",
                         "timeout_flag":False,"status":"pending","execution_mode":"REAL"}
     try:
         _real_trade_preflight(force=False)
@@ -3404,7 +3744,8 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
     except BinanceCooldownError:
         with positions_lock:
             if sym in positions:
-                positions[sym].update({"entry": actual_entry, "entry_time": time.time(), "status": "active", "current_sl": sl, "initial_sl": sl, "quantity": qty, "tp_order_id": None, "sl_order_id": None})
+                now=time.time()
+                positions[sym].update({"entry": actual_entry, "entry_time": now, "status": "active", "trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}", "current_sl": sl, "initial_sl": sl, "quantity": qty, "tp_order_id": None, "sl_order_id": None, "trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
         _queue_pending_protection(sym, buy, sl, tp, qty)
         tg_send(chat_id, f"⏸️ <b>PROTEKSI DITUNDA</b> — {sym}\nBinance sedang rate-limit/ban. TP/SL dicatat dan akan dipasang setelah recovery +60 detik.")
         threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start(); return
@@ -3417,9 +3758,10 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
 
     with positions_lock:
         if sym not in positions:return
-        positions[sym].update({"entry":actual_entry,"entry_time":time.time(),"status":"active",
+        now=time.time()
+        positions[sym].update({"entry":actual_entry,"entry_time":now,"status":"active","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
                                "current_sl":sl,"initial_sl":sl,"quantity":qty,"tp_order_id":t["algoId"],"sl_order_id":s["algoId"],
-                               "execution_mode":"REAL"})
+                               "execution_mode":"REAL","trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
     tg_send(chat_id,f"⚡ <b>ENTRY REAL</b> — {sym}\nEntry: <code>{actual_entry:.8g}</code>\nTP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
     threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start()
 
@@ -3697,8 +4039,12 @@ def _resume_binance_and_flush_pending(chat_id=None):
                 if not qty or sl is None or tp is None: raise RuntimeError('pending trail tidak lengkap')
                 cancel_algo_order(pos.get('tp_order_id')); cancel_algo_order(pos.get('sl_order_id'))
                 t,s=place_tp_sl(sym,buy,tp,sl,qty)
+                old_sl = pos.get('current_sl')
                 with positions_lock:
-                    if sym in positions: positions[sym].update({'tp_order_id':t['algoId'],'sl_order_id':s['algoId'],'exchange_synced_at':time.time(),'execution_mode':'REAL'})
+                    if sym in positions:
+                        positions[sym].update({'tp_order_id':t['algoId'],'sl_order_id':s['algoId'],'exchange_synced_at':time.time(),'execution_mode':'REAL','current_sl':sl})
+                if old_sl is not None and sl is not None and float(sl) != float(old_sl):
+                    _record_trail_event(sym, pos, {'trail_source':'pending_resume','reason':['queued trail applied after Binance recovery']}, old_sl, sl, status='APPLIED')
                 _clear_pending_trail(sym)
             except Exception as e:
                 failures.append(f'{sym}: trail {e}'); log.error(f'[trail-resume] {sym} GAGAL: {e}')
@@ -3890,14 +4236,19 @@ def get_start_msg():
         "━━━━━━━━ <b>RESEARCH</b> ━━━━━━━━\n"
         "/stats               — Statistik & saldo aktif\n"
         "/backtest            — 20 trade terakhir\n"
-        "/analyze             — Analisis seluruh closed trade sejak resetbalance\n"
-        "/resetbalance        — Mulai research run baru & kosongkan trade history\n\n"
+        "/analyze             — Analisis seluruh closed trade sejak resetstats\n"
+        "/resetstats           — Reset research stats/ledger tanpa mengubah modal\n\n"
         "━━━━━━━━ <b>TOOLS</b> ━━━━━━━━━━\n"
         "/ganti               — Upload/ganti strategy_logic.py\n"
         "/info                — Detail engine & metode analisis\n"
         "/banned              — Lihat daftar koin yang diban\n"
         "/koin                — Lihat koin yang sedang/terakhir di-scan\n"
-        "/resetban            — Hapus semua ban koin\n"
+        "/resetban             — Hapus semua ban koin\n"
+        "/unban SYMBOL         — Lepas ban satu koin\n"
+        "/timer               — Lihat/ubah ban pendek (scan)\n"
+        "/timer 20            — Ban pendek 20 scan\n"
+        "/reject              — Lihat/ubah warmup reject setelah /resetstats\n"
+        "/reject 5            — Tolak 5 sinyal awal setelah /resetstats\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         + ("🔴 <b>REAL TRADE AKTIF</b> — order sungguhan di Binance Futures, uang beneran."
            if REAL_TRADE_ENABLED else
@@ -3953,7 +4304,7 @@ def _telegram_watchdog_alert(cid, text):
 # BOT LOOP
 # ═════════════════════════════════════════════
 def bot_loop():
-    global auto_mode, auto_thread, active_chat_id, timeout_flag, MAX_POSITIONS, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance, REAL_TRADE_ENABLED, STRATEGY_CONFIDENCE_THRESHOLD
+    global auto_mode, auto_thread, autostop_thread, active_chat_id, timeout_flag, MAX_POSITIONS, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance, REAL_TRADE_ENABLED, STRATEGY_CONFIDENCE_THRESHOLD, BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_KEYS_PRESENT, real_balance_snapshot, real_balance_snapshot_at, early_reject_configured, early_reject_remaining, BAN_DURATION_SCANS
 
     # Set active_chat_id ke ALLOWED_USER_ID SEJAK AWAL — di chat pribadi
     # Telegram, chat_id sama dengan user_id, jadi bot bisa kirim pesan
@@ -4031,20 +4382,27 @@ def bot_loop():
                                 trade_count = len(trade_history)
                             tg_send(cid,
                                 f"🔎 <b>Mulai /analyze</b>\n"
-                                f"Menganalisis <b>{trade_count}</b> closed trade yang tercatat sejak /resetbalance terakhir.\n"
+                                f"Menganalisis <b>{trade_count}</b> closed trade yang tercatat sejak /resetstats terakhir.\n"
                                 f"Tidak melakukan scan market baru.\n"
                                 f"Dibuat: report Markdown + data CSV.")
                             rows, summary, hist = _analyze_snapshot()
                             report_path = _write_analyze_report(rows, summary, hist)
                             csv_path = _write_analyze_csv(rows)
-
+                            support_paths = _write_research_support_files(summary)
                             tg_send(cid,
                                 f"✅ <b>/analyze selesai</b>\n"
                                 f"Closed trade dianalisis: <b>{len(rows)}</b>\n"
+                                f"Trail events: <b>{len(_trail_events_snapshot(summary.get('run_id', research_run_id)))}</b>\n"
+                                f"Low-confidence history: <b>{len(_low_conf_snapshot())}</b>\n"
                                 f"Run: <code>{summary.get('run_id', research_run_id)}</code>\n\n"
-                                f"Mengirim 2 file...")
-                            tg_send_document(cid, report_path, caption="📊 analyze_report.md — analisis trade aktual")
-                            tg_send_document(cid, csv_path, caption="📋 analyze_data.csv — seluruh closed trade")
+                                f"Mengirim <b>7 file research</b>...")
+                            tg_send_document(cid, report_path, caption="📊 analyze_report.md")
+                            tg_send_document(cid, csv_path, caption="📋 analyze_data.csv")
+                            tg_send_document(cid, support_paths[0], caption="🔒 trail_events.csv")
+                            tg_send_document(cid, support_paths[1], caption="📈 trail_summary.csv")
+                            tg_send_document(cid, support_paths[2], caption="🔍 scan_quality.csv")
+                            tg_send_document(cid, support_paths[3], caption="🧠 low_confidence_bans.csv")
+                            tg_send_document(cid, support_paths[4], caption="🌐 market_context.csv")
                         except Exception as e:
                             log.error(f"[analyze] Error: {e}", exc_info=True)
                             tg_send(cid, f"❌ Error saat /analyze:\n<code>{str(e)[:300]}</code>")
@@ -4186,29 +4544,84 @@ def bot_loop():
                 elif text.startswith("/banned") or text.startswith("banned"):
                     parts = text.split()
                     if len(parts) > 1:
-                        # /banned <koin> -> ban PERMANEN (duration=inf, tidak pernah auto-unban)
                         target_sym = parts[1].upper()
-                        with ban_lock:
-                            banned_coins[target_sym] = (scan_counter, float("inf"))
-                        log.info(f"[ban] {target_sym} diban PERMANEN (manual via /banned)")
-                        tg_send(chat_id, f"🚫 <b>{target_sym} diban PERMANEN.</b>\nLepas lagi dengan /resetban.")
+                        _ban_coin(target_sym, reason="manual", duration=float("inf"), kind="manual")
+                        tg_send(chat_id, f"🚫 <b>{target_sym} diban PERMANEN.</b>\nLepas dengan <code>/unban {target_sym}</code> atau <code>/resetban</code>.")
                     else:
                         with ban_lock:
                             cur_scan = scan_counter
                             b = sorted(banned_coins.items())
                         if b:
                             lines = []
-                            for sym, (banned_at, dur) in b:
-                                if dur == float("inf"):
-                                    lines.append(f"• {sym} (PERMANEN)")
+                            for sym, meta in b:
+                                if isinstance(meta, tuple):
+                                    banned_at, dur = meta; reason = "legacy"; kind = "short"; conf_txt = ""
                                 else:
-                                    remaining = max(0, dur - (cur_scan - banned_at))
-                                    lines.append(f"• {sym} (unban dalam {remaining} scan)")
-                            tg_send(chat_id,
-                                f"🚫 <b>Banned ({len(b)}):</b>\n" + "\n".join(lines) +
-                                f"\n\n<i>Ban permanen: /banned SYMBOL</i>")
+                                    banned_at, dur = meta.get("banned_at", cur_scan), meta.get("duration", 0)
+                                    reason = meta.get("reason", "")
+                                    kind = meta.get("kind", "short")
+                                    c = meta.get("confidence")
+                                    conf_txt = f" C{float(c):.0f}%" if c is not None else ""
+                                if dur == float("inf"):
+                                    lines.append(f"• {sym} (PERMANEN) | {kind} | {reason}")
+                                else:
+                                    remaining = max(0.0, float(dur) - (cur_scan - float(banned_at)))
+                                    lines.append(f"• {sym} ({remaining:g} scan) | {kind}{conf_txt} | {reason}")
+                            text_out = f"🚫 <b>Banned ({len(b)}):</b>\n" + "\n".join(lines)
+                            lc=_low_conf_summary()
+                            if lc:
+                                top="\n".join(f"• {x['symbol']} — {x['count']}x | avg C{x['avg']:.1f}% | min C{x['min']:.1f}%" for x in lc[:10])
+                                text_out += "\n\n🧠 <b>Low-confidence frequency:</b>\n" + top
+                            tg_send(chat_id, text_out)
                         else:
-                            tg_send(chat_id, "✅ Belum ada ban.\n\n<i>Ban permanen: /banned SYMBOL</i>")
+                            lc=_low_conf_summary()
+                            if lc:
+                                top="\n".join(f"• {x['symbol']} — {x['count']}x | avg C{x['avg']:.1f}% | min C{x['min']:.1f}%" for x in lc[:10])
+                                tg_send(chat_id,"✅ Tidak ada ban aktif.\n\n🧠 <b>Low-confidence frequency:</b>\n"+top)
+                            else: tg_send(chat_id,"✅ Belum ada ban dan belum ada histori low-confidence.")
+                elif text.startswith("/unban") or text.startswith("unban"):
+                    parts = text.split()
+                    if len(parts) != 2:
+                        tg_send(chat_id, "❌ Format: <code>/unban SYMBOL</code>")
+                    else:
+                        sym = parts[1].upper()
+                        if _unban_coin(sym):
+                            tg_send(chat_id, f"✅ <b>{sym}</b> di-unban.")
+                        else:
+                            tg_send(chat_id, f"ℹ️ <b>{sym}</b> tidak sedang diban.")
+                elif text.startswith("/timer") or text.startswith("timer"):
+                    parts = text.split()
+                    if len(parts) == 1:
+                        tg_send(chat_id, f"⏱️ <b>Ban pendek:</b> {BAN_DURATION_SCANS:g} scan\nDipakai untuk pending/no-trade dan low-confidence.\nUbah: <code>/timer 20</code> atau <code>/timer 7.5</code>")
+                    elif len(parts) == 2:
+                        try:
+                            val = float(parts[1].replace(",", "."))
+                            if not (val > 0 and val <= 10000): raise ValueError
+                            BAN_DURATION_SCANS = val
+                            tg_send(chat_id, f"✅ Ban pendek diubah menjadi <b>{BAN_DURATION_SCANS:g} scan</b>.")
+                        except ValueError:
+                            tg_send(chat_id, "❌ Format timer salah. Gunakan misalnya <code>/timer 20</code> atau <code>/timer 7.5</code>.")
+                    else:
+                        tg_send(chat_id, "❌ Format: <code>/timer</code> atau <code>/timer 20</code>")
+                elif text.startswith("/reject") or text.startswith("reject"):
+                    parts = text.split()
+                    with early_reject_lock:
+                        remaining_now = early_reject_remaining
+                        configured_now = early_reject_configured
+                    if len(parts) == 1:
+                        tg_send(chat_id, f"🛡️ <b>Warmup reject:</b> {configured_now} sinyal\nTersisa setelah /resetstats: {remaining_now}\nUbah: <code>/reject 5</code> atau matikan <code>/reject 0</code>")
+                    elif len(parts) == 2:
+                        try:
+                            val = int(float(parts[1]))
+                            if val < 0 or val > 1000: raise ValueError
+                            with early_reject_lock:
+                                early_reject_configured = val
+                                early_reject_remaining = val
+                            tg_send(chat_id, f"✅ Warmup reject diubah menjadi <b>{val} sinyal</b>. Counter aktif langsung di-reset ke {val}.")
+                        except ValueError:
+                            tg_send(chat_id, "❌ Format reject salah. Gunakan <code>/reject 5</code>.")
+                    else:
+                        tg_send(chat_id, "❌ Format: <code>/reject</code> atau <code>/reject 5</code>")
                 elif text in ("/koin","koin"):
                     with _last_scanned_lock:
                         coins = list(last_scanned_coins)
@@ -4221,30 +4634,45 @@ def bot_loop():
                             f"📋 <b>Koin yang di-scan ({len(coins)})</b> — update {age_min:.0f} menit lalu:\n\n"
                             + ", ".join(coins))
                 elif text in ("/resetban","resetban"):
-                    with ban_lock: n=len(banned_coins); banned_coins.clear()
+                    with ban_lock:
+                        n=len(banned_coins); banned_coins.clear()
                     tg_send(chat_id,f"✅ Ban direset ({n} dihapus).")
-                elif text in ("/resetbalance","resetbalance"):
-                    global research_run_id, trade_sequence
+                elif text in ("/resetlowconf","resetlowconf"):
+                    with low_conf_history_lock:
+                        cleared_lc=len(low_conf_history); low_conf_history.clear()
+                    tg_send(chat_id,f"✅ <b>Low-confidence history direset.</b> Event dihapus: <b>{cleared_lc}</b>. Current ban tidak disentuh.")
+                elif text in ("/resetstats","resetstats"):
+                    global research_run_id, trade_sequence, trail_event_sequence
                     with stat_lock:
-                        stats["balance"]     = STARTING_BALANCE
+                        current_balance = stats["balance"]
                         stats["pnl_history"] = deque(maxlen=20)
                         stats["tp"]          = 0
                         stats["sl"]          = 0
                         stats["trail"]       = 0
                         stats["total"]       = 0
+                        stats["balance"]     = current_balance
                     with trade_history_lock:
                         cleared = len(trade_history)
                         trade_history.clear()
                     trade_sequence = 0
+                    with trail_events_lock:
+                        trail_events.clear(); trail_event_sequence=0
+                    with scan_quality_lock:
+                        scan_quality_history.clear()
+                    with market_context_lock:
+                        market_context_history.clear()
                     research_run_id = datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
                     with pending_cancel_lock:
                         pending_cancel_stats.clear()
                         pending_cancel_stats.update({"tp_before_entry": 0, "expired": 0, "binance_reject": 0})
+                    with early_reject_lock:
+                        early_reject_remaining = early_reject_configured
                     tg_send(chat_id,
-                        f"✅ <b>Research run direset.</b>\n"
+                        f"✅ <b>Research stats direset.</b>\n"
                         f"Closed trade ledger dihapus: <b>{cleared}</b>\n"
                         f"Run baru: <code>{research_run_id}</code>\n"
-                        f"💵 Modal awal: <b>${STARTING_BALANCE:.2f}</b>")
+                        f"💵 Balance TIDAK diubah: <b>${current_balance:.4f}</b>\n"
+                        f"🛡️ Warmup reject aktif: <b>{early_reject_configured}</b> sinyal awal.")
                 elif text in ("/auto","auto"):
                     if auto_mode:
                         tg_send(chat_id,"⚙️ Broadcaster sudah berjalan.")
@@ -4293,7 +4721,7 @@ def bot_loop():
                                     f"\n⏳ <b>{s}</b> — PENDING\n"
                                     f"{em} {sig['decision']} | Entry zone: <code>{p['entry']:.6g}</code>\n"
                                     f"Harga kini: <code>{pr:.6g}</code> | Jarak: {dist_pct:.2f}%\n"
-                                    f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{sig['sl']:.6g}</code>"
+                                    f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{sig['sl']:.6g}</code> | Confidence: <b>{float(sig.get('confidence', 0) or 0):.0f}%</b>"
                                 )
                             else:
                                 pr  = get_price(s) or p["entry"]
@@ -4306,7 +4734,7 @@ def bot_loop():
                                     lines.append(
                                         f"\n🚨 <b>{s}</b> — EMERGENCY\n"
                                         f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
-                                        f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note}\n"
+                                        f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note} | Confidence: <b>{float(sig.get('confidence', 0) or 0):.0f}%</b>\n"
                                         f"PnL: <b>{pnl:+.2f}%</b>\n"
                                         f"⚠️ {p.get('emergency_error','Posisi Binance belum terverifikasi')[:180]}\n"
                                         f"➡️ Jalankan <code>/ok {s}</code>"
@@ -4315,7 +4743,7 @@ def bot_loop():
                                     lines.append(
                                         f"\n{em} <b>{s}</b> — AKTIF\n"
                                         f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
-                                        f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note}\n"
+                                        f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note} | Confidence: <b>{float(sig.get('confidence', 0) or 0):.0f}%</b>\n"
                                         f"PnL: <b>{pnl:+.2f}%</b> | 🕐 Entry jam {entry_clock}"
                                     )
                         tg_send(chat_id,"\n".join(lines))
@@ -4389,64 +4817,59 @@ def bot_loop():
                                         "Membatalkan SEMUA order Binance dan menutup SEMUA posisi…")
                         threading.Thread(target=_verified_timeout_all, args=(chat_id,), daemon=True).start()
                 elif text.startswith("/mode"):
-                    # /mode          → tampilkan status sekarang
-                    # /mode on       → aktifkan REAL TRADE (butuh API key)
-                    # /mode off      → aktifkan mode SIMULASI (backtest strategy_logic)
-                    #
-                    # PENTING: toggle ini HANYA memengaruhi posisi BARU yang
-                    # dibuka SETELAH perintah ini. Posisi yang sudah terbuka
-                    # tetap dipantau oleh thread monitor yang sama seperti
-                    # saat dibuka (monitor_position untuk simulasi,
-                    # monitor_position_real untuk real trade) — thread itu
-                    # sudah "terkunci" ke fungsinya sejak posisi dibuat, jadi
-                    # toggle mode di tengah jalan TIDAK mengubah/mengganggu
-                    # posisi yang sedang berjalan sama sekali (tidak ada
-                    # posisi yang tiba-tiba pindah rezim atau kehilangan
-                    # monitoring). Pipeline pencarian sinyal, monitoring, dan
-                    # pencatatan statistik 100% sama persis di kedua mode —
-                    # satu-satunya cabang beda cuma di titik "buka posisi"
-                    # (line ~2742: REAL_TRADE_ENABLED → _open_pending_real
-                    # vs jalur simulasi), jadi tidak ada logic baru yang
-                    # perlu diduplikasi/di-maintain terpisah.
+                    # /mode on snapshots Binance balance exactly once per OFF→ON transition.
                     parts = text.split()
                     arg = parts[1].lower() if len(parts) > 1 else None
                     with positions_lock:
                         n_open = len(positions)
                     if arg is None:
-                        status = "🔴 REAL TRADE (uang beneran)" if REAL_TRADE_ENABLED else "🧪 SIMULASI (backtest strategy_logic)"
-                        tg_send(chat_id,
-                            f"⚙️ Mode saat ini: <b>{status}</b>\n\n"
-                            f"Ganti dengan <code>/mode on</code> (real) atau "
-                            f"<code>/mode off</code> (simulasi).")
+                        status = "🔴 REAL TRADE" if REAL_TRADE_ENABLED else "🧪 SIMULASI"
+                        anchor = (f"${real_balance_snapshot:.4f}" if REAL_TRADE_ENABLED and real_balance_snapshot is not None else f"${STARTING_BALANCE:.4f}")
+                        tg_send(chat_id, f"⚙️ <b>Mode:</b> {status}\nBalance anchor: <b>{anchor}</b>\n\nGunakan <code>/mode on</code> atau <code>/mode off</code>.")
                     elif arg == "on":
+                        if REAL_TRADE_ENABLED:
+                            tg_send(chat_id, "🔴 Mode real sudah aktif. Tidak fetch balance ulang.")
+                            continue
                         key, secret = _read_binance_credentials()
                         BINANCE_KEYS_PRESENT = bool(key and secret)
                         if BINANCE_KEYS_PRESENT:
                             BINANCE_API_KEY, BINANCE_API_SECRET = key, secret
                         if not BINANCE_KEYS_PRESENT:
-                            tg_send(chat_id,
-                                "❌ Tidak bisa aktifkan mode real — "
-                                "BINANCE_API_KEY/BINANCE_API_SECRET belum diset di server.")
-                        elif REAL_TRADE_ENABLED:
-                            tg_send(chat_id, "🔴 Mode real sudah aktif.")
-                        else:
+                            tg_send(chat_id, "❌ Tidak bisa aktifkan mode real — API key/secret belum diset.")
+                            continue
+                        # One signed balance call on the transition only. If it fails, remain OFF.
+                        try:
+                            avail, total = get_real_balance()
+                            if total is None:
+                                raise RuntimeError("saldo Binance tidak tersedia")
+                            with real_balance_lock:
+                                real_balance_snapshot = float(total)
+                                real_balance_snapshot_at = time.time()
+                            with stat_lock:
+                                stats["balance"] = float(total)
+                            with autostop_lock:
+                                peak_real_balance = float(total)
                             REAL_TRADE_ENABLED = True
-                            extra = (f"\n\nℹ️ {n_open} posisi simulasi yang sedang berjalan "
-                                     f"tetap dipantau sebagai simulasi sampai selesai (TP/SL/timeout) — "
-                                     f"tidak ikut berubah jadi real." if n_open else "")
-                            tg_send(chat_id, f"🔴 <b>Mode REAL TRADE diaktifkan.</b> "
-                                              f"Posisi baru mulai sekarang akan pakai uang beneran di Binance.{extra}")
+                            if autostop_thread is None or not autostop_thread.is_alive():
+                                autostop_thread = threading.Thread(target=autostop_loop, args=(chat_id,), daemon=True)
+                                autostop_thread.start()
+                            extra = (f"\n\nℹ️ {n_open} posisi simulasi tetap dipantau sebagai simulasi." if n_open else "")
+                            tg_send(chat_id, f"🔴 <b>Mode REAL TRADE diaktifkan.</b>\nBalance Binance snapshot: <b>${float(total):.4f}</b>\nSnapshot dibuat sekali pada transisi ini.{extra}")
+                        except Exception as e:
+                            REAL_TRADE_ENABLED = False
+                            tg_send(chat_id, f"❌ <b>/mode on gagal.</b> Balance Binance tidak berhasil diambil.\n<code>{str(e)[:220]}</code>")
                     elif arg == "off":
                         if not REAL_TRADE_ENABLED:
-                            tg_send(chat_id, "🧪 Mode simulasi sudah aktif.")
+                            with stat_lock:
+                                stats["balance"] = STARTING_BALANCE
+                            tg_send(chat_id, "🧪 Mode simulasi sudah aktif. Balance anchor: $10.0000.")
                         else:
                             REAL_TRADE_ENABLED = False
-                            extra = (f"\n\nℹ️ {n_open} posisi real yang sedang berjalan "
-                                     f"tetap dipantau & ditutup normal via Binance — "
-                                     f"tidak ikut berubah jadi simulasi." if n_open else "")
-                            tg_send(chat_id, f"🧪 <b>Mode SIMULASI diaktifkan.</b> "
-                                              f"Posisi baru mulai sekarang cuma backtest strategy_logic, "
-                                              f"tidak ada order sungguhan.{extra}")
+                            with stat_lock:
+                                stats["balance"] = STARTING_BALANCE
+                            # Do not clear active REAL positions; their execution mode is immutable.
+                            extra = (f"\n\nℹ️ {n_open} posisi real tetap dipantau/ditutup via Binance." if n_open else "")
+                            tg_send(chat_id, f"🧪 <b>Mode SIMULASI diaktifkan.</b>\nBalance anchor dikembalikan ke <b>${STARTING_BALANCE:.2f}</b>.{extra}")
                     else:
                         tg_send(chat_id, "❓ Pakai <code>/mode</code>, <code>/mode on</code>, atau <code>/mode off</code>.")
                 elif text.startswith("/max"):
