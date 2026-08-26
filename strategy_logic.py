@@ -3973,3 +3973,598 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
         return upd
     except Exception as exc:
         return {"action": "PROTECT", "reason": [f"v12_manager_fallback:{str(exc)[:160]}"], "reasoning_engine": V12_VERSION}
+
+# =============================================================================
+# V13 — DATA-DRIVEN PATH / INVALIDATION BRAIN
+# =============================================================================
+# This layer is intentionally appended so the proven V11/V12 detectors remain
+# available while the decision/management contracts evolve without breaking
+# main.py. The core principles are:
+#   1) Initial SL is a LOSS CONTAINMENT boundary, but must sit beyond the
+#      structural/liquidity invalidation that makes the thesis wrong.
+#   2) MFE/MAE/path history is first-class evidence. Immediate failures are
+#      diagnosed as entry problems; mature givebacks are management problems.
+#   3) Trailing is a lifecycle state machine: INITIAL -> PROVING -> WINNER ->
+#      EXTENDED. Healthy winners breathe; reversal evidence, not profit alone,
+#      causes tightening.
+#   4) Historical research is used as a small soft adjustment only. The sample
+#      is still small, so no bucket can become a hard filter.
+#   5) RR remains unlimited above the 2R floor when the target is structural.
+
+V13_VERSION = "13.0-data-driven-path-brain"
+V13_HISTORY_MIN = 6
+V13_HISTORY_WEIGHT_CAP = 0.20
+V13_HISTORY_SCORE_CAP = 5.0
+V13_IMMEDIATE_FAIL_MFE_R = 0.35
+V13_STRONG_PATH_MFE_R = 2.0
+V13_MATURE_GIVEBACK_MFE_R = 1.0
+V13_SL_MIN_ATR = 0.65
+V13_SL_MAX_ATR = 2.00
+V13_SL_MAX_PCT = 0.035
+V13_SL_BUFFER_ATR = 0.45
+V13_SL_SWEEP_NEAR_ATR = 0.55
+V13_TRAIL_ARM_R = 0.80
+V13_TRAIL_BE_R = 1.00
+V13_TRAIL_STRUCTURE_R = 1.25
+V13_TRAIL_EXTENDED_R = 1.75
+V13_TRAIL_DEEP_MFE_R = 2.50
+V13_TRAIL_WARN_GIVEBACK = 0.30
+V13_TRAIL_TIGHT_GIVEBACK = 0.50
+V13_TRAIL_CRITICAL_GIVEBACK = 0.70
+V13_TRAIL_MIN_UPDATE_R = 0.10
+V13_TRAIL_MAX_CHURN = 8
+V13_TRAIL_HEALTHY_ATR_MULT = 2.40
+V13_TRAIL_REVERSAL_ATR_MULT = 1.30
+V13_TRAIL_CRITICAL_LOCK_R = 0.55
+V13_TRAIL_REVERSAL_LOCK_R = 0.75
+
+
+def _v13_trade_profit(row):
+    try:
+        if row.get("profitable") is not None:
+            return bool(row.get("profitable"))
+        return float(row.get("pnl_usd", row.get("pnl", 0)) or 0) > 0
+    except Exception:
+        return False
+
+
+def _v13_path_bucket(row):
+    """Classify closed-trade path into entry vs management failure groups."""
+    try:
+        mfe = float(row.get("mfe_r", 0) or 0)
+        final_r = float(row.get("final_r", 0) or 0)
+    except Exception:
+        return "unknown"
+    if mfe < V13_IMMEDIATE_FAIL_MFE_R and final_r < 0:
+        return "immediate_failure"
+    if mfe < 1.0 and final_r < 0:
+        return "weak_follow_through"
+    if mfe >= V13_STRONG_PATH_MFE_R and final_r > 0:
+        return "strong_winner"
+    if mfe >= V13_MATURE_GIVEBACK_MFE_R and final_r < 0:
+        return "mature_giveback"
+    if final_r > 0:
+        return "winner"
+    return "loss"
+
+
+def _v13_history_profile(history, direction, entry_label, rr=None):
+    """Small-sample-safe conditional history profile.
+
+    Matching hierarchy:
+      1) exact direction + entry type + RR band
+      2) direction + entry type
+      3) direction only
+      4) whole history only as a last diagnostic fallback
+
+    A hard minimum remains in _v13_candidate_history_adjustment(), so sparse
+    buckets cannot become a trading veto or manufacture a strong confidence.
+    """
+    rows = [r for r in (history or []) if isinstance(r, dict)]
+    empty = {
+        "samples": 0, "matched_samples": 0, "match_level": "none",
+        "immediate_failure_rate": None, "strong_winner_rate": None,
+        "mature_giveback_rate": None, "avg_final_r": None,
+        "avg_mfe_r": None, "avg_mae_r": None, "win_rate": None,
+        "path_quality": 0.0, "weight": 0.0,
+    }
+    if not rows:
+        return empty
+
+    side = str(direction or "").upper()
+    side = "BUY" if side in {"BULL", "BUY"} else "SELL" if side in {"BEAR", "SELL"} else side
+    label = str(entry_label or "").lower()
+    rr_band = _rr_band(float(rr or 0)) if rr is not None else None
+
+    def _side(r):
+        return str(r.get("decision", r.get("direction", ""))).upper()
+    def _label(r):
+        return str(r.get("entry_label", "")).lower()
+    def _rrmatch(r):
+        try:
+            return rr_band is not None and _rr_band(float(r.get("rr", 0) or 0)) == rr_band
+        except Exception:
+            return False
+
+    exact = [r for r in rows if _side(r) == side and _label(r) == label and _rrmatch(r)]
+    side_label = [r for r in rows if _side(r) == side and _label(r) == label]
+    side_rows = [r for r in rows if _side(r) == side]
+    if len(exact) >= V13_HISTORY_MIN:
+        data, level, base_weight = exact, "direction+label+rr", 1.00
+    elif len(side_label) >= V13_HISTORY_MIN:
+        data, level, base_weight = side_label, "direction+label", 0.85
+    elif len(side_rows) >= V13_HISTORY_MIN:
+        data, level, base_weight = side_rows, "direction", 0.70
+    else:
+        data, level, base_weight = rows, "all", 0.35
+
+    weights = np.asarray([base_weight] * len(data), dtype=float)
+    mfes = np.asarray([float(r.get("mfe_r", 0) or 0) for r in data], dtype=float)
+    maes = np.asarray([float(r.get("mae_r", 0) or 0) for r in data], dtype=float)
+    finals = np.asarray([float(r.get("final_r", 0) or 0) for r in data], dtype=float)
+    immediate = np.asarray([_v13_path_bucket(r) == "immediate_failure" for r in data], dtype=float)
+    strong = np.asarray([_v13_path_bucket(r) == "strong_winner" for r in data], dtype=float)
+    mature = np.asarray([_v13_path_bucket(r) == "mature_giveback" for r in data], dtype=float)
+    wins = np.asarray([_v13_trade_profit(r) for r in data], dtype=float)
+    wsum = max(float(weights.sum()), 1e-9)
+    imm = float(np.dot(weights, immediate) / wsum)
+    strong_r = float(np.dot(weights, strong) / wsum)
+    mature_r = float(np.dot(weights, mature) / wsum)
+    win_r = float(np.dot(weights, wins) / wsum)
+    avg_final = float(np.dot(weights, finals) / wsum)
+    avg_mfe = float(np.dot(weights, mfes) / wsum)
+    avg_mae = float(np.dot(weights, maes) / wsum)
+    path_quality = np.clip(
+        4.0 * strong_r + 1.5 * np.tanh(avg_final) -
+        4.5 * imm - 2.0 * mature_r,
+        -V13_HISTORY_SCORE_CAP, V13_HISTORY_SCORE_CAP
+    )
+    weight = min(V13_HISTORY_WEIGHT_CAP, len(data) / 40.0)
+    return {
+        "samples": len(rows), "matched_samples": len(data), "match_level": level,
+        "immediate_failure_rate": round(imm, 4),
+        "strong_winner_rate": round(strong_r, 4),
+        "mature_giveback_rate": round(mature_r, 4),
+        "avg_final_r": round(avg_final, 4), "avg_mfe_r": round(avg_mfe, 4),
+        "avg_mae_r": round(avg_mae, 4), "win_rate": round(win_r, 4),
+        "path_quality": round(float(path_quality), 3), "weight": round(weight, 3),
+    }
+
+
+def _v13_candidate_history_adjustment(history, direction, entry_label, rr):
+    prof = _v13_history_profile(history, direction, entry_label, rr)
+    if prof.get("matched_samples", 0) < V13_HISTORY_MIN or prof.get("match_level") == "all":
+        return 0.0, prof
+    # Do not allow historical data to override structural evidence. This is a
+    # ranking nudge only, not a veto.
+    adj = float(prof.get("path_quality", 0.0)) * float(prof.get("weight", 0.0))
+    return float(np.clip(adj, -V13_HISTORY_SCORE_CAP, V13_HISTORY_SCORE_CAP)), prof
+
+
+# The active history is a scan-local snapshot installed by full_analyze().
+_V13_ACTIVE_HISTORY = []
+_V13_ORIG_COLLECT = _collect_entry_candidates
+
+
+def _collect_entry_candidates_v13(m15, h1, direction, current_price, atr, score_ctx):
+    cands = _V13_ORIG_COLLECT(m15, h1, direction, current_price, atr, score_ctx)
+    history = list(_V13_ACTIVE_HISTORY or [])
+    for c in cands:
+        adj, prof = _v13_candidate_history_adjustment(
+            history, direction, c.get("label"), None
+        )
+        c["history_path_adjustment"] = round(adj, 3)
+        c["history_path_profile"] = prof
+        # The legacy candidate score is an integer. Keep historical adjustment
+        # small so current-chart evidence remains dominant.
+        c["score"] = float(c.get("score", 0)) + adj
+    cands.sort(key=lambda x: (-float(x.get("score", 0)), -float(x.get("location_score", 50))))
+    return cands
+
+
+_collect_entry_candidates = _collect_entry_candidates_v13
+
+
+# -----------------------------------------------------------------------------
+# V13 structural SL. Replace "zone body" stops with a true invalidation band.
+# -----------------------------------------------------------------------------
+_V13_ORIG_COMPUTE_SL = _compute_sl
+
+
+def _v13_last_structural_anchor(df, direction, entry, lb=3, max_bars=60):
+    if df is None or len(df) < lb * 2 + 3:
+        return None
+    recent = df.iloc[-min(len(df), max_bars):]
+    sh, sl = swing_pts(recent, lb=lb)
+    if direction == "bull" and sl:
+        vals = [float(recent["low"].iloc[i]) for i in sl if float(recent["low"].iloc[i]) < entry]
+        return min(vals) if vals else None
+    if direction == "bear" and sh:
+        vals = [float(recent["high"].iloc[i]) for i in sh if float(recent["high"].iloc[i]) > entry]
+        return max(vals) if vals else None
+    return None
+
+
+def _v13_structural_sl(m15, h1, direction, entry, atr, liq_sweep, invalid_level):
+    up = direction == "bull"
+    a = max(float(atr), 1e-12)
+    buffer = a * V13_SL_BUFFER_ATR
+    min_risk = a * V13_SL_MIN_ATR
+    max_risk = min(a * V13_SL_MAX_ATR, float(entry) * V13_SL_MAX_PCT)
+    anchors = []
+
+    def add(name, level, strength):
+        try:
+            lv = float(level)
+        except Exception:
+            return
+        if up and lv >= entry:
+            return
+        if (not up) and lv <= entry:
+            return
+        # For a BUY the stop goes below the anchor; for a SELL above it.
+        sl = lv - buffer if up else lv + buffer
+        risk = abs(sl - entry)
+        if min_risk <= risk <= max_risk:
+            anchors.append({"source": name, "level": lv, "sl": sl, "risk": risk, "strength": float(strength)})
+
+    if invalid_level is not None:
+        add("candidate_invalidation", invalid_level, 1.00)
+    m15_anchor = _v13_last_structural_anchor(m15, direction, entry, lb=3, max_bars=60)
+    if m15_anchor is not None:
+        add("m15_protected_swing", m15_anchor, 0.90)
+    h1_anchor = _v13_last_structural_anchor(h1, direction, entry, lb=5, max_bars=80)
+    if h1_anchor is not None:
+        add("h1_protected_swing", h1_anchor, 1.00)
+    if liq_sweep and liq_sweep.get("type") == "sweep" and liq_sweep.get("level") is not None:
+        lev = float(liq_sweep["level"])
+        # A recent liquidity sweep is useful as an invalidation boundary only
+        # when it is on the adverse side and not too close to the entry.
+        dist = abs(entry - lev) / a
+        if dist >= V13_SL_SWEEP_NEAR_ATR:
+            add("liquidity_sweep_boundary", lev, 1.05)
+
+    if not anchors:
+        raise ValueError("NO_COMPACT_STRUCTURAL_SL_V13")
+
+    # Prefer the deepest valid structural boundary. This is intentional: the
+    # stop's job is to absorb ordinary sweep/noise, not to sit inside the zone.
+    # Strength breaks exact ties.
+    if up:
+        chosen = max(anchors, key=lambda x: (x["risk"], x["strength"]))
+    else:
+        chosen = max(anchors, key=lambda x: (x["risk"], x["strength"]))
+    return float(chosen["sl"]), float(chosen["risk"]), {
+        "source": chosen["source"],
+        "anchor": round(chosen["level"], 10),
+        "buffer_atr": round(V13_SL_BUFFER_ATR, 3),
+        "risk_atr": round(chosen["risk"] / a, 3),
+        "risk_pct_entry": round(chosen["risk"] / max(entry, 1e-12) * 100.0, 4),
+        "min_risk_atr": round(V13_SL_MIN_ATR, 3),
+        "max_risk_atr": round(V13_SL_MAX_ATR, 3),
+        "max_risk_pct": round(V13_SL_MAX_PCT * 100.0, 3),
+        "anchors_considered": [a["source"] for a in anchors],
+    }
+
+
+def _compute_sl_v13(m15, h1, direction, entry, atr, liq_sweep, invalid_level=None):
+    return _v13_structural_sl(m15, h1, direction, entry, atr, liq_sweep, invalid_level)[:2]
+
+
+_compute_sl = _compute_sl_v13
+
+
+# -----------------------------------------------------------------------------
+# V13 lifecycle trail. The old reversal engine remains available as a detector,
+# but the actual stop progression is governed by path maturity + structure.
+# -----------------------------------------------------------------------------
+
+def _v13_current_price(df_m15, state):
+    # For strategy decisions prefer the latest closed M15 candle because it is
+    # the fresh dataset supplied on every management cycle. The state price may
+    # be stale between monitor cycles.
+    try:
+        if df_m15 is not None and len(df_m15):
+            if "close" in df_m15.columns:
+                return float(df_m15["close"].iloc[-1])
+    except Exception:
+        pass
+    return _safe_float(state.get("current_price") or state.get("price"), None)
+
+
+def _v13_structural_trail(df_m15, direction, entry, initial_risk, current_price, state):
+    a = max(float(df_m15["atr"].iloc[-1]), 1e-12)
+    swing = _trail_protected_swing(df_m15, direction, a)
+    if swing is not None:
+        # A profit trail should only become the primary protection once the
+        # structural swing has crossed into the profitable side.
+        if direction == "bull" and float(swing) > entry:
+            return float(swing), "m15_structure"
+        if direction == "bear" and float(swing) < entry:
+            return float(swing), "m15_structure"
+
+    # No profitable confirmed swing yet: use a conservative BE floor once the
+    # trade has actually earned 1R. This is not a profit ladder; it is a safety
+    # transition after the market has proven the thesis.
+    if direction == "bull":
+        be = entry + initial_risk * 0.02
+        return min(be, current_price - a * TRAIL_MIN_MARKET_GAP_ATR), "breakeven_protection"
+    be = entry - initial_risk * 0.02
+    return max(be, current_price + a * TRAIL_MIN_MARKET_GAP_ATR), "breakeven_protection"
+
+
+def _v13_trail_candidate(df_m15, state, direction, entry, initial_sl, current_price):
+    risk = max(abs(entry - initial_sl), 1e-12)
+    current_r = ((current_price - entry) if direction == "bull" else (entry - current_price)) / risk
+    state_mfe = _safe_float(state.get("mfe_r"), 0.0) or 0.0
+    state_mae = _safe_float(state.get("mae_r"), 0.0) or 0.0
+    # main.py's MFE/MAE are the authoritative live path values. We only use a
+    # closed-candle observation to avoid missing a move between monitor ticks.
+    peak_obs = _trail_peak_metrics(df_m15, direction, entry, risk)
+    mfe = max(state_mfe, float(peak_obs.get("peak_r", 0.0)))
+    mae = state_mae
+    giveback_r = max(0.0, mfe - current_r)
+    giveback_ratio = giveback_r / max(mfe, 0.25) if mfe > 0 else 0.0
+    t1 = state.get("time_to_1r_sec")
+    slow_winner = bool(t1 is not None and float(t1) > 4 * 3600 and mfe >= 0.8)
+    reversal = _trail_reversal_analysis(df_m15, direction, entry, current_price, risk, state.get("signal", {}).get("tp"))
+    return {
+        "current_r": round(current_r, 4), "mfe_r": round(mfe, 4), "mae_r": round(mae, 4),
+        "giveback_r": round(giveback_r, 4), "giveback_ratio": round(giveback_ratio, 4),
+        "time_to_1r_sec": t1, "slow_winner": slow_winner, "reversal": reversal,
+    }
+
+
+def _manage_position_v13(state, df_m15, df_h1=None, df_d1=None, symbol=None):
+    if df_m15 is None or len(df_m15) < 30:
+        return {"action": "PROTECT", "reason": ["v13_insufficient_m15_data"], "reasoning_engine": V13_VERSION}
+    sig = state.get("signal") or {}
+    direction = "bull" if str(sig.get("decision", "BUY")).upper() == "BUY" else "bear"
+    entry = _safe_float(state.get("entry") or sig.get("entry"), None)
+    initial_sl = _safe_float(state.get("initial_sl") or sig.get("initial_sl") or sig.get("sl"), None)
+    current_sl = _safe_float(state.get("current_sl") or sig.get("sl"), None)
+    current_price = _v13_current_price(df_m15, state)
+    if entry is None or initial_sl is None or current_sl is None or current_price is None:
+        return {"action": "PROTECT", "reason": ["v13_missing_position_geometry"], "reasoning_engine": V13_VERSION}
+    risk = abs(entry - initial_sl)
+    if risk <= 0:
+        return {"action": "PROTECT", "reason": ["v13_invalid_initial_risk"], "reasoning_engine": V13_VERSION}
+
+    # Hard safety geometry: the brain never proposes an impossible-side stop.
+    if direction == "bull" and current_price <= current_sl:
+        return {"action": "PROTECT", "reason": ["v13_market_at_or_below_current_sl"], "reasoning_engine": V13_VERSION}
+    if direction == "bear" and current_price >= current_sl:
+        return {"action": "PROTECT", "reason": ["v13_market_at_or_above_current_sl"], "reasoning_engine": V13_VERSION}
+
+    path = _v13_trail_candidate(df_m15, state, direction, entry, initial_sl, current_price)
+    current_r = path["current_r"]
+    mfe = path["mfe_r"]
+    giveback = path["giveback_ratio"]
+    reversal = path["reversal"]
+    rev_state = reversal.get("state", "HEALTHY")
+
+    if current_r < V13_TRAIL_ARM_R and mfe < V13_TRAIL_ARM_R:
+        return {
+            "action": "HOLD", "state": "INITIAL" if current_r < 0.35 else "PROVING",
+            "profit_r": round(current_r, 3), "lifecycle": path,
+            "reversal_diagnostics": reversal,
+            "reason": ["path_not_mature_for_trailing"], "reasoning_engine": V13_VERSION,
+        }
+
+    # At ~1R the position has proven enough to remove catastrophic give-back risk.
+    # If no profitable structural swing exists, use a tiny BE offset rather than
+    # a tight profit lock.
+    candidate = None
+    source = None
+    if mfe >= V13_TRAIL_BE_R:
+        candidate, source = _v13_structural_trail(df_m15, direction, entry, risk, current_price, state)
+
+    # Healthy winners get a wider structure-derived candidate. Do not tighten a
+    # slow winner merely because a single reversal detector fired.
+    if mfe >= V13_TRAIL_STRUCTURE_R and reversal.get("state") in {"HEALTHY", "CAUTION", "WEAKENING"}:
+        if reversal.get("state") == "HEALTHY" and giveback < V13_TRAIL_WARN_GIVEBACK:
+            candidate, source = _v13_structural_trail(df_m15, direction, entry, risk, current_price, state)
+
+    # Once meaningful giveback appears, structure remains preferred but the stop
+    # can lock more of the realized path. This is where PROM/JTO-type trades are
+    # protected without cutting ordinary healthy winners early.
+    if mfe >= V13_TRAIL_STRUCTURE_R and giveback >= V13_TRAIL_WARN_GIVEBACK:
+        struct_candidate, struct_source = _v13_structural_trail(df_m15, direction, entry, risk, current_price, state)
+        if struct_candidate is not None:
+            candidate, source = struct_candidate, struct_source
+        if giveback >= V13_TRAIL_TIGHT_GIVEBACK and mfe >= V13_TRAIL_EXTENDED_R:
+            lock_r = V13_TRAIL_REVERSAL_LOCK_R if reversal.get("confirmations", 0) >= 2 else 0.45
+            lock = entry + (risk * lock_r if direction == "bull" else -risk * lock_r)
+            if direction == "bull":
+                candidate = max(float(candidate or -np.inf), min(lock, current_price - float(df_m15["atr"].iloc[-1]) * TRAIL_MIN_MARKET_GAP_ATR))
+            else:
+                candidate = min(float(candidate or np.inf), max(lock, current_price + float(df_m15["atr"].iloc[-1]) * TRAIL_MIN_MARKET_GAP_ATR))
+            source = "path_giveback_lock"
+
+    # Critical giveback: preserve a meaningful slice of the realized move when
+    # possible. Do not market-close automatically; let the verified SL/TP path in
+    # main.py remain the execution authority.
+    if mfe >= V13_TRAIL_DEEP_MFE_R and giveback >= V13_TRAIL_CRITICAL_GIVEBACK:
+        lock_r = V13_TRAIL_CRITICAL_LOCK_R
+        lock = entry + (risk * lock_r if direction == "bull" else -risk * lock_r)
+        if direction == "bull":
+            candidate = max(float(candidate or -np.inf), min(lock, current_price - float(df_m15["atr"].iloc[-1]) * TRAIL_MIN_MARKET_GAP_ATR))
+        else:
+            candidate = min(float(candidate or np.inf), max(lock, current_price + float(df_m15["atr"].iloc[-1]) * TRAIL_MIN_MARKET_GAP_ATR))
+        source = "critical_giveback_lock"
+
+    if candidate is None:
+        return {
+            "action": "PROTECT" if current_r >= V13_TRAIL_ARM_R else "HOLD",
+            "state": rev_state,
+            "profit_r": round(current_r, 3), "lifecycle": path,
+            "reversal_diagnostics": reversal,
+            "reason": ["no_safe_trail_candidate"], "reasoning_engine": V13_VERSION,
+        }
+
+    atr = max(float(df_m15["atr"].iloc[-1]), 1e-12)
+    bar_high = float(df_m15["high"].iloc[-1]) if "high" in df_m15 else None
+    bar_low = float(df_m15["low"].iloc[-1]) if "low" in df_m15 else None
+    candidate, invalid_reason = _validate_trail_candidate(
+        candidate, direction, current_price, atr, current_sl, entry,
+        bar_high=bar_high, bar_low=bar_low
+    )
+
+    if candidate is None:
+        return {
+            "action": "PROTECT" if (giveback >= V13_TRAIL_WARN_GIVEBACK or rev_state in {"WEAKENING", "REVERSAL", "REVERSAL_CONFIRMED"}) else "HOLD",
+            "state": rev_state, "profit_r": round(current_r, 3),
+            "lifecycle": path, "reversal_diagnostics": reversal,
+            "trail_candidate_rejected": invalid_reason,
+            "reason": ["trail_geometry_rejected"], "reasoning_engine": V13_VERSION,
+        }
+
+    improvement_r = ((candidate - current_sl) if direction == "bull" else (current_sl - candidate)) / risk
+    if improvement_r < V13_TRAIL_MIN_UPDATE_R and int(state.get("trail_update_count", 0) or 0) >= V13_TRAIL_MAX_CHURN:
+        return {
+            "action": "PROTECT", "state": rev_state, "profit_r": round(current_r, 3),
+            "lifecycle": path, "reversal_diagnostics": reversal,
+            "reason": ["anti_churn_small_improvement"], "reasoning_engine": V13_VERSION,
+        }
+
+    locked_r = ((candidate - entry) if direction == "bull" else (entry - candidate)) / risk
+    return {
+        "action": "TRAIL",
+        "state": rev_state,
+        "sl": round(float(candidate), 10),
+        "profit_r": round(current_r, 3),
+        "locked_r": round(float(locked_r), 3),
+        "trail_source": source,
+        "lifecycle": path,
+        "reversal_diagnostics": reversal,
+        "reason": [
+            "v13_path_aware_trailing",
+            f"mfe={mfe:.2f}R",
+            f"giveback={giveback:.0%}",
+            f"source={source}",
+        ],
+        "reasoning_engine": V13_VERSION,
+    }
+
+
+# -----------------------------------------------------------------------------
+# V13 public API. The extra trade_history argument is optional and preserves the
+# original full_analyze(df_h1, df_m15, df_d1, symbol) contract.
+# -----------------------------------------------------------------------------
+_V13_ORIG_FULL_ANALYZE = _legacy_full_analyze
+
+
+def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None,
+                 trade_history=None, market_context=None):
+    global _V13_ACTIVE_HISTORY
+    old = _V13_ACTIVE_HISTORY
+    try:
+        # Work on a detached snapshot so live position closure cannot mutate the
+        # list while a scan is evaluating a candidate.
+        _V13_ACTIVE_HISTORY = [dict(x) for x in (trade_history or []) if isinstance(x, dict)]
+        result = _V13_ORIG_FULL_ANALYZE(
+            df_h1, df_m15, df_d1, symbol, df_btc_h1,
+            trade_history=_V13_ACTIVE_HISTORY,
+        )
+    finally:
+        _V13_ACTIVE_HISTORY = old
+
+    if not isinstance(result, dict):
+        return result
+    try:
+        direction = str(result.get("decision") or "BUY").upper()
+        side = "bull" if direction == "BUY" else "bear"
+        label = result.get("entry_label")
+        rr = float(result.get("rr") or 0)
+        profile = _v13_history_profile(_V13_ACTIVE_HISTORY if old else (trade_history or []), side, label, rr)
+        # Historical context is deliberately small. It informs confidence and
+        # auditability but can never overturn a valid structural decision.
+        path_adj, profile2 = _v13_candidate_history_adjustment(trade_history or [], side, label, rr)
+        base_conf = int(result.get("confidence") or 0)
+        # Only use the positive side of the historical path signal to help a
+        # setup with demonstrated realized edge; negative history remains a soft
+        # reduction. Main.py's operator threshold still owns final execution.
+        conf_adj = int(round(path_adj))
+        conf_adj = int(np.clip(conf_adj, -V13_HISTORY_SCORE_CAP, V13_HISTORY_SCORE_CAP))
+        final_conf = int(np.clip(base_conf + conf_adj, 0, 99))
+        result["confidence_base_v13"] = base_conf
+        result["confidence_history_adjustment_v13"] = conf_adj
+        result["confidence"] = final_conf
+        result["reasoning_engine"] = V13_VERSION
+        result["confidence_band"] = _confidence_band_v12(final_conf)
+        result["historical_path_profile"] = profile2
+        result["path_diagnosis"] = {
+            "immediate_failure_definition": f"MFE < {V13_IMMEDIATE_FAIL_MFE_R:.2f}R and final_r < 0",
+            "strong_winner_definition": f"MFE >= {V13_STRONG_PATH_MFE_R:.2f}R and final_r > 0",
+            "mature_giveback_definition": f"MFE >= {V13_MATURE_GIVEBACK_MFE_R:.2f}R and final_r < 0",
+        }
+        # Initial SL diagnostics — based on the selected signal itself. The
+        # actual structural anchor was already enforced by _compute_sl_v13().
+        selected_risk = abs(float(result.get("entry", 0.0)) - float(result.get("sl", 0.0)))
+        selected_atr = max(float(result.get("atr", 0.0) or 0.0), 1e-12)
+        selected_entry = max(abs(float(result.get("entry", 0.0))), 1e-12)
+        result["v13_sl_policy"] = {
+            "purpose": "loss_containment_at_structural_invalidation",
+            "risk_atr": round(selected_risk / selected_atr, 3),
+            "risk_pct_entry": round(selected_risk / selected_entry * 100.0, 4),
+            "min_risk_atr": V13_SL_MIN_ATR,
+            "max_risk_atr": V13_SL_MAX_ATR,
+            "max_risk_pct": V13_SL_MAX_PCT,
+            "anti_sweep_buffer_atr": V13_SL_BUFFER_ATR,
+        }
+        return result
+    except Exception as exc:
+        result["reasoning_engine"] = V13_VERSION
+        result["v13_warning"] = str(exc)[:240]
+        return result
+
+
+def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
+    try:
+        return _manage_position_v13(state, df_m15, df_h1, df_d1, symbol)
+    except Exception as exc:
+        # Fail safe: preserve the older manager if V13 encounters an unexpected
+        # dataset shape. It may still return HOLD/PROTECT/T RAIL under the same
+        # execution contract.
+        try:
+            fallback = _legacy_manage_position(state, df_m15, df_h1, df_d1, symbol)
+            if isinstance(fallback, dict):
+                fallback.setdefault("reason", [])
+                if isinstance(fallback["reason"], str):
+                    fallback["reason"] = [fallback["reason"]]
+                fallback["reason"].append(f"v13_fallback:{str(exc)[:120]}")
+                fallback["reasoning_engine"] = V13_VERSION
+            return fallback
+        except Exception:
+            return {"action": "PROTECT", "reason": [f"v13_manager_exception:{str(exc)[:180]}"], "reasoning_engine": V13_VERSION}
+
+
+def validate_and_adjust_geometry(entry, sl, tp, current_price, atr, direction):
+    """V13 geometry contract: never rescue a structurally invalid SL/TP."""
+    try:
+        e, s, t, px, a = map(float, (entry, sl, tp, current_price, atr))
+    except Exception:
+        return None
+    up = str(direction).lower() in {"bull", "buy"}
+    if a <= 0 or e <= 0 or t <= 0 or s <= 0:
+        return None
+    geo = (s < e < t) if up else (t < e < s)
+    if not geo:
+        return None
+    breached = (px <= s) if up else (px >= s)
+    if breached:
+        return None
+    risk = abs(e - s)
+    rr = abs(t - e) / max(risk, 1e-12)
+    risk_atr = risk / a
+    risk_pct = risk / e
+    if rr < MIN_RR:
+        return None
+    if risk_atr < V13_SL_MIN_ATR or risk_atr > V13_SL_MAX_ATR or risk_pct > V13_SL_MAX_PCT:
+        return None
+    return {
+        "entry": e, "sl": s, "tp": t, "rr": round(rr, 2), "adjusted": False,
+        "v13_sl_risk_atr": round(risk_atr, 3),
+        "v13_sl_risk_pct": round(risk_pct * 100.0, 4),
+    }
+
