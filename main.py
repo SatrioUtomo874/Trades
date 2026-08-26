@@ -76,7 +76,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V20.2"
+MAIN_ENGINE_VERSION = "V21"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -2687,22 +2687,31 @@ def run_scan_once(chat_id):
     _record_scan_quality({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc})
     log.info("[SCAN SUMMARY] " + " | ".join(f"{k}={v}" for k,v in telemetry.items()))
 
+    # /reject is expressed in SCAN CYCLES, not individual signals.
+    # While warmup is active, every qualified signal from the current scan is
+    # discarded together, none is banned, and exactly one scan is consumed.
     rejected_warmup=[]
+    warmup_active=False
     with early_reject_lock:
         remaining=int(early_reject_remaining)
-        if remaining>0 and results:
-            take=min(remaining,len(results)); rejected_warmup=results[:take]; results=results[take:]; early_reject_remaining-=take
-    for r in rejected_warmup: log.info(f"[EARLY-REJECT] {r.get('symbol','?')} confidence={float(r.get('confidence',0) or 0):.1f}")
+        if remaining>0:
+            warmup_active=True
+            rejected_warmup=list(results)
+            results=[]
+            early_reject_remaining=max(0, remaining-1)
+    for r in rejected_warmup:
+        log.info(f"[EARLY-REJECT][scan] {r.get('symbol','?')} confidence={float(r.get('confidence',0) or 0):.1f}")
     with scan_quality_lock:
         if scan_quality_history and scan_quality_history[-1].get("run_id")==research_run_id and scan_quality_history[-1].get("scan_counter")==scan_counter:
             scan_quality_history[-1]["early_rejected_count"]=len(rejected_warmup)
+            scan_quality_history[-1]["warmup_reject_scan"]=warmup_active
 
     results.sort(key=lambda x:float(x.get("confidence",0) or 0),reverse=True)
     avg_txt=f"{avg_conf:.1f}%" if avg_conf is not None else "—"
     breadth_txt=(f"📈 Breadth BUY <b>{mc['bullish_breadth_pct']:.1f}%</b> | SELL <b>{mc['bearish_breadth_pct']:.1f}%</b> | Regime: <b>{mc['market_regime']}</b>" if mc.get('bullish_breadth_pct') is not None else "📈 Market context: <b>insufficient data</b>")
     rs_txt=(f"\n₿ BTC 1h: <b>{mc['btc_price_1h_pct']:+.2f}%</b> | BTC 4h: <b>{mc['btc_price_4h_pct']:+.2f}%</b>" if mc.get('btc_price_1h_pct') is not None else "")
     scan_meta=f"\n\n📊 Rata-rata confidence scan: <b>{avg_txt}</b> ({analyzed_symbols}/{len(symbols)} dianalisis)\n{breadth_txt}{rs_txt}"
-    if rejected_warmup: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> sinyal awal"
+    if warmup_active: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> signal qualified dari scan ini ditolak"
     if not results:
         tg_send(chat_id,f"⚠️ Tidak ada setup dengan confidence ≥ {STRATEGY_CONFIDENCE_THRESHOLD}%."+scan_meta); return []
     summary="\n".join(f"• {r.get('symbol','?')} {r.get('decision','?')} — {float(r.get('confidence',0) or 0):.0f}%" for r in results)
@@ -2732,33 +2741,35 @@ EXIT_FEE_PCT  = 0.0005   # 0.05% — exit via SL/TP market-trigger (taker)
 POSITION_SIZE_PCT = 100.0  # DEPRECATED — lihat catatan di atas
 
 def _classify_close_result(result, entry=None, close_price=None, decision=None):
-    """Classify a closed trade from the *realized price outcome*.
+    """Normalize every closed trade into the three operational outcome buckets.
 
-    Rules:
-      - Explicit TP remains TP because the exchange confirmed the TP path.
-      - Any non-TP exit (SL, Trail, timeout, recovery/manual close) is
-        classified by realized net PnL: positive -> Trail, non-positive -> SL.
-      - This is important when a trailing SL has moved above entry: Binance can
-        report the exit/order as an SL, while economically the trade is a win.
+    TP is preserved when the exchange/engine explicitly confirms a take-profit path.
+    Every other realized exit is classified economically: positive net PnL -> TRAIL,
+    non-positive net PnL -> SL. The original reason is kept separately in
+    ``close_reason`` for research, so UI/statistics never end up with an uncounted
+    fourth outcome such as ``strategy`` or ``timeout``.
     """
-    result = str(result or "strategy").lower()
+    result = str(result or "strategy").strip().lower()
     if result == "tp":
         return "tp"
-    if entry is None or close_price is None:
-        return "sl" if result in ("sl", "trail", "timeout") else result
-    try:
-        entry = float(entry); close_price = float(close_price)
-        if entry <= 0:
-            return "sl" if result in ("sl", "trail", "timeout") else result
-        side = str(decision or "BUY").upper()
-        direction = 1 if side == "BUY" else -1
-        pnl_raw = ((close_price - entry) / entry) * direction
-        net_pnl = pnl_raw - (ENTRY_FEE_PCT + EXIT_FEE_PCT)
-        if result in ("sl", "trail", "timeout"):
-            return "trail" if net_pnl > 0 else "sl"
-        return result
-    except Exception:
-        return "sl" if result in ("sl", "trail", "timeout") else result
+    if entry is not None and close_price is not None:
+        try:
+            entry = float(entry); close_price = float(close_price)
+            if entry > 0:
+                side = str(decision or "BUY").upper()
+                direction = 1 if side == "BUY" else -1
+                pnl_raw = ((close_price - entry) / entry) * direction
+                net_pnl = pnl_raw - (ENTRY_FEE_PCT + EXIT_FEE_PCT)
+                return "trail" if net_pnl > 0 else "sl"
+        except Exception:
+            pass
+    # No realized price available: preserve explicit operational result, otherwise
+    # fail closed into SL so every closed trade remains countable.
+    if result == "trail":
+        return "trail"
+    if result == "sl":
+        return "sl"
+    return "sl"
 
 
 def _update_trade_path_metrics(pos, price):
@@ -2923,7 +2934,8 @@ def fmt_stats():
     pnl_pct = round((pnl / base * 100), 2) if base else 0.0
     sgn = "+" if pnl >= 0 else ""
     hist_str = "\n".join(
-        f"  {'✅' if h['result'] in ('tp','trail') else '❌'} {'+' if h['pnl_usd']>=0 else ''}{h['pct']:.2f}% → ${h['balance_after']:.4f} | C{float(h.get('confidence',0) or 0):.0f}%"
+        f"  {'🟢' if h.get('pnl_usd',0) > 0 else '🔴' if h.get('pnl_usd',0) < 0 else '⚪'} "
+        f"{h.get('result','?').upper()} {'+' if h.get('pnl_usd',0)>=0 else ''}{h.get('pct',0):.2f}% → ${h.get('balance_after',0):.4f} | C{float(h.get('confidence',0) or 0):.0f}%"
         for h in reversed(hist[-5:])
     ) or "  (belum ada)"
     avg_all = None
@@ -2974,7 +2986,7 @@ def fmt_backtest():
         return "📋 <b>Backtest</b>\nBelum ada trade."
     lines = []
     for h in reversed(hist):
-        em  = "✅" if h["result"] in ("tp", "trail") else "❌"
+        em  = "🟢" if float(h.get("pnl_usd", 0) or 0) > 0 else "🔴" if float(h.get("pnl_usd", 0) or 0) < 0 else "⚪"
         dec = h.get("decision") or "?"
         sym = h.get("symbol") or "?"
         et  = h.get("entry_time"); xt = h.get("exit_time")
@@ -3382,8 +3394,8 @@ def close_position(sym, result, close_price=None):
     except Exception:
         last = None
 
-    emoji = {"tp":"🎯","sl":"🛑","trail":"🔒"}.get(classified, "❓")
-    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(classified, classified.upper())
+    emoji = {"tp":"🎯","sl":"🛑","trail":"🔒"}.get(classified, "🛑")
+    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(classified, "STOP LOSS")
     detail = ""
     if last and last.get("symbol") == sym:
         sgn = "+" if last.get("pct", 0) >= 0 else ""
@@ -4607,44 +4619,48 @@ def bot_loop():
                     if len(parts) > 1:
                         target_sym = parts[1].upper()
                         _ban_coin(target_sym, reason="manual", duration=float("inf"), kind="manual")
-                        safe_sym = html.escape(target_sym)
-                        tg_send(chat_id, f"🚫 <b>{safe_sym} diban PERMANEN.</b>\nLepas dengan <code>{safe_sym}</code> memakai /unban atau <code>/resetban</code>.")
+                        tg_send(chat_id, f"🚫 <b>{html.escape(target_sym)}</b> diban PERMANEN.\nLepas dengan <code>/unban {html.escape(target_sym)}</code> atau <code>/resetban</code>.")
                     else:
                         with ban_lock:
                             cur_scan = scan_counter
                             b = sorted(banned_coins.items())
+                        output_lines = [f"🚫 <b>Banned ({len(b)}):</b>"]
                         if b:
-                            lines = []
                             for sym, meta in b:
+                                sym_e = html.escape(str(sym))
                                 if isinstance(meta, tuple):
                                     banned_at, dur = meta; reason = "legacy"; kind = "short"; conf_txt = ""
                                 else:
                                     banned_at, dur = meta.get("banned_at", cur_scan), meta.get("duration", 0)
-                                    reason = meta.get("reason", "")
-                                    kind = meta.get("kind", "short")
+                                    reason = html.escape(str(meta.get("reason", "") or ""))
+                                    kind = html.escape(str(meta.get("kind", "short") or "short"))
                                     c = meta.get("confidence")
                                     conf_txt = f" C{float(c):.0f}%" if c is not None else ""
-                                safe_sym = html.escape(str(sym))
-                                safe_reason = html.escape(str(reason), quote=False)
-                                safe_kind = html.escape(str(kind), quote=False)
-                                safe_conf = html.escape(str(conf_txt), quote=False)
                                 if dur == float("inf"):
-                                    lines.append(f"• {safe_sym} (PERMANEN) | {safe_kind} | {safe_reason}")
+                                    output_lines.append(f"• {sym_e} (PERMANEN) | {kind}{conf_txt} | {reason}")
                                 else:
                                     remaining = max(0.0, float(dur) - (cur_scan - float(banned_at)))
-                                    lines.append(f"• {safe_sym} ({remaining:g} scan) | {safe_kind}{safe_conf} | {safe_reason}")
-                            text_out = f"🚫 <b>Banned ({len(b)}):</b>\n" + "\n".join(lines)
-                            lc=_low_conf_summary()
-                            if lc:
-                                top="\n".join(f"• {html.escape(str(x['symbol']))} — {x['count']}x | avg C{x['avg']:.1f}% | min C{x['min']:.1f}%" for x in lc[:10])
-                                text_out += "\n\n🧠 <b>Low-confidence frequency:</b>\n" + top
-                            tg_send(chat_id, text_out)
+                                    output_lines.append(f"• {sym_e} ({remaining:g} scan) | {kind}{conf_txt} | {reason}")
                         else:
-                            lc=_low_conf_summary()
-                            if lc:
-                                top="\n".join(f"• {html.escape(str(x['symbol']))} — {x['count']}x | avg C{x['avg']:.1f}% | min C{x['min']:.1f}%" for x in lc[:10])
-                                tg_send(chat_id,"✅ Tidak ada ban aktif.\n\n🧠 <b>Low-confidence frequency:</b>\n"+top)
-                            else: tg_send(chat_id,"✅ Belum ada ban dan belum ada histori low-confidence.")
+                            output_lines.append("• (tidak ada ban aktif)")
+
+                        lc = _low_conf_summary()
+                        if lc:
+                            output_lines.append("\n🧠 <b>Low-confidence frequency:</b>")
+                            for x in lc[:10]:
+                                output_lines.append(f"• {html.escape(str(x['symbol']))} — {x['count']}x | avg C{x['avg']:.1f}% | min C{x['min']:.1f}%")
+
+                        # Telegram messages have a hard length limit. Send line-aware chunks.
+                        chunk = ""
+                        for line in output_lines:
+                            candidate = (chunk + "\n" + line).strip()
+                            if chunk and len(candidate) > 3500:
+                                tg_send(chat_id, chunk)
+                                chunk = line
+                            else:
+                                chunk = candidate
+                        if chunk:
+                            tg_send(chat_id, chunk)
                 elif text.startswith("/unban") or text.startswith("unban"):
                     parts = text.split()
                     if len(parts) != 2:
@@ -4675,7 +4691,7 @@ def bot_loop():
                         remaining_now = early_reject_remaining
                         configured_now = early_reject_configured
                     if len(parts) == 1:
-                        tg_send(chat_id, f"🛡️ <b>Warmup reject:</b> {configured_now} sinyal\nTersisa setelah /resetstats: {remaining_now}\nUbah: <code>/reject 5</code> atau matikan <code>/reject 0</code>")
+                        tg_send(chat_id, f"🛡️ <b>Warmup reject:</b> {configured_now} scan\nTersisa: {remaining_now} scan\nSetiap scan warmup: semua signal qualified ditolak, tanpa ban.\nUbah: <code>/reject 5</code> atau matikan <code>/reject 0</code>")
                     elif len(parts) == 2:
                         try:
                             val = int(float(parts[1]))
@@ -4683,11 +4699,11 @@ def bot_loop():
                             with early_reject_lock:
                                 early_reject_configured = val
                                 early_reject_remaining = val
-                            tg_send(chat_id, f"✅ Warmup reject diubah menjadi <b>{val} sinyal</b>. Counter aktif langsung di-reset ke {val}.")
+                            tg_send(chat_id, f"✅ Warmup reject diubah menjadi <b>{val} scan</b>. Counter aktif langsung di-reset ke {val} scan.")
                         except ValueError:
                             tg_send(chat_id, "❌ Format reject salah. Gunakan <code>/reject 5</code>.")
                     else:
-                        tg_send(chat_id, "❌ Format: <code>/reject</code> atau <code>/reject 5</code>")
+                        tg_send(chat_id, "❌ Format: <code>/reject</code> atau <code>/reject 5</code> (satuan scan)")
                 elif text in ("/koin","koin"):
                     with _last_scanned_lock:
                         coins = list(last_scanned_coins)
@@ -4770,6 +4786,14 @@ def bot_loop():
                 elif text in ("/trade","trade"):
                     with positions_lock:
                         pos_list = list(positions.items())
+                    # Safety-first display order: EMERGENCY, ACTIVE, then PENDING;
+                    # within each status, highest confidence first.
+                    status_rank = {"EMERGENCY": 0, "active": 1, "pending": 2}
+                    pos_list.sort(key=lambda item: (
+                        status_rank.get(str(item[1].get("status", "active")), 3),
+                        -float((item[1].get("signal") or {}).get("confidence", 0) or 0),
+                        str(item[0])
+                    ))
                     if not pos_list:
                         tg_send(chat_id,"ℹ️ Tidak ada posisi aktif.")
                     else:
