@@ -76,7 +76,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "V21"
+MAIN_ENGINE_VERSION = "machine_Learning_main_v1"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -228,6 +228,445 @@ trade_history_lock = threading.Lock()
 trade_history: list[dict] = []
 trade_sequence = 0
 research_run_id = datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
+
+
+# ==================== MACHINE LEARNING ====================
+ML_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", str(Path(__file__).resolve().parent / "machine_learning_state")))
+ML_STATE_FILE = ML_STATE_DIR / "full_learning_state.json"
+ML_EXPERIENCE_FILE = ML_STATE_DIR / "experience.jsonl"
+ML_LOCK = threading.RLock()
+FULL_MODE = False
+FULL_THREAD = None
+FULL_WAKE = threading.Event()
+FULL_STOP = threading.Event()
+FULL_MANUAL_THRESHOLD_SAVED = None
+FULL_TRAIN_INTERVAL = max(60, int(os.getenv("FULL_TRAIN_INTERVAL_SEC", "180")))
+FULL_MIN_TRAIN_SAMPLES = max(20, int(os.getenv("FULL_MIN_TRAIN_SAMPLES", "30")))
+FULL_MIN_VALIDATION_SAMPLES = max(5, int(os.getenv("FULL_MIN_VALIDATION_SAMPLES", "10")))
+FULL_PROMOTION_MIN_IMPROVEMENT = float(os.getenv("FULL_PROMOTION_MIN_IMPROVEMENT", "0.01"))
+FULL_ALLOWED_THRESHOLDS = list(range(35, 81))
+FULL_MIN_COVERAGE = 0.25
+ML_FEATURE_NAMES = [
+    "direction_confidence", "setup_quality", "entry_location_score", "rr",
+    "range_position", "rsi_timing_score", "direction_edge", "m15_trigger_count",
+    "poi_reacted", "selected_sweep", "m15_structure_alignment", "htf_alignment",
+    "macro_alignment", "m15_relative_volume", "fib_position", "atr_pct_proxy",
+    "entry_distance_atr", "risk_atr", "target_distance_atr", "data_quality",
+    "entry_ob", "entry_fvg", "entry_eq", "entry_sweep", "entry_breakout",
+    "entry_pullback", "htf_conflict", "m15_ranging",
+    "market_bull_breadth", "market_bear_breadth", "market_efficiency",
+    "market_relative_volume", "btc_1h", "btc_4h", "symbol_rs_1h", "symbol_rs_4h"
+]
+
+
+def _ml_default_state():
+    return {
+        "schema": "machine_Learning_v1",
+        "champion": None,
+        "previous_champion": None,
+        "last_training_at": None,
+        "last_training_samples": 0,
+        "last_training_result": None,
+        "drift": {"status": "UNKNOWN", "score": 0.0},
+        "learning_cycles": 0,
+        "promotion_count": 0,
+    }
+
+
+def _ml_load_state():
+    try:
+        ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if not ML_STATE_FILE.exists():
+            return _ml_default_state()
+        data = json.loads(ML_STATE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else _ml_default_state()
+    except Exception as e:
+        log.warning(f"[ML] state load gagal: {e}")
+        return _ml_default_state()
+
+
+ML_STATE = _ml_load_state()
+
+ML_EXPERIENCE_LOCK = threading.RLock()
+ML_EXPERIENCE = []
+
+
+def _ml_load_experience():
+    try:
+        ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if not ML_EXPERIENCE_FILE.exists():
+            return []
+        rows = []
+        with ML_EXPERIENCE_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        rows.append(obj)
+                except Exception:
+                    continue
+        return rows[-10000:]
+    except Exception as e:
+        log.warning(f"[ML] experience load gagal: {e}")
+        return []
+
+
+ML_EXPERIENCE = _ml_load_experience()
+
+
+def _ml_append_experience(record):
+    if not isinstance(record, dict) or not isinstance(record.get("learning_features"), dict):
+        return
+    sample = {
+        "trade_uid": record.get("trade_uid"),
+        "entry_time": record.get("entry_time"),
+        "exit_time": record.get("exit_time"),
+        "result": record.get("result"),
+        "final_r": record.get("final_r"),
+        "pnl_usd": record.get("pnl_usd"),
+        "confidence": record.get("confidence"),
+        "learning_features": record.get("learning_features"),
+        "ml_model_version": record.get("ml_model_version", "static"),
+    }
+    try:
+        with ML_EXPERIENCE_LOCK:
+            key = str(sample.get("trade_uid") or "")
+            if key and any(str(x.get("trade_uid") or "") == key for x in ML_EXPERIENCE[-200:]):
+                return
+            ML_EXPERIENCE.append(sample)
+            if len(ML_EXPERIENCE) > 10000:
+                del ML_EXPERIENCE[:-10000]
+            ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
+            with ML_EXPERIENCE_FILE.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(sample, ensure_ascii=False, allow_nan=False, default=str) + "\n")
+    except Exception as e:
+        log.warning(f"[ML] experience append gagal: {e}")
+
+
+
+def _ml_save_state():
+    try:
+        ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = ML_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(ML_STATE, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
+        os.replace(tmp, ML_STATE_FILE)
+    except Exception as e:
+        log.warning(f"[ML] state save gagal: {e}")
+
+
+def _strategy_set_ml_model(model):
+    setter = globals().get("set_learning_model")
+    if callable(setter):
+        try:
+            setter(model)
+        except Exception as e:
+            log.warning(f"[ML] gagal bind model ke strategy: {e}")
+
+
+def _ml_current_champion():
+    with ML_LOCK:
+        c = ML_STATE.get("champion")
+        return dict(c) if isinstance(c, dict) else None
+
+
+def _ml_sync_strategy():
+    _strategy_set_ml_model(_ml_current_champion())
+
+
+def _ml_feature_vector(record):
+    feats = record.get("learning_features")
+    if not isinstance(feats, dict):
+        return None
+    try:
+        return np.asarray([float(feats.get(k, 0.0) or 0.0) for k in ML_FEATURE_NAMES], dtype=float)
+    except Exception:
+        return None
+
+
+def _ml_collect_samples():
+    with trade_history_lock:
+        hist = [dict(x) for x in trade_history]
+    with ML_EXPERIENCE_LOCK:
+        persisted = [dict(x) for x in ML_EXPERIENCE]
+    combined = {}
+    for row in persisted + hist:
+        key = str(row.get("trade_uid") or f"{row.get('symbol','')}|{row.get('entry_time','')}|{row.get('exit_time','')}")
+        combined[key] = row
+    samples = []
+    for t in combined.values():
+        x = _ml_feature_vector(t)
+        if x is None:
+            continue
+        try:
+            fr = float(t.get("final_r"))
+        except (TypeError, ValueError):
+            fr = None
+        if fr is None:
+            try:
+                fr = float(t.get("pnl_usd", 0.0))
+            except Exception:
+                fr = 0.0
+        result = str(t.get("result") or "sl").lower()
+        y = 1.0 if fr > 0 and result not in {"strategy_error", "data_error"} else 0.0
+        expected = max(-3.0, min(3.0, fr))
+        try:
+            baseline_conf = float(t.get("confidence", 50.0) or 50.0) / 100.0
+        except (TypeError, ValueError):
+            baseline_conf = 0.5
+        samples.append((t.get("exit_time") or t.get("entry_time") or 0, x, y, expected, baseline_conf))
+    samples.sort(key=lambda r: float(r[0] or 0))
+    return samples
+
+def _ml_sigmoid(z):
+    z = np.clip(z, -35.0, 35.0)
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def _ml_fit(X, y, r_targets, reg=1.0, epochs=250, lr=0.03):
+    mean = np.mean(X, axis=0)
+    scale = np.std(X, axis=0)
+    scale[scale < 1e-8] = 1.0
+    Z = (X - mean) / scale
+    w = np.zeros(Z.shape[1], dtype=float)
+    b = 0.0
+    rw = np.zeros(Z.shape[1], dtype=float)
+    rb = float(np.mean(r_targets)) if len(r_targets) else 0.0
+    n = max(1, len(Z))
+    for _ in range(epochs):
+        p = _ml_sigmoid(Z @ w + b)
+        gw = (Z.T @ (p - y)) / n + (reg / n) * w
+        gb = float(np.mean(p - y))
+        w -= lr * gw
+        b -= lr * gb
+        pred_r = Z @ rw + rb
+        grw = (Z.T @ (pred_r - r_targets)) / n + (reg / n) * rw
+        grb = float(np.mean(pred_r - r_targets))
+        rw -= lr * grw
+        rb -= lr * grb
+    return {"mean": mean.tolist(), "scale": scale.tolist(), "w": w.tolist(), "b": b, "rw": rw.tolist(), "rb": rb}
+
+
+def _ml_predict_model(model, X):
+    mean = np.asarray(model["mean"], dtype=float)
+    scale = np.asarray(model["scale"], dtype=float)
+    w = np.asarray(model["w"], dtype=float)
+    b = float(model.get("b", 0.0))
+    Z = (X - mean) / np.maximum(scale, 1e-8)
+    p = _ml_sigmoid(Z @ w + b)
+    rw = np.asarray(model.get("rw", np.zeros_like(w)), dtype=float)
+    rb = float(model.get("rb", 0.0))
+    er = Z @ rw + rb
+    return p, er
+
+
+def _ml_score_from_expected_r(expected_r):
+    return 50.0 + 25.0 * np.tanh(np.asarray(expected_r, dtype=float))
+
+
+def _ml_eval_predictions(p, rs, threshold):
+    mask = p * 100.0 >= threshold
+    if int(mask.sum()) < 1:
+        return None
+    actual = rs[mask]
+    avg_r = float(np.mean(actual))
+    equity = 0.0
+    peak = 0.0
+    dd = 0.0
+    for r in actual:
+        equity += float(r)
+        peak = max(peak, equity)
+        dd = max(dd, peak - equity)
+    win = float(np.mean(actual > 0)) if len(actual) else 0.0
+    calibration = 1.0 - abs(float(np.mean(p[mask])) - win)
+    coverage = float(mask.sum()) / max(1, len(rs))
+    required = max(5, int(np.ceil(len(rs) * FULL_MIN_COVERAGE)))
+    if int(mask.sum()) < required:
+        return None
+    objective = avg_r - 0.12 * dd + 0.18 * calibration + 0.05 * coverage
+    return {"objective": float(objective), "threshold": int(threshold), "n": int(mask.sum()),
+            "coverage": coverage, "avg_r": avg_r, "win_rate": win,
+            "max_dd_r": dd, "calibration": calibration}
+
+
+def _ml_eval_candidate(model, samples):
+    if not samples:
+        return {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
+    X = np.vstack([s[1] for s in samples])
+    rs = np.asarray([s[3] for s in samples], dtype=float)
+    _p, er = _ml_predict_model(model, X)
+    p = np.clip(_ml_score_from_expected_r(er) / 100.0, 0.0, 1.0)
+    best = None
+    for threshold in FULL_ALLOWED_THRESHOLDS:
+        candidate = _ml_eval_predictions(p, rs, threshold)
+        if candidate is not None and (best is None or candidate["objective"] > best["objective"]):
+            best = candidate
+    return best or {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
+
+
+def _ml_eval_baseline(samples):
+    if not samples:
+        return {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
+    p = np.asarray([s[4] for s in samples], dtype=float)
+    rs = np.asarray([s[3] for s in samples], dtype=float)
+    best = None
+    for threshold in FULL_ALLOWED_THRESHOLDS:
+        candidate = _ml_eval_predictions(p, rs, threshold)
+        if candidate is not None and (best is None or candidate["objective"] > best["objective"]):
+            best = candidate
+    return best or {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
+
+def _ml_train_once(force=False):
+    global ML_STATE
+    samples = _ml_collect_samples()
+    now = datetime.now(WIB).isoformat()
+    if len(samples) < FULL_MIN_TRAIN_SAMPLES:
+        with ML_LOCK:
+            ML_STATE["last_training_at"] = now
+            ML_STATE["last_training_samples"] = len(samples)
+            ML_STATE["last_training_result"] = {"status": "INSUFFICIENT_DATA", "samples": len(samples)}
+            _ml_save_state()
+        return False
+
+    split = int(len(samples) * 0.70)
+    if len(samples) - split < FULL_MIN_VALIDATION_SAMPLES:
+        split = len(samples) - FULL_MIN_VALIDATION_SAMPLES
+    train = samples[:split]
+    valid = samples[split:]
+    Xtr = np.vstack([s[1] for s in train])
+    ytr = np.asarray([s[2] for s in train], dtype=float)
+    rtr = np.asarray([s[3] for s in train], dtype=float)
+
+    best = None
+    for reg in (0.1, 0.3, 1.0, 3.0, 10.0):
+        params = _ml_fit(Xtr, ytr, rtr, reg=reg)
+        evaluation = _ml_eval_candidate(params, valid)
+        evaluation["reg"] = reg
+        if best is None or evaluation["objective"] > best["evaluation"]["objective"]:
+            best = {"params": params, "evaluation": evaluation}
+    if best is None:
+        return False
+
+    candidate_score = float(best["evaluation"].get("objective", -999.0))
+    baseline_eval = _ml_eval_baseline(valid)
+    champion = _ml_current_champion()
+    champion_eval = {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
+    if champion:
+        try:
+            champion_eval = _ml_eval_candidate(champion, valid)
+        except Exception as e:
+            log.warning(f"[ML] champion evaluation gagal: {e}")
+
+    best_reference = max(float(baseline_eval.get("objective", -999.0)), float(champion_eval.get("objective", -999.0)))
+    promote = candidate_score >= best_reference + FULL_PROMOTION_MIN_IMPROVEMENT
+    if champion is None and candidate_score < baseline_eval.get("objective", -999.0) + FULL_PROMOTION_MIN_IMPROVEMENT:
+        promote = False
+
+    candidate = dict(best["params"])
+    candidate.update({
+        "active": bool(promote),
+        "model_version": f"ML-{int(time.time())}",
+        "sample_count": len(samples),
+        "train_samples": len(train),
+        "validation_samples": len(valid),
+        "validation_objective": candidate_score,
+        "validation": best["evaluation"],
+        "confidence_min": int(best["evaluation"].get("threshold", 60)),
+        "live_weight": 0.35,
+        "baseline_validation": baseline_eval,
+        "champion_validation": champion_eval,
+    })
+
+    with ML_LOCK:
+        ML_STATE["learning_cycles"] = int(ML_STATE.get("learning_cycles", 0)) + 1
+        ML_STATE["last_training_at"] = now
+        ML_STATE["last_training_samples"] = len(samples)
+        ML_STATE["last_training_result"] = {
+            "status": "PROMOTED" if promote else "CHALLENGER",
+            "candidate": best["evaluation"],
+            "baseline": baseline_eval,
+            "champion": champion_eval,
+        }
+        if promote:
+            ML_STATE["previous_champion"] = ML_STATE.get("champion")
+            ML_STATE["champion"] = candidate
+            ML_STATE["promotion_count"] = int(ML_STATE.get("promotion_count", 0)) + 1
+        ML_STATE["last_challenger"] = candidate
+        _ml_save_state()
+
+    if promote:
+        _ml_sync_strategy()
+        if FULL_MODE:
+            STRATEGY_CONFIDENCE_THRESHOLD = int(candidate["confidence_min"])
+        log.info(f"[ML] Champion promoted {candidate['model_version']} threshold={candidate['confidence_min']} objective={candidate_score:.4f}")
+    else:
+        log.info(f"[ML] Challenger rejected/retained objective={candidate_score:.4f}; baseline={float(baseline_eval.get('objective',-999)):.4f}; champion={float(champion_eval.get('objective',-999)):.4f}")
+    return promote
+
+def _ml_learning_loop():
+    while not FULL_STOP.is_set():
+        try:
+            if FULL_MODE:
+                _ml_train_once()
+        except Exception as e:
+            log.exception(f"[ML] learning cycle gagal: {e}")
+        FULL_WAKE.wait(FULL_TRAIN_INTERVAL)
+        FULL_WAKE.clear()
+
+
+def _full_status_text():
+    champion = _ml_current_champion()
+    with ML_LOCK:
+        cycles = int(ML_STATE.get("learning_cycles", 0))
+        promotions = int(ML_STATE.get("promotion_count", 0))
+        last = ML_STATE.get("last_training_result") or {}
+        last_samples = int(ML_STATE.get("last_training_samples", 0) or 0)
+    if champion:
+        return (f"🧠 <b>FULL LEARNING</b>: {'ON' if FULL_MODE else 'OFF'}\n"
+                f"Champion: <code>{html.escape(str(champion.get('model_version')))}</code>\n"
+                f"Samples: <b>{int(champion.get('sample_count',0) or 0)}</b> | OOS: <b>{int(champion.get('validation_samples',0) or 0)}</b>\n"
+                f"Confidence min ML: <b>{int(champion.get('confidence_min',60) or 60)}%</b>\n"
+                f"Objective OOS: <b>{float(champion.get('validation_objective',0) or 0):.4f}</b>\n"
+                f"Learning cycles: <b>{cycles}</b> | Promotions: <b>{promotions}</b>\n"
+                f"Last samples: <b>{last_samples}</b> | Last status: <b>{html.escape(str(last.get('status','—')))}</b>")
+    return (f"🧠 <b>FULL LEARNING</b>: {'ON' if FULL_MODE else 'OFF'}\n"
+            f"Champion: <b>Belum ada</b>\nLearning cycles: <b>{cycles}</b> | Samples: <b>{last_samples}</b>\n"
+            f"Minimum training samples: <b>{FULL_MIN_TRAIN_SAMPLES}</b>")
+
+
+def _full_on():
+    global FULL_MODE, FULL_THREAD, FULL_MANUAL_THRESHOLD_SAVED
+    with ML_LOCK:
+        if not FULL_MODE:
+            FULL_MANUAL_THRESHOLD_SAVED = int(STRATEGY_CONFIDENCE_THRESHOLD)
+        FULL_MODE = True
+        FULL_STOP.clear()
+        FULL_WAKE.set()
+    _ml_sync_strategy()
+    if FULL_THREAD is None or not FULL_THREAD.is_alive():
+        FULL_THREAD = threading.Thread(target=_ml_learning_loop, name="full-learning", daemon=True)
+        FULL_THREAD.start()
+    _ml_train_once(force=True)
+    return _full_status_text()
+
+
+def _full_off():
+    global FULL_MODE, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED
+    with ML_LOCK:
+        FULL_MODE = False
+        FULL_WAKE.clear()
+        if FULL_MANUAL_THRESHOLD_SAVED is not None:
+            STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
+            FULL_MANUAL_THRESHOLD_SAVED = None
+    return _full_status_text()
+
+
+def _ml_record_signal_metadata(signal):
+    if not isinstance(signal, dict):
+        return
+    signal.setdefault("ml_schema", "machine_Learning_v1")
+    signal.setdefault("ml_model_version", signal.get("learning_model_version", "static"))
+
+_ml_sync_strategy()
 
 # Research warmup: beberapa kandidat sinyal pertama setelah /resetstats sengaja
 # ditolak tanpa dianggap trade gagal dan tanpa mengubah ban state.
@@ -2649,16 +3088,29 @@ def run_scan_once(chat_id):
             after=_scan_cache_stats(); cache_misses += max(0,after[0]-before[0])
             r=full_analyze(h1,m15,d1,symbol=sym)
             if isinstance(r,dict):
+                _ml_record_signal_metadata(r)
                 analyzed_symbols+=1; conf=float(r.get("confidence",0) or 0); all_scan_confidences.append(conf)
                 row=_market_feature_row(sym,h1,m15,r)
                 row.update({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter})
+                lf = r.setdefault("learning_features", {})
+                lf.update({
+                    "market_bull_breadth": float(row.get("bullish_breadth_pct") or 0.0) / 100.0,
+                    "market_bear_breadth": float(row.get("bearish_breadth_pct") or 0.0) / 100.0,
+                    "market_efficiency": float(row.get("efficiency_4h") or 0.0),
+                    "market_relative_volume": float(row.get("relative_volume") or 0.0),
+                    "btc_1h": float(row.get("price_1h_pct") or 0.0) if sym == "BTCUSDT" else 0.0,
+                    "btc_4h": float(row.get("price_4h_pct") or 0.0) if sym == "BTCUSDT" else 0.0,
+                    "symbol_rs_1h": float(row.get("relative_strength_1h_pct") or 0.0) if row.get("relative_strength_1h_pct") is not None else 0.0,
+                    "symbol_rs_4h": float(row.get("relative_strength_4h_pct") or 0.0) if row.get("relative_strength_4h_pct") is not None else 0.0,
+                })
                 market_rows.append(row)
-                cutoff=float(STRATEGY_CONFIDENCE_THRESHOLD)/2.0
+                active_threshold = int((_ml_current_champion() or {}).get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD)) if FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD
+                cutoff=float(active_threshold)/2.0
                 if conf<=cutoff:
                     low_conf_count+=1; _record_low_confidence_event(sym,conf,cutoff,r.get("decision"),r.get("entry_label"))
                     _ban_coin(sym,reason=f"low confidence {conf:.1f} <= {cutoff:.1f}",duration=BAN_DURATION_SCANS,kind="low_confidence",confidence=conf)
-                if conf<STRATEGY_CONFIDENCE_THRESHOLD: below_threshold_count+=1
-                if conf>=STRATEGY_CONFIDENCE_THRESHOLD:
+                if conf<active_threshold: below_threshold_count+=1
+                if conf>=active_threshold:
                     r["market_context"]={k:v for k,v in row.items() if k not in {"scan_time","run_id","scan_counter"}}
                     results.append(r); log.info(f"[SIGNAL] {sym} {r.get('decision')} confidence={conf:.1f}")
                 else:
@@ -2677,6 +3129,16 @@ def run_scan_once(chat_id):
         row["relative_strength_4h_pct"]=(row.get("price_4h_pct")-btc_r4) if btc_r4 is not None and row.get("price_4h_pct") is not None else None
         if row.get("symbol")=="BTCUSDT":
             row["relative_strength_1h_pct"]=0.0; row["relative_strength_4h_pct"]=0.0
+        for result in results:
+            if result.get("symbol") == row.get("symbol"):
+                lf = result.setdefault("learning_features", {})
+                lf.update({
+                    "market_bull_breadth": lf.get("market_bull_breadth", 0.0),
+                    "btc_1h": float(btc_r1 or 0.0),
+                    "btc_4h": float(btc_r4 or 0.0),
+                    "symbol_rs_1h": float(row.get("relative_strength_1h_pct") or 0.0),
+                    "symbol_rs_4h": float(row.get("relative_strength_4h_pct") or 0.0),
+                })
     _record_market_context(market_rows)
     mc=_summarize_market_context(market_rows)
 
@@ -2710,12 +3172,13 @@ def run_scan_once(chat_id):
     avg_txt=f"{avg_conf:.1f}%" if avg_conf is not None else "—"
     breadth_txt=(f"📈 Breadth BUY <b>{mc['bullish_breadth_pct']:.1f}%</b> | SELL <b>{mc['bearish_breadth_pct']:.1f}%</b> | Regime: <b>{mc['market_regime']}</b>" if mc.get('bullish_breadth_pct') is not None else "📈 Market context: <b>insufficient data</b>")
     rs_txt=(f"\n₿ BTC 1h: <b>{mc['btc_price_1h_pct']:+.2f}%</b> | BTC 4h: <b>{mc['btc_price_4h_pct']:+.2f}%</b>" if mc.get('btc_price_1h_pct') is not None else "")
-    scan_meta=f"\n\n📊 Rata-rata confidence scan: <b>{avg_txt}</b> ({analyzed_symbols}/{len(symbols)} dianalisis)\n{breadth_txt}{rs_txt}"
+    active_threshold = int((_ml_current_champion() or {}).get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD)) if FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD
+    scan_meta=f"\n\n📊 Rata-rata confidence scan: <b>{avg_txt}</b> ({analyzed_symbols}/{len(symbols)} dianalisis)\nThreshold aktif: <b>{active_threshold}%</b>\n{breadth_txt}{rs_txt}"
     if warmup_active: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> signal qualified dari scan ini ditolak"
     if not results:
-        tg_send(chat_id,f"⚠️ Tidak ada setup dengan confidence ≥ {STRATEGY_CONFIDENCE_THRESHOLD}%."+scan_meta); return []
+        tg_send(chat_id,f"⚠️ Tidak ada setup dengan confidence ≥ {active_threshold}%."+scan_meta); return []
     summary="\n".join(f"• {r.get('symbol','?')} {r.get('decision','?')} — {float(r.get('confidence',0) or 0):.0f}%" for r in results)
-    tg_send(chat_id,f"✅ <b>{len(results)} sinyal lolos</b> (threshold {STRATEGY_CONFIDENCE_THRESHOLD}%)\n\n{summary}{scan_meta}")
+    tg_send(chat_id,f"✅ <b>{len(results)} sinyal lolos</b> (threshold {active_threshold}%)\n\n{summary}{scan_meta}")
     return results
 
 
@@ -2798,7 +3261,7 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
                  time_in_trade_sec=None, time_to_1r_sec=None, time_to_2r_sec=None,
                  execution_mode=None, balance_anchor=None, trade_uid=None,
                  trail_update_count=0, trail_applied_count=0, trail_failed_count=0, trail_queued_count=0,
-                 first_trail_r=None, last_trail_r=None, max_protected_r=None):
+                 first_trail_r=None, last_trail_r=None, max_protected_r=None, learning_features=None, ml_model_version=None):
     """
     Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
     lama untuk detail model close_price). Tambahan: catat sym/decision/
@@ -2893,10 +3356,13 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
             "trail_update_count": int(trail_update_count or 0), "trail_applied_count": int(trail_applied_count or 0),
             "trail_failed_count": int(trail_failed_count or 0), "trail_queued_count": int(trail_queued_count or 0),
             "first_trail_r": first_trail_r, "last_trail_r": last_trail_r, "max_protected_r": max_protected_r,
+            "learning_features": dict(learning_features) if isinstance(learning_features, dict) else None,
+            "ml_model_version": ml_model_version or "static",
         }
         # Full ledger: every closed trade in this research run.
         with trade_history_lock:
             trade_history.append(dict(trade_record))
+        _ml_append_experience(trade_record)
         # Backward-compatible 20-trade view for /backtest and existing UI.
         stats["pnl_history"].append(dict(trade_record))
 
@@ -3044,6 +3510,8 @@ def _trade_analysis_rows(hist):
             "execution_mode": t.get("execution_mode", ""), "balance_anchor": t.get("balance_anchor", ""), "trade_uid": t.get("trade_uid", ""),
             "trail_update_count": t.get("trail_update_count",0), "trail_applied_count": t.get("trail_applied_count",0), "trail_failed_count": t.get("trail_failed_count",0), "trail_queued_count": t.get("trail_queued_count",0),
             "first_trail_r": t.get("first_trail_r", ""), "last_trail_r": t.get("last_trail_r", ""), "max_protected_r": t.get("max_protected_r", ""),
+            "ml_model_version": t.get("ml_model_version", "static"),
+            "learning_features": json.dumps(t.get("learning_features"), ensure_ascii=False, sort_keys=True) if t.get("learning_features") else "",
             "entry_time": t.get("entry_time", ""), "exit_time": t.get("exit_time", ""),
         })
     return rows
@@ -3146,7 +3614,7 @@ def _write_analyze_csv(rows):
         "rr", "final_r", "confidence", "entry_label", "rsi", "struct_h1", "d1_bias", "pct", "pnl_usd",
         "balance_after", "balance_anchor", "execution_mode", "mfe_pct", "mae_pct", "mfe_r", "mae_r", "time_in_trade_sec",
         "time_to_1r_sec", "time_to_2r_sec", "trail_update_count", "trail_applied_count", "trail_failed_count", "trail_queued_count",
-        "first_trail_r", "last_trail_r", "max_protected_r", "trade_uid", "entry_time", "exit_time",
+        "first_trail_r", "last_trail_r", "max_protected_r", "trade_uid", "ml_model_version", "learning_features", "entry_time", "exit_time",
     ]
     pd.DataFrame(rows, columns=cols).to_csv(path, index=False)
     return path
@@ -3165,35 +3633,72 @@ def _low_conf_snapshot():
 
 
 def _write_research_support_files(summary):
-    run_id=summary.get("run_id",research_run_id); events=_trail_events_snapshot(run_id); scans=_scan_quality_snapshot(run_id); lows=_low_conf_snapshot()
-    trail_cols=["event_id","trade_uid","run_id","event_time","symbol","decision","entry","initial_sl","old_sl","new_sl","tp","current_price","current_r","mfe_r","mae_r","giveback_r","giveback_ratio","protected_r","atr","sl_distance_atr","weakness_score","state","trade_phase","trail_source","reasons","relative_volume","candidate_type","status","error_code","error_message","time_since_entry_sec","time_since_previous_trail_sec","distance_to_tp_r"]
-    pd.DataFrame(events,columns=trail_cols).to_csv('/tmp/trail_events.csv',index=False)
-    groups={}
+    """Bundle all research support datasets into one lossless JSON artifact."""
+    run_id = summary.get("run_id", research_run_id)
+    events = _trail_events_snapshot(run_id)
+    scans = _scan_quality_snapshot(run_id)
+    lows = _low_conf_snapshot()
+    market_rows = _market_context_snapshot(run_id)
+
+    trail_cols = ["event_id","trade_uid","run_id","event_time","symbol","decision","entry","initial_sl","old_sl","new_sl","tp","current_price","current_r","mfe_r","mae_r","giveback_r","giveback_ratio","protected_r","atr","sl_distance_atr","weakness_score","state","trade_phase","trail_source","reasons","relative_volume","candidate_type","status","error_code","error_message","time_since_entry_sec","time_since_previous_trail_sec","distance_to_tp_r"]
+    scan_cols = ["scan_time","run_id","scan_counter","symbols_requested","symbols_analyzed","failed_symbols","avg_confidence","min_confidence","max_confidence","low_confidence_count","below_threshold_count","qualified_count","early_rejected_count","cache_entries","cache_fresh","market_regime","bullish_breadth_pct","bearish_breadth_pct","neutral_breadth_pct","breadth_score","median_price_1h_pct","median_price_4h_pct","median_efficiency_4h","median_range_expansion_ratio","avg_relative_volume","btc_price_1h_pct","btc_price_4h_pct"]
+    low_cols = ["event_time","run_id","scan_counter","symbol","confidence","confidence_min","cutoff","decision","entry_label"]
+    market_cols = ["scan_time","run_id","scan_counter","symbol","decision","confidence","entry_label","struct_h1","d1_bias","price_1h_pct","price_4h_pct","efficiency_4h","atr_pct","relative_volume","range_expansion_ratio","volatility_ratio","chart_regime","directional_bias","relative_strength_1h_pct","relative_strength_4h_pct"]
+
+    groups = {}
     for e in events:
-        uid=e.get('trade_uid') or f"{e.get('symbol','?')}|{e.get('entry','')}"
-        g=groups.setdefault(uid,{"trade_uid":uid,"symbol":e.get('symbol'),"trail_updates":0,"trail_applied":0,"trail_failed":0,"trail_queued":0,"first_trail_r":None,"max_protected_r":None,"max_mfe_at_trail":None,"max_giveback_ratio":None,"final_new_sl":None,"_d":[]})
-        g['trail_updates']+=1; st=str(e.get('status') or ''); g['trail_applied']+=int(st=='APPLIED'); g['trail_failed']+=int(st=='FAILED'); g['trail_queued']+=int(st=='QUEUED')
-        if g['first_trail_r'] is None and e.get('current_r') not in (None,''): g['first_trail_r']=float(e['current_r'])
-        if e.get('protected_r') not in (None,''): g['max_protected_r']=float(e['protected_r']) if g['max_protected_r'] is None else max(g['max_protected_r'],float(e['protected_r']))
-        if e.get('mfe_r') not in (None,''): g['max_mfe_at_trail']=float(e['mfe_r']) if g['max_mfe_at_trail'] is None else max(g['max_mfe_at_trail'],float(e['mfe_r']))
-        if e.get('giveback_ratio') not in (None,''): g['max_giveback_ratio']=float(e['giveback_ratio']) if g['max_giveback_ratio'] is None else max(g['max_giveback_ratio'],float(e['giveback_ratio']))
-        if e.get('sl_distance_atr') not in (None,''): g['_d'].append(float(e['sl_distance_atr']))
-        g['final_new_sl']=e.get('new_sl')
-    out=[]
+        uid = e.get("trade_uid") or f"{e.get('symbol','?')}|{e.get('entry','')}"
+        g = groups.setdefault(uid, {
+            "trade_uid": uid, "symbol": e.get("symbol"), "trail_updates": 0,
+            "trail_applied": 0, "trail_failed": 0, "trail_queued": 0,
+            "first_trail_r": None, "max_protected_r": None,
+            "max_mfe_at_trail": None, "max_giveback_ratio": None,
+            "final_new_sl": None, "_dist": []
+        })
+        g["trail_updates"] += 1
+        status = str(e.get("status") or "")
+        g["trail_applied"] += int(status == "APPLIED")
+        g["trail_failed"] += int(status == "FAILED")
+        g["trail_queued"] += int(status == "QUEUED")
+        if g["first_trail_r"] is None and e.get("current_r") not in (None, ""):
+            g["first_trail_r"] = float(e["current_r"])
+        if e.get("protected_r") not in (None, ""):
+            v = float(e["protected_r"])
+            g["max_protected_r"] = v if g["max_protected_r"] is None else max(g["max_protected_r"], v)
+        if e.get("mfe_r") not in (None, ""):
+            v = float(e["mfe_r"])
+            g["max_mfe_at_trail"] = v if g["max_mfe_at_trail"] is None else max(g["max_mfe_at_trail"], v)
+        if e.get("giveback_ratio") not in (None, ""):
+            v = float(e["giveback_ratio"])
+            g["max_giveback_ratio"] = v if g["max_giveback_ratio"] is None else max(g["max_giveback_ratio"], v)
+        if e.get("sl_distance_atr") not in (None, ""):
+            g["_dist"].append(float(e["sl_distance_atr"]))
+        g["final_new_sl"] = e.get("new_sl")
+
+    trail_summary = []
     for g in groups.values():
-        ds=g.pop('_d',[])
-        g['avg_sl_distance_atr']=(sum(ds)/len(ds)) if ds else None
-        out.append(g)
-    trail_summary_cols=["trade_uid","symbol","trail_updates","trail_applied","trail_failed","trail_queued","first_trail_r","max_protected_r","max_mfe_at_trail","max_giveback_ratio","avg_sl_distance_atr","final_new_sl"]
-    pd.DataFrame(out,columns=trail_summary_cols).to_csv('/tmp/trail_summary.csv',index=False)
-    scan_cols=["scan_time","run_id","scan_counter","symbols_requested","symbols_analyzed","failed_symbols","avg_confidence","min_confidence","max_confidence","low_confidence_count","below_threshold_count","qualified_count","early_rejected_count","cache_entries","cache_fresh","market_regime","bullish_breadth_pct","bearish_breadth_pct","neutral_breadth_pct","breadth_score","median_price_1h_pct","median_price_4h_pct","median_efficiency_4h","median_range_expansion_ratio","avg_relative_volume","btc_price_1h_pct","btc_price_4h_pct"]
-    pd.DataFrame(scans,columns=scan_cols).to_csv('/tmp/scan_quality.csv',index=False)
-    low_cols=["event_time","run_id","scan_counter","symbol","confidence","confidence_min","cutoff","decision","entry_label"]
-    pd.DataFrame(lows,columns=low_cols).to_csv('/tmp/low_confidence_bans.csv',index=False)
-    market_rows=_market_context_snapshot(run_id)
-    market_cols=["scan_time","run_id","scan_counter","symbol","decision","confidence","entry_label","struct_h1","d1_bias","price_1h_pct","price_4h_pct","efficiency_4h","atr_pct","relative_volume","range_expansion_ratio","volatility_ratio","chart_regime","directional_bias","relative_strength_1h_pct","relative_strength_4h_pct"]
-    pd.DataFrame(market_rows,columns=market_cols).to_csv('/tmp/market_context.csv',index=False)
-    return ['/tmp/trail_events.csv','/tmp/trail_summary.csv','/tmp/scan_quality.csv','/tmp/low_confidence_bans.csv','/tmp/market_context.csv']
+        ds = g.pop("_dist", [])
+        g["avg_sl_distance_atr"] = (sum(ds) / len(ds)) if ds else None
+        trail_summary.append(g)
+
+    payload = {
+        "schema_version": "analyze_research_bundle_v1",
+        "generated_at": datetime.now(WIB).isoformat(),
+        "run_id": run_id,
+        "description": "Lossless bundle of the five research-support datasets formerly emitted as separate CSV files.",
+        "trail_events": {"columns": trail_cols, "rows": events},
+        "trail_summary": {"columns": ["trade_uid","symbol","trail_updates","trail_applied","trail_failed","trail_queued","first_trail_r","max_protected_r","max_mfe_at_trail","max_giveback_ratio","avg_sl_distance_atr","final_new_sl"], "rows": trail_summary},
+        "scan_quality": {"columns": scan_cols, "rows": scans},
+        "low_confidence_bans": {"columns": low_cols, "rows": lows},
+        "market_context": {"columns": market_cols, "rows": market_rows},
+        "machine_learning": _full_status_text(),
+        "machine_learning_state": _ml_current_champion(),
+        "machine_learning_experience_count": len(ML_EXPERIENCE),
+    }
+
+    path = "/tmp/analyze_research_bundle.json"
+    Path(path).write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False, default=str), encoding="utf-8")
+    return path
 
 def _write_analyze_report(rows, summary, hist):
     """Write the report from the SAME snapshot used to calculate summary."""
@@ -3377,7 +3882,9 @@ def close_position(sym, result, close_price=None):
             execution_mode=pos.get("execution_mode"), balance_anchor=(real_balance_snapshot if str(pos.get("execution_mode") or "").upper()=="REAL" else STARTING_BALANCE),
             trade_uid=pos.get("trade_uid"), trail_update_count=pos.get("trail_update_count",0), trail_applied_count=pos.get("trail_applied_count",0),
             trail_failed_count=pos.get("trail_failed_count",0), trail_queued_count=pos.get("trail_queued_count",0), first_trail_r=pos.get("first_trail_r"),
-            last_trail_r=pos.get("last_trail_r"), max_protected_r=(pos.get("max_protected_r") if pos.get("max_protected_r",-999)>-998 else None)
+            last_trail_r=pos.get("last_trail_r"), max_protected_r=(pos.get("max_protected_r") if pos.get("max_protected_r",-999)>-998 else None),
+            learning_features=(pos.get("signal") or {}).get("learning_features"),
+            ml_model_version=(pos.get("signal") or {}).get("learning_model_version", "static")
         )
     except Exception as e:
         stats_error = e
@@ -4447,6 +4954,20 @@ def bot_loop():
                 # ============================================================
                 # TAMBAHAN BARU (START) — Handler /analyze
                 # ============================================================
+                elif text in ("/full on", "full on"):
+                    try:
+                        tg_send(chat_id, _full_on())
+                    except Exception as e:
+                        log.exception(f"[full] on gagal: {e}")
+                        tg_send(chat_id, f"❌ FULL gagal diaktifkan: <code>{html.escape(str(e)[:300])}</code>")
+                elif text in ("/full off", "full off"):
+                    try:
+                        tg_send(chat_id, _full_off())
+                    except Exception as e:
+                        log.exception(f"[full] off gagal: {e}")
+                        tg_send(chat_id, f"❌ FULL gagal dimatikan: <code>{html.escape(str(e)[:300])}</code>")
+                elif text in ("/full", "full"):
+                    tg_send(chat_id, _full_status_text())
                 elif text in ("/analyze","analyze"):
                     # Research analysis dari FULL CLOSED-TRADE LEDGER; TIDAK scan Binance.
                     def _run_analyze(cid):
@@ -4457,7 +4978,7 @@ def bot_loop():
                                 f"🔎 <b>Mulai /analyze</b>\n"
                                 f"Menganalisis <b>{trade_count}</b> closed trade yang tercatat sejak /resetstats terakhir.\n"
                                 f"Tidak melakukan scan market baru.\n"
-                                f"Dibuat: report Markdown + data CSV.")
+                                f"Dibuat: 3 file research terstruktur.")
                             rows, summary, hist = _analyze_snapshot()
                             report_path = _write_analyze_report(rows, summary, hist)
                             csv_path = _write_analyze_csv(rows)
@@ -4468,14 +4989,10 @@ def bot_loop():
                                 f"Trail events: <b>{len(_trail_events_snapshot(summary.get('run_id', research_run_id)))}</b>\n"
                                 f"Low-confidence history: <b>{len(_low_conf_snapshot())}</b>\n"
                                 f"Run: <code>{summary.get('run_id', research_run_id)}</code>\n\n"
-                                f"Mengirim <b>7 file research</b>...")
-                            tg_send_document(cid, report_path, caption="📊 analyze_report.md")
-                            tg_send_document(cid, csv_path, caption="📋 analyze_data.csv")
-                            tg_send_document(cid, support_paths[0], caption="🔒 trail_events.csv")
-                            tg_send_document(cid, support_paths[1], caption="📈 trail_summary.csv")
-                            tg_send_document(cid, support_paths[2], caption="🔍 scan_quality.csv")
-                            tg_send_document(cid, support_paths[3], caption="🧠 low_confidence_bans.csv")
-                            tg_send_document(cid, support_paths[4], caption="🌐 market_context.csv")
+                                f"Mengirim <b>3 file research</b> (7 dataset digabung losslessly)...")
+                            tg_send_document(cid, report_path, caption="📊 analyze_report.md — ringkasan analisis")
+                            tg_send_document(cid, csv_path, caption="📋 analyze_data.csv — seluruh closed trade")
+                            tg_send_document(cid, support_paths, caption="🧠 analyze_research_bundle.json — 5 dataset research: trail events, trail summary, scan quality, low-confidence bans, market context")
                         except Exception as e:
                             log.error(f"[analyze] Error: {e}", exc_info=True)
                             tg_send(cid, f"❌ Error saat /analyze:\n<code>{str(e)[:300]}</code>")
@@ -4551,6 +5068,7 @@ def bot_loop():
                            del sys.modules["strategy_logic"]
 
                        import strategy_logic as sl
+                       _strategy_set_ml_model(_ml_current_champion())
 
                        # --- SENTINEL untuk membedakan "tidak ada" vs None ---
                        _SL_SENTINEL = object()
