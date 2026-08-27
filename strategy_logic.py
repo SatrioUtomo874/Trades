@@ -16,8 +16,8 @@ TRAIL_R_LADDER = []
 STRUCT_TRAIL_LB = 3
 STRUCT_TRAIL_BUF_PCT = 0.0025
 STRUCT_TRAIL_LOOKBACK = 60
-TRAIL_ENGINE_VERSION = "16.0-context-thesis-path-brain"
-CONFIDENCE_MODEL_VERSION = "16.0-monotonic-quality-v2"
+TRAIL_ENGINE_VERSION = "17.0-live-safe-invalidation-path-brain"
+CONFIDENCE_MODEL_VERSION = "17.0-data-path-calibrated-v1"
 
 MAIN_ENTRY_MAX_ATR = 1.60
 MIN_DISPLACEMENT_ATR = 0.30
@@ -38,19 +38,32 @@ TRAIL_MFE_DEEP = 2.50
 TRAIL_GIVEBACK_WARN = 0.30
 TRAIL_GIVEBACK_STRONG = 0.50
 TRAIL_GIVEBACK_CRITICAL = 0.70
-TRAIL_LOCK_WARN_R = 0.08
-TRAIL_LOCK_STRONG_R = 0.30
-TRAIL_LOCK_CRITICAL_R = 0.60
+TRAIL_LOCK_WARN_R = 0.05
+TRAIL_LOCK_STRONG_R = 0.20
+TRAIL_LOCK_CRITICAL_R = 0.45
 TRAIL_MIN_UPDATE_R = 0.05
 TRAIL_MAX_CHURN = 5
 TRAIL_STRUCT_BUFFER_ATR = 0.34
-TRAIL_RETRACE_BUFFER_ATR = 0.24
-TRAIL_MIN_MARKET_GAP_ATR = 0.36
+TRAIL_RETRACE_BUFFER_ATR = 0.30
+TRAIL_MIN_MARKET_GAP_ATR = 0.45
 TRAIL_REVERSAL_BODY_ATR = 0.85
 TRAIL_COUNTER_BODY_ATR = 0.55
 TRAIL_VOLUME_EXHAUSTION = 0.72
 TRAIL_VOLUME_COUNTER = 1.20
 TRAIL_PEAK_LOOKBACK = 48
+
+# V17 research/path intelligence. History is soft evidence only.
+HISTORY_MIN_MATCH = 6
+HISTORY_MFE_GOOD_R = 1.00
+HISTORY_MFE_BAD_R = 0.30
+HISTORY_GIVEBACK_BAD = 0.70
+TARGET_HIST_MFE_PREFERRED = 0.65
+TARGET_HIST_MFE_STRONG = 0.80
+SL_BUFFER_ATR = 0.22
+SL_MIN_MARKET_GAP_ATR = 0.12
+TRAIL_REVALIDATE_GAP_ATR = 0.45
+TRAIL_DEEP_GIVEBACK_R = 0.70
+TRAIL_REVERSAL_CONFIRM_MIN = 3
 
 
 def _num(v, default=None):
@@ -433,28 +446,66 @@ def _poi_quality(zone, htf_overlap, displacement, sweep, pullback):
 
 
 def _geometry(m15, h1, direction, entry, atr):
+    """Build structural invalidation SL with bounded downside.
+
+    Prefer the NEAREST structural anchor that still gives the setup enough room.
+    The old implementation used the farthest valid swing (min for BUY/max for
+    SELL), which could make initial risk unnecessarily large. V17 treats SL as
+    a true thesis-invalidation boundary plus a volatility buffer.
+    """
     sh, sl = swing_pts(m15, SWING_LB)
     hsh, hsl = swing_pts(h1, 5)
-    anchors = []
     if direction == "bull":
-        if sl: anchors.append(float(m15["low"].iloc[sl[-1]]))
-        if hsl: anchors.append(float(h1["low"].iloc[hsl[-1]]))
-        valid = [x for x in anchors if x < entry]
-        anchor = min(valid) if valid else entry - atr
-        stop = anchor - atr * 0.18
+        anchors = []
+        if sl:
+            anchors.append((float(m15["low"].iloc[sl[-1]]), "m15_swing"))
+        if hsl:
+            anchors.append((float(h1["low"].iloc[hsl[-1]]), "h1_swing"))
+        valid = sorted([(x, lbl) for x, lbl in anchors if x < entry], key=lambda z: entry - z[0])
+        if not valid:
+            return None
+        # Pick the closest anchor that still clears the minimum risk.
+        selected = None
+        for anchor, label in valid:
+            risk0 = entry - (anchor - atr * SL_BUFFER_ATR)
+            if risk0 >= atr * ENTRY_MIN_RISK_ATR:
+                selected = (anchor, label)
+                break
+        if selected is None:
+            selected = valid[-1]
+        anchor, anchor_label = selected
+        stop = anchor - atr * SL_BUFFER_ATR
+        # Never allow a stop to sit materially above/at the entry.
+        stop = min(stop, entry - atr * SL_MIN_MARKET_GAP_ATR)
     else:
-        if sh: anchors.append(float(m15["high"].iloc[sh[-1]]))
-        if hsh: anchors.append(float(h1["high"].iloc[hsh[-1]]))
-        valid = [x for x in anchors if x > entry]
-        anchor = max(valid) if valid else entry + atr
-        stop = anchor + atr * 0.18
+        anchors = []
+        if sh:
+            anchors.append((float(m15["high"].iloc[sh[-1]]), "m15_swing"))
+        if hsh:
+            anchors.append((float(h1["high"].iloc[hsh[-1]]), "h1_swing"))
+        valid = sorted([(x, lbl) for x, lbl in anchors if x > entry], key=lambda z: z[0] - entry)
+        if not valid:
+            return None
+        selected = None
+        for anchor, label in valid:
+            risk0 = (anchor + atr * SL_BUFFER_ATR) - entry
+            if risk0 >= atr * ENTRY_MIN_RISK_ATR:
+                selected = (anchor, label)
+                break
+        if selected is None:
+            selected = valid[-1]
+        anchor, anchor_label = selected
+        stop = anchor + atr * SL_BUFFER_ATR
+        stop = max(stop, entry + atr * SL_MIN_MARKET_GAP_ATR)
+
     risk = (entry - stop) if direction == "bull" else (stop - entry)
-    if risk <= 0: return None
+    if risk <= 0:
+        return None
     risk_atr = risk / max(atr, 1e-12)
-    risk_pct = risk / max(entry, 1e-12) * 100
+    risk_pct = risk / max(entry, 1e-12) * 100.0
     if not (ENTRY_MIN_RISK_ATR <= risk_atr <= ENTRY_MAX_RISK_ATR and ENTRY_MIN_RISK_PCT <= risk_pct <= ENTRY_MAX_RISK_PCT):
         return None
-    return float(stop), float(risk), float(risk_atr), float(risk_pct), sh, sl, hsh, hsl
+    return float(stop), float(risk), float(risk_atr), float(risk_pct), sh, sl, hsh, hsl, anchor_label
 
 
 def _targets(m15, h1, direction, entry, risk):
@@ -553,6 +604,13 @@ def _candidate_quality(ctx, zone, htf_overlap, sweep, displacement, pullback, lo
         quality -= 4.0
     quality = _clip(quality)
 
+    # History is deliberately soft: it ranks similar path behaviour without
+    # turning a small sample into a hard gate.
+    hist = globals().get("_ACTIVE_HISTORY_CONTEXT") or {}
+    hist_adj, hist_reasons = _history_adjustment(hist)
+    quality = _clip(quality + hist_adj)
+    contradictions.extend([r for r in hist_reasons if r != "history_mfe_healthy" and r != "history_positive_expectancy_hint"])
+
     quality *= max(0.82, min(1.0, data_quality / 100.0))
     confidence = int(np.clip(round(20 + quality * 0.76), 25, 94))
     if quality < 44: confidence = min(confidence, 52)
@@ -577,18 +635,74 @@ def _data_quality(h1, m15, d1, market_context):
 
 
 def _history_context(history, direction, entry_label, archetype):
+    """Turn closed-trade history into soft, path-aware evidence.
+
+    Never hard-veto from history; small samples only adjust ranking/confidence.
+    """
     rows = [r for r in (history or []) if isinstance(r, dict)]
     side = "BUY" if direction == "bull" else "SELL"
     matched = [r for r in rows if str(r.get("decision", "")).upper() == side and str(r.get("entry_label", "")) == entry_label]
-    if len(matched) < 8:
+    if len(matched) < HISTORY_MIN_MATCH:
         matched = [r for r in rows if str(r.get("decision", "")).upper() == side]
-    profits = [_num(r.get("pnl_usd"), 0.0) or 0.0 for r in matched]
+    if len(matched) < HISTORY_MIN_MATCH:
+        matched = rows
+
+    def f(r, k, d=0.0):
+        x = _num(r.get(k), d)
+        return float(x if x is not None else d)
+
+    final_r = [f(r, "final_r") for r in matched]
+    mfe = [f(r, "mfe_r") for r in matched]
+    give = []
+    for r in matched:
+        m = max(0.0, f(r, "mfe_r"))
+        c = f(r, "current_r", f(r, "final_r"))
+        give.append(max(0.0, m-c) / max(m, 0.25) if m > 0 else 0.0)
+    med_mfe = float(np.median(mfe)) if mfe else 0.0
+    med_final = float(np.median(final_r)) if final_r else 0.0
+    immediate_fail = float(np.mean([x < HISTORY_MFE_BAD_R and y < 0 for x, y in zip(mfe, final_r)])) if matched else 0.0
+    deep_give = float(np.mean([x >= HISTORY_GIVEBACK_BAD for x in give])) if matched else 0.0
     return {
-        "samples": len(rows), "matched": len(matched),
-        "win_rate": round(float(np.mean([p > 0 for p in profits])) if profits else 0.0, 3),
+        "samples": len(rows),
+        "matched": len(matched),
+        "win_rate": round(float(np.mean([x > 0 for x in final_r])) if final_r else 0.0, 3),
+        "median_final_r": round(med_final, 3),
+        "median_mfe_r": round(med_mfe, 3),
+        "immediate_failure_rate": round(immediate_fail, 3),
+        "deep_giveback_rate": round(deep_give, 3),
         "archetype": archetype,
-        "usage": "audit_only",
+        "usage": "soft_path_evidence",
     }
+
+def _history_adjustment(hist):
+    if not isinstance(hist, dict) or hist.get("matched", 0) < HISTORY_MIN_MATCH:
+        return 0.0, ["history_insufficient"]
+    adj = 0.0; reasons = []
+    med_mfe = float(hist.get("median_mfe_r", 0.0) or 0.0)
+    fail = float(hist.get("immediate_failure_rate", 0.0) or 0.0)
+    final = float(hist.get("median_final_r", 0.0) or 0.0)
+    if med_mfe >= HISTORY_MFE_GOOD_R:
+        adj += 4.0; reasons.append("history_mfe_healthy")
+    if fail >= 0.55:
+        adj -= 5.0; reasons.append("history_immediate_failure_risk")
+    if final > 0.15:
+        adj += 2.0; reasons.append("history_positive_expectancy_hint")
+    elif final < -0.20:
+        adj -= 2.0; reasons.append("history_negative_expectancy_hint")
+    return float(np.clip(adj, -7.0, 6.0)), reasons
+
+def _target_history_factor(hist, rr):
+    if not isinstance(hist, dict) or hist.get("matched", 0) < HISTORY_MIN_MATCH:
+        return 0.0, "history_insufficient"
+    med_mfe = float(hist.get("median_mfe_r", 0.0) or 0.0)
+    if med_mfe <= 0:
+        return 0.0, "history_no_mfe"
+    reach = med_mfe / max(rr, 1e-9)
+    if reach >= TARGET_HIST_MFE_STRONG:
+        return 5.0, "historical_mfe_supports_target"
+    if reach >= TARGET_HIST_MFE_PREFERRED:
+        return 2.5, "historical_mfe_partially_supports_target"
+    return -4.0, "historical_mfe_below_target_distance"
 
 
 def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None, market_context=None):
@@ -627,17 +741,20 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             tp_price, tp_label, rr = tp
             overlap = any(float(z["bot"]) <= entry <= float(z["top"]) for z in htf_zones)
             archetype = _archetype(direction, zone, sweep, displacement, pullback, overlap, regime)
-            q = _candidate_quality(ctx, zone, overlap, sweep, displacement, pullback, location, context, geo, rr, archetype, data_quality)
             hist = _history_context(trade_history, direction, zone.get("kind", "market"), archetype)
+            globals()["_ACTIVE_HISTORY_CONTEXT"] = hist
+            q = _candidate_quality(ctx, zone, overlap, sweep, displacement, pullback, location, context, geo, rr, archetype, data_quality)
             timing_penalty = 0.0
             age = float(zone.get("age", 999))
             if age > 36: timing_penalty = 5.0
             if abs(price - entry) > atr * 1.25: timing_penalty += 5.0
-            execution_score = q["quality"] * 0.93 + min(rr, 5.5) * 1.8 + q["poi_quality"] * 0.025 - timing_penalty
+            hist_target_adj, hist_target_reason = _target_history_factor(hist, rr)
+            execution_score = q["quality"] * 0.93 + min(rr, 5.5) * 1.8 + q["poi_quality"] * 0.025 + hist_target_adj - timing_penalty
             evaluated.append({
                 "entry": entry, "entry_label": zone.get("kind", "market"), "sl": geo[0], "risk": geo[1],
+                "sl_anchor": geo[8] if len(geo) > 8 else None,
                 "risk_atr": geo[2], "risk_pct": geo[3], "tp": tp_price, "tp_label": tp_label, "rr": rr,
-                "q": q, "archetype": archetype, "history": hist, "execution_score": execution_score,
+                "q": q, "archetype": archetype, "history": hist, "history_target_reason": hist_target_reason, "execution_score": execution_score,
                 "htf_overlap": overlap, "zone": zone,
             })
         if not evaluated:
@@ -665,6 +782,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
         if displacement["confirmed"]: evidence_for.append(f"fresh displacement {displacement['body_atr']:.2f} ATR")
         if sweep["detected"]: evidence_for.append(f"liquidity reclaim {sweep['strength']:.0f}")
         evidence_against = list(best["q"]["contradictions"])
+        globals()["_ACTIVE_HISTORY_CONTEXT"] = {}
         return {
             "symbol": symbol, "decision": decision, "confidence": confidence,
             "direction_confidence": int(round(ctx["direction_quality"])),
@@ -770,9 +888,9 @@ def _structural_trail(df, direction, price, atr):
     sub = df.tail(STRUCT_TRAIL_LOOKBACK)
     sh, sl = swing_pts(sub, STRUCT_TRAIL_LB)
     if direction == "bull" and sl:
-        return float(sub["low"].iloc[sl[-1]]) - atr * TRAIL_STRUCT_BUFFER_ATR
+        return float(sub["low"].iloc[sl[-1]]) - atr * max(TRAIL_STRUCT_BUFFER_ATR, 0.40)
     if direction == "bear" and sh:
-        return float(sub["high"].iloc[sh[-1]]) + atr * TRAIL_STRUCT_BUFFER_ATR
+        return float(sub["high"].iloc[sh[-1]]) + atr * max(TRAIL_STRUCT_BUFFER_ATR, 0.40)
     return None
 
 
@@ -784,11 +902,13 @@ def _retracement_trail(df, direction, entry, risk, price, path):
         peak = float(df["high"].tail(TRAIL_PEAK_LOOKBACK).max())
         keep = 0.45 if path["giveback_ratio"] < TRAIL_GIVEBACK_STRONG else 0.35
         raw = peak - (peak - entry) * keep
-        return min(raw, price - atr * TRAIL_RETRACE_BUFFER_ATR)
+        safe_max = price - atr * TRAIL_REVALIDATE_GAP_ATR
+        return min(raw, safe_max)
     peak = float(df["low"].tail(TRAIL_PEAK_LOOKBACK).min())
     keep = 0.45 if path["giveback_ratio"] < TRAIL_GIVEBACK_STRONG else 0.35
     raw = peak + (entry - peak) * keep
-    return max(raw, price + atr * TRAIL_RETRACE_BUFFER_ATR)
+    safe_min = price + atr * TRAIL_REVALIDATE_GAP_ATR
+    return max(raw, safe_min)
 
 
 def _liquidity_trail(df, direction, price, atr):
@@ -857,7 +977,7 @@ def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
 
         candidates, atr = _trail_candidates(m15, state, direction, entry, current_sl, price, path, state_name, weakness)
         valid = []
-        market_gap = atr * TRAIL_MIN_MARKET_GAP_ATR
+        market_gap = atr * max(TRAIL_MIN_MARKET_GAP_ATR, TRAIL_REVALIDATE_GAP_ATR)
         for cand, source in candidates:
             if direction == "bull":
                 if cand >= price - market_gap: cand = price - market_gap
