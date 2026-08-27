@@ -1,276 +1,157 @@
+"""strategy_logic.py — SMC/price-action decision engine v14.
+
+Satu jalur reasoning: market context -> direction -> setup -> location -> risk -> confidence.
+Position management memakai state machine terpisah dan path metrics MFE/MAE/giveback.
+Kompatibel dengan dispatcher main.py dan tidak membutuhkan dependency di luar pandas/numpy.
 """
-strategy_logic.py — OTAK v11 (Evidence-Based Chart Brain) (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
-========================================================================================
-V10 dianggap eksperimen over-filtering dan tidak dijadikan baseline. V11 dibangun sebagai evidence-based chart reasoning engine.
-Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
-market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
-CISD, OTE & Fibonacci, external vs internal liquidity, Wyckoff, dsb).
-
-Urutan proses tiap sinyal (SESUAI PERMINTAAN): Entry → SL → TP → Confidence
-global (tanpa bias sesi). Arah HTF adalah gate keputusan, bukan sekadar bonus
-skor. Setup lokal hanya boleh dipakai setelah POI HTF disentuh dan ada
-konfirmasi displacement/structure yang baru. Ini sengaja mengurangi sinyal:
-skor agregat lama dapat membuat OTE/RSI/sweep mengalahkan tren utama.
-
-Poin revisi v3:
-  1) RR minimal 1:2, maksimal 1:4. Jika target RR<2 → JANGAN auto‑tolak,
-     dulu cari target lebih jauh dari pool TP (swing H1 lebih lama, EQ H1,
-     fib extension) sebelum menyerah; jika ada RR>4 → cap ke 4 (bukan tolak).
-  2) Entry presisi: OB/FVG/EQ dengan bonus konfluen HTF (overlap zona H1) dan
-     bonus Inducement (liquidity minor sudah disapu sebelum POI asli) —
-     sesuai transkrip "How the Market Traps Traders with Inducement" &
-     "trading strategy using inducement [SNIPER ENTRY]".
-  3) SL struktural anti‑Liquidity Sweep: SL ditaruh di luar invalidation
-     level (OB/struktur) + buffer, supaya jika benar‑benar tersentuh berarti
-     arah memang salah, bukan sekadar sweep likuiditas minor. Penanganan
-     "SL tersentuh tapi ternyata sweep" (harga lanjut sesuai arah semula)
-     ditangani di validate_and_adjust_geometry() (dipanggil main.py saat
-     order terisi/di-monitor) dan di monitor_position() main.py (verifikasi
-     candle M1 sebelum SL dikonfirmasi).
-  4) Trail Ladder: seluruh profit-ladder dihapus. Trail hanya mengikuti
-     struktur M15 (HL/LH + buffer), sehingga pergeseran SL berarti struktur
-     mulai gagal, bukan sekadar memaksa profit terkunci.
-  5) Proses per‑koin: Entry → SL → TP → confidence (global, tanpa sesi).
-  6) Tidak ada confidence per‑sesi — confidence murni dari kualitas
-     struktur+konfluensi chart (skema sama seperti v2, ditambah bonus baru).
-  7) Konsep tambahan (inducement, external/internal liquidity, konfluensi
-     HTF) masuk sebagai bonus skor kecil, TIDAK menambah filter penolakan,
-     supaya kuantitas sinyal tidak turun.
-  8) Entry-location layer: arah bullish/bearish tidak otomatis berarti entry
-     sekarang. Kandidat dinilai terhadap range M15, adverse swing, dan timing
-     RSI. Harga yang terlalu dekat sisi salah range + momentum RSI yang masih
-     melawan entry menjadi WAIT_ENTRY, bukan langsung dipaksa trade.
-  9) Candidate fallback: jika kandidat terbaik punya invalidation terlalu lebar
-     atau TP tidak mencapai 2R, candidate berikutnya dicoba. Tidak ada synthetic
-     ATR stop untuk menyelamatkan entry yang buruk.
- 10) Tidak menambahkan logika scalping M1/Silver Bullet/killzone sesi yang
-     tidak relevan untuk swing H1/M15 — hanya diambil konsep yang dipakai
-     bot ini (structure, OB/FVG, liquidity, CISD, Fibonacci).
-
-Kompatibel dengan main.py:
-  - full_analyze(df_h1, df_m15, df_d1=None, symbol=None) → dict | None
-  - score_direction(df_h1, df_m15, df_d1=None) → dict | None
-  - swing_pts(df, lb) → (sh, sl)
-  - TRAIL_R_LADDER, STRUCT_TRAIL_LB, STRUCT_TRAIL_BUF_PCT, STRUCT_TRAIL_LOOKBACK
-  - MIN_RR, MAX_RR, FIB_EXT_1, FIB_EXT_2
-"""
+from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
-import pandas as pd
+from typing import Optional
+
 import numpy as np
+import pandas as pd
 
 log = logging.getLogger(__name__)
 
-# =============================================================================
-# KONFIGURASI — Diimpor langsung oleh main.py
-# =============================================================================
-
-MIN_RR   = 2.0
-MAX_RR   = None  # unlimited RR; target tetap harus struktural/berbasis liquidity
-
-# ── Trail Ladder v3 ──────────────────────────────────────────────────────
-# HANYA breakeven di 1.0R. Ini bukan "pengaman profit" — cuma menghilangkan
-# risiko begitu trade sudah maju 1R, konsisten dengan permintaan: "Trail
-# jangan dipaksa profit". Setelah breakeven tercapai, seluruh pergeseran SL
-# selanjutnya murni mengikuti struktur M15 (lihat monitor_position main.py
-# yang memakai kandidat "paling protektif" antara ladder ini vs structure —
-# karena ladder cuma py 1 rung breakeven, structure yang akan mendominasi
-# di hampir semua kasus setelah 1R).
-TRAIL_R_LADDER = []  # Trail sepenuhnya struktural M15; tidak ada profit-lock ladder.
-
-# Trailing struktural M15 — INI inti dari Trail (bukan ladder di atas).
-# "Ketika harga menyentuh Trail artinya harga tidak kuat mengikuti trend
-# sebelumnya" — SL baru = swing M15 terakhir (HL utk BUY / LH utk SELL)
-# + buffer supaya tidak kena liquidity sweep biasa.
-STRUCT_TRAIL_LB       = 3      # lookback swing_pts saat trailing
-STRUCT_TRAIL_BUF_PCT  = 0.0025 # buffer 0.25% di luar swing agar tidak kena LS biasa
-STRUCT_TRAIL_LOOKBACK = 60     # candle M15 untuk cari swing trailing
-
-# Adaptive trailing engine V4
-TRAIL_ENGINE_VERSION       = "11.0-evidence-based-market-brain"
-TRAIL_ARM_R                = 0.80
-TRAIL_PROTECT_R            = 1.00
-TRAIL_MATURE_R             = 1.50
-TRAIL_ATR_MULT             = 2.40
-TRAIL_ATR_TIGHT_MULT       = 1.65
-TRAIL_MIN_GAP_ATR          = 0.28
-TRAIL_BREAK_EVEN_OFFSET_R  = 0.02
-TRAIL_WEAKNESS_MODERATE    = 3
-TRAIL_WEAKNESS_STRONG      = 6
-TRAIL_LIQUIDITY_NEAR_R     = 0.75
-TRAIL_VOLUME_EXPANSION     = 1.30
-TRAIL_VOLUME_WEAK          = 0.75
-TRAIL_MIN_IMPROVEMENT_ATR  = 0.10
-# Execution-aware trailing safety. The strategy is the source of truth for
-# whether a candidate is executable; main.py only executes an accepted candidate.
-# Use the latest M15 close as the live-price proxy because main.py passes the
-# same 15m kline set to manage_position and does not pass a fresh ticker price
-# into the strategy dispatcher. Closed candles remain the analysis dataset.
-TRAIL_EXECUTION_BUFFER_ATR = 0.05
-TRAIL_MIN_MARKET_GAP_ATR = 0.32
-
-# V9 Trade-lifecycle / path-aware management. These are deliberately broad
-# guardrails, not hard profit targets. The bot learns from the path already
-# observed on the live position: current R, MFE, MAE and giveback.
-TRAIL_PROVING_R = 0.35
-TRAIL_WINNER_R = 0.80
-TRAIL_EXTENDED_R = 1.50
-TRAIL_GIVEBACK_WARN = 0.30
-TRAIL_GIVEBACK_TIGHT = 0.50
-TRAIL_GIVEBACK_CRITICAL = 0.70
-TRAIL_MFE_ARM_R = 0.60
-TRAIL_MFE_STRONG_R = 1.00
-TRAIL_MFE_EXTENDED_R = 1.50
-TRAIL_MIN_LOCK_AFTER_MFE_R = 0.05
-TRAIL_FAST_REVERSAL_R = 0.80
-TRAIL_SLOW_WINNER_GRACE_R = 0.90
-
-# Entry-quality diagnostics. They are used as context/weighting, not as a
-# binary veto, because the supplied research sample is only 14 trades.
-ENTRY_TYPE_WEIGHT = {"ob": 3, "fvg": 2, "eq": 1}
-STRUCTURE_WEIGHT = {"bullish": 2, "bearish": 2, "ranging": 1, "neutral": 0}
-
-# Fibonacci extension TP (level 1.272 dan 1.618 dari impulse leg)
-FIB_EXT_1 = 0.272   # 127.2%
-FIB_EXT_2 = 0.618   # 161.8%
-
-# ── Inducement & konfluensi ──────────────────────────────────────────────
-INDUCEMENT_LOOKBACK  = 40     # candle M15 untuk cari liquidity minor sebelum POI
-INDUCEMENT_MINOR_LB  = 2      # lookback swing_pts untuk swing "minor" (inducement)
-CONFLUENCE_BONUS      = 2     # bonus skor kalau OB/FVG M15 overlap dengan zona H1
-POI_REACTION_LOOKBACK = 16     # candle M15 untuk menunggu reaksi setelah POI HTF
-CONFIRMATION_LOOKBACK = 4      # candle M15 yang dipakai untuk displacement terbaru
-MIN_DISPLACEMENT_ATR  = 0.25   # body minimum agar candle bukan noise
-
-# Entry-location / RSI timing — ditambahkan setelah audit CAPUSDT.
-# Tujuannya bukan membuat bot anti-trade, tetapi mencegah BUY/SELL di lokasi
-# yang sudah terlalu dekat sisi salah dari range saat momentum M15 masih
-# bergerak melawan entry. RSI dipakai sebagai timing/context, bukan sinyal
-# tunggal dan bukan hard overbought/oversold rule.
-ENTRY_LOCATION_LOOKBACK = 16     # 4 jam M15 untuk konteks lokasi
-ENTRY_CHASE_HIGH = 0.82         # BUY di atas 82% range / SELL di bawah 18% = chase
-ENTRY_PREFERRED_BUY = 0.55      # BUY ideal di bawah ~55% range lokal
-ENTRY_PREFERRED_SELL = 0.45     # SELL ideal di atas ~45% range lokal
-ENTRY_SWING_NEAR_ATR = 0.55     # dekat swing adverse => kurangi kualitas
-RSI_TIMING_SLOPE = 1.5          # perubahan RSI minimum agar dianggap bermakna
-RSI_BUY_WEAK = 48.0              # BUY + RSI di bawah ini yang masih jatuh = tunggu
-RSI_SELL_WEAK = 52.0              # SELL + RSI di atas ini yang masih naik = tunggu
-ENTRY_LOCATION_HARD_FLOOR = 30   # kandidat di bawah ini tidak executable
-
-# Must match main.py _validate_signal_before_entry().  Keeping this in the
-# strategy engine prevents full_analyze() from returning a candidate that the
-# execution gate will immediately reject as ENTRY_TOO_FAR.
+# Public constants imported by main.py.
+MIN_RR = 2.0
+MAX_RR = None
+FIB_EXT_1 = 0.272
+FIB_EXT_2 = 0.618
+TRAIL_R_LADDER = []
+STRUCT_TRAIL_LB = 3
+STRUCT_TRAIL_BUF_PCT = 0.0025
+STRUCT_TRAIL_LOOKBACK = 60
+TRAIL_ENGINE_VERSION = "14.0-single-path-brain"
+TRAIL_EXECUTION_BUFFER_ATR = 0.08
+TRAIL_MIN_MARKET_GAP_ATR = 0.35
 MAIN_ENTRY_MAX_ATR = 1.50
+CONFIDENCE_MODEL_VERSION = "14.0-monotonic-quality"
 
-# # V11 — evidence-based chart reasoning. These are soft weights/diagnostics, not
-# a pile of hard entry gates. The research sample showed that over-filtering
-# reduced opportunity without proving better outcomes, so V11 separates:
-#   1) market thesis, 2) setup evidence, 3) execution geometry.
-# Only execution-invalid conditions are hard rejects here.
-V11_TREND_LOOKBACK_FAST = 3
-V11_TREND_LOOKBACK_SLOW = 8
-V11_EARLY_FAIL_R = -0.75
-V11_EARLY_FAIL_MAE_R = -0.80
-V11_EARLY_FAIL_MAX_TRADE_MIN = 180.0
-V11_EXTERNAL_LIQ_NEAR_ATR = 1.25
-V11_EXTERNAL_LIQ_VERY_NEAR_ATR = 0.65
-V11_CONF_FLOOR = 40
-V11_EVIDENCE_NEUTRAL = 50.0
-V11_EVIDENCE_MAX_ADJUST = 10.0
-V11_TREND_WEIGHT = 0.22
-V11_PULLBACK_WEIGHT = 0.18
-V11_POI_WEIGHT = 0.22
-V11_LIQUIDITY_WEIGHT = 0.16
-V11_LOCATION_WEIGHT = 0.12
-V11_CONFIRMATION_WEIGHT = 0.10
-V11_FVG_PENALTY_WITHOUT_CONFIRMATION = 3
-V11_EQ_PENALTY_IN_UNCLEAR_CONTEXT = 2
+# Entry engine.
+MIN_DISPLACEMENT_ATR = 0.30
+ENTRY_LOOKBACK = 20
+SWING_LB = 3
+POI_LOOKBACK = 80
+HTF_POI_LOOKBACK = 90
+ENTRY_MAX_RISK_ATR = 2.20
+ENTRY_MIN_RISK_ATR = 0.55
+ENTRY_MIN_RISK_PCT = 0.08
+ENTRY_MAX_RISK_PCT = 3.50
+ENTRY_LOCATION_SOFT_HIGH = 0.82
+ENTRY_LOCATION_SOFT_LOW = 0.18
+ENTRY_PREFERRED_BUY = 0.55
+ENTRY_PREFERRED_SELL = 0.45
+
+# Trail engine. Values are guardrails, not profit-lock ladders.
+TRAIL_ARM_R = 0.80
+TRAIL_GIVEBACK_WARN = 0.30
+TRAIL_GIVEBACK_STRONG = 0.50
+TRAIL_GIVEBACK_CRITICAL = 0.70
+TRAIL_MFE_STRONG = 1.00
+TRAIL_MFE_EXTENDED = 1.50
+TRAIL_MFE_DEEP = 2.00
+TRAIL_LOCK_WARN_R = 0.08
+TRAIL_LOCK_STRONG_R = 0.30
+TRAIL_LOCK_CRITICAL_R = 0.60
+TRAIL_MIN_UPDATE_R = 0.04
+TRAIL_MAX_CHURN = 4
+TRAIL_STRUCT_BUFFER_ATR = 0.36
+TRAIL_RETRACE_BUFFER_ATR = 0.25
+TRAIL_REVERSAL_BODY_ATR = 0.85
+TRAIL_COUNTER_BODY_ATR = 0.55
+TRAIL_VOLUME_EXHAUSTION = 0.72
+TRAIL_VOLUME_COUNTER = 1.20
+TRAIL_PEAK_LOOKBACK = 40
 
 
-# =============================================================================
-# UTILITY — Indikator teknikal
-# =============================================================================
+def _num(v, default=None):
+    try:
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _clip(v, lo=0.0, hi=100.0):
+    return float(np.clip(float(v), lo, hi))
+
 
 def ema(s: pd.Series, n: int) -> pd.Series:
     return s.ewm(span=n, adjust=False).mean()
 
+
 def rsi(s: pd.Series, n: int = 14) -> pd.Series:
     d = s.diff()
     g = d.clip(lower=0).rolling(n).mean()
-    lo = (-d.clip(upper=0)).rolling(n).mean()
-    rs = g / lo.replace(0, np.nan)
+    l = (-d.clip(upper=0)).rolling(n).mean()
+    rs = g / l.replace(0, np.nan)
     return 100 - 100 / (1 + rs)
 
+
 def atr_fn(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - df["close"].shift()).abs(),
-        (df["low"] - df["close"].shift()).abs(),
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - df["close"].shift()).abs(),
+            (df["low"] - df["close"].shift()).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
     return tr.rolling(n).mean()
 
-def _closed_candles(df: pd.DataFrame, interval_minutes: int) -> pd.DataFrame:
-    """Keep only candles whose interval has fully closed.
 
-    Binance REST and websocket kline feeds include the currently forming
-    candle.  Using it for structure/EMA decisions makes a signal repaint
-    during the same scan and was especially harmful on the fast altcoins in
-    the supplied trade sample.  DataFrames with a non-datetime index are
-    left untouched for compatibility with offline callers/tests.
-    """
+def _closed_candles(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
     if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
         return df
     out = df.copy()
     idx = out.index
-    if idx.tz is None:
-        idx = idx.tz_localize("UTC")
-    else:
-        idx = idx.tz_convert("UTC")
-    now = pd.Timestamp.now(tz="UTC")
-    boundary = now.floor(f"{interval_minutes}min")
-    # Historical/offline datasets may be entirely older than the current
-    # candle. In that case every row is already closed and must be preserved.
+    idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+    boundary = pd.Timestamp.now(tz="UTC").floor(f"{minutes}min")
     if idx[-1] < boundary:
         return out
     return out.loc[idx < boundary].copy()
 
 
 def build_df(df: pd.DataFrame, interval_minutes: Optional[int] = None) -> Optional[pd.DataFrame]:
-    """Tambahkan EMA, RSI, ATR, volume SMA ke DataFrame OHLCV."""
     if df is None or len(df) < 60:
         return None
-    df = df.copy()
-    if interval_minutes is not None:
-        df = _closed_candles(df, interval_minutes)
-    if len(df) < 60:
+    x = df.copy()
+    if interval_minutes:
+        x = _closed_candles(x, interval_minutes)
+    if len(x) < 60:
         return None
-    df["ema9"] = ema(df["close"], 9)
-    df["ema21"] = ema(df["close"], 21)
-    df["ema50"] = ema(df["close"], 50)
-    df["ema200"] = ema(df["close"], 200) if len(df) >= 200 else ema(df["close"], 50)
-    df["rsi"] = rsi(df["close"])
-    df["atr"] = atr_fn(df)
-    df["vol_sma"] = df["volume"].rolling(20).mean()
-    return df.dropna()
+    for c in ("open", "high", "low", "close", "volume"):
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+    x["ema9"] = ema(x["close"], 9)
+    x["ema21"] = ema(x["close"], 21)
+    x["ema50"] = ema(x["close"], 50)
+    x["ema200"] = ema(x["close"], 200) if len(x) >= 200 else ema(x["close"], 50)
+    x["rsi"] = rsi(x["close"])
+    x["atr"] = atr_fn(x)
+    x["vol_sma"] = x["volume"].rolling(20).mean()
+    return x.dropna()
+
 
 def swing_pts(df: pd.DataFrame, lb: int = 5):
-    """Swing high & low — dipakai main.py untuk trailing."""
+    if df is None or df.empty or len(df) < lb * 2 + 3:
+        return [], []
+    h = df["high"].to_numpy(dtype=float)
+    l = df["low"].to_numpy(dtype=float)
     sh, sl = [], []
-    high = df["high"].values
-    low = df["low"].values
-    n = len(high)
-    for i in range(lb, n - lb):
-        window_h = high[max(0, i - lb): i + lb + 1]
-        window_l = low[max(0, i - lb): i + lb + 1]
-        if high[i] == window_h.max():
+    for i in range(lb, len(df) - lb):
+        wh = h[i - lb : i + lb + 1]
+        wl = l[i - lb : i + lb + 1]
+        if h[i] >= wh.max():
             sh.append(i)
-        if low[i] == window_l.min():
+        if l[i] <= wl.min():
             sl.append(i)
     return sh, sl
 
-def _market_structure(df: pd.DataFrame, sh: list, sl: list) -> str:
-    """HH+HL = bullish · LH+LL = bearish · else ranging."""
+
+def _market_structure(df, sh, sl):
     if len(sh) < 2 or len(sl) < 2:
         return "ranging"
     hh = df["high"].iloc[sh[-1]] > df["high"].iloc[sh[-2]]
@@ -283,4288 +164,727 @@ def _market_structure(df: pd.DataFrame, sh: list, sl: list) -> str:
         return "bearish"
     return "ranging"
 
-mkt_struct = _market_structure  # alias
 
-def _macro_bias(df_btc_h1: Optional[pd.DataFrame]) -> str:
-    """
-    Bias arah MARKET SECARA KESELURUHAN (BTC H1 sebagai proxy), bukan
-    struktur per-koin. Dipakai untuk meredam sinyal BUY di altcoin saat
-    seluruh market lagi risk-off (dan sebaliknya) — analisa 7 Agu 2026:
-    4/4 sinyal BUY kena SL, total market cap crypto turun 0.5% & BTC di
-    bawah EMA50/EMA200 hari itu; satu-satunya SELL malah menang besar.
-    Struktur per-koin (OB/FVG M15) bisa kelihatan valid sendiri, tapi
-    kalah lawan gravitasi market kalau macro-nya jelas berlawanan.
-
-    Return "bullish" / "bearish" / "ranging" / "unknown" (kalau data BTC
-    tidak dikasih atau tidak cukup — caller HARUS treat "unknown" sebagai
-    no-op, jangan menghukum arah manapun).
-    """
-    if df_btc_h1 is None or len(df_btc_h1) < 60:
-        return "unknown"
-    try:
-        btc = build_df(df_btc_h1, interval_minutes=60)
-        if btc is None or len(btc) < 60:
-            return "unknown"
-        LB = btc.iloc[-1]
-        shb, slb = swing_pts(btc, lb=5)
-        struct_btc = _market_structure(btc, shb, slb)
-        ema_bull = LB["ema9"] > LB["ema21"] > LB["ema50"]
-        ema_bear = LB["ema9"] < LB["ema21"] < LB["ema50"]
-        if struct_btc == "bullish" or ema_bull:
-            return "bullish"
-        if struct_btc == "bearish" or ema_bear:
-            return "bearish"
-        return "ranging"
-    except Exception:
-        return "unknown"
-
-# Penalti/bonus macro — sengaja MODERAT (bukan veto keras seperti d1_bias
-# per-koin di atas), karena ini cuma satu lapis konteks tambahan. Tujuannya
-# NGE-REM sinyal yang jelas melawan arus market, BUKAN mematikannya —
-# kuantitas sinyal harus tetap terjaga (lihat instruksi awal strategy ini).
-MACRO_ALIGN_BONUS   = 8      # searah macro → bonus kecil
-MACRO_AGAINST_MULT  = 0.72   # berlawanan macro → skor sisi itu dikali ini (bukan 0)
+mkt_struct = _market_structure
 
 
-# =============================================================================
-# SMC / ICT DETECTORS (berdasarkan transkrip)
-# =============================================================================
+def _direction_score(df_h1, df_m15, df_d1=None, market_context=None, df_btc_h1=None):
+    h1 = build_df(df_h1, 60)
+    m15 = build_df(df_m15, 15)
+    if h1 is None or m15 is None:
+        return None
+    d1 = None
+    if df_d1 is not None and len(df_d1) >= 60:
+        d1 = build_df(df_d1, 1440)
+    if d1 is None and isinstance(h1.index, pd.DatetimeIndex):
+        d1 = build_df(
+            h1.resample("1D").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+        )
+    sh1, sl1 = swing_pts(h1, 5)
+    sh15, sl15 = swing_pts(m15, 5)
+    struct_h1 = _market_structure(h1, sh1, sl1)
+    struct_m15 = _market_structure(m15, sh15, sl15)
+    d1_bias = "neutral"
+    if d1 is not None and len(d1) >= 10:
+        shd, sld = swing_pts(d1, 3)
+        sd1 = _market_structure(d1, shd, sld)
+        bull = sd1 == "bullish" or bool(d1["ema9"].iloc[-1] > d1["ema21"].iloc[-1] > d1["ema50"].iloc[-1])
+        bear = sd1 == "bearish" or bool(d1["ema9"].iloc[-1] < d1["ema21"].iloc[-1] < d1["ema50"].iloc[-1])
+        d1_bias = "bullish" if bull and not bear else "bearish" if bear and not bull else "neutral"
 
-def is_zone_fresh(df: pd.DataFrame, top: float, bot: float,
-                  formed_idx: int, end_idx: Optional[int] = None,
-                  direction: Optional[str] = None) -> bool:
-    """True jika zona masih aktif, bukan sekadar belum pernah disentuh.
+    ema_bull = h1["ema9"].iloc[-1] > h1["ema21"].iloc[-1] > h1["ema50"].iloc[-1]
+    ema_bear = h1["ema9"].iloc[-1] < h1["ema21"].iloc[-1] < h1["ema50"].iloc[-1]
+    fast = (float(m15["close"].iloc[-1]) - float(m15["close"].iloc[-4])) / max(float(m15["atr"].iloc[-1]), 1e-12)
+    slow = (float(m15["close"].iloc[-1]) - float(m15["close"].iloc[-9])) / max(float(m15["atr"].iloc[-1]), 1e-12)
 
-    Untuk zona berarah, retest tidak otomatis membatalkan zona. Invalidasi
-    terjadi bila candle close menembus sisi luar zona. Tanpa ``direction``
-    fungsi mempertahankan perilaku konservatif lama untuk caller generik.
-    """
-    if formed_idx is None or formed_idx + 2 >= len(df):
+    bull = 35.0
+    bear = 35.0
+    if d1_bias == "bullish": bull += 20
+    if d1_bias == "bearish": bear += 20
+    if struct_h1 == "bullish": bull += 24
+    elif struct_h1 == "bearish": bear += 24
+    else:
+        bull += 6; bear += 6
+    if ema_bull: bull += 10
+    if ema_bear: bear += 10
+    if fast > 0: bull += min(8, fast * 4)
+    if fast < 0: bear += min(8, -fast * 4)
+    if slow > 0: bull += min(8, slow * 2)
+    if slow < 0: bear += min(8, -slow * 2)
+    if struct_m15 == "bullish": bull += 8
+    if struct_m15 == "bearish": bear += 8
+
+    mc = market_context if isinstance(market_context, dict) else {}
+    breadth = _num(mc.get("bullish_breadth_pct"), None)
+    if breadth is not None:
+        if breadth >= 70: bull += 6
+        elif breadth <= 35: bear += 6
+        if breadth >= 80: bull += 2
+        elif breadth <= 20: bear += 2
+    rs1 = _num(mc.get("relative_strength_1h_pct"), None)
+    if rs1 is not None:
+        if rs1 > 0.40: bull += 5
+        elif rs1 < -0.40: bear += 5
+    rv = _num(mc.get("relative_volume"), None)
+    if rv is not None and rv >= 1.2:
+        if fast > 0: bull += 4
+        elif fast < 0: bear += 4
+
+    macro = "unknown"
+    if df_btc_h1 is not None:
+        bh1 = build_df(df_btc_h1, 60)
+        if bh1 is not None:
+            macro = "bullish" if bh1["ema9"].iloc[-1] > bh1["ema21"].iloc[-1] > bh1["ema50"].iloc[-1] else "bearish" if bh1["ema9"].iloc[-1] < bh1["ema21"].iloc[-1] < bh1["ema50"].iloc[-1] else "ranging"
+    elif str(mc.get("market_regime", "")).lower().startswith("bull"):
+        macro = "bullish"
+    elif str(mc.get("market_regime", "")).lower().startswith("bear"):
+        macro = "bearish"
+    if macro == "bullish": bull += 5; bear *= 0.88
+    elif macro == "bearish": bear += 5; bull *= 0.88
+
+    direction = "bull" if bull >= bear else "bear"
+    edge = abs(bull - bear)
+    direction_quality = _clip(50 + edge * 1.25)
+    return {
+        "direction": direction,
+        "bull_score": round(bull, 2),
+        "bear_score": round(bear, 2),
+        "direction_edge": round(edge, 2),
+        "direction_quality": round(direction_quality, 2),
+        "struct_h1": struct_h1,
+        "m15_struct": struct_m15,
+        "d1_bias": d1_bias,
+        "macro_bias": macro,
+        "atr": max(float(m15["atr"].iloc[-1]), float(h1["atr"].iloc[-1]) / 4),
+        "price": float(m15["close"].iloc[-1]),
+        "sh1": sh1, "sl1": sl1, "sh15": sh15, "sl15": sl15,
+        "h1": h1, "m15": m15, "d1": d1,
+    }
+
+
+def score_direction(df_h1, df_m15, df_d1=None, df_btc_h1=None):
+    return _direction_score(df_h1, df_m15, df_d1, None, df_btc_h1)
+
+
+def _zone_overlap(price, top, bot):
+    return float(bot) <= float(price) <= float(top)
+
+
+def _fresh_zone(df, formed_idx, top, bot, direction):
+    if formed_idx >= len(df) - 2:
         return True
-    start = formed_idx + 2
-    end = end_idx if end_idx is not None else len(df) - 1
-    if start >= end:
-        return True
-    sub = df.iloc[start:end]
+    sub = df.iloc[formed_idx + 2 :]
     if direction == "bull":
         return not bool((sub["close"] < bot).any())
-    if direction == "bear":
-        return not bool((sub["close"] > top).any())
-    touched = ((sub["low"] <= top) & (sub["high"] >= bot)).any()
-    return not bool(touched)
+    return not bool((sub["close"] > top).any())
 
-def fib_position(price: float, swing_low: float, swing_high: float) -> float:
-    """Posisi harga dalam range 0–1, 0 = swing_low, 1 = swing_high."""
-    rng = swing_high - swing_low
-    if rng <= 0:
-        return 0.5
-    return max(0.0, min(1.0, (price - swing_low) / rng))
 
-def is_in_ote(price: float, swing_low: float, swing_high: float,
-              direction: str) -> bool:
-    """
-    OTE (Optimal Trade Entry) — zona 61.8%–78.6% retracement.
-    Bull: fib_position antara 0.214 dan 0.382
-    Bear: fib_position antara 0.618 dan 0.786
-    """
-    if swing_high <= swing_low:
-        return False
-    r = fib_position(price, swing_low, swing_high)
-    if direction == "bull":
-        return 0.214 <= r <= 0.382
-    else:
-        return 0.618 <= r <= 0.786
+def _find_order_blocks(df, direction, lookback=POI_LOOKBACK):
+    sub = df.tail(lookback).reset_index(drop=True)
+    base = len(df) - len(sub)
+    avg_body = max(float((sub["close"] - sub["open"]).abs().median()), 1e-12)
+    out = []
+    for i in range(1, len(sub) - 4):
+        c, nxt = sub.iloc[i], sub.iloc[i + 1]
+        if direction == "bull" and not (c["close"] < c["open"] and nxt["close"] > nxt["open"]):
+            continue
+        if direction == "bear" and not (c["close"] > c["open"] and nxt["close"] < nxt["open"]):
+            continue
+        body = abs(float(nxt["close"] - nxt["open"]))
+        if body < avg_body * 1.25:
+            continue
+        top = float(max(c["open"], c["close"]))
+        bot = float(min(c["open"], c["close"]))
+        idx = base + i
+        if not _fresh_zone(df, idx, top, bot, direction):
+            continue
+        score = 0.0
+        score += min(30.0, body / avg_body * 10.0)
+        if i + 2 < len(sub):
+            c2 = sub.iloc[i + 2]
+            if direction == "bull" and c2["low"] > c["high"]: score += 20
+            if direction == "bear" and c2["high"] < c["low"]: score += 20
+        if idx >= len(df) - 20: score += 15
+        mid = (top + bot) / 2
+        if direction == "bull" and mid <= float(df["close"].iloc[-1]): score += 10
+        if direction == "bear" and mid >= float(df["close"].iloc[-1]): score += 10
+        out.append({"top": top, "bot": bot, "mid": mid, "idx": idx, "score": score, "kind": "ob"})
+    out.sort(key=lambda z: (-z["score"], -z["idx"]))
+    return out[:4]
 
-def detect_fvg(df: pd.DataFrame, direction: str, lb: int = 50) -> list:
-    """
-    Fair Value Gap (imbalance) — 3‑candle pattern.
-    Hanya return zona yang FRESH.
-    """
-    sub = df.iloc[-lb:]
+
+def _find_fvg(df, direction, lookback=POI_LOOKBACK):
+    sub = df.tail(lookback)
     base = len(df) - len(sub)
     out = []
     for i in range(len(sub) - 2):
-        c0, c2 = sub.iloc[i], sub.iloc[i + 2]
-        gap = None
-        if direction == "bull" and c2["low"] > c0["high"]:
-            gap = {"top": float(c2["low"]), "bot": float(c0["high"])}
-        elif direction == "bear" and c2["high"] < c0["low"]:
-            gap = {"top": float(c0["low"]), "bot": float(c2["high"])}
-        if gap:
-            gap["mid"] = (gap["top"] + gap["bot"]) / 2
-            gap["idx"] = base + i + 2
-            gap["is_fresh"] = is_zone_fresh(
-                df, gap["top"], gap["bot"], gap["idx"], direction=direction
-            )
-            out.append(gap)
-    fresh = [f for f in out if f["is_fresh"]]
-    return fresh[-3:] if fresh else []
-
-def detect_order_block(df: pd.DataFrame, direction: str, lb: int = 60,
-                       sh: Optional[list] = None, sl: Optional[list] = None) -> list:
-    """
-    Order Block berkualitas (transkrip 1, 14, 26).
-    Filter:
-      - zona fresh
-      - Fibonacci diskon (bull ≤ 0.618) / premium (bear ≥ 0.382)
-      - kualitas: impulse kuat, FVG setelahnya, BOS, recency.
-    Return list max 3, urut kualitas tertinggi.
-    """
-    is_demand = direction == "bull"
-    sub = df.iloc[-lb:]
-    base = len(df) - len(sub)
-    avg_body = (sub["close"] - sub["open"]).abs().mean() or 1e-8
-
-    # Fibonacci context
-    fib_sh = float(df["high"].iloc[sh[-1]]) if (sh and len(sh) > 0) else None
-    fib_sl = float(df["low"].iloc[sl[-1]]) if (sl and len(sl) > 0) else None
-
-    # BOS global
-    has_bos_global = False
-    if sh and sl:
-        if is_demand and len(sh) >= 2:
-            has_bos_global = float(df["high"].iloc[-1]) > float(df["high"].iloc[sh[-2]])
-        elif not is_demand and len(sl) >= 2:
-            has_bos_global = float(df["low"].iloc[-1]) < float(df["low"].iloc[sl[-2]])
-
-    zones = []
-    for i in range(1, len(sub) - 3):
-        c, nx = sub.iloc[i], sub.iloc[i + 1]
-        # Pola trigger + impulse
-        if is_demand:
-            if not (c["close"] < c["open"] and nx["close"] > nx["open"]):
-                continue
+        a, c = sub.iloc[i], sub.iloc[i + 2]
+        if direction == "bull" and c["low"] > a["high"]:
+            top, bot = float(c["low"]), float(a["high"])
+        elif direction == "bear" and c["high"] < a["low"]:
+            top, bot = float(a["low"]), float(c["high"])
         else:
-            if not (c["close"] > c["open"] and nx["close"] < nx["open"]):
-                continue
-
-        impulse_body = abs(nx["close"] - nx["open"])
-        if impulse_body < avg_body * 1.2:
             continue
-
-        ob_top = float(max(c["open"], c["close"]))
-        ob_bot = float(min(c["open"], c["close"]))
-        df_idx = base + i
-
-        if not is_zone_fresh(
-            df, ob_top, ob_bot, df_idx, direction=direction
-        ):
+        idx = base + i + 2
+        if not _fresh_zone(df, idx, top, bot, direction):
             continue
+        width = top - bot
+        out.append({"top": top, "bot": bot, "mid": (top + bot) / 2, "idx": idx, "score": 50 + min(30, width / max(float(df["atr"].iloc[-1]), 1e-12) * 20), "kind": "fvg"})
+    out.sort(key=lambda z: (-z["score"], -z["idx"]))
+    return out[:4]
 
-        q = 0
-        if impulse_body >= avg_body * 1.5:
-            q += 1
-        if impulse_body >= avg_body * 2.5:
-            q += 1
 
-        # FVG setelah OB
-        if i + 2 < len(sub):
-            c2 = sub.iloc[i + 2]
-            if is_demand and c2["low"] > c["high"]:
-                q += 1
-            elif not is_demand and c2["high"] < c["low"]:
-                q += 1
+def _find_equal_levels(df, kind="low", lookback=80, tol=0.0025):
+    sub = df.tail(lookback)
+    vals = sub[kind].to_numpy(dtype=float)
+    clusters = []
+    for i in range(len(vals)):
+        grp = [vals[i]]
+        for j in range(i + 1, len(vals)):
+            if abs(vals[i] - vals[j]) / max(abs(vals[i]), 1e-12) <= tol:
+                grp.append(vals[j])
+        if len(grp) >= 2:
+            clusters.append(float(np.mean(grp)))
+    return sorted(set(round(x, 10) for x in clusters))
 
-        if has_bos_global:
-            q += 1
 
-        # Fibonacci diskon/premium (kunci dari transkrip 1)
-        if fib_sh is not None and fib_sl is not None:
-            ob_mid = (ob_top + ob_bot) / 2
-            fib_r = fib_position(ob_mid, fib_sl, fib_sh)
-            if is_demand and fib_r <= 0.618:
-                q += 1
-            elif not is_demand and fib_r >= 0.382:
-                q += 1
-
-        if df_idx >= len(df) - 20:
-            q += 1
-
-        if q >= 2:
-            zones.append({
-                "top": ob_top,
-                "bot": ob_bot,
-                "mid": (ob_top + ob_bot) / 2,
-                "idx": df_idx,
-                "quality": q,
-                "has_bos": has_bos_global,
-            })
-
-    zones.sort(key=lambda z: (-z["quality"], -z["idx"]))
-    return zones[:3]
-
-def detect_choch(df: pd.DataFrame, sh: list, sl: list) -> dict:
-    """Change of Character (transkrip 17, 19, 20)."""
-    result = {"bullish_choch": False, "bearish_choch": False}
-    if len(sh) < 2 or len(sl) < 2:
-        return result
-    close = float(df["close"].iloc[-1])
-    prev_high = float(df["high"].iloc[sh[-2]])
-    last_high = float(df["high"].iloc[sh[-1]])
-    prev_low = float(df["low"].iloc[sl[-2]])
-    last_low = float(df["low"].iloc[sl[-1]])
-    struct = _market_structure(df, sh, sl)
-
-    # A ChoCH is a break of the *opposite* protected swing.  The old
-    # implementation compared a bullish close with prev_low (and a bearish
-    # close with prev_low), which is true on most ordinary candles and added
-    # +20 points to both random pullbacks and continuations.
-    if struct == "bearish" and close > last_high:
-        result["bullish_choch"] = True
-    if struct == "bullish" and close < last_low:
-        result["bearish_choch"] = True
-
-    # Raw reversal: require a close beyond the swing, never only a wick.
-    if last_high > prev_high and last_low > prev_low and close > last_high:
-        result["bullish_choch"] = True
-    if last_high < prev_high and last_low < prev_low and close < last_low:
-        result["bearish_choch"] = True
-    return result
-
-def detect_bos(df: pd.DataFrame, sh: list, sl: list) -> dict:
-    """Break of Structure (transkrip 17)."""
-    result = {"bullish_bos": False, "bearish_bos": False}
-    if len(sh) < 2 or len(sl) < 2:
-        return result
-
-    # Use the latest confirmed swing and a candle close.  Looking at the
-    # previous swing plus the current wick made old structure look broken
-    # long after the actual break had happened.
-    close = float(df["close"].iloc[-1])
-    last_high = float(df["high"].iloc[sh[-1]])
-    last_low = float(df["low"].iloc[sl[-1]])
-    prev_close = float(df["close"].iloc[-2]) if len(df) >= 2 else close
-    result["bullish_bos"] = close > last_high and prev_close <= last_high
-    result["bearish_bos"] = close < last_low and prev_close >= last_low
-    return result
-
-def detect_cisd(df: pd.DataFrame, lb: int = 8) -> dict:
-    """Change In State of Delivery (transkrip 29)."""
-    result = {"bullish_cisd": False, "bearish_cisd": False}
-    if len(df) < lb + 1:
-        return result
-    sub = df.iloc[-lb:]
-    opens = sub["open"].values
-    closes = sub["close"].values
-    n = len(closes)
-    if n < 4:
-        return result
-    last_bull = closes[-1] > opens[-1]
-    last_bear = closes[-1] < opens[-1]
-
-    if last_bull:
-        bear_run = 0
-        for j in range(n - 2, -1, -1):
-            if closes[j] < opens[j]:
-                bear_run += 1
-            else:
-                break
-        if bear_run >= 3:
-            first_idx = n - 1 - bear_run
-            if first_idx >= 0:
-                bear_mid = (opens[first_idx] + closes[first_idx]) / 2
-                if closes[-1] > bear_mid:
-                    result["bullish_cisd"] = True
-    elif last_bear:
-        bull_run = 0
-        for j in range(n - 2, -1, -1):
-            if closes[j] > opens[j]:
-                bull_run += 1
-            else:
-                break
-        if bull_run >= 3:
-            first_idx = n - 1 - bull_run
-            if first_idx >= 0:
-                bull_mid = (opens[first_idx] + closes[first_idx]) / 2
-                if closes[-1] < bull_mid:
-                    result["bearish_cisd"] = True
-    return result
-
-def detect_liquidity_sweep(df: pd.DataFrame, sh: list, sl: list,
-                           direction: str) -> dict:
-    """
-    Liquidity Sweep (transkrip 4, 9, 15, 18).
-    Valid: wick menembus swing, tapi close kembali di atas/bawah level.
-    """
-    result = {"type": "none", "level": None, "strength": 0}
+def _sweep(df, direction, sh, sl):
     if direction == "bull" and sl:
         level = float(df["low"].iloc[sl[-1]])
-        last_low = float(df["low"].iloc[-1])
-        last_close = float(df["close"].iloc[-1])
-        if last_low < level and last_close > level:
-            depth = (level - last_low) / max(level, 1e-10)
-            result = {
-                "type": "sweep",
-                "level": level,
-                "strength": min(3, int(depth / 0.002) + 1),
-            }
-    elif direction == "bear" and sh:
+        if float(df["low"].iloc[-1]) < level and float(df["close"].iloc[-1]) > level:
+            depth = (level - float(df["low"].iloc[-1])) / max(float(df["atr"].iloc[-1]), 1e-12)
+            return {"type": "sweep", "level": level, "strength": _clip(45 + depth * 25)}
+    if direction == "bear" and sh:
         level = float(df["high"].iloc[sh[-1]])
-        last_high = float(df["high"].iloc[-1])
-        last_close = float(df["close"].iloc[-1])
-        if last_high > level and last_close < level:
-            depth = (last_high - level) / max(level, 1e-10)
-            result = {
-                "type": "sweep",
-                "level": level,
-                "strength": min(3, int(depth / 0.002) + 1),
-            }
-    return result
-
-def detect_inducement(df: pd.DataFrame, direction: str,
-                      lb: int = INDUCEMENT_LOOKBACK) -> dict:
-    """
-    Inducement (transkrip "How the Market Traps Traders with Inducement" &
-    "trading strategy using inducement [SNIPER ENTRY]").
-
-    Konsep: sebelum harga bereaksi di POI "asli" (OB/FVG yang lebih dalam),
-    market sering menyapu dulu liquidity pool MINOR (swing kecil) yang
-    memancing early entry ("inducement"). Kalau minor pool itu SUDAH disapu
-    (wick tembus, close kembali ke sisi yang benar) sebelum harga mendekati
-    POI kita, itu tanda bagus — bukan validasi wajib, cuma BONUS confidence,
-    supaya kuantitas sinyal tidak berkurang untuk koin yang tidak
-    menunjukkan pola ini secara eksplisit.
-
-    Return: {"found": bool, "level": float|None, "swept": bool}
-    """
-    out = {"found": False, "level": None, "swept": False}
-    if df is None or len(df) < lb + INDUCEMENT_MINOR_LB * 2 + 1:
-        return out
-    sub = df.iloc[-lb:].reset_index(drop=True)
-    sh_m, sl_m = swing_pts(sub, lb=INDUCEMENT_MINOR_LB)
-    try:
-        if direction == "bull" and sl_m:
-            idx = sl_m[-1]
-            if idx >= len(sub) - 2:
-                return out
-            level = float(sub["low"].iloc[idx])
-            after = sub.iloc[idx + 1:]
-            swept = bool((after["low"] < level).any() and
-                         float(after["close"].iloc[-1]) > level)
-            out = {"found": True, "level": level, "swept": swept}
-        elif direction == "bear" and sh_m:
-            idx = sh_m[-1]
-            if idx >= len(sub) - 2:
-                return out
-            level = float(sub["high"].iloc[idx])
-            after = sub.iloc[idx + 1:]
-            swept = bool((after["high"] > level).any() and
-                         float(after["close"].iloc[-1]) < level)
-            out = {"found": True, "level": level, "swept": swept}
-    except Exception:
-        return {"found": False, "level": None, "swept": False}
-    return out
-
-def zones_overlap(a_top: float, a_bot: float, b_top: float, b_bot: float) -> bool:
-    """True jika dua rentang harga [bot, top] saling overlap (dipakai untuk
-    cek konfluensi OB/FVG M15 dengan zona H1 — 'How to Choose the Best Order
-    Block When All Zones Look Valid')."""
-    lo = max(min(a_bot, a_top), min(b_bot, b_top))
-    hi = min(max(a_bot, a_top), max(b_bot, b_top))
-    return lo <= hi
-
-def detect_equal_highs_lows(df: pd.DataFrame, kind: str = "high",
-                            lb: int = 80, tol: float = 0.003) -> list:
-    """Equal Highs/Lows (transkrip 15, 24)."""
-    sub = df.iloc[-lb:]
-    vals = sub["high"] if kind == "high" else sub["low"]
-    clusters, visited = [], set()
-    for i in range(len(vals)):
-        if i in visited:
-            continue
-        group = [float(vals.iloc[i])]
-        for j in range(i + 1, len(vals)):
-            if abs(vals.iloc[i] - vals.iloc[j]) / max(abs(float(vals.iloc[i])), 1e-10) < tol:
-                group.append(float(vals.iloc[j]))
-                visited.add(j)
-        if len(group) >= 2:
-            clusters.append(sum(group) / len(group))
-    return sorted(clusters)
-
-def detect_rsi_divergence(df: pd.DataFrame, direction: str, lb: int = 30) -> dict:
-    """RSI Divergence (transkrip 19)."""
-    result = {"bull_div": False, "bear_div": False, "strong": False}
-    if len(df) < lb + 1 or "rsi" not in df.columns:
-        return result
-    sub = df.iloc[-lb:]
-    price = sub["close"].values
-    rsi_v = sub["rsi"].values
-    n = len(price)
-    lb3 = 3
-
-    lows = [i for i in range(lb3, n - lb3)
-            if price[i] == min(price[max(0, i - lb3): i + lb3 + 1])]
-    if len(lows) >= 2:
-        i1, i2 = lows[-2], lows[-1]
-        if price[i2] < price[i1] and rsi_v[i2] > rsi_v[i1]:
-            result["bull_div"] = True
-            if rsi_v[i2] < 35:
-                result["strong"] = True
-
-    highs = [i for i in range(lb3, n - lb3)
-             if price[i] == max(price[max(0, i - lb3): i + lb3 + 1])]
-    if len(highs) >= 2:
-        i1, i2 = highs[-2], highs[-1]
-        if price[i2] > price[i1] and rsi_v[i2] < rsi_v[i1]:
-            result["bear_div"] = True
-            if rsi_v[i2] > 65:
-                result["strong"] = True
-
-    if direction == "bull" and not result["bull_div"]:
-        return {"bull_div": False, "bear_div": False, "strong": False}
-    if direction == "bear" and not result["bear_div"]:
-        return {"bull_div": False, "bear_div": False, "strong": False}
-    return result
-
-def detect_failed_retest(df: pd.DataFrame, sh: list, sl: list,
-                         atr: float) -> dict:
-    """Failed retest (untuk kompatibilitas)."""
-    result = {"failed_retest_sell": False, "failed_retest_buy": False}
-    if len(df) < 3 or not sh or not sl:
-        return result
-    L = df.iloc[-1]
-    P = df.iloc[-2]
-    if len(sh) >= 2:
-        res = float(df["high"].iloc[sh[-2]])
-        if P["high"] >= res - atr * 0.5 and L["close"] < res - atr * 0.3 and L["close"] < L["open"]:
-            result["failed_retest_sell"] = True
-    if len(sl) >= 2:
-        sup = float(df["low"].iloc[sl[-2]])
-        if P["low"] <= sup + atr * 0.5 and L["close"] > sup + atr * 0.3 and L["close"] > L["open"]:
-            result["failed_retest_buy"] = True
-    return result
+        if float(df["high"].iloc[-1]) > level and float(df["close"].iloc[-1]) < level:
+            depth = (float(df["high"].iloc[-1]) - level) / max(float(df["atr"].iloc[-1]), 1e-12)
+            return {"type": "sweep", "level": level, "strength": _clip(45 + depth * 25)}
+    return {"type": "none", "level": None, "strength": 0}
 
 
-def detect_entry_confirmation(df: pd.DataFrame, direction: str, atr: float,
-                              lb: int = CONFIRMATION_LOOKBACK) -> dict:
-    """Konfirmasi displacement yang baru, bukan sekadar lokasi entry.
-
-    OTE, RSI divergence, discount/premium, dan sweep menjelaskan lokasi atau
-    kemungkinan reaksi. Mereka tidak membuktikan bahwa buyer/seller sudah
-    mengambil alih. Konfirmasi ini membutuhkan candle close searah yang
-    menembus range pendek sebelumnya dengan body yang cukup besar.
-    """
-    out = {
-        "confirmed": False,
-        "direction": direction,
-        "kind": "none",
-        "idx": None,
-        "body_atr": 0.0,
-    }
-    if df is None or len(df) < max(lb + 2, 8):
-        return out
-
+def _displacement(df, direction):
     last = df.iloc[-1]
-    prior = df.iloc[-(lb + 1):-1]
-    body = abs(float(last["close"]) - float(last["open"]))
-    local_atr = max(float(atr), 1e-10)
-    body_atr = body / local_atr
-    out["body_atr"] = round(body_atr, 3)
-
-    recent_bodies = (df["close"] - df["open"]).abs().iloc[-(lb + 5):-1]
-    median_body = float(recent_bodies.median()) if not recent_bodies.empty else 0.0
-    min_body = max(local_atr * MIN_DISPLACEMENT_ATR, median_body * 0.8)
-
+    body = abs(float(last["close"] - last["open"]))
+    atr = max(float(last["atr"]), 1e-12)
+    recent = df["close"].iloc[-5:-1]
+    med = max(float((df["close"] - df["open"]).abs().iloc[-8:-1].median()), atr * 0.20)
     if direction == "bull":
-        confirmed = (
-            float(last["close"]) > float(last["open"])
-            and float(last["close"]) > float(prior["high"].max())
-            and body >= min_body
-        )
+        ok = float(last["close"]) > float(last["open"]) and float(last["close"]) > float(recent.max()) and body >= max(atr * MIN_DISPLACEMENT_ATR, med)
     else:
-        confirmed = (
-            float(last["close"]) < float(last["open"])
-            and float(last["close"]) < float(prior["low"].min())
-            and body >= min_body
-        )
-
-    if confirmed:
-        out.update({
-            "confirmed": True,
-            "kind": "displacement_close",
-            "idx": len(df) - 1,
-        })
-    return out
+        ok = float(last["close"]) < float(last["open"]) and float(last["close"]) < float(recent.min()) and body >= max(atr * MIN_DISPLACEMENT_ATR, med)
+    return bool(ok), body / atr
 
 
-def _collect_htf_poi_zones(h1: pd.DataFrame, direction: str,
-                           score_ctx: dict) -> list:
-    """Kumpulkan POI H1 searah untuk validasi reaksi sebelum entry."""
-    zones = []
-    try:
-        for z in detect_order_block(
-            h1, direction, lb=80,
-            sh=score_ctx.get("sh1", []),
-            sl=score_ctx.get("sl1", []),
-        ):
-            zones.append({
-                "top": float(z["top"]),
-                "bot": float(z["bot"]),
-                "kind": "ob_h1",
-            })
-        for f in detect_fvg(h1, direction, lb=60):
-            zones.append({
-                "top": float(f["top"]),
-                "bot": float(f["bot"]),
-                "kind": "fvg_h1",
-            })
-    except Exception:
-        return []
-    return zones
+def _pullback_quality(df, direction, atr):
+    n = 10
+    if len(df) < n + 4:
+        return {"score": 45, "state": "unknown", "depth_atr": 0.0, "efficiency": 0.0}
+    sub = df.tail(n + 1)
+    move = float(sub["close"].iloc[-1] - sub["close"].iloc[0])
+    if direction == "bear": move = -move
+    gross = float(sub["close"].diff().abs().sum())
+    eff = abs(move) / max(gross, 1e-12)
+    adverse = min(float((sub["low"] - sub["close"].iloc[0]).min()), 0.0) if direction == "bull" else min(float((sub["close"].iloc[0] - sub["high"]).min()), 0.0)
+    depth = abs(adverse) / max(atr, 1e-12)
+    score = 55.0
+    if 0.25 <= depth <= 1.50: score += 20
+    elif depth > 2.0: score -= 20
+    if eff >= 0.45: score += 15
+    elif eff < 0.22: score -= 12
+    if direction == "bull" and sub["close"].iloc[-1] > sub["close"].iloc[-2]: score += 8
+    if direction == "bear" and sub["close"].iloc[-1] < sub["close"].iloc[-2]: score += 8
+    state = "clean" if score >= 70 else "mixed" if score >= 45 else "damaged"
+    return {"score": _clip(score), "state": state, "depth_atr": round(depth, 3), "efficiency": round(eff, 3)}
 
 
-def _recent_poi_reaction(m15: pd.DataFrame, zones: list, direction: str,
-                         atr: float,
-                         lookback: int = POI_REACTION_LOOKBACK) -> bool:
-    """Pastikan POI HTF sudah disentuh dan mendapat rejection baru.
-
-    Retest saja tidak cukup. Setelah harga masuk POI, harus ada close kembali
-    keluar dari sisi reaksi zona. Ini mencegah pending order dipasang hanya
-    karena OB/FVG lama masih terlihat fresh.
-    """
-    if m15 is None or m15.empty or not zones:
-        return False
-    start = max(0, len(m15) - lookback)
-    sub = m15.iloc[start:]
-    body_floor = max(float(atr) * MIN_DISPLACEMENT_ATR, 1e-10)
-
-    for zone in zones:
-        top, bot = float(zone["top"]), float(zone["bot"])
-        for i in range(len(sub)):
-            candle = sub.iloc[i]
-            touched = float(candle["low"]) <= top and float(candle["high"]) >= bot
-            if not touched:
-                continue
-            for j in range(i, min(i + 5, len(sub))):
-                reaction = sub.iloc[j]
-                body = abs(float(reaction["close"]) - float(reaction["open"]))
-                if direction == "bull":
-                    ok = (
-                        float(reaction["close"]) > top
-                        and float(reaction["close"]) > float(reaction["open"])
-                        and body >= body_floor
-                    )
-                else:
-                    ok = (
-                        float(reaction["close"]) < bot
-                        and float(reaction["close"]) < float(reaction["open"])
-                        and body >= body_floor
-                    )
-                if ok:
-                    return True
-    return False
+def _location_quality(df, direction, price, atr):
+    look = df.tail(ENTRY_LOOKBACK)
+    lo, hi = float(look["low"].min()), float(look["high"].max())
+    pos = (price - lo) / max(hi - lo, 1e-12)
+    score = 50.0
+    if direction == "bull":
+        score += 28 if pos <= ENTRY_PREFERRED_BUY else -24 if pos >= ENTRY_LOCATION_SOFT_HIGH else 8
+    else:
+        score += 28 if pos >= ENTRY_PREFERRED_SELL else -24 if pos <= ENTRY_LOCATION_SOFT_LOW else 8
+    near_high = abs(hi - price) / max(atr, 1e-12)
+    near_low = abs(price - lo) / max(atr, 1e-12)
+    if direction == "bull" and near_high < 0.45: score -= 10
+    if direction == "bear" and near_low < 0.45: score -= 10
+    return {"score": _clip(score), "range_position": round(pos, 3), "range_low": lo, "range_high": hi}
 
 
-# =============================================================================
-# SCORING — Confidence global tanpa bias sesi
-# =============================================================================
+def _candidate_levels(m15, h1, direction, current_price, atr):
+    zones = _find_order_blocks(m15, direction) + _find_fvg(m15, direction)
+    zones += _find_order_blocks(h1, direction, HTF_POI_LOOKBACK) + _find_fvg(h1, direction, HTF_POI_LOOKBACK)
+    out = []
+    seen = set()
+    for z in zones:
+        p = float(z["mid"])
+        if direction == "bull" and p > current_price * 1.006:
+            continue
+        if direction == "bear" and p < current_price * 0.994:
+            continue
+        if abs(current_price - p) > atr * MAIN_ENTRY_MAX_ATR:
+            continue
+        key = round(p, 10)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(z)
+    if not out:
+        out = [{"mid": current_price, "top": current_price, "bot": current_price, "score": 35, "kind": "market", "idx": len(m15)-1}]
+    return sorted(out, key=lambda z: z.get("score", 0), reverse=True)[:6]
 
-def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
-                    df_d1: Optional[pd.DataFrame] = None,
-                    df_btc_h1: Optional[pd.DataFrame] = None) -> Optional[dict]:
-    """
-    Tentukan arah dan skor confidence global (tanpa bias sesi).
-    Faktor scoring (max ~165):
-      - D1 bias (struktur/EMA)         +20
-      - H1 structure                   +20
-      - H1 ChoCH                       +10
-      - H1 BOS                         +5
-      - H1 EMA stack                   +10
-      - M15 ChoCH                      +20
-      - M15 BOS                        +10
-      - M15 CISD                       +15
-      - M15 Liquidity Sweep            +15
-      - M15 OTE                        +10
-      - M15 Fibonacci diskon/premium   +10
-      - M15 RSI divergence             +10 (+5 if strong)
-      - M15 failed retest              +10
-    Penalti: jika setup M15 berlawanan dengan bias D1 → kurangi 50%.
-    """
-    h1 = build_df(df_h1, interval_minutes=60)
-    m15 = build_df(df_m15, interval_minutes=15)
-    if h1 is None or m15 is None:
+
+def _compute_geometry(m15, h1, direction, entry, atr):
+    sh, sl = swing_pts(m15, SWING_LB)
+    h1sh, h1sl = swing_pts(h1, 5)
+    if direction == "bull":
+        anchors = [float(m15["low"].iloc[sl[-1]]) for _ in [0] if sl]
+        if h1sl: anchors.append(float(h1["low"].iloc[h1sl[-1]]))
+        anchor = min([x for x in anchors if x < entry] or [entry - atr * 1.0])
+        sl = anchor - atr * 0.18
+        risk = entry - sl
+    else:
+        anchors = [float(m15["high"].iloc[sh[-1]]) for _ in [0] if sh]
+        if h1sh: anchors.append(float(h1["high"].iloc[h1sh[-1]]))
+        anchor = max([x for x in anchors if x > entry] or [entry + atr * 1.0])
+        sl = anchor + atr * 0.18
+        risk = sl - entry
+    risk = float(risk)
+    risk_pct = risk / max(entry, 1e-12) * 100.0
+    risk_atr = risk / max(atr, 1e-12)
+    if risk <= 0 or risk_atr < ENTRY_MIN_RISK_ATR or risk_atr > ENTRY_MAX_RISK_ATR or risk_pct < ENTRY_MIN_RISK_PCT or risk_pct > ENTRY_MAX_RISK_PCT:
         return None
-
-    L1 = h1.iloc[-1]
-    L15 = m15.iloc[-1]
-    atr = max(float(L15["atr"]),
-              float(L1["atr"]) / 4,
-              float(L15["close"]) * 0.003)
-
-    sh1, sl1 = swing_pts(h1, lb=5)
-    sh15, sl15 = swing_pts(m15, lb=5)
-    struct_h1 = _market_structure(h1, sh1, sl1)
-
-    # ── D1 bias ──────────────────────────────────────────────────
-    d1_bias = "neutral"
-    try:
-        if df_d1 is not None and len(df_d1) >= 65:
-            d1 = build_df(df_d1, interval_minutes=1440)
-        else:
-            d1 = build_df(
-                df_h1.resample("1D").agg(
-                    {"open": "first", "high": "max", "low": "min",
-                     "close": "last", "volume": "sum"}
-                ).dropna()
-            )
-        if d1 is not None and len(d1) >= 10:
-            LD = d1.iloc[-1]
-            shd, sld = swing_pts(d1, lb=3)
-            sd1 = _market_structure(d1, shd, sld)
-            bull_d1 = sd1 == "bullish" or (LD["ema9"] > LD["ema21"] > LD["ema50"])
-            bear_d1 = sd1 == "bearish" or (LD["ema9"] < LD["ema21"] < LD["ema50"])
-            if bull_d1:
-                d1_bias = "bullish"
-            elif bear_d1:
-                d1_bias = "bearish"
-    except Exception:
-        pass
-
-    # ── H1 indikator ─────────────────────────────────────────────
-    ema_h1_bull = L1["ema9"] > L1["ema21"] > L1["ema50"]
-    ema_h1_bear = L1["ema9"] < L1["ema21"] < L1["ema50"]
-    choch_h1 = detect_choch(h1, sh1, sl1)
-    bos_h1 = detect_bos(h1, sh1, sl1)
-
-    # ── M15 indikator ─────────────────────────────────────────────
-    choch_m15 = detect_choch(m15, sh15, sl15)
-    bos_m15 = detect_bos(m15, sh15, sl15)
-    cisd_m15 = detect_cisd(m15, lb=8)
-    liq_bull = detect_liquidity_sweep(m15, sh15, sl15, "bull")
-    liq_bear = detect_liquidity_sweep(m15, sh15, sl15, "bear")
-    fr_m15 = detect_failed_retest(m15, sh15, sl15, atr)
-
-    # ── Fibonacci M15 context ─────────────────────────────────────
-    fib_sh = float(m15["high"].iloc[sh15[-1]]) if sh15 else None
-    fib_sl = float(m15["low"].iloc[sl15[-1]]) if sl15 else None
-    fib_r = fib_position(float(L15["close"]), fib_sl or 0, fib_sh or 1) \
-            if (fib_sh and fib_sl) else 0.5
-
-    ote_bull = is_in_ote(float(L15["close"]), fib_sl or 0, fib_sh or 1, "bull") if (fib_sh and fib_sl) else False
-    ote_bear = is_in_ote(float(L15["close"]), fib_sl or 0, fib_sh or 1, "bear") if (fib_sh and fib_sl) else False
-
-    in_discount = fib_r < 0.45
-    in_premium = fib_r > 0.55
-
-    rdiv_bull = detect_rsi_divergence(m15, "bull", lb=30)
-    rdiv_bear = detect_rsi_divergence(m15, "bear", lb=30)
-
-    # ── Inducement dan konfirmasi entry ────────────────────────────
-    induce_bull = detect_inducement(m15, "bull")
-    induce_bear = detect_inducement(m15, "bear")
-    confirm_bull = detect_entry_confirmation(m15, "bull", atr)
-    confirm_bear = detect_entry_confirmation(m15, "bear", atr)
-
-    # ── Score BULL ───────────────────────────────────────────────
-    bull = 0
-    if d1_bias == "bullish":                    bull += 20
-    if struct_h1 == "bullish":                  bull += 20
-    elif struct_h1 == "ranging":                bull += 5
-    if choch_h1["bullish_choch"]:               bull += 10
-    if bos_h1["bullish_bos"]:                   bull += 5
-    if ema_h1_bull:                             bull += 10
-    if choch_m15["bullish_choch"]:              bull += 20
-    if bos_m15["bullish_bos"]:                  bull += 10
-    if cisd_m15["bullish_cisd"]:                bull += 15
-    if liq_bull["type"] == "sweep":             bull += 15
-    if ote_bull:                                bull += 10
-    if in_discount:                             bull += 10
-    if rdiv_bull.get("bull_div"):
-        bull += 10 + (5 if rdiv_bull.get("strong") else 0)
-    if fr_m15["failed_retest_buy"]:             bull += 10
-    if induce_bull.get("swept"):                bull += 8
-
-    # ── Score BEAR ───────────────────────────────────────────────
-    bear = 0
-    if d1_bias == "bearish":                    bear += 20
-    if struct_h1 == "bearish":                  bear += 20
-    elif struct_h1 == "ranging":                bear += 5
-    if choch_h1["bearish_choch"]:               bear += 10
-    if bos_h1["bearish_bos"]:                   bear += 5
-    if ema_h1_bear:                             bear += 10
-    if choch_m15["bearish_choch"]:              bear += 20
-    if bos_m15["bearish_bos"]:                  bear += 10
-    if cisd_m15["bearish_cisd"]:                bear += 15
-    if liq_bear["type"] == "sweep":             bear += 15
-    if ote_bear:                                bear += 10
-    if in_premium:                              bear += 10
-    if rdiv_bear.get("bear_div"):
-        bear += 10 + (5 if rdiv_bear.get("strong") else 0)
-    if fr_m15["failed_retest_sell"]:            bear += 10
-    if induce_bear.get("swept"):                bear += 8
-
-    # ── Macro bias (BTC H1) — konteks tambahan, bukan pengganti HTF koin ──
-    macro_bias = _macro_bias(df_btc_h1)
-    if macro_bias == "bullish":
-        bull += MACRO_ALIGN_BONUS
-        bear = int(bear * MACRO_AGAINST_MULT)
-    elif macro_bias == "bearish":
-        bear += MACRO_ALIGN_BONUS
-        bull = int(bull * MACRO_AGAINST_MULT)
-    # macro_bias == "ranging"/"unknown" → tidak ada perubahan sama sekali
-
-    # ── HTF direction gate ─────────────────────────────────────────
-    # D1 dan H1 bukan lagi bonus independen yang bisa dikalahkan oleh RSI,
-    # OTE, atau sweep. Jika keduanya berlawanan, market sedang tidak memiliki
-    # bias yang cukup jelas untuk limit order baru; tunggu alignment berikutnya.
-    h1_bias = "bullish" if struct_h1 == "bullish" else (
-        "bearish" if struct_h1 == "bearish" else "neutral"
-    )
-    if d1_bias in ("bullish", "bearish") and h1_bias in ("bullish", "bearish"):
-        htf_bias = d1_bias if d1_bias == h1_bias else "conflict"
-    elif d1_bias in ("bullish", "bearish"):
-        htf_bias = d1_bias
-    elif h1_bias in ("bullish", "bearish"):
-        htf_bias = h1_bias
-    else:
-        htf_bias = "neutral"
-
-    if htf_bias == "bullish":
-        direction = "bull"
-    elif htf_bias == "bearish":
-        direction = "bear"
-    else:
-        # Konflik/ranging bukan auto-reject. Pilih sisi dengan confluence
-        # terbesar dan biarkan confidence yang menghukum setup yang lemah.
-        direction = "bull" if bull >= bear else "bear"
-    raw = bull if direction == "bull" else bear
-    # ── FIX BUG KRITIS (scan 50 koin selalu "Tidak ada setup valid") ──
-    # MAX_SCORE=173 lama = jumlah SEMUA bonus sekaligus (D1+H1+ChoCH+BOS+
-    # EMA+M15 ChoCH+BOS+CISD+Liquidity+OTE+Fib+RSIdiv+failed_retest+
-    # inducement, semua di arah yang sama). Dites empiris lewat 300
-    # skenario pasar acak (termasuk tren paling bersih): skor mentah
-    # MAKSIMUM yang pernah tercapai cuma ~88, rata-rata ~40, p99 ~75 —
-    # skala 173 bikin confidence yang ditampilkan jauh lebih rendah dari
-    # kualitas setup sebenarnya (bahkan setup terbaik pun mentok ~50%).
-    # Direkalibrasi ke 100 (dekat batas atas realistis) supaya angka
-    # confidence yang tampil BERARTI sesuatu — setup kuat bisa mendekati
-    # 80-90%, bukan mentok di 50%.
-    MAX_SCORE = 100
-    confidence = min(int(raw / MAX_SCORE * 100), 99)
-    if htf_bias == "conflict":
-        confidence = max(0, confidence - 12)
-    elif htf_bias == "neutral":
-        confidence = max(0, confidence - 5)
-
-    # Direction quality is separate from the absolute score.  A high score
-    # assembled from unrelated bonuses is not enough when H1 and M15 disagree.
-    edge = abs(bull - bear)
-    m15_struct = _market_structure(m15, sh15, sl15)
-    trend_metrics = _trend_strength_metrics(m15, direction, atr)
-    pullback_metrics = _pullback_quality_metrics(m15, direction, atr)
-    liquidity_metrics = _liquidity_context_metrics(m15, direction, atr)
-    selected_choch = choch_m15["bullish_choch"] if direction == "bull" else choch_m15["bearish_choch"]
-    selected_bos = bos_m15["bullish_bos"] if direction == "bull" else bos_m15["bearish_bos"]
-    selected_cisd = cisd_m15["bullish_cisd"] if direction == "bull" else cisd_m15["bearish_cisd"]
-    selected_confirm = (
-        confirm_bull if direction == "bull" else confirm_bear
-    )
-    selected_sweep = (
-        liq_bull if direction == "bull" else liq_bear
-    ).get("type") == "sweep"
-    # Sweep hanya lokasi liquidity, bukan bukti arah. Trigger utama harus
-    # berupa structure/displacement yang terjadi pada candle terbaru.
-    trigger_count = sum(bool(x) for x in (
-        selected_choch, selected_bos, selected_cisd,
-        selected_confirm.get("confirmed"),
-    ))
-
-    # V11: market-health metrics are exposed as evidence; they do not hard-cap
-    # confidence here. The operator threshold remains external in main.py.
-
-    return {
-        "direction": direction,
-        "confidence": confidence,
-        "bull_score": bull,
-        "bear_score": bear,
-        "direction_edge": edge,
-        "m15_struct": m15_struct,
-        "trigger_count": trigger_count,
-        "htf_bias": htf_bias,
-        "h1_bias": h1_bias,
-        "entry_confirmation": selected_confirm,
-        "entry_confirmation_bull": confirm_bull,
-        "entry_confirmation_bear": confirm_bear,
-        "selected_sweep": selected_sweep,
-        "price": float(L15["close"]),
-        "atr": atr,
-        "struct_h1": struct_h1,
-        "d1_bias": d1_bias,
-        "macro_bias": macro_bias,
-        "choch_m15": choch_m15,
-        "choch_h1": choch_h1,
-        "cisd_m15": cisd_m15,
-        "bos_m15": bos_m15,
-        "bos_h1": bos_h1,
-        "m15_rsi": float(L15["rsi"]),
-        "m15_rsi_slope": float(L15["rsi"] - m15["rsi"].iloc[-2]) if len(m15) >= 2 else 0.0,
-        "m15_relative_volume": _relative_volume(m15, 20) if len(m15) >= 23 else 1.0,
-        "m15_momentum_aligned": bool((direction == "bull" and _momentum_context(m15).get("bull")) or (direction == "bear" and _momentum_context(m15).get("bear"))),
-        "m15_divergence_against": bool((direction == "bull" and rdiv_bear.get("bear_div")) or (direction == "bear" and rdiv_bull.get("bull_div"))),
-        "trend_strength": trend_metrics,
-        "pullback_quality": pullback_metrics,
-        "liquidity_context": liquidity_metrics,
-        "failed_retest": fr_m15,
-        "liquidity_bull": liq_bull,
-        "liquidity_bear": liq_bear,
-        "inducement_bull": induce_bull,
-        "inducement_bear": induce_bear,
-        "sh15": sh15, "sl15": sl15,
-        "sh1": sh1, "sl1": sl1,
-        "fib_r": round(fib_r, 3),
-        "ote_bull": ote_bull,
-        "ote_bear": ote_bear,
-    }
+    return float(sl), risk, sh, sl, h1sh, h1sl, risk_atr, risk_pct
 
 
-
-# =============================================================================
-# V11 MARKET-REGIME REASONER
-# =============================================================================
-def infer_market_regime(df_btc_h1: Optional[pd.DataFrame] = None) -> dict:
-    """Infer a soft crypto market regime from BTC H1 when supplied.
-
-    This is deliberately context, not a hard entry filter. It allows the same
-    strategy to reason differently in expansion, consolidation, exhaustion and
-    risk-off conditions without hard-coding today's price.  Current external
-    market research on 25 Aug 2026 describes BTC above $80k after a sharp rally,
-    with consolidation/high sentiment and elevated reversal risk; V11 therefore
-    treats strong expansion followed by exhaustion as a *caution signal*, not a
-    prohibition on trades.
-    """
-    if df_btc_h1 is None or df_btc_h1.empty or len(df_btc_h1) < 30:
-        return {"state": "UNKNOWN", "bias": "neutral", "score": 50.0,
-                "reason": "BTC H1 tidak tersedia; macro context non-blocking."}
-    try:
-        x = build_df(_closed_candles(df_btc_h1, 60), interval_minutes=60)
-        atr = max(float(x["atr"].iloc[-1]), 1e-12)
-        c = x["close"].astype(float)
-        fast = (float(c.iloc[-1] - c.iloc[-3]) / atr)
-        slow = (float(c.iloc[-1] - c.iloc[-10]) / atr)
-        ema20 = float(ema(c, 20).iloc[-1])
-        ema50 = float(ema(c, 50).iloc[-1]) if len(c) >= 50 else ema20
-        above = float(c.iloc[-1]) > ema20 > ema50
-        below = float(c.iloc[-1]) < ema20 < ema50
-        if above and fast > 0.6 and slow > 1.0:
-            state, bias, score = "EXPANSION_BULL", "bullish", 78.0
-        elif below and fast < -0.6 and slow < -1.0:
-            state, bias, score = "EXPANSION_BEAR", "bearish", 22.0
-        elif above and fast < 0:
-            state, bias, score = "BULLISH_EXHAUSTION", "bullish", 62.0
-        elif below and fast > 0:
-            state, bias, score = "BEARISH_EXHAUSTION", "bearish", 38.0
-        else:
-            state, bias, score = "CONSOLIDATION", "neutral", 50.0
-        return {"state": state, "bias": bias, "score": score,
-                "fast_atr": round(fast, 3), "slow_atr": round(slow, 3),
-                "ema20": ema20, "ema50": ema50}
-    except Exception as exc:
-        return {"state": "UNKNOWN", "bias": "neutral", "score": 50.0,
-                "reason": f"macro context unavailable: {exc}"}
-
-
-# =============================================================================
-# V11 ENTRY INTELLIGENCE — TREND / PULLBACK / POI / LIQUIDITY
-# =============================================================================
-
-def _trend_strength_metrics(m15: pd.DataFrame, direction: str, atr: Optional[float] = None) -> dict:
-    """Measure trend strength as price progress per unit time + efficiency.
-
-    The research corpus emphasizes that trend strength is not merely the
-    presence of HH/HL or LL/LH; the *speed and efficiency* of directional
-    progress matters. This is used as a soft quality signal, not a standalone
-    entry trigger.
-    """
-    if m15 is None or len(m15) < max(V11_TREND_LOOKBACK_SLOW + 2, 12):
-        return {"score": 0, "state": "UNKNOWN", "fast_atr": 0.0,
-                "slow_atr": 0.0, "efficiency": 0.0, "progress_ratio": 0.0}
-    atr_v = max(float(atr if atr is not None else m15["atr"].iloc[-1]), 1e-12)
-    close = m15["close"].astype(float)
-
-    def _directional_move(n: int) -> float:
-        delta = float(close.iloc[-1] - close.iloc[-1-n])
-        return delta if direction == "bull" else -delta
-
-    def _efficiency(n: int) -> float:
-        seg = close.iloc[-n-1:]
-        net = abs(float(seg.iloc[-1] - seg.iloc[0]))
-        gross = float(seg.diff().abs().sum())
-        return net / max(gross, 1e-12)
-
-    fast = _directional_move(V11_TREND_LOOKBACK_FAST) / atr_v
-    slow = _directional_move(V11_TREND_LOOKBACK_SLOW) / atr_v
-    eff = _efficiency(V11_TREND_LOOKBACK_SLOW)
-    bar_speed = max(0.0, slow) / max(V11_TREND_LOOKBACK_SLOW, 1)
-
-    sh, sl = swing_pts(m15, lb=3)
-    structure_progress = False
-    if direction == "bull" and len(sh) >= 2 and len(sl) >= 2:
-        structure_progress = float(m15["high"].iloc[sh[-1]]) > float(m15["high"].iloc[sh[-2]])
-    elif direction == "bear" and len(sh) >= 2 and len(sl) >= 2:
-        structure_progress = float(m15["low"].iloc[sl[-1]]) < float(m15["low"].iloc[sl[-2]])
-
-    score = 0.0
-    score += min(35.0, max(0.0, fast * 18.0))
-    score += min(25.0, max(0.0, slow * 10.0))
-    score += min(25.0, eff * 25.0)
-    if structure_progress:
-        score += 15.0
-    score = max(0.0, min(100.0, score))
-    if score >= 70:
-        state_name = "STRONG"
-    elif score >= 52:
-        state_name = "HEALTHY"
-    elif score >= 48:
-        state_name = "WEAK"
-    else:
-        state_name = "FRAGILE"
-    return {
-        "score": round(score, 1),
-        "state": state_name,
-        "fast_atr": round(fast, 3),
-        "slow_atr": round(slow, 3),
-        "efficiency": round(eff, 3),
-        "progress_ratio": round(bar_speed, 4),
-        "structure_progress": bool(structure_progress),
-    }
-
-
-def _pullback_quality_metrics(m15: pd.DataFrame, direction: str, atr: Optional[float] = None) -> dict:
-    """Classify whether the current move is a real corrective pullback.
-
-    A pullback is stronger when there is an impulse, a meaningful but bounded
-    counter-move, and evidence that liquidity/structure was interacted with.
-    Merely seeing a few opposite candles is not enough.
-    """
-    if m15 is None or len(m15) < 20:
-        return {"score": 0, "state": "UNKNOWN", "impulse_atr": 0.0,
-                "retracement": 0.0, "counter_candles": 0, "swept_minor": False,
-                "continuation_trigger": False}
-    atr_v = max(float(atr if atr is not None else m15["atr"].iloc[-1]), 1e-12)
-    recent = m15.iloc[-12:].copy()
-    impulse_start = float(recent["close"].iloc[0])
-    impulse_end = float(recent["close"].iloc[-5])
-    impulse = (impulse_end - impulse_start) if direction == "bull" else (impulse_start - impulse_end)
-    impulse_atr = impulse / atr_v
-    tail = recent.iloc[-5:]
-    counter = 0
-    for _, r in tail.iterrows():
-        if direction == "bull" and float(r["close"]) < float(r["open"]):
-            counter += 1
-        elif direction == "bear" and float(r["close"]) > float(r["open"]):
-            counter += 1
+def _tp_targets(m15, h1, direction, entry, risk):
+    vals = []
     if direction == "bull":
-        impulse_high = float(recent["high"].iloc[: -4].max())
-        current_low = float(recent["low"].iloc[-1])
-        pull = max(0.0, impulse_high - current_low) / max(abs(impulse), atr_v)
-        sh, sl = swing_pts(m15, lb=2)
-        swept_minor = bool(sl and float(recent["low"].iloc[-1]) <= float(m15["low"].iloc[sl[-1]]) )
-        continuation = bool(m15["close"].iloc[-1] > m15["high"].iloc[-2])
+        sh, _ = swing_pts(h1, 5)
+        for i in reversed(sh[-6:]):
+            x = float(h1["high"].iloc[i])
+            if x > entry: vals.append((x, "h1_swing"))
     else:
-        impulse_low = float(recent["low"].iloc[: -4].min())
-        current_high = float(recent["high"].iloc[-1])
-        pull = max(0.0, current_high - impulse_low) / max(abs(impulse), atr_v)
-        sh, sl = swing_pts(m15, lb=2)
-        swept_minor = bool(sh and float(recent["high"].iloc[-1]) >= float(m15["high"].iloc[sh[-1]]) )
-        continuation = bool(m15["close"].iloc[-1] < m15["low"].iloc[-2])
-    score = 0.0
-    if impulse_atr >= 0.65:
-        score += 35
-    elif impulse_atr >= 0.35:
-        score += 20
-    if 0.10 <= pull <= 0.85:
-        score += 25
-    elif 0.85 < pull <= 1.15:
-        score += 12
-    if 1 <= counter <= 3:
-        score += 15
-    if swept_minor:
-        score += 15
-    if continuation:
-        score += 10
-    score = max(0.0, min(100.0, score))
-    if score >= 70:
-        state_name = "VALID"
-    elif score >= 45:
-        state_name = "WEAK_VALID"
-    else:
-        state_name = "INVALID_OR_UNCONFIRMED"
-    return {
-        "score": round(score, 1), "state": state_name,
-        "impulse_atr": round(impulse_atr, 3), "retracement": round(pull, 3),
-        "counter_candles": int(counter), "swept_minor": bool(swept_minor),
-        "continuation_trigger": bool(continuation),
-    }
+        _, sl = swing_pts(h1, 5)
+        for i in reversed(sl[-6:]):
+            x = float(h1["low"].iloc[i])
+            if x < entry: vals.append((x, "h1_swing"))
+    atr = max(float(m15["atr"].iloc[-1]), 1e-12)
+    ext1 = entry + risk * (1 + FIB_EXT_1) if direction == "bull" else entry - risk * (1 + FIB_EXT_1)
+    ext2 = entry + risk * (1 + FIB_EXT_2) if direction == "bull" else entry - risk * (1 + FIB_EXT_2)
+    vals += [(ext1, "fib_1.272"), (ext2, "fib_1.618")]
+    if direction == "bull": vals = [x for x in vals if x[0] > entry + risk * 1.95]
+    else: vals = [x for x in vals if x[0] < entry - risk * 1.95]
+    if not vals:
+        return None
+    vals.sort(key=lambda x: abs(((x[0]-entry) if direction == "bull" else (entry-x[0])) / risk - 2.5))
+    tp, label = vals[0]
+    rr = ((tp-entry) if direction == "bull" else (entry-tp)) / risk
+    return float(tp), label, float(rr), atr
 
 
-def _liquidity_context_metrics(m15: pd.DataFrame, direction: str, atr: Optional[float] = None) -> dict:
-    """Locate nearby external liquidity and recent sweep/inducement evidence."""
-    if m15 is None or len(m15) < 30:
-        return {"score": 0, "external_distance_atr": None, "near": False,
-                "very_near": False, "swept": False, "inducement": False}
-    atr_v = max(float(atr if atr is not None else m15["atr"].iloc[-1]), 1e-12)
-    sh, sl = swing_pts(m15, lb=3)
-    price = float(m15["close"].iloc[-1])
-    liq = detect_liquidity_sweep(m15, sh, sl, direction)
-    ind = detect_inducement(m15, direction)
-    ext_dist = None
-    if direction == "bull" and sh:
-        highs = [float(m15["high"].iloc[i]) for i in sh if float(m15["high"].iloc[i]) > price]
-        if highs:
-            ext_dist = min(highs) - price
-    elif direction == "bear" and sl:
-        lows = [float(m15["low"].iloc[i]) for i in sl if float(m15["low"].iloc[i]) < price]
-        if lows:
-            ext_dist = price - max(lows)
-    dist_atr = ext_dist / atr_v if ext_dist is not None else None
-    near = bool(dist_atr is not None and dist_atr <= V11_EXTERNAL_LIQ_NEAR_ATR)
-    very_near = bool(dist_atr is not None and dist_atr <= V11_EXTERNAL_LIQ_VERY_NEAR_ATR)
-    score = 0
-    if liq.get("type") == "sweep": score += 45
-    if ind.get("swept"): score += 25
-    if dist_atr is not None and dist_atr >= 1.5: score += 20
-    elif near: score += 10
-    if very_near: score -= 10
-    return {
-        "score": int(max(0, min(100, score))),
-        "external_distance_atr": round(dist_atr, 3) if dist_atr is not None else None,
-        "near": near, "very_near": very_near,
-        "swept": bool(liq.get("type") == "sweep"),
-        "inducement": bool(ind.get("swept")),
-        "sweep": liq,
-    }
+def _context_quality(market_context, direction):
+    if not isinstance(market_context, dict) or not market_context:
+        return {"score": 50.0, "reasons": ["market_context_unavailable"], "conflicts": []}
+    score = 50.0
+    reasons, conflicts = [], []
+    breadth = _num(market_context.get("bullish_breadth_pct"), None)
+    if breadth is not None:
+        aligned = breadth >= 60 if direction == "bull" else breadth <= 40
+        opposed = breadth <= 40 if direction == "bull" else breadth >= 60
+        if aligned: score += 15; reasons.append("breadth_aligned")
+        elif opposed: score -= 15; conflicts.append("breadth_opposed")
+    rs = _num(market_context.get("relative_strength_1h_pct"), None)
+    if rs is not None:
+        if (rs >= 0.35 and direction == "bull") or (rs <= -0.35 and direction == "bear"):
+            score += 15; reasons.append("relative_strength_aligned")
+        elif (rs <= -0.35 and direction == "bull") or (rs >= 0.35 and direction == "bear"):
+            score -= 14; conflicts.append("relative_strength_opposed")
+    rv = _num(market_context.get("relative_volume"), None)
+    if rv is not None:
+        if rv >= 1.2: score += 8; reasons.append("volume_participation")
+        elif rv <= 0.55: score -= 6; conflicts.append("low_participation")
+    regime = str(market_context.get("market_regime") or market_context.get("chart_regime") or "").lower()
+    if "expansion" in regime or "trend" in regime:
+        reasons.append("trend_regime")
+        score += 5
+    elif "range" in regime or "compression" in regime:
+        reasons.append("range_regime")
+        score -= 2
+    return {"score": _clip(score), "reasons": reasons, "conflicts": conflicts}
 
 
-def _candidate_poi_quality(candidate: dict, m15: pd.DataFrame, h1: pd.DataFrame,
-                           direction: str, score_ctx: dict) -> dict:
-    """Score a zone as evidence, not as a binary gate.
-
-    V11 treats OB/FVG/EQ as different setup archetypes. A zone becomes more
-    convincing when freshness, liquidity interaction, structural trigger, HTF
-    overlap and M15 confirmation agree, but one missing feature does not erase
-    an otherwise coherent setup.
-    """
-    label = str(candidate.get("label", "")).lower()
-    raw = float(candidate.get("score", 0) or 0)
-    freshness = 1.0 if candidate.get("fresh", True) else 0.0
-    sweep = 1.0 if score_ctx.get("selected_sweep") else 0.0
-    trigger = min(1.0, int(score_ctx.get("trigger_count", 0) or 0) / 2.0)
-    confirmed = 1.0 if (score_ctx.get("entry_confirmation", {}) or {}).get("confirmed") else 0.0
-    htf_overlap = 1.0 if score_ctx.get("htf_poi_overlap") else 0.0
-
-    base = {"ob": 58.0, "fvg": 50.0, "eq": 47.0}.get(label, 45.0)
-    q = base + min(10.0, raw * 1.6) + 6.0 * freshness + 9.0 * sweep + 8.0 * trigger + 8.0 * confirmed + 6.0 * htf_overlap
-    reasons = []
-    if label == "ob": reasons.append("structural_supply_demand_zone")
-    elif label == "fvg": reasons.append("imbalance_zone")
-    elif label == "eq": reasons.append("liquidity_level")
-    if sweep: reasons.append("liquidity_interaction")
-    if confirmed: reasons.append("entry_confirmation")
-    if htf_overlap: reasons.append("htf_overlap")
-    if freshness: reasons.append("fresh_zone")
-    state = "STRONG" if q >= 78 else "GOOD" if q >= 62 else "MIXED" if q >= 50 else "WEAK"
-    return {"score": round(max(0.0, min(100.0, q)), 1), "state": state, "reasons": reasons}
+def _archetype(direction, sweep, poi_kind, displacement, pullback, htf_overlap, market_regime):
+    if sweep["type"] == "sweep" and displacement:
+        return "LIQUIDITY_SWEEP_RECLAIM"
+    if htf_overlap and pullback["score"] >= 65 and poi_kind == "ob":
+        return "HTF_OB_PULLBACK_CONTINUATION"
+    if poi_kind == "fvg" and displacement:
+        return "FVG_DISPLACEMENT_RETEST"
+    if "range" in str(market_regime).lower() and sweep["type"] == "sweep":
+        return "RANGE_LIQUIDITY_REVERSAL"
+    return "STRUCTURE_CONTINUATION" if direction in ("bull", "bear") else "CONTEXTUAL_SETUP"
 
 
-def _v11_market_thesis(score: dict, trend: dict, pullback: dict, liquidity: dict, loc: dict, candidate: dict) -> dict:
-    """Human-like synthesis layer: compress many numeric features into an explainable thesis."""
-    direction = score.get("direction", "bull")
+def _confidence(components, contradictions):
+    quality = (
+        components["direction"] * 0.27
+        + components["setup"] * 0.28
+        + components["location"] * 0.15
+        + components["risk"] * 0.12
+        + components["context"] * 0.18
+    )
+    penalty = min(20.0, contradictions * 6.0)
+    quality = _clip(quality - penalty)
+    confidence = int(round(20.0 + 0.70 * quality))
+    return int(np.clip(confidence, 20, 90)), round(quality, 2), round(penalty, 2)
+
+
+def _history_context(history, direction, entry_label, archetype):
+    rows = [r for r in (history or []) if isinstance(r, dict)]
+    if len(rows) < 8:
+        return {"samples": len(rows), "adjustment": 0.0, "note": "history_insufficient"}
     side = "BUY" if direction == "bull" else "SELL"
-    htf = score.get("htf_bias", "neutral")
-    h1 = score.get("h1_bias", "neutral")
-    tr = float(trend.get("score", 0) or 0)
-    pb = float(pullback.get("score", 0) or 0)
-    lq = float(liquidity.get("score", 0) or 0)
-    poi = float(candidate.get("poi_quality", 0) or 0)
-    locs = float(loc.get("location_score", 50) or 50)
-    evidence = {
-        "direction": side, "htf_alignment": htf, "h1_alignment": h1,
-        "trend_strength": tr, "pullback_quality": pb, "poi_quality": poi,
-        "liquidity_quality": lq, "location_quality": locs,
-    }
-    positives = []
-    cautions = []
-    if htf == ("bullish" if direction == "bull" else "bearish"): positives.append("HTF aligned")
-    elif htf == "conflict": cautions.append("HTF conflict")
-    if tr >= 65: positives.append("strong directional progress")
-    elif tr < 40: cautions.append("weak directional progress")
-    if pb >= 65: positives.append("clean pullback/continuation evidence")
-    elif pb < 40: cautions.append("pullback evidence is incomplete")
-    if poi >= 70: positives.append("high-quality reaction zone")
-    elif poi < 50: cautions.append("zone quality is ordinary")
-    if lq >= 60: positives.append("liquidity context supports the setup")
-    if locs >= 65: positives.append("entry is well located")
-    elif locs < 45: cautions.append("entry location is extended")
-    label = str(candidate.get("label", "")).lower()
-    if label == "ob": archetype = "ORDER_BLOCK_REACTION"
-    elif label == "fvg": archetype = "FVG_RETEST"
-    elif label == "eq": archetype = "LIQUIDITY_REACTION"
-    else: archetype = "STRUCTURE_REACTION"
-    if liquidity.get("swept") and pb >= 50: archetype = "LIQUIDITY_SWEEP_CONTINUATION"
-    if direction == "bull" and htf == "bearish": archetype = "COUNTER_TREND_LONG"
-    if direction == "bear" and htf == "bullish": archetype = "COUNTER_TREND_SHORT"
-    return {"archetype": archetype, "evidence": evidence, "positives": positives[:6], "cautions": cautions[:6]}
+    matched = [r for r in rows if str(r.get("decision", "")).upper() == side]
+    matched2 = [r for r in matched if str(r.get("entry_label", "")) == entry_label]
+    matched = matched2 if len(matched2) >= 6 else matched
+    if not matched:
+        return {"samples": len(rows), "adjustment": 0.0, "note": "no_match"}
+    wins = np.array([1.0 if float(r.get("pnl_usd", 0) or 0) > 0 else 0.0 for r in matched], dtype=float)
+    base = float(wins.mean())
+    shrink = min(0.55, len(matched) / 40.0)
+    adjustment = (base - 0.50) * 8.0 * shrink
+    return {"samples": len(rows), "matched": len(matched), "win_rate": round(base, 3), "adjustment": round(adjustment, 2), "note": "soft_history_only"}
 
 
-def _v11_evidence_adjustment(trend: dict, pullback: dict, poi: dict, liquidity: dict, loc: dict, confirmation: dict, label: str, htf_bias: str, direction: str) -> tuple[float, dict]:
-    vals = {
-        "trend": float(trend.get("score", 50) or 50),
-        "pullback": float(pullback.get("score", 50) or 50),
-        "poi": float(poi.get("score", 50) or 50),
-        "liquidity": float(liquidity.get("score", 50) or 50),
-        "location": float(loc.get("location_score", 50) or 50),
-        "confirmation": 100.0 if confirmation.get("confirmed") else 50.0,
-    }
-    weights = {"trend": V11_TREND_WEIGHT, "pullback": V11_PULLBACK_WEIGHT, "poi": V11_POI_WEIGHT, "liquidity": V11_LIQUIDITY_WEIGHT, "location": V11_LOCATION_WEIGHT, "confirmation": V11_CONFIRMATION_WEIGHT}
-    raw = sum((vals[k] - 50.0) * weights[k] for k in vals) / 5.0
-    # Gentle context corrections, never enough to create a hard gate.
-    adj = raw
-    if label == "fvg" and not confirmation.get("confirmed"):
-        adj -= V11_FVG_PENALTY_WITHOUT_CONFIRMATION
-    if label == "eq" and htf_bias in {"conflict", "neutral"}:
-        adj -= V11_EQ_PENALTY_IN_UNCLEAR_CONTEXT
-    if htf_bias == "conflict":
-        adj -= 2.0
-    adj = max(-V11_EVIDENCE_MAX_ADJUST, min(V11_EVIDENCE_MAX_ADJUST, adj))
-    diag = {"components": vals, "weights": weights, "adjustment": round(adj, 2), "soft_only": True}
-    return adj, diag
-
-
-def _early_failure_context(state: dict, analysis: dict, lifecycle: dict,
-                           trend: dict, pullback: dict, current_r: float) -> dict:
-    """Detect a failing thesis before a full initial SL is reached.
-
-    This is intentionally rare: it needs a meaningful adverse move plus at
-    least two independent signs that the original thesis is invalidating.
-    """
-    mae_r = float(lifecycle.get("mae_r", current_r) or current_r)
-    confirmations = int(analysis.get("confirmations", 0) or 0)
-    protected_break = bool(analysis.get("protected_break"))
-    opposite_mom = bool(analysis.get("opposite_momentum"))
-    opposite_break = bool(analysis.get("opposite_break"))
-    fragile_trend = float(trend.get("score", 0) or 0) < 42
-    weak_pullback = pullback.get("state") == "INVALID_OR_UNCONFIRMED"
-    elapsed = float(state.get("time_in_trade_sec", 0) or 0) / 60.0
-    evidence = sum(bool(x) for x in (protected_break, opposite_mom, opposite_break, fragile_trend, weak_pullback))
-    eligible = (current_r <= V11_EARLY_FAIL_R and mae_r <= V11_EARLY_FAIL_MAE_R
-                and evidence >= 3 and elapsed >= 5.0 and elapsed <= V11_EARLY_FAIL_MAX_TRADE_MIN
-                and confirmations >= 1)
-    return {
-        "eligible": bool(eligible), "evidence": int(evidence),
-        "protected_break": protected_break, "opposite_momentum": opposite_mom,
-        "opposite_break": opposite_break, "fragile_trend": fragile_trend,
-        "weak_pullback": weak_pullback, "elapsed_min": round(elapsed, 1),
-    }
-
-# =============================================================================
-# CONFIDENCE CALIBRATION V3.0 — TRADEABILITY
-# =============================================================================
-CONFIDENCE_MODEL_VERSION = "5.0_v11_evidence_brain"
-
-def _rr_band(rr: float) -> str:
-    rr = float(rr or 0.0)
-    if rr < 3.0:
-        return "2-3R"
-    if rr < 5.0:
-        return "3-5R"
-    if rr < 7.0:
-        return "5-7R"
-    if rr < 9.0:
-        return "7-9R"
-    return "9R+"
-
-
-def calibrate_confidence_from_history(history, base_score: float, decision: str,
-                                      entry_label: str, rr: float, setup_quality: float) -> tuple[int, dict]:
-    """Empirical probability calibration hook.
-
-    `history` is optional and must contain closed trades with a numeric PnL or
-    a boolean `profitable`. With fewer observations the model falls back to the
-    structural score; it never pretends that a tiny sample is a precise probability.
-    Bayesian smoothing keeps sparse buckets conservative.
-    """
+def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None, market_context=None):
     try:
-        rows = [r for r in (history or []) if isinstance(r, dict)]
-        if not rows:
-            return int(max(0, min(99, round(base_score)))), {
-                "calibration": "structural_fallback", "samples": 0,
-                "empirical_confidence": None, "calibration_weight": 0.0
-            }
-
-        rrband = _rr_band(rr)
-        direction = str(decision or "").upper()
-        label = str(entry_label or "").lower()
-        candidates = []
-        for r in rows:
-            d = str(r.get("decision", r.get("direction", ""))).upper()
-            el = str(r.get("entry_label", "")).lower()
-            rb = _rr_band(float(r.get("rr", 0) or 0))
-            profitable = r.get("profitable")
-            if profitable is None:
-                pnl = r.get("pnl", r.get("pnl_usd", r.get("net_pnl")))
-                try:
-                    profitable = float(pnl) > 0
-                except Exception:
-                    continue
-            # Hierarchical relevance: same direction + label + RR band is strongest.
-            match = 0.0
-            if d == direction: match += 0.35
-            if el == label: match += 0.30
-            if rb == rrband: match += 0.25
-            if match >= 0.35:
-                candidates.append((match, bool(profitable)))
-
-        if not candidates:
-            candidates = [(0.25, bool(r.get("profitable"))) for r in rows if "profitable" in r]
-
-        if not candidates:
-            return int(max(0, min(99, round(base_score)))), {
-                "calibration": "structural_fallback", "samples": 0,
-                "empirical_confidence": None, "calibration_weight": 0.0
-            }
-
-        # Weighted Beta posterior. Prior is intentionally neutral, not a claim of
-        # 60% win probability. More observations are required before it dominates.
-        alpha = beta = 2.0
-        weighted_n = 0.0
-        for w, win in candidates:
-            alpha += w if win else 0.0
-            beta += 0.0 if win else w
-            weighted_n += w
-        empirical = 100.0 * alpha / max(alpha + beta, 1e-9)
-        weight = min(0.70, weighted_n / 40.0)
-        calibrated = (1.0 - weight) * float(base_score) + weight * empirical
-        calibrated = max(0, min(99, int(round(calibrated))))
-        return calibrated, {
-            "calibration": "empirical_bayesian",
-            "samples": len(candidates),
-            "weighted_samples": round(weighted_n, 2),
-            "empirical_confidence": round(empirical, 2),
-            "calibration_weight": round(weight, 3),
-            "rr_band": rrband,
-            "direction": direction,
-            "entry_label": label,
-        }
-    except Exception:
-        return int(max(0, min(99, round(base_score)))), {
-            "calibration": "structural_fallback_error", "samples": 0,
-            "empirical_confidence": None, "calibration_weight": 0.0
-        }
-
-
-def _confidence_band(conf: int) -> str:
-    if conf >= 85:
-        return "ELITE"
-    if conf >= 75:
-        return "VERY_STRONG"
-    if conf >= 65:
-        return "STRONG"
-    if conf >= 55:
-        return "NORMAL"
-    if conf >= 45:
-        return "WEAK"
-    return "VERY_WEAK"
-
-
-def _calibrate_confidence(base_confidence: int, score_ctx: dict, loc: dict,
-                          candidate: dict, rr: float, htf_poi: list,
-                          poi_reacted: bool, tp_diag: Optional[dict] = None) -> tuple[int, int, dict]:
-    """Confidence V3.0 = tradeability, not raw confluence count.
-
-    Direction establishes the thesis, but entry location and current-move health
-    have larger influence on the final number. RR is payoff, not probability.
-    """
-    direction = score_ctx.get("direction", "bull")
-    htf_bias = score_ctx.get("htf_bias", "neutral")
-    m15_struct = score_ctx.get("m15_struct", "ranging")
-    h1_bias = score_ctx.get("h1_bias", "neutral")
-    trigger_count = int(score_ctx.get("trigger_count", 0) or 0)
-    selected_confirm = score_ctx.get("entry_confirmation", {}) or {}
-    selected_sweep = bool(score_ctx.get("selected_sweep"))
-    loc_score = int(loc.get("location_score", 50) or 50)
-    candidate_score = float(candidate.get("score", 0) or 0)
-    entry_label = str(candidate.get("label", ""))
-
-    # 1) DIRECTION / STRUCTURAL THESIS: 0-25
-    direction_q = 0.0
-    if h1_bias == ("bullish" if direction == "bull" else "bearish"):
-        direction_q += 10
-    elif h1_bias == "neutral":
-        direction_q += 6
-    if htf_bias == ("bullish" if direction == "bull" else "bearish"):
-        direction_q += 9
-    elif htf_bias == "neutral":
-        direction_q += 5
-    elif htf_bias == "conflict":
-        direction_q -= 4
-    if m15_struct == ("bullish" if direction == "bull" else "bearish"):
-        direction_q += 6
-    elif m15_struct == "ranging":
-        direction_q += 3
-    direction_q = max(0.0, min(25.0, direction_q))
-
-    # 2) ENTRY QUALITY: 0-30 -- deliberately larger than raw direction.
-    entry_q = 0.0
-    entry_q += max(0.0, min(18.0, (loc_score - 30) * 0.38))
-    if htf_poi:
-        entry_q += 3.0
-    if poi_reacted:
-        entry_q += 4.0
-    if entry_label in ("ob", "ob_retest"):
-        entry_q += 2.0
-    elif entry_label in ("fvg", "fvg_retest"):
-        entry_q += 1.5
-    # Chase / bad location penalties.
-    if loc_score < 45:
-        entry_q -= 4
-    if loc.get("location_state") in {"chase", "bad_location", "premium_chase", "discount_chase"}:
-        entry_q -= 4
-    entry_q = max(0.0, min(30.0, entry_q))
-
-    # 3) CURRENT MOVE HEALTH: 0-25
-    move_q = 12.0
-    rsi_val = float(loc.get("rsi", score_ctx.get("m15_rsi", 50.0)) or 50.0)
-    rv = float(score_ctx.get("m15_relative_volume", 1.0) or 1.0)
-    rsi_timing = str(loc.get("rsi_timing", "unknown"))
-    rsi_slope = float(loc.get("rsi_slope", score_ctx.get("m15_rsi_slope", 0.0)) or 0.0)
-    momentum_aligned = bool(score_ctx.get("m15_momentum_aligned", False))
-    divergence = bool(score_ctx.get("m15_divergence_against", False))
-
-    if momentum_aligned:
-        move_q += 6
-    if rv >= 1.30 and momentum_aligned:
-        move_q += 3
-    elif rv < 0.70 and rr >= 2.0:
-        move_q -= 2
-    if divergence:
-        move_q -= 5
-    if direction == "bull" and rsi_val >= 72:
-        move_q -= 4
-    elif direction == "bear" and rsi_val <= 28:
-        move_q -= 4
-    if rsi_timing in {"rising", "falling", "favorable"}:
-        move_q += 1
-    if direction == "bull" and rsi_slope < -1.5:
-        move_q -= 2
-    if direction == "bear" and rsi_slope > 1.5:
-        move_q -= 2
-    move_q = max(0.0, min(25.0, move_q))
-
-    # 4) TRIGGER / CONFIRMATION: 0-10
-    trigger_q = min(10.0, 2.0 + min(trigger_count, 3) * 1.5)
-    if selected_confirm.get("confirmed"):
-        trigger_q += 2.0
-    if selected_sweep:
-        trigger_q += 0.5
-    trigger_q = max(0.0, min(10.0, trigger_q))
-
-    # 5) TARGET / PAYOFF QUALITY: 0-10. RR is not treated as win probability.
-    target_q = 4.0
-    selected = (tp_diag or {}).get("selected") if isinstance(tp_diag, dict) else None
-    if selected:
-        reach = float(selected.get("reachability_proxy", 0.0) or 0.0)
-        path = float(selected.get("path_clear", 0.0) or 0.0)
-        tq = float(selected.get("target_quality", 0.0) or 0.0)
-        target_q = min(10.0, 2.0 + 3.0 * reach + 2.0 * path + 3.0 * tq)
-    elif rr >= 2.0:
-        target_q = 5.0
-    target_q = max(0.0, min(10.0, target_q))
-
-    # Research prior: OB was materially healthier than FVG/EQ in the supplied
-    # ledger, while SELL was weaker. These are soft penalties only; they are not
-    # hard filters and must be re-calibrated once a larger history is available.
-    if entry_label in ("fvg", "fvg_retest"):
-        entry_q -= 1.5
-    elif entry_label in ("eq", "equal", "equal_high", "equal_low"):
-        entry_q -= 3.0
-    if direction == "bear":
-        direction_q -= 2.0
-    entry_q = max(0.0, min(30.0, entry_q))
-    direction_q = max(0.0, min(25.0, direction_q))
-
-    # Direction should matter, but cannot dominate. This is the key change that
-    # addresses high-confidence SLs caused by strong HTF structure + poor timing.
-    calibrated = int(round(
-        0.25 * (base_confidence)
-        + 0.30 * (direction_q + 10 * 0)
-        + 0.30 * (entry_q / 30.0 * 100.0)
-        + 0.15 * ((move_q + trigger_q + target_q) / 45.0 * 100.0)
-    ))
-
-    # Harder contradiction penalties are still soft, so frequency does not collapse.
-    if htf_bias == "conflict":
-        calibrated -= 7
-    if m15_struct not in (("bullish" if direction == "bull" else "bearish"), "ranging"):
-        calibrated -= 4
-    if loc_score < 40:
-        calibrated -= 5
-    if divergence and (direction == "bull" and rsi_val >= 70 or direction == "bear" and rsi_val <= 30):
-        calibrated -= 3
-
-    calibrated = max(0, min(99, calibrated))
-    setup_quality = int(round(0.20 * direction_q + 0.40 * entry_q + 0.25 * move_q + 0.10 * trigger_q + 0.05 * target_q))
-    diagnostics = {
-        "model_version": CONFIDENCE_MODEL_VERSION,
-        "direction_component": int(base_confidence),
-        "direction_quality": int(round(direction_q)),
-        "entry_quality": int(round(entry_q)),
-        "move_health": int(round(move_q)),
-        "trigger_quality": int(round(trigger_q)),
-        "target_quality": int(round(target_q)),
-        "setup_quality": max(0, min(100, setup_quality)),
-        "rr_band": _rr_band(rr),
-        "entry_type_prior": "OB_BASELINE" if entry_label in ("ob", "ob_retest") else ("FVG_SOFT_PENALTY" if entry_label in ("fvg", "fvg_retest") else "OTHER_SOFT_PENALTY"),
-        "rsi": round(rsi_val, 1),
-        "relative_volume": round(rv, 3),
-        "divergence_against": bool(divergence),
-        "confidence_band": _confidence_band(calibrated),
-    }
-    return calibrated, max(0, min(100, setup_quality)), diagnostics
-
-
-# =============================================================================
-# ENTRY LOCATION + RSI TIMING
-# =============================================================================
-
-def _entry_location_metrics(m15: pd.DataFrame, direction: str,
-                            entry: float, atr: float) -> dict:
-    """Nilai lokasi entry relatif terhadap range M15 + timing RSI.
-
-    Prinsip CAP: arah HTF boleh benar, tetapi entry di bagian atas range saat
-    M15 sedang melemah adalah entry yang buruk. Kita tidak memaksa harga
-    masuk di titik tertentu; kita hanya memberi ranking lebih tinggi pada
-    retracement yang sehat dan memblokir chase yang jelas.
-    """
-    if m15 is None or len(m15) < 8:
-        return {
-            "location_score": 50, "location_state": "unknown",
-            "range_position": 0.5, "rsi_timing": "unknown",
-            "rsi": None, "rsi_slope": 0.0, "hard_block": False,
-            "entry_zone_low": None, "entry_zone_high": None,
-        }
-
-    n = min(ENTRY_LOCATION_LOOKBACK, len(m15))
-    sub = m15.iloc[-n:]
-    rh = float(sub["high"].max())
-    rl = float(sub["low"].min())
-    width = max(rh - rl, max(float(atr), 1e-10))
-    pos = (float(entry) - rl) / width
-    pos = max(0.0, min(1.0, pos))
-
-    rsi_now = float(m15["rsi"].iloc[-1])
-    rsi_1 = float(m15["rsi"].iloc[-2])
-    rsi_2 = float(m15["rsi"].iloc[-3])
-    slope = rsi_now - rsi_2
-    rising = slope >= RSI_TIMING_SLOPE
-    falling = slope <= -RSI_TIMING_SLOPE
-
-    # Adverse-side swing: BUY terlalu dekat high, SELL terlalu dekat low.
-    recent = m15.iloc[-8:]
-    adverse_high = float(recent["high"].max())
-    adverse_low = float(recent["low"].min())
-    if direction == "bull":
-        swing_dist_atr = (adverse_high - float(entry)) / max(float(atr), 1e-10)
-    else:
-        swing_dist_atr = (float(entry) - adverse_low) / max(float(atr), 1e-10)
-
-    score = 50
-    notes = []
-    if direction == "bull":
-        if pos <= 0.35:
-            score += 15; notes.append("deep_discount")
-        elif pos <= ENTRY_PREFERRED_BUY:
-            score += 10; notes.append("good_pullback")
-        elif pos <= 0.70:
-            score += 0; notes.append("mid_range")
-        elif pos <= ENTRY_CHASE_HIGH:
-            score -= 10; notes.append("upper_range")
-        else:
-            score -= 22; notes.append("chasing_high")
-
-        if swing_dist_atr <= ENTRY_SWING_NEAR_ATR:
-            score -= 10; notes.append("near_swing_high")
-        if 42 <= rsi_now <= 58 and rising:
-            score += 10; notes.append("rsi_recovery")
-        elif rsi_now > 68 and falling:
-            score -= 14; notes.append("rsi_exhaustion")
-        elif rsi_now < RSI_BUY_WEAK and falling and pos > ENTRY_PREFERRED_BUY:
-            score -= 18; notes.append("rsi_weak_while_high")
-        elif falling:
-            score -= 5; notes.append("rsi_falling")
-    else:
-        if pos >= 0.65:
-            score += 15; notes.append("deep_premium")
-        elif pos >= ENTRY_PREFERRED_SELL:
-            score += 10; notes.append("good_pullback")
-        elif pos >= 0.30:
-            score += 0; notes.append("mid_range")
-        elif pos >= (1.0 - ENTRY_CHASE_HIGH):
-            score -= 10; notes.append("lower_range")
-        else:
-            score -= 22; notes.append("chasing_low")
-
-        if swing_dist_atr <= ENTRY_SWING_NEAR_ATR:
-            score -= 10; notes.append("near_swing_low")
-        if 42 <= rsi_now <= 58 and falling:
-            score += 10; notes.append("rsi_recovery")
-        elif rsi_now < 32 and rising:
-            score -= 8; notes.append("rsi_bounce_against_sell")
-        elif rsi_now > RSI_SELL_WEAK and rising and pos < ENTRY_PREFERRED_SELL:
-            score -= 18; notes.append("rsi_weak_while_low")
-        elif rising:
-            score -= 5; notes.append("rsi_rising")
-
-    score = int(max(0, min(100, score)))
-    # Hard block hanya untuk lokasi yang benar-benar mengejar harga.
-    # RSI tetap menjadi penalty/confluence, bukan gate keras, supaya setup
-    # yang bagus tidak hilang hanya karena momentum belum ideal.
-    if direction == "bull":
-        hard_block = pos >= ENTRY_CHASE_HIGH
-    else:
-        hard_block = pos <= (1.0 - ENTRY_CHASE_HIGH)
-
-    # Zona entry berbasis range lokal, bukan titik matematis palsu.
-    if direction == "bull":
-        zone_low = rl
-        zone_high = rl + width * 0.60
-    else:
-        zone_low = rl + width * 0.40
-        zone_high = rh
-
-    if hard_block:
-        state = "WAIT_ENTRY"
-    elif score >= 70:
-        state = "GOOD"
-    elif score >= 50:
-        state = "ACCEPTABLE"
-    else:
-        state = "WEAK"
-
-    return {
-        "location_score": score,
-        "location_state": state,
-        "range_position": round(pos, 3),
-        "range_low": rl, "range_high": rh,
-        "entry_zone_low": zone_low, "entry_zone_high": zone_high,
-        "rsi": round(rsi_now, 2),
-        "rsi_prev": round(rsi_1, 2),
-        "rsi_slope": round(slope, 2),
-        "rsi_timing": "rising" if rising else ("falling" if falling else "flat"),
-        "swing_dist_atr": round(swing_dist_atr, 3),
-        "notes": notes,
-        "hard_block": hard_block,
-    }
-
-
-# =============================================================================
-# STEP 1 — ENTRY CANDIDATES
-# =============================================================================
-
-def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
-                              direction: str, current_price: float,
-                              atr: float, score_ctx: dict) -> list:
-    """
-    Kumpulkan kandidat entry berdasarkan SMC/ICT.
-    Prioritas (score tertinggi):
-      1. OB + Liquidity Sweep (12–15)
-      2. OB + ChoCH (9–12)
-      3. OB + OTE (8–10)
-      4. OB saja (5–8)
-      5. FVG + CISD + LiqSweep (6–9)
-      6. FVG saja (3–5)
-      7. Equal Highs/Lows (2–4)
-      8. Market entry fallback (1)
-    """
-    up = direction == "bull"
-    cands = []
-
-    liq = score_ctx.get("liquidity_bull" if up else "liquidity_bear", {})
-    choch = score_ctx.get("choch_m15", {})
-    cisd = score_ctx.get("cisd_m15", {})
-
-    choch_ok = choch.get("bullish_choch") if up else choch.get("bearish_choch")
-    cisd_ok = cisd.get("bullish_cisd") if up else cisd.get("bearish_cisd")
-    liq_ok = liq.get("type") == "sweep"
-
-    fib_sh = float(m15["high"].iloc[score_ctx["sh15"][-1]]) if score_ctx.get("sh15") else None
-    fib_sl = float(m15["low"].iloc[score_ctx["sl15"][-1]]) if score_ctx.get("sl15") else None
-
-    induce = score_ctx.get("inducement_bull" if up else "inducement_bear", {})
-    induce_ok = bool(induce.get("swept"))
-
-    # Zona H1 (OB + FVG searah) untuk cek konfluensi — "How to Choose the
-    # Best Order Block When All Zones Look Valid": OB M15 yang overlap
-    # dengan zona HTF lebih dipercaya daripada OB M15 berdiri sendiri.
-    htf_zones = []
-    try:
-        for z in detect_order_block(h1, direction, lb=80,
-                                    sh=score_ctx.get("sh1", []),
-                                    sl=score_ctx.get("sl1", [])):
-            htf_zones.append((z["top"], z["bot"]))
-        for f in detect_fvg(h1, direction, lb=60):
-            htf_zones.append((f["top"], f["bot"]))
-    except Exception:
-        htf_zones = []
-
-    def _htf_confluence(top: float, bot: float) -> bool:
-        return any(zones_overlap(top, bot, zt, zb) for zt, zb in htf_zones)
-
-    # ── Order Block ──────────────────────────────────────────────────
-    obs = detect_order_block(m15, direction, lb=60,
-                             sh=score_ctx.get("sh15", []),
-                             sl=score_ctx.get("sl15", []))
-    for z in obs:
-        entry_pt = float(z["top"]) if up else float(z["bot"])
-        invalid_pt = float(z["bot"]) if up else float(z["top"])
-
-        # A limit order must be a genuine retracement.  The previous 1%
-        # tolerance allowed a BUY above market or a SELL below market;
-        # Binance can fill those immediately at a different price, leaving
-        # the original SL/TP geometry invalid.
-        if up:
-            if current_price < z["bot"] or entry_pt > current_price * 1.001:
-                continue
-        else:
-            if current_price > z["top"] or entry_pt < current_price * 0.999:
-                continue
-
-        sc = 3 + z["quality"]  # base 3 + quality
-
-        if liq_ok:
-            sweep_lev = liq.get("level", 0)
-            if up and entry_pt >= float(sweep_lev) * 0.995:
-                sc += 3
-            elif not up and entry_pt <= float(sweep_lev) * 1.005:
-                sc += 3
-        if choch_ok:
-            sc += 2
-        if fib_sh and fib_sl and is_in_ote(entry_pt, fib_sl, fib_sh, direction):
-            sc += 1
-        if _htf_confluence(z["top"], z["bot"]):
-            sc += CONFLUENCE_BONUS
-        if induce_ok:
-            sc += 1
-
-        cands.append({
-            "price": round(entry_pt, 8),
-            "invalid": round(invalid_pt, 8),
-            "label": "ob",
-            "score": sc,
-        })
-
-    # ── FVG ──────────────────────────────────────────────────────────
-    fvgs = detect_fvg(m15, direction, lb=50)
-    for f in fvgs:
-        if not f["is_fresh"]:
-            continue
-        entry_pt = f["mid"]
-        invalid_pt = f["top"] if up else f["bot"]
-        if up:
-            if current_price < f["bot"] or entry_pt > current_price * 1.001:
-                continue
-        else:
-            if current_price > f["top"] or entry_pt < current_price * 0.999:
-                continue
-        sc = 3
-        if cisd_ok: sc += 2
-        if liq_ok: sc += 2
-        if choch_ok: sc += 1
-        if _htf_confluence(f["top"], f["bot"]):
-            sc += CONFLUENCE_BONUS
-        if induce_ok:
-            sc += 1
-        cands.append({
-            "price": round(entry_pt, 8),
-            "invalid": round(invalid_pt, 8),
-            "label": "fvg",
-            "score": sc,
-        })
-
-    # ── Equal Highs/Lows ─────────────────────────────────────────────
-    eqs = detect_equal_highs_lows(m15, "low" if up else "high", lb=80)
-    for eq in eqs[:2]:
-        # ── Proximity filter: EQ entry harus REACHABLE dari harga sekarang.
-        #
-        # Bug asal: tidak ada filter proximity → EQ yang harganya sudah
-        # "tersapu" (liquidity sweep) tetap masuk sebagai kandidat entry.
-        # Akibatnya SELL limit dipasang DI BAWAH harga pasar → Binance langsung
-        # fill di harga pasar (slippage besar) → actual_entry > SL → geometri
-        # rusak → auto-out terpicu.
-        #
-        # SELL (not up): entry di equal HIGH → level harus ≥ current_price
-        #   supaya SELL limit menunggu harga naik ke sana, bukan fill sekarang.
-        #   Toleransi 0.3%: jika eq < current_price * 0.997 → sudah tersapu.
-        #
-        # BUY (up): entry di equal LOW → level harus ≤ current_price
-        #   supaya BUY limit menunggu harga turun ke sana, bukan fill sekarang.
-        #   Toleransi 0.3%: jika eq > current_price * 1.003 → sudah tersapu.
-        if not up and float(eq) < current_price * 0.999:
-            continue   # EQ high sudah di bawah harga pasar → skip
-        if up and float(eq) > current_price * 1.001:
-            continue   # EQ low sudah di atas harga pasar → skip
-
-        invalid_pt = eq - atr * 0.8 if up else eq + atr * 0.8
-        sc = 2
-        if liq_ok: sc += 1
-        if induce_ok: sc += 1
-        cands.append({
-            "price": round(float(eq), 8),
-            "invalid": round(float(invalid_pt), 8),
-            "label": "eq",
-            "score": sc,
-        })
-
-    # No synthetic market entry. If no fresh/reachable POI exists, wait for
-    # price to come to a real zone.  Before ranking, evaluate LOCATION + RSI
-    # timing for every candidate so a good-direction but bad-location setup
-    # cannot become the best trade merely because its RR is attractive.
-    enriched = []
-    for c in cands:
-        loc = _entry_location_metrics(m15, direction, c["price"], atr)
-        c = dict(c)
-        c["location"] = loc
-        c["location_score"] = loc["location_score"]
-        c["location_state"] = loc["location_state"]
-        c["rsi_timing"] = loc["rsi_timing"]
-        c["hard_location_block"] = loc["hard_block"]
-        c["reject_reason"] = "CHASE_LOCATION" if loc["hard_block"] else None
-        pq = _candidate_poi_quality(c, m15, h1, direction, score_ctx)
-        c["poi_quality"] = pq["score"]
-        c["poi_state"] = pq["state"]
-        c["poi_reasons"] = pq["reasons"]
-
-        # Candidate-specific quality. Location is deliberately meaningful but
-        # not dominant: structure/POI can still win, while an obvious chase is
-        # removed before SL/TP are calculated.
-        c["score"] = int(c.get("score", 0) + round((loc["location_score"] - 50) * 0.35))
-        if loc["hard_block"]:
-            continue
-        # V11: POI quality is ranking evidence, not a hard gate. Keep all
-        # executable geometries so main.py's confidence threshold can choose the
-        # required breadth; bad geometry still gets rejected elsewhere.
-        enriched.append(c)
-
-    enriched.sort(key=lambda c: (-c["score"], -c.get("location_score", 0)))
-    return enriched
-
-
-# =============================================================================
-# STEP 2 — SL STRUKTURAL (anti‑Liquidity Sweep)
-# =============================================================================
-
-def _compute_sl(m15: pd.DataFrame, h1: pd.DataFrame, direction: str,
-                entry: float, atr: float, liq_sweep: dict,
-                invalid_level: Optional[float] = None) -> Tuple[float, float]:
-    """
-    Hitung SL yang tepat secara struktural, ditempatkan sedemikian rupa
-    sehingga jika tersentuh berarti arah benar‑benar salah (bukan LS biasa).
-    Buffer anti‑Liquidity Sweep = 0.5 ATR.
-    Pilih kandidat dengan prioritas: ob_invalid > struct_h1 > ls_level > struct_m15,
-    dan di antara prioritas yang sama pilih yang LEBIH JAUH dari entry
-    (lebih tahan noise).
-    """
-    up = direction == "bull"
-    ls_buffer = atr * 0.5
-    min_risk = atr * 1.0
-    # Risk width is a QUALITY signal, not an automatic rejection. If the
-    # real structural invalidation is wide, keep that invalidation rather than
-    # moving SL inward just to manufacture a better RR. TP selection will then
-    # decide whether a genuine >=2R target exists.
-    # A very wide structural invalidation is not repaired by pulling SL inward.
-    # The caller will try another entry candidate. This is exactly the CAP lesson:
-    # a 4% stop is a property of the chosen entry, not a reason to keep the entry.
-    max_risk = min(float(atr) * 2.0, float(entry) * 0.035)
-
-    cands = []
-
-    # 1. invalid level dari OB/FVG
-    if invalid_level is not None:
-        sl_raw = invalid_level + (-ls_buffer if up else ls_buffer)
-        risk = abs(sl_raw - entry)
-        if min_risk <= risk <= max_risk:
-            cands.append(("ob_invalid", sl_raw, risk))
-
-    # 2. M15 swing (prioritas lebih rendah karena lebih rentan noise)
-    sh15, sl15 = swing_pts(m15, lb=3)
-    if up and sl15:
-        struct_low = float(m15["low"].iloc[sl15[-1]])
-        if struct_low < entry:
-            sl_raw = struct_low - ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_m15", sl_raw, risk))
-    elif not up and sh15:
-        struct_high = float(m15["high"].iloc[sh15[-1]])
-        if struct_high > entry:
-            sl_raw = struct_high + ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_m15", sl_raw, risk))
-
-    # 3. level yang disweep
-    if liq_sweep and liq_sweep.get("type") == "sweep" and liq_sweep.get("level"):
-        lev = float(liq_sweep["level"])
-        if up and lev < entry:
-            sl_raw = lev - ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("ls_level", sl_raw, risk))
-        elif not up and lev > entry:
-            sl_raw = lev + ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("ls_level", sl_raw, risk))
-
-    # 4. H1 swing (lebih lebar, lebih tahan noise)
-    sh1, sl1 = swing_pts(h1, lb=5)
-    if up and sl1:
-        h1_low = float(h1["low"].iloc[sl1[-1]])
-        if h1_low < entry:
-            sl_raw = h1_low - ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_h1", sl_raw, risk))
-    elif not up and sh1:
-        h1_high = float(h1["high"].iloc[sh1[-1]])
-        if h1_high > entry:
-            sl_raw = h1_high + ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_h1", sl_raw, risk))
-
-    if cands:
-        # Prioritas: ob_invalid (paling presisi), struct_h1 (paling tahan),
-        # ls_level, struct_m15. Dalam prioritas sama, pilih risk terbesar.
-        _PRIO = {"ob_invalid": 0, "struct_h1": 1, "ls_level": 2, "struct_m15": 3}
-        cands.sort(key=lambda x: (_PRIO.get(x[0], 9), -x[2]))
-        _, sl_price, risk = cands[0]
-        return sl_price, risk
-
-    # No compact structural invalidation. Do not manufacture an ATR stop.
-    raise ValueError("NO_COMPACT_STRUCTURAL_SL")
-
-
-# =============================================================================
-# STEP 3 — TP POOL DAN SELEKSI (dengan ekstensi jika RR < 2.0)
-# =============================================================================
-
-def _target_context(h1: pd.DataFrame, m15: pd.DataFrame, direction: str,
-                    entry: float, atr: float) -> dict:
-    """Context lokal untuk menilai apakah target yang lebih jauh masih credible."""
-    up = direction == "bull"
-    sh1, sl1 = swing_pts(h1, lb=5)
-    struct_h1 = _market_structure(h1, sh1, sl1)
-    struct_m15 = _market_structure(m15, *swing_pts(m15, lb=5)) if len(m15) >= 12 else "ranging"
-    rsi_val = float(m15["rsi"].iloc[-1]) if ("rsi" in m15.columns and len(m15)) else 50.0
-    rv = _relative_volume(m15, 20) if len(m15) >= 23 else 1.0
-    mom = _momentum_context(m15) if len(m15) >= 8 else {"bull": False, "bear": False}
-    return {
-        "h1_structure": struct_h1,
-        "m15_structure": struct_m15,
-        "rsi": rsi_val,
-        "relative_volume": rv,
-        "momentum": mom,
-        "atr": max(float(atr), 1e-12),
-        "entry": float(entry),
-        "direction": direction,
-        "sh1": sh1,
-        "sl1": sl1,
-    }
-
-
-def _build_tp_pool(h1: pd.DataFrame, m15: pd.DataFrame, direction: str,
-                   entry: float, atr: float,
-                   sh1: list, sl1: list, sh15: list, sl15: list) -> list:
-    """Build a rich target pool; selection is performed by _select_tp()."""
-    up = direction == "bull"
-    sgn = 1 if up else -1
-    pool = []
-
-    def add(value, label, tier, anchor_strength=1.0):
-        try:
-            v = float(value)
-        except Exception:
-            return
-        if sgn * (v - entry) <= atr * 0.35:
-            return
-        pool.append({
-            "value": v,
-            "label": str(label),
-            "tier": int(tier),
-            "anchor_strength": float(anchor_strength),
-        })
-
-    opp_dir = "bear" if up else "bull"
-
-    # External liquidity / opposing HTF zones.
-    for z in detect_order_block(h1, opp_dir, lb=80, sh=sh1, sl=sl1):
-        edge = float(z["bot"]) if up else float(z["top"])
-        fresh = 1.0 if z.get("quality", 0) >= 4 else 0.75
-        add(edge, "ob_h1", 1, 1.10 * fresh)
-
-    for f in detect_fvg(h1, opp_dir, lb=60):
-        add(float(f["mid"]), "fvg_h1", 2, 0.95 if f.get("is_fresh", False) else 0.75)
-
-    sw_vals = ([float(h1["high"].iloc[i]) for i in sh1]
-               if up else [float(h1["low"].iloc[i]) for i in sl1])
-    for v in sw_vals[-2:]:
-        add(v, "sw_h1", 3, 1.00)
-
-    for v in detect_equal_highs_lows(h1, "high" if up else "low", lb=100):
-        add(v, "eq_h1", 4, 1.08)
-
-    sw_all = ([float(h1["high"].iloc[i]) for i in sh1]
-              if up else [float(h1["low"].iloc[i]) for i in sl1])
-    for v in sw_all[:-2]:
-        add(v, "sw_h1_far", 5, 0.82)
-
-    # Internal liquidity is useful as a waypoint/path obstacle, but may be a
-    # weaker final target than external H1 liquidity.
-    for v in detect_equal_highs_lows(m15, "high" if up else "low", lb=80):
-        add(v, "eq_m15", 6, 0.62)
-
-    # Extensions are valid farther targets, but start with lower credibility.
-    if sh1 and sl1:
-        sh_val = float(h1["high"].iloc[sh1[-1]])
-        sl_val = float(h1["low"].iloc[sl1[-1]])
-        leg = sh_val - sl_val
-        if leg > atr * 0.8:
-            for ext, lbl, tier, strength in [
-                (FIB_EXT_1, "fib127", 7, 0.58),
-                (FIB_EXT_2, "fib162", 7, 0.48),
-                (1.0, "fib200", 8, 0.38),
-                (1.414, "fib241", 8, 0.30),
-            ]:
-                tp_v = (sh_val + leg * ext) if up else (sl_val - leg * ext)
-                add(tp_v, lbl, tier, strength)
-
-    # De-duplicate very close targets; preserve the strongest anchor.
-    pool.sort(key=lambda x: (x["value"], x["tier"]))
-    dedup = []
-    for item in pool:
-        if dedup:
-            last = dedup[-1]
-            if abs(item["value"] - last["value"]) <= atr * 0.12:
-                if item["anchor_strength"] > last["anchor_strength"]:
-                    dedup[-1] = item
-                continue
-        dedup.append(item)
-    return dedup
-
-
-def _target_path_score(pool: list, target: dict, entry: float, direction: str,
-                       atr: float) -> tuple[float, int]:
-    """Score how clear the price path is before a proposed final target."""
-    sgn = 1 if direction == "bull" else -1
-    target_v = float(target["value"])
-    obstacles = 0
-    penalty = 0.0
-    for other in pool:
-        ov = float(other["value"])
-        if other is target:
-            continue
-        if sgn * (ov - entry) <= 0:
-            continue
-        if sgn * (target_v - ov) <= atr * 0.15:
-            strength = max(0.2, float(other.get("anchor_strength", 0.5)))
-            tier = int(other.get("tier", 8))
-            tier_w = 1.20 if tier <= 4 else (0.80 if tier <= 6 else 0.45)
-            distance = abs(ov - entry) / max(atr, 1e-12)
-            # Obstacles closer to entry are less damaging because they may be
-            # swept/consumed on the way; major levels close to target matter more.
-            target_proximity = 1.0 / (1.0 + abs(target_v - ov) / max(atr, 1e-12))
-            penalty += strength * tier_w * (0.55 + 0.90 * target_proximity)
-            obstacles += 1
-    return max(0.0, 1.0 - min(0.78, penalty * 0.10)), obstacles
-
-
-def _select_tp(pool: list, entry: float, risk: float, direction: str,
-               h1: Optional[pd.DataFrame] = None,
-               m15: Optional[pd.DataFrame] = None,
-               atr: Optional[float] = None) -> Tuple[Optional[float], Optional[str], Optional[float], dict]:
-    """Choose the target with the best risk-adjusted plausibility, not merely the first >=2R.
-
-    There is no artificial maximum RR. The engine prefers a target when its structural
-    quality, path clarity, market regime and distance form a better *expected-value proxy*.
-    The proxy is a ranking heuristic, not a calibrated probability.
-    """
-    if not pool or risk <= 0:
-        return None, None, None, {}
-
-    atr_v = max(float(atr or risk), 1e-12)
-    ctx = _target_context(h1, m15, direction, entry, atr_v) if h1 is not None and m15 is not None else {
-        "h1_structure": "unknown", "m15_structure": "unknown", "rsi": 50.0,
-        "relative_volume": 1.0, "momentum": {"bull": False, "bear": False},
-        "atr": atr_v,
-    }
-    sgn = 1 if direction == "bull" else -1
-    candidates = []
-
-    aligned_struct = ctx["h1_structure"] == ("bullish" if direction == "bull" else "bearish")
-    aligned_m15 = ctx["m15_structure"] == ("bullish" if direction == "bull" else "bearish")
-    momentum_aligned = ((direction == "bull" and ctx["momentum"].get("bull")) or
-                        (direction == "bear" and ctx["momentum"].get("bear")))
-    rsi = float(ctx["rsi"])
-    # RSI is soft context: avoid rewarding an already exhausted extreme.
-    rsi_support = 1.0
-    if direction == "bull" and rsi >= 75:
-        rsi_support = 0.78
-    elif direction == "bear" and rsi <= 25:
-        rsi_support = 0.78
-
-    for target in pool:
-        value = float(target["value"])
-        distance = sgn * (value - entry)
-        if distance <= 0:
-            continue
-        rr = distance / risk
-        if rr < MIN_RR:
-            continue
-
-        path_clear, obstacles = _target_path_score(pool, target, entry, direction, atr_v)
-        quality = 0.50
-        quality += 0.12 * min(1.0, max(0.0, float(target.get("anchor_strength", 0.5))))
-
-        tier = int(target.get("tier", 8))
-        tier_base = {1: 0.14, 2: 0.12, 3: 0.13, 4: 0.15, 5: 0.09, 6: 0.04, 7: 0.02, 8: 0.0}.get(tier, 0.0)
-        quality += tier_base
-        quality += 0.10 if aligned_struct else (-0.05 if ctx["h1_structure"] in ("bullish", "bearish") else 0.0)
-        quality += 0.06 if aligned_m15 else (-0.04 if ctx["m15_structure"] in ("bullish", "bearish") else 0.0)
-        quality += 0.06 if momentum_aligned else 0.0
-        quality *= rsi_support
-        quality *= (0.88 + 0.16 * min(1.0, path_clear))
-
-        # Distance is valuable, but target reachability should decay as the
-        # requested move becomes increasingly remote. This prevents a raw
-        # "largest RR wins" behaviour while still allowing 6R+ targets when
-        # structure, momentum and path quality genuinely support them.
-        far_support = 0.0
-        if aligned_struct:
-            far_support += 0.35
-        if aligned_m15:
-            far_support += 0.20
-        if momentum_aligned:
-            far_support += 0.25
-        if path_clear > 0.85:
-            far_support += 0.20
-        decay = max(0.028, 0.085 - 0.055 * far_support)
-        distance_excess = max(0.0, rr - 3.0)
-        reachability = quality * np.exp(-decay * distance_excess)
-        reachability = max(0.06, min(0.93, reachability))
-
-        # Expected-value proxy with diminishing reward. log(1+RR) prevents a
-        # mathematically huge target from dominating solely because it is far.
-        # It is a ranking tool, NOT a calibrated probability model.
-        ev_proxy = reachability * np.log1p(rr) - (1.0 - reachability) * 0.45
-        distance_bonus = 0.08 * min(1.0, max(0.0, rr - 2.0) / 4.0)
-        far_penalty = 0.0
-        # Research showed the useful zone is not simply "lowest RR" or "highest RR".
-        # Keep unlimited RR, but require stronger path evidence for extreme targets.
-        if rr > 7.0:
-            evidence = far_support
-            if rr > 9.0:
-                far_penalty += min(0.38, 0.055 * (rr - 9.0))
-                if evidence < 0.80:
-                    far_penalty += min(0.22, (0.80 - evidence) * 0.55)
-            elif evidence < 0.60:
-                far_penalty += min(0.16, (0.60 - evidence) * 0.45)
-        # Prefer the empirically interesting middle-distance region when its
-        # structural/path quality is comparable, without hard-capping RR.
-        middle_rr_bonus = 0.035 if 5.0 <= rr <= 8.5 else 0.0
-        score = ev_proxy + distance_bonus + middle_rr_bonus - far_penalty
-
-        # A target directly beyond several strong obstacles is less attractive.
-        score -= min(0.30, obstacles * 0.035)
-
-        candidates.append({
-            "label": target["label"],
-            "value": round(value, 10),
-            "rr": round(rr, 3),
-            "tier": tier,
-            "target_quality": round(quality, 4),
-            "path_clear": round(path_clear, 4),
-            "obstacles": int(obstacles),
-            "reachability_proxy": round(reachability, 4),
-            "ev_proxy": round(ev_proxy, 4),
-            "score": round(score, 4),
-        })
-
-    if not candidates:
-        return None, None, None, {}
-
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    best = candidates[0]
-    diagnostics = {
-        "selected": best,
-        "candidates": candidates[:12],
-        "context": {
-            "h1_structure": ctx["h1_structure"],
-            "m15_structure": ctx["m15_structure"],
-            "rsi": round(rsi, 1),
-            "relative_volume": round(float(ctx["relative_volume"]), 3),
-            "momentum_aligned": bool(momentum_aligned),
-            "min_rr": MIN_RR,
-            "max_rr": None,
-        },
-        "method": "structural_target_quality + path_clarity + regime/momentum context + diminishing_distance + EV_proxy",
-    }
-    return best["value"], best["label"], best["rr"], diagnostics
-
-
-# =============================================================================
-# FUNGSI UTAMA — Dipanggil oleh main.py
-# =============================================================================
-
-def _legacy_full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
-                 df_d1: Optional[pd.DataFrame] = None,
-                 symbol: Optional[str] = None,
-                 df_btc_h1: Optional[pd.DataFrame] = None,
-                 trade_history: Optional[list] = None) -> Optional[dict]:
-    """
-    Analisa penuh satu koin: Entry → SL → TP.
-
-    df_btc_h1: candle H1 BTCUSDT, OPSIONAL — kalau dikasih, dipakai sebagai
-    filter macro (lihat _macro_bias) supaya sinyal yang jelas melawan arah
-    market keseluruhan sedikit diredam, bukan diloloskan mentah-mentah cuma
-    berdasar struktur koin itu sendiri. Kalau tidak dikasih (default None),
-    perilaku 100% sama seperti sebelumnya — tidak ada filter tambahan.
-    """
-    try:
-        trade_history = trade_history if isinstance(trade_history, list) else []
-        if df_h1 is None or df_m15 is None or df_h1.empty or df_m15.empty:
+        ctx = _direction_score(df_h1, df_m15, df_d1, market_context, df_btc_h1)
+        if ctx is None:
             return None
-
-        if symbol:
-            log.info(f"[{symbol}] h1={len(df_h1)} m15={len(df_m15)}")
-
-        # Structural analysis MUST use only fully closed candles.
-        # Keep the latest market price separately for execution/pending-entry
-        # geometry; the forming candle must not rewrite M15/H1 structure.
-        live_price = float(df_m15["close"].iloc[-1])
-        h1_closed = _closed_candles(df_h1, 60)
-        m15_closed = _closed_candles(df_m15, 15)
-        d1_closed = _closed_candles(df_d1, 1440) if df_d1 is not None else None
-        score = score_direction(h1_closed, m15_closed, d1_closed, df_btc_h1)
-        macro_regime = infer_market_regime(df_btc_h1)
-        if score is None:
-            if symbol:
-                log.debug(f"[{symbol}] score_direction=None (data kurang)")
-            return None
-
-        direction = score["direction"]
-        cur_price = live_price
-        atr = score["atr"]
-        confidence = score["confidence"]
-        up = direction == "bull"
-
-        if symbol:
-            log.info(
-                f"[{symbol}] dir={direction} conf={confidence}% "
-                f"struct_h1={score['struct_h1']} d1={score['d1_bias']} "
-                f"macro={score.get('macro_bias', 'unknown')}"
-            )
-
-        h1 = build_df(h1_closed, interval_minutes=60)
-        m15 = build_df(m15_closed, interval_minutes=15)
-        if h1 is None or m15 is None:
-            return None
-
-        # ── STEP 1: ENTRY ────────────────────────────────────────
-        # Coba kandidat satu per satu. Candidate #1 tidak boleh membunuh
-        # seluruh koin hanya karena SL-nya lebar atau lokasi entry buruk.
-        cands = _collect_entry_candidates(m15, h1, direction, cur_price, atr, score)
-        if not cands:
-            if symbol:
-                log.debug(f"[{symbol}] no executable entry candidate (location/POI)")
-            return None
-
-        # HTF POI, displacement, sweep, CHoCH/BOS/CISD, inducement, OTE, dan
-        # reaction adalah confluence. Geometri entry/SL/TP tetap dihitung per
-        # candidate, sehingga candidate buruk bisa dilewati tanpa membuang koin.
-        htf_poi = _collect_htf_poi_zones(h1, direction, score)
-        poi_reacted = _recent_poi_reaction(m15, htf_poi, direction, atr) if htf_poi else False
-        confirmation = score.get("entry_confirmation", {})
-        selected_m15_struct = score.get("m15_struct", "ranging")
-        opposite_m15 = (
-            (direction == "bull" and selected_m15_struct == "bearish") or
-            (direction == "bear" and selected_m15_struct == "bullish")
-        )
-
-        confluence_bonus = 0
-        if htf_poi:
-            confluence_bonus += 5
-        if poi_reacted:
-            confluence_bonus += 7
-        if confirmation.get("confirmed"):
-            confluence_bonus += 8
-        if score.get("selected_sweep"):
-            confluence_bonus += 9
-        if score.get("trigger_count", 0) >= 2:
-            confluence_bonus += 4
-        elif score.get("trigger_count", 0) == 1:
-            confluence_bonus += 2
-        if selected_m15_struct == ("bullish" if up else "bearish"):
-            confluence_bonus += 4
-        if opposite_m15:
-            confluence_bonus -= 6
-        base_confidence = max(0, min(99, confidence + confluence_bonus))
-
-        liq_ctx = score["liquidity_bull"] if up else score["liquidity_bear"]
-        sh1 = score.get("sh1", [])
-        sl1 = score.get("sl1", [])
-        sh15 = score.get("sh15", [])
-        sl15 = score.get("sl15", [])
-
+        direction = ctx["direction"]
+        h1, m15 = ctx["h1"], ctx["m15"]
+        price, atr = ctx["price"], ctx["atr"]
+        sweep = _sweep(m15, direction, ctx["sh15"], ctx["sl15"])
+        displacement, displacement_atr = _displacement(m15, direction)
+        pullback = _pullback_quality(m15, direction, atr)
+        location = _location_quality(m15, direction, price, atr)
+        candidates = _candidate_levels(m15, h1, direction, price, atr)
+        context_q = _context_quality(market_context, direction)
         evaluated = []
-        for candidate in cands:
-            entry = float(candidate["price"])
-            entry_lbl = candidate["label"]
-            invalid = candidate.get("invalid")
-            loc = candidate.get("location", {})
-
-            # V11: evidence is soft. Do not stack hard gates on trend/pullback/POI.
-            # The research showed that V11 became too sparse while confidence lost
-            # predictive meaning. Only execution geometry and impossible RR are hard rejects.
-            trend_q = score.get("trend_strength", {})
-            pullback_q = score.get("pullback_quality", {})
-            liquidity_q = score.get("liquidity_context", {})
-
-            # Geometry checks per candidate.
-            if up and entry > cur_price * 1.005:
+        htf_zones = _find_order_blocks(h1, direction, HTF_POI_LOOKBACK) + _find_fvg(h1, direction, HTF_POI_LOOKBACK)
+        for cand in candidates:
+            entry = float(cand["mid"])
+            if abs(price - entry) > atr * MAIN_ENTRY_MAX_ATR:
                 continue
-            if not up and entry < cur_price * 0.995:
+            geo = _compute_geometry(m15, h1, direction, entry, atr)
+            if geo is None:
                 continue
-
-            # Keep strategy output compatible with main.py's pre-entry gate.
-            # If candidate #1 is too far, evaluate candidate #2/#3 instead of
-            # returning a signal that will be rejected immediately after scan.
-            # The price can move after this snapshot; main.py still performs the
-            # final live validation immediately before placing the order.
-            if abs(cur_price - entry) > atr * MAIN_ENTRY_MAX_ATR:
-                if symbol:
-                    log.debug(
-                        f"[{symbol}] candidate {entry_lbl}@{entry:.6g} skipped: "
-                        f"ENTRY_TOO_FAR "
-                        f"({abs(cur_price-entry)/max(atr,1e-12):.2f} ATR > "
-                        f"{MAIN_ENTRY_MAX_ATR:.2f} ATR)"
-                    )
+            sl_price, risk, *_rest = geo
+            tp = _tp_targets(m15, h1, direction, entry, risk)
+            if tp is None:
                 continue
-
-            try:
-                sl_price, risk = _compute_sl(
-                    m15, h1, direction, entry, atr, liq_ctx, invalid
-                )
-            except ValueError as exc:
-                if symbol:
-                    log.debug(
-                        f"[{symbol}] candidate {entry_lbl}@{entry:.6g} skipped: {exc}"
-                    )
+            tp_price, tp_label, rr, _ = tp
+            if rr < MIN_RR:
                 continue
-
-            if up and sl_price >= entry:
-                continue
-            if not up and sl_price <= entry:
-                continue
-            if risk <= 0:
-                continue
-            if up and cur_price <= sl_price:
-                continue
-            if not up and cur_price >= sl_price:
-                continue
-
-            tp_pool = _build_tp_pool(
-                h1, m15, direction, entry, atr, sh1, sl1, sh15, sl15
-            )
-            tp_price, tp_lbl, rr, tp_diag = _select_tp(tp_pool, entry, risk, direction, h1=h1, m15=m15, atr=atr)
-            if tp_price is None or rr is None or rr < MIN_RR:
-                if symbol:
-                    log.debug(
-                        f"[{symbol}] candidate {entry_lbl}@{entry:.6g} skipped: "
-                        f"no TP >= {MIN_RR}R"
-                    )
-                continue
-
-            if up and cur_price >= tp_price:
-                continue
-            if not up and cur_price <= tp_price:
-                continue
-
-            # V3.0: confidence menilai tradeability; entry location + move health lebih berat
-            # daripada raw structural confluence. Tidak ada hard rejection baru.
-            loc_score = int(loc.get("location_score", 50))
-            final_conf, setup_quality, conf_diag = _calibrate_confidence(
-                base_confidence, score, loc, candidate, float(rr), htf_poi, poi_reacted, tp_diag=tp_diag
-            )
-            empirical_conf, empirical_diag = calibrate_confidence_from_history(
-                trade_history, final_conf, "BUY" if up else "SELL", entry_lbl, float(rr), setup_quality
-            )
-            final_conf = empirical_conf
-            conf_diag.update(empirical_diag)
-
-            poi_diag = _candidate_poi_quality(candidate, m15, h1, direction, {**score, "htf_poi_overlap": bool(htf_poi)})
-            candidate["poi_quality"] = poi_diag["score"]
-            candidate["poi_state"] = poi_diag["state"]
-            evidence_adj, evidence_diag = _v11_evidence_adjustment(
-                trend_q, pullback_q, poi_diag, liquidity_q, loc, confirmation, entry_lbl, score.get("htf_bias", "neutral"), direction
-            )
-            final_conf = int(max(0, min(99, round(final_conf + evidence_adj))))
-            conf_diag["trend_strength"] = trend_q
-            conf_diag["pullback_quality"] = pullback_q
-            conf_diag["liquidity_context"] = liquidity_q
-            conf_diag["poi_quality"] = poi_diag
-            conf_diag["v11_evidence"] = evidence_diag
-
-            thesis = _v11_market_thesis(score, trend_q, pullback_q, liquidity_q, loc, candidate)
-            conf_diag["market_thesis"] = thesis
-
-            # Ranking is a quality ranking, not another hard threshold. This lets
-            # the strongest coherent setup survive even when its raw confidence
-            # is modest, while preserving the main.py operator threshold.
-            evidence_quality = (
-                trend_q.get("score", 50) * 0.22
-                + pullback_q.get("score", 50) * 0.18
-                + poi_diag.get("score", 50) * 0.22
-                + liquidity_q.get("score", 50) * 0.16
-                + loc_score * 0.12
-                + (100.0 if confirmation.get("confirmed") else 50.0) * 0.10
-            )
-            execution_score = (
-                final_conf * 0.55
-                + evidence_quality * 0.35
-                + min(float(rr), 6.0) * 1.0
-                + (3.0 if entry_lbl == "ob" else 1.5 if entry_lbl == "fvg" else 0.5)
-            )
-
+            htf_overlap = any(_zone_overlap(entry, z["top"], z["bot"]) for z in htf_zones[:6])
+            poi_quality = _clip(40 + float(cand.get("score", 0)) * 0.55 + (12 if htf_overlap else 0) + (10 if sweep["type"] == "sweep" else 0))
+            if displacement:
+                setup_score = _clip(0.45 * poi_quality + 0.28 * pullback["score"] + 0.17 * min(100, displacement_atr * 35) + 0.10 * sweep["strength"])
+            else:
+                setup_score = _clip(0.55 * poi_quality + 0.30 * pullback["score"] + 0.15 * sweep["strength"])
+            risk_atr = risk / max(atr, 1e-12)
+            risk_score = 100 - min(65, abs(risk_atr - 1.0) * 32) - (15 if risk_atr < ENTRY_MIN_RISK_ATR * 1.15 else 0)
+            contradictions = 0
+            reasons = []
+            if ctx["struct_h1"] == "bullish" and direction == "bear": contradictions += 1; reasons.append("h1_conflict")
+            if ctx["struct_h1"] == "bearish" and direction == "bull": contradictions += 1; reasons.append("h1_conflict")
+            if pullback["state"] == "damaged": contradictions += 1; reasons.append("damaged_pullback")
+            if location["score"] < 35: contradictions += 1; reasons.append("poor_location")
+            if context_q["conflicts"]: contradictions += min(2, len(context_q["conflicts"])); reasons.extend(context_q["conflicts"][:2])
+            if not displacement: reasons.append("displacement_not_confirmed")
+            if htf_overlap: reasons.append("htf_poi_overlap")
+            if sweep["type"] == "sweep": reasons.append("liquidity_sweep")
+            archetype = _archetype(direction, sweep, cand.get("kind", "market"), displacement, pullback, htf_overlap, (market_context or {}).get("market_regime", ""))
+            components = {
+                "direction": ctx["direction_quality"],
+                "setup": setup_score,
+                "location": location["score"],
+                "risk": _clip(risk_score),
+                "context": context_q["score"],
+            }
+            conf, quality, penalty = _confidence(components, contradictions)
+            hist = _history_context(trade_history, direction, cand.get("kind", "market"), archetype)
+            hist_adj = float(hist.get("adjustment", 0.0))
+            # Historical adjustment is deliberately tiny and cannot reorder the primary quality model aggressively.
+            conf = int(np.clip(round(conf + hist_adj), 20, 90))
+            execution_score = quality * 0.82 + min(rr, 6.0) * 2.2 + float(cand.get("score", 0)) * 0.08 - contradictions * 3.5
             evaluated.append({
-                "candidate": candidate,
-                "entry": entry,
-                "entry_lbl": entry_lbl,
-                "invalid": invalid,
-                "sl": float(sl_price),
-                "risk": float(risk),
-                "tp": float(tp_price),
-                "tp_lbl": tp_lbl,
-                "rr": float(rr),
-                "confidence": final_conf,
-                "setup_quality": setup_quality,
-                "confidence_diagnostics": conf_diag,
-                "execution_score": execution_score,
-                "location": loc,
+                "entry": entry, "entry_label": cand.get("kind", "market"), "sl": sl_price, "risk": risk,
+                "tp": tp_price, "tp_label": tp_label, "rr": rr, "confidence": conf, "quality": quality,
+                "execution_score": execution_score, "contradictions": contradictions, "reason": reasons,
+                "archetype": archetype, "hist": hist, "components": components, "penalty": penalty,
+                "poi_quality": poi_quality, "location": location, "pullback": pullback,
+                "risk_atr": risk_atr, "displacement_atr": displacement_atr,
             })
-
         if not evaluated:
-            if symbol:
-                log.debug(
-                    f"[{symbol}] semua candidate gugur di geometry/TP/location/"
-                    f"entry-distance; tidak mengembalikan setup yang main.py pasti tolak"
-                )
             return None
-
         evaluated.sort(key=lambda x: x["execution_score"], reverse=True)
-        best_eval = evaluated[0]
-        best = best_eval["candidate"]
-        entry = best_eval["entry"]
-        entry_lbl = best_eval["entry_lbl"]
-        sl_price = best_eval["sl"]
-        risk = best_eval["risk"]
-        tp_price = best_eval["tp"]
-        tp_lbl = best_eval["tp_lbl"]
-        rr = best_eval["rr"]
-        confidence = best_eval["confidence"]
-        loc = best_eval["location"]
-
-        if symbol:
-            log.info(
-                f"[{symbol}] ENTRY={entry:.6f} label={entry_lbl} "
-                f"loc={loc.get('location_score')}%/{loc.get('location_state')} "
-                f"RSI={loc.get('rsi')}({loc.get('rsi_timing')})"
-            )
-            log.info(f"[{symbol}] SL={sl_price:.6f} risk={risk:.6f}")
-            log.info(f"[{symbol}] TP={tp_price:.6f} label={tp_lbl} RR={rr:.2f}")
-
-        rsi_val = round(float(m15["rsi"].iloc[-1]), 1)
-
+        best = evaluated[0]
+        confidence_band = "ELITE" if best["confidence"] >= 75 else "STRONG" if best["confidence"] >= 65 else "VALID" if best["confidence"] >= 50 else "WEAK"
         return {
             "symbol": symbol,
-            "original_dir": direction,
-            "decision": "BUY" if up else "SELL",
-            "confidence": confidence,
-            "direction_confidence": max(0, min(99, base_confidence)),
-            "setup_quality": int(best_eval.get("setup_quality", 0)),
-            "confidence_band": best_eval.get("confidence_diagnostics", {}).get("confidence_band", _confidence_band(confidence)),
-            "confidence_diagnostics": best_eval.get("confidence_diagnostics", {}),
+            "decision": "BUY" if direction == "bull" else "SELL",
+            "confidence": int(best["confidence"]),
+            "direction_confidence": int(round(ctx["direction_quality"])),
+            "setup_quality": int(round(best["quality"])),
+            "confidence_band": confidence_band,
             "confidence_model": CONFIDENCE_MODEL_VERSION,
-            "confidence_is_probability": bool(best_eval.get("confidence_diagnostics", {}).get("calibration") == "empirical_bayesian"),
-            "rr_band": _rr_band(rr),
-            "entry_location_score": loc.get("location_score", 50),
-            "entry_location_state": loc.get("location_state", "unknown"),
-            "trend_strength": score.get("trend_strength", {}),
-            "pullback_quality": score.get("pullback_quality", {}),
-            "liquidity_context": score.get("liquidity_context", {}),
-            "poi_quality": best.get("poi_quality"),
-            "poi_state": best.get("poi_state"),
-            "entry_range_position": loc.get("range_position", 0.5),
-            "entry_zone_low": loc.get("entry_zone_low"),
-            "entry_zone_high": loc.get("entry_zone_high"),
-            "rsi_timing": loc.get("rsi_timing", "unknown"),
-            "rsi_slope": loc.get("rsi_slope", 0.0),
-            "entry": round(entry, 8),
-            "price": cur_price,
-            "entry_label": entry_lbl,
-            "sl": round(sl_price, 8),
-            "initial_sl": round(sl_price, 8),
-            "initial_risk": round(abs(entry - sl_price), 8),
-            "tp": round(tp_price, 8),
-            "rr": round(rr, 2),
-            "atr": round(atr, 8),
-            "market_thesis": best_eval.get("confidence_diagnostics", {}).get("market_thesis", {}),
-            "market_regime": macro_regime,
-            "v11_evidence": best_eval.get("confidence_diagnostics", {}).get("v11_evidence", {}),
-            "v11_quality": {
-                "trend_strength": score.get("trend_strength", {}),
-                "pullback_quality": score.get("pullback_quality", {}),
-                "liquidity_context": score.get("liquidity_context", {}),
-                "poi_quality": best.get("poi_quality"),
-                "poi_state": best.get("poi_state"),
+            "confidence_is_probability": False,
+            "confidence_diagnostics": {
+                "model": CONFIDENCE_MODEL_VERSION,
+                "components": best["components"],
+                "contradictions": best["contradictions"],
+                "contradiction_reasons": best["reason"],
+                "historical_context": best["hist"],
+                "archetype": best["archetype"],
+                "quality_before_history": best["quality"],
+                "history_adjustment": best["hist"].get("adjustment", 0.0),
+                "quality_penalty": best["penalty"],
+                "market_context": context_q,
             },
-            "rsi": rsi_val,
-            "struct_h1": score["struct_h1"],
-            "d1_bias": score.get("d1_bias", "neutral"),
-            "choch_m15": score["choch_m15"],
-            "choch_h1": score["choch_h1"],
-            "cisd_m15": score["cisd_m15"],
-            "failed_retest": score.get("failed_retest", {}),
-            "htf_bias": score.get("htf_bias", "unknown"),
-            "h1_bias": score.get("h1_bias", "unknown"),
-            "poi_reacted": poi_reacted,
-            "entry_confirmation": confirmation,
-            "selected_sweep": score.get("selected_sweep", False),
-            "trigger_count": score.get("trigger_count", 0),
-            "tp_sl_reason": (
-                f"Entry@{entry:.5g}({entry_lbl}) | "
-                f"SL@{sl_price:.5g}(struct) | "
-                f"TP@{tp_price:.5g}({tp_lbl}) | RR={rr:.2f} | "
-                f"Loc={loc.get('location_score')}({loc.get('location_state')}) | "
-                f"RSI={rsi_val}/{loc.get('rsi_timing')}"
-            ),
+            "market_thesis": {
+                "direction": "BUY" if direction == "bull" else "SELL",
+                "archetype": best["archetype"],
+                "evidence": best["reason"],
+                "market_regime": (market_context or {}).get("market_regime", ctx["macro_bias"]),
+            },
+            "entry_location_score": int(round(best["location"]["score"])),
+            "entry_location_state": "preferred" if best["location"]["score"] >= 70 else "acceptable" if best["location"]["score"] >= 45 else "late",
+            "entry_range_position": best["location"]["range_position"],
+            "trend_strength": {"score": ctx["direction_quality"], "state": ctx["struct_h1"]},
+            "pullback_quality": best["pullback"],
+            "liquidity_context": {"sweep": sweep},
+            "poi_quality": best["poi_quality"],
+            "poi_state": "fresh" if best["poi_quality"] >= 70 else "usable",
+            "market_regime": (market_context or {}).get("market_regime", ctx["macro_bias"]),
+            "entry": round(best["entry"], 10),
+            "price": round(price, 10),
+            "entry_label": best["entry_label"],
+            "sl": round(best["sl"], 10),
+            "initial_sl": round(best["sl"], 10),
+            "initial_risk": round(best["risk"], 10),
+            "tp": round(best["tp"], 10),
+            "rr": round(best["rr"], 3),
+            "tp_label": best["tp_label"],
+            "atr": round(atr, 10),
+            "risk_atr": round(best["risk_atr"], 3),
+            "rsi": round(float(m15["rsi"].iloc[-1]), 2),
+            "struct_h1": ctx["struct_h1"],
+            "d1_bias": ctx["d1_bias"],
+            "htf_bias": ctx["d1_bias"] if ctx["d1_bias"] != "neutral" else ctx["struct_h1"],
+            "h1_bias": ctx["struct_h1"],
+            "choch_m15": {"bullish_choch": False, "bearish_choch": False},
+            "choch_h1": {"bullish_choch": False, "bearish_choch": False},
+            "cisd_m15": {"bullish_cisd": False, "bearish_cisd": False},
+            "failed_retest": {},
+            "entry_confirmation": {"confirmed": bool(displacement), "kind": "displacement_close" if displacement else "none", "body_atr": round(displacement_atr, 3)},
+            "selected_sweep": bool(sweep["type"] == "sweep"),
+            "trigger_count": int(bool(displacement)) + int(bool(sweep["type"] == "sweep")),
+            "m15_relative_volume": float(m15["volume"].iloc[-1] / max(m15["vol_sma"].iloc[-1], 1e-12)),
+            "m15_rsi": float(m15["rsi"].iloc[-1]),
+            "m15_rsi_slope": float(m15["rsi"].iloc[-1] - m15["rsi"].iloc[-2]),
+            "v11_quality": {"trend_strength": {"score": ctx["direction_quality"]}, "pullback_quality": best["pullback"], "poi_quality": best["poi_quality"]},
+            "reasoning_engine": TRAIL_ENGINE_VERSION,
+            "tp_sl_reason": f"Entry@{best['entry']:.8g}({best['entry_label']}) | SL@{best['sl']:.8g} | TP@{best['tp']:.8g}({best['tp_label']}) | RR={best['rr']:.2f} | quality={best['quality']:.1f} | conf={best['confidence']}%",
         }
-
-    except Exception as e:
-        if symbol:
-            log.error(f"[full_analyze] {symbol}: {e}", exc_info=True)
+    except Exception as exc:
+        log.exception("[full_analyze] %s: %s", symbol or "?", exc)
         return None
 
-def get_best_signal(candidates: list) -> Optional[dict]:
-    """Pilih sinyal terbaik dari list kandidat."""
-    if not candidates:
-        return None
-    label_bonus = {"ob": 4, "fvg": 2, "eq": 1, "market": 0}
 
-    def _rank(sig):
-        bonus = label_bonus.get(sig.get("entry_label", ""), 0)
-        return sig["confidence"] + bonus + sig.get("rr", 0) * 0.5
-
-    return max(candidates, key=_rank)
+def _current_price(df_m15, state):
+    p = _num(state.get("current_price"), None)
+    if p is not None:
+        return p
+    return float(df_m15["close"].iloc[-1]) if df_m15 is not None and not df_m15.empty else None
 
 
-# =============================================================================
-# ADAPTIVE POSITION MANAGEMENT — TRAILING BRAIN V8
-# =============================================================================
-# V11 design principle:
-#   Trail is not a static distance-from-price stop. It is a state machine that
-#   evaluates continuation health, momentum decay, structural failure,
-#   exhaustion and retracement depth before choosing a protection level.
-#
-# The goal is asymmetric:
-#   - healthy winner -> preserve room and avoid noise exits
-#   - weakening winner -> lock a meaningful portion of realized edge
-#   - confirmed reversal -> move protection close enough to avoid giving back
-#     the move, while still respecting the current candle/ATR noise envelope
-#
-# No API calls are made here. main.py remains the execution layer.
-
-TRAIL_LOOKBACK_CANDLES = STRUCT_TRAIL_LOOKBACK
-TRAIL_PREDICTIVE_VERSION = "5.0"
-TRAIL_MIN_PROFIT_TO_PROTECT_R = 0.55
-TRAIL_CAUTION_R = 0.90
-TRAIL_MATURE_R = 1.50
-TRAIL_REVERSAL_R = 1.00
-TRAIL_STRONG_REVERSAL_R = 1.75
-TRAIL_RETRACE_WARN_R = 0.30
-TRAIL_RETRACE_STRONG_R = 0.55
-TRAIL_LOCK_CAUTION_R = 0.12
-TRAIL_LOCK_WEAK_R = 0.28
-TRAIL_LOCK_STRONG_R = 0.55
-TRAIL_LOCK_REVERSAL_R = 0.80
-TRAIL_MIN_GAP_ATR_V8 = 0.32
-TRAIL_STRUCT_BUFFER_ATR = 0.36
-TRAIL_MOMENTUM_DECAY_ATR = 0.12
-TRAIL_OPPOSITE_BODY_ATR = 0.70
-TRAIL_REVERSAL_BODY_ATR = 0.95
-TRAIL_TWO_BAR_REVERSAL = True
-TRAIL_VOLUME_COUNTER = 1.20
-TRAIL_VOLUME_EXHAUSTION = 0.72
-TRAIL_PEAK_LOOKBACK = 40
-TRAIL_PROTECTED_SWING_LB = 3
-TRAIL_SCORE_CAUTION = 3
-TRAIL_SCORE_WEAK = 5
-TRAIL_SCORE_REVERSAL = 7
-TRAIL_SCORE_STRONG_REVERSAL = 9
-
-
-def _trail_directional_return(df: pd.DataFrame, direction: str, bars: int = 3) -> float:
-    if df is None or len(df) < bars + 1:
-        return 0.0
-    atr = max(float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0, 1e-12)
-    move = float(df["close"].iloc[-1] - df["close"].iloc[-1-bars])
-    return (move if direction == "bull" else -move) / atr
-
-
-def _trail_peak_metrics(df: pd.DataFrame, direction: str, entry: float,
-                        initial_risk: float) -> dict:
-    """Measure favorable excursion and give-back from the recent favorable extreme."""
-    recent = df.iloc[-min(len(df), TRAIL_PEAK_LOOKBACK):]
-    if recent.empty:
-        return {"peak_price": entry, "peak_r": 0.0, "giveback_r": 0.0, "retracement_r": 0.0}
-    peak_price = float(recent["high"].max()) if direction == "bull" else float(recent["low"].min())
-    peak_r = ((peak_price - entry) if direction == "bull" else (entry - peak_price)) / max(initial_risk, 1e-12)
-    current_price = float(df["close"].iloc[-1])
-    giveback_r = ((peak_price - current_price) if direction == "bull" else (current_price - peak_price)) / max(initial_risk, 1e-12)
-    retracement_r = max(0.0, giveback_r)
+def _path_metrics(df_m15, state, direction, entry, risk, current_price):
+    current_r = ((current_price - entry) / risk) if direction == "bull" else ((entry - current_price) / risk)
+    state_mfe = _num(state.get("mfe_r"), 0.0) or 0.0
+    state_mae = _num(state.get("mae_r"), 0.0) or 0.0
+    window = df_m15.tail(TRAIL_PEAK_LOOKBACK)
+    peak = float(window["high"].max()) if direction == "bull" else float(window["low"].min())
+    peak_r = ((peak - entry) / risk) if direction == "bull" else ((entry - peak) / risk)
+    mfe = max(0.0, state_mfe, peak_r)
+    giveback_r = max(0.0, mfe - current_r)
+    ratio = giveback_r / max(mfe, 0.25) if mfe > 0 else 0.0
     return {
-        "peak_price": peak_price,
-        "peak_r": round(peak_r, 3),
-        "giveback_r": round(giveback_r, 3),
-        "retracement_r": round(retracement_r, 3),
+        "current_r": round(current_r, 4),
+        "mfe_r": round(mfe, 4),
+        "mae_r": round(state_mae, 4),
+        "giveback_r": round(giveback_r, 4),
+        "giveback_ratio": round(ratio, 4),
     }
 
 
-def _trail_protected_swing(df: pd.DataFrame, direction: str, atr: float) -> Optional[float]:
-    """Return the nearest *confirmed* structural stop candidate."""
-    recent = df.iloc[-min(len(df), TRAIL_LOOKBACK_CANDLES):]
-    if len(recent) < TRAIL_PROTECTED_SWING_LB * 2 + 3:
-        return None
-    sh, sl = swing_pts(recent, lb=TRAIL_PROTECTED_SWING_LB)
-    buf = max(atr * TRAIL_STRUCT_BUFFER_ATR, 1e-12)
+def _reversal_state(df, direction, current_r, giveback_ratio):
+    atr = max(float(df["atr"].iloc[-1]), 1e-12)
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    body = abs(float(last["close"] - last["open"])) / atr
+    counter = (float(last["close"]) < float(last["open"])) if direction == "bull" else (float(last["close"]) > float(last["open"]))
+    prev_counter = (float(prev["close"]) < float(prev["open"])) if direction == "bull" else (float(prev["close"]) > float(prev["open"]))
+    rv = float(last["volume"] / max(last["vol_sma"], 1e-12))
+    if counter and prev_counter and body >= TRAIL_REVERSAL_BODY_ATR and giveback_ratio >= TRAIL_GIVEBACK_STRONG:
+        return "REVERSAL_CONFIRMED", 3, rv
+    if counter and body >= TRAIL_COUNTER_BODY_ATR and giveback_ratio >= TRAIL_GIVEBACK_WARN:
+        return "WEAKENING", 2, rv
+    if giveback_ratio >= TRAIL_GIVEBACK_STRONG or current_r < 0.5:
+        return "CAUTION", 1, rv
+    return "HEALTHY", 0, rv
+
+
+def _structural_trail(df, direction, current_price, atr):
+    sh, sl = swing_pts(df.tail(STRUCT_TRAIL_LOOKBACK), STRUCT_TRAIL_LB)
+    sub = df.tail(STRUCT_TRAIL_LOOKBACK)
     if direction == "bull" and sl:
-        return float(recent["low"].iloc[sl[-1]]) - buf
+        level = float(sub["low"].iloc[sl[-1]]) - atr * TRAIL_STRUCT_BUFFER_ATR
+        return level
     if direction == "bear" and sh:
-        return float(recent["high"].iloc[sh[-1]]) + buf
+        level = float(sub["high"].iloc[sh[-1]]) + atr * TRAIL_STRUCT_BUFFER_ATR
+        return level
     return None
 
 
-def _trade_lifecycle_context(state: dict, current_r: float, direction: str,
-                              entry: float, current_price: float,
-                              initial_risk: float) -> dict:
-    """Build a path-aware lifecycle from metrics maintained by main.py.
-
-    main.py already updates mfe_r/mae_r/time-to-R before dispatching the strategy.
-    V9 treats those fields as first-class evidence instead of recalculating a
-    trailing decision from weakness alone. If a field is unavailable (old/local
-    state), the function degrades safely to the current R observation.
-    """
-    try:
-        mfe_r = max(float(state.get("mfe_r", current_r)), current_r)
-    except Exception:
-        mfe_r = current_r
-    try:
-        mae_r = min(float(state.get("mae_r", current_r)), current_r)
-    except Exception:
-        mae_r = current_r
-    giveback_r = max(0.0, mfe_r - current_r)
-    giveback_ratio = giveback_r / max(abs(mfe_r), 0.25) if mfe_r > 0 else 0.0
-    if current_r < TRAIL_PROVING_R:
-        phase = "INITIAL"
-    elif current_r < TRAIL_WINNER_R and mfe_r < TRAIL_MFE_ARM_R:
-        phase = "PROVING"
-    elif mfe_r >= TRAIL_MFE_EXTENDED_R:
-        phase = "EXTENDED"
-    elif mfe_r >= TRAIL_MFE_ARM_R:
-        phase = "WINNER"
-    else:
-        phase = "PROVING"
-
-    if giveback_ratio >= TRAIL_GIVEBACK_CRITICAL:
-        distribution = "CRITICAL_GIVEBACK"
-    elif giveback_ratio >= TRAIL_GIVEBACK_TIGHT:
-        distribution = "DEEP_GIVEBACK"
-    elif giveback_ratio >= TRAIL_GIVEBACK_WARN:
-        distribution = "MEANINGFUL_GIVEBACK"
-    else:
-        distribution = "HEALTHY_GIVEBACK"
-
-    # A slow winner is not automatically weak. Time-to-1R is informational and
-    # only used to prevent premature tightening when structure remains healthy.
-    t1 = state.get("time_to_1r_sec")
-    slow_winner = bool(t1 is not None and float(t1) > 4 * 3600 and mfe_r >= TRAIL_MFE_ARM_R)
-    return {
-        "phase": phase,
-        "distribution": distribution,
-        "current_r": round(float(current_r), 4),
-        "mfe_r": round(float(mfe_r), 4),
-        "mae_r": round(float(mae_r), 4),
-        "giveback_r": round(float(giveback_r), 4),
-        "giveback_ratio": round(float(giveback_ratio), 4),
-        "time_to_1r_sec": float(t1) if t1 is not None else None,
-        "time_to_2r_sec": float(state.get("time_to_2r_sec")) if state.get("time_to_2r_sec") is not None else None,
-        "slow_winner": slow_winner,
-    }
-
-
-def _entry_quality_context(state: dict, direction: str) -> dict:
-    """Low-risk diagnostic quality score; never acts as a hard entry veto."""
-    sig = state.get("signal", state) or {}
-    label = str(sig.get("entry_label") or state.get("entry_label") or "").lower()
-    h1 = str(sig.get("struct_h1") or state.get("struct_h1") or "neutral").lower()
-    d1 = str(sig.get("d1_bias") or state.get("d1_bias") or "neutral").lower()
-    score = ENTRY_TYPE_WEIGHT.get(label, 0)
-    reasons = []
-    if label in ENTRY_TYPE_WEIGHT:
-        reasons.append(f"entry:{label}")
-    if (direction == "bull" and h1 == "bullish") or (direction == "bear" and h1 == "bearish"):
-        score += 2; reasons.append("h1_aligned")
-    elif h1 in {"bullish", "bearish"}:
-        score -= 1; reasons.append("h1_conflict")
-    if (direction == "bull" and d1 == "bullish") or (direction == "bear" and d1 == "bearish"):
-        score += 2; reasons.append("d1_aligned")
-    elif d1 in {"bullish", "bearish"}:
-        score -= 2; reasons.append("d1_conflict")
-    return {"score": int(score), "entry_label": label or None, "struct_h1": h1,
-            "d1_bias": d1, "reasons": reasons}
-
-
-def _trail_reversal_analysis(df: pd.DataFrame, direction: str, entry: float,
-                             current_price: float, initial_risk: float,
-                             tp: Optional[float] = None) -> dict:
-    """Estimate continuation health vs. reversal risk from closed M15 candles.
-
-    This is deliberately a *risk-management classifier*, not a claim that the
-    market can be predicted perfectly. It looks for agreement across independent
-    signals before calling a move a reversal.
-    """
+def _retracement_trail(df, direction, entry, risk, current_price, path, state):
     atr = max(float(df["atr"].iloc[-1]), 1e-12)
-    last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) >= 2 else last
-    prev2 = df.iloc[-3] if len(df) >= 3 else prev
-    peak = _trail_peak_metrics(df, direction, entry, initial_risk)
-    structure = _market_structure(df, *swing_pts(df, lb=TRAIL_PROTECTED_SWING_LB))
-    aligned_structure = structure == ("bullish" if direction == "bull" else "bearish")
-    opposite_structure = structure == ("bearish" if direction == "bull" else "bullish")
-    mom = _momentum_context(df)
-    aligned_mom = (direction == "bull" and mom.get("bull")) or (direction == "bear" and mom.get("bear"))
-    opposite_mom = (direction == "bull" and mom.get("bear")) or (direction == "bear" and mom.get("bull"))
-    rdiv = detect_rsi_divergence(df, direction, lb=30)
-    divergence = ((direction == "bull" and rdiv.get("bear_div")) or
-                  (direction == "bear" and rdiv.get("bull_div")))
-    vol = _relative_volume(df, 20)
-
-    last_body_atr = abs(float(last["close"] - last["open"])) / atr
-    prev_body_atr = abs(float(prev["close"] - prev["open"])) / atr
-    opposite_last = (direction == "bull" and float(last["close"]) < float(last["open"])) or (direction == "bear" and float(last["close"]) > float(last["open"]))
-    opposite_prev = (direction == "bull" and float(prev["close"]) < float(prev["open"])) or (direction == "bear" and float(prev["close"]) > float(prev["open"]))
-    two_bar_opposite = opposite_last and opposite_prev if TRAIL_TWO_BAR_REVERSAL else False
-
-    # Directional return is measured in ATR units. A healthy trade should retain
-    # positive directional return over several lookbacks.
-    ret3 = _trail_directional_return(df, direction, 3)
-    ret5 = _trail_directional_return(df, direction, 5) if len(df) >= 6 else ret3
-    momentum_decay = (ret5 < TRAIL_MOMENTUM_DECAY_ATR and ret3 < 0.0)
-
-    # Detect a fresh opposite displacement / break of the short-term range.
-    look = df.iloc[-6:-1] if len(df) >= 7 else df.iloc[:-1]
-    prior_high = float(look["high"].max()) if not look.empty else float(prev["high"])
-    prior_low = float(look["low"].min()) if not look.empty else float(prev["low"])
-    opposite_break = ((direction == "bull" and float(last["close"]) < prior_low) or
-                      (direction == "bear" and float(last["close"]) > prior_high))
-
-    # Protected swing failure is stronger than a wick: the close must break the
-    # latest confirmed swing in the adverse direction.
-    sh, sl = swing_pts(df, lb=TRAIL_PROTECTED_SWING_LB)
-    protected_break = False
-    if direction == "bull" and sl:
-        protected_break = float(last["close"]) < float(df["low"].iloc[sl[-1]])
-    elif direction == "bear" and sh:
-        protected_break = float(last["close"]) > float(df["high"].iloc[sh[-1]])
-
-    # Liquidity rejection = extension followed by close back through the candle body.
-    recent_high = float(df["high"].iloc[-15:].max())
-    recent_low = float(df["low"].iloc[-15:].min())
-    liquidity_rejection = False
+    mfe = path["mfe_r"]
+    gb = path["giveback_ratio"]
     if direction == "bull":
-        liquidity_rejection = (float(last["high"]) >= recent_high * (1 - 1e-9)
-                               and opposite_last and last_body_atr >= TRAIL_OPPOSITE_BODY_ATR)
-    else:
-        liquidity_rejection = (float(last["low"]) <= recent_low * (1 + 1e-9)
-                               and opposite_last and last_body_atr >= TRAIL_OPPOSITE_BODY_ATR)
-
-    score = 0
-    reasons = []
-    confirmations = 0
-
-    if opposite_structure:
-        score += 3
-        confirmations += 1
-        reasons.append("opposite_structure")
-    elif not aligned_structure:
-        score += 1
-        reasons.append("structure_ranging")
-    else:
-        reasons.append("structure_aligned")
-
-    if opposite_mom:
-        score += 2
-        confirmations += 1
-        reasons.append("opposite_momentum")
-    elif aligned_mom:
-        reasons.append("momentum_aligned")
-    elif momentum_decay:
-        score += 1
-        reasons.append("momentum_decay")
-
-    if divergence:
-        score += 2 if not rdiv.get("strong") else 3
-        confirmations += 1
-        reasons.append("rsi_divergence")
-
-    if two_bar_opposite:
-        score += 2
-        confirmations += 1
-        reasons.append("two_bar_opposite")
-    elif opposite_last and last_body_atr >= TRAIL_OPPOSITE_BODY_ATR:
-        score += 1
-        reasons.append("opposite_candle")
-
-    if opposite_break:
-        score += 2
-        confirmations += 1
-        reasons.append("opposite_range_break")
-
-    if protected_break:
-        score += 3
-        confirmations += 1
-        reasons.append("protected_swing_break")
-
-    if liquidity_rejection:
-        score += 2
-        confirmations += 1
-        reasons.append("liquidity_rejection")
-
-    if vol >= TRAIL_VOLUME_COUNTER and opposite_last:
-        score += 2
-        confirmations += 1
-        reasons.append("counter_volume_expansion")
-    elif vol <= TRAIL_VOLUME_EXHAUSTION and peak["peak_r"] >= TRAIL_CAUTION_R:
-        score += 1
-        reasons.append("volume_exhaustion")
-
-    if peak["retracement_r"] >= TRAIL_RETRACE_WARN_R and peak["peak_r"] >= TRAIL_MIN_PROFIT_TO_PROTECT_R:
-        score += 2
-        reasons.append("meaningful_giveback")
-    if peak["retracement_r"] >= TRAIL_RETRACE_STRONG_R:
-        score += 2
-        confirmations += 1
-        reasons.append("deep_giveback")
-
-    if tp is not None:
-        target_distance_r = abs(float(tp) - current_price) / max(initial_risk, 1e-12)
-        if target_distance_r <= TRAIL_LIQUIDITY_NEAR_R:
-            score += 1
-            reasons.append("target_near")
-    else:
-        target_distance_r = None
-
-    strong_reversal = (protected_break and opposite_break and confirmations >= 3) or score >= TRAIL_SCORE_STRONG_REVERSAL
-    reversal = strong_reversal or (score >= TRAIL_SCORE_REVERSAL and confirmations >= 2)
-    weakening = reversal or score >= TRAIL_SCORE_WEAK or peak["retracement_r"] >= TRAIL_RETRACE_WARN_R
-    # Profit maturity arms the trailing engine, but is NOT itself evidence of
-    # reversal. A large floating profit with healthy structure must still be
-    # allowed to breathe.
-    caution = weakening or score >= TRAIL_SCORE_CAUTION
-
-    if strong_reversal:
-        state = "REVERSAL_CONFIRMED"
-    elif reversal:
-        state = "REVERSAL"
-    elif weakening:
-        state = "WEAKENING"
-    elif caution:
-        state = "CAUTION"
-    else:
-        state = "HEALTHY"
-
-    return {
-        "state": state,
-        "score": int(score),
-        "confirmations": int(confirmations),
-        "reasons": reasons,
-        "aligned_structure": bool(aligned_structure),
-        "opposite_structure": bool(opposite_structure),
-        "aligned_momentum": bool(aligned_mom),
-        "opposite_momentum": bool(opposite_mom),
-        "divergence": bool(divergence),
-        "protected_break": bool(protected_break),
-        "opposite_break": bool(opposite_break),
-        "liquidity_rejection": bool(liquidity_rejection),
-        "last_body_atr": round(last_body_atr, 3),
-        "prev_body_atr": round(prev_body_atr, 3),
-        "relative_volume": round(vol, 3),
-        "ret3_atr": round(ret3, 3),
-        "ret5_atr": round(ret5, 3),
-        "peak_price": round(peak["peak_price"], 10),
-        "peak_r": peak["peak_r"],
-        "giveback_r": peak["giveback_r"],
-        "target_distance_r": round(target_distance_r, 3) if target_distance_r is not None else None,
-    }
+        peak_price = float(df["high"].tail(TRAIL_PEAK_LOOKBACK).max())
+        if mfe < 1.0 or gb < TRAIL_GIVEBACK_WARN:
+            return None
+        retrace = max(0.18, 0.35 if gb < TRAIL_GIVEBACK_STRONG else 0.25)
+        target = peak_price - (peak_price - entry) * retrace
+        return min(target, current_price - atr * TRAIL_RETRACE_BUFFER_ATR)
+    peak_price = float(df["low"].tail(TRAIL_PEAK_LOOKBACK).min())
+    if mfe < 1.0 or gb < TRAIL_GIVEBACK_WARN:
+        return None
+    retrace = max(0.18, 0.35 if gb < TRAIL_GIVEBACK_STRONG else 0.25)
+    target = peak_price + (entry - peak_price) * retrace
+    return max(target, current_price + atr * TRAIL_RETRACE_BUFFER_ATR)
 
 
-def _trail_lock_floor(entry: float, initial_risk: float, state: str, direction: str) -> float:
-    lock_r = {
-        "CAUTION": TRAIL_LOCK_CAUTION_R,
-        "WEAKENING": TRAIL_LOCK_WEAK_R,
-        "REVERSAL": TRAIL_LOCK_REVERSAL_R,
-        "REVERSAL_CONFIRMED": TRAIL_LOCK_REVERSAL_R,
-    }.get(state, 0.0)
-    return entry + (initial_risk * lock_r if direction == "bull" else -initial_risk * lock_r)
-
-
-def _trail_stop_candidates(df_m15: pd.DataFrame, direction: str, entry: float,
-                           current_price: float, initial_risk: float,
-                           analysis: dict) -> dict:
-    """Build protection candidates from structure, retracement and momentum.
-
-    The candidates are *floors/ceilings*, not direct orders. manage_position()
-    selects the tightest candidate that remains outside the current noise band.
-    """
-    atr = max(float(df_m15["atr"].iloc[-1]), 1e-12)
-    state = analysis["state"]
-    peak_price = float(analysis["peak_price"])
-    weakness = int(analysis["score"])
-
-    structure_stop = _trail_protected_swing(df_m15, direction, atr)
-    min_gap = atr * TRAIL_MIN_GAP_ATR_V8
-
-    # Momentum stop is adaptive to weakness. More weakness => smaller distance
-    # from the favorable extreme, but never inside the current noise gap.
-    mult = 2.20
-    if state == "CAUTION":
-        mult = 1.80
-    elif state == "WEAKENING":
-        mult = 1.45
-    elif state == "REVERSAL":
-        mult = 1.10
-    elif state == "REVERSAL_CONFIRMED":
-        mult = 0.85
-    momentum_stop = (peak_price - atr * mult) if direction == "bull" else (peak_price + atr * mult)
-
-    # Retracement-based stop locks part of the move before a new confirmed swing
-    # is available. This is the key V8 addition: it can protect a winner *before*
-    # the market has completed a textbook BOS/ChoCH.
-    retrace_lock_r = {
-        "CAUTION": 0.05,
-        "WEAKENING": 0.18,
-        "REVERSAL": 0.38,
-        "REVERSAL_CONFIRMED": 0.55,
-    }.get(state, 0.0)
-    retrace_stop = (peak_price - max(initial_risk * retrace_lock_r, atr * 0.20)
-                    if direction == "bull"
-                    else peak_price + max(initial_risk * retrace_lock_r, atr * 0.20))
-
-    lock_floor = _trail_lock_floor(entry, initial_risk, state, direction)
-
-    # In a confirmed reversal, use the tighter of retracement and momentum stops.
-    # In healthy/caution phases structure remains the primary authority.
-    if direction == "bull":
-        usable_ceiling = current_price - min_gap
-        candidates = {
-            "structure": structure_stop,
-            "momentum": min(momentum_stop, usable_ceiling),
-            "retracement": min(retrace_stop, usable_ceiling),
-            "lock_floor": min(lock_floor, usable_ceiling),
-        }
-    else:
-        usable_floor = current_price + min_gap
-        candidates = {
-            "structure": structure_stop,
-            "momentum": max(momentum_stop, usable_floor),
-            "retracement": max(retrace_stop, usable_floor),
-            "lock_floor": max(lock_floor, usable_floor),
-        }
-
-    return {
-        "candidates": candidates,
-        "atr": atr,
-        "min_gap": min_gap,
-        "weakness_score": weakness,
-        "state": state,
-    }
-
-
-def _validate_trail_candidate(candidate: Optional[float], direction: str,
-                              market_price: float, atr: float,
-                              current_sl: float, entry: float,
-                              bar_high: Optional[float] = None,
-                              bar_low: Optional[float] = None) -> tuple[Optional[float], Optional[str]]:
-    """Final strategy-side feasibility gate for a trailing SL.
-
-    This is deliberately kept in strategy_logic.py: a trail candidate is an
-    analytical proposal, not an order. The candidate must first be geometrically
-    valid for the current market and strictly improve the existing protection.
-    main.py should therefore never receive a known-wrong-side SL from the brain.
-    """
-    if candidate is None:
-        return None, "no_candidate"
+def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None, df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None):
     try:
-        v = float(candidate)
-        px = float(market_price)
-        a = max(float(atr), 1e-12)
-        old = float(current_sl)
-        ent = float(entry)
-    except (TypeError, ValueError):
-        return None, "non_numeric"
+        if df_m15 is None or len(df_m15) < 40:
+            return {"action": "PROTECT", "state": "UNKNOWN", "reason": ["insufficient_m15_data"], "reasoning_engine": TRAIL_ENGINE_VERSION}
+        m15 = build_df(df_m15, 15)
+        if m15 is None or len(m15) < 40:
+            return {"action": "PROTECT", "state": "UNKNOWN", "reason": ["insufficient_m15_data"], "reasoning_engine": TRAIL_ENGINE_VERSION}
+        sig = state.get("signal") or {}
+        side = str(sig.get("decision") or "BUY").upper()
+        direction = "bull" if side == "BUY" else "bear"
+        entry = _num(state.get("entry") or sig.get("entry"), None)
+        initial_sl = _num(state.get("initial_sl") or sig.get("initial_sl") or sig.get("sl"), None)
+        current_sl = _num(state.get("current_sl") or sig.get("sl"), None)
+        current_price = _current_price(m15, state)
+        if entry is None or initial_sl is None or current_sl is None or current_price is None:
+            return {"action": "PROTECT", "state": "UNKNOWN", "reason": ["missing_position_geometry"], "reasoning_engine": TRAIL_ENGINE_VERSION}
+        risk = abs(entry - initial_sl)
+        if risk <= 0:
+            return {"action": "PROTECT", "state": "UNKNOWN", "reason": ["invalid_initial_risk"], "reasoning_engine": TRAIL_ENGINE_VERSION}
+        if direction == "bull" and current_price <= current_sl:
+            return {"action": "PROTECT", "state": "AT_STOP", "reason": ["market_at_or_below_stop"], "reasoning_engine": TRAIL_ENGINE_VERSION}
+        if direction == "bear" and current_price >= current_sl:
+            return {"action": "PROTECT", "state": "AT_STOP", "reason": ["market_at_or_above_stop"], "reasoning_engine": TRAIL_ENGINE_VERSION}
 
-    gap = max(a * TRAIL_MIN_MARKET_GAP_ATR,
-              a * TRAIL_EXECUTION_BUFFER_ATR)
+        path = _path_metrics(m15, state, direction, entry, risk, current_price)
+        cur_r = path["current_r"]
+        mfe = path["mfe_r"]
+        gb = path["giveback_ratio"]
+        state_name, reversal_score, rv = _reversal_state(m15, direction, cur_r, gb)
+        reasons = []
+        if cur_r < TRAIL_ARM_R and mfe < TRAIL_ARM_R:
+            return {"action": "HOLD", "state": "INITIAL" if cur_r < 0.35 else "PROVING", "profit_r": cur_r, "lifecycle": path, "weakness_score": 0, "relative_volume": rv, "reason": ["path_not_mature_for_trailing"], "reasoning_engine": TRAIL_ENGINE_VERSION}
 
-    if direction == "bull":
-        # BUY protection must remain below market and below entry/price geometry.
-        if v >= px:
-            return None, "buy_sl_not_below_market"
-        if (px - v) < gap:
-            return None, "buy_sl_too_close_to_market"
-        if bar_low is not None and v >= float(bar_low):
-            return None, "buy_sl_inside_current_bar_range"
-        if v <= old:
-            return None, "buy_sl_not_improving"
-        if v >= ent and px <= ent:
-            return None, "buy_sl_above_entry_while_not_profitable"
-    else:
-        # SELL protection must remain above market and improve downward.
-        if v <= px:
-            return None, "sell_sl_not_above_market"
-        if (v - px) < gap:
-            return None, "sell_sl_too_close_to_market"
-        if bar_high is not None and v <= float(bar_high):
-            return None, "sell_sl_inside_current_bar_range"
-        if v >= old:
-            return None, "sell_sl_not_improving"
-        if v <= ent and px >= ent:
-            return None, "sell_sl_below_entry_while_not_profitable"
+        atr = max(float(m15["atr"].iloc[-1]), 1e-12)
+        structural = _structural_trail(m15, direction, current_price, atr)
+        retracement = _retracement_trail(m15, direction, entry, risk, current_price, path, state)
+        candidates = []
+        if structural is not None:
+            candidates.append((float(structural), "structure"))
+        if retracement is not None:
+            candidates.append((float(retracement), "retracement"))
 
-    return v, None
+        # Conservative profit floor after realized excursion. Never move to a side that can be immediately triggered.
+        if mfe >= TRAIL_MFE_EXTENDED:
+            lock_r = TRAIL_LOCK_STRONG_R if gb >= TRAIL_GIVEBACK_WARN else TRAIL_LOCK_WARN_R
+            if gb >= TRAIL_GIVEBACK_CRITICAL and mfe >= TRAIL_MFE_DEEP:
+                lock_r = TRAIL_LOCK_CRITICAL_R
+            lock = entry + risk * lock_r if direction == "bull" else entry - risk * lock_r
+            candidates.append((float(lock), "path_protection"))
+            reasons.append(f"mfe={mfe:.2f}R")
+        if gb >= TRAIL_GIVEBACK_WARN:
+            reasons.append(f"giveback={gb:.0%}")
+        if reversal_score:
+            reasons.append(f"reversal_signal={reversal_score}")
+        if rv <= TRAIL_VOLUME_EXHAUSTION:
+            reasons.append("volume_exhaustion")
+        elif rv >= TRAIL_VOLUME_COUNTER and reversal_score:
+            reasons.append("counter_volume")
 
+        valid = []
+        for cand, source in candidates:
+            if direction == "bull":
+                cand = min(cand, current_price - atr * TRAIL_MIN_MARKET_GAP_ATR)
+                if cand <= current_sl:
+                    continue
+                if cand >= current_price:
+                    continue
+            else:
+                cand = max(cand, current_price + atr * TRAIL_MIN_MARKET_GAP_ATR)
+                if cand >= current_sl:
+                    continue
+                if cand <= current_price:
+                    continue
+            valid.append((cand, source))
+        if not valid:
+            return {"action": "PROTECT" if gb >= TRAIL_GIVEBACK_WARN or reversal_score >= 2 else "HOLD", "state": state_name, "profit_r": round(cur_r, 3), "lifecycle": path, "weakness_score": reversal_score, "relative_volume": rv, "reason": reasons + ["no_safe_trail_candidate"], "reasoning_engine": TRAIL_ENGINE_VERSION}
 
-def _choose_trail_stop(candidates: dict, direction: str, current_price: float,
-                       current_sl: float, atr: float, state: str) -> tuple[Optional[float], Optional[str]]:
-    valid = []
-    for name, value in candidates.items():
-        if value is None:
-            continue
-        v = float(value)
-        if direction == "bull":
-            if current_sl < v < current_price - atr * 0.10:
-                valid.append((v, name))
-        else:
-            if current_price + atr * 0.10 < v < current_sl:
-                valid.append((v, name))
+        # For BUY, highest safe stop is most protective; for SELL, lowest is most protective.
+        best_cand, best_source = (max(valid, key=lambda x: x[0]) if direction == "bull" else min(valid, key=lambda x: x[0]))
+        improvement_r = ((best_cand - current_sl) if direction == "bull" else (current_sl - best_cand)) / risk
+        update_count = int(state.get("trail_update_count", 0) or 0)
+        if improvement_r < TRAIL_MIN_UPDATE_R and update_count >= TRAIL_MAX_CHURN:
+            return {"action": "PROTECT", "state": state_name, "profit_r": round(cur_r, 3), "lifecycle": path, "weakness_score": reversal_score, "relative_volume": rv, "reason": reasons + ["anti_churn"], "reasoning_engine": TRAIL_ENGINE_VERSION}
 
-    if not valid:
-        return None, None
-
-    # Healthy/caution: prefer structural integrity. Weak/reversal: prefer the
-    # tightest valid protection to minimize give-back.
-    priority = {"structure": 0, "momentum": 1, "retracement": 2, "lock_floor": 3}
-    if state in {"HEALTHY", "CAUTION"}:
-        # Healthy/caution is explicitly anti-overtrailing. Structure is preferred;
-        # when unavailable, use the wider momentum stop rather than a close
-        # retracement/lock candidate.
-        structural = [x for x in valid if x[1] == "structure"]
-        if structural:
-            return structural[0]
-        momentum = [x for x in valid if x[1] == "momentum"]
-        if momentum:
-            return (max(momentum, key=lambda x: x[0]) if direction == "bull"
-                    else min(momentum, key=lambda x: x[0]))
-        lock = [x for x in valid if x[1] == "lock_floor"]
-        if lock:
-            return (max(lock, key=lambda x: x[0]) if direction == "bull"
-                    else min(lock, key=lambda x: x[0]))
-        return (max(valid, key=lambda x: x[0]) if direction == "bull"
-                else min(valid, key=lambda x: x[0]))
-
-    if direction == "bull":
-        return max(valid, key=lambda x: x[0])
-    return min(valid, key=lambda x: x[0])
-
-
-def _relative_volume(df: pd.DataFrame, n: int = 20) -> float:
-    """Relative volume proxy dari data OHLCV yang SUDAH DIMILIKI bot."""
-    if df is None or df.empty or "volume" not in df.columns:
-        return 1.0
-    vol = pd.to_numeric(df["volume"], errors="coerce").dropna()
-    if len(vol) < n + 3:
-        return 1.0
-    base = float(vol.iloc[-n-1:-1].mean())
-    return float(vol.iloc[-1] / max(base, 1e-12))
-
-
-def _momentum_context(df: pd.DataFrame) -> dict:
-    """Momentum lokal: EMA slope + multi-horizon return + candle expansion."""
-    if df is None or len(df) < 8:
-        return {"bull": False, "bear": False, "expanding": False, "slope_atr": 0.0,
-                "ret3_atr": 0.0, "ret5_atr": 0.0, "last_body_atr": 0.0}
-    close = df["close"].astype(float)
-    atr = max(float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0, 1e-12)
-    e9 = ema(close, 9)
-    slope = float(e9.iloc[-1] - e9.iloc[-4]) / atr
-    ret3 = float(close.iloc[-1] - close.iloc[-4]) / atr
-    ret5 = float(close.iloc[-1] - close.iloc[-6]) / atr if len(df) >= 6 else ret3
-    last_body = abs(float(df["close"].iloc[-1] - df["open"].iloc[-1])) / atr
-    return {
-        "bull": slope > 0.20 and ret3 > 0.15,
-        "bear": slope < -0.20 and ret3 < -0.15,
-        "expanding": last_body >= 0.80,
-        "slope_atr": round(slope, 3),
-        "ret3_atr": round(ret3, 3),
-        "ret5_atr": round(ret5, 3),
-        "last_body_atr": round(last_body, 3),
-    }
-
-
-def _legacy_manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
-                    df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
-    """V9 position-management brain: lifecycle + path + structure + execution safety.
-
-    Contract with main.py:
-      * returns only HOLD/PROTECT/TRAIL/EXIT decisions;
-      * TRAIL contains a strictly improving, strategy-validated ``sl``;
-      * main.py remains the execution/reconciliation layer;
-      * no Binance order is created here.
-
-    The decision hierarchy is intentionally conservative:
-      1. Establish the market/path context.
-      2. Classify lifecycle and giveback.
-      3. Classify structural/momentum weakness.
-      4. Generate candidate stops.
-      5. Reject candidates that are geometrically unsafe or fail to improve.
-      6. Tighten only when the observed path justifies it.
-    """
-    if df_m15 is None or df_m15.empty:
-        return {"action": "HOLD", "state": "NO_DATA", "reason": ["M15 unavailable"]}
-
-    # main.py does not pass a ticker into strategy dispatch. The latest M15 close
-    # is therefore the shared market-price proxy. Structural analysis uses only
-    # completed candles when a datetime index is available.
-    live_price = float(df_m15["close"].iloc[-1])
-    m15 = build_df(_closed_candles(df_m15, 15), interval_minutes=15)
-    if m15 is None or len(m15) < 55:
-        return {"action": "HOLD", "state": "NO_DATA", "reason": ["insufficient M15 data"]}
-
-    sig = state.get("signal", state) or {}
-    decision = str(sig.get("decision") or state.get("decision") or "BUY").upper()
-    direction = "bull" if decision == "BUY" else "bear"
-    entry = float(state.get("entry") or sig.get("entry") or m15["close"].iloc[-1])
-    current_price = live_price
-    current_sl = float(state.get("current_sl") or sig.get("sl") or entry)
-    initial_sl = float(state.get("initial_sl") or sig.get("initial_sl") or sig.get("sl") or current_sl)
-    tp = sig.get("tp")
-    tp = float(tp) if tp is not None else None
-    initial_risk = max(abs(entry - initial_sl), 1e-12)
-    profit_r = ((current_price - entry) if direction == "bull" else (entry - current_price)) / initial_risk
-
-    lifecycle = _trade_lifecycle_context(state, profit_r, direction, entry, current_price, initial_risk)
-    quality = _entry_quality_context(state, direction)
-    analysis = _trail_reversal_analysis(m15, direction, entry, current_price, initial_risk, tp=tp)
-    trend_metrics = _trend_strength_metrics(m15, direction)
-    pullback_metrics = _pullback_quality_metrics(m15, direction)
-    liquidity_metrics = _liquidity_context_metrics(m15, direction)
-    analysis["lifecycle"] = lifecycle
-    analysis["entry_quality"] = quality
-    analysis["trend_strength"] = trend_metrics
-    analysis["pullback_quality"] = pullback_metrics
-    analysis["liquidity_context"] = liquidity_metrics
-    state_name = analysis["state"]
-    reasons = list(analysis["reasons"])
-
-    early_fail = _early_failure_context(state, analysis, lifecycle, trend_metrics, pullback_metrics, profit_r)
-    analysis["early_failure"] = early_fail
-
-    # V11: early structural invalidation. This is intentionally rarer than the
-    # normal SL and only fires when the thesis has accumulated independent failure
-    # evidence. main.py already owns the verified market-close path.
-    if early_fail["eligible"]:
-        return {
-            "action": "EXIT", "close": True, "state": "EARLY_INVALIDATION",
-            "profit_r": round(profit_r, 2),
-            "weakness_score": int(analysis.get("score", 0)),
-            "reversal_confirmations": int(analysis.get("confirmations", 0)),
-            "reversal_diagnostics": analysis, "lifecycle": lifecycle,
-            "entry_quality": quality,
-            "reason": reasons + ["early_structural_invalidation", "loss_control_before_full_sl"],
-        }
-
-    # INITIAL/PROVING trades are not allowed to become aggressively trailed just
-    # because a single weak candle appeared. A thesis can still be developing.
-    if profit_r < TRAIL_MIN_PROFIT_TO_PROTECT_R and lifecycle["mfe_r"] < TRAIL_MFE_ARM_R:
-        return {
-            "action": "HOLD", "state": "DEVELOPING", "profit_r": round(profit_r, 2),
-            "weakness_score": analysis["score"], "reversal_state": state_name,
-            "reversal_confirmations": analysis["confirmations"],
-            "reversal_diagnostics": analysis,
-            "reason": reasons + ["lifecycle_not_mature_for_trail"],
-        }
-
-    trail_pack = _trail_stop_candidates(m15, direction, entry, current_price, initial_risk, analysis)
-    candidates = trail_pack["candidates"]
-    atr = trail_pack["atr"]
-
-    # Path-aware tightening: healthy winners get structure-first treatment. A
-    # large MFE with deep giveback allows the tighter candidates to compete.
-    giveback_ratio = lifecycle["giveback_ratio"]
-    path_state = lifecycle["distribution"]
-    effective_state = state_name
-    if path_state in {"DEEP_GIVEBACK", "CRITICAL_GIVEBACK"} and lifecycle["mfe_r"] >= TRAIL_MFE_ARM_R:
-        effective_state = "REVERSAL" if state_name == "HEALTHY" else state_name
-        if "deep_giveback" not in reasons and path_state == "DEEP_GIVEBACK":
-            reasons.append("path_deep_giveback")
-        if "critical_giveback" not in reasons and path_state == "CRITICAL_GIVEBACK":
-            reasons.append("path_critical_giveback")
-
-    chosen, source = _choose_trail_stop(candidates, direction, current_price, current_sl, atr, effective_state)
-
-    current_bar_high = float(df_m15["high"].iloc[-1]) if "high" in df_m15.columns else None
-    current_bar_low = float(df_m15["low"].iloc[-1]) if "low" in df_m15.columns else None
-    chosen, invalid_reason = _validate_trail_candidate(
-        chosen, direction, current_price, atr, current_sl, entry,
-        bar_high=current_bar_high, bar_low=current_bar_low
-    )
-
-    # Candidate can be valid but still too ambitious for the observed path. Before
-    # ~0.8R, require a meaningful MFE and a real weakness/reversal signal. This
-    # prevents normal noise from repeatedly replacing protection.
-    if chosen is not None and profit_r < TRAIL_WINNER_R and lifecycle["mfe_r"] < TRAIL_MFE_ARM_R:
-        chosen, source = None, None
-        invalid_reason = "lifecycle_not_ready_for_stop_improvement"
-
-    # If the position is an extended winner, protect against giveback. The stop
-    # may not erase the existing protection and must still pass the final geometry gate.
-    if chosen is not None and lifecycle["mfe_r"] >= TRAIL_MFE_EXTENDED_R and giveback_ratio >= TRAIL_GIVEBACK_TIGHT:
-        tight = []
-        for name, value in candidates.items():
-            if value is None: continue
-            v = float(value)
-            if direction == "bull" and current_sl < v < current_price - atr * 0.10:
-                tight.append((v, name))
-            elif direction == "bear" and current_price + atr * 0.10 < v < current_sl:
-                tight.append((v, name))
-        if tight:
-            chosen, source = (max(tight, key=lambda x: x[0]) if direction == "bull" else min(tight, key=lambda x: x[0]))
-            chosen, invalid_reason = _validate_trail_candidate(
-                chosen, direction, current_price, atr, current_sl, entry,
-                bar_high=current_bar_high, bar_low=current_bar_low
-            )
-
-    if chosen is not None:
-        minimum_lock_r = TRAIL_LOCK_CAUTION_R
-        if effective_state == "WEAKENING":
-            minimum_lock_r = TRAIL_LOCK_WEAK_R
-        elif effective_state == "REVERSAL":
-            minimum_lock_r = TRAIL_LOCK_REVERSAL_R * 0.65
-        elif effective_state == "REVERSAL_CONFIRMED":
-            minimum_lock_r = TRAIL_LOCK_REVERSAL_R
-
-        locked_r = ((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk
-        # Do not force a profit lock that the market/path cannot safely support.
-        if effective_state in {"REVERSAL", "REVERSAL_CONFIRMED"} and locked_r < minimum_lock_r:
-            chosen, source = None, None
-            invalid_reason = "candidate_does_not_support_required_lock"
-
-    if chosen is not None:
-        locked_r = ((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk
+        locked_r = ((best_cand - entry) if direction == "bull" else (entry - best_cand)) / risk
         return {
             "action": "TRAIL",
             "state": state_name,
-            "sl": round(float(chosen), 10),
-            "profit_r": round(profit_r, 2),
-            "locked_r": round(locked_r, 3),
-            "weakness_score": int(analysis["score"]),
-            "reversal_confirmations": int(analysis["confirmations"]),
-            "trail_source": source,
-            "reversal_diagnostics": analysis,
-            "lifecycle": lifecycle,
-            "entry_quality": quality,
-            "reason": reasons + [f"predictive_trail:{source}"],
+            "sl": round(float(best_cand), 10),
+            "profit_r": round(cur_r, 3),
+            "locked_r": round(float(locked_r), 3),
+            "trail_source": best_source,
+            "candidate_type": best_source,
+            "weakness_score": reversal_score,
+            "relative_volume": rv,
+            "lifecycle": path,
+            "reversal_diagnostics": {"state": state_name, "score": reversal_score, "relative_volume": rv},
+            "reason": reasons + [f"source={best_source}"],
+            "reasoning_engine": TRAIL_ENGINE_VERSION,
         }
-
-    # External liquidity very near means the current move has less room to run;
-    # once weakness is present, favor protection over an open-ended hold.
-    if liquidity_metrics.get("very_near") and lifecycle.get("mfe_r", 0) >= TRAIL_MFE_ARM_R and state_name in {"WEAKENING", "REVERSAL", "REVERSAL_CONFIRMED"}:
-        reasons.append("external_liquidity_near")
-
-    # Confirmed reversal at a mature profit is the only case where the brain may
-    # request a market exit. This keeps main.py's verified-close path intact.
-    if state_name == "REVERSAL_CONFIRMED" and profit_r >= TRAIL_STRONG_REVERSAL_R and lifecycle["mfe_r"] >= TRAIL_MFE_EXTENDED_R:
-        return {
-            "action": "EXIT", "close": True, "state": state_name,
-            "profit_r": round(profit_r, 2), "weakness_score": int(analysis["score"]),
-            "reversal_confirmations": int(analysis["confirmations"]),
-            "reversal_diagnostics": analysis, "lifecycle": lifecycle,
-            "entry_quality": quality,
-            "reason": reasons + ["confirmed_reversal_mature_winner_no_safe_trail"],
-        }
-
-    if state_name in {"REVERSAL", "REVERSAL_CONFIRMED", "WEAKENING"} or giveback_ratio >= TRAIL_GIVEBACK_WARN:
-        safe_reason = invalid_reason or "weakness_detected_but_no_safe_improvement"
-        return {
-            "action": "PROTECT", "state": state_name,
-            "profit_r": round(profit_r, 2), "weakness_score": int(analysis["score"]),
-            "reversal_confirmations": int(analysis["confirmations"]),
-            "reversal_diagnostics": analysis, "lifecycle": lifecycle,
-            "entry_quality": quality, "trail_candidate_rejected": safe_reason,
-            "market_price": round(current_price, 10),
-            "reason": reasons + [f"trail_not_executed:{safe_reason}"],
-        }
-
-    return {
-        "action": "PROTECT" if profit_r >= TRAIL_CAUTION_R else "HOLD",
-        "state": state_name, "profit_r": round(profit_r, 2),
-        "weakness_score": int(analysis["score"]),
-        "reversal_confirmations": int(analysis["confirmations"]),
-        "reversal_diagnostics": analysis, "lifecycle": lifecycle,
-        "entry_quality": quality,
-        "reason": reasons + ["trend_healthy_or_no_safe_better_stop"],
-    }
-
-
-# =============================================================================
-# VALIDASI PRE-ORDER & KOREKSI GEOMETRY (dipanggil oleh main.py)
-# =============================================================================
-
-def validate_and_adjust_geometry(
-    entry: float, sl: float, tp: float,
-    current_price: float, atr: float,
-    direction: str,
-) -> Optional[dict]:
-    """
-    Validasi dan (jika perlu) koreksi geometri entry/SL/TP sebelum order dipasang
-    atau setelah order terisi di harga yang berbeda dari target.
-
-    Mengapa fungsi ini penting:
-    ─────────────────────────────────────────────────────────────────────────────
-    Sinyal dihitung pada waktu T. Saat order terpasang (T+beberapa detik/menit),
-    harga pasar bisa sudah bergerak — khususnya:
-
-      • Kasus "geometri invalid setelah order terisi":
-        SELL limit di entry_target, tapi actual_fill = harga pasar (lebih tinggi
-        dari entry_target karena market sudah di atas limit sell). Akibatnya
-        actual_fill > SL → geometri rusak.
-
-      • Kasus "harga sudah melewati SL setelah order terisi":
-        Sinyal sudah kedaluwarsa atau fill terjadi di sisi yang salah.
-        Posisi tidak boleh diselamatkan dengan menggeser entry/SL
-        secara retroaktif.
-
-    Logika:
-    ─────────────────────────────────────────────────────────────────────────────
-    1. Cek geometri dasar: SL di sisi yang benar dari entry, TP di sisi lain.
-    2. Cek SL belum ditembus current_price.
-    3. Jika SL ditembus atau geometri fill berubah, tolak posisi secara aman.
-       Wick M1 tidak cukup untuk membuktikan bahwa posisi masih valid.
-    4. Cek RR ≥ MIN_RR tanpa mengubah level trade.
-
-    Return:
-      dict  {entry, sl, tp, rr, adjusted} jika valid / bisa diselamatkan
-      None  jika tidak bisa diperbaiki → TOLAK sinyal / auto-out
-    """
-    up = direction == "bull"
-    def _geo_ok(e: float, s: float, t: float) -> bool:
-        return (s < e < t) if up else (t < e < s)
-
-    def _rr(e: float, s: float, t: float) -> float:
-        return abs(t - e) / max(abs(e - s), 1e-10)
-
-    sl_breached = (current_price <= sl) if up else (current_price >= sl)
-
-    # ─── Kasus 1: sudah valid ────────────────────────────────────────────────
-    if _geo_ok(entry, sl, tp) and not sl_breached:
-        rr = _rr(entry, sl, tp)
-        if rr < MIN_RR:
-            return None
-        return {"entry": entry, "sl": sl, "tp": tp, "rr": round(rr, 2), "adjusted": False}
-
-    # ─── Kasus 2: SL ditembus → fail closed ─────────────────────────────────
-    if sl_breached:
-        log.info(
-            f"[validate_geo] SL sudah ditembus sebelum validasi "
-            f"(entry={entry:.6g}, sl={sl:.6g}, price={current_price:.6g}) — ditolak"
-        )
-        return None
-
-    # Never move entry or SL after a fill. A changed geometry is a stale
-    # signal, not a new setup.
-    if not _geo_ok(entry, sl, tp):
-        return None
-
-    rr = _rr(entry, sl, tp)
-    if rr < MIN_RR:
-        log.debug(
-            f"[validate_geo] RR={rr:.2f} < MIN_RR={MIN_RR} setelah koreksi — ditolak"
-        )
-        return None
-
-    return {
-        "entry": round(entry, 8),
-        "sl":    round(sl, 8),
-        "tp":    tp,
-        "rr":    round(rr, 2),
-        "adjusted": False,
-    }
-
-# =============================================================================
-# V12 AI-STYLE REASONING LAYER
-# =============================================================================
-# This layer deliberately wraps the proven V11 detectors instead of replacing
-# them. V10's lesson: adding hard gates made the scanner too sparse. V12 therefore
-# uses evidence voting, contradiction detection, setup archetypes, and bounded
-# confidence adjustments. Only execution geometry remains a hard reject.
-#
-# Optional cross-market context: V19 may pass a `market_context` dict to
-# full_analyze(..., market_context=...). The strategy remains fully compatible
-# with the existing main.py contract when that field is absent.
-
-V12_VERSION = "12.0-ai-context-reasoner"
-V12_CONFIDENCE_DELTA_CAP = 10
-V12_MIN_SAMPLE_FOR_HISTORY = 8
-V12_TRAIL_MIN_UPDATE_R = 0.08
-V12_TRAIL_MAX_CHURN = 6
-V12_GIVEBACK_WARN = 0.28
-V12_GIVEBACK_TIGHT = 0.45
-
-
-def _safe_float(x, default=None):
-    try:
-        v = float(x)
-        if np.isfinite(v):
-            return v
-    except Exception:
-        pass
-    return default
-
-
-def _market_snapshot_from_context(mc):
-    if not isinstance(mc, dict):
-        return {"available": False}
-    out = {"available": True}
-    for k in (
-        "market_regime", "breadth_score", "bullish_breadth_pct",
-        "bearish_breadth_pct", "neutral_breadth_pct", "median_price_1h_pct",
-        "median_price_4h_pct", "median_efficiency_4h",
-        "median_range_expansion_ratio", "avg_relative_volume",
-        "btc_price_1h_pct", "btc_price_4h_pct",
-        "relative_strength_1h_pct", "relative_strength_4h_pct",
-        "symbol_relative_strength_1h_pct", "symbol_relative_strength_4h_pct",
-    ):
-        if k in mc:
-            out[k] = mc[k]
-    # V19 exports per-symbol RS rows, while the future strategy bridge may
-    # provide the already-selected row fields directly.
-    if "symbol_relative_strength_1h_pct" not in out and "relative_strength_1h_pct" in out:
-        out["symbol_relative_strength_1h_pct"] = out.get("relative_strength_1h_pct")
-    if "symbol_relative_strength_4h_pct" not in out and "relative_strength_4h_pct" in out:
-        out["symbol_relative_strength_4h_pct"] = out.get("relative_strength_4h_pct")
-    return out
-
-
-def _local_market_state(df_h1, df_m15, df_d1=None):
-    """Derive a compact market state from already-available OHLCV."""
-    try:
-        h1 = build_df(_closed_candles(df_h1, 60), 60)
-        m15 = build_df(_closed_candles(df_m15, 15), 15)
-        if h1 is None or m15 is None or len(m15) < 40 or len(h1) < 30:
-            return {"state": "unknown", "score": 50}
-        atr = max(_safe_float(m15["atr"].iloc[-1], 0.0), 1e-12)
-        closes = m15["close"].astype(float)
-        window = max(12, min(32, len(closes) - 1))
-        net = (closes.iloc[-1] - closes.iloc[-window]) / max(atr * np.sqrt(window), 1e-12)
-        path = closes.diff().abs().iloc[-window:].sum()
-        efficiency = abs(closes.iloc[-1] - closes.iloc[-window]) / max(path, 1e-12)
-        rv = _safe_float(m15["volume"].iloc[-1] / max(m15["volume"].rolling(20).mean().iloc[-1], 1e-12), 1.0)
-        last_range = float(m15["high"].iloc[-1] - m15["low"].iloc[-1])
-        avg_range = float((m15["high"] - m15["low"]).rolling(20).mean().iloc[-1])
-        expansion = last_range / max(avg_range, 1e-12)
-        # Simple, explainable regime classifier. It is context, not a trading gate.
-        if abs(net) >= 2.0 and efficiency >= 0.55 and expansion >= 1.10:
-            state = "expansion_bull" if net > 0 else "expansion_bear"
-        elif efficiency <= 0.28 and expansion <= 0.90:
-            state = "compression_range"
-        elif abs(net) >= 0.8 and efficiency >= 0.42:
-            state = "trend_bull" if net > 0 else "trend_bear"
-        else:
-            state = "transition"
-        return {"state": state, "score": float(np.clip(50 + 20*min(abs(net)/2,1) + 20*efficiency + 5*min(rv,2), 0, 100)),
-                "net": net, "efficiency": efficiency, "relative_volume": rv,
-                "range_expansion": expansion}
-    except Exception:
-        return {"state": "unknown", "score": 50}
-
-
-def _setup_archetype(direction, entry_label, score, market_state, candidate):
-    bull = direction == "bull"
-    liq = score.get("selected_sweep", False)
-    conf = score.get("entry_confirmation", {}) or {}
-    choch = score.get("choch_m15", {}) or {}
-    cisd = score.get("cisd_m15", {}) or {}
-    label = str(entry_label or "").lower()
-    if liq and conf.get("confirmed"):
-        return "LIQUIDITY_SWEEP_RECLAIM"
-    if label == "ob" and (score.get("htf_poi") or score.get("poi_reacted")):
-        return "HTF_POI_OB_REACTION"
-    if label == "fvg":
-        return "FVG_RETEST_CONTINUATION"
-    selected_choch = choch.get("bullish_choch") if bull else choch.get("bearish_choch")
-    selected_cisd = cisd.get("bullish_cisd") if bull else cisd.get("bearish_cisd")
-    if selected_choch or selected_cisd:
-        return "STRUCTURE_SHIFT_CONTINUATION"
-    if market_state.get("state") == ("expansion_bull" if bull else "expansion_bear"):
-        return "MOMENTUM_CONTINUATION"
-    return "LOCATION_REVERSAL_OR_RANGE"
-
-
-def _reasoning_engine(base, score, market_state, market_context, candidate, rr, entry_label):
-    """Produce explainable evidence/votes rather than a binary indicator pile."""
-    direction = base["direction"]
-    bull = direction == "bull"
-    evidence = []
-    contradictions = []
-    points = 0.0
-
-    def vote(name, strength, reason, conflict=False):
-        nonlocal points
-        s = float(np.clip(strength, -1.0, 1.0))
-        points += s
-        if s >= 0.25:
-            evidence.append({"name": name, "strength": round(s,2), "reason": reason})
-        elif s <= -0.25 or conflict:
-            contradictions.append({"name": name, "strength": round(s,2), "reason": reason})
-
-    htf = score.get("htf_bias", "neutral")
-    vote("HTF", 0.65 if htf == ("bullish" if bull else "bearish") else -0.75 if htf == ("bearish" if bull else "bullish") else 0.0, f"HTF bias={htf}")
-    ts = score.get("trend_strength", {}) or {}
-    ps = score.get("pullback_quality", {}) or {}
-    lq = score.get("liquidity_context", {}) or {}
-    pq = candidate.get("poi_quality", score.get("poi_quality", 50)) if isinstance(candidate, dict) else score.get("poi_quality", 50)
-    vote("trend_strength", (float(ts.get("score",50))-50)/50, f"trend score={ts.get('score',50)}")
-    vote("pullback", (float(ps.get("score",50))-50)/50, f"pullback score={ps.get('score',50)}")
-    vote("liquidity", (float(lq.get("score",50))-50)/50, f"liquidity score={lq.get('score',50)}")
-    vote("POI", (float(pq)-50)/50, f"POI quality={pq}")
-
-    if market_context.get("available"):
-        regime = str(market_context.get("market_regime") or "unknown")
-        wanted = "bullish" if bull else "bearish"
-        opposing = "bearish" if bull else "bullish"
-        if wanted in regime:
-            vote("market_regime", 0.55, f"market regime={regime}")
-        elif opposing in regime:
-            vote("market_regime", -0.65, f"market regime conflicts: {regime}", conflict=True)
-        rs = _safe_float(market_context.get("symbol_relative_strength_4h_pct"), None)
-        if rs is not None:
-            if (bull and rs > 0.5) or ((not bull) and rs < -0.5):
-                vote("relative_strength", 0.55, f"4h relative strength={rs:.2f}%")
-            elif (bull and rs < -0.5) or ((not bull) and rs > 0.5):
-                vote("relative_strength", -0.55, f"4h relative strength conflicts={rs:.2f}%", conflict=True)
-        breadth = _safe_float(market_context.get("breadth_score"), None)
-        if breadth is not None:
-            if (bull and breadth > 0.15) or ((not bull) and breadth < -0.15):
-                vote("breadth", 0.35, f"breadth score={breadth:.2f}")
-            elif (bull and breadth < -0.15) or ((not bull) and breadth > 0.15):
-                vote("breadth", -0.35, f"breadth conflicts={breadth:.2f}", conflict=True)
-    else:
-        # No invented macro data: local state is the only context we have.
-        if market_state.get("state") == ("expansion_bull" if bull else "expansion_bear"):
-            vote("local_regime", 0.45, f"local regime={market_state.get('state')}")
-        elif market_state.get("state") == ("expansion_bear" if bull else "expansion_bull"):
-            vote("local_regime", -0.45, f"local regime conflicts={market_state.get('state')}", conflict=True)
-
-    if score.get("trigger_count", 0) >= 2:
-        vote("trigger_confluence", 0.45, f"{score.get('trigger_count')} aligned triggers")
-    elif score.get("trigger_count", 0) == 0:
-        vote("trigger_confluence", -0.45, "no fresh M15 trigger")
-
-    # Risk / target sanity is deliberately a soft vote: RR is hard-validated elsewhere.
-    if rr >= 2.5:
-        vote("reward_geometry", 0.25, f"RR={rr:.2f}")
-    elif rr < 2.0:
-        vote("reward_geometry", -0.35, f"marginal RR={rr:.2f}")
-
-    raw = 50 + 22 * np.tanh(points / 2.5)
-    confidence_adj = float(np.clip(raw - 50, -V12_CONFIDENCE_DELTA_CAP, V12_CONFIDENCE_DELTA_CAP))
-    archetype = _setup_archetype(direction, entry_label, score, market_state, candidate)
-    # A genuine hard conflict only vetoes when the candidate is structurally invalid.
-    # Otherwise contradictions lower confidence; they do not create V10-style over-filtering.
-    hard_conflict = any(x["name"] == "HTF" and x["strength"] <= -0.70 for x in contradictions)
-    return {
-        "archetype": archetype,
-        "evidence": evidence,
-        "contradictions": contradictions,
-        "evidence_balance": round(points, 3),
-        "confidence_adjustment": round(confidence_adj, 2),
-        "hard_conflict": hard_conflict,
-        "market_state": market_state,
-        "market_context_used": market_context.get("available", False),
-        "thesis": (
-            f"{archetype}: {direction.upper()} setup; "
-            + ("evidence aligned" if points >= 0.8 else "mixed evidence" if points > -0.8 else "evidence mostly conflicted")
-        ),
-    }
-
-
-def _confidence_band_v12(conf):
-    c=float(conf)
-    if c < 40: return "weak"
-    if c < 55: return "developing"
-    if c < 70: return "qualified"
-    if c < 82: return "strong"
-    return "exceptional"
-
-
-def _safe_market_context_arg(market_context):
-    return _market_snapshot_from_context(market_context)
-
-
-
-# =============================================================================
-# V12 PUBLIC API WRAPPERS
-# =============================================================================
-
-def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
-                 df_d1: Optional[pd.DataFrame] = None,
-                 symbol: Optional[str] = None,
-                 df_btc_h1: Optional[pd.DataFrame] = None,
-                 trade_history: Optional[list] = None,
-                 market_context: Optional[dict] = None) -> Optional[dict]:
-    """V12 reasoning wrapper around the proven V11 execution-compatible engine.
-
-    New input `market_context` is optional. V19 currently does not pass the
-    cross-market row into full_analyze, so the engine never invents it; local
-    market-state reasoning remains active and V12 is ready for the context when
-    the main bridge is enabled.
-    """
-    result = _legacy_full_analyze(df_h1, df_m15, df_d1, symbol, df_btc_h1, trade_history)
-    if not isinstance(result, dict):
-        return result
-
-    try:
-        direction = "bull" if result.get("decision") == "BUY" else "bear"
-        score = dict(result.get("confidence_diagnostics", {}).get("score_snapshot", {}) or {})
-        # Rebuild only the compact fields required by the reasoning layer from public output.
-        score.update({
-            "direction": direction,
-            "htf_bias": result.get("htf_bias", "neutral"),
-            "trend_strength": result.get("trend_strength", {}),
-            "pullback_quality": result.get("pullback_quality", {}),
-            "liquidity_context": result.get("liquidity_context", {}),
-            "trigger_count": result.get("v11_quality", {}).get("trigger_count", 0) if isinstance(result.get("v11_quality"), dict) else 0,
-            "entry_confirmation": result.get("entry_confirmation", {}),
-            "choch_m15": result.get("choch_m15", {}),
-            "cisd_m15": result.get("cisd_m15", {}),
-            "poi_quality": result.get("poi_quality", 50),
-            "poi_reacted": result.get("poi_reacted", False),
-            "selected_sweep": bool(result.get("liquidity_context", {}).get("swept", False)) if isinstance(result.get("liquidity_context"), dict) else False,
-        })
-        market_state = _local_market_state(df_h1, df_m15, df_d1)
-        mc = _safe_market_context_arg(market_context)
-        candidate = {"poi_quality": result.get("poi_quality", 50)}
-        rr = _safe_float(result.get("rr"), 2.0) or 2.0
-        reasoning = _reasoning_engine(result, score, market_state, mc, candidate, rr, result.get("entry_label"))
-
-        base_conf = int(round(float(result.get("confidence", 0))))
-        conf = int(np.clip(round(base_conf + reasoning["confidence_adjustment"]), 0, 99))
-        result["confidence_base"] = base_conf
-        result["confidence"] = conf
-        result["confidence_band"] = _confidence_band_v12(conf)
-        result["reasoning_engine"] = V12_VERSION
-        result["setup_archetype"] = reasoning["archetype"]
-        result["market_thesis"] = {
-            "summary": reasoning["thesis"],
-            "evidence": reasoning["evidence"],
-            "contradictions": reasoning["contradictions"],
-            "evidence_balance": reasoning["evidence_balance"],
-            "market_state": reasoning["market_state"],
-            "market_context_used": reasoning["market_context_used"],
-        }
-        result["decision_trace"] = {
-            "direction": direction,
-            "entry_label": result.get("entry_label"),
-            "rr": rr,
-            "confidence_base": base_conf,
-            "confidence_adjustment": reasoning["confidence_adjustment"],
-            "confidence_final": conf,
-            "hard_conflict": reasoning["hard_conflict"],
-        }
-        result["v12_context"] = {
-            "local_market_state": market_state,
-            "optional_market_context": mc,
-            "uses_new_external_data": False,
-        }
-        return result
     except Exception as exc:
-        # Fail open to the proven V11 result rather than breaking scanning.
-        result["reasoning_engine"] = V12_VERSION
-        result["reasoning_warning"] = str(exc)[:240]
-        return result
+        log.exception("[manage_position] %s: %s", symbol or "?", exc)
+        return {"action": "PROTECT", "state": "ERROR", "reason": [f"management_exception:{type(exc).__name__}"], "reasoning_engine": TRAIL_ENGINE_VERSION}
 
 
-def _trail_path_state(state, current_price, current_sl):
-    try:
-        entry = float(state.get("entry")); initial_sl = float(state.get("initial_sl") or state.get("signal", {}).get("sl"));
-        risk = abs(entry - initial_sl)
-        side = str(state.get("signal", {}).get("decision") or "BUY").upper()
-        if risk <= 0:
-            return {"mfe_r": 0.0, "giveback_ratio": 0.0, "protected_r": 0.0, "trail_count": 0}
-        move = ((float(current_price)-entry) if side == "BUY" else (entry-float(current_price)))
-        r = move / risk
-        mfe = _safe_float(state.get("mfe_r"), max(r,0.0)) or 0.0
-        giveback = max(mfe - r, 0.0)
-        ratio = giveback / max(mfe, 0.25) if mfe > 0 else 0.0
-        protected = ((float(current_sl)-entry) if side == "BUY" else (entry-float(current_sl))) / risk
-        return {"mfe_r": mfe, "current_r": r, "giveback_ratio": ratio, "protected_r": protected,
-                "trail_count": int(state.get("trail_update_count", 0) or 0),
-                "trail_failed": int(state.get("trail_failed_count", 0) or 0)}
-    except Exception:
-        return {"mfe_r": 0.0, "current_r": 0.0, "giveback_ratio": 0.0, "protected_r": 0.0, "trail_count": 0, "trail_failed": 0}
-
-
-def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
-                    df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
-    """V12 path-aware trade manager. Preserves V11 execution contract."""
-    try:
-        current_price = _safe_float(state.get("current_price") or state.get("price"), None)
-        if current_price is None and df_m15 is not None and len(df_m15):
-            current_price = float(df_m15["close"].iloc[-1])
-        current_sl = _safe_float(state.get("current_sl") or state.get("signal", {}).get("sl"), None)
-        path = _trail_path_state(state, current_price, current_sl) if current_price is not None and current_sl is not None else {}
-        upd = _legacy_manage_position(state, df_m15, df_h1, df_d1, symbol)
-        if not isinstance(upd, dict):
-            return upd
-
-        upd.setdefault("reason", [])
-        reasons = upd["reason"] if isinstance(upd["reason"], list) else [upd["reason"]]
-        upd["path_context"] = path
-        upd["reasoning_engine"] = V12_VERSION
-
-        # Anti-churn: if the legacy engine proposes a tiny improvement after many
-        # successful updates, require another meaningful state change before sending it.
-        new_sl = _safe_float(upd.get("sl"), None)
-        if new_sl is not None and current_sl is not None and current_price is not None:
-            atr = _safe_float(upd.get("atr"), None) or _safe_float(df_m15["atr"].iloc[-1], 0.0)
-            improvement = abs(new_sl - current_sl) / max(atr or 0.0, 1e-12)
-            if path.get("trail_count", 0) >= V12_TRAIL_MAX_CHURN and improvement < V12_TRAIL_MIN_UPDATE_R:
-                upd["action"] = "PROTECT"
-                upd.pop("sl", None)
-                reasons.append("anti_churn_small_trail_update")
-
-        # Winner path logic: deep giveback gets priority, but healthy winners keep
-        # room and do not get locked merely because weakness score is nonzero.
-        if path.get("mfe_r", 0.0) >= 1.0 and path.get("giveback_ratio", 0.0) >= V12_GIVEBACK_WARN:
-            reasons.append("path_meaningful_giveback")
-        if path.get("mfe_r", 0.0) >= 1.5 and path.get("giveback_ratio", 0.0) >= V12_GIVEBACK_TIGHT:
-            reasons.append("path_deep_giveback")
-
-        upd["reason"] = reasons
-        return upd
-    except Exception as exc:
-        return {"action": "PROTECT", "reason": [f"v12_manager_fallback:{str(exc)[:160]}"], "reasoning_engine": V12_VERSION}
-
-# =============================================================================
-# V13 — DATA-DRIVEN PATH / INVALIDATION BRAIN
-# =============================================================================
-# This layer is intentionally appended so the proven V11/V12 detectors remain
-# available while the decision/management contracts evolve without breaking
-# main.py. The core principles are:
-#   1) Initial SL is a LOSS CONTAINMENT boundary, but must sit beyond the
-#      structural/liquidity invalidation that makes the thesis wrong.
-#   2) MFE/MAE/path history is first-class evidence. Immediate failures are
-#      diagnosed as entry problems; mature givebacks are management problems.
-#   3) Trailing is a lifecycle state machine: INITIAL -> PROVING -> WINNER ->
-#      EXTENDED. Healthy winners breathe; reversal evidence, not profit alone,
-#      causes tightening.
-#   4) Historical research is used as a small soft adjustment only. The sample
-#      is still small, so no bucket can become a hard filter.
-#   5) RR remains unlimited above the 2R floor when the target is structural.
-
-V13_VERSION = "13.0-data-driven-path-brain"
-V13_HISTORY_MIN = 6
-V13_HISTORY_WEIGHT_CAP = 0.20
-V13_HISTORY_SCORE_CAP = 5.0
-V13_IMMEDIATE_FAIL_MFE_R = 0.35
-V13_STRONG_PATH_MFE_R = 2.0
-V13_MATURE_GIVEBACK_MFE_R = 1.0
-V13_SL_MIN_ATR = 0.65
-V13_SL_MAX_ATR = 2.00
-V13_SL_MAX_PCT = 0.035
-V13_SL_BUFFER_ATR = 0.45
-V13_SL_SWEEP_NEAR_ATR = 0.55
-V13_TRAIL_ARM_R = 0.80
-V13_TRAIL_BE_R = 1.00
-V13_TRAIL_STRUCTURE_R = 1.25
-V13_TRAIL_EXTENDED_R = 1.75
-V13_TRAIL_DEEP_MFE_R = 2.50
-V13_TRAIL_WARN_GIVEBACK = 0.30
-V13_TRAIL_TIGHT_GIVEBACK = 0.50
-V13_TRAIL_CRITICAL_GIVEBACK = 0.70
-V13_TRAIL_MIN_UPDATE_R = 0.10
-V13_TRAIL_MAX_CHURN = 8
-V13_TRAIL_HEALTHY_ATR_MULT = 2.40
-V13_TRAIL_REVERSAL_ATR_MULT = 1.30
-V13_TRAIL_CRITICAL_LOCK_R = 0.55
-V13_TRAIL_REVERSAL_LOCK_R = 0.75
-
-
-def _v13_trade_profit(row):
-    try:
-        if row.get("profitable") is not None:
-            return bool(row.get("profitable"))
-        return float(row.get("pnl_usd", row.get("pnl", 0)) or 0) > 0
-    except Exception:
-        return False
-
-
-def _v13_path_bucket(row):
-    """Classify closed-trade path into entry vs management failure groups."""
-    try:
-        mfe = float(row.get("mfe_r", 0) or 0)
-        final_r = float(row.get("final_r", 0) or 0)
-    except Exception:
-        return "unknown"
-    if mfe < V13_IMMEDIATE_FAIL_MFE_R and final_r < 0:
-        return "immediate_failure"
-    if mfe < 1.0 and final_r < 0:
-        return "weak_follow_through"
-    if mfe >= V13_STRONG_PATH_MFE_R and final_r > 0:
-        return "strong_winner"
-    if mfe >= V13_MATURE_GIVEBACK_MFE_R and final_r < 0:
-        return "mature_giveback"
-    if final_r > 0:
-        return "winner"
-    return "loss"
-
-
-def _v13_history_profile(history, direction, entry_label, rr=None):
-    """Small-sample-safe conditional history profile.
-
-    Matching hierarchy:
-      1) exact direction + entry type + RR band
-      2) direction + entry type
-      3) direction only
-      4) whole history only as a last diagnostic fallback
-
-    A hard minimum remains in _v13_candidate_history_adjustment(), so sparse
-    buckets cannot become a trading veto or manufacture a strong confidence.
-    """
-    rows = [r for r in (history or []) if isinstance(r, dict)]
-    empty = {
-        "samples": 0, "matched_samples": 0, "match_level": "none",
-        "immediate_failure_rate": None, "strong_winner_rate": None,
-        "mature_giveback_rate": None, "avg_final_r": None,
-        "avg_mfe_r": None, "avg_mae_r": None, "win_rate": None,
-        "path_quality": 0.0, "weight": 0.0,
-    }
-    if not rows:
-        return empty
-
-    side = str(direction or "").upper()
-    side = "BUY" if side in {"BULL", "BUY"} else "SELL" if side in {"BEAR", "SELL"} else side
-    label = str(entry_label or "").lower()
-    rr_band = _rr_band(float(rr or 0)) if rr is not None else None
-
-    def _side(r):
-        return str(r.get("decision", r.get("direction", ""))).upper()
-    def _label(r):
-        return str(r.get("entry_label", "")).lower()
-    def _rrmatch(r):
-        try:
-            return rr_band is not None and _rr_band(float(r.get("rr", 0) or 0)) == rr_band
-        except Exception:
-            return False
-
-    exact = [r for r in rows if _side(r) == side and _label(r) == label and _rrmatch(r)]
-    side_label = [r for r in rows if _side(r) == side and _label(r) == label]
-    side_rows = [r for r in rows if _side(r) == side]
-    if len(exact) >= V13_HISTORY_MIN:
-        data, level, base_weight = exact, "direction+label+rr", 1.00
-    elif len(side_label) >= V13_HISTORY_MIN:
-        data, level, base_weight = side_label, "direction+label", 0.85
-    elif len(side_rows) >= V13_HISTORY_MIN:
-        data, level, base_weight = side_rows, "direction", 0.70
-    else:
-        data, level, base_weight = rows, "all", 0.35
-
-    weights = np.asarray([base_weight] * len(data), dtype=float)
-    mfes = np.asarray([float(r.get("mfe_r", 0) or 0) for r in data], dtype=float)
-    maes = np.asarray([float(r.get("mae_r", 0) or 0) for r in data], dtype=float)
-    finals = np.asarray([float(r.get("final_r", 0) or 0) for r in data], dtype=float)
-    immediate = np.asarray([_v13_path_bucket(r) == "immediate_failure" for r in data], dtype=float)
-    strong = np.asarray([_v13_path_bucket(r) == "strong_winner" for r in data], dtype=float)
-    mature = np.asarray([_v13_path_bucket(r) == "mature_giveback" for r in data], dtype=float)
-    wins = np.asarray([_v13_trade_profit(r) for r in data], dtype=float)
-    wsum = max(float(weights.sum()), 1e-9)
-    imm = float(np.dot(weights, immediate) / wsum)
-    strong_r = float(np.dot(weights, strong) / wsum)
-    mature_r = float(np.dot(weights, mature) / wsum)
-    win_r = float(np.dot(weights, wins) / wsum)
-    avg_final = float(np.dot(weights, finals) / wsum)
-    avg_mfe = float(np.dot(weights, mfes) / wsum)
-    avg_mae = float(np.dot(weights, maes) / wsum)
-    path_quality = np.clip(
-        4.0 * strong_r + 1.5 * np.tanh(avg_final) -
-        4.5 * imm - 2.0 * mature_r,
-        -V13_HISTORY_SCORE_CAP, V13_HISTORY_SCORE_CAP
-    )
-    weight = min(V13_HISTORY_WEIGHT_CAP, len(data) / 40.0)
-    return {
-        "samples": len(rows), "matched_samples": len(data), "match_level": level,
-        "immediate_failure_rate": round(imm, 4),
-        "strong_winner_rate": round(strong_r, 4),
-        "mature_giveback_rate": round(mature_r, 4),
-        "avg_final_r": round(avg_final, 4), "avg_mfe_r": round(avg_mfe, 4),
-        "avg_mae_r": round(avg_mae, 4), "win_rate": round(win_r, 4),
-        "path_quality": round(float(path_quality), 3), "weight": round(weight, 3),
-    }
-
-
-def _v13_candidate_history_adjustment(history, direction, entry_label, rr):
-    prof = _v13_history_profile(history, direction, entry_label, rr)
-    if prof.get("matched_samples", 0) < V13_HISTORY_MIN or prof.get("match_level") == "all":
-        return 0.0, prof
-    # Do not allow historical data to override structural evidence. This is a
-    # ranking nudge only, not a veto.
-    adj = float(prof.get("path_quality", 0.0)) * float(prof.get("weight", 0.0))
-    return float(np.clip(adj, -V13_HISTORY_SCORE_CAP, V13_HISTORY_SCORE_CAP)), prof
-
-
-# The active history is a scan-local snapshot installed by full_analyze().
-_V13_ACTIVE_HISTORY = []
-_V13_ORIG_COLLECT = _collect_entry_candidates
-
-
-def _collect_entry_candidates_v13(m15, h1, direction, current_price, atr, score_ctx):
-    cands = _V13_ORIG_COLLECT(m15, h1, direction, current_price, atr, score_ctx)
-    history = list(_V13_ACTIVE_HISTORY or [])
-    for c in cands:
-        adj, prof = _v13_candidate_history_adjustment(
-            history, direction, c.get("label"), None
-        )
-        c["history_path_adjustment"] = round(adj, 3)
-        c["history_path_profile"] = prof
-        # The legacy candidate score is an integer. Keep historical adjustment
-        # small so current-chart evidence remains dominant.
-        c["score"] = float(c.get("score", 0)) + adj
-    cands.sort(key=lambda x: (-float(x.get("score", 0)), -float(x.get("location_score", 50))))
-    return cands
-
-
-_collect_entry_candidates = _collect_entry_candidates_v13
-
-
-# -----------------------------------------------------------------------------
-# V13 structural SL. Replace "zone body" stops with a true invalidation band.
-# -----------------------------------------------------------------------------
-_V13_ORIG_COMPUTE_SL = _compute_sl
-
-
-def _v13_last_structural_anchor(df, direction, entry, lb=3, max_bars=60):
-    if df is None or len(df) < lb * 2 + 3:
+def get_best_signal(candidates: list) -> Optional[dict]:
+    if not candidates:
         return None
-    recent = df.iloc[-min(len(df), max_bars):]
-    sh, sl = swing_pts(recent, lb=lb)
-    if direction == "bull" and sl:
-        vals = [float(recent["low"].iloc[i]) for i in sl if float(recent["low"].iloc[i]) < entry]
-        return min(vals) if vals else None
-    if direction == "bear" and sh:
-        vals = [float(recent["high"].iloc[i]) for i in sh if float(recent["high"].iloc[i]) > entry]
-        return max(vals) if vals else None
-    return None
-
-
-def _v13_structural_sl(m15, h1, direction, entry, atr, liq_sweep, invalid_level):
-    up = direction == "bull"
-    a = max(float(atr), 1e-12)
-    buffer = a * V13_SL_BUFFER_ATR
-    min_risk = a * V13_SL_MIN_ATR
-    max_risk = min(a * V13_SL_MAX_ATR, float(entry) * V13_SL_MAX_PCT)
-    anchors = []
-
-    def add(name, level, strength):
-        try:
-            lv = float(level)
-        except Exception:
-            return
-        if up and lv >= entry:
-            return
-        if (not up) and lv <= entry:
-            return
-        # For a BUY the stop goes below the anchor; for a SELL above it.
-        sl = lv - buffer if up else lv + buffer
-        risk = abs(sl - entry)
-        if min_risk <= risk <= max_risk:
-            anchors.append({"source": name, "level": lv, "sl": sl, "risk": risk, "strength": float(strength)})
-
-    if invalid_level is not None:
-        add("candidate_invalidation", invalid_level, 1.00)
-    m15_anchor = _v13_last_structural_anchor(m15, direction, entry, lb=3, max_bars=60)
-    if m15_anchor is not None:
-        add("m15_protected_swing", m15_anchor, 0.90)
-    h1_anchor = _v13_last_structural_anchor(h1, direction, entry, lb=5, max_bars=80)
-    if h1_anchor is not None:
-        add("h1_protected_swing", h1_anchor, 1.00)
-    if liq_sweep and liq_sweep.get("type") == "sweep" and liq_sweep.get("level") is not None:
-        lev = float(liq_sweep["level"])
-        # A recent liquidity sweep is useful as an invalidation boundary only
-        # when it is on the adverse side and not too close to the entry.
-        dist = abs(entry - lev) / a
-        if dist >= V13_SL_SWEEP_NEAR_ATR:
-            add("liquidity_sweep_boundary", lev, 1.05)
-
-    if not anchors:
-        raise ValueError("NO_COMPACT_STRUCTURAL_SL_V13")
-
-    # Prefer the deepest valid structural boundary. This is intentional: the
-    # stop's job is to absorb ordinary sweep/noise, not to sit inside the zone.
-    # Strength breaks exact ties.
-    if up:
-        chosen = max(anchors, key=lambda x: (x["risk"], x["strength"]))
-    else:
-        chosen = max(anchors, key=lambda x: (x["risk"], x["strength"]))
-    return float(chosen["sl"]), float(chosen["risk"]), {
-        "source": chosen["source"],
-        "anchor": round(chosen["level"], 10),
-        "buffer_atr": round(V13_SL_BUFFER_ATR, 3),
-        "risk_atr": round(chosen["risk"] / a, 3),
-        "risk_pct_entry": round(chosen["risk"] / max(entry, 1e-12) * 100.0, 4),
-        "min_risk_atr": round(V13_SL_MIN_ATR, 3),
-        "max_risk_atr": round(V13_SL_MAX_ATR, 3),
-        "max_risk_pct": round(V13_SL_MAX_PCT * 100.0, 3),
-        "anchors_considered": [a["source"] for a in anchors],
-    }
-
-
-def _compute_sl_v13(m15, h1, direction, entry, atr, liq_sweep, invalid_level=None):
-    return _v13_structural_sl(m15, h1, direction, entry, atr, liq_sweep, invalid_level)[:2]
-
-
-_compute_sl = _compute_sl_v13
-
-
-# -----------------------------------------------------------------------------
-# V13 lifecycle trail. The old reversal engine remains available as a detector,
-# but the actual stop progression is governed by path maturity + structure.
-# -----------------------------------------------------------------------------
-
-def _v13_current_price(df_m15, state):
-    # For strategy decisions prefer the latest closed M15 candle because it is
-    # the fresh dataset supplied on every management cycle. The state price may
-    # be stale between monitor cycles.
-    try:
-        if df_m15 is not None and len(df_m15):
-            if "close" in df_m15.columns:
-                return float(df_m15["close"].iloc[-1])
-    except Exception:
-        pass
-    return _safe_float(state.get("current_price") or state.get("price"), None)
-
-
-def _v13_structural_trail(df_m15, direction, entry, initial_risk, current_price, state):
-    a = max(float(df_m15["atr"].iloc[-1]), 1e-12)
-    swing = _trail_protected_swing(df_m15, direction, a)
-    if swing is not None:
-        # A profit trail should only become the primary protection once the
-        # structural swing has crossed into the profitable side.
-        if direction == "bull" and float(swing) > entry:
-            return float(swing), "m15_structure"
-        if direction == "bear" and float(swing) < entry:
-            return float(swing), "m15_structure"
-
-    # No profitable confirmed swing yet: use a conservative BE floor once the
-    # trade has actually earned 1R. This is not a profit ladder; it is a safety
-    # transition after the market has proven the thesis.
-    if direction == "bull":
-        be = entry + initial_risk * 0.02
-        return min(be, current_price - a * TRAIL_MIN_MARKET_GAP_ATR), "breakeven_protection"
-    be = entry - initial_risk * 0.02
-    return max(be, current_price + a * TRAIL_MIN_MARKET_GAP_ATR), "breakeven_protection"
-
-
-def _v13_trail_candidate(df_m15, state, direction, entry, initial_sl, current_price):
-    risk = max(abs(entry - initial_sl), 1e-12)
-    current_r = ((current_price - entry) if direction == "bull" else (entry - current_price)) / risk
-    state_mfe = _safe_float(state.get("mfe_r"), 0.0) or 0.0
-    state_mae = _safe_float(state.get("mae_r"), 0.0) or 0.0
-    # main.py's MFE/MAE are the authoritative live path values. We only use a
-    # closed-candle observation to avoid missing a move between monitor ticks.
-    peak_obs = _trail_peak_metrics(df_m15, direction, entry, risk)
-    mfe = max(state_mfe, float(peak_obs.get("peak_r", 0.0)))
-    mae = state_mae
-    giveback_r = max(0.0, mfe - current_r)
-    giveback_ratio = giveback_r / max(mfe, 0.25) if mfe > 0 else 0.0
-    t1 = state.get("time_to_1r_sec")
-    slow_winner = bool(t1 is not None and float(t1) > 4 * 3600 and mfe >= 0.8)
-    reversal = _trail_reversal_analysis(df_m15, direction, entry, current_price, risk, state.get("signal", {}).get("tp"))
-    return {
-        "current_r": round(current_r, 4), "mfe_r": round(mfe, 4), "mae_r": round(mae, 4),
-        "giveback_r": round(giveback_r, 4), "giveback_ratio": round(giveback_ratio, 4),
-        "time_to_1r_sec": t1, "slow_winner": slow_winner, "reversal": reversal,
-    }
-
-
-def _manage_position_v13(state, df_m15, df_h1=None, df_d1=None, symbol=None):
-    if df_m15 is None or len(df_m15) < 30:
-        return {"action": "PROTECT", "reason": ["v13_insufficient_m15_data"], "reasoning_engine": V13_VERSION}
-    sig = state.get("signal") or {}
-    direction = "bull" if str(sig.get("decision", "BUY")).upper() == "BUY" else "bear"
-    entry = _safe_float(state.get("entry") or sig.get("entry"), None)
-    initial_sl = _safe_float(state.get("initial_sl") or sig.get("initial_sl") or sig.get("sl"), None)
-    current_sl = _safe_float(state.get("current_sl") or sig.get("sl"), None)
-    current_price = _v13_current_price(df_m15, state)
-    if entry is None or initial_sl is None or current_sl is None or current_price is None:
-        return {"action": "PROTECT", "reason": ["v13_missing_position_geometry"], "reasoning_engine": V13_VERSION}
-    risk = abs(entry - initial_sl)
-    if risk <= 0:
-        return {"action": "PROTECT", "reason": ["v13_invalid_initial_risk"], "reasoning_engine": V13_VERSION}
-
-    # Hard safety geometry: the brain never proposes an impossible-side stop.
-    if direction == "bull" and current_price <= current_sl:
-        return {"action": "PROTECT", "reason": ["v13_market_at_or_below_current_sl"], "reasoning_engine": V13_VERSION}
-    if direction == "bear" and current_price >= current_sl:
-        return {"action": "PROTECT", "reason": ["v13_market_at_or_above_current_sl"], "reasoning_engine": V13_VERSION}
-
-    path = _v13_trail_candidate(df_m15, state, direction, entry, initial_sl, current_price)
-    current_r = path["current_r"]
-    mfe = path["mfe_r"]
-    giveback = path["giveback_ratio"]
-    reversal = path["reversal"]
-    rev_state = reversal.get("state", "HEALTHY")
-
-    if current_r < V13_TRAIL_ARM_R and mfe < V13_TRAIL_ARM_R:
-        return {
-            "action": "HOLD", "state": "INITIAL" if current_r < 0.35 else "PROVING",
-            "profit_r": round(current_r, 3), "lifecycle": path,
-            "reversal_diagnostics": reversal,
-            "reason": ["path_not_mature_for_trailing"], "reasoning_engine": V13_VERSION,
-        }
-
-    # At ~1R the position has proven enough to remove catastrophic give-back risk.
-    # If no profitable structural swing exists, use a tiny BE offset rather than
-    # a tight profit lock.
-    candidate = None
-    source = None
-    if mfe >= V13_TRAIL_BE_R:
-        candidate, source = _v13_structural_trail(df_m15, direction, entry, risk, current_price, state)
-
-    # Healthy winners get a wider structure-derived candidate. Do not tighten a
-    # slow winner merely because a single reversal detector fired.
-    if mfe >= V13_TRAIL_STRUCTURE_R and reversal.get("state") in {"HEALTHY", "CAUTION", "WEAKENING"}:
-        if reversal.get("state") == "HEALTHY" and giveback < V13_TRAIL_WARN_GIVEBACK:
-            candidate, source = _v13_structural_trail(df_m15, direction, entry, risk, current_price, state)
-
-    # Once meaningful giveback appears, structure remains preferred but the stop
-    # can lock more of the realized path. This is where PROM/JTO-type trades are
-    # protected without cutting ordinary healthy winners early.
-    if mfe >= V13_TRAIL_STRUCTURE_R and giveback >= V13_TRAIL_WARN_GIVEBACK:
-        struct_candidate, struct_source = _v13_structural_trail(df_m15, direction, entry, risk, current_price, state)
-        if struct_candidate is not None:
-            candidate, source = struct_candidate, struct_source
-        if giveback >= V13_TRAIL_TIGHT_GIVEBACK and mfe >= V13_TRAIL_EXTENDED_R:
-            lock_r = V13_TRAIL_REVERSAL_LOCK_R if reversal.get("confirmations", 0) >= 2 else 0.45
-            lock = entry + (risk * lock_r if direction == "bull" else -risk * lock_r)
-            if direction == "bull":
-                candidate = max(float(candidate or -np.inf), min(lock, current_price - float(df_m15["atr"].iloc[-1]) * TRAIL_MIN_MARKET_GAP_ATR))
-            else:
-                candidate = min(float(candidate or np.inf), max(lock, current_price + float(df_m15["atr"].iloc[-1]) * TRAIL_MIN_MARKET_GAP_ATR))
-            source = "path_giveback_lock"
-
-    # Critical giveback: preserve a meaningful slice of the realized move when
-    # possible. Do not market-close automatically; let the verified SL/TP path in
-    # main.py remain the execution authority.
-    if mfe >= V13_TRAIL_DEEP_MFE_R and giveback >= V13_TRAIL_CRITICAL_GIVEBACK:
-        lock_r = V13_TRAIL_CRITICAL_LOCK_R
-        lock = entry + (risk * lock_r if direction == "bull" else -risk * lock_r)
-        if direction == "bull":
-            candidate = max(float(candidate or -np.inf), min(lock, current_price - float(df_m15["atr"].iloc[-1]) * TRAIL_MIN_MARKET_GAP_ATR))
-        else:
-            candidate = min(float(candidate or np.inf), max(lock, current_price + float(df_m15["atr"].iloc[-1]) * TRAIL_MIN_MARKET_GAP_ATR))
-        source = "critical_giveback_lock"
-
-    if candidate is None:
-        return {
-            "action": "PROTECT" if current_r >= V13_TRAIL_ARM_R else "HOLD",
-            "state": rev_state,
-            "profit_r": round(current_r, 3), "lifecycle": path,
-            "reversal_diagnostics": reversal,
-            "reason": ["no_safe_trail_candidate"], "reasoning_engine": V13_VERSION,
-        }
-
-    atr = max(float(df_m15["atr"].iloc[-1]), 1e-12)
-    bar_high = float(df_m15["high"].iloc[-1]) if "high" in df_m15 else None
-    bar_low = float(df_m15["low"].iloc[-1]) if "low" in df_m15 else None
-    candidate, invalid_reason = _validate_trail_candidate(
-        candidate, direction, current_price, atr, current_sl, entry,
-        bar_high=bar_high, bar_low=bar_low
-    )
-
-    if candidate is None:
-        return {
-            "action": "PROTECT" if (giveback >= V13_TRAIL_WARN_GIVEBACK or rev_state in {"WEAKENING", "REVERSAL", "REVERSAL_CONFIRMED"}) else "HOLD",
-            "state": rev_state, "profit_r": round(current_r, 3),
-            "lifecycle": path, "reversal_diagnostics": reversal,
-            "trail_candidate_rejected": invalid_reason,
-            "reason": ["trail_geometry_rejected"], "reasoning_engine": V13_VERSION,
-        }
-
-    improvement_r = ((candidate - current_sl) if direction == "bull" else (current_sl - candidate)) / risk
-    if improvement_r < V13_TRAIL_MIN_UPDATE_R and int(state.get("trail_update_count", 0) or 0) >= V13_TRAIL_MAX_CHURN:
-        return {
-            "action": "PROTECT", "state": rev_state, "profit_r": round(current_r, 3),
-            "lifecycle": path, "reversal_diagnostics": reversal,
-            "reason": ["anti_churn_small_improvement"], "reasoning_engine": V13_VERSION,
-        }
-
-    locked_r = ((candidate - entry) if direction == "bull" else (entry - candidate)) / risk
-    return {
-        "action": "TRAIL",
-        "state": rev_state,
-        "sl": round(float(candidate), 10),
-        "profit_r": round(current_r, 3),
-        "locked_r": round(float(locked_r), 3),
-        "trail_source": source,
-        "lifecycle": path,
-        "reversal_diagnostics": reversal,
-        "reason": [
-            "v13_path_aware_trailing",
-            f"mfe={mfe:.2f}R",
-            f"giveback={giveback:.0%}",
-            f"source={source}",
-        ],
-        "reasoning_engine": V13_VERSION,
-    }
-
-
-# -----------------------------------------------------------------------------
-# V13 public API. The extra trade_history argument is optional and preserves the
-# original full_analyze(df_h1, df_m15, df_d1, symbol) contract.
-# -----------------------------------------------------------------------------
-_V13_ORIG_FULL_ANALYZE = _legacy_full_analyze
-
-
-def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None,
-                 trade_history=None, market_context=None):
-    global _V13_ACTIVE_HISTORY
-    old = _V13_ACTIVE_HISTORY
-    try:
-        # Work on a detached snapshot so live position closure cannot mutate the
-        # list while a scan is evaluating a candidate.
-        _V13_ACTIVE_HISTORY = [dict(x) for x in (trade_history or []) if isinstance(x, dict)]
-        result = _V13_ORIG_FULL_ANALYZE(
-            df_h1, df_m15, df_d1, symbol, df_btc_h1,
-            trade_history=_V13_ACTIVE_HISTORY,
-        )
-    finally:
-        _V13_ACTIVE_HISTORY = old
-
-    if not isinstance(result, dict):
-        return result
-    try:
-        direction = str(result.get("decision") or "BUY").upper()
-        side = "bull" if direction == "BUY" else "bear"
-        label = result.get("entry_label")
-        rr = float(result.get("rr") or 0)
-        profile = _v13_history_profile(_V13_ACTIVE_HISTORY if old else (trade_history or []), side, label, rr)
-        # Historical context is deliberately small. It informs confidence and
-        # auditability but can never overturn a valid structural decision.
-        path_adj, profile2 = _v13_candidate_history_adjustment(trade_history or [], side, label, rr)
-        base_conf = int(result.get("confidence") or 0)
-        # Only use the positive side of the historical path signal to help a
-        # setup with demonstrated realized edge; negative history remains a soft
-        # reduction. Main.py's operator threshold still owns final execution.
-        conf_adj = int(round(path_adj))
-        conf_adj = int(np.clip(conf_adj, -V13_HISTORY_SCORE_CAP, V13_HISTORY_SCORE_CAP))
-        final_conf = int(np.clip(base_conf + conf_adj, 0, 99))
-        result["confidence_base_v13"] = base_conf
-        result["confidence_history_adjustment_v13"] = conf_adj
-        result["confidence"] = final_conf
-        result["reasoning_engine"] = V13_VERSION
-        result["confidence_band"] = _confidence_band_v12(final_conf)
-        result["historical_path_profile"] = profile2
-        result["path_diagnosis"] = {
-            "immediate_failure_definition": f"MFE < {V13_IMMEDIATE_FAIL_MFE_R:.2f}R and final_r < 0",
-            "strong_winner_definition": f"MFE >= {V13_STRONG_PATH_MFE_R:.2f}R and final_r > 0",
-            "mature_giveback_definition": f"MFE >= {V13_MATURE_GIVEBACK_MFE_R:.2f}R and final_r < 0",
-        }
-        # Initial SL diagnostics — based on the selected signal itself. The
-        # actual structural anchor was already enforced by _compute_sl_v13().
-        selected_risk = abs(float(result.get("entry", 0.0)) - float(result.get("sl", 0.0)))
-        selected_atr = max(float(result.get("atr", 0.0) or 0.0), 1e-12)
-        selected_entry = max(abs(float(result.get("entry", 0.0))), 1e-12)
-        result["v13_sl_policy"] = {
-            "purpose": "loss_containment_at_structural_invalidation",
-            "risk_atr": round(selected_risk / selected_atr, 3),
-            "risk_pct_entry": round(selected_risk / selected_entry * 100.0, 4),
-            "min_risk_atr": V13_SL_MIN_ATR,
-            "max_risk_atr": V13_SL_MAX_ATR,
-            "max_risk_pct": V13_SL_MAX_PCT,
-            "anti_sweep_buffer_atr": V13_SL_BUFFER_ATR,
-        }
-        return result
-    except Exception as exc:
-        result["reasoning_engine"] = V13_VERSION
-        result["v13_warning"] = str(exc)[:240]
-        return result
-
-
-def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
-    try:
-        return _manage_position_v13(state, df_m15, df_h1, df_d1, symbol)
-    except Exception as exc:
-        # Fail safe: preserve the older manager if V13 encounters an unexpected
-        # dataset shape. It may still return HOLD/PROTECT/T RAIL under the same
-        # execution contract.
-        try:
-            fallback = _legacy_manage_position(state, df_m15, df_h1, df_d1, symbol)
-            if isinstance(fallback, dict):
-                fallback.setdefault("reason", [])
-                if isinstance(fallback["reason"], str):
-                    fallback["reason"] = [fallback["reason"]]
-                fallback["reason"].append(f"v13_fallback:{str(exc)[:120]}")
-                fallback["reasoning_engine"] = V13_VERSION
-            return fallback
-        except Exception:
-            return {"action": "PROTECT", "reason": [f"v13_manager_exception:{str(exc)[:180]}"], "reasoning_engine": V13_VERSION}
-
-
-def validate_and_adjust_geometry(entry, sl, tp, current_price, atr, direction):
-    """V13 geometry contract: never rescue a structurally invalid SL/TP."""
-    try:
-        e, s, t, px, a = map(float, (entry, sl, tp, current_price, atr))
-    except Exception:
-        return None
-    up = str(direction).lower() in {"bull", "buy"}
-    if a <= 0 or e <= 0 or t <= 0 or s <= 0:
-        return None
-    geo = (s < e < t) if up else (t < e < s)
-    if not geo:
-        return None
-    breached = (px <= s) if up else (px >= s)
-    if breached:
-        return None
-    risk = abs(e - s)
-    rr = abs(t - e) / max(risk, 1e-12)
-    risk_atr = risk / a
-    risk_pct = risk / e
-    if rr < MIN_RR:
-        return None
-    if risk_atr < V13_SL_MIN_ATR or risk_atr > V13_SL_MAX_ATR or risk_pct > V13_SL_MAX_PCT:
-        return None
-    return {
-        "entry": e, "sl": s, "tp": t, "rr": round(rr, 2), "adjusted": False,
-        "v13_sl_risk_atr": round(risk_atr, 3),
-        "v13_sl_risk_pct": round(risk_pct * 100.0, 4),
-    }
-
+    return max(candidates, key=lambda x: float(x.get("confidence", 0) or 0) * 0.8 + float(x.get("rr", 0) or 0) * 2.0)
