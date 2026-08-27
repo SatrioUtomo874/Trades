@@ -1,9 +1,3 @@
-"""SMCAutoTrade strategy engine V15.
-
-Single decision path for entry and a separate path-aware manager for open positions.
-The engine uses only pandas/numpy and accepts the market_context produced by main.py
-when available. No network/API access is performed here.
-"""
 from __future__ import annotations
 
 import logging
@@ -22,43 +16,41 @@ TRAIL_R_LADDER = []
 STRUCT_TRAIL_LB = 3
 STRUCT_TRAIL_BUF_PCT = 0.0025
 STRUCT_TRAIL_LOOKBACK = 60
-TRAIL_ENGINE_VERSION = "15.0-evidence-hierarchy-path-brain"
-TRAIL_EXECUTION_BUFFER_ATR = 0.08
-TRAIL_MIN_MARKET_GAP_ATR = 0.35
-MAIN_ENTRY_MAX_ATR = 1.50
-CONFIDENCE_MODEL_VERSION = "15.0-monotonic-evidence-quality"
+TRAIL_ENGINE_VERSION = "16.0-context-thesis-path-brain"
+CONFIDENCE_MODEL_VERSION = "16.0-monotonic-quality-v2"
 
+MAIN_ENTRY_MAX_ATR = 1.60
 MIN_DISPLACEMENT_ATR = 0.30
-ENTRY_LOOKBACK = 20
+ENTRY_LOOKBACK = 24
 SWING_LB = 3
-POI_LOOKBACK = 80
-HTF_POI_LOOKBACK = 90
-ENTRY_MAX_RISK_ATR = 2.20
+POI_LOOKBACK = 96
+HTF_POI_LOOKBACK = 120
 ENTRY_MIN_RISK_ATR = 0.55
+ENTRY_MAX_RISK_ATR = 2.20
 ENTRY_MIN_RISK_PCT = 0.08
 ENTRY_MAX_RISK_PCT = 3.50
-ENTRY_PREFERRED_BUY = 0.55
-ENTRY_PREFERRED_SELL = 0.45
+ENTRY_TARGET_RR = 2.60
 
 TRAIL_ARM_R = 0.80
+TRAIL_MFE_ARM_R = 0.90
+TRAIL_MFE_EXTENDED = 1.50
+TRAIL_MFE_DEEP = 2.50
 TRAIL_GIVEBACK_WARN = 0.30
 TRAIL_GIVEBACK_STRONG = 0.50
 TRAIL_GIVEBACK_CRITICAL = 0.70
-TRAIL_MFE_STRONG = 1.00
-TRAIL_MFE_EXTENDED = 1.50
-TRAIL_MFE_DEEP = 2.00
 TRAIL_LOCK_WARN_R = 0.08
 TRAIL_LOCK_STRONG_R = 0.30
 TRAIL_LOCK_CRITICAL_R = 0.60
-TRAIL_MIN_UPDATE_R = 0.04
-TRAIL_MAX_CHURN = 4
-TRAIL_STRUCT_BUFFER_ATR = 0.36
-TRAIL_RETRACE_BUFFER_ATR = 0.25
+TRAIL_MIN_UPDATE_R = 0.05
+TRAIL_MAX_CHURN = 5
+TRAIL_STRUCT_BUFFER_ATR = 0.34
+TRAIL_RETRACE_BUFFER_ATR = 0.24
+TRAIL_MIN_MARKET_GAP_ATR = 0.36
 TRAIL_REVERSAL_BODY_ATR = 0.85
 TRAIL_COUNTER_BODY_ATR = 0.55
 TRAIL_VOLUME_EXHAUSTION = 0.72
 TRAIL_VOLUME_COUNTER = 1.20
-TRAIL_PEAK_LOOKBACK = 40
+TRAIL_PEAK_LOOKBACK = 48
 
 
 def _num(v, default=None):
@@ -70,7 +62,10 @@ def _num(v, default=None):
 
 
 def _clip(v, lo=0.0, hi=100.0):
-    return float(np.clip(float(v), lo, hi))
+    try:
+        return float(np.clip(float(v), lo, hi))
+    except Exception:
+        return float(lo)
 
 
 def ema(s, n):
@@ -81,8 +76,11 @@ def rsi(s, n=14):
     d = s.diff()
     g = d.clip(lower=0).rolling(n).mean()
     l = (-d.clip(upper=0)).rolling(n).mean()
-    rs = g / l.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
+    out = 100 - 100 / (1 + g / l.replace(0, np.nan))
+    out = out.mask((l <= 0) & (g > 0), 100.0)
+    out = out.mask((g <= 0) & (l > 0), 0.0)
+    out = out.fillna(50.0)
+    return out
 
 
 def atr_fn(df, n=14):
@@ -99,14 +97,9 @@ def _closed_candles(df, minutes):
         return df
     out = df.copy()
     idx = out.index
-    if idx.tz is None:
-        idx = idx.tz_localize("UTC")
-    else:
-        idx = idx.tz_convert("UTC")
+    idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
     boundary = pd.Timestamp.now(tz="UTC").floor(f"{minutes}min")
-    if idx[-1] < boundary:
-        return out
-    return out.loc[idx < boundary].copy()
+    return out.loc[idx < boundary].copy() if len(idx) and idx[-1] >= boundary else out
 
 
 def build_df(df, interval_minutes=None):
@@ -117,6 +110,10 @@ def build_df(df, interval_minutes=None):
         x = _closed_candles(x, interval_minutes)
     if x is None or len(x) < 60:
         return None
+    for col in ("open", "high", "low", "close", "volume"):
+        if col not in x.columns:
+            return None
+        x[col] = pd.to_numeric(x[col], errors="coerce")
     x["ema9"] = ema(x["close"], 9)
     x["ema21"] = ema(x["close"], 21)
     x["ema50"] = ema(x["close"], 50)
@@ -124,6 +121,8 @@ def build_df(df, interval_minutes=None):
     x["rsi"] = rsi(x["close"])
     x["atr"] = atr_fn(x)
     x["vol_sma"] = x["volume"].rolling(20).mean()
+    x["range"] = x["high"] - x["low"]
+    x["body"] = (x["close"] - x["open"]).abs()
     return x.dropna()
 
 
@@ -131,7 +130,7 @@ def swing_pts(df, lb=5):
     sh, sl = [], []
     if df is None or len(df) < lb * 2 + 3:
         return sh, sl
-    hi, lo = df["high"].to_numpy(), df["low"].to_numpy()
+    hi, lo = df["high"].to_numpy(dtype=float), df["low"].to_numpy(dtype=float)
     for i in range(lb, len(df) - lb):
         if hi[i] == np.max(hi[i - lb:i + lb + 1]):
             sh.append(i)
@@ -154,13 +153,29 @@ def _market_structure(df, sh, sl):
     return "ranging"
 
 
+def _pct_move(df, bars):
+    if df is None or len(df) <= bars:
+        return 0.0
+    a, b = float(df["close"].iloc[-bars - 1]), float(df["close"].iloc[-1])
+    return (b - a) / max(abs(a), 1e-12) * 100.0
+
+
+def _efficiency(df, bars=24):
+    if df is None or len(df) <= bars:
+        return 0.5
+    sub = df.tail(bars)
+    net = abs(float(sub["close"].iloc[-1] - sub["close"].iloc[0]))
+    gross = float(sub["close"].diff().abs().sum())
+    return _clip(net / max(gross, 1e-12), 0.0, 1.0)
+
+
 def _direction_context(h1, m15, d1, market_context):
     sh1, sl1 = swing_pts(h1, 5)
     sh15, sl15 = swing_pts(m15, 5)
     struct_h1 = _market_structure(h1, sh1, sl1)
     struct_m15 = _market_structure(m15, sh15, sl15)
     d1_bias = "neutral"
-    if d1 is not None and len(d1) >= 10:
+    if d1 is not None and len(d1) >= 60:
         shd, sld = swing_pts(d1, 3)
         sd1 = _market_structure(d1, shd, sld)
         bull = sd1 == "bullish" or bool(d1["ema9"].iloc[-1] > d1["ema21"].iloc[-1] > d1["ema50"].iloc[-1])
@@ -169,68 +184,68 @@ def _direction_context(h1, m15, d1, market_context):
 
     ema_bull = bool(h1["ema9"].iloc[-1] > h1["ema21"].iloc[-1] > h1["ema50"].iloc[-1])
     ema_bear = bool(h1["ema9"].iloc[-1] < h1["ema21"].iloc[-1] < h1["ema50"].iloc[-1])
-    atr = max(float(m15["atr"].iloc[-1]), float(h1["atr"].iloc[-1]) / 4, float(m15["close"].iloc[-1]) * 0.003)
-    fast = (float(m15["close"].iloc[-1]) - float(m15["close"].iloc[-4])) / max(atr, 1e-12)
-    slow = (float(m15["close"].iloc[-1]) - float(m15["close"].iloc[-9])) / max(atr, 1e-12)
+    atr = max(float(m15["atr"].iloc[-1]), float(h1["atr"].iloc[-1]) / 4, float(m15["close"].iloc[-1]) * 0.0025)
+    fast = (float(m15["close"].iloc[-1]) - float(m15["close"].iloc[-4])) / atr
+    slow = (float(m15["close"].iloc[-1]) - float(m15["close"].iloc[-12])) / atr
+    eff = _efficiency(h1, 24)
 
-    bull = 50.0
-    bear = 50.0
+    bull, bear = 50.0, 50.0
     if d1_bias == "bullish": bull += 18
-    elif d1_bias == "bearish": bear += 18
+    if d1_bias == "bearish": bear += 18
     if struct_h1 == "bullish": bull += 22
-    elif struct_h1 == "bearish": bear += 22
+    if struct_h1 == "bearish": bear += 22
     if ema_bull: bull += 8
     if ema_bear: bear += 8
-    if fast > 0: bull += min(7.0, fast * 3.0)
-    if fast < 0: bear += min(7.0, -fast * 3.0)
-    if slow > 0: bull += min(7.0, slow * 1.5)
-    if slow < 0: bear += min(7.0, -slow * 1.5)
+    if fast > 0: bull += min(8.0, fast * 3.0)
+    if fast < 0: bear += min(8.0, -fast * 3.0)
+    if slow > 0: bull += min(8.0, slow * 1.6)
+    if slow < 0: bear += min(8.0, -slow * 1.6)
     if struct_m15 == "bullish": bull += 5
-    elif struct_m15 == "bearish": bear += 5
+    if struct_m15 == "bearish": bear += 5
 
     mc = market_context if isinstance(market_context, dict) else {}
     breadth = _num(mc.get("bullish_breadth_pct"), None)
-    breadth_score = 50.0
     if breadth is not None:
-        breadth_score = _clip(50 + (breadth - 50) * 1.5)
-        if breadth >= 65: bull += 6
-        elif breadth <= 35: bear += 6
+        if breadth >= 62: bull += 7
+        elif breadth <= 38: bear += 7
     rs = _num(mc.get("relative_strength_1h_pct"), None)
     if rs is not None:
-        if rs >= 0.35: bull += 5
-        elif rs <= -0.35: bear += 5
-    rv = _num(mc.get("relative_volume"), None)
-    if rv is not None and rv >= 1.15:
-        if fast > 0: bull += 3
-        elif fast < 0: bear += 3
+        if rs >= 0.30: bull += 5
+        elif rs <= -0.30: bear += 5
+    rv = _num(mc.get("relative_volume"), _num(mc.get("avg_relative_volume"), None))
+    if rv is not None and rv >= 1.20:
+        if fast > 0: bull += 2.5
+        elif fast < 0: bear += 2.5
 
     regime = str(mc.get("market_regime") or mc.get("chart_regime") or "").lower()
     macro = "unknown"
     if "bull" in regime: macro = "bullish"
     elif "bear" in regime: macro = "bearish"
     elif "range" in regime or "compression" in regime: macro = "ranging"
+    elif "transition" in regime: macro = "transition"
     if macro == "bullish":
         bull += 4
-        bear *= 0.90
+        bear -= 2
     elif macro == "bearish":
         bear += 4
-        bull *= 0.90
+        bull -= 2
+    elif macro == "transition":
+        bull -= 3
+        bear -= 3
 
     direction = "bull" if bull >= bear else "bear"
     edge = abs(bull - bear)
-    quality = _clip(45 + edge * 1.5)
-    htf_alignment = (
-        d1_bias == "neutral" or struct_h1 == "ranging" or d1_bias == struct_h1
-    )
+    quality = _clip(42 + edge * 1.45 + max(0.0, eff - 0.5) * 18)
     htf_conflict = d1_bias in ("bullish", "bearish") and struct_h1 in ("bullish", "bearish") and d1_bias != struct_h1
+    htf_alignment = not htf_conflict and (d1_bias == "neutral" or struct_h1 == "ranging" or d1_bias == struct_h1)
     return {
-        "direction": direction, "bull": round(bull, 2), "bear": round(bear, 2),
+        "direction": direction,
+        "bull": round(bull, 2), "bear": round(bear, 2),
         "direction_quality": round(quality, 2), "edge": round(edge, 2),
         "struct_h1": struct_h1, "struct_m15": struct_m15, "d1_bias": d1_bias,
         "macro_bias": macro, "htf_alignment": htf_alignment, "htf_conflict": htf_conflict,
-        "atr": atr, "price": float(m15["close"].iloc[-1]),
+        "atr": atr, "price": float(m15["close"].iloc[-1]), "efficiency_h1": eff,
         "sh1": sh1, "sl1": sl1, "sh15": sh15, "sl15": sl15,
-        "breadth_score": breadth_score,
     }
 
 
@@ -238,9 +253,9 @@ def score_direction(df_h1, df_m15, df_d1=None, df_btc_h1=None):
     h1, m15 = build_df(df_h1, 60), build_df(df_m15, 15)
     if h1 is None or m15 is None:
         return None
-    d1 = build_df(df_d1, 1440) if df_d1 is not None and len(df_d1) >= 60 else None
+    d1 = build_df(df_d1, 1440) if df_d1 is not None else None
     ctx = _direction_context(h1, m15, d1, {})
-    ctx["h1"], ctx["m15"], ctx["d1"] = h1, m15, d1
+    ctx.update({"h1": h1, "m15": m15, "d1": d1})
     return ctx
 
 
@@ -254,7 +269,7 @@ def _zone_fresh(df, idx, top, bot, direction):
 def _find_ob(df, direction, lookback=POI_LOOKBACK):
     sub = df.tail(lookback).reset_index(drop=True)
     base = len(df) - len(sub)
-    avg_body = max(float((sub["close"] - sub["open"]).abs().median()), 1e-12)
+    med_body = max(float(sub["body"].median()), 1e-12)
     out = []
     for i in range(1, len(sub) - 4):
         c, nxt = sub.iloc[i], sub.iloc[i + 1]
@@ -262,95 +277,86 @@ def _find_ob(df, direction, lookback=POI_LOOKBACK):
             continue
         if direction == "bear" and not (c["close"] > c["open"] and nxt["close"] < nxt["open"]):
             continue
-        body = abs(float(nxt["close"] - nxt["open"]))
-        if body < avg_body * 1.20:
+        body_atr = float(nxt["body"]) / max(float(nxt["atr"]), 1e-12)
+        if float(nxt["body"]) < med_body * 1.15 or body_atr < MIN_DISPLACEMENT_ATR:
             continue
         top, bot = float(max(c["open"], c["close"])), float(min(c["open"], c["close"]))
         idx = base + i
         if not _zone_fresh(df, idx, top, bot, direction):
             continue
-        score = min(45.0, body / avg_body * 15.0)
+        score = 35.0 + min(35.0, body_atr * 18.0)
         if i + 2 < len(sub):
             c2 = sub.iloc[i + 2]
-            if direction == "bull" and c2["low"] > c["high"]: score += 22
-            if direction == "bear" and c2["high"] < c["low"]: score += 22
-        if idx >= len(df) - 20: score += 15
-        out.append({"top": top, "bot": bot, "mid": (top + bot) / 2, "idx": idx, "score": _clip(score), "kind": "ob"})
+            if direction == "bull" and c2["low"] > c["high"]: score += 15
+            if direction == "bear" and c2["high"] < c["low"]: score += 15
+        age = len(df) - 1 - idx
+        score += max(0.0, 18.0 - age * 0.45)
+        out.append({"top": top, "bot": bot, "mid": (top + bot) / 2, "idx": idx, "score": _clip(score), "kind": "ob", "age": age, "body_atr": round(body_atr, 3)})
     out.sort(key=lambda z: (-z["score"], -z["idx"]))
-    return out[:4]
+    return out[:6]
 
 
 def _find_fvg(df, direction, lookback=POI_LOOKBACK):
-    sub = df.tail(lookback)
+    sub = df.tail(lookback).reset_index(drop=True)
     base = len(df) - len(sub)
     out = []
-    for i in range(len(sub) - 2):
-        a, c = sub.iloc[i], sub.iloc[i + 2]
+    for i in range(1, len(sub) - 1):
+        a, c = sub.iloc[i - 1], sub.iloc[i + 1]
         if direction == "bull" and c["low"] > a["high"]:
             top, bot = float(c["low"]), float(a["high"])
         elif direction == "bear" and c["high"] < a["low"]:
             top, bot = float(a["low"]), float(c["high"])
         else:
             continue
-        idx = base + i + 2
+        idx = base + i + 1
         if not _zone_fresh(df, idx, top, bot, direction):
             continue
-        width = top - bot
-        atr = max(float(df["atr"].iloc[-1]), 1e-12)
-        recency = 12.0 if idx >= len(df) - 16 else 0.0
-        score = _clip(40 + min(30, width / atr * 18) + recency)
-        out.append({"top": top, "bot": bot, "mid": (top + bot) / 2, "idx": idx, "score": score, "kind": "fvg"})
+        width_atr = (top - bot) / max(float(df["atr"].iloc[-1]), 1e-12)
+        age = len(df) - 1 - idx
+        score = _clip(28 + min(40, width_atr * 22) + max(0, 18 - age * 0.40))
+        out.append({"top": top, "bot": bot, "mid": (top + bot) / 2, "idx": idx, "score": score, "kind": "fvg", "age": age, "width_atr": round(width_atr, 3)})
     out.sort(key=lambda z: (-z["score"], -z["idx"]))
-    return out[:4]
-
-
-def _find_equal(df, kind, lookback=80, tol=0.0025):
-    vals = df[kind].tail(lookback).to_numpy(dtype=float)
-    out = []
-    for i in range(len(vals)):
-        grp = [vals[i]]
-        for j in range(i + 1, len(vals)):
-            if abs(vals[i] - vals[j]) / max(abs(vals[i]), 1e-12) <= tol:
-                grp.append(vals[j])
-        if len(grp) >= 2:
-            out.append(float(np.mean(grp)))
-    return sorted(set(round(x, 10) for x in out))
+    return out[:6]
 
 
 def _sweep(df, direction, sh, sl):
+    atr = max(float(df["atr"].iloc[-1]), 1e-12)
     if direction == "bull" and sl:
         level = float(df["low"].iloc[sl[-1]])
         lo, close = float(df["low"].iloc[-1]), float(df["close"].iloc[-1])
         if lo < level and close > level:
-            return {"type": "sweep", "level": level, "strength": _clip(45 + (level - lo) / max(float(df["atr"].iloc[-1]), 1e-12) * 25)}
+            return {"detected": True, "type": "sell_side_reclaim", "level": level, "strength": _clip(48 + (level - lo) / atr * 28)}
     if direction == "bear" and sh:
         level = float(df["high"].iloc[sh[-1]])
         hi, close = float(df["high"].iloc[-1]), float(df["close"].iloc[-1])
         if hi > level and close < level:
-            return {"type": "sweep", "level": level, "strength": _clip(45 + (hi - level) / max(float(df["atr"].iloc[-1]), 1e-12) * 25)}
-    return {"type": "none", "level": None, "strength": 0.0}
+            return {"detected": True, "type": "buy_side_reclaim", "level": level, "strength": _clip(48 + (hi - level) / atr * 28)}
+    return {"detected": False, "type": "none", "level": None, "strength": 0.0}
 
 
 def _displacement(df, direction):
     if len(df) < 8:
-        return {"confirmed": False, "body_atr": 0.0, "range_break": False}
-    last = df.iloc[-1]
-    atr = max(float(last["atr"]), 1e-12)
-    body = abs(float(last["close"] - last["open"]))
-    prior = df.iloc[-5:-1]
+        return {"confirmed": False, "body_atr": 0.0, "range_atr": 0.0, "break_strength": 0.0, "follow_through": 0.0}
+    a = df.iloc[-1]
+    atr = max(float(a["atr"]), 1e-12)
+    body_atr = float(a["body"]) / atr
+    range_atr = float(a["range"]) / atr
+    prior = df.iloc[-6:-1]
     if direction == "bull":
-        rb = float(last["close"]) > float(prior["high"].max())
-        conf = float(last["close"]) > float(last["open"]) and rb and body >= atr * MIN_DISPLACEMENT_ATR
+        broke = float(a["close"]) > float(prior["high"].max())
+        aligned = float(a["close"]) > float(a["open"])
     else:
-        rb = float(last["close"]) < float(prior["low"].min())
-        conf = float(last["close"]) < float(last["open"]) and rb and body >= atr * MIN_DISPLACEMENT_ATR
-    return {"confirmed": bool(conf), "body_atr": round(body / atr, 3), "range_break": bool(rb)}
+        broke = float(a["close"]) < float(prior["low"].min())
+        aligned = float(a["close"]) < float(a["open"])
+    rv = float(a["volume"]) / max(float(a["vol_sma"]), 1e-12)
+    follow = _clip((body_atr - 0.25) * 35 + (rv - 0.8) * 22 + (range_atr - 0.5) * 10, 0, 100)
+    confirmed = aligned and broke and body_atr >= MIN_DISPLACEMENT_ATR
+    strength = _clip(body_atr * 35 + max(0, rv - 0.9) * 24 + (20 if broke else 0))
+    return {"confirmed": bool(confirmed), "body_atr": round(body_atr, 3), "range_atr": round(range_atr, 3), "break_strength": round(strength, 2), "follow_through": round(follow, 2), "relative_volume": round(rv, 3)}
 
 
 def _pullback(df, direction, atr):
-    if len(df) < 14:
-        return {"score": 45.0, "state": "unknown", "efficiency": 0.0, "depth_atr": 0.0}
-    sub = df.tail(12)
+    sub = df.tail(14)
     gross = float(sub["close"].diff().abs().sum())
     net = float(sub["close"].iloc[-1] - sub["close"].iloc[0])
     if direction == "bear": net = -net
@@ -360,53 +366,70 @@ def _pullback(df, direction, atr):
     else:
         adverse = max(0.0, float(sub["high"].max() - sub["low"].iloc[0]))
     depth = adverse / max(atr, 1e-12)
-    score = 52.0
-    if 0.25 <= depth <= 1.6: score += 18
-    elif depth > 2.0: score -= 22
-    if eff >= 0.45: score += 18
-    elif eff < 0.20: score -= 14
+    score = 54.0
+    if 0.20 <= depth <= 1.70: score += 16
+    elif depth > 2.10: score -= 24
+    if eff >= 0.50: score += 18
+    elif eff < 0.22: score -= 18
     aligned_last = (direction == "bull" and sub["close"].iloc[-1] > sub["close"].iloc[-2]) or (direction == "bear" and sub["close"].iloc[-1] < sub["close"].iloc[-2])
     if aligned_last: score += 7
-    return {"score": _clip(score), "state": "clean" if score >= 72 else "mixed" if score >= 45 else "damaged", "efficiency": round(eff, 3), "depth_atr": round(depth, 3)}
+    return {"score": _clip(score), "state": "clean" if score >= 74 else "mixed" if score >= 48 else "damaged", "efficiency": round(eff, 3), "depth_atr": round(depth, 3)}
 
 
-def _location(df, direction, price, atr):
+def _location(df, direction, price):
     look = df.tail(ENTRY_LOOKBACK)
     lo, hi = float(look["low"].min()), float(look["high"].max())
-    pos = (price - lo) / max(hi - lo, 1e-12)
+    width = max(hi - lo, 1e-12)
+    pos = (price - lo) / width
     if direction == "bull":
-        score = 76 if pos <= ENTRY_PREFERRED_BUY else 62 if pos < 0.82 else 30
+        score = 85 if pos <= 0.50 else 72 if pos <= 0.68 else 48 if pos <= 0.82 else 28
     else:
-        score = 76 if pos >= ENTRY_PREFERRED_SELL else 62 if pos > 0.18 else 30
-    edge_gap = (hi - price) / max(atr, 1e-12) if direction == "bull" else (price - lo) / max(atr, 1e-12)
-    if edge_gap < 0.45: score -= 12
-    return {"score": _clip(score), "range_position": round(pos, 3), "range_low": lo, "range_high": hi}
+        score = 85 if pos >= 0.50 else 72 if pos >= 0.32 else 48 if pos >= 0.18 else 28
+    return {"score": float(score), "range_position": round(pos, 4), "range_low": lo, "range_high": hi, "state": "preferred" if score >= 75 else "acceptable" if score >= 48 else "late"}
 
 
 def _context_quality(mc, direction):
     if not isinstance(mc, dict) or not mc:
-        return {"score": 50.0, "conflicts": [], "reasons": ["market_context_unavailable"]}
+        return {"score": 50.0, "conflicts": ["cross_market_context_unavailable"], "reasons": [], "available": False}
     score, reasons, conflicts = 50.0, [], []
     breadth = _num(mc.get("bullish_breadth_pct"), None)
     if breadth is not None:
         aligned = breadth >= 60 if direction == "bull" else breadth <= 40
         opposed = breadth <= 40 if direction == "bull" else breadth >= 60
-        if aligned: score += 15; reasons.append("breadth_aligned")
+        if aligned: score += 14; reasons.append("breadth_aligned")
         elif opposed: score -= 18; conflicts.append("breadth_opposed")
-        elif (45 <= breadth <= 55): reasons.append("breadth_neutral")
     rs = _num(mc.get("relative_strength_1h_pct"), None)
     if rs is not None:
-        if (direction == "bull" and rs >= 0.35) or (direction == "bear" and rs <= -0.35): score += 14; reasons.append("relative_strength_aligned")
-        elif (direction == "bull" and rs <= -0.35) or (direction == "bear" and rs >= 0.35): score -= 14; conflicts.append("relative_strength_opposed")
-    rv = _num(mc.get("relative_volume"), None)
+        if (direction == "bull" and rs >= 0.30) or (direction == "bear" and rs <= -0.30): score += 12; reasons.append("relative_strength_aligned")
+        elif (direction == "bull" and rs <= -0.30) or (direction == "bear" and rs >= 0.30): score -= 13; conflicts.append("relative_strength_opposed")
+    rs4 = _num(mc.get("relative_strength_4h_pct"), None)
+    if rs4 is not None:
+        if (direction == "bull" and rs4 >= 0.50) or (direction == "bear" and rs4 <= -0.50): score += 8; reasons.append("relative_strength_4h_aligned")
+        elif (direction == "bull" and rs4 <= -0.50) or (direction == "bear" and rs4 >= 0.50): score -= 8; conflicts.append("relative_strength_4h_opposed")
+    rv = _num(mc.get("relative_volume"), _num(mc.get("avg_relative_volume"), None))
     if rv is not None:
-        if rv >= 1.20: score += 8; reasons.append("participation_expanded")
+        if rv >= 1.25: score += 7; reasons.append("participation_expanded")
         elif rv <= 0.55: score -= 6; conflicts.append("participation_thin")
     regime = str(mc.get("market_regime") or mc.get("chart_regime") or "").lower()
-    if "transition" in regime: score -= 4; conflicts.append("transition_regime")
-    elif "range" in regime or "compression" in regime: score -= 2; reasons.append("range_regime")
+    if "transition" in regime: score -= 8; conflicts.append("transition_regime")
     elif "trend" in regime or "expansion" in regime: score += 4; reasons.append("trend_regime")
-    return {"score": _clip(score), "conflicts": conflicts, "reasons": reasons}
+    elif "range" in regime or "compression" in regime: score -= 2; reasons.append("range_regime")
+    return {"score": _clip(score), "conflicts": conflicts, "reasons": reasons, "available": True}
+
+
+def _poi_quality(zone, htf_overlap, displacement, sweep, pullback):
+    base = float(zone.get("score", 25.0))
+    kind = zone.get("kind", "market")
+    quality = 0.55 * base + 45.0
+    quality = min(90.0, quality)
+    if htf_overlap: quality += 8
+    if kind == "fvg" and not displacement["confirmed"]: quality -= 12
+    if kind == "ob" and displacement["confirmed"]: quality += 5
+    if sweep["detected"]: quality += 5
+    if pullback["state"] == "damaged": quality -= 12
+    age = float(zone.get("age", 999))
+    if age > 45: quality -= 8
+    return _clip(quality)
 
 
 def _geometry(m15, h1, direction, entry, atr):
@@ -427,8 +450,9 @@ def _geometry(m15, h1, direction, entry, atr):
         stop = anchor + atr * 0.18
     risk = (entry - stop) if direction == "bull" else (stop - entry)
     if risk <= 0: return None
-    risk_atr, risk_pct = risk / max(atr, 1e-12), risk / max(entry, 1e-12) * 100
-    if risk_atr < ENTRY_MIN_RISK_ATR or risk_atr > ENTRY_MAX_RISK_ATR or risk_pct < ENTRY_MIN_RISK_PCT or risk_pct > ENTRY_MAX_RISK_PCT:
+    risk_atr = risk / max(atr, 1e-12)
+    risk_pct = risk / max(entry, 1e-12) * 100
+    if not (ENTRY_MIN_RISK_ATR <= risk_atr <= ENTRY_MAX_RISK_ATR and ENTRY_MIN_RISK_PCT <= risk_pct <= ENTRY_MAX_RISK_PCT):
         return None
     return float(stop), float(risk), float(risk_atr), float(risk_pct), sh, sl, hsh, hsl
 
@@ -437,131 +461,134 @@ def _targets(m15, h1, direction, entry, risk):
     vals = []
     if direction == "bull":
         sh, _ = swing_pts(h1, 5)
-        for i in reversed(sh[-8:]):
+        for i in reversed(sh[-10:]):
             x = float(h1["high"].iloc[i])
             if x > entry: vals.append((x, "h1_swing"))
-        vals += [(entry + risk * 1.272, "fib_1.272"), (entry + risk * 1.618, "fib_1.618")]
-        vals = [v for v in vals if v[0] > entry + risk * 1.95]
+        vals += [(entry + risk * (1 + FIB_EXT_1), "fib_1.272"), (entry + risk * (1 + FIB_EXT_2), "fib_1.618")]
     else:
         _, sl = swing_pts(h1, 5)
-        for i in reversed(sl[-8:]):
+        for i in reversed(sl[-10:]):
             x = float(h1["low"].iloc[i])
             if x < entry: vals.append((x, "h1_swing"))
-        vals += [(entry - risk * 1.272, "fib_1.272"), (entry - risk * 1.618, "fib_1.618")]
-        vals = [v for v in vals if v[0] < entry - risk * 1.95]
-    if not vals: return None
-    vals.sort(key=lambda z: abs((((z[0] - entry) if direction == "bull" else (entry - z[0])) / risk) - 2.6))
-    tp, label = vals[0]
-    rr = ((tp - entry) if direction == "bull" else (entry - tp)) / risk
+        vals += [(entry - risk * (1 + FIB_EXT_1), "fib_1.272"), (entry - risk * (1 + FIB_EXT_2), "fib_1.618")]
+    valid = []
+    for x, label in vals:
+        rr = ((x - entry) if direction == "bull" else (entry - x)) / max(risk, 1e-12)
+        if rr >= MIN_RR:
+            valid.append((x, label, rr))
+    if not valid: return None
+    valid.sort(key=lambda z: abs(z[2] - ENTRY_TARGET_RR))
+    tp, label, rr = valid[0]
     return float(tp), label, float(rr)
 
 
-def _candidate_quality(direction, cand, htf_overlap, sweep, displacement, pullback, location, context, geom, rr, ctx, market_regime):
-    risk, risk_atr, risk_pct = geom[1], geom[2], geom[3]
-    poi_base = _clip(cand.get("score", 35.0) * 0.95)
-    poi = poi_base + (10 if htf_overlap else 0)
-    if cand.get("kind") == "fvg": poi -= 4 if not displacement["confirmed"] else 0
-    if cand.get("kind") == "market": poi = min(poi, 38.0)
-    poi = _clip(poi)
-
-    trigger = 52.0
-    if displacement["confirmed"]: trigger += 35
-    elif displacement["range_break"]: trigger += 12
-    if sweep["type"] == "sweep": trigger += 8
-    if pullback["state"] == "clean": trigger += 8
-    elif pullback["state"] == "damaged": trigger -= 20
-    trigger = _clip(trigger)
-
-    risk_score = 78.0
-    if risk_atr < 0.70: risk_score -= 24
-    elif risk_atr > 1.85: risk_score -= 15
-    elif 0.85 <= risk_atr <= 1.55: risk_score += 10
-    if risk_pct < 0.10: risk_score -= 10
-    risk_score = _clip(risk_score)
-
-    direction_score = ctx["direction_quality"]
-    htf_score = 82.0 if ctx["htf_alignment"] else 45.0 if ctx["htf_conflict"] else 60.0
-    market_score = context["score"]
-    location_score = location["score"]
-
-    positive = [
-        ("htf", htf_score, 0.20),
-        ("direction", direction_score, 0.18),
-        ("poi", poi, 0.17),
-        ("trigger", trigger, 0.20),
-        ("location", location_score, 0.08),
-        ("risk", risk_score, 0.08),
-        ("context", market_score, 0.09),
-    ]
-    quality = sum(v * w for _, v, w in positive)
-
-    contradictions = []
-    if ctx["htf_conflict"]: contradictions.append("d1_h1_conflict")
-    if pullback["state"] == "damaged": contradictions.append("damaged_pullback")
-    if location_score < 40: contradictions.append("poor_location")
-    contradictions.extend(context.get("conflicts", [])[:3])
-    if not displacement["confirmed"]: contradictions.append("no_fresh_displacement")
-    if sweep["type"] == "sweep":
-        quality += min(5.0, sweep["strength"] * 0.04)
-    else:
-        quality -= 2.0
-
-    penalty = min(24.0, len(contradictions) * 4.5)
-    quality = _clip(quality - penalty)
-
-    completeness = (
-        int(displacement["confirmed"]) +
-        int(sweep["type"] == "sweep") +
-        int(htf_overlap) +
-        int(pullback["state"] == "clean")
-    )
-    if completeness == 0: quality -= 10
-    elif completeness == 1: quality -= 3
-    elif completeness >= 3: quality += 4
-    quality = _clip(quality)
-
-    # Monotonic mapping: all inputs are normalized evidence scores, and the same
-    # quality score always maps to the same confidence. There is no post-hoc
-    # history boost that can reorder candidates.
-    confidence = int(round(18 + quality * 0.74))
-    confidence = int(np.clip(confidence, 25, 92))
-    return {
-        "quality": round(quality, 2), "confidence": confidence,
-        "components": {k: round(v, 2) for k, v, _ in positive},
-        "contradictions": contradictions, "penalty": round(penalty, 2),
-        "completeness": completeness, "risk_atr": round(risk_atr, 3), "risk_pct": round(risk_pct, 4),
-        "poi_quality": round(poi, 2), "trigger_quality": round(trigger, 2),
-    }
-
-
-def _archetype(direction, cand_kind, sweep, displacement, pullback, htf_overlap, regime):
-    if sweep["type"] == "sweep" and displacement["confirmed"]:
+def _archetype(direction, zone, sweep, displacement, pullback, htf_overlap, market_regime):
+    k = zone.get("kind", "market")
+    if sweep["detected"] and displacement["confirmed"]:
         return "LIQUIDITY_SWEEP_RECLAIM"
-    if htf_overlap and cand_kind == "ob" and pullback["state"] == "clean":
+    if htf_overlap and k == "ob" and pullback["state"] == "clean" and displacement["confirmed"]:
         return "HTF_OB_PULLBACK_CONTINUATION"
-    if cand_kind == "fvg" and displacement["confirmed"]:
+    if k == "fvg" and displacement["confirmed"]:
         return "FVG_DISPLACEMENT_RETEST"
-    if "range" in str(regime).lower() and sweep["type"] == "sweep":
+    if "range" in str(market_regime).lower() and sweep["detected"]:
         return "RANGE_LIQUIDITY_REVERSAL"
     if displacement["confirmed"] and pullback["state"] == "clean":
         return "STRUCTURE_CONTINUATION"
-    return "EARLY_CONTEXTUAL_SETUP"
+    return "CONTEXTUAL_PULLBACK"
+
+
+def _candidate_quality(ctx, zone, htf_overlap, sweep, displacement, pullback, location, context, geom, rr, archetype, data_quality):
+    stop, risk, risk_atr, risk_pct = geom[:4]
+    poi = _poi_quality(zone, htf_overlap, displacement, sweep, pullback)
+    direction_q = float(ctx["direction_quality"])
+    htf_q = 90.0 if ctx["htf_alignment"] else 42.0 if ctx["htf_conflict"] else 60.0
+    trigger_q = 46.0
+    if displacement["confirmed"]: trigger_q += 34
+    else: trigger_q += min(14, displacement["break_strength"] * 0.18)
+    if sweep["detected"]: trigger_q += min(10, sweep["strength"] * 0.10)
+    if pullback["state"] == "clean": trigger_q += 8
+    elif pullback["state"] == "damaged": trigger_q -= 22
+    trigger_q = _clip(trigger_q)
+
+    risk_q = 76.0
+    if risk_atr < 0.70: risk_q -= 18
+    elif 0.85 <= risk_atr <= 1.60: risk_q += 10
+    elif risk_atr > 1.90: risk_q -= 14
+    if risk_pct < 0.10: risk_q -= 8
+    risk_q = _clip(risk_q)
+
+    reward_q = _clip(52 + min(28, max(0, rr - 2.0) * 13))
+    if rr > 5.5: reward_q -= 4
+
+    comps = {
+        "htf": htf_q,
+        "direction": direction_q,
+        "setup": trigger_q,
+        "poi": poi,
+        "location": float(location["score"]),
+        "risk": risk_q,
+        "reward": reward_q,
+        "context": float(context["score"]),
+    }
+    weights = {"htf": 0.16, "direction": 0.15, "setup": 0.20, "poi": 0.15, "location": 0.10, "risk": 0.10, "reward": 0.06, "context": 0.08}
+    quality = sum(comps[k] * weights[k] for k in comps)
+
+    contradictions = []
+    if ctx["htf_conflict"]: contradictions.append("d1_h1_conflict")
+    if location["state"] == "late": contradictions.append("late_entry_location")
+    if pullback["state"] == "damaged": contradictions.append("damaged_pullback")
+    if not displacement["confirmed"]: contradictions.append("no_fresh_displacement")
+    contradictions += list(context.get("conflicts", []))[:4]
+    if zone.get("kind") == "fvg" and not displacement["confirmed"]: contradictions.append("fvg_without_confirmation")
+    if risk_q < 45: contradictions.append("weak_risk_geometry")
+
+    penalty = min(30.0, len(set(contradictions)) * 4.2)
+    quality = _clip(quality - penalty)
+
+    if sweep["detected"] and displacement["confirmed"]:
+        quality += 4.0
+    if htf_overlap and zone.get("kind") == "ob" and pullback["state"] == "clean":
+        quality += 3.0
+    if archetype == "CONTEXTUAL_PULLBACK":
+        quality -= 4.0
+    quality = _clip(quality)
+
+    quality *= max(0.82, min(1.0, data_quality / 100.0))
+    confidence = int(np.clip(round(20 + quality * 0.76), 25, 94))
+    if quality < 44: confidence = min(confidence, 52)
+    elif quality < 54: confidence = min(confidence, 59)
+    return {
+        "quality": round(quality, 2), "confidence": confidence,
+        "components": {k: round(v, 2) for k, v in comps.items()},
+        "contradictions": list(dict.fromkeys(contradictions)),
+        "penalty": round(penalty, 2), "risk_atr": round(risk_atr, 3), "risk_pct": round(risk_pct, 4),
+        "poi_quality": round(poi, 2), "trigger_quality": round(trigger_q, 2), "risk_quality": round(risk_q, 2),
+        "data_quality": round(data_quality, 2),
+    }
+
+
+def _data_quality(h1, m15, d1, market_context):
+    score = 100.0
+    if d1 is None: score -= 8
+    if not isinstance(market_context, dict) or not market_context: score -= 8
+    if len(h1) < 120: score -= 4
+    if len(m15) < 100: score -= 4
+    return _clip(score)
 
 
 def _history_context(history, direction, entry_label, archetype):
     rows = [r for r in (history or []) if isinstance(r, dict)]
-    if len(rows) < 10:
-        return {"samples": len(rows), "matched": 0, "weight": 0.0, "note": "insufficient_history"}
     side = "BUY" if direction == "bull" else "SELL"
     matched = [r for r in rows if str(r.get("decision", "")).upper() == side and str(r.get("entry_label", "")) == entry_label]
-    if len(matched) < 6:
+    if len(matched) < 8:
         matched = [r for r in rows if str(r.get("decision", "")).upper() == side]
-    if not matched:
-        return {"samples": len(rows), "matched": 0, "weight": 0.0, "note": "no_match"}
-    wins = np.array([1.0 if _num(r.get("pnl_usd"), 0.0) > 0 else 0.0 for r in matched])
-    wr = float(wins.mean())
-    # History is audit context only. It never reorders the primary score.
-    return {"samples": len(rows), "matched": len(matched), "win_rate": round(wr, 3), "weight": round(min(0.10, len(matched) / 80), 3), "note": "audit_context_only"}
+    profits = [_num(r.get("pnl_usd"), 0.0) or 0.0 for r in matched]
+    return {
+        "samples": len(rows), "matched": len(matched),
+        "win_rate": round(float(np.mean([p > 0 for p in profits])) if profits else 0.0, 3),
+        "archetype": archetype,
+        "usage": "audit_only",
+    }
 
 
 def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None, market_context=None):
@@ -569,30 +596,28 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
         h1, m15 = build_df(df_h1, 60), build_df(df_m15, 15)
         if h1 is None or m15 is None:
             return None
-        d1 = build_df(df_d1, 1440) if df_d1 is not None and len(df_d1) >= 60 else None
+        d1 = build_df(df_d1, 1440) if df_d1 is not None else None
         ctx = _direction_context(h1, m15, d1, market_context)
-        direction = ctx["direction"]
-        price, atr = ctx["price"], ctx["atr"]
+        direction, price, atr = ctx["direction"], ctx["price"], ctx["atr"]
         sweep = _sweep(m15, direction, ctx["sh15"], ctx["sl15"])
         displacement = _displacement(m15, direction)
         pullback = _pullback(m15, direction, atr)
-        location = _location(m15, direction, price, atr)
+        location = _location(m15, direction, price)
         context = _context_quality(market_context, direction)
+        data_quality = _data_quality(h1, m15, d1, market_context)
+        regime = str((market_context or {}).get("market_regime") or (market_context or {}).get("chart_regime") or ctx["macro_bias"])
 
         zones = _find_ob(m15, direction) + _find_fvg(m15, direction)
         zones += _find_ob(h1, direction, HTF_POI_LOOKBACK) + _find_fvg(h1, direction, HTF_POI_LOOKBACK)
-        zones = [z for z in zones if abs(price - float(z["mid"])) <= atr * MAIN_ENTRY_MAX_ATR and ((direction == "bull" and z["mid"] <= price * 1.006) or (direction == "bear" and z["mid"] >= price * 0.994))]
-        zones.sort(key=lambda z: (-z.get("score", 0), -z.get("idx", 0)))
+        zones = [z for z in zones if abs(price - float(z["mid"])) <= atr * MAIN_ENTRY_MAX_ATR]
+        zones.sort(key=lambda z: (-float(z.get("score", 0)), -int(z.get("idx", 0))))
         if not zones:
-            zones = [{"mid": price, "top": price, "bot": price, "score": 25.0, "kind": "market", "idx": len(m15) - 1}]
-        htf_zones = _find_ob(h1, direction, HTF_POI_LOOKBACK) + _find_fvg(h1, direction, HTF_POI_LOOKBACK)
+            zones = [{"mid": price, "top": price, "bot": price, "score": 24.0, "kind": "market", "idx": len(m15) - 1, "age": 0}]
 
+        htf_zones = _find_ob(h1, direction, HTF_POI_LOOKBACK) + _find_fvg(h1, direction, HTF_POI_LOOKBACK)
         evaluated = []
-        regime = str((market_context or {}).get("market_regime") or (market_context or {}).get("chart_regime") or ctx["macro_bias"])
-        for cand in zones[:6]:
-            entry = float(cand["mid"])
-            if abs(price - entry) > atr * MAIN_ENTRY_MAX_ATR:
-                continue
+        for zone in zones[:10]:
+            entry = float(zone["mid"])
             geo = _geometry(m15, h1, direction, entry, atr)
             if geo is None:
                 continue
@@ -600,63 +625,103 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             if tp is None:
                 continue
             tp_price, tp_label, rr = tp
-            if rr < MIN_RR:
-                continue
-            htf_overlap = any(z["bot"] <= entry <= z["top"] for z in htf_zones)
-            q = _candidate_quality(direction, cand, htf_overlap, sweep, displacement, pullback, location, context, geo, rr, ctx, regime)
-            archetype = _archetype(direction, cand.get("kind", "market"), sweep, displacement, pullback, htf_overlap, regime)
-            history = _history_context(trade_history, direction, cand.get("kind", "market"), archetype)
-            execution_score = q["quality"] * 0.82 + min(rr, 6.0) * 2.0 + q["poi_quality"] * 0.08
+            overlap = any(float(z["bot"]) <= entry <= float(z["top"]) for z in htf_zones)
+            archetype = _archetype(direction, zone, sweep, displacement, pullback, overlap, regime)
+            q = _candidate_quality(ctx, zone, overlap, sweep, displacement, pullback, location, context, geo, rr, archetype, data_quality)
+            hist = _history_context(trade_history, direction, zone.get("kind", "market"), archetype)
+            timing_penalty = 0.0
+            age = float(zone.get("age", 999))
+            if age > 36: timing_penalty = 5.0
+            if abs(price - entry) > atr * 1.25: timing_penalty += 5.0
+            execution_score = q["quality"] * 0.93 + min(rr, 5.5) * 1.8 + q["poi_quality"] * 0.025 - timing_penalty
             evaluated.append({
-                "entry": entry, "entry_label": cand.get("kind", "market"), "sl": geo[0], "risk": geo[1],
+                "entry": entry, "entry_label": zone.get("kind", "market"), "sl": geo[0], "risk": geo[1],
                 "risk_atr": geo[2], "risk_pct": geo[3], "tp": tp_price, "tp_label": tp_label, "rr": rr,
-                "q": q, "archetype": archetype, "history": history, "execution_score": execution_score,
-                "htf_overlap": htf_overlap,
+                "q": q, "archetype": archetype, "history": hist, "execution_score": execution_score,
+                "htf_overlap": overlap, "zone": zone,
             })
         if not evaluated:
             return None
+
         evaluated.sort(key=lambda x: x["execution_score"], reverse=True)
         best = evaluated[0]
-        conf = best["q"]["confidence"]
-        band = "ELITE" if conf >= 78 else "STRONG" if conf >= 68 else "VALID" if conf >= 55 else "WEAK"
+        quality = best["q"]["quality"]
+        confidence = int(best["q"]["confidence"])
+        if context.get("conflicts") and not displacement["confirmed"]:
+            confidence = max(25, confidence - min(8, len(context["conflicts"]) * 2))
+        if ctx["htf_conflict"] and best["archetype"] not in {"LIQUIDITY_SWEEP_RECLAIM", "RANGE_LIQUIDITY_REVERSAL"}:
+            confidence = min(confidence, 58)
+        if best["entry_label"] == "market":
+            confidence = min(confidence, 55)
+        band = "ELITE" if confidence >= 80 else "STRONG" if confidence >= 68 else "QUALIFIED" if confidence >= 55 else "WEAK"
         decision = "BUY" if direction == "bull" else "SELL"
-        evidence = [
-            f"HTF alignment: {ctx['htf_alignment']}",
-            f"direction quality: {ctx['direction_quality']:.0f}",
-            f"POI: {best['entry_label']} ({best['q']['poi_quality']:.0f})",
-            f"pullback: {pullback['state']}",
-            f"displacement: {displacement['confirmed']}",
-            f"market context: {context['score']:.0f}",
+        evidence_for = [
+            f"D1 bias: {ctx['d1_bias']}",
+            f"H1 structure: {ctx['struct_h1']}",
+            f"M15 structure: {ctx['struct_m15']}",
+            f"setup: {best['archetype']}",
+            f"POI: {best['entry_label']}",
         ]
-        if sweep["type"] == "sweep": evidence.append("liquidity sweep")
+        if displacement["confirmed"]: evidence_for.append(f"fresh displacement {displacement['body_atr']:.2f} ATR")
+        if sweep["detected"]: evidence_for.append(f"liquidity reclaim {sweep['strength']:.0f}")
+        evidence_against = list(best["q"]["contradictions"])
         return {
-            "symbol": symbol, "decision": decision, "confidence": conf,
-            "direction_confidence": int(round(ctx["direction_quality"])), "setup_quality": int(round(best["q"]["quality"])),
-            "confidence_band": band, "confidence_model": CONFIDENCE_MODEL_VERSION, "confidence_is_probability": False,
+            "symbol": symbol, "decision": decision, "confidence": confidence,
+            "direction_confidence": int(round(ctx["direction_quality"])),
+            "setup_quality": int(round(quality)),
+            "trade_quality": int(round(quality)),
+            "confidence_band": band, "confidence_model": CONFIDENCE_MODEL_VERSION,
+            "confidence_is_probability": False,
+            "confidence_uncertainty": int(round(100 - data_quality + len(evidence_against) * 5)),
             "confidence_diagnostics": {
-                "components": best["q"]["components"], "contradictions": best["q"]["contradictions"],
-                "penalty": best["q"]["penalty"], "completeness": best["q"]["completeness"],
-                "archetype": best["archetype"], "history": best["history"],
-                "market_context": context, "direction": ctx,
+                "components": best["q"]["components"],
+                "contradictions": evidence_against,
+                "penalty": best["q"]["penalty"],
+                "archetype": best["archetype"],
+                "history": best["history"],
+                "market_context": context,
+                "data_quality": data_quality,
+                "candidates_evaluated": len(evaluated),
+                "ranking_score": round(best["execution_score"], 3),
             },
-            "market_thesis": {"direction": decision, "archetype": best["archetype"], "market_regime": regime, "evidence": evidence, "contradictions": best["q"]["contradictions"]},
-            "entry_location_score": int(round(location["score"])), "entry_location_state": "preferred" if location["score"] >= 70 else "acceptable" if location["score"] >= 45 else "late",
-            "entry_range_position": location["range_position"], "entry_zone_low": location["range_low"], "entry_zone_high": location["range_high"],
-            "trend_strength": {"score": ctx["direction_quality"], "state": ctx["struct_h1"]}, "pullback_quality": pullback,
-            "liquidity_context": {"sweep": sweep}, "poi_quality": best["q"]["poi_quality"], "poi_state": "fresh" if best["q"]["poi_quality"] >= 70 else "usable",
-            "market_regime": regime, "entry": round(best["entry"], 10), "price": round(price, 10), "entry_label": best["entry_label"],
+            "market_thesis": {
+                "direction": decision,
+                "archetype": best["archetype"],
+                "market_regime": regime,
+                "evidence_for": evidence_for,
+                "evidence_against": evidence_against,
+                "invalidation": "protected structural swing breaks against the thesis",
+            },
+            "entry_location_score": int(round(location["score"])),
+            "entry_location_state": location["state"],
+            "entry_range_position": location["range_position"],
+            "entry_zone_low": location["range_low"], "entry_zone_high": location["range_high"],
+            "trend_strength": {"score": ctx["direction_quality"], "state": ctx["struct_h1"], "efficiency": ctx["efficiency_h1"]},
+            "pullback_quality": pullback,
+            "liquidity_context": {"sweep": sweep},
+            "poi_quality": best["q"]["poi_quality"],
+            "poi_state": "fresh" if best["q"]["poi_quality"] >= 75 else "usable" if best["q"]["poi_quality"] >= 55 else "weak",
+            "market_regime": regime,
+            "entry": round(best["entry"], 10), "price": round(price, 10), "entry_label": best["entry_label"],
             "sl": round(best["sl"], 10), "initial_sl": round(best["sl"], 10), "initial_risk": round(best["risk"], 10),
             "tp": round(best["tp"], 10), "rr": round(best["rr"], 3), "tp_label": best["tp_label"], "atr": round(atr, 10),
-            "risk_atr": round(best["risk_atr"], 3), "risk_pct": round(best["risk_pct"], 4), "rsi": round(float(m15["rsi"].iloc[-1]), 2),
-            "m15_rsi": float(m15["rsi"].iloc[-1]), "m15_rsi_slope": float(m15["rsi"].iloc[-1] - m15["rsi"].iloc[-2]),
-            "m15_relative_volume": float(m15["volume"].iloc[-1] / max(m15["vol_sma"].iloc[-1], 1e-12)),
-            "struct_h1": ctx["struct_h1"], "d1_bias": ctx["d1_bias"], "htf_bias": ctx["d1_bias"] if ctx["d1_bias"] != "neutral" else ctx["struct_h1"], "h1_bias": ctx["struct_h1"],
-            "choch_m15": {"bullish_choch": False, "bearish_choch": False}, "choch_h1": {"bullish_choch": False, "bearish_choch": False},
-            "cisd_m15": {"bullish_cisd": False, "bearish_cisd": False}, "failed_retest": {},
-            "entry_confirmation": displacement, "selected_sweep": sweep["type"] == "sweep", "trigger_count": int(displacement["confirmed"]) + int(sweep["type"] == "sweep"),
-            "v11_quality": {"trend_strength": {"score": ctx["direction_quality"]}, "pullback_quality": pullback, "poi_quality": best["q"]["poi_quality"]},
+            "risk_atr": round(best["risk_atr"], 3), "risk_pct": round(best["risk_pct"], 4),
+            "risk_quality": best["q"]["risk_quality"],
+            "rsi": round(float(m15["rsi"].iloc[-1]), 2), "m15_rsi": round(float(m15["rsi"].iloc[-1]), 2),
+            "m15_rsi_slope": round(float(m15["rsi"].iloc[-1] - m15["rsi"].iloc[-2]), 3),
+            "m15_relative_volume": round(float(m15["volume"].iloc[-1] / max(m15["vol_sma"].iloc[-1], 1e-12)), 3),
+            "struct_h1": ctx["struct_h1"], "d1_bias": ctx["d1_bias"],
+            "htf_bias": ctx["d1_bias"] if ctx["d1_bias"] != "neutral" else ctx["struct_h1"],
+            "h1_bias": ctx["struct_h1"],
+            "entry_confirmation": displacement,
+            "selected_sweep": sweep["detected"],
+            "trigger_count": int(displacement["confirmed"]) + int(sweep["detected"]),
+            "data_quality": data_quality,
+            "evidence_for": evidence_for,
+            "evidence_against": evidence_against,
+            "archetype": best["archetype"],
             "reasoning_engine": TRAIL_ENGINE_VERSION,
-            "tp_sl_reason": f"Entry@{best['entry']:.8g}({best['entry_label']}) | SL@{best['sl']:.8g} | TP@{best['tp']:.8g}({best['tp_label']}) | RR={best['rr']:.2f} | quality={best['q']['quality']:.1f} | conf={conf}%",
+            "tp_sl_reason": f"{best['archetype']} | {decision} | entry={best['entry']:.8g} | SL={best['sl']:.8g} | TP={best['tp']:.8g} | RR={best['rr']:.2f} | quality={quality:.1f} | conf={confidence}%",
         }
     except Exception as exc:
         log.exception("[full_analyze] %s: %s", symbol or "?", exc)
@@ -665,34 +730,38 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
 
 def _current_price(df, state):
     p = _num(state.get("current_price"), None)
-    return p if p is not None else float(df["close"].iloc[-1]) if df is not None and not df.empty else None
+    if p is not None and p > 0:
+        return p
+    if df is not None and not df.empty:
+        return float(df["close"].iloc[-1])
+    return None
 
 
 def _path_metrics(df, state, direction, entry, risk, price):
     cur = (price - entry) / risk if direction == "bull" else (entry - price) / risk
-    smfe = _num(state.get("mfe_r"), 0.0) or 0.0
-    smae = _num(state.get("mae_r"), 0.0) or 0.0
-    win = df.tail(TRAIL_PEAK_LOOKBACK)
-    peak = float(win["high"].max()) if direction == "bull" else float(win["low"].min())
-    pmfe = (peak - entry) / risk if direction == "bull" else (entry - peak) / risk
-    mfe = max(0.0, smfe, pmfe)
-    gb = max(0.0, mfe - cur)
-    ratio = gb / max(mfe, 0.25) if mfe > 0 else 0.0
-    return {"current_r": round(cur, 4), "mfe_r": round(mfe, 4), "mae_r": round(smae, 4), "giveback_r": round(gb, 4), "giveback_ratio": round(ratio, 4)}
+    stored_mfe = _num(state.get("mfe_r"), 0.0) or 0.0
+    stored_mae = _num(state.get("mae_r"), 0.0) or 0.0
+    sub = df.tail(TRAIL_PEAK_LOOKBACK)
+    peak = float(sub["high"].max()) if direction == "bull" else float(sub["low"].min())
+    peak_r = (peak - entry) / risk if direction == "bull" else (entry - peak) / risk
+    mfe = max(0.0, stored_mfe, peak_r)
+    give = max(0.0, mfe - cur)
+    ratio = give / max(mfe, 0.25) if mfe > 0 else 0.0
+    return {"current_r": cur, "mfe_r": mfe, "mae_r": stored_mae, "giveback_r": give, "giveback_ratio": ratio}
 
 
-def _reversal_state(df, direction, cur_r, gb_ratio):
-    atr = max(float(df["atr"].iloc[-1]), 1e-12)
+def _reversal_state(df, direction, current_r, giveback_ratio):
     a, b = df.iloc[-1], df.iloc[-2]
-    body = abs(float(a["close"] - a["open"])) / atr
+    atr = max(float(a["atr"]), 1e-12)
+    body = float(a["body"]) / atr
     counter = (a["close"] < a["open"]) if direction == "bull" else (a["close"] > a["open"])
     counter2 = (b["close"] < b["open"]) if direction == "bull" else (b["close"] > b["open"])
-    rv = float(a["volume"] / max(a["vol_sma"], 1e-12))
-    if counter and counter2 and body >= TRAIL_REVERSAL_BODY_ATR and gb_ratio >= TRAIL_GIVEBACK_STRONG:
+    rv = float(a["volume"]) / max(float(a["vol_sma"]), 1e-12)
+    if counter and counter2 and body >= TRAIL_REVERSAL_BODY_ATR and giveback_ratio >= TRAIL_GIVEBACK_STRONG:
         return "REVERSAL_CONFIRMED", 3, rv
-    if counter and body >= TRAIL_COUNTER_BODY_ATR and gb_ratio >= TRAIL_GIVEBACK_WARN:
+    if counter and body >= TRAIL_COUNTER_BODY_ATR and giveback_ratio >= TRAIL_GIVEBACK_WARN:
         return "WEAKENING", 2, rv
-    if gb_ratio >= TRAIL_GIVEBACK_STRONG or cur_r < 0.5:
+    if giveback_ratio >= TRAIL_GIVEBACK_STRONG or current_r < 0.5:
         return "CAUTION", 1, rv
     return "HEALTHY", 0, rv
 
@@ -709,15 +778,48 @@ def _structural_trail(df, direction, price, atr):
 
 def _retracement_trail(df, direction, entry, risk, price, path):
     atr = max(float(df["atr"].iloc[-1]), 1e-12)
-    if path["mfe_r"] < 1.0 or path["giveback_ratio"] < TRAIL_GIVEBACK_WARN:
+    if path["mfe_r"] < TRAIL_MFE_ARM_R or path["giveback_ratio"] < TRAIL_GIVEBACK_WARN:
         return None
     if direction == "bull":
         peak = float(df["high"].tail(TRAIL_PEAK_LOOKBACK).max())
-        frac = 0.35 if path["giveback_ratio"] < TRAIL_GIVEBACK_STRONG else 0.25
-        return min(peak - (peak - entry) * frac, price - atr * TRAIL_RETRACE_BUFFER_ATR)
+        keep = 0.45 if path["giveback_ratio"] < TRAIL_GIVEBACK_STRONG else 0.35
+        raw = peak - (peak - entry) * keep
+        return min(raw, price - atr * TRAIL_RETRACE_BUFFER_ATR)
     peak = float(df["low"].tail(TRAIL_PEAK_LOOKBACK).min())
-    frac = 0.35 if path["giveback_ratio"] < TRAIL_GIVEBACK_STRONG else 0.25
-    return max(peak + (entry - peak) * frac, price + atr * TRAIL_RETRACE_BUFFER_ATR)
+    keep = 0.45 if path["giveback_ratio"] < TRAIL_GIVEBACK_STRONG else 0.35
+    raw = peak + (entry - peak) * keep
+    return max(raw, price + atr * TRAIL_RETRACE_BUFFER_ATR)
+
+
+def _liquidity_trail(df, direction, price, atr):
+    sub = df.tail(30)
+    sh, sl = swing_pts(sub, 3)
+    if direction == "bull" and sl:
+        return float(sub["low"].iloc[sl[-1]]) - atr * 0.20
+    if direction == "bear" and sh:
+        return float(sub["high"].iloc[sh[-1]]) + atr * 0.20
+    return None
+
+
+def _trail_candidates(m15, state, direction, entry, current_sl, price, path, state_name, weakness):
+    atr = max(float(m15["atr"].iloc[-1]), 1e-12)
+    candidates = []
+    struct = _structural_trail(m15, direction, price, atr)
+    if struct is not None:
+        candidates.append((float(struct), "structure"))
+    retrace = _retracement_trail(m15, direction, entry, abs(entry - float(state.get("initial_sl") or state.get("signal", {}).get("sl") or entry)), price, path)
+    if retrace is not None:
+        candidates.append((float(retrace), "retracement"))
+    if path["mfe_r"] >= TRAIL_MFE_EXTENDED:
+        lock_r = TRAIL_LOCK_STRONG_R if path["giveback_ratio"] >= TRAIL_GIVEBACK_WARN else TRAIL_LOCK_WARN_R
+        if path["giveback_ratio"] >= TRAIL_GIVEBACK_CRITICAL and path["mfe_r"] >= TRAIL_MFE_DEEP:
+            lock_r = TRAIL_LOCK_CRITICAL_R
+        lock = entry + abs(entry - float(state.get("initial_sl") or state.get("signal", {}).get("sl") or entry)) * lock_r if direction == "bull" else entry - abs(entry - float(state.get("initial_sl") or state.get("signal", {}).get("sl") or entry)) * lock_r
+        candidates.append((float(lock), "path_protection"))
+    liq = _liquidity_trail(m15, direction, price, atr)
+    if liq is not None and (state_name in {"WEAKENING", "REVERSAL_CONFIRMED"} or path["giveback_ratio"] >= TRAIL_GIVEBACK_STRONG):
+        candidates.append((float(liq), "liquidity_structure"))
+    return candidates, atr
 
 
 def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
@@ -744,59 +846,54 @@ def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
             return {"action": "PROTECT", "state": "AT_STOP", "reason": ["market_at_or_above_stop"], "reasoning_engine": TRAIL_ENGINE_VERSION}
 
         path = _path_metrics(m15, state, direction, entry, risk, price)
-        cur_r, mfe, gb = path["current_r"], path["mfe_r"], path["giveback_ratio"]
-        state_name, rev_score, rv = _reversal_state(m15, direction, cur_r, gb)
-        reasons = [f"mfe={mfe:.2f}R", f"giveback={gb:.0%}"] if mfe > 0 else []
-        if rev_score: reasons.append(f"reversal_signal={rev_score}")
+        state_name, weakness, rv = _reversal_state(m15, direction, path["current_r"], path["giveback_ratio"])
+        reasons = [f"mfe={path['mfe_r']:.2f}R", f"giveback={path['giveback_ratio']:.0%}"]
+        if weakness: reasons.append(f"reversal_signal={weakness}")
         if rv <= TRAIL_VOLUME_EXHAUSTION: reasons.append("volume_exhaustion")
-        elif rv >= TRAIL_VOLUME_COUNTER and rev_score: reasons.append("counter_volume")
+        if rv >= TRAIL_VOLUME_COUNTER and weakness: reasons.append("counter_volume")
 
-        if cur_r < TRAIL_ARM_R and mfe < TRAIL_ARM_R:
-            return {"action": "HOLD", "state": "INITIAL" if cur_r < 0.35 else "PROVING", "profit_r": cur_r, "lifecycle": path, "weakness_score": 0, "relative_volume": rv, "reason": ["path_not_mature_for_trailing"], "reasoning_engine": TRAIL_ENGINE_VERSION}
+        if path["current_r"] < TRAIL_ARM_R and path["mfe_r"] < TRAIL_MFE_ARM_R:
+            return {"action": "HOLD", "state": "DEVELOPING", "profit_r": round(path["current_r"], 3), "lifecycle": path, "weakness_score": weakness, "relative_volume": round(rv, 3), "reason": reasons + ["trail_not_mature"], "reasoning_engine": TRAIL_ENGINE_VERSION}
 
-        atr = max(float(m15["atr"].iloc[-1]), 1e-12)
-        candidates = []
-        s = _structural_trail(m15, direction, price, atr)
-        r = _retracement_trail(m15, direction, entry, risk, price, path)
-        if s is not None: candidates.append((float(s), "structure"))
-        if r is not None: candidates.append((float(r), "retracement"))
-        if mfe >= TRAIL_MFE_EXTENDED:
-            lock_r = TRAIL_LOCK_STRONG_R if gb >= TRAIL_GIVEBACK_WARN else TRAIL_LOCK_WARN_R
-            if gb >= TRAIL_GIVEBACK_CRITICAL and mfe >= TRAIL_MFE_DEEP:
-                lock_r = TRAIL_LOCK_CRITICAL_R
-            lock = entry + risk * lock_r if direction == "bull" else entry - risk * lock_r
-            candidates.append((float(lock), "path_protection"))
-
+        candidates, atr = _trail_candidates(m15, state, direction, entry, current_sl, price, path, state_name, weakness)
         valid = []
+        market_gap = atr * TRAIL_MIN_MARKET_GAP_ATR
         for cand, source in candidates:
             if direction == "bull":
-                cand = min(cand, price - atr * TRAIL_MIN_MARKET_GAP_ATR)
+                if cand >= price - market_gap: cand = price - market_gap
                 if cand <= current_sl or cand >= price: continue
             else:
-                cand = max(cand, price + atr * TRAIL_MIN_MARKET_GAP_ATR)
+                if cand <= price + market_gap: cand = price + market_gap
                 if cand >= current_sl or cand <= price: continue
-            valid.append((cand, source))
+            improvement_r = ((cand - current_sl) if direction == "bull" else (current_sl - cand)) / risk
+            if improvement_r < 0.0: continue
+            valid.append((cand, source, improvement_r))
         if not valid:
-            return {"action": "PROTECT" if gb >= TRAIL_GIVEBACK_WARN or rev_score >= 2 else "HOLD", "state": state_name, "profit_r": round(cur_r, 3), "lifecycle": path, "weakness_score": rev_score, "relative_volume": rv, "reason": reasons + ["no_safe_trail_candidate"], "reasoning_engine": TRAIL_ENGINE_VERSION}
-        best, source = max(valid, key=lambda x: x[0]) if direction == "bull" else min(valid, key=lambda x: x[0])
-        improvement = ((best - current_sl) if direction == "bull" else (current_sl - best)) / risk
+            action = "PROTECT" if path["giveback_ratio"] >= TRAIL_GIVEBACK_WARN or weakness >= 2 else "HOLD"
+            return {"action": action, "state": state_name, "profit_r": round(path["current_r"], 3), "lifecycle": path, "weakness_score": weakness, "relative_volume": round(rv, 3), "reason": reasons + ["no_safe_trail_candidate"], "reasoning_engine": TRAIL_ENGINE_VERSION}
+
+        if direction == "bull":
+            best = max(valid, key=lambda x: (x[0], x[2]))
+        else:
+            best = min(valid, key=lambda x: (x[0], -x[2]))
+        cand, source, improvement_r = best
         count = int(state.get("trail_update_count", 0) or 0)
-        if improvement < TRAIL_MIN_UPDATE_R and count >= TRAIL_MAX_CHURN:
-            return {"action": "PROTECT", "state": state_name, "profit_r": round(cur_r, 3), "lifecycle": path, "weakness_score": rev_score, "relative_volume": rv, "reason": reasons + ["anti_churn"], "reasoning_engine": TRAIL_ENGINE_VERSION}
-        locked_r = ((best - entry) if direction == "bull" else (entry - best)) / risk
+        if count >= TRAIL_MAX_CHURN and improvement_r < TRAIL_MIN_UPDATE_R:
+            return {"action": "PROTECT", "state": state_name, "profit_r": round(path["current_r"], 3), "lifecycle": path, "weakness_score": weakness, "relative_volume": round(rv, 3), "reason": reasons + ["anti_churn_small_improvement"], "reasoning_engine": TRAIL_ENGINE_VERSION}
+
+        lock_r = ((cand - entry) if direction == "bull" else (entry - cand)) / risk
+        reasons.append(f"source={source}")
+        if path["mfe_r"] >= TRAIL_MFE_EXTENDED: reasons.append("extended_winner_path")
+        if path["giveback_ratio"] >= TRAIL_GIVEBACK_STRONG: reasons.append("deep_giveback")
         return {
-            "action": "TRAIL", "state": state_name, "sl": round(float(best), 10), "profit_r": round(cur_r, 3),
-            "locked_r": round(float(locked_r), 3), "trail_source": source, "candidate_type": source,
-            "weakness_score": rev_score, "relative_volume": rv, "lifecycle": path,
-            "reversal_diagnostics": {"state": state_name, "score": rev_score, "relative_volume": rv},
-            "reason": reasons + [f"source={source}"], "reasoning_engine": TRAIL_ENGINE_VERSION,
+            "action": "TRAIL", "state": state_name, "sl": round(float(cand), 10),
+            "profit_r": round(path["current_r"], 3), "locked_r": round(float(lock_r), 3),
+            "trail_source": source, "candidate_type": source,
+            "weakness_score": weakness, "relative_volume": round(rv, 3), "lifecycle": path,
+            "reversal_diagnostics": {"state": state_name, "score": weakness, "relative_volume": round(rv, 3)},
+            "trail_geometry": {"market_price": round(price, 10), "atr": round(atr, 10), "min_market_gap_atr": TRAIL_MIN_MARKET_GAP_ATR, "improvement_r": round(improvement_r, 3)},
+            "reason": reasons, "reasoning_engine": TRAIL_ENGINE_VERSION,
         }
     except Exception as exc:
         log.exception("[manage_position] %s: %s", symbol or "?", exc)
         return {"action": "PROTECT", "state": "ERROR", "reason": [f"management_exception:{type(exc).__name__}"], "reasoning_engine": TRAIL_ENGINE_VERSION}
-
-
-def get_best_signal(candidates: list) -> Optional[dict]:
-    if not candidates:
-        return None
-    return max(candidates, key=lambda x: float(x.get("execution_score", x.get("confidence", 0)) or 0))
