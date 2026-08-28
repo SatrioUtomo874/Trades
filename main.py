@@ -253,15 +253,14 @@ ML_FEATURE_NAMES = [
     "macro_alignment", "m15_relative_volume", "fib_position", "atr_pct_proxy",
     "entry_distance_atr", "risk_atr", "target_distance_atr", "data_quality",
     "entry_ob", "entry_fvg", "entry_eq", "entry_sweep", "entry_breakout",
-    "entry_pullback", "htf_conflict", "m15_ranging",
-    "market_bull_breadth", "market_bear_breadth", "market_efficiency",
-    "market_relative_volume", "btc_1h", "btc_4h", "symbol_rs_1h", "symbol_rs_4h"
+    "entry_pullback", "htf_conflict", "m15_ranging"
 ]
 
 
 def _ml_default_state():
     return {
-        "schema": "machine_Learning_v1",
+        "schema": "machine_Learning_v2",
+        "feature_names": list(ML_FEATURE_NAMES),
         "champion": None,
         "previous_champion": None,
         "last_training_at": None,
@@ -286,6 +285,28 @@ def _ml_load_state():
 
 
 ML_STATE = _ml_load_state()
+
+def _ml_model_compatible(model):
+    if not isinstance(model, dict):
+        return False
+    if str(model.get("schema") or "") != "machine_Learning_v2":
+        return False
+    names = model.get("feature_names")
+    if not isinstance(names, list) or names != list(ML_FEATURE_NAMES):
+        return False
+    n = len(ML_FEATURE_NAMES)
+    try:
+        return all(len(model.get(k, [])) == n for k in ("mean", "scale", "w", "rw"))
+    except Exception:
+        return False
+
+with ML_LOCK:
+    if not _ml_model_compatible(ML_STATE.get("champion")):
+        ML_STATE["previous_champion"] = None
+        ML_STATE["champion"] = None
+    if not _ml_model_compatible(ML_STATE.get("last_challenger")):
+        ML_STATE["last_challenger"] = None
+    _ml_save_state()
 
 ML_EXPERIENCE_LOCK = threading.RLock()
 ML_EXPERIENCE = []
@@ -563,6 +584,8 @@ def _ml_train_once(force=False):
 
     candidate = dict(best["params"])
     candidate.update({
+        "schema": "machine_Learning_v2",
+        "feature_names": list(ML_FEATURE_NAMES),
         "active": bool(promote),
         "model_version": f"ML-{int(time.time())}",
         "sample_count": len(samples),

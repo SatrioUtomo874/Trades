@@ -62,7 +62,7 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 
-MACHINE_LEARNING_SCHEMA = "machine_Learning_v1"
+MACHINE_LEARNING_SCHEMA = "machine_Learning_v2"
 _LEARNED_MODEL = None
 
 ML_FEATURE_NAMES = [
@@ -158,20 +158,46 @@ def _build_learning_features(score, loc, candidate, rr, entry, atr, cur_price, r
     }
 
 
+_ML_SCHEMA_WARNED = False
+
 def _predict_learning(features):
+    global _ML_SCHEMA_WARNED
     if not _LEARNED_MODEL:
         return None
     try:
-        mean = np.asarray(_LEARNED_MODEL.get("mean", [0.0] * len(ML_FEATURE_NAMES)), dtype=float)
-        scale = np.asarray(_LEARNED_MODEL.get("scale", [1.0] * len(ML_FEATURE_NAMES)), dtype=float)
-        w = np.asarray(_LEARNED_MODEL.get("w", [0.0] * len(ML_FEATURE_NAMES)), dtype=float)
+        model_schema = str(_LEARNED_MODEL.get("schema") or "")
+        model_features = _LEARNED_MODEL.get("feature_names")
+        if model_schema and model_schema != MACHINE_LEARNING_SCHEMA:
+            if not _ML_SCHEMA_WARNED:
+                log.warning("[ML] model schema mismatch; ML prediction disabled until a compatible model is trained")
+                _ML_SCHEMA_WARNED = True
+            return None
+        expected = list(model_features) if isinstance(model_features, list) and model_features else list(ML_FEATURE_NAMES)
+        if expected != list(ML_FEATURE_NAMES):
+            if not _ML_SCHEMA_WARNED:
+                log.warning("[ML] model feature schema mismatch; ML prediction disabled until a compatible model is trained")
+                _ML_SCHEMA_WARNED = True
+            return None
+        mean = np.asarray(_LEARNED_MODEL.get("mean", [0.0] * len(expected)), dtype=float)
+        scale = np.asarray(_LEARNED_MODEL.get("scale", [1.0] * len(expected)), dtype=float)
+        w = np.asarray(_LEARNED_MODEL.get("w", [0.0] * len(expected)), dtype=float)
         b = float(_LEARNED_MODEL.get("b", 0.0) or 0.0)
         x = _feature_dict_to_vector(features)
+        if not (len(x) == len(mean) == len(scale) == len(w) == len(expected)):
+            if not _ML_SCHEMA_WARNED:
+                log.warning("[ML] model dimension mismatch; ML prediction disabled until a compatible model is trained")
+                _ML_SCHEMA_WARNED = True
+            return None
         z = float(np.dot((x - mean) / np.maximum(scale, 1e-8), w) + b)
         z = max(-35.0, min(35.0, z))
         _classification_prob = 1.0 / (1.0 + np.exp(-z))
-        rw = np.asarray(_LEARNED_MODEL.get("rw", [0.0] * len(ML_FEATURE_NAMES)), dtype=float)
+        rw = np.asarray(_LEARNED_MODEL.get("rw", [0.0] * len(expected)), dtype=float)
         rb = float(_LEARNED_MODEL.get("rb", 0.0) or 0.0)
+        if len(rw) != len(expected):
+            if not _ML_SCHEMA_WARNED:
+                log.warning("[ML] expected-R model dimension mismatch; ML prediction disabled until a compatible model is trained")
+                _ML_SCHEMA_WARNED = True
+            return None
         expected_r = float(np.dot((x - mean) / np.maximum(scale, 1e-8), rw) + rb)
         expected_r = float(max(-3.0, min(3.0, expected_r)))
         model_conf = float(50.0 + 25.0 * np.tanh(expected_r))
