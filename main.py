@@ -60,7 +60,7 @@ TELEGRAM_ERROR_BACKOFF_MAX = 60
 TELEGRAM_KEEPALIVE_SEC = 300
 # Jeda minimum antar-request HTTP ke Binance agar scan tidak menghantam API beruntun.
 # 1 request / detik masih cukup untuk scan 50 koin tanpa burst besar.
-BINANCE_REQUEST_INTERVAL = 2.5
+BINANCE_REQUEST_INTERVAL = 0.35
 # Setelah cooldown/ban Binance selesai, tunggu tambahan 60 detik sebelum request pertama.
 BINANCE_POST_COOLDOWN_GRACE = 60.0
 MAX_MARGIN_MULTIPLIER = 1.50  # HARD SAFETY CAP relative to configured MARGIN_USD
@@ -246,6 +246,7 @@ FULL_MIN_VALIDATION_SAMPLES = max(5, int(os.getenv("FULL_MIN_VALIDATION_SAMPLES"
 FULL_PROMOTION_MIN_IMPROVEMENT = float(os.getenv("FULL_PROMOTION_MIN_IMPROVEMENT", "0.01"))
 FULL_ALLOWED_THRESHOLDS = list(range(35, 81))
 FULL_MIN_COVERAGE = 0.25
+SCAN_MAX_DURATION_SEC = max(60, int(os.getenv("SCAN_MAX_DURATION_SEC", "180")))
 ML_FEATURE_NAMES = [
     "direction_confidence", "setup_quality", "entry_location_score", "rr",
     "range_position", "rsi_timing_score", "direction_edge", "m15_trigger_count",
@@ -299,14 +300,6 @@ def _ml_model_compatible(model):
         return all(len(model.get(k, [])) == n for k in ("mean", "scale", "w", "rw"))
     except Exception:
         return False
-
-with ML_LOCK:
-    if not _ml_model_compatible(ML_STATE.get("champion")):
-        ML_STATE["previous_champion"] = None
-        ML_STATE["champion"] = None
-    if not _ml_model_compatible(ML_STATE.get("last_challenger")):
-        ML_STATE["last_challenger"] = None
-    _ml_save_state()
 
 ML_EXPERIENCE_LOCK = threading.RLock()
 ML_EXPERIENCE = []
@@ -373,6 +366,17 @@ def _ml_save_state():
         os.replace(tmp, ML_STATE_FILE)
     except Exception as e:
         log.warning(f"[ML] state save gagal: {e}")
+
+
+# Validate persisted model only after the save helper is defined.
+# Incompatible old models are discarded safely; they are never padded or coerced.
+with ML_LOCK:
+    if not _ml_model_compatible(ML_STATE.get("champion")):
+        ML_STATE["previous_champion"] = None
+        ML_STATE["champion"] = None
+    if not _ml_model_compatible(ML_STATE.get("last_challenger")):
+        ML_STATE["last_challenger"] = None
+    _ml_save_state()
 
 
 def _strategy_set_ml_model(model):
@@ -3098,7 +3102,11 @@ def run_scan_once(chat_id):
 
     data_started=time.monotonic(); results=[]; all_scan_confidences=[]; market_rows=[]
     analyzed_symbols=cache_hits=cache_misses=failed_symbols=low_conf_count=below_threshold_count=0
+    scan_deadline = scan_started + SCAN_MAX_DURATION_SEC
     for idx,sym in enumerate(symbols,1):
+        if time.monotonic() >= scan_deadline:
+            log.warning(f"[scan] hard deadline {SCAN_MAX_DURATION_SEC}s tercapai — cycle dihentikan aman.")
+            break
         if _binance_is_scan_paused():
             log.warning("[scan] Binance pause aktif — scan cycle dihentikan di tengah jalan."); break
         log.info(f"[scan {idx:02d}/{len(symbols)}] {sym}")
@@ -3142,7 +3150,8 @@ def run_scan_once(chat_id):
             log.warning(f"[scan] {sym}: Binance cooldown aktif — scan cycle dihentikan aman."); break
         except Exception as e:
             failed_symbols+=1; log.debug(f"[scan] {sym}: {e}")
-        time.sleep(0.05)
+        # No per-symbol sleep here. Binance requests are serialized by _binance_request_slot().
+        # Sleeping here only stretched scans without adding API safety.
 
     # Enrich per-symbol rows with relative strength vs BTC without a new request.
     btc_row=next((x for x in market_rows if x.get("symbol")=="BTCUSDT"),None)
@@ -5346,7 +5355,7 @@ def bot_loop():
                             status = p.get("status", "active")
 
                             if status == "pending":
-                                pr       = get_price(s) or p["entry"]
+                                pr       = ws_feed.get_price(s) or get_price(s) or p["entry"]
                                 dist_pct = abs(p["entry"] - pr) / pr * 100
                                 lines.append(
                                     f"\n⏳ <b>{s}</b> — PENDING\n"
@@ -5355,7 +5364,7 @@ def bot_loop():
                                     f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{sig['sl']:.6g}</code> | Confidence: <b>{float(sig.get('confidence', 0) or 0):.0f}%</b>"
                                 )
                             else:
-                                pr  = get_price(s) or p["entry"]
+                                pr  = ws_feed.get_price(s) or get_price(s) or p["entry"]
                                 pnl = (pr - p["entry"]) / p["entry"] * 100 * (1 if is_buy else -1)
                                 entry_clock = datetime.fromtimestamp(
                                     p["entry_time"], tz=WIB).strftime("%H:%M") if p.get("entry_time") else "?"
