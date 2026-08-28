@@ -3044,7 +3044,7 @@ def _get_top_coins_impl():
     if _binance_is_scan_paused():
         log.warning(f"[scan] DITAHAN — Binance cooldown aktif {_binance_cooldown_remaining():.0f}s")
         return []
-    global scan_counter
+    global scan_counter, _top_coins_cached_symbols, _top_coins_cached_at
     with ban_lock:
         scan_counter += 1
         to_unban = []
