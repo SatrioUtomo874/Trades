@@ -60,13 +60,13 @@ TELEGRAM_ERROR_BACKOFF_MAX = 60
 TELEGRAM_KEEPALIVE_SEC = 300
 # Jeda minimum antar-request HTTP ke Binance agar scan tidak menghantam API beruntun.
 # 1 request / detik masih cukup untuk scan 50 koin tanpa burst besar.
-BINANCE_REQUEST_INTERVAL = 0.35
+BINANCE_REQUEST_INTERVAL = 0.55
 # Setelah cooldown/ban Binance selesai, tunggu tambahan 60 detik sebelum request pertama.
 BINANCE_POST_COOLDOWN_GRACE = 60.0
 MAX_MARGIN_MULTIPLIER = 1.50  # HARD SAFETY CAP relative to configured MARGIN_USD
 # Safety governor berbasis header usage; berhenti sebelum mendekati limit 1 menit.
-BINANCE_WEIGHT_SOFT_LIMIT = 1800
-BINANCE_WEIGHT_HARD_LIMIT = 2100
+BINANCE_WEIGHT_SOFT_LIMIT = 1400
+BINANCE_WEIGHT_HARD_LIMIT = 1900
 _binance_request_lock = threading.Lock()
 _binance_last_request_at = 0.0
 _binance_weight_1m = None
@@ -76,7 +76,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "machine_Learning_main_v1"
+MAIN_ENGINE_VERSION = "machine_Learning_main_v25"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -240,7 +240,9 @@ FULL_THREAD = None
 FULL_WAKE = threading.Event()
 FULL_STOP = threading.Event()
 FULL_MANUAL_THRESHOLD_SAVED = None
-FULL_TRAIN_INTERVAL = max(60, int(os.getenv("FULL_TRAIN_INTERVAL_SEC", "180")))
+FULL_TRAIN_INTERVAL = max(120, int(os.getenv("FULL_TRAIN_INTERVAL_SEC", "300")))
+FULL_RETRAIN_MIN_NEW = max(1, int(os.getenv("FULL_RETRAIN_MIN_NEW", "3")))
+FULL_LAST_TRAINED_COUNT = 0
 FULL_MIN_TRAIN_SAMPLES = max(20, int(os.getenv("FULL_MIN_TRAIN_SAMPLES", "30")))
 FULL_MIN_VALIDATION_SAMPLES = max(5, int(os.getenv("FULL_MIN_VALIDATION_SAMPLES", "10")))
 FULL_PROMOTION_MIN_IMPROVEMENT = float(os.getenv("FULL_PROMOTION_MIN_IMPROVEMENT", "0.01"))
@@ -630,10 +632,14 @@ def _ml_train_once(force=False):
     return promote
 
 def _ml_learning_loop():
+    global FULL_LAST_TRAINED_COUNT
     while not FULL_STOP.is_set():
         try:
             if FULL_MODE:
-                _ml_train_once()
+                current_count = len(ML_EXPERIENCE)
+                if current_count >= FULL_MIN_TRAIN_SAMPLES and (current_count - FULL_LAST_TRAINED_COUNT) >= FULL_RETRAIN_MIN_NEW:
+                    _ml_train_once()
+                    FULL_LAST_TRAINED_COUNT = current_count
         except Exception as e:
             log.exception(f"[ML] learning cycle gagal: {e}")
         FULL_WAKE.wait(FULL_TRAIN_INTERVAL)
@@ -672,7 +678,7 @@ def _full_on():
     if FULL_THREAD is None or not FULL_THREAD.is_alive():
         FULL_THREAD = threading.Thread(target=_ml_learning_loop, name="full-learning", daemon=True)
         FULL_THREAD.start()
-    _ml_train_once(force=True)
+    FULL_WAKE.set()
     return _full_status_text()
 
 
@@ -687,10 +693,61 @@ def _full_off():
     return _full_status_text()
 
 
+def _full_reset_internal():
+    global FULL_MODE, FULL_THREAD, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED, FULL_LAST_TRAINED_COUNT
+    with ML_LOCK:
+        FULL_MODE = False
+        FULL_WAKE.clear()
+        FULL_STOP.set()
+        ML_STATE.clear()
+        ML_STATE.update(_ml_default_state())
+        _strategy_set_ml_model(None)
+        if FULL_MANUAL_THRESHOLD_SAVED is not None:
+            STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
+            FULL_MANUAL_THRESHOLD_SAVED = None
+        _ml_save_state()
+    with ML_EXPERIENCE_LOCK:
+        ML_EXPERIENCE.clear()
+    try:
+        ML_EXPERIENCE_FILE.unlink(missing_ok=True)
+    except Exception as e:
+        log.warning(f"[ML] reset experience file gagal: {e}")
+    FULL_LAST_TRAINED_COUNT = 0
+    FULL_THREAD = None
+    FULL_STOP.clear()
+    return _full_controller_state()
+
+
+def _full_controller_state():
+    champion = _ml_current_champion()
+    with ML_LOCK:
+        last = dict(ML_STATE.get("last_training_result") or {})
+        cycles = int(ML_STATE.get("learning_cycles", 0) or 0)
+        promotions = int(ML_STATE.get("promotion_count", 0) or 0)
+    return {
+        "mode": bool(FULL_MODE),
+        "champion": champion,
+        "experience_samples": len(ML_EXPERIENCE),
+        "learning_cycles": cycles,
+        "promotion_count": promotions,
+        "last_training_samples": int(ML_STATE.get("last_training_samples", 0) or 0),
+        "last_status": last.get("status", "—"),
+        "manual_threshold": int(STRATEGY_CONFIDENCE_THRESHOLD),
+        "minimum_training_samples": int(FULL_MIN_TRAIN_SAMPLES),
+    }
+
+
+def _full_strategy_command(action):
+    handler = globals().get("full_command")
+    if callable(handler):
+        return handler(action, {"on": _full_on, "off": _full_off, "reset": _full_reset_internal, "status": _full_controller_state})
+    return _full_status_text()
+
+
 def _ml_record_signal_metadata(signal):
     if not isinstance(signal, dict):
         return
-    signal.setdefault("ml_schema", "machine_Learning_v1")
+    signal.setdefault("ml_schema", "machine_Learning_v2")
     signal.setdefault("ml_model_version", signal.get("learning_model_version", "static"))
 
 _ml_sync_strategy()
@@ -1621,28 +1678,19 @@ def _binance_request_pause():
 
 
 @contextmanager
-def _binance_request_slot():
-    """Serialize the actual Binance HTTP request, not only its scheduling.
-
-    This closes the race where worker A detects a ban while worker B has already
-    passed the old throttle function but has not sent its HTTP request yet. B now
-    re-checks the breaker immediately before its request. Once A registers the ban,
-    the next worker waiting on this lock is stopped before it can hit Binance.
-    """
+def _binance_request_slot(critical=False):
+    """Serialize Binance calls and fail-fast before the IP budget becomes unsafe."""
     global _binance_last_request_at
     with _binance_request_lock:
         _binance_wait_if_banned()
-        if _binance_weight_1m is not None and _binance_weight_1m >= BINANCE_WEIGHT_SOFT_LIMIT:
-            wall_now = time.time()
-            wait_window = max(0.0, 62.0 - (wall_now % 60.0))
-            log.warning(f"[binance-weight] {_binance_weight_1m} weight/1m — throttle {wait_window:.1f}s ke window berikutnya.")
-            time.sleep(wait_window)
-            _binance_wait_if_banned()
+        used = _binance_weight_1m
+        if used is not None and used >= BINANCE_WEIGHT_HARD_LIMIT:
+            raise BinanceCooldownError(f"Binance weight governor: {used}/min >= hard limit {BINANCE_WEIGHT_HARD_LIMIT}")
+        if used is not None and used >= BINANCE_WEIGHT_SOFT_LIMIT and not critical:
+            raise BinanceCooldownError(f"Binance scan governor: {used}/min >= soft limit {BINANCE_WEIGHT_SOFT_LIMIT}")
         wait = BINANCE_REQUEST_INTERVAL - (time.monotonic() - _binance_last_request_at)
         if wait > 0:
             time.sleep(wait)
-        # Final breaker check is deliberately immediately before yielding to the
-        # HTTP call. This is the important anti-race point.
         _binance_wait_if_banned()
         _binance_last_request_at = time.monotonic()
         yield
@@ -1735,7 +1783,7 @@ def _binance_signed(method, path, params=None):
                 except Exception:
                     pass
 
-            with _binance_request_slot():
+            with _binance_request_slot(critical=True):
                 req = dict(base_params)
                 req["timestamp"] = _binance_timestamp_ms(sync_if_stale=False)
                 req["recvWindow"] = 10000
@@ -1785,7 +1833,7 @@ def _binance_signed(method, path, params=None):
                     f"Binance {method} {path} transport error; execution status unknown: {e}"
                 ) from e
             log.warning(f"[binance-signed] GET {path} percobaan {attempt+1}: {e}")
-            time.sleep(1.0 + attempt)
+            time.sleep(0.25 + 0.25 * attempt)
         except Exception as e:
             last_err = e
             if mutating:
@@ -1793,7 +1841,7 @@ def _binance_signed(method, path, params=None):
                     f"Binance {method} {path} response error; execution status unknown: {e}"
                 ) from e
             log.warning(f"[binance-signed] GET {path} percobaan {attempt+1}: {e}")
-            time.sleep(1.0 + attempt)
+            time.sleep(0.25 + 0.25 * attempt)
 
     raise RuntimeError(f"Gagal request signed {method} {path}: {last_err}")
 
@@ -2817,31 +2865,43 @@ ws_feed = BinanceWSFeed()
 
 # ── FUNGSI PUBLIK — signature SAMA PERSIS dgn sebelumnya, jadi seluruh
 #    kode bot (scoring, monitor posisi, dsb) TIDAK perlu diubah sama sekali ──
+_LOCAL_PRICE_MAX_AGE = 30.0
+_local_price_cache = {}
+_local_price_lock = threading.Lock()
+
 def get_price(symbol):
-    """Saat Binance pause: jangan hit REST fallback. Gunakan WS/local cache saja."""
+    """Normal price path: WS first; REST only as a last-resort recovery path."""
+    now = time.time()
+    p = ws_feed.get_price(symbol)
+    if p is not None and ws_feed.is_fresh():
+        with _local_price_lock:
+            _local_price_cache[symbol] = (p, now)
+        return p
+    with _local_price_lock:
+        cached = _local_price_cache.get(symbol)
+    if cached and now - cached[1] <= _LOCAL_PRICE_MAX_AGE:
+        return cached[0]
     if _binance_is_scan_paused():
-        p = ws_feed.get_price(symbol)
         return p
     try:
-        return _binance_price(symbol)
+        byp = _bybit_price(symbol)
+        with _local_price_lock:
+            _local_price_cache[symbol] = (byp, now)
+        return byp
+    except Exception:
+        pass
+    try:
+        bp = _binance_price(symbol)
+        with _local_price_lock:
+            _local_price_cache[symbol] = (bp, now)
+        return bp
     except Exception as e:
-        log.warning(f"[price/binance] {symbol}: {e} — fallback")
-        if _binance_is_scan_paused():
-            return ws_feed.get_price(symbol)
-    for _ in range(2):
-        try:
-            return _bybit_price(symbol)
-        except Exception as e:
-            log.warning(f"[price/bybit] {symbol}: {e}")
-            time.sleep(1)
-    if ws_feed.is_fresh():
-        p = ws_feed.get_price(symbol)
-        if p is not None:
-            return p
+        log.debug(f"[price/binance] {symbol}: {e}")
     p = _coingecko_price(symbol)
     if p is not None:
-        return p
-    return None
+        with _local_price_lock:
+            _local_price_cache[symbol] = (p, now)
+    return p
 
 def get_klines(symbol, interval, limit=250):
     """Normal market-data accessor. Existing behavior retained for execution.
@@ -2972,6 +3032,11 @@ def get_top_coins():
         last_scanned_at = time.time()
     return coins
 
+_TOP_COINS_CACHE_TTL = 120.0
+_top_coins_cached_symbols = []
+_top_coins_cached_at = 0.0
+_top_coins_cache_lock = threading.Lock()
+
 def _get_top_coins_impl():
     """Ambil top coins. Saat Binance pause, seluruh scan berhenti.
     Fallback Bybit/WS hanya boleh dipakai ketika Binance tidak sedang dalam global pause.
@@ -3001,11 +3066,19 @@ def _get_top_coins_impl():
         active_syms = set(positions.keys())
 
     exclude_syms = cur_ban | active_syms
+    with _top_coins_cache_lock:
+        cached_syms = list(_top_coins_cached_symbols)
+        cached_at = float(_top_coins_cached_at or 0.0)
+    if cached_syms and time.time() - cached_at <= _TOP_COINS_CACHE_TTL:
+        return [s for s in cached_syms if s not in exclude_syms][:TOP_N_COINS]
 
     # Binance REST
     try:
         coins = _binance_top_coins(exclude_syms)
         if coins:
+            with _top_coins_cache_lock:
+                _top_coins_cached_symbols = list(coins)
+                _top_coins_cached_at = time.time()
             return coins
         if _binance_is_scan_paused():
             log.warning("[top_coins/binance] kosong karena circuit breaker aktif — TIDAK fallback.")
@@ -3023,6 +3096,9 @@ def _get_top_coins_impl():
         coins = _bybit_top_coins(exclude_syms)
         if coins:
             log.info(f"[top_coins/bybit fallback] {len(coins)} koin")
+            with _top_coins_cache_lock:
+                _top_coins_cached_symbols = list(coins)
+                _top_coins_cached_at = time.time()
             return coins
         log.warning("[top_coins/bybit] kosong, coba WS...")
     except Exception as e:
@@ -4988,18 +5064,28 @@ def bot_loop():
                 # ============================================================
                 elif text in ("/full on", "full on"):
                     try:
-                        tg_send(chat_id, _full_on())
+                        tg_send(chat_id, _full_strategy_command("on"))
                     except Exception as e:
                         log.exception(f"[full] on gagal: {e}")
                         tg_send(chat_id, f"❌ FULL gagal diaktifkan: <code>{html.escape(str(e)[:300])}</code>")
                 elif text in ("/full off", "full off"):
                     try:
-                        tg_send(chat_id, _full_off())
+                        tg_send(chat_id, _full_strategy_command("off"))
                     except Exception as e:
                         log.exception(f"[full] off gagal: {e}")
                         tg_send(chat_id, f"❌ FULL gagal dimatikan: <code>{html.escape(str(e)[:300])}</code>")
-                elif text in ("/full", "full"):
-                    tg_send(chat_id, _full_status_text())
+                elif text in ("/full reset", "full reset"):
+                    try:
+                        tg_send(chat_id, _full_strategy_command("reset"))
+                    except Exception as e:
+                        log.exception(f"[full] reset gagal: {e}")
+                        tg_send(chat_id, f"❌ FULL reset gagal: <code>{html.escape(str(e)[:300])}</code>")
+                elif text in ("/full", "full", "/full status", "full status"):
+                    try:
+                        tg_send(chat_id, _full_strategy_command("status"))
+                    except Exception as e:
+                        log.exception(f"[full] status gagal: {e}")
+                        tg_send(chat_id, f"❌ FULL status gagal: <code>{html.escape(str(e)[:300])}</code>")
                 elif text in ("/analyze","analyze"):
                     # Research analysis dari FULL CLOSED-TRADE LEDGER; TIDAK scan Binance.
                     def _run_analyze(cid):
