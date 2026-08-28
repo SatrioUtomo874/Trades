@@ -56,13 +56,22 @@ Kompatibel dengan main.py:
 
 import logging
 from typing import Optional, Tuple
+from pathlib import Path
+import os
+import json
+import time
+import threading
+import html
 import pandas as pd
 import numpy as np
 
 log = logging.getLogger(__name__)
 
+ML_COGNITIVE_VERSION = "V28_COGNITIVE"
+FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
 
-MACHINE_LEARNING_SCHEMA = "machine_Learning_v2"
+
+MACHINE_LEARNING_SCHEMA = "machine_Learning_v3_cognitive"
 _LEARNED_MODEL = None
 
 ML_FEATURE_NAMES = [
@@ -298,10 +307,20 @@ def ema(s: pd.Series, n: int) -> pd.Series:
 
 def rsi(s: pd.Series, n: int = 14) -> pd.Series:
     d = s.diff()
-    g = d.clip(lower=0).rolling(n).mean()
-    lo = (-d.clip(upper=0)).rolling(n).mean()
-    rs = g / lo.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
+    g = d.clip(lower=0).rolling(n, min_periods=n).mean()
+    lo = (-d.clip(upper=0)).rolling(n, min_periods=n).mean()
+    out = pd.Series(50.0, index=s.index, dtype=float)
+    valid = g.notna() & lo.notna()
+    both_zero = valid & (g <= 1e-12) & (lo <= 1e-12)
+    gain_only = valid & (lo <= 1e-12) & (g > 1e-12)
+    loss_only = valid & (g <= 1e-12) & (lo > 1e-12)
+    normal = valid & (g > 1e-12) & (lo > 1e-12)
+    out.loc[gain_only] = 100.0
+    out.loc[loss_only] = 0.0
+    out.loc[both_zero] = 50.0
+    rs = g.loc[normal] / lo.loc[normal]
+    out.loc[normal] = 100 - 100 / (1 + rs)
+    return out
 
 def atr_fn(df: pd.DataFrame, n: int = 14) -> pd.Series:
     tr = pd.concat([
@@ -353,7 +372,10 @@ def build_df(df: pd.DataFrame, interval_minutes: Optional[int] = None) -> Option
     df["rsi"] = rsi(df["close"])
     df["atr"] = atr_fn(df)
     df["vol_sma"] = df["volume"].rolling(20).mean()
-    return df.dropna()
+    required = ["ema9", "ema21", "ema50", "ema200", "atr", "vol_sma"]
+    df = df.dropna(subset=required)
+    df["rsi"] = df["rsi"].fillna(50.0).clip(0.0, 100.0)
+    return df
 
 def swing_pts(df: pd.DataFrame, lb: int = 5):
     """Swing high & low — dipakai main.py untuk trailing."""
@@ -2158,6 +2180,163 @@ def _select_tp(pool: list, entry: float, risk: float, direction: str,
 
 
 # =============================================================================
+# DECISION BRAIN V26
+# =============================================================================
+
+def _clamp(value, lo=0.0, hi=100.0):
+    try:
+        return float(max(lo, min(hi, float(value))))
+    except Exception:
+        return lo
+
+
+def _bool01(value):
+    return 1.0 if bool(value) else 0.0
+
+
+def _regime_profile(score: dict, m15: pd.DataFrame, h1: pd.DataFrame) -> dict:
+    h1_struct = str(score.get("struct_h1") or "ranging")
+    m15_struct = str(score.get("m15_struct") or "ranging")
+    rvol = float(score.get("m15_relative_volume", 1.0) or 1.0)
+    atr = max(float(m15["atr"].iloc[-1]), 1e-12)
+    body = abs(float(m15["close"].iloc[-1]) - float(m15["open"].iloc[-1])) / atr
+    ret3 = abs(float(m15["close"].iloc[-1]) - float(m15["close"].iloc[-4])) / atr if len(m15) >= 4 else 0.0
+    trend = 0.0
+    if h1_struct in {"bullish", "bearish"}: trend += 0.45
+    if m15_struct == h1_struct and h1_struct != "ranging": trend += 0.30
+    if ret3 >= 0.7: trend += 0.15
+    if rvol >= 1.2: trend += 0.10
+    expansion = _clamp((body - 0.35) * 90 + max(0.0, rvol - 1.0) * 35, 0, 100)
+    range_score = 100.0 - _clamp(trend * 100, 0, 100)
+    transition = 0.0
+    if h1_struct == "ranging" and m15_struct in {"bullish", "bearish"}: transition += 0.45
+    if h1_struct in {"bullish", "bearish"} and m15_struct not in {h1_struct, "ranging"}: transition += 0.40
+    if 0.7 <= rvol <= 1.15 and ret3 < 0.5: transition += 0.15
+    if trend >= 0.70 and expansion >= 55: regime = "TREND_EXPANSION"
+    elif trend >= 0.55: regime = "TREND"
+    elif range_score >= 75 and expansion < 45: regime = "RANGE"
+    elif transition >= 0.55: regime = "TRANSITION"
+    elif expansion >= 70: regime = "EXPANSION"
+    else: regime = "MIXED"
+    return {"regime": regime, "trend": round(_clamp(trend * 100), 2), "range": round(range_score, 2), "transition": round(_clamp(transition * 100), 2), "expansion": round(expansion, 2), "rvol": round(rvol, 3), "ret3_atr": round(ret3, 3)}
+
+
+def _setup_archetype(direction: str, score: dict, candidate: dict, loc: dict, poi_reacted: bool) -> str:
+    label = str(candidate.get("label") or "").lower()
+    sweep = bool(score.get("selected_sweep"))
+    choch = bool(score.get("choch_m15", {}).get("bullish_choch") if direction == "bull" else score.get("choch_m15", {}).get("bearish_choch"))
+    cisd = bool(score.get("cisd_m15", {}).get("bullish_cisd") if direction == "bull" else score.get("cisd_m15", {}).get("bearish_cisd"))
+    confirmed = bool(score.get("entry_confirmation", {}).get("confirmed"))
+    if sweep and (choch or confirmed):
+        return "LIQUIDITY_SWEEP_RECLAIM"
+    if label == "ob" and poi_reacted and confirmed:
+        return "HTF_POI_DISPLACEMENT_RETEST"
+    if label == "fvg" and confirmed:
+        return "FVG_DISPLACEMENT_RETEST"
+    if choch and cisd:
+        return "STRUCTURE_SHIFT_CONTINUATION"
+    if label == "eq":
+        return "LIQUIDITY_REACTION"
+    if loc.get("location_state") == "GOOD":
+        return "HEALTHY_PULLBACK"
+    return "STRUCTURE_REACTION"
+
+
+def _thesis_quality(score: dict, loc: dict, candidate: dict, tp_diag: dict, regime: dict, direction: str, poi_reacted: bool) -> dict:
+    htf_bias = str(score.get("htf_bias") or "neutral")
+    d1_bias = str(score.get("d1_bias") or "neutral")
+    desired = "bullish" if direction == "bull" else "bearish"
+    structure = 50.0
+    if htf_bias == desired: structure += 22
+    elif htf_bias == "conflict": structure -= 22
+    elif d1_bias == desired: structure += 10
+    elif d1_bias not in {"neutral", desired}: structure -= 10
+    trend = float(score.get("trend_strength", score.get("direction_edge", 50)) or 50)
+    structure += _clamp(trend) * 0.20
+    location = float(loc.get("location_score", 50) or 50)
+    setup = float(candidate.get("score", 0) or 0)
+    setup_norm = _clamp(setup * 8.5, 0, 100)
+    confirmation = 100.0 if score.get("entry_confirmation", {}).get("confirmed") else 45.0
+    liquidity = 100.0 if score.get("selected_sweep") else 55.0
+    reaction = 100.0 if poi_reacted else 55.0
+    target = _clamp(float(tp_diag.get("target_quality", 0) or 0) * 100)
+    path = _clamp(float(tp_diag.get("path_clear", 0) or 0) * 100)
+    contradiction = 0.0
+    reasons = []
+    if regime["regime"] == "TRANSITION":
+        contradiction += 12; reasons.append("transition regime")
+    if regime["regime"] == "RANGE" and structure > 70 and not score.get("selected_sweep"):
+        contradiction += 10; reasons.append("trend thesis inside range")
+    if loc.get("location_state") == "WEAK":
+        contradiction += 12; reasons.append("weak entry location")
+    if loc.get("hard_block"):
+        contradiction += 40; reasons.append("entry chase")
+    if not score.get("entry_confirmation", {}).get("confirmed"):
+        contradiction += 8; reasons.append("confirmation incomplete")
+    if not poi_reacted:
+        contradiction += 4; reasons.append("HTF reaction not confirmed")
+    if float(tp_diag.get("obstacles", 0) or 0) >= 3:
+        contradiction += 7; reasons.append("target path obstructed")
+    # A balanced quality model: no single indicator can dominate.
+    base = (
+        structure * 0.25 + setup_norm * 0.20 + location * 0.16 +
+        confirmation * 0.13 + liquidity * 0.08 + reaction * 0.06 +
+        target * 0.07 + path * 0.05
+    )
+    # Stronger trend regimes reward aligned structure; range regimes reward location/liquidity.
+    if regime["regime"] in {"TREND", "TREND_EXPANSION"}:
+        base += (structure - 50.0) * 0.08
+    elif regime["regime"] == "RANGE":
+        base += (liquidity - 50.0) * 0.08 + (location - 50.0) * 0.05
+    quality = _clamp(base - contradiction)
+    return {
+        "trade_quality": round(quality, 2),
+        "structure_quality": round(_clamp(structure), 2),
+        "setup_quality": round(setup_norm, 2),
+        "location_quality": round(location, 2),
+        "confirmation_quality": round(confirmation, 2),
+        "liquidity_quality": round(liquidity, 2),
+        "reaction_quality": round(reaction, 2),
+        "target_quality": round(target, 2),
+        "path_quality": round(path, 2),
+        "contradiction_score": round(_clamp(contradiction), 2),
+        "contradictions": reasons[:8],
+    }
+
+
+def _quality_to_confidence(quality: float, uncertainty: float = 0.0) -> int:
+    q = _clamp(quality)
+    u = _clamp(uncertainty)
+    # Compress extremes: confidence is an interpretable quality rank, not a claim of certainty.
+    conf = 30.0 + 0.68 * q - 0.18 * u
+    return int(max(1, min(99, round(conf))))
+
+
+def _selection_strength(evaluated: list) -> dict:
+    if not evaluated:
+        return {"leader_margin": 0.0, "candidate_count": 0}
+    ordered = sorted(evaluated, key=lambda x: x.get("execution_score", -1), reverse=True)
+    if len(ordered) == 1:
+        return {"leader_margin": 100.0, "candidate_count": 1}
+    a = float(ordered[0].get("execution_score", 0))
+    b = float(ordered[1].get("execution_score", 0))
+    return {"leader_margin": round(_clamp(a - b, 0, 100), 3), "candidate_count": len(ordered)}
+
+
+def _trail_ml_adjustment(analysis: dict, ml: Optional[dict]) -> dict:
+    if not ml:
+        return {"model_used": False}
+    er = float(ml.get("expected_r", 0.0) or 0.0)
+    prob = float(ml.get("probability", 0.5) or 0.5)
+    return {
+        "model_used": True,
+        "model_expected_r": round(er, 3),
+        "model_probability": round(prob, 3),
+        "model_confidence": round(float(ml.get("model_confidence", 50.0) or 50.0), 2),
+        "model_version": ml.get("model_version", "unknown"),
+    }
+
+# =============================================================================
 # FUNGSI UTAMA — Dipanggil oleh main.py
 # =============================================================================
 
@@ -2342,24 +2521,31 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             learning_features = _build_learning_features(
                 score, loc, candidate, float(rr), entry, atr, cur_price, risk, htf_poi, poi_reacted
             )
+            regime = _regime_profile(score, m15, h1)
+            thesis = _thesis_quality(score, loc, candidate, tp_diag, regime, direction, poi_reacted)
+            archetype = _setup_archetype(direction, score, candidate, loc, poi_reacted)
+            uncertainty = min(65.0, thesis["contradiction_score"] * 0.70 + (20.0 if regime["regime"] in {"TRANSITION", "MIXED"} else 0.0))
+            quality_conf = _quality_to_confidence(thesis["trade_quality"], uncertainty)
+            final_conf = int(round(0.55 * final_conf + 0.45 * quality_conf))
+            final_conf = max(1, min(99, final_conf))
             ml_prediction = _predict_learning(learning_features)
             if ml_prediction is not None:
-                heuristic_conf = float(final_conf)
-                ml_conf = float(ml_prediction.get("model_confidence", ml_prediction["probability"] * 100.0))
-                ml_weight = float((_LEARNED_MODEL or {}).get("live_weight", 0.35) or 0.35)
-                ml_weight = min(max(ml_weight, 0.0), 0.70)
-                final_conf = int(round((1.0 - ml_weight) * heuristic_conf + ml_weight * ml_conf))
-                final_conf = max(0, min(99, final_conf))
+                ml_conf = float(ml_prediction.get("model_confidence", 50.0))
+                ml_weight = min(max(float((_LEARNED_MODEL or {}).get("live_weight", 0.35) or 0.35), 0.0), 0.50)
+                # Learning model participates as a calibrated modifier, never as an override.
+                final_conf = int(round((1.0 - ml_weight) * final_conf + ml_weight * ml_conf))
+                final_conf = max(1, min(99, final_conf))
                 conf_diag["ml_confidence"] = round(ml_conf, 2)
-                conf_diag["ml_expected_r"] = round(ml_prediction["expected_r"], 3)
+                conf_diag["ml_expected_r"] = round(float(ml_prediction.get("expected_r", 0.0) or 0.0), 3)
                 conf_diag["ml_weight"] = round(ml_weight, 3)
-                conf_diag["ml_model_version"] = ml_prediction["model_version"]
-
+                conf_diag["ml_model_version"] = ml_prediction.get("model_version")
+            # Final selection score is based on quality first; RR is only a small feasibility factor.
             execution_score = (
-                final_conf
-                + min(float(rr), 6.0) * 0.45
-                + candidate.get("score", 0) * 0.20
-                + setup_quality * 0.35
+                thesis["trade_quality"] * 1.30
+                + final_conf * 0.55
+                + min(float(rr), 6.0) * 1.50
+                + thesis["target_quality"] * 0.20
+                - thesis["contradiction_score"] * 0.65
             )
 
             evaluated.append({
@@ -2379,6 +2565,10 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                 "location": loc,
                 "learning_features": learning_features,
                 "learning_prediction": ml_prediction,
+                "regime": regime,
+                "archetype": archetype,
+                "thesis": thesis,
+                "uncertainty": round(uncertainty, 2),
             })
 
         if not evaluated:
@@ -2401,6 +2591,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         rr = best_eval["rr"]
         confidence = best_eval["confidence"]
         loc = best_eval["location"]
+        selection = _selection_strength(evaluated)
 
         if symbol:
             log.info(
@@ -2419,7 +2610,12 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "decision": "BUY" if up else "SELL",
             "confidence": confidence,
             "direction_confidence": max(0, min(99, base_confidence)),
-            "setup_quality": int(best_eval.get("setup_quality", 0)),
+            "setup_quality": int(round(best_eval.get("thesis", {}).get("trade_quality", best_eval.get("setup_quality", 0)))),
+            "trade_quality": round(float(best_eval.get("thesis", {}).get("trade_quality", 0.0)), 2),
+            "archetype": best_eval.get("archetype", "STRUCTURE_REACTION"),
+            "thesis": best_eval.get("thesis", {}),
+            "regime_profile": best_eval.get("regime", {}),
+            "uncertainty": best_eval.get("uncertainty", 0.0),
             "confidence_band": best_eval.get("confidence_diagnostics", {}).get("confidence_band", _confidence_band(confidence)),
             "confidence_diagnostics": best_eval.get("confidence_diagnostics", {}),
             "confidence_model": CONFIDENCE_MODEL_VERSION,
@@ -2457,6 +2653,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "entry_confirmation": confirmation,
             "selected_sweep": score.get("selected_sweep", False),
             "trigger_count": score.get("trigger_count", 0),
+            "selection_diagnostics": selection,
+            "candidate_count": len(evaluated),
             "tp_sl_reason": (
                 f"Entry@{entry:.5g}({entry_lbl}) | "
                 f"SL@{sl_price:.5g}(struct) | "
@@ -2472,14 +2670,29 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
         return None
 
 def get_best_signal(candidates: list) -> Optional[dict]:
-    """Pilih sinyal terbaik dari list kandidat."""
+    """Pilih peluang terbaik berdasarkan kualitas trade, bukan confidence mentah."""
     if not candidates:
         return None
-    label_bonus = {"ob": 4, "fvg": 2, "eq": 1, "market": 0}
 
     def _rank(sig):
-        bonus = label_bonus.get(sig.get("entry_label", ""), 0)
-        return sig["confidence"] + bonus + sig.get("rr", 0) * 0.5
+        quality = float(sig.get("trade_quality", sig.get("setup_quality", 0)) or 0.0)
+        conf = float(sig.get("confidence", 0) or 0.0)
+        rr = min(float(sig.get("rr", 0) or 0.0), 6.0)
+        diag = sig.get("confidence_diagnostics") or {}
+        ml_er = float((sig.get("learning_prediction") or {}).get("expected_r", 0.0) or 0.0)
+        contradiction = float((sig.get("thesis") or {}).get("contradiction_score", 0.0) or 0.0)
+        calibration_penalty = 0.0
+        if diag.get("calibration") == "empirical_bayesian":
+            samples = float(diag.get("samples", 0) or 0.0)
+            calibration_penalty = max(0.0, 12.0 - min(12.0, samples * 0.15))
+        return (
+            quality * 1.45
+            + conf * 0.55
+            + rr * 1.10
+            + ml_er * 6.0
+            - contradiction * 0.90
+            - calibration_penalty
+        )
 
     return max(candidates, key=_rank)
 
@@ -2970,8 +3183,11 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
     chosen, source = _choose_trail_stop(
         candidates, direction, current_price, current_sl, atr, state_name
     )
+    # The entry model is not reused as a trail predictor. Trail decisions are based
+    # on current position-path evidence; a dedicated trail learner can be plugged
+    # in later once enough trail-labelled samples exist.
+    trail_model_diag = {"model_used": False, "reason": "entry_model_not_reused_for_trail"}
 
-    # Strong reversal: if a valid stop can lock meaningful profit, use it immediately.
     if chosen is not None:
         minimum_lock_r = TRAIL_LOCK_WEAK_R
         if state_name == "CAUTION":
@@ -3012,6 +3228,7 @@ def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFr
             "reversal_confirmations": int(analysis["confirmations"]),
             "trail_source": source,
             "reversal_diagnostics": analysis,
+            "trail_model": trail_model_diag,
             "reason": reasons + [f"predictive_trail:{source}"],
         }
 
@@ -3135,3 +3352,1080 @@ def validate_and_adjust_geometry(
         "rr":    round(rr, 2),
         "adjusted": False,
     }
+
+# =============================================================================
+# MACHINE LEARNING COGNITIVE LAYER
+# =============================================================================
+# V27: belief revision, evidence arbitration, failure autopsy, candidate
+# comparison, richer research snapshots, and FULL command interface.
+# This layer is deliberately execution-free and Binance-free.
+
+ML_COGNITIVE_VERSION = "V28_COGNITIVE"
+FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
+FULL_BELIEF_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
+FULL_BELIEF_FILE = FULL_BELIEF_DIR / "belief_state.json"
+FULL_LESSONS_FILE = FULL_BELIEF_DIR / "lessons.jsonl"
+
+
+def _finite(value, default=0.0):
+    try:
+        x = float(value)
+        return x if np.isfinite(x) else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _clamp(value, lo=0.0, hi=1.0):
+    return max(lo, min(hi, _finite(value)))
+
+
+def _load_json_file(path, default):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            return default
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        return obj if isinstance(obj, type(default)) else default
+    except Exception as exc:
+        log.warning(f"[FULL] load state gagal: {exc}")
+        return default
+
+
+def _save_json_atomic(path, obj):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(obj, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:
+        log.warning(f"[FULL] save state gagal: {exc}")
+        return False
+
+
+_FULL_LOCK = threading.RLock()
+_FULL_BELIEFS = _load_json_file(FULL_BELIEF_FILE, {
+    "schema": FULL_LEARNING_SCHEMA,
+    "beliefs": {},
+    "lessons": 0,
+    "revisions": 0,
+    "last_review": None,
+})
+if _FULL_BELIEFS.get("schema") != FULL_LEARNING_SCHEMA:
+    _FULL_BELIEFS = {"schema": FULL_LEARNING_SCHEMA, "beliefs": {}, "lessons": 0, "revisions": 0, "last_review": None}
+
+
+def _belief_key(name, condition="global"):
+    return f"{str(name).strip().lower()}::{str(condition).strip().lower()}"
+
+
+def get_belief(name, condition="global", default_value=None):
+    key = _belief_key(name, condition)
+    with _FULL_LOCK:
+        b = dict((_FULL_BELIEFS.get("beliefs") or {}).get(key) or {})
+    if b:
+        return b
+    return {
+        "name": name,
+        "condition": condition,
+        "value": default_value,
+        "belief_strength": 0.35,
+        "sample_size": 0,
+        "evidence_for": [],
+        "evidence_against": [],
+        "last_revision": None,
+        "status": "UNESTABLISHED",
+    }
+
+
+def revise_belief(name, observed_value, condition="global", evidence_strength=0.5,
+                  source="unknown", reason="", sample_increment=1):
+    """Bayes-like gradual belief revision; evidence changes the belief, not a hard override."""
+    observed = _finite(observed_value)
+    strength = _clamp(evidence_strength)
+    now = datetime.now(timezone.utc).isoformat()
+    key = _belief_key(name, condition)
+    with _FULL_LOCK:
+        beliefs = _FULL_BELIEFS.setdefault("beliefs", {})
+        old = dict(beliefs.get(key) or {})
+        old_value = _finite(old.get("value"), observed)
+        old_strength = _clamp(old.get("belief_strength", 0.35))
+        old_n = int(old.get("sample_size", 0) or 0)
+        prior_weight = max(1.0, old_n * max(0.20, old_strength))
+        evidence_weight = max(0.10, strength)
+        new_value = (old_value * prior_weight + observed * evidence_weight) / (prior_weight + evidence_weight)
+        new_strength = _clamp((old_strength * prior_weight + strength * evidence_weight) / (prior_weight + evidence_weight))
+        change = abs(new_value - old_value)
+        status = "TENTATIVE" if old_n + sample_increment < 30 else ("SUPPORTED" if new_strength >= 0.65 else "MIXED")
+        row = {
+            "name": name,
+            "condition": condition,
+            "value": new_value,
+            "belief_strength": new_strength,
+            "sample_size": old_n + int(sample_increment),
+            "evidence_for": (old.get("evidence_for") or [])[-9:],
+            "evidence_against": (old.get("evidence_against") or [])[-9:],
+            "last_revision": now,
+            "last_change": change,
+            "last_source": source,
+            "last_reason": reason,
+            "status": status,
+        }
+        if change > 0:
+            if observed >= old_value:
+                row["evidence_for"].append({"value": observed, "strength": strength, "source": source, "reason": reason, "at": now})
+            else:
+                row["evidence_against"].append({"value": observed, "strength": strength, "source": source, "reason": reason, "at": now})
+        beliefs[key] = row
+        _FULL_BELIEFS["revisions"] = int(_FULL_BELIEFS.get("revisions", 0) or 0) + 1
+        _FULL_BELIEFS["last_review"] = now
+        _save_json_atomic(FULL_BELIEF_FILE, _FULL_BELIEFS)
+    return row
+
+
+def _append_lesson(lesson):
+    try:
+        FULL_BELIEF_DIR.mkdir(parents=True, exist_ok=True)
+        with FULL_LESSONS_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(lesson, ensure_ascii=False, allow_nan=False, default=str) + "\n")
+        return True
+    except Exception as exc:
+        log.warning(f"[FULL] lesson append gagal: {exc}")
+        return False
+
+
+def _safe_ratio(num, den, default=0.0):
+    den = _finite(den)
+    if abs(den) < 1e-12:
+        return default
+    return _finite(num) / den
+
+
+def _detect_regime_local(h1, m15, d1=None):
+    result = {"regime": "UNKNOWN", "trend_strength": 0.0, "volatility": 0.0, "range_position": 0.5}
+    try:
+        h = h1 if isinstance(h1, pd.DataFrame) else None
+        m = m15 if isinstance(m15, pd.DataFrame) else None
+        if h is None or m is None or len(h) < 20 or len(m) < 20:
+            return result
+        h_close = _finite(h["close"].iloc[-1])
+        h_old = _finite(h["close"].iloc[-20])
+        atr_h = _finite(h.get("atr", pd.Series(dtype=float)).iloc[-1] if "atr" in h else np.mean(np.abs(h["high"].tail(14).to_numpy() - h["low"].tail(14).to_numpy())))
+        move = _safe_ratio(h_close - h_old, max(abs(h_old), 1e-12))
+        trend = _clamp(abs(move) / max(atr_h / max(abs(h_close), 1e-12), 1e-6), 0, 3.0) / 3.0
+        window = m["close"].tail(32)
+        lo, hi = float(window.min()), float(window.max())
+        rp = _clamp(_safe_ratio(float(m["close"].iloc[-1]) - lo, hi - lo, 0.5)) if hi > lo else 0.5
+        vol = _safe_ratio(float(m["high"].tail(16).max() - m["low"].tail(16).min()), max(abs(float(m["close"].tail(16).mean())), 1e-12))
+        result["trend_strength"] = trend
+        result["volatility"] = _clamp(vol / 0.25)
+        result["range_position"] = rp
+        if trend > 0.55 and move > 0:
+            result["regime"] = "TREND_UP"
+        elif trend > 0.55 and move < 0:
+            result["regime"] = "TREND_DOWN"
+        elif result["volatility"] > 0.75 and trend < 0.45:
+            result["regime"] = "TRANSITION"
+        else:
+            result["regime"] = "RANGE"
+    except Exception:
+        pass
+    return result
+
+
+def _evidence_arbitration(signal, regime=None):
+    thesis = signal.get("thesis") or {}
+    quality = _finite(signal.get("trade_quality", signal.get("setup_quality", 0.0)))
+    contradictions = _finite(thesis.get("contradiction_score", 0.0))
+    confidence = _finite(signal.get("confidence", 50.0))
+    uncertainty = _finite(signal.get("uncertainty", 0.5))
+    support = []
+    against = []
+    for key, label in (
+        ("selected_sweep", "liquidity sweep"),
+        ("poi_reacted", "POI reaction"),
+        ("entry_confirmation", "entry confirmation"),
+    ):
+        if signal.get(key):
+            support.append(label)
+    if contradictions > 30:
+        against.append("meaningful contradictions")
+    if _finite(signal.get("entry_location_score", 50)) < 45:
+        against.append("weak entry location")
+    if _finite(signal.get("rr", 0)) < 2.0:
+        against.append("weak target geometry")
+    regime_name = (regime or signal.get("regime_profile", {}) or {}).get("regime") if isinstance(regime, dict) else regime
+    decision_quality = _clamp((quality / 100.0) * 0.52 + (confidence / 100.0) * 0.28 + (1.0 - _clamp(contradictions / 100.0)) * 0.12 + (1.0 - _clamp(uncertainty / 100.0)) * 0.08) * 100.0
+    return {
+        "supporting_evidence": support,
+        "contradicting_evidence": against,
+        "regime": regime_name or "UNKNOWN",
+        "decision_quality": round(decision_quality, 2),
+        "evidence_balance": len(support) - len(against),
+    }
+
+
+def analyze_counterfactual(signal, hypothetical_changes=None):
+    """Cheap, execution-free counterfactual reasoning for research/autopsy."""
+    hypothetical_changes = hypothetical_changes if isinstance(hypothetical_changes, dict) else {}
+    base = _finite(signal.get("trade_quality", signal.get("setup_quality", 0.0)))
+    conf = _finite(signal.get("confidence", 50.0))
+    loc = _finite(signal.get("entry_location_score", 50.0))
+    rr = _finite(signal.get("rr", 0.0))
+    delta = 0.0
+    assumptions = []
+    if hypothetical_changes.get("wait_for_retest"):
+        delta += 4.0 if signal.get("entry_confirmation") else 2.0
+        assumptions.append("entry delayed for retest")
+    if hypothetical_changes.get("ignore_sweep_without_reclaim") and signal.get("selected_sweep") and not signal.get("entry_confirmation"):
+        delta -= 12.0
+        assumptions.append("sweep without reclaim treated as weak")
+    if hypothetical_changes.get("boost_location"):
+        delta += max(0.0, 55.0 - loc) * 0.10
+        assumptions.append("location given more influence")
+    if hypothetical_changes.get("penalize_low_rr") and rr < 2.0:
+        delta -= (2.0 - rr) * 6.0
+        assumptions.append("low RR penalized")
+    return {
+        "base_quality": round(base, 2),
+        "counterfactual_quality": round(max(0.0, min(100.0, base + delta)), 2),
+        "quality_delta": round(delta, 2),
+        "base_confidence": round(conf, 2),
+        "assumptions": assumptions,
+    }
+
+
+def autopsy_trade(record, path_rows=None):
+    """Explain a closed trade without rewriting history."""
+    record = record if isinstance(record, dict) else {}
+    final_r = _finite(record.get("final_r"), _finite(record.get("pnl_usd")))
+    mfe = _finite(record.get("mfe_r", record.get("mfe", 0.0)))
+    mae = _finite(record.get("mae_r", record.get("mae", 0.0)))
+    giveback = _finite(record.get("giveback_ratio", record.get("giveback_pct", 0.0)))
+    result = str(record.get("result") or "").lower()
+    if final_r > 0:
+        outcome_class = "SUCCESS"
+    elif mfe > 1.0 and final_r < 0:
+        outcome_class = "MANAGEMENT_OR_PROTECTION_FAILURE"
+    elif mfe < 0.35 and final_r < 0:
+        outcome_class = "ENTRY_OR_THESIS_FAILURE"
+    else:
+        outcome_class = "AMBIGUOUS_FAILURE"
+    reasons = []
+    if outcome_class == "MANAGEMENT_OR_PROTECTION_FAILURE":
+        reasons.append("trade demonstrated favorable excursion but failed to preserve it")
+    if giveback >= 0.50:
+        reasons.append("large giveback relative to MFE")
+    if mae > 0 and mfe > 0 and mae > mfe:
+        reasons.append("adverse excursion exceeded favorable excursion")
+    if result in {"strategy_error", "data_error", "execution_error"}:
+        outcome_class = "EXECUTION_OR_DATA_FAILURE"
+    lesson = {
+        "trade_uid": record.get("trade_uid"),
+        "symbol": record.get("symbol"),
+        "outcome_class": outcome_class,
+        "final_r": final_r,
+        "mfe_r": mfe,
+        "mae_r": mae,
+        "giveback": giveback,
+        "reasons": reasons,
+        "confidence": _finite(record.get("confidence"), 50.0),
+        "archetype": record.get("archetype"),
+        "regime": record.get("market_regime", record.get("regime")),
+    }
+    _append_lesson(lesson)
+    return lesson
+
+
+def build_research_snapshot(signal, h1=None, m15=None, d1=None, symbol=None):
+    """Feature-rich decision snapshot. It never calls Binance/network."""
+    signal = signal if isinstance(signal, dict) else {}
+    regime = _detect_regime_local(h1, m15, d1)
+    arb = _evidence_arbitration(signal, regime)
+    snapshot = {
+        "schema": FULL_LEARNING_SCHEMA,
+        "snapshot_time": datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol or signal.get("symbol"),
+        "strategy_version": ML_COGNITIVE_VERSION,
+        "model_version": signal.get("learning_model_version", signal.get("learning_prediction", {}).get("model_version", "static")),
+        "decision": signal.get("decision"),
+        "confidence": _finite(signal.get("confidence"), 50.0),
+        "raw_confidence": _finite(signal.get("direction_confidence", signal.get("confidence")), 50.0),
+        "trade_quality": _finite(signal.get("trade_quality", signal.get("setup_quality")), 0.0),
+        "archetype": signal.get("archetype", "UNKNOWN"),
+        "market": regime,
+        "evidence": arb,
+        "location": {
+            "score": _finite(signal.get("entry_location_score"), 50.0),
+            "state": signal.get("entry_location_state"),
+            "range_position": _finite(signal.get("entry_range_position"), 0.5),
+        },
+        "geometry": {
+            "entry": _finite(signal.get("entry")),
+            "sl": _finite(signal.get("sl")),
+            "tp": _finite(signal.get("tp")),
+            "rr": _finite(signal.get("rr")),
+            "atr": _finite(signal.get("atr")),
+            "entry_distance_atr": _finite(signal.get("learning_features", {}).get("entry_distance_atr")),
+            "risk_atr": _finite(signal.get("learning_features", {}).get("risk_atr")),
+        },
+        "thesis": signal.get("thesis", {}),
+        "uncertainty": _finite(signal.get("uncertainty"), 0.5),
+        "counter_thesis": arb.get("contradicting_evidence", []),
+    }
+    return snapshot
+
+
+
+
+# ============================================================
+# COGNITIVE LEARNING LAYER — V28
+# ============================================================
+_COG_LOCK = threading.RLock()
+_COG_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
+_COG_EXPERIENCE_FILE = _COG_STATE_DIR / "strategy_experience.jsonl"
+_COG_LESSON_FILE = _COG_STATE_DIR / "strategy_lessons.jsonl"
+_COG_BELIEF_FILE = _COG_STATE_DIR / "strategy_beliefs.json"
+_COG_STATE_FILE = _COG_STATE_DIR / "strategy_cognitive_state.json"
+_COG_STATE = {
+    "schema": FULL_LEARNING_SCHEMA,
+    "observations": 0,
+    "candidates": 0,
+    "labeled_outcomes": 0,
+    "autopsies": 0,
+    "counterfactuals": 0,
+    "belief_revisions": 0,
+    "research_cycles": 0,
+    "market_clusters": [],
+    "last_cycle": None,
+    "drift": {"status": "UNKNOWN", "score": 0.0},
+}
+_COG_BELIEFS = {"schema": FULL_LEARNING_SCHEMA, "beliefs": {}}
+_COG_EXPERIENCE_BUFFER = []
+_COG_LESSON_BUFFER = []
+
+
+def _cjson_load(path, default):
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning(f"[COG] load gagal {path.name}: {exc}")
+    return default
+
+
+def _cjson_save(path, payload):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception as exc:
+        log.warning(f"[COG] save gagal {path.name}: {exc}")
+
+
+def _load_cognitive_state():
+    global _COG_STATE, _COG_BELIEFS
+    with _COG_LOCK:
+        state = _cjson_load(_COG_STATE_FILE, {})
+        if isinstance(state, dict):
+            _COG_STATE.update(state)
+        beliefs = _cjson_load(_COG_BELIEF_FILE, {})
+        if isinstance(beliefs, dict):
+            _COG_BELIEFS.update(beliefs)
+
+
+def _append_jsonl(path, record, memory, max_mem=5000):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(record, ensure_ascii=False, allow_nan=False, default=str)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        memory.append(record)
+        if len(memory) > max_mem:
+            del memory[:-max_mem]
+    except Exception as exc:
+        log.warning(f"[COG] jsonl append gagal {path.name}: {exc}")
+
+
+def _finite_num(v, default=0.0):
+    try:
+        x = float(v)
+        return x if np.isfinite(x) else default
+    except Exception:
+        return default
+
+
+def _bounded(v, lo=0.0, hi=1.0):
+    return max(lo, min(hi, _finite_num(v, lo)))
+
+
+def _safe_mean(values, default=0.0):
+    vals = [_finite_num(v, np.nan) for v in values]
+    vals = [v for v in vals if np.isfinite(v)]
+    return float(np.mean(vals)) if vals else default
+
+
+def _last_row_features(df):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {}
+    r = df.iloc[-1]
+    out = {}
+    for k, v in r.to_dict().items():
+        if isinstance(v, (int, float, np.number, bool)):
+            out[str(k)] = _finite_num(v)
+    return out
+
+
+def extract_market_features(df_h1, df_m15, df_d1=None, df_btc_h1=None):
+    """Point-in-time numeric market representation. No network access."""
+    h1 = build_df(df_h1, 60)
+    m15 = build_df(df_m15, 15)
+    d1 = build_df(df_d1, 1440) if isinstance(df_d1, pd.DataFrame) else None
+    btc = build_df(df_btc_h1, 60) if isinstance(df_btc_h1, pd.DataFrame) else None
+    def ret(df, bars):
+        if df is None or len(df) <= bars:
+            return 0.0
+        a = _finite_num(df["close"].iloc[-bars-1])
+        b = _finite_num(df["close"].iloc[-1])
+        return (b / a - 1.0) if a else 0.0
+    def atr_pct(df):
+        if df is None or df.empty:
+            return 0.0
+        atr = _finite_num(df["atr"].iloc[-1] if "atr" in df.columns else 0.0)
+        px = _finite_num(df["close"].iloc[-1])
+        return atr / px if px else 0.0
+    mf = {
+        "m15_ret_1": ret(m15, 1), "m15_ret_4": ret(m15, 4), "m15_ret_16": ret(m15, 16),
+        "h1_ret_1": ret(h1, 1), "h1_ret_4": ret(h1, 4), "h1_ret_24": ret(h1, 24),
+        "d1_ret_1": ret(d1, 1), "d1_ret_5": ret(d1, 5),
+        "m15_atr_pct": atr_pct(m15), "h1_atr_pct": atr_pct(h1), "d1_atr_pct": atr_pct(d1),
+        "m15_rv": _relative_volume(m15) if m15 is not None else 0.0,
+        "h1_rv": _relative_volume(h1) if h1 is not None else 0.0,
+        "btc_h1_ret_1": ret(btc, 1), "btc_h1_ret_4": ret(btc, 4),
+    }
+    if h1 is not None and not h1.empty:
+        sh, sl = swing_pts(h1, 5)
+        mf["h1_structure_numeric"] = {"bullish": 1.0, "bearish": -1.0}.get(_market_structure(h1, sh, sl), 0.0)
+    else:
+        mf["h1_structure_numeric"] = 0.0
+    if m15 is not None and not m15.empty:
+        sh, sl = swing_pts(m15, 5)
+        mf["m15_structure_numeric"] = {"bullish": 1.0, "bearish": -1.0}.get(_market_structure(m15, sh, sl), 0.0)
+    else:
+        mf["m15_structure_numeric"] = 0.0
+    return {k: float(v) for k, v in mf.items()}
+
+
+def record_market_observation(symbol, features, source="binance", timestamp=None):
+    record = {
+        "type": "market_observation",
+        "timestamp": timestamp or time.time(),
+        "symbol": symbol,
+        "source": source,
+        "features": dict(features or {}),
+    }
+    with _COG_LOCK:
+        _append_jsonl(_COG_EXPERIENCE_FILE, record, _COG_EXPERIENCE_BUFFER, 10000)
+        _COG_STATE["observations"] = int(_COG_STATE.get("observations", 0)) + 1
+    return record
+
+
+def record_candidate_observation(signal, outcome=None, rejected_reason=None, source="binance"):
+    sig = dict(signal or {}) if isinstance(signal, dict) else {}
+    snap = sig.get("research_snapshot") or {}
+    record = {
+        "type": "candidate",
+        "timestamp": time.time(),
+        "symbol": sig.get("symbol"),
+        "source": source,
+        "decision": sig.get("decision"),
+        "confidence": _finite_num(sig.get("confidence"), 50.0),
+        "quality": _finite_num(sig.get("trade_quality", sig.get("setup_quality")), 0.0),
+        "archetype": sig.get("archetype", "UNKNOWN"),
+        "regime": sig.get("market_regime") or snap.get("market", {}).get("regime"),
+        "snapshot": snap,
+        "rejected_reason": rejected_reason,
+        "outcome": outcome,
+    }
+    with _COG_LOCK:
+        _append_jsonl(_COG_EXPERIENCE_FILE, record, _COG_EXPERIENCE_BUFFER, 10000)
+        _COG_STATE["candidates"] = int(_COG_STATE.get("candidates", 0)) + 1
+    return record
+
+
+def record_trade_outcome(signal, outcome, source="binance"):
+    sig = dict(signal or {}) if isinstance(signal, dict) else {}
+    record = record_candidate_observation(sig, outcome=outcome, source=source)
+    record["type"] = "trade_outcome"
+    try:
+        with _COG_LOCK:
+            with _COG_EXPERIENCE_FILE.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False, allow_nan=False, default=str) + "\n")
+            _COG_STATE["labeled_outcomes"] = int(_COG_STATE.get("labeled_outcomes", 0)) + 1
+    except Exception as exc:
+        log.warning(f"[COG] trade outcome persist gagal: {exc}")
+    return record
+
+
+def _evidence_quality(source, sample_size=0):
+    base = {"binance_trade": 1.0, "binance_market": 0.85, "external": 0.55, "domain": 0.35}.get(source, 0.5)
+    return float(base * min(1.0, 0.35 + 0.65 * np.sqrt(max(sample_size, 1) / 100.0)))
+
+
+def evidence_discussion(evidence_items):
+    """Make heterogeneous evidence explicit: support, contradiction, uncertainty."""
+    rows = []
+    for item in evidence_items or []:
+        if not isinstance(item, dict):
+            continue
+        val = str(item.get("stance", "neutral")).lower()
+        if val not in {"support", "contradict", "neutral"}:
+            val = "neutral"
+        strength = _bounded(item.get("strength", 0.5))
+        reliability = _bounded(item.get("reliability", _evidence_quality(item.get("source", "external"), item.get("sample_size", 0))))
+        rows.append({**item, "stance": val, "weighted_strength": strength * reliability})
+    support = sum(x["weighted_strength"] for x in rows if x["stance"] == "support")
+    contradict = sum(x["weighted_strength"] for x in rows if x["stance"] == "contradict")
+    neutral = sum(x["weighted_strength"] for x in rows if x["stance"] == "neutral")
+    total = support + contradict + neutral
+    balance = (support - contradict) / max(total, 1e-9)
+    return {
+        "support": round(support, 5),
+        "contradict": round(contradict, 5),
+        "neutral": round(neutral, 5),
+        "balance": round(balance, 5),
+        "uncertainty": round(1.0 - min(1.0, abs(balance)), 5),
+        "items": rows,
+    }
+
+
+def _trade_path(record):
+    mfe = _finite_num(record.get("mfe_r"), 0.0)
+    mae = _finite_num(record.get("mae_r"), 0.0)
+    final_r = _finite_num(record.get("final_r"), 0.0)
+    giveback = _finite_num(record.get("giveback_r"), max(0.0, mfe - final_r))
+    return {
+        "mfe_r": mfe,
+        "mae_r": mae,
+        "final_r": final_r,
+        "giveback_r": max(0.0, giveback),
+        "giveback_ratio": max(0.0, giveback) / max(mfe, 1e-9) if mfe > 0 else 0.0,
+        "capture_ratio": final_r / mfe if mfe > 1e-9 else 0.0,
+    }
+
+
+def autopsy_trade(record, path_rows=None):
+    """Diagnose *why* a trade failed; never equates every SL with bad entry."""
+    rec = dict(record or {})
+    path = _trade_path(rec)
+    result = str(rec.get("result") or "").lower()
+    reasons = []
+    if path["mfe_r"] < 0.35 and result in {"sl", "loss", "strategy_error", "timeout"}:
+        reasons.append("ENTRY_OR_THESIS_FAILURE_LIKELY")
+    if path["mfe_r"] >= 1.0 and path["giveback_ratio"] >= 0.50:
+        reasons.append("MANAGEMENT_OR_PROTECTION_FAILURE_LIKELY")
+    if result in {"strategy_error", "execution_error", "data_error"}:
+        reasons.append("EXECUTION_OR_DATA_FAILURE")
+    if rec.get("cross_version"):
+        reasons.append("CROSS_VERSION_TRADE")
+    if not reasons:
+        reasons.append("AMBIGUOUS_FAILURE")
+    if path_rows:
+        rows = [x for x in path_rows if isinstance(x, dict)]
+        if rows:
+            max_protected = max((_finite_num(x.get("protected_r"), 0.0) for x in rows), default=0.0)
+            peak_before_loss = max((_finite_num(x.get("mfe_r"), 0.0) for x in rows), default=path["mfe_r"])
+            if peak_before_loss >= 1.0 and max_protected < peak_before_loss * 0.35:
+                reasons.append("TRAIL_CAPTURE_LOW")
+    diagnosis = {
+        "type": "autopsy",
+        "timestamp": time.time(),
+        "symbol": rec.get("symbol"),
+        "result": result,
+        "confidence": _finite_num(rec.get("confidence"), 50.0),
+        "archetype": rec.get("archetype"),
+        "regime": rec.get("market_regime", rec.get("regime")),
+        "path": path,
+        "reasons": sorted(set(reasons)),
+        "original_thesis": rec.get("thesis") or rec.get("research_snapshot", {}).get("thesis"),
+        "evidence": rec.get("research_snapshot", {}).get("evidence"),
+    }
+    with _COG_LOCK:
+        _append_jsonl(_COG_LESSON_FILE, diagnosis, _COG_LESSON_BUFFER, 5000)
+        _COG_STATE["autopsies"] = int(_COG_STATE.get("autopsies", 0)) + 1
+    return diagnosis
+
+
+def counterfactual_trade(record, changes=None):
+    """Evaluate a small alternative hypothesis without using future data in features."""
+    rec = dict(record or {})
+    ch = dict(changes or {})
+    path = _trade_path(rec)
+    final_r = path["final_r"]
+    simulated = final_r
+    notes = []
+    if ch.get("delay_entry_bars"):
+        delay = max(0, int(ch.get("delay_entry_bars")))
+        adverse = _finite_num(rec.get("mae_r"), 0.0)
+        simulated = final_r - 0.10 * min(delay, 5) * abs(adverse)
+        notes.append(f"entry_delay_{delay}")
+    if ch.get("require_reclaim") and not rec.get("research_snapshot", {}).get("evidence", {}).get("reclaim"):
+        simulated = min(simulated, 0.0)
+        notes.append("missing_reclaim_penalty")
+    if ch.get("trail_tighten_on_giveback"):
+        gb = path["giveback_ratio"]
+        if gb >= 0.50 and path["mfe_r"] > 1.0:
+            simulated = max(simulated, 0.25 * path["mfe_r"])
+            notes.append("hypothetical_giveback_protection")
+    out = {
+        "type": "counterfactual",
+        "timestamp": time.time(),
+        "symbol": rec.get("symbol"),
+        "changes": ch,
+        "actual_final_r": final_r,
+        "simulated_final_r": float(simulated),
+        "delta_r": float(simulated - final_r),
+        "notes": notes,
+        "causal_confidence": 0.25,
+    }
+    with _COG_LOCK:
+        _COG_STATE["counterfactuals"] = int(_COG_STATE.get("counterfactuals", 0)) + 1
+    return out
+
+
+def get_belief_state(name, condition="global", default_value=None):
+    key = f"{name}|{condition}"
+    with _COG_LOCK:
+        b = (_COG_BELIEFS.get("beliefs") or {}).get(key)
+        if isinstance(b, dict):
+            return dict(b)
+    return {
+        "name": name, "condition": condition, "value": default_value,
+        "strength": 0.20, "evidence_for": 0, "evidence_against": 0,
+        "last_revision": None,
+    }
+
+
+def revise_belief(name, observed_value, condition="global", evidence_strength=0.5, supports=True, source="unknown"):
+    """Gradual, revisable belief update; no hard lock and no single-event takeover."""
+    key = f"{name}|{condition}"
+    with _COG_LOCK:
+        beliefs = _COG_BELIEFS.setdefault("beliefs", {})
+        cur = beliefs.get(key, {
+            "name": name, "condition": condition, "value": observed_value,
+            "strength": 0.20, "evidence_for": 0, "evidence_against": 0,
+        })
+        old = _finite_num(cur.get("value"), _finite_num(observed_value))
+        strength = _bounded(cur.get("strength", 0.2), 0.0, 0.98)
+        e = _bounded(evidence_strength)
+        trust = 0.08 + 0.42 * e * (1.0 - 0.5 * strength)
+        new = old + trust * (_finite_num(observed_value) - old)
+        if supports:
+            cur["evidence_for"] = int(cur.get("evidence_for", 0)) + 1
+        else:
+            cur["evidence_against"] = int(cur.get("evidence_against", 0)) + 1
+        cur.update({
+            "value": float(new),
+            "strength": float(min(0.98, strength + 0.04 * e)),
+            "last_revision": time.time(),
+            "last_source": source,
+        })
+        beliefs[key] = cur
+        _COG_STATE["belief_revisions"] = int(_COG_STATE.get("belief_revisions", 0)) + 1
+        _cjson_save(_COG_BELIEF_FILE, _COG_BELIEFS)
+        _cjson_save(_COG_STATE_FILE, _COG_STATE)
+        return dict(cur)
+
+
+def _zscore_matrix(rows):
+    if not rows:
+        return np.empty((0, 0))
+    keys = sorted({k for r in rows for k in r if isinstance(r.get(k), (int, float, np.number, bool))})
+    if not keys:
+        return np.empty((len(rows), 0))
+    X = np.asarray([[ _finite_num(r.get(k), 0.0) for k in keys] for r in rows], dtype=float)
+    mu = np.mean(X, axis=0)
+    sd = np.std(X, axis=0)
+    sd[sd < 1e-9] = 1.0
+    return (X - mu) / sd, keys
+
+
+def discover_market_clusters(observations, k=3, max_iter=15):
+    """Lightweight k-means using only numpy; exploratory, not a live trade gate."""
+    rows = [r.get("features", {}) for r in observations or [] if isinstance(r, dict)]
+    rows = rows[-3000:]
+    z = _zscore_matrix(rows)
+    if isinstance(z, tuple):
+        X, keys = z
+    else:
+        X, keys = z, []
+    if X.size == 0 or len(X) < max(2, k):
+        return []
+    k = max(2, min(int(k), len(X)))
+    seeds = np.linspace(0, len(X) - 1, k, dtype=int)
+    centers = X[seeds].copy()
+    for _ in range(max_iter):
+        dist = ((X[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+        labels = np.argmin(dist, axis=1)
+        new_centers = []
+        for i in range(k):
+            subset = X[labels == i]
+            new_centers.append(np.mean(subset, axis=0) if len(subset) else centers[i])
+        new_centers = np.asarray(new_centers)
+        if np.max(np.abs(new_centers - centers)) < 1e-5:
+            centers = new_centers
+            break
+        centers = new_centers
+    out = []
+    for i in range(k):
+        idx = np.where(labels == i)[0]
+        if len(idx) == 0:
+            continue
+        centroid = centers[i]
+        ranked = np.argsort(np.abs(centroid))[::-1][:min(6, len(keys))]
+        signature = [{"feature": keys[j], "z": round(float(centroid[j]), 3)} for j in ranked]
+        out.append({"cluster": i, "samples": int(len(idx)), "signature": signature})
+    with _COG_LOCK:
+        _COG_STATE["market_clusters"] = out
+    return out
+
+
+def detect_feature_drift(reference_rows, recent_rows):
+    ref = [r.get("features", {}) for r in reference_rows or [] if isinstance(r, dict)]
+    rec = [r.get("features", {}) for r in recent_rows or [] if isinstance(r, dict)]
+    if not ref or not rec:
+        return {"status": "UNKNOWN", "score": 0.0, "features": []}
+    keys = sorted(set().union(*(r.keys() for r in ref + rec)))
+    diffs = []
+    for key in keys:
+        a = [_finite_num(r.get(key), 0.0) for r in ref]
+        b = [_finite_num(r.get(key), 0.0) for r in rec]
+        sa = np.std(a) or 1.0
+        d = abs(float(np.mean(b) - np.mean(a))) / sa
+        diffs.append((d, key))
+    diffs.sort(reverse=True)
+    score = _bounded(np.mean([min(d, 3.0) / 3.0 for d, _ in diffs]) if diffs else 0.0)
+    status = "HIGH" if score >= 0.45 else "MEDIUM" if score >= 0.25 else "LOW"
+    result = {"status": status, "score": round(float(score), 4), "features": [{"feature": k, "z_shift": round(float(d), 3)} for d, k in diffs[:10]]}
+    with _COG_LOCK:
+        _COG_STATE["drift"] = result
+    return result
+
+
+def build_evidence_discussion(signal, historical=None, lessons=None):
+    sig = signal if isinstance(signal, dict) else {}
+    items = []
+    q = _finite_num(sig.get("trade_quality", sig.get("setup_quality")), 0.0)
+    items.append({"source": "binance_market", "stance": "support" if q >= 70 else "neutral", "strength": q / 100.0, "sample_size": 1, "label": "current analytical quality"})
+    hist = historical or {}
+    if hist.get("expected_r") is not None:
+        ex = _finite_num(hist.get("expected_r"))
+        items.append({"source": "external", "stance": "support" if ex > 0 else "contradict", "strength": min(1.0, abs(ex) / 1.0), "sample_size": int(hist.get("sample", 0) or 0), "label": "historical conditional expectancy"})
+    lesson_rows = lessons or []
+    if lesson_rows:
+        failure_rate = _safe_mean([1.0 if "FAILURE" in str(x.get("reasons")) else 0.0 for x in lesson_rows], 0.0)
+        items.append({"source": "binance_trade", "stance": "contradict" if failure_rate > 0.5 else "neutral", "strength": failure_rate, "sample_size": len(lesson_rows), "label": "recent failure evidence"})
+    return evidence_discussion(items)
+
+
+def research_brain_cycle(observations=None, outcomes=None, current_signal=None):
+    """One bounded research cycle. It does not call any network/API."""
+    observations = observations or []
+    outcomes = outcomes or []
+    recent = observations[-250:] if len(observations) > 250 else observations
+    reference = observations[-1500:-250] if len(observations) > 500 else observations
+    clusters = discover_market_clusters(recent, k=3) if len(recent) >= 20 else []
+    drift = detect_feature_drift(reference, recent) if reference and recent else {"status": "UNKNOWN", "score": 0.0, "features": []}
+    lessons = []
+    for row in outcomes[-100:]:
+        if isinstance(row, dict) and row.get("type") == "trade_outcome":
+            lessons.append(autopsy_trade(row))
+    discussion = build_evidence_discussion(current_signal, lessons=lessons) if current_signal else {}
+    with _COG_LOCK:
+        _COG_STATE["research_cycles"] = int(_COG_STATE.get("research_cycles", 0)) + 1
+        _COG_STATE["last_cycle"] = time.time()
+        _cjson_save(_COG_STATE_FILE, _COG_STATE)
+    return {
+        "schema": FULL_LEARNING_SCHEMA,
+        "version": ML_COGNITIVE_VERSION,
+        "clusters": clusters,
+        "drift": drift,
+        "evidence_discussion": discussion,
+        "state": dict(_COG_STATE),
+    }
+
+
+def get_cognitive_status():
+    with _COG_LOCK:
+        return {
+            "version": ML_COGNITIVE_VERSION,
+            "schema": FULL_LEARNING_SCHEMA,
+            "state": dict(_COG_STATE),
+            "belief_count": len(_COG_BELIEFS.get("beliefs") or {}),
+            "experience_buffer": len(_COG_EXPERIENCE_BUFFER),
+            "lesson_buffer": len(_COG_LESSON_BUFFER),
+        }
+
+
+def get_learning_schema():
+    return {
+        "schema": MACHINE_LEARNING_SCHEMA,
+        "feature_names": list(ML_FEATURE_NAMES),
+        "count": len(ML_FEATURE_NAMES),
+        "point_in_time": True,
+        "network_access": False,
+    }
+
+
+
+def ingest_historical_ohlcv(path, source="external", symbol=None, interval_minutes=15, max_rows=50000):
+    """Ingest local historical OHLCV only; never performs a network request."""
+    fp = Path(path)
+    if not fp.exists() or not fp.is_file():
+        raise FileNotFoundError(str(fp))
+    if fp.suffix.lower() == ".csv":
+        df = pd.read_csv(fp)
+    elif fp.suffix.lower() in {".json", ".jsonl"}:
+        if fp.suffix.lower() == ".jsonl":
+            df = pd.DataFrame([json.loads(line) for line in fp.read_text(encoding="utf-8").splitlines() if line.strip()])
+        else:
+            obj = json.loads(fp.read_text(encoding="utf-8"))
+            df = pd.DataFrame(obj)
+    else:
+        raise ValueError("historical file must be CSV, JSON, or JSONL")
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    aliases = {"timestamp":"timestamp", "time":"timestamp", "datetime":"timestamp", "date":"timestamp"}
+    if "timestamp" not in df.columns:
+        for old, new in aliases.items():
+            if old in df.columns:
+                df = df.rename(columns={old:new}); break
+    required = {"open","high","low","close","volume"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f"missing OHLCV columns: {sorted(missing)}")
+    for col in required:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "timestamp" in df.columns:
+        ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        df["timestamp"] = ts
+        df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
+    else:
+        df = df.sort_index()
+    df = df.dropna(subset=list(required))
+    df = df[(df["high"] >= df[["open","close"]].max(axis=1)) & (df["low"] <= df[["open","close"]].min(axis=1))]
+    df = df.drop_duplicates(subset=["timestamp"] if "timestamp" in df.columns else None, keep="last")
+    if max_rows and len(df) > int(max_rows):
+        df = df.tail(int(max_rows)).copy()
+    features = extract_market_features(df, df, df)
+    rec = {
+        "type": "historical_dataset",
+        "source": source,
+        "symbol": symbol,
+        "interval_minutes": int(interval_minutes),
+        "rows": int(len(df)),
+        "start": df["timestamp"].iloc[0].isoformat() if "timestamp" in df.columns and len(df) else None,
+        "end": df["timestamp"].iloc[-1].isoformat() if "timestamp" in df.columns and len(df) else None,
+        "summary_features": features,
+    }
+    with _COG_LOCK:
+        _append_jsonl(_COG_EXPERIENCE_FILE, rec, _COG_EXPERIENCE_BUFFER, 10000)
+    return {"data": df, "record": rec}
+
+def reset_cognitive_memory():
+    """Reset learning memory/lessons, never trading state or primary trade ledger."""
+    global _COG_STATE, _COG_BELIEFS, _COG_EXPERIENCE_BUFFER, _COG_LESSON_BUFFER
+    with _COG_LOCK:
+        _COG_STATE = {
+            "schema": FULL_LEARNING_SCHEMA, "observations": 0, "candidates": 0,
+            "labeled_outcomes": 0, "autopsies": 0, "counterfactuals": 0,
+            "belief_revisions": 0, "research_cycles": 0, "market_clusters": [],
+            "last_cycle": None, "drift": {"status": "UNKNOWN", "score": 0.0},
+        }
+        _COG_BELIEFS = {"schema": FULL_LEARNING_SCHEMA, "beliefs": {}}
+        _COG_EXPERIENCE_BUFFER = []
+        _COG_LESSON_BUFFER = []
+        for path in (_COG_EXPERIENCE_FILE, _COG_LESSON_FILE):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        _cjson_save(_COG_STATE_FILE, _COG_STATE)
+        _cjson_save(_COG_BELIEF_FILE, _COG_BELIEFS)
+    return get_cognitive_status()
+
+
+_load_cognitive_state()
+
+# Preserve the battle-tested V26 public implementations and decorate their output
+# rather than replacing their core detector math.
+_BASE_FULL_ANALYZE_V26 = full_analyze
+_BASE_MANAGE_POSITION_V26 = manage_position
+
+
+def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
+                 df_d1: Optional[pd.DataFrame] = None,
+                 symbol: Optional[str] = None,
+                 df_btc_h1: Optional[pd.DataFrame] = None,
+                 trade_history: Optional[list] = None) -> Optional[dict]:
+    result = _BASE_FULL_ANALYZE_V26(df_h1, df_m15, df_d1, symbol=symbol, df_btc_h1=df_btc_h1, trade_history=trade_history)
+    if not isinstance(result, dict):
+        return result
+    try:
+        snap = build_research_snapshot(result, df_h1, df_m15, df_d1, symbol=symbol)
+        result["research_snapshot"] = snap
+        result["market_regime"] = snap["market"]["regime"]
+        result["evidence_balance"] = snap["evidence"]["evidence_balance"]
+        result["contradiction_evidence"] = snap["evidence"]["contradicting_evidence"]
+        result["supporting_evidence"] = snap["evidence"]["supporting_evidence"]
+        result["brain_version"] = ML_COGNITIVE_VERSION
+        result["belief_revision_ready"] = True
+        # Belief is advisory: it never overrides a hard safety condition.
+        cond = snap["market"]["regime"]
+        if cond != "UNKNOWN" and result.get("confidence") is not None:
+            b = get_belief("confidence_min", cond, default_value=60.0)
+            result["confidence_policy_belief"] = b
+            result["confidence_uncertainty"] = round(1.0 - _clamp(b.get("belief_strength", 0.35)), 3)
+        result["cognitive_schema"] = FULL_LEARNING_SCHEMA
+        result["cognitive_status"] = get_cognitive_status()
+        result["evidence_discussion"] = build_evidence_discussion(result)
+    except Exception as exc:
+        log.warning(f"[COGNITIVE] snapshot gagal: {exc}")
+    return result
+
+
+def manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
+                    df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
+    result = _BASE_MANAGE_POSITION_V26(state, df_m15, df_h1, df_d1, symbol=symbol)
+    if not isinstance(result, dict):
+        return result
+    try:
+        sig = state.get("signal", state) if isinstance(state, dict) else {}
+        current_r = _finite(result.get("profit_r", state.get("profit_r", 0.0) if isinstance(state, dict) else 0.0))
+        result["management_brain_version"] = ML_COGNITIVE_VERSION
+        result["trail_reasoning"] = {
+            "path_state": result.get("state"),
+            "current_r": round(current_r, 3),
+            "selected_source": result.get("trail_source"),
+            "action": result.get("action"),
+            "protects_only_if_improves": True,
+            "entry_model_reused": False,
+        }
+        result["trail_research_ready"] = True
+        result["cognitive_management"] = {
+            "position_health": result.get("state"),
+            "mfe_r": _finite_num(result.get("mfe_r", state.get("mfe_r", 0.0) if isinstance(state, dict) else 0.0)),
+            "giveback_ratio": _finite_num(result.get("giveback_ratio", 0.0)),
+            "action_explanation": result.get("reason"),
+        }
+    except Exception as exc:
+        log.warning(f"[COGNITIVE] trail annotation gagal: {exc}")
+    return result
+
+
+def compare_candidates(candidates):
+    """Global candidate comparison with quality, uncertainty, and contradiction penalties."""
+    rows = []
+    for c in candidates or []:
+        if not isinstance(c, dict):
+            continue
+        q = _finite(c.get("trade_quality", c.get("setup_quality")), 0.0)
+        conf = _finite(c.get("confidence"), 50.0)
+        unc = _finite(c.get("uncertainty"), 50.0)
+        rr = min(_finite(c.get("rr")), 6.0)
+        contradiction = _finite((c.get("thesis") or {}).get("contradiction_score"), 0.0)
+        dataq = _finite(c.get("research_snapshot", {}).get("data_quality", 1.0), 1.0)
+        score = q * 0.62 + conf * 0.16 + rr * 2.2 + dataq * 4.0 - contradiction * 0.55 - unc * 0.08
+        rows.append((score, c))
+    rows.sort(key=lambda x: x[0], reverse=True)
+    for rank, (score, c) in enumerate(rows, 1):
+        c["global_rank"] = rank
+        c["global_candidate_score"] = round(float(score), 3)
+    return [c for _, c in rows]
+
+
+def get_best_signal(candidates: list) -> Optional[dict]:
+    ranked = compare_candidates(candidates)
+    return ranked[0] if ranked else None
+
+
+def full_command(action, callbacks=None):
+    """Strategy-owned FULL command surface; main.py supplies only mode callbacks."""
+    callbacks = callbacks if isinstance(callbacks, dict) else {}
+    action = str(action or "status").strip().lower()
+    try:
+        if action == "reset":
+            fn = callbacks.get("reset")
+            response = fn() if callable(fn) else None
+            mem = reset_cognitive_memory()
+            return "🧠 <b>FULL RESET</b>\nMemori pembelajaran kognitif di-reset. Raw trading state/ledger tidak disentuh.\n\n" + _format_full_payload(response) + f"\nCognitive memory: <b>0</b>"
+        if action == "on":
+            fn = callbacks.get("on")
+            response = fn() if callable(fn) else None
+            return "🧠 <b>FULL LEARNING ON</b>\nOtak masuk mode belajar berkelanjutan: observe → hypothesize → test → autopsy → revise → validate.\n\n" + _format_full_payload(response)
+        if action == "off":
+            fn = callbacks.get("off")
+            response = fn() if callable(fn) else None
+            return "🧠 <b>FULL LEARNING OFF</b>\nPembelajaran dihentikan; model/champion terakhir dipertahankan.\n\n" + _format_full_payload(response)
+        if action in {"review", "research"}:
+            st = get_cognitive_status()
+            return ("🔬 <b>FULL RESEARCH</b>\n"
+                    f"Observations: <b>{st['state'].get('observations', 0)}</b>\n"
+                    f"Candidates: <b>{st['state'].get('candidates', 0)}</b>\n"
+                    f"Outcomes: <b>{st['state'].get('labeled_outcomes', 0)}</b>\n"
+                    f"Autopsies: <b>{st['state'].get('autopsies', 0)}</b>\n"
+                    f"Counterfactuals: <b>{st['state'].get('counterfactuals', 0)}</b>\n"
+                    f"Belief revisions: <b>{st['state'].get('belief_revisions', 0)}</b>\n"
+                    f"Drift: <b>{html.escape(str(st['state'].get('drift', {}).get('status', 'UNKNOWN')))}</b>")
+        fn = callbacks.get("status")
+        payload = fn() if callable(fn) else {}
+        st = get_cognitive_status()
+        if not isinstance(payload, dict):
+            payload = {"raw": payload}
+        payload = dict(payload)
+        payload.update({
+            "cognitive_version": st["version"],
+            "cognitive_observations": st["state"].get("observations", 0),
+            "cognitive_candidates": st["state"].get("candidates", 0),
+            "cognitive_outcomes": st["state"].get("labeled_outcomes", 0),
+            "autopsies": st["state"].get("autopsies", 0),
+            "belief_revisions": st["state"].get("belief_revisions", 0),
+            "drift": st["state"].get("drift", {}),
+        })
+        return "🧠 <b>FULL LEARNING STATUS</b>\n" + _format_full_payload(payload)
+    except Exception as exc:
+        log.exception("[FULL] command gagal")
+        return f"❌ <b>FULL gagal</b>\n<code>{html.escape(str(exc)[:400])}</code>"
+
+
+def _format_full_payload(payload):
+    if not isinstance(payload, dict):
+        return html.escape(str(payload))
+    mode = "ON" if payload.get("mode") else "OFF"
+    champ = payload.get("champion") or {}
+    model = champ.get("model_version", "Belum ada") if isinstance(champ, dict) else "Belum ada"
+    threshold = champ.get("confidence_min", payload.get("manual_threshold", "—")) if isinstance(champ, dict) else payload.get("manual_threshold", "—")
+    return (
+        f"Status: <b>{mode}</b>\n"
+        f"Champion: <code>{html.escape(str(model))}</code>\n"
+        f"Confidence min: <b>{html.escape(str(threshold))}%</b>\n"
+        f"Experience: <b>{int(payload.get('experience_samples', 0) or 0)}</b>\n"
+        f"Learning cycles: <b>{int(payload.get('learning_cycles', 0) or 0)}</b>\n"
+        f"Promotions: <b>{int(payload.get('promotion_count', 0) or 0)}</b>\n"
+        f"Beliefs: <b>{len(_FULL_BELIEFS.get('beliefs') or {})}</b>\n"
+        f"Belief revisions: <b>{int(_FULL_BELIEFS.get('revisions', 0) or 0)}</b>"
+    )
+
+
+# Keep exported public API explicit and stable for main.py /ganti validation.
+__all__ = [
+    "full_analyze", "manage_position", "get_best_signal", "score_direction", "swing_pts",
+    "set_learning_model", "get_learning_model_info", "full_command",
+    "build_research_snapshot", "autopsy_trade", "analyze_counterfactual",
+    "revise_belief", "get_belief", "compare_candidates", "ML_FEATURE_NAMES",
+    "extract_market_features", "record_market_observation", "record_candidate_observation",
+    "record_trade_outcome", "evidence_discussion", "get_belief_state", "revise_belief",
+    "discover_market_clusters", "detect_feature_drift", "research_brain_cycle",
+    "get_cognitive_status", "get_learning_schema", "reset_cognitive_memory", "ingest_historical_ohlcv",
+    "TRAIL_R_LADDER", "TRAIL_ENGINE_VERSION", "MIN_RR", "MAX_RR",
+]
