@@ -3038,12 +3038,9 @@ _top_coins_cached_at = 0.0
 _top_coins_cache_lock = threading.Lock()
 
 def _get_top_coins_impl():
-    """Ambil top coins. Saat Binance pause, seluruh scan berhenti.
-    Fallback Bybit/WS hanya boleh dipakai ketika Binance tidak sedang dalam global pause.
+    """Ambil top coins dengan cache/WS/Bybit-first saat Binance sedang pause.
+    Tidak melakukan request Binance ketika circuit breaker aktif.
     """
-    if _binance_is_scan_paused():
-        log.warning(f"[scan] DITAHAN — Binance cooldown aktif {_binance_cooldown_remaining():.0f}s")
-        return []
     global scan_counter, _top_coins_cached_symbols, _top_coins_cached_at
     with ban_lock:
         scan_counter += 1
@@ -3072,25 +3069,19 @@ def _get_top_coins_impl():
     if cached_syms and time.time() - cached_at <= _TOP_COINS_CACHE_TTL:
         return [s for s in cached_syms if s not in exclude_syms][:TOP_N_COINS]
 
-    # Binance REST
-    try:
-        coins = _binance_top_coins(exclude_syms)
-        if coins:
-            with _top_coins_cache_lock:
-                _top_coins_cached_symbols = list(coins)
-                _top_coins_cached_at = time.time()
-            return coins
-        if _binance_is_scan_paused():
-            log.warning("[top_coins/binance] kosong karena circuit breaker aktif — TIDAK fallback.")
-            return []
-        log.warning("[top_coins/binance] kosong, coba Bybit...")
-    except BinanceCooldownError:
-        log.warning("[top_coins/binance] rate-limit/ban — TIDAK fallback, scan cycle dihentikan.")
-        return []
-    except Exception as e:
-        log.warning(f"[top_coins/binance] {e}")
-        if _binance_is_scan_paused():
-            return []
+    paused = _binance_is_scan_paused()
+    if not paused:
+        try:
+            coins = _binance_top_coins(exclude_syms)
+            if coins:
+                with _top_coins_cache_lock:
+                    _top_coins_cached_symbols = list(coins)
+                    _top_coins_cached_at = time.time()
+                return coins
+        except BinanceCooldownError:
+            log.warning("[top_coins/binance] rate-limit/ban terdeteksi; pindah ke fallback tanpa retry Binance.")
+        except Exception as e:
+            log.warning(f"[top_coins/binance] {e}; pindah ke fallback tanpa retry Binance.")
     # Bybit fallback
     try:
         coins = _bybit_top_coins(exclude_syms)
@@ -4858,7 +4849,8 @@ def simulation_loop(chat_id):
 
     while auto_mode:
         if _binance_is_scan_paused():
-            time.sleep(5)
+            remaining = _binance_cooldown_remaining()
+            time.sleep(min(10.0, remaining) if remaining > 0 else 1.0)
             continue
         with positions_lock: full=len(positions)>=MAX_POSITIONS
         if full: time.sleep(5); continue
