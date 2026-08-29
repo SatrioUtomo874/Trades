@@ -3190,7 +3190,7 @@ def run_scan_once(chat_id):
         tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan."); return []
 
     data_started=time.monotonic(); results=[]; all_scan_confidences=[]; market_rows=[]
-    analyzed_symbols=cache_hits=cache_misses=failed_symbols=low_conf_count=below_threshold_count=0
+    processed_symbols=analyzed_symbols=cache_hits=cache_misses=failed_symbols=low_conf_count=below_threshold_count=0
     scan_deadline = scan_started + SCAN_MAX_DURATION_SEC
     for idx,sym in enumerate(symbols,1):
         if time.monotonic() >= scan_deadline:
@@ -3199,6 +3199,7 @@ def run_scan_once(chat_id):
         if _binance_is_scan_paused():
             log.warning("[scan] Binance pause aktif — scan cycle dihentikan di tengah jalan."); break
         log.info(f"[scan {idx:02d}/{len(symbols)}] {sym}")
+        processed_symbols += 1
         try:
             before=_scan_cache_stats()
             h1=get_scan_klines(sym,"1h",250); m15=get_scan_klines(sym,"15m",250)
