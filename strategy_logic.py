@@ -3648,7 +3648,7 @@ def build_research_snapshot(signal, h1=None, m15=None, d1=None, symbol=None):
         "snapshot_time": datetime.now(timezone.utc).isoformat(),
         "symbol": symbol or signal.get("symbol"),
         "strategy_version": ML_COGNITIVE_VERSION,
-        "model_version": signal.get("learning_model_version", signal.get("learning_prediction", {}).get("model_version", "static")),
+        "model_version": signal.get("learning_model_version") or (signal.get("learning_prediction") or {}).get("model_version", "static"),
         "decision": signal.get("decision"),
         "confidence": _finite(signal.get("confidence"), 50.0),
         "raw_confidence": _finite(signal.get("direction_confidence", signal.get("confidence")), 50.0),
