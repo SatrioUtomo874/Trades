@@ -68,7 +68,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-ML_COGNITIVE_VERSION = "V28_COGNITIVE"
+ML_COGNITIVE_VERSION = "V29_COGNITIVE"
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
 
 
@@ -2611,8 +2611,8 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "decision": "BUY" if up else "SELL",
             "confidence": confidence,
             "direction_confidence": max(0, min(99, base_confidence)),
-            "setup_quality": int(round(best_eval.get("thesis", {}).get("trade_quality", best_eval.get("setup_quality", 0)))),
-            "trade_quality": round(float(best_eval.get("thesis", {}).get("trade_quality", 0.0)), 2),
+            "setup_quality": int(round((best_eval.get("thesis") or {}).get("trade_quality", best_eval.get("setup_quality", 0)))),
+            "trade_quality": round(float((best_eval.get("thesis") or {}).get("trade_quality", 0.0)), 2),
             "archetype": best_eval.get("archetype", "STRUCTURE_REACTION"),
             "thesis": best_eval.get("thesis", {}),
             "regime_profile": best_eval.get("regime", {}),
@@ -3361,7 +3361,7 @@ def validate_and_adjust_geometry(
 # comparison, richer research snapshots, and FULL command interface.
 # This layer is deliberately execution-free and Binance-free.
 
-ML_COGNITIVE_VERSION = "V28_COGNITIVE"
+ML_COGNITIVE_VERSION = "V29_COGNITIVE"
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
 FULL_BELIEF_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 FULL_BELIEF_FILE = FULL_BELIEF_DIR / "belief_state.json"
@@ -3667,8 +3667,8 @@ def build_research_snapshot(signal, h1=None, m15=None, d1=None, symbol=None):
             "tp": _finite(signal.get("tp")),
             "rr": _finite(signal.get("rr")),
             "atr": _finite(signal.get("atr")),
-            "entry_distance_atr": _finite(signal.get("learning_features", {}).get("entry_distance_atr")),
-            "risk_atr": _finite(signal.get("learning_features", {}).get("risk_atr")),
+            "entry_distance_atr": _finite((signal.get("learning_features") or {}).get("entry_distance_atr")),
+            "risk_atr": _finite((signal.get("learning_features") or {}).get("risk_atr")),
         },
         "thesis": signal.get("thesis", {}),
         "uncertainty": _finite(signal.get("uncertainty"), 0.5),
@@ -3705,6 +3705,19 @@ _COG_BELIEFS = {"schema": FULL_LEARNING_SCHEMA, "beliefs": {}}
 _COG_EXPERIENCE_BUFFER = []
 _COG_LESSON_BUFFER = []
 
+# Autonomous FULL cognitive worker. It NEVER calls Binance/network; it only
+# processes locally buffered experiences, builds research hypotheses, and
+# revises cognitive state. Trading/execution remains owned by main.py.
+_FULL_COG_THREAD = None
+_FULL_COG_STOP = threading.Event()
+_FULL_COG_WAKE = threading.Event()
+_FULL_COG_LOCK = threading.RLock()
+_FULL_COG_INTERVAL_SEC = 5.0
+_FULL_COG_LAST_SIGNATURE = None
+_FULL_COG_LAST_ERROR = None
+_FULL_COG_TICKS = 0
+_FULL_COG_LAST_RESULT = {}
+
 
 def _cjson_load(path, default):
     try:
@@ -3723,6 +3736,115 @@ def _cjson_save(path, payload):
         os.replace(tmp, path)
     except Exception as exc:
         log.warning(f"[COG] save gagal {path.name}: {exc}")
+
+
+def _full_cognitive_signature():
+    with _COG_LOCK:
+        return (
+            int(_COG_STATE.get("observations", 0) or 0),
+            int(_COG_STATE.get("candidates", 0) or 0),
+            int(_COG_STATE.get("labeled_outcomes", 0) or 0),
+            int(_COG_STATE.get("autopsies", 0) or 0),
+            int(_COG_STATE.get("counterfactuals", 0) or 0),
+            int(_COG_STATE.get("belief_revisions", 0) or 0),
+        )
+
+
+def _full_cognitive_tick():
+    """Run one local-only FULL learning/research cycle.
+
+    It deliberately does not change live trading parameters. Its purpose is
+    to continuously process observations/outcomes, find contradictions and
+    lessons, and maintain a research state that can later be consumed by the
+    model-training layer.
+    """
+    global _FULL_COG_TICKS, _FULL_COG_LAST_RESULT, _FULL_COG_LAST_ERROR
+    with _COG_LOCK:
+        obs = list(_COG_EXPERIENCE_BUFFER)
+    outcomes = [r for r in obs if isinstance(r, dict) and r.get("type") == "trade_outcome"]
+    candidates = [r for r in obs if isinstance(r, dict) and r.get("type") == "candidate"]
+    market_obs = [r for r in obs if isinstance(r, dict) and r.get("type") == "market_observation"]
+    # Use recent local evidence; no network and bounded work.
+    recent = obs[-1000:]
+    research = research_brain_cycle(
+        observations=recent,
+        outcomes=outcomes[-200:],
+        current_signal=(candidates[-1] if candidates else None),
+    )
+    # Learn from the distribution of actual outcomes without turning that
+    # observation into a hard threshold change. This keeps FULL adaptive rather
+    # than chronically tightening the live gate.
+    if outcomes:
+        rs = []
+        for row in outcomes[-200:]:
+            payload = row.get("outcome") if isinstance(row.get("outcome"), dict) else row
+            rs.append(_finite_num(payload.get("final_r"), _finite_num(payload.get("r"), 0.0)))
+        positive_rate = sum(1 for x in rs if x > 0) / max(1, len(rs))
+        revise_belief(
+            "positive_outcome_rate", positive_rate, condition="rolling",
+            evidence_strength=min(0.90, len(rs) / 200.0),
+            source="binance_trade", reason="continuous FULL outcome review",
+            sample_increment=max(1, len(rs)),
+        )
+    with _COG_LOCK:
+        _COG_STATE["observations"] = max(int(_COG_STATE.get("observations", 0) or 0), len(market_obs))
+        _COG_STATE["candidates"] = max(int(_COG_STATE.get("candidates", 0) or 0), len(candidates))
+        _COG_STATE["labeled_outcomes"] = max(int(_COG_STATE.get("labeled_outcomes", 0) or 0), len(outcomes))
+        _COG_STATE["last_cycle"] = time.time()
+        _COG_STATE["full_worker_ticks"] = int(_COG_STATE.get("full_worker_ticks", 0) or 0) + 1
+        _COG_STATE["last_worker_mode"] = "ACTIVE"
+        _cjson_save(_COG_STATE_FILE, _COG_STATE)
+    _FULL_COG_TICKS += 1
+    _FULL_COG_LAST_ERROR = None
+    _FULL_COG_LAST_RESULT = research
+    return research
+
+
+def _full_cognitive_loop():
+    global _FULL_COG_LAST_ERROR, _FULL_COG_LAST_RESULT
+    while not _FULL_COG_STOP.is_set():
+        try:
+            if _full_cognitive_signature() != _FULL_COG_LAST_SIGNATURE:
+                _FULL_COG_LAST_RESULT = _full_cognitive_tick()
+                globals()["_FULL_COG_LAST_SIGNATURE"] = _full_cognitive_signature()
+        except Exception as exc:
+            _FULL_COG_LAST_ERROR = str(exc)[:500]
+            log.exception("[FULL COG] learning tick gagal")
+        _FULL_COG_WAKE.wait(_FULL_COG_INTERVAL_SEC)
+        _FULL_COG_WAKE.clear()
+
+
+def _start_full_cognitive_worker():
+    global _FULL_COG_THREAD
+    with _FULL_COG_LOCK:
+        if _FULL_COG_THREAD is None or not _FULL_COG_THREAD.is_alive():
+            _FULL_COG_STOP.clear()
+            _FULL_COG_WAKE.set()
+            _FULL_COG_THREAD = threading.Thread(
+                target=_full_cognitive_loop, name="full-cognitive", daemon=True
+            )
+            _FULL_COG_THREAD.start()
+        else:
+            _FULL_COG_WAKE.set()
+
+
+def _stop_full_cognitive_worker():
+    _FULL_COG_STOP.set()
+    _FULL_COG_WAKE.set()
+
+
+def get_full_cognitive_status():
+    thread_alive = bool(_FULL_COG_THREAD is not None and _FULL_COG_THREAD.is_alive())
+    with _COG_LOCK:
+        return {
+            "worker_alive": thread_alive,
+            "worker_ticks": int(_COG_STATE.get("full_worker_ticks", 0) or 0),
+            "last_cycle": _COG_STATE.get("last_cycle"),
+            "last_error": _FULL_COG_LAST_ERROR,
+            "last_result": dict(_FULL_COG_LAST_RESULT or {}),
+        }
+
+
 
 
 def _load_cognitive_state():
@@ -3844,7 +3966,7 @@ def record_candidate_observation(signal, outcome=None, rejected_reason=None, sou
         "confidence": _finite_num(sig.get("confidence"), 50.0),
         "quality": _finite_num(sig.get("trade_quality", sig.get("setup_quality")), 0.0),
         "archetype": sig.get("archetype", "UNKNOWN"),
-        "regime": sig.get("market_regime") or snap.get("market", {}).get("regime"),
+        "regime": sig.get("market_regime") or (snap.get("market") or {}).get("regime"),
         "snapshot": snap,
         "rejected_reason": rejected_reason,
         "outcome": outcome,
@@ -3971,7 +4093,7 @@ def counterfactual_trade(record, changes=None):
         adverse = _finite_num(rec.get("mae_r"), 0.0)
         simulated = final_r - 0.10 * min(delay, 5) * abs(adverse)
         notes.append(f"entry_delay_{delay}")
-    if ch.get("require_reclaim") and not rec.get("research_snapshot", {}).get("evidence", {}).get("reclaim"):
+    if ch.get("require_reclaim") and not (rec.get("research_snapshot") or {}).get("evidence", {}).get("reclaim"):
         simulated = min(simulated, 0.0)
         notes.append("missing_reclaim_penalty")
     if ch.get("trail_tighten_on_giveback"):
@@ -4235,6 +4357,7 @@ def ingest_historical_ohlcv(path, source="external", symbol=None, interval_minut
 
 def reset_cognitive_memory():
     """Reset learning memory/lessons, never trading state or primary trade ledger."""
+    _stop_full_cognitive_worker()
     global _COG_STATE, _COG_BELIEFS, _COG_EXPERIENCE_BUFFER, _COG_LESSON_BUFFER
     with _COG_LOCK:
         _COG_STATE = {
@@ -4246,6 +4369,7 @@ def reset_cognitive_memory():
         _COG_BELIEFS = {"schema": FULL_LEARNING_SCHEMA, "beliefs": {}}
         _COG_EXPERIENCE_BUFFER = []
         _COG_LESSON_BUFFER = []
+        _COG_SEEN_OUTCOME_KEYS.clear() if "_COG_SEEN_OUTCOME_KEYS" in globals() else None
         for path in (_COG_EXPERIENCE_FILE, _COG_LESSON_FILE):
             try:
                 path.unlink(missing_ok=True)
@@ -4335,7 +4459,7 @@ def compare_candidates(candidates):
         unc = _finite(c.get("uncertainty"), 50.0)
         rr = min(_finite(c.get("rr")), 6.0)
         contradiction = _finite((c.get("thesis") or {}).get("contradiction_score"), 0.0)
-        dataq = _finite(c.get("research_snapshot", {}).get("data_quality", 1.0), 1.0)
+        dataq = _finite((c.get("research_snapshot") or {}).get("data_quality", 1.0), 1.0)
         score = q * 0.62 + conf * 0.16 + rr * 2.2 + dataq * 4.0 - contradiction * 0.55 - unc * 0.08
         rows.append((score, c))
     rows.sort(key=lambda x: x[0], reverse=True)
@@ -4356,6 +4480,7 @@ def full_command(action, callbacks=None):
     action = str(action or "status").strip().lower()
     try:
         if action == "reset":
+            _stop_full_cognitive_worker()
             fn = callbacks.get("reset")
             response = fn() if callable(fn) else None
             mem = reset_cognitive_memory()
@@ -4363,8 +4488,10 @@ def full_command(action, callbacks=None):
         if action == "on":
             fn = callbacks.get("on")
             response = fn() if callable(fn) else None
-            return "🧠 <b>FULL LEARNING ON</b>\nOtak masuk mode belajar berkelanjutan: observe → hypothesize → test → autopsy → revise → validate.\n\n" + _format_full_payload(response)
+            _start_full_cognitive_worker()
+            return "🧠 <b>FULL LEARNING ON</b>\nOtak masuk mode belajar berkelanjutan: observe → hypothesize → test → autopsy → revise → validate.\nTidak menutup posisi dan tidak melakukan request Binance.\n\n" + _format_full_payload(response)
         if action == "off":
+            _stop_full_cognitive_worker()
             fn = callbacks.get("off")
             response = fn() if callable(fn) else None
             return "🧠 <b>FULL LEARNING OFF</b>\nPembelajaran dihentikan; model/champion terakhir dipertahankan.\n\n" + _format_full_payload(response)
@@ -4392,6 +4519,7 @@ def full_command(action, callbacks=None):
             "autopsies": st["state"].get("autopsies", 0),
             "belief_revisions": st["state"].get("belief_revisions", 0),
             "drift": st["state"].get("drift", {}),
+            "cognitive_worker": get_full_cognitive_status(),
         })
         return "🧠 <b>FULL LEARNING STATUS</b>\n" + _format_full_payload(payload)
     except Exception as exc:
@@ -4406,6 +4534,9 @@ def _format_full_payload(payload):
     champ = payload.get("champion") or {}
     model = champ.get("model_version", "Belum ada") if isinstance(champ, dict) else "Belum ada"
     threshold = champ.get("confidence_min", payload.get("manual_threshold", "—")) if isinstance(champ, dict) else payload.get("manual_threshold", "—")
+    worker = payload.get("cognitive_worker") or {}
+    worker_state = "ACTIVE" if worker.get("worker_alive") else "OFF"
+    ticks = int(worker.get("worker_ticks", 0) or 0)
     return (
         f"Status: <b>{mode}</b>\n"
         f"Champion: <code>{html.escape(str(model))}</code>\n"
@@ -4414,8 +4545,67 @@ def _format_full_payload(payload):
         f"Learning cycles: <b>{int(payload.get('learning_cycles', 0) or 0)}</b>\n"
         f"Promotions: <b>{int(payload.get('promotion_count', 0) or 0)}</b>\n"
         f"Beliefs: <b>{len(_FULL_BELIEFS.get('beliefs') or {})}</b>\n"
-        f"Belief revisions: <b>{int(_FULL_BELIEFS.get('revisions', 0) or 0)}</b>"
+        f"Belief revisions: <b>{int(_FULL_BELIEFS.get('revisions', 0) or 0)}</b>\n"
+        f"Cognitive worker: <b>{worker_state}</b>\n"
+        f"Research ticks: <b>{ticks}</b>"
     )
+
+
+# =============================================================================
+# LIVE EXPERIENCE BRIDGE
+# Main.py may call these hooks after each scan/close. They never access Binance.
+# =============================================================================
+_COG_SEEN_OUTCOME_KEYS = set()
+
+def ingest_live_candidate(signal, h1=None, m15=None, d1=None, rejected_reason=None, source="binance"):
+    """Record a decision/candidate snapshot for FULL without requiring execution."""
+    sig = dict(signal or {}) if isinstance(signal, dict) else {}
+    try:
+        snap = build_research_snapshot(sig, h1=h1, m15=m15, d1=d1, symbol=sig.get("symbol"))
+    except Exception:
+        snap = sig.get("research_snapshot") if isinstance(sig.get("research_snapshot"), dict) else {}
+    sig["research_snapshot"] = snap if isinstance(snap, dict) else {}
+    return record_candidate_observation(sig, rejected_reason=rejected_reason, source=source)
+
+def ingest_live_outcome(signal, outcome, source="binance"):
+    """Record one actual close outcome, deduplicated by trade uid/timestamps."""
+    sig = dict(signal or {}) if isinstance(signal, dict) else {}
+    key = str(sig.get("trade_uid") or f"{sig.get('symbol','')}|{sig.get('entry_time','')}|{sig.get('exit_time','')}|{outcome}")
+    if key in _COG_SEEN_OUTCOME_KEYS:
+        return None
+    _COG_SEEN_OUTCOME_KEYS.add(key)
+    return record_trade_outcome(sig, outcome=outcome, source=source)
+
+def full_learning_review(max_rows=2000):
+    """Offline self-review over local cognitive experience; no exchange/network calls."""
+    rows = []
+    try:
+        if _COG_EXPERIENCE_FILE.exists():
+            with _COG_EXPERIENCE_FILE.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict):
+                            rows.append(obj)
+                    except Exception:
+                        continue
+        rows = rows[-max(1, int(max_rows)):]
+    except Exception as exc:
+        log.warning(f"[FULL REVIEW] load gagal: {exc}")
+        return {"status": "ERROR", "error": str(exc)}
+    outcomes = [r for r in rows if r.get("type") == "trade_outcome"]
+    wins = [r for r in outcomes if _finite(r.get("outcome", {}).get("final_r"), _finite(r.get("final_r"), 0.0)) > 0] if outcomes else []
+    losses = [r for r in outcomes if r not in wins]
+    # Review a few high-value beliefs gradually. These are beliefs, not hard rules.
+    if outcomes:
+        win_rate = len(wins) / max(1, len(outcomes))
+        revise_belief("trade_positive_rate", win_rate, condition="observed", evidence_strength=min(0.9, len(outcomes)/200), source="binance_trade", reason="rolling outcome review", sample_increment=len(outcomes))
+    status = "READY" if outcomes else "OBSERVING"
+    with _COG_LOCK:
+        _COG_STATE["research_cycles"] = int(_COG_STATE.get("research_cycles", 0)) + 1
+        _COG_STATE["last_cycle"] = time.time()
+        _cjson_save(_COG_STATE_FILE, _COG_STATE)
+    return {"status": status, "rows": len(rows), "outcomes": len(outcomes), "wins": len(wins), "losses": len(losses)}
 
 
 # Keep exported public API explicit and stable for main.py /ganti validation.
@@ -4427,6 +4617,8 @@ __all__ = [
     "extract_market_features", "record_market_observation", "record_candidate_observation",
     "record_trade_outcome", "evidence_discussion", "get_belief_state", "revise_belief",
     "discover_market_clusters", "detect_feature_drift", "research_brain_cycle",
+    "get_full_cognitive_status", "ingest_historical_ohlcv", "full_learning_review",
     "get_cognitive_status", "get_learning_schema", "reset_cognitive_memory", "ingest_historical_ohlcv",
+    "ingest_live_candidate", "ingest_live_outcome", "full_learning_review",
     "TRAIL_R_LADDER", "TRAIL_ENGINE_VERSION", "MIN_RR", "MAX_RR",
 ]
