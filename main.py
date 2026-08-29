@@ -999,13 +999,15 @@ def _market_context_snapshot(run_id=None):
 def _summarize_market_context(rows):
     rows=[dict(x) for x in (rows or [])]
     analyzed=len(rows)
-    bull=sum(1 for x in rows if str(x.get("decision") or "").upper()=="BUY")
-    bear=sum(1 for x in rows if str(x.get("decision") or "").upper()=="SELL")
-    neutral=max(0, analyzed-bull-bear)
+    decision_rows=[x for x in rows if str(x.get("decision") or "").upper() in {"BUY","SELL"}]
+    decision_count=len(decision_rows)
+    bull=sum(1 for x in decision_rows if str(x.get("decision") or "").upper()=="BUY")
+    bear=sum(1 for x in decision_rows if str(x.get("decision") or "").upper()=="SELL")
+    neutral=max(0, decision_count-bull-bear)
     def med(key):
         vals=[float(x[key]) for x in rows if x.get(key) is not None]
         return float(np.median(vals)) if vals else None
-    breadth=(bull-bear)/analyzed if analyzed else 0.0
+    breadth=(bull-bear)/decision_count if decision_count else 0.0
     eff=med("efficiency_4h") or 0.0
     rr=med("range_expansion_ratio") or 1.0
     avg_rv=float(np.mean([float(x["relative_volume"]) for x in rows if x.get("relative_volume") is not None])) if any(x.get("relative_volume") is not None for x in rows) else None
@@ -1013,18 +1015,18 @@ def _summarize_market_context(rows):
     med_r4=med("price_4h_pct")
     if analyzed==0:
         regime="unknown"
-    elif abs(breadth)>=0.35 and eff>=0.45:
+    elif abs(breadth)>=0.35 and eff>=0.45 and decision_count>0:
         regime="bullish expansion" if breadth>0 else "bearish expansion"
     elif abs(breadth)<=0.15 and eff<=0.35:
         regime="range/compression"
-    elif abs(breadth)>=0.20:
+    elif abs(breadth)>=0.20 and decision_count>0:
         regime="bullish trend" if breadth>0 else "bearish trend"
     else:
         regime="transition"
     btc=[x for x in rows if str(x.get("symbol"))=="BTCUSDT"]
     btc1=btc[0].get("price_1h_pct") if btc else None
     btc4=btc[0].get("price_4h_pct") if btc else None
-    return {"market_regime":regime,"bullish_breadth_pct":100*bull/analyzed if analyzed else None,"bearish_breadth_pct":100*bear/analyzed if analyzed else None,"neutral_breadth_pct":100*neutral/analyzed if analyzed else None,"breadth_score":breadth,"median_price_1h_pct":med_r1,"median_price_4h_pct":med_r4,"median_efficiency_4h":eff,"median_range_expansion_ratio":rr,"avg_relative_volume":avg_rv,"btc_price_1h_pct":btc1,"btc_price_4h_pct":btc4,"analyzed_symbols":analyzed}
+    return {"market_regime":regime,"bullish_breadth_pct":100*bull/decision_count if decision_count else None,"bearish_breadth_pct":100*bear/decision_count if decision_count else None,"neutral_breadth_pct":100*neutral/decision_count if decision_count else None,"breadth_score":breadth,"median_price_1h_pct":med_r1,"median_price_4h_pct":med_r4,"median_efficiency_4h":eff,"median_range_expansion_ratio":rr,"avg_relative_volume":avg_rv,"btc_price_1h_pct":btc1,"btc_price_4h_pct":btc4,"analyzed_symbols":analyzed}
 
 def _record_trail_event(sym, pos, update, old_sl, new_sl, status="APPLIED", error=None):
     global trail_event_sequence
@@ -3205,11 +3207,15 @@ def run_scan_once(chat_id):
             except Exception: d1=None
             after=_scan_cache_stats(); cache_misses += max(0,after[0]-before[0])
             r=full_analyze(h1,m15,d1,symbol=sym)
+            # Market-context telemetry belongs to every successfully loaded chart,
+            # not only to symbols where strategy_logic returned a trade candidate.
+            # This keeps market context meaningful even when no setup is produced.
+            row=_market_feature_row(sym,h1,m15,r if isinstance(r,dict) else {})
+            row.update({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter})
+            market_rows.append(row)
             if isinstance(r,dict):
                 _ml_record_signal_metadata(r)
                 analyzed_symbols+=1; conf=float(r.get("confidence",0) or 0); all_scan_confidences.append(conf)
-                row=_market_feature_row(sym,h1,m15,r)
-                row.update({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter})
                 lf = r.setdefault("learning_features", {})
                 lf.update({
                     "market_bull_breadth": float(row.get("bullish_breadth_pct") or 0.0) / 100.0,
@@ -3221,7 +3227,6 @@ def run_scan_once(chat_id):
                     "symbol_rs_1h": float(row.get("relative_strength_1h_pct") or 0.0) if row.get("relative_strength_1h_pct") is not None else 0.0,
                     "symbol_rs_4h": float(row.get("relative_strength_4h_pct") or 0.0) if row.get("relative_strength_4h_pct") is not None else 0.0,
                 })
-                market_rows.append(row)
                 # Every analyzed candidate is retained for cognitive learning,
                 # even when it is below the live threshold. No network call here.
                 try:
@@ -3296,11 +3301,16 @@ def run_scan_once(chat_id):
             scan_quality_history[-1]["warmup_reject_scan"]=warmup_active
 
     results.sort(key=lambda x:float(x.get("confidence",0) or 0),reverse=True)
-    avg_txt=f"{avg_conf:.1f}%" if avg_conf is not None else "—"
-    breadth_txt=(f"📈 Breadth BUY <b>{mc['bullish_breadth_pct']:.1f}%</b> | SELL <b>{mc['bearish_breadth_pct']:.1f}%</b> | Regime: <b>{mc['market_regime']}</b>" if mc.get('bullish_breadth_pct') is not None else "📈 Market context: <b>insufficient data</b>")
+    avg_txt=f"{avg_conf:.1f}%" if avg_conf is not None else "belum tersedia (0 analisa strategy valid)"
+    if mc.get('bullish_breadth_pct') is not None:
+        breadth_txt=(f"📈 Breadth BUY <b>{mc['bullish_breadth_pct']:.1f}%</b> | SELL <b>{mc['bearish_breadth_pct']:.1f}%</b> | Regime: <b>{mc['market_regime']}</b>")
+    elif market_rows:
+        breadth_txt=(f"📈 Breadth BUY <b>—</b> | SELL <b>—</b> | Regime: <b>{mc.get('market_regime','unknown')}</b> | arah belum cukup untuk breadth")
+    else:
+        breadth_txt="📈 Market context: <b>belum tersedia</b>"
     rs_txt=(f"\n₿ BTC 1h: <b>{mc['btc_price_1h_pct']:+.2f}%</b> | BTC 4h: <b>{mc['btc_price_4h_pct']:+.2f}%</b>" if mc.get('btc_price_1h_pct') is not None else "")
     active_threshold = int((_ml_current_champion() or {}).get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD)) if FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD
-    scan_meta=f"\n\n📊 Rata-rata confidence scan: <b>{avg_txt}</b> ({analyzed_symbols}/{len(symbols)} dianalisis)\nThreshold aktif: <b>{active_threshold}%</b>\n{breadth_txt}{rs_txt}"
+    scan_meta=f"\n\n📊 Scan: <b>{TOP_N_COINS}</b> diminta | <b>{len(symbols)}</b> tersedia | <b>{processed_symbols}</b> diproses | <b>{analyzed_symbols}</b> analisa strategy valid\n🧠 Rata-rata confidence scan: <b>{avg_txt}</b>\nThreshold aktif: <b>{active_threshold}%</b>\n{breadth_txt}{rs_txt}"
     if warmup_active: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> signal qualified dari scan ini ditolak"
     if not results:
         tg_send(chat_id,f"⚠️ Tidak ada setup dengan confidence ≥ {active_threshold}%."+scan_meta); return []
@@ -3768,7 +3778,7 @@ def _write_research_support_files(summary):
     market_rows = _market_context_snapshot(run_id)
 
     trail_cols = ["event_id","trade_uid","run_id","event_time","symbol","decision","entry","initial_sl","old_sl","new_sl","tp","current_price","current_r","mfe_r","mae_r","giveback_r","giveback_ratio","protected_r","atr","sl_distance_atr","weakness_score","state","trade_phase","trail_source","reasons","relative_volume","candidate_type","status","error_code","error_message","time_since_entry_sec","time_since_previous_trail_sec","distance_to_tp_r"]
-    scan_cols = ["scan_time","run_id","scan_counter","symbols_requested","symbols_analyzed","failed_symbols","avg_confidence","min_confidence","max_confidence","low_confidence_count","below_threshold_count","qualified_count","early_rejected_count","cache_entries","cache_fresh","market_regime","bullish_breadth_pct","bearish_breadth_pct","neutral_breadth_pct","breadth_score","median_price_1h_pct","median_price_4h_pct","median_efficiency_4h","median_range_expansion_ratio","avg_relative_volume","btc_price_1h_pct","btc_price_4h_pct"]
+    scan_cols = ["scan_time","run_id","scan_counter","symbols_requested","symbols_available","symbols_processed","symbols_analyzed","failed_symbols","avg_confidence","min_confidence","max_confidence","low_confidence_count","below_threshold_count","qualified_count","early_rejected_count","cache_entries","cache_fresh","market_regime","bullish_breadth_pct","bearish_breadth_pct","neutral_breadth_pct","breadth_score","median_price_1h_pct","median_price_4h_pct","median_efficiency_4h","median_range_expansion_ratio","avg_relative_volume","btc_price_1h_pct","btc_price_4h_pct"]
     low_cols = ["event_time","run_id","scan_counter","symbol","confidence","confidence_min","cutoff","decision","entry_label"]
     market_cols = ["scan_time","run_id","scan_counter","symbol","decision","confidence","entry_label","struct_h1","d1_bias","price_1h_pct","price_4h_pct","efficiency_4h","atr_pct","relative_volume","range_expansion_ratio","volatility_ratio","chart_regime","directional_bias","relative_strength_1h_pct","relative_strength_4h_pct"]
 
