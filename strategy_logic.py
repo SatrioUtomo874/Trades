@@ -61,14 +61,18 @@ import os
 import json
 import time
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 import html
 import pandas as pd
 import numpy as np
 
 log = logging.getLogger(__name__)
 
-ML_COGNITIVE_VERSION = "V29_COGNITIVE"
+ML_COGNITIVE_VERSION = "V31_TIME_AWARE_COGNITIVE"
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
 
 
@@ -3361,7 +3365,7 @@ def validate_and_adjust_geometry(
 # comparison, richer research snapshots, and FULL command interface.
 # This layer is deliberately execution-free and Binance-free.
 
-ML_COGNITIVE_VERSION = "V29_COGNITIVE"
+ML_COGNITIVE_VERSION = "V31_TIME_AWARE_COGNITIVE"
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
 FULL_BELIEF_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 FULL_BELIEF_FILE = FULL_BELIEF_DIR / "belief_state.json"
@@ -3646,6 +3650,7 @@ def build_research_snapshot(signal, h1=None, m15=None, d1=None, symbol=None):
     snapshot = {
         "schema": FULL_LEARNING_SCHEMA,
         "snapshot_time": datetime.now(timezone.utc).isoformat(),
+        "time_context": extract_time_context(df=m15),
         "symbol": symbol or signal.get("symbol"),
         "strategy_version": ML_COGNITIVE_VERSION,
         "model_version": signal.get("learning_model_version") or (signal.get("learning_prediction") or {}).get("model_version", "static"),
@@ -3900,8 +3905,151 @@ def _last_row_features(df):
     return out
 
 
+
+# =============================================================================
+# TIME-OF-DAY / SESSION CONTEXT
+# =============================================================================
+FULL_TIMEZONE_NAME = os.getenv("FULL_TIMEZONE", "Asia/Jakarta")
+
+def _full_timezone():
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(FULL_TIMEZONE_NAME)
+        except Exception:
+            pass
+    return timezone(timedelta(hours=7))
+
+
+def _timestamp_from_df(df):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    try:
+        if "timestamp" in df.columns:
+            raw = df["timestamp"].iloc[-1]
+        else:
+            raw = df.index[-1]
+        ts = pd.Timestamp(raw)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        return ts.to_pydatetime().astimezone(_full_timezone())
+    except Exception:
+        return None
+
+
+def _time_session(hour):
+    h = int(hour) % 24
+    if 0 <= h < 6:
+        return "NIGHT_EARLY"
+    if 6 <= h < 12:
+        return "MORNING"
+    if 12 <= h < 18:
+        return "AFTERNOON"
+    return "EVENING_NIGHT"
+
+
+def extract_time_context(timestamp=None, df=None):
+    """Time is an evidence feature, never a hard trading rule."""
+    dt = None
+    if timestamp is not None:
+        try:
+            ts = pd.Timestamp(timestamp)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            dt = ts.to_pydatetime().astimezone(_full_timezone())
+        except Exception:
+            dt = None
+    if dt is None and df is not None:
+        dt = _timestamp_from_df(df)
+    if dt is None:
+        return {
+            "available": False,
+            "timezone": FULL_TIMEZONE_NAME,
+            "hour_local": None,
+            "minute_local": None,
+            "day_of_week": None,
+            "session": "UNKNOWN",
+            "hour_sin": 0.0,
+            "hour_cos": 0.0,
+            "is_weekend": False,
+        }
+    hour_float = dt.hour + dt.minute / 60.0
+    angle = 2.0 * np.pi * hour_float / 24.0
+    return {
+        "available": True,
+        "timezone": FULL_TIMEZONE_NAME,
+        "hour_local": int(dt.hour),
+        "minute_local": int(dt.minute),
+        "day_of_week": int(dt.weekday()),
+        "session": _time_session(dt.hour),
+        "hour_sin": float(np.sin(angle)),
+        "hour_cos": float(np.cos(angle)),
+        "is_weekend": bool(dt.weekday() >= 5),
+    }
+
+
+def _time_effect_from_outcomes(outcomes):
+    """Estimate whether time-of-day explains outcomes without forcing it into live decisions."""
+    rows = []
+    for r in outcomes or []:
+        if not isinstance(r, dict):
+            continue
+        try:
+            fr = float(r.get("final_r"))
+        except (TypeError, ValueError):
+            continue
+        tc = r.get("time_context") or {}
+        if not isinstance(tc, dict) or not tc.get("available"):
+            tc = extract_time_context(r.get("entry_timestamp") or r.get("timestamp"))
+        if not tc.get("available"):
+            continue
+        rows.append((fr, tc))
+    if len(rows) < 10:
+        return {"status": "INSUFFICIENT", "sample_size": len(rows), "overall_mean_r": 0.0, "effects": [], "strongest_effect": 0.0, "usable": False}
+    rs = np.asarray([x[0] for x in rows], dtype=float)
+    overall = float(np.mean(rs))
+    groups = {}
+    for fr, tc in rows:
+        groups.setdefault(str(tc.get("session", "UNKNOWN")), []).append(fr)
+    effects = []
+    for session, vals in groups.items():
+        n = len(vals)
+        if n < 5:
+            continue
+        arr = np.asarray(vals, dtype=float)
+        mean = float(np.mean(arr))
+        diff = mean - overall
+        sd = float(np.std(arr, ddof=1)) if n > 1 else 0.0
+        se = sd / np.sqrt(n) if sd > 0 else 0.0
+        t = diff / se if se > 1e-12 else (999.0 if abs(diff) > 1e-12 else 0.0)
+        # Shrink small groups toward zero; never turn this into a hard gate.
+        shrink = min(1.0, n / 30.0)
+        effect = float(np.tanh(diff) * shrink)
+        effects.append({
+            "session": session,
+            "sample_size": n,
+            "mean_r": round(mean, 5),
+            "delta_vs_overall": round(diff, 5),
+            "t_like": round(float(t), 3),
+            "effect": round(effect, 5),
+        })
+    effects.sort(key=lambda x: abs(x["effect"]), reverse=True)
+    strongest = effects[0]["effect"] if effects else 0.0
+    strong = bool(effects and effects[0]["sample_size"] >= 20 and abs(effects[0]["t_like"]) >= 2.0)
+    status = "SUPPORTED" if strong else ("WEAK_SIGNAL" if effects else "INSUFFICIENT")
+    return {
+        "status": status,
+        "sample_size": len(rows),
+        "overall_mean_r": round(overall, 5),
+        "effects": effects,
+        "strongest_effect": round(float(strongest), 5),
+        "usable": strong,
+        "timezone": FULL_TIMEZONE_NAME,
+    }
+
+
 def extract_market_features(df_h1, df_m15, df_d1=None, df_btc_h1=None):
     """Point-in-time numeric market representation. No network access."""
+    raw_time_df = df_m15 if isinstance(df_m15, pd.DataFrame) else df_h1
     h1 = build_df(df_h1, 60)
     m15 = build_df(df_m15, 15)
     d1 = build_df(df_d1, 1440) if isinstance(df_d1, pd.DataFrame) else None
@@ -3937,6 +4085,15 @@ def extract_market_features(df_h1, df_m15, df_d1=None, df_btc_h1=None):
         mf["m15_structure_numeric"] = {"bullish": 1.0, "bearish": -1.0}.get(_market_structure(m15, sh, sl), 0.0)
     else:
         mf["m15_structure_numeric"] = 0.0
+    tc = extract_time_context(df=raw_time_df)
+    if tc.get("available"):
+        mf.update({
+            "time_hour_local": float(tc["hour_local"]),
+            "time_day_of_week": float(tc["day_of_week"]),
+            "time_hour_sin": float(tc["hour_sin"]),
+            "time_hour_cos": float(tc["hour_cos"]),
+            "time_is_weekend": float(1.0 if tc["is_weekend"] else 0.0),
+        })
     return {k: float(v) for k, v in mf.items()}
 
 
@@ -3947,6 +4104,7 @@ def record_market_observation(symbol, features, source="binance", timestamp=None
         "symbol": symbol,
         "source": source,
         "features": dict(features or {}),
+        "time_context": (features or {}).get("time_context") if isinstance(features, dict) else None,
     }
     with _COG_LOCK:
         _append_jsonl(_COG_EXPERIENCE_FILE, record, _COG_EXPERIENCE_BUFFER, 10000)
@@ -3970,6 +4128,7 @@ def record_candidate_observation(signal, outcome=None, rejected_reason=None, sou
         "snapshot": snap,
         "rejected_reason": rejected_reason,
         "outcome": outcome,
+        "time_context": sig.get("time_context") or snap.get("time_context"),
     }
     with _COG_LOCK:
         _append_jsonl(_COG_EXPERIENCE_FILE, record, _COG_EXPERIENCE_BUFFER, 10000)
@@ -3981,6 +4140,7 @@ def record_trade_outcome(signal, outcome, source="binance"):
     sig = dict(signal or {}) if isinstance(signal, dict) else {}
     record = record_candidate_observation(sig, outcome=outcome, source=source)
     record["type"] = "trade_outcome"
+    record["entry_timestamp"] = sig.get("entry_timestamp") or sig.get("entry_time") or (sig.get("time_context") or {}).get("timestamp")
     try:
         with _COG_LOCK:
             with _COG_EXPERIENCE_FILE.open("a", encoding="utf-8") as fh:
@@ -4246,6 +4406,17 @@ def build_evidence_discussion(signal, historical=None, lessons=None):
         ex = _finite_num(hist.get("expected_r"))
         items.append({"source": "external", "stance": "support" if ex > 0 else "contradict", "strength": min(1.0, abs(ex) / 1.0), "sample_size": int(hist.get("sample", 0) or 0), "label": "historical conditional expectancy"})
     lesson_rows = lessons or []
+    with _COG_LOCK:
+        time_effect = dict(_COG_STATE.get("time_of_day") or {})
+    if time_effect.get("usable"):
+        strongest = time_effect.get("effects", [])[0] if time_effect.get("effects") else {}
+        items.append({
+            "source": "binance_trade",
+            "stance": "support" if _finite_num(strongest.get("effect"), 0.0) > 0 else "contradict",
+            "strength": abs(_finite_num(strongest.get("effect"), 0.0)),
+            "sample_size": int(time_effect.get("sample_size", 0) or 0),
+            "label": f"time-of-day effect: {strongest.get('session', 'UNKNOWN')}",
+        })
     if lesson_rows:
         failure_rate = _safe_mean([1.0 if "FAILURE" in str(x.get("reasons")) else 0.0 for x in lesson_rows], 0.0)
         items.append({"source": "binance_trade", "stance": "contradict" if failure_rate > 0.5 else "neutral", "strength": failure_rate, "sample_size": len(lesson_rows), "label": "recent failure evidence"})
@@ -4265,6 +4436,9 @@ def research_brain_cycle(observations=None, outcomes=None, current_signal=None):
         if isinstance(row, dict) and row.get("type") == "trade_outcome":
             lessons.append(autopsy_trade(row))
     discussion = build_evidence_discussion(current_signal, lessons=lessons) if current_signal else {}
+    time_effect = _time_effect_from_outcomes(outcomes)
+    with _COG_LOCK:
+        _COG_STATE["time_of_day"] = time_effect
     with _COG_LOCK:
         _COG_STATE["research_cycles"] = int(_COG_STATE.get("research_cycles", 0)) + 1
         _COG_STATE["last_cycle"] = time.time()
@@ -4365,6 +4539,7 @@ def reset_cognitive_memory():
             "labeled_outcomes": 0, "autopsies": 0, "counterfactuals": 0,
             "belief_revisions": 0, "research_cycles": 0, "market_clusters": [],
             "last_cycle": None, "drift": {"status": "UNKNOWN", "score": 0.0},
+            "time_of_day": {"status": "UNKNOWN", "sample_size": 0, "overall_mean_r": 0.0, "strongest_effect": 0.0},
         }
         _COG_BELIEFS = {"schema": FULL_LEARNING_SCHEMA, "beliefs": {}}
         _COG_EXPERIENCE_BUFFER = []
@@ -4397,6 +4572,7 @@ def full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
     if not isinstance(result, dict):
         return result
     try:
+        result["time_context"] = extract_time_context(df=df_m15)
         snap = build_research_snapshot(result, df_h1, df_m15, df_d1, symbol=symbol)
         result["research_snapshot"] = snap
         result["market_regime"] = snap["market"]["regime"]
@@ -4504,6 +4680,7 @@ def full_command(action, callbacks=None):
                     f"Autopsies: <b>{st['state'].get('autopsies', 0)}</b>\n"
                     f"Counterfactuals: <b>{st['state'].get('counterfactuals', 0)}</b>\n"
                     f"Belief revisions: <b>{st['state'].get('belief_revisions', 0)}</b>\n"
+                    f"Time-of-day: <b>{html.escape(str(st['state'].get('time_of_day', {}).get('status', 'UNKNOWN')))}</b>\n"
                     f"Drift: <b>{html.escape(str(st['state'].get('drift', {}).get('status', 'UNKNOWN')))}</b>")
         fn = callbacks.get("status")
         payload = fn() if callable(fn) else {}
@@ -4616,9 +4793,653 @@ __all__ = [
     "revise_belief", "get_belief", "compare_candidates", "ML_FEATURE_NAMES",
     "extract_market_features", "record_market_observation", "record_candidate_observation",
     "record_trade_outcome", "evidence_discussion", "get_belief_state", "revise_belief",
-    "discover_market_clusters", "detect_feature_drift", "research_brain_cycle",
+    "discover_market_clusters", "detect_feature_drift", "research_brain_cycle", "extract_time_context", "_time_effect_from_outcomes",
     "get_full_cognitive_status", "ingest_historical_ohlcv", "full_learning_review",
     "get_cognitive_status", "get_learning_schema", "reset_cognitive_memory", "ingest_historical_ohlcv",
     "ingest_live_candidate", "ingest_live_outcome", "full_learning_review",
     "TRAIL_R_LADDER", "TRAIL_ENGINE_VERSION", "MIN_RR", "MAX_RR",
 ]
+
+# =============================================================================
+# V32 COGNITIVE RESEARCH ENGINE
+# =============================================================================
+# This section intentionally lives after the older cognitive layer so the exported
+# functions below become the single public behavior. It is research-only: it does
+# not send orders, call Binance, or forcibly tighten live signal frequency.
+
+V32_VERSION = "V32_ADAPTIVE_RESEARCH_BRAIN"
+V32_SCHEMA = "full_learning_cognitive_v2"
+V32_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
+V32_STATE_FILE = V32_STATE_DIR / "v32_brain_state.json"
+V32_EXPERIENCE_FILE = V32_STATE_DIR / "v32_experience.jsonl"
+V32_LESSON_FILE = V32_STATE_DIR / "v32_lessons.jsonl"
+V32_POLICY_FILE = V32_STATE_DIR / "v32_policy.json"
+V32_TIMEZONE = os.getenv("FULL_TIMEZONE", "Asia/Jakarta")
+
+V32_MIN_OUTCOMES = 40
+V32_MIN_WIN = 10
+V32_MIN_LOSS = 10
+V32_MIN_CELL = 12
+V32_RESEARCH_WINDOW = 2500
+V32_REVIEW_INTERVAL = max(5.0, float(os.getenv("FULL_REVIEW_INTERVAL", "30")))
+V32_SINGLE_EVENT_MAX_BELIEF_DELTA = 0.035
+V32_POLICY_MIN_STABILITY_REVIEWS = 3
+V32_EXPLORATION_SHARE = 0.15
+
+try:
+    V32_TZ = ZoneInfo(V32_TIMEZONE) if ZoneInfo else timezone(timedelta(hours=7))
+except Exception:
+    V32_TZ = timezone(timedelta(hours=7))
+
+_V32_LOCK = threading.RLock()
+_V32_STOP = threading.Event()
+_V32_WAKE = threading.Event()
+_V32_THREAD = None
+_V32_TICKS = 0
+_V32_LAST_ERROR = None
+
+_V32_STATE = {
+    "schema": V32_SCHEMA,
+    "version": V32_VERSION,
+    "observations": 0,
+    "candidates": 0,
+    "outcomes": 0,
+    "wins": 0,
+    "losses": 0,
+    "autopsies": 0,
+    "counterfactuals": 0,
+    "belief_revisions": 0,
+    "research_questions": 0,
+    "resolved_questions": 0,
+    "model_candidates": 0,
+    "model_promotions": 0,
+    "drift_score": 0.0,
+    "drift_status": "UNKNOWN",
+    "time_effect": {"status": "INSUFFICIENT", "usable": False},
+    "coverage": {"candidate_count": 0, "live_candidate_count": 0, "shadow_count": 0, "coverage_rate": 0.0},
+    "calibration": {"status": "INSUFFICIENT", "buckets": []},
+    "last_review": None,
+    "last_model_update": None,
+    "last_policy_revision": None,
+    "policy_revision_count": 0,
+}
+_V32_BELIEFS = {}
+_V32_BUFFER = []
+_V32_QUESTIONS = []
+_V32_LAST_FILE_OFFSET = 0
+
+
+def _v32_json_load(path, default):
+    try:
+        if path.exists():
+            obj = json.loads(path.read_text(encoding="utf-8"))
+            return obj if isinstance(obj, type(default)) else default
+    except Exception as exc:
+        log.warning(f"[V32] load {path.name} gagal: {exc}")
+    return default
+
+
+def _v32_json_save(path, obj):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(obj, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:
+        log.warning(f"[V32] save {path.name} gagal: {exc}")
+        return False
+
+
+def _v32_load_state():
+    global _V32_STATE, _V32_BELIEFS
+    with _V32_LOCK:
+        st = _v32_json_load(V32_STATE_FILE, {})
+        if isinstance(st, dict):
+            _V32_STATE.update(st)
+        _V32_BELIEFS = _v32_json_load(V32_POLICY_FILE, {}) or {}
+        if not isinstance(_V32_BELIEFS, dict):
+            _V32_BELIEFS = {}
+
+
+def _v32_append(path, row, memory, max_mem=8000):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False, allow_nan=False, default=str) + "\n")
+        memory.append(row)
+        if len(memory) > max_mem:
+            del memory[:-max_mem]
+    except Exception as exc:
+        log.warning(f"[V32] append gagal: {exc}")
+
+
+def _v32_f(v, default=0.0):
+    try:
+        x = float(v)
+        return x if np.isfinite(x) else float(default)
+    except Exception:
+        return float(default)
+
+
+def _v32_prob(v):
+    x = _v32_f(v, 0.5)
+    return max(0.0, min(1.0, x))
+
+
+def _v32_hour_context(timestamp=None):
+    dt = None
+    try:
+        if timestamp is not None:
+            ts = pd.Timestamp(timestamp)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            dt = ts.to_pydatetime().astimezone(V32_TZ)
+    except Exception:
+        dt = None
+    if dt is None:
+        dt = datetime.now(timezone.utc).astimezone(V32_TZ)
+    hour = dt.hour + dt.minute / 60.0
+    angle = 2.0 * np.pi * hour / 24.0
+    if 0 <= dt.hour < 6:
+        session = "NIGHT_EARLY"
+    elif dt.hour < 12:
+        session = "MORNING"
+    elif dt.hour < 18:
+        session = "AFTERNOON"
+    else:
+        session = "EVENING_NIGHT"
+    return {
+        "timezone": V32_TIMEZONE,
+        "hour_local": int(dt.hour),
+        "minute_local": int(dt.minute),
+        "day_of_week": int(dt.weekday()),
+        "session": session,
+        "hour_sin": float(np.sin(angle)),
+        "hour_cos": float(np.cos(angle)),
+        "is_weekend": bool(dt.weekday() >= 5),
+    }
+
+
+def _v32_record_experience(row):
+    row = dict(row or {})
+    with _V32_LOCK:
+        _v32_append(V32_EXPERIENCE_FILE, row, _V32_BUFFER)
+        typ = str(row.get("type") or "")
+        if typ == "market_observation":
+            _V32_STATE["observations"] = int(_V32_STATE.get("observations", 0)) + 1
+        elif typ == "candidate":
+            _V32_STATE["candidates"] = int(_V32_STATE.get("candidates", 0)) + 1
+        elif typ == "trade_outcome":
+            _V32_STATE["outcomes"] = int(_V32_STATE.get("outcomes", 0)) + 1
+            result = row.get("outcome") if isinstance(row.get("outcome"), dict) else row
+            final_r = _v32_f((result or {}).get("final_r", row.get("final_r", 0.0)))
+            if final_r > 0:
+                _V32_STATE["wins"] = int(_V32_STATE.get("wins", 0)) + 1
+            elif final_r < 0:
+                _V32_STATE["losses"] = int(_V32_STATE.get("losses", 0)) + 1
+        _v32_json_save(V32_STATE_FILE, _V32_STATE)
+    return row
+
+
+def _v32_current_records(limit=V32_RESEARCH_WINDOW):
+    records = []
+    try:
+        if V32_EXPERIENCE_FILE.exists():
+            with V32_EXPERIENCE_FILE.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                        if isinstance(row, dict):
+                            records.append(row)
+                    except Exception:
+                        continue
+    except Exception as exc:
+        log.warning(f"[V32] read experience gagal: {exc}")
+    return records[-max(1, int(limit)):]
+
+
+def _v32_outcome_payload(row):
+    if not isinstance(row, dict):
+        return {}
+    p = row.get("outcome")
+    return p if isinstance(p, dict) else row
+
+
+def _v32_outcomes(records=None):
+    rows = records if records is not None else _v32_current_records()
+    return [r for r in rows if isinstance(r, dict) and r.get("type") == "trade_outcome"]
+
+
+def _v32_candidate_records(records=None):
+    rows = records if records is not None else _v32_current_records()
+    return [r for r in rows if isinstance(r, dict) and r.get("type") == "candidate"]
+
+
+def _v32_market_records(records=None):
+    rows = records if records is not None else _v32_current_records()
+    return [r for r in rows if isinstance(r, dict) and r.get("type") == "market_observation"]
+
+
+def _v32_effective_sample(rows):
+    rows = [r for r in rows if isinstance(r, dict)]
+    if not rows:
+        return 0.0
+    symbols = len({str(r.get("symbol")) for r in rows if r.get("symbol")})
+    regimes = len({str(r.get("regime") or r.get("market_regime")) for r in rows if r.get("regime") or r.get("market_regime")})
+    times = len({str((r.get("time_context") or {}).get("session")) for r in rows})
+    diversity = max(1.0, min(2.5, 1.0 + 0.12 * symbols + 0.10 * regimes + 0.05 * times))
+    return float(len(rows) / diversity)
+
+
+def _v32_wilson(pos, n, z=1.96):
+    if n <= 0:
+        return (0.0, 1.0)
+    p = pos / n
+    den = 1.0 + z*z/n
+    center = (p + z*z/(2*n)) / den
+    half = z * np.sqrt(max(0.0, p*(1-p)/n + z*z/(4*n*n))) / den
+    return (max(0.0, center-half), min(1.0, center+half))
+
+
+def _v32_calibration(outcomes):
+    if len(outcomes) < V32_MIN_OUTCOMES:
+        return {"status": "INSUFFICIENT", "sample_size": len(outcomes), "buckets": [], "error": None}
+    buckets = []
+    for lo, hi in ((0, .40),(.40,.50),(.50,.60),(.60,.70),(.70,.80),(.80,1.01)):
+        vals=[]
+        for r in outcomes:
+            p = _v32_f(r.get("confidence"), 50.0) / 100.0
+            if lo <= p < hi:
+                payload=_v32_outcome_payload(r)
+                fr=_v32_f(payload.get("final_r"), 0.0)
+                vals.append((p, 1.0 if fr>0 else 0.0))
+        if not vals:
+            continue
+        pred=float(np.mean([x[0] for x in vals])); actual=float(np.mean([x[1] for x in vals])); n=len(vals)
+        low, high=_v32_wilson(sum(x[1] for x in vals), n)
+        buckets.append({"range":f"{int(lo*100)}-{min(99,int(hi*100))}%","n":n,"predicted":round(pred,4),"actual":round(actual,4),"error":round(actual-pred,4),"ci_low":round(low,4),"ci_high":round(high,4)})
+    if len(buckets) < 2:
+        return {"status":"INSUFFICIENT","sample_size":len(outcomes),"buckets":buckets,"error":None}
+    monotonic = all(buckets[i]["actual"] <= buckets[i+1]["actual"] + 0.08 for i in range(len(buckets)-1))
+    mae = float(np.mean([abs(b["error"]) for b in buckets]))
+    return {"status":"GOOD" if monotonic and mae < .15 else "NEEDS_REVIEW","sample_size":len(outcomes),"buckets":buckets,"mae":round(mae,4),"monotonic":monotonic}
+
+
+def _v32_time_effect(outcomes):
+    if len(outcomes) < V32_MIN_OUTCOMES:
+        return {"status":"INSUFFICIENT","usable":False,"sample_size":len(outcomes),"effects":[]}
+    rows=[]
+    for r in outcomes:
+        tc=r.get("time_context") if isinstance(r.get("time_context"),dict) else _v32_hour_context(r.get("entry_timestamp") or r.get("timestamp"))
+        session=tc.get("session")
+        if not session or session=="UNKNOWN": continue
+        fr=_v32_f(_v32_outcome_payload(r).get("final_r"),0.0)
+        rows.append((session,fr))
+    if len(rows)<V32_MIN_OUTCOMES:
+        return {"status":"INSUFFICIENT","usable":False,"sample_size":len(rows),"effects":[]}
+    overall=float(np.mean([x[1] for x in rows])); effects=[]
+    for session in sorted({x[0] for x in rows}):
+        vals=[x[1] for x in rows if x[0]==session]
+        n=len(vals)
+        if n<V32_MIN_CELL: continue
+        mean=float(np.mean(vals)); sd=float(np.std(vals,ddof=1)) if n>1 else 0.0; se=sd/np.sqrt(n) if sd>0 else 0.0
+        t=(mean-overall)/se if se>1e-12 else 0.0
+        shrink=min(1.0,n/40.0)
+        effect=float(np.tanh(mean-overall)*shrink)
+        effects.append({"session":session,"n":n,"mean_r":round(mean,5),"delta":round(mean-overall,5),"t_like":round(float(t),3),"effect":round(effect,5)})
+    effects.sort(key=lambda x:abs(x["effect"]),reverse=True)
+    usable=bool(effects and effects[0]["n"]>=24 and abs(effects[0]["t_like"])>=2.0)
+    return {"status":"SUPPORTED" if usable else "WEAK_SIGNAL","usable":usable,"sample_size":len(rows),"overall_mean_r":round(overall,5),"effects":effects,"timezone":V32_TIMEZONE}
+
+
+def _v32_conditional_cells(outcomes, key_fn, min_cell=V32_MIN_CELL):
+    cells={}
+    for r in outcomes:
+        key=key_fn(r)
+        if key is None: continue
+        payload=_v32_outcome_payload(r); fr=_v32_f(payload.get("final_r"),0.0)
+        cells.setdefault(key,[]).append(fr)
+    out=[]
+    for key,vals in cells.items():
+        if len(vals)<min_cell: continue
+        pos=sum(1 for x in vals if x>0); n=len(vals); low,high=_v32_wilson(pos,n)
+        out.append({"key":key,"n":n,"mean_r":round(float(np.mean(vals)),5),"positive_rate":round(pos/n,4),"ci_low":round(low,4),"ci_high":round(high,4)})
+    return sorted(out,key=lambda x:x["n"],reverse=True)
+
+
+def _v32_coverage(candidates):
+    n=len(candidates)
+    live=sum(1 for r in candidates if not r.get("rejected_reason") and str(r.get("decision") or "").upper() in {"BUY","SELL"})
+    shadow=sum(1 for r in candidates if r.get("rejected_reason") or str(r.get("decision") or "").upper() not in {"BUY","SELL"})
+    return {"candidate_count":n,"live_candidate_count":live,"shadow_count":shadow,"coverage_rate":round(live/max(1,n),4),"exploration_share":V32_EXPLORATION_SHARE}
+
+
+def _v32_autopsy(record):
+    payload=_v32_outcome_payload(record); fr=_v32_f(payload.get("final_r"),0.0); mfe=_v32_f(payload.get("mfe_r",record.get("mfe_r")),0.0); mae=_v32_f(payload.get("mae_r",record.get("mae_r")),0.0)
+    gb=_v32_f(payload.get("giveback_ratio",record.get("giveback_ratio")),0.0)
+    result=str(record.get("result") or payload.get("result") or "").lower()
+    if fr>0: cls="SUCCESS"
+    elif mfe>=1.0 and gb>=0.5: cls="MANAGEMENT_OR_PROTECTION_FAILURE"
+    elif mfe<0.35 and fr<0: cls="ENTRY_OR_THESIS_FAILURE"
+    else: cls="AMBIGUOUS_FAILURE"
+    if result in {"execution_error","data_error","strategy_error"}: cls="EXECUTION_OR_DATA_FAILURE"
+    return {"type":"autopsy","timestamp":time.time(),"symbol":record.get("symbol"),"class":cls,"final_r":fr,"mfe_r":mfe,"mae_r":mae,"giveback_ratio":gb,"confidence":_v32_f(record.get("confidence"),50),"archetype":record.get("archetype"),"regime":record.get("market_regime",record.get("regime")),"thesis":record.get("thesis") or (record.get("research_snapshot") or {}).get("thesis"),"lesson_type":"preserve" if cls=="SUCCESS" else "repair"}
+
+
+def _v32_counterfactuals(record):
+    p=_v32_outcome_payload(record); actual=_v32_f(p.get("final_r"),0.0); mfe=_v32_f(p.get("mfe_r"),0.0); gb=_v32_f(p.get("giveback_ratio"),0.0)
+    rows=[]
+    if actual<0:
+        rows.append({"policy":"require_reclaim","simulated_delta_r":round(0.10*max(0,mfe),4) if record.get("selected_sweep") else 0.0})
+        rows.append({"policy":"delay_entry_1_bar","simulated_delta_r":round(-0.05*abs(_v32_f(p.get("mae_r"),0.0)),4)})
+    if actual<0 and mfe>=1.0 and gb>=0.5:
+        rows.append({"policy":"adaptive_giveback_trail","simulated_delta_r":round(0.20*mfe,4)})
+    return rows
+
+
+def _v32_stable_policy_update(name, observed, evidence_n, condition="global", source="research"):
+    key=f"{name}|{condition}"
+    with _V32_LOCK:
+        b=dict(_V32_BELIEFS.get(key) or {"name":name,"condition":condition,"value":observed,"strength":0.25,"samples":0,"stable_reviews":0,"last_change":0.0})
+        old=_v32_f(b.get("value"),observed); strength=max(0.05,min(0.98,_v32_f(b.get("strength"),0.25)))
+        n=max(1,int(evidence_n)); effective=min(1.0,n/200.0)
+        # One review can move the belief only modestly. Large evidence is needed for large policy changes.
+        rate=min(V32_SINGLE_EVENT_MAX_BELIEF_DELTA, 0.01+0.025*effective)
+        new=old + np.clip(_v32_f(observed)-old,-rate,rate)
+        if abs(new-old)<1e-12:
+            stable=int(b.get("stable_reviews",0) or 0)
+        else:
+            stable=int(b.get("stable_reviews",0) or 0)+1
+        b.update({"value":float(new),"strength":float(min(.98,strength+0.01*effective)),"samples":int(b.get("samples",0) or 0)+n,"stable_reviews":stable,"last_change":float(abs(new-old)),"last_source":source,"last_revision":time.time()})
+        _V32_BELIEFS[key]=b
+        _V32_STATE["belief_revisions"]=int(_V32_STATE.get("belief_revisions",0))+1
+        _V32_STATE["last_policy_revision"]=time.time()
+        _V32_STATE["policy_revision_count"]=int(_V32_STATE.get("policy_revision_count",0))+1
+        _v32_json_save(V32_POLICY_FILE,_V32_BELIEFS); _v32_json_save(V32_STATE_FILE,_V32_STATE)
+        return dict(b)
+
+
+def get_v32_belief(name, condition="global", default=None):
+    with _V32_LOCK:
+        return dict(_V32_BELIEFS.get(f"{name}|{condition}") or {"name":name,"condition":condition,"value":default,"strength":0.20,"samples":0,"stable_reviews":0})
+
+
+def _v32_make_questions(outcomes, candidates, time_effect, calibration, drift):
+    qs=[]
+    if time_effect.get("status") in {"WEAK_SIGNAL","SUPPORTED"}:
+        qs.append("Apakah time-of-day effect bertahan setelah mengontrol setup dan regime?")
+    if calibration.get("status")=="NEEDS_REVIEW":
+        qs.append("Apakah confidence buckets masih monotonic dan terkalibrasi?")
+    if drift.get("status") in {"MEDIUM","HIGH"}:
+        qs.append("Apakah recent market distribution berbeda enough untuk memerlukan challenger?")
+    if outcomes:
+        failures=[_v32_autopsy(x) for x in outcomes if _v32_f(_v32_outcome_payload(x).get("final_r"),0)<0]
+        mgmt=sum(1 for x in failures if x["class"]=="MANAGEMENT_OR_PROTECTION_FAILURE")
+        entry=sum(1 for x in failures if x["class"]=="ENTRY_OR_THESIS_FAILURE")
+        if mgmt and mgmt>entry: qs.append("Apakah management/trailing saat ini lebih lemah daripada entry thesis?")
+        elif entry: qs.append("Apakah failure cluster sebenarnya berasal dari thesis/location/timing?")
+    # Deduplicate while keeping the list bounded.
+    uniq=[]
+    for q in qs:
+        if q not in uniq: uniq.append(q)
+    return uniq[:8]
+
+
+def _v32_model_fit(outcomes):
+    # Lightweight research-only model. It does not replace the main live model.
+    if len(outcomes)<V32_MIN_OUTCOMES: return {"status":"INSUFFICIENT"}
+    rows=[]; ys=[]
+    for r in outcomes:
+        lf=r.get("learning_features")
+        if not isinstance(lf,dict): continue
+        p=_v32_f(r.get("confidence"),50.0)/100.0
+        payload=_v32_outcome_payload(r); y=1.0 if _v32_f(payload.get("final_r"),0.0)>0 else 0.0
+        rows.append([p,_v32_f(lf.get("setup_quality"),0)/100.0,_v32_f(lf.get("entry_location_score"),50)/100.0,_v32_f(lf.get("rr"),0)/4.0,_v32_f(lf.get("selected_sweep"),0),_v32_f((r.get("time_context") or {}).get("hour_sin"),0),_v32_f((r.get("time_context") or {}).get("hour_cos"),1)])
+        ys.append(y)
+    if len(rows)<V32_MIN_OUTCOMES: return {"status":"INSUFFICIENT"}
+    X=np.asarray(rows,float); y=np.asarray(ys,float)
+    split=max(int(len(X)*0.70),V32_MIN_OUTCOMES-10)
+    split=min(split,len(X)-10)
+    mu=X[:split].mean(axis=0); sd=X[:split].std(axis=0); sd[sd<1e-8]=1.0
+    Z=(X-mu)/sd; Ztr=Z[:split]; ytr=y[:split]; Zte=Z[split:]; yte=y[split:]
+    w=np.zeros(Z.shape[1]); b=0.0
+    for _ in range(220):
+        z=np.clip(Ztr@w+b,-8,8); p=1/(1+np.exp(-z)); grad=(Ztr.T@(p-ytr))/len(ytr)+0.01*w; gb=float(np.mean(p-ytr)); w-=0.08*grad; b-=0.08*gb
+    pte=1/(1+np.exp(-np.clip(Zte@w+b,-8,8))); pred=(pte>=0.5).astype(float); acc=float(np.mean(pred==yte)) if len(yte) else 0.0
+    return {"status":"READY","sample_count":len(X),"train_count":len(ytr),"oos_count":len(yte),"oos_accuracy":round(acc,4),"w":w.tolist(),"b":float(b),"mean":mu.tolist(),"scale":sd.tolist(),"feature_names":["confidence","setup_quality","location","rr","sweep","hour_sin","hour_cos"]}
+
+
+def _v32_drift(market):
+    if len(market)<80: return {"status":"UNKNOWN","score":0.0,"features":[]}
+    ref=market[:-40]; recent=market[-40:]
+    keys=sorted(set().union(*(r.get("features",{}).keys() for r in ref+recent)))
+    ds=[]
+    for k in keys:
+        a=np.asarray([_v32_f(r.get("features",{}).get(k),0.0) for r in ref]); b=np.asarray([_v32_f(r.get("features",{}).get(k),0.0) for r in recent]); s=float(np.std(a)) or 1.0; d=abs(float(np.mean(b)-np.mean(a)))/s; ds.append((d,k))
+    ds.sort(reverse=True); score=min(1.0,float(np.mean([min(x[0],3)/3 for x in ds]))) if ds else 0.0
+    status="HIGH" if score>=0.45 else "MEDIUM" if score>=0.25 else "LOW"
+    return {"status":status,"score":round(score,4),"features":[{"feature":k,"shift":round(d,3)} for d,k in ds[:10]]}
+
+
+def _v32_research_cycle():
+    records=_v32_current_records()
+    outcomes=_v32_outcomes(records); candidates=_v32_candidate_records(records); market=_v32_market_records(records)
+    calibration=_v32_calibration(outcomes); time_effect=_v32_time_effect(outcomes); drift=_v32_drift(market); coverage=_v32_coverage(candidates)
+    questions=_v32_make_questions(outcomes,candidates,time_effect,calibration,drift)
+    model=_v32_model_fit(outcomes)
+    lessons=[]
+    if outcomes:
+        # Re-autopsy only the recent tail of outcomes; bounded and deterministic.
+        for row in outcomes[-25:]:
+            dx=_v32_autopsy(row); lessons.append(dx)
+            for cf in _v32_counterfactuals(row):
+                with _V32_LOCK: _V32_STATE["counterfactuals"]=int(_V32_STATE.get("counterfactuals",0))+1
+        _V32_STATE["autopsies"]=int(_V32_STATE.get("autopsies",0))+len(lessons)
+        for lesson in lessons[-10:]: _v32_append(V32_LESSON_FILE,lesson,[])
+    if time_effect.get("usable"):
+        best=time_effect["effects"][0]
+        # Time effect is advisory, not a hard gate.
+        _v32_stable_policy_update("time_effect","" + str(best.get("effect",0.0)),best.get("n",0),condition=str(best.get("session")),source="time_research")
+    # Confidence minimum belief is deliberately slow and is not directly applied as a gate.
+    if calibration.get("status")=="GOOD":
+        avg_error=float(calibration.get("mae",0.0) or 0.0)
+        _v32_stable_policy_update("confidence_calibration_error",avg_error,len(outcomes),condition="global",source="calibration")
+    if model.get("status")=="READY":
+        with _V32_LOCK:
+            _V32_STATE["model_candidates"]=int(_V32_STATE.get("model_candidates",0))+1
+            _V32_STATE["last_model_update"]=time.time()
+    with _V32_LOCK:
+        _V32_STATE.update({"version":V32_VERSION,"time_effect":time_effect,"calibration":calibration,"coverage":coverage,"drift_score":drift.get("score",0.0),"drift_status":drift.get("status","UNKNOWN"),"research_questions":len(questions),"resolved_questions":max(0,int(_V32_STATE.get("resolved_questions",0))),"last_review":time.time()})
+        _v32_json_save(V32_STATE_FILE,_V32_STATE)
+    return {"schema":V32_SCHEMA,"version":V32_VERSION,"outcomes":len(outcomes),"candidates":len(candidates),"coverage":coverage,"calibration":calibration,"time_effect":time_effect,"drift":drift,"questions":questions,"model_research":model,"lessons_reviewed":len(lessons)}
+
+
+def _v32_loop():
+    global _V32_TICKS,_V32_LAST_ERROR
+    while not _V32_STOP.is_set():
+        try:
+            _v32_research_cycle()
+            _V32_TICKS += 1
+            _V32_LAST_ERROR = None
+        except Exception as exc:
+            _V32_LAST_ERROR = str(exc)[:500]
+            log.exception("[V32 FULL] research cycle gagal")
+        _V32_WAKE.wait(V32_REVIEW_INTERVAL)
+        _V32_WAKE.clear()
+
+
+def _v32_start():
+    global _V32_THREAD
+    with _V32_LOCK:
+        if _V32_THREAD is None or not _V32_THREAD.is_alive():
+            _V32_STOP.clear(); _V32_WAKE.set()
+            _V32_THREAD=threading.Thread(target=_v32_loop,name="full-v32-brain",daemon=True)
+            _V32_THREAD.start()
+        else:
+            _V32_WAKE.set()
+
+
+def _v32_stop():
+    _V32_STOP.set(); _V32_WAKE.set()
+
+
+def get_v32_status():
+    with _V32_LOCK:
+        return {"version":V32_VERSION,"worker_alive":bool(_V32_THREAD is not None and _V32_THREAD.is_alive()),"ticks":_V32_TICKS,"last_error":_V32_LAST_ERROR,"state":dict(_V32_STATE),"beliefs":len(_V32_BELIEFS)}
+
+
+def _v32_time_features_into(signal, timestamp=None):
+    tc=_v32_hour_context(timestamp)
+    out=dict(signal or {})
+    out["time_context"]=tc
+    out["time_aware_research"] = True
+    return out
+
+
+# V32 public bridge: every strategy result becomes a research observation; actual
+# execution remains owned by main.py.
+_V31_BASE_FULL_ANALYZE = full_analyze
+_V31_BASE_MANAGE_POSITION = manage_position
+
+
+def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None):
+    result = _V31_BASE_FULL_ANALYZE(df_h1, df_m15, df_d1, symbol=symbol, df_btc_h1=df_btc_h1, trade_history=trade_history)
+    ts = _timestamp_from_df(df_m15)
+    if not isinstance(result, dict):
+        # Even a strategy-level no-result is useful as a market observation.
+        try:
+            feats=extract_market_features(df_h1,df_m15,df_d1,df_btc_h1)
+            feats["time_context"]=_v32_hour_context(ts)
+            _v32_record_experience({"type":"market_observation","timestamp":time.time(),"symbol":symbol,"source":"binance","features":feats,"result":"no_strategy_result"})
+        except Exception:
+            pass
+        return result
+    try:
+        result=_v32_time_features_into(result,ts)
+        result.setdefault("learning_features",{})
+        tc=result["time_context"]
+        result["learning_features"].update({"hour_sin":tc["hour_sin"],"hour_cos":tc["hour_cos"],"hour_local":float(tc["hour_local"])/23.0,"is_weekend":float(tc["is_weekend"])})
+        snap=result.get("research_snapshot") if isinstance(result.get("research_snapshot"),dict) else {}
+        snap["time_context"]=tc; snap["coverage_role"]="candidate"
+        result["research_snapshot"]=snap
+        feat=extract_market_features(df_h1,df_m15,df_d1,df_btc_h1)
+        feat["time_context"]=tc
+        _v32_record_experience({"type":"market_observation","timestamp":time.time(),"symbol":symbol,"source":"binance","features":feat,"regime":result.get("market_regime")})
+        _v32_record_experience({"type":"candidate","timestamp":time.time(),"symbol":symbol,"decision":result.get("decision"),"confidence":result.get("confidence"),"trade_quality":result.get("trade_quality",result.get("setup_quality")),"archetype":result.get("archetype"),"regime":result.get("market_regime"),"time_context":tc,"learning_features":dict(result.get("learning_features") or {}),"research_snapshot":snap,"signal":result,"rejected_reason":None})
+    except Exception as exc:
+        log.warning(f"[V32] full_analyze research bridge gagal {symbol}: {exc}")
+    return result
+
+
+def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
+    result=_V31_BASE_MANAGE_POSITION(state,df_m15,df_h1,df_d1,symbol=symbol)
+    if isinstance(result,dict):
+        try:
+            tc=_v32_hour_context(_timestamp_from_df(df_m15))
+            result["time_context"]=tc
+            result["trail_research"]={"frequency_neutral":True,"learning_target":"capture_ratio_vs_continuation_survival","uses_actual_position_only":True}
+        except Exception:
+            pass
+    return result
+
+
+def ingest_live_candidate(signal,h1=None,m15=None,d1=None,rejected_reason=None,source="binance"):
+    sig=dict(signal or {}) if isinstance(signal,dict) else {}
+    tc=sig.get("time_context") if isinstance(sig.get("time_context"),dict) else _v32_hour_context(sig.get("entry_timestamp") or sig.get("timestamp"))
+    snap=sig.get("research_snapshot") if isinstance(sig.get("research_snapshot"),dict) else {}
+    row={"type":"candidate","timestamp":time.time(),"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":_v32_f(sig.get("confidence"),50),"trade_quality":_v32_f(sig.get("trade_quality",sig.get("setup_quality")),0),"archetype":sig.get("archetype"),"regime":sig.get("market_regime") or (snap.get("market") or {}).get("regime"),"time_context":tc,"learning_features":dict(sig.get("learning_features") or {}),"research_snapshot":snap,"signal":sig,"rejected_reason":rejected_reason}
+    return _v32_record_experience(row)
+
+
+def ingest_live_outcome(signal,outcome,source="binance_trade"):
+    sig=dict(signal or {}) if isinstance(signal,dict) else {}
+    payload=outcome if isinstance(outcome,dict) else {"result":outcome}
+    row={"type":"trade_outcome","timestamp":time.time(),"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":sig.get("confidence"),"archetype":sig.get("archetype"),"market_regime":sig.get("market_regime"),"time_context":sig.get("time_context") or _v32_hour_context(sig.get("entry_timestamp")),"learning_features":dict(sig.get("learning_features") or {}),"research_snapshot":sig.get("research_snapshot") or {},"signal":sig,"outcome":dict(payload)}
+    return _v32_record_experience(row)
+
+
+def full_learning_review(max_rows=V32_RESEARCH_WINDOW):
+    return _v32_research_cycle()
+
+
+def reset_cognitive_memory():
+    """Reset V32 cognitive research memory only; never touches trading ledger."""
+    global _V32_STATE,_V32_BELIEFS,_V32_BUFFER,_V32_TICKS,_V32_LAST_ERROR
+    _v32_stop()
+    with _V32_LOCK:
+        _V32_STATE={
+            "schema":V32_SCHEMA,"version":V32_VERSION,"observations":0,"candidates":0,"outcomes":0,"wins":0,"losses":0,"autopsies":0,"counterfactuals":0,"belief_revisions":0,"research_questions":0,"resolved_questions":0,"model_candidates":0,"model_promotions":0,"drift_score":0.0,"drift_status":"UNKNOWN","time_effect":{"status":"INSUFFICIENT","usable":False},"coverage":{"candidate_count":0,"live_candidate_count":0,"shadow_count":0,"coverage_rate":0.0},"calibration":{"status":"INSUFFICIENT","buckets":[]},"last_review":None,"last_model_update":None,"last_policy_revision":None,"policy_revision_count":0,
+        }
+        _V32_BELIEFS={}; _V32_BUFFER=[]; _V32_TICKS=0; _V32_LAST_ERROR=None
+        for path in (V32_STATE_FILE,V32_EXPERIENCE_FILE,V32_LESSON_FILE,V32_POLICY_FILE):
+            try: path.unlink(missing_ok=True)
+            except Exception: pass
+        _v32_json_save(V32_STATE_FILE,_V32_STATE); _v32_json_save(V32_POLICY_FILE,_V32_BELIEFS)
+    return get_v32_status()
+
+
+def full_command(action, callbacks=None):
+    callbacks=callbacks if isinstance(callbacks,dict) else {}
+    action=str(action or "status").strip().lower()
+    try:
+        if action=="on":
+            cb=callbacks.get("on"); payload=cb() if callable(cb) else {}
+            _v32_start()
+            return ("🧠 <b>FULL LEARNING ON</b>\n"
+                    "Otak belajar terus: observasi → kandidat → outcome → autopsy → counterfactual → calibration → hypothesis → adaptation.\n"
+                    "<b>Frequency tetap menjadi objective</b>; learning tidak diperbolehkan mematikan opportunity hanya demi menjadi lebih ketat.\n"
+                    "Satu SL tidak mengubah policy secara langsung; perubahan harus melewati bukti bertahap dan stability review.\n\n" + _v32_full_text(payload))
+        if action=="off":
+            _v32_stop(); cb=callbacks.get("off"); payload=cb() if callable(cb) else {}
+            return "🧠 <b>FULL LEARNING OFF</b>\nResearch worker dihentikan; state/model terakhir dipertahankan.\n\n"+_v32_full_text(payload)
+        if action=="reset":
+            cb=callbacks.get("reset"); payload=cb() if callable(cb) else {}
+            st=reset_cognitive_memory()
+            return "🧠 <b>FULL RESET</b>\nCognitive research memory V32 dihapus; trading ledger/posisi tidak disentuh.\n\n"+_v32_full_text({"mode":False,"cognitive_worker":st})
+        if action in {"review","research"}:
+            rep=_v32_research_cycle(); return _v32_research_text(rep)
+        cb=callbacks.get("status"); payload=cb() if callable(cb) else {}
+        return "🧠 <b>FULL LEARNING STATUS</b>\n"+_v32_full_text(payload)
+    except Exception as exc:
+        log.exception("[V32 FULL] command gagal")
+        return f"❌ <b>FULL gagal</b>\n<code>{html.escape(str(exc)[:400])}</code>"
+
+
+def _v32_full_text(payload):
+    p=payload if isinstance(payload,dict) else {}
+    st=get_v32_status(); s=st["state"]; cw="ON" if st["worker_alive"] else "OFF"
+    champion=p.get("champion") if isinstance(p.get("champion"),dict) else {}
+    return (f"Main mode: <b>{'ON' if p.get('mode') else 'OFF'}</b>\n"
+            f"Cognitive worker: <b>{cw}</b> | ticks: <b>{st['ticks']}</b>\n"
+            f"Observations: <b>{s.get('observations',0)}</b> | Candidates: <b>{s.get('candidates',0)}</b>\n"
+            f"Outcomes: <b>{s.get('outcomes',0)}</b> | W/L: <b>{s.get('wins',0)}/{s.get('losses',0)}</b>\n"
+            f"Coverage: <b>{s.get('coverage',{}).get('coverage_rate',0)*100:.1f}%</b>\n"
+            f"Calibration: <b>{s.get('calibration',{}).get('status','INSUFFICIENT')}</b>\n"
+            f"Time effect: <b>{s.get('time_effect',{}).get('status','INSUFFICIENT')}</b>\n"
+            f"Drift: <b>{s.get('drift_status','UNKNOWN')}</b>\n"
+            f"Beliefs: <b>{st['beliefs']}</b>\n"
+            f"Policy revisions: <b>{s.get('policy_revision_count',0)}</b>\n"
+            f"Champion: <code>{html.escape(str(champion.get('model_version','—')))}</code>")
+
+
+def _v32_research_text(rep):
+    cal=rep.get("calibration",{}); te=rep.get("time_effect",{}); drift=rep.get("drift",{}); cov=rep.get("coverage",{})
+    return ("🔬 <b>FULL RESEARCH REVIEW</b>\n"
+            f"Candidates: <b>{rep.get('candidates',0)}</b> | Outcomes: <b>{rep.get('outcomes',0)}</b>\n"
+            f"Coverage: <b>{cov.get('coverage_rate',0)*100:.1f}%</b>\n"
+            f"Calibration: <b>{cal.get('status','INSUFFICIENT')}</b>\n"
+            f"Time-of-day: <b>{te.get('status','INSUFFICIENT')}</b>\n"
+            f"Drift: <b>{drift.get('status','UNKNOWN')}</b>\n"
+            f"Questions: <b>{len(rep.get('questions',[]))}</b>\n"
+            f"Research model: <b>{rep.get('model_research',{}).get('status','INSUFFICIENT')}</b>")
+
+
+_v32_load_state()
+
+# Explicitly advertise the V32 cognitive surface while preserving the stable API.
+__all__ = list(dict.fromkeys(__all__ + [
+    "V32_VERSION", "get_v32_status", "get_v32_belief", "full_command",
+    "full_analyze", "manage_position", "ingest_live_candidate", "ingest_live_outcome",
+    "full_learning_review", "reset_cognitive_memory", "extract_time_context",
+]))
