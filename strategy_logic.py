@@ -5212,6 +5212,14 @@ def ingest_live_candidate(signal,h1=None,m15=None,d1=None,rejected_reason=None,s
 _V34_SEEN_OUTCOME_KEYS = set()
 _V34_SEEN_CANDIDATE_KEYS = set()
 
+def ingest_management_event(event):
+    row=dict(event or {})
+    row.setdefault("type","management_event")
+    row.setdefault("timestamp",time.time())
+    with _V32_LOCK:
+        _v32_append(V32_EXPERIENCE_FILE,row,_V32_BUFFER)
+    return row
+
 def ingest_live_outcome(signal,outcome,source="binance_trade"):
     canonical = _canonical_trade_outcome(signal, outcome)
     sig = dict(signal or {}) if isinstance(signal,dict) else {}
@@ -5238,6 +5246,37 @@ def ingest_live_outcome(signal,outcome,source="binance_trade"):
     }
     return _v32_record_experience(row)
 
+
+def reload_learning_state():
+    """Reload all on-disk learning state into memory after /open checkpoint restore."""
+    global _V32_STATE, _V32_BELIEFS, _V32_BUFFER, _V32_TICKS, _COG_STATE, _COG_BELIEFS, _COG_EXPERIENCE_BUFFER, _COG_LESSON_BUFFER, _AGENT_STATE, _AGENT_POLICY, _AGENT_HISTORY_DONE
+    # Existing workers are stopped by main.py; this function only restores state.
+    with _V32_LOCK:
+        _V32_STATE = _v32_json_load(V32_STATE_FILE, _V32_STATE) or _V32_STATE
+        _V32_BELIEFS = _v32_json_load(V32_POLICY_FILE, {}) or {}
+        _V32_BUFFER = _v32_current_records(limit=5000)
+        _V32_TICKS = int(_V32_STATE.get("worker_ticks", _V32_STATE.get("ticks", 0)) or 0)
+    with _COG_LOCK:
+        _COG_STATE = _cjson_load(_COG_STATE_FILE, _COG_STATE) or _COG_STATE
+        _COG_BELIEFS = _cjson_load(_COG_BELIEF_FILE, _COG_BELIEFS) or _COG_BELIEFS
+        _COG_EXPERIENCE_BUFFER = []
+        _COG_LESSON_BUFFER = []
+        for path, buf, limit in ((_COG_EXPERIENCE_FILE,_COG_EXPERIENCE_BUFFER,10000),(_COG_LESSON_FILE,_COG_LESSON_BUFFER,5000)):
+            if path.exists():
+                try:
+                    rows=[json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+                    buf.extend([x for x in rows if isinstance(x,dict)][-limit:])
+                except Exception as exc:
+                    log.warning(f"[CHECKPOINT] cognitive buffer reload gagal {path.name}: {exc}")
+    with _AGENT_LOCK:
+        _AGENT_STATE = _agent_json_load(AGENT_STATE_FILE, _AGENT_STATE) or _AGENT_STATE
+        _AGENT_POLICY = _agent_json_load(AGENT_POLICY_FILE, {}) or {}
+        _AGENT_HISTORY_DONE=set()
+    # Reload persisted cognitive state if present and make sure model APIs see fresh state.
+    try:
+        _load_cognitive_state()
+    except Exception: pass
+    return {"v32_state":dict(_V32_STATE),"cognitive_state":dict(_COG_STATE),"adaptive_state":dict(_AGENT_STATE)}
 
 def full_learning_review(max_rows=V32_RESEARCH_WINDOW):
     return _v32_research_cycle()
@@ -5333,7 +5372,7 @@ __all__ = list(dict.fromkeys(__all__ + [
     "V32_VERSION", "get_v32_status", "get_v32_belief", "full_command",
     "_v33_log", "_v33_notify",
     "full_analyze", "manage_position", "ingest_live_candidate", "ingest_live_outcome",
-    "full_learning_review", "reset_cognitive_memory", "extract_time_context",
+    "full_learning_review", "reset_cognitive_memory", "extract_time_context", "ingest_management_event", "reload_learning_state",
 ]))
 
 

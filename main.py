@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 
 import requests, pandas as pd, numpy as np, urllib3, json, html
+import base64, io, zipfile, hashlib, tempfile
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask
 
@@ -1250,6 +1251,189 @@ def _commit_to_github(content, path="strategy_logic.py", commit_msg="Update stra
         raise ValueError(f"GitHub commit gagal: {resp.status_code} {resp.text}")
     
     return True
+
+# ============================================================
+# LEARNING CHECKPOINT — /save dan /open
+# ============================================================
+LEARNING_CHECKPOINT_ROOT = "learning_checkpoints"
+LEARNING_CHECKPOINT_LATEST = f"{LEARNING_CHECKPOINT_ROOT}/latest.json"
+LEARNING_CHECKPOINT_CHUNK_BYTES = 700_000
+LEARNING_CHECKPOINT_FILES = (
+    "strategy_experience.jsonl", "strategy_lessons.jsonl", "strategy_beliefs.json",
+    "strategy_cognitive_state.json", "v32_experience.jsonl", "v32_lessons.jsonl",
+    "v32_policy.json", "v32_brain_state.json", "adaptive_brain_state.json",
+    "adaptive_policy.json", "full_learning_state.json", "experience.jsonl",
+)
+
+def _github_headers():
+    if not GITHUB_TOKEN or not REPO_NAME:
+        raise ValueError("GITHUB_TOKEN atau REPO_NAME tidak diset di environment.")
+    return {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10"}
+
+def _github_get_json(path):
+    url=f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
+    r=requests.get(url,headers=_github_headers(),params={"ref":"main"},timeout=20)
+    if r.status_code != 200:
+        raise ValueError(f"GitHub GET {path} gagal: {r.status_code} {r.text[:300]}")
+    return r.json()
+
+def _github_put_bytes(data_bytes, path, message):
+    headers=_github_headers(); url=f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
+    sha=None
+    try:
+        r=requests.get(url,headers=headers,params={"ref":"main"},timeout=20)
+        if r.status_code==200: sha=r.json().get("sha")
+        elif r.status_code!=404: raise ValueError(f"GitHub preflight {path}: {r.status_code} {r.text[:200]}")
+    except requests.RequestException as exc:
+        raise ValueError(f"GitHub preflight error {path}: {exc}") from exc
+    body={"message":message,"content":base64.b64encode(data_bytes).decode("ascii"),"branch":"main"}
+    if sha: body["sha"]=sha
+    r=requests.put(url,headers=headers,json=body,timeout=60)
+    if r.status_code not in (200,201):
+        raise ValueError(f"GitHub PUT {path} gagal: {r.status_code} {r.text[:500]}")
+    return r.json()
+
+def _learning_files_snapshot():
+    state_dir=Path(os.getenv("FULL_STATE_DIR", str(Path(__file__).resolve().parent/"machine_learning_state")))
+    payload={}
+    for name in LEARNING_CHECKPOINT_FILES:
+        p=state_dir/name
+        if p.exists() and p.is_file():
+            payload[name]=p.read_bytes()
+    return payload
+
+def _build_learning_checkpoint():
+    files=_learning_files_snapshot()
+    meta={"format":"adaptive-learning-checkpoint-v1","created_at":datetime.now(WIB).isoformat(),"brain_engine":MAIN_ENGINE_VERSION,"files":sorted(files.keys())}
+    bio=io.BytesIO()
+    with zipfile.ZipFile(bio,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+        z.writestr("manifest.json",json.dumps(meta,ensure_ascii=False,indent=2))
+        for name,data in files.items():
+            z.writestr(name,data)
+    raw=bio.getvalue(); meta["archive_sha256"]=hashlib.sha256(raw).hexdigest(); meta["archive_bytes"]=len(raw)
+    # rewrite manifest with final hash without changing archive hash would be circular; keep hash in pointer instead.
+    return raw, files, meta
+
+def _save_learning_checkpoint_github():
+    raw, files, meta=_build_learning_checkpoint()
+    checkpoint_id=datetime.now(WIB).strftime("%Y%m%d_%H%M%S_%f")
+    prefix=f"{LEARNING_CHECKPOINT_ROOT}/{checkpoint_id}"
+    chunks=[]
+    for i in range(0,len(raw),LEARNING_CHECKPOINT_CHUNK_BYTES):
+        chunk=raw[i:i+LEARNING_CHECKPOINT_CHUNK_BYTES]
+        path=f"{prefix}/part_{i//LEARNING_CHECKPOINT_CHUNK_BYTES:04d}.bin"
+        _github_put_bytes(chunk,path,f"Learning checkpoint {checkpoint_id} part {i//LEARNING_CHECKPOINT_CHUNK_BYTES:04d}")
+        chunks.append(path)
+    manifest=dict(meta); manifest.update({"checkpoint_id":checkpoint_id,"prefix":prefix,"chunks":chunks,"file_count":len(files)})
+    _github_put_bytes(json.dumps(manifest,ensure_ascii=False,indent=2).encode(),f"{prefix}/manifest.json",f"Learning checkpoint {checkpoint_id} manifest")
+    _github_put_bytes(json.dumps(manifest,ensure_ascii=False,indent=2).encode(),LEARNING_CHECKPOINT_LATEST,f"Update latest learning checkpoint -> {checkpoint_id}")
+    return manifest
+
+def _github_get_bytes(path):
+    obj=_github_get_json(path)
+    if not isinstance(obj,dict) or obj.get("type")!="file": raise ValueError(f"GitHub path bukan file: {path}")
+    if obj.get("encoding")=="base64" and obj.get("content") is not None:
+        return base64.b64decode((obj.get("content") or "").replace("\n",""))
+    raise ValueError(f"GitHub file content tidak tersedia langsung: {path}")
+
+def _open_learning_checkpoint_github(checkpoint_id=None):
+    pointer=_github_get_json(LEARNING_CHECKPOINT_LATEST if not checkpoint_id else f"{LEARNING_CHECKPOINT_ROOT}/{checkpoint_id}/manifest.json")
+    if isinstance(pointer,dict) and pointer.get("content"):
+        manifest=json.loads(base64.b64decode(pointer["content"].replace("\n","")).decode("utf-8"))
+    else:
+        manifest=pointer
+    if not isinstance(manifest,dict) or not manifest.get("chunks"):
+        raise ValueError("Checkpoint manifest tidak valid atau tidak memiliki chunks")
+    raw=b"".join(_github_get_bytes(p) for p in manifest["chunks"])
+    expected=manifest.get("archive_sha256")
+    if expected and hashlib.sha256(raw).hexdigest()!=expected:
+        raise ValueError("Checksum checkpoint tidak cocok — restore dibatalkan")
+    state_dir=Path(os.getenv("FULL_STATE_DIR", str(Path(__file__).resolve().parent/"machine_learning_state")))
+    with zipfile.ZipFile(io.BytesIO(raw),"r") as z:
+        names=[n for n in z.namelist() if n and not n.endswith("/")]
+        for name in names:
+            if name=="manifest.json": continue
+            safe=Path(name)
+            if safe.name != name or safe.is_absolute() or ".." in safe.parts:
+                raise ValueError(f"Checkpoint path tidak aman: {name}")
+        # write all files through temp dir first so /open is atomic-ish
+        tmp=Path(tempfile.mkdtemp(prefix="learning-open-"))
+        try:
+            for name in names:
+                (tmp/name).write_bytes(z.read(name))
+            for name in names:
+                dst=state_dir/name; dst.parent.mkdir(parents=True,exist_ok=True); os.replace(tmp/name,dst)
+        finally:
+            try:
+                for p in tmp.iterdir(): p.unlink()
+                tmp.rmdir()
+            except Exception: pass
+    return manifest
+
+def _run_save_checkpoint(cid):
+    try:
+        manifest=_save_learning_checkpoint_github()
+        tg_send(cid, f"✅ <b>LEARNING SAVED</b>\nCheckpoint: <code>{html.escape(str(manifest.get('checkpoint_id')))}</code>\nData: <b>{int(manifest.get('file_count',0))}</b> file | archive <b>{int(manifest.get('archive_bytes',0)):,} B</b>\nTersimpan di GitHub. Tidak ada file dikirim ke Telegram.")
+    except Exception as e:
+        log.exception("[SAVE] checkpoint gagal")
+        tg_send(cid, f"❌ <b>/save gagal</b>\n<code>{html.escape(str(e)[:500])}</code>")
+
+def _wait_learning_workers_stopped(timeout_sec=60.0):
+    """Do not replace checkpoint files while a research worker can still write them."""
+    deadline=time.time()+float(timeout_sec)
+    while time.time() < deadline:
+        alive=False
+        try:
+            st=globals().get("get_adaptive_status")
+            if callable(st):
+                x=st() or {}
+                alive = alive or bool(x.get("worker_alive")) or bool(x.get("history_worker_alive"))
+        except Exception: pass
+        try:
+            st2=globals().get("get_v32_status")
+            if callable(st2): alive = alive or bool((st2() or {}).get("worker_alive"))
+        except Exception: pass
+        try:
+            t=globals().get("_FULL_COG_THREAD")
+            alive = alive or bool(t is not None and t.is_alive())
+        except Exception: pass
+        if not alive: return True
+        time.sleep(0.25)
+    return False
+
+def _run_open_checkpoint(cid, checkpoint_id=None):
+    try:
+        fn_stop=globals().get("adaptive_agent_stop")
+        if callable(fn_stop): fn_stop()
+        fn_stop_v32=globals().get("_v32_stop")
+        if callable(fn_stop_v32): fn_stop_v32()
+        fn_stop_cog=globals().get("_stop_full_cognitive_worker")
+        if callable(fn_stop_cog): fn_stop_cog()
+        if not _wait_learning_workers_stopped(60.0):
+            raise RuntimeError("research worker belum berhenti; checkpoint tidak diganti agar state belajar tidak rusak")
+        manifest=_open_learning_checkpoint_github(checkpoint_id)
+        # Reload strategy in-memory state; keep live execution state untouched.
+        fn_reload=globals().get("reload_learning_state")
+        if not callable(fn_reload): raise RuntimeError("Brain tidak menyediakan reload_learning_state(); restore dibatalkan")
+        fn_reload()
+        # Reload main ML state/experience from restored files.
+        global ML_STATE, ML_EXPERIENCE
+        ML_STATE=_ml_load_state(); ML_EXPERIENCE=_ml_load_experience(); _ml_sync_strategy()
+        # Restart research workers after successful restore.
+        fn_start_v32=globals().get("_v32_start")
+        if callable(fn_start_v32): fn_start_v32()
+        fn_start=globals().get("adaptive_agent_start")
+        if callable(fn_start): fn_start()
+        tg_send(cid, f"✅ <b>LEARNING OPENED</b>\nCheckpoint: <code>{html.escape(str(manifest.get('checkpoint_id','latest')))}</code>\nState belajar lama <b>diganti</b> dengan checkpoint tersebut. Posisi/trade execution tidak di-reset.")
+    except Exception as e:
+        log.exception("[OPEN] checkpoint gagal")
+        # Best-effort worker restart if restore failed.
+        try:
+            if callable(globals().get("_v32_start")): _v32_start()
+            if callable(globals().get("adaptive_agent_start")): adaptive_agent_start()
+        except Exception: pass
+        tg_send(cid, f"❌ <b>/open gagal</b>\n<code>{html.escape(str(e)[:500])}</code>")
+
 # ============================================================
 # TAMBAHAN BARU (END)
 # ============================================================
@@ -2447,6 +2631,27 @@ def _verified_timeout_all(chat_id):
                         "Cek Binance dan gunakan /ok SYMBOL untuk rekonsiliasi.")
         log.error(f"[TIMEOUT GLOBAL] cleanup gagal: {e}")
         return False
+def _trail_trigger_preflight(symbol, is_buy, candidate_tp, candidate_sl, reference_price=None):
+    """Reject locally invalid conditional trigger levels before cancelling live protection."""
+    try:
+        ref=float(reference_price) if reference_price is not None else float(get_price(symbol, prefer_binance=True) or 0.0)
+    except Exception:
+        ref=0.0
+    if ref <= 0: return False, "NO_REFERENCE_PRICE"
+    info=get_symbol_filters(symbol); tick=float(info.get("tickSize") or 0.0)
+    buffer=max(tick*3.0, abs(ref)*0.00020)
+    if is_buy:
+        if candidate_sl is not None and float(candidate_sl) >= ref-buffer: return False, "STOP_WOULD_IMMEDIATELY_TRIGGER"
+        if candidate_tp is not None and float(candidate_tp) <= ref+buffer: return False, "TP_WOULD_IMMEDIATELY_TRIGGER"
+    else:
+        if candidate_sl is not None and float(candidate_sl) <= ref+buffer: return False, "STOP_WOULD_IMMEDIATELY_TRIGGER"
+        if candidate_tp is not None and float(candidate_tp) >= ref-buffer: return False, "TP_WOULD_IMMEDIATELY_TRIGGER"
+    return True, "OK"
+
+def _is_binance_immediate_trigger_error(exc):
+    text=str(exc)
+    return "-2021" in text or "Order would immediately trigger" in text
+
 def place_sl_order(symbol, is_buy, sl_price, quantity, client_algo_id=None):
     close_side = "SELL" if is_buy else "BUY"
     info = get_symbol_filters(symbol)
@@ -4257,6 +4462,17 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
 # STRATEGY DISPATCH — ENGINE TIDAK MEMILIKI OTAK TRADING
 # ============================================================
 
+def _record_rejected_trail_event(sym, pos, candidate_sl, candidate_tp, reason, price):
+    event={"type":"management_event","event":"TRAIL_REJECTED","timestamp":time.time(),"symbol":sym,"reason":str(reason),"price":price,"candidate_sl":candidate_sl,"candidate_tp":candidate_tp,"execution_class":_position_execution_mode(pos)}
+    try:
+        fn=globals().get("ingest_management_event")
+        if callable(fn): fn(event)
+    except Exception as exc: log.debug(f"[TRAIL] research bridge gagal {sym}: {exc}")
+    with positions_lock:
+        if sym in positions:
+            positions[sym].setdefault("trail_history",[]).append(event)
+            positions[sym]["trail_failed_count"]=int(positions[sym].get("trail_failed_count",0) or 0)+1
+
 def _strategy_position_update(sym,pos):
     if _binance_is_scan_paused():
         return None
@@ -4707,13 +4923,24 @@ def monitor_position_real(sym,pos):
                                     live_qty = abs(float(latest.get("positionAmt",0) or 0)) if latest else 0.0
                                     if live_qty <= 0:
                                         continue
+                                    # Preflight against the freshest locally authoritative price.
+                                    # This prevents Binance -2021 and, critically, prevents us from
+                                    # cancelling a valid old protection before discovering the new
+                                    # trigger is already on the wrong side of market.
+                                    buy_side = pos["signal"]["decision"]=="BUY"
+                                    ok_trigger, trigger_reason = _trail_trigger_preflight(sym, buy_side, candidate_tp, candidate_sl, reference_price=current_price)
+                                    if not ok_trigger:
+                                        _record_rejected_trail_event(sym, pos, candidate_sl, candidate_tp, trigger_reason, current_price)
+                                        if candidate_sl != oldsl:
+                                            _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="FAILED", error=RuntimeError(trigger_reason))
+                                        continue
                                     # Cancel existing protection, then create+verify new pair. If creation
                                     # fails, restore the old pair before declaring an emergency.
                                     with _binance_critical_context():
                                         _cancel_all_algo_orders_verified(sym)
                                     try:
                                         with _binance_critical_context():
-                                            nt, ns = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", candidate_tp, candidate_sl, live_qty)
+                                            nt, ns = place_tp_sl(sym, buy_side, candidate_tp, candidate_sl, live_qty)
                                     except Exception as protect_err:
                                         restore_failed = False
                                         try:
@@ -4729,6 +4956,13 @@ def monitor_position_real(sym,pos):
                                                     positions[sym]["status"]="EMERGENCY"
                                                     positions[sym]["emergency_error"]=str(protect_err)[:300]
                                             raise RuntimeError(f"trail update gagal dan protection lama tidak bisa dipulihkan: {protect_err}")
+                                        if _is_binance_immediate_trigger_error(protect_err):
+                                            # Expected race: market moved between preflight and submit.
+                                            # The old verified protection has been restored, so this is a
+                                            # management rejection, NOT a strategy failure and NOT an ERROR.
+                                            _record_rejected_trail_event(sym, pos, candidate_sl, candidate_tp, "BINANCE_-2021_IMMEDIATE_TRIGGER", current_price)
+                                            log.warning(f"[trail] {sym}: candidate rejected by Binance -2021; old protection restored")
+                                            continue
                                         raise
                                     with positions_lock:
                                         if sym in positions:
@@ -5093,6 +5327,8 @@ def get_start_msg():
         "/resetstats           — Reset research stats/ledger tanpa mengubah modal\n\n"
         "━━━━━━━━ <b>TOOLS</b> ━━━━━━━━━━\n"
         "/ganti               — Upload/ganti strategy_logic.py\n"
+        "/save                — Simpan progress learning ke GitHub\n"
+        "/open                — Replace learning dari checkpoint GitHub terbaru\n"
         "/info                — Detail engine & metode analisis\n"
         "/IP                  — Lihat public IP Render saat ini\n"
         "/banned              — Lihat daftar koin yang diban\n"
@@ -5320,6 +5556,13 @@ def bot_loop():
                 # ============================================================
 # TAMBAHAN BARU (START) — Handler /ganti (Upload Otak Baru via GitHub API)
 # ============================================================
+                elif text in ("/save", "save"):
+                    threading.Thread(target=_run_save_checkpoint, args=(chat_id,), daemon=True).start()
+                    tg_send(chat_id, "⏳ <b>/save</b> berjalan di background. Progress learning disimpan ke GitHub; tidak mengirim file ke Telegram.")
+                elif text == "/open" or text.startswith("/open ") or text == "open" or text.startswith("open "):
+                    parts=text.split(maxsplit=1); checkpoint_id=parts[1].strip() if len(parts)==2 else None
+                    threading.Thread(target=_run_open_checkpoint, args=(chat_id, checkpoint_id), daemon=True).start()
+                    tg_send(chat_id, "⏳ <b>/open</b> mengambil checkpoint dari GitHub lalu <b>replace</b> memory learning. Posisi/trade execution tetap dipertahankan.")
                 elif text in ("/ganti","ganti"):
                    doc = msg.get("document")
                    if not doc:
