@@ -1,5 +1,5 @@
 """
-strategy_logic.py — ADAPTIVE BRAIN v35 (OTAK) (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
+strategy_logic.py — ADAPTIVE BRAIN v37 (OTAK) (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
 ========================================================================================
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
@@ -74,7 +74,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-ML_COGNITIVE_VERSION = "V34_COGNITIVE_AUDITED"
+ML_COGNITIVE_VERSION = "V37_LIFECYCLE_AUDITED"
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
 
 
@@ -3367,7 +3367,7 @@ def validate_and_adjust_geometry(
 # comparison, richer research snapshots, and FULL command interface.
 # This layer is deliberately execution-free and Binance-free.
 
-ML_COGNITIVE_VERSION = "V34_COGNITIVE_AUDITED"
+ML_COGNITIVE_VERSION = "V37_LIFECYCLE_AUDITED"
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
 FULL_BELIEF_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 FULL_BELIEF_FILE = FULL_BELIEF_DIR / "belief_state.json"
@@ -4140,11 +4140,46 @@ def record_candidate_observation(signal, outcome=None, rejected_reason=None, sou
     return record
 
 
-def record_trade_outcome(signal, outcome, source="binance"):
+def _canonical_trade_outcome(signal, outcome):
+    """Normalize BODY lifecycle data for research without changing strategy rules."""
     sig = dict(signal or {}) if isinstance(signal, dict) else {}
-    record = record_candidate_observation(sig, outcome=outcome, source=source)
+    payload = dict(outcome or {}) if isinstance(outcome, dict) else {"result": outcome}
+    exit_mechanism = str(payload.get("exit_mechanism") or payload.get("result") or "unknown").upper()
+    economic = str(payload.get("economic_outcome") or "UNKNOWN").upper()
+    if economic not in {"WIN", "LOSS", "BREAKEVEN", "UNKNOWN"}:
+        economic = "UNKNOWN"
+    try:
+        final_r = float(payload.get("final_r"))
+    except Exception:
+        final_r = 0.0
+    path = {
+        "mfe_r": _finite_num(payload.get("mfe_r"), 0.0),
+        "mae_r": _finite_num(payload.get("mae_r"), 0.0),
+        "final_r": final_r,
+    }
+    path["giveback_r"] = max(0.0, path["mfe_r"] - path["final_r"])
+    path["giveback_ratio"] = path["giveback_r"] / max(path["mfe_r"], 1e-9) if path["mfe_r"] > 0 else 0.0
+    path["capture_ratio"] = path["final_r"] / path["mfe_r"] if path["mfe_r"] > 0 else 0.0
+    initial_sl = payload.get("initial_sl", sig.get("initial_sl"))
+    final_sl = payload.get("sl", sig.get("sl"))
+    return {
+        **sig, **payload,
+        "exit_mechanism": exit_mechanism,
+        "economic_outcome": economic,
+        "final_r": path["final_r"],
+        "trade_path": path,
+        "initial_sl": initial_sl,
+        "final_sl": final_sl,
+        "trail_used": bool(payload.get("trail_applied_count", 0) or payload.get("trail_history")),
+        "trail_history": list(payload.get("trail_history") or []),
+    }
+
+
+def record_trade_outcome(signal, outcome, source="binance"):
+    record = _canonical_trade_outcome(signal, outcome)
     record["type"] = "trade_outcome"
-    record["entry_timestamp"] = sig.get("entry_timestamp") or sig.get("entry_time") or (sig.get("time_context") or {}).get("timestamp")
+    record["timestamp"] = time.time()
+    record["source"] = source
     try:
         with _COG_LOCK:
             with _COG_EXPERIENCE_FILE.open("a", encoding="utf-8") as fh:
@@ -4733,10 +4768,16 @@ def _v32_record_experience(row):
             _V32_STATE["outcomes"] = int(_V32_STATE.get("outcomes", 0)) + 1
             result = row.get("outcome") if isinstance(row.get("outcome"), dict) else row
             final_r = _v32_f((result or {}).get("final_r", row.get("final_r", 0.0)))
-            if final_r > 0:
+            economic = str((result or {}).get("economic_outcome", row.get("economic_outcome", "")) or "").upper()
+            if economic == "WIN" or final_r > 0:
                 _V32_STATE["wins"] = int(_V32_STATE.get("wins", 0)) + 1
-            elif final_r < 0:
+            elif economic == "LOSS" or final_r < 0:
                 _V32_STATE["losses"] = int(_V32_STATE.get("losses", 0)) + 1
+            elif economic == "BREAKEVEN":
+                _V32_STATE["breakeven"] = int(_V32_STATE.get("breakeven", 0)) + 1
+            mechanism = str((result or {}).get("exit_mechanism", row.get("exit_mechanism", "UNKNOWN")) or "UNKNOWN").upper()
+            exits = _V32_STATE.setdefault("exit_mechanisms", {})
+            exits[mechanism] = int(exits.get(mechanism, 0)) + 1
         _v32_json_save(V32_STATE_FILE, _V32_STATE)
     # Wake the worker immediately; it remains rate-limited by its own review cycle.
     _V32_WAKE.set()
@@ -5172,16 +5213,29 @@ _V34_SEEN_OUTCOME_KEYS = set()
 _V34_SEEN_CANDIDATE_KEYS = set()
 
 def ingest_live_outcome(signal,outcome,source="binance_trade"):
-    sig=dict(signal or {}) if isinstance(signal,dict) else {}
-    payload=outcome if isinstance(outcome,dict) else {"result":outcome}
-    uid=str(sig.get("trade_uid") or sig.get("order_id") or f"{sig.get('symbol','')}|{sig.get('entry_time','')}|{sig.get('exit_time','')}|{payload.get('result','')}")
+    canonical = _canonical_trade_outcome(signal, outcome)
+    sig = dict(signal or {}) if isinstance(signal,dict) else {}
+    uid=str(canonical.get("trade_uid") or sig.get("trade_uid") or sig.get("order_id") or f"{sig.get('symbol','')}|{sig.get('entry_time','')}|{canonical.get('closed_at','')}|{canonical.get('exit_mechanism','unknown')}")
     key=f"{uid}|{str(source)}"
     with _V32_LOCK:
         if key in _V34_SEEN_OUTCOME_KEYS:
             _v33_log("DATA", f"duplicate outcome ignored uid={uid}", logging.DEBUG)
             return None
         _V34_SEEN_OUTCOME_KEYS.add(key)
-    row={"type":"trade_outcome","timestamp":time.time(),"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":sig.get("confidence"),"archetype":sig.get("archetype"),"market_regime":sig.get("market_regime"),"time_context":sig.get("time_context") or _v32_hour_context(sig.get("entry_timestamp")),"learning_features":dict(sig.get("learning_features") or {}),"research_snapshot":sig.get("research_snapshot") or {},"signal":sig,"outcome":dict(payload)}
+    row={
+        "type":"trade_outcome", "timestamp":time.time(), "symbol":canonical.get("symbol") or sig.get("symbol"),
+        "source":source, "decision":canonical.get("decision"), "confidence":canonical.get("confidence"),
+        "archetype":canonical.get("archetype"), "market_regime":canonical.get("market_regime"),
+        "time_context":canonical.get("time_context") or _v32_hour_context(canonical.get("entry_timestamp") or canonical.get("entry_time")),
+        "learning_features":dict(canonical.get("learning_features") or {}),
+        "research_snapshot":canonical.get("research_snapshot") or {},
+        "signal":canonical, "outcome":canonical,
+        "exit_mechanism":canonical.get("exit_mechanism"),
+        "economic_outcome":canonical.get("economic_outcome"),
+        "final_r":canonical.get("final_r"),
+        "trade_path":canonical.get("trade_path"),
+        "trail_history":canonical.get("trail_history"),
+    }
     return _v32_record_experience(row)
 
 
@@ -5195,7 +5249,7 @@ def reset_cognitive_memory():
     _v32_stop()
     with _V32_LOCK:
         _V32_STATE={
-            "schema":V32_SCHEMA,"version":V32_VERSION,"observations":0,"candidates":0,"outcomes":0,"wins":0,"losses":0,"autopsies":0,"counterfactuals":0,"belief_revisions":0,"research_questions":0,"resolved_questions":0,"model_candidates":0,"model_promotions":0,"drift_score":0.0,"drift_status":"UNKNOWN","time_effect":{"status":"INSUFFICIENT","usable":False},"coverage":{"candidate_count":0,"live_candidate_count":0,"shadow_count":0,"coverage_rate":0.0},"calibration":{"status":"INSUFFICIENT","buckets":[]},"last_review":None,"last_model_update":None,"last_model_sample_count":0,"last_reviewed_outcomes":0,"last_policy_revision":None,"policy_revision_count":0,
+            "schema":V32_SCHEMA,"version":V32_VERSION,"observations":0,"candidates":0,"outcomes":0,"wins":0,"losses":0,"breakeven":0,"exit_mechanisms":{},"autopsies":0,"counterfactuals":0,"belief_revisions":0,"research_questions":0,"resolved_questions":0,"model_candidates":0,"model_promotions":0,"drift_score":0.0,"drift_status":"UNKNOWN","time_effect":{"status":"INSUFFICIENT","usable":False},"coverage":{"candidate_count":0,"live_candidate_count":0,"shadow_count":0,"coverage_rate":0.0},"calibration":{"status":"INSUFFICIENT","buckets":[]},"last_review":None,"last_model_update":None,"last_model_sample_count":0,"last_reviewed_outcomes":0,"last_policy_revision":None,"policy_revision_count":0,
         }
         _V32_BELIEFS={}; _V32_BUFFER=[]; _V32_TICKS=0; _V32_LAST_ERROR=None
         for path in (V32_STATE_FILE,V32_EXPERIENCE_FILE,V32_LESSON_FILE,V32_POLICY_FILE):
@@ -5241,10 +5295,13 @@ def _v32_full_text(payload):
     p=payload if isinstance(payload,dict) else {}
     st=get_v32_status(); s=st["state"]; cw="ON" if st["worker_alive"] else "OFF"
     champion=p.get("champion") if isinstance(p.get("champion"),dict) else {}
+    exits = s.get("exit_mechanisms") or {}
+    exit_line = (f"TP {int(exits.get('TP',0))} | Trail {int(exits.get('TRAIL',0))} | Initial SL {int(exits.get('SL',0))} | Strategy {int(exits.get('STRATEGY',0))}" )
     return (f"Main mode: <b>{'ON' if p.get('mode') else 'OFF'}</b>\n"
             f"Cognitive worker: <b>{cw}</b> | ticks: <b>{st['ticks']}</b>\n"
             f"Observations: <b>{s.get('observations',0)}</b> | Candidates: <b>{s.get('candidates',0)}</b>\n"
-            f"Outcomes: <b>{s.get('outcomes',0)}</b> | W/L: <b>{s.get('wins',0)}/{s.get('losses',0)}</b>\n"
+            f"Outcomes: <b>{s.get('outcomes',0)}</b> | W/L/BE: <b>{s.get('wins',0)}/{s.get('losses',0)}/{s.get('breakeven',0)}</b>\n"
+            f"Exit: <b>{exit_line}</b>\n"
             f"Coverage: <b>{(s.get('coverage') or {}).get('coverage_rate',0)*100:.1f}%</b>\n"
             f"Calibration: <b>{(s.get('calibration') or {}).get('status','INSUFFICIENT')}</b>\n"
             f"Time effect: <b>{(s.get('time_effect') or {}).get('status','INSUFFICIENT')}</b>\n"
@@ -5260,6 +5317,7 @@ def _v32_research_text(rep):
     cal=rep.get("calibration",{}); te=rep.get("time_effect",{}); drift=rep.get("drift",{}); cov=rep.get("coverage",{})
     return ("🔬 <b>FULL RESEARCH REVIEW</b>\n"
             f"Candidates: <b>{rep.get('candidates',0)}</b> | Outcomes: <b>{rep.get('outcomes',0)}</b>\n"
+            f"Trail health: <b>{(rep.get('trail_health') or {}).get('count',0)}</b> exits\n"
             f"Coverage: <b>{cov.get('coverage_rate',0)*100:.1f}%</b>\n"
             f"Calibration: <b>{cal.get('status','INSUFFICIENT')}</b>\n"
             f"Time-of-day: <b>{te.get('status','INSUFFICIENT')}</b>\n"
@@ -5300,7 +5358,7 @@ __all__ = list(dict.fromkeys(__all__ + [
 # Frequency/opportunity is a first-class research metric. The brain is not
 # rewarded for simply making the filter stricter and quieter.
 
-AGENT_BRAIN_API_VERSION = "v35-body-brain-contract-1"
+AGENT_BRAIN_API_VERSION = "v37-body-brain-contract-lifecycle-3"
 AGENT_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 AGENT_STATE_FILE = AGENT_STATE_DIR / "adaptive_brain_state.json"
 AGENT_POLICY_FILE = AGENT_STATE_DIR / "adaptive_policy.json"
@@ -5416,20 +5474,26 @@ def _agent_outcome_cells(records):
         key = (str(r.get("archetype") or "UNKNOWN"), str(r.get("market_regime") or r.get("regime") or "UNKNOWN"))
         p = r.get("outcome") if isinstance(r.get("outcome"), dict) else r
         try:
-            final_r = float(p.get("final_r", 0.0) or 0.0)
+            final_r = float(p.get("final_r", r.get("final_r", 0.0)) or 0.0)
         except Exception:
             final_r = 0.0
-        cells[key].append(final_r)
+        mechanism = str(p.get("exit_mechanism") or r.get("exit_mechanism") or "UNKNOWN").upper()
+        economic = str(p.get("economic_outcome") or r.get("economic_outcome") or "UNKNOWN").upper()
+        cells[key].append({"final_r": final_r, "mechanism": mechanism, "economic": economic})
     out = []
     for (archetype, regime), vals in cells.items():
-        n = len(vals)
-        wins = sum(1 for x in vals if x > 0)
+        rs = [float(x["final_r"]) for x in vals]
+        wins = sum(1 for x in vals if x["economic"] == "WIN" or x["final_r"] > 0)
+        mechanisms = defaultdict(int)
+        for x in vals:
+            mechanisms[x["mechanism"]] += 1
         out.append({
-            "archetype": archetype,
-            "regime": regime,
-            "n": n,
-            "mean_r": round(float(np.mean(vals)), 5),
-            "win_rate": round(wins / max(1, n), 4),
+            "archetype": archetype, "regime": regime, "n": len(vals),
+            "mean_r": round(float(np.mean(rs)), 5) if rs else 0.0,
+            "win_rate": round(wins / max(1, len(vals)), 4),
+            "exit_mechanisms": dict(mechanisms),
+            "trail_count": int(mechanisms.get("TRAIL", 0)),
+            "trail_mean_r": round(float(np.mean([x["final_r"] for x in vals if x["mechanism"] == "TRAIL"])), 5) if any(x["mechanism"] == "TRAIL" for x in vals) else None,
         })
     out.sort(key=lambda x: (x["mean_r"], x["n"]), reverse=True)
     return out
@@ -5500,12 +5564,65 @@ def _agent_apply_policy_proposals(proposals):
     return changed
 
 
+def _agent_trail_health(records):
+    outcomes = [r for r in records if isinstance(r, dict) and r.get("type") == "trade_outcome"]
+    trail = []
+    for r in outcomes:
+        p = r.get("outcome") if isinstance(r.get("outcome"), dict) else r
+        if str(p.get("exit_mechanism") or r.get("exit_mechanism") or "").upper() != "TRAIL":
+            continue
+        path = p.get("trade_path") if isinstance(p.get("trade_path"), dict) else {}
+        trail.append({
+            "final_r": _finite_num(p.get("final_r", path.get("final_r")), 0.0),
+            "mfe_r": _finite_num(p.get("mfe_r", path.get("mfe_r")), 0.0),
+            "capture_ratio": _finite_num(path.get("capture_ratio", p.get("capture_ratio")), 0.0),
+            "giveback_ratio": _finite_num(path.get("giveback_ratio", p.get("giveback_ratio")), 0.0),
+            "economic": str(p.get("economic_outcome") or r.get("economic_outcome") or "UNKNOWN"),
+            "trail_updates": int(p.get("trail_applied_count", 0) or 0),
+        })
+    return {
+        "count": len(trail),
+        "wins": sum(1 for x in trail if x["economic"] == "WIN"),
+        "losses": sum(1 for x in trail if x["economic"] == "LOSS"),
+        "mean_final_r": round(float(np.mean([x["final_r"] for x in trail])), 5) if trail else 0.0,
+        "mean_mfe_r": round(float(np.mean([x["mfe_r"] for x in trail])), 5) if trail else 0.0,
+        "mean_capture_ratio": round(float(np.mean([x["capture_ratio"] for x in trail])), 5) if trail else 0.0,
+        "mean_giveback_ratio": round(float(np.mean([x["giveback_ratio"] for x in trail])), 5) if trail else 0.0,
+    }
+
+
+def _agent_trade_lifecycle_health(records):
+    """Separate exit mechanism from economic outcome for adaptive research."""
+    outcomes=[r for r in records if isinstance(r,dict) and r.get("type")=="trade_outcome"]
+    by_exit={}
+    for r in outcomes:
+        p=r.get("outcome") if isinstance(r.get("outcome"),dict) else r
+        e=str(p.get("exit_mechanism") or r.get("exit_mechanism") or r.get("result") or "UNKNOWN").upper()
+        econ=str(p.get("economic_outcome") or r.get("economic_outcome") or "UNKNOWN").upper()
+        path=p.get("trade_path") if isinstance(p.get("trade_path"),dict) else {}
+        fr=_finite_num(p.get("final_r",path.get("final_r")),0.0)
+        z=by_exit.setdefault(e,{"count":0,"wins":0,"losses":0,"breakeven":0,"sum_r":0.0})
+        z["count"]+=1; z["sum_r"]+=fr
+        if econ=="WIN": z["wins"]+=1
+        elif econ=="LOSS": z["losses"]+=1
+        elif econ=="BREAKEVEN": z["breakeven"]+=1
+    for z in by_exit.values(): z["avg_final_r"]=z["sum_r"]/z["count"] if z["count"] else 0.0
+    trails=[r for r in outcomes if str((r.get("outcome") or r).get("exit_mechanism") or r.get("exit_mechanism") or "").upper()=="TRAIL"]
+    trail_stats=[]
+    for r in trails:
+        p=r.get("outcome") if isinstance(r.get("outcome"),dict) else r; path=p.get("trade_path") if isinstance(p.get("trade_path"),dict) else {}
+        trail_stats.append((_finite_num(p.get("final_r",path.get("final_r")),0.0),_finite_num(p.get("mfe_r",path.get("mfe_r")),0.0),_finite_num(path.get("capture_ratio",p.get("capture_ratio")),0.0),_finite_num(path.get("giveback_ratio",p.get("giveback_ratio")),0.0)))
+    return {"outcomes":len(outcomes),"by_exit":by_exit,"trail":{"count":len(trail_stats),"wins":sum(str((r.get("outcome") or r).get("economic_outcome") or r.get("economic_outcome") or "").upper()=="WIN" for r in trails),"losses":sum(str((r.get("outcome") or r).get("economic_outcome") or r.get("economic_outcome") or "").upper()=="LOSS" for r in trails),"avg_final_r":float(np.mean([x[0] for x in trail_stats])) if trail_stats else 0.0,"avg_mfe_r":float(np.mean([x[1] for x in trail_stats])) if trail_stats else 0.0,"avg_capture_ratio":float(np.mean([x[2] for x in trail_stats])) if trail_stats else 0.0,"avg_giveback_ratio":float(np.mean([x[3] for x in trail_stats])) if trail_stats else 0.0}}
+
+
 def adaptive_research_cycle():
     """Fast research pass. It runs immediately with sparse evidence and scales with data."""
     records = _agent_read_records()
     candidate_cells = _agent_candidate_cells(records)
     outcome_cells = _agent_outcome_cells(records)
     frequency = _agent_frequency_health(candidate_cells)
+    trail_health = _agent_trail_health(records)
+    lifecycle_health = _agent_trade_lifecycle_health(records)
     proposals = _agent_bounded_policy_proposal(candidate_cells, outcome_cells)
     changed = _agent_apply_policy_proposals(proposals)
     report = {
@@ -5515,11 +5632,15 @@ def adaptive_research_cycle():
         "candidate_cells": candidate_cells[:100],
         "outcome_cells": outcome_cells[:100],
         "frequency": frequency,
+        "trail_health": trail_health,
+        "lifecycle_health": lifecycle_health,
         "policy_proposals": proposals[:100],
         "policy_changes": changed,
     }
     with _AGENT_LOCK:
         _AGENT_STATE["frequency"] = frequency
+        _AGENT_STATE["trail_health"] = trail_health
+        _AGENT_STATE["lifecycle_health"] = lifecycle_health
         _AGENT_STATE["live"] = {
             "observations": sum(1 for x in records if x.get("type") == "market_observation"),
             "candidates": sum(1 for x in records if x.get("type") == "candidate"),
@@ -5543,6 +5664,7 @@ def get_adaptive_status():
             "history": dict(_AGENT_STATE.get("historical") or {}),
             "live": dict(_AGENT_STATE.get("live") or {}),
             "frequency": dict(_AGENT_STATE.get("frequency") or {}),
+            "trail_health": dict(_AGENT_STATE.get("trail_health") or {}),
             "policy_revisions": int(_AGENT_STATE.get("policy_revisions", 0) or 0),
             "exploration_share": AGENT_EXPLORATION_SHARE,
         }
@@ -5600,6 +5722,62 @@ def _historical_symbol_name(path):
     return name.split("-")[0].split("_")[0]
 
 
+def _simulate_historical_position_lifecycle(result, df, h1, d1, start_idx, symbol, max_forward_bars=64):
+    """Point-in-time virtual position lifecycle including strategy trailing.
+
+    Future bars are used only after the signal exists to label the hypothetical
+    path. No future value is fed back into the analysis at the signal timestamp.
+    Ambiguous bars that touch both TP and SL are explicitly labeled instead of
+    inventing an execution order.
+    """
+    if not isinstance(result, dict) or df is None or df.empty:
+        return {"status":"NO_SIGNAL"}
+    try:
+        entry=float(result.get("entry") or result.get("price")); initial_sl=float(result.get("sl")); tp=float(result.get("tp"))
+    except Exception:
+        return {"status":"INVALID_GEOMETRY"}
+    side=str(result.get("decision") or "BUY").upper(); risk=abs(entry-initial_sl)
+    if entry<=0 or risk<=0 or tp<=0: return {"status":"INVALID_GEOMETRY"}
+    state={"signal":dict(result),"entry":entry,"initial_sl":initial_sl,"current_sl":initial_sl,"current_price":entry,"price":entry,"status":"active","decision":side,"trade_uid":f"historical:{symbol}:{start_idx}"}
+    mfe_r=0.0; mae_r=0.0; trail_history=[]; exit_mech=None; exit_price=None; ambiguous=False
+    end=min(len(df),start_idx+1+max_forward_bars)
+    for j in range(start_idx+1,end):
+        bar=df.iloc[j]
+        high=float(bar["high"]); low=float(bar["low"]); close=float(bar["close"]); state["current_price"]=close; state["price"]=close
+        if side=="BUY":
+            mfe_r=max(mfe_r,max(0.0,(high-entry)/risk)); mae_r=min(mae_r,(low-entry)/risk)
+        else:
+            mfe_r=max(mfe_r,max(0.0,(entry-low)/risk)); mae_r=min(mae_r,(entry-high)/risk)
+        m15_now=df.iloc[:j+1].copy(); h1_now=h1.loc[:m15_now.index[-1]].copy(); d1_now=d1.loc[:m15_now.index[-1]].copy()
+        try: upd=_V31_BASE_MANAGE_POSITION(dict(state),m15_now,h1_now,d1_now,symbol=symbol)
+        except Exception: upd={}
+        if isinstance(upd,dict):
+            if upd.get("close"):
+                exit_mech="STRATEGY_EXIT"; exit_price=float(upd.get("close_price") or close); break
+            proposed=upd.get("sl")
+            if proposed is not None:
+                proposed=float(proposed); old=float(state["current_sl"])
+                better=(proposed>old) if side=="BUY" else (proposed<old)
+                valid=(proposed<close) if side=="BUY" else (proposed>close)
+                if better and valid:
+                    trail_history.append({"bar_time":str(m15_now.index[-1]),"old_sl":old,"new_sl":proposed,"profit_r":(((close-entry)/risk) if side=="BUY" else ((entry-close)/risk)),"state":upd.get("state"),"trail_source":upd.get("trail_source"),"reason":upd.get("reason",[])})
+                    state["current_sl"]=proposed; state["signal"]["sl"]=proposed
+        sl=float(state["current_sl"]); hit_tp=(high>=tp) if side=="BUY" else (low<=tp); hit_sl=(low<=sl) if side=="BUY" else (high>=sl)
+        if hit_tp and hit_sl:
+            ambiguous=True; exit_mech="AMBIGUOUS_BAR"; exit_price=close; break
+        if hit_tp:
+            exit_mech="TAKE_PROFIT"; exit_price=tp; break
+        if hit_sl:
+            exit_mech="TRAILING_STOP" if trail_history else "INITIAL_STOP"; exit_price=sl; break
+    if exit_mech is None:
+        exit_mech="FORWARD_WINDOW_EXPIRED"; exit_price=close
+    final_r=(((exit_price-entry)/risk) if side=="BUY" else ((entry-exit_price)/risk))
+    capture=(final_r/mfe_r) if mfe_r>1e-9 else 0.0; give=max(0.0,mfe_r-final_r); give_ratio=(give/mfe_r) if mfe_r>1e-9 else 0.0
+    econ="WIN" if final_r>1e-9 else ("LOSS" if final_r<-1e-9 else "BREAKEVEN")
+    if ambiguous: econ="UNKNOWN"
+    return {"status":"OK","entry":entry,"initial_sl":initial_sl,"final_sl":state["current_sl"],"tp":tp,"exit_price":exit_price,"exit_mechanism":exit_mech,"economic_outcome":econ,"final_r":float(final_r),"mfe_r":float(mfe_r),"mae_r":float(mae_r),"capture_ratio":float(capture),"giveback_ratio":float(give_ratio),"trail_history":trail_history,"trail_applied_count":len(trail_history)}
+
+
 def _replay_one_history_file(path):
     """Replay one M15-ish OHLCV file; generate observation/candidate evidence only."""
     try:
@@ -5640,25 +5818,19 @@ def _replay_one_history_file(path):
                 entry = float(result.get("entry") or result.get("price") or 0.0)
                 direction = str(result.get("decision") or "BUY").upper()
                 future = df.iloc[i:min(len(df), i + 32)]
-                if entry > 0 and not future.empty:
-                    if direction == "BUY":
-                        mfe = max(0.0, float(future["high"].max()) - entry)
-                        mae = max(0.0, entry - float(future["low"].min()))
-                    else:
-                        mfe = max(0.0, entry - float(future["low"].min()))
-                        mae = max(0.0, float(future["high"].max()) - entry)
-                    risk = abs(float(result.get("entry") or entry) - float(result.get("sl") or entry)) or np.nan
-                    mfe_r = float(mfe / risk) if np.isfinite(risk) and risk > 0 else 0.0
-                    mae_r = float(mae / risk) if np.isfinite(risk) and risk > 0 else 0.0
-                else:
-                    mfe_r = mae_r = 0.0
+                lifecycle = _simulate_historical_position_lifecycle(result, df, h1, d1, i, symbol, max_forward_bars=64)
                 result = dict(result)
                 result["historical_timestamp"] = str(now)
                 result["source"] = "historical_replay"
                 result["shadow"] = True
-                result["shadow_forward_bars"] = 32
-                result["shadow_mfe_r"] = round(mfe_r, 4)
-                result["shadow_mae_r"] = round(mae_r, 4)
+                result["shadow_forward_bars"] = 64
+                result["shadow_lifecycle"] = lifecycle
+                result["shadow_mfe_r"] = lifecycle.get("mfe_r")
+                result["shadow_mae_r"] = lifecycle.get("mae_r")
+                result["shadow_final_r"] = lifecycle.get("final_r")
+                result["shadow_exit_mechanism"] = lifecycle.get("exit_mechanism")
+                result["shadow_economic_outcome"] = lifecycle.get("economic_outcome")
+                result["shadow_trail_history"] = lifecycle.get("trail_history", [])
                 result["rejected_reason"] = "historical_shadow"
                 ingest_live_candidate(result, h1=h1_now, m15=m15_now, d1=d1_now, rejected_reason="historical_shadow", source="historical_replay")
                 emitted += 1
@@ -5745,11 +5917,7 @@ def adaptive_agent_stop():
     return get_adaptive_status()
 
 
-# Start learning immediately on module load. This worker never touches Binance.
-try:
-    adaptive_agent_start()
-except Exception as exc:
-    log.warning(f"[ADAPTIVE] auto-start gagal: {exc}")
+# Adaptive agent is started by main.py after the execution body is ready.
 
 # Explicit public API for the stable execution body.
 try:

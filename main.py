@@ -81,7 +81,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v27_ADAPTIVE_BRAIN"
+MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v29_TRADE_LIFECYCLE"
 
 # Stable body / replaceable brain contract.
 # main.py owns Binance, Telegram, execution, protection and runtime state.
@@ -232,6 +232,7 @@ real_balance_lock = threading.Lock()
 stat_lock = threading.Lock()
 stats = {
     "tp":0, "sl":0, "trail":0, "total":0,
+    "wins":0, "losses":0, "breakeven":0,
     "balance"    : STARTING_BALANCE,
     "pnl_history": deque(maxlen=20),   # compatibility /backtest view
 }
@@ -1079,6 +1080,7 @@ def _record_trail_event(sym, pos, update, old_sl, new_sl, status="APPLIED", erro
             prev=next((x for x in reversed(trail_events) if x.get("trade_uid")==pos.get("trade_uid") and x.get("symbol")==sym),None)
             if prev: event["time_since_previous_trail_sec"]=max(0.0,now-float(prev.get("event_time") or now))
             trail_events.append(event)
+        pos.setdefault("trail_history", []).append(dict(event))
         pos["trail_update_count"]=int(pos.get("trail_update_count",0))+1
         pos["trail_applied_count"]=int(pos.get("trail_applied_count",0))+(status=="APPLIED")
         pos["trail_failed_count"]=int(pos.get("trail_failed_count",0))+(status=="FAILED")
@@ -1101,8 +1103,8 @@ def index():
         t=stats["total"]; tp=stats["tp"]; sl=stats["sl"]; trail=stats.get("trail",0)
     with ban_lock:
         n_banned = len(banned_coins)
-    wins = tp + trail
-    wr=f"{wins/(wins+sl)*100:.1f}%" if (wins+sl)>0 else "–"
+    wins = int(stats.get("wins", 0)); losses = int(stats.get("losses", 0))
+    wr=f"{wins/(wins+losses)*100:.1f}%" if (wins+losses)>0 else "–"
     ws_state = "REST (WS fallback siaga)" if ws_feed.is_fresh() else "REST (WS fallback belum siap)"
     return (f"<h3>SMC Signal Broadcaster</h3>"
             f"<p>Auto:{auto_mode} | Banned:{n_banned} | Data:{ws_state}</p>"
@@ -3412,42 +3414,86 @@ EXIT_FEE_PCT  = 0.0005   # 0.05% — exit via SL/TP market-trigger (taker)
 # pakai MARGIN_USD × LEVERAGE (persis logika real trade), bukan ini lagi.
 POSITION_SIZE_PCT = 100.0  # DEPRECATED — lihat catatan di atas
 
-def _classify_close_result(result, entry=None, close_price=None, decision=None):
-    """Normalize every closed trade into the three operational outcome buckets.
+def _classify_close_result(result, entry=None, close_price=None, decision=None,
+                            trail_applied=False, exit_mechanism=None):
+    """Return the OPERATIONAL exit mechanism, never the economic outcome.
 
-    TP is preserved when the exchange/engine explicitly confirms a take-profit path.
-    Every other realized exit is classified economically: positive net PnL -> TRAIL,
-    non-positive net PnL -> SL. The original reason is kept separately in
-    ``close_reason`` for research, so UI/statistics never end up with an uncounted
-    fourth outcome such as ``strategy`` or ``timeout``.
+    ``result`` is kept for backward compatibility, but the returned value now
+    answers *how the position exited*: TP, trailing stop, initial stop, strategy,
+    timeout, emergency, or unknown. Economic WIN/LOSS/BREAKEVEN is derived
+    separately from the realized net PnL. This prevents a profitable trailing
+    stop from being mislabeled as a generic WIN and, more importantly, prevents
+    a losing trailing stop from being confused with a thesis/entry failure.
     """
-    result = str(result or "strategy").strip().lower()
-    if result == "tp":
+    hinted = str(exit_mechanism or result or "unknown").strip().lower()
+    aliases = {
+        "take_profit": "tp", "takeprofit": "tp",
+        "trailing": "trail", "trailing_stop": "trail", "trailing-stop": "trail",
+        "initial_stop": "sl", "initial-stop": "sl", "stop": "sl",
+        "strategy_exit": "strategy", "strategy-close": "strategy",
+    }
+    hinted = aliases.get(hinted, hinted)
+    if hinted == "tp":
         return "tp"
-    if entry is not None and close_price is not None:
-        try:
-            entry = float(entry); close_price = float(close_price)
-            if entry > 0:
-                side = str(decision or "BUY").upper()
-                direction = 1 if side == "BUY" else -1
-                pnl_raw = ((close_price - entry) / entry) * direction
-                net_pnl = pnl_raw - (ENTRY_FEE_PCT + EXIT_FEE_PCT)
-                return "trail" if net_pnl > 0 else "sl"
-        except Exception:
-            pass
-    # No realized price available: preserve explicit operational result, otherwise
-    # fail closed into SL so every closed trade remains countable.
-    if result == "trail":
+    if hinted in {"trail", "sl", "strategy", "timeout", "emergency"}:
+        if hinted == "sl" and trail_applied:
+            return "trail"
+        return hinted
+    if trail_applied:
         return "trail"
-    if result == "sl":
+    # A local monitor hitting the current SL without any prior trail is the
+    # initial stop. Price is not used to decide the mechanism.
+    if hinted in {"unknown", ""} and entry is not None and close_price is not None:
         return "sl"
-    return "sl"
+    return "unknown"
+
+
+def _classify_economic_outcome(entry=None, close_price=None, decision=None,
+                               fee_pct=None, epsilon_pct=1e-9):
+    """Classify realized economics independently from the exit mechanism."""
+    if entry is None or close_price is None:
+        return "UNKNOWN", None, None
+    try:
+        entry = float(entry); close_price = float(close_price)
+        if entry <= 0 or close_price <= 0:
+            return "UNKNOWN", None, None
+        side = str(decision or "BUY").upper()
+        direction = 1.0 if side == "BUY" else -1.0
+        gross = ((close_price - entry) / entry) * direction
+        fees = float(ENTRY_FEE_PCT + EXIT_FEE_PCT if fee_pct is None else fee_pct)
+        net = gross - fees
+        if net > epsilon_pct:
+            outcome = "WIN"
+        elif net < -epsilon_pct:
+            outcome = "LOSS"
+        else:
+            outcome = "BREAKEVEN"
+        return outcome, gross, net
+    except Exception:
+        return "UNKNOWN", None, None
+
+
+def _final_r_from_prices(entry, initial_sl, close_price, decision, fee_pct=None):
+    """Net R relative to INITIAL risk, so trailing does not rewrite the denominator."""
+    try:
+        entry = float(entry); initial_sl = float(initial_sl); close_price = float(close_price)
+        risk_pct = abs(entry - initial_sl) / entry if entry > 0 else 0.0
+        if risk_pct <= 0:
+            return None, None
+        side = str(decision or "BUY").upper()
+        direction = 1.0 if side == "BUY" else -1.0
+        gross_pct = ((close_price - entry) / entry) * direction
+        fees = float(ENTRY_FEE_PCT + EXIT_FEE_PCT if fee_pct is None else fee_pct)
+        net_pct = gross_pct - fees
+        return gross_pct / risk_pct, net_pct / risk_pct
+    except Exception:
+        return None, None
 
 
 def _update_trade_path_metrics(pos, price):
     """Track MFE/MAE and time-to-R milestones in-memory without API calls."""
     try:
-        entry=float(pos.get("entry")); sl=float(pos["signal"].get("sl")); price=float(price)
+        entry=float(pos.get("entry")); sl=float(pos.get("initial_sl") or pos["signal"].get("sl")); price=float(price)
         if entry <= 0: return
         side=str(pos["signal"].get("decision") or "BUY").upper()
         move=((price-entry)/entry*100.0) if side=="BUY" else ((entry-price)/entry*100.0)
@@ -3470,110 +3516,83 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
                  time_in_trade_sec=None, time_to_1r_sec=None, time_to_2r_sec=None,
                  execution_mode=None, balance_anchor=None, trade_uid=None,
                  trail_update_count=0, trail_applied_count=0, trail_failed_count=0, trail_queued_count=0,
-                 first_trail_r=None, last_trail_r=None, max_protected_r=None, learning_features=None, ml_model_version=None):
-    """
-    Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
-    lama untuk detail model close_price). Tambahan: catat sym/decision/
-    entry_time/exit_time + detail sinyal (confidence/entry_label/rr/rsi/
-    struct_h1/d1_bias) ke pnl_history — bahan diagnosis strategy_logic.py
-    tanpa perlu data tambahan lain (lihat /analyze).
+                 first_trail_r=None, last_trail_r=None, max_protected_r=None,
+                 trail_history=None, initial_sl_p=None, learning_features=None, ml_model_version=None):
+    """Finalize one closed trade with two independent labels:
 
-    result: klasifikasi final yang sudah dinormalisasi. "trail" hanya dipakai
-    jika exit trailing benar-benar menghasilkan PnL positif; trailing yang
-    berakhir negatif dicatat sebagai "sl". "timeout" juga diklasifikasikan
-    menjadi "trail" bila positif dan "sl" bila negatif.
+    - ``exit_mechanism``: HOW it ended (TP/TRAIL/INITIAL_SL/STRATEGY/...)
+    - ``economic_outcome``: WHETHER the realized economics were WIN/LOSS/BREAKEVEN.
+
+    This separation is deliberate: a trailing stop can be either profitable or
+    losing, and a stop loss is not automatically evidence that the strategy thesis
+    was wrong.
     """
-    result = _classify_close_result(result, entry=entry, close_price=close_price, decision=decision)
+    exit_mechanism = _classify_close_result(
+        result, entry=entry, close_price=close_price, decision=decision,
+        trail_applied=(int(trail_applied_count or 0) > 0), exit_mechanism=close_reason or result
+    )
+    economic_outcome, gross_pct, net_pct = _classify_economic_outcome(
+        entry=entry, close_price=close_price, decision=decision
+    )
+    initial_sl_value = initial_sl_p if initial_sl_p is not None else sl_p
+    gross_r, final_r = _final_r_from_prices(entry, initial_sl_value, close_price, decision)
+
     with stat_lock:
         stats["total"] += 1
-        if result in ("tp", "sl", "trail"):
-            stats[result] = stats.get(result, 0) + 1
+        if exit_mechanism in ("tp", "sl", "trail"):
+            stats[exit_mechanism] = stats.get(exit_mechanism, 0) + 1
+        if economic_outcome == "WIN":
+            stats["wins"] = stats.get("wins", 0) + 1
+        elif economic_outcome == "LOSS":
+            stats["losses"] = stats.get("losses", 0) + 1
+        elif economic_outcome == "BREAKEVEN":
+            stats["breakeven"] = stats.get("breakeven", 0) + 1
 
-        if not entry or tp_p is None:
+        if not entry or tp_p is None or close_price is None:
             return
 
-        balance      = stats["balance"]
-        # ── FIX "buat semirip mungkin" ──────────────────────────────────
-        # Sebelumnya: position_usd = balance × 100% — simulasi selalu
-        # bertaruh SELURUH saldo tiap trade (full compounding), padahal
-        # real trading pakai MARGIN_USD × LEVERAGE (jumlah dolar FIXED,
-        # kecil, diatur via /margin & /leverage), TIDAK ikut membesar
-        # walau saldo real sudah tumbuh. Ini bikin bentuk kurva ekuitas
-        # simulasi sama sekali beda dari real (simulasi: compounding
-        # agresif; real: flat sizing) — bukan cuma soal fee/entry lagi,
-        # tapi soal skala taruhan itu sendiri.
-        # Sekarang KEDUA mode pakai rumus yang SAMA PERSIS seperti real
-        # trade sizing, supaya kalau kamu ubah /margin atau /leverage,
-        # simulasi otomatis ikut menyesuaikan — selaras terus dengan real.
+        balance = stats["balance"]
         position_usd = round(MARGIN_USD * LEVERAGE, 6)
         direction_sign = 1 if tp_p > entry else -1
-
-        if close_price is not None:
-            ref_price = close_price
-        elif result == "tp":
-            ref_price = tp_p
-        elif result == "sl" and sl_p is not None:
-            ref_price = sl_p
-        else:
-            return
-
-        pnl_pct_raw = (ref_price - entry) / entry * direction_sign
-        # ── FIX "simulasi tidak real / win rate kelewat bagus" ──────────
-        # Sebelumnya PnL dihitung MURNI dari selisih harga — nol biaya
-        # trading. Di real trading, Binance SELALU potong fee tiap kali
-        # entry (limit order → biasanya maker) DAN exit (SL/TP → market-
-        # trigger → taker), otomatis kepotong dari saldo asli. Simulasi
-        # tidak pernah mengurangi ini, jadi untuk trade RR ketat (SL 1-2%
-        # dari harga, khas bot ini), fee round-trip yang kelihatannya kecil
-        # bisa membalik hasil "breakeven/rugi tipis di real" jadi "menang"
-        # di simulasi — bias sistemik yang bikin win rate simulasi selalu
-        # kelihatan lebih bagus dari kenyataan.
-        #
-        # Angka ENTRY_FEE_PCT/EXIT_FEE_PCT di bawah = tarif standar Binance
-        # USDT-M Futures VIP0 tanpa diskon BNB. Kalau akun kamu VIP lebih
-        # tinggi / pakai diskon BNB / fee-nya beda, SESUAIKAN angka ini
-        # (dekat bagian atas file) supaya makin presisi ke kondisi akunmu.
-        # Diterapkan ke SIMULASI *dan* REAL supaya keduanya konsisten
-        # mencerminkan biaya riil (real trading sebenarnya sudah kepotong
-        # otomatis di Binance — ini menyamakan angka yang DITAMPILKAN bot
-        # dengan kenyataan itu, bukan menambah biaya baru yang sungguhan).
+        ref_price = float(close_price)
         fee_pct = ENTRY_FEE_PCT + EXIT_FEE_PCT
+        pnl_pct_raw = (ref_price - entry) / entry * direction_sign
         pnl_pct = pnl_pct_raw - fee_pct
         pnl_usd = round(position_usd * pnl_pct, 4)
-        pct     = round(pnl_pct * 100, 3)
+        pct = round(pnl_pct * 100, 3)
         stats["balance"] = round(balance + pnl_usd, 4)
         exit_ts = time.time()
         global trade_sequence
         trade_sequence += 1
         trade_record = {
             "trade_id": trade_sequence, "run_id": research_run_id, "trade_uid": trade_uid,
-            "result": result, "close_reason": close_reason or result, "pct": pct,
+            "result": exit_mechanism,
+            "exit_mechanism": exit_mechanism,
+            "economic_outcome": economic_outcome,
+            "close_reason": close_reason or exit_mechanism,
+            "pct": pct, "gross_pnl_pct": gross_pct, "net_pnl_pct": net_pct,
             "pnl_usd": pnl_usd, "balance_after": stats["balance"],
             "symbol": sym, "decision": decision,
             "entry_time": entry_time, "exit_time": exit_ts,
-            "entry": entry, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
+            "entry": entry, "initial_sl": initial_sl_value, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
             "confidence": confidence, "entry_label": entry_label, "rr": rr,
             "rsi": rsi, "struct_h1": struct_h1, "d1_bias": d1_bias,
-            "mfe_pct": mfe_pct,
-            "mae_pct": mae_pct,
-            "mfe_r": mfe_r,
-            "mae_r": mae_r,
-            "time_in_trade_sec": time_in_trade_sec,
-            "time_to_1r_sec": time_to_1r_sec,
-            "time_to_2r_sec": time_to_2r_sec,
+            "mfe_pct": mfe_pct, "mae_pct": mae_pct, "mfe_r": mfe_r, "mae_r": mae_r,
+            "final_r": final_r, "gross_final_r": gross_r,
+            "time_in_trade_sec": time_in_trade_sec, "time_to_1r_sec": time_to_1r_sec, "time_to_2r_sec": time_to_2r_sec,
             "execution_mode": execution_mode, "balance_anchor": balance_anchor,
             "trail_update_count": int(trail_update_count or 0), "trail_applied_count": int(trail_applied_count or 0),
             "trail_failed_count": int(trail_failed_count or 0), "trail_queued_count": int(trail_queued_count or 0),
             "first_trail_r": first_trail_r, "last_trail_r": last_trail_r, "max_protected_r": max_protected_r,
+            "trail_history": list(trail_history or []),
             "learning_features": dict(learning_features) if isinstance(learning_features, dict) else None,
             "ml_model_version": ml_model_version or "static",
         }
-        # Full ledger: every closed trade in this research run.
         with trade_history_lock:
             trade_history.append(dict(trade_record))
         _ml_append_experience(trade_record)
-        # Backward-compatible 20-trade view for /backtest and existing UI.
         stats["pnl_history"].append(dict(trade_record))
+        return dict(trade_record)
 
 # Hitung alasan pending dibatalkan — biar bisa didiagnosis dari data,
 # bukan tebak-tebakan (mis. "kenapa banyak batal?" jadi terjawab dari /stats).
@@ -3602,8 +3621,8 @@ def fmt_stats():
         hist = list(stats["pnl_history"])
     with trade_history_lock:
         full_hist = [dict(x) for x in trade_history]
-    wins = tp + trail
-    wr = wins/(wins+sl)*100 if (wins+sl) > 0 else 0
+    wins = int(stats.get("wins", 0)); losses = int(stats.get("losses", 0)); breakeven = int(stats.get("breakeven", 0))
+    wr = wins/(wins+losses)*100 if (wins+losses) > 0 else 0
     base = STARTING_BALANCE if not REAL_TRADE_ENABLED else (real_balance_snapshot if real_balance_snapshot is not None else bal)
     pnl = round(bal - base, 4)
     pnl_pct = round((pnl / base * 100), 2) if base else 0.0
@@ -3641,9 +3660,9 @@ def fmt_stats():
     trail_line = f"{avg_trail:.1f}%" if avg_trail is not None else "—"
     sl_line = f"{avg_sl:.1f}%" if avg_sl is not None else "—"
     return (
-        f"📊 <b>Statistik</b> — {t} trade | TP {tp} SL {sl} Trail {trail}\n"
+        f"📊 <b>Statistik</b> — {t} trade | TP {tp} | Initial SL {sl} | Trail {trail}\n"
         f"Mode: <b>{mode_label}</b>\n"
-        f"Win Rate: <b>{wr:.1f}%</b> (TP+Trail vs SL)\n"
+        f"Hasil ekonomi: <b>{wins} WIN / {losses} LOSS / {breakeven} BE</b> | WR: <b>{wr:.1f}%</b>\n"
         f"\nModal anchor: <b>${base:.4f}</b> → Saldo statistik: <b>${bal:.4f}</b> "
         f"({sgn}{pnl_pct:.2f}%)\n"
         f"\nConfidence rata-rata closed: <b>{avg_line}</b>\n"
@@ -3669,7 +3688,7 @@ def fmt_backtest():
         t_out = datetime.fromtimestamp(xt, WIB).strftime("%d/%m/%Y %H:%M") if xt else "?"
         sgn = "+" if h["pnl_usd"] >= 0 else ""
         entry_v, tp_v, sl_v = h.get("entry"), h.get("tp"), h.get("sl")
-        sl_display = h.get("exit_price") if h.get("result") == "trail" else sl_v
+        sl_display = h.get("exit_price") if h.get("exit_mechanism") == "trail" else sl_v
         levels = (f"Entry: <code>{entry_v:.6g}</code> | TP: <code>{tp_v:.6g}</code> | SL: <code>{sl_display:.6g}</code>\n"
                   if entry_v is not None and tp_v is not None and sl_display is not None else "")
         try:
@@ -3677,7 +3696,7 @@ def fmt_backtest():
         except (TypeError, ValueError):
             conf_txt = "—"
         lines.append(
-            f"{em} <b>{sym}</b> {dec} | {h['result'].upper()} {sgn}{h['pct']:.2f}% | Confidence: <b>{conf_txt}</b>\n"
+            f"{em} <b>{sym}</b> {dec} | {str(h.get('economic_outcome') or h.get('result','?')).upper()} / {str(h.get('exit_mechanism') or h.get('result','?')).upper()} {sgn}{h['pct']:.2f}% | Confidence: <b>{conf_txt}</b>\n"
             f"{levels}{t_in}→{t_out}"
         )
     return f"📋 <b>Backtest ({len(hist)} trade terakhir)</b>\n\n" + "\n\n".join(lines)
@@ -3693,6 +3712,8 @@ def _trade_analysis_rows(hist):
             "run_id": t.get("run_id", ""),
             "symbol": t.get("symbol", ""),
             "result": t.get("result", ""),
+            "exit_mechanism": t.get("exit_mechanism", t.get("result", "")),
+            "economic_outcome": t.get("economic_outcome", ""),
             "close_reason": t.get("close_reason", ""),
             "decision": t.get("decision", ""),
             "entry": t.get("entry", ""),
@@ -3700,7 +3721,7 @@ def _trade_analysis_rows(hist):
             "tp": t.get("tp", ""),
             "exit_price": t.get("exit_price", ""),
             "rr": t.get("rr", ""),
-            "final_r": t.get("final_r", ""),
+            "final_r": t.get("final_r", ""), "gross_final_r": t.get("gross_final_r", ""),
             "confidence": t.get("confidence", ""),
             "entry_label": t.get("entry_label", ""),
             "rsi": t.get("rsi", ""),
@@ -3733,8 +3754,8 @@ def _analyze_trade_history():
     if not hist:
         return [], {"trades": 0, "run_id": research_run_id}, []
 
-    winners = [t for t in hist if t.get("result") in ("tp", "trail")]
-    losers = [t for t in hist if t.get("result") == "sl"]
+    winners = [t for t in hist if str(t.get("economic_outcome") or "").upper() == "WIN"]
+    losers = [t for t in hist if str(t.get("economic_outcome") or "").upper() == "LOSS"]
     gross_profit = sum(max(float(t.get("pnl_usd", 0.0)), 0.0) for t in hist)
     gross_loss = abs(sum(min(float(t.get("pnl_usd", 0.0)), 0.0) for t in hist))
     total_pnl = sum(float(t.get("pnl_usd", 0.0)) for t in hist)
@@ -3765,7 +3786,7 @@ def _analyze_trade_history():
     by_symbol = {}
     by_entry = {}
     for t in hist:
-        r = str(t.get("result") or "unknown")
+        r = str(t.get("exit_mechanism") or t.get("result") or "unknown")
         s = str(t.get("symbol") or "?")
         el = str(t.get("entry_label") or "?")
         for bucket, key in ((by_result, r), (by_symbol, s), (by_entry, el)):
@@ -3783,6 +3804,9 @@ def _analyze_trade_history():
         "balance": float(hist[-1].get("balance_after", run_anchor)),
         "balance_anchor": run_anchor, "net": total_pnl,
         "win_rate": len(winners) / len(hist) * 100.0,
+        "wins": len(winners),
+        "losses": len(losers),
+        "breakeven": sum(1 for t in hist if str(t.get("economic_outcome") or "").upper() == "BREAKEVEN"),
         "profit_factor": gross_profit / gross_loss if gross_loss > 0 else float("inf"),
         "max_dd": max_dd,
         "expectancy": total_pnl / len(hist),
@@ -3819,7 +3843,7 @@ def _analyze_runtime_stats():
 def _write_analyze_csv(rows):
     path = "/tmp/analyze_data.csv"
     cols = [
-        "trade_id", "run_id", "symbol", "result", "close_reason", "decision", "entry", "sl", "tp", "exit_price",
+        "trade_id", "run_id", "symbol", "result", "exit_mechanism", "economic_outcome", "close_reason", "decision", "entry", "sl", "tp", "exit_price",
         "rr", "final_r", "confidence", "entry_label", "rsi", "struct_h1", "d1_bias", "pct", "pnl_usd",
         "balance_after", "balance_anchor", "execution_mode", "mfe_pct", "mae_pct", "mfe_r", "mae_r", "time_in_trade_sec",
         "time_to_1r_sec", "time_to_2r_sec", "trail_update_count", "trail_applied_count", "trail_failed_count", "trail_queued_count",
@@ -4076,8 +4100,9 @@ def close_position(sym, result, close_price=None):
             active_trade = None
 
     stats_error = None
+    canonical_trade = None
     try:
-        update_stats(
+        canonical_trade = update_stats(
             classified, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price,
             sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"),
             close_reason=result,
@@ -4092,6 +4117,7 @@ def close_position(sym, result, close_price=None):
             trade_uid=pos.get("trade_uid"), trail_update_count=pos.get("trail_update_count",0), trail_applied_count=pos.get("trail_applied_count",0),
             trail_failed_count=pos.get("trail_failed_count",0), trail_queued_count=pos.get("trail_queued_count",0), first_trail_r=pos.get("first_trail_r"),
             last_trail_r=pos.get("last_trail_r"), max_protected_r=(pos.get("max_protected_r") if pos.get("max_protected_r",-999)>-998 else None),
+            trail_history=pos.get("trail_history"), initial_sl_p=pos.get("initial_sl"),
             learning_features=(pos.get("signal") or {}).get("learning_features"),
             ml_model_version=(pos.get("signal") or {}).get("learning_model_version", "static")
         )
@@ -4102,8 +4128,15 @@ def close_position(sym, result, close_price=None):
     try:
         fn_outcome = globals().get("ingest_live_outcome")
         if callable(fn_outcome):
-            outcome_record = {**sig, **pos, "result": classified, "exit_price": close_price, "closed_at": time.time()}
-            fn_outcome(outcome_record, classified, source="binance_trade")
+            outcome_record = dict(canonical_trade) if isinstance(canonical_trade, dict) else {
+                **sig, **pos,
+                "result": classified,
+                "exit_mechanism": classified,
+                "exit_price": close_price,
+                "closed_at": time.time(),
+                "economic_outcome": "UNKNOWN",
+            }
+            fn_outcome(outcome_record, outcome_record, source="binance_trade")
     except Exception as e:
         log.warning(f"[COGNITIVE] outcome bridge gagal {sym}: {e}")
     _brain_wakeup_from_body()
@@ -4138,12 +4171,7 @@ def close_position(sym, result, close_price=None):
 
 
 def _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=None):
-    """Finalize an exchange-side close detected by positionAmt==0.
-
-    Binance positionRisk returning a symbol with positionAmt=0 is treated as a real close,
-    not as a still-open position. Cleanup is best-effort but tracked separately so a
-    transient API failure cannot erase the closed-trade record.
-    """
+    """Finalize an exchange-side close and preserve the true exit mechanism."""
     sig = pos.get("signal") or {}
     price = exit_price
     if price is None:
@@ -4153,26 +4181,22 @@ def _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=None):
             price = None
     if price is None:
         price = pos.get("current_price") or pos.get("entry")
-
-    # Keep final MFE/MAE snapshot without another Binance request.
     try:
         if price is not None:
             _update_trade_path_metrics(pos, price)
     except Exception:
         pass
 
-    reason = reason_hint if reason_hint in ("tp", "sl") else "unknown"
-    if reason == "unknown":
-        # A trailing SL that was moved to/above breakeven and then triggered is a Trail
-        # only if the realized outcome is positive; the common classifier below handles it.
-        reason = "trail"
-    elif reason == "sl":
-        # Preserve explicit SL when Binance's algo status confirms a stop. The final
-        # classifier will still convert it only when the caller marks it as trail/timeout.
-        pass
+    hint = str(reason_hint or "unknown").lower()
+    if hint == "tp":
+        mechanism = "tp"
+    elif hint == "sl":
+        mechanism = "trail" if int(pos.get("trail_applied_count", 0) or 0) > 0 else "sl"
+    elif hint in {"trail", "strategy", "timeout", "emergency"}:
+        mechanism = hint
+    else:
+        mechanism = "trail" if int(pos.get("trail_applied_count", 0) or 0) > 0 else "unknown"
 
-    # Clean orphan protection. If Binance is temporarily unavailable, retain a pending
-    # cleanup marker but still finalize the already-flat trade locally.
     try:
         with _binance_critical_context():
             _cancel_all_algo_orders_verified(sym)
@@ -4180,19 +4204,7 @@ def _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=None):
         _queue_pending_cleanup(sym, "post-external-close cleanup", e)
         log.warning(f"[external-close] {sym} cleanup tertunda: {e}")
 
-    # If the exchange explicitly told us TP/SL, preserve that reason. Otherwise classify
-    # from the realized exit outcome and trailing context.
-    if reason_hint == "tp":
-        final_result = "tp"
-    elif reason_hint == "sl":
-        # An SL trigger after a trailing move is a Trail only if the realized PnL is positive.
-        trail_candidate = bool(pos.get("current_sl") is not None and pos.get("entry") is not None)
-        final_result = "trail" if trail_candidate and _classify_close_result("trail", pos.get("entry"), price, sig.get("decision")) == "trail" else "sl"
-    else:
-        final_result = "trail" if _classify_close_result("trail", pos.get("entry"), price, sig.get("decision")) == "trail" else "sl"
-
-    closed = close_position(sym, final_result, close_price=price)
-    return closed
+    return close_position(sym, mechanism, close_price=price)
 
 
 def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
@@ -4355,8 +4367,10 @@ def monitor_position(sym,pos):
         hit_tp=tp is not None and ((price>=tp) if buy else (price<=tp))
         hit_sl=sl is not None and ((price<=sl) if buy else (price>=sl))
         if hit_tp or hit_sl:
-            result="tp" if hit_tp and not hit_sl else "sl"
-            if hit_tp and hit_sl: result=check_tp_sl_order(sym,tp,sl,buy,3) or "tp"
+            result="tp" if hit_tp and not hit_sl else ("trail" if int(pos.get("trail_applied_count",0) or 0) > 0 else "sl")
+            if hit_tp and hit_sl:
+                resolved=check_tp_sl_order(sym,tp,sl,buy,3) or "tp"
+                result = "tp" if resolved == "tp" else ("trail" if int(pos.get("trail_applied_count",0) or 0) > 0 else "sl")
             close_position(sym,result,close_price=tp if result=="tp" else sl); return
         time.sleep(MONITOR_SLEEP)
 
@@ -4377,7 +4391,7 @@ def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
         now=time.time()
         pos.update({"entry":actual_entry,"entry_time":now,"status":"active","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
                     "timeout_flag":False,"current_sl":sl,"initial_sl":sl,"execution_mode":"SIMULATION",
-                    "trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+                    "trail_history":[],"trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
     tg_send(chat_id,f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
                     f"Entry: <code>{actual_entry:.8g}</code>\n"
                     f"TP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
@@ -4517,7 +4531,7 @@ def _emergency_close(sym, is_buy, qty, chat_id, reason):
         with positions_lock:
             local_pos = positions.get(sym)
         if local_pos is not None:
-            close_position(sym, "trail" if _classify_close_result("trail", local_pos.get("entry"), exit_price or get_price(sym), local_pos["signal"].get("decision")) == "trail" else "sl", close_price=exit_price or get_price(sym) or local_pos.get("entry"))
+            close_position(sym, "emergency", close_price=exit_price or get_price(sym) or local_pos.get("entry"))
         tg_send(chat_id, f"✅ <b>AUTO-OUT</b> — {sym}\nPosisi Binance terkonfirmasi tertutup dan protection dibersihkan.")
         return True
     except Exception as e:
@@ -4549,7 +4563,7 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
         with positions_lock:
             if sym in positions:
                 now=time.time()
-                positions[sym].update({"entry": actual_entry, "entry_time": now, "status": "active", "trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}", "current_sl": sl, "initial_sl": sl, "quantity": qty, "tp_order_id": None, "sl_order_id": None, "trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+                positions[sym].update({"entry": actual_entry, "entry_time": now, "status": "active", "trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}", "current_sl": sl, "initial_sl": sl, "quantity": qty, "tp_order_id": None, "sl_order_id": None, "trail_history":[], "trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
         _queue_pending_protection(sym, buy, sl, tp, qty)
         tg_send(chat_id, f"⏸️ <b>PROTEKSI DITUNDA</b> — {sym}\nBinance sedang rate-limit/ban. TP/SL dicatat dan akan dipasang setelah recovery +60 detik.")
         threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start(); return
@@ -4565,7 +4579,7 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
         now=time.time()
         positions[sym].update({"entry":actual_entry,"entry_time":now,"status":"active","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
                                "current_sl":sl,"initial_sl":sl,"quantity":qty,"tp_order_id":t["algoId"],"sl_order_id":s["algoId"],
-                               "execution_mode":"REAL","trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+                               "execution_mode":"REAL","trail_history":[],"trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
     tg_send(chat_id,f"⚡ <b>ENTRY REAL</b> — {sym}\nEntry: <code>{actual_entry:.8g}</code>\nTP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
     threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start()
 
@@ -4668,8 +4682,7 @@ def monitor_position_real(sym,pos):
                                     if sym in positions:
                                         positions[sym]["status"]="EMERGENCY"
                                 return
-                            result = "trail" if _classify_close_result("trail", pos.get("entry"), exit_price or price, pos["signal"].get("decision")) == "trail" else "sl"
-                            close_position(sym,result,close_price=exit_price or price); return
+                            close_position(sym, "strategy", close_price=exit_price or price); return
 
                         oldsl=pos.get("current_sl",pos["signal"].get("sl")); oldtp=pos["signal"].get("tp")
                         # Calculate candidates WITHOUT mutating local state.
