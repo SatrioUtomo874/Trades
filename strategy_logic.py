@@ -1,5 +1,5 @@
 """
-strategy_logic.py — OTAK v8 (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
+strategy_logic.py — ADAPTIVE BRAIN v35 (OTAK) (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
 ========================================================================================
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
@@ -61,6 +61,8 @@ import os
 import json
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 try:
     from zoneinfo import ZoneInfo
@@ -4559,7 +4561,7 @@ __all__ = [
 # functions below become the single public behavior. It is research-only: it does
 # not send orders, call Binance, or forcibly tighten live signal frequency.
 
-V32_VERSION = "V34_CONTINUAL_COGNITIVE_AUDITED"
+V32_VERSION = "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED"
 V32_SCHEMA = "full_learning_cognitive_v2"
 V32_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 V32_STATE_FILE = V32_STATE_DIR / "v32_brain_state.json"
@@ -4568,10 +4570,10 @@ V32_LESSON_FILE = V32_STATE_DIR / "v32_lessons.jsonl"
 V32_POLICY_FILE = V32_STATE_DIR / "v32_policy.json"
 V32_TIMEZONE = os.getenv("FULL_TIMEZONE", "Asia/Jakarta")
 
-V32_MIN_OUTCOMES = 40
-V32_MIN_WIN = 10
-V32_MIN_LOSS = 10
-V32_MIN_CELL = 12
+V32_MIN_OUTCOMES = 8
+V32_MIN_WIN = 3
+V32_MIN_LOSS = 3
+V32_MIN_CELL = 8
 V32_RESEARCH_WINDOW = 2500
 V32_REVIEW_INTERVAL = max(5.0, float(os.getenv("FULL_REVIEW_INTERVAL", "30")))
 V32_SINGLE_EVENT_MAX_BELIEF_DELTA = 0.035
@@ -5275,3 +5277,486 @@ __all__ = list(dict.fromkeys(__all__ + [
     "full_analyze", "manage_position", "ingest_live_candidate", "ingest_live_outcome",
     "full_learning_review", "reset_cognitive_memory", "extract_time_context",
 ]))
+
+
+# =============================================================================
+# V35 ADAPTIVE AGENT OVERLAY
+# =============================================================================
+# Design contract:
+#   strategy_logic.py = replaceable brain.
+#   It may research, learn, rank and propose policy changes, but NEVER calls
+#   Binance execution APIs. main.py remains the execution body.
+#
+# Learning starts immediately from observations. There is NO "wait 30 trades"
+# requirement for observation/model bookkeeping. Policy changes still require
+# batched evidence, validation and stability; one SL cannot rewrite the brain.
+#
+# Sources of evidence:
+#   1) historical replay (local Binance-compatible OHLCV files),
+#   2) live market observations,
+#   3) every analyzed live candidate, including below-threshold candidates,
+#   4) executed trade outcomes and management events.
+#
+# Frequency/opportunity is a first-class research metric. The brain is not
+# rewarded for simply making the filter stricter and quieter.
+
+AGENT_BRAIN_API_VERSION = "v35-body-brain-contract-1"
+AGENT_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
+AGENT_STATE_FILE = AGENT_STATE_DIR / "adaptive_brain_state.json"
+AGENT_POLICY_FILE = AGENT_STATE_DIR / "adaptive_policy.json"
+AGENT_HISTORY_DIR = Path(os.getenv("HISTORICAL_DATA_DIR", str(AGENT_STATE_DIR / "historical_data")))
+AGENT_HISTORICAL_DAYS = max(30, int(os.getenv("HISTORICAL_LEARNING_DAYS", "90")))
+AGENT_RESEARCH_INTERVAL = max(5.0, float(os.getenv("ADAPTIVE_RESEARCH_INTERVAL", "20")))
+AGENT_REPLAY_WORKERS = max(1, min(4, int(os.getenv("ADAPTIVE_REPLAY_WORKERS", "2"))))
+AGENT_REPLAY_STEP_M15 = max(1, int(os.getenv("ADAPTIVE_REPLAY_STEP_M15", "4")))
+AGENT_MIN_POLICY_EVIDENCE = max(8, int(os.getenv("ADAPTIVE_MIN_POLICY_EVIDENCE", "20")))
+AGENT_POLICY_MAX_DELTA = max(0.01, min(0.10, float(os.getenv("ADAPTIVE_POLICY_MAX_DELTA", "0.03"))))
+AGENT_EXPLORATION_SHARE = max(0.05, min(0.30, float(os.getenv("ADAPTIVE_EXPLORATION_SHARE", "0.15"))))
+AGENT_AUTO_HISTORICAL = str(os.getenv("ADAPTIVE_AUTO_HISTORICAL", "1")).strip().lower() not in {"0", "false", "off", "no"}
+AGENT_MAX_HISTORY_ROWS = max(5000, int(os.getenv("ADAPTIVE_MAX_HISTORY_ROWS", "300000")))
+
+_AGENT_LOCK = threading.RLock()
+_AGENT_STOP = threading.Event()
+_AGENT_WAKE = threading.Event()
+_AGENT_THREAD = None
+_AGENT_HISTORY_THREAD = None
+_AGENT_HISTORY_DONE = set()
+_AGENT_LAST_ERROR = None
+_AGENT_TICKS = 0
+_AGENT_LAST_REPORT = {}
+_AGENT_STATE = {
+    "version": AGENT_BRAIN_API_VERSION,
+    "brain_version": V32_VERSION,
+    "historical": {"files": 0, "rows": 0, "replay_candidates": 0, "status": "NOT_STARTED"},
+    "live": {"observations": 0, "candidates": 0, "outcomes": 0},
+    "frequency": {},
+    "policy": {},
+    "policy_revisions": 0,
+    "last_research": None,
+}
+
+
+def _agent_json_load(path, default):
+    try:
+        if path.exists():
+            obj = json.loads(path.read_text(encoding="utf-8"))
+            return obj if isinstance(obj, type(default)) else default
+    except Exception as exc:
+        log.warning(f"[ADAPTIVE] load {path.name} gagal: {exc}")
+    return default
+
+
+def _agent_json_save(path, obj):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(obj, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:
+        log.warning(f"[ADAPTIVE] save {path.name} gagal: {exc}")
+        return False
+
+
+with _AGENT_LOCK:
+    _AGENT_STATE.update(_agent_json_load(AGENT_STATE_FILE, {}))
+    _AGENT_POLICY = _agent_json_load(AGENT_POLICY_FILE, {})
+    if not isinstance(_AGENT_POLICY, dict):
+        _AGENT_POLICY = {}
+
+
+def _agent_read_records(limit=AGENT_MAX_HISTORY_ROWS):
+    """Read the canonical v32/v35 experience log without touching Binance."""
+    rows = []
+    try:
+        if V32_EXPERIENCE_FILE.exists():
+            with V32_EXPERIENCE_FILE.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                        if isinstance(row, dict):
+                            rows.append(row)
+                    except Exception:
+                        continue
+    except Exception as exc:
+        log.warning(f"[ADAPTIVE] experience read gagal: {exc}")
+    return rows[-int(limit):]
+
+
+def _agent_candidate_cells(records):
+    """Compute opportunity/frequency and quality cells from *all* candidates."""
+    candidates = [r for r in records if isinstance(r, dict) and r.get("type") == "candidate"]
+    cells = defaultdict(list)
+    for r in candidates:
+        regime = str(r.get("regime") or r.get("market_regime") or "UNKNOWN")
+        archetype = str(r.get("archetype") or "UNKNOWN")
+        decision = str(r.get("decision") or "UNKNOWN").upper()
+        key = (archetype, regime, decision)
+        q = float(r.get("trade_quality") or (r.get("confidence") or 0.0))
+        cells[key].append(q)
+    out = []
+    for (archetype, regime, decision), vals in cells.items():
+        n = len(vals)
+        out.append({
+            "archetype": archetype,
+            "regime": regime,
+            "decision": decision,
+            "n": n,
+            "avg_quality": round(float(np.mean(vals)), 3) if vals else 0.0,
+            "opportunity_share": round(n / max(1, len(candidates)), 5),
+        })
+    out.sort(key=lambda x: (-x["n"], -x["avg_quality"]))
+    return out
+
+
+def _agent_outcome_cells(records):
+    outcomes = [r for r in records if isinstance(r, dict) and r.get("type") == "trade_outcome"]
+    cells = defaultdict(list)
+    for r in outcomes:
+        key = (str(r.get("archetype") or "UNKNOWN"), str(r.get("market_regime") or r.get("regime") or "UNKNOWN"))
+        p = r.get("outcome") if isinstance(r.get("outcome"), dict) else r
+        try:
+            final_r = float(p.get("final_r", 0.0) or 0.0)
+        except Exception:
+            final_r = 0.0
+        cells[key].append(final_r)
+    out = []
+    for (archetype, regime), vals in cells.items():
+        n = len(vals)
+        wins = sum(1 for x in vals if x > 0)
+        out.append({
+            "archetype": archetype,
+            "regime": regime,
+            "n": n,
+            "mean_r": round(float(np.mean(vals)), 5),
+            "win_rate": round(wins / max(1, n), 4),
+        })
+    out.sort(key=lambda x: (x["mean_r"], x["n"]), reverse=True)
+    return out
+
+
+def _agent_frequency_health(candidate_cells):
+    total = sum(int(x.get("n", 0) or 0) for x in candidate_cells)
+    if not total:
+        return {"candidates": 0, "top_cell_share": 0.0, "status": "INSUFFICIENT"}
+    top = max((int(x.get("n", 0) or 0) / total for x in candidate_cells), default=0.0)
+    return {
+        "candidates": total,
+        "top_cell_share": round(top, 4),
+        "exploration_share_target": AGENT_EXPLORATION_SHARE,
+        "status": "HEALTHY" if total >= 20 else "WARMING_UP",
+    }
+
+
+def _agent_bounded_policy_proposal(candidate_cells, outcome_cells):
+    """Propose small, auditable policy changes; never mutate core strategy code."""
+    proposals = []
+    outcome_map = {(x["archetype"], x["regime"]): x for x in outcome_cells if int(x.get("n", 0) or 0) >= AGENT_MIN_POLICY_EVIDENCE}
+    for c in candidate_cells:
+        key = (c["archetype"], c["regime"])
+        o = outcome_map.get(key)
+        if not o:
+            continue
+        mean_r = float(o.get("mean_r", 0.0))
+        n = int(o.get("n", 0) or 0)
+        # Positive edge => gentle support; negative edge => gentle caution.
+        target = float(np.tanh(mean_r)) * 0.03
+        target = max(-AGENT_POLICY_MAX_DELTA, min(AGENT_POLICY_MAX_DELTA, target))
+        proposals.append({
+            "key": f"{c['archetype']}|{c['regime']}",
+            "delta": round(target, 5),
+            "evidence": n,
+            "mean_r": round(mean_r, 5),
+            "frequency": int(c.get("n", 0) or 0),
+        })
+    return proposals
+
+
+def _agent_apply_policy_proposals(proposals):
+    """Apply only bounded, evidence-backed revisions; one trade cannot change it."""
+    changed = []
+    global _AGENT_POLICY
+    with _AGENT_LOCK:
+        for p in proposals:
+            key = str(p.get("key"))
+            n = int(p.get("evidence", 0) or 0)
+            if n < AGENT_MIN_POLICY_EVIDENCE:
+                continue
+            old = float(_AGENT_POLICY.get(key, 0.0) or 0.0)
+            delta = max(-AGENT_POLICY_MAX_DELTA, min(AGENT_POLICY_MAX_DELTA, float(p.get("delta", 0.0) or 0.0)))
+            # Hysteresis: ignore tiny noise.
+            if abs(delta) < 0.005:
+                continue
+            new = max(-0.25, min(0.25, old + delta * min(1.0, n / 100.0)))
+            if abs(new - old) < 0.002:
+                continue
+            _AGENT_POLICY[key] = round(float(new), 6)
+            changed.append({"key": key, "old": round(old, 6), "new": round(new, 6), "evidence": n})
+        if changed:
+            _AGENT_STATE["policy_revisions"] = int(_AGENT_STATE.get("policy_revisions", 0) or 0) + len(changed)
+            _AGENT_STATE["policy"] = dict(_AGENT_POLICY)
+            _agent_json_save(AGENT_POLICY_FILE, _AGENT_POLICY)
+            _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+    return changed
+
+
+def adaptive_research_cycle():
+    """Fast research pass. It runs immediately with sparse evidence and scales with data."""
+    records = _agent_read_records()
+    candidate_cells = _agent_candidate_cells(records)
+    outcome_cells = _agent_outcome_cells(records)
+    frequency = _agent_frequency_health(candidate_cells)
+    proposals = _agent_bounded_policy_proposal(candidate_cells, outcome_cells)
+    changed = _agent_apply_policy_proposals(proposals)
+    report = {
+        "timestamp": time.time(),
+        "brain_version": AGENT_BRAIN_API_VERSION,
+        "records": len(records),
+        "candidate_cells": candidate_cells[:100],
+        "outcome_cells": outcome_cells[:100],
+        "frequency": frequency,
+        "policy_proposals": proposals[:100],
+        "policy_changes": changed,
+    }
+    with _AGENT_LOCK:
+        _AGENT_STATE["frequency"] = frequency
+        _AGENT_STATE["live"] = {
+            "observations": sum(1 for x in records if x.get("type") == "market_observation"),
+            "candidates": sum(1 for x in records if x.get("type") == "candidate"),
+            "outcomes": sum(1 for x in records if x.get("type") == "trade_outcome"),
+        }
+        _AGENT_STATE["last_research"] = time.time()
+        _AGENT_STATE["policy"] = dict(_AGENT_POLICY)
+        _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+    return report
+
+
+def get_adaptive_status():
+    with _AGENT_LOCK:
+        return {
+            "api_version": AGENT_BRAIN_API_VERSION,
+            "brain_version": V32_VERSION,
+            "worker_alive": bool(_AGENT_THREAD is not None and _AGENT_THREAD.is_alive()),
+            "history_worker_alive": bool(_AGENT_HISTORY_THREAD is not None and _AGENT_HISTORY_THREAD.is_alive()),
+            "ticks": int(_AGENT_TICKS),
+            "last_error": _AGENT_LAST_ERROR,
+            "history": dict(_AGENT_STATE.get("historical") or {}),
+            "live": dict(_AGENT_STATE.get("live") or {}),
+            "frequency": dict(_AGENT_STATE.get("frequency") or {}),
+            "policy_revisions": int(_AGENT_STATE.get("policy_revisions", 0) or 0),
+            "exploration_share": AGENT_EXPLORATION_SHARE,
+        }
+
+
+def get_adaptive_policy():
+    with _AGENT_LOCK:
+        return dict(_AGENT_POLICY)
+
+
+def _load_ohlcv_file(path):
+    """Load CSV/JSON/JSONL historical OHLCV without contacting Binance."""
+    suffix = path.suffix.lower()
+    rows = []
+    if suffix == ".csv":
+        df = pd.read_csv(path)
+    elif suffix in {".json", ".jsonl"}:
+        if suffix == ".jsonl":
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            df = pd.DataFrame(rows)
+        else:
+            obj = json.loads(path.read_text(encoding="utf-8"))
+            df = pd.DataFrame(obj if isinstance(obj, list) else obj.get("data", []))
+    else:
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    rename = {c.lower().strip(): c for c in df.columns}
+    def pick(*names):
+        for n in names:
+            if n in rename: return rename[n]
+        return None
+    cols = {k: pick(k, k.replace("_", " ")) for k in ("open_time","timestamp","time","open","high","low","close","volume")}
+    ts_col = cols.get("open_time") or cols.get("timestamp") or cols.get("time")
+    if not ts_col:
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "open": pd.to_numeric(df[cols["open"]], errors="coerce"),
+        "high": pd.to_numeric(df[cols["high"]], errors="coerce"),
+        "low": pd.to_numeric(df[cols["low"]], errors="coerce"),
+        "close": pd.to_numeric(df[cols["close"]], errors="coerce"),
+        "volume": pd.to_numeric(df[cols["volume"]], errors="coerce"),
+    }, index=pd.to_datetime(df[ts_col], unit="ms", utc=True, errors="coerce"))
+    if out.index.isna().all():
+        out.index = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
+    out = out[~out.index.isna()].dropna(subset=["open","high","low","close","volume"]).sort_index()
+    return out
+
+
+def _historical_symbol_name(path):
+    name = path.stem.upper()
+    for token in ("-15M", "_15M", "15M", "-M15", "_M15", "M15"):
+        if token in name:
+            return name.split(token)[0].replace("-", "").replace("_", "") or name
+    return name.split("-")[0].split("_")[0]
+
+
+def _replay_one_history_file(path):
+    """Replay one M15-ish OHLCV file; generate observation/candidate evidence only."""
+    try:
+        df = _load_ohlcv_file(path)
+        if df is None or len(df) < 320:
+            return {"file": str(path), "rows": 0, "candidates": 0, "status": "SKIPPED"}
+        # Respect requested historical horizon without relying on current Binance REST.
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=AGENT_HISTORICAL_DAYS)
+        df = df.loc[df.index >= cutoff]
+        if len(df) < 320:
+            return {"file": str(path), "rows": int(len(df)), "candidates": 0, "status": "SKIPPED_SHORT"}
+        h1 = df.resample("1h").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
+        d1 = df.resample("1D").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
+        symbol = _historical_symbol_name(path)
+        emitted = 0
+        step = AGENT_REPLAY_STEP_M15
+        # Point-in-time replay: only rows up to t are visible to the analysis.
+        for i in range(300, len(df) - 32, step):
+            m15_now = df.iloc[:i].copy()
+            now = m15_now.index[-1]
+            h1_now = h1.loc[:now].copy()
+            d1_now = d1.loc[:now].copy()
+            if len(h1_now) < 80 or len(d1_now) < 20:
+                continue
+            try:
+                result = _V31_BASE_FULL_ANALYZE(h1_now, m15_now, d1_now, symbol=symbol, df_btc_h1=None, trade_history=None)
+            except Exception:
+                continue
+            # The original engine can return None; that itself is a useful scan observation.
+            try:
+                feats = extract_market_features(h1_now, m15_now, d1_now, None)
+                _v32_record_experience({"type":"historical_market_observation","timestamp":time.time(),"historical_timestamp":str(now),"symbol":symbol,"source":"historical_replay","features":feats})
+            except Exception:
+                pass
+            if isinstance(result, dict):
+                # Label the hypothetical candidate with forward path information without
+                # allowing those future values to enter the analysis itself.
+                entry = float(result.get("entry") or result.get("price") or 0.0)
+                direction = str(result.get("decision") or "BUY").upper()
+                future = df.iloc[i:min(len(df), i + 32)]
+                if entry > 0 and not future.empty:
+                    if direction == "BUY":
+                        mfe = max(0.0, float(future["high"].max()) - entry)
+                        mae = max(0.0, entry - float(future["low"].min()))
+                    else:
+                        mfe = max(0.0, entry - float(future["low"].min()))
+                        mae = max(0.0, float(future["high"].max()) - entry)
+                    risk = abs(float(result.get("entry") or entry) - float(result.get("sl") or entry)) or np.nan
+                    mfe_r = float(mfe / risk) if np.isfinite(risk) and risk > 0 else 0.0
+                    mae_r = float(mae / risk) if np.isfinite(risk) and risk > 0 else 0.0
+                else:
+                    mfe_r = mae_r = 0.0
+                result = dict(result)
+                result["historical_timestamp"] = str(now)
+                result["source"] = "historical_replay"
+                result["shadow"] = True
+                result["shadow_forward_bars"] = 32
+                result["shadow_mfe_r"] = round(mfe_r, 4)
+                result["shadow_mae_r"] = round(mae_r, 4)
+                result["rejected_reason"] = "historical_shadow"
+                ingest_live_candidate(result, h1=h1_now, m15=m15_now, d1=d1_now, rejected_reason="historical_shadow", source="historical_replay")
+                emitted += 1
+        return {"file": str(path), "rows": int(len(df)), "candidates": emitted, "status": "OK"}
+    except Exception as exc:
+        return {"file": str(path), "rows": 0, "candidates": 0, "status": "ERROR", "error": str(exc)[:300]}
+
+
+def adaptive_replay_historical(force=False):
+    """Replay local historical files in parallel; never uses Binance API."""
+    global _AGENT_HISTORY_DONE
+    if not AGENT_HISTORY_DIR.exists():
+        with _AGENT_LOCK:
+            _AGENT_STATE["historical"] = {"files": 0, "rows": 0, "replay_candidates": 0, "status": "NO_DIRECTORY"}
+            _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+        return dict(_AGENT_STATE["historical"])
+    paths = [p for p in sorted(AGENT_HISTORY_DIR.rglob("*")) if p.suffix.lower() in {".csv", ".json", ".jsonl"}]
+    if not force:
+        paths = [p for p in paths if str(p) not in _AGENT_HISTORY_DONE]
+    if not paths:
+        with _AGENT_LOCK:
+            _AGENT_STATE["historical"] = {"files": len(_AGENT_HISTORY_DONE), "rows": _AGENT_STATE.get("historical",{}).get("rows",0), "replay_candidates": _AGENT_STATE.get("historical",{}).get("replay_candidates",0), "status": "UP_TO_DATE"}
+            _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+        return dict(_AGENT_STATE["historical"])
+    results=[]
+    with ThreadPoolExecutor(max_workers=AGENT_REPLAY_WORKERS, thread_name_prefix="hist-replay") as ex:
+        futs={ex.submit(_replay_one_history_file,p):p for p in paths}
+        for fut in as_completed(futs):
+            try: results.append(fut.result())
+            except Exception as exc: results.append({"file":str(futs[fut]),"status":"ERROR","error":str(exc)[:300]})
+    _AGENT_HISTORY_DONE.update(str(x.get("file")) for x in results if x.get("status") in {"OK","SKIPPED","SKIPPED_SHORT"})
+    with _AGENT_LOCK:
+        hist=_AGENT_STATE.get("historical") if isinstance(_AGENT_STATE.get("historical"),dict) else {}
+        _AGENT_STATE["historical"]={
+            "files": int(hist.get("files",0) or 0)+len(results),
+            "rows": int(hist.get("rows",0) or 0)+sum(int(x.get("rows",0) or 0) for x in results),
+            "replay_candidates": int(hist.get("replay_candidates",0) or 0)+sum(int(x.get("candidates",0) or 0) for x in results),
+            "status": "RUNNING" if results else "IDLE",
+            "last_results": results[-20:],
+        }
+        _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+        return dict(_AGENT_STATE["historical"])
+
+
+def _adaptive_worker_loop():
+    global _AGENT_TICKS, _AGENT_LAST_ERROR
+    log.info("[ADAPTIVE] brain worker started")
+    while not _AGENT_STOP.is_set():
+        try:
+            if AGENT_AUTO_HISTORICAL and _AGENT_TICKS == 0:
+                try:
+                    adaptive_replay_historical(force=False)
+                except Exception:
+                    log.exception("[ADAPTIVE] historical bootstrap gagal")
+            _AGENT_LAST_REPORT = adaptive_research_cycle()
+            _AGENT_TICKS += 1
+            _AGENT_LAST_ERROR = None
+        except Exception as exc:
+            _AGENT_LAST_ERROR = str(exc)[:500]
+            log.exception("[ADAPTIVE] research cycle gagal")
+        _AGENT_WAKE.wait(AGENT_RESEARCH_INTERVAL)
+        _AGENT_WAKE.clear()
+    log.info("[ADAPTIVE] brain worker stopped")
+
+
+def adaptive_agent_start():
+    """Idempotent start. Called by main.py at boot and after brain hot-swap."""
+    global _AGENT_THREAD, _AGENT_STOP
+    with _AGENT_LOCK:
+        if _AGENT_THREAD is not None and _AGENT_THREAD.is_alive():
+            _AGENT_WAKE.set()
+            return get_adaptive_status()
+        _AGENT_STOP.clear()
+        _AGENT_WAKE.set()
+        _AGENT_THREAD = threading.Thread(target=_adaptive_worker_loop, name="adaptive-brain", daemon=True)
+        _AGENT_THREAD.start()
+    return get_adaptive_status()
+
+
+def adaptive_agent_stop():
+    with _AGENT_LOCK:
+        _AGENT_STOP.set()
+        _AGENT_WAKE.set()
+    return get_adaptive_status()
+
+
+# Start learning immediately on module load. This worker never touches Binance.
+try:
+    adaptive_agent_start()
+except Exception as exc:
+    log.warning(f"[ADAPTIVE] auto-start gagal: {exc}")
+
+# Explicit public API for the stable execution body.
+try:
+    __all__ = list(dict.fromkeys(__all__ + [
+        "AGENT_BRAIN_API_VERSION", "adaptive_agent_start", "adaptive_agent_stop",
+        "adaptive_research_cycle", "adaptive_replay_historical", "get_adaptive_status",
+        "get_adaptive_policy",
+    ]))
+except Exception:
+    pass
