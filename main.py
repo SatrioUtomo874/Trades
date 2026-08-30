@@ -1356,17 +1356,27 @@ def _open_learning_checkpoint_github(checkpoint_id=None):
             safe=Path(name)
             if safe.name != name or safe.is_absolute() or ".." in safe.parts:
                 raise ValueError(f"Checkpoint path tidak aman: {name}")
-        # write all files through temp dir first so /open is atomic-ish
-        tmp=Path(tempfile.mkdtemp(prefix="learning-open-"))
+        # Stage INSIDE the destination filesystem. Render's /tmp and /opt/render
+        # can be different mounts, so os.replace(/tmp/..., destination/...) can
+        # raise Errno 18 (Invalid cross-device link).
+        state_dir.mkdir(parents=True, exist_ok=True)
+        tmp=state_dir / f".learning-open-{os.getpid()}-{int(time.time()*1000)}"
+        tmp.mkdir(parents=False, exist_ok=False)
         try:
             for name in names:
-                (tmp/name).write_bytes(z.read(name))
+                dst_tmp=tmp/name
+                dst_tmp.parent.mkdir(parents=True, exist_ok=True)
+                dst_tmp.write_bytes(z.read(name))
+            # Replace only files represented by this checkpoint. All moves now
+            # stay on the same filesystem, so os.replace is atomic per file.
             for name in names:
-                dst=state_dir/name; dst.parent.mkdir(parents=True,exist_ok=True); os.replace(tmp/name,dst)
+                dst=state_dir/name
+                dst.parent.mkdir(parents=True,exist_ok=True)
+                os.replace(tmp/name,dst)
         finally:
             try:
-                for p in tmp.iterdir(): p.unlink()
-                tmp.rmdir()
+                import shutil
+                shutil.rmtree(tmp, ignore_errors=True)
             except Exception: pass
     return manifest
 

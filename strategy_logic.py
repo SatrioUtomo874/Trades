@@ -5397,7 +5397,7 @@ __all__ = list(dict.fromkeys(__all__ + [
 # Frequency/opportunity is a first-class research metric. The brain is not
 # rewarded for simply making the filter stricter and quieter.
 
-AGENT_BRAIN_API_VERSION = "v37-body-brain-contract-lifecycle-3"
+AGENT_BRAIN_API_VERSION = "v39-open-checkpoint"
 AGENT_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 AGENT_STATE_FILE = AGENT_STATE_DIR / "adaptive_brain_state.json"
 AGENT_POLICY_FILE = AGENT_STATE_DIR / "adaptive_policy.json"
