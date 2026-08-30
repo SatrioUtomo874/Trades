@@ -1,86 +1,269 @@
+#!/usr/bin/env python3
 """
-strategy_logic.py — ADAPTIVE BRAIN v35 (OTAK) (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
-========================================================================================
-Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
-market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
-CISD, OTE & Fibonacci, external vs internal liquidity, Wyckoff, dsb).
+main.py V27 — STABLE BODY (execution engine).
 
-Urutan proses tiap sinyal (SESUAI PERMINTAAN): Entry → SL → TP → Confidence
-global (tanpa bias sesi). Arah HTF adalah gate keputusan, bukan sekadar bonus
-skor. Setup lokal hanya boleh dipakai setelah POI HTF disentuh dan ada
-konfirmasi displacement/structure yang baru. Ini sengaja mengurangi sinyal:
-skor agregat lama dapat membuat OTE/RSI/sweep mengalahkan tren utama.
+V15 HARDENED: verified real-order execution, no blind mutating retries, exchange/local state reconciliation, protection-pair verification, and fail-closed emergency handling. Telegram handler, API client, monitoring,
+stats, export /analyze, hot-swap /ganti. Logika analisa ada di
+strategy_logic.py ("Otak"), diimpor di bawah.
 
-Poin revisi v3:
-  1) RR minimal 1:2, maksimal 1:4. Jika target RR<2 → JANGAN auto‑tolak,
-     dulu cari target lebih jauh dari pool TP (swing H1 lebih lama, EQ H1,
-     fib extension) sebelum menyerah; jika ada RR>4 → cap ke 4 (bukan tolak).
-  2) Entry presisi: OB/FVG/EQ dengan bonus konfluen HTF (overlap zona H1) dan
-     bonus Inducement (liquidity minor sudah disapu sebelum POI asli) —
-     sesuai transkrip "How the Market Traps Traders with Inducement" &
-     "trading strategy using inducement [SNIPER ENTRY]".
-  3) SL struktural anti‑Liquidity Sweep: SL ditaruh di luar invalidation
-     level (OB/struktur) + buffer, supaya jika benar‑benar tersentuh berarti
-     arah memang salah, bukan sekadar sweep likuiditas minor. Penanganan
-     "SL tersentuh tapi ternyata sweep" (harga lanjut sesuai arah semula)
-     ditangani di validate_and_adjust_geometry() (dipanggil main.py saat
-     order terisi/di-monitor) dan di monitor_position() main.py (verifikasi
-     candle M1 sebelum SL dikonfirmasi).
-  4) Trail Ladder: seluruh profit-ladder dihapus. Trail hanya mengikuti
-     struktur M15 (HL/LH + buffer), sehingga pergeseran SL berarti struktur
-     mulai gagal, bukan sekadar memaksa profit terkunci.
-  5) Proses per‑koin: Entry → SL → TP → confidence (global, tanpa sesi).
-  6) Tidak ada confidence per‑sesi — confidence murni dari kualitas
-     struktur+konfluensi chart (skema sama seperti v2, ditambah bonus baru).
-  7) Konsep tambahan (inducement, external/internal liquidity, konfluensi
-     HTF) masuk sebagai bonus skor kecil, TIDAK menambah filter penolakan,
-     supaya kuantitas sinyal tidak turun.
-  8) Entry-location layer: arah bullish/bearish tidak otomatis berarti entry
-     sekarang. Kandidat dinilai terhadap range M15, adverse swing, dan timing
-     RSI. Harga yang terlalu dekat sisi salah range + momentum RSI yang masih
-     melawan entry menjadi WAIT_ENTRY, bukan langsung dipaksa trade.
-  9) Candidate fallback: jika kandidat terbaik punya invalidation terlalu lebar
-     atau TP tidak mencapai 2R, candidate berikutnya dicoba. Tidak ada synthetic
-     ATR stop untuk menyelamatkan entry yang buruk.
- 10) Tidak menambahkan logika scalping M1/Silver Bullet/killzone sesi yang
-     tidak relevan untuk swing H1/M15 — hanya diambil konsep yang dipakai
-     bot ini (structure, OB/FVG, liquidity, CISD, Fibonacci).
-
-Kompatibel dengan main.py:
-  - full_analyze(df_h1, df_m15, df_d1=None, symbol=None) → dict | None
-  - score_direction(df_h1, df_m15, df_d1=None) → dict | None
-  - swing_pts(df, lb) → (sh, sl)
-  - TRAIL_R_LADDER, STRUCT_TRAIL_LB, STRUCT_TRAIL_BUF_PCT, STRUCT_TRAIL_LOOKBACK
-  - MIN_RR, MAX_RR, FIB_EXT_1, FIB_EXT_2
+V19: V18 observability retained; derived market-context telemetry added from existing cached M15/H1/D1 data with zero additional Binance requests. Adds breadth, relative strength vs BTC, efficiency, volume participation, volatility/regime descriptors, and market-context research export.
+1. Setup logging dipindah ke awal (sebelumnya log dipanggil sebelum
+   didefinisikan -> selalu NameError saat start).
+2. Fallback strategy_logic gagal load: full_analyze jadi no-op (tidak
+   entry baru), tapi TRAIL_R_LADDER dkk tetap terisi biar posisi yang
+   sudah terbuka tetap ke-trailing.
+3. full_analyze() terima df_h1/df_m15/df_d1 langsung, bukan symbol.
 """
-
-import logging
-from typing import Optional, Tuple
+import sys
+import os, time, logging, threading
+from collections import deque
 from pathlib import Path
-import os
-import json
-import time
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
-try:
-    from zoneinfo import ZoneInfo
-except Exception:
-    ZoneInfo = None
-import html
-import pandas as pd
-import numpy as np
+from contextlib import contextmanager
 
+import requests, pandas as pd, numpy as np, urllib3, json, html
+from concurrent.futures import ThreadPoolExecutor
+from flask import Flask
+
+try:
+    import websocket   # pip: websocket-client
+    _WS_LIB_OK = True
+except ImportError:
+    _WS_LIB_OK = False
+
+# ── Logging: WAJIB disiapkan sebelum baris lain yang mungkin logging ──
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
-ML_COGNITIVE_VERSION = "V34_COGNITIVE_AUDITED"
-FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
+from dotenv import load_dotenv
+load_dotenv()
+
+# ─────────────────────────────────────────────
+TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
+MAX_PRICE       = 80.0
+TOP_N_COINS     = 50
+MONITOR_SLEEP       = 10
+# Polling API SIGNED (posisi/order real) sengaja lebih jarang dari MONITOR_SLEEP
+# biasa — TP/SL sudah dieksekusi Binance sendiri otomatis begitu tersentuh,
+# polling di sini cuma buat TAHU KAPAN itu terjadi (pencatatan), bukan buat
+# memicu eksekusinya. Terlalu sering polling = boros weight API tanpa manfaat
+# nyata, malah berisiko kena limit/ban (lihat _binance_wait_if_banned).
+REAL_TRADE_POLL_SLEEP = 30
+
+# Telegram long-polling / Render watchdog. Telegram polling harus tetap hidup
+# walaupun Binance sedang pause; error polling TIDAK boleh ditelan diam-diam.
+TELEGRAM_LONGPOLL_TIMEOUT = 20
+TELEGRAM_HTTP_TIMEOUT = 30
+TELEGRAM_ERROR_BACKOFF_MAX = 60
+TELEGRAM_KEEPALIVE_SEC = 300
+# Jeda minimum antar-request HTTP ke Binance agar scan tidak menghantam API beruntun.
+# 1 request / detik masih cukup untuk scan 50 koin tanpa burst besar.
+BINANCE_REQUEST_INTERVAL = 0.55
+# Setelah cooldown/ban Binance selesai, tunggu tambahan 60 detik sebelum request pertama.
+BINANCE_POST_COOLDOWN_GRACE = 60.0
+MAX_MARGIN_MULTIPLIER = 1.50  # HARD SAFETY CAP relative to configured MARGIN_USD
+# Safety governor berbasis header usage; berhenti sebelum mendekati limit 1 menit.
+BINANCE_WEIGHT_SOFT_LIMIT = 1400
+BINANCE_WEIGHT_HARD_LIMIT = 1900
+BINANCE_CRITICAL_HARD_LIMIT = 2300
+BINANCE_EXECUTION_RESERVE = 350
+BINANCE_WEIGHT_STALE_AFTER_SEC = 65.0
+_binance_request_lock = threading.Lock()
+_binance_priority_local = threading.local()
+_binance_last_request_at = 0.0
+_binance_weight_1m = None
+_binance_weight_seen_at = 0.0
+MAX_POSITIONS       = 20   # runtime via /max — jangan pindah ke strategy_logic
+MONITOR_INTERVAL    = 15 * 60
+STRATEGY_MANAGE_INTERVAL = 60
+STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
+WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
+MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v27_ADAPTIVE_BRAIN"
+
+# Stable body / replaceable brain contract.
+# main.py owns Binance, Telegram, execution, protection and runtime state.
+# strategy_logic.py owns analysis, research and adaptive policy.
+BRAIN_API_REQUIRED = ("full_analyze", "manage_position", "adaptive_agent_start", "get_adaptive_status")
+BODY_MUST_SURVIVE_BRAIN_ERRORS = True
+RESEARCH_NEVER_BLOCKS_EXECUTION = True
+
+# ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
+# Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
+# hanya dipakai oleh pipeline scan; execution/position monitoring tetap memakai
+# get_klines() normal sehingga tidak mengubah freshness data posisi.
+SCAN_KLINE_TTL = {
+    "15m": 8 * 60,      # refresh maksimum sekitar sekali per 8 menit
+    "1h": 30 * 60,      # tidak perlu REST berulang di antara candle 1h
+    "1d": 6 * 60 * 60,  # daily candle cukup direfresh berkala
+}
+_scan_kline_cache = {}          # {(symbol, interval): {df, fetched_at, source}}
+_scan_kline_cache_lock = threading.RLock()
+_scan_kline_fetch_locks = {}
+_scan_kline_fetch_locks_guard = threading.Lock()
+_scan_telemetry_lock = threading.Lock()
+_last_scan_telemetry = {}
+
+def _scan_key_lock(key):
+    with _scan_kline_fetch_locks_guard:
+        lock = _scan_kline_fetch_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _scan_kline_fetch_locks[key] = lock
+        return lock
+
+def _scan_cache_get(symbol, interval, limit):
+    key = (symbol, interval)
+    now = time.time()
+    with _scan_kline_cache_lock:
+        item = _scan_kline_cache.get(key)
+        if not item:
+            return None
+        age = now - item["fetched_at"]
+        ttl = SCAN_KLINE_TTL.get(interval, 10 * 60)
+        df = item["df"]
+        if age > ttl or df is None or df.empty or len(df) < min(limit, 40):
+            return None
+        return df.tail(limit).copy()
+
+def _scan_cache_put(symbol, interval, df, source):
+    if df is None or df.empty:
+        return
+    with _scan_kline_cache_lock:
+        _scan_kline_cache[(symbol, interval)] = {
+            "df": df.copy(), "fetched_at": time.time(), "source": source,
+        }
+
+def _scan_cache_stats():
+    now = time.time()
+    with _scan_kline_cache_lock:
+        total = len(_scan_kline_cache)
+        fresh = 0
+        for (sym, itv), item in _scan_kline_cache.items():
+            if now - item["fetched_at"] <= SCAN_KLINE_TTL.get(itv, 600):
+                fresh += 1
+    return total, fresh
+
+# ─────────────────────────────────────────────
+
+# Import OTAK — kalau gagal ATAU full_analyze() tidak ada di dalamnya
+# (misal file strategy_logic.py yang salah/lama ke-upload), fallback aman.
+try:
+    from strategy_logic import *
+    if "full_analyze" not in dir() or not callable(full_analyze):
+        raise ImportError(
+            "strategy_logic.py ke-import tapi TIDAK ADA fungsi full_analyze() di dalamnya "
+            "— kemungkinan file yang salah/versi lama ter-upload.")
+    log.info("[OTAK] strategy_logic.py berhasil dimuat & full_analyze() terverifikasi ada.")
+    missing_brain=[name for name in BRAIN_API_REQUIRED if not callable(globals().get(name))]
+    if missing_brain:
+        log.warning(f"[OTAK] Adaptive brain API sebagian belum tersedia: {missing_brain}. Execution tetap jalan dengan compatibility mode.")
+except Exception as e:
+    log.error(f"[OTAK] Gagal memuat strategy_logic.py ({e}) — fallback aman aktif.")
+    # Engine fallback tidak memiliki aturan trading.
+    def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
+        return None
+    _STRATEGY_LOAD_ERROR = str(e)
+else:
+    _STRATEGY_LOAD_ERROR = None
+
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN tidak ditemukan di environment. Cek file .env")
+
+class TelegramLogHandler(logging.Handler):
+    """
+    Forward log ERROR/CRITICAL ke Telegram.
+    Throttle: maks 1 pesan per 30 detik per pesan unik
+    agar tidak flood saat error berulang.
+    """
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self._last_sent: dict = {}   # {msg_key: timestamp}
+        self._throttle  = 30         # detik
+
+    def emit(self, record):
+        # Hindari rekursi (error saat kirim TG itu sendiri)
+        if "TG" in record.getMessage(): return
+        try:
+            msg_key = record.getMessage()[:80]
+            now = time.time()
+            if now - self._last_sent.get(msg_key, 0) < self._throttle:
+                return
+            self._last_sent[msg_key] = now
+
+            cid = active_chat_id
+            if not cid or not TELEGRAM_TOKEN: return
+
+            level_em = "🔴" if record.levelno >= logging.CRITICAL else "⚠️"
+            safe_msg = html.escape(record.getMessage()[:400], quote=False)
+            text = (
+                f"{level_em} <b>[{html.escape(record.levelname)}]</b>\n"
+                f"<code>{safe_msg}</code>"
+            )
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": cid, "text": text, "parse_mode": "HTML"},
+                timeout=5
+            )
+        except Exception:
+            pass   # jangan pernah raise dari handler log
 
 
-MACHINE_LEARNING_SCHEMA = "machine_Learning_v3_cognitive"
-_LEARNED_MODEL = None
+_tg_log_handler = TelegramLogHandler()
+log.addHandler(_tg_log_handler)
 
+auto_mode      = False
+auto_thread    = None
+autostop_thread = None
+active_chat_id = None
+timeout_flag   = False
+active_trade   = None   # dict posisi yang sedang dipantau, None jika tidak ada
+
+STARTING_BALANCE = 10.0   # modal awal simulasi dalam USD
+
+# Research/UI balance state. /mode on snapshots Binance balance once; /mode off
+# restores the simulation anchor to $10. /resetstats NEVER changes this balance.
+real_balance_snapshot = None
+real_balance_snapshot_at = 0.0
+real_balance_lock = threading.Lock()
+
+stat_lock = threading.Lock()
+stats = {
+    "tp":0, "sl":0, "trail":0, "total":0,
+    "balance"    : STARTING_BALANCE,
+    "pnl_history": deque(maxlen=20),   # compatibility /backtest view
+}
+
+# FULL CLOSED-TRADE LEDGER UNTUK RESEARCH /analyze.
+# Berbeda dari pnl_history yang sengaja hanya menyimpan 20 trade terakhir.
+# Ledger ini tumbuh sepanjang research run dan dihapus oleh /resetstats.
+trade_history_lock = threading.Lock()
+trade_history: list[dict] = []
+trade_sequence = 0
+research_run_id = datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
+
+
+# ==================== MACHINE LEARNING ====================
+ML_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", str(Path(__file__).resolve().parent / "machine_learning_state")))
+ML_STATE_FILE = ML_STATE_DIR / "full_learning_state.json"
+ML_EXPERIENCE_FILE = ML_STATE_DIR / "experience.jsonl"
+ML_LOCK = threading.RLock()
+FULL_MODE = False
+FULL_THREAD = None
+FULL_WAKE = threading.Event()
+FULL_STOP = threading.Event()
+FULL_MANUAL_THRESHOLD_SAVED = None
+FULL_TRAIN_INTERVAL = max(120, int(os.getenv("FULL_TRAIN_INTERVAL_SEC", "300")))
+FULL_RETRAIN_MIN_NEW = max(1, int(os.getenv("FULL_RETRAIN_MIN_NEW", "3")))
+FULL_LAST_TRAINED_COUNT = 0
+FULL_MIN_TRAIN_SAMPLES = max(20, int(os.getenv("FULL_MIN_TRAIN_SAMPLES", "30")))
+FULL_MIN_VALIDATION_SAMPLES = max(5, int(os.getenv("FULL_MIN_VALIDATION_SAMPLES", "10")))
+FULL_PROMOTION_MIN_IMPROVEMENT = float(os.getenv("FULL_PROMOTION_MIN_IMPROVEMENT", "0.01"))
+FULL_ALLOWED_THRESHOLDS = list(range(35, 81))
+FULL_MIN_COVERAGE = 0.25
+SCAN_MAX_DURATION_SEC = max(60, int(os.getenv("SCAN_MAX_DURATION_SEC", "180")))
 ML_FEATURE_NAMES = [
     "direction_confidence", "setup_quality", "entry_location_score", "rr",
     "range_position", "rsi_timing_score", "direction_edge", "m15_trigger_count",
@@ -91,5672 +274,5701 @@ ML_FEATURE_NAMES = [
     "entry_pullback", "htf_conflict", "m15_ranging"
 ]
 
-def set_learning_model(model):
-    global _LEARNED_MODEL
-    _LEARNED_MODEL = model if isinstance(model, dict) and model.get("active") else None
 
-
-def get_learning_model_info():
-    if not _LEARNED_MODEL:
-        return {"active": False, "model_version": "static", "sample_count": 0}
+def _ml_default_state():
     return {
-        "active": True,
-        "model_version": _LEARNED_MODEL.get("model_version", "unknown"),
-        "sample_count": int(_LEARNED_MODEL.get("sample_count", 0) or 0),
-        "confidence_min": _LEARNED_MODEL.get("confidence_min"),
+        "schema": "machine_Learning_v2",
+        "feature_names": list(ML_FEATURE_NAMES),
+        "champion": None,
+        "previous_champion": None,
+        "last_training_at": None,
+        "last_training_samples": 0,
+        "last_training_result": None,
+        "drift": {"status": "UNKNOWN", "score": 0.0},
+        "learning_cycles": 0,
+        "promotion_count": 0,
     }
 
 
-def _rsi_timing_numeric(value):
-    s = str(value or "").lower()
-    if "strong" in s:
-        return 1.0
-    if "support" in s or "aligned" in s:
-        return 0.75
-    if "neutral" in s:
-        return 0.5
-    if "weak" in s or "against" in s:
-        return 0.25
-    return 0.5
-
-
-def _feature_dict_to_vector(features):
-    return np.asarray([float(features.get(k, 0.0) or 0.0) for k in ML_FEATURE_NAMES], dtype=float)
-
-
-def _build_learning_features(score, loc, candidate, rr, entry, atr, cur_price, risk, htf_poi, poi_reacted):
-    direction = str(score.get("direction") or "bull")
-    m15_struct = str(score.get("m15_struct") or "ranging")
-    htf_bias = str(score.get("htf_bias") or "neutral")
-    macro = str(score.get("macro_bias") or "unknown")
-    edge = float(score.get("direction_edge", 0) or 0)
-    atr = max(float(atr or 0.0), 1e-12)
-    entry = float(entry or 0.0)
-    cur_price = float(cur_price or entry)
-    risk = abs(float(risk or 0.0))
-    distance_atr = abs(cur_price - entry) / atr
-    risk_atr = risk / atr
-    target_distance_atr = abs(float(rr or 0.0) * risk) / atr if risk else 0.0
-    loc_pos = float(loc.get("range_position", 0.5) or 0.5)
-    fib_r = float(score.get("fib_r", 0.5) or 0.5)
-    htf_align = 1.0 if htf_bias == ("bullish" if direction == "bull" else "bearish") else 0.0
-    macro_align = 1.0 if macro == ("bullish" if direction == "bull" else "bearish") else 0.0
-    label = str(candidate.get("label") or "").lower()
-    return {
-        "direction_confidence": float(score.get("confidence", 0) or 0),
-        "setup_quality": float(candidate.get("score", 0) or 0),
-        "entry_location_score": float(loc.get("location_score", 50) or 50),
-        "rr": min(float(rr or 0.0), 8.0),
-        "range_position": min(max(loc_pos, 0.0), 1.0),
-        "rsi_timing_score": _rsi_timing_numeric(loc.get("rsi_timing")),
-        "direction_edge": min(max(edge / 100.0, 0.0), 1.0),
-        "m15_trigger_count": min(float(score.get("trigger_count", 0) or 0) / 4.0, 1.0),
-        "poi_reacted": float(bool(poi_reacted)),
-        "selected_sweep": float(bool(score.get("selected_sweep"))),
-        "m15_structure_alignment": 1.0 if m15_struct == ("bullish" if direction == "bull" else "bearish") else 0.0,
-        "htf_alignment": htf_align,
-        "macro_alignment": macro_align,
-        "m15_relative_volume": min(max(float(score.get("m15_relative_volume", 1.0) or 1.0) / 2.0, 0.0), 2.0),
-        "fib_position": min(max(fib_r, 0.0), 1.0),
-        "atr_pct_proxy": min(max((atr / max(cur_price, 1e-12)) * 100.0, 0.0), 25.0),
-        "entry_distance_atr": min(max(distance_atr, 0.0), 3.0),
-        "risk_atr": min(max(risk_atr, 0.0), 6.0),
-        "target_distance_atr": min(max(target_distance_atr, 0.0), 20.0),
-        "data_quality": 1.0 if htf_poi is not None else 0.85,
-        "entry_ob": float("ob" in label or "order" in label),
-        "entry_fvg": float("fvg" in label),
-        "entry_eq": float("eq" in label or "equilibrium" in label),
-        "entry_sweep": float("sweep" in label),
-        "entry_breakout": float("break" in label),
-        "entry_pullback": float("pullback" in label or "retest" in label),
-        "htf_conflict": float(htf_bias == "conflict"),
-        "m15_ranging": float(m15_struct == "ranging"),
-    }
-
-
-_ML_SCHEMA_WARNED = False
-
-def _predict_learning(features):
-    global _ML_SCHEMA_WARNED
-    if not _LEARNED_MODEL:
-        return None
+def _ml_load_state():
     try:
-        model_schema = str(_LEARNED_MODEL.get("schema") or "")
-        model_features = _LEARNED_MODEL.get("feature_names")
-        if model_schema and model_schema != MACHINE_LEARNING_SCHEMA:
-            if not _ML_SCHEMA_WARNED:
-                log.warning("[ML] model schema mismatch; ML prediction disabled until a compatible model is trained")
-                _ML_SCHEMA_WARNED = True
-            return None
-        expected = list(model_features) if isinstance(model_features, list) and model_features else list(ML_FEATURE_NAMES)
-        if expected != list(ML_FEATURE_NAMES):
-            if not _ML_SCHEMA_WARNED:
-                log.warning("[ML] model feature schema mismatch; ML prediction disabled until a compatible model is trained")
-                _ML_SCHEMA_WARNED = True
-            return None
-        mean = np.asarray(_LEARNED_MODEL.get("mean", [0.0] * len(expected)), dtype=float)
-        scale = np.asarray(_LEARNED_MODEL.get("scale", [1.0] * len(expected)), dtype=float)
-        w = np.asarray(_LEARNED_MODEL.get("w", [0.0] * len(expected)), dtype=float)
-        b = float(_LEARNED_MODEL.get("b", 0.0) or 0.0)
-        x = _feature_dict_to_vector(features)
-        if not (len(x) == len(mean) == len(scale) == len(w) == len(expected)):
-            if not _ML_SCHEMA_WARNED:
-                log.warning("[ML] model dimension mismatch; ML prediction disabled until a compatible model is trained")
-                _ML_SCHEMA_WARNED = True
-            return None
-        z = float(np.dot((x - mean) / np.maximum(scale, 1e-8), w) + b)
-        z = max(-35.0, min(35.0, z))
-        _classification_prob = 1.0 / (1.0 + np.exp(-z))
-        rw = np.asarray(_LEARNED_MODEL.get("rw", [0.0] * len(expected)), dtype=float)
-        rb = float(_LEARNED_MODEL.get("rb", 0.0) or 0.0)
-        if len(rw) != len(expected):
-            if not _ML_SCHEMA_WARNED:
-                log.warning("[ML] expected-R model dimension mismatch; ML prediction disabled until a compatible model is trained")
-                _ML_SCHEMA_WARNED = True
-            return None
-        expected_r = float(np.dot((x - mean) / np.maximum(scale, 1e-8), rw) + rb)
-        expected_r = float(max(-3.0, min(3.0, expected_r)))
-        model_conf = float(50.0 + 25.0 * np.tanh(expected_r))
-        probability = float(1.0 / (1.0 + np.exp(-expected_r / 0.75)))
-        return {
-            "probability": probability,
-            "classification_probability": float(_classification_prob),
-            "model_confidence": model_conf,
-            "expected_r": expected_r,
-            "model_version": _LEARNED_MODEL.get("model_version", "unknown"),
-            "sample_count": int(_LEARNED_MODEL.get("sample_count", 0) or 0),
-            "confidence_min": _LEARNED_MODEL.get("confidence_min"),
-        }
-    except Exception:
-        log.exception("[ML] prediction gagal")
-        return None
-
-# =============================================================================
-# KONFIGURASI — Diimpor langsung oleh main.py
-# =============================================================================
-
-MIN_RR   = 2.0
-MAX_RR   = None  # unlimited RR; target tetap harus struktural/berbasis liquidity
-
-# ── Trail Ladder v3 ──────────────────────────────────────────────────────
-# HANYA breakeven di 1.0R. Ini bukan "pengaman profit" — cuma menghilangkan
-# risiko begitu trade sudah maju 1R, konsisten dengan permintaan: "Trail
-# jangan dipaksa profit". Setelah breakeven tercapai, seluruh pergeseran SL
-# selanjutnya murni mengikuti struktur M15 (lihat monitor_position main.py
-# yang memakai kandidat "paling protektif" antara ladder ini vs structure —
-# karena ladder cuma py 1 rung breakeven, structure yang akan mendominasi
-# di hampir semua kasus setelah 1R).
-TRAIL_R_LADDER = []  # Trail sepenuhnya struktural M15; tidak ada profit-lock ladder.
-
-# Trailing struktural M15 — INI inti dari Trail (bukan ladder di atas).
-# "Ketika harga menyentuh Trail artinya harga tidak kuat mengikuti trend
-# sebelumnya" — SL baru = swing M15 terakhir (HL utk BUY / LH utk SELL)
-# + buffer supaya tidak kena liquidity sweep biasa.
-STRUCT_TRAIL_LB       = 3      # lookback swing_pts saat trailing
-STRUCT_TRAIL_BUF_PCT  = 0.0025 # buffer 0.25% di luar swing agar tidak kena LS biasa
-STRUCT_TRAIL_LOOKBACK = 60     # candle M15 untuk cari swing trailing
-
-# Adaptive trailing engine V4
-TRAIL_ENGINE_VERSION       = "8.0-predictive-reversal"
-TRAIL_ARM_R                = 0.80
-TRAIL_PROTECT_R            = 1.00
-TRAIL_MATURE_R             = 1.50
-TRAIL_ATR_MULT             = 2.40
-TRAIL_ATR_TIGHT_MULT       = 1.65
-TRAIL_MIN_GAP_ATR          = 0.28
-TRAIL_BREAK_EVEN_OFFSET_R  = 0.02
-TRAIL_WEAKNESS_MODERATE    = 3
-TRAIL_WEAKNESS_STRONG      = 6
-TRAIL_LIQUIDITY_NEAR_R     = 0.75
-TRAIL_VOLUME_EXPANSION     = 1.30
-TRAIL_VOLUME_WEAK          = 0.75
-TRAIL_MIN_IMPROVEMENT_ATR  = 0.10
-
-# Fibonacci extension TP (level 1.272 dan 1.618 dari impulse leg)
-FIB_EXT_1 = 0.272   # 127.2%
-FIB_EXT_2 = 0.618   # 161.8%
-
-# ── Inducement & konfluensi ──────────────────────────────────────────────
-INDUCEMENT_LOOKBACK  = 40     # candle M15 untuk cari liquidity minor sebelum POI
-INDUCEMENT_MINOR_LB  = 2      # lookback swing_pts untuk swing "minor" (inducement)
-CONFLUENCE_BONUS      = 2     # bonus skor kalau OB/FVG M15 overlap dengan zona H1
-POI_REACTION_LOOKBACK = 16     # candle M15 untuk menunggu reaksi setelah POI HTF
-CONFIRMATION_LOOKBACK = 4      # candle M15 yang dipakai untuk displacement terbaru
-MIN_DISPLACEMENT_ATR  = 0.25   # body minimum agar candle bukan noise
-
-# Entry-location / RSI timing — ditambahkan setelah audit CAPUSDT.
-# Tujuannya bukan membuat bot anti-trade, tetapi mencegah BUY/SELL di lokasi
-# yang sudah terlalu dekat sisi salah dari range saat momentum M15 masih
-# bergerak melawan entry. RSI dipakai sebagai timing/context, bukan sinyal
-# tunggal dan bukan hard overbought/oversold rule.
-ENTRY_LOCATION_LOOKBACK = 16     # 4 jam M15 untuk konteks lokasi
-ENTRY_CHASE_HIGH = 0.82         # BUY di atas 82% range / SELL di bawah 18% = chase
-ENTRY_PREFERRED_BUY = 0.55      # BUY ideal di bawah ~55% range lokal
-ENTRY_PREFERRED_SELL = 0.45     # SELL ideal di atas ~45% range lokal
-ENTRY_SWING_NEAR_ATR = 0.55     # dekat swing adverse => kurangi kualitas
-RSI_TIMING_SLOPE = 1.5          # perubahan RSI minimum agar dianggap bermakna
-RSI_BUY_WEAK = 48.0              # BUY + RSI di bawah ini yang masih jatuh = tunggu
-RSI_SELL_WEAK = 52.0              # SELL + RSI di atas ini yang masih naik = tunggu
-ENTRY_LOCATION_HARD_FLOOR = 30   # kandidat di bawah ini tidak executable
-
-# Must match main.py _validate_signal_before_entry().  Keeping this in the
-# strategy engine prevents full_analyze() from returning a candidate that the
-# execution gate will immediately reject as ENTRY_TOO_FAR.
-MAIN_ENTRY_MAX_ATR = 1.50
+        ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if not ML_STATE_FILE.exists():
+            return _ml_default_state()
+        data = json.loads(ML_STATE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else _ml_default_state()
+    except Exception as e:
+        log.warning(f"[ML] state load gagal: {e}")
+        return _ml_default_state()
 
 
-# =============================================================================
-# UTILITY — Indikator teknikal
-# =============================================================================
+ML_STATE = _ml_load_state()
 
-def ema(s: pd.Series, n: int) -> pd.Series:
-    return s.ewm(span=n, adjust=False).mean()
-
-def rsi(s: pd.Series, n: int = 14) -> pd.Series:
-    d = s.diff()
-    g = d.clip(lower=0).rolling(n, min_periods=n).mean()
-    lo = (-d.clip(upper=0)).rolling(n, min_periods=n).mean()
-    out = pd.Series(50.0, index=s.index, dtype=float)
-    valid = g.notna() & lo.notna()
-    both_zero = valid & (g <= 1e-12) & (lo <= 1e-12)
-    gain_only = valid & (lo <= 1e-12) & (g > 1e-12)
-    loss_only = valid & (g <= 1e-12) & (lo > 1e-12)
-    normal = valid & (g > 1e-12) & (lo > 1e-12)
-    out.loc[gain_only] = 100.0
-    out.loc[loss_only] = 0.0
-    out.loc[both_zero] = 50.0
-    rs = g.loc[normal] / lo.loc[normal]
-    out.loc[normal] = 100 - 100 / (1 + rs)
-    return out
-
-def atr_fn(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - df["close"].shift()).abs(),
-        (df["low"] - df["close"].shift()).abs(),
-    ], axis=1).max(axis=1)
-    return tr.rolling(n).mean()
-
-def _closed_candles(df: pd.DataFrame, interval_minutes: int) -> pd.DataFrame:
-    """Keep only candles whose interval has fully closed.
-
-    Binance REST and websocket kline feeds include the currently forming
-    candle.  Using it for structure/EMA decisions makes a signal repaint
-    during the same scan and was especially harmful on the fast altcoins in
-    the supplied trade sample.  DataFrames with a non-datetime index are
-    left untouched for compatibility with offline callers/tests.
-    """
-    if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
-        return df
-    out = df.copy()
-    idx = out.index
-    if idx.tz is None:
-        idx = idx.tz_localize("UTC")
-    else:
-        idx = idx.tz_convert("UTC")
-    now = pd.Timestamp.now(tz="UTC")
-    boundary = now.floor(f"{interval_minutes}min")
-    # Historical/offline datasets may be entirely older than the current
-    # candle. In that case every row is already closed and must be preserved.
-    if idx[-1] < boundary:
-        return out
-    return out.loc[idx < boundary].copy()
-
-
-def build_df(df: pd.DataFrame, interval_minutes: Optional[int] = None) -> Optional[pd.DataFrame]:
-    """Tambahkan EMA, RSI, ATR, volume SMA ke DataFrame OHLCV."""
-    if df is None or len(df) < 60:
-        return None
-    df = df.copy()
-    if interval_minutes is not None:
-        df = _closed_candles(df, interval_minutes)
-    if len(df) < 60:
-        return None
-    df["ema9"] = ema(df["close"], 9)
-    df["ema21"] = ema(df["close"], 21)
-    df["ema50"] = ema(df["close"], 50)
-    df["ema200"] = ema(df["close"], 200) if len(df) >= 200 else ema(df["close"], 50)
-    df["rsi"] = rsi(df["close"])
-    df["atr"] = atr_fn(df)
-    df["vol_sma"] = df["volume"].rolling(20).mean()
-    required = ["ema9", "ema21", "ema50", "ema200", "atr", "vol_sma"]
-    df = df.dropna(subset=required)
-    df["rsi"] = df["rsi"].fillna(50.0).clip(0.0, 100.0)
-    return df
-
-def swing_pts(df: pd.DataFrame, lb: int = 5):
-    """Swing high & low — dipakai main.py untuk trailing."""
-    sh, sl = [], []
-    high = df["high"].values
-    low = df["low"].values
-    n = len(high)
-    for i in range(lb, n - lb):
-        window_h = high[max(0, i - lb): i + lb + 1]
-        window_l = low[max(0, i - lb): i + lb + 1]
-        if high[i] == window_h.max():
-            sh.append(i)
-        if low[i] == window_l.min():
-            sl.append(i)
-    return sh, sl
-
-def _market_structure(df: pd.DataFrame, sh: list, sl: list) -> str:
-    """HH+HL = bullish · LH+LL = bearish · else ranging."""
-    if len(sh) < 2 or len(sl) < 2:
-        return "ranging"
-    hh = df["high"].iloc[sh[-1]] > df["high"].iloc[sh[-2]]
-    hl = df["low"].iloc[sl[-1]] > df["low"].iloc[sl[-2]]
-    lh = df["high"].iloc[sh[-1]] < df["high"].iloc[sh[-2]]
-    ll = df["low"].iloc[sl[-1]] < df["low"].iloc[sl[-2]]
-    if hh and hl:
-        return "bullish"
-    if lh and ll:
-        return "bearish"
-    return "ranging"
-
-mkt_struct = _market_structure  # alias
-
-def _macro_bias(df_btc_h1: Optional[pd.DataFrame]) -> str:
-    """
-    Bias arah MARKET SECARA KESELURUHAN (BTC H1 sebagai proxy), bukan
-    struktur per-koin. Dipakai untuk meredam sinyal BUY di altcoin saat
-    seluruh market lagi risk-off (dan sebaliknya) — analisa 7 Agu 2026:
-    4/4 sinyal BUY kena SL, total market cap crypto turun 0.5% & BTC di
-    bawah EMA50/EMA200 hari itu; satu-satunya SELL malah menang besar.
-    Struktur per-koin (OB/FVG M15) bisa kelihatan valid sendiri, tapi
-    kalah lawan gravitasi market kalau macro-nya jelas berlawanan.
-
-    Return "bullish" / "bearish" / "ranging" / "unknown" (kalau data BTC
-    tidak dikasih atau tidak cukup — caller HARUS treat "unknown" sebagai
-    no-op, jangan menghukum arah manapun).
-    """
-    if df_btc_h1 is None or len(df_btc_h1) < 60:
-        return "unknown"
-    try:
-        btc = build_df(df_btc_h1, interval_minutes=60)
-        if btc is None or len(btc) < 60:
-            return "unknown"
-        LB = btc.iloc[-1]
-        shb, slb = swing_pts(btc, lb=5)
-        struct_btc = _market_structure(btc, shb, slb)
-        ema_bull = LB["ema9"] > LB["ema21"] > LB["ema50"]
-        ema_bear = LB["ema9"] < LB["ema21"] < LB["ema50"]
-        if struct_btc == "bullish" or ema_bull:
-            return "bullish"
-        if struct_btc == "bearish" or ema_bear:
-            return "bearish"
-        return "ranging"
-    except Exception:
-        return "unknown"
-
-# Penalti/bonus macro — sengaja MODERAT (bukan veto keras seperti d1_bias
-# per-koin di atas), karena ini cuma satu lapis konteks tambahan. Tujuannya
-# NGE-REM sinyal yang jelas melawan arus market, BUKAN mematikannya —
-# kuantitas sinyal harus tetap terjaga (lihat instruksi awal strategy ini).
-MACRO_ALIGN_BONUS   = 8      # searah macro → bonus kecil
-MACRO_AGAINST_MULT  = 0.72   # berlawanan macro → skor sisi itu dikali ini (bukan 0)
-
-
-# =============================================================================
-# SMC / ICT DETECTORS (berdasarkan transkrip)
-# =============================================================================
-
-def is_zone_fresh(df: pd.DataFrame, top: float, bot: float,
-                  formed_idx: int, end_idx: Optional[int] = None,
-                  direction: Optional[str] = None) -> bool:
-    """True jika zona masih aktif, bukan sekadar belum pernah disentuh.
-
-    Untuk zona berarah, retest tidak otomatis membatalkan zona. Invalidasi
-    terjadi bila candle close menembus sisi luar zona. Tanpa ``direction``
-    fungsi mempertahankan perilaku konservatif lama untuk caller generik.
-    """
-    if formed_idx is None or formed_idx + 2 >= len(df):
-        return True
-    start = formed_idx + 2
-    end = end_idx if end_idx is not None else len(df) - 1
-    if start >= end:
-        return True
-    sub = df.iloc[start:end]
-    if direction == "bull":
-        return not bool((sub["close"] < bot).any())
-    if direction == "bear":
-        return not bool((sub["close"] > top).any())
-    touched = ((sub["low"] <= top) & (sub["high"] >= bot)).any()
-    return not bool(touched)
-
-def fib_position(price: float, swing_low: float, swing_high: float) -> float:
-    """Posisi harga dalam range 0–1, 0 = swing_low, 1 = swing_high."""
-    rng = swing_high - swing_low
-    if rng <= 0:
-        return 0.5
-    return max(0.0, min(1.0, (price - swing_low) / rng))
-
-def is_in_ote(price: float, swing_low: float, swing_high: float,
-              direction: str) -> bool:
-    """
-    OTE (Optimal Trade Entry) — zona 61.8%–78.6% retracement.
-    Bull: fib_position antara 0.214 dan 0.382
-    Bear: fib_position antara 0.618 dan 0.786
-    """
-    if swing_high <= swing_low:
+def _ml_model_compatible(model):
+    if not isinstance(model, dict):
         return False
-    r = fib_position(price, swing_low, swing_high)
-    if direction == "bull":
-        return 0.214 <= r <= 0.382
-    else:
-        return 0.618 <= r <= 0.786
-
-def detect_fvg(df: pd.DataFrame, direction: str, lb: int = 50) -> list:
-    """
-    Fair Value Gap (imbalance) — 3‑candle pattern.
-    Hanya return zona yang FRESH.
-    """
-    sub = df.iloc[-lb:]
-    base = len(df) - len(sub)
-    out = []
-    for i in range(len(sub) - 2):
-        c0, c2 = sub.iloc[i], sub.iloc[i + 2]
-        gap = None
-        if direction == "bull" and c2["low"] > c0["high"]:
-            gap = {"top": float(c2["low"]), "bot": float(c0["high"])}
-        elif direction == "bear" and c2["high"] < c0["low"]:
-            gap = {"top": float(c0["low"]), "bot": float(c2["high"])}
-        if gap:
-            gap["mid"] = (gap["top"] + gap["bot"]) / 2
-            gap["idx"] = base + i + 2
-            gap["is_fresh"] = is_zone_fresh(
-                df, gap["top"], gap["bot"], gap["idx"], direction=direction
-            )
-            out.append(gap)
-    fresh = [f for f in out if f["is_fresh"]]
-    return fresh[-3:] if fresh else []
-
-def detect_order_block(df: pd.DataFrame, direction: str, lb: int = 60,
-                       sh: Optional[list] = None, sl: Optional[list] = None) -> list:
-    """
-    Order Block berkualitas (transkrip 1, 14, 26).
-    Filter:
-      - zona fresh
-      - Fibonacci diskon (bull ≤ 0.618) / premium (bear ≥ 0.382)
-      - kualitas: impulse kuat, FVG setelahnya, BOS, recency.
-    Return list max 3, urut kualitas tertinggi.
-    """
-    is_demand = direction == "bull"
-    sub = df.iloc[-lb:]
-    base = len(df) - len(sub)
-    avg_body = (sub["close"] - sub["open"]).abs().mean() or 1e-8
-
-    # Fibonacci context
-    fib_sh = float(df["high"].iloc[sh[-1]]) if (sh and len(sh) > 0) else None
-    fib_sl = float(df["low"].iloc[sl[-1]]) if (sl and len(sl) > 0) else None
-
-    # BOS global
-    has_bos_global = False
-    if sh and sl:
-        if is_demand and len(sh) >= 2:
-            has_bos_global = float(df["high"].iloc[-1]) > float(df["high"].iloc[sh[-2]])
-        elif not is_demand and len(sl) >= 2:
-            has_bos_global = float(df["low"].iloc[-1]) < float(df["low"].iloc[sl[-2]])
-
-    zones = []
-    for i in range(1, len(sub) - 3):
-        c, nx = sub.iloc[i], sub.iloc[i + 1]
-        # Pola trigger + impulse
-        if is_demand:
-            if not (c["close"] < c["open"] and nx["close"] > nx["open"]):
-                continue
-        else:
-            if not (c["close"] > c["open"] and nx["close"] < nx["open"]):
-                continue
-
-        impulse_body = abs(nx["close"] - nx["open"])
-        if impulse_body < avg_body * 1.2:
-            continue
-
-        ob_top = float(max(c["open"], c["close"]))
-        ob_bot = float(min(c["open"], c["close"]))
-        df_idx = base + i
-
-        if not is_zone_fresh(
-            df, ob_top, ob_bot, df_idx, direction=direction
-        ):
-            continue
-
-        q = 0
-        if impulse_body >= avg_body * 1.5:
-            q += 1
-        if impulse_body >= avg_body * 2.5:
-            q += 1
-
-        # FVG setelah OB
-        if i + 2 < len(sub):
-            c2 = sub.iloc[i + 2]
-            if is_demand and c2["low"] > c["high"]:
-                q += 1
-            elif not is_demand and c2["high"] < c["low"]:
-                q += 1
-
-        if has_bos_global:
-            q += 1
-
-        # Fibonacci diskon/premium (kunci dari transkrip 1)
-        if fib_sh is not None and fib_sl is not None:
-            ob_mid = (ob_top + ob_bot) / 2
-            fib_r = fib_position(ob_mid, fib_sl, fib_sh)
-            if is_demand and fib_r <= 0.618:
-                q += 1
-            elif not is_demand and fib_r >= 0.382:
-                q += 1
-
-        if df_idx >= len(df) - 20:
-            q += 1
-
-        if q >= 2:
-            zones.append({
-                "top": ob_top,
-                "bot": ob_bot,
-                "mid": (ob_top + ob_bot) / 2,
-                "idx": df_idx,
-                "quality": q,
-                "has_bos": has_bos_global,
-            })
-
-    zones.sort(key=lambda z: (-z["quality"], -z["idx"]))
-    return zones[:3]
-
-def detect_choch(df: pd.DataFrame, sh: list, sl: list) -> dict:
-    """Change of Character (transkrip 17, 19, 20)."""
-    result = {"bullish_choch": False, "bearish_choch": False}
-    if len(sh) < 2 or len(sl) < 2:
-        return result
-    close = float(df["close"].iloc[-1])
-    prev_high = float(df["high"].iloc[sh[-2]])
-    last_high = float(df["high"].iloc[sh[-1]])
-    prev_low = float(df["low"].iloc[sl[-2]])
-    last_low = float(df["low"].iloc[sl[-1]])
-    struct = _market_structure(df, sh, sl)
-
-    # A ChoCH is a break of the *opposite* protected swing.  The old
-    # implementation compared a bullish close with prev_low (and a bearish
-    # close with prev_low), which is true on most ordinary candles and added
-    # +20 points to both random pullbacks and continuations.
-    if struct == "bearish" and close > last_high:
-        result["bullish_choch"] = True
-    if struct == "bullish" and close < last_low:
-        result["bearish_choch"] = True
-
-    # Raw reversal: require a close beyond the swing, never only a wick.
-    if last_high > prev_high and last_low > prev_low and close > last_high:
-        result["bullish_choch"] = True
-    if last_high < prev_high and last_low < prev_low and close < last_low:
-        result["bearish_choch"] = True
-    return result
-
-def detect_bos(df: pd.DataFrame, sh: list, sl: list) -> dict:
-    """Break of Structure (transkrip 17)."""
-    result = {"bullish_bos": False, "bearish_bos": False}
-    if len(sh) < 2 or len(sl) < 2:
-        return result
-
-    # Use the latest confirmed swing and a candle close.  Looking at the
-    # previous swing plus the current wick made old structure look broken
-    # long after the actual break had happened.
-    close = float(df["close"].iloc[-1])
-    last_high = float(df["high"].iloc[sh[-1]])
-    last_low = float(df["low"].iloc[sl[-1]])
-    prev_close = float(df["close"].iloc[-2]) if len(df) >= 2 else close
-    result["bullish_bos"] = close > last_high and prev_close <= last_high
-    result["bearish_bos"] = close < last_low and prev_close >= last_low
-    return result
-
-def detect_cisd(df: pd.DataFrame, lb: int = 8) -> dict:
-    """Change In State of Delivery (transkrip 29)."""
-    result = {"bullish_cisd": False, "bearish_cisd": False}
-    if len(df) < lb + 1:
-        return result
-    sub = df.iloc[-lb:]
-    opens = sub["open"].values
-    closes = sub["close"].values
-    n = len(closes)
-    if n < 4:
-        return result
-    last_bull = closes[-1] > opens[-1]
-    last_bear = closes[-1] < opens[-1]
-
-    if last_bull:
-        bear_run = 0
-        for j in range(n - 2, -1, -1):
-            if closes[j] < opens[j]:
-                bear_run += 1
-            else:
-                break
-        if bear_run >= 3:
-            first_idx = n - 1 - bear_run
-            if first_idx >= 0:
-                bear_mid = (opens[first_idx] + closes[first_idx]) / 2
-                if closes[-1] > bear_mid:
-                    result["bullish_cisd"] = True
-    elif last_bear:
-        bull_run = 0
-        for j in range(n - 2, -1, -1):
-            if closes[j] > opens[j]:
-                bull_run += 1
-            else:
-                break
-        if bull_run >= 3:
-            first_idx = n - 1 - bull_run
-            if first_idx >= 0:
-                bull_mid = (opens[first_idx] + closes[first_idx]) / 2
-                if closes[-1] < bull_mid:
-                    result["bearish_cisd"] = True
-    return result
-
-def detect_liquidity_sweep(df: pd.DataFrame, sh: list, sl: list,
-                           direction: str) -> dict:
-    """
-    Liquidity Sweep (transkrip 4, 9, 15, 18).
-    Valid: wick menembus swing, tapi close kembali di atas/bawah level.
-    """
-    result = {"type": "none", "level": None, "strength": 0}
-    if direction == "bull" and sl:
-        level = float(df["low"].iloc[sl[-1]])
-        last_low = float(df["low"].iloc[-1])
-        last_close = float(df["close"].iloc[-1])
-        if last_low < level and last_close > level:
-            depth = (level - last_low) / max(level, 1e-10)
-            result = {
-                "type": "sweep",
-                "level": level,
-                "strength": min(3, int(depth / 0.002) + 1),
-            }
-    elif direction == "bear" and sh:
-        level = float(df["high"].iloc[sh[-1]])
-        last_high = float(df["high"].iloc[-1])
-        last_close = float(df["close"].iloc[-1])
-        if last_high > level and last_close < level:
-            depth = (last_high - level) / max(level, 1e-10)
-            result = {
-                "type": "sweep",
-                "level": level,
-                "strength": min(3, int(depth / 0.002) + 1),
-            }
-    return result
-
-def detect_inducement(df: pd.DataFrame, direction: str,
-                      lb: int = INDUCEMENT_LOOKBACK) -> dict:
-    """
-    Inducement (transkrip "How the Market Traps Traders with Inducement" &
-    "trading strategy using inducement [SNIPER ENTRY]").
-
-    Konsep: sebelum harga bereaksi di POI "asli" (OB/FVG yang lebih dalam),
-    market sering menyapu dulu liquidity pool MINOR (swing kecil) yang
-    memancing early entry ("inducement"). Kalau minor pool itu SUDAH disapu
-    (wick tembus, close kembali ke sisi yang benar) sebelum harga mendekati
-    POI kita, itu tanda bagus — bukan validasi wajib, cuma BONUS confidence,
-    supaya kuantitas sinyal tidak berkurang untuk koin yang tidak
-    menunjukkan pola ini secara eksplisit.
-
-    Return: {"found": bool, "level": float|None, "swept": bool}
-    """
-    out = {"found": False, "level": None, "swept": False}
-    if df is None or len(df) < lb + INDUCEMENT_MINOR_LB * 2 + 1:
-        return out
-    sub = df.iloc[-lb:].reset_index(drop=True)
-    sh_m, sl_m = swing_pts(sub, lb=INDUCEMENT_MINOR_LB)
+    if str(model.get("schema") or "") != "machine_Learning_v2":
+        return False
+    names = model.get("feature_names")
+    if not isinstance(names, list) or names != list(ML_FEATURE_NAMES):
+        return False
+    n = len(ML_FEATURE_NAMES)
     try:
-        if direction == "bull" and sl_m:
-            idx = sl_m[-1]
-            if idx >= len(sub) - 2:
-                return out
-            level = float(sub["low"].iloc[idx])
-            after = sub.iloc[idx + 1:]
-            swept = bool((after["low"] < level).any() and
-                         float(after["close"].iloc[-1]) > level)
-            out = {"found": True, "level": level, "swept": swept}
-        elif direction == "bear" and sh_m:
-            idx = sh_m[-1]
-            if idx >= len(sub) - 2:
-                return out
-            level = float(sub["high"].iloc[idx])
-            after = sub.iloc[idx + 1:]
-            swept = bool((after["high"] > level).any() and
-                         float(after["close"].iloc[-1]) < level)
-            out = {"found": True, "level": level, "swept": swept}
+        return all(len(model.get(k, [])) == n for k in ("mean", "scale", "w", "rw"))
     except Exception:
-        return {"found": False, "level": None, "swept": False}
-    return out
+        return False
 
-def zones_overlap(a_top: float, a_bot: float, b_top: float, b_bot: float) -> bool:
-    """True jika dua rentang harga [bot, top] saling overlap (dipakai untuk
-    cek konfluensi OB/FVG M15 dengan zona H1 — 'How to Choose the Best Order
-    Block When All Zones Look Valid')."""
-    lo = max(min(a_bot, a_top), min(b_bot, b_top))
-    hi = min(max(a_bot, a_top), max(b_bot, b_top))
-    return lo <= hi
-
-def detect_equal_highs_lows(df: pd.DataFrame, kind: str = "high",
-                            lb: int = 80, tol: float = 0.003) -> list:
-    """Equal Highs/Lows (transkrip 15, 24)."""
-    sub = df.iloc[-lb:]
-    vals = sub["high"] if kind == "high" else sub["low"]
-    clusters, visited = [], set()
-    for i in range(len(vals)):
-        if i in visited:
-            continue
-        group = [float(vals.iloc[i])]
-        for j in range(i + 1, len(vals)):
-            if abs(vals.iloc[i] - vals.iloc[j]) / max(abs(float(vals.iloc[i])), 1e-10) < tol:
-                group.append(float(vals.iloc[j]))
-                visited.add(j)
-        if len(group) >= 2:
-            clusters.append(sum(group) / len(group))
-    return sorted(clusters)
-
-def detect_rsi_divergence(df: pd.DataFrame, direction: str, lb: int = 30) -> dict:
-    """RSI Divergence (transkrip 19)."""
-    result = {"bull_div": False, "bear_div": False, "strong": False}
-    if len(df) < lb + 1 or "rsi" not in df.columns:
-        return result
-    sub = df.iloc[-lb:]
-    price = sub["close"].values
-    rsi_v = sub["rsi"].values
-    n = len(price)
-    lb3 = 3
-
-    lows = [i for i in range(lb3, n - lb3)
-            if price[i] == min(price[max(0, i - lb3): i + lb3 + 1])]
-    if len(lows) >= 2:
-        i1, i2 = lows[-2], lows[-1]
-        if price[i2] < price[i1] and rsi_v[i2] > rsi_v[i1]:
-            result["bull_div"] = True
-            if rsi_v[i2] < 35:
-                result["strong"] = True
-
-    highs = [i for i in range(lb3, n - lb3)
-             if price[i] == max(price[max(0, i - lb3): i + lb3 + 1])]
-    if len(highs) >= 2:
-        i1, i2 = highs[-2], highs[-1]
-        if price[i2] > price[i1] and rsi_v[i2] < rsi_v[i1]:
-            result["bear_div"] = True
-            if rsi_v[i2] > 65:
-                result["strong"] = True
-
-    if direction == "bull" and not result["bull_div"]:
-        return {"bull_div": False, "bear_div": False, "strong": False}
-    if direction == "bear" and not result["bear_div"]:
-        return {"bull_div": False, "bear_div": False, "strong": False}
-    return result
-
-def detect_failed_retest(df: pd.DataFrame, sh: list, sl: list,
-                         atr: float) -> dict:
-    """Failed retest (untuk kompatibilitas)."""
-    result = {"failed_retest_sell": False, "failed_retest_buy": False}
-    if len(df) < 3 or not sh or not sl:
-        return result
-    L = df.iloc[-1]
-    P = df.iloc[-2]
-    if len(sh) >= 2:
-        res = float(df["high"].iloc[sh[-2]])
-        if P["high"] >= res - atr * 0.5 and L["close"] < res - atr * 0.3 and L["close"] < L["open"]:
-            result["failed_retest_sell"] = True
-    if len(sl) >= 2:
-        sup = float(df["low"].iloc[sl[-2]])
-        if P["low"] <= sup + atr * 0.5 and L["close"] > sup + atr * 0.3 and L["close"] > L["open"]:
-            result["failed_retest_buy"] = True
-    return result
+ML_EXPERIENCE_LOCK = threading.RLock()
+ML_EXPERIENCE = []
 
 
-def detect_entry_confirmation(df: pd.DataFrame, direction: str, atr: float,
-                              lb: int = CONFIRMATION_LOOKBACK) -> dict:
-    """Konfirmasi displacement yang baru, bukan sekadar lokasi entry.
-
-    OTE, RSI divergence, discount/premium, dan sweep menjelaskan lokasi atau
-    kemungkinan reaksi. Mereka tidak membuktikan bahwa buyer/seller sudah
-    mengambil alih. Konfirmasi ini membutuhkan candle close searah yang
-    menembus range pendek sebelumnya dengan body yang cukup besar.
-    """
-    out = {
-        "confirmed": False,
-        "direction": direction,
-        "kind": "none",
-        "idx": None,
-        "body_atr": 0.0,
-    }
-    if df is None or len(df) < max(lb + 2, 8):
-        return out
-
-    last = df.iloc[-1]
-    prior = df.iloc[-(lb + 1):-1]
-    body = abs(float(last["close"]) - float(last["open"]))
-    local_atr = max(float(atr), 1e-10)
-    body_atr = body / local_atr
-    out["body_atr"] = round(body_atr, 3)
-
-    recent_bodies = (df["close"] - df["open"]).abs().iloc[-(lb + 5):-1]
-    median_body = float(recent_bodies.median()) if not recent_bodies.empty else 0.0
-    min_body = max(local_atr * MIN_DISPLACEMENT_ATR, median_body * 0.8)
-
-    if direction == "bull":
-        confirmed = (
-            float(last["close"]) > float(last["open"])
-            and float(last["close"]) > float(prior["high"].max())
-            and body >= min_body
-        )
-    else:
-        confirmed = (
-            float(last["close"]) < float(last["open"])
-            and float(last["close"]) < float(prior["low"].min())
-            and body >= min_body
-        )
-
-    if confirmed:
-        out.update({
-            "confirmed": True,
-            "kind": "displacement_close",
-            "idx": len(df) - 1,
-        })
-    return out
-
-
-def _collect_htf_poi_zones(h1: pd.DataFrame, direction: str,
-                           score_ctx: dict) -> list:
-    """Kumpulkan POI H1 searah untuk validasi reaksi sebelum entry."""
-    zones = []
+def _ml_load_experience():
     try:
-        for z in detect_order_block(
-            h1, direction, lb=80,
-            sh=score_ctx.get("sh1", []),
-            sl=score_ctx.get("sl1", []),
-        ):
-            zones.append({
-                "top": float(z["top"]),
-                "bot": float(z["bot"]),
-                "kind": "ob_h1",
-            })
-        for f in detect_fvg(h1, direction, lb=60):
-            zones.append({
-                "top": float(f["top"]),
-                "bot": float(f["bot"]),
-                "kind": "fvg_h1",
-            })
-    except Exception:
+        ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if not ML_EXPERIENCE_FILE.exists():
+            return []
+        rows = []
+        with ML_EXPERIENCE_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        rows.append(obj)
+                except Exception:
+                    continue
+        return rows[-10000:]
+    except Exception as e:
+        log.warning(f"[ML] experience load gagal: {e}")
         return []
-    return zones
 
 
-def _recent_poi_reaction(m15: pd.DataFrame, zones: list, direction: str,
-                         atr: float,
-                         lookback: int = POI_REACTION_LOOKBACK) -> bool:
-    """Pastikan POI HTF sudah disentuh dan mendapat rejection baru.
+ML_EXPERIENCE = _ml_load_experience()
 
-    Retest saja tidak cukup. Setelah harga masuk POI, harus ada close kembali
-    keluar dari sisi reaksi zona. Ini mencegah pending order dipasang hanya
-    karena OB/FVG lama masih terlihat fresh.
-    """
-    if m15 is None or m15.empty or not zones:
+
+def _ml_append_experience(record):
+    if not isinstance(record, dict) or not isinstance(record.get("learning_features"), dict):
+        return
+    sample = {
+        "trade_uid": record.get("trade_uid"),
+        "entry_time": record.get("entry_time"),
+        "exit_time": record.get("exit_time"),
+        "result": record.get("result"),
+        "final_r": record.get("final_r"),
+        "pnl_usd": record.get("pnl_usd"),
+        "confidence": record.get("confidence"),
+        "learning_features": record.get("learning_features"),
+        "ml_model_version": record.get("ml_model_version", "static"),
+    }
+    try:
+        with ML_EXPERIENCE_LOCK:
+            key = str(sample.get("trade_uid") or "")
+            if key and any(str(x.get("trade_uid") or "") == key for x in ML_EXPERIENCE[-200:]):
+                return
+            ML_EXPERIENCE.append(sample)
+            if len(ML_EXPERIENCE) > 10000:
+                del ML_EXPERIENCE[:-10000]
+            ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
+            with ML_EXPERIENCE_FILE.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(sample, ensure_ascii=False, allow_nan=False, default=str) + "\n")
+    except Exception as e:
+        log.warning(f"[ML] experience append gagal: {e}")
+
+
+
+def _ml_save_state():
+    try:
+        ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = ML_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(ML_STATE, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
+        os.replace(tmp, ML_STATE_FILE)
+    except Exception as e:
+        log.warning(f"[ML] state save gagal: {e}")
+
+
+# Validate persisted model only after the save helper is defined.
+# Incompatible old models are discarded safely; they are never padded or coerced.
+with ML_LOCK:
+    if not _ml_model_compatible(ML_STATE.get("champion")):
+        ML_STATE["previous_champion"] = None
+        ML_STATE["champion"] = None
+    if not _ml_model_compatible(ML_STATE.get("last_challenger")):
+        ML_STATE["last_challenger"] = None
+    _ml_save_state()
+
+
+def _strategy_set_ml_model(model):
+    setter = globals().get("set_learning_model")
+    if callable(setter):
+        try:
+            setter(model)
+        except Exception as e:
+            log.warning(f"[ML] gagal bind model ke strategy: {e}")
+
+
+def _ml_current_champion():
+    with ML_LOCK:
+        c = ML_STATE.get("champion")
+        return dict(c) if isinstance(c, dict) else None
+
+
+def _ml_sync_strategy():
+    _strategy_set_ml_model(_ml_current_champion())
+
+
+def _ml_feature_vector(record):
+    feats = record.get("learning_features")
+    if not isinstance(feats, dict):
+        return None
+    try:
+        return np.asarray([float(feats.get(k, 0.0) or 0.0) for k in ML_FEATURE_NAMES], dtype=float)
+    except Exception:
+        return None
+
+
+def _ml_collect_samples():
+    with trade_history_lock:
+        hist = [dict(x) for x in trade_history]
+    with ML_EXPERIENCE_LOCK:
+        persisted = [dict(x) for x in ML_EXPERIENCE]
+    combined = {}
+    for row in persisted + hist:
+        key = str(row.get("trade_uid") or f"{row.get('symbol','')}|{row.get('entry_time','')}|{row.get('exit_time','')}")
+        combined[key] = row
+    samples = []
+    for t in combined.values():
+        x = _ml_feature_vector(t)
+        if x is None:
+            continue
+        try:
+            fr = float(t.get("final_r"))
+        except (TypeError, ValueError):
+            fr = None
+        if fr is None:
+            try:
+                fr = float(t.get("pnl_usd", 0.0))
+            except Exception:
+                fr = 0.0
+        result = str(t.get("result") or "sl").lower()
+        y = 1.0 if fr > 0 and result not in {"strategy_error", "data_error"} else 0.0
+        expected = max(-3.0, min(3.0, fr))
+        try:
+            baseline_conf = float(t.get("confidence", 50.0) or 50.0) / 100.0
+        except (TypeError, ValueError):
+            baseline_conf = 0.5
+        samples.append((t.get("exit_time") or t.get("entry_time") or 0, x, y, expected, baseline_conf))
+    samples.sort(key=lambda r: float(r[0] or 0))
+    return samples
+
+def _ml_sigmoid(z):
+    z = np.clip(z, -35.0, 35.0)
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def _ml_fit(X, y, r_targets, reg=1.0, epochs=250, lr=0.03):
+    mean = np.mean(X, axis=0)
+    scale = np.std(X, axis=0)
+    scale[scale < 1e-8] = 1.0
+    Z = (X - mean) / scale
+    w = np.zeros(Z.shape[1], dtype=float)
+    b = 0.0
+    rw = np.zeros(Z.shape[1], dtype=float)
+    rb = float(np.mean(r_targets)) if len(r_targets) else 0.0
+    n = max(1, len(Z))
+    for _ in range(epochs):
+        p = _ml_sigmoid(Z @ w + b)
+        gw = (Z.T @ (p - y)) / n + (reg / n) * w
+        gb = float(np.mean(p - y))
+        w -= lr * gw
+        b -= lr * gb
+        pred_r = Z @ rw + rb
+        grw = (Z.T @ (pred_r - r_targets)) / n + (reg / n) * rw
+        grb = float(np.mean(pred_r - r_targets))
+        rw -= lr * grw
+        rb -= lr * grb
+    return {"mean": mean.tolist(), "scale": scale.tolist(), "w": w.tolist(), "b": b, "rw": rw.tolist(), "rb": rb}
+
+
+def _ml_predict_model(model, X):
+    mean = np.asarray(model["mean"], dtype=float)
+    scale = np.asarray(model["scale"], dtype=float)
+    w = np.asarray(model["w"], dtype=float)
+    b = float(model.get("b", 0.0))
+    Z = (X - mean) / np.maximum(scale, 1e-8)
+    p = _ml_sigmoid(Z @ w + b)
+    rw = np.asarray(model.get("rw", np.zeros_like(w)), dtype=float)
+    rb = float(model.get("rb", 0.0))
+    er = Z @ rw + rb
+    return p, er
+
+
+def _ml_score_from_expected_r(expected_r):
+    return 50.0 + 25.0 * np.tanh(np.asarray(expected_r, dtype=float))
+
+
+def _ml_eval_predictions(p, rs, threshold):
+    mask = p * 100.0 >= threshold
+    if int(mask.sum()) < 1:
+        return None
+    actual = rs[mask]
+    avg_r = float(np.mean(actual))
+    equity = 0.0
+    peak = 0.0
+    dd = 0.0
+    for r in actual:
+        equity += float(r)
+        peak = max(peak, equity)
+        dd = max(dd, peak - equity)
+    win = float(np.mean(actual > 0)) if len(actual) else 0.0
+    calibration = 1.0 - abs(float(np.mean(p[mask])) - win)
+    coverage = float(mask.sum()) / max(1, len(rs))
+    required = max(5, int(np.ceil(len(rs) * FULL_MIN_COVERAGE)))
+    if int(mask.sum()) < required:
+        return None
+    objective = avg_r - 0.12 * dd + 0.18 * calibration + 0.05 * coverage
+    return {"objective": float(objective), "threshold": int(threshold), "n": int(mask.sum()),
+            "coverage": coverage, "avg_r": avg_r, "win_rate": win,
+            "max_dd_r": dd, "calibration": calibration}
+
+
+def _ml_eval_candidate(model, samples):
+    if not samples:
+        return {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
+    X = np.vstack([s[1] for s in samples])
+    rs = np.asarray([s[3] for s in samples], dtype=float)
+    _p, er = _ml_predict_model(model, X)
+    p = np.clip(_ml_score_from_expected_r(er) / 100.0, 0.0, 1.0)
+    best = None
+    for threshold in FULL_ALLOWED_THRESHOLDS:
+        candidate = _ml_eval_predictions(p, rs, threshold)
+        if candidate is not None and (best is None or candidate["objective"] > best["objective"]):
+            best = candidate
+    return best or {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
+
+
+def _ml_eval_baseline(samples):
+    if not samples:
+        return {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
+    p = np.asarray([s[4] for s in samples], dtype=float)
+    rs = np.asarray([s[3] for s in samples], dtype=float)
+    best = None
+    for threshold in FULL_ALLOWED_THRESHOLDS:
+        candidate = _ml_eval_predictions(p, rs, threshold)
+        if candidate is not None and (best is None or candidate["objective"] > best["objective"]):
+            best = candidate
+    return best or {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
+
+def _ml_train_once(force=False):
+    global ML_STATE
+    samples = _ml_collect_samples()
+    now = datetime.now(WIB).isoformat()
+    if len(samples) < FULL_MIN_TRAIN_SAMPLES:
+        with ML_LOCK:
+            ML_STATE["last_training_at"] = now
+            ML_STATE["last_training_samples"] = len(samples)
+            ML_STATE["last_training_result"] = {"status": "INSUFFICIENT_DATA", "samples": len(samples)}
+            _ml_save_state()
         return False
-    start = max(0, len(m15) - lookback)
-    sub = m15.iloc[start:]
-    body_floor = max(float(atr) * MIN_DISPLACEMENT_ATR, 1e-10)
 
-    for zone in zones:
-        top, bot = float(zone["top"]), float(zone["bot"])
-        for i in range(len(sub)):
-            candle = sub.iloc[i]
-            touched = float(candle["low"]) <= top and float(candle["high"]) >= bot
-            if not touched:
-                continue
-            for j in range(i, min(i + 5, len(sub))):
-                reaction = sub.iloc[j]
-                body = abs(float(reaction["close"]) - float(reaction["open"]))
-                if direction == "bull":
-                    ok = (
-                        float(reaction["close"]) > top
-                        and float(reaction["close"]) > float(reaction["open"])
-                        and body >= body_floor
-                    )
-                else:
-                    ok = (
-                        float(reaction["close"]) < bot
-                        and float(reaction["close"]) < float(reaction["open"])
-                        and body >= body_floor
-                    )
-                if ok:
-                    return True
+    split = int(len(samples) * 0.70)
+    if len(samples) - split < FULL_MIN_VALIDATION_SAMPLES:
+        split = len(samples) - FULL_MIN_VALIDATION_SAMPLES
+    train = samples[:split]
+    valid = samples[split:]
+    Xtr = np.vstack([s[1] for s in train])
+    ytr = np.asarray([s[2] for s in train], dtype=float)
+    rtr = np.asarray([s[3] for s in train], dtype=float)
+
+    best = None
+    for reg in (0.1, 0.3, 1.0, 3.0, 10.0):
+        params = _ml_fit(Xtr, ytr, rtr, reg=reg)
+        evaluation = _ml_eval_candidate(params, valid)
+        evaluation["reg"] = reg
+        if best is None or evaluation["objective"] > best["evaluation"]["objective"]:
+            best = {"params": params, "evaluation": evaluation}
+    if best is None:
+        return False
+
+    candidate_score = float(best["evaluation"].get("objective", -999.0))
+    baseline_eval = _ml_eval_baseline(valid)
+    champion = _ml_current_champion()
+    champion_eval = {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
+    if champion:
+        try:
+            champion_eval = _ml_eval_candidate(champion, valid)
+        except Exception as e:
+            log.warning(f"[ML] champion evaluation gagal: {e}")
+
+    best_reference = max(float(baseline_eval.get("objective", -999.0)), float(champion_eval.get("objective", -999.0)))
+    promote = candidate_score >= best_reference + FULL_PROMOTION_MIN_IMPROVEMENT
+    if champion is None and candidate_score < baseline_eval.get("objective", -999.0) + FULL_PROMOTION_MIN_IMPROVEMENT:
+        promote = False
+
+    candidate = dict(best["params"])
+    candidate.update({
+        "schema": "machine_Learning_v2",
+        "feature_names": list(ML_FEATURE_NAMES),
+        "active": bool(promote),
+        "model_version": f"ML-{int(time.time())}",
+        "sample_count": len(samples),
+        "train_samples": len(train),
+        "validation_samples": len(valid),
+        "validation_objective": candidate_score,
+        "validation": best["evaluation"],
+        "confidence_min": int(best["evaluation"].get("threshold", 60)),
+        "live_weight": 0.35,
+        "baseline_validation": baseline_eval,
+        "champion_validation": champion_eval,
+    })
+
+    with ML_LOCK:
+        ML_STATE["learning_cycles"] = int(ML_STATE.get("learning_cycles", 0)) + 1
+        ML_STATE["last_training_at"] = now
+        ML_STATE["last_training_samples"] = len(samples)
+        ML_STATE["last_training_result"] = {
+            "status": "PROMOTED" if promote else "CHALLENGER",
+            "candidate": best["evaluation"],
+            "baseline": baseline_eval,
+            "champion": champion_eval,
+        }
+        if promote:
+            ML_STATE["previous_champion"] = ML_STATE.get("champion")
+            ML_STATE["champion"] = candidate
+            ML_STATE["promotion_count"] = int(ML_STATE.get("promotion_count", 0)) + 1
+        ML_STATE["last_challenger"] = candidate
+        _ml_save_state()
+
+    if promote:
+        _ml_sync_strategy()
+        if FULL_MODE:
+            STRATEGY_CONFIDENCE_THRESHOLD = int(candidate["confidence_min"])
+        log.info(f"[ML] Champion promoted {candidate['model_version']} threshold={candidate['confidence_min']} objective={candidate_score:.4f}")
+    else:
+        log.info(f"[ML] Challenger rejected/retained objective={candidate_score:.4f}; baseline={float(baseline_eval.get('objective',-999)):.4f}; champion={float(champion_eval.get('objective',-999)):.4f}")
+    return promote
+
+def _ml_learning_loop():
+    global FULL_LAST_TRAINED_COUNT
+    while not FULL_STOP.is_set():
+        try:
+            if FULL_MODE:
+                current_count = len(ML_EXPERIENCE)
+                if current_count >= FULL_MIN_TRAIN_SAMPLES and (current_count - FULL_LAST_TRAINED_COUNT) >= FULL_RETRAIN_MIN_NEW:
+                    _ml_train_once()
+                    FULL_LAST_TRAINED_COUNT = current_count
+        except Exception as e:
+            log.exception(f"[ML] learning cycle gagal: {e}")
+        FULL_WAKE.wait(FULL_TRAIN_INTERVAL)
+        FULL_WAKE.clear()
+
+
+def _full_status_text():
+    champion = _ml_current_champion()
+    with ML_LOCK:
+        cycles = int(ML_STATE.get("learning_cycles", 0))
+        promotions = int(ML_STATE.get("promotion_count", 0))
+        last = ML_STATE.get("last_training_result") or {}
+        last_samples = int(ML_STATE.get("last_training_samples", 0) or 0)
+    if champion:
+        return (f"🧠 <b>FULL LEARNING</b>: {'ON' if FULL_MODE else 'OFF'}\n"
+                f"Champion: <code>{html.escape(str(champion.get('model_version')))}</code>\n"
+                f"Samples: <b>{int(champion.get('sample_count',0) or 0)}</b> | OOS: <b>{int(champion.get('validation_samples',0) or 0)}</b>\n"
+                f"Confidence min ML: <b>{int(champion.get('confidence_min',60) or 60)}%</b>\n"
+                f"Objective OOS: <b>{float(champion.get('validation_objective',0) or 0):.4f}</b>\n"
+                f"Learning cycles: <b>{cycles}</b> | Promotions: <b>{promotions}</b>\n"
+                f"Last samples: <b>{last_samples}</b> | Last status: <b>{html.escape(str(last.get('status','—')))}</b>")
+    return (f"🧠 <b>FULL LEARNING</b>: {'ON' if FULL_MODE else 'OFF'}\n"
+            f"Champion: <b>Belum ada</b>\nLearning cycles: <b>{cycles}</b> | Samples: <b>{last_samples}</b>\n"
+            f"Minimum training samples: <b>{FULL_MIN_TRAIN_SAMPLES}</b>")
+
+
+def _full_on():
+    global FULL_MODE, FULL_THREAD, FULL_MANUAL_THRESHOLD_SAVED
+    with ML_LOCK:
+        if not FULL_MODE:
+            FULL_MANUAL_THRESHOLD_SAVED = int(STRATEGY_CONFIDENCE_THRESHOLD)
+        FULL_MODE = True
+        FULL_STOP.clear()
+        FULL_WAKE.set()
+    _ml_sync_strategy()
+    if FULL_THREAD is None or not FULL_THREAD.is_alive():
+        FULL_THREAD = threading.Thread(target=_ml_learning_loop, name="full-learning", daemon=True)
+        FULL_THREAD.start()
+    FULL_WAKE.set()
+    return _full_status_text()
+
+
+def _full_off():
+    global FULL_MODE, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED
+    with ML_LOCK:
+        FULL_MODE = False
+        FULL_WAKE.clear()
+        if FULL_MANUAL_THRESHOLD_SAVED is not None:
+            STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
+            FULL_MANUAL_THRESHOLD_SAVED = None
+    return _full_status_text()
+
+
+def _full_reset_internal():
+    global FULL_MODE, FULL_THREAD, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED, FULL_LAST_TRAINED_COUNT
+    with ML_LOCK:
+        FULL_MODE = False
+        FULL_WAKE.clear()
+        FULL_STOP.set()
+        ML_STATE.clear()
+        ML_STATE.update(_ml_default_state())
+        _strategy_set_ml_model(None)
+        if FULL_MANUAL_THRESHOLD_SAVED is not None:
+            STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
+            FULL_MANUAL_THRESHOLD_SAVED = None
+        _ml_save_state()
+    with ML_EXPERIENCE_LOCK:
+        ML_EXPERIENCE.clear()
+    try:
+        ML_EXPERIENCE_FILE.unlink(missing_ok=True)
+    except Exception as e:
+        log.warning(f"[ML] reset experience file gagal: {e}")
+    FULL_LAST_TRAINED_COUNT = 0
+    FULL_THREAD = None
+    FULL_STOP.clear()
+    return _full_controller_state()
+
+
+def _full_controller_state():
+    champion = _ml_current_champion()
+    with ML_LOCK:
+        last = dict(ML_STATE.get("last_training_result") or {})
+        cycles = int(ML_STATE.get("learning_cycles", 0) or 0)
+        promotions = int(ML_STATE.get("promotion_count", 0) or 0)
+    return {
+        "mode": bool(FULL_MODE),
+        "champion": champion,
+        "experience_samples": len(ML_EXPERIENCE),
+        "learning_cycles": cycles,
+        "promotion_count": promotions,
+        "last_training_samples": int(ML_STATE.get("last_training_samples", 0) or 0),
+        "last_status": last.get("status", "—"),
+        "manual_threshold": int(STRATEGY_CONFIDENCE_THRESHOLD),
+        "minimum_training_samples": int(FULL_MIN_TRAIN_SAMPLES),
+    }
+
+
+def _full_strategy_command(action, chat_id=None):
+    handler = globals().get("full_command")
+    if callable(handler):
+        callbacks = {"on": _full_on, "off": _full_off, "reset": _full_reset_internal, "status": _full_controller_state}
+        if chat_id is not None:
+            callbacks["notify"] = lambda msg: tg_send(chat_id, msg)
+        return handler(action, callbacks)
+    return _full_status_text()
+
+
+def _ml_record_signal_metadata(signal):
+    if not isinstance(signal, dict):
+        return
+    signal.setdefault("ml_schema", "machine_Learning_v2")
+    signal.setdefault("ml_model_version", signal.get("learning_model_version", "static"))
+
+_ml_sync_strategy()
+try:
+    if callable(globals().get("adaptive_agent_start")):
+        adaptive_agent_start()
+except Exception as _brain_boot_exc:
+    log.warning(f"[ADAPTIVE] brain bootstrap gagal; execution tetap hidup: {_brain_boot_exc}")
+
+# Research warmup: beberapa kandidat sinyal pertama setelah /resetstats sengaja
+# ditolak tanpa dianggap trade gagal dan tanpa mengubah ban state.
+EARLY_REJECT_DEFAULT = 5
+early_reject_configured = EARLY_REJECT_DEFAULT
+early_reject_remaining = EARLY_REJECT_DEFAULT
+early_reject_lock = threading.Lock()
+
+# Ban koin berbasis SCAN CYCLE.
+# SHORT ban = pending/no-trade + low-confidence. CLOSED ban tetap terpisah.
+ban_lock = threading.Lock()
+banned_coins: dict = {}      # {symbol: {banned_at, duration, reason, kind, confidence}}
+scan_counter = 0             # bertambah 1 setiap get_top_coins() dipanggil
+BAN_DURATION_SCANS = 15.0
+BAN_DURATION_TRADE_CLOSED = 25.0   # setelah trade BENAR-BENAR closed
+
+# Research observability state. Low-confidence history intentionally survives
+# /resetstats; use /resetlowconf to clear it explicitly.
+low_conf_history_lock = threading.Lock()
+low_conf_history: list[dict] = []
+trail_events_lock = threading.Lock()
+trail_events: list[dict] = []
+trail_event_sequence = 0
+scan_quality_lock = threading.Lock()
+scan_quality_history: list[dict] = []
+market_context_lock = threading.Lock()
+market_context_history: list[dict] = []
+
+# ── REAL TRADE (Binance Futures) — aktif otomatis kalau API key/secret diset ──
+BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+
+def _read_binance_credentials():
+    """Read Binance credentials at runtime, not only at module import.
+
+    Render/container environments can update secrets between process starts or
+    expose a secret under a legacy alias. We keep the canonical names first,
+    trim accidental whitespace, and return a single consistent pair.
+    """
+    key = os.getenv("BINANCE_API_KEY") or os.getenv("BINANCE_KEY")
+    secret = (os.getenv("BINANCE_API_SECRET")
+              or os.getenv("BINANCE_SECRET_KEY")
+              or os.getenv("BINANCE_API_SECRET_KEY"))
+    key = key.strip() if isinstance(key, str) else key
+    secret = secret.strip() if isinstance(secret, str) else secret
+    return key, secret
+
+# BINANCE_KEYS_PRESENT: apakah kredensial ADA. Nilai ini juga disegarkan
+# sebelum signed request/recovery sehingga secret yang tersedia setelah boot
+# tidak dianggap hilang selamanya.
+BINANCE_KEYS_PRESENT = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
+# REAL_TRADE_ENABLED: mode AKTIF SEKARANG (bisa di-toggle runtime via /mode
+# on|off). Default tetap mengikuti ketersediaan key saat startup.
+REAL_TRADE_ENABLED   = False
+# New real trading is OFF until the operator explicitly runs /mode on.
+# Existing REAL positions remain manageable even while the mode flag is OFF.
+
+
+LEVERAGE          = 5      # runtime, via /leverage
+MARGIN_USD        = 5.0    # runtime, via /margin
+AUTOSTOP_PCT      = 3.0    # runtime, via /autostop
+peak_real_balance = None   # diisi saat fetch balance real pertama kali sukses
+autostop_lock     = threading.Lock()
+
+def _position_execution_mode(pos):
+    """Return the immutable execution class of a local position."""
+    if not isinstance(pos, dict):
+        return "SIMULATION"
+    mode = str(pos.get("execution_mode") or "").strip().upper()
+    if mode in {"REAL", "SIMULATION"}:
+        return mode
+    real_markers = ("order_id", "tp_order_id", "sl_order_id", "entry_client_order_id", "margin_used")
+    if any(pos.get(k) is not None for k in real_markers):
+        return "REAL"
+    if str(pos.get("status") or "").upper() == "EMERGENCY":
+        return "REAL"
+    return "SIMULATION"
+
+
+def _position_is_real(pos):
+    return _position_execution_mode(pos) == "REAL"
+
+
+def _has_real_recovery_work():
+    """True only when private Binance reconciliation/protection work is required."""
+    with positions_lock:
+        if any(_position_is_real(pos) for pos in positions.values()):
+            return True
+    with _pending_protections_lock:
+        if _pending_protections:
+            return True
+    with _pending_trails_lock:
+        if _pending_trails:
+            return True
+    with _pending_cleanup_lock:
+        if _pending_cleanup:
+            return True
     return False
 
 
-# =============================================================================
-# SCORING — Confidence global tanpa bias sesi
-# =============================================================================
+_binance_recovery_notice_generation = -1
+_binance_recovery_notice_lock = threading.Lock()
 
-def score_direction(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
-                    df_d1: Optional[pd.DataFrame] = None,
-                    df_btc_h1: Optional[pd.DataFrame] = None) -> Optional[dict]:
+
+def _ban_coin(sym, reason="", duration=None, kind="short", confidence=None):
+    """Ban a symbol for scan cycles with explicit reason/kind metadata."""
+    d = float(BAN_DURATION_SCANS if duration is None else duration)
+    kind = str(kind or "short").lower()
+    with ban_lock:
+        banned_coins[sym] = {
+            "banned_at": float(scan_counter),
+            "duration": d,
+            "reason": str(reason or ""),
+            "kind": kind,
+            "confidence": (float(confidence) if confidence is not None else None),
+        }
+    log.info(f"[ban] {sym} diban {d:g} scan ({kind})" + (f" [{reason}]" if reason else ""))
+
+def _unban_coin(sym):
+    with ban_lock:
+        existed = sym in banned_coins
+        if existed:
+            del banned_coins[sym]
+    if existed:
+        log.info(f"[unban] {sym} dihapus dari ban manual/operator")
+    return existed
+
+def _ban_remaining(sym, current_scan=None):
+    cur = float(scan_counter if current_scan is None else current_scan)
+    with ban_lock:
+        b = banned_coins.get(sym)
+        if not b:
+            return None
+        if isinstance(b, tuple):
+            banned_at, dur = b
+            return max(0.0, float(dur) - (cur - float(banned_at)))
+        return max(0.0, float(b["duration"]) - (cur - float(b["banned_at"])))
+
+
+def _record_low_confidence_event(sym, confidence, cutoff, direction=None, entry_label=None):
+    event = {
+        "event_time": time.time(), "run_id": research_run_id, "scan_counter": scan_counter,
+        "symbol": str(sym), "confidence": float(confidence),
+        "confidence_min": float(STRATEGY_CONFIDENCE_THRESHOLD), "cutoff": float(cutoff),
+        "decision": direction, "entry_label": entry_label,
+    }
+    with low_conf_history_lock: low_conf_history.append(event)
+
+def _low_conf_summary():
+    with low_conf_history_lock: rows=[dict(x) for x in low_conf_history]
+    g={}
+    for r in rows:
+        sym=str(r.get("symbol") or "?"); c=float(r.get("confidence",0) or 0)
+        x=g.setdefault(sym,{"symbol":sym,"count":0,"sum":0.0,"min":None,"max":None,"last":0.0})
+        x["count"]+=1; x["sum"]+=c; x["min"]=c if x["min"] is None else min(x["min"],c); x["max"]=c if x["max"] is None else max(x["max"],c); x["last"]=max(x["last"],float(r.get("event_time") or 0))
+    out=[]
+    for x in g.values():
+        x["avg"]=x["sum"]/x["count"] if x["count"] else 0.0; out.append(x)
+    out.sort(key=lambda x:(-x["count"],x["avg"],x["symbol"]))
+    return out
+
+def _record_scan_quality(row):
+    with scan_quality_lock: scan_quality_history.append(dict(row))
+
+def _market_feature_row(sym, h1, m15, analysis):
+    """Derive chart-context features from already-fetched scan data.
+
+    This function intentionally performs ZERO Binance requests. It is a feature
+    extraction layer for future strategy_logic versions: price velocity,
+    directional efficiency, ATR/volatility regime, volume participation and
+    structure/decision labels are recorded while the scanner already has the
+    candles in memory.
     """
-    Tentukan arah dan skor confidence global (tanpa bias sesi).
-    Faktor scoring (max ~165):
-      - D1 bias (struktur/EMA)         +20
-      - H1 structure                   +20
-      - H1 ChoCH                       +10
-      - H1 BOS                         +5
-      - H1 EMA stack                   +10
-      - M15 ChoCH                      +20
-      - M15 BOS                        +10
-      - M15 CISD                       +15
-      - M15 Liquidity Sweep            +15
-      - M15 OTE                        +10
-      - M15 Fibonacci diskon/premium   +10
-      - M15 RSI divergence             +10 (+5 if strong)
-      - M15 failed retest              +10
-    Penalti: jika setup M15 berlawanan dengan bias D1 → kurangi 50%.
-    """
-    h1 = build_df(df_h1, interval_minutes=60)
-    m15 = build_df(df_m15, interval_minutes=15)
-    if h1 is None or m15 is None:
-        return None
+    def _safe_float(v, default=None):
+        try:
+            x=float(v)
+            return x if np.isfinite(x) else default
+        except Exception:
+            return default
 
-    L1 = h1.iloc[-1]
-    L15 = m15.iloc[-1]
-    atr = max(float(L15["atr"]),
-              float(L1["atr"]) / 4,
-              float(L15["close"]) * 0.003)
-
-    sh1, sl1 = swing_pts(h1, lb=5)
-    sh15, sl15 = swing_pts(m15, lb=5)
-    struct_h1 = _market_structure(h1, sh1, sl1)
-
-    # ── D1 bias ──────────────────────────────────────────────────
-    d1_bias = "neutral"
+    out={"symbol":str(sym),"decision":(analysis or {}).get("decision"),
+         "confidence":_safe_float((analysis or {}).get("confidence")),
+         "entry_label":(analysis or {}).get("entry_label"),
+         "struct_h1":(analysis or {}).get("struct_h1") or (analysis or {}).get("structure"),
+         "d1_bias":(analysis or {}).get("d1_bias")}
     try:
-        if df_d1 is not None and len(df_d1) >= 65:
-            d1 = build_df(df_d1, interval_minutes=1440)
+        c=pd.to_numeric(m15["close"], errors="coerce").dropna()
+        v=pd.to_numeric(m15["volume"], errors="coerce").fillna(0.0)
+        atr_col=pd.to_numeric(m15.get("atr", pd.Series(index=m15.index,dtype=float)), errors="coerce")
+        if len(c)<20:
+            return out
+        last=float(c.iloc[-1]);
+        out["price_1h_pct"]=(float(c.iloc[-1]/c.iloc[-5]-1.0)*100.0) if c.iloc[-5] else None
+        out["price_4h_pct"]=(float(c.iloc[-1]/c.iloc[-17]-1.0)*100.0) if c.iloc[-17] else None
+        diffs=c.diff().abs().iloc[-17:].sum()
+        out["efficiency_4h"]=float(abs(c.iloc[-1]-c.iloc[-17])/diffs) if diffs and np.isfinite(diffs) else 0.0
+        atr_last=_safe_float(atr_col.iloc[-1])
+        out["atr_pct"]=(atr_last/last*100.0) if atr_last and last else None
+        vol_base=float(v.iloc[-21:-1].mean()) if len(v)>=21 else float(v.iloc[:-1].mean())
+        out["relative_volume"]=(float(v.iloc[-1])/vol_base) if vol_base>0 else None
+        true_range=np.maximum(pd.to_numeric(m15["high"],errors="coerce")-pd.to_numeric(m15["low"],errors="coerce"),
+                              np.maximum((pd.to_numeric(m15["high"],errors="coerce")-pd.to_numeric(m15["close"].shift(1),errors="coerce")).abs(),
+                                         (pd.to_numeric(m15["low"],errors="coerce")-pd.to_numeric(m15["close"].shift(1),errors="coerce")).abs()))
+        tr=pd.Series(true_range,index=m15.index).replace([np.inf,-np.inf],np.nan).dropna()
+        if len(tr)>=20:
+            recent=float(tr.iloc[-4:].mean()); baseline=float(tr.iloc[-20:-4].median())
+            out["range_expansion_ratio"]=recent/baseline if baseline>0 else None
+        atr_series=atr_col.dropna()
+        if len(atr_series)>=30 and atr_last is not None:
+            med=float(atr_series.iloc[-31:-1].median())
+            out["volatility_ratio"]=atr_last/med if med>0 else None
+        # Simple, robust regime label derived from the same chart data. It is a
+        # descriptor, not a trade rule.
+        r1=out.get("price_1h_pct") or 0.0; eff=out.get("efficiency_4h") or 0.0
+        rr=out.get("range_expansion_ratio") or 1.0
+        if eff>=0.55 and rr>=1.15:
+            regime="expansion"
+        elif eff<=0.30 and rr<=1.10:
+            regime="range/compression"
+        elif eff>=0.45:
+            regime="trend"
         else:
-            d1 = build_df(
-                df_h1.resample("1D").agg(
-                    {"open": "first", "high": "max", "low": "min",
-                     "close": "last", "volume": "sum"}
-                ).dropna()
+            regime="transition"
+        out["chart_regime"]=regime
+        out["directional_bias"]="bullish" if r1>0.15 else "bearish" if r1<-0.15 else "neutral"
+    except Exception:
+        pass
+    return out
+
+
+def _record_market_context(rows):
+    if not rows:
+        return
+    with market_context_lock:
+        market_context_history.extend(dict(x) for x in rows)
+
+
+def _market_context_snapshot(run_id=None):
+    with market_context_lock:
+        rows=[dict(x) for x in market_context_history]
+    return [x for x in rows if run_id is None or x.get("run_id")==run_id]
+
+
+def _summarize_market_context(rows):
+    rows=[dict(x) for x in (rows or [])]
+    analyzed=len(rows)
+    decision_rows=[x for x in rows if str(x.get("decision") or "").upper() in {"BUY","SELL"}]
+    decision_count=len(decision_rows)
+    bull=sum(1 for x in decision_rows if str(x.get("decision") or "").upper()=="BUY")
+    bear=sum(1 for x in decision_rows if str(x.get("decision") or "").upper()=="SELL")
+    neutral=max(0, decision_count-bull-bear)
+    def med(key):
+        vals=[float(x[key]) for x in rows if x.get(key) is not None]
+        return float(np.median(vals)) if vals else None
+    breadth=(bull-bear)/decision_count if decision_count else 0.0
+    eff=med("efficiency_4h") or 0.0
+    rr=med("range_expansion_ratio") or 1.0
+    avg_rv=float(np.mean([float(x["relative_volume"]) for x in rows if x.get("relative_volume") is not None])) if any(x.get("relative_volume") is not None for x in rows) else None
+    med_r1=med("price_1h_pct")
+    med_r4=med("price_4h_pct")
+    if analyzed==0:
+        regime="unknown"
+    elif abs(breadth)>=0.35 and eff>=0.45 and decision_count>0:
+        regime="bullish expansion" if breadth>0 else "bearish expansion"
+    elif abs(breadth)<=0.15 and eff<=0.35:
+        regime="range/compression"
+    elif abs(breadth)>=0.20 and decision_count>0:
+        regime="bullish trend" if breadth>0 else "bearish trend"
+    else:
+        regime="transition"
+    btc=[x for x in rows if str(x.get("symbol"))=="BTCUSDT"]
+    btc1=btc[0].get("price_1h_pct") if btc else None
+    btc4=btc[0].get("price_4h_pct") if btc else None
+    return {"market_regime":regime,"bullish_breadth_pct":100*bull/decision_count if decision_count else None,"bearish_breadth_pct":100*bear/decision_count if decision_count else None,"neutral_breadth_pct":100*neutral/decision_count if decision_count else None,"breadth_score":breadth,"median_price_1h_pct":med_r1,"median_price_4h_pct":med_r4,"median_efficiency_4h":eff,"median_range_expansion_ratio":rr,"avg_relative_volume":avg_rv,"btc_price_1h_pct":btc1,"btc_price_4h_pct":btc4,"analyzed_symbols":analyzed}
+
+def _record_trail_event(sym, pos, update, old_sl, new_sl, status="APPLIED", error=None):
+    global trail_event_sequence
+    if old_sl is None or new_sl is None: return None
+    try:
+        sig=pos.get("signal",{}); entry=float(pos.get("entry") or sig.get("entry") or 0); initial_sl=float(pos.get("initial_sl") or sig.get("initial_sl") or old_sl); risk=abs(entry-initial_sl)
+        side=str(sig.get("decision") or "BUY").upper(); price=float(pos.get("current_price") or pos.get("price") or entry)
+        current_r=(((price-entry)/risk) if side=="BUY" else ((entry-price)/risk)) if risk else 0.0
+        mfe=float(pos.get("mfe_r",0) or 0); mae=float(pos.get("mae_r",0) or 0); give=max(0.0,mfe-current_r); gr=(give/mfe) if mfe>0 else 0.0
+        atr=float(sig.get("atr") or 0); protected=(((float(new_sl)-entry)/risk) if side=="BUY" else ((entry-float(new_sl))/risk)) if risk else 0.0
+        reasons=update.get("reason",[]) if isinstance(update,dict) else []
+        if isinstance(reasons,str): reasons=[reasons]
+        now=time.time(); event={
+            "event_id":None,"trade_uid":pos.get("trade_uid"),"run_id":research_run_id,"event_time":now,"symbol":sym,"decision":side,
+            "entry":entry,"initial_sl":initial_sl,"old_sl":float(old_sl),"new_sl":float(new_sl),"tp":sig.get("tp"),"current_price":price,
+            "current_r":current_r,"mfe_r":mfe,"mae_r":mae,"giveback_r":give,"giveback_ratio":gr,"protected_r":protected,
+            "atr":atr,"sl_distance_atr":(abs(price-float(new_sl))/atr if atr>0 else None),
+            "weakness_score":update.get("weakness_score") if isinstance(update,dict) else None,"state":update.get("state","TRAIL") if isinstance(update,dict) else "TRAIL",
+            "trade_phase":update.get("trade_phase") if isinstance(update,dict) else pos.get("trade_phase"),
+            "trail_source":(update.get("trail_source") or update.get("source") or "adaptive") if isinstance(update,dict) else "adaptive",
+            "reasons":" | ".join(str(x) for x in reasons[:10]),"relative_volume":update.get("relative_volume") if isinstance(update,dict) else None,
+            "candidate_type":update.get("candidate_type") if isinstance(update,dict) else None,"status":status,
+            "error_code":None,"error_message":str(error)[:400] if error else "","time_since_entry_sec":max(0.0,now-float(pos.get("entry_time") or now)),
+            "time_since_previous_trail_sec":None,"distance_to_tp_r":None}
+        if sig.get("tp") is not None and risk:
+            tp_r=(((float(sig["tp"])-entry)/risk) if side=="BUY" else ((entry-float(sig["tp"]))/risk)); event["distance_to_tp_r"]=tp_r-current_r
+        with trail_events_lock:
+            trail_event_sequence+=1; event["event_id"]=trail_event_sequence
+            prev=next((x for x in reversed(trail_events) if x.get("trade_uid")==pos.get("trade_uid") and x.get("symbol")==sym),None)
+            if prev: event["time_since_previous_trail_sec"]=max(0.0,now-float(prev.get("event_time") or now))
+            trail_events.append(event)
+        pos["trail_update_count"]=int(pos.get("trail_update_count",0))+1
+        pos["trail_applied_count"]=int(pos.get("trail_applied_count",0))+(status=="APPLIED")
+        pos["trail_failed_count"]=int(pos.get("trail_failed_count",0))+(status=="FAILED")
+        pos["trail_queued_count"]=int(pos.get("trail_queued_count",0))+(status=="QUEUED")
+        if pos.get("first_trail_r") is None: pos["first_trail_r"]=current_r
+        pos["last_trail_r"]=current_r; pos["max_protected_r"]=max(float(pos.get("max_protected_r",-999)),protected)
+        return event
+    except Exception as e:
+        log.debug(f"[trail-observe] {sym}: {e}"); return None
+
+FAPI = "https://fapi.binance.com"
+BINANCE_WS_URL = "wss://fstream.binance.com/ws"
+
+# ── Flask ─────────────────────────────────────
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    with stat_lock:
+        t=stats["total"]; tp=stats["tp"]; sl=stats["sl"]; trail=stats.get("trail",0)
+    with ban_lock:
+        n_banned = len(banned_coins)
+    wins = tp + trail
+    wr=f"{wins/(wins+sl)*100:.1f}%" if (wins+sl)>0 else "–"
+    ws_state = "REST (WS fallback siaga)" if ws_feed.is_fresh() else "REST (WS fallback belum siap)"
+    return (f"<h3>SMC Signal Broadcaster</h3>"
+            f"<p>Auto:{auto_mode} | Banned:{n_banned} | Data:{ws_state}</p>"
+            f"<p>Total:{t} TP:{tp} SL:{sl} Trail:{trail} WR:{wr}</p>"), 200
+
+@app.route("/health")
+@app.route("/healthz")
+def health():
+    # Endpoint ini sengaja TIDAK memanggil Binance/API eksternal.
+    # Aman dipakai Render/uptime monitor untuk menjaga service tetap hidup.
+    with _telegram_state_lock:
+        tg_ok = _telegram_polling_alive
+        tg_last = _telegram_last_success_at
+    with _binance_pause_lock:
+        paused = _binance_scan_paused or _binance_recovering
+    body = {
+        "status": "ok",
+        "telegram_polling": bool(tg_ok),
+        "telegram_last_success_age": (round(time.time()-tg_last, 1) if tg_last else None),
+        "binance_scan_paused": bool(paused),
+        "timestamp": time.time(),
+    }
+    return body, 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    log.info(f"[flask] binding port {port} ...")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+
+# ═════════════════════════════════════════════
+# TELEGRAM
+# ═════════════════════════════════════════════
+def _tg_plain_fallback(text):
+    """Strip HTML markup for a guaranteed-safe Telegram fallback message."""
+    try:
+        # The normal path keeps rich HTML. This path is used only after Telegram
+        # rejects the markup, so sacrificing formatting is preferable to losing
+        # the operational message entirely.
+        plain = re.sub(r"<[^>]*>", "", str(text))
+        plain = html.unescape(plain)
+        return plain
+    except Exception:
+        return str(text)
+
+
+def tg_send(chat_id, text):
+    """Send Telegram HTML safely, retrying rejected HTML once as plain text."""
+    if not chat_id or not TELEGRAM_TOKEN:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        r = requests.post(
+            url,
+            json={"chat_id":chat_id,"text":str(text),"parse_mode":"HTML"},
+            timeout=10)
+        if r.status_code < 400:
+            return True
+
+        body = r.text[:500]
+        # Telegram 400s caused by malformed HTML must never become an operational
+        # failure. Retry exactly once without parse_mode. Do not retry arbitrary
+        # HTTP failures because that could amplify rate-limit/network problems.
+        if r.status_code == 400 and "can't parse entities" in body.lower():
+            fallback = _tg_plain_fallback(text)
+            try:
+                rr = requests.post(
+                    url,
+                    json={"chat_id":chat_id,"text":fallback},
+                    timeout=10)
+                if rr.status_code < 400:
+                    log.warning("[TG/sendMessage] HTML rejected; delivered plain-text fallback")
+                    return True
+                log.warning(f"[TG/sendMessage] HTML rejected and fallback failed: HTTP {rr.status_code}: {rr.text[:300]}")
+                return False
+            except Exception as e:
+                log.error(f"[TG/sendMessage] fallback error: {e}")
+                return False
+
+        log.warning(f"[TG/sendMessage] HTTP {r.status_code}: {body[:300]}")
+        return False
+    except Exception as e:
+        log.error(f"[TG/sendMessage] {e}")
+        return False
+
+# ============================================================
+# TAMBAHAN BARU (START) — Helper kirim file ke Telegram
+# ============================================================
+def tg_send_document(chat_id, file_path, caption=""):
+    """Kirim file ke Telegram."""
+    if not chat_id or not TELEGRAM_TOKEN:
+        return
+    try:
+        with open(file_path, "rb") as f:
+            files = {"document": f}
+            data = {"chat_id": chat_id, "caption": caption}
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+                files=files, data=data, timeout=30
             )
-        if d1 is not None and len(d1) >= 10:
-            LD = d1.iloc[-1]
-            shd, sld = swing_pts(d1, lb=3)
-            sd1 = _market_structure(d1, shd, sld)
-            bull_d1 = sd1 == "bullish" or (LD["ema9"] > LD["ema21"] > LD["ema50"])
-            bear_d1 = sd1 == "bearish" or (LD["ema9"] < LD["ema21"] < LD["ema50"])
-            if bull_d1:
-                d1_bias = "bullish"
-            elif bear_d1:
-                d1_bias = "bearish"
+    except Exception as e:
+        log.error(f"[TG doc] {e}")
+# ============================================================
+# TAMBAHAN BARU (END)
+# ============================================================
+
+
+# ============================================================
+# TAMBAHAN BARU (START) — GitHub API untuk /ganti
+# ============================================================
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+REPO_NAME = os.getenv("REPO_NAME")  # format: "username/repo"
+
+def _commit_to_github(content, path="strategy_logic.py", commit_msg="Update strategy_logic via Telegram /ganti"):
+    """Commit file ke GitHub menggunakan API."""
+    if not GITHUB_TOKEN or not REPO_NAME:
+        raise ValueError("GITHUB_TOKEN atau REPO_NAME tidak diset di environment.")
+    
+    url = f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    
+    # 1. Get current SHA (untuk update)
+    sha = None
+    try:
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            sha = resp.json().get("sha")
+    except Exception:
+        pass
+    
+    # 2. Commit baru
+    import base64
+    data = {
+        "message": commit_msg,
+        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+        "branch": "main"
+    }
+    if sha:
+        data["sha"] = sha
+    
+    resp = requests.put(url, headers=headers, json=data)
+    if resp.status_code not in (200, 201):
+        raise ValueError(f"GitHub commit gagal: {resp.status_code} {resp.text}")
+    
+    return True
+# ============================================================
+# TAMBAHAN BARU (END)
+# ============================================================
+
+# ── TELEGRAM POLLING STATE ───────────────────────────────────────────────
+_telegram_state_lock = threading.Lock()
+_telegram_polling_alive = False
+_telegram_last_success_at = 0.0
+_telegram_last_error_at = 0.0
+_telegram_last_conflict_alert_at = 0.0
+
+class TelegramPollingConflict(ConnectionError):
+    """Telegram 409: webhook/instance lain bentrok dengan getUpdates."""
+
+
+def _telegram_mark_success():
+    global _telegram_polling_alive, _telegram_last_success_at
+    with _telegram_state_lock:
+        _telegram_polling_alive = True
+        _telegram_last_success_at = time.time()
+
+
+def _telegram_mark_error():
+    global _telegram_polling_alive, _telegram_last_error_at
+    with _telegram_state_lock:
+        _telegram_polling_alive = False
+        _telegram_last_error_at = time.time()
+
+
+def _telegram_bootstrap():
+    """Pastikan token memakai long polling, bukan webhook lama yang tertinggal."""
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo",
+            timeout=10)
+        d = r.json()
+        if not d.get("ok"):
+            log.warning(f"[TG] getWebhookInfo gagal: {d}")
+            return
+        info = d.get("result", {})
+        url = info.get("url") or ""
+        if url:
+            log.warning(f"[TG] Webhook aktif ({url}) — hapus agar long polling tidak 409.")
+            rr = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
+                params={"drop_pending_updates": False}, timeout=10)
+            rd = rr.json()
+            if rd.get("ok"):
+                log.info("[TG] Webhook lama dihapus; long polling siap.")
+            else:
+                log.error(f"[TG] deleteWebhook gagal: {rd}")
+    except Exception as e:
+        log.warning(f"[TG] bootstrap error: {e}")
+
+
+def tg_updates(offset=None):
+    """Long poll Telegram dengan error visibility + backoff signal.
+
+    Tidak pernah mengembalikan [] secara diam-diam saat HTTP/JSON gagal, karena
+    itu membuat bot terlihat hidup padahal command tidak diterima.
+    """
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+            params={"timeout": TELEGRAM_LONGPOLL_TIMEOUT, "offset": offset},
+            timeout=TELEGRAM_HTTP_TIMEOUT)
+        if r.status_code == 409:
+            _telegram_mark_error()
+            raise TelegramPollingConflict(
+                "Telegram 409 Conflict: ada webhook atau instance bot lain yang memakai token ini.")
+        if r.status_code == 429:
+            _telegram_mark_error()
+            try:
+                d = r.json(); retry_after = int((d.get("parameters") or {}).get("retry_after", 5))
+            except Exception:
+                retry_after = 5
+            raise ConnectionError(f"Telegram rate limit 429; retry_after={retry_after}s")
+        if r.status_code >= 500:
+            _telegram_mark_error()
+            raise ConnectionError(f"Telegram server HTTP {r.status_code}")
+        r.raise_for_status()
+        d = r.json()
+        if not d.get("ok"):
+            _telegram_mark_error()
+            raise ConnectionError(f"Telegram getUpdates error: {d}")
+        _telegram_mark_success()
+        return d.get("result", [])
+    except TelegramPollingConflict:
+        raise
+    except Exception as e:
+        _telegram_mark_error()
+        log.warning(f"[TG/getUpdates] {e}")
+        raise
+
+
+# ═════════════════════════════════════════════
+# DATA LAYER — REST sebagai sumber UTAMA, WS cuma fallback TERAKHIR
+#   Tier 1: Binance Futures REST        (sumber utama)
+#   Tier 2: Bybit REST                  (kalau Binance REST error/kena
+#           limit/ban — lihat fapi_get(): begitu Binance balas 418/429,
+#           retry ke Binance langsung dihentikan, tidak ditunggu2)
+#   Tier 3: Binance Futures WebSocket   (fallback TERAKHIR, dipakai hanya
+#           kalau Tier 1 & Tier 2 dua-duanya gagal. WS tetap disubscribe
+#           & di-backfill terus di background — lihat ensure_symbol_
+#           interval() — supaya buffernya SIAP dipakai sewaktu-waktu,
+#           tapi TIDAK dijadikan sumber utama krn koneksinya sering
+#           putus-nyambung di lingkungan hosting ini)
+#   Tier 4: CoinGecko REST — DARURAT, HARGA SAJA, hanya koin-koin di
+#           COINGECKO_ID_MAP. TIDAK dipakai untuk klines: granularitas
+#           candle CoinGecko (30m/4h/4hari tergantung rentang) tidak
+#           cocok dengan kebutuhan M1/M15/H1/D1 presisi bot ini — kalau
+#           dipaksakan, sinyal SMC yang butuh candle presisi (BOS/CHoCH/
+#           swing point) bisa salah baca. Kalau semua REST+WS gagal
+#           total, get_klines() balikin DataFrame kosong (sama seperti
+#           perilaku lama) alih-alih pura-pura pakai data CoinGecko yang
+#           tidak akurat.
+# ═════════════════════════════════════════════
+BYBIT = "https://api.bybit.com"
+
+# Konversi interval Binance → Bybit
+INTERVAL_MAP = {
+    "1m":"1","3m":"3","5m":"5","15m":"15","30m":"30",
+    "1h":"60","2h":"120","4h":"240","1d":"D","1w":"W",
+}
+
+# Simbol Binance Futures -> id CoinGecko, HANYA koin-koin besar yang aman
+# di-mapping manual (ticker collision antar chain bikin auto-match ke
+# CoinGecko berisiko fatal — bisa ambil harga koin yang salah). Tambah
+# manual kalau perlu koin lain, JANGAN pernah generate otomatis dari nama.
+COINGECKO_ID_MAP = {
+    "BTCUSDT":"bitcoin", "ETHUSDT":"ethereum", "BNBUSDT":"binancecoin",
+    "SOLUSDT":"solana", "XRPUSDT":"ripple", "ADAUSDT":"cardano",
+    "DOGEUSDT":"dogecoin", "AVAXUSDT":"avalanche-2", "LINKUSDT":"chainlink",
+    "DOTUSDT":"polkadot", "LTCUSDT":"litecoin", "TRXUSDT":"tron",
+    "ATOMUSDT":"cosmos", "NEARUSDT":"near", "APTUSDT":"aptos",
+    "ARBUSDT":"arbitrum", "OPUSDT":"optimism", "SUIUSDT":"sui",
+    "TONUSDT":"the-open-network", "BCHUSDT":"bitcoin-cash",
+}
+
+import re
+
+# ── State ban IP Binance — DIBAGI antara fapi_get (publik) & _binance_signed
+# (private), karena ban itu per-IP, bukan per-endpoint/per-key. Begitu satu
+# sisi kena ban, sisi lain juga harus tahu & berhenti nembak, bukan lanjut
+# jalan sendiri-sendiri (itu yang bikin log kebanjiran "Skip ... HTTP 418").
+_binance_ban_lock = threading.Lock()
+_binance_banned_until = 0.0   # unix timestamp detik; 0 = tidak sedang ban
+_BINANCE_BAN_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".binance_ban_state.json")
+# Global circuit breaker: saat Binance 429/418, NEW SCAN/ENTRY berhenti.
+# WS tetap hidup untuk memantau posisi aktif.
+_binance_scan_paused = False
+_binance_pause_reason = ""
+_binance_recovering = False
+_binance_pause_lock = threading.Lock()
+# Monotonic pause generation + notification generation. A single Binance ban
+# must produce at most ONE pause notification, even when several worker threads
+# receive the same 418/429 a few milliseconds apart.
+_binance_pause_generation = 0
+_binance_pause_notice_generation = -1
+_binance_pause_notice_lock = threading.Lock()
+# Pending trail: satu state terbaru per simbol, bukan queue order lama berantai.
+_pending_trails = {}   # {symbol: {sl, tp, quantity, updated_at, reason, side}}
+_pending_trails_lock = threading.Lock()
+_pending_protections = {}  # filled position awaiting TP/SL after Binance recovery
+_pending_protections_lock = threading.Lock()
+# V6: explicit emergency/cleanup state. These states are retained in /trade until
+# Binance confirms the exchange-side truth; API errors must never silently remove them.
+_pending_cleanup = {}          # {symbol: {reason, created_at, last_error}}
+_pending_cleanup_lock = threading.Lock()
+_binance_time_offset_ms = 0
+_binance_time_sync_at = 0.0
+_binance_time_sync_lock = threading.Lock()
+BINANCE_TIME_SYNC_TTL = 60.0
+_real_trade_preflight_cache = {"at": 0.0, "position_mode": None, "can_trade": None}
+_real_trade_preflight_lock = threading.Lock()
+REAL_TRADE_PREFLIGHT_TTL = 60.0
+
+class BinanceCooldownError(ConnectionError):
+    """Tidak mengirim request Binance selama cooldown aktif."""
+
+
+class BinanceUnknownExecutionError(ConnectionError):
+    """Mutating Binance request may have reached the exchange but response is unknown.
+
+    IMPORTANT: callers must reconcile exchange state before submitting a duplicate
+    mutating request. This prevents blind duplicate entry/exit/protection orders.
+    """
+
+
+def _load_binance_ban_state():
+    global _binance_banned_until
+    try:
+        with open(_BINANCE_BAN_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        until = float(data.get("banned_until", 0.0))
+        if until > time.time():
+            _binance_banned_until = until
+            with _binance_pause_lock:
+                globals()["_binance_scan_paused"] = True
+                globals()["_binance_pause_reason"] = "persisted Binance cooldown"
+                globals()["_binance_pause_generation"] = 1
+            log.warning(f"[binance] cooldown dipulihkan: {until-time.time():.0f} detik tersisa")
     except Exception:
         pass
 
-    # ── H1 indikator ─────────────────────────────────────────────
-    ema_h1_bull = L1["ema9"] > L1["ema21"] > L1["ema50"]
-    ema_h1_bear = L1["ema9"] < L1["ema21"] < L1["ema50"]
-    choch_h1 = detect_choch(h1, sh1, sl1)
-    bos_h1 = detect_bos(h1, sh1, sl1)
 
-    # ── M15 indikator ─────────────────────────────────────────────
-    choch_m15 = detect_choch(m15, sh15, sl15)
-    bos_m15 = detect_bos(m15, sh15, sl15)
-    cisd_m15 = detect_cisd(m15, lb=8)
-    liq_bull = detect_liquidity_sweep(m15, sh15, sl15, "bull")
-    liq_bear = detect_liquidity_sweep(m15, sh15, sl15, "bear")
-    fr_m15 = detect_failed_retest(m15, sh15, sl15, atr)
-
-    # ── Fibonacci M15 context ─────────────────────────────────────
-    fib_sh = float(m15["high"].iloc[sh15[-1]]) if sh15 else None
-    fib_sl = float(m15["low"].iloc[sl15[-1]]) if sl15 else None
-    fib_r = fib_position(float(L15["close"]), fib_sl or 0, fib_sh or 1) \
-            if (fib_sh and fib_sl) else 0.5
-
-    ote_bull = is_in_ote(float(L15["close"]), fib_sl or 0, fib_sh or 1, "bull") if (fib_sh and fib_sl) else False
-    ote_bear = is_in_ote(float(L15["close"]), fib_sl or 0, fib_sh or 1, "bear") if (fib_sh and fib_sl) else False
-
-    in_discount = fib_r < 0.45
-    in_premium = fib_r > 0.55
-
-    rdiv_bull = detect_rsi_divergence(m15, "bull", lb=30)
-    rdiv_bear = detect_rsi_divergence(m15, "bear", lb=30)
-
-    # ── Inducement dan konfirmasi entry ────────────────────────────
-    induce_bull = detect_inducement(m15, "bull")
-    induce_bear = detect_inducement(m15, "bear")
-    confirm_bull = detect_entry_confirmation(m15, "bull", atr)
-    confirm_bear = detect_entry_confirmation(m15, "bear", atr)
-
-    # ── Score BULL ───────────────────────────────────────────────
-    bull = 0
-    if d1_bias == "bullish":                    bull += 20
-    if struct_h1 == "bullish":                  bull += 20
-    elif struct_h1 == "ranging":                bull += 5
-    if choch_h1["bullish_choch"]:               bull += 10
-    if bos_h1["bullish_bos"]:                   bull += 5
-    if ema_h1_bull:                             bull += 10
-    if choch_m15["bullish_choch"]:              bull += 20
-    if bos_m15["bullish_bos"]:                  bull += 10
-    if cisd_m15["bullish_cisd"]:                bull += 15
-    if liq_bull["type"] == "sweep":             bull += 15
-    if ote_bull:                                bull += 10
-    if in_discount:                             bull += 10
-    if rdiv_bull.get("bull_div"):
-        bull += 10 + (5 if rdiv_bull.get("strong") else 0)
-    if fr_m15["failed_retest_buy"]:             bull += 10
-    if induce_bull.get("swept"):                bull += 8
-
-    # ── Score BEAR ───────────────────────────────────────────────
-    bear = 0
-    if d1_bias == "bearish":                    bear += 20
-    if struct_h1 == "bearish":                  bear += 20
-    elif struct_h1 == "ranging":                bear += 5
-    if choch_h1["bearish_choch"]:               bear += 10
-    if bos_h1["bearish_bos"]:                   bear += 5
-    if ema_h1_bear:                             bear += 10
-    if choch_m15["bearish_choch"]:              bear += 20
-    if bos_m15["bearish_bos"]:                  bear += 10
-    if cisd_m15["bearish_cisd"]:                bear += 15
-    if liq_bear["type"] == "sweep":             bear += 15
-    if ote_bear:                                bear += 10
-    if in_premium:                              bear += 10
-    if rdiv_bear.get("bear_div"):
-        bear += 10 + (5 if rdiv_bear.get("strong") else 0)
-    if fr_m15["failed_retest_sell"]:            bear += 10
-    if induce_bear.get("swept"):                bear += 8
-
-    # ── Macro bias (BTC H1) — konteks tambahan, bukan pengganti HTF koin ──
-    macro_bias = _macro_bias(df_btc_h1)
-    if macro_bias == "bullish":
-        bull += MACRO_ALIGN_BONUS
-        bear = int(bear * MACRO_AGAINST_MULT)
-    elif macro_bias == "bearish":
-        bear += MACRO_ALIGN_BONUS
-        bull = int(bull * MACRO_AGAINST_MULT)
-    # macro_bias == "ranging"/"unknown" → tidak ada perubahan sama sekali
-
-    # ── HTF direction gate ─────────────────────────────────────────
-    # D1 dan H1 bukan lagi bonus independen yang bisa dikalahkan oleh RSI,
-    # OTE, atau sweep. Jika keduanya berlawanan, market sedang tidak memiliki
-    # bias yang cukup jelas untuk limit order baru; tunggu alignment berikutnya.
-    h1_bias = "bullish" if struct_h1 == "bullish" else (
-        "bearish" if struct_h1 == "bearish" else "neutral"
-    )
-    if d1_bias in ("bullish", "bearish") and h1_bias in ("bullish", "bearish"):
-        htf_bias = d1_bias if d1_bias == h1_bias else "conflict"
-    elif d1_bias in ("bullish", "bearish"):
-        htf_bias = d1_bias
-    elif h1_bias in ("bullish", "bearish"):
-        htf_bias = h1_bias
-    else:
-        htf_bias = "neutral"
-
-    if htf_bias == "bullish":
-        direction = "bull"
-    elif htf_bias == "bearish":
-        direction = "bear"
-    else:
-        # Konflik/ranging bukan auto-reject. Pilih sisi dengan confluence
-        # terbesar dan biarkan confidence yang menghukum setup yang lemah.
-        direction = "bull" if bull >= bear else "bear"
-    raw = bull if direction == "bull" else bear
-    # ── FIX BUG KRITIS (scan 50 koin selalu "Tidak ada setup valid") ──
-    # MAX_SCORE=173 lama = jumlah SEMUA bonus sekaligus (D1+H1+ChoCH+BOS+
-    # EMA+M15 ChoCH+BOS+CISD+Liquidity+OTE+Fib+RSIdiv+failed_retest+
-    # inducement, semua di arah yang sama). Dites empiris lewat 300
-    # skenario pasar acak (termasuk tren paling bersih): skor mentah
-    # MAKSIMUM yang pernah tercapai cuma ~88, rata-rata ~40, p99 ~75 —
-    # skala 173 bikin confidence yang ditampilkan jauh lebih rendah dari
-    # kualitas setup sebenarnya (bahkan setup terbaik pun mentok ~50%).
-    # Direkalibrasi ke 100 (dekat batas atas realistis) supaya angka
-    # confidence yang tampil BERARTI sesuatu — setup kuat bisa mendekati
-    # 80-90%, bukan mentok di 50%.
-    MAX_SCORE = 100
-    confidence = min(int(raw / MAX_SCORE * 100), 99)
-    if htf_bias == "conflict":
-        confidence = max(0, confidence - 12)
-    elif htf_bias == "neutral":
-        confidence = max(0, confidence - 5)
-
-    # Direction quality is separate from the absolute score.  A high score
-    # assembled from unrelated bonuses is not enough when H1 and M15 disagree.
-    edge = abs(bull - bear)
-    m15_struct = _market_structure(m15, sh15, sl15)
-    selected_choch = choch_m15["bullish_choch"] if direction == "bull" else choch_m15["bearish_choch"]
-    selected_bos = bos_m15["bullish_bos"] if direction == "bull" else bos_m15["bearish_bos"]
-    selected_cisd = cisd_m15["bullish_cisd"] if direction == "bull" else cisd_m15["bearish_cisd"]
-    selected_confirm = (
-        confirm_bull if direction == "bull" else confirm_bear
-    )
-    selected_sweep = (
-        liq_bull if direction == "bull" else liq_bear
-    ).get("type") == "sweep"
-    # Sweep hanya lokasi liquidity, bukan bukti arah. Trigger utama harus
-    # berupa structure/displacement yang terjadi pada candle terbaru.
-    trigger_count = sum(bool(x) for x in (
-        selected_choch, selected_bos, selected_cisd,
-        selected_confirm.get("confirmed"),
-    ))
-
-    return {
-        "direction": direction,
-        "confidence": confidence,
-        "bull_score": bull,
-        "bear_score": bear,
-        "direction_edge": edge,
-        "m15_struct": m15_struct,
-        "trigger_count": trigger_count,
-        "htf_bias": htf_bias,
-        "h1_bias": h1_bias,
-        "entry_confirmation": selected_confirm,
-        "entry_confirmation_bull": confirm_bull,
-        "entry_confirmation_bear": confirm_bear,
-        "selected_sweep": selected_sweep,
-        "price": float(L15["close"]),
-        "atr": atr,
-        "struct_h1": struct_h1,
-        "d1_bias": d1_bias,
-        "macro_bias": macro_bias,
-        "choch_m15": choch_m15,
-        "choch_h1": choch_h1,
-        "cisd_m15": cisd_m15,
-        "bos_m15": bos_m15,
-        "bos_h1": bos_h1,
-        "m15_rsi": float(L15["rsi"]),
-        "m15_rsi_slope": float(L15["rsi"] - m15["rsi"].iloc[-2]) if len(m15) >= 2 else 0.0,
-        "m15_relative_volume": _relative_volume(m15, 20) if len(m15) >= 23 else 1.0,
-        "m15_momentum_aligned": bool((direction == "bull" and _momentum_context(m15).get("bull")) or (direction == "bear" and _momentum_context(m15).get("bear"))),
-        "m15_divergence_against": bool((direction == "bull" and rdiv_bear.get("bear_div")) or (direction == "bear" and rdiv_bull.get("bull_div"))),
-        "failed_retest": fr_m15,
-        "liquidity_bull": liq_bull,
-        "liquidity_bear": liq_bear,
-        "inducement_bull": induce_bull,
-        "inducement_bear": induce_bear,
-        "sh15": sh15, "sl15": sl15,
-        "sh1": sh1, "sl1": sl1,
-        "fib_r": round(fib_r, 3),
-        "ote_bull": ote_bull,
-        "ote_bear": ote_bear,
-    }
-
-
-# =============================================================================
-# CONFIDENCE CALIBRATION V3.0 — TRADEABILITY
-# =============================================================================
-CONFIDENCE_MODEL_VERSION = "4.0_calibrated_ready"
-
-def _rr_band(rr: float) -> str:
-    rr = float(rr or 0.0)
-    if rr < 3.0:
-        return "2-3R"
-    if rr < 5.0:
-        return "3-5R"
-    if rr < 7.0:
-        return "5-7R"
-    if rr < 9.0:
-        return "7-9R"
-    return "9R+"
-
-
-def calibrate_confidence_from_history(history, base_score: float, decision: str,
-                                      entry_label: str, rr: float, setup_quality: float) -> tuple[int, dict]:
-    """Empirical probability calibration hook.
-
-    `history` is optional and must contain closed trades with a numeric PnL or
-    a boolean `profitable`. With fewer observations the model falls back to the
-    structural score; it never pretends that a tiny sample is a precise probability.
-    Bayesian smoothing keeps sparse buckets conservative.
-    """
+def _save_binance_ban_state(until):
     try:
-        rows = [r for r in (history or []) if isinstance(r, dict)]
-        if not rows:
-            return int(max(0, min(99, round(base_score)))), {
-                "calibration": "structural_fallback", "samples": 0,
-                "empirical_confidence": None, "calibration_weight": 0.0
-            }
-
-        rrband = _rr_band(rr)
-        direction = str(decision or "").upper()
-        label = str(entry_label or "").lower()
-        candidates = []
-        for r in rows:
-            d = str(r.get("decision", r.get("direction", ""))).upper()
-            el = str(r.get("entry_label", "")).lower()
-            rb = _rr_band(float(r.get("rr", 0) or 0))
-            profitable = r.get("profitable")
-            if profitable is None:
-                pnl = r.get("pnl", r.get("pnl_usd", r.get("net_pnl")))
-                try:
-                    profitable = float(pnl) > 0
-                except Exception:
-                    continue
-            # Hierarchical relevance: same direction + label + RR band is strongest.
-            match = 0.0
-            if d == direction: match += 0.35
-            if el == label: match += 0.30
-            if rb == rrband: match += 0.25
-            if match >= 0.35:
-                candidates.append((match, bool(profitable)))
-
-        if not candidates:
-            candidates = [(0.25, bool(r.get("profitable"))) for r in rows if "profitable" in r]
-
-        if not candidates:
-            return int(max(0, min(99, round(base_score)))), {
-                "calibration": "structural_fallback", "samples": 0,
-                "empirical_confidence": None, "calibration_weight": 0.0
-            }
-
-        # Weighted Beta posterior. Prior is intentionally neutral, not a claim of
-        # 60% win probability. More observations are required before it dominates.
-        alpha = beta = 2.0
-        weighted_n = 0.0
-        for w, win in candidates:
-            alpha += w if win else 0.0
-            beta += 0.0 if win else w
-            weighted_n += w
-        empirical = 100.0 * alpha / max(alpha + beta, 1e-9)
-        weight = min(0.70, weighted_n / 40.0)
-        calibrated = (1.0 - weight) * float(base_score) + weight * empirical
-        calibrated = max(0, min(99, int(round(calibrated))))
-        return calibrated, {
-            "calibration": "empirical_bayesian",
-            "samples": len(candidates),
-            "weighted_samples": round(weighted_n, 2),
-            "empirical_confidence": round(empirical, 2),
-            "calibration_weight": round(weight, 3),
-            "rr_band": rrband,
-            "direction": direction,
-            "entry_label": label,
-        }
-    except Exception:
-        return int(max(0, min(99, round(base_score)))), {
-            "calibration": "structural_fallback_error", "samples": 0,
-            "empirical_confidence": None, "calibration_weight": 0.0
-        }
-
-
-def _confidence_band(conf: int) -> str:
-    if conf >= 85:
-        return "ELITE"
-    if conf >= 75:
-        return "VERY_STRONG"
-    if conf >= 65:
-        return "STRONG"
-    if conf >= 55:
-        return "NORMAL"
-    if conf >= 45:
-        return "WEAK"
-    return "VERY_WEAK"
-
-
-def _calibrate_confidence(base_confidence: int, score_ctx: dict, loc: dict,
-                          candidate: dict, rr: float, htf_poi: list,
-                          poi_reacted: bool, tp_diag: Optional[dict] = None) -> tuple[int, int, dict]:
-    """Confidence V3.0 = tradeability, not raw confluence count.
-
-    Direction establishes the thesis, but entry location and current-move health
-    have larger influence on the final number. RR is payoff, not probability.
-    """
-    direction = score_ctx.get("direction", "bull")
-    htf_bias = score_ctx.get("htf_bias", "neutral")
-    m15_struct = score_ctx.get("m15_struct", "ranging")
-    h1_bias = score_ctx.get("h1_bias", "neutral")
-    trigger_count = int(score_ctx.get("trigger_count", 0) or 0)
-    selected_confirm = score_ctx.get("entry_confirmation", {}) or {}
-    selected_sweep = bool(score_ctx.get("selected_sweep"))
-    loc_score = int(loc.get("location_score", 50) or 50)
-    candidate_score = float(candidate.get("score", 0) or 0)
-    entry_label = str(candidate.get("label", ""))
-
-    # 1) DIRECTION / STRUCTURAL THESIS: 0-25
-    direction_q = 0.0
-    if h1_bias == ("bullish" if direction == "bull" else "bearish"):
-        direction_q += 10
-    elif h1_bias == "neutral":
-        direction_q += 6
-    if htf_bias == ("bullish" if direction == "bull" else "bearish"):
-        direction_q += 9
-    elif htf_bias == "neutral":
-        direction_q += 5
-    elif htf_bias == "conflict":
-        direction_q -= 4
-    if m15_struct == ("bullish" if direction == "bull" else "bearish"):
-        direction_q += 6
-    elif m15_struct == "ranging":
-        direction_q += 3
-    direction_q = max(0.0, min(25.0, direction_q))
-
-    # 2) ENTRY QUALITY: 0-30 -- deliberately larger than raw direction.
-    entry_q = 0.0
-    entry_q += max(0.0, min(18.0, (loc_score - 30) * 0.38))
-    if htf_poi:
-        entry_q += 3.0
-    if poi_reacted:
-        entry_q += 4.0
-    if entry_label in ("ob", "ob_retest"):
-        entry_q += 2.0
-    elif entry_label in ("fvg", "fvg_retest"):
-        entry_q += 1.5
-    # Chase / bad location penalties.
-    if loc_score < 45:
-        entry_q -= 4
-    if loc.get("location_state") in {"chase", "bad_location", "premium_chase", "discount_chase"}:
-        entry_q -= 4
-    entry_q = max(0.0, min(30.0, entry_q))
-
-    # 3) CURRENT MOVE HEALTH: 0-25
-    move_q = 12.0
-    rsi_val = float(loc.get("rsi", score_ctx.get("m15_rsi", 50.0)) or 50.0)
-    rv = float(score_ctx.get("m15_relative_volume", 1.0) or 1.0)
-    rsi_timing = str(loc.get("rsi_timing", "unknown"))
-    rsi_slope = float(loc.get("rsi_slope", score_ctx.get("m15_rsi_slope", 0.0)) or 0.0)
-    momentum_aligned = bool(score_ctx.get("m15_momentum_aligned", False))
-    divergence = bool(score_ctx.get("m15_divergence_against", False))
-
-    if momentum_aligned:
-        move_q += 6
-    if rv >= 1.30 and momentum_aligned:
-        move_q += 3
-    elif rv < 0.70 and rr >= 2.0:
-        move_q -= 2
-    if divergence:
-        move_q -= 5
-    if direction == "bull" and rsi_val >= 72:
-        move_q -= 4
-    elif direction == "bear" and rsi_val <= 28:
-        move_q -= 4
-    if rsi_timing in {"rising", "falling", "favorable"}:
-        move_q += 1
-    if direction == "bull" and rsi_slope < -1.5:
-        move_q -= 2
-    if direction == "bear" and rsi_slope > 1.5:
-        move_q -= 2
-    move_q = max(0.0, min(25.0, move_q))
-
-    # 4) TRIGGER / CONFIRMATION: 0-10
-    trigger_q = min(10.0, 2.0 + min(trigger_count, 3) * 1.5)
-    if selected_confirm.get("confirmed"):
-        trigger_q += 2.0
-    if selected_sweep:
-        trigger_q += 0.5
-    trigger_q = max(0.0, min(10.0, trigger_q))
-
-    # 5) TARGET / PAYOFF QUALITY: 0-10. RR is not treated as win probability.
-    target_q = 4.0
-    selected = (tp_diag or {}).get("selected") if isinstance(tp_diag, dict) else None
-    if selected:
-        reach = float(selected.get("reachability_proxy", 0.0) or 0.0)
-        path = float(selected.get("path_clear", 0.0) or 0.0)
-        tq = float(selected.get("target_quality", 0.0) or 0.0)
-        target_q = min(10.0, 2.0 + 3.0 * reach + 2.0 * path + 3.0 * tq)
-    elif rr >= 2.0:
-        target_q = 5.0
-    target_q = max(0.0, min(10.0, target_q))
-
-    # Research prior: OB was materially healthier than FVG/EQ in the supplied
-    # ledger, while SELL was weaker. These are soft penalties only; they are not
-    # hard filters and must be re-calibrated once a larger history is available.
-    if entry_label in ("fvg", "fvg_retest"):
-        entry_q -= 1.5
-    elif entry_label in ("eq", "equal", "equal_high", "equal_low"):
-        entry_q -= 3.0
-    if direction == "bear":
-        direction_q -= 2.0
-    entry_q = max(0.0, min(30.0, entry_q))
-    direction_q = max(0.0, min(25.0, direction_q))
-
-    # Direction should matter, but cannot dominate. This is the key change that
-    # addresses high-confidence SLs caused by strong HTF structure + poor timing.
-    calibrated = int(round(
-        0.25 * (base_confidence)
-        + 0.30 * (direction_q + 10 * 0)
-        + 0.30 * (entry_q / 30.0 * 100.0)
-        + 0.15 * ((move_q + trigger_q + target_q) / 45.0 * 100.0)
-    ))
-
-    # Harder contradiction penalties are still soft, so frequency does not collapse.
-    if htf_bias == "conflict":
-        calibrated -= 7
-    if m15_struct not in (("bullish" if direction == "bull" else "bearish"), "ranging"):
-        calibrated -= 4
-    if loc_score < 40:
-        calibrated -= 5
-    if divergence and (direction == "bull" and rsi_val >= 70 or direction == "bear" and rsi_val <= 30):
-        calibrated -= 3
-
-    calibrated = max(0, min(99, calibrated))
-    setup_quality = int(round(0.20 * direction_q + 0.40 * entry_q + 0.25 * move_q + 0.10 * trigger_q + 0.05 * target_q))
-    diagnostics = {
-        "model_version": CONFIDENCE_MODEL_VERSION,
-        "direction_component": int(base_confidence),
-        "direction_quality": int(round(direction_q)),
-        "entry_quality": int(round(entry_q)),
-        "move_health": int(round(move_q)),
-        "trigger_quality": int(round(trigger_q)),
-        "target_quality": int(round(target_q)),
-        "setup_quality": max(0, min(100, setup_quality)),
-        "rr_band": _rr_band(rr),
-        "entry_type_prior": "OB_BASELINE" if entry_label in ("ob", "ob_retest") else ("FVG_SOFT_PENALTY" if entry_label in ("fvg", "fvg_retest") else "OTHER_SOFT_PENALTY"),
-        "rsi": round(rsi_val, 1),
-        "relative_volume": round(rv, 3),
-        "divergence_against": bool(divergence),
-        "confidence_band": _confidence_band(calibrated),
-    }
-    return calibrated, max(0, min(100, setup_quality)), diagnostics
-
-
-# =============================================================================
-# ENTRY LOCATION + RSI TIMING
-# =============================================================================
-
-def _entry_location_metrics(m15: pd.DataFrame, direction: str,
-                            entry: float, atr: float) -> dict:
-    """Nilai lokasi entry relatif terhadap range M15 + timing RSI.
-
-    Prinsip CAP: arah HTF boleh benar, tetapi entry di bagian atas range saat
-    M15 sedang melemah adalah entry yang buruk. Kita tidak memaksa harga
-    masuk di titik tertentu; kita hanya memberi ranking lebih tinggi pada
-    retracement yang sehat dan memblokir chase yang jelas.
-    """
-    if m15 is None or len(m15) < 8:
-        return {
-            "location_score": 50, "location_state": "unknown",
-            "range_position": 0.5, "rsi_timing": "unknown",
-            "rsi": None, "rsi_slope": 0.0, "hard_block": False,
-            "entry_zone_low": None, "entry_zone_high": None,
-        }
-
-    n = min(ENTRY_LOCATION_LOOKBACK, len(m15))
-    sub = m15.iloc[-n:]
-    rh = float(sub["high"].max())
-    rl = float(sub["low"].min())
-    width = max(rh - rl, max(float(atr), 1e-10))
-    pos = (float(entry) - rl) / width
-    pos = max(0.0, min(1.0, pos))
-
-    rsi_now = float(m15["rsi"].iloc[-1])
-    rsi_1 = float(m15["rsi"].iloc[-2])
-    rsi_2 = float(m15["rsi"].iloc[-3])
-    slope = rsi_now - rsi_2
-    rising = slope >= RSI_TIMING_SLOPE
-    falling = slope <= -RSI_TIMING_SLOPE
-
-    # Adverse-side swing: BUY terlalu dekat high, SELL terlalu dekat low.
-    recent = m15.iloc[-8:]
-    adverse_high = float(recent["high"].max())
-    adverse_low = float(recent["low"].min())
-    if direction == "bull":
-        swing_dist_atr = (adverse_high - float(entry)) / max(float(atr), 1e-10)
-    else:
-        swing_dist_atr = (float(entry) - adverse_low) / max(float(atr), 1e-10)
-
-    score = 50
-    notes = []
-    if direction == "bull":
-        if pos <= 0.35:
-            score += 15; notes.append("deep_discount")
-        elif pos <= ENTRY_PREFERRED_BUY:
-            score += 10; notes.append("good_pullback")
-        elif pos <= 0.70:
-            score += 0; notes.append("mid_range")
-        elif pos <= ENTRY_CHASE_HIGH:
-            score -= 10; notes.append("upper_range")
-        else:
-            score -= 22; notes.append("chasing_high")
-
-        if swing_dist_atr <= ENTRY_SWING_NEAR_ATR:
-            score -= 10; notes.append("near_swing_high")
-        if 42 <= rsi_now <= 58 and rising:
-            score += 10; notes.append("rsi_recovery")
-        elif rsi_now > 68 and falling:
-            score -= 14; notes.append("rsi_exhaustion")
-        elif rsi_now < RSI_BUY_WEAK and falling and pos > ENTRY_PREFERRED_BUY:
-            score -= 18; notes.append("rsi_weak_while_high")
-        elif falling:
-            score -= 5; notes.append("rsi_falling")
-    else:
-        if pos >= 0.65:
-            score += 15; notes.append("deep_premium")
-        elif pos >= ENTRY_PREFERRED_SELL:
-            score += 10; notes.append("good_pullback")
-        elif pos >= 0.30:
-            score += 0; notes.append("mid_range")
-        elif pos >= (1.0 - ENTRY_CHASE_HIGH):
-            score -= 10; notes.append("lower_range")
-        else:
-            score -= 22; notes.append("chasing_low")
-
-        if swing_dist_atr <= ENTRY_SWING_NEAR_ATR:
-            score -= 10; notes.append("near_swing_low")
-        if 42 <= rsi_now <= 58 and falling:
-            score += 10; notes.append("rsi_recovery")
-        elif rsi_now < 32 and rising:
-            score -= 8; notes.append("rsi_bounce_against_sell")
-        elif rsi_now > RSI_SELL_WEAK and rising and pos < ENTRY_PREFERRED_SELL:
-            score -= 18; notes.append("rsi_weak_while_low")
-        elif rising:
-            score -= 5; notes.append("rsi_rising")
-
-    score = int(max(0, min(100, score)))
-    # Hard block hanya untuk lokasi yang benar-benar mengejar harga.
-    # RSI tetap menjadi penalty/confluence, bukan gate keras, supaya setup
-    # yang bagus tidak hilang hanya karena momentum belum ideal.
-    if direction == "bull":
-        hard_block = pos >= ENTRY_CHASE_HIGH
-    else:
-        hard_block = pos <= (1.0 - ENTRY_CHASE_HIGH)
-
-    # Zona entry berbasis range lokal, bukan titik matematis palsu.
-    if direction == "bull":
-        zone_low = rl
-        zone_high = rl + width * 0.60
-    else:
-        zone_low = rl + width * 0.40
-        zone_high = rh
-
-    if hard_block:
-        state = "WAIT_ENTRY"
-    elif score >= 70:
-        state = "GOOD"
-    elif score >= 50:
-        state = "ACCEPTABLE"
-    else:
-        state = "WEAK"
-
-    return {
-        "location_score": score,
-        "location_state": state,
-        "range_position": round(pos, 3),
-        "range_low": rl, "range_high": rh,
-        "entry_zone_low": zone_low, "entry_zone_high": zone_high,
-        "rsi": round(rsi_now, 2),
-        "rsi_prev": round(rsi_1, 2),
-        "rsi_slope": round(slope, 2),
-        "rsi_timing": "rising" if rising else ("falling" if falling else "flat"),
-        "swing_dist_atr": round(swing_dist_atr, 3),
-        "notes": notes,
-        "hard_block": hard_block,
-    }
-
-
-# =============================================================================
-# STEP 1 — ENTRY CANDIDATES
-# =============================================================================
-
-def _collect_entry_candidates(m15: pd.DataFrame, h1: pd.DataFrame,
-                              direction: str, current_price: float,
-                              atr: float, score_ctx: dict) -> list:
-    """
-    Kumpulkan kandidat entry berdasarkan SMC/ICT.
-    Prioritas (score tertinggi):
-      1. OB + Liquidity Sweep (12–15)
-      2. OB + ChoCH (9–12)
-      3. OB + OTE (8–10)
-      4. OB saja (5–8)
-      5. FVG + CISD + LiqSweep (6–9)
-      6. FVG saja (3–5)
-      7. Equal Highs/Lows (2–4)
-      8. Market entry fallback (1)
-    """
-    up = direction == "bull"
-    cands = []
-
-    liq = score_ctx.get("liquidity_bull" if up else "liquidity_bear", {})
-    choch = score_ctx.get("choch_m15", {})
-    cisd = score_ctx.get("cisd_m15", {})
-
-    choch_ok = choch.get("bullish_choch") if up else choch.get("bearish_choch")
-    cisd_ok = cisd.get("bullish_cisd") if up else cisd.get("bearish_cisd")
-    liq_ok = liq.get("type") == "sweep"
-
-    fib_sh = float(m15["high"].iloc[score_ctx["sh15"][-1]]) if score_ctx.get("sh15") else None
-    fib_sl = float(m15["low"].iloc[score_ctx["sl15"][-1]]) if score_ctx.get("sl15") else None
-
-    induce = score_ctx.get("inducement_bull" if up else "inducement_bear", {})
-    induce_ok = bool(induce.get("swept"))
-
-    # Zona H1 (OB + FVG searah) untuk cek konfluensi — "How to Choose the
-    # Best Order Block When All Zones Look Valid": OB M15 yang overlap
-    # dengan zona HTF lebih dipercaya daripada OB M15 berdiri sendiri.
-    htf_zones = []
-    try:
-        for z in detect_order_block(h1, direction, lb=80,
-                                    sh=score_ctx.get("sh1", []),
-                                    sl=score_ctx.get("sl1", [])):
-            htf_zones.append((z["top"], z["bot"]))
-        for f in detect_fvg(h1, direction, lb=60):
-            htf_zones.append((f["top"], f["bot"]))
-    except Exception:
-        htf_zones = []
-
-    def _htf_confluence(top: float, bot: float) -> bool:
-        return any(zones_overlap(top, bot, zt, zb) for zt, zb in htf_zones)
-
-    # ── Order Block ──────────────────────────────────────────────────
-    obs = detect_order_block(m15, direction, lb=60,
-                             sh=score_ctx.get("sh15", []),
-                             sl=score_ctx.get("sl15", []))
-    for z in obs:
-        entry_pt = float(z["top"]) if up else float(z["bot"])
-        invalid_pt = float(z["bot"]) if up else float(z["top"])
-
-        # A limit order must be a genuine retracement.  The previous 1%
-        # tolerance allowed a BUY above market or a SELL below market;
-        # Binance can fill those immediately at a different price, leaving
-        # the original SL/TP geometry invalid.
-        if up:
-            if current_price < z["bot"] or entry_pt > current_price * 1.001:
-                continue
-        else:
-            if current_price > z["top"] or entry_pt < current_price * 0.999:
-                continue
-
-        sc = 3 + z["quality"]  # base 3 + quality
-
-        if liq_ok:
-            sweep_lev = liq.get("level", 0)
-            if up and entry_pt >= float(sweep_lev) * 0.995:
-                sc += 3
-            elif not up and entry_pt <= float(sweep_lev) * 1.005:
-                sc += 3
-        if choch_ok:
-            sc += 2
-        if fib_sh and fib_sl and is_in_ote(entry_pt, fib_sl, fib_sh, direction):
-            sc += 1
-        if _htf_confluence(z["top"], z["bot"]):
-            sc += CONFLUENCE_BONUS
-        if induce_ok:
-            sc += 1
-
-        cands.append({
-            "price": round(entry_pt, 8),
-            "invalid": round(invalid_pt, 8),
-            "label": "ob",
-            "score": sc,
-        })
-
-    # ── FVG ──────────────────────────────────────────────────────────
-    fvgs = detect_fvg(m15, direction, lb=50)
-    for f in fvgs:
-        if not f["is_fresh"]:
-            continue
-        entry_pt = f["mid"]
-        invalid_pt = f["top"] if up else f["bot"]
-        if up:
-            if current_price < f["bot"] or entry_pt > current_price * 1.001:
-                continue
-        else:
-            if current_price > f["top"] or entry_pt < current_price * 0.999:
-                continue
-        sc = 3
-        if cisd_ok: sc += 2
-        if liq_ok: sc += 2
-        if choch_ok: sc += 1
-        if _htf_confluence(f["top"], f["bot"]):
-            sc += CONFLUENCE_BONUS
-        if induce_ok:
-            sc += 1
-        cands.append({
-            "price": round(entry_pt, 8),
-            "invalid": round(invalid_pt, 8),
-            "label": "fvg",
-            "score": sc,
-        })
-
-    # ── Equal Highs/Lows ─────────────────────────────────────────────
-    eqs = detect_equal_highs_lows(m15, "low" if up else "high", lb=80)
-    for eq in eqs[:2]:
-        # ── Proximity filter: EQ entry harus REACHABLE dari harga sekarang.
-        #
-        # Bug asal: tidak ada filter proximity → EQ yang harganya sudah
-        # "tersapu" (liquidity sweep) tetap masuk sebagai kandidat entry.
-        # Akibatnya SELL limit dipasang DI BAWAH harga pasar → Binance langsung
-        # fill di harga pasar (slippage besar) → actual_entry > SL → geometri
-        # rusak → auto-out terpicu.
-        #
-        # SELL (not up): entry di equal HIGH → level harus ≥ current_price
-        #   supaya SELL limit menunggu harga naik ke sana, bukan fill sekarang.
-        #   Toleransi 0.3%: jika eq < current_price * 0.997 → sudah tersapu.
-        #
-        # BUY (up): entry di equal LOW → level harus ≤ current_price
-        #   supaya BUY limit menunggu harga turun ke sana, bukan fill sekarang.
-        #   Toleransi 0.3%: jika eq > current_price * 1.003 → sudah tersapu.
-        if not up and float(eq) < current_price * 0.999:
-            continue   # EQ high sudah di bawah harga pasar → skip
-        if up and float(eq) > current_price * 1.001:
-            continue   # EQ low sudah di atas harga pasar → skip
-
-        invalid_pt = eq - atr * 0.8 if up else eq + atr * 0.8
-        sc = 2
-        if liq_ok: sc += 1
-        if induce_ok: sc += 1
-        cands.append({
-            "price": round(float(eq), 8),
-            "invalid": round(float(invalid_pt), 8),
-            "label": "eq",
-            "score": sc,
-        })
-
-    # No synthetic market entry. If no fresh/reachable POI exists, wait for
-    # price to come to a real zone.  Before ranking, evaluate LOCATION + RSI
-    # timing for every candidate so a good-direction but bad-location setup
-    # cannot become the best trade merely because its RR is attractive.
-    enriched = []
-    for c in cands:
-        loc = _entry_location_metrics(m15, direction, c["price"], atr)
-        c = dict(c)
-        c["location"] = loc
-        c["location_score"] = loc["location_score"]
-        c["location_state"] = loc["location_state"]
-        c["rsi_timing"] = loc["rsi_timing"]
-        c["hard_location_block"] = loc["hard_block"]
-        c["reject_reason"] = "CHASE_LOCATION" if loc["hard_block"] else None
-
-        # Candidate-specific quality. Location is deliberately meaningful but
-        # not dominant: structure/POI can still win, while an obvious chase is
-        # removed before SL/TP are calculated.
-        c["score"] = int(c.get("score", 0) + round((loc["location_score"] - 50) * 0.35))
-        if loc["hard_block"]:
-            continue
-        enriched.append(c)
-
-    enriched.sort(key=lambda c: (-c["score"], -c.get("location_score", 0)))
-    return enriched
-
-
-# =============================================================================
-# STEP 2 — SL STRUKTURAL (anti‑Liquidity Sweep)
-# =============================================================================
-
-def _compute_sl(m15: pd.DataFrame, h1: pd.DataFrame, direction: str,
-                entry: float, atr: float, liq_sweep: dict,
-                invalid_level: Optional[float] = None) -> Tuple[float, float]:
-    """
-    Hitung SL yang tepat secara struktural, ditempatkan sedemikian rupa
-    sehingga jika tersentuh berarti arah benar‑benar salah (bukan LS biasa).
-    Buffer anti‑Liquidity Sweep = 0.5 ATR.
-    Pilih kandidat dengan prioritas: ob_invalid > struct_h1 > ls_level > struct_m15,
-    dan di antara prioritas yang sama pilih yang LEBIH JAUH dari entry
-    (lebih tahan noise).
-    """
-    up = direction == "bull"
-    ls_buffer = atr * 0.5
-    min_risk = atr * 1.0
-    # Risk width is a QUALITY signal, not an automatic rejection. If the
-    # real structural invalidation is wide, keep that invalidation rather than
-    # moving SL inward just to manufacture a better RR. TP selection will then
-    # decide whether a genuine >=2R target exists.
-    # A very wide structural invalidation is not repaired by pulling SL inward.
-    # The caller will try another entry candidate. This is exactly the CAP lesson:
-    # a 4% stop is a property of the chosen entry, not a reason to keep the entry.
-    max_risk = min(float(atr) * 2.0, float(entry) * 0.035)
-
-    cands = []
-
-    # 1. invalid level dari OB/FVG
-    if invalid_level is not None:
-        sl_raw = invalid_level + (-ls_buffer if up else ls_buffer)
-        risk = abs(sl_raw - entry)
-        if min_risk <= risk <= max_risk:
-            cands.append(("ob_invalid", sl_raw, risk))
-
-    # 2. M15 swing (prioritas lebih rendah karena lebih rentan noise)
-    sh15, sl15 = swing_pts(m15, lb=3)
-    if up and sl15:
-        struct_low = float(m15["low"].iloc[sl15[-1]])
-        if struct_low < entry:
-            sl_raw = struct_low - ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_m15", sl_raw, risk))
-    elif not up and sh15:
-        struct_high = float(m15["high"].iloc[sh15[-1]])
-        if struct_high > entry:
-            sl_raw = struct_high + ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_m15", sl_raw, risk))
-
-    # 3. level yang disweep
-    if liq_sweep and liq_sweep.get("type") == "sweep" and liq_sweep.get("level"):
-        lev = float(liq_sweep["level"])
-        if up and lev < entry:
-            sl_raw = lev - ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("ls_level", sl_raw, risk))
-        elif not up and lev > entry:
-            sl_raw = lev + ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("ls_level", sl_raw, risk))
-
-    # 4. H1 swing (lebih lebar, lebih tahan noise)
-    sh1, sl1 = swing_pts(h1, lb=5)
-    if up and sl1:
-        h1_low = float(h1["low"].iloc[sl1[-1]])
-        if h1_low < entry:
-            sl_raw = h1_low - ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_h1", sl_raw, risk))
-    elif not up and sh1:
-        h1_high = float(h1["high"].iloc[sh1[-1]])
-        if h1_high > entry:
-            sl_raw = h1_high + ls_buffer
-            risk = abs(sl_raw - entry)
-            if min_risk <= risk <= max_risk:
-                cands.append(("struct_h1", sl_raw, risk))
-
-    if cands:
-        # Prioritas: ob_invalid (paling presisi), struct_h1 (paling tahan),
-        # ls_level, struct_m15. Dalam prioritas sama, pilih risk terbesar.
-        _PRIO = {"ob_invalid": 0, "struct_h1": 1, "ls_level": 2, "struct_m15": 3}
-        cands.sort(key=lambda x: (_PRIO.get(x[0], 9), -x[2]))
-        _, sl_price, risk = cands[0]
-        return sl_price, risk
-
-    # No compact structural invalidation. Do not manufacture an ATR stop.
-    raise ValueError("NO_COMPACT_STRUCTURAL_SL")
-
-
-# =============================================================================
-# STEP 3 — TP POOL DAN SELEKSI (dengan ekstensi jika RR < 2.0)
-# =============================================================================
-
-def _target_context(h1: pd.DataFrame, m15: pd.DataFrame, direction: str,
-                    entry: float, atr: float) -> dict:
-    """Context lokal untuk menilai apakah target yang lebih jauh masih credible."""
-    up = direction == "bull"
-    sh1, sl1 = swing_pts(h1, lb=5)
-    struct_h1 = _market_structure(h1, sh1, sl1)
-    struct_m15 = _market_structure(m15, *swing_pts(m15, lb=5)) if len(m15) >= 12 else "ranging"
-    rsi_val = float(m15["rsi"].iloc[-1]) if ("rsi" in m15.columns and len(m15)) else 50.0
-    rv = _relative_volume(m15, 20) if len(m15) >= 23 else 1.0
-    mom = _momentum_context(m15) if len(m15) >= 8 else {"bull": False, "bear": False}
-    return {
-        "h1_structure": struct_h1,
-        "m15_structure": struct_m15,
-        "rsi": rsi_val,
-        "relative_volume": rv,
-        "momentum": mom,
-        "atr": max(float(atr), 1e-12),
-        "entry": float(entry),
-        "direction": direction,
-        "sh1": sh1,
-        "sl1": sl1,
-    }
-
-
-def _build_tp_pool(h1: pd.DataFrame, m15: pd.DataFrame, direction: str,
-                   entry: float, atr: float,
-                   sh1: list, sl1: list, sh15: list, sl15: list) -> list:
-    """Build a rich target pool; selection is performed by _select_tp()."""
-    up = direction == "bull"
-    sgn = 1 if up else -1
-    pool = []
-
-    def add(value, label, tier, anchor_strength=1.0):
-        try:
-            v = float(value)
-        except Exception:
-            return
-        if sgn * (v - entry) <= atr * 0.35:
-            return
-        pool.append({
-            "value": v,
-            "label": str(label),
-            "tier": int(tier),
-            "anchor_strength": float(anchor_strength),
-        })
-
-    opp_dir = "bear" if up else "bull"
-
-    # External liquidity / opposing HTF zones.
-    for z in detect_order_block(h1, opp_dir, lb=80, sh=sh1, sl=sl1):
-        edge = float(z["bot"]) if up else float(z["top"])
-        fresh = 1.0 if z.get("quality", 0) >= 4 else 0.75
-        add(edge, "ob_h1", 1, 1.10 * fresh)
-
-    for f in detect_fvg(h1, opp_dir, lb=60):
-        add(float(f["mid"]), "fvg_h1", 2, 0.95 if f.get("is_fresh", False) else 0.75)
-
-    sw_vals = ([float(h1["high"].iloc[i]) for i in sh1]
-               if up else [float(h1["low"].iloc[i]) for i in sl1])
-    for v in sw_vals[-2:]:
-        add(v, "sw_h1", 3, 1.00)
-
-    for v in detect_equal_highs_lows(h1, "high" if up else "low", lb=100):
-        add(v, "eq_h1", 4, 1.08)
-
-    sw_all = ([float(h1["high"].iloc[i]) for i in sh1]
-              if up else [float(h1["low"].iloc[i]) for i in sl1])
-    for v in sw_all[:-2]:
-        add(v, "sw_h1_far", 5, 0.82)
-
-    # Internal liquidity is useful as a waypoint/path obstacle, but may be a
-    # weaker final target than external H1 liquidity.
-    for v in detect_equal_highs_lows(m15, "high" if up else "low", lb=80):
-        add(v, "eq_m15", 6, 0.62)
-
-    # Extensions are valid farther targets, but start with lower credibility.
-    if sh1 and sl1:
-        sh_val = float(h1["high"].iloc[sh1[-1]])
-        sl_val = float(h1["low"].iloc[sl1[-1]])
-        leg = sh_val - sl_val
-        if leg > atr * 0.8:
-            for ext, lbl, tier, strength in [
-                (FIB_EXT_1, "fib127", 7, 0.58),
-                (FIB_EXT_2, "fib162", 7, 0.48),
-                (1.0, "fib200", 8, 0.38),
-                (1.414, "fib241", 8, 0.30),
-            ]:
-                tp_v = (sh_val + leg * ext) if up else (sl_val - leg * ext)
-                add(tp_v, lbl, tier, strength)
-
-    # De-duplicate very close targets; preserve the strongest anchor.
-    pool.sort(key=lambda x: (x["value"], x["tier"]))
-    dedup = []
-    for item in pool:
-        if dedup:
-            last = dedup[-1]
-            if abs(item["value"] - last["value"]) <= atr * 0.12:
-                if item["anchor_strength"] > last["anchor_strength"]:
-                    dedup[-1] = item
-                continue
-        dedup.append(item)
-    return dedup
-
-
-def _target_path_score(pool: list, target: dict, entry: float, direction: str,
-                       atr: float) -> tuple[float, int]:
-    """Score how clear the price path is before a proposed final target."""
-    sgn = 1 if direction == "bull" else -1
-    target_v = float(target["value"])
-    obstacles = 0
-    penalty = 0.0
-    for other in pool:
-        ov = float(other["value"])
-        if other is target:
-            continue
-        if sgn * (ov - entry) <= 0:
-            continue
-        if sgn * (target_v - ov) <= atr * 0.15:
-            strength = max(0.2, float(other.get("anchor_strength", 0.5)))
-            tier = int(other.get("tier", 8))
-            tier_w = 1.20 if tier <= 4 else (0.80 if tier <= 6 else 0.45)
-            distance = abs(ov - entry) / max(atr, 1e-12)
-            # Obstacles closer to entry are less damaging because they may be
-            # swept/consumed on the way; major levels close to target matter more.
-            target_proximity = 1.0 / (1.0 + abs(target_v - ov) / max(atr, 1e-12))
-            penalty += strength * tier_w * (0.55 + 0.90 * target_proximity)
-            obstacles += 1
-    return max(0.0, 1.0 - min(0.78, penalty * 0.10)), obstacles
-
-
-def _select_tp(pool: list, entry: float, risk: float, direction: str,
-               h1: Optional[pd.DataFrame] = None,
-               m15: Optional[pd.DataFrame] = None,
-               atr: Optional[float] = None) -> Tuple[Optional[float], Optional[str], Optional[float], dict]:
-    """Choose the target with the best risk-adjusted plausibility, not merely the first >=2R.
-
-    There is no artificial maximum RR. The engine prefers a target when its structural
-    quality, path clarity, market regime and distance form a better *expected-value proxy*.
-    The proxy is a ranking heuristic, not a calibrated probability.
-    """
-    if not pool or risk <= 0:
-        return None, None, None, {}
-
-    atr_v = max(float(atr or risk), 1e-12)
-    ctx = _target_context(h1, m15, direction, entry, atr_v) if h1 is not None and m15 is not None else {
-        "h1_structure": "unknown", "m15_structure": "unknown", "rsi": 50.0,
-        "relative_volume": 1.0, "momentum": {"bull": False, "bear": False},
-        "atr": atr_v,
-    }
-    sgn = 1 if direction == "bull" else -1
-    candidates = []
-
-    aligned_struct = ctx["h1_structure"] == ("bullish" if direction == "bull" else "bearish")
-    aligned_m15 = ctx["m15_structure"] == ("bullish" if direction == "bull" else "bearish")
-    momentum_aligned = ((direction == "bull" and ctx["momentum"].get("bull")) or
-                        (direction == "bear" and ctx["momentum"].get("bear")))
-    rsi = float(ctx["rsi"])
-    # RSI is soft context: avoid rewarding an already exhausted extreme.
-    rsi_support = 1.0
-    if direction == "bull" and rsi >= 75:
-        rsi_support = 0.78
-    elif direction == "bear" and rsi <= 25:
-        rsi_support = 0.78
-
-    for target in pool:
-        value = float(target["value"])
-        distance = sgn * (value - entry)
-        if distance <= 0:
-            continue
-        rr = distance / risk
-        if rr < MIN_RR:
-            continue
-
-        path_clear, obstacles = _target_path_score(pool, target, entry, direction, atr_v)
-        quality = 0.50
-        quality += 0.12 * min(1.0, max(0.0, float(target.get("anchor_strength", 0.5))))
-
-        tier = int(target.get("tier", 8))
-        tier_base = {1: 0.14, 2: 0.12, 3: 0.13, 4: 0.15, 5: 0.09, 6: 0.04, 7: 0.02, 8: 0.0}.get(tier, 0.0)
-        quality += tier_base
-        quality += 0.10 if aligned_struct else (-0.05 if ctx["h1_structure"] in ("bullish", "bearish") else 0.0)
-        quality += 0.06 if aligned_m15 else (-0.04 if ctx["m15_structure"] in ("bullish", "bearish") else 0.0)
-        quality += 0.06 if momentum_aligned else 0.0
-        quality *= rsi_support
-        quality *= (0.88 + 0.16 * min(1.0, path_clear))
-
-        # Distance is valuable, but target reachability should decay as the
-        # requested move becomes increasingly remote. This prevents a raw
-        # "largest RR wins" behaviour while still allowing 6R+ targets when
-        # structure, momentum and path quality genuinely support them.
-        far_support = 0.0
-        if aligned_struct:
-            far_support += 0.35
-        if aligned_m15:
-            far_support += 0.20
-        if momentum_aligned:
-            far_support += 0.25
-        if path_clear > 0.85:
-            far_support += 0.20
-        decay = max(0.028, 0.085 - 0.055 * far_support)
-        distance_excess = max(0.0, rr - 3.0)
-        reachability = quality * np.exp(-decay * distance_excess)
-        reachability = max(0.06, min(0.93, reachability))
-
-        # Expected-value proxy with diminishing reward. log(1+RR) prevents a
-        # mathematically huge target from dominating solely because it is far.
-        # It is a ranking tool, NOT a calibrated probability model.
-        ev_proxy = reachability * np.log1p(rr) - (1.0 - reachability) * 0.45
-        distance_bonus = 0.08 * min(1.0, max(0.0, rr - 2.0) / 4.0)
-        far_penalty = 0.0
-        # Research showed the useful zone is not simply "lowest RR" or "highest RR".
-        # Keep unlimited RR, but require stronger path evidence for extreme targets.
-        if rr > 7.0:
-            evidence = far_support
-            if rr > 9.0:
-                far_penalty += min(0.38, 0.055 * (rr - 9.0))
-                if evidence < 0.80:
-                    far_penalty += min(0.22, (0.80 - evidence) * 0.55)
-            elif evidence < 0.60:
-                far_penalty += min(0.16, (0.60 - evidence) * 0.45)
-        # Prefer the empirically interesting middle-distance region when its
-        # structural/path quality is comparable, without hard-capping RR.
-        middle_rr_bonus = 0.035 if 5.0 <= rr <= 8.5 else 0.0
-        score = ev_proxy + distance_bonus + middle_rr_bonus - far_penalty
-
-        # A target directly beyond several strong obstacles is less attractive.
-        score -= min(0.30, obstacles * 0.035)
-
-        candidates.append({
-            "label": target["label"],
-            "value": round(value, 10),
-            "rr": round(rr, 3),
-            "tier": tier,
-            "target_quality": round(quality, 4),
-            "path_clear": round(path_clear, 4),
-            "obstacles": int(obstacles),
-            "reachability_proxy": round(reachability, 4),
-            "ev_proxy": round(ev_proxy, 4),
-            "score": round(score, 4),
-        })
-
-    if not candidates:
-        return None, None, None, {}
-
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    best = candidates[0]
-    diagnostics = {
-        "selected": best,
-        "candidates": candidates[:12],
-        "context": {
-            "h1_structure": ctx["h1_structure"],
-            "m15_structure": ctx["m15_structure"],
-            "rsi": round(rsi, 1),
-            "relative_volume": round(float(ctx["relative_volume"]), 3),
-            "momentum_aligned": bool(momentum_aligned),
-            "min_rr": MIN_RR,
-            "max_rr": None,
-        },
-        "method": "structural_target_quality + path_clarity + regime/momentum context + diminishing_distance + EV_proxy",
-    }
-    return best["value"], best["label"], best["rr"], diagnostics
-
-
-# =============================================================================
-# DECISION BRAIN V26
-# =============================================================================
-
-def _clamp(value, lo=0.0, hi=100.0):
-    try:
-        return float(max(lo, min(hi, float(value))))
-    except Exception:
-        return lo
-
-
-def _bool01(value):
-    return 1.0 if bool(value) else 0.0
-
-
-def _regime_profile(score: dict, m15: pd.DataFrame, h1: pd.DataFrame) -> dict:
-    h1_struct = str(score.get("struct_h1") or "ranging")
-    m15_struct = str(score.get("m15_struct") or "ranging")
-    rvol = float(score.get("m15_relative_volume", 1.0) or 1.0)
-    atr = max(float(m15["atr"].iloc[-1]), 1e-12)
-    body = abs(float(m15["close"].iloc[-1]) - float(m15["open"].iloc[-1])) / atr
-    ret3 = abs(float(m15["close"].iloc[-1]) - float(m15["close"].iloc[-4])) / atr if len(m15) >= 4 else 0.0
-    trend = 0.0
-    if h1_struct in {"bullish", "bearish"}: trend += 0.45
-    if m15_struct == h1_struct and h1_struct != "ranging": trend += 0.30
-    if ret3 >= 0.7: trend += 0.15
-    if rvol >= 1.2: trend += 0.10
-    expansion = _clamp((body - 0.35) * 90 + max(0.0, rvol - 1.0) * 35, 0, 100)
-    range_score = 100.0 - _clamp(trend * 100, 0, 100)
-    transition = 0.0
-    if h1_struct == "ranging" and m15_struct in {"bullish", "bearish"}: transition += 0.45
-    if h1_struct in {"bullish", "bearish"} and m15_struct not in {h1_struct, "ranging"}: transition += 0.40
-    if 0.7 <= rvol <= 1.15 and ret3 < 0.5: transition += 0.15
-    if trend >= 0.70 and expansion >= 55: regime = "TREND_EXPANSION"
-    elif trend >= 0.55: regime = "TREND"
-    elif range_score >= 75 and expansion < 45: regime = "RANGE"
-    elif transition >= 0.55: regime = "TRANSITION"
-    elif expansion >= 70: regime = "EXPANSION"
-    else: regime = "MIXED"
-    return {"regime": regime, "trend": round(_clamp(trend * 100), 2), "range": round(range_score, 2), "transition": round(_clamp(transition * 100), 2), "expansion": round(expansion, 2), "rvol": round(rvol, 3), "ret3_atr": round(ret3, 3)}
-
-
-def _setup_archetype(direction: str, score: dict, candidate: dict, loc: dict, poi_reacted: bool) -> str:
-    label = str(candidate.get("label") or "").lower()
-    sweep = bool(score.get("selected_sweep"))
-    choch = bool((score.get("choch_m15") or {}).get("bullish_choch") if direction == "bull" else (score.get("choch_m15") or {}).get("bearish_choch"))
-    cisd = bool((score.get("cisd_m15") or {}).get("bullish_cisd") if direction == "bull" else (score.get("cisd_m15") or {}).get("bearish_cisd"))
-    confirmed = bool((score.get("entry_confirmation") or {}).get("confirmed"))
-    if sweep and (choch or confirmed):
-        return "LIQUIDITY_SWEEP_RECLAIM"
-    if label == "ob" and poi_reacted and confirmed:
-        return "HTF_POI_DISPLACEMENT_RETEST"
-    if label == "fvg" and confirmed:
-        return "FVG_DISPLACEMENT_RETEST"
-    if choch and cisd:
-        return "STRUCTURE_SHIFT_CONTINUATION"
-    if label == "eq":
-        return "LIQUIDITY_REACTION"
-    if loc.get("location_state") == "GOOD":
-        return "HEALTHY_PULLBACK"
-    return "STRUCTURE_REACTION"
-
-
-def _thesis_quality(score: dict, loc: dict, candidate: dict, tp_diag: dict, regime: dict, direction: str, poi_reacted: bool) -> dict:
-    htf_bias = str(score.get("htf_bias") or "neutral")
-    d1_bias = str(score.get("d1_bias") or "neutral")
-    desired = "bullish" if direction == "bull" else "bearish"
-    structure = 50.0
-    if htf_bias == desired: structure += 22
-    elif htf_bias == "conflict": structure -= 22
-    elif d1_bias == desired: structure += 10
-    elif d1_bias not in {"neutral", desired}: structure -= 10
-    trend = float(score.get("trend_strength", score.get("direction_edge", 50)) or 50)
-    structure += _clamp(trend) * 0.20
-    location = float(loc.get("location_score", 50) or 50)
-    setup = float(candidate.get("score", 0) or 0)
-    setup_norm = _clamp(setup * 8.5, 0, 100)
-    confirmation = 100.0 if (score.get("entry_confirmation") or {}).get("confirmed") else 45.0
-    liquidity = 100.0 if score.get("selected_sweep") else 55.0
-    reaction = 100.0 if poi_reacted else 55.0
-    target = _clamp(float(tp_diag.get("target_quality", 0) or 0) * 100)
-    path = _clamp(float(tp_diag.get("path_clear", 0) or 0) * 100)
-    contradiction = 0.0
-    reasons = []
-    if regime["regime"] == "TRANSITION":
-        contradiction += 12; reasons.append("transition regime")
-    if regime["regime"] == "RANGE" and structure > 70 and not score.get("selected_sweep"):
-        contradiction += 10; reasons.append("trend thesis inside range")
-    if loc.get("location_state") == "WEAK":
-        contradiction += 12; reasons.append("weak entry location")
-    if loc.get("hard_block"):
-        contradiction += 40; reasons.append("entry chase")
-    if not (score.get("entry_confirmation") or {}).get("confirmed"):
-        contradiction += 8; reasons.append("confirmation incomplete")
-    if not poi_reacted:
-        contradiction += 4; reasons.append("HTF reaction not confirmed")
-    if float(tp_diag.get("obstacles", 0) or 0) >= 3:
-        contradiction += 7; reasons.append("target path obstructed")
-    # A balanced quality model: no single indicator can dominate.
-    base = (
-        structure * 0.25 + setup_norm * 0.20 + location * 0.16 +
-        confirmation * 0.13 + liquidity * 0.08 + reaction * 0.06 +
-        target * 0.07 + path * 0.05
-    )
-    # Stronger trend regimes reward aligned structure; range regimes reward location/liquidity.
-    if regime["regime"] in {"TREND", "TREND_EXPANSION"}:
-        base += (structure - 50.0) * 0.08
-    elif regime["regime"] == "RANGE":
-        base += (liquidity - 50.0) * 0.08 + (location - 50.0) * 0.05
-    quality = _clamp(base - contradiction)
-    return {
-        "trade_quality": round(quality, 2),
-        "structure_quality": round(_clamp(structure), 2),
-        "setup_quality": round(setup_norm, 2),
-        "location_quality": round(location, 2),
-        "confirmation_quality": round(confirmation, 2),
-        "liquidity_quality": round(liquidity, 2),
-        "reaction_quality": round(reaction, 2),
-        "target_quality": round(target, 2),
-        "path_quality": round(path, 2),
-        "contradiction_score": round(_clamp(contradiction), 2),
-        "contradictions": reasons[:8],
-    }
-
-
-def _quality_to_confidence(quality: float, uncertainty: float = 0.0) -> int:
-    q = _clamp(quality)
-    u = _clamp(uncertainty)
-    # Compress extremes: confidence is an interpretable quality rank, not a claim of certainty.
-    conf = 30.0 + 0.68 * q - 0.18 * u
-    return int(max(1, min(99, round(conf))))
-
-
-def _selection_strength(evaluated: list) -> dict:
-    if not evaluated:
-        return {"leader_margin": 0.0, "candidate_count": 0}
-    ordered = sorted(evaluated, key=lambda x: x.get("execution_score", -1), reverse=True)
-    if len(ordered) == 1:
-        return {"leader_margin": 100.0, "candidate_count": 1}
-    a = float(ordered[0].get("execution_score", 0))
-    b = float(ordered[1].get("execution_score", 0))
-    return {"leader_margin": round(_clamp(a - b, 0, 100), 3), "candidate_count": len(ordered)}
-
-
-def _trail_ml_adjustment(analysis: dict, ml: Optional[dict]) -> dict:
-    if not ml:
-        return {"model_used": False}
-    er = float(ml.get("expected_r", 0.0) or 0.0)
-    prob = float(ml.get("probability", 0.5) or 0.5)
-    return {
-        "model_used": True,
-        "model_expected_r": round(er, 3),
-        "model_probability": round(prob, 3),
-        "model_confidence": round(float(ml.get("model_confidence", 50.0) or 50.0), 2),
-        "model_version": ml.get("model_version", "unknown"),
-    }
-
-# =============================================================================
-# FUNGSI UTAMA — Dipanggil oleh main.py
-# =============================================================================
-
-def _core_full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
-                 df_d1: Optional[pd.DataFrame] = None,
-                 symbol: Optional[str] = None,
-                 df_btc_h1: Optional[pd.DataFrame] = None,
-                 trade_history: Optional[list] = None) -> Optional[dict]:
-    """
-    Analisa penuh satu koin: Entry → SL → TP.
-
-    df_btc_h1: candle H1 BTCUSDT, OPSIONAL — kalau dikasih, dipakai sebagai
-    filter macro (lihat _macro_bias) supaya sinyal yang jelas melawan arah
-    market keseluruhan sedikit diredam, bukan diloloskan mentah-mentah cuma
-    berdasar struktur koin itu sendiri. Kalau tidak dikasih (default None),
-    perilaku 100% sama seperti sebelumnya — tidak ada filter tambahan.
-    """
-    try:
-        trade_history = trade_history if isinstance(trade_history, list) else []
-        if df_h1 is None or df_m15 is None or df_h1.empty or df_m15.empty:
-            return None
-
-        if symbol:
-            log.info(f"[{symbol}] h1={len(df_h1)} m15={len(df_m15)}")
-
-        # Structural analysis MUST use only fully closed candles.
-        # Keep the latest market price separately for execution/pending-entry
-        # geometry; the forming candle must not rewrite M15/H1 structure.
-        live_price = float(df_m15["close"].iloc[-1])
-        h1_closed = _closed_candles(df_h1, 60)
-        m15_closed = _closed_candles(df_m15, 15)
-        d1_closed = _closed_candles(df_d1, 1440) if df_d1 is not None else None
-        score = score_direction(h1_closed, m15_closed, d1_closed, df_btc_h1)
-        if score is None:
-            if symbol:
-                log.debug(f"[{symbol}] score_direction=None (data kurang)")
-            return None
-
-        direction = score["direction"]
-        cur_price = live_price
-        atr = score["atr"]
-        confidence = score["confidence"]
-        up = direction == "bull"
-
-        if symbol:
-            log.info(
-                f"[{symbol}] dir={direction} conf={confidence}% "
-                f"struct_h1={score['struct_h1']} d1={score['d1_bias']} "
-                f"macro={score.get('macro_bias', 'unknown')}"
-            )
-
-        h1 = build_df(h1_closed, interval_minutes=60)
-        m15 = build_df(m15_closed, interval_minutes=15)
-        if h1 is None or m15 is None:
-            return None
-
-        # ── STEP 1: ENTRY ────────────────────────────────────────
-        # Coba kandidat satu per satu. Candidate #1 tidak boleh membunuh
-        # seluruh koin hanya karena SL-nya lebar atau lokasi entry buruk.
-        cands = _collect_entry_candidates(m15, h1, direction, cur_price, atr, score)
-        if not cands:
-            if symbol:
-                log.debug(f"[{symbol}] no executable entry candidate (location/POI)")
-            return None
-
-        # HTF POI, displacement, sweep, CHoCH/BOS/CISD, inducement, OTE, dan
-        # reaction adalah confluence. Geometri entry/SL/TP tetap dihitung per
-        # candidate, sehingga candidate buruk bisa dilewati tanpa membuang koin.
-        htf_poi = _collect_htf_poi_zones(h1, direction, score)
-        poi_reacted = _recent_poi_reaction(m15, htf_poi, direction, atr) if htf_poi else False
-        confirmation = score.get("entry_confirmation", {})
-        selected_m15_struct = score.get("m15_struct", "ranging")
-        opposite_m15 = (
-            (direction == "bull" and selected_m15_struct == "bearish") or
-            (direction == "bear" and selected_m15_struct == "bullish")
-        )
-
-        confluence_bonus = 0
-        if htf_poi:
-            confluence_bonus += 5
-        if poi_reacted:
-            confluence_bonus += 7
-        if confirmation.get("confirmed"):
-            confluence_bonus += 8
-        if score.get("selected_sweep"):
-            confluence_bonus += 9
-        if score.get("trigger_count", 0) >= 2:
-            confluence_bonus += 4
-        elif score.get("trigger_count", 0) == 1:
-            confluence_bonus += 2
-        if selected_m15_struct == ("bullish" if up else "bearish"):
-            confluence_bonus += 4
-        if opposite_m15:
-            confluence_bonus -= 6
-        base_confidence = max(0, min(99, confidence + confluence_bonus))
-
-        liq_ctx = score["liquidity_bull"] if up else score["liquidity_bear"]
-        sh1 = score.get("sh1", [])
-        sl1 = score.get("sl1", [])
-        sh15 = score.get("sh15", [])
-        sl15 = score.get("sl15", [])
-
-        evaluated = []
-        for candidate in cands:
-            entry = float(candidate["price"])
-            entry_lbl = candidate["label"]
-            invalid = candidate.get("invalid")
-            loc = candidate.get("location", {})
-
-            # Geometry checks per candidate.
-            if up and entry > cur_price * 1.005:
-                continue
-            if not up and entry < cur_price * 0.995:
-                continue
-
-            # Keep strategy output compatible with main.py's pre-entry gate.
-            # If candidate #1 is too far, evaluate candidate #2/#3 instead of
-            # returning a signal that will be rejected immediately after scan.
-            # The price can move after this snapshot; main.py still performs the
-            # final live validation immediately before placing the order.
-            if abs(cur_price - entry) > atr * MAIN_ENTRY_MAX_ATR:
-                if symbol:
-                    log.debug(
-                        f"[{symbol}] candidate {entry_lbl}@{entry:.6g} skipped: "
-                        f"ENTRY_TOO_FAR "
-                        f"({abs(cur_price-entry)/max(atr,1e-12):.2f} ATR > "
-                        f"{MAIN_ENTRY_MAX_ATR:.2f} ATR)"
-                    )
-                continue
-
-            try:
-                sl_price, risk = _compute_sl(
-                    m15, h1, direction, entry, atr, liq_ctx, invalid
-                )
-            except ValueError as exc:
-                if symbol:
-                    log.debug(
-                        f"[{symbol}] candidate {entry_lbl}@{entry:.6g} skipped: {exc}"
-                    )
-                continue
-
-            if up and sl_price >= entry:
-                continue
-            if not up and sl_price <= entry:
-                continue
-            if risk <= 0:
-                continue
-            if up and cur_price <= sl_price:
-                continue
-            if not up and cur_price >= sl_price:
-                continue
-
-            tp_pool = _build_tp_pool(
-                h1, m15, direction, entry, atr, sh1, sl1, sh15, sl15
-            )
-            tp_price, tp_lbl, rr, tp_diag = _select_tp(tp_pool, entry, risk, direction, h1=h1, m15=m15, atr=atr)
-            if tp_price is None or rr is None or rr < MIN_RR:
-                if symbol:
-                    log.debug(
-                        f"[{symbol}] candidate {entry_lbl}@{entry:.6g} skipped: "
-                        f"no TP >= {MIN_RR}R"
-                    )
-                continue
-
-            if up and cur_price >= tp_price:
-                continue
-            if not up and cur_price <= tp_price:
-                continue
-
-            # V3.0: confidence menilai tradeability; entry location + move health lebih berat
-            # daripada raw structural confluence. Tidak ada hard rejection baru.
-            loc_score = int(loc.get("location_score", 50))
-            final_conf, setup_quality, conf_diag = _calibrate_confidence(
-                base_confidence, score, loc, candidate, float(rr), htf_poi, poi_reacted, tp_diag=tp_diag
-            )
-            empirical_conf, empirical_diag = calibrate_confidence_from_history(
-                trade_history, final_conf, "BUY" if up else "SELL", entry_lbl, float(rr), setup_quality
-            )
-            final_conf = empirical_conf
-            conf_diag.update(empirical_diag)
-
-            learning_features = _build_learning_features(
-                score, loc, candidate, float(rr), entry, atr, cur_price, risk, htf_poi, poi_reacted
-            )
-            regime = _regime_profile(score, m15, h1)
-            thesis = _thesis_quality(score, loc, candidate, tp_diag, regime, direction, poi_reacted)
-            archetype = _setup_archetype(direction, score, candidate, loc, poi_reacted)
-            uncertainty = min(65.0, thesis["contradiction_score"] * 0.70 + (20.0 if regime["regime"] in {"TRANSITION", "MIXED"} else 0.0))
-            quality_conf = _quality_to_confidence(thesis["trade_quality"], uncertainty)
-            final_conf = int(round(0.55 * final_conf + 0.45 * quality_conf))
-            final_conf = max(1, min(99, final_conf))
-            ml_prediction = _predict_learning(learning_features)
-            if ml_prediction is not None:
-                ml_conf = float(ml_prediction.get("model_confidence", 50.0))
-                ml_weight = min(max(float((_LEARNED_MODEL or {}).get("live_weight", 0.35) or 0.35), 0.0), 0.50)
-                # Learning model participates as a calibrated modifier, never as an override.
-                final_conf = int(round((1.0 - ml_weight) * final_conf + ml_weight * ml_conf))
-                final_conf = max(1, min(99, final_conf))
-                conf_diag["ml_confidence"] = round(ml_conf, 2)
-                conf_diag["ml_expected_r"] = round(float(ml_prediction.get("expected_r", 0.0) or 0.0), 3)
-                conf_diag["ml_weight"] = round(ml_weight, 3)
-                conf_diag["ml_model_version"] = ml_prediction.get("model_version")
-            # Final selection score is based on quality first; RR is only a small feasibility factor.
-            execution_score = (
-                thesis["trade_quality"] * 1.30
-                + final_conf * 0.55
-                + min(float(rr), 6.0) * 1.50
-                + thesis["target_quality"] * 0.20
-                - thesis["contradiction_score"] * 0.65
-            )
-
-            evaluated.append({
-                "candidate": candidate,
-                "entry": entry,
-                "entry_lbl": entry_lbl,
-                "invalid": invalid,
-                "sl": float(sl_price),
-                "risk": float(risk),
-                "tp": float(tp_price),
-                "tp_lbl": tp_lbl,
-                "rr": float(rr),
-                "confidence": final_conf,
-                "setup_quality": setup_quality,
-                "confidence_diagnostics": conf_diag,
-                "execution_score": execution_score,
-                "location": loc,
-                "learning_features": learning_features,
-                "learning_prediction": ml_prediction,
-                "regime": regime,
-                "archetype": archetype,
-                "thesis": thesis,
-                "uncertainty": round(uncertainty, 2),
-            })
-
-        if not evaluated:
-            if symbol:
-                log.debug(
-                    f"[{symbol}] semua candidate gugur di geometry/TP/location/"
-                    f"entry-distance; tidak mengembalikan setup yang main.py pasti tolak"
-                )
-            return None
-
-        evaluated.sort(key=lambda x: x["execution_score"], reverse=True)
-        best_eval = evaluated[0]
-        best = best_eval["candidate"]
-        entry = best_eval["entry"]
-        entry_lbl = best_eval["entry_lbl"]
-        sl_price = best_eval["sl"]
-        risk = best_eval["risk"]
-        tp_price = best_eval["tp"]
-        tp_lbl = best_eval["tp_lbl"]
-        rr = best_eval["rr"]
-        confidence = best_eval["confidence"]
-        loc = best_eval["location"]
-        selection = _selection_strength(evaluated)
-
-        if symbol:
-            log.info(
-                f"[{symbol}] ENTRY={entry:.6f} label={entry_lbl} "
-                f"loc={loc.get('location_score')}%/{loc.get('location_state')} "
-                f"RSI={loc.get('rsi')}({loc.get('rsi_timing')})"
-            )
-            log.info(f"[{symbol}] SL={sl_price:.6f} risk={risk:.6f}")
-            log.info(f"[{symbol}] TP={tp_price:.6f} label={tp_lbl} RR={rr:.2f}")
-
-        rsi_val = round(float(m15["rsi"].iloc[-1]), 1)
-
-        return {
-            "symbol": symbol,
-            "original_dir": direction,
-            "decision": "BUY" if up else "SELL",
-            "confidence": confidence,
-            "direction_confidence": max(0, min(99, base_confidence)),
-            "setup_quality": int(round((best_eval.get("thesis") or {}).get("trade_quality", best_eval.get("setup_quality", 0)))),
-            "trade_quality": round(float((best_eval.get("thesis") or {}).get("trade_quality", 0.0)), 2),
-            "archetype": best_eval.get("archetype", "STRUCTURE_REACTION"),
-            "thesis": best_eval.get("thesis", {}),
-            "regime_profile": best_eval.get("regime", {}),
-            "uncertainty": best_eval.get("uncertainty", 0.0),
-            "confidence_band": (best_eval.get("confidence_diagnostics") or {}).get("confidence_band", _confidence_band(confidence)),
-            "confidence_diagnostics": best_eval.get("confidence_diagnostics", {}),
-            "confidence_model": CONFIDENCE_MODEL_VERSION,
-            "confidence_is_probability": bool((best_eval.get("confidence_diagnostics") or {}).get("calibration") == "empirical_bayesian"),
-            "learning_features": best_eval.get("learning_features", {}),
-            "learning_prediction": best_eval.get("learning_prediction"),
-            "learning_model_version": (best_eval.get("learning_prediction") or {}).get("model_version", "static"),
-            "rr_band": _rr_band(rr),
-            "entry_location_score": loc.get("location_score", 50),
-            "entry_location_state": loc.get("location_state", "unknown"),
-            "entry_range_position": loc.get("range_position", 0.5),
-            "entry_zone_low": loc.get("entry_zone_low"),
-            "entry_zone_high": loc.get("entry_zone_high"),
-            "rsi_timing": loc.get("rsi_timing", "unknown"),
-            "rsi_slope": loc.get("rsi_slope", 0.0),
-            "entry": round(entry, 8),
-            "price": cur_price,
-            "entry_label": entry_lbl,
-            "sl": round(sl_price, 8),
-            "initial_sl": round(sl_price, 8),
-            "initial_risk": round(abs(entry - sl_price), 8),
-            "tp": round(tp_price, 8),
-            "rr": round(rr, 2),
-            "atr": round(atr, 8),
-            "rsi": rsi_val,
-            "struct_h1": score["struct_h1"],
-            "d1_bias": score.get("d1_bias", "neutral"),
-            "choch_m15": score["choch_m15"],
-            "choch_h1": score["choch_h1"],
-            "cisd_m15": score["cisd_m15"],
-            "failed_retest": score.get("failed_retest", {}),
-            "htf_bias": score.get("htf_bias", "unknown"),
-            "h1_bias": score.get("h1_bias", "unknown"),
-            "poi_reacted": poi_reacted,
-            "entry_confirmation": confirmation,
-            "selected_sweep": score.get("selected_sweep", False),
-            "trigger_count": score.get("trigger_count", 0),
-            "selection_diagnostics": selection,
-            "candidate_count": len(evaluated),
-            "tp_sl_reason": (
-                f"Entry@{entry:.5g}({entry_lbl}) | "
-                f"SL@{sl_price:.5g}(struct) | "
-                f"TP@{tp_price:.5g}({tp_lbl}) | RR={rr:.2f} | "
-                f"Loc={loc.get('location_score')}({loc.get('location_state')}) | "
-                f"RSI={rsi_val}/{loc.get('rsi_timing')}"
-            ),
-        }
-
+        tmp = _BINANCE_BAN_STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"banned_until": float(until)}, f)
+        os.replace(tmp, _BINANCE_BAN_STATE_FILE)
     except Exception as e:
-        if symbol:
-            log.error(f"[full_analyze] {symbol}: {e}", exc_info=True)
+        log.debug(f"[binance] gagal simpan cooldown: {e}")
+
+_load_binance_ban_state()
+
+
+def _binance_sync_time(force=False):
+    """Sync local clock against Binance server time for signed requests.
+    Public endpoint only; no API key required.
+    """
+    global _binance_time_offset_ms, _binance_time_sync_at
+    now = time.time()
+    with _binance_time_sync_lock:
+        if not force and (now - _binance_time_sync_at) < BINANCE_TIME_SYNC_TTL:
+            return _binance_time_offset_ms
+    local_send = int(time.time() * 1000)
+    try:
+        r = requests.get(f"{FAPI}/fapi/v1/time", timeout=5, verify=False)
+        r.raise_for_status()
+        server_ms = int(r.json()["serverTime"])
+        local_recv = int(time.time() * 1000)
+        midpoint = (local_send + local_recv) // 2
+        offset = server_ms - midpoint
+        with _binance_time_sync_lock:
+            _binance_time_offset_ms = int(offset)
+            _binance_time_sync_at = time.time()
+        log.info(f"[binance-time] sync OK offset={offset}ms")
+        return int(offset)
+    except Exception as e:
+        log.warning(f"[binance-time] sync gagal: {e}")
+        raise
+
+
+def _binance_timestamp_ms(sync_if_stale=True):
+    with _binance_time_sync_lock:
+        offset = _binance_time_offset_ms
+        synced_at = _binance_time_sync_at
+    if sync_if_stale and (time.time() - synced_at) >= BINANCE_TIME_SYNC_TTL:
+        try:
+            offset = _binance_sync_time(force=True)
+        except Exception:
+            pass
+    return int(time.time() * 1000) + int(offset)
+
+
+def _queue_pending_cleanup(sym, reason="orphan algo cleanup", error=None):
+    with _pending_cleanup_lock:
+        item = _pending_cleanup.get(sym) or {"reason": reason, "created_at": time.time()}
+        item.update({"reason": reason, "last_error": str(error)[:300] if error else item.get("last_error")})
+        _pending_cleanup[sym] = item
+
+
+def _clear_pending_cleanup(sym):
+    with _pending_cleanup_lock:
+        _pending_cleanup.pop(sym, None)
+
+
+def _get_pending_cleanup(sym):
+    with _pending_cleanup_lock:
+        v = _pending_cleanup.get(sym)
+        return dict(v) if v else None
+
+
+def _get_open_algo_orders(sym):
+    """Exchange-side verification of remaining Binance algo orders for symbol."""
+    data = _binance_signed("GET", "/fapi/v1/openAlgoOrders", {"symbol": sym}, critical=True)
+    if isinstance(data, dict):
+        rows = data.get("orders") or data.get("openOrders") or data.get("data") or []
+    else:
+        rows = data or []
+    return rows if isinstance(rows, list) else []
+
+
+def _cleanup_algo_orders_verified(sym):
+    """Cancel all algo orders and verify none remain."""
+    _cancel_all_algo_orders_verified(sym)
+    _clear_pending_cleanup(sym)
+    return True
+
+
+def _binance_register_ban(msg="", fallback_seconds=60, retry_after=None):
+    """Aktifkan global Binance circuit breaker secara idempotent.
+
+    Banyak worker boleh menerima 418/429 yang sama. Hanya transisi dari
+    *tidak pause* -> *pause* yang membuat generasi pause baru. Error berikutnya
+    hanya boleh memperpanjang cooldown bila memang lebih panjang; tidak boleh
+    menghasilkan ban notification baru.
+    """
+    global _binance_banned_until, _binance_scan_paused, _binance_pause_reason
+    global _binance_pause_generation
+    m = re.search(r"banned until (\d+)", msg or "")
+    candidates = [time.time() + fallback_seconds]
+    if retry_after is not None:
+        try:
+            candidates.append(time.time() + max(float(retry_after), 0.0))
+        except (TypeError, ValueError):
+            pass
+    if m:
+        candidates.append(int(m.group(1)) / 1000)
+    until = max(candidates) + BINANCE_POST_COOLDOWN_GRACE
+    now = time.time()
+    with _binance_ban_lock:
+        previous_until = _binance_banned_until
+        was_cooldown_active = previous_until > now
+        _binance_banned_until = max(previous_until, until)
+        current_until = _binance_banned_until
+    with _binance_pause_lock:
+        was_paused = bool(_binance_scan_paused or _binance_recovering or was_cooldown_active)
+        _binance_scan_paused = True
+        _binance_pause_reason = (msg or "Binance rate limit / ban")[:180]
+        if not was_paused:
+            _binance_pause_generation += 1
+            transition = True
+        else:
+            transition = False
+    _save_binance_ban_state(current_until)
+    remaining = max(current_until - time.time(), 0)
+    if transition:
+        # ERROR is intentionally emitted only once per pause generation.
+        # Subsequent 418/429 events are WARNING-only and therefore cannot flood
+        # Telegram through TelegramLogHandler.
+        log.error(f"[BINANCE PAUSE] Scanner & entry BARU dihentikan selama {remaining:.0f} detik. WS tetap memantau posisi.")
+    else:
+        log.warning(f"[BINANCE PAUSE] duplicate/parallel limit event ignored; cooldown tersisa {remaining:.0f} detik.")
+    return transition
+
+
+def _notify_binance_pause_once(chat_id):
+    """Send one user-facing pause notice for the current pause generation."""
+    if not chat_id or not _binance_is_scan_paused():
+        return False
+    global _binance_pause_notice_generation
+    with _binance_pause_notice_lock:
+        with _binance_pause_lock:
+            generation = _binance_pause_generation
+            reason = _binance_pause_reason
+        if generation == _binance_pause_notice_generation:
+            return False
+        _binance_pause_notice_generation = generation
+    remaining = _binance_cooldown_remaining()
+    detail = f"\nCooldown: <b>{remaining:.0f} detik</b>" if remaining > 0 else ""
+    tg_send(chat_id,
+            "⏸️ <b>Binance RATE LIMIT/BAN</b>\n"
+            "Scanning & entry baru dihentikan. Posisi aktif tetap dipantau via WS."
+            f"{detail}")
+    log.warning(f"[BINANCE PAUSE NOTICE] generation={generation} reason={reason[:120]}")
+    return True
+
+
+def _binance_is_scan_paused():
+    with _binance_pause_lock:
+        paused = _binance_scan_paused or _binance_recovering
+    if paused:
+        return True
+    return _binance_cooldown_remaining() > 0
+
+
+def _binance_cooldown_remaining():
+    with _binance_ban_lock:
+        return max(0.0, _binance_banned_until - time.time())
+
+
+def _binance_try_resume():
+    global _binance_scan_paused, _binance_pause_reason
+    if _binance_cooldown_remaining() > 0:
+        return False
+    with _binance_pause_lock:
+        _binance_scan_paused = False
+        _binance_pause_reason = ""
+    return True
+
+
+def _queue_pending_trail(sym, new_sl, new_tp, qty, reason="strategy", side=None):
+    """Simpan state trail terbaru per simbol; order lama tidak ditumpuk."""
+    with _pending_trails_lock:
+        old = _pending_trails.get(sym)
+        if old is None:
+            _pending_trails[sym] = {
+                "sl": new_sl, "tp": new_tp, "quantity": qty,
+                "updated_at": time.time(), "reason": reason, "side": side,
+            }
+            return
+        buy = (side or old.get("side")) == "BUY"
+        old_sl = old.get("sl")
+        better_sl = (new_sl is not None and old_sl is None) or (new_sl is not None and ((new_sl > old_sl) if buy else (new_sl < old_sl)))
+        if better_sl or new_tp != old.get("tp") or (qty and qty != old.get("quantity")):
+            old.update({"sl": new_sl, "tp": new_tp, "quantity": qty, "updated_at": time.time(), "reason": reason, "side": side or old.get("side")})
+
+
+def _get_pending_trail(sym):
+    with _pending_trails_lock:
+        v = _pending_trails.get(sym)
+        return dict(v) if v else None
+
+
+def _clear_pending_trail(sym):
+    with _pending_trails_lock:
+        _pending_trails.pop(sym, None)
+
+
+def _binance_wait_if_banned():
+    with _binance_ban_lock:
+        until = _binance_banned_until
+    remaining = until - time.time()
+    if remaining > 0:
+        raise BinanceCooldownError(f"Binance cooldown aktif {remaining:.0f}s")
+
+def _binance_update_weight_from_response(r):
+    """Catat request-weight 1m dari header Binance bila tersedia."""
+    global _binance_weight_1m, _binance_weight_seen_at
+    raw = None
+    for key in ("X-MBX-USED-WEIGHT-1M", "x-mbx-used-weight-1m"):
+        if key in r.headers:
+            raw = r.headers.get(key)
+            break
+    if raw is None:
         return None
-
-def get_best_signal(candidates: list) -> Optional[dict]:
-    """Pilih peluang terbaik berdasarkan kualitas trade, bukan confidence mentah."""
-    if not candidates:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
         return None
-
-    def _rank(sig):
-        quality = float(sig.get("trade_quality", sig.get("setup_quality", 0)) or 0.0)
-        conf = float(sig.get("confidence", 0) or 0.0)
-        rr = min(float(sig.get("rr", 0) or 0.0), 6.0)
-        diag = sig.get("confidence_diagnostics") or {}
-        ml_er = float((sig.get("learning_prediction") or {}).get("expected_r", 0.0) or 0.0)
-        contradiction = float((sig.get("thesis") or {}).get("contradiction_score", 0.0) or 0.0)
-        calibration_penalty = 0.0
-        if diag.get("calibration") == "empirical_bayesian":
-            samples = float(diag.get("samples", 0) or 0.0)
-            calibration_penalty = max(0.0, 12.0 - min(12.0, samples * 0.15))
-        return (
-            quality * 1.45
-            + conf * 0.55
-            + rr * 1.10
-            + ml_er * 6.0
-            - contradiction * 0.90
-            - calibration_penalty
-        )
-
-    return max(candidates, key=_rank)
+    _binance_weight_1m = value
+    _binance_weight_seen_at = time.time()
+    return value
 
 
-# =============================================================================
-# ADAPTIVE POSITION MANAGEMENT — TRAILING BRAIN V8
-# =============================================================================
-# V8 design principle:
-#   Trail is not a static distance-from-price stop. It is a state machine that
-#   evaluates continuation health, momentum decay, structural failure,
-#   exhaustion and retracement depth before choosing a protection level.
-#
-# The goal is asymmetric:
-#   - healthy winner -> preserve room and avoid noise exits
-#   - weakening winner -> lock a meaningful portion of realized edge
-#   - confirmed reversal -> move protection close enough to avoid giving back
-#     the move, while still respecting the current candle/ATR noise envelope
-#
-# No API calls are made here. main.py remains the execution layer.
-
-TRAIL_LOOKBACK_CANDLES = STRUCT_TRAIL_LOOKBACK
-TRAIL_PREDICTIVE_VERSION = "5.0"
-TRAIL_MIN_PROFIT_TO_PROTECT_R = 0.55
-TRAIL_CAUTION_R = 0.90
-TRAIL_MATURE_R = 1.50
-TRAIL_REVERSAL_R = 1.00
-TRAIL_STRONG_REVERSAL_R = 1.75
-TRAIL_RETRACE_WARN_R = 0.30
-TRAIL_RETRACE_STRONG_R = 0.55
-TRAIL_LOCK_CAUTION_R = 0.12
-TRAIL_LOCK_WEAK_R = 0.28
-TRAIL_LOCK_STRONG_R = 0.55
-TRAIL_LOCK_REVERSAL_R = 0.80
-TRAIL_MIN_GAP_ATR_V8 = 0.32
-TRAIL_STRUCT_BUFFER_ATR = 0.36
-TRAIL_MOMENTUM_DECAY_ATR = 0.12
-TRAIL_OPPOSITE_BODY_ATR = 0.70
-TRAIL_REVERSAL_BODY_ATR = 0.95
-TRAIL_TWO_BAR_REVERSAL = True
-TRAIL_VOLUME_COUNTER = 1.20
-TRAIL_VOLUME_EXHAUSTION = 0.72
-TRAIL_PEAK_LOOKBACK = 40
-TRAIL_PROTECTED_SWING_LB = 3
-TRAIL_SCORE_CAUTION = 3
-TRAIL_SCORE_WEAK = 5
-TRAIL_SCORE_REVERSAL = 7
-TRAIL_SCORE_STRONG_REVERSAL = 9
+def _binance_request_pause():
+    """Legacy throttle helper. New Binance calls should use _binance_request_slot()."""
+    global _binance_last_request_at
+    _binance_wait_if_banned()
+    with _binance_request_lock:
+        if _binance_weight_1m is not None and _binance_weight_1m >= BINANCE_WEIGHT_SOFT_LIMIT:
+            wall_now = time.time()
+            wait_window = max(0.0, 62.0 - (wall_now % 60.0))
+            log.warning(f"[binance-weight] {_binance_weight_1m} weight/1m — throttle {wait_window:.1f}s ke window berikutnya.")
+            time.sleep(wait_window)
+        wait = BINANCE_REQUEST_INTERVAL - (time.monotonic() - _binance_last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _binance_last_request_at = time.monotonic()
 
 
-def _trail_directional_return(df: pd.DataFrame, direction: str, bars: int = 3) -> float:
-    if df is None or len(df) < bars + 1:
-        return 0.0
-    atr = max(float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0, 1e-12)
-    move = float(df["close"].iloc[-1] - df["close"].iloc[-1-bars])
-    return (move if direction == "bull" else -move) / atr
+@contextmanager
+def _binance_critical_context():
+    """Promote nested Binance calls to the bounded emergency/reconciliation lane."""
+    previous = bool(getattr(_binance_priority_local, "critical", False))
+    _binance_priority_local.critical = True
+    try:
+        yield
+    finally:
+        _binance_priority_local.critical = previous
 
 
-def _trail_peak_metrics(df: pd.DataFrame, direction: str, entry: float,
-                        initial_risk: float) -> dict:
-    """Measure favorable excursion and give-back from the recent favorable extreme."""
-    recent = df.iloc[-min(len(df), TRAIL_PEAK_LOOKBACK):]
-    if recent.empty:
-        return {"peak_price": entry, "peak_r": 0.0, "giveback_r": 0.0, "retracement_r": 0.0}
-    peak_price = float(recent["high"].max()) if direction == "bull" else float(recent["low"].min())
-    peak_r = ((peak_price - entry) if direction == "bull" else (entry - peak_price)) / max(initial_risk, 1e-12)
-    current_price = float(df["close"].iloc[-1])
-    giveback_r = ((peak_price - current_price) if direction == "bull" else (current_price - peak_price)) / max(initial_risk, 1e-12)
-    retracement_r = max(0.0, giveback_r)
-    return {
-        "peak_price": peak_price,
-        "peak_r": round(peak_r, 3),
-        "giveback_r": round(giveback_r, 3),
-        "retracement_r": round(retracement_r, 3),
-    }
+@contextmanager
+def _binance_request_slot(critical=False):
+    """Serialize Binance calls; stale usage must expire and scan keeps execution reserve."""
+    global _binance_last_request_at, _binance_weight_1m, _binance_weight_seen_at
+    critical = bool(critical or getattr(_binance_priority_local, "critical", False))
+    with _binance_request_lock:
+        _binance_wait_if_banned()
+        used = _binance_weight_1m
+        age = time.time() - float(_binance_weight_seen_at or 0.0)
+        if used is not None and age > BINANCE_WEIGHT_STALE_AFTER_SEC:
+            used = None
+            _binance_weight_1m = None
+            _binance_weight_seen_at = 0.0
+        if used is not None:
+            if critical:
+                if used >= BINANCE_CRITICAL_HARD_LIMIT:
+                    raise BinanceCooldownError(f"Binance critical governor: {used}/min >= critical hard limit {BINANCE_CRITICAL_HARD_LIMIT}")
+            else:
+                normal_limit = min(BINANCE_WEIGHT_SOFT_LIMIT, max(1, BINANCE_WEIGHT_HARD_LIMIT - BINANCE_EXECUTION_RESERVE))
+                if used >= normal_limit:
+                    raise BinanceCooldownError(f"Binance scan governor: {used}/min >= normal limit {normal_limit} (execution reserve {BINANCE_EXECUTION_RESERVE})")
+        wait = BINANCE_REQUEST_INTERVAL - (time.monotonic() - _binance_last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _binance_wait_if_banned()
+        _binance_last_request_at = time.monotonic()
+        yield
+
+def _raw_get(url, params=None, retries=3):
+    """HTTP GET dengan retry — digunakan oleh Bybit & CoinGecko."""
+    for i in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=10, verify=False)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            log.warning(f"[http] {i+1}/{retries} {url}: {e}")
+            time.sleep(2)
+    raise ConnectionError(f"GET gagal: {url}")
 
 
-def _trail_protected_swing(df: pd.DataFrame, direction: str, atr: float) -> Optional[float]:
-    """Return the nearest *confirmed* structural stop candidate."""
-    recent = df.iloc[-min(len(df), TRAIL_LOOKBACK_CANDLES):]
-    if len(recent) < TRAIL_PROTECTED_SWING_LB * 2 + 3:
-        return None
-    sh, sl = swing_pts(recent, lb=TRAIL_PROTECTED_SWING_LB)
-    buf = max(atr * TRAIL_STRUCT_BUFFER_ATR, 1e-12)
-    if direction == "bull" and sl:
-        return float(recent["low"].iloc[sl[-1]]) - buf
-    if direction == "bear" and sh:
-        return float(recent["high"].iloc[sh[-1]]) + buf
+# ── BINANCE REST (backfill awal WS + fallback tier-2) ─────────────────
+def fapi_get(path, params=None):
+    # Satu request saja per pemanggilan. Retry REST publik ke Binance dihapus:
+    # saat gagal langsung gunakan fallback agar error tidak berubah menjadi burst.
+    _binance_wait_if_banned()
+    try:
+        with _binance_request_slot():
+            r = requests.get(f"{FAPI}{path}", params=params, timeout=10, verify=False)
+        used = _binance_update_weight_from_response(r)
+        if used is not None and used >= BINANCE_WEIGHT_HARD_LIMIT:
+            log.warning(f"[binance-weight] {used} weight/1m — menahan request baru sampai window mereda.")
+        if r.status_code in (418, 429):
+            retry_after = r.headers.get("Retry-After")
+            _binance_register_ban(r.text or "", retry_after=retry_after)
+            raise BinanceCooldownError(f"Binance kena limit/ban (HTTP {r.status_code})")
+        d = r.json()
+        if isinstance(d, dict) and "code" in d:
+            if d["code"] == -1003:
+                retry_after = None
+                _binance_register_ban(d.get("msg", ""), retry_after=retry_after)
+                raise BinanceCooldownError(f"Binance {d['code']}: {d.get('msg')}")
+            raise ValueError(f"Binance {d['code']}: {d.get('msg')}")
+        return d
+    except BinanceCooldownError:
+        raise
+    except Exception as e:
+        log.warning(f"[binance] {path} gagal: {e} — langsung fallback")
+        raise ConnectionError(f"Binance gagal: {path}: {e}") from e
+
+
+# ============================================================
+# REAL TRADE — Binance Futures signed API (order/leverage/posisi)
+# Dipakai TERPISAH dari fapi_get di atas (yang publik, untuk cari
+# sinyal) supaya limit rate keduanya tidak bercampur.
+# ============================================================
+import hmac, hashlib, urllib.parse, math
+from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
+
+def _binance_signed(method, path, params=None, critical=False):
+    """Signed Binance request with strict handling for mutating requests.
+
+    GET requests may be retried after transient transport errors. Mutating
+    requests (POST/PUT/DELETE) are NEVER blindly retried after a transport
+    exception because Binance may have accepted the request even if the HTTP
+    response was lost. The caller must reconcile first.
+    """
+    global BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_KEYS_PRESENT
+    key, secret = _read_binance_credentials()
+    if key and secret:
+        BINANCE_API_KEY, BINANCE_API_SECRET = key, secret
+        BINANCE_KEYS_PRESENT = True
+    else:
+        BINANCE_KEYS_PRESENT = False
+    if not BINANCE_KEYS_PRESENT:
+        raise RuntimeError("BINANCE_API_KEY/SECRET tidak tersedia di runtime Render")
+
+    base_params = dict(params or {})
+    method = str(method).upper()
+    mutating = method in {"POST", "PUT", "DELETE"}
+    critical = bool(critical or mutating)
+    max_attempts = 1 if mutating else 3
+    last_err = None
+    time_resync_attempted = False
+
+    for attempt in range(max_attempts):
+        _binance_wait_if_banned()
+        try:
+            with _binance_time_sync_lock:
+                time_stale = (time.time() - _binance_time_sync_at) >= BINANCE_TIME_SYNC_TTL
+            if time_stale:
+                try:
+                    _binance_sync_time(force=True)
+                except Exception:
+                    pass
+
+            with _binance_request_slot(critical=critical):
+                req = dict(base_params)
+                req["timestamp"] = _binance_timestamp_ms(sync_if_stale=False)
+                req["recvWindow"] = 10000
+                query = urllib.parse.urlencode(req, safe=",")
+                sig = hmac.new(BINANCE_API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
+                url = f"{FAPI}{path}?{query}&signature={sig}"
+                headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+                r = requests.request(method, url, headers=headers, timeout=10, verify=False)
+
+            used = _binance_update_weight_from_response(r)
+            if used is not None and used >= BINANCE_WEIGHT_HARD_LIMIT:
+                log.warning(f"[binance-weight] {used} weight/1m setelah signed {method} {path}")
+
+            if r.status_code in (418, 429):
+                retry_after = r.headers.get("Retry-After")
+                _binance_register_ban(r.text, retry_after=retry_after)
+                raise BinanceCooldownError(f"Binance kena limit/ban (HTTP {r.status_code})")
+
+            data = r.json()
+            if isinstance(data, dict) and "code" in data and data["code"] < 0:
+                code = int(data["code"])
+                if code == -1003:
+                    _binance_register_ban(data.get("msg", ""))
+                    raise BinanceCooldownError(f"Binance {code}: {data.get('msg')}")
+                if code == -1021:
+                    if time_resync_attempted:
+                        raise RuntimeError(f"Binance -1021 setelah resync: {data.get('msg')}")
+                    time_resync_attempted = True
+                    last_err = RuntimeError(f"Binance -1021: {data.get('msg')}")
+                    log.warning(f"[binance-time] -1021 pada {method} {path}; resync server time lalu retry dengan signature baru")
+                    _binance_sync_time(force=True)
+                    # Safe to retry because the exchange explicitly rejected the request.
+                    if mutating and attempt + 1 >= max_attempts:
+                        max_attempts = 2
+                    continue
+                raise RuntimeError(f"Binance {code}: {data.get('msg')}")
+            return data
+
+        except BinanceCooldownError:
+            raise
+        except RuntimeError:
+            raise
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = e
+            if mutating:
+                raise BinanceUnknownExecutionError(
+                    f"Binance {method} {path} transport error; execution status unknown: {e}"
+                ) from e
+            log.warning(f"[binance-signed] GET {path} percobaan {attempt+1}: {e}")
+            time.sleep(0.25 + 0.25 * attempt)
+        except Exception as e:
+            last_err = e
+            if mutating:
+                raise BinanceUnknownExecutionError(
+                    f"Binance {method} {path} response error; execution status unknown: {e}"
+                ) from e
+            log.warning(f"[binance-signed] GET {path} percobaan {attempt+1}: {e}")
+            time.sleep(0.25 + 0.25 * attempt)
+
+    raise RuntimeError(f"Gagal request signed {method} {path}: {last_err}")
+
+
+_symbol_filters_cache = {}
+_exchange_info_cache = {"fetched_at": 0.0}
+_exchange_info_lock = threading.Lock()
+
+def _load_all_symbol_filters():
+    """Fetch /fapi/v1/exchangeInfo SEKALI, parse SEMUA simbol sekaligus ke
+    cache — supaya koin baru berikutnya tidak perlu fetch ulang endpoint
+    berat ini. Refresh tiap 1 jam (filter simbol jarang berubah)."""
+    with _exchange_info_lock:
+        if time.time() - _exchange_info_cache["fetched_at"] < 3600 and _symbol_filters_cache:
+            return
+        data = fapi_get("/fapi/v1/exchangeInfo")
+        for s in data["symbols"]:
+            f = {x["filterType"]: x for x in s["filters"]}
+            if "LOT_SIZE" not in f or "PRICE_FILTER" not in f:
+                continue
+            _symbol_filters_cache[s["symbol"]] = {
+                "stepSize": float(f["LOT_SIZE"]["stepSize"]),
+                "minQty": float(f["LOT_SIZE"]["minQty"]),
+                "minNotional": float((f.get("MIN_NOTIONAL") or {}).get("notional", 5.0)),
+                "tickSize": float(f["PRICE_FILTER"]["tickSize"]),
+                "qtyPrecision": s["quantityPrecision"],
+                "pricePrecision": s["pricePrecision"],
+            }
+        _exchange_info_cache["fetched_at"] = time.time()
+
+def get_symbol_filters(symbol):
+    if symbol not in _symbol_filters_cache:
+        _load_all_symbol_filters()
+    if symbol not in _symbol_filters_cache:
+        raise ValueError(f"{symbol} tidak ada di exchangeInfo")
+    return _symbol_filters_cache[symbol]
+
+
+def round_to_tick(price, tick_size):
+    """Bulatkan ke kelipatan PERSIS tickSize (bukan cuma jumlah desimal —
+    dua hal beda, sumber error -4014 'Price not increased by tick size').
+    Pakai Decimal supaya tidak kena noise floating point (mis. 0.0005)."""
+    if not tick_size or tick_size <= 0:
+        return price
+    d_price, d_tick = Decimal(str(price)), Decimal(str(tick_size))
+    steps = (d_price / d_tick).to_integral_value(rounding=ROUND_HALF_UP)
+    return float(steps * d_tick)
+
+
+def round_qty(quantity, step, qty_prec, rounding=ROUND_HALF_UP):
+    """Bulatkan quantity ke kelipatan PERSIS stepSize pakai Decimal.
+
+    KENAPA INI PENTING (bug 'posisi tidak 100% tertutup saat SL'):
+    ─────────────────────────────────────────────────────────────
+    `math.floor(quantity / step) * step` pakai float biasa KENA noise
+    binary floating point. Contoh nyata: quantity=1.2, step=0.1 →
+    1.2/0.1 di Python = 11.999999999999998 (BUKAN 12.0), lalu
+    math.floor() membulatkannya jadi 11 → hasil 1.1, padahal quantity
+    aslinya 1.2. Order SL (reduceOnly=quantity) yang dipasang jadi
+    0.1 koin LEBIH KECIL dari posisi riil → saat SL ter-trigger, 0.1
+    koin itu TIDAK IKUT TERTUTUP dan posisi tersisa terbuka selamanya
+    (tanpa proteksi SL sama sekali untuk sisa itu).
+
+    Fix: pakai Decimal(str(...)) supaya representasi desimalnya EXACT
+    (bukan biner), dan default ROUND_HALF_UP (bulatkan ke kelipatan
+    step TERDEKAT) — karena quantity yang masuk ke sini (qty posisi
+    aktif) SEHARUSNYA sudah persis kelipatan step sejak awal dibuka
+    (lihat calc_auto_quantity), jadi tidak perlu di-floor lagi; floor
+    kedua itulah sumber bug di atas. Kalau memang perlu floor murni
+    (mis. saat menghitung qty MAKSIMUM yang boleh dibeli dari suatu
+    notional — lihat calc_auto_quantity), panggil dengan
+    rounding=ROUND_DOWN secara eksplisit.
+    """
+    if not step or step <= 0:
+        return round(quantity, qty_prec)
+    d_qty, d_step = Decimal(str(quantity)), Decimal(str(step))
+    steps = (d_qty / d_step).to_integral_value(rounding=rounding)
+    return float(round(steps * d_step, qty_prec))
+
+
+def calc_auto_quantity(symbol, entry_price, margin_usd, leverage):
+    """
+    Quantity dari margin x leverage, dibulatkan ke stepSize Binance.
+    Kalau di bawah minQty/minNotional (error -1013 LOT_SIZE / -4164
+    MIN_NOTIONAL), margin dinaikkan SEDIKIT supaya order tetap valid.
+    Cap kenaikan = mana yang LEBIH BESAR antara 3x margin awal ATAU
+    margin awal + $5 — kombinasi ini supaya margin kecil (mis. $1) tetap
+    dapat headroom wajar (cuma 1.5x dari $1 = $1.5, kelewat sempit utk
+    banyak koin), sementara margin besar tidak melonjak tak terkendali.
+    Return (qty, margin_terpakai, dinaikkan?) atau (None, None, False)
+    kalau tetap gagal walau sudah disesuaikan.
+    """
+    info = get_symbol_filters(symbol)
+    step, min_qty, min_notional = info["stepSize"], info["minQty"], info["minNotional"]
+
+    def qty_from_notional(notional):
+        # Sama seperti place_sl_order() — pakai Decimal (ROUND_DOWN, exact)
+        # bukan math.floor(float) supaya tidak kehilangan 1 step ekstra
+        # akibat noise floating point (mis. 1.2/0.1 = 11.999999999998 di
+        # Python murni). Floor tetap dipertahankan di sini (memang harus
+        # floor, bukan nearest) karena tujuannya membatasi qty MAKSIMUM
+        # yang boleh dibeli dari notional yang tersedia.
+        q = round_qty(notional / entry_price, step, info["qtyPrecision"], rounding=ROUND_DOWN)
+        return q
+
+    qty = qty_from_notional(margin_usd * leverage)
+    if qty >= min_qty and qty * entry_price >= min_notional:
+        actual_margin = (qty * entry_price) / max(float(leverage), 1e-12)
+        hard_cap = float(margin_usd) * MAX_MARGIN_MULTIPLIER
+        if actual_margin > hard_cap + 1e-9:
+            log.warning(f"[calc_auto_quantity] {symbol}: computed margin ${actual_margin:.4f} > hard cap ${hard_cap:.4f}")
+            return None, None, False
+        return qty, float(margin_usd), False
+
+    # Minimum-notional compensation is allowed only inside the hard cap.
+    needed_notional = max(min_notional, min_qty * entry_price) * 1.01
+    bumped_margin = needed_notional / max(float(leverage), 1e-12)
+    cap = float(margin_usd) * MAX_MARGIN_MULTIPLIER
+    if bumped_margin > cap:
+        log.warning(f"[calc_auto_quantity] {symbol}: minimum notional needs ${bumped_margin:.4f} "
+                    f"but hard cap is ${cap:.4f} (base margin ${margin_usd:.2f}, leverage {leverage}x)")
+        return None, None, False
+    qty = qty_from_notional(needed_notional)
+    actual_margin = (qty * entry_price) / max(float(leverage), 1e-12)
+    if qty < min_qty or qty * entry_price < min_notional or actual_margin > cap + 1e-9:
+        return None, None, False
+    return qty, round(actual_margin, 4), True
+
+
+def _real_trade_preflight(force=False):
+    """Verify account canTrade and require One-way/BOTH position mode.
+
+    The engine intentionally does not auto-switch position mode because Binance
+    rejects that while positions/orders exist. Entries are blocked when the
+    account is in Hedge Mode, while existing positions remain manageable.
+    """
+    now = time.time()
+    with _real_trade_preflight_lock:
+        if (not force and now - _real_trade_preflight_cache["at"] < REAL_TRADE_PREFLIGHT_TTL
+                and _real_trade_preflight_cache["position_mode"] is not None):
+            if not _real_trade_preflight_cache["can_trade"]:
+                raise RuntimeError("Binance account canTrade=false")
+            if _real_trade_preflight_cache["position_mode"] is True:
+                raise RuntimeError("Binance Hedge Mode aktif; bot V15 membutuhkan One-way Mode (positionSide=BOTH)")
+            return dict(_real_trade_preflight_cache)
+
+    mode = _binance_signed("GET", "/fapi/v1/positionSide/dual", {}, critical=True)
+    acct = _binance_signed("GET", "/fapi/v2/account", {}, critical=True)
+    dual = bool(mode.get("dualSidePosition")) if isinstance(mode, dict) else False
+    can_trade = bool(acct.get("canTrade", True)) if isinstance(acct, dict) else True
+    with _real_trade_preflight_lock:
+        _real_trade_preflight_cache.update({"at": now, "position_mode": dual, "can_trade": can_trade})
+    if not can_trade:
+        raise RuntimeError("Binance account canTrade=false")
+    if dual:
+        raise RuntimeError("Binance Hedge Mode aktif; bot V15 membutuhkan One-way Mode (positionSide=BOTH)")
+    return dict(_real_trade_preflight_cache)
+
+
+def _new_client_id(prefix):
+    # Binance allows up to 36 chars: ^[\.A-Z\:/a-z0-9_-]{1,36}$
+    return f"{prefix}_{int(time.time()*1000)%10_000_000_000}_{threading.get_ident()%100000}"[:36]
+
+
+def _order_query_by_client_id(symbol, client_id):
+    try:
+        return _binance_signed("GET", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": client_id}, critical=True)
+    except Exception as e:
+        msg = str(e).lower()
+        if "order does not exist" in msg or "-2013" in msg:
+            return None
+        raise
+
+
+def _find_open_algo_by_client_id(symbol, client_algo_id):
+    for row in _get_open_algo_orders(symbol):
+        if str(row.get("clientAlgoId") or "") == str(client_algo_id):
+            return row
     return None
 
 
-def _trail_reversal_analysis(df: pd.DataFrame, direction: str, entry: float,
-                             current_price: float, initial_risk: float,
-                             tp: Optional[float] = None) -> dict:
-    """Estimate continuation health vs. reversal risk from closed M15 candles.
-
-    This is deliberately a *risk-management classifier*, not a claim that the
-    market can be predicted perfectly. It looks for agreement across independent
-    signals before calling a move a reversal.
-    """
-    atr = max(float(df["atr"].iloc[-1]), 1e-12)
-    last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) >= 2 else last
-    prev2 = df.iloc[-3] if len(df) >= 3 else prev
-    peak = _trail_peak_metrics(df, direction, entry, initial_risk)
-    structure = _market_structure(df, *swing_pts(df, lb=TRAIL_PROTECTED_SWING_LB))
-    aligned_structure = structure == ("bullish" if direction == "bull" else "bearish")
-    opposite_structure = structure == ("bearish" if direction == "bull" else "bullish")
-    mom = _momentum_context(df)
-    aligned_mom = (direction == "bull" and mom.get("bull")) or (direction == "bear" and mom.get("bear"))
-    opposite_mom = (direction == "bull" and mom.get("bear")) or (direction == "bear" and mom.get("bull"))
-    rdiv = detect_rsi_divergence(df, direction, lb=30)
-    divergence = ((direction == "bull" and rdiv.get("bear_div")) or
-                  (direction == "bear" and rdiv.get("bull_div")))
-    vol = _relative_volume(df, 20)
-
-    last_body_atr = abs(float(last["close"] - last["open"])) / atr
-    prev_body_atr = abs(float(prev["close"] - prev["open"])) / atr
-    opposite_last = (direction == "bull" and float(last["close"]) < float(last["open"])) or (direction == "bear" and float(last["close"]) > float(last["open"]))
-    opposite_prev = (direction == "bull" and float(prev["close"]) < float(prev["open"])) or (direction == "bear" and float(prev["close"]) > float(prev["open"]))
-    two_bar_opposite = opposite_last and opposite_prev if TRAIL_TWO_BAR_REVERSAL else False
-
-    # Directional return is measured in ATR units. A healthy trade should retain
-    # positive directional return over several lookbacks.
-    ret3 = _trail_directional_return(df, direction, 3)
-    ret5 = _trail_directional_return(df, direction, 5) if len(df) >= 6 else ret3
-    momentum_decay = (ret5 < TRAIL_MOMENTUM_DECAY_ATR and ret3 < 0.0)
-
-    # Detect a fresh opposite displacement / break of the short-term range.
-    look = df.iloc[-6:-1] if len(df) >= 7 else df.iloc[:-1]
-    prior_high = float(look["high"].max()) if not look.empty else float(prev["high"])
-    prior_low = float(look["low"].min()) if not look.empty else float(prev["low"])
-    opposite_break = ((direction == "bull" and float(last["close"]) < prior_low) or
-                      (direction == "bear" and float(last["close"]) > prior_high))
-
-    # Protected swing failure is stronger than a wick: the close must break the
-    # latest confirmed swing in the adverse direction.
-    sh, sl = swing_pts(df, lb=TRAIL_PROTECTED_SWING_LB)
-    protected_break = False
-    if direction == "bull" and sl:
-        protected_break = float(last["close"]) < float(df["low"].iloc[sl[-1]])
-    elif direction == "bear" and sh:
-        protected_break = float(last["close"]) > float(df["high"].iloc[sh[-1]])
-
-    # Liquidity rejection = extension followed by close back through the candle body.
-    recent_high = float(df["high"].iloc[-15:].max())
-    recent_low = float(df["low"].iloc[-15:].min())
-    liquidity_rejection = False
-    if direction == "bull":
-        liquidity_rejection = (float(last["high"]) >= recent_high * (1 - 1e-9)
-                               and opposite_last and last_body_atr >= TRAIL_OPPOSITE_BODY_ATR)
-    else:
-        liquidity_rejection = (float(last["low"]) <= recent_low * (1 + 1e-9)
-                               and opposite_last and last_body_atr >= TRAIL_OPPOSITE_BODY_ATR)
-
-    score = 0
-    reasons = []
-    confirmations = 0
-
-    if opposite_structure:
-        score += 3
-        confirmations += 1
-        reasons.append("opposite_structure")
-    elif not aligned_structure:
-        score += 1
-        reasons.append("structure_ranging")
-    else:
-        reasons.append("structure_aligned")
-
-    if opposite_mom:
-        score += 2
-        confirmations += 1
-        reasons.append("opposite_momentum")
-    elif aligned_mom:
-        reasons.append("momentum_aligned")
-    elif momentum_decay:
-        score += 1
-        reasons.append("momentum_decay")
-
-    if divergence:
-        score += 2 if not rdiv.get("strong") else 3
-        confirmations += 1
-        reasons.append("rsi_divergence")
-
-    if two_bar_opposite:
-        score += 2
-        confirmations += 1
-        reasons.append("two_bar_opposite")
-    elif opposite_last and last_body_atr >= TRAIL_OPPOSITE_BODY_ATR:
-        score += 1
-        reasons.append("opposite_candle")
-
-    if opposite_break:
-        score += 2
-        confirmations += 1
-        reasons.append("opposite_range_break")
-
-    if protected_break:
-        score += 3
-        confirmations += 1
-        reasons.append("protected_swing_break")
-
-    if liquidity_rejection:
-        score += 2
-        confirmations += 1
-        reasons.append("liquidity_rejection")
-
-    if vol >= TRAIL_VOLUME_COUNTER and opposite_last:
-        score += 2
-        confirmations += 1
-        reasons.append("counter_volume_expansion")
-    elif vol <= TRAIL_VOLUME_EXHAUSTION and peak["peak_r"] >= TRAIL_CAUTION_R:
-        score += 1
-        reasons.append("volume_exhaustion")
-
-    if peak["retracement_r"] >= TRAIL_RETRACE_WARN_R and peak["peak_r"] >= TRAIL_MIN_PROFIT_TO_PROTECT_R:
-        score += 2
-        reasons.append("meaningful_giveback")
-    if peak["retracement_r"] >= TRAIL_RETRACE_STRONG_R:
-        score += 2
-        confirmations += 1
-        reasons.append("deep_giveback")
-
-    if tp is not None:
-        target_distance_r = abs(float(tp) - current_price) / max(initial_risk, 1e-12)
-        if target_distance_r <= TRAIL_LIQUIDITY_NEAR_R:
-            score += 1
-            reasons.append("target_near")
-    else:
-        target_distance_r = None
-
-    strong_reversal = (protected_break and opposite_break and confirmations >= 3) or score >= TRAIL_SCORE_STRONG_REVERSAL
-    reversal = strong_reversal or (score >= TRAIL_SCORE_REVERSAL and confirmations >= 2)
-    weakening = reversal or score >= TRAIL_SCORE_WEAK or peak["retracement_r"] >= TRAIL_RETRACE_WARN_R
-    # Profit maturity arms the trailing engine, but is NOT itself evidence of
-    # reversal. A large floating profit with healthy structure must still be
-    # allowed to breathe.
-    caution = weakening or score >= TRAIL_SCORE_CAUTION
-
-    if strong_reversal:
-        state = "REVERSAL_CONFIRMED"
-    elif reversal:
-        state = "REVERSAL"
-    elif weakening:
-        state = "WEAKENING"
-    elif caution:
-        state = "CAUTION"
-    else:
-        state = "HEALTHY"
-
-    return {
-        "state": state,
-        "score": int(score),
-        "confirmations": int(confirmations),
-        "reasons": reasons,
-        "aligned_structure": bool(aligned_structure),
-        "opposite_structure": bool(opposite_structure),
-        "aligned_momentum": bool(aligned_mom),
-        "opposite_momentum": bool(opposite_mom),
-        "divergence": bool(divergence),
-        "protected_break": bool(protected_break),
-        "opposite_break": bool(opposite_break),
-        "liquidity_rejection": bool(liquidity_rejection),
-        "last_body_atr": round(last_body_atr, 3),
-        "prev_body_atr": round(prev_body_atr, 3),
-        "relative_volume": round(vol, 3),
-        "ret3_atr": round(ret3, 3),
-        "ret5_atr": round(ret5, 3),
-        "peak_price": round(peak["peak_price"], 10),
-        "peak_r": peak["peak_r"],
-        "giveback_r": peak["giveback_r"],
-        "target_distance_r": round(target_distance_r, 3) if target_distance_r is not None else None,
-    }
-
-
-def _trail_lock_floor(entry: float, initial_risk: float, state: str, direction: str) -> float:
-    lock_r = {
-        "CAUTION": TRAIL_LOCK_CAUTION_R,
-        "WEAKENING": TRAIL_LOCK_WEAK_R,
-        "REVERSAL": TRAIL_LOCK_REVERSAL_R,
-        "REVERSAL_CONFIRMED": TRAIL_LOCK_REVERSAL_R,
-    }.get(state, 0.0)
-    return entry + (initial_risk * lock_r if direction == "bull" else -initial_risk * lock_r)
-
-
-def _trail_stop_candidates(df_m15: pd.DataFrame, direction: str, entry: float,
-                           current_price: float, initial_risk: float,
-                           analysis: dict) -> dict:
-    """Build protection candidates from structure, retracement and momentum.
-
-    The candidates are *floors/ceilings*, not direct orders. manage_position()
-    selects the tightest candidate that remains outside the current noise band.
-    """
-    atr = max(float(df_m15["atr"].iloc[-1]), 1e-12)
-    state = analysis["state"]
-    peak_price = float(analysis["peak_price"])
-    weakness = int(analysis["score"])
-
-    structure_stop = _trail_protected_swing(df_m15, direction, atr)
-    min_gap = atr * TRAIL_MIN_GAP_ATR_V8
-
-    # Momentum stop is adaptive to weakness. More weakness => smaller distance
-    # from the favorable extreme, but never inside the current noise gap.
-    mult = 2.20
-    if state == "CAUTION":
-        mult = 1.80
-    elif state == "WEAKENING":
-        mult = 1.45
-    elif state == "REVERSAL":
-        mult = 1.10
-    elif state == "REVERSAL_CONFIRMED":
-        mult = 0.85
-    momentum_stop = (peak_price - atr * mult) if direction == "bull" else (peak_price + atr * mult)
-
-    # Retracement-based stop locks part of the move before a new confirmed swing
-    # is available. This is the key V8 addition: it can protect a winner *before*
-    # the market has completed a textbook BOS/ChoCH.
-    retrace_lock_r = {
-        "CAUTION": 0.05,
-        "WEAKENING": 0.18,
-        "REVERSAL": 0.38,
-        "REVERSAL_CONFIRMED": 0.55,
-    }.get(state, 0.0)
-    retrace_stop = (peak_price - max(initial_risk * retrace_lock_r, atr * 0.20)
-                    if direction == "bull"
-                    else peak_price + max(initial_risk * retrace_lock_r, atr * 0.20))
-
-    lock_floor = _trail_lock_floor(entry, initial_risk, state, direction)
-
-    # In a confirmed reversal, use the tighter of retracement and momentum stops.
-    # In healthy/caution phases structure remains the primary authority.
-    if direction == "bull":
-        usable_ceiling = current_price - min_gap
-        candidates = {
-            "structure": structure_stop,
-            "momentum": min(momentum_stop, usable_ceiling),
-            "retracement": min(retrace_stop, usable_ceiling),
-            "lock_floor": min(lock_floor, usable_ceiling),
-        }
-    else:
-        usable_floor = current_price + min_gap
-        candidates = {
-            "structure": structure_stop,
-            "momentum": max(momentum_stop, usable_floor),
-            "retracement": max(retrace_stop, usable_floor),
-            "lock_floor": max(lock_floor, usable_floor),
-        }
-
-    return {
-        "candidates": candidates,
-        "atr": atr,
-        "min_gap": min_gap,
-        "weakness_score": weakness,
-        "state": state,
-    }
-
-
-def _choose_trail_stop(candidates: dict, direction: str, current_price: float,
-                       current_sl: float, atr: float, state: str) -> tuple[Optional[float], Optional[str]]:
-    valid = []
-    for name, value in candidates.items():
-        if value is None:
-            continue
-        v = float(value)
-        if direction == "bull":
-            if current_sl < v < current_price - atr * 0.10:
-                valid.append((v, name))
-        else:
-            if current_price + atr * 0.10 < v < current_sl:
-                valid.append((v, name))
-
-    if not valid:
-        return None, None
-
-    # Healthy/caution: prefer structural integrity. Weak/reversal: prefer the
-    # tightest valid protection to minimize give-back.
-    priority = {"structure": 0, "momentum": 1, "retracement": 2, "lock_floor": 3}
-    if state in {"HEALTHY", "CAUTION"}:
-        # Healthy/caution is explicitly anti-overtrailing. Structure is preferred;
-        # when unavailable, use the wider momentum stop rather than a close
-        # retracement/lock candidate.
-        structural = [x for x in valid if x[1] == "structure"]
-        if structural:
-            return structural[0]
-        momentum = [x for x in valid if x[1] == "momentum"]
-        if momentum:
-            return (max(momentum, key=lambda x: x[0]) if direction == "bull"
-                    else min(momentum, key=lambda x: x[0]))
-        lock = [x for x in valid if x[1] == "lock_floor"]
-        if lock:
-            return (max(lock, key=lambda x: x[0]) if direction == "bull"
-                    else min(lock, key=lambda x: x[0]))
-        return (max(valid, key=lambda x: x[0]) if direction == "bull"
-                else min(valid, key=lambda x: x[0]))
-
-    if direction == "bull":
-        return max(valid, key=lambda x: x[0])
-    return min(valid, key=lambda x: x[0])
-
-
-def _relative_volume(df: pd.DataFrame, n: int = 20) -> float:
-    """Relative volume proxy dari data OHLCV yang SUDAH DIMILIKI bot."""
-    if df is None or df.empty or "volume" not in df.columns:
-        return 1.0
-    vol = pd.to_numeric(df["volume"], errors="coerce").dropna()
-    if len(vol) < n + 3:
-        return 1.0
-    base = float(vol.iloc[-n-1:-1].mean())
-    return float(vol.iloc[-1] / max(base, 1e-12))
-
-
-def _momentum_context(df: pd.DataFrame) -> dict:
-    """Momentum lokal: EMA slope + multi-horizon return + candle expansion."""
-    if df is None or len(df) < 8:
-        return {"bull": False, "bear": False, "expanding": False, "slope_atr": 0.0,
-                "ret3_atr": 0.0, "ret5_atr": 0.0, "last_body_atr": 0.0}
-    close = df["close"].astype(float)
-    atr = max(float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0, 1e-12)
-    e9 = ema(close, 9)
-    slope = float(e9.iloc[-1] - e9.iloc[-4]) / atr
-    ret3 = float(close.iloc[-1] - close.iloc[-4]) / atr
-    ret5 = float(close.iloc[-1] - close.iloc[-6]) / atr if len(df) >= 6 else ret3
-    last_body = abs(float(df["close"].iloc[-1] - df["open"].iloc[-1])) / atr
-    return {
-        "bull": slope > 0.20 and ret3 > 0.15,
-        "bear": slope < -0.20 and ret3 < -0.15,
-        "expanding": last_body >= 0.80,
-        "slope_atr": round(slope, 3),
-        "ret3_atr": round(ret3, 3),
-        "ret5_atr": round(ret5, 3),
-        "last_body_atr": round(last_body, 3),
-    }
-
-
-def _core_manage_position(state: dict, df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None,
-                    df_d1: Optional[pd.DataFrame] = None, symbol: Optional[str] = None) -> dict:
-    """Position-management brain V8 — predictive, stateful-in-time, execution-free.
-
-    The engine does not predict exact future prices. It detects when the evidence
-    for continuation is degrading and moves protection *before* a full reversal
-    is complete. This is intentionally asymmetric: healthy winners get room;
-    weakening/reversing winners surrender progressively less of the move.
-    """
-    if df_m15 is None or df_m15.empty:
-        return {"action": "HOLD", "state": "NO_DATA", "reason": ["M15 unavailable"]}
-
-    live_price = float(df_m15["close"].iloc[-1])
-    m15 = build_df(_closed_candles(df_m15, 15), interval_minutes=15)
-    if m15 is None or len(m15) < 55:
-        return {"action": "HOLD", "state": "NO_DATA", "reason": ["insufficient M15 data"]}
-
-    sig = state.get("signal", state) or {}
-    decision = str(sig.get("decision") or state.get("decision") or "BUY").upper()
-    direction = "bull" if decision == "BUY" else "bear"
-    entry = float(state.get("entry") or sig.get("entry") or m15["close"].iloc[-1])
-    current_price = float(state.get("current_price") or state.get("price") or live_price)
-    current_sl = float(state.get("current_sl") or sig.get("sl") or entry)
-    initial_sl = float(state.get("initial_sl") or sig.get("initial_sl") or sig.get("sl") or current_sl)
-    tp = sig.get("tp")
-    tp = float(tp) if tp is not None else None
-    initial_risk = max(abs(entry - initial_sl), 1e-12)
-    profit_r = ((current_price - entry) if direction == "bull" else (entry - current_price)) / initial_risk
-
-    analysis = _trail_reversal_analysis(
-        m15, direction, entry, current_price, initial_risk, tp=tp
-    )
-    state_name = analysis["state"]
-    reasons = list(analysis["reasons"])
-
-    # Before enough profit exists, do not force a trail unless the price has already
-    # invalidated the thesis. We still return diagnostics so main.py can log why.
-    if profit_r < TRAIL_MIN_PROFIT_TO_PROTECT_R:
-        return {
-            "action": "HOLD",
-            "state": "DEVELOPING",
-            "profit_r": round(profit_r, 2),
-            "weakness_score": analysis["score"],
-            "reversal_state": state_name,
-            "reversal_confirmations": analysis["confirmations"],
-            "reversal_diagnostics": analysis,
-            "reason": reasons + ["profit_not_mature_for_trail"],
-        }
-
-    trail_pack = _trail_stop_candidates(
-        m15, direction, entry, current_price, initial_risk, analysis
-    )
-    candidates = trail_pack["candidates"]
-    atr = trail_pack["atr"]
-    chosen, source = _choose_trail_stop(
-        candidates, direction, current_price, current_sl, atr, state_name
-    )
-    # The entry model is not reused as a trail predictor. Trail decisions are based
-    # on current position-path evidence; a dedicated trail learner can be plugged
-    # in later once enough trail-labelled samples exist.
-    trail_model_diag = {"model_used": False, "reason": "entry_model_not_reused_for_trail"}
-
-    if chosen is not None:
-        minimum_lock_r = TRAIL_LOCK_WEAK_R
-        if state_name == "CAUTION":
-            minimum_lock_r = TRAIL_LOCK_CAUTION_R
-        elif state_name == "WEAKENING":
-            minimum_lock_r = TRAIL_LOCK_WEAK_R
-        elif state_name == "REVERSAL":
-            minimum_lock_r = TRAIL_LOCK_REVERSAL_R * 0.65
-        elif state_name == "REVERSAL_CONFIRMED":
-            minimum_lock_r = TRAIL_LOCK_REVERSAL_R
-
-        locked_r = ((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk
-        if locked_r < minimum_lock_r and state_name in {"REVERSAL", "REVERSAL_CONFIRMED"}:
-            # Fall back to the strongest valid candidate that actually preserves
-            # at least the minimum lock; if none exists, keep the previous SL.
-            eligible = []
-            for name, value in candidates.items():
-                if value is None:
-                    continue
-                v = float(value)
-                lr = ((v - entry) if direction == "bull" else (entry - v)) / initial_risk
-                if lr >= minimum_lock_r:
-                    if direction == "bull" and current_sl < v < current_price - atr * 0.10:
-                        eligible.append((v, name))
-                    elif direction == "bear" and current_price + atr * 0.10 < v < current_sl:
-                        eligible.append((v, name))
-            if eligible:
-                chosen, source = (max(eligible, key=lambda x: x[0]) if direction == "bull"
-                                  else min(eligible, key=lambda x: x[0]))
-
-        return {
-            "action": "TRAIL",
-            "state": state_name,
-            "sl": round(float(chosen), 10),
-            "profit_r": round(profit_r, 2),
-            "locked_r": round((((chosen - entry) if direction == "bull" else (entry - chosen)) / initial_risk), 3),
-            "weakness_score": int(analysis["score"]),
-            "reversal_confirmations": int(analysis["confirmations"]),
-            "trail_source": source,
-            "reversal_diagnostics": analysis,
-            "trail_model": trail_model_diag,
-            "reason": reasons + [f"predictive_trail:{source}"],
-        }
-
-    # A confirmed reversal without an improvable stop is safer handled as a controlled
-    # exit once there is enough realized profit. This avoids holding a winner all the
-    # way back to its original SL just because no structural candidate exists.
-    if state_name == "REVERSAL_CONFIRMED" and profit_r >= TRAIL_STRONG_REVERSAL_R:
-        return {
-            "action": "EXIT",
-            "close": True,
-            "state": state_name,
-            "profit_r": round(profit_r, 2),
-            "weakness_score": int(analysis["score"]),
-            "reversal_confirmations": int(analysis["confirmations"]),
-            "reversal_diagnostics": analysis,
-            "reason": reasons + ["confirmed_reversal_no_safe_trail"]
-        }
-
-    if state_name in {"REVERSAL", "REVERSAL_CONFIRMED", "WEAKENING"}:
-        return {
-            "action": "PROTECT",
-            "state": state_name,
-            "profit_r": round(profit_r, 2),
-            "weakness_score": int(analysis["score"]),
-            "reversal_confirmations": int(analysis["confirmations"]),
-            "reversal_diagnostics": analysis,
-            "reason": reasons + ["reversal_detected_but_no_safe_improvement"]
-        }
-
-    return {
-        "action": "PROTECT" if profit_r >= TRAIL_CAUTION_R else "HOLD",
-        "state": state_name,
-        "profit_r": round(profit_r, 2),
-        "weakness_score": int(analysis["score"]),
-        "reversal_confirmations": int(analysis["confirmations"]),
-        "reversal_diagnostics": analysis,
-        "reason": reasons + ["trend_still_healthy_or_no_better_stop"]
-    }
-
-
-# =============================================================================
-# VALIDASI PRE-ORDER & KOREKSI GEOMETRY (dipanggil oleh main.py)
-# =============================================================================
-
-def validate_and_adjust_geometry(
-    entry: float, sl: float, tp: float,
-    current_price: float, atr: float,
-    direction: str,
-) -> Optional[dict]:
-    """
-    Validasi dan (jika perlu) koreksi geometri entry/SL/TP sebelum order dipasang
-    atau setelah order terisi di harga yang berbeda dari target.
-
-    Mengapa fungsi ini penting:
-    ─────────────────────────────────────────────────────────────────────────────
-    Sinyal dihitung pada waktu T. Saat order terpasang (T+beberapa detik/menit),
-    harga pasar bisa sudah bergerak — khususnya:
-
-      • Kasus "geometri invalid setelah order terisi":
-        SELL limit di entry_target, tapi actual_fill = harga pasar (lebih tinggi
-        dari entry_target karena market sudah di atas limit sell). Akibatnya
-        actual_fill > SL → geometri rusak.
-
-      • Kasus "harga sudah melewati SL setelah order terisi":
-        Sinyal sudah kedaluwarsa atau fill terjadi di sisi yang salah.
-        Posisi tidak boleh diselamatkan dengan menggeser entry/SL
-        secara retroaktif.
-
-    Logika:
-    ─────────────────────────────────────────────────────────────────────────────
-    1. Cek geometri dasar: SL di sisi yang benar dari entry, TP di sisi lain.
-    2. Cek SL belum ditembus current_price.
-    3. Jika SL ditembus atau geometri fill berubah, tolak posisi secara aman.
-       Wick M1 tidak cukup untuk membuktikan bahwa posisi masih valid.
-    4. Cek RR ≥ MIN_RR tanpa mengubah level trade.
-
-    Return:
-      dict  {entry, sl, tp, rr, adjusted} jika valid / bisa diselamatkan
-      None  jika tidak bisa diperbaiki → TOLAK sinyal / auto-out
-    """
-    up = direction == "bull"
-    def _geo_ok(e: float, s: float, t: float) -> bool:
-        return (s < e < t) if up else (t < e < s)
-
-    def _rr(e: float, s: float, t: float) -> float:
-        return abs(t - e) / max(abs(e - s), 1e-10)
-
-    sl_breached = (current_price <= sl) if up else (current_price >= sl)
-
-    # ─── Kasus 1: sudah valid ────────────────────────────────────────────────
-    if _geo_ok(entry, sl, tp) and not sl_breached:
-        rr = _rr(entry, sl, tp)
-        if rr < MIN_RR:
-            return None
-        return {"entry": entry, "sl": sl, "tp": tp, "rr": round(rr, 2), "adjusted": False}
-
-    # ─── Kasus 2: SL ditembus → fail closed ─────────────────────────────────
-    if sl_breached:
-        log.info(
-            f"[validate_geo] SL sudah ditembus sebelum validasi "
-            f"(entry={entry:.6g}, sl={sl:.6g}, price={current_price:.6g}) — ditolak"
-        )
-        return None
-
-    # Never move entry or SL after a fill. A changed geometry is a stale
-    # signal, not a new setup.
-    if not _geo_ok(entry, sl, tp):
-        return None
-
-    rr = _rr(entry, sl, tp)
-    if rr < MIN_RR:
-        log.debug(
-            f"[validate_geo] RR={rr:.2f} < MIN_RR={MIN_RR} setelah koreksi — ditolak"
-        )
-        return None
-
-    return {
-        "entry": round(entry, 8),
-        "sl":    round(sl, 8),
-        "tp":    tp,
-        "rr":    round(rr, 2),
-        "adjusted": False,
-    }
-
-# =============================================================================
-# MACHINE LEARNING COGNITIVE LAYER
-# =============================================================================
-# V27: belief revision, evidence arbitration, failure autopsy, candidate
-# comparison, richer research snapshots, and FULL command interface.
-# This layer is deliberately execution-free and Binance-free.
-
-ML_COGNITIVE_VERSION = "V34_COGNITIVE_AUDITED"
-FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
-FULL_BELIEF_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
-FULL_BELIEF_FILE = FULL_BELIEF_DIR / "belief_state.json"
-FULL_LESSONS_FILE = FULL_BELIEF_DIR / "lessons.jsonl"
-
-
-def _finite(value, default=0.0):
+def _protection_matches(row, symbol, side, order_type, trigger_price, quantity, tick, step):
+    if not row or row.get("symbol") != symbol:
+        return False
+    if str(row.get("side")) != str(side):
+        return False
+    typ = str(row.get("orderType") or row.get("type") or "").upper()
+    expected = "TAKE_PROFIT" if order_type == "TAKE_PROFIT_MARKET" else "STOP"
+    if expected not in typ:
+        return False
     try:
-        x = float(value)
-        return x if np.isfinite(x) else float(default)
-    except (TypeError, ValueError):
-        return float(default)
-
-
-def _v34_clamp(value, lo=0.0, hi=1.0):
-    return max(lo, min(hi, _finite(value)))
-
-
-def _load_json_file(path, default):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            return default
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        return obj if isinstance(obj, type(default)) else default
-    except Exception as exc:
-        log.warning(f"[FULL] load state gagal: {exc}")
-        return default
-
-
-def _save_json_atomic(path, obj):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(obj, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
-        os.replace(tmp, path)
-        return True
-    except Exception as exc:
-        log.warning(f"[FULL] save state gagal: {exc}")
+        t_actual = round_to_tick(float(row.get("triggerPrice")), tick)
+        t_expected = round_to_tick(float(trigger_price), tick)
+        q_actual = round_qty(float(row.get("quantity")), step, 16)
+        q_expected = round_qty(float(quantity), step, 16)
+        return abs(t_actual - t_expected) <= max(tick, 1e-12) and abs(q_actual - q_expected) <= max(step, 1e-12) and bool(row.get("reduceOnly", False))
+    except Exception:
         return False
 
 
-_FULL_LOCK = threading.RLock()
-_FULL_BELIEFS = _load_json_file(FULL_BELIEF_FILE, {
-    "schema": FULL_LEARNING_SCHEMA,
-    "beliefs": {},
-    "lessons": 0,
-    "revisions": 0,
-    "last_review": None,
-})
-if _FULL_BELIEFS.get("schema") != FULL_LEARNING_SCHEMA:
-    _FULL_BELIEFS = {"schema": FULL_LEARNING_SCHEMA, "beliefs": {}, "lessons": 0, "revisions": 0, "last_review": None}
-
-
-def _belief_key(name, condition="global"):
-    return f"{str(name).strip().lower()}::{str(condition).strip().lower()}"
-
-
-def get_belief(name, condition="global", default_value=None):
-    key = _belief_key(name, condition)
-    with _FULL_LOCK:
-        b = dict((_FULL_BELIEFS.get("beliefs") or {}).get(key) or {})
-    if b:
-        return b
-    return {
-        "name": name,
-        "condition": condition,
-        "value": default_value,
-        "belief_strength": 0.35,
-        "sample_size": 0,
-        "evidence_for": [],
-        "evidence_against": [],
-        "last_revision": None,
-        "status": "UNESTABLISHED",
-    }
-
-
-def revise_belief(name, observed_value, condition="global", evidence_strength=0.5,
-                  source="unknown", reason="", sample_increment=1):
-    """Bayes-like gradual belief revision; evidence changes the belief, not a hard override."""
-    observed = _finite(observed_value)
-    strength = _v34_clamp(evidence_strength)
-    now = datetime.now(timezone.utc).isoformat()
-    key = _belief_key(name, condition)
-    with _FULL_LOCK:
-        beliefs = _FULL_BELIEFS.setdefault("beliefs", {})
-        old = dict(beliefs.get(key) or {})
-        old_value = _finite(old.get("value"), observed)
-        old_strength = _v34_clamp(old.get("belief_strength", 0.35))
-        old_n = int(old.get("sample_size", 0) or 0)
-        prior_weight = max(1.0, old_n * max(0.20, old_strength))
-        evidence_weight = max(0.10, strength)
-        new_value = (old_value * prior_weight + observed * evidence_weight) / (prior_weight + evidence_weight)
-        new_strength = _v34_clamp((old_strength * prior_weight + strength * evidence_weight) / (prior_weight + evidence_weight))
-        change = abs(new_value - old_value)
-        status = "TENTATIVE" if old_n + sample_increment < 30 else ("SUPPORTED" if new_strength >= 0.65 else "MIXED")
-        row = {
-            "name": name,
-            "condition": condition,
-            "value": new_value,
-            "belief_strength": new_strength,
-            "sample_size": old_n + int(sample_increment),
-            "evidence_for": (old.get("evidence_for") or [])[-9:],
-            "evidence_against": (old.get("evidence_against") or [])[-9:],
-            "last_revision": now,
-            "last_change": change,
-            "last_source": source,
-            "last_reason": reason,
-            "status": status,
-        }
-        if change > 0:
-            if observed >= old_value:
-                row["evidence_for"].append({"value": observed, "strength": strength, "source": source, "reason": reason, "at": now})
-            else:
-                row["evidence_against"].append({"value": observed, "strength": strength, "source": source, "reason": reason, "at": now})
-        beliefs[key] = row
-        _FULL_BELIEFS["revisions"] = int(_FULL_BELIEFS.get("revisions", 0) or 0) + 1
-        _FULL_BELIEFS["last_review"] = now
-        _save_json_atomic(FULL_BELIEF_FILE, _FULL_BELIEFS)
-    return row
-
-
-def _append_lesson(lesson):
-    try:
-        FULL_BELIEF_DIR.mkdir(parents=True, exist_ok=True)
-        with FULL_LESSONS_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(lesson, ensure_ascii=False, allow_nan=False, default=str) + "\n")
-        return True
-    except Exception as exc:
-        log.warning(f"[FULL] lesson append gagal: {exc}")
-        return False
-
-
-def _safe_ratio(num, den, default=0.0):
-    den = _finite(den)
-    if abs(den) < 1e-12:
-        return default
-    return _finite(num) / den
-
-
-def _detect_regime_local(h1, m15, d1=None):
-    result = {"regime": "UNKNOWN", "trend_strength": 0.0, "volatility": 0.0, "range_position": 0.5}
-    try:
-        h = h1 if isinstance(h1, pd.DataFrame) else None
-        m = m15 if isinstance(m15, pd.DataFrame) else None
-        if h is None or m is None or len(h) < 20 or len(m) < 20:
-            return result
-        h_close = _finite(h["close"].iloc[-1])
-        h_old = _finite(h["close"].iloc[-20])
-        atr_h = _finite(h.get("atr", pd.Series(dtype=float)).iloc[-1] if "atr" in h else np.mean(np.abs(h["high"].tail(14).to_numpy() - h["low"].tail(14).to_numpy())))
-        move = _safe_ratio(h_close - h_old, max(abs(h_old), 1e-12))
-        trend = _v34_clamp(abs(move) / max(atr_h / max(abs(h_close), 1e-12), 1e-6), 0, 3.0) / 3.0
-        window = m["close"].tail(32)
-        lo, hi = float(window.min()), float(window.max())
-        rp = _v34_clamp(_safe_ratio(float(m["close"].iloc[-1]) - lo, hi - lo, 0.5)) if hi > lo else 0.5
-        vol = _safe_ratio(float(m["high"].tail(16).max() - m["low"].tail(16).min()), max(abs(float(m["close"].tail(16).mean())), 1e-12))
-        result["trend_strength"] = trend
-        result["volatility"] = _v34_clamp(vol / 0.25)
-        result["range_position"] = rp
-        if trend > 0.55 and move > 0:
-            result["regime"] = "TREND_UP"
-        elif trend > 0.55 and move < 0:
-            result["regime"] = "TREND_DOWN"
-        elif result["volatility"] > 0.75 and trend < 0.45:
-            result["regime"] = "TRANSITION"
-        else:
-            result["regime"] = "RANGE"
-    except Exception:
-        pass
-    return result
-
-
-def _evidence_arbitration(signal, regime=None):
-    thesis = signal.get("thesis") or {}
-    quality = _finite(signal.get("trade_quality", signal.get("setup_quality", 0.0)))
-    contradictions = _finite(thesis.get("contradiction_score", 0.0))
-    confidence = _finite(signal.get("confidence", 50.0))
-    uncertainty = _finite(signal.get("uncertainty", 0.5))
-    support = []
-    against = []
-    for key, label in (
-        ("selected_sweep", "liquidity sweep"),
-        ("poi_reacted", "POI reaction"),
-        ("entry_confirmation", "entry confirmation"),
-    ):
-        if signal.get(key):
-            support.append(label)
-    if contradictions > 30:
-        against.append("meaningful contradictions")
-    if _finite(signal.get("entry_location_score", 50)) < 45:
-        against.append("weak entry location")
-    if _finite(signal.get("rr", 0)) < 2.0:
-        against.append("weak target geometry")
-    regime_name = (regime or signal.get("regime_profile", {}) or {}).get("regime") if isinstance(regime, dict) else regime
-    decision_quality = _v34_clamp((quality / 100.0) * 0.52 + (confidence / 100.0) * 0.28 + (1.0 - _v34_clamp(contradictions / 100.0)) * 0.12 + (1.0 - _v34_clamp(uncertainty / 100.0)) * 0.08) * 100.0
-    return {
-        "supporting_evidence": support,
-        "contradicting_evidence": against,
-        "regime": regime_name or "UNKNOWN",
-        "decision_quality": round(decision_quality, 2),
-        "evidence_balance": len(support) - len(against),
-    }
-
-
-def analyze_counterfactual(signal, hypothetical_changes=None):
-    """Cheap, execution-free counterfactual reasoning for research/autopsy."""
-    hypothetical_changes = hypothetical_changes if isinstance(hypothetical_changes, dict) else {}
-    base = _finite(signal.get("trade_quality", signal.get("setup_quality", 0.0)))
-    conf = _finite(signal.get("confidence", 50.0))
-    loc = _finite(signal.get("entry_location_score", 50.0))
-    rr = _finite(signal.get("rr", 0.0))
-    delta = 0.0
-    assumptions = []
-    if hypothetical_changes.get("wait_for_retest"):
-        delta += 4.0 if signal.get("entry_confirmation") else 2.0
-        assumptions.append("entry delayed for retest")
-    if hypothetical_changes.get("ignore_sweep_without_reclaim") and signal.get("selected_sweep") and not signal.get("entry_confirmation"):
-        delta -= 12.0
-        assumptions.append("sweep without reclaim treated as weak")
-    if hypothetical_changes.get("boost_location"):
-        delta += max(0.0, 55.0 - loc) * 0.10
-        assumptions.append("location given more influence")
-    if hypothetical_changes.get("penalize_low_rr") and rr < 2.0:
-        delta -= (2.0 - rr) * 6.0
-        assumptions.append("low RR penalized")
-    return {
-        "base_quality": round(base, 2),
-        "counterfactual_quality": round(max(0.0, min(100.0, base + delta)), 2),
-        "quality_delta": round(delta, 2),
-        "base_confidence": round(conf, 2),
-        "assumptions": assumptions,
-    }
-
-
-def autopsy_trade(record, path_rows=None):
-    """Explain a closed trade without rewriting history."""
-    record = record if isinstance(record, dict) else {}
-    final_r = _finite(record.get("final_r"), _finite(record.get("pnl_usd")))
-    mfe = _finite(record.get("mfe_r", record.get("mfe", 0.0)))
-    mae = _finite(record.get("mae_r", record.get("mae", 0.0)))
-    giveback = _finite(record.get("giveback_ratio", record.get("giveback_pct", 0.0)))
-    result = str(record.get("result") or "").lower()
-    if final_r > 0:
-        outcome_class = "SUCCESS"
-    elif mfe > 1.0 and final_r < 0:
-        outcome_class = "MANAGEMENT_OR_PROTECTION_FAILURE"
-    elif mfe < 0.35 and final_r < 0:
-        outcome_class = "ENTRY_OR_THESIS_FAILURE"
-    else:
-        outcome_class = "AMBIGUOUS_FAILURE"
-    reasons = []
-    if outcome_class == "SUCCESS":
-        reasons.append("successful_outcome")
-    if outcome_class == "MANAGEMENT_OR_PROTECTION_FAILURE":
-        reasons.append("trade demonstrated favorable excursion but failed to preserve it")
-    if giveback >= 0.50:
-        reasons.append("large giveback relative to MFE")
-    if mae > 0 and mfe > 0 and mae > mfe:
-        reasons.append("adverse excursion exceeded favorable excursion")
-    if result in {"strategy_error", "data_error", "execution_error"}:
-        outcome_class = "EXECUTION_OR_DATA_FAILURE"
-    lesson = {
-        "trade_uid": record.get("trade_uid"),
-        "symbol": record.get("symbol"),
-        "outcome_class": outcome_class,
-        "final_r": final_r,
-        "mfe_r": mfe,
-        "mae_r": mae,
-        "giveback": giveback,
-        "reasons": reasons,
-        "confidence": _finite(record.get("confidence"), 50.0),
-        "archetype": record.get("archetype"),
-        "regime": record.get("market_regime", record.get("regime")),
-    }
-    _append_lesson(lesson)
-    return lesson
-
-
-def build_research_snapshot(signal, h1=None, m15=None, d1=None, symbol=None):
-    """Feature-rich decision snapshot. It never calls Binance/network."""
-    signal = signal if isinstance(signal, dict) else {}
-    regime = _detect_regime_local(h1, m15, d1)
-    arb = _evidence_arbitration(signal, regime)
-    snapshot = {
-        "schema": FULL_LEARNING_SCHEMA,
-        "snapshot_time": datetime.now(timezone.utc).isoformat(),
-        "time_context": extract_time_context(df=m15),
-        "symbol": symbol or signal.get("symbol"),
-        "strategy_version": ML_COGNITIVE_VERSION,
-        "model_version": signal.get("learning_model_version") or (signal.get("learning_prediction") or {}).get("model_version", "static"),
-        "decision": signal.get("decision"),
-        "confidence": _finite(signal.get("confidence"), 50.0),
-        "raw_confidence": _finite(signal.get("direction_confidence", signal.get("confidence")), 50.0),
-        "trade_quality": _finite(signal.get("trade_quality", signal.get("setup_quality")), 0.0),
-        "archetype": signal.get("archetype", "UNKNOWN"),
-        "market": regime,
-        "evidence": arb,
-        "location": {
-            "score": _finite(signal.get("entry_location_score"), 50.0),
-            "state": signal.get("entry_location_state"),
-            "range_position": _finite(signal.get("entry_range_position"), 0.5),
-        },
-        "geometry": {
-            "entry": _finite(signal.get("entry")),
-            "sl": _finite(signal.get("sl")),
-            "tp": _finite(signal.get("tp")),
-            "rr": _finite(signal.get("rr")),
-            "atr": _finite(signal.get("atr")),
-            "entry_distance_atr": _finite((signal.get("learning_features") or {}).get("entry_distance_atr")),
-            "risk_atr": _finite((signal.get("learning_features") or {}).get("risk_atr")),
-        },
-        "thesis": signal.get("thesis", {}),
-        "uncertainty": _finite(signal.get("uncertainty"), 0.5),
-        "counter_thesis": arb.get("contradicting_evidence", []),
-    }
-    return snapshot
-
-
-
-
-# ============================================================
-# COGNITIVE LEARNING LAYER — V28
-# ============================================================
-_COG_LOCK = threading.RLock()
-_COG_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
-_COG_EXPERIENCE_FILE = _COG_STATE_DIR / "strategy_experience.jsonl"
-_COG_LESSON_FILE = _COG_STATE_DIR / "strategy_lessons.jsonl"
-_COG_BELIEF_FILE = _COG_STATE_DIR / "strategy_beliefs.json"
-_COG_STATE_FILE = _COG_STATE_DIR / "strategy_cognitive_state.json"
-_COG_STATE = {
-    "schema": FULL_LEARNING_SCHEMA,
-    "observations": 0,
-    "candidates": 0,
-    "labeled_outcomes": 0,
-    "autopsies": 0,
-    "counterfactuals": 0,
-    "belief_revisions": 0,
-    "research_cycles": 0,
-    "market_clusters": [],
-    "last_cycle": None,
-    "drift": {"status": "UNKNOWN", "score": 0.0},
-}
-_COG_BELIEFS = {"schema": FULL_LEARNING_SCHEMA, "beliefs": {}}
-_COG_EXPERIENCE_BUFFER = []
-_COG_LESSON_BUFFER = []
-
-# Autonomous FULL cognitive worker. It NEVER calls Binance/network; it only
-# processes locally buffered experiences, builds research hypotheses, and
-# revises cognitive state. Trading/execution remains owned by main.py.
-_FULL_COG_THREAD = None
-_FULL_COG_STOP = threading.Event()
-_FULL_COG_WAKE = threading.Event()
-_FULL_COG_LOCK = threading.RLock()
-_FULL_COG_INTERVAL_SEC = 5.0
-_FULL_COG_LAST_SIGNATURE = None
-_FULL_COG_LAST_ERROR = None
-_FULL_COG_TICKS = 0
-_FULL_COG_LAST_RESULT = {}
-
-
-def _cjson_load(path, default):
-    try:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        log.warning(f"[COG] load gagal {path.name}: {exc}")
-    return default
-
-
-def _cjson_save(path, payload):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
-        os.replace(tmp, path)
-    except Exception as exc:
-        log.warning(f"[COG] save gagal {path.name}: {exc}")
-
-
-def _full_cognitive_signature():
-    with _COG_LOCK:
-        return (
-            int(_COG_STATE.get("observations", 0) or 0),
-            int(_COG_STATE.get("candidates", 0) or 0),
-            int(_COG_STATE.get("labeled_outcomes", 0) or 0),
-            int(_COG_STATE.get("autopsies", 0) or 0),
-            int(_COG_STATE.get("counterfactuals", 0) or 0),
-            int(_COG_STATE.get("belief_revisions", 0) or 0),
-        )
-
-
-def _full_cognitive_tick():
-    """Run one local-only FULL learning/research cycle.
-
-    It deliberately does not change live trading parameters. Its purpose is
-    to continuously process observations/outcomes, find contradictions and
-    lessons, and maintain a research state that can later be consumed by the
-    model-training layer.
-    """
-    global _FULL_COG_TICKS, _FULL_COG_LAST_RESULT, _FULL_COG_LAST_ERROR
-    with _COG_LOCK:
-        obs = list(_COG_EXPERIENCE_BUFFER)
-    outcomes = [r for r in obs if isinstance(r, dict) and r.get("type") == "trade_outcome"]
-    candidates = [r for r in obs if isinstance(r, dict) and r.get("type") == "candidate"]
-    market_obs = [r for r in obs if isinstance(r, dict) and r.get("type") == "market_observation"]
-    # Use recent local evidence; no network and bounded work.
-    recent = obs[-1000:]
-    research = research_brain_cycle(
-        observations=recent,
-        outcomes=outcomes[-200:],
-        current_signal=(candidates[-1] if candidates else None),
-    )
-    # Learn from the distribution of actual outcomes without turning that
-    # observation into a hard threshold change. This keeps FULL adaptive rather
-    # than chronically tightening the live gate.
-    if outcomes:
-        rs = []
-        for row in outcomes[-200:]:
-            payload = row.get("outcome") if isinstance(row.get("outcome"), dict) else row
-            rs.append(_finite_num(payload.get("final_r"), _finite_num(payload.get("r"), 0.0)))
-        positive_rate = sum(1 for x in rs if x > 0) / max(1, len(rs))
-        revise_belief(
-            "positive_outcome_rate", positive_rate, condition="rolling",
-            evidence_strength=min(0.90, len(rs) / 200.0),
-            source="binance_trade", reason="continuous FULL outcome review",
-            sample_increment=max(1, len(rs)),
-        )
-    with _COG_LOCK:
-        _COG_STATE["observations"] = max(int(_COG_STATE.get("observations", 0) or 0), len(market_obs))
-        _COG_STATE["candidates"] = max(int(_COG_STATE.get("candidates", 0) or 0), len(candidates))
-        _COG_STATE["labeled_outcomes"] = max(int(_COG_STATE.get("labeled_outcomes", 0) or 0), len(outcomes))
-        _COG_STATE["last_cycle"] = time.time()
-        _COG_STATE["full_worker_ticks"] = int(_COG_STATE.get("full_worker_ticks", 0) or 0) + 1
-        _COG_STATE["last_worker_mode"] = "ACTIVE"
-        _cjson_save(_COG_STATE_FILE, _COG_STATE)
-    _FULL_COG_TICKS += 1
-    _FULL_COG_LAST_ERROR = None
-    _FULL_COG_LAST_RESULT = research
-    return research
-
-
-def _full_cognitive_loop():
-    global _FULL_COG_LAST_ERROR, _FULL_COG_LAST_RESULT
-    while not _FULL_COG_STOP.is_set():
-        try:
-            if _full_cognitive_signature() != _FULL_COG_LAST_SIGNATURE:
-                _FULL_COG_LAST_RESULT = _full_cognitive_tick()
-                globals()["_FULL_COG_LAST_SIGNATURE"] = _full_cognitive_signature()
-        except Exception as exc:
-            _FULL_COG_LAST_ERROR = str(exc)[:500]
-            log.exception("[FULL COG] learning tick gagal")
-        _FULL_COG_WAKE.wait(_FULL_COG_INTERVAL_SEC)
-        _FULL_COG_WAKE.clear()
-
-
-def _start_full_cognitive_worker():
-    global _FULL_COG_THREAD
-    with _FULL_COG_LOCK:
-        if _FULL_COG_THREAD is None or not _FULL_COG_THREAD.is_alive():
-            _FULL_COG_STOP.clear()
-            _FULL_COG_WAKE.set()
-            _FULL_COG_THREAD = threading.Thread(
-                target=_full_cognitive_loop, name="full-cognitive", daemon=True
-            )
-            _FULL_COG_THREAD.start()
-        else:
-            _FULL_COG_WAKE.set()
-
-
-def _stop_full_cognitive_worker():
-    _FULL_COG_STOP.set()
-    _FULL_COG_WAKE.set()
-
-
-def get_full_cognitive_status():
-    thread_alive = bool(_FULL_COG_THREAD is not None and _FULL_COG_THREAD.is_alive())
-    with _COG_LOCK:
-        return {
-            "worker_alive": thread_alive,
-            "worker_ticks": int(_COG_STATE.get("full_worker_ticks", 0) or 0),
-            "last_cycle": _COG_STATE.get("last_cycle"),
-            "last_error": _FULL_COG_LAST_ERROR,
-            "last_result": dict(_FULL_COG_LAST_RESULT or {}),
-        }
-
-
-
-
-def _load_cognitive_state():
-    global _COG_STATE, _COG_BELIEFS
-    with _COG_LOCK:
-        state = _cjson_load(_COG_STATE_FILE, {})
-        if isinstance(state, dict):
-            _COG_STATE.update(state)
-        beliefs = _cjson_load(_COG_BELIEF_FILE, {})
-        if isinstance(beliefs, dict):
-            _COG_BELIEFS.update(beliefs)
-
-
-def _append_jsonl(path, record, memory, max_mem=5000):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(record, ensure_ascii=False, allow_nan=False, default=str)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-        memory.append(record)
-        if len(memory) > max_mem:
-            del memory[:-max_mem]
-    except Exception as exc:
-        log.warning(f"[COG] jsonl append gagal {path.name}: {exc}")
-
-
-def _finite_num(v, default=0.0):
-    try:
-        x = float(v)
-        return x if np.isfinite(x) else default
-    except Exception:
-        return default
-
-
-def _bounded(v, lo=0.0, hi=1.0):
-    return max(lo, min(hi, _finite_num(v, lo)))
-
-
-def _safe_mean(values, default=0.0):
-    vals = [_finite_num(v, np.nan) for v in values]
-    vals = [v for v in vals if np.isfinite(v)]
-    return float(np.mean(vals)) if vals else default
-
-
-def _last_row_features(df):
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return {}
-    r = df.iloc[-1]
-    out = {}
-    for k, v in r.to_dict().items():
-        if isinstance(v, (int, float, np.number, bool)):
-            out[str(k)] = _finite_num(v)
-    return out
-
-
-
-# =============================================================================
-# TIME-OF-DAY / SESSION CONTEXT
-# =============================================================================
-FULL_TIMEZONE_NAME = os.getenv("FULL_TIMEZONE", "Asia/Jakarta")
-
-def _full_timezone():
-    if ZoneInfo is not None:
-        try:
-            return ZoneInfo(FULL_TIMEZONE_NAME)
-        except Exception:
-            pass
-    return timezone(timedelta(hours=7))
-
-
-def _timestamp_from_df(df):
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return None
-    try:
-        if "timestamp" in df.columns:
-            raw = df["timestamp"].iloc[-1]
-        else:
-            raw = df.index[-1]
-        ts = pd.Timestamp(raw)
-        if ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-        return ts.to_pydatetime().astimezone(_full_timezone())
-    except Exception:
-        return None
-
-
-def _time_session(hour):
-    h = int(hour) % 24
-    if 0 <= h < 6:
-        return "NIGHT_EARLY"
-    if 6 <= h < 12:
-        return "MORNING"
-    if 12 <= h < 18:
-        return "AFTERNOON"
-    return "EVENING_NIGHT"
-
-
-def extract_time_context(timestamp=None, df=None):
-    """Time is an evidence feature, never a hard trading rule."""
-    dt = None
-    if timestamp is not None:
-        try:
-            ts = pd.Timestamp(timestamp)
-            if ts.tzinfo is None:
-                ts = ts.tz_localize("UTC")
-            dt = ts.to_pydatetime().astimezone(_full_timezone())
-        except Exception:
-            dt = None
-    if dt is None and df is not None:
-        dt = _timestamp_from_df(df)
-    if dt is None:
-        return {
-            "available": False,
-            "timezone": FULL_TIMEZONE_NAME,
-            "hour_local": None,
-            "minute_local": None,
-            "day_of_week": None,
-            "session": "UNKNOWN",
-            "hour_sin": 0.0,
-            "hour_cos": 0.0,
-            "is_weekend": False,
-        }
-    hour_float = dt.hour + dt.minute / 60.0
-    angle = 2.0 * np.pi * hour_float / 24.0
-    return {
-        "available": True,
-        "timezone": FULL_TIMEZONE_NAME,
-        "hour_local": int(dt.hour),
-        "minute_local": int(dt.minute),
-        "day_of_week": int(dt.weekday()),
-        "session": _time_session(dt.hour),
-        "hour_sin": float(np.sin(angle)),
-        "hour_cos": float(np.cos(angle)),
-        "is_weekend": bool(dt.weekday() >= 5),
-    }
-
-
-def _time_effect_from_outcomes(outcomes):
-    """Estimate whether time-of-day explains outcomes without forcing it into live decisions."""
-    rows = []
-    for r in outcomes or []:
-        if not isinstance(r, dict):
-            continue
-        try:
-            fr = float(r.get("final_r"))
-        except (TypeError, ValueError):
-            continue
-        tc = r.get("time_context") or {}
-        if not isinstance(tc, dict) or not tc.get("available"):
-            tc = extract_time_context(r.get("entry_timestamp") or r.get("timestamp"))
-        if not tc.get("available"):
-            continue
-        rows.append((fr, tc))
-    if len(rows) < 10:
-        return {"status": "INSUFFICIENT", "sample_size": len(rows), "overall_mean_r": 0.0, "effects": [], "strongest_effect": 0.0, "usable": False}
-    rs = np.asarray([x[0] for x in rows], dtype=float)
-    overall = float(np.mean(rs))
-    groups = {}
-    for fr, tc in rows:
-        groups.setdefault(str(tc.get("session", "UNKNOWN")), []).append(fr)
-    effects = []
-    for session, vals in groups.items():
-        n = len(vals)
-        if n < 5:
-            continue
-        arr = np.asarray(vals, dtype=float)
-        mean = float(np.mean(arr))
-        diff = mean - overall
-        sd = float(np.std(arr, ddof=1)) if n > 1 else 0.0
-        se = sd / np.sqrt(n) if sd > 0 else 0.0
-        t = diff / se if se > 1e-12 else (999.0 if abs(diff) > 1e-12 else 0.0)
-        # Shrink small groups toward zero; never turn this into a hard gate.
-        shrink = min(1.0, n / 30.0)
-        effect = float(np.tanh(diff) * shrink)
-        effects.append({
-            "session": session,
-            "sample_size": n,
-            "mean_r": round(mean, 5),
-            "delta_vs_overall": round(diff, 5),
-            "t_like": round(float(t), 3),
-            "effect": round(effect, 5),
-        })
-    effects.sort(key=lambda x: abs(x["effect"]), reverse=True)
-    strongest = effects[0]["effect"] if effects else 0.0
-    strong = bool(effects and effects[0]["sample_size"] >= 20 and abs(effects[0]["t_like"]) >= 2.0)
-    status = "SUPPORTED" if strong else ("WEAK_SIGNAL" if effects else "INSUFFICIENT")
-    return {
-        "status": status,
-        "sample_size": len(rows),
-        "overall_mean_r": round(overall, 5),
-        "effects": effects,
-        "strongest_effect": round(float(strongest), 5),
-        "usable": strong,
-        "timezone": FULL_TIMEZONE_NAME,
-    }
-
-
-def extract_market_features(df_h1, df_m15, df_d1=None, df_btc_h1=None):
-    """Point-in-time numeric market representation. No network access."""
-    raw_time_df = df_m15 if isinstance(df_m15, pd.DataFrame) else df_h1
-    h1 = build_df(df_h1, 60)
-    m15 = build_df(df_m15, 15)
-    d1 = build_df(df_d1, 1440) if isinstance(df_d1, pd.DataFrame) else None
-    btc = build_df(df_btc_h1, 60) if isinstance(df_btc_h1, pd.DataFrame) else None
-    def ret(df, bars):
-        if df is None or len(df) <= bars:
-            return 0.0
-        a = _finite_num(df["close"].iloc[-bars-1])
-        b = _finite_num(df["close"].iloc[-1])
-        return (b / a - 1.0) if a else 0.0
-    def atr_pct(df):
-        if df is None or df.empty:
-            return 0.0
-        atr = _finite_num(df["atr"].iloc[-1] if "atr" in df.columns else 0.0)
-        px = _finite_num(df["close"].iloc[-1])
-        return atr / px if px else 0.0
-    mf = {
-        "m15_ret_1": ret(m15, 1), "m15_ret_4": ret(m15, 4), "m15_ret_16": ret(m15, 16),
-        "h1_ret_1": ret(h1, 1), "h1_ret_4": ret(h1, 4), "h1_ret_24": ret(h1, 24),
-        "d1_ret_1": ret(d1, 1), "d1_ret_5": ret(d1, 5),
-        "m15_atr_pct": atr_pct(m15), "h1_atr_pct": atr_pct(h1), "d1_atr_pct": atr_pct(d1),
-        "m15_rv": _relative_volume(m15) if m15 is not None else 0.0,
-        "h1_rv": _relative_volume(h1) if h1 is not None else 0.0,
-        "btc_h1_ret_1": ret(btc, 1), "btc_h1_ret_4": ret(btc, 4),
-    }
-    if h1 is not None and not h1.empty:
-        sh, sl = swing_pts(h1, 5)
-        mf["h1_structure_numeric"] = {"bullish": 1.0, "bearish": -1.0}.get(_market_structure(h1, sh, sl), 0.0)
-    else:
-        mf["h1_structure_numeric"] = 0.0
-    if m15 is not None and not m15.empty:
-        sh, sl = swing_pts(m15, 5)
-        mf["m15_structure_numeric"] = {"bullish": 1.0, "bearish": -1.0}.get(_market_structure(m15, sh, sl), 0.0)
-    else:
-        mf["m15_structure_numeric"] = 0.0
-    tc = extract_time_context(df=raw_time_df)
-    if tc.get("available"):
-        mf.update({
-            "time_hour_local": float(tc["hour_local"]),
-            "time_day_of_week": float(tc["day_of_week"]),
-            "time_hour_sin": float(tc["hour_sin"]),
-            "time_hour_cos": float(tc["hour_cos"]),
-            "time_is_weekend": float(1.0 if tc["is_weekend"] else 0.0),
-        })
-    return {k: float(v) for k, v in mf.items()}
-
-
-def record_market_observation(symbol, features, source="binance", timestamp=None):
-    record = {
-        "type": "market_observation",
-        "timestamp": timestamp or time.time(),
-        "symbol": symbol,
-        "source": source,
-        "features": dict(features or {}),
-        "time_context": (features or {}).get("time_context") if isinstance(features, dict) else None,
-    }
-    with _COG_LOCK:
-        _append_jsonl(_COG_EXPERIENCE_FILE, record, _COG_EXPERIENCE_BUFFER, 10000)
-        _COG_STATE["observations"] = int(_COG_STATE.get("observations", 0)) + 1
-    return record
-
-
-def record_candidate_observation(signal, outcome=None, rejected_reason=None, source="binance"):
-    sig = dict(signal or {}) if isinstance(signal, dict) else {}
-    snap = sig.get("research_snapshot") or {}
-    record = {
-        "type": "candidate",
-        "timestamp": time.time(),
-        "symbol": sig.get("symbol"),
-        "source": source,
-        "decision": sig.get("decision"),
-        "confidence": _finite_num(sig.get("confidence"), 50.0),
-        "quality": _finite_num(sig.get("trade_quality", sig.get("setup_quality")), 0.0),
-        "archetype": sig.get("archetype", "UNKNOWN"),
-        "regime": sig.get("market_regime") or (snap.get("market") or {}).get("regime"),
-        "snapshot": snap,
-        "rejected_reason": rejected_reason,
-        "outcome": outcome,
-        "time_context": sig.get("time_context") or snap.get("time_context"),
-    }
-    with _COG_LOCK:
-        _append_jsonl(_COG_EXPERIENCE_FILE, record, _COG_EXPERIENCE_BUFFER, 10000)
-        _COG_STATE["candidates"] = int(_COG_STATE.get("candidates", 0)) + 1
-    return record
-
-
-def record_trade_outcome(signal, outcome, source="binance"):
-    sig = dict(signal or {}) if isinstance(signal, dict) else {}
-    record = record_candidate_observation(sig, outcome=outcome, source=source)
-    record["type"] = "trade_outcome"
-    record["entry_timestamp"] = sig.get("entry_timestamp") or sig.get("entry_time") or (sig.get("time_context") or {}).get("timestamp")
-    try:
-        with _COG_LOCK:
-            with _COG_EXPERIENCE_FILE.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False, allow_nan=False, default=str) + "\n")
-            _COG_STATE["labeled_outcomes"] = int(_COG_STATE.get("labeled_outcomes", 0)) + 1
-    except Exception as exc:
-        log.warning(f"[COG] trade outcome persist gagal: {exc}")
-    return record
-
-
-def _evidence_quality(source, sample_size=0):
-    base = {"binance_trade": 1.0, "binance_market": 0.85, "external": 0.55, "domain": 0.35}.get(source, 0.5)
-    return float(base * min(1.0, 0.35 + 0.65 * np.sqrt(max(sample_size, 1) / 100.0)))
-
-
-def evidence_discussion(evidence_items):
-    """Make heterogeneous evidence explicit: support, contradiction, uncertainty."""
-    rows = []
-    for item in evidence_items or []:
-        if not isinstance(item, dict):
-            continue
-        val = str(item.get("stance", "neutral")).lower()
-        if val not in {"support", "contradict", "neutral"}:
-            val = "neutral"
-        strength = _bounded(item.get("strength", 0.5))
-        reliability = _bounded(item.get("reliability", _evidence_quality(item.get("source", "external"), item.get("sample_size", 0))))
-        rows.append({**item, "stance": val, "weighted_strength": strength * reliability})
-    support = sum(x["weighted_strength"] for x in rows if x["stance"] == "support")
-    contradict = sum(x["weighted_strength"] for x in rows if x["stance"] == "contradict")
-    neutral = sum(x["weighted_strength"] for x in rows if x["stance"] == "neutral")
-    total = support + contradict + neutral
-    balance = (support - contradict) / max(total, 1e-9)
-    return {
-        "support": round(support, 5),
-        "contradict": round(contradict, 5),
-        "neutral": round(neutral, 5),
-        "balance": round(balance, 5),
-        "uncertainty": round(1.0 - min(1.0, abs(balance)), 5),
-        "items": rows,
-    }
-
-
-def _trade_path(record):
-    mfe = _finite_num(record.get("mfe_r"), 0.0)
-    mae = _finite_num(record.get("mae_r"), 0.0)
-    final_r = _finite_num(record.get("final_r"), 0.0)
-    giveback = _finite_num(record.get("giveback_r"), max(0.0, mfe - final_r))
-    return {
-        "mfe_r": mfe,
-        "mae_r": mae,
-        "final_r": final_r,
-        "giveback_r": max(0.0, giveback),
-        "giveback_ratio": max(0.0, giveback) / max(mfe, 1e-9) if mfe > 0 else 0.0,
-        "capture_ratio": final_r / mfe if mfe > 1e-9 else 0.0,
-    }
-
-
-
-
-def counterfactual_trade(record, changes=None):
-    """Evaluate a small alternative hypothesis without using future data in features."""
-    rec = dict(record or {})
-    ch = dict(changes or {})
-    path = _trade_path(rec)
-    final_r = path["final_r"]
-    simulated = final_r
-    notes = []
-    if ch.get("delay_entry_bars"):
-        delay = max(0, int(ch.get("delay_entry_bars")))
-        adverse = _finite_num(rec.get("mae_r"), 0.0)
-        simulated = final_r - 0.10 * min(delay, 5) * abs(adverse)
-        notes.append(f"entry_delay_{delay}")
-    if ch.get("require_reclaim") and not ((rec.get("research_snapshot") or {}).get("evidence") or {}).get("reclaim"):
-        simulated = min(simulated, 0.0)
-        notes.append("missing_reclaim_penalty")
-    if ch.get("trail_tighten_on_giveback"):
-        gb = path["giveback_ratio"]
-        if gb >= 0.50 and path["mfe_r"] > 1.0:
-            simulated = max(simulated, 0.25 * path["mfe_r"])
-            notes.append("hypothetical_giveback_protection")
-    out = {
-        "type": "counterfactual",
-        "timestamp": time.time(),
-        "symbol": rec.get("symbol"),
-        "changes": ch,
-        "actual_final_r": final_r,
-        "simulated_final_r": float(simulated),
-        "delta_r": float(simulated - final_r),
-        "notes": notes,
-        "causal_confidence": 0.25,
-    }
-    with _COG_LOCK:
-        _COG_STATE["counterfactuals"] = int(_COG_STATE.get("counterfactuals", 0)) + 1
-    return out
-
-
-def get_belief_state(name, condition="global", default_value=None):
-    key = f"{name}|{condition}"
-    with _COG_LOCK:
-        b = (_COG_BELIEFS.get("beliefs") or {}).get(key)
-        if isinstance(b, dict):
-            return dict(b)
-    return {
-        "name": name, "condition": condition, "value": default_value,
-        "strength": 0.20, "evidence_for": 0, "evidence_against": 0,
-        "last_revision": None,
-    }
-
-
-
-
-def _zscore_matrix(rows):
-    if not rows:
-        return np.empty((0, 0))
-    keys = sorted({k for r in rows for k in r if isinstance(r.get(k), (int, float, np.number, bool))})
-    if not keys:
-        return np.empty((len(rows), 0))
-    X = np.asarray([[ _finite_num(r.get(k), 0.0) for k in keys] for r in rows], dtype=float)
-    mu = np.mean(X, axis=0)
-    sd = np.std(X, axis=0)
-    sd[sd < 1e-9] = 1.0
-    return (X - mu) / sd, keys
-
-
-def discover_market_clusters(observations, k=3, max_iter=15):
-    """Lightweight k-means using only numpy; exploratory, not a live trade gate."""
-    rows = [r.get("features", {}) for r in observations or [] if isinstance(r, dict)]
-    rows = rows[-3000:]
-    z = _zscore_matrix(rows)
-    if isinstance(z, tuple):
-        X, keys = z
-    else:
-        X, keys = z, []
-    if X.size == 0 or len(X) < max(2, k):
-        return []
-    k = max(2, min(int(k), len(X)))
-    seeds = np.linspace(0, len(X) - 1, k, dtype=int)
-    centers = X[seeds].copy()
-    for _ in range(max_iter):
-        dist = ((X[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
-        labels = np.argmin(dist, axis=1)
-        new_centers = []
-        for i in range(k):
-            subset = X[labels == i]
-            new_centers.append(np.mean(subset, axis=0) if len(subset) else centers[i])
-        new_centers = np.asarray(new_centers)
-        if np.max(np.abs(new_centers - centers)) < 1e-5:
-            centers = new_centers
-            break
-        centers = new_centers
-    out = []
-    for i in range(k):
-        idx = np.where(labels == i)[0]
-        if len(idx) == 0:
-            continue
-        centroid = centers[i]
-        ranked = np.argsort(np.abs(centroid))[::-1][:min(6, len(keys))]
-        signature = [{"feature": keys[j], "z": round(float(centroid[j]), 3)} for j in ranked]
-        out.append({"cluster": i, "samples": int(len(idx)), "signature": signature})
-    with _COG_LOCK:
-        _COG_STATE["market_clusters"] = out
-    return out
-
-
-def detect_feature_drift(reference_rows, recent_rows):
-    ref = [r.get("features", {}) for r in reference_rows or [] if isinstance(r, dict)]
-    rec = [r.get("features", {}) for r in recent_rows or [] if isinstance(r, dict)]
-    if not ref or not rec:
-        return {"status": "UNKNOWN", "score": 0.0, "features": []}
-    keys = sorted(set().union(*(r.keys() for r in ref + rec)))
-    diffs = []
-    for key in keys:
-        a = [_finite_num(r.get(key), 0.0) for r in ref]
-        b = [_finite_num(r.get(key), 0.0) for r in rec]
-        sa = np.std(a) or 1.0
-        d = abs(float(np.mean(b) - np.mean(a))) / sa
-        diffs.append((d, key))
-    diffs.sort(reverse=True)
-    score = _bounded(np.mean([min(d, 3.0) / 3.0 for d, _ in diffs]) if diffs else 0.0)
-    status = "HIGH" if score >= 0.45 else "MEDIUM" if score >= 0.25 else "LOW"
-    result = {"status": status, "score": round(float(score), 4), "features": [{"feature": k, "z_shift": round(float(d), 3)} for d, k in diffs[:10]]}
-    with _COG_LOCK:
-        _COG_STATE["drift"] = result
-    return result
-
-
-def build_evidence_discussion(signal, historical=None, lessons=None):
-    sig = signal if isinstance(signal, dict) else {}
-    items = []
-    q = _finite_num(sig.get("trade_quality", sig.get("setup_quality")), 0.0)
-    items.append({"source": "binance_market", "stance": "support" if q >= 70 else "neutral", "strength": q / 100.0, "sample_size": 1, "label": "current analytical quality"})
-    hist = historical or {}
-    if hist.get("expected_r") is not None:
-        ex = _finite_num(hist.get("expected_r"))
-        items.append({"source": "external", "stance": "support" if ex > 0 else "contradict", "strength": min(1.0, abs(ex) / 1.0), "sample_size": int(hist.get("sample", 0) or 0), "label": "historical conditional expectancy"})
-    lesson_rows = lessons or []
-    with _COG_LOCK:
-        time_effect = dict(_COG_STATE.get("time_of_day") or {})
-    if time_effect.get("usable"):
-        strongest = time_effect.get("effects", [])[0] if time_effect.get("effects") else {}
-        items.append({
-            "source": "binance_trade",
-            "stance": "support" if _finite_num(strongest.get("effect"), 0.0) > 0 else "contradict",
-            "strength": abs(_finite_num(strongest.get("effect"), 0.0)),
-            "sample_size": int(time_effect.get("sample_size", 0) or 0),
-            "label": f"time-of-day effect: {strongest.get('session', 'UNKNOWN')}",
-        })
-    if lesson_rows:
-        failure_rate = _safe_mean([1.0 if "FAILURE" in str(x.get("reasons")) else 0.0 for x in lesson_rows], 0.0)
-        items.append({"source": "binance_trade", "stance": "contradict" if failure_rate > 0.5 else "neutral", "strength": failure_rate, "sample_size": len(lesson_rows), "label": "recent failure evidence"})
-    return evidence_discussion(items)
-
-
-def research_brain_cycle(observations=None, outcomes=None, current_signal=None):
-    """One bounded research cycle. It does not call any network/API."""
-    observations = observations or []
-    outcomes = outcomes or []
-    recent = observations[-250:] if len(observations) > 250 else observations
-    reference = observations[-1500:-250] if len(observations) > 500 else observations
-    clusters = discover_market_clusters(recent, k=3) if len(recent) >= 20 else []
-    drift = detect_feature_drift(reference, recent) if reference and recent else {"status": "UNKNOWN", "score": 0.0, "features": []}
-    lessons = []
-    for row in outcomes[-100:]:
-        if isinstance(row, dict) and row.get("type") == "trade_outcome":
-            lessons.append(autopsy_trade(row))
-    discussion = build_evidence_discussion(current_signal, lessons=lessons) if current_signal else {}
-    time_effect = _time_effect_from_outcomes(outcomes)
-    with _COG_LOCK:
-        _COG_STATE["time_of_day"] = time_effect
-    with _COG_LOCK:
-        _COG_STATE["research_cycles"] = int(_COG_STATE.get("research_cycles", 0)) + 1
-        _COG_STATE["last_cycle"] = time.time()
-        _cjson_save(_COG_STATE_FILE, _COG_STATE)
-    return {
-        "schema": FULL_LEARNING_SCHEMA,
-        "version": ML_COGNITIVE_VERSION,
-        "clusters": clusters,
-        "drift": drift,
-        "evidence_discussion": discussion,
-        "state": dict(_COG_STATE),
-    }
-
-
-def get_cognitive_status():
-    with _COG_LOCK:
-        return {
-            "version": ML_COGNITIVE_VERSION,
-            "schema": FULL_LEARNING_SCHEMA,
-            "state": dict(_COG_STATE),
-            "belief_count": len(_COG_BELIEFS.get("beliefs") or {}),
-            "experience_buffer": len(_COG_EXPERIENCE_BUFFER),
-            "lesson_buffer": len(_COG_LESSON_BUFFER),
-        }
-
-
-def get_learning_schema():
-    return {
-        "schema": MACHINE_LEARNING_SCHEMA,
-        "feature_names": list(ML_FEATURE_NAMES),
-        "count": len(ML_FEATURE_NAMES),
-        "point_in_time": True,
-        "network_access": False,
-    }
-
-
-
-def ingest_historical_ohlcv(path, source="external", symbol=None, interval_minutes=15, max_rows=50000):
-    """Ingest local historical OHLCV only; never performs a network request."""
-    fp = Path(path)
-    if not fp.exists() or not fp.is_file():
-        raise FileNotFoundError(str(fp))
-    if fp.suffix.lower() == ".csv":
-        df = pd.read_csv(fp)
-    elif fp.suffix.lower() in {".json", ".jsonl"}:
-        if fp.suffix.lower() == ".jsonl":
-            df = pd.DataFrame([json.loads(line) for line in fp.read_text(encoding="utf-8").splitlines() if line.strip()])
-        else:
-            obj = json.loads(fp.read_text(encoding="utf-8"))
-            df = pd.DataFrame(obj)
-    else:
-        raise ValueError("historical file must be CSV, JSON, or JSONL")
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    aliases = {"timestamp":"timestamp", "time":"timestamp", "datetime":"timestamp", "date":"timestamp"}
-    if "timestamp" not in df.columns:
-        for old, new in aliases.items():
-            if old in df.columns:
-                df = df.rename(columns={old:new}); break
-    required = {"open","high","low","close","volume"}
-    missing = required.difference(df.columns)
-    if missing:
-        raise ValueError(f"missing OHLCV columns: {sorted(missing)}")
-    for col in required:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    if "timestamp" in df.columns:
-        ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-        df["timestamp"] = ts
-        df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
-    else:
-        df = df.sort_index()
-    df = df.dropna(subset=list(required))
-    df = df[(df["high"] >= df[["open","close"]].max(axis=1)) & (df["low"] <= df[["open","close"]].min(axis=1))]
-    df = df.drop_duplicates(subset=["timestamp"] if "timestamp" in df.columns else None, keep="last")
-    if max_rows and len(df) > int(max_rows):
-        df = df.tail(int(max_rows)).copy()
-    features = extract_market_features(df, df, df)
-    rec = {
-        "type": "historical_dataset",
-        "source": source,
-        "symbol": symbol,
-        "interval_minutes": int(interval_minutes),
-        "rows": int(len(df)),
-        "start": df["timestamp"].iloc[0].isoformat() if "timestamp" in df.columns and len(df) else None,
-        "end": df["timestamp"].iloc[-1].isoformat() if "timestamp" in df.columns and len(df) else None,
-        "summary_features": features,
-    }
-    with _COG_LOCK:
-        _append_jsonl(_COG_EXPERIENCE_FILE, rec, _COG_EXPERIENCE_BUFFER, 10000)
-    return {"data": df, "record": rec}
-
-
-
-_load_cognitive_state()
-
-# Preserve the battle-tested V26 public implementations and decorate their output
-# rather than replacing their core detector math.
-_CORE_FULL_ANALYZE = _core_full_analyze
-_CORE_MANAGE_POSITION = _core_manage_position
-_BASE_FULL_ANALYZE_V26 = _CORE_FULL_ANALYZE
-_BASE_MANAGE_POSITION_V26 = _CORE_MANAGE_POSITION
-
-
-
-
-
-
-def compare_candidates(candidates):
-    """Global candidate comparison with quality, uncertainty, and contradiction penalties."""
-    rows = []
-    for c in candidates or []:
-        if not isinstance(c, dict):
-            continue
-        q = _finite(c.get("trade_quality", c.get("setup_quality")), 0.0)
-        conf = _finite(c.get("confidence"), 50.0)
-        unc = _finite(c.get("uncertainty"), 50.0)
-        rr = min(_finite(c.get("rr")), 6.0)
-        contradiction = _finite((c.get("thesis") or {}).get("contradiction_score"), 0.0)
-        dataq = _finite((c.get("research_snapshot") or {}).get("data_quality", 1.0), 1.0)
-        score = q * 0.62 + conf * 0.16 + rr * 2.2 + dataq * 4.0 - contradiction * 0.55 - unc * 0.08
-        rows.append((score, c))
-    rows.sort(key=lambda x: x[0], reverse=True)
-    for rank, (score, c) in enumerate(rows, 1):
-        c["global_rank"] = rank
-        c["global_candidate_score"] = round(float(score), 3)
-    return [c for _, c in rows]
-
-
-
-
-
-
-def _format_full_payload(payload):
-    if not isinstance(payload, dict):
-        return html.escape(str(payload))
-    mode = "ON" if payload.get("mode") else "OFF"
-    champ = payload.get("champion") or {}
-    model = champ.get("model_version", "Belum ada") if isinstance(champ, dict) else "Belum ada"
-    threshold = champ.get("confidence_min", payload.get("manual_threshold", "—")) if isinstance(champ, dict) else payload.get("manual_threshold", "—")
-    worker = payload.get("cognitive_worker") or {}
-    worker_state = "ACTIVE" if worker.get("worker_alive") else "OFF"
-    ticks = int(worker.get("worker_ticks", 0) or 0)
-    return (
-        f"Status: <b>{mode}</b>\n"
-        f"Champion: <code>{html.escape(str(model))}</code>\n"
-        f"Confidence min: <b>{html.escape(str(threshold))}%</b>\n"
-        f"Experience: <b>{int(payload.get('experience_samples', 0) or 0)}</b>\n"
-        f"Learning cycles: <b>{int(payload.get('learning_cycles', 0) or 0)}</b>\n"
-        f"Promotions: <b>{int(payload.get('promotion_count', 0) or 0)}</b>\n"
-        f"Beliefs: <b>{len(_FULL_BELIEFS.get('beliefs') or {})}</b>\n"
-        f"Belief revisions: <b>{int(_FULL_BELIEFS.get('revisions', 0) or 0)}</b>\n"
-        f"Cognitive worker: <b>{worker_state}</b>\n"
-        f"Research ticks: <b>{ticks}</b>"
-    )
-
-
-# =============================================================================
-# LIVE EXPERIENCE BRIDGE
-# Main.py may call these hooks after each scan/close. They never access Binance.
-# =============================================================================
-_COG_SEEN_OUTCOME_KEYS = set()
-
-
-
-
-
-# Keep exported public API explicit and stable for main.py /ganti validation.
-__all__ = [
-    "full_analyze", "manage_position", "get_best_signal", "score_direction", "swing_pts",
-    "set_learning_model", "get_learning_model_info", "full_command",
-    "build_research_snapshot", "autopsy_trade", "analyze_counterfactual",
-    "revise_belief", "get_belief", "compare_candidates", "ML_FEATURE_NAMES",
-    "extract_market_features", "record_market_observation", "record_candidate_observation",
-    "record_trade_outcome", "evidence_discussion", "get_belief_state", "revise_belief",
-    "discover_market_clusters", "detect_feature_drift", "research_brain_cycle", "extract_time_context", "_time_effect_from_outcomes",
-    "get_full_cognitive_status", "ingest_historical_ohlcv", "full_learning_review",
-    "get_cognitive_status", "get_learning_schema", "reset_cognitive_memory", "ingest_historical_ohlcv",
-    "ingest_live_candidate", "ingest_live_outcome", "full_learning_review",
-    "TRAIL_R_LADDER", "TRAIL_ENGINE_VERSION", "MIN_RR", "MAX_RR",
-]
-
-# =============================================================================
-# V32 COGNITIVE RESEARCH ENGINE
-# =============================================================================
-# This section intentionally lives after the older cognitive layer so the exported
-# functions below become the single public behavior. It is research-only: it does
-# not send orders, call Binance, or forcibly tighten live signal frequency.
-
-V32_VERSION = "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED"
-V32_SCHEMA = "full_learning_cognitive_v2"
-V32_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
-V32_STATE_FILE = V32_STATE_DIR / "v32_brain_state.json"
-V32_EXPERIENCE_FILE = V32_STATE_DIR / "v32_experience.jsonl"
-V32_LESSON_FILE = V32_STATE_DIR / "v32_lessons.jsonl"
-V32_POLICY_FILE = V32_STATE_DIR / "v32_policy.json"
-V32_TIMEZONE = os.getenv("FULL_TIMEZONE", "Asia/Jakarta")
-
-V32_MIN_OUTCOMES = 8
-V32_MIN_WIN = 3
-V32_MIN_LOSS = 3
-V32_MIN_CELL = 8
-V32_RESEARCH_WINDOW = 2500
-V32_REVIEW_INTERVAL = max(5.0, float(os.getenv("FULL_REVIEW_INTERVAL", "30")))
-V32_SINGLE_EVENT_MAX_BELIEF_DELTA = 0.035
-V32_POLICY_MIN_STABILITY_REVIEWS = 3
-V32_EXPLORATION_SHARE = 0.15
-
-try:
-    V32_TZ = ZoneInfo(V32_TIMEZONE) if ZoneInfo else timezone(timedelta(hours=7))
-except Exception:
-    V32_TZ = timezone(timedelta(hours=7))
-
-_V32_LOCK = threading.RLock()
-_V32_STOP = threading.Event()
-_V32_WAKE = threading.Event()
-_V32_THREAD = None
-_V32_TICKS = 0
-_V32_LAST_ERROR = None
-_V32_NOTIFY = None
-_V32_LAST_TELEGRAM_NOTIFY = 0.0
-_V32_TELEGRAM_MIN_INTERVAL = max(30.0, float(os.getenv("FULL_TELEGRAM_MIN_INTERVAL", "90")))
-
-_V32_STATE = {
-    "schema": V32_SCHEMA,
-    "version": V32_VERSION,
-    "observations": 0,
-    "candidates": 0,
-    "outcomes": 0,
-    "wins": 0,
-    "losses": 0,
-    "autopsies": 0,
-    "counterfactuals": 0,
-    "belief_revisions": 0,
-    "research_questions": 0,
-    "resolved_questions": 0,
-    "model_candidates": 0,
-    "model_promotions": 0,
-    "drift_score": 0.0,
-    "drift_status": "UNKNOWN",
-    "time_effect": {"status": "INSUFFICIENT", "usable": False},
-    "coverage": {"candidate_count": 0, "live_candidate_count": 0, "shadow_count": 0, "coverage_rate": 0.0},
-    "calibration": {"status": "INSUFFICIENT", "buckets": []},
-    "last_review": None,
-    "last_model_update": None,
-    "last_model_sample_count": 0,
-    "last_reviewed_outcomes": 0,
-    "last_policy_revision": None,
-    "policy_revision_count": 0,
-}
-_V32_BELIEFS = {}
-_V32_BUFFER = []
-_V32_QUESTIONS = []
-_V32_LAST_FILE_OFFSET = 0
-
-
-def _v32_json_load(path, default):
-    try:
-        if path.exists():
-            obj = json.loads(path.read_text(encoding="utf-8"))
-            return obj if isinstance(obj, type(default)) else default
-    except Exception as exc:
-        log.warning(f"[V32] load {path.name} gagal: {exc}")
-    return default
-
-
-def _v32_json_save(path, obj):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(obj, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
-        os.replace(tmp, path)
-        return True
-    except Exception as exc:
-        log.warning(f"[V32] save {path.name} gagal: {exc}")
-        return False
-
-
-def _v32_load_state():
-    global _V32_STATE, _V32_BELIEFS
-    with _V32_LOCK:
-        st = _v32_json_load(V32_STATE_FILE, {})
-        if isinstance(st, dict):
-            _V32_STATE.update(st)
-        _V32_BELIEFS = _v32_json_load(V32_POLICY_FILE, {}) or {}
-        if not isinstance(_V32_BELIEFS, dict):
-            _V32_BELIEFS = {}
-
-
-def _v32_append(path, row, memory, max_mem=8000):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False, allow_nan=False, default=str) + "\n")
-        memory.append(row)
-        if len(memory) > max_mem:
-            del memory[:-max_mem]
-    except Exception as exc:
-        log.warning(f"[V32] append gagal: {exc}")
-
-
-def _v32_f(v, default=0.0):
-    try:
-        x = float(v)
-        return x if np.isfinite(x) else float(default)
-    except Exception:
-        return float(default)
-
-
-def _v32_prob(v):
-    x = _v32_f(v, 0.5)
-    return max(0.0, min(1.0, x))
-
-
-def _v32_hour_context(timestamp=None):
-    dt = None
-    try:
-        if timestamp is not None:
-            ts = pd.Timestamp(timestamp)
-            if ts.tzinfo is None:
-                ts = ts.tz_localize("UTC")
-            dt = ts.to_pydatetime().astimezone(V32_TZ)
-    except Exception:
-        dt = None
-    if dt is None:
-        dt = datetime.now(timezone.utc).astimezone(V32_TZ)
-    hour = dt.hour + dt.minute / 60.0
-    angle = 2.0 * np.pi * hour / 24.0
-    if 0 <= dt.hour < 6:
-        session = "NIGHT_EARLY"
-    elif dt.hour < 12:
-        session = "MORNING"
-    elif dt.hour < 18:
-        session = "AFTERNOON"
-    else:
-        session = "EVENING_NIGHT"
-    return {
-        "timezone": V32_TIMEZONE,
-        "hour_local": int(dt.hour),
-        "minute_local": int(dt.minute),
-        "day_of_week": int(dt.weekday()),
-        "session": session,
-        "hour_sin": float(np.sin(angle)),
-        "hour_cos": float(np.cos(angle)),
-        "is_weekend": bool(dt.weekday() >= 5),
-    }
-
-
-def _v32_record_experience(row):
-    row = dict(row or {})
-    with _V32_LOCK:
-        _v32_append(V32_EXPERIENCE_FILE, row, _V32_BUFFER)
-        typ = str(row.get("type") or "")
-        if typ == "market_observation":
-            _V32_STATE["observations"] = int(_V32_STATE.get("observations", 0)) + 1
-        elif typ == "candidate":
-            _V32_STATE["candidates"] = int(_V32_STATE.get("candidates", 0)) + 1
-        elif typ == "trade_outcome":
-            _V32_STATE["outcomes"] = int(_V32_STATE.get("outcomes", 0)) + 1
-            result = row.get("outcome") if isinstance(row.get("outcome"), dict) else row
-            final_r = _v32_f((result or {}).get("final_r", row.get("final_r", 0.0)))
-            if final_r > 0:
-                _V32_STATE["wins"] = int(_V32_STATE.get("wins", 0)) + 1
-            elif final_r < 0:
-                _V32_STATE["losses"] = int(_V32_STATE.get("losses", 0)) + 1
-        _v32_json_save(V32_STATE_FILE, _V32_STATE)
-    # Wake the worker immediately; it remains rate-limited by its own review cycle.
-    _V32_WAKE.set()
-    return row
-
-
-def _v32_current_records(limit=V32_RESEARCH_WINDOW):
-    records = []
-    try:
-        if V32_EXPERIENCE_FILE.exists():
-            with V32_EXPERIENCE_FILE.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    try:
-                        row = json.loads(line)
-                        if isinstance(row, dict):
-                            records.append(row)
-                    except Exception:
-                        continue
-    except Exception as exc:
-        log.warning(f"[V32] read experience gagal: {exc}")
-    return records[-max(1, int(limit)):]
-
-
-def _v32_outcome_payload(row):
-    if not isinstance(row, dict):
-        return {}
-    p = row.get("outcome")
-    return p if isinstance(p, dict) else row
-
-
-def _v32_outcomes(records=None):
-    rows = records if records is not None else _v32_current_records()
-    return [r for r in rows if isinstance(r, dict) and r.get("type") == "trade_outcome"]
-
-
-def _v32_candidate_records(records=None):
-    rows = records if records is not None else _v32_current_records()
-    return [r for r in rows if isinstance(r, dict) and r.get("type") == "candidate"]
-
-
-def _v32_market_records(records=None):
-    rows = records if records is not None else _v32_current_records()
-    return [r for r in rows if isinstance(r, dict) and r.get("type") == "market_observation"]
-
-
-def _v32_effective_sample(rows):
-    rows = [r for r in rows if isinstance(r, dict)]
-    if not rows:
-        return 0.0
-    symbols = len({str(r.get("symbol")) for r in rows if r.get("symbol")})
-    regimes = len({str(r.get("regime") or r.get("market_regime")) for r in rows if r.get("regime") or r.get("market_regime")})
-    times = len({str((r.get("time_context") or {}).get("session")) for r in rows})
-    diversity = max(1.0, min(2.5, 1.0 + 0.12 * symbols + 0.10 * regimes + 0.05 * times))
-    return float(len(rows) / diversity)
-
-
-def _v32_wilson(pos, n, z=1.96):
-    if n <= 0:
-        return (0.0, 1.0)
-    p = pos / n
-    den = 1.0 + z*z/n
-    center = (p + z*z/(2*n)) / den
-    half = z * np.sqrt(max(0.0, p*(1-p)/n + z*z/(4*n*n))) / den
-    return (max(0.0, center-half), min(1.0, center+half))
-
-
-def _v32_calibration(outcomes):
-    if len(outcomes) < V32_MIN_OUTCOMES:
-        return {"status": "INSUFFICIENT", "sample_size": len(outcomes), "buckets": [], "error": None}
-    buckets = []
-    for lo, hi in ((0, .40),(.40,.50),(.50,.60),(.60,.70),(.70,.80),(.80,1.01)):
-        vals=[]
-        for r in outcomes:
-            p = _v32_f(r.get("confidence"), 50.0) / 100.0
-            if lo <= p < hi:
-                payload=_v32_outcome_payload(r)
-                fr=_v32_f(payload.get("final_r"), 0.0)
-                vals.append((p, 1.0 if fr>0 else 0.0))
-        if not vals:
-            continue
-        pred=float(np.mean([x[0] for x in vals])); actual=float(np.mean([x[1] for x in vals])); n=len(vals)
-        low, high=_v32_wilson(sum(x[1] for x in vals), n)
-        buckets.append({"range":f"{int(lo*100)}-{min(99,int(hi*100))}%","n":n,"predicted":round(pred,4),"actual":round(actual,4),"error":round(actual-pred,4),"ci_low":round(low,4),"ci_high":round(high,4)})
-    if len(buckets) < 2:
-        return {"status":"INSUFFICIENT","sample_size":len(outcomes),"buckets":buckets,"error":None}
-    monotonic = all(buckets[i]["actual"] <= buckets[i+1]["actual"] + 0.08 for i in range(len(buckets)-1))
-    mae = float(np.mean([abs(b["error"]) for b in buckets]))
-    return {"status":"GOOD" if monotonic and mae < .15 else "NEEDS_REVIEW","sample_size":len(outcomes),"buckets":buckets,"mae":round(mae,4),"monotonic":monotonic}
-
-
-def _v32_time_effect(outcomes):
-    if len(outcomes) < V32_MIN_OUTCOMES:
-        return {"status":"INSUFFICIENT","usable":False,"sample_size":len(outcomes),"effects":[]}
-    rows=[]
-    for r in outcomes:
-        tc=r.get("time_context") if isinstance(r.get("time_context"),dict) else _v32_hour_context(r.get("entry_timestamp") or r.get("timestamp"))
-        session=tc.get("session")
-        if not session or session=="UNKNOWN": continue
-        fr=_v32_f(_v32_outcome_payload(r).get("final_r"),0.0)
-        rows.append((session,fr))
-    if len(rows)<V32_MIN_OUTCOMES:
-        return {"status":"INSUFFICIENT","usable":False,"sample_size":len(rows),"effects":[]}
-    overall=float(np.mean([x[1] for x in rows])); effects=[]
-    for session in sorted({x[0] for x in rows}):
-        vals=[x[1] for x in rows if x[0]==session]
-        n=len(vals)
-        if n<V32_MIN_CELL: continue
-        mean=float(np.mean(vals)); sd=float(np.std(vals,ddof=1)) if n>1 else 0.0; se=sd/np.sqrt(n) if sd>0 else 0.0
-        t=(mean-overall)/se if se>1e-12 else 0.0
-        shrink=min(1.0,n/40.0)
-        effect=float(np.tanh(mean-overall)*shrink)
-        effects.append({"session":session,"n":n,"mean_r":round(mean,5),"delta":round(mean-overall,5),"t_like":round(float(t),3),"effect":round(effect,5)})
-    effects.sort(key=lambda x:abs(x["effect"]),reverse=True)
-    usable=bool(effects and effects[0]["n"]>=24 and abs(effects[0]["t_like"])>=2.0)
-    return {"status":"SUPPORTED" if usable else "WEAK_SIGNAL","usable":usable,"sample_size":len(rows),"overall_mean_r":round(overall,5),"effects":effects,"timezone":V32_TIMEZONE}
-
-
-def _v32_conditional_cells(outcomes, key_fn, min_cell=V32_MIN_CELL):
-    cells={}
-    for r in outcomes:
-        key=key_fn(r)
-        if key is None: continue
-        payload=_v32_outcome_payload(r); fr=_v32_f(payload.get("final_r"),0.0)
-        cells.setdefault(key,[]).append(fr)
-    out=[]
-    for key,vals in cells.items():
-        if len(vals)<min_cell: continue
-        pos=sum(1 for x in vals if x>0); n=len(vals); low,high=_v32_wilson(pos,n)
-        out.append({"key":key,"n":n,"mean_r":round(float(np.mean(vals)),5),"positive_rate":round(pos/n,4),"ci_low":round(low,4),"ci_high":round(high,4)})
-    return sorted(out,key=lambda x:x["n"],reverse=True)
-
-
-def _v32_coverage(candidates):
-    n=len(candidates)
-    live=sum(1 for r in candidates if not r.get("rejected_reason") and str(r.get("decision") or "").upper() in {"BUY","SELL"})
-    shadow=sum(1 for r in candidates if r.get("rejected_reason") or str(r.get("decision") or "").upper() not in {"BUY","SELL"})
-    return {"candidate_count":n,"live_candidate_count":live,"shadow_count":shadow,"coverage_rate":round(live/max(1,n),4),"exploration_share":V32_EXPLORATION_SHARE}
-
-
-def _v32_autopsy(record):
-    payload=_v32_outcome_payload(record); fr=_v32_f(payload.get("final_r"),0.0); mfe=_v32_f(payload.get("mfe_r",record.get("mfe_r")),0.0); mae=_v32_f(payload.get("mae_r",record.get("mae_r")),0.0)
-    gb=_v32_f(payload.get("giveback_ratio",record.get("giveback_ratio")),0.0)
-    result=str(record.get("result") or payload.get("result") or "").lower()
-    if fr>0: cls="SUCCESS"
-    elif mfe>=1.0 and gb>=0.5: cls="MANAGEMENT_OR_PROTECTION_FAILURE"
-    elif mfe<0.35 and fr<0: cls="ENTRY_OR_THESIS_FAILURE"
-    else: cls="AMBIGUOUS_FAILURE"
-    if result in {"execution_error","data_error","strategy_error"}: cls="EXECUTION_OR_DATA_FAILURE"
-    return {"type":"autopsy","timestamp":time.time(),"symbol":record.get("symbol"),"class":cls,"final_r":fr,"mfe_r":mfe,"mae_r":mae,"giveback_ratio":gb,"confidence":_v32_f(record.get("confidence"),50),"archetype":record.get("archetype"),"regime":record.get("market_regime",record.get("regime")),"thesis":record.get("thesis") or (record.get("research_snapshot") or {}).get("thesis"),"lesson_type":"preserve" if cls=="SUCCESS" else "repair"}
-
-
-def _v32_counterfactuals(record):
-    p=_v32_outcome_payload(record); actual=_v32_f(p.get("final_r"),0.0); mfe=_v32_f(p.get("mfe_r"),0.0); gb=_v32_f(p.get("giveback_ratio"),0.0)
-    rows=[]
-    if actual<0:
-        rows.append({"policy":"require_reclaim","simulated_delta_r":round(0.10*max(0,mfe),4) if record.get("selected_sweep") else 0.0})
-        rows.append({"policy":"delay_entry_1_bar","simulated_delta_r":round(-0.05*abs(_v32_f(p.get("mae_r"),0.0)),4)})
-    if actual<0 and mfe>=1.0 and gb>=0.5:
-        rows.append({"policy":"adaptive_giveback_trail","simulated_delta_r":round(0.20*mfe,4)})
+def _verify_protection_pair(symbol, is_buy, tp_price, sl_price, quantity):
+    info = get_symbol_filters(symbol)
+    tick, step = info["tickSize"], info["stepSize"]
+    qty = round_qty(quantity, step, info.get("qtyPrecision", 8))
+    rows = _get_open_algo_orders(symbol)
+    close_side = "SELL" if is_buy else "BUY"
+    tp_ok = any(_protection_matches(r, symbol, close_side, "TAKE_PROFIT_MARKET", tp_price, qty, tick, step) for r in rows)
+    sl_ok = any(_protection_matches(r, symbol, close_side, "STOP_MARKET", sl_price, qty, tick, step) for r in rows)
+    if not (tp_ok and sl_ok):
+        raise RuntimeError(f"protection verification gagal: TP={tp_ok}, SL={sl_ok}, algo={len(rows)}")
     return rows
 
 
-def _v32_stable_policy_update(name, observed, evidence_n, condition="global", source="research"):
-    """Update a belief only on fresh, batched evidence; repeated reviews of the same sample do nothing."""
-    n = int(evidence_n or 0)
-    if n < 5:
+def _reconcile_position_quantity(symbol):
+    real = get_real_position(symbol)
+    if not real:
         return None
-    key=f"{name}|{condition}"
-    with _V32_LOCK:
-        b=dict(_V32_BELIEFS.get(key) or {"name":name,"condition":condition,"value":observed,"strength":0.25,"samples":0,"stable_reviews":0,"last_change":0.0})
-        old=_v32_f(b.get("value"),observed); strength=max(0.05,min(0.98,_v32_f(b.get("strength"),0.25)))
-        effective=min(1.0,n/200.0)
-        # Single review is capped. Fresh evidence must accumulate before policy moves.
-        rate=min(V32_SINGLE_EVENT_MAX_BELIEF_DELTA, 0.01+0.025*effective)
-        new=old + np.clip(_v32_f(observed)-old,-rate,rate)
-        changed=abs(new-old)>1e-12
-        stable=int(b.get("stable_reviews",0) or 0) + (1 if changed else 0)
-        b.update({"value":float(new),"strength":float(min(.98,strength+0.01*effective)),"samples":int(b.get("samples",0) or 0)+n,"stable_reviews":stable,"last_change":float(abs(new-old)),"last_source":source,"last_revision":time.time()})
-        _V32_BELIEFS[key]=b
-        if changed:
-            _V32_STATE["belief_revisions"]=int(_V32_STATE.get("belief_revisions",0))+1
-            _V32_STATE["last_policy_revision"]=time.time()
-            _V32_STATE["policy_revision_count"]=int(_V32_STATE.get("policy_revision_count",0))+1
-        _v32_json_save(V32_POLICY_FILE,_V32_BELIEFS); _v32_json_save(V32_STATE_FILE,_V32_STATE)
-        return dict(b) if changed else None
+    qty = abs(float(real.get("positionAmt", 0) or 0))
+    return (real, qty) if qty > 0 else (real, 0.0)
 
 
-def get_v32_belief(name, condition="global", default=None):
-    with _V32_LOCK:
-        return dict(_V32_BELIEFS.get(f"{name}|{condition}") or {"name":name,"condition":condition,"value":default,"strength":0.20,"samples":0,"stable_reviews":0})
+def _verified_market_close(symbol, is_buy, reason, chat_id=None, max_retries=1):
+    """Close actual Binance position with reconcile-before-retry semantics."""
+    last_error = None
+    for attempt in range(max_retries + 1):
+        with _binance_critical_context():
+            real_info = _reconcile_position_quantity(symbol)
+        if real_info is None:
+            return True, None
+        real, qty = real_info
+        if qty <= 0:
+            return True, None
 
-
-def _v32_make_questions(outcomes, candidates, time_effect, calibration, drift):
-    qs=[]
-    if time_effect.get("status") in {"WEAK_SIGNAL","SUPPORTED"}:
-        qs.append("Apakah time-of-day effect bertahan setelah mengontrol setup dan regime?")
-    if calibration.get("status")=="NEEDS_REVIEW":
-        qs.append("Apakah confidence buckets masih monotonic dan terkalibrasi?")
-    if drift.get("status") in {"MEDIUM","HIGH"}:
-        qs.append("Apakah recent market distribution berbeda enough untuk memerlukan challenger?")
-    if outcomes:
-        failures=[_v32_autopsy(x) for x in outcomes if _v32_f(_v32_outcome_payload(x).get("final_r"),0)<0]
-        mgmt=sum(1 for x in failures if x["class"]=="MANAGEMENT_OR_PROTECTION_FAILURE")
-        entry=sum(1 for x in failures if x["class"]=="ENTRY_OR_THESIS_FAILURE")
-        if mgmt and mgmt>entry: qs.append("Apakah management/trailing saat ini lebih lemah daripada entry thesis?")
-        elif entry: qs.append("Apakah failure cluster sebenarnya berasal dari thesis/location/timing?")
-    # Deduplicate while keeping the list bounded.
-    uniq=[]
-    for q in qs:
-        if q not in uniq: uniq.append(q)
-    return uniq[:8]
-
-
-def _v32_model_fit(outcomes):
-    # Lightweight research-only model. It does not replace the main live model.
-    if len(outcomes)<V32_MIN_OUTCOMES: return {"status":"INSUFFICIENT"}
-    rows=[]; ys=[]
-    for r in outcomes:
-        lf=r.get("learning_features")
-        if not isinstance(lf,dict): continue
-        p=_v32_f(r.get("confidence"),50.0)/100.0
-        payload=_v32_outcome_payload(r); y=1.0 if _v32_f(payload.get("final_r"),0.0)>0 else 0.0
-        rows.append([p,_v32_f(lf.get("setup_quality"),0)/100.0,_v32_f(lf.get("entry_location_score"),50)/100.0,_v32_f(lf.get("rr"),0)/4.0,_v32_f(lf.get("selected_sweep"),0),_v32_f((r.get("time_context") or {}).get("hour_sin"),0),_v32_f((r.get("time_context") or {}).get("hour_cos"),1)])
-        ys.append(y)
-    if len(rows)<V32_MIN_OUTCOMES: return {"status":"INSUFFICIENT"}
-    X=np.asarray(rows,float); y=np.asarray(ys,float)
-    split=max(int(len(X)*0.70),V32_MIN_OUTCOMES-10)
-    split=min(split,len(X)-10)
-    mu=X[:split].mean(axis=0); sd=X[:split].std(axis=0); sd[sd<1e-8]=1.0
-    Z=(X-mu)/sd; Ztr=Z[:split]; ytr=y[:split]; Zte=Z[split:]; yte=y[split:]
-    w=np.zeros(Z.shape[1]); b=0.0
-    for _ in range(220):
-        z=np.clip(Ztr@w+b,-8,8); p=1/(1+np.exp(-z)); grad=(Ztr.T@(p-ytr))/len(ytr)+0.01*w; gb=float(np.mean(p-ytr)); w-=0.08*grad; b-=0.08*gb
-    pte=1/(1+np.exp(-np.clip(Zte@w+b,-8,8))); pred=(pte>=0.5).astype(float); acc=float(np.mean(pred==yte)) if len(yte) else 0.0
-    return {"status":"READY","sample_count":len(X),"train_count":len(ytr),"oos_count":len(yte),"oos_accuracy":round(acc,4),"w":w.tolist(),"b":float(b),"mean":mu.tolist(),"scale":sd.tolist(),"feature_names":["confidence","setup_quality","location","rr","sweep","hour_sin","hour_cos"]}
-
-
-def _v32_drift(market):
-    if len(market)<80: return {"status":"UNKNOWN","score":0.0,"features":[]}
-    ref=market[:-40]; recent=market[-40:]
-    keys=sorted(set().union(*(r.get("features",{}).keys() for r in ref+recent)))
-    ds=[]
-    for k in keys:
-        a=np.asarray([_v32_f((r.get("features") or {}).get(k),0.0) for r in ref]); b=np.asarray([_v32_f((r.get("features") or {}).get(k),0.0) for r in recent]); s=float(np.std(a)) or 1.0; d=abs(float(np.mean(b)-np.mean(a)))/s; ds.append((d,k))
-    ds.sort(reverse=True); score=min(1.0,float(np.mean([min(x[0],3)/3 for x in ds]))) if ds else 0.0
-    status="HIGH" if score>=0.45 else "MEDIUM" if score>=0.25 else "LOW"
-    return {"status":status,"score":round(score,4),"features":[{"feature":k,"shift":round(d,3)} for d,k in ds[:10]]}
-
-
-def _v33_log(phase, message, level=logging.INFO):
-    """Structured FULL telemetry for Render logs."""
-    log.log(level, f"[FULL][{phase}] {message}")
-
-def _v33_notify(message, force=False):
-    """Optional low-frequency Telegram heartbeat; never raises into learning."""
-    global _V32_LAST_TELEGRAM_NOTIFY
-    cb = _V32_NOTIFY
-    if not callable(cb):
-        return
-    now = time.time()
-    if not force and now - _V32_LAST_TELEGRAM_NOTIFY < _V32_TELEGRAM_MIN_INTERVAL:
-        return
-    try:
-        cb(str(message))
-        _V32_LAST_TELEGRAM_NOTIFY = now
-    except Exception as exc:
-        log.debug(f"[FULL][TELEGRAM] heartbeat gagal: {exc}")
-
-def _v32_research_cycle():
-    _v33_log("CYCLE", "START")
-    records=_v32_current_records()
-    outcomes=_v32_outcomes(records); candidates=_v32_candidate_records(records); market=_v32_market_records(records)
-    with _V32_LOCK:
-        prev_outcomes=int(_V32_STATE.get("last_reviewed_outcomes",0) or 0)
-        prev_model_samples=int(_V32_STATE.get("last_model_sample_count",0) or 0)
-    fresh_outcomes=max(0,len(outcomes)-prev_outcomes)
-    _v33_log("DATA", f"loaded observations={len(market)} candidates={len(candidates)} outcomes={len(outcomes)} fresh_outcomes={fresh_outcomes}")
-    coverage=_v32_coverage(candidates)
-    _v33_log("FREQUENCY", f"candidates={coverage.get('candidate_count',0)} live={coverage.get('live_candidate_count',0)} shadow={coverage.get('shadow_count',0)} rate={coverage.get('coverage_rate',0):.1%}")
-    calibration=_v32_calibration(outcomes)
-    _v33_log("CALIBRATION", f"status={calibration.get('status','INSUFFICIENT')} samples={len(outcomes)}")
-    time_effect=_v32_time_effect(outcomes)
-    _v33_log("TIME", f"status={time_effect.get('status','INSUFFICIENT')} usable={bool(time_effect.get('usable'))}")
-    drift=_v32_drift(market)
-    _v33_log("DRIFT", f"status={drift.get('status','UNKNOWN')} score={drift.get('score',0):.3f}")
-    questions=_v32_make_questions(outcomes,candidates,time_effect,calibration,drift)
-    if questions:
-        _v33_log("HYPOTHESIS", f"research_questions={len(questions)}")
-        for q in questions[:5]: _v33_log("HYPOTHESIS", q, logging.DEBUG)
-    model={"status":"INSUFFICIENT"}
-    if len(outcomes) >= V32_MIN_OUTCOMES and (prev_model_samples == 0 or len(outcomes)-prev_model_samples >= 10):
-        model=_v32_model_fit(outcomes)
-        if model.get("status")=="READY":
-            with _V32_LOCK:
-                _V32_STATE["model_candidates"]=int(_V32_STATE.get("model_candidates",0))+1
-                _V32_STATE["last_model_update"]=time.time()
-                _V32_STATE["last_model_sample_count"]=len(outcomes)
-            _v33_log("MODEL", f"research_fit=READY samples={model.get('sample_count',0)} oos={model.get('oos_count',0)}")
-        else:
-            _v33_log("MODEL", f"research_fit={model.get('status','INSUFFICIENT')} samples={model.get('sample_count',0)}")
-    else:
-        _v33_log("MODEL", f"research_fit=HOLD samples={len(outcomes)} fresh_outcomes={fresh_outcomes}")
-    lessons=[]
-    if fresh_outcomes>0:
-        batch=outcomes[-min(25,fresh_outcomes):]
-        for row in batch:
-            dx=_v32_autopsy(row); lessons.append(dx); _v33_log("AUTOPSY", f"{dx.get('symbol','?')} class={dx.get('class','UNKNOWN')}", logging.DEBUG)
-            for _ in _v32_counterfactuals(row):
-                with _V32_LOCK: _V32_STATE["counterfactuals"]=int(_V32_STATE.get("counterfactuals",0))+1
-        with _V32_LOCK: _V32_STATE["autopsies"]=int(_V32_STATE.get("autopsies",0))+len(lessons)
-        for lesson in lessons[-10:]: _v32_append(V32_LESSON_FILE,lesson,[])
-    _v33_log("AUTOPSY", f"reviewed={len(lessons)} counterfactuals_total={_V32_STATE.get('counterfactuals',0)}")
-    # Policy/belief changes require fresh batches; repeated scans of the same outcomes cannot move them.
-    if fresh_outcomes>=5 and time_effect.get("usable"):
-        best=time_effect["effects"][0]
-        revised=_v32_stable_policy_update("time_effect", float(best.get("delta",0.0)), best.get("n",0), condition=str(best.get("session")), source="time_research")
-        _v33_log("BELIEF", f"time_effect reviewed; changed={bool(revised)}")
-    else:
-        _v33_log("BELIEF", "time effect observed; no policy change without fresh sufficient evidence", logging.DEBUG)
-    if fresh_outcomes>=5 and calibration.get("status")=="GOOD":
-        avg_error=float(calibration.get("mae",0.0) or 0.0)
-        revised=_v32_stable_policy_update("confidence_calibration_error",avg_error,fresh_outcomes,condition="global",source="calibration")
-        _v33_log("BELIEF", f"calibration belief reviewed; changed={bool(revised)}")
-    else:
-        _v33_log("BELIEF", "calibration observed; no policy change without fresh evidence", logging.DEBUG)
-    with _V32_LOCK:
-        _V32_STATE.update({"version":V32_VERSION,"time_effect":time_effect,"calibration":calibration,"coverage":coverage,"drift_score":drift.get("score",0.0),"drift_status":drift.get("status","UNKNOWN"),"research_questions":len(questions),"resolved_questions":max(0,int(_V32_STATE.get("resolved_questions",0))),"last_review":time.time(),"last_reviewed_outcomes":len(outcomes)})
-        _v32_json_save(V32_STATE_FILE,_V32_STATE)
-    _v33_log("CYCLE", f"COMPLETE observations={len(market)} candidates={len(candidates)} outcomes={len(outcomes)} fresh_outcomes={fresh_outcomes}")
-    _v33_notify(f"🧠 FULL masih belajar…\nCycle selesai • {len(market)} observations • {len(candidates)} candidates", force=False)
-    return {"schema":V32_SCHEMA,"version":V32_VERSION,"outcomes":len(outcomes),"candidates":len(candidates),"coverage":coverage,"calibration":calibration,"time_effect":time_effect,"drift":drift,"questions":questions,"model_research":model,"lessons_reviewed":len(lessons),"fresh_outcomes":fresh_outcomes}
-
-
-def _v32_loop():
-    global _V32_TICKS,_V32_LAST_ERROR
-    _v33_log("WORKER", "STARTED")
-    while not _V32_STOP.is_set():
+        side = "SELL" if is_buy else "BUY"
         try:
-            _v32_research_cycle()
-            _V32_TICKS += 1
-            _V32_LAST_ERROR = None
-        except Exception as exc:
-            _V32_LAST_ERROR = str(exc)[:500]
-            log.exception("[FULL][ERROR] research cycle gagal")
-            _v33_notify("⚠️ FULL mengalami error penelitian. Worker tetap hidup dan akan mencoba lagi.", force=True)
-        _V32_WAKE.wait(V32_REVIEW_INTERVAL)
-        _V32_WAKE.clear()
-    _v33_log("WORKER", "STOPPED")
+            resp = place_market_order(symbol, side, qty, reduce_only=True)
+        except BinanceUnknownExecutionError as e:
+            last_error = e
+            # Do NOT immediately send another order. Reconcile first.
+            try:
+                real_after = get_real_position(symbol)
+            except Exception:
+                real_after = None
+            if real_after is None or abs(float(real_after.get("positionAmt", 0) or 0)) <= 0:
+                return True, None
+            if attempt >= max_retries:
+                raise
+            continue
+        except Exception as e:
+            last_error = e
+            # Even a known/rejected response can race with an exchange-side fill.
+            # Reconcile actual position before declaring the close failed.
+            try:
+                real_after = get_real_position(symbol)
+                remaining_after = abs(float(real_after.get("positionAmt", 0) or 0)) if real_after else 0.0
+                if remaining_after <= 0:
+                    return True, None
+            except Exception:
+                pass
+            raise
+
+        try:
+            real_after = get_real_position(symbol)
+        except Exception as e:
+            last_error = e
+            if attempt >= max_retries:
+                raise RuntimeError(f"market close response received but position verification failed: {e}") from e
+            continue
+        remaining = abs(float(real_after.get("positionAmt", 0) or 0)) if real_after else 0.0
+        if remaining <= 0:
+            exit_price = None
+            if isinstance(resp, dict):
+                try:
+                    exit_price = float(resp.get("avgPrice") or 0) or None
+                except Exception:
+                    exit_price = None
+            return True, exit_price
+        if attempt >= max_retries:
+            raise RuntimeError(f"market close submitted but position remains open: {remaining}")
+
+    raise RuntimeError(f"market close failed: {last_error}")
 
 
-def _v32_start():
-    global _V32_THREAD
-    with _V32_LOCK:
-        if _V32_THREAD is None or not _V32_THREAD.is_alive():
-            _V32_STOP.clear(); _V32_WAKE.set()
-            _V32_THREAD=threading.Thread(target=_v32_loop,name="full-v32-brain",daemon=True)
-            _V32_THREAD.start()
-        else:
-            _V32_WAKE.set()
-
-
-def _v32_stop():
-    _V32_STOP.set(); _V32_WAKE.set()
-
-
-def get_v32_status():
-    with _V32_LOCK:
-        return {"version":V32_VERSION,"worker_alive":bool(_V32_THREAD is not None and _V32_THREAD.is_alive()),"ticks":_V32_TICKS,"last_error":_V32_LAST_ERROR,"state":dict(_V32_STATE),"beliefs":len(_V32_BELIEFS)}
-
-
-def _v32_time_features_into(signal, timestamp=None):
-    tc=_v32_hour_context(timestamp)
-    out=dict(signal or {})
-    out["time_context"]=tc
-    out["time_aware_research"] = True
-    return out
-
-
-# V32 public bridge: every strategy result becomes a research observation; actual
-# execution remains owned by main.py.
-_V31_BASE_FULL_ANALYZE = _CORE_FULL_ANALYZE
-_V31_BASE_MANAGE_POSITION = _CORE_MANAGE_POSITION
-
-
-def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None):
-    result = _V31_BASE_FULL_ANALYZE(df_h1, df_m15, df_d1, symbol=symbol, df_btc_h1=df_btc_h1, trade_history=trade_history)
-    ts = _timestamp_from_df(df_m15)
+def set_leverage_verified(symbol, leverage):
+    """Set leverage, and reconcile if the POST response is unknown."""
     try:
-        feats = extract_market_features(df_h1, df_m15, df_d1, df_btc_h1)
-        feats["time_context"] = _v32_hour_context(ts)
-        _v32_record_experience({"type":"market_observation","timestamp":time.time(),"symbol":symbol,"source":"binance","features":feats,"regime":(result or {}).get("market_regime") if isinstance(result,dict) else None,"result":"strategy_result" if isinstance(result,dict) else "no_strategy_result"})
-    except Exception as exc:
-        _v33_log("DATA", f"market observation bridge gagal {symbol}: {exc}", logging.DEBUG)
-    if not isinstance(result, dict):
+        return set_leverage(symbol, leverage)
+    except BinanceUnknownExecutionError:
+        rows = _binance_signed("GET", "/fapi/v2/positionRisk", {"symbol": symbol}, critical=True)
+        for row in rows or []:
+            if row.get("symbol") == symbol and int(float(row.get("leverage", 0) or 0)) == int(leverage):
+                return {"verified": True, "leverage": leverage}
+        raise
+
+
+def set_leverage(symbol, leverage):
+    return _binance_signed("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})
+
+
+def place_limit_order(symbol, side, quantity, price):
+    tick = get_symbol_filters(symbol)["tickSize"]
+    client_id = _new_client_id("ENTRY")
+    params = {
+        "symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
+        "quantity": quantity, "price": round_to_tick(price, tick),
+        "newClientOrderId": client_id,
+    }
+    try:
+        result = _binance_signed("POST", "/fapi/v1/order", params)
+        if isinstance(result, dict):
+            result.setdefault("clientOrderId", client_id)
         return result
+    except BinanceUnknownExecutionError as e:
+        reconciled = _order_query_by_client_id(symbol, client_id)
+        if reconciled is not None:
+            return reconciled
+        e.client_order_id = client_id
+        e.symbol = symbol
+        raise
+
+
+def place_market_order(symbol, side, quantity, reduce_only=False):
+    params = {
+        "symbol": symbol, "side": side, "type": "MARKET",
+        "quantity": quantity, "newOrderRespType": "RESULT",
+    }
+    if reduce_only:
+        params["reduceOnly"] = "true"
+    return _binance_signed("POST", "/fapi/v1/order", params)
+
+
+def cancel_order(symbol, order_id):
+    """Cancel ordinary order. Unknown transport result is reconciled before reporting failure."""
+    if not order_id:
+        return None
     try:
-        result = _v32_time_features_into(result, ts)
-        result.setdefault("learning_features", {})
-        tc = result["time_context"]
-        result["learning_features"].update({"hour_sin":tc["hour_sin"],"hour_cos":tc["hour_cos"],"hour_local":float(tc["hour_local"])/23.0,"is_weekend":float(tc["is_weekend"])})
-        snap = build_research_snapshot(result, df_h1, df_m15, df_d1, symbol=symbol)
-        snap["time_context"] = tc
-        snap["coverage_role"] = "candidate"
-        result["research_snapshot"] = snap
-        result["brain_version"] = V32_VERSION
-        result["cognitive_schema"] = V32_SCHEMA
-    except Exception as exc:
-        log.warning(f"[V32] full_analyze annotation gagal {symbol}: {exc}")
-    return result
-
-
-def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
-    result=_V31_BASE_MANAGE_POSITION(state,df_m15,df_h1,df_d1,symbol=symbol)
-    if isinstance(result,dict):
+        return _binance_signed("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+    except BinanceUnknownExecutionError as e:
         try:
-            tc=_v32_hour_context(_timestamp_from_df(df_m15))
-            result["time_context"]=tc
-            result["trail_research"]={"frequency_neutral":True,"learning_target":"capture_ratio_vs_continuation_survival","uses_actual_position_only":True}
+            st = get_order_status(symbol, order_id)
+            status = str(st.get("status", "")).upper()
+            if status in {"CANCELED", "EXPIRED", "REJECTED"}:
+                return st
+            if status == "FILLED":
+                raise RuntimeError(f"cancel #{order_id} terlambat: order sudah FILLED")
+        except RuntimeError:
+            raise
         except Exception:
             pass
-    return result
+        raise
+    except Exception as e:
+        log.warning(f"[cancel_order] {symbol} #{order_id}: {e}")
+        return None
 
 
-def ingest_live_candidate(signal,h1=None,m15=None,d1=None,rejected_reason=None,source="binance"):
-    sig=dict(signal or {}) if isinstance(signal,dict) else {}
-    tc=sig.get("time_context") if isinstance(sig.get("time_context"),dict) else _v32_hour_context(sig.get("entry_timestamp") or sig.get("timestamp"))
-    snap=sig.get("research_snapshot") if isinstance(sig.get("research_snapshot"),dict) else {}
-    row={"type":"candidate","timestamp":time.time(),"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":_v32_f(sig.get("confidence"),50),"trade_quality":_v32_f(sig.get("trade_quality",sig.get("setup_quality")),0),"archetype":sig.get("archetype"),"regime":sig.get("market_regime") or (snap.get("market") or {}).get("regime"),"time_context":tc,"learning_features":dict(sig.get("learning_features") or {}),"research_snapshot":snap,"signal":sig,"rejected_reason":rejected_reason}
-    return _v32_record_experience(row)
+def get_order_status(symbol, order_id):
+    return _binance_signed("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id}, critical=True)
 
 
-_V34_SEEN_OUTCOME_KEYS = set()
-_V34_SEEN_CANDIDATE_KEYS = set()
 
-def ingest_live_outcome(signal,outcome,source="binance_trade"):
-    sig=dict(signal or {}) if isinstance(signal,dict) else {}
-    payload=outcome if isinstance(outcome,dict) else {"result":outcome}
-    uid=str(sig.get("trade_uid") or sig.get("order_id") or f"{sig.get('symbol','')}|{sig.get('entry_time','')}|{sig.get('exit_time','')}|{payload.get('result','')}")
-    key=f"{uid}|{str(source)}"
-    with _V32_LOCK:
-        if key in _V34_SEEN_OUTCOME_KEYS:
-            _v33_log("DATA", f"duplicate outcome ignored uid={uid}", logging.DEBUG)
+def get_real_position(symbol):
+    rows = _binance_signed("GET", "/fapi/v2/positionRisk", {"symbol": symbol}, critical=True)
+    for p in rows:
+        if p["symbol"] == symbol:
+            if abs(float(p.get("positionAmt", 0) or 0)) > 0:
+                return p
             return None
-        _V34_SEEN_OUTCOME_KEYS.add(key)
-    row={"type":"trade_outcome","timestamp":time.time(),"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":sig.get("confidence"),"archetype":sig.get("archetype"),"market_regime":sig.get("market_regime"),"time_context":sig.get("time_context") or _v32_hour_context(sig.get("entry_timestamp")),"learning_features":dict(sig.get("learning_features") or {}),"research_snapshot":sig.get("research_snapshot") or {},"signal":sig,"outcome":dict(payload)}
-    return _v32_record_experience(row)
+    return None
+
+def get_real_positions_all():
+    """Return every non-zero Futures position visible on Binance."""
+    rows = _binance_signed("GET", "/fapi/v2/positionRisk", {}, critical=True)
+    return [p for p in (rows or []) if abs(float(p.get("positionAmt", 0) or 0)) > 0]
 
 
-def full_learning_review(max_rows=V32_RESEARCH_WINDOW):
-    return _v32_research_cycle()
+def get_open_orders_all(symbol=None):
+    """Return ordinary open orders. With no symbol, query the whole account."""
+    params = {"symbol": symbol} if symbol else {}
+    rows = _binance_signed("GET", "/fapi/v1/openOrders", params, critical=True)
+    return rows if isinstance(rows, list) else []
 
 
-def reset_cognitive_memory():
-    """Reset V32 cognitive research memory only; never touches trading ledger."""
-    global _V32_STATE,_V32_BELIEFS,_V32_BUFFER,_V32_TICKS,_V32_LAST_ERROR
-    _v32_stop()
-    with _V32_LOCK:
-        _V32_STATE={
-            "schema":V32_SCHEMA,"version":V32_VERSION,"observations":0,"candidates":0,"outcomes":0,"wins":0,"losses":0,"autopsies":0,"counterfactuals":0,"belief_revisions":0,"research_questions":0,"resolved_questions":0,"model_candidates":0,"model_promotions":0,"drift_score":0.0,"drift_status":"UNKNOWN","time_effect":{"status":"INSUFFICIENT","usable":False},"coverage":{"candidate_count":0,"live_candidate_count":0,"shadow_count":0,"coverage_rate":0.0},"calibration":{"status":"INSUFFICIENT","buckets":[]},"last_review":None,"last_model_update":None,"last_model_sample_count":0,"last_reviewed_outcomes":0,"last_policy_revision":None,"policy_revision_count":0,
-        }
-        _V32_BELIEFS={}; _V32_BUFFER=[]; _V32_TICKS=0; _V32_LAST_ERROR=None
-        for path in (V32_STATE_FILE,V32_EXPERIENCE_FILE,V32_LESSON_FILE,V32_POLICY_FILE):
-            try: path.unlink(missing_ok=True)
-            except Exception: pass
-        _v32_json_save(V32_STATE_FILE,_V32_STATE); _v32_json_save(V32_POLICY_FILE,_V32_BELIEFS)
-    return get_v32_status()
+def get_open_algo_orders_all(symbol=None):
+    """Return open conditional/algo orders. With no symbol, query the whole account."""
+    params = {"symbol": symbol} if symbol else {}
+    data = _binance_signed("GET", "/fapi/v1/openAlgoOrders", params, critical=True)
+    if isinstance(data, dict):
+        rows = data.get("orders") or data.get("openOrders") or data.get("data") or []
+    else:
+        rows = data or []
+    return rows if isinstance(rows, list) else []
 
 
-def full_command(action, callbacks=None):
-    global _V32_NOTIFY, _V32_LAST_TELEGRAM_NOTIFY
-    callbacks=callbacks if isinstance(callbacks,dict) else {}
-    if callable(callbacks.get("notify")):
-        _V32_NOTIFY = callbacks.get("notify")
-    action=str(action or "status").strip().lower()
+def _cancel_all_ordinary_orders_verified(sym, retries=2):
+    """Cancel all ordinary orders for a symbol and verify exchange-side empty state.
+
+    A DELETE transport error is treated as unknown: query open orders first. Only
+    if orders are still present do we attempt another cancel.
+    """
+    last = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            _binance_signed("DELETE", "/fapi/v1/allOpenOrders", {"symbol": sym})
+        except BinanceUnknownExecutionError as e:
+            last = e
+        except Exception as e:
+            last = e
+        try:
+            rows = get_open_orders_all(sym)
+            if not rows:
+                return True
+        except Exception as e:
+            last = e
+        if attempt + 1 < retries:
+            time.sleep(0.35 * (attempt + 1))
+    raise RuntimeError(f"{sym}: ordinary order cleanup belum terverifikasi ({last})")
+
+
+
+def _cancel_all_algo_orders_verified(sym, retries=2):
+    """Cancel all algo orders, then verify exchange-side empty state.
+
+    A transport-unknown DELETE is reconciled by GET /openAlgoOrders before any
+    retry. This avoids both orphan protection and blind repeated cancels.
+    """
+    last = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            cancel_all_algo_orders(sym)
+        except BinanceUnknownExecutionError as e:
+            last = e
+        except Exception as e:
+            last = e
+        try:
+            rows = _get_open_algo_orders(sym)
+            if not rows:
+                _clear_pending_cleanup(sym)
+                return True
+        except Exception as e:
+            last = e
+        if attempt + 1 < retries:
+            time.sleep(0.35 * (attempt + 1))
+    raise RuntimeError(f"{sym}: algo cleanup belum terverifikasi ({last})")
+
+
+def _cancel_all_symbol_orders_verified(sym):
+    """Cancel ordinary + algo orders for one symbol and verify both are empty."""
+    _cancel_all_ordinary_orders_verified(sym)
+    _cancel_all_algo_orders_verified(sym)
+    ordinary = get_open_orders_all(sym)
+    algo = _get_open_algo_orders(sym)
+    if ordinary or algo:
+        raise RuntimeError(f"{sym}: masih ada order setelah cancel (ordinary={len(ordinary)}, algo={len(algo)})")
+    return True
+
+
+def _verified_timeout_symbol(sym, chat_id, reason="manual timeout"):
+    """Emergency flatten+cleanup using the bounded critical Binance lane."""
     try:
-        if action=="on":
-            cb=callbacks.get("on"); payload=cb() if callable(cb) else {}
-            _v32_start()
-            _v33_notify("🧠 FULL ON — otak mulai belajar terus.", force=True)
-            return ("🧠 <b>FULL LEARNING ON</b>\n"
-                    "Otak belajar terus: observasi → kandidat → outcome → autopsy → counterfactual → calibration → hypothesis → adaptation.\n"
-                    "<b>Frequency tetap menjadi objective</b>; learning tidak diperbolehkan mematikan opportunity hanya demi menjadi lebih ketat.\n"
-                    "Satu SL tidak mengubah policy secara langsung; perubahan harus melewati bukti bertahap dan stability review.\n\n" + _v32_full_text(payload))
-        if action=="off":
-            _v32_stop(); cb=callbacks.get("off"); payload=cb() if callable(cb) else {}
-            _v33_notify("🧠 FULL OFF — learning dihentikan; model terakhir dipertahankan.", force=True)
-            return "🧠 <b>FULL LEARNING OFF</b>\nResearch worker dihentikan; state/model terakhir dipertahankan.\n\n"+_v32_full_text(payload)
-        if action=="reset":
-            cb=callbacks.get("reset"); payload=cb() if callable(cb) else {}
-            st=reset_cognitive_memory()
-            return "🧠 <b>FULL RESET</b>\nCognitive research memory V32 dihapus; trading ledger/posisi tidak disentuh.\n\n"+_v32_full_text({"mode":False,"cognitive_worker":st})
-        if action in {"review","research"}:
-            rep=_v32_research_cycle(); return _v32_research_text(rep)
-        cb=callbacks.get("status"); payload=cb() if callable(cb) else {}
-        return "🧠 <b>FULL LEARNING STATUS</b>\n"+_v32_full_text(payload)
-    except Exception as exc:
-        log.exception("[V32 FULL] command gagal")
-        return f"❌ <b>FULL gagal</b>\n<code>{html.escape(str(exc)[:400])}</code>"
-
-
-def _v32_full_text(payload):
-    p=payload if isinstance(payload,dict) else {}
-    st=get_v32_status(); s=st["state"]; cw="ON" if st["worker_alive"] else "OFF"
-    champion=p.get("champion") if isinstance(p.get("champion"),dict) else {}
-    return (f"Main mode: <b>{'ON' if p.get('mode') else 'OFF'}</b>\n"
-            f"Cognitive worker: <b>{cw}</b> | ticks: <b>{st['ticks']}</b>\n"
-            f"Observations: <b>{s.get('observations',0)}</b> | Candidates: <b>{s.get('candidates',0)}</b>\n"
-            f"Outcomes: <b>{s.get('outcomes',0)}</b> | W/L: <b>{s.get('wins',0)}/{s.get('losses',0)}</b>\n"
-            f"Coverage: <b>{(s.get('coverage') or {}).get('coverage_rate',0)*100:.1f}%</b>\n"
-            f"Calibration: <b>{(s.get('calibration') or {}).get('status','INSUFFICIENT')}</b>\n"
-            f"Time effect: <b>{(s.get('time_effect') or {}).get('status','INSUFFICIENT')}</b>\n"
-            f"Drift: <b>{s.get('drift_status','UNKNOWN')}</b>\n"
-            f"Beliefs: <b>{st['beliefs']}</b>\n"
-            f"Policy revisions: <b>{s.get('policy_revision_count',0)}</b>\n"
-            f"Champion: <code>{html.escape(str(champion.get('model_version','—')))}</code>"
-            f"\nWorker: <b>{'ON' if get_v32_status().get('worker_alive') else 'OFF'}</b> | Ticks: <b>{get_v32_status().get('ticks',0)}</b>"
-            f"\nLast error: <b>{html.escape(str(get_v32_status().get('last_error') or '—')[:160])}</b>")
-
-
-def _v32_research_text(rep):
-    cal=rep.get("calibration",{}); te=rep.get("time_effect",{}); drift=rep.get("drift",{}); cov=rep.get("coverage",{})
-    return ("🔬 <b>FULL RESEARCH REVIEW</b>\n"
-            f"Candidates: <b>{rep.get('candidates',0)}</b> | Outcomes: <b>{rep.get('outcomes',0)}</b>\n"
-            f"Coverage: <b>{cov.get('coverage_rate',0)*100:.1f}%</b>\n"
-            f"Calibration: <b>{cal.get('status','INSUFFICIENT')}</b>\n"
-            f"Time-of-day: <b>{te.get('status','INSUFFICIENT')}</b>\n"
-            f"Drift: <b>{drift.get('status','UNKNOWN')}</b>\n"
-            f"Questions: <b>{len(rep.get('questions',[]))}</b>\n"
-            f"Research model: <b>{(rep.get('model_research') or {}).get('status','INSUFFICIENT')}</b>")
-
-
-_v32_load_state()
-
-# Explicitly advertise the V32 cognitive surface while preserving the stable API.
-__all__ = list(dict.fromkeys(__all__ + [
-    "V32_VERSION", "get_v32_status", "get_v32_belief", "full_command",
-    "_v33_log", "_v33_notify",
-    "full_analyze", "manage_position", "ingest_live_candidate", "ingest_live_outcome",
-    "full_learning_review", "reset_cognitive_memory", "extract_time_context",
-]))
-
-
-# =============================================================================
-# V35 ADAPTIVE AGENT OVERLAY
-# =============================================================================
-# Design contract:
-#   strategy_logic.py = replaceable brain.
-#   It may research, learn, rank and propose policy changes, but NEVER calls
-#   Binance execution APIs. main.py remains the execution body.
-#
-# Learning starts immediately from observations. There is NO "wait 30 trades"
-# requirement for observation/model bookkeeping. Policy changes still require
-# batched evidence, validation and stability; one SL cannot rewrite the brain.
-#
-# Sources of evidence:
-#   1) historical replay (local Binance-compatible OHLCV files),
-#   2) live market observations,
-#   3) every analyzed live candidate, including below-threshold candidates,
-#   4) executed trade outcomes and management events.
-#
-# Frequency/opportunity is a first-class research metric. The brain is not
-# rewarded for simply making the filter stricter and quieter.
-
-AGENT_BRAIN_API_VERSION = "v35-body-brain-contract-1"
-AGENT_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
-AGENT_STATE_FILE = AGENT_STATE_DIR / "adaptive_brain_state.json"
-AGENT_POLICY_FILE = AGENT_STATE_DIR / "adaptive_policy.json"
-AGENT_HISTORY_DIR = Path(os.getenv("HISTORICAL_DATA_DIR", str(AGENT_STATE_DIR / "historical_data")))
-AGENT_HISTORICAL_DAYS = max(30, int(os.getenv("HISTORICAL_LEARNING_DAYS", "90")))
-AGENT_RESEARCH_INTERVAL = max(5.0, float(os.getenv("ADAPTIVE_RESEARCH_INTERVAL", "20")))
-AGENT_REPLAY_WORKERS = max(1, min(4, int(os.getenv("ADAPTIVE_REPLAY_WORKERS", "2"))))
-AGENT_REPLAY_STEP_M15 = max(1, int(os.getenv("ADAPTIVE_REPLAY_STEP_M15", "4")))
-AGENT_MIN_POLICY_EVIDENCE = max(8, int(os.getenv("ADAPTIVE_MIN_POLICY_EVIDENCE", "20")))
-AGENT_POLICY_MAX_DELTA = max(0.01, min(0.10, float(os.getenv("ADAPTIVE_POLICY_MAX_DELTA", "0.03"))))
-AGENT_EXPLORATION_SHARE = max(0.05, min(0.30, float(os.getenv("ADAPTIVE_EXPLORATION_SHARE", "0.15"))))
-AGENT_AUTO_HISTORICAL = str(os.getenv("ADAPTIVE_AUTO_HISTORICAL", "1")).strip().lower() not in {"0", "false", "off", "no"}
-AGENT_MAX_HISTORY_ROWS = max(5000, int(os.getenv("ADAPTIVE_MAX_HISTORY_ROWS", "300000")))
-
-_AGENT_LOCK = threading.RLock()
-_AGENT_STOP = threading.Event()
-_AGENT_WAKE = threading.Event()
-_AGENT_THREAD = None
-_AGENT_HISTORY_THREAD = None
-_AGENT_HISTORY_DONE = set()
-_AGENT_LAST_ERROR = None
-_AGENT_TICKS = 0
-_AGENT_LAST_REPORT = {}
-_AGENT_STATE = {
-    "version": AGENT_BRAIN_API_VERSION,
-    "brain_version": V32_VERSION,
-    "historical": {"files": 0, "rows": 0, "replay_candidates": 0, "status": "NOT_STARTED"},
-    "live": {"observations": 0, "candidates": 0, "outcomes": 0},
-    "frequency": {},
-    "policy": {},
-    "policy_revisions": 0,
-    "last_research": None,
-}
-
-
-def _agent_json_load(path, default):
-    try:
-        if path.exists():
-            obj = json.loads(path.read_text(encoding="utf-8"))
-            return obj if isinstance(obj, type(default)) else default
-    except Exception as exc:
-        log.warning(f"[ADAPTIVE] load {path.name} gagal: {exc}")
-    return default
-
-
-def _agent_json_save(path, obj):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(obj, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
-        os.replace(tmp, path)
+        with _binance_critical_context():
+            _cancel_all_symbol_orders_verified(sym)
+            real = get_real_position(sym)
+            exit_price = None
+            if real is not None:
+                live_qty = abs(float(real.get("positionAmt", 0) or 0))
+                if live_qty > 0:
+                    is_buy = float(real.get("positionAmt", 0) or 0) > 0
+                    closed, exit_price = _verified_market_close(sym, is_buy, reason, chat_id=chat_id, max_retries=1)
+                    if not closed:
+                        raise RuntimeError("market close belum terkonfirmasi")
+            _cancel_all_symbol_orders_verified(sym)
+        with positions_lock:
+            local = positions.get(sym)
+        if local and local.get("entry_time") is not None and local.get("status") != "pending":
+            close_position(sym, "timeout", close_price=exit_price or get_price(sym) or local.get("entry"))
+        elif local:
+            with positions_lock:
+                positions.pop(sym, None)
+            _record_pending_cancel("manual_timeout")
+        _clear_pending_cleanup(sym)
+        tg_send(chat_id, f"✅ <b>TIMEOUT CLOSED</b> — {sym}\nPosisi Binance: <b>0</b>\nOrder biasa: <b>0</b>\nAlgo TP/SL/Trail: <b>0</b>\nSemua exposure {sym} sudah dibersihkan.")
         return True
+    except BinanceCooldownError as e:
+        with positions_lock:
+            if sym in positions:
+                positions[sym]["status"] = "EMERGENCY"
+                positions[sym]["emergency_reason"] = reason
+                positions[sym]["emergency_error"] = str(e)[:300]
+        _queue_pending_cleanup(sym, "timeout deferred by Binance governor/cooldown", e)
+        tg_send(chat_id, f"🚨 <b>TIMEOUT TERTUNDA</b> — {sym}\n<code>{html.escape(str(e)[:350])}</code>\nTidak ada retry agresif; posisi tetap dicatat untuk rekonsiliasi.")
+        return False
+    except Exception as e:
+        with positions_lock:
+            if sym in positions:
+                positions[sym]["status"] = "EMERGENCY"
+                positions[sym]["emergency_reason"] = reason
+                positions[sym]["emergency_error"] = str(e)[:300]
+        _queue_pending_cleanup(sym, "timeout cleanup", e)
+        tg_send(chat_id, f"🚨 <b>TIMEOUT BELUM SELESAI</b> — {sym}\n<code>{html.escape(str(e)[:350])}</code>\nPosisi tetap dipertahankan di /trade. Gunakan <code>/ok {sym}</code> untuk rekonsiliasi.")
+        return False
+
+def _verified_timeout_all(chat_id):
+    """Global emergency cleanup using the bounded critical Binance lane."""
+    try:
+        with _binance_critical_context():
+            positions_remote = get_real_positions_all()
+            ordinary = get_open_orders_all()
+            algo = get_open_algo_orders_all()
+            symbols = {str(p.get("symbol")) for p in positions_remote if p.get("symbol")}
+            symbols.update(str(o.get("symbol")) for o in ordinary if o.get("symbol"))
+            symbols.update(str(o.get("symbol")) for o in algo if o.get("symbol"))
+            for sym in sorted(symbols):
+                _cancel_all_symbol_orders_verified(sym)
+            exit_prices = {}
+            for p in positions_remote:
+                sym = p.get("symbol")
+                qty = abs(float(p.get("positionAmt", 0) or 0))
+                if not sym or qty <= 0:
+                    continue
+                is_buy = float(p.get("positionAmt", 0) or 0) > 0
+                closed, exit_price = _verified_market_close(sym, is_buy, "manual timeout global", chat_id=chat_id, max_retries=1)
+                if not closed:
+                    raise RuntimeError(f"{sym}: posisi global belum terkonfirmasi flat")
+                exit_prices[sym] = exit_price
+            remaining_pos = get_real_positions_all()
+            remaining_orders = get_open_orders_all()
+            remaining_algo = get_open_algo_orders_all()
+            if remaining_pos or remaining_orders or remaining_algo:
+                raise RuntimeError(f"verifikasi global gagal: positions={len(remaining_pos)}, ordinary_orders={len(remaining_orders)}, algo_orders={len(remaining_algo)}")
+        with positions_lock:
+            local_items = [(sym, dict(pos)) for sym, pos in positions.items()]
+        for sym, pos in local_items:
+            if pos.get("status") == "pending" or pos.get("entry_time") is None:
+                with positions_lock:
+                    positions.pop(sym, None)
+                _record_pending_cancel("manual_timeout_global")
+            else:
+                close_position(sym, "timeout", close_price=exit_prices.get(sym) or get_price(sym) or pos.get("entry"))
+        with positions_lock:
+            positions.clear()
+        tg_send(chat_id, "✅ <b>TIMEOUT GLOBAL SELESAI</b>\n"
+                        f"Posisi ditutup: <b>{len(positions_remote)}</b>\n"
+                        f"Symbol dibersihkan: <b>{len(symbols)}</b>\n"
+                        "Semua posisi dan semua order Binance terverifikasi <b>0</b>.")
+        return True
+    except BinanceCooldownError as e:
+        tg_send(chat_id, "🚨 <b>TIMEOUT GLOBAL TERTUNDA</b>\n"
+                        f"<code>{html.escape(str(e)[:500])}</code>\n"
+                        "Critical lane sedang dibatasi; tidak ada retry agresif.")
+        log.warning(f"[TIMEOUT GLOBAL] ditunda: {e}")
+        return False
+    except Exception as e:
+        tg_send(chat_id, "🚨 <b>TIMEOUT GLOBAL BELUM SELESAI</b>\n"
+                        f"<code>{html.escape(str(e)[:500])}</code>\n"
+                        "Cek Binance dan gunakan /ok SYMBOL untuk rekonsiliasi.")
+        log.error(f"[TIMEOUT GLOBAL] cleanup gagal: {e}")
+        return False
+def place_sl_order(symbol, is_buy, sl_price, quantity, client_algo_id=None):
+    close_side = "SELL" if is_buy else "BUY"
+    info = get_symbol_filters(symbol)
+    tick = info["tickSize"]; step = info["stepSize"]; qty_prec = info.get("qtyPrecision", 8)
+    qty_rounded = round_qty(quantity, step, qty_prec)
+    client_algo_id = client_algo_id or _new_client_id("SL")
+    params = {
+        "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side,
+        "type": "STOP_MARKET", "triggerPrice": round_to_tick(sl_price, tick),
+        "quantity": qty_rounded, "reduceOnly": "true", "workingType": "MARK_PRICE",
+        "clientAlgoId": client_algo_id,
+    }
+    try:
+        return _binance_signed("POST", "/fapi/v1/algoOrder", params)
+    except BinanceUnknownExecutionError:
+        found = _find_open_algo_by_client_id(symbol, client_algo_id)
+        if found is not None:
+            return found
+        raise
+
+
+def place_tp_sl(symbol, is_buy, tp_price, sl_price, quantity):
+    """Create verified TP+SL pair. On partial creation, clean up and fail closed."""
+    close_side = "SELL" if is_buy else "BUY"
+    info = get_symbol_filters(symbol)
+    tick, step = info["tickSize"], info["stepSize"]
+    qty_prec = info.get("qtyPrecision", 8)
+    qty_rounded = round_qty(quantity, step, qty_prec)
+    tp_client = _new_client_id("TP")
+    sl_client = _new_client_id("SL")
+    tp = None; sl = None
+    try:
+        tp = _binance_signed("POST", "/fapi/v1/algoOrder", {
+            "algoType": "CONDITIONAL", "symbol": symbol, "side": close_side,
+            "type": "TAKE_PROFIT_MARKET", "triggerPrice": round_to_tick(tp_price, tick),
+            "quantity": qty_rounded, "reduceOnly": "true", "workingType": "MARK_PRICE",
+            "clientAlgoId": tp_client,
+        })
+    except BinanceUnknownExecutionError:
+        tp = _find_open_algo_by_client_id(symbol, tp_client)
+        if tp is None:
+            raise
+
+    try:
+        sl = place_sl_order(symbol, is_buy, sl_price, quantity, client_algo_id=sl_client)
+    except Exception:
+        # If TP exists, best-effort remove it so we never leave a half-protected pair.
+        try:
+            _cancel_all_algo_orders_verified(symbol)
+        finally:
+            raise
+
+    # Exchange-side verification is mandatory before local state is allowed to advance.
+    _verify_protection_pair(symbol, is_buy, tp_price, sl_price, qty_rounded)
+    return tp, sl
+
+
+def cancel_algo_order(algo_id):
+    if not algo_id: return None
+    try:
+        return _binance_signed("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+    except BinanceUnknownExecutionError:
+        # Query-all-by-symbol is unavailable without symbol; caller verification
+        # is authoritative. Do not blindly repeat a cancel.
+        raise
+    except Exception as e:
+        log.warning(f"[cancel_algo_order] #{algo_id}: {e}")
+        return None
+
+
+def get_algo_order_status(algo_id):
+    return _binance_signed("GET", "/fapi/v1/algoOrder", {"algoId": algo_id}, critical=True)
+
+
+def cancel_all_algo_orders(symbol):
+    try:
+        return _binance_signed("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
+    except BinanceUnknownExecutionError:
+        # Verification immediately after the call determines whether cleanup happened.
+        raise
+    except Exception as e:
+        log.warning(f"[cancel_all_algo_orders] {symbol}: {e}")
+        return None
+
+
+def get_real_balance():
+    """Return (available, total) USDT, atau (None, None) kalau gagal."""
+    try:
+        rows = _binance_signed("GET", "/fapi/v2/balance", {}, critical=True)
+        for r in rows:
+            if r["asset"] == "USDT":
+                return float(r["availableBalance"]), float(r["balance"])
+    except Exception as e:
+        log.warning(f"[get_real_balance] {e}")
+    return None, None
+
+
+def get_public_ip():
+    try:
+        return requests.get("https://api.ipify.org", timeout=5).text.strip()
+    except Exception:
+        return "unknown"
+
+
+def _binance_klines(symbol, interval, limit):
+    raw = fapi_get("/fapi/v1/klines",
+                   {"symbol":symbol,"interval":interval,"limit":limit})
+    if not isinstance(raw, list) or len(raw) < min(limit, 40):
+        return pd.DataFrame()
+    df = pd.DataFrame(raw, columns=[
+        "ts","open","high","low","close","volume",
+        "cts","qvol","trades","tbv","tbq","ign"])
+    for c in ["open","high","low","close","volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df.index = pd.to_datetime(df["ts"], unit="ms")
+    return df[["open","high","low","close","volume"]].dropna()
+
+def _binance_price(symbol):
+    d = fapi_get("/fapi/v1/ticker/price", {"symbol": symbol})
+    return float(d["price"])
+
+def _binance_top_coins(exclude_syms):
+    tickers = fapi_get("/fapi/v1/ticker/24hr")
+    usdt = [
+        t for t in tickers
+        if t["symbol"].endswith("USDT")
+        and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
+        and float(t["quoteVolume"]) > 5_000_000
+        and abs(float(t.get("priceChangePercent","0"))) < 15
+        and t["symbol"] not in exclude_syms
+    ]
+    usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
+    return [t["symbol"] for t in usdt[:TOP_N_COINS]]
+
+
+# ── BYBIT (fallback tier-3) ────────────────────────────────────────────
+def _bybit_klines(symbol, interval, limit):
+    iv = INTERVAL_MAP.get(interval, "15")
+    d = _raw_get(f"{BYBIT}/v5/market/kline", {
+        "category":"linear","symbol":symbol,
+        "interval":iv,"limit":limit
+    })
+    if d.get("retCode", -1) != 0:
+        raise ValueError(f"Bybit kline error: {d.get('retMsg')}")
+    rows = d["result"]["list"]
+    if not rows or len(rows) < min(limit, 40):
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=["ts","open","high","low","close","volume","turnover"])
+    for c in ["open","high","low","close","volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df.index = pd.to_datetime(df["ts"].astype(float), unit="ms")
+    df = df.sort_index()
+    return df[["open","high","low","close","volume"]].dropna()
+
+def _bybit_price(symbol):
+    d = _raw_get(f"{BYBIT}/v5/market/tickers",
+                 {"category":"linear","symbol":symbol})
+    if d.get("retCode", -1) != 0:
+        raise ValueError(f"Bybit ticker error: {d.get('retMsg')}")
+    return float(d["result"]["list"][0]["lastPrice"])
+
+def _bybit_top_coins(exclude_syms):
+    d = _raw_get(f"{BYBIT}/v5/market/tickers", {"category":"linear"})
+    if d.get("retCode", -1) != 0:
+        raise ValueError(f"Bybit tickers error: {d.get('retMsg')}")
+    items = d["result"]["list"]
+    usdt = [
+        t for t in items
+        if t["symbol"].endswith("USDT")
+        and 0.0001 < float(t["lastPrice"]) < MAX_PRICE
+        and float(t.get("turnover24h","0")) > 5_000_000
+        and abs(float(t.get("price24hPcnt","0"))) < 0.15
+        and t["symbol"] not in exclude_syms
+    ]
+    usdt.sort(key=lambda x: float(x.get("turnover24h","0")), reverse=True)
+    return [t["symbol"] for t in usdt[:TOP_N_COINS]]
+
+
+# ── COINGECKO (fallback tier-4, DARURAT — harga saja) ──────────────────
+def _coingecko_price(symbol):
+    cid = COINGECKO_ID_MAP.get(symbol)
+    if not cid:
+        return None
+    try:
+        d = _raw_get("https://api.coingecko.com/api/v3/simple/price",
+                     {"ids": cid, "vs_currencies": "usd"}, retries=1)
+        p = (d.get(cid) or {}).get("usd")
+        return float(p) if p is not None else None
+    except Exception as e:
+        log.warning(f"[price/coingecko] {symbol}: {e}")
+        return None
+
+
+# ── WEBSOCKET FEED (tier-1) ─────────────────────────────────────────────
+class BinanceWSFeed:
+    """
+    Satu koneksi WS gabungan (raw stream endpoint, subscribe dinamis) ke
+    Binance Futures:
+      - !ticker@arr        → harga + statistik 24 jam SEMUA simbol tiap
+                              ~1 detik. Menggantikan polling REST batch
+                              utk get_price() & get_top_coins() sepenuhnya
+                              begitu WS ini live — jauh lebih hemat rate
+                              limit/risiko IP ban dibanding sebelumnya.
+      - <sym>@kline_<itv>  → update candle real-time, HANYA utk pasangan
+                              (simbol, interval) yang benar-benar diminta
+                              get_klines() — subscribe on-demand (lazy),
+                              bukan semua 50 koin x semua interval sekaligus,
+                              biar hemat kuota stream & bandwidth.
+
+    Catatan penting: WS TIDAK BISA memberi histori candle sebelum koneksi
+    dibuka — itu keterbatasan protokol, bukan celah desain. Karena itu
+    setiap (simbol, interval) yang baru pertama kali diminta di-backfill
+    SEKALI via REST (Binance → Bybit), baru setelah itu WS yang menjaga
+    buffer tetap update tanpa REST lagi.
+
+    Auto-reconnect dgn exponential backoff (1s→30s), auto re-subscribe
+    semua stream yang lagi aktif begitu reconnect berhasil.
+    """
+    KLINE_INTERVALS = ("1m", "15m", "1h", "1d")
+    MAX_CANDLES  = {"1m": 300, "15m": 300, "1h": 300, "1d": 150}
+    STALE_AFTER_SEC   = 30     # >30s tanpa pesan masuk → anggap WS mati
+    STREAM_IDLE_SEC   = 1800   # (simbol,interval) tak dipakai 30menit → unsubscribe
+
+    def __init__(self):
+        self._lock       = threading.Lock()
+        self._send_lock  = threading.Lock()
+        self._klines     = {}     # {(sym,itv): deque([{t,o,h,l,c,v}, ...])}
+        self._ticker     = {}     # {sym: {"symbol","price","qvol","chg"}}
+        self._last_used  = {}     # {(sym,itv): timestamp terakhir diminta}
+        self._subscribed = set()  # stream string yg lagi aktif di WS
+        self._ws         = None
+        self._last_msg   = 0.0
+        self._connected  = False
+        self._stop       = False
+        self._backoff    = 1
+
+    # ── public ──
+    def start(self):
+        if not _WS_LIB_OK:
+            log.error("[ws] Modul 'websocket-client' belum terpasang — "
+                      "TAMBAHKAN 'websocket-client' ke requirements.txt. "
+                      "Bot tetap jalan tapi full REST-only (Binance→Bybit) "
+                      "sampai modul ini ada.")
+            return
+        threading.Thread(target=self._run_forever, daemon=True).start()
+
+    def is_fresh(self):
+        return self._connected and (time.time() - self._last_msg) < self.STALE_AFTER_SEC
+
+    def get_price(self, symbol):
+        with self._lock:
+            d = self._ticker.get(symbol)
+            return d["price"] if d else None
+
+    def get_top_coins_raw(self):
+        with self._lock:
+            return list(self._ticker.values())
+
+    def get_klines(self, symbol, interval, limit=250):
+        """Return klines dari buffer WS internal (data yg sudah di-backfill & live-update).
+        Dipanggil dari module-level get_klines() sebagai fallback setelah REST gagal."""
+        with self._lock:
+            buf = self._klines.get((symbol, interval))
+            if not buf:
+                return pd.DataFrame()
+            rows = list(buf)[-limit:]
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        df.index = pd.to_datetime(df["t"], unit="ms")
+        df.rename(columns={"o": "open", "h": "high", "l": "low",
+                            "c": "close", "v": "volume"}, inplace=True)
+        return df[["open", "high", "low", "close", "volume"]]
+
+    def seed_klines(self, symbol, interval, df):
+        """Masukkan histori yang SUDAH diperoleh scanner ke buffer WS.
+
+        Ini sengaja tidak melakukan REST request. Setelah seed, WS tinggal
+        melanjutkan candle secara live sehingga request histori tidak diulang.
+        """
+        if not _WS_LIB_OK or df is None or df.empty:
+            return
+        try:
+            rows = []
+            for idx, row in df.tail(self.MAX_CANDLES.get(interval, 250)).iterrows():
+                ts = int(pd.Timestamp(idx).timestamp() * 1000)
+                rows.append({
+                    "t": ts, "o": float(row["open"]), "h": float(row["high"]),
+                    "l": float(row["low"]), "c": float(row["close"]), "v": float(row["volume"]),
+                })
+            if not rows:
+                return
+            with self._lock:
+                self._klines[(symbol, interval)] = deque(rows, maxlen=self.MAX_CANDLES.get(interval, 250))
+                self._last_used[(symbol, interval)] = time.time()
+            self._subscribe_kline(symbol, interval)
+        except Exception as e:
+            log.warning(f"[ws-seed] {symbol} {interval}: {e}")
+
+    def ensure_symbol_interval(self, symbol, interval):
+        """Dipanggil tiap get_klines() — backfill SEKALI kalau baru,
+        subscribe stream kalau belum, update timestamp pemakaian terakhir."""
+        if not _WS_LIB_OK:
+            return
+        with self._lock:
+            have = (symbol, interval) in self._klines
+            self._last_used[(symbol, interval)] = time.time()
+        if not have:
+            self._backfill(symbol, interval)
+        self._subscribe_kline(symbol, interval)
+
+    def cleanup_stale_streams(self):
+        """Unsubscribe & buang buffer (simbol,interval) yg tidak dipakai
+        >30menit — dipanggil berkala dari watchdog thread, biar jumlah
+        stream aktif tetap proporsional dgn pool koin yang sedang jalan."""
+        now = time.time()
+        with self._lock:
+            stale = [k for k, ts in self._last_used.items()
+                     if now - ts > self.STREAM_IDLE_SEC]
+        for (sym, itv) in stale:
+            self._unsubscribe_kline(sym, itv)
+            with self._lock:
+                self._klines.pop((sym, itv), None)
+                self._last_used.pop((sym, itv), None)
+        if stale:
+            log.info(f"[ws] cleanup {len(stale)} stream idle >30menit")
+
+    # ── internal: backfill histori awal via REST ──
+    def _backfill(self, symbol, interval):
+        limit = self.MAX_CANDLES.get(interval, 250)
+        df, src = pd.DataFrame(), None
+        try:
+            df = _binance_klines(symbol, interval, limit)
+            if not df.empty: src = "binance"
+        except Exception as e:
+            log.warning(f"[ws-backfill/binance] {symbol} {interval}: {e}")
+        if df.empty:
+            try:
+                df = _bybit_klines(symbol, interval, limit)
+                if not df.empty: src = "bybit"
+            except Exception as e:
+                log.warning(f"[ws-backfill/bybit] {symbol} {interval}: {e}")
+        if df.empty:
+            log.warning(f"[ws-backfill] {symbol} {interval} GAGAL TOTAL "
+                        f"(binance+bybit) — coba lagi di pemanggilan berikutnya")
+            return
+        rows = deque(maxlen=limit)
+        for ts, r in df.iterrows():
+            rows.append({"t": int(ts.timestamp()*1000), "o": float(r.open),
+                         "h": float(r.high), "l": float(r.low),
+                         "c": float(r.close), "v": float(r.volume)})
+        with self._lock:
+            self._klines[(symbol, interval)] = rows
+        log.info(f"[ws-backfill] {symbol} {interval} OK via {src} ({len(rows)} candle)")
+
+    # ── internal: lifecycle WS ──
+    def _run_forever(self):
+        while not self._stop:
+            try:
+                self._connect()
+            except Exception as e:
+                log.warning(f"[ws] koneksi error: {e}")
+            self._connected = False
+            if self._stop:
+                break
+            time.sleep(self._backoff)
+            self._backoff = min(self._backoff * 2, 30)
+
+    def _connect(self):
+        self._ws = websocket.WebSocketApp(
+            BINANCE_WS_URL,
+            on_open=self._on_open, on_message=self._on_message,
+            on_error=self._on_error, on_close=self._on_close)
+        self._ws.run_forever(ping_interval=180, ping_timeout=10)
+
+    def _on_open(self, ws):
+        self._connected = True
+        self._backoff = 1
+        self._last_msg = time.time()
+        log.info("[ws] Binance Futures WS terhubung")
+        self._send_subscribe(["!ticker@arr"])
+        with self._lock:
+            keys = list(self._klines.keys())
+        if keys:
+            streams = [f"{sym.lower()}@kline_{itv}" for sym, itv in keys]
+            self._send_subscribe(streams)
+
+    def _on_message(self, ws, raw):
+        self._last_msg = time.time()
+        try:
+            msg = json.loads(raw)
+        except Exception:
+            return
+        if isinstance(msg, list):
+            self._handle_ticker_array(msg)
+        elif isinstance(msg, dict) and msg.get("e") == "24hrTicker":
+            self._handle_ticker_array([msg])
+        elif isinstance(msg, dict) and msg.get("e") == "kline":
+            self._handle_kline(msg)
+
+    def _handle_ticker_array(self, arr):
+        with self._lock:
+            for t in arr:
+                try:
+                    sym = t["s"]
+                    self._ticker[sym] = {
+                        "symbol": sym, "price": float(t["c"]),
+                        "qvol": float(t["q"]), "chg": float(t["P"]),
+                    }
+                except Exception:
+                    continue
+
+    def _handle_kline(self, msg):
+        k = msg["k"]; sym = msg["s"]; itv = k["i"]
+        key = (sym, itv)
+        row = {"t": k["t"], "o": float(k["o"]), "h": float(k["h"]),
+               "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"])}
+        with self._lock:
+            buf = self._klines.get(key)
+            if buf is None:
+                return   # belum di-backfill — abaikan sampai diminta
+            if buf and buf[-1]["t"] == row["t"]:
+                buf[-1] = row
+            else:
+                buf.append(row)
+
+    def _on_error(self, ws, err):
+        log.warning(f"[ws] error: {err}")
+
+    def _on_close(self, ws, code, msg):
+        self._connected = False
+        log.warning(f"[ws] tertutup (code={code})")
+
+    def _send_subscribe(self, streams):
+        if not streams or not self._ws:
+            return   # belum connect — akan di-resubscribe otomatis di _on_open
+        try:
+            with self._send_lock:
+                self._ws.send(json.dumps({
+                    "method":"SUBSCRIBE","params":streams,
+                    "id": int(time.time()*1000) % 100000}))
+            with self._lock:
+                self._subscribed |= set(streams)
+        except Exception as e:
+            log.warning(f"[ws] gagal subscribe {streams}: {e}")
+
+    def _subscribe_kline(self, symbol, interval):
+        stream = f"{symbol.lower()}@kline_{interval}"
+        with self._lock:
+            already = stream in self._subscribed
+        if not already:
+            self._send_subscribe([stream])
+
+    def _unsubscribe_kline(self, symbol, interval):
+        stream = f"{symbol.lower()}@kline_{interval}"
+        try:
+            with self._send_lock:
+                if self._ws:
+                    self._ws.send(json.dumps({
+                        "method":"UNSUBSCRIBE","params":[stream],
+                        "id": int(time.time()*1000) % 100000}))
+            with self._lock:
+                self._subscribed.discard(stream)
+        except Exception:
+            pass
+
+
+ws_feed = BinanceWSFeed()
+
+
+# ── FUNGSI PUBLIK — signature SAMA PERSIS dgn sebelumnya, jadi seluruh
+#    kode bot (scoring, monitor posisi, dsb) TIDAK perlu diubah sama sekali ──
+_LOCAL_PRICE_MAX_AGE = 30.0
+_local_price_cache = {}
+_local_price_lock = threading.Lock()
+
+def get_price(symbol, prefer_binance=False):
+    """Price accessor. WS is preferred; real-position callers may require Binance-authoritative REST."""
+    now = time.time()
+    p = ws_feed.get_price(symbol)
+    if p is not None and ws_feed.is_fresh():
+        with _local_price_lock:
+            _local_price_cache[symbol] = (p, now)
+        return p
+    if prefer_binance and not _binance_is_scan_paused():
+        try:
+            with _binance_critical_context():
+                bp = _binance_price(symbol)
+            if bp is not None:
+                with _local_price_lock:
+                    _local_price_cache[symbol] = (bp, now)
+                return bp
+        except Exception as e:
+            log.debug(f"[price/binance-preferred] {symbol}: {e}")
+    with _local_price_lock:
+        cached = _local_price_cache.get(symbol)
+    if cached and now - cached[1] <= _LOCAL_PRICE_MAX_AGE:
+        return cached[0]
+    if _binance_is_scan_paused():
+        return p
+    if not prefer_binance:
+        try:
+            with _binance_critical_context():
+                bp = _binance_price(symbol)
+            if bp is not None:
+                with _local_price_lock:
+                    _local_price_cache[symbol] = (bp, now)
+                return bp
+        except Exception as e:
+            log.debug(f"[price/binance] {symbol}: {e}")
+    try:
+        byp = _bybit_price(symbol)
+        with _local_price_lock:
+            _local_price_cache[symbol] = (byp, now)
+        return byp
+    except Exception:
+        pass
+    p = _coingecko_price(symbol)
+    if p is not None:
+        with _local_price_lock:
+            _local_price_cache[symbol] = (p, now)
+    return p
+
+def get_klines(symbol, interval, limit=250):
+    """Normal market-data accessor. Existing behavior retained for execution.
+
+    Scanner optimization lives in get_scan_klines(); it uses a dedicated
+    freshness cache and never forces a WS backfill synchronously.
+    """
+    if _binance_is_scan_paused():
+        df = ws_feed.get_klines(symbol, interval, limit) if ws_feed.is_fresh() else pd.DataFrame()
+        return df if df is not None else pd.DataFrame()
+    ws_feed.ensure_symbol_interval(symbol, interval)
+    if ws_feed.is_fresh():
+        df = ws_feed.get_klines(symbol, interval, limit)
+        if df is not None and not df.empty:
+            return df
+    try:
+        df = _binance_klines(symbol, interval, limit)
+        if not df.empty:
+            return df
+    except Exception as e:
+        log.warning(f"[klines/binance] {symbol}: {e}")
+        if _binance_is_scan_paused():
+            return ws_feed.get_klines(symbol, interval, limit) if ws_feed.is_fresh() else pd.DataFrame()
+    try:
+        df = _bybit_klines(symbol, interval, limit)
+        if not df.empty:
+            log.info(f"[klines/bybit fallback] {symbol} {interval} OK")
+            return df
+    except Exception as e:
+        log.warning(f"[klines/bybit] {symbol}: {e}")
+    return pd.DataFrame()
+
+def get_scan_klines(symbol, interval, limit=250):
+    """Scanner-only candle accessor: cache-first, single-flight, no duplicate backfill.
+
+    Prinsip utama V11: mempercepat scan dengan MENGURANGI request, bukan dengan
+    menaikkan concurrency/request rate. Jika cache masih fresh, tidak ada HTTP
+    request sama sekali. Jika cache miss, hanya satu fetch untuk key tersebut;
+    histori yang berhasil kemudian di-seed ke WS sehingga tidak di-backfill dua kali.
+    """
+    if _binance_is_scan_paused():
+        cached = _scan_cache_get(symbol, interval, limit)
+        if cached is not None:
+            return cached
+        df = ws_feed.get_klines(symbol, interval, limit) if ws_feed.is_fresh() else pd.DataFrame()
+        return df if df is not None else pd.DataFrame()
+
+    cached = _scan_cache_get(symbol, interval, limit)
+    if cached is not None:
+        return cached
+
+    key = (symbol, interval)
+    lock = _scan_key_lock(key)
+    with lock:
+        # Double-check after waiting for another worker/fetcher.
+        cached = _scan_cache_get(symbol, interval, limit)
+        if cached is not None:
+            return cached
+
+        # A pre-existing WS buffer is free data; promote it to scan cache.
+        if ws_feed.is_fresh():
+            ws_df = ws_feed.get_klines(symbol, interval, limit)
+            if ws_df is not None and not ws_df.empty and len(ws_df) >= min(limit, 40):
+                _scan_cache_put(symbol, interval, ws_df, "ws")
+                return ws_df.tail(limit).copy()
+
+        started = time.monotonic()
+        source = None
+        df = pd.DataFrame()
+
+        # Do NOT call ensure_symbol_interval() here. That would synchronously
+        # backfill through WS and then make the scanner wait on another REST path.
+        # Fetch exactly once, cache it, seed WS, and let WS maintain it thereafter.
+        try:
+            # If Binance weight is already near the soft governor, prefer the
+            # existing fallback instead of sleeping an entire minute inside a scan.
+            high_weight = (_binance_weight_1m is not None and
+                           _binance_weight_1m >= BINANCE_WEIGHT_SOFT_LIMIT)
+            if not high_weight:
+                df = _binance_klines(symbol, interval, limit)
+                if not df.empty:
+                    source = "binance"
+        except BinanceCooldownError:
+            raise
+        except Exception as e:
+            log.warning(f"[scan-data/binance] {symbol} {interval}: {e}")
+
+        if df.empty:
+            try:
+                df = _bybit_klines(symbol, interval, limit)
+                if not df.empty:
+                    source = "bybit"
+            except Exception as e:
+                log.warning(f"[scan-data/bybit] {symbol} {interval}: {e}")
+
+        if df.empty:
+            return pd.DataFrame()
+
+        _scan_cache_put(symbol, interval, df, source or "unknown")
+        # Seed WS from the same dataframe. This adds zero REST requests.
+        ws_feed.seed_klines(symbol, interval, df)
+        elapsed = time.monotonic() - started
+        log.info(f"[scan-data] {symbol} {interval} source={source} fetch={elapsed:.2f}s")
+        return df.tail(limit).copy()
+
+def _record_scan_telemetry(data):
+    global _last_scan_telemetry
+    with _scan_telemetry_lock:
+        _last_scan_telemetry = dict(data)
+
+def get_last_scan_telemetry():
+    with _scan_telemetry_lock:
+        return dict(_last_scan_telemetry)
+
+last_scanned_coins = []
+last_scanned_at = None
+_last_scanned_lock = threading.Lock()
+
+def get_top_coins():
+    """Wrapper: panggil _get_top_coins_impl() lalu cache hasilnya ke
+    last_scanned_coins — dipakai command /koin supaya bisa nampilin daftar
+    koin yang di-scan TANPA perlu fetch ulang / ikut nambah scan_counter
+    (yang dipakai buat hitung durasi ban)."""
+    coins = _get_top_coins_impl()
+    global last_scanned_coins, last_scanned_at
+    with _last_scanned_lock:
+        last_scanned_coins = coins
+        last_scanned_at = time.time()
+    return coins
+
+_TOP_COINS_CACHE_TTL = 120.0
+_top_coins_cached_symbols = []
+_top_coins_cached_at = 0.0
+_top_coins_cache_lock = threading.Lock()
+
+def _get_top_coins_impl():
+    """Ambil top coins dengan cache/WS/Bybit-first saat Binance sedang pause.
+    Tidak melakukan request Binance ketika circuit breaker aktif.
+    """
+    global scan_counter, _top_coins_cached_symbols, _top_coins_cached_at
+    with ban_lock:
+        scan_counter += 1
+        to_unban = []
+        for sym, meta in list(banned_coins.items()):
+            if isinstance(meta, tuple):
+                banned_at, dur = meta
+                expired = scan_counter - banned_at >= dur
+            else:
+                expired = scan_counter - float(meta.get("banned_at", scan_counter)) >= float(meta.get("duration", 0))
+            if expired and meta != "PERMANENT":
+                to_unban.append(sym)
+        for sym in to_unban:
+            meta = banned_coins.pop(sym, {})
+            dur = meta[1] if isinstance(meta, tuple) else meta.get("duration", 0)
+            log.info(f"[unban] {sym} kembali aktif setelah {float(dur):g} scan")
+        cur_ban = set(banned_coins.keys())
+
+    with positions_lock:
+        active_syms = set(positions.keys())
+
+    exclude_syms = cur_ban | active_syms
+    with _top_coins_cache_lock:
+        cached_syms = list(_top_coins_cached_symbols)
+        cached_at = float(_top_coins_cached_at or 0.0)
+    if cached_syms and time.time() - cached_at <= _TOP_COINS_CACHE_TTL:
+        return [s for s in cached_syms if s not in exclude_syms][:TOP_N_COINS]
+
+    paused = _binance_is_scan_paused()
+    if not paused:
+        try:
+            coins = _binance_top_coins(exclude_syms)
+            if coins:
+                with _top_coins_cache_lock:
+                    _top_coins_cached_symbols = list(coins)
+                    _top_coins_cached_at = time.time()
+                return coins
+        except BinanceCooldownError:
+            log.warning("[top_coins/binance] rate-limit/ban terdeteksi; pindah ke fallback tanpa retry Binance.")
+        except Exception as e:
+            log.warning(f"[top_coins/binance] {e}; pindah ke fallback tanpa retry Binance.")
+    # Bybit fallback
+    try:
+        coins = _bybit_top_coins(exclude_syms)
+        if coins:
+            log.info(f"[top_coins/bybit fallback] {len(coins)} koin")
+            with _top_coins_cache_lock:
+                _top_coins_cached_symbols = list(coins)
+                _top_coins_cached_at = time.time()
+            return coins
+        log.warning("[top_coins/bybit] kosong, coba WS...")
+    except Exception as e:
+        log.warning(f"[top_coins/bybit] {e} — coba WS...")
+    # WS fallback TERAKHIR
+    if ws_feed.is_fresh():
+        raw = ws_feed.get_top_coins_raw()
+        usdt = [
+            t for t in raw
+            if t["symbol"].endswith("USDT")
+            and 0.0001 < t["price"] < MAX_PRICE
+            and t["qvol"] > 5_000_000
+            and abs(t["chg"]) < 15
+            and t["symbol"] not in exclude_syms
+        ]
+        if usdt:
+            usdt.sort(key=lambda x: x["qvol"], reverse=True)
+            log.warning("[top_coins/ws fallback] REST Binance & Bybit gagal")
+            return [t["symbol"] for t in usdt[:TOP_N_COINS]]
+    return []
+
+
+_PRICE_REFRESH_SEC = 10   # interval cek watchdog (detik)
+
+def _price_cache_loop():
+    """
+    DULU: thread polling REST batch tiap 10 detik utk cache harga posisi.
+    SEKARANG: REST (Binance→Bybit) adalah sumber data UTAMA di get_price/
+    get_klines/get_top_coins; WS cuma buffer fallback TERAKHIR yang
+    disiapkan di background. Karena WS bukan sumber utama lagi, hidup-
+    matinya WS BUKAN kejadian penting bagi operasional bot — jadi TIDAK
+    lagi dikirim ke Telegram tiap kali flap (dulu ini yang bikin spam
+    notifikasi "WS pulih"/"WS terputus" berulang-ulang). Status WS tetap
+    dicatat di log untuk keperluan debug, dan stream kline yang sudah
+    tidak dipakai >30 menit tetap dibersihkan di sini.
+    """
+    was_fresh = None   # None = belum pernah dicek
+    while True:
+        try:
+            fresh = ws_feed.is_fresh()
+            if was_fresh is not None and was_fresh != fresh:
+                if fresh:
+                    log.info("[ws-watchdog] WS fallback tersedia lagi (buffer siap)")
+                else:
+                    log.info("[ws-watchdog] WS fallback tidak tersedia — tidak masalah, REST tetap sumber utama")
+            was_fresh = fresh
+            ws_feed.cleanup_stale_streams()
+        except Exception as e:
+            log.error(f"[ws-watchdog] {e}")
+        time.sleep(_PRICE_REFRESH_SEC)
+
+# ═════════════════════════════════════════════
+# INDIKATOR
+# ═════════════════════════════════════════════
+
+# =============================================================================
+# STABLE BODY — PARALLEL RESEARCH DISPATCH
+# =============================================================================
+def _dispatch_research_job(fn, *args, **kwargs):
+    """Fire-and-forget research task. NEVER used for order/protection requests."""
+    try:
+        pool = getattr(_dispatch_research_job, "_pool", None)
+        if pool is None:
+            pool = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("RESEARCH_WORKERS", "2"))), thread_name_prefix="research")
+            _dispatch_research_job._pool = pool
+        fut = pool.submit(fn, *args, **kwargs)
+        fut.add_done_callback(lambda f: (log.debug(f"[RESEARCH] job error: {f.exception()}") if f.exception() else None))
+        return fut
     except Exception as exc:
-        log.warning(f"[ADAPTIVE] save {path.name} gagal: {exc}")
+        log.warning(f"[RESEARCH] dispatch gagal: {exc}")
+        return None
+
+
+def _brain_wakeup_from_body():
+    try:
+        fn = globals().get("adaptive_research_cycle")
+        if callable(fn):
+            _dispatch_research_job(fn)
+    except Exception as exc:
+        log.debug(f"[ADAPTIVE] wake research gagal: {exc}")
+
+def run_scan_once(chat_id):
+    global early_reject_remaining
+    """Scan universe with cached market data and record rich market context.
+
+    V19 adds *derived* market breadth/relative-strength/regime telemetry only.
+    It does not add a Binance endpoint or a new request: the M15/H1/D1 frames
+    already fetched for strategy analysis are reused in memory.
+    """
+    scan_started=time.monotonic()
+    if _binance_is_scan_paused():
+        _notify_binance_pause_once(chat_id); return []
+    tg_send(chat_id, f"🔍 Scanning {TOP_N_COINS} koin...")
+    if _binance_is_scan_paused():
+        _notify_binance_pause_once(chat_id); return []
+    try:
+        symbols=get_top_coins()
+    except BinanceCooldownError as e:
+        tg_send(chat_id, f"⏸️ <b>Scan dihentikan</b> — Binance rate-limit/ban aktif.\n<code>{str(e)[:180]}</code>"); return []
+    except Exception as e:
+        tg_send(chat_id, f"⚠️ Market data error: <code>{str(e)[:150]}</code>"); return []
+    if not symbols:
+        tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan."); return []
+
+    data_started=time.monotonic(); results=[]; all_scan_confidences=[]; market_rows=[]
+    processed_symbols=analyzed_symbols=cache_hits=cache_misses=failed_symbols=low_conf_count=below_threshold_count=0
+    scan_deadline = scan_started + SCAN_MAX_DURATION_SEC
+    for idx,sym in enumerate(symbols,1):
+        if time.monotonic() >= scan_deadline:
+            log.warning(f"[scan] hard deadline {SCAN_MAX_DURATION_SEC}s tercapai — cycle dihentikan aman.")
+            break
+        if _binance_is_scan_paused():
+            log.warning("[scan] Binance pause aktif — scan cycle dihentikan di tengah jalan."); break
+        log.info(f"[scan {idx:02d}/{len(symbols)}] {sym}")
+        processed_symbols += 1
+        try:
+            before=_scan_cache_stats()
+            h1=get_scan_klines(sym,"1h",250); m15=get_scan_klines(sym,"15m",250)
+            try: d1=get_scan_klines(sym,"1d",100)
+            except BinanceCooldownError: raise
+            except Exception: d1=None
+            after=_scan_cache_stats(); cache_misses += max(0,after[0]-before[0])
+            r=full_analyze(h1,m15,d1,symbol=sym)
+            # Market-context telemetry belongs to every successfully loaded chart,
+            # not only to symbols where strategy_logic returned a trade candidate.
+            # This keeps market context meaningful even when no setup is produced.
+            row=_market_feature_row(sym,h1,m15,r if isinstance(r,dict) else {})
+            row.update({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter})
+            market_rows.append(row)
+            if isinstance(r,dict):
+                _ml_record_signal_metadata(r)
+                analyzed_symbols+=1; conf=float(r.get("confidence",0) or 0); all_scan_confidences.append(conf)
+                lf = r.setdefault("learning_features", {})
+                lf.update({
+                    "market_bull_breadth": float(row.get("bullish_breadth_pct") or 0.0) / 100.0,
+                    "market_bear_breadth": float(row.get("bearish_breadth_pct") or 0.0) / 100.0,
+                    "market_efficiency": float(row.get("efficiency_4h") or 0.0),
+                    "market_relative_volume": float(row.get("relative_volume") or 0.0),
+                    "btc_1h": float(row.get("price_1h_pct") or 0.0) if sym == "BTCUSDT" else 0.0,
+                    "btc_4h": float(row.get("price_4h_pct") or 0.0) if sym == "BTCUSDT" else 0.0,
+                    "symbol_rs_1h": float(row.get("relative_strength_1h_pct") or 0.0) if row.get("relative_strength_1h_pct") is not None else 0.0,
+                    "symbol_rs_4h": float(row.get("relative_strength_4h_pct") or 0.0) if row.get("relative_strength_4h_pct") is not None else 0.0,
+                })
+                # Every analyzed candidate is retained for cognitive learning,
+                # even when it is below the live threshold. No network call here.
+                try:
+                    fn_ingest = globals().get("ingest_live_candidate")
+                    if callable(fn_ingest):
+                        fn_ingest(r, h1=h1, m15=m15, d1=d1, rejected_reason=("below_threshold" if conf < STRATEGY_CONFIDENCE_THRESHOLD else None), source="binance")
+                except Exception as e:
+                    log.warning(f"[COGNITIVE] candidate bridge gagal {sym}: {e}")
+                active_threshold = int((_ml_current_champion() or {}).get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD)) if FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD
+                cutoff=float(active_threshold)/2.0
+                if conf<=cutoff:
+                    low_conf_count+=1; _record_low_confidence_event(sym,conf,cutoff,r.get("decision"),r.get("entry_label"))
+                    _ban_coin(sym,reason=f"low confidence {conf:.1f} <= {cutoff:.1f}",duration=BAN_DURATION_SCANS,kind="low_confidence",confidence=conf)
+                if conf<active_threshold: below_threshold_count+=1
+                if conf>=active_threshold:
+                    r["market_context"]={k:v for k,v in row.items() if k not in {"scan_time","run_id","scan_counter"}}
+                    results.append(r); log.info(f"[SIGNAL] {sym} {r.get('decision')} confidence={conf:.1f}")
+                else:
+                    log.info(f"[FILTER] {sym} confidence={conf:.1f} < {STRATEGY_CONFIDENCE_THRESHOLD}")
+        except BinanceCooldownError:
+            log.warning(f"[scan] {sym}: Binance cooldown aktif — scan cycle dihentikan aman."); break
+        except Exception as e:
+            failed_symbols+=1; log.debug(f"[scan] {sym}: {e}")
+        # No per-symbol sleep here. Binance requests are serialized by _binance_request_slot().
+        # Sleeping here only stretched scans without adding API safety.
+
+    # Enrich per-symbol rows with relative strength vs BTC without a new request.
+    btc_row=next((x for x in market_rows if x.get("symbol")=="BTCUSDT"),None)
+    btc_r1=btc_row.get("price_1h_pct") if btc_row else None; btc_r4=btc_row.get("price_4h_pct") if btc_row else None
+    for row in market_rows:
+        row["relative_strength_1h_pct"]=(row.get("price_1h_pct")-btc_r1) if btc_r1 is not None and row.get("price_1h_pct") is not None else None
+        row["relative_strength_4h_pct"]=(row.get("price_4h_pct")-btc_r4) if btc_r4 is not None and row.get("price_4h_pct") is not None else None
+        if row.get("symbol")=="BTCUSDT":
+            row["relative_strength_1h_pct"]=0.0; row["relative_strength_4h_pct"]=0.0
+        for result in results:
+            if result.get("symbol") == row.get("symbol"):
+                lf = result.setdefault("learning_features", {})
+                lf.update({
+                    "market_bull_breadth": lf.get("market_bull_breadth", 0.0),
+                    "btc_1h": float(btc_r1 or 0.0),
+                    "btc_4h": float(btc_r4 or 0.0),
+                    "symbol_rs_1h": float(row.get("relative_strength_1h_pct") or 0.0),
+                    "symbol_rs_4h": float(row.get("relative_strength_4h_pct") or 0.0),
+                })
+    _record_market_context(market_rows)
+    mc=_summarize_market_context(market_rows)
+
+    data_elapsed=time.monotonic()-data_started; total_elapsed=time.monotonic()-scan_started
+    cache_total,cache_fresh=_scan_cache_stats(); avg_conf=(sum(all_scan_confidences)/len(all_scan_confidences)) if all_scan_confidences else None
+    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct")}
+    _record_scan_telemetry(telemetry)
+    _record_scan_quality({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc})
+    log.info("[SCAN SUMMARY] " + " | ".join(f"{k}={v}" for k,v in telemetry.items()))
+
+    # /reject is expressed in SCAN CYCLES, not individual signals.
+    # While warmup is active, every qualified signal from the current scan is
+    # discarded together, none is banned, and exactly one scan is consumed.
+    rejected_warmup=[]
+    warmup_active=False
+    with early_reject_lock:
+        remaining=int(early_reject_remaining)
+        if remaining>0:
+            warmup_active=True
+            rejected_warmup=list(results)
+            results=[]
+            early_reject_remaining=max(0, remaining-1)
+    for r in rejected_warmup:
+        log.info(f"[EARLY-REJECT][scan] {r.get('symbol','?')} confidence={float(r.get('confidence',0) or 0):.1f}")
+    with scan_quality_lock:
+        if scan_quality_history and scan_quality_history[-1].get("run_id")==research_run_id and scan_quality_history[-1].get("scan_counter")==scan_counter:
+            scan_quality_history[-1]["early_rejected_count"]=len(rejected_warmup)
+            scan_quality_history[-1]["warmup_reject_scan"]=warmup_active
+
+    results.sort(key=lambda x:float(x.get("confidence",0) or 0),reverse=True)
+    avg_txt=f"{avg_conf:.1f}%" if avg_conf is not None else "belum tersedia (0 analisa strategy valid)"
+    if mc.get('bullish_breadth_pct') is not None:
+        breadth_txt=(f"📈 Breadth BUY <b>{mc['bullish_breadth_pct']:.1f}%</b> | SELL <b>{mc['bearish_breadth_pct']:.1f}%</b> | Regime: <b>{mc['market_regime']}</b>")
+    elif market_rows:
+        breadth_txt=(f"📈 Breadth BUY <b>—</b> | SELL <b>—</b> | Regime: <b>{mc.get('market_regime','unknown')}</b> | arah belum cukup untuk breadth")
+    else:
+        breadth_txt="📈 Market context: <b>belum tersedia</b>"
+    rs_txt=(f"\n₿ BTC 1h: <b>{mc['btc_price_1h_pct']:+.2f}%</b> | BTC 4h: <b>{mc['btc_price_4h_pct']:+.2f}%</b>" if mc.get('btc_price_1h_pct') is not None else "")
+    active_threshold = int((_ml_current_champion() or {}).get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD)) if FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD
+    scan_meta=f"\n\n📊 Scan: <b>{TOP_N_COINS}</b> diminta | <b>{len(symbols)}</b> tersedia | <b>{processed_symbols}</b> diproses | <b>{analyzed_symbols}</b> analisa strategy valid\n🧠 Rata-rata confidence scan: <b>{avg_txt}</b>\nThreshold aktif: <b>{active_threshold}%</b>\n{breadth_txt}{rs_txt}"
+    if warmup_active: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> signal qualified dari scan ini ditolak"
+    if not results:
+        tg_send(chat_id,f"⚠️ Tidak ada setup dengan confidence ≥ {active_threshold}%."+scan_meta); return []
+    _brain_wakeup_from_body()
+    summary="\n".join(f"• {r.get('symbol','?')} {r.get('decision','?')} — {float(r.get('confidence',0) or 0):.0f}%" for r in results)
+    tg_send(chat_id,f"✅ <b>{len(results)} sinyal lolos</b> (threshold {active_threshold}%)\n\n{summary}{scan_meta}")
+    return results
+
+
+# ═════════════════════════════════════════════
+# STATISTIK + BALANCE
+# ═════════════════════════════════════════════
+
+# ── Fee trading — dipakai update_stats() untuk PnL simulasi & real ────────
+# Standar Binance USDT-M Futures VIP0, TANPA diskon BNB. SESUAIKAN kalau
+# tier akun kamu beda (VIP lebih tinggi / diskon BNB aktif / dsb) —
+# semakin akurat angka ini, semakin dekat statistik bot ke kenyataan.
+ENTRY_FEE_PCT = 0.0002   # 0.02% — entry via limit order (biasanya maker)
+EXIT_FEE_PCT  = 0.0005   # 0.05% — exit via SL/TP market-trigger (taker)
+                            # P&L murni dari jarak SL/TP yang ditetapkan analisis:
+                            #   TP hit → gain = posisi × (tp_dist / entry)
+                            #   SL hit → loss = posisi × (sl_dist / entry)
+                            # Nilai ini TIDAK mempengaruhi PENEMPATAN SL/TP —
+                            # hanya memengaruhi simulasi saldo.
+# POSITION_SIZE_PCT: SUDAH TIDAK DIPAKAI (lihat fix di update_stats di bawah)
+# — dipertahankan sebagai konstanta supaya tidak menghapus definisi yang
+# mungkin masih direferensikan dari luar, tapi update_stats() sekarang
+# pakai MARGIN_USD × LEVERAGE (persis logika real trade), bukan ini lagi.
+POSITION_SIZE_PCT = 100.0  # DEPRECATED — lihat catatan di atas
+
+def _classify_close_result(result, entry=None, close_price=None, decision=None):
+    """Normalize every closed trade into the three operational outcome buckets.
+
+    TP is preserved when the exchange/engine explicitly confirms a take-profit path.
+    Every other realized exit is classified economically: positive net PnL -> TRAIL,
+    non-positive net PnL -> SL. The original reason is kept separately in
+    ``close_reason`` for research, so UI/statistics never end up with an uncounted
+    fourth outcome such as ``strategy`` or ``timeout``.
+    """
+    result = str(result or "strategy").strip().lower()
+    if result == "tp":
+        return "tp"
+    if entry is not None and close_price is not None:
+        try:
+            entry = float(entry); close_price = float(close_price)
+            if entry > 0:
+                side = str(decision or "BUY").upper()
+                direction = 1 if side == "BUY" else -1
+                pnl_raw = ((close_price - entry) / entry) * direction
+                net_pnl = pnl_raw - (ENTRY_FEE_PCT + EXIT_FEE_PCT)
+                return "trail" if net_pnl > 0 else "sl"
+        except Exception:
+            pass
+    # No realized price available: preserve explicit operational result, otherwise
+    # fail closed into SL so every closed trade remains countable.
+    if result == "trail":
+        return "trail"
+    if result == "sl":
+        return "sl"
+    return "sl"
+
+
+def _update_trade_path_metrics(pos, price):
+    """Track MFE/MAE and time-to-R milestones in-memory without API calls."""
+    try:
+        entry=float(pos.get("entry")); sl=float(pos["signal"].get("sl")); price=float(price)
+        if entry <= 0: return
+        side=str(pos["signal"].get("decision") or "BUY").upper()
+        move=((price-entry)/entry*100.0) if side=="BUY" else ((entry-price)/entry*100.0)
+        risk_pct=(abs(entry-sl)/entry*100.0)
+        r=(move/risk_pct) if risk_pct else 0.0
+        pos.setdefault("mfe_pct", 0.0); pos.setdefault("mae_pct", 0.0); pos.setdefault("mfe_r", 0.0); pos.setdefault("mae_r", 0.0)
+        pos["mfe_pct"]=max(float(pos["mfe_pct"]), move); pos["mae_pct"]=min(float(pos["mae_pct"]), move)
+        pos["mfe_r"]=max(float(pos["mfe_r"]), r); pos["mae_r"]=min(float(pos["mae_r"]), r)
+        now=time.time(); start=pos.get("entry_time") or now; pos.setdefault("time_in_trade_sec", 0.0); pos["time_in_trade_sec"]=max(0.0, now-start)
+        if r>=1.0 and pos.get("time_to_1r_sec") is None: pos["time_to_1r_sec"]=now-start
+        if r>=2.0 and pos.get("time_to_2r_sec") is None: pos["time_to_2r_sec"]=now-start
+    except Exception:
+        return
+
+def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
+                 sym=None, decision=None, entry_time=None, close_reason=None,
+                 confidence=None, entry_label=None, rr=None, rsi=None,
+                 struct_h1=None, d1_bias=None,
+                 mfe_pct=None, mae_pct=None, mfe_r=None, mae_r=None,
+                 time_in_trade_sec=None, time_to_1r_sec=None, time_to_2r_sec=None,
+                 execution_mode=None, balance_anchor=None, trade_uid=None,
+                 trail_update_count=0, trail_applied_count=0, trail_failed_count=0, trail_queued_count=0,
+                 first_trail_r=None, last_trail_r=None, max_protected_r=None, learning_features=None, ml_model_version=None):
+    """
+    Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
+    lama untuk detail model close_price). Tambahan: catat sym/decision/
+    entry_time/exit_time + detail sinyal (confidence/entry_label/rr/rsi/
+    struct_h1/d1_bias) ke pnl_history — bahan diagnosis strategy_logic.py
+    tanpa perlu data tambahan lain (lihat /analyze).
+
+    result: klasifikasi final yang sudah dinormalisasi. "trail" hanya dipakai
+    jika exit trailing benar-benar menghasilkan PnL positif; trailing yang
+    berakhir negatif dicatat sebagai "sl". "timeout" juga diklasifikasikan
+    menjadi "trail" bila positif dan "sl" bila negatif.
+    """
+    result = _classify_close_result(result, entry=entry, close_price=close_price, decision=decision)
+    with stat_lock:
+        stats["total"] += 1
+        if result in ("tp", "sl", "trail"):
+            stats[result] = stats.get(result, 0) + 1
+
+        if not entry or tp_p is None:
+            return
+
+        balance      = stats["balance"]
+        # ── FIX "buat semirip mungkin" ──────────────────────────────────
+        # Sebelumnya: position_usd = balance × 100% — simulasi selalu
+        # bertaruh SELURUH saldo tiap trade (full compounding), padahal
+        # real trading pakai MARGIN_USD × LEVERAGE (jumlah dolar FIXED,
+        # kecil, diatur via /margin & /leverage), TIDAK ikut membesar
+        # walau saldo real sudah tumbuh. Ini bikin bentuk kurva ekuitas
+        # simulasi sama sekali beda dari real (simulasi: compounding
+        # agresif; real: flat sizing) — bukan cuma soal fee/entry lagi,
+        # tapi soal skala taruhan itu sendiri.
+        # Sekarang KEDUA mode pakai rumus yang SAMA PERSIS seperti real
+        # trade sizing, supaya kalau kamu ubah /margin atau /leverage,
+        # simulasi otomatis ikut menyesuaikan — selaras terus dengan real.
+        position_usd = round(MARGIN_USD * LEVERAGE, 6)
+        direction_sign = 1 if tp_p > entry else -1
+
+        if close_price is not None:
+            ref_price = close_price
+        elif result == "tp":
+            ref_price = tp_p
+        elif result == "sl" and sl_p is not None:
+            ref_price = sl_p
+        else:
+            return
+
+        pnl_pct_raw = (ref_price - entry) / entry * direction_sign
+        # ── FIX "simulasi tidak real / win rate kelewat bagus" ──────────
+        # Sebelumnya PnL dihitung MURNI dari selisih harga — nol biaya
+        # trading. Di real trading, Binance SELALU potong fee tiap kali
+        # entry (limit order → biasanya maker) DAN exit (SL/TP → market-
+        # trigger → taker), otomatis kepotong dari saldo asli. Simulasi
+        # tidak pernah mengurangi ini, jadi untuk trade RR ketat (SL 1-2%
+        # dari harga, khas bot ini), fee round-trip yang kelihatannya kecil
+        # bisa membalik hasil "breakeven/rugi tipis di real" jadi "menang"
+        # di simulasi — bias sistemik yang bikin win rate simulasi selalu
+        # kelihatan lebih bagus dari kenyataan.
+        #
+        # Angka ENTRY_FEE_PCT/EXIT_FEE_PCT di bawah = tarif standar Binance
+        # USDT-M Futures VIP0 tanpa diskon BNB. Kalau akun kamu VIP lebih
+        # tinggi / pakai diskon BNB / fee-nya beda, SESUAIKAN angka ini
+        # (dekat bagian atas file) supaya makin presisi ke kondisi akunmu.
+        # Diterapkan ke SIMULASI *dan* REAL supaya keduanya konsisten
+        # mencerminkan biaya riil (real trading sebenarnya sudah kepotong
+        # otomatis di Binance — ini menyamakan angka yang DITAMPILKAN bot
+        # dengan kenyataan itu, bukan menambah biaya baru yang sungguhan).
+        fee_pct = ENTRY_FEE_PCT + EXIT_FEE_PCT
+        pnl_pct = pnl_pct_raw - fee_pct
+        pnl_usd = round(position_usd * pnl_pct, 4)
+        pct     = round(pnl_pct * 100, 3)
+        stats["balance"] = round(balance + pnl_usd, 4)
+        exit_ts = time.time()
+        global trade_sequence
+        trade_sequence += 1
+        trade_record = {
+            "trade_id": trade_sequence, "run_id": research_run_id, "trade_uid": trade_uid,
+            "result": result, "close_reason": close_reason or result, "pct": pct,
+            "pnl_usd": pnl_usd, "balance_after": stats["balance"],
+            "symbol": sym, "decision": decision,
+            "entry_time": entry_time, "exit_time": exit_ts,
+            "entry": entry, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
+            "confidence": confidence, "entry_label": entry_label, "rr": rr,
+            "rsi": rsi, "struct_h1": struct_h1, "d1_bias": d1_bias,
+            "mfe_pct": mfe_pct,
+            "mae_pct": mae_pct,
+            "mfe_r": mfe_r,
+            "mae_r": mae_r,
+            "time_in_trade_sec": time_in_trade_sec,
+            "time_to_1r_sec": time_to_1r_sec,
+            "time_to_2r_sec": time_to_2r_sec,
+            "execution_mode": execution_mode, "balance_anchor": balance_anchor,
+            "trail_update_count": int(trail_update_count or 0), "trail_applied_count": int(trail_applied_count or 0),
+            "trail_failed_count": int(trail_failed_count or 0), "trail_queued_count": int(trail_queued_count or 0),
+            "first_trail_r": first_trail_r, "last_trail_r": last_trail_r, "max_protected_r": max_protected_r,
+            "learning_features": dict(learning_features) if isinstance(learning_features, dict) else None,
+            "ml_model_version": ml_model_version or "static",
+        }
+        # Full ledger: every closed trade in this research run.
+        with trade_history_lock:
+            trade_history.append(dict(trade_record))
+        _ml_append_experience(trade_record)
+        # Backward-compatible 20-trade view for /backtest and existing UI.
+        stats["pnl_history"].append(dict(trade_record))
+
+# Hitung alasan pending dibatalkan — biar bisa didiagnosis dari data,
+# bukan tebak-tebakan (mis. "kenapa banyak batal?" jadi terjawab dari /stats).
+pending_cancel_stats = {"tp_before_entry": 0, "expired": 0, "binance_reject": 0}
+pending_cancel_lock = threading.Lock()
+
+def _record_pending_cancel(reason_key):
+    with pending_cancel_lock:
+        pending_cancel_stats[reason_key] = pending_cancel_stats.get(reason_key, 0) + 1
+
+
+def _avg_conf_for_result(hist, result_key):
+    vals = []
+    for row in hist:
+        if str(row.get("result", "")).lower() == result_key:
+            try:
+                vals.append(float(row.get("confidence")))
+            except (TypeError, ValueError):
+                pass
+    return (sum(vals) / len(vals)) if vals else None
+
+def fmt_stats():
+    with stat_lock:
+        t, tp, sl = stats["total"], stats["tp"], stats["sl"]
+        trail, bal = stats.get("trail", 0), stats["balance"]
+        hist = list(stats["pnl_history"])
+    with trade_history_lock:
+        full_hist = [dict(x) for x in trade_history]
+    wins = tp + trail
+    wr = wins/(wins+sl)*100 if (wins+sl) > 0 else 0
+    base = STARTING_BALANCE if not REAL_TRADE_ENABLED else (real_balance_snapshot if real_balance_snapshot is not None else bal)
+    pnl = round(bal - base, 4)
+    pnl_pct = round((pnl / base * 100), 2) if base else 0.0
+    sgn = "+" if pnl >= 0 else ""
+    hist_str = "\n".join(
+        f"  {'🟢' if h.get('pnl_usd',0) > 0 else '🔴' if h.get('pnl_usd',0) < 0 else '⚪'} "
+        f"{h.get('result','?').upper()} {'+' if h.get('pnl_usd',0)>=0 else ''}{h.get('pct',0):.2f}% → ${h.get('balance_after',0):.4f} | C{float(h.get('confidence',0) or 0):.0f}%"
+        for h in reversed(hist[-5:])
+    ) or "  (belum ada)"
+    avg_all = None
+    conf_vals = []
+    for h in full_hist:
+        try: conf_vals.append(float(h.get("confidence")))
+        except (TypeError, ValueError): pass
+    if conf_vals: avg_all = sum(conf_vals)/len(conf_vals)
+    avg_tp = _avg_conf_for_result(full_hist, "tp")
+    avg_trail = _avg_conf_for_result(full_hist, "trail")
+    avg_sl = _avg_conf_for_result(full_hist, "sl")
+    with pending_cancel_lock:
+        pc = dict(pending_cancel_stats)
+    total_cancel = sum(pc.values())
+    cancel_line = ""
+    if total_cancel > 0:
+        cancel_line = (f"\n\n⏭ Pending batal: {total_cancel} total\n"
+                       f"  TP sebelum entry: {pc['tp_before_entry']} | "
+                       f"Expired: {pc['expired']} | Ditolak Binance: {pc['binance_reject']}")
+    with ban_lock:
+        banned_n = len(banned_coins)
+    with early_reject_lock:
+        reject_rem = early_reject_remaining
+    lc=_low_conf_summary(); top_lc=", ".join(f"{x['symbol']}({x['count']}x)" for x in lc[:5]) if lc else "—"
+    mode_label = "🔴 REAL" if REAL_TRADE_ENABLED else "🧪 SIMULASI"
+    avg_line = f"{avg_all:.1f}%" if avg_all is not None else "—"
+    tp_line = f"{avg_tp:.1f}%" if avg_tp is not None else "—"
+    trail_line = f"{avg_trail:.1f}%" if avg_trail is not None else "—"
+    sl_line = f"{avg_sl:.1f}%" if avg_sl is not None else "—"
+    return (
+        f"📊 <b>Statistik</b> — {t} trade | TP {tp} SL {sl} Trail {trail}\n"
+        f"Mode: <b>{mode_label}</b>\n"
+        f"Win Rate: <b>{wr:.1f}%</b> (TP+Trail vs SL)\n"
+        f"\nModal anchor: <b>${base:.4f}</b> → Saldo statistik: <b>${bal:.4f}</b> "
+        f"({sgn}{pnl_pct:.2f}%)\n"
+        f"\nConfidence rata-rata closed: <b>{avg_line}</b>\n"
+        f"🎯 TP: <b>{tp_line}</b> | 🔒 Trail: <b>{trail_line}</b> | 🛑 SL: <b>{sl_line}</b>\n"
+        f"\n5 terakhir:\n{hist_str}\n\n"
+        f"🚫 Banned: {banned_n} | 🧠 Low-conf teratas: {top_lc} | 🛡️ Early reject tersisa: {reject_rem}"
+        f"{cancel_line}"
+    )
+
+def fmt_backtest():
+    """20 trade terakhir dengan confidence per trade."""
+    with stat_lock:
+        hist = list(stats["pnl_history"])
+    if not hist:
+        return "📋 <b>Backtest</b>\nBelum ada trade."
+    lines = []
+    for h in reversed(hist):
+        em  = "🟢" if float(h.get("pnl_usd", 0) or 0) > 0 else "🔴" if float(h.get("pnl_usd", 0) or 0) < 0 else "⚪"
+        dec = h.get("decision") or "?"
+        sym = h.get("symbol") or "?"
+        et  = h.get("entry_time"); xt = h.get("exit_time")
+        t_in  = datetime.fromtimestamp(et, WIB).strftime("%d/%m/%Y %H:%M") if et else "?"
+        t_out = datetime.fromtimestamp(xt, WIB).strftime("%d/%m/%Y %H:%M") if xt else "?"
+        sgn = "+" if h["pnl_usd"] >= 0 else ""
+        entry_v, tp_v, sl_v = h.get("entry"), h.get("tp"), h.get("sl")
+        sl_display = h.get("exit_price") if h.get("result") == "trail" else sl_v
+        levels = (f"Entry: <code>{entry_v:.6g}</code> | TP: <code>{tp_v:.6g}</code> | SL: <code>{sl_display:.6g}</code>\n"
+                  if entry_v is not None and tp_v is not None and sl_display is not None else "")
+        try:
+            conf_txt = f"{float(h.get('confidence')):.0f}%"
+        except (TypeError, ValueError):
+            conf_txt = "—"
+        lines.append(
+            f"{em} <b>{sym}</b> {dec} | {h['result'].upper()} {sgn}{h['pct']:.2f}% | Confidence: <b>{conf_txt}</b>\n"
+            f"{levels}{t_in}→{t_out}"
+        )
+    return f"📋 <b>Backtest ({len(hist)} trade terakhir)</b>\n\n" + "\n\n".join(lines)
+
+# ============================================================
+# ANALYZE — CLOSED TRADE LEDGER (DUA FILE: MD + CSV)
+# ============================================================
+def _trade_analysis_rows(hist):
+    rows = []
+    for t in hist:
+        rows.append({
+            "trade_id": t.get("trade_id", ""),
+            "run_id": t.get("run_id", ""),
+            "symbol": t.get("symbol", ""),
+            "result": t.get("result", ""),
+            "close_reason": t.get("close_reason", ""),
+            "decision": t.get("decision", ""),
+            "entry": t.get("entry", ""),
+            "sl": t.get("sl", ""),
+            "tp": t.get("tp", ""),
+            "exit_price": t.get("exit_price", ""),
+            "rr": t.get("rr", ""),
+            "final_r": t.get("final_r", ""),
+            "confidence": t.get("confidence", ""),
+            "entry_label": t.get("entry_label", ""),
+            "rsi": t.get("rsi", ""),
+            "struct_h1": t.get("struct_h1", ""),
+            "d1_bias": t.get("d1_bias", ""),
+            "pct": t.get("pct", ""),
+            "pnl_usd": t.get("pnl_usd", ""),
+            "balance_after": t.get("balance_after", ""),
+            "mfe_pct": t.get("mfe_pct", ""),
+            "mae_pct": t.get("mae_pct", ""),
+            "mfe_r": t.get("mfe_r", ""),
+            "mae_r": t.get("mae_r", ""),
+            "time_in_trade_sec": t.get("time_in_trade_sec", ""),
+            "time_to_1r_sec": t.get("time_to_1r_sec", ""),
+            "time_to_2r_sec": t.get("time_to_2r_sec", ""),
+            "execution_mode": t.get("execution_mode", ""), "balance_anchor": t.get("balance_anchor", ""), "trade_uid": t.get("trade_uid", ""),
+            "trail_update_count": t.get("trail_update_count",0), "trail_applied_count": t.get("trail_applied_count",0), "trail_failed_count": t.get("trail_failed_count",0), "trail_queued_count": t.get("trail_queued_count",0),
+            "first_trail_r": t.get("first_trail_r", ""), "last_trail_r": t.get("last_trail_r", ""), "max_protected_r": t.get("max_protected_r", ""),
+            "ml_model_version": t.get("ml_model_version", "static"),
+            "learning_features": json.dumps(t.get("learning_features"), ensure_ascii=False, sort_keys=True) if t.get("learning_features") else "",
+            "entry_time": t.get("entry_time", ""), "exit_time": t.get("exit_time", ""),
+        })
+    return rows
+
+
+def _analyze_trade_history():
+    """Build one consistent, immutable-enough snapshot for the whole analysis pipeline."""
+    with trade_history_lock:
+        hist = [dict(x) for x in trade_history]
+    if not hist:
+        return [], {"trades": 0, "run_id": research_run_id}, []
+
+    winners = [t for t in hist if t.get("result") in ("tp", "trail")]
+    losers = [t for t in hist if t.get("result") == "sl"]
+    gross_profit = sum(max(float(t.get("pnl_usd", 0.0)), 0.0) for t in hist)
+    gross_loss = abs(sum(min(float(t.get("pnl_usd", 0.0)), 0.0) for t in hist))
+    total_pnl = sum(float(t.get("pnl_usd", 0.0)) for t in hist)
+    avg_pct = sum(float(t.get("pct", 0.0)) for t in hist) / len(hist)
+    anchors=[]
+    for t in hist:
+        try:
+            if t.get("balance_anchor") is not None: anchors.append(float(t.get("balance_anchor")))
+        except (TypeError,ValueError): pass
+    run_anchor = anchors[0] if anchors else STARTING_BALANCE
+    equity = [run_anchor] + [float(t.get("balance_after", run_anchor)) for t in hist]
+    peak = equity[0]
+    max_dd = 0.0
+    for e in equity:
+        peak = max(peak, e)
+        max_dd = max(max_dd, peak - e)
+
+    # Additional diagnostics derived from the closed-trade ledger.
+    for t in hist:
+        try:
+            entry=float(t.get("entry")); exit_price=float(t.get("exit_price")); sl=float(t.get("sl")); side=str(t.get("decision") or "BUY").upper(); risk=abs(entry-sl)
+            t["final_r"] = (((exit_price-entry)/risk) if side=="BUY" else ((entry-exit_price)/risk)) if risk else 0.0
+        except Exception:
+            t["final_r"] = None
+
+    # Breakdown yang berguna untuk diagnosis strategy tanpa market rescan.
+    by_result = {}
+    by_symbol = {}
+    by_entry = {}
+    for t in hist:
+        r = str(t.get("result") or "unknown")
+        s = str(t.get("symbol") or "?")
+        el = str(t.get("entry_label") or "?")
+        for bucket, key in ((by_result, r), (by_symbol, s), (by_entry, el)):
+            b = bucket.setdefault(key, {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0})
+            b["trades"] += 1
+            b["pnl"] += float(t.get("pnl_usd", 0.0))
+            if float(t.get("pnl_usd", 0.0)) >= 0:
+                b["wins"] += 1
+            else:
+                b["losses"] += 1
+
+    summary = {
+        "trades": len(hist),
+        "run_id": hist[-1].get("run_id", research_run_id),
+        "balance": float(hist[-1].get("balance_after", run_anchor)),
+        "balance_anchor": run_anchor, "net": total_pnl,
+        "win_rate": len(winners) / len(hist) * 100.0,
+        "profit_factor": gross_profit / gross_loss if gross_loss > 0 else float("inf"),
+        "max_dd": max_dd,
+        "expectancy": total_pnl / len(hist),
+        "avg_pct": avg_pct,
+        "tp": sum(1 for t in hist if t.get("result") == "tp"),
+        "trail": sum(1 for t in hist if t.get("result") == "trail"),
+        "sl": sum(1 for t in hist if t.get("result") == "sl"),
+        "by_result": by_result,
+        "by_symbol": by_symbol,
+        "by_entry": by_entry,
+    }
+    return _trade_analysis_rows(hist), summary, hist
+
+
+def _analyze_snapshot():
+    """Compatibility wrapper: /analyze tidak scan market; membaca satu ledger snapshot."""
+    rows, summary, hist = _analyze_trade_history()
+    return rows, summary, hist
+
+
+def _analyze_runtime_stats():
+    rows, summary, _hist = _analyze_snapshot()
+    return {
+        "trades": summary.get("trades", 0),
+        "balance": summary.get("balance", STARTING_BALANCE),
+        "net": summary.get("net", 0.0),
+        "win_rate": summary.get("win_rate", 0.0),
+        "profit_factor": summary.get("profit_factor", 0.0),
+        "max_dd": summary.get("max_dd", 0.0),
+        "expectancy": summary.get("expectancy", 0.0),
+    }
+
+
+def _write_analyze_csv(rows):
+    path = "/tmp/analyze_data.csv"
+    cols = [
+        "trade_id", "run_id", "symbol", "result", "close_reason", "decision", "entry", "sl", "tp", "exit_price",
+        "rr", "final_r", "confidence", "entry_label", "rsi", "struct_h1", "d1_bias", "pct", "pnl_usd",
+        "balance_after", "balance_anchor", "execution_mode", "mfe_pct", "mae_pct", "mfe_r", "mae_r", "time_in_trade_sec",
+        "time_to_1r_sec", "time_to_2r_sec", "trail_update_count", "trail_applied_count", "trail_failed_count", "trail_queued_count",
+        "first_trail_r", "last_trail_r", "max_protected_r", "trade_uid", "ml_model_version", "learning_features", "entry_time", "exit_time",
+    ]
+    pd.DataFrame(rows, columns=cols).to_csv(path, index=False)
+    return path
+
+
+def _trail_events_snapshot(run_id=None):
+    with trail_events_lock: rows=[dict(x) for x in trail_events]
+    return [x for x in rows if run_id is None or x.get("run_id")==run_id]
+
+def _scan_quality_snapshot(run_id=None):
+    with scan_quality_lock: rows=[dict(x) for x in scan_quality_history]
+    return [x for x in rows if run_id is None or x.get("run_id")==run_id]
+
+def _low_conf_snapshot():
+    with low_conf_history_lock: return [dict(x) for x in low_conf_history]
+
+
+def _write_research_support_files(summary):
+    """Bundle all research support datasets into one lossless JSON artifact."""
+    run_id = summary.get("run_id", research_run_id)
+    events = _trail_events_snapshot(run_id)
+    scans = _scan_quality_snapshot(run_id)
+    lows = _low_conf_snapshot()
+    market_rows = _market_context_snapshot(run_id)
+
+    trail_cols = ["event_id","trade_uid","run_id","event_time","symbol","decision","entry","initial_sl","old_sl","new_sl","tp","current_price","current_r","mfe_r","mae_r","giveback_r","giveback_ratio","protected_r","atr","sl_distance_atr","weakness_score","state","trade_phase","trail_source","reasons","relative_volume","candidate_type","status","error_code","error_message","time_since_entry_sec","time_since_previous_trail_sec","distance_to_tp_r"]
+    scan_cols = ["scan_time","run_id","scan_counter","symbols_requested","symbols_available","symbols_processed","symbols_analyzed","failed_symbols","avg_confidence","min_confidence","max_confidence","low_confidence_count","below_threshold_count","qualified_count","early_rejected_count","cache_entries","cache_fresh","market_regime","bullish_breadth_pct","bearish_breadth_pct","neutral_breadth_pct","breadth_score","median_price_1h_pct","median_price_4h_pct","median_efficiency_4h","median_range_expansion_ratio","avg_relative_volume","btc_price_1h_pct","btc_price_4h_pct"]
+    low_cols = ["event_time","run_id","scan_counter","symbol","confidence","confidence_min","cutoff","decision","entry_label"]
+    market_cols = ["scan_time","run_id","scan_counter","symbol","decision","confidence","entry_label","struct_h1","d1_bias","price_1h_pct","price_4h_pct","efficiency_4h","atr_pct","relative_volume","range_expansion_ratio","volatility_ratio","chart_regime","directional_bias","relative_strength_1h_pct","relative_strength_4h_pct"]
+
+    groups = {}
+    for e in events:
+        uid = e.get("trade_uid") or f"{e.get('symbol','?')}|{e.get('entry','')}"
+        g = groups.setdefault(uid, {
+            "trade_uid": uid, "symbol": e.get("symbol"), "trail_updates": 0,
+            "trail_applied": 0, "trail_failed": 0, "trail_queued": 0,
+            "first_trail_r": None, "max_protected_r": None,
+            "max_mfe_at_trail": None, "max_giveback_ratio": None,
+            "final_new_sl": None, "_dist": []
+        })
+        g["trail_updates"] += 1
+        status = str(e.get("status") or "")
+        g["trail_applied"] += int(status == "APPLIED")
+        g["trail_failed"] += int(status == "FAILED")
+        g["trail_queued"] += int(status == "QUEUED")
+        if g["first_trail_r"] is None and e.get("current_r") not in (None, ""):
+            g["first_trail_r"] = float(e["current_r"])
+        if e.get("protected_r") not in (None, ""):
+            v = float(e["protected_r"])
+            g["max_protected_r"] = v if g["max_protected_r"] is None else max(g["max_protected_r"], v)
+        if e.get("mfe_r") not in (None, ""):
+            v = float(e["mfe_r"])
+            g["max_mfe_at_trail"] = v if g["max_mfe_at_trail"] is None else max(g["max_mfe_at_trail"], v)
+        if e.get("giveback_ratio") not in (None, ""):
+            v = float(e["giveback_ratio"])
+            g["max_giveback_ratio"] = v if g["max_giveback_ratio"] is None else max(g["max_giveback_ratio"], v)
+        if e.get("sl_distance_atr") not in (None, ""):
+            g["_dist"].append(float(e["sl_distance_atr"]))
+        g["final_new_sl"] = e.get("new_sl")
+
+    trail_summary = []
+    for g in groups.values():
+        ds = g.pop("_dist", [])
+        g["avg_sl_distance_atr"] = (sum(ds) / len(ds)) if ds else None
+        trail_summary.append(g)
+
+    payload = {
+        "schema_version": "analyze_research_bundle_v1",
+        "generated_at": datetime.now(WIB).isoformat(),
+        "run_id": run_id,
+        "description": "Lossless bundle of the five research-support datasets formerly emitted as separate CSV files.",
+        "trail_events": {"columns": trail_cols, "rows": events},
+        "trail_summary": {"columns": ["trade_uid","symbol","trail_updates","trail_applied","trail_failed","trail_queued","first_trail_r","max_protected_r","max_mfe_at_trail","max_giveback_ratio","avg_sl_distance_atr","final_new_sl"], "rows": trail_summary},
+        "scan_quality": {"columns": scan_cols, "rows": scans},
+        "low_confidence_bans": {"columns": low_cols, "rows": lows},
+        "market_context": {"columns": market_cols, "rows": market_rows},
+        "machine_learning": _full_status_text(),
+        "machine_learning_state": _ml_current_champion(),
+        "machine_learning_experience_count": len(ML_EXPERIENCE),
+    }
+
+    path = "/tmp/analyze_research_bundle.json"
+    Path(path).write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False, default=str), encoding="utf-8")
+    return path
+
+def _write_analyze_report(rows, summary, hist):
+    """Write the report from the SAME snapshot used to calculate summary."""
+    path = "/tmp/analyze_report.md"
+    now = datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S WIB")
+    hist = [dict(t) for t in (hist or [])]
+    if not rows or not hist:
+        Path(path).write_text(
+            "# SMCAutoTrade — Trade Analysis\n\n"
+            f"**Waktu:** {now}\n\n"
+            "Belum ada closed trade pada research run aktif.\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _pf(v):
+        return "∞" if v == float("inf") else f"{v:.3f}"
+
+    lines = [
+        "# SMCAutoTrade — Trade Analysis",
+        "",
+        f"**Waktu analysis:** {now}",
+        f"**Research run:** `{summary.get('run_id', research_run_id)}`",
+        f"**Snapshot:** {len(hist)} closed trade",
+        "**Sumber:** full closed-trade ledger dari `/stats`; tidak melakukan market scan.",
+        "",
+        "## Ringkasan",
+        "",
+        "| Metrik | Nilai |",
+        "|---|---:|",
+        f"| Closed trades | {summary['trades']} |",
+        f"| TP | {summary['tp']} |",
+        f"| Trail | {summary['trail']} |",
+        f"| SL | {summary['sl']} |",
+        f"| Win rate | {summary['win_rate']:.2f}% |",
+        f"| Profit factor | {_pf(summary['profit_factor'])} |",
+        f"| Expectancy/trade | ${summary['expectancy']:.5f} |",
+        f"| Avg PnL/trade | {summary['avg_pct']:.3f}% |",
+        f"| Net PnL | ${summary['net']:.4f} |",
+        f"| Balance | ${summary['balance']:.4f} |",
+        f"| Max drawdown | ${summary['max_dd']:.4f} |",
+        "",
+        "## Breakdown Result",
+        "",
+        "| Result | Trades | PnL |",
+        "|---|---:|---:|",
+    ]
+    for k in ("tp", "trail", "sl"):
+        b = summary["by_result"].get(k, {"trades": 0, "pnl": 0.0})
+        lines.append(f"| {k.upper()} | {b['trades']} | ${b['pnl']:.4f} |")
+
+    lines += ["", "## Breakdown Entry Type", "", "| Entry | Trades | Wins | Losses | PnL |", "|---|---:|---:|---:|---:|"]
+    for key, b in sorted(summary["by_entry"].items(), key=lambda kv: kv[1]["pnl"], reverse=True):
+        lines.append(f"| {key} | {b['trades']} | {b['wins']} | {b['losses']} | ${b['pnl']:.4f} |")
+
+    lines += ["", "## Breakdown Symbol", "", "| Symbol | Trades | Wins | Losses | PnL |", "|---|---:|---:|---:|---:|"]
+    for key, b in sorted(summary["by_symbol"].items(), key=lambda kv: kv[1]["pnl"], reverse=True):
+        lines.append(f"| {key} | {b['trades']} | {b['wins']} | {b['losses']} | ${b['pnl']:.4f} |")
+
+    buckets=[(50,59),(60,69),(70,79),(80,89),(90,100)]
+    lines += ["", "## Breakdown Confidence", "", "| Bucket | Trades | Wins | Losses | Win Rate | Avg PnL | Avg R |", "|---|---:|---:|---:|---:|---:|---:|"]
+    for lo,hi in buckets:
+        bt=[t for t in hist if lo <= float(t.get("confidence",0) or 0) <= hi]
+        if not bt: continue
+        wins=sum(1 for t in bt if t.get("result") in ("tp","trail")); losses=len(bt)-wins
+        lines.append(f"| {lo}-{hi} | {len(bt)} | {wins} | {losses} | {wins/len(bt)*100:.1f}% | {sum(float(t.get('pct',0) or 0) for t in bt)/len(bt):.3f}% | {sum(float(t.get('final_r',0) or 0) for t in bt)/len(bt):.2f}R |")
+    lines += ["", "## Breakdown Entry Type", "", "| Entry | Trades | Wins | Losses | Win Rate | Avg PnL | Avg R |", "|---|---:|---:|---:|---:|---:|---:|"]
+    for key,b in sorted(summary["by_entry"].items(), key=lambda kv: kv[1]["pnl"], reverse=True):
+        bt=[t for t in hist if str(t.get("entry_label") or "?")==str(key)]
+        avgr=sum(float(t.get("final_r",0) or 0) for t in bt)/len(bt) if bt else 0
+        lines.append(f"| {key} | {b['trades']} | {b['wins']} | {b['losses']} | {(b['wins']/b['trades']*100 if b['trades'] else 0):.1f}% | {(b['pnl']/b['trades'] if b['trades'] else 0):.3f} | {avgr:.2f}R |")
+    path_rows=[t for t in hist if t.get("mfe_r") is not None or t.get("mae_r") is not None]
+    if path_rows:
+        mfe=sum(float(t.get("mfe_r",0) or 0) for t in path_rows)/len(path_rows); mae=sum(float(t.get("mae_r",0) or 0) for t in path_rows)/len(path_rows)
+        ds=[float(t.get("time_in_trade_sec")) for t in path_rows if t.get("time_in_trade_sec") not in (None, "")]
+        lines += ["", "## Path Analytics", "", f"- Trades tracked: **{len(path_rows)}**", f"- Avg MFE: **{mfe:.2f}R**", f"- Avg MAE: **{mae:.2f}R**"]
+        if ds: lines.append(f"- Avg time in trade: **{sum(ds)/len(ds)/60:.1f} minutes**")
+
+    # Guard against future regressions where summary and report receive different snapshots.
+    if int(summary.get("trades", 0) or 0) != len(hist):
+        raise RuntimeError(
+            f"analysis snapshot mismatch: summary={summary.get('trades')} hist={len(hist)}"
+        )
+
+    trail_rows=_trail_events_snapshot(summary.get("run_id",research_run_id)); low_summary=_low_conf_summary(); scan_rows=_scan_quality_snapshot(summary.get("run_id",research_run_id))
+    if trail_rows:
+        protected=[float(x["protected_r"]) for x in trail_rows if x.get("protected_r") not in (None,"")]; give=[float(x["giveback_ratio"]) for x in trail_rows if x.get("giveback_ratio") not in (None,"")]
+        lines += ["","## Trail Effectiveness","",f"- Trail events: **{len(trail_rows)}**",f"- Applied: **{sum(x.get('status')=='APPLIED' for x in trail_rows)}** | Queued: **{sum(x.get('status')=='QUEUED' for x in trail_rows)}** | Failed: **{sum(x.get('status')=='FAILED' for x in trail_rows)}**",f"- Avg protected R: **{(sum(protected)/len(protected) if protected else 0):.2f}R**",f"- Avg giveback ratio: **{(sum(give)/len(give)*100 if give else 0):.1f}%**"]
+    if low_summary:
+        lines += ["","## Low Confidence Ban Frequency","","| Symbol | Ban Count | Avg Conf | Min | Max |","|---|---:|---:|---:|---:|"]
+        for g in low_summary[:20]: lines.append(f"| {g['symbol']} | {g['count']} | {g['avg']:.1f}% | {g['min']:.1f}% | {g['max']:.1f}% |")
+    if scan_rows:
+        av=[float(x['avg_confidence']) for x in scan_rows if x.get('avg_confidence') is not None]
+        lines += ["","## Scan Quality","",f"- Scan cycles: **{len(scan_rows)}**",f"- Avg confidence by scan: **{(sum(av)/len(av) if av else 0):.2f}%**",f"- Total qualified signals: **{sum(int(x.get('qualified_count',0) or 0) for x in scan_rows)}**"]
+        last_scan=scan_rows[-1]
+        lines += [f"- Latest market regime: **{last_scan.get('market_regime','unknown')}**",f"- Latest breadth: **BUY {float(last_scan.get('bullish_breadth_pct',0) or 0):.1f}% / SELL {float(last_scan.get('bearish_breadth_pct',0) or 0):.1f}%**",f"- Latest median 4h efficiency: **{float(last_scan.get('median_efficiency_4h',0) or 0):.2f}**"]
+    market_rows=_market_context_snapshot(summary.get("run_id",research_run_id))
+    if market_rows:
+        rs1=[float(x['relative_strength_1h_pct']) for x in market_rows if x.get('relative_strength_1h_pct') is not None and x.get('symbol')!='BTCUSDT']
+        rv=[float(x['relative_volume']) for x in market_rows if x.get('relative_volume') is not None]
+        lines += ["","## Market Context","",f"- Symbol-context observations: **{len(market_rows)}**",f"- Avg relative strength vs BTC (1h): **{(sum(rs1)/len(rs1) if rs1 else 0):+.2f}%**",f"- Avg relative volume: **{(sum(rv)/len(rv) if rv else 0):.2f}x**"]
+    lines += [
+        "", "## Catatan", "",
+        "- `/analyze` hanya menganalisis trade yang benar-benar closed dan tercatat sejak `/resetstats` terakhir.",
+        "- History penuh disimpan dalam memory `trade_history`; `/backtest` tetap menampilkan 20 trade terakhir untuk kompatibilitas UI.",
+        "- Jalankan `/resetstats` untuk memulai research run baru dan mengosongkan ledger aktif.",
+    ]
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+# ============================================================
+# END ANALYZE
+# ============================================================
+
+def fmt_signal_msg(sig):
+    d=sig.get("decision","?"); em="🟢" if d=="BUY" else "🔴" if d=="SELL" else "⚪"
+    return (f"📡 <b>{sig.get('symbol','?')}</b> | {em} <b>{d}</b> | Confidence: {sig.get('confidence','—')}%\n"
+            f"Entry: <code>{sig.get('entry',0):.8g}</code> | TP: <code>{sig.get('tp',0):.8g}</code> | SL: <code>{sig.get('sl',0):.8g}</code>")
+
+
+
+# ═════════════════════════════════════════════
+# MULTI-POSITION BROADCASTER
+# ═════════════════════════════════════════════
+# MAX_POSITIONS dikontrol lewat /max — lihat konstanta di bagian atas file
+MONITOR_INTERVAL = 15 * 60  # cek posisi tiap 15 menit (detik)
+
+positions_lock = threading.Lock()
+positions: dict = {}   # {sym: {signal, entry, tp, sl, entry_time, thread}}
+
+def close_position(sym, result, close_price=None):
+    """Finalize a position that is already confirmed flat on Binance.
+
+    This function is intentionally exception-safe: exchange-side closure must never be
+    lost merely because statistics/Telegram formatting encounters an unexpected error.
+    """
+    global active_trade
+    with positions_lock:
+        pos = positions.get(sym)
+    if pos is None:
+        return False
+
+    sig = pos.get("signal") or {}
+    entry = pos.get("entry")
+    sl_p = sig.get("sl")
+    tp_p = sig.get("tp")
+    cid = pos.get("chat_id") or active_chat_id
+
+    # Final path metric update before the local state is removed.
+    try:
+        if close_price is not None:
+            _update_trade_path_metrics(pos, close_price)
+    except Exception:
+        pass
+
+    classified = _classify_close_result(
+        result, entry=entry, close_price=close_price, decision=sig.get("decision")
+    )
+
+    # Remove local position exactly once. Exchange has already been confirmed flat by callers.
+    with positions_lock:
+        popped = positions.pop(sym, None)
+        if popped is None:
+            return False
+        if not positions:
+            active_trade = None
+
+    stats_error = None
+    try:
+        update_stats(
+            classified, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price,
+            sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"),
+            close_reason=result,
+            confidence=sig.get("confidence"), entry_label=sig.get("entry_label"),
+            rr=sig.get("rr"), rsi=sig.get("rsi"), struct_h1=sig.get("struct_h1"),
+            d1_bias=sig.get("d1_bias"),
+            mfe_pct=pos.get("mfe_pct"), mae_pct=pos.get("mae_pct"),
+            mfe_r=pos.get("mfe_r"), mae_r=pos.get("mae_r"),
+            time_in_trade_sec=pos.get("time_in_trade_sec"),
+            time_to_1r_sec=pos.get("time_to_1r_sec"), time_to_2r_sec=pos.get("time_to_2r_sec"),
+            execution_mode=pos.get("execution_mode"), balance_anchor=(real_balance_snapshot if str(pos.get("execution_mode") or "").upper()=="REAL" else STARTING_BALANCE),
+            trade_uid=pos.get("trade_uid"), trail_update_count=pos.get("trail_update_count",0), trail_applied_count=pos.get("trail_applied_count",0),
+            trail_failed_count=pos.get("trail_failed_count",0), trail_queued_count=pos.get("trail_queued_count",0), first_trail_r=pos.get("first_trail_r"),
+            last_trail_r=pos.get("last_trail_r"), max_protected_r=(pos.get("max_protected_r") if pos.get("max_protected_r",-999)>-998 else None),
+            learning_features=(pos.get("signal") or {}).get("learning_features"),
+            ml_model_version=(pos.get("signal") or {}).get("learning_model_version", "static")
+        )
+    except Exception as e:
+        stats_error = e
+        log.exception(f"[close_position] stats gagal {sym}: {e}")
+
+    try:
+        fn_outcome = globals().get("ingest_live_outcome")
+        if callable(fn_outcome):
+            outcome_record = {**sig, **pos, "result": classified, "exit_price": close_price, "closed_at": time.time()}
+            fn_outcome(outcome_record, classified, source="binance_trade")
+    except Exception as e:
+        log.warning(f"[COGNITIVE] outcome bridge gagal {sym}: {e}")
+    _brain_wakeup_from_body()
+
+    try:
+        _ban_coin(sym, f"trade closed ({classified}; reason={result})", duration=BAN_DURATION_TRADE_CLOSED, kind="closed")
+    except Exception as e:
+        log.warning(f"[close_position] gagal ban {sym}: {e}")
+
+    try:
+        with stat_lock:
+            last = stats["pnl_history"][-1] if stats["pnl_history"] else None
+    except Exception:
+        last = None
+
+    emoji = {"tp":"🎯","sl":"🛑","trail":"🔒"}.get(classified, "🛑")
+    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(classified, "STOP LOSS")
+    detail = ""
+    if last and last.get("symbol") == sym:
+        sgn = "+" if last.get("pct", 0) >= 0 else ""
+        detail = (
+            f"Entry: <code>{last.get('entry', entry):.6g}</code> → Exit: <code>{last.get('exit_price', close_price):.6g}</code>\n"
+            f"Hasil: <b>{sgn}{last.get('pct', 0):.2f}%</b> (${sgn}{last.get('pnl_usd', 0):.4f})\n\n"
+        )
+    if stats_error:
+        detail += "⚠️ Statistik lokal mengalami error dan akan dicoba dipulihkan oleh audit/recovery.\n\n"
+    try:
+        tg_send(cid, f"{emoji} <b>{label}</b> — {sym}\n\n{detail}" + fmt_stats())
+    except Exception as e:
+        log.error(f"[close_position] notifikasi gagal {sym}: {e}")
+    return True
+
+
+def _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=None):
+    """Finalize an exchange-side close detected by positionAmt==0.
+
+    Binance positionRisk returning a symbol with positionAmt=0 is treated as a real close,
+    not as a still-open position. Cleanup is best-effort but tracked separately so a
+    transient API failure cannot erase the closed-trade record.
+    """
+    sig = pos.get("signal") or {}
+    price = exit_price
+    if price is None:
+        try:
+            price = get_price(sym, prefer_binance=True)
+        except Exception:
+            price = None
+    if price is None:
+        price = pos.get("current_price") or pos.get("entry")
+
+    # Keep final MFE/MAE snapshot without another Binance request.
+    try:
+        if price is not None:
+            _update_trade_path_metrics(pos, price)
+    except Exception:
+        pass
+
+    reason = reason_hint if reason_hint in ("tp", "sl") else "unknown"
+    if reason == "unknown":
+        # A trailing SL that was moved to/above breakeven and then triggered is a Trail
+        # only if the realized outcome is positive; the common classifier below handles it.
+        reason = "trail"
+    elif reason == "sl":
+        # Preserve explicit SL when Binance's algo status confirms a stop. The final
+        # classifier will still convert it only when the caller marks it as trail/timeout.
+        pass
+
+    # Clean orphan protection. If Binance is temporarily unavailable, retain a pending
+    # cleanup marker but still finalize the already-flat trade locally.
+    try:
+        with _binance_critical_context():
+            _cancel_all_algo_orders_verified(sym)
+    except Exception as e:
+        _queue_pending_cleanup(sym, "post-external-close cleanup", e)
+        log.warning(f"[external-close] {sym} cleanup tertunda: {e}")
+
+    # If the exchange explicitly told us TP/SL, preserve that reason. Otherwise classify
+    # from the realized exit outcome and trailing context.
+    if reason_hint == "tp":
+        final_result = "tp"
+    elif reason_hint == "sl":
+        # An SL trigger after a trailing move is a Trail only if the realized PnL is positive.
+        trail_candidate = bool(pos.get("current_sl") is not None and pos.get("entry") is not None)
+        final_result = "trail" if trail_candidate and _classify_close_result("trail", pos.get("entry"), price, sig.get("decision")) == "trail" else "sl"
+    else:
+        final_result = "trail" if _classify_close_result("trail", pos.get("entry"), price, sig.get("decision")) == "trail" else "sl"
+
+    closed = close_position(sym, final_result, close_price=price)
+    return closed
+
+
+def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
+    """
+    Ambil candle M1 dalam N menit terakhir, periksa urutan:
+    mana yang kena duluan — TP atau SL?
+
+    Return: "tp", "sl", atau None (tidak ada yang tersentuh)
+    """
+    try:
+        df = get_klines(sym, "1m", lookback_min + 2)
+        if df is None or df.empty: return None
+
+        # Ambil hanya candle dalam lookback_min menit terakhir
+        df = df.tail(lookback_min)
+
+        for _, row in df.iterrows():
+            high = row["high"]
+            low  = row["low"]
+            if is_buy:
+                # Untuk BUY: TP di atas, SL di bawah
+                # Kalau high >= TP dan low <= SL di candle yang sama → cek open lebih dekat ke mana
+                if high >= tp_p and low <= sl_p:
+                    # Harga open candle ini lebih dekat ke TP atau SL?
+                    dist_tp = abs(row["open"] - tp_p)
+                    dist_sl = abs(row["open"] - sl_p)
+                    return "tp" if dist_tp < dist_sl else "sl"
+                elif high >= tp_p:
+                    return "tp"
+                elif low <= sl_p:
+                    return "sl"
+            else:
+                # Untuk SELL: TP di bawah, SL di atas
+                if low <= tp_p and high >= sl_p:
+                    dist_tp = abs(row["open"] - tp_p)
+                    dist_sl = abs(row["open"] - sl_p)
+                    return "tp" if dist_tp < dist_sl else "sl"
+                elif low <= tp_p:
+                    return "tp"
+                elif high >= sl_p:
+                    return "sl"
+    except Exception as e:
+        log.debug(f"[check_tp_sl_order] {sym}: {e}")
+    return None
+
+
+
+
+# ============================================================
+# STRATEGY DISPATCH — ENGINE TIDAK MEMILIKI OTAK TRADING
+# ============================================================
+
+def _strategy_position_update(sym,pos):
+    if _binance_is_scan_paused():
+        return None
+    manager=globals().get("manage_position")
+    if not callable(manager): return None
+    try:
+        m15=get_klines(sym,"15m",250); h1=get_klines(sym,"1h",250)
+        try: d1=get_klines(sym,"1d",100)
+        except Exception: d1=None
+        return manager(state=dict(pos),df_m15=m15,df_h1=h1,df_d1=d1,symbol=sym)
+    except Exception as e:
+        log.warning(f"[strategy/manage] {sym}: {e}"); return None
+
+def _notify_trail_update(chat_id, sym, pos, update, old_sl, new_sl, status="APPLIED", error=None):
+    """Kirim notifikasi Telegram hanya saat trailing/protection benar-benar berubah."""
+    if not chat_id or new_sl is None or old_sl is None:
+        return
+    try:
+        _record_trail_event(sym,pos,update if isinstance(update,dict) else {},old_sl,new_sl,status=status,error=error)
+        sig = pos.get("signal", {})
+        entry = float(pos.get("entry") or sig.get("entry") or 0.0)
+        decision = str(sig.get("decision") or "BUY").upper()
+        tp = sig.get("tp")
+        atr = sig.get("atr") or 0.0
+        initial_sl = float(pos.get("initial_sl") or sig.get("initial_sl") or old_sl)
+        risk = abs(entry - initial_sl) if entry and initial_sl else 0.0
+        current_price = float(pos.get("current_price") or pos.get("price") or entry)
+        profit_r = ((current_price - entry) if decision == "BUY" else (entry - current_price)) / risk if risk > 0 else 0.0
+        reasons = update.get("reason") or []
+        if isinstance(reasons, str):
+            reasons = [reasons]
+        state = update.get("state") or "TRAIL"
+        source = update.get("trail_source") or update.get("source") or "adaptive"
+        rv = update.get("relative_volume")
+        weakness = update.get("weakness_score")
+        arrow = "↑" if new_sl > old_sl else "↓"
+        lines = [
+            f"🔒 <b>TRAILING UPDATE — {sym}</b>",
+            "",
+            f"Arah: <b>{decision}</b> | State: <b>{state}</b>",
+            f"Entry: <code>{entry:.8g}</code>",
+            f"Harga: <code>{current_price:.8g}</code>",
+            f"SL: <code>{old_sl:.8g}</code> → <code>{new_sl:.8g}</code> {arrow}",
+            f"Profit: <b>{profit_r:+.2f}R</b>",
+        ]
+        if tp is not None:
+            lines.append(f"TP saat ini: <code>{float(tp):.8g}</code>")
+        if atr:
+            lines.append(f"ATR M15: <code>{float(atr):.8g}</code>")
+        if rv is not None:
+            lines.append(f"Relative Volume: <b>{float(rv):.2f}x</b>")
+        if weakness is not None:
+            lines.append(f"Weakness score: <b>{int(weakness)}</b>")
+        lines.append(f"Engine: <b>{source}</b>")
+        if reasons:
+            pretty = "\n".join(f"• {str(r).replace('_', ' ')}" for r in reasons[:6])
+            lines.append("\n<b>Alasan:</b>\n" + pretty)
+        if status == "QUEUED":
+            lines += ["", "⏸️ <b>BINANCE PAUSE</b>", "Trail disimpan sebagai pending dan akan dipasang saat recovery selesai."]
+        elif status == "APPLIED":
+            lines += ["", "✅ <b>Protection order berhasil diperbarui di Binance.</b>"]
+        elif status == "FAILED":
+            lines += ["", f"🚨 <b>Update protection gagal:</b> <code>{str(error)[:220]}</code>", "⚠️ SL sebelumnya dipertahankan."]
+        tg_send(chat_id, "\n".join(lines))
+    except Exception as e:
+        log.debug(f"[trail-notify] {sym}: {e}")
+
+
+def _apply_strategy_update(sym,pos,update):
+    if not isinstance(update,dict): return False
+    sig=pos["signal"]; changed=False
+    if update.get("tp") is not None:
+        sig["tp"]=float(update["tp"]); changed=True
+    if update.get("sl") is not None:
+        new=float(update["sl"]); old=float(pos.get("current_sl",sig["sl"]))
+        buy=sig["decision"]=="BUY"
+        if (new>old) if buy else (new<old):
+            pos["current_sl"]=new; sig["sl"]=new; changed=True
+    return changed
+
+def monitor_position(sym,pos):
+    """Execution monitor. Tidak menentukan Entry/TP/SL/Trail."""
+    next_strategy=0
+    while True:
+        with positions_lock:
+            if sym not in positions:return
+            pos=positions[sym]
+        if pos.get("timeout_flag"):
+            price=get_price(sym) or pos["entry"]; buy=pos["signal"]["decision"]=="BUY"
+            close_position(sym,"timeout",close_price=price); return
+        if time.time()>=next_strategy:
+            upd=_strategy_position_update(sym,pos); next_strategy=time.time()+STRATEGY_MANAGE_INTERVAL
+            if isinstance(upd,dict):
+                if upd.get("close"):
+                    price=upd.get("close_price") or get_price(sym) or pos["entry"]
+                    reason=str(upd.get("reason") or "strategy")
+                    close_position(sym,"trail" if reason=="trail" else "strategy",close_price=price); return
+                old_sl=float(pos.get("current_sl",pos["signal"].get("sl")))
+                changed=_apply_strategy_update(sym,pos,upd)
+                new_sl=float(pos.get("current_sl",pos["signal"].get("sl")))
+                if changed and new_sl != old_sl:
+                    pos["current_price"] = get_price(sym) or pos.get("current_price") or pos["entry"]
+                    _notify_trail_update(active_chat_id, sym, pos, upd, old_sl, new_sl, status="APPLIED")
+        price=get_price(sym)
+        if price is None: time.sleep(MONITOR_SLEEP); continue
+        _update_trade_path_metrics(pos, price)
+        sig=pos["signal"]; buy=sig["decision"]=="BUY"; tp=sig.get("tp"); sl=pos.get("current_sl",sig.get("sl"))
+        hit_tp=tp is not None and ((price>=tp) if buy else (price<=tp))
+        hit_sl=sl is not None and ((price<=sl) if buy else (price>=sl))
+        if hit_tp or hit_sl:
+            result="tp" if hit_tp and not hit_sl else "sl"
+            if hit_tp and hit_sl: result=check_tp_sl_order(sym,tp,sl,buy,3) or "tp"
+            close_position(sym,result,close_price=tp if result=="tp" else sl); return
+        time.sleep(MONITOR_SLEEP)
+
+def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
+    buy=signal["decision"]=="BUY"; sl=signal.get("sl"); tp=signal.get("tp")
+    if sl is None or tp is None:
+        with positions_lock: positions.pop(sym,None)
+        _ban_coin(sym,"strategy tidak mengirim SL/TP"); return
+    valid=(sl<actual_entry<tp) if buy else (tp<actual_entry<sl)
+    if not valid:
+        with positions_lock: positions.pop(sym,None)
+        _ban_coin(sym,"level strategy invalid")
+        tg_send(chat_id,f"⚠️ <b>Skip {sym}</b> — geometri level strategy invalid.")
+        return
+    with positions_lock:
+        if sym not in positions:return
+        pos=positions[sym]
+        now=time.time()
+        pos.update({"entry":actual_entry,"entry_time":now,"status":"active","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
+                    "timeout_flag":False,"current_sl":sl,"initial_sl":sl,"execution_mode":"SIMULATION",
+                    "trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+    tg_send(chat_id,f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
+                    f"Entry: <code>{actual_entry:.8g}</code>\n"
+                    f"TP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
+    threading.Thread(target=monitor_position,args=(sym,pos),daemon=True).start()
+
+
+# ============================================================
+# REAL TRADE — alur pending order, monitoring posisi, auto-stop
+# ============================================================
+
+def _open_pending_real(sym,signal,chat_id):
+    if _binance_is_scan_paused():
+        log.warning(f"[entry] {sym} ditahan — Binance pause aktif")
+        return
+    buy=signal["decision"]=="BUY"; entry=signal["entry"]; sl=signal.get("sl"); tp=signal.get("tp")
+    if sl is None or tp is None:
+        _ban_coin(sym,"strategy tidak mengirim SL/TP"); return
+    valid=(sl<entry<tp) if buy else (tp<entry<sl)
+    if not valid:
+        _ban_coin(sym,"geometri strategy invalid"); tg_send(chat_id,f"⏭ <b>Skip {sym}</b> — geometri strategy invalid."); return
+    side="BUY" if buy else "SELL"
+    with positions_lock:
+        if sym in positions or len(positions)>=MAX_POSITIONS:return
+        positions[sym]={"signal":signal,"entry":entry,"chat_id":chat_id,"entry_time":None,"trade_uid":f"{research_run_id}:{sym}:pending:{int(time.time()*1000)}",
+                        "timeout_flag":False,"status":"pending","execution_mode":"REAL"}
+    try:
+        with _binance_critical_context():
+            _real_trade_preflight(force=False)
+            avail,_=get_real_balance()
+            if avail is not None and avail<MARGIN_USD: raise RuntimeError(f"saldo ${avail:.2f} < margin ${MARGIN_USD:.2f}")
+            qty,margin,bumped=calc_auto_quantity(sym,entry,MARGIN_USD,LEVERAGE)
+            if qty is None: raise RuntimeError("quantity di bawah minimum Binance")
+            set_leverage_verified(sym,LEVERAGE); order=place_limit_order(sym,side,qty,entry)
+        with positions_lock: positions[sym].update({"order_id":order["orderId"],"quantity":qty,"margin_used":margin})
+        tg_send(chat_id,f"🎯 <b>PENDING ORDER REAL</b> — {sym}\n\n{fmt_signal_msg(signal)}")
+        threading.Thread(target=_wait_entry_real,args=(sym,signal,chat_id,order["orderId"]),daemon=True).start()
+        return True
+    except BinanceCooldownError as e:
+        with positions_lock:
+            positions.pop(sym, None)
+        log.warning(f"[entry] {sym} ditunda karena Binance budget/cooldown: {e}")
+        tg_send(chat_id, f"⚠️ <b>ENTRY DITUNDA</b> — {sym}\n<code>{html.escape(str(e)[:300])}</code>\nSinyal tidak dianggap gagal dan tidak diban karena alasan API.")
+        return False
+    except BinanceUnknownExecutionError as e:
+        # The entry POST may have reached Binance even though its response was lost.
+        # Preserve the client order id so reconciliation can resolve the ambiguity.
+        with positions_lock:
+            if sym in positions:
+                positions[sym]["status"]="EMERGENCY"
+                positions[sym]["emergency_error"]=str(e)[:300]
+                positions[sym]["entry_client_order_id"]=getattr(e, "client_order_id", None)
+        tg_send(chat_id,f"🚨 <b>ENTRY STATUS UNKNOWN</b> — {sym}\n<code>{str(e)[:300]}</code>\nOrder tidak diulang secara buta. State dipertahankan untuk rekonsiliasi <code>/ok {sym}</code>.")
+    except Exception as e:
+        with positions_lock: positions.pop(sym,None)
+        msg = str(e)
+        # Infrastructure/account/API failures are not evidence that the symbol is bad.
+        # Only known symbol-specific order validation errors may receive a short ban.
+        symbol_specific = any(k in msg.lower() for k in (
+            "precision", "min notional", "minimum quantity", "quantity", "invalid price",
+            "-1111", "-1013", "-1121"
+        ))
+        if symbol_specific:
+            _ban_coin(sym, f"order ditolak khusus simbol ({msg})")
+        tg_send(chat_id,f"⚠️ <b>ENTRY GAGAL</b> — {sym}\n<code>{html.escape(msg[:300])}</code>\nSinyal tidak dihukum sebagai loss strategi.")
         return False
 
 
-with _AGENT_LOCK:
-    _AGENT_STATE.update(_agent_json_load(AGENT_STATE_FILE, {}))
-    _AGENT_POLICY = _agent_json_load(AGENT_POLICY_FILE, {})
-    if not isinstance(_AGENT_POLICY, dict):
-        _AGENT_POLICY = {}
 
-
-def _agent_read_records(limit=AGENT_MAX_HISTORY_ROWS):
-    """Read the canonical v32/v35 experience log without touching Binance."""
-    rows = []
-    try:
-        if V32_EXPERIENCE_FILE.exists():
-            with V32_EXPERIENCE_FILE.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    try:
-                        row = json.loads(line)
-                        if isinstance(row, dict):
-                            rows.append(row)
-                    except Exception:
-                        continue
-    except Exception as exc:
-        log.warning(f"[ADAPTIVE] experience read gagal: {exc}")
-    return rows[-int(limit):]
-
-
-def _agent_candidate_cells(records):
-    """Compute opportunity/frequency and quality cells from *all* candidates."""
-    candidates = [r for r in records if isinstance(r, dict) and r.get("type") == "candidate"]
-    cells = defaultdict(list)
-    for r in candidates:
-        regime = str(r.get("regime") or r.get("market_regime") or "UNKNOWN")
-        archetype = str(r.get("archetype") or "UNKNOWN")
-        decision = str(r.get("decision") or "UNKNOWN").upper()
-        key = (archetype, regime, decision)
-        q = float(r.get("trade_quality") or (r.get("confidence") or 0.0))
-        cells[key].append(q)
-    out = []
-    for (archetype, regime, decision), vals in cells.items():
-        n = len(vals)
-        out.append({
-            "archetype": archetype,
-            "regime": regime,
-            "decision": decision,
-            "n": n,
-            "avg_quality": round(float(np.mean(vals)), 3) if vals else 0.0,
-            "opportunity_share": round(n / max(1, len(candidates)), 5),
-        })
-    out.sort(key=lambda x: (-x["n"], -x["avg_quality"]))
-    return out
-
-
-def _agent_outcome_cells(records):
-    outcomes = [r for r in records if isinstance(r, dict) and r.get("type") == "trade_outcome"]
-    cells = defaultdict(list)
-    for r in outcomes:
-        key = (str(r.get("archetype") or "UNKNOWN"), str(r.get("market_regime") or r.get("regime") or "UNKNOWN"))
-        p = r.get("outcome") if isinstance(r.get("outcome"), dict) else r
-        try:
-            final_r = float(p.get("final_r", 0.0) or 0.0)
-        except Exception:
-            final_r = 0.0
-        cells[key].append(final_r)
-    out = []
-    for (archetype, regime), vals in cells.items():
-        n = len(vals)
-        wins = sum(1 for x in vals if x > 0)
-        out.append({
-            "archetype": archetype,
-            "regime": regime,
-            "n": n,
-            "mean_r": round(float(np.mean(vals)), 5),
-            "win_rate": round(wins / max(1, n), 4),
-        })
-    out.sort(key=lambda x: (x["mean_r"], x["n"]), reverse=True)
-    return out
-
-
-def _agent_frequency_health(candidate_cells):
-    total = sum(int(x.get("n", 0) or 0) for x in candidate_cells)
-    if not total:
-        return {"candidates": 0, "top_cell_share": 0.0, "status": "INSUFFICIENT"}
-    top = max((int(x.get("n", 0) or 0) / total for x in candidate_cells), default=0.0)
-    return {
-        "candidates": total,
-        "top_cell_share": round(top, 4),
-        "exploration_share_target": AGENT_EXPLORATION_SHARE,
-        "status": "HEALTHY" if total >= 20 else "WARMING_UP",
-    }
-
-
-def _agent_bounded_policy_proposal(candidate_cells, outcome_cells):
-    """Propose small, auditable policy changes; never mutate core strategy code."""
-    proposals = []
-    outcome_map = {(x["archetype"], x["regime"]): x for x in outcome_cells if int(x.get("n", 0) or 0) >= AGENT_MIN_POLICY_EVIDENCE}
-    for c in candidate_cells:
-        key = (c["archetype"], c["regime"])
-        o = outcome_map.get(key)
-        if not o:
-            continue
-        mean_r = float(o.get("mean_r", 0.0))
-        n = int(o.get("n", 0) or 0)
-        # Positive edge => gentle support; negative edge => gentle caution.
-        target = float(np.tanh(mean_r)) * 0.03
-        target = max(-AGENT_POLICY_MAX_DELTA, min(AGENT_POLICY_MAX_DELTA, target))
-        proposals.append({
-            "key": f"{c['archetype']}|{c['regime']}",
-            "delta": round(target, 5),
-            "evidence": n,
-            "mean_r": round(mean_r, 5),
-            "frequency": int(c.get("n", 0) or 0),
-        })
-    return proposals
-
-
-def _agent_apply_policy_proposals(proposals):
-    """Apply only bounded, evidence-backed revisions; one trade cannot change it."""
-    changed = []
-    global _AGENT_POLICY
-    with _AGENT_LOCK:
-        for p in proposals:
-            key = str(p.get("key"))
-            n = int(p.get("evidence", 0) or 0)
-            if n < AGENT_MIN_POLICY_EVIDENCE:
-                continue
-            old = float(_AGENT_POLICY.get(key, 0.0) or 0.0)
-            delta = max(-AGENT_POLICY_MAX_DELTA, min(AGENT_POLICY_MAX_DELTA, float(p.get("delta", 0.0) or 0.0)))
-            # Hysteresis: ignore tiny noise.
-            if abs(delta) < 0.005:
-                continue
-            new = max(-0.25, min(0.25, old + delta * min(1.0, n / 100.0)))
-            if abs(new - old) < 0.002:
-                continue
-            _AGENT_POLICY[key] = round(float(new), 6)
-            changed.append({"key": key, "old": round(old, 6), "new": round(new, 6), "evidence": n})
-        if changed:
-            _AGENT_STATE["policy_revisions"] = int(_AGENT_STATE.get("policy_revisions", 0) or 0) + len(changed)
-            _AGENT_STATE["policy"] = dict(_AGENT_POLICY)
-            _agent_json_save(AGENT_POLICY_FILE, _AGENT_POLICY)
-            _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
-    return changed
-
-
-def adaptive_research_cycle():
-    """Fast research pass. It runs immediately with sparse evidence and scales with data."""
-    records = _agent_read_records()
-    candidate_cells = _agent_candidate_cells(records)
-    outcome_cells = _agent_outcome_cells(records)
-    frequency = _agent_frequency_health(candidate_cells)
-    proposals = _agent_bounded_policy_proposal(candidate_cells, outcome_cells)
-    changed = _agent_apply_policy_proposals(proposals)
-    report = {
-        "timestamp": time.time(),
-        "brain_version": AGENT_BRAIN_API_VERSION,
-        "records": len(records),
-        "candidate_cells": candidate_cells[:100],
-        "outcome_cells": outcome_cells[:100],
-        "frequency": frequency,
-        "policy_proposals": proposals[:100],
-        "policy_changes": changed,
-    }
-    with _AGENT_LOCK:
-        _AGENT_STATE["frequency"] = frequency
-        _AGENT_STATE["live"] = {
-            "observations": sum(1 for x in records if x.get("type") == "market_observation"),
-            "candidates": sum(1 for x in records if x.get("type") == "candidate"),
-            "outcomes": sum(1 for x in records if x.get("type") == "trade_outcome"),
-        }
-        _AGENT_STATE["last_research"] = time.time()
-        _AGENT_STATE["policy"] = dict(_AGENT_POLICY)
-        _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
-    return report
-
-
-def get_adaptive_status():
-    with _AGENT_LOCK:
-        return {
-            "api_version": AGENT_BRAIN_API_VERSION,
-            "brain_version": V32_VERSION,
-            "worker_alive": bool(_AGENT_THREAD is not None and _AGENT_THREAD.is_alive()),
-            "history_worker_alive": bool(_AGENT_HISTORY_THREAD is not None and _AGENT_HISTORY_THREAD.is_alive()),
-            "ticks": int(_AGENT_TICKS),
-            "last_error": _AGENT_LAST_ERROR,
-            "history": dict(_AGENT_STATE.get("historical") or {}),
-            "live": dict(_AGENT_STATE.get("live") or {}),
-            "frequency": dict(_AGENT_STATE.get("frequency") or {}),
-            "policy_revisions": int(_AGENT_STATE.get("policy_revisions", 0) or 0),
-            "exploration_share": AGENT_EXPLORATION_SHARE,
-        }
-
-
-def get_adaptive_policy():
-    with _AGENT_LOCK:
-        return dict(_AGENT_POLICY)
-
-
-def _load_ohlcv_file(path):
-    """Load CSV/JSON/JSONL historical OHLCV without contacting Binance."""
-    suffix = path.suffix.lower()
-    rows = []
-    if suffix == ".csv":
-        df = pd.read_csv(path)
-    elif suffix in {".json", ".jsonl"}:
-        if suffix == ".jsonl":
-            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-            df = pd.DataFrame(rows)
-        else:
-            obj = json.loads(path.read_text(encoding="utf-8"))
-            df = pd.DataFrame(obj if isinstance(obj, list) else obj.get("data", []))
-    else:
-        return pd.DataFrame()
-    if df.empty:
-        return df
-    rename = {c.lower().strip(): c for c in df.columns}
-    def pick(*names):
-        for n in names:
-            if n in rename: return rename[n]
-        return None
-    cols = {k: pick(k, k.replace("_", " ")) for k in ("open_time","timestamp","time","open","high","low","close","volume")}
-    ts_col = cols.get("open_time") or cols.get("timestamp") or cols.get("time")
-    if not ts_col:
-        return pd.DataFrame()
-    out = pd.DataFrame({
-        "open": pd.to_numeric(df[cols["open"]], errors="coerce"),
-        "high": pd.to_numeric(df[cols["high"]], errors="coerce"),
-        "low": pd.to_numeric(df[cols["low"]], errors="coerce"),
-        "close": pd.to_numeric(df[cols["close"]], errors="coerce"),
-        "volume": pd.to_numeric(df[cols["volume"]], errors="coerce"),
-    }, index=pd.to_datetime(df[ts_col], unit="ms", utc=True, errors="coerce"))
-    if out.index.isna().all():
-        out.index = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
-    out = out[~out.index.isna()].dropna(subset=["open","high","low","close","volume"]).sort_index()
-    return out
-
-
-def _historical_symbol_name(path):
-    name = path.stem.upper()
-    for token in ("-15M", "_15M", "15M", "-M15", "_M15", "M15"):
-        if token in name:
-            return name.split(token)[0].replace("-", "").replace("_", "") or name
-    return name.split("-")[0].split("_")[0]
-
-
-def _replay_one_history_file(path):
-    """Replay one M15-ish OHLCV file; generate observation/candidate evidence only."""
-    try:
-        df = _load_ohlcv_file(path)
-        if df is None or len(df) < 320:
-            return {"file": str(path), "rows": 0, "candidates": 0, "status": "SKIPPED"}
-        # Respect requested historical horizon without relying on current Binance REST.
-        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=AGENT_HISTORICAL_DAYS)
-        df = df.loc[df.index >= cutoff]
-        if len(df) < 320:
-            return {"file": str(path), "rows": int(len(df)), "candidates": 0, "status": "SKIPPED_SHORT"}
-        h1 = df.resample("1h").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
-        d1 = df.resample("1D").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
-        symbol = _historical_symbol_name(path)
-        emitted = 0
-        step = AGENT_REPLAY_STEP_M15
-        # Point-in-time replay: only rows up to t are visible to the analysis.
-        for i in range(300, len(df) - 32, step):
-            m15_now = df.iloc[:i].copy()
-            now = m15_now.index[-1]
-            h1_now = h1.loc[:now].copy()
-            d1_now = d1.loc[:now].copy()
-            if len(h1_now) < 80 or len(d1_now) < 20:
-                continue
-            try:
-                result = _V31_BASE_FULL_ANALYZE(h1_now, m15_now, d1_now, symbol=symbol, df_btc_h1=None, trade_history=None)
-            except Exception:
-                continue
-            # The original engine can return None; that itself is a useful scan observation.
-            try:
-                feats = extract_market_features(h1_now, m15_now, d1_now, None)
-                _v32_record_experience({"type":"historical_market_observation","timestamp":time.time(),"historical_timestamp":str(now),"symbol":symbol,"source":"historical_replay","features":feats})
-            except Exception:
-                pass
-            if isinstance(result, dict):
-                # Label the hypothetical candidate with forward path information without
-                # allowing those future values to enter the analysis itself.
-                entry = float(result.get("entry") or result.get("price") or 0.0)
-                direction = str(result.get("decision") or "BUY").upper()
-                future = df.iloc[i:min(len(df), i + 32)]
-                if entry > 0 and not future.empty:
-                    if direction == "BUY":
-                        mfe = max(0.0, float(future["high"].max()) - entry)
-                        mae = max(0.0, entry - float(future["low"].min()))
-                    else:
-                        mfe = max(0.0, entry - float(future["low"].min()))
-                        mae = max(0.0, float(future["high"].max()) - entry)
-                    risk = abs(float(result.get("entry") or entry) - float(result.get("sl") or entry)) or np.nan
-                    mfe_r = float(mfe / risk) if np.isfinite(risk) and risk > 0 else 0.0
-                    mae_r = float(mae / risk) if np.isfinite(risk) and risk > 0 else 0.0
-                else:
-                    mfe_r = mae_r = 0.0
-                result = dict(result)
-                result["historical_timestamp"] = str(now)
-                result["source"] = "historical_replay"
-                result["shadow"] = True
-                result["shadow_forward_bars"] = 32
-                result["shadow_mfe_r"] = round(mfe_r, 4)
-                result["shadow_mae_r"] = round(mae_r, 4)
-                result["rejected_reason"] = "historical_shadow"
-                ingest_live_candidate(result, h1=h1_now, m15=m15_now, d1=d1_now, rejected_reason="historical_shadow", source="historical_replay")
-                emitted += 1
-        return {"file": str(path), "rows": int(len(df)), "candidates": emitted, "status": "OK"}
-    except Exception as exc:
-        return {"file": str(path), "rows": 0, "candidates": 0, "status": "ERROR", "error": str(exc)[:300]}
-
-
-def adaptive_replay_historical(force=False):
-    """Replay local historical files in parallel; never uses Binance API."""
-    global _AGENT_HISTORY_DONE
-    if not AGENT_HISTORY_DIR.exists():
-        with _AGENT_LOCK:
-            _AGENT_STATE["historical"] = {"files": 0, "rows": 0, "replay_candidates": 0, "status": "NO_DIRECTORY"}
-            _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
-        return dict(_AGENT_STATE["historical"])
-    paths = [p for p in sorted(AGENT_HISTORY_DIR.rglob("*")) if p.suffix.lower() in {".csv", ".json", ".jsonl"}]
-    if not force:
-        paths = [p for p in paths if str(p) not in _AGENT_HISTORY_DONE]
-    if not paths:
-        with _AGENT_LOCK:
-            _AGENT_STATE["historical"] = {"files": len(_AGENT_HISTORY_DONE), "rows": _AGENT_STATE.get("historical",{}).get("rows",0), "replay_candidates": _AGENT_STATE.get("historical",{}).get("replay_candidates",0), "status": "UP_TO_DATE"}
-            _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
-        return dict(_AGENT_STATE["historical"])
-    results=[]
-    with ThreadPoolExecutor(max_workers=AGENT_REPLAY_WORKERS, thread_name_prefix="hist-replay") as ex:
-        futs={ex.submit(_replay_one_history_file,p):p for p in paths}
-        for fut in as_completed(futs):
-            try: results.append(fut.result())
-            except Exception as exc: results.append({"file":str(futs[fut]),"status":"ERROR","error":str(exc)[:300]})
-    _AGENT_HISTORY_DONE.update(str(x.get("file")) for x in results if x.get("status") in {"OK","SKIPPED","SKIPPED_SHORT"})
-    with _AGENT_LOCK:
-        hist=_AGENT_STATE.get("historical") if isinstance(_AGENT_STATE.get("historical"),dict) else {}
-        _AGENT_STATE["historical"]={
-            "files": int(hist.get("files",0) or 0)+len(results),
-            "rows": int(hist.get("rows",0) or 0)+sum(int(x.get("rows",0) or 0) for x in results),
-            "replay_candidates": int(hist.get("replay_candidates",0) or 0)+sum(int(x.get("candidates",0) or 0) for x in results),
-            "status": "RUNNING" if results else "IDLE",
-            "last_results": results[-20:],
-        }
-        _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
-        return dict(_AGENT_STATE["historical"])
-
-
-def _adaptive_worker_loop():
-    global _AGENT_TICKS, _AGENT_LAST_ERROR
-    log.info("[ADAPTIVE] brain worker started")
-    while not _AGENT_STOP.is_set():
-        try:
-            if AGENT_AUTO_HISTORICAL and _AGENT_TICKS == 0:
+def _wait_entry_real(sym,signal,chat_id,order_id):
+    deadline=time.time()+8*3600
+    while time.time()<deadline:
+        with positions_lock:
+            if sym not in positions:return
+            if positions[sym].get("timeout_flag"):
                 try:
-                    adaptive_replay_historical(force=False)
-                except Exception:
-                    log.exception("[ADAPTIVE] historical bootstrap gagal")
-            _AGENT_LAST_REPORT = adaptive_research_cycle()
-            _AGENT_TICKS += 1
-            _AGENT_LAST_ERROR = None
-        except Exception as exc:
-            _AGENT_LAST_ERROR = str(exc)[:500]
-            log.exception("[ADAPTIVE] research cycle gagal")
-        _AGENT_WAKE.wait(AGENT_RESEARCH_INTERVAL)
-        _AGENT_WAKE.clear()
-    log.info("[ADAPTIVE] brain worker stopped")
+                    with _binance_critical_context():
+                        cancel_order(sym,order_id)
+                    time.sleep(0.2)
+                    with _binance_critical_context():
+                        st=get_order_status(sym,order_id)
+                    if str(st.get("status","")).upper()=="FILLED":
+                        actual=float(st.get("avgPrice") or 0) or signal["entry"]
+                        _open_position_real(sym,signal,actual,chat_id,st)
+                        return
+                    positions.pop(sym,None); return
+                except Exception as e:
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym]["status"]="EMERGENCY"
+                            positions[sym]["emergency_error"]=str(e)[:300]
+                    tg_send(chat_id, f"🚨 <b>ENTRY CANCEL BELUM TERKONFIRMASI</b> — {sym}\n<code>{str(e)[:300]}</code>\nPosisi tetap dipertahankan sampai <code>/ok {sym}</code>.")
+                    return
+        try:
+            with _binance_critical_context():
+                order=get_order_status(sym,order_id)
+        except Exception as e:
+            log.warning(f"[wait_entry_real] {sym}: {e}"); time.sleep(REAL_TRADE_POLL_SLEEP); continue
+        status=str(order.get("status","")).upper()
+        if status=="FILLED":
+            actual=float(order.get("avgPrice") or 0) or signal["entry"]
+            _open_position_real(sym,signal,actual,chat_id,order); return
+        if status in ("CANCELED","EXPIRED","REJECTED"):
+            with positions_lock: positions.pop(sym,None)
+            _ban_coin(sym,f"order {status.lower()}"); _record_pending_cancel("binance_reject"); return
+        time.sleep(REAL_TRADE_POLL_SLEEP)
+
+    try:
+        with _binance_critical_context():
+            cancel_order(sym,order_id)
+            st=get_order_status(sym,order_id)
+        if str(st.get("status","")).upper()=="FILLED":
+            actual=float(st.get("avgPrice") or 0) or signal["entry"]
+            _open_position_real(sym,signal,actual,chat_id,st); return
+        with positions_lock: positions.pop(sym,None)
+        _ban_coin(sym,"pending expired"); _record_pending_cancel("expired")
+    except Exception as e:
+        with positions_lock:
+            if sym in positions:
+                positions[sym]["status"]="EMERGENCY"
+                positions[sym]["emergency_error"]=str(e)[:300]
+        tg_send(chat_id, f"🚨 <b>PENDING ENTRY BELUM TERKONFIRMASI</b> — {sym}\n<code>{str(e)[:300]}</code>\nState tetap dipertahankan untuk <code>/ok {sym}</code>.")
 
 
-def adaptive_agent_start():
-    """Idempotent start. Called by main.py at boot and after brain hot-swap."""
-    global _AGENT_THREAD, _AGENT_STOP
-    with _AGENT_LOCK:
-        if _AGENT_THREAD is not None and _AGENT_THREAD.is_alive():
-            _AGENT_WAKE.set()
-            return get_adaptive_status()
-        _AGENT_STOP.clear()
-        _AGENT_WAKE.set()
-        _AGENT_THREAD = threading.Thread(target=_adaptive_worker_loop, name="adaptive-brain", daemon=True)
-        _AGENT_THREAD.start()
-    return get_adaptive_status()
+def _emergency_close(sym, is_buy, qty, chat_id, reason):
+    """Emergency flatten. Exchange confirmation is required before local close."""
+    try:
+        with _binance_critical_context():
+            closed, exit_price = _verified_market_close(sym, is_buy, reason, chat_id=chat_id, max_retries=1)
+        if not closed:
+            raise RuntimeError("posisi belum terkonfirmasi flat")
+        try:
+            with _binance_critical_context():
+                _cleanup_algo_orders_verified(sym)
+        except Exception as ce:
+            _queue_pending_cleanup(sym, "post-auto-out cleanup", ce)
+            raise RuntimeError(f"posisi sudah flat tetapi cleanup protection belum terverifikasi: {ce}")
+        with positions_lock:
+            local_pos = positions.get(sym)
+        if local_pos is not None:
+            close_position(sym, "trail" if _classify_close_result("trail", local_pos.get("entry"), exit_price or get_price(sym), local_pos["signal"].get("decision")) == "trail" else "sl", close_price=exit_price or get_price(sym) or local_pos.get("entry"))
+        tg_send(chat_id, f"✅ <b>AUTO-OUT</b> — {sym}\nPosisi Binance terkonfirmasi tertutup dan protection dibersihkan.")
+        return True
+    except Exception as e:
+        with positions_lock:
+            if sym in positions:
+                positions[sym]["status"] = "EMERGENCY"
+                positions[sym]["emergency_reason"] = reason
+                positions[sym]["emergency_error"] = str(e)[:300]
+        _queue_pending_cleanup(sym, "auto-out cleanup", e)
+        tg_send(chat_id, f"🚨 <b>GAGAL AUTO-OUT</b> — {sym}: {e}\n⚠️ Posisi TETAP dicatat di /trade. Jalankan <code>/ok {sym}</code> untuk rekonsiliasi Binance.")
+        return False
 
 
-def adaptive_agent_stop():
-    with _AGENT_LOCK:
-        _AGENT_STOP.set()
-        _AGENT_WAKE.set()
-    return get_adaptive_status()
+def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
+    buy=signal["decision"]=="BUY"; sl=signal.get("sl"); tp=signal.get("tp")
+    qty=abs(float(order_info.get("executedQty",0)))
+    if not qty:
+        with positions_lock: qty=(positions.get(sym) or {}).get("quantity",0)
+    if sl is None or tp is None:
+        _emergency_close(sym,buy,qty,chat_id,"strategy tidak mengirim SL/TP"); return
+    valid=(sl<actual_entry<tp) if buy else (tp<actual_entry<sl)
+    if not valid:
+        _emergency_close(sym,buy,qty,chat_id,"level strategy invalid setelah fill"); return
+    tick=get_symbol_filters(sym)["tickSize"]; sl=round_to_tick(sl,tick); tp=round_to_tick(tp,tick)
+    try:
+        # Protection must be verified on Binance before local state is promoted to ACTIVE.
+        t,s=place_tp_sl(sym,buy,tp,sl,qty)
+    except BinanceCooldownError:
+        with positions_lock:
+            if sym in positions:
+                now=time.time()
+                positions[sym].update({"entry": actual_entry, "entry_time": now, "status": "active", "trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}", "current_sl": sl, "initial_sl": sl, "quantity": qty, "tp_order_id": None, "sl_order_id": None, "trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+        _queue_pending_protection(sym, buy, sl, tp, qty)
+        tg_send(chat_id, f"⏸️ <b>PROTEKSI DITUNDA</b> — {sym}\nBinance sedang rate-limit/ban. TP/SL dicatat dan akan dipasang setelah recovery +60 detik.")
+        threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start(); return
+    except BinanceUnknownExecutionError as e:
+        # place_tp_sl already reconciles algo client ids; if it still cannot prove the
+        # pair exists, fail closed and flatten the real position.
+        _emergency_close(sym,buy,qty,chat_id,f"status protection UNKNOWN setelah submit: {e}"); return
+    except Exception as e:
+        _emergency_close(sym,buy,qty,chat_id,f"gagal pasang protection ({e})"); return
+
+    with positions_lock:
+        if sym not in positions:return
+        now=time.time()
+        positions[sym].update({"entry":actual_entry,"entry_time":now,"status":"active","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
+                               "current_sl":sl,"initial_sl":sl,"quantity":qty,"tp_order_id":t["algoId"],"sl_order_id":s["algoId"],
+                               "execution_mode":"REAL","trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+    tg_send(chat_id,f"⚡ <b>ENTRY REAL</b> — {sym}\nEntry: <code>{actual_entry:.8g}</code>\nTP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
+    threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start()
 
 
-# Start learning immediately on module load. This worker never touches Binance.
-try:
-    adaptive_agent_start()
-except Exception as exc:
-    log.warning(f"[ADAPTIVE] auto-start gagal: {exc}")
+def _infer_close_reason(tp_algo_id, sl_algo_id):
+    """Cek algo order mana yang TRIGGERED/FINISHED untuk tahu sebab posisi
+    closed (tp/sl). TP/SL sekarang algo order (lihat place_tp_sl), jadi
+    query-nya lewat get_algo_order_status, bukan get_order_status biasa."""
+    tp_status = sl_status = None
+    try:
+        if tp_algo_id: tp_status = get_algo_order_status(tp_algo_id).get("algoStatus")
+    except Exception: pass
+    try:
+        if sl_algo_id: sl_status = get_algo_order_status(sl_algo_id).get("algoStatus")
+    except Exception: pass
+    if tp_status in ("TRIGGERED", "FINISHED"): return "tp"
+    if sl_status in ("TRIGGERED", "FINISHED"): return "sl"
+    return "unknown"
 
-# Explicit public API for the stable execution body.
-try:
-    __all__ = list(dict.fromkeys(__all__ + [
-        "AGENT_BRAIN_API_VERSION", "adaptive_agent_start", "adaptive_agent_stop",
-        "adaptive_research_cycle", "adaptive_replay_historical", "get_adaptive_status",
-        "get_adaptive_policy",
-    ]))
-except Exception:
-    pass
+
+def monitor_position_real(sym,pos):
+    next_strategy=0
+    while True:
+        try:
+                with positions_lock:
+                    if sym not in positions:return
+                    pos=positions[sym]
+
+                if pos.get("timeout_flag"):
+                    _verified_timeout_symbol(sym, pos.get("chat_id") or active_chat_id, reason="manual timeout")
+                    return
+
+                if _binance_is_scan_paused():
+                    price = get_price(sym)
+                    if price is not None:
+                        _update_trade_path_metrics(pos, price)
+                    time.sleep(MONITOR_SLEEP)
+                    continue
+
+                try:
+                    with _binance_critical_context():
+                        real=get_real_position(sym)
+                except BinanceCooldownError:
+                    time.sleep(REAL_TRADE_POLL_SLEEP); continue
+                except Exception as e:
+                    log.warning(f"[monitor_real] {sym}: {e}"); time.sleep(REAL_TRADE_POLL_SLEEP); continue
+
+                # Exchange is authoritative. get_real_position() returns None when the symbol's
+                # positionAmt is 0, which is a legitimate FILLED/closed state, not a reason to keep
+                # looping. Finalize it immediately so /stats, /analyze, ban, and Telegram all fire.
+                if real is None:
+                    reason = _infer_close_reason(pos.get("tp_order_id"), pos.get("sl_order_id"))
+                    price = None
+                    try:
+                        price = get_price(sym, prefer_binance=True)
+                    except Exception:
+                        price = None
+                    _finalize_external_close(sym, pos, reason_hint=reason, exit_price=price)
+                    return
+
+                live=abs(float(real.get("positionAmt",0) or 0))
+                if live <= 0:
+                    # Defensive fallback for any future get_real_position() implementation that
+                    # returns the raw zero-quantity row instead of None. Do not leave zombie local state.
+                    reason = _infer_close_reason(pos.get("tp_order_id"), pos.get("sl_order_id"))
+                    price = None
+                    try:
+                        price = get_price(sym, prefer_binance=True)
+                    except Exception:
+                        price = None
+                    _finalize_external_close(sym, pos, reason_hint=reason, exit_price=price)
+                    return
+                with positions_lock:
+                    if sym in positions:
+                        positions[sym]["quantity"]=live
+
+                px=get_price(sym, prefer_binance=True)
+                if px is not None:
+                    _update_trade_path_metrics(pos, px)
+
+                if time.time()>=next_strategy:
+                    upd=_strategy_position_update(sym,pos); next_strategy=time.time()+STRATEGY_MANAGE_INTERVAL
+                    if isinstance(upd,dict):
+                        # Strategy-requested market exit: use the same verified close path.
+                        if upd.get("close"):
+                            price=upd.get("close_price") or px or pos["entry"]
+                            buy=pos["signal"]["decision"]=="BUY"
+                            closed, exit_price = _verified_market_close(sym, buy, "strategy close", chat_id=pos.get("chat_id") or active_chat_id, max_retries=1)
+                            if not closed:
+                                with positions_lock:
+                                    if sym in positions:
+                                        positions[sym]["status"]="EMERGENCY"
+                                return
+                            try:
+                                with _binance_critical_context():
+                                    _cleanup_algo_orders_verified(sym)
+                            except Exception as ce:
+                                _queue_pending_cleanup(sym, "strategy close cleanup", ce)
+                                with positions_lock:
+                                    if sym in positions:
+                                        positions[sym]["status"]="EMERGENCY"
+                                return
+                            result = "trail" if _classify_close_result("trail", pos.get("entry"), exit_price or price, pos["signal"].get("decision")) == "trail" else "sl"
+                            close_position(sym,result,close_price=exit_price or price); return
+
+                        oldsl=pos.get("current_sl",pos["signal"].get("sl")); oldtp=pos["signal"].get("tp")
+                        # Calculate candidates WITHOUT mutating local state.
+                        candidate_tp = float(upd.get("tp")) if upd.get("tp") is not None else float(oldtp) if oldtp is not None else None
+                        candidate_sl = float(upd.get("sl")) if upd.get("sl") is not None else float(oldsl) if oldsl is not None else None
+                        if candidate_sl is not None:
+                            buy=pos["signal"]["decision"]=="BUY"
+                            if not ((candidate_sl > oldsl) if buy else (candidate_sl < oldsl)) and candidate_sl != oldsl:
+                                candidate_sl = oldsl
+
+                        if candidate_sl != oldsl or candidate_tp != oldtp:
+                            current_price = px or get_price(sym) or pos["entry"]
+                            try:
+                                if _binance_is_scan_paused():
+                                    _queue_pending_trail(sym, candidate_sl, candidate_tp, live, reason="strategy", side=pos["signal"]["decision"])
+                                    if candidate_sl != oldsl:
+                                        _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED")
+                                else:
+                                    # Refresh quantity from exchange immediately before protection mutation.
+                                    with _binance_critical_context():
+                                        latest = get_real_position(sym)
+                                    live_qty = abs(float(latest.get("positionAmt",0) or 0)) if latest else 0.0
+                                    if live_qty <= 0:
+                                        continue
+                                    # Cancel existing protection, then create+verify new pair. If creation
+                                    # fails, restore the old pair before declaring an emergency.
+                                    with _binance_critical_context():
+                                        _cancel_all_algo_orders_verified(sym)
+                                    try:
+                                        with _binance_critical_context():
+                                            nt, ns = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", candidate_tp, candidate_sl, live_qty)
+                                    except Exception as protect_err:
+                                        restore_failed = False
+                                        try:
+                                            rt, rs = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", oldtp, oldsl, live_qty)
+                                            _verify_protection_pair(sym, pos["signal"]["decision"]=="BUY", oldtp, oldsl, live_qty)
+                                        except Exception as restore_err:
+                                            restore_failed = True
+                                            _queue_pending_cleanup(sym, "trail protection restore failed", restore_err)
+                                            log.critical(f"[trail] {sym}: restore old protection gagal: {restore_err}")
+                                        if restore_failed:
+                                            with positions_lock:
+                                                if sym in positions:
+                                                    positions[sym]["status"]="EMERGENCY"
+                                                    positions[sym]["emergency_error"]=str(protect_err)[:300]
+                                            raise RuntimeError(f"trail update gagal dan protection lama tidak bisa dipulihkan: {protect_err}")
+                                        raise
+                                    with positions_lock:
+                                        if sym in positions:
+                                            positions[sym]["current_sl"] = candidate_sl
+                                            positions[sym]["signal"]["sl"] = candidate_sl
+                                            if candidate_tp is not None:
+                                                positions[sym]["signal"]["tp"] = candidate_tp
+                                            positions[sym]["tp_order_id"] = nt["algoId"]
+                                            positions[sym]["sl_order_id"] = ns["algoId"]
+                                            positions[sym]["quantity"] = live_qty
+                                            positions[sym]["current_price"] = current_price
+                                    _clear_pending_trail(sym)
+                                    if candidate_sl != oldsl:
+                                        _notify_trail_update(active_chat_id, sym, positions.get(sym, pos), upd, oldsl, candidate_sl, status="APPLIED")
+                            except BinanceCooldownError as e:
+                                _queue_pending_trail(sym, candidate_sl, candidate_tp, live, reason="binance_cooldown", side=pos["signal"]["decision"])
+                                if candidate_sl != oldsl:
+                                    _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED", error=e)
+                            except Exception as e:
+                                log.error(f"[strategy/manage real] {sym}: {e}")
+                                if candidate_sl != oldsl:
+                                    _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="FAILED", error=e)
+                                # Do not commit candidate local state on failure.
+
+                time.sleep(REAL_TRADE_POLL_SLEEP)
+
+        except Exception as e:
+            # Last-resort monitor guard: a single unexpected Python error must not silently
+            # kill the real-position watchdog. Keep the position visible and retry.
+            log.exception(f"[monitor_real] UNHANDLED {sym}: {e}")
+            with positions_lock:
+                if sym in positions:
+                    positions[sym]["status"] = positions[sym].get("status") or "active"
+                    positions[sym]["monitor_error"] = str(e)[:300]
+            time.sleep(REAL_TRADE_POLL_SLEEP)
+
+def _queue_pending_protection(sym, buy, sl, tp, qty):
+    with _pending_protections_lock:
+        _pending_protections[sym] = {
+            "side": "BUY" if buy else "SELL", "sl": sl, "tp": tp,
+            "quantity": qty, "updated_at": time.time()
+        }
+
+
+def _clear_pending_protection(sym):
+    with _pending_protections_lock:
+        _pending_protections.pop(sym, None)
+
+
+def _resume_binance_and_flush_pending(chat_id=None):
+    """Recover Binance without treating simulation positions as real exposure."""
+    global _binance_recovering, _binance_scan_paused, _binance_pause_reason
+    global _binance_recovery_notice_generation
+    if _binance_cooldown_remaining() > 0:
+        return False
+    with _binance_pause_lock:
+        _binance_recovering=True; _binance_scan_paused=True; _binance_pause_reason='recovery in progress'
+
+    # SIMULATION-only: no private Binance sync, no credential dependency, no extra requests.
+    # Existing REAL positions still force the real recovery path even if /mode is OFF.
+    if not _has_real_recovery_work():
+        with _binance_pause_lock:
+            _binance_recovering=False; _binance_scan_paused=False; _binance_pause_reason=''
+        log.info('[BINANCE RECOVERY] Simulation-only state; private Binance sync skipped. Scanner resumed.')
+        return True
+
+    failures=[]
+    try:
+        global BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_KEYS_PRESENT
+        key,secret=_read_binance_credentials()
+        if not key or not secret:
+            BINANCE_KEYS_PRESENT=False
+            with _binance_pause_lock:
+                _binance_recovering=False; _binance_scan_paused=True; _binance_pause_reason='Binance credentials unavailable'
+            log.error('[BINANCE RECOVERY] credential gate gagal: BINANCE_API_KEY/BINANCE_API_SECRET tidak tersedia di runtime Render')
+            return False
+        BINANCE_API_KEY, BINANCE_API_SECRET=key,secret; BINANCE_KEYS_PRESENT=True
+
+        # REAL position sync. None means a successful request found zero exposure.
+        with positions_lock:
+            items=[(sym,dict(pos)) for sym,pos in positions.items() if _position_is_real(pos)]
+        for sym,pos in items:
+            if pos.get('status') not in ('active','EMERGENCY'):
+                continue
+            try:
+                real=get_real_position(sym)
+                if real is None or abs(float(real.get('positionAmt',0) or 0))<=0:
+                    price=pos.get('current_price') or pos.get('entry')
+                    try:
+                        _finalize_external_close(sym,pos,reason_hint='unknown',exit_price=price)
+                        log.info(f'[resume] {sym}: Binance flat -> local REAL position reconciled as closed.')
+                    except Exception as e:
+                        failures.append(f'{sym}: flat-position finalize {e}')
+                        log.error(f'[resume] FINALIZE GAGAL {sym}: {e}')
+                    continue
+                live_qty=abs(float(real.get('positionAmt',0) or 0))
+                with positions_lock:
+                    if sym in positions:
+                        positions[sym].update({'quantity':live_qty,'exchange_synced_at':time.time(),'execution_mode':'REAL'})
+            except Exception as e:
+                failures.append(f'{sym}: sync {e}')
+                log.error(f'[resume] SYNC GAGAL {sym}: {e}')
+
+        # Pending protection/trail/cleanup are real-only queues.
+        with _pending_protections_lock:
+            protections=[(sym,dict(v)) for sym,v in _pending_protections.items()]
+        for sym,pr in protections:
+            try:
+                with positions_lock: pos=positions.get(sym)
+                if not pos or not _position_is_real(pos) or pos.get('status')!='active':
+                    _clear_pending_protection(sym); continue
+                qty=pos.get('quantity') or pr.get('quantity'); buy=pr.get('side')=='BUY'
+                if not qty or pr.get('tp') is None or pr.get('sl') is None: raise RuntimeError('pending protection tidak lengkap')
+                with _binance_critical_context():
+                    t,s=place_tp_sl(sym,buy,pr['tp'],pr['sl'],qty)
+                with positions_lock:
+                    if sym in positions: positions[sym].update({'tp_order_id':t['algoId'],'sl_order_id':s['algoId'],'execution_mode':'REAL'})
+                _clear_pending_protection(sym)
+            except Exception as e:
+                failures.append(f'{sym}: protection {e}'); log.error(f'[protection-resume] {sym} GAGAL: {e}')
+
+        with _pending_trails_lock:
+            pending=[(sym,dict(v)) for sym,v in _pending_trails.items()]
+        for sym,tr in pending:
+            try:
+                with positions_lock: pos=positions.get(sym)
+                if not pos or not _position_is_real(pos) or pos.get('status')!='active':
+                    _clear_pending_trail(sym); continue
+                buy=pos['signal']['decision']=='BUY'; qty=pos.get('quantity') or tr.get('quantity')
+                tp=tr.get('tp') or pos['signal'].get('tp'); sl=tr.get('sl') or pos.get('current_sl')
+                if not qty or sl is None or tp is None: raise RuntimeError('pending trail tidak lengkap')
+                with _binance_critical_context():
+                    cancel_algo_order(pos.get('tp_order_id')); cancel_algo_order(pos.get('sl_order_id'))
+                    t,s=place_tp_sl(sym,buy,tp,sl,qty)
+                old_sl = pos.get('current_sl')
+                with positions_lock:
+                    if sym in positions:
+                        positions[sym].update({'tp_order_id':t['algoId'],'sl_order_id':s['algoId'],'exchange_synced_at':time.time(),'execution_mode':'REAL','current_sl':sl})
+                if old_sl is not None and sl is not None and float(sl) != float(old_sl):
+                    _record_trail_event(sym, pos, {'trail_source':'pending_resume','reason':['queued trail applied after Binance recovery']}, old_sl, sl, status='APPLIED')
+                _clear_pending_trail(sym)
+            except Exception as e:
+                failures.append(f'{sym}: trail {e}'); log.error(f'[trail-resume] {sym} GAGAL: {e}')
+
+        with _pending_cleanup_lock:
+            cleanup_items=list(_pending_cleanup.items())
+        for sym,item in cleanup_items:
+            try:
+                with _binance_critical_context():
+                    _cleanup_algo_orders_verified(sym)
+            except Exception as e:
+                failures.append(f'{sym}: cleanup {e}'); log.error(f'[cleanup-resume] {sym} GAGAL: {e}')
+
+        if failures:
+            with _binance_pause_lock:
+                _binance_recovering=False; _binance_scan_paused=True; _binance_pause_reason='recovery incomplete'; generation=_binance_pause_generation
+            msg=' | '.join(failures[:6])
+            log.error(f'[BINANCE RECOVERY] BELUM SELESAI — scanner tetap PAUSED. {msg}')
+            with _binance_recovery_notice_lock:
+                should_notify=generation!=_binance_recovery_notice_generation
+                if should_notify: _binance_recovery_notice_generation=generation
+            if chat_id and should_notify:
+                tg_send(chat_id,'⚠️ <b>Binance recovery belum selesai.</b>\nScanner tetap dihentikan karena sync/protection REAL masih gagal.\nDetail: <code>'+msg[:500]+'</code>')
+            return False
+
+        with _binance_pause_lock:
+            _binance_recovering=False; _binance_scan_paused=False; _binance_pause_reason=''
+        if chat_id: tg_send(chat_id,'✅ <b>Binance recovery selesai.</b>\nREAL position/protection state sudah konsisten. Scanning boleh resume.')
+        return True
+    except Exception as e:
+        with _binance_pause_lock:
+            _binance_recovering=False; _binance_scan_paused=True; _binance_pause_reason='recovery exception'
+        log.error(f'[BINANCE RECOVERY] exception — scanner tetap PAUSED: {e}',exc_info=True)
+        return False
+
+def _binance_recovery_loop(chat_id_getter=lambda: active_chat_id):
+    """Watchdog global. One pause notice per pause generation; strict recovery gates resume."""
+    while True:
+        try:
+            if _binance_is_scan_paused():
+                _notify_binance_pause_once(chat_id_getter())
+                if _binance_cooldown_remaining() <= 0 and not _binance_recovering:
+                    _resume_binance_and_flush_pending(chat_id_getter())
+                else:
+                    time.sleep(5)
+                continue
+        except Exception as e:
+            log.warning(f"[binance-recovery] {e}")
+        time.sleep(5)
+
+
+def autostop_loop(chat_id):
+    """Background: pantau saldo real, auto /stop kalau drawdown dari peak > AUTOSTOP_PCT."""
+    global auto_mode, peak_real_balance
+    while True:
+        try:
+            if REAL_TRADE_ENABLED and not _binance_is_scan_paused():
+                _, total = get_real_balance()
+                if total is not None:
+                    with autostop_lock:
+                        if peak_real_balance is None or total > peak_real_balance:
+                            peak_real_balance = total
+                        drawdown_pct = (peak_real_balance - total) / peak_real_balance * 100 if peak_real_balance else 0
+                    if auto_mode and drawdown_pct >= AUTOSTOP_PCT:
+                        auto_mode = False
+                        tg_send(chat_id,
+                            f"🛑 <b>AUTO-STOP TERPICU</b>\n\n"
+                            f"Saldo turun <b>{drawdown_pct:.2f}%</b> dari peak "
+                            f"(${peak_real_balance:.2f} → ${total:.2f})\n"
+                            f"Threshold: {AUTOSTOP_PCT}%\n\n"
+                            f"Scan sinyal baru dihentikan. Posisi aktif tetap dipantau.\n"
+                            f"Jalankan lagi manual dengan /auto")
+        except Exception as e:
+            log.warning(f"[autostop_loop] {e}")
+        time.sleep(60)
+
+
+def _mode_on_preflight_reconcile(chat_id=None):
+    """One-time OFF→ON exchange reconciliation; clean orphan orders only."""
+    with _binance_critical_context():
+        _real_trade_preflight(force=True)
+        remote_positions = get_real_positions_all()
+        remote = {str(p.get("symbol")): p for p in remote_positions if p.get("symbol")}
+        ordinary = get_open_orders_all()
+        algo = get_open_algo_orders_all()
+        orphan = set()
+        for row in list(ordinary) + list(algo):
+            sym = str(row.get("symbol") or "")
+            if sym and sym not in remote:
+                orphan.add(sym)
+        for sym in sorted(orphan):
+            _cancel_all_symbol_orders_verified(sym)
+        with positions_lock:
+            local_real = [(sym, dict(pos)) for sym, pos in positions.items() if _position_is_real(pos)]
+        for sym, pos in local_real:
+            live = remote.get(sym)
+            if live is None or abs(float(live.get("positionAmt", 0) or 0)) <= 0:
+                try:
+                    _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=pos.get("current_price") or pos.get("entry"))
+                except Exception as e:
+                    log.warning(f"[mode-on reconcile] finalize {sym} gagal: {e}")
+    return {"remote_positions": len(remote_positions), "orphan_symbols_cleaned": len(orphan)}
+
+
+def simulation_loop(chat_id):
+    """Koordinator runtime; seluruh keputusan trading berasal dari strategy."""
+    global auto_mode
+    tg_send(chat_id,"🤖 <b>Engine dimulai.</b>\nStrategy mengendalikan Entry/TP/SL/Trail.")
+    scanning=False; scan_lock=threading.Lock(); last_scan=0.0
+
+    def do_scan():
+        nonlocal scanning
+        try:
+            signals = run_scan_once(chat_id)
+            if not auto_mode or not signals:
+                return
+
+            opened = 0
+            for signal in signals:
+                if not auto_mode or _binance_is_scan_paused():
+                    break
+                sym = signal.get("symbol")
+                if not sym:
+                    continue
+                with positions_lock:
+                    if sym in positions or len(positions) >= MAX_POSITIONS:
+                        continue
+
+                if REAL_TRADE_ENABLED:
+                    if _open_pending_real(sym, signal, chat_id):
+                        opened += 1
+                    continue
+
+                price = signal.get("price") or get_price(sym)
+                entry = signal.get("entry")
+                if price is None or entry is None:
+                    continue
+                mode = str(signal.get("execution_mode", "")).lower() or ("market" if signal.get("entry_label") == "market" else "limit")
+                with positions_lock:
+                    if sym in positions or len(positions) >= MAX_POSITIONS:
+                        continue
+                    positions[sym] = {"signal": signal, "entry": entry, "chat_id": chat_id,
+                                      "entry_time": None, "timeout_flag": False, "status": "pending",
+                                      "execution_mode": "SIMULATION"}
+                if mode == "market":
+                    _open_position(sym, signal, get_price(sym) or price, chat_id, "strategy")
+                else:
+                    tg_send(chat_id, f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(signal)}")
+                    threading.Thread(target=wait_entry, args=(sym, signal, chat_id), daemon=True).start()
+                opened += 1
+
+            log.info(f"[scan] {len(signals)} signal lolos, {opened} dikirim ke execution")
+        finally:
+            with scan_lock:
+                scanning = False
+
+    def wait_entry(sym,signal,chat_id):
+        entry=signal["entry"]; buy=signal["decision"]=="BUY"; deadline=time.time()+8*3600
+        while time.time()<deadline:
+            with positions_lock:
+                if sym not in positions:return
+                if positions[sym].get("timeout_flag"): positions.pop(sym,None); return
+            price=get_price(sym)
+            if price is not None and ((price<=entry) if buy else (price>=entry)):
+                fill=min(entry,price) if buy else max(entry,price)
+                _open_position(sym,signal,fill,chat_id,"strategy"); return
+            time.sleep(MONITOR_SLEEP)
+        with positions_lock: positions.pop(sym,None)
+        _ban_coin(sym,"pending expired")
+
+    while auto_mode:
+        if _binance_is_scan_paused():
+            remaining = _binance_cooldown_remaining()
+            time.sleep(min(10.0, remaining) if remaining > 0 else 1.0)
+            continue
+        with positions_lock: full=len(positions)>=MAX_POSITIONS
+        if full: time.sleep(5); continue
+        with scan_lock:
+            if scanning: time.sleep(5); continue
+            scanning=True
+        if time.time()-last_scan<120:
+            with scan_lock: scanning=False
+            time.sleep(5); continue
+        last_scan=time.time(); threading.Thread(target=do_scan,daemon=True).start(); time.sleep(5)
+    tg_send(chat_id,"⏹ <b>Scanning dihentikan.</b>\n\n"+fmt_stats())
+
+
+
+
+# ═════════════════════════════════════════════
+# PESAN STATIS
+# ═════════════════════════════════════════════
+def get_start_msg():
+    return (
+        "👋 <b>SMC Signal Broadcaster</b>\n\n"
+        f"Mode: <b>{'REAL TRADE' if REAL_TRADE_ENABLED else 'SIMULASI'}</b>\n"
+        f"Posisi aktif: <b>{MAX_POSITIONS}</b> maksimum\n"
+        f"Confidence minimum: <b>{STRATEGY_CONFIDENCE_THRESHOLD}%</b>\n"
+        "TP minimum: <b>2R</b> • Max RR: <b>Unlimited</b>\n"
+        "Trailing: <b>Adaptive / context-aware</b>\n\n"
+        "━━━━━━━━ <b>TRADING</b> ━━━━━━━━\n"
+        "/auto                — Mulai scanning & trading\n"
+        "/stop                — Hentikan scanning; posisi aktif tetap dipantau\n"
+        "/trade               — Lihat semua posisi aktif/pending/emergency\n"
+        "/ok SYMBOL           — Rekonsiliasi posisi Binance + TP/SL\n"
+        "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
+        "/timeout             — Tutup paksa semua posisi + semua order\n\n"
+        "━━━━━━━━ <b>CONFIG</b> ━━━━━━━━━\n"
+        "/mode                — Lihat mode aktif\n"
+        "/mode on             — Aktifkan REAL TRADE\n"
+        "/mode off            — Aktifkan SIMULASI\n"
+        "/max                 — Lihat/ubah batas posisi\n"
+        "/leverage            — Lihat/ubah leverage\n"
+        "/margin              — Lihat/ubah margin awal/trade\n"
+        "/confidence_min      — Lihat confidence minimum\n"
+        "/confidence_min 70   — Ubah threshold confidence\n"
+        "/autostop            — Lihat/ubah auto-stop drawdown\n\n"
+        "━━━━━━━━ <b>RESEARCH</b> ━━━━━━━━\n"
+        "/stats               — Statistik & saldo aktif\n"
+        "/backtest            — 20 trade terakhir\n"
+        "/analyze             — Analisis seluruh closed trade sejak resetstats\n"
+        "/resetstats           — Reset research stats/ledger tanpa mengubah modal\n\n"
+        "━━━━━━━━ <b>TOOLS</b> ━━━━━━━━━━\n"
+        "/ganti               — Upload/ganti strategy_logic.py\n"
+        "/info                — Detail engine & metode analisis\n"
+        "/IP                  — Lihat public IP Render saat ini\n"
+        "/banned              — Lihat daftar koin yang diban\n"
+        "/koin                — Lihat koin yang sedang/terakhir di-scan\n"
+        "/resetban             — Hapus semua ban koin\n"
+        "/unban SYMBOL         — Lepas ban satu koin\n"
+        "/timer               — Lihat/ubah ban pendek (scan)\n"
+        "/timer 20            — Ban pendek 20 scan\n"
+        "/reject              — Lihat/ubah warmup reject setelah /resetstats\n"
+        "/reject 5            — Tolak 5 sinyal awal setelah /resetstats\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        + ("🔴 <b>REAL TRADE AKTIF</b> — order sungguhan di Binance Futures, uang beneran."
+           if REAL_TRADE_ENABLED else
+           "⚠️ <i>Mode simulasi — tidak mengeksekusi order sungguhan.</i>")
+    )
+
+def get_info_msg():
+    return ("ℹ️ <b>Engine</b>\n\n"
+            "Strategy: Entry • Stop Loss • Take Profit • Trail • Confidence • Setup selection\n"
+            "Engine: data transport • Telegram • order execution • position state • monitoring • statistics." + brain_line + "\n\nResearch tidak memblokir execution; brain dapat di-hot-swap.")
+
+
+
+# ═════════════════════════════════════════════
+# RENDER KEEP-ALIVE / TELEGRAM WATCHDOG
+# ═════════════════════════════════════════════
+def _render_keepalive_loop():
+    """Best-effort self health ping untuk mengurangi risiko Render Free idle.
+
+    Render_EXTERNAL_URL dipakai kalau tersedia. Endpoint /healthz tidak menyentuh
+    Binance, jadi loop ini tidak menambah Binance weight. Untuk jaminan terhadap
+    spin-down Free, external uptime monitor tetap lebih kuat; loop ini adalah
+    lapisan tambahan, bukan satu-satunya mekanisme.
+    """
+    base = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if not base:
+        log.info("[render] RENDER_EXTERNAL_URL tidak tersedia — keepalive internal off")
+        return
+    url = f"{base}/healthz"
+    while True:
+        try:
+            r = requests.get(url, timeout=10)
+            if r.ok:
+                log.debug("[render] keepalive OK")
+            else:
+                log.warning(f"[render] keepalive HTTP {r.status_code}")
+        except Exception as e:
+            log.debug(f"[render] keepalive gagal: {e}")
+        time.sleep(TELEGRAM_KEEPALIVE_SEC)
+
+
+def _telegram_watchdog_alert(cid, text):
+    global _telegram_last_conflict_alert_at
+    now = time.time()
+    if now - _telegram_last_conflict_alert_at < 300:
+        return
+    _telegram_last_conflict_alert_at = now
+    if cid:
+        tg_send(cid, text)
+
+
+# ═════════════════════════════════════════════
+# BOT LOOP
+# ═════════════════════════════════════════════
+def bot_loop():
+    global auto_mode, auto_thread, autostop_thread, active_chat_id, timeout_flag, MAX_POSITIONS, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance, REAL_TRADE_ENABLED, STRATEGY_CONFIDENCE_THRESHOLD, BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_KEYS_PRESENT, real_balance_snapshot, real_balance_snapshot_at, early_reject_configured, early_reject_remaining, BAN_DURATION_SCANS
+
+    # Set active_chat_id ke ALLOWED_USER_ID SEJAK AWAL — di chat pribadi
+    # Telegram, chat_id sama dengan user_id, jadi bot bisa kirim pesan
+    # proaktif (termasuk "Bot Siap" & notifikasi darurat) SEBELUM user
+    # mengirim perintah apa pun. Sebelumnya active_chat_id cuma None
+    # sampai user chat duluan, jadi notifikasi penting tidak pernah sampai.
+    if ALLOWED_USER_ID:
+        active_chat_id = ALLOWED_USER_ID
+
+    # Tidak ada startup ping Binance. Request hanya dilakukan saat benar-benar dibutuhkan.
+
+    try:
+        _binance_sync_time(force=True)
+    except Exception:
+        pass
+    _telegram_bootstrap()
+    offset=None
+    poll_backoff=1
+    log.info(f"Bot siap — main.py {MAIN_ENGINE_VERSION}.")
+    if ALLOWED_USER_ID:
+        tg_send(ALLOWED_USER_ID,
+            "✅ <b>Bot Siap</b>\n"
+            "Semua sistem sudah menyala dan siap menerima perintah.\n"
+            "Ketik /start untuk melihat menu.")
+        # Always report the public Render IP at startup, regardless of trading mode.
+        # This is a non-Binance request and is best-effort only; failure must never
+        # prevent the bot from starting or receiving commands.
+        ip = get_public_ip()
+        if ip and ip != "unknown":
+            tg_send(ALLOWED_USER_ID,
+                    f"🌐 <b>Public IP Render</b>\n<code>{html.escape(ip)}</code>\n\n"
+                    "Whitelist IP ini di Binance API Management jika IP restriction aktif.")
+        else:
+            tg_send(ALLOWED_USER_ID,
+                    "⚠️ <b>Public IP Render</b>\nTidak berhasil diambil saat startup.\n"
+                    "Gunakan /IP untuk mencoba lagi.")
+
+    while True:
+        try:
+            updates = tg_updates(offset)
+            poll_backoff = 1
+            for upd in updates:
+                offset=upd["update_id"]+1
+                msg=upd.get("message",{})
+                uid=(msg.get("from") or {}).get("id")
+                chat_id=(msg.get("chat") or {}).get("id")
+                # Pesan berisi DOKUMEN pakai field "caption", bukan "text" —
+                # "text" cuma ada di pesan teks polos tanpa lampiran. Sebelumnya
+                # cuma baca "text", jadi /ganti (dikirim sbg dokumen + caption)
+                # selalu ke-skip diam-diam di baris `if ... not text: continue`
+                # di bawah, sebelum sempat sampai ke handler manapun.
+                text=(msg.get("text") or msg.get("caption") or "").strip().lower()
+                if not uid or not chat_id or not text: continue
+                if uid!=ALLOWED_USER_ID:
+                    tg_send(chat_id,"⛔ Akses ditolak."); continue
+                active_chat_id=chat_id
+
+                if text in ("/start","start"):
+                    tg_send(chat_id,get_start_msg())
+                elif text.startswith("/confidence_min") or text.startswith("confidence_min"):
+                    parts = text.split()
+                    if len(parts) == 1:
+                        tg_send(chat_id, f"🎯 <b>Confidence minimum:</b> {STRATEGY_CONFIDENCE_THRESHOLD}%\nGunakan <code>/confidence_min 70</code> untuk mengubahnya.")
+                    else:
+                        try:
+                            val = float(parts[1].replace("%", ""))
+                            if not (0 <= val <= 100):
+                                raise ValueError("rentang 0-100")
+                            STRATEGY_CONFIDENCE_THRESHOLD = int(round(val))
+                            tg_send(chat_id, f"✅ Confidence minimum diubah menjadi <b>{STRATEGY_CONFIDENCE_THRESHOLD}%</b>.")
+                        except Exception:
+                            tg_send(chat_id, "❌ Format salah. Gunakan <code>/confidence_min 70</code> (0-100).")
+                elif text in ("/info","info"):
+                    tg_send(chat_id,get_info_msg())
+                elif text in ("/ip","ip"):
+                    ip = get_public_ip()
+                    if ip and ip != "unknown":
+                        tg_send(chat_id, f"🌐 <b>Public IP Render</b>\n<code>{html.escape(ip)}</code>\n\nGunakan IP ini untuk whitelist Binance API jika diperlukan.")
+                    else:
+                        tg_send(chat_id, "⚠️ Public IP Render tidak berhasil diambil dari layanan IP eksternal saat ini.")
+                elif text in ("/stats","stats"):
+                    tg_send(chat_id,fmt_stats())
+                elif text in ("/backtest","backtest"):
+                    tg_send(chat_id,fmt_backtest())
+                # ============================================================
+                # TAMBAHAN BARU (START) — Handler /analyze
+                # ============================================================
+                elif text in ("/brain", "brain", "/brain status", "brain status"):
+                    try:
+                        st = globals().get("get_adaptive_status")
+                        tg_send(chat_id, html.escape(json.dumps(st() if callable(st) else {"status":"unavailable"}, ensure_ascii=False, indent=2)))
+                    except Exception as e:
+                        tg_send(chat_id, f"❌ Brain status gagal: <code>{html.escape(str(e)[:300])}</code>")
+                elif text in ("/brain historical", "brain historical"):
+                    try:
+                        fn = globals().get("adaptive_replay_historical")
+                        _dispatch_research_job(fn, False) if callable(fn) else None
+                        tg_send(chat_id, "🧠 Historical replay dijalankan di background. Execution tetap berjalan.")
+                    except Exception as e:
+                        tg_send(chat_id, f"❌ Historical replay gagal dimulai: <code>{html.escape(str(e)[:300])}</code>")
+                elif text in ("/full on", "full on"):
+                    try:
+                        tg_send(chat_id, _full_strategy_command("on", chat_id))
+                    except Exception as e:
+                        log.exception(f"[full] on gagal: {e}")
+                        tg_send(chat_id, f"❌ FULL gagal diaktifkan: <code>{html.escape(str(e)[:300])}</code>")
+                elif text in ("/full off", "full off"):
+                    try:
+                        tg_send(chat_id, _full_strategy_command("off", chat_id))
+                    except Exception as e:
+                        log.exception(f"[full] off gagal: {e}")
+                        tg_send(chat_id, f"❌ FULL gagal dimatikan: <code>{html.escape(str(e)[:300])}</code>")
+                elif text in ("/full reset", "full reset"):
+                    try:
+                        tg_send(chat_id, _full_strategy_command("reset", chat_id))
+                    except Exception as e:
+                        log.exception(f"[full] reset gagal: {e}")
+                        tg_send(chat_id, f"❌ FULL reset gagal: <code>{html.escape(str(e)[:300])}</code>")
+                elif text in ("/full", "full", "/full status", "full status"):
+                    try:
+                        tg_send(chat_id, _full_strategy_command("status", chat_id))
+                    except Exception as e:
+                        log.exception(f"[full] status gagal: {e}")
+                        tg_send(chat_id, f"❌ FULL status gagal: <code>{html.escape(str(e)[:300])}</code>")
+                elif text in ("/analyze","analyze"):
+                    # Research analysis dari FULL CLOSED-TRADE LEDGER; TIDAK scan Binance.
+                    def _run_analyze(cid):
+                        try:
+                            with trade_history_lock:
+                                trade_count = len(trade_history)
+                            tg_send(cid,
+                                f"🔎 <b>Mulai /analyze</b>\n"
+                                f"Menganalisis <b>{trade_count}</b> closed trade yang tercatat sejak /resetstats terakhir.\n"
+                                f"Tidak melakukan scan market baru.\n"
+                                f"Dibuat: 3 file research terstruktur.")
+                            rows, summary, hist = _analyze_snapshot()
+                            report_path = _write_analyze_report(rows, summary, hist)
+                            csv_path = _write_analyze_csv(rows)
+                            support_paths = _write_research_support_files(summary)
+                            tg_send(cid,
+                                f"✅ <b>/analyze selesai</b>\n"
+                                f"Closed trade dianalisis: <b>{len(rows)}</b>\n"
+                                f"Trail events: <b>{len(_trail_events_snapshot(summary.get('run_id', research_run_id)))}</b>\n"
+                                f"Low-confidence history: <b>{len(_low_conf_snapshot())}</b>\n"
+                                f"Run: <code>{summary.get('run_id', research_run_id)}</code>\n\n"
+                                f"Mengirim <b>3 file research</b> (7 dataset digabung losslessly)...")
+                            tg_send_document(cid, report_path, caption="📊 analyze_report.md — ringkasan analisis")
+                            tg_send_document(cid, csv_path, caption="📋 analyze_data.csv — seluruh closed trade")
+                            tg_send_document(cid, support_paths, caption="🧠 analyze_research_bundle.json — 5 dataset research: trail events, trail summary, scan quality, low-confidence bans, market context")
+                        except Exception as e:
+                            log.error(f"[analyze] Error: {e}", exc_info=True)
+                            tg_send(cid, f"❌ Error saat /analyze:\n<code>{str(e)[:300]}</code>")
+
+                    threading.Thread(target=_run_analyze, args=(chat_id,), daemon=True).start()
+                    tg_send(chat_id, "⏳ /analyze berjalan di background berdasarkan history trade. Bot tetap menerima perintah lain.")
+# ============================================================
+# TAMBAHAN BARU (END)
+# ============================================================
+                # ============================================================
+# TAMBAHAN BARU (START) — Handler /ganti (Upload Otak Baru via GitHub API)
+# ============================================================
+                elif text in ("/ganti","ganti"):
+                   doc = msg.get("document")
+                   if not doc:
+                       tg_send(chat_id, "📤 Kirim file strategy_logic.py sebagai dokumen dengan caption /ganti")
+                       continue
+               
+                   file_name = doc.get("file_name", "")
+                   if not file_name.endswith(".py"):
+                       tg_send(chat_id, "❌ Harus file .py")
+                       continue
+               
+                   try:
+                       # 1. Download file dari Telegram
+                       file_id = doc["file_id"]
+                       file_info = requests.get(
+                           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
+                           params={"file_id": file_id}, timeout=10
+                       ).json()
+                       file_path = file_info["result"]["file_path"]
+                       file_content = requests.get(
+                           f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
+                           timeout=10
+                       ).text
+               
+                       # 2. Validasi sintaks
+                       try:
+                           compiled = compile(file_content, "strategy_logic.py", "exec")
+                       except SyntaxError as e:
+                           tg_send(chat_id, f"❌ Error sintaks di file:\n<code>{e}</code>")
+                           continue
+               
+                       # 3. Validasi full_analyze() ADA
+                       check_ns = {}
+                       try:
+                           exec(compiled, check_ns)
+                       except Exception as e:
+                           tg_send(chat_id, f"❌ File error saat dijalankan (bukan cuma sintaks):\n<code>{e}</code>")
+                           continue
+                       if "full_analyze" not in check_ns or not callable(check_ns["full_analyze"]):
+                           tg_send(chat_id, "❌ File ini tidak punya fungsi full_analyze() — ditolak.")
+                           continue
+               
+                       # 4. Commit ke GitHub
+                       try:
+                           _commit_to_github(file_content, "strategy_logic.py", f"Update strategy_logic via Telegram /ganti")
+                           tg_send(chat_id, "✅ File berhasil di-commit ke GitHub!")
+                       except Exception as e:
+                           tg_send(chat_id, f"❌ Gagal commit ke GitHub:\n<code>{str(e)[:200]}</code>")
+                           continue
+               
+                       # 5. Tulis ke file LOKAL
+                       local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategy_logic.py")
+                       with open(local_path, "w", encoding="utf-8") as f:
+                           f.write(file_content)
+               
+                       # 6. ========== ADAPTIVE RELOAD: Bind apa yang ADA, pertahankan yang tidak ==========
+                       import importlib, sys
+
+                       # Hapus modul dari cache supaya reload benar-benar dari disk
+                       if "strategy_logic" in sys.modules:
+                           del sys.modules["strategy_logic"]
+
+                       import strategy_logic as sl
+                       _strategy_set_ml_model(_ml_current_champion())
+
+                       # --- SENTINEL untuk membedakan "tidak ada" vs None ---
+                       _SL_SENTINEL = object()
+
+                       def _sl_bind(name):
+                           """Bind ke global HANYA kalau ada di modul baru.
+                           Kalau tidak ada -> global lama tetap aktif, return False."""
+                           val = getattr(sl, name, _SL_SENTINEL)
+                           if val is not _SL_SENTINEL:
+                               globals()[name] = val
+                               return True
+                           return False
+
+                       # WAJIB: full_analyze sudah divalidasi ada di atas
+                       globals()["full_analyze"] = sl.full_analyze
+
+                       # -- Fungsi opsional --------------------------------------------------
+                       # Kalau tidak ada di file baru -> versi lama di global tetap aktif.
+                       # Kamu bebas ganti nama, tambah, atau hapus fungsi apapun
+                       # selama full_analyze() tetap ada.
+                       _OPT_FNS = ["manage_position"]
+                       _bound_fns, _kept_fns = [], []
+                       for _fn in _OPT_FNS:
+                           (_bound_fns if _sl_bind(_fn) else _kept_fns).append(_fn)
+
+                       # Tangkap semua public callable BARU yang tidak ada di daftar atas
+                       for _attr in dir(sl):
+                           if _attr.startswith("__"):
+                               continue
+                           if _attr not in _OPT_FNS and _attr != "full_analyze":
+                               _v = getattr(sl, _attr, None)
+                               if callable(_v):
+                                   globals()[_attr] = _v
+                                   if _attr not in _bound_fns:
+                                       _bound_fns.append(f"✨{_attr}")
+
+                       # -- Konstanta opsional -----------------------------------------------
+                       # Kalau tidak ada di file baru, nilai lama dipertahankan.
+                       _OPT_CONSTS = []
+                       _bound_consts, _kept_consts = [], []
+                       for _k in _OPT_CONSTS:
+                           (_bound_consts if _sl_bind(_k) else _kept_consts).append(_k)
+
+                       # -- Laporan ke user --------------------------------------------------
+                       _rpt = ["✅ <b>Strategy logic aktif!</b>"]
+                       if _bound_fns:
+                           _rpt.append(f"🔄 Diperbarui: <code>{', '.join(_bound_fns)}</code>")
+                       if _kept_fns:
+                           _rpt.append(f"♻️ Versi lama dipertahankan: <code>{', '.join(_kept_fns)}</code>")
+                       if _bound_consts:
+                           _rpt.append(f"📐 Konstanta diperbarui: <code>{', '.join(_bound_consts)}</code>")
+                       if _kept_consts:
+                           _rpt.append(f"📌 Konstanta lama dipertahankan: <code>{', '.join(_kept_consts)}</code>")
+
+                       log.info("[OTAK] Strategy logic di-reload (adaptive bind).")
+                       tg_send(chat_id, "\n".join(_rpt))
+               
+                   except Exception as e:
+                       log.error(f"[ganti] Error: {e}")
+                       tg_send(chat_id, f"❌ Gagal mengganti strategy_logic:\n<code>{str(e)[:200]}</code>")
+                # ============================================================
+                # TAMBAHAN BARU (END)
+                # ============================================================
+                elif text.startswith("/banned") or text.startswith("banned"):
+                    parts = text.split()
+                    if len(parts) > 1:
+                        target_sym = parts[1].upper()
+                        _ban_coin(target_sym, reason="manual", duration=float("inf"), kind="manual")
+                        tg_send(chat_id, f"🚫 <b>{html.escape(target_sym)}</b> diban PERMANEN.\nLepas dengan <code>/unban {html.escape(target_sym)}</code> atau <code>/resetban</code>.")
+                    else:
+                        with ban_lock:
+                            cur_scan = scan_counter
+                            b = sorted(banned_coins.items())
+                        output_lines = [f"🚫 <b>Banned ({len(b)}):</b>"]
+                        if b:
+                            for sym, meta in b:
+                                sym_e = html.escape(str(sym))
+                                if isinstance(meta, tuple):
+                                    banned_at, dur = meta; reason = "legacy"; kind = "short"; conf_txt = ""
+                                else:
+                                    banned_at, dur = meta.get("banned_at", cur_scan), meta.get("duration", 0)
+                                    reason = html.escape(str(meta.get("reason", "") or ""))
+                                    kind = html.escape(str(meta.get("kind", "short") or "short"))
+                                    c = meta.get("confidence")
+                                    conf_txt = f" C{float(c):.0f}%" if c is not None else ""
+                                if dur == float("inf"):
+                                    output_lines.append(f"• {sym_e} (PERMANEN) | {kind}{conf_txt} | {reason}")
+                                else:
+                                    remaining = max(0.0, float(dur) - (cur_scan - float(banned_at)))
+                                    output_lines.append(f"• {sym_e} ({remaining:g} scan) | {kind}{conf_txt} | {reason}")
+                        else:
+                            output_lines.append("• (tidak ada ban aktif)")
+
+                        lc = _low_conf_summary()
+                        if lc:
+                            output_lines.append("\n🧠 <b>Low-confidence frequency:</b>")
+                            for x in lc[:10]:
+                                output_lines.append(f"• {html.escape(str(x['symbol']))} — {x['count']}x | avg C{x['avg']:.1f}% | min C{x['min']:.1f}%")
+
+                        # Telegram messages have a hard length limit. Send line-aware chunks.
+                        chunk = ""
+                        for line in output_lines:
+                            candidate = (chunk + "\n" + line).strip()
+                            if chunk and len(candidate) > 3500:
+                                tg_send(chat_id, chunk)
+                                chunk = line
+                            else:
+                                chunk = candidate
+                        if chunk:
+                            tg_send(chat_id, chunk)
+                elif text.startswith("/unban") or text.startswith("unban"):
+                    parts = text.split()
+                    if len(parts) != 2:
+                        tg_send(chat_id, "❌ Format: <code>/unban SYMBOL</code>")
+                    else:
+                        sym = parts[1].upper()
+                        if _unban_coin(sym):
+                            tg_send(chat_id, f"✅ <b>{sym}</b> di-unban.")
+                        else:
+                            tg_send(chat_id, f"ℹ️ <b>{sym}</b> tidak sedang diban.")
+                elif text.startswith("/timer") or text.startswith("timer"):
+                    parts = text.split()
+                    if len(parts) == 1:
+                        tg_send(chat_id, f"⏱️ <b>Ban pendek:</b> {BAN_DURATION_SCANS:g} scan\nDipakai untuk pending/no-trade dan low-confidence.\nUbah: <code>/timer 20</code> atau <code>/timer 7.5</code>")
+                    elif len(parts) == 2:
+                        try:
+                            val = float(parts[1].replace(",", "."))
+                            if not (val > 0 and val <= 10000): raise ValueError
+                            BAN_DURATION_SCANS = val
+                            tg_send(chat_id, f"✅ Ban pendek diubah menjadi <b>{BAN_DURATION_SCANS:g} scan</b>.")
+                        except ValueError:
+                            tg_send(chat_id, "❌ Format timer salah. Gunakan misalnya <code>/timer 20</code> atau <code>/timer 7.5</code>.")
+                    else:
+                        tg_send(chat_id, "❌ Format: <code>/timer</code> atau <code>/timer 20</code>")
+                elif text.startswith("/reject") or text.startswith("reject"):
+                    parts = text.split()
+                    with early_reject_lock:
+                        remaining_now = early_reject_remaining
+                        configured_now = early_reject_configured
+                    if len(parts) == 1:
+                        tg_send(chat_id, f"🛡️ <b>Warmup reject:</b> {configured_now} scan\nTersisa: {remaining_now} scan\nSetiap scan warmup: semua signal qualified ditolak, tanpa ban.\nUbah: <code>/reject 5</code> atau matikan <code>/reject 0</code>")
+                    elif len(parts) == 2:
+                        try:
+                            val = int(float(parts[1]))
+                            if val < 0 or val > 1000: raise ValueError
+                            with early_reject_lock:
+                                early_reject_configured = val
+                                early_reject_remaining = val
+                            tg_send(chat_id, f"✅ Warmup reject diubah menjadi <b>{val} scan</b>. Counter aktif langsung di-reset ke {val} scan.")
+                        except ValueError:
+                            tg_send(chat_id, "❌ Format reject salah. Gunakan <code>/reject 5</code>.")
+                    else:
+                        tg_send(chat_id, "❌ Format: <code>/reject</code> atau <code>/reject 5</code> (satuan scan)")
+                elif text in ("/koin","koin"):
+                    with _last_scanned_lock:
+                        coins = list(last_scanned_coins)
+                        scanned_at = last_scanned_at
+                    if not coins:
+                        tg_send(chat_id, "⏳ Belum ada data — tunggu siklus scan pertama selesai.")
+                    else:
+                        age_min = (time.time() - scanned_at) / 60 if scanned_at else 0
+                        tg_send(chat_id,
+                            f"📋 <b>Koin yang di-scan ({len(coins)})</b> — update {age_min:.0f} menit lalu:\n\n"
+                            + ", ".join(coins))
+                elif text in ("/resetban","resetban"):
+                    with ban_lock:
+                        n=len(banned_coins); banned_coins.clear()
+                    tg_send(chat_id,f"✅ Ban direset ({n} dihapus).")
+                elif text in ("/resetlowconf","resetlowconf"):
+                    with low_conf_history_lock:
+                        cleared_lc=len(low_conf_history); low_conf_history.clear()
+                    tg_send(chat_id,f"✅ <b>Low-confidence history direset.</b> Event dihapus: <b>{cleared_lc}</b>. Current ban tidak disentuh.")
+                elif text in ("/resetstats","resetstats"):
+                    global research_run_id, trade_sequence, trail_event_sequence
+                    with stat_lock:
+                        current_balance = stats["balance"]
+                        stats["pnl_history"] = deque(maxlen=20)
+                        stats["tp"]          = 0
+                        stats["sl"]          = 0
+                        stats["trail"]       = 0
+                        stats["total"]       = 0
+                        stats["balance"]     = current_balance
+                    with trade_history_lock:
+                        cleared = len(trade_history)
+                        trade_history.clear()
+                    trade_sequence = 0
+                    with trail_events_lock:
+                        trail_events.clear(); trail_event_sequence=0
+                    with scan_quality_lock:
+                        scan_quality_history.clear()
+                    with market_context_lock:
+                        market_context_history.clear()
+                    research_run_id = datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
+                    with pending_cancel_lock:
+                        pending_cancel_stats.clear()
+                        pending_cancel_stats.update({"tp_before_entry": 0, "expired": 0, "binance_reject": 0})
+                    with early_reject_lock:
+                        early_reject_remaining = early_reject_configured
+                    tg_send(chat_id,
+                        f"✅ <b>Research stats direset.</b>\n"
+                        f"Closed trade ledger dihapus: <b>{cleared}</b>\n"
+                        f"Run baru: <code>{research_run_id}</code>\n"
+                        f"💵 Balance TIDAK diubah: <b>${current_balance:.4f}</b>\n"
+                        f"🛡️ Warmup reject aktif: <b>{early_reject_configured}</b> sinyal awal.")
+                elif text in ("/auto","auto"):
+                    if auto_mode:
+                        tg_send(chat_id,"⚙️ Broadcaster sudah berjalan.")
+                    else:
+                        # Reset referensi peak ke saldo SEKARANG — supaya drawdown
+                        # dihitung ulang dari titik ini, bukan dari peak lama yang
+                        # bikin auto-stop langsung kepicu lagi begitu /auto ditekan.
+                        if REAL_TRADE_ENABLED:
+                            _, total = get_real_balance()
+                            with autostop_lock:
+                                peak_real_balance = total
+                        auto_mode=True
+                        auto_thread=threading.Thread(
+                            target=simulation_loop,args=(chat_id,),daemon=True)
+                        auto_thread.start()
+                elif text in ("/stop","stop"):
+                    # /stop hanya mematikan scanning sinyal baru — posisi
+                    # yang sudah berjalan tetap dipantau sampai TP/SL alami.
+                    if auto_mode:
+                        auto_mode = False
+                        with positions_lock:
+                            n_active = len(positions)
+                        tg_send(chat_id,
+                            f"⏹ <b>Scanning dihentikan.</b>\n"
+                            f"Posisi aktif ({n_active}) tetap dipantau sampai TP/SL.\n"
+                            f"Pakai /timeout SYMBOL kalau mau tutup paksa.")
+                    else:
+                        tg_send(chat_id,"ℹ️ Broadcaster tidak berjalan.")
+                elif text in ("/trade","trade"):
+                    with positions_lock:
+                        pos_list = list(positions.items())
+                    # Safety-first display order: EMERGENCY, ACTIVE, then PENDING;
+                    # within each status, highest confidence first.
+                    status_rank = {"EMERGENCY": 0, "active": 1, "pending": 2}
+                    pos_list.sort(key=lambda item: (
+                        status_rank.get(str(item[1].get("status", "active")), 3),
+                        -float((item[1].get("signal") or {}).get("confidence", 0) or 0),
+                        str(item[0])
+                    ))
+                    if not pos_list:
+                        tg_send(chat_id,"ℹ️ Tidak ada posisi aktif.")
+                    else:
+                        lines = [f"📡 <b>Posisi Aktif ({len(pos_list)}/{MAX_POSITIONS})</b>\n"]
+                        for s, p in pos_list:
+                            sig    = p["signal"]
+                            is_buy = sig["decision"] == "BUY"
+                            em     = "🟢" if is_buy else "🔴"
+                            status = p.get("status", "active")
+
+                            if status == "pending":
+                                pr       = ws_feed.get_price(s) or get_price(s) or p["entry"]
+                                dist_pct = abs(p["entry"] - pr) / pr * 100
+                                lines.append(
+                                    f"\n⏳ <b>{s}</b> — PENDING\n"
+                                    f"{em} {sig['decision']} | Entry zone: <code>{p['entry']:.6g}</code>\n"
+                                    f"Harga kini: <code>{pr:.6g}</code> | Jarak: {dist_pct:.2f}%\n"
+                                    f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{sig['sl']:.6g}</code> | Confidence: <b>{float(sig.get('confidence', 0) or 0):.0f}%</b>"
+                                )
+                            else:
+                                pr  = ws_feed.get_price(s) or get_price(s) or p["entry"]
+                                pnl = (pr - p["entry"]) / p["entry"] * 100 * (1 if is_buy else -1)
+                                entry_clock = datetime.fromtimestamp(
+                                    p["entry_time"], tz=WIB).strftime("%H:%M") if p.get("entry_time") else "?"
+                                cur_sl = p.get("current_sl", sig["sl"])
+                                trail_note = " 🔒trailing" if cur_sl != sig["sl"] else ""
+                                if status == "EMERGENCY":
+                                    lines.append(
+                                        f"\n🚨 <b>{s}</b> — EMERGENCY\n"
+                                        f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
+                                        f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note} | Confidence: <b>{float(sig.get('confidence', 0) or 0):.0f}%</b>\n"
+                                        f"PnL: <b>{pnl:+.2f}%</b>\n"
+                                        f"⚠️ {p.get('emergency_error','Posisi Binance belum terverifikasi')[:180]}\n"
+                                        f"➡️ Jalankan <code>/ok {s}</code>"
+                                    )
+                                else:
+                                    lines.append(
+                                        f"\n{em} <b>{s}</b> — AKTIF\n"
+                                        f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
+                                        f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note} | Confidence: <b>{float(sig.get('confidence', 0) or 0):.0f}%</b>\n"
+                                        f"PnL: <b>{pnl:+.2f}%</b> | 🕐 Entry jam {entry_clock}"
+                                    )
+                        tg_send(chat_id,"\n".join(lines))
+                elif text.startswith("/ok") or (not text.startswith("/") and text.startswith("ok")):
+                    parts = text.split()
+                    target = parts[1].upper() if len(parts) > 1 else None
+                    if not target:
+                        tg_send(chat_id, "❌ Gunakan <code>/ok SYMBOL</code>, contoh <code>/ok HOMEUSDT</code>.")
+                        continue
+                    def _run_ok(cid, sym):
+                        try:
+                            with positions_lock:
+                                pos = positions.get(sym)
+                            if not pos:
+                                tg_send(cid, f"ℹ️ <b>{sym}</b> tidak ada di state /trade. Tidak ada yang direkonsiliasi.")
+                                return
+                            tg_send(cid, f"🔄 <b>RECONCILING {sym}...</b>\nMemeriksa posisi Binance + TP/SL + pending protection/trail.")
+                            _binance_sync_time(force=True)
+                            real = get_real_position(sym)
+                            live_qty = abs(float(real.get("positionAmt", 0))) if real else 0.0
+                            if live_qty <= 0:
+                                # Position closed: clean orphan algo orders, then remove local state.
+                                _cleanup_algo_orders_verified(sym)
+                                _clear_pending_trail(sym)
+                                _clear_pending_protection(sym)
+                                _clear_pending_cleanup(sym)
+                                close_position(sym, "strategy", close_price=get_price(sym) or pos.get("entry"))
+                                tg_send(cid, f"✅ <b>{sym} RECONCILED</b>\nPosition Binance = 0.\nOrphan TP/SL sudah dibersihkan.\nStatus: CLOSED.")
+                                return
+                            with positions_lock:
+                                if sym in positions:
+                                    positions[sym]["status"] = "active"
+                                    positions[sym]["quantity"] = live_qty
+                                    positions[sym]["exchange_synced_at"] = time.time()
+                                    positions[sym]["emergency_reason"] = None
+                            # If protection is missing/unknown, queue/restore it.
+                            sig = pos["signal"]; buy = sig["decision"] == "BUY"
+                            tp = sig.get("tp"); sl = pos.get("current_sl", sig.get("sl"))
+                            pending = _get_pending_trail(sym)
+                            if pending:
+                                tp = pending.get("tp") or tp
+                                sl = pending.get("sl") or sl
+                            # Reconcile atomically: remove stale protective algo orders before
+                            # placing the verified current TP/SL pair, preventing duplicates.
+                            cancel_all_algo_orders(sym)
+                            t, sl_order = place_tp_sl(sym, buy, tp, sl, live_qty)
+                            with positions_lock:
+                                if sym in positions:
+                                    positions[sym].update({"tp_order_id": t["algoId"], "sl_order_id": sl_order["algoId"], "protection_state": "VERIFIED", "exchange_synced_at": time.time()})
+                            _clear_pending_protection(sym)
+                            _clear_pending_trail(sym)
+                            _clear_pending_cleanup(sym)
+                            tg_send(cid, f"✅ <b>{sym} RECONCILED</b>\nPosition Binance masih terbuka: <code>{live_qty:.8g}</code>\nTP/SL terpasang ulang dan state kembali ACTIVE.")
+                        except Exception as e:
+                            with positions_lock:
+                                if sym in positions:
+                                    positions[sym]["status"] = "EMERGENCY"
+                                    positions[sym]["emergency_error"] = str(e)[:300]
+                            _queue_pending_cleanup(sym, "/ok gagal — retry manual", e)
+                            tg_send(cid, f"🚨 <b>{sym} RECONCILE GAGAL</b>\n<code>{str(e)[:350]}</code>\nPosisi tetap dipertahankan di /trade. Coba <code>/ok {sym}</code> lagi setelah Binance/API normal.")
+                    threading.Thread(target=_run_ok, args=(chat_id, target), daemon=True).start()
+                elif text.startswith("/timeout") or (not text.startswith("/") and text.startswith("timeout")):
+                    parts = text.split()
+                    target_sym = parts[1].upper() if len(parts) > 1 else None
+                    if target_sym:
+                        tg_send(chat_id, f"⏳ <b>TIMEOUT REQUESTED</b> — {target_sym}\n"
+                                        "Membatalkan semua order Binance dan menutup posisi bila ada…")
+                        threading.Thread(target=_verified_timeout_symbol, args=(target_sym, chat_id), daemon=True).start()
+                    else:
+                        tg_send(chat_id, "⏳ <b>TIMEOUT GLOBAL REQUESTED</b>\n"
+                                        "Membatalkan SEMUA order Binance dan menutup SEMUA posisi…")
+                        threading.Thread(target=_verified_timeout_all, args=(chat_id,), daemon=True).start()
+                elif text.startswith("/mode"):
+                    # /mode on snapshots Binance balance exactly once per OFF→ON transition.
+                    parts = text.split()
+                    arg = parts[1].lower() if len(parts) > 1 else None
+                    with positions_lock:
+                        n_open = len(positions)
+                    if arg is None:
+                        status = "🔴 REAL TRADE" if REAL_TRADE_ENABLED else "🧪 SIMULASI"
+                        anchor = (f"${real_balance_snapshot:.4f}" if REAL_TRADE_ENABLED and real_balance_snapshot is not None else f"${STARTING_BALANCE:.4f}")
+                        tg_send(chat_id, f"⚙️ <b>Mode:</b> {status}\nBalance anchor: <b>{anchor}</b>\n\nGunakan <code>/mode on</code> atau <code>/mode off</code>.")
+                    elif arg == "on":
+                        if REAL_TRADE_ENABLED:
+                            tg_send(chat_id, "🔴 Mode real sudah aktif. Tidak fetch balance ulang.")
+                            continue
+                        key, secret = _read_binance_credentials()
+                        BINANCE_KEYS_PRESENT = bool(key and secret)
+                        if BINANCE_KEYS_PRESENT:
+                            BINANCE_API_KEY, BINANCE_API_SECRET = key, secret
+                        if not BINANCE_KEYS_PRESENT:
+                            tg_send(chat_id, "❌ Tidak bisa aktifkan mode real — API key/secret belum diset.")
+                            continue
+                        # One-time exchange preflight/cleanup, then one balance snapshot.
+                        try:
+                            reconcile_meta = _mode_on_preflight_reconcile(chat_id)
+                            with _binance_critical_context():
+                                avail, total = get_real_balance()
+                            if total is None:
+                                raise RuntimeError("saldo Binance tidak tersedia")
+                            with real_balance_lock:
+                                real_balance_snapshot = float(total)
+                                real_balance_snapshot_at = time.time()
+                            with stat_lock:
+                                stats["balance"] = float(total)
+                            with autostop_lock:
+                                peak_real_balance = float(total)
+                            REAL_TRADE_ENABLED = True
+                            if autostop_thread is None or not autostop_thread.is_alive():
+                                autostop_thread = threading.Thread(target=autostop_loop, args=(chat_id,), daemon=True)
+                                autostop_thread.start()
+                            extra = (f"\n\nℹ️ {n_open} posisi simulasi tetap dipantau sebagai simulasi." if n_open else "")
+                            tg_send(chat_id, f"🔴 <b>Mode REAL TRADE diaktifkan.</b>\nBalance Binance snapshot: <b>${float(total):.4f}</b>\nOrphan symbols dibersihkan: <b>{int(reconcile_meta.get('orphan_symbols_cleaned', 0))}</b>.\nSnapshot dibuat sekali pada transisi ini.{extra}")
+                        except Exception as e:
+                            REAL_TRADE_ENABLED = False
+                            tg_send(chat_id, f"❌ <b>/mode on gagal.</b> Balance Binance tidak berhasil diambil.\n<code>{str(e)[:220]}</code>")
+                    elif arg == "off":
+                        if not REAL_TRADE_ENABLED:
+                            with stat_lock:
+                                stats["balance"] = STARTING_BALANCE
+                            tg_send(chat_id, "🧪 Mode simulasi sudah aktif. Balance anchor: $10.0000.")
+                        else:
+                            REAL_TRADE_ENABLED = False
+                            with stat_lock:
+                                stats["balance"] = STARTING_BALANCE
+                            # Do not clear active REAL positions; their execution mode is immutable.
+                            extra = (f"\n\nℹ️ {n_open} posisi real tetap dipantau/ditutup via Binance." if n_open else "")
+                            tg_send(chat_id, f"🧪 <b>Mode SIMULASI diaktifkan.</b>\nBalance anchor dikembalikan ke <b>${STARTING_BALANCE:.2f}</b>.{extra}")
+                    else:
+                        tg_send(chat_id, "❓ Pakai <code>/mode</code>, <code>/mode on</code>, atau <code>/mode off</code>.")
+                elif text.startswith("/max"):
+                    parts = text.split()
+                    # ── /max (tampilkan info) ──────────────────────────────
+                    if len(parts) == 1:
+                        # Estimasi beban API saat ini
+                        scan_weight_per_min  = 836   # ~100 kline req × weight5 / ~34s scan
+                        price_weight_per_min = 12    # 1 batch ticker/price tiap 10 detik
+                        total_weight         = scan_weight_per_min + price_weight_per_min
+                        binance_limit        = 2400
+                        usage_pct            = total_weight / binance_limit * 100
+                        headroom_pct         = 100 - usage_pct
+                        threads_now          = 4 + MAX_POSITIONS * 2   # bot+cache+flask+scan + monitor+wait_entry
+
+                        # Batas aman: scan mendominasi, bukan jumlah posisi
+                        # Posisi hanya menambah ~0.02 weight/mnt per posisi (SL check jarang)
+                        # Batas praktis sebelum scan overload:
+                        #   sisa headroom = 1552 weight/mnt, scan = 836/mnt
+                        #   bisa ~2 scan paralel tapi kode hanya 1 scan sekaligus → aman tak terbatas dari sisi API
+                        # Batas rekomendasi dari sisi KUALITAS SINYAL: ≤ 20
+                        tg_send(chat_id,
+                            f"⚙️ <b>Max Posisi</b>\n\n"
+                            f"Saat ini     : <b>{MAX_POSITIONS} posisi</b>\n\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📡 <b>Info Beban API (Binance Futures)</b>\n\n"
+                            f"Limit Binance    : <b>2.400 weight/mnt</b>\n"
+                            f"Scan 50 koin     : ~{scan_weight_per_min} weight/mnt\n"
+                            f"Price cache      : ~{price_weight_per_min} weight/mnt (1 batch/10 dtk)\n"
+                            f"Total dipakai    : ~{total_weight} weight/mnt "
+                            f"(<b>{usage_pct:.0f}%</b> dari limit)\n"
+                            f"Headroom tersisa : ~{headroom_pct:.0f}%\n\n"
+                            f"⚠️ <b>Penting:</b> MAX_POSITIONS <b>tidak</b> menambah beban\n"
+                            f"API secara signifikan. Beban didominasi scan koin,\n"
+                            f"bukan jumlah posisi yang dipantau.\n"
+                            f"Monitor thread baca harga dari cache lokal — bukan API.\n\n"
+                            f"🧵 Thread aktif est. : ~{threads_now}\n\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📊 <b>Batas yang Disarankan</b>\n\n"
+                            f"API weight  : ✅ aman hingga 50+ posisi\n"
+                            f"Thread      : ✅ aman hingga 50+ posisi\n"
+                            f"Kualitas sinyal: ⚠️  disarankan ≤ 20\n"
+                            f"  (lebih dari itu, scanner makin susah\n"
+                            f"  temukan setup berkualitas karena koin\n"
+                            f"  terbaik sudah terpakai)\n\n"
+                            f"<b>Ubah: /max 5 | /max 10 | /max 15 | /max 20</b>")
+                    # ── /max N (ubah nilai) ────────────────────────────────
+                    elif len(parts) == 2:
+                        try:
+                            n = int(parts[1])
+                            if n < 1 or n > 50:
+                                tg_send(chat_id,
+                                    f"❌ Nilai harus antara 1–50.\n"
+                                    f"Contoh: /max 10")
+                            else:
+                                old = MAX_POSITIONS
+                                MAX_POSITIONS = n
+                                with positions_lock:
+                                    n_active = len(positions)
+                                note = ""
+                                if n < n_active:
+                                    note = (f"\n\n⚠️ Ada {n_active} posisi aktif saat ini.\n"
+                                            f"Posisi yang sudah buka tetap dipantau.\n"
+                                            f"Scan baru berhenti sampai posisi tutup ke ≤ {n}.")
+                                tg_send(chat_id,
+                                    f"✅ Max posisi diubah: <b>{old} → {MAX_POSITIONS}</b>{note}")
+                        except ValueError:
+                            tg_send(chat_id,"❌ Format salah. Contoh: /max 10")
+                    else:
+                        tg_send(chat_id,"❌ Format: /max  atau  /max 10")
+
+                elif text.startswith("/leverage"):
+                    parts = text.split()
+                    if len(parts) == 1:
+                        tg_send(chat_id,
+                            f"⚙️ <b>Leverage</b>\n\nSaat ini: <b>{LEVERAGE}x</b>\n\n"
+                            f"<b>Ubah: /leverage 5</b>")
+                    elif len(parts) == 2:
+                        try:
+                            n = int(parts[1])
+                            if n < 1 or n > 125:
+                                tg_send(chat_id, "❌ Nilai harus antara 1–125.\nContoh: /leverage 5")
+                            else:
+                                old = LEVERAGE
+                                LEVERAGE = n
+                                tg_send(chat_id, f"✅ Leverage diubah: <b>{old}x → {LEVERAGE}x</b>")
+                        except ValueError:
+                            tg_send(chat_id, "❌ Format salah. Contoh: /leverage 5")
+                    else:
+                        tg_send(chat_id, "❌ Format: /leverage  atau  /leverage 5")
+
+                elif text.startswith("/margin"):
+                    parts = text.split()
+                    if len(parts) == 1:
+                        tg_send(chat_id,
+                            f"⚙️ <b>Margin Awal</b>\n\nSaat ini: <b>${MARGIN_USD:.2f}</b>\n\n"
+                            f"Kalau margin ini terlalu kecil untuk suatu koin (kena batas minimum\n"
+                            f"quantity/notional Binance), bot otomatis menaikkan SEDIKIT (maks 1.5x)\n"
+                            f"khusus untuk trade itu — bukan mengubah setting ini secara permanen.\n\n"
+                            f"<b>Ubah: /margin 5</b>")
+                    elif len(parts) == 2:
+                        try:
+                            n = float(parts[1])
+                            if n <= 0 or n > 10000:
+                                tg_send(chat_id, "❌ Nilai harus antara 0–10000.\nContoh: /margin 5")
+                            else:
+                                old = MARGIN_USD
+                                MARGIN_USD = n
+                                tg_send(chat_id, f"✅ Margin awal diubah: <b>${old:.2f} → ${MARGIN_USD:.2f}</b>")
+                        except ValueError:
+                            tg_send(chat_id, "❌ Format salah. Contoh: /margin 5")
+                    else:
+                        tg_send(chat_id, "❌ Format: /margin  atau  /margin 5")
+
+                elif text.startswith("/autostop"):
+                    parts = text.split()
+                    if len(parts) == 1:
+                        with autostop_lock:
+                            peak_txt = f"${peak_real_balance:.2f}" if peak_real_balance else "belum ada data"
+                        tg_send(chat_id,
+                            f"⚙️ <b>Auto-Stop Drawdown</b>\n\nThreshold: <b>{AUTOSTOP_PCT}%</b>\n"
+                            f"Peak saldo tercatat: {peak_txt}\n\n"
+                            f"Kalau saldo turun segini persen dari peak, scan sinyal baru otomatis\n"
+                            f"berhenti (posisi aktif tetap dipantau). Jalankan lagi manual dengan /auto.\n\n"
+                            f"<b>Ubah: /autostop 3</b>")
+                    elif len(parts) == 2:
+                        try:
+                            n = float(parts[1])
+                            if n <= 0 or n > 100:
+                                tg_send(chat_id, "❌ Nilai harus antara 0–100.\nContoh: /autostop 3")
+                            else:
+                                old = AUTOSTOP_PCT
+                                AUTOSTOP_PCT = n
+                                tg_send(chat_id, f"✅ Threshold auto-stop diubah: <b>{old}% → {AUTOSTOP_PCT}%</b>")
+                        except ValueError:
+                            tg_send(chat_id, "❌ Format salah. Contoh: /autostop 3")
+                    else:
+                        tg_send(chat_id, "❌ Format: /autostop  atau  /autostop 3")
+                else:
+                    tg_send(chat_id,"❓ Tidak dikenal. /start")
+
+            time.sleep(0.2)
+        except TelegramPollingConflict as e:
+            log.error(f"[TG POLLING CONFLICT] {e}")
+            _telegram_watchdog_alert(
+                active_chat_id,
+                "🚨 <b>Telegram polling conflict</b>\n\n"
+                "Bot masih hidup, tetapi <code>getUpdates</code> bentrok. "
+                "Pastikan hanya 1 instance bot memakai TELEGRAM_TOKEN ini."
+            )
+            time.sleep(min(max(poll_backoff, 5), TELEGRAM_ERROR_BACKOFF_MAX))
+            poll_backoff = min(max(poll_backoff * 2, 5), TELEGRAM_ERROR_BACKOFF_MAX)
+        except Exception as e:
+            log.error(f"[TG/BOT LOOP] {e}", exc_info=True)
+            time.sleep(min(max(poll_backoff, 2), TELEGRAM_ERROR_BACKOFF_MAX))
+            poll_backoff = min(max(poll_backoff * 2, 2), TELEGRAM_ERROR_BACKOFF_MAX)
+
+
+if __name__=="__main__":
+    # Flask dijalankan di thread sendiri PALING AWAL supaya port langsung
+    # bind & terdeteksi Render, tidak menunggu inisialisasi bot/WS selesai.
+    threading.Thread(target=run_flask, daemon=True).start()
+    ws_feed.start()
+    threading.Thread(target=_price_cache_loop, daemon=True).start()
+    threading.Thread(target=_binance_recovery_loop, daemon=True).start()
+    threading.Thread(target=_render_keepalive_loop, daemon=True).start()
+    threading.Thread(target=bot_loop, daemon=True).start()
+
+    log.info(f"[ENGINE] {MAIN_ENGINE_VERSION} starting")
+    if _STRATEGY_LOAD_ERROR and ALLOWED_USER_ID:
+        tg_send(ALLOWED_USER_ID,
+            f"🚨 <b>strategy_logic.py BERMASALAH</b>\n\n"
+            f"{_STRATEGY_LOAD_ERROR}\n\n"
+            f"Bot jalan pakai fallback AMAN (tidak akan cari/entry sinyal baru)\n"
+            f"sampai file yang benar di-upload lewat /ganti.")
+
+    if REAL_TRADE_ENABLED and ALLOWED_USER_ID:
+        ip = get_public_ip()
+        tg_send(ALLOWED_USER_ID,
+            f"🔴 <b>REAL TRADE MODE</b>\n\n"
+            f"IP Render saat ini: <code>{ip}</code>\n\n"
+            f"Whitelist IP ini di Binance API Management dulu kalau belum,\n"
+            f"lalu kirim /auto untuk mulai. Bot TIDAK akan mulai cari sinyal\n"
+            f"sampai kamu kirim /auto secara manual.")
+        threading.Thread(target=autostop_loop, args=(ALLOWED_USER_ID,), daemon=True).start()
+
+    # Semua thread di atas daemon=True — main thread harus tetap hidup,
+    # kalau tidak proses langsung exit begitu baris ini selesai.
+    while True:
+        time.sleep(3600)
