@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py V19 — MESIN (engine).
+main.py V26.6 — MESIN (engine).
 
 V15 HARDENED: verified real-order execution, no blind mutating retries, exchange/local state reconciliation, protection-pair verification, and fail-closed emergency handling. Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
@@ -68,6 +68,8 @@ MAX_MARGIN_MULTIPLIER = 1.50  # HARD SAFETY CAP relative to configured MARGIN_US
 BINANCE_WEIGHT_SOFT_LIMIT = 1400
 BINANCE_WEIGHT_HARD_LIMIT = 1900
 BINANCE_CRITICAL_HARD_LIMIT = 2300
+BINANCE_EXECUTION_RESERVE = 350
+BINANCE_WEIGHT_STALE_AFTER_SEC = 65.0
 _binance_request_lock = threading.Lock()
 _binance_priority_local = threading.local()
 _binance_last_request_at = 0.0
@@ -78,7 +80,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "machine_Learning_main_v26"
+MAIN_ENGINE_VERSION = "machine_Learning_main_v26_6_AUDITED"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -739,10 +741,13 @@ def _full_controller_state():
     }
 
 
-def _full_strategy_command(action):
+def _full_strategy_command(action, chat_id=None):
     handler = globals().get("full_command")
     if callable(handler):
-        return handler(action, {"on": _full_on, "off": _full_off, "reset": _full_reset_internal, "status": _full_controller_state})
+        callbacks = {"on": _full_on, "off": _full_off, "reset": _full_reset_internal, "status": _full_controller_state}
+        if chat_id is not None:
+            callbacks["notify"] = lambda msg: tg_send(chat_id, msg)
+        return handler(action, callbacks)
     return _full_status_text()
 
 
@@ -1300,7 +1305,7 @@ def tg_updates(offset=None):
         if r.status_code == 429:
             _telegram_mark_error()
             try:
-                d = r.json(); retry_after = int(d.get("parameters", {}).get("retry_after", 5))
+                d = r.json(); retry_after = int((d.get("parameters") or {}).get("retry_after", 5))
             except Exception:
                 retry_after = 5
             raise ConnectionError(f"Telegram rate limit 429; retry_after={retry_after}s")
@@ -1504,7 +1509,7 @@ def _get_pending_cleanup(sym):
 
 def _get_open_algo_orders(sym):
     """Exchange-side verification of remaining Binance algo orders for symbol."""
-    data = _binance_signed("GET", "/fapi/v1/openAlgoOrders", {"symbol": sym})
+    data = _binance_signed("GET", "/fapi/v1/openAlgoOrders", {"symbol": sym}, critical=True)
     if isinstance(data, dict):
         rows = data.get("orders") or data.get("openOrders") or data.get("data") or []
     else:
@@ -1694,18 +1699,25 @@ def _binance_critical_context():
 
 @contextmanager
 def _binance_request_slot(critical=False):
-    """Serialize Binance calls with separate normal and critical budgets."""
-    global _binance_last_request_at
+    """Serialize Binance calls; stale usage must expire and scan keeps execution reserve."""
+    global _binance_last_request_at, _binance_weight_1m, _binance_weight_seen_at
     critical = bool(critical or getattr(_binance_priority_local, "critical", False))
     with _binance_request_lock:
         _binance_wait_if_banned()
         used = _binance_weight_1m
+        age = time.time() - float(_binance_weight_seen_at or 0.0)
+        if used is not None and age > BINANCE_WEIGHT_STALE_AFTER_SEC:
+            used = None
+            _binance_weight_1m = None
+            _binance_weight_seen_at = 0.0
         if used is not None:
-            hard = BINANCE_CRITICAL_HARD_LIMIT if critical else BINANCE_WEIGHT_HARD_LIMIT
-            if used >= hard:
-                raise BinanceCooldownError(f"Binance weight governor: {used}/min >= {'critical ' if critical else ''}hard limit {hard}")
-            if used >= BINANCE_WEIGHT_SOFT_LIMIT and not critical:
-                raise BinanceCooldownError(f"Binance scan governor: {used}/min >= soft limit {BINANCE_WEIGHT_SOFT_LIMIT}")
+            if critical:
+                if used >= BINANCE_CRITICAL_HARD_LIMIT:
+                    raise BinanceCooldownError(f"Binance critical governor: {used}/min >= critical hard limit {BINANCE_CRITICAL_HARD_LIMIT}")
+            else:
+                normal_limit = min(BINANCE_WEIGHT_SOFT_LIMIT, max(1, BINANCE_WEIGHT_HARD_LIMIT - BINANCE_EXECUTION_RESERVE))
+                if used >= normal_limit:
+                    raise BinanceCooldownError(f"Binance scan governor: {used}/min >= normal limit {normal_limit} (execution reserve {BINANCE_EXECUTION_RESERVE})")
         wait = BINANCE_REQUEST_INTERVAL - (time.monotonic() - _binance_last_request_at)
         if wait > 0:
             time.sleep(wait)
@@ -1785,6 +1797,7 @@ def _binance_signed(method, path, params=None, critical=False):
     base_params = dict(params or {})
     method = str(method).upper()
     mutating = method in {"POST", "PUT", "DELETE"}
+    critical = bool(critical or mutating)
     max_attempts = 1 if mutating else 3
     last_err = None
     time_resync_attempted = False
@@ -1882,7 +1895,7 @@ def _load_all_symbol_filters():
             _symbol_filters_cache[s["symbol"]] = {
                 "stepSize": float(f["LOT_SIZE"]["stepSize"]),
                 "minQty": float(f["LOT_SIZE"]["minQty"]),
-                "minNotional": float(f.get("MIN_NOTIONAL", {}).get("notional", 5.0)),
+                "minNotional": float((f.get("MIN_NOTIONAL") or {}).get("notional", 5.0)),
                 "tickSize": float(f["PRICE_FILTER"]["tickSize"]),
                 "qtyPrecision": s["quantityPrecision"],
                 "pricePrecision": s["pricePrecision"],
@@ -2005,8 +2018,8 @@ def _real_trade_preflight(force=False):
                 raise RuntimeError("Binance Hedge Mode aktif; bot V15 membutuhkan One-way Mode (positionSide=BOTH)")
             return dict(_real_trade_preflight_cache)
 
-    mode = _binance_signed("GET", "/fapi/v1/positionSide/dual", {})
-    acct = _binance_signed("GET", "/fapi/v2/account", {})
+    mode = _binance_signed("GET", "/fapi/v1/positionSide/dual", {}, critical=True)
+    acct = _binance_signed("GET", "/fapi/v2/account", {}, critical=True)
     dual = bool(mode.get("dualSidePosition")) if isinstance(mode, dict) else False
     can_trade = bool(acct.get("canTrade", True)) if isinstance(acct, dict) else True
     with _real_trade_preflight_lock:
@@ -2025,7 +2038,7 @@ def _new_client_id(prefix):
 
 def _order_query_by_client_id(symbol, client_id):
     try:
-        return _binance_signed("GET", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": client_id})
+        return _binance_signed("GET", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": client_id}, critical=True)
     except Exception as e:
         msg = str(e).lower()
         if "order does not exist" in msg or "-2013" in msg:
@@ -2084,7 +2097,8 @@ def _verified_market_close(symbol, is_buy, reason, chat_id=None, max_retries=1):
     """Close actual Binance position with reconcile-before-retry semantics."""
     last_error = None
     for attempt in range(max_retries + 1):
-        real_info = _reconcile_position_quantity(symbol)
+        with _binance_critical_context():
+            real_info = _reconcile_position_quantity(symbol)
         if real_info is None:
             return True, None
         real, qty = real_info
@@ -2146,7 +2160,7 @@ def set_leverage_verified(symbol, leverage):
     try:
         return set_leverage(symbol, leverage)
     except BinanceUnknownExecutionError:
-        rows = _binance_signed("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+        rows = _binance_signed("GET", "/fapi/v2/positionRisk", {"symbol": symbol}, critical=True)
         for row in rows or []:
             if row.get("symbol") == symbol and int(float(row.get("leverage", 0) or 0)) == int(leverage):
                 return {"verified": True, "leverage": leverage}
@@ -2214,12 +2228,12 @@ def cancel_order(symbol, order_id):
 
 
 def get_order_status(symbol, order_id):
-    return _binance_signed("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
+    return _binance_signed("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id}, critical=True)
 
 
 
 def get_real_position(symbol):
-    rows = _binance_signed("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+    rows = _binance_signed("GET", "/fapi/v2/positionRisk", {"symbol": symbol}, critical=True)
     for p in rows:
         if p["symbol"] == symbol:
             if abs(float(p.get("positionAmt", 0) or 0)) > 0:
@@ -2229,21 +2243,21 @@ def get_real_position(symbol):
 
 def get_real_positions_all():
     """Return every non-zero Futures position visible on Binance."""
-    rows = _binance_signed("GET", "/fapi/v2/positionRisk", {})
+    rows = _binance_signed("GET", "/fapi/v2/positionRisk", {}, critical=True)
     return [p for p in (rows or []) if abs(float(p.get("positionAmt", 0) or 0)) > 0]
 
 
 def get_open_orders_all(symbol=None):
     """Return ordinary open orders. With no symbol, query the whole account."""
     params = {"symbol": symbol} if symbol else {}
-    rows = _binance_signed("GET", "/fapi/v1/openOrders", params)
+    rows = _binance_signed("GET", "/fapi/v1/openOrders", params, critical=True)
     return rows if isinstance(rows, list) else []
 
 
 def get_open_algo_orders_all(symbol=None):
     """Return open conditional/algo orders. With no symbol, query the whole account."""
     params = {"symbol": symbol} if symbol else {}
-    data = _binance_signed("GET", "/fapi/v1/openAlgoOrders", params)
+    data = _binance_signed("GET", "/fapi/v1/openAlgoOrders", params, critical=True)
     if isinstance(data, dict):
         rows = data.get("orders") or data.get("openOrders") or data.get("data") or []
     else:
@@ -2486,7 +2500,7 @@ def cancel_algo_order(algo_id):
 
 
 def get_algo_order_status(algo_id):
-    return _binance_signed("GET", "/fapi/v1/algoOrder", {"algoId": algo_id})
+    return _binance_signed("GET", "/fapi/v1/algoOrder", {"algoId": algo_id}, critical=True)
 
 
 def cancel_all_algo_orders(symbol):
@@ -2503,7 +2517,7 @@ def cancel_all_algo_orders(symbol):
 def get_real_balance():
     """Return (available, total) USDT, atau (None, None) kalau gagal."""
     try:
-        rows = _binance_signed("GET", "/fapi/v2/balance", {})
+        rows = _binance_signed("GET", "/fapi/v2/balance", {}, critical=True)
         for r in rows:
             if r["asset"] == "USDT":
                 return float(r["availableBalance"]), float(r["balance"])
@@ -2601,7 +2615,7 @@ def _coingecko_price(symbol):
     try:
         d = _raw_get("https://api.coingecko.com/api/v3/simple/price",
                      {"ids": cid, "vs_currencies": "usd"}, retries=1)
-        p = d.get(cid, {}).get("usd")
+        p = (d.get(cid) or {}).get("usd")
         return float(p) if p is not None else None
     except Exception as e:
         log.warning(f"[price/coingecko] {symbol}: {e}")
@@ -2891,20 +2905,40 @@ _LOCAL_PRICE_MAX_AGE = 30.0
 _local_price_cache = {}
 _local_price_lock = threading.Lock()
 
-def get_price(symbol):
-    """Normal price path: WS first; REST only as a last-resort recovery path."""
+def get_price(symbol, prefer_binance=False):
+    """Price accessor. WS is preferred; real-position callers may require Binance-authoritative REST."""
     now = time.time()
     p = ws_feed.get_price(symbol)
     if p is not None and ws_feed.is_fresh():
         with _local_price_lock:
             _local_price_cache[symbol] = (p, now)
         return p
+    if prefer_binance and not _binance_is_scan_paused():
+        try:
+            with _binance_critical_context():
+                bp = _binance_price(symbol)
+            if bp is not None:
+                with _local_price_lock:
+                    _local_price_cache[symbol] = (bp, now)
+                return bp
+        except Exception as e:
+            log.debug(f"[price/binance-preferred] {symbol}: {e}")
     with _local_price_lock:
         cached = _local_price_cache.get(symbol)
     if cached and now - cached[1] <= _LOCAL_PRICE_MAX_AGE:
         return cached[0]
     if _binance_is_scan_paused():
         return p
+    if not prefer_binance:
+        try:
+            with _binance_critical_context():
+                bp = _binance_price(symbol)
+            if bp is not None:
+                with _local_price_lock:
+                    _local_price_cache[symbol] = (bp, now)
+                return bp
+        except Exception as e:
+            log.debug(f"[price/binance] {symbol}: {e}")
     try:
         byp = _bybit_price(symbol)
         with _local_price_lock:
@@ -2912,13 +2946,6 @@ def get_price(symbol):
         return byp
     except Exception:
         pass
-    try:
-        bp = _binance_price(symbol)
-        with _local_price_lock:
-            _local_price_cache[symbol] = (bp, now)
-        return bp
-    except Exception as e:
-        log.debug(f"[price/binance] {symbol}: {e}")
     p = _coingecko_price(symbol)
     if p is not None:
         with _local_price_lock:
@@ -3277,7 +3304,7 @@ def run_scan_once(chat_id):
 
     data_elapsed=time.monotonic()-data_started; total_elapsed=time.monotonic()-scan_started
     cache_total,cache_fresh=_scan_cache_stats(); avg_conf=(sum(all_scan_confidences)/len(all_scan_confidences)) if all_scan_confidences else None
-    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct")}
+    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct")}
     _record_scan_telemetry(telemetry)
     _record_scan_quality({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc})
     log.info("[SCAN SUMMARY] " + " | ".join(f"{k}={v}" for k,v in telemetry.items()))
@@ -4076,7 +4103,7 @@ def _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=None):
     price = exit_price
     if price is None:
         try:
-            price = get_price(sym)
+            price = get_price(sym, prefer_binance=True)
         except Exception:
             price = None
     if price is None:
@@ -4102,7 +4129,8 @@ def _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=None):
     # Clean orphan protection. If Binance is temporarily unavailable, retain a pending
     # cleanup marker but still finalize the already-flat trade locally.
     try:
-        _cancel_all_algo_orders_verified(sym)
+        with _binance_critical_context():
+            _cancel_all_algo_orders_verified(sym)
     except Exception as e:
         _queue_pending_cleanup(sym, "post-external-close cleanup", e)
         log.warning(f"[external-close] {sym} cleanup tertunda: {e}")
@@ -4331,15 +4359,23 @@ def _open_pending_real(sym,signal,chat_id):
         positions[sym]={"signal":signal,"entry":entry,"chat_id":chat_id,"entry_time":None,"trade_uid":f"{research_run_id}:{sym}:pending:{int(time.time()*1000)}",
                         "timeout_flag":False,"status":"pending","execution_mode":"REAL"}
     try:
-        _real_trade_preflight(force=False)
-        avail,_=get_real_balance()
-        if avail is not None and avail<MARGIN_USD: raise RuntimeError(f"saldo ${avail:.2f} < margin ${MARGIN_USD:.2f}")
-        qty,margin,bumped=calc_auto_quantity(sym,entry,MARGIN_USD,LEVERAGE)
-        if qty is None: raise RuntimeError("quantity di bawah minimum Binance")
-        set_leverage_verified(sym,LEVERAGE); order=place_limit_order(sym,side,qty,entry)
+        with _binance_critical_context():
+            _real_trade_preflight(force=False)
+            avail,_=get_real_balance()
+            if avail is not None and avail<MARGIN_USD: raise RuntimeError(f"saldo ${avail:.2f} < margin ${MARGIN_USD:.2f}")
+            qty,margin,bumped=calc_auto_quantity(sym,entry,MARGIN_USD,LEVERAGE)
+            if qty is None: raise RuntimeError("quantity di bawah minimum Binance")
+            set_leverage_verified(sym,LEVERAGE); order=place_limit_order(sym,side,qty,entry)
         with positions_lock: positions[sym].update({"order_id":order["orderId"],"quantity":qty,"margin_used":margin})
         tg_send(chat_id,f"🎯 <b>PENDING ORDER REAL</b> — {sym}\n\n{fmt_signal_msg(signal)}")
         threading.Thread(target=_wait_entry_real,args=(sym,signal,chat_id,order["orderId"]),daemon=True).start()
+        return True
+    except BinanceCooldownError as e:
+        with positions_lock:
+            positions.pop(sym, None)
+        log.warning(f"[entry] {sym} ditunda karena Binance budget/cooldown: {e}")
+        tg_send(chat_id, f"⚠️ <b>ENTRY DITUNDA</b> — {sym}\n<code>{html.escape(str(e)[:300])}</code>\nSinyal tidak dianggap gagal dan tidak diban karena alasan API.")
+        return False
     except BinanceUnknownExecutionError as e:
         # The entry POST may have reached Binance even though its response was lost.
         # Preserve the client order id so reconciliation can resolve the ambiguity.
@@ -4351,7 +4387,17 @@ def _open_pending_real(sym,signal,chat_id):
         tg_send(chat_id,f"🚨 <b>ENTRY STATUS UNKNOWN</b> — {sym}\n<code>{str(e)[:300]}</code>\nOrder tidak diulang secara buta. State dipertahankan untuk rekonsiliasi <code>/ok {sym}</code>.")
     except Exception as e:
         with positions_lock: positions.pop(sym,None)
-        _ban_coin(sym,f"gagal pasang order real ({e})"); tg_send(chat_id,f"⚠️ <b>Skip {sym}</b> — {e}")
+        msg = str(e)
+        # Infrastructure/account/API failures are not evidence that the symbol is bad.
+        # Only known symbol-specific order validation errors may receive a short ban.
+        symbol_specific = any(k in msg.lower() for k in (
+            "precision", "min notional", "minimum quantity", "quantity", "invalid price",
+            "-1111", "-1013", "-1121"
+        ))
+        if symbol_specific:
+            _ban_coin(sym, f"order ditolak khusus simbol ({msg})")
+        tg_send(chat_id,f"⚠️ <b>ENTRY GAGAL</b> — {sym}\n<code>{html.escape(msg[:300])}</code>\nSinyal tidak dihukum sebagai loss strategi.")
+        return False
 
 
 
@@ -4362,9 +4408,11 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
             if sym not in positions:return
             if positions[sym].get("timeout_flag"):
                 try:
-                    cancel_order(sym,order_id)
+                    with _binance_critical_context():
+                        cancel_order(sym,order_id)
                     time.sleep(0.2)
-                    st=get_order_status(sym,order_id)
+                    with _binance_critical_context():
+                        st=get_order_status(sym,order_id)
                     if str(st.get("status","")).upper()=="FILLED":
                         actual=float(st.get("avgPrice") or 0) or signal["entry"]
                         _open_position_real(sym,signal,actual,chat_id,st)
@@ -4378,7 +4426,8 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
                     tg_send(chat_id, f"🚨 <b>ENTRY CANCEL BELUM TERKONFIRMASI</b> — {sym}\n<code>{str(e)[:300]}</code>\nPosisi tetap dipertahankan sampai <code>/ok {sym}</code>.")
                     return
         try:
-            order=get_order_status(sym,order_id)
+            with _binance_critical_context():
+                order=get_order_status(sym,order_id)
         except Exception as e:
             log.warning(f"[wait_entry_real] {sym}: {e}"); time.sleep(REAL_TRADE_POLL_SLEEP); continue
         status=str(order.get("status","")).upper()
@@ -4391,8 +4440,9 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
         time.sleep(REAL_TRADE_POLL_SLEEP)
 
     try:
-        cancel_order(sym,order_id)
-        st=get_order_status(sym,order_id)
+        with _binance_critical_context():
+            cancel_order(sym,order_id)
+            st=get_order_status(sym,order_id)
         if str(st.get("status","")).upper()=="FILLED":
             actual=float(st.get("avgPrice") or 0) or signal["entry"]
             _open_position_real(sym,signal,actual,chat_id,st); return
@@ -4409,11 +4459,13 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
 def _emergency_close(sym, is_buy, qty, chat_id, reason):
     """Emergency flatten. Exchange confirmation is required before local close."""
     try:
-        closed, exit_price = _verified_market_close(sym, is_buy, reason, chat_id=chat_id, max_retries=1)
+        with _binance_critical_context():
+            closed, exit_price = _verified_market_close(sym, is_buy, reason, chat_id=chat_id, max_retries=1)
         if not closed:
             raise RuntimeError("posisi belum terkonfirmasi flat")
         try:
-            _cleanup_algo_orders_verified(sym)
+            with _binance_critical_context():
+                _cleanup_algo_orders_verified(sym)
         except Exception as ce:
             _queue_pending_cleanup(sym, "post-auto-out cleanup", ce)
             raise RuntimeError(f"posisi sudah flat tetapi cleanup protection belum terverifikasi: {ce}")
@@ -4438,7 +4490,7 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
     buy=signal["decision"]=="BUY"; sl=signal.get("sl"); tp=signal.get("tp")
     qty=abs(float(order_info.get("executedQty",0)))
     if not qty:
-        with positions_lock: qty=positions.get(sym,{}).get("quantity",0)
+        with positions_lock: qty=(positions.get(sym) or {}).get("quantity",0)
     if sl is None or tp is None:
         _emergency_close(sym,buy,qty,chat_id,"strategy tidak mengirim SL/TP"); return
     valid=(sl<actual_entry<tp) if buy else (tp<actual_entry<sl)
@@ -4509,7 +4561,8 @@ def monitor_position_real(sym,pos):
                     continue
 
                 try:
-                    real=get_real_position(sym)
+                    with _binance_critical_context():
+                        real=get_real_position(sym)
                 except BinanceCooldownError:
                     time.sleep(REAL_TRADE_POLL_SLEEP); continue
                 except Exception as e:
@@ -4522,7 +4575,7 @@ def monitor_position_real(sym,pos):
                     reason = _infer_close_reason(pos.get("tp_order_id"), pos.get("sl_order_id"))
                     price = None
                     try:
-                        price = get_price(sym)
+                        price = get_price(sym, prefer_binance=True)
                     except Exception:
                         price = None
                     _finalize_external_close(sym, pos, reason_hint=reason, exit_price=price)
@@ -4535,7 +4588,7 @@ def monitor_position_real(sym,pos):
                     reason = _infer_close_reason(pos.get("tp_order_id"), pos.get("sl_order_id"))
                     price = None
                     try:
-                        price = get_price(sym)
+                        price = get_price(sym, prefer_binance=True)
                     except Exception:
                         price = None
                     _finalize_external_close(sym, pos, reason_hint=reason, exit_price=price)
@@ -4544,7 +4597,7 @@ def monitor_position_real(sym,pos):
                     if sym in positions:
                         positions[sym]["quantity"]=live
 
-                px=get_price(sym)
+                px=get_price(sym, prefer_binance=True)
                 if px is not None:
                     _update_trade_path_metrics(pos, px)
 
@@ -4562,7 +4615,8 @@ def monitor_position_real(sym,pos):
                                         positions[sym]["status"]="EMERGENCY"
                                 return
                             try:
-                                _cleanup_algo_orders_verified(sym)
+                                with _binance_critical_context():
+                                    _cleanup_algo_orders_verified(sym)
                             except Exception as ce:
                                 _queue_pending_cleanup(sym, "strategy close cleanup", ce)
                                 with positions_lock:
@@ -4590,15 +4644,18 @@ def monitor_position_real(sym,pos):
                                         _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED")
                                 else:
                                     # Refresh quantity from exchange immediately before protection mutation.
-                                    latest = get_real_position(sym)
+                                    with _binance_critical_context():
+                                        latest = get_real_position(sym)
                                     live_qty = abs(float(latest.get("positionAmt",0) or 0)) if latest else 0.0
                                     if live_qty <= 0:
                                         continue
                                     # Cancel existing protection, then create+verify new pair. If creation
                                     # fails, restore the old pair before declaring an emergency.
-                                    _cancel_all_algo_orders_verified(sym)
+                                    with _binance_critical_context():
+                                        _cancel_all_algo_orders_verified(sym)
                                     try:
-                                        nt, ns = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", candidate_tp, candidate_sl, live_qty)
+                                        with _binance_critical_context():
+                                            nt, ns = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", candidate_tp, candidate_sl, live_qty)
                                     except Exception as protect_err:
                                         restore_failed = False
                                         try:
@@ -4727,7 +4784,8 @@ def _resume_binance_and_flush_pending(chat_id=None):
                     _clear_pending_protection(sym); continue
                 qty=pos.get('quantity') or pr.get('quantity'); buy=pr.get('side')=='BUY'
                 if not qty or pr.get('tp') is None or pr.get('sl') is None: raise RuntimeError('pending protection tidak lengkap')
-                t,s=place_tp_sl(sym,buy,pr['tp'],pr['sl'],qty)
+                with _binance_critical_context():
+                    t,s=place_tp_sl(sym,buy,pr['tp'],pr['sl'],qty)
                 with positions_lock:
                     if sym in positions: positions[sym].update({'tp_order_id':t['algoId'],'sl_order_id':s['algoId'],'execution_mode':'REAL'})
                 _clear_pending_protection(sym)
@@ -4744,8 +4802,9 @@ def _resume_binance_and_flush_pending(chat_id=None):
                 buy=pos['signal']['decision']=='BUY'; qty=pos.get('quantity') or tr.get('quantity')
                 tp=tr.get('tp') or pos['signal'].get('tp'); sl=tr.get('sl') or pos.get('current_sl')
                 if not qty or sl is None or tp is None: raise RuntimeError('pending trail tidak lengkap')
-                cancel_algo_order(pos.get('tp_order_id')); cancel_algo_order(pos.get('sl_order_id'))
-                t,s=place_tp_sl(sym,buy,tp,sl,qty)
+                with _binance_critical_context():
+                    cancel_algo_order(pos.get('tp_order_id')); cancel_algo_order(pos.get('sl_order_id'))
+                    t,s=place_tp_sl(sym,buy,tp,sl,qty)
                 old_sl = pos.get('current_sl')
                 with positions_lock:
                     if sym in positions:
@@ -4760,7 +4819,8 @@ def _resume_binance_and_flush_pending(chat_id=None):
             cleanup_items=list(_pending_cleanup.items())
         for sym,item in cleanup_items:
             try:
-                _cleanup_algo_orders_verified(sym)
+                with _binance_critical_context():
+                    _cleanup_algo_orders_verified(sym)
             except Exception as e:
                 failures.append(f'{sym}: cleanup {e}'); log.error(f'[cleanup-resume] {sym} GAGAL: {e}')
 
@@ -4880,8 +4940,8 @@ def simulation_loop(chat_id):
                         continue
 
                 if REAL_TRADE_ENABLED:
-                    _open_pending_real(sym, signal, chat_id)
-                    opened += 1
+                    if _open_pending_real(sym, signal, chat_id):
+                        opened += 1
                     continue
 
                 price = signal.get("price") or get_price(sym)
@@ -5085,8 +5145,8 @@ def bot_loop():
             for upd in updates:
                 offset=upd["update_id"]+1
                 msg=upd.get("message",{})
-                uid=msg.get("from",{}).get("id")
-                chat_id=msg.get("chat",{}).get("id")
+                uid=(msg.get("from") or {}).get("id")
+                chat_id=(msg.get("chat") or {}).get("id")
                 # Pesan berisi DOKUMEN pakai field "caption", bukan "text" —
                 # "text" cuma ada di pesan teks polos tanpa lampiran. Sebelumnya
                 # cuma baca "text", jadi /ganti (dikirim sbg dokumen + caption)
@@ -5130,25 +5190,25 @@ def bot_loop():
                 # ============================================================
                 elif text in ("/full on", "full on"):
                     try:
-                        tg_send(chat_id, _full_strategy_command("on"))
+                        tg_send(chat_id, _full_strategy_command("on", chat_id))
                     except Exception as e:
                         log.exception(f"[full] on gagal: {e}")
                         tg_send(chat_id, f"❌ FULL gagal diaktifkan: <code>{html.escape(str(e)[:300])}</code>")
                 elif text in ("/full off", "full off"):
                     try:
-                        tg_send(chat_id, _full_strategy_command("off"))
+                        tg_send(chat_id, _full_strategy_command("off", chat_id))
                     except Exception as e:
                         log.exception(f"[full] off gagal: {e}")
                         tg_send(chat_id, f"❌ FULL gagal dimatikan: <code>{html.escape(str(e)[:300])}</code>")
                 elif text in ("/full reset", "full reset"):
                     try:
-                        tg_send(chat_id, _full_strategy_command("reset"))
+                        tg_send(chat_id, _full_strategy_command("reset", chat_id))
                     except Exception as e:
                         log.exception(f"[full] reset gagal: {e}")
                         tg_send(chat_id, f"❌ FULL reset gagal: <code>{html.escape(str(e)[:300])}</code>")
                 elif text in ("/full", "full", "/full status", "full status"):
                     try:
-                        tg_send(chat_id, _full_strategy_command("status"))
+                        tg_send(chat_id, _full_strategy_command("status", chat_id))
                     except Exception as e:
                         log.exception(f"[full] status gagal: {e}")
                         tg_send(chat_id, f"❌ FULL status gagal: <code>{html.escape(str(e)[:300])}</code>")
