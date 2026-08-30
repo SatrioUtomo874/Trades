@@ -82,12 +82,12 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v29_TRADE_LIFECYCLE"
+MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v32_OLLAMA_AGENT"
 
 # Stable body / replaceable brain contract.
 # main.py owns Binance, Telegram, execution, protection and runtime state.
 # strategy_logic.py owns analysis, research and adaptive policy.
-BRAIN_API_REQUIRED = ("full_analyze", "manage_position", "adaptive_agent_start", "get_adaptive_status")
+BRAIN_API_REQUIRED = ("full_analyze", "manage_position", "adaptive_agent_start", "get_adaptive_status", "get_ollama_research_status")
 BODY_MUST_SURVIVE_BRAIN_ERRORS = True
 RESEARCH_NEVER_BLOCKS_EXECUTION = True
 
@@ -1263,6 +1263,7 @@ LEARNING_CHECKPOINT_FILES = (
     "strategy_cognitive_state.json", "v32_experience.jsonl", "v32_lessons.jsonl",
     "v32_policy.json", "v32_brain_state.json", "adaptive_brain_state.json",
     "adaptive_policy.json", "full_learning_state.json", "experience.jsonl",
+    "ollama_research_state.json", "ollama_research_journal.jsonl",
 )
 
 def _github_headers():
@@ -1382,11 +1383,22 @@ def _open_learning_checkpoint_github(checkpoint_id=None):
 
 def _run_save_checkpoint(cid):
     try:
+        if callable(globals().get("adaptive_agent_stop")): adaptive_agent_stop()
+        if callable(globals().get("_v32_stop")): _v32_stop()
+        if callable(globals().get("_stop_full_cognitive_worker")): _stop_full_cognitive_worker()
+        if not _wait_learning_workers_stopped(60.0):
+            raise RuntimeError("research worker belum berhenti; /save dibatalkan agar checkpoint konsisten")
         manifest=_save_learning_checkpoint_github()
         tg_send(cid, f"✅ <b>LEARNING SAVED</b>\nCheckpoint: <code>{html.escape(str(manifest.get('checkpoint_id')))}</code>\nData: <b>{int(manifest.get('file_count',0))}</b> file | archive <b>{int(manifest.get('archive_bytes',0)):,} B</b>\nTersimpan di GitHub. Tidak ada file dikirim ke Telegram.")
     except Exception as e:
         log.exception("[SAVE] checkpoint gagal")
         tg_send(cid, f"❌ <b>/save gagal</b>\n<code>{html.escape(str(e)[:500])}</code>")
+    finally:
+        try:
+            if callable(globals().get("_v32_start")): _v32_start()
+            if callable(globals().get("adaptive_agent_start")): adaptive_agent_start()
+        except Exception as restart_exc:
+            log.warning(f"[SAVE] research worker restart gagal: {restart_exc}")
 
 def _wait_learning_workers_stopped(timeout_sec=60.0):
     """Do not replace checkpoint files while a research worker can still write them."""
@@ -3524,12 +3536,21 @@ def run_scan_once(chat_id):
                 except Exception as e:
                     log.warning(f"[COGNITIVE] candidate bridge gagal {sym}: {e}")
                 active_threshold = int((_ml_current_champion() or {}).get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD)) if FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD
+                strategy_gate = True
+                try:
+                    fn_gate=globals().get("strategy_trade_gate")
+                    if callable(fn_gate):
+                        gate=fn_gate(r, row)
+                        if isinstance(gate,dict) and gate.get("allowed") is False:
+                            strategy_gate=False; r["strategy_gate_reason"]=gate.get("reason")
+                except Exception as gate_exc:
+                    log.debug(f"[strategy-gate] {sym}: {gate_exc}")
                 cutoff=float(active_threshold)/2.0
                 if conf<=cutoff:
                     low_conf_count+=1; _record_low_confidence_event(sym,conf,cutoff,r.get("decision"),r.get("entry_label"))
                     _ban_coin(sym,reason=f"low confidence {conf:.1f} <= {cutoff:.1f}",duration=BAN_DURATION_SCANS,kind="low_confidence",confidence=conf)
                 if conf<active_threshold: below_threshold_count+=1
-                if conf>=active_threshold:
+                if conf>=active_threshold and strategy_gate:
                     r["market_context"]={k:v for k,v in row.items() if k not in {"scan_time","run_id","scan_counter"}}
                     results.append(r); log.info(f"[SIGNAL] {sym} {r.get('decision')} confidence={conf:.1f}")
                 else:
@@ -3730,7 +3751,7 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
                  mfe_pct=None, mae_pct=None, mfe_r=None, mae_r=None,
                  time_in_trade_sec=None, time_to_1r_sec=None, time_to_2r_sec=None,
                  execution_mode=None, balance_anchor=None, trade_uid=None,
-                 trail_update_count=0, trail_applied_count=0, trail_failed_count=0, trail_queued_count=0,
+                 trail_update_count=0, trail_applied_count=0, trail_failed_count=0, trail_queued_count=0, trail_rejected_count=0,
                  first_trail_r=None, last_trail_r=None, max_protected_r=None,
                  trail_history=None, initial_sl_p=None, learning_features=None, ml_model_version=None):
     """Finalize one closed trade with two independent labels:
@@ -3797,7 +3818,7 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
             "time_in_trade_sec": time_in_trade_sec, "time_to_1r_sec": time_to_1r_sec, "time_to_2r_sec": time_to_2r_sec,
             "execution_mode": execution_mode, "balance_anchor": balance_anchor,
             "trail_update_count": int(trail_update_count or 0), "trail_applied_count": int(trail_applied_count or 0),
-            "trail_failed_count": int(trail_failed_count or 0), "trail_queued_count": int(trail_queued_count or 0),
+            "trail_failed_count": int(trail_failed_count or 0), "trail_queued_count": int(trail_queued_count or 0), "trail_rejected_count": int(trail_rejected_count or 0),
             "first_trail_r": first_trail_r, "last_trail_r": last_trail_r, "max_protected_r": max_protected_r,
             "trail_history": list(trail_history or []),
             "learning_features": dict(learning_features) if isinstance(learning_features, dict) else None,
@@ -4330,7 +4351,7 @@ def close_position(sym, result, close_price=None):
             time_to_1r_sec=pos.get("time_to_1r_sec"), time_to_2r_sec=pos.get("time_to_2r_sec"),
             execution_mode=pos.get("execution_mode"), balance_anchor=(real_balance_snapshot if str(pos.get("execution_mode") or "").upper()=="REAL" else STARTING_BALANCE),
             trade_uid=pos.get("trade_uid"), trail_update_count=pos.get("trail_update_count",0), trail_applied_count=pos.get("trail_applied_count",0),
-            trail_failed_count=pos.get("trail_failed_count",0), trail_queued_count=pos.get("trail_queued_count",0), first_trail_r=pos.get("first_trail_r"),
+            trail_failed_count=pos.get("trail_failed_count",0), trail_queued_count=pos.get("trail_queued_count",0), trail_rejected_count=pos.get("trail_rejected_count",0), first_trail_r=pos.get("first_trail_r"),
             last_trail_r=pos.get("last_trail_r"), max_protected_r=(pos.get("max_protected_r") if pos.get("max_protected_r",-999)>-998 else None),
             trail_history=pos.get("trail_history"), initial_sl_p=pos.get("initial_sl"),
             learning_features=(pos.get("signal") or {}).get("learning_features"),
@@ -4559,6 +4580,16 @@ def _apply_strategy_update(sym,pos,update):
     if update.get("sl") is not None:
         new=float(update["sl"]); old=float(pos.get("current_sl",sig["sl"]))
         buy=sig["decision"]=="BUY"
+        live_price=get_price(sym, prefer_binance=True)
+        immediate=(live_price is not None and ((new >= float(live_price)) if buy else (new <= float(live_price))))
+        if immediate:
+            evt={"timestamp":time.time(),"symbol":sym,"event":"TRAIL_REJECTED","reason":"IMMEDIATE_TRIGGER","new_sl":new,"current_sl":old,"market_price":float(live_price),"decision":sig.get("decision"),"source":"execution_guard"}
+            with trail_events_lock:
+                trail_events.append(evt)
+                if len(trail_events)>5000: del trail_events[:-5000]
+            pos.setdefault("trail_history",[]).append(evt)
+            pos["trail_rejected_count"]=int(pos.get("trail_rejected_count",0))+1
+            return changed
         if (new>old) if buy else (new<old):
             pos["current_sl"]=new; sig["sl"]=new; changed=True
     return changed
@@ -4617,7 +4648,7 @@ def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
         now=time.time()
         pos.update({"entry":actual_entry,"entry_time":now,"status":"active","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
                     "timeout_flag":False,"current_sl":sl,"initial_sl":sl,"execution_mode":"SIMULATION",
-                    "trail_history":[],"trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+                    "trail_history":[],"trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"trail_rejected_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
     tg_send(chat_id,f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
                     f"Entry: <code>{actual_entry:.8g}</code>\n"
                     f"TP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
@@ -5339,6 +5370,7 @@ def get_start_msg():
         "/ganti               — Upload/ganti strategy_logic.py\n"
         "/save                — Simpan progress learning ke GitHub\n"
         "/open                — Replace learning dari checkpoint GitHub terbaru\n"
+        "/ai                  — Status & hasil research Ollama\n"
         "/info                — Detail engine & metode analisis\n"
         "/IP                  — Lihat public IP Render saat ini\n"
         "/banned              — Lihat daftar koin yang diban\n"
@@ -5573,6 +5605,12 @@ def bot_loop():
                     parts=text.split(maxsplit=1); checkpoint_id=parts[1].strip() if len(parts)==2 else None
                     threading.Thread(target=_run_open_checkpoint, args=(chat_id, checkpoint_id), daemon=True).start()
                     tg_send(chat_id, "⏳ <b>/open</b> mengambil checkpoint dari GitHub lalu <b>replace</b> memory learning. Posisi/trade execution tetap dipertahankan.")
+                elif text in ("/ai", "/ollama", "ai"):
+                    fn_ai=globals().get("get_ollama_research_status")
+                    st=fn_ai() if callable(fn_ai) else {}
+                    result=st.get("last_result") or {}
+                    summary=result.get("summary") or result.get("recommendation") or ("Belum ada hasil research AI." if st.get("enabled") else "Ollama tidak aktif")
+                    tg_send(chat_id, f"🤖 <b>OLLAMA RESEARCH</b>\nModel: <code>{html.escape(str(st.get('model','—')))}</code>\nEnabled: <b>{'YES' if st.get('enabled') else 'NO'}</b>\nIn-flight: <b>{'YES' if st.get('in_flight') else 'NO'}</b>\n\n{html.escape(str(summary))[:1200]}")
                 elif text in ("/ganti","ganti"):
                    doc = msg.get("document")
                    if not doc:

@@ -1,5 +1,5 @@
 """
-strategy_logic.py — ADAPTIVE BRAIN v37 (OTAK) (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
+strategy_logic.py — ADAPTIVE BRAIN v40 (OTAK) (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
 ========================================================================================
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
@@ -5272,6 +5272,7 @@ def reload_learning_state():
         _AGENT_STATE = _agent_json_load(AGENT_STATE_FILE, _AGENT_STATE) or _AGENT_STATE
         _AGENT_POLICY = _agent_json_load(AGENT_POLICY_FILE, {}) or {}
         _AGENT_HISTORY_DONE=set()
+    _ollama_state_load()
     # Reload persisted cognitive state if present and make sure model APIs see fresh state.
     try:
         _load_cognitive_state()
@@ -5412,6 +5413,15 @@ AGENT_EXPLORATION_SHARE = max(0.05, min(0.30, float(os.getenv("ADAPTIVE_EXPLORAT
 AGENT_AUTO_HISTORICAL = str(os.getenv("ADAPTIVE_AUTO_HISTORICAL", "1")).strip().lower() not in {"0", "false", "off", "no"}
 AGENT_MAX_HISTORY_ROWS = max(5000, int(os.getenv("ADAPTIVE_MAX_HISTORY_ROWS", "300000")))
 
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b").strip() or "gpt-oss:20b"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com/api").rstrip("/")
+OLLAMA_RESEARCH_INTERVAL_SEC = max(300.0, float(os.getenv("OLLAMA_RESEARCH_INTERVAL_SEC", "1200")))
+OLLAMA_MIN_CANDIDATES = max(20, int(os.getenv("OLLAMA_MIN_CANDIDATES", "50")))
+OLLAMA_TRIGGER_NEW_CANDIDATES = max(10, int(os.getenv("OLLAMA_TRIGGER_NEW_CANDIDATES", "25")))
+OLLAMA_MAX_INPUT_CHARS = max(4000, int(os.getenv("OLLAMA_MAX_INPUT_CHARS", "24000")))
+OLLAMA_MAX_OUTPUT_TOKENS = max(200, int(os.getenv("OLLAMA_MAX_OUTPUT_TOKENS", "900")))
+
 _AGENT_LOCK = threading.RLock()
 _AGENT_STOP = threading.Event()
 _AGENT_WAKE = threading.Event()
@@ -5421,6 +5431,15 @@ _AGENT_HISTORY_DONE = set()
 _AGENT_LAST_ERROR = None
 _AGENT_TICKS = 0
 _AGENT_LAST_REPORT = {}
+_AI_RESEARCH_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ollama-research")
+_AI_RESEARCH_FUTURE = None
+_AI_RESEARCH_LOCK = threading.RLock()
+_AI_RESEARCH_LAST_AT = 0.0
+_AI_RESEARCH_LAST_CANDIDATE_COUNT = 0
+_AI_RESEARCH_LAST_RESULT = {}
+_AI_RESEARCH_LAST_ERROR = None
+_AI_RESEARCH_STATE_FILE = AGENT_STATE_DIR / "ollama_research_state.json"
+_AI_RESEARCH_JOURNAL_FILE = AGENT_STATE_DIR / "ollama_research_journal.jsonl"
 _AGENT_STATE = {
     "version": AGENT_BRAIN_API_VERSION,
     "brain_version": V32_VERSION,
@@ -5460,6 +5479,98 @@ with _AGENT_LOCK:
     _AGENT_POLICY = _agent_json_load(AGENT_POLICY_FILE, {})
     if not isinstance(_AGENT_POLICY, dict):
         _AGENT_POLICY = {}
+
+
+def _ollama_state_load():
+    global _AI_RESEARCH_LAST_AT, _AI_RESEARCH_LAST_CANDIDATE_COUNT, _AI_RESEARCH_LAST_RESULT, _AI_RESEARCH_LAST_ERROR
+    obj=_agent_json_load(_AI_RESEARCH_STATE_FILE,{})
+    if isinstance(obj,dict):
+        _AI_RESEARCH_LAST_AT=float(obj.get("last_at",0.0) or 0.0)
+        _AI_RESEARCH_LAST_CANDIDATE_COUNT=int(obj.get("last_candidate_count",0) or 0)
+        _AI_RESEARCH_LAST_RESULT=dict(obj.get("last_result") or {})
+        _AI_RESEARCH_LAST_ERROR=obj.get("last_error")
+
+
+def _ollama_state_save():
+    with _AI_RESEARCH_LOCK:
+        _agent_json_save(_AI_RESEARCH_STATE_FILE,{"model":OLLAMA_MODEL,"enabled":bool(OLLAMA_API_KEY),"last_at":_AI_RESEARCH_LAST_AT,"last_candidate_count":_AI_RESEARCH_LAST_CANDIDATE_COUNT,"last_result":_AI_RESEARCH_LAST_RESULT,"last_error":_AI_RESEARCH_LAST_ERROR})
+
+
+def _ollama_extract_json(text):
+    raw=str(text or "").strip()
+    if not raw:return {}
+    for candidate in [raw]+[b.strip()[4:].strip() if b.strip().lower().startswith("json") else b.strip() for b in raw.split("```")]:
+        try:
+            obj=json.loads(candidate)
+            if isinstance(obj,dict):return obj
+        except Exception:pass
+    a,b=raw.find("{"),raw.rfind("}")
+    if a>=0 and b>a:
+        try:
+            obj=json.loads(raw[a:b+1]); return obj if isinstance(obj,dict) else {}
+        except Exception:pass
+    return {"raw_text":raw}
+
+
+def _ollama_build_packet(records):
+    candidates=_agent_candidate_cells(records); outcomes=_agent_outcome_cells(records); frequency=_agent_frequency_health(candidates)
+    trail_rows=[r for r in records if isinstance(r,dict) and r.get("type")=="trade_outcome" and (r.get("exit_mechanism")=="trail" or r.get("result")=="trail")]
+    trail={"count":len(trail_rows)}
+    vals=[float(r.get("final_r")) for r in trail_rows if r.get("final_r") is not None]
+    caps=[float((r.get("trade_path") or {}).get("capture_ratio")) for r in trail_rows if (r.get("trade_path") or {}).get("capture_ratio") is not None]
+    if vals:trail["mean_final_r"]=float(np.mean(vals))
+    if caps:trail["mean_capture_ratio"]=float(np.mean(caps))
+    packet={"objective":"research only; never execute trades; never directly mutate policy","candidate_cells":candidates[:40],"outcome_cells":outcomes[:40],"frequency":frequency,"trail_summary":trail,"policy":get_adaptive_policy(),"rules":["No single loss/SL is proof a strategy is bad.","Separate thesis, management/trailing and execution/data failures.","Frequency/opportunity matters with expectancy, risk and robustness.","Ollama is advisory evidence only.","Never output BUY/SELL/order instructions."]}
+    return json.dumps(packet,ensure_ascii=False,separators=(",",":"),default=str)[-OLLAMA_MAX_INPUT_CHARS:]
+
+
+def _ollama_research_request(packet):
+    if not OLLAMA_API_KEY:return {"status":"DISABLED","reason":"OLLAMA_API_KEY tidak tersedia"}
+    system=("You are an objective research analyst inside an adaptive trading system. You NEVER execute trades or control Binance. "
+            "Analyze evidence, generate hypotheses, challenge them, and suggest experiments. No single source is authoritative. "
+            "Do not overreact to one loss. Frequency/opportunity matters. Separate thesis, management/trailing, and execution/data failures. "
+            "Return concise JSON keys: summary, hypotheses, supporting_evidence, contradicting_evidence, unknowns, experiments, recommendation, confidence. "
+            "recommendation must be NO_CHANGE, RESEARCH_MORE, or PROPOSE_POLICY_CHALLENGER. Never output buy/sell/order instructions.")
+    payload={"model":OLLAMA_MODEL,"messages":[{"role":"system","content":system},{"role":"user","content":"Research packet:\n"+packet}],"stream":False,"options":{"num_predict":OLLAMA_MAX_OUTPUT_TOKENS,"temperature":0.1}}
+    r=requests.post(f"{OLLAMA_BASE_URL}/chat",headers={"Authorization":f"Bearer {OLLAMA_API_KEY}","Content-Type":"application/json"},json=payload,timeout=180)
+    if r.status_code>=400:raise RuntimeError(f"Ollama HTTP {r.status_code}: {r.text[:400]}")
+    data=r.json(); content=((data.get("message") or {}).get("content") if isinstance(data,dict) else None) or ""; result=_ollama_extract_json(content)
+    result["status"]="OK"; result["model"]=data.get("model",OLLAMA_MODEL) if isinstance(data,dict) else OLLAMA_MODEL
+    return result
+
+
+def _ollama_research_job(records,candidate_count):
+    global _AI_RESEARCH_LAST_AT,_AI_RESEARCH_LAST_CANDIDATE_COUNT,_AI_RESEARCH_LAST_RESULT,_AI_RESEARCH_LAST_ERROR
+    try:
+        result=_ollama_research_request(_ollama_build_packet(records)); now=time.time()
+        with _AI_RESEARCH_LOCK:
+            _AI_RESEARCH_LAST_AT=now; _AI_RESEARCH_LAST_CANDIDATE_COUNT=int(candidate_count); _AI_RESEARCH_LAST_RESULT=dict(result); _AI_RESEARCH_LAST_ERROR=None
+        _AI_RESEARCH_JOURNAL_FILE.parent.mkdir(parents=True,exist_ok=True)
+        with _AI_RESEARCH_JOURNAL_FILE.open("a",encoding="utf-8") as fh: fh.write(json.dumps({"timestamp":now,"candidate_count":candidate_count,"model":OLLAMA_MODEL,"result":result},ensure_ascii=False,allow_nan=False,default=str)+"\n")
+        _ollama_state_save(); return result
+    except Exception as exc:
+        with _AI_RESEARCH_LOCK:
+            _AI_RESEARCH_LAST_AT=time.time(); _AI_RESEARCH_LAST_CANDIDATE_COUNT=int(candidate_count); _AI_RESEARCH_LAST_ERROR=str(exc)[:500]; _AI_RESEARCH_LAST_RESULT={"status":"ERROR","error":_AI_RESEARCH_LAST_ERROR}
+        _ollama_state_save(); log.warning(f"[OLLAMA] research gagal: {exc}"); return dict(_AI_RESEARCH_LAST_RESULT)
+
+
+def _ollama_maybe_schedule(records,candidate_count):
+    global _AI_RESEARCH_FUTURE
+    if not OLLAMA_API_KEY or candidate_count<OLLAMA_MIN_CANDIDATES:return False
+    now=time.time()
+    with _AI_RESEARCH_LOCK:
+        if _AI_RESEARCH_FUTURE is not None and not _AI_RESEARCH_FUTURE.done():return False
+        if _AI_RESEARCH_LAST_AT and now-_AI_RESEARCH_LAST_AT<OLLAMA_RESEARCH_INTERVAL_SEC:return False
+        if _AI_RESEARCH_LAST_CANDIDATE_COUNT and candidate_count-_AI_RESEARCH_LAST_CANDIDATE_COUNT<OLLAMA_TRIGGER_NEW_CANDIDATES and _AI_RESEARCH_LAST_RESULT:return False
+        _AI_RESEARCH_FUTURE=_AI_RESEARCH_EXECUTOR.submit(_ollama_research_job,list(records),int(candidate_count)); return True
+
+
+def get_ollama_research_status():
+    with _AI_RESEARCH_LOCK:
+        return {"enabled":bool(OLLAMA_API_KEY),"model":OLLAMA_MODEL,"in_flight":bool(_AI_RESEARCH_FUTURE is not None and not _AI_RESEARCH_FUTURE.done()),"last_at":_AI_RESEARCH_LAST_AT,"last_candidate_count":_AI_RESEARCH_LAST_CANDIDATE_COUNT,"last_result":dict(_AI_RESEARCH_LAST_RESULT or {}),"last_error":_AI_RESEARCH_LAST_ERROR}
+
+
+_ollama_state_load()
 
 
 def _agent_read_records(limit=AGENT_MAX_HISTORY_ROWS):
@@ -5706,12 +5817,27 @@ def get_adaptive_status():
             "trail_health": dict(_AGENT_STATE.get("trail_health") or {}),
             "policy_revisions": int(_AGENT_STATE.get("policy_revisions", 0) or 0),
             "exploration_share": AGENT_EXPLORATION_SHARE,
+            "ollama": get_ollama_research_status(),
         }
 
 
 def get_adaptive_policy():
     with _AGENT_LOCK:
         return dict(_AGENT_POLICY)
+
+
+def strategy_trade_gate(signal, market_context=None):
+    """Strategy-owned gate. It may veto on explicit strategy state, but it never
+    delegates trade permission to Ollama and never contains exchange execution logic."""
+    sig=dict(signal or {}) if isinstance(signal,dict) else {}
+    if sig.get("strategy_blocked") is True:
+        return {"allowed": False, "reason": str(sig.get("strategy_block_reason") or "strategy_blocked")}
+    if sig.get("trade_allowed") is False:
+        return {"allowed": False, "reason": str(sig.get("trade_block_reason") or "strategy_trade_allowed_false")}
+    entry_state=str(sig.get("entry_state") or sig.get("entry_status") or "").upper()
+    if entry_state in {"WAIT_ENTRY", "WAIT", "BLOCKED", "INVALID"}:
+        return {"allowed": False, "reason": f"strategy_entry_state:{entry_state}"}
+    return {"allowed": True, "reason": "strategy_ok"}
 
 
 def _load_ohlcv_file(path):
@@ -5963,7 +6089,7 @@ try:
     __all__ = list(dict.fromkeys(__all__ + [
         "AGENT_BRAIN_API_VERSION", "adaptive_agent_start", "adaptive_agent_stop",
         "adaptive_research_cycle", "adaptive_replay_historical", "get_adaptive_status",
-        "get_adaptive_policy",
+        "get_adaptive_policy", "get_ollama_research_status", "strategy_trade_gate",
     ]))
 except Exception:
     pass
