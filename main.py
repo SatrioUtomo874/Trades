@@ -82,7 +82,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v42_CLEAN_ARCH"
+MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v43_FREQUENCY_BRIDGE_FIX"
 
 # Stable body / replaceable brain contract.
 # main.py owns Binance, Telegram, execution, protection and runtime state.
@@ -3180,6 +3180,73 @@ def _brain_wakeup_from_body():
             _dispatch_research_job(fn)
     except Exception as exc:
         log.debug(f"[ADAPTIVE] wake research gagal: {exc}")
+
+def _full_frequency_adjust():
+    """Bridge scan telemetry to the adaptive brain's frequency/confidence controller.
+
+    main.py owns only the runtime threshold value; strategy_logic.py owns the
+    decision about whether opportunity supply justifies relaxing/ tightening.
+    Uses recent scan summaries and never talks to Binance directly.
+    """
+    global STRATEGY_CONFIDENCE_THRESHOLD
+    try:
+        updater = globals().get("update_frequency_confidence_state")
+        suggester = globals().get("suggest_confidence_threshold")
+        if not callable(updater):
+            return STRATEGY_CONFIDENCE_THRESHOLD
+        with scan_quality_lock:
+            recent = [dict(x) for x in scan_quality_history[-20:] if isinstance(x, dict)]
+        if not recent:
+            return STRATEGY_CONFIDENCE_THRESHOLD
+
+        def median(key, default=0.0):
+            vals = []
+            for row in recent:
+                try:
+                    v = row.get(key)
+                    if v is not None:
+                        vals.append(float(v))
+                except Exception:
+                    pass
+            if not vals:
+                return float(default)
+            vals.sort()
+            n = len(vals)
+            return vals[n//2] if n % 2 else (vals[n//2-1] + vals[n//2]) / 2.0
+
+        metrics = {
+            "window": len(recent),
+            "median_analyzed_per_scan": median("symbols_analyzed"),
+            "median_candidate_per_scan": median("candidate_count", median("qualified_count")),
+            "median_qualified_per_scan": median("qualified_count"),
+            "median_near_threshold_per_scan": median("near_threshold_count"),
+            "near_threshold_quality": median("near_threshold_quality", median("avg_confidence", 0.0)),
+            "lower_band_quality": median("lower_band_quality", median("avg_confidence", 0.0)),
+            "target_min": 2.0,
+            "target_max": 6.0,
+            "shadow_mean_r": median("shadow_mean_r", 0.0),
+            "historical_mean_r": median("historical_mean_r", 0.0),
+        }
+        state = updater(metrics)
+        if callable(suggester):
+            suggested = int(suggester(metrics, current_threshold=int(STRATEGY_CONFIDENCE_THRESHOLD)))
+            suggested = max(40, min(72, suggested))
+            # One-point movement per completed scan window prevents oscillation.
+            old = int(STRATEGY_CONFIDENCE_THRESHOLD)
+            if suggested > old:
+                STRATEGY_CONFIDENCE_THRESHOLD = old + 1
+            elif suggested < old:
+                STRATEGY_CONFIDENCE_THRESHOLD = old - 1
+        # Keep the brain state visible to the execution body without log spam.
+        if isinstance(state, dict):
+            mode = state.get("mode", "MAINTAIN")
+            if mode != "MAINTAIN":
+                log.info(f"[FULL][CONFIDENCE] {mode} threshold={STRATEGY_CONFIDENCE_THRESHOLD}%")
+        return STRATEGY_CONFIDENCE_THRESHOLD
+    except Exception as exc:
+        log.debug(f"[FULL][CONFIDENCE] bridge gagal: {exc}")
+        return STRATEGY_CONFIDENCE_THRESHOLD
+
 
 def run_scan_once(chat_id):
     global early_reject_remaining
