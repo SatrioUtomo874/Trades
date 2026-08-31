@@ -746,7 +746,8 @@ def _full_status_text():
                 f"Learning cycles: <b>{cycles}</b> | Promotions: <b>{promotions}</b>\n"
                 f"Last samples: <b>{last_samples}</b> | Last status: <b>{html.escape(str(last.get('status','—')))}</b>\n"
                 f"Adaptive threshold: <b>{int(STRATEGY_CONFIDENCE_THRESHOLD)}%</b> | ML hint: <b>{str(FULL_ML_SUGGESTED_THRESHOLD or '—')}</b> | {html.escape(str(FULL_ADAPTIVE_THRESHOLD_LAST_REASON))}\n"
-                f"Effective confidence bias: <b>{float((globals().get('get_frequency_confidence_adjustment')() if callable(globals().get('get_frequency_confidence_adjustment')) else 0.0)):+.2f}</b>")
+                f"Effective confidence bias: <b>{float((globals().get('get_frequency_confidence_adjustment')() if callable(globals().get('get_frequency_confidence_adjustment')) else 0.0)):+.2f}</b>\n"
+                 f"Strategy evolution: <b>{html.escape(str((globals().get('get_strategy_evolution_status')() if callable(globals().get('get_strategy_evolution_status')) else {}).get('active_version','—')))}</b>")
     return (f"🧠 <b>FULL LEARNING</b>: {'ON' if FULL_MODE else 'OFF'}\n"
             f"Champion: <b>Belum ada</b>\nLearning cycles: <b>{cycles}</b> | Samples: <b>{last_samples}</b>\n"
             f"Minimum training samples: <b>{FULL_MIN_TRAIN_SAMPLES}</b>")
@@ -1423,6 +1424,7 @@ LEARNING_CHECKPOINT_FILES = (
     "v32_policy.json", "v32_brain_state.json", "adaptive_brain_state.json",
     "adaptive_policy.json", "full_learning_state.json", "experience.jsonl",
     "ollama_research_state.json", "ollama_research_journal.jsonl", "frequency_confidence_state.json",
+    "strategy_evolution_state.json",
 )
 
 def _github_headers():
@@ -2950,6 +2952,42 @@ def cancel_all_algo_orders(symbol):
         return None
 
 
+def _reset_balance_anchor_simulation():
+    """Reset only the paper/equity anchor; never erase learning or closed-trade evidence."""
+    global research_run_id
+    with stat_lock:
+        stats["balance"] = float(STARTING_BALANCE)
+        stats["pnl_history"] = deque(maxlen=20)
+    return {"mode": "SIMULATION", "balance": float(STARTING_BALANCE)}
+
+
+def _reset_balance_anchor_real():
+    """Fetch the current Binance USDT balance and reset only the local statistics anchor."""
+    global real_balance_snapshot, real_balance_snapshot_at, peak_real_balance
+    with positions_lock:
+        real_positions = [(sym, dict(pos)) for sym, pos in positions.items() if _position_is_real(pos) and pos.get("status") in ("active", "EMERGENCY")]
+    # Fetch exchange truth; this function never closes orders/positions.
+    with _binance_critical_context():
+        available, total = get_real_balance()
+    if total is None:
+        raise RuntimeError("saldo USDT Binance tidak tersedia")
+    with real_balance_lock:
+        real_balance_snapshot = float(total)
+        real_balance_snapshot_at = time.time()
+    with stat_lock:
+        stats["balance"] = float(total)
+        stats["pnl_history"] = deque(maxlen=20)
+    with autostop_lock:
+        peak_real_balance = float(total)
+    return {
+        "mode": "REAL",
+        "available": float(available) if available is not None else None,
+        "balance": float(total),
+        "open_real_positions": len(real_positions),
+        "snapshot_at": real_balance_snapshot_at,
+    }
+
+
 def get_real_balance():
     """Return (available, total) USDT, atau (None, None) kalau gagal."""
     try:
@@ -3638,7 +3676,7 @@ def _dispatch_research_job(fn, *args, **kwargs):
     try:
         pool = getattr(_dispatch_research_job, "_pool", None)
         if pool is None:
-            pool = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("RESEARCH_WORKERS", "2"))), thread_name_prefix="research")
+            pool = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("RESEARCH_WORKERS", "1"))), thread_name_prefix="research")
             _dispatch_research_job._pool = pool
         fut = pool.submit(fn, *args, **kwargs)
         fut.add_done_callback(lambda f: (log.debug(f"[RESEARCH] job error: {f.exception()}") if f.exception() else None))
@@ -5614,6 +5652,7 @@ def get_start_msg():
         "/autostop            — Lihat/ubah auto-stop drawdown\n\n"
         "━━━━━━━━ <b>RESEARCH</b> ━━━━━━━━\n"
         "/stats               — Statistik & saldo aktif\n"
+        "/resetbalance        — Reset balance statistik: SIM=$10, REAL=ambil saldo Binance\n"
         "/backtest            — 20 trade terakhir\n"
         "/analyze             — Analisis seluruh closed trade sejak resetstats\n"
         "/resetstats           — Reset research stats/ledger tanpa mengubah modal\n\n"
@@ -6098,6 +6137,41 @@ def bot_loop():
                     with low_conf_history_lock:
                         cleared_lc=len(low_conf_history); low_conf_history.clear()
                     tg_send(chat_id,f"✅ <b>Low-confidence history direset.</b> Event dihapus: <b>{cleared_lc}</b>. Current ban tidak disentuh.")
+                elif text.startswith("/resetbalance") or (not text.startswith("/") and text.startswith("resetbalance")):
+                    parts = text.split()
+                    confirm = len(parts) > 1 and parts[1].lower() in {"confirm", "yes", "ya"}
+                    if not REAL_TRADE_ENABLED:
+                        try:
+                            result = _reset_balance_anchor_simulation()
+                            tg_send(chat_id,
+                                f"✅ <b>Balance SIMULASI direset.</b>\n"
+                                f"Balance anchor baru: <b>${result['balance']:.4f}</b>\n"
+                                f"Ledger learning, strategy, policy, dan closed-trade history <b>tidak dihapus</b>.\n"
+                                f"Pakai <code>/resetstats</code> kalau memang ingin memulai research run baru.")
+                        except Exception as e:
+                            tg_send(chat_id, f"❌ <b>/resetbalance gagal.</b>\n<code>{str(e)[:250]}</code>")
+                    else:
+                        if not confirm:
+                            with positions_lock:
+                                n_real = sum(1 for p in positions.values() if _position_is_real(p) and p.get("status") in ("active", "EMERGENCY"))
+                            tg_send(chat_id,
+                                "⚠️ <b>RESET BALANCE REAL</b>\n\n"
+                                "Perintah ini <b>TIDAK mengubah saldo, posisi, atau order Binance</b>.\n"
+                                "Bot hanya mengambil saldo Binance terbaru dan menjadikannya anchor statistik baru.\n\n"
+                                f"Posisi REAL aktif: <b>{n_real}</b>\n\n"
+                                "Untuk konfirmasi: <code>/resetbalance confirm</code>")
+                            continue
+                        try:
+                            result = _reset_balance_anchor_real()
+                            tg_send(chat_id,
+                                f"✅ <b>Balance REAL disinkronkan ulang.</b>\n"
+                                f"Saldo Binance: <b>${result['balance']:.4f}</b>\n"
+                                f"Available: <b>${result['available']:.4f}</b>\n"
+                                f"Posisi REAL tetap aktif: <b>{result['open_real_positions']}</b>\n"
+                                "Order/posisi Binance <b>tidak disentuh</b>.\n"
+                                "Learning, strategy, policy, dan closed-trade history <b>tetap dipertahankan</b>.")
+                        except Exception as e:
+                            tg_send(chat_id, f"❌ <b>/resetbalance REAL gagal.</b>\n<code>{str(e)[:300]}</code>\nSaldo Binance dan posisi tidak diubah oleh perintah ini.")
                 elif text in ("/resetstats","resetstats"):
                     global research_run_id, trade_sequence, trail_event_sequence
                     with stat_lock:
@@ -6511,7 +6585,7 @@ if __name__=="__main__":
     except Exception as _brain_boot_exc:
         log.warning(f"[ADAPTIVE] brain bootstrap gagal; execution tetap hidup: {_brain_boot_exc}")
 
-    log.info(f"[ENGINE] {MAIN_ENGINE_VERSION} starting")
+    log.info(f"[ENGINE] {MAIN_ENGINE_VERSION} starting | heavy research workers capped at 5")
     if _STRATEGY_LOAD_ERROR and ALLOWED_USER_ID:
         tg_send(ALLOWED_USER_ID,
             f"🚨 <b>strategy_logic.py BERMASALAH</b>\n\n"

@@ -5185,6 +5185,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
         result["confidence"]=result["confidence_effective"]
         result["frequency_confidence_mode"]=_FREQUENCY_CONF_STATE.get("mode","MAINTAIN")
         result["adaptive_policy_state"]={"policy_delta":round(policy_delta,3),"frequency_bias":round(freq_delta,3),"mode":_FREQUENCY_CONF_STATE.get("mode","MAINTAIN")}
+        result = _strategy_apply_profile(result)
         result = _v32_time_features_into(result, ts)
         result.setdefault("learning_features", {})
         tc = result["time_context"]
@@ -5207,6 +5208,18 @@ def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
             tc=_v32_hour_context(_timestamp_from_df(df_m15))
             result["time_context"]=tc
             result["trail_research"]={"frequency_neutral":True,"learning_target":"capture_ratio_vs_continuation_survival","uses_actual_position_only":True}
+            profile=_STRATEGY_EVOLUTION.get("active") or _DEFAULT_STRATEGY_PROFILE
+            delay_r=float(profile.get("trail_delay_r",0.0) or 0.0)
+            entry=float(state.get("entry") or 0.0) if isinstance(state,dict) else 0.0
+            current=float(state.get("current_price") or state.get("price") or entry) if isinstance(state,dict) else entry
+            side=str(state.get("decision") or (state.get("signal") or {}).get("decision") or "BUY").upper() if isinstance(state,dict) else "BUY"
+            initial_sl=float(state.get("initial_sl") or (state.get("signal") or {}).get("initial_sl") or (state.get("signal") or {}).get("sl") or 0.0) if isinstance(state,dict) else 0.0
+            risk=abs(entry-initial_sl) if entry and initial_sl else 0.0
+            profit_r=((current-entry) if side=="BUY" else (entry-current))/risk if risk>0 else 0.0
+            if delay_r>0 and profit_r < delay_r and result.get("sl") is not None:
+                # Keep the existing protection until the promoted strategy's trail arm point.
+                result.pop("sl",None)
+                result["trail_suppressed_reason"]=f"strategy_trail_delay:{delay_r:.2f}R"
         except Exception:
             pass
     return result
@@ -5285,6 +5298,10 @@ def reload_learning_state():
         _AGENT_HISTORY_DONE=set()
     _frequency_state_load_from_agent()
     _ollama_state_load()
+    try:
+        if isinstance(_AGENT_STATE.get("strategy_evolution"), dict): _STRATEGY_EVOLUTION.update(_AGENT_STATE.get("strategy_evolution"))
+        _strategy_evolution_load()
+    except Exception: pass
     # Reload persisted cognitive state if present and make sure model APIs see fresh state.
     try:
         _load_cognitive_state()
@@ -5410,20 +5427,20 @@ __all__ = list(dict.fromkeys(__all__ + [
 # Frequency/opportunity is a first-class research metric. The brain is not
 # rewarded for simply making the filter stricter and quieter.
 
-AGENT_BRAIN_API_VERSION = "v39-open-checkpoint"
+AGENT_BRAIN_API_VERSION = "v49-resetbalance-compatible-1"
 AGENT_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 AGENT_STATE_FILE = AGENT_STATE_DIR / "adaptive_brain_state.json"
 AGENT_POLICY_FILE = AGENT_STATE_DIR / "adaptive_policy.json"
 AGENT_HISTORY_DIR = Path(os.getenv("HISTORICAL_DATA_DIR", str(AGENT_STATE_DIR / "historical_data")))
 AGENT_HISTORICAL_DAYS = max(30, int(os.getenv("HISTORICAL_LEARNING_DAYS", "90")))
 AGENT_RESEARCH_INTERVAL = max(5.0, float(os.getenv("ADAPTIVE_RESEARCH_INTERVAL", "20")))
-AGENT_REPLAY_WORKERS = max(1, min(4, int(os.getenv("ADAPTIVE_REPLAY_WORKERS", "2"))))
+AGENT_REPLAY_WORKERS = 1
 AGENT_REPLAY_STEP_M15 = max(1, int(os.getenv("ADAPTIVE_REPLAY_STEP_M15", "4")))
 AGENT_MIN_POLICY_EVIDENCE = max(8, int(os.getenv("ADAPTIVE_MIN_POLICY_EVIDENCE", "20")))
 AGENT_POLICY_MAX_DELTA = max(0.01, min(0.10, float(os.getenv("ADAPTIVE_POLICY_MAX_DELTA", "0.03"))))
 AGENT_EXPLORATION_SHARE = max(0.05, min(0.30, float(os.getenv("ADAPTIVE_EXPLORATION_SHARE", "0.15"))))
 AGENT_AUTO_HISTORICAL = str(os.getenv("ADAPTIVE_AUTO_HISTORICAL", "1")).strip().lower() not in {"0", "false", "off", "no"}
-AGENT_MAX_HISTORY_ROWS = max(5000, int(os.getenv("ADAPTIVE_MAX_HISTORY_ROWS", "300000")))
+AGENT_MAX_HISTORY_ROWS = max(5000, min(100000, int(os.getenv("ADAPTIVE_MAX_HISTORY_ROWS", "100000"))))
 
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b").strip() or "gpt-oss:20b"
@@ -5605,6 +5622,172 @@ _AGENT_STATE = {
     "policy_revisions": 0,
     "last_research": None,
 }
+
+# V47 STRATEGY EVOLUTION ENGINE
+# Evolves the replaceable strategy brain through bounded, auditable profiles.
+# Research/LLM can propose hypotheses, but only deterministic validation can promote
+# a challenger. main.py remains the sole execution authority.
+STRATEGY_EVOLUTION_FILE = AGENT_STATE_DIR / "strategy_evolution_state.json"
+STRATEGY_EVOLUTION_MIN_EFFECTIVE_EVIDENCE = max(20.0, float(os.getenv("STRATEGY_EVOLUTION_MIN_EVIDENCE", "30")))
+STRATEGY_EVOLUTION_MIN_VALIDATION = max(8, int(os.getenv("STRATEGY_EVOLUTION_MIN_VALIDATION", "8")))
+STRATEGY_EVOLUTION_INTERVAL_CYCLES = max(3, int(os.getenv("STRATEGY_EVOLUTION_INTERVAL_CYCLES", "5")))
+STRATEGY_EVOLUTION_MAX_CHALLENGERS = 2
+STRATEGY_EVOLUTION_MAX_CONF_DELTA = 4.0
+STRATEGY_EVOLUTION_MIN_FREQUENCY_RATIO = float(os.getenv("STRATEGY_EVOLUTION_MIN_FREQUENCY_RATIO", "0.35"))
+
+_DEFAULT_STRATEGY_PROFILE = {
+    "version": "S0", "parent": None, "status": "BASELINE",
+    "confidence_delta_global": 0.0, "regime_delta": {}, "archetype_delta": {},
+    "regime_block": [], "trend_focus": None,
+    "trail_delay_r": 0.0, "tp_rr_floor": 0.0, "entry_location_floor": 0.0,
+    "created_at": time.time(), "reason": "baseline",
+}
+_STRATEGY_EVOLUTION = {
+    "active": dict(_DEFAULT_STRATEGY_PROFILE),
+    "champion": dict(_DEFAULT_STRATEGY_PROFILE),
+    "challengers": [], "revisions": 0, "last_evaluated_cycle": 0,
+    "last_reason": "startup",
+}
+
+def _strategy_evolution_load():
+    global _STRATEGY_EVOLUTION
+    try:
+        obj = _agent_json_load(STRATEGY_EVOLUTION_FILE, {})
+        if isinstance(obj, dict) and isinstance(obj.get("active"), dict):
+            _STRATEGY_EVOLUTION.update(obj)
+    except Exception as exc:
+        log.debug(f"[EVOLUTION] load gagal: {exc}")
+
+def _strategy_evolution_save():
+    try:
+        _AGENT_STATE["strategy_evolution"] = _STRATEGY_EVOLUTION
+        _agent_json_save(STRATEGY_EVOLUTION_FILE, _STRATEGY_EVOLUTION)
+        _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+    except Exception as exc:
+        log.debug(f"[EVOLUTION] save gagal: {exc}")
+
+def _strategy_evidence_records():
+    rows = _agent_read_records(limit=min(AGENT_MAX_HISTORY_ROWS, 12000))
+    out=[]
+    for r in rows:
+        if not isinstance(r,dict) or r.get("type") != "trade_outcome":
+            continue
+        try: fr=float(r.get("final_r"))
+        except Exception: continue
+        src=str(r.get("source") or "").lower()
+        weight=1.0 if src.startswith("binance") or src in {"real","real_trade","binance_trade"} else 0.5
+        lf=r.get("learning_features") if isinstance(r.get("learning_features"),dict) else {}
+        out.append({
+            "r":max(-4.0,min(4.0,fr)), "weight":weight,
+            "confidence":float(r.get("confidence") or 50.0),
+            "regime":str(r.get("market_regime") or "UNKNOWN").upper(),
+            "archetype":str(r.get("archetype") or "UNKNOWN"),
+            "trend_strength":float(lf.get("trend_strength") or r.get("trend_strength") or 0.5),
+            "entry_location_score":float(lf.get("entry_location_score") or r.get("entry_location_score") or 50.0),
+            "timestamp":float(r.get("timestamp") or 0.0),
+        })
+    return out
+
+def _weighted_mean(rows):
+    if not rows:return 0.0
+    sw=sum(float(x.get("weight",1.0)) for x in rows)
+    return sum(float(x.get("r",0.0))*float(x.get("weight",1.0)) for x in rows)/max(sw,1e-9)
+
+def _profile_adjustment(profile,row):
+    if not isinstance(profile,dict):return 0.0
+    reg=str(row.get("regime") or "UNKNOWN").upper(); arch=str(row.get("archetype") or "UNKNOWN")
+    d=float(profile.get("confidence_delta_global",0.0) or 0.0)
+    d+=float((profile.get("regime_delta") or {}).get(reg,0.0) or 0.0)
+    d+=float((profile.get("archetype_delta") or {}).get(arch,0.0) or 0.0)
+    if profile.get("trend_focus") is not None and float(row.get("trend_strength",0.5) or 0.5) >= float(profile.get("trend_focus")):
+        d+=1.0
+    return max(-STRATEGY_EVOLUTION_MAX_CONF_DELTA,min(STRATEGY_EVOLUTION_MAX_CONF_DELTA,d))
+
+def _profile_projection(rows,profile,threshold=55.0):
+    if not rows:return {"objective":-999.0,"n":0,"coverage":0.0,"mean_r":0.0,"weighted_n":0.0}
+    blocked={str(x).upper() for x in (profile.get("regime_block") or [])}
+    chosen=[r for r in rows if str(r.get("regime") or "UNKNOWN").upper() not in blocked and float(r.get("confidence",50.0))+_profile_adjustment(profile,r)>=threshold]
+    wn=sum(float(r.get("weight",1.0)) for r in chosen); mean=_weighted_mean(chosen)
+    cov=len(chosen)/max(1,len(rows)); objective=mean + 0.08*cov
+    return {"objective":float(objective),"n":len(chosen),"weighted_n":wn,"coverage":cov,"mean_r":mean}
+
+def _strategy_make_challengers(rows):
+    if len(rows)<12:return []
+    by_reg={}
+    for r in rows:by_reg.setdefault(r["regime"],[]).append(r)
+    ranked=sorted(((k,_weighted_mean(v),len(v)) for k,v in by_reg.items()),key=lambda x:(x[1],x[2]),reverse=True)
+    out=[]
+    if ranked:
+        best=ranked[0][0]
+        weak=[k for k,m,n in ranked if m<0 and n>=6]
+        out.append({"type":"REGIME_FOCUS","regime_delta":{best:2.0},"regime_block":weak[:2],"confidence_delta_global":0.0,"trend_focus":None})
+    strong=[r for r in rows if r.get("trend_strength",0.5)>=0.65]
+    if len(strong)>=6:
+        out.append({"type":"TREND_FOCUS","regime_delta":{},"regime_block":[],"confidence_delta_global":0.0,"trend_focus":0.65,"trail_delay_r":0.0,"tp_rr_floor":0.0,"entry_location_floor":55.0})
+    return out[:STRATEGY_EVOLUTION_MAX_CHALLENGERS]
+
+def _strategy_apply_profile(result):
+    if not isinstance(result,dict):return result
+    profile=_STRATEGY_EVOLUTION.get("active") or _DEFAULT_STRATEGY_PROFILE
+    row={"regime":result.get("market_regime") or (result.get("regime_profile") or {}).get("regime"),"archetype":result.get("archetype"),"trend_strength":float((result.get("learning_features") or {}).get("trend_strength",0.5) or 0.5)}
+    raw=float(result.get("confidence",50.0) or 50.0); delta=_profile_adjustment(profile,row)
+    result["strategy_version"]=profile.get("version","S0")
+    result["strategy_confidence_delta"]=round(delta,3)
+    result["confidence_raw_before_strategy"]=round(raw,3)
+    result["confidence"]=int(round(max(1,min(99,raw+delta))))
+    result["confidence_effective"]=result["confidence"]
+    result["strategy_management_profile"]={
+        "trail_delay_r":float(profile.get("trail_delay_r",0.0) or 0.0),
+        "tp_rr_floor":float(profile.get("tp_rr_floor",0.0) or 0.0),
+        "entry_location_floor":float(profile.get("entry_location_floor",0.0) or 0.0),
+    }
+    reg=str(row.get("regime") or "UNKNOWN").upper()
+    if reg in {str(x).upper() for x in (profile.get("regime_block") or [])}:
+        result["strategy_blocked"]=True; result["strategy_block_reason"]=f"evolved_strategy_regime:{reg}"
+    floor=float(profile.get("tp_rr_floor",0.0) or 0.0)
+    if floor>0 and float(result.get("rr",0.0) or 0.0)<floor:
+        result["strategy_blocked"]=True; result["strategy_block_reason"]=f"evolved_strategy_tp_rr_floor:{floor:.2f}"
+    loc_floor=float(profile.get("entry_location_floor",0.0) or 0.0)
+    if loc_floor>0 and float(result.get("entry_location_score",0.0) or 0.0)<loc_floor:
+        result["strategy_blocked"]=True; result["strategy_block_reason"]=f"evolved_strategy_location_floor:{loc_floor:.1f}"
+    return result
+
+def get_strategy_evolution_status():
+    with _AGENT_LOCK:
+        a=dict(_STRATEGY_EVOLUTION.get("active") or _DEFAULT_STRATEGY_PROFILE)
+        return {"active_version":a.get("version","S0"),"champion_version":(_STRATEGY_EVOLUTION.get("champion") or {}).get("version","S0"),"revisions":int(_STRATEGY_EVOLUTION.get("revisions",0) or 0),"challengers":[dict(x) for x in (_STRATEGY_EVOLUTION.get("challengers") or [])],"last_reason":str(_STRATEGY_EVOLUTION.get("last_reason","startup"))}
+
+def _strategy_evolution_cycle():
+    rows=_strategy_evidence_records()
+    effective_n=sum(float(x.get("weight",1.0)) for x in rows)
+    if effective_n<STRATEGY_EVOLUTION_MIN_EFFECTIVE_EVIDENCE:return get_strategy_evolution_status()
+    n=len(rows); cut=max(1,int(n*0.70)); train=rows[:cut]; valid=rows[cut:]
+    if len(valid)<STRATEGY_EVOLUTION_MIN_VALIDATION:return get_strategy_evolution_status()
+    base=dict(_STRATEGY_EVOLUTION.get("champion") or _DEFAULT_STRATEGY_PROFILE)
+    base_v=_profile_projection(valid,base)
+    proposals=[]
+    for p in _strategy_make_challengers(train):
+        pv=_profile_projection(valid,p); improvement=pv["objective"]-base_v["objective"]
+        freq_ratio=pv["coverage"]/max(base_v["coverage"],1e-9)
+        if pv["n"]>=STRATEGY_EVOLUTION_MIN_VALIDATION and improvement>=0.03 and freq_ratio>=STRATEGY_EVOLUTION_MIN_FREQUENCY_RATIO:
+            q=dict(p); q.update({"validation":pv,"improvement":float(improvement),"frequency_ratio":float(freq_ratio),"tested_at":time.time()}); proposals.append(q)
+    with _AGENT_LOCK:
+        _STRATEGY_EVOLUTION["challengers"]=proposals[-STRATEGY_EVOLUTION_MAX_CHALLENGERS:]
+        if proposals:
+            best=max(proposals,key=lambda x:x["improvement"]); old=dict(_STRATEGY_EVOLUTION.get("champion") or _DEFAULT_STRATEGY_PROFILE)
+            version=f"S{int(_STRATEGY_EVOLUTION.get('revisions',0) or 0)+1}"; new=dict(old)
+            for k in ("type","regime_delta","regime_block","confidence_delta_global","trend_focus","trail_delay_r","tp_rr_floor","entry_location_floor"):
+                if k in best:new[k]=best[k]
+            new.update({"version":version,"parent":old.get("version"),"status":"CHAMPION","created_at":time.time(),"reason":f"validated challenger improvement={best['improvement']:+.4f}"})
+            _STRATEGY_EVOLUTION["active"]=new; _STRATEGY_EVOLUTION["champion"]=new; _STRATEGY_EVOLUTION["revisions"]=int(_STRATEGY_EVOLUTION.get("revisions",0) or 0)+1; _STRATEGY_EVOLUTION["last_reason"]=new["reason"]
+        _STRATEGY_EVOLUTION["last_evaluated_cycle"]=int(_AGENT_TICKS)
+    _strategy_evolution_save(); return get_strategy_evolution_status()
+
+_strategy_evolution_load()
+if isinstance(_AGENT_STATE,dict) and isinstance(_AGENT_STATE.get("strategy_evolution"),dict):
+    try:_STRATEGY_EVOLUTION.update(_AGENT_STATE["strategy_evolution"])
+    except Exception:pass
+
 
 
 def _agent_json_load(path, default):
@@ -6001,8 +6184,16 @@ def adaptive_research_cycle():
     frequency = _agent_frequency_health(candidate_cells, records=records)
     trail_health = _agent_trail_health(records)
     lifecycle_health = _agent_trade_lifecycle_health(records)
+    try:
+        _ollama_maybe_schedule(records, len(candidate_cells))
+    except Exception as _ollama_exc:
+        log.debug(f"[OLLAMA] scheduling gagal: {_ollama_exc}")
     proposals = _agent_bounded_policy_proposal(candidate_cells, outcome_cells)
     changed = _agent_apply_policy_proposals(proposals)
+    evolution = get_strategy_evolution_status()
+    if _AGENT_TICKS % STRATEGY_EVOLUTION_INTERVAL_CYCLES == 0:
+        try: evolution = _strategy_evolution_cycle()
+        except Exception as _evo_exc: log.debug(f"[EVOLUTION] cycle gagal: {_evo_exc}")
     report = {
         "timestamp": time.time(),
         "brain_version": AGENT_BRAIN_API_VERSION,
@@ -6014,6 +6205,7 @@ def adaptive_research_cycle():
         "lifecycle_health": lifecycle_health,
         "policy_proposals": proposals[:100],
         "policy_changes": changed,
+        "strategy_evolution": evolution,
     }
     with _AGENT_LOCK:
         _AGENT_STATE["frequency"] = frequency
@@ -6104,6 +6296,7 @@ def _load_ohlcv_file(path):
     if out.index.isna().all():
         out.index = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
     out = out[~out.index.isna()].dropna(subset=["open","high","low","close","volume"]).sort_index()
+    if len(out) > min(50000, AGENT_MAX_HISTORY_ROWS): out = out.tail(min(50000, AGENT_MAX_HISTORY_ROWS))
     return out
 
 
@@ -6270,7 +6463,7 @@ def adaptive_replay_historical(force=False):
 
 def _adaptive_worker_loop():
     global _AGENT_TICKS, _AGENT_LAST_ERROR
-    log.info("[ADAPTIVE] brain worker started")
+    log.info("[ADAPTIVE] brain worker started | heavy research worker budget=5")
     while not _AGENT_STOP.is_set():
         try:
             if AGENT_AUTO_HISTORICAL and _AGENT_TICKS == 0:
@@ -6317,7 +6510,7 @@ try:
     __all__ = list(dict.fromkeys(__all__ + [
         "AGENT_BRAIN_API_VERSION", "adaptive_agent_start", "adaptive_agent_stop",
         "adaptive_research_cycle", "adaptive_replay_historical", "get_adaptive_status",
-        "get_adaptive_policy", "get_adaptive_policy_adjustment", "suggest_confidence_threshold", "update_frequency_confidence_state", "get_frequency_confidence_adjustment", "get_frequency_confidence_state", "get_adaptive_learning_records", "get_ollama_research_status", "strategy_trade_gate",
+        "get_adaptive_policy", "get_adaptive_policy_adjustment", "suggest_confidence_threshold", "update_frequency_confidence_state", "get_frequency_confidence_adjustment", "get_frequency_confidence_state", "get_adaptive_learning_records", "get_ollama_research_status", "strategy_trade_gate", "get_strategy_evolution_status",
     ]))
 except Exception:
     pass
