@@ -5427,7 +5427,7 @@ __all__ = list(dict.fromkeys(__all__ + [
 # Frequency/opportunity is a first-class research metric. The brain is not
 # rewarded for simply making the filter stricter and quieter.
 
-AGENT_BRAIN_API_VERSION = "v49-resetbalance-compatible-1"
+AGENT_BRAIN_API_VERSION = "v50-true-strategy-evolution"
 AGENT_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 AGENT_STATE_FILE = AGENT_STATE_DIR / "adaptive_brain_state.json"
 AGENT_POLICY_FILE = AGENT_STATE_DIR / "adaptive_policy.json"
@@ -5440,7 +5440,7 @@ AGENT_MIN_POLICY_EVIDENCE = max(8, int(os.getenv("ADAPTIVE_MIN_POLICY_EVIDENCE",
 AGENT_POLICY_MAX_DELTA = max(0.01, min(0.10, float(os.getenv("ADAPTIVE_POLICY_MAX_DELTA", "0.03"))))
 AGENT_EXPLORATION_SHARE = max(0.05, min(0.30, float(os.getenv("ADAPTIVE_EXPLORATION_SHARE", "0.15"))))
 AGENT_AUTO_HISTORICAL = str(os.getenv("ADAPTIVE_AUTO_HISTORICAL", "1")).strip().lower() not in {"0", "false", "off", "no"}
-AGENT_MAX_HISTORY_ROWS = max(5000, min(100000, int(os.getenv("ADAPTIVE_MAX_HISTORY_ROWS", "100000"))))
+AGENT_MAX_HISTORY_ROWS = max(3000, min(25000, int(os.getenv("ADAPTIVE_MAX_HISTORY_ROWS", "12000"))))
 
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b").strip() or "gpt-oss:20b"
@@ -6514,3 +6514,264 @@ try:
     ]))
 except Exception:
     pass
+
+
+# =============================================================================
+# V50 TRUE STRATEGY EVOLUTION CONTRACT
+# =============================================================================
+# The active strategy is a versioned policy profile, not a confidence threshold.
+# A strategy revision may alter regime selection, entry-location preference,
+# setup preference, and management/trailing behavior. It is promoted only after
+# point-in-time evidence compares a challenger against the current champion.
+MAX_HEAVY_WORKERS = 5
+HEAVY_WORKER_ROLES = (
+    "adaptive_learning", "historical_replay", "strategy_evolution", "ollama_research", "statistical_learning"
+)
+_STRATEGY_EVOLUTION_LOG_FILE = AGENT_STATE_DIR / "strategy_evolution_log.jsonl"
+
+
+def _append_evolution_log(event):
+    try:
+        AGENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with _STRATEGY_EVOLUTION_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(dict(event or {}), ensure_ascii=False, allow_nan=False, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def get_active_strategy_profile():
+    with _AGENT_LOCK:
+        return dict(_STRATEGY_EVOLUTION.get("active") or _DEFAULT_STRATEGY_PROFILE)
+
+
+def get_active_confidence_threshold():
+    """Return the active hard gate. Frequency adapts this gate; it never rewrites raw confidence."""
+    cur = float(os.getenv("BASE_CONFIDENCE_THRESHOLD", "60"))
+    try:
+        saved = _frequency_state_load_from_agent()
+    except Exception:
+        saved = None
+    # Prefer the in-memory frequency recommendation if available.
+    st = dict(_FREQUENCY_CONF_STATE)
+    try:
+        delta = float(st.get("bias", 0.0) or 0.0)
+        # Keep hard-gate movement modest; raw confidence remains untouched.
+        return int(max(40, min(72, round(cur - delta))))
+    except Exception:
+        return int(max(40, min(72, round(cur))))
+
+
+def set_manual_confidence_threshold(value):
+    """Operator override updates the base gate; it does not erase learning."""
+    v=int(max(0,min(100,int(round(float(value))))))
+    os.environ["BASE_CONFIDENCE_THRESHOLD"] = str(v)
+    _FREQUENCY_CONF_STATE["bias"] = 0.0
+    _FREQUENCY_CONF_STATE["mode"] = "MANUAL"
+    _frequency_confidence_persist()
+    return v
+
+
+def _strategy_candidate_utility(profile, rows):
+    if not rows:
+        return {"objective": -999.0, "n": 0, "coverage": 0.0, "mean_r": 0.0, "frequency": 0.0}
+    p = dict(profile or {})
+    blocked={str(x).upper() for x in (p.get("regime_block") or [])}
+    selected=[]
+    for r in rows:
+        if str(r.get("regime") or "UNKNOWN").upper() in blocked:
+            continue
+        trend=float(r.get("trend_strength",0.5) or 0.5)
+        loc=float(r.get("entry_location_score",50.0) or 50.0)
+        if p.get("trend_focus") is not None and trend < float(p.get("trend_focus")):
+            continue
+        if float(p.get("entry_location_floor",0.0) or 0.0)>0 and loc<float(p.get("entry_location_floor")):
+            continue
+        adj=float(_profile_adjustment(p,r))
+        # Use confidence preference as a selector, not a fake PnL modifier.
+        if float(r.get("confidence",50.0) or 50.0)+adj < float(p.get("evaluation_threshold",55.0) or 55.0):
+            continue
+        selected.append(r)
+    mean=_weighted_mean(selected)
+    cov=len(selected)/max(1,len(rows))
+    return {"objective":float(mean+0.10*cov),"n":len(selected),"coverage":cov,"mean_r":mean,"frequency":cov}
+
+
+def _make_strategy_variants(rows):
+    """Generate small, interpretable strategy candidates from actual evidence."""
+    if len(rows) < 12:
+        return []
+    base=dict(_STRATEGY_EVOLUTION.get("active") or _DEFAULT_STRATEGY_PROFILE)
+    variants=[]
+    # 1) Regime selectivity derived from best observed regime.
+    by_reg=defaultdict(list)
+    for r in rows: by_reg[str(r.get("regime") or "UNKNOWN").upper()].append(r)
+    ranked=sorted(((k,_weighted_mean(v),len(v)) for k,v in by_reg.items()), key=lambda x:(x[1],x[2]), reverse=True)
+    if ranked:
+        best,_,_=ranked[0]
+        weak=[k for k,m,n in ranked if m<0 and n>=5]
+        p=dict(base); p.update({"type":"REGIME_SELECT","regime_delta":{best:1.5},"regime_block":weak[:2],"evaluation_threshold":55.0})
+        variants.append(p)
+    # 2) Preferred location when evidence supports it.
+    locs=[float(r.get("entry_location_score",50.0) or 50.0) for r in rows]
+    if locs and float(np.median(locs))<55:
+        p=dict(base); p.update({"type":"LOCATION_SELECT","entry_location_floor":55.0,"evaluation_threshold":54.0})
+        variants.append(p)
+    # 3) Trend-focus when trend-conditioned outcomes are materially stronger.
+    strong=[r for r in rows if float(r.get("trend_strength",0.5) or 0.5)>=0.65]
+    weak=[r for r in rows if float(r.get("trend_strength",0.5) or 0.5)<0.65]
+    if len(strong)>=6 and _weighted_mean(strong) > _weighted_mean(weak)+0.10:
+        p=dict(base); p.update({"type":"TREND_SELECT","trend_focus":0.65,"evaluation_threshold":54.0})
+        variants.append(p)
+    return variants[:STRATEGY_EVOLUTION_MAX_CHALLENGERS]
+
+
+def _strategy_evolution_cycle_v50():
+    rows=_strategy_evidence_records()
+    if len(rows)<STRATEGY_EVOLUTION_MIN_VALIDATION:
+        return get_strategy_evolution_status()
+    cut=max(1,int(len(rows)*0.70)); train,valid=rows[:cut],rows[cut:]
+    if len(valid)<STRATEGY_EVOLUTION_MIN_VALIDATION:
+        return get_strategy_evolution_status()
+    champion=dict(_STRATEGY_EVOLUTION.get("champion") or _DEFAULT_STRATEGY_PROFILE)
+    base=_strategy_candidate_utility(champion,valid)
+    tested=[]
+    for p in _make_strategy_variants(train):
+        pv=_strategy_candidate_utility(p,valid)
+        if pv["n"] < STRATEGY_EVOLUTION_MIN_VALIDATION:
+            continue
+        improvement=pv["objective"]-base["objective"]
+        freq_ratio=pv["coverage"]/max(base["coverage"],1e-9)
+        tested.append({"profile":p,"validation":pv,"improvement":improvement,"frequency_ratio":freq_ratio})
+    if not tested:
+        _STRATEGY_EVOLUTION["challengers"]=[]
+        _STRATEGY_EVOLUTION["last_evaluated_cycle"]=int(_AGENT_TICKS)
+        _STRATEGY_EVOLUTION["last_reason"]="no validated challenger"
+        _strategy_evolution_save()
+        return get_strategy_evolution_status()
+    best=max(tested,key=lambda x:x["improvement"])
+    # Require real improvement without catastrophic opportunity collapse.
+    if best["improvement"]>=0.03 and best["frequency_ratio"]>=STRATEGY_EVOLUTION_MIN_FREQUENCY_RATIO:
+        old=dict(champion); p=dict(best["profile"])
+        new=dict(old); new.update(p)
+        ver=f"S{int(_STRATEGY_EVOLUTION.get('revisions',0) or 0)+1}"
+        new.update({"version":ver,"parent":old.get("version"),"status":"CHAMPION","created_at":time.time(),"reason":f"validated strategy challenger +{best['improvement']:.4f}"})
+        _STRATEGY_EVOLUTION["active"]=new; _STRATEGY_EVOLUTION["champion"]=new
+        _STRATEGY_EVOLUTION["revisions"]=int(_STRATEGY_EVOLUTION.get("revisions",0) or 0)+1
+        _STRATEGY_EVOLUTION["last_reason"]=new["reason"]
+        _append_evolution_log({"event":"PROMOTE","version":ver,"parent":old.get("version"),"validation":best["validation"],"frequency_ratio":best["frequency_ratio"],"reason":new["reason"]})
+    else:
+        _append_evolution_log({"event":"REJECT","tested":tested,"cycle":int(_AGENT_TICKS)})
+    _STRATEGY_EVOLUTION["challengers"]=tested[-STRATEGY_EVOLUTION_MAX_CHALLENGERS:]
+    _STRATEGY_EVOLUTION["last_evaluated_cycle"]=int(_AGENT_TICKS)
+    _strategy_evolution_save()
+    return get_strategy_evolution_status()
+
+
+def _strategy_apply_profile_strict(result):
+    """Apply the promoted strategy to the actual live result."""
+    if not isinstance(result,dict):
+        return result
+    p=get_active_strategy_profile()
+    reg=str(result.get("market_regime") or (result.get("regime_profile") or {}).get("regime") or "UNKNOWN").upper()
+    loc=float(result.get("entry_location_score",(result.get("location") or {}).get("location_score",50.0)) or 50.0)
+    trend=float((result.get("learning_features") or {}).get("trend_strength",0.5) or 0.5)
+    blocked={str(x).upper() for x in (p.get("regime_block") or [])}
+    if reg in blocked:
+        result["strategy_blocked"]=True; result["strategy_block_reason"]=f"active_strategy_regime_block:{reg}"
+    if float(p.get("entry_location_floor",0.0) or 0.0)>0 and loc < float(p.get("entry_location_floor")):
+        result["strategy_blocked"]=True; result["strategy_block_reason"]=f"active_strategy_location_floor:{float(p.get('entry_location_floor')):.1f}"
+    if p.get("trend_focus") is not None and trend < float(p.get("trend_focus")):
+        result["strategy_blocked"]=True; result["strategy_block_reason"]=f"active_strategy_trend_focus:{float(p.get('trend_focus')):.2f}"
+    result["strategy_version"]=p.get("version","S0")
+    result["strategy_profile"]={k:p.get(k) for k in ("type","regime_block","trend_focus","entry_location_floor","trail_delay_r","tp_rr_floor")}
+    return result
+
+
+def _orchestrator_status():
+    st=get_adaptive_status()
+    evo=get_strategy_evolution_status()
+    fs=get_frequency_confidence_state()
+    return {"active_strategy":evo.get("active_version","S0"),"strategy_evolution":evo,"frequency_confidence":fs,"adaptive":st}
+
+# Wrap the existing strategy result one final time so ACTIVE strategy really affects decisions.
+_ARCH_ORIGINAL_FULL_ANALYZE = full_analyze
+_ARCH_ORIGINAL_MANAGE_POSITION = manage_position
+
+def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None):
+    r=_ARCH_ORIGINAL_FULL_ANALYZE(df_h1,df_m15,df_d1,symbol=symbol,df_btc_h1=df_btc_h1,trade_history=trade_history)
+    if isinstance(r,dict):
+        # Keep raw confidence; adaptive hard gate is handled by main.py.
+        r=_strategy_apply_profile_strict(r)
+    return r
+
+def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
+    r=_ARCH_ORIGINAL_MANAGE_POSITION(state,df_m15,df_h1,df_d1,symbol=symbol)
+    if isinstance(r,dict):
+        p=get_active_strategy_profile(); r["strategy_version"]=p.get("version","S0")
+        if float(p.get("trail_delay_r",0.0) or 0.0)>0:
+            try:
+                entry=float(state.get("entry") or 0.0); current=float(state.get("current_price") or state.get("price") or entry)
+                side=str(state.get("decision") or (state.get("signal") or {}).get("decision") or "BUY").upper()
+                isl=float(state.get("initial_sl") or (state.get("signal") or {}).get("initial_sl") or (state.get("signal") or {}).get("sl") or 0.0)
+                risk=abs(entry-isl)
+                pr=((current-entry) if side=="BUY" else (entry-current))/risk if risk>0 else 0.0
+                if pr<float(p.get("trail_delay_r")):
+                    r.pop("sl",None); r["trail_suppressed_reason"]=f"strategy_trail_delay:{float(p.get('trail_delay_r')):.2f}R"
+            except Exception: pass
+    return r
+
+# Strategy owner of FULL: starts/stops every research component, while main.py remains body.
+def full_command(action, callbacks=None):
+    global _V32_NOTIFY
+    callbacks=callbacks if isinstance(callbacks,dict) else {}
+    if callable(callbacks.get("notify")): _V32_NOTIFY=callbacks["notify"]
+    action=str(action or "status").strip().lower()
+    try:
+        if action=="on":
+            fn=callbacks.get("on")
+            if callable(fn): fn()
+            adaptive_agent_start()
+            _v32_start()
+            return "🧠 <b>FULL LEARNING ON</b>\nLearning + research + strategy evolution aktif.\n\n" + _v32_full_text({"mode":True,"frequency_confidence":get_frequency_confidence_state()}) + f"\n\n🎯 Strategy: <b>{html.escape(str(get_strategy_evolution_status().get('active_version','S0')))}</b>"
+        if action=="off":
+            adaptive_agent_stop(); _v32_stop()
+            fn=callbacks.get("off")
+            if callable(fn): fn()
+            return "🧠 <b>FULL LEARNING OFF</b>\nResearch/evolution dihentikan; memory dan strategy terakhir dipertahankan."
+        if action=="reset":
+            fn=callbacks.get("reset")
+            if callable(fn): fn()
+            try: reset_cognitive_memory()
+            except Exception: pass
+            # Reset evolution to baseline only when explicitly /full reset is requested.
+            global _STRATEGY_EVOLUTION, _FREQUENCY_CONF_STATE
+            with _AGENT_LOCK:
+                _STRATEGY_EVOLUTION={"active":dict(_DEFAULT_STRATEGY_PROFILE),"champion":dict(_DEFAULT_STRATEGY_PROFILE),"challengers":[],"revisions":0,"last_evaluated_cycle":0,"last_reason":"full reset"}
+                _FREQUENCY_CONF_STATE={"bias":0.0,"mode":"MAINTAIN","last_reason":"full reset","last_update_at":time.time(),"windows":0}
+                _strategy_evolution_save(); _frequency_confidence_persist()
+            return "🧠 <b>FULL RESET</b>\nLearning memory + strategy evolution direset. Trading position/ledger execution tidak disentuh."
+        if action in {"review","research"}:
+            rep=adaptive_research_cycle()
+            try: rep["strategy_evolution"]=_strategy_evolution_cycle_v50()
+            except Exception: pass
+            return _v32_research_text(rep)
+        st=_orchestrator_status()
+        return ("🧠 <b>FULL LEARNING STATUS</b>\n"
+                f"Strategy aktif: <b>{html.escape(str(st['active_strategy']))}</b>\n"
+                f"Revisions: <b>{int(st['strategy_evolution'].get('revisions',0) or 0)}</b>\n"
+                f"Threshold: <b>{get_active_confidence_threshold()}%</b>\n"
+                f"Frequency: <b>{html.escape(str(st['frequency_confidence'].get('mode','MAINTAIN')))}</b>\n"
+                f"Worker: <b>{'ON' if st['adaptive'].get('worker_alive') else 'OFF'}</b> | ticks: <b>{int(st['adaptive'].get('ticks',0) or 0)}</b>")
+    except Exception as exc:
+        log.exception("[FULL] orchestrator error")
+        return f"❌ <b>FULL gagal</b>\n<code>{html.escape(str(exc)[:400])}</code>"
+
+
+def get_strategy_evolution_status():
+    with _AGENT_LOCK:
+        a=dict(_STRATEGY_EVOLUTION.get("active") or _DEFAULT_STRATEGY_PROFILE)
+        return {"active_version":a.get("version","S0"),"champion_version":(_STRATEGY_EVOLUTION.get("champion") or {}).get("version","S0"),"revisions":int(_STRATEGY_EVOLUTION.get("revisions",0) or 0),"challengers":[dict(x) for x in (_STRATEGY_EVOLUTION.get("challengers") or [])],"last_reason":str(_STRATEGY_EVOLUTION.get("last_reason","startup"))}
+
+
+
+__all__ = list(dict.fromkeys(globals().get("__all__",[]) + ["get_active_confidence_threshold","set_manual_confidence_threshold","get_active_strategy_profile","get_strategy_evolution_status","full_command","full_analyze","manage_position"]))

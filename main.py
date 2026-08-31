@@ -82,7 +82,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v37_FINAL_OBJECTIVE_ADAPTIVE"
+MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v42_CLEAN_ARCH"
 
 # Stable body / replaceable brain contract.
 # main.py owns Binance, Telegram, execution, protection and runtime state.
@@ -286,656 +286,149 @@ trade_sequence = 0
 research_run_id = datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
 
 
-# ==================== MACHINE LEARNING ====================
-ML_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", str(Path(__file__).resolve().parent / "machine_learning_state")))
-ML_STATE_FILE = ML_STATE_DIR / "full_learning_state.json"
-ML_EXPERIENCE_FILE = ML_STATE_DIR / "experience.jsonl"
-ML_LOCK = threading.RLock()
+# ==================== BRAIN INTERFACE (BODY ONLY) ====================
+# main.py is the execution body. All learning, adaptive policy, strategy evolution,
+# confidence adaptation, historical research and Ollama reasoning live in strategy_logic.py.
+STRATEGY_CONFIDENCE_THRESHOLD = 60
 FULL_MODE = False
 FULL_THREAD = None
 FULL_WAKE = threading.Event()
 FULL_STOP = threading.Event()
 FULL_MANUAL_THRESHOLD_SAVED = None
-FULL_TRAIN_INTERVAL = max(120, int(os.getenv("FULL_TRAIN_INTERVAL_SEC", "300")))
-FULL_RETRAIN_MIN_NEW = max(1, int(os.getenv("FULL_RETRAIN_MIN_NEW", "3")))
+FULL_MIN_TRAIN_SAMPLES = 30
 FULL_LAST_TRAINED_COUNT = 0
-FULL_MIN_TRAIN_SAMPLES = max(8, int(os.getenv("FULL_MIN_TRAIN_SAMPLES", "12")))
-FULL_MIN_VALIDATION_SAMPLES = max(4, int(os.getenv("FULL_MIN_VALIDATION_SAMPLES", "4")))
-FULL_PROMOTION_MIN_IMPROVEMENT = float(os.getenv("FULL_PROMOTION_MIN_IMPROVEMENT", "0.01"))
-FULL_ALLOWED_THRESHOLDS = list(range(35, 81))
-# Adaptive confidence/frequency controller: FULL mode keeps a healthy opportunity
-# supply instead of becoming progressively stricter just because some trades lose.
-FULL_FREQ_TARGET_MIN = max(1, int(os.getenv("FULL_FREQ_TARGET_MIN", "2")))
-FULL_FREQ_TARGET_MAX = max(FULL_FREQ_TARGET_MIN + 1, int(os.getenv("FULL_FREQ_TARGET_MAX", "6")))
-FULL_FREQ_WINDOW_SCANS = max(3, int(os.getenv("FULL_FREQ_WINDOW_SCANS", "4")))
-FULL_FREQ_ADJUST_STEP = max(1, int(os.getenv("FULL_FREQ_ADJUST_STEP", "2")))
-FULL_FREQ_MIN_THRESHOLD = max(35, int(os.getenv("FULL_FREQ_MIN_THRESHOLD", "40")))
-FULL_FREQ_MAX_THRESHOLD = min(80, int(os.getenv("FULL_FREQ_MAX_THRESHOLD", "72")))
+ML_STATE = {}
+ML_EXPERIENCE = []
+ML_EXPERIENCE_LOCK = threading.RLock()
+ML_LOCK = threading.RLock()
+FULL_TRAIN_INTERVAL = 300
+FULL_RETRAIN_MIN_NEW = 3
+FULL_MIN_VALIDATION_SAMPLES = 10
+FULL_PROMOTION_MIN_IMPROVEMENT = 0.01
+FULL_ALLOWED_THRESHOLDS = list(range(35,81))
+FULL_MIN_COVERAGE = 0.25
 FULL_ADAPTIVE_THRESHOLD_BASE = None
-FULL_ML_SUGGESTED_THRESHOLD = None
 FULL_ADAPTIVE_THRESHOLD_LAST_REASON = "startup"
 FULL_ADAPTIVE_THRESHOLD_LAST_AT = 0.0
-FULL_MIN_COVERAGE = 0.25
+FULL_FREQ_MIN_THRESHOLD = 40
+FULL_FREQ_MAX_THRESHOLD = 72
+FULL_ML_SUGGESTED_THRESHOLD = 60
 SCAN_MAX_DURATION_SEC = max(60, int(os.getenv("SCAN_MAX_DURATION_SEC", "180")))
-ML_FEATURE_NAMES = [
-    "direction_confidence", "setup_quality", "entry_location_score", "rr",
-    "range_position", "rsi_timing_score", "direction_edge", "m15_trigger_count",
-    "poi_reacted", "selected_sweep", "m15_structure_alignment", "htf_alignment",
-    "macro_alignment", "m15_relative_volume", "fib_position", "atr_pct_proxy",
-    "entry_distance_atr", "risk_atr", "target_distance_atr", "data_quality",
-    "entry_ob", "entry_fvg", "entry_eq", "entry_sweep", "entry_breakout",
-    "entry_pullback", "htf_conflict", "m15_ranging"
-]
 
 
-def _ml_default_state():
-    return {
-        "schema": "machine_Learning_v2",
-        "feature_names": list(ML_FEATURE_NAMES),
-        "champion": None,
-        "previous_champion": None,
-        "last_training_at": None,
-        "last_training_samples": 0,
-        "last_training_result": None,
-        "drift": {"status": "UNKNOWN", "score": 0.0},
-        "learning_cycles": 0,
-        "promotion_count": 0,
-    }
-
-
-def _ml_load_state():
+def _brain_status():
+    fn = globals().get("get_adaptive_status")
     try:
-        ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
-        if not ML_STATE_FILE.exists():
-            return _ml_default_state()
-        data = json.loads(ML_STATE_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else _ml_default_state()
-    except Exception as e:
-        log.warning(f"[ML] state load gagal: {e}")
-        return _ml_default_state()
-
-
-ML_STATE = _ml_load_state()
-
-def _ml_model_compatible(model):
-    if not isinstance(model, dict):
-        return False
-    if str(model.get("schema") or "") != "machine_Learning_v2":
-        return False
-    names = model.get("feature_names")
-    if not isinstance(names, list) or names != list(ML_FEATURE_NAMES):
-        return False
-    n = len(ML_FEATURE_NAMES)
-    try:
-        return all(len(model.get(k, [])) == n for k in ("mean", "scale", "w", "rw"))
+        return fn() if callable(fn) else {}
     except Exception:
-        return False
-
-ML_EXPERIENCE_LOCK = threading.RLock()
-ML_EXPERIENCE = []
+        return {}
 
 
-def _ml_load_experience():
+def _brain_full_status():
+    fn = globals().get("get_full_cognitive_status") or globals().get("get_v32_status")
     try:
-        ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
-        if not ML_EXPERIENCE_FILE.exists():
-            return []
-        rows = []
-        with ML_EXPERIENCE_FILE.open("r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    obj = json.loads(line)
-                    if isinstance(obj, dict):
-                        rows.append(obj)
-                except Exception:
-                    continue
-        return rows[-10000:]
-    except Exception as e:
-        log.warning(f"[ML] experience load gagal: {e}")
-        return []
-
-
-ML_EXPERIENCE = _ml_load_experience()
-
-
-def _ml_append_experience(record):
-    if not isinstance(record, dict) or not isinstance(record.get("learning_features"), dict):
-        return
-    sample = {
-        "trade_uid": record.get("trade_uid"),
-        "entry_time": record.get("entry_time"),
-        "exit_time": record.get("exit_time"),
-        "result": record.get("result"),
-        "final_r": record.get("final_r"),
-        "pnl_usd": record.get("pnl_usd"),
-        "confidence": record.get("confidence"),
-        "learning_features": record.get("learning_features"),
-        "ml_model_version": record.get("ml_model_version", "static"),
-    }
-    try:
-        with ML_EXPERIENCE_LOCK:
-            key = str(sample.get("trade_uid") or "")
-            if key and any(str(x.get("trade_uid") or "") == key for x in ML_EXPERIENCE[-200:]):
-                return
-            ML_EXPERIENCE.append(sample)
-            if len(ML_EXPERIENCE) > 10000:
-                del ML_EXPERIENCE[:-10000]
-            ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
-            with ML_EXPERIENCE_FILE.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(sample, ensure_ascii=False, allow_nan=False, default=str) + "\n")
-    except Exception as e:
-        log.warning(f"[ML] experience append gagal: {e}")
-
-
-
-def _ml_save_state():
-    try:
-        ML_STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = ML_STATE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(ML_STATE, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
-        os.replace(tmp, ML_STATE_FILE)
-    except Exception as e:
-        log.warning(f"[ML] state save gagal: {e}")
-
-
-# Validate persisted model only after the save helper is defined.
-# Incompatible old models are discarded safely; they are never padded or coerced.
-with ML_LOCK:
-    if not _ml_model_compatible(ML_STATE.get("champion")):
-        ML_STATE["previous_champion"] = None
-        ML_STATE["champion"] = None
-    if not _ml_model_compatible(ML_STATE.get("last_challenger")):
-        ML_STATE["last_challenger"] = None
-    _ml_save_state()
-
-
-def _strategy_set_ml_model(model):
-    setter = globals().get("set_learning_model")
-    if callable(setter):
-        try:
-            setter(model)
-        except Exception as e:
-            log.warning(f"[ML] gagal bind model ke strategy: {e}")
+        return fn() if callable(fn) else {}
+    except Exception:
+        return {}
 
 
 def _ml_current_champion():
-    with ML_LOCK:
-        c = ML_STATE.get("champion")
-        return dict(c) if isinstance(c, dict) else None
+    info = _brain_status()
+    evo = (info or {}).get("strategy_evolution") or {}
+    return evo.get("champion") if isinstance(evo, dict) else None
 
 
 def _ml_sync_strategy():
-    _strategy_set_ml_model(_ml_current_champion())
+    return None
 
 
-def _ml_feature_vector(record):
-    feats = record.get("learning_features")
-    if not isinstance(feats, dict):
-        return None
-    try:
-        return np.asarray([float(feats.get(k, 0.0) or 0.0) for k in ML_FEATURE_NAMES], dtype=float)
-    except Exception:
-        return None
+def _ml_record_signal_metadata(signal):
+    if isinstance(signal, dict):
+        signal.setdefault("ml_schema", "brain_v50")
+        signal.setdefault("ml_model_version", "brain")
 
 
-def _ml_collect_samples():
-    with trade_history_lock:
-        hist = [dict(x) for x in trade_history]
-    with ML_EXPERIENCE_LOCK:
-        persisted = [dict(x) for x in ML_EXPERIENCE]
-    adaptive_records=[]
-    try:
-        fn_records=globals().get("get_adaptive_learning_records")
-        if callable(fn_records): adaptive_records=fn_records(limit=12000)
-    except Exception as exc:
-        log.debug(f"[ML] adaptive records unavailable: {exc}")
-    combined = {}
-    for row in persisted + hist + adaptive_records:
-        key = str(row.get("trade_uid") or f"{row.get('symbol','')}|{row.get('entry_time','')}|{row.get('exit_time','')}")
-        combined[key] = row
-    samples = []
-    for t in combined.values():
-        x = _ml_feature_vector(t)
-        if x is None:
-            continue
-        try:
-            fr = float(t.get("final_r"))
-        except (TypeError, ValueError):
-            fr = None
-        if fr is None:
-            try:
-                fr = float(t.get("pnl_usd", 0.0))
-            except Exception:
-                fr = 0.0
-        result = str(t.get("result") or "sl").lower()
-        y = 1.0 if fr > 0 and result not in {"strategy_error", "data_error"} else 0.0
-        expected = max(-3.0, min(3.0, fr))
-        try:
-            baseline_conf = float(t.get("confidence", 50.0) or 50.0) / 100.0
-        except (TypeError, ValueError):
-            baseline_conf = 0.5
-        samples.append((t.get("exit_time") or t.get("entry_time") or 0, x, y, expected, baseline_conf))
-    samples.sort(key=lambda r: float(r[0] or 0))
-    return samples
-
-def _ml_sigmoid(z):
-    z = np.clip(z, -35.0, 35.0)
-    return 1.0 / (1.0 + np.exp(-z))
-
-
-def _ml_fit(X, y, r_targets, reg=1.0, epochs=250, lr=0.03):
-    mean = np.mean(X, axis=0)
-    scale = np.std(X, axis=0)
-    scale[scale < 1e-8] = 1.0
-    Z = (X - mean) / scale
-    w = np.zeros(Z.shape[1], dtype=float)
-    b = 0.0
-    rw = np.zeros(Z.shape[1], dtype=float)
-    rb = float(np.mean(r_targets)) if len(r_targets) else 0.0
-    n = max(1, len(Z))
-    for _ in range(epochs):
-        p = _ml_sigmoid(Z @ w + b)
-        gw = (Z.T @ (p - y)) / n + (reg / n) * w
-        gb = float(np.mean(p - y))
-        w -= lr * gw
-        b -= lr * gb
-        pred_r = Z @ rw + rb
-        grw = (Z.T @ (pred_r - r_targets)) / n + (reg / n) * rw
-        grb = float(np.mean(pred_r - r_targets))
-        rw -= lr * grw
-        rb -= lr * grb
-    return {"mean": mean.tolist(), "scale": scale.tolist(), "w": w.tolist(), "b": b, "rw": rw.tolist(), "rb": rb}
-
-
-def _ml_predict_model(model, X):
-    mean = np.asarray(model["mean"], dtype=float)
-    scale = np.asarray(model["scale"], dtype=float)
-    w = np.asarray(model["w"], dtype=float)
-    b = float(model.get("b", 0.0))
-    Z = (X - mean) / np.maximum(scale, 1e-8)
-    p = _ml_sigmoid(Z @ w + b)
-    rw = np.asarray(model.get("rw", np.zeros_like(w)), dtype=float)
-    rb = float(model.get("rb", 0.0))
-    er = Z @ rw + rb
-    return p, er
-
-
-def _ml_score_from_expected_r(expected_r):
-    return 50.0 + 25.0 * np.tanh(np.asarray(expected_r, dtype=float))
-
-
-def _ml_eval_predictions(p, rs, threshold):
-    mask = p * 100.0 >= threshold
-    if int(mask.sum()) < 1:
-        return None
-    actual = rs[mask]
-    avg_r = float(np.mean(actual))
-    equity = 0.0
-    peak = 0.0
-    dd = 0.0
-    for r in actual:
-        equity += float(r)
-        peak = max(peak, equity)
-        dd = max(dd, peak - equity)
-    win = float(np.mean(actual > 0)) if len(actual) else 0.0
-    calibration = 1.0 - abs(float(np.mean(p[mask])) - win)
-    coverage = float(mask.sum()) / max(1, len(rs))
-    required = max(5, int(np.ceil(len(rs) * FULL_MIN_COVERAGE)))
-    if int(mask.sum()) < required:
-        return None
-    # Frequency is an explicit objective. A candidate model that only works
-    # on a tiny sliver of opportunities must pay a penalty, even when avg R is
-    # attractive. This keeps FULL learning from becoming progressively silent.
-    target_coverage = 0.30
-    coverage_bonus = 0.12 * coverage
-    low_coverage_penalty = 0.35 * max(0.0, target_coverage - coverage)
-    objective = avg_r - 0.12 * dd + 0.18 * calibration + coverage_bonus - low_coverage_penalty
-    return {"objective": float(objective), "threshold": int(threshold), "n": int(mask.sum()),
-            "coverage": coverage, "avg_r": avg_r, "win_rate": win,
-            "max_dd_r": dd, "calibration": calibration, "frequency_score": coverage - low_coverage_penalty}
-
-
-def _ml_eval_candidate(model, samples):
-    if not samples:
-        return {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
-    X = np.vstack([s[1] for s in samples])
-    rs = np.asarray([s[3] for s in samples], dtype=float)
-    _p, er = _ml_predict_model(model, X)
-    p = np.clip(_ml_score_from_expected_r(er) / 100.0, 0.0, 1.0)
-    best = None
-    for threshold in FULL_ALLOWED_THRESHOLDS:
-        candidate = _ml_eval_predictions(p, rs, threshold)
-        if candidate is not None and (best is None or candidate["objective"] > best["objective"]):
-            best = candidate
-    return best or {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
-
-
-def _ml_eval_baseline(samples):
-    if not samples:
-        return {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
-    p = np.asarray([s[4] for s in samples], dtype=float)
-    rs = np.asarray([s[3] for s in samples], dtype=float)
-    best = None
-    for threshold in FULL_ALLOWED_THRESHOLDS:
-        candidate = _ml_eval_predictions(p, rs, threshold)
-        if candidate is not None and (best is None or candidate["objective"] > best["objective"]):
-            best = candidate
-    return best or {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
-
-def _ml_train_once(force=False):
-    global ML_STATE
-    samples = _ml_collect_samples()
-    now = datetime.now(WIB).isoformat()
-    if len(samples) < FULL_MIN_TRAIN_SAMPLES:
-        with ML_LOCK:
-            ML_STATE["last_training_at"] = now
-            ML_STATE["last_training_samples"] = len(samples)
-            ML_STATE["last_training_result"] = {"status": "INSUFFICIENT_DATA", "samples": len(samples)}
-            _ml_save_state()
-        return False
-
-    split = int(len(samples) * 0.70)
-    if len(samples) - split < FULL_MIN_VALIDATION_SAMPLES:
-        split = len(samples) - FULL_MIN_VALIDATION_SAMPLES
-    train = samples[:split]
-    valid = samples[split:]
-    Xtr = np.vstack([s[1] for s in train])
-    ytr = np.asarray([s[2] for s in train], dtype=float)
-    rtr = np.asarray([s[3] for s in train], dtype=float)
-
-    best = None
-    for reg in (0.1, 0.3, 1.0, 3.0, 10.0):
-        params = _ml_fit(Xtr, ytr, rtr, reg=reg)
-        evaluation = _ml_eval_candidate(params, valid)
-        evaluation["reg"] = reg
-        if best is None or evaluation["objective"] > best["evaluation"]["objective"]:
-            best = {"params": params, "evaluation": evaluation}
-    if best is None:
-        return False
-
-    candidate_score = float(best["evaluation"].get("objective", -999.0))
-    baseline_eval = _ml_eval_baseline(valid)
-    champion = _ml_current_champion()
-    champion_eval = {"objective": -999.0, "threshold": 60, "n": 0, "coverage": 0.0}
-    if champion:
-        try:
-            champion_eval = _ml_eval_candidate(champion, valid)
-        except Exception as e:
-            log.warning(f"[ML] champion evaluation gagal: {e}")
-
-    best_reference = max(float(baseline_eval.get("objective", -999.0)), float(champion_eval.get("objective", -999.0)))
-    promote = candidate_score >= best_reference + FULL_PROMOTION_MIN_IMPROVEMENT
-    if champion is None and candidate_score < baseline_eval.get("objective", -999.0) + FULL_PROMOTION_MIN_IMPROVEMENT:
-        promote = False
-
-    candidate = dict(best["params"])
-    candidate.update({
-        "schema": "machine_Learning_v2",
-        "feature_names": list(ML_FEATURE_NAMES),
-        "active": bool(promote),
-        "model_version": f"ML-{int(time.time())}",
-        "sample_count": len(samples),
-        "train_samples": len(train),
-        "validation_samples": len(valid),
-        "validation_objective": candidate_score,
-        "validation": best["evaluation"],
-        "confidence_min": int(best["evaluation"].get("threshold", 60)),
-        "live_weight": 0.35,
-        "baseline_validation": baseline_eval,
-        "champion_validation": champion_eval,
-    })
-
-    with ML_LOCK:
-        ML_STATE["learning_cycles"] = int(ML_STATE.get("learning_cycles", 0)) + 1
-        ML_STATE["last_training_at"] = now
-        ML_STATE["last_training_samples"] = len(samples)
-        ML_STATE["last_training_result"] = {
-            "status": "PROMOTED" if promote else "CHALLENGER",
-            "candidate": best["evaluation"],
-            "baseline": baseline_eval,
-            "champion": champion_eval,
-        }
-        if promote:
-            ML_STATE["previous_champion"] = ML_STATE.get("champion")
-            ML_STATE["champion"] = candidate
-            ML_STATE["promotion_count"] = int(ML_STATE.get("promotion_count", 0)) + 1
-        ML_STATE["last_challenger"] = candidate
-        _ml_save_state()
-
-    if promote:
-        _ml_sync_strategy()
-        if FULL_MODE:
-            global FULL_ML_SUGGESTED_THRESHOLD
-            FULL_ML_SUGGESTED_THRESHOLD = int(candidate.get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD))
-        log.info(f"[ML] Champion promoted {candidate['model_version']} model_threshold={candidate['confidence_min']} objective={candidate_score:.4f}")
-    else:
-        log.info(f"[ML] Challenger rejected/retained objective={candidate_score:.4f}; baseline={float(baseline_eval.get('objective',-999)):.4f}; champion={float(champion_eval.get('objective',-999)):.4f}")
-    return promote
-
-def _ml_learning_loop():
-    global FULL_LAST_TRAINED_COUNT
-    while not FULL_STOP.is_set():
-        try:
-            if FULL_MODE:
-                current_count = len(ML_EXPERIENCE)
-                if current_count >= FULL_MIN_TRAIN_SAMPLES and (current_count - FULL_LAST_TRAINED_COUNT) >= FULL_RETRAIN_MIN_NEW:
-                    _ml_train_once()
-                    FULL_LAST_TRAINED_COUNT = current_count
-            # Confidence threshold adapts from multi-scan opportunity frequency.
-            if FULL_MODE:
-                _full_frequency_adjust()
-        except Exception as e:
-            log.exception(f"[ML] learning cycle gagal: {e}")
-        FULL_WAKE.wait(FULL_TRAIN_INTERVAL)
-        FULL_WAKE.clear()
+def _full_controller_state():
+    st = _brain_status()
+    evo = st.get("strategy_evolution") or {}
+    fs = st.get("frequency_confidence") or {}
+    return {
+        "mode": bool(FULL_MODE),
+        "champion": (evo.get("champion") if isinstance(evo, dict) else None),
+        "experience_samples": int(((st.get("live") or {}).get("outcomes",0)) or 0),
+        "learning_cycles": int(st.get("ticks",0) or 0),
+        "promotion_count": int((evo.get("revisions",0) if isinstance(evo,dict) else 0) or 0),
+        "last_training_samples": int(((st.get("live") or {}).get("outcomes",0)) or 0),
+        "last_status": "ACTIVE" if st.get("worker_alive") else "OFF",
+        "manual_threshold": int(STRATEGY_CONFIDENCE_THRESHOLD),
+        "minimum_training_samples": int(FULL_MIN_TRAIN_SAMPLES),
+        "frequency_confidence": fs,
+        "strategy_evolution": evo,
+    }
 
 
 def _full_status_text():
-    champion = _ml_current_champion()
-    with ML_LOCK:
-        cycles = int(ML_STATE.get("learning_cycles", 0))
-        promotions = int(ML_STATE.get("promotion_count", 0))
-        last = ML_STATE.get("last_training_result") or {}
-        last_samples = int(ML_STATE.get("last_training_samples", 0) or 0)
-    if champion:
-        return (f"🧠 <b>FULL LEARNING</b>: {'ON' if FULL_MODE else 'OFF'}\n"
-                f"Champion: <code>{html.escape(str(champion.get('model_version')))}</code>\n"
-                f"Samples: <b>{int(champion.get('sample_count',0) or 0)}</b> | OOS: <b>{int(champion.get('validation_samples',0) or 0)}</b>\n"
-                f"Confidence min ML: <b>{int(champion.get('confidence_min',60) or 60)}%</b>\n"
-                f"Objective OOS: <b>{float(champion.get('validation_objective',0) or 0):.4f}</b>\n"
-                f"Learning cycles: <b>{cycles}</b> | Promotions: <b>{promotions}</b>\n"
-                f"Last samples: <b>{last_samples}</b> | Last status: <b>{html.escape(str(last.get('status','—')))}</b>\n"
-                f"Adaptive threshold: <b>{int(STRATEGY_CONFIDENCE_THRESHOLD)}%</b> | ML hint: <b>{str(FULL_ML_SUGGESTED_THRESHOLD or '—')}</b> | {html.escape(str(FULL_ADAPTIVE_THRESHOLD_LAST_REASON))}\n"
-                f"Effective confidence bias: <b>{float((globals().get('get_frequency_confidence_adjustment')() if callable(globals().get('get_frequency_confidence_adjustment')) else 0.0)):+.2f}</b>\n"
-                 f"Strategy evolution: <b>{html.escape(str((globals().get('get_strategy_evolution_status')() if callable(globals().get('get_strategy_evolution_status')) else {}).get('active_version','—')))}</b>")
+    st = _brain_status(); evo=st.get("strategy_evolution") or {}; fs=st.get("frequency_confidence") or {}
+    active=(evo.get("active_version") if isinstance(evo,dict) else None) or "S0"
     return (f"🧠 <b>FULL LEARNING</b>: {'ON' if FULL_MODE else 'OFF'}\n"
-            f"Champion: <b>Belum ada</b>\nLearning cycles: <b>{cycles}</b> | Samples: <b>{last_samples}</b>\n"
-            f"Minimum training samples: <b>{FULL_MIN_TRAIN_SAMPLES}</b>")
-
-
-def _full_frequency_adjust():
-    """Adapt the live acceptance gate from RAW confidence opportunity data.
-
-    Raw confidence is the strategy quality score. This controller changes only
-    the effective acceptance gate and a tiny brain-side frequency bias, using a
-    rolling window so one scan or one SL cannot cause a large reaction.
-    """
-    global STRATEGY_CONFIDENCE_THRESHOLD, FULL_ADAPTIVE_THRESHOLD_BASE
-    global FULL_ADAPTIVE_THRESHOLD_LAST_REASON, FULL_ADAPTIVE_THRESHOLD_LAST_AT
-    if not FULL_MODE:
-        return STRATEGY_CONFIDENCE_THRESHOLD
-    try:
-        with scan_quality_lock:
-            rows = [dict(x) for x in scan_quality_history if str(x.get("run_id")) == str(research_run_id)]
-        window = rows[-max(FULL_FREQ_WINDOW_SCANS, 4):]
-        if len(window) < max(FULL_FREQ_WINDOW_SCANS, 4):
-            return STRATEGY_CONFIDENCE_THRESHOLD
-        import statistics as st
-        med_q = float(st.median(int(r.get("qualified_count", 0) or 0) for r in window))
-        med_a = float(st.median(int(r.get("symbols_analyzed", 0) or 0) for r in window))
-        med_near = float(st.median(int(r.get("near_threshold_count", 0) or 0) for r in window))
-        med_c = float(st.median(sum(int(v) for v in (r.get("confidence_bands") or {}).values()) for r in window))
-        med_lower = float(st.median(int(sum((r.get("confidence_bands") or {}).get(str(max(0, int(r.get("active_threshold", STRATEGY_CONFIDENCE_THRESHOLD) or STRATEGY_CONFIDENCE_THRESHOLD)-5)), 0) for _ in [0]) or 0) for r in window)) if False else 0.0
-        lower_vals=[]
-        for r in window:
-            bands=r.get("confidence_bands") or {}
-            gate=int(r.get("active_threshold") or STRATEGY_CONFIDENCE_THRESHOLD)
-            band=str(max(0, (gate//5)*5 - 5))
-            lower_vals.append(int(bands.get(band,0) or 0))
-        med_lower=float(st.median(lower_vals)) if lower_vals else 0.0
-        nearq_vals=[]
-        for r in window:
-            bands=r.get("confidence_bands") or {}
-            gate=int(r.get("active_threshold") or STRATEGY_CONFIDENCE_THRESHOLD)
-            values=[]
-            for b in range(0,100,5):
-                if abs(b - gate) <= 5:
-                    n=int(bands.get(str(b),0) or 0)
-                    values.extend([b+2.5]*n)
-            if values: nearq_vals.extend(values)
-        nearq=float(st.mean(nearq_vals)) if nearq_vals else float(st.mean(float(r.get("avg_confidence",0) or 0) for r in window))
-        lower_quality=float(nearq) if med_lower > 0 else 0.0
-        current=int(STRATEGY_CONFIDENCE_THRESHOLD)
-        if FULL_ADAPTIVE_THRESHOLD_BASE is None:
-            FULL_ADAPTIVE_THRESHOLD_BASE=current
-        metrics={
-            "median_qualified_per_scan":med_q,
-            "median_analyzed_per_scan":med_a,
-            "median_near_threshold_per_scan":med_near,
-            "median_candidate_per_scan":med_c,
-            "near_threshold_quality":nearq,
-            "lower_band_quality":lower_quality,
-            "target_min":FULL_FREQ_TARGET_MIN,
-            "target_max":FULL_FREQ_TARGET_MAX,
-            "model_threshold_hint":FULL_ML_SUGGESTED_THRESHOLD,
-        }
-        updater=globals().get("update_frequency_confidence_state")
-        state=updater(metrics) if callable(updater) else {}
-        # One-point hard-gate movement only after the soft confidence bias has
-        # accumulated enough evidence. The gate never jumps on one scan.
-        sugg=globals().get("suggest_confidence_threshold")
-        proposed=int(sugg(metrics,current_threshold=current)) if callable(sugg) else current
-        proposed=max(FULL_FREQ_MIN_THRESHOLD,min(FULL_FREQ_MAX_THRESHOLD,proposed))
-        bias=float((state or {}).get("bias",0.0) or 0.0)
-        if abs(bias) < 1.0:
-            proposed=current
-        if proposed<current:
-            mode="RELAX"
-        elif proposed>current:
-            mode="TIGHTEN"
-        else:
-            mode="MAINTAIN"
-        if proposed != current:
-            STRATEGY_CONFIDENCE_THRESHOLD=int(proposed)
-        reason=(f"{mode}: qualified={med_q:.2f}, candidates={med_c:.1f}, near={med_near:.1f}, "
-                f"near_quality={nearq:.1f}, bias={bias:+.2f}, model_hint={FULL_ML_SUGGESTED_THRESHOLD}")
-        FULL_ADAPTIVE_THRESHOLD_LAST_REASON=reason
-        FULL_ADAPTIVE_THRESHOLD_LAST_AT=time.time()
-        log.info(f"[FULL][CONFIDENCE] {current}% -> {STRATEGY_CONFIDENCE_THRESHOLD}% | {reason}")
-        return STRATEGY_CONFIDENCE_THRESHOLD
-    except Exception as exc:
-        log.debug(f"[FULL][CONFIDENCE] frequency adjust gagal: {exc}")
-        return STRATEGY_CONFIDENCE_THRESHOLD
+            f"Brain worker: <b>{'ON' if st.get('worker_alive') else 'OFF'}</b> | ticks: <b>{int(st.get('ticks',0) or 0)}</b>\n"
+            f"Strategy aktif: <b>{html.escape(str(active))}</b>\n"
+            f"Strategy revisions: <b>{int((evo.get('revisions',0) if isinstance(evo,dict) else 0) or 0)}</b>\n"
+            f"Adaptive threshold: <b>{int(STRATEGY_CONFIDENCE_THRESHOLD)}%</b>\n"
+            f"Frequency mode: <b>{html.escape(str(fs.get('mode','MAINTAIN')))}</b>\n"
+            f"Last error: <b>{html.escape(str(st.get('last_error') or '—')[:160])}</b>")
 
 
 def _full_on():
-    global FULL_MODE, FULL_THREAD, FULL_MANUAL_THRESHOLD_SAVED, FULL_ADAPTIVE_THRESHOLD_BASE, FULL_ML_SUGGESTED_THRESHOLD
-    global STRATEGY_CONFIDENCE_THRESHOLD
-    with ML_LOCK:
-        if not FULL_MODE:
-            FULL_MANUAL_THRESHOLD_SAVED = int(STRATEGY_CONFIDENCE_THRESHOLD)
-        FULL_MODE = True
-        os.environ["FULL_LEARNING_ACTIVE"] = "1"
-        champion=_ml_current_champion()
-        if champion and FULL_ADAPTIVE_THRESHOLD_BASE is None:
-            FULL_ML_SUGGESTED_THRESHOLD=int(champion.get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD) or STRATEGY_CONFIDENCE_THRESHOLD)
-            STRATEGY_CONFIDENCE_THRESHOLD=int(max(FULL_FREQ_MIN_THRESHOLD,min(FULL_FREQ_MAX_THRESHOLD,FULL_ML_SUGGESTED_THRESHOLD)))
-        FULL_ADAPTIVE_THRESHOLD_BASE = int(STRATEGY_CONFIDENCE_THRESHOLD)
-        FULL_STOP.clear()
-        FULL_WAKE.set()
-    _ml_sync_strategy()
+    global FULL_MODE, FULL_THREAD, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED
+    if not FULL_MODE:
+        FULL_MANUAL_THRESHOLD_SAVED = int(STRATEGY_CONFIDENCE_THRESHOLD)
+    FULL_MODE = True
+    os.environ["FULL_LEARNING_ACTIVE"] = "1"
+    fn = globals().get("adaptive_agent_start")
+    if callable(fn): fn()
     if FULL_THREAD is None or not FULL_THREAD.is_alive():
-        FULL_THREAD = threading.Thread(target=_ml_learning_loop, name="full-learning", daemon=True)
+        FULL_THREAD = threading.Thread(target=lambda: None, name="body-full-compat", daemon=True)
         FULL_THREAD.start()
-    FULL_WAKE.set()
     return _full_status_text()
 
 
 def _full_off():
-    global FULL_MODE, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED, FULL_ADAPTIVE_THRESHOLD_BASE
-    with ML_LOCK:
-        FULL_MODE = False
-        os.environ["FULL_LEARNING_ACTIVE"] = "0"
-        FULL_WAKE.clear()
-        if FULL_MANUAL_THRESHOLD_SAVED is not None:
-            STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
-            FULL_MANUAL_THRESHOLD_SAVED = None
-        FULL_ADAPTIVE_THRESHOLD_BASE = None
+    global FULL_MODE, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED, FULL_THREAD
+    FULL_MODE = False
+    os.environ["FULL_LEARNING_ACTIVE"] = "0"
+    fn = globals().get("adaptive_agent_stop")
+    if callable(fn): fn()
+    if FULL_MANUAL_THRESHOLD_SAVED is not None:
+        STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
+        FULL_MANUAL_THRESHOLD_SAVED = None
+    FULL_THREAD = None
     return _full_status_text()
 
 
 def _full_reset_internal():
-    global FULL_MODE, FULL_THREAD, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED, FULL_LAST_TRAINED_COUNT
-    with ML_LOCK:
-        FULL_MODE = False
-        FULL_WAKE.clear()
-        FULL_STOP.set()
-        ML_STATE.clear()
-        ML_STATE.update(_ml_default_state())
-        _strategy_set_ml_model(None)
-        if FULL_MANUAL_THRESHOLD_SAVED is not None:
-            STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
-            FULL_MANUAL_THRESHOLD_SAVED = None
-        _ml_save_state()
-    with ML_EXPERIENCE_LOCK:
-        ML_EXPERIENCE.clear()
-    try:
-        ML_EXPERIENCE_FILE.unlink(missing_ok=True)
-    except Exception as e:
-        log.warning(f"[ML] reset experience file gagal: {e}")
-    FULL_LAST_TRAINED_COUNT = 0
-    FULL_THREAD = None
-    FULL_STOP.clear()
+    global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED, STRATEGY_CONFIDENCE_THRESHOLD
+    FULL_MODE = False
+    os.environ["FULL_LEARNING_ACTIVE"] = "0"
+    fn = globals().get("reset_adaptive_learning") or globals().get("reset_cognitive_memory")
+    if callable(fn):
+        try: fn()
+        except TypeError: fn
+    if FULL_MANUAL_THRESHOLD_SAVED is not None:
+        STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
+        FULL_MANUAL_THRESHOLD_SAVED = None
     return _full_controller_state()
-
-
-def _full_controller_state():
-    champion = _ml_current_champion()
-    with ML_LOCK:
-        last = dict(ML_STATE.get("last_training_result") or {})
-        cycles = int(ML_STATE.get("learning_cycles", 0) or 0)
-        promotions = int(ML_STATE.get("promotion_count", 0) or 0)
-    return {
-        "mode": bool(FULL_MODE),
-        "champion": champion,
-        "experience_samples": len(ML_EXPERIENCE),
-        "learning_cycles": cycles,
-        "promotion_count": promotions,
-        "last_training_samples": int(ML_STATE.get("last_training_samples", 0) or 0),
-        "last_status": last.get("status", "—"),
-        "manual_threshold": int(STRATEGY_CONFIDENCE_THRESHOLD),
-        "minimum_training_samples": int(FULL_MIN_TRAIN_SAMPLES),
-        "frequency_confidence": (globals().get("get_frequency_confidence_state")() if callable(globals().get("get_frequency_confidence_state")) else {}),
-    }
 
 
 def _full_strategy_command(action, chat_id=None):
     handler = globals().get("full_command")
     if callable(handler):
-        callbacks = {"on": _full_on, "off": _full_off, "reset": _full_reset_internal, "status": _full_controller_state}
+        callbacks={"on":_full_on,"off":_full_off,"reset":_full_reset_internal,"status":_full_controller_state}
         if chat_id is not None:
-            callbacks["notify"] = lambda msg: tg_send(chat_id, msg)
+            callbacks["notify"] = lambda msg: tg_send(chat_id,msg)
         return handler(action, callbacks)
     return _full_status_text()
 
-
-def _ml_record_signal_metadata(signal):
-    if not isinstance(signal, dict):
-        return
-    signal.setdefault("ml_schema", "machine_Learning_v2")
-    signal.setdefault("ml_model_version", signal.get("learning_model_version", "static"))
-
-_ml_sync_strategy()
 
 # Research warmup: beberapa kandidat sinyal pertama setelah /resetstats sengaja
 # ditolak tanpa dianggap trade gagal dan tanpa mengubah ban state.
@@ -1546,7 +1039,6 @@ def _run_save_checkpoint(cid):
     global FULL_THREAD
     was_full=bool(FULL_MODE)
     try:
-        FULL_STOP.set(); FULL_WAKE.set()
         if callable(globals().get("adaptive_agent_stop")): adaptive_agent_stop()
         if callable(globals().get("_v32_stop")): _v32_stop()
         if callable(globals().get("_stop_full_cognitive_worker")): _stop_full_cognitive_worker()
@@ -1560,9 +1052,9 @@ def _run_save_checkpoint(cid):
     finally:
         try:
             if was_full:
-                FULL_STOP.clear(); FULL_WAKE.set()
-                if globals().get("FULL_THREAD") is None or not globals().get("FULL_THREAD").is_alive():
-                    FULL_THREAD=threading.Thread(target=_ml_learning_loop,name="full-learning",daemon=True); FULL_THREAD.start()
+                os.environ["FULL_LEARNING_ACTIVE"]="1"
+                if callable(globals().get("adaptive_agent_start")):
+                    adaptive_agent_start()
             if callable(globals().get("_v32_start")): _v32_start()
             if callable(globals().get("adaptive_agent_start")): adaptive_agent_start()
         except Exception as restart_exc:
@@ -1599,7 +1091,6 @@ def _run_open_checkpoint(cid, checkpoint_id=None):
     global FULL_THREAD
     was_full=bool(FULL_MODE)
     try:
-        FULL_STOP.set(); FULL_WAKE.set()
         fn_stop=globals().get("adaptive_agent_stop")
         if callable(fn_stop): fn_stop()
         fn_stop_v32=globals().get("_v32_stop")
@@ -1613,19 +1104,15 @@ def _run_open_checkpoint(cid, checkpoint_id=None):
         fn_reload=globals().get("reload_learning_state")
         if not callable(fn_reload): raise RuntimeError("Brain tidak menyediakan reload_learning_state(); restore dibatalkan")
         fn_reload()
-        # Reload main ML state/experience from restored files.
-        global ML_STATE, ML_EXPERIENCE
-        ML_STATE=_ml_load_state(); ML_EXPERIENCE=_ml_load_experience(); _ml_sync_strategy()
         # Restart research workers after successful restore.
         fn_start_v32=globals().get("_v32_start")
         if callable(fn_start_v32): fn_start_v32()
         fn_start=globals().get("adaptive_agent_start")
         if callable(fn_start): fn_start()
         if was_full:
-            with ML_LOCK:
-                os.environ["FULL_LEARNING_ACTIVE"]="1"; FULL_STOP.clear(); FULL_WAKE.set()
-            if FULL_THREAD is None or not FULL_THREAD.is_alive():
-                FULL_THREAD=threading.Thread(target=_ml_learning_loop,name="full-learning",daemon=True); FULL_THREAD.start()
+            os.environ["FULL_LEARNING_ACTIVE"]="1"
+            if callable(globals().get("adaptive_agent_start")):
+                globals()["adaptive_agent_start"]()
         tg_send(cid, f"✅ <b>LEARNING OPENED</b>\nCheckpoint: <code>{html.escape(str(manifest.get('checkpoint_id','latest')))}</code>\nState belajar lama <b>diganti</b> dengan checkpoint tersebut. Posisi/trade execution tidak di-reset.")
     except Exception as e:
         log.exception("[OPEN] checkpoint gagal")
@@ -3764,7 +3251,7 @@ def run_scan_once(chat_id):
                         fn_ingest(r, h1=h1, m15=m15, d1=d1, rejected_reason=("below_threshold" if conf < STRATEGY_CONFIDENCE_THRESHOLD else None), source="binance")
                 except Exception as e:
                     log.warning(f"[COGNITIVE] candidate bridge gagal {sym}: {e}")
-                active_threshold = int(STRATEGY_CONFIDENCE_THRESHOLD)
+                active_threshold = int((globals().get("get_active_confidence_threshold")() if callable(globals().get("get_active_confidence_threshold")) and FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD))
                 strategy_gate = True
                 try:
                     fn_gate=globals().get("strategy_trade_gate")
@@ -3857,7 +3344,7 @@ def run_scan_once(chat_id):
     else:
         breadth_txt="📈 Market context: <b>belum tersedia</b>"
     rs_txt=(f"\n₿ BTC 1h: <b>{mc['btc_price_1h_pct']:+.2f}%</b> | BTC 4h: <b>{mc['btc_price_4h_pct']:+.2f}%</b>" if mc.get('btc_price_1h_pct') is not None else "")
-    active_threshold = int(STRATEGY_CONFIDENCE_THRESHOLD)
+    active_threshold = int((globals().get("get_active_confidence_threshold")() if callable(globals().get("get_active_confidence_threshold")) and FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD))
     scan_meta=f"\n\n📊 Scan: <b>{TOP_N_COINS}</b> diminta | <b>{len(symbols)}</b> tersedia | <b>{processed_symbols}</b> diproses | <b>{analyzed_symbols}</b> analisa strategy valid\n🧠 Rata-rata confidence scan: <b>{avg_txt}</b>\nThreshold aktif: <b>{active_threshold}%</b>\n{breadth_txt}{rs_txt}"
     if warmup_active: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> signal qualified dari scan ini ditolak"
     if not results:
@@ -4408,7 +3895,7 @@ def _write_research_support_files(summary):
         "market_context": {"columns": market_cols, "rows": market_rows},
         "machine_learning": _full_status_text(),
         "machine_learning_state": _ml_current_champion(),
-        "machine_learning_experience_count": len(ML_EXPERIENCE),
+        "machine_learning_experience_count": int((_brain_status().get("live") or {}).get("outcomes",0) or 0),
     }
 
     path = "/tmp/analyze_research_bundle.json"
