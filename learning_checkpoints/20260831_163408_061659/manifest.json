@@ -1,0 +1,23 @@
+{
+  "format": "adaptive-learning-checkpoint-v1",
+  "created_at": "2026-08-31T16:34:06.761882+07:00",
+  "brain_engine": "STABLE_EXECUTION_BODY_v37_FINAL_OBJECTIVE_ADAPTIVE",
+  "files": [
+    "adaptive_brain_state.json",
+    "experience.jsonl",
+    "frequency_confidence_state.json",
+    "full_learning_state.json",
+    "v32_brain_state.json",
+    "v32_experience.jsonl",
+    "v32_lessons.jsonl"
+  ],
+  "archive_sha256": "01d536d4077db64d9d314fb797dda57703c7134bc14daf3decec4e15ab240932",
+  "archive_bytes": 932253,
+  "checkpoint_id": "20260831_163408_061659",
+  "prefix": "learning_checkpoints/20260831_163408_061659",
+  "chunks": [
+    "learning_checkpoints/20260831_163408_061659/part_0000.bin",
+    "learning_checkpoints/20260831_163408_061659/part_0001.bin"
+  ],
+  "file_count": 7
+}
