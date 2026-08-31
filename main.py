@@ -3038,9 +3038,12 @@ def get_top_coins():
     coins = _get_top_coins_impl()
     global last_scanned_coins, last_scanned_at
     with _last_scanned_lock:
-        last_scanned_coins = coins
-        last_scanned_at = time.time()
-    return coins
+        if coins:
+            last_scanned_coins = list(coins)
+            last_scanned_at = time.time()
+        # Never erase the last known scan universe just because a single
+        # degraded/fallback cycle temporarily returned no symbols.
+        return list(last_scanned_coins)
 
 _TOP_COINS_CACHE_TTL = 120.0
 _top_coins_cached_symbols = []
@@ -3318,7 +3321,7 @@ def run_scan_once(chat_id):
                         fn_ingest(r, h1=h1, m15=m15, d1=d1, rejected_reason=("below_threshold" if conf < STRATEGY_CONFIDENCE_THRESHOLD else None), source="binance")
                 except Exception as e:
                     log.warning(f"[COGNITIVE] candidate bridge gagal {sym}: {e}")
-                active_threshold = int((globals().get("get_active_confidence_threshold")() if callable(globals().get("get_active_confidence_threshold")) and FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD))
+                active_threshold = int(STRATEGY_CONFIDENCE_THRESHOLD)
                 strategy_gate = True
                 try:
                     fn_gate=globals().get("strategy_trade_gate")
@@ -3331,8 +3334,7 @@ def run_scan_once(chat_id):
                 cutoff=float(active_threshold)/2.0
                 if conf<=cutoff:
                     low_conf_count+=1; _record_low_confidence_event(sym,conf,cutoff,r.get("decision"),r.get("entry_label"))
-                    if not FULL_MODE:
-                        _ban_coin(sym,reason=f"low confidence {conf:.1f} <= {cutoff:.1f}",duration=BAN_DURATION_SCANS,kind="low_confidence",confidence=conf)
+                    _ban_coin(sym,reason=f"low confidence {conf:.1f} <= {cutoff:.1f}",duration=BAN_DURATION_SCANS,kind="low_confidence",confidence=conf)
                 if conf<active_threshold: below_threshold_count+=1
                 if conf>=active_threshold and strategy_gate:
                     r["market_context"]={k:v for k,v in row.items() if k not in {"scan_time","run_id","scan_counter"}}
@@ -3370,18 +3372,25 @@ def run_scan_once(chat_id):
     data_elapsed=time.monotonic()-data_started; total_elapsed=time.monotonic()-scan_started
     cache_total,cache_fresh=_scan_cache_stats(); avg_conf=(sum(all_scan_confidences)/len(all_scan_confidences)) if all_scan_confidences else None
     telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct")}
-    qrow={"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"active_threshold":int(STRATEGY_CONFIDENCE_THRESHOLD),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc}
+    qrow={"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"raw_avg_confidence":(sum(raw_confidences)/len(raw_confidences) if raw_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"candidate_count":analyzed_symbols,"active_threshold":int(STRATEGY_CONFIDENCE_THRESHOLD),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc}
     raw_confidences=list(raw_scan_confidences)
     # Preserve a raw confidence distribution separately from effective confidence.
     qrow["confidence_bands"]={str(b):sum(1 for c in raw_confidences if b<=c<b+5) for b in range(0,100,5)}
     qrow["effective_confidence_bands"]={str(b):sum(1 for c in all_scan_confidences if b<=c<b+5) for b in range(0,100,5)}
     qrow["near_threshold_count"]=sum(1 for c in raw_confidences if abs(c-float(STRATEGY_CONFIDENCE_THRESHOLD))<=5.0)
+    near_vals=[c for c in raw_confidences if abs(c-float(STRATEGY_CONFIDENCE_THRESHOLD))<=5.0]
+    lower_vals=[c for c in raw_confidences if float(STRATEGY_CONFIDENCE_THRESHOLD)-10.0 <= c < float(STRATEGY_CONFIDENCE_THRESHOLD)-5.0]
+    qrow["near_threshold_quality"]=(sum(near_vals)/len(near_vals)) if near_vals else 0.0
+    qrow["lower_band_quality"]=(sum(lower_vals)/len(lower_vals)) if lower_vals else 0.0
     _record_scan_telemetry(telemetry)
     with scan_quality_lock:
         scan_quality_history.append(dict(qrow))
         if len(scan_quality_history)>5000: del scan_quality_history[:-5000]
     log.info("[SCAN SUMMARY] " + " | ".join(f"{k}={v}" for k,v in telemetry.items()))
-    if FULL_MODE: _full_frequency_adjust()
+    if FULL_MODE:
+        _freq_bridge = globals().get("_full_frequency_adjust")
+        if callable(_freq_bridge):
+            _freq_bridge()
 
     # /reject is expressed in SCAN CYCLES, not individual signals.
     # While warmup is active, every qualified signal from the current scan is
@@ -3411,7 +3420,7 @@ def run_scan_once(chat_id):
     else:
         breadth_txt="📈 Market context: <b>belum tersedia</b>"
     rs_txt=(f"\n₿ BTC 1h: <b>{mc['btc_price_1h_pct']:+.2f}%</b> | BTC 4h: <b>{mc['btc_price_4h_pct']:+.2f}%</b>" if mc.get('btc_price_1h_pct') is not None else "")
-    active_threshold = int((globals().get("get_active_confidence_threshold")() if callable(globals().get("get_active_confidence_threshold")) and FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD))
+    active_threshold = int(STRATEGY_CONFIDENCE_THRESHOLD)
     scan_meta=f"\n\n📊 Scan: <b>{TOP_N_COINS}</b> diminta | <b>{len(symbols)}</b> tersedia | <b>{processed_symbols}</b> diproses | <b>{analyzed_symbols}</b> analisa strategy valid\n🧠 Rata-rata confidence scan: <b>{avg_txt}</b>\nThreshold aktif: <b>{active_threshold}%</b>\n{breadth_txt}{rs_txt}"
     if warmup_active: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> signal qualified dari scan ini ditolak"
     if not results:
