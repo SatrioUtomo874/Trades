@@ -82,7 +82,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v32_OLLAMA_AGENT"
+MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v37_FINAL_OBJECTIVE_ADAPTIVE"
 
 # Stable body / replaceable brain contract.
 # main.py owns Binance, Telegram, execution, protection and runtime state.
@@ -174,42 +174,81 @@ if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN tidak ditemukan di environment. Cek file .env")
 
 class TelegramLogHandler(logging.Handler):
-    """
-    Forward log ERROR/CRITICAL ke Telegram.
-    Throttle: maks 1 pesan per 30 detik per pesan unik
-    agar tidak flood saat error berulang.
+    """Send only actionable execution/protection errors to Telegram.
+
+    Render keeps detailed logs; Telegram is reserved for alerts that require
+    operator attention. Repeated expected Binance/order rejections are
+    aggregated/deduplicated instead of flooding the chat.
     """
     def __init__(self):
-        super().__init__(level=logging.ERROR)
-        self._last_sent: dict = {}   # {msg_key: timestamp}
-        self._throttle  = 30         # detik
+        super().__init__(level=logging.WARNING)
+        self._last_sent = {}
+        self._throttle = max(30, int(os.getenv("TELEGRAM_ERROR_THROTTLE_SEC", "120")))
+
+    @staticmethod
+    def _is_expected_noise(message: str) -> bool:
+        text = str(message or "")
+        upper = text.upper()
+        noise_tokens = (
+            "STOP_WOULD_IMMEDIATELY_TRIGGER",
+            "ORDER WOULD IMMEDIATELY TRIGGER",
+            "-2021",
+            "TRAIL_REJECTED",
+            "TRAIL EXECUTION REJECTED",
+            "BINANCE COOLDOWN AKTIF",
+            "RATE LIMIT/RECOVERY",
+            "SCAN DATA",
+            "[SCAN",
+            "[FULL][CONFIDENCE]",
+        )
+        return any(tok in upper for tok in noise_tokens)
+
+    @staticmethod
+    def _is_actionable(record) -> bool:
+        msg = str(record.getMessage() or "")
+        if TelegramLogHandler._is_expected_noise(msg):
+            return record.levelno >= logging.CRITICAL and "EMERGENCY" in msg.upper()
+        if record.levelno >= logging.CRITICAL:
+            return True
+        if record.levelno < logging.ERROR:
+            return False
+        upper = msg.upper()
+        actionable = (
+            "REAL" in upper or "PROTECTION" in upper or "ORDER" in upper
+            or "BINANCE" in upper or "EMERGENCY" in upper or "EXECUTION" in upper
+            or "RECONCIL" in upper or "CREDENTIAL" in upper
+        )
+        return actionable
 
     def emit(self, record):
-        # Hindari rekursi (error saat kirim TG itu sendiri)
-        if "TG" in record.getMessage(): return
+        if "TG" in record.getMessage():
+            return
         try:
-            msg_key = record.getMessage()[:80]
+            if not self._is_actionable(record):
+                return
+            raw_msg = record.getMessage()
+            # Expected, already-handled immediate-trigger rejections are not
+            # Telegram alerts. A true CRITICAL/EMERGENCY state remains visible.
+            if self._is_expected_noise(raw_msg) and not (record.levelno >= logging.CRITICAL and "EMERGENCY" in raw_msg.upper()):
+                return
+            msg_key = re.sub(r"[A-Z0-9_]{5,}USDT", "<SYMBOL>", raw_msg)[:180]
             now = time.time()
             if now - self._last_sent.get(msg_key, 0) < self._throttle:
                 return
             self._last_sent[msg_key] = now
-
             cid = active_chat_id
-            if not cid or not TELEGRAM_TOKEN: return
-
+            if not cid or not TELEGRAM_TOKEN:
+                return
             level_em = "🔴" if record.levelno >= logging.CRITICAL else "⚠️"
-            safe_msg = html.escape(record.getMessage()[:400], quote=False)
-            text = (
-                f"{level_em} <b>[{html.escape(record.levelname)}]</b>\n"
-                f"<code>{safe_msg}</code>"
-            )
+            safe_msg = html.escape(raw_msg[:600], quote=False)
+            text = f"{level_em} <b>[{html.escape(record.levelname)}]</b>\n<code>{safe_msg}</code>"
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                 json={"chat_id": cid, "text": text, "parse_mode": "HTML"},
                 timeout=5
             )
         except Exception:
-            pass   # jangan pernah raise dari handler log
+            pass
 
 
 _tg_log_handler = TelegramLogHandler()
@@ -260,10 +299,22 @@ FULL_MANUAL_THRESHOLD_SAVED = None
 FULL_TRAIN_INTERVAL = max(120, int(os.getenv("FULL_TRAIN_INTERVAL_SEC", "300")))
 FULL_RETRAIN_MIN_NEW = max(1, int(os.getenv("FULL_RETRAIN_MIN_NEW", "3")))
 FULL_LAST_TRAINED_COUNT = 0
-FULL_MIN_TRAIN_SAMPLES = max(20, int(os.getenv("FULL_MIN_TRAIN_SAMPLES", "30")))
-FULL_MIN_VALIDATION_SAMPLES = max(5, int(os.getenv("FULL_MIN_VALIDATION_SAMPLES", "10")))
+FULL_MIN_TRAIN_SAMPLES = max(8, int(os.getenv("FULL_MIN_TRAIN_SAMPLES", "12")))
+FULL_MIN_VALIDATION_SAMPLES = max(4, int(os.getenv("FULL_MIN_VALIDATION_SAMPLES", "4")))
 FULL_PROMOTION_MIN_IMPROVEMENT = float(os.getenv("FULL_PROMOTION_MIN_IMPROVEMENT", "0.01"))
 FULL_ALLOWED_THRESHOLDS = list(range(35, 81))
+# Adaptive confidence/frequency controller: FULL mode keeps a healthy opportunity
+# supply instead of becoming progressively stricter just because some trades lose.
+FULL_FREQ_TARGET_MIN = max(1, int(os.getenv("FULL_FREQ_TARGET_MIN", "2")))
+FULL_FREQ_TARGET_MAX = max(FULL_FREQ_TARGET_MIN + 1, int(os.getenv("FULL_FREQ_TARGET_MAX", "6")))
+FULL_FREQ_WINDOW_SCANS = max(3, int(os.getenv("FULL_FREQ_WINDOW_SCANS", "4")))
+FULL_FREQ_ADJUST_STEP = max(1, int(os.getenv("FULL_FREQ_ADJUST_STEP", "2")))
+FULL_FREQ_MIN_THRESHOLD = max(35, int(os.getenv("FULL_FREQ_MIN_THRESHOLD", "40")))
+FULL_FREQ_MAX_THRESHOLD = min(80, int(os.getenv("FULL_FREQ_MAX_THRESHOLD", "72")))
+FULL_ADAPTIVE_THRESHOLD_BASE = None
+FULL_ML_SUGGESTED_THRESHOLD = None
+FULL_ADAPTIVE_THRESHOLD_LAST_REASON = "startup"
+FULL_ADAPTIVE_THRESHOLD_LAST_AT = 0.0
 FULL_MIN_COVERAGE = 0.25
 SCAN_MAX_DURATION_SEC = max(60, int(os.getenv("SCAN_MAX_DURATION_SEC", "180")))
 ML_FEATURE_NAMES = [
@@ -432,8 +483,14 @@ def _ml_collect_samples():
         hist = [dict(x) for x in trade_history]
     with ML_EXPERIENCE_LOCK:
         persisted = [dict(x) for x in ML_EXPERIENCE]
+    adaptive_records=[]
+    try:
+        fn_records=globals().get("get_adaptive_learning_records")
+        if callable(fn_records): adaptive_records=fn_records(limit=12000)
+    except Exception as exc:
+        log.debug(f"[ML] adaptive records unavailable: {exc}")
     combined = {}
-    for row in persisted + hist:
+    for row in persisted + hist + adaptive_records:
         key = str(row.get("trade_uid") or f"{row.get('symbol','')}|{row.get('entry_time','')}|{row.get('exit_time','')}")
         combined[key] = row
     samples = []
@@ -526,10 +583,16 @@ def _ml_eval_predictions(p, rs, threshold):
     required = max(5, int(np.ceil(len(rs) * FULL_MIN_COVERAGE)))
     if int(mask.sum()) < required:
         return None
-    objective = avg_r - 0.12 * dd + 0.18 * calibration + 0.05 * coverage
+    # Frequency is an explicit objective. A candidate model that only works
+    # on a tiny sliver of opportunities must pay a penalty, even when avg R is
+    # attractive. This keeps FULL learning from becoming progressively silent.
+    target_coverage = 0.30
+    coverage_bonus = 0.12 * coverage
+    low_coverage_penalty = 0.35 * max(0.0, target_coverage - coverage)
+    objective = avg_r - 0.12 * dd + 0.18 * calibration + coverage_bonus - low_coverage_penalty
     return {"objective": float(objective), "threshold": int(threshold), "n": int(mask.sum()),
             "coverage": coverage, "avg_r": avg_r, "win_rate": win,
-            "max_dd_r": dd, "calibration": calibration}
+            "max_dd_r": dd, "calibration": calibration, "frequency_score": coverage - low_coverage_penalty}
 
 
 def _ml_eval_candidate(model, samples):
@@ -642,8 +705,9 @@ def _ml_train_once(force=False):
     if promote:
         _ml_sync_strategy()
         if FULL_MODE:
-            STRATEGY_CONFIDENCE_THRESHOLD = int(candidate["confidence_min"])
-        log.info(f"[ML] Champion promoted {candidate['model_version']} threshold={candidate['confidence_min']} objective={candidate_score:.4f}")
+            global FULL_ML_SUGGESTED_THRESHOLD
+            FULL_ML_SUGGESTED_THRESHOLD = int(candidate.get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD))
+        log.info(f"[ML] Champion promoted {candidate['model_version']} model_threshold={candidate['confidence_min']} objective={candidate_score:.4f}")
     else:
         log.info(f"[ML] Challenger rejected/retained objective={candidate_score:.4f}; baseline={float(baseline_eval.get('objective',-999)):.4f}; champion={float(champion_eval.get('objective',-999)):.4f}")
     return promote
@@ -657,6 +721,9 @@ def _ml_learning_loop():
                 if current_count >= FULL_MIN_TRAIN_SAMPLES and (current_count - FULL_LAST_TRAINED_COUNT) >= FULL_RETRAIN_MIN_NEW:
                     _ml_train_once()
                     FULL_LAST_TRAINED_COUNT = current_count
+            # Confidence threshold adapts from multi-scan opportunity frequency.
+            if FULL_MODE:
+                _full_frequency_adjust()
         except Exception as e:
             log.exception(f"[ML] learning cycle gagal: {e}")
         FULL_WAKE.wait(FULL_TRAIN_INTERVAL)
@@ -677,18 +744,111 @@ def _full_status_text():
                 f"Confidence min ML: <b>{int(champion.get('confidence_min',60) or 60)}%</b>\n"
                 f"Objective OOS: <b>{float(champion.get('validation_objective',0) or 0):.4f}</b>\n"
                 f"Learning cycles: <b>{cycles}</b> | Promotions: <b>{promotions}</b>\n"
-                f"Last samples: <b>{last_samples}</b> | Last status: <b>{html.escape(str(last.get('status','—')))}</b>")
+                f"Last samples: <b>{last_samples}</b> | Last status: <b>{html.escape(str(last.get('status','—')))}</b>\n"
+                f"Adaptive threshold: <b>{int(STRATEGY_CONFIDENCE_THRESHOLD)}%</b> | ML hint: <b>{str(FULL_ML_SUGGESTED_THRESHOLD or '—')}</b> | {html.escape(str(FULL_ADAPTIVE_THRESHOLD_LAST_REASON))}\n"
+                f"Effective confidence bias: <b>{float((globals().get('get_frequency_confidence_adjustment')() if callable(globals().get('get_frequency_confidence_adjustment')) else 0.0)):+.2f}</b>")
     return (f"🧠 <b>FULL LEARNING</b>: {'ON' if FULL_MODE else 'OFF'}\n"
             f"Champion: <b>Belum ada</b>\nLearning cycles: <b>{cycles}</b> | Samples: <b>{last_samples}</b>\n"
             f"Minimum training samples: <b>{FULL_MIN_TRAIN_SAMPLES}</b>")
 
 
+def _full_frequency_adjust():
+    """Adapt the live acceptance gate from RAW confidence opportunity data.
+
+    Raw confidence is the strategy quality score. This controller changes only
+    the effective acceptance gate and a tiny brain-side frequency bias, using a
+    rolling window so one scan or one SL cannot cause a large reaction.
+    """
+    global STRATEGY_CONFIDENCE_THRESHOLD, FULL_ADAPTIVE_THRESHOLD_BASE
+    global FULL_ADAPTIVE_THRESHOLD_LAST_REASON, FULL_ADAPTIVE_THRESHOLD_LAST_AT
+    if not FULL_MODE:
+        return STRATEGY_CONFIDENCE_THRESHOLD
+    try:
+        with scan_quality_lock:
+            rows = [dict(x) for x in scan_quality_history if str(x.get("run_id")) == str(research_run_id)]
+        window = rows[-max(FULL_FREQ_WINDOW_SCANS, 4):]
+        if len(window) < max(FULL_FREQ_WINDOW_SCANS, 4):
+            return STRATEGY_CONFIDENCE_THRESHOLD
+        import statistics as st
+        med_q = float(st.median(int(r.get("qualified_count", 0) or 0) for r in window))
+        med_a = float(st.median(int(r.get("symbols_analyzed", 0) or 0) for r in window))
+        med_near = float(st.median(int(r.get("near_threshold_count", 0) or 0) for r in window))
+        med_c = float(st.median(sum(int(v) for v in (r.get("confidence_bands") or {}).values()) for r in window))
+        med_lower = float(st.median(int(sum((r.get("confidence_bands") or {}).get(str(max(0, int(r.get("active_threshold", STRATEGY_CONFIDENCE_THRESHOLD) or STRATEGY_CONFIDENCE_THRESHOLD)-5)), 0) for _ in [0]) or 0) for r in window)) if False else 0.0
+        lower_vals=[]
+        for r in window:
+            bands=r.get("confidence_bands") or {}
+            gate=int(r.get("active_threshold") or STRATEGY_CONFIDENCE_THRESHOLD)
+            band=str(max(0, (gate//5)*5 - 5))
+            lower_vals.append(int(bands.get(band,0) or 0))
+        med_lower=float(st.median(lower_vals)) if lower_vals else 0.0
+        nearq_vals=[]
+        for r in window:
+            bands=r.get("confidence_bands") or {}
+            gate=int(r.get("active_threshold") or STRATEGY_CONFIDENCE_THRESHOLD)
+            values=[]
+            for b in range(0,100,5):
+                if abs(b - gate) <= 5:
+                    n=int(bands.get(str(b),0) or 0)
+                    values.extend([b+2.5]*n)
+            if values: nearq_vals.extend(values)
+        nearq=float(st.mean(nearq_vals)) if nearq_vals else float(st.mean(float(r.get("avg_confidence",0) or 0) for r in window))
+        lower_quality=float(nearq) if med_lower > 0 else 0.0
+        current=int(STRATEGY_CONFIDENCE_THRESHOLD)
+        if FULL_ADAPTIVE_THRESHOLD_BASE is None:
+            FULL_ADAPTIVE_THRESHOLD_BASE=current
+        metrics={
+            "median_qualified_per_scan":med_q,
+            "median_analyzed_per_scan":med_a,
+            "median_near_threshold_per_scan":med_near,
+            "median_candidate_per_scan":med_c,
+            "near_threshold_quality":nearq,
+            "lower_band_quality":lower_quality,
+            "target_min":FULL_FREQ_TARGET_MIN,
+            "target_max":FULL_FREQ_TARGET_MAX,
+            "model_threshold_hint":FULL_ML_SUGGESTED_THRESHOLD,
+        }
+        updater=globals().get("update_frequency_confidence_state")
+        state=updater(metrics) if callable(updater) else {}
+        # One-point hard-gate movement only after the soft confidence bias has
+        # accumulated enough evidence. The gate never jumps on one scan.
+        sugg=globals().get("suggest_confidence_threshold")
+        proposed=int(sugg(metrics,current_threshold=current)) if callable(sugg) else current
+        proposed=max(FULL_FREQ_MIN_THRESHOLD,min(FULL_FREQ_MAX_THRESHOLD,proposed))
+        bias=float((state or {}).get("bias",0.0) or 0.0)
+        if abs(bias) < 1.0:
+            proposed=current
+        if proposed<current:
+            mode="RELAX"
+        elif proposed>current:
+            mode="TIGHTEN"
+        else:
+            mode="MAINTAIN"
+        if proposed != current:
+            STRATEGY_CONFIDENCE_THRESHOLD=int(proposed)
+        reason=(f"{mode}: qualified={med_q:.2f}, candidates={med_c:.1f}, near={med_near:.1f}, "
+                f"near_quality={nearq:.1f}, bias={bias:+.2f}, model_hint={FULL_ML_SUGGESTED_THRESHOLD}")
+        FULL_ADAPTIVE_THRESHOLD_LAST_REASON=reason
+        FULL_ADAPTIVE_THRESHOLD_LAST_AT=time.time()
+        log.info(f"[FULL][CONFIDENCE] {current}% -> {STRATEGY_CONFIDENCE_THRESHOLD}% | {reason}")
+        return STRATEGY_CONFIDENCE_THRESHOLD
+    except Exception as exc:
+        log.debug(f"[FULL][CONFIDENCE] frequency adjust gagal: {exc}")
+        return STRATEGY_CONFIDENCE_THRESHOLD
+
+
 def _full_on():
-    global FULL_MODE, FULL_THREAD, FULL_MANUAL_THRESHOLD_SAVED
+    global FULL_MODE, FULL_THREAD, FULL_MANUAL_THRESHOLD_SAVED, FULL_ADAPTIVE_THRESHOLD_BASE, FULL_ML_SUGGESTED_THRESHOLD
     with ML_LOCK:
         if not FULL_MODE:
             FULL_MANUAL_THRESHOLD_SAVED = int(STRATEGY_CONFIDENCE_THRESHOLD)
         FULL_MODE = True
+        os.environ["FULL_LEARNING_ACTIVE"] = "1"
+        champion=_ml_current_champion()
+        if champion and FULL_ADAPTIVE_THRESHOLD_BASE is None:
+            FULL_ML_SUGGESTED_THRESHOLD=int(champion.get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD) or STRATEGY_CONFIDENCE_THRESHOLD)
+            STRATEGY_CONFIDENCE_THRESHOLD=int(max(FULL_FREQ_MIN_THRESHOLD,min(FULL_FREQ_MAX_THRESHOLD,FULL_ML_SUGGESTED_THRESHOLD)))
+        FULL_ADAPTIVE_THRESHOLD_BASE = int(STRATEGY_CONFIDENCE_THRESHOLD)
         FULL_STOP.clear()
         FULL_WAKE.set()
     _ml_sync_strategy()
@@ -700,13 +860,15 @@ def _full_on():
 
 
 def _full_off():
-    global FULL_MODE, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED
+    global FULL_MODE, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED, FULL_ADAPTIVE_THRESHOLD_BASE
     with ML_LOCK:
         FULL_MODE = False
+        os.environ["FULL_LEARNING_ACTIVE"] = "0"
         FULL_WAKE.clear()
         if FULL_MANUAL_THRESHOLD_SAVED is not None:
             STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
             FULL_MANUAL_THRESHOLD_SAVED = None
+        FULL_ADAPTIVE_THRESHOLD_BASE = None
     return _full_status_text()
 
 
@@ -751,6 +913,7 @@ def _full_controller_state():
         "last_status": last.get("status", "—"),
         "manual_threshold": int(STRATEGY_CONFIDENCE_THRESHOLD),
         "minimum_training_samples": int(FULL_MIN_TRAIN_SAMPLES),
+        "frequency_confidence": (globals().get("get_frequency_confidence_state")() if callable(globals().get("get_frequency_confidence_state")) else {}),
     }
 
 
@@ -771,11 +934,6 @@ def _ml_record_signal_metadata(signal):
     signal.setdefault("ml_model_version", signal.get("learning_model_version", "static"))
 
 _ml_sync_strategy()
-try:
-    if callable(globals().get("adaptive_agent_start")):
-        adaptive_agent_start()
-except Exception as _brain_boot_exc:
-    log.warning(f"[ADAPTIVE] brain bootstrap gagal; execution tetap hidup: {_brain_boot_exc}")
 
 # Research warmup: beberapa kandidat sinyal pertama setelah /resetstats sengaja
 # ditolak tanpa dianggap trade gagal dan tanpa mengubah ban state.
@@ -1263,7 +1421,7 @@ LEARNING_CHECKPOINT_FILES = (
     "strategy_cognitive_state.json", "v32_experience.jsonl", "v32_lessons.jsonl",
     "v32_policy.json", "v32_brain_state.json", "adaptive_brain_state.json",
     "adaptive_policy.json", "full_learning_state.json", "experience.jsonl",
-    "ollama_research_state.json", "ollama_research_journal.jsonl",
+    "ollama_research_state.json", "ollama_research_journal.jsonl", "frequency_confidence_state.json",
 )
 
 def _github_headers():
@@ -1382,7 +1540,10 @@ def _open_learning_checkpoint_github(checkpoint_id=None):
     return manifest
 
 def _run_save_checkpoint(cid):
+    global FULL_THREAD
+    was_full=bool(FULL_MODE)
     try:
+        FULL_STOP.set(); FULL_WAKE.set()
         if callable(globals().get("adaptive_agent_stop")): adaptive_agent_stop()
         if callable(globals().get("_v32_stop")): _v32_stop()
         if callable(globals().get("_stop_full_cognitive_worker")): _stop_full_cognitive_worker()
@@ -1395,13 +1556,17 @@ def _run_save_checkpoint(cid):
         tg_send(cid, f"❌ <b>/save gagal</b>\n<code>{html.escape(str(e)[:500])}</code>")
     finally:
         try:
+            if was_full:
+                FULL_STOP.clear(); FULL_WAKE.set()
+                if globals().get("FULL_THREAD") is None or not globals().get("FULL_THREAD").is_alive():
+                    FULL_THREAD=threading.Thread(target=_ml_learning_loop,name="full-learning",daemon=True); FULL_THREAD.start()
             if callable(globals().get("_v32_start")): _v32_start()
             if callable(globals().get("adaptive_agent_start")): adaptive_agent_start()
         except Exception as restart_exc:
             log.warning(f"[SAVE] research worker restart gagal: {restart_exc}")
 
 def _wait_learning_workers_stopped(timeout_sec=60.0):
-    """Do not replace checkpoint files while a research worker can still write them."""
+    """Do not replace checkpoint files while any research worker can still write."""
     deadline=time.time()+float(timeout_sec)
     while time.time() < deadline:
         alive=False
@@ -1419,12 +1584,19 @@ def _wait_learning_workers_stopped(timeout_sec=60.0):
             t=globals().get("_FULL_COG_THREAD")
             alive = alive or bool(t is not None and t.is_alive())
         except Exception: pass
+        try:
+            t2=globals().get("FULL_THREAD")
+            alive = alive or bool(t2 is not None and t2.is_alive())
+        except Exception: pass
         if not alive: return True
         time.sleep(0.25)
     return False
 
 def _run_open_checkpoint(cid, checkpoint_id=None):
+    global FULL_THREAD
+    was_full=bool(FULL_MODE)
     try:
+        FULL_STOP.set(); FULL_WAKE.set()
         fn_stop=globals().get("adaptive_agent_stop")
         if callable(fn_stop): fn_stop()
         fn_stop_v32=globals().get("_v32_stop")
@@ -1446,6 +1618,11 @@ def _run_open_checkpoint(cid, checkpoint_id=None):
         if callable(fn_start_v32): fn_start_v32()
         fn_start=globals().get("adaptive_agent_start")
         if callable(fn_start): fn_start()
+        if was_full:
+            with ML_LOCK:
+                os.environ["FULL_LEARNING_ACTIVE"]="1"; FULL_STOP.clear(); FULL_WAKE.set()
+            if FULL_THREAD is None or not FULL_THREAD.is_alive():
+                FULL_THREAD=threading.Thread(target=_ml_learning_loop,name="full-learning",daemon=True); FULL_THREAD.start()
         tg_send(cid, f"✅ <b>LEARNING OPENED</b>\nCheckpoint: <code>{html.escape(str(manifest.get('checkpoint_id','latest')))}</code>\nState belajar lama <b>diganti</b> dengan checkpoint tersebut. Posisi/trade execution tidak di-reset.")
     except Exception as e:
         log.exception("[OPEN] checkpoint gagal")
@@ -2654,14 +2831,27 @@ def _verified_timeout_all(chat_id):
         log.error(f"[TIMEOUT GLOBAL] cleanup gagal: {e}")
         return False
 def _trail_trigger_preflight(symbol, is_buy, candidate_tp, candidate_sl, reference_price=None):
-    """Reject locally invalid conditional trigger levels before cancelling live protection."""
-    try:
-        ref=float(reference_price) if reference_price is not None else float(get_price(symbol, prefer_binance=True) or 0.0)
-    except Exception:
-        ref=0.0
+    """Validate conditional triggers against Binance's MARK_PRICE working type."""
+    ref=0.0
+    if reference_price is not None:
+        try: ref=float(reference_price)
+        except Exception: ref=0.0
+    if ref <= 0:
+        try:
+            live=get_real_position(symbol)
+            ref=float(live.get("markPrice") or live.get("mark_price") or live.get("entryPrice") or 0.0) if isinstance(live,dict) else 0.0
+        except Exception:
+            ref=0.0
+    if ref <= 0:
+        try: ref=float(get_price(symbol, prefer_binance=True) or 0.0)
+        except Exception: ref=0.0
     if ref <= 0: return False, "NO_REFERENCE_PRICE"
-    info=get_symbol_filters(symbol); tick=float(info.get("tickSize") or 0.0)
-    buffer=max(tick*3.0, abs(ref)*0.00020)
+    try:
+        info=get_symbol_filters(symbol); tick=float(info.get("tickSize") or 0.0)
+    except Exception as exc:
+        log.debug(f"[trail-preflight] {symbol}: symbol filter unavailable, geometry-only check: {exc}")
+        tick=0.0
+    buffer=max(tick*4.0, abs(ref)*0.00030)
     if is_buy:
         if candidate_sl is not None and float(candidate_sl) >= ref-buffer: return False, "STOP_WOULD_IMMEDIATELY_TRIGGER"
         if candidate_tp is not None and float(candidate_tp) <= ref+buffer: return False, "TP_WOULD_IMMEDIATELY_TRIGGER"
@@ -3476,7 +3666,7 @@ def run_scan_once(chat_id):
     scan_started=time.monotonic()
     if _binance_is_scan_paused():
         _notify_binance_pause_once(chat_id); return []
-    tg_send(chat_id, f"🔍 Scanning {TOP_N_COINS} koin...")
+    log.debug(f"[SCAN] mulai {TOP_N_COINS} symbols")
     if _binance_is_scan_paused():
         _notify_binance_pause_once(chat_id); return []
     try:
@@ -3488,7 +3678,7 @@ def run_scan_once(chat_id):
     if not symbols:
         tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan."); return []
 
-    data_started=time.monotonic(); results=[]; all_scan_confidences=[]; market_rows=[]
+    data_started=time.monotonic(); results=[]; all_scan_confidences=[]; raw_scan_confidences=[]; market_rows=[]
     processed_symbols=analyzed_symbols=cache_hits=cache_misses=failed_symbols=low_conf_count=below_threshold_count=0
     scan_deadline = scan_started + SCAN_MAX_DURATION_SEC
     for idx,sym in enumerate(symbols,1):
@@ -3497,7 +3687,7 @@ def run_scan_once(chat_id):
             break
         if _binance_is_scan_paused():
             log.warning("[scan] Binance pause aktif — scan cycle dihentikan di tengah jalan."); break
-        log.info(f"[scan {idx:02d}/{len(symbols)}] {sym}")
+        log.debug(f"[scan {idx:02d}/{len(symbols)}] {sym}")
         processed_symbols += 1
         try:
             before=_scan_cache_stats()
@@ -3515,7 +3705,7 @@ def run_scan_once(chat_id):
             market_rows.append(row)
             if isinstance(r,dict):
                 _ml_record_signal_metadata(r)
-                analyzed_symbols+=1; conf=float(r.get("confidence",0) or 0); all_scan_confidences.append(conf)
+                analyzed_symbols+=1; conf=float(r.get("confidence",0) or 0); all_scan_confidences.append(conf); raw_scan_confidences.append(float(r.get("confidence_raw", conf) or conf))
                 lf = r.setdefault("learning_features", {})
                 lf.update({
                     "market_bull_breadth": float(row.get("bullish_breadth_pct") or 0.0) / 100.0,
@@ -3535,7 +3725,7 @@ def run_scan_once(chat_id):
                         fn_ingest(r, h1=h1, m15=m15, d1=d1, rejected_reason=("below_threshold" if conf < STRATEGY_CONFIDENCE_THRESHOLD else None), source="binance")
                 except Exception as e:
                     log.warning(f"[COGNITIVE] candidate bridge gagal {sym}: {e}")
-                active_threshold = int((_ml_current_champion() or {}).get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD)) if FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD
+                active_threshold = int(STRATEGY_CONFIDENCE_THRESHOLD)
                 strategy_gate = True
                 try:
                     fn_gate=globals().get("strategy_trade_gate")
@@ -3548,13 +3738,14 @@ def run_scan_once(chat_id):
                 cutoff=float(active_threshold)/2.0
                 if conf<=cutoff:
                     low_conf_count+=1; _record_low_confidence_event(sym,conf,cutoff,r.get("decision"),r.get("entry_label"))
-                    _ban_coin(sym,reason=f"low confidence {conf:.1f} <= {cutoff:.1f}",duration=BAN_DURATION_SCANS,kind="low_confidence",confidence=conf)
+                    if not FULL_MODE:
+                        _ban_coin(sym,reason=f"low confidence {conf:.1f} <= {cutoff:.1f}",duration=BAN_DURATION_SCANS,kind="low_confidence",confidence=conf)
                 if conf<active_threshold: below_threshold_count+=1
                 if conf>=active_threshold and strategy_gate:
                     r["market_context"]={k:v for k,v in row.items() if k not in {"scan_time","run_id","scan_counter"}}
                     results.append(r); log.info(f"[SIGNAL] {sym} {r.get('decision')} confidence={conf:.1f}")
                 else:
-                    log.info(f"[FILTER] {sym} confidence={conf:.1f} < {STRATEGY_CONFIDENCE_THRESHOLD}")
+                    log.debug(f"[FILTER] {sym} confidence={conf:.1f} < {STRATEGY_CONFIDENCE_THRESHOLD}")
         except BinanceCooldownError:
             log.warning(f"[scan] {sym}: Binance cooldown aktif — scan cycle dihentikan aman."); break
         except Exception as e:
@@ -3586,9 +3777,18 @@ def run_scan_once(chat_id):
     data_elapsed=time.monotonic()-data_started; total_elapsed=time.monotonic()-scan_started
     cache_total,cache_fresh=_scan_cache_stats(); avg_conf=(sum(all_scan_confidences)/len(all_scan_confidences)) if all_scan_confidences else None
     telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct")}
+    qrow={"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"active_threshold":int(STRATEGY_CONFIDENCE_THRESHOLD),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc}
+    raw_confidences=list(raw_scan_confidences)
+    # Preserve a raw confidence distribution separately from effective confidence.
+    qrow["confidence_bands"]={str(b):sum(1 for c in raw_confidences if b<=c<b+5) for b in range(0,100,5)}
+    qrow["effective_confidence_bands"]={str(b):sum(1 for c in all_scan_confidences if b<=c<b+5) for b in range(0,100,5)}
+    qrow["near_threshold_count"]=sum(1 for c in raw_confidences if abs(c-float(STRATEGY_CONFIDENCE_THRESHOLD))<=5.0)
     _record_scan_telemetry(telemetry)
-    _record_scan_quality({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc})
+    with scan_quality_lock:
+        scan_quality_history.append(dict(qrow))
+        if len(scan_quality_history)>5000: del scan_quality_history[:-5000]
     log.info("[SCAN SUMMARY] " + " | ".join(f"{k}={v}" for k,v in telemetry.items()))
+    if FULL_MODE: _full_frequency_adjust()
 
     # /reject is expressed in SCAN CYCLES, not individual signals.
     # While warmup is active, every qualified signal from the current scan is
@@ -3618,7 +3818,7 @@ def run_scan_once(chat_id):
     else:
         breadth_txt="📈 Market context: <b>belum tersedia</b>"
     rs_txt=(f"\n₿ BTC 1h: <b>{mc['btc_price_1h_pct']:+.2f}%</b> | BTC 4h: <b>{mc['btc_price_4h_pct']:+.2f}%</b>" if mc.get('btc_price_1h_pct') is not None else "")
-    active_threshold = int((_ml_current_champion() or {}).get("confidence_min", STRATEGY_CONFIDENCE_THRESHOLD)) if FULL_MODE else STRATEGY_CONFIDENCE_THRESHOLD
+    active_threshold = int(STRATEGY_CONFIDENCE_THRESHOLD)
     scan_meta=f"\n\n📊 Scan: <b>{TOP_N_COINS}</b> diminta | <b>{len(symbols)}</b> tersedia | <b>{processed_symbols}</b> diproses | <b>{analyzed_symbols}</b> analisa strategy valid\n🧠 Rata-rata confidence scan: <b>{avg_txt}</b>\nThreshold aktif: <b>{active_threshold}%</b>\n{breadth_txt}{rs_txt}"
     if warmup_active: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> signal qualified dari scan ini ditolak"
     if not results:
@@ -3784,12 +3984,12 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
         elif economic_outcome == "BREAKEVEN":
             stats["breakeven"] = stats.get("breakeven", 0) + 1
 
-        if not entry or tp_p is None or close_price is None:
+        if entry is None or close_price is None:
             return
 
         balance = stats["balance"]
         position_usd = round(MARGIN_USD * LEVERAGE, 6)
-        direction_sign = 1 if tp_p > entry else -1
+        direction_sign = 1 if str(decision or "BUY").upper() == "BUY" else -1
         ref_price = float(close_price)
         fee_pct = ENTRY_FEE_PCT + EXIT_FEE_PCT
         pnl_pct_raw = (ref_price - entry) / entry * direction_sign
@@ -3877,6 +4077,10 @@ def fmt_stats():
     avg_tp = _avg_conf_for_result(full_hist, "tp")
     avg_trail = _avg_conf_for_result(full_hist, "trail")
     avg_sl = _avg_conf_for_result(full_hist, "sl")
+    extra_exits = {}
+    for h in full_hist:
+        mech = str(h.get("exit_mechanism") or h.get("result") or "UNKNOWN").upper()
+        extra_exits[mech] = extra_exits.get(mech, 0) + 1
     with pending_cancel_lock:
         pc = dict(pending_cancel_stats)
     total_cancel = sum(pc.values())
@@ -4012,7 +4216,7 @@ def _analyze_trade_history():
     # Additional diagnostics derived from the closed-trade ledger.
     for t in hist:
         try:
-            entry=float(t.get("entry")); exit_price=float(t.get("exit_price")); sl=float(t.get("sl")); side=str(t.get("decision") or "BUY").upper(); risk=abs(entry-sl)
+            entry=float(t.get("entry")); exit_price=float(t.get("exit_price")); sl=float(t.get("initial_sl") if t.get("initial_sl") is not None else t.get("sl")); side=str(t.get("decision") or "BUY").upper(); risk=abs(entry-sl)
             t["final_r"] = (((exit_price-entry)/risk) if side=="BUY" else ((entry-exit_price)/risk)) if risk else 0.0
         except Exception:
             t["final_r"] = None
@@ -4047,9 +4251,12 @@ def _analyze_trade_history():
         "max_dd": max_dd,
         "expectancy": total_pnl / len(hist),
         "avg_pct": avg_pct,
-        "tp": sum(1 for t in hist if t.get("result") == "tp"),
-        "trail": sum(1 for t in hist if t.get("result") == "trail"),
-        "sl": sum(1 for t in hist if t.get("result") == "sl"),
+        "tp": sum(1 for t in hist if t.get("exit_mechanism") == "tp"),
+        "trail": sum(1 for t in hist if t.get("exit_mechanism") == "trail"),
+        "sl": sum(1 for t in hist if t.get("exit_mechanism") == "sl"),
+        "strategy": sum(1 for t in hist if t.get("exit_mechanism") == "strategy"),
+        "timeout": sum(1 for t in hist if t.get("exit_mechanism") == "timeout"),
+        "emergency": sum(1 for t in hist if t.get("exit_mechanism") == "emergency"),
         "by_result": by_result,
         "by_symbol": by_symbol,
         "by_entry": by_entry,
@@ -4388,8 +4595,8 @@ def close_position(sym, result, close_price=None):
     except Exception:
         last = None
 
-    emoji = {"tp":"🎯","sl":"🛑","trail":"🔒"}.get(classified, "🛑")
-    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(classified, "STOP LOSS")
+    emoji = {"tp":"🎯","sl":"🛑","trail":"🔒","strategy":"🧠","timeout":"⏱️","emergency":"🚨","unknown":"❔"}.get(classified, "❔")
+    label = {"tp":"TAKE PROFIT","sl":"INITIAL STOP LOSS","trail":"TRAILING STOP","strategy":"STRATEGY EXIT","timeout":"TIMEOUT EXIT","emergency":"EMERGENCY EXIT","unknown":"UNKNOWN EXIT"}.get(classified, "UNKNOWN EXIT")
     detail = ""
     if last and last.get("symbol") == sym:
         sgn = "+" if last.get("pct", 0) >= 0 else ""
@@ -4566,7 +4773,15 @@ def _notify_trail_update(chat_id, sym, pos, update, old_sl, new_sl, status="APPL
         elif status == "APPLIED":
             lines += ["", "✅ <b>Protection order berhasil diperbarui di Binance.</b>"]
         elif status == "FAILED":
-            lines += ["", f"🚨 <b>Update protection gagal:</b> <code>{str(error)[:220]}</code>", "⚠️ SL sebelumnya dipertahankan."]
+            # Expected trigger-race/geometry rejections are already stored in the
+            # management ledger. Do not flood Telegram when the old protection
+            # remains active. Escalation is handled by the critical logger if
+            # protection cannot be restored.
+            err_text=str(error or "").upper()
+            if "-2021" in err_text or "IMMEDIATELY_TRIGGER" in err_text or "STOP_WOULD" in err_text:
+                log.debug(f"[TRAIL] {sym}: update rejected; previous protection retained")
+                return
+            lines += ["", f"⚠️ <b>Protection update ditolak:</b> <code>{str(error)[:220]}</code>", "SL sebelumnya dipertahankan."]
         tg_send(chat_id, "\n".join(lines))
     except Exception as e:
         log.debug(f"[trail-notify] {sym}: {e}")
@@ -4964,12 +5179,16 @@ def monitor_position_real(sym,pos):
                                     live_qty = abs(float(latest.get("positionAmt",0) or 0)) if latest else 0.0
                                     if live_qty <= 0:
                                         continue
-                                    # Preflight against the freshest locally authoritative price.
-                                    # This prevents Binance -2021 and, critically, prevents us from
-                                    # cancelling a valid old protection before discovering the new
-                                    # trigger is already on the wrong side of market.
+                                    # Our STOP_MARKET/TAKE_PROFIT_MARKET orders use
+                                    # workingType=MARK_PRICE, so preflight must use the
+                                    # exchange mark price whenever it is available.
+                                    fresh_reference = None
+                                    if isinstance(latest, dict):
+                                        try: fresh_reference = float(latest.get("markPrice") or latest.get("mark_price") or 0.0)
+                                        except Exception: fresh_reference = None
+                                    fresh_reference = fresh_reference or current_price
                                     buy_side = pos["signal"]["decision"]=="BUY"
-                                    ok_trigger, trigger_reason = _trail_trigger_preflight(sym, buy_side, candidate_tp, candidate_sl, reference_price=current_price)
+                                    ok_trigger, trigger_reason = _trail_trigger_preflight(sym, buy_side, candidate_tp, candidate_sl, reference_price=fresh_reference)
                                     if not ok_trigger:
                                         _record_rejected_trail_event(sym, pos, candidate_sl, candidate_tp, trigger_reason, current_price)
                                         if candidate_sl != oldsl:
@@ -5023,9 +5242,13 @@ def monitor_position_real(sym,pos):
                                 if candidate_sl != oldsl:
                                     _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED", error=e)
                             except Exception as e:
-                                log.error(f"[strategy/manage real] {sym}: {e}")
-                                if candidate_sl != oldsl:
-                                    _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="FAILED", error=e)
+                                if _is_binance_immediate_trigger_error(e):
+                                    _record_rejected_trail_event(sym, pos, candidate_sl, candidate_tp, "STOP_WOULD_IMMEDIATELY_TRIGGER", current_price)
+                                    log.debug(f"[trail] {sym}: -2021 handled; old protection retained")
+                                else:
+                                    log.warning(f"[strategy/manage real] {sym}: {e}")
+                                    if candidate_sl != oldsl:
+                                        _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="FAILED", error=e)
                                 # Do not commit candidate local state on failure.
 
                 time.sleep(REAL_TRADE_POLL_SLEEP)
@@ -5135,10 +5358,37 @@ def _resume_binance_and_flush_pending(chat_id=None):
                 buy=pos['signal']['decision']=='BUY'; qty=pos.get('quantity') or tr.get('quantity')
                 tp=tr.get('tp') or pos['signal'].get('tp'); sl=tr.get('sl') or pos.get('current_sl')
                 if not qty or sl is None or tp is None: raise RuntimeError('pending trail tidak lengkap')
-                with _binance_critical_context():
-                    cancel_algo_order(pos.get('tp_order_id')); cancel_algo_order(pos.get('sl_order_id'))
-                    t,s=place_tp_sl(sym,buy,tp,sl,qty)
+                current_ref = get_price(sym, prefer_binance=True) or pos.get('current_price') or pos.get('entry')
+                ok_trigger, trigger_reason = _trail_trigger_preflight(sym, buy, tp, sl, reference_price=current_ref)
+                if not ok_trigger:
+                    _record_rejected_trail_event(sym, pos, sl, tp, trigger_reason, current_ref)
+                    _clear_pending_trail(sym)
+                    log.debug(f'[trail-resume] {sym}: queued trail discarded as invalid ({trigger_reason}); existing protection retained')
+                    continue
                 old_sl = pos.get('current_sl')
+                old_tp = pos.get('signal',{}).get('tp')
+                try:
+                    with _binance_critical_context():
+                        _cancel_all_algo_orders_verified(sym)
+                    with _binance_critical_context():
+                        t,s=place_tp_sl(sym,buy,tp,sl,qty)
+                    _verify_protection_pair(sym,buy,tp,sl,qty)
+                except Exception as protect_err:
+                    restored=False
+                    try:
+                        if old_sl is not None and old_tp is not None:
+                            with _binance_critical_context():
+                                rt,rs=place_tp_sl(sym,buy,old_tp,old_sl,qty)
+                            _verify_protection_pair(sym,buy,old_tp,old_sl,qty)
+                            restored=True
+                    except Exception as restore_err:
+                        _queue_pending_cleanup(sym,'pending trail restore failed',restore_err)
+                        log.critical(f'[trail-resume] {sym}: restore old protection gagal: {restore_err}')
+                    if _is_binance_immediate_trigger_error(protect_err) and restored:
+                        _record_rejected_trail_event(sym,pos,sl,tp,'BINANCE_-2021_IMMEDIATE_TRIGGER',current_ref)
+                        _clear_pending_trail(sym)
+                        continue
+                    raise
                 with positions_lock:
                     if sym in positions:
                         positions[sym].update({'tp_order_id':t['algoId'],'sl_order_id':s['algoId'],'exchange_synced_at':time.time(),'execution_mode':'REAL','current_sl':sl})
@@ -6253,6 +6503,12 @@ if __name__=="__main__":
     threading.Thread(target=_binance_recovery_loop, daemon=True).start()
     threading.Thread(target=_render_keepalive_loop, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
+    # Body is now alive; research/learning can start independently in the background.
+    try:
+        if callable(globals().get("adaptive_agent_start")):
+            adaptive_agent_start()
+    except Exception as _brain_boot_exc:
+        log.warning(f"[ADAPTIVE] brain bootstrap gagal; execution tetap hidup: {_brain_boot_exc}")
 
     log.info(f"[ENGINE] {MAIN_ENGINE_VERSION} starting")
     if _STRATEGY_LOAD_ERROR and ALLOWED_USER_ID:

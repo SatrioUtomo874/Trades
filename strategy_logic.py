@@ -4596,7 +4596,7 @@ __all__ = [
 # functions below become the single public behavior. It is research-only: it does
 # not send orders, call Binance, or forcibly tighten live signal frequency.
 
-V32_VERSION = "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED"
+V32_VERSION = "V45_FINAL_OBJECTIVE_ADAPTIVE_AGENT"
 V32_SCHEMA = "full_learning_cognitive_v2"
 V32_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 V32_STATE_FILE = V32_STATE_DIR / "v32_brain_state.json"
@@ -5174,6 +5174,17 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
     if not isinstance(result, dict):
         return result
     try:
+        policy_delta=get_adaptive_policy_adjustment(result)
+        before=float(result.get("confidence",50.0) or 50.0)
+        freq_delta=get_frequency_confidence_adjustment() if os.getenv("FULL_LEARNING_ACTIVE","0")=="1" else 0.0
+        result["confidence_raw"]=round(before,3)
+        result["confidence_before_policy"]=round(before,3)
+        result["confidence_policy_delta"]=round(policy_delta,3)
+        result["confidence_frequency_delta"]=round(freq_delta,3)
+        result["confidence_effective"]=int(round(max(1.0,min(99.0,before+policy_delta+freq_delta))))
+        result["confidence"]=result["confidence_effective"]
+        result["frequency_confidence_mode"]=_FREQUENCY_CONF_STATE.get("mode","MAINTAIN")
+        result["adaptive_policy_state"]={"policy_delta":round(policy_delta,3),"frequency_bias":round(freq_delta,3),"mode":_FREQUENCY_CONF_STATE.get("mode","MAINTAIN")}
         result = _v32_time_features_into(result, ts)
         result.setdefault("learning_features", {})
         tc = result["time_context"]
@@ -5272,6 +5283,7 @@ def reload_learning_state():
         _AGENT_STATE = _agent_json_load(AGENT_STATE_FILE, _AGENT_STATE) or _AGENT_STATE
         _AGENT_POLICY = _agent_json_load(AGENT_POLICY_FILE, {}) or {}
         _AGENT_HISTORY_DONE=set()
+    _frequency_state_load_from_agent()
     _ollama_state_load()
     # Reload persisted cognitive state if present and make sure model APIs see fresh state.
     try:
@@ -5422,6 +5434,148 @@ OLLAMA_TRIGGER_NEW_CANDIDATES = max(10, int(os.getenv("OLLAMA_TRIGGER_NEW_CANDID
 OLLAMA_MAX_INPUT_CHARS = max(4000, int(os.getenv("OLLAMA_MAX_INPUT_CHARS", "24000")))
 OLLAMA_MAX_OUTPUT_TOKENS = max(200, int(os.getenv("OLLAMA_MAX_OUTPUT_TOKENS", "900")))
 
+# Frequency-aware confidence policy surface. main.py may ask the replaceable brain
+# for a bounded suggestion; the body decides whether/how to apply it. This keeps
+# confidence adaptation part of strategy policy rather than hard-coding it in execution.
+# ---------------------------------------------------------------------------
+# OBJECTIVE ADAPTIVE CONFIDENCE
+# ---------------------------------------------------------------------------
+# Raw confidence = quality. Frequency adaptation is kept separately as a bounded
+# effective-confidence bias, so the controller can protect opportunity supply
+# without corrupting the meaning of the raw analytical score.
+_FREQUENCY_CONF_STATE = {
+    "bias": 0.0,
+    "mode": "MAINTAIN",
+    "last_reason": "startup",
+    "last_update_at": 0.0,
+    "windows": 0,
+}
+
+
+def _frequency_state_load_from_agent():
+    try:
+        st = globals().get("_AGENT_STATE")
+        saved = st.get("frequency_confidence") if isinstance(st, dict) else None
+        if not isinstance(saved, dict):
+            root = globals().get("AGENT_STATE_DIR")
+            if root is not None:
+                p = Path(root) / "frequency_confidence_state.json"
+                if p.exists():
+                    try: saved = json.loads(p.read_text(encoding="utf-8"))
+                    except Exception: saved = None
+        if isinstance(saved, dict):
+            _FREQUENCY_CONF_STATE.update({
+                "bias": float(saved.get("bias", 0.0) or 0.0),
+                "mode": str(saved.get("mode", "MAINTAIN") or "MAINTAIN"),
+                "last_reason": str(saved.get("last_reason", "startup") or "startup"),
+                "last_update_at": float(saved.get("last_update_at", 0.0) or 0.0),
+                "windows": int(saved.get("windows", 0) or 0),
+            })
+    except Exception:
+        pass
+
+
+def _frequency_confidence_persist():
+    try:
+        st = globals().get("_AGENT_STATE")
+        saver = globals().get("_agent_json_save")
+        path = globals().get("AGENT_STATE_FILE")
+        if isinstance(st, dict):
+            st["frequency_confidence"] = dict(_FREQUENCY_CONF_STATE)
+        if callable(saver) and path is not None and isinstance(st, dict):
+            saver(path, st)
+        root = globals().get("AGENT_STATE_DIR")
+        if root is not None:
+            saver2 = globals().get("_agent_json_save")
+            if callable(saver2): saver2(Path(root) / "frequency_confidence_state.json", dict(_FREQUENCY_CONF_STATE))
+    except Exception:
+        pass
+
+
+def update_frequency_confidence_state(frequency_metrics):
+    """Adapt effective confidence from rolling opportunity and quality evidence."""
+    try:
+        m = dict(frequency_metrics or {})
+        q = float(m.get("median_qualified_per_scan", 0.0) or 0.0)
+        a = float(m.get("median_analyzed_per_scan", 0.0) or 0.0)
+        near = float(m.get("median_near_threshold_per_scan", 0.0) or 0.0)
+        nearq = float(m.get("near_threshold_quality", 0.0) or 0.0)
+        lowerq = float(m.get("lower_band_quality", 0.0) or 0.0)
+        pool = float(m.get("median_candidate_per_scan", 0.0) or 0.0)
+        shadow = float(m.get("shadow_mean_r", 0.0) or 0.0)
+        hist = float(m.get("historical_mean_r", 0.0) or 0.0)
+        target_min = float(m.get("target_min", 2.0) or 2.0)
+        target_max = float(m.get("target_max", 6.0) or 6.0)
+        old = float(_FREQUENCY_CONF_STATE.get("bias", 0.0) or 0.0)
+        new = old
+        mode = "MAINTAIN"
+        # Relax only when there is a genuine reservoir of analyzable opportunities
+        # close to the gate. Do not manufacture trades in a dead market.
+        reservoir_ok = (
+            a >= 10.0 and pool >= max(3.0, target_min * 1.5)
+            and near >= max(2.0, target_min)
+            and (nearq >= 50.0 or lowerq >= 50.0 or shadow > 0.02 or hist > 0.02)
+        )
+        if q < target_min and reservoir_ok:
+            new = min(3.0, old + 1.00)
+            mode = "RELAX"
+        elif q > target_max and nearq < 48.0 and lowerq < 48.0 and shadow <= 0.0 and hist <= 0.0:
+            new = max(-3.0, old - 1.00)
+            mode = "TIGHTEN"
+        else:
+            new = old * 0.88 if abs(old) > 0.05 else old
+        if pool < 1.0 and q < target_min:
+            new = max(0.0, old * 0.70)
+            mode = "WAIT_MARKET"
+        if abs(new - old) < 0.20:
+            new = old
+        _FREQUENCY_CONF_STATE.update({
+            "bias": round(max(-3.0, min(3.0, new)), 3),
+            "mode": mode,
+            "windows": int(_FREQUENCY_CONF_STATE.get("windows", 0) or 0) + 1,
+            "last_update_at": time.time(),
+        })
+        _FREQUENCY_CONF_STATE["last_reason"] = (
+            f"{mode}: qualified={q:.2f}, candidates={pool:.2f}, near={near:.2f}, "
+            f"near_quality={nearq:.1f}, lower_quality={lowerq:.1f}, "
+            f"bias={_FREQUENCY_CONF_STATE['bias']:+.2f}"
+        )
+        _frequency_confidence_persist()
+        return dict(_FREQUENCY_CONF_STATE)
+    except Exception as exc:
+        log.debug(f"[FULL][CONFIDENCE] adaptive update gagal: {exc}")
+        return dict(_FREQUENCY_CONF_STATE)
+
+
+def get_frequency_confidence_adjustment():
+    try: return float(_FREQUENCY_CONF_STATE.get("bias", 0.0) or 0.0)
+    except Exception: return 0.0
+
+
+def get_frequency_confidence_state():
+    return dict(_FREQUENCY_CONF_STATE)
+
+
+def suggest_confidence_threshold(frequency_metrics, current_threshold=60):
+    """Secondary slow hard-gate change; soft confidence bias is primary."""
+    try:
+        m = dict(frequency_metrics or {}); cur = float(current_threshold)
+        q = float(m.get("median_qualified_per_scan", 0.0) or 0.0)
+        pool = float(m.get("median_candidate_per_scan", 0.0) or 0.0)
+        near = float(m.get("median_near_threshold_per_scan", 0.0) or 0.0)
+        nearq = float(m.get("near_threshold_quality", 0.0) or 0.0)
+        shadow = float(m.get("shadow_mean_r", 0.0) or 0.0)
+        hist = float(m.get("historical_mean_r", 0.0) or 0.0)
+        bias = get_frequency_confidence_adjustment()
+        if q < float(m.get("target_min", 2.0) or 2.0) and pool >= 3 and near >= 2 and (nearq >= 50 or shadow > 0 or hist > 0) and bias >= 1.0:
+            return int(max(40, cur - 1))
+        if q > float(m.get("target_max", 6.0) or 6.0) and nearq < 48 and shadow <= 0 and hist <= 0 and bias <= -1.0:
+            return int(min(72, cur + 1))
+        return int(round(cur))
+    except Exception:
+        return int(current_threshold)
+
+
 _AGENT_LOCK = threading.RLock()
 _AGENT_STOP = threading.Event()
 _AGENT_WAKE = threading.Event()
@@ -5446,6 +5600,7 @@ _AGENT_STATE = {
     "historical": {"files": 0, "rows": 0, "replay_candidates": 0, "status": "NOT_STARTED"},
     "live": {"observations": 0, "candidates": 0, "outcomes": 0},
     "frequency": {},
+    "frequency_confidence": dict(_FREQUENCY_CONF_STATE),
     "policy": {},
     "policy_revisions": 0,
     "last_research": None,
@@ -5479,6 +5634,19 @@ with _AGENT_LOCK:
     _AGENT_POLICY = _agent_json_load(AGENT_POLICY_FILE, {})
     if not isinstance(_AGENT_POLICY, dict):
         _AGENT_POLICY = {}
+
+_frequency_state_load_from_agent()
+
+
+def get_adaptive_policy_adjustment(signal=None):
+    """Translate validated policy evidence into a tiny confidence modifier."""
+    sig=signal if isinstance(signal,dict) else {}; archetype=str(sig.get("archetype") or "UNKNOWN")
+    regime=str(sig.get("market_regime") or (sig.get("regime_profile") or {}).get("regime") or "UNKNOWN")
+    total=0.0
+    for key in (f"{archetype}|{regime}",f"*|{regime}",f"{archetype}|*"):
+        try: total += float(_AGENT_POLICY.get(key,0.0) or 0.0)
+        except Exception: pass
+    return max(-5.0,min(5.0,total*20.0))
 
 
 def _ollama_state_load():
@@ -5591,6 +5759,46 @@ def _agent_read_records(limit=AGENT_MAX_HISTORY_ROWS):
     return rows[-int(limit):]
 
 
+def get_adaptive_learning_records(limit=10000):
+    """Return outcome-bearing samples from live, shadow, and historical research.
+
+    This is intentionally read-only: it gives the statistical learner one unified
+    evidence stream without allowing research state to place Binance orders.
+    """
+    try:
+        records = _v32_current_records(limit=max(1, int(limit)))
+        out = []
+        for row in records:
+            if not isinstance(row, dict):
+                continue
+            if row.get("type") == "trade_outcome":
+                payload = row.get("outcome") if isinstance(row.get("outcome"), dict) else row
+                if payload.get("final_r") is not None and isinstance(payload.get("learning_features"), dict):
+                    item = dict(row)
+                    item["final_r"] = payload.get("final_r")
+                    item["evidence_kind"] = "real_trade"
+                    item["confidence"] = payload.get("confidence", row.get("confidence"))
+                    item["learning_features"] = dict(payload.get("learning_features") or row.get("learning_features") or {})
+                    out.append(item)
+            elif row.get("type") == "candidate":
+                life = row.get("shadow_lifecycle") or {}
+                final_r = life.get("final_r")
+                if final_r is None:
+                    final_r = row.get("shadow_final_r")
+                if final_r is not None and isinstance(row.get("learning_features"), dict):
+                    item = dict(row)
+                    item["final_r"] = final_r
+                    item["economic_outcome"] = life.get("economic_outcome") or row.get("shadow_economic_outcome")
+                    item["source"] = row.get("source") or "shadow"
+                    item["evidence_kind"] = "shadow_or_historical"
+                    item["learning_features"] = dict(row.get("learning_features") or {})
+                    out.append(item)
+        return out[-max(1, int(limit)): ]
+    except Exception as exc:
+        log.debug(f"[ADAPTIVE] learning records gagal: {exc}")
+        return []
+
+
 def _agent_candidate_cells(records):
     """Compute opportunity/frequency and quality cells from *all* candidates."""
     candidates = [r for r in records if isinstance(r, dict) and r.get("type") == "candidate"]
@@ -5600,7 +5808,7 @@ def _agent_candidate_cells(records):
         archetype = str(r.get("archetype") or "UNKNOWN")
         decision = str(r.get("decision") or "UNKNOWN").upper()
         key = (archetype, regime, decision)
-        q = float(r.get("trade_quality") or (r.get("confidence") or 0.0))
+        q = float(r.get("trade_quality") or (r.get("confidence_raw") or r.get("confidence") or 0.0))
         cells[key].append(q)
     out = []
     for (archetype, regime, decision), vals in cells.items():
@@ -5618,48 +5826,68 @@ def _agent_candidate_cells(records):
 
 
 def _agent_outcome_cells(records):
-    outcomes = [r for r in records if isinstance(r, dict) and r.get("type") == "trade_outcome"]
+    """Build outcome evidence from real trades plus shadow/historical lifecycles.
+
+    Real outcomes get weight 1.0; shadow/historical lifecycle outcomes get 0.5.
+    This lets the brain learn before many live trades exist without allowing a
+    large historical archive to overwhelm real execution evidence.
+    """
     cells = defaultdict(list)
-    for r in outcomes:
-        key = (str(r.get("archetype") or "UNKNOWN"), str(r.get("market_regime") or r.get("regime") or "UNKNOWN"))
-        p = r.get("outcome") if isinstance(r.get("outcome"), dict) else r
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        weight = 0.0
+        payload = None
+        if r.get("type") == "trade_outcome":
+            weight = 1.0
+            payload = r.get("outcome") if isinstance(r.get("outcome"), dict) else r
+        elif r.get("type") == "candidate":
+            life = r.get("shadow_lifecycle") or {}
+            if life.get("final_r") is not None or r.get("shadow_final_r") is not None:
+                weight = 0.5
+                payload = {**r, **life}
+        if not payload or weight <= 0:
+            continue
         try:
-            final_r = float(p.get("final_r", r.get("final_r", 0.0)) or 0.0)
+            final_r = float(payload.get("final_r", r.get("final_r", 0.0)) or 0.0)
         except Exception:
             final_r = 0.0
-        mechanism = str(p.get("exit_mechanism") or r.get("exit_mechanism") or "UNKNOWN").upper()
-        economic = str(p.get("economic_outcome") or r.get("economic_outcome") or "UNKNOWN").upper()
-        cells[key].append({"final_r": final_r, "mechanism": mechanism, "economic": economic})
-    out = []
+        archetype = str(r.get("archetype") or payload.get("archetype") or "UNKNOWN")
+        regime = str(r.get("market_regime") or r.get("regime") or payload.get("market_regime") or "UNKNOWN")
+        mechanism = str(payload.get("exit_mechanism") or r.get("exit_mechanism") or "UNKNOWN").upper()
+        economic = str(payload.get("economic_outcome") or r.get("economic_outcome") or ("WIN" if final_r > 0 else "LOSS" if final_r < 0 else "BREAKEVEN")).upper()
+        cells[(archetype, regime)].append({"final_r": final_r, "mechanism": mechanism, "economic": economic, "weight": weight})
+    out=[]
     for (archetype, regime), vals in cells.items():
-        rs = [float(x["final_r"]) for x in vals]
-        wins = sum(1 for x in vals if x["economic"] == "WIN" or x["final_r"] > 0)
-        mechanisms = defaultdict(int)
-        for x in vals:
-            mechanisms[x["mechanism"]] += 1
+        total_w=sum(float(v.get("weight",1.0)) for v in vals) or 1.0
+        mean_r=sum(float(v["final_r"])*float(v.get("weight",1.0)) for v in vals)/total_w
+        win_w=sum(float(v.get("weight",1.0)) for v in vals if v["economic"]=="WIN" or v["final_r"]>0)
+        mechanisms=defaultdict(float)
+        for v in vals: mechanisms[v["mechanism"]]+=float(v.get("weight",1.0))
         out.append({
-            "archetype": archetype, "regime": regime, "n": len(vals),
-            "mean_r": round(float(np.mean(rs)), 5) if rs else 0.0,
-            "win_rate": round(wins / max(1, len(vals)), 4),
-            "exit_mechanisms": dict(mechanisms),
-            "trail_count": int(mechanisms.get("TRAIL", 0)),
-            "trail_mean_r": round(float(np.mean([x["final_r"] for x in vals if x["mechanism"] == "TRAIL"])), 5) if any(x["mechanism"] == "TRAIL" for x in vals) else None,
+            "archetype": archetype, "regime": regime, "n": round(total_w,2),
+            "raw_n": len(vals), "mean_r": round(float(mean_r),5),
+            "win_rate": round(win_w/total_w,4),
+            "mechanisms": {k:round(v,2) for k,v in mechanisms.items()},
+            "evidence_mix": {"real": round(sum(1.0 for v in vals if v.get("weight")==1.0),2), "shadow_or_historical": round(sum(0.5 for v in vals if v.get("weight")==0.5),2)},
         })
-    out.sort(key=lambda x: (x["mean_r"], x["n"]), reverse=True)
+    out.sort(key=lambda x:(x["mean_r"],x["n"]),reverse=True)
     return out
 
 
-def _agent_frequency_health(candidate_cells):
-    total = sum(int(x.get("n", 0) or 0) for x in candidate_cells)
+def _agent_frequency_health(candidate_cells, records=None):
+    total=sum(int(x.get("n",0) or 0) for x in candidate_cells)
+    rows=[r for r in (records or []) if isinstance(r,dict) and r.get("type")=="candidate"]
     if not total:
-        return {"candidates": 0, "top_cell_share": 0.0, "status": "INSUFFICIENT"}
-    top = max((int(x.get("n", 0) or 0) / total for x in candidate_cells), default=0.0)
-    return {
-        "candidates": total,
-        "top_cell_share": round(top, 4),
-        "exploration_share_target": AGENT_EXPLORATION_SHARE,
-        "status": "HEALTHY" if total >= 20 else "WARMING_UP",
-    }
+        return {"candidates":0,"top_cell_share":0.0,"near_threshold_count":0,"near_threshold_quality":0.0,"status":"INSUFFICIENT"}
+    top=max((int(x.get("n",0) or 0)/total for x in candidate_cells),default=0.0); near=[]; conf=[]
+    for r in rows:
+        try:
+            c=float(r.get("confidence",0.0) or 0.0); conf.append(c); th=float(r.get("confidence_min",60.0) or 60.0)
+            if abs(c-th)<=5.0: near.append(r)
+        except Exception: pass
+    nq=float(np.mean([float(x.get("trade_quality",x.get("confidence",0.0)) or 0.0) for x in near])) if near else 0.0
+    return {"candidates":total,"top_cell_share":round(top,4),"near_threshold_count":len(near),"near_threshold_quality":round(nq,3),"median_confidence":round(float(np.median(conf)),3) if conf else 0.0,"exploration_share_target":AGENT_EXPLORATION_SHARE,"status":"HEALTHY" if total>=20 else "WARMING_UP"}
 
 
 def _agent_bounded_policy_proposal(candidate_cells, outcome_cells):
@@ -5770,7 +5998,7 @@ def adaptive_research_cycle():
     records = _agent_read_records()
     candidate_cells = _agent_candidate_cells(records)
     outcome_cells = _agent_outcome_cells(records)
-    frequency = _agent_frequency_health(candidate_cells)
+    frequency = _agent_frequency_health(candidate_cells, records=records)
     trail_health = _agent_trail_health(records)
     lifecycle_health = _agent_trade_lifecycle_health(records)
     proposals = _agent_bounded_policy_proposal(candidate_cells, outcome_cells)
@@ -6089,7 +6317,7 @@ try:
     __all__ = list(dict.fromkeys(__all__ + [
         "AGENT_BRAIN_API_VERSION", "adaptive_agent_start", "adaptive_agent_stop",
         "adaptive_research_cycle", "adaptive_replay_historical", "get_adaptive_status",
-        "get_adaptive_policy", "get_ollama_research_status", "strategy_trade_gate",
+        "get_adaptive_policy", "get_adaptive_policy_adjustment", "suggest_confidence_threshold", "update_frequency_confidence_state", "get_frequency_confidence_adjustment", "get_frequency_confidence_state", "get_adaptive_learning_records", "get_ollama_research_status", "strategy_trade_gate",
     ]))
 except Exception:
     pass
