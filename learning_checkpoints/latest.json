@@ -1,19 +1,20 @@
 {
   "format": "adaptive-learning-checkpoint-v1",
-  "created_at": "2026-08-31T22:53:22.456925+07:00",
+  "created_at": "2026-08-31T23:25:36.921412+07:00",
   "brain_engine": "STABLE_EXECUTION_BODY_v43_FREQUENCY_BRIDGE_FIX",
   "files": [
     "adaptive_brain_state.json",
     "frequency_confidence_state.json",
     "v32_brain_state.json",
-    "v32_experience.jsonl"
+    "v32_experience.jsonl",
+    "v32_lessons.jsonl"
   ],
-  "archive_sha256": "6b03bb2a4cf2d186bcfd98f91873a555d9b849ed3155e5773634f34f6e334c2c",
-  "archive_bytes": 602554,
-  "checkpoint_id": "20260831_225323_229940",
-  "prefix": "learning_checkpoints/20260831_225323_229940",
+  "archive_sha256": "4eb07139ae5c1e99d5e6e39cae1506c85dd4139526be8d014248beef7815c0f2",
+  "archive_bytes": 646216,
+  "checkpoint_id": "20260831_232538_220759",
+  "prefix": "learning_checkpoints/20260831_232538_220759",
   "chunks": [
-    "learning_checkpoints/20260831_225323_229940/part_0000.bin"
+    "learning_checkpoints/20260831_232538_220759/part_0000.bin"
   ],
-  "file_count": 4
+  "file_count": 5
 }
