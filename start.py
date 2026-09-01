@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""SMCAutoTrade start_v5.py
+"""SMCAutoTrade start_v6.py
 
 Data + execution orchestration layer.
 
@@ -33,7 +33,7 @@ from typing import Any, Callable
 import requests
 import websocket
 
-VERSION = "5.0"
+VERSION = "6.0"
 
 BYBIT_BASE_URL = (os.getenv("BYBIT_BASE_URL") or "https://api.bybit.com").rstrip("/")
 BYBIT_WS_URL = (os.getenv("BYBIT_WS_URL") or "wss://stream.bybit.com/v5/public/linear").strip()
@@ -41,7 +41,6 @@ BINANCE_BASE_URL = (os.getenv("BINANCE_BASE_URL") or "https://fapi.binance.com")
 BINANCE_WS_BASE = (os.getenv("BINANCE_WS_BASE") or "wss://fstream.binance.com/ws").rstrip("/")
 IP_URL = (os.getenv("IP_URL") or "https://api.ipify.org").strip()
 
-MAX_SYMBOLS = max(1, int(os.getenv("DATA_MAX_SYMBOLS", "250")))
 TF_CONFIG = {"15": 700, "5": 500, "1": 500}
 LOAD_INTERVAL = max(0.0, float(os.getenv("DATA_LOAD_INTERVAL", "1.0")))
 RETENTION_EXTRA = max(50, int(os.getenv("DATA_RETENTION_EXTRA", "50")))
@@ -49,6 +48,9 @@ REQUEST_TIMEOUT = max(5, int(os.getenv("REQUEST_TIMEOUT", "20")))
 WS_PING_INTERVAL = max(5, int(os.getenv("WS_PING_INTERVAL", "20")))
 WS_RECONNECT_MAX = max(5, int(os.getenv("WS_RECONNECT_MAX", "30")))
 LOG_EVERY_SYMBOL_TICK = max(2, int(os.getenv("LOG_EVERY_SYMBOL_TICK", "15")))
+WS_MAX_ARG_CHARS = max(5000, int(os.getenv("WS_MAX_ARG_CHARS", "18000")))
+WS_RECONNECT_JITTER = max(0.0, float(os.getenv("WS_RECONNECT_JITTER", "1.5")))
+WS_NOTIFY_BATCH_EVERY = max(1, int(os.getenv("WS_NOTIFY_BATCH_EVERY", "5")))
 STRATEGY_FILE = (os.getenv("STRATEGY_FILE") or "strategy.py").strip()
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -60,7 +62,7 @@ DEFAULT_LEVERAGE = max(1, int(os.getenv("TRADE_LEVERAGE", "10")))
 DEFAULT_MAX_ACTIVE = max(0, int(os.getenv("TRADE_MAX_ACTIVE", "5")))
 BAN_HOURS = max(0.25, float(os.getenv("TRADE_BAN_HOURS", "8")))
 AUTO_QTY_RANGE = 0.50
-STATE_FILE = Path(os.getenv("TRADE_STATE_FILE", str(BASE_DIR / "trade_state_v5.json"))).resolve()
+STATE_FILE = Path(os.getenv("TRADE_STATE_FILE", str(BASE_DIR / "trade_state_v6.json"))).resolve()
 STATE_LOCK = threading.RLock()
 
 logging.basicConfig(
@@ -866,8 +868,11 @@ class DataEngine:
         self.run_lock = threading.RLock()
         self.auto_running = False
         self.bootstrap_complete = False
-        self.ws: websocket.WebSocketApp | None = None
-        self.ws_thread: threading.Thread | None = None
+        # WebSocket is a pool: one connection per subscription batch.
+        self.ws_apps: dict[int, websocket.WebSocketApp] = {}
+        self.ws_threads: dict[int, threading.Thread] = {}
+        self.ws_batch_topics: dict[int, list[str]] = {}
+        self.ws_connected: set[int] = set()
         self.bootstrap_thread: threading.Thread | None = None
         self.strategy: Any = None
         self.strategy_error: str | None = None
@@ -919,10 +924,10 @@ class DataEngine:
         a = self.bybit_symbols(); log.info("[DISCOVERY] Bybit=%d", len(a))
         b = self.binance_symbols(); log.info("[DISCOVERY] Binance=%d", len(b))
         common = sorted(a & b)
-        selected = common[:MAX_SYMBOLS]
-        with self.symbol_lock: self.symbols = selected
-        log.info("[DISCOVERY] common=%d selected=%d", len(common), len(selected))
-        return selected
+        # No hard symbol cap: every pair common to Bybit + Binance is retained.
+        with self.symbol_lock: self.symbols = common
+        log.info("[DISCOVERY] common=%d selected=ALL", len(common))
+        return common
 
     def fetch_klines(self, symbol: str, tf: str, limit: int) -> list[Candle]:
         d = self._get(f"{BYBIT_BASE_URL}/v5/market/kline", {"category": "linear", "symbol": symbol, "interval": tf, "limit": limit}).json()
@@ -956,7 +961,11 @@ class DataEngine:
             if self.bootstrap_symbol(s): success += 1
             else: failed += 1
             if i == 1 or i % 25 == 0 or i == total:
-                self._notify(f"📥 BOOTSTRAP PROGRESS\n{i}/{total}\nSuccess: {success} | Failed: {failed}")
+                self._notify(
+                    "📥 BOOTSTRAP PROGRESS\n"
+                    f"{i}/{total} pairs\n"
+                    f"Success: {success} | Failed: {failed}"
+                )
             elapsed = time.monotonic() - t0
             wait = max(0.0, LOAD_INTERVAL - elapsed)
             if i < total and wait: self.stop_event.wait(wait)
@@ -1060,82 +1069,194 @@ class DataEngine:
             try: cb(event)
             except Exception: log.exception("[DATA CALLBACK] failed")
 
-    # ---- websocket ----
+    # ---- websocket pool ----
     def add_data_callback(self, callback: Callable[[dict[str, Any]], None]) -> None:
         self.callbacks.append(callback)
 
     def _topics(self) -> list[str]:
+        # Every selected pair is subscribed on all three native timeframes.
         return [f"kline.{tf}.{s}" for tf in TF_CONFIG for s in self.get_symbols()]
 
     @staticmethod
-    def _topic_batches(topics: list[str], max_chars: int = 19000) -> list[list[str]]:
-        batches: list[list[str]] = []; cur: list[str] = []; n = 2
-        for t in topics:
-            add = len(t) + (1 if cur else 0)
-            if cur and n + add > max_chars:
-                batches.append(cur); cur = []; n = 2
-            cur.append(t); n += add
-        if cur: batches.append(cur)
+    def _topic_batches(topics: list[str], max_chars: int) -> list[list[str]]:
+        """Pack topics by the public connection args character budget."""
+        batches: list[list[str]] = []
+        current: list[str] = []
+        chars = 2  # rough [] overhead
+        for topic in topics:
+            add = len(topic) + (1 if current else 0)
+            if current and chars + add > max_chars:
+                batches.append(current)
+                current = []
+                chars = 2
+            current.append(topic)
+            chars += add
+        if current:
+            batches.append(current)
         return batches
 
-    def _ws_open(self, ws: websocket.WebSocketApp) -> None:
-        topics = self._topics(); batches = self._topic_batches(topics)
-        for i, batch in enumerate(batches, 1):
-            ws.send(json.dumps({"op": "subscribe", "req_id": f"smc5-{i}", "args": batch}, separators=(",", ":")))
-            log.info("[WS] subscription batch=%d/%d topics=%d", i, len(batches), len(batch))
-        self._notify(f"🟢 MARKET DATA LIVE\nBybit WS\nSymbols: {len(self.symbols)}\nStreams: 15M + 5M + 1M\nSubscriptions: {len(topics)} in {len(batches)} batches")
+    def _ws_open(self, ws: websocket.WebSocketApp, batch: list[str], batch_idx: int, batch_total: int) -> None:
+        conn_id = id(ws)
+        self.ws_apps[conn_id] = ws
+        self.ws_batch_topics[conn_id] = batch
+        self.ws_connected.add(conn_id)
+        payload = {
+            "op": "subscribe",
+            "req_id": f"smc6-{batch_idx}-{uuid.uuid4().hex[:6]}",
+            "args": batch,
+        }
+        ws.send(json.dumps(payload, separators=(",", ":")))
+        log.info(
+            "[WS %d/%d] connected | topics=%d | args_chars=%d",
+            batch_idx, batch_total, len(batch), sum(len(x) for x in batch),
+        )
+        if batch_idx == 1 or batch_idx % WS_NOTIFY_BATCH_EVERY == 0 or batch_idx == batch_total:
+            self._notify(
+                "📡 WS CONNECTIONS\n"
+                f"Connected: {len(self.ws_connected)}/{batch_total}\n"
+                f"Topics on this conn: {len(batch)}\n"
+                f"All topics: {sum(len(x) for x in self.ws_batch_topics.values())}"
+            )
+        self._notify_live_state(batch_total)
 
-    def _ws_message(self, _ws: websocket.WebSocketApp, raw: str) -> None:
-        try: p = json.loads(raw)
-        except json.JSONDecodeError: return
-        if p.get("op") in {"subscribe", "pong"}: return
+    def _notify_live_state(self, batch_total: int) -> None:
+        if len(self.ws_connected) < batch_total:
+            return
+        topics = sum(len(x) for x in self.ws_batch_topics.values())
+        self._notify(
+            "🟢 MARKET DATA LIVE\n"
+            "Bybit WS pool\n"
+            f"Symbols: {len(self.symbols)}\n"
+            "Streams: 15M + 5M + 1M\n"
+            f"Topics: {topics}\n"
+            f"Connections: {batch_total}"
+        )
+
+    def _ws_message(self, conn_id: int, _ws: websocket.WebSocketApp, raw: str) -> None:
+        try:
+            p = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        if p.get("op") in {"subscribe", "pong", "unsubscribe"}:
+            if p.get("op") == "subscribe" and p.get("success") is False:
+                log.error("[WS %s] subscription rejected: %s", conn_id, p)
+            return
         parts = str(p.get("topic") or "").split(".")
-        if len(parts) != 3 or parts[0] != "kline": return
+        if len(parts) != 3 or parts[0] != "kline":
+            return
         tf = parts[1]
         for x in p.get("data") or []:
             try:
-                c = Candle(int(x["start"]), float(x["open"]), float(x["high"]), float(x["low"]), float(x["close"]), float(x["volume"]), float(x.get("turnover") or 0), bool(x.get("confirm", False)))
+                c = Candle(
+                    int(x["start"]), float(x["open"]), float(x["high"]),
+                    float(x["low"]), float(x["close"]), float(x["volume"]),
+                    float(x.get("turnover") or 0), bool(x.get("confirm", False))
+                )
                 symbol = str(x.get("symbol") or parts[2]).upper()
             except (KeyError, TypeError, ValueError):
-                log.exception("[WS] bad kline payload"); continue
+                log.exception("[WS %s] bad kline payload", conn_id)
+                continue
             self.store.upsert(symbol, tf, c)
-            key = (symbol, tf); now = time.monotonic()
+            key = (symbol, tf)
+            now = time.monotonic()
             if now - self.tick_logs.get(key, 0) >= LOG_EVERY_SYMBOL_TICK:
                 self.tick_logs[key] = now
-                log.info("[TICK] %s %s C=%.8f confirm=%s", symbol, tf, c.close, c.confirmed)
-            self._dispatch_event({"type": "candle", "symbol": symbol, "timeframe": tf, "candle": c.as_dict()})
+                log.info(
+                    "[TICK WS#%s] %s %s C=%.8f confirm=%s",
+                    conn_id, symbol, tf, c.close, c.confirmed
+                )
+            self._dispatch_event({
+                "type": "candle",
+                "symbol": symbol,
+                "timeframe": tf,
+                "candle": c.as_dict(),
+            })
 
-    def _ws_error(self, _ws: websocket.WebSocketApp, error: Any) -> None:
-        log.warning("[WS] error=%s", error)
+    def _ws_error(self, conn_id: int, _ws: websocket.WebSocketApp, error: Any) -> None:
+        log.warning("[WS %s] error=%s", conn_id, error)
 
-    def _ws_close(self, _ws: websocket.WebSocketApp, code: Any, msg: Any) -> None:
-        log.warning("[WS] closed code=%s msg=%s", code, msg)
+    def _ws_close(self, conn_id: int, _ws: websocket.WebSocketApp, code: Any, msg: Any) -> None:
+        self.ws_connected.discard(conn_id)
+        log.warning("[WS %s] closed code=%s msg=%s connected=%d", conn_id, code, msg, len(self.ws_connected))
 
-    def _ws_worker(self) -> None:
-        backoff = 2
+    def _ws_worker(self, batch_idx: int, batch: list[str], batch_total: int) -> None:
+        backoff = 2.0
         while self.auto_running and not self.stop_event.is_set():
+            conn_id = None
             try:
-                ws = websocket.WebSocketApp(BYBIT_WS_URL, on_open=self._ws_open, on_message=self._ws_message, on_error=self._ws_error, on_close=self._ws_close)
-                self.ws = ws
-                log.info("[WS] connecting %s", BYBIT_WS_URL)
-                ws.run_forever(ping_interval=WS_PING_INTERVAL, ping_timeout=WS_PING_INTERVAL - 2, skip_utf8_validation=True)
+                ws = websocket.WebSocketApp(
+                    BYBIT_WS_URL,
+                    on_open=lambda w, b=batch, i=batch_idx, n=batch_total: self._ws_open(w, b, i, n),
+                    on_message=lambda w, m: self._ws_message(id(w), w, m),
+                    on_error=lambda w, e: self._ws_error(id(w), w, e),
+                    on_close=lambda w, c, m: self._ws_close(id(w), w, c, m),
+                )
+                conn_id = id(ws)
+                self.ws_apps[conn_id] = ws
+                self.ws_batch_topics[conn_id] = batch
+                self.ws_threads[conn_id] = threading.current_thread()
+                log.info(
+                    "[WS %d/%d] connecting | topics=%d | url=%s",
+                    batch_idx, batch_total, len(batch), BYBIT_WS_URL
+                )
+                ws.run_forever(
+                    ping_interval=WS_PING_INTERVAL,
+                    ping_timeout=max(2, WS_PING_INTERVAL - 2),
+                    skip_utf8_validation=True,
+                )
             except Exception:
-                log.exception("[WS] worker error")
+                log.exception("[WS %d/%d] worker error", batch_idx, batch_total)
             finally:
-                self.ws = None
+                if conn_id is not None:
+                    self.ws_connected.discard(conn_id)
+                    self.ws_apps.pop(conn_id, None)
+                    self.ws_batch_topics.pop(conn_id, None)
             if self.auto_running and not self.stop_event.is_set():
-                log.warning("[WS] reconnect in %ss", backoff)
-                self.stop_event.wait(backoff); backoff = min(backoff * 2, WS_RECONNECT_MAX)
+                jitter = (uuid.uuid4().int % 1000) / 1000 * WS_RECONNECT_JITTER
+                delay = min(WS_RECONNECT_MAX, backoff + jitter)
+                log.warning("[WS %d/%d] reconnect in %.1fs", batch_idx, batch_total, delay)
+                if self.stop_event.wait(delay):
+                    return
+                backoff = min(backoff * 2.0, WS_RECONNECT_MAX)
 
     def start_websocket(self) -> None:
-        if self.ws_thread and self.ws_thread.is_alive(): return
-        self.ws_thread = threading.Thread(target=self._ws_worker, name="bybit-ws", daemon=True); self.ws_thread.start()
+        topics = self._topics()
+        if not topics:
+            raise RuntimeError("WebSocket topic list kosong")
+        batches = self._topic_batches(topics, WS_MAX_ARG_CHARS)
+        log.info(
+            "[WS] starting pool | symbols=%d topics=%d connections=%d budget=%d chars",
+            len(self.symbols), len(topics), len(batches), WS_MAX_ARG_CHARS
+        )
+        self.ws_connected.clear()
+        self.ws_apps.clear()
+        self.ws_batch_topics.clear()
+        self.ws_threads.clear()
+        for i, batch in enumerate(batches, 1):
+            if self.stop_event.is_set() or not self.auto_running:
+                return
+            t = threading.Thread(
+                target=self._ws_worker,
+                args=(i, batch, len(batches)),
+                name=f"bybit-ws-{i}",
+                daemon=True,
+            )
+            self.ws_threads[i] = t
+            t.start()
+            # Tiny stagger avoids a connection burst when the universe is large.
+            self.stop_event.wait(0.15)
 
     def stop_websocket(self) -> None:
-        ws = self.ws; self.ws = None
-        if ws:
-            try: ws.close()
-            except Exception: log.exception("[WS] close failed")
+        apps = list(self.ws_apps.values())
+        self.ws_connected.clear()
+        self.ws_apps.clear()
+        self.ws_batch_topics.clear()
+        for ws in apps:
+            try:
+                ws.close()
+            except Exception:
+                log.exception("[WS] close failed")
+        self.ws_threads.clear()
 
     # ---- lifecycle / command ----
     def start_auto(self) -> str:
@@ -1150,7 +1271,11 @@ class DataEngine:
             self.auto_running = False; log.exception("[AUTO] discovery failed"); return f"❌ /auto gagal: {exc}"
         if not syms:
             self.auto_running = False; return "❌ /auto gagal: common symbol universe kosong"
-        self._notify(f"✅ Universe ready\nCommon selected: {len(syms)}\n\nBootstrap 15M/5M/1M dimulai...")
+        self._notify(
+            "✅ Universe ready\n"
+            f"Common pairs: {len(syms)} (UNLIMITED)\n\n"
+            "Bootstrap 15M/5M/1M dimulai..."
+        )
         self.bootstrap_thread = threading.Thread(target=self.bootstrap_all, name="bootstrap", daemon=True); self.bootstrap_thread.start()
         return f"🟢 /auto aktif — {len(syms)} pair masuk data pipeline."
 
@@ -1188,7 +1313,8 @@ class DataEngine:
     def status(self) -> dict[str, Any]:
         return {
             "auto": self.auto_running, "bootstrap": self.bootstrap_complete, "symbols": len(self.symbols),
-            "strategy": bool(self.strategy), "strategy_error": self.strategy_error, "ws": self.ws is not None,
+            "strategy": bool(self.strategy), "strategy_error": self.strategy_error, "ws": len(self.ws_connected),
+            "ws_connections": len(self.ws_apps),
             "mode": self.trade_manager.mode, "active": self.trade_manager.active_count(), "max": self.trade_manager.max_active,
         }
 
@@ -1229,7 +1355,7 @@ def on_start(context: dict[str, Any]) -> None:
     ENGINE = DataEngine(context)
     try: ip = ENGINE.public_ip()
     except Exception as exc: ip = f"unavailable ({exc})"
-    log.info("[START] V5 ready | ip=%s | base=%s | strategy=%s", ip, BASE_DIR, STRATEGY_FILE)
+    log.info("[START] V6 ready | ip=%s | base=%s | strategy=%s", ip, BASE_DIR, STRATEGY_FILE)
     ENGINE._notify(
         f"🟢 START.PY V{VERSION} READY\n"
         f"Server IP: {ip}\n"
@@ -1247,8 +1373,8 @@ def on_stop(context: dict[str, Any]) -> None:
 
 def _help() -> str:
     return (
-        "🤖 SMCAutoTrade V5\n\n"
-        "/auto — discovery + historical + websocket\n"
+        "🤖 SMCAutoTrade V6\n\n"
+        "/auto — ALL common pairs + historical + websocket pool\n"
         "/mode — show mode\n/mode on — REAL Binance\n/mode off — SIMULATION\n"
         "/margin 10 — target margin/trade\n/leverage 10 — leverage\n/max 5 — max active orders/positions\n"
         "/trade — active simulated/real orders\n/stats — closed trade statistics\n"
@@ -1276,7 +1402,7 @@ def handle_update(update: dict[str, Any], context: dict[str, Any]) -> str | None
             return (
                 "📊 SYSTEM STATUS\n"
                 f"AUTO: {s['auto']}\nBOOTSTRAP: {s['bootstrap']}\nSYMBOLS: {s['symbols']}\n"
-                f"WS: {s['ws']}\nSTRATEGY: {s['strategy']}\nSTRATEGY ERROR: {s['strategy_error'] or '-'}\n"
+                f"WS connections: {s['ws']}/runtime {s['ws_connections']}\nSTRATEGY: {s['strategy']}\nSTRATEGY ERROR: {s['strategy_error'] or '-'}\n"
                 f"MODE: {s['mode']}\nACTIVE: {s['active']}/{s['max']}"
             )
         if cmd == "/mode":
