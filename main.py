@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py V27 — STABLE BODY (execution engine).
+main.py V49 — FORMAL BODY / EXECUTION INFRASTRUCTURE.
 
 V15 HARDENED: verified real-order execution, no blind mutating retries, exchange/local state reconciliation, protection-pair verification, and fail-closed emergency handling. Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
@@ -15,15 +15,13 @@ V19: V18 observability retained; derived market-context telemetry added from exi
 3. full_analyze() terima df_h1/df_m15/df_d1 langsung, bukan symbol.
 """
 import sys
-import os, time, logging, threading
+import os, time, logging, threading, signal, uuid, inspect
 from collections import deque
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 
-import requests, pandas as pd, numpy as np, urllib3, json, html
-import base64, io, zipfile, hashlib, tempfile
-from concurrent.futures import ThreadPoolExecutor
+import requests, pandas as pd, numpy as np, urllib3, json, html, base64
 from flask import Flask
 
 try:
@@ -80,16 +78,9 @@ _binance_weight_seen_at = 0.0
 MAX_POSITIONS       = 20   # runtime via /max — jangan pindah ke strategy_logic
 MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
-STRATEGY_CONFIDENCE_THRESHOLD = 60  # filter orchestration; strategy tetap menghitung confidence
+BRAIN_CONFIDENCE_DISPLAY_FALLBACK = "brain-owned"
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "STABLE_EXECUTION_BODY_v43_FREQUENCY_BRIDGE_FIX"
-
-# Stable body / replaceable brain contract.
-# main.py owns Binance, Telegram, execution, protection and runtime state.
-# strategy_logic.py owns analysis, research and adaptive policy.
-BRAIN_API_REQUIRED = ("full_analyze", "manage_position", "adaptive_agent_start", "get_adaptive_status", "get_ollama_research_status")
-BODY_MUST_SURVIVE_BRAIN_ERRORS = True
-RESEARCH_NEVER_BLOCKS_EXECUTION = True
+MAIN_ENGINE_VERSION = "MAIN-BODY-V48-FORMAL-CONTRACT"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -149,106 +140,199 @@ def _scan_cache_stats():
 
 # ─────────────────────────────────────────────
 
-# Import OTAK — kalau gagal ATAU full_analyze() tidak ada di dalamnya
-# (misal file strategy_logic.py yang salah/lama ke-upload), fallback aman.
+# ==================== BRAIN / STRATEGY INTERFACE ====================
+# main.py never contains strategy reasoning. It exposes a small stable adapter
+# to strategy_logic.py; missing optional research APIs never break execution.
 try:
-    from strategy_logic import *
-    if "full_analyze" not in dir() or not callable(full_analyze):
-        raise ImportError(
-            "strategy_logic.py ke-import tapi TIDAK ADA fungsi full_analyze() di dalamnya "
-            "— kemungkinan file yang salah/versi lama ter-upload.")
-    log.info("[OTAK] strategy_logic.py berhasil dimuat & full_analyze() terverifikasi ada.")
-    missing_brain=[name for name in BRAIN_API_REQUIRED if not callable(globals().get(name))]
-    if missing_brain:
-        log.warning(f"[OTAK] Adaptive brain API sebagian belum tersedia: {missing_brain}. Execution tetap jalan dengan compatibility mode.")
-except Exception as e:
-    log.error(f"[OTAK] Gagal memuat strategy_logic.py ({e}) — fallback aman aktif.")
-    # Engine fallback tidak memiliki aturan trading.
-    def full_analyze(df_h1, df_m15, df_d1=None, symbol=None):
-        return None
-    _STRATEGY_LOAD_ERROR = str(e)
-else:
+    import strategy_logic as _brain
+    if not callable(getattr(_brain, "full_analyze", None)):
+        raise ImportError("strategy_logic.py tidak menyediakan full_analyze()")
     _STRATEGY_LOAD_ERROR = None
+    log.info("[BRAIN] strategy_logic.py imported; final contract validation deferred to runtime bootstrap.")
+except Exception as e:
+    _brain = None
+    _STRATEGY_LOAD_ERROR = str(e)
+    log.error(f"[BRAIN] load gagal: {e}; new entries disabled, existing positions remain managed.")
+
+def _brain_fn(name):
+    return getattr(_brain, name, None) if _brain is not None else None
+
+def _brain_on_candidate(row):
+    for name in ("ingest_live_candidate", "record_candidate_observation", "ingest_live_candidate"):
+        fn=_brain_fn(name)
+        if callable(fn):
+            try:
+                fn(row)
+            except TypeError:
+                try: fn(row.get("symbol"), row)
+                except Exception: pass
+            except Exception as e:
+                log.debug(f"[BRAIN] candidate hook gagal: {e}")
+            return
+
+def _brain_on_trade(row):
+    for name in ("ingest_live_outcome", "record_trade_outcome"):
+        fn=_brain_fn(name)
+        if callable(fn):
+            try: fn(row)
+            except TypeError:
+                try: fn(row.get("symbol"), row)
+                except Exception: pass
+            except Exception as e:
+                log.debug(f"[BRAIN] trade hook gagal: {e}")
+            return
+
+
+def _brain_get_experience_count():
+    for name in ("get_experience_count", "get_learning_model_info", "get_full_cognitive_status"):
+        fn=_brain_fn(name)
+        if callable(fn):
+            try:
+                v=fn()
+                if isinstance(v, dict):
+                    for k in ("experience_samples","samples","experience_count","outcomes"):
+                        if k in v:
+                            return int(v.get(k) or 0)
+            except Exception:
+                pass
+    return 0
+
+def _strategy_set_ml_model(model):
+    fn=_brain_fn("set_learning_model")
+    if callable(fn):
+        try: fn(model)
+        except Exception as e: log.debug(f"[BRAIN] set model ignored: {e}")
+
+def _brain_get_champion():
+    fn=_brain_fn("get_learning_model_info")
+    if callable(fn):
+        try:
+            info=fn()
+            if isinstance(info, dict): return info.get("champion") or info.get("model") or {}
+        except Exception: pass
+    return {}
+
+def _brain_threshold_suggestion():
+    for name in ("get_active_confidence_threshold", "suggest_confidence_threshold"):
+        fn=_brain_fn(name)
+        if callable(fn):
+            try:
+                sig=inspect.signature(fn)
+                if len(sig.parameters)!=0:
+                    continue
+                v=fn()
+                if isinstance(v, dict): v=v.get("threshold") or v.get("active_threshold")
+                if v is not None: return float(v)
+            except Exception: pass
+    return None
+
+def _get_active_confidence_threshold():
+    try:
+        v=_brain_threshold_suggestion()
+        if v is not None: return max(0, min(100, int(round(v))))
+    except Exception: pass
+    return BRAIN_CONFIDENCE_DISPLAY_FALLBACK
+
+def _brain_full_command(action, chat_id=None):
+    fn=_brain_fn("full_command")
+    if callable(fn):
+        try: return fn(action)
+        except TypeError:
+            try: return fn(action, chat_id)
+            except Exception: pass
+        except Exception: pass
+    return None
+
+def _brain_full_status():
+    fn=_brain_fn("get_full_cognitive_status") or _brain_fn("get_cognitive_status")
+    if callable(fn):
+        try:
+            v=fn()
+            return str(v)
+        except Exception: pass
+    return "🧠 <b>FULL LEARNING</b>: unavailable"
+
+# Local runtime state is authoritative for execution; brain owns strategy state.
+FULL_MODE=False
+FULL_THREAD=None
+FULL_MANUAL_THRESHOLD_SAVED=None
+FULL_STOP=threading.Event()
+FULL_WAKE=threading.Event()
+
+def _full_on():
+    global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED
+    FULL_MODE=True
+    FULL_MANUAL_THRESHOLD_SAVED=None
+    _brain_full_command("on")
+    return _brain_full_status()
+
+def _full_off():
+    global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED
+    FULL_MODE=False
+    _brain_full_command("off")
+    FULL_MANUAL_THRESHOLD_SAVED=None
+    return _brain_full_status()
+
+def _full_reset_internal():
+    global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED
+    FULL_MODE=False
+    FULL_STOP.set(); FULL_WAKE.clear()
+    _brain_full_command("reset")
+    FULL_MANUAL_THRESHOLD_SAVED=None
+    return _brain_full_status()
+
+def _full_strategy_command(action, chat_id=None):
+    if action=="on": return _full_on()
+    if action=="off": return _full_off()
+    if action=="reset": return _full_reset_internal()
+    return _brain_full_status()
+
+def _full_status_text():
+    return _brain_full_status()
+
+def _full_controller_state():
+    return {"mode": bool(FULL_MODE), "threshold": _get_active_confidence_threshold(), "brain": _brain_full_status()}
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN tidak ditemukan di environment. Cek file .env")
 
 class TelegramLogHandler(logging.Handler):
-    """Send only actionable execution/protection errors to Telegram.
-
-    Render keeps detailed logs; Telegram is reserved for alerts that require
-    operator attention. Repeated expected Binance/order rejections are
-    aggregated/deduplicated instead of flooding the chat.
+    """
+    Forward log ERROR/CRITICAL ke Telegram.
+    Throttle: maks 1 pesan per 30 detik per pesan unik
+    agar tidak flood saat error berulang.
     """
     def __init__(self):
-        super().__init__(level=logging.WARNING)
-        self._last_sent = {}
-        self._throttle = max(30, int(os.getenv("TELEGRAM_ERROR_THROTTLE_SEC", "120")))
-
-    @staticmethod
-    def _is_expected_noise(message: str) -> bool:
-        text = str(message or "")
-        upper = text.upper()
-        noise_tokens = (
-            "STOP_WOULD_IMMEDIATELY_TRIGGER",
-            "ORDER WOULD IMMEDIATELY TRIGGER",
-            "-2021",
-            "TRAIL_REJECTED",
-            "TRAIL EXECUTION REJECTED",
-            "BINANCE COOLDOWN AKTIF",
-            "RATE LIMIT/RECOVERY",
-            "SCAN DATA",
-            "[SCAN",
-            "[FULL][CONFIDENCE]",
-        )
-        return any(tok in upper for tok in noise_tokens)
-
-    @staticmethod
-    def _is_actionable(record) -> bool:
-        msg = str(record.getMessage() or "")
-        if TelegramLogHandler._is_expected_noise(msg):
-            return record.levelno >= logging.CRITICAL and "EMERGENCY" in msg.upper()
-        if record.levelno >= logging.CRITICAL:
-            return True
-        if record.levelno < logging.ERROR:
-            return False
-        upper = msg.upper()
-        actionable = (
-            "REAL" in upper or "PROTECTION" in upper or "ORDER" in upper
-            or "BINANCE" in upper or "EMERGENCY" in upper or "EXECUTION" in upper
-            or "RECONCIL" in upper or "CREDENTIAL" in upper
-        )
-        return actionable
+        super().__init__(level=logging.ERROR)
+        self._last_sent: dict = {}   # {msg_key: timestamp}
+        self._throttle  = 900         # detik
 
     def emit(self, record):
-        if "TG" in record.getMessage():
-            return
+        # Hindari rekursi (error saat kirim TG itu sendiri)
+        if "TG" in record.getMessage(): return
         try:
-            if not self._is_actionable(record):
-                return
-            raw_msg = record.getMessage()
-            # Expected, already-handled immediate-trigger rejections are not
-            # Telegram alerts. A true CRITICAL/EMERGENCY state remains visible.
-            if self._is_expected_noise(raw_msg) and not (record.levelno >= logging.CRITICAL and "EMERGENCY" in raw_msg.upper()):
-                return
-            msg_key = re.sub(r"[A-Z0-9_]{5,}USDT", "<SYMBOL>", raw_msg)[:180]
+            msg_key = record.getMessage()[:80]
             now = time.time()
             if now - self._last_sent.get(msg_key, 0) < self._throttle:
                 return
             self._last_sent[msg_key] = now
+
             cid = active_chat_id
-            if not cid or not TELEGRAM_TOKEN:
-                return
+            if not cid or not TELEGRAM_TOKEN: return
+
             level_em = "🔴" if record.levelno >= logging.CRITICAL else "⚠️"
-            safe_msg = html.escape(raw_msg[:600], quote=False)
-            text = f"{level_em} <b>[{html.escape(record.levelname)}]</b>\n<code>{safe_msg}</code>"
+            safe_msg = html.escape(record.getMessage()[:400], quote=False)
+            text = (
+                f"{level_em} <b>[{html.escape(record.levelname)}]</b>\n"
+                f"<code>{safe_msg}</code>"
+            )
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                 json={"chat_id": cid, "text": text, "parse_mode": "HTML"},
                 timeout=5
             )
         except Exception:
-            pass
+            pass   # jangan pernah raise dari handler log
 
 
 _tg_log_handler = TelegramLogHandler()
@@ -272,7 +356,6 @@ real_balance_lock = threading.Lock()
 stat_lock = threading.Lock()
 stats = {
     "tp":0, "sl":0, "trail":0, "total":0,
-    "wins":0, "losses":0, "breakeven":0,
     "balance"    : STARTING_BALANCE,
     "pnl_history": deque(maxlen=20),   # compatibility /backtest view
 }
@@ -286,151 +369,7 @@ trade_sequence = 0
 research_run_id = datetime.now(WIB).strftime("%Y%m%d_%H%M%S")
 
 
-# ==================== BRAIN INTERFACE (BODY ONLY) ====================
-# main.py is the execution body. All learning, adaptive policy, strategy evolution,
-# confidence adaptation, historical research and Ollama reasoning live in strategy_logic.py.
-STRATEGY_CONFIDENCE_THRESHOLD = 60
-FULL_MODE = False
-FULL_THREAD = None
-FULL_WAKE = threading.Event()
-FULL_STOP = threading.Event()
-FULL_MANUAL_THRESHOLD_SAVED = None
-FULL_MIN_TRAIN_SAMPLES = 30
-FULL_LAST_TRAINED_COUNT = 0
-ML_STATE = {}
-ML_EXPERIENCE = []
-ML_EXPERIENCE_LOCK = threading.RLock()
-ML_LOCK = threading.RLock()
-FULL_TRAIN_INTERVAL = 300
-FULL_RETRAIN_MIN_NEW = 3
-FULL_MIN_VALIDATION_SAMPLES = 10
-FULL_PROMOTION_MIN_IMPROVEMENT = 0.01
-FULL_ALLOWED_THRESHOLDS = list(range(35,81))
-FULL_MIN_COVERAGE = 0.25
-FULL_ADAPTIVE_THRESHOLD_BASE = None
-FULL_ADAPTIVE_THRESHOLD_LAST_REASON = "startup"
-FULL_ADAPTIVE_THRESHOLD_LAST_AT = 0.0
-FULL_FREQ_MIN_THRESHOLD = 40
-FULL_FREQ_MAX_THRESHOLD = 72
-FULL_ML_SUGGESTED_THRESHOLD = 60
-SCAN_MAX_DURATION_SEC = max(60, int(os.getenv("SCAN_MAX_DURATION_SEC", "180")))
-
-
-def _brain_status():
-    fn = globals().get("get_adaptive_status")
-    try:
-        return fn() if callable(fn) else {}
-    except Exception:
-        return {}
-
-
-def _brain_full_status():
-    fn = globals().get("get_full_cognitive_status") or globals().get("get_v32_status")
-    try:
-        return fn() if callable(fn) else {}
-    except Exception:
-        return {}
-
-
-def _ml_current_champion():
-    info = _brain_status()
-    evo = (info or {}).get("strategy_evolution") or {}
-    return evo.get("champion") if isinstance(evo, dict) else None
-
-
-def _ml_sync_strategy():
-    return None
-
-
-def _ml_record_signal_metadata(signal):
-    if isinstance(signal, dict):
-        signal.setdefault("ml_schema", "brain_v50")
-        signal.setdefault("ml_model_version", "brain")
-
-
-def _full_controller_state():
-    st = _brain_status()
-    evo = st.get("strategy_evolution") or {}
-    fs = st.get("frequency_confidence") or {}
-    return {
-        "mode": bool(FULL_MODE),
-        "champion": (evo.get("champion") if isinstance(evo, dict) else None),
-        "experience_samples": int(((st.get("live") or {}).get("outcomes",0)) or 0),
-        "learning_cycles": int(st.get("ticks",0) or 0),
-        "promotion_count": int((evo.get("revisions",0) if isinstance(evo,dict) else 0) or 0),
-        "last_training_samples": int(((st.get("live") or {}).get("outcomes",0)) or 0),
-        "last_status": "ACTIVE" if st.get("worker_alive") else "OFF",
-        "manual_threshold": int(STRATEGY_CONFIDENCE_THRESHOLD),
-        "minimum_training_samples": int(FULL_MIN_TRAIN_SAMPLES),
-        "frequency_confidence": fs,
-        "strategy_evolution": evo,
-    }
-
-
-def _full_status_text():
-    st = _brain_status(); evo=st.get("strategy_evolution") or {}; fs=st.get("frequency_confidence") or {}
-    active=(evo.get("active_version") if isinstance(evo,dict) else None) or "S0"
-    return (f"🧠 <b>FULL LEARNING</b>: {'ON' if FULL_MODE else 'OFF'}\n"
-            f"Brain worker: <b>{'ON' if st.get('worker_alive') else 'OFF'}</b> | ticks: <b>{int(st.get('ticks',0) or 0)}</b>\n"
-            f"Strategy aktif: <b>{html.escape(str(active))}</b>\n"
-            f"Strategy revisions: <b>{int((evo.get('revisions',0) if isinstance(evo,dict) else 0) or 0)}</b>\n"
-            f"Adaptive threshold: <b>{int(STRATEGY_CONFIDENCE_THRESHOLD)}%</b>\n"
-            f"Frequency mode: <b>{html.escape(str(fs.get('mode','MAINTAIN')))}</b>\n"
-            f"Last error: <b>{html.escape(str(st.get('last_error') or '—')[:160])}</b>")
-
-
-def _full_on():
-    global FULL_MODE, FULL_THREAD, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED
-    if not FULL_MODE:
-        FULL_MANUAL_THRESHOLD_SAVED = int(STRATEGY_CONFIDENCE_THRESHOLD)
-    FULL_MODE = True
-    os.environ["FULL_LEARNING_ACTIVE"] = "1"
-    fn = globals().get("adaptive_agent_start")
-    if callable(fn): fn()
-    if FULL_THREAD is None or not FULL_THREAD.is_alive():
-        FULL_THREAD = threading.Thread(target=lambda: None, name="body-full-compat", daemon=True)
-        FULL_THREAD.start()
-    return _full_status_text()
-
-
-def _full_off():
-    global FULL_MODE, STRATEGY_CONFIDENCE_THRESHOLD, FULL_MANUAL_THRESHOLD_SAVED, FULL_THREAD
-    FULL_MODE = False
-    os.environ["FULL_LEARNING_ACTIVE"] = "0"
-    fn = globals().get("adaptive_agent_stop")
-    if callable(fn): fn()
-    if FULL_MANUAL_THRESHOLD_SAVED is not None:
-        STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
-        FULL_MANUAL_THRESHOLD_SAVED = None
-    FULL_THREAD = None
-    return _full_status_text()
-
-
-def _full_reset_internal():
-    global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED, STRATEGY_CONFIDENCE_THRESHOLD
-    FULL_MODE = False
-    os.environ["FULL_LEARNING_ACTIVE"] = "0"
-    fn = globals().get("reset_adaptive_learning") or globals().get("reset_cognitive_memory")
-    if callable(fn):
-        try: fn()
-        except TypeError: fn
-    if FULL_MANUAL_THRESHOLD_SAVED is not None:
-        STRATEGY_CONFIDENCE_THRESHOLD = int(FULL_MANUAL_THRESHOLD_SAVED)
-        FULL_MANUAL_THRESHOLD_SAVED = None
-    return _full_controller_state()
-
-
-def _full_strategy_command(action, chat_id=None):
-    handler = globals().get("full_command")
-    if callable(handler):
-        callbacks={"on":_full_on,"off":_full_off,"reset":_full_reset_internal,"status":_full_controller_state}
-        if chat_id is not None:
-            callbacks["notify"] = lambda msg: tg_send(chat_id,msg)
-        return handler(action, callbacks)
-    return _full_status_text()
-
-
-# Research warmup: beberapa kandidat sinyal pertama setelah /resetstats sengaja
+# ==================== MACHINE LEARNING ====================
 # ditolak tanpa dianggap trade gagal dan tanpa mengubah ban state.
 EARLY_REJECT_DEFAULT = 5
 early_reject_configured = EARLY_REJECT_DEFAULT
@@ -483,6 +422,628 @@ BINANCE_KEYS_PRESENT = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
 # REAL_TRADE_ENABLED: mode AKTIF SEKARANG (bisa di-toggle runtime via /mode
 # on|off). Default tetap mengikuti ketersediaan key saat startup.
 REAL_TRADE_ENABLED   = False
+
+# Execution infrastructure invariants
+EXECUTION_ENGINE_VERSION = "MAIN-BODY-V47-FINAL"
+RUNTIME_SCHEMA_VERSION = "runtime_v1"
+EVENT_SCHEMA_VERSION = "event_v1"
+CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
+BRAIN_INTERFACE_VERSION = "brain_v1"
+MAX_HEAVY_WORKERS = 5
+HEAVY_WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_HEAVY_WORKERS)
+_HEAVY_WORKER_LOCK = threading.RLock()
+_HEAVY_WORKER_REGISTRY = {}
+STOP_NEW_ENTRIES = False
+CIRCUIT_BREAKER_OPEN = False
+RUNTIME_STATE = "BOOTING"
+RUNTIME_STATE_LOCK = threading.RLock()
+SHUTDOWN_EVENT = threading.Event()
+EXECUTION_MUTATION_LOCK = threading.RLock()
+EVENT_SEQUENCE = 0
+EVENT_SEQUENCE_LOCK = threading.Lock()
+RUN_ID = uuid.uuid4().hex[:16]
+RUNTIME_STATE_DIR = Path(os.getenv("RUNTIME_STATE_DIR", str(Path(__file__).resolve().parent / "runtime_state")))
+RUNTIME_CHECKPOINT_DIR = RUNTIME_STATE_DIR / "checkpoints"
+RUNTIME_CHECKPOINT_MANIFEST = RUNTIME_CHECKPOINT_DIR / "latest.json"
+RUNTIME_STATE_LOCK = threading.RLock()
+
+def _runtime_snapshot(include_brain=True):
+    with stat_lock:
+        stat_copy = {k: v for k, v in stats.items() if k != "pnl_history"}
+        stat_copy["pnl_history"] = list(stats.get("pnl_history") or [])
+    with positions_lock:
+        pos_copy = {}
+        for sym, pos in positions.items():
+            # Current exchange is authoritative for REAL positions; checkpoint only
+            # records metadata for them. SIMULATION positions can be restored locally.
+            if _position_is_real(pos):
+                pos_copy[sym] = {
+                    "execution_mode": "REAL",
+                    "position_id": pos.get("position_id"),
+                    "trade_uid": pos.get("trade_uid"),
+                    "strategy_version": (pos.get("signal") or {}).get("strategy_version"),
+                }
+            else:
+                pos_copy[sym] = dict(pos)
+    with _last_scanned_lock:
+        scanned = list(last_scanned_coins)
+        scanned_at = last_scanned_at
+    with trade_history_lock:
+        trade_copy = [dict(x) for x in trade_history]
+    with ban_lock:
+        ban_copy = dict(banned_coins)
+    with low_conf_history_lock:
+        low_conf_copy = [dict(x) for x in low_conf_history]
+    with trail_events_lock:
+        trail_copy = [dict(x) for x in trail_events]
+    brain_state = None
+    if include_brain:
+        for name in ("export_checkpoint_state", "get_brain_state"):
+            fn = _brain_fn(name)
+            if callable(fn):
+                try:
+                    brain_state = fn()
+                    break
+                except Exception as e:
+                    log.debug(f"[CHECKPOINT] brain export ignored: {e}")
+    return {
+        "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
+        "engine_version": EXECUTION_ENGINE_VERSION,
+        "run_id": RUN_ID,
+        "created_at": time.time(),
+        "event_sequence": EVENT_SEQUENCE,
+        "runtime_schema_version": RUNTIME_SCHEMA_VERSION,
+        "event_schema_version": EVENT_SCHEMA_VERSION,
+        "brain_interface_version": BRAIN_INTERFACE_VERSION,
+        "runtime_state": RUNTIME_STATE,
+        "runtime": {
+            "auto_mode": bool(auto_mode),
+            "real_trade_enabled": bool(REAL_TRADE_ENABLED),
+            "max_positions": int(MAX_POSITIONS),
+            "leverage": int(LEVERAGE),
+            "margin_usd": float(MARGIN_USD),
+            "autostop_pct": float(AUTOSTOP_PCT),
+            "full_mode": bool(FULL_MODE),
+        },
+        "stats": stat_copy,
+        "trade_history": trade_copy,
+        "trail_events": trail_copy,
+        "banned_coins": ban_copy,
+        "low_confidence_history": low_conf_copy,
+        "positions": pos_copy,
+        "scan_universe": {"symbols": scanned, "updated_at": scanned_at},
+        "brain_state": brain_state,
+    }
+
+def _write_atomic_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
+    os.replace(tmp, path)
+
+def _github_get_json(path):
+    if not GITHUB_TOKEN or not REPO_NAME:
+        raise RuntimeError("GITHUB_TOKEN/REPO_NAME belum diset")
+    url=f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
+    r=requests.get(url, headers={"Authorization":f"token {GITHUB_TOKEN}","Accept":"application/vnd.github+json"}, timeout=15)
+    if r.status_code>=400:
+        raise RuntimeError(f"GitHub GET {path}: HTTP {r.status_code} {r.text[:200]}")
+    body=r.json(); raw=base64.b64decode(body["content"]).decode("utf-8")
+    return json.loads(raw), body.get("sha")
+
+_CHECKPOINT_TRANSACTION_LOCK=threading.RLock()
+_CHECKPOINT_LAST_GOOD=None
+
+def _save_runtime_checkpoint(push_github=True):
+    global _CHECKPOINT_LAST_GOOD, STOP_NEW_ENTRIES
+    with _CHECKPOINT_TRANSACTION_LOCK:
+        prev_stop=STOP_NEW_ENTRIES; STOP_NEW_ENTRIES=True
+        try:
+            cp=_runtime_snapshot(include_brain=True); cid=f"cp-{int(time.time())}-{RUN_ID}"; cp["checkpoint_id"]=cid
+            canonical=json.dumps(cp,ensure_ascii=False,allow_nan=False,sort_keys=True,default=str).encode()
+            cp["content_hash"]=hashlib.sha256(canonical).hexdigest()
+            local=RUNTIME_CHECKPOINT_DIR/f"{cid}.json"; _write_atomic_json(local,cp); _verify_checkpoint_integrity(cp)
+            prev=None
+            if RUNTIME_CHECKPOINT_MANIFEST.exists():
+                try: prev=json.loads(RUNTIME_CHECKPOINT_MANIFEST.read_text(encoding="utf-8"))
+                except Exception: prev=None
+            manifest={"checkpoint_id":cid,"path":local.name,"created_at":cp["created_at"],"content_hash":cp["content_hash"],"previous_known_good":prev}
+            _write_atomic_json(RUNTIME_CHECKPOINT_MANIFEST,manifest)
+            if push_github:
+                remote=f"runtime_state/checkpoints/{cid}.json"; _commit_to_github(json.dumps(cp,ensure_ascii=False,allow_nan=False,indent=2,default=str),remote,f"Runtime checkpoint {cid}")
+                _commit_to_github(json.dumps({**manifest,"path":remote},indent=2),"runtime_state/latest.json",f"Update latest checkpoint {cid}")
+            _CHECKPOINT_LAST_GOOD=cp
+            return cid,local
+        finally:
+            STOP_NEW_ENTRIES=prev_stop
+
+
+def _load_runtime_checkpoint(reference=None):
+    if reference in ("previous","previous_known_good"):
+        prev=_load_previous_known_good_manifest()
+        if not prev: raise RuntimeError("previous known-good checkpoint tidak tersedia")
+        path=prev.get("path")
+        if path and RUNTIME_CHECKPOINT_MANIFEST.exists():
+            local=RUNTIME_CHECKPOINT_DIR/path
+            if local.exists(): return json.loads(local.read_text(encoding="utf-8"))
+        remote_path=prev.get("path")
+        if remote_path and GITHUB_TOKEN and REPO_NAME:
+            data,_=_github_get_json(remote_path)
+            return data
+        raise RuntimeError("previous known-good checkpoint tidak dapat dimuat")
+    if reference:
+        try:
+            with open(reference, "r", encoding="utf-8") as f: return json.load(f)
+        except Exception: pass
+    if RUNTIME_CHECKPOINT_MANIFEST.exists():
+        m=json.loads(RUNTIME_CHECKPOINT_MANIFEST.read_text(encoding="utf-8")); p=RUNTIME_CHECKPOINT_DIR/m["path"]
+        return json.loads(p.read_text(encoding="utf-8"))
+    # Prefer GitHub only when local latest is absent.
+    latest,_=_github_get_json("runtime_state/latest.json")
+    cp=latest.get("path") if isinstance(latest,dict) else None
+    if not cp: raise RuntimeError("latest checkpoint tidak ditemukan")
+    data,_=_github_get_json(cp)
+    return data
+
+def _verify_checkpoint_integrity(checkpoint):
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError("checkpoint bukan object")
+    schema = checkpoint.get("checkpoint_schema")
+    if schema != CHECKPOINT_SCHEMA_VERSION:
+        raise RuntimeError(f"checkpoint schema tidak kompatibel: {schema}")
+    expected = checkpoint.get("content_hash")
+    if expected:
+        probe = dict(checkpoint)
+        probe.pop("content_hash", None)
+        canonical = json.dumps(probe, ensure_ascii=False, allow_nan=False, sort_keys=True, default=str).encode("utf-8")
+        actual = hashlib.sha256(canonical).hexdigest()
+        if actual != expected:
+            raise RuntimeError("checkpoint content hash mismatch / possible corruption")
+    return True
+
+
+def _migrate_checkpoint(checkpoint):
+    schema=str(checkpoint.get("checkpoint_schema") or "") if isinstance(checkpoint,dict) else ""
+    if schema==CHECKPOINT_SCHEMA_VERSION: return checkpoint
+    raise RuntimeError(f"unsupported checkpoint schema: {schema}; current={CHECKPOINT_SCHEMA_VERSION}")
+
+def _restore_runtime_checkpoint(checkpoint):
+    checkpoint=_migrate_checkpoint(checkpoint)
+    _verify_checkpoint_integrity(checkpoint)
+    # Restore simulation statistics/config only. REAL exposure remains exchange-authoritative.
+    runtime=checkpoint.get("runtime") or {}
+    with stat_lock:
+        restored=checkpoint.get("stats") or {}
+        for k in ("tp","sl","trail","total","balance"):
+            if k in restored: stats[k]=restored[k]
+        stats["pnl_history"]=deque(restored.get("pnl_history") or [], maxlen=20)
+    global MAX_POSITIONS, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT
+    MAX_POSITIONS=int(runtime.get("max_positions",MAX_POSITIONS))
+    LEVERAGE=int(runtime.get("leverage",LEVERAGE))
+    MARGIN_USD=float(runtime.get("margin_usd",MARGIN_USD))
+    AUTOSTOP_PCT=float(runtime.get("autostop_pct",AUTOSTOP_PCT))
+    with trade_history_lock:
+        trade_history.clear()
+        trade_history.extend([dict(x) for x in (checkpoint.get("trade_history") or [])])
+    with trail_events_lock:
+        trail_events.clear()
+        trail_events.extend([dict(x) for x in (checkpoint.get("trail_events") or [])])
+    with ban_lock:
+        banned_coins.clear()
+        banned_coins.update(checkpoint.get("banned_coins") or {})
+    with low_conf_history_lock:
+        low_conf_history.clear()
+        low_conf_history.extend([dict(x) for x in (checkpoint.get("low_confidence_history") or [])])
+    sim_positions={}
+    for sym,pos in (checkpoint.get("positions") or {}).items():
+        if str(pos.get("execution_mode") or "SIMULATION").upper()=="SIMULATION": sim_positions[sym]=pos
+    with positions_lock:
+        for sym in list(positions):
+            if _position_is_real(positions[sym]): continue
+            positions.pop(sym,None)
+        positions.update(sim_positions)
+    universe=(checkpoint.get("scan_universe") or {})
+    with _last_scanned_lock:
+        last_scanned_coins.clear()
+        last_scanned_coins.extend(list(universe.get("symbols") or []))
+        globals()["last_scanned_at"] = universe.get("updated_at")
+    brain_state=checkpoint.get("brain_state")
+    for name in ("import_checkpoint_state", "apply_brain_state"):
+        fn=_brain_fn(name)
+        if callable(fn) and brain_state is not None:
+            try: fn(brain_state); break
+            except Exception as e: log.warning(f"[CHECKPOINT] brain restore warning: {e}")
+    # Exchange truth always wins after restore.
+    try:
+        if _has_real_recovery_work(): _resume_binance_and_flush_pending(active_chat_id)
+    except Exception as e: log.warning(f"[CHECKPOINT] reconcile after restore warning: {e}")
+    return checkpoint.get("checkpoint_id","unknown")
+
+def _set_runtime_state_legacy(state, reason=""):
+    global RUNTIME_STATE
+    with RUNTIME_STATE_LOCK:
+        old=RUNTIME_STATE; RUNTIME_STATE=state
+    if old!=state:
+        log.info(f"[STATE] {old} -> {state}" + (f" | {reason}" if reason else ""))
+
+def _next_event_id():
+    global EVENT_SEQUENCE
+    with EVENT_SEQUENCE_LOCK:
+        EVENT_SEQUENCE += 1
+        return EVENT_SEQUENCE
+
+def _emit_execution_event(event_type, entity_id=None, correlation_id=None, payload=None, persist=False):
+    event={"event_id":_next_event_id(),"event_type":event_type,"event_version":EVENT_SCHEMA_VERSION,
+           "sequence":EVENT_SEQUENCE,"timestamp":time.time(),"source":"main.py","run_id":RUN_ID,
+           "correlation_id":correlation_id or RUN_ID,"entity_id":entity_id,"payload":payload or {}}
+    if persist:
+        try:
+            p=Path(os.getenv("RUNTIME_EVENT_FILE", "runtime_events.jsonl"))
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a",encoding="utf-8") as f:
+                f.write(json.dumps(event,ensure_ascii=False,separators=(",",":")) + "\n")
+        except Exception as e:
+            log.debug(f"[EVENT] persist gagal: {e}")
+    return event
+
+def _new_request_id(prefix="REQ"):
+    return f"{prefix}-{uuid.uuid4().hex[:20]}"
+
+
+# =============================================================================
+# V47 FINAL BODY CONTRACT — RUNTIME / HEALTH / EXECUTION AUTHORITY
+# =============================================================================
+STATE_TRANSITIONS = {
+    "BOOTING": {"READY", "DEGRADED", "RECOVERING", "EMERGENCY", "STOPPING"},
+    "READY": {"DEGRADED", "RECOVERING", "EMERGENCY", "STOPPING"},
+    "DEGRADED": {"READY", "RECOVERING", "EMERGENCY", "STOPPING"},
+    "RECOVERING": {"READY", "DEGRADED", "EMERGENCY", "STOPPING"},
+    "EMERGENCY": {"RECOVERING", "STOPPING"},
+    "STOPPING": set(),
+}
+HEALTH_STATES = {"HEALTHY", "DEGRADED", "RECOVERING", "BLOCKED", "EMERGENCY", "UNKNOWN"}
+HEALTH_COMPONENTS = (
+    "binance_rest", "binance_websocket", "brain", "scanner", "execution",
+    "protection", "persistence", "telegram", "research", "resource"
+)
+_health_lock = threading.RLock()
+_component_health = {name: {"state":"UNKNOWN", "updated_at":time.time(), "detail":"not checked"} for name in HEALTH_COMPONENTS}
+_runtime_state_history = deque(maxlen=100)
+
+
+def _set_component_health(component, state, detail=""):
+    if component not in _component_health:
+        return
+    state=str(state).upper()
+    if state not in HEALTH_STATES:
+        state="UNKNOWN"
+    with _health_lock:
+        _component_health[component]={"state":state,"updated_at":time.time(),"detail":str(detail)[:500]}
+
+
+def _health_snapshot():
+    with _health_lock:
+        comps={k:dict(v) for k,v in _component_health.items()}
+    states={v["state"] for v in comps.values()}
+    if "EMERGENCY" in states: overall="EMERGENCY"
+    elif "BLOCKED" in states: overall="BLOCKED"
+    elif "RECOVERING" in states: overall="RECOVERING"
+    elif "DEGRADED" in states or "UNKNOWN" in states: overall="DEGRADED"
+    else: overall="HEALTHY"
+    return {"overall":overall,"components":comps,"timestamp":time.time()}
+
+
+def _set_runtime_state(state, reason=""):
+    global RUNTIME_STATE
+    state=str(state).upper()
+    if state not in STATE_TRANSITIONS:
+        raise ValueError(f"invalid runtime state: {state}")
+    with RUNTIME_STATE_LOCK:
+        old=RUNTIME_STATE
+        if old!=state and state not in STATE_TRANSITIONS.get(old,set()):
+            raise RuntimeError(f"invalid runtime transition {old} -> {state}")
+        RUNTIME_STATE=state
+        _runtime_state_history.append({"from":old,"to":state,"timestamp":time.time(),"reason":str(reason)[:500]})
+    if old!=state:
+        log.info(f"[STATE] {old} -> {state}" + (f" | {reason}" if reason else ""))
+
+
+POSITION_LIFECYCLE = {"DISCOVERED","ENTRY_PENDING","OPENING","PROTECTION_PENDING","OPEN","MANAGED","CLOSING","CLOSED","RECONCILING","EMERGENCY"}
+POSITION_TRANSITIONS = {
+    "DISCOVERED":{"ENTRY_PENDING","EMERGENCY"},"ENTRY_PENDING":{"OPENING","CLOSED","RECONCILING","EMERGENCY"},
+    "OPENING":{"PROTECTION_PENDING","CLOSING","RECONCILING","EMERGENCY"},"PROTECTION_PENDING":{"OPEN","MANAGED","CLOSING","RECONCILING","EMERGENCY"},
+    "OPEN":{"MANAGED","CLOSING","RECONCILING","EMERGENCY"},"MANAGED":{"CLOSING","RECONCILING","EMERGENCY"},
+    "CLOSING":{"CLOSED","RECONCILING","EMERGENCY"},"CLOSED":{"RECONCILING"},
+    "RECONCILING":{"OPEN","MANAGED","CLOSED","EMERGENCY"},"EMERGENCY":{"RECONCILING","CLOSING","CLOSED"},
+}
+
+def _position_lifecycle(pos):
+    if not isinstance(pos,dict): return "EMERGENCY"
+    lc=str(pos.get("lifecycle") or "").upper()
+    if lc in POSITION_LIFECYCLE: return lc
+    st=str(pos.get("status") or "").lower()
+    if st=="pending": return "ENTRY_PENDING"
+    if st=="active": return "MANAGED" if pos.get("current_sl") is not None else "OPEN"
+    if st=="EMERGENCY": return "EMERGENCY"
+    return "DISCOVERED"
+
+def _force_position_emergency(sym, reason):
+    with positions_lock:
+        pos=positions.get(sym)
+        if pos is None: return
+        old=_position_lifecycle(pos)
+        pos["lifecycle"]="EMERGENCY"; pos["status"]="EMERGENCY"; pos["emergency_error"]=str(reason)[:400]
+        pid=pos.get("position_id")
+    _emit_execution_event("POSITION_LIFECYCLE",entity_id=pid or sym,correlation_id=pid or RUN_ID,payload={"symbol":sym,"from":old,"to":"EMERGENCY","reason":str(reason)[:300]},persist=True)
+
+def _transition_position_lifecycle(sym,new_state,reason="",expected_state=None):
+    new_state=str(new_state).upper()
+    with positions_lock:
+        pos=positions.get(sym)
+        if pos is None: raise KeyError(f"position not found: {sym}")
+        old=_position_lifecycle(pos)
+        if expected_state and old!=str(expected_state).upper(): raise RuntimeError(f"stale lifecycle mutation {sym}: expected {expected_state}, actual {old}")
+        if old!=new_state and new_state not in POSITION_TRANSITIONS.get(old,set()): raise RuntimeError(f"invalid lifecycle transition {sym}: {old}->{new_state}")
+        pos["lifecycle"]=new_state
+        pos["status"]="pending" if new_state in {"DISCOVERED","ENTRY_PENDING","OPENING","PROTECTION_PENDING"} else ("active" if new_state not in {"CLOSED","EMERGENCY"} else ("closed" if new_state=="CLOSED" else "EMERGENCY"))
+        pid=pos.get("position_id")
+    _emit_execution_event("POSITION_LIFECYCLE",entity_id=pid or sym,correlation_id=pid or RUN_ID,payload={"symbol":sym,"from":old,"to":new_state,"reason":str(reason)[:300]},persist=True)
+    return new_state
+
+
+class ExecutionRequest:
+    __slots__=("request_id","request_type","created_at","expires_at","source","correlation_id","position_id","symbol","execution_mode","strategy_version","requested_action","parameters")
+    def __init__(self, **kw):
+        now=time.time()
+        self.request_id=kw.get("request_id") or _new_request_id("EXEC")
+        self.request_type=str(kw.get("request_type") or "BINANCE_MUTATION")
+        self.created_at=float(kw.get("created_at") or now)
+        self.expires_at=float(kw.get("expires_at") or (now+30.0))
+        self.source=str(kw.get("source") or "main")
+        self.correlation_id=str(kw.get("correlation_id") or RUN_ID)
+        self.position_id=kw.get("position_id")
+        self.symbol=kw.get("symbol")
+        self.execution_mode=kw.get("execution_mode")
+        self.strategy_version=kw.get("strategy_version")
+        self.requested_action=str(kw.get("requested_action") or "")
+        self.parameters=dict(kw.get("parameters") or {})
+    def expired(self): return time.time()>self.expires_at
+    def as_dict(self): return {k:getattr(self,k) for k in self.__slots__}
+
+class ProtectionMutationRequest:
+    __slots__=("request_id","position_id","symbol","expected_version","created_at","expires_at","action")
+    def __init__(self,position_id,symbol,expected_version,action,expires_sec=20):
+        self.request_id=_new_request_id("PROT"); self.position_id=str(position_id or ""); self.symbol=str(symbol or "")
+        self.expected_version=int(expected_version or 0); self.created_at=time.time(); self.expires_at=self.created_at+float(expires_sec); self.action=str(action)
+    def expired(self): return time.time()>self.expires_at
+
+def _validate_protection_mutation(sym,expected_version,request_id):
+    with positions_lock:
+        pos=positions.get(sym)
+        if not pos: raise RuntimeError(f"protection mutation rejected: {sym} position missing")
+        actual=int(pos.get("protection_version",0) or 0)
+        if actual!=int(expected_version): raise RuntimeError(f"stale protection request {request_id}: expected v{expected_version}, actual v{actual}")
+        return pos.get("position_id")
+
+_EXECUTION_IDEMPOTENCY_LOCK=threading.RLock()
+_EXECUTION_IDEMPOTENCY={}
+_EXECUTION_IDEMPOTENCY_TTL=6*3600
+
+
+def _prune_execution_idempotency():
+    now=time.time()
+    with _EXECUTION_IDEMPOTENCY_LOCK:
+        for k in [k for k,v in _EXECUTION_IDEMPOTENCY.items() if now-v.get("at",now)>_EXECUTION_IDEMPOTENCY_TTL]:
+            _EXECUTION_IDEMPOTENCY.pop(k,None)
+
+
+class ExecutionController:
+    """Single Binance mutation authority. High-level helpers ultimately use this path."""
+    MUTATIONS={"POST","PUT","DELETE"}
+    def submit_signed(self, method, path, params=None, *, critical=False, request_type="BINANCE_MUTATION", source="main", position_id=None, symbol=None, execution_mode="REAL", strategy_version=None, correlation_id=None, expires_sec=30.0):
+        method=str(method).upper()
+        if method not in self.MUTATIONS:
+            return _binance_signed_impl(method,path,params=params,critical=critical)
+        req=ExecutionRequest(request_type=request_type,source=source,position_id=position_id,symbol=symbol,execution_mode=execution_mode,strategy_version=strategy_version,correlation_id=correlation_id,requested_action=f"{method} {path}",parameters=params,expires_at=time.time()+float(expires_sec))
+        if req.expired(): raise RuntimeError(f"execution request expired: {req.request_id}")
+        _prune_execution_idempotency()
+        # Exchange order IDs/client IDs remain the strongest duplicate guard. This in-process key catches identical concurrent requests.
+        key=f"{req.request_type}|{req.symbol or ''}|{req.position_id or ''}|{req.requested_action}|{json.dumps(params or {},sort_keys=True,default=str)}"
+        with _EXECUTION_IDEMPOTENCY_LOCK:
+            prev=_EXECUTION_IDEMPOTENCY.get(key)
+            if prev and prev.get("inflight"): raise RuntimeError(f"duplicate mutation blocked: {req.request_id}")
+            if prev and prev.get("has_result"): return prev.get("result")
+            _EXECUTION_IDEMPOTENCY[key]={"at":time.time(),"inflight":True,"request_id":req.request_id}
+        _emit_execution_event("EXECUTION_REQUESTED",entity_id=req.position_id or req.symbol,correlation_id=req.correlation_id,payload=req.as_dict(),persist=False)
+        try:
+            result=_binance_signed_impl(method,path,params=params,critical=critical)
+        except Exception as exc:
+            msg=str(exc).lower()
+            if any(k in msg for k in ("429","418","rate","timeout","connection","unknown")): _record_circuit_failure(msg[:120])
+            with _EXECUTION_IDEMPOTENCY_LOCK:
+                _EXECUTION_IDEMPOTENCY[key]={"at":time.time(),"error":str(exc)[:500],"request_id":req.request_id}
+            _emit_execution_event("EXECUTION_RESULT",entity_id=req.position_id or req.symbol,correlation_id=req.correlation_id,payload={"request_id":req.request_id,"status":"ERROR","error":str(exc)[:500]},persist=True)
+            raise
+        with _EXECUTION_IDEMPOTENCY_LOCK:
+            _EXECUTION_IDEMPOTENCY[key]={"at":time.time(),"has_result":True,"result":result,"request_id":req.request_id}
+        _emit_execution_event("EXECUTION_RESULT",entity_id=req.position_id or req.symbol,correlation_id=req.correlation_id,payload={"request_id":req.request_id,"status":"SUCCESS","method":method,"path":path},persist=True)
+        return result
+
+_execution_controller=ExecutionController()
+_CIRCUIT_LOCK=threading.RLock(); _CIRCUIT_FAILURES=deque(maxlen=50); _CIRCUIT_OPEN_AT=0.0
+_CIRCUIT_WINDOW_SEC=300.0; _CIRCUIT_THRESHOLD=5; _CIRCUIT_COOLDOWN_SEC=180.0
+def _record_circuit_failure(kind):
+    global CIRCUIT_BREAKER_OPEN, STOP_NEW_ENTRIES, _CIRCUIT_OPEN_AT, _CIRCUIT_FAILURES
+    now=time.time()
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_FAILURES.append((now,str(kind))); recent=[x for x in _CIRCUIT_FAILURES if now-x[0]<=_CIRCUIT_WINDOW_SEC]
+        if len(recent)>=_CIRCUIT_THRESHOLD and not CIRCUIT_BREAKER_OPEN:
+            CIRCUIT_BREAKER_OPEN=True; STOP_NEW_ENTRIES=True; _CIRCUIT_OPEN_AT=now; _set_component_health("execution","BLOCKED",f"circuit opened: {len(recent)} failures")
+            log.error("[CIRCUIT] OPEN")
+def _circuit_health_tick():
+    global CIRCUIT_BREAKER_OPEN, STOP_NEW_ENTRIES
+    with _CIRCUIT_LOCK:
+        if not CIRCUIT_BREAKER_OPEN or time.time()-_CIRCUIT_OPEN_AT<_CIRCUIT_COOLDOWN_SEC: return
+        recent=[x for x in _CIRCUIT_FAILURES if time.time()-x[0]<=_CIRCUIT_WINDOW_SEC]
+        if not recent:
+            CIRCUIT_BREAKER_OPEN=False; STOP_NEW_ENTRIES=(RUNTIME_STATE!="READY"); _set_component_health("execution","HEALTHY","circuit recovered"); log.info("[CIRCUIT] CLOSED")
+_execution_controller=ExecutionController()
+
+
+def _validate_brain_contract(brain):
+    if brain is None: return False,"strategy_logic unavailable"
+    required=("full_analyze","manage_position")
+    missing=[n for n in required if not callable(getattr(brain,n,None))]
+    if missing: return False,f"missing required brain interface: {', '.join(missing)}"
+    version=getattr(brain,"BRAIN_INTERFACE_VERSION",None)
+    if str(version or "").strip()!=BRAIN_INTERFACE_VERSION: return False,f"brain interface version mismatch: {version!r}"
+    for name in required:
+        try:
+            sig=inspect.signature(getattr(brain,name))
+            required_params=[p for p in sig.parameters.values() if p.default is inspect._empty and p.kind not in (p.VAR_POSITIONAL,p.VAR_KEYWORD)]
+            if name=="full_analyze" and len(required_params)<1: return False,"full_analyze contract invalid"
+            if name=="manage_position" and len(required_params)<1: return False,"manage_position contract invalid"
+        except Exception as exc: return False,f"signature inspection failed for {name}: {exc}"
+    for name in ("get_strategy_descriptor","get_learning_schema"):
+        fn=getattr(brain,name,None)
+        if callable(fn):
+            try: json.dumps(fn(),ensure_ascii=False,allow_nan=False,default=str)
+            except Exception as exc: return False,f"{name} serialization failed: {exc}"
+    return True,"contract OK"
+
+
+def _validate_decision_freshness(signal):
+    if not isinstance(signal,dict): return False,"decision packet is not a dict"
+    created=signal.get("decision_created_at") or signal.get("created_at") or signal.get("analysis_time")
+    expires=signal.get("decision_expires_at") or signal.get("expires_at")
+    if created is None and expires is None: return True,"legacy-current-scan"
+    try:
+        now=time.time()
+        if expires is not None and now>float(expires): return False,"decision expired"
+        if created is not None and now+1<float(created): return False,"decision timestamp is in the future"
+    except (TypeError,ValueError): return False,"invalid decision timestamp"
+    return True,"fresh"
+
+
+def _bootstrap_validate_and_reconcile():
+    ok,detail=_validate_brain_contract(_brain)
+    _set_component_health("brain","HEALTHY" if ok else "BLOCKED",detail)
+    try:
+        fapi_get("/fapi/v1/time")
+        _set_component_health("binance_rest","HEALTHY","public REST reachable")
+    except Exception as exc:
+        _set_component_health("binance_rest","DEGRADED",str(exc))
+    try:
+        _load_all_symbol_filters()
+        _set_component_health("execution","HEALTHY","exchange metadata loaded")
+    except Exception as exc:
+        _set_component_health("execution","DEGRADED",f"exchange metadata: {exc}")
+    key,secret=_read_binance_credentials()
+    if key and secret:
+        try:
+            with _binance_critical_context():
+                remote_positions=get_real_positions_all()
+            with positions_lock:
+                local_real={sym for sym,pos in positions.items() if _position_is_real(pos)}
+            remote_by={str(p.get("symbol")):p for p in remote_positions if p.get("symbol")}
+            unresolved=[]
+            for sym in sorted(local_real):
+                pos=positions.get(sym)
+                remote=remote_by.get(sym)
+                if remote is None:
+                    unresolved.append(sym); continue
+                try:
+                    with _binance_critical_context():
+                        if pos.get("signal") and pos.get("current_sl") is not None:
+                            _verify_protection_pair(sym,pos["signal"].get("decision")=="BUY",pos["signal"].get("tp"),pos.get("current_sl"),abs(float(remote.get("positionAmt",0) or 0)))
+                    with positions_lock:
+                        if sym in positions:
+                            positions[sym]["quantity"]=abs(float(remote.get("positionAmt",0) or 0))
+                except Exception as exc:
+                    unresolved.append(sym)
+                    _force_position_emergency(sym, str(exc)[:400])
+            unmanaged=sorted(set(remote_by)-local_real)
+            if unresolved or unmanaged:
+                _set_component_health("protection","EMERGENCY",f"unresolved={unresolved[:6]} unmanaged={unmanaged[:6]}")
+                global STOP_NEW_ENTRIES
+                STOP_NEW_ENTRIES=True
+                _set_runtime_state("EMERGENCY", "startup real-state safety unresolved")
+            else:
+                _set_component_health("protection","HEALTHY","real protection verified")
+        except Exception as exc:
+            _set_component_health("binance_rest","RECOVERING",str(exc))
+            STOP_NEW_ENTRIES=True
+            _set_runtime_state("RECOVERING",f"private reconciliation unavailable: {exc}")
+    else:
+        _set_component_health("protection","HEALTHY","simulation/no private credentials")
+    _set_component_health("persistence","HEALTHY","local state ready")
+    _set_component_health("research","HEALTHY","research non-critical")
+    _set_component_health("resource","HEALTHY",f"heavy cap={MAX_HEAVY_WORKERS}")
+    return _health_snapshot()
+
+
+def _graceful_shutdown(reason="shutdown"):
+    global STOP_NEW_ENTRIES
+    if RUNTIME_STATE!="STOPPING":
+        try: _set_runtime_state("STOPPING",reason)
+        except Exception: RUNTIME_STATE="STOPPING"
+    STOP_NEW_ENTRIES=True
+    try: _full_off()
+    except Exception: pass
+    try: _save_runtime_checkpoint(push_github=False)
+    except Exception as exc: log.warning(f"[SHUTDOWN] checkpoint gagal: {exc}")
+    deadline=time.time()+3.0
+    for t in list(_ACTIVE_HEAVY_THREADS.values()):
+        rem=max(0.0,deadline-time.time())
+        if rem<=0: break
+        try: t.join(rem)
+        except Exception: pass
+    SHUTDOWN_EVENT.set()
+
+
+
+
+def _heavy_worker_target(name, fn, *args, **kwargs):
+    acquired = HEAVY_WORKER_SEMAPHORE.acquire(blocking=False)
+    if not acquired:
+        log.warning(f"[RESOURCE] heavy worker limit reached ({MAX_HEAVY_WORKERS}); skip/defer {name}")
+        return
+    worker_id = _new_request_id("WRK")
+    with _HEAVY_WORKER_LOCK:
+        _HEAVY_WORKER_REGISTRY[worker_id] = {"name": name, "started_at": time.time()}
+    try:
+        fn(*args, **kwargs)
+    except Exception as exc:
+        log.exception(f"[WORKER] {name} failed: {exc}")
+        try:
+            _set_component_health("resource", "DEGRADED", f"worker {name}: {exc}")
+        except Exception:
+            pass
+    finally:
+        with _HEAVY_WORKER_LOCK:
+            _HEAVY_WORKER_REGISTRY.pop(worker_id, None)
+        HEAVY_WORKER_SEMAPHORE.release()
+
+
+_ACTIVE_HEAVY_THREADS={}
+
+def _start_heavy_worker(name, fn, *args, **kwargs):
+    t = threading.Thread(
+        target=_heavy_worker_target,
+        args=(name, fn, *args),
+        kwargs=kwargs,
+        name=f"heavy-{name}",
+        daemon=True,
+    )
+    _ACTIVE_HEAVY_THREADS[t.name]=t
+    t.start()
+    return t
+
+
+def _heavy_worker_snapshot():
+    with _HEAVY_WORKER_LOCK:
+        return {k: dict(v) for k, v in _HEAVY_WORKER_REGISTRY.items()}
+
 # New real trading is OFF until the operator explicitly runs /mode on.
 # Existing REAL positions remain manageable even while the mode flag is OFF.
 
@@ -572,7 +1133,7 @@ def _record_low_confidence_event(sym, confidence, cutoff, direction=None, entry_
     event = {
         "event_time": time.time(), "run_id": research_run_id, "scan_counter": scan_counter,
         "symbol": str(sym), "confidence": float(confidence),
-        "confidence_min": float(STRATEGY_CONFIDENCE_THRESHOLD), "cutoff": float(cutoff),
+        "confidence_min": None, "cutoff": float(cutoff),
         "decision": direction, "entry_label": entry_label,
     }
     with low_conf_history_lock: low_conf_history.append(event)
@@ -734,7 +1295,6 @@ def _record_trail_event(sym, pos, update, old_sl, new_sl, status="APPLIED", erro
             prev=next((x for x in reversed(trail_events) if x.get("trade_uid")==pos.get("trade_uid") and x.get("symbol")==sym),None)
             if prev: event["time_since_previous_trail_sec"]=max(0.0,now-float(prev.get("event_time") or now))
             trail_events.append(event)
-        pos.setdefault("trail_history", []).append(dict(event))
         pos["trail_update_count"]=int(pos.get("trail_update_count",0))+1
         pos["trail_applied_count"]=int(pos.get("trail_applied_count",0))+(status=="APPLIED")
         pos["trail_failed_count"]=int(pos.get("trail_failed_count",0))+(status=="FAILED")
@@ -757,8 +1317,8 @@ def index():
         t=stats["total"]; tp=stats["tp"]; sl=stats["sl"]; trail=stats.get("trail",0)
     with ban_lock:
         n_banned = len(banned_coins)
-    wins = int(stats.get("wins", 0)); losses = int(stats.get("losses", 0))
-    wr=f"{wins/(wins+losses)*100:.1f}%" if (wins+losses)>0 else "–"
+    wins = tp + trail
+    wr=f"{wins/(wins+sl)*100:.1f}%" if (wins+sl)>0 else "–"
     ws_state = "REST (WS fallback siaga)" if ws_feed.is_fresh() else "REST (WS fallback belum siap)"
     return (f"<h3>SMC Signal Broadcaster</h3>"
             f"<p>Auto:{auto_mode} | Banned:{n_banned} | Data:{ws_state}</p>"
@@ -904,225 +1464,6 @@ def _commit_to_github(content, path="strategy_logic.py", commit_msg="Update stra
         raise ValueError(f"GitHub commit gagal: {resp.status_code} {resp.text}")
     
     return True
-
-# ============================================================
-# LEARNING CHECKPOINT — /save dan /open
-# ============================================================
-LEARNING_CHECKPOINT_ROOT = "learning_checkpoints"
-LEARNING_CHECKPOINT_LATEST = f"{LEARNING_CHECKPOINT_ROOT}/latest.json"
-LEARNING_CHECKPOINT_CHUNK_BYTES = 700_000
-LEARNING_CHECKPOINT_FILES = (
-    "strategy_experience.jsonl", "strategy_lessons.jsonl", "strategy_beliefs.json",
-    "strategy_cognitive_state.json", "v32_experience.jsonl", "v32_lessons.jsonl",
-    "v32_policy.json", "v32_brain_state.json", "adaptive_brain_state.json",
-    "adaptive_policy.json", "full_learning_state.json", "experience.jsonl",
-    "ollama_research_state.json", "ollama_research_journal.jsonl", "frequency_confidence_state.json",
-    "strategy_evolution_state.json",
-)
-
-def _github_headers():
-    if not GITHUB_TOKEN or not REPO_NAME:
-        raise ValueError("GITHUB_TOKEN atau REPO_NAME tidak diset di environment.")
-    return {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10"}
-
-def _github_get_json(path):
-    url=f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
-    r=requests.get(url,headers=_github_headers(),params={"ref":"main"},timeout=20)
-    if r.status_code != 200:
-        raise ValueError(f"GitHub GET {path} gagal: {r.status_code} {r.text[:300]}")
-    return r.json()
-
-def _github_put_bytes(data_bytes, path, message):
-    headers=_github_headers(); url=f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
-    sha=None
-    try:
-        r=requests.get(url,headers=headers,params={"ref":"main"},timeout=20)
-        if r.status_code==200: sha=r.json().get("sha")
-        elif r.status_code!=404: raise ValueError(f"GitHub preflight {path}: {r.status_code} {r.text[:200]}")
-    except requests.RequestException as exc:
-        raise ValueError(f"GitHub preflight error {path}: {exc}") from exc
-    body={"message":message,"content":base64.b64encode(data_bytes).decode("ascii"),"branch":"main"}
-    if sha: body["sha"]=sha
-    r=requests.put(url,headers=headers,json=body,timeout=60)
-    if r.status_code not in (200,201):
-        raise ValueError(f"GitHub PUT {path} gagal: {r.status_code} {r.text[:500]}")
-    return r.json()
-
-def _learning_files_snapshot():
-    state_dir=Path(os.getenv("FULL_STATE_DIR", str(Path(__file__).resolve().parent/"machine_learning_state")))
-    payload={}
-    for name in LEARNING_CHECKPOINT_FILES:
-        p=state_dir/name
-        if p.exists() and p.is_file():
-            payload[name]=p.read_bytes()
-    return payload
-
-def _build_learning_checkpoint():
-    files=_learning_files_snapshot()
-    meta={"format":"adaptive-learning-checkpoint-v1","created_at":datetime.now(WIB).isoformat(),"brain_engine":MAIN_ENGINE_VERSION,"files":sorted(files.keys())}
-    bio=io.BytesIO()
-    with zipfile.ZipFile(bio,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=6) as z:
-        z.writestr("manifest.json",json.dumps(meta,ensure_ascii=False,indent=2))
-        for name,data in files.items():
-            z.writestr(name,data)
-    raw=bio.getvalue(); meta["archive_sha256"]=hashlib.sha256(raw).hexdigest(); meta["archive_bytes"]=len(raw)
-    # rewrite manifest with final hash without changing archive hash would be circular; keep hash in pointer instead.
-    return raw, files, meta
-
-def _save_learning_checkpoint_github():
-    raw, files, meta=_build_learning_checkpoint()
-    checkpoint_id=datetime.now(WIB).strftime("%Y%m%d_%H%M%S_%f")
-    prefix=f"{LEARNING_CHECKPOINT_ROOT}/{checkpoint_id}"
-    chunks=[]
-    for i in range(0,len(raw),LEARNING_CHECKPOINT_CHUNK_BYTES):
-        chunk=raw[i:i+LEARNING_CHECKPOINT_CHUNK_BYTES]
-        path=f"{prefix}/part_{i//LEARNING_CHECKPOINT_CHUNK_BYTES:04d}.bin"
-        _github_put_bytes(chunk,path,f"Learning checkpoint {checkpoint_id} part {i//LEARNING_CHECKPOINT_CHUNK_BYTES:04d}")
-        chunks.append(path)
-    manifest=dict(meta); manifest.update({"checkpoint_id":checkpoint_id,"prefix":prefix,"chunks":chunks,"file_count":len(files)})
-    _github_put_bytes(json.dumps(manifest,ensure_ascii=False,indent=2).encode(),f"{prefix}/manifest.json",f"Learning checkpoint {checkpoint_id} manifest")
-    _github_put_bytes(json.dumps(manifest,ensure_ascii=False,indent=2).encode(),LEARNING_CHECKPOINT_LATEST,f"Update latest learning checkpoint -> {checkpoint_id}")
-    return manifest
-
-def _github_get_bytes(path):
-    obj=_github_get_json(path)
-    if not isinstance(obj,dict) or obj.get("type")!="file": raise ValueError(f"GitHub path bukan file: {path}")
-    if obj.get("encoding")=="base64" and obj.get("content") is not None:
-        return base64.b64decode((obj.get("content") or "").replace("\n",""))
-    raise ValueError(f"GitHub file content tidak tersedia langsung: {path}")
-
-def _open_learning_checkpoint_github(checkpoint_id=None):
-    pointer=_github_get_json(LEARNING_CHECKPOINT_LATEST if not checkpoint_id else f"{LEARNING_CHECKPOINT_ROOT}/{checkpoint_id}/manifest.json")
-    if isinstance(pointer,dict) and pointer.get("content"):
-        manifest=json.loads(base64.b64decode(pointer["content"].replace("\n","")).decode("utf-8"))
-    else:
-        manifest=pointer
-    if not isinstance(manifest,dict) or not manifest.get("chunks"):
-        raise ValueError("Checkpoint manifest tidak valid atau tidak memiliki chunks")
-    raw=b"".join(_github_get_bytes(p) for p in manifest["chunks"])
-    expected=manifest.get("archive_sha256")
-    if expected and hashlib.sha256(raw).hexdigest()!=expected:
-        raise ValueError("Checksum checkpoint tidak cocok — restore dibatalkan")
-    state_dir=Path(os.getenv("FULL_STATE_DIR", str(Path(__file__).resolve().parent/"machine_learning_state")))
-    with zipfile.ZipFile(io.BytesIO(raw),"r") as z:
-        names=[n for n in z.namelist() if n and not n.endswith("/")]
-        for name in names:
-            if name=="manifest.json": continue
-            safe=Path(name)
-            if safe.name != name or safe.is_absolute() or ".." in safe.parts:
-                raise ValueError(f"Checkpoint path tidak aman: {name}")
-        # Stage INSIDE the destination filesystem. Render's /tmp and /opt/render
-        # can be different mounts, so os.replace(/tmp/..., destination/...) can
-        # raise Errno 18 (Invalid cross-device link).
-        state_dir.mkdir(parents=True, exist_ok=True)
-        tmp=state_dir / f".learning-open-{os.getpid()}-{int(time.time()*1000)}"
-        tmp.mkdir(parents=False, exist_ok=False)
-        try:
-            for name in names:
-                dst_tmp=tmp/name
-                dst_tmp.parent.mkdir(parents=True, exist_ok=True)
-                dst_tmp.write_bytes(z.read(name))
-            # Replace only files represented by this checkpoint. All moves now
-            # stay on the same filesystem, so os.replace is atomic per file.
-            for name in names:
-                dst=state_dir/name
-                dst.parent.mkdir(parents=True,exist_ok=True)
-                os.replace(tmp/name,dst)
-        finally:
-            try:
-                import shutil
-                shutil.rmtree(tmp, ignore_errors=True)
-            except Exception: pass
-    return manifest
-
-def _run_save_checkpoint(cid):
-    global FULL_THREAD
-    was_full=bool(FULL_MODE)
-    try:
-        if callable(globals().get("adaptive_agent_stop")): adaptive_agent_stop()
-        if callable(globals().get("_v32_stop")): _v32_stop()
-        if callable(globals().get("_stop_full_cognitive_worker")): _stop_full_cognitive_worker()
-        if not _wait_learning_workers_stopped(60.0):
-            raise RuntimeError("research worker belum berhenti; /save dibatalkan agar checkpoint konsisten")
-        manifest=_save_learning_checkpoint_github()
-        tg_send(cid, f"✅ <b>LEARNING SAVED</b>\nCheckpoint: <code>{html.escape(str(manifest.get('checkpoint_id')))}</code>\nData: <b>{int(manifest.get('file_count',0))}</b> file | archive <b>{int(manifest.get('archive_bytes',0)):,} B</b>\nTersimpan di GitHub. Tidak ada file dikirim ke Telegram.")
-    except Exception as e:
-        log.exception("[SAVE] checkpoint gagal")
-        tg_send(cid, f"❌ <b>/save gagal</b>\n<code>{html.escape(str(e)[:500])}</code>")
-    finally:
-        try:
-            if was_full:
-                os.environ["FULL_LEARNING_ACTIVE"]="1"
-                if callable(globals().get("adaptive_agent_start")):
-                    adaptive_agent_start()
-            if callable(globals().get("_v32_start")): _v32_start()
-            if callable(globals().get("adaptive_agent_start")): adaptive_agent_start()
-        except Exception as restart_exc:
-            log.warning(f"[SAVE] research worker restart gagal: {restart_exc}")
-
-def _wait_learning_workers_stopped(timeout_sec=60.0):
-    """Do not replace checkpoint files while any research worker can still write."""
-    deadline=time.time()+float(timeout_sec)
-    while time.time() < deadline:
-        alive=False
-        try:
-            st=globals().get("get_adaptive_status")
-            if callable(st):
-                x=st() or {}
-                alive = alive or bool(x.get("worker_alive")) or bool(x.get("history_worker_alive"))
-        except Exception: pass
-        try:
-            st2=globals().get("get_v32_status")
-            if callable(st2): alive = alive or bool((st2() or {}).get("worker_alive"))
-        except Exception: pass
-        try:
-            t=globals().get("_FULL_COG_THREAD")
-            alive = alive or bool(t is not None and t.is_alive())
-        except Exception: pass
-        try:
-            t2=globals().get("FULL_THREAD")
-            alive = alive or bool(t2 is not None and t2.is_alive())
-        except Exception: pass
-        if not alive: return True
-        time.sleep(0.25)
-    return False
-
-def _run_open_checkpoint(cid, checkpoint_id=None):
-    global FULL_THREAD
-    was_full=bool(FULL_MODE)
-    try:
-        fn_stop=globals().get("adaptive_agent_stop")
-        if callable(fn_stop): fn_stop()
-        fn_stop_v32=globals().get("_v32_stop")
-        if callable(fn_stop_v32): fn_stop_v32()
-        fn_stop_cog=globals().get("_stop_full_cognitive_worker")
-        if callable(fn_stop_cog): fn_stop_cog()
-        if not _wait_learning_workers_stopped(60.0):
-            raise RuntimeError("research worker belum berhenti; checkpoint tidak diganti agar state belajar tidak rusak")
-        manifest=_open_learning_checkpoint_github(checkpoint_id)
-        # Reload strategy in-memory state; keep live execution state untouched.
-        fn_reload=globals().get("reload_learning_state")
-        if not callable(fn_reload): raise RuntimeError("Brain tidak menyediakan reload_learning_state(); restore dibatalkan")
-        fn_reload()
-        # Restart research workers after successful restore.
-        fn_start_v32=globals().get("_v32_start")
-        if callable(fn_start_v32): fn_start_v32()
-        fn_start=globals().get("adaptive_agent_start")
-        if callable(fn_start): fn_start()
-        if was_full:
-            os.environ["FULL_LEARNING_ACTIVE"]="1"
-            if callable(globals().get("adaptive_agent_start")):
-                globals()["adaptive_agent_start"]()
-        tg_send(cid, f"✅ <b>LEARNING OPENED</b>\nCheckpoint: <code>{html.escape(str(manifest.get('checkpoint_id','latest')))}</code>\nState belajar lama <b>diganti</b> dengan checkpoint tersebut. Posisi/trade execution tidak di-reset.")
-    except Exception as e:
-        log.exception("[OPEN] checkpoint gagal")
-        # Best-effort worker restart if restore failed.
-        try:
-            if callable(globals().get("_v32_start")): _v32_start()
-            if callable(globals().get("adaptive_agent_start")): adaptive_agent_start()
-        except Exception: pass
-        tg_send(cid, f"❌ <b>/open gagal</b>\n<code>{html.escape(str(e)[:500])}</code>")
-
 # ============================================================
 # TAMBAHAN BARU (END)
 # ============================================================
@@ -1667,7 +2008,7 @@ def fapi_get(path, params=None):
 import hmac, hashlib, urllib.parse, math
 from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
 
-def _binance_signed(method, path, params=None, critical=False):
+def _binance_signed_impl(method, path, params=None, critical=False):
     """Signed Binance request with strict handling for mutating requests.
 
     GET requests may be retried after transient transport errors. Mutating
@@ -1766,6 +2107,14 @@ def _binance_signed(method, path, params=None, critical=False):
 
     raise RuntimeError(f"Gagal request signed {method} {path}: {last_err}")
 
+
+def _binance_signed_legacy(method, path, params=None, critical=False):
+    """Legacy compatibility helper; final authority is defined near runtime entry."""
+    method_u=str(method).upper()
+    if method_u in {"POST","PUT","DELETE"}:
+        with EXECUTION_MUTATION_LOCK:
+            return _binance_signed_impl(method_u, path, params=params, critical=critical)
+    return _binance_signed_impl(method_u, path, params=params, critical=critical)
 
 _symbol_filters_cache = {}
 _exchange_info_cache = {"fetched_at": 0.0}
@@ -2246,20 +2595,12 @@ def _verified_timeout_symbol(sym, chat_id, reason="manual timeout"):
         tg_send(chat_id, f"✅ <b>TIMEOUT CLOSED</b> — {sym}\nPosisi Binance: <b>0</b>\nOrder biasa: <b>0</b>\nAlgo TP/SL/Trail: <b>0</b>\nSemua exposure {sym} sudah dibersihkan.")
         return True
     except BinanceCooldownError as e:
-        with positions_lock:
-            if sym in positions:
-                positions[sym]["status"] = "EMERGENCY"
-                positions[sym]["emergency_reason"] = reason
-                positions[sym]["emergency_error"] = str(e)[:300]
+        _force_position_emergency(sym, f"{reason}: {e}")
         _queue_pending_cleanup(sym, "timeout deferred by Binance governor/cooldown", e)
         tg_send(chat_id, f"🚨 <b>TIMEOUT TERTUNDA</b> — {sym}\n<code>{html.escape(str(e)[:350])}</code>\nTidak ada retry agresif; posisi tetap dicatat untuk rekonsiliasi.")
         return False
     except Exception as e:
-        with positions_lock:
-            if sym in positions:
-                positions[sym]["status"] = "EMERGENCY"
-                positions[sym]["emergency_reason"] = reason
-                positions[sym]["emergency_error"] = str(e)[:300]
+        _force_position_emergency(sym, f"{reason}: {e}")
         _queue_pending_cleanup(sym, "timeout cleanup", e)
         tg_send(chat_id, f"🚨 <b>TIMEOUT BELUM SELESAI</b> — {sym}\n<code>{html.escape(str(e)[:350])}</code>\nPosisi tetap dipertahankan di /trade. Gunakan <code>/ok {sym}</code> untuk rekonsiliasi.")
         return False
@@ -2320,40 +2661,6 @@ def _verified_timeout_all(chat_id):
                         "Cek Binance dan gunakan /ok SYMBOL untuk rekonsiliasi.")
         log.error(f"[TIMEOUT GLOBAL] cleanup gagal: {e}")
         return False
-def _trail_trigger_preflight(symbol, is_buy, candidate_tp, candidate_sl, reference_price=None):
-    """Validate conditional triggers against Binance's MARK_PRICE working type."""
-    ref=0.0
-    if reference_price is not None:
-        try: ref=float(reference_price)
-        except Exception: ref=0.0
-    if ref <= 0:
-        try:
-            live=get_real_position(symbol)
-            ref=float(live.get("markPrice") or live.get("mark_price") or live.get("entryPrice") or 0.0) if isinstance(live,dict) else 0.0
-        except Exception:
-            ref=0.0
-    if ref <= 0:
-        try: ref=float(get_price(symbol, prefer_binance=True) or 0.0)
-        except Exception: ref=0.0
-    if ref <= 0: return False, "NO_REFERENCE_PRICE"
-    try:
-        info=get_symbol_filters(symbol); tick=float(info.get("tickSize") or 0.0)
-    except Exception as exc:
-        log.debug(f"[trail-preflight] {symbol}: symbol filter unavailable, geometry-only check: {exc}")
-        tick=0.0
-    buffer=max(tick*4.0, abs(ref)*0.00030)
-    if is_buy:
-        if candidate_sl is not None and float(candidate_sl) >= ref-buffer: return False, "STOP_WOULD_IMMEDIATELY_TRIGGER"
-        if candidate_tp is not None and float(candidate_tp) <= ref+buffer: return False, "TP_WOULD_IMMEDIATELY_TRIGGER"
-    else:
-        if candidate_sl is not None and float(candidate_sl) <= ref+buffer: return False, "STOP_WOULD_IMMEDIATELY_TRIGGER"
-        if candidate_tp is not None and float(candidate_tp) >= ref-buffer: return False, "TP_WOULD_IMMEDIATELY_TRIGGER"
-    return True, "OK"
-
-def _is_binance_immediate_trigger_error(exc):
-    text=str(exc)
-    return "-2021" in text or "Order would immediately trigger" in text
-
 def place_sl_order(symbol, is_buy, sl_price, quantity, client_algo_id=None):
     close_side = "SELL" if is_buy else "BUY"
     info = get_symbol_filters(symbol)
@@ -2437,42 +2744,6 @@ def cancel_all_algo_orders(symbol):
     except Exception as e:
         log.warning(f"[cancel_all_algo_orders] {symbol}: {e}")
         return None
-
-
-def _reset_balance_anchor_simulation():
-    """Reset only the paper/equity anchor; never erase learning or closed-trade evidence."""
-    global research_run_id
-    with stat_lock:
-        stats["balance"] = float(STARTING_BALANCE)
-        stats["pnl_history"] = deque(maxlen=20)
-    return {"mode": "SIMULATION", "balance": float(STARTING_BALANCE)}
-
-
-def _reset_balance_anchor_real():
-    """Fetch the current Binance USDT balance and reset only the local statistics anchor."""
-    global real_balance_snapshot, real_balance_snapshot_at, peak_real_balance
-    with positions_lock:
-        real_positions = [(sym, dict(pos)) for sym, pos in positions.items() if _position_is_real(pos) and pos.get("status") in ("active", "EMERGENCY")]
-    # Fetch exchange truth; this function never closes orders/positions.
-    with _binance_critical_context():
-        available, total = get_real_balance()
-    if total is None:
-        raise RuntimeError("saldo USDT Binance tidak tersedia")
-    with real_balance_lock:
-        real_balance_snapshot = float(total)
-        real_balance_snapshot_at = time.time()
-    with stat_lock:
-        stats["balance"] = float(total)
-        stats["pnl_history"] = deque(maxlen=20)
-    with autostop_lock:
-        peak_real_balance = float(total)
-    return {
-        "mode": "REAL",
-        "available": float(available) if available is not None else None,
-        "balance": float(total),
-        "open_real_positions": len(real_positions),
-        "snapshot_at": real_balance_snapshot_at,
-    }
 
 
 def get_real_balance():
@@ -3038,12 +3309,9 @@ def get_top_coins():
     coins = _get_top_coins_impl()
     global last_scanned_coins, last_scanned_at
     with _last_scanned_lock:
-        if coins:
-            last_scanned_coins = list(coins)
-            last_scanned_at = time.time()
-        # Never erase the last known scan universe just because a single
-        # degraded/fallback cycle temporarily returned no symbols.
-        return list(last_scanned_coins)
+        last_scanned_coins = coins
+        last_scanned_at = time.time()
+    return coins
 
 _TOP_COINS_CACHE_TTL = 120.0
 _top_coins_cached_symbols = []
@@ -3157,101 +3425,10 @@ def _price_cache_loop():
 # ═════════════════════════════════════════════
 # INDIKATOR
 # ═════════════════════════════════════════════
-
-# =============================================================================
-# STABLE BODY — PARALLEL RESEARCH DISPATCH
-# =============================================================================
-def _dispatch_research_job(fn, *args, **kwargs):
-    """Fire-and-forget research task. NEVER used for order/protection requests."""
-    try:
-        pool = getattr(_dispatch_research_job, "_pool", None)
-        if pool is None:
-            pool = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("RESEARCH_WORKERS", "1"))), thread_name_prefix="research")
-            _dispatch_research_job._pool = pool
-        fut = pool.submit(fn, *args, **kwargs)
-        fut.add_done_callback(lambda f: (log.debug(f"[RESEARCH] job error: {f.exception()}") if f.exception() else None))
-        return fut
-    except Exception as exc:
-        log.warning(f"[RESEARCH] dispatch gagal: {exc}")
-        return None
-
-
-def _brain_wakeup_from_body():
-    try:
-        fn = globals().get("adaptive_research_cycle")
-        if callable(fn):
-            _dispatch_research_job(fn)
-    except Exception as exc:
-        log.debug(f"[ADAPTIVE] wake research gagal: {exc}")
-
-def _full_frequency_adjust():
-    """Bridge scan telemetry to the adaptive brain's frequency/confidence controller.
-
-    main.py owns only the runtime threshold value; strategy_logic.py owns the
-    decision about whether opportunity supply justifies relaxing/ tightening.
-    Uses recent scan summaries and never talks to Binance directly.
-    """
-    global STRATEGY_CONFIDENCE_THRESHOLD
-    try:
-        updater = globals().get("update_frequency_confidence_state")
-        suggester = globals().get("suggest_confidence_threshold")
-        if not callable(updater):
-            return STRATEGY_CONFIDENCE_THRESHOLD
-        with scan_quality_lock:
-            recent = [dict(x) for x in scan_quality_history[-20:] if isinstance(x, dict)]
-        if not recent:
-            return STRATEGY_CONFIDENCE_THRESHOLD
-
-        def median(key, default=0.0):
-            vals = []
-            for row in recent:
-                try:
-                    v = row.get(key)
-                    if v is not None:
-                        vals.append(float(v))
-                except Exception:
-                    pass
-            if not vals:
-                return float(default)
-            vals.sort()
-            n = len(vals)
-            return vals[n//2] if n % 2 else (vals[n//2-1] + vals[n//2]) / 2.0
-
-        metrics = {
-            "window": len(recent),
-            "median_analyzed_per_scan": median("symbols_analyzed"),
-            "median_candidate_per_scan": median("candidate_count", median("qualified_count")),
-            "median_qualified_per_scan": median("qualified_count"),
-            "median_near_threshold_per_scan": median("near_threshold_count"),
-            "near_threshold_quality": median("near_threshold_quality", median("avg_confidence", 0.0)),
-            "lower_band_quality": median("lower_band_quality", median("avg_confidence", 0.0)),
-            "target_min": 2.0,
-            "target_max": 6.0,
-            "shadow_mean_r": median("shadow_mean_r", 0.0),
-            "historical_mean_r": median("historical_mean_r", 0.0),
-        }
-        state = updater(metrics)
-        if callable(suggester):
-            suggested = int(suggester(metrics, current_threshold=int(STRATEGY_CONFIDENCE_THRESHOLD)))
-            suggested = max(40, min(72, suggested))
-            # One-point movement per completed scan window prevents oscillation.
-            old = int(STRATEGY_CONFIDENCE_THRESHOLD)
-            if suggested > old:
-                STRATEGY_CONFIDENCE_THRESHOLD = old + 1
-            elif suggested < old:
-                STRATEGY_CONFIDENCE_THRESHOLD = old - 1
-        # Keep the brain state visible to the execution body without log spam.
-        if isinstance(state, dict):
-            mode = state.get("mode", "MAINTAIN")
-            if mode != "MAINTAIN":
-                log.info(f"[FULL][CONFIDENCE] {mode} threshold={STRATEGY_CONFIDENCE_THRESHOLD}%")
-        return STRATEGY_CONFIDENCE_THRESHOLD
-    except Exception as exc:
-        log.debug(f"[FULL][CONFIDENCE] bridge gagal: {exc}")
-        return STRATEGY_CONFIDENCE_THRESHOLD
-
-
 def run_scan_once(chat_id):
+    if STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN or _STRATEGY_LOAD_ERROR:
+        log.debug("[SCAN] new-entry gate blocked")
+        return []
     global early_reject_remaining
     """Scan universe with cached market data and record rich market context.
 
@@ -3262,7 +3439,7 @@ def run_scan_once(chat_id):
     scan_started=time.monotonic()
     if _binance_is_scan_paused():
         _notify_binance_pause_once(chat_id); return []
-    log.debug(f"[SCAN] mulai {TOP_N_COINS} symbols")
+    tg_send(chat_id, f"🔍 Scanning {TOP_N_COINS} koin...")
     if _binance_is_scan_paused():
         _notify_binance_pause_once(chat_id); return []
     try:
@@ -3274,7 +3451,7 @@ def run_scan_once(chat_id):
     if not symbols:
         tg_send(chat_id, "⚠️ Tidak ada koin tersedia untuk di-scan."); return []
 
-    data_started=time.monotonic(); results=[]; all_scan_confidences=[]; raw_scan_confidences=[]; market_rows=[]
+    data_started=time.monotonic(); results=[]; all_scan_confidences=[]; market_rows=[]
     processed_symbols=analyzed_symbols=cache_hits=cache_misses=failed_symbols=low_conf_count=below_threshold_count=0
     scan_deadline = scan_started + SCAN_MAX_DURATION_SEC
     for idx,sym in enumerate(symbols,1):
@@ -3300,8 +3477,8 @@ def run_scan_once(chat_id):
             row.update({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter})
             market_rows.append(row)
             if isinstance(r,dict):
-                _ml_record_signal_metadata(r)
-                analyzed_symbols+=1; conf=float(r.get("confidence",0) or 0); all_scan_confidences.append(conf); raw_scan_confidences.append(float(r.get("confidence_raw", conf) or conf))
+                _brain_on_candidate(r)
+                analyzed_symbols+=1; conf=float(r.get("confidence",0) or 0); all_scan_confidences.append(conf)
                 lf = r.setdefault("learning_features", {})
                 lf.update({
                     "market_bull_breadth": float(row.get("bullish_breadth_pct") or 0.0) / 100.0,
@@ -3313,34 +3490,22 @@ def run_scan_once(chat_id):
                     "symbol_rs_1h": float(row.get("relative_strength_1h_pct") or 0.0) if row.get("relative_strength_1h_pct") is not None else 0.0,
                     "symbol_rs_4h": float(row.get("relative_strength_4h_pct") or 0.0) if row.get("relative_strength_4h_pct") is not None else 0.0,
                 })
-                # Every analyzed candidate is retained for cognitive learning,
-                # even when it is below the live threshold. No network call here.
                 try:
                     fn_ingest = globals().get("ingest_live_candidate")
-                    if callable(fn_ingest):
-                        fn_ingest(r, h1=h1, m15=m15, d1=d1, rejected_reason=("below_threshold" if conf < STRATEGY_CONFIDENCE_THRESHOLD else None), source="binance")
+                    if callable(fn_ingest): fn_ingest(r, h1=h1, m15=m15, d1=d1, rejected_reason=(None if r.get("execution_eligible") else "brain_rejected"), source="binance")
                 except Exception as e:
                     log.warning(f"[COGNITIVE] candidate bridge gagal {sym}: {e}")
-                active_threshold = int(STRATEGY_CONFIDENCE_THRESHOLD)
-                strategy_gate = True
-                try:
-                    fn_gate=globals().get("strategy_trade_gate")
-                    if callable(fn_gate):
-                        gate=fn_gate(r, row)
-                        if isinstance(gate,dict) and gate.get("allowed") is False:
-                            strategy_gate=False; r["strategy_gate_reason"]=gate.get("reason")
-                except Exception as gate_exc:
-                    log.debug(f"[strategy-gate] {sym}: {gate_exc}")
-                cutoff=float(active_threshold)/2.0
-                if conf<=cutoff:
+                display_threshold=_get_active_confidence_threshold()
+                if bool(r.get("low_confidence")):
+                    cutoff=float(r.get("low_confidence_cutoff") or 0.0)
                     low_conf_count+=1; _record_low_confidence_event(sym,conf,cutoff,r.get("decision"),r.get("entry_label"))
-                    _ban_coin(sym,reason=f"low confidence {conf:.1f} <= {cutoff:.1f}",duration=BAN_DURATION_SCANS,kind="low_confidence",confidence=conf)
-                if conf<active_threshold: below_threshold_count+=1
-                if conf>=active_threshold and strategy_gate:
+                if bool(r.get("ban_recommended")):
+                    _ban_coin(sym, reason=str(r.get("ban_reason") or "brain recommendation"), duration=r.get("ban_duration"), kind=str(r.get("ban_kind") or "low_confidence"), confidence=conf)
+                if not bool(r.get("execution_eligible")):
+                    below_threshold_count+=1
+                else:
                     r["market_context"]={k:v for k,v in row.items() if k not in {"scan_time","run_id","scan_counter"}}
                     results.append(r); log.info(f"[SIGNAL] {sym} {r.get('decision')} confidence={conf:.1f}")
-                else:
-                    log.debug(f"[FILTER] {sym} confidence={conf:.1f} < {STRATEGY_CONFIDENCE_THRESHOLD}")
         except BinanceCooldownError:
             log.warning(f"[scan] {sym}: Binance cooldown aktif — scan cycle dihentikan aman."); break
         except Exception as e:
@@ -3372,25 +3537,9 @@ def run_scan_once(chat_id):
     data_elapsed=time.monotonic()-data_started; total_elapsed=time.monotonic()-scan_started
     cache_total,cache_fresh=_scan_cache_stats(); avg_conf=(sum(all_scan_confidences)/len(all_scan_confidences)) if all_scan_confidences else None
     telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct")}
-    qrow={"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"raw_avg_confidence":(sum(raw_confidences)/len(raw_confidences) if raw_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"candidate_count":analyzed_symbols,"active_threshold":int(STRATEGY_CONFIDENCE_THRESHOLD),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc}
-    raw_confidences=list(raw_scan_confidences)
-    # Preserve a raw confidence distribution separately from effective confidence.
-    qrow["confidence_bands"]={str(b):sum(1 for c in raw_confidences if b<=c<b+5) for b in range(0,100,5)}
-    qrow["effective_confidence_bands"]={str(b):sum(1 for c in all_scan_confidences if b<=c<b+5) for b in range(0,100,5)}
-    qrow["near_threshold_count"]=sum(1 for c in raw_confidences if abs(c-float(STRATEGY_CONFIDENCE_THRESHOLD))<=5.0)
-    near_vals=[c for c in raw_confidences if abs(c-float(STRATEGY_CONFIDENCE_THRESHOLD))<=5.0]
-    lower_vals=[c for c in raw_confidences if float(STRATEGY_CONFIDENCE_THRESHOLD)-10.0 <= c < float(STRATEGY_CONFIDENCE_THRESHOLD)-5.0]
-    qrow["near_threshold_quality"]=(sum(near_vals)/len(near_vals)) if near_vals else 0.0
-    qrow["lower_band_quality"]=(sum(lower_vals)/len(lower_vals)) if lower_vals else 0.0
     _record_scan_telemetry(telemetry)
-    with scan_quality_lock:
-        scan_quality_history.append(dict(qrow))
-        if len(scan_quality_history)>5000: del scan_quality_history[:-5000]
+    _record_scan_quality({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc})
     log.info("[SCAN SUMMARY] " + " | ".join(f"{k}={v}" for k,v in telemetry.items()))
-    if FULL_MODE:
-        _freq_bridge = globals().get("_full_frequency_adjust")
-        if callable(_freq_bridge):
-            _freq_bridge()
 
     # /reject is expressed in SCAN CYCLES, not individual signals.
     # While warmup is active, every qualified signal from the current scan is
@@ -3420,12 +3569,11 @@ def run_scan_once(chat_id):
     else:
         breadth_txt="📈 Market context: <b>belum tersedia</b>"
     rs_txt=(f"\n₿ BTC 1h: <b>{mc['btc_price_1h_pct']:+.2f}%</b> | BTC 4h: <b>{mc['btc_price_4h_pct']:+.2f}%</b>" if mc.get('btc_price_1h_pct') is not None else "")
-    active_threshold = int(STRATEGY_CONFIDENCE_THRESHOLD)
+    active_threshold = _get_active_confidence_threshold()
     scan_meta=f"\n\n📊 Scan: <b>{TOP_N_COINS}</b> diminta | <b>{len(symbols)}</b> tersedia | <b>{processed_symbols}</b> diproses | <b>{analyzed_symbols}</b> analisa strategy valid\n🧠 Rata-rata confidence scan: <b>{avg_txt}</b>\nThreshold aktif: <b>{active_threshold}%</b>\n{breadth_txt}{rs_txt}"
     if warmup_active: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> signal qualified dari scan ini ditolak"
     if not results:
         tg_send(chat_id,f"⚠️ Tidak ada setup dengan confidence ≥ {active_threshold}%."+scan_meta); return []
-    _brain_wakeup_from_body()
     summary="\n".join(f"• {r.get('symbol','?')} {r.get('decision','?')} — {float(r.get('confidence',0) or 0):.0f}%" for r in results)
     tg_send(chat_id,f"✅ <b>{len(results)} sinyal lolos</b> (threshold {active_threshold}%)\n\n{summary}{scan_meta}")
     return results
@@ -3452,86 +3600,42 @@ EXIT_FEE_PCT  = 0.0005   # 0.05% — exit via SL/TP market-trigger (taker)
 # pakai MARGIN_USD × LEVERAGE (persis logika real trade), bukan ini lagi.
 POSITION_SIZE_PCT = 100.0  # DEPRECATED — lihat catatan di atas
 
-def _classify_close_result(result, entry=None, close_price=None, decision=None,
-                            trail_applied=False, exit_mechanism=None):
-    """Return the OPERATIONAL exit mechanism, never the economic outcome.
+def _classify_close_result(result, entry=None, close_price=None, decision=None):
+    """Normalize every closed trade into the three operational outcome buckets.
 
-    ``result`` is kept for backward compatibility, but the returned value now
-    answers *how the position exited*: TP, trailing stop, initial stop, strategy,
-    timeout, emergency, or unknown. Economic WIN/LOSS/BREAKEVEN is derived
-    separately from the realized net PnL. This prevents a profitable trailing
-    stop from being mislabeled as a generic WIN and, more importantly, prevents
-    a losing trailing stop from being confused with a thesis/entry failure.
+    TP is preserved when the exchange/engine explicitly confirms a take-profit path.
+    Every other realized exit is classified economically: positive net PnL -> TRAIL,
+    non-positive net PnL -> SL. The original reason is kept separately in
+    ``close_reason`` for research, so UI/statistics never end up with an uncounted
+    fourth outcome such as ``strategy`` or ``timeout``.
     """
-    hinted = str(exit_mechanism or result or "unknown").strip().lower()
-    aliases = {
-        "take_profit": "tp", "takeprofit": "tp",
-        "trailing": "trail", "trailing_stop": "trail", "trailing-stop": "trail",
-        "initial_stop": "sl", "initial-stop": "sl", "stop": "sl",
-        "strategy_exit": "strategy", "strategy-close": "strategy",
-    }
-    hinted = aliases.get(hinted, hinted)
-    if hinted == "tp":
+    result = str(result or "strategy").strip().lower()
+    if result == "tp":
         return "tp"
-    if hinted in {"trail", "sl", "strategy", "timeout", "emergency"}:
-        if hinted == "sl" and trail_applied:
-            return "trail"
-        return hinted
-    if trail_applied:
+    if entry is not None and close_price is not None:
+        try:
+            entry = float(entry); close_price = float(close_price)
+            if entry > 0:
+                side = str(decision or "BUY").upper()
+                direction = 1 if side == "BUY" else -1
+                pnl_raw = ((close_price - entry) / entry) * direction
+                net_pnl = pnl_raw - (ENTRY_FEE_PCT + EXIT_FEE_PCT)
+                return "trail" if net_pnl > 0 else "sl"
+        except Exception:
+            pass
+    # No realized price available: preserve explicit operational result, otherwise
+    # fail closed into SL so every closed trade remains countable.
+    if result == "trail":
         return "trail"
-    # A local monitor hitting the current SL without any prior trail is the
-    # initial stop. Price is not used to decide the mechanism.
-    if hinted in {"unknown", ""} and entry is not None and close_price is not None:
+    if result == "sl":
         return "sl"
-    return "unknown"
-
-
-def _classify_economic_outcome(entry=None, close_price=None, decision=None,
-                               fee_pct=None, epsilon_pct=1e-9):
-    """Classify realized economics independently from the exit mechanism."""
-    if entry is None or close_price is None:
-        return "UNKNOWN", None, None
-    try:
-        entry = float(entry); close_price = float(close_price)
-        if entry <= 0 or close_price <= 0:
-            return "UNKNOWN", None, None
-        side = str(decision or "BUY").upper()
-        direction = 1.0 if side == "BUY" else -1.0
-        gross = ((close_price - entry) / entry) * direction
-        fees = float(ENTRY_FEE_PCT + EXIT_FEE_PCT if fee_pct is None else fee_pct)
-        net = gross - fees
-        if net > epsilon_pct:
-            outcome = "WIN"
-        elif net < -epsilon_pct:
-            outcome = "LOSS"
-        else:
-            outcome = "BREAKEVEN"
-        return outcome, gross, net
-    except Exception:
-        return "UNKNOWN", None, None
-
-
-def _final_r_from_prices(entry, initial_sl, close_price, decision, fee_pct=None):
-    """Net R relative to INITIAL risk, so trailing does not rewrite the denominator."""
-    try:
-        entry = float(entry); initial_sl = float(initial_sl); close_price = float(close_price)
-        risk_pct = abs(entry - initial_sl) / entry if entry > 0 else 0.0
-        if risk_pct <= 0:
-            return None, None
-        side = str(decision or "BUY").upper()
-        direction = 1.0 if side == "BUY" else -1.0
-        gross_pct = ((close_price - entry) / entry) * direction
-        fees = float(ENTRY_FEE_PCT + EXIT_FEE_PCT if fee_pct is None else fee_pct)
-        net_pct = gross_pct - fees
-        return gross_pct / risk_pct, net_pct / risk_pct
-    except Exception:
-        return None, None
+    return "sl"
 
 
 def _update_trade_path_metrics(pos, price):
     """Track MFE/MAE and time-to-R milestones in-memory without API calls."""
     try:
-        entry=float(pos.get("entry")); sl=float(pos.get("initial_sl") or pos["signal"].get("sl")); price=float(price)
+        entry=float(pos.get("entry")); sl=float(pos["signal"].get("sl")); price=float(price)
         if entry <= 0: return
         side=str(pos["signal"].get("decision") or "BUY").upper()
         move=((price-entry)/entry*100.0) if side=="BUY" else ((entry-price)/entry*100.0)
@@ -3553,84 +3657,111 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
                  mfe_pct=None, mae_pct=None, mfe_r=None, mae_r=None,
                  time_in_trade_sec=None, time_to_1r_sec=None, time_to_2r_sec=None,
                  execution_mode=None, balance_anchor=None, trade_uid=None,
-                 trail_update_count=0, trail_applied_count=0, trail_failed_count=0, trail_queued_count=0, trail_rejected_count=0,
-                 first_trail_r=None, last_trail_r=None, max_protected_r=None,
-                 trail_history=None, initial_sl_p=None, learning_features=None, ml_model_version=None):
-    """Finalize one closed trade with two independent labels:
-
-    - ``exit_mechanism``: HOW it ended (TP/TRAIL/INITIAL_SL/STRATEGY/...)
-    - ``economic_outcome``: WHETHER the realized economics were WIN/LOSS/BREAKEVEN.
-
-    This separation is deliberate: a trailing stop can be either profitable or
-    losing, and a stop loss is not automatically evidence that the strategy thesis
-    was wrong.
+                 trail_update_count=0, trail_applied_count=0, trail_failed_count=0, trail_queued_count=0,
+                 first_trail_r=None, last_trail_r=None, max_protected_r=None, learning_features=None, ml_model_version=None):
     """
-    exit_mechanism = _classify_close_result(
-        result, entry=entry, close_price=close_price, decision=decision,
-        trail_applied=(int(trail_applied_count or 0) > 0), exit_mechanism=close_reason or result
-    )
-    economic_outcome, gross_pct, net_pct = _classify_economic_outcome(
-        entry=entry, close_price=close_price, decision=decision
-    )
-    initial_sl_value = initial_sl_p if initial_sl_p is not None else sl_p
-    gross_r, final_r = _final_r_from_prices(entry, initial_sl_value, close_price, decision)
+    Hitung P&L simulasi murni dari jarak harga analisis (lihat komentar
+    lama untuk detail model close_price). Tambahan: catat sym/decision/
+    entry_time/exit_time + detail sinyal (confidence/entry_label/rr/rsi/
+    struct_h1/d1_bias) ke pnl_history — bahan diagnosis strategy_logic.py
+    tanpa perlu data tambahan lain (lihat /analyze).
 
+    result: klasifikasi final yang sudah dinormalisasi. "trail" hanya dipakai
+    jika exit trailing benar-benar menghasilkan PnL positif; trailing yang
+    berakhir negatif dicatat sebagai "sl". "timeout" juga diklasifikasikan
+    menjadi "trail" bila positif dan "sl" bila negatif.
+    """
+    result = _classify_close_result(result, entry=entry, close_price=close_price, decision=decision)
     with stat_lock:
         stats["total"] += 1
-        if exit_mechanism in ("tp", "sl", "trail"):
-            stats[exit_mechanism] = stats.get(exit_mechanism, 0) + 1
-        if economic_outcome == "WIN":
-            stats["wins"] = stats.get("wins", 0) + 1
-        elif economic_outcome == "LOSS":
-            stats["losses"] = stats.get("losses", 0) + 1
-        elif economic_outcome == "BREAKEVEN":
-            stats["breakeven"] = stats.get("breakeven", 0) + 1
+        if result in ("tp", "sl", "trail"):
+            stats[result] = stats.get(result, 0) + 1
 
-        if entry is None or close_price is None:
+        if not entry or tp_p is None:
             return
 
-        balance = stats["balance"]
+        balance      = stats["balance"]
+        # ── FIX "buat semirip mungkin" ──────────────────────────────────
+        # Sebelumnya: position_usd = balance × 100% — simulasi selalu
+        # bertaruh SELURUH saldo tiap trade (full compounding), padahal
+        # real trading pakai MARGIN_USD × LEVERAGE (jumlah dolar FIXED,
+        # kecil, diatur via /margin & /leverage), TIDAK ikut membesar
+        # walau saldo real sudah tumbuh. Ini bikin bentuk kurva ekuitas
+        # simulasi sama sekali beda dari real (simulasi: compounding
+        # agresif; real: flat sizing) — bukan cuma soal fee/entry lagi,
+        # tapi soal skala taruhan itu sendiri.
+        # Sekarang KEDUA mode pakai rumus yang SAMA PERSIS seperti real
+        # trade sizing, supaya kalau kamu ubah /margin atau /leverage,
+        # simulasi otomatis ikut menyesuaikan — selaras terus dengan real.
         position_usd = round(MARGIN_USD * LEVERAGE, 6)
-        direction_sign = 1 if str(decision or "BUY").upper() == "BUY" else -1
-        ref_price = float(close_price)
-        fee_pct = ENTRY_FEE_PCT + EXIT_FEE_PCT
+        direction_sign = 1 if tp_p > entry else -1
+
+        if close_price is not None:
+            ref_price = close_price
+        elif result == "tp":
+            ref_price = tp_p
+        elif result == "sl" and sl_p is not None:
+            ref_price = sl_p
+        else:
+            return
+
         pnl_pct_raw = (ref_price - entry) / entry * direction_sign
+        # ── FIX "simulasi tidak real / win rate kelewat bagus" ──────────
+        # Sebelumnya PnL dihitung MURNI dari selisih harga — nol biaya
+        # trading. Di real trading, Binance SELALU potong fee tiap kali
+        # entry (limit order → biasanya maker) DAN exit (SL/TP → market-
+        # trigger → taker), otomatis kepotong dari saldo asli. Simulasi
+        # tidak pernah mengurangi ini, jadi untuk trade RR ketat (SL 1-2%
+        # dari harga, khas bot ini), fee round-trip yang kelihatannya kecil
+        # bisa membalik hasil "breakeven/rugi tipis di real" jadi "menang"
+        # di simulasi — bias sistemik yang bikin win rate simulasi selalu
+        # kelihatan lebih bagus dari kenyataan.
+        #
+        # Angka ENTRY_FEE_PCT/EXIT_FEE_PCT di bawah = tarif standar Binance
+        # USDT-M Futures VIP0 tanpa diskon BNB. Kalau akun kamu VIP lebih
+        # tinggi / pakai diskon BNB / fee-nya beda, SESUAIKAN angka ini
+        # (dekat bagian atas file) supaya makin presisi ke kondisi akunmu.
+        # Diterapkan ke SIMULASI *dan* REAL supaya keduanya konsisten
+        # mencerminkan biaya riil (real trading sebenarnya sudah kepotong
+        # otomatis di Binance — ini menyamakan angka yang DITAMPILKAN bot
+        # dengan kenyataan itu, bukan menambah biaya baru yang sungguhan).
+        fee_pct = ENTRY_FEE_PCT + EXIT_FEE_PCT
         pnl_pct = pnl_pct_raw - fee_pct
         pnl_usd = round(position_usd * pnl_pct, 4)
-        pct = round(pnl_pct * 100, 3)
+        pct     = round(pnl_pct * 100, 3)
         stats["balance"] = round(balance + pnl_usd, 4)
         exit_ts = time.time()
         global trade_sequence
         trade_sequence += 1
         trade_record = {
             "trade_id": trade_sequence, "run_id": research_run_id, "trade_uid": trade_uid,
-            "result": exit_mechanism,
-            "exit_mechanism": exit_mechanism,
-            "economic_outcome": economic_outcome,
-            "close_reason": close_reason or exit_mechanism,
-            "pct": pct, "gross_pnl_pct": gross_pct, "net_pnl_pct": net_pct,
+            "result": result, "close_reason": close_reason or result, "pct": pct,
             "pnl_usd": pnl_usd, "balance_after": stats["balance"],
             "symbol": sym, "decision": decision,
             "entry_time": entry_time, "exit_time": exit_ts,
-            "entry": entry, "initial_sl": initial_sl_value, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
+            "entry": entry, "tp": tp_p, "sl": sl_p, "exit_price": ref_price,
             "confidence": confidence, "entry_label": entry_label, "rr": rr,
             "rsi": rsi, "struct_h1": struct_h1, "d1_bias": d1_bias,
-            "mfe_pct": mfe_pct, "mae_pct": mae_pct, "mfe_r": mfe_r, "mae_r": mae_r,
-            "final_r": final_r, "gross_final_r": gross_r,
-            "time_in_trade_sec": time_in_trade_sec, "time_to_1r_sec": time_to_1r_sec, "time_to_2r_sec": time_to_2r_sec,
+            "mfe_pct": mfe_pct,
+            "mae_pct": mae_pct,
+            "mfe_r": mfe_r,
+            "mae_r": mae_r,
+            "time_in_trade_sec": time_in_trade_sec,
+            "time_to_1r_sec": time_to_1r_sec,
+            "time_to_2r_sec": time_to_2r_sec,
             "execution_mode": execution_mode, "balance_anchor": balance_anchor,
             "trail_update_count": int(trail_update_count or 0), "trail_applied_count": int(trail_applied_count or 0),
-            "trail_failed_count": int(trail_failed_count or 0), "trail_queued_count": int(trail_queued_count or 0), "trail_rejected_count": int(trail_rejected_count or 0),
+            "trail_failed_count": int(trail_failed_count or 0), "trail_queued_count": int(trail_queued_count or 0),
             "first_trail_r": first_trail_r, "last_trail_r": last_trail_r, "max_protected_r": max_protected_r,
-            "trail_history": list(trail_history or []),
             "learning_features": dict(learning_features) if isinstance(learning_features, dict) else None,
             "ml_model_version": ml_model_version or "static",
         }
+        # Full ledger: every closed trade in this research run.
         with trade_history_lock:
             trade_history.append(dict(trade_record))
-        _ml_append_experience(trade_record)
+        _brain_on_trade(trade_record)
+        # Backward-compatible 20-trade view for /backtest and existing UI.
         stats["pnl_history"].append(dict(trade_record))
-        return dict(trade_record)
 
 # Hitung alasan pending dibatalkan — biar bisa didiagnosis dari data,
 # bukan tebak-tebakan (mis. "kenapa banyak batal?" jadi terjawab dari /stats).
@@ -3659,8 +3790,8 @@ def fmt_stats():
         hist = list(stats["pnl_history"])
     with trade_history_lock:
         full_hist = [dict(x) for x in trade_history]
-    wins = int(stats.get("wins", 0)); losses = int(stats.get("losses", 0)); breakeven = int(stats.get("breakeven", 0))
-    wr = wins/(wins+losses)*100 if (wins+losses) > 0 else 0
+    wins = tp + trail
+    wr = wins/(wins+sl)*100 if (wins+sl) > 0 else 0
     base = STARTING_BALANCE if not REAL_TRADE_ENABLED else (real_balance_snapshot if real_balance_snapshot is not None else bal)
     pnl = round(bal - base, 4)
     pnl_pct = round((pnl / base * 100), 2) if base else 0.0
@@ -3679,10 +3810,6 @@ def fmt_stats():
     avg_tp = _avg_conf_for_result(full_hist, "tp")
     avg_trail = _avg_conf_for_result(full_hist, "trail")
     avg_sl = _avg_conf_for_result(full_hist, "sl")
-    extra_exits = {}
-    for h in full_hist:
-        mech = str(h.get("exit_mechanism") or h.get("result") or "UNKNOWN").upper()
-        extra_exits[mech] = extra_exits.get(mech, 0) + 1
     with pending_cancel_lock:
         pc = dict(pending_cancel_stats)
     total_cancel = sum(pc.values())
@@ -3702,9 +3829,9 @@ def fmt_stats():
     trail_line = f"{avg_trail:.1f}%" if avg_trail is not None else "—"
     sl_line = f"{avg_sl:.1f}%" if avg_sl is not None else "—"
     return (
-        f"📊 <b>Statistik</b> — {t} trade | TP {tp} | Initial SL {sl} | Trail {trail}\n"
+        f"📊 <b>Statistik</b> — {t} trade | TP {tp} SL {sl} Trail {trail}\n"
         f"Mode: <b>{mode_label}</b>\n"
-        f"Hasil ekonomi: <b>{wins} WIN / {losses} LOSS / {breakeven} BE</b> | WR: <b>{wr:.1f}%</b>\n"
+        f"Win Rate: <b>{wr:.1f}%</b> (TP+Trail vs SL)\n"
         f"\nModal anchor: <b>${base:.4f}</b> → Saldo statistik: <b>${bal:.4f}</b> "
         f"({sgn}{pnl_pct:.2f}%)\n"
         f"\nConfidence rata-rata closed: <b>{avg_line}</b>\n"
@@ -3730,7 +3857,7 @@ def fmt_backtest():
         t_out = datetime.fromtimestamp(xt, WIB).strftime("%d/%m/%Y %H:%M") if xt else "?"
         sgn = "+" if h["pnl_usd"] >= 0 else ""
         entry_v, tp_v, sl_v = h.get("entry"), h.get("tp"), h.get("sl")
-        sl_display = h.get("exit_price") if h.get("exit_mechanism") == "trail" else sl_v
+        sl_display = h.get("exit_price") if h.get("result") == "trail" else sl_v
         levels = (f"Entry: <code>{entry_v:.6g}</code> | TP: <code>{tp_v:.6g}</code> | SL: <code>{sl_display:.6g}</code>\n"
                   if entry_v is not None and tp_v is not None and sl_display is not None else "")
         try:
@@ -3738,7 +3865,7 @@ def fmt_backtest():
         except (TypeError, ValueError):
             conf_txt = "—"
         lines.append(
-            f"{em} <b>{sym}</b> {dec} | {str(h.get('economic_outcome') or h.get('result','?')).upper()} / {str(h.get('exit_mechanism') or h.get('result','?')).upper()} {sgn}{h['pct']:.2f}% | Confidence: <b>{conf_txt}</b>\n"
+            f"{em} <b>{sym}</b> {dec} | {h['result'].upper()} {sgn}{h['pct']:.2f}% | Confidence: <b>{conf_txt}</b>\n"
             f"{levels}{t_in}→{t_out}"
         )
     return f"📋 <b>Backtest ({len(hist)} trade terakhir)</b>\n\n" + "\n\n".join(lines)
@@ -3754,8 +3881,6 @@ def _trade_analysis_rows(hist):
             "run_id": t.get("run_id", ""),
             "symbol": t.get("symbol", ""),
             "result": t.get("result", ""),
-            "exit_mechanism": t.get("exit_mechanism", t.get("result", "")),
-            "economic_outcome": t.get("economic_outcome", ""),
             "close_reason": t.get("close_reason", ""),
             "decision": t.get("decision", ""),
             "entry": t.get("entry", ""),
@@ -3763,7 +3888,7 @@ def _trade_analysis_rows(hist):
             "tp": t.get("tp", ""),
             "exit_price": t.get("exit_price", ""),
             "rr": t.get("rr", ""),
-            "final_r": t.get("final_r", ""), "gross_final_r": t.get("gross_final_r", ""),
+            "final_r": t.get("final_r", ""),
             "confidence": t.get("confidence", ""),
             "entry_label": t.get("entry_label", ""),
             "rsi": t.get("rsi", ""),
@@ -3796,8 +3921,8 @@ def _analyze_trade_history():
     if not hist:
         return [], {"trades": 0, "run_id": research_run_id}, []
 
-    winners = [t for t in hist if str(t.get("economic_outcome") or "").upper() == "WIN"]
-    losers = [t for t in hist if str(t.get("economic_outcome") or "").upper() == "LOSS"]
+    winners = [t for t in hist if t.get("result") in ("tp", "trail")]
+    losers = [t for t in hist if t.get("result") == "sl"]
     gross_profit = sum(max(float(t.get("pnl_usd", 0.0)), 0.0) for t in hist)
     gross_loss = abs(sum(min(float(t.get("pnl_usd", 0.0)), 0.0) for t in hist))
     total_pnl = sum(float(t.get("pnl_usd", 0.0)) for t in hist)
@@ -3818,7 +3943,7 @@ def _analyze_trade_history():
     # Additional diagnostics derived from the closed-trade ledger.
     for t in hist:
         try:
-            entry=float(t.get("entry")); exit_price=float(t.get("exit_price")); sl=float(t.get("initial_sl") if t.get("initial_sl") is not None else t.get("sl")); side=str(t.get("decision") or "BUY").upper(); risk=abs(entry-sl)
+            entry=float(t.get("entry")); exit_price=float(t.get("exit_price")); sl=float(t.get("sl")); side=str(t.get("decision") or "BUY").upper(); risk=abs(entry-sl)
             t["final_r"] = (((exit_price-entry)/risk) if side=="BUY" else ((entry-exit_price)/risk)) if risk else 0.0
         except Exception:
             t["final_r"] = None
@@ -3828,7 +3953,7 @@ def _analyze_trade_history():
     by_symbol = {}
     by_entry = {}
     for t in hist:
-        r = str(t.get("exit_mechanism") or t.get("result") or "unknown")
+        r = str(t.get("result") or "unknown")
         s = str(t.get("symbol") or "?")
         el = str(t.get("entry_label") or "?")
         for bucket, key in ((by_result, r), (by_symbol, s), (by_entry, el)):
@@ -3846,19 +3971,13 @@ def _analyze_trade_history():
         "balance": float(hist[-1].get("balance_after", run_anchor)),
         "balance_anchor": run_anchor, "net": total_pnl,
         "win_rate": len(winners) / len(hist) * 100.0,
-        "wins": len(winners),
-        "losses": len(losers),
-        "breakeven": sum(1 for t in hist if str(t.get("economic_outcome") or "").upper() == "BREAKEVEN"),
         "profit_factor": gross_profit / gross_loss if gross_loss > 0 else float("inf"),
         "max_dd": max_dd,
         "expectancy": total_pnl / len(hist),
         "avg_pct": avg_pct,
-        "tp": sum(1 for t in hist if t.get("exit_mechanism") == "tp"),
-        "trail": sum(1 for t in hist if t.get("exit_mechanism") == "trail"),
-        "sl": sum(1 for t in hist if t.get("exit_mechanism") == "sl"),
-        "strategy": sum(1 for t in hist if t.get("exit_mechanism") == "strategy"),
-        "timeout": sum(1 for t in hist if t.get("exit_mechanism") == "timeout"),
-        "emergency": sum(1 for t in hist if t.get("exit_mechanism") == "emergency"),
+        "tp": sum(1 for t in hist if t.get("result") == "tp"),
+        "trail": sum(1 for t in hist if t.get("result") == "trail"),
+        "sl": sum(1 for t in hist if t.get("result") == "sl"),
         "by_result": by_result,
         "by_symbol": by_symbol,
         "by_entry": by_entry,
@@ -3888,7 +4007,7 @@ def _analyze_runtime_stats():
 def _write_analyze_csv(rows):
     path = "/tmp/analyze_data.csv"
     cols = [
-        "trade_id", "run_id", "symbol", "result", "exit_mechanism", "economic_outcome", "close_reason", "decision", "entry", "sl", "tp", "exit_price",
+        "trade_id", "run_id", "symbol", "result", "close_reason", "decision", "entry", "sl", "tp", "exit_price",
         "rr", "final_r", "confidence", "entry_label", "rsi", "struct_h1", "d1_bias", "pct", "pnl_usd",
         "balance_after", "balance_anchor", "execution_mode", "mfe_pct", "mae_pct", "mfe_r", "mae_r", "time_in_trade_sec",
         "time_to_1r_sec", "time_to_2r_sec", "trail_update_count", "trail_applied_count", "trail_failed_count", "trail_queued_count",
@@ -3970,8 +4089,8 @@ def _write_research_support_files(summary):
         "low_confidence_bans": {"columns": low_cols, "rows": lows},
         "market_context": {"columns": market_cols, "rows": market_rows},
         "machine_learning": _full_status_text(),
-        "machine_learning_state": _ml_current_champion(),
-        "machine_learning_experience_count": int((_brain_status().get("live") or {}).get("outcomes",0) or 0),
+        "machine_learning_state": _brain_get_champion(),
+        "machine_learning_experience_count": int(_brain_get_experience_count()),
     }
 
     path = "/tmp/analyze_research_bundle.json"
@@ -4135,6 +4254,10 @@ def close_position(sym, result, close_price=None):
     classified = _classify_close_result(
         result, entry=entry, close_price=close_price, decision=sig.get("decision")
     )
+    try:
+        _transition_position_lifecycle(sym, "CLOSING", reason=f"finalizing {classified}")
+    except Exception:
+        pass
 
     # Remove local position exactly once. Exchange has already been confirmed flat by callers.
     with positions_lock:
@@ -4143,11 +4266,11 @@ def close_position(sym, result, close_price=None):
             return False
         if not positions:
             active_trade = None
+    _emit_execution_event("POSITION_LIFECYCLE", entity_id=pos.get("position_id") or sym, correlation_id=pos.get("position_id") or RUN_ID, payload={"symbol":sym,"from":"CLOSING","to":"CLOSED","reason":str(classified)}, persist=True)
 
     stats_error = None
-    canonical_trade = None
     try:
-        canonical_trade = update_stats(
+        update_stats(
             classified, entry=entry, sl_p=sl_p, tp_p=tp_p, close_price=close_price,
             sym=sym, decision=sig.get("decision"), entry_time=pos.get("entry_time"),
             close_reason=result,
@@ -4160,9 +4283,8 @@ def close_position(sym, result, close_price=None):
             time_to_1r_sec=pos.get("time_to_1r_sec"), time_to_2r_sec=pos.get("time_to_2r_sec"),
             execution_mode=pos.get("execution_mode"), balance_anchor=(real_balance_snapshot if str(pos.get("execution_mode") or "").upper()=="REAL" else STARTING_BALANCE),
             trade_uid=pos.get("trade_uid"), trail_update_count=pos.get("trail_update_count",0), trail_applied_count=pos.get("trail_applied_count",0),
-            trail_failed_count=pos.get("trail_failed_count",0), trail_queued_count=pos.get("trail_queued_count",0), trail_rejected_count=pos.get("trail_rejected_count",0), first_trail_r=pos.get("first_trail_r"),
+            trail_failed_count=pos.get("trail_failed_count",0), trail_queued_count=pos.get("trail_queued_count",0), first_trail_r=pos.get("first_trail_r"),
             last_trail_r=pos.get("last_trail_r"), max_protected_r=(pos.get("max_protected_r") if pos.get("max_protected_r",-999)>-998 else None),
-            trail_history=pos.get("trail_history"), initial_sl_p=pos.get("initial_sl"),
             learning_features=(pos.get("signal") or {}).get("learning_features"),
             ml_model_version=(pos.get("signal") or {}).get("learning_model_version", "static")
         )
@@ -4173,18 +4295,10 @@ def close_position(sym, result, close_price=None):
     try:
         fn_outcome = globals().get("ingest_live_outcome")
         if callable(fn_outcome):
-            outcome_record = dict(canonical_trade) if isinstance(canonical_trade, dict) else {
-                **sig, **pos,
-                "result": classified,
-                "exit_mechanism": classified,
-                "exit_price": close_price,
-                "closed_at": time.time(),
-                "economic_outcome": "UNKNOWN",
-            }
-            fn_outcome(outcome_record, outcome_record, source="binance_trade")
+            outcome_record = {**sig, **pos, "result": classified, "exit_price": close_price, "closed_at": time.time()}
+            fn_outcome(outcome_record, classified, source="binance_trade")
     except Exception as e:
         log.warning(f"[COGNITIVE] outcome bridge gagal {sym}: {e}")
-    _brain_wakeup_from_body()
 
     try:
         _ban_coin(sym, f"trade closed ({classified}; reason={result})", duration=BAN_DURATION_TRADE_CLOSED, kind="closed")
@@ -4197,8 +4311,8 @@ def close_position(sym, result, close_price=None):
     except Exception:
         last = None
 
-    emoji = {"tp":"🎯","sl":"🛑","trail":"🔒","strategy":"🧠","timeout":"⏱️","emergency":"🚨","unknown":"❔"}.get(classified, "❔")
-    label = {"tp":"TAKE PROFIT","sl":"INITIAL STOP LOSS","trail":"TRAILING STOP","strategy":"STRATEGY EXIT","timeout":"TIMEOUT EXIT","emergency":"EMERGENCY EXIT","unknown":"UNKNOWN EXIT"}.get(classified, "UNKNOWN EXIT")
+    emoji = {"tp":"🎯","sl":"🛑","trail":"🔒"}.get(classified, "🛑")
+    label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(classified, "STOP LOSS")
     detail = ""
     if last and last.get("symbol") == sym:
         sgn = "+" if last.get("pct", 0) >= 0 else ""
@@ -4216,7 +4330,12 @@ def close_position(sym, result, close_price=None):
 
 
 def _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=None):
-    """Finalize an exchange-side close and preserve the true exit mechanism."""
+    """Finalize an exchange-side close detected by positionAmt==0.
+
+    Binance positionRisk returning a symbol with positionAmt=0 is treated as a real close,
+    not as a still-open position. Cleanup is best-effort but tracked separately so a
+    transient API failure cannot erase the closed-trade record.
+    """
     sig = pos.get("signal") or {}
     price = exit_price
     if price is None:
@@ -4226,22 +4345,26 @@ def _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=None):
             price = None
     if price is None:
         price = pos.get("current_price") or pos.get("entry")
+
+    # Keep final MFE/MAE snapshot without another Binance request.
     try:
         if price is not None:
             _update_trade_path_metrics(pos, price)
     except Exception:
         pass
 
-    hint = str(reason_hint or "unknown").lower()
-    if hint == "tp":
-        mechanism = "tp"
-    elif hint == "sl":
-        mechanism = "trail" if int(pos.get("trail_applied_count", 0) or 0) > 0 else "sl"
-    elif hint in {"trail", "strategy", "timeout", "emergency"}:
-        mechanism = hint
-    else:
-        mechanism = "trail" if int(pos.get("trail_applied_count", 0) or 0) > 0 else "unknown"
+    reason = reason_hint if reason_hint in ("tp", "sl") else "unknown"
+    if reason == "unknown":
+        # A trailing SL that was moved to/above breakeven and then triggered is a Trail
+        # only if the realized outcome is positive; the common classifier below handles it.
+        reason = "trail"
+    elif reason == "sl":
+        # Preserve explicit SL when Binance's algo status confirms a stop. The final
+        # classifier will still convert it only when the caller marks it as trail/timeout.
+        pass
 
+    # Clean orphan protection. If Binance is temporarily unavailable, retain a pending
+    # cleanup marker but still finalize the already-flat trade locally.
     try:
         with _binance_critical_context():
             _cancel_all_algo_orders_verified(sym)
@@ -4249,7 +4372,19 @@ def _finalize_external_close(sym, pos, reason_hint="unknown", exit_price=None):
         _queue_pending_cleanup(sym, "post-external-close cleanup", e)
         log.warning(f"[external-close] {sym} cleanup tertunda: {e}")
 
-    return close_position(sym, mechanism, close_price=price)
+    # If the exchange explicitly told us TP/SL, preserve that reason. Otherwise classify
+    # from the realized exit outcome and trailing context.
+    if reason_hint == "tp":
+        final_result = "tp"
+    elif reason_hint == "sl":
+        # An SL trigger after a trailing move is a Trail only if the realized PnL is positive.
+        trail_candidate = bool(pos.get("current_sl") is not None and pos.get("entry") is not None)
+        final_result = "trail" if trail_candidate and _classify_close_result("trail", pos.get("entry"), price, sig.get("decision")) == "trail" else "sl"
+    else:
+        final_result = "trail" if _classify_close_result("trail", pos.get("entry"), price, sig.get("decision")) == "trail" else "sl"
+
+    closed = close_position(sym, final_result, close_price=price)
+    return closed
 
 
 def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
@@ -4301,17 +4436,6 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
 # ============================================================
 # STRATEGY DISPATCH — ENGINE TIDAK MEMILIKI OTAK TRADING
 # ============================================================
-
-def _record_rejected_trail_event(sym, pos, candidate_sl, candidate_tp, reason, price):
-    event={"type":"management_event","event":"TRAIL_REJECTED","timestamp":time.time(),"symbol":sym,"reason":str(reason),"price":price,"candidate_sl":candidate_sl,"candidate_tp":candidate_tp,"execution_class":_position_execution_mode(pos)}
-    try:
-        fn=globals().get("ingest_management_event")
-        if callable(fn): fn(event)
-    except Exception as exc: log.debug(f"[TRAIL] research bridge gagal {sym}: {exc}")
-    with positions_lock:
-        if sym in positions:
-            positions[sym].setdefault("trail_history",[]).append(event)
-            positions[sym]["trail_failed_count"]=int(positions[sym].get("trail_failed_count",0) or 0)+1
 
 def _strategy_position_update(sym,pos):
     if _binance_is_scan_paused():
@@ -4375,15 +4499,7 @@ def _notify_trail_update(chat_id, sym, pos, update, old_sl, new_sl, status="APPL
         elif status == "APPLIED":
             lines += ["", "✅ <b>Protection order berhasil diperbarui di Binance.</b>"]
         elif status == "FAILED":
-            # Expected trigger-race/geometry rejections are already stored in the
-            # management ledger. Do not flood Telegram when the old protection
-            # remains active. Escalation is handled by the critical logger if
-            # protection cannot be restored.
-            err_text=str(error or "").upper()
-            if "-2021" in err_text or "IMMEDIATELY_TRIGGER" in err_text or "STOP_WOULD" in err_text:
-                log.debug(f"[TRAIL] {sym}: update rejected; previous protection retained")
-                return
-            lines += ["", f"⚠️ <b>Protection update ditolak:</b> <code>{str(error)[:220]}</code>", "SL sebelumnya dipertahankan."]
+            lines += ["", f"🚨 <b>Update protection gagal:</b> <code>{str(error)[:220]}</code>", "⚠️ SL sebelumnya dipertahankan."]
         tg_send(chat_id, "\n".join(lines))
     except Exception as e:
         log.debug(f"[trail-notify] {sym}: {e}")
@@ -4397,16 +4513,6 @@ def _apply_strategy_update(sym,pos,update):
     if update.get("sl") is not None:
         new=float(update["sl"]); old=float(pos.get("current_sl",sig["sl"]))
         buy=sig["decision"]=="BUY"
-        live_price=get_price(sym, prefer_binance=True)
-        immediate=(live_price is not None and ((new >= float(live_price)) if buy else (new <= float(live_price))))
-        if immediate:
-            evt={"timestamp":time.time(),"symbol":sym,"event":"TRAIL_REJECTED","reason":"IMMEDIATE_TRIGGER","new_sl":new,"current_sl":old,"market_price":float(live_price),"decision":sig.get("decision"),"source":"execution_guard"}
-            with trail_events_lock:
-                trail_events.append(evt)
-                if len(trail_events)>5000: del trail_events[:-5000]
-            pos.setdefault("trail_history",[]).append(evt)
-            pos["trail_rejected_count"]=int(pos.get("trail_rejected_count",0))+1
-            return changed
         if (new>old) if buy else (new<old):
             pos["current_sl"]=new; sig["sl"]=new; changed=True
     return changed
@@ -4441,14 +4547,13 @@ def monitor_position(sym,pos):
         hit_tp=tp is not None and ((price>=tp) if buy else (price<=tp))
         hit_sl=sl is not None and ((price<=sl) if buy else (price>=sl))
         if hit_tp or hit_sl:
-            result="tp" if hit_tp and not hit_sl else ("trail" if int(pos.get("trail_applied_count",0) or 0) > 0 else "sl")
-            if hit_tp and hit_sl:
-                resolved=check_tp_sl_order(sym,tp,sl,buy,3) or "tp"
-                result = "tp" if resolved == "tp" else ("trail" if int(pos.get("trail_applied_count",0) or 0) > 0 else "sl")
+            result="tp" if hit_tp and not hit_sl else "sl"
+            if hit_tp and hit_sl: result=check_tp_sl_order(sym,tp,sl,buy,3) or "tp"
             close_position(sym,result,close_price=tp if result=="tp" else sl); return
         time.sleep(MONITOR_SLEEP)
 
 def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
+    if STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN: return
     buy=signal["decision"]=="BUY"; sl=signal.get("sl"); tp=signal.get("tp")
     if sl is None or tp is None:
         with positions_lock: positions.pop(sym,None)
@@ -4463,9 +4568,11 @@ def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
         if sym not in positions:return
         pos=positions[sym]
         now=time.time()
-        pos.update({"entry":actual_entry,"entry_time":now,"status":"active","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
-                    "timeout_flag":False,"current_sl":sl,"initial_sl":sl,"execution_mode":"SIMULATION",
-                    "trail_history":[],"trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"trail_rejected_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+        pos.update({"entry":actual_entry,"entry_time":now,"status":"active","lifecycle":"PROTECTION_PENDING","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
+                    "timeout_flag":False,"current_sl":sl,"initial_sl":sl,"execution_mode":"SIMULATION","position_id":_new_request_id("POS"),
+                    "trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+    try: _transition_position_lifecycle(sym,"MANAGED",reason="simulation protection state initialized")
+    except Exception: pass
     tg_send(chat_id,f"⚡ <b>ENTRY {mode_label.upper()}</b> — {sym}\n"
                     f"Entry: <code>{actual_entry:.8g}</code>\n"
                     f"TP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
@@ -4477,6 +4584,7 @@ def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
 # ============================================================
 
 def _open_pending_real(sym,signal,chat_id):
+    if STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN: return False
     if _binance_is_scan_paused():
         log.warning(f"[entry] {sym} ditahan — Binance pause aktif")
         return
@@ -4490,7 +4598,7 @@ def _open_pending_real(sym,signal,chat_id):
     with positions_lock:
         if sym in positions or len(positions)>=MAX_POSITIONS:return
         positions[sym]={"signal":signal,"entry":entry,"chat_id":chat_id,"entry_time":None,"trade_uid":f"{research_run_id}:{sym}:pending:{int(time.time()*1000)}",
-                        "timeout_flag":False,"status":"pending","execution_mode":"REAL"}
+                        "timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"REAL","position_id":_new_request_id("POS")}
     try:
         with _binance_critical_context():
             _real_trade_preflight(force=False)
@@ -4512,10 +4620,9 @@ def _open_pending_real(sym,signal,chat_id):
     except BinanceUnknownExecutionError as e:
         # The entry POST may have reached Binance even though its response was lost.
         # Preserve the client order id so reconciliation can resolve the ambiguity.
+        _force_position_emergency(sym, str(e)[:300])
         with positions_lock:
             if sym in positions:
-                positions[sym]["status"]="EMERGENCY"
-                positions[sym]["emergency_error"]=str(e)[:300]
                 positions[sym]["entry_client_order_id"]=getattr(e, "client_order_id", None)
         tg_send(chat_id,f"🚨 <b>ENTRY STATUS UNKNOWN</b> — {sym}\n<code>{str(e)[:300]}</code>\nOrder tidak diulang secara buta. State dipertahankan untuk rekonsiliasi <code>/ok {sym}</code>.")
     except Exception as e:
@@ -4552,10 +4659,7 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
                         return
                     positions.pop(sym,None); return
                 except Exception as e:
-                    with positions_lock:
-                        if sym in positions:
-                            positions[sym]["status"]="EMERGENCY"
-                            positions[sym]["emergency_error"]=str(e)[:300]
+                    _force_position_emergency(sym, str(e)[:300])
                     tg_send(chat_id, f"🚨 <b>ENTRY CANCEL BELUM TERKONFIRMASI</b> — {sym}\n<code>{str(e)[:300]}</code>\nPosisi tetap dipertahankan sampai <code>/ok {sym}</code>.")
                     return
         try:
@@ -4582,10 +4686,7 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
         with positions_lock: positions.pop(sym,None)
         _ban_coin(sym,"pending expired"); _record_pending_cancel("expired")
     except Exception as e:
-        with positions_lock:
-            if sym in positions:
-                positions[sym]["status"]="EMERGENCY"
-                positions[sym]["emergency_error"]=str(e)[:300]
+        _force_position_emergency(sym, str(e)[:300])
         tg_send(chat_id, f"🚨 <b>PENDING ENTRY BELUM TERKONFIRMASI</b> — {sym}\n<code>{str(e)[:300]}</code>\nState tetap dipertahankan untuk <code>/ok {sym}</code>.")
 
 
@@ -4605,15 +4706,11 @@ def _emergency_close(sym, is_buy, qty, chat_id, reason):
         with positions_lock:
             local_pos = positions.get(sym)
         if local_pos is not None:
-            close_position(sym, "emergency", close_price=exit_price or get_price(sym) or local_pos.get("entry"))
+            close_position(sym, "trail" if _classify_close_result("trail", local_pos.get("entry"), exit_price or get_price(sym), local_pos["signal"].get("decision")) == "trail" else "sl", close_price=exit_price or get_price(sym) or local_pos.get("entry"))
         tg_send(chat_id, f"✅ <b>AUTO-OUT</b> — {sym}\nPosisi Binance terkonfirmasi tertutup dan protection dibersihkan.")
         return True
     except Exception as e:
-        with positions_lock:
-            if sym in positions:
-                positions[sym]["status"] = "EMERGENCY"
-                positions[sym]["emergency_reason"] = reason
-                positions[sym]["emergency_error"] = str(e)[:300]
+        _force_position_emergency(sym, f"{reason}: {e}")
         _queue_pending_cleanup(sym, "auto-out cleanup", e)
         tg_send(chat_id, f"🚨 <b>GAGAL AUTO-OUT</b> — {sym}: {e}\n⚠️ Posisi TETAP dicatat di /trade. Jalankan <code>/ok {sym}</code> untuk rekonsiliasi Binance.")
         return False
@@ -4637,7 +4734,7 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
         with positions_lock:
             if sym in positions:
                 now=time.time()
-                positions[sym].update({"entry": actual_entry, "entry_time": now, "status": "active", "trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}", "current_sl": sl, "initial_sl": sl, "quantity": qty, "tp_order_id": None, "sl_order_id": None, "trail_history":[], "trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+                positions[sym].update({"entry": actual_entry, "entry_time": now, "status": "active", "lifecycle":"PROTECTION_PENDING", "trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}", "current_sl": sl, "initial_sl": sl, "quantity": qty, "position_id": (positions.get(sym) or {}).get("position_id") or _new_request_id("POS"), "tp_order_id": None, "sl_order_id": None, "trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
         _queue_pending_protection(sym, buy, sl, tp, qty)
         tg_send(chat_id, f"⏸️ <b>PROTEKSI DITUNDA</b> — {sym}\nBinance sedang rate-limit/ban. TP/SL dicatat dan akan dipasang setelah recovery +60 detik.")
         threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start(); return
@@ -4651,9 +4748,11 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
     with positions_lock:
         if sym not in positions:return
         now=time.time()
-        positions[sym].update({"entry":actual_entry,"entry_time":now,"status":"active","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
-                               "current_sl":sl,"initial_sl":sl,"quantity":qty,"tp_order_id":t["algoId"],"sl_order_id":s["algoId"],
-                               "execution_mode":"REAL","trail_history":[],"trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+        positions[sym].update({"entry":actual_entry,"entry_time":now,"status":"active","lifecycle":"PROTECTION_PENDING","trade_uid":f"{research_run_id}:{sym}:{int(now*1000)}",
+                               "current_sl":sl,"initial_sl":sl,"quantity":qty,"position_id":(positions.get(sym) or {}).get("position_id") or _new_request_id("POS"),"tp_order_id":t["algoId"],"sl_order_id":s["algoId"],
+                               "execution_mode":"REAL","trail_update_count":0,"trail_applied_count":0,"trail_failed_count":0,"trail_queued_count":0,"first_trail_r":None,"last_trail_r":None,"max_protected_r":-999.0})
+    try: _transition_position_lifecycle(sym,"MANAGED",reason="entry protection verified")
+    except Exception: pass
     tg_send(chat_id,f"⚡ <b>ENTRY REAL</b> — {sym}\nEntry: <code>{actual_entry:.8g}</code>\nTP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
     threading.Thread(target=monitor_position_real,args=(sym,positions[sym]),daemon=True).start()
 
@@ -4743,20 +4842,17 @@ def monitor_position_real(sym,pos):
                             buy=pos["signal"]["decision"]=="BUY"
                             closed, exit_price = _verified_market_close(sym, buy, "strategy close", chat_id=pos.get("chat_id") or active_chat_id, max_retries=1)
                             if not closed:
-                                with positions_lock:
-                                    if sym in positions:
-                                        positions[sym]["status"]="EMERGENCY"
+                                _force_position_emergency(sym, "strategy close cleanup gagal")
                                 return
                             try:
                                 with _binance_critical_context():
                                     _cleanup_algo_orders_verified(sym)
                             except Exception as ce:
                                 _queue_pending_cleanup(sym, "strategy close cleanup", ce)
-                                with positions_lock:
-                                    if sym in positions:
-                                        positions[sym]["status"]="EMERGENCY"
+                                _force_position_emergency(sym, "strategy close cleanup gagal")
                                 return
-                            close_position(sym, "strategy", close_price=exit_price or price); return
+                            result = "trail" if _classify_close_result("trail", pos.get("entry"), exit_price or price, pos["signal"].get("decision")) == "trail" else "sl"
+                            close_position(sym,result,close_price=exit_price or price); return
 
                         oldsl=pos.get("current_sl",pos["signal"].get("sl")); oldtp=pos["signal"].get("tp")
                         # Calculate candidates WITHOUT mutating local state.
@@ -4769,7 +4865,9 @@ def monitor_position_real(sym,pos):
 
                         if candidate_sl != oldsl or candidate_tp != oldtp:
                             current_price = px or get_price(sym) or pos["entry"]
+                            protection_request = ProtectionMutationRequest(pos.get("position_id"), sym, int(pos.get("protection_version",0) or 0), "REPLACE", expires_sec=20.0)
                             try:
+                                _validate_protection_mutation(sym, protection_request.expected_version, protection_request.request_id)
                                 if _binance_is_scan_paused():
                                     _queue_pending_trail(sym, candidate_sl, candidate_tp, live, reason="strategy", side=pos["signal"]["decision"])
                                     if candidate_sl != oldsl:
@@ -4781,28 +4879,13 @@ def monitor_position_real(sym,pos):
                                     live_qty = abs(float(latest.get("positionAmt",0) or 0)) if latest else 0.0
                                     if live_qty <= 0:
                                         continue
-                                    # Our STOP_MARKET/TAKE_PROFIT_MARKET orders use
-                                    # workingType=MARK_PRICE, so preflight must use the
-                                    # exchange mark price whenever it is available.
-                                    fresh_reference = None
-                                    if isinstance(latest, dict):
-                                        try: fresh_reference = float(latest.get("markPrice") or latest.get("mark_price") or 0.0)
-                                        except Exception: fresh_reference = None
-                                    fresh_reference = fresh_reference or current_price
-                                    buy_side = pos["signal"]["decision"]=="BUY"
-                                    ok_trigger, trigger_reason = _trail_trigger_preflight(sym, buy_side, candidate_tp, candidate_sl, reference_price=fresh_reference)
-                                    if not ok_trigger:
-                                        _record_rejected_trail_event(sym, pos, candidate_sl, candidate_tp, trigger_reason, current_price)
-                                        if candidate_sl != oldsl:
-                                            _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="FAILED", error=RuntimeError(trigger_reason))
-                                        continue
                                     # Cancel existing protection, then create+verify new pair. If creation
                                     # fails, restore the old pair before declaring an emergency.
                                     with _binance_critical_context():
                                         _cancel_all_algo_orders_verified(sym)
                                     try:
                                         with _binance_critical_context():
-                                            nt, ns = place_tp_sl(sym, buy_side, candidate_tp, candidate_sl, live_qty)
+                                            nt, ns = place_tp_sl(sym, pos["signal"]["decision"]=="BUY", candidate_tp, candidate_sl, live_qty)
                                     except Exception as protect_err:
                                         restore_failed = False
                                         try:
@@ -4813,22 +4896,15 @@ def monitor_position_real(sym,pos):
                                             _queue_pending_cleanup(sym, "trail protection restore failed", restore_err)
                                             log.critical(f"[trail] {sym}: restore old protection gagal: {restore_err}")
                                         if restore_failed:
-                                            with positions_lock:
-                                                if sym in positions:
-                                                    positions[sym]["status"]="EMERGENCY"
-                                                    positions[sym]["emergency_error"]=str(protect_err)[:300]
+                                            _force_position_emergency(sym, str(protect_err)[:300])
                                             raise RuntimeError(f"trail update gagal dan protection lama tidak bisa dipulihkan: {protect_err}")
-                                        if _is_binance_immediate_trigger_error(protect_err):
-                                            # Expected race: market moved between preflight and submit.
-                                            # The old verified protection has been restored, so this is a
-                                            # management rejection, NOT a strategy failure and NOT an ERROR.
-                                            _record_rejected_trail_event(sym, pos, candidate_sl, candidate_tp, "BINANCE_-2021_IMMEDIATE_TRIGGER", current_price)
-                                            log.warning(f"[trail] {sym}: candidate rejected by Binance -2021; old protection restored")
-                                            continue
                                         raise
+                                    _validate_protection_mutation(sym, protection_request.expected_version, protection_request.request_id)
                                     with positions_lock:
                                         if sym in positions:
                                             positions[sym]["current_sl"] = candidate_sl
+                                            positions[sym]["protection_version"] = protection_request.expected_version + 1
+                                            positions[sym]["protection_request_id"] = protection_request.request_id
                                             positions[sym]["signal"]["sl"] = candidate_sl
                                             if candidate_tp is not None:
                                                 positions[sym]["signal"]["tp"] = candidate_tp
@@ -4844,13 +4920,9 @@ def monitor_position_real(sym,pos):
                                 if candidate_sl != oldsl:
                                     _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="QUEUED", error=e)
                             except Exception as e:
-                                if _is_binance_immediate_trigger_error(e):
-                                    _record_rejected_trail_event(sym, pos, candidate_sl, candidate_tp, "STOP_WOULD_IMMEDIATELY_TRIGGER", current_price)
-                                    log.debug(f"[trail] {sym}: -2021 handled; old protection retained")
-                                else:
-                                    log.warning(f"[strategy/manage real] {sym}: {e}")
-                                    if candidate_sl != oldsl:
-                                        _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="FAILED", error=e)
+                                log.error(f"[strategy/manage real] {sym}: {e}")
+                                if candidate_sl != oldsl:
+                                    _notify_trail_update(active_chat_id, sym, pos, upd, oldsl, candidate_sl, status="FAILED", error=e)
                                 # Do not commit candidate local state on failure.
 
                 time.sleep(REAL_TRADE_POLL_SLEEP)
@@ -4861,7 +4933,6 @@ def monitor_position_real(sym,pos):
             log.exception(f"[monitor_real] UNHANDLED {sym}: {e}")
             with positions_lock:
                 if sym in positions:
-                    positions[sym]["status"] = positions[sym].get("status") or "active"
                     positions[sym]["monitor_error"] = str(e)[:300]
             time.sleep(REAL_TRADE_POLL_SLEEP)
 
@@ -4960,37 +5031,10 @@ def _resume_binance_and_flush_pending(chat_id=None):
                 buy=pos['signal']['decision']=='BUY'; qty=pos.get('quantity') or tr.get('quantity')
                 tp=tr.get('tp') or pos['signal'].get('tp'); sl=tr.get('sl') or pos.get('current_sl')
                 if not qty or sl is None or tp is None: raise RuntimeError('pending trail tidak lengkap')
-                current_ref = get_price(sym, prefer_binance=True) or pos.get('current_price') or pos.get('entry')
-                ok_trigger, trigger_reason = _trail_trigger_preflight(sym, buy, tp, sl, reference_price=current_ref)
-                if not ok_trigger:
-                    _record_rejected_trail_event(sym, pos, sl, tp, trigger_reason, current_ref)
-                    _clear_pending_trail(sym)
-                    log.debug(f'[trail-resume] {sym}: queued trail discarded as invalid ({trigger_reason}); existing protection retained')
-                    continue
+                with _binance_critical_context():
+                    cancel_algo_order(pos.get('tp_order_id')); cancel_algo_order(pos.get('sl_order_id'))
+                    t,s=place_tp_sl(sym,buy,tp,sl,qty)
                 old_sl = pos.get('current_sl')
-                old_tp = pos.get('signal',{}).get('tp')
-                try:
-                    with _binance_critical_context():
-                        _cancel_all_algo_orders_verified(sym)
-                    with _binance_critical_context():
-                        t,s=place_tp_sl(sym,buy,tp,sl,qty)
-                    _verify_protection_pair(sym,buy,tp,sl,qty)
-                except Exception as protect_err:
-                    restored=False
-                    try:
-                        if old_sl is not None and old_tp is not None:
-                            with _binance_critical_context():
-                                rt,rs=place_tp_sl(sym,buy,old_tp,old_sl,qty)
-                            _verify_protection_pair(sym,buy,old_tp,old_sl,qty)
-                            restored=True
-                    except Exception as restore_err:
-                        _queue_pending_cleanup(sym,'pending trail restore failed',restore_err)
-                        log.critical(f'[trail-resume] {sym}: restore old protection gagal: {restore_err}')
-                    if _is_binance_immediate_trigger_error(protect_err) and restored:
-                        _record_rejected_trail_event(sym,pos,sl,tp,'BINANCE_-2021_IMMEDIATE_TRIGGER',current_ref)
-                        _clear_pending_trail(sym)
-                        continue
-                    raise
                 with positions_lock:
                     if sym in positions:
                         positions[sym].update({'tp_order_id':t['algoId'],'sl_order_id':s['algoId'],'exchange_synced_at':time.time(),'execution_mode':'REAL','current_sl':sl})
@@ -5138,7 +5182,7 @@ def simulation_loop(chat_id):
                     if sym in positions or len(positions) >= MAX_POSITIONS:
                         continue
                     positions[sym] = {"signal": signal, "entry": entry, "chat_id": chat_id,
-                                      "entry_time": None, "timeout_flag": False, "status": "pending",
+                                      "entry_time": None, "timeout_flag": False, "status": "pending", "lifecycle": "ENTRY_PENDING",
                                       "execution_mode": "SIMULATION"}
                 if mode == "market":
                     _open_position(sym, signal, get_price(sym) or price, chat_id, "strategy")
@@ -5179,7 +5223,7 @@ def simulation_loop(chat_id):
         if time.time()-last_scan<120:
             with scan_lock: scanning=False
             time.sleep(5); continue
-        last_scan=time.time(); threading.Thread(target=do_scan,daemon=True).start(); time.sleep(5)
+        last_scan=time.time(); _start_heavy_worker("scan", do_scan); time.sleep(5)
     tg_send(chat_id,"⏹ <b>Scanning dihentikan.</b>\n\n"+fmt_stats())
 
 
@@ -5193,7 +5237,7 @@ def get_start_msg():
         "👋 <b>SMC Signal Broadcaster</b>\n\n"
         f"Mode: <b>{'REAL TRADE' if REAL_TRADE_ENABLED else 'SIMULASI'}</b>\n"
         f"Posisi aktif: <b>{MAX_POSITIONS}</b> maksimum\n"
-        f"Confidence minimum: <b>{STRATEGY_CONFIDENCE_THRESHOLD}%</b>\n"
+        f"Confidence policy: <b>{html.escape(str(_get_active_confidence_threshold()))}</b> (brain-owned)\n"
         "TP minimum: <b>2R</b> • Max RR: <b>Unlimited</b>\n"
         "Trailing: <b>Adaptive / context-aware</b>\n\n"
         "━━━━━━━━ <b>TRADING</b> ━━━━━━━━\n"
@@ -5215,15 +5259,11 @@ def get_start_msg():
         "/autostop            — Lihat/ubah auto-stop drawdown\n\n"
         "━━━━━━━━ <b>RESEARCH</b> ━━━━━━━━\n"
         "/stats               — Statistik & saldo aktif\n"
-        "/resetbalance        — Reset balance statistik: SIM=$10, REAL=ambil saldo Binance\n"
         "/backtest            — 20 trade terakhir\n"
         "/analyze             — Analisis seluruh closed trade sejak resetstats\n"
         "/resetstats           — Reset research stats/ledger tanpa mengubah modal\n\n"
         "━━━━━━━━ <b>TOOLS</b> ━━━━━━━━━━\n"
         "/ganti               — Upload/ganti strategy_logic.py\n"
-        "/save                — Simpan progress learning ke GitHub\n"
-        "/open                — Replace learning dari checkpoint GitHub terbaru\n"
-        "/ai                  — Status & hasil research Ollama\n"
         "/info                — Detail engine & metode analisis\n"
         "/IP                  — Lihat public IP Render saat ini\n"
         "/banned              — Lihat daftar koin yang diban\n"
@@ -5243,7 +5283,7 @@ def get_start_msg():
 def get_info_msg():
     return ("ℹ️ <b>Engine</b>\n\n"
             "Strategy: Entry • Stop Loss • Take Profit • Trail • Confidence • Setup selection\n"
-            "Engine: data transport • Telegram • order execution • position state • monitoring • statistics." + brain_line + "\n\nResearch tidak memblokir execution; brain dapat di-hot-swap.")
+            "Engine: data transport • Telegram • order execution • position state • monitoring • statistics.")
 
 
 
@@ -5289,7 +5329,7 @@ def _telegram_watchdog_alert(cid, text):
 # BOT LOOP
 # ═════════════════════════════════════════════
 def bot_loop():
-    global auto_mode, auto_thread, autostop_thread, active_chat_id, timeout_flag, MAX_POSITIONS, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance, REAL_TRADE_ENABLED, STRATEGY_CONFIDENCE_THRESHOLD, BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_KEYS_PRESENT, real_balance_snapshot, real_balance_snapshot_at, early_reject_configured, early_reject_remaining, BAN_DURATION_SCANS
+    global auto_mode, auto_thread, autostop_thread, active_chat_id, timeout_flag, MAX_POSITIONS, LEVERAGE, MARGIN_USD, AUTOSTOP_PCT, peak_real_balance, REAL_TRADE_ENABLED, BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_KEYS_PRESENT, real_balance_snapshot, real_balance_snapshot_at, early_reject_configured, early_reject_remaining, BAN_DURATION_SCANS, STOP_NEW_ENTRIES
 
     # Set active_chat_id ke ALLOWED_USER_ID SEJAK AWAL — di chat pribadi
     # Telegram, chat_id sama dengan user_id, jadi bot bisa kirim pesan
@@ -5350,18 +5390,18 @@ def bot_loop():
                 if text in ("/start","start"):
                     tg_send(chat_id,get_start_msg())
                 elif text.startswith("/confidence_min") or text.startswith("confidence_min"):
-                    parts = text.split()
-                    if len(parts) == 1:
-                        tg_send(chat_id, f"🎯 <b>Confidence minimum:</b> {STRATEGY_CONFIDENCE_THRESHOLD}%\nGunakan <code>/confidence_min 70</code> untuk mengubahnya.")
-                    else:
+                    parts=text.split(); setter=_brain_fn("set_manual_confidence_threshold"); getter=_brain_fn("get_active_confidence_threshold")
+                    if len(parts)==1:
+                        try: current=getter() if callable(getter) else "brain-owned"
+                        except Exception: current="brain-owned"
+                        tg_send(chat_id,f"🎯 <b>Confidence policy:</b> <b>{html.escape(str(current))}</b> (owned by brain).")
+                    elif callable(setter):
                         try:
-                            val = float(parts[1].replace("%", ""))
-                            if not (0 <= val <= 100):
-                                raise ValueError("rentang 0-100")
-                            STRATEGY_CONFIDENCE_THRESHOLD = int(round(val))
-                            tg_send(chat_id, f"✅ Confidence minimum diubah menjadi <b>{STRATEGY_CONFIDENCE_THRESHOLD}%</b>.")
-                        except Exception:
-                            tg_send(chat_id, "❌ Format salah. Gunakan <code>/confidence_min 70</code> (0-100).")
+                            val=float(parts[1].replace("%",""));
+                            if not 0<=val<=100: raise ValueError
+                            setter(val); tg_send(chat_id,f"✅ Brain confidence policy diberi nilai manual <b>{val:.0f}%</b>.")
+                        except Exception: tg_send(chat_id,"❌ Format salah. Gunakan <code>/confidence_min 70</code>.")
+                    else: tg_send(chat_id,"⚠️ Brain tidak menyediakan kontrol confidence manual.")
                 elif text in ("/info","info"):
                     tg_send(chat_id,get_info_msg())
                 elif text in ("/ip","ip"):
@@ -5377,19 +5417,6 @@ def bot_loop():
                 # ============================================================
                 # TAMBAHAN BARU (START) — Handler /analyze
                 # ============================================================
-                elif text in ("/brain", "brain", "/brain status", "brain status"):
-                    try:
-                        st = globals().get("get_adaptive_status")
-                        tg_send(chat_id, html.escape(json.dumps(st() if callable(st) else {"status":"unavailable"}, ensure_ascii=False, indent=2)))
-                    except Exception as e:
-                        tg_send(chat_id, f"❌ Brain status gagal: <code>{html.escape(str(e)[:300])}</code>")
-                elif text in ("/brain historical", "brain historical"):
-                    try:
-                        fn = globals().get("adaptive_replay_historical")
-                        _dispatch_research_job(fn, False) if callable(fn) else None
-                        tg_send(chat_id, "🧠 Historical replay dijalankan di background. Execution tetap berjalan.")
-                    except Exception as e:
-                        tg_send(chat_id, f"❌ Historical replay gagal dimulai: <code>{html.escape(str(e)[:300])}</code>")
                 elif text in ("/full on", "full on"):
                     try:
                         tg_send(chat_id, _full_strategy_command("on", chat_id))
@@ -5443,154 +5470,106 @@ def bot_loop():
                             log.error(f"[analyze] Error: {e}", exc_info=True)
                             tg_send(cid, f"❌ Error saat /analyze:\n<code>{str(e)[:300]}</code>")
 
-                    threading.Thread(target=_run_analyze, args=(chat_id,), daemon=True).start()
+                    _start_heavy_worker("analyze", _run_analyze, chat_id)
                     tg_send(chat_id, "⏳ /analyze berjalan di background berdasarkan history trade. Bot tetap menerima perintah lain.")
 # ============================================================
 # TAMBAHAN BARU (END)
 # ============================================================
                 # ============================================================
-# TAMBAHAN BARU (START) — Handler /ganti (Upload Otak Baru via GitHub API)
-# ============================================================
-                elif text in ("/save", "save"):
-                    threading.Thread(target=_run_save_checkpoint, args=(chat_id,), daemon=True).start()
-                    tg_send(chat_id, "⏳ <b>/save</b> berjalan di background. Progress learning disimpan ke GitHub; tidak mengirim file ke Telegram.")
-                elif text == "/open" or text.startswith("/open ") or text == "open" or text.startswith("open "):
-                    parts=text.split(maxsplit=1); checkpoint_id=parts[1].strip() if len(parts)==2 else None
-                    threading.Thread(target=_run_open_checkpoint, args=(chat_id, checkpoint_id), daemon=True).start()
-                    tg_send(chat_id, "⏳ <b>/open</b> mengambil checkpoint dari GitHub lalu <b>replace</b> memory learning. Posisi/trade execution tetap dipertahankan.")
-                elif text in ("/ai", "/ollama", "ai"):
-                    fn_ai=globals().get("get_ollama_research_status")
-                    st=fn_ai() if callable(fn_ai) else {}
-                    result=st.get("last_result") or {}
-                    summary=result.get("summary") or result.get("recommendation") or ("Belum ada hasil research AI." if st.get("enabled") else "Ollama tidak aktif")
-                    tg_send(chat_id, f"🤖 <b>OLLAMA RESEARCH</b>\nModel: <code>{html.escape(str(st.get('model','—')))}</code>\nEnabled: <b>{'YES' if st.get('enabled') else 'NO'}</b>\nIn-flight: <b>{'YES' if st.get('in_flight') else 'NO'}</b>\n\n{html.escape(str(summary))[:1200]}")
-                elif text in ("/ganti","ganti"):
-                   doc = msg.get("document")
-                   if not doc:
-                       tg_send(chat_id, "📤 Kirim file strategy_logic.py sebagai dokumen dengan caption /ganti")
-                       continue
-               
-                   file_name = doc.get("file_name", "")
-                   if not file_name.endswith(".py"):
-                       tg_send(chat_id, "❌ Harus file .py")
-                       continue
-               
-                   try:
-                       # 1. Download file dari Telegram
-                       file_id = doc["file_id"]
-                       file_info = requests.get(
-                           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
-                           params={"file_id": file_id}, timeout=10
-                       ).json()
-                       file_path = file_info["result"]["file_path"]
-                       file_content = requests.get(
-                           f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
-                           timeout=10
-                       ).text
-               
-                       # 2. Validasi sintaks
-                       try:
-                           compiled = compile(file_content, "strategy_logic.py", "exec")
-                       except SyntaxError as e:
-                           tg_send(chat_id, f"❌ Error sintaks di file:\n<code>{e}</code>")
-                           continue
-               
-                       # 3. Validasi full_analyze() ADA
-                       check_ns = {}
-                       try:
-                           exec(compiled, check_ns)
-                       except Exception as e:
-                           tg_send(chat_id, f"❌ File error saat dijalankan (bukan cuma sintaks):\n<code>{e}</code>")
-                           continue
-                       if "full_analyze" not in check_ns or not callable(check_ns["full_analyze"]):
-                           tg_send(chat_id, "❌ File ini tidak punya fungsi full_analyze() — ditolak.")
-                           continue
-               
-                       # 4. Commit ke GitHub
-                       try:
-                           _commit_to_github(file_content, "strategy_logic.py", f"Update strategy_logic via Telegram /ganti")
-                           tg_send(chat_id, "✅ File berhasil di-commit ke GitHub!")
-                       except Exception as e:
-                           tg_send(chat_id, f"❌ Gagal commit ke GitHub:\n<code>{str(e)[:200]}</code>")
-                           continue
-               
-                       # 5. Tulis ke file LOKAL
-                       local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategy_logic.py")
-                       with open(local_path, "w", encoding="utf-8") as f:
-                           f.write(file_content)
-               
-                       # 6. ========== ADAPTIVE RELOAD: Bind apa yang ADA, pertahankan yang tidak ==========
-                       import importlib, sys
-
-                       # Hapus modul dari cache supaya reload benar-benar dari disk
-                       if "strategy_logic" in sys.modules:
-                           del sys.modules["strategy_logic"]
-
-                       import strategy_logic as sl
-                       _strategy_set_ml_model(_ml_current_champion())
-
-                       # --- SENTINEL untuk membedakan "tidak ada" vs None ---
-                       _SL_SENTINEL = object()
-
-                       def _sl_bind(name):
-                           """Bind ke global HANYA kalau ada di modul baru.
-                           Kalau tidak ada -> global lama tetap aktif, return False."""
-                           val = getattr(sl, name, _SL_SENTINEL)
-                           if val is not _SL_SENTINEL:
-                               globals()[name] = val
-                               return True
-                           return False
-
-                       # WAJIB: full_analyze sudah divalidasi ada di atas
-                       globals()["full_analyze"] = sl.full_analyze
-
-                       # -- Fungsi opsional --------------------------------------------------
-                       # Kalau tidak ada di file baru -> versi lama di global tetap aktif.
-                       # Kamu bebas ganti nama, tambah, atau hapus fungsi apapun
-                       # selama full_analyze() tetap ada.
-                       _OPT_FNS = ["manage_position"]
-                       _bound_fns, _kept_fns = [], []
-                       for _fn in _OPT_FNS:
-                           (_bound_fns if _sl_bind(_fn) else _kept_fns).append(_fn)
-
-                       # Tangkap semua public callable BARU yang tidak ada di daftar atas
-                       for _attr in dir(sl):
-                           if _attr.startswith("__"):
-                               continue
-                           if _attr not in _OPT_FNS and _attr != "full_analyze":
-                               _v = getattr(sl, _attr, None)
-                               if callable(_v):
-                                   globals()[_attr] = _v
-                                   if _attr not in _bound_fns:
-                                       _bound_fns.append(f"✨{_attr}")
-
-                       # -- Konstanta opsional -----------------------------------------------
-                       # Kalau tidak ada di file baru, nilai lama dipertahankan.
-                       _OPT_CONSTS = []
-                       _bound_consts, _kept_consts = [], []
-                       for _k in _OPT_CONSTS:
-                           (_bound_consts if _sl_bind(_k) else _kept_consts).append(_k)
-
-                       # -- Laporan ke user --------------------------------------------------
-                       _rpt = ["✅ <b>Strategy logic aktif!</b>"]
-                       if _bound_fns:
-                           _rpt.append(f"🔄 Diperbarui: <code>{', '.join(_bound_fns)}</code>")
-                       if _kept_fns:
-                           _rpt.append(f"♻️ Versi lama dipertahankan: <code>{', '.join(_kept_fns)}</code>")
-                       if _bound_consts:
-                           _rpt.append(f"📐 Konstanta diperbarui: <code>{', '.join(_bound_consts)}</code>")
-                       if _kept_consts:
-                           _rpt.append(f"📌 Konstanta lama dipertahankan: <code>{', '.join(_kept_consts)}</code>")
-
-                       log.info("[OTAK] Strategy logic di-reload (adaptive bind).")
-                       tg_send(chat_id, "\n".join(_rpt))
-               
-                   except Exception as e:
-                       log.error(f"[ganti] Error: {e}")
-                       tg_send(chat_id, f"❌ Gagal mengganti strategy_logic:\n<code>{str(e)[:200]}</code>")
+                # FINAL /GANTI — strict brain hot-swap; no silent fallback.
                 # ============================================================
-                # TAMBAHAN BARU (END)
-                # ============================================================
+                elif text in ("/ganti", "ganti"):
+                    doc = msg.get("document")
+                    if not doc:
+                        tg_send(chat_id, "📤 Kirim file strategy_logic.py sebagai dokumen dengan caption /ganti")
+                        continue
+                    file_name = str(doc.get("file_name") or "")
+                    if not file_name.endswith(".py"):
+                        tg_send(chat_id, "❌ Strategy brain harus file .py")
+                        continue
+                    try:
+                        file_id = doc["file_id"]
+                        file_info = requests.get(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile",
+                            params={"file_id": file_id}, timeout=10
+                        ).json()
+                        file_path = file_info["result"]["file_path"]
+                        downloaded = requests.get(
+                            f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
+                            timeout=10
+                        )
+                        downloaded.raise_for_status()
+                        file_content = downloaded.text
+
+                        # Stage in a temporary module namespace. Never mutate the active brain first.
+                        import ast as _ast, tempfile, pathlib as _pathlib, importlib.util as _importlib_util
+                        try:
+                            _ast.parse(file_content, filename="strategy_logic.py")
+                            compile(file_content, "strategy_logic.py", "exec")
+                        except SyntaxError as exc:
+                            tg_send(chat_id, f"❌ Brain ditolak — syntax error:\n<code>{html.escape(str(exc)[:500])}</code>")
+                            continue
+
+                        stage_path = _pathlib.Path(tempfile.mkdtemp(prefix="brain-stage-") ) / "strategy_logic.py"
+                        stage_path.write_text(file_content, encoding="utf-8")
+                        spec = _importlib_util.spec_from_file_location("_strategy_candidate", stage_path)
+                        candidate = _importlib_util.module_from_spec(spec)
+                        spec.loader.exec_module(candidate)
+
+                        ok, detail = _validate_brain_contract(candidate)
+                        if not ok:
+                            tg_send(chat_id, f"❌ Brain ditolak — contract gagal:\n<code>{html.escape(detail[:500])}</code>")
+                            continue
+
+                        # Require the mandatory decision/management contract. Optional APIs may evolve freely.
+                        required = ("full_analyze", "manage_position")
+                        if any(not callable(getattr(candidate, name, None)) for name in required):
+                            tg_send(chat_id, "❌ Brain ditolak — contract mandatory tidak lengkap.")
+                            continue
+
+                        # Validate serialization-safe descriptor before committing.
+                        descriptor = {
+                            "brain_interface_version": getattr(candidate, "BRAIN_INTERFACE_VERSION", BRAIN_INTERFACE_VERSION),
+                            "module_name": "strategy_logic",
+                            "required": list(required),
+                        }
+                        json.dumps(descriptor, ensure_ascii=False, allow_nan=False)
+
+                        # Commit locally only after validation. GitHub commit follows successful local stage.
+                        local_path = Path(os.path.dirname(os.path.abspath(__file__))) / "strategy_logic.py"
+                        backup_path = local_path.with_suffix(".py.previous")
+                        previous = local_path.read_text(encoding="utf-8") if local_path.exists() else None
+                        if previous is not None:
+                            backup_path.write_text(previous, encoding="utf-8")
+                        local_path.write_text(file_content, encoding="utf-8")
+                        try:
+                            _commit_to_github(file_content, "strategy_logic.py", "Update strategy_logic via Telegram /ganti")
+                        except Exception:
+                            if previous is not None:
+                                local_path.write_text(previous, encoding="utf-8")
+                            else:
+                                try: local_path.unlink()
+                                except Exception: pass
+                            raise
+
+                        # Only now activate the candidate as the new brain; no partial function binding.
+                        import importlib, sys as _sys
+                        if "strategy_logic" in _sys.modules:
+                            del _sys.modules["strategy_logic"]
+                        import strategy_logic as new_brain
+                        ok2, detail2 = _validate_brain_contract(new_brain)
+                        if not ok2:
+                            # Restore previous local brain if possible; exchange state remains untouched.
+                            if previous is not None:
+                                local_path.write_text(previous, encoding="utf-8")
+                            raise RuntimeError(f"post-commit brain reload contract failed: {detail2}")
+                        globals()["_brain"] = new_brain
+                        globals()["_STRATEGY_LOAD_ERROR"] = None
+                        log.info("[BRAIN] strict hot-swap activated")
+                        tg_send(chat_id, "✅ <b>Brain baru aktif.</b> Contract, load, dan post-load validation berhasil. Tidak ada fallback fungsi lama.")
+                    except Exception as e:
+                        log.exception(f"[ganti] strict hot-swap gagal: {e}")
+                        tg_send(chat_id, f"❌ <b>Brain tidak diganti.</b>\n<code>{html.escape(str(e)[:500])}</code>")
                 elif text.startswith("/banned") or text.startswith("banned"):
                     parts = text.split()
                     if len(parts) > 1:
@@ -5700,41 +5679,54 @@ def bot_loop():
                     with low_conf_history_lock:
                         cleared_lc=len(low_conf_history); low_conf_history.clear()
                     tg_send(chat_id,f"✅ <b>Low-confidence history direset.</b> Event dihapus: <b>{cleared_lc}</b>. Current ban tidak disentuh.")
-                elif text.startswith("/resetbalance") or (not text.startswith("/") and text.startswith("resetbalance")):
-                    parts = text.split()
-                    confirm = len(parts) > 1 and parts[1].lower() in {"confirm", "yes", "ya"}
-                    if not REAL_TRADE_ENABLED:
+                elif text in ("/save", "save"):
+                    try:
+                        cid, local = _save_runtime_checkpoint(push_github=True)
+                        tg_send(chat_id, f"💾 <b>SAVE BERHASIL</b>\nCheckpoint: <code>{html.escape(cid)}</code>\nMemory/strategy tetap utuh.")
+                    except Exception as e:
+                        log.exception(f"[save] gagal: {e}")
+                        tg_send(chat_id, f"❌ <b>/save gagal</b>\n<code>{html.escape(str(e)[:300])}</code>")
+                elif text in ("/open", "open") or text.startswith("/open ") or text.startswith("open "):
+                    parts=text.split(maxsplit=2)
+                    if len(parts)==1:
+                        tg_send(chat_id, "⚠️ <b>/open akan mengganti state lokal yang kompatibel.</b>\nREAL position tetap mengikuti Binance.\nKonfirmasi: <code>/open confirm</code> atau rollback: <code>/open previous</code>")
+                    elif len(parts)==2 and parts[1].strip() in {"confirm","previous"}:
                         try:
-                            result = _reset_balance_anchor_simulation()
-                            tg_send(chat_id,
-                                f"✅ <b>Balance SIMULASI direset.</b>\n"
-                                f"Balance anchor baru: <b>${result['balance']:.4f}</b>\n"
-                                f"Ledger learning, strategy, policy, dan closed-trade history <b>tidak dihapus</b>.\n"
-                                f"Pakai <code>/resetstats</code> kalau memang ingin memulai research run baru.")
+                            STOP_NEW_ENTRIES=True
+                            cp=_load_runtime_checkpoint("previous" if parts[1].strip()=="previous" else None)
+                            cid=_restore_runtime_checkpoint(cp)
+                            STOP_NEW_ENTRIES=False
+                            tg_send(chat_id, f"✅ <b>OPEN BERHASIL</b>\nCheckpoint: <code>{html.escape(str(cid))}</code>\nREAL state direkonsiliasi ulang dengan Binance.")
                         except Exception as e:
-                            tg_send(chat_id, f"❌ <b>/resetbalance gagal.</b>\n<code>{str(e)[:250]}</code>")
+                            STOP_NEW_ENTRIES=False
+                            log.exception(f"[open] gagal: {e}")
+                            tg_send(chat_id, f"❌ <b>/open gagal</b>\n<code>{html.escape(str(e)[:300])}</code>")
                     else:
-                        if not confirm:
-                            with positions_lock:
-                                n_real = sum(1 for p in positions.values() if _position_is_real(p) and p.get("status") in ("active", "EMERGENCY"))
-                            tg_send(chat_id,
-                                "⚠️ <b>RESET BALANCE REAL</b>\n\n"
-                                "Perintah ini <b>TIDAK mengubah saldo, posisi, atau order Binance</b>.\n"
-                                "Bot hanya mengambil saldo Binance terbaru dan menjadikannya anchor statistik baru.\n\n"
-                                f"Posisi REAL aktif: <b>{n_real}</b>\n\n"
-                                "Untuk konfirmasi: <code>/resetbalance confirm</code>")
-                            continue
+                        tg_send(chat_id, "❌ Konfirmasi salah. Gunakan <code>/open confirm</code>.")
+                elif text in ("/resetbalance", "resetbalance"):
+                    if REAL_TRADE_ENABLED:
+                        tg_send(chat_id, "⚠️ <b>RESET REAL BALANCE STATISTICS</b>\nIni tidak mengubah saldo Binance, posisi, atau order.\nKonfirmasi: <code>/resetbalance confirm</code>")
+                    else:
+                        with stat_lock:
+                            stats["balance"] = STARTING_BALANCE
+                        tg_send(chat_id, "✅ <b>Balance simulasi di-reset ke $10.00</b>\nStats, learning, strategy, dan trade evidence tetap utuh.")
+                elif text in ("/resetbalance confirm", "resetbalance confirm"):
+                    if not REAL_TRADE_ENABLED:
+                        with stat_lock:
+                            stats["balance"] = STARTING_BALANCE
+                        tg_send(chat_id, "✅ <b>Balance simulasi di-reset ke $10.00</b>\nStats dan learning tetap utuh.")
+                    else:
                         try:
-                            result = _reset_balance_anchor_real()
-                            tg_send(chat_id,
-                                f"✅ <b>Balance REAL disinkronkan ulang.</b>\n"
-                                f"Saldo Binance: <b>${result['balance']:.4f}</b>\n"
-                                f"Available: <b>${result['available']:.4f}</b>\n"
-                                f"Posisi REAL tetap aktif: <b>{result['open_real_positions']}</b>\n"
-                                "Order/posisi Binance <b>tidak disentuh</b>.\n"
-                                "Learning, strategy, policy, dan closed-trade history <b>tetap dipertahankan</b>.")
+                            with _binance_critical_context():
+                                _, total = get_real_balance()
+                            if total is None: raise RuntimeError("saldo Binance tidak tersedia")
+                            with stat_lock:
+                                stats["balance"] = float(total)
+                            with real_balance_lock:
+                                real_balance_snapshot=float(total); real_balance_snapshot_at=time.time()
+                            tg_send(chat_id, f"✅ <b>Real statistics anchor diperbarui</b>\nSaldo Binance terbaru: <b>${float(total):.4f}</b>\nTidak ada order/posisi yang diubah. Learning tetap utuh.")
                         except Exception as e:
-                            tg_send(chat_id, f"❌ <b>/resetbalance REAL gagal.</b>\n<code>{str(e)[:300]}</code>\nSaldo Binance dan posisi tidak diubah oleh perintah ini.")
+                            tg_send(chat_id, f"❌ <b>/resetbalance gagal</b>\n<code>{html.escape(str(e)[:300])}</code>")
                 elif text in ("/resetstats","resetstats"):
                     global research_run_id, trade_sequence, trail_event_sequence
                     with stat_lock:
@@ -5877,8 +5869,8 @@ def bot_loop():
                                 return
                             with positions_lock:
                                 if sym in positions:
-                                    positions[sym]["status"] = "active"
                                     positions[sym]["quantity"] = live_qty
+                                    positions[sym]["lifecycle"] = "RECONCILING"
                                     positions[sym]["exchange_synced_at"] = time.time()
                                     positions[sym]["emergency_reason"] = None
                             # If protection is missing/unknown, queue/restore it.
@@ -5900,10 +5892,7 @@ def bot_loop():
                             _clear_pending_cleanup(sym)
                             tg_send(cid, f"✅ <b>{sym} RECONCILED</b>\nPosition Binance masih terbuka: <code>{live_qty:.8g}</code>\nTP/SL terpasang ulang dan state kembali ACTIVE.")
                         except Exception as e:
-                            with positions_lock:
-                                if sym in positions:
-                                    positions[sym]["status"] = "EMERGENCY"
-                                    positions[sym]["emergency_error"] = str(e)[:300]
+                            _force_position_emergency(sym, str(e)[:300])
                             _queue_pending_cleanup(sym, "/ok gagal — retry manual", e)
                             tg_send(cid, f"🚨 <b>{sym} RECONCILE GAGAL</b>\n<code>{str(e)[:350]}</code>\nPosisi tetap dipertahankan di /trade. Coba <code>/ok {sym}</code> lagi setelah Binance/API normal.")
                     threading.Thread(target=_run_ok, args=(chat_id, target), daemon=True).start()
@@ -6132,41 +6121,59 @@ def bot_loop():
             poll_backoff = min(max(poll_backoff * 2, 2), TELEGRAM_ERROR_BACKOFF_MAX)
 
 
-if __name__=="__main__":
-    # Flask dijalankan di thread sendiri PALING AWAL supaya port langsung
-    # bind & terdeteksi Render, tidak menunggu inisialisasi bot/WS selesai.
-    threading.Thread(target=run_flask, daemon=True).start()
-    ws_feed.start()
-    threading.Thread(target=_price_cache_loop, daemon=True).start()
-    threading.Thread(target=_binance_recovery_loop, daemon=True).start()
-    threading.Thread(target=_render_keepalive_loop, daemon=True).start()
-    threading.Thread(target=bot_loop, daemon=True).start()
-    # Body is now alive; research/learning can start independently in the background.
+
+# Final runtime authority alias. All mutation helpers resolve through this symbol.
+def _binance_signed(method, path, params=None, critical=False):
+    method_u=str(method).upper()
+    if method_u in ExecutionController.MUTATIONS:
+        return _execution_controller.submit_signed(method_u,path,params=params,critical=critical)
+    return _binance_signed_impl(method_u,path,params=params,critical=critical)
+
+
+def _handle_shutdown(signum, frame):
     try:
-        if callable(globals().get("adaptive_agent_start")):
-            adaptive_agent_start()
-    except Exception as _brain_boot_exc:
-        log.warning(f"[ADAPTIVE] brain bootstrap gagal; execution tetap hidup: {_brain_boot_exc}")
+        _graceful_shutdown(f"signal={signum}")
+    except Exception as exc:
+        log.critical(f"[SHUTDOWN] cleanup gagal: {exc}")
+        SHUTDOWN_EVENT.set()
 
-    log.info(f"[ENGINE] {MAIN_ENGINE_VERSION} starting | heavy research workers capped at 5")
+if hasattr(signal, "SIGTERM"):
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+if hasattr(signal, "SIGINT"):
+    signal.signal(signal.SIGINT, _handle_shutdown)
+
+
+def start_runtime():
+    global STOP_NEW_ENTRIES
+    _set_runtime_state("BOOTING", "runtime start")
+    STOP_NEW_ENTRIES=True
+    health=_bootstrap_validate_and_reconcile()
+    # Start non-entry infrastructure only after deterministic preflight.
+    try:
+        ws_feed.start(); _set_component_health("binance_websocket","HEALTHY","websocket started")
+    except Exception as exc:
+        _set_component_health("binance_websocket","DEGRADED",str(exc))
+    threading.Thread(target=_price_cache_loop,name="price-cache",daemon=True).start()
+    threading.Thread(target=_binance_recovery_loop,name="binance-recovery",daemon=True).start()
+    threading.Thread(target=_render_keepalive_loop,name="render-health",daemon=True).start()
+    threading.Thread(target=run_flask,name="http",daemon=True).start()
+    threading.Thread(target=bot_loop,name="telegram-runtime",daemon=True).start()
+    _set_component_health("scanner","HEALTHY","scanner initialized")
+    if _brain is None or not _validate_brain_contract(_brain)[0]:
+        STOP_NEW_ENTRIES=True
+        if RUNTIME_STATE=="BOOTING": _set_runtime_state("DEGRADED","brain contract unavailable")
+    elif RUNTIME_STATE=="BOOTING":
+        STOP_NEW_ENTRIES=False
+        _set_runtime_state("READY","deterministic startup checks completed")
+    log.info(f"[ENGINE] {EXECUTION_ENGINE_VERSION} run={RUN_ID} health={health['overall']}")
     if _STRATEGY_LOAD_ERROR and ALLOWED_USER_ID:
-        tg_send(ALLOWED_USER_ID,
-            f"🚨 <b>strategy_logic.py BERMASALAH</b>\n\n"
-            f"{_STRATEGY_LOAD_ERROR}\n\n"
-            f"Bot jalan pakai fallback AMAN (tidak akan cari/entry sinyal baru)\n"
-            f"sampai file yang benar di-upload lewat /ganti.")
+        tg_send(ALLOWED_USER_ID,f"🚨 <b>strategy_logic.py bermasalah</b>\n<code>{html.escape(_STRATEGY_LOAD_ERROR[:500])}</code>\nNew entry ditahan.")
 
-    if REAL_TRADE_ENABLED and ALLOWED_USER_ID:
-        ip = get_public_ip()
-        tg_send(ALLOWED_USER_ID,
-            f"🔴 <b>REAL TRADE MODE</b>\n\n"
-            f"IP Render saat ini: <code>{ip}</code>\n\n"
-            f"Whitelist IP ini di Binance API Management dulu kalau belum,\n"
-            f"lalu kirim /auto untuk mulai. Bot TIDAK akan mulai cari sinyal\n"
-            f"sampai kamu kirim /auto secara manual.")
-        threading.Thread(target=autostop_loop, args=(ALLOWED_USER_ID,), daemon=True).start()
 
-    # Semua thread di atas daemon=True — main thread harus tetap hidup,
-    # kalau tidak proses langsung exit begitu baris ini selesai.
-    while True:
-        time.sleep(3600)
+if __name__ == "__main__":
+    start_runtime()
+    while not SHUTDOWN_EVENT.wait(15):
+        try: _circuit_health_tick()
+        except Exception: pass
+        if RUNTIME_STATE=="STOPPING": break
+    if RUNTIME_STATE!="STOPPING": _graceful_shutdown("main loop exit")
