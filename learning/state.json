@@ -1,11 +1,11 @@
 {
-  "version": "1.0",
-  "saved_at": 1788281933.423319,
-  "active_strategy": "",
+  "version": "2.0",
+  "saved_at": 1788289171.9724684,
+  "active_strategy": "/opt/render/project/src/strategy.py",
   "last_full": {
-    "started_at": 1788281232.3330896,
-    "finished_at": 1788281933.4219105,
-    "duration_s": 701.0888211727142,
+    "started_at": 1788288446.6633234,
+    "finished_at": 1788289171.9609423,
+    "duration_s": 725.2976200580597,
     "baseline": {
       "sample": 0,
       "wins": 0,
@@ -18,33 +18,33 @@
       "frequency_per_day": 0.0
     },
     "global_context": {
-      "timestamp": 1788281916840,
+      "timestamp": 1788289153374,
       "symbols": 461,
-      "bullish": 171,
-      "bearish": 290,
+      "bullish": 128,
+      "bearish": 333,
       "neutral": 0,
-      "breadth": 0.37093275488069416,
-      "alt_breadth": 0.3717391304347826,
+      "breadth": 0.27765726681127983,
+      "alt_breadth": 0.2782608695652174,
       "breadth_delta": 0.0,
-      "median_rvol": 0.23989923011554606,
-      "median_atr_pct": 0.0061506324706974945,
-      "median_efficiency_4h": 0.1515151515151505,
-      "expansion_share": 0.03253796095444685,
-      "transition_share": 0.3557483731019523,
+      "median_rvol": 0.6662422026428851,
+      "median_atr_pct": 0.006968641114982598,
+      "median_efficiency_4h": 0.3409090909090958,
+      "expansion_share": 0.42733188720173537,
+      "transition_share": 0.5075921908893709,
       "market_label": "BROAD_BEARISH",
-      "regime": "RANGE",
+      "regime": "TRANSITION",
       "btc": {
         "symbol": "BTCUSDT",
-        "timestamp": 1788281100000,
-        "price_change_1h": -0.004118280826429954,
-        "price_change_4h": -0.005278137990921361,
-        "directional_efficiency_1h": 0.5150152561426026,
-        "directional_efficiency_4h": 0.1784862285838213,
-        "atr_pct": 0.00387751049439522,
-        "atr_percentile": 0.8166915052160953,
-        "relative_volume": 0.10641056152835283,
-        "range_expansion": 0.6097456538494507,
-        "regime": "RANGE",
+        "timestamp": 1788288300000,
+        "price_change_1h": -0.006943958898185554,
+        "price_change_4h": -0.018411746863437384,
+        "directional_efficiency_1h": 0.628206629963693,
+        "directional_efficiency_4h": 0.583421202043971,
+        "atr_pct": 0.0039088307668408715,
+        "atr_percentile": 0.8241430700447094,
+        "relative_volume": 1.4416376000962403,
+        "range_expansion": 1.1490366104759129,
+        "regime": "TRANSITION",
         "directional_bias": "BEARISH",
         "structure_label": "LH_LL",
         "d1_bias": "BEARISH",
@@ -58,59 +58,43 @@
         "reason": "Need 50, have 0"
       },
       {
-        "title": "FREQUENCY_INCREASE",
-        "change_type": "frequency",
-        "feature": "frequency_per_day",
+        "title": "Reduce Stop Loss to 0.5%",
+        "change_type": "modify_stop",
+        "feature": "stop_loss_pct",
+        "threshold": 0.5,
+        "reason": "Lower risk per trade while maintaining a 4:1 risk‑reward ratio with a 2% take profit.",
+        "source": "ollama"
+      },
+      {
+        "title": "Increase Take Profit to 2%",
+        "change_type": "modify_take_profit",
+        "feature": "take_profit_pct",
+        "threshold": 2.0,
+        "reason": "Achieve a 4:1 risk‑reward ratio with the reduced stop loss, keeping within the allowed RR limits.",
+        "source": "ollama"
+      },
+      {
+        "title": "Add Volume Filter (Relative Volume > 1.2)",
+        "change_type": "add_filter",
+        "feature": "relative_volume_min",
+        "threshold": 1.2,
+        "reason": "Exclude low‑volume trades that may be more prone to slippage and false signals.",
+        "source": "ollama"
+      },
+      {
+        "title": "Add Time Filter (Start Trading After 09:30 UTC)",
+        "change_type": "add_time_filter",
+        "feature": "trade_start_time",
+        "threshold": "09:30",
+        "reason": "Avoid early‑session volatility and improve execution quality.",
+        "source": "ollama"
+      },
+      {
+        "title": "Add Trend Filter (4‑Hour MA Slope > 0.1%)",
+        "change_type": "add_filter",
+        "feature": "ma_slope_min",
         "threshold": 0.1,
-        "reason": "Test whether a 10% increase in trade frequency improves net PnL while keeping drawdown within the 20% drop limit.",
-        "source": "ollama"
-      },
-      {
-        "title": "DIRECTIONAL_BIAS_FILTER",
-        "change_type": "entry_filter",
-        "feature": "btc_directional_bias",
-        "threshold": "BEARISH",
-        "reason": "Exclude trades during bearish BTC bias to reduce exposure in a broad bearish market.",
-        "source": "ollama"
-      },
-      {
-        "title": "VOLATILITY_FILTER",
-        "change_type": "entry_filter",
-        "feature": "median_atr_pct",
-        "threshold": 0.006,
-        "reason": "Avoid high volatility periods that may increase risk by only trading when ATR% is below 0.6%.",
-        "source": "ollama"
-      },
-      {
-        "title": "POSITION_SIZING_0.5",
-        "change_type": "position_sizing",
-        "feature": "risk_per_trade",
-        "threshold": 0.005,
-        "reason": "Maintain conservative risk exposure by risking 0.5% of equity per trade.",
-        "source": "ollama"
-      },
-      {
-        "title": "TRAILING_STOP_1ATR",
-        "change_type": "exit_strategy",
-        "feature": "trailing_stop_atr",
-        "threshold": 1,
-        "reason": "Lock in profits while allowing trend continuation by using a trailing stop set at 1 ATR.",
-        "source": "ollama"
-      },
-      {
-        "title": "RR_2_1",
-        "change_type": "risk_reward",
-        "feature": "rr_ratio",
-        "threshold": 2,
-        "reason": "Ensure a favorable expectancy by targeting a 2:1 risk‑reward ratio.",
-        "source": "ollama"
-      },
-      {
-        "title": "BREADTH_FILTER",
-        "change_type": "entry_filter",
-        "feature": "breadth",
-        "threshold": 0.35,
-        "reason": "Trade only when market breadth exceeds 0.35 to capture more bullish market conditions.",
+        "reason": "Ensure trades are taken in a clear trend, reducing exposure to sideways markets.",
         "source": "ollama"
       }
     ],
@@ -161,293 +145,199 @@
       },
       {
         "hypothesis": {
-          "title": "FREQUENCY_INCREASE",
-          "change_type": "frequency",
-          "feature": "frequency_per_day",
+          "title": "Reduce Stop Loss to 0.5%",
+          "change_type": "modify_stop",
+          "feature": "stop_loss_pct",
+          "threshold": 0.5,
+          "reason": "Lower risk per trade while maintaining a 4:1 risk‑reward ratio with a 2% take profit.",
+          "source": "ollama"
+        },
+        "baseline": {
+          "sample": 0,
+          "wins": 0,
+          "losses": 0,
+          "win_rate": 0.0,
+          "expectancy_r": 0.0,
+          "net_r": 0,
+          "net_pnl": 0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "candidate": {
+          "sample": 0,
+          "expectancy_r": 0.0,
+          "win_rate": 0.0,
+          "net_r": 0.0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "sample_ok": false,
+        "improvement_pct": 0.0,
+        "frequency_drop_pct": 0.0,
+        "drawdown_worsen_pct": 0.0,
+        "walk_forward": {
+          "pass": false,
+          "folds": [],
+          "reason": "insufficient chronological sample"
+        },
+        "out_of_sample": {
+          "pass": false,
+          "reason": "insufficient OOS sample"
+        },
+        "robustness": {
+          "pass": false,
+          "reason": "candidate selects zero rows"
+        },
+        "decision": "REJECT"
+      },
+      {
+        "hypothesis": {
+          "title": "Increase Take Profit to 2%",
+          "change_type": "modify_take_profit",
+          "feature": "take_profit_pct",
+          "threshold": 2.0,
+          "reason": "Achieve a 4:1 risk‑reward ratio with the reduced stop loss, keeping within the allowed RR limits.",
+          "source": "ollama"
+        },
+        "baseline": {
+          "sample": 0,
+          "wins": 0,
+          "losses": 0,
+          "win_rate": 0.0,
+          "expectancy_r": 0.0,
+          "net_r": 0,
+          "net_pnl": 0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "candidate": {
+          "sample": 0,
+          "expectancy_r": 0.0,
+          "win_rate": 0.0,
+          "net_r": 0.0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "sample_ok": false,
+        "improvement_pct": 0.0,
+        "frequency_drop_pct": 0.0,
+        "drawdown_worsen_pct": 0.0,
+        "walk_forward": {
+          "pass": false,
+          "folds": [],
+          "reason": "insufficient chronological sample"
+        },
+        "out_of_sample": {
+          "pass": false,
+          "reason": "insufficient OOS sample"
+        },
+        "robustness": {
+          "pass": false,
+          "reason": "candidate selects zero rows"
+        },
+        "decision": "REJECT"
+      },
+      {
+        "hypothesis": {
+          "title": "Add Volume Filter (Relative Volume > 1.2)",
+          "change_type": "add_filter",
+          "feature": "relative_volume_min",
+          "threshold": 1.2,
+          "reason": "Exclude low‑volume trades that may be more prone to slippage and false signals.",
+          "source": "ollama"
+        },
+        "baseline": {
+          "sample": 0,
+          "wins": 0,
+          "losses": 0,
+          "win_rate": 0.0,
+          "expectancy_r": 0.0,
+          "net_r": 0,
+          "net_pnl": 0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "candidate": {
+          "sample": 0,
+          "expectancy_r": 0.0,
+          "win_rate": 0.0,
+          "net_r": 0.0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "sample_ok": false,
+        "improvement_pct": 0.0,
+        "frequency_drop_pct": 0.0,
+        "drawdown_worsen_pct": 0.0,
+        "walk_forward": {
+          "pass": false,
+          "folds": [],
+          "reason": "insufficient chronological sample"
+        },
+        "out_of_sample": {
+          "pass": false,
+          "reason": "insufficient OOS sample"
+        },
+        "robustness": {
+          "pass": false,
+          "reason": "candidate selects zero rows"
+        },
+        "decision": "REJECT"
+      },
+      {
+        "hypothesis": {
+          "title": "Add Time Filter (Start Trading After 09:30 UTC)",
+          "change_type": "add_time_filter",
+          "feature": "trade_start_time",
+          "threshold": "09:30",
+          "reason": "Avoid early‑session volatility and improve execution quality.",
+          "source": "ollama"
+        },
+        "baseline": {
+          "sample": 0,
+          "wins": 0,
+          "losses": 0,
+          "win_rate": 0.0,
+          "expectancy_r": 0.0,
+          "net_r": 0,
+          "net_pnl": 0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "candidate": {
+          "sample": 0,
+          "expectancy_r": 0.0,
+          "win_rate": 0.0,
+          "net_r": 0.0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "sample_ok": false,
+        "improvement_pct": 0.0,
+        "frequency_drop_pct": 0.0,
+        "drawdown_worsen_pct": 0.0,
+        "walk_forward": {
+          "pass": false,
+          "folds": [],
+          "reason": "insufficient chronological sample"
+        },
+        "out_of_sample": {
+          "pass": false,
+          "reason": "insufficient OOS sample"
+        },
+        "robustness": {
+          "pass": false,
+          "reason": "candidate selects zero rows"
+        },
+        "decision": "REJECT"
+      },
+      {
+        "hypothesis": {
+          "title": "Add Trend Filter (4‑Hour MA Slope > 0.1%)",
+          "change_type": "add_filter",
+          "feature": "ma_slope_min",
           "threshold": 0.1,
-          "reason": "Test whether a 10% increase in trade frequency improves net PnL while keeping drawdown within the 20% drop limit.",
-          "source": "ollama"
-        },
-        "baseline": {
-          "sample": 0,
-          "wins": 0,
-          "losses": 0,
-          "win_rate": 0.0,
-          "expectancy_r": 0.0,
-          "net_r": 0,
-          "net_pnl": 0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "candidate": {
-          "sample": 0,
-          "expectancy_r": 0.0,
-          "win_rate": 0.0,
-          "net_r": 0.0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "sample_ok": false,
-        "improvement_pct": 0.0,
-        "frequency_drop_pct": 0.0,
-        "drawdown_worsen_pct": 0.0,
-        "walk_forward": {
-          "pass": false,
-          "folds": [],
-          "reason": "insufficient chronological sample"
-        },
-        "out_of_sample": {
-          "pass": false,
-          "reason": "insufficient OOS sample"
-        },
-        "robustness": {
-          "pass": false,
-          "reason": "candidate selects zero rows"
-        },
-        "decision": "REJECT"
-      },
-      {
-        "hypothesis": {
-          "title": "DIRECTIONAL_BIAS_FILTER",
-          "change_type": "entry_filter",
-          "feature": "btc_directional_bias",
-          "threshold": "BEARISH",
-          "reason": "Exclude trades during bearish BTC bias to reduce exposure in a broad bearish market.",
-          "source": "ollama"
-        },
-        "baseline": {
-          "sample": 0,
-          "wins": 0,
-          "losses": 0,
-          "win_rate": 0.0,
-          "expectancy_r": 0.0,
-          "net_r": 0,
-          "net_pnl": 0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "candidate": {
-          "sample": 0,
-          "expectancy_r": 0.0,
-          "win_rate": 0.0,
-          "net_r": 0.0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "sample_ok": false,
-        "improvement_pct": 0.0,
-        "frequency_drop_pct": 0.0,
-        "drawdown_worsen_pct": 0.0,
-        "walk_forward": {
-          "pass": false,
-          "folds": [],
-          "reason": "insufficient chronological sample"
-        },
-        "out_of_sample": {
-          "pass": false,
-          "reason": "insufficient OOS sample"
-        },
-        "robustness": {
-          "pass": false,
-          "reason": "candidate selects zero rows"
-        },
-        "decision": "REJECT"
-      },
-      {
-        "hypothesis": {
-          "title": "VOLATILITY_FILTER",
-          "change_type": "entry_filter",
-          "feature": "median_atr_pct",
-          "threshold": 0.006,
-          "reason": "Avoid high volatility periods that may increase risk by only trading when ATR% is below 0.6%.",
-          "source": "ollama"
-        },
-        "baseline": {
-          "sample": 0,
-          "wins": 0,
-          "losses": 0,
-          "win_rate": 0.0,
-          "expectancy_r": 0.0,
-          "net_r": 0,
-          "net_pnl": 0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "candidate": {
-          "sample": 0,
-          "expectancy_r": 0.0,
-          "win_rate": 0.0,
-          "net_r": 0.0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "sample_ok": false,
-        "improvement_pct": 0.0,
-        "frequency_drop_pct": 0.0,
-        "drawdown_worsen_pct": 0.0,
-        "walk_forward": {
-          "pass": false,
-          "folds": [],
-          "reason": "insufficient chronological sample"
-        },
-        "out_of_sample": {
-          "pass": false,
-          "reason": "insufficient OOS sample"
-        },
-        "robustness": {
-          "pass": false,
-          "reason": "candidate selects zero rows"
-        },
-        "decision": "REJECT"
-      },
-      {
-        "hypothesis": {
-          "title": "POSITION_SIZING_0.5",
-          "change_type": "position_sizing",
-          "feature": "risk_per_trade",
-          "threshold": 0.005,
-          "reason": "Maintain conservative risk exposure by risking 0.5% of equity per trade.",
-          "source": "ollama"
-        },
-        "baseline": {
-          "sample": 0,
-          "wins": 0,
-          "losses": 0,
-          "win_rate": 0.0,
-          "expectancy_r": 0.0,
-          "net_r": 0,
-          "net_pnl": 0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "candidate": {
-          "sample": 0,
-          "expectancy_r": 0.0,
-          "win_rate": 0.0,
-          "net_r": 0.0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "sample_ok": false,
-        "improvement_pct": 0.0,
-        "frequency_drop_pct": 0.0,
-        "drawdown_worsen_pct": 0.0,
-        "walk_forward": {
-          "pass": false,
-          "folds": [],
-          "reason": "insufficient chronological sample"
-        },
-        "out_of_sample": {
-          "pass": false,
-          "reason": "insufficient OOS sample"
-        },
-        "robustness": {
-          "pass": false,
-          "reason": "candidate selects zero rows"
-        },
-        "decision": "REJECT"
-      },
-      {
-        "hypothesis": {
-          "title": "TRAILING_STOP_1ATR",
-          "change_type": "exit_strategy",
-          "feature": "trailing_stop_atr",
-          "threshold": 1,
-          "reason": "Lock in profits while allowing trend continuation by using a trailing stop set at 1 ATR.",
-          "source": "ollama"
-        },
-        "baseline": {
-          "sample": 0,
-          "wins": 0,
-          "losses": 0,
-          "win_rate": 0.0,
-          "expectancy_r": 0.0,
-          "net_r": 0,
-          "net_pnl": 0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "candidate": {
-          "sample": 0,
-          "expectancy_r": 0.0,
-          "win_rate": 0.0,
-          "net_r": 0.0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "sample_ok": false,
-        "improvement_pct": 0.0,
-        "frequency_drop_pct": 0.0,
-        "drawdown_worsen_pct": 0.0,
-        "walk_forward": {
-          "pass": false,
-          "folds": [],
-          "reason": "insufficient chronological sample"
-        },
-        "out_of_sample": {
-          "pass": false,
-          "reason": "insufficient OOS sample"
-        },
-        "robustness": {
-          "pass": false,
-          "reason": "candidate selects zero rows"
-        },
-        "decision": "REJECT"
-      },
-      {
-        "hypothesis": {
-          "title": "RR_2_1",
-          "change_type": "risk_reward",
-          "feature": "rr_ratio",
-          "threshold": 2,
-          "reason": "Ensure a favorable expectancy by targeting a 2:1 risk‑reward ratio.",
-          "source": "ollama"
-        },
-        "baseline": {
-          "sample": 0,
-          "wins": 0,
-          "losses": 0,
-          "win_rate": 0.0,
-          "expectancy_r": 0.0,
-          "net_r": 0,
-          "net_pnl": 0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "candidate": {
-          "sample": 0,
-          "expectancy_r": 0.0,
-          "win_rate": 0.0,
-          "net_r": 0.0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "sample_ok": false,
-        "improvement_pct": 0.0,
-        "frequency_drop_pct": 0.0,
-        "drawdown_worsen_pct": 0.0,
-        "walk_forward": {
-          "pass": false,
-          "folds": [],
-          "reason": "insufficient chronological sample"
-        },
-        "out_of_sample": {
-          "pass": false,
-          "reason": "insufficient OOS sample"
-        },
-        "robustness": {
-          "pass": false,
-          "reason": "candidate selects zero rows"
-        },
-        "decision": "REJECT"
-      },
-      {
-        "hypothesis": {
-          "title": "BREADTH_FILTER",
-          "change_type": "entry_filter",
-          "feature": "breadth",
-          "threshold": 0.35,
-          "reason": "Trade only when market breadth exceeds 0.35 to capture more bullish market conditions.",
+          "reason": "Ensure trades are taken in a clear trend, reducing exposure to sideways markets.",
           "source": "ollama"
         },
         "baseline": {
@@ -495,33 +385,33 @@
     "decision": "NO_CHANGE"
   },
   "global_context": {
-    "timestamp": 1788281916840,
+    "timestamp": 1788289153374,
     "symbols": 461,
-    "bullish": 171,
-    "bearish": 290,
+    "bullish": 128,
+    "bearish": 333,
     "neutral": 0,
-    "breadth": 0.37093275488069416,
-    "alt_breadth": 0.3717391304347826,
+    "breadth": 0.27765726681127983,
+    "alt_breadth": 0.2782608695652174,
     "breadth_delta": 0.0,
-    "median_rvol": 0.23989923011554606,
-    "median_atr_pct": 0.0061506324706974945,
-    "median_efficiency_4h": 0.1515151515151505,
-    "expansion_share": 0.03253796095444685,
-    "transition_share": 0.3557483731019523,
+    "median_rvol": 0.6662422026428851,
+    "median_atr_pct": 0.006968641114982598,
+    "median_efficiency_4h": 0.3409090909090958,
+    "expansion_share": 0.42733188720173537,
+    "transition_share": 0.5075921908893709,
     "market_label": "BROAD_BEARISH",
-    "regime": "RANGE",
+    "regime": "TRANSITION",
     "btc": {
       "symbol": "BTCUSDT",
-      "timestamp": 1788281100000,
-      "price_change_1h": -0.004118280826429954,
-      "price_change_4h": -0.005278137990921361,
-      "directional_efficiency_1h": 0.5150152561426026,
-      "directional_efficiency_4h": 0.1784862285838213,
-      "atr_pct": 0.00387751049439522,
-      "atr_percentile": 0.8166915052160953,
-      "relative_volume": 0.10641056152835283,
-      "range_expansion": 0.6097456538494507,
-      "regime": "RANGE",
+      "timestamp": 1788288300000,
+      "price_change_1h": -0.006943958898185554,
+      "price_change_4h": -0.018411746863437384,
+      "directional_efficiency_1h": 0.628206629963693,
+      "directional_efficiency_4h": 0.583421202043971,
+      "atr_pct": 0.0039088307668408715,
+      "atr_percentile": 0.8241430700447094,
+      "relative_volume": 1.4416376000962403,
+      "range_expansion": 1.1490366104759129,
+      "regime": "TRANSITION",
       "directional_bias": "BEARISH",
       "structure_label": "LH_LL",
       "d1_bias": "BEARISH",
