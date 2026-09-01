@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-SMCAutoTrade learn_v1.py
+SMCAutoTrade learn_v2.py
 
 Research / learning brain.
 
@@ -36,13 +36,14 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("learn")
 
-VERSION = "1.0"
+VERSION = "2.0"
 BASE_DIR = Path(__file__).resolve().parent
 LEARNING_DIR = Path(os.getenv("LEARNING_DIR", str(BASE_DIR / "learning"))).resolve()
 DB_FILE = Path(os.getenv("LEARNING_DB", str(LEARNING_DIR / "brain.sqlite3"))).resolve()
@@ -67,6 +68,7 @@ MIN_IMPROVEMENT_PCT = max(0.0, float(os.getenv("LEARNING_MIN_IMPROVEMENT_PCT", "
 MAX_FREQUENCY_DROP_PCT = max(0.0, float(os.getenv("LEARNING_MAX_FREQUENCY_DROP_PCT", "20.0")))
 MAX_DRAWDOWN_WORSEN_PCT = max(0.0, float(os.getenv("LEARNING_MAX_DRAWDOWN_WORSEN_PCT", "20.0")))
 CHECKPOINT_SECONDS = max(60, int(os.getenv("LEARNING_CHECKPOINT_SECONDS", "900")))
+MAX_WORKERS = max(1, min(5, int(os.getenv("LEARNING_MAX_WORKERS", "5"))))
 
 API: Any = None
 CONTEXT: dict[str, Any] = {}
@@ -74,6 +76,7 @@ STRATEGY_MODULE: Any = None
 STRATEGY_PATH: Path | None = None
 LOCK = threading.RLock()
 FULL_RUNNING = False
+FULL_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="learn-worker")
 LAST_FULL_RESULT: dict[str, Any] = {}
 LAST_CHECKPOINT = 0.0
 GLOBAL_CONTEXT: dict[str, Any] = {}
@@ -1050,7 +1053,7 @@ def initialize(api: Any, context: dict[str, Any]) -> None:
     GLOBAL_CONTEXT.update(state.get("global_context") or {})
     _ensure_dirs()
     _load_constitution()
-    log.info("[LEARN V1] initialized | db=%s | ollama=%s | github_push=%s", DB_FILE, OLLAMA_MODEL, GITHUB_PUSH_ENABLED)
+    log.info("[LEARN V2] initialized | db=%s | ollama=%s | github_push=%s", DB_FILE, OLLAMA_MODEL, GITHUB_PUSH_ENABLED)
 
 
 def on_strategy_loaded(module: Any, path: str | Path) -> None:
@@ -1115,7 +1118,7 @@ def full_cycle_background() -> str:
         if FULL_RUNNING:
             return "ℹ️ /full sedang berjalan."
         FULL_RUNNING = True
-    threading.Thread(target=_full_worker, name="learn-full", daemon=True).start()
+    FULL_EXECUTOR.submit(_full_worker)
     return "🧠 FULL LEARNING STARTED\nResearch berjalan di background. Lihat terminal untuk progress; gunakan /learn untuk status."
 
 
@@ -1237,6 +1240,15 @@ def handle_command(text: str) -> str | None:
             return "📭 Belum ada /full report."
         return json.dumps(LAST_FULL_RESULT, ensure_ascii=False)[:3900]
     return None
+
+
+def shutdown() -> None:
+    global FULL_RUNNING
+    FULL_RUNNING = False
+    try:
+        _save_state()
+    except Exception:
+        log.exception("[LEARN] shutdown save failed")
 
 
 def get_global_context() -> dict[str, Any]:
