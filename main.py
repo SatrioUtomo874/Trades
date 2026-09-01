@@ -52,7 +52,8 @@ TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
 GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
 GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
-START_FILE = Path(os.getenv("START_FILE", "start.py")).resolve()
+BASE_DIR = Path(__file__).resolve().parent
+START_FILE = Path(os.getenv("START_FILE", str(BASE_DIR / "start.py"))).resolve()
 PORT = int(os.getenv("PORT", "10000"))
 TG_POLL_TIMEOUT = max(5, int(os.getenv("TG_POLL_TIMEOUT", "30")))
 TG_ERROR_BACKOFF_MAX = max(10, int(os.getenv("TG_ERROR_BACKOFF_MAX", "30")))
@@ -222,9 +223,52 @@ def start_is_running() -> bool:
         return _START_RUNNING and _START_MODULE is not None
 
 
+def _sync_start_file_from_github() -> bool:
+    """Download START_FILE from GitHub when it is missing locally."""
+    if not GITHUB_TOKEN or not REPO_NAME:
+        return False
+
+    path = validate_github_path(START_FILE.name)
+    encoded = "/".join(quote(part, safe="") for part in path.split("/"))
+    response = requests.get(
+        f"https://api.github.com/repos/{REPO_NAME}/contents/{encoded}",
+        headers=_github_headers(),
+        params={"ref": GITHUB_BRANCH},
+        timeout=30,
+    )
+    if response.status_code == 404:
+        return False
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"GitHub GET start.py HTTP {response.status_code}: {response.text[:600]}"
+        )
+
+    body = response.json()
+    encoded_content = body.get("content")
+    if not encoded_content:
+        raise RuntimeError("GitHub tidak mengembalikan content untuk start.py.")
+
+    content = base64.b64decode(encoded_content)
+    START_FILE.parent.mkdir(parents=True, exist_ok=True)
+    START_FILE.write_bytes(content)
+    log.info("[START SYNC] %s diambil dari GitHub -> %s", START_FILE.name, START_FILE)
+    return True
+
+
+def ensure_start_file() -> None:
+    """Ensure start.py exists locally; fallback to GitHub when needed."""
+    if START_FILE.exists():
+        return
+    if _sync_start_file_from_github():
+        return
+    raise FileNotFoundError(
+        f"{START_FILE.name} tidak ditemukan di {START_FILE.parent} "
+        "dan tidak tersedia dari GitHub. Pastikan file ada di repo atau set START_FILE yang benar."
+    )
+
+
 def _load_start_module() -> ModuleType:
-    if not START_FILE.exists():
-        raise FileNotFoundError(f"{START_FILE.name} tidak ditemukan di {START_FILE.parent}")
+    ensure_start_file()
 
     source = START_FILE.read_text(encoding="utf-8")
     compile(source, str(START_FILE), "exec")
@@ -444,6 +488,14 @@ def handle_ganti(message: dict[str, Any]) -> str:
         path = validate_github_path(requested_path)
         content = tg_get_file_bytes(str(document["file_id"]))
         commit = github_replace(path, content)
+
+        # Keep the running Render process in sync immediately. This is important
+        # because /try loads from the local filesystem, while /ganti writes to GitHub.
+        if path == validate_github_path(START_FILE.name):
+            START_FILE.parent.mkdir(parents=True, exist_ok=True)
+            START_FILE.write_bytes(content)
+            log.info("[GANTI] local cache updated: %s", START_FILE)
+
         digest = hashlib.sha256(content).hexdigest()[:16]
         return (
             "✅ <b>/ganti berhasil</b>\n"
