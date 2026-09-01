@@ -1,40 +1,25 @@
+
 from __future__ import annotations
 
 """
-SMCAutoTrade - strategy.py
+SMCAutoTrade strategy_v2.py
 
-Simulation-only strategy engine.
+Rule-based, simulation-only strategy engine.
+Source basis: combined.txt supplied by the user.
 
-Design:
-- Consumes market data exposed by start.py / DataEngine.
-- Builds higher timeframes from the 15M base data:
-    15M -> H1 -> H4 -> D1
-- Does NOT fabricate M5/M1 candles. Those cannot be reconstructed faithfully
-  from 15M OHLCV.
-- Scans ALL available symbols; it does not force one setup per symbol.
-- Produces simulated setups only. No real orders are sent.
-- Maintains state so a setup can WAIT for a future confirmation / retest.
-- Designed to be attached to start.py through context["data_engine"].
+Design goals:
+- Candidate != confirmed setup.
+- Event-driven reevaluation per symbol/timeframe.
+- Explicit reason codes and human-readable thesis.
+- Setup lifecycle: CANDIDATE -> WATCHING -> IN_ZONE -> WAITING_CONFIRMATION
+  -> PENDING_LIMIT / FILLED -> CLOSED / INVALIDATED / EXPIRED.
+- Ranking across the entire universe, without forcing one setup per pair.
+- Initial scan progress + summary even when zero setups are found.
+- Simulation journal only; no broker/exchange order calls.
 
-Expected data engine interface:
-    get_symbols() -> list[str]
-    get_candles(symbol, limit=None) -> list[dict]
-    get_price(symbol) -> float | None
-
-Optional context:
-    chat_id
-    send_message(chat_id, text)
-    data_engine
-
-Strategy source basis:
-- trend strength / trade with dominant direction
-- multi-timeframe context
-- order block + FVG
-- Fibonacci discount / premium, especially 0.618+
-- liquidity sweep / inducement
-- market structure shift / change of character
-- confluence
-- fixed RR 1:2 or 1:3
+Timeframes:
+- Native: 1m, 5m, 15m from start.py.
+- Derived: 1H/4H/1D from 15m by aggregation.
 """
 
 import logging
@@ -42,1713 +27,1178 @@ import math
 import os
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable, Iterable
+import uuid
+from dataclasses import dataclass, asdict
+from typing import Any
 
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-BASE_TF_MINUTES = 15
-H1_FACTOR = 4
-H4_FACTOR = 16
-D1_FACTOR = 96
-
-MIN_BASE_CANDLES = max(96, int(os.getenv("STRATEGY_MIN_CANDLES", "180")))
-SCAN_INTERVAL_SECONDS = max(
-    0.5, float(os.getenv("STRATEGY_SCAN_INTERVAL", "2.0"))
-)
-MAX_ACTIVE_SETUP_PER_SYMBOL = max(
-    1, int(os.getenv("STRATEGY_MAX_SETUP_PER_SYMBOL", "2"))
-)
-MAX_TOTAL_ACTIVE_SETUPS = max(
-    1, int(os.getenv("STRATEGY_MAX_ACTIVE_SETUPS", "100"))
-)
-SETUP_EXPIRY_CANDLES = max(4, int(os.getenv("STRATEGY_SETUP_EXPIRY_CANDLES", "32")))
-
-SWING_LEFT = max(1, int(os.getenv("STRATEGY_SWING_LEFT", "2")))
-SWING_RIGHT = max(1, int(os.getenv("STRATEGY_SWING_RIGHT", "2")))
-
-MIN_SCORE = max(1, int(os.getenv("STRATEGY_MIN_SCORE", "5")))
-MIN_RR = float(os.getenv("STRATEGY_MIN_RR", "2.0"))
-DEFAULT_RR = max(MIN_RR, float(os.getenv("STRATEGY_DEFAULT_RR", "2.0")))
-
-# Confluence thresholds.
-STRONG_BODY_RATIO = max(0.1, float(os.getenv("STRATEGY_STRONG_BODY_RATIO", "0.60")))
-ATR_MULTIPLIER = max(0.1, float(os.getenv("STRATEGY_ATR_MULTIPLIER", "1.20")))
-ZONE_TOUCH_EPSILON = max(0.0, float(os.getenv("STRATEGY_ZONE_EPSILON", "0.0002")))
-
-LOG_SUMMARY_SECONDS = max(
-    10.0, float(os.getenv("STRATEGY_LOG_SUMMARY_SECONDS", "30"))
-)
-
-# Conservative simulation constraints.
-SIM_MAX_RISK_FRACTION = max(
-    0.0001, float(os.getenv("STRATEGY_SIM_RISK", "0.005"))
-)
-
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-logging.basicConfig(
-    level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
 log = logging.getLogger("strategy")
 
+# ---------------- configuration ----------------
+MIN_RR = float(os.getenv("STRAT_V2_MIN_RR", "2.0"))
+MIN_SCORE = int(os.getenv("STRAT_V2_MIN_SCORE", "62"))
+MAX_ACTIVE_PER_SYMBOL = max(1, int(os.getenv("STRAT_V2_MAX_ACTIVE_PER_SYMBOL", "3")))
+MAX_WATCHING_PER_SYMBOL = max(1, int(os.getenv("STRAT_V2_MAX_WATCHING_PER_SYMBOL", "4")))
+MAX_TELEGRAM_SETUPS = max(1, int(os.getenv("STRAT_V2_MAX_TELEGRAM_SETUPS", "8")))
+SCAN_LOG_EVERY = max(1, int(os.getenv("STRAT_V2_SCAN_LOG_EVERY", "10")))
 
-# ---------------------------------------------------------------------------
-# Data models
-# ---------------------------------------------------------------------------
+SWING_LEFT = max(1, int(os.getenv("STRAT_V2_SWING_LEFT", "2")))
+SWING_RIGHT = max(1, int(os.getenv("STRAT_V2_SWING_RIGHT", "2")))
+ENTRY_ATR_PAD = float(os.getenv("STRAT_V2_ENTRY_ATR_PAD", "0.12"))
+SL_ATR_PAD = float(os.getenv("STRAT_V2_SL_ATR_PAD", "0.20"))
+EXPIRY_MINUTES = max(15, int(os.getenv("STRAT_V2_EXPIRY_MINUTES", "720")))
 
-@dataclass(slots=True, frozen=True)
-class Bar:
-    timestamp: int
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
+# A setup is allowed to be reported when it has a coherent score.
+# Score is a ranking/filter, NOT a probability of winning.
 
-    @property
-    def bullish(self) -> bool:
-        return self.close > self.open
+API: Any = None
+CONTEXT: dict[str, Any] = {}
+LOCK = threading.RLock()
 
-    @property
-    def bearish(self) -> bool:
-        return self.close < self.open
-
-    @property
-    def body(self) -> float:
-        return abs(self.close - self.open)
-
-    @property
-    def range(self) -> float:
-        return max(0.0, self.high - self.low)
-
-    @property
-    def body_ratio(self) -> float:
-        return self.body / self.range if self.range > 0 else 0.0
-
-
-@dataclass(slots=True)
-class Zone:
-    kind: str
-    low: float
-    high: float
-    created_at: int
-    source_tf: str
-    reference_index: int
-    fresh: bool = True
-
-    @property
-    def midpoint(self) -> float:
-        return (self.low + self.high) / 2.0
+SETUPS: dict[str, "Setup"] = {}
+JOURNAL: list[dict[str, Any]] = []
+LAST_ANALYSIS: dict[str, dict[str, Any]] = {}
+LAST_CLOSED_TS: dict[str, dict[str, int]] = {}
+COUNTERS = {
+    "initial_scans": 0,
+    "event_scans": 0,
+    "candidates": 0,
+    "confirmed": 0,
+    "fills": 0,
+    "wins": 0,
+    "losses": 0,
+    "expired": 0,
+    "invalidated": 0,
+}
+INITIAL_SCAN_DONE = False
 
 
-@dataclass(slots=True)
+@dataclass
 class Setup:
+    id: str
+    symbol: str
+    direction: str
+    model: str
+    state: str
+    entry_type: str
+    entry: float
+    sl: float
+    tp: float
+    rr: float
+    score: int
+    created_ts: int
+    expires_ts: int
+    reason: str
+    reason_codes: list[str]
+    confluences: list[str]
+    trigger_tf: str
+    zone_low: float
+    zone_high: float
+    thesis: str
+    confirmation_required: list[str]
+    filled_ts: int | None = None
+    outcome: str | None = None
+    r_multiple: float | None = None
+
+
+@dataclass
+class Position:
     setup_id: str
     symbol: str
     direction: str
-    family: str
-    status: str
-    score: float
-    created_at: int
-    expiry_at: int | None
+    entry: float
+    sl: float
+    tp: float
+    opened_ts: int
+    closed_ts: int | None = None
+    outcome: str | None = None
+    r_multiple: float | None = None
 
-    source_tf: str
-    confirmation_tf: str
 
-    entry_type: str
-    entry_low: float
-    entry_high: float
-    entry_price: float
+POSITIONS: dict[str, Position] = {}
 
-    stop_loss: float
-    take_profit: float
-    risk_distance: float
-    rr: float
 
-    reasons: list[str] = field(default_factory=list)
-    confluences: list[str] = field(default_factory=list)
+# ---------------- public lifecycle ----------------
+def initialize(api: Any, context: dict[str, Any]) -> None:
+    global API, CONTEXT, INITIAL_SCAN_DONE
+    API = api
+    CONTEXT = dict(context)
+    INITIAL_SCAN_DONE = False
+    log.info(
+        "[STRATEGY V2] initialized | min_score=%d min_rr=%.2f "
+        "max_active=%d max_watch=%d",
+        MIN_SCORE, MIN_RR, MAX_ACTIVE_PER_SYMBOL, MAX_WATCHING_PER_SYMBOL
+    )
 
-    origin_bar: int = 0
-    last_seen_bar: int = 0
-    trigger_bar: int | None = None
 
-    def as_dict(self) -> dict[str, Any]:
+def shutdown() -> None:
+    log.info(
+        "[STRATEGY V2] shutdown | setups=%d journal=%d active=%d",
+        len(SETUPS),
+        len(JOURNAL),
+        _active_count(),
+    )
+
+
+# ---------------- generic math/helpers ----------------
+def _ema(values: list[float], period: int) -> float | None:
+    if len(values) < period:
+        return None
+    alpha = 2.0 / (period + 1.0)
+    e = sum(values[:period]) / period
+    for x in values[period:]:
+        e = alpha * x + (1.0 - alpha) * e
+    return e
+
+
+def _atr(candles: list[dict[str, Any]], period: int = 14) -> float | None:
+    if len(candles) < period + 1:
+        return None
+    tr = []
+    for i in range(1, len(candles)):
+        cur, prev = candles[i], candles[i - 1]
+        tr.append(
+            max(
+                cur["high"] - cur["low"],
+                abs(cur["high"] - prev["close"]),
+                abs(cur["low"] - prev["close"]),
+            )
+        )
+    return sum(tr[-period:]) / period
+
+
+def _aggregate(candles: list[dict[str, Any]], minutes: int) -> list[dict[str, Any]]:
+    if not candles:
+        return []
+    bucket_ms = minutes * 60_000
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for c in candles:
+        ts = int(c["timestamp"])
+        key = (ts // bucket_ms) * bucket_ms
+        groups.setdefault(key, []).append(c)
+
+    out: list[dict[str, Any]] = []
+    for key in sorted(groups):
+        group = sorted(groups[key], key=lambda x: x["timestamp"])
+        out.append(
+            {
+                "timestamp": key,
+                "open": float(group[0]["open"]),
+                "high": max(float(x["high"]) for x in group),
+                "low": min(float(x["low"]) for x in group),
+                "close": float(group[-1]["close"]),
+                "volume": sum(float(x.get("volume", 0.0)) for x in group),
+                "turnover": sum(float(x.get("turnover", 0.0)) for x in group),
+                "confirmed": all(bool(x.get("confirmed", True)) for x in group),
+            }
+        )
+    return out
+
+
+def _swing_points(candles: list[dict[str, Any]]) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
+    highs: list[tuple[int, float]] = []
+    lows: list[tuple[int, float]] = []
+    if len(candles) < SWING_LEFT + SWING_RIGHT + 1:
+        return highs, lows
+    for i in range(SWING_LEFT, len(candles) - SWING_RIGHT):
+        h = candles[i]["high"]
+        l = candles[i]["low"]
+        left_highs = [candles[j]["high"] for j in range(i - SWING_LEFT, i)]
+        right_highs = [candles[j]["high"] for j in range(i + 1, i + SWING_RIGHT + 1)]
+        left_lows = [candles[j]["low"] for j in range(i - SWING_LEFT, i)]
+        right_lows = [candles[j]["low"] for j in range(i + 1, i + SWING_RIGHT + 1)]
+
+        if all(h > x for x in left_highs) and all(h >= x for x in right_highs):
+            highs.append((i, float(h)))
+        if all(l < x for x in left_lows) and all(l <= x for x in right_lows):
+            lows.append((i, float(l)))
+    return highs, lows
+
+
+def _fvg(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    zones = []
+    for i in range(2, len(candles)):
+        a = candles[i - 2]
+        c = candles[i]
+        if c["low"] > a["high"]:
+            zones.append(
+                {
+                    "direction": "LONG",
+                    "low": float(a["high"]),
+                    "high": float(c["low"]),
+                    "index": i,
+                }
+            )
+        if c["high"] < a["low"]:
+            zones.append(
+                {
+                    "direction": "SHORT",
+                    "low": float(c["high"]),
+                    "high": float(a["low"]),
+                    "index": i,
+                }
+            )
+    return zones
+
+
+def _zone_fresh(candles: list[dict[str, Any]], zone: dict[str, Any], direction: str) -> bool:
+    lo, hi = zone["low"], zone["high"]
+    for c in candles[zone["index"] + 1 :]:
+        if direction == "LONG" and c["low"] <= hi and c["high"] >= lo:
+            return False
+        if direction == "SHORT" and c["high"] >= lo and c["low"] <= hi:
+            return False
+    return True
+
+
+def _order_blocks(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    zones = []
+    atr = _atr(candles, 14) or 0.0
+    for i in range(2, len(candles)):
+        prev = candles[i - 1]
+        cur = candles[i]
+        prev_body = abs(prev["close"] - prev["open"])
+        up = cur["close"] > prev["high"] and (atr == 0.0 or prev_body >= atr * 0.12)
+        down = cur["close"] < prev["low"] and (atr == 0.0 or prev_body >= atr * 0.12)
+
+        # Heuristic "last opposite candle" definition.
+        if up and prev["close"] < prev["open"]:
+            zones.append(
+                {
+                    "direction": "LONG",
+                    "low": float(prev["low"]),
+                    "high": float(prev["open"]),
+                    "index": i - 1,
+                }
+            )
+        if down and prev["close"] > prev["open"]:
+            zones.append(
+                {
+                    "direction": "SHORT",
+                    "low": float(prev["open"]),
+                    "high": float(prev["high"]),
+                    "index": i - 1,
+                }
+            )
+    return zones
+
+
+def _trend(candles_1h: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(candles_1h) < 30:
         return {
-            "setup_id": self.setup_id,
-            "symbol": self.symbol,
-            "direction": self.direction,
-            "family": self.family,
-            "status": self.status,
-            "score": round(self.score, 2),
-            "created_at": self.created_at,
-            "expiry_at": self.expiry_at,
-            "source_tf": self.source_tf,
-            "confirmation_tf": self.confirmation_tf,
-            "entry_type": self.entry_type,
-            "entry_low": self.entry_low,
-            "entry_high": self.entry_high,
-            "entry_price": self.entry_price,
-            "stop_loss": self.stop_loss,
-            "take_profit": self.take_profit,
-            "risk_distance": self.risk_distance,
-            "rr": round(self.rr, 3),
-            "reasons": list(self.reasons),
-            "confluences": list(self.confluences),
-            "origin_bar": self.origin_bar,
-            "last_seen_bar": self.last_seen_bar,
-            "trigger_bar": self.trigger_bar,
+            "bias": "NEUTRAL",
+            "score": 0,
+            "codes": [],
+            "labels": [],
+            "ema9": None,
+            "ema20": None,
+        }
+    closes = [float(c["close"]) for c in candles_1h]
+    ema9 = _ema(closes, 9)
+    ema20 = _ema(closes, 20)
+    highs, lows = _swing_points(candles_1h)
+
+    if ema9 is None or ema20 is None:
+        return {"bias": "NEUTRAL", "score": 0, "codes": [], "labels": [], "ema9": ema9, "ema20": ema20}
+
+    if ema9 > ema20:
+        bias = "BULL"
+        score = 20
+        codes = ["HTF_EMA_BULL"]
+        labels = ["1H EMA9 > EMA20"]
+        if len(highs) >= 2 and len(lows) >= 2:
+            if highs[-1][1] > highs[-2][1] and lows[-1][1] > lows[-2][1]:
+                score += 15
+                codes.append("HTF_HH_HL")
+                labels.append("1H HH + HL")
+    elif ema9 < ema20:
+        bias = "BEAR"
+        score = 20
+        codes = ["HTF_EMA_BEAR"]
+        labels = ["1H EMA9 < EMA20"]
+        if len(highs) >= 2 and len(lows) >= 2:
+            if highs[-1][1] < highs[-2][1] and lows[-1][1] < lows[-2][1]:
+                score += 15
+                codes.append("HTF_LH_LL")
+                labels.append("1H LH + LL")
+    else:
+        bias = "NEUTRAL"
+        score = 0
+        codes = []
+        labels = []
+
+    return {
+        "bias": bias,
+        "score": score,
+        "codes": codes,
+        "labels": labels,
+        "ema9": ema9,
+        "ema20": ema20,
+    }
+
+
+def _fib_context(candles_1h: list[dict[str, Any]], direction: str) -> dict[str, Any]:
+    highs, lows = _swing_points(candles_1h)
+    if not highs or not lows:
+        return {"ok": False, "level": None, "code": None, "label": None}
+
+    if direction == "LONG":
+        hi_i, hi = highs[-1]
+        prior_lows = [x for x in lows if x[0] < hi_i]
+        if not prior_lows:
+            return {"ok": False, "level": None, "code": None, "label": None}
+        lo = prior_lows[-1][1]
+        level = hi - 0.618 * (hi - lo)
+        px = candles_1h[-1]["close"]
+        return {
+            "ok": px <= level,
+            "level": level,
+            "code": "FIB_DISCOUNT",
+            "label": "1H price in 0.618 discount",
         }
 
-
-# ---------------------------------------------------------------------------
-# Pure helpers
-# ---------------------------------------------------------------------------
-
-def _to_bar(raw: dict[str, Any]) -> Bar | None:
-    try:
-        return Bar(
-            timestamp=int(raw["timestamp"]),
-            open=float(raw["open"]),
-            high=float(raw["high"]),
-            low=float(raw["low"]),
-            close=float(raw["close"]),
-            volume=float(raw.get("volume") or 0.0),
-        )
-    except (KeyError, TypeError, ValueError):
-        return None
+    lo_i, lo = lows[-1]
+    prior_highs = [x for x in highs if x[0] < lo_i]
+    if not prior_highs:
+        return {"ok": False, "level": None, "code": None, "label": None}
+    hi = prior_highs[-1][1]
+    level = lo + 0.618 * (hi - lo)
+    px = candles_1h[-1]["close"]
+    return {
+        "ok": px >= level,
+        "level": level,
+        "code": "FIB_PREMIUM",
+        "label": "1H price in 0.618 premium",
+    }
 
 
-def normalize_bars(rows: Iterable[dict[str, Any]]) -> list[Bar]:
-    bars: list[Bar] = []
-    for row in rows:
-        bar = _to_bar(row)
-        if bar is not None:
-            bars.append(bar)
+def _liquidity_sweep(candles_5m: list[dict[str, Any]], direction: str) -> dict[str, Any]:
+    if len(candles_5m) < 10:
+        return {"ok": False, "level": None, "code": None, "label": None}
 
-    bars.sort(key=lambda x: x.timestamp)
+    closed = candles_5m[:-1] if not candles_5m[-1].get("confirmed", True) else candles_5m
+    if len(closed) < 8:
+        return {"ok": False, "level": None, "code": None, "label": None}
 
-    # Deduplicate by timestamp, keeping the last version.
-    dedup: dict[int, Bar] = {}
-    for bar in bars:
-        dedup[bar.timestamp] = bar
-
-    return [dedup[k] for k in sorted(dedup)]
-
-
-def aggregate_bars(bars: list[Bar], factor: int) -> list[Bar]:
-    """
-    Aggregate contiguous base bars into a higher timeframe.
-
-    This is valid for higher timeframes because 15M divides evenly into H1/H4/D1.
-    """
-    if factor <= 1:
-        return list(bars)
-
-    grouped: list[Bar] = []
-    bucket: list[Bar] = []
-
-    expected_step_ms = BASE_TF_MINUTES * 60_000
-
-    for bar in bars:
-        if bucket:
-            previous = bucket[-1]
-            continuous = bar.timestamp - previous.timestamp == expected_step_ms
-            if not continuous:
-                if bucket:
-                    grouped.append(
-                        Bar(
-                            timestamp=bucket[0].timestamp,
-                            open=bucket[0].open,
-                            high=max(x.high for x in bucket),
-                            low=min(x.low for x in bucket),
-                            close=bucket[-1].close,
-                            volume=sum(x.volume for x in bucket),
-                        )
-                    )
-                bucket = []
-
-        bucket.append(bar)
-
-        if len(bucket) == factor:
-            grouped.append(
-                Bar(
-                    timestamp=bucket[0].timestamp,
-                    open=bucket[0].open,
-                    high=max(x.high for x in bucket),
-                    low=min(x.low for x in bucket),
-                    close=bucket[-1].close,
-                    volume=sum(x.volume for x in bucket),
-                )
-            )
-            bucket = []
-
-    # Do not append an incomplete higher-timeframe bar.
-    return grouped
+    highs, lows = _swing_points(closed[:-1])
+    c = closed[-1]
+    if direction == "LONG" and lows:
+        level = lows[-1][1]
+        if c["low"] < level and c["close"] > level:
+            return {"ok": True, "level": level, "code": "SSL_SWEEP", "label": "5M sell-side liquidity sweep"}
+    if direction == "SHORT" and highs:
+        level = highs[-1][1]
+        if c["high"] > level and c["close"] < level:
+            return {"ok": True, "level": level, "code": "BSL_SWEEP", "label": "5M buy-side liquidity sweep"}
+    return {"ok": False, "level": None, "code": None, "label": None}
 
 
-def ema(values: list[float], period: int) -> list[float | None]:
-    if period <= 0:
-        raise ValueError("period harus > 0")
+def _mss(candles_5m: list[dict[str, Any]], direction: str) -> dict[str, Any]:
+    closed = candles_5m[:-1] if candles_5m and not candles_5m[-1].get("confirmed", True) else candles_5m
+    if len(closed) < 15:
+        return {"ok": False, "level": None, "code": None, "label": None}
 
-    result: list[float | None] = [None] * len(values)
-    if len(values) < period:
+    highs, lows = _swing_points(closed[:-1])
+    last_close = closed[-1]["close"]
+
+    if direction == "LONG" and highs:
+        level = highs[-1][1]
+        if last_close > level:
+            return {"ok": True, "level": level, "code": "MSS_BULL", "label": "5M bullish MSS/ChoCH"}
+    if direction == "SHORT" and lows:
+        level = lows[-1][1]
+        if last_close < level:
+            return {"ok": True, "level": level, "code": "MSS_BEAR", "label": "5M bearish MSS/ChoCH"}
+    return {"ok": False, "level": None, "code": None, "label": None}
+
+
+def _in_zone(price: float, zone: dict[str, Any], atr: float) -> bool:
+    pad = atr * 0.25
+    return zone["low"] - pad <= price <= zone["high"] + pad
+
+
+def _best_zones(candles_1h: list[dict[str, Any]], direction: str) -> list[tuple[dict[str, Any], str]]:
+    wanted = "LONG" if direction == "LONG" else "SHORT"
+    out: list[tuple[dict[str, Any], str]] = []
+
+    for z in _fvg(candles_1h):
+        if z["direction"] == wanted and _zone_fresh(candles_1h, z, direction):
+            out.append((z, "FVG"))
+
+    for z in _order_blocks(candles_1h):
+        if z["direction"] == wanted:
+            out.append((z, "OB"))
+
+    out.sort(key=lambda item: item[0]["index"], reverse=True)
+    return out[:8]
+
+
+def _active_setups(symbol: str) -> list[Setup]:
+    return [
+        s
+        for s in SETUPS.values()
+        if s.symbol == symbol and s.state in {
+            "CANDIDATE", "WATCHING", "IN_ZONE", "WAITING_CONFIRMATION",
+            "PENDING_LIMIT", "FILLED"
+        }
+    ]
+
+
+def _active_count() -> int:
+    return sum(
+        1
+        for s in SETUPS.values()
+        if s.state in {"CANDIDATE", "WATCHING", "IN_ZONE", "WAITING_CONFIRMATION", "PENDING_LIMIT", "FILLED"}
+    )
+
+
+def _build_plan(
+    symbol: str,
+    direction: str,
+    zone: dict[str, Any],
+    model: str,
+    score: int,
+    codes: list[str],
+    labels: list[str],
+    ts: int,
+    atr: float,
+    confirmation_required: list[str],
+) -> Setup | None:
+    zl, zh = float(zone["low"]), float(zone["high"])
+    entry = (zl + zh) / 2.0
+
+    if direction == "LONG":
+        sl = zl - max(atr * SL_ATR_PAD, (zh - zl) * 0.15)
+        risk = entry - sl
+        if risk <= 0:
+            return None
+        tp = entry + MIN_RR * risk
+    else:
+        sl = zh + max(atr * SL_ATR_PAD, (zh - zl) * 0.15)
+        risk = sl - entry
+        if risk <= 0:
+            return None
+        tp = entry - MIN_RR * risk
+
+    dedup_key = f"{symbol}:{direction}:{model}:{int(zl*1e8)}:{int(zh*1e8)}"
+    sid = f"{symbol}-{direction}-{int(ts)}-{uuid.uuid4().hex[:6]}"
+
+    return Setup(
+        id=sid,
+        symbol=symbol,
+        direction=direction,
+        model=model,
+        state="WATCHING",
+        entry_type="LIMIT",
+        entry=entry,
+        sl=sl,
+        tp=tp,
+        rr=abs(tp - entry) / max(abs(entry - sl), 1e-12),
+        score=min(100, int(score)),
+        created_ts=ts,
+        expires_ts=ts + EXPIRY_MINUTES * 60_000,
+        reason=" | ".join(labels),
+        reason_codes=list(dict.fromkeys(codes)),
+        confluences=list(dict.fromkeys(labels)),
+        trigger_tf="5",
+        zone_low=zl,
+        zone_high=zh,
+        thesis=(
+            f"{direction} because HTF bias and POI align; "
+            f"entry is planned from {model} while waiting for micro confirmation."
+        ),
+        confirmation_required=list(dict.fromkeys(confirmation_required)),
+    )
+
+
+def _candidate_signature(setup: Setup) -> tuple:
+    return (
+        setup.symbol,
+        setup.direction,
+        setup.model,
+        round(setup.zone_low, 8),
+        round(setup.zone_high, 8),
+    )
+
+
+def _register_or_merge(setup: Setup) -> bool:
+    signature = _candidate_signature(setup)
+    for existing in SETUPS.values():
+        if existing.state in {"CLOSED", "EXPIRED", "INVALIDATED"}:
+            continue
+        if _candidate_signature(existing) == signature:
+            # Keep better score and preserve confirmation state.
+            if setup.score > existing.score:
+                existing.score = setup.score
+                existing.reason = setup.reason
+                existing.reason_codes = setup.reason_codes
+                existing.confluences = setup.confluences
+                existing.thesis = setup.thesis
+            return False
+
+    current = _active_setups(setup.symbol)
+    if len(current) >= MAX_WATCHING_PER_SYMBOL:
+        weakest = min(current, key=lambda x: (x.score, x.created_ts))
+        if weakest.score >= setup.score:
+            return False
+        weakest.state = "INVALIDATED"
+        weakest.outcome = "replaced_by_higher_score"
+        COUNTERS["invalidated"] += 1
+
+    SETUPS[setup.id] = setup
+    COUNTERS["candidates"] += 1
+    log.info(
+        "[CANDIDATE] %s %s model=%s score=%d entry=%.8f rr=%.2f codes=%s",
+        setup.symbol, setup.direction, setup.model, setup.score, setup.entry, setup.rr,
+        ",".join(setup.reason_codes)
+    )
+    return True
+
+
+def _scan_symbol(symbol: str, event_tf: str | None = None) -> dict[str, Any]:
+    c15 = API.get_candles(symbol, "15", 700)
+    c5 = API.get_candles(symbol, "5", 500)
+    c1 = API.get_candles(symbol, "1", 500)
+
+    result = {
+        "symbol": symbol,
+        "bias": "NEUTRAL",
+        "score": 0,
+        "candidates": [],
+        "reason_codes": [],
+        "labels": [],
+        "event_tf": event_tf,
+    }
+
+    if len(c15) < 120 or len(c5) < 80 or len(c1) < 80:
+        result["labels"] = ["insufficient history"]
         return result
 
-    sma = sum(values[:period]) / period
-    result[period - 1] = sma
-    alpha = 2.0 / (period + 1.0)
-    prev = sma
+    h1 = _aggregate(c15, 60)
+    h4 = _aggregate(c15, 240)
+    d1 = _aggregate(c15, 1440)
+    if len(h1) < 30 or len(h4) < 8:
+        result["labels"] = ["insufficient derived HTF history"]
+        return result
 
-    for i in range(period, len(values)):
-        prev = (values[i] - prev) * alpha + prev
-        result[i] = prev
+    trend = _trend(h1)
+    result["bias"] = trend["bias"]
+    result["score"] = trend["score"]
+    result["reason_codes"].extend(trend["codes"])
+    result["labels"].extend(trend["labels"])
+
+    if trend["bias"] == "NEUTRAL":
+        result["labels"].append("HTF neutral")
+        return result
+
+    direction = "LONG" if trend["bias"] == "BULL" else "SHORT"
+    fib = _fib_context(h1, direction)
+
+    price = float(API.get_price(symbol) or c5[-1]["close"])
+    atr = _atr(c5, 14) or max(price * 0.001, 1e-9)
+    sweep = _liquidity_sweep(c5, direction)
+    mss = _mss(c5, direction)
+
+    # HTF zones based on H1; H4/D1 are context only in v2.
+    zones = _best_zones(h1, direction)
+
+    candidate_rows: list[dict[str, Any]] = []
+    for zone, model in zones:
+        in_zone = _in_zone(price, zone, atr)
+        score = trend["score"]
+        codes = list(trend["codes"])
+        labels = list(trend["labels"])
+        missing: list[str] = []
+
+        if h4:
+            h4trend = _trend(h4)
+            if h4trend["bias"] == trend["bias"]:
+                score += 10
+                codes.append("H4_ALIGN")
+                labels.append("4H bias aligned")
+            else:
+                missing.append("H4 alignment")
+
+        if d1 and len(d1) >= 4:
+            d1trend = _trend(d1)
+            if d1trend["bias"] in {"BULL", "BEAR"} and d1trend["bias"] == trend["bias"]:
+                score += 5
+                codes.append("D1_ALIGN")
+                labels.append("1D bias aligned")
+
+        if fib["ok"]:
+            score += 15
+            if fib["code"]:
+                codes.append(fib["code"])
+            if fib["label"]:
+                labels.append(fib["label"])
+        else:
+            missing.append("Fib 0.618 location")
+
+        if model == "FVG":
+            score += 15
+            codes.append("FRESH_FVG")
+            labels.append("Fresh H1 FVG")
+        else:
+            score += 15
+            codes.append("ORDER_BLOCK")
+            labels.append("H1 Order Block")
+
+        if sweep["ok"]:
+            score += 20
+            if sweep["code"]:
+                codes.append(sweep["code"])
+            if sweep["label"]:
+                labels.append(sweep["label"])
+        else:
+            missing.append("liquidity sweep")
+
+        if mss["ok"]:
+            score += 25
+            if mss["code"]:
+                codes.append(mss["code"])
+            if mss["label"]:
+                labels.append(mss["label"])
+        else:
+            missing.append("5M MSS/ChoCH")
+
+        if not in_zone:
+            missing.append("price at POI")
+
+        state = "WATCHING"
+        confirmations_needed: list[str] = []
+        if in_zone:
+            state = "IN_ZONE"
+            confirmations_needed = [x for x in ("liquidity sweep", "5M MSS/ChoCH") if x in missing]
+            if confirmations_needed:
+                state = "WAITING_CONFIRMATION"
+            else:
+                state = "PENDING_LIMIT"
+
+        candidate_rows.append(
+            {
+                "zone": zone,
+                "model": model,
+                "score": min(100, score),
+                "codes": list(dict.fromkeys(codes)),
+                "labels": list(dict.fromkeys(labels)),
+                "missing": list(dict.fromkeys(missing)),
+                "state": state,
+            }
+        )
+
+    candidate_rows.sort(
+        key=lambda x: (
+            -int(x["score"]),
+            0 if x["state"] in {"PENDING_LIMIT", "WAITING_CONFIRMATION", "IN_ZONE"} else 1,
+        )
+    )
+
+    for row in candidate_rows[:MAX_ACTIVE_PER_SYMBOL]:
+        if row["score"] < MIN_SCORE:
+            continue
+        plan = _build_plan(
+            symbol=symbol,
+            direction=direction,
+            zone=row["zone"],
+            model=row["model"],
+            score=row["score"],
+            codes=row["codes"],
+            labels=row["labels"],
+            ts=int(c5[-1]["timestamp"]),
+            atr=atr,
+            confirmation_required=row["missing"],
+        )
+        if plan:
+            plan.state = row["state"]
+            result["candidates"].append(plan)
 
     return result
 
 
-def atr(bars: list[Bar], period: int = 14) -> list[float | None]:
-    if len(bars) < period:
-        return [None] * len(bars)
+def _transition_setup(setup: Setup, analysis: dict[str, Any], now_ts: int) -> list[str]:
+    notices: list[str] = []
+    rows = [
+        r for r in analysis.get("candidates", [])
+        if r.model == setup.model
+        and r.direction == setup.direction
+        and abs(r.zone_low - setup.zone_low) / max(abs(setup.zone_low), 1e-12) < 0.002
+        and abs(r.zone_high - setup.zone_high) / max(abs(setup.zone_high), 1e-12) < 0.002
+    ]
+    if not rows:
+        return notices
 
-    trs: list[float] = []
-    previous_close: float | None = None
+    row = rows[0]
+    old_state = setup.state
 
-    for bar in bars:
-        if previous_close is None:
-            tr = bar.high - bar.low
+    if now_ts >= setup.expires_ts and setup.state not in {"CLOSED", "FILLED"}:
+        setup.state = "EXPIRED"
+        setup.outcome = "expired"
+        COUNTERS["expired"] += 1
+        notices.append(f"⏳ {setup.symbol} {setup.direction} setup expired")
+        return notices
+
+    setup.score = max(setup.score, int(row["score"]))
+    setup.reason_codes = list(dict.fromkeys(setup.reason_codes + row["codes"]))
+    setup.confluences = list(dict.fromkeys(setup.confluences + row["labels"]))
+    setup.reason = " | ".join(setup.confluences)
+    setup.confirmation_required = list(row["missing"])
+
+    if setup.state != "FILLED":
+        target_state = str(row["state"])
+        if target_state == "PENDING_LIMIT":
+            setup.state = "PENDING_LIMIT"
+        elif target_state == "WAITING_CONFIRMATION":
+            setup.state = "WAITING_CONFIRMATION"
+        elif target_state == "IN_ZONE":
+            setup.state = "IN_ZONE"
         else:
-            tr = max(
-                bar.high - bar.low,
-                abs(bar.high - previous_close),
-                abs(bar.low - previous_close),
-            )
-        trs.append(tr)
-        previous_close = bar.close
+            setup.state = "WATCHING"
 
-    out: list[float | None] = [None] * len(bars)
-    first = sum(trs[:period]) / period
-    out[period - 1] = first
-    prev = first
+        if setup.state != old_state:
+            notices.append(_format_transition(setup, old_state))
 
-    # Wilder-style smoothing.
-    for i in range(period, len(trs)):
-        prev = ((prev * (period - 1)) + trs[i]) / period
-        out[i] = prev
-
-    return out
+    return notices
 
 
-def find_swings(
-    bars: list[Bar],
-    left: int = SWING_LEFT,
-    right: int = SWING_RIGHT,
-) -> tuple[list[int], list[int]]:
-    highs: list[int] = []
-    lows: list[int] = []
+def _simulation_update(symbol: str, now_ts: int) -> list[str]:
+    notices: list[str] = []
+    price = API.get_price(symbol)
+    if price is None:
+        return notices
 
-    if len(bars) < left + right + 1:
-        return highs, lows
-
-    for i in range(left, len(bars) - right):
-        high = bars[i].high
-        low = bars[i].low
-
-        left_highs = all(high >= bars[j].high for j in range(i - left, i))
-        right_highs = all(high >= bars[j].high for j in range(i + 1, i + right + 1))
-
-        left_lows = all(low <= bars[j].low for j in range(i - left, i))
-        right_lows = all(low <= bars[j].low for j in range(i + 1, i + right + 1))
-
-        if left_highs and right_highs:
-            highs.append(i)
-        if left_lows and right_lows:
-            lows.append(i)
-
-    return highs, lows
-
-
-def market_structure(bars: list[Bar]) -> dict[str, Any]:
-    high_idx, low_idx = find_swings(bars)
-
-    trend = "neutral"
-    structure_break = False
-    last_swing_high = bars[high_idx[-1]].high if high_idx else None
-    last_swing_low = bars[low_idx[-1]].low if low_idx else None
-
-    if len(high_idx) >= 2 and len(low_idx) >= 2:
-        h1, h2 = bars[high_idx[-2]], bars[high_idx[-1]]
-        l1, l2 = bars[low_idx[-2]], bars[low_idx[-1]]
-
-        if h2.high > h1.high and l2.low > l1.low:
-            trend = "bullish"
-        elif h2.high < h1.high and l2.low < l1.low:
-            trend = "bearish"
-
-        # Latest closed bar breaking latest confirmed swing.
-        last = bars[-1]
-        if trend == "bullish" and last_swing_high is not None and last.close > last_swing_high:
-            structure_break = True
-        elif trend == "bearish" and last_swing_low is not None and last.close < last_swing_low:
-            structure_break = True
-
-    return {
-        "trend": trend,
-        "high_idx": high_idx,
-        "low_idx": low_idx,
-        "last_swing_high": last_swing_high,
-        "last_swing_low": last_swing_low,
-        "structure_break": structure_break,
-    }
-
-
-def trend_strength(bars: list[Bar]) -> dict[str, Any]:
-    if len(bars) < 25:
-        return {"direction": "neutral", "score": 0.0, "ema9": None, "ema20": None}
-
-    closes = [b.close for b in bars]
-    e9 = ema(closes, 9)[-1]
-    e20 = ema(closes, 20)[-1]
-
-    if e9 is None or e20 is None:
-        return {"direction": "neutral", "score": 0.0, "ema9": e9, "ema20": e20}
-
-    direction = "bullish" if e9 > e20 else "bearish" if e9 < e20 else "neutral"
-
-    # Directional strength is based on the rate of change over recent bars,
-    # consistent with the source's price-over-time idea.
-    lookback = min(12, len(bars) - 1)
-    start = bars[-1 - lookback].close
-    end = bars[-1].close
-    roc = (end - start) / start if start else 0.0
-
-    same_direction = (
-        (direction == "bullish" and roc > 0)
-        or (direction == "bearish" and roc < 0)
-    )
-    score = abs(roc) * 1000.0
-    if same_direction:
-        score *= 1.25
-
-    return {
-        "direction": direction,
-        "score": score,
-        "ema9": e9,
-        "ema20": e20,
-        "roc": roc,
-    }
-
-
-def detect_fvgs(bars: list[Bar], limit: int = 8) -> list[Zone]:
-    zones: list[Zone] = []
-    start = max(2, len(bars) - 80)
-
-    for i in range(start, len(bars)):
-        a = bars[i - 2]
-        b = bars[i - 1]
-        c = bars[i]
-
-        # Bullish FVG: current low above two-bars-back high.
-        if c.low > a.high and b.bullish:
-            zones.append(
-                Zone(
-                    kind="bullish_fvg",
-                    low=a.high,
-                    high=c.low,
-                    created_at=c.timestamp,
-                    source_tf="TF",
-                    reference_index=i,
-                )
-            )
-
-        # Bearish FVG: current high below two-bars-back low.
-        if c.high < a.low and b.bearish:
-            zones.append(
-                Zone(
-                    kind="bearish_fvg",
-                    low=c.high,
-                    high=a.low,
-                    created_at=c.timestamp,
-                    source_tf="TF",
-                    reference_index=i,
-                )
-            )
-
-    return zones[-limit:]
-
-
-def detect_order_blocks(bars: list[Bar], limit: int = 8) -> list[Zone]:
-    """
-    Heuristic order-block detector based on:
-    - a final opposite candle
-    - followed by a strong displacement
-    - that closes through a recent swing.
-    """
-    zones: list[Zone] = []
-    swing_highs, swing_lows = find_swings(bars)
-
-    recent_high_prices = {
-        idx: bars[idx].high for idx in swing_highs[-8:]
-    }
-    recent_low_prices = {
-        idx: bars[idx].low for idx in swing_lows[-8:]
-    }
-
-    for i in range(max(3, len(bars) - 100), len(bars)):
-        if i >= len(bars) - 1:
+    for setup in list(SETUPS.values()):
+        if setup.symbol != symbol:
             continue
 
-        base = bars[i]
-        impulse = bars[i + 1]
-
-        recent_high = max(recent_high_prices.values(), default=None)
-        recent_low = min(recent_low_prices.values(), default=None)
-
-        if (
-            base.bearish
-            and impulse.bullish
-            and impulse.body_ratio >= STRONG_BODY_RATIO
-            and recent_high is not None
-            and impulse.close > recent_high
-        ):
-            zones.append(
-                Zone(
-                    kind="bullish_ob",
-                    low=base.low,
-                    high=max(base.open, base.close),
-                    created_at=base.timestamp,
-                    source_tf="TF",
-                    reference_index=i,
-                )
-            )
-
-        if (
-            base.bullish
-            and impulse.bearish
-            and impulse.body_ratio >= STRONG_BODY_RATIO
-            and recent_low is not None
-            and impulse.close < recent_low
-        ):
-            zones.append(
-                Zone(
-                    kind="bearish_ob",
-                    low=min(base.open, base.close),
-                    high=base.high,
-                    created_at=base.timestamp,
-                    source_tf="TF",
-                    reference_index=i,
-                )
-            )
-
-    return zones[-limit:]
-
-
-def fib_levels(
-    swing_low: float,
-    swing_high: float,
-) -> dict[str, float]:
-    distance = swing_high - swing_low
-    if distance <= 0:
-        return {}
-
-    return {
-        "0.382": swing_high - distance * 0.382,
-        "0.500": swing_high - distance * 0.500,
-        "0.618": swing_high - distance * 0.618,
-        "0.786": swing_high - distance * 0.786,
-    }
-
-
-def fib_retracement_fraction(
-    price: float,
-    swing_low: float,
-    swing_high: float,
-) -> float:
-    distance = swing_high - swing_low
-    if distance <= 0:
-        return math.nan
-    return (swing_high - price) / distance
-
-
-def bearish_fib_retracement_fraction(
-    price: float,
-    swing_low: float,
-    swing_high: float,
-) -> float:
-    distance = swing_high - swing_low
-    if distance <= 0:
-        return math.nan
-    return (price - swing_low) / distance
-
-
-def zone_contains_price(zone: Zone, price: float) -> bool:
-    epsilon = abs(price) * ZONE_TOUCH_EPSILON
-    return zone.low - epsilon <= price <= zone.high + epsilon
-
-
-def zone_is_discount(
-    zone: Zone,
-    swing_low: float,
-    swing_high: float,
-) -> bool:
-    retracement = fib_retracement_fraction(zone.midpoint, swing_low, swing_high)
-    return math.isfinite(retracement) and retracement >= 0.618
-
-
-def zone_is_premium(
-    zone: Zone,
-    swing_low: float,
-    swing_high: float,
-) -> bool:
-    retracement = bearish_fib_retracement_fraction(
-        zone.midpoint, swing_low, swing_high
-    )
-    return math.isfinite(retracement) and retracement >= 0.618
-
-
-def bullish_liquidity_sweep(
-    bars: list[Bar],
-    lookback: int = 20,
-) -> dict[str, Any] | None:
-    if len(bars) < lookback + 5:
-        return None
-
-    swing_highs, swing_lows = find_swings(bars)
-    if not swing_lows:
-        return None
-
-    candidate_idx = swing_lows[-1]
-    if candidate_idx >= len(bars) - 2:
-        return None
-
-    level = bars[candidate_idx].low
-    window = bars[candidate_idx + 1 : -1]
-    if not window:
-        return None
-
-    latest = bars[-1]
-    had_break = any(bar.low < level for bar in window[-lookback:])
-    reclaimed = latest.close > level and latest.low < level
-
-    if had_break and reclaimed:
-        return {"level": level, "bar": latest, "swing_index": candidate_idx}
-
-    return None
-
-
-def bearish_liquidity_sweep(
-    bars: list[Bar],
-    lookback: int = 20,
-) -> dict[str, Any] | None:
-    if len(bars) < lookback + 5:
-        return None
-
-    swing_highs, swing_lows = find_swings(bars)
-    if not swing_highs:
-        return None
-
-    candidate_idx = swing_highs[-1]
-    if candidate_idx >= len(bars) - 2:
-        return None
-
-    level = bars[candidate_idx].high
-    window = bars[candidate_idx + 1 : -1]
-    if not window:
-        return None
-
-    latest = bars[-1]
-    had_break = any(bar.high > level for bar in window[-lookback:])
-    reclaimed = latest.close < level and latest.high > level
-
-    if had_break and reclaimed:
-        return {"level": level, "bar": latest, "swing_index": candidate_idx}
-
-    return None
-
-
-def mss_after_sweep(
-    bars: list[Bar],
-    direction: str,
-) -> bool:
-    """
-    Confirmation proxy on the 15M stream.
-
-    A true M5/M1 confirmation cannot be reconstructed from 15M candles.
-    Therefore this uses the latest confirmed 15M structure shift as the live
-    confirmation layer until start.py exposes lower-timeframe data.
-    """
-    if len(bars) < 10:
-        return False
-
-    swing_highs, swing_lows = find_swings(bars)
-
-    if direction == "bullish" and swing_highs:
-        level = bars[swing_highs[-1]].high
-        return bars[-1].close > level
-
-    if direction == "bearish" and swing_lows:
-        level = bars[swing_lows[-1]].low
-        return bars[-1].close < level
-
-    return False
-
-
-def nearest_target(
-    bars: list[Bar],
-    direction: str,
-    entry: float,
-    stop: float,
-) -> float | None:
-    risk = abs(entry - stop)
-    if risk <= 0:
-        return None
-
-    # Prefer a recent opposing liquidity / swing level if it gives >= 2R.
-    swing_highs, swing_lows = find_swings(bars)
-
-    if direction == "bullish":
-        candidates = [
-            bars[i].high for i in swing_highs[-8:]
-            if bars[i].high > entry
-        ]
-        for target in sorted(candidates):
-            if target - entry >= risk * DEFAULT_RR:
-                return target
-        return entry + risk * DEFAULT_RR
-
-    candidates = [
-        bars[i].low for i in swing_lows[-8:]
-        if bars[i].low < entry
-    ]
-    for target in sorted(candidates, reverse=True):
-        if entry - target >= risk * DEFAULT_RR:
-            return target
-    return entry - risk * DEFAULT_RR
-
-
-def setup_key(
-    symbol: str,
-    direction: str,
-    family: str,
-    created_at: int,
-    entry_low: float,
-    entry_high: float,
-) -> str:
-    return (
-        f"{symbol}:{direction}:{family}:{created_at}:"
-        f"{entry_low:.12g}:{entry_high:.12g}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Strategy engine
-# ---------------------------------------------------------------------------
-
-class StrategyEngine:
-    """
-    Scans all symbols and maintains simulated setup state.
-
-    The engine intentionally separates:
-        detect -> score -> publish -> wait -> trigger -> expire
-    """
-
-    def __init__(self, context: dict[str, Any]) -> None:
-        self.context = context
-        self.stop_event: threading.Event = context["stop_event"]
-        self.send_message: Callable[[int, Any], None] = context["send_message"]
-        self.chat_id: int | None = context.get("chat_id")
-
-        self.data_engine = context.get("data_engine")
-        self._running = False
-        self._thread: threading.Thread | None = None
-        self._lock = threading.RLock()
-
-        self.setups: dict[str, Setup] = {}
-        self._reported_ids: set[str] = set()
-        self._last_processed_timestamp: dict[str, int] = {}
-        self._last_scan = 0.0
-        self._last_summary = 0.0
-
-        self._stats = {
-            "scans": 0,
-            "symbols_scanned": 0,
-            "setups_created": 0,
-            "setups_triggered": 0,
-            "setups_expired": 0,
-        }
-
-    # ----------------------------- IO -----------------------------
-
-    def _notify(self, text: str) -> None:
-        if self.chat_id is None:
-            return
-        try:
-            self.send_message(self.chat_id, text)
-        except Exception:
-            log.exception("[TG] send failed")
-
-    def _get_symbols(self) -> list[str]:
-        if self.data_engine is None:
-            return []
-        try:
-            return list(self.data_engine.get_symbols())
-        except Exception:
-            log.exception("[DATA] get_symbols failed")
-            return []
-
-    def _get_candles(self, symbol: str) -> list[dict[str, Any]]:
-        if self.data_engine is None:
-            return []
-        try:
-            return list(self.data_engine.get_candles(symbol, 700))
-        except Exception:
-            log.exception("[DATA] get_candles failed | %s", symbol)
-            return []
-
-    def _get_price(self, symbol: str, bars: list[Bar]) -> float | None:
-        if self.data_engine is not None:
-            try:
-                value = self.data_engine.get_price(symbol)
-                if value is not None:
-                    return float(value)
-            except Exception:
-                log.exception("[DATA] get_price failed | %s", symbol)
-
-        return bars[-1].close if bars else None
-
-    # ----------------------------- analysis -----------------------------
-
-    def _build_timeframes(
-        self,
-        base: list[Bar],
-    ) -> dict[str, list[Bar]]:
-        return {
-            "15M": base,
-            "1H": aggregate_bars(base, H1_FACTOR),
-            "4H": aggregate_bars(base, H4_FACTOR),
-            "1D": aggregate_bars(base, D1_FACTOR),
-        }
-
-    def _source_context(
-        self,
-        frames: dict[str, list[Bar]],
-    ) -> dict[str, Any]:
-        h1 = frames["1H"]
-        h4 = frames["4H"]
-        d1 = frames["1D"]
-
-        h1_trend = trend_strength(h1)
-        h4_trend = trend_strength(h4)
-        d1_trend = trend_strength(d1)
-
-        h1_struct = market_structure(h1)
-        h4_struct = market_structure(h4)
-        d1_struct = market_structure(d1)
-
-        return {
-            "h1_trend": h1_trend,
-            "h4_trend": h4_trend,
-            "d1_trend": d1_trend,
-            "h1_struct": h1_struct,
-            "h4_struct": h4_struct,
-            "d1_struct": d1_struct,
-        }
-
-    def _dominant_bias(self, ctx: dict[str, Any]) -> str:
-        scores = {"bullish": 0, "bearish": 0}
-
-        for tf in ("d1_trend", "h4_trend", "h1_trend"):
-            item = ctx[tf]
-            direction = item.get("direction")
-            if direction in scores:
-                weight = 3 if tf == "d1_trend" else 2 if tf == "h4_trend" else 1
-                scores[direction] += weight
-
-        for tf in ("d1_struct", "h4_struct", "h1_struct"):
-            direction = ctx[tf].get("trend")
-            if direction in scores:
-                scores[direction] += 2 if tf != "h1_struct" else 1
-
-        if scores["bullish"] > scores["bearish"]:
-            return "bullish"
-        if scores["bearish"] > scores["bullish"]:
-            return "bearish"
-        return "neutral"
-
-    def _find_latest_swing_pair(
-        self,
-        bars: list[Bar],
-        direction: str,
-    ) -> tuple[float, float] | None:
-        highs, lows = find_swings(bars)
-        if not highs or not lows:
-            return None
-
-        if direction == "bullish":
-            low_idx = lows[-1]
-            later_highs = [i for i in highs if i > low_idx]
-            if not later_highs:
-                return None
-            high_idx = later_highs[-1]
-            if bars[high_idx].high <= bars[low_idx].low:
-                return None
-            return bars[low_idx].low, bars[high_idx].high
-
-        high_idx = highs[-1]
-        later_lows = [i for i in lows if i > high_idx]
-        if not later_lows:
-            return None
-        low_idx = later_lows[-1]
-        if bars[high_idx].high <= bars[low_idx].low:
-            return None
-        return bars[low_idx].low, bars[high_idx].high
-
-    def _zone_candidates(
-        self,
-        h1: list[Bar],
-        direction: str,
-    ) -> list[Zone]:
-        fvg = detect_fvgs(h1)
-        ob = detect_order_blocks(h1)
-
-        zones = []
-        for zone in fvg + ob:
-            zone.source_tf = "1H"
-            if direction == "bullish" and zone.kind in {"bullish_fvg", "bullish_ob"}:
-                zones.append(zone)
-            elif direction == "bearish" and zone.kind in {"bearish_fvg", "bearish_ob"}:
-                zones.append(zone)
-
-        # Newest first.
-        return sorted(zones, key=lambda z: z.created_at, reverse=True)
-
-    def _make_setup(
-        self,
-        symbol: str,
-        bars: list[Bar],
-        frames: dict[str, list[Bar]],
-        ctx: dict[str, Any],
-        bias: str,
-    ) -> Setup | None:
-        h1 = frames["1H"]
-        base = bars
-
-        swing = self._find_latest_swing_pair(h1, bias)
-        if swing is None:
-            return None
-
-        swing_low, swing_high = swing
-        zones = self._zone_candidates(h1, bias)
-        if not zones:
-            return None
-
-        selected: Zone | None = None
-        best_score = -1.0
-        best_reasons: list[str] = []
-        best_confluences: list[str] = []
-
-        current_price = base[-1].close
-
-        for zone in zones:
-            if bias == "bullish":
-                fib_ok = zone_is_discount(zone, swing_low, swing_high)
-            else:
-                fib_ok = zone_is_premium(zone, swing_low, swing_high)
-
-            score = 0.0
-            reasons: list[str] = []
-            confluences: list[str] = []
-
-            if fib_ok:
-                score += 2
-                confluences.append("Fibonacci 0.618+")
-            else:
+        if setup.state == "PENDING_LIMIT":
+            if now_ts >= setup.expires_ts:
+                setup.state = "EXPIRED"
+                setup.outcome = "expired"
+                COUNTERS["expired"] += 1
+                notices.append(f"⏳ {symbol} {setup.direction} limit expired")
+                _journal_setup(setup)
                 continue
 
-            if (
-                (bias == "bullish" and zone.kind == "bullish_ob")
-                or (bias == "bearish" and zone.kind == "bearish_ob")
-            ):
-                score += 2
-                confluences.append("Order Block")
-
-            if (
-                (bias == "bullish" and zone.kind == "bullish_fvg")
-                or (bias == "bearish" and zone.kind == "bearish_fvg")
-            ):
-                score += 2
-                confluences.append("Fair Value Gap")
-
-            h4_dir = ctx["h4_struct"].get("trend")
-            d1_dir = ctx["d1_struct"].get("trend")
-            if h4_dir == bias:
-                score += 1
-                confluences.append("H4 structure aligned")
-            if d1_dir == bias:
-                score += 1
-                confluences.append("D1 structure aligned")
-
-            h1_dir = ctx["h1_struct"].get("trend")
-            if h1_dir == bias:
-                score += 1
-                confluences.append("H1 structure aligned")
-
-            # Detect a current/very recent liquidity event.
-            sweep = (
-                bullish_liquidity_sweep(base)
-                if bias == "bullish"
-                else bearish_liquidity_sweep(base)
-            )
-            if sweep:
-                score += 2
-                confluences.append("Liquidity sweep")
-                reasons.append(
-                    f"Liquidity taken at {sweep['level']:.8g}"
+            if setup.direction == "LONG" and setup.sl < price <= setup.entry:
+                setup.state = "FILLED"
+                setup.filled_ts = now_ts
+                POSITIONS[setup.id] = Position(
+                    setup.id, symbol, setup.direction, setup.entry, setup.sl, setup.tp, now_ts
                 )
+                COUNTERS["fills"] += 1
+                notices.append(_format_fill(setup))
+                log.info("[SIM] LIMIT FILLED %s %s entry=%.8f", symbol, setup.direction, setup.entry)
 
-            if zone_contains_price(zone, current_price):
-                score += 1
-                reasons.append("Price is inside POI")
+            elif setup.direction == "SHORT" and setup.entry <= price < setup.sl:
+                setup.state = "FILLED"
+                setup.filled_ts = now_ts
+                POSITIONS[setup.id] = Position(
+                    setup.id, symbol, setup.direction, setup.entry, setup.sl, setup.tp, now_ts
+                )
+                COUNTERS["fills"] += 1
+                notices.append(_format_fill(setup))
+                log.info("[SIM] LIMIT FILLED %s %s entry=%.8f", symbol, setup.direction, setup.entry)
+
+        elif setup.state == "FILLED":
+            pos = POSITIONS.get(setup.id)
+            if not pos or pos.closed_ts is not None:
+                continue
+
+            # Price updates arrive from the live candle stream. This is intentionally
+            # conservative: it does not invent intrabar ordering beyond current price.
+            if setup.direction == "LONG":
+                if price <= setup.sl:
+                    _close_position(setup, now_ts, "SL", -1.0)
+                    notices.append(_format_exit(setup))
+                elif price >= setup.tp:
+                    _close_position(setup, now_ts, "TP", setup.rr)
+                    notices.append(_format_exit(setup))
             else:
-                reasons.append("Waiting for POI retest")
+                if price >= setup.sl:
+                    _close_position(setup, now_ts, "SL", -1.0)
+                    notices.append(_format_exit(setup))
+                elif price <= setup.tp:
+                    _close_position(setup, now_ts, "TP", setup.rr)
+                    notices.append(_format_exit(setup))
 
-            if score > best_score:
-                selected = zone
-                best_score = score
-                best_reasons = reasons
-                best_confluences = confluences
+    return notices
 
-        if selected is None or best_score < MIN_SCORE:
-            return None
 
-        # Entry zone.
-        entry_low = selected.low
-        entry_high = selected.high
+def _close_position(setup: Setup, ts: int, outcome: str, r_multiple: float) -> None:
+    setup.state = "CLOSED"
+    setup.outcome = outcome
+    setup.r_multiple = r_multiple
+    pos = POSITIONS.get(setup.id)
+    if pos:
+        pos.closed_ts = ts
+        pos.outcome = outcome
+        pos.r_multiple = r_multiple
 
-        # Prefer limit while waiting for the POI. If price is already in the
-        # zone and 15M structure has confirmed the direction, use simulated
-        # market execution.
-        confirmed = mss_after_sweep(base, bias)
-        touched = zone_contains_price(selected, current_price)
+    if outcome == "TP":
+        COUNTERS["wins"] += 1
+    elif outcome == "SL":
+        COUNTERS["losses"] += 1
 
-        if touched and confirmed:
-            entry_type = "MARKET"
-            entry_price = current_price
-            status = "READY"
-        else:
-            entry_type = "LIMIT"
-            entry_price = selected.midpoint
-            status = "WATCHING"
+    _journal_setup(setup)
+    log.info("[SIM] CLOSED %s %s %s R=%.2f", setup.symbol, setup.direction, outcome, r_multiple)
 
-        risk_buffer = max(
-            selected.high - selected.low,
-            (atr(h1, 14)[-1] or 0.0) * 0.15,
-        )
 
-        if bias == "bullish":
-            stop = min(selected.low, swing_low) - risk_buffer * 0.10
-        else:
-            stop = max(selected.high, swing_high) + risk_buffer * 0.10
+def _journal_setup(setup: Setup) -> None:
+    JOURNAL.append(
+        {
+            "ts": int(time.time() * 1000),
+            "setup": asdict(setup),
+        }
+    )
+    if len(JOURNAL) > 5000:
+        del JOURNAL[:-5000]
 
-        target = nearest_target(h1, bias, entry_price, stop)
-        if target is None:
-            return None
 
-        risk = abs(entry_price - stop)
-        reward = abs(target - entry_price)
-        rr = reward / risk if risk > 0 else 0.0
+def _format_transition(setup: Setup, old_state: str) -> str:
+    if setup.state == "IN_ZONE":
+        return f"📍 {setup.symbol} {setup.direction}\nState: {old_state} → IN_ZONE\nWaiting for confirmation."
+    if setup.state == "WAITING_CONFIRMATION":
+        missing = ", ".join(setup.confirmation_required) or "micro confirmation"
+        return f"⏳ {setup.symbol} {setup.direction}\nState: {old_state} → WAITING_CONFIRMATION\nMissing: {missing}"
+    if setup.state == "PENDING_LIMIT":
+        return _format_setup(setup, header="🟢 SETUP CONFIRMED")
+    return ""
 
-        if rr < MIN_RR:
-            # Recalculate with strict 2R/3R style target rather than force a
-            # structurally too-close level.
-            target = (
-                entry_price + risk * DEFAULT_RR
-                if bias == "bullish"
-                else entry_price - risk * DEFAULT_RR
-            )
-            reward = abs(target - entry_price)
-            rr = reward / risk if risk > 0 else 0.0
 
-        now_bar = base[-1]
-        setup_id = setup_key(
-            symbol,
-            bias,
-            "H1_POI_CONFLUENCE",
-            selected.created_at,
-            entry_low,
-            entry_high,
-        )
+def _format_setup(setup: Setup, header: str = "🧠 SETUP") -> str:
+    missing = ", ".join(setup.confirmation_required) if setup.confirmation_required else "-"
+    codes = ", ".join(setup.reason_codes) if setup.reason_codes else "-"
+    return (
+        f"{header}\n\n"
+        f"{setup.symbol} {setup.direction}\n"
+        f"Model: {setup.model}\n"
+        f"Score: {setup.score}/100\n"
+        f"State: {setup.state}\n"
+        f"Entry: {setup.entry_type} {setup.entry:.8f}\n"
+        f"SL: {setup.sl:.8f}\n"
+        f"TP: {setup.tp:.8f}\n"
+        f"RR: {setup.rr:.2f}\n"
+        f"Confluence: {', '.join(setup.confluences) or '-'}\n"
+        f"Reason codes: {codes}\n"
+        f"Waiting: {missing}"
+    )
 
-        return Setup(
-            setup_id=setup_id,
-            symbol=symbol,
-            direction="BUY" if bias == "bullish" else "SELL",
-            family="H1_POI_CONFLUENCE",
-            status=status,
-            score=best_score,
-            created_at=now_bar.timestamp,
-            expiry_at=now_bar.timestamp + SETUP_EXPIRY_CANDLES * BASE_TF_MINUTES * 60_000,
-            source_tf="1H",
-            confirmation_tf="15M",
-            entry_type=entry_type,
-            entry_low=entry_low,
-            entry_high=entry_high,
-            entry_price=entry_price,
-            stop_loss=stop,
-            take_profit=target,
-            risk_distance=risk,
-            rr=rr,
-            reasons=best_reasons + [
-                "15M confirmation layer; M5/M1 unavailable from 15M source"
-            ],
-            confluences=best_confluences,
-            origin_bar=now_bar.timestamp,
-            last_seen_bar=now_bar.timestamp,
-            trigger_bar=None,
-        )
 
-    def _make_sweep_setup(
-        self,
-        symbol: str,
-        bars: list[Bar],
-        frames: dict[str, list[Bar]],
-        ctx: dict[str, Any],
-    ) -> Setup | None:
-        """
-        Reversal candidate:
-            liquidity sweep -> 15M MSS -> FVG/OB retracement.
-        """
-        bias: str
-        sweep: dict[str, Any] | None
+def _format_fill(setup: Setup) -> str:
+    return (
+        "🟢 SIMULATION FILLED\n\n"
+        f"{setup.symbol} {setup.direction}\n"
+        f"Entry: {setup.entry:.8f}\n"
+        f"SL: {setup.sl:.8f}\n"
+        f"TP: {setup.tp:.8f}\n"
+        f"RR: {setup.rr:.2f}\n"
+        f"Model: {setup.model}"
+    )
 
-        bull_sweep = bullish_liquidity_sweep(bars)
-        bear_sweep = bearish_liquidity_sweep(bars)
 
-        if bull_sweep and not bear_sweep:
-            bias = "bullish"
-            sweep = bull_sweep
-        elif bear_sweep and not bull_sweep:
-            bias = "bearish"
-            sweep = bear_sweep
-        else:
-            return None
+def _format_exit(setup: Setup) -> str:
+    icon = "✅" if setup.outcome == "TP" else "🛑"
+    return (
+        f"{icon} SIMULATION {setup.outcome}\n\n"
+        f"{setup.symbol} {setup.direction}\n"
+        f"R: {setup.r_multiple:.2f}\n"
+        f"Model: {setup.model}"
+    )
 
-        if not mss_after_sweep(bars, bias):
-            return None
 
-        h1 = frames["1H"]
-        zones = self._zone_candidates(h1, bias)
-        if not zones:
-            return None
+def _active_setups_sorted() -> list[Setup]:
+    active = [
+        s for s in SETUPS.values()
+        if s.state in {
+            "CANDIDATE", "WATCHING", "IN_ZONE",
+            "WAITING_CONFIRMATION", "PENDING_LIMIT", "FILLED"
+        }
+    ]
+    return sorted(active, key=lambda x: (-x.score, x.symbol, x.created_ts))
 
-        swing = self._find_latest_swing_pair(h1, bias)
-        if swing is None:
-            return None
 
-        swing_low, swing_high = swing
-        eligible: list[Zone] = []
-        for z in zones:
-            good = (
-                zone_is_discount(z, swing_low, swing_high)
-                if bias == "bullish"
-                else zone_is_premium(z, swing_low, swing_high)
-            )
-            if good:
-                eligible.append(z)
+def scan_all(initial: bool = False) -> list[str]:
+    if API is None or not API.is_bootstrap_complete():
+        return ["ℹ️ Strategy menunggu historical data lengkap."]
 
-        if not eligible:
-            return None
+    global INITIAL_SCAN_DONE
+    symbols = API.get_symbols()
+    total = len(symbols)
+    found_new = 0
+    watching = 0
+    confirmed = 0
+    no_setup = 0
+    best_candidates: list[Setup] = []
 
-        zone = eligible[0]
-        price = bars[-1].close
+    log.info(
+        "[SCAN] %s scan start | symbols=%d",
+        "INITIAL" if initial else "FULL",
+        total,
+    )
 
-        if bias == "bullish":
-            stop = min(zone.low, sweep["level"]) * (1.0 - 0.00015)
-        else:
-            stop = max(zone.high, sweep["level"]) * (1.0 + 0.00015)
-
-        entry = zone.midpoint
-        target = nearest_target(h1, bias, entry, stop)
-        if target is None:
-            return None
-
-        risk = abs(entry - stop)
-        rr = abs(target - entry) / risk if risk > 0 else 0.0
-        if rr < MIN_RR:
-            target = entry + risk * DEFAULT_RR if bias == "bullish" else entry - risk * DEFAULT_RR
-            rr = DEFAULT_RR
-
-        touched = zone_contains_price(zone, price)
-
-        return Setup(
-            setup_id=setup_key(
-                symbol,
-                bias,
-                "LIQUIDITY_SWEEP_MSS",
-                int(sweep["bar"].timestamp),
-                zone.low,
-                zone.high,
-            ),
-            symbol=symbol,
-            direction="BUY" if bias == "bullish" else "SELL",
-            family="LIQUIDITY_SWEEP_MSS",
-            status="READY" if touched else "WATCHING",
-            score=7.0,
-            created_at=int(sweep["bar"].timestamp),
-            expiry_at=int(sweep["bar"].timestamp)
-            + SETUP_EXPIRY_CANDLES * BASE_TF_MINUTES * 60_000,
-            source_tf="1H/15M",
-            confirmation_tf="15M",
-            entry_type="MARKET" if touched else "LIMIT",
-            entry_low=zone.low,
-            entry_high=zone.high,
-            entry_price=price if touched else entry,
-            stop_loss=stop,
-            take_profit=target,
-            risk_distance=risk,
-            rr=rr,
-            reasons=[
-                f"Liquidity sweep at {sweep['level']:.8g}",
-                "15M market structure shift confirmed",
-                "H1 POI retest model",
-                "M5/M1 not available from 15M source",
-            ],
-            confluences=[
-                "Liquidity sweep",
-                "Market structure shift",
-                zone.kind.replace("_", " ").upper(),
-                "Fibonacci 0.618+",
-            ],
-            origin_bar=int(sweep["bar"].timestamp),
-            last_seen_bar=bars[-1].timestamp,
-        )
-
-    # ----------------------------- state -----------------------------
-
-    def _existing_for_symbol(self, symbol: str) -> list[Setup]:
-        with self._lock:
-            return [
-                s for s in self.setups.values()
-                if s.symbol == symbol and s.status in {"WATCHING", "READY", "PENDING"}
-            ]
-
-    def _accept_setup(self, setup: Setup) -> bool:
-        if setup.setup_id in self._reported_ids:
-            return False
-
-        existing = self._existing_for_symbol(setup.symbol)
-        if len(existing) >= MAX_ACTIVE_SETUP_PER_SYMBOL:
-            return False
-
-        with self._lock:
-            active = [
-                s for s in self.setups.values()
-                if s.status in {"WATCHING", "READY", "PENDING"}
-            ]
-            if len(active) >= MAX_TOTAL_ACTIVE_SETUPS:
-                return False
-
-            self.setups[setup.setup_id] = setup
-            self._reported_ids.add(setup.setup_id)
-            self._stats["setups_created"] += 1
-
-        return True
-
-    def _update_setup_state(
-        self,
-        setup: Setup,
-        bars: list[Bar],
-        current_price: float,
-    ) -> str | None:
-        latest_ts = bars[-1].timestamp
-
-        if setup.expiry_at is not None and latest_ts >= setup.expiry_at:
-            setup.status = "EXPIRED"
-            self._stats["setups_expired"] += 1
-            return "EXPIRED"
-
-        # Invalidate a setup if the market closes clearly beyond the protective
-        # zone before entry.
-        if setup.direction == "BUY":
-            if bars[-1].close < setup.stop_loss:
-                setup.status = "INVALIDATED"
-                return "INVALIDATED"
-            touched = (
-                setup.entry_low <= current_price <= setup.entry_high
-                or bars[-1].low <= setup.entry_high
-            )
-        else:
-            if bars[-1].close > setup.stop_loss:
-                setup.status = "INVALIDATED"
-                return "INVALIDATED"
-            touched = (
-                setup.entry_low <= current_price <= setup.entry_high
-                or bars[-1].high >= setup.entry_low
-            )
-
-        if setup.status == "WATCHING" and touched:
-            # Wait for 15M directional confirmation before simulated execution.
-            confirmed = mss_after_sweep(bars, "bullish" if setup.direction == "BUY" else "bearish")
-            if confirmed:
-                setup.status = "TRIGGERED"
-                setup.entry_type = "MARKET"
-                setup.entry_price = current_price
-                setup.trigger_bar = latest_ts
-                self._stats["setups_triggered"] += 1
-                return "TRIGGERED"
-            setup.status = "PENDING"
-            return "PENDING"
-
-        if setup.status == "PENDING":
-            confirmed = mss_after_sweep(bars, "bullish" if setup.direction == "BUY" else "bearish")
-            if confirmed and touched:
-                setup.status = "TRIGGERED"
-                setup.entry_type = "MARKET"
-                setup.entry_price = current_price
-                setup.trigger_bar = latest_ts
-                self._stats["setups_triggered"] += 1
-                return "TRIGGERED"
-
-        setup.last_seen_bar = latest_ts
-        return None
-
-    def _format_setup(self, setup: Setup, event: str = "NEW") -> str:
-        emoji = "🟢" if setup.direction == "BUY" else "🔴"
-        return (
-            f"{emoji} <b>{event} SETUP</b>\n"
-            f"Pair: <code>{setup.symbol}</code>\n"
-            f"Direction: <b>{setup.direction}</b>\n"
-            f"Family: <code>{setup.family}</code>\n"
-            f"Status: <b>{setup.status}</b>\n"
-            f"Entry: {setup.entry_type} @ {setup.entry_price:.8g}\n"
-            f"Zone: {setup.entry_low:.8g} → {setup.entry_high:.8g}\n"
-            f"SL: {setup.stop_loss:.8g}\n"
-            f"TP: {setup.take_profit:.8g}\n"
-            f"RR: 1:{setup.rr:.2f}\n"
-            f"Score: {setup.score:.1f}\n"
-            f"Confluence: {', '.join(setup.confluences)}\n"
-            f"Reason: {', '.join(setup.reasons[:4])}"
-        )
-
-    # ----------------------------- scanning -----------------------------
-
-    def scan_symbol(self, symbol: str) -> list[Setup]:
-        raw = self._get_candles(symbol)
-        bars = normalize_bars(raw)
-
-        if len(bars) < MIN_BASE_CANDLES:
-            log.warning(
-                "[SCAN] %s | insufficient data %d/%d",
-                symbol,
-                len(bars),
-                MIN_BASE_CANDLES,
-            )
-            return []
-
-        frames = self._build_timeframes(bars)
-        if len(frames["1H"]) < 25:
-            return []
-
-        ctx = self._source_context(frames)
-        bias = self._dominant_bias(ctx)
-
-        if bias == "neutral":
-            return []
-
-        current_price = self._get_price(symbol, bars)
-        if current_price is None:
-            return []
-
-        newest = bars[-1].timestamp
-        last_seen = self._last_processed_timestamp.get(symbol)
-        if last_seen == newest:
-            # Still update state because the live candle price can change.
-            pass
-        else:
-            self._last_processed_timestamp[symbol] = newest
-
-        candidates: list[Setup] = []
-
-        regular = self._make_setup(symbol, bars, frames, ctx, bias)
-        if regular is not None:
-            candidates.append(regular)
-
-        reversal = self._make_sweep_setup(symbol, bars, frames, ctx)
-        if reversal is not None:
-            candidates.append(reversal)
-
-        # Prefer stronger setup families first.
-        candidates.sort(
-            key=lambda s: (
-                s.score,
-                1 if s.family == "LIQUIDITY_SWEEP_MSS" else 0,
-            ),
-            reverse=True,
-        )
-
-        return candidates[:MAX_ACTIVE_SETUP_PER_SYMBOL]
-
-    def scan_all(self) -> tuple[list[Setup], int]:
-        symbols = self._get_symbols()
-
-        created: list[Setup] = []
-        scanned = 0
-
-        for symbol in symbols:
-            if self.stop_event.is_set() or not self._running:
-                break
-
+    for idx, symbol in enumerate(symbols, 1):
+        with LOCK:
             try:
-                scanned += 1
-                candidates = self.scan_symbol(symbol)
-                for candidate in candidates:
-                    if self._accept_setup(candidate):
-                        created.append(candidate)
-                        log.info(
-                            "[SETUP] NEW | %s | %s | family=%s score=%.1f entry=%s rr=1:%.2f",
-                            candidate.symbol,
-                            candidate.direction,
-                            candidate.family,
-                            candidate.score,
-                            candidate.entry_type,
-                            candidate.rr,
-                        )
+                analysis = _scan_symbol(symbol)
+                LAST_ANALYSIS[symbol] = analysis
+                COUNTERS["initial_scans" if initial else "event_scans"] += 1
+
+                rows = analysis.get("candidates", [])
+                if not rows:
+                    no_setup += 1
+                for setup in rows:
+                    if _register_or_merge(setup):
+                        found_new += 1
+                    best_candidates.append(setup)
+                    if setup.state in {"IN_ZONE", "WAITING_CONFIRMATION", "PENDING_LIMIT"}:
+                        confirmed += 1
+                    else:
+                        watching += 1
             except Exception:
                 log.exception("[SCAN] %s failed", symbol)
 
-        self._stats["scans"] += 1
-        self._stats["symbols_scanned"] += scanned
-        return created, scanned
-
-    def update_live_states(self) -> list[tuple[Setup, str]]:
-        events: list[tuple[Setup, str]] = []
-
-        with self._lock:
-            active = [
-                s for s in self.setups.values()
-                if s.status in {"WATCHING", "PENDING", "READY"}
-            ]
-
-        for setup in active:
-            raw = self._get_candles(setup.symbol)
-            bars = normalize_bars(raw)
-            if not bars:
-                continue
-
-            price = self._get_price(setup.symbol, bars)
-            if price is None:
-                continue
-
-            old = setup.status
-            result = self._update_setup_state(setup, bars, price)
-
-            if result and result != old:
-                events.append((setup, result))
-                log.info(
-                    "[SETUP] STATE | %s | %s -> %s | entry=%s",
-                    setup.symbol,
-                    old,
-                    result,
-                    setup.entry_price,
-                )
-
-        return events
-
-    def _summary(self) -> None:
-        now = time.monotonic()
-        if now - self._last_summary < LOG_SUMMARY_SECONDS:
-            return
-        self._last_summary = now
-
-        with self._lock:
-            active = [
-                s for s in self.setups.values()
-                if s.status in {"WATCHING", "PENDING", "READY"}
-            ]
-
-        log.info(
-            "[SUMMARY] scans=%d symbols=%d new_setups=%d triggered=%d expired=%d active=%d",
-            self._stats["scans"],
-            self._stats["symbols_scanned"],
-            self._stats["setups_created"],
-            self._stats["setups_triggered"],
-            self._stats["setups_expired"],
-            len(active),
-        )
-
-    # ----------------------------- lifecycle -----------------------------
-
-    def run(self) -> None:
-        log.info("[STRATEGY] worker started")
-        boot_notified = False
-
-        while self._running and not self.stop_event.is_set():
-            try:
-                if self.data_engine is None:
-                    log.warning("[STRATEGY] data_engine unavailable; waiting")
-                    self.stop_event.wait(5)
-                    continue
-
-                status = {}
-                try:
-                    status = self.data_engine.get_status()
-                except Exception:
-                    pass
-
-                if not status.get("bootstrap_done", False):
-                    if not boot_notified:
-                        log.info("[STRATEGY] waiting for historical bootstrap")
-                        boot_notified = True
-                    self.stop_event.wait(SCAN_INTERVAL_SECONDS)
-                    continue
-
-                if not self._last_scan or (
-                    time.monotonic() - self._last_scan >= SCAN_INTERVAL_SECONDS
-                ):
-                    self._last_scan = time.monotonic()
-
-                    created, scanned = self.scan_all()
-
-                    for setup in created:
-                        # Telegram only gets meaningful setup messages.
-                        self._notify(self._format_setup(setup, "NEW"))
-
-                    state_events = self.update_live_states()
-                    for setup, event in state_events:
-                        if event == "TRIGGERED":
-                            self._notify(self._format_setup(setup, "TRIGGERED"))
-                        elif event in {"EXPIRED", "INVALIDATED"}:
-                            self._notify(
-                                f"ℹ️ <b>SETUP {event}</b>\n"
-                                f"{setup.symbol} {setup.direction}\n"
-                                f"{setup.family}\n"
-                                f"ID: <code>{setup.setup_id}</code>"
-                            )
-
-                    self._summary()
-
-                self.stop_event.wait(SCAN_INTERVAL_SECONDS)
-
-            except Exception:
-                log.exception("[STRATEGY] worker loop failed")
-                self.stop_event.wait(3)
-
-        log.info("[STRATEGY] worker stopped")
-
-    def start(self) -> str:
-        with self._lock:
-            if self._running:
-                return "ℹ️ Strategy engine sudah aktif."
-
-            if self.data_engine is None:
-                return (
-                    "❌ Strategy engine belum mendapat data_engine dari start.py."
-                )
-
-            self._running = True
-
-        self._thread = threading.Thread(
-            target=self.run,
-            name="strategy-engine",
-            daemon=True,
-        )
-        self._thread.start()
-
-        self._notify(
-            "🧠 <b>STRATEGY ENGINE ACTIVE</b>\n"
-            "Mode: SIMULATION ONLY\n"
-            "Base data: 15M\n"
-            "Derived TF: 1H / 4H / 1D\n"
-            "Scanning: ALL available pairs\n"
-            "Execution: virtual only"
-        )
-        return "🟢 Strategy engine aktif."
-
-    def stop(self) -> None:
-        with self._lock:
-            self._running = False
-        log.info("[STRATEGY] stop requested")
-
-    # ----------------------------- commands / API -----------------------------
-
-    def get_setups(self, active_only: bool = True) -> list[dict[str, Any]]:
-        with self._lock:
-            values = list(self.setups.values())
-
-        if active_only:
-            values = [
-                x for x in values
-                if x.status in {"WATCHING", "PENDING", "READY", "TRIGGERED"}
-            ]
-
-        values.sort(key=lambda x: x.created_at, reverse=True)
-        return [x.as_dict() for x in values]
-
-    def get_status(self) -> dict[str, Any]:
-        with self._lock:
-            active = sum(
-                1 for x in self.setups.values()
-                if x.status in {"WATCHING", "PENDING", "READY"}
+        if idx == 1 or idx % SCAN_LOG_EVERY == 0 or idx == total:
+            log.info(
+                "[SCAN] progress %d/%d | new=%d watching=%d actionable=%d no_setup=%d active=%d",
+                idx, total, found_new, watching, confirmed, no_setup, _active_count()
             )
-            triggered = sum(1 for x in self.setups.values() if x.status == "TRIGGERED")
 
-        return {
-            "running": self._running,
-            "active_setups": active,
-            "triggered_setups": triggered,
-            **self._stats,
-        }
+    INITIAL_SCAN_DONE = INITIAL_SCAN_DONE or initial
 
+    active = _active_setups_sorted()
+    summary = [
+        "🔎 INITIAL STRATEGY SCAN COMPLETE" if initial else "🔎 STRATEGY SCAN COMPLETE",
+        "",
+        f"Pairs scanned: {total}",
+        f"New candidates: {found_new}",
+        f"Actionable/watch states: {len(active)}",
+        f"Pairs without candidate: {no_setup}",
+    ]
 
-# ---------------------------------------------------------------------------
-# Module-level integration
-# ---------------------------------------------------------------------------
-
-_ENGINE_LOCK = threading.RLock()
-_STRATEGY: StrategyEngine | None = None
-
-
-def on_start(context: dict[str, Any]) -> bool:
-    """
-    Called by an integrated start.py.
-
-    Important:
-    Current start.py must pass context["data_engine"] = its DataEngine instance
-    for this strategy module to access the market data.
-    """
-    global _STRATEGY
-
-    data_engine = context.get("data_engine")
-    if data_engine is None:
-        log.warning(
-            "[STRATEGY] context[data_engine] missing. "
-            "Strategy file loaded but cannot scan yet."
+    if best_candidates:
+        ranked = sorted(
+            {s.id: s for s in best_candidates}.values(),
+            key=lambda s: (-s.score, s.symbol),
         )
+        summary += ["", "Top candidates:"]
+        for i, s in enumerate(ranked[:MAX_TELEGRAM_SETUPS], 1):
+            summary.append(
+                f"{i}. {s.symbol} {s.direction} | {s.model} | "
+                f"{s.state} | score={s.score} | RR={s.rr:.2f}"
+            )
+        if len(ranked) > MAX_TELEGRAM_SETUPS:
+            summary.append(f"… +{len(ranked) - MAX_TELEGRAM_SETUPS} lainnya. Gunakan /setups.")
+    else:
+        summary += ["", "No candidate met the current rule threshold."]
 
-    with _ENGINE_LOCK:
-        _STRATEGY = StrategyEngine(context)
-
-    # Strategy can start its worker immediately; it will wait until bootstrap_done.
-    return _STRATEGY.start().startswith("🟢") if _STRATEGY else False
-
-
-def on_stop(context: dict[str, Any]) -> bool:
-    global _STRATEGY
-
-    with _ENGINE_LOCK:
-        engine = _STRATEGY
-        _STRATEGY = None
-
-    if engine is not None:
-        engine.stop()
-
-    return True
+    return ["\n".join(summary)]
 
 
-def _strategy_or_raise() -> StrategyEngine:
-    with _ENGINE_LOCK:
-        engine = _STRATEGY
-    if engine is None:
-        raise RuntimeError("Strategy engine belum diinisialisasi.")
-    return engine
+def on_data_ready() -> str | None:
+    with LOCK:
+        messages = scan_all(initial=True)
+    return "\n\n".join(messages)
 
 
-def handle_update(update: dict[str, Any], context: dict[str, Any]) -> str | None:
-    """
-    Telegram command namespace for strategy.py.
-
-    The module is intentionally simulation-only.
-    """
-    message = update.get("message") or {}
-    text = str(message.get("text") or message.get("caption") or "").strip()
-    if not text:
+def on_market_event(event: dict[str, Any]) -> str | None:
+    if API is None or event.get("type") != "candle":
         return None
 
-    command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+    symbol = str(event.get("symbol") or "").upper()
+    tf = str(event.get("timeframe") or "")
+    candle = event.get("candle") or {}
+    if not symbol or tf not in {"1", "5", "15"}:
+        return None
 
-    if command == "/strategystatus":
-        engine = _strategy_or_raise()
-        s = engine.get_status()
-        return (
-            "🧠 <b>STRATEGY STATUS</b>\n"
-            f"Running: {'ON' if s['running'] else 'OFF'}\n"
-            f"Scans: {s['scans']}\n"
-            f"Symbols scanned: {s['symbols_scanned']}\n"
-            f"Setups created: {s['setups_created']}\n"
-            f"Triggered: {s['setups_triggered']}\n"
-            f"Expired: {s['setups_expired']}\n"
-            f"Active: {s['active_setups']}"
-        )
+    now_ts = int(candle.get("timestamp") or int(time.time() * 1000))
+    notices: list[str] = []
 
-    if command == "/setups":
-        parts = text.split()
-        limit = 10
-        if len(parts) > 1:
-            try:
-                limit = max(1, min(25, int(parts[1])))
-            except ValueError:
-                return "❌ Limit harus angka."
+    with LOCK:
+        # Simulation can react to every live price update.
+        notices.extend(_simulation_update(symbol, now_ts))
 
-        setups = _strategy_or_raise().get_setups(active_only=True)[:limit]
-        if not setups:
-            return "ℹ️ Belum ada setup aktif."
+        # Only closed candles are allowed to advance structural analysis.
+        if not candle.get("confirmed", False):
+            return "\n\n".join(notices[:2]) if notices else None
 
-        lines = ["📋 <b>ACTIVE SETUPS</b>"]
-        for s in setups:
+        # Micro timeframe updates: inspect only this symbol.
+        if tf in {"5", "1"}:
+            analysis = _scan_symbol(symbol, event_tf=tf)
+            LAST_ANALYSIS[symbol] = analysis
+
+            for setup in list(_active_setups(symbol)):
+                notices.extend(_transition_setup(setup, analysis, now_ts))
+
+            # Register new candidate if it is materially new.
+            for setup in analysis.get("candidates", []):
+                if _register_or_merge(setup):
+                    if setup.state == "PENDING_LIMIT":
+                        COUNTERS["confirmed"] += 1
+                        notices.append(_format_setup(setup, header="🟢 NEW CONFIRMED SETUP"))
+                    elif setup.state in {"IN_ZONE", "WAITING_CONFIRMATION"}:
+                        notices.append(
+                            f"⏳ {setup.symbol} {setup.direction} "
+                            f"{setup.state}\nMissing: "
+                            f"{', '.join(setup.confirmation_required) or '-'}"
+                        )
+
+            log.info(
+                "[EVENT] %s %s closed | bias=%s candidates=%d",
+                symbol, tf, analysis.get("bias"), len(analysis.get("candidates", []))
+            )
+
+        # 15M close can alter 1H/4H context, so rescan just this symbol.
+        elif tf == "15":
+            analysis = _scan_symbol(symbol, event_tf=tf)
+            LAST_ANALYSIS[symbol] = analysis
+            for setup in list(_active_setups(symbol)):
+                notices.extend(_transition_setup(setup, analysis, now_ts))
+
+            for setup in analysis.get("candidates", []):
+                if _register_or_merge(setup):
+                    notices.append(_format_setup(setup, header="🆕 NEW WATCH"))
+            log.info(
+                "[HTF] %s 15M close | bias=%s candidates=%d active=%d",
+                symbol, analysis.get("bias"), len(analysis.get("candidates", [])), len(_active_setups(symbol))
+            )
+
+    # Telegram remains intentionally quiet unless something changed.
+    unique: list[str] = []
+    seen = set()
+    for msg in notices:
+        if not msg or msg in seen:
+            continue
+        seen.add(msg)
+        unique.append(msg)
+    return "\n\n".join(unique[:3]) if unique else None
+
+
+# ---------------- Telegram commands ----------------
+def _why(symbol: str) -> str:
+    a = LAST_ANALYSIS.get(symbol)
+    if not a:
+        return f"ℹ️ Belum ada analysis snapshot untuk {symbol}. Gunakan /rescan."
+
+    labels = a.get("labels") or []
+    codes = a.get("reason_codes") or []
+    candidates = a.get("candidates") or []
+
+    out = [
+        f"🔍 WHY {symbol}",
+        "",
+        f"Bias: {a.get('bias')}",
+        f"Base score: {a.get('score', 0)}",
+        f"Reason codes: {', '.join(codes) or '-'}",
+        f"Context: {', '.join(labels) or '-'}",
+        "",
+        f"Candidates: {len(candidates)}",
+    ]
+    for i, s in enumerate(candidates[:5], 1):
+        out += [
+            "",
+            f"{i}. {s.symbol} {s.direction} / {s.model}",
+            f"State: {s.state}",
+            f"Score: {s.score}",
+            f"Confluence: {', '.join(s.confluences) or '-'}",
+            f"Waiting: {', '.join(s.confirmation_required) or '-'}",
+        ]
+    return "\n".join(out)
+
+
+def _setup_detail(setup_id: str) -> str:
+    s = SETUPS.get(setup_id)
+    if not s:
+        return "❌ Setup ID tidak ditemukan."
+    return _format_setup(s) + f"\n\nThesis: {s.thesis}"
+
+
+def handle_command(text: str) -> str | None:
+    parts = text.split()
+    cmd = parts[0].lower() if parts else ""
+
+    if cmd == "/setups":
+        active = _active_setups_sorted()
+        if not active:
+            return "📭 Tidak ada active setup/candidate saat ini."
+        lines = ["🧠 ACTIVE SETUPS"]
+        for i, s in enumerate(active[:40], 1):
             lines.append(
-                f"{'🟢' if s['direction'] == 'BUY' else '🔴'} "
-                f"{s['symbol']} | {s['direction']} | {s['family']} | "
-                f"{s['status']} | RR 1:{s['rr']}"
+                f"{i}. {s.symbol} {s.direction} | {s.model} | "
+                f"{s.state} | {s.score} | RR {s.rr:.2f}"
+            )
+        if len(active) > 40:
+            lines.append(f"… +{len(active)-40} lainnya")
+        return "\n".join(lines)
+
+    if cmd == "/setup":
+        if len(parts) < 2:
+            return "Format: /setup SETUP_ID"
+        return _setup_detail(parts[1])
+
+    if cmd == "/why":
+        if len(parts) < 2:
+            return "Format: /why BTCUSDT"
+        return _why(parts[1].upper())
+
+    if cmd == "/top":
+        active = _active_setups_sorted()
+        if not active:
+            return "📭 Belum ada candidate."
+        lines = ["🏆 TOP SETUPS"]
+        for i, s in enumerate(active[:15], 1):
+            lines.append(
+                f"{i}. {s.symbol} {s.direction} | {s.model} | "
+                f"score={s.score} | {s.state}"
             )
         return "\n".join(lines)
 
-    if command == "/setup":
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            return "Usage: /setup SETUP_ID"
-
-        setup_id = parts[1].strip()
-        setups = _strategy_or_raise().get_setups(active_only=False)
-        for s in setups:
-            if s["setup_id"] == setup_id:
-                return (
-                    f"🧾 <b>SETUP DETAIL</b>\n"
-                    f"Pair: {s['symbol']}\n"
-                    f"Direction: {s['direction']}\n"
-                    f"Family: {s['family']}\n"
-                    f"Status: {s['status']}\n"
-                    f"Entry: {s['entry_type']} @ {s['entry_price']}\n"
-                    f"Zone: {s['entry_low']} → {s['entry_high']}\n"
-                    f"SL: {s['stop_loss']}\n"
-                    f"TP: {s['take_profit']}\n"
-                    f"RR: 1:{s['rr']}\n"
-                    f"Confluence: {', '.join(s['confluences'])}\n"
-                    f"Reason: {', '.join(s['reasons'])}"
-                )
-        return "❌ Setup ID tidak ditemukan."
-
-    if command == "/strategyhelp":
+    if cmd == "/strategystatus":
+        active = _active_setups_sorted()
+        state_counts: dict[str, int] = {}
+        for s in active:
+            state_counts[s.state] = state_counts.get(s.state, 0) + 1
         return (
-            "🧠 <b>STRATEGY COMMANDS</b>\n\n"
-            "/strategystatus — status engine\n"
-            "/setups [n] — daftar setup aktif\n"
-            "/setup SETUP_ID — detail setup\n"
-            "/strategyhelp — bantuan"
+            "🧠 STRATEGY V2 STATUS\n"
+            f"Symbols: {len(API.get_symbols()) if API else 0}\n"
+            f"Initial scan done: {INITIAL_SCAN_DONE}\n"
+            f"Initial scans: {COUNTERS['initial_scans']}\n"
+            f"Event scans: {COUNTERS['event_scans']}\n"
+            f"Candidates created: {COUNTERS['candidates']}\n"
+            f"Confirmed count: {COUNTERS['confirmed']}\n"
+            f"Fills: {COUNTERS['fills']}\n"
+            f"Wins: {COUNTERS['wins']} | Losses: {COUNTERS['losses']}\n"
+            f"Expired: {COUNTERS['expired']} | Invalidated: {COUNTERS['invalidated']}\n"
+            f"Active: {_active_count()}\n"
+            f"States: {state_counts or '-'}\n"
+            f"Min score: {MIN_SCORE}\n"
+            f"Min RR: {MIN_RR:.2f}"
         )
 
+    if cmd == "/rescan":
+        with LOCK:
+            messages = scan_all(initial=False)
+        return "\n\n".join(messages)
+
+    if cmd == "/journal":
+        if not JOURNAL:
+            return "📓 Journal simulasi masih kosong."
+        rows = JOURNAL[-20:]
+        lines = ["📓 SIMULATION JOURNAL"]
+        for row in reversed(rows):
+            s = row["setup"]
+            lines.append(
+                f"{s['symbol']} {s['direction']} | {s['model']} | "
+                f"{s['outcome']} | R={s['r_multiple']}"
+            )
+        return "\n".join(lines)
+
+    if cmd == "/debug":
+        if len(parts) < 2:
+            return "Format: /debug BTCUSDT"
+        symbol = parts[1].upper()
+        a = LAST_ANALYSIS.get(symbol)
+        if not a:
+            return f"ℹ️ Tidak ada analysis snapshot untuk {symbol}."
+        return repr(a)[:3800]
+
     return None
-
-
-if __name__ == "__main__":
-    print(
-        "strategy.py is a simulation strategy module. "
-        "Load it from start.py with context['data_engine']."
-    )
