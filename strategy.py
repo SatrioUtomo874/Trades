@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-SMCAutoTrade strategy_v6.py
+SMCAutoTrade strategy_v7.py
 
 Simulation-only strategy engine.
 Source basis: user's combined.txt trading transcripts.
@@ -30,20 +30,20 @@ from dataclasses import dataclass, asdict, field
 from typing import Any
 
 log = logging.getLogger("strategy")
-VERSION = "6.0"
+VERSION = "7.0"
 
 # LEARNED_POLICY_V1 = {"min_score":58,"transition_penalty":0,"rvol_min":0.0,"efficiency_min":0.0}
 
-MIN_RR = max(2.0, float(os.getenv("STRAT_V5_MIN_RR", "2.0")))
-MAX_RR = max(MIN_RR, min(4.0, float(os.getenv("STRAT_V5_MAX_RR", "4.0"))))
-MIN_SCORE = int(os.getenv("STRAT_V5_MIN_SCORE", "58"))
-MAX_TELEGRAM_SETUPS = max(1, int(os.getenv("STRAT_V5_MAX_TELEGRAM_SETUPS", "10")))
-SCAN_LOG_EVERY = max(1, int(os.getenv("STRAT_V5_SCAN_LOG_EVERY", "10")))
-EXPIRY_MINUTES = max(15, int(os.getenv("STRAT_V5_EXPIRY_MINUTES", "720")))
-SWING_LEFT = max(1, int(os.getenv("STRAT_V5_SWING_LEFT", "2")))
-SWING_RIGHT = max(1, int(os.getenv("STRAT_V5_SWING_RIGHT", "2")))
-SL_ATR_PAD = float(os.getenv("STRAT_V5_SL_ATR_PAD", "0.20"))
-ZONE_TOLERANCE = float(os.getenv("STRAT_V5_ZONE_TOLERANCE", "0.0025"))
+MIN_RR = max(2.0, float(os.getenv("STRAT_V7_MIN_RR", "2.0")))
+MAX_RR = max(MIN_RR, min(4.0, float(os.getenv("STRAT_V7_MAX_RR", "4.0"))))
+MIN_SCORE = int(os.getenv("STRAT_V7_MIN_SCORE", "58"))
+MAX_TELEGRAM_SETUPS = max(1, int(os.getenv("STRAT_V7_MAX_TELEGRAM_SETUPS", "10")))
+SCAN_LOG_EVERY = max(1, int(os.getenv("STRAT_V7_SCAN_LOG_EVERY", "10")))
+EXPIRY_MINUTES = max(15, int(os.getenv("STRAT_V7_EXPIRY_MINUTES", "720")))
+SWING_LEFT = max(1, int(os.getenv("STRAT_V7_SWING_LEFT", "2")))
+SWING_RIGHT = max(1, int(os.getenv("STRAT_V7_SWING_RIGHT", "2")))
+SL_ATR_PAD = float(os.getenv("STRAT_V7_SL_ATR_PAD", "0.20"))
+ZONE_TOLERANCE = float(os.getenv("STRAT_V7_ZONE_TOLERANCE", "0.0025"))
 
 # Policy is embedded by learn.py candidate generation; it remains bounded by strategy constitution.
 
@@ -57,6 +57,8 @@ THESIS_INDEX: dict[str, str] = {}  # stable thesis_key -> setup_id
 JOURNAL: list[dict[str, Any]] = []
 POSITIONS: dict[str, "Position"] = {}
 LAST_ANALYSIS: dict[str, dict[str, Any]] = {}
+SIGNAL_QUEUE: list[dict[str, Any]] = []
+EMITTED_SIGNALS: set[str] = set()
 
 COUNTERS = {
     "symbols_scanned": 0,
@@ -801,21 +803,23 @@ def _analysis_for_symbol(symbol: str, event_tf: str | None = None) -> dict[str, 
 
 # ---------------- public lifecycle ----------------
 def initialize(api: Any, context: dict[str, Any]) -> None:
-    global API, CONTEXT, INITIAL_SCAN_DONE, LEARNED_POLICY
+    global API, CONTEXT, INITIAL_SCAN_DONE, LEARNED_POLICY, SIGNAL_QUEUE, EMITTED_SIGNALS
     API = api
     CONTEXT = dict(context)
     LEARNED_POLICY = _load_learned_policy()
     INITIAL_SCAN_DONE = False
-    log.info("[STRATEGY V6] learned policy=%s", LEARNED_POLICY)
+    SIGNAL_QUEUE = []
+    EMITTED_SIGNALS = set()
+    log.info("[STRATEGY V7] learned policy=%s", LEARNED_POLICY)
     log.info(
-        "[STRATEGY V6] initialized | min_score=%d min_rr=%.2f expiry=%dm",
+        "[STRATEGY V7] initialized | min_score=%d min_rr=%.2f expiry=%dm",
         MIN_SCORE, MIN_RR, EXPIRY_MINUTES,
     )
 
 
 def shutdown() -> None:
     log.info(
-        "[STRATEGY V6] shutdown | active=%d theses=%d journal=%d",
+        "[STRATEGY V7] shutdown | active=%d theses=%d journal=%d",
         _active_count(), len(SETUPS), len(JOURNAL),
     )
 
@@ -879,7 +883,51 @@ def scan_all(initial: bool = False) -> list[str]:
             lines.append(f"{i}. {s.symbol} {s.direction} | {s.model} | {s.state} | score={s.score} | RR={s.rr:.2f} | freq={s.frequency_per_day:.1f}/d")
         if len(active) > MAX_TELEGRAM_SETUPS:
             lines.append(f"… +{len(active)-MAX_TELEGRAM_SETUPS} lainnya. Gunakan /setups.")
+    for setup in active:
+        _queue_confirmed_setup(setup)
     return ["\n".join(lines)]
+
+
+def _queue_confirmed_setup(setup: Setup) -> None:
+    if setup.decision != "TRADE" or setup.state != "PENDING_LIMIT":
+        return
+    if setup.id in EMITTED_SIGNALS:
+        return
+    EMITTED_SIGNALS.add(setup.id)
+    SIGNAL_QUEUE.append({
+        "type": "signal",
+        "signal": {
+            "id": setup.id,
+            "symbol": setup.symbol,
+            "direction": setup.direction,
+            "entry_type": setup.entry_type,
+            "entry_price": setup.entry_price,
+            "confirmation_price": setup.confirmation_price,
+            "confirmation_condition": setup.confirmation_condition,
+            "stop_loss": setup.stop_loss,
+            "take_profit": setup.take_profit,
+            "rr": setup.rr,
+            "score": setup.score,
+            "model": setup.model,
+            "decision": setup.decision,
+            "thesis": setup.thesis,
+            "reason_codes": list(setup.reason_codes),
+            "confluences": list(setup.confluences),
+            "frequency_per_day": setup.frequency_per_day,
+            "created_ts": setup.created_ts,
+        },
+    })
+    log.warning("[SIGNAL QUEUED] %s %s entry=%.8f sl=%.8f tp=%.8f rr=%.2f score=%d",
+                setup.symbol, setup.direction, setup.entry_price, setup.stop_loss,
+                setup.take_profit, setup.rr, setup.score)
+
+
+def drain_signals(limit: int = 100) -> list[dict[str, Any]]:
+    with LOCK:
+        n = max(1, int(limit))
+        out = SIGNAL_QUEUE[:n]
+        del SIGNAL_QUEUE[:n]
+        return out
 
 
 def on_data_ready() -> str | None:
@@ -983,10 +1031,12 @@ def on_market_event(event: dict[str, Any]) -> str | None:
                     elif existing.state == "PENDING_LIMIT":
                         COUNTERS["confirmed"] += 1
                         existing.confirmation_ts = now_ts
+                        _queue_confirmed_setup(existing)
                         notices.append(_format_signal(existing, "🟢 SETUP CONFIRMED"))
             else:
                 is_new, setup = _register_thesis(incoming)
                 if is_new:
+                    _queue_confirmed_setup(setup)
                     notices.append(_format_signal(setup, "🧠 NEW TRADING SIGNAL"))
 
         log.info(
@@ -1105,7 +1155,7 @@ def handle_command(text: str) -> str | None:
         for s in _active_setups():
             states[s.state] = states.get(s.state, 0) + 1
         return (
-            "🧠 STRATEGY V5 STATUS\n"
+            "🧠 STRATEGY V7 STATUS\n"
             f"Symbols: {len(API.get_symbols()) if API else 0}\n"
             f"Initial scan: {INITIAL_SCAN_DONE}\n"
             f"Symbols scanned: {COUNTERS['symbols_scanned']}\n"
