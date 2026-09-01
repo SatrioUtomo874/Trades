@@ -297,46 +297,57 @@ if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN tidak ditemukan di environment. Cek file .env")
 
 class TelegramLogHandler(logging.Handler):
-    """
-    Forward log ERROR/CRITICAL ke Telegram.
-    Throttle: maks 1 pesan per 30 detik per pesan unik
-    agar tidak flood saat error berulang.
+    """Route every WARNING/ERROR/CRITICAL record to the operator Telegram chat.
+
+    The handler intentionally never logs through ``log`` itself, so a Telegram
+    delivery failure can never create a recursive logging storm. Repeated
+    identical messages are coalesced briefly to protect Telegram from bursts.
     """
     def __init__(self):
-        super().__init__(level=logging.ERROR)
-        self._last_sent: dict = {}   # {msg_key: timestamp}
-        self._throttle  = 900         # detik
+        super().__init__(level=logging.WARNING)
+        self._last_sent: dict = {}
+        self._throttle = 15.0
 
     def emit(self, record):
-        # Hindari rekursi (error saat kirim TG itu sendiri)
-        if "TG" in record.getMessage(): return
         try:
-            msg_key = record.getMessage()[:80]
-            now = time.time()
-            if now - self._last_sent.get(msg_key, 0) < self._throttle:
+            msg = record.getMessage()
+            # Do not recurse on our own Telegram transport diagnostics.
+            if msg.startswith("[TG/LOG]"):
                 return
+            now = time.time()
+            msg_key = f"{record.levelno}:{msg[:160]}"
+            last = self._last_sent.get(msg_key, 0.0)
+            if now - last < self._throttle:
+                return
+
+            cid = globals().get("active_chat_id") or ALLOWED_USER_ID
+            if not cid or not TELEGRAM_TOKEN:
+                return
+
             self._last_sent[msg_key] = now
-
-            cid = active_chat_id
-            if not cid or not TELEGRAM_TOKEN: return
-
-            level_em = "🔴" if record.levelno >= logging.CRITICAL else "⚠️"
-            safe_msg = html.escape(record.getMessage()[:400], quote=False)
+            level_em = "🔴" if record.levelno >= logging.ERROR else "⚠️"
+            safe_msg = html.escape(msg[:1200], quote=False)
+            location = ""
+            if record.exc_info:
+                location = f"\n<code>{html.escape(record.exc_info[0].__name__ if record.exc_info[0] else 'Exception')}</code>"
             text = (
                 f"{level_em} <b>[{html.escape(record.levelname)}]</b>\n"
-                f"<code>{safe_msg}</code>"
+                f"<code>{safe_msg}</code>" + location
             )
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                 json={"chat_id": cid, "text": text, "parse_mode": "HTML"},
-                timeout=5
+                timeout=5,
             )
         except Exception:
-            pass   # jangan pernah raise dari handler log
+            # Logging must never destabilize the trading runtime.
+            pass
 
 
 _tg_log_handler = TelegramLogHandler()
-log.addHandler(_tg_log_handler)
+# Attach to the root logger so WARNING/ERROR from main.py, strategy_logic.py,
+# worker threads, and other imported modules all reach the operator.
+logging.getLogger().addHandler(_tg_log_handler)
 
 auto_mode      = False
 auto_thread    = None
@@ -1038,6 +1049,26 @@ def _start_heavy_worker(name, fn, *args, **kwargs):
     _ACTIVE_HEAVY_THREADS[t.name]=t
     t.start()
     return t
+
+
+def _active_heavy_worker_names():
+    with _HEAVY_WORKER_LOCK:
+        return [v.get("name") for v in _HEAVY_WORKER_REGISTRY.values()]
+
+
+def _simulation_loop_entry(chat_id):
+    """Top-level exception boundary for the /auto runtime thread."""
+    try:
+        simulation_loop(chat_id)
+    except Exception as exc:
+        log.exception(f"[AUTO LOOP] crashed: {exc}")
+        try:
+            tg_send(chat_id, f"🚨 <b>AUTO LOOP CRASH</b>\n<code>{html.escape(str(exc)[:700])}</code>\nScanning dihentikan.")
+        except Exception:
+            pass
+    finally:
+        global auto_mode
+        auto_mode = False
 
 
 def _heavy_worker_snapshot():
@@ -5210,20 +5241,46 @@ def simulation_loop(chat_id):
         with positions_lock: positions.pop(sym,None)
         _ban_coin(sym,"pending expired")
 
-    while auto_mode:
+    last_gate_notice = 0.0
+    while auto_mode and not SHUTDOWN_EVENT.is_set():
+        if STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN or _STRATEGY_LOAD_ERROR:
+            now = time.time()
+            if now - last_gate_notice >= 60:
+                reasons = []
+                if STOP_NEW_ENTRIES: reasons.append("STOP_NEW_ENTRIES")
+                if CIRCUIT_BREAKER_OPEN: reasons.append("CIRCUIT_BREAKER_OPEN")
+                if _STRATEGY_LOAD_ERROR: reasons.append("STRATEGY_LOAD_ERROR")
+                log.warning(f"[AUTO] scanner gated: {', '.join(reasons) or 'unknown'}")
+                tg_send(chat_id, "⏸️ <b>AUTO AKTIF — SCANNER DITAHAN</b>\n" + ", ".join(reasons or ["infrastructure gate"]) + "\nPosisi existing tetap dikelola.")
+                last_gate_notice = now
+            time.sleep(5)
+            continue
         if _binance_is_scan_paused():
             remaining = _binance_cooldown_remaining()
+            now = time.time()
+            if now - last_gate_notice >= 60:
+                log.warning(f"[AUTO] waiting Binance recovery; remaining={remaining:.0f}s")
+                tg_send(chat_id, f"⏸️ <b>AUTO MENUNGGU BINANCE</b>\nCooldown tersisa kira-kira <b>{remaining:.0f}s</b>.\nScanner akan lanjut otomatis setelah recovery.")
+                last_gate_notice = now
             time.sleep(min(10.0, remaining) if remaining > 0 else 1.0)
             continue
         with positions_lock: full=len(positions)>=MAX_POSITIONS
-        if full: time.sleep(5); continue
+        if full:
+            time.sleep(5); continue
         with scan_lock:
-            if scanning: time.sleep(5); continue
+            if scanning: time.sleep(2); continue
             scanning=True
         if time.time()-last_scan<120:
             with scan_lock: scanning=False
             time.sleep(5); continue
-        last_scan=time.time(); _start_heavy_worker("scan", do_scan); time.sleep(5)
+        last_scan=time.time()
+        log.info(f"[AUTO] starting scan worker; active_heavy={_active_heavy_worker_names()}")
+        tg_send(chat_id, f"🚦 <b>AUTO</b> — memulai scan cycle. Heavy workers: {len(_active_heavy_worker_names())}/{MAX_HEAVY_WORKERS}")
+        worker = _start_heavy_worker("scan", do_scan)
+        if worker is None:
+            with scan_lock: scanning=False
+            log.warning("[AUTO] scan worker start returned None")
+        time.sleep(5)
     tg_send(chat_id,"⏹ <b>Scanning dihentikan.</b>\n\n"+fmt_stats())
 
 
@@ -5435,7 +5492,18 @@ def bot_loop():
                     except Exception as e:
                         log.exception(f"[full] reset gagal: {e}")
                         tg_send(chat_id, f"❌ FULL reset gagal: <code>{html.escape(str(e)[:300])}</code>")
-                elif text in ("/full", "full", "/full status", "full status"):
+                elif text in ("/full", "full"):
+                    def _run_full_cycle(cid):
+                        try:
+                            tg_send(cid, "🧠 <b>FULL CYCLE DIMULAI</b>\nPerception → autopsy → pattern → hypothesis → experiment → challenger → validation → promotion.\nIni berjalan sebagai heavy worker.")
+                            result = _brain_full_command("cycle", cid)
+                            tg_send(cid, "✅ <b>FULL CYCLE SELESAI</b>\n" + html.escape(str(result)[:3500]))
+                            log.info(f"[FULL] cycle completed: {result}")
+                        except Exception as e:
+                            log.exception(f"[FULL] cycle gagal: {e}")
+                    tg_send(chat_id, f"🧠 <b>FULL</b> dijadwalkan. Heavy workers aktif: {len(_active_heavy_worker_names())}/{MAX_HEAVY_WORKERS}")
+                    _start_heavy_worker("full", _run_full_cycle, chat_id)
+                elif text in ("/full status", "full status"):
                     try:
                         tg_send(chat_id, _full_strategy_command("status", chat_id))
                     except Exception as e:
@@ -5771,8 +5839,16 @@ def bot_loop():
                             with autostop_lock:
                                 peak_real_balance = total
                         auto_mode=True
+                        log.info(f"[AUTO] start requested chat_id={chat_id} runtime={RUNTIME_STATE} binance_paused={_binance_is_scan_paused()} circuit={CIRCUIT_BREAKER_OPEN}")
+                        tg_send(chat_id,
+                            "▶️ <b>AUTO DIJALANKAN</b>\n"
+                            f"Runtime: <b>{RUNTIME_STATE}</b>\n"
+                            f"Binance pause: <b>{'YA' if _binance_is_scan_paused() else 'TIDAK'}</b>\n"
+                            f"Circuit breaker: <b>{'OPEN' if CIRCUIT_BREAKER_OPEN else 'CLOSED'}</b>\n"
+                            f"Heavy workers: <b>{len(_active_heavy_worker_names())}/{MAX_HEAVY_WORKERS}</b>\n\n"
+                            "Saya akan memberi tahu saat scan benar-benar dimulai, tertahan, atau gagal.")
                         auto_thread=threading.Thread(
-                            target=simulation_loop,args=(chat_id,),daemon=True)
+                            target=_simulation_loop_entry,args=(chat_id,),name="auto-loop",daemon=True)
                         auto_thread.start()
                 elif text in ("/stop","stop"):
                     # /stop hanya mematikan scanning sinyal baru — posisi
