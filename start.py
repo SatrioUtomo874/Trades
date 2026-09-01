@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-"""SMCAutoTrade start_v3.py - market data infrastructure.
+"""SMCAutoTrade start_v4.py - market data infrastructure.
 
-VERSION: 3.0
+VERSION: 4.0
 
 Launcher contract:
     on_start(context)
@@ -381,7 +381,7 @@ class DataEngine:
             )
             return
         try:
-            spec = importlib.util.spec_from_file_location("smc_strategy_runtime", path)
+            spec = importlib.util.spec_from_file_location(f"smc_strategy_runtime_{int(time.time() * 1000)}", path)
             if spec is None or spec.loader is None:
                 raise ImportError("cannot create module spec")
             module = importlib.util.module_from_spec(spec)
@@ -402,6 +402,85 @@ class DataEngine:
                 f"File: {os.path.basename(path)}\n"
                 f"Error: {self.strategy_error}"
             )
+
+    def reset_strategy(self) -> str:
+        """Reload only strategy.py using the current local file.
+
+        Data history and the live Bybit WebSocket stay untouched. This is intended
+        for replacing a strategy while /auto is already running.
+        """
+        with self._run_lock:
+            if not self.auto_running:
+                return "ℹ️ /auto belum aktif. Jalankan /auto terlebih dahulu."
+
+        old_strategy = self.strategy
+        old_error = self.strategy_error
+
+        if old_strategy and hasattr(old_strategy, "shutdown"):
+            try:
+                old_strategy.shutdown()
+            except Exception:
+                log.exception("[STRATEGY] old shutdown failed during reset")
+
+        self.strategy = None
+        self.strategy_error = None
+
+        try:
+            # Force a fresh module namespace every reset so Python never reuses
+            # stale module state from the previous strategy.
+            raw_path = str(STRATEGY_FILE).strip()
+            path = raw_path if os.path.isabs(raw_path) else os.path.join(BASE_DIR, raw_path)
+            path = os.path.abspath(path)
+
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"strategy file not found: {path}")
+
+            module_name = f"smc_strategy_runtime_{int(time.time() * 1000)}"
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError("cannot create strategy module spec")
+
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+
+            self.strategy = module
+            self.strategy_error = None
+
+            if hasattr(module, "initialize"):
+                module.initialize(self.api, self.context)
+
+            log.info(
+                "[STRATEGY RESET] loaded=%s old=%s",
+                path,
+                getattr(old_strategy, "__file__", None) if old_strategy else old_error,
+            )
+            self._notify(
+                "🔄 STRATEGY RESET\n"
+                f"Loaded: {os.path.basename(path)}\n"
+                "Data/WebSocket tetap berjalan.\n"
+                "Running fresh initial scan..."
+            )
+
+            if hasattr(module, "on_data_ready"):
+                result = module.on_data_ready()
+                message = str(result).strip() if result else "🔎 Initial scan selesai\nSetup baru: 0"
+            else:
+                message = "✅ Strategy reloaded\nTidak ada on_data_ready()."
+
+            self._notify(message)
+            log.info("[STRATEGY RESET] initial scan finished")
+            return "✅ Strategy berhasil di-reset dan di-scan ulang dari data yang sudah ada."
+
+        except Exception as exc:
+            self.strategy = None
+            self.strategy_error = f"{type(exc).__name__}: {exc}"
+            log.exception("[STRATEGY RESET] failed")
+            self._notify(
+                "❌ STRATEGY RESET FAILED\n"
+                f"{type(exc).__name__}: {exc}"
+            )
+            return f"❌ Strategy reset gagal: {type(exc).__name__}: {exc}"
 
     def add_data_callback(self, callback: Callable[[dict[str, Any]], None]) -> None:
         self._callbacks.append(callback)
@@ -626,6 +705,7 @@ def _help() -> str:
         "/symbols — jumlah dan daftar pair\n"
         "/candles BTCUSDT 15 20 — lihat candle\n"
         "/price BTCUSDT — harga terakhir\n"
+        "/reset — reload strategy.py + scan ulang tanpa reset data/WS\n"
     )
 
 
@@ -678,6 +758,8 @@ def handle_update(update: dict[str, Any], context: dict[str, Any]) -> str | None
             return "Format: /price BTCUSDT"
         p = engine.api.get_price(args[0].upper())
         return f"💵 {args[0].upper()} = {p}" if p is not None else "❌ Harga belum tersedia."
+    if cmd == "/reset":
+        return engine.reset_strategy()
     if engine.strategy and hasattr(engine.strategy, "handle_command"):
         try:
             result = engine.strategy.handle_command(text)
