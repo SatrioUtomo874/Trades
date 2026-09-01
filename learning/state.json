@@ -1,11 +1,11 @@
 {
   "version": "2.0",
-  "saved_at": 1788289302.766123,
+  "saved_at": 1788289659.26342,
   "active_strategy": "/opt/render/project/src/strategy.py",
   "last_full": {
-    "started_at": 1788288446.6633234,
-    "finished_at": 1788289171.9609423,
-    "duration_s": 725.2976200580597,
+    "started_at": 1788289298.4613893,
+    "finished_at": 1788289659.2624705,
+    "duration_s": 360.8010814189911,
     "baseline": {
       "sample": 0,
       "wins": 0,
@@ -18,19 +18,19 @@
       "frequency_per_day": 0.0
     },
     "global_context": {
-      "timestamp": 1788289153374,
+      "timestamp": 1788289645073,
       "symbols": 461,
-      "bullish": 128,
-      "bearish": 333,
+      "bullish": 126,
+      "bearish": 335,
       "neutral": 0,
-      "breadth": 0.27765726681127983,
-      "alt_breadth": 0.2782608695652174,
-      "breadth_delta": 0.0,
-      "median_rvol": 0.6662422026428851,
-      "median_atr_pct": 0.006968641114982598,
-      "median_efficiency_4h": 0.3409090909090958,
-      "expansion_share": 0.42733188720173537,
-      "transition_share": 0.5075921908893709,
+      "breadth": 0.27331887201735355,
+      "alt_breadth": 0.27391304347826084,
+      "breadth_delta": -0.004338394793926281,
+      "median_rvol": 0.3764264009602475,
+      "median_atr_pct": 0.006930842248003588,
+      "median_efficiency_4h": 0.2910052910052927,
+      "expansion_share": 0.18655097613882862,
+      "transition_share": 0.5357917570498916,
       "market_label": "BROAD_BEARISH",
       "regime": "TRANSITION",
       "btc": {
@@ -58,43 +58,43 @@
         "reason": "Need 50, have 0"
       },
       {
-        "title": "Reduce Stop Loss to 0.5%",
-        "change_type": "modify_stop",
-        "feature": "stop_loss_pct",
+        "title": "RSI_4h Oversold Filter",
+        "change_type": "add_filter",
+        "feature": "RSI_4h",
+        "threshold": 30,
+        "reason": "In a broad bearish, transition regime, buying on oversold conditions may increase risk. Filtering entries to RSI > 30 may reduce false positives.",
+        "source": "ollama"
+      },
+      {
+        "title": "ATR_1h Stop Placement",
+        "change_type": "add_stop",
+        "feature": "ATR_1h",
+        "threshold": 1.5,
+        "reason": "ATR-based stops adapt to current volatility. A 1.5 ATR stop below entry provides a conservative risk buffer in volatile markets.",
+        "source": "ollama"
+      },
+      {
+        "title": "Position Size Reduction",
+        "change_type": "adjust_position_size",
+        "feature": "position_size",
         "threshold": 0.5,
-        "reason": "Lower risk per trade while maintaining a 4:1 risk‑reward ratio with a 2% take profit.",
+        "reason": "Limiting each trade to 0.5% of equity reduces drawdown potential while maintaining exposure.",
         "source": "ollama"
       },
       {
-        "title": "Increase Take Profit to 2%",
-        "change_type": "modify_take_profit",
-        "feature": "take_profit_pct",
-        "threshold": 2.0,
-        "reason": "Achieve a 4:1 risk‑reward ratio with the reduced stop loss, keeping within the allowed RR limits.",
-        "source": "ollama"
-      },
-      {
-        "title": "Add Volume Filter (Relative Volume > 1.2)",
+        "title": "200 SMA Trend Filter",
         "change_type": "add_filter",
-        "feature": "relative_volume_min",
-        "threshold": 1.2,
-        "reason": "Exclude low‑volume trades that may be more prone to slippage and false signals.",
+        "feature": "SMA_200_4h",
+        "threshold": "above",
+        "reason": "Only taking positions when price is above the 200-period SMA on a 4h chart aligns trades with the prevailing trend, reducing bearish bias.",
         "source": "ollama"
       },
       {
-        "title": "Add Time Filter (Start Trading After 09:30 UTC)",
-        "change_type": "add_time_filter",
-        "feature": "trade_start_time",
-        "threshold": "09:30",
-        "reason": "Avoid early‑session volatility and improve execution quality.",
-        "source": "ollama"
-      },
-      {
-        "title": "Add Trend Filter (4‑Hour MA Slope > 0.1%)",
-        "change_type": "add_filter",
-        "feature": "ma_slope_min",
-        "threshold": 0.1,
-        "reason": "Ensure trades are taken in a clear trend, reducing exposure to sideways markets.",
+        "title": "Sample Size Expansion",
+        "change_type": "increase_sample_size",
+        "feature": "sample_size",
+        "threshold": 100,
+        "reason": "Current sample is 0; a minimum of 100 trades is needed to achieve statistical significance for performance metrics.",
         "source": "ollama"
       }
     ],
@@ -145,11 +145,105 @@
       },
       {
         "hypothesis": {
-          "title": "Reduce Stop Loss to 0.5%",
-          "change_type": "modify_stop",
-          "feature": "stop_loss_pct",
+          "title": "RSI_4h Oversold Filter",
+          "change_type": "add_filter",
+          "feature": "RSI_4h",
+          "threshold": 30,
+          "reason": "In a broad bearish, transition regime, buying on oversold conditions may increase risk. Filtering entries to RSI > 30 may reduce false positives.",
+          "source": "ollama"
+        },
+        "baseline": {
+          "sample": 0,
+          "wins": 0,
+          "losses": 0,
+          "win_rate": 0.0,
+          "expectancy_r": 0.0,
+          "net_r": 0,
+          "net_pnl": 0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "candidate": {
+          "sample": 0,
+          "expectancy_r": 0.0,
+          "win_rate": 0.0,
+          "net_r": 0.0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "sample_ok": false,
+        "improvement_pct": 0.0,
+        "frequency_drop_pct": 0.0,
+        "drawdown_worsen_pct": 0.0,
+        "walk_forward": {
+          "pass": false,
+          "folds": [],
+          "reason": "insufficient chronological sample"
+        },
+        "out_of_sample": {
+          "pass": false,
+          "reason": "insufficient OOS sample"
+        },
+        "robustness": {
+          "pass": false,
+          "reason": "candidate selects zero rows"
+        },
+        "decision": "REJECT"
+      },
+      {
+        "hypothesis": {
+          "title": "ATR_1h Stop Placement",
+          "change_type": "add_stop",
+          "feature": "ATR_1h",
+          "threshold": 1.5,
+          "reason": "ATR-based stops adapt to current volatility. A 1.5 ATR stop below entry provides a conservative risk buffer in volatile markets.",
+          "source": "ollama"
+        },
+        "baseline": {
+          "sample": 0,
+          "wins": 0,
+          "losses": 0,
+          "win_rate": 0.0,
+          "expectancy_r": 0.0,
+          "net_r": 0,
+          "net_pnl": 0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "candidate": {
+          "sample": 0,
+          "expectancy_r": 0.0,
+          "win_rate": 0.0,
+          "net_r": 0.0,
+          "max_drawdown_r": 0.0,
+          "frequency_per_day": 0.0
+        },
+        "sample_ok": false,
+        "improvement_pct": 0.0,
+        "frequency_drop_pct": 0.0,
+        "drawdown_worsen_pct": 0.0,
+        "walk_forward": {
+          "pass": false,
+          "folds": [],
+          "reason": "insufficient chronological sample"
+        },
+        "out_of_sample": {
+          "pass": false,
+          "reason": "insufficient OOS sample"
+        },
+        "robustness": {
+          "pass": false,
+          "reason": "candidate selects zero rows"
+        },
+        "decision": "REJECT"
+      },
+      {
+        "hypothesis": {
+          "title": "Position Size Reduction",
+          "change_type": "adjust_position_size",
+          "feature": "position_size",
           "threshold": 0.5,
-          "reason": "Lower risk per trade while maintaining a 4:1 risk‑reward ratio with a 2% take profit.",
+          "reason": "Limiting each trade to 0.5% of equity reduces drawdown potential while maintaining exposure.",
           "source": "ollama"
         },
         "baseline": {
@@ -192,58 +286,11 @@
       },
       {
         "hypothesis": {
-          "title": "Increase Take Profit to 2%",
-          "change_type": "modify_take_profit",
-          "feature": "take_profit_pct",
-          "threshold": 2.0,
-          "reason": "Achieve a 4:1 risk‑reward ratio with the reduced stop loss, keeping within the allowed RR limits.",
-          "source": "ollama"
-        },
-        "baseline": {
-          "sample": 0,
-          "wins": 0,
-          "losses": 0,
-          "win_rate": 0.0,
-          "expectancy_r": 0.0,
-          "net_r": 0,
-          "net_pnl": 0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "candidate": {
-          "sample": 0,
-          "expectancy_r": 0.0,
-          "win_rate": 0.0,
-          "net_r": 0.0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "sample_ok": false,
-        "improvement_pct": 0.0,
-        "frequency_drop_pct": 0.0,
-        "drawdown_worsen_pct": 0.0,
-        "walk_forward": {
-          "pass": false,
-          "folds": [],
-          "reason": "insufficient chronological sample"
-        },
-        "out_of_sample": {
-          "pass": false,
-          "reason": "insufficient OOS sample"
-        },
-        "robustness": {
-          "pass": false,
-          "reason": "candidate selects zero rows"
-        },
-        "decision": "REJECT"
-      },
-      {
-        "hypothesis": {
-          "title": "Add Volume Filter (Relative Volume > 1.2)",
+          "title": "200 SMA Trend Filter",
           "change_type": "add_filter",
-          "feature": "relative_volume_min",
-          "threshold": 1.2,
-          "reason": "Exclude low‑volume trades that may be more prone to slippage and false signals.",
+          "feature": "SMA_200_4h",
+          "threshold": "above",
+          "reason": "Only taking positions when price is above the 200-period SMA on a 4h chart aligns trades with the prevailing trend, reducing bearish bias.",
           "source": "ollama"
         },
         "baseline": {
@@ -286,58 +333,11 @@
       },
       {
         "hypothesis": {
-          "title": "Add Time Filter (Start Trading After 09:30 UTC)",
-          "change_type": "add_time_filter",
-          "feature": "trade_start_time",
-          "threshold": "09:30",
-          "reason": "Avoid early‑session volatility and improve execution quality.",
-          "source": "ollama"
-        },
-        "baseline": {
-          "sample": 0,
-          "wins": 0,
-          "losses": 0,
-          "win_rate": 0.0,
-          "expectancy_r": 0.0,
-          "net_r": 0,
-          "net_pnl": 0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "candidate": {
-          "sample": 0,
-          "expectancy_r": 0.0,
-          "win_rate": 0.0,
-          "net_r": 0.0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "sample_ok": false,
-        "improvement_pct": 0.0,
-        "frequency_drop_pct": 0.0,
-        "drawdown_worsen_pct": 0.0,
-        "walk_forward": {
-          "pass": false,
-          "folds": [],
-          "reason": "insufficient chronological sample"
-        },
-        "out_of_sample": {
-          "pass": false,
-          "reason": "insufficient OOS sample"
-        },
-        "robustness": {
-          "pass": false,
-          "reason": "candidate selects zero rows"
-        },
-        "decision": "REJECT"
-      },
-      {
-        "hypothesis": {
-          "title": "Add Trend Filter (4‑Hour MA Slope > 0.1%)",
-          "change_type": "add_filter",
-          "feature": "ma_slope_min",
-          "threshold": 0.1,
-          "reason": "Ensure trades are taken in a clear trend, reducing exposure to sideways markets.",
+          "title": "Sample Size Expansion",
+          "change_type": "increase_sample_size",
+          "feature": "sample_size",
+          "threshold": 100,
+          "reason": "Current sample is 0; a minimum of 100 trades is needed to achieve statistical significance for performance metrics.",
           "source": "ollama"
         },
         "baseline": {
@@ -385,19 +385,19 @@
     "decision": "NO_CHANGE"
   },
   "global_context": {
-    "timestamp": 1788289153374,
+    "timestamp": 1788289645073,
     "symbols": 461,
-    "bullish": 128,
-    "bearish": 333,
+    "bullish": 126,
+    "bearish": 335,
     "neutral": 0,
-    "breadth": 0.27765726681127983,
-    "alt_breadth": 0.2782608695652174,
-    "breadth_delta": 0.0,
-    "median_rvol": 0.6662422026428851,
-    "median_atr_pct": 0.006968641114982598,
-    "median_efficiency_4h": 0.3409090909090958,
-    "expansion_share": 0.42733188720173537,
-    "transition_share": 0.5075921908893709,
+    "breadth": 0.27331887201735355,
+    "alt_breadth": 0.27391304347826084,
+    "breadth_delta": -0.004338394793926281,
+    "median_rvol": 0.3764264009602475,
+    "median_atr_pct": 0.006930842248003588,
+    "median_efficiency_4h": 0.2910052910052927,
+    "expansion_share": 0.18655097613882862,
+    "transition_share": 0.5357917570498916,
     "market_label": "BROAD_BEARISH",
     "regime": "TRANSITION",
     "btc": {
