@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""SMCAutoTrade start_v8.py
+"""SMCAutoTrade start_v10.py
 
 Data + execution orchestration layer.
 
@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import websocket
 
-VERSION = "9.0"
+VERSION = "10.0"
 
 BYBIT_BASE_URL = (os.getenv("BYBIT_BASE_URL") or "https://api.bybit.com").rstrip("/")
 BYBIT_WS_URL = (os.getenv("BYBIT_WS_URL") or "wss://stream.bybit.com/v5/public/linear").strip()
@@ -195,6 +195,13 @@ class DataStore:
     def price(self, symbol: str) -> float | None:
         with self.lock:
             return self.prices.get(symbol.upper())
+
+    def remove_symbol(self, symbol: str) -> None:
+        symbol = symbol.upper()
+        with self.lock:
+            self.data.pop(symbol, None)
+            self.prices.pop(symbol, None)
+            self.price_ts.pop(symbol, None)
 
 
 class DataAPI:
@@ -1292,6 +1299,7 @@ class DataEngine:
         success = 0
         failed = 0
         completed = 0
+        failed_symbols: list[str] = []
         started = time.monotonic()
         log.info(
             "[BOOTSTRAP] START %d symbols | workers=%d | batch=%d",
@@ -1303,9 +1311,8 @@ class DataEngine:
                 return symbol, False
             return symbol, self.bootstrap_symbol(symbol)
 
-        # Process a bounded number of futures at a time. This keeps memory use
-        # predictable even when the common universe grows to several thousand
-        # symbols; only a small queue of Future objects exists at once.
+        # Bounded queue: at most BOOTSTRAP_BATCH_SIZE Future objects exist at once.
+        # Actual REST concurrency is capped globally by the shared worker pool.
         for offset in range(0, total, BOOTSTRAP_BATCH_SIZE):
             if self.stop_event.is_set() or not self.auto_running:
                 return
@@ -1326,6 +1333,10 @@ class DataEngine:
                         success += 1
                     else:
                         failed += 1
+                        failed_symbols.append(symbol)
+                        # Remove any partial data from a symbol that failed one or more
+                        # timeframes. It must never leak incomplete history into strategy.
+                        self.store.remove_symbol(symbol)
                     if completed == 1 or completed % 25 == 0 or completed == total:
                         elapsed = max(0.001, time.monotonic() - started)
                         rate = completed / elapsed
@@ -1347,18 +1358,44 @@ class DataEngine:
 
         if not self.auto_running or self.stop_event.is_set():
             return
+
+        # Best-effort bootstrap policy:
+        # failed pairs are discarded, successful pairs remain active, and the
+        # strategy/WS continue as long as at least one complete pair remains.
+        if failed_symbols:
+            failed_set = set(failed_symbols)
+            with self.symbol_lock:
+                self.symbols = [s for s in self.symbols if s not in failed_set]
+
+        active_total = len(self.get_symbols())
         elapsed = time.monotonic() - started
-        self.bootstrap_complete = success == total and total > 0
+        self.bootstrap_complete = active_total > 0 and success > 0
         log.info(
-            "[BOOTSTRAP] COMPLETE success=%d failed=%d/%d elapsed=%.1fs",
-            success, failed, total, elapsed
+            "[BOOTSTRAP] COMPLETE usable=%d/%d failed=%d elapsed=%.1fs",
+            active_total, total, failed, elapsed
         )
+
         if not self.bootstrap_complete:
             self._notify(
-                f"❌ DATA BOOTSTRAP INCOMPLETE\nLoaded: {success}/{total}\n"
-                "Strategy/WebSocket not started."
+                "❌ DATA BOOTSTRAP FAILED\n"
+                f"Usable pairs: {active_total}/{total}\n"
+                f"Failed/discarded: {failed}\n"
+                "No complete pair is available; strategy/WebSocket not started."
             )
             return
+
+        if failed_symbols:
+            preview = ", ".join(failed_symbols[:12])
+            if len(failed_symbols) > 12:
+                preview += f" … +{len(failed_symbols) - 12} more"
+            self._notify(
+                "⚠️ BOOTSTRAP BEST-EFFORT\n"
+                f"Usable pairs: {active_total}/{total}\n"
+                f"Discarded failed pairs: {failed}\n"
+                f"Dropped: {preview}\n"
+                "Continuing with successful pairs."
+            )
+
         self.load_strategy()
         if self.learning and hasattr(self.learning, "build_global_context"):
             try:
@@ -1370,13 +1407,18 @@ class DataEngine:
                 )
             except Exception:
                 log.exception("[LEARN] initial global context build failed")
+
         self._notify(
             "✅ DATA READY\n"
-            f"Symbols: {total}\nLoaded: {success}\nFailed: {failed}\n"
+            f"Universe before bootstrap: {total}\n"
+            f"Usable pairs: {active_total}\n"
+            f"Discarded: {failed}\n"
             "Historical: 15M/700 + 5M/500 + 1M/500\n"
-            f"Bootstrap time: {elapsed:.1f}s\nWorkers: {MAX_WORKERS}\n"
+            f"Bootstrap time: {elapsed:.1f}s\n"
+            f"Workers: {MAX_WORKERS}\n"
             f"Strategy: {'READY' if self.strategy else 'NOT READY'}"
         )
+
         if self.strategy and hasattr(self.strategy, "on_data_ready"):
             try:
                 summary = self.strategy.on_data_ready()
@@ -1387,34 +1429,11 @@ class DataEngine:
                 self._notify(f"❌ INITIAL STRATEGY SCAN ERROR\n{type(exc).__name__}: {exc}")
         else:
             self._notify(
-                f"⚠️ INITIAL STRATEGY SCAN SKIPPED\n"
+                "⚠️ INITIAL STRATEGY SCAN SKIPPED\n"
                 f"Reason: {self.strategy_error or 'strategy unavailable'}"
             )
+
         self.start_websocket()
-
-    # ---- strategy ----
-    def _strategy_path(self) -> Path:
-        # learn.py may promote a new root-level strategy_vN.py and persist it as
-        # active_strategy. Prefer that explicit path when it exists; otherwise
-        # fall back to STRATEGY_FILE from the environment.
-        if self.learning:
-            try:
-                state_path = self.learning._get_meta("active_strategy", "") if hasattr(self.learning, "_get_meta") else ""
-                if state_path:
-                    active = Path(str(state_path))
-                    if active.is_file():
-                        return active.resolve()
-                    root_candidate = BASE_DIR / active.name
-                    if root_candidate.is_file():
-                        return root_candidate.resolve()
-            except Exception:
-                log.exception("[STRATEGY] active learned path lookup failed")
-        raw = STRATEGY_FILE
-        if raw.startswith("[") and "](" in raw:
-            raw = raw.split("](", 1)[0].lstrip("[")
-        p = Path(raw)
-        return p if p.is_absolute() else (BASE_DIR / p).resolve()
-
     def load_strategy(self) -> None:
         path = self._strategy_path()
         self.strategy = None; self.strategy_error = None
