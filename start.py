@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """
 
-# VERSION: 12.0
-SMCAutoTrade start_v12.py
+# VERSION: 13.0
+SMCAutoTrade start_v13.py
 
 Data + execution orchestration layer.
 
@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import websocket
 
-VERSION = "12.0"
+VERSION = "13.0"
 
 BYBIT_BASE_URL = (os.getenv("BYBIT_BASE_URL") or "https://api.bybit.com").rstrip("/")
 BYBIT_WS_URL = (os.getenv("BYBIT_WS_URL") or "wss://stream.bybit.com/v5/public/linear").strip()
@@ -94,7 +94,7 @@ logging.basicConfig(
     level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-log = logging.getLogger("start-v12")
+log = logging.getLogger("start-v13")
 
 
 @dataclass(slots=True)
@@ -1166,6 +1166,13 @@ class DataEngine:
         except Exception:
             log.exception("[TG] notify failed")
 
+    def _strategy_path(self) -> Path:
+        raw = STRATEGY_FILE
+        if raw.startswith("[") and "](" in raw:
+            raw = raw.split("](", 1)[0].lstrip("[")
+        path = Path(raw)
+        return path if path.is_absolute() else (BASE_DIR / path).resolve()
+
     def _learning_path(self) -> Path:
         raw = LEARN_FILE
         if raw.startswith("[") and "](" in raw:
@@ -1472,7 +1479,7 @@ class DataEngine:
             if not path.is_file():
                 raise FileNotFoundError(f"strategy file not found: {path}")
 
-            name = f"smc_strategy_reset_v12_{int(time.time()*1000)}"
+            name = f"smc_strategy_reset_v13_{int(time.time()*1000)}"
             spec = importlib.util.spec_from_file_location(name, path)
             if spec is None or spec.loader is None:
                 raise ImportError("cannot create strategy spec")
@@ -1528,7 +1535,7 @@ class DataEngine:
             self._notify(f"❌ STRATEGY LOAD FAILED\nFile: {path.name}\nPath: {path}")
             return
         try:
-            name = f"smc_strategy_runtime_v12_{int(time.time()*1000)}"
+            name = f"smc_strategy_runtime_v13_{int(time.time()*1000)}"
             spec = importlib.util.spec_from_file_location(name, path)
             if spec is None or spec.loader is None: raise ImportError("cannot create strategy spec")
             module = importlib.util.module_from_spec(spec); sys.modules[name] = module
@@ -1705,8 +1712,10 @@ class DataEngine:
                 ws_app.close()
             except Exception:
                 log.exception("[WS] close failed batch=%s", idx)
-        self.ws_apps.clear()
-        self.ws_batch_topics.clear()
+        if hasattr(self, "ws_apps"):
+            self.ws_apps.clear()
+        if hasattr(self, "ws_batch_topics"):
+            self.ws_batch_topics.clear()
 
         ws = getattr(self, "ws", None)
         self.ws = None
@@ -1797,7 +1806,7 @@ class DataEngine:
                 self.stop_event.wait(BINANCE_RECOVERY_POLL)
 
     def _resume_auto_pipeline(self) -> None:
-        with self._run_lock:
+        with self.run_lock:
             if not self.auto_running or not self.auto_armed:
                 return
             self._auto_pipeline_started = False
@@ -1820,7 +1829,7 @@ class DataEngine:
             self._notify(f"❌ AUTO RESUME FAILED\n{type(exc).__name__}: {exc}")
 
     def _start_bootstrap_once(self) -> None:
-        with self._run_lock:
+        with self.run_lock:
             if not self.auto_running or not self.auto_armed:
                 return
             if self._auto_pipeline_started:
@@ -1838,7 +1847,7 @@ class DataEngine:
         self.bootstrap_thread.start()
 
     def start_auto(self) -> str:
-        with self._run_lock:
+        with self.run_lock:
             if self.auto_running and self.auto_armed:
                 if self._binance_blackout_active():
                     return (
@@ -1897,7 +1906,7 @@ class DataEngine:
                     "Bybit/strategy tetap berjalan; auto akan resume sendiri."
                 )
             log.exception("[AUTO] discovery failed")
-            with self._run_lock:
+            with self.run_lock:
                 self.auto_running = False
                 self.auto_armed = False
             return f"❌ /auto gagal: {exc}"
@@ -1916,7 +1925,10 @@ class DataEngine:
             try: self.strategy.shutdown()
             except Exception: log.exception("[STRATEGY] shutdown failed")
         self.trade_manager._save_state()
-        if self.learning and hasattr(self.learning, "_save_state"):
+        if self.learning and hasattr(self.learning, "shutdown"):
+            try: self.learning.shutdown()
+            except Exception: log.exception("[LEARN] shutdown failed")
+        elif self.learning and hasattr(self.learning, "_save_state"):
             try: self.learning._save_state()
             except Exception: log.exception("[LEARN] final save failed")
         log.info("[ENGINE] stopped")
