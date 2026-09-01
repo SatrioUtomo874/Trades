@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py V49 — FORMAL BODY / EXECUTION INFRASTRUCTURE.
+main.py V53 — FORMAL BODY / EXECUTION INFRASTRUCTURE — AUDITED.
 
 V15 HARDENED: verified real-order execution, no blind mutating retries, exchange/local state reconciliation, protection-pair verification, and fail-closed emergency handling. Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
@@ -45,6 +45,7 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 MAX_PRICE       = 80.0
 TOP_N_COINS     = 50
 MONITOR_SLEEP       = 10
+SCAN_MAX_DURATION_SEC = 120.0
 # Polling API SIGNED (posisi/order real) sengaja lebih jarang dari MONITOR_SLEEP
 # biasa — TP/SL sudah dieksekusi Binance sendiri otomatis begitu tersentuh,
 # polling di sini cuma buat TAHU KAPAN itu terjadi (pencatatan), bukan buat
@@ -80,7 +81,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 BRAIN_CONFIDENCE_DISPLAY_FALLBACK = "brain-owned"
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "MAIN-BODY-V48-FORMAL-CONTRACT"
+MAIN_ENGINE_VERSION = "MAIN-BODY-V53-FORMAL-CONTRACT"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -156,6 +157,20 @@ except Exception as e:
 
 def _brain_fn(name):
     return getattr(_brain, name, None) if _brain is not None else None
+
+# Stable main→brain adapters. These resolve the CURRENT brain at call time,
+# so a validated hot-swap does not leave stale function bindings behind.
+def full_analyze(*args, **kwargs):
+    fn = _brain_fn("full_analyze")
+    if not callable(fn):
+        raise RuntimeError("strategy_logic.full_analyze unavailable")
+    return fn(*args, **kwargs)
+
+def manage_position(*args, **kwargs):
+    fn = _brain_fn("manage_position")
+    if not callable(fn):
+        raise RuntimeError("strategy_logic.manage_position unavailable")
+    return fn(*args, **kwargs)
 
 def _brain_on_candidate(row):
     for name in ("ingest_live_candidate", "record_candidate_observation", "ingest_live_candidate"):
@@ -567,6 +582,19 @@ def _save_runtime_checkpoint(push_github=True):
             return cid,local
         finally:
             STOP_NEW_ENTRIES=prev_stop
+
+
+def _load_previous_known_good_manifest():
+    """Return the manifest entry that points to the previous known-good checkpoint."""
+    if not RUNTIME_CHECKPOINT_MANIFEST.exists():
+        return None
+    try:
+        manifest=json.loads(RUNTIME_CHECKPOINT_MANIFEST.read_text(encoding="utf-8"))
+        prev=manifest.get("previous_known_good") if isinstance(manifest,dict) else None
+        return prev if isinstance(prev,dict) else None
+    except Exception as exc:
+        log.warning(f"[CHECKPOINT] previous-known-good manifest read failed: {exc}")
+        return None
 
 
 def _load_runtime_checkpoint(reference=None):
