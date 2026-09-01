@@ -33,7 +33,7 @@ from typing import Any, Callable
 import requests
 import websocket
 
-VERSION = "6.0"
+VERSION = "7.0"
 
 BYBIT_BASE_URL = (os.getenv("BYBIT_BASE_URL") or "https://api.bybit.com").rstrip("/")
 BYBIT_WS_URL = (os.getenv("BYBIT_WS_URL") or "wss://stream.bybit.com/v5/public/linear").strip()
@@ -65,11 +65,22 @@ AUTO_QTY_RANGE = 0.50
 STATE_FILE = Path(os.getenv("TRADE_STATE_FILE", str(BASE_DIR / "trade_state_v6.json"))).resolve()
 STATE_LOCK = threading.RLock()
 
+BINANCE_META_CACHE_FILE = Path(
+    os.getenv("BINANCE_META_CACHE_FILE", str(BASE_DIR / "binance_exchange_cache_v7.json"))
+).resolve()
+BINANCE_META_TTL = max(300, int(os.getenv("BINANCE_META_TTL", str(6 * 3600))))
+BINANCE_WEIGHT_LIMIT = max(100, int(os.getenv("BINANCE_WEIGHT_LIMIT", "2400")))
+BINANCE_WEIGHT_SOFT_LIMIT = max(100, min(BINANCE_WEIGHT_LIMIT - 1, int(os.getenv("BINANCE_WEIGHT_SOFT_LIMIT", "1800"))))
+BINANCE_REQUEST_MIN_GAP = max(0.0, float(os.getenv("BINANCE_REQUEST_MIN_GAP", "0.08")))
+BINANCE_BLACKOUT_EXTRA = max(0, int(os.getenv("BINANCE_BLACKOUT_EXTRA", "60")))
+BINANCE_429_BASE_BACKOFF = max(5, int(os.getenv("BINANCE_429_BASE_BACKOFF", "30")))
+
+
 logging.basicConfig(
     level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-log = logging.getLogger("start-v5")
+log = logging.getLogger("start-v7")
 
 
 @dataclass(slots=True)
@@ -210,6 +221,133 @@ class BinanceError(RuntimeError):
     pass
 
 
+class BinanceRateLimited(BinanceError):
+    def __init__(self, status: int, retry_after_seconds: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retry_after_seconds = retry_after_seconds
+
+
+class BinanceCircuitOpen(BinanceError):
+    pass
+
+
+class BinanceRequestManager:
+    """Central Binance request gate.
+
+    All Binance REST traffic passes here. The manager tracks Binance's IP weight
+    headers, enforces a local request gap, and opens a circuit after 429/418.
+    """
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.last_request = 0.0
+        self.used_weight_1m = 0
+        self.used_weight_1s = 0
+        self.blackout_until = 0.0
+        self.last_status: int | None = None
+        self.last_retry_after = 0
+        self.backoff_count = 0
+
+    @property
+    def blocked(self) -> bool:
+        return time.time() < self.blackout_until
+
+    @property
+    def remaining_seconds(self) -> int:
+        return max(0, int(self.blackout_until - time.time()))
+
+    def status_text(self) -> str:
+        if self.blocked:
+            return f"BINANCE: BLACKOUT ({self.remaining_seconds}s remaining)"
+        if self.used_weight_1m >= BINANCE_WEIGHT_SOFT_LIMIT:
+            return f"BINANCE: THROTTLED ({self.used_weight_1m}/{BINANCE_WEIGHT_LIMIT} weight/1m)"
+        return f"BINANCE: OK ({self.used_weight_1m}/{BINANCE_WEIGHT_LIMIT} weight/1m)"
+
+    def _parse_retry_after(self, response: requests.Response) -> int:
+        raw = response.headers.get("Retry-After")
+        if raw is not None:
+            try:
+                return max(1, int(float(raw)))
+            except ValueError:
+                pass
+        # Binance may omit Retry-After on some responses. Use conservative
+        # exponential backoff instead of hammering the IP.
+        self.backoff_count = min(self.backoff_count + 1, 6)
+        return BINANCE_429_BASE_BACKOFF * (2 ** (self.backoff_count - 1))
+
+    def open_blackout(self, seconds: int, status: int) -> int:
+        seconds = max(1, int(seconds))
+        until = time.time() + seconds + BINANCE_BLACKOUT_EXTRA
+        with self.lock:
+            self.blackout_until = max(self.blackout_until, until)
+            self.last_status = status
+            self.last_retry_after = seconds
+        return max(0, int(self.blackout_until - time.time()))
+
+    def before_request(self) -> None:
+        with self.lock:
+            remaining = self.blackout_until - time.time()
+            if remaining > 0:
+                raise BinanceCircuitOpen(
+                    f"Binance temporarily disabled; {int(remaining)}s remaining after HTTP {self.last_status}"
+                )
+            gap = time.monotonic() - self.last_request
+            if gap < BINANCE_REQUEST_MIN_GAP:
+                time.sleep(BINANCE_REQUEST_MIN_GAP - gap)
+            # Once the soft threshold is reached, pause briefly rather than
+            # continue producing a burst that can push the IP into 429.
+            if self.used_weight_1m >= BINANCE_WEIGHT_SOFT_LIMIT:
+                sleep_for = min(2.0, max(0.2, (self.used_weight_1m - BINANCE_WEIGHT_SOFT_LIMIT + 1) * 0.002))
+                time.sleep(sleep_for)
+            self.last_request = time.monotonic()
+
+    def after_response(self, response: requests.Response) -> None:
+        with self.lock:
+            for key, attr in (
+                ("X-MBX-USED-WEIGHT-1M", "used_weight_1m"),
+                ("X-MBX-USED-WEIGHT-1S", "used_weight_1s"),
+            ):
+                raw = response.headers.get(key)
+                if raw is not None:
+                    try:
+                        setattr(self, attr, int(raw))
+                    except ValueError:
+                        pass
+            if response.status_code < 429:
+                self.backoff_count = 0
+            self.last_status = response.status_code
+
+    def request(self, method: str, url: str, *, params=None, headers=None) -> requests.Response:
+        self.before_request()
+        try:
+            response = requests.request(
+                method,
+                url,
+                params=params,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            raise BinanceError(f"network error: {exc}") from exc
+        self.after_response(response)
+        if response.status_code in (418, 429):
+            retry = self._parse_retry_after(response)
+            blocked_for = self.open_blackout(retry, response.status_code)
+            log.error(
+                "[BINANCE] HTTP %s rate-limit circuit OPEN | retry-after=%ss | blackout=%ss | used_1m=%s",
+                response.status_code, retry, blocked_for, self.used_weight_1m,
+            )
+            raise BinanceRateLimited(
+                response.status_code,
+                blocked_for,
+                f"Binance HTTP {response.status_code}; blackout {blocked_for}s",
+            )
+        return response
+
+
+BINANCE_GATE = BinanceRequestManager()
+
+
 class BinanceClient:
     def __init__(self) -> None:
         self.key = BINANCE_API_KEY
@@ -217,10 +355,16 @@ class BinanceClient:
         self.base_url = BINANCE_BASE_URL
         self.meta: dict[str, dict[str, Any]] = {}
         self.meta_loaded = False
+        self.meta_loaded_ts = 0.0
+        self._load_meta_cache()
 
     @property
     def configured(self) -> bool:
         return bool(self.key and self.secret)
+
+    @property
+    def available(self) -> bool:
+        return not BINANCE_GATE.blocked
 
     def _signed(self, method: str, path: str, params: dict[str, Any] | None = None, signed: bool = True) -> Any:
         params = dict(params or {})
@@ -232,43 +376,76 @@ class BinanceClient:
             params["signature"] = signature
         headers = {"X-MBX-APIKEY": self.key} if self.key else {}
         url = self.base_url + path
+        response = BINANCE_GATE.request(method, url, params=params, headers=headers)
         try:
-            if method == "GET":
-                r = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-            elif method == "POST":
-                r = requests.post(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-            elif method == "DELETE":
-                r = requests.delete(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-            else:
-                raise BinanceError(f"Unsupported HTTP method {method}")
-        except requests.RequestException as exc:
-            raise BinanceError(f"network error: {exc}") from exc
-        try:
-            body = r.json()
+            body = response.json()
         except ValueError:
-            body = r.text
-        if r.status_code >= 400:
-            raise BinanceError(f"HTTP {r.status_code}: {body}")
+            body = response.text
+        if response.status_code >= 400:
+            raise BinanceError(f"HTTP {response.status_code}: {body}")
         if isinstance(body, dict) and "code" in body and isinstance(body.get("code"), int) and body["code"] < 0:
             raise BinanceError(str(body))
         return body
 
-    def public_get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        return self._signed("GET", path, params, signed=False)
+    def _load_meta_cache(self) -> None:
+        if not BINANCE_META_CACHE_FILE.exists():
+            return
+        try:
+            raw = json.loads(BINANCE_META_CACHE_FILE.read_text(encoding="utf-8"))
+            symbols = raw.get("symbols") or {}
+            if isinstance(symbols, dict) and symbols:
+                self.meta = symbols
+                self.meta_loaded = True
+                self.meta_loaded_ts = float(raw.get("saved_at", 0.0))
+                log.info(
+                    "[BINANCE] exchangeInfo cache loaded symbols=%d age=%ss",
+                    len(self.meta), max(0, int(time.time() - self.meta_loaded_ts))
+                )
+        except Exception:
+            log.exception("[BINANCE] exchangeInfo cache load failed")
 
-    def exchange_info(self) -> dict[str, Any]:
-        if not self.meta_loaded:
-            data = self.public_get("/fapi/v1/exchangeInfo")
-            self.meta = {str(s["symbol"]).upper(): s for s in data.get("symbols", []) if s.get("status") == "TRADING"}
-            self.meta_loaded = True
-            log.info("[BINANCE] exchangeInfo loaded symbols=%d", len(self.meta))
+    def _save_meta_cache(self) -> None:
+        try:
+            payload = {"saved_at": time.time(), "symbols": self.meta}
+            tmp = BINANCE_META_CACHE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(BINANCE_META_CACHE_FILE)
+        except Exception:
+            log.exception("[BINANCE] exchangeInfo cache save failed")
+
+    def exchange_info(self, force: bool = False) -> dict[str, Any]:
+        fresh = self.meta_loaded and (time.time() - self.meta_loaded_ts) < BINANCE_META_TTL
+        if fresh and not force:
+            return {"symbols": list(self.meta.values())}
+
+        if BINANCE_GATE.blocked:
+            if self.meta_loaded:
+                log.warning("[BINANCE] using stale exchangeInfo cache while circuit is open")
+                return {"symbols": list(self.meta.values()), "stale": True}
+            raise BinanceCircuitOpen(
+                f"Binance unavailable and no exchangeInfo cache exists; {BINANCE_GATE.remaining_seconds}s remaining"
+            )
+
+        data = self._signed("GET", "/fapi/v1/exchangeInfo", signed=False)
+        self.meta = {
+            str(s["symbol"]).upper(): s
+            for s in data.get("symbols", [])
+            if s.get("status") == "TRADING"
+        }
+        self.meta_loaded = True
+        self.meta_loaded_ts = time.time()
+        self._save_meta_cache()
+        log.info(
+            "[BINANCE] exchangeInfo refreshed symbols=%d ttl=%ss",
+            len(self.meta), BINANCE_META_TTL
+        )
         return {"symbols": list(self.meta.values())}
 
     def symbol_meta(self, symbol: str) -> dict[str, Any]:
         self.exchange_info()
         s = self.meta.get(symbol.upper())
         if not s:
-            raise BinanceError(f"Binance symbol {symbol} not found in exchangeInfo")
+            raise BinanceError(f"Binance symbol {symbol} not found in exchangeInfo cache")
         return s
 
     def account(self) -> dict[str, Any]:
@@ -339,7 +516,9 @@ class TradeManager:
         self.closed: list[dict[str, Any]] = []
         self._last_real_poll = 0.0
         self._load_state()
-        self.binance.exchange_info()  # public; needed for quantity validation in both modes
+
+    def binance_status(self) -> str:
+        return BINANCE_GATE.status_text()
 
     def _notify(self, text: str) -> None:
         if self.chat_id is None:
@@ -471,7 +650,7 @@ class TradeManager:
         entry = float(signal["entry_price"])
         qty, actual_margin, _ = self.calculate_quantity(symbol, entry, order_type)
         return Trade(
-            id=f"T5-{symbol}-{uuid.uuid4().hex[:10]}",
+            id=f"T7-{symbol}-{uuid.uuid4().hex[:10]}",
             signal_id=str(signal["id"]),
             symbol=symbol,
             direction=direction,
@@ -559,6 +738,15 @@ class TradeManager:
             self._notify(_format_trade(trade, "📤 REAL ENTRY ORDER SENT"))
             log.info("[REAL] entry sent %s %s type=%s orderId=%s", trade.symbol, trade.direction, trade.order_type, trade.entry_order_id)
             self._poll_real_trade(trade, force=True)
+        except BinanceRateLimited as exc:
+            trade.status = "ERROR"
+            trade.error = str(exc)
+            self._notify(
+                "🚨 BINANCE RATE LIMIT / BLACKOUT\n\n"
+                f"HTTP {exc.status}\n"
+                f"Binance disabled for ~{BINANCE_GATE.remaining_seconds}s.\n"
+                "Bybit/strategy data tetap berjalan."
+            )
         except Exception as exc:
             trade.status = "ERROR"
             trade.error = f"{type(exc).__name__}: {exc}"
@@ -593,7 +781,7 @@ class TradeManager:
                     elif trade.status == "OPEN":
                         self._sim_check_exit_range(trade, high, low, price, now)
             # Real entry/protection state is confirmed against Binance, not Bybit price.
-            if self.mode == "ON" and time.monotonic() - self._last_real_poll >= 2.0:
+            if self.mode == "ON" and not BINANCE_GATE.blocked and time.monotonic() - self._last_real_poll >= 5.0:
                 self._last_real_poll = time.monotonic()
                 for trade in list(self.trades.values()):
                     if trade.mode == "ON" and trade.status in {"WAITING_ENTRY", "ENTRY_SUBMITTED", "OPEN", "PROTECTION_PENDING"}:
@@ -745,7 +933,7 @@ class TradeManager:
             log.warning("[REAL POLL] %s failed: %s", trade.symbol, exc)
 
     def mode_text(self) -> str:
-        return f"MODE: {self.mode}\nExecution: {'REAL Binance Futures' if self.mode == 'ON' else 'SIMULATION'}\nMargin: {self.margin}\nLeverage: {self.leverage}x\nMax active: {self.max_active}"
+        return f"MODE: {self.mode}\nExecution: {'REAL Binance Futures' if self.mode == 'ON' else 'SIMULATION'}\nMargin: {self.margin}\nLeverage: {self.leverage}x\nMax active: {self.max_active}\n{BINANCE_GATE.status_text()}"
 
     def set_mode(self, value: str) -> str:
         value = value.upper()
@@ -913,20 +1101,42 @@ class DataEngine:
         return out
 
     def binance_symbols(self) -> set[str]:
-        d = self._get(f"{BINANCE_BASE_URL}/fapi/v1/exchangeInfo", {}).json()
-        return {
-            str(x.get("symbol") or "").upper()
-            for x in d.get("symbols") or []
-            if x.get("status") == "TRADING" and x.get("contractType") == "PERPETUAL" and x.get("quoteAsset") == "USDT" and x.get("marginAsset") == "USDT"
-        }
+        data = self.trade_manager.binance.exchange_info()
+        out: set[str] = set()
+        for x in data.get("symbols") or []:
+            if (
+                x.get("status") == "TRADING"
+                and x.get("contractType") == "PERPETUAL"
+                and x.get("quoteAsset") == "USDT"
+                and x.get("marginAsset") == "USDT"
+            ):
+                s = str(x.get("symbol") or "").upper()
+                if s:
+                    out.add(s)
+        if data.get("stale"):
+            log.warning("[DISCOVERY] Binance symbols are from stale local cache")
+        return out
 
     def build_universe(self) -> list[str]:
-        a = self.bybit_symbols(); log.info("[DISCOVERY] Bybit=%d", len(a))
-        b = self.binance_symbols(); log.info("[DISCOVERY] Binance=%d", len(b))
-        common = sorted(a & b)
-        # No hard symbol cap: every pair common to Bybit + Binance is retained.
-        with self.symbol_lock: self.symbols = common
-        log.info("[DISCOVERY] common=%d selected=ALL", len(common))
+        b1 = self.bybit_symbols()
+        log.info("[DISCOVERY] Bybit USDT perpetuals=%d", len(b1))
+        try:
+            b2 = self.binance_symbols()
+            log.info("[DISCOVERY] Binance USDT perpetuals=%d", len(b2))
+            common = sorted(b1 & b2)
+        except BinanceCircuitOpen as exc:
+            # Keep the Bybit market-data pipeline alive. A previous universe is
+            # reused if available; otherwise discovery cannot form an intersection.
+            with self.symbol_lock:
+                existing = list(self.symbols)
+            if existing:
+                log.warning("[DISCOVERY] Binance circuit open; reusing previous universe=%d", len(existing))
+                common = existing
+            else:
+                raise RuntimeError(f"Binance unavailable and no cached universe: {exc}") from exc
+        with self.symbol_lock:
+            self.symbols = common
+        log.info("[DISCOVERY] common=%d selected=%d", len(common), len(common))
         return common
 
     def fetch_klines(self, symbol: str, tf: str, limit: int) -> list[Candle]:
@@ -1397,6 +1607,8 @@ def handle_update(update: dict[str, Any], context: dict[str, Any]) -> str | None
         if cmd == "/ip":
             return f"🌐 Server public IP\n{engine.public_ip()}"
         if cmd == "/auto": return engine.start_auto()
+        if cmd == "/binance":
+            return engine.trade_manager.binance_status() + f"\nBlackout extra: +{BINANCE_BLACKOUT_EXTRA}s"
         if cmd == "/status":
             s = engine.status()
             return (
