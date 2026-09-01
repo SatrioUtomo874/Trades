@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 """
-SMCAutoTrade strategy_v2.py
+SMCAutoTrade strategy_v3.py
 
 Rule-based, simulation-only strategy engine.
 Source basis: combined.txt supplied by the user.
@@ -81,8 +81,12 @@ class Setup:
     state: str
     entry_type: str
     entry: float
+    confirmation_price: float | None
+    confirmation_condition: str
     sl: float
     tp: float
+    tp_model: str
+    invalidation_price: float
     rr: float
     score: int
     created_ts: int
@@ -462,6 +466,8 @@ def _build_plan(
     ts: int,
     atr: float,
     confirmation_required: list[str],
+    confirmation_price: float | None = None,
+    confirmation_condition: str = "Micro confirmation required",
 ) -> Setup | None:
     zl, zh = float(zone["low"]), float(zone["high"])
     entry = (zl + zh) / 2.0
@@ -479,7 +485,6 @@ def _build_plan(
             return None
         tp = entry - MIN_RR * risk
 
-    dedup_key = f"{symbol}:{direction}:{model}:{int(zl*1e8)}:{int(zh*1e8)}"
     sid = f"{symbol}-{direction}-{int(ts)}-{uuid.uuid4().hex[:6]}"
 
     return Setup(
@@ -490,8 +495,12 @@ def _build_plan(
         state="WATCHING",
         entry_type="LIMIT",
         entry=entry,
+        confirmation_price=confirmation_price,
+        confirmation_condition=confirmation_condition,
         sl=sl,
         tp=tp,
+        tp_model="FIXED_RR",
+        invalidation_price=(zl if direction == "LONG" else zh),
         rr=abs(tp - entry) / max(abs(entry - sl), 1e-12),
         score=min(100, int(score)),
         created_ts=ts,
@@ -696,6 +705,21 @@ def _scan_symbol(symbol: str, event_tf: str | None = None) -> dict[str, Any]:
     for row in candidate_rows[:MAX_ACTIVE_PER_SYMBOL]:
         if row["score"] < MIN_SCORE:
             continue
+        confirmation_price = None
+        confirmation_condition = "Wait for 5M MSS/ChoCH confirmation"
+        if mss.get("level") is not None:
+            confirmation_price = float(mss["level"])
+            if direction == "LONG":
+                confirmation_condition = f"5M close above {confirmation_price:.8f}"
+            else:
+                confirmation_condition = f"5M close below {confirmation_price:.8f}"
+        elif sweep.get("level") is not None:
+            confirmation_price = float(sweep["level"])
+            if direction == "LONG":
+                confirmation_condition = f"5M sweep/reclaim above {confirmation_price:.8f}"
+            else:
+                confirmation_condition = f"5M sweep/reject below {confirmation_price:.8f}"
+
         plan = _build_plan(
             symbol=symbol,
             direction=direction,
@@ -707,6 +731,8 @@ def _scan_symbol(symbol: str, event_tf: str | None = None) -> dict[str, Any]:
             ts=int(c5[-1]["timestamp"]),
             atr=atr,
             confirmation_required=row["missing"],
+            confirmation_price=confirmation_price,
+            confirmation_condition=confirmation_condition,
         )
         if plan:
             plan.state = row["state"]
@@ -856,28 +882,45 @@ def _journal_setup(setup: Setup) -> None:
 
 def _format_transition(setup: Setup, old_state: str) -> str:
     if setup.state == "IN_ZONE":
-        return f"📍 {setup.symbol} {setup.direction}\nState: {old_state} → IN_ZONE\nWaiting for confirmation."
+        return (
+            f"📍 {setup.symbol} {setup.direction}\n"
+            f"State: {old_state} → IN_ZONE\n"
+            f"Entry zone: {setup.zone_low:.8f}–{setup.zone_high:.8f}\n"
+            f"Waiting: {setup.confirmation_condition}"
+        )
     if setup.state == "WAITING_CONFIRMATION":
         missing = ", ".join(setup.confirmation_required) or "micro confirmation"
-        return f"⏳ {setup.symbol} {setup.direction}\nState: {old_state} → WAITING_CONFIRMATION\nMissing: {missing}"
+        cp = f" @ {setup.confirmation_price:.8f}" if setup.confirmation_price is not None else ""
+        return (
+            f"⏳ {setup.symbol} {setup.direction}\n"
+            f"State: {old_state} → WAITING_CONFIRMATION\n"
+            f"Confirmation{cp}: {setup.confirmation_condition}\n"
+            f"Planned entry: {setup.entry_type} @ {setup.entry:.8f}\n"
+            f"SL: {setup.sl:.8f} | TP: {setup.tp:.8f}"
+        )
     if setup.state == "PENDING_LIMIT":
         return _format_setup(setup, header="🟢 SETUP CONFIRMED")
     return ""
 
 
-def _format_setup(setup: Setup, header: str = "🧠 SETUP") -> str:
+def _format_setup(setup: Setup, header: str = "🧠 TRADING SETUP") -> str:
     missing = ", ".join(setup.confirmation_required) if setup.confirmation_required else "-"
     codes = ", ".join(setup.reason_codes) if setup.reason_codes else "-"
+    confirmation_price = (f"{setup.confirmation_price:.8f}" if setup.confirmation_price is not None else "-")
     return (
         f"{header}\n\n"
-        f"{setup.symbol} {setup.direction}\n"
-        f"Model: {setup.model}\n"
+        f"{setup.symbol} — {setup.direction}\n"
+        f"Strategy: {setup.model}\n"
         f"Score: {setup.score}/100\n"
-        f"State: {setup.state}\n"
-        f"Entry: {setup.entry_type} {setup.entry:.8f}\n"
-        f"SL: {setup.sl:.8f}\n"
-        f"TP: {setup.tp:.8f}\n"
-        f"RR: {setup.rr:.2f}\n"
+        f"Status: {setup.state}\n\n"
+        f"📍 Entry: {setup.entry_type} @ {setup.entry:.8f}\n"
+        f"🔔 Confirmation: {confirmation_price}\n"
+        f"   {setup.confirmation_condition}\n"
+        f"🛑 Stop Loss: {setup.sl:.8f}\n"
+        f"⚠️ Invalidation: {setup.invalidation_price:.8f}\n"
+        f"🎯 Take Profit: {setup.tp:.8f}\n"
+        f"TP Model: {setup.tp_model}\n"
+        f"📐 Risk/Reward: 1:{setup.rr:.2f}\n\n"
         f"Confluence: {', '.join(setup.confluences) or '-'}\n"
         f"Reason codes: {codes}\n"
         f"Waiting: {missing}"
@@ -887,12 +930,13 @@ def _format_setup(setup: Setup, header: str = "🧠 SETUP") -> str:
 def _format_fill(setup: Setup) -> str:
     return (
         "🟢 SIMULATION FILLED\n\n"
-        f"{setup.symbol} {setup.direction}\n"
+        f"{setup.symbol} — {setup.direction}\n"
+        f"Strategy: {setup.model}\n"
         f"Entry: {setup.entry:.8f}\n"
         f"SL: {setup.sl:.8f}\n"
         f"TP: {setup.tp:.8f}\n"
-        f"RR: {setup.rr:.2f}\n"
-        f"Model: {setup.model}"
+        f"RR: 1:{setup.rr:.2f}\n"
+        f"Invalidation: {setup.invalidation_price:.8f}"
     )
 
 
@@ -1116,7 +1160,7 @@ def handle_command(text: str) -> str | None:
     parts = text.split()
     cmd = parts[0].lower() if parts else ""
 
-    if cmd == "/setups":
+    if cmd in {"/setups", "/signals"}:
         active = _active_setups_sorted()
         if not active:
             return "📭 Tidak ada active setup/candidate saat ini."
@@ -1134,6 +1178,15 @@ def handle_command(text: str) -> str | None:
         if len(parts) < 2:
             return "Format: /setup SETUP_ID"
         return _setup_detail(parts[1])
+
+    if cmd == "/watch":
+        if len(parts) < 2:
+            return "Format: /watch BTCUSDT"
+        symbol = parts[1].upper()
+        rows = [s for s in _active_setups_sorted() if s.symbol == symbol]
+        if not rows:
+            return f"📭 Tidak ada active signal untuk {symbol}."
+        return "\n\n".join(_format_setup(s) for s in rows[:5])
 
     if cmd == "/why":
         if len(parts) < 2:
