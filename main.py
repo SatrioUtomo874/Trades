@@ -994,7 +994,7 @@ def _bootstrap_validate_and_reconcile():
 
 
 def _graceful_shutdown(reason="shutdown"):
-    global STOP_NEW_ENTRIES
+    global STOP_NEW_ENTRIES, RUNTIME_STATE
     if RUNTIME_STATE!="STOPPING":
         try: _set_runtime_state("STOPPING",reason)
         except Exception: RUNTIME_STATE="STOPPING"
@@ -6182,12 +6182,16 @@ def bot_loop():
 
             time.sleep(0.2)
         except TelegramPollingConflict as e:
+            # 409 is a Telegram transport conflict, not a Binance/position failure.
+            # Keep the runtime alive and retry with bounded backoff; never enter
+            # graceful shutdown merely because another Telegram poller is active.
             log.error(f"[TG POLLING CONFLICT] {e}")
             _telegram_watchdog_alert(
                 active_chat_id,
                 "🚨 <b>Telegram polling conflict</b>\n\n"
-                "Bot masih hidup, tetapi <code>getUpdates</code> bentrok. "
-                "Pastikan hanya 1 instance bot memakai TELEGRAM_TOKEN ini."
+                "<code>getUpdates</code> sedang dipakai oleh webhook atau instance bot lain. "
+                "Runtime trading tetap hidup; command Telegram belum dapat diterima sampai konflik hilang.\n\n"
+                "Pastikan hanya <b>1 instance</b> memakai <code>TELEGRAM_TOKEN</code> ini dan webhook sudah nonaktif."
             )
             time.sleep(min(max(poll_backoff, 5), TELEGRAM_ERROR_BACKOFF_MAX))
             poll_backoff = min(max(poll_backoff * 2, 5), TELEGRAM_ERROR_BACKOFF_MAX)
