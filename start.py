@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """
 
-# VERSION: 11.0
-SMCAutoTrade start_v11.py
+# VERSION: 12.0
+SMCAutoTrade start_v12.py
 
 Data + execution orchestration layer.
 
@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import websocket
 
-VERSION = "10.0"
+VERSION = "12.0"
 
 BYBIT_BASE_URL = (os.getenv("BYBIT_BASE_URL") or "https://api.bybit.com").rstrip("/")
 BYBIT_WS_URL = (os.getenv("BYBIT_WS_URL") or "wss://stream.bybit.com/v5/public/linear").strip()
@@ -94,7 +94,7 @@ logging.basicConfig(
     level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-log = logging.getLogger("start-v9")
+log = logging.getLogger("start-v12")
 
 
 @dataclass(slots=True)
@@ -1132,12 +1132,20 @@ class DataEngine:
         self.callbacks: list[Callable[[dict[str, Any]], None]] = []
         self.run_lock = threading.RLock()
         self.auto_running = False
+        self.auto_armed = False
+        self.binance_cooldown_until = 0.0
+        self.binance_cooldown_reason: str | None = None
+        self.binance_recovery_thread: threading.Thread | None = None
+        self._recovery_lock = threading.RLock()
+        self._auto_pipeline_started = False
         self.bootstrap_complete = False
         # WebSocket is a pool: one connection per subscription batch.
         self.ws_apps: dict[int, websocket.WebSocketApp] = {}
         self.ws_threads: dict[int, threading.Thread] = {}
         self.ws_batch_topics: dict[int, list[str]] = {}
         self.ws_connected: bool = False
+        self.ws: websocket.WebSocketApp | None = None
+        self.ws_thread: threading.Thread | None = None
         self.bootstrap_thread: threading.Thread | None = None
         self.strategy: Any = None
         self.strategy_error: str | None = None
@@ -1439,6 +1447,78 @@ class DataEngine:
             )
 
         self.start_websocket()
+
+    def reset_strategy(self) -> str:
+        """Reload strategy.py while preserving market data, trades and bans."""
+        with self.run_lock:
+            if not self.auto_running:
+                return "ℹ️ /reset hanya boleh dijalankan saat /auto aktif."
+
+        old = self.strategy
+        old_path = getattr(old, "__file__", None) if old else None
+
+        # Stop only the old strategy runtime. Do NOT stop data/WS/trade manager.
+        if old and hasattr(old, "shutdown"):
+            try:
+                old.shutdown()
+            except Exception:
+                log.exception("[STRATEGY] old shutdown failed during reset")
+
+        self.strategy = None
+        self.strategy_error = None
+
+        try:
+            path = self._strategy_path()
+            if not path.is_file():
+                raise FileNotFoundError(f"strategy file not found: {path}")
+
+            name = f"smc_strategy_reset_v12_{int(time.time()*1000)}"
+            spec = importlib.util.spec_from_file_location(name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError("cannot create strategy spec")
+
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+
+            if hasattr(module, "initialize"):
+                module.initialize(self.api, self.context)
+
+            self.strategy = module
+            self.strategy_error = None
+
+            if self.learning and hasattr(self.learning, "on_strategy_loaded"):
+                try:
+                    self.learning.on_strategy_loaded(module, path)
+                except Exception:
+                    log.exception("[LEARN] on_strategy_loaded failed during reset")
+
+            log.info("[STRATEGY RESET] old=%s new=%s", old_path, path)
+
+            # Fresh analysis over already-collected candles.
+            result = None
+            if hasattr(module, "on_data_ready"):
+                result = module.on_data_ready()
+
+            self._notify(
+                "🔄 STRATEGY RESET COMPLETE\n"
+                f"Loaded: {path.name}\n"
+                "Data/WebSocket/Trades/Bans tetap berjalan.\n"
+                + (str(result).strip() if result else "🔎 Initial scan selesai\nSetup baru: 0")
+            )
+            self._accept_strategy_queue()
+            return "✅ Strategy berhasil di-reset dan di-scan ulang."
+        except Exception as exc:
+            self.strategy = None
+            self.strategy_error = f"{type(exc).__name__}: {exc}"
+            log.exception("[STRATEGY RESET] failed")
+            self._notify(
+                "🚨 STRATEGY RESET FAILED\n"
+                f"{type(exc).__name__}: {exc}\n"
+                "Data/WebSocket tetap berjalan."
+            )
+            return f"❌ Strategy reset gagal: {type(exc).__name__}: {exc}"
+
     def load_strategy(self) -> None:
         path = self._strategy_path()
         self.strategy = None; self.strategy_error = None
@@ -1448,7 +1528,7 @@ class DataEngine:
             self._notify(f"❌ STRATEGY LOAD FAILED\nFile: {path.name}\nPath: {path}")
             return
         try:
-            name = f"smc_strategy_v5_{int(time.time()*1000)}"
+            name = f"smc_strategy_runtime_v12_{int(time.time()*1000)}"
             spec = importlib.util.spec_from_file_location(name, path)
             if spec is None or spec.loader is None: raise ImportError("cannot create strategy spec")
             module = importlib.util.module_from_spec(spec); sys.modules[name] = module
@@ -1617,14 +1697,25 @@ class DataEngine:
         self.ws_thread.start()
 
     def stop_websocket(self) -> None:
-        ws = self.ws
+        # Close every active websocket in the pool, plus the legacy single
+        # connection reference used by older worker code.
+        apps = list(getattr(self, "ws_apps", {}).items())
+        for idx, ws_app in apps:
+            try:
+                ws_app.close()
+            except Exception:
+                log.exception("[WS] close failed batch=%s", idx)
+        self.ws_apps.clear()
+        self.ws_batch_topics.clear()
+
+        ws = getattr(self, "ws", None)
         self.ws = None
         self.ws_connected = False
         if ws:
             try:
                 ws.close()
             except Exception:
-                log.exception("[WS] close failed")
+                log.exception("[WS] legacy ws close failed")
 
     # ---- lifecycle / command ----
 
@@ -1812,7 +1903,10 @@ class DataEngine:
             return f"❌ /auto gagal: {exc}"
 
     def stop(self) -> None:
-        with self.run_lock: self.auto_running = False
+        with self.run_lock:
+            self.auto_running = False
+            self.auto_armed = False
+            self._auto_pipeline_started = False
         self.stop_websocket()
         try:
             self.worker_pool.shutdown(wait=False, cancel_futures=True)
@@ -1836,6 +1930,9 @@ class DataEngine:
             "strategy": bool(self.strategy), "strategy_error": self.strategy_error, "ws": int(self.ws_connected),
             "ws_connections": 1 if self.ws_connected else 0,
             "mode": self.trade_manager.mode, "active": self.trade_manager.active_count(), "max": self.trade_manager.max_active,
+            "auto_armed": self.auto_armed,
+            "binance_cooldown": self._binance_blackout_remaining(),
+
         }
 
 
@@ -1875,7 +1972,7 @@ def on_start(context: dict[str, Any]) -> None:
     ENGINE = DataEngine(context)
     try: ip = ENGINE.public_ip()
     except Exception as exc: ip = f"unavailable ({exc})"
-    log.info("[START] V8 ready | ip=%s | base=%s | strategy=%s", ip, BASE_DIR, STRATEGY_FILE)
+    log.info("[START] V12 ready | ip=%s | base=%s | strategy=%s", ip, BASE_DIR, STRATEGY_FILE)
     ENGINE._notify(
         f"🟢 START.PY V{VERSION} READY\n"
         f"Server IP: {ip}\n"
@@ -1893,7 +1990,7 @@ def on_stop(context: dict[str, Any]) -> None:
 
 def _help() -> str:
     return (
-        "🤖 SMCAutoTrade V8\n\n"
+        "🤖 SMCAutoTrade V12\n\n"
         "/auto — ALL common pairs + historical + websocket pool\n"
         "/mode — show mode\n/mode on — REAL Binance\n/mode off — SIMULATION\n"
         "/margin 10 — target margin/trade\n/leverage 10 — leverage\n/max 5 — max active orders/positions\n"
