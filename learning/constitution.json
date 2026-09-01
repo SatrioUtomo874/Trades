@@ -1,0 +1,10 @@
+{
+  "rr_min": 2.0,
+  "rr_max": 4.0,
+  "frequency_priority": true,
+  "max_frequency_drop_pct": 20.0,
+  "min_improvement_pct": 3.0,
+  "min_sample": 50,
+  "live_execution_requires_mode_on": true,
+  "strategy_can_change_rr_limits": false
+}
