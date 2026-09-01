@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-"""SMCAutoTrade start_v10.py
+"""
+
+# VERSION: 11.0
+SMCAutoTrade start_v11.py
 
 Data + execution orchestration layer.
 
@@ -46,6 +49,8 @@ TF_CONFIG = {"15": 700, "5": 500, "1": 500}
 LOAD_INTERVAL = max(0.0, float(os.getenv("DATA_LOAD_INTERVAL", "0.0")))
 RETENTION_EXTRA = max(50, int(os.getenv("DATA_RETENTION_EXTRA", "50")))
 REQUEST_TIMEOUT = max(5, int(os.getenv("REQUEST_TIMEOUT", "20")))
+BINANCE_EXTRA_COOLDOWN = max(0, int(os.getenv("BINANCE_EXTRA_COOLDOWN", "60")))
+BINANCE_RECOVERY_POLL = max(5, int(os.getenv("BINANCE_RECOVERY_POLL", "30")))
 WS_PING_INTERVAL = max(5, int(os.getenv("WS_PING_INTERVAL", "20")))
 WS_RECONNECT_MAX = max(5, int(os.getenv("WS_RECONNECT_MAX", "30")))
 LOG_EVERY_SYMBOL_TICK = max(2, int(os.getenv("LOG_EVERY_SYMBOL_TICK", "15")))
@@ -1622,44 +1627,189 @@ class DataEngine:
                 log.exception("[WS] close failed")
 
     # ---- lifecycle / command ----
-    def start_auto(self) -> str:
-        with self.run_lock:
-            if self.auto_running: return "ℹ️ /auto sudah aktif."
-            self.auto_running = True; self.bootstrap_complete = False
-        try: ip = self.public_ip()
-        except Exception as exc: ip = f"unavailable ({exc})"
-        self._notify(f"🤖 AUTO MODE\nServer IP: {ip}\n\nDiscovering Bybit + Binance...")
-        try: syms = self.build_universe()
-        except Exception as exc:
-            self.auto_running = False; log.exception("[AUTO] discovery failed"); return f"❌ /auto gagal: {exc}"
-        if not syms:
-            self.auto_running = False; return "❌ /auto gagal: common symbol universe kosong"
-        self._notify(
-            "✅ Universe ready\n"
-            f"Common pairs: {len(syms)} (UNLIMITED)\n\n"
-            "Bootstrap 15M/5M/1M dimulai..."
-        )
-        self.bootstrap_thread = threading.Thread(target=self.bootstrap_all, name="bootstrap", daemon=True); self.bootstrap_thread.start()
-        return f"🟢 /auto aktif — {len(syms)} pair masuk data pipeline."
 
-    def reset_strategy(self) -> str:
-        with self.run_lock:
-            if not self.auto_running or not self.bootstrap_complete:
-                return "ℹ️ /auto belum aktif atau historical data belum ready."
-        old = self.strategy
-        if old and hasattr(old, "shutdown"):
-            try: old.shutdown()
-            except Exception: log.exception("[STRATEGY RESET] shutdown failed")
-        self.load_strategy()
-        if not self.strategy: return f"❌ Strategy reset gagal: {self.strategy_error or 'unknown error'}"
+    # ---------------- Binance blackout / auto-resume ----------------
+    def _binance_blackout_remaining(self) -> int:
+        return max(0, int(self.binance_cooldown_until - time.time()))
+
+    def _binance_blackout_active(self) -> bool:
+        return self.binance_cooldown_until > time.time()
+
+    def _arm_binance_blackout(self, retry_after: float, reason: str) -> None:
+        total = max(1.0, float(retry_after)) + BINANCE_EXTRA_COOLDOWN
+        with self._recovery_lock:
+            self.binance_cooldown_until = max(
+                self.binance_cooldown_until,
+                time.time() + total,
+            )
+            self.binance_cooldown_reason = reason
+            self.auto_armed = True
+
+        log.warning(
+            "[BINANCE] blackout armed | reason=%s | retry_after=%.0fs | safety=%ss | total=%ss",
+            reason, retry_after, BINANCE_EXTRA_COOLDOWN, total
+        )
+        self._notify(
+            "⚠️ BINANCE COOLDOWN\n"
+            f"Reason: {reason}\n"
+            f"Duration: {int(total)}s (incl. +{BINANCE_EXTRA_COOLDOWN}s safety)\n"
+            "Bybit/strategy tetap berjalan.\n"
+            "AUTO tetap armed — akan resume otomatis."
+        )
+        self._ensure_recovery_worker()
+
+    def _ensure_recovery_worker(self) -> None:
+        with self._recovery_lock:
+            if self.binance_recovery_thread and self.binance_recovery_thread.is_alive():
+                return
+            self.binance_recovery_thread = threading.Thread(
+                target=self._binance_recovery_loop,
+                name="binance-auto-recovery",
+                daemon=True,
+            )
+            self.binance_recovery_thread.start()
+
+    def _binance_recovery_loop(self) -> None:
+        while self.auto_armed and not self.stop_event.is_set():
+            remaining = self._binance_blackout_remaining()
+            if remaining > 0:
+                self.stop_event.wait(min(BINANCE_RECOVERY_POLL, remaining))
+                continue
+
+            try:
+                # Health check must not cause a recursive cooldown through the
+                # same handler; use a very lightweight unauthenticated endpoint.
+                if hasattr(self, "_raw_binance_get"):
+                    self._raw_binance_get("/fapi/v1/time", {})
+                else:
+                    r = requests.get(
+                        f"{BINANCE_BASE_URL}/fapi/v1/time",
+                        timeout=REQUEST_TIMEOUT,
+                    )
+                    r.raise_for_status()
+
+                with self._recovery_lock:
+                    self.binance_cooldown_until = 0.0
+                    self.binance_cooldown_reason = None
+                self._notify(
+                    "🟢 BINANCE RECOVERY\n"
+                    "Cooldown selesai.\n"
+                    "Health check: ✅\n"
+                    "AUTO pipeline dilanjutkan."
+                )
+                self._resume_auto_pipeline()
+                return
+            except Exception as exc:
+                log.warning("[BINANCE] recovery health check failed: %s", exc)
+                with self._recovery_lock:
+                    self.binance_cooldown_until = time.time() + BINANCE_RECOVERY_POLL
+                self.stop_event.wait(BINANCE_RECOVERY_POLL)
+
+    def _resume_auto_pipeline(self) -> None:
+        with self._run_lock:
+            if not self.auto_running or not self.auto_armed:
+                return
+            self._auto_pipeline_started = False
+
         try:
-            summary = self.strategy.on_data_ready() if hasattr(self.strategy, "on_data_ready") else "✅ Strategy reloaded"
-            self._notify(f"🔄 STRATEGY RESET\nLoaded: {self._strategy_path().name}\nData + WebSocket tetap berjalan.\n\n{summary or 'Scan selesai.'}")
-            self._accept_strategy_queue()
-            return "✅ Strategy berhasil di-reset dan scan ulang."
+            symbols = self.build_universe()
+            if not symbols:
+                raise RuntimeError("common symbol universe still empty")
+            self._notify(
+                "🔄 AUTO RESUME\n"
+                f"Common pairs: {len(symbols)}\n"
+                "Melanjutkan bootstrap/data pipeline."
+            )
+            self._start_bootstrap_once()
         except Exception as exc:
-            log.exception("[STRATEGY RESET] scan failed")
-            return f"❌ Strategy reset scan gagal: {type(exc).__name__}: {exc}"
+            log.exception("[AUTO RESUME] failed")
+            if "418" in str(exc) or "429" in str(exc):
+                # The request path should already have armed a new blackout.
+                return
+            self._notify(f"❌ AUTO RESUME FAILED\n{type(exc).__name__}: {exc}")
+
+    def _start_bootstrap_once(self) -> None:
+        with self._run_lock:
+            if not self.auto_running or not self.auto_armed:
+                return
+            if self._auto_pipeline_started:
+                return
+            if self._binance_blackout_active():
+                self._ensure_recovery_worker()
+                return
+            self._auto_pipeline_started = True
+
+        self.bootstrap_thread = threading.Thread(
+            target=self.bootstrap_all,
+            name="historical-bootstrap",
+            daemon=True,
+        )
+        self.bootstrap_thread.start()
+
+    def start_auto(self) -> str:
+        with self._run_lock:
+            if self.auto_running and self.auto_armed:
+                if self._binance_blackout_active():
+                    return (
+                        "⏳ /auto armed.\n"
+                        f"Binance cooldown: {self._binance_blackout_remaining()}s\n"
+                        "Bybit/strategy tetap berjalan.\n"
+                        "Auto-resume aktif."
+                    )
+                return "ℹ️ /auto sudah aktif."
+
+            self.auto_running = True
+            self.auto_armed = True
+            self.bootstrap_complete = False
+            self._auto_pipeline_started = False
+
+        try:
+            ip = self.public_ip()
+        except Exception as exc:
+            ip = f"unavailable ({exc})"
+
+        log.info("[AUTO] armed | server_ip=%s", ip)
+        self._notify(
+            "🤖 AUTO MODE ARMED\n"
+            f"Server IP: {ip}\n"
+            "Discovering Bybit + Binance..."
+        )
+
+        if self._binance_blackout_active():
+            self._ensure_recovery_worker()
+            return (
+                "⏳ /auto armed.\n"
+                f"Binance cooldown: {self._binance_blackout_remaining()}s\n"
+                "Auto akan lanjut otomatis."
+            )
+
+        try:
+            symbols = self.build_universe()
+            if not symbols:
+                raise RuntimeError("common symbol universe kosong")
+            self._notify(
+                f"✅ Universe ready\n"
+                f"Common pairs: {len(symbols)}\n"
+                "No pair hard-cap\n\n"
+                "Bootstrap 15M/5M/1M dimulai..."
+            )
+            self._start_bootstrap_once()
+            return f"🟢 /auto aktif — {len(symbols)} pair masuk pipeline."
+
+        except Exception as exc:
+            text = str(exc)
+            if "418" in text or "429" in text:
+                self._ensure_recovery_worker()
+                return (
+                    "⏳ /auto armed.\n"
+                    f"Binance cooldown: {self._binance_blackout_remaining()}s\n"
+                    "Bybit/strategy tetap berjalan; auto akan resume sendiri."
+                )
+            log.exception("[AUTO] discovery failed")
+            with self._run_lock:
+                self.auto_running = False
+                self.auto_armed = False
+            return f"❌ /auto gagal: {exc}"
 
     def stop(self) -> None:
         with self.run_lock: self.auto_running = False
