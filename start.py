@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""SMCAutoTrade start_v6.py
+"""SMCAutoTrade start_v8.py
 
 Data + execution orchestration layer.
 
@@ -29,11 +29,12 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any, Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import websocket
 
-VERSION = "7.0"
+VERSION = "9.0"
 
 BYBIT_BASE_URL = (os.getenv("BYBIT_BASE_URL") or "https://api.bybit.com").rstrip("/")
 BYBIT_WS_URL = (os.getenv("BYBIT_WS_URL") or "wss://stream.bybit.com/v5/public/linear").strip()
@@ -42,7 +43,7 @@ BINANCE_WS_BASE = (os.getenv("BINANCE_WS_BASE") or "wss://fstream.binance.com/ws
 IP_URL = (os.getenv("IP_URL") or "https://api.ipify.org").strip()
 
 TF_CONFIG = {"15": 700, "5": 500, "1": 500}
-LOAD_INTERVAL = max(0.0, float(os.getenv("DATA_LOAD_INTERVAL", "1.0")))
+LOAD_INTERVAL = max(0.0, float(os.getenv("DATA_LOAD_INTERVAL", "0.0")))
 RETENTION_EXTRA = max(50, int(os.getenv("DATA_RETENTION_EXTRA", "50")))
 REQUEST_TIMEOUT = max(5, int(os.getenv("REQUEST_TIMEOUT", "20")))
 WS_PING_INTERVAL = max(5, int(os.getenv("WS_PING_INTERVAL", "20")))
@@ -52,6 +53,7 @@ WS_MAX_ARG_CHARS = max(5000, int(os.getenv("WS_MAX_ARG_CHARS", "18000")))
 WS_RECONNECT_JITTER = max(0.0, float(os.getenv("WS_RECONNECT_JITTER", "1.5")))
 WS_NOTIFY_BATCH_EVERY = max(1, int(os.getenv("WS_NOTIFY_BATCH_EVERY", "5")))
 STRATEGY_FILE = (os.getenv("STRATEGY_FILE") or "strategy.py").strip()
+LEARN_FILE = (os.getenv("LEARN_FILE") or "learn.py").strip()
 BASE_DIR = Path(__file__).resolve().parent
 
 BINANCE_API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
@@ -75,12 +77,19 @@ BINANCE_REQUEST_MIN_GAP = max(0.0, float(os.getenv("BINANCE_REQUEST_MIN_GAP", "0
 BINANCE_BLACKOUT_EXTRA = max(0, int(os.getenv("BINANCE_BLACKOUT_EXTRA", "60")))
 BINANCE_429_BASE_BACKOFF = max(5, int(os.getenv("BINANCE_429_BASE_BACKOFF", "30")))
 
+MAX_WORKERS = max(1, min(5, int(os.getenv("MAX_WORKERS", "5"))))
+BYBIT_REQUEST_MIN_GAP = max(0.05, float(os.getenv("BYBIT_REQUEST_MIN_GAP", "0.12")))
+BYBIT_HTTP_WINDOW = max(1.0, float(os.getenv("BYBIT_HTTP_WINDOW", "5")))
+BYBIT_HTTP_MAX_REQUESTS = max(1, int(os.getenv("BYBIT_HTTP_MAX_REQUESTS", "500")))
+BYBIT_429_BACKOFF = max(1.0, float(os.getenv("BYBIT_429_BACKOFF", "5")))
+BOOTSTRAP_BATCH_SIZE = max(MAX_WORKERS, int(os.getenv("BOOTSTRAP_BATCH_SIZE", "50")))
+
 
 logging.basicConfig(
     level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-log = logging.getLogger("start-v7")
+log = logging.getLogger("start-v9")
 
 
 @dataclass(slots=True)
@@ -212,6 +221,22 @@ class DataAPI:
 
     def is_symbol_banned(self, symbol: str) -> bool:
         return self.engine.trade_manager.is_banned(symbol)
+
+    def get_global_context(self) -> dict[str, Any]:
+        if self.engine.learning and hasattr(self.engine.learning, "get_global_context"):
+            try:
+                return dict(self.engine.learning.get_global_context())
+            except Exception:
+                log.exception("[LEARN] global context read failed")
+        return {}
+
+    def get_learning_snapshot(self) -> dict[str, Any]:
+        if self.engine.learning and hasattr(self.engine.learning, "status"):
+            try:
+                return {"learning": self.engine.learning.status()}
+            except Exception:
+                pass
+        return {}
 
     def subscribe(self, callback: Callable[[dict[str, Any]], None]) -> None:
         self.engine.add_data_callback(callback)
@@ -711,6 +736,7 @@ class TradeManager:
         self._notify(_format_trade(trade, "🟢 SIMULATION TRADE OPEN"))
         log.info("[SIM] OPEN %s %s @ %.8f qty=%s", trade.symbol, trade.direction, price, trade.quantity)
         self._save_state()
+        self.engine._emit_learning("on_trade_event", {"trade_id": trade.id, "signal_id": trade.signal_id, "symbol": trade.symbol, "direction": trade.direction, "status": trade.status, "mode": trade.mode, "ts": int(time.time()*1000), "pnl": trade.pnl, "r_multiple": trade.r_multiple})
 
     def _submit_real_entry(self, trade: Trade) -> None:
         try:
@@ -839,6 +865,7 @@ class TradeManager:
         self._notify(_format_close(trade))
         log.warning("[TRADE CLOSED] %s %s %s pnl=%.8f R=%s", trade.symbol, trade.direction, outcome, trade.pnl, trade.r_multiple)
         self._save_state()
+        self.engine._emit_learning("on_trade_event", {"trade_id": trade.id, "signal_id": trade.signal_id, "symbol": trade.symbol, "direction": trade.direction, "status": trade.status, "mode": trade.mode, "ts": int(time.time()*1000), "pnl": trade.pnl, "r_multiple": trade.r_multiple, "outcome": trade.outcome})
 
     def _place_protection(self, trade: Trade) -> None:
         if trade.mode != "ON" or trade.status not in {"OPEN", "PROTECTION_PENDING"}:
@@ -1041,6 +1068,44 @@ class TradeManager:
             return f"✅ BAN LIST RESET\nRemoved: {n} symbols"
 
 
+class BybitHttpGate:
+    """Conservative shared HTTP gate for Bybit requests."""
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.last_request = 0.0
+        self.starts: list[float] = []
+        self.backoff_until = 0.0
+
+    def before(self) -> None:
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                if now < self.backoff_until:
+                    wait = self.backoff_until - now
+                else:
+                    cutoff = now - BYBIT_HTTP_WINDOW
+                    self.starts = [x for x in self.starts if x >= cutoff]
+                    gap = BYBIT_REQUEST_MIN_GAP - (now - self.last_request)
+                    window_wait = 0.0
+                    if len(self.starts) >= BYBIT_HTTP_MAX_REQUESTS:
+                        window_wait = max(0.0, self.starts[0] + BYBIT_HTTP_WINDOW - now)
+                    wait = max(gap, window_wait, 0.0)
+                if wait <= 0:
+                    now = time.monotonic()
+                    self.last_request = now
+                    self.starts.append(now)
+                    return
+            time.sleep(min(wait, 1.0))
+
+    def after(self, response: requests.Response) -> None:
+        if response.status_code == 429:
+            with self.lock:
+                self.backoff_until = max(self.backoff_until, time.monotonic() + BYBIT_429_BACKOFF)
+            log.warning("[BYBIT] 429 received; backing off %.1fs", BYBIT_429_BACKOFF)
+
+BYBIT_GATE = BybitHttpGate()
+
+
 class DataEngine:
     def __init__(self, context: dict[str, Any]) -> None:
         self.context = context
@@ -1060,11 +1125,18 @@ class DataEngine:
         self.ws_apps: dict[int, websocket.WebSocketApp] = {}
         self.ws_threads: dict[int, threading.Thread] = {}
         self.ws_batch_topics: dict[int, list[str]] = {}
-        self.ws_connected: set[int] = set()
+        self.ws_connected: bool = False
         self.bootstrap_thread: threading.Thread | None = None
         self.strategy: Any = None
         self.strategy_error: str | None = None
         self.tick_logs: dict[tuple[str, str], float] = {}
+        self.worker_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="smc-worker")
+        self.learning: Any = None
+        self.learning_error: str | None = None
+        self.load_learning()
+        # learn.py receives a callback to reload a promoted strategy without
+        # rebuilding the data engine or websocket pool.
+        self.context["reset_strategy"] = self.reset_strategy
 
     def _notify(self, text: str) -> None:
         if self.chat_id is None:
@@ -1074,13 +1146,65 @@ class DataEngine:
         except Exception:
             log.exception("[TG] notify failed")
 
+    def _learning_path(self) -> Path:
+        raw = LEARN_FILE
+        if raw.startswith("[") and "](" in raw:
+            raw = raw.split("](", 1)[0].lstrip("[")
+        p = Path(raw)
+        return p if p.is_absolute() else (BASE_DIR / p).resolve()
+
+    def load_learning(self) -> None:
+        path = self._learning_path()
+        self.learning = None
+        self.learning_error = None
+        if not path.is_file():
+            self.learning_error = f"learn file not found: {path}"
+            log.warning("[LEARN] %s", self.learning_error)
+            return
+        try:
+            name = f"smc_learn_v1_{int(time.time()*1000)}"
+            spec = importlib.util.spec_from_file_location(name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError("cannot create learn spec")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+            self.learning = module
+            if hasattr(module, "initialize"):
+                module.initialize(self.api, self.context)
+            log.info("[LEARN] loaded %s", path)
+            self._notify(f"✅ LEARN ENGINE LOADED\n{path.name}")
+        except Exception as exc:
+            self.learning = None
+            self.learning_error = f"{type(exc).__name__}: {exc}"
+            log.exception("[LEARN] load failed")
+            self._notify(f"⚠️ LEARN ENGINE UNAVAILABLE\n{self.learning_error}")
+
+    def _emit_learning(self, method: str, payload: dict[str, Any]) -> None:
+        module = self.learning
+        if not module:
+            return
+        try:
+            fn = getattr(module, method, None)
+            if callable(fn):
+                fn(payload)
+        except Exception:
+            log.exception("[LEARN] %s failed", method)
+
     def public_ip(self) -> str:
         r = requests.get(IP_URL, timeout=10)
         r.raise_for_status()
         return r.text.strip()
 
     def _get(self, url: str, params: dict[str, Any]) -> requests.Response:
-        r = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        if url.startswith(BYBIT_BASE_URL):
+            BYBIT_GATE.before()
+        try:
+            r = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"HTTP request failed: {exc}") from exc
+        if url.startswith(BYBIT_BASE_URL):
+            BYBIT_GATE.after(r)
         r.raise_for_status()
         return r
 
@@ -1163,33 +1287,94 @@ class DataEngine:
         return ok
 
     def bootstrap_all(self) -> None:
-        syms = self.get_symbols(); total = len(syms); success = 0; failed = 0
-        log.info("[BOOTSTRAP] START %d symbols", total)
-        for i, s in enumerate(syms, 1):
-            if self.stop_event.is_set() or not self.auto_running: return
-            t0 = time.monotonic(); log.info("[BOOTSTRAP] %d/%d %s", i, total, s)
-            if self.bootstrap_symbol(s): success += 1
-            else: failed += 1
-            if i == 1 or i % 25 == 0 or i == total:
-                self._notify(
-                    "📥 BOOTSTRAP PROGRESS\n"
-                    f"{i}/{total} pairs\n"
-                    f"Success: {success} | Failed: {failed}"
-                )
-            elapsed = time.monotonic() - t0
-            wait = max(0.0, LOAD_INTERVAL - elapsed)
-            if i < total and wait: self.stop_event.wait(wait)
-        if not self.auto_running or self.stop_event.is_set(): return
+        syms = self.get_symbols()
+        total = len(syms)
+        success = 0
+        failed = 0
+        completed = 0
+        started = time.monotonic()
+        log.info(
+            "[BOOTSTRAP] START %d symbols | workers=%d | batch=%d",
+            total, MAX_WORKERS, BOOTSTRAP_BATCH_SIZE
+        )
+
+        def load_one(symbol: str) -> tuple[str, bool]:
+            if self.stop_event.is_set() or not self.auto_running:
+                return symbol, False
+            return symbol, self.bootstrap_symbol(symbol)
+
+        # Process a bounded number of futures at a time. This keeps memory use
+        # predictable even when the common universe grows to several thousand
+        # symbols; only a small queue of Future objects exists at once.
+        for offset in range(0, total, BOOTSTRAP_BATCH_SIZE):
+            if self.stop_event.is_set() or not self.auto_running:
+                return
+            batch = syms[offset: offset + BOOTSTRAP_BATCH_SIZE]
+            futures = {self.worker_pool.submit(load_one, symbol): symbol for symbol in batch}
+            try:
+                for future in as_completed(futures):
+                    if self.stop_event.is_set() or not self.auto_running:
+                        break
+                    symbol = futures[future]
+                    completed += 1
+                    try:
+                        _, ok = future.result()
+                    except Exception:
+                        ok = False
+                        log.exception("[BOOTSTRAP] %s failed in worker", symbol)
+                    if ok:
+                        success += 1
+                    else:
+                        failed += 1
+                    if completed == 1 or completed % 25 == 0 or completed == total:
+                        elapsed = max(0.001, time.monotonic() - started)
+                        rate = completed / elapsed
+                        eta = (total - completed) / rate if rate else 0
+                        log.info(
+                            "[BOOTSTRAP] %d/%d | success=%d failed=%d | %.2f pair/s | ETA %.0fs",
+                            completed, total, success, failed, rate, eta
+                        )
+                        self._notify(
+                            "📥 BOOTSTRAP PROGRESS\n"
+                            f"{completed}/{total} pairs\n"
+                            f"Success: {success} | Failed: {failed}\n"
+                            f"Workers: {MAX_WORKERS}"
+                        )
+            finally:
+                if self.stop_event.is_set() or not self.auto_running:
+                    for future in futures:
+                        future.cancel()
+
+        if not self.auto_running or self.stop_event.is_set():
+            return
+        elapsed = time.monotonic() - started
         self.bootstrap_complete = success == total and total > 0
+        log.info(
+            "[BOOTSTRAP] COMPLETE success=%d failed=%d/%d elapsed=%.1fs",
+            success, failed, total, elapsed
+        )
         if not self.bootstrap_complete:
-            log.error("[BOOTSTRAP] incomplete success=%d failed=%d", success, failed)
-            self._notify(f"❌ DATA BOOTSTRAP INCOMPLETE\nLoaded: {success}/{total}\nStrategy/WebSocket not started.")
+            self._notify(
+                f"❌ DATA BOOTSTRAP INCOMPLETE\nLoaded: {success}/{total}\n"
+                "Strategy/WebSocket not started."
+            )
             return
         self.load_strategy()
+        if self.learning and hasattr(self.learning, "build_global_context"):
+            try:
+                ctx = self.learning.build_global_context()
+                log.info(
+                    "[LEARN] initial global context regime=%s label=%s breadth=%.2f",
+                    ctx.get("regime", "-"), ctx.get("market_label", "-"),
+                    float(ctx.get("breadth", 0.0))
+                )
+            except Exception:
+                log.exception("[LEARN] initial global context build failed")
         self._notify(
             "✅ DATA READY\n"
             f"Symbols: {total}\nLoaded: {success}\nFailed: {failed}\n"
             "Historical: 15M/700 + 5M/500 + 1M/500\n"
+            f"Bootstrap time: {elapsed:.1f}s\nWorkers: {MAX_WORKERS}\n"
             f"Strategy: {'READY' if self.strategy else 'NOT READY'}"
         )
         if self.strategy and hasattr(self.strategy, "on_data_ready"):
@@ -1201,13 +1386,31 @@ class DataEngine:
                 log.exception("[STRATEGY] initial scan failed")
                 self._notify(f"❌ INITIAL STRATEGY SCAN ERROR\n{type(exc).__name__}: {exc}")
         else:
-            self._notify(f"⚠️ INITIAL STRATEGY SCAN SKIPPED\nReason: {self.strategy_error or 'strategy unavailable'}")
+            self._notify(
+                f"⚠️ INITIAL STRATEGY SCAN SKIPPED\n"
+                f"Reason: {self.strategy_error or 'strategy unavailable'}"
+            )
         self.start_websocket()
 
     # ---- strategy ----
     def _strategy_path(self) -> Path:
+        # learn.py may promote a new root-level strategy_vN.py and persist it as
+        # active_strategy. Prefer that explicit path when it exists; otherwise
+        # fall back to STRATEGY_FILE from the environment.
+        if self.learning:
+            try:
+                state_path = self.learning._get_meta("active_strategy", "") if hasattr(self.learning, "_get_meta") else ""
+                if state_path:
+                    active = Path(str(state_path))
+                    if active.is_file():
+                        return active.resolve()
+                    root_candidate = BASE_DIR / active.name
+                    if root_candidate.is_file():
+                        return root_candidate.resolve()
+            except Exception:
+                log.exception("[STRATEGY] active learned path lookup failed")
         raw = STRATEGY_FILE
-        if raw.startswith("[") and "](" in raw:  # defensive normalization for prior env mistakes
+        if raw.startswith("[") and "](" in raw:
             raw = raw.split("](", 1)[0].lstrip("[")
         p = Path(raw)
         return p if p.is_absolute() else (BASE_DIR / p).resolve()
@@ -1228,6 +1431,8 @@ class DataEngine:
             spec.loader.exec_module(module)
             self.strategy = module
             if hasattr(module, "initialize"): module.initialize(self.api, self.context)
+            if self.learning and hasattr(self.learning, "on_strategy_loaded"):
+                self.learning.on_strategy_loaded(module, path)
             log.info("[STRATEGY] loaded %s", path)
             self._notify(f"✅ STRATEGY LOADED\n{path.name}")
         except Exception as exc:
@@ -1255,15 +1460,19 @@ class DataEngine:
             float(signal.get("entry_price")), float(signal.get("stop_loss")), float(signal.get("take_profit")),
             float(signal.get("rr", 0)), signal.get("score"),
         )
+        self._emit_learning("on_signal", dict(signal))
         tid = self.trade_manager.accept_signal(signal)
         if tid:
             trade = self.trade_manager.trades.get(tid)
+            if trade:
+                self._emit_learning("on_trade_event", {"trade_id": trade.id, "signal_id": trade.signal_id, "symbol": trade.symbol, "direction": trade.direction, "status": trade.status, "mode": trade.mode, "ts": int(time.time()*1000), "pnl": trade.pnl, "r_multiple": trade.r_multiple})
 
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         symbol = str(event.get("symbol") or "").upper()
         candle = event.get("candle") or {}
         if symbol and candle.get("close") is not None:
             self.trade_manager.on_market_price(symbol, float(candle["close"]), candle)
+        self._emit_learning("on_market_event", event)
         if self.strategy and hasattr(self.strategy, "on_market_event"):
             try:
                 result = self.strategy.on_market_event(event)
@@ -1279,20 +1488,18 @@ class DataEngine:
             try: cb(event)
             except Exception: log.exception("[DATA CALLBACK] failed")
 
-    # ---- websocket pool ----
+    # ---- websocket ----
     def add_data_callback(self, callback: Callable[[dict[str, Any]], None]) -> None:
         self.callbacks.append(callback)
 
     def _topics(self) -> list[str]:
-        # Every selected pair is subscribed on all three native timeframes.
         return [f"kline.{tf}.{s}" for tf in TF_CONFIG for s in self.get_symbols()]
 
     @staticmethod
     def _topic_batches(topics: list[str], max_chars: int) -> list[list[str]]:
-        """Pack topics by the public connection args character budget."""
         batches: list[list[str]] = []
         current: list[str] = []
-        chars = 2  # rough [] overhead
+        chars = 2
         for topic in topics:
             add = len(topic) + (1 if current else 0)
             if current and chars + add > max_chars:
@@ -1305,51 +1512,32 @@ class DataEngine:
             batches.append(current)
         return batches
 
-    def _ws_open(self, ws: websocket.WebSocketApp, batch: list[str], batch_idx: int, batch_total: int) -> None:
-        conn_id = id(ws)
-        self.ws_apps[conn_id] = ws
-        self.ws_batch_topics[conn_id] = batch
-        self.ws_connected.add(conn_id)
-        payload = {
-            "op": "subscribe",
-            "req_id": f"smc6-{batch_idx}-{uuid.uuid4().hex[:6]}",
-            "args": batch,
-        }
-        ws.send(json.dumps(payload, separators=(",", ":")))
-        log.info(
-            "[WS %d/%d] connected | topics=%d | args_chars=%d",
-            batch_idx, batch_total, len(batch), sum(len(x) for x in batch),
-        )
-        if batch_idx == 1 or batch_idx % WS_NOTIFY_BATCH_EVERY == 0 or batch_idx == batch_total:
-            self._notify(
-                "📡 WS CONNECTIONS\n"
-                f"Connected: {len(self.ws_connected)}/{batch_total}\n"
-                f"Topics on this conn: {len(batch)}\n"
-                f"All topics: {sum(len(x) for x in self.ws_batch_topics.values())}"
-            )
-        self._notify_live_state(batch_total)
-
-    def _notify_live_state(self, batch_total: int) -> None:
-        if len(self.ws_connected) < batch_total:
-            return
-        topics = sum(len(x) for x in self.ws_batch_topics.values())
+    def _ws_open(self, ws: websocket.WebSocketApp) -> None:
+        topics = self._topics()
+        batches = self._topic_batches(topics, WS_MAX_ARG_CHARS)
+        self.ws = ws
+        self.ws_connected = True
+        log.info("[WS] connected | topics=%d subscribe_messages=%d | one I/O thread", len(topics), len(batches))
+        for idx, batch in enumerate(batches, 1):
+            payload = {"op": "subscribe", "req_id": f"smc9-{idx}-{uuid.uuid4().hex[:6]}", "args": batch}
+            ws.send(json.dumps(payload, separators=(",", ":")))
+            log.info("[WS] subscribe %d/%d | topics=%d chars=%d", idx, len(batches), len(batch), sum(len(x) for x in batch))
+            if idx < len(batches):
+                time.sleep(0.05)
         self._notify(
-            "🟢 MARKET DATA LIVE\n"
-            "Bybit WS pool\n"
-            f"Symbols: {len(self.symbols)}\n"
-            "Streams: 15M + 5M + 1M\n"
-            f"Topics: {topics}\n"
-            f"Connections: {batch_total}"
+            "🟢 MARKET DATA LIVE\nBybit WS\n"
+            f"Symbols: {len(self.symbols)}\nStreams: 15M + 5M + 1M\n"
+            f"Topics: {len(topics)}\nSubscribe messages: {len(batches)}\nWS connections: 1"
         )
 
-    def _ws_message(self, conn_id: int, _ws: websocket.WebSocketApp, raw: str) -> None:
+    def _ws_message(self, _ws: websocket.WebSocketApp, raw: str) -> None:
         try:
             p = json.loads(raw)
         except json.JSONDecodeError:
             return
         if p.get("op") in {"subscribe", "pong", "unsubscribe"}:
             if p.get("op") == "subscribe" and p.get("success") is False:
-                log.error("[WS %s] subscription rejected: %s", conn_id, p)
+                log.error("[WS] subscription rejected: %s", p)
             return
         parts = str(p.get("topic") or "").split(".")
         if len(parts) != 3 or parts[0] != "kline":
@@ -1357,116 +1545,62 @@ class DataEngine:
         tf = parts[1]
         for x in p.get("data") or []:
             try:
-                c = Candle(
-                    int(x["start"]), float(x["open"]), float(x["high"]),
-                    float(x["low"]), float(x["close"]), float(x["volume"]),
-                    float(x.get("turnover") or 0), bool(x.get("confirm", False))
-                )
+                c = Candle(int(x["start"]), float(x["open"]), float(x["high"]), float(x["low"]), float(x["close"]), float(x["volume"]), float(x.get("turnover") or 0), bool(x.get("confirm", False)))
                 symbol = str(x.get("symbol") or parts[2]).upper()
             except (KeyError, TypeError, ValueError):
-                log.exception("[WS %s] bad kline payload", conn_id)
+                log.exception("[WS] bad kline payload")
                 continue
             self.store.upsert(symbol, tf, c)
             key = (symbol, tf)
             now = time.monotonic()
             if now - self.tick_logs.get(key, 0) >= LOG_EVERY_SYMBOL_TICK:
                 self.tick_logs[key] = now
-                log.info(
-                    "[TICK WS#%s] %s %s C=%.8f confirm=%s",
-                    conn_id, symbol, tf, c.close, c.confirmed
-                )
-            self._dispatch_event({
-                "type": "candle",
-                "symbol": symbol,
-                "timeframe": tf,
-                "candle": c.as_dict(),
-            })
+                log.info("[TICK WS] %s %s C=%.8f confirm=%s", symbol, tf, c.close, c.confirmed)
+            self._dispatch_event({"type": "candle", "symbol": symbol, "timeframe": tf, "candle": c.as_dict()})
 
-    def _ws_error(self, conn_id: int, _ws: websocket.WebSocketApp, error: Any) -> None:
-        log.warning("[WS %s] error=%s", conn_id, error)
+    def _ws_error(self, _ws: websocket.WebSocketApp, error: Any) -> None:
+        log.warning("[WS] error=%s", error)
 
-    def _ws_close(self, conn_id: int, _ws: websocket.WebSocketApp, code: Any, msg: Any) -> None:
-        self.ws_connected.discard(conn_id)
-        log.warning("[WS %s] closed code=%s msg=%s connected=%d", conn_id, code, msg, len(self.ws_connected))
+    def _ws_close(self, _ws: websocket.WebSocketApp, code: Any, msg: Any) -> None:
+        self.ws_connected = False
+        log.warning("[WS] closed code=%s msg=%s", code, msg)
 
-    def _ws_worker(self, batch_idx: int, batch: list[str], batch_total: int) -> None:
+    def _ws_worker(self) -> None:
         backoff = 2.0
         while self.auto_running and not self.stop_event.is_set():
-            conn_id = None
             try:
-                ws = websocket.WebSocketApp(
-                    BYBIT_WS_URL,
-                    on_open=lambda w, b=batch, i=batch_idx, n=batch_total: self._ws_open(w, b, i, n),
-                    on_message=lambda w, m: self._ws_message(id(w), w, m),
-                    on_error=lambda w, e: self._ws_error(id(w), w, e),
-                    on_close=lambda w, c, m: self._ws_close(id(w), w, c, m),
-                )
-                conn_id = id(ws)
-                self.ws_apps[conn_id] = ws
-                self.ws_batch_topics[conn_id] = batch
-                self.ws_threads[conn_id] = threading.current_thread()
-                log.info(
-                    "[WS %d/%d] connecting | topics=%d | url=%s",
-                    batch_idx, batch_total, len(batch), BYBIT_WS_URL
-                )
-                ws.run_forever(
-                    ping_interval=WS_PING_INTERVAL,
-                    ping_timeout=max(2, WS_PING_INTERVAL - 2),
-                    skip_utf8_validation=True,
-                )
+                ws = websocket.WebSocketApp(BYBIT_WS_URL, on_open=self._ws_open, on_message=self._ws_message, on_error=self._ws_error, on_close=self._ws_close)
+                self.ws = ws
+                log.info("[WS] connecting %s", BYBIT_WS_URL)
+                ws.run_forever(ping_interval=WS_PING_INTERVAL, ping_timeout=max(2, WS_PING_INTERVAL - 2), skip_utf8_validation=True)
             except Exception:
-                log.exception("[WS %d/%d] worker error", batch_idx, batch_total)
+                log.exception("[WS] worker error")
             finally:
-                if conn_id is not None:
-                    self.ws_connected.discard(conn_id)
-                    self.ws_apps.pop(conn_id, None)
-                    self.ws_batch_topics.pop(conn_id, None)
+                self.ws_connected = False
+                self.ws = None
             if self.auto_running and not self.stop_event.is_set():
                 jitter = (uuid.uuid4().int % 1000) / 1000 * WS_RECONNECT_JITTER
                 delay = min(WS_RECONNECT_MAX, backoff + jitter)
-                log.warning("[WS %d/%d] reconnect in %.1fs", batch_idx, batch_total, delay)
+                log.warning("[WS] reconnect in %.1fs", delay)
                 if self.stop_event.wait(delay):
                     return
                 backoff = min(backoff * 2.0, WS_RECONNECT_MAX)
 
     def start_websocket(self) -> None:
-        topics = self._topics()
-        if not topics:
-            raise RuntimeError("WebSocket topic list kosong")
-        batches = self._topic_batches(topics, WS_MAX_ARG_CHARS)
-        log.info(
-            "[WS] starting pool | symbols=%d topics=%d connections=%d budget=%d chars",
-            len(self.symbols), len(topics), len(batches), WS_MAX_ARG_CHARS
-        )
-        self.ws_connected.clear()
-        self.ws_apps.clear()
-        self.ws_batch_topics.clear()
-        self.ws_threads.clear()
-        for i, batch in enumerate(batches, 1):
-            if self.stop_event.is_set() or not self.auto_running:
-                return
-            t = threading.Thread(
-                target=self._ws_worker,
-                args=(i, batch, len(batches)),
-                name=f"bybit-ws-{i}",
-                daemon=True,
-            )
-            self.ws_threads[i] = t
-            t.start()
-            # Tiny stagger avoids a connection burst when the universe is large.
-            self.stop_event.wait(0.15)
+        if self.ws_thread and self.ws_thread.is_alive():
+            return
+        self.ws_thread = threading.Thread(target=self._ws_worker, name="bybit-ws", daemon=True)
+        self.ws_thread.start()
 
     def stop_websocket(self) -> None:
-        apps = list(self.ws_apps.values())
-        self.ws_connected.clear()
-        self.ws_apps.clear()
-        self.ws_batch_topics.clear()
-        for ws in apps:
+        ws = self.ws
+        self.ws = None
+        self.ws_connected = False
+        if ws:
             try:
                 ws.close()
             except Exception:
                 log.exception("[WS] close failed")
-        self.ws_threads.clear()
 
     # ---- lifecycle / command ----
     def start_auto(self) -> str:
@@ -1511,10 +1645,17 @@ class DataEngine:
     def stop(self) -> None:
         with self.run_lock: self.auto_running = False
         self.stop_websocket()
+        try:
+            self.worker_pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            log.exception("[WORKERS] shutdown failed")
         if self.strategy and hasattr(self.strategy, "shutdown"):
             try: self.strategy.shutdown()
             except Exception: log.exception("[STRATEGY] shutdown failed")
         self.trade_manager._save_state()
+        if self.learning and hasattr(self.learning, "_save_state"):
+            try: self.learning._save_state()
+            except Exception: log.exception("[LEARN] final save failed")
         log.info("[ENGINE] stopped")
 
     def get_symbols(self) -> list[str]:
@@ -1523,8 +1664,8 @@ class DataEngine:
     def status(self) -> dict[str, Any]:
         return {
             "auto": self.auto_running, "bootstrap": self.bootstrap_complete, "symbols": len(self.symbols),
-            "strategy": bool(self.strategy), "strategy_error": self.strategy_error, "ws": len(self.ws_connected),
-            "ws_connections": len(self.ws_apps),
+            "strategy": bool(self.strategy), "strategy_error": self.strategy_error, "ws": int(self.ws_connected),
+            "ws_connections": 1 if self.ws_connected else 0,
             "mode": self.trade_manager.mode, "active": self.trade_manager.active_count(), "max": self.trade_manager.max_active,
         }
 
@@ -1565,7 +1706,7 @@ def on_start(context: dict[str, Any]) -> None:
     ENGINE = DataEngine(context)
     try: ip = ENGINE.public_ip()
     except Exception as exc: ip = f"unavailable ({exc})"
-    log.info("[START] V6 ready | ip=%s | base=%s | strategy=%s", ip, BASE_DIR, STRATEGY_FILE)
+    log.info("[START] V8 ready | ip=%s | base=%s | strategy=%s", ip, BASE_DIR, STRATEGY_FILE)
     ENGINE._notify(
         f"🟢 START.PY V{VERSION} READY\n"
         f"Server IP: {ip}\n"
@@ -1583,13 +1724,14 @@ def on_stop(context: dict[str, Any]) -> None:
 
 def _help() -> str:
     return (
-        "🤖 SMCAutoTrade V6\n\n"
+        "🤖 SMCAutoTrade V8\n\n"
         "/auto — ALL common pairs + historical + websocket pool\n"
         "/mode — show mode\n/mode on — REAL Binance\n/mode off — SIMULATION\n"
         "/margin 10 — target margin/trade\n/leverage 10 — leverage\n/max 5 — max active orders/positions\n"
         "/trade — active simulated/real orders\n/stats — closed trade statistics\n"
         "/banned — banned symbols\n/unban BTCUSDT — remove ban\n/resetban — clear all bans\n"
         "/reset — reload strategy.py using existing market data\n"
+        "/open — restore learning memory\n/full — run autonomous learning cycle\n/learn — learning status\n/save — checkpoint learning memory\n"
         "/status — data + execution status\n"
     )
 
@@ -1615,7 +1757,8 @@ def handle_update(update: dict[str, Any], context: dict[str, Any]) -> str | None
                 "📊 SYSTEM STATUS\n"
                 f"AUTO: {s['auto']}\nBOOTSTRAP: {s['bootstrap']}\nSYMBOLS: {s['symbols']}\n"
                 f"WS connections: {s['ws']}/runtime {s['ws_connections']}\nSTRATEGY: {s['strategy']}\nSTRATEGY ERROR: {s['strategy_error'] or '-'}\n"
-                f"MODE: {s['mode']}\nACTIVE: {s['active']}/{s['max']}"
+                f"MODE: {s['mode']}\nACTIVE: {s['active']}/{s['max']}\n"
+                f"LEARN: {'READY' if engine.learning else 'OFF'}"
             )
         if cmd == "/mode":
             return engine.trade_manager.set_mode(args[0]) if args else engine.trade_manager.mode_text()
@@ -1650,6 +1793,12 @@ def handle_update(update: dict[str, Any], context: dict[str, Any]) -> str | None
         if cmd == "/price":
             if not args: return "Format: /price BTCUSDT"
             p = engine.api.get_price(args[0].upper()); return f"💵 {args[0].upper()} = {p}" if p is not None else "❌ Harga belum tersedia."
+        if cmd in {"/full", "/open", "/learn", "/save", "/learningreport"}:
+            if not engine.learning or not hasattr(engine.learning, "handle_command"):
+                return f"⚠️ Learn engine unavailable: {engine.learning_error or 'not loaded'}"
+            if cmd == "/full" and not engine.auto_running:
+                return "ℹ️ /full hanya boleh dijalankan saat /auto aktif."
+            return engine.learning.handle_command(text)
 
         if engine.strategy and hasattr(engine.strategy, "handle_command"):
             result = engine.strategy.handle_command(text)
