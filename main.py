@@ -80,7 +80,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 BRAIN_CONFIDENCE_DISPLAY_FALLBACK = "brain-owned"
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "MAIN-BODY-V80-BYBIT-ANALYSIS-BINANCE-EXECUTION"
+MAIN_ENGINE_VERSION = "MAIN-BODY-V91-BYBIT-SCANNER-BINANCE-EXECUTION-SEP"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -129,6 +129,9 @@ _SCAN_STATE = {
     "last_low_confidence_count": 0,
     "last_rejection_reasons": {},
     "consecutive_no_signal_cycles": 0,
+    "coordinator_heartbeat_at": None,
+    "last_cycle_id": None,
+    "last_data_source": "BYBIT_REST",
 }
 _SCAN_COORDINATOR_THREAD = None
 _SCAN_CYCLE_THREAD = None
@@ -545,12 +548,12 @@ BINANCE_KEYS_PRESENT = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
 REAL_TRADE_ENABLED   = False
 
 # Execution infrastructure invariants
-EXECUTION_ENGINE_VERSION = "MAIN-BODY-V53-FULL-RUNTIME-AUDITED"
+EXECUTION_ENGINE_VERSION = "MAIN-BODY-V91-BYBIT-SCANNER-BINANCE-EXECUTION-SEP"
 RUNTIME_SCHEMA_VERSION = "runtime_v1"
 EVENT_SCHEMA_VERSION = "event_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
 BRAIN_INTERFACE_VERSION = "brain_v1"
-BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT", "V52_OPERATIONAL_BRAIN", "V60_STATS_DRIVEN_FREQUENCY_BRAIN"}
+BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT", "V52_OPERATIONAL_BRAIN", "V60_STATS_DRIVEN_FREQUENCY_BRAIN", "V71_UNIFIED_FULL_BRAIN"}
 MAX_HEAVY_WORKERS = 5
 HEAVY_WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_HEAVY_WORKERS)
 _HEAVY_WORKER_LOCK = threading.RLock()
@@ -2038,7 +2041,7 @@ def _binance_register_ban(msg="", fallback_seconds=60, retry_after=None):
         # ERROR is intentionally emitted only once per pause generation.
         # Subsequent 418/429 events are WARNING-only and therefore cannot flood
         # Telegram through TelegramLogHandler.
-        log.error(f"[BINANCE PAUSE] Scanner & entry BARU dihentikan selama {remaining:.0f} detik. WS tetap memantau posisi.")
+        log.error(f"[BINANCE PAUSE] Entry baru Binance dihentikan selama {remaining:.0f} detik. Scanner Bybit tetap berjalan; WS tetap memantau posisi.")
     else:
         log.warning(f"[BINANCE PAUSE] duplicate/parallel limit event ignored; cooldown tersisa {remaining:.0f} detik.")
     return transition
@@ -2060,7 +2063,7 @@ def _notify_binance_pause_once(chat_id):
     detail = f"\nCooldown: <b>{remaining:.0f} detik</b>" if remaining > 0 else ""
     tg_send(chat_id,
             "⏸️ <b>Binance RATE LIMIT/BAN</b>\n"
-            "Scanning & entry baru dihentikan. Posisi aktif tetap dipantau via WS."
+            "Entry baru Binance dihentikan. <b>Scanner Bybit tetap berjalan.</b> Posisi aktif tetap dipantau via WS."
             f"{detail}")
     log.warning(f"[BINANCE PAUSE NOTICE] generation={generation} reason={reason[:120]}")
     return True
@@ -3610,9 +3613,12 @@ def _price_cache_loop():
 # INDIKATOR
 # ═════════════════════════════════════════════
 def run_scan_once(chat_id):
-    # Runtime-safe contract: this function must fail closed, never by NameError.
-    if STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN or _STRATEGY_LOAD_ERROR:
-        log.debug("[SCAN] new-entry gate blocked")
+    # Scanner/analysis is intentionally decoupled from Binance entry pause.
+    # STOP_NEW_ENTRIES and Binance cooldowns block NEW ORDER MUTATION only;
+    # Bybit market analysis must continue so FULL can keep learning.
+    # Analysis is fail-closed only for shutdown/emergency/brain-load failure.
+    if SHUTDOWN_EVENT.is_set() or RUNTIME_STATE in {"STOPPING", "EMERGENCY"} or _STRATEGY_LOAD_ERROR:
+        log.debug("[SCAN] analysis gate blocked by runtime safety/brain state")
         return []
     global early_reject_remaining
     """Scan universe with cached market data and record rich market context.
@@ -3626,7 +3632,7 @@ def run_scan_once(chat_id):
     try:
         symbols=get_top_coins()
     except BinanceCooldownError as e:
-        tg_send(chat_id, f"⏸️ <b>Scan dihentikan</b> — Binance rate-limit/ban aktif.\n<code>{str(e)[:180]}</code>"); return []
+        tg_send(chat_id, f"⚠️ <b>Universe Bybit gagal</b> — sumber data analisis sedang tidak tersedia.\n<code>{html.escape(str(e)[:180])}</code>"); return []
     except Exception as e:
         tg_send(chat_id, f"⚠️ Market data error: <code>{str(e)[:150]}</code>"); return []
     if not symbols:
@@ -3731,7 +3737,7 @@ def run_scan_once(chat_id):
 
     data_elapsed=time.monotonic()-data_started; total_elapsed=time.monotonic()-scan_started
     cache_total,cache_fresh=_scan_cache_stats(); avg_conf=(sum(all_scan_confidences)/len(all_scan_confidences)) if all_scan_confidences else None
-    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"candidate_count":candidate_count,"eligible_count":eligible_count,"ban_count":ban_count,"rejection_reasons":dict(sorted(rejection_reasons.items(), key=lambda kv:(-kv[1],kv[0]))[:20]),"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct"),"source":"bybit_primary_analysis"}
+    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"candidate_count":candidate_count,"eligible_count":eligible_count,"ban_count":ban_count,"rejection_reasons":dict(sorted(rejection_reasons.items(), key=lambda kv:(-kv[1],kv[0]))[:20]),"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct"),"source":"bybit_primary_analysis","binance_entry_paused":bool(_binance_is_scan_paused()),"entry_mutations_blocked":bool(STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN or _binance_is_scan_paused())}
     _record_scan_telemetry(telemetry)
     # Give the brain one canonical summary per scan. This is the observation
     # boundary used for frequency health and controlled exploration; it never
@@ -4069,7 +4075,7 @@ def fmt_stats():
         f"Frequency action: <b>{html.escape(freq_action)}</b>\n\n"
         f"5 terakhir:\n" + "\n".join(recent) + "\n\n"
         f"🚫 Ban: <b>{banned_n}</b> | Low-conf: <b>{html.escape(top_lc)}</b> | Early reject: <b>{reject_rem}</b>\n"
-        f"🔎 Scan: <b>{_SCAN_STATE.get('cycle_count',0)}</b> cycle | last eligible <b>{_SCAN_STATE.get('last_result_count',0)}</b>\n"
+        f"🔎 Scan: <b>{_SCAN_STATE.get('cycle_count',0)}</b> cycle | status <b>{get_scanner_status().get('health')}</b> | last eligible <b>{_SCAN_STATE.get('last_result_count',0)}</b>\n"
         f"📡 Market data: <b>{html.escape(source)}</b> | Execution: <b>Binance</b> | Binance pause: <b>{"YA" if _binance_is_scan_paused() else "TIDAK"}</b>\n"
         f"Bybit REST: <b>{_bybit_request_count}</b> req | errors: <b>{_bybit_request_errors}</b>"
     )
@@ -5375,14 +5381,70 @@ def _set_scan_state(**updates):
 def get_scanner_status():
     with _SCAN_STATE_LOCK:
         out = dict(_SCAN_STATE)
+    now=time.time()
+    hb=float(out.get("coordinator_heartbeat_at") or 0.0)
+    fin=float(out.get("last_finished_at") or 0.0)
+    out["coordinator_heartbeat_age_sec"] = round(now-hb,1) if hb else None
+    out["last_cycle_age_sec"] = round(now-fin,1) if fin else None
+    out["thread_alive"] = bool(auto_thread is not None and auto_thread.is_alive())
+    recent_hb = bool(hb and now-hb <= max(45.0, SCAN_MAX_DURATION_SEC*0.75))
+    healthy = bool(out.get("enabled")) and bool(out.get("coordinator_alive")) and out["thread_alive"] and recent_hb
+    out["health"] = "RUNNING" if healthy else ("STARTING" if out.get("enabled") else "STOPPED")
     out["binance_paused"] = _binance_is_scan_paused()
     out["market_data_source"] = "BYBIT_REST"
     out["execution_exchange"] = "BINANCE"
+    out["entry_mutations_blocked"] = bool(STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN or _binance_is_scan_paused())
     out["pause_remaining_sec"] = round(_binance_cooldown_remaining(), 2)
     out["heavy_workers"] = len(_heavy_worker_snapshot())
     out["light_workers"] = len(_light_worker_snapshot())
     out["top_coins_cached"] = len(_top_coins_cached_symbols)
     return out
+
+def _scanner_thread_is_alive():
+    t=auto_thread
+    return bool(t is not None and t.is_alive())
+
+def _ensure_scanner_running(chat_id, announce=False):
+    global auto_mode, auto_thread, active_chat_id
+    active_chat_id = chat_id or active_chat_id
+    if _scanner_thread_is_alive():
+        _set_scan_state(enabled=True, coordinator_alive=True, last_error=None)
+        return auto_thread, False
+    auto_mode=True
+    _set_scan_state(enabled=True, coordinator_alive=False, last_error=None)
+    _set_component_health("scanner", "STARTING", "scanner coordinator starting")
+    t=threading.Thread(target=simulation_loop, args=(active_chat_id,), name="scanner-coordinator", daemon=True)
+    auto_thread=t
+    t.start()
+    _SCAN_WAKE.set()
+    if announce and active_chat_id:
+        tg_send(active_chat_id, "🔎 <b>Scanner dimulai.</b>\nData analisis: <b>Bybit</b>\nExecution: <b>Binance</b>")
+    return t, True
+
+def _scanner_watchdog_loop():
+    # Watchdog proves scanner liveness independently from the /auto flag.
+    # It only supervises the coordinator; it does not create a second scanner.
+    while not SHUTDOWN_EVENT.wait(10):
+        try:
+            if not auto_mode:
+                continue
+            t=auto_thread
+            with _SCAN_STATE_LOCK:
+                enabled=bool(_SCAN_STATE.get("enabled"))
+                coordinator=bool(_SCAN_STATE.get("coordinator_alive"))
+                hb=float(_SCAN_STATE.get("coordinator_heartbeat_at") or 0.0)
+            stale=bool(hb and time.time()-hb > max(90.0, SCAN_MAX_DURATION_SEC+30))
+            if t is None or not t.is_alive() or not coordinator or stale:
+                log.error("[SCANNER WATCHDOG] scanner coordinator tidak sehat — restart terkontrol")
+                _set_scan_state(last_error="scanner coordinator not healthy")
+                try:
+                    _ensure_scanner_running(active_chat_id, announce=True)
+                    _set_component_health("scanner", "RECOVERING", "scanner coordinator restarted by watchdog")
+                except Exception as exc:
+                    _set_component_health("scanner", "DEGRADED", str(exc)[:250])
+                    log.exception(f"[SCANNER WATCHDOG] restart gagal: {exc}")
+        except Exception as exc:
+            log.error(f"[SCANNER WATCHDOG] {exc}")
 
 def simulation_loop(chat_id):
     """Long-lived scan coordinator. It never owns strategy logic and cannot deadlock on a rejected worker slot."""
@@ -5418,8 +5480,12 @@ def simulation_loop(chat_id):
             _set_scan_state(last_result_count=len(signals or []))
             opened = 0
             if auto_mode and signals:
+                entry_blocked = bool(_binance_is_scan_paused() or STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN)
+                if entry_blocked:
+                    log.info(f"[EXECUTION GATE] {len(signals)} eligible signals retained; Binance/new-entry gate blocked execution only")
                 for sig in signals:
-                    if not auto_mode or _binance_is_scan_paused(): break
+                    if not auto_mode: break
+                    if _binance_is_scan_paused() or STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN: continue
                     sym=str(sig.get("symbol") or "").upper()
                     if not sym: continue
                     with positions_lock:
@@ -5444,17 +5510,17 @@ def simulation_loop(chat_id):
             _set_scan_state(last_success_at=time.time(), last_finished_at=time.time())
         except Exception as exc:
             _set_scan_state(last_error=str(exc)[:500], last_finished_at=time.time())
+            _set_component_health("scanner", "DEGRADED", str(exc)[:250])
             log.exception(f"[SCAN CYCLE] gagal: {exc}")
         finally:
             _set_scan_state(cycle_running=False, cycle_count=_SCAN_STATE.get("cycle_count",0)+1)
 
     try:
         while auto_mode:
+            _set_scan_state(coordinator_heartbeat_at=time.time(), coordinator_alive=True)
             # Binance cooldown/ban blocks new Binance entry mutation, not market analysis.
-            with positions_lock:
-                full=len(positions)>=MAX_POSITIONS
-            if full:
-                _SCAN_WAKE.wait(5); _SCAN_WAKE.clear(); continue
+            # Full position capacity blocks new execution, NOT market analysis.
+            # The scan continues so frequency/learning remain alive.
             with _SCAN_STATE_LOCK:
                 running=bool(_SCAN_STATE.get("cycle_running"))
                 last_finished=_SCAN_STATE.get("last_finished_at") or 0.0
@@ -6010,21 +6076,25 @@ def bot_loop():
                         f"💵 Balance TIDAK diubah: <b>${current_balance:.4f}</b>\n"
                         f"🛡️ Warmup reject aktif: <b>{early_reject_configured}</b> sinyal awal.")
                 elif text in ("/auto","auto"):
-                    if auto_mode:
-                        tg_send(chat_id,"⚙️ Broadcaster sudah berjalan.")
-                    else:
-                        # Reset referensi peak ke saldo SEKARANG — supaya drawdown
-                        # dihitung ulang dari titik ini, bukan dari peak lama yang
-                        # bikin auto-stop langsung kepicu lagi begitu /auto ditekan.
-                        if REAL_TRADE_ENABLED:
+                    if REAL_TRADE_ENABLED:
+                        try:
                             _, total = get_real_balance()
                             with autostop_lock:
                                 peak_real_balance = total
-                        auto_mode=True
-                        auto_thread=threading.Thread(
-                            target=simulation_loop,args=(chat_id,),daemon=True)
-                        auto_thread.start()
-                        _SCAN_WAKE.set()
+                        except Exception:
+                            pass
+                    try:
+                        t, created = _ensure_scanner_running(chat_id, announce=False)
+                        st=get_scanner_status()
+                        if created:
+                            tg_send(chat_id, "🔎 <b>SCANNER STARTING</b>\nData analisis: <b>Bybit REST</b>\nExecution: <b>Binance</b>")
+                        else:
+                            tg_send(chat_id, "🔎 <b>SCANNER SUDAH AKTIF</b>\n"
+                                            f"Cycle: <b>{st.get('cycle_count',0)}</b> | "
+                                            f"last scan: <b>{st.get('last_cycle_age_sec','—')}s lalu</b>\n"
+                                            f"Health: <b>{st.get('health')}</b> | Bybit: <b>AKTIF</b>")
+                    except Exception as exc:
+                        tg_send(chat_id, f"❌ <b>Scanner gagal dimulai</b>\n<code>{html.escape(str(exc)[:300])}</code>")
                 elif text in ("/stop","stop"):
                     # /stop hanya mematikan scanning sinyal baru — posisi
                     # yang sudah berjalan tetap dipantau sampai TP/SL alami.
@@ -6038,7 +6108,9 @@ def bot_loop():
                             f"Posisi aktif ({n_active}) tetap dipantau sampai TP/SL.\n"
                             f"Pakai /timeout SYMBOL kalau mau tutup paksa.")
                     else:
-                        tg_send(chat_id,"ℹ️ Broadcaster tidak berjalan.")
+                        st=get_scanner_status()
+                        tg_send(chat_id,"ℹ️ <b>Scanner tidak berjalan.</b>\n"
+                                        f"Health: <b>{st.get('health')}</b>")
                 elif text in ("/trade","trade"):
                     with positions_lock:
                         pos_list = list(positions.items())
@@ -6407,10 +6479,11 @@ def start_runtime():
         _set_component_health("binance_websocket","DEGRADED",str(exc))
     threading.Thread(target=_price_cache_loop,name="price-cache",daemon=True).start()
     threading.Thread(target=_binance_recovery_loop,name="binance-recovery",daemon=True).start()
+    threading.Thread(target=_scanner_watchdog_loop,name="scanner-watchdog",daemon=True).start()
     threading.Thread(target=_render_keepalive_loop,name="render-health",daemon=True).start()
     threading.Thread(target=run_flask,name="http",daemon=True).start()
     threading.Thread(target=bot_loop,name="telegram-runtime",daemon=True).start()
-    _set_component_health("scanner","HEALTHY","scanner initialized")
+    _set_component_health("scanner","STOPPED","scanner menunggu /auto; watchdog siap memantau")
     if _brain is None or not _validate_brain_contract(_brain)[0]:
         STOP_NEW_ENTRIES=True
         if RUNTIME_STATE=="BOOTING": _set_runtime_state("DEGRADED","brain contract unavailable")

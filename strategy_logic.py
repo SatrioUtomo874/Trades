@@ -75,8 +75,8 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-ML_COGNITIVE_VERSION = "V60_STATS_DRIVEN_FREQUENCY_BRAIN"
-V40_VERSION = "V60_STATS_DRIVEN_FREQUENCY_BRAIN"
+ML_COGNITIVE_VERSION = "V71_UNIFIED_FULL_BRAIN"
+V40_VERSION = "V71_UNIFIED_FULL_BRAIN"
 BRAIN_INTERFACE_VERSION = V40_VERSION
 BRAIN_INTERFACE_VERSION = V40_VERSION
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v2"
@@ -3889,11 +3889,11 @@ def get_full_cognitive_status():
     state = dict(v32.get("state") or {})
     state["adaptive"] = adaptive
     return {
-        "worker_alive": bool(v32.get("worker_alive")),
-        "worker_ticks": int(v32.get("ticks", 0) or 0),
-        "last_cycle": state.get("last_review"),
-        "last_error": v32.get("last_error") or adaptive.get("last_error"),
-        "last_result": {},
+        "worker_alive": bool(adaptive.get("worker_alive")),
+        "worker_ticks": int(adaptive.get("ticks", 0) or 0),
+        "last_cycle": (adaptive.get("last_frequency_review") or {}).get("time") or state.get("last_review"),
+        "last_error": adaptive.get("last_error") or v32.get("last_error"),
+        "last_result": dict((adaptive.get("last_frequency_review") or {}).get("result") or {}),
         "full_enabled": bool(_FULL_ENABLED),
         "v32": v32,
         "adaptive": adaptive,
@@ -4183,6 +4183,14 @@ def record_candidate_observation(signal, outcome=None, rejected_reason=None, sou
     with _COG_LOCK:
         _append_jsonl(_COG_EXPERIENCE_FILE, record, _COG_EXPERIENCE_BUFFER, 10000)
         _COG_STATE["candidates"] = int(_COG_STATE.get("candidates", 0)) + 1
+    try:
+        with _AGENT_LOCK:
+            live=_AGENT_STATE.setdefault("live", {})
+            live["observations"]=int(live.get("observations",0) or 0)+1
+            live["candidates"]=int(live.get("candidates",0) or 0)+1
+            _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    except Exception:
+        pass
     return record
 
 
@@ -4201,6 +4209,13 @@ def record_trade_outcome(signal, outcome, source="binance"):
         record = {"type":"trade_outcome","timestamp":time.time(),"trade_uid":uid,"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":_finite_num(sig.get("confidence"),50),"quality":_finite_num(sig.get("trade_quality",sig.get("setup_quality")),0),"archetype":sig.get("archetype","UNKNOWN"),"regime":sig.get("market_regime") or (snap.get("market") or {}).get("regime"),"snapshot":snap,"time_context":sig.get("time_context") or snap.get("time_context"),"learning_features":dict(sig.get("learning_features") or {}),"signal":sig,"outcome":dict(payload)}
         _append_jsonl(_COG_EXPERIENCE_FILE, record, _COG_EXPERIENCE_BUFFER, 10000)
         _COG_STATE["labeled_outcomes"] = int(_COG_STATE.get("labeled_outcomes", 0)) + 1
+    try:
+        with _AGENT_LOCK:
+            live=_AGENT_STATE.setdefault("live", {})
+            live["outcomes"]=int(live.get("outcomes",0) or 0)+1
+            _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    except Exception:
+        pass
     return record
 
 
@@ -5190,7 +5205,7 @@ _V31_BASE_FULL_ANALYZE = _CORE_FULL_ANALYZE
 _V31_BASE_MANAGE_POSITION = _CORE_MANAGE_POSITION
 
 
-def _v51_base_full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None):
+def _v51_base_full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None, market_data_source="bybit"):
     result = _V31_BASE_FULL_ANALYZE(df_h1, df_m15, df_d1, symbol=symbol, df_btc_h1=df_btc_h1, trade_history=trade_history)
     ts = _timestamp_from_df(df_m15)
     try:
@@ -5232,7 +5247,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
     Eligibility, threshold, low-confidence ban recommendation and frequency metadata
     are brain-owned; this function never calls Binance.
     """
-    base=_v51_base_full_analyze(df_h1, df_m15, df_d1, symbol=symbol, df_btc_h1=df_btc_h1, trade_history=trade_history)
+    base=_v51_base_full_analyze(df_h1, df_m15, df_d1, symbol=symbol, df_btc_h1=df_btc_h1, trade_history=trade_history, market_data_source=market_data_source)
     threshold=get_active_confidence_threshold()
     if isinstance(base,dict):
         out=dict(base)
@@ -5459,12 +5474,12 @@ AGENT_POLICY_FILE = AGENT_STATE_DIR / "adaptive_policy.json"
 AGENT_HISTORY_DIR = Path(os.getenv("HISTORICAL_DATA_DIR", str(AGENT_STATE_DIR / "historical_data")))
 AGENT_HISTORICAL_DAYS = max(30, int(os.getenv("HISTORICAL_LEARNING_DAYS", "90")))
 AGENT_RESEARCH_INTERVAL = max(5.0, float(os.getenv("ADAPTIVE_RESEARCH_INTERVAL", "20")))
-AGENT_REPLAY_WORKERS = max(1, min(4, int(os.getenv("ADAPTIVE_REPLAY_WORKERS", "2"))))
+AGENT_REPLAY_WORKERS = 1
 AGENT_REPLAY_STEP_M15 = max(1, int(os.getenv("ADAPTIVE_REPLAY_STEP_M15", "4")))
 AGENT_MIN_POLICY_EVIDENCE = max(8, int(os.getenv("ADAPTIVE_MIN_POLICY_EVIDENCE", "20")))
 AGENT_POLICY_MAX_DELTA = max(0.01, min(0.10, float(os.getenv("ADAPTIVE_POLICY_MAX_DELTA", "0.03"))))
 AGENT_EXPLORATION_SHARE = max(0.05, min(0.30, float(os.getenv("ADAPTIVE_EXPLORATION_SHARE", "0.15"))))
-AGENT_AUTO_HISTORICAL = str(os.getenv("ADAPTIVE_AUTO_HISTORICAL", "1")).strip().lower() not in {"0", "false", "off", "no"}
+AGENT_AUTO_HISTORICAL = str(os.getenv("ADAPTIVE_AUTO_HISTORICAL", "0")).strip().lower() not in {"0", "false", "off", "no"}
 AGENT_MAX_HISTORY_ROWS = max(5000, int(os.getenv("ADAPTIVE_MAX_HISTORY_ROWS", "300000")))
 
 _AGENT_LOCK = threading.RLock()
