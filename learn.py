@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-SMCAutoTrade learn_v2.py
+SMCAutoTrade learn_v3.py
 
 Research / learning brain.
 
@@ -22,6 +22,7 @@ No exchange or Telegram polling is performed here.
 """
 
 import base64
+import gzip
 import hashlib
 import itertools
 import json
@@ -43,7 +44,7 @@ from typing import Any
 
 log = logging.getLogger("learn")
 
-VERSION = "2.0"
+VERSION = "3.0"
 BASE_DIR = Path(__file__).resolve().parent
 LEARNING_DIR = Path(os.getenv("LEARNING_DIR", str(BASE_DIR / "learning"))).resolve()
 DB_FILE = Path(os.getenv("LEARNING_DB", str(LEARNING_DIR / "brain.sqlite3"))).resolve()
@@ -69,6 +70,9 @@ MAX_FREQUENCY_DROP_PCT = max(0.0, float(os.getenv("LEARNING_MAX_FREQUENCY_DROP_P
 MAX_DRAWDOWN_WORSEN_PCT = max(0.0, float(os.getenv("LEARNING_MAX_DRAWDOWN_WORSEN_PCT", "20.0")))
 CHECKPOINT_SECONDS = max(60, int(os.getenv("LEARNING_CHECKPOINT_SECONDS", "900")))
 MAX_WORKERS = max(1, min(5, int(os.getenv("LEARNING_MAX_WORKERS", "5"))))
+SILENCE_CHECK_SECONDS = max(300, int(os.getenv("LEARNING_SILENCE_CHECK_SECONDS", "900")))
+ZERO_SIGNAL_MINUTES = max(15, int(os.getenv("LEARNING_ZERO_SIGNAL_MINUTES", "60")))
+SILENCE_COOLDOWN_SECONDS = max(900, int(os.getenv("LEARNING_SILENCE_COOLDOWN_SECONDS", "3600")))
 
 API: Any = None
 CONTEXT: dict[str, Any] = {}
@@ -80,6 +84,9 @@ FULL_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="
 LAST_FULL_RESULT: dict[str, Any] = {}
 LAST_CHECKPOINT = 0.0
 GLOBAL_CONTEXT: dict[str, Any] = {}
+SILENCE_THREAD: threading.Thread | None = None
+SILENCE_STOP = threading.Event()
+LAST_SILENCE_AUDIT = 0.0
 
 DEFAULT_CONSTITUTION = {
     "rr_min": 2.0,
@@ -592,6 +599,71 @@ def on_trade_event(trade_event: dict[str, Any]) -> None:
         _save_state()
 
 
+# ---------------- signal-silence auditor ----------------
+def _latest_signal_ts() -> int | None:
+    with _db() as conn:
+        row = conn.execute("SELECT MAX(ts) ts FROM signals").fetchone()
+    return int(row["ts"]) if row and row["ts"] is not None else None
+
+def _recent_signal_count(hours: float = 24.0) -> int:
+    cutoff = _now_ms() - int(hours * 3_600_000)
+    with _db() as conn:
+        row = conn.execute("SELECT COUNT(*) n FROM signals WHERE ts >= ?", (cutoff,)).fetchone()
+    return int(row["n"] or 0)
+
+def diagnose_signal_silence(force: bool = False) -> dict[str, Any]:
+    global LAST_SILENCE_AUDIT
+    now = time.time()
+    if not force and now - LAST_SILENCE_AUDIT < SILENCE_COOLDOWN_SECONDS:
+        return {"skipped": True}
+    LAST_SILENCE_AUDIT = now
+    latest = _latest_signal_ts()
+    silence_min = ((now * 1000 - latest) / 60_000.0) if latest else float("inf")
+    count24 = _recent_signal_count(24.0)
+    snap: dict[str, Any] = {}
+    try:
+        if STRATEGY_MODULE and hasattr(STRATEGY_MODULE, "get_learning_snapshot"):
+            snap = STRATEGY_MODULE.get_learning_snapshot() or {}
+    except Exception:
+        log.exception("[SILENCE] strategy snapshot failed")
+    active = snap.get("active_setups") or []
+    waiting = sum(1 for x in active if x.get("state") == "WAITING_CONFIRMATION")
+    pending = sum(1 for x in active if x.get("state") == "PENDING_LIMIT")
+    watching = sum(1 for x in active if x.get("state") in {"WATCHING", "IN_ZONE"})
+    freq_vals = [float(x.get("frequency_per_day")) for x in active if isinstance(x.get("frequency_per_day"), (int, float))]
+    median_freq = statistics.median(freq_vals) if freq_vals else 0.0
+    reasons = []
+    if waiting: reasons.append(f"{waiting} setup stuck at confirmation")
+    if watching and not waiting and not pending: reasons.append(f"{watching} setup not reaching confirmation/POI")
+    if pending: reasons.append(f"{pending} confirmed setup pending execution")
+    if median_freq <= 0: reasons.append("strategy opportunity-frequency estimate is zero")
+    if not active: reasons.append("no active setup candidates")
+    result = {"ts": _now_ms(), "silence_minutes": silence_min, "signals_24h": count24, "active": len(active), "waiting_confirmation": waiting, "pending_limit": pending, "watching_or_in_zone": watching, "median_setup_frequency_per_day": median_freq, "reasons": reasons, "market_context": GLOBAL_CONTEXT}
+    with _db() as conn:
+        conn.execute("INSERT INTO hypotheses(created_ts,title,source,payload_json,status) VALUES(?,?,?,?,?)", (_now_ms(), "ZERO_SIGNAL_SILENCE_AUDIT", "automatic", _json(result), "OPEN"))
+    log.warning("[SILENCE AUDIT] %s", result)
+    return result
+
+def _silence_worker() -> None:
+    while not SILENCE_STOP.wait(SILENCE_CHECK_SECONDS):
+        try:
+            latest = _latest_signal_ts()
+            silence_min = ((time.time() * 1000 - latest) / 60_000.0) if latest else float("inf")
+            if silence_min >= ZERO_SIGNAL_MINUTES:
+                diagnose_signal_silence()
+        except Exception:
+            log.exception("[SILENCE] automatic audit failed")
+
+def _start_silence_monitor() -> None:
+    global SILENCE_THREAD
+    SILENCE_STOP.clear()
+    if SILENCE_THREAD and SILENCE_THREAD.is_alive(): return
+    SILENCE_THREAD = threading.Thread(target=_silence_worker, name="learning-silence-auditor", daemon=True)
+    SILENCE_THREAD.start()
+
+def _stop_silence_monitor() -> None:
+    SILENCE_STOP.set()
+
 # ---------------- statistics ----------------
 def _load_closed_rows() -> list[sqlite3.Row]:
     with _db() as conn:
@@ -981,6 +1053,43 @@ def _promote_candidate(candidate: Path, report: dict[str, Any], base_path: Path)
 
 
 # ---------------- github persistence ----------------
+def _github_get_json(path: str) -> dict[str, Any]:
+    return _github_request(path, method="GET")
+
+def _github_file_blob(repo_path: str) -> bytes | None:
+    if not GITHUB_TOKEN or not REPO_NAME:
+        return None
+    try:
+        ref = _github_get_json(f"/repos/{REPO_NAME}/git/ref/heads/{urllib.parse.quote(GITHUB_BRANCH)}")
+        head = ((ref.get("object") or {}).get("sha") or "")
+        commit = _github_get_json(f"/repos/{REPO_NAME}/git/commits/{head}")
+        tree_sha = ((commit.get("tree") or {}).get("sha") or "")
+        tree = _github_get_json(f"/repos/{REPO_NAME}/git/trees/{tree_sha}?recursive=1")
+        target = repo_path.strip("/")
+        item = next((x for x in tree.get("tree", []) if x.get("path") == target and x.get("type") == "blob"), None)
+        if not item:
+            return None
+        blob = _github_get_json(f"/repos/{REPO_NAME}/git/blobs/{item['sha']}")
+        if blob.get("encoding") != "base64":
+            return None
+        return base64.b64decode(blob.get("content", ""))
+    except Exception:
+        log.exception("[GITHUB] restore failed %s", repo_path)
+        return None
+
+def _github_put_large_file(local: Path, repo_path: str, message: str) -> None:
+    if not GITHUB_PUSH_ENABLED or not GITHUB_TOKEN or not REPO_NAME:
+        return
+    data = local.read_bytes()
+    blob = _github_request(f"/repos/{REPO_NAME}/git/blobs", method="POST", payload={"content": base64.b64encode(data).decode(), "encoding": "base64"})
+    ref = _github_get_json(f"/repos/{REPO_NAME}/git/ref/heads/{urllib.parse.quote(GITHUB_BRANCH)}")
+    head = ((ref.get("object") or {}).get("sha") or "")
+    commit0 = _github_get_json(f"/repos/{REPO_NAME}/git/commits/{head}")
+    base_tree = ((commit0.get("tree") or {}).get("sha") or "")
+    tree = _github_request(f"/repos/{REPO_NAME}/git/trees", method="POST", payload={"base_tree": base_tree, "tree": [{"path": repo_path, "mode": "100644", "type": "blob", "sha": blob.get("sha")}]})
+    commit = _github_request(f"/repos/{REPO_NAME}/git/commits", method="POST", payload={"message": message, "tree": tree.get("sha"), "parents": [head]})
+    _github_request(f"/repos/{REPO_NAME}/git/refs/heads/{urllib.parse.quote(GITHUB_BRANCH)}", method="PATCH", payload={"sha": commit.get("sha")})
+
 def _github_request(path: str, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
     if not GITHUB_TOKEN or not REPO_NAME:
         raise RuntimeError("GITHUB_TOKEN/REPO_NAME tidak tersedia")
@@ -1031,6 +1140,13 @@ def push_checkpoint(report: dict[str, Any] | None = None) -> None:
             _github_put_file(local, repo, f"learn: save {local.name}")
         except Exception:
             log.exception("[GITHUB] push failed %s", local)
+    try:
+        db_gz = LEARNING_DIR / "brain.sqlite3.gz"
+        with DB_FILE.open("rb") as src, gzip.open(db_gz, "wb", compresslevel=6) as dst:
+            dst.write(src.read())
+        _github_put_large_file(db_gz, "learning/brain.sqlite3.gz", "learn: backup brain memory")
+    except Exception:
+        log.exception("[GITHUB] sqlite backup failed")
 
 
 def push_strategy(path: Path) -> None:
@@ -1053,7 +1169,8 @@ def initialize(api: Any, context: dict[str, Any]) -> None:
     GLOBAL_CONTEXT.update(state.get("global_context") or {})
     _ensure_dirs()
     _load_constitution()
-    log.info("[LEARN V2] initialized | db=%s | ollama=%s | github_push=%s", DB_FILE, OLLAMA_MODEL, GITHUB_PUSH_ENABLED)
+    _start_silence_monitor()
+    log.info("[LEARN V3] initialized | db=%s | ollama=%s | github_push=%s", DB_FILE, OLLAMA_MODEL, GITHUB_PUSH_ENABLED)
 
 
 def on_strategy_loaded(module: Any, path: str | Path) -> None:
@@ -1065,7 +1182,38 @@ def on_strategy_loaded(module: Any, path: str | Path) -> None:
     log.info("[LEARN] active strategy=%s", STRATEGY_PATH)
 
 
+def _restore_from_github() -> bool:
+    restored = False
+    gz = _github_file_blob("learning/brain.sqlite3.gz")
+    if gz:
+        try:
+            temp_gz = LEARNING_DIR / "brain.restore.sqlite3.gz"
+            temp_db = LEARNING_DIR / "brain.restore.sqlite3"
+            temp_gz.write_bytes(gz)
+            with gzip.open(temp_gz, "rb") as src, temp_db.open("wb") as dst:
+                dst.write(src.read())
+            temp_db.replace(DB_FILE)
+            temp_gz.unlink(missing_ok=True)
+            restored = True
+        except Exception:
+            log.exception("[GITHUB] brain memory restore failed")
+    for repo_path, local in (("learning/state.json", STATE_FILE), ("learning/constitution.json", CONSTITUTION_FILE)):
+        data = _github_file_blob(repo_path)
+        if data:
+            try:
+                local.parent.mkdir(parents=True, exist_ok=True)
+                local.write_bytes(data)
+                restored = True
+            except Exception:
+                log.exception("[GITHUB] restore failed %s", repo_path)
+    if restored:
+        _init_db()
+    return restored
+
 def open_memory() -> str:
+    # Pause the monitor while replacing the SQLite file from GitHub.
+    _stop_silence_monitor()
+    restored_github = _restore_from_github() if (GITHUB_TOKEN and REPO_NAME) else False
     state = _load_state()
     global GLOBAL_CONTEXT, LAST_FULL_RESULT
     GLOBAL_CONTEXT = dict(state.get("global_context") or GLOBAL_CONTEXT)
@@ -1077,8 +1225,11 @@ def open_memory() -> str:
         trades = conn.execute("SELECT COUNT(*) n FROM trades WHERE status='CLOSED'").fetchone()["n"]
         hyps = conn.execute("SELECT COUNT(*) n FROM hypotheses").fetchone()["n"]
         exps = conn.execute("SELECT COUNT(*) n FROM experiments").fetchone()["n"]
+    source = "GITHUB + LOCAL" if restored_github else "LOCAL"
+    _start_silence_monitor()
     return (
         "🧠 LEARNING MEMORY OPENED\n\n"
+        f"Source: {source}\n"
         f"Active strategy: {Path(str(active)).name}\n"
         f"Observations: {obs}\n"
         f"Signals learned: {signals}\n"
@@ -1087,7 +1238,6 @@ def open_memory() -> str:
         f"Experiments: {exps}\n"
         "State: RESTORED"
     )
-
 
 def status() -> str:
     with _db() as conn:
@@ -1228,6 +1378,9 @@ def handle_command(text: str) -> str | None:
     cmd = parts[0].lower() if parts else ""
     if cmd == "/open":
         return open_memory()
+    if cmd == "/silence":
+        result = diagnose_signal_silence(force=True)
+        return "🧠 SIGNAL SILENCE AUDIT\n" + json.dumps(result, ensure_ascii=False, indent=2, default=str)[:3600]
     if cmd == "/learn":
         return status()
     if cmd == "/save":
@@ -1245,6 +1398,7 @@ def handle_command(text: str) -> str | None:
 def shutdown() -> None:
     global FULL_RUNNING
     FULL_RUNNING = False
+    _stop_silence_monitor()
     try:
         _save_state()
     except Exception:
