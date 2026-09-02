@@ -80,12 +80,13 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 BRAIN_CONFIDENCE_DISPLAY_FALLBACK = "brain-owned"
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "MAIN-BODY-V48-FORMAL-CONTRACT"
+MAIN_ENGINE_VERSION = "MAIN-BODY-V53-FULL-RUNTIME-AUDITED"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
 # hanya dipakai oleh pipeline scan; execution/position monitoring tetap memakai
 # get_klines() normal sehingga tidak mengubah freshness data posisi.
+SCAN_MAX_DURATION_SEC = max(60, int(os.getenv("SCAN_MAX_DURATION_SEC", "180")))
 SCAN_KLINE_TTL = {
     "15m": 8 * 60,      # refresh maksimum sekitar sekali per 8 menit
     "1h": 30 * 60,      # tidak perlu REST berulang di antara candle 1h
@@ -468,12 +469,12 @@ BINANCE_KEYS_PRESENT = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
 REAL_TRADE_ENABLED   = False
 
 # Execution infrastructure invariants
-EXECUTION_ENGINE_VERSION = "MAIN-BODY-V47-FINAL"
+EXECUTION_ENGINE_VERSION = "MAIN-BODY-V53-FULL-RUNTIME-AUDITED"
 RUNTIME_SCHEMA_VERSION = "runtime_v1"
 EVENT_SCHEMA_VERSION = "event_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
 BRAIN_INTERFACE_VERSION = "brain_v1"
-BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED"}
+BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED"}
 MAX_HEAVY_WORKERS = 5
 HEAVY_WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_HEAVY_WORKERS)
 _HEAVY_WORKER_LOCK = threading.RLock()
