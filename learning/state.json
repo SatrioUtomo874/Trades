@@ -1,11 +1,11 @@
 {
   "version": "3.0",
-  "saved_at": 1788322107.5264258,
+  "saved_at": 1788325682.7309277,
   "active_strategy": "/opt/render/project/src/strategy.py",
   "last_full": {
-    "started_at": 1788321382.8263178,
-    "finished_at": 1788322107.5252676,
-    "duration_s": 724.6989502906799,
+    "started_at": 1788325409.812742,
+    "finished_at": 1788325682.728899,
+    "duration_s": 272.916157245636,
     "baseline": {
       "sample": 0,
       "wins": 0,
@@ -18,32 +18,32 @@
       "frequency_per_day": 0.0
     },
     "global_context": {
-      "timestamp": 1788322098632,
+      "timestamp": 1788325671937,
       "symbols": 459,
-      "bullish": 143,
-      "bearish": 316,
+      "bullish": 168,
+      "bearish": 291,
       "neutral": 0,
-      "breadth": 0.3115468409586057,
-      "alt_breadth": 0.31222707423580787,
-      "breadth_delta": 0.051243153323030866,
-      "median_rvol": 0.23180986156083666,
-      "median_atr_pct": 0.0057391368535012815,
-      "median_efficiency_4h": 0.1422680412371128,
-      "expansion_share": 0.037037037037037035,
-      "transition_share": 0.3333333333333333,
+      "breadth": 0.3660130718954248,
+      "alt_breadth": 0.36681222707423583,
+      "breadth_delta": 0.05446623093681913,
+      "median_rvol": 0.1553052894141624,
+      "median_atr_pct": 0.005401434621035352,
+      "median_efficiency_4h": 0.16398713826366368,
+      "expansion_share": 0.02178649237472767,
+      "transition_share": 0.39869281045751637,
       "market_label": "BROAD_BEARISH",
       "regime": "RANGE",
       "btc": {
         "symbol": "BTCUSDT",
-        "timestamp": 1788320700000,
-        "price_change_1h": 0.00298318240620965,
-        "price_change_4h": 0.001783116215245295,
-        "directional_efficiency_1h": 0.5323176361957517,
-        "directional_efficiency_4h": 0.07345113902490884,
-        "atr_pct": 0.002995038640964244,
-        "atr_percentile": 0.6572280178837556,
-        "relative_volume": 0.4960451671834272,
-        "range_expansion": 0.6032015739581187,
+        "timestamp": 1788325200000,
+        "price_change_1h": 0.0018555514608427082,
+        "price_change_4h": 0.002186004397878749,
+        "directional_efficiency_1h": 0.595682855956843,
+        "directional_efficiency_4h": 0.08611903791275886,
+        "atr_pct": 0.0026117676126065498,
+        "atr_percentile": 0.47391952309985097,
+        "relative_volume": 0.10568793973126359,
+        "range_expansion": 0.5251971850942075,
         "regime": "RANGE",
         "directional_bias": "BEARISH",
         "structure_label": "HH_HL",
@@ -58,51 +58,43 @@
         "reason": "Need 50, have 0"
       },
       {
-        "title": "Increase Sample Size to 50",
-        "change_type": "increase_sample",
-        "feature": "sample",
-        "threshold": 50,
-        "reason": "Current sample size is 0, below the minimum required 50 for statistical significance.",
+        "title": "SMA20_FILTER",
+        "change_type": "add_filter",
+        "feature": "sma_period",
+        "threshold": 20,
+        "reason": "In a range regime, filtering trades to only those occurring when price is above (bullish) or below (bearish) the 20‑period simple moving average may reduce false signals and improve win rate.",
         "source": "ollama"
       },
       {
-        "title": "Reduce Risk-Reward Ratio to 2.0",
-        "change_type": "adjust_rr",
-        "feature": "rr_min",
-        "threshold": 2.0,
-        "reason": "Lowering RR to the minimum allowed may improve win rate in a range regime.",
+        "title": "ATR_STOP_LOSS",
+        "change_type": "add_parameter",
+        "feature": "atr_multiplier",
+        "threshold": 1.5,
+        "reason": "Using a stop loss at 1.5× ATR can provide a conservative risk‑management rule that adapts to current volatility, potentially limiting drawdowns without overly tightening the stop.",
         "source": "ollama"
       },
       {
-        "title": "Add ATR % Filter for Entry",
-        "change_type": "add_feature",
-        "feature": "atr_pct",
-        "threshold": 0.005,
-        "reason": "Using ATR % > 0.005 may filter out low volatility periods, potentially reducing false signals.",
+        "title": "VOLUME_THRESHOLD",
+        "change_type": "add_filter",
+        "feature": "volume_threshold",
+        "threshold": 1.2,
+        "reason": "Only executing trades when relative volume exceeds 1.2 may increase the likelihood that price moves are supported by market participation, improving expectancy.",
         "source": "ollama"
       },
       {
-        "title": "Limit Trade Frequency to 0.5 per Day",
-        "change_type": "adjust_frequency",
-        "feature": "frequency_per_day",
-        "threshold": 0.5,
-        "reason": "Reducing frequency may lower transaction costs and avoid overtrading in a bearish market.",
+        "title": "BREAKOUT_FILTER",
+        "change_type": "add_filter",
+        "feature": "breakout_period",
+        "threshold": 1,
+        "reason": "Restricting entries to moments when price breaks the previous day’s high or low could capture genuine breakout moves even within a range regime, potentially raising win rate.",
         "source": "ollama"
       },
       {
-        "title": "Test Directional Efficiency 1h > 0.55",
-        "change_type": "add_feature",
-        "feature": "directional_efficiency_1h",
-        "threshold": 0.55,
-        "reason": "High directional efficiency may indicate stronger trend signals, improving trade selection.",
-        "source": "ollama"
-      },
-      {
-        "title": "Apply Bearish Bias Filter on BTC",
-        "change_type": "add_feature",
-        "feature": "btc_directional_bias",
-        "threshold": "BEARISH",
-        "reason": "Filtering for bearish bias aligns strategy with current market label 'BROAD_BEARISH'.",
+        "title": "TIME_OF_DAY_FILTER",
+        "change_type": "add_filter",
+        "feature": "time_filter",
+        "threshold": "09:00",
+        "reason": "Limiting trades to after 09:00 UTC may avoid early‑session volatility spikes and provide a more stable testing environment.",
         "source": "ollama"
       }
     ],
@@ -153,11 +145,11 @@
       },
       {
         "hypothesis": {
-          "title": "Increase Sample Size to 50",
-          "change_type": "increase_sample",
-          "feature": "sample",
-          "threshold": 50,
-          "reason": "Current sample size is 0, below the minimum required 50 for statistical significance.",
+          "title": "SMA20_FILTER",
+          "change_type": "add_filter",
+          "feature": "sma_period",
+          "threshold": 20,
+          "reason": "In a range regime, filtering trades to only those occurring when price is above (bullish) or below (bearish) the 20‑period simple moving average may reduce false signals and improve win rate.",
           "source": "ollama"
         },
         "baseline": {
@@ -200,11 +192,11 @@
       },
       {
         "hypothesis": {
-          "title": "Reduce Risk-Reward Ratio to 2.0",
-          "change_type": "adjust_rr",
-          "feature": "rr_min",
-          "threshold": 2.0,
-          "reason": "Lowering RR to the minimum allowed may improve win rate in a range regime.",
+          "title": "ATR_STOP_LOSS",
+          "change_type": "add_parameter",
+          "feature": "atr_multiplier",
+          "threshold": 1.5,
+          "reason": "Using a stop loss at 1.5× ATR can provide a conservative risk‑management rule that adapts to current volatility, potentially limiting drawdowns without overly tightening the stop.",
           "source": "ollama"
         },
         "baseline": {
@@ -247,11 +239,11 @@
       },
       {
         "hypothesis": {
-          "title": "Add ATR % Filter for Entry",
-          "change_type": "add_feature",
-          "feature": "atr_pct",
-          "threshold": 0.005,
-          "reason": "Using ATR % > 0.005 may filter out low volatility periods, potentially reducing false signals.",
+          "title": "VOLUME_THRESHOLD",
+          "change_type": "add_filter",
+          "feature": "volume_threshold",
+          "threshold": 1.2,
+          "reason": "Only executing trades when relative volume exceeds 1.2 may increase the likelihood that price moves are supported by market participation, improving expectancy.",
           "source": "ollama"
         },
         "baseline": {
@@ -294,11 +286,11 @@
       },
       {
         "hypothesis": {
-          "title": "Limit Trade Frequency to 0.5 per Day",
-          "change_type": "adjust_frequency",
-          "feature": "frequency_per_day",
-          "threshold": 0.5,
-          "reason": "Reducing frequency may lower transaction costs and avoid overtrading in a bearish market.",
+          "title": "BREAKOUT_FILTER",
+          "change_type": "add_filter",
+          "feature": "breakout_period",
+          "threshold": 1,
+          "reason": "Restricting entries to moments when price breaks the previous day’s high or low could capture genuine breakout moves even within a range regime, potentially raising win rate.",
           "source": "ollama"
         },
         "baseline": {
@@ -341,58 +333,11 @@
       },
       {
         "hypothesis": {
-          "title": "Test Directional Efficiency 1h > 0.55",
-          "change_type": "add_feature",
-          "feature": "directional_efficiency_1h",
-          "threshold": 0.55,
-          "reason": "High directional efficiency may indicate stronger trend signals, improving trade selection.",
-          "source": "ollama"
-        },
-        "baseline": {
-          "sample": 0,
-          "wins": 0,
-          "losses": 0,
-          "win_rate": 0.0,
-          "expectancy_r": 0.0,
-          "net_r": 0,
-          "net_pnl": 0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "candidate": {
-          "sample": 0,
-          "expectancy_r": 0.0,
-          "win_rate": 0.0,
-          "net_r": 0.0,
-          "max_drawdown_r": 0.0,
-          "frequency_per_day": 0.0
-        },
-        "sample_ok": false,
-        "improvement_pct": 0.0,
-        "frequency_drop_pct": 0.0,
-        "drawdown_worsen_pct": 0.0,
-        "walk_forward": {
-          "pass": false,
-          "folds": [],
-          "reason": "insufficient chronological sample"
-        },
-        "out_of_sample": {
-          "pass": false,
-          "reason": "insufficient OOS sample"
-        },
-        "robustness": {
-          "pass": false,
-          "reason": "candidate selects zero rows"
-        },
-        "decision": "REJECT"
-      },
-      {
-        "hypothesis": {
-          "title": "Apply Bearish Bias Filter on BTC",
-          "change_type": "add_feature",
-          "feature": "btc_directional_bias",
-          "threshold": "BEARISH",
-          "reason": "Filtering for bearish bias aligns strategy with current market label 'BROAD_BEARISH'.",
+          "title": "TIME_OF_DAY_FILTER",
+          "change_type": "add_filter",
+          "feature": "time_filter",
+          "threshold": "09:00",
+          "reason": "Limiting trades to after 09:00 UTC may avoid early‑session volatility spikes and provide a more stable testing environment.",
           "source": "ollama"
         },
         "baseline": {
@@ -440,32 +385,32 @@
     "decision": "NO_CHANGE"
   },
   "global_context": {
-    "timestamp": 1788322098632,
+    "timestamp": 1788325671937,
     "symbols": 459,
-    "bullish": 143,
-    "bearish": 316,
+    "bullish": 168,
+    "bearish": 291,
     "neutral": 0,
-    "breadth": 0.3115468409586057,
-    "alt_breadth": 0.31222707423580787,
-    "breadth_delta": 0.051243153323030866,
-    "median_rvol": 0.23180986156083666,
-    "median_atr_pct": 0.0057391368535012815,
-    "median_efficiency_4h": 0.1422680412371128,
-    "expansion_share": 0.037037037037037035,
-    "transition_share": 0.3333333333333333,
+    "breadth": 0.3660130718954248,
+    "alt_breadth": 0.36681222707423583,
+    "breadth_delta": 0.05446623093681913,
+    "median_rvol": 0.1553052894141624,
+    "median_atr_pct": 0.005401434621035352,
+    "median_efficiency_4h": 0.16398713826366368,
+    "expansion_share": 0.02178649237472767,
+    "transition_share": 0.39869281045751637,
     "market_label": "BROAD_BEARISH",
     "regime": "RANGE",
     "btc": {
       "symbol": "BTCUSDT",
-      "timestamp": 1788320700000,
-      "price_change_1h": 0.00298318240620965,
-      "price_change_4h": 0.001783116215245295,
-      "directional_efficiency_1h": 0.5323176361957517,
-      "directional_efficiency_4h": 0.07345113902490884,
-      "atr_pct": 0.002995038640964244,
-      "atr_percentile": 0.6572280178837556,
-      "relative_volume": 0.4960451671834272,
-      "range_expansion": 0.6032015739581187,
+      "timestamp": 1788325200000,
+      "price_change_1h": 0.0018555514608427082,
+      "price_change_4h": 0.002186004397878749,
+      "directional_efficiency_1h": 0.595682855956843,
+      "directional_efficiency_4h": 0.08611903791275886,
+      "atr_pct": 0.0026117676126065498,
+      "atr_percentile": 0.47391952309985097,
+      "relative_volume": 0.10568793973126359,
+      "range_expansion": 0.5251971850942075,
       "regime": "RANGE",
       "directional_bias": "BEARISH",
       "structure_label": "HH_HL",
