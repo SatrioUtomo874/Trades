@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py V49 — FORMAL BODY / EXECUTION INFRASTRUCTURE.
+main.py V72 — OPERATIONAL BODY / FINAL EXECUTION INFRASTRUCTURE.
 
 V15 HARDENED: verified real-order execution, no blind mutating retries, exchange/local state reconciliation, protection-pair verification, and fail-closed emergency handling. Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
@@ -123,6 +123,12 @@ _SCAN_STATE = {
     "last_error": None,
     "last_result_count": 0,
     "last_symbols_processed": 0,
+    "last_candidate_count": 0,
+    "last_eligible_count": 0,
+    "last_ban_count": 0,
+    "last_low_confidence_count": 0,
+    "last_rejection_reasons": {},
+    "consecutive_no_signal_cycles": 0,
 }
 _SCAN_COORDINATOR_THREAD = None
 _SCAN_CYCLE_THREAD = None
@@ -260,6 +266,19 @@ def _brain_on_trade(row):
         except Exception as exc:
             log.warning(f"[BRAIN] record_trade_outcome gagal: {exc}")
     return None
+
+def _record_brain_scan_summary(summary):
+    """Canonical scan→brain frequency boundary. Legacy brains simply ignore it."""
+    fn = _brain_fn("record_scan_summary")
+    if not callable(fn):
+        return None
+    try:
+        return fn(dict(summary or {}), source="main_scanner")
+    except TypeError:
+        return fn(dict(summary or {}))
+    except Exception as exc:
+        log.warning(f"[BRAIN] record_scan_summary gagal: {exc}")
+        return None
 
 def _brain_get_experience_count():
     for name in ("get_experience_count", "get_learning_model_info", "get_full_cognitive_status", "get_cognitive_status"):
@@ -514,7 +533,7 @@ RUNTIME_SCHEMA_VERSION = "runtime_v1"
 EVENT_SCHEMA_VERSION = "event_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
 BRAIN_INTERFACE_VERSION = "brain_v1"
-BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT"}
+BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT", "V52_OPERATIONAL_BRAIN"}
 MAX_HEAVY_WORKERS = 5
 HEAVY_WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_HEAVY_WORKERS)
 _HEAVY_WORKER_LOCK = threading.RLock()
@@ -1198,6 +1217,46 @@ def _start_heavy_worker(name, fn, *args, **kwargs):
 def _heavy_worker_snapshot():
     with _HEAVY_WORKER_LOCK:
         return {k: dict(v) for k, v in _HEAVY_WORKER_REGISTRY.items()}
+
+# Long-lived I/O waiters (e.g. pending entry watchers) are NOT heavy compute.
+# Keeping them out of the heavy pool prevents four pending entries from starving
+# the scanner/FULL/recovery workers.  The global heavy-worker ceiling remains 5.
+_LIGHT_WORKER_LOCK = threading.RLock()
+_LIGHT_WORKER_REGISTRY = {}
+_MAX_LIGHT_WORKERS = max(4, _env_int("MAX_LIGHT_WORKERS", 16, minimum=4, maximum=64))
+
+def _light_worker_target(name, fn, *args, worker_id=None, **kwargs):
+    try:
+        fn(*args, **kwargs)
+    except Exception as exc:
+        log.exception(f"[LIGHT WORKER] {name} failed: {exc}")
+    finally:
+        with _LIGHT_WORKER_LOCK:
+            if worker_id:
+                _LIGHT_WORKER_REGISTRY.pop(worker_id, None)
+
+def _start_light_worker(name, fn, *args, **kwargs):
+    with _LIGHT_WORKER_LOCK:
+        if len(_LIGHT_WORKER_REGISTRY) >= _MAX_LIGHT_WORKERS:
+            log.warning(f"[RESOURCE] light worker limit reached ({_MAX_LIGHT_WORKERS}); defer {name}")
+            return None
+        if any(v.get("name") == name for v in _LIGHT_WORKER_REGISTRY.values()):
+            log.debug(f"[RESOURCE] light worker {name} already running")
+            return None
+        worker_id = _new_request_id("LWRK")
+        _LIGHT_WORKER_REGISTRY[worker_id] = {"name": name, "started_at": time.time()}
+    try:
+        t = threading.Thread(target=_light_worker_target, args=(name, fn, *args), kwargs={"worker_id": worker_id, **kwargs}, name=f"light-{name}-{worker_id[-6:]}", daemon=True)
+        t.start()
+        return t
+    except Exception:
+        with _LIGHT_WORKER_LOCK:
+            _LIGHT_WORKER_REGISTRY.pop(worker_id, None)
+        raise
+
+def _light_worker_snapshot():
+    with _LIGHT_WORKER_LOCK:
+        return {k: dict(v) for k,v in _LIGHT_WORKER_REGISTRY.items()}
 
 # New real trading is OFF until the operator explicitly runs /mode on.
 # Existing REAL positions remain manageable even while the mode flag is OFF.
@@ -3609,6 +3668,8 @@ def run_scan_once(chat_id):
 
     data_started=time.monotonic(); results=[]; all_scan_confidences=[]; market_rows=[]
     processed_symbols=analyzed_symbols=cache_hits=cache_misses=failed_symbols=low_conf_count=below_threshold_count=0
+    candidate_count=eligible_count=ban_count=0
+    rejection_reasons={}
     scan_deadline = scan_started + SCAN_MAX_DURATION_SEC
     for idx,sym in enumerate(symbols,1):
         if time.monotonic() >= scan_deadline:
@@ -3638,6 +3699,13 @@ def run_scan_once(chat_id):
                     log.info(f"[SCAN NO-SIGNAL] {sym} stage={r.get('analysis_stage')} reason={r.get('rejected_reason')}")
                 _brain_on_candidate(r)
                 analyzed_symbols+=1; conf=float(r.get("confidence",0) or 0); all_scan_confidences.append(conf)
+                if bool(r.get("candidate") or r.get("is_candidate") or (r.get("decision") in {"BUY","SELL"} and not r.get("no_signal"))):
+                    candidate_count += 1
+                reason = str(r.get("rejected_reason") or r.get("eligibility_reason") or "UNCLASSIFIED")
+                if bool(r.get("no_signal")) and reason == "UNCLASSIFIED":
+                    reason = "NO_SIGNAL"
+                if reason and reason not in {"UNCLASSIFIED", ""} and not bool(r.get("execution_eligible")):
+                    rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                 lf = r.setdefault("learning_features", {})
                 lf.update({
                     "market_bull_breadth": float(row.get("bullish_breadth_pct") or 0.0) / 100.0,
@@ -3654,12 +3722,18 @@ def run_scan_once(chat_id):
                     low_conf_count+=1; _record_low_confidence_event(sym,conf,cutoff,r.get("decision"),r.get("entry_label"))
                 if bool(r.get("ban_recommended")):
                     _ban_coin(sym, reason=str(r.get("ban_reason") or "brain recommendation"), duration=r.get("ban_duration"), kind=str(r.get("ban_kind") or "low_confidence"), confidence=conf)
+                    ban_count += 1
+                # Brain owns entry eligibility. Main only supplies a compatibility
+                # fallback for truly legacy brains; current operational brain always
+                # returns an explicit boolean + reason.
                 if "execution_eligible" not in r:
                     r["execution_eligible"] = str(r.get("decision") or "").upper() in {"BUY", "SELL"}
-                    r["eligibility_source"] = "brain_decision_adapter"
-                if not bool(r.get("execution_eligible")):
+                    r["eligibility_source"] = "legacy_decision_adapter"
+                eligible = bool(r.get("execution_eligible"))
+                if not eligible:
                     below_threshold_count+=1
                 else:
+                    eligible_count += 1
                     r["market_context"]={k:v for k,v in row.items() if k not in {"scan_time","run_id","scan_counter"}}
                     results.append(r); log.info(f"[SIGNAL] {sym} {r.get('decision')} confidence={conf:.1f}")
         except BinanceCooldownError:
@@ -3692,8 +3766,16 @@ def run_scan_once(chat_id):
 
     data_elapsed=time.monotonic()-data_started; total_elapsed=time.monotonic()-scan_started
     cache_total,cache_fresh=_scan_cache_stats(); avg_conf=(sum(all_scan_confidences)/len(all_scan_confidences)) if all_scan_confidences else None
-    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct")}
+    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"candidate_count":candidate_count,"eligible_count":eligible_count,"ban_count":ban_count,"rejection_reasons":dict(sorted(rejection_reasons.items(), key=lambda kv:(-kv[1],kv[0]))[:20]),"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct")}
     _record_scan_telemetry(telemetry)
+    # Give the brain one canonical summary per scan. This is the observation
+    # boundary used for frequency health and controlled exploration; it never
+    # mutates Binance and never bypasses the execution authority.
+    try:
+        _record_brain_scan_summary(dict(telemetry))
+    except Exception as exc:
+        log.warning(f"[BRAIN] scan summary bridge gagal: {exc}")
+    _set_scan_state(last_candidate_count=candidate_count,last_eligible_count=eligible_count,last_ban_count=ban_count,last_low_confidence_count=low_conf_count,last_rejection_reasons=dict(rejection_reasons),last_symbols_processed=processed_symbols)
     _record_scan_quality({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter,"symbols_requested":len(symbols),"symbols_analyzed":analyzed_symbols,"failed_symbols":failed_symbols,"avg_confidence":avg_conf,"min_confidence":(min(all_scan_confidences) if all_scan_confidences else None),"max_confidence":(max(all_scan_confidences) if all_scan_confidences else None),"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"qualified_count":len(results),"early_rejected_count":0,"cache_entries":cache_total,"cache_fresh":cache_fresh,**mc})
     log.info("[SCAN SUMMARY] " + " | ".join(f"{k}={v}" for k,v in telemetry.items()))
 
@@ -3725,7 +3807,12 @@ def run_scan_once(chat_id):
     else:
         breadth_txt="📈 Market context: <b>belum tersedia</b>"
     rs_txt=(f"\n₿ BTC 1h: <b>{mc['btc_price_1h_pct']:+.2f}%</b> | BTC 4h: <b>{mc['btc_price_4h_pct']:+.2f}%</b>" if mc.get('btc_price_1h_pct') is not None else "")
-    scan_meta=f"\n\n📊 Scan: <b>{TOP_N_COINS}</b> diminta | <b>{len(symbols)}</b> tersedia | <b>{processed_symbols}</b> diproses | <b>{analyzed_symbols}</b> analisa strategy valid\n🧠 Rata-rata confidence scan: <b>{avg_txt}</b>\n{breadth_txt}{rs_txt}"
+    freq_txt = f"\n🎯 Candidate: <b>{candidate_count}</b> | Eligible: <b>{eligible_count}</b> | Low-conf ban: <b>{ban_count}</b>"
+    reject_txt = ""
+    if rejection_reasons:
+        top_reject = ", ".join(f"{k}={v}" for k,v in sorted(rejection_reasons.items(), key=lambda kv:(-kv[1],kv[0]))[:4])
+        reject_txt = f"\n🚫 Reject utama: <code>{html.escape(top_reject)}</code>"
+    scan_meta=f"\n\n📊 Scan: <b>{TOP_N_COINS}</b> diminta | <b>{len(symbols)}</b> tersedia | <b>{processed_symbols}</b> diproses | <b>{analyzed_symbols}</b> analisa strategy valid\n🧠 Rata-rata confidence scan: <b>{avg_txt}</b>{freq_txt}{reject_txt}\n{breadth_txt}{rs_txt}"
     if warmup_active: scan_meta+=f"\n🛡️ Warmup reject: <b>{len(rejected_warmup)}</b> signal qualified dari scan ini ditolak"
     if not results:
         tg_send(chat_id,"⚠️ Tidak ada decision yang dinyatakan eligible oleh brain."+scan_meta); return []
@@ -5304,6 +5391,7 @@ def get_scanner_status():
     out["binance_paused"] = _binance_is_scan_paused()
     out["pause_remaining_sec"] = round(_binance_cooldown_remaining(), 2)
     out["heavy_workers"] = len(_heavy_worker_snapshot())
+    out["light_workers"] = len(_light_worker_snapshot())
     out["top_coins_cached"] = len(_top_coins_cached_symbols)
     return out
 
@@ -5361,7 +5449,7 @@ def simulation_loop(chat_id):
                         _open_position(sym,sig,get_price(sym) or price,chat_id,"strategy")
                     else:
                         tg_send(chat_id,f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(sig)}")
-                        _start_heavy_worker(f"entry-wait-{sym}", wait_entry, sym, sig, chat_id)
+                        _start_light_worker(f"entry-wait-{sym}", wait_entry, sym, sig, chat_id)
                     opened += 1
             log.info(f"[scan] {len(signals or [])} signal lolos, {opened} dikirim ke execution")
             _set_scan_state(last_success_at=time.time(), last_finished_at=time.time())
@@ -5565,10 +5653,17 @@ def bot_loop():
                         tg_send(chat_id,f"🎯 <b>Confidence policy:</b> <b>{html.escape(str(current))}</b> (owned by brain).")
                     elif callable(setter):
                         try:
-                            val=float(parts[1].replace("%",""));
-                            if not 0<=val<=100: raise ValueError
-                            setter(val); tg_send(chat_id,f"✅ Brain confidence policy diberi nilai manual <b>{val:.0f}%</b>.")
-                        except Exception: tg_send(chat_id,"❌ Format salah. Gunakan <code>/confidence_min 70</code>.")
+                            token=parts[1].strip().lower()
+                            if token == "auto":
+                                auto_fn=_brain_fn("set_confidence_mode")
+                                if callable(auto_fn): auto_fn("auto")
+                                else: setter(None)
+                                tg_send(chat_id,"✅ Confidence policy kembali ke <b>AUTO</b>. FULL boleh mengadaptasi frequency dengan guardrail.")
+                            else:
+                                val=float(token.replace("%",""));
+                                if not 0<=val<=100: raise ValueError
+                                setter(val); tg_send(chat_id,f"✅ Brain confidence policy diberi nilai manual <b>{val:.0f}%</b>.")
+                        except Exception: tg_send(chat_id,"❌ Format salah. Gunakan <code>/confidence_min 70</code> atau <code>/confidence_min auto</code>.")
                     else: tg_send(chat_id,"⚠️ Brain tidak menyediakan kontrol confidence manual.")
                 elif text in ("/info","info"):
                     tg_send(chat_id,get_info_msg())

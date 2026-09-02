@@ -76,7 +76,8 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 ML_COGNITIVE_VERSION = "V40_FULL_BRAIN_REBUILT"
-V40_VERSION = "V40_FULL_BRAIN_REBUILT"
+V40_VERSION = "V52_OPERATIONAL_BRAIN"
+BRAIN_INTERFACE_VERSION = V40_VERSION
 BRAIN_INTERFACE_VERSION = V40_VERSION
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v2"
 
@@ -5189,7 +5190,7 @@ _V31_BASE_FULL_ANALYZE = _CORE_FULL_ANALYZE
 _V31_BASE_MANAGE_POSITION = _CORE_MANAGE_POSITION
 
 
-def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None):
+def _v51_base_full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None):
     result = _V31_BASE_FULL_ANALYZE(df_h1, df_m15, df_d1, symbol=symbol, df_btc_h1=df_btc_h1, trade_history=trade_history)
     ts = _timestamp_from_df(df_m15)
     try:
@@ -5225,6 +5226,51 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
     return result
 
 
+def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None):
+    """Operational brain boundary: always returns an explicit decision packet.
+    Eligibility, threshold, low-confidence ban recommendation and frequency metadata
+    are brain-owned; this function never calls Binance.
+    """
+    base=_v51_base_full_analyze(df_h1, df_m15, df_d1, symbol=symbol, df_btc_h1=df_btc_h1, trade_history=trade_history)
+    threshold=get_active_confidence_threshold()
+    if isinstance(base,dict):
+        out=dict(base)
+        conf=max(0.0,min(100.0,_agent_safe_float(out.get("confidence"),0.0)))
+        decision=str(out.get("decision") or "HOLD").upper()
+        has_trade = decision in {"BUY","SELL"} and not bool(out.get("no_signal"))
+        eligible = bool(has_trade and conf >= threshold)
+        out["confidence"]=round(conf,2)
+        out["confidence_threshold"]=round(threshold,2)
+        out["threshold_mode"]=str(_AGENT_STATE.get("threshold_mode") or "auto")
+        out["execution_eligible"]=eligible
+        out["eligibility_source"]="brain_policy_v52"
+        out["eligibility_reason"] = "ABOVE_ACTIVE_THRESHOLD" if eligible else ("BELOW_ACTIVE_THRESHOLD" if has_trade else str(out.get("rejected_reason") or "NO_SIGNAL"))
+        ban=_agent_make_ban_recommendation(symbol, conf, decision, reason="LOW_CONFIDENCE")
+        if ban.get("ban_recommended"):
+            out.update(ban)
+        else:
+            out.setdefault("low_confidence",False); out.setdefault("low_confidence_cutoff",round(threshold*0.5,2)); out.setdefault("confidence_threshold",round(threshold,2))
+        out["strategy_version"]=str(_AGENT_STATE.get("strategy_version") or out.get("strategy_version") or "S1")
+        out["brain_version"]=V40_VERSION
+        return out
+    # If the core detector cannot produce an executable setup, build a safe
+    # diagnostic packet from directional scoring when possible. No fake entry/SL/TP
+    # is invented, but the brain still exposes confidence/reason and can recommend ban.
+    conf=0.0; direction="HOLD"; reason="NO_VALID_ENTRY_CANDIDATE"
+    try:
+        h1c=_closed_candles(df_h1,60); m15c=_closed_candles(df_m15,15); d1c=_closed_candles(df_d1,1440) if df_d1 is not None else None
+        sc=score_direction(h1c,m15c,d1c,df_btc_h1)
+        if isinstance(sc,dict):
+            conf=max(0.0,min(100.0,_agent_safe_float(sc.get("confidence"),0.0)))
+            direction="BUY" if str(sc.get("direction") or "").lower()=="bull" else ("SELL" if str(sc.get("direction") or "").lower()=="bear" else "HOLD")
+            reason="NO_EXECUTABLE_ENTRY_CANDIDATE"
+    except Exception as exc:
+        reason=f"ANALYSIS_DATA_ERROR:{type(exc).__name__}"
+    out={"symbol":symbol,"decision":direction,"confidence":round(conf,2),"confidence_threshold":round(threshold,2),"threshold_mode":str(_AGENT_STATE.get("threshold_mode") or "auto"),"execution_eligible":False,"eligibility_source":"brain_policy_v52","eligibility_reason":reason,"no_signal":True,"analysis_stage":"DIAGNOSTIC_NO_ENTRY","rejected_reason":reason,"brain_version":V40_VERSION,"cognitive_schema":V32_SCHEMA,"strategy_version":str(_AGENT_STATE.get("strategy_version") or "S1"),"candidate":False}
+    out.update(_agent_make_ban_recommendation(symbol,conf,direction,reason="LOW_CONFIDENCE_DIAGNOSTIC"))
+    return out
+
+
 def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
     result=_V31_BASE_MANAGE_POSITION(state,df_m15,df_h1,df_d1,symbol=symbol)
     if isinstance(result,dict):
@@ -5249,7 +5295,7 @@ def ingest_live_candidate(signal,h1=None,m15=None,d1=None,rejected_reason=None,s
             _v33_log("DATA", f"duplicate candidate ignored uid={uid}", logging.DEBUG)
             return None
         _V34_SEEN_CANDIDATE_KEYS.add(key)
-    row={"type":"candidate","timestamp":time.time(),"candidate_uid":uid,"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":_v32_f(sig.get("confidence"),50),"trade_quality":_v32_f(sig.get("trade_quality",sig.get("setup_quality")),0),"archetype":sig.get("archetype"),"regime":sig.get("market_regime") or (snap.get("market") or {}).get("regime"),"time_context":tc,"learning_features":dict(sig.get("learning_features") or {}),"research_snapshot":snap,"signal":sig,"rejected_reason":rejected_reason}
+    row={"type":"candidate","timestamp":time.time(),"candidate_uid":uid,"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":_v32_f(sig.get("confidence"),50),"trade_quality":_v32_f(sig.get("trade_quality",sig.get("setup_quality")),0),"archetype":sig.get("archetype"),"execution_eligible":bool(sig.get("execution_eligible")),"confidence_threshold":sig.get("confidence_threshold"),"ban_recommended":bool(sig.get("ban_recommended")),"regime":sig.get("market_regime") or (snap.get("market") or {}).get("regime"),"time_context":tc,"learning_features":dict(sig.get("learning_features") or {}),"research_snapshot":snap,"signal":sig,"rejected_reason":rejected_reason}
     return _v32_record_experience(row)
 
 
@@ -5427,7 +5473,18 @@ _AGENT_TICKS = 0
 _AGENT_LAST_REPORT = {}
 _AGENT_STATE = {
     "version": AGENT_BRAIN_API_VERSION,
-    "brain_version": V32_VERSION,
+    "brain_version": V40_VERSION,
+    "threshold_mode": "auto",
+    "active_threshold": 55.0,
+    "threshold_floor": 45.0,
+    "threshold_ceiling": 80.0,
+    "manual_threshold": None,
+    "consecutive_no_eligible_scans": 0,
+    "consecutive_low_opportunity_scans": 0,
+    "frequency_actions": 0,
+    "last_frequency_action": None,
+    "scan_count": 0,
+    "last_scan_summary": {},
     "historical": {"files": 0, "rows": 0, "replay_candidates": 0, "status": "NOT_STARTED"},
     "live": {"observations": 0, "candidates": 0, "outcomes": 0},
     "frequency": {},
@@ -5467,6 +5524,129 @@ with _AGENT_LOCK:
     if not isinstance(_AGENT_POLICY, dict):
         _AGENT_POLICY = {}
 
+
+def _agent_safe_float(value, default):
+    try:
+        x=float(value)
+        return x if np.isfinite(x) else float(default)
+    except Exception:
+        return float(default)
+
+def _agent_active_threshold():
+    with _AGENT_LOCK:
+        mode=str(_AGENT_STATE.get("threshold_mode") or "auto").lower()
+        if mode == "manual" and _AGENT_STATE.get("manual_threshold") is not None:
+            return max(0.0, min(100.0, _agent_safe_float(_AGENT_STATE.get("manual_threshold"), 55.0)))
+        return max(0.0, min(100.0, _agent_safe_float(_AGENT_STATE.get("active_threshold"), 55.0)))
+
+def get_active_confidence_threshold():
+    return round(_agent_active_threshold(), 2)
+
+def set_manual_confidence_threshold(value):
+    global _AGENT_STATE
+    if value is None:
+        return set_confidence_mode("auto")
+    v=max(0.0,min(100.0,_agent_safe_float(value,55.0)))
+    with _AGENT_LOCK:
+        _AGENT_STATE["threshold_mode"]="manual"
+        _AGENT_STATE["manual_threshold"]=round(v,2)
+        _AGENT_STATE["active_threshold"]=round(v,2)
+        _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    return v
+
+def set_confidence_mode(mode):
+    m=str(mode or "auto").strip().lower()
+    if m not in {"auto","manual"}:
+        raise ValueError("confidence mode must be auto/manual")
+    with _AGENT_LOCK:
+        _AGENT_STATE["threshold_mode"]=m
+        if m == "auto" and _AGENT_STATE.get("manual_threshold") is not None:
+            _AGENT_STATE["active_threshold"]=_agent_safe_float(_AGENT_STATE.get("manual_threshold"),55.0)
+            _AGENT_STATE["manual_threshold"]=None
+        _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    return get_active_confidence_threshold()
+
+def _agent_make_ban_recommendation(symbol, confidence, decision, reason="LOW_CONFIDENCE"):
+    threshold=get_active_confidence_threshold()
+    half=threshold*0.5
+    conf=max(0.0,min(100.0,_agent_safe_float(confidence,0.0)))
+    direction=str(decision or "HOLD").upper()
+    # A missing setup/HOLD is not a low-confidence trade candidate. Ban is only
+    # for an actual directional candidate whose confidence is < half threshold.
+    if threshold <= 0 or direction not in {"BUY","SELL"} or conf >= half:
+        return {"ban_recommended":False,"low_confidence_cutoff":round(half,2),"threshold":round(threshold,2)}
+    return {
+        "ban_recommended": True,
+        "ban_kind": "low_confidence",
+        "ban_duration": max(3, min(30, int(round(8 + (half-conf)/max(1.0,half)*10)))),
+        "ban_reason": f"{reason}: confidence={conf:.1f}% < half-threshold={half:.1f}%",
+        "low_confidence": True,
+        "low_confidence_cutoff": round(half,2),
+        "confidence_threshold": round(threshold,2),
+        "threshold_mode": "manual" if str(_AGENT_STATE.get("threshold_mode"))=="manual" else "auto",
+    }
+
+def _agent_frequency_adjust(summary):
+    """Adaptive opportunity policy. It changes threshold only with repeated evidence,
+    never below the floor, and never on a single scan. Structural policy remains separate."""
+    if not isinstance(summary, dict):
+        return {"action":"NONE","reason":"invalid_summary"}
+    total=int(summary.get("symbols_requested",0) or 0)
+    analyzed=int(summary.get("analyzed_symbols",0) or 0)
+    eligible=int(summary.get("eligible_count",summary.get("results",0)) or 0)
+    candidates=int(summary.get("candidate_count",0) or 0)
+    avg=_agent_safe_float(summary.get("avg_confidence"),0.0)
+    regime=str(summary.get("market_regime") or "UNKNOWN").upper()
+    reasons=summary.get("rejection_reasons") if isinstance(summary.get("rejection_reasons"),dict) else {}
+    no_signal = analyzed >= max(5, int(total*0.5)) and eligible == 0
+    near = sum(int(v or 0) for k,v in reasons.items() if any(t in str(k).upper() for t in ("THRESHOLD","CONFIDENCE","NEAR_ELIGIBLE","WARMUP")))
+    hostile = regime in {"BEARISH", "RANGING", "TRANSITION", "MIXED", "UNCERTAIN"}
+    with _AGENT_LOCK:
+        if no_signal:
+            _AGENT_STATE["consecutive_no_eligible_scans"]=int(_AGENT_STATE.get("consecutive_no_eligible_scans",0) or 0)+1
+        else:
+            _AGENT_STATE["consecutive_no_eligible_scans"]=0
+        if candidates == 0:
+            _AGENT_STATE["consecutive_low_opportunity_scans"]=int(_AGENT_STATE.get("consecutive_low_opportunity_scans",0) or 0)+1
+        else:
+            _AGENT_STATE["consecutive_low_opportunity_scans"]=0
+        mode=str(_AGENT_STATE.get("threshold_mode") or "auto")
+        cur=_agent_active_threshold()
+        floor=_agent_safe_float(_AGENT_STATE.get("threshold_floor"),45.0)
+        ceiling=_agent_safe_float(_AGENT_STATE.get("threshold_ceiling"),80.0)
+        action="NONE"; new=cur; why="evidence insufficient"
+        streak=int(_AGENT_STATE.get("consecutive_no_eligible_scans",0) or 0)
+        if mode == "auto" and streak >= 3 and analyzed >= 20 and not hostile and (near > 0 or avg >= floor-5):
+            step=2.0 if streak < 6 else 3.0
+            new=max(floor, cur-step)
+            if new < cur-0.01:
+                action="EXPAND_FREQUENCY"; why=f"{streak} consecutive zero-eligible scans; near-miss={near}; regime={regime}"
+        elif mode == "auto" and eligible > 0 and eligible >= max(3, int(analyzed*0.22)) and avg >= cur+12:
+            new=min(ceiling, cur+1.0)
+            if new > cur+0.01:
+                action="TIGHTEN_QUALITY"; why="opportunity abundant and confidence comfortably above threshold"
+        if new != cur:
+            _AGENT_STATE["active_threshold"]=round(new,2)
+            _AGENT_STATE["frequency_actions"]=int(_AGENT_STATE.get("frequency_actions",0) or 0)+1
+            _AGENT_STATE["last_frequency_action"]={"time":time.time(),"action":action,"old":round(cur,2),"new":round(new,2),"reason":why,"summary":{"analyzed":analyzed,"eligible":eligible,"candidates":candidates,"avg_confidence":avg}}
+            experiments=_AGENT_STATE.setdefault("frequency_experiments",[])
+            experiments.append({"id":f"FREQ-{int(time.time()*1000)}","type":"threshold_exploration","status":"RUNNING","action":action,"baseline_threshold":round(cur,2),"challenger_threshold":round(new,2),"reason":why,"created_at":time.time()})
+            if len(experiments)>20:
+                del experiments[:-20]
+        _AGENT_STATE["frequency_state"]=(
+            "OVERFILTERED_SUSPECTED" if mode=="auto" and streak>=3 and near>0 else
+            "LOW_OPPORTUNITY" if candidates==0 and analyzed>0 else
+            "HEALTHY" if eligible>0 else "INSUFFICIENT_DATA"
+        )
+        _AGENT_STATE["scan_count"]=int(_AGENT_STATE.get("scan_count",0) or 0)+1
+        _AGENT_STATE["last_scan_summary"]=dict(summary)
+        _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    return {"action":action,"old_threshold":round(cur,2),"new_threshold":round(new,2),"reason":why,"streak":streak,"near_miss":near}
+
+def record_scan_summary(summary, source="main_scanner"):
+    rep=dict(summary or {})
+    rep["source"]=source
+    return _agent_frequency_adjust(rep)
 
 def _agent_strategy_policy_adjustment(archetype, regime):
     """Translate learned policy into a small selection modifier, not a hard gate."""
@@ -5669,6 +5849,16 @@ def get_adaptive_status():
             "strategy_revisions": int(_AGENT_STATE.get("strategy_revisions", 0) or 0),
             "strategy_version": str(_AGENT_STATE.get("strategy_version") or "S1"),
             "exploration_share": AGENT_EXPLORATION_SHARE,
+            "threshold_mode": str(_AGENT_STATE.get("threshold_mode") or "auto"),
+            "active_threshold": get_active_confidence_threshold(),
+            "threshold_floor": float(_AGENT_STATE.get("threshold_floor",45.0) or 45.0),
+            "threshold_ceiling": float(_AGENT_STATE.get("threshold_ceiling",80.0) or 80.0),
+            "consecutive_no_eligible_scans": int(_AGENT_STATE.get("consecutive_no_eligible_scans",0) or 0),
+            "frequency_actions": int(_AGENT_STATE.get("frequency_actions",0) or 0),
+            "last_frequency_action": _AGENT_STATE.get("last_frequency_action"),
+            "last_scan_summary": dict(_AGENT_STATE.get("last_scan_summary") or {}),
+            "frequency_state": str(_AGENT_STATE.get("frequency_state") or "INSUFFICIENT_DATA"),
+            "frequency_experiments": list(_AGENT_STATE.get("frequency_experiments") or [])[-10:],
         }
 
 
@@ -5881,6 +6071,19 @@ try:
         "AGENT_BRAIN_API_VERSION", "adaptive_agent_start", "adaptive_agent_stop",
         "adaptive_research_cycle", "adaptive_replay_historical", "get_adaptive_status",
         "get_adaptive_policy",
+    ]))
+except Exception:
+    pass
+
+
+# =============================================================================
+# V52 OPERATIONAL CONTRACT EXPORTS
+# =============================================================================
+try:
+    __all__ = list(dict.fromkeys(__all__ + [
+        "BRAIN_INTERFACE_VERSION", "get_active_confidence_threshold",
+        "set_manual_confidence_threshold", "set_confidence_mode",
+        "record_scan_summary", "get_adaptive_status",
     ]))
 except Exception:
     pass
