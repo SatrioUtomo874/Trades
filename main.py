@@ -80,7 +80,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 BRAIN_CONFIDENCE_DISPLAY_FALLBACK = "brain-owned"
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "MAIN-BODY-V60-RUNTIME-REBUILT"
+MAIN_ENGINE_VERSION = "MAIN-BODY-V80-BYBIT-ANALYSIS-BINANCE-EXECUTION"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -246,8 +246,30 @@ def _call_brain_event(names, row, *, fallback_symbol=False):
         return None
     return None
 
+def _brain_on_stats_snapshot(snapshot):
+    fn=_brain_fn("evaluate_stats_decision")
+    if not callable(fn): return None
+    try:
+        return fn(dict(snapshot or {}), source="main_stats")
+    except Exception as exc:
+        log.warning(f"[BRAIN] evaluate_stats_decision gagal: {exc}")
+        return None
+
 def _brain_on_candidate(row):
-    return _call_brain_event(("ingest_live_candidate", "record_candidate_observation"), row)
+    for name in ("ingest_live_candidate", "record_candidate_observation"):
+        fn=_brain_fn(name)
+        if not callable(fn): continue
+        try:
+            if name=="ingest_live_candidate":
+                return fn(dict(row or {}), source="bybit_market")
+            return fn(dict(row or {}), source="bybit_market")
+        except TypeError:
+            try: return fn(dict(row or {}))
+            except Exception as exc: log.warning(f"[BRAIN] {name} gagal: {exc}")
+        except Exception as exc:
+            log.warning(f"[BRAIN] {name} gagal: {exc}")
+        break
+    return None
 
 def _brain_on_trade(row):
     """Canonical outcome bridge. Supports both modern ingest_* and legacy record_* APIs."""
@@ -365,34 +387,29 @@ FULL_WAKE=threading.Event()
 
 def _full_on():
     global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED
-    FULL_MODE=True
-    FULL_MANUAL_THRESHOLD_SAVED=None
-    _brain_full_command("on")
-    return _brain_full_status()
+    FULL_MODE=True; FULL_MANUAL_THRESHOLD_SAVED=None
+    return _brain_full_command("on")
 
 def _full_off():
     global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED
-    FULL_MODE=False
-    _brain_full_command("off")
-    FULL_MANUAL_THRESHOLD_SAVED=None
-    return _brain_full_status()
+    FULL_MODE=False; FULL_MANUAL_THRESHOLD_SAVED=None
+    return _brain_full_command("off")
 
 def _full_reset_internal():
     global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED
-    FULL_MODE=False
-    FULL_STOP.set(); FULL_WAKE.clear()
-    _brain_full_command("reset")
-    FULL_MANUAL_THRESHOLD_SAVED=None
-    return _brain_full_status()
+    FULL_MODE=False; FULL_STOP.set(); FULL_WAKE.clear(); FULL_MANUAL_THRESHOLD_SAVED=None
+    return _brain_full_command("reset")
 
 def _full_strategy_command(action, chat_id=None):
+    action=str(action or "status").strip().lower()
+    # Human-readable brain command is the canonical Telegram surface. Never send raw status dicts.
     if action=="on": return _full_on()
     if action=="off": return _full_off()
     if action=="reset": return _full_reset_internal()
-    return _brain_full_status()
+    return _brain_full_command("status")
 
 def _full_status_text():
-    return _brain_full_status()
+    return _brain_full_command("status")
 
 def _full_controller_state():
     return {"mode": bool(FULL_MODE), "threshold": _get_active_confidence_threshold(), "brain": _brain_full_status()}
@@ -533,7 +550,7 @@ RUNTIME_SCHEMA_VERSION = "runtime_v1"
 EVENT_SCHEMA_VERSION = "event_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
 BRAIN_INTERFACE_VERSION = "brain_v1"
-BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT", "V52_OPERATIONAL_BRAIN"}
+BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT", "V52_OPERATIONAL_BRAIN", "V60_STATS_DRIVEN_FREQUENCY_BRAIN"}
 MAX_HEAVY_WORKERS = 5
 HEAVY_WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_HEAVY_WORKERS)
 _HEAVY_WORKER_LOCK = threading.RLock()
@@ -1796,6 +1813,16 @@ def tg_updates(offset=None):
 #           tidak akurat.
 # ═════════════════════════════════════════════
 BYBIT = "https://api.bybit.com"
+# Bybit is the primary public market-data infrastructure. Binance REST is reserved
+# for authenticated execution/reconciliation and is never required for scanning.
+BYBIT_PUBLIC_REQUEST_INTERVAL = 0.18
+BYBIT_PUBLIC_MIN_INTERVAL = 0.18  # <= ~5.5 req/s globally; comfortably below IP ceilings
+_bybit_request_lock = threading.Lock()
+_bybit_last_request_at = 0.0
+_bybit_rate_limit_until = 0.0
+_bybit_request_count = 0
+_bybit_request_errors = 0
+
 
 # Konversi interval Binance → Bybit
 INTERVAL_MAP = {
@@ -2170,6 +2197,49 @@ def _binance_request_slot(critical=False):
         _binance_wait_if_banned()
         _binance_last_request_at = time.monotonic()
         yield
+
+def _bybit_wait_slot():
+    global _bybit_last_request_at
+    wait_until = time.time()
+    with _bybit_request_lock:
+        now=time.monotonic()
+        wait = BYBIT_PUBLIC_MIN_INTERVAL - (now - _bybit_last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _bybit_last_request_at = time.monotonic()
+
+def _bybit_get(path, params=None):
+    """Primary public Bybit REST accessor for market data. One controlled request per call."""
+    global _bybit_rate_limit_until, _bybit_request_count, _bybit_request_errors
+    now=time.time()
+    if _bybit_rate_limit_until > now:
+        raise ConnectionError(f"Bybit cooldown active {int(_bybit_rate_limit_until-now)}s")
+    _bybit_wait_slot()
+    _bybit_request_count += 1
+    try:
+        r=requests.get(f"{BYBIT}{path}", params=params, timeout=10, verify=False)
+        # honor documented response rate-limit headers when present
+        reset_ms = r.headers.get("X-Bapi-Limit-Reset-Timestamp")
+        remain = r.headers.get("X-Bapi-Limit-Status")
+        if remain is not None:
+            try:
+                if int(float(remain)) <= 1 and reset_ms:
+                    reset_s=max(0.0,(float(reset_ms)/1000.0)-time.time())
+                    _bybit_rate_limit_until=max(_bybit_rate_limit_until, time.time()+min(max(reset_s,0.0),5.0))
+            except Exception:
+                pass
+        if r.status_code == 403 and "access too frequent" in r.text.lower():
+            _bybit_rate_limit_until=time.time()+600.0
+            raise ConnectionError("Bybit HTTP 403 access too frequent; 10m safety cooldown")
+        r.raise_for_status()
+        data=r.json()
+        if isinstance(data,dict) and int(data.get("retCode",0) or 0) == 10006:
+            _bybit_rate_limit_until=time.time()+10.0
+            raise ConnectionError("Bybit API rate limit 10006")
+        return data
+    except Exception:
+        _bybit_request_errors += 1
+        raise
 
 def _raw_get(url, params=None, retries=3):
     """HTTP GET dengan retry — digunakan oleh Bybit & CoinGecko."""
@@ -3013,7 +3083,7 @@ def _binance_top_coins(exclude_syms):
 # ── BYBIT (fallback tier-3) ────────────────────────────────────────────
 def _bybit_klines(symbol, interval, limit):
     iv = INTERVAL_MAP.get(interval, "15")
-    d = _raw_get(f"{BYBIT}/v5/market/kline", {
+    d = _bybit_get("/v5/market/kline", {
         "category":"linear","symbol":symbol,
         "interval":iv,"limit":limit
     })
@@ -3030,14 +3100,14 @@ def _bybit_klines(symbol, interval, limit):
     return df[["open","high","low","close","volume"]].dropna()
 
 def _bybit_price(symbol):
-    d = _raw_get(f"{BYBIT}/v5/market/tickers",
+    d = _bybit_get("/v5/market/tickers",
                  {"category":"linear","symbol":symbol})
     if d.get("retCode", -1) != 0:
         raise ValueError(f"Bybit ticker error: {d.get('retMsg')}")
     return float(d["result"]["list"][0]["lastPrice"])
 
 def _bybit_top_coins(exclude_syms):
-    d = _raw_get(f"{BYBIT}/v5/market/tickers", {"category":"linear"})
+    d = _bybit_get("/v5/market/tickers", {"category":"linear"})
     if d.get("retCode", -1) != 0:
         raise ValueError(f"Bybit tickers error: {d.get('retMsg')}")
     items = d["result"]["list"]
@@ -3352,155 +3422,85 @@ _local_price_cache = {}
 _local_price_lock = threading.Lock()
 
 def get_price(symbol, prefer_binance=False):
-    """Price accessor. WS is preferred; real-position callers may require Binance-authoritative REST."""
-    now = time.time()
-    p = ws_feed.get_price(symbol)
-    if p is not None and ws_feed.is_fresh():
-        with _local_price_lock:
-            _local_price_cache[symbol] = (p, now)
-        return p
+    """Market price accessor: Bybit first for analysis; Binance only on explicit real-position path."""
+    now=time.time()
     if prefer_binance and not _binance_is_scan_paused():
         try:
             with _binance_critical_context():
-                bp = _binance_price(symbol)
+                bp=_binance_price(symbol)
             if bp is not None:
-                with _local_price_lock:
-                    _local_price_cache[symbol] = (bp, now)
+                with _local_price_lock: _local_price_cache[symbol]=(bp,now)
                 return bp
         except Exception as e:
-            log.debug(f"[price/binance-preferred] {symbol}: {e}")
+            log.debug(f"[price/binance-authoritative] {symbol}: {e}")
     with _local_price_lock:
-        cached = _local_price_cache.get(symbol)
-    if cached and now - cached[1] <= _LOCAL_PRICE_MAX_AGE:
+        cached=_local_price_cache.get(symbol)
+    # fresh local market cache first
+    if cached and now-cached[1] <= _LOCAL_PRICE_MAX_AGE:
         return cached[0]
-    if _binance_is_scan_paused():
-        return p
-    if not prefer_binance:
+    try:
+        byp=_bybit_price(symbol)
+        with _local_price_lock: _local_price_cache[symbol]=(byp,now)
+        return byp
+    except Exception as e:
+        log.debug(f"[price/bybit] {symbol}: {e}")
+    # Only explicit real-position paths should use Binance fallback.
+    if prefer_binance:
         try:
             with _binance_critical_context():
-                bp = _binance_price(symbol)
+                bp=_binance_price(symbol)
             if bp is not None:
-                with _local_price_lock:
-                    _local_price_cache[symbol] = (bp, now)
+                with _local_price_lock: _local_price_cache[symbol]=(bp,now)
                 return bp
         except Exception as e:
-            log.debug(f"[price/binance] {symbol}: {e}")
-    try:
-        byp = _bybit_price(symbol)
-        with _local_price_lock:
-            _local_price_cache[symbol] = (byp, now)
-        return byp
-    except Exception:
-        pass
-    p = _coingecko_price(symbol)
+            log.debug(f"[price/binance-fallback] {symbol}: {e}")
+    p=_coingecko_price(symbol)
     if p is not None:
-        with _local_price_lock:
-            _local_price_cache[symbol] = (p, now)
+        with _local_price_lock: _local_price_cache[symbol]=(p,now)
     return p
 
 def get_klines(symbol, interval, limit=250):
-    """Normal market-data accessor. Existing behavior retained for execution.
-
-    Scanner optimization lives in get_scan_klines(); it uses a dedicated
-    freshness cache and never forces a WS backfill synchronously.
-    """
-    if _binance_is_scan_paused():
-        df = ws_feed.get_klines(symbol, interval, limit) if ws_feed.is_fresh() else pd.DataFrame()
-        return df if df is not None else pd.DataFrame()
-    ws_feed.ensure_symbol_interval(symbol, interval)
-    if ws_feed.is_fresh():
-        df = ws_feed.get_klines(symbol, interval, limit)
-        if df is not None and not df.empty:
-            return df
-    try:
-        df = _binance_klines(symbol, interval, limit)
-        if not df.empty:
-            return df
-    except Exception as e:
-        log.warning(f"[klines/binance] {symbol}: {e}")
-        if _binance_is_scan_paused():
-            return ws_feed.get_klines(symbol, interval, limit) if ws_feed.is_fresh() else pd.DataFrame()
-    try:
-        df = _bybit_klines(symbol, interval, limit)
-        if not df.empty:
-            log.info(f"[klines/bybit fallback] {symbol} {interval} OK")
-            return df
-    except Exception as e:
-        log.warning(f"[klines/bybit] {symbol}: {e}")
-    return pd.DataFrame()
-
-def get_scan_klines(symbol, interval, limit=250):
-    """Scanner-only candle accessor: cache-first, single-flight, no duplicate backfill.
-
-    Prinsip utama V11: mempercepat scan dengan MENGURANGI request, bukan dengan
-    menaikkan concurrency/request rate. Jika cache masih fresh, tidak ada HTTP
-    request sama sekali. Jika cache miss, hanya satu fetch untuk key tersebut;
-    histori yang berhasil kemudian di-seed ke WS sehingga tidak di-backfill dua kali.
-    """
-    if _binance_is_scan_paused():
-        cached = _scan_cache_get(symbol, interval, limit)
-        if cached is not None:
-            return cached
-        df = ws_feed.get_klines(symbol, interval, limit) if ws_feed.is_fresh() else pd.DataFrame()
-        return df if df is not None else pd.DataFrame()
-
-    cached = _scan_cache_get(symbol, interval, limit)
+    """Bybit-first market data. Binance REST is intentionally not part of normal analysis."""
+    cached=_scan_cache_get(symbol,interval,limit)
     if cached is not None:
         return cached
+    try:
+        df=_bybit_klines(symbol,interval,limit)
+        if not df.empty:
+            _scan_cache_put(symbol,interval,df,"bybit")
+            return df
+    except Exception as e:
+        log.warning(f"[klines/bybit] {symbol} {interval}: {e}")
+    # free Binance WS buffer may still be used as a non-REST fallback for monitoring
+    df=ws_feed.get_klines(symbol,interval,limit) if ws_feed.is_fresh() else pd.DataFrame()
+    return df if df is not None else pd.DataFrame()
 
-    key = (symbol, interval)
-    lock = _scan_key_lock(key)
+def get_scan_klines(symbol, interval, limit=250):
+    """Scanner market-data path: cache -> Bybit REST -> optional WS buffer. Never Binance REST."""
+    cached=_scan_cache_get(symbol,interval,limit)
+    if cached is not None:
+        return cached
+    key=(symbol,interval); lock=_scan_key_lock(key)
     with lock:
-        # Double-check after waiting for another worker/fetcher.
-        cached = _scan_cache_get(symbol, interval, limit)
-        if cached is not None:
-            return cached
-
-        # A pre-existing WS buffer is free data; promote it to scan cache.
-        if ws_feed.is_fresh():
-            ws_df = ws_feed.get_klines(symbol, interval, limit)
-            if ws_df is not None and not ws_df.empty and len(ws_df) >= min(limit, 40):
-                _scan_cache_put(symbol, interval, ws_df, "ws")
-                return ws_df.tail(limit).copy()
-
-        started = time.monotonic()
-        source = None
-        df = pd.DataFrame()
-
-        # Do NOT call ensure_symbol_interval() here. That would synchronously
-        # backfill through WS and then make the scanner wait on another REST path.
-        # Fetch exactly once, cache it, seed WS, and let WS maintain it thereafter.
+        cached=_scan_cache_get(symbol,interval,limit)
+        if cached is not None: return cached
+        df=pd.DataFrame()
         try:
-            # If Binance weight is already near the soft governor, prefer the
-            # existing fallback instead of sleeping an entire minute inside a scan.
-            high_weight = (_binance_weight_1m is not None and
-                           _binance_weight_1m >= BINANCE_WEIGHT_SOFT_LIMIT)
-            if not high_weight:
-                df = _binance_klines(symbol, interval, limit)
-                if not df.empty:
-                    source = "binance"
-        except BinanceCooldownError:
-            raise
+            df=_bybit_klines(symbol,interval,limit)
+            if not df.empty:
+                _scan_cache_put(symbol,interval,df,"bybit")
+                # Keep Binance WS only as a free monitoring fallback; no REST backfill.
+                try: ws_feed.seed_klines(symbol,interval,df)
+                except Exception: pass
+                return df.tail(limit).copy()
         except Exception as e:
-            log.warning(f"[scan-data/binance] {symbol} {interval}: {e}")
-
-        if df.empty:
-            try:
-                df = _bybit_klines(symbol, interval, limit)
-                if not df.empty:
-                    source = "bybit"
-            except Exception as e:
-                log.warning(f"[scan-data/bybit] {symbol} {interval}: {e}")
-
-        if df.empty:
-            return pd.DataFrame()
-
-        _scan_cache_put(symbol, interval, df, source or "unknown")
-        # Seed WS from the same dataframe. This adds zero REST requests.
-        ws_feed.seed_klines(symbol, interval, df)
-        elapsed = time.monotonic() - started
-        log.info(f"[scan-data] {symbol} {interval} source={source} fetch={elapsed:.2f}s")
-        return df.tail(limit).copy()
+            log.warning(f"[scan-data/bybit] {symbol} {interval}: {e}")
+        if ws_feed.is_fresh():
+            ws_df=ws_feed.get_klines(symbol,interval,limit)
+            if ws_df is not None and not ws_df.empty and len(ws_df)>=min(limit,40):
+                _scan_cache_put(symbol,interval,ws_df,"ws")
+                return ws_df.tail(limit).copy()
+        return pd.DataFrame()
 
 def _record_scan_telemetry(data):
     global _last_scan_telemetry
@@ -3533,77 +3533,47 @@ _top_coins_cached_at = 0.0
 _top_coins_cache_lock = threading.Lock()
 
 def _get_top_coins_impl():
-    """Ambil top coins dengan cache/WS/Bybit-first saat Binance sedang pause.
-    Tidak melakukan request Binance ketika circuit breaker aktif.
-    """
-    global scan_counter, _top_coins_cached_symbols, _top_coins_cached_at
+    """Top-universe source is Bybit public market data. Binance is not queried for scanning."""
+    global scan_counter,_top_coins_cached_symbols,_top_coins_cached_at
     with ban_lock:
-        scan_counter += 1
-        to_unban = []
-        for sym, meta in list(banned_coins.items()):
-            if isinstance(meta, tuple):
-                banned_at, dur = meta
-                expired = scan_counter - banned_at >= dur
-            else:
-                expired = scan_counter - float(meta.get("banned_at", scan_counter)) >= float(meta.get("duration", 0))
-            if expired and meta != "PERMANENT":
-                to_unban.append(sym)
-        for sym in to_unban:
-            meta = banned_coins.pop(sym, {})
-            dur = meta[1] if isinstance(meta, tuple) else meta.get("duration", 0)
-            log.info(f"[unban] {sym} kembali aktif setelah {float(dur):g} scan")
-        cur_ban = set(banned_coins.keys())
-
-    with positions_lock:
-        active_syms = set(positions.keys())
-
-    exclude_syms = cur_ban | active_syms
+        scan_counter+=1
+        cur_ban=set(banned_coins.keys())
+        now=time.time()
+        expired=[]
+        for sym,meta in list(banned_coins.items()):
+            try:
+                if isinstance(meta,tuple):
+                    banned_at,dur=meta;
+                    # legacy scan-count ban
+                    exp=(scan_counter-int(banned_at))>=int(dur)
+                else:
+                    until=float(meta.get("until",0) or 0)
+                    exp=until>0 and now>=until
+                    if not until:
+                        exp=(scan_counter-float(meta.get("banned_at",scan_counter)))>=float(meta.get("duration",0))
+                if exp: expired.append(sym)
+            except Exception: continue
+        for sym in expired:
+            banned_coins.pop(sym,None); cur_ban.discard(sym); log.info(f"[unban] {sym} kembali aktif")
+    with positions_lock: active_syms=set(positions.keys())
+    exclude_syms=cur_ban|active_syms
     with _top_coins_cache_lock:
-        cached_syms = list(_top_coins_cached_symbols)
-        cached_at = float(_top_coins_cached_at or 0.0)
-    if cached_syms and time.time() - cached_at <= _TOP_COINS_CACHE_TTL:
+        cached_syms=list(_top_coins_cached_symbols); cached_at=float(_top_coins_cached_at or 0.0)
+    if cached_syms and time.time()-cached_at<=_TOP_COINS_CACHE_TTL:
         return [s for s in cached_syms if s not in exclude_syms][:TOP_N_COINS]
-
-    paused = _binance_is_scan_paused()
-    if not paused:
-        try:
-            coins = _binance_top_coins(exclude_syms)
-            if coins:
-                with _top_coins_cache_lock:
-                    _top_coins_cached_symbols = list(coins)
-                    _top_coins_cached_at = time.time()
-                return coins
-        except BinanceCooldownError:
-            log.warning("[top_coins/binance] rate-limit/ban terdeteksi; pindah ke fallback tanpa retry Binance.")
-        except Exception as e:
-            log.warning(f"[top_coins/binance] {e}; pindah ke fallback tanpa retry Binance.")
-    # Bybit fallback
     try:
-        coins = _bybit_top_coins(exclude_syms)
+        coins=_bybit_top_coins(exclude_syms)
         if coins:
-            log.info(f"[top_coins/bybit fallback] {len(coins)} koin")
             with _top_coins_cache_lock:
-                _top_coins_cached_symbols = list(coins)
-                _top_coins_cached_at = time.time()
+                _top_coins_cached_symbols=list(coins); _top_coins_cached_at=time.time()
             return coins
-        log.warning("[top_coins/bybit] kosong, coba WS...")
     except Exception as e:
-        log.warning(f"[top_coins/bybit] {e} — coba WS...")
-    # WS fallback TERAKHIR
+        log.warning(f"[top_coins/bybit] {e}")
     if ws_feed.is_fresh():
-        raw = ws_feed.get_top_coins_raw()
-        usdt = [
-            t for t in raw
-            if t["symbol"].endswith("USDT")
-            and 0.0001 < t["price"] < MAX_PRICE
-            and t["qvol"] > 5_000_000
-            and abs(t["chg"]) < 15
-            and t["symbol"] not in exclude_syms
-        ]
-        if usdt:
-            usdt.sort(key=lambda x: x["qvol"], reverse=True)
-            log.warning("[top_coins/ws fallback] REST Binance & Bybit gagal")
-            return [t["symbol"] for t in usdt[:TOP_N_COINS]]
+        raw=ws_feed.get_top_coins_raw()
+        usdt=[t for t in raw if t.get("symbol","").endswith("USDT") and 0.0001<float(t.get("price",0))<MAX_PRICE and float(t.get("qvol",0))>5_000_000 and t.get("symbol") not in exclude_syms]
+        usdt.sort(key=lambda x:float(x.get("qvol",0)),reverse=True)
+        if usdt: return [t["symbol"] for t in usdt[:TOP_N_COINS]]
     return []
 
 
@@ -3652,11 +3622,7 @@ def run_scan_once(chat_id):
     already fetched for strategy analysis are reused in memory.
     """
     scan_started=time.monotonic()
-    if _binance_is_scan_paused():
-        _notify_binance_pause_once(chat_id); return []
-    tg_send(chat_id, f"🔍 Scanning {TOP_N_COINS} koin...")
-    if _binance_is_scan_paused():
-        _notify_binance_pause_once(chat_id); return []
+    tg_send(chat_id, f"🔍 Scanning {TOP_N_COINS} koin via Bybit...")
     try:
         symbols=get_top_coins()
     except BinanceCooldownError as e:
@@ -3675,8 +3641,7 @@ def run_scan_once(chat_id):
         if time.monotonic() >= scan_deadline:
             log.warning(f"[scan] hard deadline {SCAN_MAX_DURATION_SEC}s tercapai — cycle dihentikan aman.")
             break
-        if _binance_is_scan_paused():
-            log.warning("[scan] Binance pause aktif — scan cycle dihentikan di tengah jalan."); break
+        # Binance rate-limit must NOT stop market analysis; it only gates new Binance entry mutation.
         log.debug(f"[scan {idx:02d}/{len(symbols)}] {sym}")
         processed_symbols += 1
         try:
@@ -3686,7 +3651,7 @@ def run_scan_once(chat_id):
             except BinanceCooldownError: raise
             except Exception: d1=None
             after=_scan_cache_stats(); cache_misses += max(0,after[0]-before[0])
-            r=full_analyze(h1,m15,d1,symbol=sym)
+            r=full_analyze(h1,m15,d1,symbol=sym,market_data_source="bybit")
             # Market-context telemetry belongs to every successfully loaded chart,
             # not only to symbols where strategy_logic returned a trade candidate.
             # This keeps market context meaningful even when no setup is produced.
@@ -3766,7 +3731,7 @@ def run_scan_once(chat_id):
 
     data_elapsed=time.monotonic()-data_started; total_elapsed=time.monotonic()-scan_started
     cache_total,cache_fresh=_scan_cache_stats(); avg_conf=(sum(all_scan_confidences)/len(all_scan_confidences)) if all_scan_confidences else None
-    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"candidate_count":candidate_count,"eligible_count":eligible_count,"ban_count":ban_count,"rejection_reasons":dict(sorted(rejection_reasons.items(), key=lambda kv:(-kv[1],kv[0]))[:20]),"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct")}
+    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"candidate_count":candidate_count,"eligible_count":eligible_count,"ban_count":ban_count,"rejection_reasons":dict(sorted(rejection_reasons.items(), key=lambda kv:(-kv[1],kv[0]))[:20]),"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct"),"source":"bybit_primary_analysis"}
     _record_scan_telemetry(telemetry)
     # Give the brain one canonical summary per scan. This is the observation
     # boundary used for frequency health and controlled exploration; it never
@@ -4004,6 +3969,19 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
         _brain_on_trade(trade_record)
         # Backward-compatible 20-trade view for /backtest and existing UI.
         stats["pnl_history"].append(dict(trade_record))
+        try:
+            decision_payload={
+                "total":int(stats.get("total",0) or 0),"tp":int(stats.get("tp",0) or 0),
+                "sl":int(stats.get("sl",0) or 0),"trail":int(stats.get("trail",0) or 0),
+                "balance":float(stats.get("balance",0) or 0),
+                "recent":list(stats.get("pnl_history") or [])[-20:],
+            }
+            sd=_brain_on_stats_snapshot(decision_payload)
+            if isinstance(sd,dict):
+                trade_record["strategy_decision"]=sd
+                stats["last_strategy_decision"]=dict(sd)
+        except Exception as exc:
+            log.warning(f"[STATS→BRAIN] decision bridge gagal: {exc}")
 
 # Hitung alasan pending dibatalkan — biar bisa didiagnosis dari data,
 # bukan tebak-tebakan (mis. "kenapa banyak batal?" jadi terjawab dari /stats).
@@ -4027,63 +4005,74 @@ def _avg_conf_for_result(hist, result_key):
 
 def fmt_stats():
     with stat_lock:
-        t, tp, sl = stats["total"], stats["tp"], stats["sl"]
-        trail, bal = stats.get("trail", 0), stats["balance"]
-        hist = list(stats["pnl_history"])
-    with trade_history_lock:
-        full_hist = [dict(x) for x in trade_history]
-    wins = tp + trail
-    wr = wins/(wins+sl)*100 if (wins+sl) > 0 else 0
-    base = STARTING_BALANCE if not REAL_TRADE_ENABLED else (real_balance_snapshot if real_balance_snapshot is not None else bal)
-    pnl = round(bal - base, 4)
-    pnl_pct = round((pnl / base * 100), 2) if base else 0.0
-    sgn = "+" if pnl >= 0 else ""
-    hist_str = "\n".join(
-        f"  {'🟢' if h.get('pnl_usd',0) > 0 else '🔴' if h.get('pnl_usd',0) < 0 else '⚪'} "
-        f"{h.get('result','?').upper()} {'+' if h.get('pnl_usd',0)>=0 else ''}{h.get('pct',0):.2f}% → ${h.get('balance_after',0):.4f} | C{float(h.get('confidence',0) or 0):.0f}%"
-        for h in reversed(hist[-5:])
-    ) or "  (belum ada)"
-    avg_all = None
-    conf_vals = []
-    for h in full_hist:
-        try: conf_vals.append(float(h.get("confidence")))
-        except (TypeError, ValueError): pass
-    if conf_vals: avg_all = sum(conf_vals)/len(conf_vals)
-    avg_tp = _avg_conf_for_result(full_hist, "tp")
-    avg_trail = _avg_conf_for_result(full_hist, "trail")
-    avg_sl = _avg_conf_for_result(full_hist, "sl")
-    with pending_cancel_lock:
-        pc = dict(pending_cancel_stats)
-    total_cancel = sum(pc.values())
-    cancel_line = ""
-    if total_cancel > 0:
-        cancel_line = (f"\n\n⏭ Pending batal: {total_cancel} total\n"
-                       f"  TP sebelum entry: {pc['tp_before_entry']} | "
-                       f"Expired: {pc['expired']} | Ditolak Binance: {pc['binance_reject']}")
-    with ban_lock:
-        banned_n = len(banned_coins)
-    with early_reject_lock:
-        reject_rem = early_reject_remaining
-    lc=_low_conf_summary(); top_lc=", ".join(f"{x['symbol']}({x['count']}x)" for x in lc[:5]) if lc else "—"
-    mode_label = "🔴 REAL" if REAL_TRADE_ENABLED else "🧪 SIMULASI"
-    avg_line = f"{avg_all:.1f}%" if avg_all is not None else "—"
-    tp_line = f"{avg_tp:.1f}%" if avg_tp is not None else "—"
-    trail_line = f"{avg_trail:.1f}%" if avg_trail is not None else "—"
-    sl_line = f"{avg_sl:.1f}%" if avg_sl is not None else "—"
+        t,tp,sl=stats["total"],stats["tp"],stats["sl"]
+        trail,bal=stats.get("trail",0),stats["balance"]
+        hist=list(stats["pnl_history"])
+        last_dec=dict(stats.get("last_strategy_decision") or {})
+    # Existing ledger must be evaluated too; otherwise /stats is only a report, not a brain feedback loop.
+    try:
+        sd=_brain_on_stats_snapshot({"total":t,"tp":tp,"sl":sl,"trail":trail,"balance":bal,"recent":hist[-20:]})
+        if isinstance(sd,dict):
+            last_dec=sd
+            with stat_lock:
+                stats["last_strategy_decision"]=dict(sd)
+    except Exception as exc:
+        log.debug(f"[STATS→BRAIN] fmt_stats evaluation gagal: {exc}")
+    with trade_history_lock: full_hist=[dict(x) for x in trade_history]
+    wins=tp+trail; wr=wins/(wins+sl)*100 if wins+sl>0 else 0.0
+    base=STARTING_BALANCE if not REAL_TRADE_ENABLED else (real_balance_snapshot if real_balance_snapshot is not None else bal)
+    pnl=bal-base; pnl_pct=(pnl/base*100) if base else 0.0
+    def avg_res(k):
+        vals=[]
+        for h in full_hist:
+            if str(h.get("result","")).lower()==k:
+                try: vals.append(float(h.get("confidence")))
+                except Exception: pass
+        return sum(vals)/len(vals) if vals else None
+    def fmt(v): return f"{v:.1f}%" if v is not None else "—"
+    recent=[]
+    for h in reversed(full_hist[-5:]):
+        p=float(h.get("pnl_usd",0) or 0); icon="🟢" if p>0 else "🔴" if p<0 else "⚪"
+        recent.append(f"{icon} {str(h.get('result','?')).upper()} {p:+.2f}% | {h.get('symbol','?')} | C{float(h.get('confidence',0) or 0):.0f}%")
+    if not recent: recent=["—"]
+    with ban_lock: banned_n=len(banned_coins)
+    with early_reject_lock: reject_rem=early_reject_remaining
+    lc=_low_conf_summary(); top_lc=", ".join(f"{x['symbol']} ({x['count']}x)" for x in lc[:3]) or "—"
+    scan=get_last_scan_telemetry()
+    mode="🔴 REAL" if REAL_TRADE_ENABLED else "🧪 SIMULASI"
+    freq_state="—"; freq_action="—"
+    try:
+        bs=_brain_full_status()
+        adaptive=bs.get("adaptive") if isinstance(bs,dict) else {}
+        freq=adaptive.get("frequency") if isinstance(adaptive,dict) else {}
+        freq_state=str(adaptive.get("frequency_state") or freq.get("status") or "—")
+        fa=adaptive.get("last_frequency_action") if isinstance(adaptive,dict) else None
+        if isinstance(fa,dict): freq_action=str(fa.get("action") or "—")
+    except Exception: pass
+    action=str(last_dec.get("action") or "WAITING_DATA")
+    reason=str(last_dec.get("reason") or "—")
+    proposal=str(last_dec.get("proposal") or "—")
+    threshold=str(last_dec.get("active_threshold") or "—")
+    freq=str(last_dec.get("frequency_action") or "—")
+    source=str(scan.get("source") or "bybit_primary")
     return (
-        f"📊 <b>Statistik</b> — {t} trade | TP {tp} SL {sl} Trail {trail}\n"
-        f"Mode: <b>{mode_label}</b>\n"
-        f"Win Rate: <b>{wr:.1f}%</b> (TP+Trail vs SL)\n"
-        f"\nModal anchor: <b>${base:.4f}</b> → Saldo statistik: <b>${bal:.4f}</b> "
-        f"({sgn}{pnl_pct:.2f}%)\n"
-        f"\nConfidence rata-rata closed: <b>{avg_line}</b>\n"
-        f"🎯 TP: <b>{tp_line}</b> | 🔒 Trail: <b>{trail_line}</b> | 🛑 SL: <b>{sl_line}</b>\n"
-        f"\n5 terakhir:\n{hist_str}\n\n"
-        f"🚫 Banned: {banned_n} | 🧠 Low-conf teratas: {top_lc} | 🛡️ Early reject tersisa: {reject_rem}"
-        f"{cancel_line}"
-        f"\n\n🔎 Scanner: {_SCAN_STATE.get('cycle_count',0)} cycle | last result {_SCAN_STATE.get('last_result_count',0)} | error: {html.escape(str(_SCAN_STATE.get('last_error') or '—'))}"
+        f"📊 <b>STATISTIK</b> — {t} trade | ✅ TP {tp} | 🟢 Trail {trail} | 🔴 SL {sl}\n"
+        f"Mode: <b>{mode}</b>\n"
+        f"Win rate: <b>{wr:.1f}%</b> | Net: <b>{pnl:+.2f}%</b>\n"
+        f"Saldo statistik: <b>${bal:.4f}</b>\n"
+        f"Confidence closed: TP {fmt(avg_res('tp'))} | Trail {fmt(avg_res('trail'))} | SL {fmt(avg_res('sl'))}\n\n"
+        f"🧠 <b>KEPUTUSAN OTAK</b>\n"
+        f"Action: <b>{html.escape(action)}</b>\n"
+        f"Reason: {html.escape(reason[:240])}\n"
+        f"Proposal: <b>{html.escape(proposal[:200])}</b>\n"
+        f"Threshold aktif: <b>{html.escape(threshold)}%</b> | Frequency state: <b>{html.escape(freq_state)}</b>\n"
+        f"Frequency action: <b>{html.escape(freq_action)}</b>\n\n"
+        f"5 terakhir:\n" + "\n".join(recent) + "\n\n"
+        f"🚫 Ban: <b>{banned_n}</b> | Low-conf: <b>{html.escape(top_lc)}</b> | Early reject: <b>{reject_rem}</b>\n"
+        f"🔎 Scan: <b>{_SCAN_STATE.get('cycle_count',0)}</b> cycle | last eligible <b>{_SCAN_STATE.get('last_result_count',0)}</b>\n"
+        f"📡 Market data: <b>{html.escape(source)}</b> | Execution: <b>Binance</b> | Binance pause: <b>{"YA" if _binance_is_scan_paused() else "TIDAK"}</b>\n"
+        f"Bybit REST: <b>{_bybit_request_count}</b> req | errors: <b>{_bybit_request_errors}</b>"
     )
-
 def fmt_backtest():
     """20 trade terakhir dengan confidence per trade."""
     with stat_lock:
@@ -4674,8 +4663,6 @@ def check_tp_sl_order(sym, tp_p, sl_p, is_buy, lookback_min=15):
 # ============================================================
 
 def _strategy_position_update(sym,pos):
-    if _binance_is_scan_paused():
-        return None
     manager=globals().get("manage_position")
     if not callable(manager): return None
     try:
@@ -5389,6 +5376,8 @@ def get_scanner_status():
     with _SCAN_STATE_LOCK:
         out = dict(_SCAN_STATE)
     out["binance_paused"] = _binance_is_scan_paused()
+    out["market_data_source"] = "BYBIT_REST"
+    out["execution_exchange"] = "BINANCE"
     out["pause_remaining_sec"] = round(_binance_cooldown_remaining(), 2)
     out["heavy_workers"] = len(_heavy_worker_snapshot())
     out["light_workers"] = len(_light_worker_snapshot())
@@ -5461,9 +5450,7 @@ def simulation_loop(chat_id):
 
     try:
         while auto_mode:
-            if _binance_is_scan_paused():
-                _notify_binance_pause_once(chat_id)
-                _SCAN_WAKE.wait(min(10.0, max(1.0,_binance_cooldown_remaining()) or 1.0)); _SCAN_WAKE.clear(); continue
+            # Binance cooldown/ban blocks new Binance entry mutation, not market analysis.
             with positions_lock:
                 full=len(positions)>=MAX_POSITIONS
             if full:

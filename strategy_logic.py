@@ -75,8 +75,8 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-ML_COGNITIVE_VERSION = "V40_FULL_BRAIN_REBUILT"
-V40_VERSION = "V52_OPERATIONAL_BRAIN"
+ML_COGNITIVE_VERSION = "V60_STATS_DRIVEN_FREQUENCY_BRAIN"
+V40_VERSION = "V60_STATS_DRIVEN_FREQUENCY_BRAIN"
 BRAIN_INTERFACE_VERSION = V40_VERSION
 BRAIN_INTERFACE_VERSION = V40_VERSION
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v2"
@@ -4601,7 +4601,7 @@ __all__ = [
     "get_full_cognitive_status", "ingest_historical_ohlcv", "full_learning_review",
     "get_cognitive_status", "get_learning_schema", "reset_cognitive_memory", "ingest_historical_ohlcv",
     "ingest_live_candidate", "ingest_live_outcome", "full_learning_review",
-    "TRAIL_R_LADDER", "TRAIL_ENGINE_VERSION", "MIN_RR", "MAX_RR",
+    "TRAIL_R_LADDER", "TRAIL_ENGINE_VERSION", "MIN_RR", "MAX_RR", "evaluate_stats_decision",
 ]
 
 # =============================================================================
@@ -4611,7 +4611,7 @@ __all__ = [
 # functions below become the single public behavior. It is research-only: it does
 # not send orders, call Binance, or forcibly tighten live signal frequency.
 
-V32_VERSION = "V38_EVENT_CONTRACT_HARDENED_BRAIN"
+V32_VERSION = "V60_STATS_DRIVEN_FREQUENCY_BRAIN"
 V32_SCHEMA = "full_learning_cognitive_v2"
 V32_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 V32_STATE_FILE = V32_STATE_DIR / "v32_brain_state.json"
@@ -5196,7 +5196,7 @@ def _v51_base_full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=Non
     try:
         feats = extract_market_features(df_h1, df_m15, df_d1, df_btc_h1)
         feats["time_context"] = _v32_hour_context(ts)
-        _v32_record_experience({"type":"market_observation","timestamp":time.time(),"symbol":symbol,"source":"binance","features":feats,"regime":(result or {}).get("market_regime") if isinstance(result,dict) else None,"result":"strategy_result" if isinstance(result,dict) else "no_strategy_result"})
+        _v32_record_experience({"type":"market_observation","timestamp":time.time(),"symbol":symbol,"source":"bybit_market","features":feats,"regime":(result or {}).get("market_regime") if isinstance(result,dict) else None,"result":"strategy_result" if isinstance(result,dict) else "no_strategy_result"})
     except Exception as exc:
         _v33_log("DATA", f"market observation bridge gagal {symbol}: {exc}", logging.DEBUG)
     if not isinstance(result, dict):
@@ -5218,6 +5218,7 @@ def _v51_base_full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=Non
         snap["time_context"] = tc
         snap["coverage_role"] = "candidate"
         result["research_snapshot"] = snap
+        result["market_data_source"] = str(market_data_source or "bybit")
         result["brain_version"] = V40_VERSION
         result["cognitive_schema"] = V32_SCHEMA
         result["strategy_version"] = str(_AGENT_STATE.get("strategy_version") or "S1")
@@ -5226,7 +5227,7 @@ def _v51_base_full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=Non
     return result
 
 
-def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None):
+def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None, market_data_source="bybit", **kwargs):
     """Operational brain boundary: always returns an explicit decision packet.
     Eligibility, threshold, low-confidence ban recommendation and frequency metadata
     are brain-owned; this function never calls Binance.
@@ -5252,6 +5253,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             out.setdefault("low_confidence",False); out.setdefault("low_confidence_cutoff",round(threshold*0.5,2)); out.setdefault("confidence_threshold",round(threshold,2))
         out["strategy_version"]=str(_AGENT_STATE.get("strategy_version") or out.get("strategy_version") or "S1")
         out["brain_version"]=V40_VERSION
+        out["market_data_source"]=str(market_data_source or "bybit")
         return out
     # If the core detector cannot produce an executable setup, build a safe
     # diagnostic packet from directional scoring when possible. No fake entry/SL/TP
@@ -5266,7 +5268,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             reason="NO_EXECUTABLE_ENTRY_CANDIDATE"
     except Exception as exc:
         reason=f"ANALYSIS_DATA_ERROR:{type(exc).__name__}"
-    out={"symbol":symbol,"decision":direction,"confidence":round(conf,2),"confidence_threshold":round(threshold,2),"threshold_mode":str(_AGENT_STATE.get("threshold_mode") or "auto"),"execution_eligible":False,"eligibility_source":"brain_policy_v52","eligibility_reason":reason,"no_signal":True,"analysis_stage":"DIAGNOSTIC_NO_ENTRY","rejected_reason":reason,"brain_version":V40_VERSION,"cognitive_schema":V32_SCHEMA,"strategy_version":str(_AGENT_STATE.get("strategy_version") or "S1"),"candidate":False}
+    out={"symbol":symbol,"decision":direction,"confidence":round(conf,2),"confidence_threshold":round(threshold,2),"threshold_mode":str(_AGENT_STATE.get("threshold_mode") or "auto"),"execution_eligible":False,"eligibility_source":"brain_policy_v52","eligibility_reason":reason,"no_signal":True,"analysis_stage":"DIAGNOSTIC_NO_ENTRY","rejected_reason":reason,"brain_version":V40_VERSION,"cognitive_schema":V32_SCHEMA,"strategy_version":str(_AGENT_STATE.get("strategy_version") or "S1"),"candidate":False,"market_data_source":str(market_data_source or "bybit")}
     out.update(_agent_make_ban_recommendation(symbol,conf,direction,reason="LOW_CONFIDENCE_DIAGNOSTIC"))
     return out
 
@@ -5388,6 +5390,9 @@ def _v32_full_text(payload):
     p=payload if isinstance(payload,dict) else {}
     st=get_v32_status(); s=st["state"]; cw="ON" if st["worker_alive"] else "OFF"
     champion=p.get("champion") if isinstance(p.get("champion"),dict) else {}
+    ad=get_adaptive_status()
+    decision=_AGENT_STATE.get("last_strategy_decision") or {}
+    fa=ad.get("last_frequency_action") or {}
     return (f"Main mode: <b>{'ON' if p.get('mode') else 'OFF'}</b>\n"
             f"Cognitive worker: <b>{cw}</b> | ticks: <b>{st['ticks']}</b>\n"
             f"Observations: <b>{s.get('observations',0)}</b> | Candidates: <b>{s.get('candidates',0)}</b>\n"
@@ -5396,12 +5401,12 @@ def _v32_full_text(payload):
             f"Calibration: <b>{(s.get('calibration') or {}).get('status','INSUFFICIENT')}</b>\n"
             f"Time effect: <b>{(s.get('time_effect') or {}).get('status','INSUFFICIENT')}</b>\n"
             f"Drift: <b>{s.get('drift_status','UNKNOWN')}</b>\n"
-            f"Beliefs: <b>{st['beliefs']}</b>\n"
-            f"Policy revisions: <b>{s.get('policy_revision_count',0)}</b>\n"
-            f"Champion: <code>{html.escape(str(champion.get('model_version','—')))}</code>"
-            f"\nWorker: <b>{'ON' if get_v32_status().get('worker_alive') else 'OFF'}</b> | Ticks: <b>{get_v32_status().get('ticks',0)}</b>"
-            f"\nLast error: <b>{html.escape(str(get_v32_status().get('last_error') or '—')[:160])}</b>")
-
+            f"Beliefs: <b>{st['beliefs']}</b> | Policy revisions: <b>{s.get('policy_revision_count',0)}</b>\n"
+            f"Strategy: <b>{html.escape(str(ad.get('strategy_version','S1')))}</b> | Threshold: <b>{ad.get('active_threshold','—')}%</b>\n"
+            f"Frequency: <b>{html.escape(str(ad.get('frequency_state','UNKNOWN')))}</b> | Last action: <b>{html.escape(str(fa.get('action','—')))}</b>\n"
+            f"Strategy decision: <b>{html.escape(str(decision.get('action','—')))}</b>\n"
+            f"Decision reason: {html.escape(str(decision.get('reason','—'))[:220])}\n"
+            f"Champion: <code>{html.escape(str(champion.get('model_version','—')))}</code>" )
 
 def _v32_research_text(rep):
     cal=rep.get("calibration",{}); te=rep.get("time_effect",{}); drift=rep.get("drift",{}); cov=rep.get("coverage",{})
@@ -5485,6 +5490,9 @@ _AGENT_STATE = {
     "last_frequency_action": None,
     "scan_count": 0,
     "last_scan_summary": {},
+    "last_strategy_decision": {"action":"WAITING_DATA","reason":"Belum ada closed outcome."},
+    "stats_decision_count": 0,
+    "frequency_signal_state": "UNKNOWN",
     "historical": {"files": 0, "rows": 0, "replay_candidates": 0, "status": "NOT_STARTED"},
     "live": {"observations": 0, "candidates": 0, "outcomes": 0},
     "frequency": {},
@@ -5616,8 +5624,8 @@ def _agent_frequency_adjust(summary):
         ceiling=_agent_safe_float(_AGENT_STATE.get("threshold_ceiling"),80.0)
         action="NONE"; new=cur; why="evidence insufficient"
         streak=int(_AGENT_STATE.get("consecutive_no_eligible_scans",0) or 0)
-        if mode == "auto" and streak >= 3 and analyzed >= 20 and not hostile and (near > 0 or avg >= floor-5):
-            step=2.0 if streak < 6 else 3.0
+        if mode == "auto" and streak >= 3 and analyzed >= 20 and (near > 0 or avg >= floor-5):
+            step=1.5 if streak < 6 else 2.0
             new=max(floor, cur-step)
             if new < cur-0.01:
                 action="EXPAND_FREQUENCY"; why=f"{streak} consecutive zero-eligible scans; near-miss={near}; regime={regime}"
@@ -5832,6 +5840,60 @@ def adaptive_research_cycle():
     return report
 
 
+
+def evaluate_stats_decision(stats_snapshot, source="main_stats"):
+    """Turn closed-trade statistics into an explicit, auditable brain decision.
+
+    This does not blindly mutate strategy from one trade. It creates a decision layer:
+    PRESERVE, REVIEW_ENTRY, REVIEW_MANAGEMENT, RUN_EXPERIMENT, or HOLD_FOR_EVIDENCE.
+    Structural strategy revision still requires batched evidence/validation.
+    """
+    ss=dict(stats_snapshot or {})
+    total=int(ss.get("total",0) or 0); tp=int(ss.get("tp",0) or 0); sl=int(ss.get("sl",0) or 0); trail=int(ss.get("trail",0) or 0)
+    closed=max(0,tp+sl+trail)
+    recent=[x for x in (ss.get("recent") or []) if isinstance(x,dict)][-20:]
+    threshold=get_active_confidence_threshold()
+    if closed < 5:
+        out={"action":"HOLD_FOR_EVIDENCE","reason":f"Baru {closed} closed outcome; belum cukup untuk mengubah logika struktural.","proposal":"Kumpulkan outcome + autopsy + frequency evidence.","active_threshold":threshold,"source":source,"evidence":closed}
+    else:
+        trails=trail/max(1,closed); losses=sl/max(1,closed)
+        mfe=[]; mae=[]
+        for row in recent:
+            try:
+                mfe.append(float(row.get("mfe_r") or 0.0)); mae.append(float(row.get("mae_r") or 0.0))
+            except Exception: pass
+        avg_mfe=float(np.mean(mfe)) if mfe else 0.0
+        avg_mae=float(np.mean(mae)) if mae else 0.0
+        # Positive trail share means management can preserve profits; do not call it failure.
+        if closed >= 8 and losses >= 0.40:
+            action="RUN_EXPERIMENT"; proposal="ENTRY_QUALITY_VS_TRAIL_PRESERVATION"
+            reason=f"SL share {losses:.0%} sudah material sementara Trail positif {trails:.0%}: jalankan experiment entry/timing yang mempertahankan keunggulan Trail, bukan sekadar menurunkan threshold."
+        elif trails >= 0.45 and losses > 0.25:
+            action="REVIEW_MANAGEMENT"; proposal="PRESERVE_POSITIVE_TRAIL_AND_TEST_GIVEBACK"
+            reason=f"Positive Trail {trails:.0%} dominan: jangan menghukum Trail; fokus uji entry quality + capture/giveback."
+        elif losses >= 0.40 and avg_mfe >= 1.0:
+            action="REVIEW_MANAGEMENT"; proposal="ADAPTIVE_TRAIL_OR_PROTECTION"
+            reason=f"Loss sering masih mencapai MFE {avg_mfe:.2f}R: cek management/protection sebelum mengubah entry."
+        else:
+            action="PRESERVE_AND_OBSERVE"; proposal="NONE"
+            reason=f"Outcome mix belum menunjukkan penyebab dominan; pertahankan champion sambil tambah evidence."
+        out={"action":action,"reason":reason,"proposal":proposal,"active_threshold":threshold,"source":source,"evidence":closed,"trail_share":round(trails,4),"sl_share":round(losses,4),"avg_mfe_r":round(avg_mfe,3),"avg_mae_r":round(avg_mae,3)}
+    with _AGENT_LOCK:
+        _AGENT_STATE["last_strategy_decision"]=dict(out)
+        _AGENT_STATE["stats_decision_count"]=int(_AGENT_STATE.get("stats_decision_count",0) or 0)+1
+        # Batched experiment trigger: do not increment strategy version merely for a report.
+        if out.get("action")=="RUN_EXPERIMENT":
+            ex=_AGENT_STATE.setdefault("frequency_experiments",[])
+            exp={"id":f"STAT-{int(time.time()*1000)}","type":"stats_driven","status":"PROPOSED","proposal":out.get("proposal"),"reason":out.get("reason"),"created_at":time.time(),"baseline_strategy":_AGENT_STATE.get("strategy_version","S1")}
+            if not any(str(x.get("id"))==exp["id"] for x in ex): ex.append(exp)
+            _AGENT_STATE["frequency_signal_state"]="QUALITY_REVIEW"
+        elif out.get("action")=="REVIEW_MANAGEMENT":
+            _AGENT_STATE["frequency_signal_state"]="MANAGEMENT_REVIEW"
+        else:
+            _AGENT_STATE["frequency_signal_state"]="OBSERVE"
+        _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    return out
+
 def get_adaptive_status():
     with _AGENT_LOCK:
         return {
@@ -5859,6 +5921,9 @@ def get_adaptive_status():
             "last_scan_summary": dict(_AGENT_STATE.get("last_scan_summary") or {}),
             "frequency_state": str(_AGENT_STATE.get("frequency_state") or "INSUFFICIENT_DATA"),
             "frequency_experiments": list(_AGENT_STATE.get("frequency_experiments") or [])[-10:],
+            "last_strategy_decision": dict(_AGENT_STATE.get("last_strategy_decision") or {}),
+            "stats_decision_count": int(_AGENT_STATE.get("stats_decision_count",0) or 0),
+            "frequency_signal_state": str(_AGENT_STATE.get("frequency_signal_state") or "UNKNOWN"),
         }
 
 
