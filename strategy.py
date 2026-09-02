@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-SMCAutoTrade strategy_v7.py
+SMCAutoTrade strategy_v8.py
 
 Simulation-only strategy engine.
 Source basis: user's combined.txt trading transcripts.
@@ -30,16 +30,18 @@ from dataclasses import dataclass, asdict, field
 from typing import Any
 
 log = logging.getLogger("strategy")
-VERSION = "7.0"
+VERSION = "8.0"
 
 # LEARNED_POLICY_V1 = {"min_score":58,"transition_penalty":0,"rvol_min":0.0,"efficiency_min":0.0}
 
 MIN_RR = max(2.0, float(os.getenv("STRAT_V7_MIN_RR", "2.0")))
 MAX_RR = max(MIN_RR, min(4.0, float(os.getenv("STRAT_V7_MAX_RR", "4.0"))))
 MIN_SCORE = int(os.getenv("STRAT_V7_MIN_SCORE", "58"))
-MAX_TELEGRAM_SETUPS = max(1, int(os.getenv("STRAT_V7_MAX_TELEGRAM_SETUPS", "10")))
+SETUPS_PAGE_SIZE = max(10, int(os.getenv("STRAT_V8_SETUPS_PAGE_SIZE", "25")))
 SCAN_LOG_EVERY = max(1, int(os.getenv("STRAT_V7_SCAN_LOG_EVERY", "10")))
-EXPIRY_MINUTES = max(15, int(os.getenv("STRAT_V7_EXPIRY_MINUTES", "720")))
+EXPIRY_MINUTES = max(15, int(os.getenv("STRAT_V8_EXPIRY_MINUTES", "720")))
+CONFIRMATION_TIMEOUT_MINUTES = max(15, int(os.getenv("STRAT_V8_CONFIRMATION_TIMEOUT_MINUTES", "90")))
+INVALIDATION_BUFFER_PCT = max(0.0, float(os.getenv("STRAT_V8_INVALIDATION_BUFFER_PCT", "0.0015")))
 SWING_LEFT = max(1, int(os.getenv("STRAT_V7_SWING_LEFT", "2")))
 SWING_RIGHT = max(1, int(os.getenv("STRAT_V7_SWING_RIGHT", "2")))
 SL_ATR_PAD = float(os.getenv("STRAT_V7_SL_ATR_PAD", "0.20"))
@@ -878,14 +880,11 @@ def scan_all(initial: bool = False) -> list[str]:
     if not active:
         lines += ["", "No setup met the minimum rule threshold."]
     else:
-        lines += ["", "Top signals:"]
-        for i, s in enumerate(active[:MAX_TELEGRAM_SETUPS], 1):
-            lines.append(f"{i}. {s.symbol} {s.direction} | {s.model} | {s.state} | score={s.score} | RR={s.rr:.2f} | freq={s.frequency_per_day:.1f}/d")
-        if len(active) > MAX_TELEGRAM_SETUPS:
-            lines.append(f"… +{len(active)-MAX_TELEGRAM_SETUPS} lainnya. Gunakan /setups.")
+        lines += ["", f"Active setups total: {len(active)}"]
+    log.info("[SCAN SUMMARY] %s", " | ".join(x for x in lines if x))
     for setup in active:
         _queue_confirmed_setup(setup)
-    return ["\n".join(lines)]
+    return []
 
 
 def _queue_confirmed_setup(setup: Setup) -> None:
@@ -931,7 +930,8 @@ def drain_signals(limit: int = 100) -> list[dict[str, Any]]:
 
 
 def on_data_ready() -> str | None:
-    return "\n\n".join(scan_all(initial=True))
+    scan_all(initial=True)
+    return None
 
 
 def _active_setups(symbol: str | None = None) -> list[Setup]:
@@ -942,19 +942,34 @@ def _active_setups(symbol: str | None = None) -> list[Setup]:
     return sorted(rows, key=lambda s: (-s.score, s.symbol, s.direction))
 
 
+def _invalidate_setup(s: Setup, ts: int, reason: str) -> None:
+    s.state = "INVALIDATED"
+    s.outcome = reason
+    s.updated_ts = ts
+    COUNTERS["invalidated"] += 1
+    _journal(s)
+    log.info("[SETUP CANCELLED] %s %s id=%s reason=%s", s.symbol, s.direction, s.id, reason)
+
 def _expire_and_update_simulation(symbol: str, now_ts: int) -> list[str]:
-    notices = []
+    notices: list[str] = []
     price = API.get_price(symbol)
     if price is None:
         return notices
     for s in list(_active_setups(symbol)):
         if s.state != "FILLED" and now_ts >= s.expires_ts:
-            s.state = "EXPIRED"
-            s.outcome = "expired"
-            COUNTERS["expired"] += 1
-            notices.append(f"⏳ SIGNAL EXPIRED\n{s.symbol} {s.direction}\nID: {s.id}")
-            _journal(s)
+            _invalidate_setup(s, now_ts, "expired")
             continue
+        if s.state == "WAITING_CONFIRMATION":
+            age_min = max(0.0, (now_ts - s.updated_ts) / 60_000.0)
+            inv = s.invalidation_price
+            buf = abs(inv) * INVALIDATION_BUFFER_PCT
+            broken = (s.direction == "LONG" and price <= inv - buf) or (s.direction == "SHORT" and price >= inv + buf)
+            if broken:
+                _invalidate_setup(s, now_ts, "invalidation_broken_before_confirmation")
+                continue
+            if age_min >= CONFIRMATION_TIMEOUT_MINUTES:
+                _invalidate_setup(s, now_ts, "confirmation_timeout")
+                continue
         if s.state == "PENDING_LIMIT":
             filled = (s.direction == "LONG" and s.stop_loss < price <= s.entry_price) or (s.direction == "SHORT" and s.entry_price <= price < s.stop_loss)
             if filled:
@@ -976,7 +991,6 @@ def _expire_and_update_simulation(symbol: str, now_ts: int) -> list[str]:
                 _close(s, now_ts, "TP", s.rr)
                 notices.append(_format_exit(s))
     return notices
-
 
 def _close(s: Setup, ts: int, outcome: str, r: float) -> None:
     s.state = "CLOSED"
@@ -1027,17 +1041,17 @@ def on_market_event(event: dict[str, Any]) -> str | None:
                 _merge_thesis(existing, incoming)
                 if existing.state != old_state:
                     if existing.state == "WAITING_CONFIRMATION":
-                        notices.append(_format_signal(existing, "⏳ CONFIRMATION NEEDED"))
+                        log.info("[WAITING] %s %s id=%s", existing.symbol, existing.direction, existing.id)
                     elif existing.state == "PENDING_LIMIT":
                         COUNTERS["confirmed"] += 1
                         existing.confirmation_ts = now_ts
                         _queue_confirmed_setup(existing)
-                        notices.append(_format_signal(existing, "🟢 SETUP CONFIRMED"))
+                        log.info("[CONFIRMED] %s %s id=%s", existing.symbol, existing.direction, existing.id)
             else:
                 is_new, setup = _register_thesis(incoming)
                 if is_new:
                     _queue_confirmed_setup(setup)
-                    notices.append(_format_signal(setup, "🧠 NEW TRADING SIGNAL"))
+                    log.info("[NEW SETUP] %s %s state=%s score=%d freq=%.2f/d", setup.symbol, setup.direction, setup.state, setup.score, setup.frequency_per_day)
 
         log.info(
             "[EVENT] %s %s CLOSED | bias=%s candidate=%d active=%d",
@@ -1089,7 +1103,7 @@ def get_learning_snapshot() -> dict[str, Any]:
     return {
         "version": VERSION,
         "policy": dict(LEARNED_POLICY),
-        "active_setups": [asdict(x) for x in active[:500]],
+        "active_setups": [asdict(x) for x in active],
         "counters": dict(COUNTERS),
     }
 
@@ -1121,17 +1135,25 @@ def handle_command(text: str) -> str | None:
 
     if cmd in {"/setups", "/signals", "/top"}:
         rows = _active_setups()
-        if not rows:
-            return "📭 Tidak ada active primary thesis saat ini."
-        limit = 20 if cmd == "/setups" else 10
-        lines = ["🧠 ACTIVE TRADING SIGNALS"]
-        for i, s in enumerate(rows[:limit], 1):
+        if cmd == "/top":
+            rows = rows[:10]; page_size = 10; page = 1; total_pages = 1; page_rows = rows
+        else:
+            page_size = 30 if cmd == "/signals" else SETUPS_PAGE_SIZE
+            if cmd == "/signals":
+                rows = [s for s in rows if s.state == "PENDING_LIMIT"]
+            page = max(1, int(parts[1])) if len(parts) > 1 and parts[1].isdigit() else 1
+            total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+            page = min(page, total_pages)
+            page_rows = rows[(page - 1) * page_size: page * page_size]
+        lines = [f"📋 {cmd.upper()[1:]} | Total: {len(rows)} | Page: {page}/{total_pages}"]
+        for i, s in enumerate(page_rows, (page - 1) * page_size + 1):
             lines.append(
-                f"\n{i}. {s.symbol} — {s.direction}\n"
-                f"Score {s.score} | {s.model} | {s.state} | {s.decision} | RR 1:{s.rr:.2f} | freq {s.frequency_per_day:.1f}/d\n"
-                f"Entry {s.entry_type} {s.entry_price:.8f} | Confirm {s.confirmation_price:.8f} | SL {s.stop_loss:.8f} | TP {s.take_profit:.8f}"
+                f"{i}. {s.symbol} {s.direction} | {s.state} | score={s.score} | freq={s.frequency_per_day:.1f}/d\n"
+                f"Entry {s.entry_type} {s.entry_price:.8f} | Confirm {s.confirmation_price if s.confirmation_price is not None else '-'} | SL {s.stop_loss:.8f} | TP {s.take_profit:.8f}"
             )
-        return "".join(lines)[:3900]
+        if cmd == "/setups" and total_pages > 1:
+            lines.append(f"\n➡️ Next: /setups {page + 1 if page < total_pages else 1}")
+        return "\n".join(lines)[:3900]
 
     if cmd == "/setup":
         if len(parts) < 2:
