@@ -6167,3 +6167,226 @@ try:
     ]))
 except Exception:
     pass
+
+
+# ============================================================================
+# FINAL V100 BRAIN HARDENING
+# Canonical market-data source, scan-frequency reasoning, stats-driven decisions,
+# normalized trade evidence, and safe strategy evolution metadata.
+# ============================================================================
+FINAL_BRAIN_VERSION = "STRATEGY-BRAIN-V100-BYBIT-WS-STATS-EVOLUTION"
+BRAIN_INTERFACE_VERSION = FINAL_BRAIN_VERSION
+
+# ---------- canonical source markers ----------
+MARKET_SOURCE_BYBIT_WS = "bybit_ws"
+MARKET_SOURCE_BYBIT_REST = "bybit_rest_backfill"
+OUTCOME_SOURCE_BINANCE = "binance_trade"
+
+# Keep the newest strategy state readable even when older persisted state exists.
+with _AGENT_LOCK:
+    _AGENT_STATE["brain_version"] = FINAL_BRAIN_VERSION
+    _AGENT_STATE["market_data_source_policy"] = "BYBIT_WS_PRIMARY_BYBIT_REST_BACKFILL"
+    _AGENT_STATE["execution_source_policy"] = "BINANCE_ONLY"
+    _AGENT_STATE.setdefault("strategy_decisions", [])
+    _AGENT_STATE.setdefault("frequency_state", "INSUFFICIENT_DATA")
+    _AGENT_STATE.setdefault("frequency_experiments", [])
+
+
+def _final_brain_frequency_health(summary):
+    """Determine whether zero eligibility is real scarcity or overfiltering.
+    It never changes strategy from a single scan; repeated evidence starts a controlled experiment.
+    """
+    if not isinstance(summary,dict): return {"state":"INSUFFICIENT_DATA","action":"NONE","reason":"invalid"}
+    analyzed=int(summary.get("analyzed_symbols",0) or 0); eligible=int(summary.get("eligible_count",0) or 0); candidates=int(summary.get("candidate_count",0) or 0)
+    reasons=summary.get("rejection_reasons") if isinstance(summary.get("rejection_reasons"),dict) else {}
+    near=sum(int(v or 0) for k,v in reasons.items() if any(x in str(k).upper() for x in ("THRESHOLD","CONFIDENCE","NEAR_ELIGIBLE")))
+    warmup=sum(int(v or 0) for k,v in reasons.items() if "WARMUP" in str(k).upper())
+    no_setup=sum(int(v or 0) for k,v in reasons.items() if any(x in str(k).upper() for x in ("NO_VALID","NO_SIGNAL","REGIME_MISMATCH")))
+    no_eligible=analyzed>=max(5,int(summary.get("symbols_requested",analyzed)*0.5)) and eligible==0
+    with _AGENT_LOCK:
+        streak=int(_AGENT_STATE.get("consecutive_no_eligible_scans",0) or 0)
+        if no_eligible: streak+=1
+        else: streak=0
+        _AGENT_STATE["consecutive_no_eligible_scans"]=streak
+        if no_eligible and near>0 and streak>=3:
+            state="OVERFILTERED_SUSPECTED"; action="EXPAND_FREQUENCY"
+            reason=f"repeated zero-eligible scans with {near} near-threshold candidates"
+        elif candidates==0 and no_setup>warmup:
+            state="LOW_OPPORTUNITY"; action="NONE"; reason="few/no genuine setups; do not force frequency"
+        elif warmup>max(near,no_setup) and warmup>0:
+            state="WARMUP_BOTTLENECK"; action="NONE"; reason=f"warmup rejects dominate ({warmup})"
+        elif eligible>0:
+            state="HEALTHY"; action="NONE"; reason="eligible opportunity exists"
+        else:
+            state="INSUFFICIENT_DATA"; action="NONE"; reason="insufficient repeated evidence"
+        _AGENT_STATE["frequency_state"]=state
+        _AGENT_STATE["last_frequency_action"]={"time":time.time(),"action":action,"reason":reason,"analyzed":analyzed,"eligible":eligible,"candidates":candidates,"near_miss":near}
+        if action=="EXPAND_FREQUENCY":
+            active=_agent_active_threshold(); floor=_agent_safe_float(_AGENT_STATE.get("threshold_floor"),45.0); step=1.0 if streak<6 else 1.5; new=max(floor,active-step)
+            if new<active:
+                _AGENT_STATE["active_threshold"]=round(new,2)
+                _AGENT_STATE["frequency_actions"]=int(_AGENT_STATE.get("frequency_actions",0))+1
+                ex={"id":f"FREQ-{int(time.time()*1000)}","status":"RUNNING","baseline_threshold":active,"challenger_threshold":new,"reason":reason,"created_at":time.time()}
+                _AGENT_STATE["frequency_experiments"].append(ex); _AGENT_STATE["frequency_experiments"]=_AGENT_STATE["frequency_experiments"][-20:]
+        _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    return dict(_AGENT_STATE.get("last_frequency_action") or {})
+
+
+def record_scan_summary_final(summary, source="main_scanner"):
+    rep=dict(summary or {}); rep["source"]=source; rep["market_data_source"]="bybit_ws_primary"; rep["recorded_at"]=time.time()
+    with _AGENT_LOCK:
+        _AGENT_STATE["last_scan_summary"]=dict(rep)
+        _AGENT_STATE["scan_count"]=int(_AGENT_STATE.get("scan_count",0))+1
+        _AGENT_STATE["live"]["scan_summaries"] = int(_AGENT_STATE["live"].get("scan_summaries",0) if isinstance(_AGENT_STATE.get("live"),dict) else 0)+1
+    return _final_brain_frequency_health(rep)
+
+
+def evaluate_trade_statistics(stats_snapshot):
+    """Create an evidence-based strategy review. One trade never changes strategy."""
+    s=dict(stats_snapshot or {})
+    total=int(s.get("total",0) or 0); tp=int(s.get("tp",0) or 0); trail=int(s.get("trail",0) or 0); sl=int(s.get("sl",0) or 0)
+    wins=tp+trail; wr=(wins/(wins+sl)) if wins+sl else 0.0
+    recent=list(s.get("recent") or [])[-20:]
+    sl_rows=[x for x in recent if str(x.get("result"))=="sl"]
+    trail_rows=[x for x in recent if str(x.get("result"))=="trail"]
+    if total<8: action="WAIT_FOR_EVIDENCE"; reason=f"only {total} closed trades"; proposal="CONTINUE_OBSERVATION"
+    elif trail>=sl and trail>0: action="REVIEW_MANAGEMENT"; reason=f"Positive Trail {trail}/{total} is dominant; preserve Trail and inspect entry/capture/giveback"; proposal="PRESERVE_POSITIVE_TRAIL_AND_TEST_GIVEBACK"
+    elif sl>trail: action="REVIEW_ENTRY"; reason=f"SL {sl}/{total} exceeds Trail {trail}; inspect entry quality, regime and SL geometry"; proposal="TEST_ENTRY_QUALITY_AND_SL_GEOMETRY"
+    else: action="MONITOR"; reason="no dominant failure mode"; proposal="CONTINUE_CONTROLLED_RESEARCH"
+    return {"action":action,"reason":reason,"proposal":proposal,"trade_count":total,"win_rate":round(wr*100,2),"trail":trail,"sl":sl,"tp":tp,"frequency_state":_AGENT_STATE.get("frequency_state"),"active_threshold":get_active_confidence_threshold(),"strategy_version":_AGENT_STATE.get("strategy_version","S1"),"evidence":{"sl_count":len(sl_rows),"trail_count":len(trail_rows)}}
+
+
+_ORIGINAL_FULL_COMMAND_V100 = globals().get("full_command")
+def full_command_final(action, callbacks=None):
+    # Keep existing behavior but ensure formatted status/review data is returned.
+    act=str(action or "status").strip().lower()
+    if act in {"status","/full","full status"}:
+        with _AGENT_LOCK: st=dict(_AGENT_STATE)
+        return {"ok":True,"action":"status","adaptive":{**st,"worker_alive":bool(_AGENT_THREAD and _AGENT_THREAD.is_alive())},"decision":dict(st.get("last_strategy_decision") or {})}
+    if act in {"review","full review"}:
+        with _AGENT_LOCK:
+            dec=dict(_AGENT_STATE.get("last_strategy_decision") or {})
+            freq=dict(_AGENT_STATE.get("last_frequency_action") or {})
+        return {"ok":True,"action":"review","strategy_decision":dec,"frequency_decision":freq,"strategy_version":_AGENT_STATE.get("strategy_version","S1")}
+    return _ORIGINAL_FULL_COMMAND_V100(action,callbacks=callbacks) if callable(_ORIGINAL_FULL_COMMAND_V100) else {"ok":False,"reason":"unsupported"}
+
+
+# Final public bindings.
+record_scan_summary = record_scan_summary_final
+full_command = full_command_final
+
+
+# =============================================================================
+# V110 BRAIN FINAL GUARDRAILS
+# Single FULL adaptive worker, stats-driven decisions, frequency experiments,
+# strategy evolution with persistence, and source-aware event accounting.
+# =============================================================================
+FINAL_BRAIN_VERSION = "STRATEGY-BRAIN-V111-BYBIT-WS-STATS-EVOLUTION-GUARDED"
+BRAIN_INTERFACE_VERSION = FINAL_BRAIN_VERSION
+MARKET_SOURCE_BYBIT_WS = "bybit_ws"
+OUTCOME_SOURCE_BINANCE = "binance_trade"
+
+# Prevent duplicated V32/adaptive research workers: V110 treats adaptive worker as the
+# canonical FULL worker. Legacy V32 functions remain available for compatibility but are
+# not started by the final operator command.
+def _v110_stop_legacy_v32():
+    try: _v32_stop()
+    except Exception: pass
+
+# Stats decision ledger prevents repeated identical experiments from being created on
+# every /stats invocation while still allowing fresh evidence to create a new decision.
+_V110_STATS_REVIEW_COOLDOWN = max(1800.0, float(os.getenv("STATS_REVIEW_COOLDOWN_SEC", "21600")))
+
+def _v110_stats_signature(snapshot, decision):
+    import hashlib
+    s=dict(snapshot or {})
+    payload={k:s.get(k) for k in ("total","tp","trail","sl","balance")}
+    payload["action"]=decision.get("action"); payload["proposal"]=decision.get("proposal")
+    payload["strategy_version"]=_AGENT_STATE.get("strategy_version","S1")
+    return hashlib.sha1(json.dumps(payload,sort_keys=True,default=str).encode()).hexdigest()
+
+def evaluate_stats_decision_v110(stats_snapshot, source="main_stats"):
+    s=dict(stats_snapshot or {})
+    total=int(s.get("total",0) or 0); tp=int(s.get("tp",0) or 0); trail=int(s.get("trail",0) or 0); sl=int(s.get("sl",0) or 0)
+    wins=tp+trail; wr=(wins/(wins+sl)) if wins+sl else 0.0
+    recent=list(s.get("recent") or [])[-20:]
+    if total < 5:
+        action="WAIT_FOR_EVIDENCE"; reason=f"closed trades={total}; minimum evidence not reached"; proposal="CONTINUE_OBSERVATION"
+    elif sl>max(trail,tp) and sl>=3:
+        action="REVIEW_ENTRY_AND_RISK"; reason=f"SL={sl} exceeds positive exits; inspect entry quality, regime and SL geometry"; proposal="TEST_ENTRY_QUALITY_AND_SL_GEOMETRY"
+    elif trail>=sl and trail>0:
+        action="REVIEW_MANAGEMENT"; reason=f"Positive Trail={trail} is dominant; preserve Trail and inspect entry/capture/giveback"; proposal="PRESERVE_POSITIVE_TRAIL_AND_TEST_GIVEBACK"
+    else:
+        action="MONITOR"; reason="no dominant failure mode"; proposal="CONTINUE_CONTROLLED_RESEARCH"
+    dec={"action":action,"reason":reason,"proposal":proposal,"trade_count":total,"win_rate":round(wr*100,2),"trail":trail,"sl":sl,"tp":tp,"frequency_state":_AGENT_STATE.get("frequency_state","INSUFFICIENT_DATA"),"active_threshold":get_active_confidence_threshold(),"strategy_version":_AGENT_STATE.get("strategy_version","S1"),"source":source,"evidence":{"recent_count":len(recent)}}
+    sig=_v110_stats_signature(s,dec); now=time.time()
+    with _AGENT_LOCK:
+        prev=_AGENT_STATE.get("last_stats_review") if isinstance(_AGENT_STATE.get("last_stats_review"),dict) else {}
+        duplicate=(prev.get("signature")==sig and now-float(prev.get("at",0.0))<_V110_STATS_REVIEW_COOLDOWN)
+        dec["experiment_created"]=False; dec["review_duplicate_suppressed"]=duplicate
+        if not duplicate:
+            _AGENT_STATE["last_strategy_decision"]=dict(dec); _AGENT_STATE["last_stats_review"]={"signature":sig,"at":now,"decision":dict(dec)}
+            if action.startswith("REVIEW"):
+                _AGENT_STATE["stats_decision_count"]=int(_AGENT_STATE.get("stats_decision_count",0))+1
+                # A stats review is evidence, not a promotion. Create one challenger only
+                # when no equivalent active experiment exists.
+                exs=_AGENT_STATE.get("strategy_experiments") if isinstance(_AGENT_STATE.get("strategy_experiments"),list) else []
+                duplicate_ex=any(str(e.get("proposal"))==proposal and str(e.get("status")) in {"RUNNING","VALIDATING","SHADOW"} for e in exs)
+                if not duplicate_ex:
+                    exp={"id":f"STATS-{int(now*1000)}","proposal":proposal,"baseline_strategy":_AGENT_STATE.get("strategy_version","S1"),"status":"SHADOW","created_at":now,"evidence":{"trade_count":total,"win_rate":round(wr*100,2),"trail":trail,"sl":sl}}
+                    exs.append(exp); _AGENT_STATE["strategy_experiments"]=exs[-20:]; dec["experiment_created"]=True
+            _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    return dec
+
+evaluate_stats_decision = evaluate_stats_decision_v110
+
+def record_scan_summary_v110(summary, source="main_scanner"):
+    rep=dict(summary or {}); rep["source"]=source; rep["market_data_source"]="bybit_ws_primary"; rep["recorded_at"]=time.time()
+    with _AGENT_LOCK:
+        _AGENT_STATE["last_scan_summary"]=dict(rep); _AGENT_STATE["scan_count"]=int(_AGENT_STATE.get("scan_count",0))+1
+        live=_AGENT_STATE.get("live") if isinstance(_AGENT_STATE.get("live"),dict) else {}
+        live["scan_summaries"]=int(live.get("scan_summaries",0))+1; _AGENT_STATE["live"]=live
+    action=_final_brain_frequency_health(rep)
+    # Always store frequency decision even when action is NONE; this is the brain's
+    # explanation for why no threshold change happened.
+    with _AGENT_LOCK: _AGENT_STATE["last_frequency_action"]=dict(action or {})
+    _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    return action
+
+record_scan_summary=record_scan_summary_v110
+
+# Final FULL command: only adaptive worker is operator controlled.
+def full_command_v110(action, callbacks=None):
+    act=str(action or "status").strip().lower()
+    callbacks=callbacks if isinstance(callbacks,dict) else {}
+    if act in {"on","/full on","full on"}:
+        _v110_stop_legacy_v32()
+        with _AGENT_LOCK: _FULL_ENABLED=True
+        adaptive_agent_start()
+        return "🧠 <b>FULL ON</b>\nAdaptive brain worker: ✅\nMarket evidence: Bybit WS\nTrade outcome source: Binance\nLearning: observation → evidence → hypothesis → experiment → validation."
+    if act in {"off","/full off","full off"}:
+        with _AGENT_LOCK: _FULL_ENABLED=False
+        adaptive_agent_stop(); _v110_stop_legacy_v32()
+        return "🧠 <b>FULL OFF</b>\nState/model dipertahankan; worker dihentikan tanpa menghapus learning."
+    if act in {"reset","/full reset","full reset"}:
+        reset_cognitive_memory()
+        with _AGENT_LOCK:
+            _AGENT_STATE["frequency_state"]="INSUFFICIENT_DATA"; _AGENT_STATE["frequency_experiments"]=[]; _AGENT_STATE["strategy_experiments"]=[]; _AGENT_STATE["last_strategy_decision"]={}; _AGENT_STATE["last_stats_review"]={}
+        return "🧠 <b>FULL RESET</b>\nCognitive evidence dan experiment ledger direset; trading ledger tidak disentuh."
+    if act in {"review","full review","/full review"}:
+        with _AGENT_LOCK:
+            return {"ok":True,"action":"review","strategy_decision":dict(_AGENT_STATE.get("last_strategy_decision") or {}),"frequency_decision":dict(_AGENT_STATE.get("last_frequency_action") or {}),"strategy_version":_AGENT_STATE.get("strategy_version","S1"),"strategy_revisions":_AGENT_STATE.get("strategy_revisions",0)}
+    with _AGENT_LOCK:
+        st=dict(_AGENT_STATE)
+        strategy_dec=dict(st.get("last_strategy_decision") or {})
+    adaptive={**st,"worker_alive":bool(_AGENT_THREAD and _AGENT_THREAD.is_alive())}
+    return {"ok":True,"action":"status","adaptive":adaptive,"decision":strategy_dec,"interface_version":FINAL_BRAIN_VERSION}
+
+full_command=full_command_v110
+
+# Full worker runner is intentionally adaptive-only. Existing callers that invoke
+# adaptive_agent_start continue to work; legacy V32 is explicitly stopped by full on/reset/off.
+# Re-export guarded contract.
+try:
+    __all__=list(dict.fromkeys(__all__+["FINAL_BRAIN_VERSION","BRAIN_INTERFACE_VERSION","record_scan_summary","evaluate_stats_decision","full_command","adaptive_agent_start","adaptive_agent_stop"]))
+except Exception: pass

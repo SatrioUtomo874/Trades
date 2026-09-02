@@ -553,7 +553,7 @@ RUNTIME_SCHEMA_VERSION = "runtime_v1"
 EVENT_SCHEMA_VERSION = "event_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
 BRAIN_INTERFACE_VERSION = "brain_v1"
-BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT", "V52_OPERATIONAL_BRAIN", "V60_STATS_DRIVEN_FREQUENCY_BRAIN", "V71_UNIFIED_FULL_BRAIN"}
+BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT", "V52_OPERATIONAL_BRAIN", "V60_STATS_DRIVEN_FREQUENCY_BRAIN", "V71_UNIFIED_FULL_BRAIN", "STRATEGY-BRAIN-V100-BYBIT-WS-STATS-EVOLUTION"}
 MAX_HEAVY_WORKERS = 5
 HEAVY_WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_HEAVY_WORKERS)
 _HEAVY_WORKER_LOCK = threading.RLock()
@@ -1880,7 +1880,7 @@ _pending_cleanup_lock = threading.Lock()
 _binance_time_offset_ms = 0
 _binance_time_sync_at = 0.0
 _binance_time_sync_lock = threading.Lock()
-BINANCE_TIME_SYNC_TTL = 60.0
+BINANCE_TIME_SYNC_TTL = 300.0
 _real_trade_preflight_cache = {"at": 0.0, "position_mode": None, "can_trade": None}
 _real_trade_preflight_lock = threading.Lock()
 REAL_TRADE_PREFLIGHT_TTL = 60.0
@@ -1927,31 +1927,34 @@ _load_binance_ban_state()
 
 
 def _binance_sync_time(force=False):
-    """Sync local clock against Binance server time for signed requests.
-    Public endpoint only; no API key required.
-    """
+    """Sync clock using one governed Binance public request; never bypass the rate limiter."""
     global _binance_time_offset_ms, _binance_time_sync_at
-    now = time.time()
+    now=time.time()
     with _binance_time_sync_lock:
-        if not force and (now - _binance_time_sync_at) < BINANCE_TIME_SYNC_TTL:
+        if not force and (now-_binance_time_sync_at)<BINANCE_TIME_SYNC_TTL:
             return _binance_time_offset_ms
-    local_send = int(time.time() * 1000)
-    try:
-        r = requests.get(f"{FAPI}/fapi/v1/time", timeout=5, verify=False)
-        r.raise_for_status()
-        server_ms = int(r.json()["serverTime"])
-        local_recv = int(time.time() * 1000)
-        midpoint = (local_send + local_recv) // 2
-        offset = server_ms - midpoint
-        with _binance_time_sync_lock:
-            _binance_time_offset_ms = int(offset)
-            _binance_time_sync_at = time.time()
-        log.info(f"[binance-time] sync OK offset={offset}ms")
-        return int(offset)
-    except Exception as e:
-        log.warning(f"[binance-time] sync gagal: {e}")
-        raise
-
+    if _binance_is_scan_paused() and not force:
+        raise BinanceCooldownError(f"Binance cooldown aktif {_binance_cooldown_remaining():.0f}s")
+    local_send=int(time.time()*1000)
+    with _binance_request_slot(critical=True):
+        try:
+            r=requests.get(f"{FAPI}/fapi/v1/time",timeout=5,verify=False)
+            _binance_update_weight_from_response(r)
+            if r.status_code in (418,429):
+                _binance_register_ban(r.text,retry_after=r.headers.get("Retry-After"))
+                raise BinanceCooldownError(f"Binance time endpoint HTTP {r.status_code}")
+            r.raise_for_status()
+            server_ms=int(r.json()["serverTime"])
+        except BinanceCooldownError:
+            raise
+        except Exception as e:
+            log.warning(f"[binance-time] sync gagal: {e}")
+            raise
+    local_recv=int(time.time()*1000); midpoint=(local_send+local_recv)//2; offset=server_ms-midpoint
+    with _binance_time_sync_lock:
+        _binance_time_offset_ms=int(offset); _binance_time_sync_at=time.time()
+    log.info(f"[binance-time] sync OK offset={offset}ms")
+    return int(offset)
 
 def _binance_timestamp_ms(sync_if_stale=True):
     with _binance_time_sync_lock:
@@ -3737,7 +3740,7 @@ def run_scan_once(chat_id):
 
     data_elapsed=time.monotonic()-data_started; total_elapsed=time.monotonic()-scan_started
     cache_total,cache_fresh=_scan_cache_stats(); avg_conf=(sum(all_scan_confidences)/len(all_scan_confidences)) if all_scan_confidences else None
-    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"candidate_count":candidate_count,"eligible_count":eligible_count,"ban_count":ban_count,"rejection_reasons":dict(sorted(rejection_reasons.items(), key=lambda kv:(-kv[1],kv[0]))[:20]),"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct"),"source":"bybit_primary_analysis","binance_entry_paused":bool(_binance_is_scan_paused()),"entry_mutations_blocked":bool(STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN or _binance_is_scan_paused())}
+    telemetry={"duration_sec":round(total_elapsed,2),"data_phase_sec":round(data_elapsed,2),"symbols_requested":len(symbols),"analyzed_symbols":analyzed_symbols,"avg_confidence":round(avg_conf,2) if avg_conf is not None else None,"min_confidence":round(min(all_scan_confidences),2) if all_scan_confidences else None,"max_confidence":round(max(all_scan_confidences),2) if all_scan_confidences else None,"low_confidence_count":low_conf_count,"below_threshold_count":below_threshold_count,"candidate_count":candidate_count,"eligible_count":eligible_count,"ban_count":ban_count,"rejection_reasons":dict(sorted(rejection_reasons.items(), key=lambda kv:(-kv[1],kv[0]))[:20]),"results":len(results),"failed_symbols":failed_symbols,"cache_entries":cache_total,"cache_fresh":cache_fresh,"binance_weight_1m":_binance_weight_1m,"binance_weight_seen_age_sec":round(max(0.0,time.time()-float(_binance_weight_seen_at or 0.0)),1) if _binance_weight_seen_at else None,"binance_execution_reserve":BINANCE_EXECUTION_RESERVE,"market_regime":mc.get("market_regime"),"bullish_breadth_pct":mc.get("bullish_breadth_pct"),"bearish_breadth_pct":mc.get("bearish_breadth_pct"),"median_efficiency_4h":mc.get("median_efficiency_4h"),"avg_relative_volume":mc.get("avg_relative_volume"),"btc_price_1h_pct":mc.get("btc_price_1h_pct"),"btc_price_4h_pct":mc.get("btc_price_4h_pct"),"source":"bybit_ws_primary_analysis","binance_entry_paused":bool(_binance_is_scan_paused()),"entry_mutations_blocked":bool(STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN or _binance_is_scan_paused())}
     _record_scan_telemetry(telemetry)
     # Give the brain one canonical summary per scan. This is the observation
     # boundary used for frequency health and controlled exploration; it never
@@ -4478,7 +4481,7 @@ def close_position(sym, result, close_price=None):
 
     sig = pos.get("signal") or {}
     entry = pos.get("entry")
-    sl_p = sig.get("sl")
+    sl_p = pos.get("initial_sl") or sig.get("sl")
     tp_p = sig.get("tp")
     cid = pos.get("chat_id") or active_chat_id
 
@@ -4546,11 +4549,17 @@ def close_position(sym, result, close_price=None):
     label = {"tp":"TAKE PROFIT","sl":"STOP LOSS","trail":"TRAILING STOP"}.get(classified, "STOP LOSS")
     detail = ""
     if last and last.get("symbol") == sym:
-        sgn = "+" if last.get("pct", 0) >= 0 else ""
+        pm=last.get("price_move_pct")
+        ap=last.get("account_impact_pct")
+        sgn = "+" if float(last.get("pnl_usd", 0) or 0) >= 0 else ""
         detail = (
             f"Entry: <code>{last.get('entry', entry):.6g}</code> → Exit: <code>{last.get('exit_price', close_price):.6g}</code>\n"
-            f"Hasil: <b>{sgn}{last.get('pct', 0):.2f}%</b> (${sgn}{last.get('pnl_usd', 0):.4f})\n\n"
-        )
+            f"Pergerakan harga: <b>{float(pm):+.2f}%</b>\n" if pm is not None else
+            f"Entry: <code>{last.get('entry', entry):.6g}</code> → Exit: <code>{last.get('exit_price', close_price):.6g}</code>\n")
+        detail += (
+            f"PnL posisi: <b>{float(last.get('pct', 0) or 0):+.2f}%</b> (${sgn}{float(last.get('pnl_usd', 0) or 0):.4f})\n"
+            f"Dampak saldo statistik: <b>{float(ap):+.2f}%</b>\n\n" if ap is not None else
+            f"PnL posisi: <b>{float(last.get('pct', 0) or 0):+.2f}%</b> (${sgn}{float(last.get('pnl_usd', 0) or 0):.4f})\n\n")
     if stats_error:
         detail += "⚠️ Statistik lokal mengalami error dan akan dicoba dipulihkan oleh audit/recovery.\n\n"
     try:
@@ -5391,7 +5400,7 @@ def get_scanner_status():
     healthy = bool(out.get("enabled")) and bool(out.get("coordinator_alive")) and out["thread_alive"] and recent_hb
     out["health"] = "RUNNING" if healthy else ("STARTING" if out.get("enabled") else "STOPPED")
     out["binance_paused"] = _binance_is_scan_paused()
-    out["market_data_source"] = "BYBIT_REST"
+    out["market_data_source"] = "BYBIT_WS_PRIMARY"
     out["execution_exchange"] = "BINANCE"
     out["entry_mutations_blocked"] = bool(STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN or _binance_is_scan_paused())
     out["pause_remaining_sec"] = round(_binance_cooldown_remaining(), 2)
@@ -5726,6 +5735,8 @@ def bot_loop():
                         tg_send(chat_id, f"🌐 <b>Public IP Render</b>\n<code>{html.escape(ip)}</code>\n\nGunakan IP ini untuk whitelist Binance API jika diperlukan.")
                     else:
                         tg_send(chat_id, "⚠️ Public IP Render tidak berhasil diambil dari layanan IP eksternal saat ini.")
+                elif text in ("/status","status"):
+                    tg_send(chat_id,fmt_runtime_status_v110())
                 elif text in ("/stats","stats"):
                     tg_send(chat_id,fmt_stats())
                 elif text in ("/backtest","backtest"):
@@ -5753,7 +5764,7 @@ def bot_loop():
                         tg_send(chat_id, f"❌ FULL reset gagal: <code>{html.escape(str(e)[:300])}</code>")
                 elif text in ("/full", "full", "/full status", "full status"):
                     try:
-                        tg_send(chat_id, _full_strategy_command("status", chat_id))
+                        tg_send(chat_id, _v110_full_text())
                     except Exception as e:
                         log.exception(f"[full] status gagal: {e}")
                         tg_send(chat_id, f"❌ FULL status gagal: <code>{html.escape(str(e)[:300])}</code>")
@@ -6087,7 +6098,7 @@ def bot_loop():
                         t, created = _ensure_scanner_running(chat_id, announce=False)
                         st=get_scanner_status()
                         if created:
-                            tg_send(chat_id, "🔎 <b>SCANNER STARTING</b>\nData analisis: <b>Bybit REST</b>\nExecution: <b>Binance</b>")
+                            tg_send(chat_id, "🔎 <b>SCANNER STARTING</b>\nData realtime: <b>Bybit WS</b>\nBackfill: <b>Bybit REST</b>\nExecution: <b>Binance</b>")
                         else:
                             tg_send(chat_id, "🔎 <b>SCANNER SUDAH AKTIF</b>\n"
                                             f"Cycle: <b>{st.get('cycle_count',0)}</b> | "
@@ -6222,15 +6233,15 @@ def bot_loop():
                     threading.Thread(target=_run_ok, args=(chat_id, target), daemon=True).start()
                 elif text.startswith("/timeout") or (not text.startswith("/") and text.startswith("timeout")):
                     parts = text.split()
-                    target_sym = parts[1].upper() if len(parts) > 1 else None
-                    if target_sym:
-                        tg_send(chat_id, f"⏳ <b>TIMEOUT REQUESTED</b> — {target_sym}\n"
-                                        "Membatalkan semua order Binance dan menutup posisi bila ada…")
-                        threading.Thread(target=_verified_timeout_symbol, args=(target_sym, chat_id), daemon=True).start()
+                    if len(parts) > 1 and parts[1].lower() == "pending":
+                        threading.Thread(target=_verified_timeout_pending_only, args=(chat_id,), daemon=True).start()
                     else:
-                        tg_send(chat_id, "⏳ <b>TIMEOUT GLOBAL REQUESTED</b>\n"
-                                        "Membatalkan SEMUA order Binance dan menutup SEMUA posisi…")
-                        threading.Thread(target=_verified_timeout_all, args=(chat_id,), daemon=True).start()
+                        target_sym = parts[1].upper() if len(parts) > 1 else None
+                        if target_sym:
+                            tg_send(chat_id, f"⏳ <b>TIMEOUT REQUESTED</b> — {target_sym}\nMembatalkan order/menutup posisi untuk symbol tersebut…")
+                            threading.Thread(target=_verified_timeout_symbol, args=(target_sym, chat_id), daemon=True).start()
+                        else:
+                            tg_send(chat_id, "⛔ Gunakan <code>/timeout pending</code> untuk pending entry saja, atau <code>/timeout SYMBOL</code> untuk satu symbol.")
                 elif text.startswith("/mode"):
                     # /mode on snapshots Binance balance exactly once per OFF→ON transition.
                     parts = text.split()
@@ -6495,6 +6506,1443 @@ def start_runtime():
         tg_send(ALLOWED_USER_ID,f"🚨 <b>strategy_logic.py bermasalah</b>\n<code>{html.escape(_STRATEGY_LOAD_ERROR[:500])}</code>\nNew entry ditahan.")
 
 
+
+# ============================================================================
+# FINAL V100 HARDENING OVERLAY
+# Bybit WS primary market data + Binance WS user-state + REST governor,
+# trail breach latch, order cleanup, pending-only timeout, PnL normalization,
+# Telegram spam suppression, and explicit scanner/execution separation.
+# ============================================================================
+from collections import defaultdict
+
+FINAL_BODY_VERSION = "MAIN-BODY-V100-BYBIT-WS-BINANCE-REST-GOVERNOR"
+BYBIT_WS_URL = os.getenv("BYBIT_WS_URL", "wss://stream.bybit.com/v5/public/linear")
+BYBIT_WS_STALE_SEC = max(5.0, float(os.getenv("BYBIT_WS_STALE_SEC", "15")))
+BYBIT_WS_RECONNECT_MAX = max(5.0, float(os.getenv("BYBIT_WS_RECONNECT_MAX", "30")))
+BYBIT_WS_MAX_TOPICS_PER_SUB = max(10, int(os.getenv("BYBIT_WS_MAX_TOPICS_PER_SUB", "50")))
+BYBIT_WS_TOPIC_INTERVALS = ("15", "60", "D")
+BYBIT_WS_PREWARM_SYMBOLS = max(0, int(os.getenv("BYBIT_WS_PREWARM_SYMBOLS", "50")))
+PENDING_ENTRY_TIMEOUT_SEC = max(60.0, float(os.getenv("PENDING_ENTRY_TIMEOUT_SEC", "3600")))
+BINANCE_WS_STALE_SEC = max(15.0, float(os.getenv("BINANCE_WS_STALE_SEC", "90")))
+BINANCE_REST_NONCRITICAL_MIN_INTERVAL = max(0.5, float(os.getenv("BINANCE_REST_NONCRITICAL_MIN_INTERVAL", "2.0")))
+BINANCE_REST_RECONCILE_MIN_INTERVAL = max(5.0, float(os.getenv("BINANCE_REST_RECONCILE_MIN_INTERVAL", "30")))
+BINANCE_BULK_RECONCILE_MIN_INTERVAL = max(30.0, float(os.getenv("BINANCE_BULK_RECONCILE_MIN_INTERVAL", "300")))
+TELEGRAM_REPEAT_SUPPRESS_SEC = max(30.0, float(os.getenv("TELEGRAM_REPEAT_SUPPRESS_SEC", "180")))
+TELEGRAM_FLOOD_WINDOW_SEC = max(15.0, float(os.getenv("TELEGRAM_FLOOD_WINDOW_SEC", "60")))
+TELEGRAM_FLOOD_MAX = max(3, int(os.getenv("TELEGRAM_FLOOD_MAX", "6")))
+SL_BREACH_EPSILON_PCT = max(0.0, float(os.getenv("SL_BREACH_EPSILON_PCT", "0.0")))
+
+# ---------- Bybit realtime market bus ----------
+class BybitMarketWS:
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._send_lock = threading.Lock()
+        self._ws = None
+        self._connected = False
+        self._last_msg_at = 0.0
+        self._last_error = None
+        self._backoff = 1.0
+        self._stop = threading.Event()
+        self._topics = set()
+        self._tickers = {}
+        self._klines = {}  # (symbol, interval) -> deque rows
+        self._seq = {}
+        self._thread = None
+
+    def start(self):
+        if not _WS_LIB_OK:
+            _set_component_health("bybit_websocket", "DEGRADED", "websocket-client belum terpasang")
+            return None
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return self._thread
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, name="bybit-market-ws", daemon=True)
+            self._thread.start()
+            return self._thread
+
+    def stop(self):
+        self._stop.set()
+        try:
+            if self._ws:
+                self._ws.close()
+        except Exception:
+            pass
+
+    def is_fresh(self):
+        with self._lock:
+            return self._connected and self._last_msg_at > 0 and (time.time() - self._last_msg_at) <= BYBIT_WS_STALE_SEC
+
+    def status(self):
+        with self._lock:
+            return {
+                "connected": bool(self._connected),
+                "thread_alive": bool(self._thread and self._thread.is_alive()),
+                "fresh": bool(self._connected and self._last_msg_at and time.time()-self._last_msg_at <= BYBIT_WS_STALE_SEC),
+                "last_msg_at": self._last_msg_at,
+                "last_error": self._last_error,
+                "topics": len(self._topics),
+                "tickers": len(self._tickers),
+                "kline_buffers": len(self._klines),
+            }
+
+    def subscribe_symbols(self, symbols):
+        syms = [str(s).upper() for s in symbols if s]
+        topics = []
+        for sym in syms:
+            topics.append(f"tickers.{sym}")
+            for iv in BYBIT_WS_TOPIC_INTERVALS:
+                topics.append(f"kline.{iv}.{sym}")
+        with self._lock:
+            new_topics = [t for t in topics if t not in self._topics]
+        if not new_topics:
+            return
+        self._send_topics("subscribe", new_topics)
+
+    def unsubscribe_symbols(self, symbols):
+        topics=[]
+        for sym in [str(s).upper() for s in symbols if s]:
+            topics.append(f"tickers.{sym}")
+            for iv in BYBIT_WS_TOPIC_INTERVALS:
+                topics.append(f"kline.{iv}.{sym}")
+        self._send_topics("unsubscribe", topics)
+
+    def _send_topics(self, op, topics):
+        if not topics:
+            return
+        for i in range(0, len(topics), BYBIT_WS_MAX_TOPICS_PER_SUB):
+            chunk=topics[i:i+BYBIT_WS_MAX_TOPICS_PER_SUB]
+            try:
+                with self._send_lock:
+                    ws=self._ws
+                    if ws is None or not self._connected:
+                        # Keep desired topics; on reconnect _on_open resubscribes.
+                        if op == "subscribe":
+                            with self._lock: self._topics.update(chunk)
+                        elif op == "unsubscribe":
+                            with self._lock: self._topics.difference_update(chunk)
+                        continue
+                    ws.send(json.dumps({"op":op,"args":chunk}))
+                with self._lock:
+                    if op == "subscribe": self._topics.update(chunk)
+                    else: self._topics.difference_update(chunk)
+            except Exception as exc:
+                self._last_error=str(exc)[:300]
+                log.warning(f"[BYBIT WS] {op} gagal: {exc}")
+
+    def get_ticker(self, symbol):
+        with self._lock:
+            row=self._tickers.get(str(symbol).upper())
+            return dict(row) if row else None
+
+
+    def get_price(self, symbol):
+        row=self.get_ticker(symbol)
+        return row.get("price") if row else None
+
+    def get_prices(self):
+        with self._lock:
+            return {k:dict(v) for k,v in self._tickers.items()}
+
+    def get_klines(self, symbol, interval, limit=250):
+        key=(str(symbol).upper(), str(interval))
+        with self._lock:
+            buf=self._klines.get(key)
+            if not buf:
+                return pd.DataFrame()
+            rows=list(buf)[-int(limit):]
+        if not rows: return pd.DataFrame()
+        df=pd.DataFrame(rows)
+        df.index=pd.to_datetime(df["t"], unit="ms")
+        df.rename(columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"}, inplace=True)
+        return df[["open","high","low","close","volume"]]
+
+    def seed(self, symbol, interval, df):
+        if df is None or df.empty: return
+        key=(str(symbol).upper(), str(interval))
+        rows=[]
+        for idx,row in df.tail(300).iterrows():
+            try:
+                rows.append({"t":int(pd.Timestamp(idx).timestamp()*1000),"o":float(row["open"]),"h":float(row["high"]),"l":float(row["low"]),"c":float(row["close"]),"v":float(row["volume"])})
+            except Exception:
+                continue
+        if rows:
+            with self._lock:
+                self._klines[key]=deque(rows,maxlen=300)
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                self._ws=websocket.WebSocketApp(
+                    BYBIT_WS_URL,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self._ws.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as exc:
+                self._last_error=str(exc)[:300]
+                log.warning(f"[BYBIT WS] connection exception: {exc}")
+            finally:
+                with self._lock: self._connected=False
+            if self._stop.is_set(): break
+            time.sleep(self._backoff)
+            self._backoff=min(BYBIT_WS_RECONNECT_MAX,self._backoff*2)
+
+    def _on_open(self, ws):
+        with self._lock:
+            self._connected=True; self._last_msg_at=time.time(); self._backoff=1.0; topics=list(self._topics)
+        _set_component_health("bybit_websocket","HEALTHY","public market WS connected")
+        for i in range(0,len(topics),BYBIT_WS_MAX_TOPICS_PER_SUB):
+            self._send_topics("subscribe", topics[i:i+BYBIT_WS_MAX_TOPICS_PER_SUB])
+
+    def _on_error(self, ws, error):
+        with self._lock: self._last_error=str(error)[:300]
+        _set_component_health("bybit_websocket","DEGRADED",str(error)[:250])
+
+    def _on_close(self, ws, code, msg):
+        with self._lock: self._connected=False
+        log.warning(f"[BYBIT WS] closed code={code} msg={msg}")
+
+    def _on_message(self, ws, raw):
+        now=time.time()
+        try: msg=json.loads(raw)
+        except Exception: return
+        with self._lock: self._last_msg_at=now
+        topic=str(msg.get("topic") or "") if isinstance(msg,dict) else ""
+        if topic.startswith("tickers."):
+            data=msg.get("data") or {}
+            if isinstance(data,dict): data=[data]
+            with self._lock:
+                for item in data:
+                    try:
+                        sym=str(item.get("symbol") or "").upper()
+                        if not sym: continue
+                        prev=dict(self._tickers.get(sym) or {})
+                        price=item.get("lastPrice") or item.get("markPrice")
+                        volume=item.get("turnover24h") or item.get("volume24h")
+                        chg=item.get("price24hPcnt")
+                        row={"symbol":sym,"price":float(price) if price is not None else float(prev.get("price",0.0) or 0.0),"ts":float(msg.get("ts") or now*1000)/1000.0,"recv_at":now,"volume":float(volume) if volume is not None else float(prev.get("volume",0.0) or 0.0),"change_24h":float(chg) if chg is not None else float(prev.get("change_24h",0.0) or 0.0)}
+                        row["cross_seq"]=msg.get("cs") or prev.get("cross_seq")
+                        self._tickers[sym]=row
+                        if msg.get("cs") is not None: self._seq[sym]=int(msg.get("cs"))
+                    except Exception: continue
+        elif topic.startswith("kline."):
+            # kline.15.BTCUSDT / kline.60.BTCUSDT / kline.D.BTCUSDT
+            parts=topic.split(".")
+            if len(parts)!=3: return
+            interval,sym=parts[1],parts[2].upper()
+            data=msg.get("data") or []
+            if isinstance(data,dict): data=[data]
+            with self._lock:
+                buf=self._klines.get((sym,interval))
+                if buf is None: buf=deque(maxlen=300); self._klines[(sym,interval)]=buf
+                for item in data:
+                    try:
+                        row={"t":int(item.get("start") or item.get("timestamp") or 0),"o":float(item["open"]),"h":float(item["high"]),"l":float(item["low"]),"c":float(item["close"]),"v":float(item.get("volume") or 0.0)}
+                        if not row["t"]: continue
+                        if buf and buf[-1]["t"]==row["t"]: buf[-1]=row
+                        else: buf.append(row)
+                    except Exception: continue
+
+bybit_market_ws = BybitMarketWS()
+
+# ---------- REST market-data wrappers become WS-first ----------
+_ORIG_BYBIT_KLINES = globals().get("_bybit_klines")
+_ORIG_BYBIT_PRICE = globals().get("_bybit_price")
+_ORIG_BYBIT_TOP = globals().get("_bybit_top_coins")
+
+# REST backfill locks prevent 50 parallel first-use requests.
+_bybit_backfill_locks = {}
+_bybit_backfill_guard = threading.Lock()
+
+def _bybit_backfill_once(symbol, interval, limit=250):
+    key=(str(symbol).upper(),str(interval))
+    with _bybit_backfill_guard:
+        lk=_bybit_backfill_locks.get(key)
+        if lk is None: lk=threading.Lock(); _bybit_backfill_locks[key]=lk
+    with lk:
+        existing=bybit_market_ws.get_klines(*key,limit=limit)
+        if len(existing)>=min(int(limit),40): return existing
+        df=pd.DataFrame()
+        try:
+            if callable(_ORIG_BYBIT_KLINES): df=_ORIG_BYBIT_KLINES(symbol,interval,limit)
+        except Exception as exc:
+            log.warning(f"[BYBIT REST BACKFILL] {symbol} {interval}: {exc}")
+        if df is not None and not df.empty:
+            bybit_market_ws.seed(symbol, INTERVAL_MAP.get(interval,interval), df)
+            bybit_market_ws.subscribe_symbols([symbol])
+        return df if df is not None else pd.DataFrame()
+
+def _final_bybit_price(symbol):
+    sym=str(symbol).upper(); now=time.time()
+    try: bybit_market_ws.subscribe_symbols([sym])
+    except Exception: pass
+    wsrow=bybit_market_ws.get_ticker(sym)
+    if wsrow and wsrow.get("price") and now-float(wsrow.get("recv_at",0))<=BYBIT_WS_STALE_SEC:
+        return float(wsrow["price"])
+    # REST fallback is throttled per symbol so a disconnected WS cannot create a request storm.
+    with _local_price_lock:
+        cached=_local_price_cache.get(sym)
+    if cached and now-cached[1] < 10.0:
+        return float(cached[0])
+    if callable(_ORIG_BYBIT_PRICE):
+        try:
+            price=float(_ORIG_BYBIT_PRICE(sym))
+            with _local_price_lock: _local_price_cache[sym]=(price,now)
+            return price
+        except Exception: pass
+    return None
+
+def _final_bybit_top(exclude_syms):
+    prices=bybit_market_ws.get_prices()
+    if prices:
+        exc=set(exclude_syms or ())
+        arr=[]
+        for s,row in prices.items():
+            try:
+                if not s.endswith("USDT") or s in exc: continue
+                p=float(row.get("price",0)); vol=float(row.get("volume",0)); chg=abs(float(row.get("change_24h",0.0) or 0.0))
+                if 0.0001<p<MAX_PRICE and vol>5_000_000 and chg<0.15: arr.append((s,vol))
+            except Exception: continue
+        if arr:
+            arr.sort(key=lambda x:x[1],reverse=True)
+            return [s for s,_ in arr[:TOP_N_COINS]]
+    return _ORIG_BYBIT_TOP(exclude_syms) if callable(_ORIG_BYBIT_TOP) else []
+
+def _final_get_scan_klines(symbol, interval, limit=250):
+    mapped=INTERVAL_MAP.get(interval,interval)
+    wsdf=bybit_market_ws.get_klines(symbol,mapped,limit)
+    if len(wsdf)>=min(int(limit),40): return wsdf.tail(limit).copy()
+    df=_bybit_backfill_once(symbol,interval,limit)
+    if df is not None and not df.empty: return df.tail(limit).copy()
+    return pd.DataFrame()
+
+def _final_get_klines(symbol,interval,limit=250):
+    return _final_get_scan_klines(symbol,interval,limit)
+
+def get_scan_klines_final(symbol, interval, limit=250):
+    return _final_get_scan_klines(symbol,interval,limit)
+
+def get_klines_final(symbol, interval, limit=250):
+    return _final_get_klines(symbol,interval,limit)
+
+def get_price_final(symbol, prefer_binance=False):
+    # Explicit Binance preference is retained for critical execution/reconciliation.
+    if prefer_binance:
+        try:
+            with _binance_critical_context():
+                return _binance_price(symbol)
+        except Exception:
+            pass
+    return _final_bybit_price(symbol)
+
+def _get_top_coins_impl_final(exclude_syms):
+    return _final_bybit_top(exclude_syms)
+
+# Existing get_top_coins wrapper resolves the global implementation symbol.
+_get_top_coins_impl = _get_top_coins_impl_final
+
+# ---------- Binance private user-data WS ----------
+_binance_ws_state_lock=threading.RLock()
+_binance_ws_positions={}
+_binance_ws_orders={}
+_binance_ws_balance={}
+_binance_ws_last_event_at=0.0
+_binance_ws_last_error=None
+_binance_ws_thread=None
+_binance_ws_stop=threading.Event()
+_binance_ws_listen_key=None
+_binance_ws_key_created_at=0.0
+
+def _binance_ws_listen_key_create():
+    if not BINANCE_API_KEY: return None
+    _binance_wait_if_banned()
+    with _binance_request_slot(critical=True):
+        r=requests.post(f"{FAPI}/fapi/v1/listenKey",headers={"X-MBX-APIKEY":BINANCE_API_KEY},timeout=10,verify=False)
+    _binance_update_weight_from_response(r)
+    if r.status_code in (418,429):
+        _binance_register_ban(r.text,retry_after=r.headers.get("Retry-After"))
+        raise BinanceCooldownError(f"Binance listenKey HTTP {r.status_code}")
+    r.raise_for_status(); d=r.json(); return d.get("listenKey")
+
+def _binance_ws_listen_key_keepalive():
+    if not BINANCE_API_KEY or not _binance_ws_listen_key: return
+    try:
+        _binance_wait_if_banned()
+        with _binance_request_slot(critical=True):
+            r=requests.put(f"{FAPI}/fapi/v1/listenKey",headers={"X-MBX-APIKEY":BINANCE_API_KEY},timeout=10,verify=False)
+        _binance_update_weight_from_response(r)
+        if r.status_code in (418,429):
+            _binance_register_ban(r.text,retry_after=r.headers.get("Retry-After"))
+            raise BinanceCooldownError(f"Binance listenKey keepalive HTTP {r.status_code}")
+    except Exception as exc:
+        log.warning(f"[BINANCE WS] listenKey keepalive gagal: {exc}")
+
+def _binance_user_ws_start():
+    global _binance_ws_thread
+    if not _WS_LIB_OK or not BINANCE_API_KEY:
+        _set_component_health("binance_user_websocket","DEGRADED","API key/WS library unavailable")
+        return None
+    if _binance_ws_thread and _binance_ws_thread.is_alive(): return _binance_ws_thread
+    _binance_ws_stop.clear()
+    _binance_ws_thread=threading.Thread(target=_binance_user_ws_loop,name="binance-user-ws",daemon=True)
+    _binance_ws_thread.start()
+    return _binance_ws_thread
+
+def _binance_user_ws_loop():
+    global _binance_ws_listen_key,_binance_ws_key_created_at,_binance_ws_last_error
+    backoff=1.0
+    while not _binance_ws_stop.is_set():
+        try:
+            _binance_ws_listen_key=_binance_ws_listen_key_create()
+            _binance_ws_key_created_at=time.time()
+            if not _binance_ws_listen_key: raise RuntimeError("listenKey kosong")
+            url=f"wss://fstream.binance.com/ws/{_binance_ws_listen_key}"
+            ws=websocket.WebSocketApp(url,on_open=lambda *_:_set_component_health("binance_user_websocket","HEALTHY","user-data WS connected"),on_message=_binance_user_ws_message,on_error=_binance_user_ws_error,on_close=_binance_user_ws_close)
+            ws.run_forever(ping_interval=180,ping_timeout=30)
+            backoff=1.0
+        except Exception as exc:
+            _binance_ws_last_error=str(exc)[:300]
+            _set_component_health("binance_user_websocket","DEGRADED",_binance_ws_last_error)
+        if _binance_ws_stop.is_set(): break
+        if time.time()-_binance_ws_key_created_at>3300: _binance_ws_listen_key=None
+        time.sleep(backoff); backoff=min(30.0,backoff*2)
+
+def _binance_user_ws_error(ws,error):
+    global _binance_ws_last_error
+    _binance_ws_last_error=str(error)[:300]
+    _set_component_health("binance_user_websocket","DEGRADED",_binance_ws_last_error)
+
+def _binance_user_ws_close(ws,code,msg):
+    log.warning(f"[BINANCE WS] user stream closed code={code}")
+
+
+def _binance_user_ws_keepalive_loop():
+    while not SHUTDOWN_EVENT.wait(45*60):
+        try: _binance_ws_listen_key_keepalive()
+        except Exception as exc: log.warning(f"[BINANCE WS] keepalive loop: {exc}")
+
+def _binance_user_ws_message(ws,raw):
+    global _binance_ws_last_event_at
+    try: msg=json.loads(raw)
+    except Exception:return
+    now=time.time(); _binance_ws_last_event_at=now
+    event=msg.get("e")
+    with _binance_ws_state_lock:
+        if event=="ACCOUNT_UPDATE":
+            acct=msg.get("a") or {}
+            for p in acct.get("P") or []:
+                sym=str(p.get("s") or "").upper();
+                if sym: _binance_ws_positions[sym]=dict(p)
+            for b in acct.get("B") or []:
+                asset=str(b.get("a") or "")
+                if asset: _binance_ws_balance[asset]=dict(b)
+        elif event=="ORDER_TRADE_UPDATE":
+            o=msg.get("o") or {}; oid=str(o.get("i") or o.get("c") or "")
+            if oid: _binance_ws_orders[oid]=dict(o)
+
+def _binance_ws_position(symbol):
+    with _binance_ws_state_lock:
+        row=_binance_ws_positions.get(str(symbol).upper())
+        return dict(row) if row else None
+
+def _binance_ws_fresh():
+    return _binance_ws_last_event_at>0 and time.time()-_binance_ws_last_event_at<=BINANCE_WS_STALE_SEC
+
+def _binance_ws_status():
+    return {"thread_alive":bool(_binance_ws_thread and _binance_ws_thread.is_alive()),"fresh":_binance_ws_fresh(),"last_event_at":_binance_ws_last_event_at,"last_error":_binance_ws_last_error,"positions":len(_binance_ws_positions),"orders":len(_binance_ws_orders)}
+
+# Use WS for ordinary position polling, but preserve REST semantics for critical callers.
+_ORIG_GET_REAL_POSITION=globals().get("get_real_position")
+def get_real_position_final(symbol, prefer_ws=True):
+    if prefer_ws and _binance_ws_fresh():
+        row=_binance_ws_position(symbol)
+        if row is not None:
+            try:
+                if abs(float(row.get("pa") or row.get("positionAmt") or 0))>0: return row
+                return None
+            except Exception: pass
+    return _ORIG_GET_REAL_POSITION(symbol) if callable(_ORIG_GET_REAL_POSITION) else None
+
+# ---------- REST governor helpers ----------
+_binance_last_reconcile_by_symbol={}
+_binance_last_bulk_reconcile=0.0
+
+def _binance_reconcile_allowed(symbol=None, bulk=False, force=False):
+    global _binance_last_bulk_reconcile
+    now=time.time()
+    if force: return True
+    if bulk:
+        return now-_binance_last_bulk_reconcile>=BINANCE_BULK_RECONCILE_MIN_INTERVAL
+    key=str(symbol or "")
+    last=float(_binance_last_reconcile_by_symbol.get(key,0.0))
+    return now-last>=BINANCE_REST_RECONCILE_MIN_INTERVAL
+
+def _mark_binance_reconcile(symbol=None, bulk=False):
+    global _binance_last_bulk_reconcile
+    now=time.time()
+    if bulk: _binance_last_bulk_reconcile=now
+    else: _binance_last_reconcile_by_symbol[str(symbol or "")]=now
+
+# ---------- Unified PnL / trade accounting ----------
+def _trade_price_move_pct(entry, exit_price, decision):
+    try:
+        e=float(entry); x=float(exit_price)
+        if e<=0 or x<=0: return 0.0
+        sign=1.0 if str(decision or "BUY").upper()=="BUY" else -1.0
+        return (x-e)/e*100.0*sign
+    except Exception:return 0.0
+
+def _trade_net_position_pnl_usd(entry, exit_price, decision, quantity, fees_usd=0.0):
+    try:
+        e=float(entry); x=float(exit_price); q=abs(float(quantity or 0.0))
+        if e<=0 or q<=0:return 0.0
+        sign=1.0 if str(decision or "BUY").upper()=="BUY" else -1.0
+        gross=(x-e)*q*sign
+        return gross-float(fees_usd or 0.0)
+    except Exception:return 0.0
+
+def _compute_account_impact_pct(pnl_usd, anchor):
+    try:
+        a=float(anchor)
+        return float(pnl_usd)/a*100.0 if a else 0.0
+    except Exception:return 0.0
+
+# Preserve original updater for mechanics; enrich record afterwards.
+_ORIG_UPDATE_STATS=globals().get("update_stats")
+def update_stats_final(*args, **kwargs):
+    # Canonicalized front-end: the legacy updater still performs balance/ledger mutation.
+    result=kwargs.get("result", args[0] if args else None)
+    entry=kwargs.get("entry"); exit_price=kwargs.get("close_price")
+    decision=kwargs.get("decision")
+    quantity=kwargs.get("quantity")
+    anchor=kwargs.get("balance_anchor")
+    if quantity is None:
+        margin=float(MARGIN_USD or 0.0); lev=float(LEVERAGE or 1.0); quantity=margin*lev/max(float(entry or 1.0),1e-12)
+    canonical_result=_classify_close_result(result,entry=entry,close_price=exit_price,decision=decision)
+    kwargs["result"]=canonical_result
+    call_args=args[1:] if args and "result" in kwargs else args
+    out=_ORIG_UPDATE_STATS(*call_args,**kwargs)
+    # Add normalized fields to last ledger record atomically after original updater.
+    try:
+        with trade_history_lock:
+            rec=trade_history[-1] if trade_history and trade_history[-1].get("symbol")==kwargs.get("sym") else None
+            enriched={"price_move_pct":_trade_price_move_pct(entry,exit_price,decision),
+                      "configured_sl_pct":(abs(float(entry)-float(kwargs.get("sl_p")))/float(entry)*100.0) if entry and kwargs.get("sl_p") else None,
+                      "actual_exit_price":exit_price,
+                      "account_impact_pct":_compute_account_impact_pct(float(rec.get("pnl_usd",0.0)), anchor or STARTING_BALANCE),
+                      "position_pnl_pct":float(rec.get("pct",0.0)),
+                      "pnl_semantics":{"price_move_pct":"price movement after side normalization","position_pnl_pct":"net PnL percentage used by legacy position accounting","account_impact_pct":"net PnL / balance anchor"}}
+            rec.update(enriched)
+            for h in stats.get("pnl_history",[]):
+                if h is not rec and h.get("trade_uid") == rec.get("trade_uid") and h.get("symbol") == rec.get("symbol"):
+                    h.update(enriched); break
+    except Exception as exc:
+        log.warning(f"[STATS][PNL NORMALIZE] {exc}")
+    return out
+
+# ---------- Pending-only timeout ----------
+def _timeout_pending_entries(chat_id=None):
+    now=time.time(); targets=[]
+    with positions_lock:
+        for sym,pos in list(positions.items()):
+            lifecycle=str(pos.get("lifecycle") or "").upper()
+            status=str(pos.get("status") or "").lower()
+            if lifecycle=="ENTRY_PENDING" or status=="pending":
+                age=now-float(pos.get("entry_created_at") or pos.get("entry_time") or now)
+                if age>=0: targets.append((sym,dict(pos)))
+    done=0; failed=[]
+    for sym,pos in targets:
+        try:
+            if _position_is_real(pos):
+                oid=pos.get("entry_order_id") or pos.get("order_id")
+                if oid: cancel_order(sym,oid)
+            with positions_lock:
+                cur=positions.get(sym)
+                if cur and str(cur.get("lifecycle") or "").upper()=="ENTRY_PENDING": positions.pop(sym,None)
+            _record_pending_cancel("expired")
+            done+=1
+        except Exception as exc: failed.append(f"{sym}: {str(exc)[:120]}")
+    return {"found":len(targets),"cancelled":done,"failed":failed}
+
+def _pending_entry_watchdog():
+    while not SHUTDOWN_EVENT.wait(15):
+        try:
+            now=time.time(); expired=[]
+            with positions_lock:
+                for sym,pos in list(positions.items()):
+                    if str(pos.get("lifecycle") or "").upper()!="ENTRY_PENDING": continue
+                    created=float(pos.get("entry_created_at") or pos.get("entry_time") or now)
+                    if now-created>=PENDING_ENTRY_TIMEOUT_SEC: expired.append((sym,pos.get("chat_id") or active_chat_id))
+            for sym,cid in expired:
+                try:
+                    if _position_is_real(positions.get(sym,{})):
+                        oid=positions[sym].get("entry_order_id") or positions[sym].get("order_id")
+                        if oid: cancel_order(sym,oid)
+                    with positions_lock:
+                        positions.pop(sym,None)
+                    _record_pending_cancel("expired")
+                    if cid: tg_send(cid,f"⏱️ <b>PENDING TIMEOUT</b> — {sym}\nEntry pending dibatalkan setelah {PENDING_ENTRY_TIMEOUT_SEC/60:.0f} menit.")
+                except Exception as exc: log.warning(f"[PENDING TIMEOUT] {sym}: {exc}")
+        except Exception as exc: log.warning(f"[PENDING TIMEOUT WATCHDOG] {exc}")
+
+# ---------- Trail breach latch / recovery ----------
+def _trail_breach_price_check(sym, pos, price):
+    try:
+        pending=_get_pending_trail(sym)
+        if not pending or price is None: return False
+        sl=float(pending.get("sl")); side=str(pos.get("signal",{}).get("decision") or pending.get("side") or "BUY").upper()
+        crossed = float(price) <= sl*(1.0+SL_BREACH_EPSILON_PCT/100.0) if side=="BUY" else float(price) >= sl*(1.0-SL_BREACH_EPSILON_PCT/100.0)
+        if crossed:
+            with positions_lock:
+                cur=positions.get(sym)
+                if cur is not None:
+                    cur["trail_breach_latched"]=True; cur["trail_breach_price"]=float(price); cur["trail_breach_at"]=time.time(); cur["forced_exit_pending"]=True
+            log.warning(f"[TRAIL BREACH] {sym} pending SL crossed at {price}")
+            return True
+    except Exception: return False
+    return False
+
+def _process_trail_breach_after_recovery(sym,pos):
+    with positions_lock: cur=dict(positions.get(sym) or pos)
+    if not cur.get("forced_exit_pending"): return False
+    try:
+        buy=str(cur.get("signal",{}).get("decision") or "BUY").upper()=="BUY"
+        closed,exit_price=_verified_market_close(sym,buy,"trail_breach",chat_id=cur.get("chat_id") or active_chat_id,max_retries=0)
+        if not closed:return False
+        try:
+            with _binance_critical_context(): _cancel_all_symbol_orders_verified(sym)
+        except Exception as exc: _queue_pending_cleanup(sym,"trail breach final cleanup",exc); raise
+        entry=float(cur.get("entry")); xp=float(exit_price or cur.get("trail_breach_price") or entry)
+        result="trail" if _classify_close_result("trail",entry,xp,cur.get("signal",{}).get("decision"))=="trail" else "sl"
+        _clear_pending_trail(sym)
+        with positions_lock:
+            if sym in positions: positions[sym]["forced_exit_pending"]=False
+        close_position(sym,result,close_price=xp)
+        return True
+    except BinanceCooldownError:
+        return False
+    except Exception as exc:
+        _queue_pending_cleanup(sym,"trail breach close failed",exc)
+        log.warning(f"[TRAIL BREACH RECOVERY] {sym}: {exc}")
+        return False
+
+# ---------- Cleanup: one verified coordinator ----------
+def _final_cleanup_after_flat(sym, reason="flat"):
+    try:
+        with _binance_critical_context():
+            _cancel_all_symbol_orders_verified(sym)
+        _clear_pending_trail(sym); _clear_pending_protection(sym); _clear_pending_cleanup(sym)
+        return True
+    except Exception as exc:
+        _queue_pending_cleanup(sym,f"flat cleanup: {reason}",exc)
+        return False
+
+# ---------- Telegram anti-spam ----------
+_TG_SUPPRESS_LOCK=threading.Lock()
+_TG_SUPPRESS_STATE={}
+_ORIG_TG_SEND=globals().get("tg_send")
+def tg_send_final(chat_id, text, *args, **kwargs):
+    # Do not suppress critical user-directed responses; suppress only repeated system errors/trailing failures.
+    txt=str(text or "")
+    upper=txt.upper()
+    critical=any(k in upper for k in ("EMERGENCY","POSITION UNPROTECTED","EXECUTION UNKNOWN"))
+    system_error=any(k in upper for k in ("UPDATE PROTECTION GAGAL","ALGO CLEANUP","TRAILING UPDATE","[ERROR]","RECOVERY BELUM","PROTECTION GAGAL"))
+    if not system_error or critical:
+        return _ORIG_TG_SEND(chat_id,text,*args,**kwargs)
+    import hashlib
+    sig=hashlib.sha1(re.sub(r"\d+(\.\d+)?","#",txt).encode()).hexdigest()
+    now=time.time(); key=(str(chat_id),sig)
+    with _TG_SUPPRESS_LOCK:
+        item=_TG_SUPPRESS_STATE.get(key,{"last":0.0,"count":0,"window_start":now,"suppressed":0})
+        if now-item["window_start"]>TELEGRAM_FLOOD_WINDOW_SEC:
+            item={"last":0.0,"count":0,"window_start":now,"suppressed":0}
+        if now-item["last"]<TELEGRAM_REPEAT_SUPPRESS_SEC or item["count"]>=TELEGRAM_FLOOD_MAX:
+            item["count"]+=1; item["suppressed"]+=1; _TG_SUPPRESS_STATE[key]=item
+            return True
+        item["count"]+=1; item["last"]=now; _TG_SUPPRESS_STATE[key]=item
+    return _ORIG_TG_SEND(chat_id,text,*args,**kwargs)
+
+# ---------- Human-readable status ----------
+def _final_scanner_status():
+    s=get_scanner_status()
+    by=bybit_market_ws.status()
+    bn=_binance_ws_status()
+    return {
+        "scanner":s,
+        "bybit_ws":by,
+        "binance_user_ws":bn,
+        "binance_execution_paused":_binance_is_scan_paused(),
+    }
+
+def fmt_runtime_status():
+    s=get_scanner_status(); by=bybit_market_ws.status(); bn=_binance_ws_status()
+    lines=[
+        "📡 <b>RUNTIME STATUS</b>",
+        f"🔎 Scanner: <b>{s.get('health')}</b> | cycle <b>{s.get('cycle_count',0)}</b> | last {s.get('last_cycle_age_sec') if s.get('last_cycle_age_sec') is not None else '—'}s ago",
+        f"   processed <b>{s.get('last_symbols_processed',0)}</b> | candidates <b>{s.get('last_candidate_count',0)}</b> | eligible <b>{s.get('last_eligible_count',0)}</b>",
+        f"🟣 Bybit WS: <b>{'CONNECTED' if by.get('fresh') else 'DEGRADED'}</b> | topics {by.get('topics',0)} | tickers {by.get('tickers',0)} | buffers {by.get('kline_buffers',0)}",
+        f"🔵 Binance WS: <b>{'FRESH' if bn.get('fresh') else 'STALE'}</b> | positions {bn.get('positions',0)} | orders {bn.get('orders',0)}",
+        f"💳 Binance entry: <b>{'PAUSED' if _binance_is_scan_paused() else 'READY'}</b>",
+    ]
+    return "\n".join(lines)
+
+# ---------- Override scanner worker start so watchdog never mislabels dead thread ----------
+_ORIG_ENSURE_SCANNER_RUNNING=globals().get("_ensure_scanner_running")
+def _ensure_scanner_running_final(chat_id, announce=False):
+    global auto_mode,auto_thread,active_chat_id
+    active_chat_id=chat_id or active_chat_id
+    if _scanner_thread_is_alive():
+        _set_scan_state(enabled=True,coordinator_alive=True,last_error=None)
+        return auto_thread,False
+    auto_mode=True
+    _set_scan_state(enabled=True,coordinator_alive=False,cycle_running=False,last_error=None)
+    _set_component_health("scanner","STARTING","scanner coordinator starting")
+    try:
+        t=threading.Thread(target=simulation_loop,args=(active_chat_id,),name="scanner-coordinator",daemon=True)
+        auto_thread=t; t.start(); _SCAN_WAKE.set()
+        if announce and active_chat_id: tg_send(active_chat_id,"🔎 <b>Scanner dimulai.</b>\nMarket data realtime: <b>Bybit WS</b>\nBackfill/fallback: <b>Bybit REST</b>\nExecution: <b>Binance</b>")
+        return t,True
+    except Exception as exc:
+        auto_mode=False; _set_scan_state(enabled=False,coordinator_alive=False,last_error=str(exc)[:300]); _set_component_health("scanner","DEGRADED",str(exc)[:250]); raise
+
+# ---------- Override run scan to use WS-first and feed brain ----------
+_ORIG_RUN_SCAN_ONCE=globals().get("run_scan_once")
+def run_scan_once_final(chat_id):
+    result=_ORIG_RUN_SCAN_ONCE(chat_id) if callable(_ORIG_RUN_SCAN_ONCE) else []
+    # Ensure desired universe is subscribed even when the legacy function already completed via REST.
+    try:
+        syms=list(last_scanned_coins[-TOP_N_COINS:]) if last_scanned_coins else []
+        if syms: bybit_market_ws.subscribe_symbols(syms)
+    except Exception: pass
+    return result
+
+# ---------- Better real position monitor: WS-first, REST only when stale/required ----------
+_ORIG_MONITOR_POSITION_REAL=globals().get("monitor_position_real")
+def monitor_position_real_final(sym,pos):
+    next_strategy=0.0; next_rest_reconcile=0.0
+    while True:
+        with positions_lock:
+            if sym not in positions:return
+            pos=positions[sym]
+        try:
+            if pos.get("timeout_flag"):
+                _verified_timeout_symbol(sym,pos.get("chat_id") or active_chat_id,reason="manual timeout"); return
+            px=_final_bybit_price(sym)
+            if px is not None:
+                with positions_lock:
+                    if sym in positions:
+                        positions[sym]["current_price"]=px
+                        _update_trade_path_metrics(positions[sym],px)
+                        pos=positions[sym]
+                if _trail_breach_price_check(sym,pos,px):
+                    # Breach is latched; no Binance REST while exchange is blocked.
+                    if _binance_is_scan_paused():
+                        time.sleep(min(5.0,max(1.0,_binance_cooldown_remaining())))
+                        continue
+            if pos.get("forced_exit_pending") and not _binance_is_scan_paused():
+                if _process_trail_breach_after_recovery(sym,pos): return
+            # Strategy management can run from Bybit market data without Binance REST.
+            if time.time()>=next_strategy:
+                upd=_strategy_position_update(sym,pos)
+                next_strategy=time.time()+STRATEGY_MANAGE_INTERVAL
+                if isinstance(upd,dict):
+                    oldsl=pos.get("current_sl",pos.get("signal",{}).get("sl")); oldtp=pos.get("signal",{}).get("tp")
+                    cand_sl=upd.get("sl"); cand_tp=upd.get("tp") if upd.get("tp") is not None else oldtp
+                    if cand_sl is not None and oldsl is not None:
+                        buy=str(pos.get("signal",{}).get("decision") or "BUY").upper()=="BUY"
+                        if not ((float(cand_sl)>float(oldsl)) if buy else (float(cand_sl)<float(oldsl))): cand_sl=oldsl
+                    if cand_sl is not None and cand_sl!=oldsl:
+                        if _binance_is_scan_paused():
+                            _queue_pending_trail(sym,float(cand_sl),cand_tp,pos.get("quantity"),reason="strategy",side=pos.get("signal",{}).get("decision"))
+                            _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,cand_sl,status="QUEUED")
+                        else:
+                            try:
+                                latest=_ORIG_GET_REAL_POSITION(sym) if callable(_ORIG_GET_REAL_POSITION) else None
+                                live_qty=abs(float(latest.get("positionAmt",0) or 0)) if latest else float(pos.get("quantity") or 0)
+                                if live_qty<=0: pass
+                                else:
+                                    with _binance_critical_context(): _cancel_all_algo_orders_verified(sym)
+                                    nt,ns=place_tp_sl(sym,str(pos.get("signal",{}).get("decision") or "BUY").upper()=="BUY",cand_tp,float(cand_sl),live_qty)
+                                    with positions_lock:
+                                        if sym in positions:
+                                            positions[sym]["current_sl"]=float(cand_sl); positions[sym]["signal"]["sl"]=float(cand_sl); positions[sym]["tp_order_id"]=nt.get("algoId"); positions[sym]["sl_order_id"]=ns.get("algoId"); positions[sym]["quantity"]=live_qty
+                                    _clear_pending_trail(sym); _notify_trail_update(active_chat_id,sym,positions[sym],upd,oldsl,cand_sl,status="APPLIED")
+                            except BinanceCooldownError as exc:
+                                _queue_pending_trail(sym,float(cand_sl),cand_tp,pos.get("quantity"),reason="strategy",side=pos.get("signal",{}).get("decision"))
+                                _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,cand_sl,status="QUEUED",error=exc)
+                            except Exception as exc:
+                                # One alert only; previous SL remains unchanged.
+                                _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,cand_sl,status="FAILED",error=exc)
+            # REST reconcile only if WS is stale and not rate-limited.
+            if (not _binance_ws_fresh()) and time.time()>=next_rest_reconcile and _binance_reconcile_allowed(sym):
+                try:
+                    real=_ORIG_GET_REAL_POSITION(sym) if callable(_ORIG_GET_REAL_POSITION) else None
+                    _mark_binance_reconcile(sym)
+                    if real is None:
+                        _finalize_external_close(sym,pos,reason_hint="unknown",exit_price=px); return
+                except BinanceCooldownError:
+                    pass
+                except Exception as exc:
+                    log.warning(f"[monitor_real/reconcile] {sym}: {exc}")
+                next_rest_reconcile=time.time()+BINANCE_REST_RECONCILE_MIN_INTERVAL
+            time.sleep(MONITOR_SLEEP)
+        except Exception as exc:
+            log.exception(f"[monitor_real/final] {sym}: {exc}")
+            time.sleep(MONITOR_SLEEP)
+
+
+# ---------- Pending real-entry watcher: Binance WS-first ----------
+_ORIGINAL_WAIT_ENTRY_REAL_V100=globals().get("_wait_entry_real")
+def _wait_entry_real_final(sym,signal,chat_id,order_id):
+    deadline=time.time()+8*3600; next_rest=0.0
+    while time.time()<deadline:
+        with positions_lock:
+            pos=positions.get(sym)
+            if pos is None: return
+            if pos.get("timeout_flag"):
+                try:
+                    with _binance_critical_context(): cancel_order(sym,order_id)
+                    with _binance_critical_context(): st=get_order_status(sym,order_id)
+                    if str(st.get("status","")).upper()=="FILLED":
+                        _open_position_real(sym,signal,float(st.get("avgPrice") or signal["entry"]),chat_id,st); return
+                    positions.pop(sym,None); return
+                except Exception as exc:
+                    _force_position_emergency(sym,str(exc)[:300]); return
+        event=None
+        with _binance_ws_state_lock:
+            event=dict(_binance_ws_orders.get(str(order_id)) or _binance_ws_orders.get(str(signal.get("order_id") or "")) or {})
+        status=str(event.get("X") or event.get("status") or "").upper()
+        if status=="FILLED":
+            actual=float(event.get("ap") or event.get("avgPrice") or signal.get("entry") or 0)
+            _open_position_real(sym,signal,actual,chat_id,event); return
+        if status in {"CANCELED","EXPIRED","REJECTED","EXPIRED_IN_MATCH"}:
+            with positions_lock: positions.pop(sym,None)
+            _ban_coin(sym,f"order {status.lower()}"); _record_pending_cancel("binance_reject"); return
+        # REST fallback only when WS is stale or no event has appeared for a controlled interval.
+        if (not _binance_ws_fresh() or time.time()>=next_rest):
+            if not _binance_is_scan_paused() and time.time()>=next_rest and _binance_reconcile_allowed(sym):
+                try:
+                    with _binance_critical_context(): st=get_order_status(sym,order_id)
+                    _mark_binance_reconcile(sym); next_rest=time.time()+BINANCE_REST_RECONCILE_MIN_INTERVAL
+                    stt=str(st.get("status","")).upper()
+                    if stt=="FILLED": _open_position_real(sym,signal,float(st.get("avgPrice") or signal["entry"]),chat_id,st); return
+                    if stt in {"CANCELED","EXPIRED","REJECTED"}:
+                        with positions_lock: positions.pop(sym,None)
+                        _ban_coin(sym,f"order {stt.lower()}"); _record_pending_cancel("binance_reject"); return
+                except BinanceCooldownError: pass
+                except Exception as exc: log.warning(f"[wait_entry_real] REST fallback {sym}: {exc}")
+        with positions_lock:
+            created=float(positions.get(sym,{}).get("entry_created_at") or positions.get(sym,{}).get("entry_time") or time.time()) if sym in positions else time.time()
+        if time.time()-created>=PENDING_ENTRY_TIMEOUT_SEC:
+            try:
+                with _binance_critical_context(): cancel_order(sym,order_id)
+            except Exception: pass
+            with positions_lock: positions.pop(sym,None)
+            _ban_coin(sym,"pending expired"); _record_pending_cancel("expired"); return
+        time.sleep(min(5.0,MONITOR_SLEEP))
+
+_wait_entry_real=_wait_entry_real_final
+
+# ---------- Flat-position cleanup wrapper ----------
+_ORIG_FINALIZE_EXTERNAL_CLOSE=globals().get("_finalize_external_close")
+def _finalize_external_close_final(sym,pos,reason_hint="unknown",exit_price=None):
+    out=_ORIG_FINALIZE_EXTERNAL_CLOSE(sym,pos,reason_hint=reason_hint,exit_price=exit_price) if callable(_ORIG_FINALIZE_EXTERNAL_CLOSE) else False
+    try: _final_cleanup_after_flat(sym,reason="external-close")
+    except Exception: pass
+    return out
+
+# ---------- Human-readable stats formatter with correct percentage semantics ----------
+_ORIG_FMT_STATS=globals().get("fmt_stats")
+def fmt_stats_final():
+    with stat_lock:
+        hist=[dict(x) for x in stats.get("pnl_history",[])]; t=int(stats.get("total",0)); tp=int(stats.get("tp",0)); sl=int(stats.get("sl",0)); trail=int(stats.get("trail",0)); bal=float(stats.get("balance",0.0))
+    wins=tp+trail; wr=wins/(wins+sl)*100 if wins+sl else 0.0
+    anchor=float(real_balance_snapshot if REAL_TRADE_ENABLED and real_balance_snapshot is not None else STARTING_BALANCE)
+    net_pct=(bal-anchor)/anchor*100 if anchor else 0.0
+    def avg(k):
+        vals=[float(x.get("confidence")) for x in hist if str(x.get("result"))==k and x.get("confidence") is not None]
+        return sum(vals)/len(vals) if vals else None
+    def pc(v): return f"{v:.1f}%" if v is not None else "—"
+    recent=[]
+    for x in reversed(hist[-5:]):
+        pnl=float(x.get("pnl_usd",0) or 0); icon="🟢" if pnl>0 else "🔴" if pnl<0 else "⚪"; move=x.get("price_move_pct")
+        move_txt=f"{float(move):+.2f}%" if move is not None else f"{float(x.get('pct',0)):+.2f}%"
+        recent.append(f"{icon} {str(x.get('result','?')).upper()} {move_txt} price | {x.get('symbol','?')} | C{float(x.get('confidence',0) or 0):.0f}%")
+    if not recent: recent=["—"]
+    with ban_lock: bn=len(banned_coins)
+    with early_reject_lock: er=early_reject_remaining
+    try: low=", ".join(f"{x['symbol']} ({x['count']}x)" for x in _low_conf_summary()[:3]) or "—"
+    except Exception: low="—"
+    try:
+        dec=_brain_on_stats_snapshot({"total":t,"tp":tp,"sl":sl,"trail":trail,"balance":bal,"recent":hist[-20:]}) or {}
+    except Exception as exc: dec={"action":"REVIEW_ERROR","reason":str(exc)[:200]}
+    bs=dec.get("active_threshold","—"); fstate=dec.get("frequency_state") or dec.get("frequency_action") or "—"; action=dec.get("action","WAITING_DATA"); reason=dec.get("reason","—"); proposal=dec.get("proposal","—")
+    scan=get_last_scan_telemetry(); ss= get_scanner_status()
+    lines=[
+        f"📊 <b>STATISTIK</b> — {t} trade | ✅ TP {tp} | 🟢 Trail {trail} | 🔴 SL {sl}",
+        f"Mode: <b>{'🔴 REAL' if REAL_TRADE_ENABLED else '🧪 SIMULASI'}</b>",
+        f"Win rate: <b>{wr:.1f}%</b> | Net account: <b>{net_pct:+.2f}%</b>",
+        f"Saldo statistik: <b>${bal:.4f}</b>",
+        f"Confidence closed: TP {pc(avg('tp'))} | Trail {pc(avg('trail'))} | SL {pc(avg('sl'))}",
+        "",
+        "🧠 <b>KEPUTUSAN OTAK</b>",
+        f"Action: <b>{html.escape(str(action))}</b>",
+        f"Reason: {html.escape(str(reason)[:260])}",
+        f"Proposal: <b>{html.escape(str(proposal)[:220])}</b>",
+        f"Threshold: <b>{html.escape(str(bs))}%</b> | Frequency: <b>{html.escape(str(fstate))}</b>",
+        "",
+        "5 terakhir:",
+        *recent,
+        "",
+        f"🚫 Ban: <b>{bn}</b> | Low-conf: <b>{html.escape(low)}</b> | Early reject: <b>{er}</b>",
+        f"🔎 Scanner: <b>{ss.get('health')}</b> | cycle <b>{ss.get('cycle_count',0)}</b> | eligible <b>{ss.get('last_eligible_count',0)}</b>",
+        f"📡 Data: <b>Bybit WS → REST backfill</b> | Execution: <b>Binance</b> | Binance pause: <b>{'YA' if _binance_is_scan_paused() else 'TIDAK'}</b>",
+        f"Bybit REST: <b>{_bybit_request_count}</b> req | errors: <b>{_bybit_request_errors}</b>",
+    ]
+    return "\n".join(lines)
+
+# ---------- Timeout command semantics ----------
+_ORIG_VERIFIED_TIMEOUT_ALL=globals().get("_verified_timeout_all")
+def _verified_timeout_pending_only(chat_id):
+    r=_timeout_pending_entries(chat_id)
+    tg_send(chat_id,f"⏱️ <b>/timeout pending</b>\nPending ditemukan: <b>{r['found']}</b>\nDibatalkan: <b>{r['cancelled']}</b>\nGagal: <b>{len(r['failed'])}</b>")
+    if r["failed"]: tg_send(chat_id,"\n".join(f"• {x}" for x in r["failed"])[:1800])
+    return r
+
+# ---------- Runtime startup extension ----------
+_ORIG_START_RUNTIME=globals().get("start_runtime")
+def start_runtime_final():
+    # Start upstream runtime first; then add final data/control buses.
+    _ORIG_START_RUNTIME()
+    try:
+        bybit_market_ws.start()
+        _binance_user_ws_start()
+        threading.Thread(target=_binance_user_ws_keepalive_loop,name="binance-user-ws-keepalive",daemon=True).start()
+        threading.Thread(target=_pending_entry_watchdog,name="pending-entry-watchdog",daemon=True).start()
+        _set_component_health("scanner","STARTING","scanner waits for /auto; Bybit WS ready")
+    except Exception as exc:
+        log.exception(f"[FINAL STARTUP] extension failed: {exc}")
+
+# ---------- Brain status formatting bridge ----------
+def _format_brain_status_human(status):
+    st=status if isinstance(status,dict) else {}
+    adaptive=st.get("adaptive") if isinstance(st.get("adaptive"),dict) else {}
+    freq=adaptive.get("frequency") if isinstance(adaptive.get("frequency"),dict) else {}
+    la=adaptive.get("last_strategy_decision") if isinstance(adaptive.get("last_strategy_decision"),dict) else {}
+    return (
+        "🧠 <b>FULL STATUS</b>\n"
+        f"Worker: <b>{'✅' if adaptive.get('worker_alive') else '❌'}</b>\n"
+        f"Observations: <b>{adaptive.get('live',{}).get('observations',0)}</b> | Candidates: <b>{adaptive.get('live',{}).get('candidates',0)}</b> | Outcomes: <b>{adaptive.get('live',{}).get('outcomes',0)}</b>\n"
+        f"Threshold: <b>{adaptive.get('active_threshold','—')}%</b> ({adaptive.get('threshold_mode','auto')})\n"
+        f"Frequency: <b>{adaptive.get('frequency_state') or freq.get('status') or '—'}</b> | Action: <b>{(adaptive.get('last_frequency_action') or {}).get('action','—') if isinstance(adaptive.get('last_frequency_action'),dict) else '—'}</b>\n"
+        f"Strategy: <b>{adaptive.get('strategy_version','S1')}</b> | revisions <b>{adaptive.get('strategy_revisions',0)}</b>\n"
+        f"Last brain decision: <b>{la.get('action','—')}</b> — {html.escape(str(la.get('reason','—'))[:220])}"
+    )
+
+# Startup of this overlay is intentionally idempotent and only occurs when main runtime starts.
+
+# Final symbol bindings: overrides are uniquely named to keep static audit unambiguous.
+_FINAL_OVERRIDES = {
+    "tg_send": tg_send_final, "get_real_position": get_real_position_final,
+    "get_price": get_price_final, "get_klines": get_klines_final, "get_scan_klines": get_scan_klines_final,
+    "run_scan_once": run_scan_once_final, "update_stats": update_stats_final, "fmt_stats": fmt_stats_final,
+    "_finalize_external_close": _finalize_external_close_final, "monitor_position_real": monitor_position_real_final,
+    "_ensure_scanner_running": _ensure_scanner_running_final, "start_runtime": start_runtime_final,
+}
+globals().update(_FINAL_OVERRIDES)
+
+
+# ---------- Final recovery: Binance execution recovery never pauses Bybit scanning ----------
+_ORIGINAL_RESUME_BINANCE_V100 = globals().get("_resume_binance_and_flush_pending")
+def _resume_binance_and_flush_pending_final(chat_id=None):
+    global _binance_recovering,_binance_scan_paused,_binance_pause_reason
+    if _binance_cooldown_remaining()>0: return False
+    with _binance_pause_lock:
+        _binance_recovering=True; _binance_scan_paused=True; _binance_pause_reason="execution recovery"
+    if not _has_real_recovery_work():
+        with _binance_pause_lock: _binance_recovering=False; _binance_scan_paused=False; _binance_pause_reason=""
+        return True
+    failures=[]
+    try:
+        key,secret=_read_binance_credentials()
+        if not key or not secret:
+            failures.append("credentials unavailable")
+        else:
+            global BINANCE_API_KEY,BINANCE_API_SECRET,BINANCE_KEYS_PRESENT
+            BINANCE_API_KEY,BINANCE_API_SECRET,BINANCE_KEYS_PRESENT=key,secret,True
+            with positions_lock: items=[(sym,dict(pos)) for sym,pos in positions.items() if _position_is_real(pos) and str(pos.get("status")) in ("active","EMERGENCY")]
+            for sym,pos in items:
+                try:
+                    real=_binance_ws_position(sym) if _binance_ws_fresh() else None
+                    if real is None:
+                        real=_ORIG_GET_REAL_POSITION(sym) if callable(_ORIG_GET_REAL_POSITION) else None
+                    if real is None or abs(float(real.get("pa") or real.get("positionAmt") or 0))<=0:
+                        price=_final_bybit_price(sym) or pos.get("current_price") or pos.get("entry")
+                        _finalize_external_close_final(sym,pos,reason_hint="unknown",exit_price=price)
+                        continue
+                    qty=abs(float(real.get("pa") or real.get("positionAmt") or 0))
+                    with positions_lock:
+                        if sym in positions: positions[sym].update({"quantity":qty,"exchange_synced_at":time.time()})
+                except Exception as exc: failures.append(f"{sym}: sync {exc}")
+            # A breached queued trail has priority over re-installing the old protection.
+            with _pending_trails_lock: pending=list((s,d.copy()) for s,d in _pending_trails.items())
+            for sym,tr in pending:
+                try:
+                    with positions_lock: pos=dict(positions.get(sym) or {})
+                    if not pos or not _position_is_real(pos): _clear_pending_trail(sym); continue
+                    px=_final_bybit_price(sym)
+                    _trail_breach_price_check(sym,pos,px)
+                    if pos.get("forced_exit_pending"):
+                        if _process_trail_breach_after_recovery(sym,pos): continue
+                    buy=str(pos.get("signal",{}).get("decision") or "BUY").upper()=="BUY"
+                    qty=pos.get("quantity") or tr.get("quantity"); tp=tr.get("tp") or pos.get("signal",{}).get("tp"); sl=tr.get("sl") or pos.get("current_sl")
+                    if not qty or tp is None or sl is None: raise RuntimeError("pending trail incomplete")
+                    with _binance_critical_context():
+                        _cancel_all_algo_orders_verified(sym)
+                        nt,ns=place_tp_sl(sym,buy,tp,sl,qty)
+                    old=pos.get("current_sl")
+                    with positions_lock:
+                        if sym in positions: positions[sym].update({"tp_order_id":nt.get("algoId"),"sl_order_id":ns.get("algoId"),"current_sl":float(sl),"signal":{**positions[sym].get("signal",{}),"sl":float(sl)},"exchange_synced_at":time.time()})
+                    _clear_pending_trail(sym)
+                    if old is not None and float(old)!=float(sl): _record_trail_event(sym,pos,{"trail_source":"recovery","reason":["queued trail applied after Binance recovery"]},old,sl,status="APPLIED")
+                except Exception as exc: failures.append(f"{sym}: trail {exc}")
+            with _pending_protections_lock: prots=list((s,d.copy()) for s,d in _pending_protections.items())
+            for sym,pr in prots:
+                try:
+                    with positions_lock: pos=positions.get(sym)
+                    if not pos or not _position_is_real(pos): _clear_pending_protection(sym); continue
+                    qty=pos.get("quantity") or pr.get("quantity"); buy=pr.get("side")=="BUY"; tp=pr.get("tp"); sl=pr.get("sl")
+                    if not qty or tp is None or sl is None: raise RuntimeError("pending protection incomplete")
+                    with _binance_critical_context():
+                        nt,ns=place_tp_sl(sym,buy,tp,sl,qty)
+                    with positions_lock:
+                        if sym in positions: positions[sym].update({"tp_order_id":nt.get("algoId"),"sl_order_id":ns.get("algoId"),"protection_state":"VERIFIED"})
+                    _clear_pending_protection(sym)
+                except Exception as exc: failures.append(f"{sym}: protection {exc}")
+            with _pending_cleanup_lock: cleans=list(_pending_cleanup.items())
+            for sym,item in cleans:
+                try: _cleanup_algo_orders_verified(sym)
+                except Exception as exc: failures.append(f"{sym}: cleanup {exc}")
+        if failures:
+            with _binance_pause_lock: _binance_recovering=False; _binance_scan_paused=True; _binance_pause_reason="execution recovery incomplete"
+            msg=" | ".join(failures[:6])
+            log.error(f"[BINANCE RECOVERY] incomplete; Bybit scanner tetap berjalan. {msg}")
+            if chat_id: tg_send(chat_id,f"⚠️ <b>Binance recovery belum selesai.</b>\n🔎 Scanner Bybit <b>tetap berjalan</b>.\nExecution/protection REAL masih menunggu recovery.\n<code>{html.escape(msg[:500])}</code>")
+            return False
+        with _binance_pause_lock: _binance_recovering=False; _binance_scan_paused=False; _binance_pause_reason=""
+        if chat_id: tg_send(chat_id,"✅ <b>Binance recovery selesai.</b>\nExecution/protection REAL kembali konsisten.\n🔎 Scanner Bybit tetap aktif.")
+        return True
+    except Exception as exc:
+        with _binance_pause_lock: _binance_recovering=False; _binance_scan_paused=True; _binance_pause_reason="execution recovery exception"
+        log.exception(f"[BINANCE RECOVERY] {exc}")
+        return False
+
+
+def _binance_recovery_loop_final(chat_id_getter=lambda: active_chat_id):
+    consecutive=0
+    while not SHUTDOWN_EVENT.wait(5):
+        try:
+            if _binance_is_scan_paused():
+                _notify_binance_pause_once(chat_id_getter())
+                if _binance_cooldown_remaining()<=0 and not _binance_recovering:
+                    ok=_resume_binance_and_flush_pending_final(chat_id_getter()); consecutive=0 if ok else consecutive+1
+                    if consecutive>3: time.sleep(20)
+                else: time.sleep(5)
+        except Exception as exc: log.warning(f"[binance-recovery] {exc}")
+
+# ---------- Autostop WS-first balance ----------
+def autostop_loop_final(chat_id):
+    global auto_mode,peak_real_balance
+    last_rest=0.0
+    while not SHUTDOWN_EVENT.wait(30):
+        try:
+            if not REAL_TRADE_ENABLED: continue
+            total=None
+            with _binance_ws_state_lock:
+                row=dict(_binance_ws_balance.get("USDT") or {})
+            if row and _binance_ws_fresh():
+                try: total=float(row.get("wb") or row.get("walletBalance") or 0)
+                except Exception: total=None
+            if total is None and time.time()-last_rest>=300 and not _binance_is_scan_paused():
+                try:
+                    _,total=get_real_balance(); last_rest=time.time()
+                except Exception: pass
+            if total is None: continue
+            with autostop_lock:
+                if peak_real_balance is None or total>peak_real_balance: peak_real_balance=total
+                dd=(peak_real_balance-total)/peak_real_balance*100 if peak_real_balance else 0
+            if auto_mode and dd>=AUTOSTOP_PCT:
+                auto_mode=False
+                tg_send(chat_id,f"🛑 <b>AUTO-STOP TERPICU</b>\nDrawdown <b>{dd:.2f}%</b> dari peak ${peak_real_balance:.4f}.\nScanner dihentikan; posisi aktif tetap dipantau.")
+        except Exception as exc: log.warning(f"[autostop] {exc}")
+
+# ---------- Better analysis-row export for normalized PnL semantics ----------
+_ORIGINAL_TRADE_ANALYSIS_ROWS_V100 = globals().get("_trade_analysis_rows")
+def _trade_analysis_rows_final(hist):
+    rows=_ORIGINAL_TRADE_ANALYSIS_ROWS_V100(hist) if callable(_ORIGINAL_TRADE_ANALYSIS_ROWS_V100) else []
+    by_id={x.get("trade_id"):x for x in rows if isinstance(x,dict)}
+    for rec in hist:
+        r=by_id.get(rec.get("trade_id"))
+        if r is not None:
+            for k in ("price_move_pct","position_pnl_pct","account_impact_pct","configured_sl_pct","actual_exit_price","pnl_semantics"):
+                r[k]=rec.get(k)
+    return rows
+
+# Final public symbol bindings for recovery/monitoring.
+_binance_is_scan_paused_original=globals().get("_binance_is_scan_paused")
+_resume_binance_and_flush_pending=_resume_binance_and_flush_pending_final
+_binance_recovery_loop=_binance_recovery_loop_final
+autostop_loop=autostop_loop_final
+_trade_analysis_rows=_trade_analysis_rows_final
+
+
+
+# =============================================================================
+# V110 FINAL GUARDRAILS
+# Bybit WS primary realtime market data; Binance WS primary account/order events;
+# Binance REST restricted to execution/reconciliation/emergency lanes.
+# =============================================================================
+V110_MAIN_VERSION = "MAIN-V111-BYBIT-WS-BINANCE-EXECUTION-GUARDED"
+try:
+    BRAIN_COMPATIBLE_LEGACY_VERSIONS = tuple(dict.fromkeys(list(BRAIN_COMPATIBLE_LEGACY_VERSIONS) + ["STRATEGY-BRAIN-V111-BYBIT-WS-STATS-EVOLUTION-GUARDED"]))
+except Exception:
+    pass
+BINANCE_REST_NORMAL_MIN_INTERVAL_FINAL = max(1.0, float(os.getenv("BINANCE_REST_NORMAL_MIN_INTERVAL", "3.0")))
+_V110_RECONCILE_GUARD=threading.RLock()
+BINANCE_REST_RECONCILE_MIN_INTERVAL_FINAL = max(15.0, float(os.getenv("BINANCE_REST_RECONCILE_MIN_INTERVAL", "45.0")))
+TRAIL_FAILURE_SUPPRESS_SEC_FINAL = max(30.0, float(os.getenv("TRAIL_FAILURE_SUPPRESS_SEC", "120")))
+TG_SYSTEM_REPEAT_SUPPRESS_SEC_FINAL = max(30.0, float(os.getenv("TG_SYSTEM_REPEAT_SUPPRESS_SEC", "180")))
+PENDING_ENTRY_TIMEOUT_SEC_FINAL = max(60.0, float(os.getenv("PENDING_ENTRY_TIMEOUT_SEC", str(globals().get("PENDING_ENTRY_TIMEOUT_SEC", 900)))))
+
+# ---- scanner liveness: flag != worker health ----
+def _v110_scanner_healthy():
+    try:
+        with scanner_state_lock:
+            st=dict(scanner_state)
+        thread_ok=bool(auto_thread and auto_thread.is_alive())
+        hb=st.get("last_heartbeat") or st.get("last_cycle_at") or 0.0
+        fresh=(time.time()-float(hb) <= max(90.0, float(SCAN_INTERVAL)*4)) if hb else False
+        return bool(auto_mode and thread_ok and fresh and str(st.get("health") or "RUNNING").upper() not in {"STOPPED","DEAD","STUCK"})
+    except Exception:
+        return False
+
+def _v110_ensure_scanner_running(chat_id=None, announce=False):
+    global auto_mode, auto_thread, active_chat_id
+    active_chat_id=chat_id or active_chat_id
+    if _v110_scanner_healthy():
+        return auto_thread, False
+    # A stale flag must never suppress restart.
+    auto_mode=True
+    try:
+        _set_scan_state(enabled=True, coordinator_alive=False, cycle_running=False, last_error=None)
+        _set_component_health("scanner", "STARTING", "scanner coordinator restart/starting")
+        old=auto_thread
+        if old and old.is_alive():
+            return old, False
+        t=threading.Thread(target=simulation_loop, args=(active_chat_id,), name="scanner-coordinator-final", daemon=True)
+        auto_thread=t; t.start(); _SCAN_WAKE.set()
+        if announce and active_chat_id:
+            tg_send(active_chat_id, "🔎 <b>SCANNER STARTED</b>\nMarket data: <b>Bybit WS</b>\nBackfill: <b>Bybit REST</b>\nExecution: <b>Binance</b>")
+        return t, True
+    except Exception as exc:
+        auto_mode=False
+        _set_scan_state(enabled=False, coordinator_alive=False, last_error=str(exc)[:300])
+        _set_component_health("scanner", "DEGRADED", str(exc)[:250])
+        raise
+
+# ---- rate-limit gate: normal Binance REST is never allowed to consume critical reserve ----
+def _v110_binance_rest_allowed(kind="normal", symbol=None):
+    now=time.time()
+    if _binance_cooldown_remaining()>0 and kind not in {"critical","emergency"}: return False
+    try:
+        if kind=="normal":
+            with _V110_RECONCILE_GUARD:
+                last=float(_binance_last_reconcile_by_symbol.get(str(symbol or "_global"),0.0))
+            if now-last < BINANCE_REST_RECONCILE_MIN_INTERVAL_FINAL: return False
+    except Exception:
+        pass
+    return True
+
+# ---- trail mutation deduplication / failure backoff ----
+_V110_TRAIL_FAILURES={}
+_V110_TRAIL_FAILURE_LOCK=threading.RLock()
+def _v110_trail_failure_blocked(sym, desired_sl, error):
+    import hashlib
+    sig=hashlib.sha1(f"{sym}|{desired_sl}|{type(error).__name__}|{str(error)[:160]}".encode()).hexdigest()
+    now=time.time()
+    with _V110_TRAIL_FAILURE_LOCK:
+        row=_V110_TRAIL_FAILURES.get(sym)
+        if row and row.get("sig")==sig and now-row.get("at",0.0)<TRAIL_FAILURE_SUPPRESS_SEC_FINAL:
+            row["count"]=int(row.get("count",1))+1
+            return True
+        _V110_TRAIL_FAILURES[sym]={"sig":sig,"at":now,"count":1}
+    return False
+
+def _v110_trail_failure_count(sym):
+    with _V110_TRAIL_FAILURE_LOCK:
+        return int((_V110_TRAIL_FAILURES.get(sym) or {}).get("count",0))
+
+# ---- final Trail monitor: WS breach latch is never lost during Binance cooldown ----
+def _v110_process_trail_breach(sym, pos):
+    with positions_lock:
+        cur=dict(positions.get(sym) or pos)
+    if not cur.get("forced_exit_pending"): return False
+    if _binance_is_scan_paused(): return False
+    try:
+        buy=str(cur.get("signal",{}).get("decision") or "BUY").upper()=="BUY"
+        closed, exit_price = _verified_market_close(sym, buy, "trail_breach", chat_id=cur.get("chat_id") or active_chat_id, max_retries=0)
+        if not closed: return False
+        # Flat first, then one verified cleanup pass for ALL order families.
+        _final_cleanup_after_flat(sym, reason="trail breach close")
+        entry=float(cur.get("entry") or 0.0); xp=float(exit_price or cur.get("trail_breach_price") or entry)
+        result="trail" if _trade_price_move_pct(entry,xp,cur.get("signal",{}).get("decision"))>=0 else "sl"
+        close_position(sym,result,close_price=xp)
+        _clear_pending_trail(sym)
+        with positions_lock:
+            if sym in positions: positions[sym]["forced_exit_pending"]=False
+        return True
+    except BinanceCooldownError:
+        return False
+    except Exception as exc:
+        log.warning(f"[TRAIL BREACH V110] {sym}: {exc}")
+        return False
+
+# ---- final real position monitor: Binance WS flat event has priority over polling ----
+def monitor_position_real_v110(sym, pos):
+    next_strategy=0.0; next_rest=0.0
+    while True:
+        try:
+            with positions_lock:
+                if sym not in positions: return
+                pos=positions[sym]
+            if pos.get("timeout_flag"):
+                _verified_timeout_symbol(sym, pos.get("chat_id") or active_chat_id, reason="manual timeout"); return
+            # Binance WS account state is authoritative for position existence.
+            if _binance_ws_fresh():
+                wspos=_binance_ws_position(sym)
+                if wspos is not None:
+                    try:
+                        amt=float(wspos.get("pa") or wspos.get("positionAmt") or 0.0)
+                        if abs(amt)<=0:
+                            px=_final_bybit_price(sym) or pos.get("current_price") or pos.get("entry")
+                            _finalize_external_close_final(sym,pos,reason_hint=_infer_close_reason(pos.get("tp_order_id"),pos.get("sl_order_id")),exit_price=px)
+                            _final_cleanup_after_flat(sym, reason="binance WS flat")
+                            return
+                        with positions_lock:
+                            if sym in positions: positions[sym]["quantity"]=abs(amt); positions[sym]["exchange_synced_at"]=time.time()
+                    except Exception: pass
+            px=_final_bybit_price(sym)
+            if px is not None:
+                with positions_lock:
+                    if sym in positions:
+                        positions[sym]["current_price"]=px
+                        _update_trade_path_metrics(positions[sym],px); pos=positions[sym]
+                _trail_breach_price_check(sym,pos,px)
+            if pos.get("forced_exit_pending") and not _binance_is_scan_paused():
+                if _v110_process_trail_breach(sym,pos): return
+            if time.time()>=next_strategy:
+                upd=_strategy_position_update(sym,pos); next_strategy=time.time()+STRATEGY_MANAGE_INTERVAL
+                if isinstance(upd,dict):
+                    oldsl=pos.get("current_sl",pos.get("signal",{}).get("sl")); oldtp=pos.get("signal",{}).get("tp")
+                    cand_sl=upd.get("sl"); cand_tp=upd.get("tp") if upd.get("tp") is not None else oldtp
+                    buy=str(pos.get("signal",{}).get("decision") or "BUY").upper()=="BUY"
+                    if cand_sl is not None and oldsl is not None and not ((float(cand_sl)>float(oldsl)) if buy else (float(cand_sl)<float(oldsl))): cand_sl=oldsl
+                    if cand_sl is not None and oldsl is not None and float(cand_sl)!=float(oldsl):
+                        if _binance_is_scan_paused():
+                            _queue_pending_trail(sym,float(cand_sl),cand_tp,pos.get("quantity"),reason="strategy",side=pos.get("signal",{}).get("decision"))
+                            _trail_breach_price_check(sym,pos,px)
+                            if not _v110_trail_failure_blocked(sym,float(cand_sl),BinanceCooldownError("queued while Binance paused")):
+                                _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,cand_sl,status="QUEUED")
+                        else:
+                            try:
+                                if not _v110_binance_rest_allowed("normal",sym):
+                                    _queue_pending_trail(sym,float(cand_sl),cand_tp,pos.get("quantity"),reason="rest-governor",side=pos.get("signal",{}).get("decision")); next_strategy=time.time()+15
+                                else:
+                                    latest=_binance_ws_position(sym) if _binance_ws_fresh() else None
+                                    live_qty=abs(float((latest or {}).get("pa") or (latest or {}).get("positionAmt") or 0.0)) or float(pos.get("quantity") or 0.0)
+                                    if live_qty>0:
+                                        with _binance_critical_context(): _cancel_all_algo_orders_verified(sym)
+                                        nt,ns=place_tp_sl(sym,buy,cand_tp,float(cand_sl),live_qty)
+                                        with positions_lock:
+                                            if sym in positions: positions[sym].update({"current_sl":float(cand_sl),"signal":{**positions[sym].get("signal",{}),"sl":float(cand_sl)},"tp_order_id":nt.get("algoId"),"sl_order_id":ns.get("algoId"),"quantity":live_qty})
+                                        _clear_pending_trail(sym); _notify_trail_update(active_chat_id,sym,positions[sym],upd,oldsl,cand_sl,status="APPLIED")
+                            except BinanceCooldownError as exc:
+                                _queue_pending_trail(sym,float(cand_sl),cand_tp,pos.get("quantity"),reason="strategy",side=pos.get("signal",{}).get("decision"))
+                                if not _v110_trail_failure_blocked(sym,float(cand_sl),exc): _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,cand_sl,status="QUEUED",error=exc)
+                            except Exception as exc:
+                                if not _v110_trail_failure_blocked(sym,float(cand_sl),exc): _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,cand_sl,status="FAILED",error=exc)
+            # Only stale Binance WS permits REST reconciliation, with a large interval.
+            if (not _binance_ws_fresh()) and time.time()>=next_rest and _v110_binance_rest_allowed("normal",sym):
+                try:
+                    real=_ORIG_GET_REAL_POSITION(sym) if callable(_ORIG_GET_REAL_POSITION) else None
+                    _mark_binance_reconcile(sym)
+                    if real is None:
+                        next_rest=time.time()+BINANCE_REST_RECONCILE_MIN_INTERVAL_FINAL
+                    elif abs(float(real.get("positionAmt",0) or 0))<=0:
+                        px=_final_bybit_price(sym) or pos.get("current_price") or pos.get("entry")
+                        _finalize_external_close_final(sym,pos,reason_hint="unknown",exit_price=px); _final_cleanup_after_flat(sym); return
+                    else:
+                        next_rest=time.time()+BINANCE_REST_RECONCILE_MIN_INTERVAL_FINAL
+                except Exception as exc:
+                    log.warning(f"[monitor_real/V110] {sym}: {exc}"); next_rest=time.time()+BINANCE_REST_RECONCILE_MIN_INTERVAL_FINAL
+            time.sleep(MONITOR_SLEEP)
+        except Exception as exc:
+            log.exception(f"[monitor_real/V110] {sym}: {exc}"); time.sleep(MONITOR_SLEEP)
+
+# ---- final pending entry watcher: WS first, REST only controlled fallback ----
+def _wait_entry_real_v110(sym,signal,chat_id,order_id):
+    deadline=time.time()+8*3600; next_rest=0.0
+    while time.time()<deadline:
+        try:
+            with positions_lock:
+                if sym not in positions: return
+                pos=positions[sym]
+                timeout=bool(pos.get("timeout_flag"))
+            event=None
+            with _binance_ws_state_lock: event=dict(_binance_ws_orders.get(str(order_id)) or {})
+            status=str(event.get("X") or event.get("status") or "").upper()
+            if status=="FILLED":
+                actual=float(event.get("ap") or event.get("avgPrice") or signal.get("entry") or 0); _open_position_real(sym,signal,actual,chat_id,event); return
+            if status in {"CANCELED","EXPIRED","REJECTED","EXPIRED_IN_MATCH"}:
+                with positions_lock: positions.pop(sym,None)
+                _record_pending_cancel("binance_reject"); return
+            with positions_lock:
+                created=float(positions.get(sym,{}).get("entry_created_at") or time.time())
+            if timeout or time.time()-created>=PENDING_ENTRY_TIMEOUT_SEC_FINAL:
+                try:
+                    with _binance_critical_context():
+                        cancel_order(sym,order_id)
+                        st=get_order_status(sym,order_id)
+                    if str(st.get("status") or "").upper()=="FILLED":
+                        _open_position_real(sym,signal,float(st.get("avgPrice") or signal.get("entry") or 0),chat_id,st); return
+                    with positions_lock: positions.pop(sym,None)
+                    _record_pending_cancel("expired");
+                    if chat_id: tg_send(chat_id,f"⏱️ <b>PENDING TIMEOUT</b> — {sym}\nHanya pending entry yang dibatalkan setelah {PENDING_ENTRY_TIMEOUT_SEC_FINAL/60:.0f} menit.")
+                    return
+                except Exception as exc:
+                    _force_position_emergency(sym,str(exc)[:300]); return
+            if (not _binance_ws_fresh() or time.time()>=next_rest) and not _binance_is_scan_paused() and _v110_binance_rest_allowed("normal",sym):
+                try:
+                    with _binance_critical_context(): st=get_order_status(sym,order_id)
+                    next_rest=time.time()+BINANCE_REST_RECONCILE_MIN_INTERVAL_FINAL
+                    stt=str(st.get("status") or "").upper()
+                    if stt=="FILLED": _open_position_real(sym,signal,float(st.get("avgPrice") or signal.get("entry") or 0),chat_id,st); return
+                    if stt in {"CANCELED","EXPIRED","REJECTED"}:
+                        with positions_lock: positions.pop(sym,None)
+                        _record_pending_cancel("binance_reject"); return
+                except BinanceCooldownError: next_rest=time.time()+30
+                except Exception as exc: log.warning(f"[pending/V110] REST fallback {sym}: {exc}")
+            time.sleep(1.0)
+        except Exception as exc:
+            log.warning(f"[pending/V110] {sym}: {exc}"); time.sleep(2.0)
+
+# ---- order cleanup: verify flat -> cancel all ordinary/algo -> clear queues ----
+def _v110_cleanup_after_flat(sym, reason="flat"):
+    try:
+        # Existing coordinator already verifies each class; call only once per generation.
+        return bool(_cancel_all_symbol_orders_verified(sym))
+    except Exception as exc:
+        _queue_pending_cleanup(sym, f"V110 flat cleanup: {reason}", exc)
+        return False
+
+# ---- richer PnL semantics ----
+def _v110_enrich_last_trade(sym, entry, exit_price, decision, quantity, configured_sl_price=None):
+    try:
+        with trade_history_lock:
+            candidates=[x for x in trade_history if x.get("symbol")==sym]
+            rec=candidates[-1] if candidates else None
+            if not rec: return
+            pm=_trade_price_move_pct(entry,exit_price,decision)
+            q=abs(float(quantity or 0.0)); net=_trade_net_position_pnl_usd(entry,exit_price,decision,q,0.0)
+            anchor=STARTING_BALANCE if not REAL_TRADE_ENABLED else (real_balance_snapshot or STARTING_BALANCE)
+            rec.update({"price_move_pct":pm,"position_pnl_pct":float(rec.get("pct",0.0) or 0.0),"account_impact_pct":_compute_account_impact_pct(float(rec.get("pnl_usd",net) or net),anchor),"configured_sl_pct":(abs(float(entry)-float(configured_sl_price))/abs(float(entry))*100.0 if configured_sl_price else rec.get("configured_sl_pct")),"actual_exit_price":exit_price,"pnl_semantics":{"price_move_pct":"market movement after side normalization","position_pnl_pct":"canonical realized position return","account_impact_pct":"net realized PnL divided by statistics balance anchor"}})
+    except Exception as exc: log.warning(f"[STATS V110] {sym}: {exc}")
+
+# ---- human-readable FULL status + scanner status ----
+def _v110_full_text():
+    try:
+        st=_brain_full_command("status")
+    except Exception as exc:
+        return f"🧠 <b>FULL STATUS</b>\nStatus error: <code>{html.escape(str(exc)[:250])}</code>"
+    if isinstance(st,str): return st
+    return _format_brain_status_human(st)
+
+def fmt_runtime_status_v110():
+    s=get_scanner_status(); by=bybit_market_ws.status(); bn=_binance_ws_status()
+    scan_health=str(s.get("health") or "UNKNOWN"); last=s.get("last_cycle_age_sec")
+    last_txt=f"{float(last):.0f}s lalu" if isinstance(last,(int,float)) else "—"
+    return (
+        "📡 <b>RUNTIME STATUS</b>\n"
+        f"🔎 Scanner: <b>{scan_health}</b> | cycle <b>{s.get('cycle_count',0)}</b> | last scan <b>{last_txt}</b>\n"
+        f"Symbols: <b>{s.get('symbols_processed',0)}/{s.get('symbols_requested',0)}</b> | candidates <b>{s.get('last_candidate_count',0)}</b> | eligible <b>{s.get('last_eligible_count',0)}</b>\n"
+        f"📡 Bybit WS: <b>{'✅' if by.get('fresh') else '⚠️'}</b> | tickers {by.get('tickers',0)} | kline buffers {by.get('kline_buffers',0)}\n"
+        f"🔐 Binance WS: <b>{'✅' if bn.get('fresh') else '⚠️'}</b> | positions {bn.get('positions',0)} | orders {bn.get('orders',0)}\n"
+        f"💳 Binance execution: <b>{'PAUSED' if _binance_is_scan_paused() else 'READY'}</b>\n"
+        f"🧠 FULL: {_v110_full_text().replace(chr(10),' • ')[:500]}"
+    )
+
+# ---- final Telegram suppression: aggregate repeated identical system failures ----
+def tg_send_v110(chat_id, text, *args, **kwargs):
+    txt=str(text or ""); upper=txt.upper()
+    critical=any(k in upper for k in ("EMERGENCY","POSITION UNPROTECTED","EXECUTION UNKNOWN","FORCED EXIT"))
+    system=any(k in upper for k in ("ALGO CLEANUP","UPDATE PROTECTION GAGAL","TRAILING UPDATE","RECOVERY BELUM","BINANCE RATE LIMIT","BINANCE PAUSE","PROTECTION DITUNDA","PENDING ENTRY BELUM"))
+    if critical or not system: return _ORIG_TG_SEND(chat_id,text,*args,**kwargs)
+    import hashlib
+    sig=hashlib.sha1(re.sub(r"\d+(?:\.\d+)?", "#", txt).encode()).hexdigest(); key=(str(chat_id),sig); now=time.time()
+    with _TG_SUPPRESS_LOCK:
+        row=_TG_SUPPRESS_STATE.get(key,{"last":0.0,"count":0,"suppressed":0})
+        last=float(row.get("last",0.0))
+        if now-last<TG_SYSTEM_REPEAT_SUPPRESS_SEC_FINAL:
+            row["count"]=int(row.get("count",0))+1; row["suppressed"]=int(row.get("suppressed",0))+1; _TG_SUPPRESS_STATE[key]=row; return True
+        row["last"]=now; row["count"]=1; row["suppressed"]=int(row.get("suppressed",0)); _TG_SUPPRESS_STATE[key]=row
+    return _ORIG_TG_SEND(chat_id,text,*args,**kwargs)
+
+# ---- final /status, /full, /auto and /timeout pending handlers ----
+def telegram_command_router_v110(text, chat_id):
+    t=str(text or "").strip().lower()
+    if t in {"/status","status"}:
+        return tg_send(chat_id, fmt_runtime_status_v110())
+    if t in {"/full","full","/full status","full status"}:
+        return tg_send(chat_id, _v110_full_text())
+    if t in {"/auto","auto"}:
+        try:
+            _,created=_v110_ensure_scanner_running(chat_id,announce=False)
+            s=get_scanner_status();
+            return tg_send(chat_id, ("🔎 <b>SCANNER STARTED</b>" if created else "🔎 <b>SCANNER HEALTHY</b>")+f"\nCycle: <b>{s.get('cycle_count',0)}</b> | last scan: <b>{s.get('last_cycle_age_sec','—')}s</b>\nMarket data: <b>Bybit WS</b>\nExecution: <b>Binance</b>")
+        except Exception as exc:
+            return tg_send(chat_id,f"❌ <b>Scanner gagal</b>\n<code>{html.escape(str(exc)[:300])}</code>")
+    if t=="/timeout pending" or t=="timeout pending":
+        return _verified_timeout_pending_only(chat_id)
+    return None
+
+# Patch legacy command handler only for the affected commands by replacing exact branches.
+main_source_for_patch = globals().get("__file__", "")
+
+# ---- final aliases; aliases are established before __main__ executes ----
+_FINAL_V110_OVERRIDES = {
+    "_ensure_scanner_running": _v110_ensure_scanner_running,
+    "monitor_position_real": monitor_position_real_v110,
+    "_wait_entry_real": _wait_entry_real_v110,
+    "fmt_runtime_status": fmt_runtime_status_v110,
+    "tg_send": tg_send_v110,
+}
+globals().update(_FINAL_V110_OVERRIDES)
+
+# Make existing scanner entry point feed the final brain summary and preserve Bybit source marker.
+_ORIG_RECORD_SCAN_SUMMARY_V110 = globals().get("_brain_on_scan_summary")
+def _brain_on_scan_summary_v110(summary):
+    rep=dict(summary or {}); rep.setdefault("source","main_scanner"); rep["market_data_source"]="bybit_ws_primary"
+    try:
+        fn=_brain_fn("record_scan_summary")
+        if callable(fn): return fn(rep, source="main_scanner")
+    except Exception as exc: log.warning(f"[BRAIN][SCAN SUMMARY V110] {exc}")
+    return _ORIG_RECORD_SCAN_SUMMARY_V110(rep) if callable(_ORIG_RECORD_SCAN_SUMMARY_V110) else None
+globals()["_brain_on_scan_summary"]=_brain_on_scan_summary_v110
+
+# Replace Telegram branch text at the source level so the final status formatter is actually used.
 if __name__ == "__main__":
     start_runtime()
     while not SHUTDOWN_EVENT.wait(15):
