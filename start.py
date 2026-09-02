@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """
 
-# VERSION: 13.0
-SMCAutoTrade start_v13.py
+# VERSION: 14.0
+SMCAutoTrade start_v14.py
 
 Data + execution orchestration layer.
 
@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import websocket
 
-VERSION = "13.0"
+VERSION = "14.0"
 
 BYBIT_BASE_URL = (os.getenv("BYBIT_BASE_URL") or "https://api.bybit.com").rstrip("/")
 BYBIT_WS_URL = (os.getenv("BYBIT_WS_URL") or "wss://stream.bybit.com/v5/public/linear").strip()
@@ -1189,7 +1189,7 @@ class DataEngine:
             log.warning("[LEARN] %s", self.learning_error)
             return
         try:
-            name = f"smc_learn_v1_{int(time.time()*1000)}"
+            name = f"smc_learn_v3_{int(time.time()*1000)}"
             spec = importlib.util.spec_from_file_location(name, path)
             if spec is None or spec.loader is None:
                 raise ImportError("cannot create learn spec")
@@ -1199,8 +1199,16 @@ class DataEngine:
             self.learning = module
             if hasattr(module, "initialize"):
                 module.initialize(self.api, self.context)
+            # Learning memory is opened automatically on startup.  /open remains
+            # available as an explicit restore command.
+            if hasattr(module, "open_memory"):
+                try:
+                    restored = module.open_memory()
+                    log.info("[LEARN] startup memory open: %s", str(restored).replace("\n", " | "))
+                except Exception:
+                    log.exception("[LEARN] startup memory open failed")
             log.info("[LEARN] loaded %s", path)
-            self._notify(f"✅ LEARN ENGINE LOADED\n{path.name}")
+            self._notify(f"✅ LEARN ENGINE LOADED + MEMORY OPENED\n{path.name}")
         except Exception as exc:
             self.learning = None
             self.learning_error = f"{type(exc).__name__}: {exc}"
@@ -1984,7 +1992,7 @@ def on_start(context: dict[str, Any]) -> None:
     ENGINE = DataEngine(context)
     try: ip = ENGINE.public_ip()
     except Exception as exc: ip = f"unavailable ({exc})"
-    log.info("[START] V12 ready | ip=%s | base=%s | strategy=%s", ip, BASE_DIR, STRATEGY_FILE)
+    log.info("[START] V14 ready | ip=%s | base=%s | strategy=%s", ip, BASE_DIR, STRATEGY_FILE)
     ENGINE._notify(
         f"🟢 START.PY V{VERSION} READY\n"
         f"Server IP: {ip}\n"
@@ -2002,7 +2010,7 @@ def on_stop(context: dict[str, Any]) -> None:
 
 def _help() -> str:
     return (
-        "🤖 SMCAutoTrade V12\n\n"
+        "🤖 SMCAutoTrade V14\n\n"
         "/auto — ALL common pairs + historical + websocket pool\n"
         "/mode — show mode\n/mode on — REAL Binance\n/mode off — SIMULATION\n"
         "/margin 10 — target margin/trade\n/leverage 10 — leverage\n/max 5 — max active orders/positions\n"
