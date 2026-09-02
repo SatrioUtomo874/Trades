@@ -80,13 +80,24 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 BRAIN_CONFIDENCE_DISPLAY_FALLBACK = "brain-owned"
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "MAIN-BODY-V53-FULL-RUNTIME-AUDITED"
+MAIN_ENGINE_VERSION = "MAIN-BODY-V60-RUNTIME-REBUILT"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
 # hanya dipakai oleh pipeline scan; execution/position monitoring tetap memakai
 # get_klines() normal sehingga tidak mengubah freshness data posisi.
-SCAN_MAX_DURATION_SEC = max(60, int(os.getenv("SCAN_MAX_DURATION_SEC", "180")))
+def _env_int(name, default, minimum=None, maximum=None):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+SCAN_MAX_DURATION_SEC = _env_int("SCAN_MAX_DURATION_SEC", 180, minimum=60, maximum=3600)
 SCAN_KLINE_TTL = {
     "15m": 8 * 60,      # refresh maksimum sekitar sekali per 8 menit
     "1h": 30 * 60,      # tidak perlu REST berulang di antara candle 1h
@@ -98,6 +109,25 @@ _scan_kline_fetch_locks = {}
 _scan_kline_fetch_locks_guard = threading.Lock()
 _scan_telemetry_lock = threading.Lock()
 _last_scan_telemetry = {}
+
+# Scanner lifecycle is explicit: exactly one coordinator and at most one heavy scan task.
+_SCAN_STATE_LOCK = threading.RLock()
+_SCAN_STATE = {
+    "enabled": False,
+    "coordinator_alive": False,
+    "cycle_running": False,
+    "cycle_count": 0,
+    "last_started_at": None,
+    "last_finished_at": None,
+    "last_success_at": None,
+    "last_error": None,
+    "last_result_count": 0,
+    "last_symbols_processed": 0,
+}
+_SCAN_COORDINATOR_THREAD = None
+_SCAN_CYCLE_THREAD = None
+_SCAN_CYCLE_EVENT = threading.Event()
+_SCAN_WAKE = threading.Event()
 
 def _scan_key_lock(key):
     with _scan_kline_fetch_locks_guard:
@@ -156,6 +186,42 @@ except Exception as e:
 def _brain_fn(name):
     return getattr(_brain, name, None) if _brain is not None else None
 
+def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, **kwargs):
+    """Stable body→brain adapter. The body never implements strategy logic."""
+    fn = _brain_fn("full_analyze")
+    if not callable(fn):
+        return None
+    try:
+        return fn(df_h1, df_m15, df_d1=df_d1, symbol=symbol, **kwargs)
+    except TypeError as exc:
+        try:
+            params = inspect.signature(fn).parameters
+            legacy_ok = "df_btc_h1" not in params and "trade_history" not in params
+        except Exception:
+            legacy_ok = False
+        if legacy_ok:
+            return fn(df_h1, df_m15, df_d1, symbol=symbol)
+        log.exception(f"[BRAIN] full_analyze internal TypeError {symbol}: {exc}")
+        return None
+
+def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None, **kwargs):
+    """Stable body→brain management adapter; no execution is performed here."""
+    fn = _brain_fn("manage_position")
+    if not callable(fn):
+        return None
+    try:
+        return fn(state, df_m15, df_h1=df_h1, df_d1=df_d1, symbol=symbol, **kwargs)
+    except TypeError as exc:
+        try:
+            params = inspect.signature(fn).parameters
+            legacy_ok = "symbol" not in params
+        except Exception:
+            legacy_ok = False
+        if legacy_ok:
+            return fn(state, df_m15, df_h1, df_d1, symbol=symbol)
+        log.exception(f"[BRAIN] manage_position internal TypeError {symbol}: {exc}")
+        return None
+
 def _call_brain_event(names, row, *, fallback_symbol=False):
     for name in names:
         fn = _brain_fn(name)
@@ -175,10 +241,25 @@ def _call_brain_event(names, row, *, fallback_symbol=False):
     return None
 
 def _brain_on_candidate(row):
-    return _call_brain_event(("record_candidate_observation", "ingest_live_candidate"), row)
+    return _call_brain_event(("ingest_live_candidate", "record_candidate_observation"), row)
 
 def _brain_on_trade(row):
-    return _call_brain_event(("record_trade_outcome", "ingest_live_outcome"), row)
+    """Canonical outcome bridge. Supports both modern ingest_* and legacy record_* APIs."""
+    fn = _brain_fn("ingest_live_outcome")
+    if callable(fn):
+        try:
+            outcome = row.get("outcome") if isinstance(row, dict) and isinstance(row.get("outcome"), dict) else (dict(row) if isinstance(row, dict) else {"result": row})
+            return fn(row, outcome, source="binance_trade")
+        except Exception as exc:
+            log.warning(f"[BRAIN] ingest_live_outcome gagal: {exc}")
+    fn = _brain_fn("record_trade_outcome")
+    if callable(fn):
+        try:
+            outcome = row.get("outcome") if isinstance(row, dict) else {"result": row}
+            return fn(row, outcome, source="binance_trade")
+        except Exception as exc:
+            log.warning(f"[BRAIN] record_trade_outcome gagal: {exc}")
+    return None
 
 def _brain_get_experience_count():
     for name in ("get_experience_count", "get_learning_model_info", "get_full_cognitive_status", "get_cognitive_status"):
@@ -257,47 +338,6 @@ def _get_active_confidence_threshold():
             pass
     return None
 
-FULL_MODE=False
-FULL_THREAD=None
-FULL_MANUAL_THRESHOLD_SAVED=None
-FULL_STOP=threading.Event()
-FULL_WAKE=threading.Event()
-
-def _full_on():
-    global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED
-    FULL_MODE=True
-    FULL_MANUAL_THRESHOLD_SAVED=None
-    _brain_full_command("on")
-    return _brain_full_status()
-
-def _full_off():
-    global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED
-    FULL_MODE=False
-    _brain_full_command("off")
-    FULL_MANUAL_THRESHOLD_SAVED=None
-    return _brain_full_status()
-
-def _full_reset_internal():
-    global FULL_MODE, FULL_MANUAL_THRESHOLD_SAVED
-    FULL_MODE=False
-    FULL_STOP.set(); FULL_WAKE.clear()
-    _brain_full_command("reset")
-    FULL_MANUAL_THRESHOLD_SAVED=None
-    return _brain_full_status()
-
-def _full_strategy_command(action, chat_id=None):
-    if action == "on": return _full_on()
-    if action == "off": return _full_off()
-    if action == "reset": return _full_reset_internal()
-    return _brain_full_status()
-
-def _full_status_text():
-    return _brain_full_status()
-
-def _full_controller_state():
-    return {"mode": bool(FULL_MODE), "brain": _brain_full_status()}
-
-# Local runtime state is authoritative for execution; brain owns strategy state.
 FULL_MODE=False
 FULL_THREAD=None
 FULL_MANUAL_THRESHOLD_SAVED=None
@@ -474,7 +514,7 @@ RUNTIME_SCHEMA_VERSION = "runtime_v1"
 EVENT_SCHEMA_VERSION = "event_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
 BRAIN_INTERFACE_VERSION = "brain_v1"
-BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED"}
+BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT"}
 MAX_HEAVY_WORKERS = 5
 HEAVY_WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_HEAVY_WORKERS)
 _HEAVY_WORKER_LOCK = threading.RLock()
@@ -1103,14 +1143,7 @@ def _graceful_shutdown(reason="shutdown"):
 
 
 
-def _heavy_worker_target(name, fn, *args, **kwargs):
-    acquired = HEAVY_WORKER_SEMAPHORE.acquire(blocking=False)
-    if not acquired:
-        log.warning(f"[RESOURCE] heavy worker limit reached ({MAX_HEAVY_WORKERS}); skip/defer {name}")
-        return
-    worker_id = _new_request_id("WRK")
-    with _HEAVY_WORKER_LOCK:
-        _HEAVY_WORKER_REGISTRY[worker_id] = {"name": name, "started_at": time.time()}
+def _heavy_worker_target(name, fn, *args, worker_id=None, **kwargs):
     try:
         fn(*args, **kwargs)
     except Exception as exc:
@@ -1121,23 +1154,45 @@ def _heavy_worker_target(name, fn, *args, **kwargs):
             pass
     finally:
         with _HEAVY_WORKER_LOCK:
-            _HEAVY_WORKER_REGISTRY.pop(worker_id, None)
+            if worker_id is not None:
+                _HEAVY_WORKER_REGISTRY.pop(worker_id, None)
+            _ACTIVE_HEAVY_THREADS.pop(threading.current_thread().name, None)
         HEAVY_WORKER_SEMAPHORE.release()
 
 
 _ACTIVE_HEAVY_THREADS={}
 
 def _start_heavy_worker(name, fn, *args, **kwargs):
-    t = threading.Thread(
-        target=_heavy_worker_target,
-        args=(name, fn, *args),
-        kwargs=kwargs,
-        name=f"heavy-{name}",
-        daemon=True,
-    )
-    _ACTIVE_HEAVY_THREADS[t.name]=t
-    t.start()
-    return t
+    # Reserve the global heavy-worker slot BEFORE starting the thread.
+    # This prevents callers from believing a worker started when the semaphore was full.
+    with _HEAVY_WORKER_LOCK:
+        if any(v.get("name") == name for v in _HEAVY_WORKER_REGISTRY.values()):
+            log.warning(f"[RESOURCE] worker {name} already running; skip duplicate")
+            return None
+        if not HEAVY_WORKER_SEMAPHORE.acquire(blocking=False):
+            log.warning(f"[RESOURCE] heavy worker limit reached ({MAX_HEAVY_WORKERS}); defer {name}")
+            return None
+        worker_id = _new_request_id("WRK")
+        thread_name = f"heavy-{name}-{worker_id[-6:]}"
+        _HEAVY_WORKER_REGISTRY[worker_id] = {"name": name, "started_at": time.time(), "thread": thread_name}
+    try:
+        t = threading.Thread(
+            target=_heavy_worker_target,
+            args=(name, fn, *args),
+            kwargs={"worker_id": worker_id, **kwargs},
+            name=thread_name,
+            daemon=True,
+        )
+        with _HEAVY_WORKER_LOCK:
+            _ACTIVE_HEAVY_THREADS[thread_name] = t
+        t.start()
+        return t
+    except Exception:
+        with _HEAVY_WORKER_LOCK:
+            _HEAVY_WORKER_REGISTRY.pop(worker_id, None)
+            _ACTIVE_HEAVY_THREADS.pop(thread_name, None)
+        HEAVY_WORKER_SEMAPHORE.release()
+        raise
 
 
 def _heavy_worker_snapshot():
@@ -3526,6 +3581,7 @@ def _price_cache_loop():
 # INDIKATOR
 # ═════════════════════════════════════════════
 def run_scan_once(chat_id):
+    # Runtime-safe contract: this function must fail closed, never by NameError.
     if STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN or _STRATEGY_LOAD_ERROR:
         log.debug("[SCAN] new-entry gate blocked")
         return []
@@ -3577,6 +3633,9 @@ def run_scan_once(chat_id):
             row.update({"scan_time":time.time(),"run_id":research_run_id,"scan_counter":scan_counter})
             market_rows.append(row)
             if isinstance(r,dict):
+                r.setdefault("candidate_uid", f"{research_run_id}|{scan_counter}|{sym}")
+                if r.get("no_signal"):
+                    log.info(f"[SCAN NO-SIGNAL] {sym} stage={r.get('analysis_stage')} reason={r.get('rejected_reason')}")
                 _brain_on_candidate(r)
                 analyzed_symbols+=1; conf=float(r.get("confidence",0) or 0); all_scan_confidences.append(conf)
                 lf = r.setdefault("learning_features", {})
@@ -3590,11 +3649,6 @@ def run_scan_once(chat_id):
                     "symbol_rs_1h": float(row.get("relative_strength_1h_pct") or 0.0) if row.get("relative_strength_1h_pct") is not None else 0.0,
                     "symbol_rs_4h": float(row.get("relative_strength_4h_pct") or 0.0) if row.get("relative_strength_4h_pct") is not None else 0.0,
                 })
-                try:
-                    fn_ingest = globals().get("ingest_live_candidate")
-                    if callable(fn_ingest): fn_ingest(r, h1=h1, m15=m15, d1=d1, rejected_reason=(None if r.get("execution_eligible") else "brain_rejected"), source="binance")
-                except Exception as e:
-                    log.warning(f"[COGNITIVE] candidate bridge gagal {sym}: {e}")
                 if bool(r.get("low_confidence")):
                     cutoff=float(r.get("low_confidence_cutoff") or 0.0)
                     low_conf_count+=1; _record_low_confidence_event(sym,conf,cutoff,r.get("decision"),r.get("entry_label"))
@@ -3611,7 +3665,7 @@ def run_scan_once(chat_id):
         except BinanceCooldownError:
             log.warning(f"[scan] {sym}: Binance cooldown aktif — scan cycle dihentikan aman."); break
         except Exception as e:
-            failed_symbols+=1; log.debug(f"[scan] {sym}: {e}")
+            failed_symbols+=1; log.warning(f"[scan] {sym}: {type(e).__name__}: {e}")
         # No per-symbol sleep here. Binance requests are serialized by _binance_request_slot().
         # Sleeping here only stretched scans without adding API safety.
 
@@ -3940,6 +3994,7 @@ def fmt_stats():
         f"\n5 terakhir:\n{hist_str}\n\n"
         f"🚫 Banned: {banned_n} | 🧠 Low-conf teratas: {top_lc} | 🛡️ Early reject tersisa: {reject_rem}"
         f"{cancel_line}"
+        f"\n\n🔎 Scanner: {_SCAN_STATE.get('cycle_count',0)} cycle | last result {_SCAN_STATE.get('last_result_count',0)} | error: {html.escape(str(_SCAN_STATE.get('last_error') or '—'))}"
     )
 
 def fmt_backtest():
@@ -4393,13 +4448,6 @@ def close_position(sym, result, close_price=None):
         stats_error = e
         log.exception(f"[close_position] stats gagal {sym}: {e}")
 
-    try:
-        fn_outcome = globals().get("ingest_live_outcome")
-        if callable(fn_outcome):
-            outcome_record = {**sig, **pos, "result": classified, "exit_price": close_price, "closed_at": time.time()}
-            fn_outcome(outcome_record, classified, source="binance_trade")
-    except Exception as e:
-        log.warning(f"[COGNITIVE] outcome bridge gagal {sym}: {e}")
 
     try:
         _ban_coin(sym, f"trade closed ({classified}; reason={result})", duration=BAN_DURATION_TRADE_CLOSED, kind="closed")
@@ -5245,89 +5293,108 @@ def _mode_on_preflight_reconcile(chat_id=None):
     return {"remote_positions": len(remote_positions), "orphan_symbols_cleaned": len(orphan)}
 
 
+def _set_scan_state(**updates):
+    with _SCAN_STATE_LOCK:
+        _SCAN_STATE.update(updates)
+        return dict(_SCAN_STATE)
+
+def get_scanner_status():
+    with _SCAN_STATE_LOCK:
+        out = dict(_SCAN_STATE)
+    out["binance_paused"] = _binance_is_scan_paused()
+    out["pause_remaining_sec"] = round(_binance_cooldown_remaining(), 2)
+    out["heavy_workers"] = len(_heavy_worker_snapshot())
+    out["top_coins_cached"] = len(_top_coins_cached_symbols)
+    return out
+
 def simulation_loop(chat_id):
-    """Koordinator runtime; seluruh keputusan trading berasal dari strategy."""
+    """Long-lived scan coordinator. It never owns strategy logic and cannot deadlock on a rejected worker slot."""
     global auto_mode
-    tg_send(chat_id,"🤖 <b>Engine dimulai.</b>\nStrategy mengendalikan Entry/TP/SL/Trail.")
-    scanning=False; scan_lock=threading.Lock(); last_scan=0.0
+    _set_scan_state(enabled=True, coordinator_alive=True, last_error=None)
+    tg_send(chat_id, "🤖 <b>Engine dimulai.</b>\nStrategy mengendalikan Entry/TP/SL/Trail.")
+
+    def wait_entry(sym, signal, chat_id):
+        try:
+            entry=float(signal["entry"]); buy=str(signal.get("decision")).upper()=="BUY"; deadline=time.time()+8*3600
+            while time.time()<deadline and auto_mode:
+                with positions_lock:
+                    if sym not in positions: return
+                    if positions[sym].get("timeout_flag"):
+                        positions.pop(sym,None); return
+                if _binance_is_scan_paused():
+                    time.sleep(min(10.0, max(1.0, _binance_cooldown_remaining()))); continue
+                price=get_price(sym)
+                if price is not None and ((price<=entry) if buy else (price>=entry)):
+                    fill=min(entry,price) if buy else max(entry,price)
+                    _open_position(sym,signal,fill,chat_id,"strategy"); return
+                time.sleep(MONITOR_SLEEP)
+            with positions_lock:
+                positions.pop(sym,None)
+            _ban_coin(sym,"pending expired")
+        except Exception as exc:
+            log.exception(f"[ENTRY WAIT] {sym}: {exc}")
 
     def do_scan():
-        nonlocal scanning
+        _set_scan_state(cycle_running=True, last_started_at=time.time(), last_error=None)
         try:
             signals = run_scan_once(chat_id)
-            if not auto_mode or not signals:
-                return
-
+            _set_scan_state(last_result_count=len(signals or []))
             opened = 0
-            for signal in signals:
-                if not auto_mode or _binance_is_scan_paused():
-                    break
-                sym = signal.get("symbol")
-                if not sym:
-                    continue
-                with positions_lock:
-                    if sym in positions or len(positions) >= MAX_POSITIONS:
+            if auto_mode and signals:
+                for sig in signals:
+                    if not auto_mode or _binance_is_scan_paused(): break
+                    sym=str(sig.get("symbol") or "").upper()
+                    if not sym: continue
+                    with positions_lock:
+                        if sym in positions or len(positions)>=MAX_POSITIONS: continue
+                    if REAL_TRADE_ENABLED:
+                        if _open_pending_real(sym,sig,chat_id): opened += 1
                         continue
-
-                if REAL_TRADE_ENABLED:
-                    if _open_pending_real(sym, signal, chat_id):
-                        opened += 1
-                    continue
-
-                price = signal.get("price") or get_price(sym)
-                entry = signal.get("entry")
-                if price is None or entry is None:
-                    continue
-                mode = str(signal.get("execution_mode", "")).lower() or ("market" if signal.get("entry_label") == "market" else "limit")
-                with positions_lock:
-                    if sym in positions or len(positions) >= MAX_POSITIONS:
-                        continue
-                    positions[sym] = {"signal": signal, "entry": entry, "chat_id": chat_id,
-                                      "entry_time": None, "timeout_flag": False, "status": "pending", "lifecycle": "ENTRY_PENDING",
-                                      "execution_mode": "SIMULATION"}
-                if mode == "market":
-                    _open_position(sym, signal, get_price(sym) or price, chat_id, "strategy")
-                else:
-                    tg_send(chat_id, f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(signal)}")
-                    threading.Thread(target=wait_entry, args=(sym, signal, chat_id), daemon=True).start()
-                opened += 1
-
-            log.info(f"[scan] {len(signals)} signal lolos, {opened} dikirim ke execution")
+                    price=sig.get("price") or get_price(sym)
+                    entry=sig.get("entry")
+                    if price is None or entry is None: continue
+                    mode=str(sig.get("execution_mode") or "").lower() or ("market" if sig.get("entry_label")=="market" else "limit")
+                    with positions_lock:
+                        if sym in positions or len(positions)>=MAX_POSITIONS: continue
+                        positions[sym]={"signal":sig,"entry":entry,"chat_id":chat_id,"entry_time":None,"timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"SIMULATION"}
+                    if mode=="market":
+                        _open_position(sym,sig,get_price(sym) or price,chat_id,"strategy")
+                    else:
+                        tg_send(chat_id,f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(sig)}")
+                        _start_heavy_worker(f"entry-wait-{sym}", wait_entry, sym, sig, chat_id)
+                    opened += 1
+            log.info(f"[scan] {len(signals or [])} signal lolos, {opened} dikirim ke execution")
+            _set_scan_state(last_success_at=time.time(), last_finished_at=time.time())
+        except Exception as exc:
+            _set_scan_state(last_error=str(exc)[:500], last_finished_at=time.time())
+            log.exception(f"[SCAN CYCLE] gagal: {exc}")
         finally:
-            with scan_lock:
-                scanning = False
+            _set_scan_state(cycle_running=False, cycle_count=_SCAN_STATE.get("cycle_count",0)+1)
 
-    def wait_entry(sym,signal,chat_id):
-        entry=signal["entry"]; buy=signal["decision"]=="BUY"; deadline=time.time()+8*3600
-        while time.time()<deadline:
+    try:
+        while auto_mode:
+            if _binance_is_scan_paused():
+                _notify_binance_pause_once(chat_id)
+                _SCAN_WAKE.wait(min(10.0, max(1.0,_binance_cooldown_remaining()) or 1.0)); _SCAN_WAKE.clear(); continue
             with positions_lock:
-                if sym not in positions:return
-                if positions[sym].get("timeout_flag"): positions.pop(sym,None); return
-            price=get_price(sym)
-            if price is not None and ((price<=entry) if buy else (price>=entry)):
-                fill=min(entry,price) if buy else max(entry,price)
-                _open_position(sym,signal,fill,chat_id,"strategy"); return
-            time.sleep(MONITOR_SLEEP)
-        with positions_lock: positions.pop(sym,None)
-        _ban_coin(sym,"pending expired")
-
-    while auto_mode:
-        if _binance_is_scan_paused():
-            remaining = _binance_cooldown_remaining()
-            time.sleep(min(10.0, remaining) if remaining > 0 else 1.0)
-            continue
-        with positions_lock: full=len(positions)>=MAX_POSITIONS
-        if full: time.sleep(5); continue
-        with scan_lock:
-            if scanning: time.sleep(5); continue
-            scanning=True
-        if time.time()-last_scan<120:
-            with scan_lock: scanning=False
-            time.sleep(5); continue
-        last_scan=time.time(); _start_heavy_worker("scan", do_scan); time.sleep(5)
-    tg_send(chat_id,"⏹ <b>Scanning dihentikan.</b>\n\n"+fmt_stats())
-
-
+                full=len(positions)>=MAX_POSITIONS
+            if full:
+                _SCAN_WAKE.wait(5); _SCAN_WAKE.clear(); continue
+            with _SCAN_STATE_LOCK:
+                running=bool(_SCAN_STATE.get("cycle_running"))
+                last_finished=_SCAN_STATE.get("last_finished_at") or 0.0
+            if running:
+                _SCAN_WAKE.wait(1); _SCAN_WAKE.clear(); continue
+            if time.time()-float(last_finished or 0.0) < 120:
+                _SCAN_WAKE.wait(5); _SCAN_WAKE.clear(); continue
+            worker=_start_heavy_worker("scan", do_scan)
+            if worker is None:
+                # Crucially: no permanent scanning=True flag when worker admission fails.
+                _SCAN_WAKE.wait(2); _SCAN_WAKE.clear(); continue
+            _SCAN_WAKE.wait(2); _SCAN_WAKE.clear()
+    finally:
+        _set_scan_state(enabled=False, coordinator_alive=False, cycle_running=False)
+        tg_send(chat_id,"⏹ <b>Scanning dihentikan.</b>\n\n"+fmt_stats())
 
 
 # ═════════════════════════════════════════════
@@ -5875,11 +5942,13 @@ def bot_loop():
                         auto_thread=threading.Thread(
                             target=simulation_loop,args=(chat_id,),daemon=True)
                         auto_thread.start()
+                        _SCAN_WAKE.set()
                 elif text in ("/stop","stop"):
                     # /stop hanya mematikan scanning sinyal baru — posisi
                     # yang sudah berjalan tetap dipantau sampai TP/SL alami.
                     if auto_mode:
                         auto_mode = False
+                        _SCAN_WAKE.set()
                         with positions_lock:
                             n_active = len(positions)
                         tg_send(chat_id,

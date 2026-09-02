@@ -1,5 +1,5 @@
 """
-strategy_logic.py — OTAK v8 (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
+strategy_logic.py — ADAPTIVE BRAIN v35 (OTAK) (Adaptive RR + Intelligent Target Selection + Predictive Reversal-Aware Trailing)
 ========================================================================================
 Dibangun dari corpus transkrip video SMC/ICT (channel RUANG TRADER, ~39 video:
 market structure, order block, FVG, liquidity sweep, inducement, ChoCH/BOS,
@@ -61,6 +61,9 @@ import os
 import json
 import time
 import threading
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 try:
     from zoneinfo import ZoneInfo
@@ -72,12 +75,16 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-ML_COGNITIVE_VERSION = "V34_COGNITIVE_AUDITED"
-FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
+ML_COGNITIVE_VERSION = "V40_FULL_BRAIN_REBUILT"
+V40_VERSION = "V40_FULL_BRAIN_REBUILT"
+BRAIN_INTERFACE_VERSION = V40_VERSION
+FULL_LEARNING_SCHEMA = "full_learning_cognitive_v2"
 
 
 MACHINE_LEARNING_SCHEMA = "machine_Learning_v3_cognitive"
 _LEARNED_MODEL = None
+_LEARNED_MODEL_FILE = Path(os.getenv("FULL_MODEL_FILE", "machine_learning_state/active_model.json"))
+_FULL_ENABLED = False
 
 ML_FEATURE_NAMES = [
     "direction_confidence", "setup_quality", "entry_location_score", "rr",
@@ -92,6 +99,28 @@ ML_FEATURE_NAMES = [
 def set_learning_model(model):
     global _LEARNED_MODEL
     _LEARNED_MODEL = model if isinstance(model, dict) and model.get("active") else None
+
+
+def _load_active_learning_model():
+    global _LEARNED_MODEL
+    try:
+        if _LEARNED_MODEL_FILE.exists():
+            obj=json.loads(_LEARNED_MODEL_FILE.read_text(encoding="utf-8"))
+            if isinstance(obj,dict) and obj.get("active"):
+                _LEARNED_MODEL=obj
+    except Exception as exc:
+        log.warning(f"[MODEL] active model load gagal: {exc}")
+
+def _save_active_learning_model(model):
+    try:
+        _LEARNED_MODEL_FILE.parent.mkdir(parents=True,exist_ok=True)
+        tmp=_LEARNED_MODEL_FILE.with_suffix(_LEARNED_MODEL_FILE.suffix+".tmp")
+        tmp.write_text(json.dumps(model,ensure_ascii=False,allow_nan=False,indent=2,default=str),encoding="utf-8")
+        os.replace(tmp,_LEARNED_MODEL_FILE)
+        return True
+    except Exception as exc:
+        log.warning(f"[MODEL] active model save gagal: {exc}")
+        return False
 
 
 def get_learning_model_info():
@@ -2552,6 +2581,10 @@ def _core_full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                 + thesis["target_quality"] * 0.20
                 - thesis["contradiction_score"] * 0.65
             )
+            # Learned policy is a bounded ranking mutation. It can change which
+            # setup wins, but it cannot create an invalid trade or bypass safety.
+            policy_effect = _agent_strategy_policy_adjustment(archetype, regime.get("regime", "UNKNOWN"))
+            execution_score += float(policy_effect["score_adjustment"])
 
             evaluated.append({
                 "candidate": candidate,
@@ -2567,6 +2600,7 @@ def _core_full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
                 "setup_quality": setup_quality,
                 "confidence_diagnostics": conf_diag,
                 "execution_score": execution_score,
+                "strategy_policy_effect": policy_effect,
                 "location": loc,
                 "learning_features": learning_features,
                 "learning_prediction": ml_prediction,
@@ -2659,6 +2693,7 @@ def _core_full_analyze(df_h1: pd.DataFrame, df_m15: pd.DataFrame,
             "selected_sweep": score.get("selected_sweep", False),
             "trigger_count": score.get("trigger_count", 0),
             "selection_diagnostics": selection,
+            "strategy_policy_effect": best_eval.get("strategy_policy_effect", {"policy_active": False, "delta": 0.0}),
             "candidate_count": len(evaluated),
             "tp_sl_reason": (
                 f"Entry@{entry:.5g}({entry_lbl}) | "
@@ -3365,7 +3400,7 @@ def validate_and_adjust_geometry(
 # comparison, richer research snapshots, and FULL command interface.
 # This layer is deliberately execution-free and Binance-free.
 
-ML_COGNITIVE_VERSION = "V34_COGNITIVE_AUDITED"
+ML_COGNITIVE_VERSION = "V40_FULL_BRAIN_REBUILT"
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v1"
 FULL_BELIEF_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 FULL_BELIEF_FILE = FULL_BELIEF_DIR / "belief_state.json"
@@ -3841,17 +3876,29 @@ def _stop_full_cognitive_worker():
 
 
 def get_full_cognitive_status():
-    thread_alive = bool(_FULL_COG_THREAD is not None and _FULL_COG_THREAD.is_alive())
-    with _COG_LOCK:
-        return {
-            "worker_alive": thread_alive,
-            "worker_ticks": int(_COG_STATE.get("full_worker_ticks", 0) or 0),
-            "last_cycle": _COG_STATE.get("last_cycle"),
-            "last_error": _FULL_COG_LAST_ERROR,
-            "last_result": dict(_FULL_COG_LAST_RESULT or {}),
-        }
-
-
+    """Authoritative FULL status used by main.py. Includes the real V32 and adaptive workers."""
+    try:
+        v32 = get_v32_status()
+    except Exception as exc:
+        v32 = {"worker_alive": False, "ticks": 0, "last_error": str(exc)[:300], "state": {}}
+    try:
+        adaptive = get_adaptive_status()
+    except Exception as exc:
+        adaptive = {"worker_alive": False, "last_error": str(exc)[:300], "strategy_revisions": 0, "strategy_version": "S1"}
+    state = dict(v32.get("state") or {})
+    state["adaptive"] = adaptive
+    return {
+        "worker_alive": bool(v32.get("worker_alive")),
+        "worker_ticks": int(v32.get("ticks", 0) or 0),
+        "last_cycle": state.get("last_review"),
+        "last_error": v32.get("last_error") or adaptive.get("last_error"),
+        "last_result": {},
+        "full_enabled": bool(_FULL_ENABLED),
+        "v32": v32,
+        "adaptive": adaptive,
+        "strategy_version": adaptive.get("strategy_version", "S1"),
+        "strategy_revisions": int(adaptive.get("strategy_revisions", 0) or 0),
+    }
 
 
 def _load_cognitive_state():
@@ -4139,17 +4186,20 @@ def record_candidate_observation(signal, outcome=None, rejected_reason=None, sou
 
 
 def record_trade_outcome(signal, outcome, source="binance"):
+    """Canonical cognitive outcome writer; idempotent by trade_uid/order_id."""
     sig = dict(signal or {}) if isinstance(signal, dict) else {}
-    record = record_candidate_observation(sig, outcome=outcome, source=source)
-    record["type"] = "trade_outcome"
-    record["entry_timestamp"] = sig.get("entry_timestamp") or sig.get("entry_time") or (sig.get("time_context") or {}).get("timestamp")
-    try:
-        with _COG_LOCK:
-            with _COG_EXPERIENCE_FILE.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False, allow_nan=False, default=str) + "\n")
-            _COG_STATE["labeled_outcomes"] = int(_COG_STATE.get("labeled_outcomes", 0)) + 1
-    except Exception as exc:
-        log.warning(f"[COG] trade outcome persist gagal: {exc}")
+    payload = outcome if isinstance(outcome, dict) else {"result": outcome}
+    uid = str(sig.get("trade_uid") or sig.get("order_id") or f"{sig.get('symbol','')}|{sig.get('entry_time','')}|{sig.get('exit_time','')}|{payload.get('result','')}")
+    key=f"{uid}|{source}"
+    with _COG_LOCK:
+        seen = globals().setdefault("_COG_SEEN_OUTCOME_KEYS", set())
+        if key in seen:
+            return None
+        seen.add(key)
+        snap = sig.get("research_snapshot") if isinstance(sig.get("research_snapshot"), dict) else {}
+        record = {"type":"trade_outcome","timestamp":time.time(),"trade_uid":uid,"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":_finite_num(sig.get("confidence"),50),"quality":_finite_num(sig.get("trade_quality",sig.get("setup_quality")),0),"archetype":sig.get("archetype","UNKNOWN"),"regime":sig.get("market_regime") or (snap.get("market") or {}).get("regime"),"snapshot":snap,"time_context":sig.get("time_context") or snap.get("time_context"),"learning_features":dict(sig.get("learning_features") or {}),"signal":sig,"outcome":dict(payload)}
+        _append_jsonl(_COG_EXPERIENCE_FILE, record, _COG_EXPERIENCE_BUFFER, 10000)
+        _COG_STATE["labeled_outcomes"] = int(_COG_STATE.get("labeled_outcomes", 0)) + 1
     return record
 
 
@@ -4465,6 +4515,7 @@ def ingest_historical_ohlcv(path, source="external", symbol=None, interval_minut
 
 
 _load_cognitive_state()
+_load_active_learning_model()
 
 # Preserve the battle-tested V26 public implementations and decorate their output
 # rather than replacing their core detector math.
@@ -4559,7 +4610,7 @@ __all__ = [
 # functions below become the single public behavior. It is research-only: it does
 # not send orders, call Binance, or forcibly tighten live signal frequency.
 
-V32_VERSION = "V34_CONTINUAL_COGNITIVE_AUDITED"
+V32_VERSION = "V38_EVENT_CONTRACT_HARDENED_BRAIN"
 V32_SCHEMA = "full_learning_cognitive_v2"
 V32_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
 V32_STATE_FILE = V32_STATE_DIR / "v32_brain_state.json"
@@ -4568,10 +4619,10 @@ V32_LESSON_FILE = V32_STATE_DIR / "v32_lessons.jsonl"
 V32_POLICY_FILE = V32_STATE_DIR / "v32_policy.json"
 V32_TIMEZONE = os.getenv("FULL_TIMEZONE", "Asia/Jakarta")
 
-V32_MIN_OUTCOMES = 40
-V32_MIN_WIN = 10
-V32_MIN_LOSS = 10
-V32_MIN_CELL = 12
+V32_MIN_OUTCOMES = 8
+V32_MIN_WIN = 3
+V32_MIN_LOSS = 3
+V32_MIN_CELL = 8
 V32_RESEARCH_WINDOW = 2500
 V32_REVIEW_INTERVAL = max(5.0, float(os.getenv("FULL_REVIEW_INTERVAL", "30")))
 V32_SINGLE_EVENT_MAX_BELIEF_DELTA = 0.035
@@ -4950,22 +5001,33 @@ def _v32_make_questions(outcomes, candidates, time_effect, calibration, drift):
 
 def _v32_model_fit(outcomes):
     # Lightweight research-only model. It does not replace the main live model.
-    if len(outcomes)<V32_MIN_OUTCOMES: return {"status":"INSUFFICIENT"}
-    rows=[]; ys=[]
+    if len(outcomes) < V32_MIN_OUTCOMES:
+        return {"status": "INSUFFICIENT", "reason": "too_few_outcomes"}
+    rows, ys = [], []
     for r in outcomes:
-        lf=r.get("learning_features")
-        if not isinstance(lf,dict): continue
-        p=_v32_f(r.get("confidence"),50.0)/100.0
-        payload=_v32_outcome_payload(r); y=1.0 if _v32_f(payload.get("final_r"),0.0)>0 else 0.0
-        rows.append([p,_v32_f(lf.get("setup_quality"),0)/100.0,_v32_f(lf.get("entry_location_score"),50)/100.0,_v32_f(lf.get("rr"),0)/4.0,_v32_f(lf.get("selected_sweep"),0),_v32_f((r.get("time_context") or {}).get("hour_sin"),0),_v32_f((r.get("time_context") or {}).get("hour_cos"),1)])
+        lf = r.get("learning_features")
+        if not isinstance(lf, dict):
+            continue
+        p = _v32_f(r.get("confidence"), 50.0) / 100.0
+        payload = _v32_outcome_payload(r)
+        y = 1.0 if _v32_f(payload.get("final_r"), 0.0) > 0 else 0.0
+        rows.append([p, _v32_f(lf.get("setup_quality"),0)/100.0, _v32_f(lf.get("entry_location_score"),50)/100.0, _v32_f(lf.get("rr"),0)/4.0, _v32_f(lf.get("selected_sweep"),0), _v32_f((r.get("time_context") or {}).get("hour_sin"),0), _v32_f((r.get("time_context") or {}).get("hour_cos"),1)])
         ys.append(y)
-    if len(rows)<V32_MIN_OUTCOMES: return {"status":"INSUFFICIENT"}
+    if len(rows) < max(V32_MIN_OUTCOMES, 10):
+        return {"status":"INSUFFICIENT", "reason":"too_few_labeled_rows", "sample_count":len(rows)}
     X=np.asarray(rows,float); y=np.asarray(ys,float)
-    split=max(int(len(X)*0.70),V32_MIN_OUTCOMES-10)
-    split=min(split,len(X)-10)
-    mu=X[:split].mean(axis=0); sd=X[:split].std(axis=0); sd[sd<1e-8]=1.0
-    Z=(X-mu)/sd; Ztr=Z[:split]; ytr=y[:split]; Zte=Z[split:]; yte=y[split:]
-    w=np.zeros(Z.shape[1]); b=0.0
+    test_n=max(5, int(round(len(X)*0.30)))
+    if len(X)-test_n < 5:
+        test_n=max(1, len(X)//3)
+    train_n=len(X)-test_n
+    if train_n < 5 or test_n < 1:
+        return {"status":"INSUFFICIENT", "reason":"invalid_oos_split", "sample_count":len(X)}
+    Ztr_raw=X[:train_n]; Zte_raw=X[train_n:]; ytr=y[:train_n]; yte=y[train_n:]
+    if len(np.unique(ytr)) < 2:
+        return {"status":"INSUFFICIENT", "reason":"single_class_training", "sample_count":len(X), "train_count":train_n, "oos_count":test_n}
+    mu=Ztr_raw.mean(axis=0); sd=Ztr_raw.std(axis=0); sd[sd<1e-8]=1.0
+    Ztr=(Ztr_raw-mu)/sd; Zte=(Zte_raw-mu)/sd
+    w=np.zeros(Ztr.shape[1]); b=0.0
     for _ in range(220):
         z=np.clip(Ztr@w+b,-8,8); p=1/(1+np.exp(-z)); grad=(Ztr.T@(p-ytr))/len(ytr)+0.01*w; gb=float(np.mean(p-ytr)); w-=0.08*grad; b-=0.08*gb
     pte=1/(1+np.exp(-np.clip(Zte@w+b,-8,8))); pred=(pte>=0.5).astype(float); acc=float(np.mean(pred==yte)) if len(yte) else 0.0
@@ -5028,11 +5090,19 @@ def _v32_research_cycle():
     if len(outcomes) >= V32_MIN_OUTCOMES and (prev_model_samples == 0 or len(outcomes)-prev_model_samples >= 10):
         model=_v32_model_fit(outcomes)
         if model.get("status")=="READY":
+            oos=float(model.get("oos_accuracy",0.0) or 0.0)
+            if oos >= 0.52 and int(model.get("oos_count",0) or 0) >= 10:
+                promoted=dict(model)
+                promoted.update({"active":True,"schema":MACHINE_LEARNING_SCHEMA,"model_version":f"ML-{int(time.time())}","live_weight":0.25,"promoted_at":time.time()})
+                if _save_active_learning_model(promoted):
+                    set_learning_model(promoted)
+                    with _V32_LOCK:
+                        _V32_STATE["model_promotions"]=int(_V32_STATE.get("model_promotions",0))+1
             with _V32_LOCK:
                 _V32_STATE["model_candidates"]=int(_V32_STATE.get("model_candidates",0))+1
                 _V32_STATE["last_model_update"]=time.time()
                 _V32_STATE["last_model_sample_count"]=len(outcomes)
-            _v33_log("MODEL", f"research_fit=READY samples={model.get('sample_count',0)} oos={model.get('oos_count',0)}")
+            _v33_log("MODEL", f"research_fit=READY samples={model.get('sample_count',0)} oos={model.get('oos_count',0)} accuracy={oos:.3f}")
         else:
             _v33_log("MODEL", f"research_fit={model.get('status','INSUFFICIENT')} samples={model.get('sample_count',0)}")
     else:
@@ -5129,7 +5199,15 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
     except Exception as exc:
         _v33_log("DATA", f"market observation bridge gagal {symbol}: {exc}", logging.DEBUG)
     if not isinstance(result, dict):
-        return result
+        return {
+            "symbol": symbol, "decision": "HOLD", "confidence": 0,
+            "execution_eligible": False, "no_signal": True,
+            "analysis_stage": "CORE_NO_CANDIDATE",
+            "rejected_reason": "NO_VALID_ENTRY_CANDIDATE",
+            "brain_version": V40_VERSION, "cognitive_schema": V32_SCHEMA,
+            "strategy_version": str(_AGENT_STATE.get("strategy_version") or "S1"),
+            "time_context": _v32_hour_context(ts),
+        }
     try:
         result = _v32_time_features_into(result, ts)
         result.setdefault("learning_features", {})
@@ -5139,8 +5217,9 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
         snap["time_context"] = tc
         snap["coverage_role"] = "candidate"
         result["research_snapshot"] = snap
-        result["brain_version"] = V32_VERSION
+        result["brain_version"] = V40_VERSION
         result["cognitive_schema"] = V32_SCHEMA
+        result["strategy_version"] = str(_AGENT_STATE.get("strategy_version") or "S1")
     except Exception as exc:
         log.warning(f"[V32] full_analyze annotation gagal {symbol}: {exc}")
     return result
@@ -5159,10 +5238,18 @@ def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
 
 
 def ingest_live_candidate(signal,h1=None,m15=None,d1=None,rejected_reason=None,source="binance"):
+    """Record one live/shadow candidate idempotently. Never calls execution APIs."""
     sig=dict(signal or {}) if isinstance(signal,dict) else {}
     tc=sig.get("time_context") if isinstance(sig.get("time_context"),dict) else _v32_hour_context(sig.get("entry_timestamp") or sig.get("timestamp"))
     snap=sig.get("research_snapshot") if isinstance(sig.get("research_snapshot"),dict) else {}
-    row={"type":"candidate","timestamp":time.time(),"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":_v32_f(sig.get("confidence"),50),"trade_quality":_v32_f(sig.get("trade_quality",sig.get("setup_quality")),0),"archetype":sig.get("archetype"),"regime":sig.get("market_regime") or (snap.get("market") or {}).get("regime"),"time_context":tc,"learning_features":dict(sig.get("learning_features") or {}),"research_snapshot":snap,"signal":sig,"rejected_reason":rejected_reason}
+    uid=str(sig.get("candidate_uid") or f"{sig.get('symbol','')}|{sig.get('timestamp','')}|{sig.get('decision','')}|{sig.get('entry','')}")
+    key=f"{uid}|{source}"
+    with _V32_LOCK:
+        if key in _V34_SEEN_CANDIDATE_KEYS:
+            _v33_log("DATA", f"duplicate candidate ignored uid={uid}", logging.DEBUG)
+            return None
+        _V34_SEEN_CANDIDATE_KEYS.add(key)
+    row={"type":"candidate","timestamp":time.time(),"candidate_uid":uid,"symbol":sig.get("symbol"),"source":source,"decision":sig.get("decision"),"confidence":_v32_f(sig.get("confidence"),50),"trade_quality":_v32_f(sig.get("trade_quality",sig.get("setup_quality")),0),"archetype":sig.get("archetype"),"regime":sig.get("market_regime") or (snap.get("market") or {}).get("regime"),"time_context":tc,"learning_features":dict(sig.get("learning_features") or {}),"research_snapshot":snap,"signal":sig,"rejected_reason":rejected_reason}
     return _v32_record_experience(row)
 
 
@@ -5196,6 +5283,9 @@ def reset_cognitive_memory():
             "schema":V32_SCHEMA,"version":V32_VERSION,"observations":0,"candidates":0,"outcomes":0,"wins":0,"losses":0,"autopsies":0,"counterfactuals":0,"belief_revisions":0,"research_questions":0,"resolved_questions":0,"model_candidates":0,"model_promotions":0,"drift_score":0.0,"drift_status":"UNKNOWN","time_effect":{"status":"INSUFFICIENT","usable":False},"coverage":{"candidate_count":0,"live_candidate_count":0,"shadow_count":0,"coverage_rate":0.0},"calibration":{"status":"INSUFFICIENT","buckets":[]},"last_review":None,"last_model_update":None,"last_model_sample_count":0,"last_reviewed_outcomes":0,"last_policy_revision":None,"policy_revision_count":0,
         }
         _V32_BELIEFS={}; _V32_BUFFER=[]; _V32_TICKS=0; _V32_LAST_ERROR=None
+        _V34_SEEN_OUTCOME_KEYS.clear(); _V34_SEEN_CANDIDATE_KEYS.clear()
+        if "_COG_SEEN_OUTCOME_KEYS" in globals():
+            globals()["_COG_SEEN_OUTCOME_KEYS"].clear()
         for path in (V32_STATE_FILE,V32_EXPERIENCE_FILE,V32_LESSON_FILE,V32_POLICY_FILE):
             try: path.unlink(missing_ok=True)
             except Exception: pass
@@ -5204,25 +5294,38 @@ def reset_cognitive_memory():
 
 
 def full_command(action, callbacks=None):
-    global _V32_NOTIFY, _V32_LAST_TELEGRAM_NOTIFY
+    global _V32_NOTIFY, _V32_LAST_TELEGRAM_NOTIFY, _FULL_ENABLED, _LEARNED_MODEL
     callbacks=callbacks if isinstance(callbacks,dict) else {}
     if callable(callbacks.get("notify")):
         _V32_NOTIFY = callbacks.get("notify")
     action=str(action or "status").strip().lower()
     try:
         if action=="on":
+            _FULL_ENABLED=True
             cb=callbacks.get("on"); payload=cb() if callable(cb) else {}
             _v32_start()
+            try: adaptive_agent_start()
+            except Exception as exc: log.warning(f"[FULL] adaptive worker start gagal: {exc}")
             _v33_notify("🧠 FULL ON — otak mulai belajar terus.", force=True)
             return ("🧠 <b>FULL LEARNING ON</b>\n"
                     "Otak belajar terus: observasi → kandidat → outcome → autopsy → counterfactual → calibration → hypothesis → adaptation.\n"
                     "<b>Frequency tetap menjadi objective</b>; learning tidak diperbolehkan mematikan opportunity hanya demi menjadi lebih ketat.\n"
                     "Satu SL tidak mengubah policy secara langsung; perubahan harus melewati bukti bertahap dan stability review.\n\n" + _v32_full_text(payload))
         if action=="off":
-            _v32_stop(); cb=callbacks.get("off"); payload=cb() if callable(cb) else {}
+            _FULL_ENABLED=False
+            _v32_stop()
+            try: adaptive_agent_stop()
+            except Exception as exc: log.warning(f"[FULL] adaptive worker stop gagal: {exc}")
+            cb=callbacks.get("off"); payload=cb() if callable(cb) else {}
             _v33_notify("🧠 FULL OFF — learning dihentikan; model terakhir dipertahankan.", force=True)
             return "🧠 <b>FULL LEARNING OFF</b>\nResearch worker dihentikan; state/model terakhir dipertahankan.\n\n"+_v32_full_text(payload)
         if action=="reset":
+            _FULL_ENABLED=False
+            try: adaptive_agent_stop()
+            except Exception: pass
+            _LEARNED_MODEL=None
+            try: _LEARNED_MODEL_FILE.unlink(missing_ok=True)
+            except Exception: pass
             cb=callbacks.get("reset"); payload=cb() if callable(cb) else {}
             st=reset_cognitive_memory()
             return "🧠 <b>FULL RESET</b>\nCognitive research memory V32 dihapus; trading ledger/posisi tidak disentuh.\n\n"+_v32_full_text({"mode":False,"cognitive_worker":st})
@@ -5277,404 +5380,507 @@ __all__ = list(dict.fromkeys(__all__ + [
 ]))
 
 
-# ============================================================================
-# V35 ADAPTIVE BRAIN LAYER
-# ============================================================================
-# This layer deliberately sits above the stable analysis engine.  It does not
-# place/cancel orders and does not own Binance resources.  It learns strategy
-# structure from evidence and changes ONE policy dimension at a time.
+# =============================================================================
+# V35 ADAPTIVE AGENT OVERLAY
+# =============================================================================
+# Design contract:
+#   strategy_logic.py = replaceable brain.
+#   It may research, learn, rank and propose policy changes, but NEVER calls
+#   Binance execution APIs. main.py remains the execution body.
+#
+# Learning starts immediately from observations. There is NO "wait 30 trades"
+# requirement for observation/model bookkeeping. Policy changes still require
+# batched evidence, validation and stability; one SL cannot rewrite the brain.
+#
+# Sources of evidence:
+#   1) historical replay (local Binance-compatible OHLCV files),
+#   2) live market observations,
+#   3) every analyzed live candidate, including below-threshold candidates,
+#   4) executed trade outcomes and management events.
+#
+# Frequency/opportunity is a first-class research metric. The brain is not
+# rewarded for simply making the filter stricter and quieter.
 
-V35_VERSION = "V35_ADAPTIVE_BRAIN"
-V35_SCHEMA = "strategy_brain_v35"
-_V35_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
-_V35_STATE_FILE = _V35_DIR / "strategy_brain_v35.json"
-_V35_EXPERIENCE_FILE = _V35_DIR / "strategy_brain_v35_experience.jsonl"
-_V35_LOCK = threading.RLock()
+AGENT_BRAIN_API_VERSION = "v35-body-brain-contract-1"
+AGENT_STATE_DIR = Path(os.getenv("FULL_STATE_DIR", "machine_learning_state"))
+AGENT_STATE_FILE = AGENT_STATE_DIR / "adaptive_brain_state.json"
+AGENT_POLICY_FILE = AGENT_STATE_DIR / "adaptive_policy.json"
+AGENT_HISTORY_DIR = Path(os.getenv("HISTORICAL_DATA_DIR", str(AGENT_STATE_DIR / "historical_data")))
+AGENT_HISTORICAL_DAYS = max(30, int(os.getenv("HISTORICAL_LEARNING_DAYS", "90")))
+AGENT_RESEARCH_INTERVAL = max(5.0, float(os.getenv("ADAPTIVE_RESEARCH_INTERVAL", "20")))
+AGENT_REPLAY_WORKERS = max(1, min(4, int(os.getenv("ADAPTIVE_REPLAY_WORKERS", "2"))))
+AGENT_REPLAY_STEP_M15 = max(1, int(os.getenv("ADAPTIVE_REPLAY_STEP_M15", "4")))
+AGENT_MIN_POLICY_EVIDENCE = max(8, int(os.getenv("ADAPTIVE_MIN_POLICY_EVIDENCE", "20")))
+AGENT_POLICY_MAX_DELTA = max(0.01, min(0.10, float(os.getenv("ADAPTIVE_POLICY_MAX_DELTA", "0.03"))))
+AGENT_EXPLORATION_SHARE = max(0.05, min(0.30, float(os.getenv("ADAPTIVE_EXPLORATION_SHARE", "0.15"))))
+AGENT_AUTO_HISTORICAL = str(os.getenv("ADAPTIVE_AUTO_HISTORICAL", "1")).strip().lower() not in {"0", "false", "off", "no"}
+AGENT_MAX_HISTORY_ROWS = max(5000, int(os.getenv("ADAPTIVE_MAX_HISTORY_ROWS", "300000")))
 
-_V35_DEFAULT = {
-    "schema": V35_SCHEMA,
-    "version": V35_VERSION,
-    "strategy_version": "S00",
-    "strategy_revision": 0,
-    "last_revision_at": None,
-    "last_revision_reason": None,
-    "champion": "S00",
-    "components": {
-        "setup_preferences": {},
-        "regime_preferences": {},
-        "time_preferences": {},
-        "btc_alignment_preferences": {},
-        "entry_timing": {"early": 0.0, "late": 0.0},
-        "management_preferences": {}
-    },
-    "cells": {},
-    "evidence_count": 0,
-    "candidate_count": 0,
-    "outcome_count": 0,
-    "policy_changes": [],
-    "last_full_review": None
+_AGENT_LOCK = threading.RLock()
+_AGENT_STOP = threading.Event()
+_AGENT_WAKE = threading.Event()
+_AGENT_THREAD = None
+_AGENT_HISTORY_THREAD = None
+_AGENT_HISTORY_DONE = set()
+_AGENT_LAST_ERROR = None
+_AGENT_TICKS = 0
+_AGENT_LAST_REPORT = {}
+_AGENT_STATE = {
+    "version": AGENT_BRAIN_API_VERSION,
+    "brain_version": V32_VERSION,
+    "historical": {"files": 0, "rows": 0, "replay_candidates": 0, "status": "NOT_STARTED"},
+    "live": {"observations": 0, "candidates": 0, "outcomes": 0},
+    "frequency": {},
+    "policy": {},
+    "policy_revisions": 0,
+    "strategy_revisions": 0,
+    "strategy_version": "S1",
+    "last_research": None,
 }
-_V35_STATE = {}
 
 
-def _v35_num(v, default=0.0):
+def _agent_json_load(path, default):
     try:
-        x = float(v)
-        return x if np.isfinite(x) else float(default)
-    except Exception:
-        return float(default)
-
-
-def _v35_clamp(v, lo, hi):
-    return max(lo, min(hi, _v35_num(v, 0.0)))
-
-
-def _v35_load():
-    global _V35_STATE
-    with _V35_LOCK:
-        try:
-            if _V35_STATE_FILE.exists():
-                raw = json.loads(_V35_STATE_FILE.read_text(encoding="utf-8"))
-                if isinstance(raw, dict) and raw.get("schema") == V35_SCHEMA:
-                    base = json.loads(json.dumps(_V35_DEFAULT))
-                    base.update(raw)
-                    for k, dv in _V35_DEFAULT["components"].items():
-                        if not isinstance(base.get("components", {}).get(k), type(dv)):
-                            base.setdefault("components", {})[k] = dv
-                    _V35_STATE = base
-                    return
-        except Exception as exc:
-            log.warning("[V35] state load failed: %s", exc)
-        _V35_STATE = json.loads(json.dumps(_V35_DEFAULT))
-
-
-def _v35_save():
-    with _V35_LOCK:
-        try:
-            _V35_DIR.mkdir(parents=True, exist_ok=True)
-            tmp = _V35_STATE_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(_V35_STATE, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
-            os.replace(tmp, _V35_STATE_FILE)
-            return True
-        except Exception as exc:
-            log.warning("[V35] state save failed: %s", exc)
-            return False
-
-
-def _v35_append(row):
-    try:
-        _V35_DIR.mkdir(parents=True, exist_ok=True)
-        with _V35_EXPERIENCE_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False, allow_nan=False, default=str) + "\n")
+        if path.exists():
+            obj = json.loads(path.read_text(encoding="utf-8"))
+            return obj if isinstance(obj, type(default)) else default
     except Exception as exc:
-        log.warning("[V35] experience append failed: %s", exc)
+        log.warning(f"[ADAPTIVE] load {path.name} gagal: {exc}")
+    return default
 
 
-def _v35_key(signal):
-    sig = signal if isinstance(signal, dict) else {}
-    snap = sig.get("research_snapshot") or {}
-    market = snap.get("market") or {}
-    setup = str(sig.get("archetype") or sig.get("setup_type") or sig.get("setup") or "UNKNOWN").upper()
-    regime = str(sig.get("market_regime") or market.get("regime") or "UNKNOWN").upper()
-    tc = sig.get("time_context") or {}
-    session = str(tc.get("session") or "UNKNOWN").upper()
-    btc = str(sig.get("btc_bias") or sig.get("macro_bias") or "UNKNOWN").upper()
-    return setup, regime, session, btc
+def _agent_json_save(path, obj):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(obj, ensure_ascii=False, allow_nan=False, indent=2, default=str), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:
+        log.warning(f"[ADAPTIVE] save {path.name} gagal: {exc}")
+        return False
 
 
-def _v35_outcome_value(outcome):
-    if isinstance(outcome, dict):
-        for k in ("pnl_r", "R", "r_multiple", "profit_r", "pnl_pct", "profit_pct", "return_pct", "pnl"):
-            if k in outcome:
-                x = _v35_num(outcome.get(k), 0.0)
-                # Dollar PnL can be enormous relative to R; only use it as a
-                # directional fallback when no normalized field exists.
-                return x
-        reason = str(outcome.get("exit_reason") or outcome.get("reason") or "").upper()
-        if "TRAIL" in reason and "LOSS" not in reason:
-            return 0.1
-        if "TP" in reason:
-            return 1.0
-        if "SL" in reason:
-            return -1.0
-    return _v35_num(outcome, 0.0)
+with _AGENT_LOCK:
+    _AGENT_STATE.update(_agent_json_load(AGENT_STATE_FILE, {}))
+    _AGENT_POLICY = _agent_json_load(AGENT_POLICY_FILE, {})
+    if not isinstance(_AGENT_POLICY, dict):
+        _AGENT_POLICY = {}
 
 
-def _v35_entry_quality(signal):
-    sig = signal if isinstance(signal, dict) else {}
-    for k in ("entry_quality", "setup_quality", "trade_quality", "decision_score"):
-        if k in sig:
-            return _v35_clamp(_v35_num(sig.get(k), 50.0), 0.0, 100.0)
-    return 50.0
+def _agent_strategy_policy_adjustment(archetype, regime):
+    """Translate learned policy into a small selection modifier, not a hard gate."""
+    key=f"{archetype}|{regime}"
+    try:
+        raw=float(_AGENT_POLICY.get(key,0.0) or 0.0)
+    except (TypeError, ValueError):
+        raw=0.0
+    delta=max(-0.25,min(0.25,raw))
+    return {"key":key,"delta":round(delta,6),"score_adjustment":round(delta*10.0,4),"policy_active":bool(abs(delta)>1e-9)}
 
 
-def _v35_cell(signal):
-    setup, regime, session, btc = _v35_key(signal)
-    # Keep cells bounded: setup/regime is the primary learning unit. Time and
-    # BTC are dimensions inside the cell, not an explosion of independent cells.
-    return f"{setup}|{regime}", setup, regime, session, btc
+def _agent_read_records(limit=AGENT_MAX_HISTORY_ROWS):
+    """Read the canonical v32/v35 experience log without touching Binance."""
+    rows = []
+    try:
+        if V32_EXPERIENCE_FILE.exists():
+            with V32_EXPERIENCE_FILE.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                        if isinstance(row, dict):
+                            rows.append(row)
+                    except Exception:
+                        continue
+    except Exception as exc:
+        log.warning(f"[ADAPTIVE] experience read gagal: {exc}")
+    return rows[-int(limit):]
 
 
-def _v35_record_candidate(signal, decision=None, rejected_reason=None, source="binance"):
-    sig = dict(signal or {}) if isinstance(signal, dict) else {}
-    key, setup, regime, session, btc = _v35_cell(sig)
-    row = {
-        "type": "candidate",
-        "timestamp": time.time(),
-        "symbol": sig.get("symbol"),
-        "cell": key,
-        "setup": setup,
-        "regime": regime,
-        "session": session,
-        "btc_bias": btc,
-        "decision": decision if decision is not None else sig.get("decision"),
-        "confidence": _v35_num(sig.get("confidence"), 50.0),
-        "entry_quality": _v35_entry_quality(sig),
-        "strategy_version": _V35_STATE.get("strategy_version", "S00"),
-        "rejected_reason": rejected_reason,
-        "source": source,
-    }
-    with _V35_LOCK:
-        _V35_STATE["candidate_count"] = int(_V35_STATE.get("candidate_count", 0)) + 1
-        _V35_STATE["evidence_count"] = int(_V35_STATE.get("evidence_count", 0)) + 1
-        _v35_append(row)
-        _v35_save()
-    return row
-
-
-def _v35_record_outcome(signal, outcome, source="binance"):
-    sig = dict(signal or {}) if isinstance(signal, dict) else {}
-    key, setup, regime, session, btc = _v35_cell(sig)
-    value = _v35_outcome_value(outcome)
-    eq = _v35_entry_quality(sig)
-    with _V35_LOCK:
-        cells = _V35_STATE.setdefault("cells", {})
-        cell = cells.setdefault(key, {
-            "setup": setup, "regime": regime, "n": 0, "wins": 0,
-            "losses": 0, "sum_result": 0.0, "sum_entry_quality": 0.0,
-            "bad_entry_wins": 0, "good_entry_losses": 0,
-            "sessions": {}, "btc": {}
+def _agent_candidate_cells(records):
+    """Compute opportunity/frequency and quality cells from *all* candidates."""
+    candidates = [r for r in records if isinstance(r, dict) and r.get("type") == "candidate"]
+    cells = defaultdict(list)
+    for r in candidates:
+        regime = str(r.get("regime") or r.get("market_regime") or "UNKNOWN")
+        archetype = str(r.get("archetype") or "UNKNOWN")
+        decision = str(r.get("decision") or "UNKNOWN").upper()
+        key = (archetype, regime, decision)
+        q = float(r.get("trade_quality") or (r.get("confidence") or 0.0))
+        cells[key].append(q)
+    out = []
+    for (archetype, regime, decision), vals in cells.items():
+        n = len(vals)
+        out.append({
+            "archetype": archetype,
+            "regime": regime,
+            "decision": decision,
+            "n": n,
+            "avg_quality": round(float(np.mean(vals)), 3) if vals else 0.0,
+            "opportunity_share": round(n / max(1, len(candidates)), 5),
         })
-        cell["n"] += 1
-        cell["wins"] += int(value > 0)
-        cell["losses"] += int(value < 0)
-        cell["sum_result"] += value
-        cell["sum_entry_quality"] += eq
-        cell["bad_entry_wins"] += int(value > 0 and eq < 45)
-        cell["good_entry_losses"] += int(value < 0 and eq >= 60)
-        sess = cell.setdefault("sessions", {}).setdefault(session, {"n":0,"sum":0.0})
-        sess["n"] += 1; sess["sum"] += value
-        b = cell.setdefault("btc", {}).setdefault(btc, {"n":0,"sum":0.0})
-        b["n"] += 1; b["sum"] += value
-        _V35_STATE["outcome_count"] = int(_V35_STATE.get("outcome_count", 0)) + 1
-        _V35_STATE["evidence_count"] = int(_V35_STATE.get("evidence_count", 0)) + 1
-        row = {
-            "type":"outcome", "timestamp":time.time(), "symbol":sig.get("symbol"),
-            "cell":key, "setup":setup, "regime":regime, "session":session,
-            "btc_bias":btc, "result":value, "entry_quality":eq,
-            "outcome":outcome, "strategy_version":_V35_STATE.get("strategy_version","S00"),
-            "source":source
-        }
-        _v35_append(row)
-        _v35_evolve_locked()
-        _v35_save()
-    return row
+    out.sort(key=lambda x: (-x["n"], -x["avg_quality"]))
+    return out
 
 
-def _v35_evolve_locked():
-    """Evidence-driven strategy mutation. One dimension per revision."""
-    cells = _V35_STATE.get("cells", {})
-    if not cells:
-        return None
-    # Avoid thrashing: a new policy revision requires a batch of fresh outcomes.
-    n_total = int(_V35_STATE.get("outcome_count", 0))
-    last_revision_count = int((_V35_STATE.get("last_revision_at_count") or 0))
-    if n_total < 8 or n_total - last_revision_count < 8:
-        return None
-
-    candidates = []
-    for key, c in cells.items():
-        n = int(c.get("n", 0))
-        if n < 8:
-            continue
-        avg = _v35_num(c.get("sum_result"), 0.0) / max(1, n)
-        bad_rescue = int(c.get("bad_entry_wins", 0)) / max(1, n)
-        good_loss = int(c.get("good_entry_losses", 0)) / max(1, n)
-        candidates.append((avg, bad_rescue, good_loss, n, key, c))
-    if not candidates:
-        return None
-
-    # Prefer the strongest repeatable negative/positive evidence.
-    negative = [x for x in candidates if x[0] < -0.08]
-    positive = [x for x in candidates if x[0] > 0.10]
-    target = min(negative, key=lambda x: x[0]) if negative else (max(positive, key=lambda x: x[0]) if positive else None)
-    if target is None:
-        return None
-
-    avg, bad_rescue, good_loss, n, key, cell = target
-    setup = cell.get("setup", "UNKNOWN")
-    regime = cell.get("regime", "UNKNOWN")
-    components = _V35_STATE.setdefault("components", {})
-    setup_pref = components.setdefault("setup_preferences", {})
-    old = _v35_num(setup_pref.get(setup), 0.0)
-
-    # A bad-entry WIN is deliberately treated as weak evidence for entry.
-    # Conversely, a good-entry LOSS is not treated as proof the setup is bad.
-    if avg < -0.08:
-        delta = -0.08 if bad_rescue < 0.35 else -0.04
-        reason = f"cell {key}: repeated negative expectancy"
-        dimension = "setup_preferences"
-    else:
-        delta = 0.06
-        reason = f"cell {key}: repeated positive expectancy"
-        dimension = "setup_preferences"
-    new = _v35_clamp(old + delta, -0.40, 0.40)
-    if abs(new - old) < 0.02:
-        return None
-
-    setup_pref[setup] = new
-    rev = int(_V35_STATE.get("strategy_revision", 0)) + 1
-    old_ver = str(_V35_STATE.get("strategy_version", "S00"))
-    new_ver = f"S{rev:02d}"
-    change = {
-        "revision": rev, "timestamp": time.time(), "from": old_ver,
-        "to": new_ver, "dimension": dimension, "target": setup,
-        "old": old, "new": new, "delta": new-old, "sample": n,
-        "avg_result": avg, "bad_entry_rescue_rate": bad_rescue,
-        "good_entry_loss_rate": good_loss, "reason": reason,
-        "regime": regime, "status": "SHADOW_POLICY_CHANGE"
-    }
-    _V35_STATE["strategy_revision"] = rev
-    _V35_STATE["strategy_version"] = new_ver
-    _V35_STATE["champion"] = new_ver
-    _V35_STATE["last_revision_at"] = time.time()
-    _V35_STATE["last_revision_at_count"] = n_total
-    _V35_STATE["last_revision_reason"] = reason
-    hist = _V35_STATE.setdefault("policy_changes", [])
-    hist.append(change)
-    if len(hist) > 50:
-        del hist[:-50]
-    _v35_append({"type":"strategy_revision", **change})
-    return change
-
-
-def get_adaptive_strategy_state():
-    with _V35_LOCK:
-        return json.loads(json.dumps(_V35_STATE, default=str))
-
-
-def _v35_adjust_result(result, signal_symbol=None):
-    if not isinstance(result, dict):
-        return result
-    with _V35_LOCK:
-        setup, regime, session, btc = _v35_key(result)
-        cell_key = f"{setup}|{regime}"
-        cell = (_V35_STATE.get("cells") or {}).get(cell_key) or {}
-        n = int(cell.get("n", 0))
-        pref = _v35_num((_V35_STATE.get("components", {}).get("setup_preferences", {}) or {}).get(setup), 0.0)
-        avg = _v35_num(cell.get("sum_result"), 0.0) / max(1, n)
-        bad_rescue = int(cell.get("bad_entry_wins", 0)) / max(1, n)
-        # Only mature evidence can alter the live analysis. Sparse evidence is
-        # visible but neutral, preventing overfitting to the first few trades.
-        maturity = _v35_clamp((n - 7) / 18.0, 0.0, 1.0)
-        adaptive_delta = _v35_clamp((pref * 18.0 + avg * 20.0) * maturity, -12.0, 12.0)
-        base_conf = _v35_num(result.get("confidence"), 50.0)
-        calibrated = _v35_clamp(base_conf + adaptive_delta, 0.0, 100.0)
-        result["raw_confidence"] = base_conf
-        result["calibrated_confidence"] = calibrated
-        result["strategy_version"] = _V35_STATE.get("strategy_version", "S00")
-        result["adaptive_brain"] = {
-            "version": V35_VERSION, "cell": cell_key, "sample": n,
-            "maturity": maturity, "strategy_adjustment": adaptive_delta,
-            "entry_evidence": {"avg_result": avg, "bad_entry_rescue_rate": bad_rescue},
-            "role": "evidence_weighting_not_single_authority"
-        }
-        # Mature, strongly negative repeated evidence changes the SETUP policy,
-        # not merely the confidence number. We use WAIT_ENTRY rather than a
-        # hard market veto so the underlying thesis remains inspectable.
-        if n >= 12 and avg < -0.15 and maturity >= 0.5:
-            current = str(result.get("decision") or "").upper()
-            if current in {"BUY", "SELL", "LONG", "SHORT", "ENTER", "TRADE"}:
-                result["decision_before_adaptation"] = result.get("decision")
-                result["decision"] = "WAIT_ENTRY"
-                result["adaptive_reason"] = "mature negative setup evidence"
-        return result
-
-
-# Preserve the stable API and layer V35 on top instead of replacing the proven
-# chart/geometry engine.
-_V35_BASE_FULL_ANALYZE = full_analyze
-_V35_BASE_MANAGE_POSITION = manage_position
-_V35_BASE_RECORD_CANDIDATE = record_candidate_observation
-_V35_BASE_RECORD_OUTCOME = record_trade_outcome
-_V35_BASE_FULL_REVIEW = full_learning_review
-
-
-def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_history=None):
-    result = _V35_BASE_FULL_ANALYZE(df_h1, df_m15, df_d1, symbol=symbol, df_btc_h1=df_btc_h1, trade_history=trade_history)
-    if isinstance(result, dict):
+def _agent_outcome_cells(records):
+    outcomes = [r for r in records if isinstance(r, dict) and r.get("type") == "trade_outcome"]
+    cells = defaultdict(list)
+    for r in outcomes:
+        key = (str(r.get("archetype") or "UNKNOWN"), str(r.get("market_regime") or r.get("regime") or "UNKNOWN"))
+        p = r.get("outcome") if isinstance(r.get("outcome"), dict) else r
         try:
-            result.setdefault("symbol", symbol)
-            _v35_adjust_result(result, symbol)
-        except Exception as exc:
-            log.warning("[V35] adaptive annotation failed %s: %s", symbol, exc)
-    return result
+            final_r = float(p.get("final_r", 0.0) or 0.0)
+        except Exception:
+            final_r = 0.0
+        cells[key].append(final_r)
+    out = []
+    for (archetype, regime), vals in cells.items():
+        n = len(vals)
+        wins = sum(1 for x in vals if x > 0)
+        out.append({
+            "archetype": archetype,
+            "regime": regime,
+            "n": n,
+            "mean_r": round(float(np.mean(vals)), 5),
+            "win_rate": round(wins / max(1, n), 4),
+        })
+    out.sort(key=lambda x: (x["mean_r"], x["n"]), reverse=True)
+    return out
 
 
-def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None):
-    result = _V35_BASE_MANAGE_POSITION(state, df_m15, df_h1, df_d1, symbol=symbol)
-    if isinstance(result, dict):
-        with _V35_LOCK:
-            result["strategy_version"] = _V35_STATE.get("strategy_version", "S00")
-            result["management_learning"] = {
-                "enabled": True,
-                "principle": "entry_quality_is_separate_from_management_quality",
-                "trail_positive_is_not_entry_validation": True,
-                "learned_policy": dict(_V35_STATE.get("components", {}).get("management_preferences", {}))
-            }
-    return result
+def _agent_frequency_health(candidate_cells):
+    total = sum(int(x.get("n", 0) or 0) for x in candidate_cells)
+    if not total:
+        return {"candidates": 0, "top_cell_share": 0.0, "status": "INSUFFICIENT"}
+    top = max((int(x.get("n", 0) or 0) / total for x in candidate_cells), default=0.0)
+    return {
+        "candidates": total,
+        "top_cell_share": round(top, 4),
+        "exploration_share_target": AGENT_EXPLORATION_SHARE,
+        "status": "HEALTHY" if total >= 20 else "WARMING_UP",
+    }
 
 
-def record_candidate_observation(signal, outcome=None, rejected_reason=None, source="binance"):
-    base = _V35_BASE_RECORD_CANDIDATE(signal, outcome=outcome, rejected_reason=rejected_reason, source=source)
-    try:
-        _v35_record_candidate(signal, decision=(signal or {}).get("decision") if isinstance(signal, dict) else None, rejected_reason=rejected_reason, source=source)
-    except Exception as exc:
-        log.warning("[V35] candidate learning failed: %s", exc)
-    return base
+def _agent_bounded_policy_proposal(candidate_cells, outcome_cells):
+    """Propose small, auditable policy changes; never mutate core strategy code."""
+    proposals = []
+    outcome_map = {(x["archetype"], x["regime"]): x for x in outcome_cells if int(x.get("n", 0) or 0) >= AGENT_MIN_POLICY_EVIDENCE}
+    for c in candidate_cells:
+        key = (c["archetype"], c["regime"])
+        o = outcome_map.get(key)
+        if not o:
+            continue
+        mean_r = float(o.get("mean_r", 0.0))
+        n = int(o.get("n", 0) or 0)
+        # Positive edge => gentle support; negative edge => gentle caution.
+        target = float(np.tanh(mean_r)) * 0.03
+        target = max(-AGENT_POLICY_MAX_DELTA, min(AGENT_POLICY_MAX_DELTA, target))
+        proposals.append({
+            "key": f"{c['archetype']}|{c['regime']}",
+            "delta": round(target, 5),
+            "evidence": n,
+            "mean_r": round(mean_r, 5),
+            "frequency": int(c.get("n", 0) or 0),
+        })
+    return proposals
 
 
-def record_trade_outcome(signal, outcome, source="binance"):
-    base = _V35_BASE_RECORD_OUTCOME(signal, outcome, source=source)
-    try:
-        _v35_record_outcome(signal, outcome, source=source)
-    except Exception as exc:
-        log.warning("[V35] outcome learning failed: %s", exc)
-    return base
+def _agent_apply_policy_proposals(proposals):
+    """Apply only bounded, evidence-backed revisions; one trade cannot change it."""
+    changed = []
+    global _AGENT_POLICY
+    with _AGENT_LOCK:
+        for p in proposals:
+            key = str(p.get("key"))
+            n = int(p.get("evidence", 0) or 0)
+            if n < AGENT_MIN_POLICY_EVIDENCE:
+                continue
+            old = float(_AGENT_POLICY.get(key, 0.0) or 0.0)
+            delta = max(-AGENT_POLICY_MAX_DELTA, min(AGENT_POLICY_MAX_DELTA, float(p.get("delta", 0.0) or 0.0)))
+            # Hysteresis: ignore tiny noise.
+            if abs(delta) < 0.005:
+                continue
+            new = max(-0.25, min(0.25, old + delta * min(1.0, n / 100.0)))
+            if abs(new - old) < 0.002:
+                continue
+            _AGENT_POLICY[key] = round(float(new), 6)
+            changed.append({"key": key, "old": round(old, 6), "new": round(new, 6), "evidence": n})
+        if changed:
+            _AGENT_STATE["policy_revisions"] = int(_AGENT_STATE.get("policy_revisions", 0) or 0) + len(changed)
+            _AGENT_STATE["strategy_revisions"] = int(_AGENT_STATE.get("strategy_revisions", 0) or 0) + len(changed)
+            old_version = str(_AGENT_STATE.get("strategy_version") or "S1")
+            m = re.match(r"S(\d+)", old_version)
+            next_num = (int(m.group(1)) + len(changed)) if m else 1 + len(changed)
+            _AGENT_STATE["strategy_version"] = f"S{next_num}"
+            _AGENT_STATE["policy"] = dict(_AGENT_POLICY)
+            _agent_json_save(AGENT_POLICY_FILE, _AGENT_POLICY)
+            _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+    return changed
 
 
-def full_learning_review(max_rows=V32_RESEARCH_WINDOW):
-    report = _V35_BASE_FULL_REVIEW(max_rows=max_rows)
-    with _V35_LOCK:
-        revision = _v35_evolve_locked()
-        _V35_STATE["last_full_review"] = time.time()
-        _v35_save()
-        if isinstance(report, dict):
-            report["adaptive_strategy"] = {
-                "version": V35_VERSION,
-                "strategy_version": _V35_STATE.get("strategy_version", "S00"),
-                "revision": _V35_STATE.get("strategy_revision", 0),
-                "last_revision": revision,
-                "evidence": _V35_STATE.get("evidence_count", 0),
-                "outcomes": _V35_STATE.get("outcome_count", 0)
-            }
+def adaptive_research_cycle():
+    """Fast research pass. It runs immediately with sparse evidence and scales with data."""
+    records = _agent_read_records()
+    candidate_cells = _agent_candidate_cells(records)
+    outcome_cells = _agent_outcome_cells(records)
+    frequency = _agent_frequency_health(candidate_cells)
+    proposals = _agent_bounded_policy_proposal(candidate_cells, outcome_cells)
+    changed = _agent_apply_policy_proposals(proposals)
+    report = {
+        "timestamp": time.time(),
+        "brain_version": AGENT_BRAIN_API_VERSION,
+        "records": len(records),
+        "candidate_cells": candidate_cells[:100],
+        "outcome_cells": outcome_cells[:100],
+        "frequency": frequency,
+        "policy_proposals": proposals[:100],
+        "policy_changes": changed,
+        "strategy_version": str(_AGENT_STATE.get("strategy_version") or "S1"),
+        "strategy_revision_count": int(_AGENT_STATE.get("strategy_revisions", 0) or 0),
+    }
+    with _AGENT_LOCK:
+        _AGENT_STATE["frequency"] = frequency
+        _AGENT_STATE["live"] = {
+            "observations": sum(1 for x in records if x.get("type") == "market_observation"),
+            "candidates": sum(1 for x in records if x.get("type") == "candidate"),
+            "outcomes": sum(1 for x in records if x.get("type") == "trade_outcome"),
+        }
+        _AGENT_STATE["last_research"] = time.time()
+        _AGENT_STATE["policy"] = dict(_AGENT_POLICY)
+        _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
     return report
 
 
-_v35_load()
+def get_adaptive_status():
+    with _AGENT_LOCK:
+        return {
+            "api_version": AGENT_BRAIN_API_VERSION,
+            "full_enabled": bool(_FULL_ENABLED),
+            "brain_version": V32_VERSION,
+            "worker_alive": bool(_AGENT_THREAD is not None and _AGENT_THREAD.is_alive()),
+            "history_worker_alive": bool(_AGENT_HISTORY_THREAD is not None and _AGENT_HISTORY_THREAD.is_alive()),
+            "ticks": int(_AGENT_TICKS),
+            "last_error": _AGENT_LAST_ERROR,
+            "history": dict(_AGENT_STATE.get("historical") or {}),
+            "live": dict(_AGENT_STATE.get("live") or {}),
+            "frequency": dict(_AGENT_STATE.get("frequency") or {}),
+            "policy_revisions": int(_AGENT_STATE.get("policy_revisions", 0) or 0),
+            "strategy_revisions": int(_AGENT_STATE.get("strategy_revisions", 0) or 0),
+            "strategy_version": str(_AGENT_STATE.get("strategy_version") or "S1"),
+            "exploration_share": AGENT_EXPLORATION_SHARE,
+        }
 
-__all__ = list(dict.fromkeys(__all__ + [
-    "V35_VERSION", "get_adaptive_strategy_state", "full_analyze",
-    "manage_position", "record_candidate_observation", "record_trade_outcome",
-    "full_learning_review"
-]))
+
+def get_adaptive_policy():
+    with _AGENT_LOCK:
+        return dict(_AGENT_POLICY)
+
+
+def _load_ohlcv_file(path):
+    """Load CSV/JSON/JSONL historical OHLCV without contacting Binance."""
+    suffix = path.suffix.lower()
+    rows = []
+    if suffix == ".csv":
+        df = pd.read_csv(path)
+    elif suffix in {".json", ".jsonl"}:
+        if suffix == ".jsonl":
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            df = pd.DataFrame(rows)
+        else:
+            obj = json.loads(path.read_text(encoding="utf-8"))
+            df = pd.DataFrame(obj if isinstance(obj, list) else obj.get("data", []))
+    else:
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    rename = {c.lower().strip(): c for c in df.columns}
+    def pick(*names):
+        for n in names:
+            if n in rename: return rename[n]
+        return None
+    cols = {k: pick(k, k.replace("_", " ")) for k in ("open_time","timestamp","time","open","high","low","close","volume")}
+    ts_col = cols.get("open_time") or cols.get("timestamp") or cols.get("time")
+    if not ts_col:
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "open": pd.to_numeric(df[cols["open"]], errors="coerce"),
+        "high": pd.to_numeric(df[cols["high"]], errors="coerce"),
+        "low": pd.to_numeric(df[cols["low"]], errors="coerce"),
+        "close": pd.to_numeric(df[cols["close"]], errors="coerce"),
+        "volume": pd.to_numeric(df[cols["volume"]], errors="coerce"),
+    }, index=pd.to_datetime(df[ts_col], unit="ms", utc=True, errors="coerce"))
+    if out.index.isna().all():
+        out.index = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
+    out = out[~out.index.isna()].dropna(subset=["open","high","low","close","volume"]).sort_index()
+    return out
+
+
+def _historical_symbol_name(path):
+    name = path.stem.upper()
+    for token in ("-15M", "_15M", "15M", "-M15", "_M15", "M15"):
+        if token in name:
+            return name.split(token)[0].replace("-", "").replace("_", "") or name
+    return name.split("-")[0].split("_")[0]
+
+
+def _replay_one_history_file(path):
+    """Replay one M15-ish OHLCV file; generate observation/candidate evidence only."""
+    try:
+        df = _load_ohlcv_file(path)
+        if df is None or len(df) < 320:
+            return {"file": str(path), "rows": 0, "candidates": 0, "status": "SKIPPED"}
+        # Respect requested historical horizon without relying on current Binance REST.
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=AGENT_HISTORICAL_DAYS)
+        df = df.loc[df.index >= cutoff]
+        if len(df) < 320:
+            return {"file": str(path), "rows": int(len(df)), "candidates": 0, "status": "SKIPPED_SHORT"}
+        h1 = df.resample("1h").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
+        d1 = df.resample("1D").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
+        symbol = _historical_symbol_name(path)
+        emitted = 0
+        step = AGENT_REPLAY_STEP_M15
+        # Point-in-time replay: only rows up to t are visible to the analysis.
+        for i in range(300, len(df) - 32, step):
+            m15_now = df.iloc[:i].copy()
+            now = m15_now.index[-1]
+            h1_now = h1.loc[:now].copy()
+            d1_now = d1.loc[:now].copy()
+            if len(h1_now) < 80 or len(d1_now) < 20:
+                continue
+            try:
+                result = _V31_BASE_FULL_ANALYZE(h1_now, m15_now, d1_now, symbol=symbol, df_btc_h1=None, trade_history=None)
+            except Exception:
+                continue
+            # The original engine can return None; that itself is a useful scan observation.
+            try:
+                feats = extract_market_features(h1_now, m15_now, d1_now, None)
+                _v32_record_experience({"type":"historical_market_observation","timestamp":time.time(),"historical_timestamp":str(now),"symbol":symbol,"source":"historical_replay","features":feats})
+            except Exception:
+                pass
+            if isinstance(result, dict):
+                # Label the hypothetical candidate with forward path information without
+                # allowing those future values to enter the analysis itself.
+                entry = float(result.get("entry") or result.get("price") or 0.0)
+                direction = str(result.get("decision") or "BUY").upper()
+                future = df.iloc[i:min(len(df), i + 32)]
+                if entry > 0 and not future.empty:
+                    if direction == "BUY":
+                        mfe = max(0.0, float(future["high"].max()) - entry)
+                        mae = max(0.0, entry - float(future["low"].min()))
+                    else:
+                        mfe = max(0.0, entry - float(future["low"].min()))
+                        mae = max(0.0, float(future["high"].max()) - entry)
+                    risk = abs(float(result.get("entry") or entry) - float(result.get("sl") or entry)) or np.nan
+                    mfe_r = float(mfe / risk) if np.isfinite(risk) and risk > 0 else 0.0
+                    mae_r = float(mae / risk) if np.isfinite(risk) and risk > 0 else 0.0
+                else:
+                    mfe_r = mae_r = 0.0
+                result = dict(result)
+                result["historical_timestamp"] = str(now)
+                result["source"] = "historical_replay"
+                result["shadow"] = True
+                result["shadow_forward_bars"] = 32
+                result["shadow_mfe_r"] = round(mfe_r, 4)
+                result["shadow_mae_r"] = round(mae_r, 4)
+                result["rejected_reason"] = "historical_shadow"
+                ingest_live_candidate(result, h1=h1_now, m15=m15_now, d1=d1_now, rejected_reason="historical_shadow", source="historical_replay")
+                emitted += 1
+        return {"file": str(path), "rows": int(len(df)), "candidates": emitted, "status": "OK"}
+    except Exception as exc:
+        return {"file": str(path), "rows": 0, "candidates": 0, "status": "ERROR", "error": str(exc)[:300]}
+
+
+def adaptive_replay_historical(force=False):
+    """Replay local historical files in parallel; never uses Binance API."""
+    global _AGENT_HISTORY_DONE
+    if not AGENT_HISTORY_DIR.exists():
+        with _AGENT_LOCK:
+            _AGENT_STATE["historical"] = {"files": 0, "rows": 0, "replay_candidates": 0, "status": "NO_DIRECTORY"}
+            _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+        return dict(_AGENT_STATE["historical"])
+    paths = [p for p in sorted(AGENT_HISTORY_DIR.rglob("*")) if p.suffix.lower() in {".csv", ".json", ".jsonl"}]
+    if not force:
+        paths = [p for p in paths if str(p) not in _AGENT_HISTORY_DONE]
+    if not paths:
+        with _AGENT_LOCK:
+            _AGENT_STATE["historical"] = {"files": len(_AGENT_HISTORY_DONE), "rows": _AGENT_STATE.get("historical",{}).get("rows",0), "replay_candidates": _AGENT_STATE.get("historical",{}).get("replay_candidates",0), "status": "UP_TO_DATE"}
+            _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+        return dict(_AGENT_STATE["historical"])
+    results=[]
+    with ThreadPoolExecutor(max_workers=AGENT_REPLAY_WORKERS, thread_name_prefix="hist-replay") as ex:
+        futs={ex.submit(_replay_one_history_file,p):p for p in paths}
+        for fut in as_completed(futs):
+            try: results.append(fut.result())
+            except Exception as exc: results.append({"file":str(futs[fut]),"status":"ERROR","error":str(exc)[:300]})
+    _AGENT_HISTORY_DONE.update(str(x.get("file")) for x in results if x.get("status") in {"OK","SKIPPED","SKIPPED_SHORT"})
+    with _AGENT_LOCK:
+        hist=_AGENT_STATE.get("historical") if isinstance(_AGENT_STATE.get("historical"),dict) else {}
+        _AGENT_STATE["historical"]={
+            "files": int(hist.get("files",0) or 0)+len(results),
+            "rows": int(hist.get("rows",0) or 0)+sum(int(x.get("rows",0) or 0) for x in results),
+            "replay_candidates": int(hist.get("replay_candidates",0) or 0)+sum(int(x.get("candidates",0) or 0) for x in results),
+            "status": "RUNNING" if results else "IDLE",
+            "last_results": results[-20:],
+        }
+        _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+        return dict(_AGENT_STATE["historical"])
+
+
+def _adaptive_worker_loop():
+    global _AGENT_TICKS, _AGENT_LAST_ERROR
+    log.info("[ADAPTIVE] brain worker started")
+    while not _AGENT_STOP.is_set():
+        try:
+            if not _FULL_ENABLED:
+                _AGENT_WAKE.wait(5)
+                _AGENT_WAKE.clear()
+                continue
+            if AGENT_AUTO_HISTORICAL and _AGENT_TICKS == 0:
+                try:
+                    adaptive_replay_historical(force=False)
+                except Exception:
+                    log.exception("[ADAPTIVE] historical bootstrap gagal")
+            _AGENT_LAST_REPORT = adaptive_research_cycle()
+            _AGENT_TICKS += 1
+            _AGENT_LAST_ERROR = None
+        except Exception as exc:
+            _AGENT_LAST_ERROR = str(exc)[:500]
+            log.exception("[ADAPTIVE] research cycle gagal")
+        _AGENT_WAKE.wait(AGENT_RESEARCH_INTERVAL)
+        _AGENT_WAKE.clear()
+    log.info("[ADAPTIVE] brain worker stopped")
+
+
+def adaptive_agent_start():
+    """Idempotent start. Called by main.py at boot and after brain hot-swap."""
+    global _AGENT_THREAD, _AGENT_STOP
+    with _AGENT_LOCK:
+        if _AGENT_THREAD is not None and _AGENT_THREAD.is_alive():
+            _AGENT_WAKE.set()
+            return get_adaptive_status()
+        _AGENT_STOP.clear()
+        _AGENT_WAKE.set()
+        _AGENT_THREAD = threading.Thread(target=_adaptive_worker_loop, name="adaptive-brain", daemon=True)
+        _AGENT_THREAD.start()
+    return get_adaptive_status()
+
+
+def adaptive_agent_stop():
+    with _AGENT_LOCK:
+        _AGENT_STOP.set()
+        _AGENT_WAKE.set()
+    return get_adaptive_status()
+
+
+# FULL workers are operator-controlled; no research thread is spawned at import.
+
+# Explicit public API for the stable execution body.
+try:
+    __all__ = list(dict.fromkeys(__all__ + [
+        "AGENT_BRAIN_API_VERSION", "adaptive_agent_start", "adaptive_agent_stop",
+        "adaptive_research_cycle", "adaptive_replay_historical", "get_adaptive_status",
+        "get_adaptive_policy",
+    ]))
+except Exception:
+    pass
