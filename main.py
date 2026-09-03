@@ -7388,6 +7388,152 @@ def run_scan_once_final(chat_id):
     except Exception: pass
     return result
 
+
+# ═════════════════════════════════════════════
+# V11 — SCAN DIAGNOSTICS / ZERO-SIGNAL VISIBILITY
+# ═════════════════════════════════════════════
+# V11 does not alter the strategy decision. It makes every scan outcome
+# observable so "scanner jalan tapi 0 signal" is distinguishable from a
+# data/brain/runtime failure.
+_SCAN_DIAG_V11_LOCK = threading.RLock()
+_SCAN_DIAG_V11 = {
+    "started_at": 0.0, "symbols": 0, "analyzed": 0, "failed": 0,
+    "empty_h1": 0, "empty_m15": 0, "empty_d1": 0,
+    "none_result": 0, "no_signal": 0, "directional": 0,
+    "candidate": 0, "eligible": 0, "max_confidence": None,
+    "items": [], "errors": [],
+}
+_ORIG_FULL_ANALYZE_V11 = globals().get("full_analyze")
+
+def _scan_diag_reset_v11():
+    with _SCAN_DIAG_V11_LOCK:
+        _SCAN_DIAG_V11.clear()
+        _SCAN_DIAG_V11.update({
+            "started_at": time.time(), "symbols": 0, "analyzed": 0, "failed": 0,
+            "empty_h1": 0, "empty_m15": 0, "empty_d1": 0,
+            "none_result": 0, "no_signal": 0, "directional": 0,
+            "candidate": 0, "eligible": 0, "max_confidence": None,
+            "items": [], "errors": [],
+        })
+
+def _scan_diag_capture_v11(symbol, h1, m15, d1, result=None, error=None):
+    with _SCAN_DIAG_V11_LOCK:
+        _SCAN_DIAG_V11["symbols"] += 1
+        if h1 is None or getattr(h1, "empty", True): _SCAN_DIAG_V11["empty_h1"] += 1
+        if m15 is None or getattr(m15, "empty", True): _SCAN_DIAG_V11["empty_m15"] += 1
+        if d1 is None or getattr(d1, "empty", True): _SCAN_DIAG_V11["empty_d1"] += 1
+        if error:
+            _SCAN_DIAG_V11["failed"] += 1
+            _SCAN_DIAG_V11["errors"].append(f"{symbol}:{type(error).__name__}:{str(error)[:120]}")
+            return
+        if isinstance(result, dict):
+            _SCAN_DIAG_V11["analyzed"] += 1
+            conf=float(result.get("confidence", 0) or 0)
+            prev=_SCAN_DIAG_V11.get("max_confidence")
+            _SCAN_DIAG_V11["max_confidence"] = conf if prev is None else max(float(prev), conf)
+            decision=str(result.get("decision") or "HOLD").upper()
+            no_signal=bool(result.get("no_signal"))
+            eligible=bool(result.get("execution_eligible"))
+            candidate=bool(result.get("candidate") or result.get("is_candidate") or (decision in {"BUY","SELL"} and not no_signal))
+            if no_signal: _SCAN_DIAG_V11["no_signal"] += 1
+            if decision in {"BUY","SELL"}: _SCAN_DIAG_V11["directional"] += 1
+            if candidate: _SCAN_DIAG_V11["candidate"] += 1
+            if eligible: _SCAN_DIAG_V11["eligible"] += 1
+            item={
+                "symbol":symbol, "decision":decision, "confidence":round(conf,2),
+                "threshold":result.get("confidence_threshold", result.get("active_threshold")),
+                "eligible":eligible, "candidate":candidate,
+                "no_signal":no_signal,
+                "stage":result.get("analysis_stage"),
+                "reason":result.get("eligibility_reason") or result.get("rejected_reason"),
+                "h1":len(h1) if h1 is not None else 0,
+                "m15":len(m15) if m15 is not None else 0,
+                "d1":len(d1) if d1 is not None else 0,
+            }
+            _SCAN_DIAG_V11["items"].append(item)
+        else:
+            _SCAN_DIAG_V11["none_result"] += 1
+            _SCAN_DIAG_V11["items"].append({"symbol":symbol,"decision":"NONE","confidence":0,"reason":"FULL_ANALYZE_RETURNED_NONE"})
+
+def full_analyze_v11_diagnostic(df_h1, df_m15, df_d1=None, symbol=None, **kwargs):
+    try:
+        result=_ORIG_FULL_ANALYZE_V11(df_h1, df_m15, df_d1=df_d1, symbol=symbol, **kwargs) if callable(_ORIG_FULL_ANALYZE_V11) else None
+        _scan_diag_capture_v11(symbol or "?", df_h1, df_m15, df_d1, result=result)
+        return result
+    except Exception as exc:
+        _scan_diag_capture_v11(symbol or "?", df_h1, df_m15, df_d1, error=exc)
+        raise
+
+globals()["full_analyze"] = full_analyze_v11_diagnostic
+
+
+def _scan_diag_message_v11(telemetry=None):
+    with _SCAN_DIAG_V11_LOCK:
+        d=dict(_SCAN_DIAG_V11)
+        items=list(d.get("items") or [])
+        errors=list(d.get("errors") or [])
+    counts={}
+    for x in items:
+        reason=str(x.get("reason") or x.get("stage") or "UNCLASSIFIED")
+        counts[reason]=counts.get(reason,0)+1
+    top=sorted(counts.items(), key=lambda kv:(-kv[1],kv[0]))[:5]
+    near=sorted(items,key=lambda x:float(x.get("confidence",0) or 0),reverse=True)[:5]
+    t=telemetry or {}
+    lines=[
+        "🔎 <b>SCAN DIAGNOSTIC</b>",
+        f"Universe: <b>{d.get('symbols',0)}</b> | Analyzed: <b>{d.get('analyzed',0)}</b> | Failed: <b>{d.get('failed',0)}</b>",
+        f"Data kosong H1/M15/D1: <b>{d.get('empty_h1',0)}/{d.get('empty_m15',0)}/{d.get('empty_d1',0)}</b>",
+        f"Directional: <b>{d.get('directional',0)}</b> | Candidate: <b>{d.get('candidate',0)}</b> | Eligible: <b>{d.get('eligible',0)}</b>",
+        f"Max confidence: <b>{('%.1f%%' % float(d.get('max_confidence'))) if d.get('max_confidence') is not None else '—'}</b>",
+        f"Telemetry: analyzed={t.get('analyzed_symbols',0)} candidate={t.get('candidate_count',0)} eligible={t.get('eligible_count',0)} failed={t.get('failed_symbols',0)}",
+        "",
+        "<b>Reject terbesar:</b>",
+    ]
+    if top:
+        lines.extend([f"• {html.escape(k[:90])}: <b>{v}</b>" for k,v in top])
+    else:
+        lines.append("• —")
+    if near:
+        lines.append("")
+        lines.append("<b>Top confidence:</b>")
+        for x in near:
+            lines.append(f"• {x.get('symbol')} {x.get('decision')} C{x.get('confidence',0)}% → {html.escape(str(x.get('reason') or '—')[:90])}")
+    if errors:
+        lines.append("")
+        lines.append("<b>Error:</b>")
+        lines.extend(f"• {html.escape(x)}" for x in errors[:3])
+    return "\n".join(lines)[:3900]
+
+_ORIG_RUN_SCAN_ONCE_V11 = globals().get("run_scan_once")
+def run_scan_once_v11_diagnostic(chat_id):
+    _scan_diag_reset_v11()
+    before=time.time()
+    try:
+        result=_ORIG_RUN_SCAN_ONCE_V11(chat_id) if callable(_ORIG_RUN_SCAN_ONCE_V11) else []
+        return result
+    finally:
+        elapsed=time.time()-before
+        telemetry=get_last_scan_telemetry() if callable(globals().get("get_last_scan_telemetry")) else {}
+        with _SCAN_DIAG_V11_LOCK:
+            d=dict(_SCAN_DIAG_V11)
+        # The point of this hook is visibility, not spam. Only zero-signal cycles
+        # or data failures receive a Telegram diagnostic.
+        if (not d.get("eligible")) or d.get("failed",0)>0 or d.get("empty_h1",0)>0 or d.get("empty_m15",0)>0:
+            try:
+                tg_send(chat_id, _scan_diag_message_v11(telemetry))
+            except Exception as exc:
+                log.warning(f"[SCAN/V11] diagnostic Telegram gagal: {exc}")
+        log.info(
+            "[SCAN/V11 DIAG] symbols=%s analyzed=%s failed=%s empty_h1=%s empty_m15=%s "
+            "directional=%s candidate=%s eligible=%s max_conf=%s elapsed=%.2fs",
+            d.get("symbols",0), d.get("analyzed",0), d.get("failed",0),
+            d.get("empty_h1",0), d.get("empty_m15",0), d.get("directional",0),
+            d.get("candidate",0), d.get("eligible",0), d.get("max_confidence"), elapsed
+        )
+
+globals()["run_scan_once"] = run_scan_once_v11_diagnostic
+
+
 # ---------- Better real position monitor: WS-first, REST only when stale/required ----------
 _ORIG_MONITOR_POSITION_REAL=globals().get("monitor_position_real")
 def monitor_position_real_final(sym,pos):
