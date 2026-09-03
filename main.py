@@ -8979,6 +8979,9 @@ BINANCE_MARK_WS_STALE_SEC_V124 = max(3.0, float(os.getenv("BINANCE_MARK_WS_STALE
 BINANCE_TRIGGER_GUARD_TICKS_V124 = max(1, int(os.getenv("BINANCE_TRIGGER_GUARD_TICKS", "2")))
 TIMEOUT_ALL_LOCK = threading.RLock()
 _TIMEOUT_ALL_PENDING = {"requested": False, "at": None, "chat_id": None, "running": False}
+# V16: hard single-flight guard against synchronous /timeout all re-entry/recursion.
+_TIMEOUT_ALL_EXEC_LOCK = threading.Lock()
+_TIMEOUT_ALL_EXEC_LOCAL = threading.local()
 _TIMEOUT_ALL_LAST_NOTICE = 0.0
 
 class BinanceImmediateTriggerError(RuntimeError):
@@ -9434,7 +9437,7 @@ def _verified_timeout_symbol_v124(sym,chat_id,reason="manual timeout"):
 
 globals()["_verified_timeout_symbol"]=_verified_timeout_symbol_v124
 
-def _verified_timeout_all_v124(chat_id):
+def _verified_timeout_all_v124_core(chat_id):
     global _TIMEOUT_ALL_LAST_NOTICE
     with TIMEOUT_ALL_LOCK:
         if _TIMEOUT_ALL_PENDING.get("running"):
@@ -9504,6 +9507,22 @@ def _verified_timeout_all_v124(chat_id):
             _TIMEOUT_ALL_PENDING["running"]=False
             # Keep requested=True only while a cooldown/recovery retry remains.
             if _binance_cooldown_remaining()<=0: _TIMEOUT_ALL_PENDING["requested"]=False
+
+def _verified_timeout_all_v124(chat_id):
+    """V16 guarded global timeout: never re-enter synchronously."""
+    depth = int(getattr(_TIMEOUT_ALL_EXEC_LOCAL, "depth", 0) or 0)
+    if depth > 0:
+        log.warning("[TIMEOUT ALL V16] re-entry blocked depth=%s", depth)
+        return False
+    if not _TIMEOUT_ALL_EXEC_LOCK.acquire(blocking=False):
+        log.info("[TIMEOUT ALL V16] concurrent invocation blocked")
+        return False
+    _TIMEOUT_ALL_EXEC_LOCAL.depth = depth + 1
+    try:
+        return _verified_timeout_all_v124_core(chat_id)
+    finally:
+        _TIMEOUT_ALL_EXEC_LOCAL.depth = depth
+        _TIMEOUT_ALL_EXEC_LOCK.release()
 
 globals()["_verified_timeout_all"]=_verified_timeout_all_v124
 
@@ -10885,6 +10904,13 @@ def _v13_run_one_scan_cycle(chat_id=None):
 # Make the V128 coordinator use the explicit canonical cycle, eliminating any
 # possibility of another global run_scan_once rebinding bypassing V12/V13.
 globals()["_v128_run_one_scan_cycle"] = _v13_run_one_scan_cycle
+
+# ═══════════════════════════════════════════════════════════════════════
+# V16 — FINAL /timeout all CANONICAL BINDING
+# ═══════════════════════════════════════════════════════════════════════
+# All command/recovery entry points must converge on the guarded handler.
+globals()["_verified_timeout_all"] = _verified_timeout_all_v124
+globals()["_timeout_all_recovery_hook_v124"] = _timeout_all_recovery_hook_v124
 
 # FINAL ENTRYPOINT — MUST BE THE LAST EXECUTABLE CODE IN THIS FILE.
 if __name__ == "__main__":
