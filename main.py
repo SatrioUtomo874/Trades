@@ -11037,32 +11037,32 @@ _TIMEOUT_ALL_V18_STATE_LOCK = threading.RLock()
 _TIMEOUT_ALL_V18_PENDING = {"requested": False, "at": None, "chat_id": None, "running": False}
 
 
-def _timeout_all_v18_signed(method, path, params=None, *, critical=True):
-    """Isolated Binance path: no _binance_signed aliases, no timeout helpers."""
+def _timeout_all_v19_signed(method, path, params=None, *, critical=True):
+    """Low-level Binance call used only for symbols that exist in /trade."""
     return _binance_signed_impl_v120(method, path, params=params, critical=critical)
 
 
-def _timeout_all_v18_position_snapshot():
-    rows = _timeout_all_v18_signed("GET", "/fapi/v2/positionRisk", {})
-    return [dict(r) for r in (rows or [])
-            if isinstance(r, dict) and abs(float(r.get("positionAmt") or 0.0)) > 0]
+def _timeout_all_v19_position(symbol):
+    rows = _timeout_all_v19_signed("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+    for row in (rows or []):
+        if isinstance(row, dict) and str(row.get("symbol") or "").upper() == str(symbol).upper():
+            return dict(row)
+    return None
 
 
-def _timeout_all_v18_open_orders(symbol=None):
-    params = {"symbol": symbol} if symbol else {}
-    rows = _timeout_all_v18_signed("GET", "/fapi/v1/openOrders", params)
+def _timeout_all_v19_orders(symbol):
+    rows = _timeout_all_v19_signed("GET", "/fapi/v1/openOrders", {"symbol": symbol})
     return list(rows or []) if isinstance(rows, list) else []
 
 
-def _timeout_all_v18_open_algo_orders(symbol=None):
-    params = {"symbol": symbol} if symbol else {}
-    data = _timeout_all_v18_signed("GET", "/fapi/v1/openAlgoOrders", params)
+def _timeout_all_v19_algo_orders(symbol):
+    data = _timeout_all_v19_signed("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
     if isinstance(data, dict):
         data = data.get("orders") or data.get("openOrders") or data.get("data") or []
     return list(data or []) if isinstance(data, list) else []
 
 
-def _timeout_all_v18_close_position(symbol, position_amt):
+def _timeout_all_v19_close_real(symbol, position_amt):
     qty = abs(float(position_amt or 0.0))
     if qty <= 0:
         return True, None
@@ -11075,121 +11075,150 @@ def _timeout_all_v18_close_position(symbol, position_amt):
         "newOrderRespType": "RESULT",
         "reduceOnly": "true",
     }
+    # IMPORTANT: requested_action is not part of ExecutionController.submit_signed().
     resp = _execution_controller.submit_signed(
         "POST", "/fapi/v1/order", params=params, critical=True,
-        request_type="TIMEOUT_ALL_V18_CLOSE", source="timeout_all_v18",
-        symbol=symbol, execution_mode="REAL",
-        expires_sec=30.0,
+        request_type="TIMEOUT_ALL_V19_CLOSE", source="timeout_all_v19",
+        symbol=symbol, execution_mode="REAL", expires_sec=30.0,
     )
-    return True, (resp or {}).get("avgPrice") if isinstance(resp, dict) else None
+    px = (resp or {}).get("avgPrice") if isinstance(resp, dict) else None
+    return True, px
 
 
-def _timeout_all_v18_cancel_orders(symbol):
+def _timeout_all_v19_cancel_symbol_orders(symbol):
     errors = []
+    # Ordinary orders for THIS /trade symbol only.
     try:
         _execution_controller.submit_signed(
             "DELETE", "/fapi/v1/allOpenOrders", params={"symbol": symbol},
-            critical=True, request_type="TIMEOUT_ALL_V18_CANCEL_ORDERS",
-            source="timeout_all_v18", symbol=symbol, execution_mode="REAL",
-            requested_action=f"CANCEL ORDERS {symbol}", expires_sec=30.0,
+            critical=True, request_type="TIMEOUT_ALL_V19_CANCEL_ORDERS",
+            source="timeout_all_v19", symbol=symbol, execution_mode="REAL",
+            expires_sec=30.0,
         )
     except Exception as exc:
         errors.append(f"ordinary:{exc}")
+
+    # Algo/conditional orders for THIS /trade symbol only.
     try:
         _execution_controller.submit_signed(
             "DELETE", "/fapi/v1/algoOpenOrders", params={"symbol": symbol},
-            critical=True, request_type="TIMEOUT_ALL_V18_CANCEL_ALGO",
-            source="timeout_all_v18", symbol=symbol, execution_mode="REAL",
-            requested_action=f"CANCEL ALGO {symbol}", expires_sec=30.0,
+            critical=True, request_type="TIMEOUT_ALL_V19_CANCEL_ALGO",
+            source="timeout_all_v19", symbol=symbol, execution_mode="REAL",
+            expires_sec=30.0,
         )
     except Exception as exc:
         errors.append(f"algo:{exc}")
     return errors
 
 
-def _timeout_all_v18_worker(chat_id):
+def _timeout_all_v19_worker(chat_id):
+    """Clean ONLY positions represented in Main's /trade state.
+
+    /timeout all is deliberately limited to symbols currently represented in /trade.
+    An already-flat/missing Binance position is treated as clean (manual cleanup is
+    allowed), and only the stale Main /trade state is removed. Simulation positions
+    never query Binance and are finalized locally with the latest known price and
+    the existing timeout/PnL recording path.
+    """
     with _TIMEOUT_ALL_V18_LOCK:
         with _TIMEOUT_ALL_V18_STATE_LOCK:
             if _TIMEOUT_ALL_V18_PENDING.get("running"):
                 return False
-            _TIMEOUT_ALL_V18_PENDING.update({"requested": True, "at": time.time(), "chat_id": chat_id, "running": True})
+            _TIMEOUT_ALL_V18_PENDING.update({
+                "requested": True, "at": time.time(), "chat_id": chat_id, "running": True
+            })
 
-    symbols = set()
     failures = []
+    processed = []
     try:
         if _binance_cooldown_remaining() > 0:
+            tg_send(chat_id, "⏸️ <b>/timeout all ditunda</b> — Binance cooldown aktif.")
             return False
 
-        # IMPORTANT: isolated exchange reads; do not use get_real_positions_all(),
-        # get_open_orders_all(), get_open_algo_orders_all(), or any timeout helper.
-        remote = _timeout_all_v18_position_snapshot()
-        ordinary = _timeout_all_v18_open_orders()
-        algo = _timeout_all_v18_open_algo_orders()
-
-        remote_by_sym = {}
-        for row in remote:
-            sym = str(row.get("symbol") or "").upper()
-            if sym:
-                remote_by_sym[sym] = row
-                symbols.add(sym)
-        for row in ordinary + algo:
-            sym = str(row.get("symbol") or "").upper()
-            if sym:
-                symbols.add(sym)
+        # SNAPSHOT /trade ONLY. This is the authoritative target set.
         with positions_lock:
-            local_items = {str(sym).upper(): dict(pos) for sym, pos in positions.items()}
-        symbols.update(local_items.keys())
+            local_items = [(str(sym).upper(), dict(pos)) for sym, pos in positions.items()]
 
-        # 1) Flatten every real exchange position.
-        exits = {}
-        for sym, row in sorted(remote_by_sym.items()):
-            amt = float(row.get("positionAmt") or 0.0)
-            if abs(amt) <= 0:
-                continue
+        # Nothing in /trade means nothing to clean. Do NOT inspect or flatten
+        # unrelated Binance positions/orders.
+        if not local_items:
+            with _pending_trails_lock:
+                _pending_trails.clear()
+            with _pending_protections_lock:
+                _pending_protections.clear()
+            with _pending_cleanup_lock:
+                _pending_cleanup.clear()
+            tg_send(chat_id, "✅ <b>/timeout all SELESAI</b>\n<code>/trade</code> sudah kosong. Tidak ada posisi/order bot yang perlu dibersihkan.")
+            return True
+
+        for sym, pos in local_items:
+            processed.append(sym)
+            is_real = _position_is_real(pos)
             try:
-                closed, px = _timeout_all_v18_close_position(sym, amt)
-                if closed:
-                    exits[sym] = px
-            except Exception as exc:
-                failures.append(f"{sym}:close:{exc}")
+                if is_real:
+                    # Only inspect THIS local /trade symbol on Binance.
+                    remote_pos = _timeout_all_v19_position(sym)
+                    remote_amt = float((remote_pos or {}).get("positionAmt") or 0.0)
 
-        # 2) Cancel every ordinary/algo order for every touched symbol.
-        for sym in sorted(symbols):
-            failures.extend(f"{sym}:{e}" for e in _timeout_all_v18_cancel_orders(sym))
+                    # USER CONTRACT V20:
+                    # If this /trade symbol is already absent/flat on Binance, consider
+                    # the exchange side clean (it may have been closed manually).
+                    # Do NOT touch unrelated Binance orders in that case; just remove the
+                    # stale local /trade entry.
+                    if abs(remote_amt) <= 0.0:
+                        with positions_lock:
+                            positions.pop(sym, None)
+                        log.info("[TIMEOUT ALL V20] %s already clean on Binance; local /trade state removed", sym)
+                        continue
 
-        # 3) Verify exchange is actually flat/empty using the isolated path.
-        remaining_positions = _timeout_all_v18_position_snapshot()
-        remaining_orders = _timeout_all_v18_open_orders()
-        remaining_algo = _timeout_all_v18_open_algo_orders()
-        for row in remaining_positions:
-            sym = str(row.get("symbol") or "").upper()
-            if sym:
-                failures.append(f"{sym}:position_still_open")
-        if remaining_orders:
-            failures.append(f"ordinary_still_present:{len(remaining_orders)}")
-        if remaining_algo:
-            failures.append(f"algo_still_present:{len(remaining_algo)}")
+                    # A live Binance position exists for this /trade symbol: close only it.
+                    _timeout_all_v19_close_real(sym, remote_amt)
 
-        if failures:
-            raise RuntimeError("global cleanup incomplete: " + "; ".join(failures[:8]))
+                    # Only after a real position existed and was closed do we clean
+                    # this symbol's orders, then verify the position is flat.
+                    errs = _timeout_all_v19_cancel_symbol_orders(sym)
+                    failures.extend(f"{sym}:{e}" for e in errs)
 
-        # 4) Exchange verified clean: now clean local state.
-        with positions_lock:
-            local_copy = list(positions.items())
-        for sym, pos in local_copy:
-            try:
-                if _position_is_real(pos):
-                    # Exchange is already verified flat; removing stale local REAL state
-                    # is safer than sending another mutation.
+                    remote_after = _timeout_all_v19_position(sym)
+                    amt_after = float((remote_after or {}).get("positionAmt") or 0.0)
+                    if abs(amt_after) > 0:
+                        failures.append(f"{sym}:position_still_open")
+                        continue
+
+                    if any(x.startswith(f"{sym}:") for x in failures):
+                        continue
+
                     with positions_lock:
                         positions.pop(sym, None)
                 else:
-                    close_position(sym, "timeout", close_price=pos.get("current_price") or pos.get("entry"))
+                    # SIMULATION has no Binance exposure. If the position is active in
+                    # /trade, finalize it locally using its latest known price so the
+                    # existing close_position()/update_stats() path records the final
+                    # PnL with close_reason/result = "timeout".
+                    lifecycle = _position_lifecycle(pos)
+                    status = str(pos.get("status") or "").lower()
+                    active_local = lifecycle not in {"CLOSED"} and status not in {"closed"}
+                    if active_local:
+                        latest_price = pos.get("current_price")
+                        if latest_price is None:
+                            latest_price = pos.get("last_price")
+                        if latest_price is None:
+                            latest_price = pos.get("mark_price")
+                        if latest_price is None:
+                            latest_price = pos.get("entry")
+                        closed_ok = close_position(sym, "timeout", close_price=latest_price)
+                        if not closed_ok:
+                            failures.append(f"{sym}:simulation_close_failed")
+                    else:
+                        with positions_lock:
+                            positions.pop(sym, None)
+            except BinanceCooldownError:
+                raise
             except Exception as exc:
-                failures.append(f"{sym}:local:{exc}")
+                failures.append(f"{sym}:{exc}")
 
         if failures:
-            raise RuntimeError("local cleanup incomplete: " + "; ".join(failures[:8]))
+            raise RuntimeError("/trade cleanup incomplete: " + "; ".join(failures[:8]))
 
         with _pending_trails_lock:
             _pending_trails.clear()
@@ -11198,17 +11227,23 @@ def _timeout_all_v18_worker(chat_id):
         with _pending_cleanup_lock:
             _pending_cleanup.clear()
 
+        with positions_lock:
+            remaining_local = list(positions.keys())
+        if remaining_local:
+            raise RuntimeError("Main /trade masih berisi: " + ", ".join(map(str, remaining_local[:8])))
+
         tg_send(
             chat_id,
-            f"✅ <b>/timeout all SELESAI</b>\n"
-            f"Position: <b>0</b>\nOrdinary orders: <b>0</b>\n"
-            f"Algo TP/SL/Trail: <b>0</b>\nSymbol diproses: <b>{len(symbols)}</b>"
+            "✅ <b>/timeout all SELESAI</b>\n"
+            f"Target: <code>/trade</code> ({len(processed)} symbol)\n"
+            "Main /trade: <b>0</b>\n"
+            "Binance: hanya symbol yang ada di /trade yang diperiksa/dibersihkan."
         )
         return True
     except BinanceCooldownError:
         return False
     except Exception as exc:
-        log.exception(f"[TIMEOUT ALL V18] {exc}")
+        log.exception(f"[TIMEOUT ALL V19] {exc}")
         try:
             tg_send(chat_id, f"🚨 <b>/timeout all BELUM SELESAI</b>\n<code>{html.escape(str(exc)[:500])}</code>")
         except Exception:
@@ -11217,52 +11252,47 @@ def _timeout_all_v18_worker(chat_id):
     finally:
         with _TIMEOUT_ALL_V18_STATE_LOCK:
             _TIMEOUT_ALL_V18_PENDING["running"] = False
-            _TIMEOUT_ALL_V18_PENDING["requested"] = bool(_binance_cooldown_remaining() > 0)
+            _TIMEOUT_ALL_V18_PENDING["requested"] = False
 
 
-def _timeout_all_v18_start(chat_id):
-    def runner():
-        try:
-            _timeout_all_v18_worker(chat_id)
-        finally:
-            pass
+def _timeout_all_v19_start(chat_id):
     with _TIMEOUT_ALL_V18_STATE_LOCK:
         if _TIMEOUT_ALL_V18_PENDING.get("running"):
             return False
         _TIMEOUT_ALL_V18_PENDING["running"] = True
-    # worker owns the authoritative running flag; clear the reservation before launch.
+        _TIMEOUT_ALL_V18_PENDING["requested"] = True
+        _TIMEOUT_ALL_V18_PENDING["chat_id"] = chat_id
+    # Reservation above only prevents duplicate starts; the worker owns the
+    # actual running lifecycle and is allowed to execute immediately.
     with _TIMEOUT_ALL_V18_STATE_LOCK:
         _TIMEOUT_ALL_V18_PENDING["running"] = False
-    threading.Thread(target=runner, name="timeout-all-v18", daemon=True).start()
+    threading.Thread(target=_timeout_all_v19_worker, args=(chat_id,), name="timeout-all-v19", daemon=True).start()
     return True
 
 
-def _timeout_all_v18_request(chat_id):
-    with _TIMEOUT_ALL_V18_STATE_LOCK:
-        if _TIMEOUT_ALL_V18_PENDING.get("running"):
-            tg_send(chat_id, "⏳ <b>/timeout all</b> sudah sedang diproses.")
-            return False
-        _TIMEOUT_ALL_V18_PENDING.update({"requested": True, "at": time.time(), "chat_id": chat_id})
-    return _timeout_all_v18_start(chat_id)
+def _timeout_all_v19_request(chat_id):
+    return _timeout_all_v19_start(chat_id)
 
 
-def _timeout_all_recovery_hook_v18():
+def _timeout_all_recovery_hook_v19():
+    # Recovery may retry a pending request, but it still resolves only the
+    # /trade-local target set. It never becomes an account-wide flatten path.
     if _binance_cooldown_remaining() > 0:
         return False
     with _TIMEOUT_ALL_V18_STATE_LOCK:
         pending = bool(_TIMEOUT_ALL_V18_PENDING.get("requested")) and not bool(_TIMEOUT_ALL_V18_PENDING.get("running"))
         cid = _TIMEOUT_ALL_V18_PENDING.get("chat_id")
-    return _timeout_all_v18_start(cid) if pending and cid else False
+    return _timeout_all_v19_start(cid) if pending and cid else False
 
-# Final source-level command branch: never call a compatibility timeout alias.
-s = globals().get("__file__")
-
-# Runtime aliases used by every legacy router/recovery layer.
-globals()["_timeout_all_request_v17"] = _timeout_all_v18_request
-globals()["_timeout_all_recovery_hook_v17"] = _timeout_all_recovery_hook_v18
-globals()["_verified_timeout_all"] = _timeout_all_v18_request
-globals()["_verified_timeout_all_v124"] = _timeout_all_v18_request
-globals()["_verified_timeout_all_v124_core"] = _timeout_all_v18_worker
+# Final aliases: all legacy command/recovery names converge to V19.
+globals()['_timeout_all_v18_worker'] = _timeout_all_v19_worker
+globals()['_timeout_all_v18_request'] = _timeout_all_v19_request
+globals()['_timeout_all_recovery_hook_v18'] = _timeout_all_recovery_hook_v19
+globals()['_timeout_all_request_v17'] = _timeout_all_v19_request
+globals()['_timeout_all_recovery_hook_v17'] = _timeout_all_recovery_hook_v19
+globals()['_verified_timeout_all'] = _timeout_all_v19_request
+globals()['_verified_timeout_all_v124'] = _timeout_all_v19_request
+globals()['_verified_timeout_all_v124_core'] = _timeout_all_v19_worker
 
 # FINAL ENTRYPOINT — MUST BE THE LAST EXECUTABLE CODE IN THIS FILE.
 if __name__ == "__main__":
