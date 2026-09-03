@@ -1,7 +1,7 @@
 {
-  "checkpoint_id": "cp-1788426326-d38100de3d4046c8",
-  "path": "runtime_state/checkpoints/cp-1788426326-d38100de3d4046c8.json",
-  "created_at": 1788426326.454021,
-  "content_hash": "bf18a92f431ffe773d416c2a7065308431684e20b5f8fb920a00d0f73cb4be50",
+  "checkpoint_id": "cp-1788434238-d12ebd1b50fa4cdb",
+  "path": "runtime_state/checkpoints/cp-1788434238-d12ebd1b50fa4cdb.json",
+  "created_at": 1788434238.161263,
+  "content_hash": "52b0ca826bc85dfcd50c5b0f45afc5c8c15db310062851a63938c11156daa8e0",
   "previous_known_good": null
 }
