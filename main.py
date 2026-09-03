@@ -7943,6 +7943,495 @@ def _brain_on_scan_summary_v110(summary):
 globals()["_brain_on_scan_summary"]=_brain_on_scan_summary_v110
 
 # Replace Telegram branch text at the source level so the final status formatter is actually used.
+
+
+# ============================================================
+# V120 — BINANCE REST SINGLE GATE / WS-FIRST HARDENING
+# Goal: eliminate avoidable Binance REST traffic before touching
+# notification UX. All Binance REST calls are serialized here;
+# non-critical reads are cached/coalesced; 429/418 create a global
+# hard cooldown; scanner/Bybit are never gated by Binance state.
+# ============================================================
+from dataclasses import dataclass
+
+BINANCE_REST_GLOBAL_MIN_INTERVAL = max(0.80, float(os.getenv("BINANCE_REST_GLOBAL_MIN_INTERVAL", "1.0")))
+BINANCE_REST_RECOVERY_INTERVAL = max(2.0, float(os.getenv("BINANCE_REST_RECOVERY_INTERVAL", "3.0")))
+BINANCE_REST_READ_TIMEOUT = max(3.0, float(os.getenv("BINANCE_REST_READ_TIMEOUT", "8.0")))
+BINANCE_REST_GET_RETRY_COUNT = 1
+BINANCE_REST_CACHE_DEFAULT_TTL = 5.0
+BINANCE_REST_CACHE = {
+    "/fapi/v1/exchangeInfo": 3600.0,
+    "/fapi/v1/time": 300.0,
+    "/fapi/v1/positionSide/dual": 300.0,
+    "/fapi/v2/account": 30.0,
+    "/fapi/v2/balance": 30.0,
+    "/fapi/v2/positionRisk": 15.0,
+    "/fapi/v1/order": 5.0,
+    "/fapi/v1/openOrders": 15.0,
+    "/fapi/v1/openAlgoOrders": 15.0,
+    "/fapi/v1/algoOrder": 5.0,
+}
+BINANCE_PUBLIC_MARKET_ENDPOINTS = {
+    "/fapi/v1/klines", "/fapi/v1/ticker/price", "/fapi/v1/ticker/24hr",
+}
+
+_binance_rest_state_lock = threading.RLock()
+_binance_rest_cache = {}
+_binance_rest_inflight = {}
+_binance_rest_last_request_mono = 0.0
+_binance_rest_probe_at = 0.0
+_binance_rest_metrics = {
+    "requests": 0, "success": 0, "errors": 0, "cache_hits": 0,
+    "singleflight_hits": 0, "rate_limited": 0, "unknown_mutations": 0,
+    "coalesced": 0, "last_endpoint": None, "last_status": None,
+    "last_at": None, "last_429_at": None, "last_418_at": None,
+}
+
+@dataclass
+class _BinanceInflight:
+    event: object
+    result: object = None
+    error: object = None
+
+class BinanceMarketDataDisabled(ConnectionError):
+    """Legacy Binance market-data path is intentionally disabled."""
+
+
+def _binance_rest_key(method, path, params=None):
+    try:
+        return (str(method).upper(), str(path), tuple(sorted((str(k), str(v)) for k, v in (params or {}).items())))
+    except Exception:
+        return (str(method).upper(), str(path), repr(params or {}))
+
+
+def _binance_rest_cache_ttl(method, path):
+    if str(method).upper() != "GET":
+        return 0.0
+    return float(BINANCE_REST_CACHE.get(str(path), BINANCE_REST_CACHE_DEFAULT_TTL))
+
+
+def _binance_rest_cache_get(key, force=False):
+    if force:
+        return None
+    now=time.time()
+    with _binance_rest_state_lock:
+        row=_binance_rest_cache.get(key)
+        if not row:
+            return None
+        if now >= float(row.get("expires_at",0.0)):
+            _binance_rest_cache.pop(key,None)
+            return None
+        _binance_rest_metrics["cache_hits"] += 1
+        return row.get("value")
+
+
+def _binance_rest_cache_put(key, value, ttl):
+    if ttl <= 0:
+        return
+    with _binance_rest_state_lock:
+        _binance_rest_cache[key] = {"value": value, "expires_at": time.time()+ttl}
+
+
+def _binance_rest_mark_request(endpoint, status=None):
+    with _binance_rest_state_lock:
+        _binance_rest_metrics["requests"] += 1
+        _binance_rest_metrics["last_endpoint"] = endpoint
+        _binance_rest_metrics["last_status"] = status
+        _binance_rest_metrics["last_at"] = time.time()
+
+
+def _binance_rest_wait_for_global_slot(critical=False, mutation=False):
+    """Global pacing. Critical traffic still shares one gate; only the post-ban
+    recovery phase is intentionally slower to avoid immediately re-triggering 418."""
+    global _binance_rest_last_request_mono
+    interval = BINANCE_REST_RECOVERY_INTERVAL if _binance_recovering else BINANCE_REST_GLOBAL_MIN_INTERVAL
+    now_mono=time.monotonic()
+    with _binance_rest_state_lock:
+        wait=max(0.0, interval-(now_mono-_binance_rest_last_request_mono))
+    if wait>0:
+        time.sleep(wait)
+    with _binance_rest_state_lock:
+        _binance_rest_last_request_mono=time.monotonic()
+
+
+def _binance_parse_retry_after(response):
+    raw=None
+    try: raw=response.headers.get("Retry-After")
+    except Exception: pass
+    try:
+        return max(0.0, float(raw)) if raw is not None else None
+    except (TypeError,ValueError):
+        return None
+
+
+def _binance_register_rate_limit_response(response, body=""):
+    status=int(getattr(response,"status_code",0) or 0)
+    retry_after=_binance_parse_retry_after(response)
+    if status not in (418,429):
+        return False
+    if status==418:
+        with _binance_rest_state_lock: _binance_rest_metrics["last_418_at"]=time.time()
+    else:
+        with _binance_rest_state_lock: _binance_rest_metrics["last_429_at"]=time.time()
+    with _binance_rest_state_lock: _binance_rest_metrics["rate_limited"]+=1
+    _binance_register_ban(str(body or ""), retry_after=retry_after, fallback_seconds=(retry_after or (120.0 if status==418 else 60.0)))
+    return True
+
+
+@contextmanager
+def _binance_request_slot_v120(critical=False):
+    """Final global REST gate. A Binance ban blocks every REST caller until expiry."""
+    _binance_wait_if_banned()
+    _binance_rest_wait_for_global_slot(critical=critical, mutation=critical)
+    _binance_wait_if_banned()
+    yield
+
+
+@contextmanager
+def _binance_critical_context_v120(force_reconcile=True):
+    prev_critical=bool(getattr(_binance_priority_local,"critical",False))
+    prev_force=bool(getattr(_binance_priority_local,"force_reconcile",False))
+    _binance_priority_local.critical=True
+    _binance_priority_local.force_reconcile=bool(force_reconcile)
+    try:
+        yield
+    finally:
+        _binance_priority_local.critical=prev_critical
+        _binance_priority_local.force_reconcile=prev_force
+
+
+def _binance_signed_impl_v120(method, path, params=None, critical=False):
+    """Single implementation for Binance REST. GET reads are cached/single-flight;
+    mutations are never blindly retried. -1021 is the only deterministic mutation retry."""
+    global BINANCE_API_KEY,BINANCE_API_SECRET,BINANCE_KEYS_PRESENT
+    key,secret=_read_binance_credentials()
+    if key and secret:
+        BINANCE_API_KEY,BINANCE_API_SECRET=key,secret; BINANCE_KEYS_PRESENT=True
+    else:
+        BINANCE_KEYS_PRESENT=False
+    if not BINANCE_KEYS_PRESENT:
+        raise RuntimeError("BINANCE_API_KEY/SECRET tidak tersedia di runtime Render")
+
+    method=str(method).upper(); path=str(path); base_params=dict(params or {})
+    if path in BINANCE_PUBLIC_MARKET_ENDPOINTS:
+        raise BinanceMarketDataDisabled(f"Binance market-data endpoint disabled: {path}; gunakan Bybit WS/REST")
+    mutating=method in {"POST","PUT","DELETE"}
+    critical=bool(critical or getattr(_binance_priority_local,"critical",False) or mutating)
+    force_read=bool(getattr(_binance_priority_local,"force_reconcile",False))
+    cache_key=_binance_rest_key(method,path,base_params)
+    if not mutating:
+        cached=_binance_rest_cache_get(cache_key,force=force_read)
+        if cached is not None:
+            return cached
+
+        owner=False
+        with _binance_rest_state_lock:
+            slot=_binance_rest_inflight.get(cache_key)
+            if slot is None:
+                slot=_BinanceInflight(threading.Event()); _binance_rest_inflight[cache_key]=slot; owner=True
+            else:
+                _binance_rest_metrics["singleflight_hits"]+=1; _binance_rest_metrics["coalesced"]+=1
+        if not owner:
+            slot.event.wait(timeout=BINANCE_REST_READ_TIMEOUT+5)
+            if slot.error is not None: raise slot.error
+            if slot.result is not None: return slot.result
+            raise RuntimeError(f"Binance single-flight timeout: {path}")
+    else:
+        slot=None
+
+    try:
+        attempts=2 if (not mutating) else 1
+        time_resync=False
+        last_err=None
+        for attempt in range(attempts):
+            try:
+                _binance_wait_if_banned()
+                with _binance_time_sync_lock:
+                    stale=(time.time()-_binance_time_sync_at)>=BINANCE_TIME_SYNC_TTL
+                if stale and path != "/fapi/v1/time":
+                    try: _binance_sync_time(force=False)
+                    except Exception: pass
+                with _binance_request_slot_v120(critical=critical):
+                    req=dict(base_params)
+                    if path!="/fapi/v1/time":
+                        req["timestamp"]=_binance_timestamp_ms(sync_if_stale=False)
+                        req["recvWindow"]=10000
+                    if method in {"POST","PUT","DELETE","GET"}:
+                        query=urllib.parse.urlencode(req,safe=",")
+                        sig=hmac.new(BINANCE_API_SECRET.encode(),query.encode(),hashlib.sha256).hexdigest() if method!="GET" or path!="/fapi/v1/time" else None
+                        url=f"{FAPI}{path}"
+                        if sig: url += f"?{query}&signature={sig}"
+                        elif query: url += f"?{query}"
+                        headers={"X-MBX-APIKEY":BINANCE_API_KEY} if path!="/fapi/v1/time" else {}
+                        r=requests.request(method,url,headers=headers,timeout=BINANCE_REST_READ_TIMEOUT,verify=False)
+                    else:
+                        raise RuntimeError(f"unsupported Binance method {method}")
+                used=_binance_update_weight_from_response(r)
+                _binance_rest_mark_request(path,r.status_code)
+                if _binance_register_rate_limit_response(r,r.text or ""):
+                    raise BinanceCooldownError(f"Binance rate limited HTTP {r.status_code}")
+                data=r.json()
+                if isinstance(data,dict) and "code" in data and isinstance(data.get("code"),int) and data.get("code")<0:
+                    code=int(data["code"]); msg=str(data.get("msg") or "")
+                    if code==-1003:
+                        _binance_register_ban(msg); raise BinanceCooldownError(f"Binance {code}: {msg}")
+                    if code==-1021 and not time_resync:
+                        time_resync=True
+                        _binance_sync_time(force=True)
+                        if not mutating: continue
+                        raise RuntimeError(f"Binance -1021 on mutation: {msg}")
+                    raise RuntimeError(f"Binance {code}: {msg}")
+                with _binance_rest_state_lock: _binance_rest_metrics["success"]+=1
+                if not mutating:
+                    _binance_rest_cache_put(cache_key,data,_binance_rest_cache_ttl(method,path))
+                return data
+            except BinanceCooldownError:
+                raise
+            except BinanceMarketDataDisabled:
+                raise
+            except BinanceUnknownExecutionError:
+                raise
+            except (requests.Timeout,requests.ConnectionError) as e:
+                last_err=e
+                with _binance_rest_state_lock: _binance_rest_metrics["errors"]+=1
+                if mutating:
+                    _binance_rest_metrics["unknown_mutations"]+=1
+                    raise BinanceUnknownExecutionError(f"Binance {method} {path} transport error; execution status unknown: {e}") from e
+                if attempt+1<attempts:
+                    time.sleep(0.75)
+                    continue
+                raise ConnectionError(f"Binance GET gagal {path}: {e}") from e
+            except Exception as e:
+                last_err=e
+                with _binance_rest_state_lock: _binance_rest_metrics["errors"]+=1
+                if mutating:
+                    _binance_rest_metrics["unknown_mutations"]+=1
+                    raise BinanceUnknownExecutionError(f"Binance {method} {path} response error; execution status unknown: {e}") from e
+                if attempt+1<attempts and not isinstance(e, BinanceCooldownError):
+                    time.sleep(0.75)
+                    continue
+                raise
+        raise RuntimeError(f"Binance request failed: {path}: {last_err}")
+    finally:
+        if slot is not None:
+            with _binance_rest_state_lock:
+                _binance_rest_inflight.pop(cache_key,None)
+                slot.event.set()
+
+
+# Final REST aliases. These assignments happen after the legacy implementations,
+# so every runtime caller resolves to this single guarded gateway.
+globals()["_binance_request_slot"] = _binance_request_slot_v120
+globals()["_binance_critical_context"] = _binance_critical_context_v120
+globals()["_binance_signed_impl"] = _binance_signed_impl_v120
+
+# Final signed gateway: mutations still pass through ExecutionController.
+def _binance_signed_v120(method,path,params=None,critical=False):
+    method_u=str(method).upper()
+    if method_u in ExecutionController.MUTATIONS:
+        return _execution_controller.submit_signed(method_u,path,params=params,critical=critical)
+    return _binance_signed_impl_v120(method_u,path,params=params,critical=critical)
+
+globals()["_binance_signed"] = _binance_signed_v120
+
+# Binance public market data is forbidden; Bybit is the only analysis source.
+def fapi_get_v120(path,params=None):
+    if str(path) in BINANCE_PUBLIC_MARKET_ENDPOINTS:
+        raise BinanceMarketDataDisabled(f"Binance market-data disabled for {path}; scanner must use Bybit")
+    _binance_wait_if_banned()
+    return _binance_signed_impl_v120("GET",path,params=params,critical=False)
+
+globals()["fapi_get"] = fapi_get_v120
+
+# WS-first position/account helpers: REST only as controlled reconciliation fallback.
+_ORIG_GET_REAL_POSITION_V120 = globals().get("get_real_position")
+_ORIG_GET_ORDER_STATUS_V120 = globals().get("get_order_status")
+_ORIG_GET_OPEN_ORDERS_ALL_V120 = globals().get("get_open_orders_all")
+_ORIG_GET_OPEN_ALGO_ORDERS_ALL_V120 = globals().get("get_open_algo_orders_all")
+_ORIG_GET_REAL_POSITIONS_ALL_V120 = globals().get("get_real_positions_all")
+
+_bn_position_rest_cache={}
+_bn_position_rest_lock=threading.RLock()
+
+def get_real_position_v120(symbol,prefer_ws=True,force=False):
+    sym=str(symbol).upper()
+    if prefer_ws and _binance_ws_fresh():
+        row=_binance_ws_position(sym)
+        if row is not None:
+            try:
+                return row if abs(float(row.get("pa") or row.get("positionAmt") or 0))>0 else None
+            except Exception: pass
+    key=(sym,)
+    now=time.time()
+    if not force:
+        with _bn_position_rest_lock:
+            row=_bn_position_rest_cache.get(key)
+            if row and now-row["at"]<BINANCE_REST_RECONCILE_MIN_INTERVAL:
+                return dict(row["value"]) if row["value"] is not None else None
+    val=_ORIG_GET_REAL_POSITION_V120(sym) if callable(_ORIG_GET_REAL_POSITION_V120) else None
+    with _bn_position_rest_lock: _bn_position_rest_cache[key]={"at":time.time(),"value":dict(val) if isinstance(val,dict) else None}
+    return val
+
+globals()["get_real_position"] = get_real_position_v120
+
+# Order status: use Binance user-data WS mirror first.
+def get_order_status_v120(symbol,order_id):
+    oid=str(order_id or "")
+    if _binance_ws_fresh():
+        with _binance_ws_state_lock:
+            row=dict(_binance_ws_orders.get(oid) or {})
+        if row:
+            row.setdefault("status",row.get("X")); row.setdefault("avgPrice",row.get("ap")); row.setdefault("orderId",row.get("i")); row.setdefault("clientOrderId",row.get("c")); return row
+    return _ORIG_GET_ORDER_STATUS_V120(symbol,order_id) if callable(_ORIG_GET_ORDER_STATUS_V120) else None
+
+globals()["get_order_status"] = get_order_status_v120
+
+# Open-order verification remains REST, but global gateway caches/coalesces reads.
+def get_open_orders_all_v120(symbol=None):
+    return _ORIG_GET_OPEN_ORDERS_ALL_V120(symbol) if callable(_ORIG_GET_OPEN_ORDERS_ALL_V120) else []
+globals()["get_open_orders_all"] = get_open_orders_all_v120
+
+def get_open_algo_orders_all_v120(symbol=None):
+    return _ORIG_GET_OPEN_ALGO_ORDERS_ALL_V120(symbol) if callable(_ORIG_GET_OPEN_ALGO_ORDERS_ALL_V120) else []
+globals()["get_open_algo_orders_all"] = get_open_algo_orders_all_v120
+
+def get_real_positions_all_v120():
+    # Binance WS is authoritative for normal monitoring; REST bulk is reconciliation only.
+    if _binance_ws_fresh():
+        with _binance_ws_state_lock:
+            rows=[]
+            for row in _binance_ws_positions.values():
+                try:
+                    if abs(float(row.get("pa") or row.get("positionAmt") or 0))>0: rows.append(dict(row))
+                except Exception: continue
+            if rows: return rows
+    return _ORIG_GET_REAL_POSITIONS_ALL_V120() if callable(_ORIG_GET_REAL_POSITIONS_ALL_V120) else []
+globals()["get_real_positions_all"] = get_real_positions_all_v120
+
+# REST diagnostics for /status and troubleshooting.
+def get_binance_rest_status_v120():
+    with _binance_rest_state_lock: m=dict(_binance_rest_metrics)
+    m.update({
+        "cooldown_sec": round(_binance_cooldown_remaining(),1),
+        "blocked": bool(_binance_is_scan_paused()),
+        "last_weight_1m": _binance_weight_1m,
+        "weight_age_sec": round(time.time()-_binance_weight_seen_at,1) if _binance_weight_seen_at else None,
+        "cache_items": len(_binance_rest_cache),
+        "inflight": len(_binance_rest_inflight),
+    })
+    return m
+
+globals()["get_binance_rest_status"] = get_binance_rest_status_v120
+
+# Ensure startup always initializes market WS before scanner can be reported healthy.
+_ORIG_START_RUNTIME_V120 = globals().get("start_runtime")
+def start_runtime_v120():
+    out = _ORIG_START_RUNTIME_V120() if callable(_ORIG_START_RUNTIME_V120) else None
+    try:
+        if not (bybit_market_ws._thread and bybit_market_ws._thread.is_alive()):
+            bybit_market_ws.start()
+    except Exception as exc:
+        log.warning(f"[BYBIT WS] startup: {exc}")
+    return out
+
+globals()["start_runtime"] = start_runtime_v120
+
+# ---------- Notification safety AFTER the API path is hardened ----------
+_ORIG_TG_SEND_V120 = globals().get("tg_send")
+_TG_API_INCIDENT_LOCK = threading.RLock()
+_TG_API_INCIDENT_LAST = {}
+
+def tg_send_v120(chat_id,text,*args,**kwargs):
+    raw=str(text or "")
+    low=raw.lower()
+    is_api=("binance rate limit/ban" in low or "[binance pause]" in low or "http 418" in low or "http 429" in low or "binance cooldown" in low or "algo cleanup belum terverifikasi" in low)
+    if is_api:
+        if "http 418" in low or "http 429" in low or "binance rate limit/ban" in low or "[binance pause]" in low or "binance cooldown" in low:
+            kind="binance-rate-limit"
+        else:
+            kind="binance-protection"
+        now=time.time()
+        with _TG_API_INCIDENT_LOCK:
+            prev=float(_TG_API_INCIDENT_LAST.get(kind,0.0))
+            # Initial incident and state change may pass; identical noise inside the window is dropped.
+            if now-prev < 300.0:
+                return False
+            _TG_API_INCIDENT_LAST[kind]=now
+    return _ORIG_TG_SEND_V120(chat_id,text,*args,**kwargs)
+
+globals()["tg_send"] = tg_send_v120
+
+# Human-readable REST status extension.
+_ORIG_FMT_RUNTIME_STATUS_V120 = globals().get("fmt_runtime_status")
+def fmt_runtime_status_v120():
+    base=_ORIG_FMT_RUNTIME_STATUS_V120() if callable(_ORIG_FMT_RUNTIME_STATUS_V120) else ""
+    bn=get_binance_rest_status_v120()
+    extra=(
+        "\n\n🔧 <b>BINANCE API</b>\n"
+        f"REST state: <b>{'COOLDOWN' if bn['blocked'] else 'READY'}</b> | "
+        f"requests {bn['requests']} | cache-hit {bn['cache_hits']} | coalesced {bn['coalesced']}\n"
+        f"429: {bn['last_429_at'] or '—'} | 418: {bn['last_418_at'] or '—'} | "
+        f"cooldown: {bn['cooldown_sec']}s\n"
+        f"Market analysis: <b>Bybit WS</b> | Binance REST market-data: <b>DISABLED</b>\n"
+        f"REST last endpoint: <code>{html.escape(str(bn.get('last_endpoint') or '—'))}</code>"
+    )
+    return base+extra
+
+globals()["fmt_runtime_status"] = fmt_runtime_status_v120
+
+
+
+# ============================================================
+# V121 — FINAL TRAFFIC CUT: NEVER PULL BINANCE FOR MARKET PRICE
+# Existing legacy monitors sometimes requested get_price(...,
+# prefer_binance=True). That defeats the Bybit market-data design.
+# Rebind those legacy references to the WS-first position reader and
+# make market price unambiguously Bybit-only unless an explicit caller
+# invokes a Binance execution/reconciliation endpoint directly.
+# ============================================================
+
+def get_price_v121(symbol, prefer_binance=False):
+    # Market price for analysis/monitoring is ALWAYS Bybit.
+    # Binance REST price endpoints are intentionally disabled.
+    return _final_bybit_price(symbol)
+
+globals()["get_price"] = get_price_v121
+
+# Legacy final monitor functions reference this captured name directly.
+# Point it to the WS-first/cached position reader so those paths no longer
+# fall through to per-loop Binance positionRisk polling.
+globals()["_ORIG_GET_REAL_POSITION"] = get_real_position_v120
+
+# Keep the final Binance public market helpers hard-disabled.
+def _binance_price_v121(symbol):
+    raise BinanceMarketDataDisabled("Binance REST price is disabled; use Bybit WS/REST")
+
+def _binance_klines_v121(symbol, interval, limit):
+    raise BinanceMarketDataDisabled("Binance REST klines are disabled; use Bybit WS/REST")
+
+def _binance_top_coins_v121(exclude_syms):
+    raise BinanceMarketDataDisabled("Binance REST ticker universe is disabled; use Bybit WS/REST")
+
+globals()["_binance_price"] = _binance_price_v121
+globals()["_binance_klines"] = _binance_klines_v121
+globals()["_binance_top_coins"] = _binance_top_coins_v121
+
+# /status REST metrics are human-friendly and do not expose raw headers/objects.
+def fmt_runtime_status_v121():
+    base=fmt_runtime_status_v120()
+    bn=get_binance_rest_status_v120()
+    cooldown=bn.get("cooldown_sec") or 0
+    state="COOLDOWN" if cooldown>0 else "READY"
+    return base+(
+        "\n📊 <b>REST GUARD</b>\n"
+        f"State: <b>{state}</b> | Calls: <b>{bn.get('requests',0)}</b> | "
+        f"Cache: <b>{bn.get('cache_hits',0)}</b> | Coalesced: <b>{bn.get('coalesced',0)}</b>\n"
+        f"429: <b>{bn.get('last_429_at') or '—'}</b> | 418: <b>{bn.get('last_418_at') or '—'}</b>\n"
+        "Market REST: <b>DISABLED</b> | Analysis: <b>Bybit WS</b>"
+    )
+
+globals()["fmt_runtime_status"] = fmt_runtime_status_v121
+
 if __name__ == "__main__":
     start_runtime()
     while not SHUTDOWN_EVENT.wait(15):
