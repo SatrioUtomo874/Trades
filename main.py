@@ -8080,8 +8080,13 @@ def telegram_command_router_v110(text, chat_id):
     if t in {"/auto","auto"}:
         try:
             _,created=_v110_ensure_scanner_running(chat_id,announce=False)
+            kicked=False
+            try:
+                kicked=_v128_kick_scan_now(chat_id)
+            except Exception as kick_exc:
+                log.warning(f"[SCANNER/V128] immediate kick gagal: {kick_exc}")
             s=get_scanner_status();
-            return tg_send(chat_id, ("🔎 <b>SCANNER STARTED</b>" if created else "🔎 <b>SCANNER HEALTHY</b>")+f"\nCycle: <b>{s.get('cycle_count',0)}</b> | last scan: <b>{s.get('last_cycle_age_sec','—')}s</b>\nMarket data: <b>Bybit WS</b>\nExecution: <b>Binance</b>")
+            return tg_send(chat_id, ("🔎 <b>SCANNER STARTED</b>" if created else "🔎 <b>SCANNER HEALTHY</b>")+f"\nImmediate scan: <b>{'STARTED' if kicked else 'ALREADY RUNNING'}</b>\nCycle: <b>{s.get('cycle_count',0)}</b> | last scan: <b>{s.get('last_cycle_age_sec','—')}s</b>\nMarket data: <b>Bybit WS</b>\nExecution: <b>Binance</b>")
         except Exception as exc:
             return tg_send(chat_id,f"❌ <b>Scanner gagal</b>\n<code>{html.escape(str(exc)[:300])}</code>")
     if t=="/timeout pending" or t=="timeout pending":
@@ -10016,13 +10021,97 @@ def _v128_execute_deferred(chat_id=None):
             log.warning(f"[DEFERRED ENTRY] execute {sym} gagal: {exc}")
     return done
 
-# ---------- Dedicated scanner cycle worker (does not consume generic heavy-worker slots) ----------
+# ---------- Guaranteed scanner cycle: normal scan first, deferred execution second ----------
 _SCANNER_CYCLE_THREAD_LOCK = threading.RLock()
 _SCANNER_CYCLE_THREAD = None
 
-def _start_dedicated_scanner_cycle(fn, *args, **kwargs):
-    """Start exactly one scan cycle independently from the generic heavy-worker pool."""
+def _v128_wait_entry_sim(sym, signal, cid):
+    try:
+        entry=float(signal.get("entry") or 0.0)
+        buy=str(signal.get("decision") or "BUY").upper()=="BUY"
+        deadline=time.time()+8*3600
+        while time.time()<deadline and auto_mode:
+            with positions_lock:
+                if sym not in positions: return
+                pos=positions.get(sym) or {}
+                if pos.get("timeout_flag"):
+                    positions.pop(sym,None)
+                    return
+                created=float(pos.get("entry_created_at") or pos.get("entry_time") or time.time())
+            price=_final_bybit_price(sym)
+            if price is not None and ((price<=entry) if buy else (price>=entry)):
+                _open_position(sym,signal,min(entry,price) if buy else max(entry,price),cid,"strategy")
+                return
+            if time.time()-created>=PENDING_ENTRY_TIMEOUT_SEC:
+                with positions_lock: positions.pop(sym,None)
+                _record_pending_cancel("expired")
+                return
+            time.sleep(min(5.0,MONITOR_SLEEP))
+    except Exception as exc:
+        log.warning(f"[ENTRY WAIT/V128] {sym}: {exc}")
+
+def _v128_run_one_scan_cycle(chat_id=None):
+    """One canonical scan cycle. Normal Bybit scanning MUST happen before deferred work."""
+    cid=chat_id or active_chat_id
+    cycle_started=time.time()
+    _set_scan_state(cycle_running=True,last_started_at=cycle_started,last_error=None)
+    log.info(f"[SCAN/V128] cycle START chat_id={cid}")
+    try:
+        # Critical ordering: never let deferred Binance/revalidation work block a fresh Bybit scan.
+        log.info("[SCAN/V128] invoking run_scan_once()")
+        signals=run_scan_once(cid)
+        log.info(f"[SCAN/V128] run_scan_once() returned signals={len(signals or [])}")
+        _set_scan_state(last_result_count=len(signals or []))
+        opened=0; deferred=0
+        for sig in signals or []:
+            sym=str(sig.get("symbol") or "").upper()
+            if not sym: continue
+            if _binance_execution_blocked_v127():
+                if _v128_queue_deferred_signal(sig,"binance_execution_unavailable"): deferred+=1
+                continue
+            with positions_lock:
+                if sym in positions or len(positions)>=MAX_POSITIONS: continue
+            if REAL_TRADE_ENABLED:
+                ok=_open_pending_real(sym,sig,cid)
+                if ok:
+                    opened+=1
+                elif _binance_execution_blocked_v127():
+                    if _v128_queue_deferred_signal(sig,"binance_execution_unavailable_race"): deferred+=1
+            else:
+                price=sig.get("price") or _final_bybit_price(sym)
+                entry=sig.get("entry")
+                if price is None or entry is None: continue
+                with positions_lock:
+                    if sym in positions or len(positions)>=MAX_POSITIONS: continue
+                    positions[sym]={"signal":sig,"entry":entry,"chat_id":cid,"entry_time":None,"entry_created_at":time.time(),"timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"SIMULATION"}
+                if str(sig.get("execution_mode") or "").lower()=="market" or sig.get("entry_label")=="market":
+                    if _open_position(sym,sig,price,cid,"strategy"): opened+=1
+                else:
+                    tg_send(cid,f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(sig)}")
+                    _start_light_worker(f"entry-wait-{sym}",_v128_wait_entry_sim,sym,sig,cid)
+                    opened+=1
+
+        log.info(f"[SCAN/V128] normal scan done signals={len(signals or [])} opened={opened} deferred={deferred}")
+        _set_scan_state(last_success_at=time.time(),last_finished_at=time.time())
+
+        # Deferred execution is explicitly AFTER the normal scan. It can no longer starve Bybit scanning.
+        try:
+            flushed=int(_v128_execute_deferred(cid) or 0)
+            if flushed:
+                log.info(f"[SCAN/V128] deferred flush after normal scan: {flushed}")
+        except Exception as exc:
+            log.warning(f"[SCAN/V128] deferred flush gagal setelah scan normal: {exc}")
+    except Exception as exc:
+        _set_scan_state(last_error=str(exc)[:500],last_finished_at=time.time())
+        _set_component_health("scanner","DEGRADED",str(exc)[:250])
+        log.exception(f"[SCAN/V128] cycle gagal: {exc}")
+    finally:
+        _set_scan_state(cycle_running=False,cycle_count=int(_SCAN_STATE.get("cycle_count",0))+1)
+
+def _start_dedicated_scanner_cycle(fn=None, *args, **kwargs):
+    """Start exactly one scanner cycle independently from the generic heavy-worker pool."""
     global _SCANNER_CYCLE_THREAD
+    fn=fn or _v128_run_one_scan_cycle
     with _SCANNER_CYCLE_THREAD_LOCK:
         if _SCANNER_CYCLE_THREAD is not None and _SCANNER_CYCLE_THREAD.is_alive():
             log.warning("[SCANNER] dedicated scan cycle already running; duplicate suppressed")
@@ -10035,81 +10124,30 @@ def _start_dedicated_scanner_cycle(fn, *args, **kwargs):
                 log.exception(f"[SCANNER] dedicated cycle crashed: {exc}")
                 _set_scan_state(last_error=str(exc)[:500])
                 _set_component_health("scanner", "DEGRADED", str(exc)[:250])
-        t=threading.Thread(target=target, name=name, daemon=True)
+        t=threading.Thread(target=target,name=name,daemon=True)
         _SCANNER_CYCLE_THREAD=t
         t.start()
         return t
 
-# ---------- Scanner execution bridge: eligible != discarded ----------
-_ORIG_SIMULATION_LOOP_V128_BASE=globals().get("simulation_loop")
+def _v128_kick_scan_now(chat_id=None):
+    """Explicit /auto/startup kick; guarantees one scan attempt without waiting on coordinator scheduling."""
+    with _SCAN_STATE_LOCK:
+        running=bool(_SCAN_STATE.get("cycle_running"))
+    if running:
+        log.info("[SCANNER/V128] immediate kick skipped: cycle already running")
+        return False
+    t=_start_dedicated_scanner_cycle(_v128_run_one_scan_cycle,chat_id or active_chat_id)
+    if t is None:
+        return False
+    log.info(f"[SCANNER/V128] IMMEDIATE KICK STARTED thread={t.name}")
+    return True
+
 def simulation_loop_v128(chat_id):
     global auto_mode
     _set_scan_state(enabled=True,coordinator_alive=True,last_error=None)
-    try: tg_send(chat_id,"🤖 <b>Engine dimulai.</b>\nMarket data: <b>Bybit WS → REST universe/backfill</b>.\nExecution: <b>Binance</b>.")
+    try:
+        tg_send(chat_id,"🤖 <b>Engine dimulai.</b>\nMarket data: <b>Bybit WS → REST universe/backfill</b>.\nExecution: <b>Binance</b>.")
     except Exception: pass
-    def wait_entry(sym, signal, cid):
-        # Reuse a tiny monitor so deferred/simulation pending remains lifecycle-compatible.
-        try:
-            entry=float(signal["entry"]); buy=str(signal.get("decision")).upper()=="BUY"; deadline=time.time()+8*3600
-            while time.time()<deadline and auto_mode:
-                with positions_lock:
-                    if sym not in positions: return
-                    if positions[sym].get("timeout_flag"): positions.pop(sym,None); return
-                price=_final_bybit_price(sym)
-                if price is not None and ((price<=entry) if buy else (price>=entry)):
-                    _open_position(sym,signal,min(entry,price) if buy else max(entry,price),cid,"strategy"); return
-                if time.time()-float(positions.get(sym,{}).get("entry_created_at") or positions.get(sym,{}).get("entry_time") or time.time())>=PENDING_ENTRY_TIMEOUT_SEC:
-                    with positions_lock: positions.pop(sym,None)
-                    _record_pending_cancel("expired"); return
-                time.sleep(min(5.0,MONITOR_SLEEP))
-        except Exception as exc: log.warning(f"[ENTRY WAIT/V128] {sym}: {exc}")
-    def do_scan():
-        cycle_started=time.time()
-        _set_scan_state(cycle_running=True,last_started_at=cycle_started,last_error=None)
-        log.info(f"[SCAN/V128] cycle START chat_id={chat_id}")
-        try:
-            _v128_execute_deferred(chat_id)
-            log.info("[SCAN/V128] deferred flush complete; invoking run_scan_once()")
-            signals=run_scan_once(chat_id)
-            log.info(f"[SCAN/V128] run_scan_once() returned signals={len(signals or [])}")
-            _set_scan_state(last_result_count=len(signals or []))
-            opened=0; deferred=0
-            for sig in signals or []:
-                sym=str(sig.get("symbol") or "").upper()
-                if not sym: continue
-                if _binance_execution_blocked_v127():
-                    if _v128_queue_deferred_signal(sig,"binance_execution_unavailable"): deferred+=1
-                    continue
-                with positions_lock:
-                    if sym in positions or len(positions)>=MAX_POSITIONS: continue
-                if REAL_TRADE_ENABLED:
-                    ok = _open_pending_real(sym,sig,chat_id)
-                    if ok:
-                        opened+=1
-                    elif _binance_execution_blocked_v127():
-                        if _v128_queue_deferred_signal(sig,"binance_execution_unavailable_race"):
-                            deferred+=1
-                else:
-                    price=sig.get("price") or _final_bybit_price(sym); entry=sig.get("entry")
-                    if price is None or entry is None: continue
-                    with positions_lock:
-                        if sym in positions or len(positions)>=MAX_POSITIONS: continue
-                        positions[sym]={"signal":sig,"entry":entry,"chat_id":chat_id,"entry_time":None,"entry_created_at":time.time(),"timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"SIMULATION"}
-                    if str(sig.get("execution_mode") or "").lower()=="market" or sig.get("entry_label")=="market":
-                        if _open_position(sym,sig,price,chat_id,"strategy"):
-                            opened+=1
-                    else:
-                        tg_send(chat_id,f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(sig)}")
-                        _start_light_worker(f"entry-wait-{sym}",wait_entry,sym,sig,chat_id)
-                        opened+=1
-            log.info(f"[SCAN/V128] signals={len(signals or [])} opened={opened} deferred={deferred} execution_blocked={_binance_execution_blocked_v127()}")
-            _set_scan_state(last_success_at=time.time(),last_finished_at=time.time())
-        except Exception as exc:
-            _set_scan_state(last_error=str(exc)[:500],last_finished_at=time.time())
-            _set_component_health("scanner","DEGRADED",str(exc)[:250])
-            log.exception(f"[SCAN/V128] cycle gagal: {exc}")
-        finally:
-            _set_scan_state(cycle_running=False,cycle_count=int(_SCAN_STATE.get("cycle_count",0))+1)
     try:
         while auto_mode:
             _set_scan_state(coordinator_heartbeat_at=time.time(),coordinator_alive=True)
@@ -10120,15 +10158,12 @@ def simulation_loop_v128(chat_id):
             if last_finished and time.time()-last_finished < 120:
                 _SCAN_WAKE.wait(5); _SCAN_WAKE.clear(); continue
             _set_scan_state(last_error=None)
-            worker=_start_dedicated_scanner_cycle(do_scan)
+            worker=_start_dedicated_scanner_cycle(_v128_run_one_scan_cycle,chat_id)
             if worker is None:
-                log.warning("[SCANNER/V128] scan cycle belum bisa dimulai karena cycle sebelumnya masih aktif")
                 _SCAN_WAKE.wait(2); _SCAN_WAKE.clear(); continue
             log.info(f"[SCANNER/V128] dedicated scan worker STARTED thread={worker.name}")
             _SCAN_WAKE.wait(2); _SCAN_WAKE.clear()
     finally:
-        # Do not silently leave auto_mode=true with a dead coordinator. The external watchdog
-        # can restart it; clear coordinator-only flags but preserve the user's /auto intent.
         _set_scan_state(enabled=False,coordinator_alive=False,cycle_running=False)
         log.info("[SCANNER/V128] coordinator stopped")
 
