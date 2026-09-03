@@ -6518,3 +6518,56 @@ FINAL_BRAIN_CHECKPOINT_SCHEMA = BRAIN_CHECKPOINT_SCHEMA
 def get_brain_progress_status():
     cp = export_checkpoint_state()
     return {"schema": cp.get("schema"), "brain_version": cp.get("brain_version"), "interface_version": cp.get("interface_version"), "observations": len((cp.get("v32_buffer") or [])), "ticks": cp.get("ticks", 0), "saved_at": cp.get("saved_at")}
+# V128 BRAIN — universe rotation evidence
+# ============================================================
+FINAL_BRAIN_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
+BRAIN_INTERFACE_VERSION = FINAL_BRAIN_VERSION
+
+def record_universe_rotation(payload, source="main_scanner"):
+    """Persist scanner-universe rotation evidence for FULL learning.
+
+    This is evidence only; it does not mutate strategy by itself. The purpose is
+    to let the brain distinguish opportunity scarcity from a narrow/stale universe.
+    """
+    rep=_brain_json_safe(dict(payload or {}))
+    rep["source"]=str(source)
+    rep["recorded_at"]=time.time()
+    with _AGENT_LOCK:
+        hist=_AGENT_STATE.get("universe_rotation_history") if isinstance(_AGENT_STATE.get("universe_rotation_history"),list) else []
+        hist.append(rep)
+        _AGENT_STATE["universe_rotation_history"]=hist[-200:]
+        _AGENT_STATE["last_universe_rotation"]=dict(rep)
+        _AGENT_STATE["universe_rotation_count"]=int(_AGENT_STATE.get("universe_rotation_count",0) or 0)+1
+    try: _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    except Exception as exc: log.warning(f"[BRAIN][ROTATION] persist warning: {exc}")
+    return {"ok":True,"rotation_count":int(_AGENT_STATE.get("universe_rotation_count",0) or 0)}
+
+# Extend checkpoint export/import without replacing the established full-memory schema.
+_ORIG_EXPORT_CHECKPOINT_V128=export_checkpoint_state
+_ORIG_IMPORT_CHECKPOINT_V128=import_checkpoint_state
+
+def export_checkpoint_state_v128():
+    cp=_ORIG_EXPORT_CHECKPOINT_V128()
+    with _AGENT_LOCK:
+        cp["universe_rotation_history"]=_brain_json_safe(list(_AGENT_STATE.get("universe_rotation_history") or [])[-200:])
+        cp["last_universe_rotation"]=_brain_json_safe(dict(_AGENT_STATE.get("last_universe_rotation") or {}))
+        cp["universe_rotation_count"]=int(_AGENT_STATE.get("universe_rotation_count",0) or 0)
+    return cp
+
+def import_checkpoint_state_v128(checkpoint):
+    result=_ORIG_IMPORT_CHECKPOINT_V128(checkpoint)
+    with _AGENT_LOCK:
+        _AGENT_STATE["universe_rotation_history"]=_brain_json_safe(list(checkpoint.get("universe_rotation_history") or [])[-200:])
+        _AGENT_STATE["last_universe_rotation"]=_brain_json_safe(dict(checkpoint.get("last_universe_rotation") or {}))
+        _AGENT_STATE["universe_rotation_count"]=int(checkpoint.get("universe_rotation_count",0) or 0)
+    return result
+
+export_checkpoint_state=export_checkpoint_state_v128
+import_checkpoint_state=import_checkpoint_state_v128
+get_brain_state=export_checkpoint_state_v128
+apply_brain_state=import_checkpoint_state_v128
+
+try:
+    __all__=list(dict.fromkeys(__all__+["record_universe_rotation","export_checkpoint_state","import_checkpoint_state"]))
+except Exception:
+    pass

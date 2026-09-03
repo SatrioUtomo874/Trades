@@ -5708,6 +5708,9 @@ def bot_loop():
                     tg_send(chat_id,"⛔ Akses ditolak."); continue
                 active_chat_id=chat_id
 
+                if _handle_special_commands_v128(text, chat_id):
+                    continue
+
                 if text in ("/start","start"):
                     tg_send(chat_id,get_start_msg())
                 elif text.startswith("/confidence_min") or text.startswith("confidence_min"):
@@ -9503,6 +9506,608 @@ def _v127_runtime_audit():
     return checks
 
 _v127_runtime_audit()
+
+# V128 — COIN ROTATION + EXCHANGE-LIFECYCLE EVENT BRIDGE
+# Purpose:
+#   * Coin universe rotates so banned/active/pending symbols vacate slots.
+#   * Bybit provides the analysis universe; Binance execution state stays isolated.
+#   * Binance ACCOUNT_UPDATE can finalize locally closed positions without REST.
+#   * Eligible signals are deferred (not discarded) while Binance entry is unavailable.
+#   * /ok is handled by a single non-recursive reconciler.
+# ============================================================
+V128_MAIN_VERSION = "V128_COIN_ROTATION_EVENT_DRIVEN"
+SCANNER_UNIVERSE_POOL_SIZE_V128 = max(100, min(500, int(os.getenv("SCANNER_UNIVERSE_POOL_SIZE", "200"))))
+SCANNER_CORE_COINS_V128 = max(0, min(TOP_N_COINS, int(os.getenv("SCANNER_CORE_COINS", "15"))))
+SCANNER_ROTATION_COINS_V128 = max(1, TOP_N_COINS - SCANNER_CORE_COINS_V128)
+SCANNER_UNIVERSE_REFRESH_SEC_V128 = max(60.0, float(os.getenv("SCANNER_UNIVERSE_REFRESH_SEC", "300")))
+SCANNER_RECENT_CLOSE_COOLDOWN_SEC_V128 = max(0.0, float(os.getenv("SCANNER_RECENT_CLOSE_COOLDOWN_SEC", "300")))
+DEFERRED_SIGNAL_TTL_SEC_V128 = max(60.0, float(os.getenv("DEFERRED_SIGNAL_TTL_SEC", "900")))
+DEFERRED_EXECUTION_MAX_PER_CYCLE_V128 = max(1, int(os.getenv("DEFERRED_EXECUTION_MAX_PER_CYCLE", "3")))
+ROTATION_UNIVERSE_CACHE_MAX_V128 = max(100, SCANNER_UNIVERSE_POOL_SIZE_V128 * 2)
+
+_ROTATION_LOCK_V128 = threading.RLock()
+_ROTATION_POOL_V128 = {}
+_ROTATION_POOL_FETCHED_AT_V128 = 0.0
+_ROTATION_LAST_SCANNED_V128 = {}
+_ROTATION_RECENT_CLOSED_V128 = {}
+_ROTATION_CYCLE_V128 = 0
+_DEFERRED_ENTRY_LOCK_V128 = threading.RLock()
+_DEFERRED_ENTRY_QUEUE_V128 = {}
+_FLAT_FINALIZE_LOCK_V128 = threading.RLock()
+_FLAT_FINALIZED_V128 = {}
+_BINANCE_WS_CLOSE_EVIDENCE_V128 = {}
+
+
+def _v128_now():
+    return time.time()
+
+
+def _v128_prune_rotation_state():
+    now=_v128_now()
+    with _ROTATION_LOCK_V128:
+        for s,t in list(_ROTATION_RECENT_CLOSED_V128.items()):
+            if now-float(t or 0) > SCANNER_RECENT_CLOSE_COOLDOWN_SEC_V128:
+                _ROTATION_RECENT_CLOSED_V128.pop(s,None)
+        # Keep recent scan timestamps bounded; the pool itself is bounded.
+        if len(_ROTATION_LAST_SCANNED_V128) > ROTATION_UNIVERSE_CACHE_MAX_V128:
+            keep=sorted(_ROTATION_LAST_SCANNED_V128.items(), key=lambda kv: kv[1], reverse=True)[:ROTATION_UNIVERSE_CACHE_MAX_V128]
+            _ROTATION_LAST_SCANNED_V128.clear(); _ROTATION_LAST_SCANNED_V128.update(keep)
+
+
+def _v128_exchange_exclusions():
+    """Symbols unavailable for a NEW ENTRY right now.
+
+    Active/pending symbols and active bans consume no scanner slots. A just-closed
+    symbol has a short re-entry cooldown only to avoid immediate churn; it is not
+    a permanent ban and returns automatically to the rotating universe.
+    """
+    _v128_prune_rotation_state()
+    with ban_lock:
+        bans=set(str(s).upper() for s in banned_coins.keys())
+    with positions_lock:
+        active=set(str(s).upper() for s in positions.keys())
+    with _DEFERRED_ENTRY_LOCK_V128:
+        deferred=set(_DEFERRED_ENTRY_QUEUE_V128.keys())
+    with _ROTATION_LOCK_V128:
+        recent_closed={s for s,t in _ROTATION_RECENT_CLOSED_V128.items()
+                       if _v128_now()-float(t or 0) < SCANNER_RECENT_CLOSE_COOLDOWN_SEC_V128}
+    return bans|active|deferred|recent_closed
+
+
+def _v128_subscribe_tickers_only(symbols):
+    fn=getattr(bybit_market_ws, "subscribe_tickers_only", None)
+    if callable(fn):
+        fn(symbols)
+        return
+    # Backward-compatible direct topic sender; no kline subscriptions are added here.
+    try:
+        bybit_market_ws._send_topics("subscribe", [f"tickers.{str(s).upper()}" for s in symbols if s])
+    except Exception:
+        pass
+
+
+def _v128_refresh_universe_pool(force=False):
+    global _ROTATION_POOL_FETCHED_AT_V128
+    now=_v128_now()
+    with _ROTATION_LOCK_V128:
+        if (not force) and _ROTATION_POOL_V128 and now-_ROTATION_POOL_FETCHED_AT_V128 < SCANNER_UNIVERSE_REFRESH_SEC_V128:
+            return dict(_ROTATION_POOL_V128)
+    try:
+        # One low-frequency public Bybit REST call builds the wide candidate pool.
+        # Realtime ranking then comes from Bybit WS ticker cache.
+        d=_bybit_get("/v5/market/tickers", {"category":"linear"})
+        if d.get("retCode", -1) != 0:
+            raise RuntimeError(f"Bybit tickers error: {d.get('retMsg')}")
+        items=d.get("result",{}).get("list") or []
+        pool={}
+        for item in items:
+            try:
+                sym=str(item.get("symbol") or "").upper()
+                price=float(item.get("lastPrice") or 0.0)
+                turnover=float(item.get("turnover24h") or 0.0)
+                chg=abs(float(item.get("price24hPcnt") or 0.0))
+                if not sym.endswith("USDT") or price<=0.0001 or price>=MAX_PRICE: continue
+                if turnover < 5_000_000 or chg >= 0.15: continue
+                pool[sym]={"symbol":sym,"turnover24h":turnover,"price":price,"change24h":chg}
+            except Exception:
+                continue
+        ranked=sorted(pool.values(), key=lambda x:x["turnover24h"], reverse=True)[:SCANNER_UNIVERSE_POOL_SIZE_V128]
+        with _ROTATION_LOCK_V128:
+            _ROTATION_POOL_V128.clear()
+            _ROTATION_POOL_V128.update({x["symbol"]:x for x in ranked})
+            _ROTATION_POOL_FETCHED_AT_V128=now
+            result=dict(_ROTATION_POOL_V128)
+        _v128_subscribe_tickers_only([x["symbol"] for x in ranked])
+        return result
+    except Exception as exc:
+        # Do not burn a scanner cycle if discovery REST has a transient failure.
+        with _ROTATION_LOCK_V128:
+            result=dict(_ROTATION_POOL_V128)
+        log.warning(f"[ROTATION/UNIVERSE] refresh gagal, pakai pool cache: {exc}")
+        return result
+
+
+def _v128_select_rotating_symbols():
+    exclusions=_v128_exchange_exclusions()
+    pool=_v128_refresh_universe_pool(False)
+    if not pool:
+        # Cold-start fallback to current Bybit top implementation.
+        try:
+            pool={s:{"symbol":s,"turnover24h":0.0} for s in (_ORIG_BYBIT_TOP(exclusions) if callable(_ORIG_BYBIT_TOP) else [])}
+        except Exception:
+            pool={}
+    now=_v128_now()
+    with _ROTATION_LOCK_V128:
+        last=dict(_ROTATION_LAST_SCANNED_V128)
+    ws_prices=bybit_market_ws.get_prices()
+    rows=[]
+    for sym,meta in pool.items():
+        sym=str(sym).upper()
+        if sym in exclusions: continue
+        row=dict(meta or {})
+        wsrow=ws_prices.get(sym)
+        if wsrow:
+            try:
+                row["price"]=float(wsrow.get("price") or row.get("price") or 0.0)
+                row["turnover24h"]=float(wsrow.get("volume") or row.get("turnover24h") or 0.0)
+                row["change24h"]=abs(float(wsrow.get("change_24h") or row.get("change24h") or 0.0))
+            except Exception:
+                pass
+        if float(row.get("price") or 0.0)<=0: continue
+        rows.append((sym,row,float(last.get(sym,0.0) or 0.0)))
+    # Core = current liquidity leaders. Rotation = least recently scanned first.
+    rows.sort(key=lambda x:float(x[1].get("turnover24h") or 0.0), reverse=True)
+    core=[x for x in rows[:SCANNER_CORE_COINS_V128]]
+    core_syms={x[0] for x in core}
+    rest=[x for x in rows if x[0] not in core_syms]
+    rest.sort(key=lambda x:(float(x[2] or 0.0)>0, float(x[2] or 0.0), -float(x[1].get("turnover24h") or 0.0)))
+    selected=core+rest[:SCANNER_ROTATION_COINS_V128]
+    # If core itself contains an active/banned item after a race, top up from rest.
+    selected_syms=[]
+    seen=set()
+    for sym,_,_ in selected:
+        if sym not in seen and sym not in exclusions:
+            selected_syms.append(sym); seen.add(sym)
+    for sym,row,last_ts in rest:
+        if len(selected_syms)>=TOP_N_COINS: break
+        if sym in seen or sym in exclusions: continue
+        selected_syms.append(sym); seen.add(sym)
+    return selected_syms[:TOP_N_COINS]
+
+
+def get_top_coins_v128():
+    """Canonical rotating entry universe.
+
+    Bans are *supposed* to rotate the universe: a banned/active/pending symbol
+    is removed before analysis and another eligible Bybit symbol takes its slot.
+    """
+    global last_scanned_coins,last_scanned_at, _ROTATION_CYCLE_V128
+    symbols=_v128_select_rotating_symbols()
+    now=_v128_now()
+    with _ROTATION_LOCK_V128:
+        _ROTATION_CYCLE_V128 += 1
+        cycle=_ROTATION_CYCLE_V128
+        for s in symbols:
+            _ROTATION_LAST_SCANNED_V128[s]=now
+    with _last_scanned_lock:
+        last_scanned_coins=list(symbols)
+        last_scanned_at=now
+    try:
+        _brain_on_universe_rotation({
+            "cycle":cycle,"selected":list(symbols),"pool_size":len(_ROTATION_POOL_V128),
+            "excluded":len(_v128_exchange_exclusions()),"source":"bybit_ws_ticker_plus_bybit_rest_universe"
+        })
+    except Exception:
+        pass
+    return symbols
+
+globals()["get_top_coins"] = get_top_coins_v128
+
+# ---- Bybit ticker-only subscription helper (prevents 200-symbol kline fan-out) ----
+def _subscribe_tickers_only_v128(self, symbols):
+    topics=[f"tickers.{str(s).upper()}" for s in (symbols or []) if s]
+    self._send_topics("subscribe", topics)
+
+try:
+    setattr(BybitMarketWS, "subscribe_tickers_only", _subscribe_tickers_only_v128)
+except Exception:
+    pass
+
+# ---------- Deferred eligible-entry queue ----------
+def _v128_queue_deferred_signal(signal, reason="binance_execution_unavailable"):
+    if not isinstance(signal,dict): return False
+    sym=str(signal.get("symbol") or "").upper()
+    if not sym: return False
+    expires=_v128_now()+DEFERRED_SIGNAL_TTL_SEC_V128
+    uid=str(signal.get("candidate_uid") or f"deferred|{research_run_id}|{sym}")
+    item={"signal":dict(signal),"queued_at":_v128_now(),"expires_at":expires,"reason":reason,"uid":uid}
+    with _DEFERRED_ENTRY_LOCK_V128:
+        # One live deferred entry per symbol; latest evidence replaces stale evidence.
+        old=_DEFERRED_ENTRY_QUEUE_V128.get(sym)
+        if old and float(old.get("expires_at",0))>_v128_now():
+            return False
+        _DEFERRED_ENTRY_QUEUE_V128[sym]=item
+    log.info(f"[DEFERRED ENTRY] {sym} eligible disimpan sampai Binance execution ready ({DEFERRED_SIGNAL_TTL_SEC_V128:.0f}s)")
+    return True
+
+
+def _v128_prune_deferred():
+    now=_v128_now(); expired=[]
+    with _DEFERRED_ENTRY_LOCK_V128:
+        for sym,item in list(_DEFERRED_ENTRY_QUEUE_V128.items()):
+            if now>=float(item.get("expires_at",0) or 0):
+                expired.append(sym); _DEFERRED_ENTRY_QUEUE_V128.pop(sym,None)
+    if expired:
+        log.info(f"[DEFERRED ENTRY] expired: {','.join(expired[:10])}")
+
+
+def _v128_revalidate_signal(sym,item):
+    sig=dict(item.get("signal") or {})
+    try:
+        h1=get_scan_klines(sym,"1h",250); m15=get_scan_klines(sym,"15m",250); d1=get_scan_klines(sym,"1d",100)
+        fresh=full_analyze(h1,m15,d1,symbol=sym,market_data_source="bybit")
+        return fresh if isinstance(fresh,dict) else None
+    except Exception as exc:
+        log.warning(f"[DEFERRED ENTRY] revalidate {sym} gagal: {exc}")
+        return None
+
+
+def _v128_sim_pending_wait(sym, signal, cid):
+    try:
+        entry=float(signal.get("entry") or 0.0); buy=str(signal.get("decision") or "BUY").upper()=="BUY"
+        deadline=time.time()+8*3600
+        while time.time()<deadline and auto_mode:
+            with positions_lock:
+                if sym not in positions: return
+                pos=positions.get(sym) or {}
+                if pos.get("timeout_flag"):
+                    positions.pop(sym,None); return
+                created=float(pos.get("entry_created_at") or pos.get("entry_time") or time.time())
+            px=_final_bybit_price(sym)
+            if px is not None and ((px<=entry) if buy else (px>=entry)):
+                _open_position(sym,signal,min(entry,px) if buy else max(entry,px),cid,"strategy"); return
+            if time.time()-created>=PENDING_ENTRY_TIMEOUT_SEC:
+                with positions_lock: positions.pop(sym,None)
+                _record_pending_cancel("expired"); return
+            time.sleep(min(5.0,MONITOR_SLEEP))
+    except Exception as exc:
+        log.warning(f"[DEFERRED WAIT/V128] {sym}: {exc}")
+
+
+def _v128_execute_deferred(chat_id=None):
+    _v128_prune_deferred()
+    if _binance_execution_blocked_v127():
+        return 0
+    done=0
+    with _DEFERRED_ENTRY_LOCK_V128:
+        items=sorted(_DEFERRED_ENTRY_QUEUE_V128.items(), key=lambda kv:float(kv[1].get("queued_at",0)))[:DEFERRED_EXECUTION_MAX_PER_CYCLE_V128]
+    for sym,item in items:
+        if done>=DEFERRED_EXECUTION_MAX_PER_CYCLE_V128: break
+        if _binance_execution_blocked_v127(): break
+        fresh=_v128_revalidate_signal(sym,item)
+        if not isinstance(fresh,dict) or not bool(fresh.get("execution_eligible")) or str(fresh.get("decision") or "").upper() not in {"BUY","SELL"}:
+            with _DEFERRED_ENTRY_LOCK_V128: _DEFERRED_ENTRY_QUEUE_V128.pop(sym,None)
+            try: _brain_on_candidate({**dict(item.get("signal") or {}),"execution_eligible":False,"rejected_reason":"DEFERRED_REVALIDATION_FAILED"})
+            except Exception: pass
+            continue
+        with positions_lock:
+            if sym in positions or len(positions)>=MAX_POSITIONS:
+                continue
+        try:
+            if REAL_TRADE_ENABLED:
+                if _open_pending_real(sym,fresh,chat_id or active_chat_id):
+                    with _DEFERRED_ENTRY_LOCK_V128: _DEFERRED_ENTRY_QUEUE_V128.pop(sym,None)
+                    done+=1
+            else:
+                # Simulation follows the same current-market revalidation semantics.
+                price=fresh.get("price") or _final_bybit_price(sym)
+                entry=fresh.get("entry")
+                if price is None or entry is None:
+                    raise RuntimeError("price/entry unavailable")
+                with positions_lock:
+                    positions[sym]={"signal":fresh,"entry":entry,"chat_id":chat_id or active_chat_id,"entry_time":None,"timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"SIMULATION"}
+                if str(fresh.get("execution_mode") or "").lower()=="market" or fresh.get("entry_label")=="market":
+                    _open_position(sym,fresh,_final_bybit_price(sym) or price,chat_id or active_chat_id,"strategy")
+                else:
+                    _start_light_worker(f"entry-wait-{sym}",_v128_sim_pending_wait,sym,fresh,chat_id or active_chat_id)
+                with _DEFERRED_ENTRY_LOCK_V128: _DEFERRED_ENTRY_QUEUE_V128.pop(sym,None)
+                done+=1
+        except Exception as exc:
+            log.warning(f"[DEFERRED ENTRY] execute {sym} gagal: {exc}")
+    return done
+
+# ---------- Scanner execution bridge: eligible != discarded ----------
+_ORIG_SIMULATION_LOOP_V128_BASE=globals().get("simulation_loop")
+def simulation_loop_v128(chat_id):
+    global auto_mode
+    _set_scan_state(enabled=True,coordinator_alive=True,last_error=None)
+    try: tg_send(chat_id,"🤖 <b>Engine dimulai.</b>\nMarket data: <b>Bybit WS → REST universe/backfill</b>.\nExecution: <b>Binance</b>.")
+    except Exception: pass
+    def wait_entry(sym, signal, cid):
+        # Reuse a tiny monitor so deferred/simulation pending remains lifecycle-compatible.
+        try:
+            entry=float(signal["entry"]); buy=str(signal.get("decision")).upper()=="BUY"; deadline=time.time()+8*3600
+            while time.time()<deadline and auto_mode:
+                with positions_lock:
+                    if sym not in positions: return
+                    if positions[sym].get("timeout_flag"): positions.pop(sym,None); return
+                price=_final_bybit_price(sym)
+                if price is not None and ((price<=entry) if buy else (price>=entry)):
+                    _open_position(sym,signal,min(entry,price) if buy else max(entry,price),cid,"strategy"); return
+                if time.time()-float(positions.get(sym,{}).get("entry_created_at") or positions.get(sym,{}).get("entry_time") or time.time())>=PENDING_ENTRY_TIMEOUT_SEC:
+                    with positions_lock: positions.pop(sym,None)
+                    _record_pending_cancel("expired"); return
+                time.sleep(min(5.0,MONITOR_SLEEP))
+        except Exception as exc: log.warning(f"[ENTRY WAIT/V128] {sym}: {exc}")
+    def do_scan():
+        _set_scan_state(cycle_running=True,last_started_at=time.time(),last_error=None)
+        try:
+            _v128_execute_deferred(chat_id)
+            signals=run_scan_once(chat_id)
+            _set_scan_state(last_result_count=len(signals or []))
+            opened=0; deferred=0
+            for sig in signals or []:
+                sym=str(sig.get("symbol") or "").upper()
+                if not sym: continue
+                if _binance_execution_blocked_v127():
+                    if _v128_queue_deferred_signal(sig,"binance_execution_unavailable"): deferred+=1
+                    continue
+                with positions_lock:
+                    if sym in positions or len(positions)>=MAX_POSITIONS: continue
+                if REAL_TRADE_ENABLED:
+                    if _open_pending_real(sym,sig,chat_id): opened+=1
+                else:
+                    price=sig.get("price") or _final_bybit_price(sym); entry=sig.get("entry")
+                    if price is None or entry is None: continue
+                    with positions_lock:
+                        if sym in positions or len(positions)>=MAX_POSITIONS: continue
+                        positions[sym]={"signal":sig,"entry":entry,"chat_id":chat_id,"entry_time":None,"entry_created_at":time.time(),"timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"SIMULATION"}
+                    if str(sig.get("execution_mode") or "").lower()=="market" or sig.get("entry_label")=="market":
+                        _open_position(sym,sig,_final_bybit_price(sym) or price,chat_id,"strategy")
+                    else:
+                        tg_send(chat_id,f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(sig)}")
+                        _start_light_worker(f"entry-wait-{sym}",wait_entry,sym,sig,chat_id)
+                    opened+=1
+            log.info(f"[SCAN/V128] signals={len(signals or [])} opened={opened} deferred={deferred} execution_blocked={_binance_execution_blocked_v127()}")
+            _set_scan_state(last_success_at=time.time(),last_finished_at=time.time())
+        except Exception as exc:
+            _set_scan_state(last_error=str(exc)[:500],last_finished_at=time.time())
+            _set_component_health("scanner","DEGRADED",str(exc)[:250])
+            log.exception(f"[SCAN/V128] cycle gagal: {exc}")
+        finally:
+            _set_scan_state(cycle_running=False,cycle_count=int(_SCAN_STATE.get("cycle_count",0))+1)
+    try:
+        while auto_mode:
+            _set_scan_state(coordinator_heartbeat_at=time.time(),coordinator_alive=True)
+            with _SCAN_STATE_LOCK:
+                running=bool(_SCAN_STATE.get("cycle_running")); last_finished=float(_SCAN_STATE.get("last_finished_at") or 0.0)
+            if running:
+                _SCAN_WAKE.wait(1); _SCAN_WAKE.clear(); continue
+            if time.time()-last_finished < 120:
+                _SCAN_WAKE.wait(5); _SCAN_WAKE.clear(); continue
+            worker=_start_heavy_worker("scan",do_scan)
+            if worker is None:
+                _SCAN_WAKE.wait(2); _SCAN_WAKE.clear(); continue
+            _SCAN_WAKE.wait(2); _SCAN_WAKE.clear()
+    finally:
+        _set_scan_state(enabled=False,coordinator_alive=False,cycle_running=False)
+        log.info("[SCANNER/V128] coordinator stopped")
+
+globals()["simulation_loop"]=simulation_loop_v128
+
+# ---------- WS close evidence + immediate local finalization ----------
+_ORIG_BINANCE_USER_WS_MESSAGE_V128=globals().get("_binance_user_ws_message")
+
+def _v128_close_evidence_from_order(o):
+    sym=str(o.get("s") or "").upper();
+    if not sym: return
+    status=str(o.get("X") or "").upper()
+    exectype=str(o.get("x") or "").upper()
+    if status!="FILLED" and exectype!="TRADE": return
+    try: price=float(o.get("ap") or o.get("L") or o.get("p") or 0.0)
+    except Exception: price=0.0
+    if price<=0: return
+    with _FLAT_FINALIZE_LOCK_V128:
+        _BINANCE_WS_CLOSE_EVIDENCE_V128[sym]={"price":price,"at":_v128_now(),"order_type":str(o.get("o") or "").upper(),"side":str(o.get("S") or "").upper(),"client_id":str(o.get("c") or "")}
+
+
+def _v128_finalize_exchange_flat(sym, reason_hint="external"):
+    sym=str(sym).upper()
+    with _FLAT_FINALIZE_LOCK_V128:
+        if _FLAT_FINALIZED_V128.get(sym): return False
+        with positions_lock:
+            pos=positions.get(sym)
+            if not pos or not _position_is_real(pos): return False
+            local_pos=dict(pos)
+        # Exchange WS is authoritative: only finalize if it explicitly says zero.
+        row=_binance_ws_position(sym)
+        if row is None: return False
+        try:
+            qty=abs(float(row.get("pa") or row.get("positionAmt") or 0.0))
+        except Exception:
+            return False
+        if qty>0: return False
+        _FLAT_FINALIZED_V128[sym]=True
+    try:
+        with _FLAT_FINALIZE_LOCK_V128:
+            evidence=dict(_BINANCE_WS_CLOSE_EVIDENCE_V128.get(sym) or {})
+        sig=local_pos.get("signal") or {}; entry=float(local_pos.get("entry") or 0.0)
+        xp=evidence.get("price") or local_pos.get("current_price") or _final_bybit_price(sym) or entry
+        order_type=str(evidence.get("order_type") or "").upper()
+        trail_breached=bool(local_pos.get("trail_breach_latched") or local_pos.get("forced_exit_pending"))
+        if "TAKE_PROFIT" in order_type:
+            result="tp"
+        elif trail_breached:
+            result="trail" if _classify_close_result("trail",entry,float(xp),sig.get("decision"))=="trail" else "sl"
+        elif "STOP" in order_type:
+            result="sl"
+        else:
+            # Manual/external close: preserve the true lifecycle without inventing TP/SL.
+            result="manual"
+        closed=close_position(sym,result,close_price=float(xp))
+        if closed:
+            try: _final_cleanup_after_flat(sym,reason=f"exchange-flat:{reason_hint}")
+            except Exception as exc: _queue_pending_cleanup(sym,f"exchange-flat cleanup",exc)
+            with _ROTATION_LOCK_V128: _ROTATION_RECENT_CLOSED_V128[sym]=_v128_now()
+            if trail_breached:
+                label="TRAILING STOP" if result=="trail" else "STOP LOSS"
+                icon="🟢" if result=="trail" else "🛑"
+                try: tg_send(local_pos.get("chat_id") or active_chat_id, f"{icon} <b>{label} — {sym}</b>\nEntry: <code>{entry:.8g}</code> → Exit: <code>{float(xp):.8g}</code>\nHasil: <b>{_trade_price_move_pct(entry,float(xp),sig.get('decision')):+.2f}%</b>\nSumber: Binance User Data WS")
+                except Exception: pass
+            log.info(f"[POSITION/V128] {sym} exchange flat finalized result={result} exit={xp}")
+            return True
+    except Exception as exc:
+        with _FLAT_FINALIZE_LOCK_V128: _FLAT_FINALIZED_V128.pop(sym,None)
+        log.exception(f"[POSITION/V128] finalize flat {sym} gagal: {exc}")
+    return False
+
+
+def _binance_user_ws_message_v128(ws,raw):
+    try:
+        msg=json.loads(raw)
+    except Exception:
+        return _ORIG_BINANCE_USER_WS_MESSAGE_V128(ws,raw) if callable(_ORIG_BINANCE_USER_WS_MESSAGE_V128) else None
+    event=str(msg.get("e") or "") if isinstance(msg,dict) else ""
+    if event=="ORDER_TRADE_UPDATE":
+        _v128_close_evidence_from_order(msg.get("o") or {})
+    result=_ORIG_BINANCE_USER_WS_MESSAGE_V128(ws,raw) if callable(_ORIG_BINANCE_USER_WS_MESSAGE_V128) else None
+    if event=="ACCOUNT_UPDATE":
+        for p in (msg.get("a") or {}).get("P") or []:
+            sym=str(p.get("s") or "").upper()
+            if not sym: continue
+            try: qty=abs(float(p.get("pa") or 0.0))
+            except Exception: continue
+            if qty<=0:
+                # Do not block WS callback; finalization happens in one light worker.
+                with positions_lock: exists=bool(sym in positions and _position_is_real(positions[sym]))
+                if exists:
+                    _start_light_worker(f"flat-finalize-{sym}",lambda s=sym: _v128_finalize_exchange_flat(s,"ACCOUNT_UPDATE"))
+    return result
+
+globals()["_binance_user_ws_message"]=_binance_user_ws_message_v128
+
+# ---------- Canonical /ok reconciler: no recursive handler calls ----------
+def _reconcile_symbol_v128(sym, chat_id=None):
+    sym=str(sym).upper(); cid=chat_id or active_chat_id
+    with positions_lock: pos=dict(positions.get(sym) or {})
+    if not pos:
+        tg_send(cid,f"ℹ️ <b>{sym}</b> tidak ada di state lokal.")
+        return {"ok":True,"state":"NO_LOCAL_POSITION"}
+    row=_binance_ws_position(sym)
+    if row is not None:
+        try: qty=abs(float(row.get("pa") or 0.0))
+        except Exception: qty=None
+        if qty==0:
+            ok=_v128_finalize_exchange_flat(sym,"/ok")
+            tg_send(cid, f"✅ <b>{sym} RECONCILED</b>\nBinance WS position = 0.\nTrade/lifecycle difinalisasi; cleanup orphan order diproses terpisah.")
+            return {"ok":ok,"state":"FLAT"}
+        if qty is not None:
+            with positions_lock:
+                if sym in positions:
+                    positions[sym]["quantity"]=qty
+                    positions[sym]["exchange_synced_at"]=_v128_now()
+                    positions[sym]["lifecycle"]="OPEN"
+            tg_send(cid,f"✅ <b>{sym} RECONCILED</b>\nBinance WS position: <b>{qty:g}</b>.\nState lokal disinkronkan tanpa recursive REST cascade.")
+            return {"ok":True,"state":"ACTIVE","quantity":qty}
+    # Only if WS is unavailable do we use a single controlled REST reconciliation.
+    try:
+        if not _binance_ws_fresh() and _binance_reconcile_allowed(sym):
+            real=get_real_position_v120(sym,prefer_ws=False,force=False)
+            _mark_binance_reconcile(sym)
+            if real is None or abs(float(real.get("positionAmt",0) or 0))<=0:
+                ok=_v128_finalize_exchange_flat(sym,"/ok-REST")
+                if ok:
+                    tg_send(cid,f"✅ <b>{sym} RECONCILED</b>\nBinance REST position = 0.")
+                else:
+                    tg_send(cid,f"⚠️ <b>{sym}</b> REST menunjukkan flat tetapi state finalisasi masih menunggu event verification.")
+                return {"ok":ok,"state":"FLAT_REST"}
+            qty=abs(float(real.get("positionAmt",0) or 0))
+            with positions_lock:
+                if sym in positions: positions[sym]["quantity"]=qty; positions[sym]["exchange_synced_at"]=_v128_now()
+            tg_send(cid,f"✅ <b>{sym} RECONCILED</b>\nBinance REST position: <b>{qty:g}</b>.")
+            return {"ok":True,"state":"ACTIVE_REST","quantity":qty}
+    except Exception as exc:
+        tg_send(cid,f"⚠️ <b>{sym} RECONCILE TERTUNDA</b>\n<code>{html.escape(str(exc)[:300])}</code>")
+        return {"ok":False,"state":"DEFERRED","error":str(exc)}
+    tg_send(cid,f"⏳ <b>{sym}</b> belum bisa direkonsiliasi: Binance WS/REST belum memberi state baru.")
+    return {"ok":False,"state":"NO_FRESH_EXCHANGE_STATE"}
+
+
+def _handle_special_commands_v128(text, chat_id):
+    t=str(text or "").strip().lower()
+    parts=t.split()
+    if parts and parts[0] in {"/ok","ok"}:
+        if len(parts)!=2:
+            tg_send(chat_id,"❌ Gunakan <code>/ok SYMBOL</code>.")
+        else:
+            _reconcile_symbol_v128(parts[1].upper(),chat_id)
+        return True
+    if t in {"/timeout pending","timeout pending"}:
+        r=_timeout_pending_entries(chat_id)
+        tg_send(chat_id,f"⏱️ <b>/timeout pending</b>\nFound: <b>{r['found']}</b> | Cancelled: <b>{r['cancelled']}</b> | Failed: <b>{len(r['failed'])}</b>")
+        return True
+    if t in {"/timeout all","timeout all"}:
+        fn=globals().get("_verified_timeout_all")
+        if callable(fn): fn(chat_id)
+        else: tg_send(chat_id,"❌ /timeout all tidak tersedia.")
+        return True
+    return False
+
+# Finalize health/status with rotation and deferred queue visibility.
+def get_scanner_status_v128():
+    base=get_scanner_status()
+    with _ROTATION_LOCK_V128:
+        pool_n=len(_ROTATION_POOL_V128); rot_n=len(_ROTATION_LAST_SCANNED_V128); cycle=_ROTATION_CYCLE_V128
+    with _DEFERRED_ENTRY_LOCK_V128:
+        deferred_n=len(_DEFERRED_ENTRY_QUEUE_V128)
+    base.update({"rotation_pool_size":pool_n,"rotation_seen_symbols":rot_n,"rotation_cycle":cycle,"deferred_entries":deferred_n,"rotation_core":SCANNER_CORE_COINS_V128,"rotation_slots":SCANNER_ROTATION_COINS_V128})
+    return base
+
+globals()["get_scanner_status"] = get_scanner_status_v128
+
+# Human-readable /status that makes lifecycle and rotation visible.
+_ORIG_FMT_RUNTIME_STATUS_V128=globals().get("fmt_runtime_status")
+def fmt_runtime_status_v128():
+    try: base=get_binance_rest_status_v120()
+    except Exception: base={"blocked":_binance_is_scan_paused(),"requests":0,"cache_hits":0,"coalesced":0}
+    s=get_scanner_status_v128(); by=bybit_market_ws.status(); bn=_binance_ws_status()
+    return (
+        "📡 <b>RUNTIME STATUS</b>\n"
+        f"🔎 Scanner: <b>{s.get('health')}</b> | cycle <b>{s.get('cycle_count',0)}</b> | last <b>{s.get('last_cycle_age_sec','—')}</b>s\n"
+        f"   {s.get('last_symbols_processed',0)}/{TOP_N_COINS} processed | candidate <b>{s.get('last_candidate_count',0)}</b> | eligible <b>{s.get('last_eligible_count',0)}</b>\n"
+        f"   Rotation pool <b>{s.get('rotation_pool_size',0)}</b> | deferred <b>{s.get('deferred_entries',0)}</b> | core/rotation <b>{s.get('rotation_core',0)}/{s.get('rotation_slots',0)}</b>\n"
+        f"🟣 Bybit WS: <b>{'✅ FRESH' if by.get('fresh') else '⚠️ DEGRADED'}</b> | tickers {by.get('tickers',0)} | klines {by.get('kline_buffers',0)}\n"
+        f"🔵 Binance WS: <b>{'✅ FRESH' if bn.get('fresh') else '⚠️ STALE'}</b> | positions {bn.get('positions',0)} | orders {bn.get('orders',0)}\n"
+        f"💳 Binance execution: <b>{'PAUSED' if _binance_is_scan_paused() else 'READY'}</b> | cooldown <b>{_binance_cooldown_remaining():.0f}s</b>\n"
+        f"🧮 Binance REST: <b>{base.get('requests',0)}</b> req | cache {base.get('cache_hits',0)} | coalesced {base.get('coalesced',0)}"
+    )
+
+globals()["fmt_runtime_status"] = fmt_runtime_status_v128
+
+# Brain bridge for rotation telemetry if present.
+def _brain_on_universe_rotation(payload):
+    fn=_brain_fn("record_universe_rotation")
+    if callable(fn): return fn(payload, source="main_scanner")
+    return None
+
+# ---------- Final runtime contract audit V128 ----------
+def _v128_runtime_audit():
+    checks={
+        "get_top_coins": callable(globals().get("get_top_coins")),
+        "get_top_coins_no_required_args": not [p for p in inspect.signature(globals()["get_top_coins"]).parameters.values() if p.default is inspect._empty and p.kind in (p.POSITIONAL_ONLY,p.POSITIONAL_OR_KEYWORD,p.KEYWORD_ONLY)],
+        "scanner_loop": globals().get("simulation_loop") is simulation_loop_v128,
+        "ws_flat_handler": globals().get("_binance_user_ws_message") is _binance_user_ws_message_v128,
+        "special_router": callable(globals().get("_handle_special_commands_v128")),
+        "brain_universe_bridge": callable(globals().get("_brain_on_universe_rotation")),
+    }
+    bad=[k for k,v in checks.items() if not v]
+    if bad: raise RuntimeError("V128 runtime contract failed: "+", ".join(bad))
+    return checks
+
+_v128_runtime_audit()
+
+
+
 
 # FINAL ENTRYPOINT — MUST BE THE LAST EXECUTABLE CODE IN THIS FILE.
 if __name__ == "__main__":
