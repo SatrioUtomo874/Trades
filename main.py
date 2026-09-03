@@ -21,7 +21,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 
-import requests, pandas as pd, numpy as np, urllib3, json, html, base64
+import requests, pandas as pd, numpy as np, urllib3, json, html, base64, hashlib
 from flask import Flask
 
 try:
@@ -695,31 +695,92 @@ def _load_previous_known_good_manifest():
         log.warning(f"[CHECKPOINT] previous manifest read failed: {exc}")
         return None
 
+def _read_json_file_safe(path, label="JSON file"):
+    """Read a local JSON file without letting an empty/corrupt file abort recovery."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        log.warning(f"[CHECKPOINT] {label} read failed: {exc}")
+        return None
+    if not raw.strip():
+        log.warning(f"[CHECKPOINT] {label} kosong: {path}")
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        log.warning(f"[CHECKPOINT] {label} JSON rusak: {path}: {exc}")
+        return None
+    except Exception as exc:
+        log.warning(f"[CHECKPOINT] {label} parse failed: {path}: {exc}")
+        return None
+
+
+def _github_get_json_safe(path):
+    """GitHub JSON reader with a descriptive error for empty/malformed content."""
+    try:
+        return _github_get_json(path)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"GitHub JSON rusak/kosong: {path}: {exc}") from exc
+
+
 def _load_runtime_checkpoint(reference=None):
-    if reference in ("previous","previous_known_good"):
-        prev=_load_previous_known_good_manifest()
-        if not prev: raise RuntimeError("previous known-good checkpoint tidak tersedia")
-        path=prev.get("path")
-        if path and RUNTIME_CHECKPOINT_MANIFEST.exists():
-            local=RUNTIME_CHECKPOINT_DIR/path
-            if local.exists(): return json.loads(local.read_text(encoding="utf-8"))
-        remote_path=prev.get("path")
+    if reference in ("previous", "previous_known_good"):
+        prev = _load_previous_known_good_manifest()
+
+        # If the local manifest is empty/corrupt, recover its previous pointer
+        # from GitHub's latest manifest.
+        if not prev and GITHUB_TOKEN and REPO_NAME:
+            try:
+                latest, _ = _github_get_json_safe("runtime_state/latest.json")
+                prev = latest.get("previous_known_good") if isinstance(latest, dict) else None
+            except Exception as exc:
+                log.warning(f"[CHECKPOINT] GitHub latest manifest recovery failed: {exc}")
+
+        if not isinstance(prev, dict):
+            raise RuntimeError("previous known-good checkpoint tidak tersedia")
+
+        path = prev.get("path")
+        if path:
+            local = RUNTIME_CHECKPOINT_DIR / Path(path).name
+            cp = _read_json_file_safe(local, "previous checkpoint")
+            if isinstance(cp, dict):
+                return cp
+
+        remote_path = prev.get("path")
         if remote_path and GITHUB_TOKEN and REPO_NAME:
-            data,_=_github_get_json(remote_path)
+            data, _ = _github_get_json_safe(remote_path)
             return data
+
         raise RuntimeError("previous known-good checkpoint tidak dapat dimuat")
+
     if reference:
-        try:
-            with open(reference, "r", encoding="utf-8") as f: return json.load(f)
-        except Exception: pass
+        cp = _read_json_file_safe(reference, "checkpoint reference")
+        if cp is not None:
+            return cp
+        raise RuntimeError(f"checkpoint reference tidak dapat dimuat: {reference}")
+
+    # Local persistence is preferred, but a zero-byte/corrupt manifest or
+    # checkpoint must not block recovery from GitHub.
     if RUNTIME_CHECKPOINT_MANIFEST.exists():
-        m=json.loads(RUNTIME_CHECKPOINT_MANIFEST.read_text(encoding="utf-8")); p=RUNTIME_CHECKPOINT_DIR/m["path"]
-        return json.loads(p.read_text(encoding="utf-8"))
-    # Prefer GitHub only when local latest is absent.
-    latest,_=_github_get_json("runtime_state/latest.json")
-    cp=latest.get("path") if isinstance(latest,dict) else None
-    if not cp: raise RuntimeError("latest checkpoint tidak ditemukan")
-    data,_=_github_get_json(cp)
+        m = _read_json_file_safe(RUNTIME_CHECKPOINT_MANIFEST, "latest manifest")
+        if isinstance(m, dict):
+            checkpoint_path = m.get("path")
+            if checkpoint_path:
+                local_cp = RUNTIME_CHECKPOINT_DIR / Path(checkpoint_path).name
+                cp = _read_json_file_safe(local_cp, "latest checkpoint")
+                if isinstance(cp, dict):
+                    return cp
+                log.warning("[CHECKPOINT] local latest checkpoint tidak valid; mencoba GitHub recovery.")
+        else:
+            log.warning("[CHECKPOINT] local latest manifest tidak valid; mencoba GitHub recovery.")
+
+    latest, _ = _github_get_json_safe("runtime_state/latest.json")
+    checkpoint_path = latest.get("path") if isinstance(latest, dict) else None
+    if not checkpoint_path:
+        raise RuntimeError("latest checkpoint tidak ditemukan di GitHub")
+    data, _ = _github_get_json_safe(checkpoint_path)
     return data
 
 def _verify_checkpoint_integrity(checkpoint):
