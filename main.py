@@ -6455,7 +6455,7 @@ def bot_loop():
                     if len(parts) > 1 and parts[1].lower() == "pending":
                         threading.Thread(target=_verified_timeout_pending_only, args=(chat_id,), daemon=True).start()
                     elif len(parts) > 1 and parts[1].lower() == "all":
-                        threading.Thread(target=_verified_timeout_all, args=(chat_id,), daemon=True).start()
+                        _timeout_all_request_v17(chat_id)
                     else:
                         target_sym = parts[1].upper() if len(parts) > 1 else None
                         if target_sym:
@@ -9437,101 +9437,211 @@ def _verified_timeout_symbol_v124(sym,chat_id,reason="manual timeout"):
 
 globals()["_verified_timeout_symbol"]=_verified_timeout_symbol_v124
 
-def _verified_timeout_all_v124_core(chat_id):
+# ═══════════════════════════════════════════════════════════════════════
+# V17 — STRUCTURAL /timeout all FIX
+# One public request function + one private worker. Recovery calls the worker
+# directly; the worker NEVER calls the public handler or recovery hook.
+# ═══════════════════════════════════════════════════════════════════════
+TIMEOUT_ALL_LOCK = threading.RLock()
+_TIMEOUT_ALL_PENDING = {"requested": False, "at": None, "chat_id": None, "running": False}
+_TIMEOUT_ALL_WORKER_LOCK = threading.Lock()
+_TIMEOUT_ALL_LAST_NOTICE = 0.0
+
+
+def _timeout_all_worker_v17(chat_id):
+    """Private one-shot global flatten/cleanup worker.
+
+    This function is intentionally isolated from Telegram dispatch and recovery:
+    it never calls /timeout all, its request function, or the recovery hook.
+    """
     global _TIMEOUT_ALL_LAST_NOTICE
     with TIMEOUT_ALL_LOCK:
         if _TIMEOUT_ALL_PENDING.get("running"):
-            tg_send(chat_id,"⏳ <b>/timeout all</b> sudah sedang diproses."); return False
-        _TIMEOUT_ALL_PENDING.update({"requested":True,"at":time.time(),"chat_id":chat_id,"running":True})
-    try:
-        if _binance_cooldown_remaining()>0:
-            tg_send(chat_id,"⏸️ <b>/timeout all diterima.</b>\nBinance cooldown aktif; permintaan global disimpan dan akan diproses saat recovery. Tidak ada retry agresif.")
             return False
+        _TIMEOUT_ALL_PENDING.update({"requested": True, "at": time.time(), "chat_id": chat_id, "running": True})
+
+    cleanup_failures = []
+    exits = {}
+    symbols = set()
+    try:
+        if _binance_cooldown_remaining() > 0:
+            return False
+
+        # Snapshot exchange state once. No recursive timeout path exists here.
         with _binance_critical_context():
-            remote_positions=list(get_real_positions_all() or [])
-            ordinary=list(get_open_orders_all() or [])
-            algo=list(get_open_algo_orders_all() or [])
-        remote_by_sym={str(p.get("symbol")).upper():dict(p) for p in remote_positions if p.get("symbol")}
-        symbols=set(remote_by_sym)
+            remote_positions = list(get_real_positions_all() or [])
+            ordinary = list(get_open_orders_all() or [])
+            algo = list(get_open_algo_orders_all() or [])
+
+        remote_by_sym = {}
+        for row in remote_positions:
+            sym = str(row.get("symbol") or "").upper()
+            if sym:
+                remote_by_sym[sym] = dict(row)
+                symbols.add(sym)
         symbols.update(str(o.get("symbol")).upper() for o in ordinary if o.get("symbol"))
         symbols.update(str(o.get("symbol")).upper() for o in algo if o.get("symbol"))
-        with positions_lock: local_items={s:dict(p) for s,p in positions.items()}
+        with positions_lock:
+            local_items = {str(sym).upper(): dict(pos) for sym, pos in positions.items()}
         symbols.update(local_items.keys())
-        # Close active real positions FIRST; protection is retained until flat.
-        exits={}
-        for sym,p in sorted(remote_by_sym.items()):
-            qty=abs(float(p.get("positionAmt") or 0.0))
-            if qty<=0: continue
-            is_buy=float(p.get("positionAmt") or 0.0)>0
-            closed,exit_price=_verified_market_close(sym,is_buy,"manual timeout all",chat_id=chat_id,max_retries=0)
-            if not closed: raise RuntimeError(f"{sym}: position not flat")
-            exits[sym]=exit_price
-        # Now cleanup all orders, including symbols that were only orphan orders.
-        cleanup_failures=[]
+
+        # Flatten real exposure first; protection remains until the position is flat.
+        for sym, pos in sorted(remote_by_sym.items()):
+            qty = abs(float(pos.get("positionAmt") or 0.0))
+            if qty <= 0:
+                continue
+            is_buy = float(pos.get("positionAmt") or 0.0) > 0
+            closed, exit_price = _verified_market_close(
+                sym, is_buy, "manual timeout all", chat_id=chat_id, max_retries=0
+            )
+            if not closed:
+                cleanup_failures.append(f"{sym}: position not flat")
+            else:
+                exits[sym] = exit_price
+
+        # Cancel and verify all ordinary/algo orders for every touched symbol.
         for sym in sorted(symbols):
-            res=_cancel_all_symbol_orders_verified_v124(sym)
-            if res.get("state")!="VERIFIED_EMPTY": cleanup_failures.append(f"{sym}:{res.get('state')}")
-        # Simulation/pending local state is resolved locally after exchange cleanup.
-        for sym,p in local_items.items():
             try:
-                if _position_is_real(p):
-                    if p.get("entry_time") is not None: close_position(sym,"timeout",close_price=exits.get(sym) or p.get("current_price") or p.get("entry"))
+                res = _cancel_all_symbol_orders_verified_v124(sym)
+                if res.get("state") != "VERIFIED_EMPTY":
+                    cleanup_failures.append(f"{sym}:{res.get('state')}")
+            except Exception as exc:
+                cleanup_failures.append(f"{sym}:order_cleanup:{exc}")
+
+        # Resolve local state only after exchange cleanup attempt.
+        for sym, pos in local_items.items():
+            try:
+                if _position_is_real(pos):
+                    if pos.get("entry_time") is not None:
+                        close_position(
+                            sym, "timeout",
+                            close_price=exits.get(sym) or pos.get("current_price") or pos.get("entry")
+                        )
                     else:
-                        with positions_lock: positions.pop(sym,None)
+                        with positions_lock:
+                            positions.pop(sym, None)
                         _record_pending_cancel("manual_timeout_global")
                 else:
-                    close_position(sym,"timeout",close_price=p.get("current_price") or p.get("entry"))
-            except Exception as exc: cleanup_failures.append(f"{sym}:local:{exc}")
-        # Final exchange verification.
+                    close_position(
+                        sym, "timeout",
+                        close_price=pos.get("current_price") or pos.get("entry")
+                    )
+            except Exception as exc:
+                cleanup_failures.append(f"{sym}:local:{exc}")
+
+        # Final exchange verification is mandatory before clearing global local state.
         with _binance_critical_context():
-            rem_pos=[p for p in (get_real_positions_all() or []) if abs(float(p.get("positionAmt") or 0.0))>0]
-            rem_ord=list(get_open_orders_all() or [])
-            rem_algo=list(get_open_algo_orders_all() or [])
-        if rem_pos or rem_ord or rem_algo or cleanup_failures:
-            raise RuntimeError(f"global cleanup incomplete positions={len(rem_pos)} ordinary={len(rem_ord)} algo={len(rem_algo)} failures={cleanup_failures[:4]}")
-        with positions_lock: positions.clear()
-        with _pending_trails_lock: _pending_trails.clear()
-        with _pending_protections_lock: _pending_protections.clear()
-        with _pending_cleanup_lock: _pending_cleanup.clear()
-        tg_send(chat_id,f"✅ <b>/timeout all SELESAI</b>\nPosition: <b>0</b>\nOrdinary orders: <b>0</b>\nAlgo TP/SL/Trail: <b>0</b>\nSymbol diproses: <b>{len(symbols)}</b>")
+            remaining_positions = [
+                p for p in (get_real_positions_all() or [])
+                if abs(float(p.get("positionAmt") or 0.0)) > 0
+            ]
+            remaining_orders = list(get_open_orders_all() or [])
+            remaining_algo = list(get_open_algo_orders_all() or [])
+
+        if remaining_positions or remaining_orders or remaining_algo or cleanup_failures:
+            detail = (
+                f"positions={len(remaining_positions)} "
+                f"ordinary={len(remaining_orders)} algo={len(remaining_algo)} "
+                f"failures={cleanup_failures[:4]}"
+            )
+            raise RuntimeError(f"global cleanup incomplete {detail}")
+
+        with positions_lock:
+            positions.clear()
+        with _pending_trails_lock:
+            _pending_trails.clear()
+        with _pending_protections_lock:
+            _pending_protections.clear()
+        with _pending_cleanup_lock:
+            _pending_cleanup.clear()
+
+        tg_send(
+            chat_id,
+            f"✅ <b>/timeout all SELESAI</b>\n"
+            f"Position: <b>0</b>\n"
+            f"Ordinary orders: <b>0</b>\n"
+            f"Algo TP/SL/Trail: <b>0</b>\n"
+            f"Symbol diproses: <b>{len(symbols)}</b>"
+        )
         return True
     except BinanceCooldownError:
-        tg_send(chat_id,"⏸️ <b>/timeout all TERTUNDA</b>\nBinance cooldown aktif; permintaan tetap menunggu recovery.")
         return False
     except Exception as exc:
-        tg_send(chat_id,f"🚨 <b>/timeout all BELUM SELESAI</b>\n<code>{html.escape(str(exc)[:500])}</code>")
-        log.error(f"[TIMEOUT ALL V124] {exc}")
+        log.exception(f"[TIMEOUT ALL V17] {exc}")
+        try:
+            tg_send(
+                chat_id,
+                f"🚨 <b>/timeout all BELUM SELESAI</b>\n"
+                f"<code>{html.escape(str(exc)[:500])}</code>"
+            )
+        except Exception:
+            pass
         return False
     finally:
         with TIMEOUT_ALL_LOCK:
-            _TIMEOUT_ALL_PENDING["running"]=False
-            # Keep requested=True only while a cooldown/recovery retry remains.
-            if _binance_cooldown_remaining()<=0: _TIMEOUT_ALL_PENDING["requested"]=False
+            _TIMEOUT_ALL_PENDING["running"] = False
+            # Keep a pending request only when Binance cooldown remains active.
+            _TIMEOUT_ALL_PENDING["requested"] = bool(_binance_cooldown_remaining() > 0)
+
+
+def _timeout_all_start_worker_v17(chat_id):
+    """Start at most one worker; never waits for the worker to call itself."""
+    if not _TIMEOUT_ALL_WORKER_LOCK.acquire(blocking=False):
+        return False
+    def _runner():
+        try:
+            _timeout_all_worker_v17(chat_id)
+        finally:
+            _TIMEOUT_ALL_WORKER_LOCK.release()
+    threading.Thread(target=_runner, name="timeout-all-v17", daemon=True).start()
+    return True
+
+
+def _timeout_all_request_v17(chat_id):
+    """Public Telegram command surface: enqueue/start one global cleanup."""
+    with TIMEOUT_ALL_LOCK:
+        if _TIMEOUT_ALL_PENDING.get("running"):
+            tg_send(chat_id, "⏳ <b>/timeout all</b> sudah sedang diproses.")
+            return False
+        _TIMEOUT_ALL_PENDING.update({"requested": True, "at": time.time(), "chat_id": chat_id})
+    started = _timeout_all_start_worker_v17(chat_id)
+    if not started:
+        # Another worker is already taking the request; leave it pending.
+        tg_send(chat_id, "⏳ <b>/timeout all</b> sudah masuk antrean proses.")
+    return True
+
+
+def _timeout_all_recovery_hook_v17():
+    """Recovery path: worker-only, never re-enters the command handler."""
+    if _binance_cooldown_remaining() > 0:
+        return False
+    with TIMEOUT_ALL_LOCK:
+        pending = bool(_TIMEOUT_ALL_PENDING.get("requested")) and not bool(_TIMEOUT_ALL_PENDING.get("running"))
+        cid = _TIMEOUT_ALL_PENDING.get("chat_id")
+    if not pending or not cid:
+        return False
+    return _timeout_all_start_worker_v17(cid)
+
+
+# Compatibility alias for old code paths: it now points ONLY to the public request
+# surface, not to the cleanup worker. Legacy Telegram branches therefore cannot
+# synchronously re-enter the worker through themselves.
+def _verified_timeout_all(chat_id):
+    return _timeout_all_request_v17(chat_id)
+
 
 def _verified_timeout_all_v124(chat_id):
-    """V16 guarded global timeout: never re-enter synchronously."""
-    depth = int(getattr(_TIMEOUT_ALL_EXEC_LOCAL, "depth", 0) or 0)
-    if depth > 0:
-        log.warning("[TIMEOUT ALL V16] re-entry blocked depth=%s", depth)
-        return False
-    if not _TIMEOUT_ALL_EXEC_LOCK.acquire(blocking=False):
-        log.info("[TIMEOUT ALL V16] concurrent invocation blocked")
-        return False
-    _TIMEOUT_ALL_EXEC_LOCAL.depth = depth + 1
-    try:
-        return _verified_timeout_all_v124_core(chat_id)
-    finally:
-        _TIMEOUT_ALL_EXEC_LOCAL.depth = depth
-        _TIMEOUT_ALL_EXEC_LOCK.release()
+    return _timeout_all_request_v17(chat_id)
 
-globals()["_verified_timeout_all"]=_verified_timeout_all_v124
 
-def _timeout_all_recovery_hook_v124():
-    with TIMEOUT_ALL_LOCK:
-        pending=bool(_TIMEOUT_ALL_PENDING.get("requested")) and not bool(_TIMEOUT_ALL_PENDING.get("running"))
-        cid=_TIMEOUT_ALL_PENDING.get("chat_id")
-    if pending and cid and _binance_cooldown_remaining()<=0:
-        _verified_timeout_all_v124(cid)
+def _verified_timeout_all_v124_core(chat_id):
+    # Kept as a compatibility symbol for diagnostics; deliberately no second implementation.
+    return _timeout_all_worker_v17(chat_id)
+
+globals()["_verified_timeout_all"] = _timeout_all_request_v17
+globals()["_verified_timeout_all_v124"] = _timeout_all_request_v17
+globals()["_verified_timeout_all_v124_core"] = _timeout_all_worker_v17
+globals()["_timeout_all_recovery_hook_v124"] = _timeout_all_recovery_hook_v17
 
 # ---------- Final real monitor: safe trail + breach + no failed-loop spam ----------
 def monitor_position_real_v124(sym,pos):
@@ -9605,12 +9715,12 @@ def _binance_recovery_loop_v124(chat_id_getter=lambda: active_chat_id):
                 _notify_binance_pause_once(chat_id_getter())
                 if _binance_cooldown_remaining()<=0 and not _binance_recovering:
                     ok=_resume_binance_and_flush_pending_v124(chat_id_getter); consecutive=0 if ok else consecutive+1
-                    if ok: _timeout_all_recovery_hook_v124()
+                    if ok: _timeout_all_recovery_hook_v17()
                     elif consecutive>3: time.sleep(20)
                 else:
-                    _timeout_all_recovery_hook_v124() if _binance_cooldown_remaining()<=0 else None
+                    _timeout_all_recovery_hook_v17() if _binance_cooldown_remaining()<=0 else None
             else:
-                _timeout_all_recovery_hook_v124()
+                _timeout_all_recovery_hook_v17()
         except Exception as exc: log.warning(f"[binance-recovery/V124] {exc}")
 
 globals()["_binance_recovery_loop"]=_binance_recovery_loop_v124
@@ -9929,7 +10039,7 @@ def _binance_recovery_loop_v127(chat_id_getter=lambda: active_chat_id):
             paused = bool(_binance_is_scan_paused())
             if not paused:
                 _set_component_health("execution", "HEALTHY", "Binance execution available")
-                _timeout_all_recovery_hook_v124() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
+                _timeout_all_recovery_hook_v17() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
                 continue
             _notify_binance_pause_once(chat_id_getter())
             if _binance_cooldown_remaining() > 0:
@@ -9943,7 +10053,7 @@ def _binance_recovery_loop_v127(chat_id_getter=lambda: active_chat_id):
             ok=_resume_binance_and_flush_pending_v127(None)
             if ok:
                 _set_component_health("execution", "HEALTHY", "Binance recovery verified")
-                _timeout_all_recovery_hook_v124() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
+                _timeout_all_recovery_hook_v17() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
                 # One canonical recovery-success notification per pause generation.
                 cid = chat_id_getter()
                 with _BINANCE_RECOVERY_V127_LOCK:
@@ -10906,11 +11016,10 @@ def _v13_run_one_scan_cycle(chat_id=None):
 globals()["_v128_run_one_scan_cycle"] = _v13_run_one_scan_cycle
 
 # ═══════════════════════════════════════════════════════════════════════
-# V16 — FINAL /timeout all CANONICAL BINDING
-# ═══════════════════════════════════════════════════════════════════════
-# All command/recovery entry points must converge on the guarded handler.
-globals()["_verified_timeout_all"] = _verified_timeout_all_v124
-globals()["_timeout_all_recovery_hook_v124"] = _timeout_all_recovery_hook_v124
+# V17 — FINAL /timeout all binding: one request path + one worker
+globals()["_verified_timeout_all"] = _timeout_all_request_v17
+globals()["_verified_timeout_all_v124"] = _timeout_all_request_v17
+globals()["_timeout_all_recovery_hook_v124"] = _timeout_all_recovery_hook_v17
 
 # FINAL ENTRYPOINT — MUST BE THE LAST EXECUTABLE CODE IN THIS FILE.
 if __name__ == "__main__":
