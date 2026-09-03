@@ -1292,10 +1292,12 @@ def _bootstrap_validate_and_reconcile():
 
 
 def _graceful_shutdown(reason="shutdown"):
-    global STOP_NEW_ENTRIES
+    global STOP_NEW_ENTRIES, RUNTIME_STATE
     if RUNTIME_STATE!="STOPPING":
         try: _set_runtime_state("STOPPING",reason)
-        except Exception: RUNTIME_STATE="STOPPING"
+        except Exception as exc:
+            log.warning(f"[SHUTDOWN] runtime state transition failed: {exc}")
+            RUNTIME_STATE="STOPPING"
     STOP_NEW_ENTRIES=True
     try: _full_off()
     except Exception: pass
@@ -5576,7 +5578,7 @@ def _ensure_scanner_running(chat_id, announce=False):
 
 def _scanner_watchdog_loop():
     # Watchdog proves scanner liveness independently from the /auto flag.
-    # It only supervises the coordinator; it does not create a second scanner.
+    # It only supervises the coordinator and restarts one dead coordinator; never creates duplicates.
     while not SHUTDOWN_EVENT.wait(10):
         try:
             if not auto_mode:
@@ -5587,7 +5589,19 @@ def _scanner_watchdog_loop():
                 coordinator=bool(_SCAN_STATE.get("coordinator_alive"))
                 hb=float(_SCAN_STATE.get("coordinator_heartbeat_at") or 0.0)
             stale=bool(hb and time.time()-hb > max(90.0, SCAN_MAX_DURATION_SEC+30))
-            if t is None or not t.is_alive() or not coordinator or stale:
+            needs_restart = bool(t is None or not t.is_alive() or not coordinator or stale)
+            if needs_restart and (t is None or not t.is_alive()):
+                try:
+                    self_heal = globals().get("_ensure_scanner_running")
+                    if callable(self_heal):
+                        self_heal(active_chat_id, announce=False)
+                except Exception as exc:
+                    _set_scan_state(last_error=str(exc)[:300])
+                    _set_component_health("scanner", "DEGRADED", str(exc)[:250])
+                    log.warning(f"[SCANNER WATCHDOG] self-heal gagal: {exc}")
+                    continue
+                t=auto_thread
+            if needs_restart:
                 log.error("[SCANNER WATCHDOG] scanner coordinator tidak sehat — restart terkontrol")
                 _set_scan_state(last_error="scanner coordinator not healthy")
                 try:
@@ -10075,13 +10089,15 @@ def simulation_loop_v128(chat_id):
                 running=bool(_SCAN_STATE.get("cycle_running")); last_finished=float(_SCAN_STATE.get("last_finished_at") or 0.0)
             if running:
                 _SCAN_WAKE.wait(1); _SCAN_WAKE.clear(); continue
-            if time.time()-last_finished < 120:
+            if last_finished and time.time()-last_finished < 120:
                 _SCAN_WAKE.wait(5); _SCAN_WAKE.clear(); continue
             worker=_start_heavy_worker("scan",do_scan)
             if worker is None:
                 _SCAN_WAKE.wait(2); _SCAN_WAKE.clear(); continue
             _SCAN_WAKE.wait(2); _SCAN_WAKE.clear()
     finally:
+        # Do not silently leave auto_mode=true with a dead coordinator. The external watchdog
+        # can restart it; clear coordinator-only flags but preserve the user's /auto intent.
         _set_scan_state(enabled=False,coordinator_alive=False,cycle_running=False)
         log.info("[SCANNER/V128] coordinator stopped")
 
@@ -10356,9 +10372,25 @@ def run_offline_audit():
 
 # FINAL ENTRYPOINT — MUST BE THE LAST EXECUTABLE CODE IN THIS FILE.
 if __name__ == "__main__":
-    start_runtime()
-    while not SHUTDOWN_EVENT.wait(15):
-        try: _circuit_health_tick()
-        except Exception: pass
-        if RUNTIME_STATE=="STOPPING": break
-    if RUNTIME_STATE!="STOPPING": _graceful_shutdown("main loop exit")
+    _main_start_ok = False
+    try:
+        start_runtime()
+        _main_start_ok = True
+        log.info("[ENGINE] main runtime entered successfully")
+        while not SHUTDOWN_EVENT.wait(15):
+            try:
+                _circuit_health_tick()
+            except Exception as exc:
+                log.warning(f"[HEALTH TICK] {exc}")
+            if RUNTIME_STATE=="STOPPING":
+                break
+    except KeyboardInterrupt:
+        log.info("[ENGINE] KeyboardInterrupt received")
+    except Exception as exc:
+        log.critical(f"[ENGINE] fatal main-loop error: {exc}", exc_info=True)
+    finally:
+        if RUNTIME_STATE!="STOPPING":
+            try:
+                _graceful_shutdown("main loop exit" if _main_start_ok else "startup failure")
+            except Exception as exc:
+                log.critical(f"[SHUTDOWN] cleanup gagal: {exc}", exc_info=True)
