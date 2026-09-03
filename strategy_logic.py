@@ -980,6 +980,77 @@ def _ollama_critic(packet: dict) -> dict:
 
 
 # -----------------------------------------------------------------------------
+# EXECUTION COMPATIBILITY LAYER
+# -----------------------------------------------------------------------------
+# main.py's existing execution path expects the legacy signal vocabulary:
+# decision=BUY/SELL plus entry/sl/tp and entry_label.  Keep that contract stable
+# while allowing the brain internals to evolve.
+def _execution_packet(packet: dict) -> tuple[dict | None, str]:
+    if not isinstance(packet, dict):
+        return None, "PACKET_NOT_DICT"
+
+    out = dict(packet)
+    decision = str(out.get("decision") or "").upper().strip()
+    if decision in {"BULL", "LONG"}:
+        decision = "BUY"
+    elif decision in {"BEAR", "SHORT"}:
+        decision = "SELL"
+    out["decision"] = decision
+
+    if decision not in {"BUY", "SELL"}:
+        return None, "INVALID_DECISION"
+
+    # These are the exact values consumed by the existing real/simulation
+    # execution path in main.py.
+    for key in ("entry", "sl", "tp"):
+        try:
+            value = float(out.get(key))
+        except Exception:
+            return None, f"MISSING_{key.upper()}"
+        if not math.isfinite(value) or value <= 0:
+            return None, f"INVALID_{key.upper()}"
+        out[key] = value
+
+    entry = out["entry"]
+    sl = out["sl"]
+    tp = out["tp"]
+    geometry_ok = (sl < entry < tp) if decision == "BUY" else (tp < entry < sl)
+    if not geometry_ok:
+        return None, "INVALID_ENTRY_SL_TP_GEOMETRY"
+
+    label = str(out.get("entry_label") or "limit").strip()
+    out["entry_label"] = label
+    out["execution_mode"] = str(out.get("execution_mode") or (
+        "market" if label.lower() == "market" else "limit"
+    )).lower()
+    out["side"] = decision
+    out["price"] = float(out.get("price") or entry)
+    out["execution_eligible"] = bool(out.get("execution_eligible"))
+    out["execution_contract"] = "main_v47_compatible"
+    out["execution_ready"] = bool(out["execution_eligible"])
+    out["no_signal"] = not out["execution_ready"]
+    return out, "OK"
+
+
+def _make_execution_ready(packet: dict) -> dict:
+    normalized, reason = _execution_packet(packet)
+    if normalized is not None:
+        return normalized
+    failed = dict(packet or {})
+    failed.update({
+        "decision": str(failed.get("decision") or "WAIT").upper(),
+        "execution_eligible": False,
+        "execution_ready": False,
+        "no_signal": True,
+        "analysis_stage": "EXECUTION_CONTRACT",
+        "rejected_reason": reason,
+        "eligibility_reason": reason,
+        "execution_contract": "main_v47_compatible",
+    })
+    return failed
+
+
+# -----------------------------------------------------------------------------
 # DECISION ENGINE
 # -----------------------------------------------------------------------------
 def _current_signal_threshold() -> float:
@@ -1126,6 +1197,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             "low_confidence":(c.confidence < max(60,required)),
             "low_confidence_cutoff":required,"ban_recommended":False,
         }
+        out = _make_execution_ready(out)
         return out
     except Exception as exc:
         log.exception("[BRAIN V2] full_analyze failed")
@@ -1141,7 +1213,7 @@ def _no_signal_packet(symbol,state,score,reason,market_data_source,extra=None):
             "confidence":round(_safe_float(score.get("confidence"),0),2),"confidence_threshold":get_active_confidence_threshold(),
             "market_regime":state.regime,"trend_strength":round(state.trend_strength,2),"structure_strength":round(state.structure_strength,2),
             "macro_bias":state.macro_bias,"liquidity_state":state.liquidity_state,"market_data_source":market_data_source,
-            "brain_version":FINAL_BRAIN_VERSION,**(extra or {})}
+            "brain_version":FINAL_BRAIN_VERSION,"execution_ready":False,"execution_contract":"main_v47_compatible",**(extra or {})}
 
 
 # -----------------------------------------------------------------------------
