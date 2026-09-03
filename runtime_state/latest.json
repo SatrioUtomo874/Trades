@@ -1,7 +1,13 @@
 {
-  "checkpoint_id": "cp-1788434238-d12ebd1b50fa4cdb",
-  "path": "runtime_state/checkpoints/cp-1788434238-d12ebd1b50fa4cdb.json",
-  "created_at": 1788434238.161263,
-  "content_hash": "52b0ca826bc85dfcd50c5b0f45afc5c8c15db310062851a63938c11156daa8e0",
-  "previous_known_good": null
+  "checkpoint_id": "cp-1788451846-41dba538f6fe4d79",
+  "path": "runtime_state/checkpoints/cp-1788451846-41dba538f6fe4d79.json",
+  "created_at": 1788451846.409104,
+  "content_hash": "76f58e23717ea730e9474205b40ae2f0c19e4ba8d816262130c80c832a852129",
+  "previous_known_good": {
+    "checkpoint_id": "cp-1788434238-d12ebd1b50fa4cdb",
+    "path": "runtime_state/checkpoints/cp-1788434238-d12ebd1b50fa4cdb.json",
+    "created_at": 1788434238.161263,
+    "content_hash": "52b0ca826bc85dfcd50c5b0f45afc5c8c15db310062851a63938c11156daa8e0",
+    "previous_known_good": null
+  }
 }
