@@ -6455,7 +6455,7 @@ def bot_loop():
                     if len(parts) > 1 and parts[1].lower() == "pending":
                         threading.Thread(target=_verified_timeout_pending_only, args=(chat_id,), daemon=True).start()
                     elif len(parts) > 1 and parts[1].lower() == "all":
-                        _timeout_all_request_v17(chat_id)
+                        _timeout_all_v18_request(chat_id)
                     else:
                         target_sym = parts[1].upper() if len(parts) > 1 else None
                         if target_sym:
@@ -9627,11 +9627,11 @@ def _timeout_all_recovery_hook_v17():
 # surface, not to the cleanup worker. Legacy Telegram branches therefore cannot
 # synchronously re-enter the worker through themselves.
 def _verified_timeout_all(chat_id):
-    return _timeout_all_request_v17(chat_id)
+    return _timeout_all_v18_request(chat_id)
 
 
 def _verified_timeout_all_v124(chat_id):
-    return _timeout_all_request_v17(chat_id)
+    return _timeout_all_v18_request(chat_id)
 
 
 def _verified_timeout_all_v124_core(chat_id):
@@ -11020,6 +11020,249 @@ globals()["_v128_run_one_scan_cycle"] = _v13_run_one_scan_cycle
 globals()["_verified_timeout_all"] = _timeout_all_request_v17
 globals()["_verified_timeout_all_v124"] = _timeout_all_request_v17
 globals()["_timeout_all_recovery_hook_v124"] = _timeout_all_recovery_hook_v17
+
+
+# ======================================================================
+# V18 — /timeout all HARD ISOLATION
+#
+# Root fix: the previous V17 worker still traversed layered compatibility
+# helpers (_verified_market_close / get_* / cancel_*), so a recursive global
+# binding could still be reached underneath the timeout worker. V18 does NOT
+# call any timeout compatibility helper, position wrapper, or recovery hook.
+# It uses the single low-level Binance REST implementation directly for all
+# exchange reads/mutations, and only uses ExecutionController for mutations.
+# ======================================================================
+_TIMEOUT_ALL_V18_LOCK = threading.Lock()
+_TIMEOUT_ALL_V18_STATE_LOCK = threading.RLock()
+_TIMEOUT_ALL_V18_PENDING = {"requested": False, "at": None, "chat_id": None, "running": False}
+
+
+def _timeout_all_v18_signed(method, path, params=None, *, critical=True):
+    """Isolated Binance path: no _binance_signed aliases, no timeout helpers."""
+    return _binance_signed_impl_v120(method, path, params=params, critical=critical)
+
+
+def _timeout_all_v18_position_snapshot():
+    rows = _timeout_all_v18_signed("GET", "/fapi/v2/positionRisk", {})
+    return [dict(r) for r in (rows or [])
+            if isinstance(r, dict) and abs(float(r.get("positionAmt") or 0.0)) > 0]
+
+
+def _timeout_all_v18_open_orders(symbol=None):
+    params = {"symbol": symbol} if symbol else {}
+    rows = _timeout_all_v18_signed("GET", "/fapi/v1/openOrders", params)
+    return list(rows or []) if isinstance(rows, list) else []
+
+
+def _timeout_all_v18_open_algo_orders(symbol=None):
+    params = {"symbol": symbol} if symbol else {}
+    data = _timeout_all_v18_signed("GET", "/fapi/v1/openAlgoOrders", params)
+    if isinstance(data, dict):
+        data = data.get("orders") or data.get("openOrders") or data.get("data") or []
+    return list(data or []) if isinstance(data, list) else []
+
+
+def _timeout_all_v18_close_position(symbol, position_amt):
+    qty = abs(float(position_amt or 0.0))
+    if qty <= 0:
+        return True, None
+    side = "SELL" if float(position_amt) > 0 else "BUY"
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "MARKET",
+        "quantity": qty,
+        "newOrderRespType": "RESULT",
+        "reduceOnly": "true",
+    }
+    resp = _execution_controller.submit_signed(
+        "POST", "/fapi/v1/order", params=params, critical=True,
+        request_type="TIMEOUT_ALL_V18_CLOSE", source="timeout_all_v18",
+        symbol=symbol, execution_mode="REAL",
+        expires_sec=30.0,
+    )
+    return True, (resp or {}).get("avgPrice") if isinstance(resp, dict) else None
+
+
+def _timeout_all_v18_cancel_orders(symbol):
+    errors = []
+    try:
+        _execution_controller.submit_signed(
+            "DELETE", "/fapi/v1/allOpenOrders", params={"symbol": symbol},
+            critical=True, request_type="TIMEOUT_ALL_V18_CANCEL_ORDERS",
+            source="timeout_all_v18", symbol=symbol, execution_mode="REAL",
+            requested_action=f"CANCEL ORDERS {symbol}", expires_sec=30.0,
+        )
+    except Exception as exc:
+        errors.append(f"ordinary:{exc}")
+    try:
+        _execution_controller.submit_signed(
+            "DELETE", "/fapi/v1/algoOpenOrders", params={"symbol": symbol},
+            critical=True, request_type="TIMEOUT_ALL_V18_CANCEL_ALGO",
+            source="timeout_all_v18", symbol=symbol, execution_mode="REAL",
+            requested_action=f"CANCEL ALGO {symbol}", expires_sec=30.0,
+        )
+    except Exception as exc:
+        errors.append(f"algo:{exc}")
+    return errors
+
+
+def _timeout_all_v18_worker(chat_id):
+    with _TIMEOUT_ALL_V18_LOCK:
+        with _TIMEOUT_ALL_V18_STATE_LOCK:
+            if _TIMEOUT_ALL_V18_PENDING.get("running"):
+                return False
+            _TIMEOUT_ALL_V18_PENDING.update({"requested": True, "at": time.time(), "chat_id": chat_id, "running": True})
+
+    symbols = set()
+    failures = []
+    try:
+        if _binance_cooldown_remaining() > 0:
+            return False
+
+        # IMPORTANT: isolated exchange reads; do not use get_real_positions_all(),
+        # get_open_orders_all(), get_open_algo_orders_all(), or any timeout helper.
+        remote = _timeout_all_v18_position_snapshot()
+        ordinary = _timeout_all_v18_open_orders()
+        algo = _timeout_all_v18_open_algo_orders()
+
+        remote_by_sym = {}
+        for row in remote:
+            sym = str(row.get("symbol") or "").upper()
+            if sym:
+                remote_by_sym[sym] = row
+                symbols.add(sym)
+        for row in ordinary + algo:
+            sym = str(row.get("symbol") or "").upper()
+            if sym:
+                symbols.add(sym)
+        with positions_lock:
+            local_items = {str(sym).upper(): dict(pos) for sym, pos in positions.items()}
+        symbols.update(local_items.keys())
+
+        # 1) Flatten every real exchange position.
+        exits = {}
+        for sym, row in sorted(remote_by_sym.items()):
+            amt = float(row.get("positionAmt") or 0.0)
+            if abs(amt) <= 0:
+                continue
+            try:
+                closed, px = _timeout_all_v18_close_position(sym, amt)
+                if closed:
+                    exits[sym] = px
+            except Exception as exc:
+                failures.append(f"{sym}:close:{exc}")
+
+        # 2) Cancel every ordinary/algo order for every touched symbol.
+        for sym in sorted(symbols):
+            failures.extend(f"{sym}:{e}" for e in _timeout_all_v18_cancel_orders(sym))
+
+        # 3) Verify exchange is actually flat/empty using the isolated path.
+        remaining_positions = _timeout_all_v18_position_snapshot()
+        remaining_orders = _timeout_all_v18_open_orders()
+        remaining_algo = _timeout_all_v18_open_algo_orders()
+        for row in remaining_positions:
+            sym = str(row.get("symbol") or "").upper()
+            if sym:
+                failures.append(f"{sym}:position_still_open")
+        if remaining_orders:
+            failures.append(f"ordinary_still_present:{len(remaining_orders)}")
+        if remaining_algo:
+            failures.append(f"algo_still_present:{len(remaining_algo)}")
+
+        if failures:
+            raise RuntimeError("global cleanup incomplete: " + "; ".join(failures[:8]))
+
+        # 4) Exchange verified clean: now clean local state.
+        with positions_lock:
+            local_copy = list(positions.items())
+        for sym, pos in local_copy:
+            try:
+                if _position_is_real(pos):
+                    # Exchange is already verified flat; removing stale local REAL state
+                    # is safer than sending another mutation.
+                    with positions_lock:
+                        positions.pop(sym, None)
+                else:
+                    close_position(sym, "timeout", close_price=pos.get("current_price") or pos.get("entry"))
+            except Exception as exc:
+                failures.append(f"{sym}:local:{exc}")
+
+        if failures:
+            raise RuntimeError("local cleanup incomplete: " + "; ".join(failures[:8]))
+
+        with _pending_trails_lock:
+            _pending_trails.clear()
+        with _pending_protections_lock:
+            _pending_protections.clear()
+        with _pending_cleanup_lock:
+            _pending_cleanup.clear()
+
+        tg_send(
+            chat_id,
+            f"✅ <b>/timeout all SELESAI</b>\n"
+            f"Position: <b>0</b>\nOrdinary orders: <b>0</b>\n"
+            f"Algo TP/SL/Trail: <b>0</b>\nSymbol diproses: <b>{len(symbols)}</b>"
+        )
+        return True
+    except BinanceCooldownError:
+        return False
+    except Exception as exc:
+        log.exception(f"[TIMEOUT ALL V18] {exc}")
+        try:
+            tg_send(chat_id, f"🚨 <b>/timeout all BELUM SELESAI</b>\n<code>{html.escape(str(exc)[:500])}</code>")
+        except Exception:
+            pass
+        return False
+    finally:
+        with _TIMEOUT_ALL_V18_STATE_LOCK:
+            _TIMEOUT_ALL_V18_PENDING["running"] = False
+            _TIMEOUT_ALL_V18_PENDING["requested"] = bool(_binance_cooldown_remaining() > 0)
+
+
+def _timeout_all_v18_start(chat_id):
+    def runner():
+        try:
+            _timeout_all_v18_worker(chat_id)
+        finally:
+            pass
+    with _TIMEOUT_ALL_V18_STATE_LOCK:
+        if _TIMEOUT_ALL_V18_PENDING.get("running"):
+            return False
+        _TIMEOUT_ALL_V18_PENDING["running"] = True
+    # worker owns the authoritative running flag; clear the reservation before launch.
+    with _TIMEOUT_ALL_V18_STATE_LOCK:
+        _TIMEOUT_ALL_V18_PENDING["running"] = False
+    threading.Thread(target=runner, name="timeout-all-v18", daemon=True).start()
+    return True
+
+
+def _timeout_all_v18_request(chat_id):
+    with _TIMEOUT_ALL_V18_STATE_LOCK:
+        if _TIMEOUT_ALL_V18_PENDING.get("running"):
+            tg_send(chat_id, "⏳ <b>/timeout all</b> sudah sedang diproses.")
+            return False
+        _TIMEOUT_ALL_V18_PENDING.update({"requested": True, "at": time.time(), "chat_id": chat_id})
+    return _timeout_all_v18_start(chat_id)
+
+
+def _timeout_all_recovery_hook_v18():
+    if _binance_cooldown_remaining() > 0:
+        return False
+    with _TIMEOUT_ALL_V18_STATE_LOCK:
+        pending = bool(_TIMEOUT_ALL_V18_PENDING.get("requested")) and not bool(_TIMEOUT_ALL_V18_PENDING.get("running"))
+        cid = _TIMEOUT_ALL_V18_PENDING.get("chat_id")
+    return _timeout_all_v18_start(cid) if pending and cid else False
+
+# Final source-level command branch: never call a compatibility timeout alias.
+s = globals().get("__file__")
+
+# Runtime aliases used by every legacy router/recovery layer.
+globals()["_timeout_all_request_v17"] = _timeout_all_v18_request
+globals()["_timeout_all_recovery_hook_v17"] = _timeout_all_recovery_hook_v18
+globals()["_verified_timeout_all"] = _timeout_all_v18_request
+globals()["_verified_timeout_all_v124"] = _timeout_all_v18_request
+globals()["_verified_timeout_all_v124_core"] = _timeout_all_v18_worker
 
 # FINAL ENTRYPOINT — MUST BE THE LAST EXECUTABLE CODE IN THIS FILE.
 if __name__ == "__main__":
