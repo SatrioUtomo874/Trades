@@ -9233,3 +9233,141 @@ if __name__ == "__main__":
 
 # V122 marker: runtime contract hardening applied.
 MAIN_RUNTIME_CONTRACT_VERSION = "V122_RUNTIME_CONTRACT_HARDENED"
+
+# ============================================================
+# V126 — BINANCE RECOVERY SINGLE-FLIGHT + GENERATION IDEMPOTENCY
+# Prevent duplicate recovery execution and duplicate success notifications.
+# One recovery incident -> one recovery execution -> one success notification.
+# ============================================================
+V126_RECOVERY_VERSION = "MAIN-V126-RECOVERY-SINGLEFLIGHT-ANTI-SPAM"
+_BINANCE_RECOVERY_SINGLEFLIGHT_LOCK = threading.Lock()
+_BINANCE_RECOVERY_ACTIVE = False
+_BINANCE_RECOVERY_ATTEMPTS = 0
+_BINANCE_RECOVERY_SUCCESS_NOTIFIED_GENERATION = -1
+_BINANCE_RECOVERY_LAST_SUCCESS_AT = 0.0
+_BINANCE_RECOVERY_LAST_RESULT = None
+BINANCE_RECOVERY_SUCCESS_REPEAT_SUPPRESS_SEC = max(30.0, float(os.getenv("BINANCE_RECOVERY_SUCCESS_REPEAT_SUPPRESS_SEC", "300")))
+
+_ORIG_TG_SEND_V126 = globals().get("tg_send")
+def _tg_send_v126(chat_id, text, *args, **kwargs):
+    global _BINANCE_RECOVERY_SUCCESS_NOTIFIED_GENERATION, _BINANCE_RECOVERY_LAST_SUCCESS_AT
+    txt = str(text or "")
+    is_recovery_success = ("Binance recovery selesai" in txt and "Execution/protection" in txt)
+    if is_recovery_success:
+        with _binance_pause_lock:
+            generation = int(globals().get("_binance_pause_generation", 0))
+            recovering = bool(globals().get("_binance_recovering", False))
+            paused = bool(globals().get("_binance_scan_paused", False))
+        now = time.time()
+        with _BINANCE_RECOVERY_SINGLEFLIGHT_LOCK:
+            # A success is a state transition, not a heartbeat. Never repeat it for
+            # the same pause generation, even if recovery is invoked again.
+            same_generation = generation == _BINANCE_RECOVERY_SUCCESS_NOTIFIED_GENERATION
+            recent_duplicate = (now - _BINANCE_RECOVERY_LAST_SUCCESS_AT) < BINANCE_RECOVERY_SUCCESS_REPEAT_SUPPRESS_SEC
+            if same_generation or (not recovering and not paused and recent_duplicate):
+                log.info("[BINANCE RECOVERY NOTIFY] duplicate success suppressed generation=%s", generation)
+                return True
+            _BINANCE_RECOVERY_SUCCESS_NOTIFIED_GENERATION = generation
+            _BINANCE_RECOVERY_LAST_SUCCESS_AT = now
+    return _ORIG_TG_SEND_V126(chat_id, text, *args, **kwargs) if callable(_ORIG_TG_SEND_V126) else True
+
+globals()["tg_send"] = _tg_send_v126
+
+_ORIG_RESUME_V126 = globals().get("_resume_binance_and_flush_pending")
+def _resume_binance_and_flush_pending_v126(chat_id_getter=lambda: active_chat_id):
+    """Single-flight wrapper. Duplicate callers never execute a second recovery pass."""
+    global _BINANCE_RECOVERY_ACTIVE, _BINANCE_RECOVERY_ATTEMPTS, _BINANCE_RECOVERY_LAST_RESULT
+    with _BINANCE_RECOVERY_SINGLEFLIGHT_LOCK:
+        if _BINANCE_RECOVERY_ACTIVE:
+            log.info("[BINANCE RECOVERY] duplicate invocation suppressed: already running")
+            return False
+        # No active cooldown and no pending/recovery work: do not launch a redundant
+        # REST reconciliation pass merely because another watchdog tick fired.
+        try:
+            paused = _binance_is_scan_paused()
+        except Exception:
+            paused = True
+        has_work = False
+        try:
+            has_work = bool(_has_real_recovery_work())
+        except Exception:
+            has_work = False
+        if not paused and not has_work:
+            _BINANCE_RECOVERY_LAST_RESULT = "NO_WORK"
+            return False
+        _BINANCE_RECOVERY_ACTIVE = True
+        _BINANCE_RECOVERY_ATTEMPTS += 1
+    try:
+        fn = _ORIG_RESUME_V126
+        result = fn(chat_id_getter) if callable(fn) else False
+        _BINANCE_RECOVERY_LAST_RESULT = bool(result)
+        return result
+    finally:
+        with _BINANCE_RECOVERY_SINGLEFLIGHT_LOCK:
+            _BINANCE_RECOVERY_ACTIVE = False
+
+globals()["_resume_binance_and_flush_pending"] = _resume_binance_and_flush_pending_v126
+
+# Replace the final recovery loop with a single canonical owner and explicit health.
+def _binance_recovery_loop_v126(chat_id_getter=lambda: active_chat_id):
+    last_skip_log = 0.0
+    while not SHUTDOWN_EVENT.wait(5):
+        try:
+            paused = _binance_is_scan_paused()
+            if not paused:
+                _timeout_all_recovery_hook_v124() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
+                continue
+            _notify_binance_pause_once(chat_id_getter)
+            if _binance_cooldown_remaining() > 0:
+                continue
+            if _BINANCE_RECOVERY_ACTIVE:
+                continue
+            ok = _resume_binance_and_flush_pending_v126(chat_id_getter)
+            if not ok and time.time() - last_skip_log > 60:
+                last_skip_log = time.time()
+                log.info("[BINANCE RECOVERY] no recovery pass started; another owner/no-work state")
+            if ok:
+                _timeout_all_recovery_hook_v124() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
+        except Exception as exc:
+            log.warning("[binance-recovery/V126] %s", exc)
+
+globals()["_binance_recovery_loop"] = _binance_recovery_loop_v126
+
+# Final status helper for diagnostics/tests.
+def get_binance_recovery_status_v126():
+    with _BINANCE_RECOVERY_SINGLEFLIGHT_LOCK:
+        active = bool(_BINANCE_RECOVERY_ACTIVE)
+        attempts = int(_BINANCE_RECOVERY_ATTEMPTS)
+        last_result = _BINANCE_RECOVERY_LAST_RESULT
+    with _binance_pause_lock:
+        paused = bool(_binance_scan_paused)
+        recovering = bool(_binance_recovering)
+        generation = int(globals().get("_binance_pause_generation", 0))
+    return {
+        "version": V126_RECOVERY_VERSION,
+        "active": active,
+        "attempts": attempts,
+        "last_result": last_result,
+        "paused": paused,
+        "recovering": recovering,
+        "generation": generation,
+        "cooldown_sec": round(_binance_cooldown_remaining(), 1),
+        "success_notified_generation": int(_BINANCE_RECOVERY_SUCCESS_NOTIFIED_GENERATION),
+    }
+
+globals()["get_binance_recovery_status_v126"] = get_binance_recovery_status_v126
+
+# Final runtime guard: required recovery helpers must be callable.
+def _v126_recovery_runtime_audit():
+    checks = {
+        "resume": callable(globals().get("_resume_binance_and_flush_pending")),
+        "recovery_loop": callable(globals().get("_binance_recovery_loop")),
+        "tg_send": callable(globals().get("tg_send")),
+        "status": callable(globals().get("get_binance_recovery_status_v126")),
+    }
+    bad = [k for k,v in checks.items() if not v]
+    if bad:
+        raise RuntimeError("V126 recovery contract missing: " + ",".join(bad))
+    return checks
+
+_v126_recovery_runtime_audit()
