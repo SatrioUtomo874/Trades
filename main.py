@@ -10696,6 +10696,138 @@ def run_offline_audit():
     report["ok"] = all(report["checks"].values()) and not report["errors"]
     return report
 
+# ═══════════════════════════════════════════════════════════════════════
+# V13 — FINAL SCAN ENTRYPOINT BINDING / PREVENT LATE OVERLAY CLOBBERING
+# ═══════════════════════════════════════════════════════════════════════
+# This block MUST remain the last runtime binding in the source file.
+# V12's hardened scanner was correct, but a later _FINAL_OVERRIDES update
+# replaced the public run_scan_once symbol and bypassed the V12 preflight.
+
+_V13_ORIGINAL_HARDENED_SCAN = globals().get("run_scan_once_v12_hardened")
+_V13_PREVIOUS_FINAL_SCAN = globals().get("run_scan_once")
+
+
+def run_scan_once_v13_final(chat_id):
+    """Canonical scanner entrypoint: V12 hardened preflight cannot be bypassed."""
+    fn = _V13_ORIGINAL_HARDENED_SCAN
+    if not callable(fn):
+        raise RuntimeError("run_scan_once_v12_hardened is unavailable")
+    log.info("[SCAN/V13] canonical hardened entrypoint active")
+    return fn(chat_id)
+
+
+# The final assignment is intentionally after ALL prior overlay bindings.
+globals()["run_scan_once"] = run_scan_once_v13_final
+
+
+def _v13_scan_binding_selfcheck():
+    fn = globals().get("run_scan_once")
+    ok = fn is run_scan_once_v13_final
+    log.info(
+        "[SCAN/V13] binding selfcheck active=%s function=%s hardened=%s",
+        ok,
+        getattr(fn, "__name__", type(fn).__name__),
+        callable(_V13_ORIGINAL_HARDENED_SCAN),
+    )
+    if not ok:
+        raise RuntimeError("V13 scan entrypoint was clobbered")
+    return ok
+
+
+# Execute at import time so a bad later binding cannot stay silent.
+try:
+    _v13_scan_binding_selfcheck()
+except Exception as exc:
+    log.exception("[SCAN/V13] binding selfcheck FAILED: %s", exc)
+
+# Patch the V128 cycle itself to call the canonical V13 function explicitly.
+# This makes scanner behavior robust even if another overlay later mutates the
+# global run_scan_once symbol during runtime.
+def _v13_run_one_scan_cycle(chat_id=None):
+    cid = chat_id or active_chat_id
+    cycle_started = time.time()
+    _set_scan_state(cycle_running=True, last_started_at=cycle_started, last_error=None)
+    log.info("[SCAN/V13] cycle START chat_id=%s", cid)
+    try:
+        log.info("[SCAN/V13] invoking canonical run_scan_once_v13_final()")
+        signals = run_scan_once_v13_final(cid)
+        log.info("[SCAN/V13] canonical scan returned signals=%s", len(signals or []))
+
+        opened = 0
+        deferred = 0
+        for sig in signals or []:
+            sym = str(sig.get("symbol") or "").upper()
+            if not sym:
+                continue
+            if _binance_execution_blocked_v127():
+                if _v128_queue_deferred_signal(sig, "binance_execution_unavailable"):
+                    deferred += 1
+                continue
+            with positions_lock:
+                if sym in positions or len(positions) >= MAX_POSITIONS:
+                    continue
+            if REAL_TRADE_ENABLED:
+                if _open_pending_real(sym, sig, cid):
+                    opened += 1
+                elif _binance_execution_blocked_v127():
+                    if _v128_queue_deferred_signal(sig, "binance_execution_unavailable_race"):
+                        deferred += 1
+            else:
+                price = sig.get("price") or _final_bybit_price(sym)
+                entry = sig.get("entry")
+                if price is None or entry is None:
+                    continue
+                with positions_lock:
+                    if sym in positions or len(positions) >= MAX_POSITIONS:
+                        continue
+                    positions[sym] = {
+                        "signal": sig,
+                        "entry": entry,
+                        "chat_id": cid,
+                        "entry_time": None,
+                        "entry_created_at": time.time(),
+                        "timeout_flag": False,
+                        "status": "pending",
+                        "lifecycle": "ENTRY_PENDING",
+                        "execution_mode": "SIMULATION",
+                    }
+                if str(sig.get("execution_mode") or "").lower() == "market" or sig.get("entry_label") == "market":
+                    if _open_position(sym, sig, price, cid, "strategy"):
+                        opened += 1
+                else:
+                    tg_send(cid, f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(sig)}")
+                    _start_light_worker(f"entry-wait-{sym}", _v128_wait_entry_sim, sym, sig, cid)
+                    opened += 1
+
+        log.info(
+            "[SCAN/V13] normal scan done signals=%s opened=%s deferred=%s",
+            len(signals or []), opened, deferred,
+        )
+        _set_scan_state(
+            last_result_count=len(signals or []),
+            last_success_at=time.time(),
+            last_finished_at=time.time(),
+        )
+        try:
+            flushed = int(_v128_execute_deferred(cid) or 0)
+            if flushed:
+                log.info("[SCAN/V13] deferred flush after normal scan: %s", flushed)
+        except Exception as exc:
+            log.warning("[SCAN/V13] deferred flush failed after normal scan: %s", exc)
+    except Exception as exc:
+        _set_scan_state(last_error=str(exc)[:500], last_finished_at=time.time())
+        _set_component_health("scanner", "DEGRADED", str(exc)[:250])
+        log.exception("[SCAN/V13] cycle failed: %s", exc)
+    finally:
+        _set_scan_state(
+            cycle_running=False,
+            cycle_count=int(_SCAN_STATE.get("cycle_count", 0)) + 1,
+        )
+
+
+# Make the V128 coordinator use the explicit canonical cycle, eliminating any
+# possibility of another global run_scan_once rebinding bypassing V12/V13.
+globals()["_v128_run_one_scan_cycle"] = _v13_run_one_scan_cycle
 
 # FINAL ENTRYPOINT — MUST BE THE LAST EXECUTABLE CODE IN THIS FILE.
 if __name__ == "__main__":
