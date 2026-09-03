@@ -659,6 +659,17 @@ def _github_get_json(path):
 _CHECKPOINT_TRANSACTION_LOCK=threading.RLock()
 _CHECKPOINT_LAST_GOOD=None
 
+def _verify_remote_checkpoint(cp, expected_id=None, expected_hash=None, path=""):
+    """Verify that a GitHub checkpoint is valid and matches the checkpoint we just saved."""
+    if not isinstance(cp, dict):
+        raise RuntimeError(f"GitHub checkpoint bukan object: {path}")
+    _verify_checkpoint_integrity(cp)
+    if expected_id is not None and cp.get("checkpoint_id") != expected_id:
+        raise RuntimeError(f"GitHub checkpoint ID mismatch: {path}")
+    if expected_hash is not None and cp.get("content_hash") != expected_hash:
+        raise RuntimeError(f"GitHub checkpoint hash mismatch: {path}")
+    return True
+
 def _save_runtime_checkpoint(push_github=True):
     global _CHECKPOINT_LAST_GOOD, STOP_NEW_ENTRIES
     with _CHECKPOINT_TRANSACTION_LOCK:
@@ -667,16 +678,42 @@ def _save_runtime_checkpoint(push_github=True):
             cp=_runtime_snapshot(include_brain=True); cid=f"cp-{int(time.time())}-{RUN_ID}"; cp["checkpoint_id"]=cid
             canonical=json.dumps(cp,ensure_ascii=False,allow_nan=False,sort_keys=True,default=str).encode()
             cp["content_hash"]=hashlib.sha256(canonical).hexdigest()
-            local=RUNTIME_CHECKPOINT_DIR/f"{cid}.json"; _write_atomic_json(local,cp); _verify_checkpoint_integrity(cp)
+            local=RUNTIME_CHECKPOINT_DIR/f"{cid}.json"
+            _write_atomic_json(local,cp)
+            _verify_checkpoint_integrity(cp)
+
             prev=None
             if RUNTIME_CHECKPOINT_MANIFEST.exists():
-                try: prev=json.loads(RUNTIME_CHECKPOINT_MANIFEST.read_text(encoding="utf-8"))
-                except Exception: prev=None
+                prev=_read_json_file_safe(RUNTIME_CHECKPOINT_MANIFEST,"previous manifest")
             manifest={"checkpoint_id":cid,"path":local.name,"created_at":cp["created_at"],"content_hash":cp["content_hash"],"previous_known_good":prev}
             _write_atomic_json(RUNTIME_CHECKPOINT_MANIFEST,manifest)
+
             if push_github:
-                remote=f"runtime_state/checkpoints/{cid}.json"; _commit_to_github(json.dumps(cp,ensure_ascii=False,allow_nan=False,indent=2,default=str),remote,f"Runtime checkpoint {cid}")
-                _commit_to_github(json.dumps({**manifest,"path":remote},indent=2),"runtime_state/latest.json",f"Update latest checkpoint {cid}")
+                remote=f"runtime_state/checkpoints/{cid}.json"
+                cp_text=json.dumps(cp,ensure_ascii=False,allow_nan=False,indent=2,default=str)
+                _commit_to_github(cp_text,remote,f"Runtime checkpoint {cid}")
+
+                # IMPORTANT: do not trust a successful PUT alone. Read the object
+                # back from GitHub and verify both JSON validity and content hash.
+                remote_cp,_=_github_get_json_safe(remote)
+                _verify_remote_checkpoint(remote_cp,cid,cp["content_hash"],remote)
+
+                latest_remote={**manifest,"path":remote}
+                latest_text=json.dumps(latest_remote,ensure_ascii=False,allow_nan=False,indent=2)
+                _commit_to_github(latest_text,"runtime_state/latest.json",f"Update latest checkpoint {cid}")
+
+                # Verify the pointer too. /open relies on this file to locate the
+                # newest checkpoint, so SAVE is not successful unless it is valid.
+                verified_latest,_=_github_get_json_safe("runtime_state/latest.json")
+                if not isinstance(verified_latest,dict):
+                    raise RuntimeError("GitHub latest.json bukan object")
+                if verified_latest.get("checkpoint_id") != cid:
+                    raise RuntimeError("GitHub latest.json menunjuk checkpoint yang berbeda")
+                if verified_latest.get("path") != remote:
+                    raise RuntimeError("GitHub latest.json path mismatch")
+                if verified_latest.get("content_hash") != cp["content_hash"]:
+                    raise RuntimeError("GitHub latest.json content_hash mismatch")
+
             _CHECKPOINT_LAST_GOOD=cp
             return cid,local
         finally:
@@ -751,6 +788,7 @@ def _load_runtime_checkpoint(reference=None):
         remote_path = prev.get("path")
         if remote_path and GITHUB_TOKEN and REPO_NAME:
             data, _ = _github_get_json_safe(remote_path)
+            _verify_checkpoint_integrity(data)
             return data
 
         raise RuntimeError("previous known-good checkpoint tidak dapat dimuat")
@@ -781,6 +819,7 @@ def _load_runtime_checkpoint(reference=None):
     if not checkpoint_path:
         raise RuntimeError("latest checkpoint tidak ditemukan di GitHub")
     data, _ = _github_get_json_safe(checkpoint_path)
+    _verify_checkpoint_integrity(data)
     return data
 
 def _verify_checkpoint_integrity(checkpoint):
