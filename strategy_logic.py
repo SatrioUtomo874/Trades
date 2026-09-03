@@ -75,9 +75,8 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-ML_COGNITIVE_VERSION = "V71_UNIFIED_FULL_BRAIN"
+ML_COGNITIVE_VERSION = "V127_CANONICAL_BRAIN_PROGRESS"
 V40_VERSION = "V71_UNIFIED_FULL_BRAIN"
-BRAIN_INTERFACE_VERSION = V40_VERSION
 BRAIN_INTERFACE_VERSION = V40_VERSION
 FULL_LEARNING_SCHEMA = "full_learning_cognitive_v2"
 
@@ -6510,3 +6509,12 @@ BRAIN_PROGRESS_CHECKPOINT_VERSION="brain_progress_checkpoint_v1"
 
 # V122 marker: complete brain progress checkpoint contract.
 BRAIN_PROGRESS_CHECKPOINT_VERSION = BRAIN_CHECKPOINT_SCHEMA
+
+
+# V127 stable brain contracts
+FINAL_BRAIN_VERSION = "V127_CANONICAL_BRAIN_PROGRESS"
+FINAL_BRAIN_CHECKPOINT_SCHEMA = BRAIN_CHECKPOINT_SCHEMA
+
+def get_brain_progress_status():
+    cp = export_checkpoint_state()
+    return {"schema": cp.get("schema"), "brain_version": cp.get("brain_version"), "interface_version": cp.get("interface_version"), "observations": len((cp.get("v32_buffer") or [])), "ticks": cp.get("ticks", 0), "saved_at": cp.get("saved_at")}

@@ -9221,7 +9221,290 @@ def _v125_final_runtime_audit():
     return result
 _v125_final_runtime_audit()
 
+# ============================================================
+# V127 CANONICAL RUNTIME / RECOVERY REBUILD
+# IMPORTANT: this block is BEFORE the __main__ entrypoint.
+# One canonical recovery owner; scanner != Binance execution state.
+# ============================================================
+V127_MAIN_VERSION = "V127_CANONICAL_RECOVERY_EXECUTION_SEPARATED"
 
+# ---------- Execution pause is distinct from scanner health ----------
+def _binance_execution_blocked_v127():
+    """Return True only when opening a new Binance position is unsafe/unavailable."""
+    try:
+        with _binance_pause_lock:
+            explicitly_paused = bool(_binance_scan_paused)
+            recovering = bool(_binance_recovering)
+        cooldown = _binance_cooldown_remaining() > 0
+        return bool(explicitly_paused or cooldown or recovering or STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN)
+    except Exception:
+        return True
+
+globals()["_binance_execution_blocked"] = _binance_execution_blocked_v127
+
+# ---------- Scanner must never treat Binance execution pause/recovery as a market-data pause ----------
+def _scan_execution_gate_diagnostic_v127():
+    return {
+        "scanner_can_analyze": not SHUTDOWN_EVENT.is_set() and RUNTIME_STATE not in {"STOPPING", "EMERGENCY"} and not bool(_STRATEGY_LOAD_ERROR),
+        "execution_blocked": _binance_execution_blocked_v127(),
+        "binance_cooldown_sec": round(_binance_cooldown_remaining(), 2),
+        "binance_recovering": bool(_binance_recovering),
+    }
+globals()["get_scan_execution_gate_v127"] = _scan_execution_gate_diagnostic_v127
+
+# ---------- Canonical scanner coordinator: replace only execution checks inside simulation loop ----------
+# The original simulation_loop is otherwise preserved. This wrapper is deliberately
+# source-derived but removes the old coupling where recovery/bans could stop scanning.
+_ORIG_SIMULATION_LOOP_V127 = globals().get("simulation_loop")
+def simulation_loop_v127(chat_id):
+    global auto_mode
+    _set_scan_state(enabled=True, coordinator_alive=True, last_error=None)
+    try:
+        tg_send(chat_id, "🤖 <b>Engine dimulai.</b>\nMarket data: <b>Bybit WS → REST backfill</b>.\nExecution: <b>Binance</b>.")
+    except Exception:
+        pass
+
+    def wait_entry(sym, signal, chat_id):
+        try:
+            entry=float(signal["entry"]); buy=str(signal.get("decision")).upper()=="BUY"; deadline=time.time()+8*3600
+            while time.time()<deadline and auto_mode:
+                with positions_lock:
+                    if sym not in positions: return
+                    if positions[sym].get("timeout_flag"):
+                        positions.pop(sym,None); return
+                # Only execution state pauses pending entry; scanner itself remains alive.
+                if _binance_execution_blocked_v127():
+                    time.sleep(min(10.0, max(1.0, _binance_cooldown_remaining() or 3.0))); continue
+                price=get_price(sym)
+                if price is not None and ((price<=entry) if buy else (price>=entry)):
+                    fill=min(entry,price) if buy else max(entry,price)
+                    _open_position(sym,signal,fill,chat_id,"strategy"); return
+                time.sleep(MONITOR_SLEEP)
+            with positions_lock:
+                positions.pop(sym,None)
+            _ban_coin(sym,"pending expired")
+        except Exception as exc:
+            log.exception(f"[ENTRY WAIT/V127] {sym}: {exc}")
+
+    def do_scan():
+        _set_scan_state(cycle_running=True, last_started_at=time.time(), last_error=None)
+        try:
+            signals = run_scan_once(chat_id)
+            _set_scan_state(last_result_count=len(signals or []))
+            opened = 0
+            if auto_mode and signals:
+                blocked = _binance_execution_blocked_v127()
+                if blocked:
+                    log.info(f"[EXECUTION GATE/V127] {len(signals)} eligible signals retained; Binance execution currently blocked; scanner continues")
+                for sig in signals:
+                    if not auto_mode: break
+                    if _binance_execution_blocked_v127():
+                        continue
+                    sym=str(sig.get("symbol") or "").upper()
+                    if not sym: continue
+                    with positions_lock:
+                        if sym in positions or len(positions)>=MAX_POSITIONS: continue
+                    if REAL_TRADE_ENABLED:
+                        if _open_pending_real(sym,sig,chat_id): opened += 1
+                        continue
+                    price=sig.get("price") or get_price(sym)
+                    entry=sig.get("entry")
+                    if price is None or entry is None: continue
+                    mode=str(sig.get("execution_mode") or "").lower() or ("market" if sig.get("entry_label")=="market" else "limit")
+                    with positions_lock:
+                        if sym in positions or len(positions)>=MAX_POSITIONS: continue
+                        positions[sym]={"signal":sig,"entry":entry,"chat_id":chat_id,"entry_time":None,"timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"SIMULATION"}
+                    if mode=="market":
+                        _open_position(sym,sig,get_price(sym) or price,chat_id,"strategy")
+                    else:
+                        tg_send(chat_id,f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(sig)}")
+                        _start_light_worker(f"entry-wait-{sym}", wait_entry, sym, sig, chat_id)
+                    opened += 1
+            log.info(f"[scan/V127] {len(signals or [])} signal lolos, {opened} dikirim ke execution; execution_blocked={_binance_execution_blocked_v127()}")
+            _set_scan_state(last_success_at=time.time(), last_finished_at=time.time())
+        except Exception as exc:
+            _set_scan_state(last_error=str(exc)[:500], last_finished_at=time.time())
+            _set_component_health("scanner", "DEGRADED", str(exc)[:250])
+            log.exception(f"[SCAN CYCLE/V127] gagal: {exc}")
+        finally:
+            with _SCAN_STATE_LOCK:
+                _set_scan_state(cycle_running=False, cycle_count=int(_SCAN_STATE.get("cycle_count",0))+1)
+
+    try:
+        while auto_mode:
+            _set_scan_state(coordinator_heartbeat_at=time.time(), coordinator_alive=True)
+            with _SCAN_STATE_LOCK:
+                running=bool(_SCAN_STATE.get("cycle_running"))
+                last_finished=_SCAN_STATE.get("last_finished_at") or 0.0
+            if running:
+                _SCAN_WAKE.wait(1); _SCAN_WAKE.clear(); continue
+            if time.time()-float(last_finished or 0.0) < 120:
+                _SCAN_WAKE.wait(5); _SCAN_WAKE.clear(); continue
+            worker=_start_heavy_worker("scan", do_scan)
+            if worker is None:
+                _SCAN_WAKE.wait(2); _SCAN_WAKE.clear(); continue
+            _SCAN_WAKE.wait(2); _SCAN_WAKE.clear()
+    finally:
+        _set_scan_state(enabled=False, coordinator_alive=False, cycle_running=False)
+        log.info("[SCANNER/V127] coordinator stopped")
+
+globals()["simulation_loop"] = simulation_loop_v127
+
+# ---------- Canonical single-flight recovery ----------
+_BINANCE_RECOVERY_V127_LOCK = threading.Lock()
+_BINANCE_RECOVERY_V127_ACTIVE = False
+_BINANCE_RECOVERY_V127_RUN_ID = 0
+_BINANCE_RECOVERY_V127_LAST_RESULT = None
+_BINANCE_RECOVERY_V127_LAST_SUCCESS_RUN = 0
+_BINANCE_RECOVERY_V127_LAST_SUCCESS_PAUSE_GENERATION = -1
+_BINANCE_RECOVERY_V127_LAST_SUCCESS_AT = 0.0
+
+# Preserve original V124 recovery implementation as the one underlying work function.
+_ORIGINAL_RECOVERY_CORE_V127 = globals().get("_resume_binance_and_flush_pending_v124") or globals().get("_resume_binance_and_flush_pending")
+
+def _resume_binance_and_flush_pending_v127(chat_id_getter=lambda: active_chat_id):
+    global _BINANCE_RECOVERY_V127_ACTIVE, _BINANCE_RECOVERY_V127_RUN_ID, _BINANCE_RECOVERY_V127_LAST_RESULT
+    with _BINANCE_RECOVERY_V127_LOCK:
+        if _BINANCE_RECOVERY_V127_ACTIVE:
+            log.info("[BINANCE RECOVERY/V127] duplicate invocation suppressed: already running")
+            return False
+        if _binance_cooldown_remaining() > 0:
+            return False
+        # Recovery is only meaningful after a pause/breach/pending-work state.
+        pending_work = False
+        try:
+            pending_work = bool(_has_real_recovery_work())
+        except Exception:
+            pending_work = False
+        with _binance_pause_lock:
+            paused = bool(_binance_scan_paused)
+            recovering = bool(_binance_recovering)
+            pause_generation = int(_binance_pause_generation)
+        timeout_pending = False
+        try:
+            with TIMEOUT_ALL_LOCK:
+                timeout_pending = bool(_TIMEOUT_ALL_PENDING.get("requested"))
+        except Exception:
+            pass
+        if not (paused or recovering or pending_work or timeout_pending):
+            _BINANCE_RECOVERY_V127_LAST_RESULT = "NO_WORK"
+            return False
+        _BINANCE_RECOVERY_V127_ACTIVE = True
+        _BINANCE_RECOVERY_V127_RUN_ID += 1
+        run_id = _BINANCE_RECOVERY_V127_RUN_ID
+    try:
+        # Underlying V124 recovery does protection/order work but does not itself
+        # need a second recovery thread. Scanner remains independently healthy.
+        fn = _ORIGINAL_RECOVERY_CORE_V127
+        if not callable(fn):
+            raise RuntimeError("canonical Binance recovery core missing")
+        result = bool(fn(chat_id_getter))
+        _BINANCE_RECOVERY_V127_LAST_RESULT = result
+        if result:
+            with _BINANCE_RECOVERY_V127_LOCK:
+                _BINANCE_RECOVERY_V127_LAST_SUCCESS_RUN = run_id
+                _BINANCE_RECOVERY_V127_LAST_SUCCESS_PAUSE_GENERATION = pause_generation
+                _BINANCE_RECOVERY_V127_LAST_SUCCESS_AT = time.time()
+        return result
+    except Exception as exc:
+        _BINANCE_RECOVERY_V127_LAST_RESULT = False
+        log.exception(f"[BINANCE RECOVERY/V127] {exc}")
+        return False
+    finally:
+        with _BINANCE_RECOVERY_V127_LOCK:
+            _BINANCE_RECOVERY_V127_ACTIVE = False
+
+globals()["_resume_binance_and_flush_pending"] = _resume_binance_and_flush_pending_v127
+
+# ---------- Canonical recovery watchdog: one owner, no hot loop, no repeated success ----------
+def _binance_recovery_loop_v127(chat_id_getter=lambda: active_chat_id):
+    last_retry=0.0
+    while not SHUTDOWN_EVENT.wait(5):
+        try:
+            paused = bool(_binance_is_scan_paused())
+            if not paused:
+                _set_component_health("execution", "HEALTHY", "Binance execution available")
+                _timeout_all_recovery_hook_v124() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
+                continue
+            _notify_binance_pause_once(chat_id_getter())
+            if _binance_cooldown_remaining() > 0:
+                continue
+            now=time.time()
+            with _BINANCE_RECOVERY_V127_LOCK:
+                active=_BINANCE_RECOVERY_V127_ACTIVE
+            if active or now-last_retry < 15:
+                continue
+            last_retry=now
+            ok=_resume_binance_and_flush_pending_v127(chat_id_getter)
+            if ok:
+                _set_component_health("execution", "HEALTHY", "Binance recovery verified")
+                _timeout_all_recovery_hook_v124() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
+            else:
+                _set_component_health("execution", "DEGRADED", "Binance recovery incomplete or not started")
+        except Exception as exc:
+            _set_component_health("execution", "DEGRADED", str(exc)[:250])
+            log.warning(f"[BINANCE RECOVERY/V127] watchdog: {exc}")
+
+globals()["_binance_recovery_loop"] = _binance_recovery_loop_v127
+
+# ---------- Notification guard: success is a state transition, not a heartbeat ----------
+_ORIGINAL_TG_SEND_V127 = globals().get("tg_send")
+_TG_RECOVERY_SUCCESS_GUARD_LOCK = threading.Lock()
+_TG_RECOVERY_SUCCESS_LAST_SENT_RUN = 0
+_TG_RECOVERY_SUCCESS_LAST_SENT_AT = 0.0
+
+def _tg_send_v127(chat_id, text, *args, **kwargs):
+    global _TG_RECOVERY_SUCCESS_LAST_SENT_RUN, _TG_RECOVERY_SUCCESS_LAST_SENT_AT
+    txt=str(text or "")
+    if "Binance recovery selesai" in txt and "Execution/protection" in txt:
+        with _BINANCE_RECOVERY_V127_LOCK:
+            run_id=int(_BINANCE_RECOVERY_V127_LAST_SUCCESS_RUN)
+            pause_gen=int(_BINANCE_RECOVERY_V127_LAST_SUCCESS_PAUSE_GENERATION)
+        with _TG_RECOVERY_SUCCESS_GUARD_LOCK:
+            if run_id and run_id == _TG_RECOVERY_SUCCESS_LAST_SENT_RUN:
+                log.info("[BINANCE RECOVERY/V127] duplicate success notification suppressed run=%s", run_id)
+                return True
+            if pause_gen >= 0 and pause_gen == _BINANCE_RECOVERY_V127_LAST_SUCCESS_PAUSE_GENERATION and time.time()-_TG_RECOVERY_SUCCESS_LAST_SENT_AT < 300:
+                log.info("[BINANCE RECOVERY/V127] duplicate success notification suppressed generation=%s", pause_gen)
+                return True
+            _TG_RECOVERY_SUCCESS_LAST_SENT_RUN=run_id
+            _TG_RECOVERY_SUCCESS_LAST_SENT_AT=time.time()
+    return _ORIGINAL_TG_SEND_V127(chat_id,text,*args,**kwargs) if callable(_ORIGINAL_TG_SEND_V127) else True
+
+globals()["tg_send"] = _tg_send_v127
+
+# ---------- Final runtime diagnostics ----------
+def get_binance_recovery_status_v127():
+    with _BINANCE_RECOVERY_V127_LOCK:
+        return {
+            "version": V127_MAIN_VERSION,
+            "active": bool(_BINANCE_RECOVERY_V127_ACTIVE),
+            "run_id": int(_BINANCE_RECOVERY_V127_RUN_ID),
+            "last_result": _BINANCE_RECOVERY_V127_LAST_RESULT,
+            "last_success_run": int(_BINANCE_RECOVERY_V127_LAST_SUCCESS_RUN),
+            "last_success_pause_generation": int(_BINANCE_RECOVERY_V127_LAST_SUCCESS_PAUSE_GENERATION),
+            "last_success_age": round(time.time()-_BINANCE_RECOVERY_V127_LAST_SUCCESS_AT,1) if _BINANCE_RECOVERY_V127_LAST_SUCCESS_AT else None,
+        }
+
+globals()["get_binance_recovery_status_v127"] = get_binance_recovery_status_v127
+
+# ---------- Contract audit: no definitions may exist after the main entrypoint ----------
+def _v127_runtime_audit():
+    checks={
+        "get_top_coins": callable(globals().get("get_top_coins")),
+        "simulation_loop": globals().get("simulation_loop") is simulation_loop_v127,
+        "recovery_loop": globals().get("_binance_recovery_loop") is _binance_recovery_loop_v127,
+        "recovery_resume": globals().get("_resume_binance_and_flush_pending") is _resume_binance_and_flush_pending_v127,
+        "tg_send": globals().get("tg_send") is _tg_send_v127,
+        "brain_export": callable(getattr(globals().get("_brain"),"export_checkpoint_state",None)),
+    }
+    bad=[k for k,v in checks.items() if not v]
+    if bad: raise RuntimeError("V127 runtime contract failed: "+", ".join(bad))
+    return checks
+
+_v127_runtime_audit()
+
+# FINAL ENTRYPOINT — MUST BE THE LAST EXECUTABLE CODE IN THIS FILE.
 if __name__ == "__main__":
     start_runtime()
     while not SHUTDOWN_EVENT.wait(15):
@@ -9229,145 +9512,3 @@ if __name__ == "__main__":
         except Exception: pass
         if RUNTIME_STATE=="STOPPING": break
     if RUNTIME_STATE!="STOPPING": _graceful_shutdown("main loop exit")
-
-
-# V122 marker: runtime contract hardening applied.
-MAIN_RUNTIME_CONTRACT_VERSION = "V122_RUNTIME_CONTRACT_HARDENED"
-
-# ============================================================
-# V126 — BINANCE RECOVERY SINGLE-FLIGHT + GENERATION IDEMPOTENCY
-# Prevent duplicate recovery execution and duplicate success notifications.
-# One recovery incident -> one recovery execution -> one success notification.
-# ============================================================
-V126_RECOVERY_VERSION = "MAIN-V126-RECOVERY-SINGLEFLIGHT-ANTI-SPAM"
-_BINANCE_RECOVERY_SINGLEFLIGHT_LOCK = threading.Lock()
-_BINANCE_RECOVERY_ACTIVE = False
-_BINANCE_RECOVERY_ATTEMPTS = 0
-_BINANCE_RECOVERY_SUCCESS_NOTIFIED_GENERATION = -1
-_BINANCE_RECOVERY_LAST_SUCCESS_AT = 0.0
-_BINANCE_RECOVERY_LAST_RESULT = None
-BINANCE_RECOVERY_SUCCESS_REPEAT_SUPPRESS_SEC = max(30.0, float(os.getenv("BINANCE_RECOVERY_SUCCESS_REPEAT_SUPPRESS_SEC", "300")))
-
-_ORIG_TG_SEND_V126 = globals().get("tg_send")
-def _tg_send_v126(chat_id, text, *args, **kwargs):
-    global _BINANCE_RECOVERY_SUCCESS_NOTIFIED_GENERATION, _BINANCE_RECOVERY_LAST_SUCCESS_AT
-    txt = str(text or "")
-    is_recovery_success = ("Binance recovery selesai" in txt and "Execution/protection" in txt)
-    if is_recovery_success:
-        with _binance_pause_lock:
-            generation = int(globals().get("_binance_pause_generation", 0))
-            recovering = bool(globals().get("_binance_recovering", False))
-            paused = bool(globals().get("_binance_scan_paused", False))
-        now = time.time()
-        with _BINANCE_RECOVERY_SINGLEFLIGHT_LOCK:
-            # A success is a state transition, not a heartbeat. Never repeat it for
-            # the same pause generation, even if recovery is invoked again.
-            same_generation = generation == _BINANCE_RECOVERY_SUCCESS_NOTIFIED_GENERATION
-            recent_duplicate = (now - _BINANCE_RECOVERY_LAST_SUCCESS_AT) < BINANCE_RECOVERY_SUCCESS_REPEAT_SUPPRESS_SEC
-            if same_generation or (not recovering and not paused and recent_duplicate):
-                log.info("[BINANCE RECOVERY NOTIFY] duplicate success suppressed generation=%s", generation)
-                return True
-            _BINANCE_RECOVERY_SUCCESS_NOTIFIED_GENERATION = generation
-            _BINANCE_RECOVERY_LAST_SUCCESS_AT = now
-    return _ORIG_TG_SEND_V126(chat_id, text, *args, **kwargs) if callable(_ORIG_TG_SEND_V126) else True
-
-globals()["tg_send"] = _tg_send_v126
-
-_ORIG_RESUME_V126 = globals().get("_resume_binance_and_flush_pending")
-def _resume_binance_and_flush_pending_v126(chat_id_getter=lambda: active_chat_id):
-    """Single-flight wrapper. Duplicate callers never execute a second recovery pass."""
-    global _BINANCE_RECOVERY_ACTIVE, _BINANCE_RECOVERY_ATTEMPTS, _BINANCE_RECOVERY_LAST_RESULT
-    with _BINANCE_RECOVERY_SINGLEFLIGHT_LOCK:
-        if _BINANCE_RECOVERY_ACTIVE:
-            log.info("[BINANCE RECOVERY] duplicate invocation suppressed: already running")
-            return False
-        # No active cooldown and no pending/recovery work: do not launch a redundant
-        # REST reconciliation pass merely because another watchdog tick fired.
-        try:
-            paused = _binance_is_scan_paused()
-        except Exception:
-            paused = True
-        has_work = False
-        try:
-            has_work = bool(_has_real_recovery_work())
-        except Exception:
-            has_work = False
-        if not paused and not has_work:
-            _BINANCE_RECOVERY_LAST_RESULT = "NO_WORK"
-            return False
-        _BINANCE_RECOVERY_ACTIVE = True
-        _BINANCE_RECOVERY_ATTEMPTS += 1
-    try:
-        fn = _ORIG_RESUME_V126
-        result = fn(chat_id_getter) if callable(fn) else False
-        _BINANCE_RECOVERY_LAST_RESULT = bool(result)
-        return result
-    finally:
-        with _BINANCE_RECOVERY_SINGLEFLIGHT_LOCK:
-            _BINANCE_RECOVERY_ACTIVE = False
-
-globals()["_resume_binance_and_flush_pending"] = _resume_binance_and_flush_pending_v126
-
-# Replace the final recovery loop with a single canonical owner and explicit health.
-def _binance_recovery_loop_v126(chat_id_getter=lambda: active_chat_id):
-    last_skip_log = 0.0
-    while not SHUTDOWN_EVENT.wait(5):
-        try:
-            paused = _binance_is_scan_paused()
-            if not paused:
-                _timeout_all_recovery_hook_v124() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
-                continue
-            _notify_binance_pause_once(chat_id_getter)
-            if _binance_cooldown_remaining() > 0:
-                continue
-            if _BINANCE_RECOVERY_ACTIVE:
-                continue
-            ok = _resume_binance_and_flush_pending_v126(chat_id_getter)
-            if not ok and time.time() - last_skip_log > 60:
-                last_skip_log = time.time()
-                log.info("[BINANCE RECOVERY] no recovery pass started; another owner/no-work state")
-            if ok:
-                _timeout_all_recovery_hook_v124() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
-        except Exception as exc:
-            log.warning("[binance-recovery/V126] %s", exc)
-
-globals()["_binance_recovery_loop"] = _binance_recovery_loop_v126
-
-# Final status helper for diagnostics/tests.
-def get_binance_recovery_status_v126():
-    with _BINANCE_RECOVERY_SINGLEFLIGHT_LOCK:
-        active = bool(_BINANCE_RECOVERY_ACTIVE)
-        attempts = int(_BINANCE_RECOVERY_ATTEMPTS)
-        last_result = _BINANCE_RECOVERY_LAST_RESULT
-    with _binance_pause_lock:
-        paused = bool(_binance_scan_paused)
-        recovering = bool(_binance_recovering)
-        generation = int(globals().get("_binance_pause_generation", 0))
-    return {
-        "version": V126_RECOVERY_VERSION,
-        "active": active,
-        "attempts": attempts,
-        "last_result": last_result,
-        "paused": paused,
-        "recovering": recovering,
-        "generation": generation,
-        "cooldown_sec": round(_binance_cooldown_remaining(), 1),
-        "success_notified_generation": int(_BINANCE_RECOVERY_SUCCESS_NOTIFIED_GENERATION),
-    }
-
-globals()["get_binance_recovery_status_v126"] = get_binance_recovery_status_v126
-
-# Final runtime guard: required recovery helpers must be callable.
-def _v126_recovery_runtime_audit():
-    checks = {
-        "resume": callable(globals().get("_resume_binance_and_flush_pending")),
-        "recovery_loop": callable(globals().get("_binance_recovery_loop")),
-        "tg_send": callable(globals().get("tg_send")),
-        "status": callable(globals().get("get_binance_recovery_status_v126")),
-    }
-    bad = [k for k,v in checks.items() if not v]
-    if bad:
-        raise RuntimeError("V126 recovery contract missing: " + ",".join(bad))
-    return checks
-
-_v126_recovery_runtime_audit()
