@@ -7534,6 +7534,121 @@ def run_scan_once_v11_diagnostic(chat_id):
 globals()["run_scan_once"] = run_scan_once_v11_diagnostic
 
 
+
+# ═════════════════════════════════════════════
+# V12 — SCANNER ROOT-CAUSE / HARD BYBIT PREFLIGHT
+# ═════════════════════════════════════════════
+# V11 only observed full_analyze(). That misses early returns such as:
+# runtime gate / empty universe / Bybit universe discovery failure.
+# V12 adds a preflight and a hardened universe path BEFORE run_scan_once().
+_SCAN_ROOT_V12_LOCK=threading.RLock()
+_SCAN_ROOT_V12={"last":{}}
+
+
+def _v12_bybit_universe_direct(exclude_syms=None, limit=None):
+    """Direct Bybit REST universe. No WS dependency and no Binance dependency."""
+    exc={str(x).upper() for x in (exclude_syms or set())}
+    want=int(limit or TOP_N_COINS)
+    try:
+        d=_bybit_get("/v5/market/tickers", {"category":"linear"})
+        if not isinstance(d,dict) or int(d.get("retCode",-1) or -1)!=0:
+            raise RuntimeError(f"Bybit tickers retCode={d.get('retCode')} retMsg={d.get('retMsg')}")
+        rows=d.get("result",{}).get("list") or []
+        ranked=[]
+        for item in rows:
+            try:
+                sym=str(item.get("symbol") or "").upper()
+                if not sym.endswith("USDT") or sym in exc: continue
+                px=float(item.get("lastPrice") or 0.0)
+                tv=float(item.get("turnover24h") or 0.0)
+                ch=float(item.get("price24hPcnt") or 0.0)
+                if not (0.0001 < px < 1000000): continue
+                # Do NOT impose MAX_PRICE / turnover / volatility filters here.
+                # Discovery must first prove that Bybit has symbols available.
+                ranked.append((sym,tv,abs(ch),px))
+            except Exception:
+                continue
+        ranked.sort(key=lambda x:x[1], reverse=True)
+        syms=[x[0] for x in ranked[:want]]
+        return syms, {"source":"bybit_rest_direct","raw":len(rows),"eligible":len(ranked),"selected":len(syms)}
+    except Exception as exc:
+        return [], {"source":"bybit_rest_direct","error":f"{type(exc).__name__}: {exc}"}
+
+
+def _v12_scanner_preflight(chat_id=None):
+    state={
+        "shutdown":bool(SHUTDOWN_EVENT.is_set()),
+        "runtime_state":str(RUNTIME_STATE),
+        "strategy_load_error":str(_STRATEGY_LOAD_ERROR or ""),
+        "brain_loaded":bool(_brain is not None),
+        "brain_contract_ok":False,
+        "ws_fresh":False,
+        "ws_tickers":0,
+        "rotation_pool":0,
+        "rotation_selected":0,
+        "direct_selected":0,
+        "direct_error":None,
+        "action":"unknown",
+    }
+    try: state["brain_contract_ok"]=bool(_validate_brain_contract(_brain)[0]) if _brain is not None else False
+    except Exception as exc: state["brain_contract_error"]=str(exc)[:250]
+    try:
+        bst=bybit_market_ws.status()
+        state["ws_fresh"]=bool(bst.get("fresh")); state["ws_tickers"]=int(bst.get("tickers",0) or 0)
+    except Exception: pass
+    try:
+        with _ROTATION_LOCK_V128: state["rotation_pool"]=len(_ROTATION_POOL_V128)
+    except Exception: pass
+    direct,meta=_v12_bybit_universe_direct(_v128_exchange_exclusions(), TOP_N_COINS)
+    state.update({"direct_selected":len(direct),"direct_error":meta.get("error"),"direct_meta":meta})
+    if state["shutdown"]: state["action"]="BLOCKED_SHUTDOWN"
+    elif state["runtime_state"] in {"STOPPING","EMERGENCY"}: state["action"]="BLOCKED_RUNTIME_STATE"
+    elif state["strategy_load_error"]: state["action"]="BLOCKED_BRAIN_LOAD"
+    elif not state["brain_loaded"] or not state["brain_contract_ok"]: state["action"]="BLOCKED_BRAIN_CONTRACT"
+    elif direct: state["action"]="READY"
+    elif meta.get("error"): state["action"]="BYBIT_UNIVERSE_ERROR"
+    else: state["action"]="BYBIT_UNIVERSE_EMPTY"
+    with _SCAN_ROOT_V12_LOCK: _SCAN_ROOT_V12["last"]=dict(state)
+    log.warning("[SCAN/V12 PREFLIGHT] %s", json.dumps(state, ensure_ascii=False, default=str))
+    return state,direct
+
+
+_ORIG_RUN_SCAN_ONCE_V12=globals().get("run_scan_once")
+def run_scan_once_v12_hardened(chat_id):
+    pre,direct=_v12_scanner_preflight(chat_id)
+    if pre.get("action") in {"BLOCKED_SHUTDOWN","BLOCKED_RUNTIME_STATE","BLOCKED_BRAIN_LOAD","BLOCKED_BRAIN_CONTRACT"}:
+        tg_send(chat_id,
+            "🛑 <b>SCAN BLOCKED</b>\n"
+            f"Reason: <code>{html.escape(str(pre.get('action')))}</code>\n"
+            f"Runtime: <b>{html.escape(str(pre.get('runtime_state')))}</b>\n"
+            f"Brain loaded: <b>{pre.get('brain_loaded')}</b> | contract: <b>{pre.get('brain_contract_ok')}</b>\n"
+            f"WS tickers: <b>{pre.get('ws_tickers')}</b> | fresh: <b>{pre.get('ws_fresh')}</b>")
+        return []
+    if not direct:
+        tg_send(chat_id,
+            "⚠️ <b>SCAN ABORTED — BYBIT UNIVERSE KOSONG</b>\n"
+            f"Bybit WS tickers: <b>{pre.get('ws_tickers')}</b> | fresh: <b>{pre.get('ws_fresh')}</b>\n"
+            f"Rotation pool: <b>{pre.get('rotation_pool')}</b>\n"
+            f"Direct Bybit error: <code>{html.escape(str(pre.get('direct_error') or 'tidak ada, tetapi 0 symbol eligible'))}</code>")
+        return []
+    # The direct universe is already proven available. Temporarily force get_top_coins()
+    # to use it for this cycle, avoiding an empty WS/rotation pool from short-circuiting scan.
+    original_top=globals().get("get_top_coins")
+    def _forced_top():
+        now=time.time()
+        global last_scanned_coins,last_scanned_at
+        with _last_scanned_lock:
+            last_scanned_coins=list(direct); last_scanned_at=now
+        return list(direct)
+    globals()["get_top_coins"]=_forced_top
+    try:
+        return _ORIG_RUN_SCAN_ONCE_V12(chat_id) if callable(_ORIG_RUN_SCAN_ONCE_V12) else []
+    finally:
+        globals()["get_top_coins"]=original_top
+
+# Final binding: V12 preflight is now the public scanner entrypoint.
+globals()["run_scan_once"] = run_scan_once_v12_hardened
+
 # ---------- Better real position monitor: WS-first, REST only when stale/required ----------
 _ORIG_MONITOR_POSITION_REAL=globals().get("monitor_position_real")
 def monitor_position_real_final(sym,pos):
