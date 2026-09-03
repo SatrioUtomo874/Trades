@@ -4969,7 +4969,7 @@ def _open_pending_real(sym,signal,chat_id):
     if STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN: return False
     if _binance_is_scan_paused():
         log.warning(f"[entry] {sym} ditahan — Binance pause aktif")
-        return
+        return False
     buy=signal["decision"]=="BUY"; entry=signal["entry"]; sl=signal.get("sl"); tp=signal.get("tp")
     if sl is None or tp is None:
         _ban_coin(sym,"strategy tidak mengirim SL/TP"); return
@@ -9544,7 +9544,10 @@ def _resume_binance_and_flush_pending_v127(chat_id_getter=lambda: active_chat_id
         fn = _ORIGINAL_RECOVERY_CORE_V127
         if not callable(fn):
             raise RuntimeError("canonical Binance recovery core missing")
-        result = bool(fn(chat_id_getter))
+        # The legacy recovery core has its own Telegram success/failure messages.
+        # Pass chat_id=None so it cannot race the canonical V127 notification gate.
+        # V127 is the sole owner of user-facing recovery notifications.
+        result = bool(fn(None))
         _BINANCE_RECOVERY_V127_LAST_RESULT = result
         if result:
             with _BINANCE_RECOVERY_V127_LOCK:
@@ -9581,10 +9584,27 @@ def _binance_recovery_loop_v127(chat_id_getter=lambda: active_chat_id):
             if active or now-last_retry < 15:
                 continue
             last_retry=now
-            ok=_resume_binance_and_flush_pending_v127(chat_id_getter)
+            ok=_resume_binance_and_flush_pending_v127(None)
             if ok:
                 _set_component_health("execution", "HEALTHY", "Binance recovery verified")
                 _timeout_all_recovery_hook_v124() if callable(globals().get("_timeout_all_recovery_hook_v124")) else None
+                # One canonical recovery-success notification per pause generation.
+                cid = chat_id_getter()
+                with _BINANCE_RECOVERY_V127_LOCK:
+                    success_run = int(_BINANCE_RECOVERY_V127_LAST_SUCCESS_RUN)
+                    success_gen = int(_BINANCE_RECOVERY_V127_LAST_SUCCESS_PAUSE_GENERATION)
+                if cid:
+                    _emit_recovery_success_once_v127(cid, success_run, success_gen)
+                # Do not wait for the next 120s scan cycle: immediately revalidate and
+                # submit eligible signals that were deferred during the Binance outage.
+                try:
+                    flush = globals().get("_v128_execute_deferred")
+                    if callable(flush):
+                        flushed = int(flush(cid) or 0)
+                        if flushed:
+                            log.info("[BINANCE RECOVERY/V128] deferred entries flushed immediately: %s", flushed)
+                except Exception as flush_exc:
+                    log.warning("[BINANCE RECOVERY/V128] deferred flush warning: %s", flush_exc)
             else:
                 _set_component_health("execution", "DEGRADED", "Binance recovery incomplete or not started")
         except Exception as exc:
@@ -9599,22 +9619,35 @@ _TG_RECOVERY_SUCCESS_GUARD_LOCK = threading.Lock()
 _TG_RECOVERY_SUCCESS_LAST_SENT_RUN = 0
 _TG_RECOVERY_SUCCESS_LAST_SENT_AT = 0.0
 
+def _emit_recovery_success_once_v127(chat_id, run_id, pause_gen):
+    global _TG_RECOVERY_SUCCESS_LAST_SENT_RUN, _TG_RECOVERY_SUCCESS_LAST_SENT_AT
+    if not chat_id or not run_id:
+        return False
+    with _TG_RECOVERY_SUCCESS_GUARD_LOCK:
+        if int(run_id) == int(_TG_RECOVERY_SUCCESS_LAST_SENT_RUN):
+            return False
+        now = time.time()
+        if int(pause_gen) >= 0 and int(pause_gen) == int(_BINANCE_RECOVERY_V127_LAST_SUCCESS_PAUSE_GENERATION) and now - _TG_RECOVERY_SUCCESS_LAST_SENT_AT < 300:
+            return False
+        _TG_RECOVERY_SUCCESS_LAST_SENT_RUN = int(run_id)
+        _TG_RECOVERY_SUCCESS_LAST_SENT_AT = now
+    try:
+        return bool(_ORIGINAL_TG_SEND_V127(chat_id, "✅ <b>Binance recovery selesai.</b>\nExecution/protection kembali konsisten.\n🔎 Scanner Bybit tetap aktif."))
+    except Exception:
+        return False
+
 def _tg_send_v127(chat_id, text, *args, **kwargs):
     global _TG_RECOVERY_SUCCESS_LAST_SENT_RUN, _TG_RECOVERY_SUCCESS_LAST_SENT_AT
     txt=str(text or "")
     if "Binance recovery selesai" in txt and "Execution/protection" in txt:
+        # Legacy layers may still attempt to emit this string. Only a canonical
+        # recovery run may publish it, and only once; all others are suppressed.
         with _BINANCE_RECOVERY_V127_LOCK:
             run_id=int(_BINANCE_RECOVERY_V127_LAST_SUCCESS_RUN)
-            pause_gen=int(_BINANCE_RECOVERY_V127_LAST_SUCCESS_PAUSE_GENERATION)
         with _TG_RECOVERY_SUCCESS_GUARD_LOCK:
             if run_id and run_id == _TG_RECOVERY_SUCCESS_LAST_SENT_RUN:
                 log.info("[BINANCE RECOVERY/V127] duplicate success notification suppressed run=%s", run_id)
                 return True
-            if pause_gen >= 0 and pause_gen == _BINANCE_RECOVERY_V127_LAST_SUCCESS_PAUSE_GENERATION and time.time()-_TG_RECOVERY_SUCCESS_LAST_SENT_AT < 300:
-                log.info("[BINANCE RECOVERY/V127] duplicate success notification suppressed generation=%s", pause_gen)
-                return True
-            _TG_RECOVERY_SUCCESS_LAST_SENT_RUN=run_id
-            _TG_RECOVERY_SUCCESS_LAST_SENT_AT=time.time()
     return _ORIGINAL_TG_SEND_V127(chat_id,text,*args,**kwargs) if callable(_ORIGINAL_TG_SEND_V127) else True
 
 globals()["tg_send"] = _tg_send_v127
@@ -9938,9 +9971,14 @@ def _v128_execute_deferred(chat_id=None):
                 continue
         try:
             if REAL_TRADE_ENABLED:
-                if _open_pending_real(sym,fresh,chat_id or active_chat_id):
+                ok = _open_pending_real(sym,fresh,chat_id or active_chat_id)
+                if ok:
                     with _DEFERRED_ENTRY_LOCK_V128: _DEFERRED_ENTRY_QUEUE_V128.pop(sym,None)
                     done+=1
+                elif _binance_execution_blocked_v127():
+                    # Keep the deferred signal; Binance may have re-entered cooldown
+                    # between the gate check and order submission.
+                    log.info("[DEFERRED ENTRY/V128] %s retained after execution race/cooldown", sym)
             else:
                 # Simulation follows the same current-market revalidation semantics.
                 price=fresh.get("price") or _final_bybit_price(sym)
@@ -10003,7 +10041,12 @@ def simulation_loop_v128(chat_id):
                 with positions_lock:
                     if sym in positions or len(positions)>=MAX_POSITIONS: continue
                 if REAL_TRADE_ENABLED:
-                    if _open_pending_real(sym,sig,chat_id): opened+=1
+                    ok = _open_pending_real(sym,sig,chat_id)
+                    if ok:
+                        opened+=1
+                    elif _binance_execution_blocked_v127():
+                        if _v128_queue_deferred_signal(sig,"binance_execution_unavailable_race"):
+                            deferred+=1
                 else:
                     price=sig.get("price") or _final_bybit_price(sym); entry=sig.get("entry")
                     if price is None or entry is None: continue
