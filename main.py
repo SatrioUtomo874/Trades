@@ -10016,6 +10016,30 @@ def _v128_execute_deferred(chat_id=None):
             log.warning(f"[DEFERRED ENTRY] execute {sym} gagal: {exc}")
     return done
 
+# ---------- Dedicated scanner cycle worker (does not consume generic heavy-worker slots) ----------
+_SCANNER_CYCLE_THREAD_LOCK = threading.RLock()
+_SCANNER_CYCLE_THREAD = None
+
+def _start_dedicated_scanner_cycle(fn, *args, **kwargs):
+    """Start exactly one scan cycle independently from the generic heavy-worker pool."""
+    global _SCANNER_CYCLE_THREAD
+    with _SCANNER_CYCLE_THREAD_LOCK:
+        if _SCANNER_CYCLE_THREAD is not None and _SCANNER_CYCLE_THREAD.is_alive():
+            log.warning("[SCANNER] dedicated scan cycle already running; duplicate suppressed")
+            return None
+        name=f"scanner-cycle-{int(time.time()*1000)%1000000}"
+        def target():
+            try:
+                fn(*args, **kwargs)
+            except Exception as exc:
+                log.exception(f"[SCANNER] dedicated cycle crashed: {exc}")
+                _set_scan_state(last_error=str(exc)[:500])
+                _set_component_health("scanner", "DEGRADED", str(exc)[:250])
+        t=threading.Thread(target=target, name=name, daemon=True)
+        _SCANNER_CYCLE_THREAD=t
+        t.start()
+        return t
+
 # ---------- Scanner execution bridge: eligible != discarded ----------
 _ORIG_SIMULATION_LOOP_V128_BASE=globals().get("simulation_loop")
 def simulation_loop_v128(chat_id):
@@ -10040,10 +10064,14 @@ def simulation_loop_v128(chat_id):
                 time.sleep(min(5.0,MONITOR_SLEEP))
         except Exception as exc: log.warning(f"[ENTRY WAIT/V128] {sym}: {exc}")
     def do_scan():
-        _set_scan_state(cycle_running=True,last_started_at=time.time(),last_error=None)
+        cycle_started=time.time()
+        _set_scan_state(cycle_running=True,last_started_at=cycle_started,last_error=None)
+        log.info(f"[SCAN/V128] cycle START chat_id={chat_id}")
         try:
             _v128_execute_deferred(chat_id)
+            log.info("[SCAN/V128] deferred flush complete; invoking run_scan_once()")
             signals=run_scan_once(chat_id)
+            log.info(f"[SCAN/V128] run_scan_once() returned signals={len(signals or [])}")
             _set_scan_state(last_result_count=len(signals or []))
             opened=0; deferred=0
             for sig in signals or []:
@@ -10091,9 +10119,12 @@ def simulation_loop_v128(chat_id):
                 _SCAN_WAKE.wait(1); _SCAN_WAKE.clear(); continue
             if last_finished and time.time()-last_finished < 120:
                 _SCAN_WAKE.wait(5); _SCAN_WAKE.clear(); continue
-            worker=_start_heavy_worker("scan",do_scan)
+            _set_scan_state(last_error=None)
+            worker=_start_dedicated_scanner_cycle(do_scan)
             if worker is None:
+                log.warning("[SCANNER/V128] scan cycle belum bisa dimulai karena cycle sebelumnya masih aktif")
                 _SCAN_WAKE.wait(2); _SCAN_WAKE.clear(); continue
+            log.info(f"[SCANNER/V128] dedicated scan worker STARTED thread={worker.name}")
             _SCAN_WAKE.wait(2); _SCAN_WAKE.clear()
     finally:
         # Do not silently leave auto_mode=true with a dead coordinator. The external watchdog
