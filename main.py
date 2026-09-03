@@ -553,7 +553,7 @@ RUNTIME_SCHEMA_VERSION = "runtime_v1"
 EVENT_SCHEMA_VERSION = "event_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
 BRAIN_INTERFACE_VERSION = "brain_v1"
-BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT", "V52_OPERATIONAL_BRAIN", "V60_STATS_DRIVEN_FREQUENCY_BRAIN", "V71_UNIFIED_FULL_BRAIN", "STRATEGY-BRAIN-V100-BYBIT-WS-STATS-EVOLUTION"}
+BRAIN_COMPATIBLE_LEGACY_VERSIONS = {"brain_v1", "V35_ADAPTIVE_BRAIN", "V34_CONTINUAL_COGNITIVE_AUDITED", "V35_CONTINUAL_ADAPTIVE_BRAIN_AUDITED", "V36_MULTI_AUDIT_EVOLUTION_BRAIN", "V37_FINAL_REGRESSION_HARDENED_BRAIN", "V38_EVENT_CONTRACT_HARDENED_BRAIN", "V40_FULL_BRAIN_REBUILT", "V52_OPERATIONAL_BRAIN", "V60_STATS_DRIVEN_FREQUENCY_BRAIN", "V71_UNIFIED_FULL_BRAIN", "STRATEGY-BRAIN-V100-BYBIT-WS-STATS-EVOLUTION", "STRATEGY-BRAIN-V111-BYBIT-WS-STATS-EVOLUTION-GUARDED", "V127_CANONICAL_BRAIN_PROGRESS", "V128_COIN_ROTATION_BRAIN_PROGRESS"}
 MAX_HEAVY_WORKERS = 5
 HEAVY_WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_HEAVY_WORKERS)
 _HEAVY_WORKER_LOCK = threading.RLock()
@@ -671,53 +671,83 @@ def _verify_remote_checkpoint(cp, expected_id=None, expected_hash=None, path="")
     return True
 
 def _save_runtime_checkpoint(push_github=True):
+    """Create a crash-safe checkpoint and, when enabled, verify GitHub before publishing latest.json.
+
+    The order is deliberate: checkpoint -> local verification -> remote checkpoint upload/verification
+    -> remote latest manifest -> remote manifest verification -> local latest pointer.
+    This prevents /open from being directed at a checkpoint that GitHub accepted only partially.
+    """
     global _CHECKPOINT_LAST_GOOD, STOP_NEW_ENTRIES
     with _CHECKPOINT_TRANSACTION_LOCK:
-        prev_stop=STOP_NEW_ENTRIES; STOP_NEW_ENTRIES=True
+        prev_stop = STOP_NEW_ENTRIES
+        STOP_NEW_ENTRIES = True
         try:
-            cp=_runtime_snapshot(include_brain=True); cid=f"cp-{int(time.time())}-{RUN_ID}"; cp["checkpoint_id"]=cid
-            canonical=json.dumps(cp,ensure_ascii=False,allow_nan=False,sort_keys=True,default=str).encode()
-            cp["content_hash"]=hashlib.sha256(canonical).hexdigest()
-            local=RUNTIME_CHECKPOINT_DIR/f"{cid}.json"
-            _write_atomic_json(local,cp)
+            cp = _runtime_snapshot(include_brain=True)
+            cid = f"cp-{int(time.time())}-{RUN_ID}"
+            cp["checkpoint_id"] = cid
+            canonical = json.dumps(cp, ensure_ascii=False, allow_nan=False, sort_keys=True, default=str).encode()
+            cp["content_hash"] = hashlib.sha256(canonical).hexdigest()
+
+            local = RUNTIME_CHECKPOINT_DIR / f"{cid}.json"
+            _write_atomic_json(local, cp)
             _verify_checkpoint_integrity(cp)
 
-            prev=None
-            if RUNTIME_CHECKPOINT_MANIFEST.exists():
-                prev=_read_json_file_safe(RUNTIME_CHECKPOINT_MANIFEST,"previous manifest")
-            manifest={"checkpoint_id":cid,"path":local.name,"created_at":cp["created_at"],"content_hash":cp["content_hash"],"previous_known_good":prev}
-            _write_atomic_json(RUNTIME_CHECKPOINT_MANIFEST,manifest)
+            # Capture the prior known-good pointer safely. Never use a malformed pointer as rollback data.
+            prev = _read_json_file_safe(RUNTIME_CHECKPOINT_MANIFEST, "previous local manifest") if RUNTIME_CHECKPOINT_MANIFEST.exists() else None
+            if not isinstance(prev, dict) and push_github and GITHUB_TOKEN and REPO_NAME:
+                try:
+                    remote_latest, _ = _github_get_json_safe("runtime_state/latest.json")
+                    if isinstance(remote_latest, dict) and remote_latest.get("path"):
+                        prev = remote_latest
+                except Exception as exc:
+                    log.warning(f"[CHECKPOINT] previous remote manifest unavailable: {exc}")
+
+            manifest = {
+                "checkpoint_id": cid,
+                "path": local.name,
+                "created_at": cp["created_at"],
+                "content_hash": cp["content_hash"],
+                "previous_known_good": prev if isinstance(prev, dict) else None,
+            }
 
             if push_github:
-                remote=f"runtime_state/checkpoints/{cid}.json"
-                cp_text=json.dumps(cp,ensure_ascii=False,allow_nan=False,indent=2,default=str)
-                _commit_to_github(cp_text,remote,f"Runtime checkpoint {cid}")
+                if not GITHUB_TOKEN or not REPO_NAME:
+                    raise RuntimeError("GITHUB_TOKEN/REPO_NAME belum diset untuk remote /save")
 
-                # IMPORTANT: do not trust a successful PUT alone. Read the object
-                # back from GitHub and verify both JSON validity and content hash.
-                remote_cp,_=_github_get_json_safe(remote)
-                _verify_remote_checkpoint(remote_cp,cid,cp["content_hash"],remote)
+                remote = f"runtime_state/checkpoints/{cid}.json"
+                checkpoint_text = json.dumps(cp, ensure_ascii=False, allow_nan=False, indent=2, default=str)
+                _commit_to_github(checkpoint_text, remote, f"Runtime checkpoint {cid}")
 
-                latest_remote={**manifest,"path":remote}
-                latest_text=json.dumps(latest_remote,ensure_ascii=False,allow_nan=False,indent=2)
-                _commit_to_github(latest_text,"runtime_state/latest.json",f"Update latest checkpoint {cid}")
+                # CRITICAL: verify the object we just published, not just the HTTP PUT result.
+                remote_cp, _ = _github_get_json_safe(remote)
+                _verify_checkpoint_integrity(remote_cp)
+                if str(remote_cp.get("checkpoint_id")) != cid:
+                    raise RuntimeError(f"remote checkpoint id mismatch: expected {cid}, got {remote_cp.get('checkpoint_id')}")
+                if str(remote_cp.get("content_hash")) != str(cp.get("content_hash")):
+                    raise RuntimeError(f"remote checkpoint hash mismatch: expected {cp.get('content_hash')}, got {remote_cp.get('content_hash')}")
 
-                # Verify the pointer too. /open relies on this file to locate the
-                # newest checkpoint, so SAVE is not successful unless it is valid.
-                verified_latest,_=_github_get_json_safe("runtime_state/latest.json")
-                if not isinstance(verified_latest,dict):
+                remote_manifest = f"runtime_state/latest.json"
+                manifest_remote = {**manifest, "path": remote}
+                manifest_text = json.dumps(manifest_remote, ensure_ascii=False, allow_nan=False, indent=2, default=str)
+                _commit_to_github(manifest_text, remote_manifest, f"Update latest checkpoint {cid}")
+
+                # Verify the pointer after publishing it.
+                verified_manifest, _ = _github_get_json_safe(remote_manifest)
+                if not isinstance(verified_manifest, dict):
                     raise RuntimeError("GitHub latest.json bukan object")
-                if verified_latest.get("checkpoint_id") != cid:
-                    raise RuntimeError("GitHub latest.json menunjuk checkpoint yang berbeda")
-                if verified_latest.get("path") != remote:
-                    raise RuntimeError("GitHub latest.json path mismatch")
-                if verified_latest.get("content_hash") != cp["content_hash"]:
-                    raise RuntimeError("GitHub latest.json content_hash mismatch")
+                if str(verified_manifest.get("checkpoint_id")) != cid:
+                    raise RuntimeError(f"GitHub latest checkpoint id mismatch: expected {cid}, got {verified_manifest.get('checkpoint_id')}")
+                if str(verified_manifest.get("path")) != remote:
+                    raise RuntimeError(f"GitHub latest checkpoint path mismatch: expected {remote}, got {verified_manifest.get('path')}")
+                if str(verified_manifest.get("content_hash")) != str(cp.get("content_hash")):
+                    raise RuntimeError("GitHub latest manifest hash mismatch")
 
-            _CHECKPOINT_LAST_GOOD=cp
-            return cid,local
+            # Publish the local latest pointer only after all remote verification above succeeds.
+            _write_atomic_json(RUNTIME_CHECKPOINT_MANIFEST, manifest)
+            _CHECKPOINT_LAST_GOOD = cp
+            return cid, local
         finally:
-            STOP_NEW_ENTRIES=prev_stop
+            STOP_NEW_ENTRIES = prev_stop
 
 
 def _load_previous_known_good_manifest():
@@ -3756,12 +3786,16 @@ def run_scan_once(chat_id):
         log.debug(f"[scan {idx:02d}/{len(symbols)}] {sym}")
         processed_symbols += 1
         try:
-            before=_scan_cache_stats()
+            h1_before = _scan_cache_get(sym,"1h",250)
+            m15_before = _scan_cache_get(sym,"15m",250)
+            before_hits = int(h1_before is not None) + int(m15_before is not None)
             h1=get_scan_klines(sym,"1h",250); m15=get_scan_klines(sym,"15m",250)
             try: d1=get_scan_klines(sym,"1d",100)
             except BinanceCooldownError: raise
             except Exception: d1=None
-            after=_scan_cache_stats(); cache_misses += max(0,after[0]-before[0])
+            after=_scan_cache_stats()
+            cache_hits += before_hits
+            cache_misses += (2 - before_hits)
             r=full_analyze(h1,m15,d1,symbol=sym,market_data_source="bybit")
             # Market-context telemetry belongs to every successfully loaded chart,
             # not only to symbols where strategy_logic returned a trade candidate.
@@ -4012,7 +4046,7 @@ def update_stats(result, entry=None, sl_p=None, tp_p=None, close_price=None,
         # trade sizing, supaya kalau kamu ubah /margin atau /leverage,
         # simulasi otomatis ikut menyesuaikan — selaras terus dengan real.
         position_usd = round(MARGIN_USD * LEVERAGE, 6)
-        direction_sign = 1 if tp_p > entry else -1
+        direction_sign = 1 if str(decision or "BUY").upper() == "BUY" else -1
 
         if close_price is not None:
             ref_price = close_price
@@ -4893,17 +4927,24 @@ def monitor_position(sym,pos):
         time.sleep(MONITOR_SLEEP)
 
 def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
-    if STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN: return
+    if STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN: return False
     buy=signal["decision"]=="BUY"; sl=signal.get("sl"); tp=signal.get("tp")
     if sl is None or tp is None:
         with positions_lock: positions.pop(sym,None)
-        _ban_coin(sym,"strategy tidak mengirim SL/TP"); return
+        _ban_coin(sym,"strategy tidak mengirim SL/TP"); return False
     valid=(sl<actual_entry<tp) if buy else (tp<actual_entry<sl)
     if not valid:
         with positions_lock: positions.pop(sym,None)
-        _ban_coin(sym,"level strategy invalid")
-        tg_send(chat_id,f"⚠️ <b>Skip {sym}</b> — geometri level strategy invalid.")
-        return
+        # If actual_entry drifted away from the planned entry, this is a stale-market condition,
+        # not evidence that the symbol is intrinsically bad. Do not short-ban it.
+        if actual_entry is not None and signal.get("entry") is not None and abs(float(actual_entry)-float(signal.get("entry"))) > 1e-12:
+            reason = "harga market sudah melewati geometri TP/SL sinyal"
+            log.info(f"[ENTRY SKIP] {sym}: {reason} (planned={signal.get('entry')}, actual={actual_entry})")
+            tg_send(chat_id,f"⏭ <b>Skip {sym}</b> — {html.escape(reason)}.")
+        else:
+            _ban_coin(sym,"level strategy invalid")
+            tg_send(chat_id,f"⚠️ <b>Skip {sym}</b> — geometri level strategy invalid.")
+        return False
     with positions_lock:
         if sym not in positions:return
         pos=positions[sym]
@@ -4917,6 +4958,7 @@ def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
                     f"Entry: <code>{actual_entry:.8g}</code>\n"
                     f"TP: <code>{tp:.8g}</code> | SL: <code>{sl:.8g}</code>")
     threading.Thread(target=monitor_position,args=(sym,pos),daemon=True).start()
+    return True
 
 
 # ============================================================
@@ -7732,13 +7774,14 @@ PENDING_ENTRY_TIMEOUT_SEC_FINAL = max(60.0, float(os.getenv("PENDING_ENTRY_TIMEO
 
 # ---- scanner liveness: flag != worker health ----
 def _v110_scanner_healthy():
+    """Use the canonical _SCAN_STATE; the legacy scanner_state is no longer authoritative."""
     try:
-        with scanner_state_lock:
-            st=dict(scanner_state)
-        thread_ok=bool(auto_thread and auto_thread.is_alive())
-        hb=st.get("last_heartbeat") or st.get("last_cycle_at") or 0.0
-        fresh=(time.time()-float(hb) <= max(90.0, float(SCAN_INTERVAL)*4)) if hb else False
-        return bool(auto_mode and thread_ok and fresh and str(st.get("health") or "RUNNING").upper() not in {"STOPPED","DEAD","STUCK"})
+        thread_ok = bool(auto_thread and auto_thread.is_alive())
+        with _SCAN_STATE_LOCK:
+            st = dict(_SCAN_STATE)
+        hb = float(st.get("coordinator_heartbeat_at") or 0.0)
+        fresh = bool(hb and time.time() - hb <= max(90.0, SCAN_MAX_DURATION_SEC + 30.0))
+        return bool(auto_mode and thread_ok and st.get("enabled") and st.get("coordinator_alive") and fresh)
     except Exception:
         return False
 
@@ -9907,11 +9950,16 @@ def _v128_execute_deferred(chat_id=None):
                 with positions_lock:
                     positions[sym]={"signal":fresh,"entry":entry,"chat_id":chat_id or active_chat_id,"entry_time":None,"timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"SIMULATION"}
                 if str(fresh.get("execution_mode") or "").lower()=="market" or fresh.get("entry_label")=="market":
-                    _open_position(sym,fresh,_final_bybit_price(sym) or price,chat_id or active_chat_id,"strategy")
+                    if _open_position(sym,fresh,price,chat_id or active_chat_id,"strategy"):
+                        with _DEFERRED_ENTRY_LOCK_V128: _DEFERRED_ENTRY_QUEUE_V128.pop(sym,None)
+                        done+=1
+                    else:
+                        # Keep the deferred signal only when it was a stale/invalid market-entry condition.
+                        with _DEFERRED_ENTRY_LOCK_V128: _DEFERRED_ENTRY_QUEUE_V128.pop(sym,None)
                 else:
                     _start_light_worker(f"entry-wait-{sym}",_v128_sim_pending_wait,sym,fresh,chat_id or active_chat_id)
-                with _DEFERRED_ENTRY_LOCK_V128: _DEFERRED_ENTRY_QUEUE_V128.pop(sym,None)
-                done+=1
+                    with _DEFERRED_ENTRY_LOCK_V128: _DEFERRED_ENTRY_QUEUE_V128.pop(sym,None)
+                    done+=1
         except Exception as exc:
             log.warning(f"[DEFERRED ENTRY] execute {sym} gagal: {exc}")
     return done
@@ -9963,11 +10011,12 @@ def simulation_loop_v128(chat_id):
                         if sym in positions or len(positions)>=MAX_POSITIONS: continue
                         positions[sym]={"signal":sig,"entry":entry,"chat_id":chat_id,"entry_time":None,"entry_created_at":time.time(),"timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"SIMULATION"}
                     if str(sig.get("execution_mode") or "").lower()=="market" or sig.get("entry_label")=="market":
-                        _open_position(sym,sig,_final_bybit_price(sym) or price,chat_id,"strategy")
+                        if _open_position(sym,sig,price,chat_id,"strategy"):
+                            opened+=1
                     else:
                         tg_send(chat_id,f"🎯 <b>PENDING ORDER</b> — {sym}\n\n{fmt_signal_msg(sig)}")
                         _start_light_worker(f"entry-wait-{sym}",wait_entry,sym,sig,chat_id)
-                    opened+=1
+                        opened+=1
             log.info(f"[SCAN/V128] signals={len(signals or [])} opened={opened} deferred={deferred} execution_blocked={_binance_execution_blocked_v127()}")
             _set_scan_state(last_success_at=time.time(),last_finished_at=time.time())
         except Exception as exc:
@@ -10154,8 +10203,10 @@ def _handle_special_commands_v128(text, chat_id):
     return False
 
 # Finalize health/status with rotation and deferred queue visibility.
+# Capture the pre-V128 implementation BEFORE rebinding get_scanner_status.
+_ORIG_GET_SCANNER_STATUS_V128 = globals().get("get_scanner_status")
 def get_scanner_status_v128():
-    base=get_scanner_status()
+    base = _ORIG_GET_SCANNER_STATUS_V128() if callable(_ORIG_GET_SCANNER_STATUS_V128) else {}
     with _ROTATION_LOCK_V128:
         pool_n=len(_ROTATION_POOL_V128); rot_n=len(_ROTATION_LAST_SCANNED_V128); cycle=_ROTATION_CYCLE_V128
     with _DEFERRED_ENTRY_LOCK_V128:
@@ -10207,6 +10258,57 @@ def _v128_runtime_audit():
 _v128_runtime_audit()
 
 
+
+
+# ============================================================================
+# OFFLINE AUDIT / SELF-TEST (no network, no real orders)
+# ============================================================================
+def run_offline_audit():
+    """Exercise the critical persistence + simulated trade lifecycle without external APIs."""
+    report = {"checks": {}, "errors": []}
+    # Scanner recursion/entrypoint sanity.
+    try:
+        st = get_scanner_status()
+        report["checks"]["scanner_status_no_recursion"] = isinstance(st, dict)
+    except Exception as exc:
+        report["checks"]["scanner_status_no_recursion"] = False; report["errors"].append(f"scanner_status:{exc}")
+    # Save checkpoint locally only, with GitHub disabled.
+    try:
+        old_local = globals().get("_save_runtime_checkpoint")
+        cid, local = old_local(push_github=False)
+        cp = _read_json_file_safe(local, "audit checkpoint")
+        _verify_checkpoint_integrity(cp)
+        report["checks"]["checkpoint_local_roundtrip"] = bool(isinstance(cp, dict) and cp.get("checkpoint_id") == cid)
+    except Exception as exc:
+        report["checks"]["checkpoint_local_roundtrip"] = False; report["errors"].append(f"checkpoint:{exc}")
+    # Simulation trade smoke test.
+    try:
+        with positions_lock: positions.clear()
+        with stat_lock:
+            stats["tp"]=stats["sl"]=stats["trail"]=stats["total"]=0; stats["balance"]=STARTING_BALANCE; stats["pnl_history"].clear()
+        old_tg = globals().get("tg_send"); old_mgr = globals().get("_strategy_position_update"); old_gp = globals().get("get_price")
+        globals()["tg_send"] = lambda *a, **k: None
+        globals()["_strategy_position_update"] = lambda *a, **k: None
+        seq = iter([102.1])
+        globals()["get_price"] = lambda *a, **k: next(seq, 102.1)
+        sig = {"symbol":"AUDITTPUSDT","decision":"BUY","entry":100.0,"sl":99.0,"tp":102.0,"confidence":80,"entry_label":"market","rr":2.0}
+        with positions_lock:
+            positions[sig["symbol"]]={"signal":sig,"entry":100.0,"chat_id":0,"entry_time":None,"timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"SIMULATION"}
+        opened = _open_position(sig["symbol"], sig, 100.0, 0, "audit")
+        # The second price is TP; allow monitor thread to finish.
+        deadline=time.time()+2
+        while time.time()<deadline:
+            with stat_lock: done=stats["total"]
+            with positions_lock: alive=sig["symbol"] in positions
+            if done and not alive: break
+            time.sleep(0.02)
+        with stat_lock: result = dict(stats); hist=list(stats["pnl_history"])
+        globals()["tg_send"] = old_tg; globals()["_strategy_position_update"] = old_mgr; globals()["get_price"] = old_gp
+        report["checks"]["sim_trade_tp"] = bool(opened and result.get("tp")==1 and result.get("total")==1 and hist)
+    except Exception as exc:
+        report["checks"]["sim_trade_tp"] = False; report["errors"].append(f"sim_trade:{exc}")
+    report["ok"] = all(report["checks"].values()) and not report["errors"]
+    return report
 
 
 # FINAL ENTRYPOINT — MUST BE THE LAST EXECUTABLE CODE IN THIS FILE.
