@@ -5566,7 +5566,8 @@ def get_start_msg():
         "/trade               — Lihat semua posisi aktif/pending/emergency\n"
         "/ok SYMBOL           — Rekonsiliasi posisi Binance + TP/SL\n"
         "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
-        "/timeout             — Tutup paksa semua posisi + semua order\n\n"
+        "/timeout all          — Timeout semua posisi + semua order\n"
+        "/timeout pending     — Timeout pending entry saja\n\n"
         "━━━━━━━━ <b>CONFIG</b> ━━━━━━━━━\n"
         "/mode                — Lihat mode aktif\n"
         "/mode on             — Aktifkan REAL TRADE\n"
@@ -6237,6 +6238,8 @@ def bot_loop():
                     parts = text.split()
                     if len(parts) > 1 and parts[1].lower() == "pending":
                         threading.Thread(target=_verified_timeout_pending_only, args=(chat_id,), daemon=True).start()
+                    elif len(parts) > 1 and parts[1].lower() == "all":
+                        threading.Thread(target=_verified_timeout_all, args=(chat_id,), daemon=True).start()
                     else:
                         target_sym = parts[1].upper() if len(parts) > 1 else None
                         if target_sym:
@@ -8476,6 +8479,748 @@ def fmt_runtime_status_v121():
     )
 
 globals()["fmt_runtime_status"] = fmt_runtime_status_v121
+
+
+# ============================================================
+# V124 — PROTECTION REFERENCE / TRAIL / TIMEOUT HARDENING
+# - Binance MARK_PRICE WS is authoritative for MARK_PRICE triggers.
+# - Safe trail update never removes old protection before the new SL is verified.
+# - -2021 is a deterministic immediate-trigger rejection, not a rate-limit error.
+# - Pending trail keeps only the latest desired SL; breach is latched and resolved
+#   after Binance recovers.
+# - Flat positions converge to zero ordinary + zero algo orders.
+# - /timeout all is an explicit global timeout; /timeout pending remains pending-only.
+# ============================================================
+V124_VERSION = "MAIN-V124-PROTECTION-TIMEOUT-ALL-HARDENED"
+BINANCE_MARK_WS_STALE_SEC_V124 = max(3.0, float(os.getenv("BINANCE_MARK_WS_STALE_SEC", "5")))
+BINANCE_TRIGGER_GUARD_TICKS_V124 = max(1, int(os.getenv("BINANCE_TRIGGER_GUARD_TICKS", "2")))
+TIMEOUT_ALL_LOCK = threading.RLock()
+_TIMEOUT_ALL_PENDING = {"requested": False, "at": None, "chat_id": None, "running": False}
+_TIMEOUT_ALL_LAST_NOTICE = 0.0
+
+class BinanceImmediateTriggerError(RuntimeError):
+    """Protection trigger would already be active on Binance reference price."""
+    code = -2021
+
+class BinanceTriggerReferenceUnavailable(RuntimeError):
+    """No sufficiently fresh Binance reference price is available for validation."""
+
+class BinanceAlgoCleanupState(RuntimeError):
+    """Explicit cleanup state when exchange-side algo order verification fails."""
+
+# ---------- Binance public MARK_PRICE WS (validation only; no REST) ----------
+class BinanceMarkPriceWSV124:
+    def __init__(self):
+        self._lock=threading.RLock()
+        self._ws=None
+        self._thread=None
+        self._stop=threading.Event()
+        self._symbols=set()
+        self._prices={}
+        self._connected=False
+        self._last_error=None
+        self._last_msg_at=0.0
+        self._desired_version=0
+        self._connected_version=-1
+
+    def start(self):
+        if not _WS_LIB_OK:
+            self._last_error="websocket-client unavailable"
+            return None
+        with self._lock:
+            if self._thread and self._thread.is_alive(): return self._thread
+            self._stop.clear()
+            self._thread=threading.Thread(target=self._run,name="binance-mark-price-ws-v124",daemon=True)
+            self._thread.start(); return self._thread
+
+    def stop(self):
+        self._stop.set()
+        try:
+            if self._ws: self._ws.close()
+        except Exception: pass
+
+    def set_symbols(self, symbols):
+        desired={str(s).upper() for s in (symbols or []) if s}
+        if len(desired)>1000:
+            desired=set(list(desired)[:1000])
+        with self._lock:
+            if desired==self._symbols: return
+            self._symbols=desired; self._desired_version+=1
+            ws=self._ws
+        # Rebuild combined stream on next loop. This changes rarely (position set changes).
+        if ws:
+            try: ws.close()
+            except Exception: pass
+
+    def get(self,symbol):
+        with self._lock:
+            row=self._prices.get(str(symbol).upper())
+            return dict(row) if row else None
+
+    def get_fresh(self,symbol):
+        row=self.get(symbol)
+        if not row: return None
+        if time.time()-float(row.get("recv_at",0.0))>BINANCE_MARK_WS_STALE_SEC_V124: return None
+        return row
+
+    def status(self):
+        with self._lock:
+            return {"thread_alive":bool(self._thread and self._thread.is_alive()),"connected":self._connected,"symbols":len(self._symbols),"prices":len(self._prices),"fresh":bool(self._last_msg_at and time.time()-self._last_msg_at<=BINANCE_MARK_WS_STALE_SEC_V124),"last_msg_at":self._last_msg_at,"last_error":self._last_error}
+
+    def _run(self):
+        backoff=1.0
+        while not self._stop.is_set():
+            with self._lock:
+                syms=sorted(self._symbols); version=self._desired_version
+            if not syms:
+                time.sleep(1.0); continue
+            try:
+                streams="/".join(f"{s.lower()}@markPrice@1s" for s in syms)
+                url=f"wss://fstream.binance.com/stream?streams={streams}"
+                ws=websocket.WebSocketApp(url,on_open=self._on_open,on_message=self._on_message,on_error=self._on_error,on_close=self._on_close)
+                with self._lock:
+                    self._ws=ws; self._connected_version=version
+                ws.run_forever(ping_interval=60,ping_timeout=20)
+                backoff=1.0
+            except Exception as exc:
+                with self._lock: self._last_error=str(exc)[:300]
+            finally:
+                with self._lock:
+                    self._connected=False; self._ws=None
+            if self._stop.is_set(): break
+            time.sleep(backoff); backoff=min(30.0,backoff*2.0)
+
+    def _on_open(self,ws):
+        with self._lock:
+            self._connected=True; self._last_error=None; self._last_msg_at=time.time()
+
+    def _on_error(self,ws,error):
+        with self._lock: self._last_error=str(error)[:300]
+
+    def _on_close(self,ws,code,msg):
+        with self._lock: self._connected=False
+
+    def _on_message(self,ws,raw):
+        try: msg=json.loads(raw)
+        except Exception: return
+        data=msg.get("data") if isinstance(msg,dict) else None
+        if not isinstance(data,dict): return
+        sym=str(data.get("s") or "").upper()
+        raw_p=data.get("p")
+        try: price=float(raw_p)
+        except Exception: return
+        now=time.time()
+        with self._lock:
+            self._last_msg_at=now
+            self._prices[sym]={"symbol":sym,"price":price,"event_at":float(data.get("E") or now*1000)/1000.0,"recv_at":now,"source":"binance_mark_price_ws"}
+
+_binance_mark_ws_v124=BinanceMarkPriceWSV124()
+
+def _sync_binance_mark_ws_symbols_v124():
+    with positions_lock:
+        syms=set(str(s).upper() for s,p in positions.items() if _position_is_real(p))
+    with _pending_trails_lock:
+        syms.update(str(s).upper() for s in _pending_trails.keys())
+    _binance_mark_ws_v124.set_symbols(syms)
+
+
+def _binance_mark_watchdog_v124():
+    while not SHUTDOWN_EVENT.wait(2):
+        try: _sync_binance_mark_ws_symbols_v124()
+        except Exception: pass
+
+_BINANCE_MARK_WATCHDOG_THREAD=None
+
+def _start_binance_mark_ws_v124():
+    global _BINANCE_MARK_WATCHDOG_THREAD
+    _binance_mark_ws_v124.start()
+    if not _BINANCE_MARK_WATCHDOG_THREAD or not _BINANCE_MARK_WATCHDOG_THREAD.is_alive():
+        _BINANCE_MARK_WATCHDOG_THREAD=threading.Thread(target=_binance_mark_watchdog_v124,name="binance-mark-watchdog-v124",daemon=True)
+        _BINANCE_MARK_WATCHDOG_THREAD.start()
+
+
+def _binance_mark_price_v124(symbol, allow_rest_fallback=False):
+    row=_binance_mark_ws_v124.get_fresh(symbol)
+    if row is not None: return float(row["price"])
+    if allow_rest_fallback:
+        try:
+            data=_binance_signed_impl_v120("GET","/fapi/v1/premiumIndex",{"symbol":str(symbol).upper()},critical=True)
+            if isinstance(data,list): data=(data[0] if data else {})
+            if isinstance(data,dict) and data.get("markPrice") is not None:
+                return float(data["markPrice"])
+        except Exception as exc:
+            raise BinanceTriggerReferenceUnavailable(f"Binance mark price unavailable: {exc}") from exc
+    raise BinanceTriggerReferenceUnavailable(f"Binance MARK_PRICE WS stale/unavailable: {symbol}")
+
+
+def _validate_conditional_trigger_v124(symbol, close_side, order_type, trigger_price, *, allow_rest_fallback=True):
+    info=get_symbol_filters(symbol); tick=max(float(info.get("tickSize") or 0.0),1e-12)
+    trigger=round_to_tick(float(trigger_price),tick)
+    mark=_binance_mark_price_v124(symbol,allow_rest_fallback=allow_rest_fallback)
+    guard=max(tick*BINANCE_TRIGGER_GUARD_TICKS_V124, abs(mark)*1e-7)
+    side=str(close_side).upper(); typ=str(order_type).upper()
+    # STOP: BUY triggers when mark >= trigger, SELL when mark <= trigger.
+    # TAKE_PROFIT is opposite for the same close side.
+    invalid=False
+    if typ in {"STOP","STOP_MARKET"}:
+        invalid=(mark+guard>=trigger) if side=="BUY" else (mark-guard<=trigger)
+    elif typ in {"TAKE_PROFIT","TAKE_PROFIT_MARKET"}:
+        invalid=(mark-guard<=trigger) if side=="BUY" else (mark+guard>=trigger)
+    if invalid:
+        raise BinanceImmediateTriggerError(f"Binance -2021 guard: {symbol} {typ} {side} trigger={trigger:.12g} mark={mark:.12g} guard={guard:.12g}")
+    return {"trigger_price":trigger,"mark_price":mark,"guard":guard,"working_type":"MARK_PRICE"}
+
+
+def _validate_protection_pair_before_mutation_v124(symbol,is_buy,tp_price,sl_price):
+    close_side="SELL" if is_buy else "BUY"
+    tp=_validate_conditional_trigger_v124(symbol,close_side,"TAKE_PROFIT_MARKET",tp_price,allow_rest_fallback=True)
+    sl=_validate_conditional_trigger_v124(symbol,close_side,"STOP_MARKET",sl_price,allow_rest_fallback=True)
+    return tp,sl
+
+# ---------- Safe algo cleanup: never return None as state ----------
+def _cancel_algo_order_verified_v124(symbol, algo_id):
+    if not algo_id: return {"state":"NO_ID"}
+    target=str(algo_id)
+    try:
+        _binance_signed("DELETE","/fapi/v1/algoOrder",{"algoId":target},critical=True)
+    except BinanceUnknownExecutionError as exc:
+        # Reconcile instead of retrying the mutation.
+        try:
+            rows=_get_open_algo_orders(symbol)
+            still=any(str(r.get("algoId") or r.get("strategyId") or "")==target for r in rows)
+            return {"state":"STILL_PRESENT" if still else "VERIFIED_EMPTY","error":str(exc)[:220]}
+        except Exception as verify_exc:
+            return {"state":"VERIFY_FAILED","error":str(verify_exc)[:220]}
+    except Exception as exc:
+        try:
+            rows=_get_open_algo_orders(symbol)
+            still=any(str(r.get("algoId") or r.get("strategyId") or "")==target for r in rows)
+            return {"state":"STILL_PRESENT" if still else "VERIFIED_EMPTY","error":str(exc)[:220]}
+        except Exception as verify_exc:
+            return {"state":"FAILED","error":str(verify_exc)[:220]}
+    try:
+        rows=_get_open_algo_orders(symbol)
+        still=any(str(r.get("algoId") or r.get("strategyId") or "")==target for r in rows)
+        return {"state":"STILL_PRESENT" if still else "VERIFIED_EMPTY"}
+    except Exception as exc:
+        return {"state":"VERIFY_FAILED","error":str(exc)[:220]}
+
+
+def _cancel_all_algo_orders_verified_v124(sym,retries=1):
+    # One cancel-all mutation maximum per invocation. Verification can be repeated without mutation.
+    last=None
+    try:
+        _binance_signed("DELETE","/fapi/v1/algoOpenOrders",{"symbol":sym},critical=True)
+    except BinanceUnknownExecutionError as exc:
+        last=exc
+    except Exception as exc:
+        last=exc
+    try:
+        rows=_get_open_algo_orders(sym)
+        if not rows:
+            _clear_pending_cleanup(sym)
+            return {"state":"VERIFIED_EMPTY","remaining":0}
+        return {"state":"STILL_PRESENT","remaining":len(rows),"error":str(last)[:220] if last else None}
+    except Exception as exc:
+        return {"state":"VERIFY_FAILED","remaining":None,"error":str(exc)[:220]}
+
+
+def _cancel_all_symbol_orders_verified_v124(sym):
+    # Active-position safety: do not cancel protection before the position is flat.
+    try: _cancel_all_ordinary_orders_verified(sym)
+    except Exception as exc: return {"state":"ORDINARY_CLEANUP_FAILED","error":str(exc)[:220]}
+    algo=_cancel_all_algo_orders_verified_v124(sym)
+    if algo.get("state")!="VERIFIED_EMPTY": return {"state":"ALGO_CLEANUP_"+str(algo.get("state")),"algo":algo}
+    try:
+        ordinary=get_open_orders_all(sym)
+    except Exception as exc:
+        return {"state":"ORDINARY_VERIFY_FAILED","error":str(exc)[:220]}
+    if ordinary: return {"state":"ORDINARY_STILL_PRESENT","remaining":len(ordinary)}
+    return {"state":"VERIFIED_EMPTY","ordinary":0,"algo":0}
+
+globals()["_cancel_all_algo_orders_verified"]=_cancel_all_algo_orders_verified_v124
+
+# ---------- Safe single-SL placement/update ----------
+_ORIG_PLACE_SL_ORDER_V124=globals().get("place_sl_order")
+_ORIG_PLACE_TP_SL_V124=globals().get("place_tp_sl")
+
+def place_sl_order_v124(symbol,is_buy,sl_price,quantity,client_algo_id=None):
+    info=get_symbol_filters(symbol); tick=float(info.get("tickSize") or 0.0)
+    validation=_validate_conditional_trigger_v124(symbol,"SELL" if is_buy else "BUY","STOP_MARKET",sl_price,allow_rest_fallback=True)
+    client_algo_id=client_algo_id or _new_client_id("SL")
+    params={"algoType":"CONDITIONAL","symbol":symbol,"side":"SELL" if is_buy else "BUY","type":"STOP_MARKET","triggerPrice":round_to_tick(float(sl_price),tick),"quantity":round_qty(quantity,info["stepSize"],info.get("qtyPrecision",8)),"reduceOnly":"true","workingType":"MARK_PRICE","clientAlgoId":client_algo_id}
+    try:
+        result=_binance_signed("POST","/fapi/v1/algoOrder",params)
+    except BinanceUnknownExecutionError:
+        found=_find_open_algo_by_client_id(symbol,client_algo_id)
+        if found is not None: return found
+        raise
+    except Exception as exc:
+        msg=str(exc)
+        if "-2021" in msg or "immediately trigger" in msg.lower():
+            try:
+                fn=_brain_fn("record_protection_event")
+                if callable(fn): fn({"type":"PROTECTION_REJECTED","symbol":symbol,"kind":"STOP_MARKET","trigger_price":float(sl_price),"reason":"-2021 immediate trigger","error":msg[:300]},source="binance_execution")
+            except Exception: pass
+            raise BinanceImmediateTriggerError(f"Binance -2021: {msg}") from exc
+        raise
+    if isinstance(result,dict):
+        result.setdefault("_validation",validation)
+    return result
+
+globals()["place_sl_order"]=place_sl_order_v124
+
+def place_tp_sl_v124(symbol,is_buy,tp_price,sl_price,quantity):
+    # Validate BOTH triggers before any mutation, so an invalid SL never causes TP to be placed first.
+    _validate_protection_pair_before_mutation_v124(symbol,is_buy,tp_price,sl_price)
+    return _ORIG_PLACE_TP_SL_V124(symbol,is_buy,tp_price,sl_price,quantity) if callable(_ORIG_PLACE_TP_SL_V124) else (None,None)
+
+globals()["place_tp_sl"] = place_tp_sl_v124
+
+# ---------- Safe trail replacement: new SL first, old SL second ----------
+def _apply_trail_update_safe_v124(sym,pos,new_sl):
+    signal_data=pos.get("signal") or {}; is_buy=str(signal_data.get("decision") or "BUY").upper()=="BUY"
+    qty=float(pos.get("quantity") or 0.0)
+    if qty<=0: raise RuntimeError(f"{sym}: quantity unavailable")
+    current_sl=float(pos.get("current_sl") or signal_data.get("sl") or 0.0)
+    desired=float(new_sl)
+    info=get_symbol_filters(sym); tick=float(info.get("tickSize") or 0.0); desired=round_to_tick(desired,tick)
+    # Validate using Binance MARK_PRICE before any mutation.
+    validation=_validate_conditional_trigger_v124(sym,"SELL" if is_buy else "BUY","STOP_MARKET",desired,allow_rest_fallback=True)
+    old_algo_id=pos.get("sl_order_id")
+    client=_new_client_id("TRL")
+    try:
+        new_order=place_sl_order_v124(sym,is_buy,desired,qty,client_algo_id=client)
+    except BinanceImmediateTriggerError:
+        raise
+    # New SL must be visible exchange-side before old SL is touched.
+    rows=_get_open_algo_orders(sym)
+    new_id=str((new_order or {}).get("algoId") or (new_order or {}).get("strategyId") or "")
+    matched=False
+    for row in rows:
+        rid=str(row.get("algoId") or row.get("strategyId") or "")
+        if (new_id and rid==new_id) or (_protection_matches(row,sym,"SELL" if is_buy else "BUY","STOP_MARKET",desired,qty,tick,info["stepSize"])):
+            matched=True; new_id=new_id or rid; break
+    if not matched: raise RuntimeError(f"{sym}: new trail SL not verified on Binance")
+    # State commit happens after new SL verification.
+    with positions_lock:
+        if sym in positions:
+            positions[sym]["current_sl"]=desired
+            positions[sym]["sl_order_id"]=new_id or positions[sym].get("sl_order_id")
+            positions[sym]["signal"]={**positions[sym].get("signal",{}),"sl":desired}
+            positions[sym]["protection_state"]="VERIFIED"
+    # Only now remove prior SL; TP is untouched.
+    old_cleanup=None
+    if old_algo_id and str(old_algo_id)!=(new_id or ""):
+        old_cleanup=_cancel_algo_order_verified_v124(sym,old_algo_id)
+        if old_cleanup.get("state") not in {"VERIFIED_EMPTY","NO_ID"}:
+            _queue_pending_cleanup(sym,"old trail SL cleanup pending",RuntimeError(str(old_cleanup)))
+    _clear_pending_trail(sym)
+    try:
+        fn=_brain_fn("record_protection_event")
+        if callable(fn): fn({"type":"TRAIL_APPLIED","symbol":sym,"old_sl":current_sl,"new_sl":desired,"mark_price":validation.get("mark_price"),"working_type":"MARK_PRICE"},source="binance_execution")
+    except Exception: pass
+    return {"ok":True,"new_sl":desired,"new_algo_id":new_id,"old_algo_id":old_algo_id,"old_cleanup":old_cleanup,"validation":validation}
+
+# ---------- Safe trail breach processing ----------
+def _process_trail_breach_after_recovery_v124(sym,pos):
+    with positions_lock: cur=dict(positions.get(sym) or pos)
+    if not cur.get("forced_exit_pending"): return False
+    if _binance_is_scan_paused(): return False
+    buy=str(cur.get("signal",{}).get("decision") or "BUY").upper()=="BUY"
+    try:
+        closed,exit_price=_verified_market_close(sym,buy,"trail_breach",chat_id=cur.get("chat_id") or active_chat_id,max_retries=0)
+        if not closed: return False
+        _final_cleanup_after_flat(sym,reason="trail breach close")
+        entry=float(cur.get("entry") or 0.0); xp=float(exit_price or cur.get("trail_breach_price") or entry)
+        result="trail" if _trade_price_move_pct(entry,xp,cur.get("signal",{}).get("decision"))>=0 else "sl"
+        close_position(sym,result,close_price=xp)
+        _clear_pending_trail(sym)
+        with positions_lock:
+            if sym in positions: positions[sym]["forced_exit_pending"]=False
+        return True
+    except BinanceCooldownError: return False
+    except Exception as exc:
+        _queue_pending_cleanup(sym,"trail breach close failed",exc); return False
+
+globals()["_process_trail_breach_after_recovery"]=_process_trail_breach_after_recovery_v124
+
+# ---------- Recovery: pending trail first, then protections/cleanup ----------
+def _resume_binance_and_flush_pending_v124(chat_id_getter=lambda: active_chat_id):
+    global _binance_recovering
+    if _binance_cooldown_remaining()>0: return False
+    if _binance_recovering: return False
+    _binance_recovering=True
+    failures=[]
+    try:
+        _sync_binance_mark_ws_symbols_v124()
+        # Breached trail always wins over reinstallation.
+        with positions_lock: active={s:dict(p) for s,p in positions.items() if _position_is_real(p)}
+        for sym,pos in active.items():
+            if pos.get("forced_exit_pending"):
+                if not _process_trail_breach_after_recovery_v124(sym,pos):
+                    failures.append(f"{sym}: forced trail exit pending")
+        with _pending_trails_lock: pending=list((s,dict(v)) for s,v in _pending_trails.items())
+        for sym,tr in pending:
+            with positions_lock: pos=dict(positions.get(sym) or {})
+            if not pos or not _position_is_real(pos): _clear_pending_trail(sym); continue
+            try:
+                px=_final_bybit_price(sym); _trail_breach_price_check(sym,pos,px)
+                if pos.get("forced_exit_pending"):
+                    if _process_trail_breach_after_recovery_v124(sym,pos): continue
+                    failures.append(f"{sym}: pending trail breached; exit pending"); continue
+                qty=float(pos.get("quantity") or tr.get("quantity") or 0.0)
+                sl=float(tr.get("sl")); tp=tr.get("tp") or pos.get("signal",{}).get("tp")
+                if qty<=0 or tp is None: raise RuntimeError("pending trail incomplete")
+                result=_apply_trail_update_safe_v124(sym,pos,sl)
+                if pos.get("current_sl")!=sl: pass
+            except BinanceImmediateTriggerError as exc:
+                _trail_breach_price_check(sym,pos,_final_bybit_price(sym))
+                with positions_lock: nowpos=dict(positions.get(sym) or pos)
+                if nowpos.get("forced_exit_pending") and _process_trail_breach_after_recovery_v124(sym,nowpos): continue
+                failures.append(f"{sym}: trail trigger already crossed")
+            except BinanceCooldownError as exc:
+                failures.append(f"{sym}: cooldown {exc}")
+            except Exception as exc: failures.append(f"{sym}: trail {exc}")
+        with _pending_protections_lock: prots=list((s,dict(v)) for s,v in _pending_protections.items())
+        for sym,pr in prots:
+            try:
+                with positions_lock: pos=dict(positions.get(sym) or {})
+                if not pos or not _position_is_real(pos): _clear_pending_protection(sym); continue
+                qty=float(pos.get("quantity") or pr.get("quantity") or 0.0); buy=str(pr.get("side") or "BUY").upper()=="BUY"; tp=pr.get("tp"); sl=pr.get("sl")
+                if qty<=0 or tp is None or sl is None: raise RuntimeError("pending protection incomplete")
+                _validate_protection_pair_before_mutation_v124(sym,buy,tp,sl)
+                nt,ns=place_tp_sl_v124(sym,buy,tp,sl,qty)
+                with positions_lock:
+                    if sym in positions: positions[sym].update({"tp_order_id":(nt or {}).get("algoId"),"sl_order_id":(ns or {}).get("algoId"),"protection_state":"VERIFIED"})
+                _clear_pending_protection(sym)
+            except Exception as exc: failures.append(f"{sym}: protection {exc}")
+        with _pending_cleanup_lock: cleans=list(_pending_cleanup.items())
+        for sym,_item in cleans:
+            try:
+                res=_cancel_all_symbol_orders_verified_v124(sym)
+                if res.get("state")=="VERIFIED_EMPTY": _clear_pending_cleanup(sym)
+                else: failures.append(f"{sym}: cleanup {res.get('state')}")
+            except Exception as exc: failures.append(f"{sym}: cleanup {exc}")
+        _sync_binance_mark_ws_symbols_v124()
+        if failures:
+            with _binance_pause_lock: _binance_recovering=False
+            _set_component_health("execution","DEGRADED","; ".join(failures[:3])[:300])
+            msg=" | ".join(failures[:6])
+            cid=chat_id_getter() if callable(chat_id_getter) else active_chat_id
+            if cid: tg_send(cid,f"⚠️ <b>Binance recovery belum selesai.</b>\n🔎 Scanner Bybit tetap berjalan.\n<code>{html.escape(msg[:600])}</code>")
+            return False
+        with _binance_pause_lock: _binance_recovering=False; _binance_scan_paused=False; _binance_pause_reason=""
+        cid=chat_id_getter() if callable(chat_id_getter) else active_chat_id
+        if cid: tg_send(cid,"✅ <b>Binance recovery selesai.</b>\nExecution/protection kembali konsisten.\n🔎 Scanner Bybit tetap aktif.")
+        return True
+    except Exception as exc:
+        with _binance_pause_lock: _binance_recovering=False
+        log.exception(f"[BINANCE RECOVERY V124] {exc}")
+        return False
+
+# ---------- Proper global timeout ----------
+def _verified_timeout_symbol_v124(sym,chat_id,reason="manual timeout"):
+    try:
+        with positions_lock: local=dict(positions.get(sym) or {})
+        real=get_real_position(sym,prefer_ws=True,force=True)
+        live_qty=abs(float(real.get("positionAmt") or 0.0)) if real else 0.0
+        if live_qty>0:
+            is_buy=float(real.get("positionAmt") or 0.0)>0
+            closed,exit_price=_verified_market_close(sym,is_buy,reason,chat_id=chat_id,max_retries=0)
+            if not closed: raise RuntimeError("position close not verified")
+            _final_cleanup_after_flat(sym,reason=reason)
+            if local: close_position(sym,"timeout",close_price=exit_price or local.get("entry"))
+        else:
+            _final_cleanup_after_flat(sym,reason="timeout flat cleanup")
+            if local and local.get("entry_time") is None:
+                with positions_lock: positions.pop(sym,None)
+                _record_pending_cancel("manual_timeout")
+            elif local:
+                close_position(sym,"timeout",close_price=local.get("current_price") or local.get("entry"))
+        tg_send(chat_id,f"✅ <b>TIMEOUT — {sym}</b>\nPosition: <b>0</b>\nOrdinary orders: <b>0</b>\nAlgo TP/SL/Trail: <b>0</b>")
+        return True
+    except BinanceCooldownError as exc:
+        _queue_pending_cleanup(sym,"timeout deferred by Binance cooldown",exc)
+        tg_send(chat_id,f"⏸️ <b>TIMEOUT TERTUNDA — {sym}</b>\nBinance masih cooldown; tidak ada retry agresif.")
+        return False
+    except Exception as exc:
+        _force_position_emergency(sym,str(exc)[:300]); _queue_pending_cleanup(sym,"timeout failed",exc)
+        tg_send(chat_id,f"🚨 <b>TIMEOUT BELUM SELESAI — {sym}</b>\n<code>{html.escape(str(exc)[:300])}</code>")
+        return False
+
+globals()["_verified_timeout_symbol"]=_verified_timeout_symbol_v124
+
+def _verified_timeout_all_v124(chat_id):
+    global _TIMEOUT_ALL_LAST_NOTICE
+    with TIMEOUT_ALL_LOCK:
+        if _TIMEOUT_ALL_PENDING.get("running"):
+            tg_send(chat_id,"⏳ <b>/timeout all</b> sudah sedang diproses."); return False
+        _TIMEOUT_ALL_PENDING.update({"requested":True,"at":time.time(),"chat_id":chat_id,"running":True})
+    try:
+        if _binance_cooldown_remaining()>0:
+            tg_send(chat_id,"⏸️ <b>/timeout all diterima.</b>\nBinance cooldown aktif; permintaan global disimpan dan akan diproses saat recovery. Tidak ada retry agresif.")
+            return False
+        with _binance_critical_context():
+            remote_positions=list(get_real_positions_all() or [])
+            ordinary=list(get_open_orders_all() or [])
+            algo=list(get_open_algo_orders_all() or [])
+        remote_by_sym={str(p.get("symbol")).upper():dict(p) for p in remote_positions if p.get("symbol")}
+        symbols=set(remote_by_sym)
+        symbols.update(str(o.get("symbol")).upper() for o in ordinary if o.get("symbol"))
+        symbols.update(str(o.get("symbol")).upper() for o in algo if o.get("symbol"))
+        with positions_lock: local_items={s:dict(p) for s,p in positions.items()}
+        symbols.update(local_items.keys())
+        # Close active real positions FIRST; protection is retained until flat.
+        exits={}
+        for sym,p in sorted(remote_by_sym.items()):
+            qty=abs(float(p.get("positionAmt") or 0.0))
+            if qty<=0: continue
+            is_buy=float(p.get("positionAmt") or 0.0)>0
+            closed,exit_price=_verified_market_close(sym,is_buy,"manual timeout all",chat_id=chat_id,max_retries=0)
+            if not closed: raise RuntimeError(f"{sym}: position not flat")
+            exits[sym]=exit_price
+        # Now cleanup all orders, including symbols that were only orphan orders.
+        cleanup_failures=[]
+        for sym in sorted(symbols):
+            res=_cancel_all_symbol_orders_verified_v124(sym)
+            if res.get("state")!="VERIFIED_EMPTY": cleanup_failures.append(f"{sym}:{res.get('state')}")
+        # Simulation/pending local state is resolved locally after exchange cleanup.
+        for sym,p in local_items.items():
+            try:
+                if _position_is_real(p):
+                    if p.get("entry_time") is not None: close_position(sym,"timeout",close_price=exits.get(sym) or p.get("current_price") or p.get("entry"))
+                    else:
+                        with positions_lock: positions.pop(sym,None)
+                        _record_pending_cancel("manual_timeout_global")
+                else:
+                    close_position(sym,"timeout",close_price=p.get("current_price") or p.get("entry"))
+            except Exception as exc: cleanup_failures.append(f"{sym}:local:{exc}")
+        # Final exchange verification.
+        with _binance_critical_context():
+            rem_pos=[p for p in (get_real_positions_all() or []) if abs(float(p.get("positionAmt") or 0.0))>0]
+            rem_ord=list(get_open_orders_all() or [])
+            rem_algo=list(get_open_algo_orders_all() or [])
+        if rem_pos or rem_ord or rem_algo or cleanup_failures:
+            raise RuntimeError(f"global cleanup incomplete positions={len(rem_pos)} ordinary={len(rem_ord)} algo={len(rem_algo)} failures={cleanup_failures[:4]}")
+        with positions_lock: positions.clear()
+        with _pending_trails_lock: _pending_trails.clear()
+        with _pending_protections_lock: _pending_protections.clear()
+        with _pending_cleanup_lock: _pending_cleanup.clear()
+        tg_send(chat_id,f"✅ <b>/timeout all SELESAI</b>\nPosition: <b>0</b>\nOrdinary orders: <b>0</b>\nAlgo TP/SL/Trail: <b>0</b>\nSymbol diproses: <b>{len(symbols)}</b>")
+        return True
+    except BinanceCooldownError:
+        tg_send(chat_id,"⏸️ <b>/timeout all TERTUNDA</b>\nBinance cooldown aktif; permintaan tetap menunggu recovery.")
+        return False
+    except Exception as exc:
+        tg_send(chat_id,f"🚨 <b>/timeout all BELUM SELESAI</b>\n<code>{html.escape(str(exc)[:500])}</code>")
+        log.error(f"[TIMEOUT ALL V124] {exc}")
+        return False
+    finally:
+        with TIMEOUT_ALL_LOCK:
+            _TIMEOUT_ALL_PENDING["running"]=False
+            # Keep requested=True only while a cooldown/recovery retry remains.
+            if _binance_cooldown_remaining()<=0: _TIMEOUT_ALL_PENDING["requested"]=False
+
+globals()["_verified_timeout_all"]=_verified_timeout_all_v124
+
+def _timeout_all_recovery_hook_v124():
+    with TIMEOUT_ALL_LOCK:
+        pending=bool(_TIMEOUT_ALL_PENDING.get("requested")) and not bool(_TIMEOUT_ALL_PENDING.get("running"))
+        cid=_TIMEOUT_ALL_PENDING.get("chat_id")
+    if pending and cid and _binance_cooldown_remaining()<=0:
+        _verified_timeout_all_v124(cid)
+
+# ---------- Final real monitor: safe trail + breach + no failed-loop spam ----------
+def monitor_position_real_v124(sym,pos):
+    next_strategy=0.0; next_rest=0.0
+    while True:
+        with positions_lock:
+            if sym not in positions: return
+            pos=positions[sym]
+        try:
+            if pos.get("timeout_flag"):
+                _verified_timeout_symbol_v124(sym,pos.get("chat_id") or active_chat_id,reason="manual timeout"); return
+            px=_final_bybit_price(sym)
+            if px is not None:
+                with positions_lock:
+                    if sym in positions:
+                        positions[sym]["current_price"]=px; _update_trade_path_metrics(positions[sym],px); pos=positions[sym]
+                _trail_breach_price_check(sym,pos,px)
+            if pos.get("forced_exit_pending") and not _binance_is_scan_paused():
+                if _process_trail_breach_after_recovery_v124(sym,pos): return
+            if time.time()>=next_strategy:
+                upd=_strategy_position_update(sym,pos); next_strategy=time.time()+STRATEGY_MANAGE_INTERVAL
+                if isinstance(upd,dict):
+                    oldsl=pos.get("current_sl",pos.get("signal",{}).get("sl")); cand_sl=upd.get("sl")
+                    if cand_sl is not None and oldsl is not None:
+                        buy=str(pos.get("signal",{}).get("decision") or "BUY").upper()=="BUY"
+                        if not ((float(cand_sl)>float(oldsl)) if buy else (float(cand_sl)<float(oldsl))): cand_sl=oldsl
+                    if cand_sl is not None and oldsl is not None and float(cand_sl)!=float(oldsl):
+                        desired=float(cand_sl)
+                        try:
+                            if _binance_is_scan_paused():
+                                _queue_pending_trail(sym,desired,upd.get("tp") or pos.get("signal",{}).get("tp"),pos.get("quantity"),reason="binance-cooldown",side=pos.get("signal",{}).get("decision"))
+                                _trail_breach_price_check(sym,pos,px)
+                            else:
+                                result=_apply_trail_update_safe_v124(sym,pos,desired)
+                                _notify_trail_update(active_chat_id,sym,positions.get(sym,pos),upd,oldsl,desired,status="APPLIED")
+                        except BinanceImmediateTriggerError as exc:
+                            _queue_pending_trail(sym,desired,upd.get("tp") or pos.get("signal",{}).get("tp"),pos.get("quantity"),reason="trigger-crossed",side=pos.get("signal",{}).get("decision"))
+                            _trail_breach_price_check(sym,pos,px)
+                            if not _v110_trail_failure_blocked(sym,desired,exc):
+                                _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,desired,status="QUEUED",error="Binance trigger already crossed; waiting for forced-close/recovery")
+                        except BinanceTriggerReferenceUnavailable as exc:
+                            _queue_pending_trail(sym,desired,upd.get("tp") or pos.get("signal",{}).get("tp"),pos.get("quantity"),reason="mark-price-unavailable",side=pos.get("signal",{}).get("decision"))
+                        except BinanceCooldownError as exc:
+                            _queue_pending_trail(sym,desired,upd.get("tp") or pos.get("signal",{}).get("tp"),pos.get("quantity"),reason="binance-cooldown",side=pos.get("signal",{}).get("decision"))
+                        except Exception as exc:
+                            if not _v110_trail_failure_blocked(sym,desired,exc):
+                                _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,desired,status="FAILED",error=exc)
+            # REST reconciliation remains slow and only when Binance WS is stale.
+            if not _binance_ws_fresh() and time.time()>=next_rest and _v110_binance_rest_allowed("normal",sym):
+                try:
+                    real=get_real_position_v120(sym,prefer_ws=False,force=False)
+                    _mark_binance_reconcile(sym); next_rest=time.time()+BINANCE_REST_RECONCILE_MIN_INTERVAL_FINAL
+                    if real is None or abs(float(real.get("positionAmt",0) or 0))<=0:
+                        px=_final_bybit_price(sym) or pos.get("current_price") or pos.get("entry")
+                        _finalize_external_close_final(sym,pos,reason_hint="unknown",exit_price=px); _final_cleanup_after_flat(sym); return
+                except Exception as exc: next_rest=time.time()+BINANCE_REST_RECONCILE_MIN_INTERVAL_FINAL
+            _sync_binance_mark_ws_symbols_v124()
+            time.sleep(MONITOR_SLEEP)
+        except Exception as exc:
+            log.exception(f"[monitor_real/V124] {sym}: {exc}"); time.sleep(MONITOR_SLEEP)
+
+globals()["monitor_position_real"] = monitor_position_real_v124
+
+# ---------- Recovery loop wrapper adds pending /timeout all processing ----------
+_ORIG_BINANCE_RECOVERY_LOOP_V124=globals().get("_binance_recovery_loop")
+def _binance_recovery_loop_v124(chat_id_getter=lambda: active_chat_id):
+    consecutive=0
+    while not SHUTDOWN_EVENT.wait(5):
+        try:
+            if _binance_is_scan_paused():
+                _notify_binance_pause_once(chat_id_getter())
+                if _binance_cooldown_remaining()<=0 and not _binance_recovering:
+                    ok=_resume_binance_and_flush_pending_v124(chat_id_getter); consecutive=0 if ok else consecutive+1
+                    if ok: _timeout_all_recovery_hook_v124()
+                    elif consecutive>3: time.sleep(20)
+                else:
+                    _timeout_all_recovery_hook_v124() if _binance_cooldown_remaining()<=0 else None
+            else:
+                _timeout_all_recovery_hook_v124()
+        except Exception as exc: log.warning(f"[binance-recovery/V124] {exc}")
+
+globals()["_binance_recovery_loop"]=_binance_recovery_loop_v124
+
+# ---------- Command handler: explicit /timeout all ----------
+# Patch the legacy command branch in source-independent runtime by replacing the router,
+# and expose a direct function for tests. The original long-poll loop still uses its own
+# branch; the exact string replacement below is applied to the generated file after this block.
+_ORIG_TELEGRAM_COMMAND_ROUTER_V124 = globals().get("telegram_command_router_v110")
+def telegram_command_router_v124(text,chat_id):
+    t=str(text or "").strip().lower()
+    if t in {"/timeout all","timeout all"}:
+        return _verified_timeout_all_v124(chat_id)
+    if t in {"/timeout pending","timeout pending"}:
+        return _verified_timeout_pending_only(chat_id)
+    return _ORIG_TELEGRAM_COMMAND_ROUTER_V124(text,chat_id) if callable(_ORIG_TELEGRAM_COMMAND_ROUTER_V124) else None
+
+globals()["telegram_command_router_v110"] = telegram_command_router_v124
+
+# ---------- Start final mark-price infrastructure ----------
+_ORIG_START_RUNTIME_V124=globals().get("start_runtime")
+def start_runtime_v124():
+    _start_binance_mark_ws_v124()
+    return _ORIG_START_RUNTIME_V124() if callable(_ORIG_START_RUNTIME_V124) else None
+
+globals()["start_runtime"] = start_runtime_v124
+
+# ---------- Critical runtime audit ----------
+def _v124_final_runtime_audit():
+    checks={
+        "place_sl_order": callable(globals().get("place_sl_order")),
+        "place_tp_sl": callable(globals().get("place_tp_sl")),
+        "verified_timeout_symbol": callable(globals().get("_verified_timeout_symbol")),
+        "verified_timeout_all": callable(globals().get("_verified_timeout_all")),
+        "timeout_pending": callable(globals().get("_verified_timeout_pending_only")),
+        "trail_safe": callable(globals().get("_apply_trail_update_safe_v124")),
+        "mark_ws": callable(globals().get("_binance_mark_price_v124")),
+        "brain_save": callable(getattr(globals().get("_brain"),"export_checkpoint_state",None)),
+    }
+    bad=[k for k,v in checks.items() if not v]
+    if bad: raise RuntimeError(f"V124 critical runtime contract missing: {bad}")
+    return checks
+
+# Ensure final audit occurs before main enters the runtime loop.
+_v124_final_runtime_audit()
+
+
+
+# ============================================================
+# V125 — SAFE TP/SL PAIR MUTATION
+# Existing protections are never bulk-canceled before a new pair is verified.
+# A failed SL create only cleans a newly-created TP from this transaction.
+# ============================================================
+V125_VERSION="MAIN-V125-SAFE-TP-SL-PAIR"
+
+def _cancel_new_algo_if_known_v125(symbol, order_obj):
+    aid=str((order_obj or {}).get("algoId") or (order_obj or {}).get("strategyId") or "")
+    if not aid: return {"state":"NO_ID"}
+    return _cancel_algo_order_verified_v124(symbol,aid)
+
+
+def place_tp_sl_v125(symbol,is_buy,tp_price,sl_price,quantity):
+    # Validate both triggers against Binance MARK_PRICE before ANY mutation.
+    tp_v,sl_v=_validate_protection_pair_before_mutation_v124(symbol,is_buy,tp_price,sl_price)
+    info=get_symbol_filters(symbol); tick=float(info.get("tickSize") or 0.0); step=float(info.get("stepSize") or 0.0); qty=round_qty(quantity,step,info.get("qtyPrecision",8))
+    close_side="SELL" if is_buy else "BUY"
+    tp_client=_new_client_id("TP"); sl_client=_new_client_id("SL")
+    tp=None
+    try:
+        tp=_binance_signed("POST","/fapi/v1/algoOrder",{
+            "algoType":"CONDITIONAL","symbol":symbol,"side":close_side,
+            "type":"TAKE_PROFIT_MARKET","triggerPrice":round_to_tick(float(tp_price),tick),
+            "quantity":qty,"reduceOnly":"true","workingType":"MARK_PRICE","clientAlgoId":tp_client,
+        })
+    except BinanceUnknownExecutionError:
+        tp=_find_open_algo_by_client_id(symbol,tp_client)
+        if tp is None: raise
+    try:
+        sl=place_sl_order_v124(symbol,is_buy,sl_price,quantity,client_algo_id=sl_client)
+    except BinanceImmediateTriggerError:
+        # Do not touch existing protection. Remove ONLY the TP created by this transaction.
+        if tp:
+            _cancel_new_algo_if_known_v125(symbol,tp)
+        raise
+    except Exception:
+        if tp:
+            _cancel_new_algo_if_known_v125(symbol,tp)
+        raise
+    rows=_get_open_algo_orders(symbol)
+    tp_ok=any(_protection_matches(r,symbol,close_side,"TAKE_PROFIT_MARKET",tp_price,qty,tick,step) for r in rows)
+    sl_ok=any(_protection_matches(r,symbol,close_side,"STOP_MARKET",sl_price,qty,tick,step) for r in rows)
+    if not (tp_ok and sl_ok):
+        # The newly-created pair is not verified. Never bulk cancel pre-existing protection.
+        for obj in (sl,tp):
+            try: _cancel_new_algo_if_known_v125(symbol,obj)
+            except Exception: pass
+        raise RuntimeError(f"protection verification gagal: TP={tp_ok}, SL={sl_ok}, algo={len(rows)}")
+    return tp,sl
+
+globals()["place_tp_sl"] = place_tp_sl_v125
+
+# Update the explicit global timeout handler to use the V124 safe close/cleanup order
+# and do not clear local state until the exchange is confirmed flat/clean.
+
+# Extend the final runtime audit with the new pair contract.
+_ORIG_V124_AUDIT=globals().get("_v124_final_runtime_audit")
+def _v125_final_runtime_audit():
+    result=_ORIG_V124_AUDIT() if callable(_ORIG_V124_AUDIT) else {}
+    if not callable(globals().get("place_tp_sl")): raise RuntimeError("V125 place_tp_sl missing")
+    return result
+_v125_final_runtime_audit()
+
 
 if __name__ == "__main__":
     start_runtime()

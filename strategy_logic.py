@@ -6485,5 +6485,28 @@ try:
 except Exception: pass
 
 
+
+# V124 — protection/execution evidence feed for FULL learning (does not trade).
+def record_protection_event(event, source="main_execution"):
+    rep=dict(event or {})
+    rep["source"]=source
+    rep["recorded_at"]=time.time()
+    with _AGENT_LOCK:
+        rows=_AGENT_STATE.get("protection_events") if isinstance(_AGENT_STATE.get("protection_events"),list) else []
+        rows.append(_brain_json_safe(rep))
+        _AGENT_STATE["protection_events"]=rows[-500:]
+    try:
+        _agent_json_save(AGENT_STATE_FILE,_AGENT_STATE)
+    except Exception as exc:
+        log.warning(f"[BRAIN][PROTECTION EVENT] persist warning: {exc}")
+    return {"ok":True,"event_count":len(_AGENT_STATE.get("protection_events",[]))}
+
+try:
+    __all__=list(dict.fromkeys(__all__+["record_protection_event"]))
+except Exception:
+    pass
+
+BRAIN_PROGRESS_CHECKPOINT_VERSION="brain_progress_checkpoint_v1"
+
 # V122 marker: complete brain progress checkpoint contract.
 BRAIN_PROGRESS_CHECKPOINT_VERSION = BRAIN_CHECKPOINT_SCHEMA
