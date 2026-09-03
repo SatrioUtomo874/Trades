@@ -102,6 +102,99 @@ def set_learning_model(model):
     _LEARNED_MODEL = model if isinstance(model, dict) and model.get("active") else None
 
 
+# =============================================================================
+# FULL BRAIN CHECKPOINT — save/open must preserve learning progress, not only config
+# =============================================================================
+BRAIN_CHECKPOINT_SCHEMA = "brain_progress_checkpoint_v1"
+
+def _brain_json_safe(value):
+    """Convert brain state recursively into deterministic JSON-safe primitives."""
+    if isinstance(value, dict):
+        return {str(k): _brain_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, deque)):
+        return [_brain_json_safe(v) for v in value]
+    if isinstance(value, set):
+        return sorted((_brain_json_safe(v) for v in value), key=lambda x: repr(x))
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+def export_checkpoint_state():
+    """Export the complete persistent learning progress of the brain.
+
+    This is intentionally larger than runtime configuration: observations,
+    candidates/outcomes, autopsies, hypotheses/experiments/beliefs, adaptive
+    policy, strategy versions, frequency state, research metadata, model state,
+    and idempotency ledgers are all included so /open resumes learning exactly
+    from the saved checkpoint.
+    """
+    with _AGENT_LOCK if "_AGENT_LOCK" in globals() else threading.RLock():
+        agent = _brain_json_safe(dict(globals().get("_AGENT_STATE", {}) or {}))
+        history_done = _brain_json_safe(list(globals().get("_AGENT_HISTORY_DONE", set()) or set()))
+    with globals().get("_V32_LOCK", threading.RLock()):
+        v32_state = _brain_json_safe(dict(globals().get("_V32_STATE", {}) or {}))
+        v32_beliefs = _brain_json_safe(dict(globals().get("_V32_BELIEFS", {}) or {}))
+        v32_buffer = _brain_json_safe(list(globals().get("_V32_BUFFER", []) or []))
+        seen_candidates = _brain_json_safe(list(globals().get("_V34_SEEN_CANDIDATE_KEYS", set()) or set()))
+        seen_outcomes = _brain_json_safe(list(globals().get("_V34_SEEN_OUTCOME_KEYS", set()) or set()))
+    return {
+        "schema": BRAIN_CHECKPOINT_SCHEMA,
+        "brain_version": FINAL_BRAIN_VERSION if "FINAL_BRAIN_VERSION" in globals() else V40_VERSION,
+        "interface_version": BRAIN_INTERFACE_VERSION,
+        "saved_at": time.time(),
+        "agent_state": agent,
+        "v32_state": v32_state,
+        "v32_beliefs": v32_beliefs,
+        "v32_buffer": v32_buffer,
+        "history_done": history_done,
+        "seen_candidate_keys": seen_candidates,
+        "seen_outcome_keys": seen_outcomes,
+        "learned_model": _brain_json_safe(dict(_LEARNED_MODEL) if isinstance(_LEARNED_MODEL, dict) else None),
+        "full_enabled": bool(globals().get("_FULL_ENABLED", False)),
+        "ticks": int(globals().get("_AGENT_TICKS", 0) or 0),
+    }
+
+def import_checkpoint_state(checkpoint):
+    """Atomically restore the full brain learning progress from a checkpoint."""
+    if not isinstance(checkpoint, dict) or checkpoint.get("schema") != BRAIN_CHECKPOINT_SCHEMA:
+        raise ValueError(f"unsupported brain checkpoint schema: {checkpoint.get('schema') if isinstance(checkpoint,dict) else None}")
+    agent = checkpoint.get("agent_state")
+    v32_state = checkpoint.get("v32_state")
+    if not isinstance(agent, dict) or not isinstance(v32_state, dict):
+        raise ValueError("brain checkpoint missing agent_state/v32_state")
+    restored_agent = json.loads(json.dumps(agent, ensure_ascii=False, allow_nan=False, default=str))
+    restored_v32 = json.loads(json.dumps(v32_state, ensure_ascii=False, allow_nan=False, default=str))
+    learned = checkpoint.get("learned_model")
+    if learned is not None and not isinstance(learned, dict):
+        raise ValueError("brain checkpoint learned_model invalid")
+    global _AGENT_STATE, _V32_STATE, _V32_BELIEFS, _V32_BUFFER, _AGENT_HISTORY_DONE, _LEARNED_MODEL, _AGENT_TICKS
+    with _AGENT_LOCK:
+        _AGENT_STATE = restored_agent
+        _AGENT_HISTORY_DONE = set(str(x) for x in (checkpoint.get("history_done") or []))
+        _AGENT_TICKS = int(checkpoint.get("ticks", 0) or 0)
+        _LEARNED_MODEL = dict(learned) if isinstance(learned, dict) else None
+    with _V32_LOCK:
+        _V32_STATE = restored_v32
+        _V32_BELIEFS = dict(checkpoint.get("v32_beliefs") or {}) if isinstance(checkpoint.get("v32_beliefs"), dict) else {}
+        _V32_BUFFER = deque(checkpoint.get("v32_buffer") or [], maxlen=int(globals().get("V32_BUFFER_MAX", 5000)))
+        globals().setdefault("_V34_SEEN_CANDIDATE_KEYS", set()).clear()
+        globals().setdefault("_V34_SEEN_OUTCOME_KEYS", set()).clear()
+        globals()["_V34_SEEN_CANDIDATE_KEYS"].update(str(x) for x in (checkpoint.get("seen_candidate_keys") or []))
+        globals()["_V34_SEEN_OUTCOME_KEYS"].update(str(x) for x in (checkpoint.get("seen_outcome_keys") or []))
+    try:
+        _agent_json_save(AGENT_STATE_FILE, _AGENT_STATE)
+        _agent_json_save(AGENT_POLICY_FILE, _AGENT_STATE.get("policy") or {})
+        if _LEARNED_MODEL:
+            _save_active_learning_model(_LEARNED_MODEL)
+    except Exception as exc:
+        log.warning(f"[BRAIN CHECKPOINT] persist after import warning: {exc}")
+    return {"ok": True, "schema": BRAIN_CHECKPOINT_SCHEMA, "restored_at": time.time(), "strategy_version": _AGENT_STATE.get("strategy_version", "S1")}
+
+get_brain_state = export_checkpoint_state
+apply_brain_state = import_checkpoint_state
+
 def _load_active_learning_model():
     global _LEARNED_MODEL
     try:
@@ -6390,3 +6483,7 @@ full_command=full_command_v110
 try:
     __all__=list(dict.fromkeys(__all__+["FINAL_BRAIN_VERSION","BRAIN_INTERFACE_VERSION","record_scan_summary","evaluate_stats_decision","full_command","adaptive_agent_start","adaptive_agent_stop"]))
 except Exception: pass
+
+
+# V122 marker: complete brain progress checkpoint contract.
+BRAIN_PROGRESS_CHECKPOINT_VERSION = BRAIN_CHECKPOINT_SCHEMA

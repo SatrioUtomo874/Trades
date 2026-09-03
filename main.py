@@ -3522,11 +3522,13 @@ last_scanned_at = None
 _last_scanned_lock = threading.Lock()
 
 def get_top_coins():
-    """Wrapper: panggil _get_top_coins_impl() lalu cache hasilnya ke
-    last_scanned_coins — dipakai command /koin supaya bisa nampilin daftar
-    koin yang di-scan TANPA perlu fetch ulang / ikut nambah scan_counter
-    (yang dipakai buat hitung durasi ban)."""
-    coins = _get_top_coins_impl()
+    """Public scanner universe API.
+
+    Signature intentionally has no required arguments. Any canonical
+    implementation behind this wrapper must therefore accept exclude_syms
+    as optional; this is also enforced by the runtime contract audit.
+    """
+    coins = _get_top_coins_impl(exclude_syms=None)
     global last_scanned_coins, last_scanned_at
     with _last_scanned_lock:
         last_scanned_coins = coins
@@ -6838,8 +6840,13 @@ def get_price_final(symbol, prefer_binance=False):
             pass
     return _final_bybit_price(symbol)
 
-def _get_top_coins_impl_final(exclude_syms):
-    return _final_bybit_top(exclude_syms)
+def _get_top_coins_impl_final(exclude_syms=None):
+    """Canonical Bybit universe implementation.
+
+    exclude_syms is optional by contract so the public get_top_coins() wrapper
+    can never fail with a missing positional argument.
+    """
+    return _final_bybit_top(set(exclude_syms or ()))
 
 # Existing get_top_coins wrapper resolves the global implementation symbol.
 _get_top_coins_impl = _get_top_coins_impl_final
@@ -8326,6 +8333,7 @@ globals()["get_binance_rest_status"] = get_binance_rest_status_v120
 # Ensure startup always initializes market WS before scanner can be reported healthy.
 _ORIG_START_RUNTIME_V120 = globals().get("start_runtime")
 def start_runtime_v120():
+    _v122_runtime_contract_audit()
     out = _ORIG_START_RUNTIME_V120() if callable(_ORIG_START_RUNTIME_V120) else None
     try:
         if not (bybit_market_ws._thread and bybit_market_ws._thread.is_alive()):
@@ -8380,6 +8388,43 @@ def fmt_runtime_status_v120():
 globals()["fmt_runtime_status"] = fmt_runtime_status_v120
 
 
+
+
+# ============================================================
+# V122 — RUNTIME CONTRACT AUDIT
+# ============================================================
+def _v122_runtime_contract_audit():
+    """Validate critical public contracts at runtime before scanner health is exposed."""
+    required_callables=("get_top_coins","get_scan_klines","full_analyze","manage_position")
+    for name in required_callables:
+        fn=globals().get(name)
+        if not callable(fn):
+            raise RuntimeError(f"runtime contract missing callable: {name}")
+    # Public get_top_coins must accept no required positional/keyword args.
+    sig=inspect.signature(globals()["get_top_coins"])
+    required=[p for p in sig.parameters.values() if p.default is inspect._empty and p.kind in (inspect.Parameter.POSITIONAL_ONLY,inspect.Parameter.POSITIONAL_OR_KEYWORD,inspect.Parameter.KEYWORD_ONLY)]
+    if required:
+        raise RuntimeError(f"get_top_coins unexpectedly requires arguments: {[p.name for p in required]}")
+    impl=globals().get("_get_top_coins_impl")
+    if not callable(impl):
+        raise RuntimeError("runtime contract missing _get_top_coins_impl")
+    impl_sig=inspect.signature(impl)
+    param=impl_sig.parameters.get("exclude_syms")
+    if param is None:
+        raise RuntimeError("_get_top_coins_impl missing exclude_syms parameter")
+    if param.default is inspect._empty:
+        raise RuntimeError("_get_top_coins_impl.exclude_syms must be optional")
+    # Brain signatures must retain the stable required arguments.
+    for name, req_names in (("full_analyze",("df_h1","df_m15")),("manage_position",("state","df_m15"))):
+        bs=inspect.signature(globals()[name])
+        missing=[x for x in req_names if x not in bs.parameters]
+        if missing: raise RuntimeError(f"{name} missing parameters: {missing}")
+    brain_mod=globals().get("_brain")
+    if brain_mod is not None:
+        for name in ("full_analyze","manage_position","export_checkpoint_state","import_checkpoint_state"):
+            if not callable(getattr(brain_mod,name,None)):
+                raise RuntimeError(f"brain contract missing: {name}")
+    return {"ok":True,"version":"V122_RUNTIME_CONTRACT_HARDENED"}
 
 # ============================================================
 # V121 — FINAL TRAFFIC CUT: NEVER PULL BINANCE FOR MARKET PRICE
@@ -8439,3 +8484,7 @@ if __name__ == "__main__":
         except Exception: pass
         if RUNTIME_STATE=="STOPPING": break
     if RUNTIME_STATE!="STOPPING": _graceful_shutdown("main loop exit")
+
+
+# V122 marker: runtime contract hardening applied.
+MAIN_RUNTIME_CONTRACT_VERSION = "V122_RUNTIME_CONTRACT_HARDENED"
