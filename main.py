@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-main.py V72 — OPERATIONAL BODY / FINAL EXECUTION INFRASTRUCTURE.
+main.py V72 — OPERATIONAL BODY / FINAL EXECUTION INFRASTRUCTURE — V15 RECONCILIATION CLEANUP
 
-V15 HARDENED: verified real-order execution, no blind mutating retries, exchange/local state reconciliation, protection-pair verification, and fail-closed emergency handling. Telegram handler, API client, monitoring,
+V15 HARDENED: verified real-order execution, no blind mutating retries, exchange/local state reconciliation, protection-pair verification, and flatten-and-clean reconciliation handling. Telegram handler, API client, monitoring,
 stats, export /analyze, hot-swap /ganti. Logika analisa ada di
 strategy_logic.py ("Otak"), diimpor di bawah.
 
@@ -961,14 +961,13 @@ def _new_request_id(prefix="REQ"):
 # V47 FINAL BODY CONTRACT — RUNTIME / HEALTH / EXECUTION AUTHORITY
 # =============================================================================
 STATE_TRANSITIONS = {
-    "BOOTING": {"READY", "DEGRADED", "RECOVERING", "EMERGENCY", "STOPPING"},
-    "READY": {"DEGRADED", "RECOVERING", "EMERGENCY", "STOPPING"},
-    "DEGRADED": {"READY", "RECOVERING", "EMERGENCY", "STOPPING"},
-    "RECOVERING": {"READY", "DEGRADED", "EMERGENCY", "STOPPING"},
-    "EMERGENCY": {"RECOVERING", "STOPPING"},
+    "BOOTING": {"READY", "DEGRADED", "RECOVERING", "STOPPING"},
+    "READY": {"DEGRADED", "RECOVERING", "STOPPING"},
+    "DEGRADED": {"READY", "RECOVERING", "STOPPING"},
+    "RECOVERING": {"READY", "DEGRADED", "STOPPING"},
     "STOPPING": set(),
 }
-HEALTH_STATES = {"HEALTHY", "DEGRADED", "RECOVERING", "BLOCKED", "EMERGENCY", "UNKNOWN"}
+HEALTH_STATES = {"HEALTHY", "DEGRADED", "RECOVERING", "BLOCKED", "UNKNOWN"}
 HEALTH_COMPONENTS = (
     "binance_rest", "binance_websocket", "brain", "scanner", "execution",
     "protection", "persistence", "telegram", "research", "resource"
@@ -992,8 +991,7 @@ def _health_snapshot():
     with _health_lock:
         comps={k:dict(v) for k,v in _component_health.items()}
     states={v["state"] for v in comps.values()}
-    if "EMERGENCY" in states: overall="EMERGENCY"
-    elif "BLOCKED" in states: overall="BLOCKED"
+    if "BLOCKED" in states: overall="BLOCKED"
     elif "RECOVERING" in states: overall="RECOVERING"
     elif "DEGRADED" in states or "UNKNOWN" in states: overall="DEGRADED"
     else: overall="HEALTHY"
@@ -1015,33 +1013,41 @@ def _set_runtime_state(state, reason=""):
         log.info(f"[STATE] {old} -> {state}" + (f" | {reason}" if reason else ""))
 
 
-POSITION_LIFECYCLE = {"DISCOVERED","ENTRY_PENDING","OPENING","PROTECTION_PENDING","OPEN","MANAGED","CLOSING","CLOSED","RECONCILING","EMERGENCY"}
+POSITION_LIFECYCLE = {"DISCOVERED","ENTRY_PENDING","OPENING","PROTECTION_PENDING","OPEN","MANAGED","CLOSING","CLOSED","RECONCILING"}
 POSITION_TRANSITIONS = {
-    "DISCOVERED":{"ENTRY_PENDING","EMERGENCY"},"ENTRY_PENDING":{"OPENING","CLOSED","RECONCILING","EMERGENCY"},
-    "OPENING":{"PROTECTION_PENDING","CLOSING","RECONCILING","EMERGENCY"},"PROTECTION_PENDING":{"OPEN","MANAGED","CLOSING","RECONCILING","EMERGENCY"},
-    "OPEN":{"MANAGED","CLOSING","RECONCILING","EMERGENCY"},"MANAGED":{"CLOSING","RECONCILING","EMERGENCY"},
-    "CLOSING":{"CLOSED","RECONCILING","EMERGENCY"},"CLOSED":{"RECONCILING"},
-    "RECONCILING":{"OPEN","MANAGED","CLOSED","EMERGENCY"},"EMERGENCY":{"RECONCILING","CLOSING","CLOSED"},
+    "DISCOVERED":{"ENTRY_PENDING","RECONCILING"},"ENTRY_PENDING":{"OPENING","CLOSED","RECONCILING"},
+    "OPENING":{"PROTECTION_PENDING","CLOSING","RECONCILING"},"PROTECTION_PENDING":{"OPEN","MANAGED","CLOSING","RECONCILING"},
+    "OPEN":{"MANAGED","CLOSING","RECONCILING"},"MANAGED":{"CLOSING","RECONCILING"},
+    "CLOSING":{"CLOSED","RECONCILING"},"CLOSED":{"RECONCILING"},
+    "RECONCILING":{"OPEN","MANAGED","CLOSED"},
 }
 
 def _position_lifecycle(pos):
-    if not isinstance(pos,dict): return "EMERGENCY"
+    if not isinstance(pos,dict): return "RECONCILING"
     lc=str(pos.get("lifecycle") or "").upper()
     if lc in POSITION_LIFECYCLE: return lc
     st=str(pos.get("status") or "").lower()
     if st=="pending": return "ENTRY_PENDING"
     if st=="active": return "MANAGED" if pos.get("current_sl") is not None else "OPEN"
-    if st=="EMERGENCY": return "EMERGENCY"
+    if st in {"RECONCILING", "ERROR", "BLOCKED"}: return "RECONCILING"
     return "DISCOVERED"
 
-def _force_position_emergency(sym, reason):
+def _mark_position_reconciling(sym, reason):
+    """Mark a position as needing reconciliation; never creates a terminal failure state."""
     with positions_lock:
         pos=positions.get(sym)
-        if pos is None: return
+        if pos is None:
+            return
         old=_position_lifecycle(pos)
-        pos["lifecycle"]="EMERGENCY"; pos["status"]="EMERGENCY"; pos["emergency_error"]=str(reason)[:400]
+        pos["lifecycle"]="RECONCILING"
+        pos["status"]="reconciling"
+        pos["reconciliation_error"]=str(reason)[:400]
         pid=pos.get("position_id")
-    _emit_execution_event("POSITION_LIFECYCLE",entity_id=pid or sym,correlation_id=pid or RUN_ID,payload={"symbol":sym,"from":old,"to":"EMERGENCY","reason":str(reason)[:300]},persist=True)
+    try:
+        _queue_pending_cleanup(sym, "position reconciliation required", reason)
+    except Exception:
+        pass
+    _emit_execution_event("POSITION_LIFECYCLE",entity_id=pid or sym,correlation_id=pid or RUN_ID,payload={"symbol":sym,"from":old,"to":"RECONCILING","reason":str(reason)[:300]},persist=True)
 
 def _transition_position_lifecycle(sym,new_state,reason="",expected_state=None):
     new_state=str(new_state).upper()
@@ -1052,7 +1058,7 @@ def _transition_position_lifecycle(sym,new_state,reason="",expected_state=None):
         if expected_state and old!=str(expected_state).upper(): raise RuntimeError(f"stale lifecycle mutation {sym}: expected {expected_state}, actual {old}")
         if old!=new_state and new_state not in POSITION_TRANSITIONS.get(old,set()): raise RuntimeError(f"invalid lifecycle transition {sym}: {old}->{new_state}")
         pos["lifecycle"]=new_state
-        pos["status"]="pending" if new_state in {"DISCOVERED","ENTRY_PENDING","OPENING","PROTECTION_PENDING"} else ("active" if new_state not in {"CLOSED","EMERGENCY"} else ("closed" if new_state=="CLOSED" else "EMERGENCY"))
+        pos["status"]="pending" if new_state in {"DISCOVERED","ENTRY_PENDING","OPENING","PROTECTION_PENDING"} else ("closed" if new_state=="CLOSED" else ("reconciling" if new_state=="RECONCILING" else "active"))
         pid=pos.get("position_id")
     _emit_execution_event("POSITION_LIFECYCLE",entity_id=pid or sym,correlation_id=pid or RUN_ID,payload={"symbol":sym,"from":old,"to":new_state,"reason":str(reason)[:300]},persist=True)
     return new_state
@@ -1234,6 +1240,48 @@ def _validate_decision_freshness(signal):
     return True,"fresh"
 
 
+def _reconcile_cleanup_symbol_startup(sym, local_pos=None, reason="startup reconciliation"):
+    """Flatten Binance symbol and only then clear local Main state after verified clean state."""
+    sym=str(sym or "").upper()
+    if not sym:
+        return False, "empty symbol"
+    try:
+        with _binance_critical_context():
+            # Read current exchange position first. Never remove local state before exchange is verified clean.
+            real=get_real_position(sym, prefer_ws=False, force=True)
+            qty=abs(float((real or {}).get("positionAmt", 0) or 0)) if real else 0.0
+            if qty>0:
+                is_buy=float(real.get("positionAmt", 0) or 0)>0
+                closed,exit_price=_verified_market_close(sym,is_buy,reason,chat_id=active_chat_id,max_retries=1)
+                if not closed:
+                    raise RuntimeError(f"{sym}: posisi Binance belum terkonfirmasi flat")
+            # After flat, remove every ordinary and algo order for the symbol.
+            _cancel_all_symbol_orders_verified(sym)
+            # Final independent verification.
+            final_pos=get_real_position(sym, prefer_ws=False, force=True)
+            final_qty=abs(float((final_pos or {}).get("positionAmt", 0) or 0)) if final_pos else 0.0
+            final_ord=get_open_orders_all(sym)
+            final_algo=_get_open_algo_orders(sym)
+            if final_qty>0 or final_ord or final_algo:
+                raise RuntimeError(f"{sym}: cleanup verify gagal position={final_qty} ordinary={len(final_ord)} algo={len(final_algo)}")
+        # Only after exchange is proven clean do we clear local state/queues.
+        with positions_lock:
+            positions.pop(sym,None)
+        try: _clear_pending_trail(sym)
+        except Exception: pass
+        try: _clear_pending_protection(sym)
+        except Exception: pass
+        try: _clear_pending_cleanup(sym)
+        except Exception: pass
+        return True, "verified-flat-and-clean"
+    except BinanceCooldownError as exc:
+        _mark_position_reconciling(sym, f"startup cleanup deferred: {exc}")
+        return False, f"cooldown: {exc}"
+    except Exception as exc:
+        _mark_position_reconciling(sym, f"startup cleanup failed: {exc}")
+        return False, str(exc)
+
+
 def _bootstrap_validate_and_reconcile():
     ok,detail=_validate_brain_contract(_brain)
     _set_component_health("brain","HEALTHY" if ok else "BLOCKED",detail)
@@ -1252,33 +1300,42 @@ def _bootstrap_validate_and_reconcile():
         try:
             with _binance_critical_context():
                 remote_positions=get_real_positions_all()
+                remote_orders=get_open_orders_all()
+                remote_algo=_get_open_algo_orders_all()
             with positions_lock:
                 local_real={sym for sym,pos in positions.items() if _position_is_real(pos)}
-            remote_by={str(p.get("symbol")):p for p in remote_positions if p.get("symbol")}
-            unresolved=[]
-            for sym in sorted(local_real):
+            remote_by={str(p.get("symbol")).upper():p for p in remote_positions if p.get("symbol")}
+            remote_symbols=set(remote_by)
+            remote_symbols.update(str(o.get("symbol")).upper() for o in remote_orders if o.get("symbol"))
+            remote_symbols.update(str(o.get("symbol")).upper() for o in remote_algo if o.get("symbol"))
+            # Any mismatch OR protection uncertainty is flattened/cleaned sym-by-sym.
+            suspect=set(local_real)^set(remote_symbols)
+            for sym in sorted(local_real & set(remote_by)):
                 pos=positions.get(sym)
-                remote=remote_by.get(sym)
-                if remote is None:
-                    unresolved.append(sym); continue
                 try:
                     with _binance_critical_context():
-                        if pos.get("signal") and pos.get("current_sl") is not None:
-                            _verify_protection_pair(sym,pos["signal"].get("decision")=="BUY",pos["signal"].get("tp"),pos.get("current_sl"),abs(float(remote.get("positionAmt",0) or 0)))
-                    with positions_lock:
-                        if sym in positions:
-                            positions[sym]["quantity"]=abs(float(remote.get("positionAmt",0) or 0))
-                except Exception as exc:
-                    unresolved.append(sym)
-                    _force_position_emergency(sym, str(exc)[:400])
-            unmanaged=sorted(set(remote_by)-local_real)
-            if unresolved or unmanaged:
-                _set_component_health("protection","EMERGENCY",f"unresolved={unresolved[:6]} unmanaged={unmanaged[:6]}")
+                        if pos and pos.get("signal") and pos.get("current_sl") is not None:
+                            _verify_protection_pair(sym,pos["signal"].get("decision")=="BUY",pos["signal"].get("tp"),pos.get("current_sl"),abs(float(remote_by[sym].get("positionAmt",0) or 0)))
+                except Exception:
+                    suspect.add(sym)
+            failures=[]
+            cleaned=[]
+            for sym in sorted(suspect):
+                pos=positions.get(sym)
+                ok_clean,detail_clean=_reconcile_cleanup_symbol_startup(sym,pos,"startup reconciliation cleanup")
+                if ok_clean:
+                    cleaned.append(sym)
+                else:
+                    failures.append(f"{sym}: {detail_clean}")
+            if failures:
+                # Execution is blocked until cleanup succeeds, but scanner remains allowed to analyze Bybit.
+                _set_component_health("protection","BLOCKED","cleanup pending: " + "; ".join(failures[:6]))
                 global STOP_NEW_ENTRIES
                 STOP_NEW_ENTRIES=True
-                _set_runtime_state("EMERGENCY", "startup real-state safety unresolved")
+                _set_runtime_state("RECOVERING","startup reconciliation cleanup pending")
             else:
-                _set_component_health("protection","HEALTHY","real protection verified")
+                _set_component_health("protection","HEALTHY",f"reconciliation clean; flattened={len(cleaned)}")
+                STOP_NEW_ENTRIES=False
         except Exception as exc:
             _set_component_health("binance_rest","RECOVERING",str(exc))
             STOP_NEW_ENTRIES=True
@@ -1430,7 +1487,7 @@ def _position_execution_mode(pos):
     real_markers = ("order_id", "tp_order_id", "sl_order_id", "entry_client_order_id", "margin_used")
     if any(pos.get(k) is not None for k in real_markers):
         return "REAL"
-    if str(pos.get("status") or "").upper() == "EMERGENCY":
+    if str(pos.get("status") or "").lower() == "reconciling":
         return "REAL"
     return "SIMULATION"
 
@@ -2005,7 +2062,7 @@ _pending_trails = {}   # {symbol: {sl, tp, quantity, updated_at, reason, side}}
 _pending_trails_lock = threading.Lock()
 _pending_protections = {}  # filled position awaiting TP/SL after Binance recovery
 _pending_protections_lock = threading.Lock()
-# V6: explicit emergency/cleanup state. These states are retained in /trade until
+# V6: explicit reconciliation/cleanup state. These states are retained in /trade until
 # Binance confirms the exchange-side truth; API errors must never silently remove them.
 _pending_cleanup = {}          # {symbol: {reason, created_at, last_error}}
 _pending_cleanup_lock = threading.Lock()
@@ -2299,7 +2356,7 @@ def _binance_request_pause():
 
 @contextmanager
 def _binance_critical_context():
-    """Promote nested Binance calls to the bounded emergency/reconciliation lane."""
+    """Promote nested Binance calls to the bounded critical/reconciliation lane."""
     previous = bool(getattr(_binance_priority_local, "critical", False))
     _binance_priority_local.critical = True
     try:
@@ -2991,7 +3048,7 @@ def _cancel_all_symbol_orders_verified(sym):
 
 
 def _verified_timeout_symbol(sym, chat_id, reason="manual timeout"):
-    """Emergency flatten+cleanup using the bounded critical Binance lane."""
+    """Verified flatten+cleanup using the bounded critical Binance lane."""
     try:
         with _binance_critical_context():
             _cancel_all_symbol_orders_verified(sym)
@@ -3017,18 +3074,18 @@ def _verified_timeout_symbol(sym, chat_id, reason="manual timeout"):
         tg_send(chat_id, f"✅ <b>TIMEOUT CLOSED</b> — {sym}\nPosisi Binance: <b>0</b>\nOrder biasa: <b>0</b>\nAlgo TP/SL/Trail: <b>0</b>\nSemua exposure {sym} sudah dibersihkan.")
         return True
     except BinanceCooldownError as e:
-        _force_position_emergency(sym, f"{reason}: {e}")
+        _mark_position_reconciling(sym, f"{reason}: {e}")
         _queue_pending_cleanup(sym, "timeout deferred by Binance governor/cooldown", e)
         tg_send(chat_id, f"🚨 <b>TIMEOUT TERTUNDA</b> — {sym}\n<code>{html.escape(str(e)[:350])}</code>\nTidak ada retry agresif; posisi tetap dicatat untuk rekonsiliasi.")
         return False
     except Exception as e:
-        _force_position_emergency(sym, f"{reason}: {e}")
+        _mark_position_reconciling(sym, f"{reason}: {e}")
         _queue_pending_cleanup(sym, "timeout cleanup", e)
         tg_send(chat_id, f"🚨 <b>TIMEOUT BELUM SELESAI</b> — {sym}\n<code>{html.escape(str(e)[:350])}</code>\nPosisi tetap dipertahankan di /trade. Gunakan <code>/ok {sym}</code> untuk rekonsiliasi.")
         return False
 
 def _verified_timeout_all(chat_id):
-    """Global emergency cleanup using the bounded critical Binance lane."""
+    """Global verified cleanup using the bounded critical Binance lane."""
     try:
         with _binance_critical_context():
             positions_remote = get_real_positions_all()
@@ -3753,8 +3810,8 @@ def run_scan_once(chat_id):
     # Scanner/analysis is intentionally decoupled from Binance entry pause.
     # STOP_NEW_ENTRIES and Binance cooldowns block NEW ORDER MUTATION only;
     # Bybit market analysis must continue so FULL can keep learning.
-    # Analysis is fail-closed only for shutdown/emergency/brain-load failure.
-    if SHUTDOWN_EVENT.is_set() or RUNTIME_STATE in {"STOPPING", "EMERGENCY"} or _STRATEGY_LOAD_ERROR:
+    # Analysis is fail-closed only for shutdown/brain-load failure.
+    if SHUTDOWN_EVENT.is_set() or RUNTIME_STATE in {"STOPPING"} or _STRATEGY_LOAD_ERROR:
         log.debug("[SCAN] analysis gate blocked by runtime safety/brain state")
         return []
     global early_reject_remaining
@@ -5004,7 +5061,7 @@ def _open_pending_real(sym,signal,chat_id):
     except BinanceUnknownExecutionError as e:
         # The entry POST may have reached Binance even though its response was lost.
         # Preserve the client order id so reconciliation can resolve the ambiguity.
-        _force_position_emergency(sym, str(e)[:300])
+        _mark_position_reconciling(sym, str(e)[:300])
         with positions_lock:
             if sym in positions:
                 positions[sym]["entry_client_order_id"]=getattr(e, "client_order_id", None)
@@ -5043,7 +5100,7 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
                         return
                     positions.pop(sym,None); return
                 except Exception as e:
-                    _force_position_emergency(sym, str(e)[:300])
+                    _mark_position_reconciling(sym, str(e)[:300])
                     tg_send(chat_id, f"🚨 <b>ENTRY CANCEL BELUM TERKONFIRMASI</b> — {sym}\n<code>{str(e)[:300]}</code>\nPosisi tetap dipertahankan sampai <code>/ok {sym}</code>.")
                     return
         try:
@@ -5070,12 +5127,12 @@ def _wait_entry_real(sym,signal,chat_id,order_id):
         with positions_lock: positions.pop(sym,None)
         _ban_coin(sym,"pending expired"); _record_pending_cancel("expired")
     except Exception as e:
-        _force_position_emergency(sym, str(e)[:300])
+        _mark_position_reconciling(sym, str(e)[:300])
         tg_send(chat_id, f"🚨 <b>PENDING ENTRY BELUM TERKONFIRMASI</b> — {sym}\n<code>{str(e)[:300]}</code>\nState tetap dipertahankan untuk <code>/ok {sym}</code>.")
 
 
-def _emergency_close(sym, is_buy, qty, chat_id, reason):
-    """Emergency flatten. Exchange confirmation is required before local close."""
+def _safe_flatten_and_cleanup(sym, is_buy, qty, chat_id, reason):
+    """Flatten position and cleanup protection. Exchange confirmation is required before local close."""
     try:
         with _binance_critical_context():
             closed, exit_price = _verified_market_close(sym, is_buy, reason, chat_id=chat_id, max_retries=1)
@@ -5094,7 +5151,7 @@ def _emergency_close(sym, is_buy, qty, chat_id, reason):
         tg_send(chat_id, f"✅ <b>AUTO-OUT</b> — {sym}\nPosisi Binance terkonfirmasi tertutup dan protection dibersihkan.")
         return True
     except Exception as e:
-        _force_position_emergency(sym, f"{reason}: {e}")
+        _mark_position_reconciling(sym, f"{reason}: {e}")
         _queue_pending_cleanup(sym, "auto-out cleanup", e)
         tg_send(chat_id, f"🚨 <b>GAGAL AUTO-OUT</b> — {sym}: {e}\n⚠️ Posisi TETAP dicatat di /trade. Jalankan <code>/ok {sym}</code> untuk rekonsiliasi Binance.")
         return False
@@ -5106,10 +5163,10 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
     if not qty:
         with positions_lock: qty=(positions.get(sym) or {}).get("quantity",0)
     if sl is None or tp is None:
-        _emergency_close(sym,buy,qty,chat_id,"strategy tidak mengirim SL/TP"); return
+        _safe_flatten_and_cleanup(sym,buy,qty,chat_id,"strategy tidak mengirim SL/TP"); return
     valid=(sl<actual_entry<tp) if buy else (tp<actual_entry<sl)
     if not valid:
-        _emergency_close(sym,buy,qty,chat_id,"level strategy invalid setelah fill"); return
+        _safe_flatten_and_cleanup(sym,buy,qty,chat_id,"level strategy invalid setelah fill"); return
     tick=get_symbol_filters(sym)["tickSize"]; sl=round_to_tick(sl,tick); tp=round_to_tick(tp,tick)
     try:
         # Protection must be verified on Binance before local state is promoted to ACTIVE.
@@ -5125,9 +5182,9 @@ def _open_position_real(sym,signal,actual_entry,chat_id,order_info):
     except BinanceUnknownExecutionError as e:
         # place_tp_sl already reconciles algo client ids; if it still cannot prove the
         # pair exists, fail closed and flatten the real position.
-        _emergency_close(sym,buy,qty,chat_id,f"status protection UNKNOWN setelah submit: {e}"); return
+        _safe_flatten_and_cleanup(sym,buy,qty,chat_id,f"status protection UNKNOWN setelah submit: {e}"); return
     except Exception as e:
-        _emergency_close(sym,buy,qty,chat_id,f"gagal pasang protection ({e})"); return
+        _safe_flatten_and_cleanup(sym,buy,qty,chat_id,f"gagal pasang protection ({e})"); return
 
     with positions_lock:
         if sym not in positions:return
@@ -5226,14 +5283,14 @@ def monitor_position_real(sym,pos):
                             buy=pos["signal"]["decision"]=="BUY"
                             closed, exit_price = _verified_market_close(sym, buy, "strategy close", chat_id=pos.get("chat_id") or active_chat_id, max_retries=1)
                             if not closed:
-                                _force_position_emergency(sym, "strategy close cleanup gagal")
+                                _mark_position_reconciling(sym, "strategy close cleanup gagal")
                                 return
                             try:
                                 with _binance_critical_context():
                                     _cleanup_algo_orders_verified(sym)
                             except Exception as ce:
                                 _queue_pending_cleanup(sym, "strategy close cleanup", ce)
-                                _force_position_emergency(sym, "strategy close cleanup gagal")
+                                _mark_position_reconciling(sym, "strategy close cleanup gagal")
                                 return
                             result = "trail" if _classify_close_result("trail", pos.get("entry"), exit_price or price, pos["signal"].get("decision")) == "trail" else "sl"
                             close_position(sym,result,close_price=exit_price or price); return
@@ -5264,7 +5321,7 @@ def monitor_position_real(sym,pos):
                                     if live_qty <= 0:
                                         continue
                                     # Cancel existing protection, then create+verify new pair. If creation
-                                    # fails, restore the old pair before declaring an emergency.
+                                    # fails, restore the old pair before treating reconciliation as unresolved.
                                     with _binance_critical_context():
                                         _cancel_all_algo_orders_verified(sym)
                                     try:
@@ -5280,7 +5337,7 @@ def monitor_position_real(sym,pos):
                                             _queue_pending_cleanup(sym, "trail protection restore failed", restore_err)
                                             log.critical(f"[trail] {sym}: restore old protection gagal: {restore_err}")
                                         if restore_failed:
-                                            _force_position_emergency(sym, str(protect_err)[:300])
+                                            _mark_position_reconciling(sym, str(protect_err)[:300])
                                             raise RuntimeError(f"trail update gagal dan protection lama tidak bisa dipulihkan: {protect_err}")
                                         raise
                                     _validate_protection_mutation(sym, protection_request.expected_version, protection_request.request_id)
@@ -5366,7 +5423,7 @@ def _resume_binance_and_flush_pending(chat_id=None):
         with positions_lock:
             items=[(sym,dict(pos)) for sym,pos in positions.items() if _position_is_real(pos)]
         for sym,pos in items:
-            if pos.get('status') not in ('active','EMERGENCY'):
+            if pos.get('status') not in ('active','reconciling'):
                 continue
             try:
                 real=get_real_position(sym)
@@ -5719,7 +5776,7 @@ def get_start_msg():
         "━━━━━━━━ <b>TRADING</b> ━━━━━━━━\n"
         "/auto                — Mulai scanning & trading\n"
         "/stop                — Hentikan scanning; posisi aktif tetap dipantau\n"
-        "/trade               — Lihat semua posisi aktif/pending/emergency\n"
+        "/trade               — Lihat semua posisi aktif/pending/reconciling\n"
         "/ok SYMBOL           — Rekonsiliasi posisi Binance + TP/SL\n"
         "/timeout SYMBOL      — Tutup paksa posisi tertentu\n"
         "/timeout all          — Timeout semua posisi + semua order\n"
@@ -6287,9 +6344,9 @@ def bot_loop():
                 elif text in ("/trade","trade"):
                     with positions_lock:
                         pos_list = list(positions.items())
-                    # Safety-first display order: EMERGENCY, ACTIVE, then PENDING;
+                    # Safety-first display order: RECONCILING, ACTIVE, then PENDING;
                     # within each status, highest confidence first.
-                    status_rank = {"EMERGENCY": 0, "active": 1, "pending": 2}
+                    status_rank = {"reconciling": 0, "active": 1, "pending": 2}
                     pos_list.sort(key=lambda item: (
                         status_rank.get(str(item[1].get("status", "active")), 3),
                         -float((item[1].get("signal") or {}).get("confidence", 0) or 0),
@@ -6321,13 +6378,13 @@ def bot_loop():
                                     p["entry_time"], tz=WIB).strftime("%H:%M") if p.get("entry_time") else "?"
                                 cur_sl = p.get("current_sl", sig["sl"])
                                 trail_note = " 🔒trailing" if cur_sl != sig["sl"] else ""
-                                if status == "EMERGENCY":
+                                if str(status).lower() == "reconciling":
                                     lines.append(
-                                        f"\n🚨 <b>{s}</b> — EMERGENCY\n"
+                                        f"\n🔄 <b>{s}</b> — RECONCILING\n"
                                         f"Entry: <code>{p['entry']:.6g}</code> | Harga: <code>{pr:.6g}</code>\n"
                                         f"TP: <code>{sig['tp']:.6g}</code> | SL: <code>{cur_sl:.6g}</code>{trail_note} | Confidence: <b>{float(sig.get('confidence', 0) or 0):.0f}%</b>\n"
                                         f"PnL: <b>{pnl:+.2f}%</b>\n"
-                                        f"⚠️ {p.get('emergency_error','Posisi Binance belum terverifikasi')[:180]}\n"
+                                        f"⚠️ {p.get('reconciliation_error','Posisi sedang dibersihkan/reconcile')[:180]}\n"
                                         f"➡️ Jalankan <code>/ok {s}</code>"
                                     )
                                 else:
@@ -6369,7 +6426,7 @@ def bot_loop():
                                     positions[sym]["quantity"] = live_qty
                                     positions[sym]["lifecycle"] = "RECONCILING"
                                     positions[sym]["exchange_synced_at"] = time.time()
-                                    positions[sym]["emergency_reason"] = None
+                                    positions[sym]["reconciliation_error"] = None
                             # If protection is missing/unknown, queue/restore it.
                             sig = pos["signal"]; buy = sig["decision"] == "BUY"
                             tp = sig.get("tp"); sl = pos.get("current_sl", sig.get("sl"))
@@ -6389,7 +6446,7 @@ def bot_loop():
                             _clear_pending_cleanup(sym)
                             tg_send(cid, f"✅ <b>{sym} RECONCILED</b>\nPosition Binance masih terbuka: <code>{live_qty:.8g}</code>\nTP/SL terpasang ulang dan state kembali ACTIVE.")
                         except Exception as e:
-                            _force_position_emergency(sym, str(e)[:300])
+                            _mark_position_reconciling(sym, str(e)[:300])
                             _queue_pending_cleanup(sym, "/ok gagal — retry manual", e)
                             tg_send(cid, f"🚨 <b>{sym} RECONCILE GAGAL</b>\n<code>{str(e)[:350]}</code>\nPosisi tetap dipertahankan di /trade. Coba <code>/ok {sym}</code> lagi setelah Binance/API normal.")
                     threading.Thread(target=_run_ok, args=(chat_id, target), daemon=True).start()
@@ -7317,7 +7374,7 @@ def tg_send_final(chat_id, text, *args, **kwargs):
     # Do not suppress critical user-directed responses; suppress only repeated system errors/trailing failures.
     txt=str(text or "")
     upper=txt.upper()
-    critical=any(k in upper for k in ("EMERGENCY","POSITION UNPROTECTED","EXECUTION UNKNOWN"))
+    critical=any(k in upper for k in ("POSITION UNPROTECTED","EXECUTION UNKNOWN"))
     system_error=any(k in upper for k in ("UPDATE PROTECTION GAGAL","ALGO CLEANUP","TRAILING UPDATE","[ERROR]","RECOVERY BELUM","PROTECTION GAGAL"))
     if not system_error or critical:
         return _ORIG_TG_SEND(chat_id,text,*args,**kwargs)
@@ -7551,7 +7608,7 @@ def _v12_bybit_universe_direct(exclude_syms=None, limit=None):
     want=int(limit or TOP_N_COINS)
     try:
         d=_bybit_get("/v5/market/tickers", {"category":"linear"})
-        if not isinstance(d,dict) or int(d.get("retCode",-1) or -1)!=0:
+        if not isinstance(d,dict) or int(d.get("retCode",-1) if d.get("retCode") is not None else -1)!=0:
             raise RuntimeError(f"Bybit tickers retCode={d.get('retCode')} retMsg={d.get('retMsg')}")
         rows=d.get("result",{}).get("list") or []
         ranked=[]
@@ -7602,7 +7659,7 @@ def _v12_scanner_preflight(chat_id=None):
     direct,meta=_v12_bybit_universe_direct(_v128_exchange_exclusions(), TOP_N_COINS)
     state.update({"direct_selected":len(direct),"direct_error":meta.get("error"),"direct_meta":meta})
     if state["shutdown"]: state["action"]="BLOCKED_SHUTDOWN"
-    elif state["runtime_state"] in {"STOPPING","EMERGENCY"}: state["action"]="BLOCKED_RUNTIME_STATE"
+    elif state["runtime_state"] in {"STOPPING"}: state["action"]="BLOCKED_RUNTIME_STATE"
     elif state["strategy_load_error"]: state["action"]="BLOCKED_BRAIN_LOAD"
     elif not state["brain_loaded"] or not state["brain_contract_ok"]: state["action"]="BLOCKED_BRAIN_CONTRACT"
     elif direct: state["action"]="READY"
@@ -7740,7 +7797,7 @@ def _wait_entry_real_final(sym,signal,chat_id,order_id):
                         _open_position_real(sym,signal,float(st.get("avgPrice") or signal["entry"]),chat_id,st); return
                     positions.pop(sym,None); return
                 except Exception as exc:
-                    _force_position_emergency(sym,str(exc)[:300]); return
+                    _mark_position_reconciling(sym,str(exc)[:300]); return
         event=None
         with _binance_ws_state_lock:
             event=dict(_binance_ws_orders.get(str(order_id)) or _binance_ws_orders.get(str(signal.get("order_id") or "")) or {})
@@ -7903,7 +7960,7 @@ def _resume_binance_and_flush_pending_final(chat_id=None):
         else:
             global BINANCE_API_KEY,BINANCE_API_SECRET,BINANCE_KEYS_PRESENT
             BINANCE_API_KEY,BINANCE_API_SECRET,BINANCE_KEYS_PRESENT=key,secret,True
-            with positions_lock: items=[(sym,dict(pos)) for sym,pos in positions.items() if _position_is_real(pos) and str(pos.get("status")) in ("active","EMERGENCY")]
+            with positions_lock: items=[(sym,dict(pos)) for sym,pos in positions.items() if _position_is_real(pos) and str(pos.get("status")) in ("active","reconciling")]
             for sym,pos in items:
                 try:
                     real=_binance_ws_position(sym) if _binance_ws_fresh() else None
@@ -8033,7 +8090,7 @@ _trade_analysis_rows=_trade_analysis_rows_final
 # =============================================================================
 # V110 FINAL GUARDRAILS
 # Bybit WS primary realtime market data; Binance WS primary account/order events;
-# Binance REST restricted to execution/reconciliation/emergency lanes.
+# Binance REST restricted to execution/reconciliation critical lanes.
 # =============================================================================
 V110_MAIN_VERSION = "MAIN-V111-BYBIT-WS-BINANCE-EXECUTION-GUARDED"
 try:
@@ -8087,7 +8144,7 @@ def _v110_ensure_scanner_running(chat_id=None, announce=False):
 # ---- rate-limit gate: normal Binance REST is never allowed to consume critical reserve ----
 def _v110_binance_rest_allowed(kind="normal", symbol=None):
     now=time.time()
-    if _binance_cooldown_remaining()>0 and kind not in {"critical","emergency"}: return False
+    if _binance_cooldown_remaining()>0 and kind != "critical": return False
     try:
         if kind=="normal":
             with _V110_RECONCILE_GUARD:
@@ -8254,7 +8311,7 @@ def _wait_entry_real_v110(sym,signal,chat_id,order_id):
                     if chat_id: tg_send(chat_id,f"⏱️ <b>PENDING TIMEOUT</b> — {sym}\nHanya pending entry yang dibatalkan setelah {PENDING_ENTRY_TIMEOUT_SEC_FINAL/60:.0f} menit.")
                     return
                 except Exception as exc:
-                    _force_position_emergency(sym,str(exc)[:300]); return
+                    _mark_position_reconciling(sym,str(exc)[:300]); return
             if (not _binance_ws_fresh() or time.time()>=next_rest) and not _binance_is_scan_paused() and _v110_binance_rest_allowed("normal",sym):
                 try:
                     with _binance_critical_context(): st=get_order_status(sym,order_id)
@@ -8318,7 +8375,7 @@ def fmt_runtime_status_v110():
 # ---- final Telegram suppression: aggregate repeated identical system failures ----
 def tg_send_v110(chat_id, text, *args, **kwargs):
     txt=str(text or ""); upper=txt.upper()
-    critical=any(k in upper for k in ("EMERGENCY","POSITION UNPROTECTED","EXECUTION UNKNOWN","FORCED EXIT"))
+    critical=any(k in upper for k in ("POSITION UNPROTECTED","EXECUTION UNKNOWN","FORCED EXIT"))
     system=any(k in upper for k in ("ALGO CLEANUP","UPDATE PROTECTION GAGAL","TRAILING UPDATE","RECOVERY BELUM","BINANCE RATE LIMIT","BINANCE PAUSE","PROTECTION DITUNDA","PENDING ENTRY BELUM"))
     if critical or not system: return _ORIG_TG_SEND(chat_id,text,*args,**kwargs)
     import hashlib
@@ -9371,7 +9428,7 @@ def _verified_timeout_symbol_v124(sym,chat_id,reason="manual timeout"):
         tg_send(chat_id,f"⏸️ <b>TIMEOUT TERTUNDA — {sym}</b>\nBinance masih cooldown; tidak ada retry agresif.")
         return False
     except Exception as exc:
-        _force_position_emergency(sym,str(exc)[:300]); _queue_pending_cleanup(sym,"timeout failed",exc)
+        _mark_position_reconciling(sym,str(exc)[:300]); _queue_pending_cleanup(sym,"timeout failed",exc)
         tg_send(chat_id,f"🚨 <b>TIMEOUT BELUM SELESAI — {sym}</b>\n<code>{html.escape(str(exc)[:300])}</code>")
         return False
 
@@ -9671,7 +9728,7 @@ globals()["_binance_execution_blocked"] = _binance_execution_blocked_v127
 # ---------- Scanner must never treat Binance execution pause/recovery as a market-data pause ----------
 def _scan_execution_gate_diagnostic_v127():
     return {
-        "scanner_can_analyze": not SHUTDOWN_EVENT.is_set() and RUNTIME_STATE not in {"STOPPING", "EMERGENCY"} and not bool(_STRATEGY_LOAD_ERROR),
+        "scanner_can_analyze": not SHUTDOWN_EVENT.is_set() and RUNTIME_STATE not in {"STOPPING"} and not bool(_STRATEGY_LOAD_ERROR),
         "execution_blocked": _binance_execution_blocked_v127(),
         "binance_cooldown_sec": round(_binance_cooldown_remaining(), 2),
         "binance_recovering": bool(_binance_recovering),
@@ -10697,10 +10754,10 @@ def run_offline_audit():
     return report
 
 # ═══════════════════════════════════════════════════════════════════════
-# V13 — FINAL SCAN ENTRYPOINT BINDING / PREVENT LATE OVERLAY CLOBBERING
+# V15 — FINAL SCAN ENTRYPOINT BINDING / PREVENT LATE OVERLAY CLOBBERING
 # ═══════════════════════════════════════════════════════════════════════
 # This block MUST remain the last runtime binding in the source file.
-# V12's hardened scanner was correct, but a later _FINAL_OVERRIDES update
+# The hardened scanner is correct, but legacy _FINAL_OVERRIDES can otherwise
 # replaced the public run_scan_once symbol and bypassed the V12 preflight.
 
 _V13_ORIGINAL_HARDENED_SCAN = globals().get("run_scan_once_v12_hardened")
