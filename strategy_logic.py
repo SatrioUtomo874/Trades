@@ -687,7 +687,7 @@ def score_direction(df_h1, df_m15, df_d1=None):
             "htf_bias":state.htf_bias,"macro_bias":state.macro_bias,"m15_struct":state.m15_bias,
             "trigger_count":int(round(max(bull,bear)/10.0)),"direction_edge":abs(bull-bear),
             "fib_r":state.range_position,"m15_relative_volume":state.relative_volume,
-            "regime":state.regime,"trend_strength":state.trend_strength,"state":asdict(state)}
+            "regime":state.regime,"trend_strength":state.trend_strength,"state":state.to_dict()}
 
 
 # -----------------------------------------------------------------------------
@@ -865,7 +865,7 @@ def _historical_context(candidate: Candidate, state: MarketState, trade_history:
         ts=_latest_ts(row); age=(now-ts)/3600.0
         if age<0: age=0
         if age>window: continue
-        drift=_regime_distance(asdict(state), row)
+        drift=_regime_distance(state.to_dict(), row)
         sim=_feature_similarity(cur,row)
         if sim<0.35: continue
         w=_recency_weight(age,window,drift)*(0.55+0.45*sim)
@@ -1088,7 +1088,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             ollama=_ollama_critic(packet)
             c.confidence=_clip(c.confidence+_safe_float(ollama.get("delta"),0.0),0,100)
             if str(ollama.get("verdict"))=="INVALIDATE":
-                return _no_signal_packet(symbol,state,score,"LLM_INVALIDATED",market_data_source,extra={"ollama":ollama,"candidate":asdict(c)})
+                return _no_signal_packet(symbol,state,score,"LLM_INVALIDATED",market_data_source,extra={"ollama":ollama,"candidate":c.to_dict()})
             if str(ollama.get("verdict"))=="WAIT":
                 c.trigger_confirmed=False
         threshold=get_active_confidence_threshold()

@@ -1894,9 +1894,10 @@ def _commit_to_github(content, path="strategy_logic.py", commit_msg="Update stra
             raise ValueError(last_error)
         # PUT response harus memuat payload base64 yang sama.
         try:
-            obj = r.json(); cf = obj.get("content") or {}
+            obj = r.json(); cf = obj.get("content")
             rc = cf.get("content") if isinstance(cf, dict) else None
-            if cf.get("encoding") == "base64" and rc and base64.b64decode(rc.replace("\n", "")) == expected:
+            enc = cf.get("encoding") if isinstance(cf, dict) else None
+            if enc == "base64" and rc and base64.b64decode(rc.replace("\n", "")) == expected:
                 return True
         except Exception as exc:
             last_error = f"PUT response verification failed: {exc}"
@@ -1904,9 +1905,10 @@ def _commit_to_github(content, path="strategy_logic.py", commit_msg="Update stra
         try:
             r = requests.get(url, headers=headers, timeout=15)
             if r.status_code == 200:
-                obj = r.json(); cf = obj.get("content") or {}
+                obj = r.json(); cf = obj.get("content")
                 rc = cf.get("content") if isinstance(cf, dict) else None
-                if cf.get("encoding") == "base64" and rc:
+                enc = cf.get("encoding") if isinstance(cf, dict) else None
+                if enc == "base64" and rc:
                     if base64.b64decode(rc.replace("\n", "")) == expected:
                         return True
                     last_error = f"GitHub remote payload mismatch untuk {path}"
