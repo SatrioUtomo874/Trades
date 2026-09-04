@@ -80,7 +80,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 BRAIN_CONFIDENCE_DISPLAY_FALLBACK = "brain-owned"
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "MAIN-BODY-V91-BYBIT-SCANNER-BINANCE-EXECUTION-SEP"
+MAIN_ENGINE_VERSION = "MAIN-BODY-V130-BRAIN-EXECUTION-CONTRACT-TRAILING"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -548,7 +548,7 @@ BINANCE_KEYS_PRESENT = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
 REAL_TRADE_ENABLED   = False
 
 # Execution infrastructure invariants
-EXECUTION_ENGINE_VERSION = "MAIN-BODY-V91-BYBIT-SCANNER-BINANCE-EXECUTION-SEP"
+EXECUTION_ENGINE_VERSION = "MAIN-BODY-V130-BRAIN-EXECUTION-CONTRACT-TRAILING"
 RUNTIME_SCHEMA_VERSION = "runtime_v1"
 EVENT_SCHEMA_VERSION = "event_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
@@ -5058,6 +5058,10 @@ def _open_position(sym,signal,actual_entry,chat_id,mode_label="strategy"):
 # ============================================================
 
 def _open_pending_real(sym,signal,chat_id):
+    signal = _normalize_execution_signal_v130(signal)
+    if signal is None:
+        log.error(f"[entry/V130] {sym}: signal contract invalid")
+        return False
     if STOP_NEW_ENTRIES or CIRCUIT_BREAKER_OPEN: return False
     if _binance_is_scan_paused():
         log.warning(f"[entry] {sym} ditahan — Binance pause aktif")
@@ -7779,28 +7783,40 @@ def monitor_position_real_final(sym,pos):
                     if cand_sl is not None and oldsl is not None:
                         buy=str(pos.get("signal",{}).get("decision") or "BUY").upper()=="BUY"
                         if not ((float(cand_sl)>float(oldsl)) if buy else (float(cand_sl)<float(oldsl))): cand_sl=oldsl
-                    if cand_sl is not None and cand_sl!=oldsl:
+                    # CLOSE is a brain recommendation, not an automatic broker action
+                    # while Binance is unavailable. Keep it explicit for the body.
+                    if bool(upd.get("close")) or str(upd.get("action") or "").upper()=="CLOSE":
                         if _binance_is_scan_paused():
-                            _queue_pending_trail(sym,float(cand_sl),cand_tp,pos.get("quantity"),reason="strategy",side=pos.get("signal",{}).get("decision"))
-                            _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,cand_sl,status="QUEUED")
+                            log.warning("[TRAIL/V130] %s close recommendation queued by execution gate", sym)
+                        else:
+                            try:
+                                _close_position_real(sym, pos, reason=str(upd.get("close_reason") or "strategy"))
+                                continue
+                            except Exception as exc:
+                                log.warning("[TRAIL/V130] %s close recommendation failed: %s", sym, exc)
+                    protection_changed = (cand_sl is not None and oldsl is not None and cand_sl != oldsl) or (cand_tp is not None and cand_tp != oldtp)
+                    if protection_changed:
+                        effective_sl = float(cand_sl if cand_sl is not None else oldsl)
+                        effective_tp = float(cand_tp if cand_tp is not None else oldtp)
+                        if _binance_is_scan_paused():
+                            _queue_pending_trail(sym,effective_sl,effective_tp,pos.get("quantity"),reason="strategy",side=pos.get("signal",{}).get("decision"))
+                            _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,effective_sl,status="QUEUED")
                         else:
                             try:
                                 latest=_ORIG_GET_REAL_POSITION(sym) if callable(_ORIG_GET_REAL_POSITION) else None
                                 live_qty=abs(float(latest.get("positionAmt",0) or 0)) if latest else float(pos.get("quantity") or 0)
-                                if live_qty<=0: pass
-                                else:
+                                if live_qty>0:
                                     with _binance_critical_context(): _cancel_all_algo_orders_verified(sym)
-                                    nt,ns=place_tp_sl(sym,str(pos.get("signal",{}).get("decision") or "BUY").upper()=="BUY",cand_tp,float(cand_sl),live_qty)
+                                    nt,ns=place_tp_sl(sym,str(pos.get("signal",{}).get("decision") or "BUY").upper()=="BUY",effective_tp,effective_sl,live_qty)
                                     with positions_lock:
                                         if sym in positions:
-                                            positions[sym]["current_sl"]=float(cand_sl); positions[sym]["signal"]["sl"]=float(cand_sl); positions[sym]["tp_order_id"]=nt.get("algoId"); positions[sym]["sl_order_id"]=ns.get("algoId"); positions[sym]["quantity"]=live_qty
-                                    _clear_pending_trail(sym); _notify_trail_update(active_chat_id,sym,positions[sym],upd,oldsl,cand_sl,status="APPLIED")
+                                            positions[sym]["current_sl"]=effective_sl; positions[sym]["signal"]["sl"]=effective_sl; positions[sym]["signal"]["tp"]=effective_tp; positions[sym]["tp_order_id"]=nt.get("algoId"); positions[sym]["sl_order_id"]=ns.get("algoId"); positions[sym]["quantity"]=live_qty
+                                    _clear_pending_trail(sym); _notify_trail_update(active_chat_id,sym,positions[sym],upd,oldsl,effective_sl,status="APPLIED")
                             except BinanceCooldownError as exc:
-                                _queue_pending_trail(sym,float(cand_sl),cand_tp,pos.get("quantity"),reason="strategy",side=pos.get("signal",{}).get("decision"))
-                                _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,cand_sl,status="QUEUED",error=exc)
+                                _queue_pending_trail(sym,effective_sl,effective_tp,pos.get("quantity"),reason="strategy",side=pos.get("signal",{}).get("decision"))
+                                _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,effective_sl,status="QUEUED",error=exc)
                             except Exception as exc:
-                                # One alert only; previous SL remains unchanged.
-                                _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,cand_sl,status="FAILED",error=exc)
+                                _notify_trail_update(active_chat_id,sym,pos,upd,oldsl,effective_sl,status="FAILED",error=exc)
             # REST reconcile only if WS is stale and not rate-limited.
             if (not _binance_ws_fresh()) and time.time()>=next_rest_reconcile and _binance_reconcile_allowed(sym):
                 try:
@@ -9880,7 +9896,7 @@ _v125_final_runtime_audit()
 # IMPORTANT: this block is BEFORE the __main__ entrypoint.
 # One canonical recovery owner; scanner != Binance execution state.
 # ============================================================
-V127_MAIN_VERSION = "V127_CANONICAL_RECOVERY_EXECUTION_SEPARATED"
+V130_MAIN_VERSION = "V130_BRAIN_EXECUTION_CONTRACT_TRAILING_HARDENED"
 
 # ---------- Execution pause is distinct from scanner health ----------
 def _binance_execution_blocked_v127():
@@ -10972,6 +10988,49 @@ try:
 except Exception as exc:
     log.exception("[SCAN/V13] binding selfcheck FAILED: %s", exc)
 
+def _normalize_execution_signal_v130(raw):
+    """Validate/normalize the exact packet required by _open_pending_real().
+
+    Strategy owns the decision and risk geometry; main owns broker execution.
+    This adapter prevents a valid strategy decision from being lost because of
+    casing, numpy scalars, missing symbol, or non-finite numeric values.
+    """
+    if not isinstance(raw, dict):
+        log.error("[ENTRY HANDOFF/V130] invalid signal type: %r", type(raw).__name__)
+        return None
+    out = dict(raw)
+    sym = str(out.get("symbol") or "").strip().upper()
+    decision = str(out.get("decision") or "").strip().upper()
+    if not sym or decision not in {"BUY", "SELL"}:
+        log.error("[ENTRY HANDOFF/V130] rejected malformed packet symbol=%r decision=%r", sym, decision)
+        return None
+    try:
+        import math as _math
+        entry = float(out.get("entry"))
+        sl = float(out.get("sl"))
+        tp = float(out.get("tp"))
+        rr = float(out.get("rr", 0.0) or 0.0)
+        if not all(_math.isfinite(x) for x in (entry, sl, tp)) or entry <= 0:
+            raise ValueError("entry/sl/tp non-finite atau entry <= 0")
+        valid = (sl < entry < tp) if decision == "BUY" else (tp < entry < sl)
+        if not valid:
+            raise ValueError(f"invalid geometry {decision}: entry={entry} sl={sl} tp={tp}")
+        if rr > 0 and not _math.isfinite(rr):
+            raise ValueError("rr non-finite")
+    except Exception as exc:
+        log.error("[ENTRY HANDOFF/V130] %s rejected: %s", sym or "?", exc)
+        return None
+    if not bool(out.get("execution_eligible")):
+        log.error("[ENTRY HANDOFF/V130] %s rejected: execution_eligible=%r reason=%s", sym, out.get("execution_eligible"), out.get("rejected_reason") or out.get("eligibility_reason"))
+        return None
+    out.update({"symbol": sym, "decision": decision, "entry": entry, "sl": sl, "tp": tp, "rr": rr})
+    out.setdefault("initial_sl", sl)
+    out.setdefault("execution_mode", "limit")
+    out["execution_eligible"] = True
+    out["execution_contract"] = "V130"
+    return out
+
+
 # Patch the V128 cycle itself to call the canonical V13 function explicitly.
 # This makes scanner behavior robust even if another overlay later mutates the
 # global run_scan_once symbol during runtime.
@@ -10987,17 +11046,36 @@ def _v13_run_one_scan_cycle(chat_id=None):
 
         opened = 0
         deferred = 0
-        for sig in signals or []:
-            sym = str(sig.get("symbol") or "").upper()
-            if not sym:
+        skipped = 0
+        for raw_sig in signals or []:
+            # Canonical body/brain handoff. Never let a malformed brain packet
+            # silently disappear before the execution layer sees it.
+            sig = _normalize_execution_signal_v130(raw_sig)
+            if sig is None:
+                skipped += 1
                 continue
+            sym = sig["symbol"]
+            log.info(
+                "[ENTRY HANDOFF/V130] %s decision=%s entry=%s sl=%s tp=%s rr=%s eligible=%s source=%s",
+                sym, sig.get("decision"), sig.get("entry"), sig.get("sl"), sig.get("tp"),
+                sig.get("rr"), sig.get("execution_eligible"), sig.get("eligibility_source")
+            )
             if _binance_execution_blocked_v127():
+                log.warning("[ENTRY GATE/V130] %s deferred: Binance execution blocked", sym)
                 if _v128_queue_deferred_signal(sig, "binance_execution_unavailable"):
                     deferred += 1
                 continue
             with positions_lock:
-                if sym in positions or len(positions) >= MAX_POSITIONS:
-                    continue
+                already_open = sym in positions
+                capacity_full = len(positions) >= MAX_POSITIONS
+            if already_open:
+                log.info("[ENTRY GATE/V130] %s skipped: already in positions", sym)
+                skipped += 1
+                continue
+            if capacity_full:
+                log.warning("[ENTRY GATE/V130] %s skipped: MAX_POSITIONS=%s reached", sym, MAX_POSITIONS)
+                skipped += 1
+                continue
             if REAL_TRADE_ENABLED:
                 if _open_pending_real(sym, sig, cid):
                     opened += 1

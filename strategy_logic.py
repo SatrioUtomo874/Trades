@@ -66,7 +66,7 @@ log = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # VERSION / CONTRACT
 # -----------------------------------------------------------------------------
-FINAL_BRAIN_VERSION = "V129_STRATEGY_BRAIN_V2"
+FINAL_BRAIN_VERSION = "V130_STRATEGY_BRAIN_EXECUTION_CONTRACT_TRAILING"
 BRAIN_INTERFACE_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
 V35_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
 V32_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
@@ -687,7 +687,7 @@ def score_direction(df_h1, df_m15, df_d1=None):
             "htf_bias":state.htf_bias,"macro_bias":state.macro_bias,"m15_struct":state.m15_bias,
             "trigger_count":int(round(max(bull,bear)/10.0)),"direction_edge":abs(bull-bear),
             "fib_r":state.range_position,"m15_relative_volume":state.relative_volume,
-            "regime":state.regime,"trend_strength":state.trend_strength,"state":state.to_dict()}
+            "regime":state.regime,"trend_strength":state.trend_strength,"state":asdict(state)}
 
 
 # -----------------------------------------------------------------------------
@@ -865,7 +865,7 @@ def _historical_context(candidate: Candidate, state: MarketState, trade_history:
         ts=_latest_ts(row); age=(now-ts)/3600.0
         if age<0: age=0
         if age>window: continue
-        drift=_regime_distance(state.to_dict(), row)
+        drift=_regime_distance(asdict(state), row)
         sim=_feature_similarity(cur,row)
         if sim<0.35: continue
         w=_recency_weight(age,window,drift)*(0.55+0.45*sim)
@@ -980,77 +980,6 @@ def _ollama_critic(packet: dict) -> dict:
 
 
 # -----------------------------------------------------------------------------
-# EXECUTION COMPATIBILITY LAYER
-# -----------------------------------------------------------------------------
-# main.py's existing execution path expects the legacy signal vocabulary:
-# decision=BUY/SELL plus entry/sl/tp and entry_label.  Keep that contract stable
-# while allowing the brain internals to evolve.
-def _execution_packet(packet: dict) -> tuple[dict | None, str]:
-    if not isinstance(packet, dict):
-        return None, "PACKET_NOT_DICT"
-
-    out = dict(packet)
-    decision = str(out.get("decision") or "").upper().strip()
-    if decision in {"BULL", "LONG"}:
-        decision = "BUY"
-    elif decision in {"BEAR", "SHORT"}:
-        decision = "SELL"
-    out["decision"] = decision
-
-    if decision not in {"BUY", "SELL"}:
-        return None, "INVALID_DECISION"
-
-    # These are the exact values consumed by the existing real/simulation
-    # execution path in main.py.
-    for key in ("entry", "sl", "tp"):
-        try:
-            value = float(out.get(key))
-        except Exception:
-            return None, f"MISSING_{key.upper()}"
-        if not math.isfinite(value) or value <= 0:
-            return None, f"INVALID_{key.upper()}"
-        out[key] = value
-
-    entry = out["entry"]
-    sl = out["sl"]
-    tp = out["tp"]
-    geometry_ok = (sl < entry < tp) if decision == "BUY" else (tp < entry < sl)
-    if not geometry_ok:
-        return None, "INVALID_ENTRY_SL_TP_GEOMETRY"
-
-    label = str(out.get("entry_label") or "limit").strip()
-    out["entry_label"] = label
-    out["execution_mode"] = str(out.get("execution_mode") or (
-        "market" if label.lower() == "market" else "limit"
-    )).lower()
-    out["side"] = decision
-    out["price"] = float(out.get("price") or entry)
-    out["execution_eligible"] = bool(out.get("execution_eligible"))
-    out["execution_contract"] = "main_v47_compatible"
-    out["execution_ready"] = bool(out["execution_eligible"])
-    out["no_signal"] = not out["execution_ready"]
-    return out, "OK"
-
-
-def _make_execution_ready(packet: dict) -> dict:
-    normalized, reason = _execution_packet(packet)
-    if normalized is not None:
-        return normalized
-    failed = dict(packet or {})
-    failed.update({
-        "decision": str(failed.get("decision") or "WAIT").upper(),
-        "execution_eligible": False,
-        "execution_ready": False,
-        "no_signal": True,
-        "analysis_stage": "EXECUTION_CONTRACT",
-        "rejected_reason": reason,
-        "eligibility_reason": reason,
-        "execution_contract": "main_v47_compatible",
-    })
-    return failed
-
-
-# -----------------------------------------------------------------------------
 # DECISION ENGINE
 # -----------------------------------------------------------------------------
 def _current_signal_threshold() -> float:
@@ -1159,7 +1088,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             ollama=_ollama_critic(packet)
             c.confidence=_clip(c.confidence+_safe_float(ollama.get("delta"),0.0),0,100)
             if str(ollama.get("verdict"))=="INVALIDATE":
-                return _no_signal_packet(symbol,state,score,"LLM_INVALIDATED",market_data_source,extra={"ollama":ollama,"candidate":c.to_dict()})
+                return _no_signal_packet(symbol,state,score,"LLM_INVALIDATED",market_data_source,extra={"ollama":ollama,"candidate":asdict(c)})
             if str(ollama.get("verdict"))=="WAIT":
                 c.trigger_confirmed=False
         threshold=get_active_confidence_threshold()
@@ -1196,8 +1125,38 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             "brain_version":FINAL_BRAIN_VERSION,"strategy_version":_STRATEGY_STATE.get("version","S2.0"),
             "low_confidence":(c.confidence < max(60,required)),
             "low_confidence_cutoff":required,"ban_recommended":False,
+            # Canonical execution handoff. main.py is the only execution authority.
+            "execution_contract":"V130",
+            "execution":{
+                "symbol":str(symbol or "").upper(),
+                "side":c.direction.upper(),
+                "entry":float(c.entry),
+                "sl":float(c.sl),
+                "tp":float(c.tp),
+                "rr":float(c.rr),
+                "type":"LIMIT",
+            },
         }
-        out = _make_execution_ready(out)
+        # Hard contract check before returning a signal to main.py. A strategy
+        # signal is never marked eligible unless its complete risk geometry is
+        # finite and directionally valid.
+        try:
+            vals=(float(out["entry"]),float(out["sl"]),float(out["tp"]))
+            valid=all(math.isfinite(v) and v>0 for v in vals)
+            valid = valid and ((out["sl"] < out["entry"] < out["tp"]) if out["decision"]=="BUY" else (out["tp"] < out["entry"] < out["sl"]))
+            if not valid:
+                out["execution_eligible"]=False
+                out["no_signal"]=True
+                out["analysis_stage"]="EXECUTION_CONTRACT_REJECTED"
+                out["rejected_reason"]="INVALID_EXECUTION_GEOMETRY"
+                out["eligibility_reason"]="INVALID_EXECUTION_GEOMETRY"
+        except Exception:
+            out["execution_eligible"]=False
+            out["no_signal"]=True
+            out["analysis_stage"]="EXECUTION_CONTRACT_REJECTED"
+            out["rejected_reason"]="INVALID_EXECUTION_PACKET"
+            out["eligibility_reason"]="INVALID_EXECUTION_PACKET"
+        return out
         return out
     except Exception as exc:
         log.exception("[BRAIN V2] full_analyze failed")
@@ -1213,7 +1172,7 @@ def _no_signal_packet(symbol,state,score,reason,market_data_source,extra=None):
             "confidence":round(_safe_float(score.get("confidence"),0),2),"confidence_threshold":get_active_confidence_threshold(),
             "market_regime":state.regime,"trend_strength":round(state.trend_strength,2),"structure_strength":round(state.structure_strength,2),
             "macro_bias":state.macro_bias,"liquidity_state":state.liquidity_state,"market_data_source":market_data_source,
-            "brain_version":FINAL_BRAIN_VERSION,"execution_ready":False,"execution_contract":"main_v47_compatible",**(extra or {})}
+            "brain_version":FINAL_BRAIN_VERSION,**(extra or {})}
 
 
 # -----------------------------------------------------------------------------
