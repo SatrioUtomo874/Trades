@@ -80,7 +80,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 BRAIN_CONFIDENCE_DISPLAY_FALLBACK = "brain-owned"
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "MAIN-BODY-V132-GITHUB-GET-VERIFY-COMPAT"
+MAIN_ENGINE_VERSION = "MAIN-BODY-V130-BRAIN-EXECUTION-CONTRACT-TRAILING"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -548,7 +548,7 @@ BINANCE_KEYS_PRESENT = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
 REAL_TRADE_ENABLED   = False
 
 # Execution infrastructure invariants
-EXECUTION_ENGINE_VERSION = "MAIN-BODY-V132-GITHUB-GET-VERIFY-COMPAT"
+EXECUTION_ENGINE_VERSION = "MAIN-BODY-V130-BRAIN-EXECUTION-CONTRACT-TRAILING"
 RUNTIME_SCHEMA_VERSION = "runtime_v1"
 EVENT_SCHEMA_VERSION = "event_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
@@ -1905,26 +1905,13 @@ def _commit_to_github(content, path="strategy_logic.py", commit_msg="Update stra
         try:
             r = requests.get(url, headers=headers, timeout=15)
             if r.status_code == 200:
-                obj = r.json()
-                # GitHub Contents API GET returns `content` as a TOP-LEVEL STRING
-                # and `encoding` as a TOP-LEVEL FIELD. The PUT response may wrap
-                # content inside an object, so verification must support both shapes.
-                cf = obj.get("content") if isinstance(obj, dict) else None
-                enc = obj.get("encoding") if isinstance(obj, dict) else None
-                if isinstance(cf, dict):
-                    enc = cf.get("encoding") or enc
-                    rc = cf.get("content")
-                else:
-                    rc = cf
-                if isinstance(rc, str) and rc.strip() and str(enc).lower() == "base64":
-                    try:
-                        decoded = base64.b64decode(rc.replace("\n", ""), validate=True)
-                    except Exception as exc:
-                        last_error = f"GitHub remote base64 rusak untuk {path}: {exc}"
-                    else:
-                        if decoded == expected:
-                            return True
-                        last_error = f"GitHub remote payload mismatch untuk {path}"
+                obj = r.json(); cf = obj.get("content")
+                rc = cf.get("content") if isinstance(cf, dict) else None
+                enc = cf.get("encoding") if isinstance(cf, dict) else None
+                if enc == "base64" and rc:
+                    if base64.b64decode(rc.replace("\n", "")) == expected:
+                        return True
+                    last_error = f"GitHub remote payload mismatch untuk {path}"
                 else:
                     last_error = f"GitHub remote content kosong/tidak tersedia untuk {path} (attempt {attempt})"
             else:
@@ -5089,7 +5076,16 @@ def _open_pending_real(sym,signal,chat_id):
         _ban_coin(sym,"geometri strategy invalid"); tg_send(chat_id,f"⏭ <b>Skip {sym}</b> — geometri strategy invalid."); return
     side="BUY" if buy else "SELL"
     with positions_lock:
-        if sym in positions or len(positions)>=MAX_POSITIONS:return
+        existing = positions.get(sym)
+        if existing:
+            existing_status = str(existing.get("status") or "").lower()
+            existing_mode = str(existing.get("execution_mode") or "").upper()
+            # A REAL pending entry may already be visible in /trade while Binance
+            # is cooling down. Reuse that state instead of silently rejecting it.
+            if not (existing_status == "pending" and existing_mode == "REAL"):
+                return False
+        elif len(positions)>=MAX_POSITIONS:
+            return False
         positions[sym]={"signal":signal,"entry":entry,"chat_id":chat_id,"entry_time":None,"trade_uid":f"{research_run_id}:{sym}:pending:{int(time.time()*1000)}",
                         "timeout_flag":False,"status":"pending","lifecycle":"ENTRY_PENDING","execution_mode":"REAL","position_id":_new_request_id("POS")}
     try:
@@ -5105,10 +5101,21 @@ def _open_pending_real(sym,signal,chat_id):
         threading.Thread(target=_wait_entry_real,args=(sym,signal,chat_id,order["orderId"]),daemon=True).start()
         return True
     except BinanceCooldownError as e:
+        # Do NOT remove the candidate: a pending entry is valid analysis state.
+        # Keep it visible in /trade and enqueue it for execution after recovery.
         with positions_lock:
-            positions.pop(sym, None)
-        log.warning(f"[entry] {sym} ditunda karena Binance budget/cooldown: {e}")
-        tg_send(chat_id, f"⚠️ <b>ENTRY DITUNDA</b> — {sym}\n<code>{html.escape(str(e)[:300])}</code>\nSinyal tidak dianggap gagal dan tidak diban karena alasan API.")
+            if sym in positions:
+                positions[sym].update({
+                    "status":"pending", "lifecycle":"ENTRY_PENDING",
+                    "execution_mode":"REAL", "deferred_execution":True,
+                    "execution_block_reason":str(e)[:300],
+                })
+        try:
+            _v128_queue_deferred_signal(signal, "binance_execution_unavailable")
+        except Exception as queue_exc:
+            log.warning(f"[entry] {sym} deferred queue gagal: {queue_exc}")
+        log.warning(f"[entry] {sym} ditunda karena Binance budget/cooldown: {e}; pending dipertahankan")
+        tg_send(chat_id, f"⚠️ <b>ENTRY DITUNDA</b> — {sym}\n<code>{html.escape(str(e)[:300])}</code>\nPending tetap disimpan untuk analisa dan retry setelah Binance recovery.")
         return False
     except BinanceUnknownExecutionError as e:
         # The entry POST may have reached Binance even though its response was lost.
@@ -10508,7 +10515,13 @@ def _v128_execute_deferred(chat_id=None):
             except Exception: pass
             continue
         with positions_lock:
-            if sym in positions or len(positions)>=MAX_POSITIONS:
+            existing = positions.get(sym)
+            if existing:
+                est = str(existing.get("status") or "").lower()
+                emode = str(existing.get("execution_mode") or "").upper()
+                if not (est == "pending" and emode == "REAL"):
+                    continue
+            elif len(positions)>=MAX_POSITIONS:
                 continue
         try:
             if REAL_TRADE_ENABLED:
@@ -11046,6 +11059,9 @@ def _normalize_execution_signal_v130(raw):
     return out
 
 
+# V133 — pending execution is first-class analysis state.
+PENDING_ORDER_ANALYSIS_VERSION = "V133"
+
 # Patch the V128 cycle itself to call the canonical V13 function explicitly.
 # This makes scanner behavior robust even if another overlay later mutates the
 # global run_scan_once symbol during runtime.
@@ -11076,7 +11092,20 @@ def _v13_run_one_scan_cycle(chat_id=None):
                 sig.get("rr"), sig.get("execution_eligible"), sig.get("eligibility_source")
             )
             if _binance_execution_blocked_v127():
-                log.warning("[ENTRY GATE/V130] %s deferred: Binance execution blocked", sym)
+                # IMPORTANT: an execution-blocked signal is still a valid research
+                # candidate. Keep it as ENTRY_PENDING so /trade and the strategy
+                # management layer can analyze it while Binance recovers.
+                with positions_lock:
+                    if sym not in positions and len(positions) < MAX_POSITIONS:
+                        positions[sym] = {
+                            "signal": sig, "entry": sig.get("entry"), "chat_id": cid,
+                            "entry_time": None, "entry_created_at": time.time(),
+                            "timeout_flag": False, "status": "pending",
+                            "lifecycle": "ENTRY_PENDING", "execution_mode": "REAL",
+                            "order_id": None, "deferred_execution": True,
+                        }
+                        log.info("[POSITION REGISTERED/V133] %s status=pending reason=binance_blocked", sym)
+                log.warning("[ENTRY GATE/V133] %s deferred: Binance execution blocked; pending retained for analysis", sym)
                 if _v128_queue_deferred_signal(sig, "binance_execution_unavailable"):
                     deferred += 1
                 continue
@@ -11094,6 +11123,7 @@ def _v13_run_one_scan_cycle(chat_id=None):
             if REAL_TRADE_ENABLED:
                 if _open_pending_real(sym, sig, cid):
                     opened += 1
+                    log.info("[POSITION REGISTERED/V133] %s status=pending execution=REAL", sym)
                 elif _binance_execution_blocked_v127():
                     if _v128_queue_deferred_signal(sig, "binance_execution_unavailable_race"):
                         deferred += 1

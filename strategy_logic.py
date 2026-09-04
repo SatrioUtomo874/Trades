@@ -66,7 +66,7 @@ log = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # VERSION / CONTRACT
 # -----------------------------------------------------------------------------
-FINAL_BRAIN_VERSION = "V132_STRATEGY_BRAIN_EXECUTION_HANDOFF_GEOMETRY"
+FINAL_BRAIN_VERSION = "V133_STRATEGY_BRAIN_PENDING_ENTRY_AWARE"
 BRAIN_INTERFACE_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
 V35_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
 V32_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
@@ -1178,9 +1178,26 @@ def _no_signal_packet(symbol,state,score,reason,market_data_source,extra=None):
 # POSITION MANAGEMENT / TRAILING
 # -----------------------------------------------------------------------------
 def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None, **kwargs):
-    """Brain-owned management recommendation. Main.py executes the actual change."""
+    """Brain-owned management recommendation. Pending entries are valid analysis state.
+
+    Main.py remains the execution authority. While an order is still pending, the
+    brain must be able to inspect the setup without pretending a live position exists
+    and without moving a protective stop before the entry is filled.
+    """
     try:
         m15=build_df(df_m15,15); h1=build_df(df_h1,60) if df_h1 is not None else None
+        status=str((state or {}).get("status") or (state or {}).get("lifecycle") or "").lower()
+        if status in {"pending", "entry_pending", "waiting_entry"} or str((state or {}).get("lifecycle") or "").upper()=="ENTRY_PENDING":
+            sig=state.get("signal") if isinstance(state.get("signal"),dict) else state
+            tp=_safe_float(sig.get("tp"),0.0) if isinstance(sig,dict) else 0.0
+            sl=_safe_float(sig.get("sl"),0.0) if isinstance(sig,dict) else 0.0
+            return {
+                "action":"HOLD", "close":False, "tp":tp or None, "sl":None, "new_sl":None,
+                "profit_r":0.0, "trend_strength":None, "weakness_score":0, "relative_volume":None,
+                "trail_source":"pending_entry_analysis", "state":"PENDING",
+                "reason":["ENTRY_PENDING","NO_TRAILING_BEFORE_FILL"],
+                "engine_version":FINAL_BRAIN_VERSION,
+            }
         if m15 is None:
             return {"action":"HOLD","tp":None,"sl":None,"reason":["DATA_UNAVAILABLE"],"trail_source":"brain_v2"}
         sig=state.get("signal") if isinstance(state.get("signal"),dict) else state
