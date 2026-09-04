@@ -1,1215 +1,607 @@
 from __future__ import annotations
 
-"""
-SMCAutoTrade strategy_v8.py
+import math
+from typing import Optional
 
-Simulation-only strategy engine.
-Source basis: user's combined.txt trading transcripts.
+import numpy as np
+import pandas as pd
 
-Key design changes from v3:
-- One PRIMARY THESIS per symbol+direction instead of multiple duplicate-looking setups.
-- Stable POI identity to prevent repeated registrations on every websocket event.
-- Alternative POIs are stored inside the same thesis, not as separate Telegram signals.
-- Score is normalized from explicit components; it no longer simply saturates at 100.
-- Signal output contains entry, confirmation price/condition, SL, TP, invalidation, RR,
-  confluence and waiting conditions.
-- Candidate/watch/confirmation lifecycle is explicit.
-- Initial scan and live event logs always explain what happened, including zero-setup cases.
-- Simulation only; no exchange order placement.
-"""
+import learn
 
-import json
-import logging
-import os
-import re
-import statistics
-import threading
-import time
-import uuid
-from dataclasses import dataclass, asdict, field
-from typing import Any
-
-log = logging.getLogger("strategy")
-VERSION = "8.0"
-
-# LEARNED_POLICY_V1 = {"min_score":58,"transition_penalty":0,"rvol_min":0.0,"efficiency_min":0.0}
-
-MIN_RR = max(2.0, float(os.getenv("STRAT_V7_MIN_RR", "2.0")))
-MAX_RR = max(MIN_RR, min(4.0, float(os.getenv("STRAT_V7_MAX_RR", "4.0"))))
-MIN_SCORE = int(os.getenv("STRAT_V7_MIN_SCORE", "58"))
-SETUPS_PAGE_SIZE = max(10, int(os.getenv("STRAT_V8_SETUPS_PAGE_SIZE", "25")))
-SCAN_LOG_EVERY = max(1, int(os.getenv("STRAT_V7_SCAN_LOG_EVERY", "10")))
-EXPIRY_MINUTES = max(15, int(os.getenv("STRAT_V8_EXPIRY_MINUTES", "720")))
-CONFIRMATION_TIMEOUT_MINUTES = max(15, int(os.getenv("STRAT_V8_CONFIRMATION_TIMEOUT_MINUTES", "90")))
-INVALIDATION_BUFFER_PCT = max(0.0, float(os.getenv("STRAT_V8_INVALIDATION_BUFFER_PCT", "0.0015")))
-SWING_LEFT = max(1, int(os.getenv("STRAT_V7_SWING_LEFT", "2")))
-SWING_RIGHT = max(1, int(os.getenv("STRAT_V7_SWING_RIGHT", "2")))
-SL_ATR_PAD = float(os.getenv("STRAT_V7_SL_ATR_PAD", "0.20"))
-ZONE_TOLERANCE = float(os.getenv("STRAT_V7_ZONE_TOLERANCE", "0.0025"))
-
-# Policy is embedded by learn.py candidate generation; it remains bounded by strategy constitution.
-
-API: Any = None
-CONTEXT: dict[str, Any] = {}
-LOCK = threading.RLock()
-INITIAL_SCAN_DONE = False
-
-SETUPS: dict[str, "Setup"] = {}
-THESIS_INDEX: dict[str, str] = {}  # stable thesis_key -> setup_id
-JOURNAL: list[dict[str, Any]] = []
-POSITIONS: dict[str, "Position"] = {}
-LAST_ANALYSIS: dict[str, dict[str, Any]] = {}
-SIGNAL_QUEUE: list[dict[str, Any]] = []
-EMITTED_SIGNALS: set[str] = set()
-
-COUNTERS = {
-    "symbols_scanned": 0,
-    "event_scans": 0,
-    "theses_created": 0,
-    "theses_updated": 0,
-    "confirmed": 0,
-    "fills": 0,
-    "wins": 0,
-    "losses": 0,
-    "expired": 0,
-    "invalidated": 0,
-}
+MIN_RR = 2.0
+MAX_RR = None
+TRAIL_R_LADDER = []
+STRUCT_TRAIL_LB = 3
+STRUCT_TRAIL_BUF_PCT = 0.0025
+STRUCT_TRAIL_LOOKBACK = 60
+FIB_EXT_1 = 0.272
+FIB_EXT_2 = 0.618
+STRATEGY_VERSION = "S1.0"
 
 
-@dataclass
-class POI:
-    poi_id: str
-    model: str
-    direction: str
-    low: float
-    high: float
-    created_index: int
-    fresh: bool
-    rank_hint: float
-
-
-@dataclass
-class Setup:
-    id: str
-    thesis_key: str
-    symbol: str
-    direction: str
-    state: str
-    model: str
-    entry_type: str
-    entry_price: float
-    confirmation_price: float | None
-    confirmation_condition: str
-    stop_loss: float
-    take_profit: float
-    tp_model: str
-    invalidation_price: float
-    rr: float
-    natural_rr: float
-    tp_cap_applied: bool
-    frequency_count: int
-    frequency_per_day: float
-    frequency_label: str
-    decision: str
-    score: int
-    created_ts: int
-    updated_ts: int
-    expires_ts: int
-    primary_poi: POI
-    alternative_pois: list[POI] = field(default_factory=list)
-    reason_codes: list[str] = field(default_factory=list)
-    confluences: list[str] = field(default_factory=list)
-    waiting_for: list[str] = field(default_factory=list)
-    thesis: str = ""
-    filled_ts: int | None = None
-    outcome: str | None = None
-    r_multiple: float | None = None
-    confirmation_ts: int | None = None
-
-
-@dataclass
-class Position:
-    setup_id: str
-    symbol: str
-    direction: str
-    entry: float
-    stop_loss: float
-    take_profit: float
-    opened_ts: int
-    closed_ts: int | None = None
-    outcome: str | None = None
-    r_multiple: float | None = None
-
-
-
-def _load_learned_policy() -> dict[str, Any]:
-    defaults = {"min_score": MIN_SCORE if "MIN_SCORE" in globals() else 58, "transition_penalty": 0, "rvol_min": 0.0, "efficiency_min": 0.0}
+def _safe_float(value, default=0.0):
     try:
-        m = re.search(r"# LEARNED_POLICY_V1 = (\{.*?\})", open(__file__, "r", encoding="utf-8").read())
-        if m:
-            raw = json.loads(m.group(1))
-            defaults.update({k: raw[k] for k in defaults if k in raw})
+        value = float(value)
+        return value if math.isfinite(value) else default
     except Exception:
-        pass
-    return defaults
+        return default
 
-LEARNED_POLICY: dict[str, Any] = {"min_score": 58, "transition_penalty": 0, "rvol_min": 0.0, "efficiency_min": 0.0}
 
-# ---------------- basic helpers ----------------
-def _ema(values: list[float], period: int) -> float | None:
-    if len(values) < period:
+def _clip(value, low, high):
+    return max(low, min(high, _safe_float(value, low)))
+
+
+def ema(series, period):
+    return series.astype(float).ewm(span=period, adjust=False).mean()
+
+
+def atr_fn(df, period=14):
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - df["close"].shift()).abs(),
+            (df["low"] - df["close"].shift()).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.rolling(period, min_periods=period).mean()
+
+
+def build_df(df, min_rows=60):
+    if df is None or not isinstance(df, pd.DataFrame) or len(df) < min_rows:
         return None
-    alpha = 2.0 / (period + 1.0)
-    value = sum(values[:period]) / period
-    for x in values[period:]:
-        value = alpha * x + (1.0 - alpha) * value
-    return value
 
+    out = df.copy()
 
-def _atr(candles: list[dict[str, Any]], period: int = 14) -> float | None:
-    if len(candles) < period + 1:
+    for column in ("open", "high", "low", "close", "volume"):
+        if column not in out.columns:
+            return None
+        out[column] = pd.to_numeric(out[column], errors="coerce")
+
+    out = out.dropna(subset=["open", "high", "low", "close", "volume"])
+    if len(out) < min_rows:
         return None
-    tr = []
-    for i in range(1, len(candles)):
-        cur, prev = candles[i], candles[i - 1]
-        tr.append(max(
-            cur["high"] - cur["low"],
-            abs(cur["high"] - prev["close"]),
-            abs(cur["low"] - prev["close"]),
-        ))
-    return sum(tr[-period:]) / period
+
+    out["ema9"] = ema(out["close"], 9)
+    out["ema20"] = ema(out["close"], 20)
+    out["ema50"] = ema(out["close"], 50)
+    out["atr"] = atr_fn(out, 14)
+    out["vol_sma"] = out["volume"].rolling(20).mean()
+    return out.dropna().copy()
 
 
-def _aggregate(candles: list[dict[str, Any]], minutes: int) -> list[dict[str, Any]]:
-    if not candles:
+def swing_pts(df, lb=5):
+    if df is None or len(df) < 2 * lb + 1:
+        return [], []
+
+    highs = df["high"].to_numpy(float)
+    lows = df["low"].to_numpy(float)
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(lb, len(df) - lb):
+        if highs[i] >= np.max(highs[i - lb:i + lb + 1]):
+            swing_highs.append(i)
+        if lows[i] <= np.min(lows[i - lb:i + lb + 1]):
+            swing_lows.append(i)
+
+    return swing_highs, swing_lows
+
+
+def mkt_struct(df, sh, sl):
+    if len(sh) < 2 or len(sl) < 2:
+        return "ranging"
+
+    hh = df["high"].iloc[sh[-1]] > df["high"].iloc[sh[-2]]
+    hl = df["low"].iloc[sl[-1]] > df["low"].iloc[sl[-2]]
+    lh = df["high"].iloc[sh[-1]] < df["high"].iloc[sh[-2]]
+    ll = df["low"].iloc[sl[-1]] < df["low"].iloc[sl[-2]]
+
+    if hh and hl:
+        return "bullish"
+    if lh and ll:
+        return "bearish"
+    return "ranging"
+
+
+def fib_position(price, swing_low, swing_high):
+    span = swing_high - swing_low
+    if span <= 0:
+        return 0.5
+    return _clip((price - swing_low) / span, 0.0, 1.0)
+
+
+def trend_strength(df, sh, sl):
+    if df is None or len(df) < 30:
+        return 0.0
+
+    atr = _safe_float(df["atr"].iloc[-1])
+    if atr <= 0:
+        return 0.0
+
+    structure = mkt_struct(df, sh, sl)
+    score = 35.0
+
+    if structure in {"bullish", "bearish"}:
+        score += 20.0
+    else:
+        score -= 10.0
+
+    if structure == "bullish" and len(sh) >= 3:
+        points = [(i, df["high"].iloc[i]) for i in sh[-3:]]
+    elif structure == "bearish" and len(sl) >= 3:
+        points = [(i, df["low"].iloc[i]) for i in sl[-3:]]
+    else:
+        points = []
+
+    slopes = []
+    for (i1, p1), (i2, p2) in zip(points[:-1], points[1:]):
+        slopes.append(abs(float(p2) - float(p1)) / max(1, i2 - i1) / atr)
+
+    if slopes:
+        score += _clip(float(np.mean(slopes)) * 900.0, 0.0, 28.0)
+        if len(slopes) >= 2:
+            if slopes[-1] > slopes[-2] * 1.10:
+                score += 7.0
+            elif slopes[-1] < slopes[-2] * 0.75:
+                score -= 7.0
+
+    last = df.iloc[-1]
+    if structure == "bullish" and last["ema9"] > last["ema20"] > last["ema50"]:
+        score += 8
+    elif structure == "bearish" and last["ema9"] < last["ema20"] < last["ema50"]:
+        score += 8
+
+    relative_volume = _safe_float(last["volume"]) / max(_safe_float(last["vol_sma"], 1.0), 1e-12)
+    score += _clip((relative_volume - 1.0) * 6.0, -6.0, 6.0)
+    return _clip(score, 0.0, 100.0)
+
+
+def detect_bos(df, sh, sl):
+    result = {"bullish": False, "bearish": False, "level": None}
+    if not sh or not sl or len(df) < 3:
+        return result
+
+    close = _safe_float(df["close"].iloc[-1])
+    prev_close = _safe_float(df["close"].iloc[-2])
+    high_level = _safe_float(df["high"].iloc[sh[-1]])
+    low_level = _safe_float(df["low"].iloc[sl[-1]])
+
+    result["bullish"] = close > high_level and prev_close <= high_level
+    result["bearish"] = close < low_level and prev_close >= low_level
+    result["level"] = high_level if result["bullish"] else low_level if result["bearish"] else None
+    return result
+
+
+def detect_choch(df, sh, sl):
+    result = {"bullish": False, "bearish": False}
+    if len(sh) < 2 or len(sl) < 2:
+        return result
+
+    structure = mkt_struct(df, sh, sl)
+    close = _safe_float(df["close"].iloc[-1])
+    last_high = _safe_float(df["high"].iloc[sh[-1]])
+    last_low = _safe_float(df["low"].iloc[sl[-1]])
+
+    if structure == "bearish" and close > last_high:
+        result["bullish"] = True
+    if structure == "bullish" and close < last_low:
+        result["bearish"] = True
+    return result
+
+
+def detect_liquidity_sweep(df, sh, sl, direction):
+    if direction == "bull" and sl:
+        level = _safe_float(df["low"].iloc[sl[-1]])
+        low = _safe_float(df["low"].iloc[-1])
+        close = _safe_float(df["close"].iloc[-1])
+        if low < level and close > level:
+            return {"type": "sellside_sweep", "level": level}
+
+    if direction == "bear" and sh:
+        level = _safe_float(df["high"].iloc[sh[-1]])
+        high = _safe_float(df["high"].iloc[-1])
+        close = _safe_float(df["close"].iloc[-1])
+        if high > level and close < level:
+            return {"type": "buyside_sweep", "level": level}
+
+    return {"type": "none", "level": None}
+
+
+def detect_fvg(df, direction, lookback=60):
+    if df is None or len(df) < 5:
         return []
-    bucket = minutes * 60_000
-    groups: dict[int, list[dict[str, Any]]] = {}
-    for c in candles:
-        key = (int(c["timestamp"]) // bucket) * bucket
-        groups.setdefault(key, []).append(c)
-    out = []
-    for ts, group in sorted(groups.items()):
-        group = sorted(group, key=lambda x: x["timestamp"])
-        out.append({
-            "timestamp": ts,
-            "open": float(group[0]["open"]),
-            "high": max(float(x["high"]) for x in group),
-            "low": min(float(x["low"]) for x in group),
-            "close": float(group[-1]["close"]),
-            "volume": sum(float(x.get("volume", 0.0)) for x in group),
-            "turnover": sum(float(x.get("turnover", 0.0)) for x in group),
-            "confirmed": all(bool(x.get("confirmed", True)) for x in group),
-        })
-    return out
 
-
-def _swings(candles: list[dict[str, Any]]) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
-    highs, lows = [], []
-    n = len(candles)
-    if n < SWING_LEFT + SWING_RIGHT + 1:
-        return highs, lows
-    for i in range(SWING_LEFT, n - SWING_RIGHT):
-        h = candles[i]["high"]
-        l = candles[i]["low"]
-        if all(h > candles[j]["high"] for j in range(i - SWING_LEFT, i)) and all(
-            h >= candles[j]["high"] for j in range(i + 1, i + SWING_RIGHT + 1)
-        ):
-            highs.append((i, float(h)))
-        if all(l < candles[j]["low"] for j in range(i - SWING_LEFT, i)) and all(
-            l <= candles[j]["low"] for j in range(i + 1, i + SWING_RIGHT + 1)
-        ):
-            lows.append((i, float(l)))
-    return highs, lows
-
-
-def _fvg(candles: list[dict[str, Any]]) -> list[POI]:
-    out: list[POI] = []
-    for i in range(2, len(candles)):
-        a, c = candles[i - 2], candles[i]
-        if c["low"] > a["high"]:
-            out.append(POI(f"FVG-L-{i}", "FVG", "LONG", float(a["high"]), float(c["low"]), i, True, float(i)))
-        elif c["high"] < a["low"]:
-            out.append(POI(f"FVG-S-{i}", "FVG", "SHORT", float(c["high"]), float(a["low"]), i, True, float(i)))
-    return out
-
-
-def _fvg_fresh(candles: list[dict[str, Any]], poi: POI, direction: str) -> bool:
-    for c in candles[poi.created_index + 1:]:
-        if direction == "LONG" and c["low"] <= poi.high and c["high"] >= poi.low:
-            return False
-        if direction == "SHORT" and c["high"] >= poi.low and c["low"] <= poi.high:
-            return False
-    return True
-
-
-def _order_blocks(candles: list[dict[str, Any]]) -> list[POI]:
-    atr = _atr(candles, 14) or 0.0
-    out: list[POI] = []
-    for i in range(2, len(candles)):
-        prev, cur = candles[i - 1], candles[i]
-        body = abs(prev["close"] - prev["open"])
-        if cur["close"] > prev["high"] and prev["close"] < prev["open"] and (atr == 0 or body >= atr * 0.10):
-            out.append(POI(f"OB-L-{i-1}", "OB", "LONG", float(prev["low"]), float(prev["open"]), i - 1, True, float(i)))
-        elif cur["close"] < prev["low"] and prev["close"] > prev["open"] and (atr == 0 or body >= atr * 0.10):
-            out.append(POI(f"OB-S-{i-1}", "OB", "SHORT", float(prev["open"]), float(prev["high"]), i - 1, True, float(i)))
-    return out
-
-
-def _trend(candles_1h: list[dict[str, Any]]) -> dict[str, Any]:
-    if len(candles_1h) < 30:
-        return {"bias": "NEUTRAL", "components": [], "score": 0, "ema9": None, "ema20": None}
-    closes = [float(c["close"]) for c in candles_1h]
-    ema9, ema20 = _ema(closes, 9), _ema(closes, 20)
-    highs, lows = _swings(candles_1h)
-    if ema9 is None or ema20 is None:
-        return {"bias": "NEUTRAL", "components": [], "score": 0, "ema9": ema9, "ema20": ema20}
-    if ema9 > ema20:
-        bias = "BULL"
-        comps = [("HTF_EMA_BULL", 22, "1H EMA9 > EMA20")]
-        if len(highs) >= 2 and len(lows) >= 2 and highs[-1][1] > highs[-2][1] and lows[-1][1] > lows[-2][1]:
-            comps.append(("HTF_HH_HL", 13, "1H HH + HL"))
-    elif ema9 < ema20:
-        bias = "BEAR"
-        comps = [("HTF_EMA_BEAR", 22, "1H EMA9 < EMA20")]
-        if len(highs) >= 2 and len(lows) >= 2 and highs[-1][1] < highs[-2][1] and lows[-1][1] < lows[-2][1]:
-            comps.append(("HTF_LH_LL", 13, "1H LH + LL"))
-    else:
-        bias, comps = "NEUTRAL", []
-    return {"bias": bias, "components": comps, "score": sum(x[1] for x in comps), "ema9": ema9, "ema20": ema20}
-
-
-def _fib(candles_1h: list[dict[str, Any]], direction: str) -> tuple[bool, float | None, str, str]:
-    highs, lows = _swings(candles_1h)
-    if not highs or not lows:
-        return False, None, "", ""
-    if direction == "LONG":
-        hi_i, hi = highs[-1]
-        prior_lows = [x for x in lows if x[0] < hi_i]
-        if not prior_lows:
-            return False, None, "", ""
-        lo = prior_lows[-1][1]
-        level = hi - 0.618 * (hi - lo)
-        return candles_1h[-1]["close"] <= level, level, "FIB_DISCOUNT", "1H price in 0.618 discount"
-    lo_i, lo = lows[-1]
-    prior_highs = [x for x in highs if x[0] < lo_i]
-    if not prior_highs:
-        return False, None, "", ""
-    hi = prior_highs[-1][1]
-    level = lo + 0.618 * (hi - lo)
-    return candles_1h[-1]["close"] >= level, level, "FIB_PREMIUM", "1H price in 0.618 premium"
-
-
-def _micro_confirmation(c5: list[dict[str, Any]], direction: str) -> dict[str, Any]:
-    closed = c5[:-1] if c5 and not c5[-1].get("confirmed", True) else c5
-    if len(closed) < 20:
-        return {"sweep": False, "mss": False, "sweep_code": "", "mss_code": "", "level": None}
-    highs, lows = _swings(closed[:-1])
-    last = closed[-1]
-    sweep = False
-    sweep_code = ""
-    sweep_level = None
-    if direction == "LONG" and lows:
-        sweep_level = lows[-1][1]
-        sweep = last["low"] < sweep_level and last["close"] > sweep_level
-        sweep_code = "SSL_SWEEP" if sweep else ""
-    elif direction == "SHORT" and highs:
-        sweep_level = highs[-1][1]
-        sweep = last["high"] > sweep_level and last["close"] < sweep_level
-        sweep_code = "BSL_SWEEP" if sweep else ""
-
-    mss = False
-    mss_code = ""
-    mss_level = None
-    if direction == "LONG" and highs:
-        mss_level = highs[-1][1]
-        mss = last["close"] > mss_level
-        mss_code = "MSS_BULL" if mss else ""
-    elif direction == "SHORT" and lows:
-        mss_level = lows[-1][1]
-        mss = last["close"] < mss_level
-        mss_code = "MSS_BEAR" if mss else ""
-    return {"sweep": sweep, "mss": mss, "sweep_code": sweep_code, "mss_code": mss_code, "level": mss_level or sweep_level}
-
-
-def _in_zone(price: float, poi: POI, atr: float) -> bool:
-    pad = atr * 0.25
-    return poi.low - pad <= price <= poi.high + pad
-
-
-def _poi_key(symbol: str, direction: str, poi: POI) -> str:
-    return f"{symbol}:{direction}:{poi.model}:{poi.poi_id}"
-
-
-def _thesis_key(symbol: str, direction: str) -> str:
-    # Exactly one primary thesis per symbol. Direction can change only if the
-    # existing thesis is still pre-entry and the new thesis is materially stronger.
-    return symbol
-
-
-def _frequency_stats(h1: list[dict[str, Any]], poi: POI, direction: str) -> tuple[int, float, str]:
-    """Approximate setup-opportunity frequency from the available H1 history.
-
-    We only have the recent 15M history, so this is explicitly labeled as an
-    opportunity-frequency estimate, not a 30-day trade-frequency statistic.
-    """
-    days = max(1.0, (h1[-1]["timestamp"] - h1[0]["timestamp"]) / 86_400_000.0)
-    count = 0
-    for p in _fvg(h1):
-        if p.direction == direction and p.high > p.low and _fvg_fresh(h1, p, direction):
-            if p.model == poi.model or poi.model == "OB":
-                count += 1
-    for p in _order_blocks(h1):
-        if p.direction == direction:
-            if p.model == poi.model or poi.model == "OB":
-                count += 1
-    per_day = count / days
-    if per_day >= 8:
-        label = "VERY_HIGH"
-    elif per_day >= 4:
-        label = "HIGH"
-    elif per_day >= 1.5:
-        label = "NORMAL"
-    elif per_day >= 0.5:
-        label = "LOW"
-    else:
-        label = "VERY_LOW"
-    return count, per_day, label
-
-
-def _liquidity_target(h1: list[dict[str, Any]], direction: str, entry: float, sl: float) -> tuple[float | None, str]:
-    """Choose a nearby opposing swing/liquidity target.
-
-    The selected target is later constrained to [MIN_RR, MAX_RR].
-    """
-    highs, lows = _swings(h1)
-    if direction == "LONG":
-        levels = [price for _, price in highs if price > entry]
-        if levels:
-            return min(levels), "SWING_HIGH_LIQUIDITY"
-    else:
-        levels = [price for _, price in lows if price < entry]
-        if levels:
-            return max(levels), "SWING_LOW_LIQUIDITY"
-    return None, "NO_CLEAR_LIQUIDITY"
-
-
-def _choose_tp(entry: float, sl: float, natural_target: float | None) -> tuple[float, float, bool, str]:
-    risk = abs(entry - sl)
-    if risk <= 0:
-        raise ValueError("non-positive risk")
-    if natural_target is None:
-        target = entry + MIN_RR * risk if entry > sl else entry - MIN_RR * risk
-        return target, MIN_RR, False, "FIXED_MIN_RR"
-
-    natural_rr = abs(natural_target - entry) / risk
-    capped = natural_rr > MAX_RR
-    target_rr = max(MIN_RR, min(MAX_RR, natural_rr))
-
-    if entry > sl:
-        target = entry + target_rr * risk
-    else:
-        target = entry - target_rr * risk
-
-    if natural_rr < MIN_RR:
-        model = "FIXED_MIN_RR"
-    elif natural_rr > MAX_RR:
-        model = "LIQUIDITY_CAPPED_4R"
-    else:
-        model = "LIQUIDITY_TARGET"
-    return target, target_rr, capped, model
-
-
-def _calculate_score(components: list[tuple[str, float, str]]) -> int:
-    # Weights are intentionally bounded. This is a ranking/filter score, not probability.
-    total = sum(max(0.0, weight) for _, weight, _ in components)
-    max_possible = 114.0
-    return max(0, min(100, round((total / max_possible) * 100.0)))
-
-
-def _build_setup(symbol: str, direction: str, poi: POI, alternatives: list[POI], a: dict[str, Any], now_ts: int) -> Setup | None:
-    price = float(API.get_price(symbol) or a["price"])
-    atr = float(a["atr"])
-    entry = (poi.low + poi.high) / 2.0
-    pad = max(atr * SL_ATR_PAD, (poi.high - poi.low) * 0.15)
-    if direction == "LONG":
-        sl = poi.low - pad
-    else:
-        sl = poi.high + pad
-    risk = abs(entry - sl)
-    if risk <= 0:
-        return None
-
-    natural_target, liquidity_code = _liquidity_target(a["h1"], direction, entry, sl)
-    tp, rr, capped, tp_model = _choose_tp(entry, sl, natural_target)
-    natural_rr = abs(natural_target - entry) / risk if natural_target is not None else MIN_RR
-
-    micro = a["micro"]
-    in_zone = _in_zone(price, poi, atr)
-    waiting = []
-    score_components = list(a["components"])
-    codes = [x[0] for x in score_components]
-    labels = [x[2] for x in score_components]
-
-    score_components.append(("POI", 15, f"{poi.model} primary POI"))
-    codes.append("ORDER_BLOCK" if poi.model == "OB" else "FRESH_FVG")
-    labels.append(f"H1 {poi.model} primary zone")
-
-    if a["fib_ok"]:
-        score_components.append((a["fib_code"], 12, a["fib_label"]))
-        codes.append(a["fib_code"])
-        labels.append(a["fib_label"])
-    else:
-        waiting.append("0.618 Fibonacci location")
-
-    if a["h4_align"]:
-        score_components.append(("H4_ALIGN", 8, "4H bias aligned"))
-        codes.append("H4_ALIGN")
-        labels.append("4H bias aligned")
-    if a["d1_align"]:
-        score_components.append(("D1_ALIGN", 5, "1D bias aligned"))
-        codes.append("D1_ALIGN")
-        labels.append("1D bias aligned")
-
-    if micro["sweep"]:
-        score_components.append((micro["sweep_code"], 15, "5M liquidity sweep"))
-        codes.append(micro["sweep_code"])
-        labels.append("5M liquidity sweep")
-    else:
-        waiting.append("5M liquidity sweep")
-
-    if micro["mss"]:
-        score_components.append((micro["mss_code"], 18, "5M MSS/ChoCH"))
-        codes.append(micro["mss_code"])
-        labels.append("5M MSS/ChoCH")
-    else:
-        waiting.append("5M MSS/ChoCH")
-
-    if not in_zone:
-        waiting.append("price returns to primary POI")
-
-    freq_count, freq_per_day, freq_label = _frequency_stats(a["h1"], poi, direction)
-    # Frequency is a soft ranking factor only. It must never overwhelm setup quality.
-    if freq_per_day >= 4:
-        freq_weight = 6
-    elif freq_per_day >= 1.5:
-        freq_weight = 4
-    elif freq_per_day >= 0.5:
-        freq_weight = 2
-    else:
-        freq_weight = 1
-    score_components.append(("FREQUENCY", freq_weight, f"Setup opportunity frequency: {freq_label}"))
-    codes.append(f"FREQ_{freq_label}")
-    labels.append(f"Frequency {freq_label} ({freq_per_day:.1f}/day)")
-
-    score = _calculate_score(score_components)
-    if score < MIN_SCORE:
-        return None
-
-    if in_zone and micro["sweep"] and micro["mss"]:
-        state = "PENDING_LIMIT"
-        decision = "TRADE"
-    elif in_zone:
-        state = "WAITING_CONFIRMATION"
-        decision = "READY"
-    else:
-        state = "WATCHING"
-        decision = "WATCH"
-
-    confirmation_price = micro["level"]
-    if confirmation_price is not None:
-        confirmation_condition = (
-            f"5M close {'above' if direction == 'LONG' else 'below'} {confirmation_price:.8f}"
-        )
-    else:
-        confirmation_condition = f"5M liquidity sweep + {'bullish' if direction == 'LONG' else 'bearish'} MSS"
-
-    thesis_key = _thesis_key(symbol, direction)
-    sid = f"S5-{symbol}-{direction}-{uuid.uuid4().hex[:8]}"
-    thesis = (
-        f"{direction} thesis: {a['bias_label']}; primary {poi.model} POI aligns with the HTF context. "
-        f"Frequency={freq_label}; target model={tp_model}."
-    )
-    return Setup(
-        id=sid,
-        thesis_key=thesis_key,
-        symbol=symbol,
-        direction=direction,
-        state=state,
-        model=poi.model,
-        entry_type="LIMIT",
-        entry_price=entry,
-        confirmation_price=confirmation_price,
-        confirmation_condition=confirmation_condition,
-        stop_loss=sl,
-        take_profit=tp,
-        tp_model=tp_model,
-        invalidation_price=poi.low if direction == "LONG" else poi.high,
-        rr=rr,
-        natural_rr=natural_rr,
-        tp_cap_applied=capped,
-        frequency_count=freq_count,
-        frequency_per_day=freq_per_day,
-        frequency_label=freq_label,
-        decision=decision,
-        score=score,
-        created_ts=now_ts,
-        updated_ts=now_ts,
-        expires_ts=now_ts + EXPIRY_MINUTES * 60_000,
-        primary_poi=poi,
-        alternative_pois=alternatives,
-        reason_codes=list(dict.fromkeys(codes)),
-        confluences=list(dict.fromkeys(labels)),
-        waiting_for=list(dict.fromkeys(waiting)),
-        thesis=thesis,
-    )
-
-
-def _active_thesis(symbol: str, direction: str | None = None) -> Setup | None:
-    sid = THESIS_INDEX.get(_thesis_key(symbol, direction or ""))
-    if not sid:
-        return None
-    setup = SETUPS.get(sid)
-    if not setup or setup.state in {"CLOSED", "EXPIRED", "INVALIDATED"}:
-        return None
-    return setup
-
-
-def _merge_thesis(existing: Setup, incoming: Setup) -> bool:
-    changed = False
-    if incoming.score > existing.score:
-        existing.score = incoming.score
-        changed = True
-    if incoming.updated_ts > existing.updated_ts:
-        existing.updated_ts = incoming.updated_ts
-    if incoming.state != existing.state:
-        priority = {
-            "WATCHING": 1,
-            "IN_ZONE": 2,
-            "WAITING_CONFIRMATION": 3,
-            "PENDING_LIMIT": 4,
-            "FILLED": 5,
-            "CLOSED": 6,
-            "EXPIRED": 0,
-            "INVALIDATED": 0,
-        }
-        if priority.get(incoming.state, 0) > priority.get(existing.state, 0):
-            existing.state = incoming.state
-            changed = True
-    if existing.primary_poi.poi_id != incoming.primary_poi.poi_id and incoming.score >= existing.score:
-        existing.alternative_pois.append(existing.primary_poi)
-        existing.primary_poi = incoming.primary_poi
-        existing.model = incoming.model
-        changed = True
-
-    known = {p.poi_id for p in existing.alternative_pois}
-    for p in incoming.alternative_pois + [existing.primary_poi]:
-        if p.poi_id != existing.primary_poi.poi_id and p.poi_id not in known:
-            existing.alternative_pois.append(p)
-            known.add(p.poi_id)
-            changed = True
-
-    existing.reason_codes = list(dict.fromkeys(existing.reason_codes + incoming.reason_codes))
-    existing.confluences = list(dict.fromkeys(existing.confluences + incoming.confluences))
-    existing.waiting_for = list(dict.fromkeys(incoming.waiting_for))
-    existing.confirmation_price = incoming.confirmation_price
-    existing.confirmation_condition = incoming.confirmation_condition
-    existing.entry_price = incoming.entry_price
-    existing.stop_loss = incoming.stop_loss
-    existing.take_profit = incoming.take_profit
-    existing.tp_model = incoming.tp_model
-    existing.invalidation_price = incoming.invalidation_price
-    existing.rr = incoming.rr
-    existing.natural_rr = incoming.natural_rr
-    existing.tp_cap_applied = incoming.tp_cap_applied
-    existing.frequency_count = incoming.frequency_count
-    existing.frequency_per_day = incoming.frequency_per_day
-    existing.frequency_label = incoming.frequency_label
-    existing.decision = incoming.decision
-    existing.thesis = incoming.thesis
-    if changed:
-        COUNTERS["theses_updated"] += 1
-    return changed
-
-
-def _register_thesis(setup: Setup) -> tuple[bool, Setup]:
-    existing = _active_thesis(setup.symbol)
-    if existing:
-        # Never replace a filled/live position with an unrelated thesis.
-        if existing.state == "FILLED":
-            return False, existing
-
-        # Same-direction thesis: merge POIs/confluence and refresh prices.
-        if existing.direction == setup.direction:
-            _merge_thesis(existing, setup)
-            return False, existing
-
-        # Opposite thesis: only switch when the incoming thesis is materially stronger.
-        if setup.score >= existing.score + 8:
-            existing.state = "INVALIDATED"
-            existing.outcome = "replaced_by_stronger_opposite_thesis"
-            COUNTERS["invalidated"] += 1
-            THESIS_INDEX.pop(existing.thesis_key, None)
-            SETUPS.pop(existing.id, None)
-        else:
-            return False, existing
-
-    SETUPS[setup.id] = setup
-    THESIS_INDEX[setup.thesis_key] = setup.id
-    COUNTERS["theses_created"] += 1
-    log.info(
-        "[THESIS] NEW %s | %s | model=%s score=%d state=%s entry=%.8f sl=%.8f tp=%.8f",
-        setup.symbol, setup.direction, setup.model, setup.score, setup.state,
-        setup.entry_price, setup.stop_loss, setup.take_profit,
-    )
-    return True, setup
-
-
-def _analysis_for_symbol(symbol: str, event_tf: str | None = None) -> dict[str, Any]:
-    c15 = API.get_candles(symbol, "15", 700)
-    c5 = API.get_candles(symbol, "5", 500)
-    c1 = API.get_candles(symbol, "1", 500)
-    price = float(API.get_price(symbol) or (c1[-1]["close"] if c1 else 0.0))
-    a: dict[str, Any] = {
-        "symbol": symbol,
-        "bias": "NEUTRAL",
-        "bias_label": "HTF neutral",
-        "price": price,
-        "atr": _atr(c5, 14) or max(price * 0.001, 1e-9),
-        "components": [],
-        "fib_ok": False,
-        "fib_code": "",
-        "fib_label": "",
-        "h4_align": False,
-        "d1_align": False,
-        "micro": _micro_confirmation(c5, "LONG"),
-        "candidates": [],
-        "event_tf": event_tf,
-        "h1": [],
-    }
-    if len(c15) < 120 or len(c5) < 80 or len(c1) < 80:
-        a["labels"] = ["insufficient history"]
-        return a
-
-    h1 = _aggregate(c15, 60)
-    h4 = _aggregate(c15, 240)
-    d1 = _aggregate(c15, 1440)
-    if len(h1) < 30 or len(h4) < 8:
-        a["labels"] = ["insufficient derived HTF history"]
-        return a
-
-    t1 = _trend(h1)
-    t4 = _trend(h4)
-    td = _trend(d1) if len(d1) >= 30 else {"bias": "NEUTRAL", "components": []}
-    a["h1"] = h1
-    a["bias"] = t1["bias"]
-    a["bias_label"] = "1H bullish" if t1["bias"] == "BULL" else "1H bearish" if t1["bias"] == "BEAR" else "HTF neutral"
-    a["components"] = list(t1["components"])
-    a["h4_align"] = t4["bias"] == t1["bias"] and t1["bias"] != "NEUTRAL"
-    a["d1_align"] = td["bias"] == t1["bias"] and t1["bias"] != "NEUTRAL"
-    a["micro"] = _micro_confirmation(c5, "LONG" if t1["bias"] == "BULL" else "SHORT") if t1["bias"] != "NEUTRAL" else a["micro"]
-
-    if t1["bias"] == "NEUTRAL":
-        return a
-
-    direction = "LONG" if t1["bias"] == "BULL" else "SHORT"
-    fib_ok, fib_level, fib_code, fib_label = _fib(h1, direction)
-    a["fib_ok"], a["fib_level"], a["fib_code"], a["fib_label"] = fib_ok, fib_level, fib_code, fib_label
-
-    pois = []
-    for p in _fvg(h1):
-        if p.direction == direction and p.high > p.low and _fvg_fresh(h1, p, direction):
-            pois.append(p)
-    for p in _order_blocks(h1):
-        if p.direction == direction:
-            pois.append(p)
-
-    pois.sort(key=lambda p: p.created_index, reverse=True)
-    if not pois:
-        return a
-
-    primary = pois[0]
-    alternatives = pois[1:5]
-    primary, alternatives = primary, alternatives
-
-    # Learned policy is a bounded soft filter. It can improve selectivity but cannot
-    # bypass the strategy's core RR bounds or force a trade.
-    policy_penalty = 0
-    if LEARNED_POLICY.get("rvol_min", 0.0) > 0:
-        vols = [float(c.get("volume", 0.0)) for c in c15]
-        base_vol = statistics.fmean(vols[-21:-1]) if len(vols) >= 21 else statistics.fmean(vols[:-1] or [1.0])
-        rvol = vols[-1] / base_vol if base_vol > 0 else 1.0
-        a["rvol"] = rvol
-        if rvol < float(LEARNED_POLICY["rvol_min"]):
-            policy_penalty += 10
-    if LEARNED_POLICY.get("efficiency_min", 0.0) > 0:
-        closes = [float(c["close"]) for c in c15]
-        segment = closes[-17:]
-        net = abs(segment[-1] - segment[0]) if len(segment) >= 17 else 0.0
-        path = sum(abs(segment[i] - segment[i - 1]) for i in range(1, len(segment))) if len(segment) >= 17 else 0.0
-        eff = net / path if path > 0 else 0.0
-        a["efficiency_4h"] = eff
-        if eff < float(LEARNED_POLICY["efficiency_min"]):
-            policy_penalty += 8
-
-    # Global market context is supplied by learn.py through DataAPI. It is a
-    # contextual modifier, never a standalone trade trigger.
-    global_ctx = {}
-    try:
-        global_ctx = API.get_global_context() if hasattr(API, "get_global_context") else {}
-    except Exception:
-        global_ctx = {}
-    a["global_context"] = global_ctx
-    context_bonus = 0
-    context_labels: list[str] = []
-    if global_ctx:
-        breadth = float(global_ctx.get("breadth", 0.5))
-        alt_breadth = float(global_ctx.get("alt_breadth", breadth))
-        if direction == "LONG" and breadth >= 0.60:
-            context_bonus += 4; context_labels.append("Global breadth bullish")
-        elif direction == "SHORT" and breadth <= 0.40:
-            context_bonus += 4; context_labels.append("Global breadth bearish")
-        elif (direction == "LONG" and breadth <= 0.40) or (direction == "SHORT" and breadth >= 0.60):
-            context_bonus -= 4; context_labels.append("Global breadth opposed")
-        if global_ctx.get("market_label") == "BTC_LED" and symbol != "BTCUSDT":
-            # Alt longs need stronger pair-specific evidence during BTC-led breadth weakness.
-            if direction == "LONG" and alt_breadth < 0.45:
-                context_bonus -= 5; context_labels.append("BTC-led / weak alt breadth")
-        if global_ctx.get("regime") == "TRANSITION":
-            context_bonus -= 3; context_labels.append("Market transition")
-        elif global_ctx.get("regime") == "EXPANSION":
-            context_bonus += 2; context_labels.append("Market expansion")
-
-    setup = _build_setup(symbol, direction, primary, alternatives, a, int(c15[-1]["timestamp"]))
-    if setup and context_bonus:
-        setup.score = max(0, min(100, setup.score + context_bonus))
-        if context_labels:
-            setup.confluences.extend(context_labels)
-        if context_bonus < 0:
-            setup.reason_codes.append("GLOBAL_CONTEXT_PENALTY")
-        else:
-            setup.reason_codes.append("GLOBAL_CONTEXT_ALIGNMENT")
-        if setup.score < MIN_SCORE:
-            return a
-    if setup and policy_penalty:
-        setup.score = max(0, setup.score - policy_penalty)
-        setup.confluences.append(f"Learned policy penalty -{policy_penalty}")
-        setup.reason_codes.append("LEARNED_POLICY_PENALTY")
-        setup.decision = "WATCH" if setup.score < MIN_SCORE else setup.decision
-        if setup.score < MIN_SCORE:
-            return a
-    if setup:
-        a["candidates"] = [setup]
-    return a
-
-
-# ---------------- public lifecycle ----------------
-def initialize(api: Any, context: dict[str, Any]) -> None:
-    global API, CONTEXT, INITIAL_SCAN_DONE, LEARNED_POLICY, SIGNAL_QUEUE, EMITTED_SIGNALS
-    API = api
-    CONTEXT = dict(context)
-    LEARNED_POLICY = _load_learned_policy()
-    INITIAL_SCAN_DONE = False
-    SIGNAL_QUEUE = []
-    EMITTED_SIGNALS = set()
-    log.info("[STRATEGY V7] learned policy=%s", LEARNED_POLICY)
-    log.info(
-        "[STRATEGY V7] initialized | min_score=%d min_rr=%.2f expiry=%dm",
-        MIN_SCORE, MIN_RR, EXPIRY_MINUTES,
-    )
-
-
-def shutdown() -> None:
-    log.info(
-        "[STRATEGY V7] shutdown | active=%d theses=%d journal=%d",
-        _active_count(), len(SETUPS), len(JOURNAL),
-    )
-
-
-def _active_count() -> int:
-    return sum(
-        1 for s in SETUPS.values()
-        if s.state in {"WATCHING", "IN_ZONE", "WAITING_CONFIRMATION", "PENDING_LIMIT", "FILLED"}
-    )
-
-
-def scan_all(initial: bool = False) -> list[str]:
-    if API is None or not API.is_bootstrap_complete():
-        return ["ℹ️ Strategy masih menunggu historical data lengkap."]
-
-    symbols = API.get_symbols()
-    total = len(symbols)
-    no_candidate = 0
-    created = 0
-    seen_before = set()
-    log.info("[SCAN] %s start | %d symbols", "INITIAL" if initial else "FULL", total)
-
-    for idx, symbol in enumerate(symbols, 1):
-        try:
-            analysis = _analysis_for_symbol(symbol)
-            LAST_ANALYSIS[symbol] = analysis
-            if not analysis.get("candidates"):
-                no_candidate += 1
-            for setup in analysis.get("candidates", []):
-                seen_before.add(setup.thesis_key)
-                is_new, current = _register_thesis(setup)
-                if is_new:
-                    created += 1
-        except Exception:
-            log.exception("[SCAN] %s failed", symbol)
-            no_candidate += 1
-        COUNTERS["symbols_scanned"] += 1
-        if idx == 1 or idx % SCAN_LOG_EVERY == 0 or idx == total:
-            log.info(
-                "[SCAN] progress %d/%d | new=%d no_candidate=%d active=%d",
-                idx, total, created, no_candidate, _active_count(),
-            )
-
-    global INITIAL_SCAN_DONE
-    INITIAL_SCAN_DONE = True
-
-    active = sorted(_active_setups(), key=lambda s: (-s.score, s.symbol, s.direction))
-    lines = [
-        "🔎 INITIAL STRATEGY SCAN COMPLETE" if initial else "🔎 STRATEGY SCAN COMPLETE",
-        "",
-        f"Pairs scanned: {total}",
-        f"New primary theses: {created}",
-        f"Active theses: {len(active)}",
-        f"Pairs with no candidate: {no_candidate}",
-    ]
-    if not active:
-        lines += ["", "No setup met the minimum rule threshold."]
-    else:
-        lines += ["", f"Active setups total: {len(active)}"]
-    log.info("[SCAN SUMMARY] %s", " | ".join(x for x in lines if x))
-    for setup in active:
-        _queue_confirmed_setup(setup)
-    return []
-
-
-def _queue_confirmed_setup(setup: Setup) -> None:
-    if setup.decision != "TRADE" or setup.state != "PENDING_LIMIT":
-        return
-    if setup.id in EMITTED_SIGNALS:
-        return
-    EMITTED_SIGNALS.add(setup.id)
-    SIGNAL_QUEUE.append({
-        "type": "signal",
-        "signal": {
-            "id": setup.id,
-            "symbol": setup.symbol,
-            "direction": setup.direction,
-            "entry_type": setup.entry_type,
-            "entry_price": setup.entry_price,
-            "confirmation_price": setup.confirmation_price,
-            "confirmation_condition": setup.confirmation_condition,
-            "stop_loss": setup.stop_loss,
-            "take_profit": setup.take_profit,
-            "rr": setup.rr,
-            "score": setup.score,
-            "model": setup.model,
-            "decision": setup.decision,
-            "thesis": setup.thesis,
-            "reason_codes": list(setup.reason_codes),
-            "confluences": list(setup.confluences),
-            "frequency_per_day": setup.frequency_per_day,
-            "created_ts": setup.created_ts,
-        },
-    })
-    log.warning("[SIGNAL QUEUED] %s %s entry=%.8f sl=%.8f tp=%.8f rr=%.2f score=%d",
-                setup.symbol, setup.direction, setup.entry_price, setup.stop_loss,
-                setup.take_profit, setup.rr, setup.score)
-
-
-def drain_signals(limit: int = 100) -> list[dict[str, Any]]:
-    with LOCK:
-        n = max(1, int(limit))
-        out = SIGNAL_QUEUE[:n]
-        del SIGNAL_QUEUE[:n]
-        return out
-
-
-def on_data_ready() -> str | None:
-    scan_all(initial=True)
-    return None
-
-
-def _active_setups(symbol: str | None = None) -> list[Setup]:
-    states = {"WATCHING", "IN_ZONE", "WAITING_CONFIRMATION", "PENDING_LIMIT", "FILLED"}
-    rows = [s for s in SETUPS.values() if s.state in states]
-    if symbol:
-        rows = [s for s in rows if s.symbol == symbol.upper()]
-    return sorted(rows, key=lambda s: (-s.score, s.symbol, s.direction))
-
-
-def _invalidate_setup(s: Setup, ts: int, reason: str) -> None:
-    s.state = "INVALIDATED"
-    s.outcome = reason
-    s.updated_ts = ts
-    COUNTERS["invalidated"] += 1
-    _journal(s)
-    log.info("[SETUP CANCELLED] %s %s id=%s reason=%s", s.symbol, s.direction, s.id, reason)
-
-def _expire_and_update_simulation(symbol: str, now_ts: int) -> list[str]:
-    notices: list[str] = []
-    price = API.get_price(symbol)
-    if price is None:
-        return notices
-    for s in list(_active_setups(symbol)):
-        if s.state != "FILLED" and now_ts >= s.expires_ts:
-            _invalidate_setup(s, now_ts, "expired")
+    start = max(0, len(df) - lookback)
+    result = []
+
+    for i in range(start, len(df) - 2):
+        first = df.iloc[i]
+        third = df.iloc[i + 2]
+
+        if direction == "bull" and third["low"] > first["high"]:
+            result.append({
+                "top": float(third["low"]),
+                "bottom": float(first["high"]),
+                "mid": float((third["low"] + first["high"]) / 2),
+                "index": i + 2,
+            })
+
+        elif direction == "bear" and third["high"] < first["low"]:
+            result.append({
+                "top": float(first["low"]),
+                "bottom": float(third["high"]),
+                "mid": float((first["low"] + third["high"]) / 2),
+                "index": i + 2,
+            })
+
+    return result[-5:]
+
+
+def detect_order_blocks(df, direction, lookback=80):
+    if df is None or len(df) < 20:
+        return []
+
+    start = max(1, len(df) - lookback)
+    body_average = _safe_float((df["close"] - df["open"]).abs().iloc[start:].mean())
+    result = []
+
+    for i in range(start, len(df) - 1):
+        candle = df.iloc[i]
+        next_candle = df.iloc[i + 1]
+        impulse = abs(float(next_candle["close"] - next_candle["open"]))
+
+        if body_average <= 0 or impulse < body_average * 1.2:
             continue
-        if s.state == "WAITING_CONFIRMATION":
-            age_min = max(0.0, (now_ts - s.updated_ts) / 60_000.0)
-            inv = s.invalidation_price
-            buf = abs(inv) * INVALIDATION_BUFFER_PCT
-            broken = (s.direction == "LONG" and price <= inv - buf) or (s.direction == "SHORT" and price >= inv + buf)
-            if broken:
-                _invalidate_setup(s, now_ts, "invalidation_broken_before_confirmation")
-                continue
-            if age_min >= CONFIRMATION_TIMEOUT_MINUTES:
-                _invalidate_setup(s, now_ts, "confirmation_timeout")
-                continue
-        if s.state == "PENDING_LIMIT":
-            filled = (s.direction == "LONG" and s.stop_loss < price <= s.entry_price) or (s.direction == "SHORT" and s.entry_price <= price < s.stop_loss)
-            if filled:
-                s.state = "FILLED"
-                s.filled_ts = now_ts
-                POSITIONS[s.id] = Position(s.id, s.symbol, s.direction, s.entry_price, s.stop_loss, s.take_profit, now_ts)
-                COUNTERS["fills"] += 1
-                notices.append(_format_signal(s, "🟢 SIMULATION FILLED"))
-        elif s.state == "FILLED":
-            pos = POSITIONS.get(s.id)
-            if not pos or pos.closed_ts:
-                continue
-            hit_sl = price <= s.stop_loss if s.direction == "LONG" else price >= s.stop_loss
-            hit_tp = price >= s.take_profit if s.direction == "LONG" else price <= s.take_profit
-            if hit_sl:
-                _close(s, now_ts, "SL", -1.0)
-                notices.append(_format_exit(s))
-            elif hit_tp:
-                _close(s, now_ts, "TP", s.rr)
-                notices.append(_format_exit(s))
-    return notices
 
-def _close(s: Setup, ts: int, outcome: str, r: float) -> None:
-    s.state = "CLOSED"
-    s.outcome = outcome
-    s.r_multiple = r
-    pos = POSITIONS.get(s.id)
-    if pos:
-        pos.closed_ts = ts
-        pos.outcome = outcome
-        pos.r_multiple = r
-    if outcome == "TP":
-        COUNTERS["wins"] += 1
-    elif outcome == "SL":
-        COUNTERS["losses"] += 1
-    _journal(s)
+        if direction == "bull" and candle["close"] < candle["open"] and next_candle["close"] > next_candle["open"]:
+            top = max(float(candle["open"]), float(candle["close"]))
+            bottom = min(float(candle["open"]), float(candle["close"]))
+        elif direction == "bear" and candle["close"] > candle["open"] and next_candle["close"] < next_candle["open"]:
+            top = max(float(candle["open"]), float(candle["close"]))
+            bottom = min(float(candle["open"]), float(candle["close"]))
+        else:
+            continue
+
+        result.append({
+            "top": top,
+            "bottom": bottom,
+            "mid": (top + bottom) / 2,
+            "index": i,
+            "quality": _clip(50.0 + (impulse / body_average) * 10.0, 0.0, 100.0),
+        })
+
+    return sorted(result, key=lambda x: (x["quality"], x["index"]), reverse=True)[:5]
 
 
-def _journal(s: Setup) -> None:
-    JOURNAL.append({"ts": int(time.time() * 1000), "setup": asdict(s)})
-    if len(JOURNAL) > 5000:
-        del JOURNAL[:-5000]
+def _find_zone(m15, direction):
+    fvgs = detect_fvg(m15, direction)
+    obs = detect_order_blocks(m15, direction)
+    candidates = []
 
+    for zone in fvgs:
+        candidates.append((zone.get("quality", 65.0), zone))
+    for zone in obs:
+        candidates.append((zone.get("quality", 55.0), zone))
 
-def on_market_event(event: dict[str, Any]) -> str | None:
-    if API is None or event.get("type") != "candle":
-        return None
-    symbol = str(event.get("symbol") or "").upper()
-    tf = str(event.get("timeframe") or "")
-    candle = event.get("candle") or {}
-    if not symbol or tf not in {"1", "5", "15"}:
+    if not candidates:
         return None
 
-    now_ts = int(candle.get("timestamp") or int(time.time() * 1000))
-    notices = []
-    with LOCK:
-        notices.extend(_expire_and_update_simulation(symbol, now_ts))
-        if not candle.get("confirmed", False):
-            return "\n\n".join(notices[:2]) if notices else None
-
-        analysis = _analysis_for_symbol(symbol, tf)
-        LAST_ANALYSIS[symbol] = analysis
-        COUNTERS["event_scans"] += 1
-
-        for incoming in analysis.get("candidates", []):
-            existing = _active_thesis(incoming.symbol, incoming.direction)
-            if existing:
-                old_state = existing.state
-                _merge_thesis(existing, incoming)
-                if existing.state != old_state:
-                    if existing.state == "WAITING_CONFIRMATION":
-                        log.info("[WAITING] %s %s id=%s", existing.symbol, existing.direction, existing.id)
-                    elif existing.state == "PENDING_LIMIT":
-                        COUNTERS["confirmed"] += 1
-                        existing.confirmation_ts = now_ts
-                        _queue_confirmed_setup(existing)
-                        log.info("[CONFIRMED] %s %s id=%s", existing.symbol, existing.direction, existing.id)
-            else:
-                is_new, setup = _register_thesis(incoming)
-                if is_new:
-                    _queue_confirmed_setup(setup)
-                    log.info("[NEW SETUP] %s %s state=%s score=%d freq=%.2f/d", setup.symbol, setup.direction, setup.state, setup.score, setup.frequency_per_day)
-
-        log.info(
-            "[EVENT] %s %s CLOSED | bias=%s candidate=%d active=%d",
-            symbol, tf, analysis.get("bias"), len(analysis.get("candidates", [])), len(_active_setups(symbol)),
-        )
-    return "\n\n".join(dict.fromkeys(notices[:3])) if notices else None
+    candidates.sort(key=lambda item: (item[0], item[1]["index"]), reverse=True)
+    return candidates[0][1]
 
 
-# ---------------- signal formatting ----------------
-def _format_signal(s: Setup, header: str = "🧠 TRADING SIGNAL") -> str:
-    waiting = ", ".join(s.waiting_for) if s.waiting_for else "-"
-    alts = ", ".join(f"{p.model} {p.low:.8f}-{p.high:.8f}" for p in s.alternative_pois[:3]) or "-"
-    return (
-        f"{header}\n\n"
-        f"{s.symbol} — {s.direction}\n"
-        f"Model: {s.model}\n"
-        f"Score: {s.score}/100\n"
-        f"Status: {s.state}\n\n"
-        f"📍 Entry: {s.entry_type} @ {s.entry_price:.8f}\n"
-        f"🔔 Confirmation: {s.confirmation_price:.8f} ({s.confirmation_condition})\n" if s.confirmation_price is not None else
-        f"{header}\n\n{s.symbol} — {s.direction}\nModel: {s.model}\nScore: {s.score}/100\nStatus: {s.state}\n\n"
-        f"📍 Entry: {s.entry_type} @ {s.entry_price:.8f}\n"
-        f"🔔 Confirmation: {s.confirmation_condition}\n"
-    ) + (
-        f"🛑 Stop Loss: {s.stop_loss:.8f}\n"
-        f"⚠️ Invalidation: {s.invalidation_price:.8f}\n"
-        f"🎯 Take Profit: {s.take_profit:.8f}\n"
-        f"TP Model: {s.tp_model}\n"
-        f"📐 RR: 1:{s.rr:.2f}\n"
-        f"Natural RR: 1:{s.natural_rr:.2f} | TP cap: {'YES' if s.tp_cap_applied else 'NO'}\n"
-        f"Decision: {s.decision}\n"
-        f"Frequency: {s.frequency_label} ({s.frequency_per_day:.1f}/day, {s.frequency_count} observed)\n\n"
-        f"Confluence: {', '.join(s.confluences) or '-'}\n"
-        f"Reason codes: {', '.join(s.reason_codes) or '-'}\n"
-        f"Waiting: {waiting}\n"
-        f"Alternative POIs: {alts}\n"
-        f"Setup ID: {s.id}"
-    )
+def _direction_from_frames(h1, m15, d1=None):
+    frames = [h1, m15]
+    if d1 is not None:
+        frames.append(d1)
+
+    directions = []
+    for frame in frames:
+        if frame is None or len(frame) < 25:
+            continue
+        sh, sl = swing_pts(frame, 5)
+        structure = mkt_struct(frame, sh, sl)
+        last = frame.iloc[-1]
+        if structure == "bullish" or last["ema9"] > last["ema20"]:
+            directions.append("bull")
+        elif structure == "bearish" or last["ema9"] < last["ema20"]:
+            directions.append("bear")
+        else:
+            directions.append("neutral")
+
+    if directions.count("bull") >= 2 and directions.count("bull") > directions.count("bear"):
+        return "bull"
+    if directions.count("bear") >= 2 and directions.count("bear") > directions.count("bull"):
+        return "bear"
+    return "neutral"
 
 
-def _format_exit(s: Setup) -> str:
-    icon = "✅" if s.outcome == "TP" else "🛑"
-    return f"{icon} SIMULATION {s.outcome}\n{s.symbol} {s.direction}\nR: {s.r_multiple:.2f}\nSetup: {s.id}"
+def score_direction(df_h1, df_m15, df_d1=None):
+    h1 = build_df(df_h1)
+    m15 = build_df(df_m15)
+    d1 = build_df(df_d1) if df_d1 is not None else None
 
+    bull = 0.0
+    bear = 0.0
 
+    for frame, weight in ((h1, 40), (m15, 35), (d1, 25)):
+        if frame is None:
+            continue
+        sh, sl = swing_pts(frame, 5)
+        structure = mkt_struct(frame, sh, sl)
+        last = frame.iloc[-1]
+        if structure == "bullish" or last["ema9"] > last["ema20"]:
+            bull += weight
+        if structure == "bearish" or last["ema9"] < last["ema20"]:
+            bear += weight
 
-def get_learning_snapshot() -> dict[str, Any]:
-    active = _active_setups()
+    direction = "bull" if bull > bear else "bear" if bear > bull else "neutral"
+    total = max(bull + bear, 1.0)
     return {
-        "version": VERSION,
-        "policy": dict(LEARNED_POLICY),
-        "active_setups": [asdict(x) for x in active],
-        "counters": dict(COUNTERS),
+        "direction": direction,
+        "confidence": _clip(max(bull, bear) / total * 100.0, 0, 100),
+        "bull_score": bull,
+        "bear_score": bear,
     }
 
-# ---------------- commands ----------------
-def _why(symbol: str) -> str:
-    a = LAST_ANALYSIS.get(symbol.upper())
-    if not a:
-        return f"ℹ️ Belum ada analysis untuk {symbol.upper()}. Gunakan /rescan."
-    codes = ", ".join(x[0] for x in a.get("components", [])) or "-"
-    candidates = a.get("candidates") or []
-    lines = [
-        f"🔍 WHY {symbol.upper()}",
-        "",
-        f"Bias: {a.get('bias_label')}",
-        f"Base structure: {codes}",
-        f"Fib: {'YES' if a.get('fib_ok') else 'NO'}",
-        f"H4 align: {'YES' if a.get('h4_align') else 'NO'}",
-        f"D1 align: {'YES' if a.get('d1_align') else 'NO'}",
-        f"Candidates: {len(candidates)}",
-    ]
-    for s in candidates:
-        lines.extend(["", _format_signal(s)])
-    return "\n".join(lines)[:3900]
+
+def _build_candidate(h1, m15, d1, direction):
+    if h1 is None or m15 is None:
+        return None
+
+    sh15, sl15 = swing_pts(m15, 5)
+    if not sh15 or not sl15:
+        return None
+
+    current = _safe_float(m15["close"].iloc[-1])
+    atr = _safe_float(m15["atr"].iloc[-1])
+    if current <= 0 or atr <= 0:
+        return None
+
+    h1_sh, h1_sl = swing_pts(h1, 5)
+    if not h1_sh or not h1_sl:
+        return None
+
+    sweep = detect_liquidity_sweep(m15, sh15, sl15, direction)
+    bos = detect_bos(m15, sh15, sl15)
+    choch = detect_choch(m15, sh15, sl15)
+    zone = _find_zone(m15, direction)
+
+    if zone is None:
+        return None
+
+    last_swing_high = _safe_float(m15["high"].iloc[sh15[-1]])
+    last_swing_low = _safe_float(m15["low"].iloc[sl15[-1]])
+
+    h1_high = _safe_float(h1["high"].iloc[h1_sh[-1]])
+    h1_low = _safe_float(h1["low"].iloc[h1_sl[-1]])
+    swing_low = min(last_swing_low, h1_low)
+    swing_high = max(last_swing_high, h1_high)
+
+    location = fib_position(zone["mid"], swing_low, swing_high)
+    location_good = location <= 0.618 if direction == "bull" else location >= 0.382
+
+    trigger = (
+        bos["bullish"] or choch["bullish"] or sweep["type"] == "sellside_sweep"
+        if direction == "bull"
+        else bos["bearish"] or choch["bearish"] or sweep["type"] == "buyside_sweep"
+    )
+
+    if not trigger:
+        return None
+
+    if direction == "bull":
+        entry = zone["mid"]
+        sl = min(last_swing_low, zone["bottom"]) - 0.10 * atr
+        risk = entry - sl
+        if risk <= 0:
+            return None
+        targets = [float(h1["high"].iloc[i]) for i in h1_sh if float(h1["high"].iloc[i]) > entry]
+        tp = min(targets) if targets else entry + 2.0 * risk
+        tp = max(tp, entry + 2.0 * risk)
+    else:
+        entry = zone["mid"]
+        sl = max(last_swing_high, zone["top"]) + 0.10 * atr
+        risk = sl - entry
+        if risk <= 0:
+            return None
+        targets = [float(h1["low"].iloc[i]) for i in h1_sl if float(h1["low"].iloc[i]) < entry]
+        tp = max(targets) if targets else entry - 2.0 * risk
+        tp = min(tp, entry - 2.0 * risk)
+
+    rr = abs(tp - entry) / max(risk, 1e-12)
+    if rr < MIN_RR:
+        return None
+
+    trend = trend_strength(m15, sh15, sl15)
+    htf_alignment = 1.0 if _direction_from_frames(h1, m15, d1) == direction else 0.0
+    score = 50.0
+    score += trend * 0.25
+    score += 12.0 if location_good else -10.0
+    score += 12.0 if htf_alignment else 0.0
+    score += 10.0 if sweep["type"] != "none" else 0.0
+    score += 8.0 if bos["bullish"] or bos["bearish"] else 0.0
+    score += 6.0 if choch["bullish"] or choch["bearish"] else 0.0
+    confidence = _clip(score, 0, 100)
+
+    return {
+        "side": "Buy" if direction == "bull" else "Sell",
+        "entry": float(entry),
+        "tp": float(tp),
+        "sl": float(sl),
+        "rr": float(rr),
+        "confidence": float(confidence),
+        "strategy_version": STRATEGY_VERSION,
+        "reasons": [
+            "HTF_ALIGNMENT" if htf_alignment else "HTF_MIXED",
+            "LIQUIDITY_SWEEP" if sweep["type"] != "none" else "NO_SWEEP",
+            "BOS" if bos["bullish"] or bos["bearish"] else "NO_BOS",
+            "CHOCH" if choch["bullish"] or choch["bearish"] else "NO_CHOCH",
+            "FVG_OR_OB",
+            "FIB_LOCATION" if location_good else "WEAK_LOCATION",
+        ],
+        "trail": {
+            "enabled": True,
+            "activation_r": 1.0,
+            "distance_r": 0.5,
+        },
+    }
 
 
-def handle_command(text: str) -> str | None:
-    parts = text.split()
-    cmd = parts[0].lower() if parts else ""
 
-    if cmd in {"/setups", "/signals", "/top"}:
-        rows = _active_setups()
-        if cmd == "/top":
-            rows = rows[:10]; page_size = 10; page = 1; total_pages = 1; page_rows = rows
-        else:
-            page_size = 30 if cmd == "/signals" else SETUPS_PAGE_SIZE
-            if cmd == "/signals":
-                rows = [s for s in rows if s.state == "PENDING_LIMIT"]
-            page = max(1, int(parts[1])) if len(parts) > 1 and parts[1].isdigit() else 1
-            total_pages = max(1, (len(rows) + page_size - 1) // page_size)
-            page = min(page, total_pages)
-            page_rows = rows[(page - 1) * page_size: page * page_size]
-        lines = [f"📋 {cmd.upper()[1:]} | Total: {len(rows)} | Page: {page}/{total_pages}"]
-        for i, s in enumerate(page_rows, (page - 1) * page_size + 1):
-            lines.append(
-                f"{i}. {s.symbol} {s.direction} | {s.state} | score={s.score} | freq={s.frequency_per_day:.1f}/d\n"
-                f"Entry {s.entry_type} {s.entry_price:.8f} | Confirm {s.confirmation_price if s.confirmation_price is not None else '-'} | SL {s.stop_loss:.8f} | TP {s.take_profit:.8f}"
-            )
-        if cmd == "/setups" and total_pages > 1:
-            lines.append(f"\n➡️ Next: /setups {page + 1 if page < total_pages else 1}")
-        return "\n".join(lines)[:3900]
+def candles_to_df(candles):
+    rows = []
+    for candle in candles:
+        if len(candle) < 6:
+            continue
+        rows.append({
+            "timestamp": pd.to_datetime(int(candle[0]), unit="ms", utc=True),
+            "open": float(candle[1]),
+            "high": float(candle[2]),
+            "low": float(candle[3]),
+            "close": float(candle[4]),
+            "volume": float(candle[5]),
+        })
+    if not rows:
+        return None
+    df = pd.DataFrame(rows).set_index("timestamp").sort_index()
+    return df
 
-    if cmd == "/setup":
-        if len(parts) < 2:
-            return "Format: /setup SETUP_ID"
-        s = SETUPS.get(parts[1])
-        return _format_signal(s) if s else "❌ Setup ID tidak ditemukan."
 
-    if cmd == "/watch":
-        if len(parts) < 2:
-            return "Format: /watch BTCUSDT"
-        rows = _active_setups(parts[1].upper())
-        return "\n\n".join(_format_signal(s) for s in rows)[:3900] if rows else f"📭 Tidak ada signal untuk {parts[1].upper()}."
+def resample_ohlc(df, rule):
+    if df is None or df.empty:
+        return None
+    return df.resample(rule).agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }).dropna()
 
-    if cmd == "/why":
-        if len(parts) < 2:
-            return "Format: /why BTCUSDT"
-        return _why(parts[1])
 
-    if cmd == "/strategystatus":
-        states: dict[str, int] = {}
-        for s in _active_setups():
-            states[s.state] = states.get(s.state, 0) + 1
-        return (
-            "🧠 STRATEGY V7 STATUS\n"
-            f"Symbols: {len(API.get_symbols()) if API else 0}\n"
-            f"Initial scan: {INITIAL_SCAN_DONE}\n"
-            f"Symbols scanned: {COUNTERS['symbols_scanned']}\n"
-            f"Event scans: {COUNTERS['event_scans']}\n"
-            f"Primary theses created: {COUNTERS['theses_created']}\n"
-            f"Theses updated: {COUNTERS['theses_updated']}\n"
-            f"Confirmed transitions: {COUNTERS['confirmed']}\n"
-            f"Fills: {COUNTERS['fills']}\n"
-            f"Wins: {COUNTERS['wins']} | Losses: {COUNTERS['losses']}\n"
-            f"Expired: {COUNTERS['expired']} | Invalidated: {COUNTERS['invalidated']}\n"
-            f"Active: {_active_count()}\n"
-            f"States: {states or '-'}\n"
-            f"Min score: {MIN_SCORE} | RR range: {MIN_RR:.2f}-{MAX_RR:.2f}"
+def strategy_logic(symbol, candles):
+    if not candles or len(candles) < 672:
+        print(f"[STRATEGY] {symbol} FAILED | M15={len(candles) if candles else 0}")
+        return None
+
+    m15 = candles_to_df(candles[-672:])
+    if m15 is None or len(m15) < 672:
+        print(f"[STRATEGY] {symbol} FAILED | invalid M15 data")
+        return None
+
+    h1 = resample_ohlc(m15, "1h")
+    h4 = resample_ohlc(m15, "4h")
+    d1 = resample_ohlc(m15, "1D")
+
+    result = full_analyze(
+        h1,
+        m15,
+        d1,
+        symbol=symbol,
+        h4=h4,
+    )
+
+    if result and result.get("execution_eligible"):
+        candidate = result.get("candidate") or {}
+        print(
+            f"[STRATEGY] {symbol} SIGNAL | "
+            f"{candidate.get('side')} | "
+            f"Entry={candidate.get('entry')} | "
+            f"TP={candidate.get('tp')} | "
+            f"SL={candidate.get('sl')}"
         )
+    else:
+        reason = result.get("reason", "NO_SIGNAL") if result else "NO_SIGNAL"
+        print(f"[STRATEGY] {symbol} WAIT | {reason}")
 
-    if cmd == "/rescan":
-        with LOCK:
-            return "\n\n".join(scan_all(initial=False))
+    return result
 
-    if cmd == "/journal":
-        if not JOURNAL:
-            return "📓 Simulation journal masih kosong."
-        lines = ["📓 SIMULATION JOURNAL"]
-        for row in reversed(JOURNAL[-20:]):
-            s = row["setup"]
-            lines.append(f"{s['symbol']} {s['direction']} | {s['model']} | {s['outcome']} | R={s['r_multiple']}")
-        return "\n".join(lines)
+def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, **kwargs):
+    """Deterministic strategy decision. Learning can adjust admission, not geometry."""
+    h1 = build_df(df_h1)
+    m15 = build_df(df_m15)
+    d1 = build_df(df_d1) if df_d1 is not None else None
 
-    if cmd == "/debug":
-        if len(parts) < 2:
-            return "Format: /debug BTCUSDT"
-        a = LAST_ANALYSIS.get(parts[1].upper())
-        return repr(a)[:3900] if a else f"ℹ️ Belum ada snapshot untuk {parts[1].upper()}."
+    if h1 is None or m15 is None:
+        return {
+            "symbol": symbol,
+            "decision": "WAIT",
+            "no_signal": True,
+            "execution_eligible": False,
+            "reason": "INSUFFICIENT_DATA",
+            "strategy_version": STRATEGY_VERSION,
+        }
 
-    return None
+    score = score_direction(h1, m15, d1)
+    direction = score["direction"]
+    if direction == "neutral":
+        return {
+            "symbol": symbol,
+            "decision": "WAIT",
+            "no_signal": True,
+            "execution_eligible": False,
+            "reason": "NO_CLEAR_DIRECTION",
+            "score": score,
+            "strategy_version": STRATEGY_VERSION,
+        }
+
+    candidate = _build_candidate(h1, m15, d1, direction)
+    if candidate is None:
+        return {
+            "symbol": symbol,
+            "decision": "WAIT",
+            "no_signal": True,
+            "execution_eligible": False,
+            "reason": "NO_VALID_SETUP",
+            "score": score,
+            "strategy_version": STRATEGY_VERSION,
+        }
+
+    learning = learn.evaluate_candidate(symbol, candidate)
+    threshold = learning.get("threshold", learn.get_confidence_threshold())
+    eligible = candidate["confidence"] >= threshold
+
+    packet = {
+        "symbol": symbol,
+        "decision": "READY" if eligible else "WAIT",
+        "no_signal": not eligible,
+        "execution_eligible": eligible,
+        "confidence": candidate["confidence"],
+        "confidence_threshold": threshold,
+        "score": score,
+        "candidate": candidate,
+        "learning": learning,
+        "strategy_version": STRATEGY_VERSION,
+    }
+
+    learn.record_candidate(packet)
+    return packet
+
+
+def manage_position(state, df_m15, df_h1=None, df_d1=None, symbol=None, **kwargs):
+    """Return a trailing/protection recommendation; does not execute orders."""
+    m15 = build_df(df_m15)
+    if m15 is None or not state:
+        return {"action": "HOLD"}
+
+    direction = str(state.get("side") or state.get("direction") or "").lower()
+    entry = _safe_float(state.get("entry"))
+    current = _safe_float(m15["close"].iloc[-1])
+    risk = abs(entry - _safe_float(state.get("sl")))
+
+    if entry <= 0 or risk <= 0:
+        return {"action": "HOLD"}
+
+    profit_r = ((current - entry) / risk) if direction in {"buy", "bull"} else ((entry - current) / risk)
+
+    if profit_r >= 1.0:
+        return {
+            "action": "TRAIL",
+            "enabled": True,
+            "distance": risk * 0.5,
+            "profit_r": round(profit_r, 3),
+        }
+
+    return {"action": "HOLD", "profit_r": round(profit_r, 3)}

@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: smcauto-launcher
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python try.py
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: ALLOWED_USER_ID
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: REPO_NAME
+        sync: false
+      - key: GITHUB_BRANCH
+        value: main
+      - key: MAIN_FILE
+        value: main.py
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_API_SECRET
+        sync: false
+      - key: PORT
+        value: 10000
