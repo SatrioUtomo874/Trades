@@ -66,7 +66,7 @@ log = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # VERSION / CONTRACT
 # -----------------------------------------------------------------------------
-FINAL_BRAIN_VERSION = "V130_STRATEGY_BRAIN_EXECUTION_CONTRACT_TRAILING"
+FINAL_BRAIN_VERSION = "V132_STRATEGY_BRAIN_EXECUTION_HANDOFF_GEOMETRY"
 BRAIN_INTERFACE_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
 V35_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
 V32_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
@@ -1106,7 +1106,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             eligible=True
         learning_features=_build_candidate_learning_features(c,account,freq,_safe_float(ollama.get("delta"),0.0))
         out={
-            "symbol":symbol,"decision":c.direction,"candidate":True,"is_candidate":True,
+            "symbol":symbol,"decision":("BUY" if c.direction=="BULL" else "SELL"),"candidate":True,"is_candidate":True,
             "execution_eligible":eligible,"eligibility_source":"brain_v2",
             "eligibility_reason":reason if not eligible else "BRAIN_READY",
             "analysis_stage":"READY" if eligible else "WAIT_ENTRY",
@@ -1126,10 +1126,10 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             "low_confidence":(c.confidence < max(60,required)),
             "low_confidence_cutoff":required,"ban_recommended":False,
             # Canonical execution handoff. main.py is the only execution authority.
-            "execution_contract":"V130",
+            "execution_contract":"V132",
             "execution":{
                 "symbol":str(symbol or "").upper(),
-                "side":c.direction.upper(),
+                "side":("BUY" if c.direction=="BULL" else "SELL"),
                 "entry":float(c.entry),
                 "sl":float(c.sl),
                 "tp":float(c.tp),
@@ -1156,7 +1156,6 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             out["analysis_stage"]="EXECUTION_CONTRACT_REJECTED"
             out["rejected_reason"]="INVALID_EXECUTION_PACKET"
             out["eligibility_reason"]="INVALID_EXECUTION_PACKET"
-        return out
         return out
     except Exception as exc:
         log.exception("[BRAIN V2] full_analyze failed")
