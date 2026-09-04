@@ -80,7 +80,7 @@ MONITOR_INTERVAL    = 15 * 60
 STRATEGY_MANAGE_INTERVAL = 60
 BRAIN_CONFIDENCE_DISPLAY_FALLBACK = "brain-owned"
 WIB = timezone(timedelta(hours=7))   # format jam entry di /trade
-MAIN_ENGINE_VERSION = "MAIN-BODY-V130-BRAIN-EXECUTION-CONTRACT-TRAILING"
+MAIN_ENGINE_VERSION = "MAIN-BODY-V132-GITHUB-GET-VERIFY-COMPAT"
 
 # ── SCAN MARKET-DATA CACHE ─────────────────────────────────────────────
 # Scanner tidak boleh mengambil candle yang sama berulang-ulang. Cache ini
@@ -548,7 +548,7 @@ BINANCE_KEYS_PRESENT = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
 REAL_TRADE_ENABLED   = False
 
 # Execution infrastructure invariants
-EXECUTION_ENGINE_VERSION = "MAIN-BODY-V130-BRAIN-EXECUTION-CONTRACT-TRAILING"
+EXECUTION_ENGINE_VERSION = "MAIN-BODY-V132-GITHUB-GET-VERIFY-COMPAT"
 RUNTIME_SCHEMA_VERSION = "runtime_v1"
 EVENT_SCHEMA_VERSION = "event_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v1"
@@ -1905,13 +1905,26 @@ def _commit_to_github(content, path="strategy_logic.py", commit_msg="Update stra
         try:
             r = requests.get(url, headers=headers, timeout=15)
             if r.status_code == 200:
-                obj = r.json(); cf = obj.get("content")
-                rc = cf.get("content") if isinstance(cf, dict) else None
-                enc = cf.get("encoding") if isinstance(cf, dict) else None
-                if enc == "base64" and rc:
-                    if base64.b64decode(rc.replace("\n", "")) == expected:
-                        return True
-                    last_error = f"GitHub remote payload mismatch untuk {path}"
+                obj = r.json()
+                # GitHub Contents API GET returns `content` as a TOP-LEVEL STRING
+                # and `encoding` as a TOP-LEVEL FIELD. The PUT response may wrap
+                # content inside an object, so verification must support both shapes.
+                cf = obj.get("content") if isinstance(obj, dict) else None
+                enc = obj.get("encoding") if isinstance(obj, dict) else None
+                if isinstance(cf, dict):
+                    enc = cf.get("encoding") or enc
+                    rc = cf.get("content")
+                else:
+                    rc = cf
+                if isinstance(rc, str) and rc.strip() and str(enc).lower() == "base64":
+                    try:
+                        decoded = base64.b64decode(rc.replace("\n", ""), validate=True)
+                    except Exception as exc:
+                        last_error = f"GitHub remote base64 rusak untuk {path}: {exc}"
+                    else:
+                        if decoded == expected:
+                            return True
+                        last_error = f"GitHub remote payload mismatch untuk {path}"
                 else:
                     last_error = f"GitHub remote content kosong/tidak tersedia untuk {path} (attempt {attempt})"
             else:
