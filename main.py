@@ -1856,37 +1856,70 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 REPO_NAME = os.getenv("REPO_NAME")  # format: "username/repo"
 
 def _commit_to_github(content, path="strategy_logic.py", commit_msg="Update strategy_logic via Telegram /ganti"):
-    """Commit file ke GitHub menggunakan API."""
+    """Commit file ke GitHub dan verifikasi payload remote sebelum sukses."""
     if not GITHUB_TOKEN or not REPO_NAME:
         raise ValueError("GITHUB_TOKEN atau REPO_NAME tidak diset di environment.")
-    
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError(f"GitHub commit ditolak: payload kosong untuk {path}")
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    
-    # 1. Get current SHA (untuk update)
-    sha = None
-    try:
-        resp = requests.get(url, headers=headers)
-        if resp.status_code == 200:
-            sha = resp.json().get("sha")
-    except Exception:
-        pass
-    
-    # 2. Commit baru
-    import base64
-    data = {
-        "message": commit_msg,
-        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
-        "branch": "main"
-    }
-    if sha:
-        data["sha"] = sha
-    
-    resp = requests.put(url, headers=headers, json=data)
-    if resp.status_code not in (200, 201):
-        raise ValueError(f"GitHub commit gagal: {resp.status_code} {resp.text}")
-    
-    return True
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    import base64, time as _time
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    expected = content.encode("utf-8")
+    last_error = None
+    for attempt in range(1, 4):
+        sha = None
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code == 200:
+                sha = r.json().get("sha")
+            elif r.status_code != 404:
+                last_error = f"GET existing file: HTTP {r.status_code} {r.text[:300]}"
+        except Exception as exc:
+            last_error = f"GET existing file: {exc}"
+        data = {"message": commit_msg, "content": encoded, "branch": "main"}
+        if sha:
+            data["sha"] = sha
+        try:
+            r = requests.put(url, headers=headers, json=data, timeout=30)
+        except Exception as exc:
+            last_error = f"PUT GitHub: {exc}"
+            if attempt < 3:
+                _time.sleep(attempt); continue
+            raise ValueError(last_error) from exc
+        if r.status_code not in (200, 201):
+            last_error = f"GitHub commit gagal: {r.status_code} {r.text[:500]}"
+            if attempt < 3 and r.status_code in (409, 502, 503, 504):
+                _time.sleep(attempt); continue
+            raise ValueError(last_error)
+        # PUT response harus memuat payload base64 yang sama.
+        try:
+            obj = r.json(); cf = obj.get("content") or {}
+            rc = cf.get("content") if isinstance(cf, dict) else None
+            if cf.get("encoding") == "base64" and rc and base64.b64decode(rc.replace("\n", "")) == expected:
+                return True
+        except Exception as exc:
+            last_error = f"PUT response verification failed: {exc}"
+        # GET ulang. Ini menangkap kasus persis: PUT HTTP sukses, file remote kosong.
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code == 200:
+                obj = r.json(); cf = obj.get("content") or {}
+                rc = cf.get("content") if isinstance(cf, dict) else None
+                if cf.get("encoding") == "base64" and rc:
+                    if base64.b64decode(rc.replace("\n", "")) == expected:
+                        return True
+                    last_error = f"GitHub remote payload mismatch untuk {path}"
+                else:
+                    last_error = f"GitHub remote content kosong/tidak tersedia untuk {path} (attempt {attempt})"
+            else:
+                last_error = f"GitHub verification GET gagal: HTTP {r.status_code} {r.text[:300]}"
+        except Exception as exc:
+            last_error = f"GitHub verification GET exception: {exc}"
+        if attempt < 3:
+            _time.sleep(attempt)
+    raise ValueError(last_error or f"GitHub commit gagal diverifikasi: {path}")
+
 # ============================================================
 # TAMBAHAN BARU (END)
 # ============================================================
