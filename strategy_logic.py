@@ -66,7 +66,7 @@ log = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # VERSION / CONTRACT
 # -----------------------------------------------------------------------------
-FINAL_BRAIN_VERSION = "V133_STRATEGY_BRAIN_PENDING_ENTRY_AWARE"
+FINAL_BRAIN_VERSION = "V135_COMBINED_BASELINE_REBUILD"
 BRAIN_INTERFACE_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
 V35_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
 V32_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
@@ -353,48 +353,63 @@ def fib_position(price: float, swing_low: float, swing_high: float) -> float:
     return _clip((price - swing_low) / rng, 0.0, 1.0)
 
 
+
 def _trend_strength(df: pd.DataFrame, sh: list, sl: list) -> float:
-    if df is None or len(df) < 20:
+    """Directional trend strength based on confirmed swing progress and price/time slope.
+
+    The baseline treats trend strength as directional energy: how far successive
+    directional swing extremes travel per unit of time, normalized by ATR.
+    """
+    if df is None or len(df) < 30:
         return 0.0
+    last = df.iloc[-1]
+    atr = _safe_float(last.get("atr"), 0.0)
+    if atr <= 0:
+        return 0.0
+
     struct = _market_structure(df, sh, sl)
-    score = 50.0
-    if struct == "bullish":
-        score += 15
-    elif struct == "bearish":
-        score += 15
+    score = 35.0
+    if struct in {"bullish", "bearish"}:
+        score += 20.0
     else:
-        score -= 10
-    # Slope of confirmed extremes per candle, normalized by ATR.
+        score -= 8.0
+
     try:
         if struct == "bullish" and len(sh) >= 3:
-            p1 = float(df["high"].iloc[sh[-3]])
-            p2 = float(df["high"].iloc[sh[-2]])
-            p3 = float(df["high"].iloc[sh[-1]])
-            dt1 = max(1, sh[-2] - sh[-3]); dt2 = max(1, sh[-1] - sh[-2])
-            impulse_accel = ((p3 - p2) / dt2) - ((p2 - p1) / dt1)
-            atr = _safe_float(df["atr"].iloc[-1], 0.0)
-            if atr > 0:
-                score += _clip(impulse_accel / atr * 1000.0, -15, 15)
+            pts = [(int(i), _safe_float(df["high"].iloc[i])) for i in sh[-3:]]
         elif struct == "bearish" and len(sl) >= 3:
-            p1 = float(df["low"].iloc[sl[-3]])
-            p2 = float(df["low"].iloc[sl[-2]])
-            p3 = float(df["low"].iloc[sl[-1]])
-            dt1 = max(1, sl[-2] - sl[-3]); dt2 = max(1, sl[-1] - sl[-2])
-            impulse_accel = ((p2 - p3) / dt2) - ((p1 - p2) / dt1)
-            atr = _safe_float(df["atr"].iloc[-1], 0.0)
-            if atr > 0:
-                score += _clip(impulse_accel / atr * 1000.0, -15, 15)
+            pts = [(int(i), _safe_float(df["low"].iloc[i])) for i in sl[-3:]]
+        else:
+            pts = []
+        if len(pts) >= 2:
+            slopes = []
+            for (i1, p1), (i2, p2) in zip(pts[:-1], pts[1:]):
+                dt = max(1, i2 - i1)
+                slopes.append(abs(p2 - p1) / dt / atr)
+            slope = float(np.mean(slopes))
+            score += _clip(slope * 900.0, 0.0, 28.0)
+
+            # Acceleration in the directional swing sequence.
+            if len(slopes) >= 2 and slopes[-1] > slopes[-2] * 1.10:
+                score += 7.0
+            elif len(slopes) >= 2 and slopes[-1] < slopes[-2] * 0.75:
+                score -= 7.0
     except Exception:
         pass
-    # EMA ordering and volume participation.
-    last = df.iloc[-1]
-    bull_ema = last["ema9"] > last["ema21"] > last["ema50"]
-    bear_ema = last["ema9"] < last["ema21"] < last["ema50"]
-    if bull_ema or bear_ema:
+
+    ema9 = _safe_float(last.get("ema9"), 0)
+    ema21 = _safe_float(last.get("ema21"), 0)
+    ema50 = _safe_float(last.get("ema50"), 0)
+    if struct == "bullish" and ema9 > ema21 > ema50:
         score += 8
-    rel_vol = _safe_float(last["volume"], 0.0) / max(_safe_float(last["vol_sma"], 1.0), 1e-12)
-    score += _clip((rel_vol - 1.0) * 8.0, -8, 8)
-    return _clip(score, 0, 100)
+    elif struct == "bearish" and ema9 < ema21 < ema50:
+        score += 8
+    elif struct in {"bullish", "bearish"}:
+        score -= 4
+
+    rel_vol = _safe_float(last.get("volume"), 0.0) / max(_safe_float(last.get("vol_sma"), 1.0), 1e-12)
+    score += _clip((rel_vol - 1.0) * 6.0, -6.0, 6.0)
+    return _clip(score, 0.0, 100.0)
 
 
 def _macro_bias(df_btc_h1: Optional[pd.DataFrame]) -> str:
@@ -594,23 +609,88 @@ def _entry_location(df: pd.DataFrame, direction: str, entry: float) -> dict:
     return {"location_score":_clip(score,0,100),"range_position":rp,"rsi_timing":"aligned" if score>=75 else "neutral" if score>=55 else "against","reasons":reasons}
 
 
+
 def _confirmation(df: pd.DataFrame, direction: str) -> dict:
+    """Lower-timeframe confirmation based on liquidity + structure + displacement.
+
+    A confirmation does not require the current candle to be the original swing
+    candle. It checks the most recent completed structure and the latest closed
+    candle, which is materially more stable for a scanner.
+    """
+    out = {
+        "confirmed": False, "bos": {}, "choch": {}, "cisd": {},
+        "sweep": {}, "displacement_atr": 0.0, "reason": "NO_CONFIRMATION"
+    }
+    if df is None or len(df) < 40:
+        return out
+
     sh, sl = swing_pts(df, 3)
-    bos=detect_bos(df,sh,sl)
-    choch=detect_choch(df,sh,sl)
-    cisd=detect_cisd(df,8)
-    atr=_safe_float(df["atr"].iloc[-1],0.0)
-    body=abs(_safe_float(df["close"].iloc[-1])-_safe_float(df["open"].iloc[-1]))
-    displacement=(body/max(atr,1e-12)) if atr else 0.0
-    bullish = bool(bos["bullish_bos"] or choch["bullish_choch"] or cisd["bullish_cisd"]) and displacement>=0.20
-    bearish = bool(bos["bearish_bos"] or choch["bearish_choch"] or cisd["bearish_cisd"]) and displacement>=0.20
-    ok = bullish if direction=="bull" else bearish
-    return {"confirmed":ok,"bos":bos,"choch":choch,"cisd":cisd,"displacement_atr":displacement}
+    bos = detect_bos(df, sh, sl)
+    choch = detect_choch(df, sh, sl)
+    cisd = detect_cisd(df, 8)
+    sweep = detect_liquidity_sweep(df, sh, sl, direction)
+
+    close = _safe_float(df["close"].iloc[-1])
+    op = _safe_float(df["open"].iloc[-1])
+    atr = _safe_float(df["atr"].iloc[-1], 0.0)
+    displacement = abs(close - op) / max(atr, 1e-12) if atr > 0 else 0.0
+
+    # Robust recent structure break: use swings that are not formed by the
+    # final 3 candles, then require the latest close to break that level.
+    recent_sh = [i for i in sh if i <= len(df) - 4]
+    recent_sl = [i for i in sl if i <= len(df) - 4]
+    bull_break = False
+    bear_break = False
+    if recent_sh:
+        level = _safe_float(df["high"].iloc[recent_sh[-1]], 0.0)
+        prev = _safe_float(df["close"].iloc[-2], 0.0)
+        bull_break = close > level and prev <= level
+    if recent_sl:
+        level = _safe_float(df["low"].iloc[recent_sl[-1]], 0.0)
+        prev = _safe_float(df["close"].iloc[-2], 0.0)
+        bear_break = close < level and prev >= level
+
+    bullish_event = bool(bos.get("bullish_bos") or choch.get("bullish_choch") or
+                          cisd.get("bullish_cisd") or bull_break)
+    bearish_event = bool(bos.get("bearish_bos") or choch.get("bearish_choch") or
+                          cisd.get("bearish_cisd") or bear_break)
+
+    # Combined baseline: a liquidity sweep is preferred, while a clean
+    # structure break/displacement can also validate a continuation setup.
+    directional_event = bullish_event if direction == "bull" else bearish_event
+    sweep_bonus = sweep.get("type") != "none"
+    body_ok = displacement >= 0.15
+    confirmed = directional_event and body_ok
+
+    if sweep_bonus and directional_event:
+        confirmed = confirmed or displacement >= 0.10
+
+    reasons = []
+    if sweep_bonus:
+        reasons.append(str(sweep.get("type")).upper())
+    if bull_break and direction == "bull":
+        reasons.append("RECENT_BULLISH_STRUCTURE_BREAK")
+    if bear_break and direction == "bear":
+        reasons.append("RECENT_BEARISH_STRUCTURE_BREAK")
+    if direction == "bull" and choch.get("bullish_choch"):
+        reasons.append("BULLISH_CHOCH")
+    if direction == "bear" and choch.get("bearish_choch"):
+        reasons.append("BEARISH_CHOCH")
+    if direction == "bull" and cisd.get("bullish_cisd"):
+        reasons.append("BULLISH_CISD")
+    if direction == "bear" and cisd.get("bearish_cisd"):
+        reasons.append("BEARISH_CISD")
+    if confirmed:
+        reasons.append("DISPLACEMENT_CONFIRMED")
+    out.update({
+        "confirmed": bool(confirmed),
+        "bos": bos, "choch": choch, "cisd": cisd, "sweep": sweep,
+        "displacement_atr": round(displacement, 4),
+        "reason": reasons or ["NO_CONFIRMATION"]
+    })
+    return out
 
 
-# -----------------------------------------------------------------------------
-# MARKET STATE / DIRECTION
-# -----------------------------------------------------------------------------
 def _frame_bias(df: Optional[pd.DataFrame], interval_minutes: Optional[int]) -> tuple[str,float,float,float]:
     d=build_df(df, interval_minutes)
     if d is None:
@@ -693,87 +773,192 @@ def score_direction(df_h1, df_m15, df_d1=None):
 # -----------------------------------------------------------------------------
 # GEOMETRY / CANDIDATE ENGINE
 # -----------------------------------------------------------------------------
+
 def _candidate_for_direction(state: MarketState, m15d: pd.DataFrame, h1d: pd.DataFrame, direction: str) -> Optional[Candidate]:
-    sign=direction
-    p=_safe_float(m15d["close"].iloc[-1])
-    atr=_safe_float(m15d["atr"].iloc[-1])
-    if p<=0 or atr<=0: return None
-    ob=detect_order_blocks(m15d,sign)
-    fvg=detect_fvg(m15d,sign)
-    poi=None
-    if ob:
-        poi=ob[0]
-    elif fvg:
-        poi=fvg[0]
+    """Build a candidate from the combined.txt baseline.
+
+    Model:
+      1) determine directional HTF context;
+      2) prefer a fresh H1 order block/FVG;
+      3) require price to be in/near that HTF value area;
+      4) confirm on M15 with structure/liquidity/displacement;
+      5) execute from a lower-timeframe FVG/OB when available;
+      6) SL beyond structural invalidation and TP at external liquidity,
+         preserving the global minimum RR.
+    """
+    if h1d is None or m15d is None or len(h1d) < 60 or len(m15d) < 60:
+        return None
+
+    p = _safe_float(m15d["close"].iloc[-1])
+    atr = _safe_float(m15d["atr"].iloc[-1], 0.0)
+    h1_atr = _safe_float(h1d["atr"].iloc[-1], 0.0)
+    if p <= 0 or atr <= 0 or h1_atr <= 0:
+        return None
+
+    # Higher-timeframe POI is the primary location filter.
+    h1_obs = detect_order_blocks(h1d, direction, 100)
+    h1_fvgs = detect_fvg(h1d, direction, 100)
+    h1_zones = []
+    for z in h1_obs:
+        zz = dict(z); zz["kind"] = "H1_OB"; h1_zones.append(zz)
+    for z in h1_fvgs:
+        zz = dict(z); zz["quality"] = 62.0; zz["kind"] = "H1_FVG"; h1_zones.append(zz)
+
+    if not h1_zones:
+        return None
+
+    # Prefer fresh, recent, high-quality zones.
+    h1_zones.sort(key=lambda z: (
+        -_safe_float(z.get("quality"), 50),
+        -_safe_float(z.get("idx"), 0)
+    ))
+
+    poi = None
+    proximity = max(0.75 * atr, 0.35 * h1_atr)
+    for z in h1_zones:
+        top = _safe_float(z.get("top"), 0)
+        bot = _safe_float(z.get("bot"), 0)
+        if top <= 0 or bot <= 0 or top < bot:
+            continue
+        # A limit setup is valid when price is inside the zone or reasonably
+        # close to it; this prevents chasing a distant zone.
+        if bot - proximity <= p <= top + proximity:
+            poi = z
+            break
     if poi is None:
         return None
-    entry=_safe_float(poi.get("mid"),p)
-    if not entry>0: return None
-    loc=_entry_location(m15d,sign,entry)
-    sh,sl=swing_pts(m15d,5)
-    last_sw_hi=_safe_float(m15d["high"].iloc[sh[-1]],p) if sh else p+atr
-    last_sw_lo=_safe_float(m15d["low"].iloc[sl[-1]],p) if sl else p-atr
-    if direction=="bull":
-        sl_price=min(last_sw_lo,entry-0.85*atr)
-        # Structural target: next external swing / extension.
-        target=max(p+2.0*atr, last_sw_hi+0.5*atr)
-        if target<=entry: target=entry+2.0*abs(entry-sl_price)
+
+    # Once price reaches the HTF zone, use M15 for the execution confirmation.
+    confirm = _confirmation(m15d, direction)
+    sh15, sl15 = swing_pts(m15d, 3)
+    lower_obs = detect_order_blocks(m15d, direction, 80)
+    lower_fvgs = detect_fvg(m15d, direction, 80)
+
+    entry_zone = None
+    if confirm["confirmed"]:
+        # Fresh lower-TF FVG is preferred for precise entry.
+        for z in reversed(lower_fvgs):
+            if direction == "bull":
+                if _safe_float(z.get("bot"), 0) > 0 and z["bot"] <= p + proximity:
+                    entry_zone = dict(z); entry_zone["kind"] = "M15_FVG"; break
+            else:
+                if _safe_float(z.get("top"), 0) > 0 and z["top"] >= p - proximity:
+                    entry_zone = dict(z); entry_zone["kind"] = "M15_FVG"; break
+        if entry_zone is None and lower_obs:
+            entry_zone = dict(lower_obs[0]); entry_zone["kind"] = "M15_OB"
+
+    if entry_zone is None:
+        # No lower-TF zone means the H1 zone itself is the entry area. The
+        # confirmation still has to be present before this becomes eligible.
+        if not confirm["confirmed"]:
+            return None
+        entry_zone = dict(poi)
+        entry_zone["kind"] = poi.get("kind", "H1_POI")
+
+    entry = _safe_float(entry_zone.get("mid"), 0.0)
+    if entry <= 0:
+        return None
+
+    # Avoid chasing an entry that is materially away from current price.
+    if abs(entry - p) > max(1.25 * atr, 0.60 * h1_atr):
+        return None
+
+    # Structural invalidation from M15, with H1 POI boundaries as a second
+    # safety reference.
+    last_hi = _safe_float(m15d["high"].iloc[sh15[-1]], p + atr) if sh15 else p + atr
+    last_lo = _safe_float(m15d["low"].iloc[sl15[-1]], p - atr) if sl15 else p - atr
+    poi_top = _safe_float(poi.get("top"), entry + atr)
+    poi_bot = _safe_float(poi.get("bot"), entry - atr)
+
+    if direction == "bull":
+        candidates = [x for x in (last_lo, poi_bot) if 0 < x < entry]
+        sl_price = min(candidates) if candidates else entry - 0.85 * atr
+        sl_price -= 0.10 * atr
+        # External buy-side liquidity: nearest meaningful H1/M15 high above entry.
+        targets = []
+        for idx in swing_pts(h1d, 5)[0]:
+            v = _safe_float(h1d["high"].iloc[idx], 0)
+            if v > entry: targets.append(v)
+        for idx in sh15:
+            v = _safe_float(m15d["high"].iloc[idx], 0)
+            if v > entry: targets.append(v)
+        target = min([v for v in targets if v > entry], default=entry + 2.5 * abs(entry-sl_price))
+        # Do not use a target that is too close to invalidate the 2R minimum.
+        target = max(target, entry + 2.0 * abs(entry-sl_price))
     else:
-        sl_price=max(last_sw_hi,entry+0.85*atr)
-        target=min(p-2.0*atr, last_sw_lo-0.5*atr)
-        if target>=entry: target=entry-2.0*abs(entry-sl_price)
-    risk=abs(entry-sl_price)
-    if risk<=0: return None
-    rr=abs(target-entry)/risk
-    # Search a farther structural target if RR < 2.
+        candidates = [x for x in (last_hi, poi_top) if x > entry]
+        sl_price = max(candidates) if candidates else entry + 0.85 * atr
+        sl_price += 0.10 * atr
+        targets = []
+        for idx in swing_pts(h1d, 5)[1]:
+            v = _safe_float(h1d["low"].iloc[idx], 0)
+            if 0 < v < entry: targets.append(v)
+        for idx in sl15:
+            v = _safe_float(m15d["low"].iloc[idx], 0)
+            if 0 < v < entry: targets.append(v)
+        target = max([v for v in targets if v < entry], default=entry - 2.5 * abs(entry-sl_price))
+        target = min(target, entry - 2.0 * abs(entry-sl_price))
+
+    risk = abs(entry - sl_price)
+    if risk <= 0:
+        return None
+    rr = abs(target-entry) / risk
     if rr < MIN_RR:
-        swing_targets=[]
-        if direction=="bull":
-            for idx in sh:
-                val=_safe_float(m15d["high"].iloc[idx])
-                if val>entry: swing_targets.append(val)
-            ext=entry+risk*(2.5+FIB_EXT_1)
-            target=max([target,*swing_targets,ext])
-        else:
-            for idx in sl:
-                val=_safe_float(m15d["low"].iloc[idx])
-                if val<entry: swing_targets.append(val)
-            ext=entry-risk*(2.5+FIB_EXT_1)
-            target=min([target,*swing_targets,ext])
-        rr=abs(target-entry)/risk
-    if rr<MIN_RR: return None
-    confirm=_confirmation(m15d,direction)
-    sweep=detect_liquidity_sweep(m15d,sh,sl,direction)
-    inducement=detect_inducement(m15d,direction)
-    htf_align=1.0 if state.htf_bias==("bullish" if direction=="bull" else "bearish") else 0.0
-    macro_align=1.0 if state.macro_bias==("bullish" if direction=="bull" else "bearish") else 0.5 if state.macro_bias=="unknown" else 0.0
-    poi_score=_safe_float(poi.get("quality"),60.0) if isinstance(poi,dict) else 55.0
-    liq_score=60.0
-    reasons=[]
-    if htf_align: reasons.append("HTF_ALIGNED")
-    if macro_align>=1: reasons.append("MACRO_ALIGNED")
-    if state.trend_strength>=72: reasons.append("STRONG_TREND")
-    if sweep["type"]!="none": liq_score+=20; reasons.append(sweep["type"].upper())
-    if inducement.get("swept"): liq_score+=8; reasons.append("INDUCEMENT_SWEPT")
-    if poi_score>=70: reasons.append("HIGH_QUALITY_POI")
-    if confirm["confirmed"]: reasons.append("M15_CONFIRMATION")
-    else: reasons.append("NO_FRESH_CONFIRMATION")
-    if loc["location_score"]>=75: reasons.append("GOOD_LOCATION")
-    else: reasons.extend(loc["reasons"][:2])
-    setup_quality=_clip(
-        poi_score*0.30 + state.trend_strength*0.20 + state.structure_strength*0.15 +
-        liq_score*0.12 + loc["location_score"]*0.13 + htf_align*10 + macro_align*5, 0, 100)
-    raw_conf=setup_quality
-    raw_conf += 7 if confirm["confirmed"] else -10
-    raw_conf += 5 if sweep["type"]!="none" else 0
-    raw_conf += 4 if rr>=3 else 0
-    raw_conf -= 10 if loc["location_score"]<45 else 0
-    raw_conf=_clip(raw_conf,0,100)
-    return Candidate(direction.upper(),entry,sl_price,target,rr,
-                     "H1_OB" if ob else "M15_FVG",raw_conf,setup_quality,
-                     loc["location_score"],state.trend_strength,state.structure_strength,
-                     liq_score,htf_align,macro_align,True,confirm["confirmed"],reasons,
-                     ["HTF_STRUCTURE_BREAK","POI_INVALIDATION","M15_THESIS_FAILURE"])
+        return None
+
+    loc = _entry_location(m15d, direction, entry)
+    htf_align = 1.0 if state.htf_bias == ("bullish" if direction == "bull" else "bearish") else 0.0
+    macro_align = (
+        1.0 if state.macro_bias == ("bullish" if direction == "bull" else "bearish")
+        else 0.5 if state.macro_bias == "unknown" else 0.0
+    )
+    poi_score = _safe_float(poi.get("quality"), 62.0)
+    sweep = confirm.get("sweep") or {"type": "none"}
+    liq_score = 62.0 + (18.0 if sweep.get("type") != "none" else 0.0)
+
+    reasons = [
+        "HTF_ALIGNED" if htf_align else "HTF_NEUTRAL",
+        str(poi.get("kind", "H1_POI")),
+        "FRESH_POI",
+    ]
+    if macro_align >= 1:
+        reasons.append("MACRO_ALIGNED")
+    if state.trend_strength >= 65:
+        reasons.append("TREND_STRENGTH")
+    if sweep.get("type") != "none":
+        reasons.append(str(sweep["type"]).upper())
+    reasons.extend([r for r in confirm.get("reason", []) if r not in reasons])
+    if loc["location_score"] >= 70:
+        reasons.append("GOOD_LOCATION")
+    if rr >= 3:
+        reasons.append("STRUCTURAL_RR_3R_PLUS")
+
+    setup_quality = _clip(
+        poi_score * 0.28 +
+        state.trend_strength * 0.22 +
+        state.structure_strength * 0.16 +
+        liq_score * 0.14 +
+        loc["location_score"] * 0.12 +
+        htf_align * 5.0 +
+        macro_align * 3.0,
+        0, 100
+    )
+    raw_conf = setup_quality
+    raw_conf += 9 if confirm["confirmed"] else -18
+    raw_conf += 5 if sweep.get("type") != "none" else 0
+    raw_conf += 4 if rr >= 3 else 0
+    raw_conf += 3 if loc["location_score"] >= 75 else 0
+    raw_conf = _clip(raw_conf, 0, 100)
+
+    return Candidate(
+        direction.upper(), entry, sl_price, target, rr,
+        str(entry_zone.get("kind", "M15_FVG")),
+        raw_conf, setup_quality, loc["location_score"],
+        state.trend_strength, state.structure_strength, liq_score,
+        htf_align, macro_align, True, confirm["confirmed"],
+        reasons,
+        ["HTF_POI_INVALIDATION", "M15_STRUCTURE_FAILURE", "LIQUIDITY_THESIS_FAILURE"]
+    )
 
 
 def _account_context(trade_history=None, kwargs=None) -> dict:
@@ -1087,15 +1272,20 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
         if c.confidence>=OLLAMA_MIN_CONFIDENCE:
             ollama=_ollama_critic(packet)
             c.confidence=_clip(c.confidence+_safe_float(ollama.get("delta"),0.0),0,100)
+            # Ollama is advisory. It may lower confidence or flag risk, but
+            # it cannot veto a deterministic strategy setup. This prevents a
+            # generic/unknown symbol or an LLM disagreement from turning a
+            # valid market-structure setup into a hard rejection.
             if str(ollama.get("verdict"))=="INVALIDATE":
-                return _no_signal_packet(symbol,state,score,"LLM_INVALIDATED",market_data_source,extra={"ollama":ollama,"candidate":c.to_dict()})
-            if str(ollama.get("verdict"))=="WAIT":
-                c.trigger_confirmed=False
+                c.reasons.append("LLM_RISK_FLAG")
+                c.confidence = _clip(c.confidence - 4.0, 0, 100)
+            elif str(ollama.get("verdict"))=="WAIT":
+                c.reasons.append("LLM_WAIT_ADVISORY")
         threshold=get_active_confidence_threshold()
         # Drawdown guard is not a strategy veto: it raises the quality requirement modestly.
         dd=account.get("drawdown_pct",0.0)
         required=threshold + (6 if dd>=6 else 3 if dd>=3 else 0)
-        if not c.trigger_confirmed and c.confidence<required+5:
+        if not c.trigger_confirmed:
             reason="WAIT_CONFIRMATION"
             eligible=False
         elif c.confidence < required:
@@ -1126,7 +1316,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             "low_confidence":(c.confidence < max(60,required)),
             "low_confidence_cutoff":required,"ban_recommended":False,
             # Canonical execution handoff. main.py is the only execution authority.
-            "execution_contract":"V132",
+            "execution_contract":"V135",
             "execution":{
                 "symbol":str(symbol or "").upper(),
                 "side":("BUY" if c.direction=="BULL" else "SELL"),
