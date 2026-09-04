@@ -66,7 +66,7 @@ log = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # VERSION / CONTRACT
 # -----------------------------------------------------------------------------
-FINAL_BRAIN_VERSION = "V135_COMBINED_BASELINE_REBUILD"
+FINAL_BRAIN_VERSION = "V136_COMBINED_FREQUENCY_LEARNING_REBUILD"
 BRAIN_INTERFACE_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
 V35_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
 V32_VERSION = "V128_COIN_ROTATION_BRAIN_PROGRESS"
@@ -775,16 +775,14 @@ def score_direction(df_h1, df_m15, df_d1=None):
 # -----------------------------------------------------------------------------
 
 def _candidate_for_direction(state: MarketState, m15d: pd.DataFrame, h1d: pd.DataFrame, direction: str) -> Optional[Candidate]:
-    """Build a candidate from the combined.txt baseline.
+    """Build a staged candidate from the combined.txt baseline.
 
-    Model:
-      1) determine directional HTF context;
-      2) prefer a fresh H1 order block/FVG;
-      3) require price to be in/near that HTF value area;
-      4) confirm on M15 with structure/liquidity/displacement;
-      5) execute from a lower-timeframe FVG/OB when available;
-      6) SL beyond structural invalidation and TP at external liquidity,
-         preserving the global minimum RR.
+    Important design change in V136:
+    - POI discovery and entry eligibility are separate stages.
+    - A valid directional POI may be *approaching* and does not need to be
+      touched on the current candle to become a candidate.
+    - Execution still requires the actual reaction/confirmation at the POI.
+    This lets the brain learn opportunity frequency without fabricating entries.
     """
     if h1d is None or m15d is None or len(h1d) < 60 or len(m15d) < 60:
         return None
@@ -795,7 +793,7 @@ def _candidate_for_direction(state: MarketState, m15d: pd.DataFrame, h1d: pd.Dat
     if p <= 0 or atr <= 0 or h1_atr <= 0:
         return None
 
-    # Higher-timeframe POI is the primary location filter.
+    # H1 is the primary POI timeframe, matching combined.txt.
     h1_obs = detect_order_blocks(h1d, direction, 100)
     h1_fvgs = detect_fvg(h1d, direction, 100)
     h1_zones = []
@@ -804,162 +802,158 @@ def _candidate_for_direction(state: MarketState, m15d: pd.DataFrame, h1d: pd.Dat
     for z in h1_fvgs:
         zz = dict(z); zz["quality"] = 62.0; zz["kind"] = "H1_FVG"; h1_zones.append(zz)
 
+    # Detector fallback: derive a structural demand/supply zone from a recent
+    # displacement when the strict OB/FVG detector found no zone. This is still
+    # price-action geometry; it does not create a directional signal by itself.
+    if not h1_zones:
+        sh1, sl1 = swing_pts(h1d, 5)
+        look = min(18, len(h1d) - 1)
+        sub = h1d.iloc[-look:]
+        body = (sub["close"] - sub["open"]).abs()
+        avg_body = max(_safe_float(body.mean(), 0.0), 1e-12)
+        for j in range(max(1, len(h1d)-look), len(h1d)-1):
+            row = h1d.iloc[j]
+            nxt = h1d.iloc[j+1]
+            impulse = abs(_safe_float(nxt["close"] - nxt["open"]))
+            if direction == "bull" and row["close"] < row["open"] and nxt["close"] > nxt["open"] and impulse >= avg_body*1.15:
+                h1_zones.append({"top":float(max(row["open"],row["close"])),
+                                 "bot":float(min(row["open"],row["close"])),
+                                 "mid":float((row["open"]+row["close"])/2),
+                                 "idx":j,"quality":58.0,"kind":"H1_STRUCTURAL_DEMAND"})
+            elif direction == "bear" and row["close"] > row["open"] and nxt["close"] < nxt["open"] and impulse >= avg_body*1.15:
+                h1_zones.append({"top":float(max(row["open"],row["close"])),
+                                 "bot":float(min(row["open"],row["close"])),
+                                 "mid":float((row["open"]+row["close"])/2),
+                                 "idx":j,"quality":58.0,"kind":"H1_STRUCTURAL_SUPPLY"})
+
     if not h1_zones:
         return None
 
-    # Prefer fresh, recent, high-quality zones.
-    h1_zones.sort(key=lambda z: (
-        -_safe_float(z.get("quality"), 50),
-        -_safe_float(z.get("idx"), 0)
-    ))
-
-    poi = None
-    proximity = max(0.75 * atr, 0.35 * h1_atr)
+    # Choose the best zone by quality + freshness + distance. Distance is now a
+    # score, not a hard rejection. A setup can be watched while price approaches.
+    h1_zones.sort(key=lambda z: (-_safe_float(z.get("quality"),50), -_safe_float(z.get("idx"),0)))
+    max_watch_distance = max(8.0 * atr, 3.0 * h1_atr)
+    ranked = []
     for z in h1_zones:
-        top = _safe_float(z.get("top"), 0)
-        bot = _safe_float(z.get("bot"), 0)
+        top = _safe_float(z.get("top"), 0); bot = _safe_float(z.get("bot"), 0)
         if top <= 0 or bot <= 0 or top < bot:
             continue
-        # A limit setup is valid when price is inside the zone or reasonably
-        # close to it; this prevents chasing a distant zone.
-        if bot - proximity <= p <= top + proximity:
-            poi = z
-            break
-    if poi is None:
-        return None
+        dist = 0.0 if bot <= p <= top else min(abs(p-bot), abs(p-top))
+        if dist <= max_watch_distance:
+            ranked.append((dist, z))
+    if not ranked:
+        # If all zones are stale/far, retain the freshest valid zone only as a
+        # monitoring candidate when it remains within a broad structural range.
+        ranked = [(min(abs(p-_safe_float(z.get("bot"),p)), abs(p-_safe_float(z.get("top"),p))), z)
+                  for z in h1_zones[:3]
+                  if _safe_float(z.get("top"),0)>0 and _safe_float(z.get("bot"),0)>0]
 
-    # Once price reaches the HTF zone, use M15 for the execution confirmation.
-    confirm = _confirmation(m15d, direction)
+    if not ranked:
+        return None
+    ranked.sort(key=lambda x: (x[0] / max(h1_atr,atr,1e-12), -_safe_float(x[1].get("quality"),50), -_safe_float(x[1].get("idx"),0)))
+    distance, poi = ranked[0]
+    poi_top = _safe_float(poi.get("top"),0); poi_bot = _safe_float(poi.get("bot"),0)
+    in_poi = poi_bot <= p <= poi_top
+    proximity = max(1.25 * atr, 0.55 * h1_atr)
+    near_poi = in_poi or distance <= proximity
+
+    # Confirmation is evaluated only as execution evidence. A distant/approaching
+    # POI is a legitimate learning candidate, not an executable signal.
+    confirm = _confirmation(m15d, direction) if near_poi else {
+        "confirmed":False,"bos":False,"choch":False,"cisd":False,"sweep":{"type":"none"},
+        "displacement":0.0,"reason":["POI_APPROACHING","AWAIT_POI_REACTION"]
+    }
+
     sh15, sl15 = swing_pts(m15d, 3)
     lower_obs = detect_order_blocks(m15d, direction, 80)
     lower_fvgs = detect_fvg(m15d, direction, 80)
 
     entry_zone = None
     if confirm["confirmed"]:
-        # Fresh lower-TF FVG is preferred for precise entry.
         for z in reversed(lower_fvgs):
-            if direction == "bull":
-                if _safe_float(z.get("bot"), 0) > 0 and z["bot"] <= p + proximity:
-                    entry_zone = dict(z); entry_zone["kind"] = "M15_FVG"; break
-            else:
-                if _safe_float(z.get("top"), 0) > 0 and z["top"] >= p - proximity:
-                    entry_zone = dict(z); entry_zone["kind"] = "M15_FVG"; break
+            top = _safe_float(z.get("top"),0); bot = _safe_float(z.get("bot"),0)
+            if top <= 0 or bot <= 0: continue
+            if direction == "bull" and bot <= p + proximity and top >= p - proximity:
+                entry_zone = dict(z); entry_zone["kind"]="M15_FVG"; break
+            if direction == "bear" and bot <= p + proximity and top >= p - proximity:
+                entry_zone = dict(z); entry_zone["kind"]="M15_FVG"; break
         if entry_zone is None and lower_obs:
-            entry_zone = dict(lower_obs[0]); entry_zone["kind"] = "M15_OB"
+            entry_zone = dict(lower_obs[0]); entry_zone["kind"]="M15_OB"
 
     if entry_zone is None:
-        # No lower-TF zone means the H1 zone itself is the entry area. The
-        # confirmation still has to be present before this becomes eligible.
-        if not confirm["confirmed"]:
-            return None
         entry_zone = dict(poi)
-        entry_zone["kind"] = poi.get("kind", "H1_POI")
+        entry_zone["kind"] = poi.get("kind","H1_POI")
 
     entry = _safe_float(entry_zone.get("mid"), 0.0)
     if entry <= 0:
         return None
 
-    # Avoid chasing an entry that is materially away from current price.
-    if abs(entry - p) > max(1.25 * atr, 0.60 * h1_atr):
-        return None
-
-    # Structural invalidation from M15, with H1 POI boundaries as a second
-    # safety reference.
+    # For an approaching POI the zone midpoint is a planning price, not a
+    # permission to chase. Execution remains disabled until confirmation.
     last_hi = _safe_float(m15d["high"].iloc[sh15[-1]], p + atr) if sh15 else p + atr
     last_lo = _safe_float(m15d["low"].iloc[sl15[-1]], p - atr) if sl15 else p - atr
-    poi_top = _safe_float(poi.get("top"), entry + atr)
-    poi_bot = _safe_float(poi.get("bot"), entry - atr)
 
     if direction == "bull":
         candidates = [x for x in (last_lo, poi_bot) if 0 < x < entry]
         sl_price = min(candidates) if candidates else entry - 0.85 * atr
         sl_price -= 0.10 * atr
-        # External buy-side liquidity: nearest meaningful H1/M15 high above entry.
-        targets = []
-        for idx in swing_pts(h1d, 5)[0]:
-            v = _safe_float(h1d["high"].iloc[idx], 0)
-            if v > entry: targets.append(v)
-        for idx in sh15:
-            v = _safe_float(m15d["high"].iloc[idx], 0)
-            if v > entry: targets.append(v)
-        target = min([v for v in targets if v > entry], default=entry + 2.5 * abs(entry-sl_price))
-        # Do not use a target that is too close to invalidate the 2R minimum.
-        target = max(target, entry + 2.0 * abs(entry-sl_price))
+        targets = [_safe_float(h1d["high"].iloc[i],0) for i in swing_pts(h1d,5)[0]]
+        targets += [_safe_float(m15d["high"].iloc[i],0) for i in sh15]
+        targets = [v for v in targets if v > entry]
+        target = min(targets, default=entry + 2.5*abs(entry-sl_price))
+        target = max(target, entry + 2.0*abs(entry-sl_price))
     else:
         candidates = [x for x in (last_hi, poi_top) if x > entry]
         sl_price = max(candidates) if candidates else entry + 0.85 * atr
         sl_price += 0.10 * atr
-        targets = []
-        for idx in swing_pts(h1d, 5)[1]:
-            v = _safe_float(h1d["low"].iloc[idx], 0)
-            if 0 < v < entry: targets.append(v)
-        for idx in sl15:
-            v = _safe_float(m15d["low"].iloc[idx], 0)
-            if 0 < v < entry: targets.append(v)
-        target = max([v for v in targets if v < entry], default=entry - 2.5 * abs(entry-sl_price))
-        target = min(target, entry - 2.0 * abs(entry-sl_price))
+        targets = [_safe_float(h1d["low"].iloc[i],0) for i in swing_pts(h1d,5)[1]]
+        targets += [_safe_float(m15d["low"].iloc[i],0) for i in sl15]
+        targets = [v for v in targets if 0 < v < entry]
+        target = max(targets, default=entry - 2.5*abs(entry-sl_price))
+        target = min(target, entry - 2.0*abs(entry-sl_price))
 
-    risk = abs(entry - sl_price)
+    risk = abs(entry-sl_price)
     if risk <= 0:
         return None
-    rr = abs(target-entry) / risk
+    rr = abs(target-entry)/risk
     if rr < MIN_RR:
         return None
 
-    loc = _entry_location(m15d, direction, entry)
-    htf_align = 1.0 if state.htf_bias == ("bullish" if direction == "bull" else "bearish") else 0.0
-    macro_align = (
-        1.0 if state.macro_bias == ("bullish" if direction == "bull" else "bearish")
-        else 0.5 if state.macro_bias == "unknown" else 0.0
-    )
-    poi_score = _safe_float(poi.get("quality"), 62.0)
-    sweep = confirm.get("sweep") or {"type": "none"}
-    liq_score = 62.0 + (18.0 if sweep.get("type") != "none" else 0.0)
+    loc = _entry_location(m15d,direction,entry)
+    htf_align = 1.0 if state.htf_bias == ("bullish" if direction=="bull" else "bearish") else 0.0
+    macro_align = 1.0 if state.macro_bias == ("bullish" if direction=="bull" else "bearish") else 0.5 if state.macro_bias=="unknown" else 0.0
+    poi_score = _safe_float(poi.get("quality"),58.0)
+    sweep = confirm.get("sweep") or {"type":"none"}
+    liq_score = 62.0 + (18.0 if sweep.get("type")!="none" else 0.0)
+    distance_score = _clip(100.0 - (distance/max(h1_atr,atr,1e-12))*18.0, 10.0, 100.0)
 
     reasons = [
         "HTF_ALIGNED" if htf_align else "HTF_NEUTRAL",
-        str(poi.get("kind", "H1_POI")),
-        "FRESH_POI",
+        str(poi.get("kind","H1_POI")),
+        "FRESH_POI" if bool(poi.get("fresh",True)) else "POI_AGED",
+        "POI_AT_PRICE" if in_poi else "POI_NEAR_PRICE" if near_poi else "POI_APPROACHING",
     ]
-    if macro_align >= 1:
-        reasons.append("MACRO_ALIGNED")
-    if state.trend_strength >= 65:
-        reasons.append("TREND_STRENGTH")
-    if sweep.get("type") != "none":
-        reasons.append(str(sweep["type"]).upper())
-    reasons.extend([r for r in confirm.get("reason", []) if r not in reasons])
-    if loc["location_score"] >= 70:
-        reasons.append("GOOD_LOCATION")
-    if rr >= 3:
-        reasons.append("STRUCTURAL_RR_3R_PLUS")
+    if macro_align >= 1: reasons.append("MACRO_ALIGNED")
+    if state.trend_strength >= 65: reasons.append("TREND_STRENGTH")
+    if sweep.get("type")!="none": reasons.append(str(sweep["type"]).upper())
+    reasons.extend([r for r in confirm.get("reason",[]) if r not in reasons])
+    if loc["location_score"]>=70: reasons.append("GOOD_LOCATION")
+    if rr>=3: reasons.append("STRUCTURAL_RR_3R_PLUS")
 
     setup_quality = _clip(
-        poi_score * 0.28 +
-        state.trend_strength * 0.22 +
-        state.structure_strength * 0.16 +
-        liq_score * 0.14 +
-        loc["location_score"] * 0.12 +
-        htf_align * 5.0 +
-        macro_align * 3.0,
-        0, 100
-    )
-    raw_conf = setup_quality
-    raw_conf += 9 if confirm["confirmed"] else -18
-    raw_conf += 5 if sweep.get("type") != "none" else 0
-    raw_conf += 4 if rr >= 3 else 0
-    raw_conf += 3 if loc["location_score"] >= 75 else 0
-    raw_conf = _clip(raw_conf, 0, 100)
+        poi_score*0.26 + state.trend_strength*0.20 + state.structure_strength*0.15 +
+        liq_score*0.12 + loc["location_score"]*0.10 + distance_score*0.10 +
+        htf_align*4.0 + macro_align*3.0, 0,100)
+    raw_conf = _clip(setup_quality + (10 if confirm["confirmed"] else -8) +
+                     (5 if sweep.get("type")!="none" else 0) + (4 if rr>=3 else 0),0,100)
 
     return Candidate(
-        direction.upper(), entry, sl_price, target, rr,
-        str(entry_zone.get("kind", "M15_FVG")),
-        raw_conf, setup_quality, loc["location_score"],
-        state.trend_strength, state.structure_strength, liq_score,
-        htf_align, macro_align, True, confirm["confirmed"],
-        reasons,
-        ["HTF_POI_INVALIDATION", "M15_STRUCTURE_FAILURE", "LIQUIDITY_THESIS_FAILURE"]
+        direction.upper(),entry,sl_price,target,rr,str(entry_zone.get("kind","H1_FVG")),
+        raw_conf,setup_quality,loc["location_score"],state.trend_strength,
+        state.structure_strength,liq_score,htf_align,macro_align,True,
+        confirm["confirmed"],reasons,
+        ["HTF_POI_INVALIDATION","M15_STRUCTURE_FAILURE","LIQUIDITY_THESIS_FAILURE"]
     )
-
 
 def _account_context(trade_history=None, kwargs=None) -> dict:
     kwargs=kwargs or {}
@@ -1199,23 +1193,53 @@ def _frequency_rate() -> float:
     return num/denom if denom else FREQUENCY_TARGET_IDEAL
 
 
+def _candidate_frequency_rate() -> float:
+    with _LOCK:
+        rows=list(_SCAN_HISTORY)
+    if not rows:
+        return FREQUENCY_TARGET_IDEAL
+    denom=sum(max(1,int(x.get("analyzed_symbols",0) or 0)) for x in rows)
+    num=sum(int(x.get("candidate_count",x.get("candidates",0)) or 0) for x in rows)
+    return num/denom if denom else FREQUENCY_TARGET_IDEAL
+
+
 def _adapt_frequency(summary: dict):
+    """Adapt entry threshold to observed opportunity frequency, never to zero-signal fabrication.
+
+    Candidate frequency answers: 'is the strategy seeing opportunities?'
+    Eligible frequency answers: 'are enough opportunities reaching confirmation?'
+    Only the second can move the confidence threshold. A sparse candidate stream
+    is a strategy/market condition and must not be solved by lowering quality gates.
+    """
     global _ADAPTIVE_THRESHOLD
-    rate=_frequency_rate()
-    quality=_safe_float(summary.get("avg_confidence"),0)
+    rate = _frequency_rate()
+    analyzed = max(1, int(summary.get("analyzed_symbols",0) or 0))
+    cand = int(summary.get("candidate_count", summary.get("candidates",0)) or 0)
+    elig = int(summary.get("eligible_count",0) or 0)
+    cand_rate = cand / analyzed
+    quality = _safe_float(summary.get("avg_confidence"),0)
+
     with _LOCK:
         cur=_ADAPTIVE_THRESHOLD
         manual=_MANUAL_THRESHOLD
-        # Manual threshold becomes the anchor. Adaptive drift is deliberately tiny.
         anchor=manual if manual is not None else CONFIDENCE_BASE
-        if rate< FREQUENCY_TARGET_LOW and quality>=55:
-            cur-=CONFIDENCE_ADAPT_STEP
-        elif rate>FREQUENCY_TARGET_HIGH:
-            cur+=CONFIDENCE_ADAPT_STEP
+
+        # Healthy candidate supply + too few executable signals => relax slightly.
+        if cand_rate >= 0.08 and rate < FREQUENCY_TARGET_LOW and quality >= 55:
+            cur -= CONFIDENCE_ADAPT_STEP
+        # Excess executable frequency => tighten.
+        elif rate > FREQUENCY_TARGET_HIGH:
+            cur += CONFIDENCE_ADAPT_STEP
         else:
-            # Slowly return toward anchor so a stale frequency shock does not stick forever.
-            cur += (anchor-cur)*0.15
+            cur += (anchor-cur)*0.10
         _ADAPTIVE_THRESHOLD=_clip(cur,CONFIDENCE_SAFE_MIN,CONFIDENCE_SAFE_MAX)
+
+        # Persist explicit frequency telemetry for the learning engine.
+        _STRATEGY_STATE["last_signal_rate"]=rate
+        _STRATEGY_STATE["last_candidate_rate"]=cand_rate
+        _STRATEGY_STATE["last_eligible_count"]=elig
+        _STRATEGY_STATE["last_candidate_count"]=cand
+        _STRATEGY_STATE["last_update_at"]=_now()
 
 
 def _build_candidate_learning_features(c: Candidate, account: dict, freq_rate: float, ollama_delta: float=0.0) -> dict:
@@ -1316,7 +1340,7 @@ def full_analyze(df_h1, df_m15, df_d1=None, symbol=None, df_btc_h1=None, trade_h
             "low_confidence":(c.confidence < max(60,required)),
             "low_confidence_cutoff":required,"ban_recommended":False,
             # Canonical execution handoff. main.py is the only execution authority.
-            "execution_contract":"V135",
+            "execution_contract":"V136",
             "execution":{
                 "symbol":str(symbol or "").upper(),
                 "side":("BUY" if c.direction=="BULL" else "SELL"),
@@ -1493,7 +1517,14 @@ def record_trade_outcome(trade, outcome=None, source="binance_trade"):
         risk_pct=abs(_safe_float(rec.get("sl"),entry)-entry)/entry if entry else 0
         rec["realized_r"]=move/max(risk_pct,1e-12)
     rec["autopsy"]=_trade_autopsy(rec)
-    return _append_experience(rec,"outcome")
+    result=_append_experience(rec,"outcome")
+    # Learning is event-driven as well as worker-driven: a completed trade can
+    # immediately contribute once enough labeled examples exist.
+    try:
+        _train_learned_model()
+    except Exception:
+        pass
+    return result
 
 
 def ingest_live_outcome(trade, outcome=None, source="binance_trade"):
@@ -1626,7 +1657,7 @@ def get_cognitive_status():
     return {"brain_version":FINAL_BRAIN_VERSION,"strategy":get_strategy_evolution_status(),
             "full_enabled":bool(FULL_ENABLED),"worker_alive":bool(_FULL_THREAD and _FULL_THREAD.is_alive()),"ticks":_AGENT_TICKS,
             "experience_samples":len(outcomes),"candidate_samples":len(candidates),"protection_events":protections,
-            "scan_cycles":len(scans),"signal_rate":_frequency_rate(),"threshold":get_active_confidence_threshold(),
+            "scan_cycles":len(scans),"signal_rate":_frequency_rate(),"candidate_rate":_candidate_frequency_rate(),"threshold":get_active_confidence_threshold(),
             "recent_72h":_recent_trade_stats(72),"recency_half_life_hours":RECENCY_HALF_LIFE_HOURS,
             "ollama":{"configured":bool(OLLAMA_API_KEY),"model":OLLAMA_MODEL,"enabled":bool(OLLAMA_ENABLED)},
             "learning_schema":FULL_LEARNING_SCHEMA}
@@ -1683,21 +1714,83 @@ def _worker_loop():
     log.info("[BRAIN V2] FULL worker stopped")
 
 
+def _train_learned_model():
+    """Train a small recency-weighted logistic model from recorded candidate outcomes.
+
+    This is deliberately dependency-free. It only learns from observations that
+    already contain learning_features and a realized outcome. It cannot alter the
+    structural POI/confirmation gates.
+    """
+    global _LEARNED_MODEL
+    try:
+        with _LOCK:
+            rows=[dict(x) for x in _HISTORY if x.get("kind")=="outcome" and isinstance(x.get("learning_features"),dict)]
+        if len(rows) < 30:
+            return {"trained":False,"reason":"NEED_30_LABELED_OUTCOMES","samples":len(rows)}
+
+        now=_now()
+        X=[]; y=[]; weights=[]
+        for r in rows[-1000:]:
+            f=r.get("learning_features") or {}
+            realized=_safe_float(r.get("realized_r"),0)
+            if realized==0 and str(r.get("result","")).lower() not in {"tp","trail","sl"}:
+                continue
+            X.append([_safe_float(f.get(k),0) for k in ML_FEATURE_NAMES])
+            y.append(1.0 if realized>0 else 0.0)
+            age=max(0,(now-_latest_ts(r))/3600.0)
+            weights.append(math.exp(-math.log(2.0)*age/RECENCY_HALF_LIFE_HOURS))
+        if len(X)<30 or len(set(y))<2:
+            return {"trained":False,"reason":"INSUFFICIENT_CLASS_BALANCE","samples":len(X)}
+
+        X=np.asarray(X,float); y=np.asarray(y,float); w=np.asarray(weights,float)
+        mean=np.average(X,axis=0,weights=w)
+        scale=np.sqrt(np.average((X-mean)**2,axis=0,weights=w)); scale=np.maximum(scale,1e-6)
+        Z=(X-mean)/scale
+        beta=np.zeros(Z.shape[1]); b=0.0
+        reg=0.03
+        for _ in range(500):
+            z=np.clip(Z@beta+b,-20,20)
+            p=1/(1+np.exp(-z))
+            err=(p-y)*w
+            grad=(Z.T@err)/max(w.sum(),1e-9)+reg*beta
+            gb=err.sum()/max(w.sum(),1e-9)
+            step=0.08
+            beta-=step*grad; b-=step*gb
+
+        pred=1/(1+np.exp(-np.clip(Z@beta+b,-20,20)))
+        ll=float(np.average(-(y*np.log(np.maximum(pred,1e-9))+(1-y)*np.log(np.maximum(1-pred,1e-9))),weights=w))
+        expected=float(np.average([_safe_float(r.get("realized_r"),0) for r in rows[-len(X):]],weights=w))
+        model={
+            "active":True,"model_version":"V136_RECENCY_LOGIT","feature_names":ML_FEATURE_NAMES,
+            "mean":mean.tolist(),"scale":scale.tolist(),"w":beta.tolist(),"b":float(b),
+            "expected_r":expected,"sample_count":len(X),"loss":ll,"trained_at":now,
+            "champion":"recency_weighted_logit"
+        }
+        with _LOCK: _LEARNED_MODEL=model
+        return {"trained":True,"samples":len(X),"loss":ll,"expected_r":expected}
+    except Exception as exc:
+        log.debug("[BRAIN V136] model training failed: %s",exc)
+        return {"trained":False,"reason":str(exc)[:180]}
+
+
 def _periodic_learning_tick():
-    # Controlled adaptation from evidence, not blind parameter mutation.
     try:
         recent=_recent_trade_stats(72)
+        model_status=_train_learned_model()
         with _LOCK:
             if recent["count"]>=20 and recent["avg_r"] < -0.15:
                 _STRATEGY_STATE["last_reason"]="recent_72h_negative_expectancy"
             elif recent["count"]>=20 and recent["avg_r"] > 0.35:
                 _STRATEGY_STATE["last_reason"]="recent_72h_positive_expectancy"
+            elif model_status.get("trained"):
+                _STRATEGY_STATE["last_reason"]="recency_model_retrained"
             else:
                 _STRATEGY_STATE["last_reason"]="insufficient_or_neutral_recent_evidence"
+            _STRATEGY_STATE["last_model_train"]=model_status
             _STRATEGY_STATE["last_update_at"]=_now()
         _save_state()
     except Exception as exc:
-        log.debug("[BRAIN V2] learning tick: %s",exc)
+        log.debug("[BRAIN V136] learning tick: %s",exc)
 
 
 def adaptive_agent_start():
