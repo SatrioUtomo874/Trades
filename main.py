@@ -1097,7 +1097,20 @@ class BinanceClient:
             # does not mean "first request of the IP in this minute".
             # Never spend the last part of the budget on an entry.
             if is_order_request and self._used_weight_1m >= BINANCE_WEIGHT_ORDER_SOFT_STOP:
-                block_seconds = 30.0
+                # BUG FIX: sebelumnya 30.0 detik. _used_weight_1m hanya di-reset
+                # ke 0 oleh _refresh_local_usage_windows() setelah >= 60 DETIK
+                # PENUH sejak pembacaan terakhir (_used_weight_1m_ts) — bukan
+                # sejak preblock ini mulai. Dengan cooldown 30s (+15s safety
+                # margin di _enter_binance_pause = 45s total), governor SELALU
+                # resume dengan angka weight LAMA yang masih >= 1500 (karena
+                # 45s < 60s), sehingga request order pertama setelah "READY"
+                # langsung kena preblock lagi — persis pola di laporan bug:
+                # limit -> READY -> limit lagi dalam hitungan detik.
+                # Cooldown dinaikkan ke >= 60s supaya saat pause berakhir,
+                # jendela 60 detik staleness DIJAMIN sudah lewat dan
+                # _refresh_local_usage_windows() sempat me-reset weight ke 0
+                # sebelum request berikutnya dikirim.
+                block_seconds = 65.0
                 self._blocked_until_mono = max(
                     self._blocked_until_mono, time.monotonic() + block_seconds
                 )
@@ -2203,9 +2216,20 @@ class TradingBot:
         self.ws.stop()
         self.binance_position_ws.stop()
         self.binance_ws.stop()
-        # Give owned worker threads a short grace period so /end really releases
-        # the current main.py runtime before the launcher drops the module.
-        deadline = time.monotonic() + 3.0
+        # BUG FIX: budget lama (3 detik total, dibagi ke banyak thread) TIDAK
+        # CUKUP. Worker1/Worker3 bisa sedang berada di tengah satu request
+        # Binance REST (timeout HTTP sampai 15s, ditambah jeda governor 6s per
+        # order) saat _stop.set() dipanggil. Iterasi while-loop yang sedang
+        # berjalan itu TETAP menyelesaikan langkahnya masing-masing (termasuk
+        # autosave/save_checkpoint atau REST order) sebelum sempat mengecek
+        # _stop lagi. Karena deadline lama sering habis sebelum thread itu
+        # benar-benar keluar, main.py lanjut menghapus/menulis checkpoint,
+        # lalu SAAT ITU JUGA thread lama yang masih hidup menulis ulang
+        # checkpoint dengan state basi (posisi/trade lama) — persis "auto
+        # save juga nyimpen list trade lama" yang dilaporkan.
+        # Deadline dinaikkan + keputusan checkpoint TIDAK diambil kalau masih
+        # ada thread yang belum benar-benar mati.
+        deadline = time.monotonic() + 20.0
         for t in list(self._threads):
             if t is threading.current_thread():
                 continue
@@ -2213,9 +2237,30 @@ class TradingBot:
             if remaining <= 0:
                 break
             if t.is_alive():
-                t.join(timeout=min(1.0, remaining))
+                t.join(timeout=max(0.1, remaining))
+        stuck_threads = [
+            t.name for t in self._threads
+            if t is not threading.current_thread() and t.is_alive()
+        ]
+        if stuck_threads:
+            logger.error(
+                "[MAIN] SHUTDOWN — worker belum berhenti dalam batas waktu: %s. "
+                "Checkpoint TIDAK diubah otomatis agar tidak menimpa sesi berikutnya "
+                "dengan state basi.",
+                stuck_threads,
+            )
         active = self.state.get_active_count()
-        if fresh_session and (self.state.mode != "REAL" or active == 0):
+        if stuck_threads:
+            # Jangan hapus maupun tulis ulang checkpoint selagi ada worker yang
+            # berpotensi masih menulis state secara paralel dengan sesi baru.
+            self.telegram.flush(max_messages=20)
+            self.telegram.send(
+                f"⚠️ SHUTDOWN TIDAK BERSIH\nWorker belum berhenti: {', '.join(stuck_threads)}\n"
+                "Checkpoint dipertahankan apa adanya demi keamanan. "
+                "Tunggu beberapa detik sebelum /try lagi.",
+                "WARNING",
+            )
+        elif fresh_session and (self.state.mode != "REAL" or active == 0):
             self.learn_engine.save_checkpoint()
             self.telegram.flush(max_messages=20)
             self.state.clear_runtime_checkpoint()
@@ -3330,6 +3375,14 @@ class TradingBot:
         last_autosave = 0.0
         while not self._stop.is_set():
             try:
+                # BUG FIX: cek _stop lagi SEBELUM tiap langkah yang menyentuh
+                # Binance REST atau menulis checkpoint. Tanpa ini, satu
+                # iterasi yang sudah terlanjur mulai (mis. sedang menunggu
+                # respons REST) akan tetap menuntaskan seluruh langkah di
+                # bawah — termasuk save_checkpoint() dengan data basi —
+                # walau shutdown() sudah memanggil _stop.set() di tengah jalan.
+                if self._stop.is_set():
+                    break
                 self._check_binance_recovery()
                 self._process_binance_waiting_lists()
                 self._process_trail_queue()
@@ -3342,7 +3395,7 @@ class TradingBot:
                     self._notify_audit_report(report)
                     logger.info("[LEARN] AUDIT DONE | action=%s", report.get("action"))
                     last_audit = now
-                if now - last_autosave > 120:  # autosave tiap 2 menit, tidak boleh ganggu trading (§40)
+                if now - last_autosave > 120 and not self._stop.is_set():  # autosave tiap 2 menit, tidak boleh ganggu trading (§40)
                     logger.info("[LEARN] AUTOSAVE START")
                     learn_ok = True
                     try:
@@ -3357,7 +3410,8 @@ class TradingBot:
                     except Exception as exc:
                         learn_ok = False
                         logger.warning("[LEARN] autosave gagal: %s", exc)
-                    self.state.save_checkpoint()
+                    if not self._stop.is_set():
+                        self.state.save_checkpoint()
                     self._notify_learn_checkpoint_fallback("periodic_worker", learn_ok)
                     logger.info("[LEARN] AUTOSAVE DONE")
                     last_autosave = now
