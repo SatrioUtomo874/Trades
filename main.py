@@ -1590,11 +1590,18 @@ class TradingBot:
         self.bybit = BybitClient(cfg.bybit_api_key, cfg.bybit_api_secret)
         self.binance = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret)
         self.telegram = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id)
-        # Learn tidak melakukan network sendiri. Checkpoint/audit notification
-        # dialirkan ke Telegram milik main.py melalui sink ini.
-        self.learn_engine.set_notification_sink(
-            lambda text, level="INFO": self.telegram.send(text, level)
-        )
+        # Learn tidak melakukan network sendiri. Bila LearnEngine vNext
+        # menyediakan notification sink, checkpoint/audit notification
+        # dialirkan ke Telegram milik main.py. Tetap kompatibel dengan
+        # LearnEngine lama agar launcher tidak crash saat repository belum
+        # tersinkron penuh.
+        self._learn_notification_sink_attached = False
+        set_sink = getattr(self.learn_engine, "set_notification_sink", None)
+        if callable(set_sink):
+            set_sink(lambda text, level="INFO": self.telegram.send(text, level))
+            self._learn_notification_sink_attached = True
+        else:
+            logger.warning("[LEARN] notification sink API belum tersedia; checkpoint Telegram fallback aktif")
         self.ws = BybitWebSocket(on_tick=self._on_tick, on_kline=self._on_kline)
         self.binance_ws = BinanceUserDataStream(
             cfg.binance_api_key,
@@ -2813,6 +2820,25 @@ class TradingBot:
             "PENDING",
         )
 
+    def _notify_learn_checkpoint_fallback(self, reason: str, ok: bool) -> None:
+        """Telegram fallback untuk LearnEngine lama tanpa notification sink.
+
+        Tidak membaca/mengambil data eksternal; hanya memberi tahu hasil
+        checkpoint yang baru saja diminta oleh main.py. LearnEngine vNext
+        menangani notifikasi sendiri melalui sink, sehingga fungsi ini hanya
+        aktif bila sink API belum tersedia.
+        """
+        if self._learn_notification_sink_attached:
+            return
+        try:
+            status = "✅ PASS" if ok else "❌ FAIL"
+            self.telegram.send(
+                f"🧠 LEARN CHECKPOINT\nStatus: {status}\nReason: {reason}",
+                "LEARN_CHECKPOINT",
+            )
+        except Exception as exc:
+            logger.warning("[LEARN] checkpoint Telegram fallback gagal: %s", exc)
+
     # -------------------------------------------------------------------
     # Worker 3 — Learn (§4, §39-§51)
     # -------------------------------------------------------------------
@@ -2835,8 +2861,21 @@ class TradingBot:
                     last_audit = now
                 if now - last_autosave > 120:  # autosave tiap 2 menit, tidak boleh ganggu trading (§40)
                     logger.info("[LEARN] AUTOSAVE START")
-                    self.learn_engine.autosave()
+                    learn_ok = True
+                    try:
+                        result = self.learn_engine.autosave(reason="periodic_worker")
+                        if isinstance(result, bool):
+                            learn_ok = result
+                    except TypeError:
+                        # Compatibility with the previous autosave() signature.
+                        result = self.learn_engine.autosave()
+                        if isinstance(result, bool):
+                            learn_ok = result
+                    except Exception as exc:
+                        learn_ok = False
+                        logger.warning("[LEARN] autosave gagal: %s", exc)
                     self.state.save_checkpoint()
+                    self._notify_learn_checkpoint_fallback("periodic_worker", learn_ok)
                     logger.info("[LEARN] AUTOSAVE DONE")
                     last_autosave = now
                 self._check_autostop()

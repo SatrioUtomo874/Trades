@@ -29,7 +29,7 @@ TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
 REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
 GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
-MAIN_FILE = (os.getenv("MAIN_FILE") or "main.py").strip()
+MAIN_FILE = (os.getenv("MAIN_FILE") or "main_final.py").strip()
 PORT = int(os.getenv("PORT", "10000"))
 TG_POLL_TIMEOUT = max(5, int(os.getenv("TG_POLL_TIMEOUT", "30")))
 TG_ERROR_BACKOFF_MAX = max(10, int(os.getenv("TG_ERROR_BACKOFF_MAX", "60")))
@@ -71,7 +71,7 @@ def index():
     return jsonify(
         {
             "ok": True,
-            "service": "SMCAutoTrade try.py launcher",
+            "service": "SMCAutoTrade try-final.py launcher",
             "main_running": _MAIN_RUNNING,
             "main_file": MAIN_FILE,
             "github": REPO_NAME,
@@ -84,7 +84,7 @@ def healthz():
     return jsonify(
         {
             "ok": True,
-            "service": "SMCAutoTrade try.py launcher",
+            "service": "SMCAutoTrade try-final.py launcher",
             "telegram_polling": not _STOP.is_set(),
             "main_running": _MAIN_RUNNING,
             "timestamp": time.time(),
@@ -325,7 +325,7 @@ async def start_main(chat_id: int) -> str:
             )
 
         context = {
-            "launcher": "try.py",
+            "launcher": "try-final.py",
             "chat_id": chat_id,
             "user_id": ALLOWED_USER_ID,
             "start_file": str(path),
@@ -360,7 +360,7 @@ async def stop_main() -> str:
             on_stop = getattr(module, "on_stop", None)
             if callable(on_stop):
                 result = on_stop({
-                    "launcher": "try.py",
+                    "launcher": "try-final.py",
                     "user_id": ALLOWED_USER_ID,
                     "is_running": lambda: _MAIN_RUNNING,
                     "send_message": tg_send,
@@ -389,7 +389,7 @@ async def forward_update(update: dict) -> None:
 
     message = update.get("message") or {}
     context = {
-        "launcher": "try.py",
+        "launcher": "try-final.py",
         "chat_id": (message.get("chat") or {}).get("id"),
         "user_id": (message.get("from") or {}).get("id"),
         "start_file": str(BASE_DIR / MAIN_FILE),
