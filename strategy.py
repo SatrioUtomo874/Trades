@@ -63,7 +63,7 @@ CONFIDENCE_WEIGHTS: Dict[str, float] = {
 assert abs(sum(CONFIDENCE_WEIGHTS.values()) - 100.0) < 1e-6
 
 DEFAULT_PARAMS: Dict[str, Any] = {
-    "ACTIVE_THRESHOLD": 45.0,       # % — dimulai rendah agar learn.py punya data (§10)
+    "ACTIVE_THRESHOLD": 0.0,       # % — dimulai rendah agar learn.py punya data (§10)
     "swing_left": 2,
     "swing_right": 2,
     "equal_level_tol_atr": 0.15,   # toleransi "equal high/low" dalam satuan ATR
@@ -78,6 +78,8 @@ DEFAULT_PARAMS: Dict[str, Any] = {
     "btc_corr_lookback": 50,
     "sl_atr_buffer": 0.25,          # buffer SL tambahan dalam satuan ATR
     "min_price_distance_ticks": 2,  # jarak minimum entry/SL/TP dalam tick
+    "entry_retracement_fib": 0.618,   # level OTE pullback dari impulse leg (§17/§25)
+    "entry_min_offset_atr": 0.25,     # jarak minimum entry dari harga saat ini (satuan ATR)
 }
 
 
@@ -466,11 +468,6 @@ class Strategy:
         if len(candles) < min_len:
             return None
 
-        # Entry hanya memakai candle yang sudah confirm. Candle terakhir WebSocket
-        # dapat berubah dan menyebabkan entry instan.
-        if len(candles) < 3:
-            return None
-        candles = list(candles[:-1])
         atrs = atr_series(candles, p["atr_period"])
         atr_now = atrs[-1]
         if atr_now <= 0:
@@ -541,23 +538,49 @@ class Strategy:
         entry_quality_score = min(entry_quality_score, CONFIDENCE_WEIGHTS["entry_quality"])
 
         # --- entry / TP / SL ---
+        # PENTING (revisi): entry TIDAK BOLEH sama dengan harga saat ini
+        # (last_close) — itu penyebab pending order "terisi" hampir instan
+        # begitu WebSocket mulai memantau (harga live sudah pasti dekat
+        # dengan harga candle terakhir). Sesuai §17/§25 spesifikasi, entry
+        # yang valid adalah level pullback/retracement (OTE) dari impulse
+        # leg yang baru terbentuk — bot MENUNGGU harga kembali ke zona
+        # tersebut, baru dianggap FILLED. Kalau harga keburu ke TP duluan
+        # sebelum pullback terjadi, itu memang seharusnya jadi TIMEOUT
+        # ("strategy terlambat entry atau entry terlalu konservatif").
         buffer_ = atr_now * p["sl_atr_buffer"]
+        fib = p["entry_retracement_fib"]
+        min_offset = atr_now * p["entry_min_offset_atr"]
+
         if direction == "BUY":
-            entry = last_close
-            recent_low = min(_lows(candles[-p["swing_left"] - p["swing_right"] - 3:]))
-            sl = min(recent_low, entry - atr_now * 0.5) - buffer_
+            leg_low = last_lows[-1][1] if last_lows else (last_close - atr_now * 2.0)
+            leg_high = last_close
+            leg_range = max(leg_high - leg_low, atr_now * 1e-6)
+            entry = leg_high - leg_range * fib
+            if leg_high - entry < min_offset:
+                entry = leg_high - min_offset
+            entry = max(entry, leg_low + atr_now * 0.05)  # jangan sampai lewati awal leg
+
+            sl = min(leg_low, entry - atr_now * 0.5) - buffer_
             target_pool = levels["equal_highs"]
             tp = max(target_pool) if target_pool else entry + (entry - sl) * 2.0
             if tp <= entry:
                 tp = entry + (entry - sl) * 2.0
         else:
-            entry = last_close
-            recent_high = max(_highs(candles[-p["swing_left"] - p["swing_right"] - 3:]))
-            sl = max(recent_high, entry + atr_now * 0.5) + buffer_
+            leg_high = last_highs[-1][1] if last_highs else (last_close + atr_now * 2.0)
+            leg_low = last_close
+            leg_range = max(leg_high - leg_low, atr_now * 1e-6)
+            entry = leg_low + leg_range * fib
+            if entry - leg_low < min_offset:
+                entry = leg_low + min_offset
+            entry = min(entry, leg_high - atr_now * 0.05)
+
+            sl = max(leg_high, entry + atr_now * 0.5) + buffer_
             target_pool = levels["equal_lows"]
             tp = min(target_pool) if target_pool else entry - (sl - entry) * 2.0
             if tp >= entry:
                 tp = entry - (sl - entry) * 2.0
+
+        reasons.append(f"entry pullback OTE {fib*100:.0f}% dari impulse leg (bukan harga pasar saat ini)")
 
         ok, geom_reason = validate_geometry(direction, entry, sl, tp, atr_val=atr_now)
         if not ok:
