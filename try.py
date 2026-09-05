@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tarfile
 import tempfile
 import threading
@@ -293,7 +294,14 @@ def _load_module_from_path(path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Tidak bisa membuat module spec untuk {path}")
+
     module = importlib.util.module_from_spec(spec)
+
+    # Wajib didaftarkan ke sys.modules sebelum exec.
+    # Tanpa ini dataclass/type annotation di main.py dapat gagal
+    # dengan error: 'NoneType' object has no attribute '__dict__'
+    sys.modules[module_name] = module
+
     spec.loader.exec_module(module)
     return module
 
