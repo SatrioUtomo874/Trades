@@ -44,7 +44,6 @@ import re
 import signal
 import socket
 import sys
-import tempfile
 import threading
 import time
 import urllib.parse
@@ -92,7 +91,7 @@ class Config:
     ollama_url: str = field(default_factory=lambda: os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     ollama_api_key: str = field(default_factory=lambda: os.environ.get("OLLAMA_API_KEY", ""))
     github_token: str = field(default_factory=lambda: os.environ.get("GITHUB_TOKEN", ""))
-    git_autosave: bool = field(default_factory=lambda: _env_bool("GIT_AUTOSAVE", bool(os.environ.get("GITHUB_TOKEN") and os.environ.get("REPO_NAME"))))
+    git_autosave: bool = field(default_factory=lambda: _env_bool("GIT_AUTOSAVE", False))
     state_dir: str = field(default_factory=lambda: os.environ.get("STATE_DIR", "state"))
 
     def __post_init__(self) -> None:
@@ -1501,6 +1500,7 @@ class TradingBot:
         self._candle_cache: Dict[str, List[Dict[str, float]]] = {}
         # cache harga realtime dari WebSocket untuk log Telegram
         self._last_prices: Dict[str, float] = {}
+        self._market_context: Dict[str, Any] = {}
         self._candle_lock = threading.Lock()
         self._trail_queue: "queue.Queue[str]" = queue.Queue()
         # Binance REST work that survives a rate-limit pause.
@@ -1534,12 +1534,12 @@ class TradingBot:
         try:
             if not self.state.binance_paused:
                 self.binance.health_check()
-                logger.info("[GLOBAL] [BINANCE] HEALTHZ STARTUP — READY")
+                logger.info("[BINANCE] HEALTHZ STARTUP — READY")
         except RateLimitError as e:
             self._enter_binance_pause(e)
-            logger.error("[GLOBAL] [BINANCE] HEALTHZ STARTUP — RATE-LIMIT/BAN")
+            logger.error("[BINANCE] HEALTHZ STARTUP — RATE-LIMIT/BAN")
         except Exception as e:
-            logger.warning("[GLOBAL] [BINANCE] HEALTHZ STARTUP — ERROR: %s", e)
+            logger.warning("[BINANCE] HEALTHZ STARTUP — ERROR: %s", e)
 
         # Jika restart terjadi saat Binance masih pause, pertahankan cooldown yang tersimpan.
         if self.state.mode == "REAL" and not self.state.binance_paused:
@@ -1553,7 +1553,6 @@ class TradingBot:
                 self.telegram.send(f"⚠️ STARTUP SAFETY HALT\nGagal sinkronisasi akun Binance: {e}\nAUTO = OFF", "ERROR")
         self._rebuild_binance_waiting_lists()
         logger.info("State dimuat (main=%s, learn=%s, strategy=%s)", label_main, label_learn, self.strategy_engine.version)
-        logger.info("[GLOBAL] [LEARN] PERSISTENCE — local=READY+BACKUP | github=%s", "ON" if self.learn_engine.git_enabled else "OFF")
 
         ip = get_server_ip()
         # Jika dijalankan lewat try.py Render, launcher sudah menjadi pemilik Telegram getUpdates.
@@ -1583,7 +1582,7 @@ class TradingBot:
             "Ketik /auto untuk memulai scanning.",
             "BOT_START",
         )
-        logger.info("[GLOBAL] [MAIN] START — new session | mode=%s | binance=%s", self.state.mode, "BAN" if self.state.binance_paused else "READY")
+        logger.info("[MAIN] START — new session | mode=%s | binance=%s", self.state.mode, "BAN" if self.state.binance_paused else "READY")
 
         self.ws.start()
         if self.state.mode == "REAL":
@@ -1678,12 +1677,12 @@ class TradingBot:
         if fresh_session and (self.state.mode != "REAL" or active == 0):
             self.learn_engine.save_checkpoint()
             self.state.clear_runtime_checkpoint()
-            logger.info("[GLOBAL] [MAIN] COLD STOP — runtime checkpoint dihapus; learning memory dipertahankan")
+            logger.info("[MAIN] COLD STOP — runtime checkpoint dihapus; learning memory dipertahankan")
         else:
             self.state.save_checkpoint()
             self.learn_engine.save_checkpoint()
             if fresh_session and self.state.mode == "REAL" and active > 0:
-                logger.warning("[GLOBAL] [MAIN] COLD STOP ditahan untuk REAL aktif: %s posisi/reserve tetap disimpan sebagai safety checkpoint", active)
+                logger.warning("[MAIN] COLD STOP ditahan untuk REAL aktif: %s posisi/reserve tetap disimpan sebagai safety checkpoint", active)
                 self.telegram.send(
                     f"⚠️ REAL SAFETY CHECKPOINT DIPERTAHANKAN\nAda {active} posisi/reserve aktif.\nRuntime tidak dihapus agar posisi Binance tidak menjadi orphan saat /try berikutnya.",
                     "WARNING",
@@ -1703,7 +1702,7 @@ class TradingBot:
         event_ts = float(data.get("E") or data.get("T") or time.time() * 1000)
         if event == "listenKeyExpired":
             self.binance_ws.invalidate_listen_key()
-            logger.error("[GLOBAL] [BINANCE] USERDATA LISTENKEY EXPIRED")
+            logger.error("[BINANCE] USERDATA LISTENKEY EXPIRED")
             self.telegram.send("⚠️ Binance User Data WS expired — akan reconnect setelah stream tersedia.", "ERROR")
             return
         if event == "ACCOUNT_UPDATE":
@@ -1820,7 +1819,7 @@ class TradingBot:
             pos["_pending_real_close_price"] = exit_price
             pos["_pending_real_close_time"] = event_ts
             pos["binance_exit_order_id"] = order_id
-            logger.info("[GLOBAL] [BINANCE] %s EXIT FILLED — %s price=%.8f", symbol, outcome, exit_price)
+            logger.info("[BINANCE] %s EXIT FILLED — %s price=%.8f", symbol, outcome, exit_price)
             # ACCOUNT_UPDATE will confirm flat; if it has already arrived, finalize immediately.
             if abs(float(pos.get("binance_position_amt", 0.0) or 0.0)) <= 0:
                 self._finalize_real_close_from_user_event(symbol, pos, outcome, exit_price, event_ts)
@@ -2150,8 +2149,13 @@ class TradingBot:
             price_pnl = (exit_d - entry_d) * qty if pos["direction"] == "BUY" else (entry_d - exit_d) * qty
             self.state.sim_balance += float(price_pnl)
 
+        with self._candle_lock:
+            trace_candles = list(self._candle_cache.get(symbol, []))
+        fill_ms = float(pos.get("fill_time", 0) or 0)
+        trace_path = [c for c in trace_candles if fill_ms <= 0 or float(c.get("t", 0)) >= fill_ms]
         self.learn_engine.record_trade_outcome(pos, outcome, {
             "pnl_pct": pnl_pct, "pnl_r": pnl_r, "close_time": ts, "trail_count": pos.get("trail_count", 0),
+            "trail_history": list(pos.get("trail_history", [])), "path_candles": trace_path[-500:],
         })
         self.state.ban(symbol, outcome, 24 * 3600)  # §26 post-trade ban 24 jam
         self.telegram.send(
@@ -2260,7 +2264,11 @@ class TradingBot:
             candles = list(self._candle_cache.get(symbol, []))
         if not candles:
             return
-        decision = self.strategy_engine.monitor_position(pos, candles)
+        btc_candles = []
+        with self._candle_lock:
+            btc_candles = list(self._candle_cache.get("BTCUSDT", []))
+        decision = self.strategy_engine.monitor_position(pos, candles, btc_candles=btc_candles, market_context=self._market_context)
+        logger.info("[MONITOR] %s action=%s profit_r=%.2f weakness=%s", symbol, decision.get("action"), float(decision.get("profit_r", 0.0)), decision.get("weakness_score", 0), extra={"symbol": symbol})
         if decision["action"] == "TRAIL" and decision["new_sl"] is not None:
             self._trail_queue.put(symbol)
             pos["_pending_trail_sl"] = decision["new_sl"]
@@ -2290,12 +2298,13 @@ class TradingBot:
             if not ok:
                 pos["_pending_trail_sl"] = new_sl
                 pos["_pending_trail_reason"] = reasons
-                logger.info("[GLOBAL] [BINANCE] TRAIL QUEUED — %s new_sl=%s", symbol, new_sl)
+                logger.info("[BINANCE] TRAIL QUEUED — %s new_sl=%s", symbol, new_sl)
                 return
 
         pos.pop("_pending_trail_sl", None)
         pos.pop("_pending_trail_reason", None)
         pos["trail_count"] = pos.get("trail_count", 0) + 1
+        pos.setdefault("trail_history", []).append({"timestamp": time.time()*1000, "old_sl": old_sl, "new_sl": new_sl, "reason": list(reasons), "profit_r": pos.get("profit_r")})
         if pos["status"] != "TRAILING":
             # transisi PROTECTED -> TRAILING sekaligus meng-update SL (§55)
             self.state.transition(
@@ -2419,6 +2428,8 @@ class TradingBot:
                 time.sleep(2)
 
     def _run_scan_cycle(self) -> None:
+        cycle_id = int(time.time() * 1000)
+        logger.info("[SCAN] CYCLE START id=%s", cycle_id)
         try:
             exchange_info = self.binance.exchange_info()
             binance_symbols = {
@@ -2435,6 +2446,7 @@ class TradingBot:
         self.state.cleanup_expired_bans()
         universe = build_universe(self.bybit, binance_symbols, self.state)
         self.state.scanned_coins = universe
+        logger.info("[SCAN] UNIVERSE READY | count=%s | max_slots=%s/%s", len(universe), self.state.get_active_count(), self.state.max_positions)
 
         btc_candles = None
         candidates: List[strategy.Setup] = []
@@ -2458,9 +2470,11 @@ class TradingBot:
                         raise
                     logger.warning("Gagal ambil candle BTCUSDT sebagai context: %s", e)
 
-        for symbol in universe:
+        for idx, symbol in enumerate(universe, 1):
             if self._stop.is_set() or not self.state.auto:
+                logger.info("[SCAN] STOPPED MID-CYCLE at=%s/%s", idx - 1, len(universe))
                 break
+            logger.info("[SCAN %02d/%02d] START", idx, len(universe), extra={"symbol": symbol})
             if self.state.is_banned(symbol) or symbol in self.state.positions:
                 continue
             if symbol == "BTCUSDT" and btc_candles is not None:
@@ -2476,14 +2490,24 @@ class TradingBot:
                     continue
             with self._candle_lock:
                 self._candle_cache[symbol] = candles
+            logger.info("[SCAN %02d/%02d] CANDLES READY | n=%s", idx, len(universe), len(candles), extra={"symbol": symbol})
 
             if symbol == "BTCUSDT":
                 btc_candles = candles
             processed += 1
 
-            setup = self.strategy_engine.analyze(symbol, candles, btc_candles, enforce_threshold=False)
+            setup, analysis_diag = self.strategy_engine.analyze_with_diagnostics(
+                symbol, candles, btc_candles, market_context=self._market_context, enforce_threshold=False
+            )
             if setup:
                 valid_strategy += 1
+                logger.info("[SCAN %02d/%02d] STRATEGY OK | %s %.1f%%", idx, len(universe), setup.direction, setup.confidence, extra={"symbol": symbol})
+                logger.info("[SCAN %02d/%02d] DIAGNOSTICS | structure=%s liquidity=%s entry_dist=%.2fATR rr=%.2f btc=%s freshness=%.2f",
+                            idx, len(universe), (analysis_diag.get("structure") or {}).get("bos"),
+                            "SWEEP" if (analysis_diag.get("liquidity") or {}).get("sweep") else "NONE",
+                            float((analysis_diag.get("entry") or {}).get("distance_atr", 0.0)),
+                            float((analysis_diag.get("tp") or {}).get("rr", 0.0)),
+                            (analysis_diag.get("btc") or {}).get("aligned"), extra={"symbol": symbol})
                 threshold = self.strategy_engine.get_active_threshold()
                 eligible_now = setup.confidence >= threshold
                 self.learn_engine.record_scan_candidate(setup.to_dict(), eligible_now, threshold, "PASS" if eligible_now else "BELOW_ACTIVE_THRESHOLD")
@@ -2491,6 +2515,7 @@ class TradingBot:
                     candidates.append(setup)
                 else:
                     reject_counts["BELOW_ACTIVE_THRESHOLD"] = reject_counts.get("BELOW_ACTIVE_THRESHOLD", 0) + 1
+                    logger.info("[SCAN %02d/%02d] BELOW THRESHOLD | %.1f%% < %.1f%%", idx, len(universe), setup.confidence, threshold, extra={"symbol": symbol})
                     # mulai low-confidence ban hanya setelah sistem threshold mencapai 40%.
                     if threshold >= 40.0 and setup.confidence < threshold and setup.confidence >= 0:
                         self.state.ban(symbol, "LOW_CONFIDENCE", 4 * 3600)
@@ -2534,8 +2559,16 @@ class TradingBot:
             "threshold_rejected": reject_counts.get("BELOW_ACTIVE_THRESHOLD", 0),
             "avg_confidence": avg_conf, "rejects": reject_counts, "breadth_buy": breadth_buy,
             "breadth_sell": 100 - breadth_buy, "regime": regime,
+            "btc_price": (btc_candles[-1].get("c") if btc_candles else None),
         }
+        self._market_context = dict(summary)
+        self.learn_engine.record_market_snapshot({
+            "timestamp": time.time(), "btc_price": summary.get("btc_price"),
+            "btc_regime": regime, "breadth_buy": breadth_buy, "breadth_sell": 100 - breadth_buy,
+            "candidate_rate": valid_strategy, "eligible_rate": len(eligible),
+        })
         self.learn_engine.record_scan_summary(summary)
+        logger.info("[SCAN] CYCLE DONE | processed=%s valid=%s candidate=%s eligible=%s avg_conf=%.1f", processed, valid_strategy, len(candidates), len(eligible), avg_conf)
         self.state.scan_history.append({
             "timestamp": time.time(), "coins": list(universe), "requested": len(universe),
             "processed": processed, "valid_strategy": valid_strategy, "eligible": len(eligible),
@@ -2563,6 +2596,7 @@ class TradingBot:
         return ("SMC" + safe)[-32:]
 
     def _create_pending(self, setup: strategy.Setup) -> None:
+        logger.info("[ENTRY] PREPARE | direction=%s confidence=%.1f%% mode=%s", setup.direction, setup.confidence, self.state.mode, extra={"symbol": setup.pair})
         # SIMULASI never touches Binance. REAL exposes PENDING only after
         # Binance acknowledges the limit order with an orderId.
         if self.state.get_active_count() >= self.state.max_positions:
@@ -2643,7 +2677,9 @@ class TradingBot:
             if not self.state.transition(setup.pair, "PENDING", event_id, binance_entry_confirmed=True):
                 raise ExchangeError(f"State PENDING gagal diterapkan setelah order Binance {setup.pair}")
             self.ws.subscribe(setup.pair)
+            logger.info("[ENTRY] BINANCE LIMIT CONFIRMED | orderId=%s | state=PENDING", order_id, extra={"symbol": setup.pair})
         except RateLimitError as e:
+            logger.warning("[ENTRY] BINANCE RATE-LIMIT | moved to waiting queue", extra={"symbol": setup.pair})
             self._queue_binance_pending(setup.pair)
             self._enter_binance_pause(e)
             return
@@ -2671,22 +2707,23 @@ class TradingBot:
         last_autosave = 0.0
         while not self._stop.is_set():
             try:
-                if self.learn_engine.is_paused():
-                    time.sleep(0.2)
-                    continue
                 self._check_binance_recovery()
                 self._process_binance_waiting_lists()
                 self._process_trail_queue()
                 now = time.time()
                 if now - last_audit > 300:  # audit tiap 5 menit
+                    logger.info("[LEARN] AUDIT START")
                     report = self.learn_engine.audit(self.strategy_engine)
                     self.learn_engine.set_strategy_state(self.strategy_engine.export_state())
                     self.state.strategy_state = self.strategy_engine.export_state()
                     self._notify_audit_report(report)
+                    logger.info("[LEARN] AUDIT DONE | action=%s", report.get("action"))
                     last_audit = now
                 if now - last_autosave > 120:  # autosave tiap 2 menit, tidak boleh ganggu trading (§40)
+                    logger.info("[LEARN] AUTOSAVE START")
                     self.learn_engine.autosave()
                     self.state.save_checkpoint()
+                    logger.info("[LEARN] AUTOSAVE DONE")
                     last_autosave = now
                 self._check_autostop()
                 self.telegram.flush(max_messages=5)
@@ -2804,13 +2841,14 @@ class TradingBot:
             "/resetbalance": self._cmd_resetbalance, "/trade": self._cmd_trade,
             "/order": self._cmd_order, "/stats": self._cmd_stats, "/koin": self._cmd_koin,
             "/ip": self._cmd_ip, "/banned": self._cmd_banned, "/unban": self._cmd_unban,
-            "/timeout": self._cmd_timeout, "/autostop": self._cmd_autostop, "/save": self._cmd_save, "/open": self._cmd_open,
+            "/timeout": self._cmd_timeout, "/autostop": self._cmd_autostop, "/open": self._cmd_open,
             "/healthz": self._cmd_healthz, "/help": self._cmd_help,
         }
         handler = handlers.get(cmd)
         if not handler:
             self.telegram.send(f"⚠️ Command tidak dikenal: {cmd}\nGunakan /help untuk daftar command yang valid.", "WARNING")
             return
+        logger.info("[COMMAND] EXECUTE %s %s", cmd, " ".join(args) if args else "")
         handler(args)
 
     def _cmd_healthz(self, args: List[str]) -> None:
@@ -3201,7 +3239,15 @@ class TradingBot:
             self.telegram.send("⚠️ /timeout REAL ditahan karena Binance sedang rate-limited. State TIDAK dihapus agar tidak meninggalkan posisi tak terlacak.", "WARNING")
             return
         try:
+            # Acknowledge immediately so the user knows the cleanup job has started.
+            self.telegram.send(
+                f"⏳ TIMEOUT {'ALL' if target == 'ALL' else target} — akan mencoba timeout dan membersihkan state/order.",
+                "INFO",
+            )
+            self.telegram.flush(max_messages=1)
+            logger.info("[TIMEOUT] START | target=%s | mode=%s", target, self.state.mode)
             if target == "ALL" and self.state.mode == "REAL":
+                logger.info("[TIMEOUT] REAL ALL | cleanup Binance START")
                 self._cleanup_real_account()
                 for symbol in list(self.state.positions.keys()):
                     self.state.transition(symbol, "CANCELLED", f"{symbol}:MANUAL_TIMEOUT:{time.time_ns()}", close_reason="MANUAL_TIMEOUT_ALL")
@@ -3210,12 +3256,14 @@ class TradingBot:
                     with self._shadow_lock:
                         self._shadow_candidates.pop(symbol, None)
                 self.state.auto = False
+                logger.info("[TIMEOUT] REAL ALL | cleanup Binance DONE | local state cleared")
                 self.telegram.send("✅ TIMEOUT ALL SELESAI\nBinance: semua posisi dan open order sudah diverifikasi bersih.\nAUTO: OFF", "INFO")
                 return
 
             targets = list(self.state.positions.keys()) if target == "ALL" else [target]
             done, missing = [], []
-            for symbol in targets:
+            for idx, symbol in enumerate(targets, 1):
+                logger.info("[TIMEOUT %02d/%02d] START", idx, len(targets), extra={"symbol": symbol})
                 pos = self.state.positions.get(symbol)
                 if not pos:
                     missing.append(symbol)
@@ -3228,6 +3276,7 @@ class TradingBot:
                     with self._shadow_lock:
                         self._shadow_candidates.pop(symbol, None)
                     done.append(symbol)
+                    logger.info("[TIMEOUT %02d/%02d] DONE", idx, len(targets), extra={"symbol": symbol})
             if missing and not done:
                 self.telegram.send(f"⚠️ Tidak ditemukan order/posisi lokal: {', '.join(missing)}", "WARNING")
             else:
@@ -3256,71 +3305,15 @@ class TradingBot:
         self.state.autostop_pct = pct
         self.telegram.send(f"✅ Autostop diatur ke {pct}% (REAL TRADE)", "INFO")
 
-    def _cmd_save(self, args: List[str]) -> None:
-        if args:
-            self.telegram.send("⚠️ Format salah. Gunakan: /save", "INFO")
-            return
-        try:
-            # Freeze Learn at a safe point first. Strategy state is copied BEFORE
-            # the snapshot so /open restores exactly the strategy active now.
-            self.learn_engine.set_strategy_state(self.strategy_engine.export_state())
-            result = self.learn_engine.manual_save()
-            if not result.get("ok"):
-                self.telegram.send(
-                    f"❌ LEARN SAVE GAGAL\nAlasan: {result.get('reason', '-')}",
-                    "ERROR",
-                )
-                return
-            self.state.strategy_state = self.strategy_engine.export_state()
-            self.state.save_checkpoint()
-            git_note = ""
-            if self.learn_engine.git_enabled:
-                self.learn_engine.mirror_ready_to_git()
-                git_note = "\nGitHub: ✅ mirror terbaru"
-            else:
-                git_note = "\nGitHub: ⚪ GIT_AUTOSAVE=false (local tetap tersimpan)"
-            self.telegram.send(
-                "💾 LEARN MEMORY TERSIMPAN\n\n"
-                "Status: ✅ VALID & ATOMIC\n"
-                f"File lokal: {result.get('path')}\n"
-                f"Ukuran: {result.get('bytes', 0)} bytes\n"
-                f"Strategy: v{self.strategy_engine.version}" + git_note + "\n\n"
-                "/open akan membaca memory lokal tervalidasi ini.",
-                "INFO",
-            )
-        except Exception as e:
-            logger.error("/save Learn gagal: %s", e)
-            self.telegram.send(f"❌ /save gagal: {e}", "ERROR")
-
     def _cmd_open(self, args: List[str]) -> None:
         if args:
             self.telegram.send("⚠️ Format salah. Gunakan: /open", "INFO")
             return
-        try:
-            result = self.learn_engine.open_ready_memory()
-            if not result.get("ok"):
-                self.telegram.send(
-                    f"❌ LEARN OPEN GAGAL\nAlasan: {result.get('reason', '-')}\n\n"
-                    "Memory aktif TIDAK diubah.",
-                    "ERROR",
-                )
-                return
-            if self.learn_engine.strategy_state:
-                self.strategy_engine.load_state(self.learn_engine.strategy_state)
-                self.state.strategy_state = self.strategy_engine.export_state()
-            self.state.save_checkpoint()
-            self.telegram.send(
-                "📂 LEARN MEMORY DIBUKA\n\n"
-                f"Sumber: LOCAL {result.get('label', '-').upper()}\n"
-                "Integrity: ✅ VALID\n"
-                f"Strategy: v{self.strategy_engine.version}\n"
-                f"Threshold: {self.strategy_engine.get_active_threshold():.1f}%\n\n"
-                "🧠 Brain resumed — analisis dilanjutkan dari memory tersebut.",
-                "INFO",
-            )
-        except Exception as e:
-            logger.error("/open Learn gagal: %s", e)
-            self.telegram.send(f"❌ /open gagal: {e}\nMemory aktif TIDAK diubah.", "ERROR")
+        label = self.learn_engine.load()
+        if self.learn_engine.strategy_state:
+            self.strategy_engine.load_state(self.learn_engine.strategy_state)
+            self.state.strategy_state = self.strategy_engine.export_state()
+        self.telegram.send(f"📂 Learning memory dibuka: {label}\n🧠 Strategy: v{self.strategy_engine.version} | Threshold: {self.strategy_engine.get_active_threshold():.1f}%", "INFO")
 
 
 # =============================================================================
@@ -3401,15 +3394,6 @@ def run_selftest() -> bool:
     audit_report = le.audit(strat)
     check("learn.audit tidak crash", isinstance(audit_report, dict))
     check("learn.save_checkpoint sukses", le.save_checkpoint())
-    with tempfile.TemporaryDirectory(prefix="learn_safe_") as td:
-        safe_cp = os.path.join(td, "learn_checkpoint.json")
-        safe = learn.LearnEngine(checkpoint_path=safe_cp)
-        safe.record_trade_outcome({"pair":"TESTUSDT","confidence":60,"outcome":"TP"}, "TP", {"pnl_r":1.0})
-        sr = safe.manual_save()
-        check("learn.manual_save valid atomic", bool(sr.get("ok")))
-        safe.trade_history.clear()
-        op = safe.open_ready_memory()
-        check("learn.open_ready_memory restore", bool(op.get("ok")) and len(safe.trade_history) == 1)
 
     # Binance user-data WS regression: a FILLED entry must be accepted without
     # a positionRisk REST probe. This is the key property during HTTP 418/429.
