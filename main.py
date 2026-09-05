@@ -187,6 +187,16 @@ def setup_logging(state_dir: str) -> logging.Logger:
 
 logger = logging.getLogger("main")
 
+# Binance REST safety governor. 418 means the IP was auto-banned after
+# continued rate-limit violations; we therefore bias toward serialization,
+# conservative headroom, and zero retries after 429/418.
+BINANCE_POST_LIMIT_SAFETY_SECONDS = 15.0
+BINANCE_WEIGHT_HARD_STOP = 1800
+BINANCE_WEIGHT_RECOVERY_MARGIN = 150
+BINANCE_DEFAULT_429_COOLDOWN = 75.0
+BINANCE_ORDER_INTERVAL = 3.0
+BINANCE_REQUEST_INTERVAL = 1.0
+
 
 class SecretRedactingFilter(logging.Filter):
     """§61 — pastikan secret tidak pernah bocor ke log/telegram/traceback."""
@@ -639,13 +649,23 @@ class BinanceClient:
         self._time_offset_ms: int = 0
         self._time_offset_synced_at: float = 0.0
         self._hedge_mode: Optional[bool] = None
-        # Semua Binance REST melewati satu gate agar worker tidak burst.
+        # Semua Binance REST melewati SATU serial choke-point.
+        # Network call juga diserialkan, bukan hanya jadwalnya, sehingga jika
+        # satu worker menerima 429/418 worker lain tidak bisa menyelipkan request
+        # sebelum governor sempat memasang hard-stop.
         self._request_gate_lock = threading.Lock()
+        self._network_lock = threading.RLock()
         self._next_request_mono = 0.0
-        self._min_request_interval = 0.60
-        self._order_request_interval = 2.00
+        self._min_request_interval = BINANCE_REQUEST_INTERVAL
+        self._order_request_interval = BINANCE_ORDER_INTERVAL
         self._next_order_request_mono = 0.0
         self._used_weight_1m = 0
+        self._used_weight_1m_ts = 0.0
+        self._last_response_ts = 0.0
+        self._last_request_path = ""
+        self._consecutive_429 = 0
+        self._last_rate_limit_ts = 0.0
+        self._last_rate_limit_status = 0
         self._used_order_10s = 0
         self._used_order_1m = 0
         self._order_limit_10s = 300
@@ -668,28 +688,21 @@ class BinanceClient:
     # for this request is outside of the recvWindow). Ini sinkronkan offset
     # sekali di awal & auto-refresh tiap 30 menit / saat error -1021 muncul.
     def sync_server_time(self) -> None:
-        try:
-            with self._request_gate_lock:
-                now_mono = time.monotonic()
-                wait = self._next_request_mono - now_mono
-                if wait > 0:
-                    time.sleep(min(wait, 2.0))
-                self._next_request_mono = time.monotonic() + self._min_request_interval
-            resp = self.session.get(f"{self.base_url}/fapi/v1/time", timeout=10)
-            raw_weight = resp.headers.get("X-MBX-USED-WEIGHT-1M")
-            if raw_weight:
-                try:
-                    self._used_weight_1m = int(raw_weight)
-                except ValueError:
-                    pass
-            resp.raise_for_status()
-            server_ms = resp.json()["serverTime"]
-            local_ms = int(time.time() * 1000)
-            self._time_offset_ms = server_ms - local_ms
-            self._time_offset_synced_at = time.time()
-            logger.info("Binance time offset disinkronkan: %d ms (endpoint=%s)", self._time_offset_ms, self.base_url)
-        except Exception as e:
-            logger.warning("Gagal sinkronisasi waktu server Binance (%s) — pakai waktu lokal", e)
+        """Sync server time through the SAME REST governor.
+
+        Versi lama memakai session.get() langsung di sini sehingga endpoint
+        /time dapat melewati gate 429/418. Pada IP yang sedang ditekan Binance,
+        itu justru dapat memperburuk keadaan.
+        """
+        data = self._request("GET", "/fapi/v1/time", signed=False, _skip_time_sync=True)
+        server_ms = int(data["serverTime"])
+        local_ms = int(time.time() * 1000)
+        self._time_offset_ms = server_ms - local_ms
+        self._time_offset_synced_at = time.time()
+        logger.info(
+            "[BINANCE] TIME SYNC | offset=%dms | weight_1m=%s",
+            self._time_offset_ms, self._used_weight_1m,
+        )
 
     def _timestamp(self) -> int:
         if time.time() - self._time_offset_synced_at > 1800:
@@ -701,156 +714,245 @@ class BinanceClient:
         sig = hmac.new(self.api_secret, query.encode(), hashlib.sha256).hexdigest()
         return f"{query}&signature={sig}"
 
-    def _request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None,
-                 signed: bool = False, _retry_on_time_drift: bool = True) -> Any:
-        """Single choke-point for Binance REST.
+    def _local_rate_limit_error(self) -> RateLimitError:
+        err = self._blocked_error or RateLimitError(
+            "Binance REST locally blocked by governor", status_code=429, code=-1003
+        )
+        remaining = max(0.0, self._blocked_until_mono - time.monotonic())
+        return RateLimitError(
+            str(err),
+            status_code=err.status_code or 429,
+            retry_after=remaining,
+            banned_until_ms=err.banned_until_ms,
+            code=err.code,
+        )
 
-        No automatic retry on 429/418. Repeatedly retrying a 429 is exactly
-        what can escalate into an HTTP 418 IP ban.
+    @staticmethod
+    def _header_float(headers: Any, name: str) -> Optional[float]:
+        raw = headers.get(name)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _response_rate_limit_block(self, resp: Any, code: Optional[int], msg: str) -> RateLimitError:
+        retry_after = self._header_float(resp.headers, "Retry-After")
+        banned_until_ms = None
+        match = re.search(r"banned until (\d+)", msg or "", re.I)
+        if match:
+            banned_until_ms = int(match.group(1))
+
+        status = int(resp.status_code)
+        if banned_until_ms:
+            block_seconds = max(1.0, banned_until_ms / 1000.0 - time.time())
+        elif retry_after is not None:
+            block_seconds = max(1.0, retry_after)
+        elif code == -1015:
+            block_seconds = BINANCE_DEFAULT_429_COOLDOWN
+        elif status == 429:
+            block_seconds = BINANCE_DEFAULT_429_COOLDOWN
+        else:
+            block_seconds = 300.0
+
+        err = RateLimitError(
+            f"Binance rate limit (HTTP {status}): {msg}",
+            status_code=status, retry_after=retry_after,
+            banned_until_ms=banned_until_ms, code=code,
+        )
+        self._blocked_until_mono = max(
+            self._blocked_until_mono, time.monotonic() + block_seconds
+        )
+        self._blocked_error = err
+        self._last_rate_limit_ts = time.time()
+        self._last_rate_limit_status = status
+        self._consecutive_429 = self._consecutive_429 + 1 if status == 429 else self._consecutive_429
+        logger.warning(
+            "[BINANCE] REST RATE LIMIT | path=%s HTTP=%s code=%s block=%.1fs weight_1m=%s order10s=%s order1m=%s",
+            self._last_request_path, status, code, block_seconds,
+            self._used_weight_1m, self._used_order_10s, self._used_order_1m,
+        )
+        return err
+
+    def _request(
+        self, method: str, path: str, params: Optional[Dict[str, Any]] = None,
+        signed: bool = False, _retry_on_time_drift: bool = True,
+        _skip_time_sync: bool = False,
+    ) -> Any:
+        """Single choke-point for ALL Binance REST requests.
+
+        Safety properties:
+        - one network request at a time;
+        - no retry after 429/418;
+        - local hard-stop is checked again immediately before sending;
+        - response usage headers update the governor;
+        - time-sync uses this same choke-point;
+        - socket timeouts are NEVER treated as rate-limit events.
         """
         params = dict(params or {})
-        url = self.base_url + path
-
-        # Immediate local hard-stop after a 429/418 response. This closes the
-        # race where another worker could start a request before TradingBot
-        # finishes switching the global state into BINANCE_PAUSED.
-        now_mono = time.monotonic()
-        if now_mono < self._blocked_until_mono:
-            err = self._blocked_error or RateLimitError(
-                "Binance REST locally blocked by governor", status_code=429, code=-1003
-            )
-            raise RateLimitError(
-                str(err),
-                status_code=err.status_code or 429,
-                retry_after=max(0.0, self._blocked_until_mono - now_mono),
-                banned_until_ms=err.banned_until_ms,
-                code=err.code,
-            )
-
-        is_order_request = (
-            path == "/fapi/v1/order"
-            or path == "/fapi/v1/allOpenOrders"
-            or path == "/fapi/v1/batchOrders"
+        is_order_request = path in (
+            "/fapi/v1/order", "/fapi/v1/allOpenOrders", "/fapi/v1/batchOrders"
         )
-        if self._used_weight_1m >= 2200:
-            raise RateLimitError(
-                f"Binance REST governor pre-block: used_weight_1m={self._used_weight_1m}",
-                status_code=429, code=-1003
-            )
-        if is_order_request and (self._used_order_10s >= int(self._order_limit_10s * 0.80) or self._used_order_1m >= int(self._order_limit_1m * 0.90)):
-            raise RateLimitError(
-                f"Binance order governor pre-block: 10s={self._used_order_10s}/{self._order_limit_10s}, 1m={self._used_order_1m}/{self._order_limit_1m}",
-                status_code=429, code=-1015
-            )
-        with self._request_gate_lock:
+
+        with self._network_lock:
             now_mono = time.monotonic()
-            wait = max(
-                self._next_request_mono - now_mono,
-                (self._next_order_request_mono - now_mono) if is_order_request else 0.0,
-            )
-            if wait > 0:
-                time.sleep(min(wait, 5.0))
-            send_mono = time.monotonic()
-            self._next_request_mono = send_mono + self._min_request_interval
-            if is_order_request:
-                self._next_order_request_mono = send_mono + self._order_request_interval
+            if now_mono < self._blocked_until_mono:
+                raise self._local_rate_limit_error()
 
-        try:
-            if signed:
-                params["timestamp"] = self._timestamp()
-                params["recvWindow"] = 10000
-                query = self._sign(params)
-                url = f"{url}?{query}"
-                resp = self.session.request(method, url, timeout=15)
-            else:
-                resp = self.session.request(method, url, params=params, timeout=15)
-        except (requests.ConnectionError, requests.Timeout) as e:
-            raise ExchangeError(f"Binance connection error: {e}")
-
-        raw_weight = resp.headers.get("X-MBX-USED-WEIGHT-1M") or resp.headers.get("X-MBX-USED-WEIGHT-1m")
-        if raw_weight:
-            try:
-                self._used_weight_1m = int(raw_weight)
-            except ValueError:
-                pass
-        for header_name, attr in (("X-MBX-ORDER-COUNT-10S", "_used_order_10s"), ("X-MBX-ORDER-COUNT-1M", "_used_order_1m")):
-            raw = resp.headers.get(header_name)
-            if raw:
-                try:
-                    setattr(self, attr, int(raw))
-                except ValueError:
-                    pass
-
-        if resp.status_code in (429, 418):
-            retry_after = None
-            raw_retry = resp.headers.get("Retry-After")
-            if raw_retry:
-                try:
-                    retry_after = float(raw_retry)
-                except ValueError:
-                    pass
-            banned_until_ms = None
-            code = None
-            msg = resp.text[:1000]
-            try:
-                body = resp.json()
-                if isinstance(body, dict):
-                    code = body.get("code")
-                    msg = body.get("msg") or msg
-            except ValueError:
-                pass
-            match = re.search(r"banned until (\d+)", msg or "", re.I)
-            if match:
-                banned_until_ms = int(match.group(1))
-            err = RateLimitError(
-                f"Binance rate limit (HTTP {resp.status_code}): {msg}",
-                status_code=resp.status_code,
-                retry_after=retry_after,
-                banned_until_ms=banned_until_ms,
-                code=code,
-            )
-            now_epoch = time.time()
-            if banned_until_ms:
-                block_seconds = max(1.0, banned_until_ms / 1000.0 - now_epoch)
-            elif retry_after is not None:
-                block_seconds = max(1.0, retry_after)
-            else:
-                block_seconds = 10.0 if resp.status_code == 429 else 60.0
-            self._blocked_until_mono = max(self._blocked_until_mono, time.monotonic() + block_seconds)
-            self._blocked_error = err
-            raise err
-
-        try:
-            data = resp.json()
-        except ValueError:
-            raise ExchangeError(f"Binance HTTP {resp.status_code} malformed response: {resp.text[:200]}")
-
-        if isinstance(data, dict) and "code" in data and data.get("code", 0) < 0:
-            code = data["code"]
-            msg = data.get("msg")
-            if code in (-1003, -1015):
-                err = RateLimitError(
-                    f"Binance rate limit code {code}: {msg}",
-                    status_code=resp.status_code,
-                    code=code,
+            # Conservative pre-flight headroom. A Binance 429 must be treated
+            # as a stop signal, not something we retry into a 418.
+            if self._used_weight_1m >= BINANCE_WEIGHT_HARD_STOP:
+                block_seconds = 60.0
+                self._blocked_until_mono = max(
+                    self._blocked_until_mono, time.monotonic() + block_seconds
                 )
-                block_seconds = 10.0 if code == -1015 else 5.0
-                self._blocked_until_mono = max(self._blocked_until_mono, time.monotonic() + block_seconds)
+                err = RateLimitError(
+                    f"Binance REST governor pre-block: used_weight_1m={self._used_weight_1m}",
+                    status_code=429, code=-1003, retry_after=block_seconds,
+                )
+                self._blocked_error = err
+                logger.warning(
+                    "[BINANCE] REST PREBLOCK | weight_1m=%s >= %s",
+                    self._used_weight_1m, BINANCE_WEIGHT_HARD_STOP,
+                )
+                raise err
+
+            if is_order_request and (
+                self._used_order_10s >= int(self._order_limit_10s * 0.70)
+                or self._used_order_1m >= int(self._order_limit_1m * 0.85)
+            ):
+                block_seconds = 15.0
+                self._blocked_until_mono = max(
+                    self._blocked_until_mono, time.monotonic() + block_seconds
+                )
+                err = RateLimitError(
+                    "Binance order governor pre-block: "
+                    f"10s={self._used_order_10s}/{self._order_limit_10s}, "
+                    f"1m={self._used_order_1m}/{self._order_limit_1m}",
+                    status_code=429, code=-1015, retry_after=block_seconds,
+                )
                 self._blocked_error = err
                 raise err
-            if code == -1021 and signed and _retry_on_time_drift:
-                logger.warning("Binance -1021 (timestamp drift) — resync & retry sekali: %s", msg)
-                self.sync_server_time()
-                return self._request(method, path, params, signed=signed, _retry_on_time_drift=False)
-            if code == -2015:
-                raise ExchangeError(
-                    f"Binance error -2015 (Invalid API-key/IP/permissions): {msg}. "
-                    f"Endpoint: {self.base_url} (MAINNET). "
-                    f"Penyebab tersering: IP restriction key tidak mencakup IP server ini, "
-                    f"atau permission Futures belum diaktifkan di API key ini."
+
+            with self._request_gate_lock:
+                now_mono = time.monotonic()
+                wait = max(
+                    self._next_request_mono - now_mono,
+                    (self._next_order_request_mono - now_mono) if is_order_request else 0.0,
                 )
-            raise ExchangeError(f"Binance error {code}: {msg} (HTTP {resp.status_code})")
-        return data
+                if wait > 0:
+                    time.sleep(wait)
+                # Re-check after sleeping: another thread cannot be sending
+                # concurrently because _network_lock is held, but this guard
+                # keeps the invariant explicit.
+                if time.monotonic() < self._blocked_until_mono:
+                    raise self._local_rate_limit_error()
+                send_mono = time.monotonic()
+                self._next_request_mono = send_mono + self._min_request_interval
+                if is_order_request:
+                    self._next_order_request_mono = send_mono + self._order_request_interval
+
+            self._last_request_path = path
+            logger.debug(
+                "[BINANCE] REST SEND | %s %s | signed=%s | weight1m=%s order10s=%s order1m=%s",
+                method, path, signed, self._used_weight_1m, self._used_order_10s, self._used_order_1m,
+            )
+
+            try:
+                if signed:
+                    if not _skip_time_sync and time.time() - self._time_offset_synced_at > 1800:
+                        self.sync_server_time()
+                    params["timestamp"] = int(time.time() * 1000) + self._time_offset_ms
+                    params["recvWindow"] = 10000
+                    query = self._sign(params)
+                    resp = self.session.request(
+                        method, f"{self.base_url}{path}?{query}", timeout=15
+                    )
+                else:
+                    resp = self.session.request(
+                        method, self.base_url + path, params=params, timeout=15
+                    )
+            except (requests.ConnectionError, requests.Timeout) as e:
+                logger.warning("[BINANCE] REST NETWORK TIMEOUT/CONNECTION | path=%s | %s", path, e)
+                raise ExchangeError(f"Binance connection error: {e}")
+
+            self._last_response_ts = time.time()
+            raw_weight = resp.headers.get("X-MBX-USED-WEIGHT-1M") or resp.headers.get("X-MBX-USED-WEIGHT-1m")
+            if raw_weight:
+                try:
+                    self._used_weight_1m = int(float(raw_weight))
+                    self._used_weight_1m_ts = time.time()
+                except (TypeError, ValueError):
+                    pass
+            for header_name, attr in (
+                ("X-MBX-ORDER-COUNT-10S", "_used_order_10s"),
+                ("X-MBX-ORDER-COUNT-1M", "_used_order_1m"),
+            ):
+                raw = resp.headers.get(header_name)
+                if raw is not None:
+                    try:
+                        setattr(self, attr, int(float(raw)))
+                    except (TypeError, ValueError):
+                        pass
+
+            if resp.status_code in (429, 418):
+                msg = resp.text[:1000]
+                code = None
+                try:
+                    body = resp.json()
+                    if isinstance(body, dict):
+                        code = body.get("code")
+                        msg = body.get("msg") or msg
+                except ValueError:
+                    pass
+                raise self._response_rate_limit_block(resp, code, msg)
+
+            try:
+                data = resp.json()
+            except ValueError:
+                raise ExchangeError(
+                    f"Binance HTTP {resp.status_code} malformed response: {resp.text[:200]}"
+                )
+
+            if isinstance(data, dict) and "code" in data and data.get("code", 0) < 0:
+                code = data["code"]
+                msg = data.get("msg")
+                if code in (-1003, -1015):
+                    class _SyntheticResponse:
+                        status_code = resp.status_code
+                        headers = resp.headers
+                        text = resp.text
+                        def json(self_inner):
+                            return data
+                    raise self._response_rate_limit_block(_SyntheticResponse(), code, msg or "")
+                if code == -1021 and signed and _retry_on_time_drift:
+                    logger.warning("[BINANCE] -1021 timestamp drift — sync + retry once")
+                    # Clear stale offset before the one allowed retry. The retry
+                    # remains behind the same serial network gate.
+                    self._time_offset_synced_at = 0.0
+                    self.sync_server_time()
+                    return self._request(
+                        method, path, params, signed=signed,
+                        _retry_on_time_drift=False, _skip_time_sync=True,
+                    )
+                if code == -2015:
+                    raise ExchangeError(
+                        f"Binance error -2015 (Invalid API-key/IP/permissions): {msg}. "
+                        f"Endpoint: {self.base_url} (MAINNET). "
+                        "Penyebab tersering: IP restriction key tidak mencakup IP server ini, "
+                        "atau permission Futures belum diaktifkan di API key ini."
+                    )
+                raise ExchangeError(f"Binance error {code}: {msg} (HTTP {resp.status_code})")
+
+            # A successful response resets the consecutive-429 counter; usage
+            # itself remains visible so the next request can still be preblocked.
+            self._consecutive_429 = 0
+            logger.debug(
+                "[BINANCE] REST OK | %s %s | HTTP=%s | weight1m=%s order10s=%s order1m=%s",
+                method, path, resp.status_code, self._used_weight_1m, self._used_order_10s, self._used_order_1m,
+            )
+            return data
 
     # -- account -----------------------------------------------------------
     def get_balance_usdt(self) -> float:
@@ -1488,6 +1590,11 @@ class TradingBot:
         self.bybit = BybitClient(cfg.bybit_api_key, cfg.bybit_api_secret)
         self.binance = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret)
         self.telegram = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id)
+        # Learn tidak melakukan network sendiri. Checkpoint/audit notification
+        # dialirkan ke Telegram milik main.py melalui sink ini.
+        self.learn_engine.set_notification_sink(
+            lambda text, level="INFO": self.telegram.send(text, level)
+        )
         self.ws = BybitWebSocket(on_tick=self._on_tick, on_kline=self._on_kline)
         self.binance_ws = BinanceUserDataStream(
             cfg.binance_api_key,
@@ -1676,11 +1783,13 @@ class TradingBot:
         active = self.state.get_active_count()
         if fresh_session and (self.state.mode != "REAL" or active == 0):
             self.learn_engine.save_checkpoint()
+            self.telegram.flush(max_messages=20)
             self.state.clear_runtime_checkpoint()
             logger.info("[MAIN] COLD STOP — runtime checkpoint dihapus; learning memory dipertahankan")
         else:
             self.state.save_checkpoint()
             self.learn_engine.save_checkpoint()
+            self.telegram.flush(max_messages=20)
             if fresh_session and self.state.mode == "REAL" and active > 0:
                 logger.warning("[MAIN] COLD STOP ditahan untuk REAL aktif: %s posisi/reserve tetap disimpan sebagai safety checkpoint", active)
                 self.telegram.send(
@@ -2192,8 +2301,12 @@ class TradingBot:
         symbols = {str(o.get("symbol", "")) for o in open_orders if o.get("symbol")}
         positions = self.binance.get_all_position_risk()
         symbols.update(str(r.get("symbol", "")) for r in positions if r.get("symbol"))
-        for symbol in sorted(symbols):
+        for idx, symbol in enumerate(sorted(symbols), 1):
+            logger.info("[TIMEOUT ALL] CANCEL OPEN ORDERS %02d/%02d | %s", idx, len(symbols), symbol, extra={"symbol": symbol})
             self.binance.cancel_all_open_orders(symbol)
+            # Explicit delay is intentionally redundant with the governor:
+            # cleanup is a safety operation, not latency-sensitive trading.
+            time.sleep(0.5)
         # Flatten every real position, including positions not present in local state.
         for risk in positions:
             symbol = str(risk.get("symbol", ""))
@@ -2211,8 +2324,9 @@ class TradingBot:
             filters = self.binance.get_symbol_filters(symbol)
             qty = round_step(abs(amt), filters["step_size"])
             if qty > 0:
+                logger.info("[TIMEOUT ALL] FLATTEN %s qty=%s", symbol, qty, extra={"symbol": symbol})
                 self.binance.place_market_order(symbol, side_close, qty, actual_dir)
-                time.sleep(0.25)
+                time.sleep(0.75)
         # Verify globally empty account state.
         for risk in self.binance.get_all_position_risk():
             if abs(float(risk.get("positionAmt", 0))) > 0:
@@ -2370,7 +2484,7 @@ class TradingBot:
             status = 429
             reason = str(error)
 
-        until += 60.0  # requested post-limit safety delay
+        until += BINANCE_POST_LIMIT_SAFETY_SECONDS  # post-limit safety delay
 
         with self.state._lock:
             was_paused = self.state.binance_paused
@@ -2883,11 +2997,13 @@ class TradingBot:
                 f"Sisa cooldown: {remaining} detik",
                 f"Reason: {reason[:300]}",
                 "User Data WS: 🟢 tetap aktif" if mode == "REAL" else "User Data WS: ⚪ tidak aktif (SIMULASI)",
+                f"REST governor: weight1m={self.binance._used_weight_1m} | order10s={self.binance._used_order_10s} | order1m={self.binance._used_order_1m}",
             ]
         else:
             lines += [
                 "Binance REST: 🟢 READY",
                 "User Data WS: 🟢 aktif" if mode == "REAL" else "User Data WS: ⚪ tidak aktif (SIMULASI)",
+                f"REST governor: weight1m={self.binance._used_weight_1m} | order10s={self.binance._used_order_10s} | order1m={self.binance._used_order_1m}",
             ]
         self.telegram.send("\n".join(lines), "INFO")
 
@@ -2923,6 +3039,7 @@ class TradingBot:
             self.telegram.send("⚠️ AUTO belum bisa dinyalakan: Binance sedang rate-limited.", "WARNING")
             return
         self.state.auto = True
+        logger.info("[AUTO] ENABLE | mode=%s | binance_paused=%s | weight1m=%s", self.state.mode, self.state.binance_paused, self.binance._used_weight_1m)
         if self.state.mode == "REAL":
             if self.state.current_balance is None:
                 try:
