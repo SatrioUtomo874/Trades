@@ -64,8 +64,8 @@ try:
 except ImportError:
     websocket = None  # akan dicek saat startup; simulasi tetap bisa jalan tanpa WS live
 
-import strategy_vnext2 as strategy
-import learn_vnext2 as learn
+import strategy as strategy
+import learn as learn
 
 
 # =============================================================================
@@ -186,6 +186,102 @@ def setup_logging(state_dir: str) -> logging.Logger:
 
 
 logger = logging.getLogger("main")
+
+
+# ---------------------------------------------------------------------------
+# Runtime compatibility guard
+# ---------------------------------------------------------------------------
+# The launcher syncs the GitHub repository before loading MAIN_FILE.  A
+# versioned module name such as ``strategy_vnext2`` can therefore crash before
+# the bot even starts when that auxiliary file was not committed.  Keep the
+# runtime dependency names stable (strategy.py / learn.py) and patch only the
+# deterministic helper symbols that older strategy.py revisions may lack.
+def _ensure_strategy_runtime_compat() -> None:
+    if not hasattr(strategy, "classify_volatility_regime"):
+        def classify_volatility_regime(candles, params):
+            if not candles:
+                return "NORMAL"
+            try:
+                period = max(2, int(params.get("atr_period", 14)))
+                lookback = max(period + 5, int(params.get("vol_regime_lookback", 100)))
+            except Exception:
+                period, lookback = 14, 100
+            work = list(candles)[-lookback:]
+            closes_fn = getattr(strategy, "_closes", None)
+            atr_fn = getattr(strategy, "atr_series", None)
+            if not callable(closes_fn) or not callable(atr_fn):
+                return "NORMAL"
+            try:
+                closes = closes_fn(work)
+                atrs = atr_fn(work, period)
+            except Exception:
+                return "NORMAL"
+            if not closes or not atrs:
+                return "NORMAL"
+            try:
+                price = float(closes[-1] or 0.0)
+                atr_now = float(atrs[-1] or 0.0)
+            except Exception:
+                return "NORMAL"
+            if price <= 0 or atr_now <= 0:
+                return "NORMAL"
+            try:
+                atr_pct = (atr_now / price) * 100.0
+                low_pct = float(params.get("low_vol_pct", 0.15))
+                high_pct = float(params.get("high_vol_pct", 3.0))
+            except Exception:
+                return "NORMAL"
+            if atr_pct < low_pct:
+                return "LOW_VOLATILITY"
+            if atr_pct > high_pct:
+                return "HIGH_VOLATILITY"
+            return "NORMAL"
+        strategy.classify_volatility_regime = classify_volatility_regime
+
+    if not hasattr(strategy, "validate_trailing_geometry"):
+        def validate_trailing_geometry(direction, current_sl, proposed_sl, price, entry, tp):
+            import math as _math
+            try:
+                cur = float(current_sl); new = float(proposed_sl)
+                px = float(price); en = float(entry); target = float(tp)
+            except Exception:
+                return False, "NON_FINITE_TRAIL_GEOMETRY"
+            if not all(_math.isfinite(x) for x in (cur, new, px, en, target)):
+                return False, "NON_FINITE_TRAIL_GEOMETRY"
+            d = str(direction or "").upper()
+            if d == "BUY":
+                if cur >= en and new < cur:
+                    return False, "TRAIL_WOULD_REDUCE_PROTECTION"
+                if new >= px:
+                    return False, "TRAIL_SL_NOT_BELOW_PRICE"
+                if target > en and new >= target:
+                    return False, "TRAIL_SL_CROSSES_TP"
+                if new <= 0 or en <= 0:
+                    return False, "INVALID_PRICE_GEOMETRY"
+                return True, "OK"
+            if d == "SELL":
+                if cur <= en and new > cur:
+                    return False, "TRAIL_WOULD_REDUCE_PROTECTION"
+                if new <= px:
+                    return False, "TRAIL_SL_NOT_ABOVE_PRICE"
+                if target < en and new <= target:
+                    return False, "TRAIL_SL_CROSSES_TP"
+                if new <= 0 or en <= 0:
+                    return False, "INVALID_PRICE_GEOMETRY"
+                return True, "OK"
+            return False, "INVALID_DIRECTION"
+        strategy.validate_trailing_geometry = validate_trailing_geometry
+
+    required = ("Strategy", "Setup", "classify_regime", "validate_geometry")
+    missing = [name for name in required if not hasattr(strategy, name)]
+    if missing:
+        raise RuntimeError(
+            "strategy.py tidak kompatibel dengan main ini; simbol wajib hilang: "
+            + ", ".join(missing)
+        )
+
+
+_ensure_strategy_runtime_compat()
 
 # Binance REST safety governor. 418 means the IP was auto-banned after
 # continued rate-limit violations; we therefore bias toward serialization,
