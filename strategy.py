@@ -84,6 +84,48 @@ DEFAULT_PARAMS: Dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
+# Data contract / safety helpers
+# ---------------------------------------------------------------------------
+
+_REQUIRED_OHLCV = ("t", "o", "h", "l", "c", "v")
+
+def validate_candles(candles: Sequence[Dict[str, float]], min_len: int = 1) -> Tuple[bool, str]:
+    """Validasi keras data yang masuk dari main.py. Tidak melakukan I/O."""
+    if candles is None or len(candles) < min_len:
+        return False, "INSUFFICIENT_CANDLES"
+    prev_t = None
+    for i, c in enumerate(candles):
+        if not isinstance(c, dict) or any(k not in c for k in _REQUIRED_OHLCV):
+            return False, f"MALFORMED_CANDLE_{i}"
+        try:
+            vals = [float(c[k]) for k in _REQUIRED_OHLCV]
+        except (TypeError, ValueError):
+            return False, f"NON_NUMERIC_CANDLE_{i}"
+        if any(not math.isfinite(v) for v in vals):
+            return False, f"NON_FINITE_CANDLE_{i}"
+        t, o, h, l, close, v = vals
+        if t <= 0 or v < 0 or min(o, h, l, close) <= 0:
+            return False, f"INVALID_CANDLE_RANGE_{i}"
+        if h < max(o, close) or l > min(o, close) or h < l:
+            return False, f"INVALID_OHLC_RELATION_{i}"
+        if prev_t is not None and t <= prev_t:
+            return False, f"TIMESTAMP_NOT_ASCENDING_{i}"
+        prev_t = t
+    return True, "OK"
+
+
+def _last_confirmed(candles: Sequence[Dict[str, float]]) -> Sequence[Dict[str, float]]:
+    """Gunakan candle tertutup bila caller menyertakan flag confirm=False/True.
+    REST candle tanpa field confirm dianggap sudah closed."""
+    if not candles:
+        return candles
+    last = candles[-1]
+    if last.get("confirm", True) is False:
+        return candles[:-1]
+    return candles
+
+
+# ---------------------------------------------------------------------------
 # Utility indikator — murni matematis, tidak butuh network.
 # ---------------------------------------------------------------------------
 
@@ -342,6 +384,8 @@ class Setup:
     atr: float
     timestamp: float
     strategy_version: str
+    threshold_passed: bool = True
+    reference_levels: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -359,6 +403,8 @@ class Setup:
             "atr": self.atr,
             "timestamp": self.timestamp,
             "strategy_version": self.strategy_version,
+            "threshold_passed": bool(self.threshold_passed),
+            "reference_levels": self.reference_levels,
         }
 
 
@@ -448,13 +494,15 @@ class Strategy:
         return previous
 
     def export_state(self) -> Dict[str, Any]:
-        return {"version": self.version, "params": dict(self.params)}
+        return {"version": self.version, "params": dict(self.params), "version_history": list(self.version_history)}
 
     def load_state(self, state: Dict[str, Any]) -> None:
         if not state:
             return
         self.version = state.get("version", self.version)
         self.params.update(state.get("params", {}))
+        if isinstance(state.get("version_history"), list) and state.get("version_history"):
+            self.version_history = list(state["version_history"])
 
     # -- analisis utama -------------------------------------------------------
     def analyze(
@@ -462,22 +510,27 @@ class Strategy:
         symbol: str,
         candles: Sequence[Dict[str, float]],
         btc_candles: Optional[Sequence[Dict[str, float]]] = None,
+        enforce_threshold: bool = True,
     ) -> Optional[Setup]:
         p = self.params
+        weights = dict(CONFIDENCE_WEIGHTS)
+        weights.update(p.get("CONFIDENCE_WEIGHTS", {}))
         min_len = max(p["structure_lookback"], p["vol_regime_lookback"], p["atr_period"]) + 5
-        if len(candles) < min_len:
+        work = list(_last_confirmed(candles))
+        ok, _ = validate_candles(work, min_len=min_len)
+        if not ok:
             return None
 
-        atrs = atr_series(candles, p["atr_period"])
+        atrs = atr_series(work, p["atr_period"])
         atr_now = atrs[-1]
         if atr_now <= 0:
             return None
 
-        closes = _closes(candles)
+        closes = _closes(work)
         last_close = closes[-1]
 
         # --- market structure ---
-        struct_window = candles[-p["structure_lookback"]:]
+        struct_window = work[-p["structure_lookback"]:]
         swings = swing_points(struct_window, p["swing_left"], p["swing_right"])
         trend_slice = closes[-p["trend_lookback"]:]
         slope, r2 = linreg_slope(trend_slice)
@@ -502,40 +555,44 @@ class Strategy:
             reasons.append("structure break bearish (BOS)")
         else:
             return None  # tanpa structure break, tidak ada dasar entry
+        if trend_dir == direction:
+            reasons.append("trend slope searah structure")
+        else:
+            reasons.append("trend slope berlawanan — confidence dikurangi")
 
         # --- liquidity ---
         levels = equal_levels(swings, atr_now, p["equal_level_tol_atr"])
-        sweep = detect_liquidity_sweep(candles, p["sweep_lookback"])
+        sweep = detect_liquidity_sweep(work, p["sweep_lookback"])
         liquidity_score = 0.0
         if sweep:
             if (direction == "BUY" and sweep["type"] == "BULLISH_SWEEP") or (
                 direction == "SELL" and sweep["type"] == "BEARISH_SWEEP"
             ):
-                liquidity_score += CONFIDENCE_WEIGHTS["liquidity"] * 0.7
+                liquidity_score += weights["liquidity"] * 0.7
                 reasons.append(f"liquidity sweep searah ({sweep['type']})")
         pool = levels["equal_highs"] if direction == "BUY" else levels["equal_lows"]
         if pool:
-            liquidity_score += CONFIDENCE_WEIGHTS["liquidity"] * 0.3
+            liquidity_score += weights["liquidity"] * 0.3
             reasons.append("equal high/low terdeteksi sebagai target likuiditas")
-        liquidity_score = min(liquidity_score, CONFIDENCE_WEIGHTS["liquidity"])
+        liquidity_score = min(liquidity_score, weights["liquidity"])
 
         # --- displacement & FVG (entry quality) ---
-        disp = detect_displacement(candles, atr_now, p["displacement_atr_mult"])
-        fvg = detect_fvg(candles)
+        disp = detect_displacement(work, atr_now, p["displacement_atr_mult"])
+        fvg = detect_fvg(work)
         entry_quality_score = 0.0
         setup_type_parts = ["SMC_BOS"]
         if disp and disp["direction"] == direction:
-            entry_quality_score += CONFIDENCE_WEIGHTS["entry_quality"] * 0.6
+            entry_quality_score += weights["entry_quality"] * 0.6
             reasons.append("displacement candle searah")
             setup_type_parts.append("DISPLACEMENT")
         if fvg and (
             (direction == "BUY" and fvg["type"] == "BULLISH_FVG")
             or (direction == "SELL" and fvg["type"] == "BEARISH_FVG")
         ):
-            entry_quality_score += CONFIDENCE_WEIGHTS["entry_quality"] * 0.4
+            entry_quality_score += weights["entry_quality"] * 0.4
             reasons.append("imbalance/FVG mendukung entry")
             setup_type_parts.append("FVG")
-        entry_quality_score = min(entry_quality_score, CONFIDENCE_WEIGHTS["entry_quality"])
+        entry_quality_score = min(entry_quality_score, weights["entry_quality"])
 
         # --- entry / TP / SL ---
         # PENTING (revisi): entry TIDAK BOLEH sama dengan harga saat ini
@@ -562,7 +619,8 @@ class Strategy:
 
             sl = min(leg_low, entry - atr_now * 0.5) - buffer_
             target_pool = levels["equal_highs"]
-            tp = max(target_pool) if target_pool else entry + (entry - sl) * 2.0
+            valid_targets = [x for x in target_pool if x > entry]
+            tp = min(valid_targets) if valid_targets else entry + (entry - sl) * 2.0
             if tp <= entry:
                 tp = entry + (entry - sl) * 2.0
         else:
@@ -576,7 +634,8 @@ class Strategy:
 
             sl = max(leg_high, entry + atr_now * 0.5) + buffer_
             target_pool = levels["equal_lows"]
-            tp = min(target_pool) if target_pool else entry - (sl - entry) * 2.0
+            valid_targets = [x for x in target_pool if x < entry]
+            tp = max(valid_targets) if valid_targets else entry - (sl - entry) * 2.0
             if tp >= entry:
                 tp = entry - (sl - entry) * 2.0
 
@@ -591,7 +650,7 @@ class Strategy:
         rr = reward / risk if risk > 0 else 0.0
         rr_score = 0.0
         if rr >= p["min_rr"]:
-            rr_score = min(CONFIDENCE_WEIGHTS["risk_reward"], CONFIDENCE_WEIGHTS["risk_reward"] * (rr / max(2.0, p["min_rr"] * 1.5)))
+            rr_score = min(weights["risk_reward"], weights["risk_reward"] * (rr / max(2.0, p["min_rr"] * 1.5)))
             reasons.append(f"risk/reward {rr:.2f}R memenuhi minimum")
         else:
             return None  # RR di bawah minimum -> bukan kandidat valid
@@ -602,14 +661,14 @@ class Strategy:
         if len(closes) > mlb and closes[-mlb - 1] != 0:
             roc = (closes[-1] - closes[-mlb - 1]) / closes[-mlb - 1]
         momentum_aligned = (direction == "BUY" and roc > 0) or (direction == "SELL" and roc < 0)
-        momentum_score = CONFIDENCE_WEIGHTS["momentum"] * min(1.0, abs(roc) * 20) if momentum_aligned else 0.0
+        momentum_score = weights["momentum"] * min(1.0, abs(roc) * 20) if momentum_aligned else 0.0
         if momentum_aligned:
             reasons.append("momentum (ROC) searah")
 
         # --- volatility regime ---
         vol_lb = atrs[-p["vol_regime_lookback"]:] if len(atrs) >= p["vol_regime_lookback"] else atrs
         vol_rank = sorted(vol_lb).index(min(vol_lb, key=lambda x: abs(x - atr_now))) / max(1, len(vol_lb) - 1)
-        volatility_score = CONFIDENCE_WEIGHTS["volatility"] * (1.0 - abs(vol_rank - 0.5) * 2)
+        volatility_score = weights["volatility"] * (1.0 - abs(vol_rank - 0.5) * 2)
         if 0.2 <= vol_rank <= 0.85:
             reasons.append("volatility (ATR) berada di rentang wajar")
 
@@ -623,13 +682,13 @@ class Strategy:
             btc_slope, _ = linreg_slope(_closes(btc_candles)[-p["trend_lookback"]:])
             btc_dir = "BUY" if btc_slope > 0 else "SELL"
             if corr > 0.3 and btc_dir == direction:
-                btc_corr_score = CONFIDENCE_WEIGHTS["btc_correlation"] * min(1.0, corr)
+                btc_corr_score = weights["btc_correlation"] * min(1.0, corr)
                 reasons.append(f"selaras dengan tren BTC (corr={corr:.2f})")
             elif corr < -0.3 and btc_dir != direction:
-                btc_corr_score = CONFIDENCE_WEIGHTS["btc_correlation"] * min(1.0, abs(corr)) * 0.7
+                btc_corr_score = weights["btc_correlation"] * min(1.0, abs(corr)) * 0.7
                 reasons.append(f"korelasi negatif terhadap BTC mendukung arah (corr={corr:.2f})")
         else:
-            btc_corr_score = CONFIDENCE_WEIGHTS["btc_correlation"] * 0.5  # netral utk BTCUSDT sendiri / data tak tersedia
+            btc_corr_score = weights["btc_correlation"] * 0.5  # netral utk BTCUSDT sendiri / data tak tersedia
 
         # --- regime & session ---
         regime = classify_regime(btc_candles if btc_candles else candles, p)
@@ -637,18 +696,19 @@ class Strategy:
         if (regime == "BULLISH_TREND" and direction == "BUY") or (
             regime == "BEARISH_TREND" and direction == "SELL"
         ):
-            regime_score = CONFIDENCE_WEIGHTS["regime"]
+            regime_score = weights["regime"]
             reasons.append(f"searah market regime ({regime})")
         elif regime == "SIDEWAYS":
-            regime_score = CONFIDENCE_WEIGHTS["regime"] * 0.4
+            regime_score = weights["regime"] * 0.4
 
-        session = classify_session(candles[-1].get("t", time.time() * 1000))
-        session_score = CONFIDENCE_WEIGHTS["session"] if session in ("LONDON", "NEWYORK") else CONFIDENCE_WEIGHTS["session"] * 0.3
+        session = classify_session(work[-1].get("t", time.time() * 1000))
+        session_score = weights["session"] if session in ("LONDON", "NEWYORK") else weights["session"] * 0.3
 
         confirmation_count = sum([bool(sweep), bool(fvg), bool(disp), bool(pool)])
-        confirmation_score = CONFIDENCE_WEIGHTS["confirmation"] * min(1.0, confirmation_count / 3)
+        confirmation_score = weights["confirmation"] * min(1.0, confirmation_count / 3)
 
-        structure_score = CONFIDENCE_WEIGHTS["structure"] * min(1.0, 0.5 + r2 * 0.5) if bos else 0.0
+        structure_alignment = 1.0 if trend_dir == direction else 0.45
+        structure_score = weights["structure"] * min(1.0, (0.45 + r2 * 0.35) * structure_alignment) if bos else 0.0
 
         components = {
             "structure": structure_score,
@@ -664,7 +724,8 @@ class Strategy:
         }
         confidence = max(0.0, min(100.0, sum(components.values())))
 
-        if confidence < self.get_active_threshold():
+        threshold_passed = confidence >= self.get_active_threshold()
+        if enforce_threshold and not threshold_passed:
             return None
 
         return Setup(
@@ -680,8 +741,20 @@ class Strategy:
             regime=regime,
             session=session,
             atr=atr_now,
-            timestamp=candles[-1].get("t", time.time() * 1000),
+            timestamp=work[-1].get("t", time.time() * 1000),
             strategy_version=self.version,
+            threshold_passed=threshold_passed,
+            reference_levels={
+                "bos": bos,
+                "equal_highs": levels["equal_highs"][-5:],
+                "equal_lows": levels["equal_lows"][-5:],
+                "sweep": sweep,
+                "fvg": fvg,
+                "rr": round(rr, 4),
+                "risk": risk,
+                "reward": reward,
+                "geometry": geom_reason,
+            },
         )
 
     # -- monitoring posisi aktif (trailing) -----------------------------------
@@ -692,25 +765,30 @@ class Strategy:
         entry baru, melainkan structure/momentum/weakness monitoring (§18/19).
         """
         p = self.params
-        if len(candles) < p["atr_period"] + 5:
+        work = list(_last_confirmed(candles))
+        if len(work) < p["atr_period"] + 5:
             return {"action": "HOLD", "new_sl": None, "reason": ["data belum cukup"], "weakness_score": 0, "engine": "none"}
+        ok, reason_data = validate_candles(work, min_len=p["atr_period"] + 5)
+        if not ok:
+            return {"action": "HOLD", "new_sl": None, "reason": [f"data invalid: {reason_data}"], "weakness_score": 0, "engine": "none"}
 
-        atrs = atr_series(candles, p["atr_period"])
+        atrs = atr_series(work, p["atr_period"])
         atr_now = atrs[-1]
         direction = position["direction"]
         entry = position["entry"]
         current_sl = position["sl"]
         tp = position["tp"]
-        last = candles[-1]
+        last = work[-1]
         price = last["c"]
 
-        risk = abs(entry - current_sl) or atr_now
+        initial_risk = abs(entry - float(position.get("initial_sl", current_sl))) or atr_now
+        risk = initial_risk
         profit_r = (price - entry) / risk if direction == "BUY" else (entry - price) / risk
 
         reasons: List[str] = []
         weakness = 0
 
-        closes = _closes(candles[-p["momentum_lookback"] - 1 :])
+        closes = _closes(work[-p["momentum_lookback"] - 1 :])
         slope, _ = linreg_slope(closes)
         structure_aligned = (direction == "BUY" and slope > 0) or (direction == "SELL" and slope < 0)
         if structure_aligned:
@@ -726,7 +804,9 @@ class Strategy:
             weakness += 1
             reasons.append("opposite candle")
 
-        peak_since_entry = max(_highs(candles)) if direction == "BUY" else min(_lows(candles))
+        fill_time = float(position.get("fill_time", 0.0) or 0.0)
+        post_fill = [c for c in work if not fill_time or float(c.get("t", 0.0)) >= fill_time] or list(work[-min(20, len(work)):])
+        peak_since_entry = max(_highs(post_fill)) if direction == "BUY" else min(_lows(post_fill))
         giveback = (peak_since_entry - price) / atr_now if direction == "BUY" else (price - peak_since_entry) / atr_now
         if giveback > 0.5:
             weakness += 1
@@ -748,12 +828,20 @@ class Strategy:
         if profit_r >= 0.3 and weakness >= 2:
             # geser SL mengikuti struktur, tidak boleh mundur (kurang protektif)
             buffer_ = atr_now * p["sl_atr_buffer"]
+            # Hanya swing yang sudah confirmed (memiliki right-side bars) yang boleh menjadi checkpoint trail.
+            recent_swings = swing_points(post_fill, p["swing_left"], p["swing_right"]) if len(post_fill) >= (p["swing_left"] + p["swing_right"] + 3) else []
             if direction == "BUY":
-                candidate = price - buffer_
+                lows = [v for _, v, t in recent_swings if t == "L"]
+                structural = max(lows[-3:]) if lows else price - buffer_
+                candidate = structural - buffer_ * 0.5
+                candidate = min(candidate, price - max(atr_now * 0.05, buffer_ * 0.25))
                 if candidate > current_sl:
                     new_sl = candidate
             else:
-                candidate = price + buffer_
+                highs = [v for _, v, t in recent_swings if t == "H"]
+                structural = min(highs[-3:]) if highs else price + buffer_
+                candidate = structural + buffer_ * 0.5
+                candidate = max(candidate, price + max(atr_now * 0.05, buffer_ * 0.25))
                 if candidate < current_sl:
                     new_sl = candidate
             if new_sl is not None:
