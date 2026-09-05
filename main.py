@@ -1432,7 +1432,7 @@ class TradingBot:
 
     def _cmd_help(self, args: List[str]) -> None:
         self.telegram.send(
-            """🤖 COMMAND BOT\n\n"
+            "🤖 COMMAND BOT\n\n"
             "/auto - Aktifkan AUTO scanning\n"
             "/stop - Matikan AUTO scanning\n"
             "/mode on|off - REAL / SIMULASI\n"
@@ -1449,7 +1449,7 @@ class TradingBot:
             "/timeout <detik> - Atur timeout\n"
             "/autostop - Pengaturan auto stop\n"
             "/ip - IP server\n"
-            "/help - Bantuan command" ,
+            "/help - Bantuan command",
             "INFO",
         )
 
