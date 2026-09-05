@@ -884,6 +884,8 @@ class TradingBot:
         self.ws = BybitWebSocket(on_tick=self._on_tick, on_kline=self._on_kline)
 
         self._candle_cache: Dict[str, List[Dict[str, float]]] = {}
+        # cache harga realtime dari WebSocket untuk log Telegram
+        self._last_prices: Dict[str, float] = {}
         self._candle_lock = threading.Lock()
         self._trail_queue: "queue.Queue[str]" = queue.Queue()
         self._stop = threading.Event()
@@ -901,7 +903,11 @@ class TradingBot:
         logger.info("State dimuat (main=%s, learn=%s)", label_main, label_learn)
 
         ip = get_server_ip()
-        self.telegram.start()
+        # Jika dijalankan lewat try.py Render, launcher sudah menjadi pemilik Telegram getUpdates.
+        # Hindari 409 Conflict karena dua polling berjalan bersamaan.
+        launcher_mode = os.environ.get("RUN_WITH_LAUNCHER", "false").lower() == "true"
+        if not launcher_mode:
+            self.telegram.start()
         self.telegram.send(
             f"🤖 BOT STARTED\n\nStatus: ONLINE\nMode: {self.state.mode}\nServer IP: {ip}\n\n"
             f"Ketik /auto untuk memulai scanning.",
@@ -914,7 +920,9 @@ class TradingBot:
         for target, name in (
             (self._worker_scanner, "Worker1-Scanner"),
             (self._worker_learn, "Worker3-Learn"),
-            (self._worker_command_handler, "Worker4-Command"),
+            # Worker command internal dimatikan saat Render launcher aktif.
+            # try.py akan meneruskan update ke handle_update().
+            *(([(self._worker_command_handler, "Worker4-Command")] ) if not launcher_mode else []),
             (self._worker_ban_timer, "Worker5-BanTimer"),
         ):
             t = threading.Thread(target=target, name=name, daemon=True)
@@ -945,6 +953,8 @@ class TradingBot:
             self._evaluate_position_monitoring(symbol)
 
     def _on_tick(self, symbol: str, price: float, ts: float) -> None:
+        # simpan harga terakhir agar command/log memakai data WebSocket
+        self._last_prices[symbol] = price
         pos = self.state.positions.get(symbol)
         if not pos:
             return
@@ -1298,10 +1308,13 @@ class TradingBot:
                 logger.error("Gagal pasang limit order %s: %s", setup.pair, e)
                 self.telegram.send(f"⚠️ ERROR — gagal pasang order {setup.pair}: {e}", "ERROR")
 
+        current = self._last_prices.get(setup.pair, setup.entry)
         self.telegram.send(
             f"🎯 PENDING ORDER — {setup.pair}\n\n"
             f"{'🟢' if setup.direction == 'BUY' else '🔴'} {setup.direction}\n"
-            f"Confidence: {setup.confidence:.1f}%\n\nEntry: {setup.entry}\nTP: {setup.tp}\nSL: {setup.sl}",
+            f"Harga Saat Ini: {current:.6f}\n\n"
+            f"Confidence: {setup.confidence:.1f}%\n\nEntry Zone: {setup.entry:.6f}\n"
+            f"TP: {setup.tp:.6f}\nSL: {setup.sl:.6f}",
             "PENDING",
         )
 
@@ -1538,13 +1551,23 @@ class TradingBot:
         for p in active:
             icon = "🟢" if p["direction"] == "BUY" else "🔴"
             if p["status"] == "PENDING":
+                current = self._last_prices.get(p['pair'], p['entry'])
                 lines.append(
-                    f"⏳ {p['pair']} — PENDING\n{icon} {p['direction']}\nEntry zone: {p['entry']}\n"
-                    f"TP: {p['tp']}\nSL: {p['sl']}\nConfidence: {p['confidence']:.0f}%\n"
+                    f"⏳ {p['pair']} — PENDING\n{icon} {p['direction']}\n"
+                    f"Harga Saat Ini: {current:.6f}\nEntry zone: {p['entry']:.6f}\n"
+                    f"TP: {p['tp']:.6f}\nSL: {p['sl']:.6f}\nConfidence: {p['confidence']:.0f}%\n"
                 )
             else:
+                current = self._last_prices.get(p['pair'], p['entry'])
+                if p['direction'] == 'BUY':
+                    pnl = ((current - p['entry']) / p['entry']) * 100
+                else:
+                    pnl = ((p['entry'] - current) / p['entry']) * 100
                 lines.append(
-                    f"{icon} {p['pair']} — AKTIF\nEntry: {p['entry']}\nTP: {p['tp']}\nSL: {p['sl']}\n"
+                    f"{icon} {p['pair']} — {p['status']}\n\n"
+                    f"Harga Saat Ini: {current:.6f}\n\n"
+                    f"Entry: {p['entry']:.6f}\nTP: {p['tp']:.6f}\nSL: {p['sl']:.6f}\n"
+                    f"P/L: {pnl:+.2f}%\n"
                     f"Confidence: {p['confidence']:.0f}%\n"
                 )
         self.telegram.send("\n".join(lines) if active else "📡 Tidak ada posisi aktif/pending.", "INFO")
@@ -1770,6 +1793,7 @@ async def on_start(context: dict):
     """Dipanggil oleh try.py saat /try."""
     global _LAUNCHER_BOT
 
+    os.environ["RUN_WITH_LAUNCHER"] = "true"
     cfg = Config()
     setup_logging(cfg.state_dir)
 
