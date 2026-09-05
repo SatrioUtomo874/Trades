@@ -1734,5 +1734,46 @@ def main() -> None:
         bot.shutdown()
 
 
+
+# =============================================================================
+# Render launcher compatibility adapter (try.py)
+# =============================================================================
+
+_LAUNCHER_BOT = None
+
+async def on_start(context: dict):
+    """Dipanggil oleh try.py saat /try."""
+    global _LAUNCHER_BOT
+
+    cfg = Config()
+    setup_logging(cfg.state_dir)
+
+    _LAUNCHER_BOT = TradingBot(cfg)
+    _LAUNCHER_BOT.startup()
+
+    return True
+
+
+async def handle_update(update: dict, context: dict = None):
+    """Adapter minimal agar command Telegram dari try.py bisa diteruskan."""
+    global _LAUNCHER_BOT
+
+    if _LAUNCHER_BOT is None:
+        return
+
+    # Telegram lama bot menggunakan polling internal.
+    # Worker utama tetap berjalan dari TradingBot.
+    return None
+
+
+async def on_stop(context: dict):
+    """Dipanggil oleh try.py saat /end."""
+    global _LAUNCHER_BOT
+
+    if _LAUNCHER_BOT is not None:
+        _LAUNCHER_BOT.shutdown()
+        _LAUNCHER_BOT = None
+
+
 if __name__ == "__main__":
     main()
