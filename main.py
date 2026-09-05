@@ -1804,18 +1804,23 @@ async def on_start(context: dict):
 
 
 async def handle_update(update: dict, context: dict = None):
-    """Adapter minimal agar command Telegram dari try.py bisa diteruskan."""
+    """Bridge command Telegram dari try.py ke dispatcher lama."""
     global _LAUNCHER_BOT
 
-    if _LAUNCHER_BOT is None:
-        return
-
-    # Terima update dari try.py lalu teruskan ke command handler lama.
     try:
-        message = update.get("message") or {}
-        text = message.get("text") or ""
-        if text.startswith("/") and _LAUNCHER_BOT is not None:
+        if _LAUNCHER_BOT is None:
+            logger.warning("handle_update dipanggil tapi bot belum aktif")
+            return None
+
+        # try.py mengirim raw Telegram update. Ambil format standar dan fallback.
+        message = update.get("message") or update.get("edited_message") or {}
+        text = str(message.get("text") or message.get("caption") or "").strip()
+
+        logger.info("[COMMAND BRIDGE] menerima: %s", text)
+
+        if text.startswith("/"):
             await asyncio.to_thread(_LAUNCHER_BOT._dispatch_command, text)
+
     except Exception as e:
         logger.exception("handle_update gagal: %s", e)
     return None
