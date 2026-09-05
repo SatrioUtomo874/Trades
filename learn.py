@@ -42,7 +42,7 @@ CONFIDENCE_BUCKETS = [
     (0, 40), (40, 50), (50, 60), (60, 70), (70, 80), (80, 90), (90, 101),
 ]
 
-MIN_SAMPLE_FOR_DECISION = 50          # minimum trade per bucket sebelum dipakai sbg bukti
+MIN_SAMPLE_FOR_DECISION = 30          # minimum trade per bucket sebelum dipakai sbg bukti
 MIN_TOTAL_SAMPLE_FOR_AUDIT = 40       # minimum total closed trade sebelum audit boleh mengubah apapun
 MIN_TRADES_SINCE_LAST_CHANGE = 20     # cooldown — tidak boleh berubah lagi terlalu cepat
 MAX_THRESHOLD_STEP = 5.0              # kenaikan/penurunan threshold maksimum per audit (poin %)
