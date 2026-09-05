@@ -44,6 +44,7 @@ import re
 import signal
 import socket
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -91,7 +92,7 @@ class Config:
     ollama_url: str = field(default_factory=lambda: os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     ollama_api_key: str = field(default_factory=lambda: os.environ.get("OLLAMA_API_KEY", ""))
     github_token: str = field(default_factory=lambda: os.environ.get("GITHUB_TOKEN", ""))
-    git_autosave: bool = field(default_factory=lambda: _env_bool("GIT_AUTOSAVE", False))
+    git_autosave: bool = field(default_factory=lambda: _env_bool("GIT_AUTOSAVE", bool(os.environ.get("GITHUB_TOKEN") and os.environ.get("REPO_NAME"))))
     state_dir: str = field(default_factory=lambda: os.environ.get("STATE_DIR", "state"))
 
     def __post_init__(self) -> None:
@@ -653,6 +654,14 @@ class BinanceClient:
         self._blocked_until_mono = 0.0
         self._blocked_error: Optional[RateLimitError] = None
         self._leverage_cache: Dict[str, int] = {}
+
+    def health_check(self) -> Dict[str, Any]:
+        """One-shot lightweight Binance REST health probe.
+
+        Uses the public server-time endpoint so it can also detect an IP-level
+        429/418 at startup without requiring account permissions. No retry.
+        """
+        return self._request("GET", "/fapi/v1/time", signed=False)
 
     # -- revisi: sinkronisasi waktu server (§4) -----------------------------
     # Penyebab klasik "API key sama, IP sama, tiba-tiba semua order error"
@@ -1299,6 +1308,20 @@ class StateStore:
         except OSError as e:
             logger.error("Gagal simpan state checkpoint: %s", e)
 
+    def clear_runtime_checkpoint(self) -> None:
+        """Delete main runtime checkpoint for a genuinely fresh /try session.
+
+        Learning memory is intentionally NOT deleted. This only resets trading
+        runtime state so a new /try starts with a fresh main session.
+        """
+        with self._lock:
+            for path in (self.checkpoint_path, self.backup_path):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError as e:
+                    logger.warning("Gagal menghapus runtime checkpoint %s: %s", path, e)
+
     def load_checkpoint(self) -> str:
         for path, label in ((self.checkpoint_path, "primary"), (self.backup_path, "backup")):
             if not os.path.exists(path):
@@ -1505,6 +1528,19 @@ class TradingBot:
             self.strategy_engine.load_state(saved_strategy)
         else:
             self.learn_engine.set_strategy_state(self.strategy_engine.export_state())
+        # One-shot Binance health probe on every fresh startup. This can detect
+        # an existing IP 418/429 immediately and prevents the bot from blindly
+        # starting REAL execution against a still-banned IP.
+        try:
+            if not self.state.binance_paused:
+                self.binance.health_check()
+                logger.info("[GLOBAL] [BINANCE] HEALTHZ STARTUP — READY")
+        except RateLimitError as e:
+            self._enter_binance_pause(e)
+            logger.error("[GLOBAL] [BINANCE] HEALTHZ STARTUP — RATE-LIMIT/BAN")
+        except Exception as e:
+            logger.warning("[GLOBAL] [BINANCE] HEALTHZ STARTUP — ERROR: %s", e)
+
         # Jika restart terjadi saat Binance masih pause, pertahankan cooldown yang tersimpan.
         if self.state.mode == "REAL" and not self.state.binance_paused:
             try:
@@ -1517,6 +1553,7 @@ class TradingBot:
                 self.telegram.send(f"⚠️ STARTUP SAFETY HALT\nGagal sinkronisasi akun Binance: {e}\nAUTO = OFF", "ERROR")
         self._rebuild_binance_waiting_lists()
         logger.info("State dimuat (main=%s, learn=%s, strategy=%s)", label_main, label_learn, self.strategy_engine.version)
+        logger.info("[GLOBAL] [LEARN] PERSISTENCE — local=READY+BACKUP | github=%s", "ON" if self.learn_engine.git_enabled else "OFF")
 
         ip = get_server_ip()
         # Jika dijalankan lewat try.py Render, launcher sudah menjadi pemilik Telegram getUpdates.
@@ -1525,12 +1562,28 @@ class TradingBot:
         # Saat dijalankan melalui try.py: polling Telegram milik launcher.
         # Telegram outbound memakai queue yang dipompa oleh worker yang sudah ada; tidak membuat thread ke-6.
         self.telegram.start_sender()
+        if self.state.binance_paused:
+            now = time.time()
+            remaining = max(0, int((self.state.binance_pause_until or now) - now))
+            ban_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.state.binance_pause_ts)) if self.state.binance_pause_ts else "-"
+            ready_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.state.binance_pause_until)) if self.state.binance_pause_until else "-"
+            binance_status = (
+                "🔴 BAN / RATE-LIMIT\n"
+                f"Mulai: {ban_at}\n"
+                f"READY setelah: {ready_at}\n"
+                f"Cooldown: {remaining} detik"
+            )
+        else:
+            binance_status = "🟢 READY"
         self.telegram.send(
-            f"🤖 BOT STARTED\n\nStatus: ONLINE\nMode: {self.state.mode}\nServer IP: {ip}\n\n"
-            f"Ketik /auto untuk memulai scanning.",
+            f"🤖 BOT STARTED — NEW MAIN SESSION\n\n"
+            f"Status: ONLINE\nMode: {self.state.mode}\nServer IP: {ip}\n"
+            f"Binance REST: {binance_status}\n\n"
+            "Ketik /healthz untuk status lengkap.\n"
+            "Ketik /auto untuk memulai scanning.",
             "BOT_START",
         )
-        logger.info("Bot started. Server IP: %s", ip)
+        logger.info("[GLOBAL] [MAIN] START — new session | mode=%s | binance=%s", self.state.mode, "BAN" if self.state.binance_paused else "READY")
 
         self.ws.start()
         if self.state.mode == "REAL":
@@ -1598,13 +1651,43 @@ class TradingBot:
             if pos.get("_pending_trail_sl") is not None:
                 self._trail_queue.put(symbol)
 
-    def shutdown(self) -> None:
+    def shutdown(self, fresh_session: bool = False) -> None:
+        """Stop every main worker. For launcher /end, optionally start fresh next time.
+
+        SIMULASI can safely discard its runtime checkpoint. REAL runtime state is
+        retained when there are active/reserved positions so a stop cannot orphan
+        live Binance risk. Learning memory is always preserved.
+        """
         self._stop.set()
+        self.state.auto = False
         self.telegram.send("🛑 BOT STOP\n\nStatus: OFFLINE", "BOT_STOP")
         self.ws.stop()
         self.binance_ws.stop()
-        self.state.save_checkpoint()
-        self.learn_engine.save_checkpoint()
+        # Give owned worker threads a short grace period so /end really releases
+        # the current main.py runtime before the launcher drops the module.
+        deadline = time.monotonic() + 3.0
+        for t in list(self._threads):
+            if t is threading.current_thread():
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if t.is_alive():
+                t.join(timeout=min(1.0, remaining))
+        active = self.state.get_active_count()
+        if fresh_session and (self.state.mode != "REAL" or active == 0):
+            self.learn_engine.save_checkpoint()
+            self.state.clear_runtime_checkpoint()
+            logger.info("[GLOBAL] [MAIN] COLD STOP — runtime checkpoint dihapus; learning memory dipertahankan")
+        else:
+            self.state.save_checkpoint()
+            self.learn_engine.save_checkpoint()
+            if fresh_session and self.state.mode == "REAL" and active > 0:
+                logger.warning("[GLOBAL] [MAIN] COLD STOP ditahan untuk REAL aktif: %s posisi/reserve tetap disimpan sebagai safety checkpoint", active)
+                self.telegram.send(
+                    f"⚠️ REAL SAFETY CHECKPOINT DIPERTAHANKAN\nAda {active} posisi/reserve aktif.\nRuntime tidak dihapus agar posisi Binance tidak menjadi orphan saat /try berikutnya.",
+                    "WARNING",
+                )
         self.telegram.stop()
 
     # -------------------------------------------------------------------
@@ -2588,6 +2671,9 @@ class TradingBot:
         last_autosave = 0.0
         while not self._stop.is_set():
             try:
+                if self.learn_engine.is_paused():
+                    time.sleep(0.2)
+                    continue
                 self._check_binance_recovery()
                 self._process_binance_waiting_lists()
                 self._process_trail_queue()
@@ -2718,14 +2804,54 @@ class TradingBot:
             "/resetbalance": self._cmd_resetbalance, "/trade": self._cmd_trade,
             "/order": self._cmd_order, "/stats": self._cmd_stats, "/koin": self._cmd_koin,
             "/ip": self._cmd_ip, "/banned": self._cmd_banned, "/unban": self._cmd_unban,
-            "/timeout": self._cmd_timeout, "/autostop": self._cmd_autostop, "/open": self._cmd_open,
-            "/help": self._cmd_help,
+            "/timeout": self._cmd_timeout, "/autostop": self._cmd_autostop, "/save": self._cmd_save, "/open": self._cmd_open,
+            "/healthz": self._cmd_healthz, "/help": self._cmd_help,
         }
         handler = handlers.get(cmd)
         if not handler:
             self.telegram.send(f"⚠️ Command tidak dikenal: {cmd}\nGunakan /help untuk daftar command yang valid.", "WARNING")
             return
         handler(args)
+
+    def _cmd_healthz(self, args: List[str]) -> None:
+        if args:
+            self.telegram.send("⚠️ Format salah. Gunakan: /healthz", "INFO")
+            return
+        now = time.time()
+        with self.state._lock:
+            paused = bool(self.state.binance_paused)
+            pause_ts = self.state.binance_pause_ts
+            pause_until = self.state.binance_pause_until
+            reason = self.state.binance_pause_reason or "-"
+            auto = self.state.auto
+            mode = self.state.mode
+            slots = self.state.get_active_count()
+            max_slots = self.state.max_positions
+        lines = [
+            "🩺 HEALTHZ",
+            f"Main: 🟢 ONLINE",
+            f"Mode: {mode}",
+            f"AUTO: {'ON' if auto else 'OFF'}",
+            f"Posisi/reserve: {slots}/{max_slots}",
+        ]
+        if paused:
+            remaining = max(0, int((pause_until or now) - now))
+            ban_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(pause_ts)) if pause_ts else "-"
+            ready_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(pause_until)) if pause_until else "-"
+            lines += [
+                "Binance REST: 🔴 BAN / RATE-LIMIT",
+                f"Catat mulai: {ban_at}",
+                f"Ready setelah: {ready_at}",
+                f"Sisa cooldown: {remaining} detik",
+                f"Reason: {reason[:300]}",
+                "User Data WS: 🟢 tetap aktif" if mode == "REAL" else "User Data WS: ⚪ tidak aktif (SIMULASI)",
+            ]
+        else:
+            lines += [
+                "Binance REST: 🟢 READY",
+                "User Data WS: 🟢 aktif" if mode == "REAL" else "User Data WS: ⚪ tidak aktif (SIMULASI)",
+            ]
+        self.telegram.send("\n".join(lines), "INFO")
 
     def _cmd_help(self, args: List[str]) -> None:
         self.telegram.send(
@@ -2746,6 +2872,7 @@ class TradingBot:
             "/timeout All|COIN - Bersihkan satu/semua posisi dan order\n"
             "/autostop - Pengaturan auto stop\n"
             "/ip - IP server\n"
+            "/healthz - Status Binance, ban/cooldown, WS, dan posisi\n"
             "/help - Bantuan command",
             "INFO",
         )
@@ -3129,15 +3256,71 @@ class TradingBot:
         self.state.autostop_pct = pct
         self.telegram.send(f"✅ Autostop diatur ke {pct}% (REAL TRADE)", "INFO")
 
+    def _cmd_save(self, args: List[str]) -> None:
+        if args:
+            self.telegram.send("⚠️ Format salah. Gunakan: /save", "INFO")
+            return
+        try:
+            # Freeze Learn at a safe point first. Strategy state is copied BEFORE
+            # the snapshot so /open restores exactly the strategy active now.
+            self.learn_engine.set_strategy_state(self.strategy_engine.export_state())
+            result = self.learn_engine.manual_save()
+            if not result.get("ok"):
+                self.telegram.send(
+                    f"❌ LEARN SAVE GAGAL\nAlasan: {result.get('reason', '-')}",
+                    "ERROR",
+                )
+                return
+            self.state.strategy_state = self.strategy_engine.export_state()
+            self.state.save_checkpoint()
+            git_note = ""
+            if self.learn_engine.git_enabled:
+                self.learn_engine.mirror_ready_to_git()
+                git_note = "\nGitHub: ✅ mirror terbaru"
+            else:
+                git_note = "\nGitHub: ⚪ GIT_AUTOSAVE=false (local tetap tersimpan)"
+            self.telegram.send(
+                "💾 LEARN MEMORY TERSIMPAN\n\n"
+                "Status: ✅ VALID & ATOMIC\n"
+                f"File lokal: {result.get('path')}\n"
+                f"Ukuran: {result.get('bytes', 0)} bytes\n"
+                f"Strategy: v{self.strategy_engine.version}" + git_note + "\n\n"
+                "/open akan membaca memory lokal tervalidasi ini.",
+                "INFO",
+            )
+        except Exception as e:
+            logger.error("/save Learn gagal: %s", e)
+            self.telegram.send(f"❌ /save gagal: {e}", "ERROR")
+
     def _cmd_open(self, args: List[str]) -> None:
         if args:
             self.telegram.send("⚠️ Format salah. Gunakan: /open", "INFO")
             return
-        label = self.learn_engine.load()
-        if self.learn_engine.strategy_state:
-            self.strategy_engine.load_state(self.learn_engine.strategy_state)
-            self.state.strategy_state = self.strategy_engine.export_state()
-        self.telegram.send(f"📂 Learning memory dibuka: {label}\n🧠 Strategy: v{self.strategy_engine.version} | Threshold: {self.strategy_engine.get_active_threshold():.1f}%", "INFO")
+        try:
+            result = self.learn_engine.open_ready_memory()
+            if not result.get("ok"):
+                self.telegram.send(
+                    f"❌ LEARN OPEN GAGAL\nAlasan: {result.get('reason', '-')}\n\n"
+                    "Memory aktif TIDAK diubah.",
+                    "ERROR",
+                )
+                return
+            if self.learn_engine.strategy_state:
+                self.strategy_engine.load_state(self.learn_engine.strategy_state)
+                self.state.strategy_state = self.strategy_engine.export_state()
+            self.state.save_checkpoint()
+            self.telegram.send(
+                "📂 LEARN MEMORY DIBUKA\n\n"
+                f"Sumber: LOCAL {result.get('label', '-').upper()}\n"
+                "Integrity: ✅ VALID\n"
+                f"Strategy: v{self.strategy_engine.version}\n"
+                f"Threshold: {self.strategy_engine.get_active_threshold():.1f}%\n\n"
+                "🧠 Brain resumed — analisis dilanjutkan dari memory tersebut.",
+                "INFO",
+            )
+        except Exception as e:
+            logger.error("/open Learn gagal: %s", e)
+            self.telegram.send(f"❌ /open gagal: {e}\nMemory aktif TIDAK diubah.", "ERROR")
 
 
 # =============================================================================
@@ -3218,6 +3401,15 @@ def run_selftest() -> bool:
     audit_report = le.audit(strat)
     check("learn.audit tidak crash", isinstance(audit_report, dict))
     check("learn.save_checkpoint sukses", le.save_checkpoint())
+    with tempfile.TemporaryDirectory(prefix="learn_safe_") as td:
+        safe_cp = os.path.join(td, "learn_checkpoint.json")
+        safe = learn.LearnEngine(checkpoint_path=safe_cp)
+        safe.record_trade_outcome({"pair":"TESTUSDT","confidence":60,"outcome":"TP"}, "TP", {"pnl_r":1.0})
+        sr = safe.manual_save()
+        check("learn.manual_save valid atomic", bool(sr.get("ok")))
+        safe.trade_history.clear()
+        op = safe.open_ready_memory()
+        check("learn.open_ready_memory restore", bool(op.get("ok")) and len(safe.trade_history) == 1)
 
     # Binance user-data WS regression: a FILLED entry must be accepted without
     # a positionRisk REST probe. This is the key property during HTTP 418/429.
@@ -3333,6 +3525,9 @@ async def on_start(context: dict):
     setup_logging(cfg.state_dir)
 
     _LAUNCHER_BOT = TradingBot(cfg)
+    # /try is a new MAIN session. Never delete a live REAL checkpoint here;
+    # shutdown() already handles safe cold-stop semantics. For a clean SIMULASI
+    # session, no main checkpoint means startup naturally begins from defaults.
     _LAUNCHER_BOT.startup()
 
     return True
@@ -3371,7 +3566,7 @@ async def on_stop(context: dict):
     global _LAUNCHER_BOT
 
     if _LAUNCHER_BOT is not None:
-        _LAUNCHER_BOT.shutdown()
+        _LAUNCHER_BOT.shutdown(fresh_session=True)
         _LAUNCHER_BOT = None
 
 
