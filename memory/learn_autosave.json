@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "saved_at": 1788615641.3467193,
+  "saved_at": 1788615661.818215,
   "trade_history": [],
   "scan_summaries": [],
   "candidate_history": [],
@@ -161,6 +161,58 @@
       ],
       "kind": "STRATEGY_STATE",
       "timestamp": 1788615641.345825
+    },
+    {
+      "version": "1.00",
+      "params": {
+        "ACTIVE_THRESHOLD": 0.0,
+        "swing_left": 2,
+        "swing_right": 2,
+        "equal_level_tol_atr": 0.15,
+        "displacement_atr_mult": 1.5,
+        "min_rr": 1.2,
+        "sweep_lookback": 40,
+        "structure_lookback": 80,
+        "momentum_lookback": 10,
+        "atr_period": 14,
+        "vol_regime_lookback": 100,
+        "trend_lookback": 30,
+        "btc_corr_lookback": 50,
+        "sl_atr_buffer": 0.25,
+        "min_price_distance_ticks": 2,
+        "entry_retracement_fib": 0.618,
+        "entry_min_offset_atr": 0.25
+      },
+      "version_history": [
+        {
+          "version": "1.00",
+          "timestamp": 1788615611.610937,
+          "reason": "INITIAL",
+          "old_params": null,
+          "new_params": {
+            "ACTIVE_THRESHOLD": 0.0,
+            "swing_left": 2,
+            "swing_right": 2,
+            "equal_level_tol_atr": 0.15,
+            "displacement_atr_mult": 1.5,
+            "min_rr": 1.2,
+            "sweep_lookback": 40,
+            "structure_lookback": 80,
+            "momentum_lookback": 10,
+            "atr_period": 14,
+            "vol_regime_lookback": 100,
+            "trend_lookback": 30,
+            "btc_corr_lookback": 50,
+            "sl_atr_buffer": 0.25,
+            "min_price_distance_ticks": 2,
+            "entry_retracement_fib": 0.618,
+            "entry_min_offset_atr": 0.25
+          },
+          "evidence": null
+        }
+      ],
+      "kind": "STRATEGY_STATE",
+      "timestamp": 1788615661.8134058
     }
   ],
   "feature_cache": {},
@@ -174,7 +226,7 @@
   "decision_history": [],
   "pending_challenger": null,
   "last_audit_report": {
-    "timestamp": 1788615613.514292,
+    "timestamp": 1788615661.813357,
     "total_trades": 0,
     "action": "NO_ACTION",
     "frequency": {
@@ -243,13 +295,13 @@
   "current_strategy_version": "1.00",
   "trades_since_last_change": 0,
   "last_change_ts": 0.0,
-  "last_audit_ts": 1788615613.514292,
+  "last_audit_ts": 1788615661.813357,
   "snapshot_kind": "READY_BRAIN_MEMORY",
-  "snapshot_source": "MANUAL_SAVE",
-  "snapshot_seq": 3,
+  "snapshot_source": "AUTO_SAVE",
+  "snapshot_seq": 4,
   "integrity": {
     "algorithm": "sha256",
-    "sha256": "b4a345d66cbc4fcbad3f6bccb67c2a7cc86a2fc65c948786293aa78551ff9292",
-    "validated_at": 1788615641.3469303
+    "sha256": "e69fdfde60eb9d9e3e31ae06b055d20ab757695dcd8641ef6ee94451d61b08ee",
+    "validated_at": 1788615661.8185117
   }
 }
