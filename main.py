@@ -64,8 +64,8 @@ try:
 except ImportError:
     websocket = None  # akan dicek saat startup; simulasi tetap bisa jalan tanpa WS live
 
-import strategy
-import learn
+import strategy_vnext2 as strategy
+import learn_vnext2 as learn
 
 
 # =============================================================================

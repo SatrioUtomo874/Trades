@@ -338,6 +338,47 @@ def classify_session(ts_ms: float) -> str:
     return "OFF_HOURS"
 
 
+def classify_volatility_regime(candles: Sequence[Dict[str, float]], params: Dict[str, Any]) -> str:
+    """Classify current volatility using ATR relative to price and its historical percentile.
+
+    This helper is intentionally deterministic and input-only. It is used by the
+    vNext engine for a separate volatility diagnostic so ``classify_regime`` can
+    continue to describe directional market regime.
+    """
+    if not candles:
+        return "NORMAL"
+    period = max(2, int(params.get("atr_period", 14)))
+    lookback = max(period + 5, int(params.get("vol_regime_lookback", 100)))
+    work = list(candles)[-lookback:]
+    closes = _closes(work)
+    atrs = atr_series(work, period)
+    if not closes or not atrs:
+        return "NORMAL"
+    price = float(closes[-1] or 0.0)
+    atr_now = float(atrs[-1] or 0.0)
+    if price <= 0 or atr_now <= 0:
+        return "NORMAL"
+
+    atr_pct = (atr_now / price) * 100.0
+    low_pct = float(params.get("low_vol_pct", 0.15))
+    high_pct = float(params.get("high_vol_pct", 3.0))
+    if atr_pct < low_pct:
+        return "LOW_VOLATILITY"
+    if atr_pct > high_pct:
+        return "HIGH_VOLATILITY"
+
+    # Relative ATR percentile prevents a symbol with a normally large ATR from
+    # being misclassified solely because its absolute ATR is large.
+    history = [float(x) for x in atrs if math.isfinite(float(x)) and float(x) > 0]
+    if len(history) >= 10:
+        rank = _vn_pct_rank(history[-max(10, min(len(history), lookback)):], atr_now) if "_vn_pct_rank" in globals() else 0.5
+        if rank < 0.05:
+            return "LOW_VOLATILITY"
+        if rank > 0.95:
+            return "HIGH_VOLATILITY"
+    return "NORMAL"
+
+
 def classify_regime(btc_candles: Sequence[Dict[str, float]], params: Dict[str, Any]) -> str:
     lb = params["trend_lookback"]
     closes = _closes(btc_candles)[-lb:]
@@ -1428,6 +1469,42 @@ def vn_diagnosis(
     return "VALID_HIGH_CONF" if confidence>=_vn_float(params.get("score_high_confidence"),70) else "VALID_LOW_CONF"
 
 
+def validate_trailing_geometry(direction: str, current_sl: float, proposed_sl: float, price: float, entry: float, tp: float) -> Tuple[bool, str]:
+    """Safety geometry for trailing stop updates. Never permits a less-protective or crossed stop."""
+    d = str(direction or "").upper()
+    cur = _vn_float(current_sl)
+    new = _vn_float(proposed_sl)
+    px = _vn_float(price)
+    en = _vn_float(entry)
+    target = _vn_float(tp)
+    if not all(math.isfinite(x) for x in (cur, new, px, en, target)):
+        return False, "NON_FINITE_TRAIL_GEOMETRY"
+    if d == "BUY":
+        if cur >= en:
+            # Once protected above entry, a new SL cannot go back below entry.
+            if new < cur:
+                return False, "TRAIL_WOULD_REDUCE_PROTECTION"
+        if new >= px:
+            return False, "TRAIL_SL_NOT_BELOW_PRICE"
+        if target > en and new >= target:
+            return False, "TRAIL_SL_CROSSES_TP"
+        if new <= 0 or en <= 0:
+            return False, "INVALID_PRICE_GEOMETRY"
+        return True, "OK"
+    if d == "SELL":
+        if cur <= en:
+            if new > cur:
+                return False, "TRAIL_WOULD_REDUCE_PROTECTION"
+        if new <= px:
+            return False, "TRAIL_SL_NOT_ABOVE_PRICE"
+        if target < en and new <= target:
+            return False, "TRAIL_SL_CROSSES_TP"
+        if new <= 0 or en <= 0:
+            return False, "INVALID_PRICE_GEOMETRY"
+        return True, "OK"
+    return False, "INVALID_DIRECTION"
+
+
 class StrategyVNext:
     """Full Strategy vNext engine; input-only, deterministic analysis."""
     def __init__(self, params: Optional[Dict[str, Any]] = None):
@@ -1620,8 +1697,8 @@ def new_default_strategy() -> Strategy:
 __all__ = [
     "STRATEGY_NAME", "CONFIDENCE_WEIGHTS", "DEFAULT_PARAMS", "Setup", "Strategy",
     "StrategyVNext", "new_default_strategy", "validate_candles", "validate_geometry",
-    "classify_session", "classify_regime", "true_range", "atr_series", "ema",
+    "classify_session", "classify_regime", "classify_volatility_regime", "true_range", "atr_series", "ema",
     "linreg_slope", "pct_returns", "correlation", "swing_points", "equal_levels",
-    "detect_liquidity_sweep", "detect_displacement", "detect_fvg", "SIGNAL_STATUSES",
+    "detect_liquidity_sweep", "detect_displacement", "detect_fvg", "validate_trailing_geometry", "SIGNAL_STATUSES",
     "MONITOR_ACTIONS",
 ]
