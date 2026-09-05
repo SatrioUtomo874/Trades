@@ -124,27 +124,65 @@ class Config:
         return missing
 
 
+class TerminalFormatter(logging.Formatter):
+    """Terminal operational log yang ringkas dan mudah dibaca."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        seq = getattr(record, "log_seq", None)
+        if seq is None:
+            seq = getattr(logging, "_adaptive_log_seq", 0) + 1
+            logging._adaptive_log_seq = seq
+
+        symbol = getattr(record, "symbol", None) or getattr(record, "coin", None)
+        scope = f"[{str(symbol).upper()}]" if symbol else "[GLOBAL]"
+        level = record.levelname
+        message = record.getMessage().replace("\n", " | ")
+        return f"[{int(seq):05d}] {scope} [{level}] {message}"
+
+
 def setup_logging(state_dir: str) -> logging.Logger:
     os.makedirs(state_dir, exist_ok=True)
-    log = logging.getLogger()
-    if getattr(log, "_adaptive_bot_configured", False):
-        return log
-    log.setLevel(logging.DEBUG)
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(logging.INFO)
-    console.setFormatter(fmt)
-    log.addHandler(console)
+    terminal_fmt = TerminalFormatter()
+    has_console = False
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            handler.setLevel(logging.INFO)
+            handler.setFormatter(terminal_fmt)
+            has_console = True
 
-    file_handler = logging.handlers.RotatingFileHandler(
-        os.path.join(state_dir, "bot.log"), maxBytes=10_000_000, backupCount=5, encoding="utf-8"
+    if not has_console:
+        console = logging.StreamHandler(sys.stdout)
+        console.setLevel(logging.INFO)
+        console.setFormatter(terminal_fmt)
+        root.addHandler(console)
+
+    # Library network DEBUG tidak boleh bocor ke terminal.
+    for name in ("urllib3", "requests", "websocket", "websocket._logging"):
+        lib_logger = logging.getLogger(name)
+        lib_logger.setLevel(logging.WARNING)
+        lib_logger.propagate = True
+
+    has_file = any(
+        isinstance(h, logging.handlers.RotatingFileHandler)
+        and getattr(h, "_adaptive_bot_file_handler", False)
+        for h in root.handlers
     )
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(fmt)
-    log.addHandler(file_handler)
-    log._adaptive_bot_configured = True
-    return log
+    if not has_file:
+        file_handler = logging.handlers.RotatingFileHandler(
+            os.path.join(state_dir, "bot.log"), maxBytes=10_000_000, backupCount=5, encoding="utf-8"
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+        )
+        file_handler._adaptive_bot_file_handler = True
+        root.addHandler(file_handler)
+
+    root._adaptive_bot_configured = True
+    return root
 
 
 logger = logging.getLogger("main")
@@ -413,7 +451,9 @@ class BinanceClient:
         # Semua Binance REST melewati satu gate agar worker tidak burst.
         self._request_gate_lock = threading.Lock()
         self._next_request_mono = 0.0
-        self._min_request_interval = 0.12
+        self._min_request_interval = 0.35
+        self._order_request_interval = 1.05
+        self._next_order_request_mono = 0.0
         self._used_weight_1m = 0
         self._leverage_cache: Dict[str, int] = {}
 
@@ -466,12 +506,23 @@ class BinanceClient:
         params = dict(params or {})
         url = self.base_url + path
 
+        is_order_request = (
+            path == "/fapi/v1/order"
+            or path == "/fapi/v1/allOpenOrders"
+            or path == "/fapi/v1/batchOrders"
+        )
         with self._request_gate_lock:
             now_mono = time.monotonic()
-            wait = self._next_request_mono - now_mono
+            wait = max(
+                self._next_request_mono - now_mono,
+                (self._next_order_request_mono - now_mono) if is_order_request else 0.0,
+            )
             if wait > 0:
-                time.sleep(min(wait, 2.0))
-            self._next_request_mono = time.monotonic() + self._min_request_interval
+                time.sleep(min(wait, 5.0))
+            send_mono = time.monotonic()
+            self._next_request_mono = send_mono + self._min_request_interval
+            if is_order_request:
+                self._next_order_request_mono = send_mono + self._order_request_interval
 
         try:
             if signed:
@@ -639,11 +690,16 @@ class BinanceClient:
         params.update(self._position_side_param(direction))
         return self._request("POST", "/fapi/v1/order", params, signed=True)
 
-    def place_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal, direction: str) -> Any:
+    def place_limit_order(
+        self, symbol: str, side: str, quantity: Decimal, price: Decimal, direction: str,
+        client_order_id: Optional[str] = None,
+    ) -> Any:
         params = {
             "symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
             "quantity": str(quantity), "price": str(price),
         }
+        if client_order_id:
+            params["newClientOrderId"] = client_order_id
         params.update(self._position_side_param(direction))
         return self._request("POST", "/fapi/v1/order", params, signed=True)
 
@@ -774,6 +830,7 @@ def normalize_order_prices(setup: Dict[str, Any], tick_size: Decimal) -> Dict[st
 # =============================================================================
 
 ALLOWED_TRANSITIONS = {
+    "BINANCE_WAITING": {"PENDING", "CANCELLED"},
     "PENDING": {"FILLED", "TIMEOUT", "CANCELLED"},
     "FILLED": {"PROTECTED", "CLOSED"},
     "PROTECTED": {"TRAILING", "CLOSED"},
@@ -797,6 +854,7 @@ class StateStore:
         self.auto = False
         self.margin = 1.0
         self.leverage = 5.0
+        self.max_positions = 5
         self.autostop_pct: Optional[float] = None
         self.highest_balance: Optional[float] = None
         self.current_balance: Optional[float] = None
@@ -823,23 +881,30 @@ class StateStore:
             return self._symbol_locks[symbol]
 
     # -- position lifecycle ---------------------------------------------------
-    def add_pending(self, setup: Dict[str, Any], qty: Decimal, margin_used: float) -> None:
+    def add_pending(
+        self, setup: Dict[str, Any], qty: Decimal, margin_used: float,
+        status: str = "PENDING",
+    ) -> None:
         with self._lock:
             entry = float(setup["entry"])
             sl = float(setup["sl"])
+            now = time.time()
             self.positions[setup["pair"]] = {
                 **setup,
-                "status": "PENDING",
+                "status": status,
                 "qty": str(qty),
                 "margin_used": margin_used,
                 "leverage": self.leverage,
-                "created_at": time.time(),
+                "created_at": now,
                 "trail_count": 0,
                 "binance_order_ids": {},
                 "peak_price": entry,
                 "initial_sl": sl,
                 "initial_risk": abs(entry - sl),
                 "real_fill_confirmed": False,
+                "binance_leverage_confirmed": False,
+                "binance_entry_client_order_id": "",
+                "binance_entry_confirmed_at": None,
             }
 
     def transition(self, symbol: str, new_status: str, event_id: str, **updates) -> bool:
@@ -935,7 +1000,7 @@ class StateStore:
     def export_state(self) -> Dict[str, Any]:
         with self._lock:
             return {
-                "mode": self.mode, "auto": self.auto, "margin": self.margin, "leverage": self.leverage,
+                "mode": self.mode, "auto": self.auto, "margin": self.margin, "leverage": self.leverage, "max_positions": self.max_positions,
                 "autostop_pct": self.autostop_pct, "highest_balance": self.highest_balance, "current_balance": self.current_balance,
                 "sim_balance": self.sim_balance, "sim_balance_anchor": self.sim_balance_anchor,
                 "positions": self.positions, "scanned_coins": self.scanned_coins,
@@ -955,6 +1020,10 @@ class StateStore:
             self.auto = data.get("auto", False)
             self.margin = data.get("margin", self.margin)
             self.leverage = data.get("leverage", self.leverage)
+            try:
+                self.max_positions = max(1, min(20, int(data.get("max_positions", self.max_positions))))
+            except (TypeError, ValueError):
+                self.max_positions = 5
             self.autostop_pct = data.get("autostop_pct")
             self.highest_balance = data.get("highest_balance")
             self.current_balance = data.get("current_balance")
@@ -1214,7 +1283,7 @@ class TradingBot:
 
         self.ws.start()
         for pos in self.state.snapshot_positions():
-            if pos.get("status") not in TERMINAL_STATES:
+            if pos.get("status") in ("PENDING", "FILLED", "PROTECTED", "TRAILING"):
                 self.ws.subscribe(pos["pair"])
 
         for target, name in (
@@ -1263,10 +1332,16 @@ class TradingBot:
                 continue
             status = pos.get("status")
             ids = pos.get("binance_order_ids", {}) or {}
-            if status == "PENDING" and not ids.get("entry"):
+            if status == "BINANCE_WAITING" and not ids.get("entry"):
                 self._queue_binance_pending(symbol)
-            elif status in ("FILLED", "PROTECTED", "TRAILING") and not ids.get("sl"):
+            elif status == "PENDING" and not ids.get("entry"):
+                self._queue_binance_pending(symbol)
+            elif status == "FILLED" and (not ids.get("sl") or not ids.get("tp")):
                 self._queue_binance_protection(symbol)
+            elif status in ("PROTECTED", "TRAILING") and not ids.get("sl"):
+                self._queue_binance_protection(symbol)
+            if pos.get("_pending_trail_sl") is not None:
+                self._trail_queue.put(symbol)
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -1391,11 +1466,10 @@ class TradingBot:
                 self._binance_pending_queue.put(symbol)
 
     def _attach_real_protection(self, symbol: str, pos: Dict[str, Any]) -> bool:
-        """Pasang TP/SL; jika Binance pause, simpan ke waiting list."""
+        """Pasang TP/SL setelah FILLED Binance sudah dikonfirmasi."""
         try:
-            confirmed = self.binance.get_position_risk(symbol)
-            if not confirmed:
-                logger.warning("Posisi %s belum terkonfirmasi di Binance — protection ditunda", symbol)
+            if not pos.get("real_fill_confirmed"):
+                logger.warning("Protection %s ditunda: Binance fill belum confirmed", symbol)
                 self._queue_binance_protection(symbol)
                 return False
 
@@ -1432,7 +1506,7 @@ class TradingBot:
             return False
 
     def _process_binance_waiting_lists(self) -> None:
-        """Drain protection/entry queue setelah recovery, satu request order per detik."""
+        """Drain REAL Binance work after cooldown, one exchange step at a time."""
         if self.state.binance_paused or self.state.mode != "REAL":
             return
 
@@ -1446,37 +1520,63 @@ class TradingBot:
             pos = self.state.positions.get(symbol)
             if pos and pos.get("status") == "FILLED":
                 self._attach_real_protection(symbol, pos)
-            time.sleep(1)
+            time.sleep(1.0)
             return
 
         try:
             symbol = self._binance_pending_queue.get_nowait()
         except queue.Empty:
             symbol = None
-        if symbol:
-            with self._binance_queue_lock:
-                self._binance_pending_queued.discard(symbol)
-            pos = self.state.positions.get(symbol)
-            if pos and pos.get("status") == "PENDING":
-                try:
-                    filters = self.binance.get_symbol_filters(symbol)
-                    self.binance.set_leverage(symbol, int(pos.get("leverage", self.state.leverage)))
-                    side = "BUY" if pos["direction"] == "BUY" else "SELL"
-                    order = self.binance.place_limit_order(
-                        symbol, side, Decimal(str(pos["qty"])),
-                        (round_price(pos["entry"], filters["tick_size"], ROUND_DOWN) if pos["direction"] == "BUY"
-                         else round_price(pos["entry"], filters["tick_size"], ROUND_UP)), pos["direction"]
-                    )
-                    pos["binance_order_ids"]["entry"] = order.get("orderId")
-                    self.telegram.send(f"▶️ BINANCE ORDER RESUMED — {symbol}\nEntry limit aktif", "PENDING")
-                except RateLimitError as e:
-                    self._queue_binance_pending(symbol)
-                    self._enter_binance_pause(e)
-                    return
-                except ExchangeError as e:
-                    logger.error("Waiting limit order gagal %s: %s", symbol, e)
-                    self.telegram.send(f"⚠️ ERROR — waiting limit {symbol}: {e}", "ERROR")
-            time.sleep(1)
+        if not symbol:
+            return
+
+        with self._binance_queue_lock:
+            self._binance_pending_queued.discard(symbol)
+        pos = self.state.positions.get(symbol)
+        if not pos or pos.get("status") != "BINANCE_WAITING":
+            return
+
+        try:
+            filters = self.binance.get_symbol_filters(symbol)
+            leverage = int(pos.get("leverage", self.state.leverage))
+            if not pos.get("binance_leverage_confirmed"):
+                self.binance.set_leverage(symbol, leverage)
+                pos["binance_leverage_confirmed"] = True
+
+            side = "BUY" if pos["direction"] == "BUY" else "SELL"
+            tick = filters["tick_size"]
+            entry_price = round_price(
+                pos["entry"], tick, ROUND_DOWN if pos["direction"] == "BUY" else ROUND_UP
+            )
+            client_id = pos.get("binance_entry_client_order_id") or self._make_client_order_id(symbol, pos)
+            pos["binance_entry_client_order_id"] = client_id
+            order = self.binance.place_limit_order(
+                symbol, side, Decimal(str(pos["qty"])), entry_price, pos["direction"],
+                client_order_id=client_id,
+            )
+            order_id = order.get("orderId")
+            if not order_id:
+                raise ExchangeError(f"Binance limit {symbol} diterima tanpa orderId")
+            pos["binance_order_ids"]["entry"] = order_id
+            pos["binance_entry_confirmed_at"] = time.time()
+            event_id = f"{symbol}:BINANCE_ENTRY_CONFIRMED:{pos['created_at']}"
+            if self.state.transition(symbol, "PENDING", event_id, binance_entry_confirmed=True):
+                self.ws.subscribe(symbol)
+                self.telegram.send(
+                    f"🎯 PENDING ORDER — {symbol}\n"
+                    f"Binance order terkonfirmasi\nEntry: {pos['entry']}",
+                    "PENDING",
+                )
+        except RateLimitError as e:
+            self._queue_binance_pending(symbol)
+            self._enter_binance_pause(e)
+            return
+        except ExchangeError as e:
+            logger.error("Waiting limit order gagal %s: %s", symbol, e)
+            self.telegram.send(f"⚠️ ERROR — waiting limit {symbol}: {e}", "ERROR")
+            self.state.discard_pending(symbol)
+            self.ws.unsubscribe(symbol)
+        time.sleep(1.0)
 
     def _check_tp_sl(self, symbol: str, pos: Dict[str, Any], price: float, ts: float) -> None:
         direction = pos["direction"]
@@ -1804,7 +1904,7 @@ class TradingBot:
                 if not self.state.auto or self.state.binance_paused:
                     time.sleep(1)
                     continue
-                if self.state.get_active_count() >= 20:
+                if self.state.get_active_count() >= self.state.max_positions:
                     time.sleep(2)
                     continue
                 self._run_scan_cycle()
@@ -1906,7 +2006,7 @@ class TradingBot:
             # kandidat yang sudah dianalisis menjadi order baru.
             eligible = []
         else:
-            slots_left = 20 - self.state.get_active_count()
+            slots_left = self.state.max_positions - self.state.get_active_count()
             eligible = candidates[: max(0, slots_left)]
 
             for setup in eligible:
@@ -1953,73 +2053,109 @@ class TradingBot:
             lines.append(f"\nRegime: {regime}")
             self.telegram.send("\n".join(lines), "SIGNAL_PASSED")
 
+    def _make_client_order_id(self, symbol: str, pos_or_setup: Dict[str, Any]) -> str:
+        raw = f"{symbol}-{pos_or_setup.get('created_at', time.time())}"
+        safe = re.sub(r"[^A-Za-z0-9_-]", "", raw)
+        return ("SMC" + safe)[-32:]
+
     def _create_pending(self, setup: strategy.Setup) -> None:
-        try:
-            filters = self.binance.get_symbol_filters(setup.pair) if True else {
-                "step_size": Decimal("0.001"), "min_qty": Decimal("0.001"),
-                "tick_size": Decimal("0.0001"), "min_notional": Decimal("5"),
-            }
-        except Exception as e:
-            logger.warning("Gagal ambil filter %s, pakai default konservatif: %s", setup.pair, e)
+        # SIMULASI never touches Binance. REAL exposes PENDING only after
+        # Binance acknowledges the limit order with an orderId.
+        if self.state.get_active_count() >= self.state.max_positions:
+            logger.info("[SYSTEM] MAX 20 — %s tidak dibuat", setup.pair)
+            return
+
+        if self.state.mode == "REAL":
+            try:
+                filters = self.binance.get_symbol_filters(setup.pair)
+            except RateLimitError as e:
+                self._enter_binance_pause(e)
+                return
+            except ExchangeError as e:
+                logger.error("Filter Binance gagal %s: %s", setup.pair, e)
+                self.telegram.send(f"⚠️ ERROR — filter Binance {setup.pair}: {e}", "ERROR")
+                return
+        else:
             filters = {
-                "step_size": Decimal("0.001"), "min_qty": Decimal("0.001"),
-                "tick_size": Decimal("0.0001"), "min_notional": Decimal("5"),
+                "step_size": Decimal("0.000001"), "min_qty": Decimal("0.000001"),
+                "tick_size": Decimal("0.000001"), "min_notional": Decimal("0.01"),
             }
 
         normalized = normalize_order_prices(setup.to_dict(), filters["tick_size"])
         ok, geom_reason = strategy.validate_geometry(
-            setup.direction, normalized["entry"], normalized["sl"], normalized["tp"], float(filters["tick_size"]), setup.atr
+            setup.direction, normalized["entry"], normalized["sl"], normalized["tp"],
+            float(filters["tick_size"]), setup.atr
         )
-        if ok:
-            setup.entry, setup.sl, setup.tp = normalized["entry"], normalized["sl"], normalized["tp"]
         if not ok:
             logger.info("Setup %s ditolak validasi geometry: %s", setup.pair, geom_reason)
             return
+        setup.entry, setup.sl, setup.tp = normalized["entry"], normalized["sl"], normalized["tp"]
 
         qty, reason = compute_quantity(setup.entry, self.state.margin, self.state.leverage, filters)
         if qty is None:
             logger.info("Setup %s ditolak validasi quantity/margin: %s", setup.pair, reason)
             return
 
-        self.state.add_pending(setup.to_dict(), qty, self.state.margin)
+        if self.state.mode == "SIMULASI":
+            self.state.add_pending(setup.to_dict(), qty, self.state.margin, status="PENDING")
+            with self._shadow_lock:
+                self._shadow_candidates.pop(setup.pair, None)
+            self.ws.subscribe(setup.pair)
+            current = self._last_prices.get(setup.pair, setup.entry)
+            self.telegram.send(
+                f"🎯 PENDING ORDER — {setup.pair}\n\n"
+                f"{'🟢' if setup.direction == 'BUY' else '🔴'} {setup.direction}\n"
+                f"Harga Saat Ini: {current:.6f}\n\nConfidence: {setup.confidence:.1f}%\n\n"
+                f"Entry Zone: {setup.entry:.6f}\nTP: {setup.tp:.6f}\nSL: {setup.sl:.6f}",
+                "PENDING",
+            )
+            return
+
+        self.state.add_pending(setup.to_dict(), qty, self.state.margin, status="BINANCE_WAITING")
+        pos = self.state.positions[setup.pair]
+        pos["binance_entry_client_order_id"] = self._make_client_order_id(setup.pair, pos)
         with self._shadow_lock:
             self._shadow_candidates.pop(setup.pair, None)
-        self.ws.subscribe(setup.pair)
 
-        if self.state.mode == "REAL":
-            try:
-                self.binance.set_leverage(setup.pair, int(self.state.leverage))
-            except RateLimitError as e:
-                self._queue_binance_pending(setup.pair)
-                self._enter_binance_pause(e)
-                return
-            except ExchangeError as e:
-                logger.warning("Gagal set leverage %s ke %sx: %s", setup.pair, self.state.leverage, e)
-                self.telegram.send(f"⚠️ WARNING — gagal set leverage {setup.pair}: {e}", "WARNING")
-            try:
-                side = "BUY" if setup.direction == "BUY" else "SELL"
-                order = self.binance.place_limit_order(
-                    setup.pair, side, qty, round_price(setup.entry, filters["tick_size"]), setup.direction
-                )
-                self.state.positions[setup.pair]["binance_order_ids"]["entry"] = order.get("orderId")
-            except RateLimitError as e:
-                self._queue_binance_pending(setup.pair)
-                self._enter_binance_pause(e)
-                return
-            except ExchangeError as e:
-                logger.error("Gagal pasang limit order %s: %s", setup.pair, e)
-                self.telegram.send(f"⚠️ ERROR — gagal pasang order {setup.pair}: {e}", "ERROR")
-                self.state.discard_pending(setup.pair)
-                self.ws.unsubscribe(setup.pair)
-                return
+        try:
+            leverage = int(self.state.leverage)
+            self.binance.set_leverage(setup.pair, leverage)
+            pos["binance_leverage_confirmed"] = True
+            side = "BUY" if setup.direction == "BUY" else "SELL"
+            entry_price = round_price(
+                setup.entry, filters["tick_size"],
+                ROUND_DOWN if setup.direction == "BUY" else ROUND_UP,
+            )
+            order = self.binance.place_limit_order(
+                setup.pair, side, qty, entry_price, setup.direction,
+                client_order_id=pos["binance_entry_client_order_id"],
+            )
+            order_id = order.get("orderId")
+            if not order_id:
+                raise ExchangeError(f"Binance limit {setup.pair} diterima tanpa orderId")
+            pos["binance_order_ids"]["entry"] = order_id
+            pos["binance_entry_confirmed_at"] = time.time()
+            event_id = f"{setup.pair}:BINANCE_ENTRY_CONFIRMED:{pos['created_at']}"
+            if not self.state.transition(setup.pair, "PENDING", event_id, binance_entry_confirmed=True):
+                raise ExchangeError(f"State PENDING gagal diterapkan setelah order Binance {setup.pair}")
+            self.ws.subscribe(setup.pair)
+        except RateLimitError as e:
+            self._queue_binance_pending(setup.pair)
+            self._enter_binance_pause(e)
+            return
+        except ExchangeError as e:
+            logger.error("Gagal pasang limit order %s: %s", setup.pair, e)
+            self.telegram.send(f"⚠️ ERROR — gagal pasang order {setup.pair}: {e}", "ERROR")
+            self.state.discard_pending(setup.pair)
+            self.ws.unsubscribe(setup.pair)
+            return
 
         current = self._last_prices.get(setup.pair, setup.entry)
         self.telegram.send(
             f"🎯 PENDING ORDER — {setup.pair}\n\n"
             f"{'🟢' if setup.direction == 'BUY' else '🔴'} {setup.direction}\n"
-            f"Harga Saat Ini: {current:.6f}\n\n"
-            f"Confidence: {setup.confidence:.1f}%\n\nEntry Zone: {setup.entry:.6f}\n"
-            f"TP: {setup.tp:.6f}\nSL: {setup.sl:.6f}",
+            f"Harga Saat Ini: {current:.6f}\n\nConfidence: {setup.confidence:.1f}%\n\n"
+            f"Entry Zone: {setup.entry:.6f}\nTP: {setup.tp:.6f}\nSL: {setup.sl:.6f}",
             "PENDING",
         )
 
@@ -2157,7 +2293,7 @@ class TradingBot:
 
         handlers = {
             "/auto": self._cmd_auto, "/stop": self._cmd_stop, "/mode": self._cmd_mode,
-            "/margin": self._cmd_margin, "/leverage": self._cmd_leverage,
+            "/margin": self._cmd_margin, "/leverage": self._cmd_leverage, "/max": self._cmd_max,
             "/resetbalance": self._cmd_resetbalance, "/trade": self._cmd_trade,
             "/order": self._cmd_order, "/stats": self._cmd_stats, "/koin": self._cmd_koin,
             "/ip": self._cmd_ip, "/banned": self._cmd_banned, "/unban": self._cmd_unban,
@@ -2288,6 +2424,39 @@ class TradingBot:
         self.state.leverage = value
         self.telegram.send(f"✅ LEVERAGE SUCCESS — leverage diatur ke {value}x", "LEVERAGE_SUCCESS")
 
+    def _cmd_max(self, args: List[str]) -> None:
+        """Atur hard cap jumlah posisi aktif/reserve. Rentang 1..20; default 5."""
+        if len(args) != 1:
+            self.telegram.send(
+                "⚠️ Format salah.\n\nGunakan:\n/max <angka>\n\nContoh:\n/max 5\n\nRentang yang diizinkan: 1–20\nDefault: 5",
+                "INFO",
+            )
+            return
+        try:
+            value = int(args[0])
+            if value < 1 or value > 20 or str(value) != args[0].lstrip("+"):
+                raise ValueError
+        except ValueError:
+            self.telegram.send(
+                "⚠️ MAX tidak valid.\n\nGunakan angka bulat 1–20.\nContoh: /max 5",
+                "INFO",
+            )
+            return
+        old = self.state.max_positions
+        self.state.max_positions = value
+        active = self.state.get_active_count()
+        self.state.save_checkpoint()
+        if active > value:
+            self.telegram.send(
+                f"⚠️ MAX POSISI DIUBAH\n\nLimit baru: {value}\nPosisi/reserve aktif saat ini: {active}\n\nBot tidak akan menambah posisi baru sampai jumlah aktif turun ke ≤ {value}.",
+                "WARNING",
+            )
+        else:
+            self.telegram.send(
+                f"✅ MAX POSISI SUCCESS\n\nSebelumnya: {old}\nSekarang: {value}\nAktif/reserve: {active}/{value}",
+                "INFO",
+            )
+
     def _cmd_resetbalance(self, args: List[str]) -> None:
         if args:
             self.telegram.send("⚠️ Format salah. Gunakan: /resetbalance", "INFO")
@@ -2320,10 +2489,17 @@ class TradingBot:
             return
         positions = self.state.snapshot_positions()
         active = [p for p in positions if p["status"] not in TERMINAL_STATES]
-        lines = [f"📡 Posisi Aktif ({len(active)}/20)\n"]
+        lines = [f"📡 Posisi / Reserve ({len(active)}/{self.state.max_positions})\n"]
         for p in active:
             icon = "🟢" if p["direction"] == "BUY" else "🔴"
-            if p["status"] == "PENDING":
+            if p["status"] == "BINANCE_WAITING":
+                lines.append(
+                    f"⏳ {p['pair']} — MENUNGGU BINANCE\n{icon} {p['direction']}\n"
+                    f"Entry zone: {p['entry']:.6f}\nTP: {p['tp']:.6f}\nSL: {p['sl']:.6f}\n"
+                    f"Confidence: {p['confidence']:.0f}%\n"
+                    "⚠️ Belum PENDING sampai Binance mengembalikan orderId.\n"
+                )
+            elif p["status"] == "PENDING":
                 current = self._last_prices.get(p['pair'], p['entry'])
                 jarak = abs(current - p['entry']) / p['entry'] * 100 if p['entry'] else 0.0
                 lines.append(
@@ -2355,12 +2531,14 @@ class TradingBot:
         if not positions:
             self.telegram.send("📋 ORDER\n\nTidak ada order aktif.", "INFO")
             return
-        lines = [f"📋 ORDER — {len(positions)}/20\n"]
+        lines = [f"📋 ORDER — {len(positions)}/{self.state.max_positions}\n"]
         for i, p in enumerate(positions, 1):
             icon = "🟢" if p["direction"] == "BUY" else "🔴"
             sl_label = "Trail SL" if p.get("trail_count", 0) > 0 else "SL"
             current = self._last_prices.get(p["pair"], p["entry"])
             status = p["status"]
+            if status == "BINANCE_WAITING":
+                status = "WAITING BINANCE CONFIRM"
             lines.append(
                 f"{i}. {p['pair']} — {status}\n"
                 f"{icon} {p['direction']} | Confidence: {p['confidence']:.0f}%\n"
@@ -2493,7 +2671,7 @@ class TradingBot:
                 if not pos:
                     missing.append(symbol)
                     continue
-                if self.state.mode == "REAL":
+                if self.state.mode == "REAL" and pos.get("status") != "BINANCE_WAITING":
                     self._cleanup_real_symbol(symbol, pos, close_position=(pos.get("status") != "PENDING"))
                 if self.state.transition(symbol, "CANCELLED", f"{symbol}:MANUAL_TIMEOUT:{time.time_ns()}", close_reason="MANUAL_TIMEOUT"):
                     self.state.remove_terminal(symbol)
