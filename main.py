@@ -287,11 +287,17 @@ _ensure_strategy_runtime_compat()
 # continued rate-limit violations; we therefore bias toward serialization,
 # conservative headroom, and zero retries after 429/418.
 BINANCE_POST_LIMIT_SAFETY_SECONDS = 15.0
+# Binance reports REQUEST_WEIGHT against the source IP, not against this bot
+# instance/API key.  Keep a large reserve so one new trade cannot be sent
+# into an already-hot IP budget.
 BINANCE_WEIGHT_HARD_STOP = 1800
-BINANCE_WEIGHT_RECOVERY_MARGIN = 150
+BINANCE_WEIGHT_ORDER_SOFT_STOP = 1500
+BINANCE_WEIGHT_RECOVERY_MARGIN = 300
 BINANCE_DEFAULT_429_COOLDOWN = 75.0
-BINANCE_ORDER_INTERVAL = 3.0
-BINANCE_REQUEST_INTERVAL = 1.0
+# Trade-related REST calls are deliberately much slower than ordinary REST.
+# This spacing covers leverage/order/cancel as one lane, not just POST /order.
+BINANCE_ORDER_INTERVAL = 6.0
+BINANCE_REQUEST_INTERVAL = 1.5
 
 
 class SecretRedactingFilter(logging.Filter):
@@ -1034,9 +1040,11 @@ class BinanceClient:
         self._last_rate_limit_status = status
         self._consecutive_429 = self._consecutive_429 + 1 if status == 429 else self._consecutive_429
         logger.warning(
-            "[BINANCE] REST RATE LIMIT | path=%s HTTP=%s code=%s block=%.1fs weight_1m=%s order10s=%s order1m=%s",
-            self._last_request_path, status, code, block_seconds,
+            "[BINANCE] REST RATE LIMIT | path=%s HTTP=%s code=%s block=%.1fs "
+            "retry_after=%s weight_1m=%s order10s=%s order1m=%s msg=%s",
+            self._last_request_path, status, code, block_seconds, retry_after,
             self._used_weight_1m, self._used_order_10s, self._used_order_1m,
+            msg[:220],
         )
         return err
 
@@ -1074,7 +1082,8 @@ class BinanceClient:
         """
         params = dict(params or {})
         is_order_request = path in (
-            "/fapi/v1/order", "/fapi/v1/allOpenOrders", "/fapi/v1/batchOrders"
+            "/fapi/v1/order", "/fapi/v1/allOpenOrders", "/fapi/v1/batchOrders",
+            "/fapi/v1/leverage", "/fapi/v1/positionSide/dual"
         )
 
         with self._network_lock:
@@ -1082,6 +1091,29 @@ class BinanceClient:
             now_mono = time.monotonic()
             if now_mono < self._blocked_until_mono:
                 raise self._local_rate_limit_error()
+
+            # Trade requests get an earlier local stop. REQUEST_WEIGHT is
+            # shared at the source-IP level, so "first order of this process"
+            # does not mean "first request of the IP in this minute".
+            # Never spend the last part of the budget on an entry.
+            if is_order_request and self._used_weight_1m >= BINANCE_WEIGHT_ORDER_SOFT_STOP:
+                block_seconds = 30.0
+                self._blocked_until_mono = max(
+                    self._blocked_until_mono, time.monotonic() + block_seconds
+                )
+                err = RateLimitError(
+                    f"Binance trade REST deferred by local governor: "
+                    f"used_weight_1m={self._used_weight_1m} >= {BINANCE_WEIGHT_ORDER_SOFT_STOP}",
+                    status_code=429, code=-1003, retry_after=block_seconds,
+                )
+                self._blocked_error = err
+                logger.warning(
+                    "[BINANCE] TRADE PREBLOCK | weight_1m=%s >= %s | path=%s | "
+                    "order10s=%s order1m=%s | request not sent",
+                    self._used_weight_1m, BINANCE_WEIGHT_ORDER_SOFT_STOP, path,
+                    self._used_order_10s, self._used_order_1m,
+                )
+                raise err
 
             # Conservative pre-flight headroom. A Binance 429 must be treated
             # as a stop signal, not something we retry into a 418.
@@ -2961,6 +2993,9 @@ class TradingBot:
                 f"Entry baru Binance dihentikan. Posisi aktif tetap dipantau via WS.\n"
                 f"Cooldown: {remaining} detik\n"
                 f"HTTP: {status}\n"
+                f"Reason: {reason[:500]}\n"
+                f"Weight 1m: {self.binance._used_weight_1m} | "
+                f"Order 10s: {self.binance._used_order_10s} | Order 1m: {self.binance._used_order_1m}\n"
                 f"Waiting list: protection/entry/trail disimpan",
                 "BINANCE_PAUSE",
             )
@@ -3072,7 +3107,9 @@ class TradingBot:
                             "SWEEP" if (analysis_diag.get("liquidity") or {}).get("sweep") else "NONE",
                             float((analysis_diag.get("entry") or {}).get("distance_atr", 0.0)),
                             float((analysis_diag.get("tp") or {}).get("rr", 0.0)),
-                            (analysis_diag.get("btc") or {}).get("aligned"), extra={"symbol": symbol})
+                            (analysis_diag.get("btc") or {}).get("aligned"),
+                            float((analysis_diag.get("freshness") or {}).get("score", analysis_diag.get("freshness_score", 0.0))),
+                            extra={"symbol": symbol})
                 threshold = self.strategy_engine.get_active_threshold()
                 eligible_now = setup.confidence >= threshold
                 self.learn_engine.record_scan_candidate(setup.to_dict(), eligible_now, threshold, "PASS" if eligible_now else "BELOW_ACTIVE_THRESHOLD")
