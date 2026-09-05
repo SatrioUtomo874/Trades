@@ -4,7 +4,7 @@ Ollama is optional local advisory only; its output can never directly change str
 """
 from __future__ import annotations
 import hashlib, json, logging, math, os, shutil, subprocess, time
-from statistics import median
+from statistics import median, pstdev
 from threading import RLock
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 try:
@@ -260,6 +260,95 @@ class LearnEngine:
                         rec=strategy_engine.apply_update({"ACTIVE_THRESHOLD":new},reason=evidence.get("type","LEARNED_UPDATE"),evidence=evidence); self.threshold_history.append({"timestamp":time.time(),"old":current,"new":new,"evidence":evidence}); self.strategy_change_log.append(rec); self.decision_history.append({"type":"ACCEPTED","proposal":{"ACTIVE_THRESHOLD":new},"evidence":evidence}); self.trades_since_last_change=0; self.last_change_ts=time.time(); self.current_strategy_version=rec.get("version"); report.update({"action":"APPLIED","old_threshold":current,"new_threshold":new,"strategy_version":rec.get("version"),"evidence":evidence,"reason":"quality+frequency+holdout gates passed"})
                 else:report["reason"]="no evidence-based parameter change"
             self.last_audit_report=report; self.last_audit_ts=time.time(); _log("AUDIT DECISION",action=report["action"],reason=report.get("reason"),elapsed=round(time.time()-started,2)); return report
+    @staticmethod
+    def confidence_interval(rate: float, n: int, z: float = 1.96) -> Dict[str, float]:
+        """Wilson interval for a proportion; transparent uncertainty estimate."""
+        if n <= 0:
+            return {"low": 0.0, "high": 0.0}
+        p = max(0.0, min(1.0, rate)); den = 1.0 + z*z/n
+        center = (p + z*z/(2*n)) / den
+        half = z * math.sqrt((p*(1-p) + z*z/(4*n))/n) / den
+        return {"low": round(max(0.0, center-half), 4), "high": round(min(1.0, center+half), 4)}
+
+    def aging_report(self) -> Dict[str, Any]:
+        with self._lock:
+            now = time.time()
+            ages=[]
+            for row in self.candidate_history:
+                ts=sf(row.get("timestamp"), now); ages.append(max(0.0,(now-ts)/86400.0))
+            if not ages:
+                return {"count":0,"median_days":0.0,"recent_pct":0.0,"stale_pct":0.0}
+            recent=sum(1 for a in ages if a<=3)/len(ages)
+            stale=sum(1 for a in ages if a>21)/len(ages)
+            return {"count":len(ages),"median_days":round(median(ages),3),"recent_pct":round(recent*100,2),"stale_pct":round(stale*100,2)}
+
+    def risk_adjusted_quality(self) -> Dict[str, Any]:
+        with self._lock:
+            rows=[r for r in self.trade_history if r.get("outcome") in ECONOMIC]
+            rs=[sf(r.get("pnl_r")) for r in rows]
+            if not rs:return {"n":0,"median_r":0.0,"downside_deviation":0.0,"max_drawdown_r":0.0}
+            downside=[min(0.0,x) for x in rs]
+            downside_dev=(sum(x*x for x in downside)/len(downside))**0.5
+            equity=peak=dd=0.0
+            for x in rs:
+                equity+=x; peak=max(peak,equity); dd=max(dd,peak-equity)
+            return {"n":len(rs),"median_r":round(median(rs),4),"downside_deviation":round(downside_dev,4),"max_drawdown_r":round(dd,4)}
+
+    def direction_breadth(self, window_scans: int = 100) -> Dict[str, Any]:
+        with self._lock:
+            rows=self.candidate_history[-max(1,window_scans):]
+            buy=sum(1 for r in rows if r.get("direction")=="BUY")
+            sell=sum(1 for r in rows if r.get("direction")=="SELL")
+            n=buy+sell
+            return {"buy":buy,"sell":sell,"total":n,"buy_pct":round(100*buy/max(1,n),2),"sell_pct":round(100*sell/max(1,n),2),"dominant":"BUY" if buy>sell else "SELL" if sell>buy else "NEUTRAL"}
+
+    def exit_attribution_v2(self) -> Dict[str, Any]:
+        with self._lock:
+            out={}
+            for outcome in OUTCOMES:
+                rows=[r for r in self.trade_history if r.get("outcome")==outcome]
+                rs=[sf(r.get("pnl_r")) for r in rows]
+                out[outcome]={"count":len(rows),"avg_r":round(sum(rs)/len(rs),4) if rs else 0.0,"median_r":round(median(rs),4) if rs else 0.0,
+                              "avg_mae":round(_mean([sf((r.get("close_info") or {}).get("mae_r")) for r in rows]),4),
+                              "avg_mfe":round(_mean([sf((r.get("close_info") or {}).get("mfe_r")) for r in rows]),4)}
+            trails=[r for r in self.trade_history if r.get("outcome")=="TRAIL"]
+            deltas=[]; saved=[]
+            for r in trails:
+                ci=r.get("close_info") or {}; path=ci.get("path_candles") or []; th=ci.get("trail_history") or []
+                if path and th:
+                    try:
+                        cf=self.trail_counterfactual(r,path,th); deltas.append(sf(cf.get("delta_r"))); saved.append(cf)
+                    except Exception: pass
+            out.setdefault("TRAIL",{}).update({"counterfactual_n":len(deltas),"avg_delta_vs_no_trail":round(sum(deltas)/len(deltas),4) if deltas else 0.0})
+            return out
+
+    def quality_quantity_matrix_v2(self, frequency: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
+        with self._lock:
+            st=self.weighted_stats(self.trade_history)
+            freq=frequency or self.frequency_diagnosis()
+            quality_score=max(0.0,min(100.0, 40*min(1.0,max(0.0,st.get("expectancy",0)+0.5)/1.0)+20*min(1.0,st.get("profit_factor",0)/2)+20*min(1.0,st.get("win_rate",0)/70)+20*max(0.0,1.0-self.risk_adjusted_quality().get("max_drawdown_r",0)/5)))
+            freq_score=max(0.0,min(100.0, 50*min(1.0,freq.get("avg_candidate",0)/5)+50*min(1.0,freq.get("avg_eligible",0)/2)))
+            if quality_score>=65 and freq_score>=55: decision="KEEP"
+            elif quality_score>=65 and freq_score<55: decision="RELAX_LOWEST_VALUE_GATE"
+            elif quality_score<45 and freq_score>=55: decision="TIGHTEN_OR_REMODEL"
+            elif quality_score<45 and freq_score<55: decision="REGIME_OR_MODEL_PROBLEM"
+            else: decision="CONTINUE_LEARNING"
+            return {"quality_score":round(quality_score,2),"frequency_score":round(freq_score,2),"decision":decision,"expectancy":st.get("expectancy",0),"profit_factor":st.get("profit_factor",0)}
+
+    def replay_threshold_and_exit_grid(self, setup: Dict[str, Any], path_candles: Sequence[Dict[str, Any]], thresholds=(0,30,40,50,60,70), rr_multipliers=(0.8,1.0,1.2)) -> Dict[str, Any]:
+        """Offline scenario grid; no API. Uses observed path candles only."""
+        base=self.replay_fixed_levels(setup,path_candles,[])
+        trials=[]
+        entry=sf(setup.get("fill_price",setup.get("entry"))); initial_sl=sf(setup.get("initial_sl",setup.get("sl")))
+        base_risk=abs(entry-initial_sl) or 1e-9
+        for thr in thresholds:
+            for mult in rr_multipliers:
+                trial_setup=dict(setup); trial_setup["tp"] = entry + base_risk*mult*max(1.0, 1.0 if setup.get("direction")=="BUY" else -1.0)
+                if setup.get("direction")=="SELL": trial_setup["tp"]=entry-base_risk*mult
+                rep=self.replay_fixed_levels(trial_setup,path_candles,[])
+                trials.append({"threshold":thr,"rr_multiple":mult,"result":rep})
+        return {"baseline":base,"grid":trials}
+
     def replay_fixed_levels(self, setup: Dict[str, Any], path_candles: Sequence[Dict[str, Any]], trail_levels: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """Offline path replay. No API. Tests whether fixed TP/SL or recorded trail checkpoints would fire first."""
         entry=sf(setup.get("fill_price", setup.get("entry"))); tp=sf(setup.get("tp")); sl=sf(setup.get("sl")); direction=setup.get("direction","BUY")
