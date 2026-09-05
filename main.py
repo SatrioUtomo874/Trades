@@ -594,6 +594,7 @@ class StateStore:
         self.highest_balance: Optional[float] = None
         self.sim_balance = 10.0
         self.sim_balance_anchor = 10.0
+        self.real_balance = None  # snapshot saldo Binance REAL saat /mode on
 
         self.binance_paused = False
         self.binance_pause_ts: Optional[float] = None
@@ -1045,6 +1046,11 @@ class TradingBot:
 
         if self.state.mode == "REAL":
             try:
+                # Ambil balance aktual setelah posisi selesai agar PnL tidak hanya simulasi lokal.
+                self.state.real_balance = self.binance.get_balance_usdt()
+            except Exception as e:
+                logger.warning("Gagal refresh balance REAL setelah close: %s", e)
+            try:
                 self.binance.cancel_all_open_orders(symbol)
             except Exception as e:
                 logger.warning("Gagal cancel sisa order %s setelah close: %s", symbol, e)
@@ -1068,6 +1074,11 @@ class TradingBot:
         if not applied:
             return
         if self.state.mode == "REAL":
+            try:
+                # Ambil balance aktual setelah posisi selesai agar PnL tidak hanya simulasi lokal.
+                self.state.real_balance = self.binance.get_balance_usdt()
+            except Exception as e:
+                logger.warning("Gagal refresh balance REAL setelah close: %s", e)
             try:
                 self.binance.cancel_all_open_orders(symbol)
             except Exception as e:
@@ -1440,7 +1451,7 @@ class TradingBot:
         handlers = {
             "/auto": self._cmd_auto, "/stop": self._cmd_stop, "/mode": self._cmd_mode,
             "/margin": self._cmd_margin, "/leverage": self._cmd_leverage,
-            "/resetbalance": self._cmd_resetbalance, "/trade": self._cmd_trade,
+            "/trade": self._cmd_trade,
             "/order": self._cmd_order, "/stats": self._cmd_stats, "/koin": self._cmd_koin,
             "/ip": self._cmd_ip, "/banned": self._cmd_banned, "/unban": self._cmd_unban,
             "/timeout": self._cmd_timeout, "/autostop": self._cmd_autostop, "/open": self._cmd_open,
@@ -1459,7 +1470,7 @@ class TradingBot:
             "/mode on|off - REAL / SIMULASI\n"
             "/margin <USDT> - Atur margin\n"
             "/leverage <angka> - Atur leverage\n"
-            "/resetbalance - Reset balance anchor\n"
+            ""
             "/trade - Posisi aktif/pending\n"
             "/order - Order aktif\n"
             "/open - Posisi/order terbuka\n"
@@ -1500,9 +1511,13 @@ class TradingBot:
                 return
             self.state.mode = "REAL"
             try:
-                self.state.highest_balance = self.binance.get_balance_usdt()
+                self.state.real_balance = self.binance.get_balance_usdt()
+                self.state.highest_balance = self.state.real_balance
             except Exception as e:
-                logger.warning("Gagal ambil balance awal REAL mode: %s", e)
+                self.state.mode = "SIMULASI"
+                logger.error("REAL gagal: tidak bisa membaca saldo Binance: %s", e)
+                self.telegram.send(f"❌ REAL MODE DIBATALKAN — saldo Binance tidak terbaca: {e}", "ERROR")
+                return
             self.telegram.send("🔴 MODE REAL TRADE AKTIF", "INFO")
         else:
             self.state.mode = "SIMULASI"
