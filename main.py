@@ -27,6 +27,7 @@ folder yang sama (lihat `.env.example`), atau export manual sebelum start:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import hmac
 import json
@@ -1422,11 +1423,35 @@ class TradingBot:
             "/order": self._cmd_order, "/stats": self._cmd_stats, "/koin": self._cmd_koin,
             "/ip": self._cmd_ip, "/banned": self._cmd_banned, "/unban": self._cmd_unban,
             "/timeout": self._cmd_timeout, "/autostop": self._cmd_autostop, "/open": self._cmd_open,
+            "/help": self._cmd_help,
         }
         handler = handlers.get(cmd)
         if not handler:
             return
         handler(args)
+
+    def _cmd_help(self, args: List[str]) -> None:
+        self.telegram.send(
+            """🤖 COMMAND BOT\n\n"
+            "/auto - Aktifkan AUTO scanning\n"
+            "/stop - Matikan AUTO scanning\n"
+            "/mode on|off - REAL / SIMULASI\n"
+            "/margin <USDT> - Atur margin\n"
+            "/leverage <angka> - Atur leverage\n"
+            "/resetbalance - Reset balance anchor\n"
+            "/trade - Posisi aktif/pending\n"
+            "/order - Order aktif\n"
+            "/open - Posisi/order terbuka\n"
+            "/stats - Statistik bot\n"
+            "/koin - Universe coin\n"
+            "/banned - Daftar coin banned\n"
+            "/unban <COIN> - Hapus ban coin\n"
+            "/timeout <detik> - Atur timeout\n"
+            "/autostop - Pengaturan auto stop\n"
+            "/ip - IP server\n"
+            "/help - Bantuan command" ,
+            "INFO",
+        )
 
     def _cmd_auto(self, args: List[str]) -> None:
         self.state.auto = True
@@ -1761,8 +1786,14 @@ async def handle_update(update: dict, context: dict = None):
     if _LAUNCHER_BOT is None:
         return
 
-    # Telegram lama bot menggunakan polling internal.
-    # Worker utama tetap berjalan dari TradingBot.
+    # Terima update dari try.py lalu teruskan ke command handler lama.
+    try:
+        message = update.get("message") or {}
+        text = message.get("text") or ""
+        if text.startswith("/") and _LAUNCHER_BOT is not None:
+            await asyncio.to_thread(_LAUNCHER_BOT._dispatch_command, text)
+    except Exception as e:
+        logger.exception("handle_update gagal: %s", e)
     return None
 
 
