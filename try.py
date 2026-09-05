@@ -344,7 +344,7 @@ async def start_main(chat_id: int) -> str:
         return (
             f"🟢 <b>{MAIN_FILE} aktif.</b>\n"
             f"✅ GitHub sync selesai: {total} file diperiksa, {changed} berubah.\n"
-            "Semua command selain /try, /end, /ganti diteruskan ke main.py."
+            "Session main.py baru dimulai. Semua command selain /try, /end, /ganti diteruskan ke main.py."
         )
 
 
@@ -467,6 +467,19 @@ async def route_message(message: dict, update: dict) -> None:
             tg_send(chat_id, await handle_ganti(message))
             return
 
+        if command == "/healthz":
+            if not _MAIN_RUNNING:
+                tg_send(
+                    chat_id,
+                    "🩺 <b>LAUNCHER HEALTHZ</b>\n\n"
+                    "Launcher: 🟢 READY\n"
+                    "main.py: ⚪ OFFLINE\n"
+                    "Gunakan /try untuk memulai main.py dari session baru.",
+                )
+            else:
+                await forward_update(update)
+            return
+
         if command in {"/help", "/start"} and not _MAIN_RUNNING:
             tg_send(
                 chat_id,
@@ -474,6 +487,7 @@ async def route_message(message: dict, update: dict) -> None:
                 "/try — sync seluruh repository dari GitHub lalu jalankan main.py\n"
                 "/end — hentikan main.py tanpa menghentikan launcher\n"
                 "/ganti — push/replace file ke GitHub\n"
+                "/healthz — status launcher/main dan Binance jika main aktif\n"
                 "/help — menu launcher\n\n"
                 "Setelah /try, command lain diteruskan ke main.py.",
             )
@@ -492,6 +506,19 @@ async def telegram_loop() -> None:
         tg_call("deleteWebhook", {"drop_pending_updates": False}, timeout=20)
     except Exception:
         log.exception("Gagal deleteWebhook")
+
+    # Launcher owns Telegram polling and announces readiness independently of main.py.
+    try:
+        tg_send(
+            ALLOWED_USER_ID,
+            "🚀 <b>SMCAutoTrade Launcher SIAP</b>\n\n"
+            "Status: 🟢 ONLINE\n"
+            "main.py: ⚪ OFFLINE\n\n"
+            "Gunakan /try untuk memulai main.py dari awal.\n"
+            "Gunakan /healthz untuk mengecek status.",
+        )
+    except Exception:
+        log.exception("Gagal kirim launcher welcome")
 
     while not _STOP.is_set():
         try:
