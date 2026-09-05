@@ -63,7 +63,7 @@ CONFIDENCE_WEIGHTS: Dict[str, float] = {
 assert abs(sum(CONFIDENCE_WEIGHTS.values()) - 100.0) < 1e-6
 
 DEFAULT_PARAMS: Dict[str, Any] = {
-    "ACTIVE_THRESHOLD": 0.0,       # % — dimulai rendah agar learn.py punya data (§10)
+    "ACTIVE_THRESHOLD": 45.0,       # % — dimulai rendah agar learn.py punya data (§10)
     "swing_left": 2,
     "swing_right": 2,
     "equal_level_tol_atr": 0.15,   # toleransi "equal high/low" dalam satuan ATR
@@ -466,6 +466,11 @@ class Strategy:
         if len(candles) < min_len:
             return None
 
+        # Entry hanya memakai candle yang sudah confirm. Candle terakhir WebSocket
+        # dapat berubah dan menyebabkan entry instan.
+        if len(candles) < 3:
+            return None
+        candles = list(candles[:-1])
         atrs = atr_series(candles, p["atr_period"])
         atr_now = atrs[-1]
         if atr_now <= 0:
