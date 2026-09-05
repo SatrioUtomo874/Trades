@@ -358,6 +358,10 @@ class BybitWebSocket:
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
+    def invalidate_listen_key(self) -> None:
+        with self._lock:
+            self._listen_key = None
+
     def _on_open(self, ws) -> None:
         logger.info("BybitWebSocket terhubung")
         with self._lock:
@@ -427,6 +431,193 @@ class BybitWebSocket:
         logger.warning("BybitWebSocket tertutup (code=%s, msg=%s) — akan reconnect", code, msg)
 
 
+class BinanceUserDataStream:
+    """Binance USD-M Futures user-data stream.
+
+    Uses a single long-lived listenKey WebSocket for ORDER_TRADE_UPDATE and
+    ACCOUNT_UPDATE. The stream is deliberately independent from Binance REST
+    rate-limit handling so fills/position changes can still arrive while REST
+    is paused or HTTP 418 banned.
+    """
+
+    REST_URL = "https://fapi.binance.com/fapi/v1/listenKey"
+    WS_BASE = "wss://fstream.binance.com/ws"
+
+    def __init__(self, api_key: str, on_event, rest_request=None, rest_allowed=None, on_rate_limit=None):
+        self.api_key = api_key
+        self.on_event = on_event
+        self._rest_request = rest_request
+        self._rest_allowed = rest_allowed or (lambda: True)
+        self._on_rate_limit = on_rate_limit or (lambda err: None)
+        self._ws = None
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._listen_key: Optional[str] = None
+        self._lock = threading.RLock()
+        self._last_event_ts = 0.0
+        self._last_keepalive = 0.0
+
+    @property
+    def connected(self) -> bool:
+        return bool(self._ws and self._listen_key and not self._stop.is_set())
+
+    def start(self) -> None:
+        if websocket is None:
+            logger.error("websocket-client tidak terpasang; Binance user-data stream nonaktif")
+            return
+        if not self.api_key:
+            logger.warning("BINANCE_API_KEY kosong; Binance user-data stream tidak dapat dimulai")
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run_forever, name="BinanceUserData", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            if self._ws:
+                self._ws.close()
+        except Exception:
+            pass
+
+    def _create_listen_key(self) -> Optional[str]:
+        try:
+            if self._rest_request is not None:
+                data = self._rest_request("POST", "/fapi/v1/listenKey", signed=False)
+                key = data.get("listenKey") if isinstance(data, dict) else None
+                if not key:
+                    raise ExchangeError("Binance listenKey response tidak berisi listenKey")
+                return str(key)
+            resp = requests.post(
+                self.REST_URL,
+                headers={"X-MBX-APIKEY": self.api_key},
+                timeout=15,
+            )
+            if resp.status_code in (429, 418):
+                raise RateLimitError(
+                    f"Binance listenKey rate-limit HTTP {resp.status_code}: {resp.text[:300]}",
+                    status_code=resp.status_code,
+                    retry_after=float(resp.headers.get("Retry-After")) if resp.headers.get("Retry-After") else None,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            key = data.get("listenKey")
+            if not key:
+                raise ExchangeError("Binance listenKey response tidak berisi listenKey")
+            return str(key)
+        except RateLimitError:
+            raise
+        except Exception as e:
+            logger.warning("Gagal membuat Binance listenKey: %s", e)
+            return None
+
+    def _keepalive(self) -> None:
+        if not self._listen_key or not self._rest_allowed():
+            return
+        try:
+            if self._rest_request is not None:
+                self._rest_request("PUT", "/fapi/v1/listenKey", signed=False)
+            else:
+                resp = requests.put(
+                    self.REST_URL,
+                    headers={"X-MBX-APIKEY": self.api_key},
+                    timeout=15,
+                )
+                if resp.status_code in (429, 418):
+                    raise RateLimitError(
+                        f"Binance listenKey keepalive rate-limit HTTP {resp.status_code}",
+                        status_code=resp.status_code,
+                        retry_after=float(resp.headers.get("Retry-After")) if resp.headers.get("Retry-After") else None,
+                    )
+                if resp.status_code >= 400:
+                    raise ExchangeError(f"listenKey keepalive HTTP {resp.status_code}: {resp.text[:300]}")
+            self._last_keepalive = time.time()
+        except RateLimitError as e:
+            self._on_rate_limit(e)
+            logger.warning("Binance user-data keepalive terkena rate-limit: %s", e)
+        except Exception as e:
+            logger.warning("Binance user-data keepalive gagal: %s", e)
+
+    def _run_forever(self) -> None:
+        backoff = 2.0
+        while not self._stop.is_set():
+            if not self._listen_key and not self._rest_allowed():
+                time.sleep(5)
+                continue
+            if not self._listen_key:
+                try:
+                    self._listen_key = self._create_listen_key()
+                except RateLimitError as e:
+                    self._on_rate_limit(e)
+                    logger.warning("Binance user-data listenKey terkena rate-limit: %s", e)
+                    time.sleep(min(30.0, backoff))
+                    backoff = min(backoff * 2.0, 60.0)
+                    continue
+                if not self._listen_key:
+                    time.sleep(min(30.0, backoff))
+                    backoff = min(backoff * 2.0, 60.0)
+                    continue
+
+            url = f"{self.WS_BASE}/{self._listen_key}"
+            try:
+                self._ws = websocket.WebSocketApp(
+                    url,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self._ws.run_forever(ping_interval=0, ping_timeout=None)
+            except Exception as e:  # pragma: no cover
+                logger.warning("Binance user-data websocket error: %s", e)
+            finally:
+                self._ws = None
+
+            if self._stop.is_set():
+                break
+            time.sleep(backoff)
+            backoff = min(backoff * 2.0, 60.0)
+
+    def _on_open(self, ws) -> None:
+        backoff = 2.0
+        self._last_event_ts = time.time()
+        self._last_keepalive = time.time()
+        logger.info("Binance User Data WS CONNECTED")
+        # A listenKey expires after 60 minutes. Keep it alive well before that.
+        # Keepalive is performed by this same thread without touching BinanceClient REST gate.
+        def keepalive_loop():
+            while not self._stop.is_set() and ws is self._ws:
+                now = time.time()
+                if now - self._last_keepalive >= 30 * 60:
+                    self._keepalive()
+                time.sleep(15)
+        threading.Thread(target=keepalive_loop, name="BinanceUserDataKeepalive", daemon=True).start()
+
+    def _on_message(self, ws, message: str) -> None:
+        self._last_event_ts = time.time()
+        try:
+            data = json.loads(message)
+        except json.JSONDecodeError:
+            return
+        try:
+            self.on_event(data)
+        except Exception:
+            logger.exception("Binance user-data event handler error")
+
+    def _on_error(self, ws, error) -> None:
+        logger.warning("Binance User Data WS error: %s", error)
+
+    def _on_close(self, ws, code, msg) -> None:
+        logger.warning("Binance User Data WS closed code=%s msg=%s", code, msg)
+        # Expired stream must get a new listenKey after reconnect.
+        if code in (1000, 1001) and self._stop.is_set():
+            return
+        if code == 1000 and self._last_event_ts and (time.time() - self._last_event_ts) > 3600:
+            self._listen_key = None
+
+
 # =============================================================================
 # 3. BINANCE FUTURES REST (eksekusi order nyata — §61)
 #    NB: "Algo Order" pada spesifikasi (TP/SL/Trail) diimplementasikan
@@ -451,10 +642,16 @@ class BinanceClient:
         # Semua Binance REST melewati satu gate agar worker tidak burst.
         self._request_gate_lock = threading.Lock()
         self._next_request_mono = 0.0
-        self._min_request_interval = 0.35
-        self._order_request_interval = 1.05
+        self._min_request_interval = 0.60
+        self._order_request_interval = 2.00
         self._next_order_request_mono = 0.0
         self._used_weight_1m = 0
+        self._used_order_10s = 0
+        self._used_order_1m = 0
+        self._order_limit_10s = 300
+        self._order_limit_1m = 1200
+        self._blocked_until_mono = 0.0
+        self._blocked_error: Optional[RateLimitError] = None
         self._leverage_cache: Dict[str, int] = {}
 
     # -- revisi: sinkronisasi waktu server (§4) -----------------------------
@@ -506,11 +703,37 @@ class BinanceClient:
         params = dict(params or {})
         url = self.base_url + path
 
+        # Immediate local hard-stop after a 429/418 response. This closes the
+        # race where another worker could start a request before TradingBot
+        # finishes switching the global state into BINANCE_PAUSED.
+        now_mono = time.monotonic()
+        if now_mono < self._blocked_until_mono:
+            err = self._blocked_error or RateLimitError(
+                "Binance REST locally blocked by governor", status_code=429, code=-1003
+            )
+            raise RateLimitError(
+                str(err),
+                status_code=err.status_code or 429,
+                retry_after=max(0.0, self._blocked_until_mono - now_mono),
+                banned_until_ms=err.banned_until_ms,
+                code=err.code,
+            )
+
         is_order_request = (
             path == "/fapi/v1/order"
             or path == "/fapi/v1/allOpenOrders"
             or path == "/fapi/v1/batchOrders"
         )
+        if self._used_weight_1m >= 2200:
+            raise RateLimitError(
+                f"Binance REST governor pre-block: used_weight_1m={self._used_weight_1m}",
+                status_code=429, code=-1003
+            )
+        if is_order_request and (self._used_order_10s >= int(self._order_limit_10s * 0.80) or self._used_order_1m >= int(self._order_limit_1m * 0.90)):
+            raise RateLimitError(
+                f"Binance order governor pre-block: 10s={self._used_order_10s}/{self._order_limit_10s}, 1m={self._used_order_1m}/{self._order_limit_1m}",
+                status_code=429, code=-1015
+            )
         with self._request_gate_lock:
             now_mono = time.monotonic()
             wait = max(
@@ -542,6 +765,13 @@ class BinanceClient:
                 self._used_weight_1m = int(raw_weight)
             except ValueError:
                 pass
+        for header_name, attr in (("X-MBX-ORDER-COUNT-10S", "_used_order_10s"), ("X-MBX-ORDER-COUNT-1M", "_used_order_1m")):
+            raw = resp.headers.get(header_name)
+            if raw:
+                try:
+                    setattr(self, attr, int(raw))
+                except ValueError:
+                    pass
 
         if resp.status_code in (429, 418):
             retry_after = None
@@ -564,13 +794,23 @@ class BinanceClient:
             match = re.search(r"banned until (\d+)", msg or "", re.I)
             if match:
                 banned_until_ms = int(match.group(1))
-            raise RateLimitError(
+            err = RateLimitError(
                 f"Binance rate limit (HTTP {resp.status_code}): {msg}",
                 status_code=resp.status_code,
                 retry_after=retry_after,
                 banned_until_ms=banned_until_ms,
                 code=code,
             )
+            now_epoch = time.time()
+            if banned_until_ms:
+                block_seconds = max(1.0, banned_until_ms / 1000.0 - now_epoch)
+            elif retry_after is not None:
+                block_seconds = max(1.0, retry_after)
+            else:
+                block_seconds = 10.0 if resp.status_code == 429 else 60.0
+            self._blocked_until_mono = max(self._blocked_until_mono, time.monotonic() + block_seconds)
+            self._blocked_error = err
+            raise err
 
         try:
             data = resp.json()
@@ -581,11 +821,15 @@ class BinanceClient:
             code = data["code"]
             msg = data.get("msg")
             if code in (-1003, -1015):
-                raise RateLimitError(
+                err = RateLimitError(
                     f"Binance rate limit code {code}: {msg}",
                     status_code=resp.status_code,
                     code=code,
                 )
+                block_seconds = 10.0 if code == -1015 else 5.0
+                self._blocked_until_mono = max(self._blocked_until_mono, time.monotonic() + block_seconds)
+                self._blocked_error = err
+                raise err
             if code == -1021 and signed and _retry_on_time_drift:
                 logger.warning("Binance -1021 (timestamp drift) — resync & retry sekali: %s", msg)
                 self.sync_server_time()
@@ -1223,6 +1467,13 @@ class TradingBot:
         self.binance = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret)
         self.telegram = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id)
         self.ws = BybitWebSocket(on_tick=self._on_tick, on_kline=self._on_kline)
+        self.binance_ws = BinanceUserDataStream(
+            cfg.binance_api_key,
+            self._on_binance_user_event,
+            self.binance._request,
+            lambda: self.state.mode == "REAL" and not self.state.binance_paused,
+            self._enter_binance_pause,
+        )
 
         self._candle_cache: Dict[str, List[Dict[str, float]]] = {}
         # cache harga realtime dari WebSocket untuk log Telegram
@@ -1282,6 +1533,8 @@ class TradingBot:
         logger.info("Bot started. Server IP: %s", ip)
 
         self.ws.start()
+        if self.state.mode == "REAL":
+            self.binance_ws.start()
         for pos in self.state.snapshot_positions():
             if pos.get("status") in ("PENDING", "FILLED", "PROTECTED", "TRAILING"):
                 self.ws.subscribe(pos["pair"])
@@ -1340,6 +1593,8 @@ class TradingBot:
                 self._queue_binance_protection(symbol)
             elif status in ("PROTECTED", "TRAILING") and not ids.get("sl"):
                 self._queue_binance_protection(symbol)
+            if pos.get("_binance_cleanup_pending"):
+                self._queue_binance_protection(symbol)
             if pos.get("_pending_trail_sl") is not None:
                 self._trail_queue.put(symbol)
 
@@ -1347,6 +1602,7 @@ class TradingBot:
         self._stop.set()
         self.telegram.send("🛑 BOT STOP\n\nStatus: OFFLINE", "BOT_STOP")
         self.ws.stop()
+        self.binance_ws.stop()
         self.state.save_checkpoint()
         self.learn_engine.save_checkpoint()
         self.telegram.stop()
@@ -1354,6 +1610,176 @@ class TradingBot:
     # -------------------------------------------------------------------
     # WebSocket callbacks (Worker 2)
     # -------------------------------------------------------------------
+    def _on_binance_user_event(self, data: Dict[str, Any]) -> None:
+        """Authoritative REAL-mode order/position events from Binance WS.
+
+        This callback intentionally performs NO Binance REST request. Therefore
+        a 418/429 REST ban cannot stop fill/exit detection.
+        """
+        event = str(data.get("e", ""))
+        event_ts = float(data.get("E") or data.get("T") or time.time() * 1000)
+        if event == "listenKeyExpired":
+            self.binance_ws.invalidate_listen_key()
+            logger.error("[GLOBAL] [BINANCE] USERDATA LISTENKEY EXPIRED")
+            self.telegram.send("⚠️ Binance User Data WS expired — akan reconnect setelah stream tersedia.", "ERROR")
+            return
+        if event == "ACCOUNT_UPDATE":
+            account = data.get("a") or {}
+            for bal in account.get("B") or []:
+                if str(bal.get("a") or "") == "USDT":
+                    try:
+                        wallet_balance = float(bal.get("wb") or 0.0)
+                        self.state.current_balance = wallet_balance
+                        if self.state.highest_balance is None:
+                            self.state.highest_balance = wallet_balance
+                        else:
+                            self.state.highest_balance = max(self.state.highest_balance, wallet_balance)
+                        if self.state.autostop_pct is not None and self.state.highest_balance > 0 and self.state.auto:
+                            dd = (self.state.highest_balance - wallet_balance) / self.state.highest_balance * 100.0
+                            if dd >= self.state.autostop_pct:
+                                self.state.auto = False
+                                self.telegram.send(
+                                    f"🛑 AUTOSTOP TERPICU\nDrawdown: {dd:.2f}% >= batas {self.state.autostop_pct}%\nAUTO = OFF\nSource: Binance WS",
+                                    "AUTOSTOP",
+                                )
+                    except (TypeError, ValueError):
+                        pass
+            for item in account.get("P") or []:
+                symbol = str(item.get("s") or "")
+                if not symbol:
+                    continue
+                try:
+                    amt = float(item.get("pa") or 0.0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                pos = self.state.positions.get(symbol)
+                if pos is None:
+                    continue
+                pos["binance_position_amt"] = amt
+                pos["binance_entry_price"] = float(item.get("ep") or pos.get("fill_price") or pos.get("entry") or 0.0)
+                pos["binance_unrealized_pnl"] = float(item.get("up") or 0.0)
+                pending_outcome = pos.get("_pending_real_close_outcome")
+                if pending_outcome and abs(amt) <= 0:
+                    self._finalize_real_close_from_user_event(symbol, pos, pending_outcome,
+                                                              float(pos.get("_pending_real_close_price") or pos.get("fill_price") or pos.get("entry") or 0.0),
+                                                              float(pos.get("_pending_real_close_time") or event_ts))
+            return
+
+        if event != "ORDER_TRADE_UPDATE":
+            return
+        order = data.get("o") or {}
+        symbol = str(order.get("s") or "")
+        if not symbol:
+            return
+        client_id = str(order.get("c") or "")
+        order_id = order.get("i")
+        status = str(order.get("X") or "")
+        exec_type = str(order.get("x") or "")
+        order_type = str(order.get("o") or "")
+        avg_price = float(order.get("ap") or order.get("L") or 0.0)
+        cumulative_qty = float(order.get("z") or 0.0)
+        pos = self.state.positions.get(symbol)
+        if not pos:
+            return
+
+        ids = pos.setdefault("binance_order_ids", {})
+        role = None
+        priority_keys = ["entry", "tp", "trail", "sl"]
+        for k in priority_keys:
+            v = ids.get(k)
+            if v is not None and str(v) == str(order_id):
+                role = k
+                break
+        if role is None:
+            if client_id and client_id == str(pos.get("binance_entry_client_order_id") or ""):
+                role = "entry"
+        if role is None:
+            # Exit orders may arrive after restart. Match known stop/tp ids by string only.
+            return
+
+        if role == "entry":
+            if status in ("PARTIALLY_FILLED", "FILLED") and cumulative_qty > 0:
+                pos["real_filled_qty"] = cumulative_qty
+                pos["fill_price"] = avg_price or pos.get("fill_price") or pos.get("entry")
+                pos["real_fill_confirmed"] = True
+                pos["binance_entry_status"] = status
+                pos["binance_entry_exec_type"] = exec_type
+                if pos.get("status") in ("BINANCE_WAITING", "PENDING"):
+                    event_id = f"{symbol}:FILLED_WS:{pos['created_at']}:{status}:{cumulative_qty}"
+                    if self.state.transition(
+                        symbol, "FILLED", event_id,
+                        fill_time=event_ts,
+                        fill_price=pos["fill_price"],
+                        real_fill_confirmed=True,
+                    ):
+                        with self._shadow_lock:
+                            self._shadow_candidates.pop(symbol, None)
+                        self.telegram.send(
+                            f"✅ FILLED — {symbol}\nEntry: {float(pos['fill_price']):.8f}\nArah: {pos['direction']}\nSource: Binance WS",
+                            "FILLED",
+                        )
+                        self._attach_real_protection(symbol, pos)
+                elif pos.get("status") in ("PROTECTED", "TRAILING"):
+                    # Additional fill quantity: protection must be reconciled later.
+                    self._queue_binance_protection(symbol)
+                return
+            if status in ("CANCELED", "EXPIRED", "EXPIRED_IN_MATCH") and pos.get("status") == "PENDING":
+                self.state.transition(symbol, "CANCELLED", f"{symbol}:ENTRY_CANCELLED_WS:{pos['created_at']}:{status}", close_reason=f"BINANCE_{status}")
+                self.state.remove_terminal(symbol)
+                self.ws.unsubscribe(symbol)
+                self.telegram.send(f"⚠️ ENTRY {status} — {symbol}\nBinance membatalkan order.", "WARNING")
+            return
+
+        if role in ("sl", "tp", "trail") and status == "FILLED":
+            outcome = "TP" if role == "tp" else ("TRAIL" if role == "trail" else "INITIAL_SL")
+            exit_price = avg_price or float(order.get("L") or pos.get("sl") or pos.get("tp") or pos.get("entry") or 0.0)
+            pos["_pending_real_close_outcome"] = outcome
+            pos["_pending_real_close_price"] = exit_price
+            pos["_pending_real_close_time"] = event_ts
+            pos["binance_exit_order_id"] = order_id
+            logger.info("[GLOBAL] [BINANCE] %s EXIT FILLED — %s price=%.8f", symbol, outcome, exit_price)
+            # ACCOUNT_UPDATE will confirm flat; if it has already arrived, finalize immediately.
+            if abs(float(pos.get("binance_position_amt", 0.0) or 0.0)) <= 0:
+                self._finalize_real_close_from_user_event(symbol, pos, outcome, exit_price, event_ts)
+
+    def _finalize_real_close_from_user_event(self, symbol: str, pos: Dict[str, Any], outcome: str, price: float, ts_ms: float) -> None:
+        if pos.get("status") not in ("FILLED", "PROTECTED", "TRAILING"):
+            return
+        event_id = f"{symbol}:CLOSED_WS:{outcome}:{pos['created_at']}"
+        risk = abs(float(pos["entry"]) - float(pos.get("initial_sl", pos["sl"]))) or 1e-9
+        pnl_r = (price - pos["entry"]) / risk if pos["direction"] == "BUY" else (pos["entry"] - price) / risk
+        pnl_pct = ((price - pos["entry"]) / pos["entry"] * 100) if pos["direction"] == "BUY" else ((pos["entry"] - price) / pos["entry"] * 100)
+        applied = self.state.transition(
+            symbol, "CLOSED", event_id,
+            close_price=price, close_time=ts_ms, close_reason=outcome,
+            pnl_pct=pnl_pct, pnl_r=pnl_r,
+        )
+        if not applied:
+            return
+        self.learn_engine.record_trade_outcome(pos, outcome, {
+            "pnl_pct": pnl_pct, "pnl_r": pnl_r, "close_time": ts_ms, "trail_count": pos.get("trail_count", 0),
+        })
+        self.state.ban(symbol, outcome, 24 * 3600)
+        self.telegram.send(
+            f"{'🟢' if pnl_pct >= 0 else '🔴'} {outcome} {pnl_pct:+.2f}% — {symbol} | C{pos['confidence']:.0f}%\nSource: Binance WS",
+            outcome if outcome in IMPORTANT_EVENTS else "INFO",
+        )
+        pos.pop("_pending_real_close_outcome", None)
+        pos.pop("_pending_real_close_price", None)
+        pos.pop("_pending_real_close_time", None)
+        # Do not use REST while banned. Remaining protective orders are harmless close-only
+        # orders; cleanup is attempted later by the recovery queue/startup reconciliation.
+        if self.state.binance_paused:
+            pos["_binance_cleanup_pending"] = True
+        else:
+            try:
+                self._cleanup_real_symbol(symbol, pos, close_position=False)
+            except Exception as e:
+                pos["_binance_cleanup_pending"] = True
+                logger.warning("Post-close cleanup %s ditunda: %s", symbol, e)
+        self.state.remove_terminal(symbol)
+        self.ws.unsubscribe(symbol)
+
     def _on_kline(self, symbol: str, candle: Dict[str, float], confirm: bool) -> None:
         with self._candle_lock:
             buf = self._candle_cache.setdefault(symbol, [])
@@ -1421,25 +1847,10 @@ class TradingBot:
             return
 
         if self.state.mode == "REAL":
-            now = time.time()
-            if now - float(pos.get("last_binance_fill_check", 0.0) or 0.0) < 2.0:
-                return
-            pos["last_binance_fill_check"] = now
-            try:
-                confirmed = self.binance.get_position_risk(symbol)
-            except RateLimitError as e:
-                self._enter_binance_pause(e)
-                return
-            except ExchangeError as e:
-                logger.warning("Verifikasi fill Binance gagal %s: %s", symbol, e)
-                return
-            if not confirmed:
-                logger.warning("Harga Bybit menyentuh entry %s tetapi posisi Binance belum terisi", symbol)
-                return
-            fill_price = float(confirmed.get("entryPrice") or price)
-            event_id = f"{symbol}:FILLED:{pos['created_at']}"
-            if not self.state.transition(symbol, "FILLED", event_id, fill_time=ts, fill_price=fill_price, real_fill_confirmed=True):
-                return
+            # REAL fill is authoritative from Binance ORDER_TRADE_UPDATE.
+            # Do not poll positionRisk from the Bybit market tick path: that was
+            # the primary source of request amplification leading to 418 bans.
+            return
         else:
             event_id = f"{symbol}:FILLED:{pos['created_at']}"
             if not self.state.transition(symbol, "FILLED", event_id, fill_time=ts, fill_price=price, real_fill_confirmed=False):
@@ -1475,20 +1886,21 @@ class TradingBot:
 
             side_close = "SELL" if pos["direction"] == "BUY" else "BUY"
             ids = pos.setdefault("binance_order_ids", {})
+            protection_qty = Decimal(str(pos.get("real_filled_qty") or pos.get("qty") or "0"))
             if not ids.get("sl"):
                 filters = self.binance.get_symbol_filters(symbol)
                 prices = normalize_order_prices(pos, filters["tick_size"])
                 pos["entry"], pos["sl"], pos["tp"] = prices["entry"], prices["sl"], prices["tp"]
                 sl_order = self.binance.place_stop_market(
                     symbol, side_close, Decimal(str(pos["sl"])), pos["direction"],
-                    quantity=Decimal(str(pos["qty"]))
+                    quantity=protection_qty
                 )
                 ids["sl"] = sl_order.get("orderId")
                 time.sleep(1)
             if not ids.get("tp"):
                 tp_order = self.binance.place_take_profit_market(
                     symbol, side_close, Decimal(str(pos["tp"])), pos["direction"],
-                    quantity=Decimal(str(pos["qty"]))
+                    quantity=protection_qty
                 )
                 ids["tp"] = tp_order.get("orderId")
             self.state.transition(symbol, "PROTECTED", f"{symbol}:PROTECTED:{pos['created_at']}")
@@ -1585,6 +1997,10 @@ class TradingBot:
         hit_tp = (direction == "BUY" and price >= pos["tp"]) or (direction == "SELL" and price <= pos["tp"])
         hit_sl = (direction == "BUY" and price <= pos["sl"]) or (direction == "SELL" and price >= pos["sl"])
 
+        if self.state.mode == "REAL":
+            # Binance protective orders are authoritative. Bybit price is used only
+            # as monitoring/trailing context, never as a REAL close confirmation.
+            return
         if hit_tp:
             self._close_position(symbol, pos, "TP", price, ts)
         elif hit_sl:
@@ -1616,6 +2032,9 @@ class TradingBot:
             logger.warning("Balance refresh setelah %s gagal: %s", reason, e)
 
     def _close_position(self, symbol: str, pos: Dict[str, Any], outcome: str, price: float, ts: float) -> None:
+        if self.state.mode == "REAL":
+            # REAL exits are finalized from Binance ORDER_TRADE_UPDATE + ACCOUNT_UPDATE.
+            return
         if self.state.mode == "REAL":
             try:
                 self._cleanup_real_symbol(symbol, pos, close_position=True)
@@ -1788,6 +2207,7 @@ class TradingBot:
             if not ok:
                 pos["_pending_trail_sl"] = new_sl
                 pos["_pending_trail_reason"] = reasons
+                logger.info("[GLOBAL] [BINANCE] TRAIL QUEUED — %s new_sl=%s", symbol, new_sl)
                 return
 
         pos.pop("_pending_trail_sl", None)
@@ -1832,6 +2252,7 @@ class TradingBot:
                     logger.error("SL baru %s terpasang tapi gagal hapus order lama %s: %s — REVIEW MANUAL", symbol, old_order_id, e)
                     self.telegram.send(f"⚠️ WARNING — order SL lama {symbol} gagal dihapus, cek manual!", "WARNING")
             pos["binance_order_ids"]["sl"] = new_order.get("orderId")
+            pos["binance_order_ids"]["trail"] = new_order.get("orderId")
             return True
         except RateLimitError as e:
             self._enter_binance_pause(e)
@@ -2377,6 +2798,7 @@ class TradingBot:
                 self.state.mode = "REAL"
                 self.state.current_balance = bal
                 self.state.highest_balance = bal
+                self.binance_ws.start()
                 self.learn_engine.set_strategy_state(self.strategy_engine.export_state())
                 self.telegram.send(f"🔴 MODE REAL TRADE AKTIF\n\nSaldo Binance: ${bal:.4f}\nAnchor autostop dibuat dari snapshot ini.", "INFO")
             except RateLimitError as e:
@@ -2796,6 +3218,64 @@ def run_selftest() -> bool:
     audit_report = le.audit(strat)
     check("learn.audit tidak crash", isinstance(audit_report, dict))
     check("learn.save_checkpoint sukses", le.save_checkpoint())
+
+    # Binance user-data WS regression: a FILLED entry must be accepted without
+    # a positionRisk REST probe. This is the key property during HTTP 418/429.
+    class _FakeTelegram:
+        def send(self, *args, **kwargs):
+            pass
+    class _FakeWS:
+        def unsubscribe(self, *args, **kwargs):
+            pass
+        def subscribe(self, *args, **kwargs):
+            pass
+    class _FakeBinanceWS:
+        def invalidate_listen_key(self):
+            pass
+    class _FakeLearn:
+        def record_trade_outcome(self, *args, **kwargs):
+            pass
+    bot = TradingBot.__new__(TradingBot)
+    bot.state = StateStore("/tmp/_selftest_ws_state.json")
+    bot.state.mode = "REAL"
+    bot.state.auto = False
+    setup_ws = {
+        "pair": "WSUSDT", "direction": "BUY", "entry": 100.0, "tp": 110.0, "sl": 95.0,
+        "confidence": 60.0, "reason": [], "components": {}, "setup_type": "x",
+        "regime": "SIDEWAYS", "session": "ASIA", "atr": 1.0, "timestamp": 0, "strategy_version": "1.00"
+    }
+    bot.state.add_pending(setup_ws, Decimal("0.05"), 1.0, status="PENDING")
+    pos = bot.state.positions["WSUSDT"]
+    pos["binance_order_ids"]["entry"] = 12345
+    pos["binance_entry_client_order_id"] = "SMCWSUSDT"
+    bot.telegram = _FakeTelegram()
+    bot.ws = _FakeWS()
+    bot.binance_ws = _FakeBinanceWS()
+    bot.learn_engine = _FakeLearn()
+    bot._shadow_lock = threading.RLock()
+    bot._shadow_candidates = {}
+    bot._attach_real_protection = lambda symbol, pos: True
+    bot._refresh_real_balance_after_event = lambda *args, **kwargs: None
+    bot._finalize_real_close_from_user_event = lambda *args, **kwargs: None
+    bot._on_binance_user_event({
+        "e": "ORDER_TRADE_UPDATE", "E": 1000,
+        "o": {"s": "WSUSDT", "c": "SMCWSUSDT", "i": 12345, "X": "FILLED",
+              "x": "TRADE", "o": "LIMIT", "ap": "100.1", "L": "100.1", "z": "0.05"}
+    })
+    check("REAL fill Binance WS tanpa REST", bot.state.positions["WSUSDT"]["status"] == "FILLED")
+    check("REAL fill confirmation tersimpan", bool(bot.state.positions["WSUSDT"].get("real_fill_confirmed")))
+
+    # Governor hard-stop regression: after a synthetic 418, a second request
+    # must be blocked locally without issuing another network request.
+    bc = BinanceClient("KEY", "SECRET")
+    bc._blocked_until_mono = time.monotonic() + 5
+    bc._blocked_error = RateLimitError("synthetic 418", status_code=418, retry_after=5.0, code=-1003)
+    try:
+        bc._request("GET", "/fapi/v2/balance", signed=True)
+        governor_blocked = False
+    except RateLimitError as e:
+        governor_blocked = True and e.status_code == 418
+    check("REST governor hard-stop after 418", governor_blocked)
 
     return ok
 
