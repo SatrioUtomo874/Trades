@@ -772,12 +772,19 @@ class TelegramNotifier:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
-    def start(self) -> None:
+    def start_sender(self) -> None:
+        """Start hanya pengirim pesan keluar. Tidak melakukan getUpdates."""
         if not self.token or not self.chat_id:
             logger.warning("Telegram belum dikonfigurasi (.env) — notifikasi nonaktif")
             return
+        if self._thread and self._thread.is_alive():
+            return
         self._thread = threading.Thread(target=self._sender_loop, name="TelegramSender", daemon=True)
         self._thread.start()
+
+    def start(self) -> None:
+        # Backward compatible: saat standalone hanya perlu sender.
+        self.start_sender()
 
     def stop(self) -> None:
         self._stop.set()
@@ -906,8 +913,9 @@ class TradingBot:
         # Jika dijalankan lewat try.py Render, launcher sudah menjadi pemilik Telegram getUpdates.
         # Hindari 409 Conflict karena dua polling berjalan bersamaan.
         launcher_mode = os.environ.get("RUN_WITH_LAUNCHER", "false").lower() == "true"
-        if not launcher_mode:
-            self.telegram.start()
+        # Saat dijalankan melalui try.py: polling Telegram milik launcher.
+        # Tetapi sender notifikasi tetap wajib hidup.
+        self.telegram.start_sender()
         self.telegram.send(
             f"🤖 BOT STARTED\n\nStatus: ONLINE\nMode: {self.state.mode}\nServer IP: {ip}\n\n"
             f"Ketik /auto untuk memulai scanning.",
