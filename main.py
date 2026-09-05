@@ -1752,6 +1752,32 @@ IMPORTANT_EVENTS = {
 }
 
 
+class TelegramErrorLogHandler(logging.Handler):
+    """Bridge ERROR log records to the bot Telegram queue.
+
+    Non-recursive: records emitted by the Telegram subsystem itself are ignored,
+    and delivery is queued rather than doing network I/O from the logging call.
+    """
+    def __init__(self, notifier_getter):
+        super().__init__(level=logging.ERROR)
+        self._notifier_getter = notifier_getter
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if record.name.startswith("telegram") or record.name.startswith("urllib3"):
+                return
+            notifier = self._notifier_getter()
+            if notifier is None:
+                return
+            symbol = getattr(record, "symbol", None) or getattr(record, "coin", None)
+            scope = f"[{str(symbol).upper()}] " if symbol else ""
+            text = self.format(record).replace("\n", " | ")
+            notifier.send(f"⚠️ ERROR LOG\n{scope}{text}", "ERROR")
+        except Exception:
+            # Logging must never be allowed to crash the trading worker.
+            pass
+
+
 class TelegramNotifier:
     def __init__(self, token: str, chat_id: str):
         self.token = token
@@ -1904,6 +1930,9 @@ class TradingBot:
         self.bybit = BybitClient(cfg.bybit_api_key, cfg.bybit_api_secret)
         self.binance = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret)
         self.telegram = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id)
+        self._telegram_error_handler = TelegramErrorLogHandler(lambda: getattr(self, "telegram", None))
+        self._telegram_error_handler.setFormatter(TerminalFormatter())
+        logging.getLogger().addHandler(self._telegram_error_handler)
         # Learn tidak melakukan network sendiri. Bila LearnEngine vNext
         # menyediakan notification sink, checkpoint/audit notification
         # dialirkan ke Telegram milik main.py. Tetap kompatibel dengan
@@ -2145,6 +2174,11 @@ class TradingBot:
                     f"⚠️ REAL SAFETY CHECKPOINT DIPERTAHANKAN\nAda {active} posisi/reserve aktif.\nRuntime tidak dihapus agar posisi Binance tidak menjadi orphan saat /try berikutnya.",
                     "WARNING",
                 )
+        try:
+            logging.getLogger().removeHandler(self._telegram_error_handler)
+            self._telegram_error_handler.close()
+        except Exception:
+            pass
         self.telegram.stop()
 
     # -------------------------------------------------------------------
@@ -2941,7 +2975,7 @@ class TradingBot:
             except RateLimitError as e:
                 self._enter_binance_pause(e)
             except Exception as e:  # pragma: no cover
-                logger.error("Worker1 scanner error: %s", e)
+                logger.error("Worker1 scanner error: %s: %s", type(e).__name__, e)
                 time.sleep(2)
 
     def _run_scan_cycle(self) -> None:

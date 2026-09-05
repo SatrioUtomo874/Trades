@@ -427,6 +427,12 @@ class Setup:
     strategy_version: str
     threshold_passed: bool = True
     reference_levels: Dict[str, Any] = field(default_factory=dict)
+    viability: str = "UNKNOWN"
+    quality_score: float = 0.0
+    execution_score: float = 0.0
+    context_score: float = 0.0
+    freshness_score: float = 0.0
+    expected_value_score: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -446,6 +452,12 @@ class Setup:
             "strategy_version": self.strategy_version,
             "threshold_passed": bool(self.threshold_passed),
             "reference_levels": self.reference_levels,
+            "viability": self.viability,
+            "quality_score": round(float(self.quality_score), 2),
+            "execution_score": round(float(self.execution_score), 2),
+            "context_score": round(float(self.context_score), 2),
+            "freshness_score": round(float(self.freshness_score), 2),
+            "expected_value_score": round(float(self.expected_value_score), 2),
         }
 
 
