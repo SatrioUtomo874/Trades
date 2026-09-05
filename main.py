@@ -1914,6 +1914,30 @@ def build_universe(
 # 8. BOT (orkestrasi worker & command handler)
 # =============================================================================
 
+def _preflight_local_contract() -> None:
+    """Fail early with a precise message if main.py is paired with an incompatible strategy.py/learn.py."""
+    import inspect
+    missing = []
+    required_strategy = ["Setup", "classify_volatility_regime", "validate_trailing_geometry"]
+    for name in required_strategy:
+        if not hasattr(strategy, name):
+            missing.append(f"strategy.{name}")
+    if hasattr(strategy, "Setup"):
+        try:
+            sig = inspect.signature(strategy.Setup)
+            params = sig.parameters
+            for name in ("viability", "quality_score", "execution_score", "context_score", "freshness_score", "expected_value_score"):
+                if name not in params and not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                    missing.append(f"strategy.Setup({name}=...)" )
+        except Exception as exc:
+            raise RuntimeError(f"Tidak bisa memeriksa kontrak strategy.Setup: {exc}") from exc
+    if missing:
+        raise RuntimeError(
+            "Kontrak main.py tidak cocok dengan strategy.py. Missing/unsupported: " + ", ".join(missing)
+            + ". Gunakan strategy.py dari paket revisi yang sama."
+        )
+
+
 class TradingBot:
     def __init__(self, cfg: Config):
         self.cfg = cfg
