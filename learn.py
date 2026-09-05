@@ -26,15 +26,16 @@ record_trade_outcome(), audit(), overall_stats().
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import os
 import shutil
-import subprocess
 import time
 from threading import RLock
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 try:
     import requests
@@ -136,6 +137,14 @@ class LearnEngine:
         self.ollama_api_key = ollama_api_key or os.environ.get("OLLAMA_API_KEY", "")
         self.git_enabled = bool(git_enabled)
         self.git_repo_dir = git_repo_dir or "."
+        self.github_token = os.environ.get("GITHUB_TOKEN", "")
+        self.github_repo = os.environ.get("REPO_NAME", "")
+        self.github_branch = os.environ.get("GITHUB_BRANCH", "main")
+        # Stable, visible GitHub mirror. /open deliberately never reads this path.
+        self.git_memory_path = os.path.join(self.git_repo_dir, "memory", "learn_autosave.json")
+        self.github_memory_path = "memory/learn_autosave.json"
+        self.github_memory_backup_path = "memory/learn_autosave.backup.json"
+        self._last_github_digest = ""
         self._lock = RLock()
 
         # A. raw event memory
@@ -166,8 +175,180 @@ class LearnEngine:
         self.last_audit_ts = 0.0
         self.last_autosave_ts = 0.0
         self._schema_version = SCHEMA_VERSION
+        # Learning can be paused safely for /save and /open.  The condition is
+        # deliberately local: it never touches trading state or exchange APIs.
+        self._learning_paused = False
+        self._active_operation = 0
 
         os.makedirs(os.path.dirname(self.checkpoint_path) or ".", exist_ok=True)
+
+    def _finite_check(self, value: Any, path: str = "root") -> None:
+        """Reject NaN/inf recursively before a learning snapshot is considered valid."""
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError(f"non-finite value at {path}")
+            return
+        if isinstance(value, dict):
+            for k, v in value.items():
+                self._finite_check(v, f"{path}.{k}")
+        elif isinstance(value, (list, tuple)):
+            for i, v in enumerate(value):
+                self._finite_check(v, f"{path}[{i}]")
+
+    def _snapshot_digest(self, data: Dict[str, Any]) -> str:
+        payload = json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def _validate_snapshot(self, data: Dict[str, Any]) -> Tuple[bool, str]:
+        try:
+            if not isinstance(data, dict):
+                return False, "snapshot bukan object JSON"
+            if _safe_int(data.get("schema_version"), -1) != SCHEMA_VERSION:
+                return False, f"schema version tidak cocok: {data.get('schema_version')} != {SCHEMA_VERSION}"
+            self._finite_check(data)
+            # Required containers must exist and have their expected basic types.
+            for key in ("trade_history", "scan_summaries", "candidate_history", "shadow_history", "raw_events", "threshold_history", "strategy_change_log", "decision_history"):
+                if not isinstance(data.get(key), list):
+                    return False, f"field {key} bukan list"
+            for key in ("feature_cache", "calibration_cache", "frequency_cache", "strategy_state"):
+                if not isinstance(data.get(key, {}), dict):
+                    return False, f"field {key} bukan dict"
+            digest = data.get("integrity", {}).get("sha256") if isinstance(data.get("integrity"), dict) else None
+            if digest:
+                body = dict(data)
+                body.pop("integrity", None)
+                if digest != self._snapshot_digest(body):
+                    return False, "integrity SHA256 tidak cocok"
+            return True, "OK"
+        except (TypeError, ValueError, OverflowError) as e:
+            return False, str(e)
+
+    def pause(self) -> None:
+        with self._lock:
+            self._learning_paused = True
+            logger.info("[GLOBAL] [LEARN] PAUSE — safe point requested")
+
+    def resume(self) -> None:
+        with self._lock:
+            self._learning_paused = False
+            logger.info("[GLOBAL] [LEARN] RESUME — brain active")
+
+    def is_paused(self) -> bool:
+        with self._lock:
+            return self._learning_paused
+
+    def _build_ready_snapshot_locked(self, source: str) -> Dict[str, Any]:
+        # Must be called while _lock is held and while no audit is in progress.
+        data = self._export_state()
+        data["snapshot_kind"] = "READY_BRAIN_MEMORY"
+        data["snapshot_source"] = source
+        data["snapshot_seq"] = sum(len(x) for x in (self.trade_history, self.candidate_history, self.shadow_history, self.raw_events))
+        self._finite_check(data)
+        body = dict(data)
+        body.pop("integrity", None)
+        data["integrity"] = {
+            "algorithm": "sha256",
+            "sha256": self._snapshot_digest(body),
+            "validated_at": time.time(),
+        }
+        return data
+
+    def _write_ready_file_locked(self, path: str, source: str) -> Tuple[bool, str]:
+        data = self._build_ready_snapshot_locked(source)
+        ok, reason = self._validate_snapshot(data)
+        if not ok:
+            return False, reason
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            return True, "OK"
+        except (OSError, TypeError, ValueError) as e:
+            try:
+                if os.path.exists(tmp): os.remove(tmp)
+            except OSError:
+                pass
+            return False, str(e)
+
+    def manual_save(self, ready_path: Optional[str] = None, backup_path: Optional[str] = None) -> Dict[str, Any]:
+        """Create a validated, atomic, human-invoked brain snapshot at a safe point."""
+        ready_path = ready_path or os.path.join(os.path.dirname(self.checkpoint_path) or ".", "learn_memory_ready.json")
+        backup_path = backup_path or (ready_path + ".backup")
+        with self._lock:
+            self._learning_paused = True
+            try:
+                logger.info("[GLOBAL] [LEARN] SAVE — reaching safe point")
+                if os.path.exists(ready_path):
+                    try:
+                        with open(ready_path, "r", encoding="utf-8") as f:
+                            old_data = json.load(f)
+                        old_ok, _old_reason = self._validate_snapshot(old_data)
+                        if old_ok:
+                            shutil.copyfile(ready_path, backup_path)
+                        else:
+                            logger.warning("[GLOBAL] [LEARN] SAVE — existing ready memory invalid; backup tidak ditimpa")
+                    except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+                        logger.warning("[GLOBAL] [LEARN] SAVE — existing ready memory unreadable; backup tidak ditimpa: %s", e)
+                ok, reason = self._write_ready_file_locked(ready_path, "MANUAL_SAVE")
+                if not ok:
+                    return {"ok": False, "reason": reason, "path": ready_path}
+                size = os.path.getsize(ready_path)
+                return {"ok": True, "reason": "validated+atomic", "path": ready_path, "bytes": size, "saved_at": time.time()}
+            finally:
+                self._learning_paused = False
+                logger.info("[GLOBAL] [LEARN] SAVE — complete; brain resumed")
+
+    def mirror_ready_to_git(self) -> bool:
+        """Optional explicit GitHub mirror of the latest validated local memory."""
+        if not self.git_enabled:
+            logger.info("[GLOBAL] [LEARN] GIT — disabled (GIT_AUTOSAVE=false)")
+            return False
+        ready = os.path.join(os.path.dirname(self.checkpoint_path) or ".", "learn_memory_ready.json")
+        if not os.path.exists(ready):
+            logger.warning("[GLOBAL] [LEARN] GIT — no validated ready memory to mirror")
+            return False
+        try:
+            self._git_commit_push(ready)
+            return True
+        except Exception:
+            return False
+
+    def open_ready_memory(self, ready_path: Optional[str] = None, backup_path: Optional[str] = None) -> Dict[str, Any]:
+        """Replace current Learn memory from the validated local /save snapshot.
+        GitHub is intentionally not consulted. The brain is paused during the swap.
+        """
+        ready_path = ready_path or os.path.join(os.path.dirname(self.checkpoint_path) or ".", "learn_memory_ready.json")
+        backup_path = backup_path or (ready_path + ".backup")
+        with self._lock:
+            self._learning_paused = True
+            logger.info("[GLOBAL] [LEARN] OPEN — brain paused")
+            try:
+                candidates = [(ready_path, "ready"), (backup_path, "backup")]
+                last_error = "memory tidak ditemukan"
+                for path, label in candidates:
+                    if not os.path.exists(path):
+                        continue
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        ok, reason = self._validate_snapshot(data)
+                        if not ok:
+                            last_error = f"{label}: {reason}"
+                            continue
+                        self._restore_state(data)
+                        self.last_audit_ts = 0.0
+                        self.last_autosave_ts = time.time()
+                        logger.info("[GLOBAL] [LEARN] OPEN — %s memory restored", label)
+                        return {"ok": True, "label": label, "path": path, "reason": "integrity+schema valid", "saved_at": data.get("saved_at"), "strategy_version": self.current_strategy_version}
+                    except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
+                        last_error = f"{label}: {e}"
+                return {"ok": False, "reason": last_error}
+            finally:
+                self._learning_paused = False
+                logger.info("[GLOBAL] [LEARN] OPEN — brain resumed")
 
     # ------------------------------------------------------------------
     # checkpoint / persistence
@@ -250,25 +431,100 @@ class LearnEngine:
 
     def autosave(self) -> None:
         try:
-            ok = self.save_checkpoint()
-            if ok and self.git_enabled:
-                self._git_commit_push()
+            with self._lock:
+                if self._learning_paused:
+                    logger.info("[GLOBAL] [LEARN] AUTOSAVE — deferred while paused")
+                    return
+                ok = self.save_checkpoint()
+                # Also maintain a stable local memory image. /open never reads GitHub.
+                ready = os.path.join(os.path.dirname(self.checkpoint_path) or ".", "learn_memory_ready.json")
+                backup = ready + ".backup"
+                if ok:
+                    if os.path.exists(ready):
+                        try:
+                            with open(ready, "r", encoding="utf-8") as f:
+                                old_data = json.load(f)
+                            old_ok, _old_reason = self._validate_snapshot(old_data)
+                            if old_ok:
+                                shutil.copyfile(ready, backup)
+                            else:
+                                logger.warning("[GLOBAL] [LEARN] AUTOSAVE — existing ready memory invalid; backup tidak ditimpa")
+                        except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+                            logger.warning("[GLOBAL] [LEARN] AUTOSAVE — existing ready memory unreadable; backup tidak ditimpa: %s", e)
+                    ready_ok, ready_reason = self._write_ready_file_locked(ready, "AUTO_SAVE")
+                    logger.info("[GLOBAL] [LEARN] AUTOSAVE — ready=%s reason=%s", ready_ok, ready_reason)
+                if ok and self.git_enabled:
+                    self._git_commit_push(ready)
         except Exception as e:  # pragma: no cover
             logger.error("learn.py: autosave non-fatal: %s", e)
 
-    def _git_commit_push(self) -> None:
-        """Git is convenience only. Failure is never allowed to affect trading."""
+    def _github_put_file(self, local_path: str, remote_path: str, commit_message: str) -> bool:
+        """Publish one validated snapshot through GitHub Contents API.
+        This works even when Render only has a tarball checkout and no .git dir.
+        """
+        if requests is None or not self.github_token or not self.github_repo:
+            logger.info("[GLOBAL] [LEARN] GIT — API mirror unavailable (token/repo missing)")
+            return False
         try:
-            checkpoint_abs = os.path.abspath(self.checkpoint_path)
-            repo = os.path.abspath(self.git_repo_dir)
-            rel = os.path.relpath(checkpoint_abs, repo)
-            subprocess.run(["git", "add", "--", rel], cwd=repo, check=False, capture_output=True, timeout=5)
-            subprocess.run(
-                ["git", "commit", "-m", f"autosave learn {time.strftime('%Y-%m-%d %H:%M:%S')}"],
-                cwd=repo, check=False, capture_output=True, timeout=5,
+            with open(local_path, "rb") as f:
+                content = f.read()
+            import base64
+            encoded_path = "/".join(quote(part, safe="") for part in remote_path.strip("/").split("/"))
+        except Exception as e:
+            logger.warning("[GLOBAL] [LEARN] GIT — read snapshot gagal: %s", e)
+            return False
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.github_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            base = f"https://api.github.com/repos/{self.github_repo}/contents/{encoded_path}"
+            get_resp = requests.get(base, headers=headers, params={"ref": self.github_branch}, timeout=15)
+            sha = None
+            if get_resp.status_code == 200:
+                payload = get_resp.json()
+                sha = payload.get("sha")
+            elif get_resp.status_code != 404:
+                logger.warning("[GLOBAL] [LEARN] GIT — lookup gagal HTTP %s", get_resp.status_code)
+                return False
+            put_payload = {
+                "message": commit_message,
+                "content": base64.b64encode(content).decode("ascii"),
+                "branch": self.github_branch,
+            }
+            if sha:
+                put_payload["sha"] = sha
+            put_resp = requests.put(base, headers=headers, json=put_payload, timeout=20)
+            if put_resp.status_code not in (200, 201):
+                logger.warning("[GLOBAL] [LEARN] GIT — upload gagal HTTP %s: %s", put_resp.status_code, put_resp.text[:300])
+                return False
+            return True
+        except Exception as e:
+            logger.warning("[GLOBAL] [LEARN] GIT — API mirror gagal: %s", e)
+            return False
+
+    def _git_commit_push(self, ready_path: Optional[str] = None) -> None:
+        """Publish stable memory to GitHub via Contents API; never affects trading."""
+        try:
+            source = os.path.abspath(ready_path or self.checkpoint_path)
+            if not os.path.exists(source):
+                logger.warning("[GLOBAL] [LEARN] GIT — source snapshot tidak ada")
+                return
+            import hashlib
+            digest = hashlib.sha256(open(source, "rb").read()).hexdigest()
+            if digest == self._last_github_digest:
+                logger.info("[GLOBAL] [LEARN] GIT — unchanged, push dilewati")
+                return
+            ok = self._github_put_file(
+                source,
+                self.github_memory_path,
+                f"autosave learn {time.strftime('%Y-%m-%d %H:%M:%S')}",
             )
-            subprocess.run(["git", "push"], cwd=repo, check=False, capture_output=True, timeout=15)
-        except Exception as e:  # pragma: no cover
+            if ok:
+                self._last_github_digest = digest
+                logger.info("[GLOBAL] [LEARN] GIT — memory mirror pushed: %s", self.github_memory_path)
+        except Exception as e:
             logger.warning("learn.py: git autosave gagal: %s", e)
 
     # ------------------------------------------------------------------
@@ -862,4 +1118,7 @@ class LearnEngine:
                 "frequency": dict(self.frequency_cache),
                 "pending_challenger": dict(self.pending_challenger) if isinstance(self.pending_challenger, dict) else None,
                 "last_audit": dict(self.last_audit_report),
+                "learning_paused": self._learning_paused,
+                "ready_memory_path": os.path.join(os.path.dirname(self.checkpoint_path) or ".", "learn_memory_ready.json"),
+                "ready_memory_exists": os.path.exists(os.path.join(os.path.dirname(self.checkpoint_path) or ".", "learn_memory_ready.json")),
             }
