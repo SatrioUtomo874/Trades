@@ -29,7 +29,7 @@ TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
 REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
 GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
-MAIN_FILE = (os.getenv("MAIN_FILE") or "main_final.py").strip()
+MAIN_FILE = (os.getenv("MAIN_FILE") or "main_final_safe_rest.py").strip()
 PORT = int(os.getenv("PORT", "10000"))
 TG_POLL_TIMEOUT = max(5, int(os.getenv("TG_POLL_TIMEOUT", "30")))
 TG_ERROR_BACKOFF_MAX = max(10, int(os.getenv("TG_ERROR_BACKOFF_MAX", "60")))
@@ -71,7 +71,7 @@ def index():
     return jsonify(
         {
             "ok": True,
-            "service": "SMCAutoTrade try-final.py launcher",
+            "service": "SMCAutoTrade local-balance launcher",
             "main_running": _MAIN_RUNNING,
             "main_file": MAIN_FILE,
             "github": REPO_NAME,
@@ -84,7 +84,7 @@ def healthz():
     return jsonify(
         {
             "ok": True,
-            "service": "SMCAutoTrade try-final.py launcher",
+            "service": "SMCAutoTrade local-balance launcher",
             "telegram_polling": not _STOP.is_set(),
             "main_running": _MAIN_RUNNING,
             "timestamp": time.time(),
