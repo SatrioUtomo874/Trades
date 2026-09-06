@@ -51,6 +51,8 @@ except ImportError:  # pragma: no cover - numpy should always be available
 logger = logging.getLogger("strategy")
 
 STRATEGY_NAME = "adaptive-smc-ict"
+EXECUTION_CONFIDENCE_FLOOR = 55.0
+EXECUTION_MIN_RR_FLOOR = 1.20
 
 # Market-context assets are analyzed for correlation/regime but are never trade candidates.
 TRADE_EXCLUDED_SYMBOLS = frozenset({"BTCUSDT"})
@@ -77,7 +79,7 @@ CONFIDENCE_WEIGHTS: Dict[str, float] = {
 assert abs(sum(CONFIDENCE_WEIGHTS.values()) - 100.0) < 1e-6
 
 DEFAULT_PARAMS: Dict[str, Any] = {
-    "ACTIVE_THRESHOLD": 0.0,       # % — dimulai rendah agar learn.py punya data (§10)
+    "ACTIVE_THRESHOLD": 65.0,      # % — execution threshold awal; Learn boleh adaptif tetapi tidak di bawah safety floor
     "swing_left": 2,
     "swing_right": 2,
     "equal_level_tol_atr": 0.15,   # toleransi "equal high/low" dalam satuan ATR
@@ -1564,7 +1566,9 @@ class StrategyVNext:
         self.last_diagnostics={}
 
     def get_active_threshold(self)->float:
-        return max(0.0,min(100.0,_vn_float(self.params.get("ACTIVE_THRESHOLD"),0.0)))
+        # Adaptive threshold may move, but execution must never drop below the hard safety floor.
+        raw = _vn_float(self.params.get("ACTIVE_THRESHOLD"), EXECUTION_CONFIDENCE_FLOOR)
+        return max(EXECUTION_CONFIDENCE_FLOOR, min(100.0, raw))
 
     def export_state(self)->Dict[str,Any]:
         return {"schema_version":STRATEGY_SCHEMA_VERSION,"strategy_name":STRATEGY_NAME,"version":self.version,"params":dict(self.params),"version_history":list(self.version_history)}
@@ -1574,6 +1578,8 @@ class StrategyVNext:
         if isinstance(state.get("params"),dict):
             self.params.update(state["params"])
             if isinstance(state["params"].get("CONFIDENCE_WEIGHTS"),dict): self.params["CONFIDENCE_WEIGHTS"]=dict(state["params"]["CONFIDENCE_WEIGHTS"])
+        # Migrate legacy checkpoints that allowed an execution threshold of 0.
+        self.params["ACTIVE_THRESHOLD"] = max(EXECUTION_CONFIDENCE_FLOOR, min(100.0, _vn_float(self.params.get("ACTIVE_THRESHOLD"), EXECUTION_CONFIDENCE_FLOOR)))
         if isinstance(state.get("version"),str): self.version=state["version"]
         if isinstance(state.get("version_history"),list) and state["version_history"]: self.version_history=list(state["version_history"])
 
@@ -1670,6 +1676,20 @@ class StrategyVNext:
         btc_info=vn_btc_alignment(symbol,direction,work,btc,p,regime); diagnostics["btc"]=btc_info
         sl=vn_build_sl(direction,entry,atr,impulse,swings,sweep,p); diagnostics["sl"]=sl
         tp=vn_build_tp(direction,entry,sl["risk"],atr,pools,swings,p,momentum_alignment,fvg_score); diagnostics["tp"]=tp
+        # HARD EXECUTION GATES: bad RR/EV is never a tradable setup.
+        hard_rejects=[]
+        rr_value=_vn_float(tp.get("rr"),0.0)
+        expected_r=_vn_float(tp.get("expected_r"),0.0)
+        if rr_value < max(EXECUTION_MIN_RR_FLOOR, _vn_float(p.get("min_rr"), EXECUTION_MIN_RR_FLOOR)):
+            hard_rejects.append(f"RR_BELOW_MIN:{rr_value:.2f}")
+        if expected_r <= 0.0:
+            hard_rejects.append(f"NEGATIVE_EXPECTED_R:{expected_r:.3f}")
+        if entry_info.get("stale"):
+            hard_rejects.append("STALE_ENTRY")
+        diagnostics["hard_gates"]={"passed":not hard_rejects,"rejects":hard_rejects,"min_rr":max(EXECUTION_MIN_RR_FLOOR,_vn_float(p.get("min_rr"),EXECUTION_MIN_RR_FLOOR))}
+        if hard_rejects:
+            diagnostics["status"]="LOW_EXPECTED_VALUE" if any(x.startswith(("RR_BELOW_MIN","NEGATIVE_EXPECTED_R")) for x in hard_rejects) else "STALE_SETUP"
+            diagnostics["reasons"].extend(hard_rejects)
         geom_ok,geom_reason=validate_geometry(direction,entry,sl["sl"],tp["tp"],atr_val=atr); diagnostics["geometry"]={"valid":geom_ok,"reason":geom_reason}
         if not geom_ok:
             diagnostics["status"]="INVALID_GEOMETRY"; diagnostics["reasons"].append(geom_reason); self.last_diagnostics=diagnostics; return None,diagnostics
@@ -1691,7 +1711,7 @@ class StrategyVNext:
         diagnostics["market"]={"regime":regime,"session":session,"breadth":dict(market_context or {}),"regime_ok":regime_ok}
         diagnostics["score"]={**score,"components":components}
         diagnostics["status"]=status
-        threshold=self.get_active_threshold(); passed=score["final"]>=threshold
+        threshold=self.get_active_threshold(); passed=bool(not hard_rejects and score["final"]>=threshold)
         diagnostics["threshold"]={"active":threshold,"passed":passed}
         reasons=[f"{event.get('bos') or event.get('choch')} {direction}",f"trend slope={'aligned' if trend_dir==direction else 'opposed'}",f"entry OTE={_vn_float(p.get('entry_retracement_fib'),0.618)*100:.0f}%",f"RR={tp['rr']:.2f}",f"expectedR={tp['expected_r']:.2f}",f"viability={status}"]
         if sweep: reasons.append(f"sweep={sweep['type']}")
@@ -2660,7 +2680,7 @@ __all__ = [
     "STRATEGY_NAME", "FINAL_BRAIN_VERSION", "BRAIN_INTERFACE_VERSION", "FULL_LEARNING_SCHEMA",
     "MACHINE_LEARNING_SCHEMA", "BRAIN_CHECKPOINT_SCHEMA", "MIN_RR", "MAX_RR",
     "TRAIL_R_LADDER", "STRUCT_TRAIL_LB", "STRUCT_TRAIL_BUF_PCT", "STRUCT_TRAIL_LOOKBACK",
-    "FIB_EXT_1", "FIB_EXT_2", "CONFIDENCE_WEIGHTS", "DEFAULT_PARAMS", "Setup", "Strategy",
+    "FIB_EXT_1", "FIB_EXT_2", "EXECUTION_CONFIDENCE_FLOOR", "EXECUTION_MIN_RR_FLOOR", "CONFIDENCE_WEIGHTS", "DEFAULT_PARAMS", "Setup", "Strategy",
     "StrategyVNext", "new_default_strategy", "validate_candles", "validate_geometry",
     "classify_session", "classify_regime", "classify_volatility_regime", "true_range", "atr_series",
     "ema", "rsi", "atr_fn", "build_df", "linreg_slope", "pct_returns", "correlation",
