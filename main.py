@@ -3475,6 +3475,20 @@ class TradingBot:
             )
         elif action == "REJECTED":
             logger.info("Audit: perubahan diusulkan tapi ditolak validasi — %s", report.get("reason"))
+        elif action == "BOTTLENECK_RELAXED":
+            # BUG FIX: sebelumnya aksi auto-relax bottleneck (mis. gate wajib
+            # liquidity sweep/killzone yang kelewat ketat sampai 0 entry) bisa
+            # jalan diam-diam tanpa notifikasi — user gak akan tahu bot baru
+            # saja mengubah aturan entry-nya sendiri.
+            relax = report.get("bottleneck_relax") or {}
+            proposal = relax.get("proposal", {})
+            evidence = relax.get("evidence", {})
+            self.telegram.send(
+                f"🧠 BOTTLENECK AUTO-RELAX — {evidence.get('type','?')}\n"
+                f"Perubahan: {proposal}\n"
+                f"Alasan: {report.get('reason','')}",
+                "INFO",
+            )
 
         freq = report.get("frequency") or {}
         status = freq.get("status")
