@@ -1566,6 +1566,14 @@ class StateStore:
         self.strategy_state: Dict[str, Any] = {}
         self.closed_trades: List[Dict[str, Any]] = []
         self.processed_events: set = set()  # idempotency guard: f"{symbol}:{event}:{ts}"
+        # BUG FIX (weight reduction): hedge-mode akun jarang berubah, tapi
+        # BinanceClient.is_hedge_mode() dulu selalu GET ulang /positionSide/dual
+        # (endpoint ini masuk daftar is_order_request -> kena gate SOFT_STOP
+        # 1500 juga) setiap kali proses baru dimulai. Saat sering /try ulang
+        # buat testing, ini nambah 1 request order-type yang gak perlu tiap
+        # restart, persis di titik paling rawan (awal sesi, weight IP masih
+        # tinggi dari trafik lain). Sekarang di-cache lintas restart.
+        self.hedge_mode_cached: Optional[bool] = None
 
     def symbol_lock(self, symbol: str) -> threading.Lock:
         with self._lock:
@@ -1709,6 +1717,7 @@ class StateStore:
                 "binance_pause_ts": self.binance_pause_ts,
                 "binance_pause_until": self.binance_pause_until,
                 "binance_pause_reason": self.binance_pause_reason,
+                "hedge_mode_cached": self.hedge_mode_cached,
                 "saved_at": time.time(),
             }
 
@@ -1742,6 +1751,8 @@ class StateStore:
             self.binance_pause_ts = data.get("binance_pause_ts")
             self.binance_pause_until = data.get("binance_pause_until")
             self.binance_pause_reason = data.get("binance_pause_reason", "")
+            hedge_cached = data.get("hedge_mode_cached")
+            self.hedge_mode_cached = bool(hedge_cached) if hedge_cached is not None else None
             if self.binance_paused and self.binance_pause_until is not None and self.binance_pause_until <= time.time():
                 self.binance_paused = False
 
@@ -2090,10 +2101,21 @@ class TradingBot:
             self.learn_engine.set_strategy_state(self.strategy_engine.export_state())
         # Jika restart terjadi saat Binance masih pause, pertahankan cooldown yang tersimpan.
         if self.state.mode == "REAL" and not self.state.binance_paused:
+            # BUG FIX (weight reduction): pakai cache hedge-mode lintas restart
+            # supaya is_hedge_mode() tidak GET ulang /positionSide/dual (endpoint
+            # order-type, kena gate SOFT_STOP) di setiap /try baru. Hanya fetch
+            # sekali kalau memang belum pernah tersimpan.
+            if self.state.hedge_mode_cached is not None:
+                self.binance._hedge_mode = self.state.hedge_mode_cached
             try:
                 # Reconcile positions/orders only. Balance REST is intentionally NOT
                 # polled on startup; the saved local balance model is reused.
                 self._reconcile_real_account_on_startup()
+                if self.state.hedge_mode_cached is None:
+                    try:
+                        self.state.hedge_mode_cached = self.binance.is_hedge_mode()
+                    except Exception:
+                        pass
             except RateLimitError as e:
                 self._enter_binance_pause(e)
             except Exception as e:
@@ -2125,10 +2147,26 @@ class TradingBot:
             )
         else:
             binance_status = "🟢 READY"
+        # DIAGNOSTIC (bug investigation): tampilkan used_weight_1m APA ADANYA
+        # persis setelah reconciliation startup selesai — sebelum bot ini
+        # sendiri sempat melakukan request order-type apapun. Reconciliation
+        # di atas hanya berbobot ~45 (get_all_position_risk=5 + get_all_open_orders=40).
+        # Kalau angka ini SUDAH tinggi (>1000) di titik ini, itu BUKAN berasal
+        # dari kode bot ini — artinya IP keluar (outbound) sedang berbagi kuota
+        # weight dengan trafik lain (mis. shared IP di hosting). Static/dedicated
+        # outbound IP adalah satu-satunya perbaikan untuk kasus itu; tidak ada
+        # perubahan di main.py yang bisa menurunkan angka yang datang dari luar.
+        weight_probe = ""
+        if self.state.mode == "REAL":
+            try:
+                w1m = self.binance._used_weight_1m
+                weight_probe = f"\nused_weight_1m saat startup (sebelum order apapun): {w1m}"
+            except Exception:
+                pass
         self.telegram.send(
             f"🤖 BOT STARTED — NEW MAIN SESSION\n\n"
             f"Status: ONLINE\nMode: {self.state.mode}\nServer IP: {ip}\n"
-            f"Binance REST: {binance_status}\n\n"
+            f"Binance REST: {binance_status}{weight_probe}\n\n"
             "Ketik /healthz untuk status lengkap.\n"
             "Ketik /auto untuk memulai scanning.",
             "BOT_START",
