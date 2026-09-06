@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import html
 import importlib.util
 import logging
@@ -312,7 +313,26 @@ async def start_main(chat_id: int) -> str:
         if _MAIN_RUNNING and _MAIN_MODULE is not None:
             return f"▶️ <b>{MAIN_FILE}</b> sudah berjalan."
 
+        # /try always starts a fresh module instance. Never reuse the previous
+        # imported main module, and never let an old tracked runtime checkpoint
+        # resurrect /trade or /order state.
+        stale = _MAIN_MODULE
+        if stale is not None:
+            old_name = getattr(stale, "__name__", None)
+            _MAIN_MODULE = None
+            if old_name:
+                sys.modules.pop(old_name, None)
+            gc.collect()
+            log.info("[TRY] stale main module discarded: %s", old_name or "<unknown>")
+
         total, changed = await asyncio.to_thread(sync_repository)
+        runtime_dir = BASE_DIR / "state"
+        for runtime_name in ("main_checkpoint.json", "main_checkpoint.json.backup"):
+            runtime_path = runtime_dir / runtime_name
+            try:
+                runtime_path.unlink(missing_ok=True)
+            except OSError as exc:
+                log.warning("[TRY] failed to remove stale runtime checkpoint %s: %s", runtime_path, exc)
         path = BASE_DIR / MAIN_FILE
         module = _load_module_from_path(path)
 
@@ -370,9 +390,14 @@ async def stop_main() -> str:
         except Exception:
             log.exception("[END] main.py cleanup gagal")
         finally:
+            old_module_name = getattr(module, "__name__", None)
             _MAIN_MODULE = None
+            if old_module_name:
+                sys.modules.pop(old_module_name, None)
+            gc.collect()
+            log.info("[END] main module unloaded: %s", old_module_name or "<unknown>")
 
-        return f"⏹️ <b>{MAIN_FILE} dihentikan.</b>\nLauncher tetap hidup."
+        return f"⏹️ <b>{MAIN_FILE}</b> dihentikan dan di-unload.\nRuntime main dibersihkan; <code>/try</code> akan membuat session baru."
 
 
 async def forward_update(update: dict) -> None:

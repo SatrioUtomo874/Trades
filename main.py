@@ -31,6 +31,7 @@ server sudah masuk whitelist key tersebut (kalau key diberi IP restriction).
 from __future__ import annotations
 
 import argparse
+import copy
 import asyncio
 import hashlib
 import hmac
@@ -296,8 +297,10 @@ BINANCE_WEIGHT_RECOVERY_MARGIN = 300
 BINANCE_DEFAULT_429_COOLDOWN = 75.0
 # Trade-related REST calls are deliberately much slower than ordinary REST.
 # This spacing covers leverage/order/cancel as one lane, not just POST /order.
-BINANCE_ORDER_INTERVAL = 6.0
-BINANCE_REQUEST_INTERVAL = 1.5
+# Extremely conservative pacing: keep the IP well below Binance rolling limits.
+# All REST calls, including order/protection/listen-key calls, share this lane.
+BINANCE_ORDER_INTERVAL = 10.0
+BINANCE_REQUEST_INTERVAL = 2.5
 
 
 class SecretRedactingFilter(logging.Filter):
@@ -1349,6 +1352,27 @@ class BinanceClient:
         self._exchange_info_ts = time.time()
         return symbols
 
+    def get_trading_symbols(self, force: bool = False) -> set:
+        """Return only Binance USDT perpetual symbols actually tradeable now.
+
+        This is intentionally cached because exchangeInfo is used to validate the
+        shared Binance/Bybit scan universe, not once per candidate.
+        """
+        info = self.exchange_info(force=force)
+        symbols = set()
+        for symbol, row in info.items():
+            if str(row.get("status", "")).upper() != "TRADING":
+                continue
+            if str(row.get("quoteAsset", "")).upper() != "USDT":
+                continue
+            if str(row.get("contractType", "")).upper() != "PERPETUAL":
+                continue
+            if str(symbol).upper() == "BTCUSDT":
+                # BTC remains a context-only analysis asset; never a trade asset.
+                continue
+            symbols.add(str(symbol).upper())
+        return symbols
+
     def get_symbol_filters(self, symbol: str) -> Dict[str, Any]:
         # Binance exchangeInfo is intentionally lazy: scanning does not call it.
         # It is fetched only when an actual execution candidate needs exchange filters.
@@ -1772,6 +1796,32 @@ class StateStore:
                 except OSError as e:
                     logger.warning("Gagal menghapus runtime checkpoint %s: %s", path, e)
 
+    def reset_runtime_for_new_session(self) -> None:
+        """Erase local trading/runtime display state while preserving learning memory."""
+        with self._lock:
+            self.mode = "SIMULASI"
+            self.auto = False
+            self.binance_paused = False
+            self.binance_pause_ts = None
+            self.binance_pause_until = None
+            self.binance_pause_reason = ""
+            self.positions.clear()
+            self.scanned_coins.clear()
+            self.scan_history.clear()
+            self.bans.clear()
+            self.closed_trades.clear()
+            self.processed_events.clear()
+            self.current_balance = None
+            self.highest_balance = None
+            self.real_balance_snapshot = None
+            self.real_localized_pnl = 0.0
+            self.real_balance_adjustment = 0.0
+            self.real_balance_snapshot_ts = 0.0
+            self.real_last_balance_source = "NONE"
+            self.sim_balance = 10.0
+            self.sim_balance_anchor = 10.0
+            self.strategy_state = copy.deepcopy(self.strategy_state) if isinstance(self.strategy_state, dict) else {}
+
     def load_checkpoint(self) -> str:
         for path, label in ((self.checkpoint_path, "primary"), (self.backup_path, "backup")):
             if not os.path.exists(path):
@@ -1928,28 +1978,27 @@ def get_server_ip() -> str:
 def build_universe(
     bybit: BybitClient, binance_symbols: Optional[set], state: StateStore, top_n: int = 50
 ) -> List[str]:
-    """Build scan universe from Bybit only. Binance symbols are optional compatibility input.
+    """Build the actual tradable universe from Binance ∩ Bybit, ranked by Bybit volume.
 
-    Scanning must not require Binance REST. Binance contract filters are resolved only
-    when a real candidate is actually about to be submitted.
+    BTCUSDT is *never* returned because BTC is a market-context / correlation asset,
+    not a trade asset. Any missing/unsupported symbol therefore cannot reach order
+    validation and cannot produce the XOMUSDT-style exchangeInfo rejection.
     """
     ranked = bybit.get_ranked_symbols()
-    if binance_symbols is None:
-        ranked_symbols = [s for s, _ in ranked]
-        available_symbols = {s for s, _ in ranked}
-    else:
-        ranked_symbols = [s for s, _ in ranked if s in binance_symbols]
-        available_symbols = set(binance_symbols)
+    bybit_symbols = {str(s).upper() for s, _ in ranked if str(s).upper().endswith("USDT")}
+    bn_symbols = {str(s).upper() for s in (binance_symbols or set()) if str(s).upper().endswith("USDT")}
+    shared = bybit_symbols & bn_symbols
 
-    excluded = set(state.positions.keys()) | set(state.bans.keys())
+    excluded = {str(s).upper() for s in state.positions.keys()}
+    excluded |= {str(s).upper() for s in state.bans.keys()}
+    excluded.add("BTCUSDT")
+
     universe: List[str] = []
-    if "BTCUSDT" in available_symbols:
-        universe.append("BTCUSDT")  # BTC context remains first without Binance REST.
-
-    for sym in ranked_symbols:
+    for sym, _turnover in ranked:
+        sym = str(sym).upper()
         if len(universe) >= top_n:
             break
-        if sym in excluded or sym in universe:
+        if sym not in shared or sym in excluded or sym in universe:
             continue
         universe.append(sym)
     return universe[:top_n]
@@ -2048,6 +2097,9 @@ class TradingBot:
         self._last_freq_alert_ts: float = 0.0
         self._shadow_candidates: Dict[str, Dict[str, Any]] = {}
         self._shadow_lock = threading.Lock()
+        self._universe_lock = threading.RLock()
+        self._binance_universe_symbols: set[str] = set()
+        self._universe_ready = False
 
     # -------------------------------------------------------------------
     # Binance position display market-data bridge
@@ -2080,6 +2132,28 @@ class TradingBot:
     # -------------------------------------------------------------------
     # Startup / shutdown
     # -------------------------------------------------------------------
+    def _prepare_shared_trade_universe(self, force: bool = False) -> List[str]:
+        """Discover Binance ∩ Bybit symbols once at the start of an AUTO session.
+
+        This works in both SIMULASI (/mode off) and REAL (/mode on). Binance
+        exchangeInfo is public, so SIMULASI does not need API credentials merely
+        to validate the tradable symbol universe.
+        """
+        with self._universe_lock:
+            if self._universe_ready and not force:
+                return build_universe(self.bybit, self._binance_universe_symbols, self.state)
+            symbols = self.binance.get_trading_symbols(force=force)
+            self._binance_universe_symbols = symbols
+            self._universe_ready = True
+            ranked = self.bybit.get_ranked_symbols()
+            bybit_set = {str(s).upper() for s, _ in ranked}
+            shared_count = len(symbols & bybit_set)
+            logger.info(
+                "[UNIVERSE] BINANCE+BYBIT READY | binance_trading=%s | bybit=%s | shared=%s | BTC=context-only",
+                len(symbols), len(bybit_set), shared_count,
+            )
+            return build_universe(self.bybit, symbols, self.state)
+
     def startup(self) -> None:
         label_main = self.state.load_checkpoint()
         label_learn = self.learn_engine.load()
@@ -2260,21 +2334,37 @@ class TradingBot:
                 "Tunggu beberapa detik sebelum /try lagi.",
                 "WARNING",
             )
-        elif fresh_session and (self.state.mode != "REAL" or active == 0):
+        elif fresh_session:
+            # /end means the MAIN session is disposable: remove local positions/orders
+            # from the next /try state regardless of mode. Learning memory is kept.
             self.learn_engine.save_checkpoint()
-            self.telegram.flush(max_messages=20)
+            self.state.reset_runtime_for_new_session()
             self.state.clear_runtime_checkpoint()
-            logger.info("[MAIN] COLD STOP — runtime checkpoint dihapus; learning memory dipertahankan")
+            with self._binance_queue_lock:
+                self._binance_pending_queued.clear()
+                self._binance_protection_queued.clear()
+            self._binance_universe_symbols.clear()
+            self._universe_ready = False
+            while True:
+                try:
+                    self._binance_pending_queue.get_nowait()
+                except queue.Empty:
+                    break
+            while True:
+                try:
+                    self._binance_protection_queue.get_nowait()
+                except queue.Empty:
+                    break
+            while True:
+                try:
+                    self._trail_queue.get_nowait()
+                except queue.Empty:
+                    break
+            logger.info("[MAIN] COLD STOP — runtime trade/order/position state deleted; learning memory preserved")
         else:
             self.state.save_checkpoint()
             self.learn_engine.save_checkpoint()
             self.telegram.flush(max_messages=20)
-            if fresh_session and self.state.mode == "REAL" and active > 0:
-                logger.warning("[MAIN] COLD STOP ditahan untuk REAL aktif: %s posisi/reserve tetap disimpan sebagai safety checkpoint", active)
-                self.telegram.send(
-                    f"⚠️ REAL SAFETY CHECKPOINT DIPERTAHANKAN\nAda {active} posisi/reserve aktif.\nRuntime tidak dihapus agar posisi Binance tidak menjadi orphan saat /try berikutnya.",
-                    "WARNING",
-                )
         try:
             logging.getLogger().removeHandler(self._telegram_error_handler)
             self._telegram_error_handler.close()
@@ -3085,12 +3175,12 @@ class TradingBot:
     def _run_scan_cycle(self) -> None:
         cycle_id = int(time.time() * 1000)
         logger.info("[SCAN] CYCLE START id=%s", cycle_id)
-        # Scanner market-data path is Bybit-only. Do not ask Binance for exchangeInfo
-        # just to build the candidate universe; Binance filters are fetched only
-        # when an actual candidate is selected for execution.
         self.state.cleanup_expired_bans()
-        universe = build_universe(self.bybit, None, self.state)
-        self.state.scanned_coins = universe
+        # The shared universe is initialized once per main session / first AUTO,
+        # then reused from cache. This prevents unsupported Bybit-only symbols from
+        # ever becoming Binance order candidates.
+        universe = self._prepare_shared_trade_universe(force=False)
+        self.state.scanned_coins = list(universe)
         logger.info("[SCAN] UNIVERSE READY | count=%s | max_slots=%s/%s", len(universe), self.state.get_active_count(), self.state.max_positions)
 
         btc_candles = None
@@ -3099,27 +3189,27 @@ class TradingBot:
         valid_strategy = 0
         reject_counts: Dict[str, int] = {}
 
-        # BTCUSDT tetap menjadi konteks korelasi walau sedang active/banned dan tidak boleh ditradingkan.
-        if "BTCUSDT" in universe:
-            btc_index = universe.index("BTCUSDT")
-            if not self.state.is_banned("BTCUSDT") and "BTCUSDT" not in self.state.positions:
-                pass
-            else:
-                try:
-                    btc_candles = self.bybit.get_klines("BTCUSDT", "15", 672)
-                    with self._candle_lock:
-                        self._candle_cache["BTCUSDT"] = btc_candles
-                    processed += 1
-                except (ExchangeError, RateLimitError) as e:
-                    if isinstance(e, RateLimitError):
-                        raise
-                    logger.warning("Gagal ambil candle BTCUSDT sebagai context: %s", e)
+        # BTCUSDT is always context-only: it is fetched for market/BTC-correlation
+        # analysis, but it is never in the trade universe and can never be queued
+        # for execution. It is also never banned.
+        try:
+            btc_candles = self.bybit.get_klines("BTCUSDT", "15", 672)
+            with self._candle_lock:
+                self._candle_cache["BTCUSDT"] = btc_candles
+            logger.info("[BTCUSDT] CONTEXT READY | n=%s | trade_allowed=NO", len(btc_candles), extra={"symbol": "BTCUSDT"})
+        except (ExchangeError, RateLimitError) as e:
+            if isinstance(e, RateLimitError):
+                raise
+            logger.warning("Gagal ambil candle BTCUSDT sebagai context: %s", e)
 
         for idx, symbol in enumerate(universe, 1):
             if self._stop.is_set() or not self.state.auto:
                 logger.info("[SCAN] STOPPED MID-CYCLE at=%s/%s", idx - 1, len(universe))
                 break
             logger.info("[SCAN %02d/%02d] START", idx, len(universe), extra={"symbol": symbol})
+            if symbol.upper() == "BTCUSDT":
+                logger.warning("[BTCUSDT] HARD REJECT TRADE | context-only asset; analysis data retained", extra={"symbol": "BTCUSDT"})
+                continue
             if self.state.is_banned(symbol) or symbol in self.state.positions:
                 continue
             if symbol == "BTCUSDT" and btc_candles is not None:
@@ -3243,6 +3333,9 @@ class TradingBot:
         return ("SMC" + safe)[-32:]
 
     def _create_pending(self, setup: strategy.Setup) -> None:
+        if str(setup.pair).upper() == "BTCUSDT":
+            logger.warning("[BTCUSDT] HARD REJECT ENTRY | setup blocked at execution boundary; BTC is context-only", extra={"symbol": "BTCUSDT"})
+            return
         logger.info("[ENTRY] PREPARE | direction=%s confidence=%.1f%% mode=%s", setup.direction, setup.confidence, self.state.mode, extra={"symbol": setup.pair})
         # SIMULASI never touches Binance. REAL exposes PENDING only after
         # Binance acknowledges the limit order with an orderId.
@@ -3614,6 +3707,17 @@ class TradingBot:
             return
         if self.state.mode == "REAL" and self.state.binance_paused:
             self.telegram.send("⚠️ AUTO belum bisa dinyalakan: Binance sedang rate-limited.", "WARNING")
+            return
+        try:
+            universe = self._prepare_shared_trade_universe(force=not self._universe_ready)
+            logger.info("[AUTO] UNIVERSE PREPARED | tradable_slots=%s | BTCUSDT=context-only", len(universe))
+        except RateLimitError as e:
+            self._enter_binance_pause(e)
+            self.telegram.send("⚠️ AUTO gagal menyiapkan universe karena Binance rate-limit. AUTO tetap OFF.", "ERROR")
+            return
+        except Exception as e:
+            logger.error("[AUTO] universe preparation gagal: %s", e)
+            self.telegram.send(f"⚠️ AUTO gagal menyiapkan universe Binance+Bybit: {e}", "ERROR")
             return
         self.state.auto = True
         logger.info("[AUTO] ENABLE | mode=%s | binance_paused=%s | weight1m=%s", self.state.mode, self.state.binance_paused, self.binance._used_weight_1m)

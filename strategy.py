@@ -52,6 +52,12 @@ logger = logging.getLogger("strategy")
 
 STRATEGY_NAME = "adaptive-smc-ict"
 
+# Market-context assets are analyzed for correlation/regime but are never trade candidates.
+TRADE_EXCLUDED_SYMBOLS = frozenset({"BTCUSDT"})
+
+def is_trade_allowed(symbol: str) -> bool:
+    return str(symbol or "").upper() not in TRADE_EXCLUDED_SYMBOLS
+
 # ---------------------------------------------------------------------------
 # Bobot komponen confidence — total harus 100. Setiap perubahan bobot HARUS
 # lewat apply_update() (dicatat versi + alasan + evidence).
@@ -1610,6 +1616,15 @@ class StrategyVNext:
         self,symbol:str,candles:Sequence[Dict[str,Any]],btc_candles:Optional[Sequence[Dict[str,Any]]]=None,
         market_context:Optional[Dict[str,Any]]=None,enforce_threshold:bool=True,current_timestamp_ms:Optional[float]=None,
     )->Tuple[Optional[Setup],Dict[str,Any]]:
+        symbol = str(symbol or "").upper()
+        if symbol in TRADE_EXCLUDED_SYMBOLS:
+            diagnostics = {"strategy_version": self.version, "symbol": symbol, "status": "BTC_CONTEXT_ONLY",
+                           "data_quality": {}, "structure": {}, "liquidity": {}, "entry": {}, "tp": {},
+                           "sl": {}, "momentum": {}, "volatility": {}, "btc": {}, "market": {},
+                           "score": {}, "reasons": ["BTCUSDT context-only; trade disabled"],
+                           "threshold": {"active": self.get_active_threshold(), "passed": False}}
+            self.last_diagnostics = diagnostics
+            return None, diagnostics
         p=self.params; work=list(_last_confirmed(candles)); btc=list(_last_confirmed(btc_candles or []))
         min_len=max(_vn_int(p.get("structure_lookback"),80),_vn_int(p.get("vol_regime_lookback"),100),_vn_int(p.get("atr_period"),14))+5
         quality=vn_validate_data_quality(work,max_gap_factor=_vn_float(p.get("max_candle_gap_factor"),2.0),stale_seconds=((current_timestamp_ms-work[-1]["t"])/1000.0 if current_timestamp_ms and work else None)) if work else {"valid":False,"reason":"INSUFFICIENT_CANDLES","candle_count":0}
