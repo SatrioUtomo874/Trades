@@ -2023,10 +2023,10 @@ class LearnEngine:
 
             baseline_train = self._weighted_stats(train)
             baseline_holdout = self._weighted_stats(holdout)
-            current_threshold = _safe_float(current.get("ACTIVE_THRESHOLD", 0.0))
+            current_threshold = max(55.0, _safe_float(current.get("ACTIVE_THRESHOLD", 55.0)))
             proposed_threshold = proposed.get("ACTIVE_THRESHOLD")
             if proposed_threshold is not None:
-                proposed_threshold = _safe_float(proposed_threshold)
+                proposed_threshold = max(55.0, min(95.0, _safe_float(proposed_threshold)))
                 train_cf = self.counterfactual_threshold(train, proposed_threshold)
                 hold_selected = [r for r in holdout if _safe_float(r.get("confidence")) >= proposed_threshold and r.get("outcome") in ECONOMIC_OUTCOMES]
                 challenger_holdout = self._weighted_stats(hold_selected)
@@ -2094,7 +2094,7 @@ class LearnEngine:
         return ok, f"holdout delta={delta:+.4f} PF={pf_ok} DD={dd_ok}", meta
 
     def _robustness_probe_locked(self, train: Sequence[Dict[str, Any]], proposed: Dict[str, Any]) -> Dict[str, Any]:
-        base_threshold = _safe_float(self.strategy_state.get("params", {}).get("ACTIVE_THRESHOLD", 0.0))
+        base_threshold = max(55.0, _safe_float(self.strategy_state.get("params", {}).get("ACTIVE_THRESHOLD", 55.0)))
         proposal_threshold = proposed.get("ACTIVE_THRESHOLD")
         if proposal_threshold is None:
             threshold = base_threshold
@@ -2174,13 +2174,13 @@ class LearnEngine:
         good_high = [(b, s) for b, s in usable if int(b.split("-")[0]) > current and _safe_float(s.get("expectancy")) > 0.05]
         if bad_low and good_high:
             target = float(int(good_high[0][0].split("-")[0]))
-            new = round(max(0.0, min(95.0, current + min(MAX_THRESHOLD_STEP, max(1.0, target - current)))), 1)
+            new = round(max(55.0, min(95.0, current + min(MAX_THRESHOLD_STEP, max(1.0, target - current)))), 1)
             if abs(new - current) >= 0.5:
                 return new, {"type": "RAISE_THRESHOLD", "bad_low": dict(bad_low), "good_high": dict(good_high), "frequency": freq}
         if current > 0 and freq.get("status") == "THRESHOLD_TOO_HIGH_OR_STRICT":
             shadow = self.shadow_performance_below(current)
             if _safe_int(shadow.get("n")) >= MIN_SAMPLE_FOR_DECISION and _safe_float(shadow.get("expectancy")) > 0.05:
-                new = round(max(0.0, current - min(3.0, MAX_THRESHOLD_STEP)), 1)
+                new = round(max(55.0, current - min(3.0, MAX_THRESHOLD_STEP)), 1)
                 if new < current:
                     return new, {"type": "LOWER_THRESHOLD_FROM_SHADOW", "shadow": shadow, "frequency": freq}
         return None
