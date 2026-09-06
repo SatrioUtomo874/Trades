@@ -49,6 +49,7 @@ import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
+from collections import deque
 from decimal import ROUND_DOWN, ROUND_UP, Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -291,8 +292,10 @@ BINANCE_POST_LIMIT_SAFETY_SECONDS = 15.0
 # Binance reports REQUEST_WEIGHT against the source IP, not against this bot
 # instance/API key.  Keep a large reserve so one new trade cannot be sent
 # into an already-hot IP budget.
-BINANCE_WEIGHT_HARD_STOP = 1800
-BINANCE_WEIGHT_ORDER_SOFT_STOP = 1500
+BINANCE_WEIGHT_HARD_STOP = 1600
+BINANCE_WEIGHT_GLOBAL_SOFT_STOP = 1400
+BINANCE_WEIGHT_ORDER_SOFT_STOP = 1300
+BINANCE_MAX_REQUESTS_PER_MINUTE = 18
 BINANCE_WEIGHT_RECOVERY_MARGIN = 300
 BINANCE_DEFAULT_429_COOLDOWN = 75.0
 # Trade-related REST calls are deliberately much slower than ordinary REST.
@@ -301,6 +304,7 @@ BINANCE_DEFAULT_429_COOLDOWN = 75.0
 # All REST calls, including order/protection/listen-key calls, share this lane.
 BINANCE_ORDER_INTERVAL = 10.0
 BINANCE_REQUEST_INTERVAL = 2.5
+EXECUTION_CONFIDENCE_FLOOR = 55.0
 
 
 class SecretRedactingFilter(logging.Filter):
@@ -951,6 +955,7 @@ class BinanceClient:
         self._blocked_until_mono = 0.0
         self._blocked_error: Optional[RateLimitError] = None
         self._leverage_cache: Dict[str, int] = {}
+        self._recent_request_mono = deque(maxlen=64)
 
     def health_check(self) -> Dict[str, Any]:
         """Explicit operator health probe; never called automatically at startup."""
@@ -1067,6 +1072,8 @@ class BinanceClient:
             self._used_order_10s = 0
         if self._last_response_ts and now - self._last_response_ts >= 60.0:
             self._used_order_1m = 0
+        while self._recent_request_mono and now - self._recent_request_mono[0] >= 60.0:
+            self._recent_request_mono.popleft()
 
     def _request(
         self, method: str, path: str, params: Optional[Dict[str, Any]] = None,
@@ -1094,6 +1101,34 @@ class BinanceClient:
             now_mono = time.monotonic()
             if now_mono < self._blocked_until_mono:
                 raise self._local_rate_limit_error()
+
+            # GLOBAL weight guard: once the observed IP weight is hot, STOP ALL
+            # Binance REST, not only order endpoints. This prevents cleanup/status
+            # traffic from walking an already-hot IP into 429/418.
+            if self._used_weight_1m >= BINANCE_WEIGHT_GLOBAL_SOFT_STOP:
+                block_seconds = 65.0
+                self._blocked_until_mono = max(self._blocked_until_mono, time.monotonic() + block_seconds)
+                err = RateLimitError(
+                    f"Binance global REST deferred by governor: used_weight_1m={self._used_weight_1m} >= {BINANCE_WEIGHT_GLOBAL_SOFT_STOP}",
+                    status_code=429, code=-1003, retry_after=block_seconds,
+                )
+                self._blocked_error = err
+                logger.warning("[BINANCE] GLOBAL PREBLOCK | weight_1m=%s >= %s | path=%s | request not sent", self._used_weight_1m, BINANCE_WEIGHT_GLOBAL_SOFT_STOP, path)
+                raise err
+
+            # Absolute request-count cap provides protection even when an endpoint
+            # reports incomplete headers. One process may send at most N REST calls
+            # in any rolling 60-second window.
+            if len(self._recent_request_mono) >= BINANCE_MAX_REQUESTS_PER_MINUTE:
+                wait_count = max(0.0, 60.0 - (time.monotonic() - self._recent_request_mono[0]) + 1.0)
+                self._blocked_until_mono = max(self._blocked_until_mono, time.monotonic() + wait_count)
+                err = RateLimitError(
+                    f"Binance request-count guard: {len(self._recent_request_mono)}/{BINANCE_MAX_REQUESTS_PER_MINUTE} requests/min",
+                    status_code=429, code=-1003, retry_after=wait_count,
+                )
+                self._blocked_error = err
+                logger.warning("[BINANCE] REQUEST-COUNT PREBLOCK | count=%s/%s | wait=%.1fs | path=%s", len(self._recent_request_mono), BINANCE_MAX_REQUESTS_PER_MINUTE, wait_count, path)
+                raise err
 
             # Trade requests get an earlier local stop. REQUEST_WEIGHT is
             # shared at the source-IP level, so "first order of this process"
@@ -1180,6 +1215,7 @@ class BinanceClient:
                 if time.monotonic() < self._blocked_until_mono:
                     raise self._local_rate_limit_error()
                 send_mono = time.monotonic()
+                self._recent_request_mono.append(send_mono)
                 self._next_request_mono = send_mono + self._min_request_interval
                 if is_order_request:
                     self._next_order_request_mono = send_mono + self._order_request_interval
@@ -2686,7 +2722,6 @@ class TradingBot:
             pos = self.state.positions.get(symbol)
             if pos and pos.get("status") == "FILLED":
                 self._attach_real_protection(symbol, pos)
-            time.sleep(1.0)
             return
 
         try:
@@ -2904,7 +2939,11 @@ class TradingBot:
     def _handle_timeout(self, symbol: str, pos: Dict[str, Any]) -> None:
         if self.state.mode == "REAL":
             if self.state.binance_paused:
-                logger.warning("Timeout %s tertahan: Binance sedang pause; state dipertahankan", symbol)
+                now = time.time()
+                last_notice = float(pos.get("_timeout_pause_notice_at", 0.0) or 0.0)
+                if now - last_notice >= 30.0:
+                    logger.warning("Timeout %s tertahan: Binance sedang pause; state dipertahankan", symbol)
+                    pos["_timeout_pause_notice_at"] = now
                 return
             try:
                 self._cleanup_real_symbol(symbol, pos, close_position=False)
@@ -3234,6 +3273,17 @@ class TradingBot:
             setup, analysis_diag = self.strategy_engine.analyze_with_diagnostics(
                 symbol, candles, btc_candles, market_context=self._market_context, enforce_threshold=False
             )
+            # Learn receives the complete diagnostic record, including candidates
+            # rejected by hard quality gates. Rejected analysis must remain learnable.
+            try:
+                self.learn_engine.record_scan_analysis(
+                    symbol, diagnostics=analysis_diag,
+                    setup=(setup.to_dict() if setup else None),
+                    timestamp=time.time(),
+                    scan_context={"threshold": max(EXECUTION_CONFIDENCE_FLOOR, self.strategy_engine.get_active_threshold()), "regime": self._market_context.get("regime")}
+                )
+            except Exception as exc:
+                logger.warning("[LEARN] scan analysis record gagal %s: %s", symbol, exc, extra={"symbol": symbol})
             if setup:
                 valid_strategy += 1
                 logger.info("[SCAN %02d/%02d] STRATEGY OK | %s %.1f%%", idx, len(universe), setup.direction, setup.confidence, extra={"symbol": symbol})
@@ -3245,22 +3295,22 @@ class TradingBot:
                             (analysis_diag.get("btc") or {}).get("aligned"),
                             float((analysis_diag.get("freshness") or {}).get("score", analysis_diag.get("freshness_score", 0.0))),
                             extra={"symbol": symbol})
-                threshold = self.strategy_engine.get_active_threshold()
-                eligible_now = setup.confidence >= threshold
-                self.learn_engine.record_scan_candidate(setup.to_dict(), eligible_now, threshold, "PASS" if eligible_now else "BELOW_ACTIVE_THRESHOLD")
+                threshold = max(EXECUTION_CONFIDENCE_FLOOR, self.strategy_engine.get_active_threshold())
+                hard = analysis_diag.get("hard_gates") or {}
+                hard_ok = bool(hard.get("passed", True))
+                eligible_now = bool(hard_ok and setup.confidence >= threshold)
+                reason = "PASS" if eligible_now else ("HARD_QUALITY_GATE" if not hard_ok else "BELOW_ACTIVE_THRESHOLD")
+                self.learn_engine.record_scan_candidate(setup.to_dict(), eligible_now, threshold, reason)
                 if eligible_now:
                     candidates.append(setup)
                 else:
-                    reject_counts["BELOW_ACTIVE_THRESHOLD"] = reject_counts.get("BELOW_ACTIVE_THRESHOLD", 0) + 1
-                    logger.info("[SCAN %02d/%02d] BELOW THRESHOLD | %.1f%% < %.1f%%", idx, len(universe), setup.confidence, threshold, extra={"symbol": symbol})
-                    # mulai low-confidence ban hanya setelah sistem threshold mencapai 40%.
-                    if threshold >= 40.0 and setup.confidence < threshold and setup.confidence >= 0:
-                        self.state.ban(symbol, "LOW_CONFIDENCE", 4 * 3600)
-                        self.telegram.send(f"🚫 LOW-CONF BAN — {symbol}\nConfidence: {setup.confidence:.1f}% < threshold {threshold:.1f}%\nDurasi: 4 jam", "BANNED")
-                # simpan kandidat sebagai shadow untuk evaluasi threshold berikutnya
+                    key = "HARD_QUALITY_GATE" if not hard_ok else "BELOW_ACTIVE_THRESHOLD"
+                    reject_counts[key] = reject_counts.get(key, 0) + 1
+                    logger.info("[SCAN %02d/%02d] REJECT | reason=%s conf=%.1f threshold=%.1f hard=%s", idx, len(universe), reason, setup.confidence, threshold, hard_ok, extra={"symbol": symbol})
+                # Low-quality/low-confidence candidates remain visible to Learn as shadow data.
                 if not eligible_now:
                     with self._shadow_lock:
-                        self._shadow_candidates[symbol] = {**setup.to_dict(), "shadow_state": "WAIT_ENTRY", "expires_at": time.time() + 24 * 3600}
+                        self._shadow_candidates[symbol] = {**setup.to_dict(), "shadow_state": "WAIT_ENTRY", "reject_reason": reason, "expires_at": time.time() + 24 * 3600}
             else:
                 reject_counts["NO_VALID_ENTRY_CANDIDATE"] = reject_counts.get("NO_VALID_ENTRY_CANDIDATE", 0) + 1
 
@@ -3333,10 +3383,25 @@ class TradingBot:
         return ("SMC" + safe)[-32:]
 
     def _create_pending(self, setup: strategy.Setup) -> None:
-        if str(setup.pair).upper() == "BTCUSDT":
-            logger.warning("[BTCUSDT] HARD REJECT ENTRY | setup blocked at execution boundary; BTC is context-only", extra={"symbol": "BTCUSDT"})
+        symbol = str(setup.pair or "").upper()
+        if symbol == "BTCUSDT":
+            logger.warning("[BTCUSDT] HARD REJECT ENTRY | BTC is context-only", extra={"symbol": "BTCUSDT"})
             return
-        logger.info("[ENTRY] PREPARE | direction=%s confidence=%.1f%% mode=%s", setup.direction, setup.confidence, self.state.mode, extra={"symbol": setup.pair})
+        threshold = max(EXECUTION_CONFIDENCE_FLOOR, self.strategy_engine.get_active_threshold())
+        refs = setup.reference_levels or {}
+        rr = float(refs.get("rr", 0.0) or 0.0)
+        expected_r = float(refs.get("expected_r", 0.0) or 0.0)
+        min_rr = max(1.20, float(self.strategy_engine.params.get("min_rr", 1.20)))
+        if setup.confidence < threshold:
+            logger.info("[ENTRY] HARD REJECT | confidence=%.1f < threshold=%.1f", setup.confidence, threshold, extra={"symbol": symbol})
+            return
+        if rr < min_rr:
+            logger.info("[ENTRY] HARD REJECT | RR=%.2f < min_rr=%.2f", rr, min_rr, extra={"symbol": symbol})
+            return
+        if expected_r <= 0.0:
+            logger.info("[ENTRY] HARD REJECT | expected_R=%.3f <= 0", expected_r, extra={"symbol": symbol})
+            return
+        logger.info("[ENTRY] PREPARE | direction=%s confidence=%.1f%% threshold=%.1f mode=%s", setup.direction, setup.confidence, threshold, self.state.mode, extra={"symbol": symbol})
         # SIMULASI never touches Binance. REAL exposes PENDING only after
         # Binance acknowledges the limit order with an orderId.
         if self.state.get_active_count() >= self.state.max_positions:
