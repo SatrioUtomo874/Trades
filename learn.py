@@ -18,6 +18,14 @@ PRINSIP KERAS
    mendaftarkan notification sink, event checkpoint juga diteruskan ke Telegram.
 9. Tidak ada look-ahead pada data scan/features. Historical outcome boleh dipakai
    hanya setelah event tersebut secara chronological memang telah terjadi.
+10. Satu pengecualian jaringan yang disengaja: autosave checkpoint ke GitHub
+    (_git_commit_push). Deployment bot (lihat try.py) mengambil file lewat
+    tarball GitHub tanpa folder .git, jadi tidak ada working copy git di
+    server untuk `git commit`/`git push`. Autosave karena itu memanggil
+    GitHub Contents API langsung (GET sha lalu PUT base64, sama seperti
+    try.py di /ganti), dengan GITHUB_TOKEN/REPO_NAME/GITHUB_BRANCH. Ini
+    murni menyalin file checkpoint yang sudah tersimpan lokal — bukan
+    keputusan trading, dan gagal push tidak pernah menggagalkan save lokal.
 
 DESAIN MEMORY
 -------------
@@ -63,6 +71,7 @@ belum dipasang; karena itu Learn tidak berpura-pura seolah Telegram sudah terkir
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -71,8 +80,9 @@ import math
 import os
 import shutil
 import statistics
-import subprocess
 import time
+
+import requests
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from threading import RLock
@@ -529,6 +539,10 @@ class LearnEngine:
         ollama_api_key: Optional[str] = None,
         git_enabled: bool = False,
         git_repo_dir: Optional[str] = None,
+        github_token: Optional[str] = None,
+        github_repo: Optional[str] = None,
+        github_branch: Optional[str] = None,
+        github_remote_path: Optional[str] = None,
         notification_sink: Optional[Callable[[str, str], Any]] = None,
         checkpoint_interval_seconds: int = 120,
     ):
@@ -540,6 +554,18 @@ class LearnEngine:
         self.ollama_model = os.environ.get("OLLAMA_MODEL", "llama3")
         self.git_enabled = bool(git_enabled)
         self.git_repo_dir = git_repo_dir or "."
+        # Autosave pushes the checkpoint straight to GitHub's Contents API.
+        # The runtime deployment (see try.py) syncs files from a downloaded
+        # GitHub tarball with no .git directory, so there is no local git
+        # working copy to `git commit`/`git push` against — REST is the only
+        # thing that actually works here, and it's the same approach try.py
+        # already uses for /ganti.
+        self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
+        self.github_repo = github_repo or os.environ.get("REPO_NAME", "")
+        self.github_branch = github_branch or os.environ.get("GITHUB_BRANCH", "main")
+        self.github_remote_path = github_remote_path or os.environ.get(
+            "LEARN_CHECKPOINT_REMOTE_PATH", os.path.basename(checkpoint_path)
+        )
         self.notification_sink = notification_sink
         self.checkpoint_interval_seconds = max(30, int(checkpoint_interval_seconds))
         self._lock = RLock()
@@ -917,16 +943,49 @@ class LearnEngine:
         return self.save_checkpoint(reason=reason)
 
     def _git_commit_push(self) -> None:
-        try:
-            checkpoint_abs = os.path.abspath(self.checkpoint_path)
-            repo = os.path.abspath(self.git_repo_dir)
-            rel = os.path.relpath(checkpoint_abs, repo)
-            subprocess.run(["git", "add", "--", rel], cwd=repo, check=False, capture_output=True, timeout=5)
-            subprocess.run(
-                ["git", "commit", "-m", f"autosave learn {_now():.0f}"],
-                cwd=repo, check=False, capture_output=True, timeout=5,
+        """Push the current checkpoint file to GitHub via the Contents API.
+
+        No local git CLI, no working tree assumption — just an HTTP GET (to
+        pick up the current file sha, if any) followed by a PUT with the
+        checkpoint bytes, exactly like try.py's own /ganti path.
+        """
+        if not self.github_token or not self.github_repo:
+            self._record_event_log(
+                "GIT", "SKIPPED | GITHUB_TOKEN/REPO_NAME belum diset", level=logging.DEBUG
             )
-            subprocess.run(["git", "push"], cwd=repo, check=False, capture_output=True, timeout=15)
+            return
+        try:
+            with open(self.checkpoint_path, "rb") as f:
+                content = f.read()
+        except OSError as exc:
+            self._record_event_log("GIT", "WARNING | tidak bisa baca checkpoint: %s", exc)
+            return
+        path = self.github_remote_path.strip("/")
+        headers = {
+            "Authorization": f"Bearer {self.github_token}",
+            "Accept": "application/vnd.github+json",
+        }
+        api_url = f"https://api.github.com/repos/{self.github_repo}/contents/{path}"
+        try:
+            get_resp = requests.get(api_url, headers=headers, params={"ref": self.github_branch}, timeout=15)
+            sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
+            payload: Dict[str, Any] = {
+                "message": f"autosave learn checkpoint {_now():.0f}",
+                "content": base64.b64encode(content).decode("ascii"),
+                "branch": self.github_branch,
+            }
+            if sha:
+                payload["sha"] = sha
+            put_resp = requests.put(api_url, headers=headers, json=payload, timeout=30)
+            if put_resp.status_code >= 400:
+                self._record_event_log(
+                    "GIT", "WARNING | push gagal HTTP %s: %s",
+                    put_resp.status_code, str(put_resp.text)[:200],
+                )
+            else:
+                self._record_event_log("GIT", "PUSH OK | %s@%s", path, self.github_branch)
+        except requests.RequestException as exc:
+            self._record_event_log("GIT", "WARNING | %s", exc)
         except Exception as exc:  # pragma: no cover
             self._record_event_log("GIT", "WARNING | %s", exc)
 
