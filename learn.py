@@ -88,7 +88,7 @@ logger = logging.getLogger("learn")
 
 SCHEMA_VERSION = 7
 ENGINE_NAME = "adaptive-learning-brain-vnext"
-ENGINE_VERSION = "2.00"
+ENGINE_VERSION = "2.10"
 
 # ---------------------------------------------------------------------------
 # Governance thresholds
@@ -124,14 +124,6 @@ MAX_PARAM_STEP: Dict[str, float] = {
     "trail_min_profit_r": 0.15,
     "stale_setup_minutes": 30.0,
     "fvg_freshness_bars": 3.0,
-    # Relaksasi bottleneck struktural (gate entry ketat: TOO_FAR, wajib
-    # liquidity sweep, wajib killzone session). require_* di sini bertipe
-    # boolean tapi diperlakukan numerik 0.0/1.0 oleh validator ini — step 1.0
-    # artinya boleh dibalik sekali per perubahan (True<->False).
-    "entry_max_distance_atr": 0.50,
-    "sweep_recency_bars": 2.0,
-    "require_liquidity_sweep": 1.0,
-    "require_killzone_session": 1.0,
 }
 
 ALLOWED_UPDATE_KEYS = set(["ACTIVE_THRESHOLD", *MAX_PARAM_STEP.keys(), "CONFIDENCE_WEIGHTS"])
@@ -158,11 +150,6 @@ SCAN_DIAGNOSES = (
     "LOW_LIQUIDITY_CONTEXT",
     "REGIME_MISMATCH",
     "BTC_CONFLICT",
-    # BUG FIX (kompatibilitas): dua status baru dari strategy.py setelah revisi
-    # gate liquidity-sweep & killzone-session, supaya tetap dikenali kalau
-    # jalur _diagnose_scan_locked ini dipakai di masa depan.
-    "NO_LIQUIDITY_SWEEP",
-    "OUTSIDE_KILLZONE",
     "VALID_LOW_CONF",
     "VALID_HIGH_CONF",
 )
@@ -595,11 +582,6 @@ class LearnEngine:
         self.current_strategy_version: Optional[str] = None
         self.last_change_ts = 0.0
         self.trades_since_last_change = 0
-        # Cooldown TERPISAH untuk relaksasi bottleneck struktural (lihat
-        # _attempt_bottleneck_relax_locked) — sengaja tidak memakai
-        # trades_since_last_change karena jalur ini justru dipakai SAAT belum
-        # ada trade sama sekali (entry gate ketat, trade_history mandek di 0).
-        self.last_bottleneck_relax_ts = 0.0
         self.last_audit_ts = 0.0
         self.last_autosave_ts = 0.0
         self.last_checkpoint_ts = 0.0
@@ -905,13 +887,16 @@ class LearnEngine:
                 self._emit_checkpoint_notification_locked(False, "", f"save failed: {exc}")
                 return False
 
-    def autosave(self, reason: str = "autosave") -> None:
+    def autosave(self, reason: str = "autosave") -> bool:
         try:
             ok = self.save_checkpoint(reason=reason)
             if ok and self.git_enabled:
                 self._git_commit_push()
+            self._record_event_log("AUTOSAVE", "%s | reason=%s", "PASS" if ok else "FAIL", reason)
+            return bool(ok)
         except Exception as exc:  # pragma: no cover
             self._record_event_log("AUTOSAVE", "NON_FATAL | %s", exc)
+            return False
 
     def _maybe_checkpoint_after_high_value_event_locked(self, reason: str) -> bool:
         """Checkpoint oportunistik tanpa melakukan write pada setiap event.
@@ -944,6 +929,42 @@ class LearnEngine:
             subprocess.run(["git", "push"], cwd=repo, check=False, capture_output=True, timeout=15)
         except Exception as exc:  # pragma: no cover
             self._record_event_log("GIT", "WARNING | %s", exc)
+
+    # ------------------------------------------------------------------
+    # Explicit /open + /save command handlers
+    # ------------------------------------------------------------------
+    def open_memory(self) -> str:
+        """Explicit /open handler: primary checkpoint, then backup, with checksum validation."""
+        label = self.load()
+        self._record_event_log("OPEN", "memory=%s", label)
+        return label
+
+    def save_memory(self, reason: str = "manual /save") -> bool:
+        """Explicit /save handler. Uses the same atomic checkpoint path as autosave."""
+        ok = self.save_checkpoint(reason=reason)
+        self._record_event_log("SAVE", "%s | reason=%s", "PASS" if ok else "FAIL", reason)
+        return bool(ok)
+
+    def handle_command(self, command: str) -> Dict[str, Any]:
+        """Small command adapter for integrations that want /open and /save owned by Learn."""
+        cmd = str(command or "").strip().lower().split()[0] if str(command or "").strip() else ""
+        if cmd == "/open":
+            label = self.open_memory()
+            return {"ok": True, "command": "/open", "source": label, "strategy": self.strategy_state.get("version")}
+        if cmd == "/save":
+            ok = self.save_memory()
+            return {"ok": ok, "command": "/save", "checkpoint": self.checkpoint_path}
+        return {"ok": False, "command": cmd or None, "reason": "UNKNOWN_COMMAND"}
+
+    def autosave_status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "checkpoint_path": self.checkpoint_path,
+                "last_autosave_ts": self.last_autosave_ts,
+                "last_checkpoint_ts": self.last_checkpoint_ts,
+                "interval_seconds": self.checkpoint_interval_seconds,
+                "checkpoint": self.validate_checkpoint(),
+            }
 
     # ------------------------------------------------------------------
     # Raw event ingestion
@@ -1139,11 +1160,7 @@ class LearnEngine:
         btc_aligned: Optional[bool],
     ) -> str:
         # Diagnostics from Strategy take precedence when explicit.
-        # BUG FIX (kompatibilitas): strategy.py (vNext) menaruh hasil diagnosis
-        # di diagnostics["status"], bukan diagnostics["diagnosis"]/["viability"].
-        # Field lama tetap dicek dulu (kompatibel mundur kalau ada caller lain
-        # yang memang mengisi format itu), "status" cuma fallback tambahan.
-        explicit = str(diagnostics.get("viability", {}).get("diagnosis", diagnostics.get("diagnosis", diagnostics.get("status", "")))).upper()
+        explicit = str(diagnostics.get("viability", {}).get("diagnosis", diagnostics.get("diagnosis", ""))).upper()
         if explicit in SCAN_DIAGNOSES:
             return explicit
         if not setup:
@@ -1166,14 +1183,6 @@ class LearnEngine:
             return "REGIME_MISMATCH"
         if _safe_bool(diagnostics.get("liquidity", {}).get("low_liquidity"), False):
             return "LOW_LIQUIDITY_CONTEXT"
-        # BUG FIX (kompatibilitas): mirror gate liquidity-sweep & killzone-session
-        # yang baru ditambahkan di strategy.py (vn_diagnosis), dibaca dari
-        # diagnostics["market"] supaya audit shadow-scan ini tetap konsisten
-        # kalau suatu saat record_scan_analysis() diaktifkan.
-        if diagnostics.get("market", {}).get("sweep_ok") is False:
-            return "NO_LIQUIDITY_SWEEP"
-        if diagnostics.get("market", {}).get("session_ok") is False:
-            return "OUTSIDE_KILLZONE"
         if threshold > 0 and not eligible:
             return "VALID_LOW_CONF"
         if confidence >= max(threshold, 70.0):
@@ -1698,8 +1707,6 @@ class LearnEngine:
         too_far = diagnosis_counts.get("TOO_FAR", 0)
         invalid = diagnosis_counts.get("INVALID_GEOMETRY", 0)
         btc_conflict = diagnosis_counts.get("BTC_CONFLICT", 0)
-        no_sweep = diagnosis_counts.get("NO_LIQUIDITY_SWEEP", 0)
-        outside_killzone = diagnosis_counts.get("OUTSIDE_KILLZONE", 0)
         threshold_reject = diagnosis_counts.get("VALID_LOW_CONF", 0) + sum(v for k, v in rejects.items() if "THRESHOLD" in k.upper())
         total_analysis = max(1, len(analysis))
 
@@ -1717,10 +1724,6 @@ class LearnEngine:
             status, note = "ENTRY_TOO_CLOSE", "entry geometry sering terlalu dekat"
         elif total_analysis >= MIN_SCAN_EVENTS_FOR_PATTERN and too_far / total_analysis >= 0.10:
             status, note = "ENTRY_TOO_FAR", "entry geometry sering terlalu jauh"
-        elif total_analysis >= MIN_SCAN_EVENTS_FOR_PATTERN and no_sweep / total_analysis >= 0.20:
-            status, note = "SWEEP_REQUIREMENT_DOMINANT", "wajib liquidity sweep terlalu sering menolak setup"
-        elif total_analysis >= MIN_SCAN_EVENTS_FOR_PATTERN and outside_killzone / total_analysis >= 0.20:
-            status, note = "KILLZONE_FILTER_DOMINANT", "filter sesi killzone terlalu sering menolak setup"
         elif total_analysis >= MIN_SCAN_EVENTS_FOR_PATTERN and btc_conflict / total_analysis >= 0.25:
             status, note = "BTC_FILTER_DOMINANT", "BTC conflict terlalu sering mematikan setup"
         elif total_analysis >= MIN_SCAN_EVENTS_FOR_PATTERN and threshold_reject / total_analysis >= 0.25:
@@ -2189,13 +2192,6 @@ class LearnEngine:
             current = _safe_float(params.get("entry_min_offset_atr", 0.25))
             new = max(0.05, current - 0.05)
             return ({"entry_min_offset_atr": new}, {"type": "RELAX_ENTRY_DISTANCE", "old": current, "new": new, "frequency": freq}) if new < current else None
-        # BUG FIX: ENTRY_TOO_FAR sudah lama didiagnosis oleh _frequency_diagnosis_locked
-        # tapi sebelumnya tidak punya aksi relaksasi sama sekali di sini — jadi
-        # bottleneck ini akan didiagnosis berulang-ulang tanpa pernah diperbaiki.
-        if diagnosis == "ENTRY_TOO_FAR":
-            current = _safe_float(params.get("entry_max_distance_atr", 2.25))
-            new = min(4.0, current + 0.25)
-            return ({"entry_max_distance_atr": new}, {"type": "RELAX_ENTRY_MAX_DISTANCE", "old": current, "new": new, "frequency": freq}) if new > current else None
         if diagnosis == "STALE_REJECT_HIGH":
             current = _safe_float(params.get("stale_setup_minutes", 30.0), 30.0)
             new = min(60.0, current + 5.0)
@@ -2206,78 +2202,7 @@ class LearnEngine:
                 new_weights = dict(current_weights)
                 new_weights["btc_correlation"] = max(3.0, _safe_float(current_weights["btc_correlation"]) - 1.0)
                 return ({"CONFIDENCE_WEIGHTS": new_weights}, {"type": "RELAX_BTC_WEIGHT", "old": current_weights, "new": new_weights, "frequency": freq})
-        # Gate wajib liquidity sweep/inducement (revisi konsep SMC): kalau ini
-        # dominan menolak setup, longgarkan dulu jendela pencarian sweep
-        # (sweep_recency_bars) sampai batas wajar; kalau sudah mentok dan masih
-        # dominan juga, baru matikan requirement-nya sepenuhnya sebagai upaya
-        # terakhir — supaya scan/learn tidak macet permanen menunggu data yang
-        # tidak akan pernah datang.
-        if diagnosis == "SWEEP_REQUIREMENT_DOMINANT":
-            recency_cap = 8.0
-            current_recency = _safe_float(params.get("sweep_recency_bars", 3.0), 3.0)
-            if current_recency < recency_cap:
-                new_recency = min(recency_cap, current_recency + 2.0)
-                return ({"sweep_recency_bars": new_recency}, {"type": "RELAX_SWEEP_RECENCY", "old": current_recency, "new": new_recency, "frequency": freq})
-            if bool(params.get("require_liquidity_sweep", True)):
-                return ({"require_liquidity_sweep": False}, {"type": "DISABLE_SWEEP_REQUIREMENT", "old": True, "new": False, "frequency": freq})
-            return None
-        # Gate killzone session: tidak ada langkah menengah yang masuk akal
-        # (sesi cuma kategori LONDON/NEWYORK/ASIA/OFF_HOURS), jadi kalau
-        # dominan menolak setup, requirement-nya dimatikan langsung.
-        if diagnosis == "KILLZONE_FILTER_DOMINANT":
-            if bool(params.get("require_killzone_session", True)):
-                return ({"require_killzone_session": False}, {"type": "DISABLE_KILLZONE_REQUIREMENT", "old": True, "new": False, "frequency": freq})
-            return None
         return None
-
-    def _attempt_bottleneck_relax_locked(self, strategy_engine: Any, frequency: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Jalur relaksasi KHUSUS untuk bottleneck struktural pada filter entry
-        (mis. wajib liquidity sweep, wajib killzone session, entry terlalu
-        jauh) — independen dari MIN_TOTAL_SAMPLE_FOR_AUDIT/trades_since_last_change.
-
-        audit() utama sengaja butuh riwayat trade tertutup dulu karena dia
-        mengklaim soal PERFORMA (menaikkan/menurunkan threshold berdasar
-        win-rate — butuh hasil nyata). Tapi kalau filter entry terlalu ketat
-        sampai TIDAK PERNAH ada entry yang terjadi, trade_history tidak akan
-        PERNAH mencapai sampel minimum itu — sistem belajar jadi mandek
-        permanen menunggu data yang tidak akan pernah datang. Relaksasi di
-        sini hanya butuh data SCAN (kandidat yang ditolak & kenapa), bukan
-        hasil trade, jadi aman dan memang dirancang untuk jalan lebih awal.
-        """
-        now = _now()
-        if now - self.last_bottleneck_relax_ts < AUDIT_COOLDOWN_SECONDS:
-            return None
-        recommendation = self._recommend_bottleneck_relaxation(frequency)
-        if recommendation is None:
-            return None
-        proposed, evidence = recommendation
-        current_params = dict(getattr(strategy_engine, "params", {}))
-        shape_ok, shape_reason, shape_meta = self.validate_candidate_parameter_change(current_params, proposed)
-        evidence = dict(evidence)
-        evidence["shape_validation"] = shape_meta
-        if not shape_ok:
-            self._record_event_log("BOTTLENECK_RELAX", "REJECTED SHAPE | %s", shape_reason, level=logging.WARNING)
-            return {"status": "REJECTED", "reason": shape_reason, "proposal": proposed}
-        try:
-            change_record = strategy_engine.apply_update(
-                proposed,
-                reason=f"Bottleneck relax (pre-trade-sample): {evidence.get('type', 'MODEL_CHANGE')}",
-                evidence=evidence,
-            )
-        except Exception as exc:
-            self._record_event_log("BOTTLENECK_RELAX", "FAILED | %s", exc, level=logging.WARNING)
-            return {"status": "FAILED", "reason": str(exc), "proposal": proposed}
-        self.last_bottleneck_relax_ts = now
-        self.strategy_change_log.append(change_record)
-        self.strategy_versions[str(change_record.get("version"))] = strategy_engine.export_state()
-        self.decision_history.append({
-            "type": "BOTTLENECK_RELAXED", "timestamp": now, "proposal": proposed,
-            "evidence": evidence, "change_record": change_record,
-        })
-        self.current_strategy_version = change_record.get("version")
-        self.strategy_state = strategy_engine.export_state()
-        self._record_event_log("BOTTLENECK_RELAX", "APPLIED | %s -> v%s", proposed, change_record.get("version"))
-        return {"status": "APPLIED", "proposal": proposed, "evidence": evidence, "strategy_version": change_record.get("version")}
 
     # ------------------------------------------------------------------
     # Ollama critic — advisor only
@@ -2462,27 +2387,8 @@ class LearnEngine:
                 # Even with insufficient trade sample, frequency/scanning analysis remains active.
                 scan_diag = self._scan_only_decision_locked(frequency, scan_analysis)
                 report["scan_decision"] = scan_diag
-                # BUG FIX: sebelumnya jalur ini CUMA melabeli bottleneck (mis.
-                # SWEEP_REQUIREMENT_DOMINANT/KILLZONE_FILTER_DOMINANT/ENTRY_TOO_FAR)
-                # tanpa pernah bertindak, karena aksi relaksasi hanya dipanggil
-                # di bawah gate MIN_TOTAL_SAMPLE_FOR_AUDIT. Kalau filter entry
-                # yang baru (sweep wajib, killzone wajib) sampai membuat 0 entry
-                # sama sekali, trade_history tidak akan pernah tumbuh dan bot
-                # macet permanen. Sekarang dicoba direlaksasi otomatis di sini,
-                # berbasis data scan saja (lihat _attempt_bottleneck_relax_locked).
-                relax_result = self._attempt_bottleneck_relax_locked(strategy_engine, frequency)
-                if relax_result:
-                    report["bottleneck_relax"] = relax_result
-                if relax_result and relax_result.get("status") == "APPLIED":
-                    report["action"] = "BOTTLENECK_RELAXED"
-                    report["reason"] = (
-                        f"sample trade belum cukup ({len(self.trade_history)}/{MIN_TOTAL_SAMPLE_FOR_AUDIT}); "
-                        f"bottleneck struktural terdeteksi & direlaksasi otomatis: {relax_result.get('proposal')}"
-                    )
-                    self._record_event_log("DECISION", "BOTTLENECK_RELAXED | %s", relax_result.get("proposal"))
-                else:
-                    report["reason"] = f"sample trade belum cukup ({len(self.trade_history)}/{MIN_TOTAL_SAMPLE_FOR_AUDIT}); scan brain tetap aktif"
-                    self._record_event_log("DECISION", "OBSERVE_ONLY | %s", report["reason"])
+                report["reason"] = f"sample trade belum cukup ({len(self.trade_history)}/{MIN_TOTAL_SAMPLE_FOR_AUDIT}); scan brain tetap aktif"
+                self._record_event_log("DECISION", "OBSERVE_ONLY | %s", report["reason"])
                 self.last_audit_report = report
                 self.last_audit_ts = now
                 self.maybe_checkpoint(reason="audit_observe_only")
@@ -2602,7 +2508,7 @@ class LearnEngine:
     def _scan_only_decision_locked(self, frequency: Dict[str, Any], scan_analysis: Dict[str, Any]) -> Dict[str, Any]:
         status = str(frequency.get("status", "NO_DATA"))
         diagnosis = scan_analysis.get("dominant_diagnosis")
-        if status in {"STRUCTURE_OR_ENTRY_TOO_RESTRICTIVE", "ENTRY_TOO_CLOSE", "ENTRY_TOO_FAR", "STALE_REJECT_HIGH", "GEOMETRY_REJECT_HIGH", "SWEEP_REQUIREMENT_DOMINANT", "KILLZONE_FILTER_DOMINANT"}:
+        if status in {"STRUCTURE_OR_ENTRY_TOO_RESTRICTIVE", "ENTRY_TOO_CLOSE", "ENTRY_TOO_FAR", "STALE_REJECT_HIGH", "GEOMETRY_REJECT_HIGH"}:
             decision = "INVESTIGATE_BOTTLENECK"
         elif status == "THRESHOLD_TOO_HIGH_OR_STRICT":
             decision = "OBSERVE_THRESHOLD"
@@ -2646,6 +2552,13 @@ class LearnEngine:
             }
 
 
+def suggest_frequency_adjustment(engine: LearnEngine) -> Dict[str, Any]:
+    """Public read-only frequency diagnosis used by higher-level orchestration."""
+    freq = engine.analyze_scan_memory(window=5000)
+    qq = engine.quality_quantity_matrix()
+    return {"frequency": freq, "quality_quantity": qq, "recommendation": qq.get("decision", "OBSERVE")}
+
+
 # ---------------------------------------------------------------------------
 # Compatibility aliases / helper functions
 # ---------------------------------------------------------------------------
@@ -2663,5 +2576,5 @@ __all__ = [
     "OUTCOME_TYPES",
     "ECONOMIC_OUTCOMES",
     "CONFIDENCE_BUCKETS",
-    "new_default_learn",
+    "new_default_learn", "suggest_frequency_adjustment",
 ]
