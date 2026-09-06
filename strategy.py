@@ -924,7 +924,8 @@ STRATEGY_SCHEMA_VERSION = 2
 SIGNAL_STATUSES = (
     "NO_SETUP", "INVALID_GEOMETRY", "STALE_SETUP", "LOW_EXPECTED_VALUE",
     "TOO_CLOSE", "TOO_FAR", "LOW_LIQUIDITY_CONTEXT", "REGIME_MISMATCH",
-    "BTC_CONFLICT", "VALID_LOW_CONF", "VALID_HIGH_CONF",
+    "BTC_CONFLICT", "NO_LIQUIDITY_SWEEP", "OUTSIDE_KILLZONE",
+    "VALID_LOW_CONF", "VALID_HIGH_CONF",
 )
 MONITOR_ACTIONS = ("HOLD", "TRAIL", "NO_TRAIL", "EXIT_RISK", "STALE")
 
@@ -964,6 +965,22 @@ VNEXT_DEFAULTS: Dict[str, Any] = {
     "allow_sideways": True,
     "score_high_confidence": 70.0,
     "score_low_confidence": 45.0,
+    # --- Revisi konsep dari materi SMC/ICT (video breakdown) ---
+    # 1) Entry presisi/dekat ala Candle Range Theory & Silver Bullet: kalau
+    #    displacement (candle impuls) kuat, market cenderung TIDAK memberi
+    #    retracement dalam sampai 0.618 — pakai level yang lebih dangkal biar
+    #    tidak keburu lari ke TP sebelum sempat terisi.
+    "entry_retracement_fib_shallow": 0.382,
+    "displacement_strength_for_shallow_entry": 1.0,
+    # 2) Wajib ada liquidity sweep/inducement dulu sebelum entry diterima
+    #    (materi "How the Market Traps Traders with Inducement" & "3 Types of
+    #    Liquidity Targeted by Smart Money"). Sweep dicari dalam beberapa bar
+    #    terakhir (bukan cuma candle paling akhir) supaya tidak terlalu sempit.
+    "require_liquidity_sweep": True,
+    "sweep_recency_bars": 3,
+    # 3) Filter sesi waktu lebih ketat — hanya killzone London/New York
+    #    (materi "London Killzone: Precision Entry Setup with Liquidity & Timing").
+    "require_killzone_session": True,
     "HISTORICAL_EXPECTANCY_R": 0.0,
     "HISTORICAL_TP_RATE": 0.50,
     "HISTORICAL_SL_RATE": 0.50,
@@ -1233,24 +1250,37 @@ def vn_equal_levels(swings: Sequence[Dict[str, Any]], atr_now: float, tol_atr: f
 def vn_liquidity_sweep(
     candles: Sequence[Dict[str, Any]], lookback: int, atr_now: float, params: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
+    """Deteksi liquidity sweep/inducement: candle yang menembus liquidity pool
+    lama lalu reclaim (jebakan/stop-hunt sebelum reversal — materi "How the
+    Market Traps Traders with Inducement").
+
+    Diperiksa mundur sampai `sweep_recency_bars` candle terakhir (bukan cuma
+    candle paling akhir) supaya sweep yang baru terjadi 1-2 bar lalu masih
+    dianggap "inducement segar", bukan langsung dianggap tidak ada.
+    """
     if len(candles) < 5: return None
-    lb = min(max(5, _vn_int(lookback, 50)), len(candles)-1)
-    prior = candles[-lb:-1]; last = candles[-1]
-    ph = max(_vn_float(c["h"]) for c in prior); pl = min(_vn_float(c["l"]) for c in prior)
-    h = _vn_float(last["h"]); l = _vn_float(last["l"]); c = _vn_float(last["c"])
-    rng = max(_vn_candle_range(last), atr_now, 1e-9)
-    wick_min = _vn_float(params.get("sweep_wick_min_atr"), 0.05) * max(atr_now, 1e-9)
-    reclaim_min = _vn_float(params.get("sweep_close_reclaim_pct"), 0.35)
-    if h > ph and c < ph:
-        penetration = h - ph; wick = _vn_upper_wick(last); reclaim = (ph-c)/rng
-        if wick >= wick_min or penetration >= wick_min:
-            quality = _vn_clip(0.45 + 0.35*_vn_clip(reclaim/max(reclaim_min,1e-9)) + 0.20*_vn_clip(penetration/max(atr_now,1e-9)))
-            return {"type":"BEARISH_SWEEP","level":ph,"penetration":penetration,"wick":wick,"reclaim":reclaim,"quality":quality}
-    if l < pl and c > pl:
-        penetration = pl - l; wick = _vn_lower_wick(last); reclaim = (c-pl)/rng
-        if wick >= wick_min or penetration >= wick_min:
-            quality = _vn_clip(0.45 + 0.35*_vn_clip(reclaim/max(reclaim_min,1e-9)) + 0.20*_vn_clip(penetration/max(atr_now,1e-9)))
-            return {"type":"BULLISH_SWEEP","level":pl,"penetration":penetration,"wick":wick,"reclaim":reclaim,"quality":quality}
+    recency = max(1, _vn_int(params.get("sweep_recency_bars"), 1))
+    for back in range(recency):
+        idx = len(candles) - 1 - back
+        if idx < 4: break
+        lb = min(max(5, _vn_int(lookback, 50)), idx)
+        prior = candles[idx - lb:idx]; last = candles[idx]
+        if not prior: continue
+        ph = max(_vn_float(c["h"]) for c in prior); pl = min(_vn_float(c["l"]) for c in prior)
+        h = _vn_float(last["h"]); l = _vn_float(last["l"]); c = _vn_float(last["c"])
+        rng = max(_vn_candle_range(last), atr_now, 1e-9)
+        wick_min = _vn_float(params.get("sweep_wick_min_atr"), 0.05) * max(atr_now, 1e-9)
+        reclaim_min = _vn_float(params.get("sweep_close_reclaim_pct"), 0.35)
+        if h > ph and c < ph:
+            penetration = h - ph; wick = _vn_upper_wick(last); reclaim = (ph-c)/rng
+            if wick >= wick_min or penetration >= wick_min:
+                quality = _vn_clip(0.45 + 0.35*_vn_clip(reclaim/max(reclaim_min,1e-9)) + 0.20*_vn_clip(penetration/max(atr_now,1e-9)))
+                return {"type":"BEARISH_SWEEP","level":ph,"penetration":penetration,"wick":wick,"reclaim":reclaim,"quality":quality,"age_bars":back}
+        if l < pl and c > pl:
+            penetration = pl - l; wick = _vn_lower_wick(last); reclaim = (c-pl)/rng
+            if wick >= wick_min or penetration >= wick_min:
+                quality = _vn_clip(0.45 + 0.35*_vn_clip(reclaim/max(reclaim_min,1e-9)) + 0.20*_vn_clip(penetration/max(atr_now,1e-9)))
+                return {"type":"BULLISH_SWEEP","level":pl,"penetration":penetration,"wick":wick,"reclaim":reclaim,"quality":quality,"age_bars":back}
     return None
 
 
@@ -1327,13 +1357,17 @@ def vn_impulse(
 
 
 def vn_entry_assessment(
-    candles: Sequence[Dict[str, Any]], current: float, entry: float, direction: str, impulse: Dict[str, Any], atr: float, params: Dict[str, Any]
+    candles: Sequence[Dict[str, Any]], current: float, entry: float, direction: str, impulse: Dict[str, Any], atr: float, params: Dict[str, Any], target_fib: Optional[float] = None
 ) -> Dict[str, Any]:
     distance=abs(current-entry)/max(atr,1e-9)
     rng=max(_vn_float(impulse.get("range")),1e-9)
     if direction=="BUY": pullback=(impulse["high"]-current)/rng
     else: pullback=(current-impulse["low"])/rng
-    retrace=_vn_clip(1.0-abs(pullback-_vn_float(params.get("entry_retracement_fib"),0.618))/0.50)
+    # target_fib: pakai level fib yang BENERAN dipakai untuk entry ini (bisa
+    # dangkal kalau displacement kuat), bukan selalu default 0.618, supaya skor
+    # retracement_quality tidak menghukum entry presisi yang memang disengaja.
+    fib_target=target_fib if target_fib is not None else _vn_float(params.get("entry_retracement_fib"),0.618)
+    retrace=_vn_clip(1.0-abs(pullback-fib_target)/0.50)
     min_offset=_vn_float(params.get("entry_min_offset_atr"),0.25)
     max_offset=_vn_float(params.get("entry_max_distance_atr"),2.25)
     too_close=distance<min_offset
@@ -1466,7 +1500,8 @@ def vn_dynamic_confidence(
 
 def vn_diagnosis(
     setup: bool, geometry_ok: bool, entry: Optional[Dict[str,Any]], tp: Optional[Dict[str,Any]], confidence: float,
-    regime_ok: bool, btc_conflict: bool, low_liquidity: bool, data_quality: Dict[str,Any], params: Dict[str,Any]
+    regime_ok: bool, btc_conflict: bool, low_liquidity: bool, data_quality: Dict[str,Any], params: Dict[str,Any],
+    sweep_ok: bool = True, session_ok: bool = True,
 ) -> str:
     if not setup: return "NO_SETUP"
     if data_quality.get("stale"): return "STALE_SETUP"
@@ -1477,6 +1512,12 @@ def vn_diagnosis(
     if low_liquidity: return "LOW_LIQUIDITY_CONTEXT"
     if btc_conflict: return "BTC_CONFLICT"
     if not regime_ok: return "REGIME_MISMATCH"
+    # Materi "How the Market Traps Traders with Inducement": entry SMC yang
+    # sehat terjadi SETELAH liquidity sweep, bukan sebelumnya.
+    if not sweep_ok: return "NO_LIQUIDITY_SWEEP"
+    # Materi "London Killzone": di luar jam London/New York, likuiditas & niat
+    # institusional lebih tipis -> entry dianggap tidak layak.
+    if not session_ok: return "OUTSIDE_KILLZONE"
     if tp and _vn_float(tp.get("expected_r"),0)<0: return "LOW_EXPECTED_VALUE"
     return "VALID_HIGH_CONF" if confidence>=_vn_float(params.get("score_high_confidence"),70) else "VALID_LOW_CONF"
 
@@ -1616,13 +1657,21 @@ class StrategyVNext:
         pools["nearest_equal_high"]=min([x for x in pools["equal_highs"] if x>current],default=None); pools["nearest_equal_low"]=max([x for x in pools["equal_lows"] if x<current],default=None)
         diagnostics["liquidity"]=pools
         disp=vn_displacement(work,atr,p); fvg_values=vn_fvgs(work,atrs,_vn_float(p.get("fvg_min_size_atr"),0.08),_vn_int(p.get("fvg_max_age_bars"),24)); aligned=[x for x in fvg_values if x["type"]==("BULLISH_FVG" if direction=="BUY" else "BEARISH_FVG")]; fvg=aligned[-1] if aligned else None; fvg_score=vn_fvg_quality(fvg,direction,p)
-        impulse=vn_impulse(work,swings,atr,_vn_float(p.get("entry_retracement_fib"),0.618),direction)
+        base_fib=_vn_float(p.get("entry_retracement_fib"),0.618)
+        # Candle Range Theory / Silver Bullet: kalau candle displacement ke arah
+        # sinyal cukup kuat, market cenderung tidak memberi retracement dalam
+        # sampai 0.618 sebelum lanjut — pakai golden pocket yang lebih dangkal
+        # (default 0.382) supaya entry presisi & lebih mungkin terisi sebelum
+        # TP tersentuh duluan.
+        strong_displacement = bool(disp and disp.get("direction")==direction and _vn_float(disp.get("strength"),0)>=_vn_float(p.get("displacement_strength_for_shallow_entry"),1.0))
+        fib_used = _vn_float(p.get("entry_retracement_fib_shallow"),0.382) if strong_displacement else base_fib
+        impulse=vn_impulse(work,swings,atr,fib_used,direction)
         if not impulse:
             diagnostics["status"]="NO_SETUP"; diagnostics["reasons"].append("NO_USABLE_IMPULSE"); self.last_diagnostics=diagnostics; return None,diagnostics
         entry=_vn_float(impulse["entry"])
         if direction=="BUY" and current-entry < atr*_vn_float(p.get("entry_min_offset_atr"),0.25): entry=current-atr*_vn_float(p.get("entry_min_offset_atr"),0.25)
         if direction=="SELL" and entry-current < atr*_vn_float(p.get("entry_min_offset_atr"),0.25): entry=current+atr*_vn_float(p.get("entry_min_offset_atr"),0.25)
-        entry_info=vn_entry_assessment(work,current,entry,direction,impulse,atr,p); diagnostics["entry"]={**entry_info,"entry":entry,"impulse":impulse}
+        entry_info=vn_entry_assessment(work,current,entry,direction,impulse,atr,p,target_fib=fib_used); diagnostics["entry"]={**entry_info,"entry":entry,"impulse":impulse}
         regime_ok=direction=="BUY" if regime=="BULLISH_TREND" else direction=="SELL" if regime=="BEARISH_TREND" else (regime=="SIDEWAYS" and bool(p.get("allow_sideways",True))) or regime not in ("LOW_VOLATILITY","HIGH_VOLATILITY")
         btc_info=vn_btc_alignment(symbol,direction,work,btc,p,regime); diagnostics["btc"]=btc_info
         sl=vn_build_sl(direction,entry,atr,impulse,swings,sweep,p); diagnostics["sl"]=sl
@@ -1644,19 +1693,39 @@ class StrategyVNext:
         components=vn_component_scores(structure_signal,liquidity_signal,entry_signal,rr_signal,momentum_alignment,normality,btc_info.get("alignment_score",0.5),btc_info.get("regime_alignment",0.5),session_signal,confirmation,freshness,ev_signal,p)
         score=vn_dynamic_confidence(components,entry_info,tp,sl,regime_ok,bool(btc_info.get("conflict")),p)
         low_liq=vol_rank<=0.10 and not sweep
-        status=vn_diagnosis(True,geom_ok,entry_info,tp,score["final"],regime_ok,bool(btc_info.get("conflict")),low_liq,quality,p)
-        diagnostics["market"]={"regime":regime,"session":session,"breadth":dict(market_context or {}),"regime_ok":regime_ok}
+        # Gate #2 (inducement wajib): sweep harus SEARAH sinyal (BULLISH_SWEEP
+        # untuk BUY, BEARISH_SWEEP untuk SELL) baru dianggap valid inducement.
+        sweep_aligned=bool(sweep and sweep.get("type")==("BULLISH_SWEEP" if direction=="BUY" else "BEARISH_SWEEP"))
+        sweep_ok = sweep_aligned or not bool(p.get("require_liquidity_sweep", True))
+        # Gate #3 (killzone wajib): hanya sesi London/New York yang lolos.
+        session_ok = (session in ("LONDON","NEWYORK")) or not bool(p.get("require_killzone_session", True))
+        status=vn_diagnosis(True,geom_ok,entry_info,tp,score["final"],regime_ok,bool(btc_info.get("conflict")),low_liq,quality,p,sweep_ok=sweep_ok,session_ok=session_ok)
+        diagnostics["market"]={"regime":regime,"session":session,"breadth":dict(market_context or {}),"regime_ok":regime_ok,"sweep_ok":sweep_ok,"session_ok":session_ok}
         diagnostics["score"]={**score,"components":components}
         diagnostics["status"]=status
         threshold=self.get_active_threshold(); passed=score["final"]>=threshold
         diagnostics["threshold"]={"active":threshold,"passed":passed}
-        reasons=[f"{event.get('bos') or event.get('choch')} {direction}",f"trend slope={'aligned' if trend_dir==direction else 'opposed'}",f"entry OTE={_vn_float(p.get('entry_retracement_fib'),0.618)*100:.0f}%",f"RR={tp['rr']:.2f}",f"expectedR={tp['expected_r']:.2f}",f"viability={status}"]
+        # BUG FIX: vn_diagnosis() sudah mendeteksi setup yang secara struktural
+        # tidak layak diambil (TOO_FAR/TOO_CLOSE/STALE_SETUP/LOW_LIQUIDITY_CONTEXT/
+        # REGIME_MISMATCH/BTC_CONFLICT/LOW_EXPECTED_VALUE), tapi sebelumnya status
+        # ini CUMA dilaporkan, tidak pernah dipakai buat menolak sinyal — satu-
+        # satunya gerbang nyata adalah confidence>=threshold. Karena ACTIVE_THRESHOLD
+        # sengaja mulai dari 0% (bootstrap learn.py), semua setup lolos meski
+        # entry-nya sendiri sudah diberi label "kemungkinan besar tidak akan
+        # terisi" (TOO_FAR/STALE_SETUP). Ini akar penyebab 24/24 trade berakhir
+        # TIMEOUT (TP tersentuh sebelum entry limit terisi, pnl selalu 0%).
+        # Sekarang status yang bukan VALID_* ikut memblokir entry riil, terpisah
+        # dari enforce_threshold=False yang dipakai jalur diagnostik/"eligible
+        # signal" report (itu memang sengaja menampilkan semua kandidat apa
+        # adanya, jadi tidak disentuh).
+        disqualifying_status = status not in ("VALID_HIGH_CONF", "VALID_LOW_CONF")
+        reasons=[f"{event.get('bos') or event.get('choch')} {direction}",f"trend slope={'aligned' if trend_dir==direction else 'opposed'}",f"entry OTE={fib_used*100:.0f}%"+(" (shallow/displacement)" if strong_displacement else ""),f"RR={tp['rr']:.2f}",f"expectedR={tp['expected_r']:.2f}",f"viability={status}"]
         if sweep: reasons.append(f"sweep={sweep['type']}")
         if fvg: reasons.append("fresh FVG")
         if btc_info.get("aligned"): reasons.append("BTC aligned")
         setup=Setup(pair=symbol,direction=direction,entry=entry,tp=tp["tp"],sl=sl["sl"],confidence=score["final"],reason=reasons,components=components,setup_type="+".join([x for x in (event.get("bos") or event.get("choch") or "STRUCTURE", "SWEEP" if sweep and sweep.get("type")==("BULLISH_SWEEP" if direction=="BUY" else "BEARISH_SWEEP") else "", "DISPLACEMENT" if disp and disp.get("direction")==direction else "", "FVG" if fvg else "") if x]),regime=regime,session=session,atr=atr,timestamp=_vn_float(work[-1].get("t")),strategy_version=self.version,threshold_passed=passed,reference_levels={"bos":event.get("bos"),"choch":event.get("choch"),"broken_level":event.get("level"),"swing_hierarchy":hierarchy,"equal_highs":pools.get("equal_highs",[])[-5:],"equal_lows":pools.get("equal_lows",[])[-5:],"sweep":sweep,"fvg":fvg,"impulse":impulse,"rr":tp["rr"],"expected_r":tp["expected_r"],"tp_reach_probability":tp["reach_probability"],"entry_distance_atr":entry_info["distance_atr"],"fill_likelihood":entry_info["fill_likelihood"],"stale":entry_info["stale"],"geometry":geom_reason,"diagnosis":status,"btc_correlation":btc_info.get("correlation"),"btc_aligned":btc_info.get("aligned")},viability=status,quality_score=score["setup_quality"],execution_score=score["execution"],context_score=score["context"],freshness_score=score["freshness"],expected_value_score=score["expected_value"])
         self.last_diagnostics=diagnostics
-        if enforce_threshold and not passed: return None,diagnostics
+        if enforce_threshold and (not passed or disqualifying_status): return None,diagnostics
         return setup,diagnostics
 
     def analyze(self,symbol:str,candles:Sequence[Dict[str,Any]],btc_candles:Optional[Sequence[Dict[str,Any]]]=None,enforce_threshold:bool=True)->Optional[Setup]:
