@@ -549,9 +549,9 @@ class LearnEngine:
         self.checkpoint_path = checkpoint_path
         self.backup_path = backup_path or (checkpoint_path + ".backup")
         self.checksum_path = checkpoint_path + ".sha256"
-        self.ollama_url = ollama_url or os.environ.get("OLLAMA_URL", "http://localhost:11434")
+        self.ollama_url = self._resolve_ollama_url(ollama_url)
         self.ollama_api_key = ollama_api_key or os.environ.get("OLLAMA_API_KEY", "")
-        self.ollama_model = os.environ.get("OLLAMA_MODEL", "llama3")
+        self.ollama_model = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b")
         self.git_enabled = bool(git_enabled)
         self.git_repo_dir = git_repo_dir or "."
         # Autosave pushes the checkpoint straight to GitHub's Contents API.
@@ -563,9 +563,9 @@ class LearnEngine:
         self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
         self.github_repo = github_repo or os.environ.get("REPO_NAME", "")
         self.github_branch = github_branch or os.environ.get("GITHUB_BRANCH", "main")
-        self.github_remote_path = github_remote_path or os.environ.get(
-            "LEARN_CHECKPOINT_REMOTE_PATH", os.path.basename(checkpoint_path)
-        )
+        self.github_remote_dir = (
+            github_remote_path or os.environ.get("LEARN_MEMORY_REMOTE_DIR", "memory")
+        ).strip("/") or "memory"
         self.notification_sink = notification_sink
         self.checkpoint_interval_seconds = max(30, int(checkpoint_interval_seconds))
         self._lock = RLock()
@@ -942,25 +942,15 @@ class LearnEngine:
                 return False
         return self.save_checkpoint(reason=reason)
 
-    def _git_commit_push(self) -> None:
-        """Push the current checkpoint file to GitHub via the Contents API.
-
-        No local git CLI, no working tree assumption — just an HTTP GET (to
-        pick up the current file sha, if any) followed by a PUT with the
-        checkpoint bytes, exactly like try.py's own /ganti path.
-        """
-        if not self.github_token or not self.github_repo:
-            self._record_event_log(
-                "GIT", "SKIPPED | GITHUB_TOKEN/REPO_NAME belum diset", level=logging.DEBUG
-            )
-            return
+    def _git_push_one_file(self, local_path: str, remote_name: str) -> Tuple[bool, str]:
+        """PUT a single local file to GitHub Contents API under memory/<remote_name>.
+        Returns (ok, detail) — never raises."""
         try:
-            with open(self.checkpoint_path, "rb") as f:
+            with open(local_path, "rb") as f:
                 content = f.read()
         except OSError as exc:
-            self._record_event_log("GIT", "WARNING | tidak bisa baca checkpoint: %s", exc)
-            return
-        path = self.github_remote_path.strip("/")
+            return False, f"tidak bisa baca {local_path}: {exc}"
+        path = f"{self.github_remote_dir.strip('/')}/{remote_name}"
         headers = {
             "Authorization": f"Bearer {self.github_token}",
             "Accept": "application/vnd.github+json",
@@ -978,16 +968,59 @@ class LearnEngine:
                 payload["sha"] = sha
             put_resp = requests.put(api_url, headers=headers, json=payload, timeout=30)
             if put_resp.status_code >= 400:
-                self._record_event_log(
-                    "GIT", "WARNING | push gagal HTTP %s: %s",
-                    put_resp.status_code, str(put_resp.text)[:200],
-                )
-            else:
-                self._record_event_log("GIT", "PUSH OK | %s@%s", path, self.github_branch)
+                return False, f"HTTP {put_resp.status_code}: {str(put_resp.text)[:180]}"
+            return True, path
         except requests.RequestException as exc:
-            self._record_event_log("GIT", "WARNING | %s", exc)
+            return False, str(exc)[:180]
         except Exception as exc:  # pragma: no cover
-            self._record_event_log("GIT", "WARNING | %s", exc)
+            return False, str(exc)[:180]
+
+    def _git_commit_push(self) -> None:
+        """Push the whole learn-memory folder to GitHub via the Contents API.
+
+        No local git CLI, no working tree assumption — just an HTTP GET (to
+        pick up each file's current sha, if any) followed by a PUT with the
+        file bytes, exactly like try.py's own /ganti path. Pushes checkpoint
+        + backup + checksum together under memory/ so "seluruh progress"
+        (not just the primary file) actually lands in the repo, and always
+        tells Telegram whether the push worked or not.
+        """
+        if not self.github_token or not self.github_repo:
+            self._record_event_log(
+                "GIT", "SKIPPED | GITHUB_TOKEN/REPO_NAME belum diset", level=logging.DEBUG
+            )
+            return
+        files = [
+            (self.checkpoint_path, os.path.basename(self.checkpoint_path)),
+            (self.backup_path, os.path.basename(self.backup_path)),
+            (self.checksum_path, os.path.basename(self.checksum_path)),
+        ]
+        results = []
+        for local_path, remote_name in files:
+            if not os.path.exists(local_path):
+                continue
+            ok, detail = self._git_push_one_file(local_path, remote_name)
+            results.append((remote_name, ok, detail))
+            if ok:
+                self._record_event_log("GIT", "PUSH OK | %s@%s", detail, self.github_branch)
+            else:
+                self._record_event_log("GIT", "WARNING | push %s gagal: %s", remote_name, detail, level=logging.WARNING)
+        ok_count = sum(1 for _, ok, _ in results if ok)
+        if not results:
+            return
+        if ok_count == len(results):
+            self._notify(
+                "GIT_PUSH",
+                f"✅ Autosave GitHub OK — {ok_count} file di `{self.github_remote_dir}/` "
+                f"({self.github_repo}@{self.github_branch})",
+            )
+        else:
+            failed = ", ".join(name for name, ok, _ in results if not ok)
+            self._notify(
+                "GIT_PUSH",
+                f"⚠️ Autosave GitHub sebagian gagal ({ok_count}/{len(results)} sukses) — "
+                f"gagal: {failed}. Cek GITHUB_TOKEN/REPO_NAME/permission repo.",
+            )
 
     # ------------------------------------------------------------------
     # Explicit /open + /save command handlers
@@ -1112,8 +1145,9 @@ class LearnEngine:
 
             direction = str(setup.get("direction", diag.get("direction", "UNKNOWN")))
             setup_type = str(setup.get("setup_type", diag.get("setup_type", "UNKNOWN")))
-            regime = str(setup.get("regime", diag.get("regime", context.get("regime", "UNKNOWN"))))
-            session = str(setup.get("session", diag.get("session", context.get("session", "UNKNOWN"))))
+            diag_market = dict(diag.get("market") or {})
+            regime = str(setup.get("regime", diag_market.get("regime", context.get("regime", "UNKNOWN"))))
+            session = str(setup.get("session", diag_market.get("session", context.get("session", "UNKNOWN"))))
             rr = _safe_float(tp.get("rr", setup.get("reference_levels", {}).get("rr", 0.0)))
             distance_atr = _safe_float(entry.get("distance_atr", entry.get("entry_distance_atr", 0.0)))
             stale = bool(freshness.get("stale", diag.get("stale", False)))
@@ -2266,37 +2300,76 @@ class LearnEngine:
     # ------------------------------------------------------------------
     # Ollama critic — advisor only
     # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_ollama_url(explicit: Optional[str]) -> str:
+        """Resolve the Ollama endpoint to call.
+
+        Sebelumnya default-nya "http://localhost:11434" lalu di-POST ke
+        /api/generate — di server deployment (Render, dst.) tidak ada Ollama
+        lokal yang jalan, jadi selalu "Connection refused". Konfigurasi yang
+        sebenarnya dipakai (lihat OLLAMA_API_KEY + OLLAMA_MODEL di .env) adalah
+        Ollama Cloud (https://ollama.com), yang butuh endpoint /api/chat +
+        Bearer token, bukan Ollama lokal. Default sekarang diarahkan ke sana.
+        OLLAMA_API_URL / OLLAMA_URL tetap bisa dipakai untuk override (mis.
+        kalau suatu saat memang menjalankan Ollama sendiri) — kalau nilainya
+        cuma host tanpa path ("http://localhost:11434"), /api/chat otomatis
+        ditambahkan.
+        """
+        raw = (
+            explicit
+            or os.environ.get("OLLAMA_API_URL", "").strip()
+            or os.environ.get("OLLAMA_URL", "").strip()
+            or "https://ollama.com/api/chat"
+        )
+        if "/api/" in raw:
+            return raw
+        return raw.rstrip("/") + "/api/chat"
+
     def _ollama_critique(self, context: Dict[str, Any]) -> Optional[str]:
-        if not self.ollama_url or requests is None:
+        if not self.ollama_url:
             self._record_event_log("OLLAMA", "SKIP | unavailable")
             return None
-        prompt_context = {
-            "instruction": (
-                "Anda hanya menjadi critic statistik. Jangan memberi order. Jangan mengubah parameter. "
-                "Tinjau blind spots, contradictory evidence, confounding, frequency-quality tradeoff, "
-                "exit attribution, trail critique, dan data freshness concern."
-            ),
-            "evidence": context,
-        }
+        system_prompt = (
+            "Anda hanya menjadi critic statistik untuk bot trading. Jangan memberi order. "
+            "Jangan mengubah parameter apapun secara langsung — hanya memberi opini tertulis. "
+            "Tinjau blind spots, contradictory evidence, confounding, frequency-quality tradeoff, "
+            "exit attribution, trail critique, dan data freshness concern. Jawab ringkas (maks "
+            "~150 kata), bahasa Indonesia, tanpa markdown/format kode."
+        )
+        user_payload = json.dumps(context, ensure_ascii=False, default=str)[:15000]
         try:
             headers = {"Content-Type": "application/json"}
             if self.ollama_api_key:
                 headers["Authorization"] = f"Bearer {self.ollama_api_key}"
             response = requests.post(
-                f"{self.ollama_url.rstrip('/')}/api/generate",
+                self.ollama_url,
                 headers=headers,
-                json={"model": self.ollama_model, "prompt": json.dumps(prompt_context, ensure_ascii=False, default=str)[:15000], "stream": False},
-                timeout=10,
+                json={
+                    "model": self.ollama_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_payload},
+                    ],
+                    "stream": False,
+                },
+                timeout=20,
             )
             if response.status_code == 200:
-                text = str(response.json().get("response", "")).strip()[:4000]
+                data = response.json()
+                text = str((data.get("message") or {}).get("content", "")).strip()[:4000]
+                if not text:
+                    self._record_event_log("OLLAMA", "EMPTY_RESPONSE", level=logging.WARNING)
+                    return None
                 note = {"timestamp": _now(), "response": text, "model": self.ollama_model}
                 self.ollama_critique_history.append(note)
                 self.ollama_critique_history = self.ollama_critique_history[-1000:]
                 self._append_event("OLLAMA_CRITIC", note)
                 self._record_event_log("OLLAMA", "DONE | chars=%s", len(text))
                 return text
-            self._record_event_log("OLLAMA", "HTTP %s", response.status_code, level=logging.WARNING)
+            self._record_event_log(
+                "OLLAMA", "HTTP %s | %s", response.status_code, str(response.text)[:200],
+                level=logging.WARNING,
+            )
         except Exception as exc:
             self._record_event_log("OLLAMA", "UNAVAILABLE | %s", exc, level=logging.WARNING)
         return None
