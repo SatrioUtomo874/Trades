@@ -1877,9 +1877,9 @@ class StateStore:
 # =============================================================================
 
 IMPORTANT_EVENTS = {
-    "BOT_START", "BOT_STOP", "BINANCE_PAUSE", "BINANCE_READY", "SIGNAL_PASSED",
+    "BOT_START", "BOT_STOP", "BINANCE_PAUSE", "BINANCE_READY", "SIGNAL_PASSED", "SIGNAL_NONE",
     "PENDING", "FILLED", "TRAIL", "TP", "SL", "TIMEOUT", "BANNED", "UNBANNED",
-    "MARGIN_SUCCESS", "LEVERAGE_SUCCESS", "AUTOSTOP", "ERROR", "WARNING",
+    "MARGIN_SUCCESS", "LEVERAGE_SUCCESS", "AUTOSTOP", "ERROR", "WARNING", "GIT_PUSH",
 }
 
 
@@ -3226,6 +3226,7 @@ class TradingBot:
         candidates: List[strategy.Setup] = []
         processed = 0
         valid_strategy = 0
+        low_conf_banned = 0
         reject_counts: Dict[str, int] = {}
 
         # BTCUSDT is always context-only: it is fetched for market/BTC-correlation
@@ -3296,6 +3297,19 @@ class TradingBot:
                             float((analysis_diag.get("freshness") or {}).get("score", analysis_diag.get("freshness_score", 0.0))),
                             extra={"symbol": symbol})
                 threshold = max(EXECUTION_CONFIDENCE_FLOOR, self.strategy_engine.get_active_threshold())
+                # Koin dengan confidence <= 50% dari threshold aktif dianggap jauh
+                # dari layak, tidak perlu terus dipantau tiap cycle — ban 8 jam
+                # supaya slot scan-nya digantikan koin lain (§ revisi low-conf ban).
+                low_conf_cutoff = threshold * 0.5
+                if setup.confidence <= low_conf_cutoff:
+                    self.state.ban(symbol, "LOW_CONFIDENCE", 8 * 3600)
+                    low_conf_banned += 1
+                    reject_counts["LOW_CONFIDENCE_BANNED"] = reject_counts.get("LOW_CONFIDENCE_BANNED", 0) + 1
+                    self.learn_engine.record_scan_candidate(setup.to_dict(), False, threshold, "LOW_CONFIDENCE_BANNED")
+                    logger.info("[SCAN %02d/%02d] LOW_CONF_BAN | %s conf=%.1f <= %.1f (50%% dari threshold=%.1f) -> banned 8h",
+                                idx, len(universe), symbol, setup.confidence, low_conf_cutoff, threshold, extra={"symbol": symbol})
+                    time.sleep(1)
+                    continue
                 hard = analysis_diag.get("hard_gates") or {}
                 hard_ok = bool(hard.get("passed", True))
                 eligible_now = bool(hard_ok and setup.confidence >= threshold)
@@ -3345,7 +3359,7 @@ class TradingBot:
             "valid_strategy": valid_strategy, "candidate": valid_strategy, "eligible": len(eligible),
             "threshold_rejected": reject_counts.get("BELOW_ACTIVE_THRESHOLD", 0),
             "avg_confidence": avg_conf, "rejects": reject_counts, "breadth_buy": breadth_buy,
-            "breadth_sell": 100 - breadth_buy, "regime": regime,
+            "breadth_sell": 100 - breadth_buy, "regime": regime, "low_conf_banned": low_conf_banned,
             "btc_price": (btc_candles[-1].get("c") if btc_candles else None),
         }
         self._market_context = dict(summary)
@@ -3363,19 +3377,31 @@ class TradingBot:
         })
         self.state.scan_history = self.state.scan_history[-20:]
 
+        btc_chg_1h = btc_chg_4h = 0.0
+        if btc_candles and len(btc_candles) > 16:
+            try:
+                last_c = float(btc_candles[-1]["c"])
+                c_1h_ago = float(btc_candles[-5]["c"])
+                c_4h_ago = float(btc_candles[-17]["c"])
+                btc_chg_1h = (last_c - c_1h_ago) / c_1h_ago * 100 if c_1h_ago else 0.0
+                btc_chg_4h = (last_c - c_4h_ago) / c_4h_ago * 100 if c_4h_ago else 0.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+        rejects_str = ", ".join(f"{k}={v}" for k, v in reject_counts.items()) or "-"
         if eligible:
-            lines = [f"✅ {len(eligible)} DECISION BRAIN ELIGIBLE\n"]
+            lines = [f"✅ {len(eligible)} decision brain eligible\n"]
             for s in eligible:
                 lines.append(f"• {s.pair} {s.direction} — {s.confidence:.0f}%")
-            lines.append(f"\n📊 Scan\n{len(universe)} requested | {len(universe)} available")
-            lines.append(f"{processed} processed | {valid_strategy} valid strategy")
-            lines.append(f"\n🧠 Average confidence: {avg_conf:.1f}%")
-            lines.append(f"\n🎯 Candidate: {len(candidates)}\nEligible: {len(eligible)}")
-            rejects_str = "\n".join(f"{k}={v}" for k, v in reject_counts.items())
-            lines.append(f"\n🚫 Main rejects:\n{rejects_str}")
-            lines.append(f"\n📈 Breadth\nBUY {breadth_buy:.1f}%\nSELL {100 - breadth_buy:.1f}%")
-            lines.append(f"\nRegime: {regime}")
-            self.telegram.send("\n".join(lines), "SIGNAL_PASSED")
+            lines.append("")
+        else:
+            lines = ["⚠️ Tidak ada decision yang dinyatakan eligible oleh brain.\n"]
+        lines.append(f"📊 Scan: {len(universe)} diminta | {len(universe)} tersedia | {processed} diproses | {valid_strategy} analisa strategy valid")
+        lines.append(f"🧠 Rata-rata confidence scan: {avg_conf:.1f}%")
+        lines.append(f"🎯 Candidate: {len(candidates)} | Eligible: {len(eligible)} | Low-conf ban: {low_conf_banned}")
+        lines.append(f"🚫 Reject utama: `{rejects_str}`")
+        lines.append(f"📈 Breadth BUY {breadth_buy:.1f}% | SELL {100 - breadth_buy:.1f}% | Regime: {regime}")
+        lines.append(f"₿ BTC 1h: {btc_chg_1h:+.2f}% | BTC 4h: {btc_chg_4h:+.2f}%")
+        self.telegram.send("\n".join(lines), "SIGNAL_PASSED" if eligible else "SIGNAL_NONE")
 
     def _make_client_order_id(self, symbol: str, pos_or_setup: Dict[str, Any]) -> str:
         raw = f"{symbol}-{pos_or_setup.get('created_at', time.time())}"
