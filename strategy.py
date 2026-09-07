@@ -264,6 +264,66 @@ def classify_session(ts_ms: float) -> str:
     return "OFF_HOURS"
 
 
+def vn_session_blocks(candles: Sequence[Dict[str, Any]]) -> List[Tuple[int, int, str]]:
+    """Split the candle series into contiguous (start_idx, end_idx, session)
+    blocks. Used to find the current session's opening range and the range
+    of the session immediately before it (the liquidity a killzone move
+    typically targets) — see combined.txt: Opening Range Breakout & London
+    Killzone.
+    """
+    blocks: List[Tuple[int, int, str]] = []
+    if not candles:
+        return blocks
+    cur = classify_session(_vn_float(candles[0].get("t")))
+    start = 0
+    for i in range(1, len(candles)):
+        s = classify_session(_vn_float(candles[i].get("t")))
+        if s != cur:
+            blocks.append((start, i - 1, cur))
+            cur = s
+            start = i
+    blocks.append((start, len(candles) - 1, cur))
+    return blocks
+
+
+def vn_opening_range(candles: Sequence[Dict[str, Any]], bars: int = 3) -> Dict[str, Any]:
+    """Opening Range Breakout: high/low of the first `bars` M15 candles of the
+    CURRENT (most recent) session block. Re-anchors every time the session
+    changes, giving a fresh intraday support/resistance reference.
+    """
+    blocks = vn_session_blocks(candles)
+    if not blocks:
+        return {"valid": False}
+    start, end, label = blocks[-1]
+    window = candles[start:min(start + bars, end + 1)]
+    if not window:
+        return {"valid": False}
+    return {
+        "valid": True, "session": label, "bars_used": len(window),
+        "high": max(_vn_float(c.get("h")) for c in window),
+        "low": min(_vn_float(c.get("l")) for c in window),
+        "complete": len(window) >= min(bars, end - start + 1),
+    }
+
+
+def vn_prior_session_range(candles: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """High/low of the session block immediately before the current one —
+    the liquidity pool London/NY killzone moves typically sweep first.
+    """
+    blocks = vn_session_blocks(candles)
+    if len(blocks) < 2:
+        return {"valid": False}
+    start, end, label = blocks[-2]
+    window = candles[start:end + 1]
+    if not window:
+        return {"valid": False}
+    return {
+        "valid": True, "session": label,
+        "high": max(_vn_float(c.get("h")) for c in window),
+        "low": min(_vn_float(c.get("l")) for c in window),
+    }
+
+
 def classify_volatility_regime(candles: Sequence[Dict[str, float]], params: Dict[str, Any]) -> str:
     """Classify current volatility using ATR relative to price and its historical percentile.
 
@@ -442,6 +502,8 @@ VNEXT_DEFAULTS: Dict[str, Any] = {
     "sweep_wick_min_atr": 0.05,
     "sweep_close_reclaim_pct": 0.35,
     "cisd_lookback": 8,
+    "orb_bars": 3,
+    "session_weights": {"ASIA": 0.45, "LONDON": 1.0, "NEWYORK": 1.0, "OFF_HOURS": 0.30},
     "liquidity_distance_max_atr": 4.5,
     "fvg_min_size_atr": 0.08,
     "fvg_max_age_bars": 24,
@@ -1241,8 +1303,26 @@ class Strategy:
         slope,r2=linreg_slope(closes[-_vn_int(p.get("trend_lookback"),30):]); trend_dir="BUY" if slope>0 else "SELL" if slope<0 else "NEUTRAL"
         diagnostics["structure"]={"bos":event.get("bos"),"choch":event.get("choch"),"direction":event.get("direction"),"level":event.get("level"),"age_bars":event.get("age_bars"),"strength_atr":event.get("strength_atr"),"hierarchy":hierarchy,"trend_direction":trend_dir,"trend_r2":r2}
         if event["direction"]=="NEUTRAL":
-            diagnostics["reasons"].append("NO_STRUCTURE_BREAK_OR_CHOCH"); self.last_diagnostics=diagnostics; return None,diagnostics
-        direction=event["direction"]
+            # Tidak ada BOS/CHOCH yang bersih (market ranging) — ini BUKAN
+            # alasan untuk berhenti menganalisa koin ini sama sekali. Setiap
+            # koin tetap harus punya arah + confidence yang bisa dibandingkan;
+            # yang membedakan hanyalah seberapa rendah confidence-nya lewat
+            # structure_signal yang di-floor jauh di bawah setup yang punya
+            # BOS/CHOCH sungguhan (lihat structure_weak di bawah).
+            diagnostics["reasons"].append("NO_STRUCTURE_BREAK_OR_CHOCH")
+            fallback_mom=_vn_return(closes,_vn_int(p.get("momentum_lookback"),10))
+            if fallback_mom>0: direction="BUY"
+            elif fallback_mom<0: direction="SELL"
+            elif slope>0: direction="BUY"
+            elif slope<0: direction="SELL"
+            else:
+                rwin=work[-20:]; mid=(max(_highs(rwin))+min(_lows(rwin)))/2.0
+                direction="BUY" if current>=mid else "SELL"
+            structure_weak=True
+            diagnostics["structure"]["fallback_direction"]=direction
+        else:
+            direction=event["direction"]
+            structure_weak=False
         regime=self._market_regime(btc,work); session=classify_session(work[-1].get("t",0))
         momentum_fast=_vn_return(closes,_vn_int(p.get("momentum_fast"),5)); momentum_main=_vn_return(closes,_vn_int(p.get("momentum_lookback"),10)); momentum_slow=_vn_return(closes,_vn_int(p.get("momentum_slow"),20))
         momentum_dir="BUY" if momentum_main>0 else "SELL" if momentum_main<0 else "NEUTRAL"
@@ -1261,23 +1341,39 @@ class Strategy:
         order_blocks=vn_detect_order_blocks(work,direction,atr,_vn_int(p.get("structure_lookback"),80)); diagnostics["liquidity"]["order_blocks"]=order_blocks[:3]
         impulse=vn_impulse(work,swings,atr,_vn_float(p.get("entry_retracement_fib"),0.618),direction)
         ob_fallback_used=False
+        minimal_fallback_used=False
         if not impulse:
             # No clean OTE displacement leg — fall back to the freshest order
             # block in this direction so a valid opportunity isn't thrown away
             # just because the impulse detector found nothing. This is what
             # keeps scan frequency up without loosening the quality gates below.
             if not order_blocks:
-                diagnostics["status"]="NO_SETUP"; diagnostics["reasons"].append("NO_USABLE_IMPULSE"); self.last_diagnostics=diagnostics; return None,diagnostics
-            ob=order_blocks[0]; ob_fallback_used=True
-            if direction=="BUY":
-                impulse={"direction":"BUY","low":ob["bottom"],"high":current,"start_index":ob["index"],"end_index":len(work)-1,
-                         "range":max(current-ob["bottom"],atr*0.10),"range_atr":max(current-ob["bottom"],atr*0.10)/atr,
-                         "entry":ob["mid"],"age_bars":ob["age_bars"]}
+                # Ultimate fallback: no impulse AND no order block either.
+                # Still build a minimal entry around the current price rather
+                # than bailing out to NO_SETUP — every coin gets a graded
+                # confidence, this path's is simply pushed very low via
+                # minimal_fallback_used below (entry_signal penalty) plus the
+                # near-zero retracement/freshness it naturally produces.
+                diagnostics["reasons"].append("NO_USABLE_IMPULSE")
+                minimal_fallback_used=True
+                if direction=="BUY":
+                    impulse={"direction":"BUY","low":current-atr*1.5,"high":current,"start_index":max(0,len(work)-6),"end_index":len(work)-1,
+                             "range":atr*1.5,"range_atr":1.5,"entry":current-atr*_vn_float(p.get("entry_min_offset_atr"),0.25),"age_bars":0}
+                else:
+                    impulse={"direction":"SELL","low":current,"high":current+atr*1.5,"start_index":max(0,len(work)-6),"end_index":len(work)-1,
+                             "range":atr*1.5,"range_atr":1.5,"entry":current+atr*_vn_float(p.get("entry_min_offset_atr"),0.25),"age_bars":0}
+                diagnostics["reasons"].append("MINIMAL_FALLBACK_ENTRY")
             else:
-                impulse={"direction":"SELL","low":current,"high":ob["top"],"start_index":ob["index"],"end_index":len(work)-1,
-                         "range":max(ob["top"]-current,atr*0.10),"range_atr":max(ob["top"]-current,atr*0.10)/atr,
-                         "entry":ob["mid"],"age_bars":ob["age_bars"]}
-            diagnostics["reasons"].append("ORDER_BLOCK_FALLBACK_ENTRY")
+                ob=order_blocks[0]; ob_fallback_used=True
+                if direction=="BUY":
+                    impulse={"direction":"BUY","low":ob["bottom"],"high":current,"start_index":ob["index"],"end_index":len(work)-1,
+                             "range":max(current-ob["bottom"],atr*0.10),"range_atr":max(current-ob["bottom"],atr*0.10)/atr,
+                             "entry":ob["mid"],"age_bars":ob["age_bars"]}
+                else:
+                    impulse={"direction":"SELL","low":current,"high":ob["top"],"start_index":ob["index"],"end_index":len(work)-1,
+                             "range":max(ob["top"]-current,atr*0.10),"range_atr":max(ob["top"]-current,atr*0.10)/atr,
+                             "entry":ob["mid"],"age_bars":ob["age_bars"]}
+                diagnostics["reasons"].append("ORDER_BLOCK_FALLBACK_ENTRY")
         entry=_vn_float(impulse["entry"])
         if direction=="BUY" and current-entry < atr*_vn_float(p.get("entry_min_offset_atr"),0.25): entry=current-atr*_vn_float(p.get("entry_min_offset_atr"),0.25)
         if direction=="SELL" and entry-current < atr*_vn_float(p.get("entry_min_offset_atr"),0.25): entry=current+atr*_vn_float(p.get("entry_min_offset_atr"),0.25)
@@ -1303,19 +1399,35 @@ class Strategy:
         geom_ok,geom_reason=validate_geometry(direction,entry,sl["sl"],tp["tp"],atr_val=atr); diagnostics["geometry"]={"valid":geom_ok,"reason":geom_reason}
         if not geom_ok:
             diagnostics["status"]="INVALID_GEOMETRY"; diagnostics["reasons"].append(geom_reason); self.last_diagnostics=diagnostics; return None,diagnostics
+        opening_range=vn_opening_range(work,_vn_int(p.get("orb_bars"),3)); prior_session=vn_prior_session_range(work)
+        time_notes=[]; orb_bonus=0.0; killzone_bonus=0.0
+        if opening_range.get("valid") and opening_range.get("complete"):
+            if direction=="BUY" and current>opening_range["high"] and entry>=opening_range["high"]*0.999:
+                orb_bonus=1.0; time_notes.append(f"ORB breakout BUY ({opening_range['session']})")
+            elif direction=="SELL" and current<opening_range["low"] and entry<=opening_range["low"]*1.001:
+                orb_bonus=1.0; time_notes.append(f"ORB breakout SELL ({opening_range['session']})")
+        if prior_session.get("valid") and sweep:
+            if direction=="BUY" and sweep.get("type")=="BULLISH_SWEEP" and sweep.get("level") is not None and abs(_vn_float(sweep["level"])-prior_session["low"])<=atr*0.5:
+                killzone_bonus=1.0; time_notes.append(f"sweep {prior_session['session']} session low (killzone)")
+            if direction=="SELL" and sweep.get("type")=="BEARISH_SWEEP" and sweep.get("level") is not None and abs(_vn_float(sweep["level"])-prior_session["high"])<=atr*0.5:
+                killzone_bonus=1.0; time_notes.append(f"sweep {prior_session['session']} session high (killzone)")
+        diagnostics["market_time"]={"opening_range":opening_range,"prior_session_range":prior_session,"orb_bonus":orb_bonus,"killzone_bonus":killzone_bonus}
         liquidity_signal=0.0
         if sweep and sweep.get("type")==("BULLISH_SWEEP" if direction=="BUY" else "BEARISH_SWEEP"): liquidity_signal+=0.55*_vn_float(sweep.get("quality"),0)
         if direction=="BUY" and pools.get("nearest_equal_high") is not None: liquidity_signal+=0.25
         if direction=="SELL" and pools.get("nearest_equal_low") is not None: liquidity_signal+=0.25
         if inducement.get("found") and inducement.get("swept"): liquidity_signal+=0.20
+        if killzone_bonus: liquidity_signal+=0.15
         structure_signal=0.35 + 0.35*(1 if event["direction"]==direction else 0) + 0.20*(1 if hierarchy["trend"]==("BULLISH" if direction=="BUY" else "BEARISH") else 0) + 0.10*(1 if trend_dir==direction else 0); structure_signal*=(0.55+0.45*r2)
+        if structure_weak: structure_signal*=0.40
         ob_best=order_blocks[0] if order_blocks else None
         ob_overlap=bool(ob_best) and _vn_float(ob_best.get("bottom"))<=entry<=_vn_float(ob_best.get("top"))
         ob_bonus=0.08*_vn_clip(_vn_float(ob_best.get("quality"),0)/100.0) if ob_overlap else 0.0
         entry_signal=0.35*entry_info["retracement_quality"]+0.20*entry_info["fill_likelihood"]+0.15*entry_info["freshness"]+0.15*(1-entry_info["adverse_excursion_risk"])+0.07*fvg_score+ob_bonus
+        if minimal_fallback_used: entry_signal*=0.45
         rr_signal=_vn_clip(0.50*_vn_float(tp["rr"])/max(1.0,_vn_float(p.get("min_rr"),1.2)*2)+0.25*tp["quality"]+0.25*sl["quality"])
-        session_signal=1.0 if session in ("LONDON","NEWYORK") else 0.35
-        confirmation=0.30*(1 if sweep else 0)+0.20*(1 if disp and disp.get("direction")==direction else 0)+0.20*fvg_score+0.15*momentum_alignment+0.15*(1 if cisd_aligned else 0)
+        session_signal=_vn_clip(_vn_float((p.get("session_weights") or {}).get(session,0.5)))
+        confirmation=0.28*(1 if sweep else 0)+0.18*(1 if disp and disp.get("direction")==direction else 0)+0.18*fvg_score+0.13*momentum_alignment+0.13*(1 if cisd_aligned else 0)+0.10*orb_bonus
         freshness=_vn_clip(0.65*entry_info["freshness"]+0.35*(1-event.get("age_bars",0)/max(1,_vn_int(p.get("structure_age_max_bars"),40))))
         ev_signal=_vn_clip(0.5+_vn_float(tp.get("expected_r"),0)/max(2,abs(_vn_float(tp.get("rr"),0))+1)*0.5)
         components=vn_component_scores(structure_signal,liquidity_signal,entry_signal,rr_signal,momentum_alignment,normality,btc_info.get("alignment_score",0.5),btc_info.get("regime_alignment",0.5),session_signal,confirmation,freshness,ev_signal,p)
@@ -1335,16 +1447,22 @@ class Strategy:
         if inducement.get("found") and inducement.get("swept"): reasons.append("inducement swept")
         if ob_overlap: reasons.append("order block confluence")
         if ob_fallback_used: reasons.append("entry via order block (no clean impulse)")
+        if structure_weak: reasons.append("no clear BOS/CHOCH — fallback direction (low confidence)")
+        if minimal_fallback_used: reasons.append("no impulse/OB — minimal fallback entry (very low confidence)")
+        reasons.extend(time_notes)
         setup_type_parts=[
-            event.get("bos") or event.get("choch") or "STRUCTURE",
+            event.get("bos") or event.get("choch") or ("RANGE" if structure_weak else "STRUCTURE"),
             "SWEEP" if sweep and sweep.get("type")==("BULLISH_SWEEP" if direction=="BUY" else "BEARISH_SWEEP") else "",
             "DISPLACEMENT" if disp and disp.get("direction")==direction else "",
             "FVG" if fvg else "",
             "CISD" if cisd_aligned else "",
             "INDUCEMENT" if inducement.get("found") and inducement.get("swept") else "",
             "OB" if (ob_overlap or ob_fallback_used) else "",
+            "ORB" if orb_bonus else "",
+            "KILLZONE" if killzone_bonus else "",
+            "MINIMAL" if minimal_fallback_used else "",
         ]
-        setup=Setup(pair=symbol,direction=direction,entry=entry,tp=tp["tp"],sl=sl["sl"],confidence=score["final"],reason=reasons,components=components,setup_type="+".join([x for x in setup_type_parts if x]),regime=regime,session=session,atr=atr,timestamp=_vn_float(work[-1].get("t")),strategy_version=self.version,threshold_passed=passed,reference_levels={"bos":event.get("bos"),"choch":event.get("choch"),"broken_level":event.get("level"),"swing_hierarchy":hierarchy,"equal_highs":pools.get("equal_highs",[])[-5:],"equal_lows":pools.get("equal_lows",[])[-5:],"sweep":sweep,"fvg":fvg,"impulse":impulse,"cisd":cisd,"inducement":inducement,"order_block":ob_best,"order_block_fallback":ob_fallback_used,"rr":tp["rr"],"expected_r":tp["expected_r"],"tp_reach_probability":tp["reach_probability"],"entry_distance_atr":entry_info["distance_atr"],"fill_likelihood":entry_info["fill_likelihood"],"stale":entry_info["stale"],"geometry":geom_reason,"diagnosis":status,"btc_correlation":btc_info.get("correlation"),"btc_aligned":btc_info.get("aligned")},viability=status,quality_score=score["setup_quality"],execution_score=score["execution"],context_score=score["context"],freshness_score=score["freshness"],expected_value_score=score["expected_value"])
+        setup=Setup(pair=symbol,direction=direction,entry=entry,tp=tp["tp"],sl=sl["sl"],confidence=score["final"],reason=reasons,components=components,setup_type="+".join([x for x in setup_type_parts if x]),regime=regime,session=session,atr=atr,timestamp=_vn_float(work[-1].get("t")),strategy_version=self.version,threshold_passed=passed,reference_levels={"bos":event.get("bos"),"choch":event.get("choch"),"broken_level":event.get("level"),"swing_hierarchy":hierarchy,"equal_highs":pools.get("equal_highs",[])[-5:],"equal_lows":pools.get("equal_lows",[])[-5:],"sweep":sweep,"fvg":fvg,"impulse":impulse,"cisd":cisd,"inducement":inducement,"order_block":ob_best,"order_block_fallback":ob_fallback_used,"structure_weak":structure_weak,"minimal_fallback":minimal_fallback_used,"rr":tp["rr"],"expected_r":tp["expected_r"],"tp_reach_probability":tp["reach_probability"],"entry_distance_atr":entry_info["distance_atr"],"fill_likelihood":entry_info["fill_likelihood"],"stale":entry_info["stale"],"geometry":geom_reason,"diagnosis":status,"btc_correlation":btc_info.get("correlation"),"btc_aligned":btc_info.get("aligned")},viability=status,quality_score=score["setup_quality"],execution_score=score["execution"],context_score=score["context"],freshness_score=score["freshness"],expected_value_score=score["expected_value"])
         self.last_diagnostics=diagnostics
         if enforce_threshold and not passed: return None,diagnostics
         return setup,diagnostics
