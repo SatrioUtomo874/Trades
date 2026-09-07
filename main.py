@@ -305,6 +305,21 @@ BINANCE_DEFAULT_429_COOLDOWN = 75.0
 BINANCE_ORDER_INTERVAL = 10.0
 BINANCE_REQUEST_INTERVAL = 2.5
 EXECUTION_CONFIDENCE_FLOOR = 55.0
+# §insiden HTTP-418 (IP banned, weight_1m=0 di laporan — lihat
+# BinanceClient._load_persisted_ban docstring untuk analisis lengkap):
+# akar masalah SEBENARNYA bukan jeda antar-request (itu sudah konservatif),
+# tapi JUMLAH posisi baru yang dibuka dalam SATU scan cycle. Sebelum revisi
+# ini, `eligible = candidates[:slots_left]` mengizinkan bot membuka semua
+# slot MAX_POSISI (bisa sampai 20) sekaligus dalam satu cycle — masing-masing
+# posisi baru perlu >=2 request Binance tipe "order" (leverage + place
+# order), masing-masing berjarak 10 detik. 20 posisi berarti puluhan request
+# order beruntun selama beberapa MENIT tanpa jeda antar-cycle — pola beruntun
+# seperti ini persis yang dideteksi & diblokir otomatis oleh Binance,
+# terlepas dari total weight yang secara teknis masih di bawah limit resmi.
+# Cap ini membatasi RATE pembukaan posisi baru, bukan total posisi aktif:
+# kandidat yang tidak kebagian slot di cycle ini otomatis dipertimbangkan
+# lagi di cycle berikutnya (candidate tidak hilang, cuma disebar).
+MAX_NEW_ENTRIES_PER_CYCLE = 3
 
 
 class SecretRedactingFilter(logging.Filter):
@@ -920,7 +935,7 @@ class BinanceUserDataStream:
 # =============================================================================
 
 class BinanceClient:
-    def __init__(self, api_key: str, api_secret: str):
+    def __init__(self, api_key: str, api_secret: str, ban_state_path: Optional[str] = None):
         self.api_key = api_key
         self.api_secret = api_secret.encode() if api_secret else b""
         self.base_url = "https://fapi.binance.com"  # selalu MAINNET — pakai API key/secret asli
@@ -956,6 +971,66 @@ class BinanceClient:
         self._blocked_error: Optional[RateLimitError] = None
         self._leverage_cache: Dict[str, int] = {}
         self._recent_request_mono = deque(maxlen=64)
+        # §insiden HTTP-418: lihat _load_persisted_ban() docstring.
+        self._ban_state_path = ban_state_path or os.path.join("state", "binance_ban_state.json")
+        self._load_persisted_ban()
+
+    def _load_persisted_ban(self) -> None:
+        """Muat status ban Binance yang tersimpan dari proses sebelumnya.
+
+        Root cause insiden HTTP 418 sebelumnya: seluruh governor lokal (weight
+        counter, request-count guard, jeda antar-request) hanya hidup di
+        memori proses ini. Begitu proses di-restart — redeploy, crash, atau
+        restart manual setelah user ganti /max /margin /leverage — gate-nya
+        mulai dari nol. Tapi ban di sisi server Binance itu IP-level dan
+        berbasis waktu absolut, jadi TETAP AKTIF walau proses baru tidak tahu
+        apa-apa soal itu. Akibatnya request PERTAMA proses baru bisa langsung
+        kena 418 lagi — dan itu persis polanya: "Weight 1m: 0" di laporan
+        insiden berarti proses itu belum pernah dapat SATU response sukses
+        pun sebelum diblokir, mustahil kalau ban itu benar-benar baru dipicu
+        oleh traffic proses ini sendiri (traffic asli akan mengisi counter
+        weight lewat header X-MBX-USED-WEIGHT-1M jauh sebelum sempat kena
+        418). Fix: simpan banned_until sebagai epoch time absolut ke disk,
+        muat ulang saat start, dan jangan kirim request live apa pun sampai
+        waktu itu lewat — walau proses baru saja restart.
+        """
+        try:
+            with open(self._ban_state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            banned_until_epoch = float(data.get("banned_until_epoch", 0))
+            remaining = banned_until_epoch - time.time()
+            if remaining > 0:
+                self._blocked_until_mono = time.monotonic() + remaining
+                self._blocked_error = RateLimitError(
+                    f"Binance ban dari sesi sebelumnya masih aktif ({remaining:.0f}s lagi): "
+                    f"{data.get('msg', '')}",
+                    status_code=int(data.get("status") or 418),
+                    retry_after=remaining,
+                    code=data.get("code"),
+                )
+                logger.warning(
+                    "[BINANCE] BAN PERSISTED | masih diblokir %.0fs dari sesi sebelumnya (until_epoch=%s)",
+                    remaining, banned_until_epoch,
+                )
+        except FileNotFoundError:
+            pass
+        except (json.JSONDecodeError, ValueError, TypeError, OSError) as exc:
+            logger.warning("[BINANCE] gagal baca ban state tersimpan: %s", exc)
+
+    def _persist_ban(self, block_seconds: float, status: int, code: Optional[int], msg: str) -> None:
+        """Simpan waktu ban absolut ke disk supaya bertahan lewat restart proses."""
+        try:
+            directory = os.path.dirname(self._ban_state_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(self._ban_state_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "banned_until_epoch": time.time() + block_seconds,
+                    "status": status, "code": code, "msg": (msg or "")[:300],
+                    "recorded_at": time.time(),
+                }, f)
+        except OSError as exc:
+            logger.warning("[BINANCE] gagal simpan ban state ke disk: %s", exc)
 
     def health_check(self) -> Dict[str, Any]:
         """Explicit operator health probe; never called automatically at startup."""
@@ -1044,6 +1119,7 @@ class BinanceClient:
             self._blocked_until_mono, time.monotonic() + block_seconds
         )
         self._blocked_error = err
+        self._persist_ban(block_seconds, status, code, msg)
         self._last_rate_limit_ts = time.time()
         self._last_rate_limit_status = status
         self._consecutive_429 = self._consecutive_429 + 1 if status == 429 else self._consecutive_429
@@ -2082,7 +2158,10 @@ class TradingBot:
             git_enabled=cfg.git_autosave,
         )
         self.bybit = BybitClient(cfg.bybit_api_key, cfg.bybit_api_secret)
-        self.binance = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret)
+        self.binance = BinanceClient(
+            cfg.binance_api_key, cfg.binance_api_secret,
+            ban_state_path=os.path.join(cfg.state_dir, "binance_ban_state.json"),
+        )
         self.telegram = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id)
         self._telegram_error_handler = TelegramErrorLogHandler(lambda: getattr(self, "telegram", None))
         self._telegram_error_handler.setFormatter(TerminalFormatter())
@@ -3335,9 +3414,16 @@ class TradingBot:
             # /stop (atau Binance pause) harus memotong cycle tanpa mengubah
             # kandidat yang sudah dianalisis menjadi order baru.
             eligible = []
+            rate_capped_count = 0
         else:
             slots_left = self.state.max_positions - self.state.get_active_count()
-            eligible = candidates[: max(0, slots_left)]
+            entry_budget = min(max(0, slots_left), MAX_NEW_ENTRIES_PER_CYCLE)
+            eligible = candidates[:entry_budget]
+            # Berapa banyak candidate yang sebenarnya masih punya slot tapi
+            # ditunda gara-gara entry-rate cap (bukan gara-gara slot penuh) —
+            # supaya "Candidate: 15 | Eligible: 3" di Telegram tidak
+            # membingungkan. Sisanya otomatis dicoba lagi cycle berikutnya.
+            rate_capped_count = max(0, min(len(candidates), max(0, slots_left)) - entry_budget)
 
             for setup in eligible:
                 if self._stop.is_set() or not self.state.auto or self.state.binance_paused:
@@ -3398,6 +3484,8 @@ class TradingBot:
         lines.append(f"📊 Scan: {len(universe)} diminta | {len(universe)} tersedia | {processed} diproses | {valid_strategy} analisa strategy valid")
         lines.append(f"🧠 Rata-rata confidence scan: {avg_conf:.1f}%")
         lines.append(f"🎯 Candidate: {len(candidates)} | Eligible: {len(eligible)} | Low-conf ban: {low_conf_banned}")
+        if rate_capped_count > 0:
+            lines.append(f"⏳ {rate_capped_count} candidate lain ditunda ke cycle berikutnya (entry-rate cap {MAX_NEW_ENTRIES_PER_CYCLE}/cycle demi keamanan API)")
         lines.append(f"🚫 Reject utama: `{rejects_str}`")
         lines.append(f"📈 Breadth BUY {breadth_buy:.1f}% | SELL {100 - breadth_buy:.1f}% | Regime: {regime}")
         lines.append(f"₿ BTC 1h: {btc_chg_1h:+.2f}% | BTC 4h: {btc_chg_4h:+.2f}%")
@@ -4405,6 +4493,24 @@ def run_selftest() -> bool:
     bc2._last_response_ts = time.time() - 61.0
     bc2._refresh_local_usage_windows()
     check("REST governor stale windows reset", bc2._used_weight_1m == 0 and bc2._used_order_10s == 0 and bc2._used_order_1m == 0)
+
+    # Ban-persistence regression — this is the actual fix for the incident
+    # where an HTTP 418 recurred instantly after a process restart: governor
+    # state used to be purely in-memory, so a fresh BinanceClient() had zero
+    # awareness that Binance's IP-level ban was still active. A recorded ban
+    # must now survive construction of a brand-new client instance.
+    import tempfile as _tempfile
+    _ban_path = os.path.join(_tempfile.mkdtemp(), "ban_state.json")
+    bc3 = BinanceClient("KEY", "SECRET", ban_state_path=_ban_path)
+    bc3._persist_ban(30.0, 418, -1003, "synthetic ban for selftest")
+    bc4 = BinanceClient("KEY", "SECRET", ban_state_path=_ban_path)
+    check("ban state bertahan lewat restart proses (BinanceClient baru)", bc4._blocked_until_mono > time.monotonic())
+    try:
+        bc4._request("GET", "/fapi/v2/balance", signed=True)
+        ban_still_enforced = False
+    except RateLimitError as e:
+        ban_still_enforced = e.status_code == 418
+    check("ban dari sesi sebelumnya langsung diblokir tanpa request baru", ban_still_enforced)
 
     # Local REAL balance model regression: one snapshot + local realized PnL,
     # no balance REST refresh on close.
