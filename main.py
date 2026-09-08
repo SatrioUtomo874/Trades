@@ -304,7 +304,10 @@ BINANCE_DEFAULT_429_COOLDOWN = 75.0
 # All REST calls, including order/protection/listen-key calls, share this lane.
 BINANCE_ORDER_INTERVAL = 10.0
 BINANCE_REQUEST_INTERVAL = 2.5
-EXECUTION_CONFIDENCE_FLOOR = 55.0
+# §floor terlalu ketat: lihat strategy.EXECUTION_CONFIDENCE_FLOOR untuk
+# analisis lengkap kenapa ini diturunkan dari 55.0 — nilai di sini HARUS
+# sinkron dengan strategy.py karena keduanya independen (tidak saling impor).
+EXECUTION_CONFIDENCE_FLOOR = 35.0
 # §insiden HTTP-418 (IP banned, weight_1m=0 di laporan — lihat
 # BinanceClient._load_persisted_ban docstring untuk analisis lengkap):
 # akar masalah SEBENARNYA bukan jeda antar-request (itu sudah konservatif),
@@ -3305,6 +3308,7 @@ class TradingBot:
         candidates: List[strategy.Setup] = []
         processed = 0
         valid_strategy = 0
+        confidence_sum = 0.0
         low_conf_banned = 0
         reject_counts: Dict[str, int] = {}
 
@@ -3366,6 +3370,7 @@ class TradingBot:
                 logger.warning("[LEARN] scan analysis record gagal %s: %s", symbol, exc, extra={"symbol": symbol})
             if setup:
                 valid_strategy += 1
+                confidence_sum += setup.confidence
                 logger.info("[SCAN %02d/%02d] STRATEGY OK | %s %.1f%%", idx, len(universe), setup.direction, setup.confidence, extra={"symbol": symbol})
                 logger.info("[SCAN %02d/%02d] DIAGNOSTICS | structure=%s liquidity=%s entry_dist=%.2fATR rr=%.2f btc=%s freshness=%.2f",
                             idx, len(universe), (analysis_diag.get("structure") or {}).get("bos"),
@@ -3430,7 +3435,11 @@ class TradingBot:
                     break
                 self._create_pending(setup)
 
-        avg_conf = sum(s.confidence for s in candidates) / len(candidates) if candidates else 0.0
+        # Rata-rata dari SEMUA setup yang berhasil dianalisa (valid_strategy),
+        # bukan cuma yang lolos threshold — supaya tidak menampilkan "0.0%"
+        # yang menyesatkan setiap kali eligible=0 padahal strategy sebenarnya
+        # tetap menemukan setup, cuma confidence-nya di bawah threshold aktif.
+        avg_conf = confidence_sum / valid_strategy if valid_strategy else 0.0
         buy_n = sum(1 for s in candidates if s.direction == "BUY")
         breadth_buy = (buy_n / len(candidates) * 100) if candidates else 0.0
         if candidates:
