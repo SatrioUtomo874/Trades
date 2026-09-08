@@ -89,7 +89,7 @@ def is_trade_allowed(symbol: str) -> bool:
     return str(symbol or "").upper() not in TRADE_EXCLUDED_SYMBOLS
 
 DEFAULT_PARAMS: Dict[str, Any] = {
-    "ACTIVE_THRESHOLD": 65.0,      # % — execution threshold awal; Learn boleh adaptif tetapi tidak di bawah safety floor
+    "ACTIVE_THRESHOLD": 35.0,      # % — mulai dari safety floor (spek asli: threshold awal rendah, naik bertahap lewat bukti statistik learn.py — bukan dimulai tinggi)
     "swing_left": 2,
     "swing_right": 2,
     "equal_level_tol_atr": 0.15,   # toleransi "equal high/low" dalam satuan ATR
