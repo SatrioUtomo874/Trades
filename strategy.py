@@ -69,7 +69,17 @@ except ImportError:  # pragma: no cover - numpy should always be available
 logger = logging.getLogger("strategy")
 
 STRATEGY_NAME = "adaptive-smc-ict"
-EXECUTION_CONFIDENCE_FLOOR = 55.0
+# Ini floor MUTLAK minimum (safety net), BUKAN target threshold — threshold
+# yang sebenarnya dikelola learn.py lewat active_threshold yang mulai rendah
+# lalu naik bertahap seiring bukti statistik (lihat learn.py). Sebelumnya
+# floor ini 55.0, padahal dari pengukuran empiris (500 skenario realistis)
+# rata-rata confidence setup yang genuinely tradeable (RR/EV/geometry sehat)
+# cuma ~46% — floor 55 secara efektif MENGUNCI threshold jadi selalu >=55
+# lewat max(FLOOR, active_threshold), meniadakan desain "mulai permisif,
+# naik pelan" dari active_threshold. Turunkan ke bawah rata-rata tradeable
+# supaya active_threshold yang benar-benar mengatur, floor cuma jaring
+# pengaman dari confidence yang jelas terlalu rendah untuk dipercaya sama sekali.
+EXECUTION_CONFIDENCE_FLOOR = 35.0
 EXECUTION_MIN_RR_FLOOR = 1.20
 
 # Market-context assets are analyzed for correlation/regime but are never trade candidates.
@@ -467,7 +477,14 @@ def validate_geometry(
     else:
         return False, "INVALID_DIRECTION"
 
-    min_dist = max(tick_size * 2, atr_val * 0.05, entry * 0.0005)
+    # Lantai jarak minimum ini HANYA untuk menangkap kasus degenerate (SL/TP
+    # praktis menempel di entry akibat rounding/tick) — bukan untuk menilai
+    # apakah setup ini "layak trading", itu tugas RR_BELOW_MIN (proporsional,
+    # sudah cukup). Sebelumnya ada suku entry*0.0005 (lantai 0.05% harga
+    # absolut) yang di pasar sepi/tight-range menolak setup yang RR-nya
+    # sebenarnya sehat, cuma karena pergerakan harganya kecil secara absolut —
+    # padahal di futures leverage itu normal. Turunkan jauh + hapus suku itu.
+    min_dist = max(tick_size * 2, atr_val * 0.02)
     if abs(entry - sl) < min_dist:
         return False, "SL_TOO_CLOSE"
     if abs(entry - tp) < min_dist:
@@ -543,18 +560,24 @@ VNEXT_DEFAULTS: Dict[str, Any] = {
 }
 
 VNEXT_WEIGHTS: Dict[str, float] = {
-    "structure": 18.0,
-    "liquidity": 12.0,
-    "entry_quality": 14.0,
-    "risk_reward": 13.0,
-    "momentum": 9.0,
+    # Direbalans dari data empiris (500 skenario sintetis realistis): sweep
+    # liquidity murni BONUS langka, bukan baseline yang selalu ada di setup
+    # bagus — bobot 12 lama bikin confidence tertahan bahkan untuk setup yang
+    # RR/geometry-nya sehat (rata-rata cuma terisi 3% dari bobotnya). Turunkan
+    # liquidity & entry_quality, naikkan structure/risk_reward/expected_value
+    # yang terbukti reliable membedakan setup bagus vs jelek.
+    "structure": 20.0,
+    "liquidity": 6.0,
+    "entry_quality": 10.0,
+    "risk_reward": 16.0,
+    "momentum": 10.0,
     "volatility": 5.0,
-    "btc_correlation": 9.0,
-    "regime": 6.0,
+    "btc_correlation": 8.0,
+    "regime": 7.0,
     "session": 3.0,
-    "confirmation": 2.0,
+    "confirmation": 4.0,
     "freshness": 3.0,
-    "expected_value": 6.0,
+    "expected_value": 8.0,
 }
 
 
@@ -1015,13 +1038,10 @@ def vn_impulse(
 
 
 def vn_entry_assessment(
-    candles: Sequence[Dict[str, Any]], current: float, entry: float, direction: str, impulse: Dict[str, Any], atr: float, params: Dict[str, Any]
+    candles: Sequence[Dict[str, Any]], current: float, entry: float, direction: str, impulse: Dict[str, Any], atr: float, params: Dict[str, Any],
+    fallback_quality: Optional[float] = None,
 ) -> Dict[str, Any]:
     distance=abs(current-entry)/max(atr,1e-9)
-    rng=max(_vn_float(impulse.get("range")),1e-9)
-    if direction=="BUY": pullback=(impulse["high"]-current)/rng
-    else: pullback=(current-impulse["low"])/rng
-    retrace=_vn_clip(1.0-abs(pullback-_vn_float(params.get("entry_retracement_fib"),0.618))/0.50)
     min_offset=_vn_float(params.get("entry_min_offset_atr"),0.25)
     max_offset=_vn_float(params.get("entry_max_distance_atr"),2.25)
     too_close=distance<min_offset
@@ -1032,6 +1052,21 @@ def vn_entry_assessment(
     touched=sum(1 for c in window if _vn_float(c["l"])<=entry<=_vn_float(c["h"]))/max(1,len(window))
     proximity=_vn_clip(1.0-distance/3.0)
     fill=_vn_clip(0.50*_vn_clip(touched*2)+0.25*proximity+0.25*fresh)
+    if fallback_quality is not None:
+        # Entry ini datang dari order-block/minimal fallback, bukan impulse
+        # OTE asli (lihat analyze_with_diagnostics) — mengukur "seberapa
+        # dekat ke retracement 61.8%" tidak relevan untuk model entry ini
+        # (pullback akan selalu ~0 by construction karena impulse["high"/
+        # "low"] sengaja dipatok ke harga sekarang, bukan swing asli).
+        # Pakai kualitas sumbernya sendiri sebagai pengganti, supaya tidak
+        # otomatis jatuh ke skor terendah hanya gara-gara bukan pola OTE.
+        pullback=0.0
+        retrace=_vn_clip(fallback_quality)
+    else:
+        rng=max(_vn_float(impulse.get("range")),1e-9)
+        if direction=="BUY": pullback=(impulse["high"]-current)/rng
+        else: pullback=(current-impulse["low"])/rng
+        retrace=_vn_clip(1.0-abs(pullback-_vn_float(params.get("entry_retracement_fib"),0.618))/0.50)
     adverse=[]
     for c in window:
         if direction=="BUY" and _vn_float(c["h"])>=entry: adverse.append(max(0.0,(entry-_vn_float(c["l"])))/max(atr,1e-9))
@@ -1134,13 +1169,15 @@ def vn_dynamic_confidence(
     regime_ok: bool, btc_conflict: bool, params: Dict[str,Any]
 ) -> Dict[str,Any]:
     raw=sum(components.values()); gate=1.0
-    if not regime_ok: gate*=0.88
-    if btc_conflict: gate*=0.72
-    if entry.get("stale"): gate*=0.70
-    if entry.get("too_far"): gate*=0.72
-    if entry.get("too_close"): gate*=0.76
-    if _vn_float(tp.get("expected_r"),0)<0: gate*=0.72
-    if _vn_float(sl.get("wickout_risk"),0)>0.75: gate*=0.90
+    # regime_ok & btc_conflict sudah tercermin di komponen berbobot (regime,
+    # btc_correlation) — penalti gate terpisah untuk hal yang sama berarti
+    # dihukum dua kali. stale/expected_r<0 juga sudah jadi hard_reject
+    # terpisah (setup itu otomatis tidak tradeable), jadi gate di sini tidak
+    # perlu mengulanginya lagi. Sisakan gate hanya untuk hal yang BELUM
+    # tercermin di komponen manapun: jarak entry & risiko wick-out SL.
+    if entry.get("too_far"): gate*=0.85
+    if entry.get("too_close"): gate*=0.90
+    if _vn_float(sl.get("wickout_risk"),0)>0.85: gate*=0.92
     final=_vn_clip(raw*gate,0,100)
     setup_keys=("structure","liquidity","entry_quality","risk_reward","confirmation")
     context_keys=("momentum","volatility","btc_correlation","regime","session")
@@ -1377,12 +1414,30 @@ class Strategy:
         entry=_vn_float(impulse["entry"])
         if direction=="BUY" and current-entry < atr*_vn_float(p.get("entry_min_offset_atr"),0.25): entry=current-atr*_vn_float(p.get("entry_min_offset_atr"),0.25)
         if direction=="SELL" and entry-current < atr*_vn_float(p.get("entry_min_offset_atr"),0.25): entry=current+atr*_vn_float(p.get("entry_min_offset_atr"),0.25)
-        entry_info=vn_entry_assessment(work,current,entry,direction,impulse,atr,p); diagnostics["entry"]={**entry_info,"entry":entry,"impulse":impulse}
+        _fallback_q = None
+        if minimal_fallback_used:
+            _fallback_q = 0.20
+        elif ob_fallback_used and order_blocks:
+            _fallback_q = _vn_clip(_vn_float(order_blocks[0].get("quality"), 50.0) / 100.0)
+        entry_info=vn_entry_assessment(work,current,entry,direction,impulse,atr,p,fallback_quality=_fallback_q); diagnostics["entry"]={**entry_info,"entry":entry,"impulse":impulse}
         regime_ok=direction=="BUY" if regime=="BULLISH_TREND" else direction=="SELL" if regime=="BEARISH_TREND" else (regime=="SIDEWAYS" and bool(p.get("allow_sideways",True))) or regime not in ("LOW_VOLATILITY","HIGH_VOLATILITY")
         btc_info=vn_btc_alignment(symbol,direction,work,btc,p,regime); diagnostics["btc"]=btc_info
         sl=vn_build_sl(direction,entry,atr,impulse,swings,sweep,p); diagnostics["sl"]=sl
         tp=vn_build_tp(direction,entry,sl["risk"],atr,pools,swings,p,momentum_alignment,fvg_score); diagnostics["tp"]=tp
-        # HARD EXECUTION GATES: bad RR/EV is never a tradable setup.
+        geom_ok,geom_reason=validate_geometry(direction,entry,sl["sl"],tp["tp"],atr_val=atr); diagnostics["geometry"]={"valid":geom_ok,"reason":geom_reason}
+        if not geom_ok and (geom_reason.startswith("INVALID_PRICE") or geom_reason in ("INVALID_DIRECTION","GEOMETRY_ORDER_INVALID_BUY","GEOMETRY_ORDER_INVALID_SELL")):
+            # Ini bukan "setup lemah", ini data yang genuinely tidak masuk akal
+            # (SL/TP di sisi yang salah, harga NaN/negatif) — tidak ada setup
+            # yang bisa ditampilkan sama sekali, beda dengan SL/TP_TOO_CLOSE
+            # di bawah yang tetap valid sebagai setup, cuma belum layak eksekusi.
+            diagnostics["status"]="INVALID_GEOMETRY"; diagnostics["reasons"].append(geom_reason); self.last_diagnostics=diagnostics; return None,diagnostics
+        # HARD EXECUTION GATES: bad RR/EV/geometry-tightness is never a tradable
+        # setup RIGHT NOW, tapi setup-nya sendiri tetap valid untuk dipelajari
+        # dan ditampilkan (candidate/shadow) — main.py yang memutuskan apakah
+        # boleh eksekusi lewat hard_gates.passed, bukan strategy.py yang
+        # membuang setupnya begitu saja. Ini yang membedakan "quiet market,
+        # tidak ada opportunity bagus" (tetap kelihatan, confidence rendah)
+        # dari "data rusak, tidak ada setup sama sekali" (baris di atas).
         hard_rejects=[]
         rr_value=_vn_float(tp.get("rr"),0.0)
         expected_r=_vn_float(tp.get("expected_r"),0.0)
@@ -1392,13 +1447,12 @@ class Strategy:
             hard_rejects.append(f"NEGATIVE_EXPECTED_R:{expected_r:.3f}")
         if entry_info.get("stale"):
             hard_rejects.append("STALE_ENTRY")
+        if not geom_ok:
+            hard_rejects.append(geom_reason)
         diagnostics["hard_gates"]={"passed":not hard_rejects,"rejects":hard_rejects,"min_rr":max(EXECUTION_MIN_RR_FLOOR,_vn_float(p.get("min_rr"),EXECUTION_MIN_RR_FLOOR))}
         if hard_rejects:
-            diagnostics["status"]="LOW_EXPECTED_VALUE" if any(x.startswith(("RR_BELOW_MIN","NEGATIVE_EXPECTED_R")) for x in hard_rejects) else "STALE_SETUP"
+            diagnostics["status"]="LOW_EXPECTED_VALUE" if any(x.startswith(("RR_BELOW_MIN","NEGATIVE_EXPECTED_R")) for x in hard_rejects) else ("TOO_CLOSE" if not geom_ok else "STALE_SETUP")
             diagnostics["reasons"].extend(hard_rejects)
-        geom_ok,geom_reason=validate_geometry(direction,entry,sl["sl"],tp["tp"],atr_val=atr); diagnostics["geometry"]={"valid":geom_ok,"reason":geom_reason}
-        if not geom_ok:
-            diagnostics["status"]="INVALID_GEOMETRY"; diagnostics["reasons"].append(geom_reason); self.last_diagnostics=diagnostics; return None,diagnostics
         opening_range=vn_opening_range(work,_vn_int(p.get("orb_bars"),3)); prior_session=vn_prior_session_range(work)
         time_notes=[]; orb_bonus=0.0; killzone_bonus=0.0
         if opening_range.get("valid") and opening_range.get("complete"):
