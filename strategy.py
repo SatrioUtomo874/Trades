@@ -94,7 +94,7 @@ DEFAULT_PARAMS: Dict[str, Any] = {
     "swing_right": 2,
     "equal_level_tol_atr": 0.15,   # toleransi "equal high/low" dalam satuan ATR
     "displacement_atr_mult": 1.5,  # body candle > mult * ATR = displacement
-    "min_rr": 1.2,                 # minimum risk/reward yang dianggap layak
+    "min_rr": 2.0,                  # target RR (1:2) — TP ditarik ke sini kalau kurang, bukan direject (lihat vn_build_tp)
     "sweep_lookback": 40,
     "structure_lookback": 80,
     "momentum_lookback": 10,
@@ -1120,6 +1120,17 @@ def vn_build_tp(direction: str, entry: float, risk: float, atr: float, liquidity
         candidates=[x for x in eqs+lows if x<entry]
         candidates=[x for x in candidates if abs(x-entry)/max(atr,1e-9)<=_vn_float(params.get("target_max_atr"),8.0)]
         tp=max(candidates) if candidates else entry-max(risk*2.0,atr*1.5); is_liq=tp in eqs
+    # RR di bawah target minimum bukan alasan untuk menolak setup — tarik TP
+    # sedikit supaya RR capai target (params["min_rr"], default 1:2), bukan
+    # hard-reject. Trailing SL yang aktif sepanjang posisi terbuka jadi
+    # pengaman tambahan; target yang ditarik ini otomatis tercermin lewat
+    # reach_probability yang lebih rendah di bawah (bukan blokir eksekusi).
+    min_rr=_vn_float(params.get("min_rr"),2.0)
+    if risk>0:
+        natural_rr=abs(tp-entry)/risk
+        if natural_rr<min_rr:
+            tp = entry+risk*min_rr if direction=="BUY" else entry-risk*min_rr
+            is_liq=False
     reward=abs(tp-entry); rr=reward/max(risk,1e-9); pr=vn_target_probability(rr,momentum,fvg_score,is_liq,params); expected=pr*rr-(1-pr)
     dist=reward/max(atr,1e-9); quality=_vn_clip(0.30*(1.0 if is_liq else 0.35)+0.25*_vn_clip(1-dist/8.0)+0.20*_vn_clip(rr/3.0)+0.25*pr)
     return {"tp":tp,"rr":rr,"reward":reward,"reach_probability":pr,"expected_r":expected,"quality":quality,"liquidity_target":is_liq,"distance_atr":dist}
@@ -1438,21 +1449,21 @@ class Strategy:
         # membuang setupnya begitu saja. Ini yang membedakan "quiet market,
         # tidak ada opportunity bagus" (tetap kelihatan, confidence rendah)
         # dari "data rusak, tidak ada setup sama sekali" (baris di atas).
-        hard_rejects=[]
+        # Dulu ada hard-reject terpisah untuk RR rendah / expected-value
+        # negatif / stale / geometry ketat — atas permintaan eksplisit user,
+        # ini dihapus. RR sekarang dijamin >= min_rr lewat penarikan TP di
+        # vn_build_tp (bukan reject), sedangkan staleness & ketatnya geometry
+        # sudah tercermin di komponen confidence (freshness, entry_quality,
+        # rr_signal) — tidak perlu didobelkan jadi blocker terpisah lagi.
+        # Satu-satunya yang masih hard-block adalah geometry yang genuinely
+        # tidak bisa dieksekusi sama sekali (baris di atas, sudah return None
+        # sebelum sampai sini) — itu bukan soal "kualitas", itu order yang
+        # secara harfiah tidak valid untuk dikirim ke exchange. Trailing SL
+        # yang aktif sepanjang posisi terbuka jadi pengaman tambahan di luar
+        # apa yang dinilai di titik ini.
         rr_value=_vn_float(tp.get("rr"),0.0)
         expected_r=_vn_float(tp.get("expected_r"),0.0)
-        if rr_value < max(EXECUTION_MIN_RR_FLOOR, _vn_float(p.get("min_rr"), EXECUTION_MIN_RR_FLOOR)):
-            hard_rejects.append(f"RR_BELOW_MIN:{rr_value:.2f}")
-        if expected_r <= 0.0:
-            hard_rejects.append(f"NEGATIVE_EXPECTED_R:{expected_r:.3f}")
-        if entry_info.get("stale"):
-            hard_rejects.append("STALE_ENTRY")
-        if not geom_ok:
-            hard_rejects.append(geom_reason)
-        diagnostics["hard_gates"]={"passed":not hard_rejects,"rejects":hard_rejects,"min_rr":max(EXECUTION_MIN_RR_FLOOR,_vn_float(p.get("min_rr"),EXECUTION_MIN_RR_FLOOR))}
-        if hard_rejects:
-            diagnostics["status"]="LOW_EXPECTED_VALUE" if any(x.startswith(("RR_BELOW_MIN","NEGATIVE_EXPECTED_R")) for x in hard_rejects) else ("TOO_CLOSE" if not geom_ok else "STALE_SETUP")
-            diagnostics["reasons"].extend(hard_rejects)
+        diagnostics["hard_gates"]={"passed":True,"rejects":[],"min_rr":_vn_float(p.get("min_rr"),EXECUTION_MIN_RR_FLOOR),"rr":rr_value,"expected_r":expected_r,"stale":entry_info.get("stale")}
         opening_range=vn_opening_range(work,_vn_int(p.get("orb_bars"),3)); prior_session=vn_prior_session_range(work)
         time_notes=[]; orb_bonus=0.0; killzone_bonus=0.0
         if opening_range.get("valid") and opening_range.get("complete"):
@@ -1491,7 +1502,7 @@ class Strategy:
         diagnostics["market"]={"regime":regime,"session":session,"breadth":dict(market_context or {}),"regime_ok":regime_ok}
         diagnostics["score"]={**score,"components":components}
         diagnostics["status"]=status
-        threshold=self.get_active_threshold(); passed=bool(not hard_rejects and score["final"]>=threshold)
+        threshold=self.get_active_threshold(); passed=bool(score["final"]>=threshold)
         diagnostics["threshold"]={"active":threshold,"passed":passed}
         reasons=[f"{event.get('bos') or event.get('choch')} {direction}",f"trend slope={'aligned' if trend_dir==direction else 'opposed'}",f"entry OTE={_vn_float(p.get('entry_retracement_fib'),0.618)*100:.0f}%",f"RR={tp['rr']:.2f}",f"expectedR={tp['expected_r']:.2f}",f"viability={status}"]
         if sweep: reasons.append(f"sweep={sweep['type']}")
