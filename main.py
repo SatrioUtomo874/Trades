@@ -1187,12 +1187,24 @@ class BinanceClient:
             if self._used_weight_1m >= BINANCE_WEIGHT_GLOBAL_SOFT_STOP:
                 block_seconds = 65.0
                 self._blocked_until_mono = max(self._blocked_until_mono, time.monotonic() + block_seconds)
+                # own_requests_1m: berapa banyak DARI JUMLAH WEIGHT itu yang
+                # benar-benar berasal dari proses ini sendiri (dalam 60s
+                # terakhir). Kalau angka ini kecil padahal used_weight_1m
+                # sudah tinggi, itu tandanya weight datang dari LUAR proses
+                # ini — API key yang sama dipakai proses lain (mis. instance
+                # lama yang belum benar-benar mati saat redeploy) — bukan
+                # bug di governor/scan loop ini.
+                own_requests_1m = len(self._recent_request_mono)
                 err = RateLimitError(
-                    f"Binance global REST deferred by governor: used_weight_1m={self._used_weight_1m} >= {BINANCE_WEIGHT_GLOBAL_SOFT_STOP}",
+                    f"Binance global REST deferred by governor: used_weight_1m={self._used_weight_1m} >= "
+                    f"{BINANCE_WEIGHT_GLOBAL_SOFT_STOP} (request dari proses ini 60s terakhir: {own_requests_1m})",
                     status_code=429, code=-1003, retry_after=block_seconds,
                 )
                 self._blocked_error = err
-                logger.warning("[BINANCE] GLOBAL PREBLOCK | weight_1m=%s >= %s | path=%s | request not sent", self._used_weight_1m, BINANCE_WEIGHT_GLOBAL_SOFT_STOP, path)
+                logger.warning(
+                    "[BINANCE] GLOBAL PREBLOCK | weight_1m=%s >= %s | own_requests_1m=%s | path=%s | request not sent",
+                    self._used_weight_1m, BINANCE_WEIGHT_GLOBAL_SOFT_STOP, own_requests_1m, path,
+                )
                 raise err
 
             # Absolute request-count cap provides protection even when an endpoint
@@ -1761,6 +1773,8 @@ class StateStore:
                 self.processed_events = set(list(self.processed_events)[-10000:])
             if new_status in TERMINAL_STATES:
                 self.closed_trades.append(dict(pos))
+                if len(self.closed_trades) > 5000:
+                    self.closed_trades = self.closed_trades[-3000:]
             return True
 
     def get_active_count(self) -> int:
@@ -1831,6 +1845,14 @@ class StateStore:
     # -- checkpoint (state utama, terpisah dari learn checkpoint) -------------
     def export_state(self) -> Dict[str, Any]:
         with self._lock:
+            # PENTING: harus deep-copy, bukan referensi langsung. Lock ini
+            # cuma dipegang selama return statement — begitu export_state()
+            # selesai, caller (mis. save_checkpoint) memakai hasilnya TANPA
+            # lock lagi (termasuk selama json.dump() yang bisa makan waktu).
+            # Kalau positions/bans/scanned_coins masih referensi ke dict asli,
+            # thread lain (scanner/websocket) yang menambah/menghapus entry
+            # di tengah json.dump() bikin "dictionary changed size during
+            # iteration" — persis error yang dilaporkan dari Worker3.
             return {
                 "mode": self.mode, "auto": self.auto, "margin": self.margin, "leverage": self.leverage, "max_positions": self.max_positions,
                 "autostop_pct": self.autostop_pct, "highest_balance": self.highest_balance, "current_balance": self.current_balance,
@@ -1840,10 +1862,10 @@ class StateStore:
                 "real_balance_snapshot_ts": self.real_balance_snapshot_ts,
                 "real_last_balance_source": self.real_last_balance_source,
                 "sim_balance": self.sim_balance, "sim_balance_anchor": self.sim_balance_anchor,
-                "positions": self.positions, "scanned_coins": self.scanned_coins,
-                "scan_history": self.scan_history[-20:],
-                "bans": self.bans, "closed_trades": self.closed_trades[-2000:],
-                "strategy_state": self.strategy_state,
+                "positions": copy.deepcopy(self.positions), "scanned_coins": list(self.scanned_coins),
+                "scan_history": copy.deepcopy(self.scan_history[-20:]),
+                "bans": copy.deepcopy(self.bans), "closed_trades": copy.deepcopy(self.closed_trades[-2000:]),
+                "strategy_state": copy.deepcopy(self.strategy_state),
                 "binance_paused": self.binance_paused,
                 "binance_pause_ts": self.binance_pause_ts,
                 "binance_pause_until": self.binance_pause_until,
@@ -2104,8 +2126,9 @@ def build_universe(
     bn_symbols = {str(s).upper() for s in (binance_symbols or set()) if str(s).upper().endswith("USDT")}
     shared = bybit_symbols & bn_symbols
 
-    excluded = {str(s).upper() for s in state.positions.keys()}
-    excluded |= {str(s).upper() for s in state.bans.keys()}
+    with state._lock:
+        excluded = {str(s).upper() for s in state.positions.keys()}
+        excluded |= {str(s).upper() for s in state.bans.keys()}
     excluded.add("BTCUSDT")
 
     universe: List[str] = []
@@ -4388,23 +4411,44 @@ def run_selftest() -> bool:
     time.sleep(0.02)
     check("ban expired terdeteksi", not st.is_banned("BANUSDT"))
 
-    # strategy engine sanity test — tidak boleh crash pada data sintetis
+    # strategy engine sanity test — tidak boleh crash pada data sintetis.
+    # Sebelumnya cuma 1 skenario hardcoded di sini, yang ternyata tidak
+    # pernah sampai ke jalur "setup berhasil dibangun" (selalu berhenti di
+    # cabang lebih awal) — itu sebabnya bug NameError di hard_rejects lolos
+    # tanpa terdeteksi selftest. Sekarang jalankan lewat banyak skenario
+    # trend/volatilitas/level-harga berbeda supaya jalur sukses juga
+    # benar-benar tereksekusi.
     import random
     random.seed(42)
-    synthetic = []
-    price = 100.0
-    for i in range(700):
-        o = price
-        price += random.uniform(-1, 1.2)
-        h, l, c = max(o, price) + 0.2, min(o, price) - 0.2, price
-        synthetic.append({"t": i * 900000, "o": o, "h": h, "l": l, "c": c, "v": 100.0})
+
+    def _mk_synth(n, pct_trend, pct_vol, start):
+        out, price, t0 = [], start, 1_700_000_000_000
+        for i in range(n):
+            o = price
+            price *= (1 + random.gauss(pct_trend, pct_vol))
+            w = abs(random.gauss(0, pct_vol * 0.4))
+            h, l = max(o, price) * (1 + w), min(o, price) * (1 - w)
+            out.append({"t": t0 + i * 900000, "o": o, "h": h, "l": l, "c": price, "v": 100.0})
+        return out
+
     strat = strategy.Strategy()
+    strat_crash = False
+    reached_success_path = False
     try:
-        result = strat.analyze("TESTUSDT", synthetic, synthetic)
-        check("strategy.analyze tidak crash pada data sintetis", True)
+        for i in range(24):
+            pt = random.choice([-0.003, -0.0015, 0, 0.0015, 0.003])
+            pv = random.choice([0.0005, 0.002, 0.008, 0.02])
+            start = random.choice([0.001, 1.0, 50.0, 68000.0])
+            candles = _mk_synth(700, pt, pv, start)
+            btc = _mk_synth(700, pt * 0.6, pv, 68000.0)
+            result = strat.analyze("TESTUSDT", candles, btc, enforce_threshold=False)
+            if result is not None:
+                reached_success_path = True
     except Exception as e:
+        strat_crash = True
         print(f"   exception: {e}")
-        check("strategy.analyze tidak crash pada data sintetis", False)
+    check("strategy.analyze tidak crash pada 24 skenario sintetis beragam", not strat_crash)
+    check("strategy.analyze mencapai jalur setup berhasil di salah satu skenario", reached_success_path)
 
     # learn engine sanity test
     le = learn.LearnEngine(checkpoint_path="/tmp/_selftest_learn.json")
