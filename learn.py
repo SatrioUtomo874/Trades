@@ -85,7 +85,7 @@ import time
 import requests
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
-from threading import RLock
+from threading import RLock, Thread
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
@@ -2332,6 +2332,32 @@ class LearnEngine:
             return raw
         return raw.rstrip("/") + "/api/chat"
 
+    def _ollama_critique_async(self, context: Dict[str, Any], audit_sequence: int) -> None:
+        """Jalankan critique Ollama di thread terpisah — TIDAK boleh dipanggil
+        sambil memegang self._lock untuk seluruh durasi network call.
+
+        audit() sebelumnya memanggil _ollama_critique() secara SINKRON sambil
+        memegang self._lock untuk seluruh isi method (statistik + network).
+        timeout=20 di requests tidak membatasi durasi TOTAL request — cuma
+        jeda antar-progress baca socket; endpoint yang lambat/nge-trickle
+        bisa membuat request "hidup" jauh lebih lama dari 20 detik tanpa
+        pernah timeout. Selama itu, self._lock tertahan, jadi SEMUA panggilan
+        learn_engine lain (record_scan_candidate dari thread scanner, dst)
+        ikut ngeblok — bot terlihat berhenti total tanpa crash/redeploy.
+        Ollama murni advisory (tidak pernah mengubah keputusan apa pun), jadi
+        aman dijalankan async dan ditempel ke laporan belakangan — audit_sequence
+        dicek dulu supaya tidak nempel ke report yang sudah digantikan audit
+        berikutnya kalau responsnya lama.
+        """
+        def _run() -> None:
+            text = self._ollama_critique(context)
+            if text:
+                with self._lock:
+                    if self.last_audit_report is not None and self.last_audit_report.get("audit_sequence") == audit_sequence:
+                        self.last_audit_report["ollama_critique"] = text
+                    self._append_event("OLLAMA_CRITIC_ASYNC", {"chars": len(text)})
+        Thread(target=_run, daemon=True, name="OllamaCritiqueAsync").start()
+
     def _ollama_critique(self, context: Dict[str, Any]) -> Optional[str]:
         if not self.ollama_url:
             self._record_event_log("OLLAMA", "SKIP | unavailable")
@@ -2462,8 +2488,35 @@ class LearnEngine:
     # ------------------------------------------------------------------
     # Main audit loop
     # ------------------------------------------------------------------
+    def _enforce_history_caps_locked(self) -> None:
+        """Cegah semua riwayat tumbuh tanpa batas selama proses hidup lama.
+
+        Sebelumnya hanya raw_events & scan_analysis_history yang dipangkas —
+        ~13 list lain (candidate_history, shadow_history, trade_history,
+        pending/fill/trail/close_history, dll) tidak punya batas sama sekali,
+        tumbuh terus tiap scan cycle/candidate/trade selama proses hidup.
+        Ini akar penyebab "Render sampai auto-redeploy" — memory Python naik
+        terus tanpa henti sampai platform mem-OOM-kill prosesnya. Dipanggil
+        dari audit() (tiap 5 menit) — cukup untuk mencegah OOM tanpa perlu
+        ubah tiap satu titik .append() di seluruh file.
+        """
+        caps = [
+            ("market_snapshots", 5000, 3000), ("scan_summaries", 5000, 3000),
+            ("candidate_history", 20000, 15000), ("pending_history", 5000, 3000),
+            ("fill_history", 5000, 3000), ("trail_history", 10000, 7000),
+            ("close_history", 5000, 3000), ("shadow_history", 10000, 7000),
+            ("trade_history", 10000, 7000), ("replay_history", 2000, 1000),
+            ("challenger_history", 1000, 500), ("decision_history", 2000, 1000),
+            ("strategy_change_log", 1000, 500), ("threshold_history", 2000, 1000),
+        ]
+        for name, max_len, keep_len in caps:
+            lst = getattr(self, name, None)
+            if isinstance(lst, list) and len(lst) > max_len:
+                setattr(self, name, lst[-keep_len:])
+
     def audit(self, strategy_engine: Any) -> Dict[str, Any]:
         with self._lock:
+            self._enforce_history_caps_locked()
             self.audit_sequence += 1
             now = _now()
             self._record_event_log("AUDIT START", "seq=%s", self.audit_sequence)
@@ -2500,16 +2553,18 @@ class LearnEngine:
             }
 
             # Always run a critic on statistical summary, never raw candles.
-            report["ollama_critique"] = self._ollama_critique({
+            # Ollama murni advisory — dijalankan async (lihat docstring
+            # _ollama_critique_async) supaya network call lambat/macet tidak
+            # pernah menahan self._lock dan membekukan seluruh learn_engine.
+            report["ollama_critique"] = None
+            self._ollama_critique_async({
                 "quality": quality,
                 "frequency": frequency,
                 "scan": scan_analysis,
                 "attribution": attribution,
                 "quality_quantity": qq,
                 "strategy_version": getattr(strategy_engine, "version", None),
-            })
-            if report["ollama_critique"]:
-                self._record_event_log("OLLAMA CRITIC DONE", "stored")
+            }, self.audit_sequence)
 
             # Safety: never update because of a single trade/scan.
             if report["version_health"].get("status") == "DEGRADED":
