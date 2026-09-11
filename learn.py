@@ -570,6 +570,13 @@ class LearnEngine:
         self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
         self.github_repo = github_repo or os.environ.get("REPO_NAME", "")
         self.github_branch = github_branch or os.environ.get("GITHUB_BRANCH", "main")
+        # Autosave checkpoint DIPISAH ke branch sendiri (bukan branch deploy
+        # di atas) — root cause "sering auto-redeploy": Render (default)
+        # auto-deploy tiap ada push baru ke branch yang di-deploy. Push
+        # checkpoint tiap ~2 menit ke branch YANG SAMA = redeploy tiap ~2
+        # menit. Branch ini tidak pernah disentuh Render sama sekali.
+        self.github_memory_branch = os.environ.get("LEARN_MEMORY_BRANCH", "learn-memory")
+        self._memory_branch_ready = False
         self.github_remote_dir = (
             github_remote_path or os.environ.get("LEARN_MEMORY_REMOTE_DIR", "memory")
         ).strip("/") or "memory"
@@ -956,14 +963,51 @@ class LearnEngine:
                 return False
         return self.save_checkpoint(reason=reason)
 
+    def _ensure_memory_branch(self) -> bool:
+        """Pastikan github_memory_branch ada di repo — GitHub Contents API
+        tidak otomatis membuat branch baru. Kalau belum ada, buat sekali
+        dari HEAD branch deploy (self.github_branch). Hasilnya di-cache di
+        self._memory_branch_ready supaya cuma dicek sekali per proses."""
+        if self._memory_branch_ready:
+            return True
+        headers = {"Authorization": f"Bearer {self.github_token}", "Accept": "application/vnd.github+json"}
+        try:
+            check = requests.get(
+                f"https://api.github.com/repos/{self.github_repo}/branches/{self.github_memory_branch}",
+                headers=headers, timeout=15,
+            )
+            if check.status_code == 200:
+                self._memory_branch_ready = True
+                return True
+            if check.status_code != 404:
+                return False
+            ref = requests.get(
+                f"https://api.github.com/repos/{self.github_repo}/git/ref/heads/{self.github_branch}",
+                headers=headers, timeout=15,
+            )
+            sha = ref.json().get("object", {}).get("sha") if ref.status_code == 200 else None
+            if not sha:
+                return False
+            created = requests.post(
+                f"https://api.github.com/repos/{self.github_repo}/git/refs",
+                headers=headers, json={"ref": f"refs/heads/{self.github_memory_branch}", "sha": sha}, timeout=15,
+            )
+            self._memory_branch_ready = created.status_code in (200, 201)
+            return self._memory_branch_ready
+        except requests.RequestException:
+            return False
+
     def _git_push_one_file(self, local_path: str, remote_name: str) -> Tuple[bool, str]:
-        """PUT a single local file to GitHub Contents API under memory/<remote_name>.
+        """PUT a single local file to GitHub Contents API under memory/<remote_name>,
+        ke github_memory_branch (bukan branch deploy — lihat _ensure_memory_branch).
         Returns (ok, detail) — never raises."""
         try:
             with open(local_path, "rb") as f:
                 content = f.read()
         except OSError as exc:
             return False, f"tidak bisa baca {local_path}: {exc}"
+        if not self._ensure_memory_branch():
+            return False, f"gagal memastikan branch {self.github_memory_branch} ada"
         path = f"{self.github_remote_dir.strip('/')}/{remote_name}"
         headers = {
             "Authorization": f"Bearer {self.github_token}",
@@ -971,12 +1015,12 @@ class LearnEngine:
         }
         api_url = f"https://api.github.com/repos/{self.github_repo}/contents/{path}"
         try:
-            get_resp = requests.get(api_url, headers=headers, params={"ref": self.github_branch}, timeout=15)
+            get_resp = requests.get(api_url, headers=headers, params={"ref": self.github_memory_branch}, timeout=15)
             sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
             payload: Dict[str, Any] = {
                 "message": f"autosave learn checkpoint {_now():.0f}",
                 "content": base64.b64encode(content).decode("ascii"),
-                "branch": self.github_branch,
+                "branch": self.github_memory_branch,
             }
             if sha:
                 payload["sha"] = sha
@@ -1016,7 +1060,7 @@ class LearnEngine:
             ok, detail = self._git_push_one_file(local_path, remote_name)
             results.append((remote_name, ok, detail))
             if ok:
-                self._record_event_log("GIT", "PUSH OK | %s@%s", detail, self.github_branch)
+                self._record_event_log("GIT", "PUSH OK | %s@%s", detail, self.github_memory_branch)
             else:
                 self._record_event_log("GIT", "WARNING | push %s gagal: %s", remote_name, detail, level=logging.WARNING)
         ok_count = sum(1 for _, ok, _ in results if ok)
@@ -1026,7 +1070,7 @@ class LearnEngine:
             self._notify(
                 "GIT_PUSH",
                 f"✅ Autosave GitHub OK — {ok_count} file di `{self.github_remote_dir}/` "
-                f"({self.github_repo}@{self.github_branch})",
+                f"({self.github_repo}@{self.github_memory_branch})",
             )
         else:
             failed = ", ".join(name for name, ok, _ in results if not ok)
