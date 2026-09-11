@@ -2117,14 +2117,22 @@ def build_universe(
 ) -> List[str]:
     """Build the actual tradable universe from Binance ∩ Bybit, ranked by Bybit volume.
 
+    binance_symbols=None berarti mode SIMULASI — tidak ada cross-check ke
+    Binance sama sekali (lihat _prepare_shared_trade_universe), jadi pakai
+    ranking Bybit langsung tanpa di-intersect (bukan di-intersect dengan set
+    kosong, yang akan membuat universe-nya kosong total).
+
     BTCUSDT is *never* returned because BTC is a market-context / correlation asset,
     not a trade asset. Any missing/unsupported symbol therefore cannot reach order
     validation and cannot produce the XOMUSDT-style exchangeInfo rejection.
     """
     ranked = bybit.get_ranked_symbols()
     bybit_symbols = {str(s).upper() for s, _ in ranked if str(s).upper().endswith("USDT")}
-    bn_symbols = {str(s).upper() for s in (binance_symbols or set()) if str(s).upper().endswith("USDT")}
-    shared = bybit_symbols & bn_symbols
+    if binance_symbols is None:
+        shared = bybit_symbols
+    else:
+        bn_symbols = {str(s).upper() for s in binance_symbols if str(s).upper().endswith("USDT")}
+        shared = bybit_symbols & bn_symbols
 
     with state._lock:
         excluded = {str(s).upper() for s in state.positions.keys()}
@@ -2276,11 +2284,18 @@ class TradingBot:
     def _prepare_shared_trade_universe(self, force: bool = False) -> List[str]:
         """Discover Binance ∩ Bybit symbols once at the start of an AUTO session.
 
-        This works in both SIMULASI (/mode off) and REAL (/mode on). Binance
-        exchangeInfo is public, so SIMULASI does not need API credentials merely
-        to validate the tradable symbol universe.
+        Simulasi (/mode off) TIDAK PERNAH menyentuh Binance sama sekali —
+        tidak ada gunanya juga: simulasi tidak butuh konfirmasi ketersediaan
+        simbol di Binance, itu baru relevan kalau memang akan real order.
+        Sebelumnya exchangeInfo tetap dipanggil di kedua mode (dengan alasan
+        "publik, tidak butuh API key") — tapi itu tetap traffic Binance yang
+        tidak perlu, dan berkontribusi ke risiko rate-limit walau kecil.
+        Cross-check ke Binance sekarang HANYA terjadi saat mode == REAL.
         """
         with self._universe_lock:
+            if self.state.mode != "REAL":
+                self._binance_universe_symbols = None
+                return build_universe(self.bybit, None, self.state)
             if self._universe_ready and not force:
                 return build_universe(self.bybit, self._binance_universe_symbols, self.state)
             symbols = self.binance.get_trading_symbols(force=force)
