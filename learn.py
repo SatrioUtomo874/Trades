@@ -859,6 +859,13 @@ class LearnEngine:
                 try:
                     data = self._read_json_file(path)
                     self._restore_state(data)
+                    # Checkpoint lama (dari sebelum cap riwayat ditambahkan)
+                    # bisa saja sudah kadung besar — pangkas SEKARANG, jangan
+                    # tunggu audit() jadwal berikutnya (5 menit lagi). Ini juga
+                    # yang bikin startup awal (dipanggil sinkron saat /try)
+                    # bisa terasa lambat kalau checkpoint-nya belum pernah
+                    # dipangkas sejak fix cap ditambahkan.
+                    self._enforce_history_caps_locked()
                     self._record_event_log("CHECKPOINT_LOAD", "%s OK | checksum validated", label)
                     return label
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
