@@ -3632,6 +3632,16 @@ class TradingBot:
         qty, reason = compute_quantity(setup.entry, self.state.margin, self.state.leverage, filters)
         if qty is None:
             logger.info("Setup %s ditolak validasi quantity/margin: %s", setup.pair, reason)
+            if reason and reason.startswith("MARGIN_DEVIATION_OUT_OF_BOUND"):
+                # Deviasi sebesar ini biasanya berarti step-size/minNotional
+                # koin ini memang tidak cocok dengan margin sekecil ini —
+                # bukan soal confidence, dan akan terus gagal tiap cycle
+                # kalau tidak dihentikan. Ban permanen sampai /unban manual.
+                self.state.ban(setup.pair, "MARGIN_DEVIATION_OUT_OF_BOUND", None)
+                self.telegram.send(
+                    f"🚫 BANNED PERMANEN — {setup.pair}\n\nAlasan: {reason}\nUnban manual: /unban {setup.pair}",
+                    "BANNED",
+                )
             return
 
         if self.state.mode == "SIMULASI":
