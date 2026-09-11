@@ -2742,21 +2742,34 @@ class TradingBot:
             return
 
         if self.state.mode == "REAL":
-            # REAL fill is authoritative from Binance ORDER_TRADE_UPDATE.
-            # Do not poll positionRisk from the Bybit market tick path: that was
-            # the primary source of request amplification leading to 418 bans.
+            # Bybit WS mendeteksi harga sudah menyentuh entry — konfirmasi
+            # SEKALI ke Binance (bukan polling tiap tick, cuma di titik
+            # transisi ini) bahwa posisi memang sudah aktif di real account,
+            # baru pasang TP/SL. Ini menggantikan ketergantungan penuh pada
+            # WebSocket user-data Binance yang ternyata tidak selalu bisa
+            # diandalkan untuk deteksi fill.
+            try:
+                live = self.binance.get_position_risk(symbol)
+            except Exception as e:
+                logger.warning("[FILL] gagal cek posisi real %s: %s — coba lagi tick berikutnya", symbol, e, extra={"symbol": symbol})
+                return
+            if not live:
+                return  # belum benar-benar terisi di Binance, tunggu tick berikutnya
+            event_id = f"{symbol}:FILLED:{pos['created_at']}"
+            if not self.state.transition(symbol, "FILLED", event_id, fill_time=ts, fill_price=price, real_fill_confirmed=True):
+                return
+            with self._shadow_lock:
+                self._shadow_candidates.pop(symbol, None)
+            self.telegram.send(f"✅ FILLED — {symbol}\nEntry: {pos.get('fill_price', price)}\nArah: {direction}", "FILLED")
+            self._attach_real_protection(symbol, pos)
             return
         else:
             event_id = f"{symbol}:FILLED:{pos['created_at']}"
             if not self.state.transition(symbol, "FILLED", event_id, fill_time=ts, fill_price=price, real_fill_confirmed=False):
                 return
-
-        with self._shadow_lock:
-            self._shadow_candidates.pop(symbol, None)
-        self.telegram.send(f"✅ FILLED — {symbol}\nEntry: {pos.get('fill_price', price)}\nArah: {direction}", "FILLED")
-        if self.state.mode == "REAL":
-            self._attach_real_protection(symbol, pos)
-        else:
+            with self._shadow_lock:
+                self._shadow_candidates.pop(symbol, None)
+            self.telegram.send(f"✅ FILLED — {symbol}\nEntry: {pos.get('fill_price', price)}\nArah: {direction}", "FILLED")
             self.state.transition(symbol, "PROTECTED", f"{symbol}:PROTECTED:{pos['created_at']}")
 
     def _queue_binance_protection(self, symbol: str) -> None:
@@ -2893,8 +2906,23 @@ class TradingBot:
         hit_sl = (direction == "BUY" and price <= pos["sl"]) or (direction == "SELL" and price >= pos["sl"])
 
         if self.state.mode == "REAL":
-            # Binance protective orders are authoritative. Bybit price is used only
-            # as monitoring/trailing context, never as a REAL close confirmation.
+            if not (hit_tp or hit_sl):
+                return
+            # Bybit WS mendeteksi harga sudah menyentuh TP/SL/Trail —
+            # konfirmasi SEKALI ke Binance (bukan polling tiap tick) bahwa
+            # posisi memang sudah flat sebelum mencatat close, supaya tidak
+            # salah catat kalau ternyata cuma wick sebentar dan order
+            # Algo-nya belum benar-benar tereksekusi.
+            try:
+                live = self.binance.get_position_risk(symbol)
+            except Exception as e:
+                logger.warning("[CLOSE] gagal cek posisi real %s: %s — coba lagi tick berikutnya", symbol, e, extra={"symbol": symbol})
+                return
+            if live:
+                return  # masih ada posisi aktif di Binance, belum benar-benar close
+            outcome = "TP" if hit_tp else ("TRAIL" if pos.get("trail_count", 0) > 0 else "INITIAL_SL")
+            self._close_position(symbol, pos, outcome, price, ts)
+            self._cleanup_symbol_orders(symbol, pos)
             return
         if hit_tp:
             self._close_position(symbol, pos, "TP", price, ts)
@@ -2988,6 +3016,27 @@ class TradingBot:
             return
         logger.info("[BALANCE] REST POLL SKIPPED | balance model local | reason=%s", reason)
         self._check_local_autostop(reason)
+
+    def _cleanup_symbol_orders(self, symbol: str, pos: Dict[str, Any]) -> None:
+        """Bersihkan sisa order Algo (TP/SL/Trail) yang tertinggal di Binance
+        untuk satu simbol setelah posisi dikonfirmasi close.
+
+        pos["binance_order_ids"] adalah array kecil {role: order_id} yang
+        dicatat tiap kali order dipasang (entry/tp/sl/trail) — di sini
+        tinggal diiterasi dan dibatalkan satu-satu. Order yang sudah
+        kefill/kehapus sendiri oleh Binance akan gagal dibatalkan (wajar,
+        bukan error) — cukup dicatat di log terminal saja, tidak spam Telegram.
+        """
+        ids = pos.get("binance_order_ids") or {}
+        for role, order_id in list(ids.items()):
+            if not order_id:
+                continue
+            try:
+                self.binance.cancel_order(symbol, order_id)
+                logger.info("[CLEANUP] order %s (%s) dibatalkan untuk %s", role, order_id, symbol, extra={"symbol": symbol})
+            except Exception as e:
+                logger.info("[CLEANUP] order %s (%s) untuk %s sudah tidak ada: %s", role, order_id, symbol, e, extra={"symbol": symbol})
+        pos["binance_order_ids"] = {}
 
     def _close_position(self, symbol: str, pos: Dict[str, Any], outcome: str, price: float, ts: float) -> None:
         if self.state.mode == "REAL":
