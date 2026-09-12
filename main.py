@@ -2246,6 +2246,11 @@ class TradingBot:
         self._last_freq_alert_ts: float = 0.0
         self._shadow_candidates: Dict[str, Dict[str, Any]] = {}
         self._shadow_lock = threading.Lock()
+        # Guard supaya konfirmasi Binance (get_position_risk) untuk 1 simbol
+        # tidak dobel-fire kalau beberapa tick Bybit datang beruntun sebelum
+        # thread konfirmasi sebelumnya selesai (lihat _check_pending_fill /
+        # _check_tp_sl — dijalankan async, TIDAK BOLEH blocking thread WS).
+        self._binance_confirm_inflight: set = set()
         self._universe_lock = threading.RLock()
         self._binance_universe_symbols: set[str] = set()
         self._universe_ready = False
@@ -2757,26 +2762,37 @@ class TradingBot:
             return
 
         if self.state.mode == "REAL":
-            # Bybit WS mendeteksi harga sudah menyentuh entry — konfirmasi
-            # SEKALI ke Binance (bukan polling tiap tick, cuma di titik
-            # transisi ini) bahwa posisi memang sudah aktif di real account,
-            # baru pasang TP/SL. Ini menggantikan ketergantungan penuh pada
-            # WebSocket user-data Binance yang ternyata tidak selalu bisa
-            # diandalkan untuk deteksi fill.
-            try:
-                live = self.binance.get_position_risk(symbol)
-            except Exception as e:
-                logger.warning("[FILL] gagal cek posisi real %s: %s — coba lagi tick berikutnya", symbol, e, extra={"symbol": symbol})
+            # Bybit WS memanggil _on_tick SINKRON di thread yang sama dengan
+            # loop ping/pong-nya sendiri (lihat BybitWebSocket._on_message).
+            # get_position_risk() sinkron di sini bisa antre di belakang
+            # rate-limit governor Binance (jeda 2.5-10 detik per request) dan
+            # menunda balasan ping/pong WS Bybit — itu penyebab "ping/pong
+            # timed out" berulang. Konfirmasi dijalankan di thread terpisah
+            # (fire-and-forget) supaya WS tidak pernah ikut tertahan.
+            if symbol in self._binance_confirm_inflight:
                 return
-            if not live:
-                return  # belum benar-benar terisi di Binance, tunggu tick berikutnya
-            event_id = f"{symbol}:FILLED:{pos['created_at']}"
-            if not self.state.transition(symbol, "FILLED", event_id, fill_time=ts, fill_price=price, real_fill_confirmed=True):
-                return
-            with self._shadow_lock:
-                self._shadow_candidates.pop(symbol, None)
-            self.telegram.send(f"✅ FILLED — {symbol}\nEntry: {pos.get('fill_price', price)}\nArah: {direction}", "FILLED")
-            self._attach_real_protection(symbol, pos)
+            self._binance_confirm_inflight.add(symbol)
+
+            def _confirm_fill() -> None:
+                try:
+                    try:
+                        live = self.binance.get_position_risk(symbol)
+                    except Exception as e:
+                        logger.warning("[FILL] gagal cek posisi real %s: %s — coba lagi tick berikutnya", symbol, e, extra={"symbol": symbol})
+                        return
+                    if not live:
+                        return  # belum benar-benar terisi di Binance, tunggu tick berikutnya
+                    event_id = f"{symbol}:FILLED:{pos['created_at']}"
+                    if not self.state.transition(symbol, "FILLED", event_id, fill_time=ts, fill_price=price, real_fill_confirmed=True):
+                        return
+                    with self._shadow_lock:
+                        self._shadow_candidates.pop(symbol, None)
+                    self.telegram.send(f"✅ FILLED — {symbol}\nEntry: {pos.get('fill_price', price)}\nArah: {direction}", "FILLED")
+                    self._attach_real_protection(symbol, pos)
+                finally:
+                    self._binance_confirm_inflight.discard(symbol)
+
+            threading.Thread(target=_confirm_fill, daemon=True, name=f"FillConfirm-{symbol}").start()
             return
         else:
             event_id = f"{symbol}:FILLED:{pos['created_at']}"
@@ -2923,21 +2939,30 @@ class TradingBot:
         if self.state.mode == "REAL":
             if not (hit_tp or hit_sl):
                 return
-            # Bybit WS mendeteksi harga sudah menyentuh TP/SL/Trail —
-            # konfirmasi SEKALI ke Binance (bukan polling tiap tick) bahwa
-            # posisi memang sudah flat sebelum mencatat close, supaya tidak
-            # salah catat kalau ternyata cuma wick sebentar dan order
-            # Algo-nya belum benar-benar tereksekusi.
-            try:
-                live = self.binance.get_position_risk(symbol)
-            except Exception as e:
-                logger.warning("[CLOSE] gagal cek posisi real %s: %s — coba lagi tick berikutnya", symbol, e, extra={"symbol": symbol})
+            # Sama seperti _check_pending_fill: jangan pernah panggil REST
+            # Binance secara sinkron di thread tick Bybit ini (bisa menunda
+            # ping/pong WS dan memicu disconnect). Konfirmasi close jalan di
+            # thread terpisah.
+            if symbol in self._binance_confirm_inflight:
                 return
-            if live:
-                return  # masih ada posisi aktif di Binance, belum benar-benar close
-            outcome = "TP" if hit_tp else ("TRAIL" if pos.get("trail_count", 0) > 0 else "INITIAL_SL")
-            self._close_position(symbol, pos, outcome, price, ts)
-            self._cleanup_symbol_orders(symbol, pos)
+            self._binance_confirm_inflight.add(symbol)
+
+            def _confirm_close() -> None:
+                try:
+                    try:
+                        live = self.binance.get_position_risk(symbol)
+                    except Exception as e:
+                        logger.warning("[CLOSE] gagal cek posisi real %s: %s — coba lagi tick berikutnya", symbol, e, extra={"symbol": symbol})
+                        return
+                    if live:
+                        return  # masih ada posisi aktif di Binance, belum benar-benar close
+                    outcome = "TP" if hit_tp else ("TRAIL" if pos.get("trail_count", 0) > 0 else "INITIAL_SL")
+                    self._close_position(symbol, pos, outcome, price, ts)
+                    self._cleanup_symbol_orders(symbol, pos)
+                finally:
+                    self._binance_confirm_inflight.discard(symbol)
+
+            threading.Thread(target=_confirm_close, daemon=True, name=f"CloseConfirm-{symbol}").start()
             return
         if hit_tp:
             self._close_position(symbol, pos, "TP", price, ts)
