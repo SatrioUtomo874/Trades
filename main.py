@@ -90,8 +90,13 @@ class Config:
     telegram_bot_token: str = field(default_factory=lambda: os.environ.get("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = field(default_factory=lambda: os.environ.get("TELEGRAM_CHAT_ID", ""))
     allowed_user_id: str = field(default_factory=lambda: os.environ.get("ALLOWED_USER_ID", ""))
-    ollama_url: str = field(default_factory=lambda: os.environ.get("OLLAMA_URL", "http://localhost:11434"))
+    # Default diarahkan ke Ollama Cloud (bukan localhost — lihat insiden
+    # "Connection refused" sebelumnya: tidak ada Ollama lokal di server).
+    # Kalau OLLAMA_URL diisi host polos (mis. Ollama lokal), /api/chat
+    # otomatis ditambahkan — lihat resolve_ollama_url().
+    ollama_url: str = field(default_factory=lambda: os.environ.get("OLLAMA_API_URL", "").strip() or os.environ.get("OLLAMA_URL", "").strip() or "https://ollama.com/api/chat")
     ollama_api_key: str = field(default_factory=lambda: os.environ.get("OLLAMA_API_KEY", ""))
+    ollama_model: str = field(default_factory=lambda: os.environ.get("OLLAMA_MODEL", "gpt-oss:20b"))
     github_token: str = field(default_factory=lambda: os.environ.get("GITHUB_TOKEN", ""))
     git_autosave: bool = field(default_factory=lambda: _env_bool("GIT_AUTOSAVE", False))
     state_dir: str = field(default_factory=lambda: os.environ.get("STATE_DIR", "state"))
@@ -2187,8 +2192,6 @@ class TradingBot:
         self.strategy_engine = strategy.Strategy()
         self.learn_engine = learn.LearnEngine(
             checkpoint_path=os.path.join(cfg.state_dir, "learn_checkpoint.json"),
-            ollama_url=cfg.ollama_url or None,
-            ollama_api_key=cfg.ollama_api_key or None,
             git_enabled=cfg.git_autosave,
         )
         self.bybit = BybitClient(cfg.bybit_api_key, cfg.bybit_api_secret)
@@ -2246,6 +2249,13 @@ class TradingBot:
         self._last_freq_alert_ts: float = 0.0
         self._shadow_candidates: Dict[str, Dict[str, Any]] = {}
         self._shadow_lock = threading.Lock()
+        # Jeda antar-panggilan Ollama (lihat call_ollama) — sekarang audit AI
+        # jalan untuk SETIAP koin yang punya setup (diminta user, demi
+        # frequency), jadi volume panggilan per cycle bisa besar. Governor
+        # sederhana ini menahan sebentar antar-request supaya tidak kena
+        # rate limit Ollama Cloud, user sudah setuju cycle jadi lebih lama.
+        self._ollama_lock = threading.Lock()
+        self._ollama_last_call_mono = 0.0
         # Guard supaya konfirmasi Binance (get_position_risk) untuk 1 simbol
         # tidak dobel-fire kalau beberapa tick Bybit datang beruntun sebelum
         # thread konfirmasi sebelumnya selesai (lihat _check_pending_fill /
@@ -3057,6 +3067,54 @@ class TradingBot:
         logger.info("[BALANCE] REST POLL SKIPPED | balance model local | reason=%s", reason)
         self._check_local_autostop(reason)
 
+    def call_ollama(self, system_prompt: str, user_payload: str) -> Optional[str]:
+        """Satu-satunya titik pemanggilan Ollama di seluruh bot — dipakai
+        sebagai `ollama_call` yang di-inject ke strategy.run_ai_audit() (Tier
+        2). strategy.py sendiri TIDAK PERNAH network langsung, sesuai aturan
+        lama "hanya main.py yang boleh akses API". Dipanggil dari thread
+        scanner (bukan thread WS), jadi aman blocking sebentar tanpa
+        mengganggu ping/pong — tetap dikasih timeout supaya tidak menggantung
+        selamanya kalau Ollama Cloud lambat/turun.
+        """
+        if not self.cfg.ollama_api_key:
+            return None
+        # Governor sederhana: jaga jeda minimum antar-request Ollama (bukan
+        # cuma per-thread — audit_ai bisa dipanggil bertubi untuk banyak
+        # koin di thread scanner yang sama, plus tiap audit sendiri sampai
+        # 6 call kalau 3 ronde). OLLAMA_MIN_INTERVAL bisa dituning lewat env
+        # kalau ternyata masih kena limit atau kepingin lebih cepat.
+        min_interval = float(os.environ.get("OLLAMA_MIN_INTERVAL", "2.0"))
+        with self._ollama_lock:
+            wait = min_interval - (time.monotonic() - self._ollama_last_call_mono)
+            if wait > 0:
+                time.sleep(wait)
+            self._ollama_last_call_mono = time.monotonic()
+        url = self.cfg.ollama_url
+        if "/api/" not in url:
+            url = url.rstrip("/") + "/api/chat"
+        try:
+            resp = requests.post(
+                url,
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.cfg.ollama_api_key}"},
+                json={
+                    "model": self.cfg.ollama_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_payload},
+                    ],
+                    "stream": False,
+                },
+                timeout=25,
+            )
+            if resp.status_code != 200:
+                logger.warning("[OLLAMA] HTTP %s: %s", resp.status_code, str(resp.text)[:200])
+                return None
+            text = str((resp.json().get("message") or {}).get("content", "")).strip()
+            return text or None
+        except Exception as e:
+            logger.warning("[OLLAMA] gagal: %s", e)
+            return None
+
     def _cleanup_symbol_orders(self, symbol: str, pos: Dict[str, Any]) -> None:
         """Bersihkan sisa order Algo (TP/SL/Trail) yang tertinggal di Binance
         untuk satu simbol setelah posisi dikonfirmasi close.
@@ -3508,6 +3566,22 @@ class TradingBot:
                     continue
                 hard = analysis_diag.get("hard_gates") or {}
                 hard_ok = bool(hard.get("passed", True))
+                # Diminta user: audit AI jalan untuk SETIAP koin yang punya
+                # setup (bukan cuma yang sudah dekat threshold) — koin yang
+                # dinilai jelek oleh mesin deterministik tetap dapat
+                # kesempatan dinilai ulang AI, bagus untuk frequency. User
+                # sudah setuju konsekuensinya: satu cycle scan jadi jauh
+                # lebih lama. Jeda antar-panggilan (lihat call_ollama) yang
+                # jaga supaya tidak kena rate limit Ollama Cloud.
+                if hard_ok and self.cfg.ollama_api_key:
+                    ai_audit = strategy.run_ai_audit(
+                        setup, analysis_diag, self.call_ollama,
+                        market_note=self.learn_engine.generate_market_note(),
+                    )
+                    if ai_audit.get("confidence_adjustment"):
+                        setup.confidence = max(0.0, min(100.0, setup.confidence + ai_audit["confidence_adjustment"]))
+                    setup.reason.append(f"AI_AUDIT:{ai_audit.get('final_verdict') or ai_audit.get('reasoning')}")
+                    setup.reference_levels["ai_audit"] = ai_audit
                 eligible_now = bool(hard_ok and setup.confidence >= threshold)
                 reason = "PASS" if eligible_now else ("HARD_QUALITY_GATE" if not hard_ok else "BELOW_ACTIVE_THRESHOLD")
                 self.learn_engine.record_scan_candidate(setup.to_dict(), eligible_now, threshold, reason)
