@@ -50,10 +50,11 @@ poin confidence bisa dijelaskan lewat Setup.reason[] dan diagnostics.
 from __future__ import annotations
 
 import logging
+import json
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 try:
     import pandas as pd
@@ -90,6 +91,7 @@ def is_trade_allowed(symbol: str) -> bool:
 
 DEFAULT_PARAMS: Dict[str, Any] = {
     "ACTIVE_THRESHOLD": 35.0,      # % — mulai dari safety floor (spek asli: threshold awal rendah, naik bertahap lewat bukti statistik learn.py — bukan dimulai tinggi)
+    "ai_audit_gate_ratio": 0.60,   # Tier-2 (Ollama) dipanggil kalau confidence >= ACTIVE_THRESHOLD * rasio ini — bisa diturunkan learn.py lewat apply_update() kalau Tier-2 jarang kepanggil (frequency)
     "swing_left": 2,
     "swing_right": 2,
     "equal_level_tol_atr": 0.15,   # toleransi "equal high/low" dalam satuan ATR
@@ -1575,6 +1577,144 @@ def new_default_strategy() -> "Strategy":
     return Strategy()
 
 
+# =============================================================================
+# TIER 2 — AI-AUDITED CONFIDENCE (Ollama dual-LLM adversarial review)
+# =============================================================================
+# main.py adalah satu-satunya yang boleh bicara ke API apa pun (termasuk
+# Ollama) — fungsi di bawah menerima `ollama_call` sebagai parameter
+# (dependency injection, pola yang sama dengan BinanceUserDataStream yang
+# menerima rest_request), supaya modul ini tetap murni/testable tanpa
+# network beneran dan prinsip lama tetap terjaga: strategy.py tidak pernah
+# I/O sendiri.
+#
+# Peran AI di sini BUKAN gatekeeper ya/tidak — perannya mengkalibrasi ulang
+# confidence Tier-1 (mesin deterministik di atas) supaya lebih presisi.
+# Prompt/instruksi/skema JSON di bawah GLOBAL dan TETAP — satu-satunya bagian
+# yang boleh disuntik konten dinamis dari learn.py adalah `market_note` di
+# payload (bukan instruksi AI itu sendiri).
+AI_MAX_ROUNDS = 3
+AI_CONFIDENCE_ADJUST_CAP = 15.0  # AI tidak boleh geser confidence Tier-1 lebih dari ini (poin)
+
+AI1_SYSTEM_PROMPT = (
+    "Anda adalah SETUP ANALYST untuk bot trading crypto futures. Anda menerima "
+    "setup yang SUDAH dihasilkan mesin analisa deterministik (SMC/ICT) beserta "
+    "data pendukungnya dalam bentuk numerik. Tugas Anda BUKAN membuat setup "
+    "baru dan BUKAN mengubah entry/SL/TP — itu domain Python. Tugas Anda "
+    "menilai independen apakah angka & alasan mesin itu masuk akal (0-100), "
+    "dan merevisi penilaian Anda kalau ada kritik dari critic pada payload "
+    "(field previous_critique). Balas HANYA JSON valid, tanpa markdown, "
+    'skema persis: {"assessment_confidence": <0-100 angka>, "thesis": '
+    '<string>, "supporting_factors": [<string>...], "weaknesses": '
+    '[<string>...]}'
+)
+AI2_SYSTEM_PROMPT = (
+    "Anda adalah CRITIC adversarial untuk audit setup trading. Tugas Anda "
+    "secara aktif MENCARI alasan kenapa setup ini bisa GAGAL — jangan mencari "
+    "alasan untuk menyetujui begitu saja. Tapi tetap objektif: kalau setup "
+    "memang valid, boleh diterima, jangan mengarang kritik palsu. Periksa "
+    "arah trend, validitas struktur, risk/reward, apakah entry sudah telat, "
+    "indikasi false-breakout. Anda TIDAK bisa mengubah angka apa pun, cuma "
+    "menilai. Balas HANYA JSON valid, tanpa markdown, skema persis: "
+    '{"verdict": "ACCEPT"|"ACCEPT_WITH_MODIFICATION"|"REJECT", "fatal_risk": '
+    'true|false, "critic_score": <0-100 angka>, "critical_issues": '
+    '[<string>...], "reasoning": <string>}'
+)
+
+
+def _ai_json_parse(text: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse respons AI jadi dict, toleran markdown-fence/whitespace. None
+    kalau genuinely tidak valid — caller HARUS anggap ini kegagalan audit
+    (confidence Tier-1 dipakai apa adanya), bukan alasan untuk crash."""
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t[:4].lower() == "json":
+            t = t[4:]
+        t = t.strip()
+    try:
+        data = json.loads(t)
+        return data if isinstance(data, dict) else None
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+
+
+def _ai_setup_payload(
+    setup: "Setup", diagnostics: Dict[str, Any], market_note: str,
+    critique: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Payload numerik (bukan chart/screenshot) untuk AI#1 — ringkas supaya
+    prompt tidak besar (batas 6000 char, sesuai anjuran efisiensi token)."""
+    payload = {
+        "pair": setup.pair, "direction": setup.direction,
+        "entry": setup.entry, "stop_loss": setup.sl, "take_profit": setup.tp,
+        "risk_reward": (diagnostics.get("tp") or {}).get("rr"),
+        "tier1_confidence": round(setup.confidence, 1),
+        "setup_type": setup.setup_type, "regime": setup.regime, "session": setup.session,
+        "atr": setup.atr, "reasons": setup.reason[:8],
+        "components": {k: round(v, 2) for k, v in setup.components.items()},
+        "market_note": market_note or "(tidak ada catatan khusus)",
+    }
+    if critique:
+        payload["previous_critique"] = critique
+    return json.dumps(payload, ensure_ascii=False, default=str)[:6000]
+
+
+def run_ai_audit(
+    setup: "Setup", diagnostics: Dict[str, Any],
+    ollama_call: Callable[[str, str], Optional[str]],
+    market_note: str = "", max_rounds: int = AI_MAX_ROUNDS,
+) -> Dict[str, Any]:
+    """Audit 2-AI (Setup Analyst vs Critic adversarial), maksimal `max_rounds`
+    ronde (default 3, TIDAK PERNAH lebih — sesuai desain: tidak boleh debat
+    tanpa batas). Return dict berisi confidence_adjustment (poin, dibatasi
+    ±AI_CONFIDENCE_ADJUST_CAP), reasoning, dan log tiap ronde untuk learn.py.
+
+    ollama_call(system_prompt, user_payload) -> teks respons atau None kalau
+    gagal/timeout — TIDAK PERNAH raise dari sisi caller (main.py yang jaga
+    itu). Kegagalan apa pun (timeout/JSON invalid/response kosong) membuat
+    fungsi ini balik confidence_adjustment=0.0 (Tier-1 dipakai apa adanya) —
+    Tier-2 sekarang mengkalibrasi confidence, bukan gerbang wajib entry/tidak.
+    """
+    result: Dict[str, Any] = {
+        "available": False, "rounds": [], "confidence_adjustment": 0.0,
+        "final_verdict": None, "fatal_risk": False, "reasoning": "AI_AUDIT_UNAVAILABLE",
+    }
+    critique: Optional[Dict[str, Any]] = None
+    for round_no in range(1, max(1, max_rounds) + 1):
+        ai1_out = _ai_json_parse(ollama_call(AI1_SYSTEM_PROMPT, _ai_setup_payload(setup, diagnostics, market_note, critique)))
+        if ai1_out is None:
+            result["reasoning"] = "AI_AUDIT_INVALID_RESPONSE (AI#1)"
+            return result
+        critic_payload = json.dumps({"setup_assessment": ai1_out, "round": round_no}, ensure_ascii=False, default=str)[:6000]
+        ai2_out = _ai_json_parse(ollama_call(AI2_SYSTEM_PROMPT, critic_payload))
+        if ai2_out is None:
+            result["reasoning"] = "AI_AUDIT_INVALID_RESPONSE (AI#2)"
+            return result
+        result["rounds"].append({"round": round_no, "ai1": ai1_out, "ai2": ai2_out})
+        critique = ai2_out
+        verdict = str(ai2_out.get("verdict", "")).upper()
+        if verdict == "ACCEPT" or round_no == max_rounds:
+            result["available"] = True
+            result["final_verdict"] = verdict or "UNKNOWN"
+            result["fatal_risk"] = bool(ai2_out.get("fatal_risk"))
+            result["reasoning"] = str(ai2_out.get("reasoning", ""))[:500]
+            ai_conf = _vn_float(ai1_out.get("assessment_confidence"), setup.confidence)
+            critic_score = _vn_float(ai2_out.get("critic_score"), 50.0)
+            # Confidence akhir = rata2 penilaian AI#1 & critic_score AI#2 —
+            # bukan cuma AI#1 — supaya kritik yang keras beneran menurunkan
+            # angka, bukan cuma jadi catatan yang diabaikan.
+            blended = (ai_conf + critic_score) / 2.0
+            adjustment = blended - setup.confidence
+            if result["fatal_risk"]:
+                adjustment = min(adjustment, -AI_CONFIDENCE_ADJUST_CAP)
+            result["confidence_adjustment"] = _vn_clip(adjustment, -AI_CONFIDENCE_ADJUST_CAP, AI_CONFIDENCE_ADJUST_CAP)
+            return result
+        # ACCEPT_WITH_MODIFICATION / REJECT dan ronde masih tersisa -> lanjut revisi
+    return result  # pragma: no cover (loop selalu return di dalam saat round_no==max_rounds)
+
+
 __all__ = [
     "STRATEGY_NAME", "EXECUTION_CONFIDENCE_FLOOR", "EXECUTION_MIN_RR_FLOOR",
     "TRADE_EXCLUDED_SYMBOLS", "is_trade_allowed", "DEFAULT_PARAMS", "VNEXT_DEFAULTS",
@@ -1583,4 +1723,5 @@ __all__ = [
     "validate_candles", "validate_geometry", "validate_trailing_geometry",
     "classify_session", "classify_regime", "classify_volatility_regime",
     "true_range", "atr_series", "ema", "linreg_slope", "pct_returns", "correlation",
+    "run_ai_audit", "AI_MAX_ROUNDS", "AI_CONFIDENCE_ADJUST_CAP",
 ]
