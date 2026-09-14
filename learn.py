@@ -12,7 +12,9 @@ PRINSIP KERAS
    satu kejadian anomali.
 5. Perubahan strategy hanya melalui statistical gate + chronological validation
    + holdout + counterfactual + robustness.
-6. Ollama hanya critic/advisor. Ia tidak pernah menjadi decision maker.
+6. learn.py murni analisa matematis/statistik — TIDAK memanggil AI/LLM apa
+   pun. Audit setup berbasis AI (Ollama) sekarang ada di strategy.py sebagai
+   Tier 2 (lihat strategy.py), main.py yang jadi satu-satunya pemanggil API.
 7. Checkpoint atomic + checksum + backup + validation.
 8. Semua aktivitas penting dibuat visible melalui logging terminal. Bila main.py
    mendaftarkan notification sink, event checkpoint juga diteruskan ke Telegram.
@@ -85,7 +87,7 @@ import time
 import requests
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
-from threading import RLock, Thread
+from threading import RLock
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
@@ -542,8 +544,6 @@ class LearnEngine:
         self,
         checkpoint_path: str = "state/learn_checkpoint.json",
         backup_path: Optional[str] = None,
-        ollama_url: Optional[str] = None,
-        ollama_api_key: Optional[str] = None,
         git_enabled: bool = False,
         git_repo_dir: Optional[str] = None,
         github_token: Optional[str] = None,
@@ -556,9 +556,6 @@ class LearnEngine:
         self.checkpoint_path = checkpoint_path
         self.backup_path = backup_path or (checkpoint_path + ".backup")
         self.checksum_path = checkpoint_path + ".sha256"
-        self.ollama_url = self._resolve_ollama_url(ollama_url)
-        self.ollama_api_key = ollama_api_key or os.environ.get("OLLAMA_API_KEY", "")
-        self.ollama_model = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b")
         self.git_enabled = bool(git_enabled)
         self.git_repo_dir = git_repo_dir or "."
         # Autosave pushes the checkpoint straight to GitHub's Contents API.
@@ -611,7 +608,6 @@ class LearnEngine:
         self.decision_history: List[Dict[str, Any]] = []
         self.challenger_history: List[Dict[str, Any]] = []
         self.replay_history: List[Dict[str, Any]] = []
-        self.ollama_critique_history: List[Dict[str, Any]] = []
         self.pending_challenger: Optional[Dict[str, Any]] = None
         self.last_audit_report: Dict[str, Any] = {}
         self.last_checkpoint_notification: Dict[str, Any] = {}
@@ -785,7 +781,6 @@ class LearnEngine:
                 "decision_history": self.decision_history[-5000:],
                 "challenger_history": self.challenger_history[-2000:],
                 "replay_history": self.replay_history[-2000:],
-                "ollama_critique_history": self.ollama_critique_history[-1000:],
                 "pending_challenger": self.pending_challenger,
                 "last_audit_report": self.last_audit_report,
                 "last_checkpoint_notification": self.last_checkpoint_notification,
@@ -829,7 +824,7 @@ class LearnEngine:
             "trade_history", "scan_summaries", "scan_analysis_history", "candidate_history",
             "market_snapshots", "pending_history", "fill_history", "trail_history", "close_history",
             "shadow_history", "raw_events", "threshold_history", "strategy_change_log", "decision_history",
-            "challenger_history", "replay_history", "ollama_critique_history",
+            "challenger_history", "replay_history",
         ):
             setattr(self, attr, list(data.get(attr, [])))
         for attr in (
@@ -1126,13 +1121,18 @@ class LearnEngine:
         row.setdefault("event_id", f"LE-{int(_now() * 1000)}-{self.event_sequence + 1}")
         row["importance"] = importance
         self.raw_events.append(row)
-        if len(self.raw_events) > 60000:
-            del self.raw_events[:-50000]
+        if len(self.raw_events) > 2000:
+            del self.raw_events[:-1200]
 
     def _append_scan_row(self, row: Dict[str, Any]) -> None:
         self.scan_analysis_history.append(row)
-        if len(self.scan_analysis_history) > 80000:
-            del self.scan_analysis_history[:-60000]
+        # Cap dipangkas langsung di sini (bukan cuma menunggu audit() tiap 5
+        # menit) karena list ini paling cepat tumbuh (~50 entri/scan cycle).
+        # Angka 4000/2500 berdasar pengukuran nyata: 1 entri ~9.4KB di
+        # memori Python — cap lama (80000) = ~717MB sendirian, itu akar
+        # penyebab OOM "used over 512MB" yang berulang di log Render.
+        if len(self.scan_analysis_history) > 1200:
+            del self.scan_analysis_history[:-800]
 
     # ------------------------------------------------------------------
     # Scan intelligence — the always-moving brain
@@ -1406,6 +1406,11 @@ class LearnEngine:
                 "reference_levels": dict(setup.get("reference_levels", {})),
             }
             self.candidate_history.append(row)
+            # Sama seperti scan_analysis_history: dipangkas langsung, bukan
+            # cuma nunggu audit(). 1 entri ~6.2KB di memori Python (diukur
+            # langsung) — cap ini dijaga selaras dengan _enforce_history_caps_locked.
+            if len(self.candidate_history) > 1200:
+                del self.candidate_history[:-800]
             self._append_event("CANDIDATE", row)
             self.live_counters["candidate"] += 1
             self.live_counters["eligible"] += int(bool(eligible))
@@ -1798,6 +1803,33 @@ class LearnEngine:
     def regime_performance(self) -> Dict[str, Dict[str, Any]]:
         groups = _group_by(self.trade_history, "regime")
         return {k: self._weighted_stats(v) for k, v in groups.items()}
+
+    def generate_market_note(self) -> str:
+        """Catatan singkat murni dari statistik yang SUDAH ada (session
+        performance, frequency) — TANPA LLM apa pun. Ini "prompt adjustment"
+        yang diminta: struktur/instruksi prompt AI di strategy.py tetap
+        global & tetap, cuma isi catatan kecil ini yang boleh berubah sesuai
+        apa yang learn.py pelajari, disuntikkan ke payload (bukan ke system
+        prompt) lewat main.py -> strategy.run_ai_audit(market_note=...).
+        """
+        with self._lock:
+            notes: List[str] = []
+            try:
+                perf = self.session_performance()
+                labeled = [(s, d) for s, d in perf.items() if isinstance(d, dict) and d.get("n", 0) >= 5]
+                if labeled:
+                    best = max(labeled, key=lambda kv: kv[1].get("win_rate", 0))
+                    worst = min(labeled, key=lambda kv: kv[1].get("win_rate", 0))
+                    if best[0] != worst[0]:
+                        notes.append(
+                            f"Sesi {best[0]} historis lebih baik (WR {best[1].get('win_rate',0):.0f}%) "
+                            f"dibanding sesi {worst[0]} (WR {worst[1].get('win_rate',0):.0f}%)."
+                        )
+            except Exception:
+                pass
+            if len(self.trade_history) < MIN_TOTAL_SAMPLE_FOR_AUDIT:
+                notes.append(f"Riwayat trade masih sedikit ({len(self.trade_history)}), pola belum kuat secara statistik.")
+            return " ".join(notes) if notes else ""
 
     def session_performance(self) -> Dict[str, Dict[str, Any]]:
         groups = _group_by(self.trade_history, "session")
@@ -2356,109 +2388,6 @@ class LearnEngine:
         return None
 
     # ------------------------------------------------------------------
-    # Ollama critic — advisor only
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _resolve_ollama_url(explicit: Optional[str]) -> str:
-        """Resolve the Ollama endpoint to call.
-
-        Sebelumnya default-nya "http://localhost:11434" lalu di-POST ke
-        /api/generate — di server deployment (Render, dst.) tidak ada Ollama
-        lokal yang jalan, jadi selalu "Connection refused". Konfigurasi yang
-        sebenarnya dipakai (lihat OLLAMA_API_KEY + OLLAMA_MODEL di .env) adalah
-        Ollama Cloud (https://ollama.com), yang butuh endpoint /api/chat +
-        Bearer token, bukan Ollama lokal. Default sekarang diarahkan ke sana.
-        OLLAMA_API_URL / OLLAMA_URL tetap bisa dipakai untuk override (mis.
-        kalau suatu saat memang menjalankan Ollama sendiri) — kalau nilainya
-        cuma host tanpa path ("http://localhost:11434"), /api/chat otomatis
-        ditambahkan.
-        """
-        raw = (
-            explicit
-            or os.environ.get("OLLAMA_API_URL", "").strip()
-            or os.environ.get("OLLAMA_URL", "").strip()
-            or "https://ollama.com/api/chat"
-        )
-        if "/api/" in raw:
-            return raw
-        return raw.rstrip("/") + "/api/chat"
-
-    def _ollama_critique_async(self, context: Dict[str, Any], audit_sequence: int) -> None:
-        """Jalankan critique Ollama di thread terpisah — TIDAK boleh dipanggil
-        sambil memegang self._lock untuk seluruh durasi network call.
-
-        audit() sebelumnya memanggil _ollama_critique() secara SINKRON sambil
-        memegang self._lock untuk seluruh isi method (statistik + network).
-        timeout=20 di requests tidak membatasi durasi TOTAL request — cuma
-        jeda antar-progress baca socket; endpoint yang lambat/nge-trickle
-        bisa membuat request "hidup" jauh lebih lama dari 20 detik tanpa
-        pernah timeout. Selama itu, self._lock tertahan, jadi SEMUA panggilan
-        learn_engine lain (record_scan_candidate dari thread scanner, dst)
-        ikut ngeblok — bot terlihat berhenti total tanpa crash/redeploy.
-        Ollama murni advisory (tidak pernah mengubah keputusan apa pun), jadi
-        aman dijalankan async dan ditempel ke laporan belakangan — audit_sequence
-        dicek dulu supaya tidak nempel ke report yang sudah digantikan audit
-        berikutnya kalau responsnya lama.
-        """
-        def _run() -> None:
-            text = self._ollama_critique(context)
-            if text:
-                with self._lock:
-                    if self.last_audit_report is not None and self.last_audit_report.get("audit_sequence") == audit_sequence:
-                        self.last_audit_report["ollama_critique"] = text
-                    self._append_event("OLLAMA_CRITIC_ASYNC", {"chars": len(text)})
-        Thread(target=_run, daemon=True, name="OllamaCritiqueAsync").start()
-
-    def _ollama_critique(self, context: Dict[str, Any]) -> Optional[str]:
-        if not self.ollama_url:
-            self._record_event_log("OLLAMA", "SKIP | unavailable")
-            return None
-        system_prompt = (
-            "Anda hanya menjadi critic statistik untuk bot trading. Jangan memberi order. "
-            "Jangan mengubah parameter apapun secara langsung — hanya memberi opini tertulis. "
-            "Tinjau blind spots, contradictory evidence, confounding, frequency-quality tradeoff, "
-            "exit attribution, trail critique, dan data freshness concern. Jawab ringkas (maks "
-            "~150 kata), bahasa Indonesia, tanpa markdown/format kode."
-        )
-        user_payload = json.dumps(context, ensure_ascii=False, default=str)[:15000]
-        try:
-            headers = {"Content-Type": "application/json"}
-            if self.ollama_api_key:
-                headers["Authorization"] = f"Bearer {self.ollama_api_key}"
-            response = requests.post(
-                self.ollama_url,
-                headers=headers,
-                json={
-                    "model": self.ollama_model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_payload},
-                    ],
-                    "stream": False,
-                },
-                timeout=20,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                text = str((data.get("message") or {}).get("content", "")).strip()[:4000]
-                if not text:
-                    self._record_event_log("OLLAMA", "EMPTY_RESPONSE", level=logging.WARNING)
-                    return None
-                note = {"timestamp": _now(), "response": text, "model": self.ollama_model}
-                self.ollama_critique_history.append(note)
-                self.ollama_critique_history = self.ollama_critique_history[-1000:]
-                self._append_event("OLLAMA_CRITIC", note)
-                self._record_event_log("OLLAMA", "DONE | chars=%s", len(text))
-                return text
-            self._record_event_log(
-                "OLLAMA", "HTTP %s | %s", response.status_code, str(response.text)[:200],
-                level=logging.WARNING,
-            )
-        except Exception as exc:
-            self._record_event_log("OLLAMA", "UNAVAILABLE | %s", exc, level=logging.WARNING)
-        return None
-
-    # ------------------------------------------------------------------
     # Strategy state and rollback
     # ------------------------------------------------------------------
     def set_strategy_state(self, state: Dict[str, Any]) -> None:
@@ -2542,23 +2471,31 @@ class LearnEngine:
     def _enforce_history_caps_locked(self) -> None:
         """Cegah semua riwayat tumbuh tanpa batas selama proses hidup lama.
 
-        Sebelumnya hanya raw_events & scan_analysis_history yang dipangkas —
-        ~13 list lain (candidate_history, shadow_history, trade_history,
-        pending/fill/trail/close_history, dll) tidak punya batas sama sekali,
-        tumbuh terus tiap scan cycle/candidate/trade selama proses hidup.
-        Ini akar penyebab "Render sampai auto-redeploy" — memory Python naik
-        terus tanpa henti sampai platform mem-OOM-kill prosesnya. Dipanggil
-        dari audit() (tiap 5 menit) — cukup untuk mencegah OOM tanpa perlu
-        ubah tiap satu titik .append() di seluruh file.
+        Revisi kedua — cap pertama (80000/20000 dst) TERBUKTI masih jauh
+        terlalu longgar: diukur langsung pakai tracemalloc, 1 entri
+        scan_analysis_history nyatanya ~9.4KB di memori Python (bukan cuma
+        beberapa ratus byte seperti dugaan awal — dict bersarang dengan
+        reference_levels/components/reasons jauh lebih berat dari perkiraan).
+        Cap lama 80000 = ~717MB SENDIRIAN, jauh di atas limit 512MB Render —
+        itu akar penyebab nyata "Ran out of memory (used over 512MB)" yang
+        berulang di log Render. Angka di bawah ini dihitung mundur dari
+        pengukuran real per-entry, dengan total budget seluruh riwayat
+        dijaga di sekitar ~150MB (sisa >350MB untuk interpreter, data candle
+        yang sedang diproses, dsb). Dipanggil dari audit() (5 menit) dan
+        load() (saat checkpoint dibuka) — untuk dua list terberat
+        (candidate_history, scan_analysis_history) juga dipangkas langsung
+        tiap append (lihat record_scan_candidate/record_scan_analysis) biar
+        tidak sempat overshoot jauh di antara audit.
         """
         caps = [
-            ("market_snapshots", 5000, 3000), ("scan_summaries", 5000, 3000),
-            ("candidate_history", 20000, 15000), ("pending_history", 5000, 3000),
-            ("fill_history", 5000, 3000), ("trail_history", 10000, 7000),
-            ("close_history", 5000, 3000), ("shadow_history", 10000, 7000),
-            ("trade_history", 10000, 7000), ("replay_history", 2000, 1000),
-            ("challenger_history", 1000, 500), ("decision_history", 2000, 1000),
-            ("strategy_change_log", 1000, 500), ("threshold_history", 2000, 1000),
+            ("scan_analysis_history", 1200, 800), ("candidate_history", 1200, 800),
+            ("market_snapshots", 900, 600), ("scan_summaries", 900, 600),
+            ("pending_history", 900, 600), ("fill_history", 600, 400),
+            ("trail_history", 900, 600), ("close_history", 600, 400),
+            ("shadow_history", 900, 600), ("trade_history", 1500, 1000),
+            ("replay_history", 250, 150), ("challenger_history", 150, 100),
+            ("decision_history", 250, 150), ("strategy_change_log", 150, 100),
+            ("threshold_history", 250, 150),
         ]
         for name, max_len, keep_len in caps:
             lst = getattr(self, name, None)
@@ -2600,22 +2537,7 @@ class LearnEngine:
                 "quality_quantity": qq,
                 "version_health": self.evaluate_current_version_degradation(),
                 "challenger": copy.deepcopy(self.pending_challenger),
-                "ollama_critique": None,
             }
-
-            # Always run a critic on statistical summary, never raw candles.
-            # Ollama murni advisory — dijalankan async (lihat docstring
-            # _ollama_critique_async) supaya network call lambat/macet tidak
-            # pernah menahan self._lock dan membekukan seluruh learn_engine.
-            report["ollama_critique"] = None
-            self._ollama_critique_async({
-                "quality": quality,
-                "frequency": frequency,
-                "scan": scan_analysis,
-                "attribution": attribution,
-                "quality_quantity": qq,
-                "strategy_version": getattr(strategy_engine, "version", None),
-            }, self.audit_sequence)
 
             # Safety: never update because of a single trade/scan.
             if report["version_health"].get("status") == "DEGRADED":
