@@ -12,12 +12,22 @@ PRINSIP KERAS
    satu kejadian anomali.
 5. Perubahan strategy hanya melalui statistical gate + chronological validation
    + holdout + counterfactual + robustness.
-6. Learning is fully statistical; no LLM or external inference service is used.
+6. learn.py murni analisa matematis/statistik — TIDAK memanggil AI/LLM apa
+   pun. Audit setup berbasis AI (Ollama) sekarang ada di strategy.py sebagai
+   Tier 2 (lihat strategy.py), main.py yang jadi satu-satunya pemanggil API.
 7. Checkpoint atomic + checksum + backup + validation.
 8. Semua aktivitas penting dibuat visible melalui logging terminal. Bila main.py
    mendaftarkan notification sink, event checkpoint juga diteruskan ke Telegram.
 9. Tidak ada look-ahead pada data scan/features. Historical outcome boleh dipakai
    hanya setelah event tersebut secara chronological memang telah terjadi.
+10. Satu pengecualian jaringan yang disengaja: autosave checkpoint ke GitHub
+    (_git_commit_push). Deployment bot (lihat try.py) mengambil file lewat
+    tarball GitHub tanpa folder .git, jadi tidak ada working copy git di
+    server untuk `git commit`/`git push`. Autosave karena itu memanggil
+    GitHub Contents API langsung (GET sha lalu PUT base64, sama seperti
+    try.py di /ganti), dengan GITHUB_TOKEN/REPO_NAME/GITHUB_BRANCH. Ini
+    murni menyalin file checkpoint yang sudah tersimpan lokal — bukan
+    keputusan trading, dan gagal push tidak pernah menggagalkan save lokal.
 
 DESAIN MEMORY
 -------------
@@ -53,14 +63,17 @@ Method tambahan yang disiapkan untuk integrasi vNext:
 - evaluate_challenger()
 - rollback_to_version()
 
-NOTE NOTIFICATION
------------------
-Learn does not perform external network requests. If main.py provides a notification
-sink, Learn may emit checkpoint notifications through that callback.
+NOTE TELEGRAM
+-------------
+Learn tidak melakukan request Telegram sendiri agar tetap menjadi engine statistik,
+bukan engine network. Bila main.py memberi callable notification sink, Learn akan
+mengirim notifikasi checkpoint melalui sink tersebut. Dengan main.py saat ini sink
+belum dipasang; karena itu Learn tidak berpura-pura seolah Telegram sudah terkirim.
 """
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -70,17 +83,24 @@ import os
 import shutil
 import statistics
 import time
+
+import requests
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+try:
+    import requests
+except ImportError:  # pragma: no cover
+    requests = None
 
 
 logger = logging.getLogger("learn")
 
 SCHEMA_VERSION = 7
 ENGINE_NAME = "adaptive-learning-brain-vnext"
-ENGINE_VERSION = "2.00"
+ENGINE_VERSION = "2.10"
 
 # ---------------------------------------------------------------------------
 # Governance thresholds
@@ -100,6 +120,13 @@ MIN_SCAN_EVENTS_FOR_PATTERN = 30
 AUDIT_COOLDOWN_SECONDS = 15 * 60
 ROLLBACK_DEGRADATION_R = 0.30
 MAX_THRESHOLD_STEP = 5.0
+# Harus sama dengan strategy.EXECUTION_CONFIDENCE_FLOOR / main.EXECUTION_CONFIDENCE_FLOOR
+# (tiga file ini tidak saling impor, jadi konstanta ini WAJIB disinkronkan
+# manual kalau salah satu berubah). Sebelumnya nilai ini 55.0 di-hardcode di
+# 4 tempat berbeda — waktu strategy.py & main.py diturunkan ke 35.0, tempat
+# ini terlewat, jadi ACTIVE_THRESHOLD tetap terkunci >=55 walau floor
+# eksekusi sudah diturunkan (laporan user, "learn tidak ikut diganti?").
+ACTIVE_THRESHOLD_FLOOR = 35.0
 
 MAX_PARAM_STEP: Dict[str, float] = {
     "min_rr": 0.20,
@@ -519,15 +546,37 @@ class LearnEngine:
         backup_path: Optional[str] = None,
         git_enabled: bool = False,
         git_repo_dir: Optional[str] = None,
+        github_token: Optional[str] = None,
+        github_repo: Optional[str] = None,
+        github_branch: Optional[str] = None,
+        github_remote_path: Optional[str] = None,
         notification_sink: Optional[Callable[[str, str], Any]] = None,
         checkpoint_interval_seconds: int = 120,
     ):
         self.checkpoint_path = checkpoint_path
         self.backup_path = backup_path or (checkpoint_path + ".backup")
         self.checksum_path = checkpoint_path + ".sha256"
-        # Compatibility-only flag. Git/network operations are intentionally owned by main.py.
-        self.git_enabled = False
+        self.git_enabled = bool(git_enabled)
         self.git_repo_dir = git_repo_dir or "."
+        # Autosave pushes the checkpoint straight to GitHub's Contents API.
+        # The runtime deployment (see try.py) syncs files from a downloaded
+        # GitHub tarball with no .git directory, so there is no local git
+        # working copy to `git commit`/`git push` against — REST is the only
+        # thing that actually works here, and it's the same approach try.py
+        # already uses for /ganti.
+        self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
+        self.github_repo = github_repo or os.environ.get("REPO_NAME", "")
+        self.github_branch = github_branch or os.environ.get("GITHUB_BRANCH", "main")
+        # Autosave checkpoint DIPISAH ke branch sendiri (bukan branch deploy
+        # di atas) — root cause "sering auto-redeploy": Render (default)
+        # auto-deploy tiap ada push baru ke branch yang di-deploy. Push
+        # checkpoint tiap ~2 menit ke branch YANG SAMA = redeploy tiap ~2
+        # menit. Branch ini tidak pernah disentuh Render sama sekali.
+        self.github_memory_branch = os.environ.get("LEARN_MEMORY_BRANCH", "learn-memory")
+        self._memory_branch_ready = False
+        self.github_remote_dir = (
+            github_remote_path or os.environ.get("LEARN_MEMORY_REMOTE_DIR", "memory")
+        ).strip("/") or "memory"
         self.notification_sink = notification_sink
         self.checkpoint_interval_seconds = max(30, int(checkpoint_interval_seconds))
         self._lock = RLock()
@@ -812,6 +861,13 @@ class LearnEngine:
                 try:
                     data = self._read_json_file(path)
                     self._restore_state(data)
+                    # Checkpoint lama (dari sebelum cap riwayat ditambahkan)
+                    # bisa saja sudah kadung besar — pangkas SEKARANG, jangan
+                    # tunggu audit() jadwal berikutnya (5 menit lagi). Ini juga
+                    # yang bikin startup awal (dipanggil sinkron saat /try)
+                    # bisa terasa lambat kalau checkpoint-nya belum pernah
+                    # dipangkas sejak fix cap ditambahkan.
+                    self._enforce_history_caps_locked()
                     self._record_event_log("CHECKPOINT_LOAD", "%s OK | checksum validated", label)
                     return label
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -873,11 +929,16 @@ class LearnEngine:
                 self._emit_checkpoint_notification_locked(False, "", f"save failed: {exc}")
                 return False
 
-    def autosave(self, reason: str = "autosave") -> None:
+    def autosave(self, reason: str = "autosave") -> bool:
         try:
             ok = self.save_checkpoint(reason=reason)
+            if ok and self.git_enabled:
+                self._git_commit_push()
+            self._record_event_log("AUTOSAVE", "%s | reason=%s", "PASS" if ok else "FAIL", reason)
+            return bool(ok)
         except Exception as exc:  # pragma: no cover
             self._record_event_log("AUTOSAVE", "NON_FATAL | %s", exc)
+            return False
 
     def _maybe_checkpoint_after_high_value_event_locked(self, reason: str) -> bool:
         """Checkpoint oportunistik tanpa melakukan write pada setiap event.
@@ -897,7 +958,162 @@ class LearnEngine:
                 return False
         return self.save_checkpoint(reason=reason)
 
+    def _ensure_memory_branch(self) -> bool:
+        """Pastikan github_memory_branch ada di repo — GitHub Contents API
+        tidak otomatis membuat branch baru. Kalau belum ada, buat sekali
+        dari HEAD branch deploy (self.github_branch). Hasilnya di-cache di
+        self._memory_branch_ready supaya cuma dicek sekali per proses."""
+        if self._memory_branch_ready:
+            return True
+        headers = {"Authorization": f"Bearer {self.github_token}", "Accept": "application/vnd.github+json"}
+        try:
+            check = requests.get(
+                f"https://api.github.com/repos/{self.github_repo}/branches/{self.github_memory_branch}",
+                headers=headers, timeout=15,
+            )
+            if check.status_code == 200:
+                self._memory_branch_ready = True
+                return True
+            if check.status_code != 404:
+                return False
+            ref = requests.get(
+                f"https://api.github.com/repos/{self.github_repo}/git/ref/heads/{self.github_branch}",
+                headers=headers, timeout=15,
+            )
+            sha = ref.json().get("object", {}).get("sha") if ref.status_code == 200 else None
+            if not sha:
+                return False
+            created = requests.post(
+                f"https://api.github.com/repos/{self.github_repo}/git/refs",
+                headers=headers, json={"ref": f"refs/heads/{self.github_memory_branch}", "sha": sha}, timeout=15,
+            )
+            self._memory_branch_ready = created.status_code in (200, 201)
+            return self._memory_branch_ready
+        except requests.RequestException:
+            return False
 
+    def _git_push_one_file(self, local_path: str, remote_name: str) -> Tuple[bool, str]:
+        """PUT a single local file to GitHub Contents API under memory/<remote_name>,
+        ke github_memory_branch (bukan branch deploy — lihat _ensure_memory_branch).
+        Returns (ok, detail) — never raises."""
+        try:
+            with open(local_path, "rb") as f:
+                content = f.read()
+        except OSError as exc:
+            return False, f"tidak bisa baca {local_path}: {exc}"
+        if not self._ensure_memory_branch():
+            return False, f"gagal memastikan branch {self.github_memory_branch} ada"
+        path = f"{self.github_remote_dir.strip('/')}/{remote_name}"
+        headers = {
+            "Authorization": f"Bearer {self.github_token}",
+            "Accept": "application/vnd.github+json",
+        }
+        api_url = f"https://api.github.com/repos/{self.github_repo}/contents/{path}"
+        try:
+            get_resp = requests.get(api_url, headers=headers, params={"ref": self.github_memory_branch}, timeout=15)
+            sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
+            payload: Dict[str, Any] = {
+                "message": f"autosave learn checkpoint {_now():.0f}",
+                "content": base64.b64encode(content).decode("ascii"),
+                "branch": self.github_memory_branch,
+            }
+            if sha:
+                payload["sha"] = sha
+            put_resp = requests.put(api_url, headers=headers, json=payload, timeout=30)
+            if put_resp.status_code >= 400:
+                return False, f"HTTP {put_resp.status_code}: {str(put_resp.text)[:180]}"
+            return True, path
+        except requests.RequestException as exc:
+            return False, str(exc)[:180]
+        except Exception as exc:  # pragma: no cover
+            return False, str(exc)[:180]
+
+    def _git_commit_push(self) -> None:
+        """Push the whole learn-memory folder to GitHub via the Contents API.
+
+        No local git CLI, no working tree assumption — just an HTTP GET (to
+        pick up each file's current sha, if any) followed by a PUT with the
+        file bytes, exactly like try.py's own /ganti path. Pushes checkpoint
+        + backup + checksum together under memory/ so "seluruh progress"
+        (not just the primary file) actually lands in the repo, and always
+        tells Telegram whether the push worked or not.
+        """
+        if not self.github_token or not self.github_repo:
+            self._record_event_log(
+                "GIT", "SKIPPED | GITHUB_TOKEN/REPO_NAME belum diset", level=logging.DEBUG
+            )
+            return
+        files = [
+            (self.checkpoint_path, os.path.basename(self.checkpoint_path)),
+            (self.backup_path, os.path.basename(self.backup_path)),
+            (self.checksum_path, os.path.basename(self.checksum_path)),
+        ]
+        results = []
+        for local_path, remote_name in files:
+            if not os.path.exists(local_path):
+                continue
+            ok, detail = self._git_push_one_file(local_path, remote_name)
+            results.append((remote_name, ok, detail))
+            if ok:
+                self._record_event_log("GIT", "PUSH OK | %s@%s", detail, self.github_memory_branch)
+            else:
+                self._record_event_log("GIT", "WARNING | push %s gagal: %s", remote_name, detail, level=logging.WARNING)
+        ok_count = sum(1 for _, ok, _ in results if ok)
+        if not results:
+            return
+        if ok_count == len(results):
+            self._notify(
+                "GIT_PUSH",
+                f"✅ Autosave GitHub OK — {ok_count} file di `{self.github_remote_dir}/` "
+                f"({self.github_repo}@{self.github_memory_branch})",
+            )
+        else:
+            failed = ", ".join(name for name, ok, _ in results if not ok)
+            self._notify(
+                "GIT_PUSH",
+                f"⚠️ Autosave GitHub sebagian gagal ({ok_count}/{len(results)} sukses) — "
+                f"gagal: {failed}. Cek GITHUB_TOKEN/REPO_NAME/permission repo.",
+            )
+
+    # ------------------------------------------------------------------
+    # Explicit /open + /save command handlers
+    # ------------------------------------------------------------------
+    def open_memory(self) -> str:
+        """Explicit /open handler: primary checkpoint, then backup, with checksum validation."""
+        label = self.load()
+        self._record_event_log("OPEN", "memory=%s", label)
+        return label
+
+    def save_memory(self, reason: str = "manual /save") -> bool:
+        """Explicit /save handler. Uses the same atomic checkpoint path as autosave."""
+        ok = self.save_checkpoint(reason=reason)
+        self._record_event_log("SAVE", "%s | reason=%s", "PASS" if ok else "FAIL", reason)
+        return bool(ok)
+
+    def handle_command(self, command: str) -> Dict[str, Any]:
+        """Small command adapter for integrations that want /open and /save owned by Learn."""
+        cmd = str(command or "").strip().lower().split()[0] if str(command or "").strip() else ""
+        if cmd == "/open":
+            label = self.open_memory()
+            return {"ok": True, "command": "/open", "source": label, "strategy": self.strategy_state.get("version")}
+        if cmd == "/save":
+            ok = self.save_memory()
+            return {"ok": ok, "command": "/save", "checkpoint": self.checkpoint_path}
+        return {"ok": False, "command": cmd or None, "reason": "UNKNOWN_COMMAND"}
+
+    def autosave_status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "checkpoint_path": self.checkpoint_path,
+                "last_autosave_ts": self.last_autosave_ts,
+                "last_checkpoint_ts": self.last_checkpoint_ts,
+                "interval_seconds": self.checkpoint_interval_seconds,
+                "checkpoint": self.validate_checkpoint(),
+            }
+
+    # ------------------------------------------------------------------
+    # Raw event ingestion
+    # ------------------------------------------------------------------
     def _append_event(self, kind: str, payload: Dict[str, Any], *, importance: str = "NORMAL") -> None:
         row = dict(payload)
         row["kind"] = kind
@@ -905,13 +1121,18 @@ class LearnEngine:
         row.setdefault("event_id", f"LE-{int(_now() * 1000)}-{self.event_sequence + 1}")
         row["importance"] = importance
         self.raw_events.append(row)
-        if len(self.raw_events) > 60000:
-            del self.raw_events[:-50000]
+        if len(self.raw_events) > 2000:
+            del self.raw_events[:-1200]
 
     def _append_scan_row(self, row: Dict[str, Any]) -> None:
         self.scan_analysis_history.append(row)
-        if len(self.scan_analysis_history) > 80000:
-            del self.scan_analysis_history[:-60000]
+        # Cap dipangkas langsung di sini (bukan cuma menunggu audit() tiap 5
+        # menit) karena list ini paling cepat tumbuh (~50 entri/scan cycle).
+        # Angka 4000/2500 berdasar pengukuran nyata: 1 entri ~9.4KB di
+        # memori Python — cap lama (80000) = ~717MB sendirian, itu akar
+        # penyebab OOM "used over 512MB" yang berulang di log Render.
+        if len(self.scan_analysis_history) > 1200:
+            del self.scan_analysis_history[:-800]
 
     # ------------------------------------------------------------------
     # Scan intelligence — the always-moving brain
@@ -982,8 +1203,9 @@ class LearnEngine:
 
             direction = str(setup.get("direction", diag.get("direction", "UNKNOWN")))
             setup_type = str(setup.get("setup_type", diag.get("setup_type", "UNKNOWN")))
-            regime = str(setup.get("regime", diag.get("regime", context.get("regime", "UNKNOWN"))))
-            session = str(setup.get("session", diag.get("session", context.get("session", "UNKNOWN"))))
+            diag_market = dict(diag.get("market") or {})
+            regime = str(setup.get("regime", diag_market.get("regime", context.get("regime", "UNKNOWN"))))
+            session = str(setup.get("session", diag_market.get("session", context.get("session", "UNKNOWN"))))
             rr = _safe_float(tp.get("rr", setup.get("reference_levels", {}).get("rr", 0.0)))
             distance_atr = _safe_float(entry.get("distance_atr", entry.get("entry_distance_atr", 0.0)))
             stale = bool(freshness.get("stale", diag.get("stale", False)))
@@ -1184,6 +1406,11 @@ class LearnEngine:
                 "reference_levels": dict(setup.get("reference_levels", {})),
             }
             self.candidate_history.append(row)
+            # Sama seperti scan_analysis_history: dipangkas langsung, bukan
+            # cuma nunggu audit(). 1 entri ~6.2KB di memori Python (diukur
+            # langsung) — cap ini dijaga selaras dengan _enforce_history_caps_locked.
+            if len(self.candidate_history) > 1200:
+                del self.candidate_history[:-800]
             self._append_event("CANDIDATE", row)
             self.live_counters["candidate"] += 1
             self.live_counters["eligible"] += int(bool(eligible))
@@ -1577,6 +1804,33 @@ class LearnEngine:
         groups = _group_by(self.trade_history, "regime")
         return {k: self._weighted_stats(v) for k, v in groups.items()}
 
+    def generate_market_note(self) -> str:
+        """Catatan singkat murni dari statistik yang SUDAH ada (session
+        performance, frequency) — TANPA LLM apa pun. Ini "prompt adjustment"
+        yang diminta: struktur/instruksi prompt AI di strategy.py tetap
+        global & tetap, cuma isi catatan kecil ini yang boleh berubah sesuai
+        apa yang learn.py pelajari, disuntikkan ke payload (bukan ke system
+        prompt) lewat main.py -> strategy.run_ai_audit(market_note=...).
+        """
+        with self._lock:
+            notes: List[str] = []
+            try:
+                perf = self.session_performance()
+                labeled = [(s, d) for s, d in perf.items() if isinstance(d, dict) and d.get("n", 0) >= 5]
+                if labeled:
+                    best = max(labeled, key=lambda kv: kv[1].get("win_rate", 0))
+                    worst = min(labeled, key=lambda kv: kv[1].get("win_rate", 0))
+                    if best[0] != worst[0]:
+                        notes.append(
+                            f"Sesi {best[0]} historis lebih baik (WR {best[1].get('win_rate',0):.0f}%) "
+                            f"dibanding sesi {worst[0]} (WR {worst[1].get('win_rate',0):.0f}%)."
+                        )
+            except Exception:
+                pass
+            if len(self.trade_history) < MIN_TOTAL_SAMPLE_FOR_AUDIT:
+                notes.append(f"Riwayat trade masih sedikit ({len(self.trade_history)}), pola belum kuat secara statistik.")
+            return " ".join(notes) if notes else ""
+
     def session_performance(self) -> Dict[str, Dict[str, Any]]:
         groups = _group_by(self.trade_history, "session")
         return {k: self._weighted_stats(v) for k, v in groups.items()}
@@ -1952,10 +2206,10 @@ class LearnEngine:
 
             baseline_train = self._weighted_stats(train)
             baseline_holdout = self._weighted_stats(holdout)
-            current_threshold = _safe_float(current.get("ACTIVE_THRESHOLD", 0.0))
+            current_threshold = max(ACTIVE_THRESHOLD_FLOOR, _safe_float(current.get("ACTIVE_THRESHOLD", ACTIVE_THRESHOLD_FLOOR)))
             proposed_threshold = proposed.get("ACTIVE_THRESHOLD")
             if proposed_threshold is not None:
-                proposed_threshold = _safe_float(proposed_threshold)
+                proposed_threshold = max(ACTIVE_THRESHOLD_FLOOR, min(95.0, _safe_float(proposed_threshold)))
                 train_cf = self.counterfactual_threshold(train, proposed_threshold)
                 hold_selected = [r for r in holdout if _safe_float(r.get("confidence")) >= proposed_threshold and r.get("outcome") in ECONOMIC_OUTCOMES]
                 challenger_holdout = self._weighted_stats(hold_selected)
@@ -2023,7 +2277,7 @@ class LearnEngine:
         return ok, f"holdout delta={delta:+.4f} PF={pf_ok} DD={dd_ok}", meta
 
     def _robustness_probe_locked(self, train: Sequence[Dict[str, Any]], proposed: Dict[str, Any]) -> Dict[str, Any]:
-        base_threshold = _safe_float(self.strategy_state.get("params", {}).get("ACTIVE_THRESHOLD", 0.0))
+        base_threshold = max(ACTIVE_THRESHOLD_FLOOR, _safe_float(self.strategy_state.get("params", {}).get("ACTIVE_THRESHOLD", ACTIVE_THRESHOLD_FLOOR)))
         proposal_threshold = proposed.get("ACTIVE_THRESHOLD")
         if proposal_threshold is None:
             threshold = base_threshold
@@ -2103,13 +2357,13 @@ class LearnEngine:
         good_high = [(b, s) for b, s in usable if int(b.split("-")[0]) > current and _safe_float(s.get("expectancy")) > 0.05]
         if bad_low and good_high:
             target = float(int(good_high[0][0].split("-")[0]))
-            new = round(max(0.0, min(95.0, current + min(MAX_THRESHOLD_STEP, max(1.0, target - current)))), 1)
+            new = round(max(ACTIVE_THRESHOLD_FLOOR, min(95.0, current + min(MAX_THRESHOLD_STEP, max(1.0, target - current)))), 1)
             if abs(new - current) >= 0.5:
                 return new, {"type": "RAISE_THRESHOLD", "bad_low": dict(bad_low), "good_high": dict(good_high), "frequency": freq}
         if current > 0 and freq.get("status") == "THRESHOLD_TOO_HIGH_OR_STRICT":
             shadow = self.shadow_performance_below(current)
             if _safe_int(shadow.get("n")) >= MIN_SAMPLE_FOR_DECISION and _safe_float(shadow.get("expectancy")) > 0.05:
-                new = round(max(0.0, current - min(3.0, MAX_THRESHOLD_STEP)), 1)
+                new = round(max(ACTIVE_THRESHOLD_FLOOR, current - min(3.0, MAX_THRESHOLD_STEP)), 1)
                 if new < current:
                     return new, {"type": "LOWER_THRESHOLD_FROM_SHADOW", "shadow": shadow, "frequency": freq}
         return None
@@ -2214,8 +2468,43 @@ class LearnEngine:
     # ------------------------------------------------------------------
     # Main audit loop
     # ------------------------------------------------------------------
+    def _enforce_history_caps_locked(self) -> None:
+        """Cegah semua riwayat tumbuh tanpa batas selama proses hidup lama.
+
+        Revisi kedua — cap pertama (80000/20000 dst) TERBUKTI masih jauh
+        terlalu longgar: diukur langsung pakai tracemalloc, 1 entri
+        scan_analysis_history nyatanya ~9.4KB di memori Python (bukan cuma
+        beberapa ratus byte seperti dugaan awal — dict bersarang dengan
+        reference_levels/components/reasons jauh lebih berat dari perkiraan).
+        Cap lama 80000 = ~717MB SENDIRIAN, jauh di atas limit 512MB Render —
+        itu akar penyebab nyata "Ran out of memory (used over 512MB)" yang
+        berulang di log Render. Angka di bawah ini dihitung mundur dari
+        pengukuran real per-entry, dengan total budget seluruh riwayat
+        dijaga di sekitar ~150MB (sisa >350MB untuk interpreter, data candle
+        yang sedang diproses, dsb). Dipanggil dari audit() (5 menit) dan
+        load() (saat checkpoint dibuka) — untuk dua list terberat
+        (candidate_history, scan_analysis_history) juga dipangkas langsung
+        tiap append (lihat record_scan_candidate/record_scan_analysis) biar
+        tidak sempat overshoot jauh di antara audit.
+        """
+        caps = [
+            ("scan_analysis_history", 1200, 800), ("candidate_history", 1200, 800),
+            ("market_snapshots", 900, 600), ("scan_summaries", 900, 600),
+            ("pending_history", 900, 600), ("fill_history", 600, 400),
+            ("trail_history", 900, 600), ("close_history", 600, 400),
+            ("shadow_history", 900, 600), ("trade_history", 1500, 1000),
+            ("replay_history", 250, 150), ("challenger_history", 150, 100),
+            ("decision_history", 250, 150), ("strategy_change_log", 150, 100),
+            ("threshold_history", 250, 150),
+        ]
+        for name, max_len, keep_len in caps:
+            lst = getattr(self, name, None)
+            if isinstance(lst, list) and len(lst) > max_len:
+                setattr(self, name, lst[-keep_len:])
+
     def audit(self, strategy_engine: Any) -> Dict[str, Any]:
         with self._lock:
+            self._enforce_history_caps_locked()
             self.audit_sequence += 1
             now = _now()
             self._record_event_log("AUDIT START", "seq=%s", self.audit_sequence)
@@ -2430,6 +2719,13 @@ class LearnEngine:
             }
 
 
+def suggest_frequency_adjustment(engine: LearnEngine) -> Dict[str, Any]:
+    """Public read-only frequency diagnosis used by higher-level orchestration."""
+    freq = engine.analyze_scan_memory(window=5000)
+    qq = engine.quality_quantity_matrix()
+    return {"frequency": freq, "quality_quantity": qq, "recommendation": qq.get("decision", "OBSERVE")}
+
+
 # ---------------------------------------------------------------------------
 # Compatibility aliases / helper functions
 # ---------------------------------------------------------------------------
@@ -2447,5 +2743,5 @@ __all__ = [
     "OUTCOME_TYPES",
     "ECONOMIC_OUTCOMES",
     "CONFIDENCE_BUCKETS",
-    "new_default_learn",
+    "new_default_learn", "suggest_frequency_adjustment",
 ]
