@@ -2468,6 +2468,59 @@ class LearnEngine:
     # ------------------------------------------------------------------
     # Main audit loop
     # ------------------------------------------------------------------
+    def _maybe_adjust_entry_depth_locked(self, strategy_engine: Any) -> Optional[Dict[str, Any]]:
+        """Timeout tinggi (TP tersentuh sebelum entry pernah terisi) berarti
+        level retracement entry (entry_retracement_fib) kemungkinan terlalu
+        dalam untuk kondisi market saat ini. Spek asli botmu eksplisit
+        meminta ini: "kalau timeout, strategy telat entry/kurang berani,
+        learn bisa mengaudit... antara menurunkan threshold ATAU MENGGANTI
+        PARAMETER-PARAMETERNYA" — ini implementasi bagian kedua (threshold
+        sendiri ditangani jalur terpisah yang lebih ketat/challenger-based).
+
+        Perubahan di sini sengaja LEBIH RINGAN daripada jalur threshold:
+        step kecil (0.05), ada floor (tidak boleh di bawah 0.30 — entry
+        yang terlalu dangkal juga bukan solusi, cuma jadi entry asal-asalan),
+        dan cooldown (minimal 10 trade baru sejak perubahan terakhir)
+        supaya tidak naik-turun cuma karena 1-2 sampel kebetulan.
+        """
+        MIN_SAMPLE = 15
+        TIMEOUT_RATE_TRIGGER = 0.65
+        FIB_STEP = 0.05
+        FIB_FLOOR = 0.30
+        COOLDOWN_TRADES = 10
+
+        recent = self.trade_history[-60:]
+        if len(recent) < MIN_SAMPLE:
+            return None
+        timeout_n = sum(1 for t in recent if t.get("outcome") == "TIMEOUT")
+        rate = timeout_n / len(recent)
+        if rate < TIMEOUT_RATE_TRIGGER:
+            return None
+
+        current_fib = _safe_float((getattr(strategy_engine, "params", None) or {}).get("entry_retracement_fib"), 0.5)
+        if current_fib <= FIB_FLOOR + 1e-9:
+            return None
+
+        for entry in reversed(self.strategy_change_log[-30:]):
+            if "entry_retracement_fib" in (entry.get("new_params") or entry.get("params") or {}):
+                changed_at = _safe_float(entry.get("timestamp"), 0.0)
+                trades_since = sum(1 for t in self.trade_history if _safe_float(t.get("timestamp"), 0.0) > changed_at)
+                if trades_since < COOLDOWN_TRADES:
+                    return None
+                break
+
+        new_fib = max(FIB_FLOOR, round(current_fib - FIB_STEP, 3))
+        if abs(new_fib - current_fib) < 1e-9:
+            return None
+        change_record = strategy_engine.apply_update(
+            {"entry_retracement_fib": new_fib},
+            reason=f"timeout_rate={rate:.2f} dari {len(recent)} trade terakhir >= {TIMEOUT_RATE_TRIGGER:.2f} — dangkalkan entry OTE supaya lebih sering terisi",
+            evidence={"timeout_rate": rate, "sample": len(recent), "old_fib": current_fib, "new_fib": new_fib},
+        )
+        self.strategy_change_log.append(change_record)
+        self._record_event_log("ENTRY_DEPTH_ADJUST", "fib %.3f -> %.3f (timeout_rate=%.2f, n=%s)", current_fib, new_fib, rate, len(recent))
+        return change_record
+
     def _enforce_history_caps_locked(self) -> None:
         """Cegah semua riwayat tumbuh tanpa batas selama proses hidup lama.
 
@@ -2515,6 +2568,7 @@ class LearnEngine:
             scan_analysis = self.analyze_scan_memory(window=10000)
             frequency = self._frequency_diagnosis_locked(window_scans=100)
             self._record_event_log("FREQUENCY ANALYSIS", "status=%s candidate_rate=%.4f eligible_rate=%.4f", frequency.get("status"), frequency.get("candidate_rate", 0.0), frequency.get("eligible_rate", 0.0))
+            entry_depth_change = self._maybe_adjust_entry_depth_locked(strategy_engine)
 
             quality = self._weighted_stats(self.trade_history)
             calibration = self.confidence_calibration()
@@ -2536,6 +2590,7 @@ class LearnEngine:
                 "attribution": attribution,
                 "quality_quantity": qq,
                 "version_health": self.evaluate_current_version_degradation(),
+                "entry_depth_change": entry_depth_change,
                 "challenger": copy.deepcopy(self.pending_challenger),
             }
 
