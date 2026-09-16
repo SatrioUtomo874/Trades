@@ -106,7 +106,7 @@ DEFAULT_PARAMS: Dict[str, Any] = {
     "btc_corr_lookback": 50,
     "sl_atr_buffer": 0.25,          # buffer SL tambahan dalam satuan ATR
     "min_price_distance_ticks": 2,  # jarak minimum entry/SL/TP dalam tick
-    "entry_retracement_fib": 0.618,   # level OTE pullback dari impulse leg (§17/§25)
+    "entry_retracement_fib": 0.5,      # level OTE pullback dari impulse leg (§17/§25) — diturunkan dari 0.618: fib sedalam itu jarang kesentuh di banyak kondisi market, jadi TIMEOUT (TP tersentuh sebelum entry terisi) mendominasi. learn.py bisa menyesuaikan lebih lanjut lewat apply_update() kalau timeout rate masih tinggi (lihat learn.py _maybe_adjust_entry_depth_locked).
     "entry_min_offset_atr": 0.25,     # jarak minimum entry dari harga saat ini (satuan ATR)
 }
 
@@ -1128,10 +1128,25 @@ def vn_build_tp(direction: str, entry: float, risk: float, atr: float, liquidity
     # pengaman tambahan; target yang ditarik ini otomatis tercermin lewat
     # reach_probability yang lebih rendah di bawah (bukan blokir eksekusi).
     min_rr=_vn_float(params.get("min_rr"),2.0)
+    max_atr=_vn_float(params.get("target_max_atr"),8.0)
     if risk>0:
         natural_rr=abs(tp-entry)/risk
         if natural_rr<min_rr:
-            tp = entry+risk*min_rr if direction=="BUY" else entry-risk*min_rr
+            stretched = entry+risk*min_rr if direction=="BUY" else entry-risk*min_rr
+            # Tarikan RR TIDAK BOLEH melebihi target_max_atr — TP yang
+            # ditarik terlalu jauh (di luar target_max_atr) persis profil
+            # yang bikin TIMEOUT meroket: harga cuma merayap ke arah itu
+            # tanpa pernah retrace cukup dalam buat isi entry (terbukti,
+            # laporan user: timeout naik dari ~50% ke 83% setelah tarikan
+            # RR tanpa batas ini ditambahkan). Kalau target_max_atr tidak
+            # cukup buat capai min_rr, RR yang lebih rendah lebih realistis
+            # daripada target fiktif — itu sekarang cuma mengurangi
+            # rr_signal sedikit, bukan reject (hard quality gate sudah
+            # dihapus, jadi ini aman).
+            max_dist=atr*max_atr
+            if abs(stretched-entry) > max_dist:
+                stretched = entry + max_dist if direction=="BUY" else entry - max_dist
+            tp = stretched
             is_liq=False
     reward=abs(tp-entry); rr=reward/max(risk,1e-9); pr=vn_target_probability(rr,momentum,fvg_score,is_liq,params); expected=pr*rr-(1-pr)
     dist=reward/max(atr,1e-9); quality=_vn_clip(0.30*(1.0 if is_liq else 0.35)+0.25*_vn_clip(1-dist/8.0)+0.20*_vn_clip(rr/3.0)+0.25*pr)
