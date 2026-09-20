@@ -34,3 +34,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-20T11:54:56.556666+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## AKEUSDT — BUY
+
+Trade ID: `AKEUSDT-20260920-203241-605840`
+
+### Setup
+
+- Price Now Reference: 0.050439
+- Entry: 0.036141
+- Reason Entry: Middle FVG H4 + Liquidity + Strength Bullish + RSI (14) 58 Netral dominan naik
+- Price Exp: 0.069949
+- Reason Price Exp: Liquidity Uptrend + Di atasnya swing high H4
+- SL: 0.021955
+- Reason SL: Dibawah Liquidity Sweep
+- TP: 0.087013
+- Reason TP: Order Block dan Prediksi RSI aman
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: DELETED
+- Exit Price: -
+- Result Reason: Dihapus oleh user.
+- PnL: -
+- Created: 2026-09-20T13:32:41.862558+00:00
+- Filled: -
+- Closed: 2026-09-20T13:40:18.864907+00:00
+- Strategy: MANUAL v1.0
