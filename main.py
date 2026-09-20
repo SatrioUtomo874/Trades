@@ -49,6 +49,8 @@ from zoneinfo import ZoneInfo
 import requests
 from dotenv import load_dotenv
 
+from websockets.exceptions import ConnectionClosed
+
 try:
     from websockets.asyncio.client import connect as ws_connect
 except ModuleNotFoundError as exc:
@@ -679,10 +681,21 @@ class BinanceWebSocket:
         if symbol in self._desired_symbols:
             return
 
+        # Simbol dicatat dulu di _desired_symbols. Kalau koneksi sedang
+        # putus / baru saja ditutup server, simbol ini otomatis
+        # di-subscribe ulang oleh _resubscribe_all() saat reconnect,
+        # jadi kegagalan kirim di sini BUKAN error fatal.
         self._desired_symbols.add(symbol)
 
         if self.connected and self._ws is not None:
-            await self._send_subscribe([symbol])
+            sent = await self._send_subscribe([symbol])
+
+            if not sent:
+                log.warning(
+                    "Subscribe %s ditunda: koneksi WebSocket sedang "
+                    "tertutup, akan di-subscribe otomatis saat reconnect.",
+                    symbol,
+                )
 
     async def remove_symbol(self, symbol: str) -> None:
         symbol = normalize_symbol(symbol)
@@ -700,12 +713,22 @@ class BinanceWebSocket:
         self,
         method: str,
         symbols: list[str],
-    ) -> None:
+    ) -> bool:
+        """
+        Kirim SUBSCRIBE/UNSUBSCRIBE.
+
+        Return True kalau payload benar-benar terkirim, False kalau
+        koneksi ternyata sudah tertutup (server menutup 1000/OK,
+        close handshake timeout, dsb). Kasus "koneksi sudah tertutup"
+        BUKAN exception yang perlu di-propagate: loop _run() akan
+        reconnect sendiri lalu _resubscribe_all() mengirim ulang semua
+        simbol di _desired_symbols.
+        """
         if self._ws is None or not self.connected:
-            return
+            return False
 
         if not symbols:
-            return
+            return False
 
         params = [
             f"{symbol.lower()}@aggTrade"
@@ -719,37 +742,72 @@ class BinanceWebSocket:
         }
 
         async with self._command_lock:
-            await self._ws.send(
-                json.dumps(payload)
-            )
+            # Ambil ulang referensi setelah lock: selama menunggu lock,
+            # _run() bisa saja sudah menutup koneksi dan mengosongkan _ws.
+            ws = self._ws
+
+            if ws is None or not self.connected:
+                return False
+
+            try:
+                await ws.send(
+                    json.dumps(payload)
+                )
+            except (
+                ConnectionClosed,
+                ConnectionError,
+                OSError,
+            ) as exc:
+                # Tandai koneksi mati supaya tidak ada send lain yang
+                # menabrak socket yang sama sebelum _run() sempat
+                # membersihkan state-nya.
+                self.connected = False
+
+                log.warning(
+                    "Gagal kirim %s ke Binance WebSocket "
+                    "(koneksi sudah tertutup): %s",
+                    method,
+                    exc,
+                )
+
+                return False
+
+        return True
 
     async def _send_subscribe(
         self,
         symbols: list[str],
-    ) -> None:
-        await self._send_request(
+    ) -> bool:
+        sent = await self._send_request(
             "SUBSCRIBE",
             symbols,
         )
 
-        for symbol in symbols:
-            self._subscribed_symbols.add(
-                normalize_symbol(symbol)
-            )
+        # Hanya tandai subscribed kalau payload benar-benar terkirim.
+        if sent:
+            for symbol in symbols:
+                self._subscribed_symbols.add(
+                    normalize_symbol(symbol)
+                )
+
+        return sent
 
     async def _send_unsubscribe(
         self,
         symbols: list[str],
-    ) -> None:
-        await self._send_request(
+    ) -> bool:
+        sent = await self._send_request(
             "UNSUBSCRIBE",
             symbols,
         )
 
-        for symbol in symbols:
-            self._subscribed_symbols.discard(
-                normalize_symbol(symbol)
-            )
+        if sent:
+            for symbol in symbols:
+                self._subscribed_symbols.discard(
+                    normalize_symbol(symbol)
+                )
+
+        return sent
 
     async def _resubscribe_all(self) -> None:
         self._subscribed_symbols.clear()
@@ -877,10 +935,14 @@ class BinanceWebSocket:
                 break
 
             except (
+                ConnectionClosed,
                 asyncio.TimeoutError,
                 ConnectionError,
                 OSError,
             ) as exc:
+                # ConnectionClosed (termasuk ConnectionClosedOK 1000)
+                # adalah putus koneksi normal, mis. server Binance
+                # menutup koneksi berkala. Cukup reconnect, bukan ERROR.
                 if self._stop.is_set():
                     break
 
