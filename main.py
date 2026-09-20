@@ -50,8 +50,21 @@ from dotenv import load_dotenv
 
 try:
     from websockets.asyncio.client import connect as ws_connect
-except ImportError:  # compatibility with older websockets releases
-    from websockets import connect as ws_connect
+except ModuleNotFoundError as exc:
+    raise RuntimeError(
+        "Dependency 'websockets' belum terpasang. "
+        "Tambahkan 'websockets>=17,<18' ke requirements.txt "
+        "lalu redeploy."
+    ) from exc
+except ImportError:
+    # Fallback hanya untuk environment dengan versi lama.
+    try:
+        from websockets import connect as ws_connect
+    except ImportError as exc:
+        raise RuntimeError(
+            "Library 'websockets' tersedia tetapi API client-nya tidak kompatibel. "
+            "Gunakan websockets>=17,<18."
+        ) from exc
 
 
 # ============================================================
