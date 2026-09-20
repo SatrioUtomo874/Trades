@@ -36,6 +36,7 @@ import logging
 import os
 import re
 import time
+import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -124,10 +125,56 @@ if not REPO_NAME or "/" not in REPO_NAME:
 
 
 # ============================================================
-# LOGGING
+# LOGGING + TELEGRAM ERROR BRIDGE
 # ============================================================
 
 log = logging.getLogger("main.trading_engine")
+
+
+class TelegramErrorHandler(logging.Handler):
+    """Forward ERROR/EXCEPTION logs from background tasks to Telegram."""
+
+    def __init__(self, engine: "TradingEngine") -> None:
+        super().__init__(level=logging.ERROR)
+        self.engine = engine
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self._last_signature = ""
+        self._last_sent = 0.0
+
+    def attach(self) -> None:
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.loop is None or self.engine is None:
+            return
+
+        # Jangan membuat loop error baru ketika Telegram sender sendiri gagal.
+        if "Gagal mengirim Telegram" in record.getMessage():
+            return
+
+        message = record.getMessage()
+        signature = f"{record.name}|{record.levelno}|{message}"
+        now = time.monotonic()
+
+        # Deduplicate spam identik selama 5 detik.
+        if signature == self._last_signature and now - self._last_sent < 5:
+            return
+
+        self._last_signature = signature
+        self._last_sent = now
+
+        try:
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(
+                    self.engine._send_log_error_to_telegram(record)
+                )
+            )
+        except Exception:
+            # Error handler tidak boleh menjatuhkan aplikasi.
+            pass
 
 
 # ============================================================
@@ -294,6 +341,7 @@ class PriceSnapshot:
     price: Decimal
     event_time_ms: int
     received_at: datetime
+    source: str = "WEBSOCKET"
 
     @property
     def age_seconds(self) -> float:
@@ -775,10 +823,24 @@ class BinanceWebSocket:
 
                         # SUBSCRIBE response:
                         # {"result": null, "id": ...}
-                        if "data" not in payload:
-                            continue
-
-                        data = payload.get("data") or {}
+                        #
+                        # /market/ws adalah raw-stream mode.
+                        # Dalam mode ini event aggTrade datang langsung
+                        # di root payload:
+                        # {"e":"aggTrade", ...}
+                        #
+                        # Combined mode (/market/stream) membungkusnya:
+                        # {"stream":"...","data":{"e":"aggTrade", ...}}
+                        #
+                        # Dukung keduanya supaya parser tahan terhadap
+                        # perubahan mode stream di kemudian hari.
+                        if "data" in payload and isinstance(
+                            payload.get("data"),
+                            dict,
+                        ):
+                            data = payload["data"]
+                        else:
+                            data = payload
 
                         if data.get("e") != "aggTrade":
                             continue
@@ -1151,6 +1213,9 @@ class TradingEngine:
         # agar dua trade yang selesai bersamaan tidak saling menimpa snapshot.
         self._history_lock = asyncio.Lock()
 
+        self._telegram_error_handler = TelegramErrorHandler(self)
+        self._telegram_error_handler_added = False
+
         self.last_history_refresh: datetime | None = None
 
     # --------------------------------------------------------
@@ -1165,9 +1230,44 @@ class TradingEngine:
                 str(text),
             )
         except Exception:
-            log.exception(
-                "Gagal mengirim Telegram."
+            # Tidak memanggil log.exception di sini karena error handler
+            # sendiri menggunakan Telegram dan bisa membuat recursion.
+            pass
+
+    async def _send_log_error_to_telegram(
+        self,
+        record: logging.LogRecord,
+    ) -> None:
+        """Send a readable backend error to the active Telegram chat."""
+        try:
+            trace = ""
+            if record.exc_info:
+                trace = "".join(
+                    traceback.format_exception(
+                        *record.exc_info
+                    )
+                )
+
+            text = (
+                "🚨 ERROR BACKEND\n\n"
+                f"Module: {record.name}\n"
+                f"Level: {record.levelname}\n"
+                f"Message: {record.getMessage()}\n"
+                f"Time: {format_wib(now_utc())}"
             )
+
+            if trace:
+                # Telegram message limit ≈4096. Keep the useful tail of trace.
+                trace = trace.strip()
+                available = 3000
+                if len(trace) > available:
+                    trace = "..." + trace[-available:]
+                text += f"\n\nTraceback:\n{trace}"
+
+            await self.reply(text)
+        except Exception:
+            # Jangan sampai error reporter sendiri menjadi sumber error baru.
+            pass
 
     # --------------------------------------------------------
     # Lifecycle
@@ -1178,6 +1278,11 @@ class TradingEngine:
             return
 
         self._running = True
+
+        if not self._telegram_error_handler_added:
+            self._telegram_error_handler.attach()
+            log.addHandler(self._telegram_error_handler)
+            self._telegram_error_handler_added = True
 
         await self._load_history()
 
@@ -1235,6 +1340,15 @@ class TradingEngine:
 
         self.last_history_refresh = None
         self.session_id = ""
+
+        if self._telegram_error_handler_added:
+            try:
+                log.removeHandler(
+                    self._telegram_error_handler
+                )
+            except Exception:
+                pass
+            self._telegram_error_handler_added = False
 
         # Tidak ada write state/checkpoint ke disk.
         log.info(
@@ -1757,6 +1871,19 @@ class TradingEngine:
 
                 data["pair"] = meta.symbol
                 data["price_now_reference"] = price_now
+
+                # Seed cache dari REST reference yang baru saja diambil.
+                # Ini bukan polling tambahan; hanya initial snapshot.
+                self.prices[meta.symbol] = PriceSnapshot(
+                    symbol=meta.symbol,
+                    price=price_now,
+                    event_time_ms=int(
+                        time.time() * 1000
+                    ),
+                    received_at=now_utc(),
+                    source="REST_REFERENCE",
+                )
+
                 self.flow["step"] = "DIRECTION"
 
                 await self.reply(
@@ -2873,16 +3000,27 @@ class TradingEngine:
             trade.pair
         )
 
+        current_text = "-"
+        feed = "NO DATA"
+        pnl_text = "-"
+
         if snapshot:
             current_text = (
                 decimal_to_str(snapshot.price)
                 or "-"
             )
-            feed = (
-                "LIVE"
-                if snapshot.live
-                else "STALE"
-            )
+
+            if (
+                snapshot.live
+                and snapshot.source == "REST_REFERENCE"
+            ):
+                feed = "REFERENCE"
+            else:
+                feed = (
+                    "LIVE"
+                    if snapshot.live
+                    else "STALE"
+                )
 
             if trade.status == "FILLED":
                 pnl_text = format_pct(
@@ -2892,41 +3030,47 @@ class TradingEngine:
                         snapshot.price,
                     )
                 )
-            else:
-                pnl_text = "-"
 
-        else:
-            current_text = "-"
-            feed = "NO DATA"
-            pnl_text = "-"
+        direction_icon = "🟢" if trade.direction == "BUY" else "🔴"
+        status_icon = {
+            "PENDING": "⏳",
+            "FILLED": "✅",
+        }.get(
+            trade.status,
+            "•",
+        )
+
+        mode = "TRAIL" if trade.trailing else "NORMAL"
+        feed_icon = {
+            "LIVE": "📡",
+            "REFERENCE": "📍",
+            "STALE": "⚠️",
+            "NO DATA": "❔",
+        }.get(
+            feed,
+            "•",
+        )
+
+        timeout_text = trade.timeout_at.astimezone(TZ).strftime(
+            "%d/%m %H:%M"
+        )
+
+        reason = trade.entry_reason.strip()
+        if len(reason) > 55:
+            reason = reason[:52] + "..."
 
         lines = [
-            f"[{number}] {trade.pair}",
-            f"Direction: {trade.direction.title()}",
-            f"Status: {trade.status}",
-            f"Mode: {'TRAILING' if trade.trailing else 'NORMAL'}",
-            "",
-            f"Entry: {decimal_to_str(trade.entry)}",
-            f"Current: {current_text}",
-            f"Feed: {feed}",
-            f"PnL: {pnl_text}",
-            "",
-            f"Price Exp: {decimal_to_str(trade.price_exp)}",
-            f"Timeout: {format_wib(trade.timeout_at)}",
-            f"SL: {decimal_to_str(trade.sl)}",
-            f"TP: {decimal_to_str(trade.tp)}",
-            "",
-            f"Reason Entry: {trade.entry_reason}",
+            f"╭─ {number} • {trade.pair} ─╮",
+            f"│ {direction_icon} {trade.direction}   {status_icon} {trade.status}",
+            f"│ {feed_icon} Now   {current_text}  •  {feed}",
+            f"│ 🎯 Entry {decimal_to_str(trade.entry)}   →   TP {decimal_to_str(trade.tp)}",
+            f"│ 🛡 SL    {decimal_to_str(trade.sl)}",
+            f"│ ⏰ Exp   {decimal_to_str(trade.price_exp)}   •   {timeout_text} WIB",
+            f"│ 📈 PnL   {pnl_text}",
+            f"│ ⚙️ Mode   {mode}",
+            f"│ 🧠 {reason}",
+            "╰────────────────────────╯",
         ]
-
-        if trade.status == "FILLED":
-            lines.extend(
-                [
-                    "",
-                    f"Filled: {format_wib(trade.filled_at)}",
-                    f"Fill Price: {decimal_to_str(trade.fill_price)}",
-                ]
-            )
 
         return "\n".join(lines)
 
@@ -2935,8 +3079,11 @@ class TradingEngine:
 
         if not items:
             await self.reply(
-                "TRADE\n\n"
-                "Tidak ada active setup."
+                "╭──────────────╮\n"
+                "│  📊 TRADE   │\n"
+                "╰──────────────╯\n\n"
+                "Tidak ada setup aktif.\n"
+                "Gunakan /add untuk membuat setup."
             )
             return
 
@@ -2958,13 +3105,22 @@ class TradingEngine:
             if trade.trailing
         )
 
+        live = sum(
+            1
+            for trade in self.active_trades.values()
+            if (
+                self.prices.get(trade.pair)
+                and self.prices[trade.pair].live
+            )
+        )
+
         blocks = [
-            "TRADE",
+            "╭──────────────╮",
+            "│  📊 TRADE   │",
+            "╰──────────────╯",
             "",
-            f"Active Setup: {len(items)}",
-            f"Pending: {pending}",
-            f"Filled: {filled}",
-            f"Trailing: {trailing}",
+            f"Active  {len(items)}   •   ⏳ {pending}   •   ✅ {filled}",
+            f"Trail   {trailing}   •   📡 Live Feed {live}",
             "",
         ]
 
@@ -2975,10 +3131,10 @@ class TradingEngine:
                     trade,
                 )
             )
-            blocks.append("\n----------------")
+            blocks.append("")
 
         await self.reply(
-            "\n".join(blocks)
+            "\n".join(blocks).rstrip()
         )
 
     # --------------------------------------------------------
@@ -3210,6 +3366,7 @@ class TradingEngine:
             price=price,
             event_time_ms=event_time_ms,
             received_at=now_utc(),
+            source="WEBSOCKET",
         )
 
         # Snapshot daftar trade tanpa menahan lock saat network I/O.
