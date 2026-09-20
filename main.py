@@ -1,1958 +1,4186 @@
-"""
-main.py — infrastructure / orchestrator layer for the SMC/ICT auto-trading bot.
-
-Compatible with try.py's launcher contract:
-    async def on_start(context) -> None | False
-    async def handle_update(update, context) -> None
-    async def on_stop(context) -> None
-
-main.py is the ONLY module that talks to Bybit, Binance, or Telegram.
-strategy.py and learn.py never make external API calls.
-"""
-
 from __future__ import annotations
 
+"""
+MAIN.PY
+========
+Trading simulator engine untuk try.py launcher.
+
+Kontrak dengan try.py:
+    async def on_start(context)
+    async def handle_update(update, context)
+    async def on_stop(context)
+
+Prinsip:
+- Binance USDⓈ-M Futures = market data saja.
+- Tidak ada fungsi order / trading API Binance.
+- Price Now pada /add diambil REST satu kali.
+- Harga live setelah setup dibuat berasal dari Binance WebSocket.
+- Active trade hanya ada di RAM selama sesi main.py.
+- /end membersihkan seluruh active state.
+- Histori permanen ditulis langsung ke GitHub:
+    data/trades.json
+    data/events.jsonl
+    data/trade_history.md
+- /stats membaca histori dan menghitung statistik.
+- /analyze membuat:
+    analysis/full_data.json
+    analysis/analysis.md
+"""
+
 import asyncio
-import hashlib
-import hmac
-import html
+import base64
+import copy
+import html  # kept out of user output; used only for safe GitHub text if needed
 import json
 import logging
 import os
+import re
 import time
-import uuid
-from decimal import Decimal, ROUND_DOWN
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
-from typing import Any, Optional
-from urllib.parse import urlencode
+from typing import Any
+from urllib.parse import quote
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import requests
+from dotenv import load_dotenv
 
-import strategy
-import learn
+try:
+    from websockets.asyncio.client import connect as ws_connect
+except ImportError:  # compatibility with older websockets releases
+    from websockets import connect as ws_connect
 
-log = logging.getLogger("main")
-if not log.handlers:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+
+# ============================================================
+# ENV / CONFIG
+# ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
-STATE_DIR = BASE_DIR / "state"
-LOG_DIR = BASE_DIR / "logs"
-STATE_DIR.mkdir(exist_ok=True)
-LOG_DIR.mkdir(exist_ok=True)
 
-MAIN_CKPT = STATE_DIR / "main_checkpoint.json"
-MAIN_CKPT_BACKUP = STATE_DIR / "main_checkpoint.json.backup"
+load_dotenv(BASE_DIR / "trades.env")
+load_dotenv(BASE_DIR / ".env")
 
-# ----------------------------------------------------------------------
-# configuration (from .env, loaded by try.py's process-wide load_dotenv)
-# ----------------------------------------------------------------------
+# Acuan nama key mengikuti Trades.env yang diberikan user.
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
+GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
+REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
+GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
+MAIN_FILE = (os.getenv("MAIN_FILE") or "main.py").strip()
 
-def _env(name: str, default: str = "") -> str:
-    return (os.getenv(name) or default).strip()
+# Key Binance tersedia di env, tetapi sengaja TIDAK dipakai.
+# Market data publik tidak membutuhkan signing / order credentials.
+BINANCE_API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
+BINANCE_API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
+BINANCE_API_KEY_1 = (os.getenv("BINANCE_API_KEY_1") or "").strip()
+BINANCE_API_SECRET_1 = (os.getenv("BINANCE_API_SECRET_1") or "").strip()
 
+TIMEZONE_NAME = "Asia/Jakarta"
+TZ = ZoneInfo(TIMEZONE_NAME)
 
-BINANCE_API_KEY = _env("BINANCE_API_KEY")
-BINANCE_API_SECRET = _env("BINANCE_API_SECRET")
-BINANCE_API_KEY_READ = _env("BINANCE_API_KEY_1") or BINANCE_API_KEY
-BINANCE_API_SECRET_READ = _env("BINANCE_API_SECRET_1") or BINANCE_API_SECRET
+BINANCE_REST_BASE = "https://fapi.binance.com"
+BINANCE_WS_BASE = "wss://fstream.binance.com/market/ws"
 
-GITHUB_TOKEN = _env("GITHUB_TOKEN")
-REPO_NAME = _env("REPO_NAME")
-GITHUB_BRANCH = _env("GITHUB_BRANCH", "main")
+GITHUB_API = "https://api.github.com"
 
-BINANCE_FAPI = "https://fapi.binance.com"
-BYBIT_API = "https://api.bybit.com"
+HISTORY_TRADES_PATH = "data/trades.json"
+HISTORY_EVENTS_PATH = "data/events.jsonl"
+HISTORY_MARKDOWN_PATH = "data/trade_history.md"
 
-SCAN_TARGET_SYMBOLS = 50
-CANDLES_PER_SYMBOL = 672  # ~7 days of M15
-SCAN_PER_COIN_DELAY = 1.0
-SCAN_INTERVAL_SEC = 120
-MAX_POSITIONS = 20
-TRAIL_QUEUE_DELAY = 2.0
-WAITING_QUEUE_DELAY = 1.0
-BINANCE_RATE_LIMIT_RECOVERY_SEC = 60
+ANALYSIS_JSON_PATH = "analysis/full_data.json"
+ANALYSIS_MD_PATH = "analysis/analysis.md"
 
-DEFAULT_SIM_BALANCE = 10.0
-DEFAULT_MARGIN = 1.0
-DEFAULT_LEVERAGE = 10
+REQUEST_TIMEOUT = 20
+GITHUB_TIMEOUT = 30
+WS_RECONNECT_MIN = 2
+WS_RECONNECT_MAX = 60
+PRICE_STALE_SECONDS = 15
+MAX_ACTIVE_TRADES = 100
+HISTORY_REFRESH_SECONDS = 30
 
-BAN_AFTER_TRADE_HOURS = 24
-BAN_AFTER_TIMEOUT_HOURS = 12
-BAN_LOW_CONFIDENCE_HOURS = 4
-LOW_CONFIDENCE_BAN_MIN_THRESHOLD = 40.0
+if not ALLOWED_USER_ID:
+    raise RuntimeError("ALLOWED_USER_ID belum diset.")
 
-STRATEGY_VERSION_FALLBACK = "1.0.0"
-MAIN_VERSION = "1.0.0"
+if not GITHUB_TOKEN:
+    raise RuntimeError("GITHUB_TOKEN belum diset.")
 
-STATE_LOCK = asyncio.Lock()
-PY_EOF_MARK = True
+if not REPO_NAME or "/" not in REPO_NAME:
+    raise RuntimeError("REPO_NAME belum diset atau formatnya tidak valid.")
 
 
-# ----------------------------------------------------------------------
-# rounding helpers (Decimal-based, per validated real-trade experience)
-# ----------------------------------------------------------------------
+# ============================================================
+# LOGGING
+# ============================================================
 
-def round_to_tick(value: float, tick: float, mode=ROUND_DOWN) -> float:
-    if tick <= 0:
+log = logging.getLogger("main.trading_engine")
+
+
+# ============================================================
+# BASIC HELPERS
+# ============================================================
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_local() -> datetime:
+    return now_utc().astimezone(TZ)
+
+
+def iso_utc(dt: datetime | None = None) -> str:
+    value = dt or now_utc()
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def format_wib(dt: datetime | None) -> str:
+    if dt is None:
+        return "-"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(TZ).strftime("%d-%m-%Y, %H:%M WIB")
+
+
+def parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        result = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=timezone.utc)
+    return result
+
+
+def decimal_to_str(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def parse_decimal(value: str) -> Decimal:
+    text = str(value or "").strip().replace(",", ".")
+
+    # Harga input dibuat ketat supaya tidak menerima karakter aneh.
+    if not re.fullmatch(r"(?:\d+(?:\.\d+)?|\.\d+)", text):
+        raise ValueError("Harga harus berupa angka positif, contoh 0.31555.")
+
+    try:
+        number = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError("Harga tidak valid.") from exc
+
+    if not number.is_finite() or number <= 0:
+        raise ValueError("Harga harus lebih besar dari 0.")
+
+    return number
+
+
+def normalize_symbol(value: str) -> str:
+    text = str(value or "").upper().strip()
+    text = text.replace("/", "").replace("-", "").replace("_", "")
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
+def safe_int(value: str, label: str) -> int:
+    text = str(value or "").strip()
+    if not text.isdigit():
+        raise ValueError(f"{label} harus berupa angka bulat.")
+    return int(text)
+
+
+def generate_trade_id(pair: str) -> str:
+    stamp = now_local().strftime("%Y%m%d-%H%M%S")
+    suffix = uuid4().hex[:6].upper()
+    return f"{pair}-{stamp}-{suffix}"
+
+
+def generate_session_id() -> str:
+    stamp = now_local().strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{uuid4().hex[:4].upper()}"
+
+
+def pct_change(direction: str, entry: Decimal, current: Decimal) -> Decimal:
+    if entry == 0:
+        return Decimal("0")
+
+    if direction == "BUY":
+        return ((current - entry) / entry) * Decimal("100")
+
+    return ((entry - current) / entry) * Decimal("100")
+
+
+def format_pct(value: Decimal | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value.quantize(Decimal('0.01')):+.2f}%"
+
+
+def duration_text(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "-"
+
+    total = max(0, int(seconds))
+    days, total = divmod(total, 86400)
+    hours, total = divmod(total, 3600)
+    minutes, secs = divmod(total, 60)
+
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}h")
+    if hours:
+        parts.append(f"{hours}j")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+
+    return " ".join(parts)
+
+
+def quantized_price(value: Decimal, tick_size: Decimal) -> Decimal:
+    if tick_size <= 0:
         return value
-    d_value = Decimal(str(value))
-    d_tick = Decimal(str(tick))
-    steps = (d_value / d_tick).to_integral_value(rounding=mode)
-    return float(steps * d_tick)
+    steps = (value / tick_size).to_integral_value(rounding=ROUND_DOWN)
+    return steps * tick_size
 
 
-def round_step(value: float, step: float, mode=ROUND_DOWN) -> float:
-    return round_to_tick(value, step, mode)
+def validate_tick(value: Decimal, tick_size: Decimal) -> bool:
+    if tick_size <= 0:
+        return True
+    remainder = value % tick_size
+    return remainder == 0
 
 
-# ----------------------------------------------------------------------
-# Binance USD-M Futures client
-# ----------------------------------------------------------------------
+# ============================================================
+# DATA MODELS
+# ============================================================
 
-class BinanceError(RuntimeError):
-    def __init__(self, message: str, code: Optional[int] = None):
-        super().__init__(message)
-        self.code = code
+@dataclass(slots=True)
+class SymbolMeta:
+    symbol: str
+    status: str
+    contract_type: str
+    quote_asset: str
+    tick_size: Decimal
+    min_price: Decimal = Decimal("0")
+    max_price: Decimal = Decimal("0")
 
 
-class BinanceClient:
-    """Wraps signed/unsigned Binance USD-M Futures REST calls.
+@dataclass(slots=True)
+class PriceSnapshot:
+    symbol: str
+    price: Decimal
+    event_time_ms: int
+    received_at: datetime
 
-    TP/SL/Trailing conditional orders go through /fapi/v1/algoOrder — the
-    mandatory Algo Service migration (effective 2025-12-09). The legacy
-    /fapi/v1/order endpoint rejects STOP_MARKET/TAKE_PROFIT_MARKET with -4120.
+    @property
+    def age_seconds(self) -> float:
+        return max(
+            0.0,
+            (now_utc() - self.received_at).total_seconds(),
+        )
+
+    @property
+    def live(self) -> bool:
+        return self.age_seconds <= PRICE_STALE_SECONDS
+
+
+@dataclass(slots=True)
+class Trade:
+    trade_id: str
+    session_id: str
+    pair: str
+    direction: str
+
+    price_now_reference: Decimal
+    entry: Decimal
+    entry_reason: str
+
+    price_exp: Decimal
+    price_exp_reason: str
+
+    timeout_at: datetime
+    timeout_reason: str
+
+    sl: Decimal
+    sl_reason: str
+
+    tp: Decimal
+    tp_reason: str
+
+    status: str = "PENDING"
+    trailing: bool = False
+
+    created_at: datetime = field(default_factory=now_utc)
+    filled_at: datetime | None = None
+    closed_at: datetime | None = None
+
+    fill_price: Decimal | None = None
+    exit_price: Decimal | None = None
+    result: str | None = None
+    result_reason: str | None = None
+
+    pnl_percent: Decimal | None = None
+
+    trail_history: list[dict[str, Any]] = field(default_factory=list)
+
+    strategy_name: str = "MANUAL"
+    strategy_version: str = "1.0"
+
+    def to_record(self) -> dict[str, Any]:
+        pending_seconds: float | None = None
+        holding_seconds: float | None = None
+
+        if self.filled_at:
+            pending_seconds = (
+                self.filled_at - self.created_at
+            ).total_seconds()
+
+        if self.filled_at and self.closed_at:
+            holding_seconds = (
+                self.closed_at - self.filled_at
+            ).total_seconds()
+
+        planned_risk = abs(self.entry - self.sl)
+        planned_reward = abs(self.tp - self.entry)
+
+        planned_rr: Decimal | None
+        if planned_risk == 0:
+            planned_rr = None
+        else:
+            planned_rr = planned_reward / planned_risk
+
+        return {
+            "trade_id": self.trade_id,
+            "session_id": self.session_id,
+            "pair": self.pair,
+            "direction": self.direction,
+
+            "price_now_reference": decimal_to_str(
+                self.price_now_reference
+            ),
+            "entry": decimal_to_str(self.entry),
+            "entry_reason": self.entry_reason,
+
+            "price_exp": decimal_to_str(self.price_exp),
+            "price_exp_reason": self.price_exp_reason,
+
+            "timeout_at": iso_utc(self.timeout_at),
+            "timeout_display_wib": format_wib(self.timeout_at),
+            "timeout_reason": self.timeout_reason,
+
+            "sl": decimal_to_str(self.sl),
+            "sl_reason": self.sl_reason,
+
+            "tp": decimal_to_str(self.tp),
+            "tp_reason": self.tp_reason,
+
+            "status": self.status,
+            "trailing": self.trailing,
+
+            "created_at": iso_utc(self.created_at),
+            "filled_at": iso_utc(self.filled_at) if self.filled_at else None,
+            "closed_at": iso_utc(self.closed_at) if self.closed_at else None,
+
+            "fill_price": decimal_to_str(self.fill_price),
+            "exit_price": decimal_to_str(self.exit_price),
+
+            "result": self.result,
+            "result_reason": self.result_reason,
+
+            "pnl_percent": (
+                decimal_to_str(self.pnl_percent)
+                if self.pnl_percent is not None
+                else None
+            ),
+
+            "planned_rr": (
+                decimal_to_str(planned_rr)
+                if planned_rr is not None
+                else None
+            ),
+
+            "pending_seconds": pending_seconds,
+            "holding_seconds": holding_seconds,
+
+            "trail_history": copy.deepcopy(self.trail_history),
+
+            "strategy_name": self.strategy_name,
+            "strategy_version": self.strategy_version,
+        }
+
+
+# ============================================================
+# BINANCE REST MARKET DATA
+# ============================================================
+
+class BinanceREST:
+    """
+    Public market-data REST only.
+
+    Tidak ada signing.
+    Tidak ada API order.
     """
 
-    def __init__(self, api_key: str, api_secret: str):
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.session = requests.Session()
-        self._banned_until = 0.0
-        self._filters_cache: dict[str, dict] = {}
-        self._filters_cache_at = 0.0
+    def __init__(self) -> None:
+        self.base_url = BINANCE_REST_BASE
 
-    # -- low level --
+    async def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        def request() -> Any:
+            response = requests.get(
+                f"{self.base_url}{path}",
+                params=params or {},
+                timeout=REQUEST_TIMEOUT,
+            )
 
-    def _sign(self, params: dict) -> dict:
-        params = dict(params)
-        params["timestamp"] = int(time.time() * 1000)
-        params.setdefault("recvWindow", 10000)
-        query = urlencode(params, doseq=True)
-        signature = hmac.new(self.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-        params["signature"] = signature
-        return params
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Binance REST {path}: HTTP "
+                    f"{response.status_code}: "
+                    f"{response.text[:500]}"
+                )
 
-    def _headers(self) -> dict:
-        return {"X-MBX-APIKEY": self.api_key}
+            return response.json()
 
-    def _wait_if_banned(self) -> None:
-        remaining = self._banned_until - time.time()
-        if remaining > 0:
-            time.sleep(min(remaining, 5))
+        return await asyncio.to_thread(request)
 
-    def _register_ban(self, message: str) -> None:
-        # Binance embeds "banned until <ms epoch>" in -1003 error messages.
-        import re
-        match = re.search(r"banned until (\d+)", message)
-        if match:
-            self._banned_until = int(match.group(1)) / 1000.0
-        else:
-            self._banned_until = time.time() + BINANCE_RATE_LIMIT_RECOVERY_SEC
+    async def get_exchange_info(self) -> dict[str, SymbolMeta]:
+        payload = await self._get("/fapi/v1/exchangeInfo")
 
-    def is_rate_limited(self) -> bool:
-        return time.time() < self._banned_until
+        result: dict[str, SymbolMeta] = {}
 
-    def ready_in_seconds(self) -> float:
-        return max(0.0, self._banned_until - time.time())
+        for raw in payload.get("symbols", []):
+            symbol = str(raw.get("symbol") or "").upper()
+            status = str(raw.get("status") or "")
+            contract_type = str(raw.get("contractType") or "")
+            quote_asset = str(raw.get("quoteAsset") or "")
 
-    def _request(self, method: str, path: str, signed: bool = False, params: Optional[dict] = None) -> Any:
-        self._wait_if_banned()
-        params = params or {}
-        headers = {}
-        if signed:
-            params = self._sign(params)
-            headers = self._headers()
-        elif self.api_key:
-            headers = self._headers()
-
-        url = f"{BINANCE_FAPI}{path}"
-        try:
-            if method == "GET":
-                resp = self.session.get(url, params=params, headers=headers, timeout=20)
-            elif method == "POST":
-                resp = self.session.post(url, data=params, headers=headers, timeout=20)
-            elif method == "DELETE":
-                resp = self.session.delete(url, params=params, headers=headers, timeout=20)
-            else:
-                raise ValueError(f"unsupported method {method}")
-        except requests.RequestException as exc:
-            raise BinanceError(f"network error: {exc}") from exc
-
-        if resp.status_code == 418 or resp.status_code == 429:
-            self._register_ban(resp.text)
-            raise BinanceError(f"rate limited: {resp.text[:300]}", code=-1003)
-
-        try:
-            body = resp.json()
-        except ValueError:
-            raise BinanceError(f"invalid JSON response: {resp.text[:300]}")
-
-        if isinstance(body, dict) and "code" in body and int(body["code"]) < 0:
-            code = int(body["code"])
-            msg = str(body.get("msg", ""))
-            if code == -1003:
-                self._register_ban(msg)
-            raise BinanceError(f"{code}: {msg}", code=code)
-
-        return body
-
-    # -- market data / symbol info --
-
-    def exchange_info(self, force: bool = False) -> dict:
-        if not force and self._filters_cache and (time.time() - self._filters_cache_at) < 3600:
-            return self._filters_cache
-        data = self._request("GET", "/fapi/v1/exchangeInfo")
-        filters: dict[str, dict] = {}
-        for sym in data.get("symbols", []):
-            f = {"symbol": sym["symbol"], "status": sym.get("status")}
-            for flt in sym.get("filters", []):
-                if flt["filterType"] == "PRICE_FILTER":
-                    f["tickSize"] = float(flt["tickSize"])
-                elif flt["filterType"] == "LOT_SIZE":
-                    f["stepSize"] = float(flt["stepSize"])
-                    f["minQty"] = float(flt["minQty"])
-                elif flt["filterType"] == "MIN_NOTIONAL":
-                    f["minNotional"] = float(flt.get("notional", flt.get("minNotional", 0)))
-            filters[sym["symbol"]] = f
-        self._filters_cache = filters
-        self._filters_cache_at = time.time()
-        return filters
-
-    def get_filters(self, symbol: str) -> Optional[dict]:
-        return self.exchange_info().get(symbol)
-
-    def usable_symbols(self) -> set[str]:
-        return {s for s, f in self.exchange_info().items() if f.get("status") == "TRADING"}
-
-    def mark_price(self, symbol: str) -> float:
-        data = self._request("GET", "/fapi/v1/premiumIndex", params={"symbol": symbol})
-        return float(data["markPrice"])
-
-    # -- account --
-
-    def account_balance_usdt(self) -> float:
-        data = self._request("GET", "/fapi/v2/balance", signed=True)
-        for entry in data:
-            if entry.get("asset") == "USDT":
-                return float(entry.get("availableBalance", entry.get("balance", 0.0)))
-        return 0.0
-
-    def set_leverage(self, symbol: str, leverage: int) -> dict:
-        return self._request("POST", "/fapi/v1/leverage", signed=True,
-                              params={"symbol": symbol, "leverage": leverage})
-
-    def position_risk(self, symbol: str) -> Optional[dict]:
-        data = self._request("GET", "/fapi/v3/positionRisk", signed=True, params={"symbol": symbol})
-        for p in data:
-            if p.get("symbol") == symbol and abs(float(p.get("positionAmt", 0))) > 0:
-                return p
-        return None
-
-    # -- orders --
-
-    def place_limit_order(self, symbol: str, side: str, quantity: float, price: float) -> dict:
-        return self._request("POST", "/fapi/v1/order", signed=True, params={
-            "symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
-            "quantity": quantity, "price": price,
-        })
-
-    def cancel_order(self, symbol: str, order_id: int) -> dict:
-        return self._request("DELETE", "/fapi/v1/order", signed=True,
-                              params={"symbol": symbol, "orderId": order_id})
-
-    def get_order(self, symbol: str, order_id: int) -> dict:
-        return self._request("GET", "/fapi/v1/order", signed=True,
-                              params={"symbol": symbol, "orderId": order_id})
-
-    def market_close(self, symbol: str, side: str, quantity: float) -> dict:
-        """side = the closing side (opposite of the position direction)."""
-        return self._request("POST", "/fapi/v1/order", signed=True, params={
-            "symbol": symbol, "side": side, "type": "MARKET", "quantity": quantity, "reduceOnly": "true",
-        })
-
-    # -- algo (conditional TP/SL/trailing) orders --
-
-    def place_algo_order(self, symbol: str, side: str, order_type: str, quantity: float,
-                          trigger_price: float, close_position: bool = False,
-                          reduce_only: bool = True) -> dict:
-        params = {
-            "algoType": "CONDITIONAL",
-            "symbol": symbol,
-            "side": side,
-            "type": order_type,
-            "triggerPrice": trigger_price,
-            "workingType": "MARK_PRICE",
-        }
-        if close_position:
-            params["closePosition"] = "true"
-        else:
-            params["quantity"] = quantity
-            params["reduceOnly"] = "true" if reduce_only else "false"
-        return self._request("POST", "/fapi/v1/algoOrder", signed=True, params=params)
-
-    def cancel_algo_order(self, algo_id: int) -> dict:
-        try:
-            return self._request("DELETE", "/fapi/v1/algoOrder", signed=True, params={"algoId": algo_id})
-        except BinanceError as exc:
-            if exc.code in (-2011, -2013):  # unknown order -> already gone, treat as clean
-                return {"already_clean": True}
-            raise
-
-    def query_algo_order(self, algo_id: int) -> dict:
-        return self._request("GET", "/fapi/v1/algoOrder", signed=True, params={"algoId": algo_id})
-
-    def open_algo_orders(self, symbol: str) -> list[dict]:
-        return self._request("GET", "/fapi/v1/openAlgoOrders", signed=True, params={"symbol": symbol})
-
-
-# ----------------------------------------------------------------------
-# Bybit public REST client (market-data source per spec section 9)
-# ----------------------------------------------------------------------
-
-class BybitClient:
-    def __init__(self):
-        self.session = requests.Session()
-
-    def _get(self, path: str, params: dict) -> dict:
-        resp = self.session.get(f"{BYBIT_API}{path}", params=params, timeout=20)
-        resp.raise_for_status()
-        body = resp.json()
-        if body.get("retCode") not in (0, None):
-            raise RuntimeError(f"Bybit {path}: {body.get('retMsg')}")
-        return body
-
-    def klines_m15(self, symbol: str, limit: int = CANDLES_PER_SYMBOL) -> list[dict]:
-        candles: list[dict] = []
-        end_time = None
-        remaining = limit
-        while remaining > 0:
-            batch = min(remaining, 1000)
-            params = {"category": "linear", "symbol": symbol, "interval": "15", "limit": batch}
-            if end_time is not None:
-                params["end"] = end_time
-            body = self._get("/v5/market/kline", params)
-            rows = body.get("result", {}).get("list", [])
-            if not rows:
-                break
-            # Bybit returns newest-first: [start, open, high, low, close, volume, turnover]
-            for r in rows:
-                candles.append({
-                    "timestamp": int(r[0]),
-                    "open": float(r[1]),
-                    "high": float(r[2]),
-                    "low": float(r[3]),
-                    "close": float(r[4]),
-                    "volume": float(r[5]),
-                })
-            remaining -= len(rows)
-            end_time = int(rows[-1][0]) - 1
-            if len(rows) < batch:
-                break
-        candles.sort(key=lambda c: c["timestamp"])
-        return candles[-limit:]
-
-    def top_volume_symbols(self, quote: str = "USDT", limit: int = 200) -> list[tuple[str, float]]:
-        body = self._get("/v5/market/tickers", {"category": "linear"})
-        rows = body.get("result", {}).get("list", [])
-        out = []
-        for r in rows:
-            symbol = r.get("symbol", "")
-            if not symbol.endswith(quote):
+            # Bot ini fokus pada USDⓈ-M USDT perpetual.
+            if status != "TRADING":
                 continue
-            try:
-                turnover = float(r.get("turnover24h", 0.0))
-            except (TypeError, ValueError):
-                turnover = 0.0
-            out.append((symbol, turnover))
-        out.sort(key=lambda x: x[1], reverse=True)
-        return out[:limit]
 
-
-BYBIT = BybitClient()
-BINANCE_EXEC = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET) if BINANCE_API_KEY and BINANCE_API_SECRET else None
-BINANCE_READ = BinanceClient(BINANCE_API_KEY_READ, BINANCE_API_SECRET_READ) if BINANCE_API_KEY_READ and BINANCE_API_SECRET_READ else BINANCE_EXEC
-
-
-# ----------------------------------------------------------------------
-# quantity / geometry / PnL helpers
-# ----------------------------------------------------------------------
-
-def validate_geometry(direction: str, entry: float, sl: float, tp: float) -> bool:
-    if entry <= 0 or sl <= 0 or tp <= 0:
-        return False
-    if direction == "BUY":
-        return sl < entry < tp
-    if direction == "SELL":
-        return tp < entry < sl
-    return False
-
-
-def calc_auto_quantity(entry: float, margin_usd: float, leverage: int, filters: Optional[dict]) -> Optional[float]:
-    """Quantity = margin*leverage / entry, normalized to exchange filters.
-    If minNotional/minQty cannot be met, margin is allowed to scale up to
-    max(margin*3, margin+$5) before giving up (documented cap from real-trade tuning)."""
-    if entry <= 0 or leverage <= 0:
-        return None
-    step = (filters or {}).get("stepSize", 0.0) or 0.0
-    min_qty = (filters or {}).get("minQty", 0.0) or 0.0
-    min_notional = (filters or {}).get("minNotional", 5.0) or 5.0
-
-    cap = max(margin_usd * 3, margin_usd + 5.0)
-    trial_margin = margin_usd
-    while trial_margin <= cap:
-        notional = trial_margin * leverage
-        qty = notional / entry
-        if step > 0:
-            qty = round_step(qty, step, ROUND_DOWN)
-        if qty <= 0 or qty < min_qty or qty * entry < min_notional:
-            trial_margin += max(margin_usd * 0.25, 0.25)
-            continue
-        return qty
-    log.warning("calc_auto_quantity: unable to satisfy filters up to cap=%.4f for entry=%.8f", cap, entry)
-    return None
-
-
-def calc_pnl(direction: str, entry: float, exit_price: float, quantity: float) -> float:
-    if direction == "BUY":
-        return (exit_price - entry) * quantity
-    return (entry - exit_price) * quantity
-
-
-def calc_pnl_pct_of_margin(direction: str, entry: float, exit_price: float, margin_usd: float, leverage: int) -> float:
-    if entry <= 0 or margin_usd <= 0:
-        return 0.0
-    move = (exit_price - entry) / entry if direction == "BUY" else (entry - exit_price) / entry
-    return move * leverage * 100.0
-
-
-def calc_r_multiple(direction: str, entry: float, exit_price: float, stop_loss: float) -> Optional[float]:
-    risk = abs(entry - stop_loss)
-    if risk <= 0:
-        return None
-    if direction == "BUY":
-        return (exit_price - entry) / risk
-    return (entry - exit_price) / risk
-
-
-# ----------------------------------------------------------------------
-# runtime state + checkpoint persistence
-# ----------------------------------------------------------------------
-
-def _new_state() -> dict:
-    return {
-        "mode": "sim",                 # "sim" | "real"
-        "sim_balance": DEFAULT_SIM_BALANCE,
-        "anchor_balance": DEFAULT_SIM_BALANCE,
-        "margin": DEFAULT_MARGIN,
-        "leverage": DEFAULT_LEVERAGE,
-        "max_positions": MAX_POSITIONS,
-        "autostop_pct": None,
-        "peak_balance": DEFAULT_SIM_BALANCE,
-        "autostop_triggered": False,
-        "scanning": False,
-        "pending": {},                 # id -> pending order dict
-        "positions": {},               # id -> filled position dict
-        "bans": {},                    # symbol -> {until: epoch|None, permanent: bool, reason: str}
-        "scanned_coins": [],           # cache for /koin
-        "pending_cancel_stats": {"tp_before_entry": 0, "expired": 0, "binance_reject": 0},
-        "confidence_threshold": 0.0,
-        "chat_id": None,
-        "banned_count_lifetime": 0,
-        "binance_paused_until": 0.0,
-    }
-
-
-STATE: dict = _new_state()
-
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    import tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp_main_")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-        os.replace(tmp_name, path)
-    finally:
-        if os.path.exists(tmp_name):
-            try:
-                os.remove(tmp_name)
-            except OSError:
-                pass
-
-
-def save_state() -> None:
-    try:
-        _atomic_write_json(MAIN_CKPT, STATE)
-        _atomic_write_json(MAIN_CKPT_BACKUP, STATE)
-    except OSError:
-        log.exception("failed to save main checkpoint")
-
-
-def load_state() -> bool:
-    global STATE
-    for path in (MAIN_CKPT, MAIN_CKPT_BACKUP):
-        if not path.exists():
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            merged = _new_state()
-            merged.update(data)
-            STATE = merged
-            return True
-        except (OSError, json.JSONDecodeError):
-            continue
-    return False
-
-
-# ----------------------------------------------------------------------
-# ban manager
-# ----------------------------------------------------------------------
-
-def is_banned(symbol: str) -> bool:
-    entry = STATE["bans"].get(symbol)
-    if not entry:
-        return False
-    if entry.get("permanent"):
-        return True
-    until = entry.get("until")
-    return bool(until and until > time.time())
-
-
-def apply_ban(symbol: str, hours: Optional[float], reason: str, permanent: bool = False) -> None:
-    STATE["bans"][symbol] = {
-        "until": None if permanent else time.time() + hours * 3600,
-        "permanent": permanent,
-        "reason": reason,
-        "applied_at": time.time(),
-    }
-    STATE["banned_count_lifetime"] = STATE.get("banned_count_lifetime", 0) + 1
-
-
-def unban(symbol: str) -> bool:
-    return STATE["bans"].pop(symbol, None) is not None
-
-
-def unban_all() -> int:
-    n = len(STATE["bans"])
-    STATE["bans"] = {}
-    return n
-
-
-def purge_expired_bans() -> list[str]:
-    now = time.time()
-    expired = []
-    for symbol, entry in list(STATE["bans"].items()):
-        if entry.get("permanent"):
-            continue
-        until = entry.get("until")
-        if until and until <= now:
-            expired.append(symbol)
-            STATE["bans"].pop(symbol, None)
-    return expired
-
-
-def active_ban_count() -> int:
-    return len(STATE["bans"])
-
-
-# ----------------------------------------------------------------------
-# notifications (captured from launcher context at on_start)
-# ----------------------------------------------------------------------
-
-_SEND_MESSAGE = None  # callable(chat_id:int, text:str)
-_CHAT_ID: Optional[int] = None
-
-
-def notify(text: str) -> None:
-    if _SEND_MESSAGE and _CHAT_ID:
-        try:
-            _SEND_MESSAGE(_CHAT_ID, text)
-        except Exception:
-            log.exception("notify failed")
-
-
-# ----------------------------------------------------------------------
-# price feed (Bybit public WS ticker) with REST fallback
-# ----------------------------------------------------------------------
-
-PRICE_CACHE: dict[str, dict] = {}   # symbol -> {"price": float, "ts": float}
-_WS_SYMBOLS: set[str] = set()
-_WS_SYMBOLS_LOCK = asyncio.Lock()
-PRICE_FRESH_SEC = 20
-
-
-async def ws_track(symbol: str) -> None:
-    async with _WS_SYMBOLS_LOCK:
-        _WS_SYMBOLS.add(symbol)
-
-
-async def ws_untrack(symbol: str) -> None:
-    async with _WS_SYMBOLS_LOCK:
-        _WS_SYMBOLS.discard(symbol)
-
-
-def get_price(symbol: str) -> Optional[float]:
-    entry = PRICE_CACHE.get(symbol)
-    if entry and (time.time() - entry["ts"]) < PRICE_FRESH_SEC:
-        return entry["price"]
-    # REST fallback (rare — WS should normally be fresh)
-    try:
-        resp = requests.get(f"{BYBIT_API}/v5/market/tickers",
-                             params={"category": "linear", "symbol": symbol}, timeout=10)
-        rows = resp.json().get("result", {}).get("list", [])
-        if rows:
-            price = float(rows[0]["lastPrice"])
-            PRICE_CACHE[symbol] = {"price": price, "ts": time.time()}
-            return price
-    except Exception:
-        log.exception("REST price fallback failed for %s", symbol)
-    return entry["price"] if entry else None
-
-
-async def ws_feed_task(stop_flag: "asyncio.Event") -> None:
-    """Maintains a Bybit public WS ticker subscription for all tracked symbols."""
-    try:
-        import websockets
-    except ImportError:
-        log.warning("websockets package not installed — falling back to REST-only price polling")
-        while not stop_flag.is_set():
-            async with _WS_SYMBOLS_LOCK:
-                symbols = list(_WS_SYMBOLS)
-            for sym in symbols:
-                await asyncio.to_thread(get_price, sym)
-            await asyncio.sleep(5)
-        return
-
-    backoff = 2
-    while not stop_flag.is_set():
-        try:
-            async with websockets.connect("wss://stream.bybit.com/v5/public/linear", ping_interval=20) as ws:
-                subscribed: set[str] = set()
-                backoff = 2
-                last_resync = 0.0
-                while not stop_flag.is_set():
-                    if time.time() - last_resync > 10:
-                        async with _WS_SYMBOLS_LOCK:
-                            desired = set(_WS_SYMBOLS)
-                        to_add = desired - subscribed
-                        to_remove = subscribed - desired
-                        if to_add:
-                            await ws.send(json.dumps({"op": "subscribe", "args": [f"tickers.{s}" for s in to_add]}))
-                            subscribed |= to_add
-                        if to_remove:
-                            await ws.send(json.dumps({"op": "unsubscribe", "args": [f"tickers.{s}" for s in to_remove]}))
-                            subscribed -= to_remove
-                        last_resync = time.time()
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=5)
-                    except asyncio.TimeoutError:
-                        continue
-                    try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    topic = msg.get("topic", "")
-                    if topic.startswith("tickers."):
-                        data = msg.get("data") or {}
-                        symbol = data.get("symbol") or topic.split(".", 1)[1]
-                        price = data.get("lastPrice")
-                        if symbol and price:
-                            PRICE_CACHE[symbol] = {"price": float(price), "ts": time.time()}
-        except Exception:
-            log.warning("ws_feed_task reconnecting after error", exc_info=True)
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
-
-
-# ----------------------------------------------------------------------
-# candle cache (Bybit REST) — used for scanning and trailing analysis
-# ----------------------------------------------------------------------
-
-_BTC_CANDLE_CACHE: dict = {"candles": [], "fetched_at": 0.0}
-_RECENT_CANDLE_CACHE: dict[str, dict] = {}  # symbol -> {"candles":[...], "fetched_at": ts}
-RECENT_CANDLE_TTL_SEC = 45
-
-
-async def get_btc_candles() -> list[dict]:
-    if time.time() - _BTC_CANDLE_CACHE["fetched_at"] < 300 and _BTC_CANDLE_CACHE["candles"]:
-        return _BTC_CANDLE_CACHE["candles"]
-    try:
-        candles = await asyncio.to_thread(BYBIT.klines_m15, "BTCUSDT", CANDLES_PER_SYMBOL)
-        _BTC_CANDLE_CACHE["candles"] = candles
-        _BTC_CANDLE_CACHE["fetched_at"] = time.time()
-        return candles
-    except Exception:
-        log.exception("failed to refresh BTC candles")
-        return _BTC_CANDLE_CACHE["candles"]
-
-
-async def get_recent_candles(symbol: str, limit: int = 120) -> list[dict]:
-    cached = _RECENT_CANDLE_CACHE.get(symbol)
-    if cached and (time.time() - cached["fetched_at"]) < RECENT_CANDLE_TTL_SEC:
-        return cached["candles"]
-    try:
-        candles = await asyncio.to_thread(BYBIT.klines_m15, symbol, limit)
-        _RECENT_CANDLE_CACHE[symbol] = {"candles": candles, "fetched_at": time.time()}
-        return candles
-    except Exception:
-        log.exception("failed to refresh recent candles for %s", symbol)
-        return cached["candles"] if cached else []
-
-
-# ----------------------------------------------------------------------
-# top-50 scanner universe
-# ----------------------------------------------------------------------
-
-async def build_scan_universe() -> list[str]:
-    """Top-volume symbols present on both Bybit and Binance, excluding banned/active/pending,
-    padded up to SCAN_TARGET_SYMBOLS. BTCUSDT is always included when available."""
-    try:
-        bybit_ranked = await asyncio.to_thread(BYBIT.top_volume_symbols, "USDT", 300)
-    except Exception:
-        log.exception("failed to fetch Bybit top-volume list")
-        return []
-
-    try:
-        binance_symbols = await asyncio.to_thread((BINANCE_READ or BINANCE_EXEC).usable_symbols) \
-            if (BINANCE_READ or BINANCE_EXEC) else set()
-    except Exception:
-        log.exception("failed to fetch Binance exchange info")
-        binance_symbols = set()
-
-    occupied_symbols = {v["symbol"] for v in STATE["pending"].values()} | \
-                       {v["symbol"] for v in STATE["positions"].values()}
-
-    eligible: list[str] = []
-
-    def usable(sym: str) -> bool:
-        if binance_symbols and sym not in binance_symbols:
-            return False
-        if is_banned(sym):
-            return False
-        if sym in occupied_symbols:
-            return False
-        return True
-
-    if usable("BTCUSDT"):
-        eligible.append("BTCUSDT")
-
-    for sym, _turnover in bybit_ranked:
-        if len(eligible) >= SCAN_TARGET_SYMBOLS:
-            break
-        if sym in eligible:
-            continue
-        if usable(sym):
-            eligible.append(sym)
-
-    return eligible[:SCAN_TARGET_SYMBOLS]
-
-
-def capacity_remaining() -> int:
-    used = len(STATE["pending"]) + len(STATE["positions"])
-    return max(0, STATE["max_positions"] - used)
-
-
-def is_binance_ready() -> bool:
-    if not BINANCE_EXEC:
-        return True  # no real client configured -> only sim mode matters
-    return not BINANCE_EXEC.is_rate_limited()
-
-
-# ----------------------------------------------------------------------
-# pending order creation (sim + real)
-# ----------------------------------------------------------------------
-
-PENDING_TIMEOUT_HOURS = 8.0
-
-
-async def open_pending(decision: dict) -> Optional[dict]:
-    symbol = decision["pair"]
-    direction = decision["direction"]
-    entry = float(decision["entry"])
-    tp = float(decision["take_profit"])
-    sl = float(decision["stop_loss"])
-
-    if not validate_geometry(direction, entry, sl, tp):
-        return None
-
-    pending_id = uuid.uuid4().hex[:12]
-    record = {
-        "id": pending_id,
-        "symbol": symbol,
-        "direction": direction,
-        "entry": entry,
-        "take_profit": tp,
-        "stop_loss": sl,
-        "confidence": decision.get("confidence"),
-        "risk_reward": decision.get("risk_reward"),
-        "setup_type": decision.get("setup_type"),
-        "market_regime": decision.get("market_regime"),
-        "feature_scores": decision.get("feature_scores"),
-        "strategy_version": decision.get("strategy_version"),
-        "created_at": time.time(),
-        "expires_at": time.time() + PENDING_TIMEOUT_HOURS * 3600,
-        "mode": STATE["mode"],
-        "margin": STATE["margin"],
-        "leverage": STATE["leverage"],
-        "state": "PENDING",
-        "binance_order_id": None,
-        "last_binance_poll": 0.0,
-    }
-
-    if STATE["mode"] == "real":
-        if not BINANCE_EXEC:
-            notify("⚠️ Mode real aktif tapi BINANCE_API_KEY/SECRET belum diset. Order dilewati.")
-            return None
-        filters = BINANCE_EXEC.get_filters(symbol)
-        if not filters:
-            return None
-        tick = filters.get("tickSize", 0.0) or 0.0
-        entry_r = round_to_tick(entry, tick) if tick else entry
-        qty = calc_auto_quantity(entry_r, STATE["margin"], STATE["leverage"], filters)
-        if not qty:
-            notify(f"⚠️ Gagal hitung quantity untuk {symbol} (margin/filter tidak cocok).")
-            return None
-        try:
-            await asyncio.to_thread(BINANCE_EXEC.set_leverage, symbol, STATE["leverage"])
-            side = "BUY" if direction == "BUY" else "SELL"
-            order = await asyncio.to_thread(BINANCE_EXEC.place_limit_order, symbol, side, qty, entry_r)
-        except BinanceError as exc:
-            notify(f"❌ Binance order gagal untuk {symbol}: <code>{html.escape(str(exc))}</code>")
-            return None
-        record["binance_order_id"] = order.get("orderId")
-        record["quantity"] = qty
-        record["entry"] = entry_r
-
-    STATE["pending"][pending_id] = record
-    ws_track_sync(symbol)
-    learn.record_candidate({**decision, "accepted": True, "pending_id": pending_id})
-    return record
-
-
-def ws_track_sync(symbol: str) -> None:
-    _WS_SYMBOLS.add(symbol)
-
-
-def ws_untrack_sync(symbol: str) -> None:
-    still_needed = any(v["symbol"] == symbol for v in STATE["pending"].values()) or \
-                   any(v["symbol"] == symbol for v in STATE["positions"].values())
-    if not still_needed:
-        _WS_SYMBOLS.discard(symbol)
-
-
-# ----------------------------------------------------------------------
-# scan cycle
-# ----------------------------------------------------------------------
-
-def _fmt_pct(x: Optional[float]) -> str:
-    return f"{x:.1f}%" if isinstance(x, (int, float)) else "—"
-
-
-async def scan_once(should_stop) -> None:
-    universe = await build_scan_universe()
-    STATE["scanned_coins"] = [{"symbol": s, "scanned_at": time.time()} for s in universe]
-    if not universe:
-        return
-
-    btc_candles = await get_btc_candles()
-    threshold = STATE["confidence_threshold"]
-
-    eligible: list[dict] = []
-    rejects: dict[str, int] = {}
-    confidences: list[float] = []
-    buy_count = 0
-    sell_count = 0
-    regimes: dict[str, int] = {}
-    low_conf_bans = 0
-    processed = 0
-
-    for symbol in universe:
-        if should_stop():
-            break
-        processed += 1
-        try:
-            candles = await asyncio.to_thread(BYBIT.klines_m15, symbol, CANDLES_PER_SYMBOL)
-        except Exception:
-            log.exception("scan: failed to fetch candles for %s", symbol)
-            await asyncio.sleep(SCAN_PER_COIN_DELAY)
-            continue
-
-        context = {"symbol": symbol, "btc_candles": btc_candles, "active_threshold": threshold}
-        decision = None
-        try:
-            decision = strategy.analyze(candles, context)
-        except Exception:
-            log.exception("strategy.analyze failed for %s", symbol)
-
-        if decision is None:
-            rejects["NO_VALID_ENTRY_CANDIDATE"] = rejects.get("NO_VALID_ENTRY_CANDIDATE", 0) + 1
-            await asyncio.sleep(SCAN_PER_COIN_DELAY)
-            continue
-
-        confidences.append(decision["confidence"])
-        regimes[decision["market_regime"]] = regimes.get(decision["market_regime"], 0) + 1
-        if decision["direction"] == "BUY":
-            buy_count += 1
-        else:
-            sell_count += 1
-
-        if decision["confidence"] < threshold:
-            rejects["BELOW_ACTIVE_THRESHOLD"] = rejects.get("BELOW_ACTIVE_THRESHOLD", 0) + 1
-            learn.record_candidate({**decision, "accepted": False, "rejected_reason": "BELOW_ACTIVE_THRESHOLD"})
-            if threshold >= LOW_CONFIDENCE_BAN_MIN_THRESHOLD:
-                apply_ban(symbol, BAN_LOW_CONFIDENCE_HOURS, "low_confidence")
-                low_conf_bans += 1
-            await asyncio.sleep(SCAN_PER_COIN_DELAY)
-            continue
-
-        eligible.append(decision)
-        await asyncio.sleep(SCAN_PER_COIN_DELAY)
-
-    accepted = 0
-    for decision in eligible:
-        if capacity_remaining() <= 0:
-            break
-        record = await open_pending(decision)
-        if record:
-            accepted += 1
-
-    avg_conf = round(sum(confidences) / len(confidences), 1) if confidences else 0.0
-    total_breadth = buy_count + sell_count
-    buy_pct = round(buy_count / total_breadth * 100, 1) if total_breadth else 0.0
-    sell_pct = round(100 - buy_pct, 1) if total_breadth else 0.0
-    top_regime = max(regimes.items(), key=lambda kv: kv[1])[0] if regimes else "unknown"
-
-    summary = {
-        "requested": len(universe),
-        "available": len(universe),
-        "processed": processed,
-        "valid_analyses": len(confidences),
-        "avg_confidence": avg_conf,
-        "candidate_count": len(eligible),
-        "eligible_count": accepted,
-        "low_confidence_bans": low_conf_bans,
-        "rejects": rejects,
-        "buy_pct": buy_pct,
-        "sell_pct": sell_pct,
-        "regime": top_regime,
-        "threshold": threshold,
-    }
-    learn.record_scan(summary)
-
-    lines = [f"✅ <b>{accepted} DECISION BRAIN ELIGIBLE</b>", ""]
-    for d in eligible[:accepted]:
-        lines.append(f"• {d['pair']} {d['direction']} — {d['confidence']:.0f}%")
-    lines += [
-        "",
-        "📊 <b>Scan:</b>",
-        f"{len(universe)} requested",
-        f"{len(universe)} available",
-        f"{processed} processed",
-        f"{len(confidences)} valid strategy analyses",
-        "",
-        f"🧠 Average confidence: {avg_conf}%",
-        "",
-        f"🎯 Candidate: {len(eligible)}",
-        f"Eligible: {accepted}",
-        f"Low-confidence bans: {low_conf_bans}",
-        "",
-        "🚫 Main rejects:",
-    ]
-    for reason, count in rejects.items():
-        lines.append(f"{reason} = {count}")
-    lines += [
-        "",
-        "📈 Breadth:",
-        f"BUY {buy_pct}%",
-        f"SELL {sell_pct}%",
-        "",
-        f"Regime: {top_regime}",
-    ]
-    notify("\n".join(lines))
-    save_state()
-
-
-async def scanner_loop(stop_flag: "asyncio.Event") -> None:
-    last_cycle = 0.0
-    while not stop_flag.is_set():
-        try:
-            if STATE["scanning"] and is_binance_ready() and capacity_remaining() > 0:
-                if time.time() - last_cycle >= SCAN_INTERVAL_SEC:
-                    last_cycle = time.time()
-
-                    def should_stop():
-                        return stop_flag.is_set() or not STATE["scanning"]
-
-                    await scan_once(should_stop)
-        except Exception:
-            log.exception("scanner_loop iteration failed")
-        await asyncio.sleep(2)
-
-
-# ----------------------------------------------------------------------
-# real-mode protection (TP/SL algo orders) + emergency close
-# ----------------------------------------------------------------------
-
-REAL_TRADE_POLL_SLEEP = 30.0  # steady per-item Binance poll cadence (rate-limit lesson learned)
-
-
-async def _install_protection_real(pos: dict) -> bool:
-    symbol = pos["symbol"]
-    close_side = "SELL" if pos["direction"] == "BUY" else "BUY"
-    qty = pos["quantity"]
-    for attempt in range(3):
-        try:
-            tp_order = await asyncio.to_thread(
-                BINANCE_EXEC.place_algo_order, symbol, close_side, "TAKE_PROFIT_MARKET", qty, pos["take_profit"])
-            sl_order = await asyncio.to_thread(
-                BINANCE_EXEC.place_algo_order, symbol, close_side, "STOP_MARKET", qty, pos["stop_loss"])
-            pos["tp_algo_id"] = tp_order.get("algoId")
-            pos["sl_algo_id"] = sl_order.get("algoId")
-            return True
-        except BinanceError:
-            log.exception("place TP/SL attempt %s failed for %s", attempt + 1, symbol)
-            await asyncio.sleep(2)
-    return False
-
-
-async def _emergency_close_real(pos: dict, reason: str) -> None:
-    symbol = pos["symbol"]
-    try:
-        risk = await asyncio.to_thread(BINANCE_EXEC.position_risk, symbol)
-        qty = abs(float(risk["positionAmt"])) if risk else pos.get("quantity", 0.0)
-        if qty > 0:
-            close_side = "SELL" if pos["direction"] == "BUY" else "BUY"
-            await asyncio.to_thread(BINANCE_EXEC.market_close, symbol, close_side, qty)
-        notify(f"🚨 <b>AUTO-OUT {symbol}</b>\nAlasan: {html.escape(reason)}")
-    except BinanceError as exc:
-        notify(f"❌ Emergency close GAGAL untuk {symbol}: <code>{html.escape(str(exc))}</code>\n"
-               f"⚠️ Posisi mungkin masih terbuka tanpa proteksi — cek manual di Binance.")
-
-
-async def _replace_sl_real(pos: dict, new_sl: float) -> bool:
-    symbol = pos["symbol"]
-    close_side = "SELL" if pos["direction"] == "BUY" else "BUY"
-    old_algo_id = pos.get("sl_algo_id")
-    try:
-        if old_algo_id:
-            await asyncio.to_thread(BINANCE_EXEC.cancel_algo_order, old_algo_id)
-        new_order = await asyncio.to_thread(
-            BINANCE_EXEC.place_algo_order, symbol, close_side, "STOP_MARKET", pos["quantity"], new_sl)
-        pos["sl_algo_id"] = new_order.get("algoId")
-        pos["stop_loss"] = new_sl
-        return True
-    except BinanceError:
-        log.exception("SL replace failed for %s — keeping previous SL", symbol)
-        return False
-
-
-# ----------------------------------------------------------------------
-# closing / recording trades
-# ----------------------------------------------------------------------
-
-def _session_and_regime(pos: dict) -> tuple[str, str]:
-    ts_ms = int(pos.get("opened_at", time.time()) * 1000)
-    return strategy.session_of(ts_ms), pos.get("market_regime", "unknown")
-
-
-async def _finalize_trade(pos: dict, result: str, exit_price: float, mode: str) -> None:
-    direction = pos["direction"]
-    entry = pos["entry"]
-    margin = pos.get("margin", DEFAULT_MARGIN)
-    leverage = pos.get("leverage", DEFAULT_LEVERAGE)
-    quantity = pos.get("quantity") or (margin * leverage / entry if entry else 0.0)
-
-    pnl_usd = calc_pnl(direction, entry, exit_price, quantity) if mode == "real" else \
-        margin * (calc_pnl_pct_of_margin(direction, entry, exit_price, margin, leverage) / 100.0)
-    pnl_pct = calc_pnl_pct_of_margin(direction, entry, exit_price, margin, leverage)
-    r_multiple = calc_r_multiple(direction, entry, exit_price, pos.get("initial_stop_loss", pos["stop_loss"]))
-    session, regime = _session_and_regime(pos)
-
-    if mode == "sim":
-        STATE["sim_balance"] = round(STATE["sim_balance"] + pnl_usd, 6)
-
-    trade = {
-        "symbol": pos["symbol"],
-        "direction": direction,
-        "mode": mode,
-        "entry": entry,
-        "exit_price": exit_price,
-        "result": result,
-        "r_multiple": r_multiple,
-        "pnl_pct": round(pnl_pct, 4),
-        "pnl_usd": round(pnl_usd, 6),
-        "confidence": pos.get("confidence"),
-        "session": session,
-        "market_regime": regime,
-        "setup_type": pos.get("setup_type"),
-        "feature_scores": pos.get("feature_scores"),
-        "opened_at": int(pos.get("opened_at", time.time()) * 1000),
-        "closed_at": int(time.time() * 1000),
-        "trail_count": pos.get("trail_count", 0),
-    }
-    learn.record_trade(trade)
-    apply_ban(pos["symbol"], BAN_AFTER_TRADE_HOURS, f"post_trade_{result}")
-
-    icon = "🟢" if pnl_usd >= 0 else "🔴"
-    label = {"tp": "TP", "initial_sl": "SL", "trail": "TRAIL"}.get(result, result.upper())
-    balance_txt = f"${STATE['sim_balance']:.4f}" if mode == "sim" else "(real)"
-    notify(f"{icon} <b>{label} — {pos['symbol']}</b>\n"
-           f"Entry: {entry} → Exit: {exit_price}\n"
-           f"PnL: {pnl_pct:+.2f}% → {balance_txt}\n"
-           f"Confidence: {pos.get('confidence')}%")
-
-
-async def close_position(pos_id: str, result: str, exit_price: float) -> None:
-    pos = STATE["positions"].pop(pos_id, None)
-    if not pos:
-        return
-    await _finalize_trade(pos, result, exit_price, pos["mode"])
-    ws_untrack_sync(pos["symbol"])
-    save_state()
-
-
-async def cancel_pending(pending_id: str, reason: str) -> None:
-    """reason: 'manual' | 'auto_timeout' | 'tp_before_entry' | 'binance_reject'"""
-    pending = STATE["pending"].pop(pending_id, None)
-    if not pending:
-        return
-    symbol = pending["symbol"]
-
-    if pending.get("mode") == "real" and pending.get("binance_order_id") and BINANCE_EXEC:
-        try:
-            await asyncio.to_thread(BINANCE_EXEC.cancel_order, symbol, pending["binance_order_id"])
-        except BinanceError as exc:
-            if not (exc.code in (-2011, -2013)):  # already gone -> fine
-                log.warning("cancel_order failed for %s: %s", symbol, exc)
-
-    if reason == "manual":
-        pass  # administrative cleanup: never sent to learn.py
-    else:
-        bucket = "expired" if reason == "auto_timeout" else reason
-        if bucket in STATE["pending_cancel_stats"]:
-            STATE["pending_cancel_stats"][bucket] += 1
-        if reason in ("auto_timeout", "tp_before_entry"):
-            apply_ban(symbol, BAN_AFTER_TIMEOUT_HOURS, reason)
-            learn.record_timeout({
-                "symbol": symbol, "direction": pending["direction"], "confidence": pending.get("confidence"),
-                "reason": reason, "entry": pending["entry"], "take_profit": pending["take_profit"],
-                "stop_loss": pending["stop_loss"],
-            })
-            notify(f"⏱️ <b>TIMEOUT — {symbol}</b>\nAlasan: {reason}\nDiban {BAN_AFTER_TIMEOUT_HOURS} jam.")
-
-    ws_untrack_sync(symbol)
-    save_state()
-
-
-# ----------------------------------------------------------------------
-# pending -> filled transition
-# ----------------------------------------------------------------------
-
-async def _promote_to_position(pending: dict, actual_entry: float) -> None:
-    pos_id = pending["id"]
-    pos = dict(pending)
-    pos["entry"] = actual_entry
-    pos["initial_stop_loss"] = pending["stop_loss"]
-    pos["opened_at"] = time.time()
-    pos["best_price"] = actual_entry
-    pos["trail_count"] = 0
-    pos["sl_replace_count"] = 0
-    pos["state"] = "FILLED"
-    pos["last_binance_poll"] = 0.0
-    pos["last_trail_check"] = 0.0
-
-    if pos["mode"] == "real":
-        protected = await _install_protection_real(pos)
-        if not protected:
-            notify(f"🚨 Gagal pasang TP/SL untuk {pos['symbol']} setelah 3x percobaan — menutup posisi demi keamanan.")
-            await _emergency_close_real(pos, "place_tp_sl gagal 3x berturut-turut")
-            STATE["pending"].pop(pos_id, None)
-            ws_untrack_sync(pos["symbol"])
-            return
-        pos["state"] = "PROTECTED"
-
-    STATE["pending"].pop(pos_id, None)
-    STATE["positions"][pos_id] = pos
-    notify(f"✅ <b>FILLED — {pos['symbol']}</b>\n{pos['direction']} @ {actual_entry}\n"
-           f"TP: {pos['take_profit']} | SL: {pos['stop_loss']}\nConfidence: {pos.get('confidence')}%")
-    save_state()
-
-
-async def _process_pending_sim(pid: str, pending: dict) -> None:
-    symbol = pending["symbol"]
-    price = get_price(symbol)
-    if price is None:
-        return
-    direction = pending["direction"]
-    entry, tp = pending["entry"], pending["take_profit"]
-
-    tp_hit_first = (direction == "BUY" and price >= tp) or (direction == "SELL" and price <= tp)
-    if tp_hit_first:
-        await cancel_pending(pid, "tp_before_entry")
-        return
-
-    if time.time() >= pending["expires_at"]:
-        await cancel_pending(pid, "auto_timeout")
-        return
-
-    filled = (direction == "BUY" and price <= entry) or (direction == "SELL" and price >= entry)
-    if filled:
-        await _promote_to_position(pending, entry)
-
-
-async def _process_pending_real(pid: str, pending: dict) -> None:
-    symbol = pending["symbol"]
-    now = time.time()
-
-    price = get_price(symbol)
-    if price is not None:
-        direction, tp = pending["direction"], pending["take_profit"]
-        tp_hit_first = (direction == "BUY" and price >= tp) or (direction == "SELL" and price <= tp)
-        if tp_hit_first:
-            await cancel_pending(pid, "tp_before_entry")
-            return
-
-    if now >= pending["expires_at"]:
-        await cancel_pending(pid, "auto_timeout")
-        return
-
-    if now - pending.get("last_binance_poll", 0) < REAL_TRADE_POLL_SLEEP:
-        return
-    pending["last_binance_poll"] = now
-    if not BINANCE_EXEC or not pending.get("binance_order_id"):
-        return
-    try:
-        order = await asyncio.to_thread(BINANCE_EXEC.get_order, symbol, pending["binance_order_id"])
-    except BinanceError:
-        log.exception("get_order failed for %s", symbol)
-        return
-
-    status = order.get("status")
-    if status == "FILLED":
-        actual_entry = float(order.get("avgPrice") or pending["entry"])
-        if not validate_geometry(pending["direction"], actual_entry, pending["stop_loss"], pending["take_profit"]):
-            notify(f"⚠️ Geometri invalid setelah fill {symbol} (slippage) — AUTO-OUT.")
-            await cancel_pending(pid, "binance_reject")
-            return
-        await _promote_to_position(pending, actual_entry)
-    elif status in ("CANCELED", "EXPIRED", "REJECTED"):
-        STATE["pending"].pop(pid, None)
-        ws_untrack_sync(symbol)
-        STATE["pending_cancel_stats"]["binance_reject"] += 1
-        save_state()
-
-
-async def _process_position_sim(pid: str, pos: dict) -> None:
-    symbol = pos["symbol"]
-    price = get_price(symbol)
-    if price is None:
-        return
-    direction = pos["direction"]
-    pos["best_price"] = max(pos["best_price"], price) if direction == "BUY" else min(pos["best_price"], price)
-
-    sl_hit = (direction == "BUY" and price <= pos["stop_loss"]) or (direction == "SELL" and price >= pos["stop_loss"])
-    tp_hit = (direction == "BUY" and price >= pos["take_profit"]) or (direction == "SELL" and price <= pos["take_profit"])
-
-    if sl_hit:
-        result = "trail" if pos["trail_count"] > 0 else "initial_sl"
-        await close_position(pid, result, pos["stop_loss"])
-        return
-    if tp_hit:
-        await close_position(pid, "tp", pos["take_profit"])
-        return
-
-    now = time.time()
-    if now - pos.get("last_trail_check", 0) < 30:
-        return
-    pos["last_trail_check"] = now
-    candles = await get_recent_candles(symbol)
-    if not candles:
-        return
-    trail = strategy.update_position(
-        {"candles": candles},
-        {"direction": direction, "entry": pos["entry"], "current_sl": pos["stop_loss"],
-         "current_tp": pos["take_profit"], "best_price": pos["best_price"]},
-    )
-    if trail and trail.get("new_sl"):
-        pos["stop_loss"] = trail["new_sl"]
-        pos["trail_count"] += 1
-        pos["state"] = "TRAILING"
-        notify(_format_trail_notice(pos, trail))
-
-
-async def _process_position_real(pid: str, pos: dict) -> None:
-    symbol = pos["symbol"]
-    price = get_price(symbol)
-    if price is not None:
-        direction = pos["direction"]
-        pos["best_price"] = max(pos["best_price"], price) if direction == "BUY" else min(pos["best_price"], price)
-
-    now = time.time()
-    if now - pos.get("last_binance_poll", 0) < REAL_TRADE_POLL_SLEEP:
-        return
-    pos["last_binance_poll"] = now
-
-    try:
-        risk = await asyncio.to_thread(BINANCE_EXEC.position_risk, symbol)
-    except BinanceError:
-        log.exception("position_risk failed for %s", symbol)
-        return
-
-    if risk is None:
-        # position closed by exchange — classify which algo order triggered
-        result = "initial_sl"
-        exit_price = pos["stop_loss"]
-        try:
-            if pos.get("tp_algo_id"):
-                tp_status = await asyncio.to_thread(BINANCE_EXEC.query_algo_order, pos["tp_algo_id"])
-                if tp_status.get("algoStatus") == "TRIGGERED":
-                    result = "tp"
-                    exit_price = pos["take_profit"]
-            if result == "initial_sl" and pos.get("trail_count", 0) > 0:
-                result = "trail"
-        except BinanceError:
-            log.exception("query_algo_order failed while classifying close for %s", symbol)
-        await close_position(pid, result, exit_price)
-        return
-
-    # health-check: verify SL algo order is still live every poll cycle
-    sl_algo_id = pos.get("sl_algo_id")
-    if sl_algo_id:
-        try:
-            sl_status = await asyncio.to_thread(BINANCE_EXEC.query_algo_order, sl_algo_id)
-            if sl_status.get("algoStatus") not in ("NEW",):
-                pos["sl_replace_count"] = pos.get("sl_replace_count", 0) + 1
-                if pos["sl_replace_count"] > 3:
-                    await _emergency_close_real(pos, "SL hilang berulang kali — circuit breaker")
-                    STATE["positions"].pop(pid, None)
-                    ws_untrack_sync(symbol)
-                    return
-                ok = await _replace_sl_real(pos, pos["stop_loss"])
-                notify(f"{'🔁' if ok else '⚠️'} SL {'dipasang ulang' if ok else 'GAGAL dipasang ulang'} untuk {symbol}")
-        except BinanceError:
-            log.exception("SL health-check failed for %s", symbol)
-
-    if now - pos.get("last_trail_check", 0) < 30:
-        return
-    pos["last_trail_check"] = now
-    candles = await get_recent_candles(symbol)
-    if not candles:
-        return
-    trail = strategy.update_position(
-        {"candles": candles},
-        {"direction": pos["direction"], "entry": pos["entry"], "current_sl": pos["stop_loss"],
-         "current_tp": pos["take_profit"], "best_price": pos["best_price"]},
-    )
-    if trail and trail.get("new_sl"):
-        ok = await _replace_sl_real(pos, trail["new_sl"])
-        if ok:
-            pos["trail_count"] += 1
-            pos["state"] = "TRAILING"
-            notify(_format_trail_notice(pos, trail))
-
-
-def _format_trail_notice(pos: dict, trail: dict) -> str:
-    return (
-        f"🔒 <b>TRAILING UPDATE — {pos['symbol']}</b>\n\n"
-        f"Direction: {pos['direction']}\n"
-        f"State: {trail['state']}\n\n"
-        f"Entry: {trail['entry']}\n"
-        f"Price: {trail['current_price']}\n\n"
-        f"SL: {trail['old_sl']} → {trail['new_sl']}\n"
-        f"Profit: {trail['profit_r']:+.2f}R\n"
-        f"TP: {trail['tp']}\n\n"
-        f"ATR M15: {trail['atr']}\n"
-        f"Weakness Score: {trail['weakness_score']}\n"
-        f"Engine: {trail['engine']}\n\n"
-        "Reasons:\n" + "\n".join(f"• {r}" for r in trail["reason_codes"])
-    )
-
-
-# ----------------------------------------------------------------------
-# monitor loop (pending fills, active positions, ban expiry, autostop)
-# ----------------------------------------------------------------------
-
-async def monitor_loop(stop_flag: "asyncio.Event") -> None:
-    while not stop_flag.is_set():
-        try:
-            expired = purge_expired_bans()
-            if expired:
-                log.info("bans expired: %s", expired)
-
-            for pid, pending in list(STATE["pending"].items()):
-                try:
-                    if pending.get("mode") == "real":
-                        await _process_pending_real(pid, pending)
-                    else:
-                        await _process_pending_sim(pid, pending)
-                except Exception:
-                    log.exception("pending processing failed for %s", pid)
-                await asyncio.sleep(0.05)
-
-            for pid, pos in list(STATE["positions"].items()):
-                try:
-                    if pos.get("mode") == "real":
-                        await _process_position_real(pid, pos)
-                    else:
-                        await _process_position_sim(pid, pos)
-                except Exception:
-                    log.exception("position processing failed for %s", pid)
-                await asyncio.sleep(0.05)
-
-            await _check_autostop()
-            await _check_binance_recovery()
-        except Exception:
-            log.exception("monitor_loop iteration failed")
-        await asyncio.sleep(3)
-
-
-async def _check_binance_recovery() -> None:
-    if not BINANCE_EXEC:
-        return
-    if BINANCE_EXEC.is_rate_limited():
-        if STATE.get("binance_paused_until", 0) == 0:
-            notify(f"⏸️ Binance API dibatasi sementara. Pemulihan dalam ~{BINANCE_EXEC.ready_in_seconds():.0f}s.")
-        STATE["binance_paused_until"] = BINANCE_EXEC._banned_until
-    elif STATE.get("binance_paused_until", 0):
-        STATE["binance_paused_until"] = 0.0
-        notify("✅ Binance API sudah pulih (READY).")
-
-
-async def _current_balance() -> float:
-    if STATE["mode"] == "real" and BINANCE_EXEC:
-        try:
-            return await asyncio.to_thread(BINANCE_EXEC.account_balance_usdt)
-        except BinanceError:
-            log.exception("failed to fetch real balance for autostop")
-            return STATE.get("peak_balance", DEFAULT_SIM_BALANCE)
-    return STATE["sim_balance"]
-
-
-async def _check_autostop() -> None:
-    if STATE.get("autostop_pct") is None or STATE.get("autostop_triggered"):
-        return
-    balance = await _current_balance()
-    STATE["peak_balance"] = max(STATE.get("peak_balance", balance), balance)
-    peak = STATE["peak_balance"]
-    if peak <= 0:
-        return
-    drawdown_pct = (peak - balance) / peak * 100
-    if drawdown_pct >= STATE["autostop_pct"]:
-        STATE["scanning"] = False
-        STATE["autostop_triggered"] = True
-        notify(f"🛑 <b>AUTO STOP</b>\nDrawdown {drawdown_pct:.2f}% dari peak ${peak:.4f}.\n"
-               f"Scanner dihentikan. WebSocket & proteksi posisi tetap aktif.\nGunakan /auto untuk reset & lanjut.")
-        save_state()
-
-
-# ----------------------------------------------------------------------
-# learn autosave (+ optional GitHub sync of the checkpoint only)
-# ----------------------------------------------------------------------
-
-def _github_headers() -> dict:
-    return {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-
-
-def _github_push_learn_checkpoint(content: bytes) -> None:
-    if not (GITHUB_TOKEN and REPO_NAME):
-        return
-    import base64
-    path = "state/learn_checkpoint.json"
-    url = f"https://api.github.com/repos/{REPO_NAME}/contents/{path}"
-    try:
-        get_resp = requests.get(url, headers=_github_headers(), params={"ref": GITHUB_BRANCH}, timeout=20)
-        sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
-        payload = {
-            "message": "learn.py autosave",
-            "content": base64.b64encode(content).decode("ascii"),
-            "branch": GITHUB_BRANCH,
-        }
-        if sha:
-            payload["sha"] = sha
-        requests.put(url, headers=_github_headers(), json=payload, timeout=30)
-    except Exception:
-        log.exception("GitHub autosave of learn checkpoint failed (non-fatal)")
-
-
-async def autosave_loop(stop_flag: "asyncio.Event") -> None:
-    while not stop_flag.is_set():
-        try:
-            saved = learn.maybe_autosave(min_interval_sec=120)
-            if saved:
-                save_state()
-                data = learn.get_checkpoint_bytes_for_sync()
-                if data:
-                    await asyncio.to_thread(_github_push_learn_checkpoint, data)
-        except Exception:
-            log.exception("autosave_loop iteration failed")
-        await asyncio.sleep(60)
-
-
-# ----------------------------------------------------------------------
-# formatting helpers for Telegram output
-# ----------------------------------------------------------------------
-
-def get_public_ip() -> str:
-    try:
-        resp = requests.get("https://api.ipify.org", timeout=10)
-        return resp.text.strip()
-    except Exception:
-        return "unknown"
-
-
-def _fmt_trade_dashboard() -> str:
-    total = len(STATE["pending"]) + len(STATE["positions"])
-    lines = [f"📡 <b>ACTIVE POSITIONS ({total}/{STATE['max_positions']})</b>", ""]
-    for pos in STATE["positions"].values():
-        price = get_price(pos["symbol"]) or pos["entry"]
-        pnl_pct = calc_pnl_pct_of_margin(pos["direction"], pos["entry"], price, pos.get("margin", 1.0), pos.get("leverage", 1))
-        icon = "🟢" if pos["direction"] == "BUY" else "🔴"
-        lines += [
-            f"{icon} {pos['symbol']} — {pos['state']}",
-            f"Entry: {pos['entry']}",
-            f"Price: {price}",
-            f"TP: {pos['take_profit']}",
-            f"SL: {pos['stop_loss']}",
-            f"Confidence: {pos.get('confidence')}%",
-            f"PnL: {pnl_pct:+.2f}%",
-            "",
-        ]
-    for pend in STATE["pending"].values():
-        price = get_price(pend["symbol"])
-        dist = None
-        if price:
-            dist = abs(price - pend["entry"]) / price * 100
-        icon = "🟢" if pend["direction"] == "BUY" else "🔴"
-        lines += [
-            f"⏳ {pend['symbol']} — PENDING",
-            f"{icon} {pend['direction']}",
-            f"Entry zone: {pend['entry']}",
-            f"Current: {price if price is not None else '—'}",
-            f"Distance: {dist:.2f}%" if dist is not None else "Distance: —",
-            f"TP: {pend['take_profit']}",
-            f"SL: {pend['stop_loss']}",
-            f"Confidence: {pend.get('confidence')}%",
-            "",
-        ]
-    if total == 0:
-        lines.append("(tidak ada posisi/pending)")
-    return "\n".join(lines)
-
-
-def _fmt_orders() -> str:
-    if not STATE["pending"]:
-        return "🎯 Tidak ada pending order."
-    blocks = []
-    for pend in STATE["pending"].values():
-        icon = "🟢" if pend["direction"] == "BUY" else "🔴"
-        blocks.append(
-            f"🎯 <b>PENDING ORDER — {pend['symbol']}</b>\n\n"
-            f"📡 {pend['symbol']} | {icon} {pend['direction']}\n"
-            f"Confidence: {pend.get('confidence')}%\n\n"
-            f"Entry: {pend['entry']}\n"
-            f"TP: {pend['take_profit']}\n"
-            f"SL: {pend['stop_loss']}"
+            if contract_type != "PERPETUAL":
+                continue
+
+            if quote_asset != "USDT":
+                continue
+
+            tick_size = Decimal("0")
+            min_price = Decimal("0")
+            max_price = Decimal("0")
+
+            for filt in raw.get("filters", []):
+                if filt.get("filterType") == "PRICE_FILTER":
+                    tick_size = Decimal(
+                        str(filt.get("tickSize") or "0")
+                    )
+                    min_price = Decimal(
+                        str(filt.get("minPrice") or "0")
+                    )
+                    max_price = Decimal(
+                        str(filt.get("maxPrice") or "0")
+                    )
+                    break
+
+            result[symbol] = SymbolMeta(
+                symbol=symbol,
+                status=status,
+                contract_type=contract_type,
+                quote_asset=quote_asset,
+                tick_size=tick_size,
+                min_price=min_price,
+                max_price=max_price,
+            )
+
+        return result
+
+    async def get_price(self, symbol: str) -> Decimal:
+        payload = await self._get(
+            "/fapi/v2/ticker/price",
+            params={"symbol": symbol},
         )
-    return "\n\n".join(blocks)
+
+        return parse_decimal(str(payload["price"]))
 
 
-def _fmt_stats() -> str:
-    summary = learn.get_stats_summary(mode=STATE["mode"])
-    count = summary["count"]
-    mode_label = "🧪 SIMULASI" if STATE["mode"] == "sim" else "💰 REAL"
-    anchor = STATE.get("anchor_balance", DEFAULT_SIM_BALANCE)
-    current = STATE["sim_balance"] if STATE["mode"] == "sim" else None
-    dd = summary["drawdown"]
+# ============================================================
+# BINANCE WEBSOCKET MARKET DATA
+# ============================================================
 
-    lines = [
-        f"📊 <b>Statistics — {count} trades</b>",
-        f"TP {summary['tp_count']} | Initial SL {summary['sl_count']} | Trail {summary['trail_count']}",
-        "",
-        f"Mode: {mode_label}",
-        "",
-        "Economic Result:",
-        f"{summary['wins']} WIN / {summary['losses']} LOSS / {summary['breakeven']} BE",
-        f"WR: {_fmt_pct(summary['win_rate'])}",
-        "",
-        "Anchor Capital:",
-        f"${anchor:.4f}",
-    ]
-    if current is not None:
-        pct = (current - anchor) / anchor * 100 if anchor else 0.0
-        lines += ["", "Statistical Balance:", f"${current:.4f} ({pct:+.2f}%)"]
-    lines += [
-        "",
-        f"Average Closed Confidence: {_fmt_pct(summary['avg_closed_confidence'])}",
-        "",
-        f"🎯 TP: {_fmt_pct(summary['tp_pct'])}",
-        f"🔒 Trail: {_fmt_pct(summary['trail_pct'])}",
-        f"🛑 SL: {_fmt_pct(summary['sl_pct'])}",
-        "",
-        "Last 5:",
-    ]
-    for t in reversed(summary["last_5"]):
-        icon = "🟢" if t.get("pnl_usd", 0) >= 0 else "🔴"
-        label = {"tp": "TP", "initial_sl": "SL", "trail": "TRAIL"}.get(t.get("result"), t.get("result", "?").upper())
-        lines.append(f"{icon} {label} {t.get('pnl_pct', 0):+.2f}% | C{int(t.get('confidence') or 0)}%")
-    lines += [
-        "",
-        f"🚫 Banned: {active_ban_count()}",
-        f"🛡️ Early Reject Remaining: {STATE['pending_cancel_stats'].get('binance_reject', 0)}",
-        f"Max drawdown: {dd['max_drawdown_pct']}%",
-    ]
-    return "\n".join(lines)
+class BinanceWebSocket:
+    """
+    Satu koneksi market WebSocket untuk seluruh symbol aktif.
 
+    Stream:
+        <symbol>@aggTrade
 
-def _fmt_koin() -> str:
-    coins = STATE.get("scanned_coins") or []
-    if not coins:
-        return "🔍 Belum ada hasil scan."
-    lines = ["🔍 <b>Koin terpantau (scan terakhir)</b>", ""]
-    for c in coins[:50]:
-        lines.append(f"• {c['symbol']}")
-    return "\n".join(lines)
+    Symbol dikirim lowercase sesuai format Binance.
+    """
 
+    def __init__(
+        self,
+        on_price,
+    ) -> None:
+        self.on_price = on_price
 
-def _fmt_banned() -> str:
-    if not STATE["bans"]:
-        return "🚫 Tidak ada koin yang diban."
-    lines = ["🚫 <b>Daftar Ban</b>", ""]
-    now = time.time()
-    for symbol, entry in STATE["bans"].items():
-        if entry.get("permanent"):
-            lines.append(f"• {symbol} — PERMANEN ({entry.get('reason')})")
-        else:
-            remaining = max(0, entry.get("until", now) - now)
-            lines.append(f"• {symbol} — sisa {remaining/3600:.1f} jam ({entry.get('reason')})")
-    return "\n".join(lines)
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task | None = None
+        self._ws = None
 
+        self._desired_symbols: set[str] = set()
+        self._subscribed_symbols: set[str] = set()
 
-HELP_TEXT = (
-    "🤖 <b>SMC/ICT Auto Trading Bot</b>\n\n"
-    "/auto — mulai/lanjutkan scanner\n"
-    "/stop — hentikan scanner (posisi & proteksi tetap jalan)\n"
-    "/mode on|off — real trade / simulasi\n"
-    "/resetbalance — reset saldo simulasi ke $10\n"
-    "/margin <usd> — set margin per trade\n"
-    "/leverage <n> — set leverage\n"
-    "/autostop <pct> — set drawdown auto-stop\n"
-    "/trade — dashboard posisi & pending\n"
-    "/order — detail pending order\n"
-    "/stats — statistik performa\n"
-    "/koin — daftar koin hasil scan terakhir\n"
-    "/banned [symbol] — lihat/ban permanen\n"
-    "/unban <symbol|all> — hapus ban\n"
-    "/timeout all|<symbol> — cleanup manual\n"
-    "/open — restore learning checkpoint\n"
-    "/IP — IP server saat ini\n"
-)
+        self._command_lock = asyncio.Lock()
 
+        self.connected = False
+        self.last_message_at: datetime | None = None
+        self.reconnect_count = 0
 
-# ----------------------------------------------------------------------
-# /timeout manual cleanup
-# ----------------------------------------------------------------------
+    @property
+    def status(self) -> str:
+        if self.connected:
+            if self.last_message_at is None:
+                return "CONNECTED"
+            age = (
+                now_utc() - self.last_message_at
+            ).total_seconds()
 
-async def _cleanup_symbol(symbol: str) -> None:
-    for pid, pend in list(STATE["pending"].items()):
-        if pend["symbol"] == symbol:
-            await cancel_pending(pid, "manual")
-    for pid, pos in list(STATE["positions"].items()):
-        if pos["symbol"] == symbol:
-            if pos["mode"] == "real" and BINANCE_EXEC:
+            if age > PRICE_STALE_SECONDS:
+                return "STALE"
+
+            return "LIVE"
+
+        if self._task is not None and not self._task.done():
+            return "CONNECTING"
+
+        return "OFFLINE"
+
+    def symbols(self) -> list[str]:
+        return sorted(self._desired_symbols)
+
+    async def start(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+
+        self._stop.clear()
+
+        self._task = asyncio.create_task(
+            self._run(),
+            name="binance-market-ws",
+        )
+
+    async def stop(self) -> None:
+        self._stop.set()
+
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                log.exception("Gagal menutup Binance WebSocket.")
+
+        task = self._task
+
+        if task is not None:
+            try:
+                await asyncio.wait_for(
+                    task,
+                    timeout=5,
+                )
+            except asyncio.TimeoutError:
+                task.cancel()
                 try:
-                    if pos.get("tp_algo_id"):
-                        await asyncio.to_thread(BINANCE_EXEC.cancel_algo_order, pos["tp_algo_id"])
-                    if pos.get("sl_algo_id"):
-                        await asyncio.to_thread(BINANCE_EXEC.cancel_algo_order, pos["sl_algo_id"])
-                    risk = await asyncio.to_thread(BINANCE_EXEC.position_risk, symbol)
-                    if risk and abs(float(risk["positionAmt"])) > 0:
-                        close_side = "SELL" if pos["direction"] == "BUY" else "BUY"
-                        await asyncio.to_thread(BINANCE_EXEC.market_close, symbol, close_side,
-                                                 abs(float(risk["positionAmt"])))
-                except BinanceError:
-                    log.exception("manual cleanup failed for %s", symbol)
-            STATE["positions"].pop(pid, None)
-            ws_untrack_sync(symbol)
-    save_state()
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception(
+                    "WebSocket task berhenti dengan error."
+                )
 
+        self._task = None
+        self._ws = None
+        self.connected = False
+        self._subscribed_symbols.clear()
+        self._desired_symbols.clear()
 
-async def cmd_timeout(args: str) -> str:
-    args = args.strip()
-    if not args:
-        return "❌ Invalid command.\n\nUsage:\n/timeout all\n/timeout BTCUSDT"
-    if args.lower() == "all":
-        symbols = {p["symbol"] for p in STATE["pending"].values()} | {p["symbol"] for p in STATE["positions"].values()}
+    async def add_symbol(self, symbol: str) -> None:
+        symbol = normalize_symbol(symbol)
+
+        if symbol in self._desired_symbols:
+            return
+
+        self._desired_symbols.add(symbol)
+
+        if self.connected and self._ws is not None:
+            await self._send_subscribe([symbol])
+
+    async def remove_symbol(self, symbol: str) -> None:
+        symbol = normalize_symbol(symbol)
+
+        self._desired_symbols.discard(symbol)
+
+        if (
+            self.connected
+            and self._ws is not None
+            and symbol in self._subscribed_symbols
+        ):
+            await self._send_unsubscribe([symbol])
+
+    async def _send_request(
+        self,
+        method: str,
+        symbols: list[str],
+    ) -> None:
+        if self._ws is None or not self.connected:
+            return
+
+        if not symbols:
+            return
+
+        params = [
+            f"{symbol.lower()}@aggTrade"
+            for symbol in symbols
+        ]
+
+        payload = {
+            "method": method,
+            "params": params,
+            "id": int(time.time() * 1000) % 2_000_000_000,
+        }
+
+        async with self._command_lock:
+            await self._ws.send(
+                json.dumps(payload)
+            )
+
+    async def _send_subscribe(
+        self,
+        symbols: list[str],
+    ) -> None:
+        await self._send_request(
+            "SUBSCRIBE",
+            symbols,
+        )
+
         for symbol in symbols:
-            await _cleanup_symbol(symbol)
-        return "✅ Semua pending & posisi dibersihkan (manual timeout)."
-    symbol = args.upper()
-    await _cleanup_symbol(symbol)
-    return f"✅ {symbol} dibersihkan (manual timeout)."
+            self._subscribed_symbols.add(
+                normalize_symbol(symbol)
+            )
 
+    async def _send_unsubscribe(
+        self,
+        symbols: list[str],
+    ) -> None:
+        await self._send_request(
+            "UNSUBSCRIBE",
+            symbols,
+        )
 
-# ----------------------------------------------------------------------
-# command dispatch
-# ----------------------------------------------------------------------
+        for symbol in symbols:
+            self._subscribed_symbols.discard(
+                normalize_symbol(symbol)
+            )
 
-async def cmd_auto(_args: str) -> str:
-    STATE["scanning"] = True
-    STATE["autostop_triggered"] = False
-    STATE["peak_balance"] = await _current_balance()
-    save_state()
-    return "▶️ Scanner diaktifkan. High-water mark autostop direset."
+    async def _resubscribe_all(self) -> None:
+        self._subscribed_symbols.clear()
 
+        symbols = sorted(
+            self._desired_symbols
+        )
 
-async def cmd_stop(_args: str) -> str:
-    STATE["scanning"] = False
-    save_state()
-    return "⏹️ Scanner dihentikan. WebSocket, posisi aktif, dan learning tetap berjalan."
+        if symbols:
+            await self._send_subscribe(
+                symbols
+            )
 
+    async def _run(self) -> None:
+        backoff = WS_RECONNECT_MIN
 
-async def cmd_mode(args: str) -> str:
-    args = args.strip().lower()
-    if args not in ("on", "off"):
-        return "❌ Invalid /mode usage.\n\nUse:\n/mode on\n/mode off"
-    if args == "on":
-        if not is_binance_ready():
-            return "⏸️ Binance API sedang dibatasi.\n/mode on sementara tidak tersedia. Tunggu hingga READY."
-        if not BINANCE_EXEC:
-            return "❌ BINANCE_API_KEY/SECRET belum diset — tidak bisa aktifkan mode real."
-        STATE["mode"] = "real"
-        STATE["peak_balance"] = await _current_balance()
-        STATE["autostop_triggered"] = False
-        save_state()
-        return "💰 Mode REAL aktif."
-    STATE["mode"] = "sim"
-    save_state()
-    return "🧪 Mode SIMULASI aktif."
+        while not self._stop.is_set():
+            try:
+                log.info(
+                    "Menghubungkan Binance WebSocket: %s",
+                    BINANCE_WS_BASE,
+                )
 
+                async with ws_connect(
+                    BINANCE_WS_BASE,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=5,
+                    max_queue=2048,
+                ) as ws:
+                    self._ws = ws
+                    self.connected = True
+                    self.last_message_at = now_utc()
+                    self.reconnect_count += 1
 
-async def cmd_resetbalance(_args: str) -> str:
-    if not is_binance_ready():
-        return "⏸️ Binance API sedang dibatasi.\n/resetbalance sementara tidak tersedia."
-    STATE["sim_balance"] = DEFAULT_SIM_BALANCE
-    STATE["anchor_balance"] = DEFAULT_SIM_BALANCE
-    STATE["peak_balance"] = DEFAULT_SIM_BALANCE
-    STATE["autostop_triggered"] = False
-    save_state()
-    return f"🔄 Saldo simulasi direset ke ${DEFAULT_SIM_BALANCE:.2f}."
+                    log.info(
+                        "Binance WebSocket connected. reconnect=%s",
+                        self.reconnect_count,
+                    )
 
+                    await self._resubscribe_all()
 
-async def cmd_margin(args: str) -> str:
-    try:
-        value = float(args.strip())
-        if value <= 0:
-            raise ValueError
-    except ValueError:
-        return "❌ Invalid /margin usage.\n\nUse:\n/margin 1.5"
-    STATE["margin"] = value
-    save_state()
-    return f"✅ Margin diset ke ${value:.4f} per trade."
+                    backoff = WS_RECONNECT_MIN
 
+                    while not self._stop.is_set():
+                        raw = await asyncio.wait_for(
+                            ws.recv(),
+                            timeout=PRICE_STALE_SECONDS + 30,
+                        )
 
-async def cmd_leverage(args: str) -> str:
-    try:
-        value = int(args.strip())
-        if not (1 <= value <= 125):
-            raise ValueError
-    except ValueError:
-        return "❌ Invalid /leverage usage.\n\nUse:\n/leverage 10 (1-125)"
-    STATE["leverage"] = value
-    save_state()
-    return f"✅ Leverage diset ke {value}x."
+                        if raw is None:
+                            raise ConnectionError(
+                                "WebSocket menerima close."
+                            )
 
+                        self.last_message_at = now_utc()
 
-async def cmd_autostop(args: str) -> str:
-    args = args.strip()
-    if not args:
-        current = STATE.get("autostop_pct")
-        return f"ℹ️ Autostop saat ini: {current if current is not None else 'nonaktif'}%.\n\nUse:\n/autostop 10"
-    try:
-        value = float(args)
-        if value <= 0:
-            raise ValueError
-    except ValueError:
-        return "❌ Invalid /autostop usage.\n\nUse:\n/autostop 10"
-    STATE["autostop_pct"] = value
-    STATE["autostop_triggered"] = False
-    save_state()
-    return f"✅ Autostop diset ke {value}% drawdown dari peak."
+                        try:
+                            payload = json.loads(raw)
+                        except json.JSONDecodeError:
+                            log.warning(
+                                "WebSocket payload bukan JSON."
+                            )
+                            continue
 
+                        # SUBSCRIBE response:
+                        # {"result": null, "id": ...}
+                        if "data" not in payload:
+                            continue
 
-async def cmd_unban(args: str) -> str:
-    args = args.strip()
-    if not args:
-        return "❌ Invalid /unban usage.\n\nUse:\n/unban BTCUSDT\n/unban all"
-    if args.lower() == "all":
-        n = unban_all()
-        save_state()
-        return f"✅ {n} ban dihapus."
-    symbol = args.upper()
-    ok = unban(symbol)
-    save_state()
-    return f"✅ {symbol} di-unban." if ok else f"ℹ️ {symbol} tidak sedang diban."
+                        data = payload.get("data") or {}
 
+                        if data.get("e") != "aggTrade":
+                            continue
 
-async def cmd_banned(args: str) -> str:
-    args = args.strip()
-    if not args:
-        return _fmt_banned()
-    symbol = args.upper()
-    apply_ban(symbol, None, "manual_permanent", permanent=True)
-    save_state()
-    return f"🚫 {symbol} diban PERMANEN."
+                        symbol = normalize_symbol(
+                            str(data.get("s") or "")
+                        )
 
+                        price_raw = str(
+                            data.get("p") or ""
+                        )
 
-async def cmd_open(_args: str) -> str:
-    report = learn.load_checkpoint()
-    if report["restored"]:
-        return f"✅ Learning checkpoint dipulihkan dari {report['source']}."
-    return f"⚠️ Gagal memulihkan checkpoint: {report['reason']}. Memulai dari state kosong."
+                        event_time_ms = int(
+                            data.get("E")
+                            or data.get("T")
+                            or int(time.time() * 1000)
+                        )
 
+                        if not symbol or not price_raw:
+                            continue
 
-COMMANDS = {
-    "/start": lambda args: HELP_TEXT,
-    "/help": lambda args: HELP_TEXT,
-    "/ip": lambda args: get_public_ip(),
-    "/auto": cmd_auto,
-    "/stop": cmd_stop,
-    "/mode": cmd_mode,
-    "/resetbalance": cmd_resetbalance,
-    "/margin": cmd_margin,
-    "/leverage": cmd_leverage,
-    "/autostop": cmd_autostop,
-    "/trade": lambda args: _fmt_trade_dashboard(),
-    "/order": lambda args: _fmt_orders(),
-    "/stats": lambda args: _fmt_stats(),
-    "/koin": lambda args: _fmt_koin(),
-    "/banned": cmd_banned,
-    "/unban": cmd_unban,
-    "/timeout": cmd_timeout,
-    "/open": cmd_open,
-}
+                        try:
+                            price = parse_decimal(
+                                price_raw
+                            )
+                        except ValueError:
+                            log.warning(
+                                "Harga WebSocket tidak valid: %s",
+                                price_raw,
+                            )
+                            continue
 
+                        await self.on_price(
+                            symbol,
+                            price,
+                            event_time_ms,
+                        )
 
-# ----------------------------------------------------------------------
-# evidence-gated threshold calibration loop
-# ----------------------------------------------------------------------
-
-CALIBRATION_INTERVAL_SEC = 6 * 3600
-
-
-async def calibration_loop(stop_flag: "asyncio.Event") -> None:
-    while not stop_flag.is_set():
-        try:
-            await asyncio.sleep(CALIBRATION_INTERVAL_SEC)
-            if stop_flag.is_set():
+            except asyncio.CancelledError:
                 break
-            result = learn.maybe_calibrate(STATE["confidence_threshold"])
-            if result["action"] == "adjust":
-                learn.apply_calibration(result["new_threshold"], result["reason"])
-                STATE["confidence_threshold"] = result["new_threshold"]
-                save_state()
-                notify(f"🧠 <b>Threshold calibration</b>\nBaru: {result['new_threshold']}%\n"
-                       f"Alasan: {html.escape(result['reason'])}")
-        except asyncio.CancelledError:
-            break
+
+            except (
+                asyncio.TimeoutError,
+                ConnectionError,
+                OSError,
+            ) as exc:
+                if self._stop.is_set():
+                    break
+
+                log.warning(
+                    "Binance WebSocket terputus: %s",
+                    exc,
+                )
+
+            except Exception as exc:
+                if self._stop.is_set():
+                    break
+
+                log.exception(
+                    "Error Binance WebSocket: %s",
+                    exc,
+                )
+
+            finally:
+                self.connected = False
+                self._ws = None
+                self._subscribed_symbols.clear()
+
+            if self._stop.is_set():
+                break
+
+            await asyncio.sleep(backoff)
+
+            backoff = min(
+                backoff * 2,
+                WS_RECONNECT_MAX,
+            )
+
+
+# ============================================================
+# GITHUB STORE
+# ============================================================
+
+class GitHubStore:
+    def __init__(self) -> None:
+        self.token = GITHUB_TOKEN
+        self.repo_name = REPO_NAME
+        self.branch = GITHUB_BRANCH
+
+        self._write_lock = asyncio.Lock()
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2026-03-10",
+        }
+
+    def _url(self, path: str) -> str:
+        encoded = "/".join(
+            quote(part, safe="")
+            for part in path.strip("/").split("/")
+        )
+
+        return (
+            f"{GITHUB_API}/repos/"
+            f"{self.repo_name}/contents/{encoded}"
+        )
+
+    async def get_file(
+        self,
+        path: str,
+    ) -> tuple[bytes | None, str | None]:
+        def request() -> tuple[bytes | None, str | None]:
+            response = requests.get(
+                self._url(path),
+                headers=self._headers(),
+                params={"ref": self.branch},
+                timeout=GITHUB_TIMEOUT,
+            )
+
+            if response.status_code == 404:
+                return None, None
+
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"GitHub GET {path}: HTTP "
+                    f"{response.status_code}: "
+                    f"{response.text[:500]}"
+                )
+
+            body = response.json()
+
+            if body.get("type") != "file":
+                raise RuntimeError(
+                    f"GitHub path bukan file: {path}"
+                )
+
+            content = str(
+                body.get("content") or ""
+            ).replace("\n", "")
+
+            try:
+                decoded = base64.b64decode(
+                    content
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"GitHub file {path} gagal di-decode."
+                ) from exc
+
+            return (
+                decoded,
+                str(body.get("sha") or ""),
+            )
+
+        return await asyncio.to_thread(request)
+
+    async def replace_file(
+        self,
+        path: str,
+        content: bytes,
+        commit_message: str,
+    ) -> str:
+        """
+        Create/update satu file GitHub secara serial.
+
+        Retry conflict 409 dilakukan dengan mengambil SHA terbaru.
+        """
+        async with self._write_lock:
+            last_error: Exception | None = None
+
+            for _attempt in range(3):
+                current, sha = await self.get_file(
+                    path
+                )
+
+                # current sengaja tidak digunakan; SHA yang dibutuhkan
+                # untuk update sudah diambil dari GitHub.
+                del current
+
+                payload = {
+                    "message": commit_message,
+                    "content": base64.b64encode(
+                        content
+                    ).decode("ascii"),
+                    "branch": self.branch,
+                }
+
+                if sha:
+                    payload["sha"] = sha
+
+                def request() -> str:
+                    response = requests.put(
+                        self._url(path),
+                        headers=self._headers(),
+                        json=payload,
+                        timeout=GITHUB_TIMEOUT,
+                    )
+
+                    if response.status_code == 409:
+                        raise RuntimeError(
+                            "GITHUB_CONFLICT"
+                        )
+
+                    if response.status_code >= 400:
+                        raise RuntimeError(
+                            f"GitHub PUT {path}: HTTP "
+                            f"{response.status_code}: "
+                            f"{response.text[:700]}"
+                        )
+
+                    body = response.json()
+
+                    return str(
+                        (body.get("commit") or {}).get("sha")
+                        or ""
+                    )
+
+                try:
+                    return await asyncio.to_thread(
+                        request
+                    )
+
+                except RuntimeError as exc:
+                    last_error = exc
+
+                    if str(exc) != "GITHUB_CONFLICT":
+                        raise
+
+                    await asyncio.sleep(0.5)
+
+            if last_error:
+                raise last_error
+
+            raise RuntimeError(
+                f"GitHub gagal meng-update {path}."
+            )
+
+    async def append_text_file(
+        self,
+        path: str,
+        addition: str,
+        commit_message: str,
+    ) -> str:
+        async with self._write_lock:
+            last_error: Exception | None = None
+
+            for _attempt in range(3):
+                current, sha = await self.get_file(path)
+
+                if current is None:
+                    content = "# Trading Journal\n\n" + addition.lstrip("\n")
+                else:
+                    old_text = current.decode(
+                        "utf-8",
+                        errors="replace",
+                    )
+
+                    if old_text and not old_text.endswith("\n"):
+                        old_text += "\n"
+
+                    content = old_text + addition
+
+                payload = {
+                    "message": commit_message,
+                    "content": base64.b64encode(
+                        content.encode("utf-8")
+                    ).decode("ascii"),
+                    "branch": self.branch,
+                }
+
+                if sha:
+                    payload["sha"] = sha
+
+                def request() -> str:
+                    response = requests.put(
+                        self._url(path),
+                        headers=self._headers(),
+                        json=payload,
+                        timeout=GITHUB_TIMEOUT,
+                    )
+
+                    if response.status_code == 409:
+                        raise RuntimeError(
+                            "GITHUB_CONFLICT"
+                        )
+
+                    if response.status_code >= 400:
+                        raise RuntimeError(
+                            f"GitHub PUT {path}: HTTP "
+                            f"{response.status_code}: "
+                            f"{response.text[:700]}"
+                        )
+
+                    body = response.json()
+
+                    return str(
+                        (body.get("commit") or {}).get("sha")
+                        or ""
+                    )
+
+                try:
+                    return await asyncio.to_thread(
+                        request
+                    )
+                except RuntimeError as exc:
+                    last_error = exc
+
+                    if str(exc) != "GITHUB_CONFLICT":
+                        raise
+
+                    await asyncio.sleep(0.5)
+
+            if last_error:
+                raise last_error
+
+            raise RuntimeError(
+                f"GitHub gagal meng-append {path}."
+            )
+
+
+
+# ============================================================
+# MAIN ENGINE
+# ============================================================
+
+class TradingEngine:
+    def __init__(self, context: dict[str, Any]) -> None:
+        self.context = dict(context)
+
+        self.chat_id = int(
+            context.get("chat_id")
+            or ALLOWED_USER_ID
+        )
+
+        self.user_id = int(
+            context.get("user_id")
+            or ALLOWED_USER_ID
+        )
+
+        self.send_message = context[
+            "send_message"
+        ]
+
+        self.session_id = generate_session_id()
+
+        self.rest = BinanceREST()
+        self.github = GitHubStore()
+
+        self.symbols: dict[str, SymbolMeta] = {}
+        self.prices: dict[str, PriceSnapshot] = {}
+
+        self.active_trades: dict[str, Trade] = {}
+
+        self.history_records: list[dict[str, Any]] = []
+        self.history_events: list[dict[str, Any]] = []
+
+        self.flow: dict[str, Any] | None = None
+
+        self.ws = BinanceWebSocket(
+            self._on_price
+        )
+
+        self._timeout_task: asyncio.Task | None = None
+        self._running = False
+
+        self._trade_lock = asyncio.Lock()
+        # Menserialkan satu lifecycle history (event + trade + markdown)
+        # agar dua trade yang selesai bersamaan tidak saling menimpa snapshot.
+        self._history_lock = asyncio.Lock()
+
+        self.last_history_refresh: datetime | None = None
+
+    # --------------------------------------------------------
+    # Telegram send
+    # --------------------------------------------------------
+
+    async def reply(self, text: str) -> None:
+        try:
+            await asyncio.to_thread(
+                self.send_message,
+                self.chat_id,
+                str(text),
+            )
         except Exception:
-            log.exception("calibration_loop iteration failed")
+            log.exception(
+                "Gagal mengirim Telegram."
+            )
+
+    # --------------------------------------------------------
+    # Lifecycle
+    # --------------------------------------------------------
+
+    async def start(self) -> None:
+        if self._running:
+            return
+
+        self._running = True
+
+        await self._load_history()
+
+        self.symbols = await self.rest.get_exchange_info()
+
+        await self.ws.start()
+
+        self._timeout_task = asyncio.create_task(
+            self._timeout_loop(),
+            name="trade-timeout-loop",
+        )
+
+        self.last_history_refresh = now_utc()
+
+        await self.reply(
+            "🟢 MAIN.PY ONLINE\n\n"
+            "Mode: SIMULATION ONLY\n"
+            "Market: Binance USDⓈ-M Futures\n"
+            "WebSocket: CONNECTING\n"
+            f"Session: {self.session_id}\n\n"
+            "Active Trade: 0\n\n"
+            "Gunakan /add untuk membuat setup."
+        )
+
+    async def stop(self) -> None:
+        if not self._running:
+            return
+
+        self._running = False
+
+        if self._timeout_task is not None:
+            self._timeout_task.cancel()
+
+            try:
+                await self._timeout_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception(
+                    "Timeout task gagal berhenti."
+                )
+
+            self._timeout_task = None
+
+        await self.ws.stop()
+
+        # /end harus benar-benar menghapus state sesi dari RAM.
+        self.flow = None
+        self.active_trades.clear()
+        self.prices.clear()
+        self.symbols.clear()
+
+        self.history_records.clear()
+        self.history_events.clear()
+
+        self.last_history_refresh = None
+        self.session_id = ""
+
+        # Tidak ada write state/checkpoint ke disk.
+        log.info(
+            "Main session dibersihkan tanpa persistence: %s",
+            MAIN_FILE,
+        )
+
+    # --------------------------------------------------------
+    # History
+    # --------------------------------------------------------
+
+    async def _load_history(self) -> None:
+        raw_trades, _ = await self.github.get_file(
+            HISTORY_TRADES_PATH
+        )
+
+        if raw_trades:
+            try:
+                payload = json.loads(
+                    raw_trades.decode(
+                        "utf-8"
+                    )
+                )
+
+                if isinstance(payload, list):
+                    self.history_records = payload
+                else:
+                    self.history_records = []
+
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"{HISTORY_TRADES_PATH} bukan JSON valid."
+                ) from exc
+
+        else:
+            self.history_records = []
+
+        raw_events, _ = await self.github.get_file(
+            HISTORY_EVENTS_PATH
+        )
+
+        self.history_events = []
+
+        if raw_events:
+            for line in raw_events.decode(
+                "utf-8",
+                errors="replace",
+            ).splitlines():
+
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    log.warning(
+                        "events.jsonl memiliki baris invalid."
+                    )
+                    continue
+
+                if isinstance(item, dict):
+                    self.history_events.append(
+                        item
+                    )
+
+    async def _refresh_history_if_needed(
+        self,
+    ) -> None:
+        if self.last_history_refresh is None:
+            await self._load_history()
+            self.last_history_refresh = now_utc()
+            return
+
+        age = (
+            now_utc() - self.last_history_refresh
+        ).total_seconds()
+
+        if age < HISTORY_REFRESH_SECONDS:
+            return
+
+        await self._load_history()
+        self.last_history_refresh = now_utc()
+
+    async def _write_history(
+        self,
+        trade: Trade,
+    ) -> None:
+        """
+        Persist satu trade yang sudah CLOSED.
+
+        Final event dibuat di sini supaya:
+        - final event tidak dobel,
+        - final event + trade record berada dalam satu history lock,
+        - dua trade yang close hampir bersamaan tidak saling overwrite.
+        """
+        async with self._history_lock:
+            record = trade.to_record()
+
+            final_event = {
+                "event_id": uuid4().hex,
+                "trade_id": trade.trade_id,
+                "session_id": trade.session_id,
+                "event": trade.result,
+                "timestamp": iso_utc(trade.closed_at),
+                "timestamp_wib": format_wib(
+                    trade.closed_at
+                ),
+                "pair": trade.pair,
+                "direction": trade.direction,
+                "price": decimal_to_str(
+                    trade.exit_price
+                ),
+                "reason": trade.result_reason,
+                "pnl_percent": (
+                    decimal_to_str(trade.pnl_percent)
+                    if trade.pnl_percent is not None
+                    else None
+                ),
+            }
+
+            self.history_records.append(
+                record
+            )
+
+            self.history_events.append(
+                final_event
+            )
+
+            trades_json = json.dumps(
+                self.history_records,
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8")
+
+            events_jsonl = (
+                "".join(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                    for item in self.history_events
+                )
+            ).encode("utf-8")
+
+            journal_entry = self._trade_to_markdown(
+                trade
+            )
+
+            try:
+                await self.github.replace_file(
+                    HISTORY_TRADES_PATH,
+                    trades_json,
+                    (
+                        f"trade: {trade.pair} "
+                        f"{trade.direction} "
+                        f"{trade.result}"
+                    ),
+                )
+
+                await self.github.replace_file(
+                    HISTORY_EVENTS_PATH,
+                    events_jsonl,
+                    (
+                        f"history: {trade.pair} "
+                        f"{trade.result}"
+                    ),
+                )
+
+                await self.github.append_text_file(
+                    HISTORY_MARKDOWN_PATH,
+                    journal_entry,
+                    (
+                        f"journal: {trade.pair} "
+                        f"{trade.result}"
+                    ),
+                )
+
+            except Exception:
+                log.exception(
+                    "Gagal menulis histori %s ke GitHub.",
+                    trade.trade_id,
+                )
+
+                await self.reply(
+                    "⚠️ GitHub gagal diperbarui.\n\n"
+                    f"Trade: {trade.pair} {trade.direction}\n"
+                    f"Hasil: {trade.result}\n"
+                    "Data tetap ada di session RAM. "
+                    "Commit histori akan dicoba lagi pada event "
+                    "berikutnya dalam session ini."
+                )
+
+    def _trade_to_markdown(
+        self,
+        trade: Trade,
+    ) -> str:
+        record = trade.to_record()
+
+        trail_lines: list[str] = []
+
+        for index, item in enumerate(
+            trade.trail_history,
+            start=1,
+        ):
+            trail_lines.append(
+                f"Trail #{index}\n"
+                f"- Old SL: {item.get('old_sl', '-')}\n"
+                f"- New SL: {item.get('new_sl', '-')}\n"
+                f"- Price: {item.get('price', '-')}\n"
+                f"- Reason: {item.get('reason', '-')}\n"
+                f"- Time: {item.get('timestamp_wib', '-')}\n"
+            )
+
+        trails = (
+            "\n".join(trail_lines)
+            if trail_lines
+            else "Tidak ada trailing.\n"
+        )
+
+        return (
+            "\n---\n\n"
+            f"## {record['pair']} — {record['direction']}\n\n"
+            f"Trade ID: `{record['trade_id']}`\n\n"
+            "### Setup\n\n"
+            f"- Price Now Reference: {record['price_now_reference']}\n"
+            f"- Entry: {record['entry']}\n"
+            f"- Reason Entry: {record['entry_reason']}\n"
+            f"- Price Exp: {record['price_exp']}\n"
+            f"- Reason Price Exp: {record['price_exp_reason']}\n"
+            f"- Timeout: {record['timeout_display_wib']}\n"
+            f"- Reason Timeout: {record['timeout_reason']}\n"
+            f"- SL: {record['sl']}\n"
+            f"- Reason SL: {record['sl_reason']}\n"
+            f"- TP: {record['tp']}\n"
+            f"- Reason TP: {record['tp_reason']}\n\n"
+            "### Management\n\n"
+            f"{trails}"
+            "\n### Result\n\n"
+            f"- Result: {record['result']}\n"
+            f"- Exit Price: {record['exit_price'] or '-'}\n"
+            f"- Result Reason: {record['result_reason'] or '-'}\n"
+            f"- PnL: {(record['pnl_percent'] + '%') if record['pnl_percent'] else '-'}\n"
+            f"- Created: {record['created_at']}\n"
+            f"- Filled: {record['filled_at'] or '-'}\n"
+            f"- Closed: {record['closed_at'] or '-'}\n"
+            f"- Strategy: {record['strategy_name']} "
+            f"v{record['strategy_version']}\n"
+        )
+
+    # --------------------------------------------------------
+    # Symbol / price
+    # --------------------------------------------------------
+
+    def _get_symbol(
+        self,
+        symbol: str,
+    ) -> SymbolMeta:
+        normalized = normalize_symbol(symbol)
+
+        meta = self.symbols.get(
+            normalized
+        )
+
+        if meta is None:
+            raise ValueError(
+                f"{normalized or symbol} tidak ditemukan "
+                "sebagai USDT-M perpetual yang aktif."
+            )
+
+        return meta
+
+    def _validate_price(
+        self,
+        symbol: str,
+        value: Decimal,
+    ) -> None:
+        meta = self._get_symbol(symbol)
+
+        if not validate_tick(
+            value,
+            meta.tick_size,
+        ):
+            raise ValueError(
+                "Harga tidak mengikuti tick size Binance.\n"
+                f"Tick size {symbol}: "
+                f"{decimal_to_str(meta.tick_size)}"
+            )
+
+        if (
+            meta.min_price > 0
+            and value < meta.min_price
+        ):
+            raise ValueError(
+                "Harga berada di bawah minimum price symbol."
+            )
+
+        if (
+            meta.max_price > 0
+            and value > meta.max_price
+        ):
+            raise ValueError(
+                "Harga berada di atas maximum price symbol."
+            )
+
+    async def _reference_price(
+        self,
+        symbol: str,
+    ) -> Decimal:
+        # REST hanya dipanggil satu kali untuk /add.
+        price = await self.rest.get_price(
+            symbol
+        )
+
+        return price
+
+    # --------------------------------------------------------
+    # ADD flow
+    # --------------------------------------------------------
+
+    def _new_add_flow(self) -> None:
+        self.flow = {
+            "kind": "ADD",
+            "step": "PAIR",
+            "data": {
+                "pair": None,
+                "direction": None,
+                "price_now_reference": None,
+                "entry": None,
+                "entry_reason": None,
+                "price_exp": None,
+                "price_exp_reason": None,
+                "timeout_date": None,
+                "timeout_month": None,
+                "timeout_year": None,
+                "timeout_hour": None,
+                "timeout_minute": None,
+                "timeout_at": None,
+                "timeout_reason": None,
+                "sl": None,
+                "sl_reason": None,
+                "tp": None,
+                "tp_reason": None,
+            },
+        }
+
+    def _add_data(self) -> dict[str, Any]:
+        if not self.flow:
+            raise RuntimeError(
+                "ADD flow tidak aktif."
+            )
+        return self.flow["data"]
+
+    def _render_add(self) -> str:
+        if not self.flow or self.flow.get("kind") != "ADD":
+            return ""
+
+        data = self._add_data()
+        step = self.flow["step"]
+
+        def value_text(
+            value: Any,
+        ) -> str:
+            if value is None:
+                return "-"
+            if isinstance(value, Decimal):
+                return (
+                    decimal_to_str(value)
+                    or "-"
+                )
+            if isinstance(value, datetime):
+                return format_wib(value)
+            return str(value)
+
+        lines = [
+            "ADD",
+            "",
+            f"Pair: {value_text(data['pair'])}",
+            f"Direction: {value_text(data['direction'])}",
+            f"Price Now: {value_text(data['price_now_reference'])}",
+            f"Price Entry: {value_text(data['entry'])}",
+            f"Reason Entry: {value_text(data['entry_reason'])}",
+            f"Price Exp: {value_text(data['price_exp'])}",
+            f"Reason Price Exp: {value_text(data['price_exp_reason'])}",
+        ]
+
+        timeout_at = data.get("timeout_at")
+
+        if timeout_at:
+            lines.append(
+                f"Timeout: {format_wib(timeout_at)}"
+            )
+        else:
+            date = data.get("timeout_date")
+            month = data.get("timeout_month")
+            year = data.get("timeout_year")
+            hour = data.get("timeout_hour")
+            minute = data.get("timeout_minute")
+
+            if all(
+                item is not None
+                for item in [
+                    date,
+                    month,
+                    year,
+                    hour,
+                    minute,
+                ]
+            ):
+                lines.append(
+                    "Timeout: "
+                    f"{date:02d}-{month:02d}-{year:04d}, "
+                    f"{hour:02d}:{minute:02d} WIB"
+                )
+            else:
+                lines.append("Timeout: -")
+
+        lines.extend(
+            [
+                f"Reason Timeout: {value_text(data['timeout_reason'])}",
+                f"Price SL: {value_text(data['sl'])}",
+                f"Reason SL: {value_text(data['sl_reason'])}",
+                f"Price TP: {value_text(data['tp'])}",
+                f"Reason TP: {value_text(data['tp_reason'])}",
+                "",
+            ]
+        )
+
+        prompt_map = {
+            "PAIR": "Pair:",
+            "DIRECTION": (
+                "Direction:\n"
+                "1. Buy\n"
+                "2. Sell"
+            ),
+            "ENTRY": "Price Entry:",
+            "ENTRY_REASON": "Reason Entry:",
+            "EXP": "Price Exp:",
+            "EXP_REASON": "Reason Price Exp:",
+            "TIMEOUT_DATE": "Tanggal Timeout (1-31):",
+            "TIMEOUT_MONTH": "Bulan Timeout (1-12):",
+            "TIMEOUT_YEAR": "Tahun Timeout:",
+            "TIMEOUT_HOUR": "Jam Timeout (0-23):",
+            "TIMEOUT_MINUTE": "Menit Timeout (0-59):",
+            "TIMEOUT_REASON": "Reason Timeout:",
+            "SL": "Price SL:",
+            "SL_REASON": "Reason SL:",
+            "TP": "Price TP:",
+            "TP_REASON": "Reason TP:",
+            "CONFIRM": (
+                "Confirm setup?\n"
+                "1. Yes\n"
+                "2. No"
+            ),
+        }
+
+        lines.append(
+            prompt_map.get(
+                step,
+                "Input:",
+            )
+        )
+
+        return "\n".join(lines)
+
+    async def _start_add(
+        self,
+    ) -> None:
+        if self.flow is not None:
+            await self.reply(
+                "Masih ada sesi yang sedang berjalan.\n"
+                "Gunakan /back untuk kembali atau "
+                "selesaikan sesi tersebut."
+            )
+            return
+
+        if (
+            len(self.active_trades)
+            >= MAX_ACTIVE_TRADES
+        ):
+            await self.reply(
+                "Maksimum active trade tercapai.\n"
+                f"Batas: {MAX_ACTIVE_TRADES}"
+            )
+            return
+
+        self._new_add_flow()
+
+        await self.reply(
+            self._render_add()
+        )
+
+    async def _handle_add_input(
+        self,
+        text: str,
+    ) -> None:
+        if not self.flow:
+            return
+
+        data = self._add_data()
+        step = self.flow["step"]
+
+        try:
+            if step == "PAIR":
+                pair = normalize_symbol(text)
+
+                meta = self._get_symbol(pair)
+
+                price_now = await self._reference_price(
+                    pair
+                )
+
+                self._validate_price(
+                    pair,
+                    price_now,
+                )
+
+                data["pair"] = meta.symbol
+                data["price_now_reference"] = price_now
+                self.flow["step"] = "DIRECTION"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "DIRECTION":
+                if text.strip() == "1":
+                    direction = "BUY"
+                elif text.strip() == "2":
+                    direction = "SELL"
+                else:
+                    raise ValueError(
+                        "Jawab 1 untuk Buy atau 2 untuk Sell."
+                    )
+
+                data["direction"] = direction
+                self.flow["step"] = "ENTRY"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "ENTRY":
+                entry = parse_decimal(text)
+                pair = data["pair"]
+
+                self._validate_price(
+                    pair,
+                    entry,
+                )
+
+                reference = data[
+                    "price_now_reference"
+                ]
+
+                direction = data[
+                    "direction"
+                ]
+
+                if direction == "BUY" and not (
+                    entry < reference
+                ):
+                    raise ValueError(
+                        "Untuk Buy, Price Entry harus "
+                        "lebih rendah dari Price Now."
+                    )
+
+                if direction == "SELL" and not (
+                    entry > reference
+                ):
+                    raise ValueError(
+                        "Untuk Sell, Price Entry harus "
+                        "lebih tinggi dari Price Now."
+                    )
+
+                data["entry"] = entry
+                self.flow["step"] = "ENTRY_REASON"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "ENTRY_REASON":
+                reason = text.strip()
+
+                if not reason:
+                    raise ValueError(
+                        "Reason Entry tidak boleh kosong."
+                    )
+
+                data["entry_reason"] = reason
+                self.flow["step"] = "EXP"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "EXP":
+                price_exp = parse_decimal(text)
+                pair = data["pair"]
+
+                self._validate_price(
+                    pair,
+                    price_exp,
+                )
+
+                reference = data[
+                    "price_now_reference"
+                ]
+
+                direction = data[
+                    "direction"
+                ]
+
+                if direction == "BUY" and not (
+                    price_exp > reference
+                ):
+                    raise ValueError(
+                        "Untuk Buy, Price Exp harus "
+                        "lebih tinggi dari Price Now."
+                    )
+
+                if direction == "SELL" and not (
+                    price_exp < reference
+                ):
+                    raise ValueError(
+                        "Untuk Sell, Price Exp harus "
+                        "lebih rendah dari Price Now."
+                    )
+
+                data["price_exp"] = price_exp
+                self.flow["step"] = "EXP_REASON"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "EXP_REASON":
+                reason = text.strip()
+
+                if not reason:
+                    raise ValueError(
+                        "Reason Price Exp tidak boleh kosong."
+                    )
+
+                data["price_exp_reason"] = reason
+                self.flow["step"] = "TIMEOUT_DATE"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "TIMEOUT_DATE":
+                value = safe_int(
+                    text,
+                    "Tanggal",
+                )
+
+                if not 1 <= value <= 31:
+                    raise ValueError(
+                        "Tanggal harus 1 sampai 31."
+                    )
+
+                data["timeout_date"] = value
+                self.flow["step"] = "TIMEOUT_MONTH"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "TIMEOUT_MONTH":
+                value = safe_int(
+                    text,
+                    "Bulan",
+                )
+
+                if not 1 <= value <= 12:
+                    raise ValueError(
+                        "Bulan harus 1 sampai 12."
+                    )
+
+                data["timeout_month"] = value
+                self.flow["step"] = "TIMEOUT_YEAR"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "TIMEOUT_YEAR":
+                value = safe_int(
+                    text,
+                    "Tahun",
+                )
+
+                if not 2020 <= value <= 2100:
+                    raise ValueError(
+                        "Tahun harus berada pada rentang 2020-2100."
+                    )
+
+                data["timeout_year"] = value
+                self.flow["step"] = "TIMEOUT_HOUR"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "TIMEOUT_HOUR":
+                value = safe_int(
+                    text,
+                    "Jam",
+                )
+
+                if not 0 <= value <= 23:
+                    raise ValueError(
+                        "Jam harus 0 sampai 23."
+                    )
+
+                data["timeout_hour"] = value
+                self.flow["step"] = "TIMEOUT_MINUTE"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "TIMEOUT_MINUTE":
+                value = safe_int(
+                    text,
+                    "Menit",
+                )
+
+                if not 0 <= value <= 59:
+                    raise ValueError(
+                        "Menit harus 0 sampai 59."
+                    )
+
+                data["timeout_minute"] = value
+
+                local_timeout = datetime(
+                    year=data["timeout_year"],
+                    month=data["timeout_month"],
+                    day=data["timeout_date"],
+                    hour=data["timeout_hour"],
+                    minute=value,
+                    tzinfo=TZ,
+                )
+
+                # Datetime constructor akan menolak tanggal seperti
+                # 31 Februari.
+                if local_timeout <= now_local():
+                    raise ValueError(
+                        "Timeout harus berada di masa depan."
+                    )
+
+                data["timeout_at"] = (
+                    local_timeout.astimezone(
+                        timezone.utc
+                    )
+                )
+
+                self.flow["step"] = "TIMEOUT_REASON"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "TIMEOUT_REASON":
+                reason = text.strip()
+
+                if not reason:
+                    raise ValueError(
+                        "Reason Timeout tidak boleh kosong."
+                    )
+
+                data["timeout_reason"] = reason
+                self.flow["step"] = "SL"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "SL":
+                sl = parse_decimal(text)
+                pair = data["pair"]
+
+                self._validate_price(
+                    pair,
+                    sl,
+                )
+
+                entry = data["entry"]
+                direction = data["direction"]
+
+                if direction == "BUY" and not (
+                    sl < entry
+                ):
+                    raise ValueError(
+                        "Untuk Buy, SL harus di bawah Entry."
+                    )
+
+                if direction == "SELL" and not (
+                    sl > entry
+                ):
+                    raise ValueError(
+                        "Untuk Sell, SL harus di atas Entry."
+                    )
+
+                data["sl"] = sl
+                self.flow["step"] = "SL_REASON"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "SL_REASON":
+                reason = text.strip()
+
+                if not reason:
+                    raise ValueError(
+                        "Reason SL tidak boleh kosong."
+                    )
+
+                data["sl_reason"] = reason
+                self.flow["step"] = "TP"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "TP":
+                tp = parse_decimal(text)
+                pair = data["pair"]
+
+                self._validate_price(
+                    pair,
+                    tp,
+                )
+
+                entry = data["entry"]
+                direction = data["direction"]
+
+                if direction == "BUY" and not (
+                    tp > entry
+                ):
+                    raise ValueError(
+                        "Untuk Buy, TP harus di atas Entry."
+                    )
+
+                if direction == "SELL" and not (
+                    tp < entry
+                ):
+                    raise ValueError(
+                        "Untuk Sell, TP harus di bawah Entry."
+                    )
+
+                data["tp"] = tp
+                self.flow["step"] = "TP_REASON"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "TP_REASON":
+                reason = text.strip()
+
+                if not reason:
+                    raise ValueError(
+                        "Reason TP tidak boleh kosong."
+                    )
+
+                data["tp_reason"] = reason
+                self.flow["step"] = "CONFIRM"
+
+                await self.reply(
+                    self._render_add()
+                )
+                return
+
+            if step == "CONFIRM":
+                if text.strip() == "1":
+                    await self._confirm_add()
+                    return
+
+                if text.strip() == "2":
+                    self.flow = None
+
+                    await self.reply(
+                        "ADD dibatalkan."
+                    )
+                    return
+
+                raise ValueError(
+                    "Jawab 1 untuk Yes atau 2 untuk No."
+                )
+
+            raise ValueError(
+                f"Step ADD tidak dikenal: {step}"
+            )
+
+        except Exception as exc:
+            await self.reply(
+                f"❌ {exc}\n\n"
+                f"{self._render_add()}"
+            )
+
+    async def _confirm_add(self) -> None:
+        data = self._add_data()
+
+        # Final validation ulang sebelum create trade.
+        pair = data["pair"]
+        direction = data["direction"]
+        reference = data["price_now_reference"]
+        entry = data["entry"]
+        price_exp = data["price_exp"]
+        sl = data["sl"]
+        tp = data["tp"]
+        timeout_at = data["timeout_at"]
+
+        if any(
+            value is None
+            for value in [
+                pair,
+                direction,
+                reference,
+                entry,
+                price_exp,
+                sl,
+                tp,
+                timeout_at,
+            ]
+        ):
+            raise ValueError(
+                "Setup belum lengkap."
+            )
+
+        # Geometri final untuk mencegah level bertabrakan.
+        if direction == "BUY":
+            valid_geometry = (
+                sl < entry < reference < price_exp
+                and tp > entry
+            )
+        else:
+            valid_geometry = (
+                price_exp < reference < entry < sl
+                and tp < entry
+            )
+
+        if not valid_geometry:
+            raise ValueError(
+                "Struktur harga setup tidak valid."
+            )
+
+        trade = Trade(
+            trade_id=generate_trade_id(pair),
+            session_id=self.session_id,
+            pair=pair,
+            direction=direction,
+
+            price_now_reference=reference,
+            entry=entry,
+            entry_reason=data[
+                "entry_reason"
+            ],
+
+            price_exp=price_exp,
+            price_exp_reason=data[
+                "price_exp_reason"
+            ],
+
+            timeout_at=timeout_at,
+            timeout_reason=data[
+                "timeout_reason"
+            ],
+
+            sl=sl,
+            sl_reason=data[
+                "sl_reason"
+            ],
+
+            tp=tp,
+            tp_reason=data[
+                "tp_reason"
+            ],
+        )
+
+        self.active_trades[
+            trade.trade_id
+        ] = trade
+
+        self.flow = None
+
+        try:
+            await self.ws.add_symbol(
+                pair
+            )
+        except Exception:
+            # Setup tetap valid dan tetap berada di RAM.
+            # desired_symbols pada WS dipertahankan untuk reconnect.
+            log.exception(
+                "Subscription WebSocket %s gagal saat /add.",
+                pair,
+            )
+
+        await self.reply(
+            "✅ SETUP DITAMBAHKAN\n\n"
+            f"Trade ID: {trade.trade_id}\n"
+            f"Pair: {trade.pair}\n"
+            f"Direction: {trade.direction.title()}\n"
+            f"Price Now: {decimal_to_str(trade.price_now_reference)}\n"
+            f"Price Entry: {decimal_to_str(trade.entry)}\n"
+            f"Reason Entry: {trade.entry_reason}\n\n"
+            f"Price Exp: {decimal_to_str(trade.price_exp)}\n"
+            f"Reason Price Exp: {trade.price_exp_reason}\n\n"
+            f"Timeout: {format_wib(trade.timeout_at)}\n"
+            f"Reason Timeout: {trade.timeout_reason}\n\n"
+            f"Price SL: {decimal_to_str(trade.sl)}\n"
+            f"Reason SL: {trade.sl_reason}\n\n"
+            f"Price TP: {decimal_to_str(trade.tp)}\n"
+            f"Reason TP: {trade.tp_reason}\n\n"
+            "Status: PENDING"
+        )
+
+    # --------------------------------------------------------
+    # BACK
+    # --------------------------------------------------------
+
+    async def _handle_back(self) -> None:
+        if not self.flow:
+            await self.reply(
+                "Tidak ada sesi yang bisa dikembalikan."
+            )
+            return
+
+        kind = self.flow["kind"]
+
+        if kind == "ADD":
+            previous = {
+                "PAIR": None,
+                "DIRECTION": "PAIR",
+                "ENTRY": "DIRECTION",
+                "ENTRY_REASON": "ENTRY",
+                "EXP": "ENTRY_REASON",
+                "EXP_REASON": "EXP",
+                "TIMEOUT_DATE": "EXP_REASON",
+                "TIMEOUT_MONTH": "TIMEOUT_DATE",
+                "TIMEOUT_YEAR": "TIMEOUT_MONTH",
+                "TIMEOUT_HOUR": "TIMEOUT_YEAR",
+                "TIMEOUT_MINUTE": "TIMEOUT_HOUR",
+                "TIMEOUT_REASON": "TIMEOUT_MINUTE",
+                "SL": "TIMEOUT_REASON",
+                "SL_REASON": "SL",
+                "TP": "SL_REASON",
+                "TP_REASON": "TP",
+                "CONFIRM": "TP_REASON",
+            }
+
+            current = self.flow["step"]
+            prior = previous.get(current)
+
+            if prior is None:
+                self.flow = None
+                await self.reply(
+                    "ADD dibatalkan."
+                )
+                return
+
+            self.flow["step"] = prior
+
+            await self.reply(
+                self._render_add()
+            )
+            return
+
+        if kind == "TRAIL":
+            step = self.flow["step"]
+
+            previous = {
+                "SELECT": None,
+                "PRICE": "SELECT",
+                "REASON": "PRICE",
+                "CONFIRM": "REASON",
+            }
+
+            prior = previous.get(step)
+
+            if prior is None:
+                self.flow = None
+                await self.reply(
+                    "TRAIL dibatalkan."
+                )
+                return
+
+            self.flow["step"] = prior
+            await self.reply(
+                self._render_trail()
+            )
+            return
+
+        if kind == "DEL":
+            if self.flow["step"] == "SELECT":
+                self.flow = None
+                await self.reply(
+                    "DEL dibatalkan."
+                )
+                return
+
+            self.flow["step"] = "SELECT"
+
+            await self.reply(
+                self._render_del()
+            )
+            return
+
+        self.flow = None
+
+        await self.reply(
+            "Sesi dibatalkan."
+        )
+
+    # --------------------------------------------------------
+    # TRAIL
+    # --------------------------------------------------------
+
+    def _trade_list_text(
+        self,
+    ) -> list[tuple[int, Trade]]:
+        return list(
+            enumerate(
+                self.active_trades.values(),
+                start=1,
+            )
+        )
+
+    def _render_trail(self) -> str:
+        if not self.flow:
+            return ""
+
+        step = self.flow["step"]
+
+        if step == "SELECT":
+            lines = [
+                "TRAIL",
+                "",
+                "Pilih setup:",
+            ]
+
+            items = self._trade_list_text()
+
+            if not items:
+                return (
+                    "TRAIL\n\n"
+                    "Tidak ada active setup."
+                )
+
+            for number, trade in items:
+                snapshot = self.prices.get(
+                    trade.pair
+                )
+
+                current = (
+                    decimal_to_str(snapshot.price)
+                    if snapshot
+                    else "-"
+                )
+
+                lines.append(
+                    f"{number}. "
+                    f"{trade.pair} "
+                    f"{trade.direction} | "
+                    f"{trade.status} | "
+                    f"Now: {current}"
+                )
+
+            lines.append(
+                "\nKetik nomor setup."
+            )
+
+            return "\n".join(lines)
+
+        trade: Trade = self.flow[
+            "data"
+        ]["trade"]
+
+        snapshot = self.prices.get(
+            trade.pair
+        )
+
+        current = (
+            decimal_to_str(snapshot.price)
+            if snapshot
+            else "-"
+        )
+
+        lines = [
+            "TRAIL",
+            "",
+            f"Pair: {trade.pair}",
+            f"Direction: {trade.direction.title()}",
+            f"Status: {trade.status}",
+            f"Entry: {decimal_to_str(trade.entry)}",
+            f"Current: {current}",
+            f"SL Now: {decimal_to_str(trade.sl)}",
+            f"New SL: {decimal_to_str(self.flow['data'].get('new_sl'))}",
+            f"Reason: {self.flow['data'].get('reason') or '-'}",
+            "",
+        ]
+
+        prompts = {
+            "PRICE": "New SL:",
+            "REASON": "Reason Trailing:",
+            "CONFIRM": (
+                "Confirm perubahan SL?\n"
+                "1. Yes\n"
+                "2. No"
+            ),
+        }
+
+        lines.append(
+            prompts.get(
+                self.flow["step"],
+                "",
+            )
+        )
+
+        return "\n".join(lines)
+
+    async def _start_trail(self) -> None:
+        if self.flow:
+            await self.reply(
+                "Masih ada sesi yang sedang berjalan.\n"
+                "Gunakan /back terlebih dahulu."
+            )
+            return
+
+        if not self.active_trades:
+            await self.reply(
+                "Tidak ada active setup."
+            )
+            return
+
+        self.flow = {
+            "kind": "TRAIL",
+            "step": "SELECT",
+            "data": {},
+        }
+
+        await self.reply(
+            self._render_trail()
+        )
+
+    async def _handle_trail_input(
+        self,
+        text: str,
+    ) -> None:
+        if not self.flow:
+            return
+
+        step = self.flow["step"]
+        data = self.flow["data"]
+
+        try:
+            if step == "SELECT":
+                number = safe_int(
+                    text,
+                    "Nomor setup",
+                )
+
+                items = self._trade_list_text()
+
+                if not 1 <= number <= len(items):
+                    raise ValueError(
+                        "Nomor setup tidak valid."
+                    )
+
+                _index, trade = items[
+                    number - 1
+                ]
+
+                data["trade"] = trade
+                self.flow["step"] = "PRICE"
+
+                await self.reply(
+                    self._render_trail()
+                )
+                return
+
+            if step == "PRICE":
+                trade: Trade = data["trade"]
+
+                new_sl = parse_decimal(
+                    text
+                )
+
+                self._validate_price(
+                    trade.pair,
+                    new_sl,
+                )
+
+                if trade.direction == "BUY":
+                    if not new_sl > trade.sl:
+                        raise ValueError(
+                            "Untuk Buy, New SL harus "
+                            "lebih tinggi dari SL sekarang."
+                        )
+                else:
+                    if not new_sl < trade.sl:
+                        raise ValueError(
+                            "Untuk Sell, New SL harus "
+                            "lebih rendah dari SL sekarang."
+                        )
+
+                if trade.status == "PENDING":
+                    # Sebelum entry, SL tetap harus berada
+                    # di sisi protektif terhadap Entry.
+                    if trade.direction == "BUY":
+                        if new_sl >= trade.entry:
+                            raise ValueError(
+                                "Setup Pending Buy: New SL harus "
+                                "tetap di bawah Entry."
+                            )
+                    else:
+                        if new_sl <= trade.entry:
+                            raise ValueError(
+                                "Setup Pending Sell: New SL harus "
+                                "tetap di atas Entry."
+                            )
+
+                elif trade.status == "FILLED":
+                    snapshot = self.prices.get(
+                        trade.pair
+                    )
+
+                    if snapshot is None or not snapshot.live:
+                        raise ValueError(
+                            "Harga live symbol belum tersedia/"
+                            "sudah stale. Tunggu WebSocket LIVE."
+                        )
+
+                    if trade.direction == "BUY":
+                        if new_sl >= snapshot.price:
+                            raise ValueError(
+                                "New SL Buy harus berada "
+                                "di bawah Current Price."
+                            )
+                    else:
+                        if new_sl <= snapshot.price:
+                            raise ValueError(
+                                "New SL Sell harus berada "
+                                "di atas Current Price."
+                            )
+
+                if trade.direction == "BUY":
+                    if new_sl >= trade.tp:
+                        raise ValueError(
+                            "New SL tidak boleh berada "
+                            "di atas/menyamai TP."
+                        )
+                else:
+                    if new_sl <= trade.tp:
+                        raise ValueError(
+                            "New SL tidak boleh berada "
+                            "di bawah/menyamai TP."
+                        )
+
+                data["new_sl"] = new_sl
+                self.flow["step"] = "REASON"
+
+                await self.reply(
+                    self._render_trail()
+                )
+                return
+
+            if step == "REASON":
+                reason = text.strip()
+
+                if not reason:
+                    raise ValueError(
+                        "Reason Trailing tidak boleh kosong."
+                    )
+
+                data["reason"] = reason
+                self.flow["step"] = "CONFIRM"
+
+                await self.reply(
+                    self._render_trail()
+                )
+                return
+
+            if step == "CONFIRM":
+                if text.strip() == "1":
+                    await self._confirm_trail()
+                    return
+
+                if text.strip() == "2":
+                    self.flow = None
+
+                    await self.reply(
+                        "TRAIL dibatalkan."
+                    )
+                    return
+
+                raise ValueError(
+                    "Jawab 1 untuk Yes atau 2 untuk No."
+                )
+
+        except Exception as exc:
+            await self.reply(
+                f"❌ {exc}\n\n"
+                f"{self._render_trail()}"
+            )
+
+    async def _confirm_trail(self) -> None:
+        data = self.flow["data"]
+        trade: Trade = data["trade"]
+
+        new_sl: Decimal = data["new_sl"]
+        old_sl = trade.sl
+
+        snapshot = self.prices.get(
+            trade.pair
+        )
+
+        current_price = (
+            snapshot.price
+            if snapshot
+            else None
+        )
+
+        trail_item = {
+            "old_sl": decimal_to_str(
+                old_sl
+            ),
+            "new_sl": decimal_to_str(
+                new_sl
+            ),
+            "price": decimal_to_str(
+                current_price
+            ),
+            "reason": data["reason"],
+            "timestamp": iso_utc(),
+            "timestamp_wib": format_wib(
+                now_utc()
+            ),
+        }
+
+        trade.sl = new_sl
+        trade.trailing = True
+        trade.trail_history.append(
+            trail_item
+        )
+
+        await self._record_event(
+            trade,
+            "TRAIL",
+            event_price=current_price,
+            reason=data["reason"],
+            extra={
+                "old_sl": decimal_to_str(
+                    old_sl
+                ),
+                "new_sl": decimal_to_str(
+                    new_sl
+                ),
+            },
+        )
+
+        self.flow = None
+
+        await self.reply(
+            "✅ TRAILING DIPERBARUI\n\n"
+            f"Pair: {trade.pair}\n"
+            f"Direction: {trade.direction.title()}\n"
+            f"Old SL: {decimal_to_str(old_sl)}\n"
+            f"New SL: {decimal_to_str(new_sl)}\n"
+            f"Reason: {data['reason']}\n"
+            f"Status: {trade.status}\n"
+            "Mode: TRAILING"
+        )
+
+    # --------------------------------------------------------
+    # DELETE
+    # --------------------------------------------------------
+
+    def _render_del(self) -> str:
+        if not self.flow:
+            return ""
+
+        items = self._trade_list_text()
+
+        if not items:
+            return (
+                "DEL\n\n"
+                "Tidak ada active setup."
+            )
+
+        lines = [
+            "DEL",
+            "",
+            "Pilih setup:",
+        ]
+
+        for number, trade in items:
+            lines.append(
+                f"{number}. "
+                f"{trade.pair} "
+                f"{trade.direction} | "
+                f"{trade.status}"
+            )
+
+        lines.append(
+            "\nKetik nomor setup."
+        )
+
+        return "\n".join(lines)
+
+    async def _start_del(self) -> None:
+        if self.flow:
+            await self.reply(
+                "Masih ada sesi yang sedang berjalan.\n"
+                "Gunakan /back terlebih dahulu."
+            )
+            return
+
+        if not self.active_trades:
+            await self.reply(
+                "Tidak ada active setup."
+            )
+            return
+
+        self.flow = {
+            "kind": "DEL",
+            "step": "SELECT",
+            "data": {},
+        }
+
+        await self.reply(
+            self._render_del()
+        )
+
+    async def _handle_del_input(
+        self,
+        text: str,
+    ) -> None:
+        if not self.flow:
+            return
+
+        try:
+            if self.flow["step"] != "SELECT":
+                self.flow = None
+                return
+
+            number = safe_int(
+                text,
+                "Nomor setup",
+            )
+
+            items = self._trade_list_text()
+
+            if not 1 <= number <= len(items):
+                raise ValueError(
+                    "Nomor setup tidak valid."
+                )
+
+            _index, trade = items[
+                number - 1
+            ]
+
+            # Snapshot sebelum delete.
+            trade_copy = copy.deepcopy(
+                trade
+            )
+
+            await self._finalize_trade(
+                trade_copy,
+                result="DELETED",
+                exit_price=None,
+                reason="Dihapus oleh user.",
+                send_notification=False,
+            )
+
+            self.active_trades.pop(
+                trade.trade_id,
+                None,
+            )
+
+            if not any(
+                item.pair == trade.pair
+                for item in self.active_trades.values()
+            ):
+                await self.ws.remove_symbol(
+                    trade.pair
+                )
+
+            self.flow = None
+
+            await self.reply(
+                "🗑️ SETUP DIHAPUS\n\n"
+                f"Pair: {trade.pair}\n"
+                f"Direction: {trade.direction.title()}\n"
+                "Result: DELETED"
+            )
+
+        except Exception as exc:
+            await self.reply(
+                f"❌ {exc}\n\n"
+                f"{self._render_del()}"
+            )
+
+    # --------------------------------------------------------
+    # TRADE DISPLAY
+    # --------------------------------------------------------
+
+    def _render_trade(
+        self,
+        number: int,
+        trade: Trade,
+    ) -> str:
+        snapshot = self.prices.get(
+            trade.pair
+        )
+
+        if snapshot:
+            current_text = (
+                decimal_to_str(snapshot.price)
+                or "-"
+            )
+            feed = (
+                "LIVE"
+                if snapshot.live
+                else "STALE"
+            )
+
+            if trade.status == "FILLED":
+                pnl_text = format_pct(
+                    pct_change(
+                        trade.direction,
+                        trade.entry,
+                        snapshot.price,
+                    )
+                )
+            else:
+                pnl_text = "-"
+
+        else:
+            current_text = "-"
+            feed = "NO DATA"
+            pnl_text = "-"
+
+        lines = [
+            f"[{number}] {trade.pair}",
+            f"Direction: {trade.direction.title()}",
+            f"Status: {trade.status}",
+            f"Mode: {'TRAILING' if trade.trailing else 'NORMAL'}",
+            "",
+            f"Entry: {decimal_to_str(trade.entry)}",
+            f"Current: {current_text}",
+            f"Feed: {feed}",
+            f"PnL: {pnl_text}",
+            "",
+            f"Price Exp: {decimal_to_str(trade.price_exp)}",
+            f"Timeout: {format_wib(trade.timeout_at)}",
+            f"SL: {decimal_to_str(trade.sl)}",
+            f"TP: {decimal_to_str(trade.tp)}",
+            "",
+            f"Reason Entry: {trade.entry_reason}",
+        ]
+
+        if trade.status == "FILLED":
+            lines.extend(
+                [
+                    "",
+                    f"Filled: {format_wib(trade.filled_at)}",
+                    f"Fill Price: {decimal_to_str(trade.fill_price)}",
+                ]
+            )
+
+        return "\n".join(lines)
+
+    async def show_trades(self) -> None:
+        items = self._trade_list_text()
+
+        if not items:
+            await self.reply(
+                "TRADE\n\n"
+                "Tidak ada active setup."
+            )
+            return
+
+        pending = sum(
+            1
+            for _number, trade in items
+            if trade.status == "PENDING"
+        )
+
+        filled = sum(
+            1
+            for _number, trade in items
+            if trade.status == "FILLED"
+        )
+
+        trailing = sum(
+            1
+            for _number, trade in items
+            if trade.trailing
+        )
+
+        blocks = [
+            "TRADE",
+            "",
+            f"Active Setup: {len(items)}",
+            f"Pending: {pending}",
+            f"Filled: {filled}",
+            f"Trailing: {trailing}",
+            "",
+        ]
+
+        for number, trade in items:
+            blocks.append(
+                self._render_trade(
+                    number,
+                    trade,
+                )
+            )
+            blocks.append("\n----------------")
+
+        await self.reply(
+            "\n".join(blocks)
+        )
+
+    # --------------------------------------------------------
+    # EVENTS / CLOSE
+    # --------------------------------------------------------
+
+    async def _record_event(
+        self,
+        trade: Trade,
+        event: str,
+        event_price: Decimal | None,
+        reason: str | None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        item = {
+            "event_id": uuid4().hex,
+            "trade_id": trade.trade_id,
+            "session_id": trade.session_id,
+            "event": event,
+            "timestamp": iso_utc(),
+            "timestamp_wib": format_wib(
+                now_utc()
+            ),
+            "pair": trade.pair,
+            "direction": trade.direction,
+            "price": decimal_to_str(
+                event_price
+            ),
+            "reason": reason,
+            "extra": extra or {},
+        }
+
+        async with self._history_lock:
+            self.history_events.append(
+                item
+            )
+
+            events_jsonl = (
+                "".join(
+                    json.dumps(
+                        event_item,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                    for event_item in self.history_events
+                )
+            ).encode("utf-8")
+
+            try:
+                await self.github.replace_file(
+                    HISTORY_EVENTS_PATH,
+                    events_jsonl,
+                    (
+                        f"event: {trade.pair} "
+                        f"{event}"
+                    ),
+                )
+            except Exception:
+                log.exception(
+                    "Gagal menyimpan event %s ke GitHub.",
+                    event,
+                )
+
+    async def _finalize_trade(
+        self,
+        trade: Trade,
+        result: str,
+        exit_price: Decimal | None,
+        reason: str,
+        send_notification: bool = True,
+    ) -> None:
+        # State transition harus atomic dan cepat.
+        # Semua network I/O dilakukan setelah lock dilepas.
+        async with self._trade_lock:
+            current = self.active_trades.get(
+                trade.trade_id
+            )
+
+            if current is None:
+                return
+
+            if current.result is not None:
+                return
+
+            current.status = "CLOSED"
+            current.result = result
+            current.closed_at = now_utc()
+            current.exit_price = exit_price
+            current.result_reason = reason
+
+            if (
+                current.fill_price is not None
+                and exit_price is not None
+            ):
+                current.pnl_percent = pct_change(
+                    current.direction,
+                    current.fill_price,
+                    exit_price,
+                )
+
+            trade = current
+
+            self.active_trades.pop(
+                trade.trade_id,
+                None,
+            )
+
+            need_unsubscribe = not any(
+                active.pair == trade.pair
+                for active in self.active_trades.values()
+            )
+
+        # _write_history() membuat final event + trade record
+        # di bawah satu history lock.
+        await self._write_history(
+            trade
+        )
+
+        if need_unsubscribe:
+            try:
+                await self.ws.remove_symbol(
+                    trade.pair
+                )
+            except Exception:
+                log.exception(
+                    "Gagal unsubscribe WebSocket %s.",
+                    trade.pair,
+                )
+
+        if send_notification:
+            await self._notify_close(
+                trade
+            )
+
+    async def _notify_close(
+        self,
+        trade: Trade,
+    ) -> None:
+        result = trade.result or "CLOSED"
+
+        title = {
+            "TP": "✅ TP TERCAPAI",
+            "SL": "🛑 SL TERCAPAI",
+            "EXPIRED": "⏳ PRICE EXPIRED",
+            "TIMEOUT": "⏰ TIMEOUT",
+            "DELETED": "🗑️ DELETED",
+        }.get(
+            result,
+            "TRADE CLOSED",
+        )
+
+        pnl = (
+            format_pct(trade.pnl_percent)
+            if trade.pnl_percent is not None
+            else "-"
+        )
+
+        await self.reply(
+            f"{title}\n\n"
+            f"Pair: {trade.pair}\n"
+            f"Direction: {trade.direction.title()}\n"
+            f"Entry: {decimal_to_str(trade.fill_price or trade.entry)}\n"
+            f"Exit: {decimal_to_str(trade.exit_price)}\n"
+            f"Result: {result}\n"
+            f"PnL: {pnl}\n\n"
+            f"Reason: {trade.result_reason or '-'}"
+        )
+
+    async def _fill_trade(
+        self,
+        trade: Trade,
+        price: Decimal,
+    ) -> None:
+        async with self._trade_lock:
+            current = self.active_trades.get(
+                trade.trade_id
+            )
+
+            if current is None:
+                return
+
+            if current.status != "PENDING":
+                return
+
+            current.status = "FILLED"
+            current.filled_at = now_utc()
+            current.fill_price = current.entry
+            current.pnl_percent = Decimal("0")
+
+            trade = current
+
+        await self._record_event(
+            trade,
+            "FILLED",
+            event_price=price,
+            reason=trade.entry_reason,
+            extra={
+                "fill_price": decimal_to_str(
+                    trade.entry
+                ),
+            },
+        )
+
+        await self.reply(
+            "✅ ENTRY FILLED\n\n"
+            f"Pair: {trade.pair}\n"
+            f"Direction: {trade.direction.title()}\n"
+            f"Entry: {decimal_to_str(trade.entry)}\n"
+            f"Fill Price: {decimal_to_str(trade.entry)}\n"
+            f"Reason Entry: {trade.entry_reason}\n"
+            "Status: FILLED"
+        )
+
+    # --------------------------------------------------------
+    # LIVE PRICE EVENT
+    # --------------------------------------------------------
+    # LIVE PRICE EVENT
+    # --------------------------------------------------------
+
+    async def _on_price(
+        self,
+        symbol: str,
+        price: Decimal,
+        event_time_ms: int,
+    ) -> None:
+        self.prices[symbol] = PriceSnapshot(
+            symbol=symbol,
+            price=price,
+            event_time_ms=event_time_ms,
+            received_at=now_utc(),
+        )
+
+        # Snapshot daftar trade tanpa menahan lock saat network I/O.
+        relevant = [
+            trade
+            for trade in list(self.active_trades.values())
+            if trade.pair == symbol
+        ]
+
+        for trade in relevant:
+            if trade.trade_id not in self.active_trades:
+                continue
+
+            try:
+                if trade.status == "PENDING":
+                    if trade.direction == "BUY":
+                        if price <= trade.entry:
+                            await self._fill_trade(
+                                trade,
+                                price,
+                            )
+                            continue
+
+                        if price >= trade.price_exp:
+                            await self._finalize_trade(
+                                trade,
+                                result="EXPIRED",
+                                exit_price=price,
+                                reason=trade.price_exp_reason,
+                            )
+                            continue
+
+                    else:
+                        if price >= trade.entry:
+                            await self._fill_trade(
+                                trade,
+                                price,
+                            )
+                            continue
+
+                        if price <= trade.price_exp:
+                            await self._finalize_trade(
+                                trade,
+                                result="EXPIRED",
+                                exit_price=price,
+                                reason=trade.price_exp_reason,
+                            )
+                            continue
+
+                elif trade.status == "FILLED":
+                    async with self._trade_lock:
+                        current = self.active_trades.get(
+                            trade.trade_id
+                        )
+
+                        if current is None:
+                            continue
+
+                        current.pnl_percent = pct_change(
+                            current.direction,
+                            current.fill_price or current.entry,
+                            price,
+                        )
+
+                        trade = current
+
+                    if trade.direction == "BUY":
+                        # SL diperiksa lebih dulu.
+                        if price <= trade.sl:
+                            await self._finalize_trade(
+                                trade,
+                                result="SL",
+                                exit_price=price,
+                                reason=trade.sl_reason,
+                            )
+                            continue
+
+                        if price >= trade.tp:
+                            await self._finalize_trade(
+                                trade,
+                                result="TP",
+                                exit_price=price,
+                                reason=trade.tp_reason,
+                            )
+                            continue
+
+                    else:
+                        if price >= trade.sl:
+                            await self._finalize_trade(
+                                trade,
+                                result="SL",
+                                exit_price=price,
+                                reason=trade.sl_reason,
+                            )
+                            continue
+
+                        if price <= trade.tp:
+                            await self._finalize_trade(
+                                trade,
+                                result="TP",
+                                exit_price=price,
+                                reason=trade.tp_reason,
+                            )
+                            continue
+
+            except Exception:
+                log.exception(
+                    "Gagal memproses price event "
+                    f"{symbol} untuk {trade.trade_id}"
+                )
+
+    # --------------------------------------------------------
+    # TIMEOUT LOOP
+    # --------------------------------------------------------
+    # TIMEOUT LOOP
+    # --------------------------------------------------------
+
+    async def _timeout_loop(self) -> None:
+        while self._running:
+            try:
+                await asyncio.sleep(0.5)
+
+                current = now_utc()
+
+                async with self._trade_lock:
+                    pending = [
+                        trade
+                        for trade in self.active_trades.values()
+                        if trade.status == "PENDING"
+                    ]
+
+                    for trade in pending:
+                        if current < trade.timeout_at:
+                            continue
+
+                        await self._record_event(
+                            trade,
+                            "TIMEOUT",
+                            event_price=None,
+                            reason=trade.timeout_reason,
+                        )
+
+                        await self._finalize_trade(
+                            trade,
+                            result="TIMEOUT",
+                            exit_price=None,
+                            reason=trade.timeout_reason,
+                        )
+
+            except asyncio.CancelledError:
+                break
+
+            except Exception:
+                log.exception(
+                    "Error timeout loop."
+                )
+
+    # --------------------------------------------------------
+    # STATS
+    # --------------------------------------------------------
+
+    def _calculate_stats(
+        self,
+        records: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        total_records = len(records)
+
+        tp = sum(
+            1
+            for record in records
+            if record.get("result") == "TP"
+        )
+
+        sl = sum(
+            1
+            for record in records
+            if record.get("result") == "SL"
+        )
+
+        expired = sum(
+            1
+            for record in records
+            if record.get("result") == "EXPIRED"
+        )
+
+        timeout = sum(
+            1
+            for record in records
+            if record.get("result") == "TIMEOUT"
+        )
+
+        deleted = sum(
+            1
+            for record in records
+            if record.get("result") == "DELETED"
+        )
+
+        total_filled = tp + sl
+
+        if total_filled:
+            win_rate = (
+                Decimal(tp)
+                / Decimal(total_filled)
+                * Decimal("100")
+            )
+        else:
+            win_rate = Decimal("0")
+
+        pnls = []
+
+        for record in records:
+            value = record.get("pnl_percent")
+
+            if value is None:
+                continue
+
+            try:
+                pnls.append(
+                    Decimal(str(value))
+                )
+            except InvalidOperation:
+                continue
+
+        gross_net = sum(
+            pnls,
+            Decimal("0"),
+        )
+
+        wins = [
+            value
+            for value in pnls
+            if value > 0
+        ]
+
+        losses = [
+            value
+            for value in pnls
+            if value < 0
+        ]
+
+        average_win = (
+            sum(
+                wins,
+                Decimal("0"),
+            )
+            / Decimal(len(wins))
+            if wins
+            else Decimal("0")
+        )
+
+        average_loss = (
+            sum(
+                losses,
+                Decimal("0"),
+            )
+            / Decimal(len(losses))
+            if losses
+            else Decimal("0")
+        )
+
+        trail_count = sum(
+            len(
+                record.get("trail_history") or []
+            )
+            for record in records
+        )
+
+        return {
+            "total_records": total_records,
+            "total_filled": total_filled,
+            "tp": tp,
+            "sl": sl,
+            "expired": expired,
+            "timeout": timeout,
+            "deleted": deleted,
+            "win_rate": win_rate,
+            "gross_pnl_percent": gross_net,
+            "average_win_percent": average_win,
+            "average_loss_percent": average_loss,
+            "trail_count": trail_count,
+        }
+
+    async def show_stats(self) -> None:
+        await self._refresh_history_if_needed()
+
+        stats = self._calculate_stats(
+            self.history_records
+        )
+
+        active_pending = sum(
+            1
+            for trade in self.active_trades.values()
+            if trade.status == "PENDING"
+        )
+
+        active_filled = sum(
+            1
+            for trade in self.active_trades.values()
+            if trade.status == "FILLED"
+        )
+
+        await self.reply(
+            "📊 STATS\n\n"
+            f"Total Setup History: {stats['total_records']}\n"
+            f"Total Trade Filled: {stats['total_filled']}\n"
+            f"Active Pending: {active_pending}\n"
+            f"Active Filled: {active_filled}\n\n"
+            f"TP: {stats['tp']}\n"
+            f"SL: {stats['sl']}\n"
+            f"Expired: {stats['expired']}\n"
+            f"Timeout: {stats['timeout']}\n"
+            f"Deleted: {stats['deleted']}\n\n"
+            f"Win Rate: {format_pct(stats['win_rate']).replace('+', '')}\n"
+            f"PnL History: {format_pct(stats['gross_pnl_percent'])}\n"
+            f"Average Win: {format_pct(stats['average_win_percent'])}\n"
+            f"Average Loss: {format_pct(stats['average_loss_percent'])}\n"
+            f"Total Trail Event: {stats['trail_count']}\n\n"
+            "Definisi Win Rate:\n"
+            "TP / (TP + SL)\n"
+            "Expired, Timeout, Deleted tidak dihitung sebagai win/loss."
+        )
+
+    # --------------------------------------------------------
+    # ANALYZE
+    # --------------------------------------------------------
+
+    def _build_analysis(
+        self,
+        records: list[dict[str, Any]],
+        events: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], str]:
+        stats = self._calculate_stats(
+            records
+        )
+
+        by_pair: dict[str, list[dict[str, Any]]] = {}
+
+        for record in records:
+            pair = str(
+                record.get("pair") or "UNKNOWN"
+            )
+            by_pair.setdefault(
+                pair,
+                [],
+            ).append(record)
+
+        pair_rows: list[dict[str, Any]] = []
+
+        for pair, pair_records in sorted(
+            by_pair.items()
+        ):
+            pair_stats = self._calculate_stats(
+                pair_records
+            )
+
+            pair_rows.append(
+                {
+                    "pair": pair,
+                    "records": pair_stats[
+                        "total_records"
+                    ],
+                    "filled": pair_stats[
+                        "total_filled"
+                    ],
+                    "tp": pair_stats["tp"],
+                    "sl": pair_stats["sl"],
+                    "win_rate": decimal_to_str(
+                        pair_stats["win_rate"]
+                    ),
+                    "pnl_percent": decimal_to_str(
+                        pair_stats[
+                            "gross_pnl_percent"
+                        ]
+                    ),
+                }
+            )
+
+        by_direction: dict[str, list[dict[str, Any]]] = {}
+
+        for record in records:
+            direction = str(
+                record.get("direction") or "UNKNOWN"
+            )
+            by_direction.setdefault(
+                direction,
+                [],
+            ).append(record)
+
+        direction_rows: list[dict[str, Any]] = []
+
+        for direction, direction_records in sorted(
+            by_direction.items()
+        ):
+            direction_stats = self._calculate_stats(
+                direction_records
+            )
+
+            direction_rows.append(
+                {
+                    "direction": direction,
+                    "records": direction_stats[
+                        "total_records"
+                    ],
+                    "filled": direction_stats[
+                        "total_filled"
+                    ],
+                    "tp": direction_stats["tp"],
+                    "sl": direction_stats["sl"],
+                    "win_rate": decimal_to_str(
+                        direction_stats["win_rate"]
+                    ),
+                    "pnl_percent": decimal_to_str(
+                        direction_stats[
+                            "gross_pnl_percent"
+                        ]
+                    ),
+                }
+            )
+
+        strategy_groups: dict[
+            tuple[str, str],
+            list[dict[str, Any]],
+        ] = {}
+
+        for record in records:
+            key = (
+                str(
+                    record.get("strategy_name")
+                    or "MANUAL"
+                ),
+                str(
+                    record.get("strategy_version")
+                    or "1.0"
+                ),
+            )
+
+            strategy_groups.setdefault(
+                key,
+                [],
+            ).append(record)
+
+        strategy_rows: list[dict[str, Any]] = []
+
+        for (name, version), group in sorted(
+            strategy_groups.items()
+        ):
+            group_stats = self._calculate_stats(
+                group
+            )
+
+            strategy_rows.append(
+                {
+                    "strategy_name": name,
+                    "strategy_version": version,
+                    "records": group_stats[
+                        "total_records"
+                    ],
+                    "filled": group_stats[
+                        "total_filled"
+                    ],
+                    "tp": group_stats["tp"],
+                    "sl": group_stats["sl"],
+                    "win_rate": decimal_to_str(
+                        group_stats["win_rate"]
+                    ),
+                    "pnl_percent": decimal_to_str(
+                        group_stats[
+                            "gross_pnl_percent"
+                        ]
+                    ),
+                }
+            )
+
+        total_trailing_trades = sum(
+            1
+            for record in records
+            if record.get("trail_history")
+        )
+
+        full_data = {
+            "generated_at": iso_utc(),
+            "generated_at_wib": format_wib(
+                now_utc()
+            ),
+            "session_id": self.session_id,
+            "source": {
+                "market": "Binance USDⓈ-M Futures",
+                "execution": "SIMULATION ONLY",
+                "price_trigger": "aggTrade last price",
+            },
+            "summary": {
+                "total_setup_history": stats[
+                    "total_records"
+                ],
+                "total_filled_trades": stats[
+                    "total_filled"
+                ],
+                "tp": stats["tp"],
+                "sl": stats["sl"],
+                "expired": stats["expired"],
+                "timeout": stats["timeout"],
+                "deleted": stats["deleted"],
+                "win_rate_percent": decimal_to_str(
+                    stats["win_rate"]
+                ),
+                "pnl_percent_sum": decimal_to_str(
+                    stats["gross_pnl_percent"]
+                ),
+                "average_win_percent": decimal_to_str(
+                    stats["average_win_percent"]
+                ),
+                "average_loss_percent": decimal_to_str(
+                    stats["average_loss_percent"]
+                ),
+                "trail_event_count": stats[
+                    "trail_count"
+                ],
+                "trailing_trade_count": total_trailing_trades,
+            },
+            "active_session": {
+                "active_trade_count": len(
+                    self.active_trades
+                ),
+                "active_trade_ids": list(
+                    self.active_trades.keys()
+                ),
+            },
+            "trades": records,
+            "events": events,
+            "analysis": {
+                "by_pair": pair_rows,
+                "by_direction": direction_rows,
+                "by_strategy": strategy_rows,
+            },
+        }
+
+        report_lines = [
+            "# Trading Analysis",
+            "",
+            f"Generated: {format_wib(now_utc())}",
+            "",
+            "## System",
+            "",
+            "- Market: Binance USDⓈ-M Futures",
+            "- Execution: Simulation Only",
+            "- Price Trigger: aggTrade last price",
+            "",
+            "## Summary",
+            "",
+            f"- Total Setup History: {stats['total_records']}",
+            f"- Total Filled Trade: {stats['total_filled']}",
+            f"- TP: {stats['tp']}",
+            f"- SL: {stats['sl']}",
+            f"- Expired: {stats['expired']}",
+            f"- Timeout: {stats['timeout']}",
+            f"- Deleted: {stats['deleted']}",
+            f"- Win Rate: {decimal_to_str(stats['win_rate'])}%",
+            f"- PnL History: {decimal_to_str(stats['gross_pnl_percent'])}%",
+            f"- Average Win: {decimal_to_str(stats['average_win_percent'])}%",
+            f"- Average Loss: {decimal_to_str(stats['average_loss_percent'])}%",
+            f"- Trail Event: {stats['trail_count']}",
+            f"- Trade dengan Trailing: {total_trailing_trades}",
+            "",
+            "Win Rate = TP / (TP + SL).",
+            "Expired, Timeout, dan Deleted tidak dihitung sebagai win/loss.",
+            "",
+            "## By Pair",
+            "",
+            "| Pair | Setup | Filled | TP | SL | Win Rate | PnL % |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+
+        for row in pair_rows:
+            report_lines.append(
+                "| "
+                f"{row['pair']} | "
+                f"{row['records']} | "
+                f"{row['filled']} | "
+                f"{row['tp']} | "
+                f"{row['sl']} | "
+                f"{row['win_rate'] or '0'}% | "
+                f"{row['pnl_percent'] or '0'} |"
+            )
+
+        report_lines.extend(
+            [
+                "",
+                "## By Direction",
+                "",
+                "| Direction | Setup | Filled | TP | SL | Win Rate | PnL % |",
+                "|---|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+
+        for row in direction_rows:
+            report_lines.append(
+                "| "
+                f"{row['direction']} | "
+                f"{row['records']} | "
+                f"{row['filled']} | "
+                f"{row['tp']} | "
+                f"{row['sl']} | "
+                f"{row['win_rate'] or '0'}% | "
+                f"{row['pnl_percent'] or '0'} |"
+            )
+
+        report_lines.extend(
+            [
+                "",
+                "## By Strategy",
+                "",
+                "| Strategy | Version | Setup | Filled | TP | SL | Win Rate | PnL % |",
+                "|---|---|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+
+        for row in strategy_rows:
+            report_lines.append(
+                "| "
+                f"{row['strategy_name']} | "
+                f"{row['strategy_version']} | "
+                f"{row['records']} | "
+                f"{row['filled']} | "
+                f"{row['tp']} | "
+                f"{row['sl']} | "
+                f"{row['win_rate'] or '0'}% | "
+                f"{row['pnl_percent'] or '0'} |"
+            )
+
+        report_lines.extend(
+            [
+                "",
+                "## Dataset",
+                "",
+                f"- Trade records: {len(records)}",
+                f"- Event records: {len(events)}",
+                "",
+                "File ini adalah hasil export dari histori simulator.",
+            ]
+        )
+
+        return (
+            full_data,
+            "\n".join(report_lines)
+            + "\n",
+        )
+
+    async def analyze(self) -> None:
+        # Gunakan history RAM yang sudah dimuat saat startup dan
+        # terus diperbarui selama session. Jangan reload dari GitHub
+        # agar event yang belum sempat ter-push tetap ikut analisis.
+        full_data, report = self._build_analysis(
+            self.history_records,
+            self.history_events,
+        )
+
+        full_data_bytes = json.dumps(
+            full_data,
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+
+        report_bytes = report.encode(
+            "utf-8"
+        )
+
+        try:
+            commit_json = await self.github.replace_file(
+                ANALYSIS_JSON_PATH,
+                full_data_bytes,
+                "analysis: update full dataset",
+            )
+
+            commit_md = await self.github.replace_file(
+                ANALYSIS_MD_PATH,
+                report_bytes,
+                "analysis: update report",
+            )
+
+            base_url = (
+                f"https://github.com/{REPO_NAME}/blob/"
+                f"{GITHUB_BRANCH}/"
+            )
+
+            json_url = (
+                base_url
+                + ANALYSIS_JSON_PATH
+            )
+
+            md_url = (
+                base_url
+                + ANALYSIS_MD_PATH
+            )
+
+            stats = self._calculate_stats(
+                self.history_records
+            )
+
+            await self.reply(
+                "📊 ANALYZE SELESAI\n\n"
+                f"Total Setup History: {stats['total_records']}\n"
+                f"Total Trade Filled: {stats['total_filled']}\n"
+                f"Win Rate: {decimal_to_str(stats['win_rate'])}%\n"
+                f"PnL History: {decimal_to_str(stats['gross_pnl_percent'])}%\n\n"
+                "Full Data:\n"
+                f"{json_url}\n\n"
+                "Analysis Report:\n"
+                f"{md_url}\n\n"
+                f"Commit Data: {commit_json[:12]}\n"
+                f"Commit Report: {commit_md[:12]}"
+            )
+
+        except Exception as exc:
+            log.exception(
+                "ANALYZE gagal."
+            )
+
+            await self.reply(
+                "❌ /analyze gagal.\n\n"
+                f"{exc}"
+            )
+
+    # --------------------------------------------------------
+    # STATUS / HELP
+    # --------------------------------------------------------
+
+    async def show_status(self) -> None:
+        pending = sum(
+            1
+            for trade in self.active_trades.values()
+            if trade.status == "PENDING"
+        )
+
+        filled = sum(
+            1
+            for trade in self.active_trades.values()
+            if trade.status == "FILLED"
+        )
+
+        fresh_prices = sum(
+            1
+            for snapshot in self.prices.values()
+            if snapshot.live
+        )
+
+        await self.reply(
+            "STATUS\n\n"
+            "Main: ONLINE\n"
+            "Mode: SIMULATION ONLY\n"
+            f"Session: {self.session_id}\n\n"
+            "Binance REST: READY\n"
+            f"WebSocket: {self.ws.status}\n"
+            f"Symbols Subscribed: {len(self.ws.symbols())}\n"
+            f"Fresh Price Feed: {fresh_prices}\n\n"
+            f"Active Setup: {len(self.active_trades)}\n"
+            f"Pending: {pending}\n"
+            f"Filled: {filled}\n\n"
+            f"History Records: {len(self.history_records)}\n"
+        )
+
+    async def show_help(self) -> None:
+        await self.reply(
+            "COMMAND MAIN.PY\n\n"
+            "/add - membuat setup baru\n"
+            "/back - kembali satu langkah / batalkan sesi\n"
+            "/trade - melihat setup aktif + harga live\n"
+            "/trail - mengubah SL setup\n"
+            "/del - menghapus setup\n"
+            "/stats - statistik histori\n"
+            "/analyze - generate full dataset + report GitHub\n"
+            "/status - status engine dan WebSocket\n"
+            "/help - menu command\n\n"
+            "Launcher:\n"
+            "/try /end /ganti /healthz"
+        )
+
+    # --------------------------------------------------------
+    # UPDATE ROUTER
+    # --------------------------------------------------------
+
+    async def handle_update(
+        self,
+        update: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        message = update.get(
+            "message"
+        ) or {}
+
+        from_user = int(
+            (message.get("from") or {}).get(
+                "id"
+            )
+            or 0
+        )
+
+        if from_user and from_user != ALLOWED_USER_ID:
+            return
+
+        text = str(
+            message.get("text") or ""
+        ).strip()
+
+        if not text:
+            return
+
+        command = (
+            text.split(maxsplit=1)[0]
+            .split("@", 1)[0]
+            .lower()
+        )
+
+        # /back selalu memiliki prioritas di atas flow.
+        if command == "/back":
+            await self._handle_back()
+            return
+
+        # Launcher commands tidak ditangani ulang di main.
+        if command in {
+            "/try",
+            "/end",
+            "/ganti",
+            "/healthz",
+        }:
+            return
+
+        # Command baru saat flow aktif.
+        if command.startswith("/"):
+            if self.flow:
+                if command in {
+                    "/add",
+                    "/trail",
+                    "/del",
+                    "/trade",
+                    "/stats",
+                    "/analyze",
+                    "/status",
+                }:
+                    await self.reply(
+                        "Masih ada sesi yang sedang berjalan.\n"
+                        "Gunakan /back terlebih dahulu."
+                    )
+                    return
+
+            if command == "/add":
+                await self._start_add()
+                return
+
+            if command == "/trade":
+                await self.show_trades()
+                return
+
+            if command == "/trail":
+                await self._start_trail()
+                return
+
+            if command == "/del":
+                await self._start_del()
+                return
+
+            if command == "/stats":
+                await self.show_stats()
+                return
+
+            if command == "/analyze":
+                await self.analyze()
+                return
+
+            if command == "/status":
+                await self.show_status()
+                return
+
+            if command in {
+                "/help",
+                "/start",
+            }:
+                await self.show_help()
+                return
+
+            await self.reply(
+                "Command tidak dikenal.\n"
+                "Gunakan /help."
+            )
+            return
+
+        # Plain text masuk ke active flow.
+        if self.flow:
+            if self.flow["kind"] == "ADD":
+                await self._handle_add_input(
+                    text
+                )
+                return
+
+            if self.flow["kind"] == "TRAIL":
+                await self._handle_trail_input(
+                    text
+                )
+                return
+
+            if self.flow["kind"] == "DEL":
+                await self._handle_del_input(
+                    text
+                )
+                return
+
+        await self.reply(
+            "Tidak ada sesi input aktif.\n"
+            "Gunakan /help atau /add."
+        )
 
 
-# ----------------------------------------------------------------------
-# background task lifecycle
-# ----------------------------------------------------------------------
+# ============================================================
+# MODULE-LEVEL CONTRACT FOR try.py
+# ============================================================
 
-_STOP_FLAG: Optional[asyncio.Event] = None
-_TASKS: list[asyncio.Task] = []
+_ENGINE: TradingEngine | None = None
 
 
-async def on_start(context: dict):
-    global _SEND_MESSAGE, _CHAT_ID, _STOP_FLAG, _TASKS
+async def on_start(
+    context: dict[str, Any],
+):
+    global _ENGINE
 
-    _SEND_MESSAGE = context.get("send_message")
-    _CHAT_ID = context.get("chat_id")
+    if _ENGINE is not None:
+        await _ENGINE.stop()
+        _ENGINE = None
 
-    load_state()
-    open_report = learn.load_checkpoint()
-    STATE["confidence_threshold"] = learn.get_threshold()
+    engine = TradingEngine(
+        context
+    )
 
-    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
-        log.warning("BINANCE_API_KEY/SECRET not set — real trading disabled, sim-only.")
+    _ENGINE = engine
 
-    _STOP_FLAG = asyncio.Event()
-    _TASKS = [
-        asyncio.create_task(ws_feed_task(_STOP_FLAG), name="ws_feed"),
-        asyncio.create_task(scanner_loop(_STOP_FLAG), name="scanner"),
-        asyncio.create_task(monitor_loop(_STOP_FLAG), name="monitor"),
-        asyncio.create_task(autosave_loop(_STOP_FLAG), name="autosave"),
-        asyncio.create_task(calibration_loop(_STOP_FLAG), name="calibration"),
-    ]
+    try:
+        await engine.start()
+    except Exception:
+        try:
+            await engine.stop()
+        except Exception:
+            log.exception(
+                "Cleanup gagal setelah startup main.py gagal."
+            )
 
-    ip = await asyncio.to_thread(get_public_ip)
-    learn_status = f"dipulihkan dari {open_report['source']}" if open_report["restored"] else "kosong (baru)"
-    notify(
-        "🚀 <b>main.py AKTIF</b>\n\n"
-        f"Server IP: <code>{ip}</code>\n"
-        f"Mode: {'💰 REAL' if STATE['mode'] == 'real' else '🧪 SIMULASI'}\n"
-        f"Learning checkpoint: {learn_status}\n"
-        f"Confidence threshold: {STATE['confidence_threshold']}%\n\n"
-        "Gunakan /auto untuk mulai scanning."
+        _ENGINE = None
+        raise
+
+    return True
+
+
+async def handle_update(
+    update: dict[str, Any],
+    context: dict[str, Any],
+):
+    if _ENGINE is None:
+        return
+
+    await _ENGINE.handle_update(
+        update,
+        context,
     )
 
 
-async def handle_update(update: dict, context: dict) -> None:
-    message = update.get("message") or {}
-    chat_id = context.get("chat_id") or (message.get("chat") or {}).get("id")
-    text = str(message.get("text") or message.get("caption") or "").strip()
-    if not text or not text.startswith("/"):
+async def on_stop(
+    context: dict[str, Any],
+):
+    global _ENGINE
+
+    engine = _ENGINE
+
+    if engine is None:
         return
 
-    parts = text.split(maxsplit=1)
-    command = parts[0].split("@", 1)[0].lower()
-    args = parts[1] if len(parts) > 1 else ""
-
-    handler = COMMANDS.get(command)
-    if handler is None:
-        return  # unknown command — silently ignore, launcher already handles /try /end /ganti
-
-    send = context.get("send_message") or _SEND_MESSAGE
     try:
-        result = handler(args)
-        if asyncio.iscoroutine(result):
-            result = await result
-        if result and send and chat_id:
-            send(chat_id, result)
-    except Exception as exc:
-        log.exception("command %s failed", command)
-        if send and chat_id:
-            send(chat_id, f"❌ Command gagal: <code>{html.escape(str(exc)[:600])}</code>")
+        await engine.stop()
+    finally:
+        _ENGINE = None
 
 
-async def on_stop(context: dict) -> None:
-    global _TASKS
-    if _STOP_FLAG:
-        _STOP_FLAG.set()
-    for task in _TASKS:
-        task.cancel()
-    for task in _TASKS:
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
-    _TASKS = []
+# ============================================================
+# DIRECT EXECUTION IS NOT SUPPORTED
+# ============================================================
 
-    learn.save_checkpoint()
-    save_state()
-    log.info("main.py stopped cleanly; state persisted.")
+if __name__ == "__main__":
+    raise SystemExit(
+        "main.py dijalankan melalui try.py menggunakan "
+        "on_start(), handle_update(), dan on_stop()."
+    )
