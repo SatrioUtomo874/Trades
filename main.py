@@ -106,8 +106,8 @@ HISTORY_MARKDOWN_PATH = "data/trade_history.md"
 ANALYSIS_JSON_PATH = "analysis/full_data.json"
 ANALYSIS_MD_PATH = "analysis/analysis.md"
 
-REQUEST_TIMEOUT = 20
-GITHUB_TIMEOUT = 30
+HTTP_REQUEST_SECONDS = 20
+GITHUB_REQUEST_SECONDS = 30
 WS_RECONNECT_MIN = 2
 WS_RECONNECT_MAX = 60
 PRICE_STALE_SECONDS = 15
@@ -369,8 +369,6 @@ class Trade:
     price_exp: Decimal
     price_exp_reason: str
 
-    timeout_at: datetime
-    timeout_reason: str
 
     sl: Decimal
     sl_reason: str
@@ -434,10 +432,6 @@ class Trade:
 
             "price_exp": decimal_to_str(self.price_exp),
             "price_exp_reason": self.price_exp_reason,
-
-            "timeout_at": iso_utc(self.timeout_at),
-            "timeout_display_wib": format_wib(self.timeout_at),
-            "timeout_reason": self.timeout_reason,
 
             "sl": decimal_to_str(self.sl),
             "sl_reason": self.sl_reason,
@@ -504,7 +498,7 @@ class BinanceREST:
             response = requests.get(
                 f"{self.base_url}{path}",
                 params=params or {},
-                timeout=REQUEST_TIMEOUT,
+                timeout=HTTP_REQUEST_SECONDS,
             )
 
             if response.status_code >= 400:
@@ -959,7 +953,7 @@ class GitHubStore:
                 self._url(path),
                 headers=self._headers(),
                 params={"ref": self.branch},
-                timeout=GITHUB_TIMEOUT,
+                timeout=GITHUB_REQUEST_SECONDS,
             )
 
             if response.status_code == 404:
@@ -1038,7 +1032,7 @@ class GitHubStore:
                         self._url(path),
                         headers=self._headers(),
                         json=payload,
-                        timeout=GITHUB_TIMEOUT,
+                        timeout=GITHUB_REQUEST_SECONDS,
                     )
 
                     if response.status_code == 409:
@@ -1121,7 +1115,7 @@ class GitHubStore:
                         self._url(path),
                         headers=self._headers(),
                         json=payload,
-                        timeout=GITHUB_TIMEOUT,
+                        timeout=GITHUB_REQUEST_SECONDS,
                     )
 
                     if response.status_code == 409:
@@ -1205,7 +1199,6 @@ class TradingEngine:
             self._on_price
         )
 
-        self._timeout_task: asyncio.Task | None = None
         self._running = False
 
         self._trade_lock = asyncio.Lock()
@@ -1290,11 +1283,6 @@ class TradingEngine:
 
         await self.ws.start()
 
-        self._timeout_task = asyncio.create_task(
-            self._timeout_loop(),
-            name="trade-timeout-loop",
-        )
-
         self.last_history_refresh = now_utc()
 
         await self.reply(
@@ -1312,20 +1300,6 @@ class TradingEngine:
             return
 
         self._running = False
-
-        if self._timeout_task is not None:
-            self._timeout_task.cancel()
-
-            try:
-                await self._timeout_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                log.exception(
-                    "Timeout task gagal berhenti."
-                )
-
-            self._timeout_task = None
 
         await self.ws.stop()
 
@@ -1582,8 +1556,6 @@ class TradingEngine:
             f"- Reason Entry: {record['entry_reason']}\n"
             f"- Price Exp: {record['price_exp']}\n"
             f"- Reason Price Exp: {record['price_exp_reason']}\n"
-            f"- Timeout: {record['timeout_display_wib']}\n"
-            f"- Reason Timeout: {record['timeout_reason']}\n"
             f"- SL: {record['sl']}\n"
             f"- Reason SL: {record['sl_reason']}\n"
             f"- TP: {record['tp']}\n"
@@ -1684,13 +1656,6 @@ class TradingEngine:
                 "entry_reason": None,
                 "price_exp": None,
                 "price_exp_reason": None,
-                "timeout_date": None,
-                "timeout_month": None,
-                "timeout_year": None,
-                "timeout_hour": None,
-                "timeout_minute": None,
-                "timeout_at": None,
-                "timeout_reason": None,
                 "sl": None,
                 "sl_reason": None,
                 "tp": None,
@@ -1712,18 +1677,13 @@ class TradingEngine:
         data = self._add_data()
         step = self.flow["step"]
 
-        def value_text(
-            value: Any,
-        ) -> str:
+        def value_text(value: Any) -> str:
             if value is None:
                 return "-"
+
             if isinstance(value, Decimal):
-                return (
-                    decimal_to_str(value)
-                    or "-"
-                )
-            if isinstance(value, datetime):
-                return format_wib(value)
+                return decimal_to_str(value) or "-"
+
             return str(value)
 
         lines = [
@@ -1736,49 +1696,12 @@ class TradingEngine:
             f"Reason Entry: {value_text(data['entry_reason'])}",
             f"Price Exp: {value_text(data['price_exp'])}",
             f"Reason Price Exp: {value_text(data['price_exp_reason'])}",
+            f"Price SL: {value_text(data['sl'])}",
+            f"Reason SL: {value_text(data['sl_reason'])}",
+            f"Price TP: {value_text(data['tp'])}",
+            f"Reason TP: {value_text(data['tp_reason'])}",
+            "",
         ]
-
-        timeout_at = data.get("timeout_at")
-
-        if timeout_at:
-            lines.append(
-                f"Timeout: {format_wib(timeout_at)}"
-            )
-        else:
-            date = data.get("timeout_date")
-            month = data.get("timeout_month")
-            year = data.get("timeout_year")
-            hour = data.get("timeout_hour")
-            minute = data.get("timeout_minute")
-
-            if all(
-                item is not None
-                for item in [
-                    date,
-                    month,
-                    year,
-                    hour,
-                    minute,
-                ]
-            ):
-                lines.append(
-                    "Timeout: "
-                    f"{date:02d}-{month:02d}-{year:04d}, "
-                    f"{hour:02d}:{minute:02d} WIB"
-                )
-            else:
-                lines.append("Timeout: -")
-
-        lines.extend(
-            [
-                f"Reason Timeout: {value_text(data['timeout_reason'])}",
-                f"Price SL: {value_text(data['sl'])}",
-                f"Reason SL: {value_text(data['sl_reason'])}",
-                f"Price TP: {value_text(data['tp'])}",
-                f"Reason TP: {value_text(data['tp_reason'])}",
-                "",
-            ]
-        )
 
         prompt_map = {
             "PAIR": "Pair:",
@@ -1791,12 +1714,6 @@ class TradingEngine:
             "ENTRY_REASON": "Reason Entry:",
             "EXP": "Price Exp:",
             "EXP_REASON": "Reason Price Exp:",
-            "TIMEOUT_DATE": "Tanggal Timeout (1-31):",
-            "TIMEOUT_MONTH": "Bulan Timeout (1-12):",
-            "TIMEOUT_YEAR": "Tahun Timeout:",
-            "TIMEOUT_HOUR": "Jam Timeout (0-23):",
-            "TIMEOUT_MINUTE": "Menit Timeout (0-59):",
-            "TIMEOUT_REASON": "Reason Timeout:",
             "SL": "Price SL:",
             "SL_REASON": "Reason SL:",
             "TP": "Price TP:",
@@ -1817,9 +1734,7 @@ class TradingEngine:
 
         return "\n".join(lines)
 
-    async def _start_add(
-        self,
-    ) -> None:
+    async def _start_add(self) -> None:
         if self.flow is not None:
             await self.reply(
                 "Masih ada sesi yang sedang berjalan.\n"
@@ -1828,10 +1743,7 @@ class TradingEngine:
             )
             return
 
-        if (
-            len(self.active_trades)
-            >= MAX_ACTIVE_TRADES
-        ):
+        if len(self.active_trades) >= MAX_ACTIVE_TRADES:
             await self.reply(
                 "Maksimum active trade tercapai.\n"
                 f"Batas: {MAX_ACTIVE_TRADES}"
@@ -1857,13 +1769,10 @@ class TradingEngine:
         try:
             if step == "PAIR":
                 pair = normalize_symbol(text)
-
                 meta = self._get_symbol(pair)
 
-                price_now = await self._reference_price(
-                    pair
-                )
-
+                # REST digunakan satu kali untuk reference price.
+                price_now = await self._reference_price(pair)
                 self._validate_price(
                     pair,
                     price_now,
@@ -1872,14 +1781,11 @@ class TradingEngine:
                 data["pair"] = meta.symbol
                 data["price_now_reference"] = price_now
 
-                # Seed cache dari REST reference yang baru saja diambil.
-                # Ini bukan polling tambahan; hanya initial snapshot.
+                # Seed Current Price dengan reference awal.
                 self.prices[meta.symbol] = PriceSnapshot(
                     symbol=meta.symbol,
                     price=price_now,
-                    event_time_ms=int(
-                        time.time() * 1000
-                    ),
+                    event_time_ms=int(time.time() * 1000),
                     received_at=now_utc(),
                     source="REST_REFERENCE",
                 )
@@ -1892,9 +1798,11 @@ class TradingEngine:
                 return
 
             if step == "DIRECTION":
-                if text.strip() == "1":
+                answer = text.strip()
+
+                if answer == "1":
                     direction = "BUY"
-                elif text.strip() == "2":
+                elif answer == "2":
                     direction = "SELL"
                 else:
                     raise ValueError(
@@ -1918,25 +1826,16 @@ class TradingEngine:
                     entry,
                 )
 
-                reference = data[
-                    "price_now_reference"
-                ]
+                reference = data["price_now_reference"]
+                direction = data["direction"]
 
-                direction = data[
-                    "direction"
-                ]
-
-                if direction == "BUY" and not (
-                    entry < reference
-                ):
+                if direction == "BUY" and entry >= reference:
                     raise ValueError(
                         "Untuk Buy, Price Entry harus "
                         "lebih rendah dari Price Now."
                     )
 
-                if direction == "SELL" and not (
-                    entry > reference
-                ):
+                if direction == "SELL" and entry <= reference:
                     raise ValueError(
                         "Untuk Sell, Price Entry harus "
                         "lebih tinggi dari Price Now."
@@ -1975,25 +1874,16 @@ class TradingEngine:
                     price_exp,
                 )
 
-                reference = data[
-                    "price_now_reference"
-                ]
+                reference = data["price_now_reference"]
+                direction = data["direction"]
 
-                direction = data[
-                    "direction"
-                ]
-
-                if direction == "BUY" and not (
-                    price_exp > reference
-                ):
+                if direction == "BUY" and price_exp <= reference:
                     raise ValueError(
                         "Untuk Buy, Price Exp harus "
                         "lebih tinggi dari Price Now."
                     )
 
-                if direction == "SELL" and not (
-                    price_exp < reference
-                ):
+                if direction == "SELL" and price_exp >= reference:
                     raise ValueError(
                         "Untuk Sell, Price Exp harus "
                         "lebih rendah dari Price Now."
@@ -2016,140 +1906,6 @@ class TradingEngine:
                     )
 
                 data["price_exp_reason"] = reason
-                self.flow["step"] = "TIMEOUT_DATE"
-
-                await self.reply(
-                    self._render_add()
-                )
-                return
-
-            if step == "TIMEOUT_DATE":
-                value = safe_int(
-                    text,
-                    "Tanggal",
-                )
-
-                if not 1 <= value <= 31:
-                    raise ValueError(
-                        "Tanggal harus 1 sampai 31."
-                    )
-
-                data["timeout_date"] = value
-                self.flow["step"] = "TIMEOUT_MONTH"
-
-                await self.reply(
-                    self._render_add()
-                )
-                return
-
-            if step == "TIMEOUT_MONTH":
-                value = safe_int(
-                    text,
-                    "Bulan",
-                )
-
-                if not 1 <= value <= 12:
-                    raise ValueError(
-                        "Bulan harus 1 sampai 12."
-                    )
-
-                data["timeout_month"] = value
-                self.flow["step"] = "TIMEOUT_YEAR"
-
-                await self.reply(
-                    self._render_add()
-                )
-                return
-
-            if step == "TIMEOUT_YEAR":
-                value = safe_int(
-                    text,
-                    "Tahun",
-                )
-
-                if not 2020 <= value <= 2100:
-                    raise ValueError(
-                        "Tahun harus berada pada rentang 2020-2100."
-                    )
-
-                data["timeout_year"] = value
-                self.flow["step"] = "TIMEOUT_HOUR"
-
-                await self.reply(
-                    self._render_add()
-                )
-                return
-
-            if step == "TIMEOUT_HOUR":
-                value = safe_int(
-                    text,
-                    "Jam",
-                )
-
-                if not 0 <= value <= 23:
-                    raise ValueError(
-                        "Jam harus 0 sampai 23."
-                    )
-
-                data["timeout_hour"] = value
-                self.flow["step"] = "TIMEOUT_MINUTE"
-
-                await self.reply(
-                    self._render_add()
-                )
-                return
-
-            if step == "TIMEOUT_MINUTE":
-                value = safe_int(
-                    text,
-                    "Menit",
-                )
-
-                if not 0 <= value <= 59:
-                    raise ValueError(
-                        "Menit harus 0 sampai 59."
-                    )
-
-                data["timeout_minute"] = value
-
-                local_timeout = datetime(
-                    year=data["timeout_year"],
-                    month=data["timeout_month"],
-                    day=data["timeout_date"],
-                    hour=data["timeout_hour"],
-                    minute=value,
-                    tzinfo=TZ,
-                )
-
-                # Datetime constructor akan menolak tanggal seperti
-                # 31 Februari.
-                if local_timeout <= now_local():
-                    raise ValueError(
-                        "Timeout harus berada di masa depan."
-                    )
-
-                data["timeout_at"] = (
-                    local_timeout.astimezone(
-                        timezone.utc
-                    )
-                )
-
-                self.flow["step"] = "TIMEOUT_REASON"
-
-                await self.reply(
-                    self._render_add()
-                )
-                return
-
-            if step == "TIMEOUT_REASON":
-                reason = text.strip()
-
-                if not reason:
-                    raise ValueError(
-                        "Reason Timeout tidak boleh kosong."
-                    )
-
-                data["timeout_reason"] = reason
                 self.flow["step"] = "SL"
 
                 await self.reply(
@@ -2169,16 +1925,12 @@ class TradingEngine:
                 entry = data["entry"]
                 direction = data["direction"]
 
-                if direction == "BUY" and not (
-                    sl < entry
-                ):
+                if direction == "BUY" and sl >= entry:
                     raise ValueError(
                         "Untuk Buy, SL harus di bawah Entry."
                     )
 
-                if direction == "SELL" and not (
-                    sl > entry
-                ):
+                if direction == "SELL" and sl <= entry:
                     raise ValueError(
                         "Untuk Sell, SL harus di atas Entry."
                     )
@@ -2219,16 +1971,12 @@ class TradingEngine:
                 entry = data["entry"]
                 direction = data["direction"]
 
-                if direction == "BUY" and not (
-                    tp > entry
-                ):
+                if direction == "BUY" and tp <= entry:
                     raise ValueError(
                         "Untuk Buy, TP harus di atas Entry."
                     )
 
-                if direction == "SELL" and not (
-                    tp < entry
-                ):
+                if direction == "SELL" and tp >= entry:
                     raise ValueError(
                         "Untuk Sell, TP harus di bawah Entry."
                     )
@@ -2258,13 +2006,14 @@ class TradingEngine:
                 return
 
             if step == "CONFIRM":
-                if text.strip() == "1":
+                answer = text.strip()
+
+                if answer == "1":
                     await self._confirm_add()
                     return
 
-                if text.strip() == "2":
+                if answer == "2":
                     self.flow = None
-
                     await self.reply(
                         "ADD dibatalkan."
                     )
@@ -2287,7 +2036,6 @@ class TradingEngine:
     async def _confirm_add(self) -> None:
         data = self._add_data()
 
-        # Final validation ulang sebelum create trade.
         pair = data["pair"]
         direction = data["direction"]
         reference = data["price_now_reference"]
@@ -2295,7 +2043,6 @@ class TradingEngine:
         price_exp = data["price_exp"]
         sl = data["sl"]
         tp = data["tp"]
-        timeout_at = data["timeout_at"]
 
         if any(
             value is None
@@ -2307,14 +2054,12 @@ class TradingEngine:
                 price_exp,
                 sl,
                 tp,
-                timeout_at,
             ]
         ):
             raise ValueError(
                 "Setup belum lengkap."
             )
 
-        # Geometri final untuk mencegah level bertabrakan.
         if direction == "BUY":
             valid_geometry = (
                 sl < entry < reference < price_exp
@@ -2336,32 +2081,15 @@ class TradingEngine:
             session_id=self.session_id,
             pair=pair,
             direction=direction,
-
             price_now_reference=reference,
             entry=entry,
-            entry_reason=data[
-                "entry_reason"
-            ],
-
+            entry_reason=data["entry_reason"],
             price_exp=price_exp,
-            price_exp_reason=data[
-                "price_exp_reason"
-            ],
-
-            timeout_at=timeout_at,
-            timeout_reason=data[
-                "timeout_reason"
-            ],
-
+            price_exp_reason=data["price_exp_reason"],
             sl=sl,
-            sl_reason=data[
-                "sl_reason"
-            ],
-
+            sl_reason=data["sl_reason"],
             tp=tp,
-            tp_reason=data[
-                "tp_reason"
-            ],
+            tp_reason=data["tp_reason"],
         )
 
         self.active_trades[
@@ -2375,8 +2103,6 @@ class TradingEngine:
                 pair
             )
         except Exception:
-            # Setup tetap valid dan tetap berada di RAM.
-            # desired_symbols pada WS dipertahankan untuk reconnect.
             log.exception(
                 "Subscription WebSocket %s gagal saat /add.",
                 pair,
@@ -2392,8 +2118,6 @@ class TradingEngine:
             f"Reason Entry: {trade.entry_reason}\n\n"
             f"Price Exp: {decimal_to_str(trade.price_exp)}\n"
             f"Reason Price Exp: {trade.price_exp_reason}\n\n"
-            f"Timeout: {format_wib(trade.timeout_at)}\n"
-            f"Reason Timeout: {trade.timeout_reason}\n\n"
             f"Price SL: {decimal_to_str(trade.sl)}\n"
             f"Reason SL: {trade.sl_reason}\n\n"
             f"Price TP: {decimal_to_str(trade.tp)}\n"
@@ -2422,13 +2146,7 @@ class TradingEngine:
                 "ENTRY_REASON": "ENTRY",
                 "EXP": "ENTRY_REASON",
                 "EXP_REASON": "EXP",
-                "TIMEOUT_DATE": "EXP_REASON",
-                "TIMEOUT_MONTH": "TIMEOUT_DATE",
-                "TIMEOUT_YEAR": "TIMEOUT_MONTH",
-                "TIMEOUT_HOUR": "TIMEOUT_YEAR",
-                "TIMEOUT_MINUTE": "TIMEOUT_HOUR",
-                "TIMEOUT_REASON": "TIMEOUT_MINUTE",
-                "SL": "TIMEOUT_REASON",
+                "SL": "EXP_REASON",
                 "SL_REASON": "SL",
                 "TP": "SL_REASON",
                 "TP_REASON": "TP",
@@ -3051,10 +2769,6 @@ class TradingEngine:
             "•",
         )
 
-        timeout_text = trade.timeout_at.astimezone(TZ).strftime(
-            "%d/%m %H:%M"
-        )
-
         reason = trade.entry_reason.strip()
         if len(reason) > 55:
             reason = reason[:52] + "..."
@@ -3065,7 +2779,7 @@ class TradingEngine:
             f"│ {feed_icon} Now   {current_text}  •  {feed}",
             f"│ 🎯 Entry {decimal_to_str(trade.entry)}   →   TP {decimal_to_str(trade.tp)}",
             f"│ 🛡 SL    {decimal_to_str(trade.sl)}",
-            f"│ ⏰ Exp   {decimal_to_str(trade.price_exp)}   •   {timeout_text} WIB",
+            f"│ ⛔ Exp   {decimal_to_str(trade.price_exp)}",
             f"│ 📈 PnL   {pnl_text}",
             f"│ ⚙️ Mode   {mode}",
             f"│ 🧠 {reason}",
@@ -3280,7 +2994,6 @@ class TradingEngine:
             "TP": "✅ TP TERCAPAI",
             "SL": "🛑 SL TERCAPAI",
             "EXPIRED": "⏳ PRICE EXPIRED",
-            "TIMEOUT": "⏰ TIMEOUT",
             "DELETED": "🗑️ DELETED",
         }.get(
             result,
@@ -3479,52 +3192,6 @@ class TradingEngine:
                 )
 
     # --------------------------------------------------------
-    # TIMEOUT LOOP
-    # --------------------------------------------------------
-    # TIMEOUT LOOP
-    # --------------------------------------------------------
-
-    async def _timeout_loop(self) -> None:
-        while self._running:
-            try:
-                await asyncio.sleep(0.5)
-
-                current = now_utc()
-
-                async with self._trade_lock:
-                    pending = [
-                        trade
-                        for trade in self.active_trades.values()
-                        if trade.status == "PENDING"
-                    ]
-
-                    for trade in pending:
-                        if current < trade.timeout_at:
-                            continue
-
-                        await self._record_event(
-                            trade,
-                            "TIMEOUT",
-                            event_price=None,
-                            reason=trade.timeout_reason,
-                        )
-
-                        await self._finalize_trade(
-                            trade,
-                            result="TIMEOUT",
-                            exit_price=None,
-                            reason=trade.timeout_reason,
-                        )
-
-            except asyncio.CancelledError:
-                break
-
-            except Exception:
-                log.exception(
-                    "Error timeout loop."
-                )
-
-    # --------------------------------------------------------
     # STATS
     # --------------------------------------------------------
 
@@ -3550,12 +3217,6 @@ class TradingEngine:
             1
             for record in records
             if record.get("result") == "EXPIRED"
-        )
-
-        timeout = sum(
-            1
-            for record in records
-            if record.get("result") == "TIMEOUT"
         )
 
         deleted = sum(
@@ -3640,7 +3301,6 @@ class TradingEngine:
             "tp": tp,
             "sl": sl,
             "expired": expired,
-            "timeout": timeout,
             "deleted": deleted,
             "win_rate": win_rate,
             "gross_pnl_percent": gross_net,
@@ -3677,7 +3337,6 @@ class TradingEngine:
             f"TP: {stats['tp']}\n"
             f"SL: {stats['sl']}\n"
             f"Expired: {stats['expired']}\n"
-            f"Timeout: {stats['timeout']}\n"
             f"Deleted: {stats['deleted']}\n\n"
             f"Win Rate: {format_pct(stats['win_rate']).replace('+', '')}\n"
             f"PnL History: {format_pct(stats['gross_pnl_percent'])}\n"
@@ -3686,7 +3345,7 @@ class TradingEngine:
             f"Total Trail Event: {stats['trail_count']}\n\n"
             "Definisi Win Rate:\n"
             "TP / (TP + SL)\n"
-            "Expired, Timeout, Deleted tidak dihitung sebagai win/loss."
+            "Expired dan Deleted tidak dihitung sebagai win/loss."
         )
 
     # --------------------------------------------------------
@@ -3867,7 +3526,6 @@ class TradingEngine:
                 "tp": stats["tp"],
                 "sl": stats["sl"],
                 "expired": stats["expired"],
-                "timeout": stats["timeout"],
                 "deleted": stats["deleted"],
                 "win_rate_percent": decimal_to_str(
                     stats["win_rate"]
@@ -3921,7 +3579,6 @@ class TradingEngine:
             f"- TP: {stats['tp']}",
             f"- SL: {stats['sl']}",
             f"- Expired: {stats['expired']}",
-            f"- Timeout: {stats['timeout']}",
             f"- Deleted: {stats['deleted']}",
             f"- Win Rate: {decimal_to_str(stats['win_rate'])}%",
             f"- PnL History: {decimal_to_str(stats['gross_pnl_percent'])}%",
@@ -3931,7 +3588,7 @@ class TradingEngine:
             f"- Trade dengan Trailing: {total_trailing_trades}",
             "",
             "Win Rate = TP / (TP + SL).",
-            "Expired, Timeout, dan Deleted tidak dihitung sebagai win/loss.",
+            "Expired dan Deleted tidak dihitung sebagai win/loss.",
             "",
             "## By Pair",
             "",
