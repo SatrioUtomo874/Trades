@@ -100,3 +100,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-20T14:02:04.221271+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## ONEUSDT — BUY
+
+Trade ID: `ONEUSDT-20260920-204312-5E2215`
+
+### Setup
+
+- Price Now Reference: 0.0038106
+- Entry: 0.0020125
+- Reason Entry: Order Block + Zona Liquidity
+- Price Exp: 0.0042905
+- Reason Price Exp: Swing High H4
+- SL: 0.0014197
+- Reason SL: Dibawah Liquidity Sweep
+- TP: 0.0042341
+- Reason TP: Swing High H4
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0042909
+- Result Reason: Swing High H4
+- PnL: -
+- Created: 2026-09-20T13:43:12.668630+00:00
+- Filled: -
+- Closed: 2026-09-21T00:00:20.500384+00:00
+- Strategy: MANUAL v1.0
