@@ -37,6 +37,7 @@ import os
 import re
 import time
 import traceback
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -107,6 +108,15 @@ HISTORY_MARKDOWN_PATH = "data/trade_history.md"
 
 ANALYSIS_JSON_PATH = "analysis/full_data.json"
 ANALYSIS_MD_PATH = "analysis/analysis.md"
+NOTES_PATH = "data/notes.json"
+RESET_PATHS = (
+    HISTORY_TRADES_PATH,
+    HISTORY_EVENTS_PATH,
+    HISTORY_MARKDOWN_PATH,
+    ANALYSIS_JSON_PATH,
+    ANALYSIS_MD_PATH,
+    NOTES_PATH,
+)
 
 HTTP_REQUEST_SECONDS = 20
 GITHUB_REQUEST_SECONDS = 30
@@ -602,6 +612,11 @@ class BinanceWebSocket:
 
         self._command_lock = asyncio.Lock()
 
+        # Runtime market-event ordering guard. Binance may reconnect and
+        # deliver an event after a connection transition; stale events must
+        # never be allowed to move a setup backwards/forwards in time.
+        self._last_market_event_key: dict[str, tuple[int, int]] = {}
+
         self.connected = False
         self.last_message_at: datetime | None = None
         self.reconnect_count = 0
@@ -621,6 +636,8 @@ class BinanceWebSocket:
             return "LIVE"
 
         if self._task is not None and not self._task.done():
+            if self.reconnect_count > 0:
+                return "RECONNECTING"
             return "CONNECTING"
 
         return "OFFLINE"
@@ -674,6 +691,7 @@ class BinanceWebSocket:
         self.connected = False
         self._subscribed_symbols.clear()
         self._desired_symbols.clear()
+        self._last_market_event_key.clear()
 
     async def add_symbol(self, symbol: str) -> None:
         symbol = normalize_symbol(symbol)
@@ -911,8 +929,35 @@ class BinanceWebSocket:
                             or int(time.time() * 1000)
                         )
 
+                        # aggTrade memiliki aggregate trade ID ("a").
+                        # Simpan bersama event time supaya event lama yang
+                        # terlambat datang setelah reconnect tidak diproses
+                        # sebagai harga terbaru. Untuk aggTrade normal, ID
+                        # tersedia; fallback  -1 hanya untuk payload yang
+                        # tidak menyediakannya.
+                        try:
+                            aggregate_trade_id = int(data.get("a"))
+                        except (TypeError, ValueError):
+                            aggregate_trade_id = -1
+
                         if not symbol or not price_raw:
                             continue
+
+                        event_key = (
+                            event_time_ms,
+                            aggregate_trade_id,
+                        )
+
+                        last_key = self._last_market_event_key.get(
+                            symbol
+                        )
+
+                        if last_key is not None and event_key <= last_key:
+                            # Event lama/duplikat. Abaikan supaya event stale
+                            # tidak bisa memicu Entry, Price Exp, SL, atau TP.
+                            continue
+
+                        self._last_market_event_key[symbol] = event_key
 
                         try:
                             price = parse_decimal(
@@ -929,6 +974,7 @@ class BinanceWebSocket:
                             symbol,
                             price,
                             event_time_ms,
+                            aggregate_trade_id,
                         )
 
             except asyncio.CancelledError:
@@ -1054,6 +1100,59 @@ class GitHubStore:
             )
 
         return await asyncio.to_thread(request)
+
+    async def delete_file(
+        self,
+        path: str,
+        commit_message: str,
+    ) -> bool:
+        """Hapus satu file GitHub. Return False jika file memang tidak ada."""
+        async with self._write_lock:
+            for _attempt in range(3):
+                _current, sha = await self.get_file(path)
+
+                if not sha:
+                    return False
+
+                payload = {
+                    "message": commit_message,
+                    "sha": sha,
+                    "branch": self.branch,
+                }
+
+                def request() -> bool:
+                    response = requests.delete(
+                        self._url(path),
+                        headers=self._headers(),
+                        json=payload,
+                        timeout=GITHUB_REQUEST_SECONDS,
+                    )
+
+                    if response.status_code == 404:
+                        return False
+
+                    if response.status_code == 409:
+                        raise RuntimeError("GITHUB_CONFLICT")
+
+                    if response.status_code >= 400:
+                        raise RuntimeError(
+                            f"GitHub DELETE {path}: HTTP "
+                            f"{response.status_code}: "
+                            f"{response.text[:700]}"
+                        )
+
+                    return True
+
+                try:
+                    return await asyncio.to_thread(request)
+                except RuntimeError as exc:
+                    if str(exc) != "GITHUB_CONFLICT":
+                        raise
+                    await asyncio.sleep(0.5)
+
+            raise RuntimeError(
+                f"GitHub gagal menghapus {path}: conflict berulang."
+            )
 
     async def replace_file(
         self,
@@ -1241,6 +1340,7 @@ class TradingEngine:
         self.send_message = context[
             "send_message"
         ]
+        self.send_document = context.get("send_document")
 
         self.session_id = generate_session_id()
 
@@ -1254,6 +1354,12 @@ class TradingEngine:
 
         self.history_records: list[dict[str, Any]] = []
         self.history_events: list[dict[str, Any]] = []
+
+        # Market-event ordering is also guarded at engine level. This is a
+        # second safety layer so an out-of-order callback can never trigger
+        # a state transition. Key = (Binance event time, aggregate trade ID).
+        self._last_market_event_key: dict[str, tuple[int, int]] = {}
+        self._last_live_price: dict[str, Decimal] = {}
 
         self.flow: dict[str, Any] | None = None
 
@@ -1324,6 +1430,24 @@ class TradingEngine:
             # Jangan sampai error reporter sendiri menjadi sumber error baru.
             pass
 
+    async def send_document_file(
+        self,
+        path: str | Path,
+        caption: str = "",
+    ) -> None:
+        """Kirim file lokal ke Telegram melalui callback dari try.py."""
+        if not callable(self.send_document):
+            raise RuntimeError(
+                "Launcher belum menyediakan callback send_document."
+            )
+
+        await asyncio.to_thread(
+            self.send_document,
+            self.chat_id,
+            str(path),
+            str(caption or ""),
+        )
+
     # --------------------------------------------------------
     # Lifecycle
     # --------------------------------------------------------
@@ -1340,6 +1464,7 @@ class TradingEngine:
             self._telegram_error_handler_added = True
 
         await self._load_history()
+        await self._load_notes()
 
         self.symbols = await self.rest.get_exchange_info()
 
@@ -1373,6 +1498,8 @@ class TradingEngine:
 
         self.history_records.clear()
         self.history_events.clear()
+        self._last_market_event_key.clear()
+        self._last_live_price.clear()
 
         self.last_history_refresh = None
         self.session_id = ""
@@ -1469,6 +1596,147 @@ class TradingEngine:
 
         await self._load_history()
         self.last_history_refresh = now_utc()
+
+    # --------------------------------------------------------
+    # CATATAN / NOTES
+    # --------------------------------------------------------
+
+    async def _load_notes(self) -> None:
+        raw, _ = await self.github.get_file(NOTES_PATH)
+
+        if not raw:
+            self.notes = []
+            return
+
+        try:
+            payload = json.loads(
+                raw.decode("utf-8")
+            )
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"{NOTES_PATH} bukan JSON valid."
+            ) from exc
+
+        if not isinstance(payload, list):
+            raise RuntimeError(
+                f"{NOTES_PATH} harus berisi JSON list."
+            )
+
+        self.notes = [
+            item
+            for item in payload
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+
+    async def add_note(self, text: str) -> None:
+        note_text = str(text or "").strip()
+        if not note_text:
+            raise ValueError(
+                "Catatan tidak boleh kosong. Gunakan: /catatan isi catatan"
+            )
+
+        if len(note_text) > 3000:
+            raise ValueError(
+                "Catatan terlalu panjang. Maksimum 3000 karakter."
+            )
+
+        await self._load_notes()
+
+        note = {
+            "note_id": uuid4().hex[:12].upper(),
+            "text": note_text,
+            "created_at": iso_utc(),
+            "created_at_wib": format_wib(now_utc()),
+        }
+
+        self.notes.append(note)
+
+        content = json.dumps(
+            self.notes,
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+
+        try:
+            await self.github.replace_file(
+                NOTES_PATH,
+                content,
+                "notes: add catatan",
+            )
+        except Exception:
+            # Jangan meninggalkan catatan lokal seolah-olah tersimpan
+            # permanen ketika commit GitHub gagal.
+            self.notes.pop()
+            raise
+
+        await self.reply(
+            "📝 CATATAN DITAMBAHKAN\n\n"
+            f"{note_text}\n\n"
+            f"Waktu: {note['created_at_wib']}"
+        )
+
+    async def show_notes(self) -> None:
+        await self._load_notes()
+
+        if not self.notes:
+            await self.reply(
+                "📝 CATATAN\n\n"
+                "Belum ada catatan.\n"
+                "Gunakan /catatan isi catatan untuk menambahkan."
+            )
+            return
+
+        lines = [
+            "📝 CATATAN",
+            "",
+        ]
+
+        for index, note in enumerate(self.notes, start=1):
+            text = str(note.get("text") or "").strip()
+            created = str(
+                note.get("created_at_wib")
+                or note.get("created_at")
+                or "-"
+            )
+            lines.append(
+                f"{index}. {text}\n"
+                f"   🕒 {created}"
+            )
+
+        await self.reply("\n\n".join(lines))
+
+    async def reset_github_records(self) -> None:
+        """Hapus seluruh file pencatatan bot dari GitHub.
+
+        Tidak menghapus main.py atau file konfigurasi/repository lain.
+        Active setup di RAM juga tidak disentuh karena /reset hanya untuk
+        pencatatan historis.
+        """
+        deleted: list[str] = []
+        missing: list[str] = []
+
+        for path in RESET_PATHS:
+            removed = await self.github.delete_file(
+                path,
+                f"reset: delete {path}",
+            )
+            if removed:
+                deleted.append(path)
+            else:
+                missing.append(path)
+
+        self.history_records.clear()
+        self.history_events.clear()
+        self.notes.clear()
+        self.last_history_refresh = now_utc()
+
+        await self.reply(
+            "♻️ RESET PENCATATAN SELESAI\n\n"
+            f"Dihapus: {len(deleted)} file\n"
+            f"Tidak ditemukan: {len(missing)} file\n\n"
+            "Yang dihapus: histori trade, event, journal, hasil analyze, dan catatan.\n"
+            "Active setup /trade TIDAK dihapus."
+        )
 
     async def _write_history(
         self,
@@ -2257,6 +2525,13 @@ class TradingEngine:
             )
             return
 
+        if kind == "FILLED":
+            self.flow = None
+            await self.reply(
+                "FILLED dibatalkan."
+            )
+            return
+
         if kind == "DEL":
             if self.flow["step"] == "SELECT":
                 self.flow = None
@@ -2639,6 +2914,176 @@ class TradingEngine:
         )
 
     # --------------------------------------------------------
+    # MANUAL FILL
+    # --------------------------------------------------------
+
+    def _render_filled(self) -> str:
+        """Tampilkan daftar /trade dan pilih setup untuk fill manual."""
+        if not self.flow or self.flow.get("kind") != "FILLED":
+            return ""
+
+        items = self._trade_list_text()
+
+        if not items:
+            return (
+                "FILLED\n\n"
+                "Tidak ada active setup."
+            )
+
+        lines = [
+            "╭──────────────────╮",
+            "│  ✅ MANUAL FILLED │",
+            "╰──────────────────╯",
+            "",
+            "Daftar setup aktif:",
+            "",
+        ]
+
+        for number, trade in items:
+            lines.append(
+                self._render_trade(number, trade)
+            )
+            lines.append("")
+
+        lines.extend([
+            "Pilih nomor setup yang entry-nya",
+            "sudah benar-benar terjadi / sudah running.",
+            "",
+            "Hanya status PENDING yang bisa diubah.",
+            "Ketik nomor setup.",
+        ])
+
+        return "\n".join(lines)
+
+    async def _start_filled(self) -> None:
+        if self.flow:
+            await self.reply(
+                "Masih ada sesi yang sedang berjalan.\n"
+                "Gunakan /back terlebih dahulu."
+            )
+            return
+
+        if not self.active_trades:
+            await self.reply(
+                "Tidak ada active setup."
+            )
+            return
+
+        if not any(
+            trade.status == "PENDING"
+            for trade in self.active_trades.values()
+        ):
+            await self.reply(
+                "✅ Tidak ada setup PENDING yang bisa diubah menjadi FILLED."
+            )
+            return
+
+        self.flow = {
+            "kind": "FILLED",
+            "step": "SELECT",
+            "data": {},
+        }
+
+        await self.reply(
+            self._render_filled()
+        )
+
+    async def _handle_filled_input(
+        self,
+        text: str,
+    ) -> None:
+        if not self.flow or self.flow.get("kind") != "FILLED":
+            return
+
+        try:
+            if self.flow["step"] != "SELECT":
+                self.flow = None
+                return
+
+            number = safe_int(
+                text,
+                "Nomor setup",
+            )
+
+            items = self._trade_list_text()
+
+            if not 1 <= number <= len(items):
+                raise ValueError(
+                    "Nomor setup tidak valid."
+                )
+
+            _index, trade = items[number - 1]
+
+            async with self._trade_lock:
+                current = self.active_trades.get(trade.trade_id)
+
+                if current is None:
+                    raise ValueError(
+                        "Setup sudah tidak aktif. Gunakan /trade untuk melihat daftar terbaru."
+                    )
+
+                if current.status != "PENDING":
+                    raise ValueError(
+                        f"Setup {current.pair} sudah berstatus {current.status}. "
+                        "Hanya PENDING yang bisa diproses /filled."
+                    )
+
+                current.status = "FILLED"
+                current.filled_at = now_utc()
+
+                # Konsisten dengan fill otomatis: posisi dianggap masuk pada
+                # level Entry, sementara harga saat command hanya dicatat
+                # sebagai informasi tambahan.
+                current.fill_price = current.entry
+                current.pnl_percent = Decimal("0")
+                trade = current
+
+            snapshot = self.prices.get(trade.pair)
+            current_market_price = (
+                snapshot.price
+                if snapshot is not None
+                else None
+            )
+
+            await self._record_event(
+                trade,
+                "FILLED",
+                event_price=current_market_price,
+                reason=(
+                    "Manual /filled — entry dianggap sudah terjadi "
+                    "dan setup sudah running."
+                ),
+                extra={
+                    "source": "MANUAL /filled",
+                    "fill_price": decimal_to_str(trade.entry),
+                    "market_price_at_manual_fill": decimal_to_str(
+                        current_market_price
+                    ),
+                },
+            )
+
+            self.flow = None
+
+            await self.reply(
+                "✅ MANUAL ENTRY FILLED\n\n"
+                f"Pair: {trade.pair}\n"
+                f"Direction: {trade.direction.title()}\n"
+                f"Entry: {decimal_to_str(trade.entry)}\n"
+                f"Fill Price: {decimal_to_str(trade.entry)}\n"
+                f"Current saat /filled: {decimal_to_str(current_market_price) or '-'}\n"
+                "Source: /filled (manual)\n"
+                "Status: FILLED\n\n"
+                "Bot sekarang menganggap posisi sudah running "
+                "dan melanjutkan monitoring SL/TP."
+            )
+
+        except Exception as exc:
+            await self.reply(
+                f"❌ {exc}\n\n"
+                f"{self._render_filled()}"
+            )
+
+    # --------------------------------------------------------
     # DELETE
     # --------------------------------------------------------
 
@@ -2795,12 +3240,12 @@ class TradingEngine:
                 and snapshot.source == "REST_REFERENCE"
             ):
                 feed = "REFERENCE"
+            elif snapshot.live:
+                feed = "LIVE"
+            elif self.ws.status == "RECONNECTING":
+                feed = "RECONNECTING"
             else:
-                feed = (
-                    "LIVE"
-                    if snapshot.live
-                    else "STALE"
-                )
+                feed = "STALE"
 
             if trade.status == "FILLED":
                 pnl_text = format_pct(
@@ -2824,6 +3269,7 @@ class TradingEngine:
         feed_icon = {
             "LIVE": "📡",
             "REFERENCE": "📍",
+            "RECONNECTING": "🔄",
             "STALE": "⚠️",
             "NO DATA": "❔",
         }.get(
@@ -3068,6 +3514,23 @@ class TradingEngine:
             else "-"
         )
 
+        if result == "EXPIRED":
+            # Notifikasi khusus supaya jelas bahwa EXPIRED berasal dari
+            # Price Exp, bukan dari TP/SL atau aturan lain.
+            await self.reply(
+                f"{title}\n\n"
+                f"Pair: {trade.pair}\n"
+                f"Direction: {trade.direction.title()}\n"
+                f"Entry: {decimal_to_str(trade.entry)}\n"
+                f"Price Exp: {decimal_to_str(trade.price_exp)}\n"
+                f"Harga Pemicu: {decimal_to_str(trade.exit_price)}\n"
+                f"Result: EXPIRED\n"
+                f"PnL: -\n\n"
+                "Pemicu: PRICE EXP SAJA\n"
+                f"Reason Price Exp: {trade.result_reason or '-'}"
+            )
+            return
+
         await self.reply(
             f"{title}\n\n"
             f"Pair: {trade.pair}\n"
@@ -3135,7 +3598,27 @@ class TradingEngine:
         symbol: str,
         price: Decimal,
         event_time_ms: int,
+        aggregate_trade_id: int | None = None,
     ) -> None:
+        # Defense-in-depth: jangan pernah memproses market event yang lebih
+        # lama dari event terakhir untuk symbol yang sama. Ini penting saat
+        # koneksi WebSocket reconnect / close-reopen dan event lama tiba
+        # terlambat.
+        event_key = (
+            int(event_time_ms),
+            int(aggregate_trade_id)
+            if aggregate_trade_id is not None
+            else -1,
+        )
+
+        last_key = self._last_market_event_key.get(symbol)
+        if last_key is not None and event_key <= last_key:
+            return
+
+        self._last_market_event_key[symbol] = event_key
+
+        previous_live_price = self._last_live_price.get(symbol)
+
         self.prices[symbol] = PriceSnapshot(
             symbol=symbol,
             price=price,
@@ -3143,6 +3626,7 @@ class TradingEngine:
             received_at=now_utc(),
             source="WEBSOCKET",
         )
+        self._last_live_price[symbol] = price
 
         # Snapshot daftar trade tanpa menahan lock saat network I/O.
         relevant = [
@@ -3157,6 +3641,8 @@ class TradingEngine:
 
             try:
                 if trade.status == "PENDING":
+                    # PENTING: saat PENDING, hanya Entry dan Price Exp yang
+                    # boleh mengubah state. TP/SL SAMA SEKALI tidak dicek.
                     if trade.direction == "BUY":
                         if price <= trade.entry:
                             await self._fill_trade(
@@ -3165,7 +3651,19 @@ class TradingEngine:
                             )
                             continue
 
-                        if price >= trade.price_exp:
+                        # Price Exp harus benar-benar merupakan crossing dari
+                        # sisi valid menuju / melewati level Exp. Dengan guard
+                        # previous_live_price, harga stale/duplicate tidak
+                        # bisa tiba-tiba membuat setup EXPIRED.
+                        crossed_exp = (
+                            price >= trade.price_exp
+                            and (
+                                previous_live_price is None
+                                or previous_live_price < trade.price_exp
+                            )
+                        )
+
+                        if crossed_exp:
                             await self._finalize_trade(
                                 trade,
                                 result="EXPIRED",
@@ -3182,7 +3680,15 @@ class TradingEngine:
                             )
                             continue
 
-                        if price <= trade.price_exp:
+                        crossed_exp = (
+                            price <= trade.price_exp
+                            and (
+                                previous_live_price is None
+                                or previous_live_price > trade.price_exp
+                            )
+                        )
+
+                        if crossed_exp:
                             await self._finalize_trade(
                                 trade,
                                 result="EXPIRED",
@@ -3735,8 +4241,7 @@ class TradingEngine:
 
     async def analyze(self) -> None:
         # Gunakan history RAM yang sudah dimuat saat startup dan
-        # terus diperbarui selama session. Jangan reload dari GitHub
-        # agar event yang belum sempat ter-push tetap ikut analisis.
+        # terus diperbarui selama session.
         full_data, report = self._build_analysis(
             self.history_records,
             self.history_events,
@@ -3747,10 +4252,9 @@ class TradingEngine:
             ensure_ascii=False,
             indent=2,
         ).encode("utf-8")
+        report_bytes = report.encode("utf-8")
 
-        report_bytes = report.encode(
-            "utf-8"
-        )
+        temp_paths: list[Path] = []
 
         try:
             commit_json = await self.github.replace_file(
@@ -3765,20 +4269,26 @@ class TradingEngine:
                 "analysis: update report",
             )
 
-            base_url = (
-                f"https://github.com/{REPO_NAME}/blob/"
-                f"{GITHUB_BRANCH}/"
-            )
+            # Buat salinan sementara untuk dikirim sebagai Telegram Document.
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                suffix=".json",
+                prefix="trading_analysis_",
+                delete=False,
+            ) as json_file:
+                json_file.write(full_data_bytes)
+                json_path = Path(json_file.name)
+                temp_paths.append(json_path)
 
-            json_url = (
-                base_url
-                + ANALYSIS_JSON_PATH
-            )
-
-            md_url = (
-                base_url
-                + ANALYSIS_MD_PATH
-            )
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                suffix=".md",
+                prefix="trading_analysis_",
+                delete=False,
+            ) as md_file:
+                md_file.write(report_bytes)
+                md_path = Path(md_file.name)
+                temp_paths.append(md_path)
 
             stats = self._calculate_stats(
                 self.history_records
@@ -3790,12 +4300,16 @@ class TradingEngine:
                 f"Total Trade Filled: {stats['total_filled']}\n"
                 f"Win Rate: {decimal_to_str(stats['win_rate'])}%\n"
                 f"PnL History: {decimal_to_str(stats['gross_pnl_percent'])}%\n\n"
-                "Full Data:\n"
-                f"{json_url}\n\n"
-                "Analysis Report:\n"
-                f"{md_url}\n\n"
-                f"Commit Data: {commit_json[:12]}\n"
-                f"Commit Report: {commit_md[:12]}"
+                "File hasil analisis dikirim sebagai dokumen Telegram."
+            )
+
+            await self.send_document_file(
+                json_path,
+                "📄 Full dataset — trading history export",
+            )
+            await self.send_document_file(
+                md_path,
+                "📄 Analysis report — trading history report",
             )
 
         except Exception as exc:
@@ -3805,6 +4319,68 @@ class TradingEngine:
 
             await self.reply(
                 "❌ /analyze gagal.\n\n"
+                f"{exc}"
+            )
+
+        finally:
+            for path in temp_paths:
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    # --------------------------------------------------------
+    # RESET
+    # --------------------------------------------------------
+
+    async def _start_reset(self) -> None:
+        if self.flow is not None:
+            await self.reply(
+                "Masih ada sesi yang sedang berjalan.\n"
+                "Gunakan /back terlebih dahulu."
+            )
+            return
+
+        self.flow = {
+            "kind": "RESET",
+            "step": "CONFIRM",
+        }
+
+        await self.reply(
+            "⚠️ RESET PENCATATAN\n\n"
+            "Perintah ini akan menghapus dari GitHub:\n"
+            "• histori trade\n"
+            "• events\n"
+            "• journal\n"
+            "• hasil /analyze\n"
+            "• seluruh /catatan\n\n"
+            "Active setup tidak dihapus.\n\n"
+            "1. Ya, hapus semua pencatatan\n"
+            "2. Batal"
+        )
+
+    async def _handle_reset_input(self, text: str) -> None:
+        answer = str(text or "").strip()
+
+        if answer == "2":
+            self.flow = None
+            await self.reply("✅ RESET dibatalkan.")
+            return
+
+        if answer != "1":
+            await self.reply(
+                "Jawab 1 untuk menjalankan reset atau 2 untuk batal."
+            )
+            return
+
+        self.flow = None
+
+        try:
+            await self.reset_github_records()
+        except Exception as exc:
+            log.exception("RESET pencatatan GitHub gagal.")
+            await self.reply(
+                "❌ /reset gagal.\n\n"
                 f"{exc}"
             )
 
@@ -3844,6 +4420,7 @@ class TradingEngine:
             f"Pending: {pending}\n"
             f"Filled: {filled}\n\n"
             f"History Records: {len(self.history_records)}\n"
+            f"Catatan: {len(self.notes)}\n"
         )
 
     async def show_help(self) -> None:
@@ -3854,8 +4431,11 @@ class TradingEngine:
             "/trade - melihat setup aktif + harga live\n"
             "/trail - mengubah SL setup\n"
             "/del - menghapus setup\n"
+            "/filled - ubah setup PENDING menjadi FILLED secara manual\n"
             "/stats - statistik histori\n"
-            "/analyze - generate full dataset + report GitHub\n"
+            "/catatan [teks] - tambah catatan / tanpa teks = lihat catatan\n"
+            "/reset - hapus seluruh pencatatan GitHub\n"
+            "/analyze - generate full dataset + report, lalu kirim file Telegram\n"
             "/status - status engine dan WebSocket\n"
             "/help - menu command\n\n"
             "Launcher:\n"
@@ -3919,10 +4499,13 @@ class TradingEngine:
                     "/add",
                     "/trail",
                     "/del",
+                    "/filled",
                     "/trade",
                     "/stats",
                     "/analyze",
                     "/status",
+                    "/catatan",
+                    "/reset",
                 }:
                     await self.reply(
                         "Masih ada sesi yang sedang berjalan.\n"
@@ -3946,12 +4529,28 @@ class TradingEngine:
                 await self._start_del()
                 return
 
+            if command == "/filled":
+                await self._start_filled()
+                return
+
             if command == "/stats":
                 await self.show_stats()
                 return
 
             if command == "/analyze":
                 await self.analyze()
+                return
+
+            if command == "/catatan":
+                argument = text[len(text.split(maxsplit=1)[0]):].strip()
+                if argument:
+                    await self.add_note(argument)
+                else:
+                    await self.show_notes()
+                return
+
+            if command == "/reset":
+                await self._start_reset()
                 return
 
             if command == "/status":
@@ -3987,6 +4586,18 @@ class TradingEngine:
 
             if self.flow["kind"] == "DEL":
                 await self._handle_del_input(
+                    text
+                )
+                return
+
+            if self.flow["kind"] == "FILLED":
+                await self._handle_filled_input(
+                    text
+                )
+                return
+
+            if self.flow["kind"] == "RESET":
+                await self._handle_reset_input(
                     text
                 )
                 return
