@@ -206,6 +206,60 @@ def tg_send(chat_id: int, text: str) -> None:
             return
 
 
+def tg_send_document(chat_id: int, file_path: str | Path, caption: str = "") -> None:
+    """Kirim file lokal sebagai Telegram document.
+
+    Callback ini dipakai main.py untuk /analyze. Sengaja sinkron agar
+    kompatibel dengan asyncio.to_thread() di main.py.
+    """
+    path = Path(file_path)
+
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"File Telegram tidak ditemukan: {path}"
+        )
+
+    try:
+        with path.open("rb") as document:
+            response = requests.post(
+                f"{TG_API}/sendDocument",
+                data={
+                    "chat_id": int(chat_id),
+                    "caption": str(caption or ""),
+                },
+                files={
+                    "document": (
+                        path.name,
+                        document,
+                        "application/octet-stream",
+                    )
+                },
+                timeout=60,
+            )
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Telegram sendDocument: network error: {exc}"
+        ) from exc
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Telegram sendDocument: HTTP {response.status_code}: "
+            f"{response.text[:800]}"
+        )
+
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            "Telegram sendDocument: invalid JSON"
+        ) from exc
+
+    if not body.get("ok"):
+        raise RuntimeError(
+            f"Telegram sendDocument: {body}"
+        )
+
+
 def tg_get_file_bytes(file_id: str) -> bytes:
     info = tg_call(
         "getFile",
