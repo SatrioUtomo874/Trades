@@ -1,0 +1,33 @@
+[
+  {
+    "trade_id": "HYPERUSDT-20260921-212614-7156B5",
+    "session_id": "20260921-210730-6AFB",
+    "pair": "HYPERUSDT",
+    "direction": "BUY",
+    "price_now_reference": "0.07412",
+    "entry": "0.07335",
+    "entry_reason": "FVG Terakir H4 yang paspasan dengan Order Block H4, Liquidity Pool 14% H4, tipis di atas Volumatic Trend konsisten yang terbentuk di M15",
+    "price_exp": "0.07473",
+    "price_exp_reason": "TP",
+    "sl": "0.07284",
+    "sl_reason": "di bawah close candle order block dan di atas Liquidity pool 24% (konfirmasi pembalikan arah sekaligus agar RR logis)",
+    "tp": "0.07473",
+    "tp_reason": "swing high H4 dan Liquidity Pool bearish 34%",
+    "status": "CLOSED",
+    "trailing": false,
+    "created_at": "2026-09-21T14:26:14.406473+00:00",
+    "filled_at": null,
+    "closed_at": "2026-09-21T15:03:23.592922+00:00",
+    "fill_price": null,
+    "exit_price": "0.07474",
+    "result": "EXPIRED",
+    "result_reason": "TP",
+    "pnl_percent": null,
+    "planned_rr": "2.705882352941176470588235294",
+    "pending_seconds": null,
+    "holding_seconds": null,
+    "trail_history": [],
+    "strategy_name": "MANUAL",
+    "strategy_version": "1.0"
+  }
+]
