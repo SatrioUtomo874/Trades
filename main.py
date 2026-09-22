@@ -25,6 +25,8 @@ Prinsip:
 - /analyze membuat:
     analysis/full_data.json
     analysis/analysis.md
+- /setup menyimpan snapshot setup aktif ke data/setups.json.
+- /open memulihkan snapshot setup tersebut setelah main.py diganti.
 """
 
 import asyncio
@@ -109,6 +111,7 @@ HISTORY_MARKDOWN_PATH = "data/trade_history.md"
 ANALYSIS_JSON_PATH = "analysis/full_data.json"
 ANALYSIS_MD_PATH = "analysis/analysis.md"
 NOTES_PATH = "data/notes.json"
+SETUPS_PATH = "data/setups.json"
 RESET_PATHS = (
     HISTORY_TRADES_PATH,
     HISTORY_EVENTS_PATH,
@@ -1354,12 +1357,14 @@ class TradingEngine:
 
         self.history_records: list[dict[str, Any]] = []
         self.history_events: list[dict[str, Any]] = []
+        self.notes: list[dict[str, Any]] = []
 
         # Market-event ordering is also guarded at engine level. This is a
         # second safety layer so an out-of-order callback can never trigger
         # a state transition. Key = (Binance event time, aggregate trade ID).
         self._last_market_event_key: dict[str, tuple[int, int]] = {}
         self._last_live_price: dict[str, Decimal] = {}
+
 
         self.flow: dict[str, Any] | None = None
 
@@ -1704,6 +1709,262 @@ class TradingEngine:
             )
 
         await self.reply("\n\n".join(lines))
+
+    # --------------------------------------------------------
+    # SETUP PERSISTENCE
+    # --------------------------------------------------------
+
+    async def save_setups(self) -> None:
+        """Simpan snapshot seluruh setup aktif (/trade) ke GitHub.
+
+        File ini sengaja dipisahkan dari histori pencatatan supaya setup
+        aktif dapat dibawa ke versi main.py berikutnya. /reset tidak
+        menghapus file ini.
+        """
+        async with self._trade_lock:
+            records = [
+                trade.to_record()
+                for trade in self.active_trades.values()
+                if trade.result is None and trade.status in {
+                    "PENDING",
+                    "FILLED",
+                }
+            ]
+
+        payload = {
+            "version": 1,
+            "saved_at": iso_utc(),
+            "saved_at_wib": format_wib(now_utc()),
+            "count": len(records),
+            "setups": records,
+        }
+
+        content = json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+
+        await self.github.replace_file(
+            SETUPS_PATH,
+            content,
+            f"setup: save {len(records)} active setup(s)",
+        )
+
+        pending = sum(
+            1
+            for record in records
+            if record.get("status") == "PENDING"
+        )
+        filled = sum(
+            1
+            for record in records
+            if record.get("status") == "FILLED"
+        )
+
+        await self.reply(
+            "💾 SETUP TERSIMPAN KE GITHUB\n\n"
+            f"Total: {len(records)}\n"
+            f"Pending: {pending}\n"
+            f"Filled: {filled}\n\n"
+            f"File: {SETUPS_PATH}\n"
+            "Setup dapat dipulihkan dengan /open setelah main.py diganti."
+        )
+
+    def _trade_from_saved_record(self, record: dict[str, Any]) -> Trade:
+        """Rebuild satu Trade aktif dari data /setup yang tersimpan."""
+        required = [
+            "trade_id",
+            "pair",
+            "direction",
+            "price_now_reference",
+            "entry",
+            "price_exp",
+            "sl",
+            "tp",
+        ]
+        missing = [
+            key
+            for key in required
+            if record.get(key) in (None, "")
+        ]
+        if missing:
+            raise ValueError(
+                "Field setup kurang: " + ", ".join(missing)
+            )
+
+        status = str(record.get("status") or "PENDING").upper().strip()
+        if status not in {"PENDING", "FILLED"}:
+            raise ValueError(
+                f"Status setup {record.get('trade_id')} tidak aktif: {status}."
+            )
+
+        if record.get("result") not in (None, ""):
+            raise ValueError(
+                f"Setup {record.get('trade_id')} sudah memiliki result dan tidak dapat dibuka."
+            )
+
+        if record.get("closed_at") not in (None, ""):
+            raise ValueError(
+                f"Setup {record.get('trade_id')} memiliki closed_at dan tidak dapat dibuka."
+            )
+
+        created_at = parse_iso(record.get("created_at")) or now_utc()
+        filled_at = parse_iso(record.get("filled_at"))
+
+        fill_price = (
+            parse_decimal(str(record["fill_price"]))
+            if record.get("fill_price") not in (None, "")
+            else None
+        )
+        pnl_percent = (
+            parse_decimal(str(record["pnl_percent"]))
+            if record.get("pnl_percent") not in (None, "")
+            else None
+        )
+
+        trail_history = record.get("trail_history")
+        if not isinstance(trail_history, list):
+            trail_history = []
+
+        return Trade(
+            trade_id=str(record["trade_id"]),
+            # Setup yang dibuka kembali menjadi bagian dari session main.py
+            # yang sedang berjalan, sementara created_at tetap dipertahankan.
+            session_id=self.session_id,
+            pair=normalize_symbol(str(record["pair"])),
+            direction=str(record["direction"]).upper().strip(),
+            price_now_reference=parse_decimal(str(record["price_now_reference"])),
+            entry=parse_decimal(str(record["entry"])),
+            entry_reason=str(record.get("entry_reason") or ""),
+            price_exp=parse_decimal(str(record["price_exp"])),
+            price_exp_reason=str(record.get("price_exp_reason") or ""),
+            sl=parse_decimal(str(record["sl"])),
+            sl_reason=str(record.get("sl_reason") or ""),
+            tp=parse_decimal(str(record["tp"])),
+            tp_reason=str(record.get("tp_reason") or ""),
+            status=status,
+            trailing=bool(record.get("trailing", False)),
+            created_at=created_at,
+            filled_at=filled_at,
+            closed_at=None,
+            fill_price=fill_price,
+            exit_price=None,
+            result=None,
+            result_reason=None,
+            pnl_percent=pnl_percent if status == "FILLED" else None,
+            trail_history=copy.deepcopy(trail_history),
+            strategy_name=str(record.get("strategy_name") or "MANUAL"),
+            strategy_version=str(record.get("strategy_version") or "1.0"),
+        )
+
+    async def open_setups(self) -> None:
+        """Pulihkan setup aktif yang sebelumnya disimpan dengan /setup."""
+        raw, _ = await self.github.get_file(SETUPS_PATH)
+
+        if not raw:
+            await self.reply(
+                "📂 OPEN SETUP\n\n"
+                f"Belum ada file {SETUPS_PATH} di GitHub.\n"
+                "Gunakan /setup terlebih dahulu."
+            )
+            return
+
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"{SETUPS_PATH} bukan JSON valid."
+            ) from exc
+
+        if isinstance(payload, list):
+            records = payload
+        elif isinstance(payload, dict):
+            records = payload.get("setups", [])
+        else:
+            raise RuntimeError(
+                f"{SETUPS_PATH} harus berisi list setup atau object dengan key 'setups'."
+            )
+
+        if not isinstance(records, list):
+            raise RuntimeError(
+                f"{SETUPS_PATH}: key 'setups' harus berupa list."
+            )
+
+        loaded = 0
+        skipped = 0
+        skipped_details: list[str] = []
+        symbols_to_subscribe: set[str] = set()
+
+        for raw_record in records:
+            if not isinstance(raw_record, dict):
+                skipped += 1
+                skipped_details.append("record bukan object")
+                continue
+
+            try:
+                trade = self._trade_from_saved_record(raw_record)
+            except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+                skipped += 1
+                skipped_details.append(str(exc))
+                continue
+
+            if trade.trade_id in self.active_trades:
+                skipped += 1
+                skipped_details.append(
+                    f"{trade.trade_id}: sudah aktif"
+                )
+                continue
+
+            if len(self.active_trades) >= MAX_ACTIVE_TRADES:
+                skipped += 1
+                skipped_details.append(
+                    f"{trade.trade_id}: batas active trade tercapai"
+                )
+                continue
+
+            self.active_trades[trade.trade_id] = trade
+            loaded += 1
+            symbols_to_subscribe.add(trade.pair)
+
+        for symbol in sorted(symbols_to_subscribe):
+            try:
+                await self.ws.add_symbol(symbol)
+            except Exception:
+                # Setup tetap dipulihkan ke RAM. WebSocket akan retry/reconnect.
+                log.exception(
+                    "Subscription WebSocket %s gagal saat /open.",
+                    symbol,
+                )
+
+        lines = [
+            "📂 SETUP DIBUKA",
+            "",
+            f"Berhasil: {loaded}",
+            f"Dilewati: {skipped}",
+        ]
+
+        if skipped_details:
+            lines.extend([
+                "",
+                "Detail dilewati:",
+            ])
+            lines.extend(
+                f"• {detail}"
+                for detail in skipped_details[:10]
+            )
+
+            if len(skipped_details) > 10:
+                lines.append(
+                    f"• ...dan {len(skipped_details) - 10} lainnya"
+                )
+
+        lines.extend([
+            "",
+            "Gunakan /trade untuk melihat setup yang aktif.",
+        ])
+
+        await self.reply("\n".join(lines))
 
     async def reset_github_records(self) -> None:
         """Hapus seluruh file pencatatan bot dari GitHub.
@@ -2426,7 +2687,16 @@ class TradingEngine:
             trade.trade_id
         ] = trade
 
+
         self.flow = None
+
+        level_note = ""
+        if trade.price_exp == trade.tp:
+            level_note = (
+                "\n\n⚠️ Catatan: Price Exp sama dengan TP. "
+                "Saat status PENDING, sentuhan level ini tetap dihitung "
+                "sebagai PRICE EXPIRED, bukan TP."
+            )
 
         try:
             await self.ws.add_symbol(
@@ -2453,6 +2723,7 @@ class TradingEngine:
             f"Price TP: {decimal_to_str(trade.tp)}\n"
             f"Reason TP: {trade.tp_reason}\n\n"
             "Status: PENDING"
+            f"{level_note}"
         )
 
     # --------------------------------------------------------
@@ -3601,9 +3872,7 @@ class TradingEngine:
         aggregate_trade_id: int | None = None,
     ) -> None:
         # Defense-in-depth: jangan pernah memproses market event yang lebih
-        # lama dari event terakhir untuk symbol yang sama. Ini penting saat
-        # koneksi WebSocket reconnect / close-reopen dan event lama tiba
-        # terlambat.
+        # lama dari event terakhir untuk symbol yang sama.
         event_key = (
             int(event_time_ms),
             int(aggregate_trade_id)
@@ -3616,8 +3885,6 @@ class TradingEngine:
             return
 
         self._last_market_event_key[symbol] = event_key
-
-        previous_live_price = self._last_live_price.get(symbol)
 
         self.prices[symbol] = PriceSnapshot(
             symbol=symbol,
@@ -3641,8 +3908,10 @@ class TradingEngine:
 
             try:
                 if trade.status == "PENDING":
-                    # PENTING: saat PENDING, hanya Entry dan Price Exp yang
-                    # boleh mengubah state. TP/SL SAMA SEKALI tidak dicek.
+                    # PENDING hanya dipengaruhi oleh Entry dan Price Exp.
+                    # Price Exp diperiksa langsung terhadap tick Binance yang
+                    # sedang diterima. Tidak memakai previous-price crossing
+                    # atau baseline REST sebagai syarat tambahan.
                     if trade.direction == "BUY":
                         if price <= trade.entry:
                             await self._fill_trade(
@@ -3651,19 +3920,7 @@ class TradingEngine:
                             )
                             continue
 
-                        # Price Exp harus benar-benar merupakan crossing dari
-                        # sisi valid menuju / melewati level Exp. Dengan guard
-                        # previous_live_price, harga stale/duplicate tidak
-                        # bisa tiba-tiba membuat setup EXPIRED.
-                        crossed_exp = (
-                            price >= trade.price_exp
-                            and (
-                                previous_live_price is None
-                                or previous_live_price < trade.price_exp
-                            )
-                        )
-
-                        if crossed_exp:
+                        if price >= trade.price_exp:
                             await self._finalize_trade(
                                 trade,
                                 result="EXPIRED",
@@ -3680,15 +3937,7 @@ class TradingEngine:
                             )
                             continue
 
-                        crossed_exp = (
-                            price <= trade.price_exp
-                            and (
-                                previous_live_price is None
-                                or previous_live_price > trade.price_exp
-                            )
-                        )
-
-                        if crossed_exp:
+                        if price <= trade.price_exp:
                             await self._finalize_trade(
                                 trade,
                                 result="EXPIRED",
@@ -4429,6 +4678,8 @@ class TradingEngine:
             "/add - membuat setup baru\n"
             "/back - kembali satu langkah / batalkan sesi\n"
             "/trade - melihat setup aktif + harga live\n"
+            "/setup - simpan semua setup aktif /trade ke GitHub\n"
+            "/open - buka kembali setup yang tersimpan di GitHub\n"
             "/trail - mengubah SL setup\n"
             "/del - menghapus setup\n"
             "/filled - ubah setup PENDING menjadi FILLED secara manual\n"
@@ -4501,6 +4752,8 @@ class TradingEngine:
                     "/del",
                     "/filled",
                     "/trade",
+                    "/setup",
+                    "/open",
                     "/stats",
                     "/analyze",
                     "/status",
@@ -4519,6 +4772,28 @@ class TradingEngine:
 
             if command == "/trade":
                 await self.show_trades()
+                return
+
+            if command == "/setup":
+                try:
+                    await self.save_setups()
+                except Exception as exc:
+                    log.exception("SETUP gagal disimpan ke GitHub.")
+                    await self.reply(
+                        "❌ /setup gagal.\n\n"
+                        f"{exc}"
+                    )
+                return
+
+            if command == "/open":
+                try:
+                    await self.open_setups()
+                except Exception as exc:
+                    log.exception("OPEN setup dari GitHub gagal.")
+                    await self.reply(
+                        "❌ /open gagal.\n\n"
+                        f"{exc}"
+                    )
                 return
 
             if command == "/trail":
