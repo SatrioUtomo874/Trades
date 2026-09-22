@@ -65,3 +65,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-21T16:16:21.652400+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## NEARUSDT — BUY
+
+Trade ID: `NEARUSDT-20260921-211112-B07D06`
+
+### Setup
+
+- Price Now Reference: 4.108
+- Entry: 3.816
+- Reason Entry: FVG + Sedikit diatas Order Block sebelum reduction + Zona Liquidity 60% + Discount Zone Fibonachi 0.618 + RSI 68 + M15 BOS (H4 Reduction)
+- Price Exp: 4.425
+- Reason Price Exp: TP
+- SL: 3.547
+- Reason SL: Tipis di bawah Liquidity Pool 27%
+- TP: 4.425
+- Reason TP: tipis di atas swing High H4
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 4.425
+- Result Reason: TP
+- PnL: -
+- Created: 2026-09-21T14:11:12.233790+00:00
+- Filled: -
+- Closed: 2026-09-22T01:34:31.906935+00:00
+- Strategy: MANUAL v1.0
