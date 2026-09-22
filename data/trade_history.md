@@ -32,3 +32,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-22T12:58:06.000106+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## UMAUSDT — BUY
+
+Trade ID: `UMAUSDT-20260922-194400-B89139`
+
+### Setup
+
+- Price Now Reference: 0.4032
+- Entry: 0.384
+- Reason Entry: RSI H4 Divergent + OverBought (65.19). Liquidity Pool 100%. RSI M15 sedang netral (bisa turun lebih). FVG M15, Discount Zone 0.618 an (naiknya struggle buat nembus resistance H4)
+- Price Exp: 0.408
+- Reason Price Exp: Terlalu jauh dari entry (telat)
+- SL: 0.3787
+- Reason SL: tepat di bawah Liquidity Sweep
+- TP: 0.4033
+- Reason TP: Swing High H4
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.408
+- Result Reason: Terlalu jauh dari entry (telat)
+- PnL: -
+- Created: 2026-09-22T12:44:00.468810+00:00
+- Filled: -
+- Closed: 2026-09-22T13:03:00.212173+00:00
+- Strategy: MANUAL v1.0
