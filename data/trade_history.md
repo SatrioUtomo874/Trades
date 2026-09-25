@@ -98,3 +98,36 @@ Tidak ada trailing.
 - Filled: 2026-09-23T14:13:11.546243+00:00
 - Closed: 2026-09-23T14:13:22.783389+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## SOLUSDT — BUY
+
+Trade ID: `SOLUSDT-20260922-195004-54BB93`
+
+### Setup
+
+- Price Now Reference: 117.29
+- Entry: 109.38
+- Reason Entry: Entry di Liquidity Sweep (Pool 100%). sedikit di atas Order Block. RSI H4 OverBought (69.01) + Divergent tipis.
+- Price Exp: 120
+- Reason Price Exp: Telat Entry
+- SL: 106.22
+- Reason SL: di bawah Volumatik Trend
+- TP: 118.86
+- Reason TP: Swing High H4
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 120
+- Result Reason: Telat Entry
+- PnL: -
+- Created: 2026-09-22T12:50:04.634431+00:00
+- Filled: -
+- Closed: 2026-09-25T11:06:32.034813+00:00
+- Strategy: MANUAL v1.0
