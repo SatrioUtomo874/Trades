@@ -11,8 +11,9 @@ Kontrak dengan try.py:
     async def on_stop(context)
 
 Prinsip:
-- Binance USDⓈ-M Futures = market data saja.
-- Tidak ada fungsi order / trading API Binance.
+- Binance USDⓈ-M Futures = market data utama.
+- Real execution bersifat opsional melalui /real dan signed Binance Futures API.
+- Saat /real OFF, sistem tetap murni simulasi seperti sebelumnya.
 - Price Now pada /add diambil REST satu kali.
 - Harga live setelah setup dibuat berasal dari Binance WebSocket.
 - Active trade hanya ada di RAM selama sesi main.py.
@@ -32,6 +33,8 @@ Prinsip:
 import asyncio
 import base64
 import copy
+import hashlib
+import hmac
 import html  # kept out of user output; used only for safe GitHub text if needed
 import json
 import logging
@@ -42,10 +45,10 @@ import traceback
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -89,8 +92,8 @@ REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
 GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
 MAIN_FILE = (os.getenv("MAIN_FILE") or "main.py").strip()
 
-# Key Binance tersedia di env, tetapi sengaja TIDAK dipakai.
-# Market data publik tidak membutuhkan signing / order credentials.
+# Kredensial real Binance hanya dipakai ketika /real ON.
+# Jangan pernah menulis key/secret ini ke GitHub, /setup, log, atau Telegram.
 BINANCE_API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
 BINANCE_API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
 BINANCE_API_KEY_1 = (os.getenv("BINANCE_API_KEY_1") or "").strip()
@@ -129,6 +132,15 @@ PRICE_STALE_SECONDS = 15
 MAX_ACTIVE_TRADES = 100
 HISTORY_REFRESH_SECONDS = 30
 
+DEFAULT_MARGIN_USDT = Decimal("0.5")
+DEFAULT_LEVERAGE = 10
+REAL_NOTIONAL_MIN_RATIO = Decimal("0.90")
+REAL_NOTIONAL_MAX_RATIO = Decimal("1.10")
+BINANCE_RECV_WINDOW = 5000
+BINANCE_RATE_LIMIT_FALLBACK_SECONDS = 60
+BINANCE_RATE_LIMIT_SAFETY_SECONDS = 60
+REAL_RECONCILE_INTERVAL_SECONDS = 1.0
+
 if not ALLOWED_USER_ID:
     raise RuntimeError("ALLOWED_USER_ID belum diset.")
 
@@ -147,10 +159,10 @@ log = logging.getLogger("main.trading_engine")
 
 
 class TelegramErrorHandler(logging.Handler):
-    """Forward ERROR/EXCEPTION logs from background tasks to Telegram."""
+    """Forward WARNING/ERROR logs from backend tasks to Telegram."""
 
     def __init__(self, engine: "TradingEngine") -> None:
-        super().__init__(level=logging.ERROR)
+        super().__init__(level=logging.WARNING)
         self.engine = engine
         self.loop: asyncio.AbstractEventLoop | None = None
         self._last_signature = ""
@@ -258,6 +270,19 @@ def parse_decimal(value: str) -> Decimal:
     return number
 
 
+def parse_signed_decimal(value: str) -> Decimal:
+    text = str(value or "").strip().replace(",", ".")
+    if not re.fullmatch(r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)", text):
+        raise ValueError("Angka desimal tidak valid.")
+    try:
+        number = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError("Angka desimal tidak valid.") from exc
+    if not number.is_finite():
+        raise ValueError("Angka desimal tidak finite.")
+    return number
+
+
 def normalize_symbol(value: str) -> str:
     text = str(value or "").upper().strip()
     text = text.replace("/", "").replace("-", "").replace("_", "")
@@ -348,6 +373,12 @@ class SymbolMeta:
     tick_size: Decimal
     min_price: Decimal = Decimal("0")
     max_price: Decimal = Decimal("0")
+    min_qty: Decimal = Decimal("0")
+    max_qty: Decimal = Decimal("0")
+    step_size: Decimal = Decimal("0")
+    min_notional: Decimal = Decimal("0")
+    max_notional: Decimal = Decimal("0")
+    quantity_precision: int = 0
 
 
 @dataclass(slots=True)
@@ -409,6 +440,25 @@ class Trade:
 
     strategy_name: str = "MANUAL"
     strategy_version: str = "1.0"
+
+    # Real execution metadata. None/False means no real order is attached.
+    margin_usdt: Decimal = DEFAULT_MARGIN_USDT
+    leverage: int = DEFAULT_LEVERAGE
+    quantity: Decimal | None = None
+    target_notional: Decimal | None = None
+    actual_notional: Decimal | None = None
+    real_enabled: bool = False
+    real_state: str = "SIMULATION"
+    position_side: str | None = None
+    entry_order_id: int | None = None
+    entry_client_order_id: str | None = None
+    tp_algo_id: int | None = None
+    sl_algo_id: int | None = None
+    tp_client_algo_id: str | None = None
+    sl_client_algo_id: str | None = None
+    real_error: str | None = None
+    last_real_check_monotonic: float = 0.0
+    real_exit_check: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         pending_seconds: float | None = None
@@ -486,6 +536,23 @@ class Trade:
 
             "strategy_name": self.strategy_name,
             "strategy_version": self.strategy_version,
+
+            "margin_usdt": decimal_to_str(self.margin_usdt),
+            "leverage": self.leverage,
+            "quantity": decimal_to_str(self.quantity),
+            "target_notional": decimal_to_str(self.target_notional),
+            "actual_notional": decimal_to_str(self.actual_notional),
+            "real_enabled": self.real_enabled,
+            "real_state": self.real_state,
+            "position_side": self.position_side,
+            "entry_order_id": self.entry_order_id,
+            "entry_client_order_id": self.entry_client_order_id,
+            "tp_algo_id": self.tp_algo_id,
+            "sl_algo_id": self.sl_algo_id,
+            "tp_client_algo_id": self.tp_client_algo_id,
+            "sl_client_algo_id": self.sl_client_algo_id,
+            "real_error": self.real_error,
+            "real_exit_check": self.real_exit_check,
         }
 
 
@@ -551,9 +618,16 @@ class BinanceREST:
             tick_size = Decimal("0")
             min_price = Decimal("0")
             max_price = Decimal("0")
+            min_qty = Decimal("0")
+            max_qty = Decimal("0")
+            step_size = Decimal("0")
+            min_notional = Decimal("0")
+            max_notional = Decimal("0")
 
             for filt in raw.get("filters", []):
-                if filt.get("filterType") == "PRICE_FILTER":
+                filter_type = str(filt.get("filterType") or "")
+
+                if filter_type == "PRICE_FILTER":
                     tick_size = Decimal(
                         str(filt.get("tickSize") or "0")
                     )
@@ -563,7 +637,32 @@ class BinanceREST:
                     max_price = Decimal(
                         str(filt.get("maxPrice") or "0")
                     )
-                    break
+
+                elif filter_type in {"LOT_SIZE", "MARKET_LOT_SIZE"}:
+                    # LOT_SIZE adalah acuan utama untuk LIMIT entry.
+                    if filter_type == "LOT_SIZE" or step_size == 0:
+                        min_qty = Decimal(
+                            str(filt.get("minQty") or "0")
+                        )
+                        max_qty = Decimal(
+                            str(filt.get("maxQty") or "0")
+                        )
+                        step_size = Decimal(
+                            str(filt.get("stepSize") or "0")
+                        )
+
+                elif filter_type == "MIN_NOTIONAL":
+                    min_notional = Decimal(
+                        str(filt.get("notional") or filt.get("minNotional") or "0")
+                    )
+
+                elif filter_type == "NOTIONAL":
+                    min_notional = Decimal(
+                        str(filt.get("minNotional") or min_notional or "0")
+                    )
+                    max_notional = Decimal(
+                        str(filt.get("maxNotional") or "0")
+                    )
 
             result[symbol] = SymbolMeta(
                 symbol=symbol,
@@ -573,6 +672,12 @@ class BinanceREST:
                 tick_size=tick_size,
                 min_price=min_price,
                 max_price=max_price,
+                min_qty=min_qty,
+                max_qty=max_qty,
+                step_size=step_size,
+                min_notional=min_notional,
+                max_notional=max_notional,
+                quantity_precision=int(raw.get("quantityPrecision") or 0),
             )
 
         return result
@@ -585,6 +690,544 @@ class BinanceREST:
 
         return parse_decimal(str(payload["price"]))
 
+
+# ============================================================
+# BINANCE REAL EXECUTION
+# ============================================================
+
+class BinanceAPIError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: int | None = None,
+        endpoint: str = "",
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.code = code
+        self.endpoint = endpoint
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(message)
+
+    def __str__(self) -> str:
+        parts = []
+        if self.status_code is not None:
+            parts.append(f"HTTP {self.status_code}")
+        if self.code is not None:
+            parts.append(f"code {self.code}")
+        if self.endpoint:
+            parts.append(self.endpoint)
+        prefix = " | ".join(parts)
+        if prefix:
+            return f"{prefix}: {super().__str__()}"
+        return super().__str__()
+
+
+class BinanceRateLimitError(BinanceAPIError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        code: int | None,
+        endpoint: str,
+        server_cooldown_seconds: float,
+        bot_cooldown_seconds: float,
+        retry_after_known: bool = False,
+    ) -> None:
+        self.server_cooldown_seconds = server_cooldown_seconds
+        self.bot_cooldown_seconds = bot_cooldown_seconds
+        self.retry_after_known = bool(retry_after_known)
+        super().__init__(
+            message,
+            status_code=status_code,
+            code=code,
+            endpoint=endpoint,
+            retry_after_seconds=(
+                server_cooldown_seconds
+                if self.retry_after_known
+                else None
+            ),
+        )
+
+
+class MarginInfluenceError(RuntimeError):
+    pass
+
+
+class BinanceRealClient:
+    """Signed USD-M Futures client used only when /real is ON."""
+
+    def __init__(self) -> None:
+        self.base_url = BINANCE_REST_BASE
+        self.api_key = BINANCE_API_KEY
+        self.api_secret = BINANCE_API_SECRET
+        self.recv_window = BINANCE_RECV_WINDOW
+        self._time_offset_ms = 0
+        self._cooldown_until = 0.0
+        self._request_lock = asyncio.Lock()
+        self._dual_side_position: bool | None = None
+        self.last_balance: dict[str, Any] | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_key and self.api_secret)
+
+    @property
+    def cooldown_remaining(self) -> float:
+        return max(0.0, self._cooldown_until - time.monotonic())
+
+    def _signed_query(self, params: dict[str, Any]) -> dict[str, Any]:
+        result = dict(params)
+        result.setdefault(
+            "timestamp",
+            int(time.time() * 1000) + self._time_offset_ms,
+        )
+        result.setdefault("recvWindow", self.recv_window)
+
+        query = urlencode(result)
+        signature = hmac.new(
+            self.api_secret.encode("utf-8"),
+            query.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        result["signature"] = signature
+        return result
+
+    @staticmethod
+    def _parse_retry_after(response: requests.Response) -> float | None:
+        raw = response.headers.get("Retry-After")
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, value)
+
+    @staticmethod
+    def _extract_binance_error(response: requests.Response) -> tuple[int | None, str]:
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        code = body.get("code") if isinstance(body, dict) else None
+        msg = body.get("msg") if isinstance(body, dict) else None
+        return (
+            int(code) if isinstance(code, (int, float, str)) and str(code).lstrip("-").isdigit() else None,
+            str(msg or response.text[:700] or "Unknown Binance API error"),
+        )
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        signed: bool = True,
+        retry_timestamp_error: bool = True,
+    ) -> Any:
+        if signed and not self.configured:
+            raise BinanceAPIError(
+                "BINANCE_API_KEY / BINANCE_API_SECRET belum tersedia di environment.",
+                endpoint=path,
+            )
+
+        remaining = self.cooldown_remaining
+        if remaining > 0:
+            raise BinanceRateLimitError(
+                f"REST Binance sedang ditahan oleh rate-limit cooldown ({remaining:.0f}s tersisa).",
+                status_code=429,
+                code=None,
+                endpoint=path,
+                server_cooldown_seconds=remaining,
+                bot_cooldown_seconds=remaining,
+                retry_after_known=False,
+            )
+
+        base_params = dict(params or {})
+        payload = self._signed_query(base_params) if signed else base_params
+        headers = {"Accept": "application/json"}
+        if signed:
+            headers["X-MBX-APIKEY"] = self.api_key
+
+        def request_once() -> requests.Response:
+            kwargs: dict[str, Any] = {
+                "headers": headers,
+                "timeout": HTTP_REQUEST_SECONDS,
+            }
+            if method.upper() in {"GET", "DELETE"}:
+                kwargs["params"] = payload
+            else:
+                kwargs["data"] = payload
+                kwargs["headers"] = {
+                    **headers,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                }
+            return requests.request(
+                method.upper(),
+                f"{self.base_url}{path}",
+                **kwargs,
+            )
+
+        async with self._request_lock:
+            try:
+                response = await asyncio.to_thread(request_once)
+            except requests.RequestException as exc:
+                raise BinanceAPIError(
+                    f"Transport error Binance: {exc}",
+                    endpoint=path,
+                ) from exc
+            except (OSError, TimeoutError) as exc:
+                raise BinanceAPIError(
+                    f"Transport error Binance: {exc}",
+                    endpoint=path,
+                ) from exc
+
+        if response.status_code in {418, 429}:
+            retry_after = self._parse_retry_after(response)
+            server_seconds = retry_after if retry_after is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
+            bot_seconds = server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS
+            self._cooldown_until = max(
+                self._cooldown_until,
+                time.monotonic() + bot_seconds,
+            )
+            code, msg = self._extract_binance_error(response)
+            raise BinanceRateLimitError(
+                msg,
+                status_code=response.status_code,
+                code=code,
+                endpoint=path,
+                server_cooldown_seconds=server_seconds,
+                bot_cooldown_seconds=bot_seconds,
+                retry_after_known=(retry_after is not None),
+            )
+
+        if response.status_code >= 400:
+            code, msg = self._extract_binance_error(response)
+            if code == -1021 and retry_timestamp_error:
+                try:
+                    server = await self._public_server_time()
+                    self._time_offset_ms = int(server) - int(time.time() * 1000)
+                    return await self._request(
+                        method,
+                        path,
+                        base_params,
+                        signed=signed,
+                        retry_timestamp_error=False,
+                    )
+                except Exception:
+                    pass
+
+            raise BinanceAPIError(
+                msg,
+                status_code=response.status_code,
+                code=code,
+                endpoint=path,
+            )
+
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise BinanceAPIError(
+                "Respons Binance bukan JSON valid.",
+                status_code=response.status_code,
+                endpoint=path,
+            ) from exc
+
+    async def _public_server_time(self) -> int:
+        def request() -> int:
+            response = requests.get(
+                f"{self.base_url}/fapi/v1/time",
+                timeout=HTTP_REQUEST_SECONDS,
+            )
+            response.raise_for_status()
+            body = response.json()
+            return int(body["serverTime"])
+
+        return await asyncio.to_thread(request)
+
+    async def get_futures_balance(self) -> list[dict[str, Any]]:
+        """Single balance test used when /real is turned ON."""
+        payload = await self._request("GET", "/fapi/v3/balance")
+        if not isinstance(payload, list):
+            raise BinanceAPIError(
+                "Respons /fapi/v3/balance tidak berbentuk list.",
+                endpoint="/fapi/v3/balance",
+            )
+        return [item for item in payload if isinstance(item, dict)]
+
+    async def get_account_info(self) -> dict[str, Any]:
+        payload = await self._request("GET", "/fapi/v2/account")
+        if not isinstance(payload, dict):
+            raise BinanceAPIError(
+                "Respons /fapi/v2/account tidak berbentuk object.",
+                endpoint="/fapi/v2/account",
+            )
+        self.last_balance = payload
+        positions = payload.get("positions") or []
+        sides = {
+            str(item.get("positionSide") or "")
+            for item in positions
+            if isinstance(item, dict)
+        }
+        if {"LONG", "SHORT"} & sides:
+            self._dual_side_position = True
+        elif "BOTH" in sides:
+            self._dual_side_position = False
+        return payload
+
+    async def get_account_config(self) -> dict[str, Any]:
+        payload = await self._request("GET", "/fapi/v1/accountConfig")
+        if isinstance(payload, dict) and "dualSidePosition" in payload:
+            self._dual_side_position = bool(payload["dualSidePosition"])
+        return payload
+
+    async def ensure_position_mode(self) -> bool:
+        if self._dual_side_position is None:
+            await self.get_account_config()
+        return bool(self._dual_side_position)
+
+    async def set_leverage(self, symbol: str, leverage: int) -> dict[str, Any]:
+        payload = await self._request(
+            "POST",
+            "/fapi/v1/leverage",
+            {"symbol": symbol, "leverage": leverage},
+        )
+        if not isinstance(payload, dict):
+            raise BinanceAPIError(
+                "Respons leverage Binance tidak valid.",
+                endpoint="/fapi/v1/leverage",
+            )
+        return payload
+
+    async def get_order(self, symbol: str, *, order_id: int | None = None, client_order_id: str | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {"symbol": symbol}
+        if order_id is not None:
+            params["orderId"] = order_id
+        elif client_order_id:
+            params["origClientOrderId"] = client_order_id
+        else:
+            raise ValueError("order_id atau client_order_id harus tersedia.")
+        payload = await self._request("GET", "/fapi/v1/order", params)
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons order Binance tidak valid.", endpoint="/fapi/v1/order")
+        return payload
+
+    async def get_open_orders(self, symbol: str) -> list[dict[str, Any]]:
+        payload = await self._request(
+            "GET",
+            "/fapi/v1/openOrders",
+            {"symbol": symbol},
+        )
+        if not isinstance(payload, list):
+            raise BinanceAPIError("Respons openOrders Binance tidak valid.", endpoint="/fapi/v1/openOrders")
+        return [item for item in payload if isinstance(item, dict)]
+
+    async def cancel_order(self, symbol: str, *, order_id: int | None = None, client_order_id: str | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {"symbol": symbol}
+        if order_id is not None:
+            params["orderId"] = order_id
+        elif client_order_id:
+            params["origClientOrderId"] = client_order_id
+        else:
+            raise ValueError("order_id atau client_order_id harus tersedia.")
+        payload = await self._request("DELETE", "/fapi/v1/order", params)
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons cancel order Binance tidak valid.", endpoint="/fapi/v1/order")
+        return payload
+
+    async def place_limit_entry(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        position_side: str,
+        client_order_id: str,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+            "quantity": decimal_to_str(quantity),
+            "price": decimal_to_str(price),
+            "newClientOrderId": client_order_id,
+            "newOrderRespType": "RESULT",
+        }
+        if position_side:
+            params["positionSide"] = position_side
+        payload = await self._request("POST", "/fapi/v1/order", params)
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons new order Binance tidak valid.", endpoint="/fapi/v1/order")
+        return payload
+
+    async def get_positions(self, symbol: str) -> list[dict[str, Any]]:
+        payload = await self._request(
+            "GET",
+            "/fapi/v2/positionRisk",
+            {"symbol": symbol},
+        )
+        if not isinstance(payload, list):
+            raise BinanceAPIError(
+                "Respons positionRisk Binance tidak valid.",
+                endpoint="/fapi/v2/positionRisk",
+            )
+
+        result: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("symbol") or "") != symbol:
+                continue
+            try:
+                amount = parse_signed_decimal(str(item.get("positionAmt") or "0"))
+            except ValueError:
+                continue
+            if amount == 0:
+                continue
+            copied = dict(item)
+            copied["_abs_position_amt"] = abs(amount)
+            copied["_position_amount_decimal"] = amount
+            result.append(copied)
+        return result
+
+    async def get_position(self, symbol: str, desired_side: str) -> dict[str, Any] | None:
+        dual = await self.ensure_position_mode()
+        target_side = (
+            "LONG" if desired_side == "BUY" else "SHORT"
+        ) if dual else "BOTH"
+
+        positions = await self.get_positions(symbol)
+        for item in positions:
+            if str(item.get("positionSide") or "BOTH") != target_side:
+                continue
+
+            amount = item.get("_position_amount_decimal")
+            if not isinstance(amount, Decimal):
+                try:
+                    amount = parse_signed_decimal(str(amount or "0"))
+                except ValueError:
+                    continue
+
+            if amount == 0:
+                continue
+
+            # In ONE-WAY mode BOTH represents the signed actual position:
+            # positive = LONG, negative = SHORT.
+            if not dual:
+                if desired_side == "BUY" and amount <= 0:
+                    continue
+                if desired_side == "SELL" and amount >= 0:
+                    continue
+
+            return item
+
+        return None
+
+    async def place_close_algo(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        position_side: str,
+        order_type: str,
+        trigger_price: Decimal,
+        client_algo_id: str,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "algoType": "CONDITIONAL",
+            "symbol": symbol,
+            "side": side,
+            "type": order_type,
+            "triggerPrice": decimal_to_str(trigger_price),
+            "workingType": "CONTRACT_PRICE",
+            "closePosition": "true",
+            "clientAlgoId": client_algo_id,
+        }
+        if position_side:
+            params["positionSide"] = position_side
+        payload = await self._request("POST", "/fapi/v1/algoOrder", params)
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons new algo order Binance tidak valid.", endpoint="/fapi/v1/algoOrder")
+        return payload
+
+    async def get_open_algo_orders(self, symbol: str) -> list[dict[str, Any]]:
+        payload = await self._request(
+            "GET",
+            "/fapi/v1/openAlgoOrders",
+            {"symbol": symbol, "algoType": "CONDITIONAL"},
+        )
+        if not isinstance(payload, list):
+            raise BinanceAPIError("Respons openAlgoOrders Binance tidak valid.", endpoint="/fapi/v1/openAlgoOrders")
+        return [item for item in payload if isinstance(item, dict)]
+
+    async def get_algo_order(self, *, algo_id: int) -> dict[str, Any]:
+        payload = await self._request(
+            "GET",
+            "/fapi/v1/algoOrder",
+            {"algoId": algo_id},
+        )
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons algoOrder Binance tidak valid.", endpoint="/fapi/v1/algoOrder")
+        return payload
+
+    async def cancel_algo_order(self, *, symbol: str, algo_id: int | None = None, client_algo_id: str | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {"symbol": symbol}
+        if algo_id is not None:
+            params["algoId"] = algo_id
+        elif client_algo_id:
+            params["clientAlgoId"] = client_algo_id
+        else:
+            raise ValueError("algo_id atau client_algo_id harus tersedia.")
+        payload = await self._request("DELETE", "/fapi/v1/algoOrder", params)
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons cancel algo Binance tidak valid.", endpoint="/fapi/v1/algoOrder")
+        return payload
+
+    async def cancel_all_algo_orders(self, symbol: str) -> dict[str, Any]:
+        payload = await self._request(
+            "DELETE",
+            "/fapi/v1/algoOpenOrders",
+            {"symbol": symbol},
+        )
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons cancel all algo Binance tidak valid.", endpoint="/fapi/v1/algoOpenOrders")
+        return payload
+
+    async def place_market_close(
+        self,
+        *,
+        symbol: str,
+        position: dict[str, Any],
+        entry_direction: str,
+    ) -> dict[str, Any]:
+        dual = await self.ensure_position_mode()
+        position_side = str(position.get("positionSide") or "BOTH")
+        quantity = parse_decimal(str(position["_abs_position_amt"]))
+        side = "SELL" if entry_direction == "BUY" else "BUY"
+
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "type": "MARKET",
+            "quantity": decimal_to_str(quantity),
+            "newOrderRespType": "RESULT",
+        }
+        if dual:
+            params["positionSide"] = position_side
+        else:
+            params["positionSide"] = "BOTH"
+            params["reduceOnly"] = "true"
+
+        payload = await self._request("POST", "/fapi/v1/order", params)
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons market close Binance tidak valid.", endpoint="/fapi/v1/order")
+        return payload
 
 # ============================================================
 # BINANCE WEBSOCKET MARKET DATA
@@ -1359,6 +2002,13 @@ class TradingEngine:
         self.history_events: list[dict[str, Any]] = []
         self.notes: list[dict[str, Any]] = []
 
+        # Runtime real-trading controls. REAL selalu OFF saat engine baru dibuat.
+        self.real_mode = False
+        self.margin_usdt = DEFAULT_MARGIN_USDT
+        self.leverage = DEFAULT_LEVERAGE
+        self.real = BinanceRealClient()
+        self._real_reconcile_guard: dict[str, float] = {}
+
         # Market-event ordering is also guarded at engine level. This is a
         # second safety layer so an out-of-order callback can never trigger
         # a state transition. Key = (Binance event time, aggregate trade ID).
@@ -1415,7 +2065,7 @@ class TradingEngine:
                 )
 
             text = (
-                "🚨 ERROR BACKEND\n\n"
+                f"{'🚨 ERROR BACKEND' if record.levelno >= logging.ERROR else '⚠️ WARNING BACKEND'}\n\n"
                 f"Module: {record.name}\n"
                 f"Level: {record.levelname}\n"
                 f"Message: {record.getMessage()}\n"
@@ -1479,7 +2129,7 @@ class TradingEngine:
 
         await self.reply(
             "🟢 MAIN.PY ONLINE\n\n"
-            "Mode: SIMULATION ONLY\n"
+            "Execution: REAL OFF (SIMULATION)\n"
             "Market: Binance USDⓈ-M Futures\n"
             "WebSocket: CONNECTING\n"
             f"Session: {self.session_id}\n\n"
@@ -1732,10 +2382,14 @@ class TradingEngine:
             ]
 
         payload = {
-            "version": 1,
+            "version": 2,
             "saved_at": iso_utc(),
             "saved_at_wib": format_wib(now_utc()),
             "count": len(records),
+            "defaults": {
+                "margin_usdt": decimal_to_str(self.margin_usdt),
+                "leverage": self.leverage,
+            },
             "setups": records,
         }
 
@@ -1768,7 +2422,8 @@ class TradingEngine:
             f"Pending: {pending}\n"
             f"Filled: {filled}\n\n"
             f"File: {SETUPS_PATH}\n"
-            "Setup dapat dipulihkan dengan /open setelah main.py diganti."
+            "Setup dapat dipulihkan dengan /open setelah main.py diganti.\n"
+            "Credential Binance TIDAK pernah disimpan ke file setup."
         )
 
     def _trade_from_saved_record(self, record: dict[str, Any]) -> Trade:
@@ -1818,10 +2473,25 @@ class TradingEngine:
             else None
         )
         pnl_percent = (
-            parse_decimal(str(record["pnl_percent"]))
+            parse_signed_decimal(str(record["pnl_percent"]))
             if record.get("pnl_percent") not in (None, "")
             else None
         )
+
+        def optional_decimal(key: str) -> Decimal | None:
+            value = record.get(key)
+            if value in (None, ""):
+                return None
+            return parse_decimal(str(value))
+
+        def optional_int(key: str) -> int | None:
+            value = record.get(key)
+            if value in (None, ""):
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
 
         trail_history = record.get("trail_history")
         if not isinstance(trail_history, list):
@@ -1856,6 +2526,31 @@ class TradingEngine:
             trail_history=copy.deepcopy(trail_history),
             strategy_name=str(record.get("strategy_name") or "MANUAL"),
             strategy_version=str(record.get("strategy_version") or "1.0"),
+            margin_usdt=optional_decimal("margin_usdt") or DEFAULT_MARGIN_USDT,
+            leverage=int(record.get("leverage") or DEFAULT_LEVERAGE),
+            quantity=optional_decimal("quantity"),
+            target_notional=optional_decimal("target_notional"),
+            actual_notional=optional_decimal("actual_notional"),
+            real_enabled=bool(record.get("real_enabled", False)),
+            real_state=(
+                str(record.get("real_state") or "").strip()
+                or (
+                    "REAL_FILLED"
+                    if status == "FILLED" and record.get("real_enabled")
+                    else "REAL_PENDING"
+                    if status == "PENDING" and record.get("real_enabled")
+                    else "SIMULATION"
+                )
+            ),
+            position_side=(str(record.get("position_side")) if record.get("position_side") not in (None, "") else None),
+            entry_order_id=optional_int("entry_order_id"),
+            entry_client_order_id=(str(record.get("entry_client_order_id")) if record.get("entry_client_order_id") not in (None, "") else None),
+            tp_algo_id=optional_int("tp_algo_id"),
+            sl_algo_id=optional_int("sl_algo_id"),
+            tp_client_algo_id=(str(record.get("tp_client_algo_id")) if record.get("tp_client_algo_id") not in (None, "") else None),
+            sl_client_algo_id=(str(record.get("sl_client_algo_id")) if record.get("sl_client_algo_id") not in (None, "") else None),
+            real_error=(str(record.get("real_error")) if record.get("real_error") not in (None, "") else None),
+            real_exit_check=(str(record.get("real_exit_check")) if record.get("real_exit_check") not in (None, "") else None),
         )
 
     async def open_setups(self) -> None:
@@ -1880,6 +2575,35 @@ class TradingEngine:
         if isinstance(payload, list):
             records = payload
         elif isinstance(payload, dict):
+            defaults = payload.get("defaults")
+            if isinstance(defaults, dict):
+                saved_margin = defaults.get("margin_usdt")
+                saved_leverage = defaults.get("leverage")
+
+                if saved_margin not in (None, ""):
+                    try:
+                        restored_margin = parse_decimal(str(saved_margin))
+                        if restored_margin > 0:
+                            self.margin_usdt = restored_margin
+                    except ValueError:
+                        log.warning(
+                            "Default margin pada %s tidak valid; margin runtime dipertahankan.",
+                            SETUPS_PATH,
+                        )
+
+                if saved_leverage not in (None, ""):
+                    try:
+                        restored_leverage = int(saved_leverage)
+                    except (TypeError, ValueError):
+                        restored_leverage = self.leverage
+                    if 1 <= restored_leverage <= 125:
+                        self.leverage = restored_leverage
+                    else:
+                        log.warning(
+                            "Default leverage pada %s di luar 1-125; leverage runtime dipertahankan.",
+                            SETUPS_PATH,
+                        )
+
             records = payload.get("setups", [])
         else:
             raise RuntimeError(
@@ -1936,6 +2660,24 @@ class TradingEngine:
                     "Subscription WebSocket %s gagal saat /open.",
                     symbol,
                 )
+
+        if self.real_mode:
+            for trade in list(self.active_trades.values()):
+                if not trade.real_enabled:
+                    continue
+                try:
+                    await self._reconcile_real_trade(trade)
+                except BinanceRateLimitError as exc:
+                    self._notify_rate_limit(exc, f"RECONCILE /open {trade.pair}")
+                except Exception:
+                    log.exception(
+                        "Rekonsiliasi REAL %s gagal saat /open.",
+                        trade.trade_id,
+                    )
+        else:
+            for trade in self.active_trades.values():
+                if trade.real_enabled:
+                    trade.real_state = "REAL_DETACHED"
 
         lines = [
             "📂 SETUP DIBUKA",
@@ -2151,6 +2893,16 @@ class TradingEngine:
             f"- Reason SL: {record['sl_reason']}\n"
             f"- TP: {record['tp']}\n"
             f"- Reason TP: {record['tp_reason']}\n\n"
+            "### Real Execution\n\n"
+            f"- Real Enabled: {record.get('real_enabled', False)}\n"
+            f"- Margin: {record.get('margin_usdt', '-')} USDT\n"
+            f"- Leverage: {record.get('leverage', '-')}x\n"
+            f"- Quantity: {record.get('quantity', '-')}\n"
+            f"- Target Notional: {record.get('target_notional', '-')} USDT\n"
+            f"- Actual Notional: {record.get('actual_notional', '-')} USDT\n"
+            f"- Entry Order ID: {record.get('entry_order_id', '-')}\n"
+            f"- TP Algo ID: {record.get('tp_algo_id', '-')}\n"
+            f"- SL Algo ID: {record.get('sl_algo_id', '-')}\n\n"
             "### Management\n\n"
             f"{trails}"
             "\n### Result\n\n"
@@ -2230,6 +2982,1131 @@ class TradingEngine:
         )
 
         return price
+
+    # --------------------------------------------------------
+    # REAL MODE / MONEY MANAGEMENT
+    # --------------------------------------------------------
+
+    async def _start_real_on(self) -> None:
+        if self.real_mode:
+            await self.reply(
+                "🟢 REAL MODE SUDAH ON\n\n"
+                f"Margin default: {decimal_to_str(self.margin_usdt)} USDT\n"
+                f"Leverage default: {self.leverage}x"
+            )
+            return
+
+        if not self.real.configured:
+            await self.reply(
+                "❌ REAL MODE GAGAL DINYALAKAN\n\n"
+                "BINANCE_API_KEY / BINANCE_API_SECRET belum tersedia."
+            )
+            return
+
+        try:
+            # Exactly one signed balance request is used as the /real ON access test.
+            balances = await self.real.get_futures_balance()
+            usdt = next(
+                (
+                    item
+                    for item in balances
+                    if str(item.get("asset") or "").upper() == "USDT"
+                ),
+                None,
+            )
+
+            if usdt is None:
+                raise BinanceAPIError(
+                    "Endpoint balance berhasil merespons, tetapi asset USDT tidak ditemukan.",
+                    endpoint="/fapi/v3/balance",
+                )
+
+            balance = parse_decimal(str(usdt.get("balance") or "0"))
+            available = parse_decimal(
+                str(usdt.get("availableBalance") or usdt.get("balance") or "0")
+            )
+
+            self.real_mode = True
+            dual_text = (
+                "HEDGE" if self.real._dual_side_position
+                else "ONE-WAY" if self.real._dual_side_position is False
+                else "AUTO (akan dibaca saat eksekusi)"
+            )
+
+            await self.reply(
+                "🟢 REAL MODE ON\n\n"
+                "Binance API: CONNECTED\n"
+                "Account: VERIFIED\n"
+                f"USDT Balance: {decimal_to_str(balance)} USDT\n"
+                f"Available: {decimal_to_str(available)} USDT\n"
+                f"Position Mode: {dual_text}\n\n"
+                f"Margin default: {decimal_to_str(self.margin_usdt)} USDT\n"
+                f"Leverage default: {self.leverage}x\n"
+                f"Target Notional: {decimal_to_str(self.margin_usdt * Decimal(self.leverage))} USDT\n\n"
+                "Execution: REAL\n"
+                "Market Feed: WEBSOCKET"
+            )
+
+            # Existing saved real setups are reconciled only here. This does
+            # not create a new entry order when the saved metadata is missing.
+            for trade in list(self.active_trades.values()):
+                if not trade.real_enabled:
+                    continue
+                try:
+                    await self._reconcile_real_trade(trade)
+                except BinanceRateLimitError as exc:
+                    self._notify_rate_limit(exc, f"RECONCILE /real ON {trade.pair}")
+                except Exception:
+                    log.exception(
+                        "Rekonsiliasi REAL gagal saat /real ON untuk %s.",
+                        trade.trade_id,
+                    )
+
+        except BinanceRateLimitError as exc:
+            self.real_mode = False
+            self._notify_rate_limit(exc, "REAL ON / balance test")
+            await self.reply(
+                "❌ REAL MODE tetap OFF karena Binance sedang rate-limited.\n"
+                f"Cooldown safety: {exc.bot_cooldown_seconds:.0f} detik."
+            )
+        except Exception as exc:
+            self.real_mode = False
+            log.exception("REAL MODE gagal dinyalakan: %s", exc)
+            await self.reply(
+                "❌ REAL MODE tetap OFF.\n\n"
+                f"Binance API test gagal: {exc}"
+            )
+
+    async def _set_real_off(self) -> None:
+        if not self.real_mode:
+            await self.reply("🔴 REAL MODE SUDAH OFF")
+            return
+
+        protected_real = [
+            trade
+            for trade in self.active_trades.values()
+            if trade.real_enabled and trade.result is None
+        ]
+
+        if protected_real:
+            pairs = ", ".join(sorted({trade.pair for trade in protected_real}))
+            await self.reply(
+                "⚠️ REAL MODE TIDAK DIMATIKAN\n\n"
+                "Masih ada setup yang terhubung ke Binance real.\n"
+                f"Pair: {pairs}\n\n"
+                "Gunakan /del untuk membersihkan order/posisi real terlebih dahulu."
+            )
+            return
+
+        self.real_mode = False
+        await self.reply(
+            "🔴 REAL MODE OFF\n\n"
+            "Tidak ada order real baru yang akan dibuat.\n"
+            "WebSocket tetap berjalan.\n"
+            "Setup simulasi tetap berjalan.\n"
+            "Tidak ada order/posisi Binance yang disentuh otomatis."
+        )
+
+    def _notify_rate_limit(self, exc: BinanceRateLimitError, action: str) -> None:
+        server = max(0.0, exc.server_cooldown_seconds)
+        bot = max(0.0, exc.bot_cooldown_seconds)
+        retry_known = getattr(exc, "retry_after_known", False)
+        if retry_known:
+            timing = f"Retry-After Binance={server:.0f}s; bot pause={bot:.0f}s"
+        elif exc.code is None and exc.status_code == 429:
+            timing = (
+                "Cooldown internal bot sedang berjalan; "
+                f"sisa jeda={bot:.0f}s"
+            )
+        else:
+            timing = (
+                "Retry-After tidak diberikan; "
+                f"fallback Binance={server:.0f}s; bot pause={bot:.0f}s"
+            )
+        log.warning(
+            "Binance API LIMIT | action=%s | endpoint=%s | HTTP=%s | code=%s | %s | message=%s",
+            action,
+            exc.endpoint,
+            exc.status_code,
+            exc.code,
+            timing,
+            str(exc),
+        )
+
+    async def _handle_real_exception(self, exc: Exception, action: str, trade: Trade | None = None) -> None:
+        pair = trade.pair if trade else "-"
+        trade_id = trade.trade_id if trade else "-"
+        if isinstance(exc, BinanceRateLimitError):
+            self._notify_rate_limit(exc, action)
+            return
+        log.exception(
+            "REAL API error | action=%s | pair=%s | trade_id=%s | %s",
+            action,
+            pair,
+            trade_id,
+            exc,
+        )
+
+    def _position_side_for_direction(self, direction: str) -> str:
+        if self.real._dual_side_position:
+            return "LONG" if direction == "BUY" else "SHORT"
+        return "BOTH"
+
+    @staticmethod
+    def _client_id(prefix: str, trade_id: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9_:\-./]", "-", trade_id)
+        return (f"{prefix}-{safe}")[:36]
+
+    @staticmethod
+    def _ceil_to_step(value: Decimal, step: Decimal) -> Decimal:
+        if step <= 0:
+            return value
+        steps = (value / step).to_integral_value(rounding=ROUND_CEILING)
+        return steps * step
+
+    @staticmethod
+    def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
+        if step <= 0:
+            return value
+        steps = (value / step).to_integral_value(rounding=ROUND_DOWN)
+        return steps * step
+
+    def _auto_quantity(
+        self,
+        meta: SymbolMeta,
+        entry: Decimal,
+        margin: Decimal,
+        leverage: int,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        if entry <= 0:
+            raise MarginInfluenceError(f"{meta.symbol}: Entry harus lebih besar dari 0.")
+        if margin <= 0:
+            raise MarginInfluenceError("Margin harus lebih besar dari 0.")
+        if leverage < 1:
+            raise MarginInfluenceError("Leverage harus minimal 1x.")
+
+        target = margin * Decimal(leverage)
+        lower_notional = target * REAL_NOTIONAL_MIN_RATIO
+        upper_notional = target * REAL_NOTIONAL_MAX_RATIO
+
+        raw_quantity = target / entry
+
+        step = meta.step_size
+        if step <= 0:
+            precision = max(0, meta.quantity_precision)
+            step = Decimal(1).scaleb(-precision)
+            if step <= 0:
+                step = Decimal("0.00000001")
+
+        # Convert all exchange constraints into one legal quantity window.
+        lower_qty = lower_notional / entry
+        upper_qty = upper_notional / entry
+
+        if meta.min_qty > 0:
+            lower_qty = max(lower_qty, meta.min_qty)
+        if meta.max_qty > 0:
+            upper_qty = min(upper_qty, meta.max_qty)
+        if meta.min_notional > 0:
+            lower_qty = max(lower_qty, meta.min_notional / entry)
+        if meta.max_notional > 0:
+            upper_qty = min(upper_qty, meta.max_notional / entry)
+
+        lower_step_qty = self._ceil_to_step(lower_qty, step)
+        upper_step_qty = self._floor_to_step(upper_qty, step)
+
+        if lower_step_qty <= 0:
+            lower_step_qty = step
+
+        if lower_step_qty > upper_step_qty:
+            nearest_candidates = [
+                lower_step_qty,
+                upper_step_qty,
+                self._floor_to_step(raw_quantity, step),
+                self._ceil_to_step(raw_quantity, step),
+            ]
+            nearest_candidates = [q for q in nearest_candidates if q > 0]
+            nearest = min(
+                nearest_candidates,
+                key=lambda q: abs((q * entry) - target),
+                default=Decimal("0"),
+            )
+            nearest_notional = nearest * entry
+            raise MarginInfluenceError(
+                f"{meta.symbol}: tidak ada quantity valid dalam rentang "
+                f"±10% dari target {decimal_to_str(target)} USDT. "
+                f"Quantity terdekat menghasilkan {decimal_to_str(nearest_notional)} USDT."
+            )
+
+        # Normally the nearest step to the raw quantity is enough. Also check
+        # the exact legal window boundaries so min/max notional constraints do
+        # not create false negatives.
+        floor_raw = self._floor_to_step(raw_quantity, step)
+        ceil_raw = self._ceil_to_step(raw_quantity, step)
+        candidates = {
+            lower_step_qty,
+            upper_step_qty,
+            floor_raw,
+            ceil_raw,
+        }
+        candidates = {
+            q for q in candidates
+            if lower_step_qty <= q <= upper_step_qty and q > 0
+        }
+
+        valid: list[tuple[Decimal, Decimal]] = []
+        for qty in sorted(candidates):
+            if meta.min_qty > 0 and qty < meta.min_qty:
+                continue
+            if meta.max_qty > 0 and qty > meta.max_qty:
+                continue
+
+            notional = qty * entry
+            if notional < lower_notional or notional > upper_notional:
+                continue
+            if meta.min_notional > 0 and notional < meta.min_notional:
+                continue
+            if meta.max_notional > 0 and notional > meta.max_notional:
+                continue
+
+            valid.append((qty, notional))
+
+        # If raw floor/ceil were not in the candidate set because of a very
+        # restrictive boundary, use the first and last legal step as fallback.
+        if not valid:
+            for qty in (lower_step_qty, upper_step_qty):
+                if lower_step_qty <= qty <= upper_step_qty and qty > 0:
+                    notional = qty * entry
+                    if (
+                        lower_notional <= notional <= upper_notional
+                        and (meta.min_qty <= 0 or qty >= meta.min_qty)
+                        and (meta.max_qty <= 0 or qty <= meta.max_qty)
+                        and (meta.min_notional <= 0 or notional >= meta.min_notional)
+                        and (meta.max_notional <= 0 or notional <= meta.max_notional)
+                    ):
+                        valid.append((qty, notional))
+
+        if not valid:
+            nearest = min(
+                [lower_step_qty, upper_step_qty],
+                key=lambda q: abs((q * entry) - target),
+            )
+            nearest_notional = nearest * entry
+            raise MarginInfluenceError(
+                f"{meta.symbol}: quantity valid tidak ditemukan dalam ±10% target "
+                f"{decimal_to_str(target)} USDT. "
+                f"Nearest notional: {decimal_to_str(nearest_notional)} USDT."
+            )
+
+        quantity, actual_notional = min(
+            valid,
+            key=lambda item: abs(item[1] - target),
+        )
+        return quantity, target, actual_notional
+
+    async def _ensure_real_entry(self, trade: Trade) -> None:
+        if not self.real_mode:
+            return
+        if trade.entry_order_id or trade.entry_client_order_id:
+            return
+
+        client_id = self._client_id("ENT", trade.trade_id)
+
+        try:
+            meta = self._get_symbol(trade.pair)
+            quantity, target, actual = self._auto_quantity(
+                meta,
+                trade.entry,
+                trade.margin_usdt,
+                trade.leverage,
+            )
+
+            await self.real.ensure_position_mode()
+            existing_positions = await self.real.get_positions(trade.pair)
+            if existing_positions:
+                descriptions = ", ".join(
+                    f"{item.get('positionSide', 'BOTH')}:{item.get('positionAmt', '0')}"
+                    for item in existing_positions
+                )
+                raise BinanceAPIError(
+                    f"Position Binance sudah ada pada {trade.pair} ({descriptions}). "
+                    "Bot tidak membuat real entry baru pada symbol yang sudah memiliki exposure.",
+                    endpoint="/fapi/v2/positionRisk",
+                )
+
+            position_side = self._position_side_for_direction(trade.direction)
+            await self.real.set_leverage(trade.pair, trade.leverage)
+
+            order = await self.real.place_limit_entry(
+                symbol=trade.pair,
+                side=trade.direction,
+                quantity=quantity,
+                price=trade.entry,
+                position_side=position_side,
+                client_order_id=client_id,
+            )
+        except MarginInfluenceError as exc:
+            trade.real_state = "REAL_ERROR"
+            trade.real_error = str(exc)
+            log.warning(
+                "MARGIN INFLUENCE | pair=%s | trade_id=%s | %s",
+                trade.pair,
+                trade.trade_id,
+                exc,
+            )
+            raise
+        except BinanceRateLimitError as exc:
+            trade.real_state = "REAL_ERROR"
+            trade.real_error = str(exc)
+            self._notify_rate_limit(exc, f"PLACE LIMIT {trade.pair}")
+            raise
+        except BinanceAPIError as exc:
+            # POST /order can have unknown execution after a 5XX/transport
+            # failure. Query by the unique clientOrderId before deciding that
+            # no order exists; never blindly submit a second LIMIT order.
+            if trade.pair and (exc.status_code is None or exc.status_code >= 500):
+                try:
+                    recovered = await self.real.get_order(
+                        trade.pair,
+                        client_order_id=client_id,
+                    )
+                    if recovered.get("orderId") is not None:
+                        order = recovered
+                    else:
+                        raise exc
+                except BinanceAPIError as lookup_exc:
+                    if lookup_exc.code != -2013:
+                        trade.real_state = "REAL_ERROR"
+                        trade.real_error = str(lookup_exc)
+                        await self._handle_real_exception(
+                            lookup_exc,
+                            "RECOVER LIMIT ORDER AFTER UNKNOWN EXECUTION",
+                            trade,
+                        )
+                        raise lookup_exc
+                    trade.real_state = "REAL_ERROR"
+                    trade.real_error = str(exc)
+                    await self._handle_real_exception(
+                        exc,
+                        "PLACE LIMIT ENTRY",
+                        trade,
+                    )
+                    raise
+            else:
+                trade.real_state = "REAL_ERROR"
+                trade.real_error = str(exc)
+                await self._handle_real_exception(
+                    exc,
+                    "PLACE LIMIT ENTRY",
+                    trade,
+                )
+                raise
+        except Exception as exc:
+            trade.real_state = "REAL_ERROR"
+            trade.real_error = str(exc)
+            await self._handle_real_exception(
+                exc,
+                "PLACE LIMIT ENTRY",
+                trade,
+            )
+            raise
+
+        trade.quantity = quantity
+        trade.target_notional = target
+        trade.actual_notional = actual
+        trade.real_enabled = True
+        trade.real_state = "REAL_PENDING"
+        trade.real_error = None
+        trade.position_side = position_side
+
+        try:
+            trade.entry_order_id = int(order.get("orderId"))
+        except (TypeError, ValueError):
+            trade.entry_order_id = None
+        trade.entry_client_order_id = str(order.get("clientOrderId") or client_id)
+
+        if trade.entry_order_id is None and not trade.entry_client_order_id:
+            raise BinanceAPIError(
+                "Binance menerima response order tanpa orderId/clientOrderId.",
+                endpoint="/fapi/v1/order",
+            )
+
+        status = str(order.get("status") or "NEW").upper()
+        if status in {"FILLED", "PARTIALLY_FILLED"}:
+            # If a LIMIT is only partially filled, leave the remaining order
+            # controlled by Binance but immediately reconcile the position.
+            # Protective closePosition algos protect the actual live position.
+            if not await self._confirm_real_fill(trade):
+                trade.real_state = "REAL_PENDING"
+                trade.real_error = (
+                    f"Order {status}, tetapi position belum terkonfirmasi."
+                )
+
+    async def _confirm_real_fill(
+        self,
+        trade: Trade,
+        verified_order: dict[str, Any] | None = None,
+    ) -> bool:
+        if not self.real_mode or not trade.real_enabled:
+            return False
+
+        if trade.entry_order_id is None and not trade.entry_client_order_id and verified_order is None:
+            trade.real_state = "REAL_ERROR"
+            trade.real_error = "REAL fill tidak dapat diverifikasi tanpa entry order ID/clientOrderId."
+            log.warning(
+                "REAL fill verification skipped: %s tidak memiliki entry order metadata.",
+                trade.trade_id,
+            )
+            return False
+
+        if verified_order is not None:
+            order = dict(verified_order)
+        else:
+            try:
+                order = await self.real.get_order(
+                    trade.pair,
+                    order_id=trade.entry_order_id,
+                    client_order_id=(
+                        trade.entry_client_order_id
+                        if trade.entry_order_id is None
+                        else None
+                    ),
+                )
+            except BinanceAPIError as exc:
+                if exc.code == -2013:
+                    trade.real_state = "REAL_ERROR"
+                    trade.real_error = str(exc)
+                    log.warning(
+                        "Entry order REAL %s tidak ditemukan saat fill verification.",
+                        trade.trade_id,
+                    )
+                    return False
+                raise
+
+        order_status = str(order.get("status") or "").upper()
+        if order_status not in {"FILLED", "PARTIALLY_FILLED"}:
+            trade.real_state = "REAL_PENDING"
+            trade.real_error = None
+            return False
+
+        position = await self.real.get_position(trade.pair, trade.direction)
+        if position is None:
+            # Exchange order is filled but position propagation may not be
+            # visible yet. Do not invent local FILLED state.
+            trade.real_state = "REAL_SYNCING"
+            trade.real_error = (
+                f"Entry order {order_status}, tetapi position belum terkonfirmasi."
+            )
+            return False
+
+        position_amount = abs(
+            parse_signed_decimal(
+                str(position.get("_abs_position_amt") or position.get("positionAmt") or "0")
+            )
+        )
+        if position_amount <= 0:
+            return False
+
+        actual_entry = parse_decimal(str(position.get("entryPrice") or trade.entry))
+        trade.position_side = str(
+            position.get("positionSide")
+            or self._position_side_for_direction(trade.direction)
+        )
+
+        # For partial fills, cancel the remaining LIMIT quantity before
+        # arming protective orders. Keep the already-verified order snapshot
+        # because Binance may report it as CANCELED immediately after this call.
+        if order_status == "PARTIALLY_FILLED" and trade.entry_order_id is not None:
+            executed_qty = parse_decimal(str(order.get("executedQty") or position_amount))
+            orig_qty = parse_decimal(str(order.get("origQty") or executed_qty))
+            if executed_qty < orig_qty:
+                try:
+                    await self.real.cancel_order(
+                        trade.pair,
+                        order_id=trade.entry_order_id,
+                    )
+                except BinanceAPIError as exc:
+                    if exc.code not in {-2011, -2013}:
+                        raise
+
+        trade.quantity = position_amount
+        trade.actual_notional = position_amount * actual_entry
+        trade.fill_price = actual_entry
+        trade.filled_at = trade.filled_at or now_utc()
+        trade.pnl_percent = Decimal("0")
+        trade.real_state = "REAL_FILLED"
+        trade.real_error = None
+        trade.status = "FILLED"
+
+        await self._ensure_real_protective_orders(trade)
+        return True
+
+    async def _ensure_real_protective_orders(self, trade: Trade) -> None:
+        if not self.real_mode or not trade.real_enabled:
+            return
+
+        position = await self.real.get_position(trade.pair, trade.direction)
+        if position is None:
+            return
+
+        position_side = str(position.get("positionSide") or self._position_side_for_direction(trade.direction))
+        exit_side = "SELL" if trade.direction == "BUY" else "BUY"
+
+        open_algos = await self.real.get_open_algo_orders(trade.pair)
+        own_by_client = {
+            str(item.get("clientAlgoId") or ""): item
+            for item in open_algos
+        }
+        own_by_id = {
+            str(item.get("algoId") or ""): item
+            for item in open_algos
+        }
+
+        def find_existing(kind: str, tracked_id: int | None, tracked_client: str | None) -> dict[str, Any] | None:
+            if tracked_client and tracked_client in own_by_client:
+                return own_by_client[tracked_client]
+            if tracked_id is not None and str(tracked_id) in own_by_id:
+                return own_by_id[str(tracked_id)]
+
+            prefix = f"{kind}-{trade.trade_id}-"
+            for item in open_algos:
+                client_id = str(item.get("clientAlgoId") or "")
+                if client_id == f"{kind}-{trade.trade_id}" or client_id.startswith(prefix):
+                    return item
+            return None
+
+        existing_sl = find_existing("SL", trade.sl_algo_id, trade.sl_client_algo_id)
+        if existing_sl is not None:
+            trade.sl_client_algo_id = str(existing_sl.get("clientAlgoId") or trade.sl_client_algo_id or "") or None
+            try:
+                trade.sl_algo_id = int(existing_sl.get("algoId"))
+            except (TypeError, ValueError):
+                trade.sl_algo_id = trade.sl_algo_id
+        else:
+            sl_client = trade.sl_client_algo_id or self._client_id("SL", trade.trade_id)
+            sl_order = await self.real.place_close_algo(
+                symbol=trade.pair,
+                side=exit_side,
+                position_side=position_side,
+                order_type="STOP_MARKET",
+                trigger_price=trade.sl,
+                client_algo_id=sl_client,
+            )
+            trade.sl_client_algo_id = str(sl_order.get("clientAlgoId") or sl_client)
+            try:
+                trade.sl_algo_id = int(sl_order.get("algoId"))
+            except (TypeError, ValueError):
+                trade.sl_algo_id = None
+
+        existing_tp = find_existing("TP", trade.tp_algo_id, trade.tp_client_algo_id)
+        if existing_tp is not None:
+            trade.tp_client_algo_id = str(existing_tp.get("clientAlgoId") or trade.tp_client_algo_id or "") or None
+            try:
+                trade.tp_algo_id = int(existing_tp.get("algoId"))
+            except (TypeError, ValueError):
+                trade.tp_algo_id = trade.tp_algo_id
+        else:
+            tp_client = trade.tp_client_algo_id or self._client_id("TP", trade.trade_id)
+            tp_order = await self.real.place_close_algo(
+                symbol=trade.pair,
+                side=exit_side,
+                position_side=position_side,
+                order_type="TAKE_PROFIT_MARKET",
+                trigger_price=trade.tp,
+                client_algo_id=tp_client,
+            )
+            trade.tp_client_algo_id = str(tp_order.get("clientAlgoId") or tp_client)
+            try:
+                trade.tp_algo_id = int(tp_order.get("algoId"))
+            except (TypeError, ValueError):
+                trade.tp_algo_id = None
+
+    async def _real_pending_price_exp(self, trade: Trade) -> None:
+        """Reconcile the real entry when Price Exp is reached.
+
+        Rule: if REAL is ON, inspect the bot's own entry LIMIT. If it exists
+        and is still open, cancel it. If there is no such LIMIT, normal local
+        EXPIRED processing is allowed to continue. A confirmed real position
+        always wins over local expiry and is promoted to FILLED first.
+        """
+        # A position that was already created by this setup must be treated as
+        # a real fill even if the LIMIT order is no longer open.
+        if trade.entry_order_id is not None or trade.entry_client_order_id:
+            try:
+                position = await self.real.get_position(trade.pair, trade.direction)
+                if position is not None:
+                    if await self._confirm_real_fill(trade):
+                        return
+            except BinanceRateLimitError:
+                raise
+            except BinanceAPIError as exc:
+                # Do not swallow real API failures; caller will report them to Telegram.
+                if exc.code != -2013:
+                    raise
+
+        order: dict[str, Any] | None = None
+
+        if trade.entry_order_id is not None or trade.entry_client_order_id:
+            try:
+                order = await self.real.get_order(
+                    trade.pair,
+                    order_id=trade.entry_order_id,
+                    client_order_id=(
+                        trade.entry_client_order_id
+                        if trade.entry_order_id is None
+                        else None
+                    ),
+                )
+            except BinanceAPIError as exc:
+                if exc.code != -2013:
+                    raise
+                # Missing bot order means there is no known LIMIT to cancel.
+                # Continue with the normal local EXPIRED decision.
+                order = None
+
+        # If metadata is missing, try to locate only this bot's entry LIMIT
+        # by its deterministic clientOrderId. Never cancel an unrelated order.
+        if order is None:
+            expected_client = trade.entry_client_order_id or self._client_id("ENT", trade.trade_id)
+            open_orders = await self.real.get_open_orders(trade.pair)
+            for candidate in open_orders:
+                candidate_type = str(candidate.get("type") or "").upper()
+                candidate_id = str(candidate.get("clientOrderId") or "")
+                candidate_order_id = candidate.get("orderId")
+                id_match = (
+                    bool(expected_client) and candidate_id == expected_client
+                )
+                order_id_match = (
+                    trade.entry_order_id is not None
+                    and candidate_order_id is not None
+                    and str(candidate_order_id) == str(trade.entry_order_id)
+                )
+                if candidate_type == "LIMIT" and (id_match or order_id_match):
+                    order = candidate
+                    break
+
+        if order is not None:
+            status = str(order.get("status") or "").upper()
+
+            if status in {"FILLED", "PARTIALLY_FILLED"}:
+                if await self._confirm_real_fill(trade):
+                    return
+
+            if status in {"NEW", "PARTIALLY_FILLED"}:
+                order_id = order.get("orderId")
+                try:
+                    if order_id is not None:
+                        await self.real.cancel_order(
+                            trade.pair,
+                            order_id=int(order_id),
+                        )
+                    elif trade.entry_client_order_id:
+                        await self.real.cancel_order(
+                            trade.pair,
+                            client_order_id=trade.entry_client_order_id,
+                        )
+                except BinanceAPIError as exc:
+                    if exc.code not in {-2011, -2013}:
+                        raise
+
+                # A partial fill can leave a live position after cancel.
+                if status == "PARTIALLY_FILLED" and await self._confirm_real_fill(
+                    trade,
+                    verified_order=order,
+                ):
+                    return
+
+        # No confirmed live position and no still-open bot entry LIMIT. Let
+        # the normal PENDING -> EXPIRED transition happen in _on_price().
+        trade.real_state = "REAL_CLOSED"
+        trade.real_error = None
+
+    async def _cancel_bot_algo_orders(self, trade: Trade) -> None:
+        """Cancel this bot trade's TP/SL algos without touching unrelated algos."""
+        open_algos = await self.real.get_open_algo_orders(trade.pair)
+        tracked_ids = {
+            str(value)
+            for value in (trade.tp_algo_id, trade.sl_algo_id)
+            if value is not None
+        }
+        tracked_clients = {
+            str(value)
+            for value in (trade.tp_client_algo_id, trade.sl_client_algo_id)
+            if value
+        }
+        prefixes = (
+            f"TP-{trade.trade_id}",
+            f"SL-{trade.trade_id}",
+        )
+
+        for item in open_algos:
+            algo_id = str(item.get("algoId") or "")
+            client_id = str(item.get("clientAlgoId") or "")
+            owned = (
+                algo_id in tracked_ids
+                or client_id in tracked_clients
+                or client_id.startswith(prefixes[0] + "-")
+                or client_id.startswith(prefixes[1] + "-")
+                or client_id in prefixes
+            )
+            if not owned:
+                continue
+
+            try:
+                if algo_id:
+                    await self.real.cancel_algo_order(
+                        symbol=trade.pair,
+                        algo_id=int(algo_id),
+                    )
+                elif client_id:
+                    await self.real.cancel_algo_order(
+                        symbol=trade.pair,
+                        client_algo_id=client_id,
+                    )
+            except BinanceAPIError as exc:
+                if exc.code not in {-2011, -2013}:
+                    raise
+
+
+    async def _real_exit_trigger(self, trade: Trade, result: str, price: Decimal) -> bool:
+        now = time.monotonic()
+        last = self._real_reconcile_guard.get(trade.trade_id, 0.0)
+        if now - last < REAL_RECONCILE_INTERVAL_SECONDS:
+            return False
+        self._real_reconcile_guard[trade.trade_id] = now
+
+        trade.real_exit_check = result
+        position = await self.real.get_position(trade.pair, trade.direction)
+        if position is not None:
+            return False
+
+        # Position is zero. Try to read the triggered algo's actual execution
+        # price before cleaning the remaining protection.
+        triggered_algo_id = (
+            trade.tp_algo_id if result == "TP" else trade.sl_algo_id
+        )
+        if triggered_algo_id is not None:
+            try:
+                algo = await self.real.get_algo_order(algo_id=triggered_algo_id)
+                status = str(algo.get("algoStatus") or "").upper()
+                if status in {"TRIGGERED", "FINISHED"}:
+                    actual_raw = algo.get("actualPrice") or algo.get("triggerPrice")
+                    if actual_raw not in (None, "", "0", 0):
+                        trade.exit_price = parse_decimal(str(actual_raw))
+            except BinanceAPIError as exc:
+                if exc.code not in {-2013}:
+                    raise
+
+        await self._cancel_bot_algo_orders(trade)
+
+        if trade.exit_price is None:
+            trade.exit_price = price
+        return True
+
+    async def _real_delete_cleanup(self, trade: Trade) -> None:
+        # Cancel entry order if it is still open.
+        if trade.entry_order_id is not None or trade.entry_client_order_id:
+            try:
+                order = await self.real.get_order(
+                    trade.pair,
+                    order_id=trade.entry_order_id,
+                    client_order_id=trade.entry_client_order_id if trade.entry_order_id is None else None,
+                )
+                if str(order.get("status") or "") in {"NEW", "PARTIALLY_FILLED"}:
+                    await self.real.cancel_order(
+                        trade.pair,
+                        order_id=int(order["orderId"]) if order.get("orderId") is not None else None,
+                        client_order_id=None,
+                    )
+            except BinanceAPIError as exc:
+                if exc.code not in {-2013, -2011}:
+                    raise
+
+        # Explicit /del requirement: clear all algo orders on this symbol.
+        await self.real.cancel_all_algo_orders(trade.pair)
+
+        # Close any remaining position.
+        position = await self.real.get_position(trade.pair, trade.direction)
+        if position is not None:
+            await self.real.place_market_close(
+                symbol=trade.pair,
+                position=position,
+                entry_direction=trade.direction,
+            )
+
+            # One immediate verification + one short reconciliation retry.
+            for _ in range(2):
+                await asyncio.sleep(0.25)
+                position = await self.real.get_position(trade.pair, trade.direction)
+                if position is None:
+                    break
+
+            if position is not None:
+                raise BinanceAPIError(
+                    f"Position {trade.pair} masih terbuka setelah /del.",
+                    endpoint="/fapi/v2/positionRisk",
+                )
+
+        trade.real_state = "REAL_CLOSED"
+
+    async def _replace_real_sl(self, trade: Trade, new_sl: Decimal) -> None:
+        if not self.real_mode or not trade.real_enabled or trade.status != "FILLED":
+            return
+
+        position = await self.real.get_position(trade.pair, trade.direction)
+        if position is None:
+            raise BinanceAPIError(
+                f"Position Binance {trade.pair} tidak ditemukan saat /trail.",
+                endpoint="/fapi/v2/positionRisk",
+            )
+
+        position_side = str(position.get("positionSide") or self._position_side_for_direction(trade.direction))
+        exit_side = "SELL" if trade.direction == "BUY" else "BUY"
+        new_client = self._client_id("SL", f"{trade.trade_id}-{uuid4().hex[:6]}")
+
+        # Place new protection first, then remove old protection to avoid a gap.
+        new_order = await self.real.place_close_algo(
+            symbol=trade.pair,
+            side=exit_side,
+            position_side=position_side,
+            order_type="STOP_MARKET",
+            trigger_price=new_sl,
+            client_algo_id=new_client,
+        )
+
+        # Record the newly created protection immediately so an exception during
+        # old-order cancellation can never leave the new SL orphaned.
+        new_client_id = str(new_order.get("clientAlgoId") or new_client)
+        try:
+            new_algo_id = int(new_order.get("algoId"))
+        except (TypeError, ValueError):
+            new_algo_id = None
+
+        old_id = trade.sl_algo_id
+
+        if old_id is not None:
+            try:
+                await self.real.cancel_algo_order(
+                    symbol=trade.pair,
+                    algo_id=old_id,
+                )
+            except BinanceAPIError as exc:
+                if exc.code not in {-2011, -2013}:
+                    # First reconcile the old/new protection state. If the old
+                    # order is still open, rollback the new order so we do not
+                    # accidentally maintain two competing SLs.
+                    try:
+                        open_algos = await self.real.get_open_algo_orders(trade.pair)
+                    except Exception:
+                        # We keep the newly created protection tracked because
+                        # its existence is known, and surface the original error.
+                        trade.sl_client_algo_id = new_client_id
+                        trade.sl_algo_id = new_algo_id
+                        trade.real_error = (
+                            "Old SL cancellation failed and Binance open-algo "
+                            "reconciliation also failed."
+                        )
+                        raise
+
+                    old_still_open = any(
+                        str(item.get("algoId") or "") == str(old_id)
+                        for item in open_algos
+                    )
+                    new_is_open = any(
+                        (
+                            str(item.get("algoId") or "") == str(new_algo_id)
+                            if new_algo_id is not None
+                            else False
+                        )
+                        or str(item.get("clientAlgoId") or "") == new_client_id
+                        for item in open_algos
+                    )
+
+                    if old_still_open and new_is_open:
+                        try:
+                            await self.real.cancel_algo_order(
+                                symbol=trade.pair,
+                                algo_id=new_algo_id if new_algo_id is not None else None,
+                                client_algo_id=(
+                                    None if new_algo_id is not None else new_client_id
+                                ),
+                            )
+                        except Exception:
+                            trade.sl_client_algo_id = new_client_id
+                            trade.sl_algo_id = new_algo_id
+                            trade.real_error = (
+                                "Old dan new SL sama-sama terdeteksi aktif; "
+                                "rollback new SL gagal."
+                            )
+                            raise
+
+                        raise exc
+
+                    if not old_still_open and new_is_open:
+                        # Old order is already gone; the new order is the active protection.
+                        trade.sl_client_algo_id = new_client_id
+                        trade.sl_algo_id = new_algo_id
+                    else:
+                        raise exc
+
+        trade.sl_client_algo_id = new_client_id
+        trade.sl_algo_id = new_algo_id
+        trade.real_error = None
+
+    async def _reconcile_real_trade(self, trade: Trade) -> None:
+        if not self.real_mode or not trade.real_enabled:
+            return
+
+        if trade.status == "PENDING":
+            position = await self.real.get_position(trade.pair, trade.direction)
+            if position is not None:
+                await self._confirm_real_fill(trade)
+                return
+
+            if not trade.entry_order_id and not trade.entry_client_order_id:
+                trade.real_state = "REAL_ERROR"
+                trade.real_error = "Setup real tidak memiliki entry order metadata."
+                log.warning(
+                    "REAL setup %s dipulihkan tanpa entry order metadata; "
+                    "bot tidak membuat order baru otomatis.",
+                    trade.trade_id,
+                )
+                return
+
+            try:
+                order = await self.real.get_order(
+                    trade.pair,
+                    order_id=trade.entry_order_id,
+                    client_order_id=(
+                        trade.entry_client_order_id
+                        if trade.entry_order_id is None
+                        else None
+                    ),
+                )
+            except BinanceAPIError as exc:
+                if exc.code == -2013:
+                    trade.real_state = "REAL_ERROR"
+                    trade.real_error = str(exc)
+                    log.warning(
+                        "Entry order REAL %s tidak ditemukan saat /open; "
+                        "bot tidak membuat order baru otomatis.",
+                        trade.trade_id,
+                    )
+                    return
+                raise
+
+            status = str(order.get("status") or "").upper()
+            if status in {"FILLED", "PARTIALLY_FILLED"}:
+                if not await self._confirm_real_fill(trade):
+                    trade.real_state = "REAL_ERROR"
+                    trade.real_error = (
+                        f"Order {status} tetapi position belum terkonfirmasi "
+                        f"untuk {trade.pair}."
+                    )
+            elif status == "NEW":
+                trade.real_state = "REAL_PENDING"
+                trade.real_error = None
+            elif status in {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}:
+                trade.real_state = "REAL_ERROR"
+                trade.real_error = f"Entry order status saat /open: {status}"
+            else:
+                trade.real_state = "REAL_ERROR"
+                trade.real_error = f"Entry order status saat /open: {status}"
+            return
+
+        if trade.status == "FILLED":
+            position = await self.real.get_position(trade.pair, trade.direction)
+            if position is not None:
+                await self._ensure_real_protective_orders(trade)
+                trade.real_state = "REAL_FILLED"
+                trade.real_error = None
+                return
+
+            # Position zero. Determine whether one of the bot's tracked algos
+            # is already triggered. If so, finalize through the normal close
+            # pipeline so the setup is removed from /trade, history is written
+            # once, and WebSocket symbol cleanup still happens.
+            for result, algo_id, fallback_price in (
+                ("TP", trade.tp_algo_id, trade.tp),
+                ("SL", trade.sl_algo_id, trade.sl),
+            ):
+                if algo_id is None:
+                    continue
+                try:
+                    algo = await self.real.get_algo_order(algo_id=algo_id)
+                except BinanceAPIError as exc:
+                    if exc.code == -2013:
+                        continue
+                    raise
+
+                status = str(algo.get("algoStatus") or "").upper()
+                if status in {"TRIGGERED", "FINISHED"}:
+                    actual_raw = algo.get("actualPrice") or algo.get("triggerPrice")
+                    actual_price = (
+                        fallback_price
+                        if actual_raw in (None, "", "0", 0)
+                        else parse_decimal(str(actual_raw))
+                    )
+                    trade.real_state = "REAL_CLOSED"
+                    trade.real_error = None
+                    trade.real_exit_check = result
+                    await self._finalize_trade(
+                        trade,
+                        result=result,
+                        exit_price=actual_price,
+                        reason=(
+                            trade.tp_reason
+                            if result == "TP"
+                            else trade.sl_reason
+                        ),
+                    )
+                    return
+
+            trade.real_state = "REAL_ERROR"
+            trade.real_error = (
+                "Position Binance tidak ada saat /open dan penyebab penutupan "
+                "tidak dapat dipastikan dari tracked algo order."
+            )
+            log.warning(
+                "REAL position %s tidak ditemukan saat /open dan hasil close tidak dapat dipastikan.",
+                trade.trade_id,
+            )
+
+    async def _set_margin_command(self, argument: str) -> None:
+        if not argument:
+            await self.reply(
+                f"💰 MARGIN\n\nSaat ini: {decimal_to_str(self.margin_usdt)} USDT\n\n"
+                "Gunakan /margin 0.5"
+            )
+            return
+        margin = parse_decimal(argument)
+        if margin <= 0:
+            raise ValueError("Margin harus lebih besar dari 0.")
+        self.margin_usdt = margin
+        await self.reply(
+            "✅ MARGIN DIPERBARUI\n\n"
+            f"Margin default: {decimal_to_str(self.margin_usdt)} USDT\n"
+            f"Leverage: {self.leverage}x\n"
+            f"Target Notional: {decimal_to_str(self.margin_usdt * Decimal(self.leverage))} USDT"
+        )
+
+    async def _set_leverage_command(self, argument: str) -> None:
+        if not argument:
+            await self.reply(
+                f"⚡ LEVERAGE\n\nSaat ini: {self.leverage}x\n\n"
+                "Gunakan /leverage 10"
+            )
+            return
+        leverage = safe_int(argument, "Leverage")
+        if not 1 <= leverage <= 125:
+            raise ValueError("Leverage harus 1 sampai 125x.")
+        self.leverage = leverage
+        await self.reply(
+            "✅ LEVERAGE DIPERBARUI\n\n"
+            f"Leverage default: {self.leverage}x\n"
+            f"Margin: {decimal_to_str(self.margin_usdt)} USDT\n"
+            f"Target Notional: {decimal_to_str(self.margin_usdt * Decimal(self.leverage))} USDT"
+        )
+
 
     # --------------------------------------------------------
     # ADD flow
@@ -2667,6 +4544,19 @@ class TradingEngine:
                 "Struktur harga setup tidak valid."
             )
 
+        if self.real_mode:
+            existing_real = [
+                active
+                for active in self.active_trades.values()
+                if active.real_enabled and active.result is None and active.pair == pair
+            ]
+            if existing_real:
+                raise ValueError(
+                    f"REAL setup untuk {pair} sudah aktif. "
+                    "Satu symbol hanya boleh memiliki satu active REAL setup agar "
+                    "position Binance tidak tertukar antar setup."
+                )
+
         trade = Trade(
             trade_id=generate_trade_id(pair),
             session_id=self.session_id,
@@ -2681,12 +4571,27 @@ class TradingEngine:
             sl_reason=data["sl_reason"],
             tp=tp,
             tp_reason=data["tp_reason"],
+            margin_usdt=self.margin_usdt,
+            leverage=self.leverage,
+            real_enabled=self.real_mode,
+            real_state="REAL_PENDING" if self.real_mode else "SIMULATION",
+            position_side=self._position_side_for_direction(direction) if self.real_mode else None,
         )
 
         self.active_trades[
             trade.trade_id
         ] = trade
 
+        real_entry_error: Exception | None = None
+
+        if self.real_mode:
+            try:
+                await self._ensure_real_entry(trade)
+            except Exception as exc:
+                # Setup tetap dipertahankan di /trade untuk troubleshooting.
+                # Jangan pernah melaporkan "order real berhasil" ketika entry
+                # belum terkonfirmasi oleh Binance.
+                real_entry_error = exc
 
         self.flow = None
 
@@ -2708,8 +4613,36 @@ class TradingEngine:
                 pair,
             )
 
+        title = "✅ SETUP DITAMBAHKAN"
+        if real_entry_error is not None:
+            title = "⚠️ SETUP DITAMBAHKAN — ORDER REAL BELUM BERHASIL"
+
+        real_block = ""
+        if trade.real_enabled:
+            real_block = (
+                f"Real: ON\n"
+                f"Real State: {trade.real_state}\n"
+                f"Margin: {decimal_to_str(trade.margin_usdt)} USDT\n"
+                f"Leverage: {trade.leverage}x\n"
+                f"Quantity: {decimal_to_str(trade.quantity) or '-'}\n"
+                f"Target Notional: {decimal_to_str(trade.target_notional) or '-'} USDT\n"
+                f"Actual Notional: {decimal_to_str(trade.actual_notional) or '-'} USDT\n\n"
+            )
+
+        error_block = ""
+        if real_entry_error is not None:
+            label = (
+                "MARGIN INFLUENCE"
+                if isinstance(real_entry_error, MarginInfluenceError)
+                else "REAL ORDER ERROR"
+            )
+            error_block = (
+                f"{label}: {real_entry_error}\n\n"
+                "Order real belum dianggap berhasil.\n"
+            )
+
         await self.reply(
-            "✅ SETUP DITAMBAHKAN\n\n"
+            f"{title}\n\n"
             f"Trade ID: {trade.trade_id}\n"
             f"Pair: {trade.pair}\n"
             f"Direction: {trade.direction.title()}\n"
@@ -2722,6 +4655,8 @@ class TradingEngine:
             f"Reason SL: {trade.sl_reason}\n\n"
             f"Price TP: {decimal_to_str(trade.tp)}\n"
             f"Reason TP: {trade.tp_reason}\n\n"
+            f"{real_block}"
+            f"{error_block}"
             "Status: PENDING"
             f"{level_note}"
         )
@@ -3150,6 +5085,9 @@ class TradingEngine:
             ),
         }
 
+        if self.real_mode and trade.real_enabled and trade.status == "FILLED":
+            await self._replace_real_sl(trade, new_sl)
+
         trade.sl = new_sl
         trade.trailing = True
         trade.trail_history.append(
@@ -3299,15 +5237,31 @@ class TradingEngine:
                         "Hanya PENDING yang bisa diproses /filled."
                     )
 
-                current.status = "FILLED"
-                current.filled_at = now_utc()
-
-                # Konsisten dengan fill otomatis: posisi dianggap masuk pada
-                # level Entry, sementara harga saat command hanya dicatat
-                # sebagai informasi tambahan.
-                current.fill_price = current.entry
-                current.pnl_percent = Decimal("0")
                 trade = current
+
+            if trade.real_enabled:
+                if not self.real_mode:
+                    trade.real_state = "REAL_DETACHED"
+                    raise ValueError(
+                        "Setup ini terhubung ke Binance REAL. Nyalakan /real on "
+                        "untuk melakukan verifikasi position sebelum /filled."
+                    )
+
+                if not await self._confirm_real_fill(trade):
+                    raise ValueError(
+                        f"Binance belum mengonfirmasi position aktif untuk {trade.pair}. "
+                        "/filled tidak membuat position baru."
+                    )
+            else:
+                async with self._trade_lock:
+                    current = self.active_trades.get(trade.trade_id)
+                    if current is None or current.status != "PENDING":
+                        raise ValueError("Setup berubah sebelum /filled diproses.")
+                    current.status = "FILLED"
+                    current.filled_at = now_utc()
+                    current.fill_price = current.entry
+                    current.pnl_percent = Decimal("0")
+                    trade = current
 
             snapshot = self.prices.get(trade.pair)
             current_market_price = (
@@ -3447,6 +5401,18 @@ class TradingEngine:
                 trade
             )
 
+            if self.real_mode and trade.real_enabled:
+                try:
+                    await self._real_delete_cleanup(trade)
+                except Exception as exc:
+                    await self._handle_real_exception(exc, "DELETE/CLOSE REAL", trade)
+                    await self.reply(
+                        "❌ /del dibatalkan. Binance belum terkonfirmasi bersih.\n\n"
+                        f"Pair: {trade.pair}\n"
+                        f"Error: {exc}"
+                    )
+                    return
+
             await self._finalize_trade(
                 trade_copy,
                 result="DELETED",
@@ -3560,12 +5526,20 @@ class TradingEngine:
             f"│ 🛡 SL    {decimal_to_str(trade.sl)}",
             f"│ ⛔ Exp   {decimal_to_str(trade.price_exp)}",
             f"│ 📈 PnL   {pnl_text}",
+            (
+                f"│ 💰 Real   ON • {decimal_to_str(trade.margin_usdt)} USDT • {trade.leverage}x"
+                if trade.real_enabled else ""
+            ),
+            (
+                f"│ 📦 Qty    {decimal_to_str(trade.quantity) or '-'} • {trade.real_state}"
+                if trade.real_enabled else ""
+            ),
             f"│ ⚙️ Mode   {mode}",
             f"│ 🧠 {reason}",
             "╰────────────────────────╯",
         ]
 
-        return "\n".join(lines)
+        return "\n".join(line for line in lines if line != "")
 
     async def show_trades(self) -> None:
         items = self._trade_list_text()
@@ -3818,23 +5792,40 @@ class TradingEngine:
         trade: Trade,
         price: Decimal,
     ) -> None:
-        async with self._trade_lock:
-            current = self.active_trades.get(
-                trade.trade_id
-            )
+        if trade.real_enabled and not self.real_mode:
+            trade.real_state = "REAL_DETACHED"
+            return
 
-            if current is None:
+        if self.real_mode and trade.real_enabled:
+            try:
+                confirmed = await self._confirm_real_fill(trade)
+            except Exception as exc:
+                await self._handle_real_exception(exc, "CONFIRM REAL ENTRY", trade)
                 return
 
-            if current.status != "PENDING":
+            if not confirmed:
+                # Harga WS menyentuh Entry, tetapi Binance belum mengonfirmasi
+                # position aktif. Jangan mengubah local status menjadi FILLED.
                 return
 
-            current.status = "FILLED"
-            current.filled_at = now_utc()
-            current.fill_price = current.entry
-            current.pnl_percent = Decimal("0")
+        else:
+            async with self._trade_lock:
+                current = self.active_trades.get(
+                    trade.trade_id
+                )
 
-            trade = current
+                if current is None:
+                    return
+
+                if current.status != "PENDING":
+                    return
+
+                current.status = "FILLED"
+                current.filled_at = now_utc()
+                current.fill_price = current.entry
+                current.pnl_percent = Decimal("0")
+
+                trade = current
 
         await self._record_event(
             trade,
@@ -3843,8 +5834,9 @@ class TradingEngine:
             reason=trade.entry_reason,
             extra={
                 "fill_price": decimal_to_str(
-                    trade.entry
+                    trade.fill_price or trade.entry
                 ),
+                "real_mode": trade.real_enabled,
             },
         )
 
@@ -3853,9 +5845,15 @@ class TradingEngine:
             f"Pair: {trade.pair}\n"
             f"Direction: {trade.direction.title()}\n"
             f"Entry: {decimal_to_str(trade.entry)}\n"
-            f"Fill Price: {decimal_to_str(trade.entry)}\n"
+            f"Fill Price: {decimal_to_str(trade.fill_price or trade.entry)}\n"
             f"Reason Entry: {trade.entry_reason}\n"
-            "Status: FILLED"
+            + (
+                f"Quantity: {decimal_to_str(trade.quantity) or '-'}\n"
+                f"Notional: {decimal_to_str(trade.actual_notional) or '-'} USDT\n"
+                "Execution: REAL\n"
+                if trade.real_enabled else ""
+            )
+            + "Status: FILLED"
         )
 
     # --------------------------------------------------------
@@ -3906,6 +5904,12 @@ class TradingEngine:
             if trade.trade_id not in self.active_trades:
                 continue
 
+            # A setup that already belongs to a REAL Binance order/position
+            # must never silently switch into simulation when /real is OFF.
+            if trade.real_enabled and not self.real_mode:
+                trade.real_state = "REAL_DETACHED"
+                continue
+
             try:
                 if trade.status == "PENDING":
                     # PENDING hanya dipengaruhi oleh Entry dan Price Exp.
@@ -3921,6 +5925,19 @@ class TradingEngine:
                             continue
 
                         if price >= trade.price_exp:
+                            if trade.real_enabled and not self.real_mode:
+                                trade.real_state = "REAL_DETACHED"
+                                continue
+
+                            if self.real_mode and trade.real_enabled:
+                                try:
+                                    await self._real_pending_price_exp(trade)
+                                except Exception as exc:
+                                    await self._handle_real_exception(exc, "PRICE EXP REAL RECONCILIATION", trade)
+                                    continue
+                                if trade.status == "FILLED":
+                                    continue
+
                             await self._finalize_trade(
                                 trade,
                                 result="EXPIRED",
@@ -3938,6 +5955,19 @@ class TradingEngine:
                             continue
 
                         if price <= trade.price_exp:
+                            if trade.real_enabled and not self.real_mode:
+                                trade.real_state = "REAL_DETACHED"
+                                continue
+
+                            if self.real_mode and trade.real_enabled:
+                                try:
+                                    await self._real_pending_price_exp(trade)
+                                except Exception as exc:
+                                    await self._handle_real_exception(exc, "PRICE EXP REAL RECONCILIATION", trade)
+                                    continue
+                                if trade.status == "FILLED":
+                                    continue
+
                             await self._finalize_trade(
                                 trade,
                                 result="EXPIRED",
@@ -3947,6 +5977,10 @@ class TradingEngine:
                             continue
 
                 elif trade.status == "FILLED":
+                    if trade.real_enabled and not self.real_mode:
+                        trade.real_state = "REAL_DETACHED"
+                        continue
+
                     async with self._trade_lock:
                         current = self.active_trades.get(
                             trade.trade_id
@@ -3966,6 +6000,18 @@ class TradingEngine:
                     if trade.direction == "BUY":
                         # SL diperiksa lebih dulu.
                         if price <= trade.sl:
+                            if self.real_mode and trade.real_enabled:
+                                try:
+                                    if await self._real_exit_trigger(trade, "SL", price):
+                                        await self._finalize_trade(
+                                            trade,
+                                            result="SL",
+                                            exit_price=price,
+                                            reason=trade.sl_reason,
+                                        )
+                                except Exception as exc:
+                                    await self._handle_real_exception(exc, "VERIFY REAL SL CLOSE", trade)
+                                continue
                             await self._finalize_trade(
                                 trade,
                                 result="SL",
@@ -3975,6 +6021,18 @@ class TradingEngine:
                             continue
 
                         if price >= trade.tp:
+                            if self.real_mode and trade.real_enabled:
+                                try:
+                                    if await self._real_exit_trigger(trade, "TP", price):
+                                        await self._finalize_trade(
+                                            trade,
+                                            result="TP",
+                                            exit_price=price,
+                                            reason=trade.tp_reason,
+                                        )
+                                except Exception as exc:
+                                    await self._handle_real_exception(exc, "VERIFY REAL TP CLOSE", trade)
+                                continue
                             await self._finalize_trade(
                                 trade,
                                 result="TP",
@@ -3985,6 +6043,18 @@ class TradingEngine:
 
                     else:
                         if price >= trade.sl:
+                            if self.real_mode and trade.real_enabled:
+                                try:
+                                    if await self._real_exit_trigger(trade, "SL", price):
+                                        await self._finalize_trade(
+                                            trade,
+                                            result="SL",
+                                            exit_price=price,
+                                            reason=trade.sl_reason,
+                                        )
+                                except Exception as exc:
+                                    await self._handle_real_exception(exc, "VERIFY REAL SL CLOSE", trade)
+                                continue
                             await self._finalize_trade(
                                 trade,
                                 result="SL",
@@ -3994,6 +6064,18 @@ class TradingEngine:
                             continue
 
                         if price <= trade.tp:
+                            if self.real_mode and trade.real_enabled:
+                                try:
+                                    if await self._real_exit_trigger(trade, "TP", price):
+                                        await self._finalize_trade(
+                                            trade,
+                                            result="TP",
+                                            exit_price=price,
+                                            reason=trade.tp_reason,
+                                        )
+                                except Exception as exc:
+                                    await self._handle_real_exception(exc, "VERIFY REAL TP CLOSE", trade)
+                                continue
                             await self._finalize_trade(
                                 trade,
                                 result="TP",
@@ -4330,7 +6412,7 @@ class TradingEngine:
             "session_id": self.session_id,
             "source": {
                 "market": "Binance USDⓈ-M Futures",
-                "execution": "SIMULATION ONLY",
+                "execution": "SIMULATION/REAL (runtime controlled by /real)",
                 "price_trigger": "aggTrade last price",
             },
             "summary": {
@@ -4386,7 +6468,7 @@ class TradingEngine:
             "## System",
             "",
             "- Market: Binance USDⓈ-M Futures",
-            "- Execution: Simulation Only",
+            "- Execution: Simulation/Real (runtime controlled by /real)",
             "- Price Trigger: aggTrade last price",
             "",
             "## Summary",
@@ -4659,9 +6741,12 @@ class TradingEngine:
         await self.reply(
             "STATUS\n\n"
             "Main: ONLINE\n"
-            "Mode: SIMULATION ONLY\n"
+            f"Execution: {'REAL' if self.real_mode else 'SIMULATION'}\n"
             f"Session: {self.session_id}\n\n"
-            "Binance REST: READY\n"
+            f"Binance REST: {'REAL READY' if self.real_mode else 'MARKET DATA ONLY'}\n"
+            f"Real Mode: {'ON' if self.real_mode else 'OFF'}\n"
+            f"Margin Default: {decimal_to_str(self.margin_usdt)} USDT\n"
+            f"Leverage Default: {self.leverage}x\n"
             f"WebSocket: {self.ws.status}\n"
             f"Symbols Subscribed: {len(self.ws.symbols())}\n"
             f"Fresh Price Feed: {fresh_prices}\n\n"
@@ -4683,6 +6768,9 @@ class TradingEngine:
             "/trail - mengubah SL setup\n"
             "/del - menghapus setup\n"
             "/filled - ubah setup PENDING menjadi FILLED secara manual\n"
+            "/real [on|off] - aktif/nonaktif real execution Binance\n"
+            "/margin [USDT] - atur margin default\n"
+            "/leverage [1-125] - atur leverage default\n"
             "/stats - statistik histori\n"
             "/catatan [teks] - tambah catatan / tanpa teks = lihat catatan\n"
             "/reset - hapus seluruh pencatatan GitHub\n"
@@ -4751,6 +6839,9 @@ class TradingEngine:
                     "/trail",
                     "/del",
                     "/filled",
+                    "/real",
+                    "/margin",
+                    "/leverage",
                     "/trade",
                     "/setup",
                     "/open",
@@ -4806,6 +6897,35 @@ class TradingEngine:
 
             if command == "/filled":
                 await self._start_filled()
+                return
+
+            if command == "/real":
+                argument = text[len(text.split(maxsplit=1)[0]):].strip().lower()
+                if argument in {"", "status"}:
+                    await self.reply(
+                        "🌐 REAL MODE\n\n"
+                        f"Status: {'ON' if self.real_mode else 'OFF'}\n"
+                        f"Margin: {decimal_to_str(self.margin_usdt)} USDT\n"
+                        f"Leverage: {self.leverage}x\n\n"
+                        "Gunakan /real on atau /real off.\n"
+                        "REAL OFF tidak akan melepas posisi/order real yang sedang aktif."
+                    )
+                elif argument in {"on", "1"}:
+                    await self._start_real_on()
+                elif argument in {"off", "0"}:
+                    await self._set_real_off()
+                else:
+                    raise ValueError("Gunakan /real on, /real off, atau /real.")
+                return
+
+            if command == "/margin":
+                argument = text[len(text.split(maxsplit=1)[0]):].strip()
+                await self._set_margin_command(argument)
+                return
+
+            if command == "/leverage":
+                argument = text[len(text.split(maxsplit=1)[0]):].strip()
+                await self._set_leverage_command(argument)
                 return
 
             if command == "/stats":
