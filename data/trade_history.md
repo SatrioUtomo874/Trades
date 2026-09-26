@@ -131,3 +131,48 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-25T11:06:32.034813+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## WUSDT — BUY
+
+Trade ID: `WUSDT-20260926-235356-AA6F23`
+
+### Setup
+
+- Price Now Reference: 0.012857
+- Entry: 0.012008
+- Reason Entry: Order Block. Liquidity Pool Tipis (semua tipis juga). Fibo 0.618. RSI Masih tinggi jadi jauh
+- Price Exp: 0.013
+- Reason Price Exp: Harga Terlalu Jauh naik
+- SL: 0.011718
+- Reason SL: di bawah Liquidity Pool Entry
+- TP: 0.01288
+- Reason TP: Swing High H4
+
+### Real Execution
+
+- Real Enabled: False
+- Margin: 0.5 USDT
+- Leverage: 10x
+- Quantity: None
+- Target Notional: None USDT
+- Actual Notional: None USDT
+- Entry Order ID: None
+- TP Algo ID: None
+- SL Algo ID: None
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.013
+- Result Reason: Harga Terlalu Jauh naik
+- PnL: -
+- Created: 2026-09-26T16:53:56.965752+00:00
+- Filled: -
+- Closed: 2026-09-26T16:56:35.447646+00:00
+- Strategy: MANUAL v1.0
