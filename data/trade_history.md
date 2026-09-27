@@ -209,3 +209,36 @@ Tidak ada trailing.
 - Filled: 2026-09-27T14:48:29.716538+00:00
 - Closed: 2026-09-27T15:14:47.101775+00:00
 - Strategy: SMC_VLT_RSI v0.1.0
+
+---
+
+## UNIUSDT — BUY
+
+Trade ID: `UNIUSDT-20260927-213358-2441B9`
+
+### Setup
+
+- Price Now Reference: 9.751
+- Entry: 9.675
+- Reason Entry: Model BREAKER_RETEST: area BULLISH_BREAKER di 9.675. Struktur pasangan mendukung bullish.
+- Price Exp: 9.799
+- Reason Price Exp: Price Exp 9.7989 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 9.635
+- Reason SL: SL di bawah low BULLISH_BREAKER (9.648) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 9.858
+- Reason TP: TP diarahkan ke EQUAL_LEVELS 9.7525 (1.19 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 9.635
+- Result Reason: SL di bawah low BULLISH_BREAKER (9.648) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- PnL: -0.4134366925064599483204134367%
+- Created: 2026-09-27T14:33:58.303540+00:00
+- Filled: 2026-09-27T14:48:29.716538+00:00
+- Closed: 2026-09-27T15:17:52.358020+00:00
+- Strategy: SMC_VLT_RSI v0.1.0
