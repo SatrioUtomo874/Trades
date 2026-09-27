@@ -275,3 +275,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-27T15:29:03.104545+00:00
 - Strategy: SMC_VLT_RSI v0.4.0
+
+---
+
+## NEARUSDT — BUY
+
+Trade ID: `NEARUSDT-20260927-213711-BE2DC5`
+
+### Setup
+
+- Price Now Reference: 5.227
+- Entry: 5.079
+- Reason Entry: Model BREAKER_RETEST: area BULLISH_BREAKER di 5.079. Struktur pasangan mendukung bullish.
+- Price Exp: 5.262
+- Reason Price Exp: Price Exp 5.26129 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 5.014
+- Reason SL: SL di bawah low BULLISH_BREAKER (5.024) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 5.304
+- Reason TP: TP diarahkan ke EQUAL_LEVELS 5.1625 (0.12 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 5.262
+- Result Reason: Price Exp 5.26129 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- PnL: -
+- Created: 2026-09-27T14:37:11.782125+00:00
+- Filled: -
+- Closed: 2026-09-27T15:29:30.086173+00:00
+- Strategy: SMC_VLT_RSI v0.1.0
