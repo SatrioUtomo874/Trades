@@ -440,3 +440,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-27T15:48:48.416346+00:00
 - Strategy: SMC_VLT_RSI v0.4.0
+
+---
+
+## ATOMUSDT — BUY
+
+Trade ID: `ATOMUSDT-20260927-222918-1E1EE9`
+
+### Setup
+
+- Price Now Reference: 1.86
+- Entry: 1.841
+- Reason Entry: ATOMUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 1.833). H1 me-refine ke BULLISH_FVG 1.8405. M15 memberi execution POI BULLISH_FVG 1.841. Fib H4 berada pada band OVERLAPS_0.618 (score 92).
+- Price Exp: 1.883
+- Reason Price Exp: Price Exp 1.8828 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 1.836
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (1.838) + buffer 0.15 ATR M15.
+- TP: 1.925
+- Reason TP: TP diarahkan ke H4_RECENT_RANGE_HIGH 1.925 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 1.883
+- Result Reason: Price Exp 1.8828 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-27T15:29:18.535723+00:00
+- Filled: -
+- Closed: 2026-09-27T16:11:04.328323+00:00
+- Strategy: SMC_VLT_RSI v0.4.0
