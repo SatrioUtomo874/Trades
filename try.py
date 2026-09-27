@@ -540,7 +540,7 @@ async def start_or_reload_main(chat_id: int) -> None:
 
 async def stop_main() -> bool:
     """Hentikan main.py. Return True jika sebelumnya aktif."""
-    global MAIN_MODULE, MAIN_RUNNING
+    global MAIN_MODULE, MAIN_RUNNING, GANTI_WAITING_SELECTION, GANTI_TARGET
 
     async with MAIN_LOCK:
         module = MAIN_MODULE
@@ -567,6 +567,8 @@ async def stop_main() -> bool:
                 log.exception("on_stop() gagal")
 
         sys.modules.pop("trading_main_runtime", None)
+        GANTI_WAITING_SELECTION = False
+        GANTI_TARGET = None
         return was_running
 
 
@@ -723,6 +725,32 @@ def get_argument(text: str) -> str:
     return parts[1].strip() if len(parts) == 2 else ""
 
 
+def get_message_text(message: dict) -> str:
+    """Ambil text command dari message.text atau document caption.
+
+    Telegram menaruh command pada `caption` ketika user mengirim file
+    dengan caption, bukan pada `text`. Launcher commands harus mengenali
+    keduanya agar `/ganti`, `/try`, dan `/end` konsisten.
+    """
+    text = str(message.get("text") or "").strip()
+    if text:
+        return text
+    return str(message.get("caption") or "").strip()
+
+
+def infer_ganti_target_from_document(document: dict) -> str | None:
+    """Infer target /ganti dari nama file jika tepat main.py/strategy.py."""
+    filename = Path(str(document.get("file_name") or "").strip()).name.lower()
+    main_name = Path(MAIN_FILE).name.lower()
+    strategy_name = Path(STRATEGY_FILE).name.lower()
+
+    if filename == main_name:
+        return MAIN_FILE
+    if filename == strategy_name:
+        return STRATEGY_FILE
+    return None
+
+
 async def route_message(message: dict, update: dict) -> None:
     global GANTI_WAITING_SELECTION, GANTI_TARGET
 
@@ -730,7 +758,7 @@ async def route_message(message: dict, update: dict) -> None:
         return
 
     chat_id = int((message.get("chat") or {}).get("id") or 0)
-    text = str(message.get("text") or "").strip()
+    text = get_message_text(message)
     command = get_command(text)
     document = message.get("document")
 
@@ -742,6 +770,8 @@ async def route_message(message: dict, update: dict) -> None:
         return
 
     if command == "/try":
+        GANTI_WAITING_SELECTION = False
+        GANTI_TARGET = None
         try:
             await start_or_reload_main(chat_id)
             if MAIN_RUNNING:
@@ -762,16 +792,17 @@ async def route_message(message: dict, update: dict) -> None:
         try:
             stopped = await stop_main()
             if stopped:
-                tg_send(chat_id, "🛑 main.py dihentikan. Runtime state main.py sudah dibersihkan oleh on_stop().")
+                tg_send(
+                    chat_id,
+                    "🛑 main.py dihentikan.\n"
+                    "Runtime state main.py sudah dibersihkan oleh on_stop().\n"
+                    "Sesi /ganti juga dibatalkan."
+                )
             else:
                 tg_send(chat_id, "ℹ️ main.py memang sedang tidak aktif.")
         except Exception as exc:
             log.exception("Gagal menjalankan /end")
             tg_send(chat_id, f"❌ /end gagal\n\n{exc}")
-        return
-
-    if command == "/ganti":
-        await start_ganti(chat_id, get_argument(text))
         return
 
     if command == "/healthz":
@@ -785,9 +816,53 @@ async def route_message(message: dict, update: dict) -> None:
         )
         return
 
-    # Upload document diprioritaskan jika /ganti sedang menunggu file.
-    if document is not None and GANTI_TARGET:
-        await handle_ganti_document(chat_id, document)
+    # -----------------------------------------------------------------
+    # DOCUMENT / /GANTI
+    # -----------------------------------------------------------------
+    # Telegram menyimpan command pada `caption` saat user mengirim file.
+    # Karena itu document harus diproses sebelum command /ganti plain-text.
+    if document is not None:
+        if GANTI_TARGET:
+            await handle_ganti_document(chat_id, document)
+            return
+
+        if command == "/ganti":
+            argument = get_argument(text)
+            inferred_target = _resolve_ganti_target(argument) if argument else None
+            if inferred_target is None:
+                inferred_target = infer_ganti_target_from_document(document)
+
+            if inferred_target:
+                GANTI_WAITING_SELECTION = False
+                GANTI_TARGET = inferred_target
+                await handle_ganti_document(chat_id, document)
+                return
+
+            # Jangan pernah meneruskan file + /ganti ke main.py.
+            GANTI_WAITING_SELECTION = True
+            GANTI_TARGET = None
+            tg_send(
+                chat_id,
+                "📎 File diterima, tetapi target /ganti tidak bisa ditentukan.\n\n"
+                f"Pilih target terlebih dahulu:\n1. {MAIN_FILE}\n2. {STRATEGY_FILE}\n\n"
+                "File belum di-upload. Setelah memilih target, kirim ulang file tersebut.",
+            )
+            return
+
+        if GANTI_WAITING_SELECTION:
+            tg_send(
+                chat_id,
+                "❌ Pilih target /ganti terlebih dahulu dengan 1 atau 2.\n\n"
+                + _ganti_menu(),
+            )
+            return
+
+        # File lain yang bukan bagian dari /ganti tidak diproses launcher.
+        # Bila main aktif, biarkan main.py yang menentukan perilakunya hanya
+        # untuk update document yang memang bukan sesi /ganti.
+
+    if command == "/ganti":
+        await start_ganti(chat_id, get_argument(text))
         return
 
     if GANTI_WAITING_SELECTION and text:
