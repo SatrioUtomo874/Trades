@@ -341,3 +341,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-27T15:30:06.513115+00:00
 - Strategy: SMC_VLT_RSI v0.4.0
+
+---
+
+## BATUSDT — BUY
+
+Trade ID: `BATUSDT-20260927-223019-7510CD`
+
+### Setup
+
+- Price Now Reference: 0.09539
+- Entry: 0.09377
+- Reason Entry: BATUSDT BUY: thesis dimulai dari POI H4. (BULLISH_OB 0.094275). H1 me-refine ke BULLISH_FVG 0.09409. M15 memberi execution POI BULLISH_FVG 0.09377. Fib H4 berada pada band OVERLAPS_0.618 (score 92).
+- Price Exp: 0.09554
+- Reason Price Exp: Price Exp 0.09554 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.09353
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.09363) + buffer 0.15 ATR M15.
+- TP: 0.09564
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.09564 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.09554
+- Result Reason: Price Exp 0.09554 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-27T15:30:19.511454+00:00
+- Filled: -
+- Closed: 2026-09-27T15:34:10.265791+00:00
+- Strategy: SMC_VLT_RSI v0.4.0
