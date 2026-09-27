@@ -308,3 +308,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-27T15:29:30.086173+00:00
 - Strategy: SMC_VLT_RSI v0.1.0
+
+---
+
+## IOTAUSDT — BUY
+
+Trade ID: `IOTAUSDT-20260927-223001-7BCB0D`
+
+### Setup
+
+- Price Now Reference: 0.04974
+- Entry: 0.04946
+- Reason Entry: IOTAUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 0.0494). H1 me-refine ke BULLISH_BREAKER 0.04966. M15 memberi execution POI BULLISH_FVG 0.04946. Fib H4 berada pada band OVERLAPS_0.618 (score 92).
+- Price Exp: 0.04979
+- Reason Price Exp: Price Exp 0.049782 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.04935
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.0494) + buffer 0.15 ATR M15.
+- TP: 0.04981
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 0.04981 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.04979
+- Result Reason: Price Exp 0.049782 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-27T15:30:01.692092+00:00
+- Filled: -
+- Closed: 2026-09-27T15:30:06.513115+00:00
+- Strategy: SMC_VLT_RSI v0.4.0
