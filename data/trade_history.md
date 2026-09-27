@@ -539,3 +539,36 @@ Tidak ada trailing.
 - Filled: 2026-09-27T15:32:09.292029+00:00
 - Closed: 2026-09-27T18:12:20.111009+00:00
 - Strategy: SMC_VLT_RSI v0.4.0
+
+---
+
+## NEOUSDT — BUY
+
+Trade ID: `NEOUSDT-20260927-223128-B38F67`
+
+### Setup
+
+- Price Now Reference: 2.629
+- Entry: 2.628
+- Reason Entry: NEOUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 2.495). H1 me-refine ke BULLISH_FVG 2.4955. M15 memberi execution POI BULLISH_BREAKER 2.6285. Fib H4 berada pada band OVERLAPS_0.618 (score 96).
+- Price Exp: 2.647
+- Reason Price Exp: Price Exp 2.64627 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 2.619
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (2.622) + buffer 0.15 ATR M15.
+- TP: 2.68
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 2.6795 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 2.68
+- Result Reason: TP diarahkan ke H4_EQUAL_LEVELS 2.6795 sebagai liquidity target HTF.
+- PnL: 1.978691019786910197869101979%
+- Created: 2026-09-27T15:31:28.983345+00:00
+- Filled: 2026-09-27T15:31:43.276207+00:00
+- Closed: 2026-09-27T18:44:38.002359+00:00
+- Strategy: SMC_VLT_RSI v0.4.0
