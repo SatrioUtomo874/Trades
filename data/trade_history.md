@@ -473,3 +473,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-27T16:11:04.328323+00:00
 - Strategy: SMC_VLT_RSI v0.4.0
+
+---
+
+## ALGOUSDT — BUY
+
+Trade ID: `ALGOUSDT-20260927-223155-EEA17C`
+
+### Setup
+
+- Price Now Reference: 0.11642
+- Entry: 0.11519
+- Reason Entry: ALGOUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.098285). H1 me-refine ke BULLISH_BREAKER 0.115355. M15 memberi execution POI BULLISH_BREAKER 0.11519. Fib H4 berada pada band DEEPER_THAN_0.786 (score 65).
+- Price Exp: 0.11778
+- Reason Price Exp: Price Exp 0.117773 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.11483
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.11495) + buffer 0.15 ATR M15.
+- TP: 0.11868
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.118675 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.11778
+- Result Reason: Price Exp 0.117773 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-27T15:31:55.151279+00:00
+- Filled: -
+- Closed: 2026-09-27T17:46:01.094879+00:00
+- Strategy: SMC_VLT_RSI v0.4.0
