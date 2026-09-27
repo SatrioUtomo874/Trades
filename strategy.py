@@ -4,12 +4,12 @@ from __future__ import annotations
 STRATEGY.PY
 ===========
 
-Strategy intelligence untuk main.py.
+Strategy intelligence untuk main.py dengan top-down POI hierarchy dan entry reachability guard.
 
 Kontrak utama:
     async def generate_setup(pair, context) -> dict
 
-Prinsip desain v0.2.0
+Prinsip desain v0.4.0
 ---------------------
 1. SMC adalah kerangka utama; RSI 14 M15 dan VLT/OHLCV adalah konfirmasi.
 2. Semua keputusan struktur memakai CLOSED candles saja.
@@ -72,7 +72,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.3.0"
+STRATEGY_VERSION = "0.4.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -98,9 +98,12 @@ SWING_SPAN_H4 = 2
 FVG_MAX_AGE_M15 = 160
 POI_MAX_DISTANCE_ATR = 3.5
 H4_POI_MAX_DISTANCE_ATR = 8.0
-H1_POI_MAX_DISTANCE_ATR = 5.0
+H1_POI_MAX_DISTANCE_ATR = 4.0
 H1_REFINEMENT_OVERLAP_ATR = 2.0
 M15_EXECUTION_OVERLAP_ATR = 1.5
+MAX_ENTRY_DISTANCE_PCT = 10.0
+MAX_ENTRY_DISTANCE_H4_ATR = 4.0
+MAX_PRIMARY_POI_CANDIDATES = 6
 FIB_DEEP_RATIO = 0.618
 FIB_DEEPEST_RATIO = 0.786
 FIB_SHALLOW_RATIO = 0.382
@@ -109,17 +112,18 @@ EXP_ATR_MULTIPLIER = 1.25
 SL_BUFFER_ATR = 0.15
 
 WEIGHTS = {
-    "btc_h4_bias": 15.0,
-    "pair_h4_structure": 10.0,
-    "h4_poi": 14.0,
-    "h4_fibonacci": 11.0,
-    "h1_refinement": 10.0,
-    "liquidity": 12.0,
-    "smc_trigger": 14.0,
-    "displacement": 5.0,
-    "rsi_m15": 3.0,
-    "vlt": 3.0,
-    "planned_rr": 3.0,
+    # BTC H4 is a directional search constraint, not a soft score component.
+    "pair_h4_structure": 12.0,
+    "h4_poi": 13.0,
+    "h4_fibonacci": 12.0,
+    "h1_refinement": 12.0,
+    "liquidity": 11.0,
+    "smc_trigger": 15.0,
+    "displacement": 7.0,
+    "rsi_m15": 4.0,
+    "vlt": 4.0,
+    "planned_rr": 5.0,
+    "entry_reachability": 5.0,
 }
 DIRECTION_BUY = "BUY"
 DIRECTION_SELL = "SELL"
@@ -1418,53 +1422,114 @@ def htf_poi_candidates(
     }
 
 
+def _zone_is_retracement_side(zone: Zone, direction: str, current: float) -> bool:
+    """A pending entry zone must sit on the retracement side of current price."""
+    if direction == "BUY":
+        return zone.midpoint < current
+    return zone.midpoint > current
+
+
+def _path_position(zone: Zone, primary: Zone | None, current: float, direction: str) -> str:
+    """Describe a refinement zone relative to the current->HTF POI path."""
+    if primary is None:
+        return "NO_PRIMARY"
+    if zone_overlap_ratio(zone, primary) > 0:
+        return "OVERLAPS_PRIMARY"
+    if direction == "BUY" and primary.midpoint <= zone.midpoint < current:
+        return "BETWEEN_CURRENT_AND_PRIMARY"
+    if direction == "SELL" and current < zone.midpoint <= primary.midpoint:
+        return "BETWEEN_CURRENT_AND_PRIMARY"
+    return "OUTSIDE_PRIMARY_PATH"
+
+
+def _primary_poi_rank(
+    zone: Zone,
+    direction: str,
+    current: float,
+    atr: float,
+    fib: FibonacciContext | None,
+) -> tuple[float, dict[str, Any]]:
+    dist_atr = abs(zone.midpoint - current) / max(atr, EPS)
+    dist_pct = distance_pct(current, zone.midpoint)
+    fib_score, fib_details = fib_confluence_score(zone, fib, direction)
+    age = safe_float(zone.details.get("age_candles"), 0.0)
+
+    # Proximity is deliberately strong: a far historical OB cannot win merely
+    # because its structural quality is high when a newer POI sits on the
+    # current retracement path.
+    proximity = clamp(100.0 - (dist_atr / max(H4_POI_MAX_DISTANCE_ATR, EPS)) * 100.0)
+    recency = clamp(100.0 - (age / 60.0) * 100.0)
+    freshness = 15.0 if zone.status == "ACTIVE" else -12.0 if zone.status == "MITIGATED" else -50.0
+    fvg_bonus = 6.0 if "FVG" in zone.kind else 0.0
+    fib_overlap_bonus = 5.0 if fib_details.get("band") in {"DEEP_0.618_0.786", "OVERLAPS_0.618"} else 0.0
+
+    total = (
+        safe_float(zone.strength, 50.0) * 0.40
+        + fib_score * 0.20
+        + proximity * 0.30
+        + recency * 0.10
+        + freshness
+        + fvg_bonus
+        + fib_overlap_bonus
+    )
+    return total, {
+        "score": round(clamp(total), 2),
+        "distance_atr": round(dist_atr, 3),
+        "distance_pct": round(dist_pct, 4),
+        "proximity_score": round(proximity, 2),
+        "recency_score": round(recency, 2),
+        "freshness_adjustment": round(freshness, 2),
+        "fib": fib_details,
+        "fvg_bonus": fvg_bonus,
+        "fib_overlap_bonus": fib_overlap_bonus,
+    }
+
+
+def rank_primary_pois(
+    ctx: dict[str, Any],
+    direction: str,
+    current: float,
+    limit: int = MAX_PRIMARY_POI_CANDIDATES,
+) -> list[tuple[Zone, dict[str, Any]]]:
+    wanted = "BULLISH" if direction == "BUY" else "BEARISH"
+    fib = ctx.get("fib", {}).get(direction)
+    atr = safe_float(ctx.get("atr"), 0.0)
+    ranked: list[tuple[float, Zone, dict[str, Any]]] = []
+
+    for zone in ctx.get("zones", []):
+        if wanted not in zone.kind or zone.status == "FAILED":
+            continue
+        if not _zone_is_retracement_side(zone, direction, current):
+            continue
+        dist_atr = abs(zone.midpoint - current) / max(atr, EPS)
+        if dist_atr > H4_POI_MAX_DISTANCE_ATR:
+            continue
+        score, details = _primary_poi_rank(zone, direction, current, atr, fib)
+        details.update({
+            "available": True,
+            "timeframe": ctx.get("timeframe"),
+            "type": zone.kind,
+            "low": round_price(zone.low),
+            "high": round_price(zone.high),
+            "midpoint": round_price(zone.midpoint),
+            "quality": round(score, 2),
+            "status": zone.status,
+        })
+        ranked.append((score, zone, details))
+
+    ranked.sort(key=lambda item: (-item[0], abs(item[1].midpoint - current)))
+    return [(zone, details) for _score, zone, details in ranked[:max(1, limit)]]
+
+
 def select_primary_poi(
     ctx: dict[str, Any],
     direction: str,
     current: float,
 ) -> tuple[Zone | None, dict[str, Any]]:
-    wanted = "BULLISH" if direction == "BUY" else "BEARISH"
-    fib = ctx.get("fib", {}).get(direction)
-    atr = safe_float(ctx.get("atr"), 0.0)
-    zones = [
-        z for z in ctx.get("zones", [])
-        if wanted in z.kind and z.status != "FAILED"
-    ]
-
-    scored: list[tuple[float, Zone, dict[str, Any]]] = []
-    for zone in zones:
-        dist = abs(current - zone.midpoint) / max(atr, EPS)
-        if dist > H4_POI_MAX_DISTANCE_ATR:
-            continue
-        quality = safe_float(zone.strength, 50.0)
-        fib_score, fib_details = fib_confluence_score(zone, fib, direction)
-        freshness_bonus = 12.0 if zone.status == "ACTIVE" else 0.0
-        distance_penalty = min(30.0, max(0.0, dist - 1.0) * 4.0)
-        overlap = fib_level_confluence(zone, fib, direction)
-        total = quality * 0.55 + fib_score * 0.25 + overlap * 0.10 + freshness_bonus - distance_penalty
-        scored.append((total, zone, {
-            "score": round(clamp(total), 2),
-            "distance_atr": round(dist, 3),
-            "fib": fib_details,
-            "freshness_bonus": freshness_bonus,
-            "distance_penalty": round(distance_penalty, 2),
-        }))
-
-    if not scored:
-        return None, {"available": False, "reason": "Tidak ada H4 POI aktif yang cukup dekat."}
-    scored.sort(key=lambda item: item[0], reverse=True)
-    best_score, best_zone, details = scored[0]
-    details.update({
-        "available": True,
-        "timeframe": ctx.get("timeframe"),
-        "type": best_zone.kind,
-        "low": round_price(best_zone.low),
-        "high": round_price(best_zone.high),
-        "midpoint": round_price(best_zone.midpoint),
-        "quality": round(best_score, 2),
-        "status": best_zone.status,
-    })
-    return best_zone, details
+    ranked = rank_primary_pois(ctx, direction, current, limit=1)
+    if not ranked:
+        return None, {"available": False, "reason": "Tidak ada H4 POI aktif yang berada pada sisi retracement dan cukup dekat."}
+    return ranked[0]
 
 
 def select_refinement_poi(
@@ -1478,36 +1543,42 @@ def select_refinement_poi(
     atr = safe_float(ctx.get("atr"), 0.0)
     zones = [
         z for z in ctx.get("zones", [])
-        if wanted in z.kind and z.status != "FAILED"
+        if wanted in z.kind
+        and z.status != "FAILED"
+        and _zone_is_retracement_side(z, direction, current)
     ]
     scored: list[tuple[float, Zone, dict[str, Any]]] = []
     for zone in zones:
-        if primary is not None:
-            overlap = zone_overlap_ratio(zone, primary)
-            center_dist_atr = abs(zone.midpoint - primary.midpoint) / max(atr, EPS)
-            if overlap <= 0 and center_dist_atr > H1_REFINEMENT_OVERLAP_ATR:
-                continue
-        else:
-            overlap = 0.0
-            center_dist_atr = abs(zone.midpoint - current) / max(atr, EPS)
-            if center_dist_atr > H1_POI_MAX_DISTANCE_ATR:
-                continue
+        overlap = zone_overlap_ratio(zone, primary) if primary is not None else 0.0
+        anchor = primary.midpoint if primary else current
+        center_dist_atr = abs(zone.midpoint - anchor) / max(atr, EPS)
+        relation = _path_position(zone, primary, current, direction)
+
+        if primary is not None and relation not in {"OVERLAPS_PRIMARY", "BETWEEN_CURRENT_AND_PRIMARY"}:
+            continue
+        if primary is None and center_dist_atr > H1_POI_MAX_DISTANCE_ATR:
+            continue
 
         fib_score, fib_details = fib_confluence_score(zone, fib, direction)
         quality = safe_float(zone.strength, 50.0)
-        freshness = 10.0 if zone.status == "ACTIVE" else 0.0
-        total = quality * 0.55 + fib_score * 0.25 + overlap * 20.0 + freshness
+        freshness = 12.0 if zone.status == "ACTIVE" else 0.0
+        path_bonus = 25.0 if relation == "OVERLAPS_PRIMARY" else 20.0 if relation == "BETWEEN_CURRENT_AND_PRIMARY" else 0.0
+        proximity = clamp(100.0 - (abs(zone.midpoint - current) / max(atr, EPS)) / max(H1_POI_MAX_DISTANCE_ATR, EPS) * 100.0)
+        total = quality * 0.44 + fib_score * 0.20 + overlap * 18.0 + proximity * 0.18 + freshness + path_bonus
         scored.append((total, zone, {
             "score": round(clamp(total), 2),
             "overlap_with_h4": round(overlap, 3),
             "center_distance_atr": round(center_dist_atr, 3),
+            "relation_to_h4": relation,
+            "proximity_score": round(proximity, 2),
+            "path_bonus": round(path_bonus, 2),
             "fib": fib_details,
             "freshness_bonus": freshness,
         }))
 
     if not scored:
-        return None, {"available": False, "reason": "Tidak ada H1 refinement yang beririsan/dekat."}
-    scored.sort(key=lambda item: item[0], reverse=True)
+        return None, {"available": False, "reason": "Tidak ada H1 refinement yang overlap atau berada pada retracement path menuju H4 POI."}
+    scored.sort(key=lambda item: (-item[0], abs(item[1].midpoint - current)))
     best_score, best_zone, details = scored[0]
     details.update({
         "available": True,
@@ -1532,33 +1603,35 @@ def select_execution_poi(
     atr = safe_float(ctx.get("atr"), 0.0)
     zones = [
         z for z in ctx.get("zones", [])
-        if wanted in z.kind and z.status != "FAILED"
+        if wanted in z.kind
+        and z.status != "FAILED"
+        and _zone_is_retracement_side(z, direction, current)
     ]
     scored: list[tuple[float, Zone, dict[str, Any]]] = []
     for zone in zones:
-        if direction == "BUY" and zone.low >= current:
+        overlap = zone_overlap_ratio(zone, parent_zone) if parent_zone is not None else 0.0
+        relation = _path_position(zone, parent_zone, current, direction)
+        center_dist_atr = abs(zone.midpoint - (parent_zone.midpoint if parent_zone else current)) / max(atr, EPS)
+        if parent_zone is not None and relation not in {"OVERLAPS_PRIMARY", "BETWEEN_CURRENT_AND_PRIMARY"}:
             continue
-        if direction == "SELL" and zone.high <= current:
+        if parent_zone is None and center_dist_atr > M15_EXECUTION_OVERLAP_ATR:
             continue
-        if parent_zone is not None:
-            overlap = zone_overlap_ratio(zone, parent_zone)
-            center_dist_atr = abs(zone.midpoint - parent_zone.midpoint) / max(atr, EPS)
-            if overlap <= 0 and center_dist_atr > M15_EXECUTION_OVERLAP_ATR:
-                continue
-        else:
-            overlap = 0.0
-            center_dist_atr = abs(zone.midpoint - current) / max(atr, EPS)
-        freshness = 12.0 if zone.status == "ACTIVE" else 0.0
-        total = safe_float(zone.strength, 50.0) * 0.70 + overlap * 25.0 + freshness - min(15.0, center_dist_atr * 1.5)
+
+        freshness = 16.0 if zone.status == "ACTIVE" else 0.0
+        proximity = clamp(100.0 - (abs(zone.midpoint - current) / max(atr, EPS)) / max(M15_EXECUTION_OVERLAP_ATR, EPS) * 100.0)
+        total = safe_float(zone.strength, 50.0) * 0.50 + overlap * 25.0 + proximity * 0.15 + freshness + (14.0 if relation == "OVERLAPS_PRIMARY" else 10.0 if relation == "BETWEEN_CURRENT_AND_PRIMARY" else 0.0)
         scored.append((total, zone, {
             "score": round(clamp(total), 2),
             "overlap_with_parent": round(overlap, 3),
             "center_distance_atr": round(center_dist_atr, 3),
+            "relation_to_parent": relation,
+            "proximity_score": round(proximity, 2),
+            "freshness_bonus": freshness,
         }))
 
     if not scored:
-        return None, {"available": False, "reason": "Tidak ada execution POI M15 yang berada di parent zone dan sisi entry."}
-    scored.sort(key=lambda item: item[0], reverse=True)
+        return None, {"available": False, "reason": "Tidak ada execution POI M15 yang berada pada parent/path dan di sisi entry."}
+    scored.sort(key=lambda item: (-item[0], abs(item[1].midpoint - current)))
     best_score, best_zone, details = scored[0]
     details.update({
         "available": True,
@@ -1571,6 +1644,29 @@ def select_execution_poi(
         "status": best_zone.status,
     })
     return best_zone, details
+
+
+def entry_reachability(
+    direction: str,
+    current: float,
+    entry: float,
+    h4_atr: float,
+) -> tuple[float, dict[str, Any]]:
+    """Measure whether a pending entry is realistically reachable from current."""
+    pct = distance_pct(current, entry)
+    h4_dist = abs(current - entry) / max(h4_atr, EPS) if h4_atr > 0 else float("inf")
+    pct_score = clamp(100.0 - (pct / MAX_ENTRY_DISTANCE_PCT) * 100.0)
+    atr_score = clamp(100.0 - (h4_dist / MAX_ENTRY_DISTANCE_H4_ATR) * 100.0) if math.isfinite(h4_dist) else 0.0
+    score = clamp(pct_score * 0.55 + atr_score * 0.45)
+    allowed = pct <= MAX_ENTRY_DISTANCE_PCT and h4_dist <= MAX_ENTRY_DISTANCE_H4_ATR
+    return score, {
+        "allowed": allowed,
+        "distance_pct": round(pct, 4),
+        "distance_h4_atr": round(h4_dist, 3) if math.isfinite(h4_dist) else None,
+        "max_distance_pct": MAX_ENTRY_DISTANCE_PCT,
+        "max_distance_h4_atr": MAX_ENTRY_DISTANCE_H4_ATR,
+        "score": round(score, 2),
+    }
 
 
 def fibonacci_summary(fib: FibonacciContext | None, current: float) -> dict[str, Any]:
@@ -1679,25 +1775,35 @@ def topdown_candidate(
     rsi: float,
     vlt_direction: str,
 ) -> Candidate | None:
-    entry_zone = execution or refinement or primary
+    # Prefer the most precise available zone, but only if it is realistically
+    # reachable from current. Never turn a distant H4 context zone into a fake
+    # executable pending entry when a nearer H1/M15 refinement exists.
+    entry_zone = None
+    entry_zone_tf = None
+    reach_score = 0.0
+    reach_details: dict[str, Any] = {}
+
+    for zone, tf in ((execution, "M15"), (refinement, "H1"), (primary, "H4")):
+        if zone is None or not _zone_is_retracement_side(zone, direction, current):
+            continue
+        score, details = entry_reachability(
+            direction,
+            current,
+            zone.midpoint,
+            safe_float(h4_ctx.get("atr"), m15_atr * 4.0),
+        )
+        if not details["allowed"]:
+            continue
+        entry_zone = zone
+        entry_zone_tf = tf
+        reach_score = score
+        reach_details = details
+        break
+
     if entry_zone is None:
         return None
 
-    # The final entry must remain on the retracement side required by main.py.
-    if direction == "BUY":
-        if entry_zone.midpoint < current:
-            entry = entry_zone.midpoint
-        elif entry_zone.low < current:
-            entry = max(entry_zone.low, current - max(m15_atr * 0.20, (entry_zone.high - entry_zone.low) * 0.25))
-        else:
-            return None
-    else:
-        if entry_zone.midpoint > current:
-            entry = entry_zone.midpoint
-        elif entry_zone.high > current:
-            entry = min(entry_zone.high, current + max(m15_atr * 0.20, (entry_zone.high - entry_zone.low) * 0.25))
-        else:
-            return None
+    entry = entry_zone.midpoint
 
     structural = structural_invalidation_level(
         direction,
@@ -1773,7 +1879,9 @@ def topdown_candidate(
         "direction": direction,
         "btc_direction_constraint": True,
         "pair_h4_trend": h4_ctx.get("structure").trend if h4_ctx.get("structure") else None,
-        "notes_architecture": "H4 primary POI -> H1 refinement -> M15 execution confirmation",
+        "entry_zone_timeframe": entry_zone_tf,
+        "entry_reachability": {"score": round(reach_score, 2), **reach_details},
+        "notes_architecture": "H4 primary POI -> H1 retracement-path refinement -> M15 execution confirmation",
     }
     entry_reason = _topdown_entry_reason(
         pair,
@@ -2764,8 +2872,9 @@ def score_candidate(
     h4_fib_score: float | None = None,
     h1_refinement_score: float | None = None,
 ) -> Candidate:
+    reach = candidate.evidence.get("entry_reachability") or {}
+    reach_score = safe_float(reach.get("score"), 50.0)
     scores = {
-        "btc_h4_bias": macro_bias_score(candidate.direction, macro_trend),
         "pair_h4_structure": structure_direction_score(candidate.direction, pair_h4_trend),
         "h4_poi": clamp(h4_poi_score if h4_poi_score is not None else 50.0),
         "h4_fibonacci": clamp(h4_fib_score if h4_fib_score is not None else 50.0),
@@ -2776,6 +2885,7 @@ def score_candidate(
         "rsi_m15": rsi_score(candidate.direction, m15_rsi, m15_rsi_slope),
         "vlt": _vlt_direction_score(candidate.direction, vlt),
         "planned_rr": candidate_rr_score(candidate),
+        "entry_reachability": reach_score,
     }
 
     confidence = sum(
@@ -2994,44 +3104,44 @@ def _collect_directional_candidates(
     rsi = rsi_ctx["rsi14"]
     vlt = volume_trend_score(m15, m15_atr_values)
     m15_rel_vol = relative_volume(m15, 20)
-    latest_disp = displacement_strength(
-        m15,
-        len(m15) - 1,
-        m15_atr_values,
-        m15_rel_vol,
-    )
+    latest_disp = displacement_strength(m15, len(m15) - 1, m15_atr_values, m15_rel_vol)
     h1_dr = dealing_range(h1, h1_structure)
 
     macro_trend = _select_macro_trend(btc_structure, h4_structure, pair)
-    allowed_directions = allowed_directions_for_macro(
-        macro_trend,
-        h4_structure.trend,
-        pair,
-    )
+    allowed_directions = allowed_directions_for_macro(macro_trend, h4_structure.trend, pair)
     candidates: list[Candidate] = []
 
     h4_ctx = h4_ctx or htf_poi_candidates(h4, h4_structure, DIRECTION_BUY, "H4")
     h1_ctx = h1_ctx or htf_poi_candidates(h1, h1_structure, DIRECTION_BUY, "H1")
     m15_ctx = m15_ctx or htf_poi_candidates(m15, m15_structure, DIRECTION_BUY, "M15")
-    combined_liquidity = topdown_liquidity or [*h4_ctx.get("liquidity", []), *h1_ctx.get("liquidity", []), *m15_ctx.get("liquidity", [])]
+    combined_liquidity = topdown_liquidity or [
+        *h4_ctx.get("liquidity", []),
+        *h1_ctx.get("liquidity", []),
+        *m15_ctx.get("liquidity", []),
+    ]
 
     for direction in allowed_directions:
-        primary, primary_details = select_primary_poi(h4_ctx, direction, current)
-        refinement, refinement_details = select_refinement_poi(h1_ctx, direction, primary, current)
-        parent = refinement or primary
-        execution, execution_details = select_execution_poi(m15_ctx, direction, parent, current)
+        primary_ranked = rank_primary_pois(h4_ctx, direction, current, limit=MAX_PRIMARY_POI_CANDIDATES)
+        topdown_count = 0
+        last_sweep = None
+        last_mss = None
+        last_bos = None
 
-        sweep, mss = find_recent_sweep_mss(sweeps, m15_structure, direction)
-        recent_bos = latest_event(
-            m15_structure,
-            {"BOS", "MSS"},
-            direction=direction,
-            max_age=40,
-            candle_count=len(m15),
-        )
+        for rank_idx, (primary, primary_details) in enumerate(primary_ranked, start=1):
+            refinement, refinement_details = select_refinement_poi(h1_ctx, direction, primary, current)
+            parent = refinement or primary
+            execution, execution_details = select_execution_poi(m15_ctx, direction, parent, current)
 
-        # Primary model: HTF POI -> H1 refinement -> M15 confirmation.
-        if primary is not None:
+            sweep, mss = find_recent_sweep_mss(sweeps, m15_structure, direction)
+            recent_bos = latest_event(
+                m15_structure,
+                {"BOS", "MSS"},
+                direction=direction,
+                max_age=40,
+                candle_count=len(m15),
+            )
+            last_sweep, last_mss, last_bos = sweep, mss, recent_bos
+
             target = find_target_liquidity_topdown(
                 combined_liquidity,
                 direction,
@@ -3057,50 +3167,51 @@ def _collect_directional_candidates(
                 rsi=rsi,
                 vlt_direction=vlt["direction"],
             )
-            if cand is not None:
-                cand.evidence["poi_selection"] = {
-                    "h4": primary_details,
-                    "h1": refinement_details,
-                    "m15": execution_details,
-                }
-                # Dedicated top-down scoring.
-                h4_fib = h4_ctx.get("fib", {}).get(direction)
-                h1_fib = h1_ctx.get("fib", {}).get(direction)
-                h4_poi_score = safe_float(primary_details.get("quality"), 50.0)
-                h4_fib_score = fib_confluence_score(primary, h4_fib, direction)[0] if primary else 50.0
-                h1_ref_score = safe_float(refinement_details.get("quality"), 50.0) if refinement else 35.0
-                trigger_event = mss or recent_bos
-                trigger_disp = safe_float(trigger_event.get("displacement"), latest_disp) if trigger_event else latest_disp
-                score_candidate(
-                    cand,
-                    macro_trend=macro_trend,
-                    pair_h4_trend=h4_structure.trend,
-                    h1_dr=h1_dr,
-                    target=target,
-                    sweep=sweep,
-                    current=current,
-                    m15_atr=atr,
-                    m15_rsi=rsi,
-                    m15_rsi_slope=rsi_ctx["slope"],
-                    vlt=vlt,
-                    latest_displacement=trigger_disp,
-                    h4_poi_score=h4_poi_score,
-                    h4_fib_score=h4_fib_score,
-                    h1_refinement_score=h1_ref_score,
-                )
-                # Trigger quality is materially lower when no M15 structural
-                # confirmation exists, but we do not hard-gate the setup.
-                if not (sweep or mss or recent_bos):
-                    cand.confidence = round(max(0.0, cand.confidence - 18.0), 2)
-                    cand.evidence["trigger_status"] = "WAITING_FOR_M15_CONFIRMATION"
-                else:
-                    cand.evidence["trigger_status"] = "M15_CONFIRMATION_AVAILABLE"
-                candidates.append(cand)
+            if cand is None:
+                continue
 
-        # Secondary legacy-style candidate is kept only as a resilience path;
-        # it remains inside the BTC-defined direction and is scored lower than
-        # a top-down candidate when both exist.
-        if not candidates or not primary:
+            cand.evidence["poi_selection"] = {
+                "h4": primary_details,
+                "h1": refinement_details,
+                "m15": execution_details,
+                "h4_candidate_rank": rank_idx,
+            }
+            h4_fib = h4_ctx.get("fib", {}).get(direction)
+            h4_poi_score = safe_float(primary_details.get("quality"), 50.0)
+            h4_fib_score = fib_confluence_score(primary, h4_fib, direction)[0]
+            h1_ref_score = safe_float(refinement_details.get("quality"), 35.0) if refinement else 35.0
+            trigger_event = mss or recent_bos
+            trigger_disp = safe_float(trigger_event.get("displacement"), latest_disp) if trigger_event else latest_disp
+
+            score_candidate(
+                cand,
+                macro_trend=macro_trend,
+                pair_h4_trend=h4_structure.trend,
+                h1_dr=h1_dr,
+                target=target,
+                sweep=sweep,
+                current=current,
+                m15_atr=atr,
+                m15_rsi=rsi,
+                m15_rsi_slope=rsi_ctx["slope"],
+                vlt=vlt,
+                latest_displacement=trigger_disp,
+                h4_poi_score=h4_poi_score,
+                h4_fib_score=h4_fib_score,
+                h1_refinement_score=h1_ref_score,
+            )
+            cand.evidence["trigger_status"] = (
+                "M15_CONFIRMATION_AVAILABLE" if (sweep or mss or recent_bos) else "WAITING_FOR_M15_CONFIRMATION"
+            )
+            if not (sweep or mss or recent_bos):
+                cand.confidence = round(max(0.0, cand.confidence - 18.0), 2)
+
+            candidates.append(cand)
+            topdown_count += 1
+
+        # Only use the M15 resilience path when no reachable top-down candidate
+        # could be produced. This protects the HTF thesis rather than bypassing it.
+        if topdown_count == 0:
             recent_fvg = [
                 z for z in fvg
                 if len(m15) - 1 - z.index <= FVG_MAX_AGE_M15
@@ -3118,12 +3229,13 @@ def _collect_directional_candidates(
                     target,
                     {
                         "poi": poi.kind,
-                        "sweep": sweep,
-                        "mss": mss,
-                        "bos": recent_bos,
+                        "sweep": last_sweep,
+                        "mss": last_mss,
+                        "bos": last_bos,
                         "macro_trend": macro_trend,
                         "allowed_directions": list(allowed_directions),
-                        "top_down_primary_available": primary is not None,
+                        "top_down_primary_available": bool(primary_ranked),
+                        "fallback_reason": "Tidak ada H4 POI/path menghasilkan entry yang reachable; M15 resilience path dipakai.",
                     },
                     rsi,
                     vlt["direction"],
@@ -3131,86 +3243,51 @@ def _collect_directional_candidates(
                     h1_dr,
                 )
                 if cand:
+                    reach_score, reach_details = entry_reachability(
+                        direction,
+                        current,
+                        cand.entry,
+                        safe_float(h4_ctx.get("atr"), atr * 4.0),
+                    )
+                    cand.evidence["entry_reachability"] = {"score": reach_score, **reach_details}
                     score_candidate(
                         cand,
                         macro_trend=macro_trend,
                         pair_h4_trend=h4_structure.trend,
                         h1_dr=h1_dr,
                         target=target,
-                        sweep=sweep,
+                        sweep=last_sweep,
                         current=current,
                         m15_atr=atr,
                         m15_rsi=rsi,
                         m15_rsi_slope=rsi_ctx["slope"],
                         vlt=vlt,
                         latest_displacement=latest_disp,
-                        h4_poi_score=35.0,
-                        h4_fib_score=35.0,
+                        h4_poi_score=25.0,
+                        h4_fib_score=25.0,
                         h1_refinement_score=location_score(direction, cand.entry, h1_dr),
                     )
                     cand.confidence = round(max(0.0, cand.confidence - 10.0), 2)
+                    cand.evidence["trigger_status"] = "M15_FALLBACK"
                     candidates.append(cand)
 
-        # Preserve secondary breaker retest as an explicit model.
-        breaker = find_matching_poi(breakers, direction, current, atr)
-        if breaker and primary is None:
-            target = find_target_liquidity(liquidity, direction, breaker.midpoint, current, atr)
-            cand = candidate_from_poi(
-                direction,
-                "BREAKER_RETEST",
-                breaker,
-                current,
-                atr,
-                target,
-                {
-                    "poi": breaker.kind,
-                    "breaker": True,
-                    "macro_trend": macro_trend,
-                    "allowed_directions": list(allowed_directions),
-                },
-                rsi,
-                vlt["direction"],
-                h4_structure,
-                h1_dr,
-            )
-            if cand:
-                score_candidate(
-                    cand,
-                    macro_trend=macro_trend,
-                    pair_h4_trend=h4_structure.trend,
-                    h1_dr=h1_dr,
-                    target=target,
-                    sweep=sweep,
-                    current=current,
-                    m15_atr=atr,
-                    m15_rsi=rsi,
-                    m15_rsi_slope=rsi_ctx["slope"],
-                    vlt=vlt,
-                    latest_displacement=latest_disp,
-                    h4_poi_score=30.0,
-                    h4_fib_score=30.0,
-                    h1_refinement_score=location_score(direction, cand.entry, h1_dr),
-                )
-                candidates.append(cand)
-
-    # Deterministic fallback remains, but it can now carry the HTF context.
     if not candidates:
         if len(allowed_directions) == 1:
             direction = allowed_directions[0]
         else:
             direction = DIRECTION_BUY if h4_structure.trend != "BEARISH" else DIRECTION_SELL
-        fallback = fallback_candidate(
+        fallback = fallback_candidate(direction, current, atr, h1_dr, h4_structure, combined_liquidity)
+        reach_score, reach_details = entry_reachability(
             direction,
             current,
-            atr,
-            h1_dr,
-            h4_structure,
-            combined_liquidity,
+            fallback.entry,
+            safe_float(h4_ctx.get("atr"), atr * 4.0),
         )
         fallback.evidence.update({
             "macro_trend": macro_trend,
             "allowed_directions": list(allowed_directions),
             "directional_regime": directional_regime_label(allowed_directions),
+            "entry_reachability": {"score": reach_score, **reach_details},
             "top_down": {
                 "h4_primary_poi": False,
                 "h1_refinement": False,
@@ -3219,25 +3296,23 @@ def _collect_directional_candidates(
         })
         candidates.append(fallback)
 
-    # Defensive invariant: no candidate may escape the macro-defined search
-    # space.
     candidates = [c for c in candidates if c.direction in allowed_directions]
     if not candidates:
         raise RuntimeError(
             "Directional strategy invariant failed: no candidate remains "
             f"for allowed directions {list(allowed_directions)}."
         )
-
     return candidates
 
 
 def _best_candidate(candidates: list[Candidate]) -> Candidate:
     # Main criterion is confidence. Ties prefer explicit SMC trigger over fallback.
     model_priority = {
-        "LIQUIDITY_SWEEP_MSS": 4,
-        "BOS_PULLBACK": 3,
-        "BREAKER_RETEST": 2,
-        "STRUCTURE_PULLBACK_FALLBACK": 1,
+        "HTF_POI_M15_MSS": 5,
+        "HTF_POI_M15_REFINEMENT": 4,
+        "M15_SMC_FALLBACK": 2,
+        "BREAKER_RETEST": 1,
+        "STRUCTURE_PULLBACK_FALLBACK": 0,
     }
     return sorted(
         candidates,
@@ -3683,6 +3758,15 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
                 "h1_refinement_candidates": _zone_summary(h1_ctx.get("zones", [])[:12], current, h1_ctx.get("atr", m15_atr_values[-1]), len(h1)),
                 "m15_execution_candidates": _zone_summary(m15_ctx.get("zones", [])[:12], current, m15_ctx.get("atr", m15_atr_values[-1]), len(m15)),
             },
+            "h4_primary_ranking_for_direction": [
+                {
+                    **details,
+                    "rank": idx + 1,
+                }
+                for idx, (_zone, details) in enumerate(
+                    rank_primary_pois(h4_ctx, best.direction, current, limit=MAX_PRIMARY_POI_CANDIDATES)
+                )
+            ],
             "fibonacci": {
                 "h4_buy": fibonacci_summary(h4_ctx.get("fib", {}).get("BUY"), current),
                 "h4_sell": fibonacci_summary(h4_ctx.get("fib", {}).get("SELL"), current),
@@ -3728,6 +3812,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "atr14_m15": round_price(m15_atr_values[-1]),
             "current_distance_to_entry_pct": round(distance_pct(current, best.entry), 4),
             "entry_distance_to_exp_pct": round(distance_pct(best.entry, best.price_exp), 4),
+            "entry_reachability": best.evidence.get("entry_reachability", {}),
+            "entry_zone_timeframe": best.evidence.get("entry_zone_timeframe"),
         },
     }
 
@@ -3781,7 +3867,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "h1_derived_candles": len(h1_derived),
             "h4_derived_candles": len(h4_derived),
             "tick_size": round_price(tick_size) if tick_size else None,
-            "htf_poi_hierarchy": "H4_PRIMARY -> H1_REFINEMENT -> M15_EXECUTION",
+            "htf_poi_hierarchy": "H4_PRIMARY -> H1_RETRACEMENT_PATH_REFINEMENT -> M15_EXECUTION",
             "fibonacci_enabled": True,
             "fibonacci_deep_filter": 0.618,
         },
@@ -3789,9 +3875,9 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "name": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
             "architecture": (
-                "BTC H4 directional constraint + H4 primary POI + "
-                "H4/H1 Fibonacci confluence + H1 refinement + M15 execution + "
-                "SMC + RSI14 M15 + VLT/OHLCV"
+                "BTC H4 directional constraint + relevant/near H4 POI hierarchy + "
+                "H4/H1 Fibonacci confluence + retracement-path refinement + M15 execution + "
+                "entry reachability guard + SMC + RSI14 M15 + VLT/OHLCV"
             ),
             "confidence_semantics": "quality_score_not_profit_probability",
             "directional_rule": (
