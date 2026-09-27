@@ -9,7 +9,7 @@ Strategy intelligence untuk main.py.
 Kontrak utama:
     async def generate_setup(pair, context) -> dict
 
-Prinsip desain v0.1.0
+Prinsip desain v0.2.0
 ---------------------
 1. SMC adalah kerangka utama; RSI 14 M15 dan VLT/OHLCV adalah konfirmasi.
 2. Semua keputusan struktur memakai CLOSED candles saja.
@@ -17,8 +17,13 @@ Prinsip desain v0.1.0
       H4 -> bias struktur pasangan
       H1 -> lokasi / dealing range / POI
       M15 -> timing / trigger / RSI / VLT
-4. Untuk altcoin, BTCUSDT H4 menjadi macro bias tambahan.
-5. Data M15 target = 672 CLOSED candles (7 hari).
+4. Untuk altcoin, BTCUSDT H4 adalah directional constraint utama:
+      BULLISH -> hanya cari BUY
+      BEARISH -> hanya cari SELL
+      RANGE   -> BUY dan SELL boleh dicari.
+5. Multi-timeframe target pair tetap menentukan kualitas, lokasi, trigger,
+   dan timing; ia tidak boleh membalikkan arah yang ditentukan BTC H4.
+6. Data M15 target = 672 CLOSED candles (7 hari).
 6. Data provider: Bybit public REST -> Binance public REST fallback.
 7. Strategy selalu memilih kandidat terbaik bila market data cukup.
    Tidak ada hard gate "NO VALID SETUP" hanya karena confidence rendah.
@@ -67,7 +72,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.1.0"
+STRATEGY_VERSION = "0.2.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -106,6 +111,10 @@ WEIGHTS = {
     "vlt": 5.0,
     "planned_rr": 5.0,
 }
+
+DIRECTION_BUY = "BUY"
+DIRECTION_SELL = "SELL"
+DIRECTIONS_BOTH = (DIRECTION_BUY, DIRECTION_SELL)
 
 EPS = 1e-12
 
@@ -1949,10 +1958,53 @@ def _structure_summary(structure: StructureSnapshot, candles: list[Candle]) -> d
     }
 
 
-def _select_macro_trend(btc_h4: StructureSnapshot, target_h4: StructureSnapshot, pair: str) -> str:
+def _select_macro_trend(
+    btc_h4: StructureSnapshot,
+    target_h4: StructureSnapshot,
+    pair: str,
+) -> str:
+    """Return the higher-timeframe directional source used by the strategy.
+
+    For altcoins, BTCUSDT H4 is the primary directional source. For BTCUSDT
+    itself, the target's own H4 structure is used so BTC is not self-compared.
+    """
     if pair == "BTCUSDT":
         return target_h4.trend
     return btc_h4.trend
+
+
+def allowed_directions_for_macro(
+    macro_trend: str,
+    pair_h4_trend: str,
+    pair: str,
+) -> tuple[str, ...]:
+    """Define the strategy search-space from the macro directional regime.
+
+    Core rule:
+        Altcoin + BTC H4 bullish -> BUY only.
+        Altcoin + BTC H4 bearish -> SELL only.
+        Altcoin + BTC H4 range   -> both directions allowed.
+
+    For BTCUSDT itself, target H4 is the macro source.
+
+    Pair H4 never reverses the macro direction. It only affects confidence.
+    """
+    trend = pair_h4_trend if pair == "BTCUSDT" else macro_trend
+    if trend == "BULLISH":
+        return (DIRECTION_BUY,)
+    if trend == "BEARISH":
+        return (DIRECTION_SELL,)
+    return DIRECTIONS_BOTH
+
+
+def directional_regime_label(
+    allowed_directions: tuple[str, ...],
+) -> str:
+    if allowed_directions == (DIRECTION_BUY,):
+        return "BULLISH_ONLY"
+    if allowed_directions == (DIRECTION_SELL,):
+        return "BEARISH_ONLY"
+    return "NEUTRAL_BOTH"
 
 
 def _collect_directional_candidates(
@@ -1987,9 +2039,18 @@ def _collect_directional_candidates(
     h1_dr = dealing_range(h1, h1_structure)
 
     macro_trend = _select_macro_trend(btc_structure, h4_structure, pair)
+    allowed_directions = allowed_directions_for_macro(
+        macro_trend,
+        h4_structure.trend,
+        pair,
+    )
     candidates: list[Candidate] = []
 
-    for direction in ("BUY", "SELL"):
+    # IMPORTANT: the macro directional regime controls the search space.
+    # We do not generate both directions and let scoring decide whether to
+    # violate the BTC H4 bias. Pair H4/H1/M15 only determine the quality and
+    # timing of the allowed direction.
+    for direction in allowed_directions:
         # Prefer recent FVGs. OB/breaker zones can live longer because their
         # meaning is tied to the structural event that created them.
         recent_fvg = [
@@ -2017,7 +2078,14 @@ def _collect_directional_candidates(
                 current,
                 atr,
                 target,
-                {"sweep": sweep, "mss": mss, "poi": poi.kind, "sweep_index": sweep["index"]},
+                {
+                    "sweep": sweep,
+                    "mss": mss,
+                    "poi": poi.kind,
+                    "sweep_index": sweep["index"],
+                    "macro_trend": macro_trend,
+                    "allowed_directions": list(allowed_directions),
+                },
                 rsi,
                 vlt["direction"],
                 h4_structure,
@@ -2035,7 +2103,12 @@ def _collect_directional_candidates(
                 current,
                 atr,
                 target,
-                {"bos": recent_bos, "poi": poi.kind},
+                {
+                    "bos": recent_bos,
+                    "poi": poi.kind,
+                    "macro_trend": macro_trend,
+                    "allowed_directions": list(allowed_directions),
+                },
                 rsi,
                 vlt["direction"],
                 h4_structure,
@@ -2055,7 +2128,12 @@ def _collect_directional_candidates(
                 current,
                 atr,
                 target,
-                {"poi": breaker.kind, "breaker": True},
+                {
+                    "poi": breaker.kind,
+                    "breaker": True,
+                    "macro_trend": macro_trend,
+                    "allowed_directions": list(allowed_directions),
+                },
                 rsi,
                 vlt["direction"],
                 h4_structure,
@@ -2065,23 +2143,42 @@ def _collect_directional_candidates(
                 candidates.append(cand)
 
     # If there are no SMC candidates, create a low-confidence fallback candidate
-    # for the macro/structure direction. This satisfies the "always choose best"
-    # design without pretending the setup quality is high.
+    # in the allowed macro direction. When the macro regime is neutral, keep a
+    # deterministic BUY fallback unless pair H4 is bearish, in which case use
+    # SELL. This still preserves the "always choose best available" contract.
     if not candidates:
-        direction = "BUY"
-        if macro_trend == "BEARISH":
-            direction = "SELL"
-        elif macro_trend == "RANGE":
-            direction = "BUY" if h4_structure.trend != "BEARISH" else "SELL"
-        candidates.append(
-            fallback_candidate(
-                direction,
-                current,
-                atr,
-                h1_dr,
-                h4_structure,
-                liquidity,
-            )
+        if len(allowed_directions) == 1:
+            direction = allowed_directions[0]
+        else:
+            direction = DIRECTION_BUY if h4_structure.trend != "BEARISH" else DIRECTION_SELL
+
+        fallback = fallback_candidate(
+            direction,
+            current,
+            atr,
+            h1_dr,
+            h4_structure,
+            liquidity,
+        )
+        fallback.evidence.update(
+            {
+                "macro_trend": macro_trend,
+                "allowed_directions": list(allowed_directions),
+                "directional_regime": directional_regime_label(
+                    allowed_directions
+                ),
+            }
+        )
+        candidates.append(fallback)
+
+    # Defensive invariant: no candidate may escape the macro-defined search
+    # space. This protects future strategy extensions from accidentally
+    # creating a counter-direction candidate.
+    candidates = [c for c in candidates if c.direction in allowed_directions]
+    if not candidates:
+        raise RuntimeError(
+            "Directional strategy invariant failed: no candidate remains "
+            f"for allowed directions {list(allowed_directions)}."
         )
 
     for candidate in candidates:
@@ -2368,8 +2465,9 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
                 )
             )
 
-    # Candidate generation is intentionally based on explicit SMC sequences,
-    # then fallback if there is no complete sequence.
+    # Candidate generation is intentionally based on explicit SMC sequences
+    # inside the BTC-defined directional search space, then fallback if there
+    # is no complete sequence.
     candidates = _collect_directional_candidates(
         pair=normalized_pair,
         current=current,
@@ -2474,6 +2572,26 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "btc_h4": _structure_summary(btc_h4_structure, btc_h4),
             "pair_h4": _structure_summary(pair_h4_structure, pair_h4),
             "macro_bias": final_macro,
+            "directional_regime": directional_regime_label(
+                allowed_directions_for_macro(
+                    final_macro,
+                    pair_h4_structure.trend,
+                    normalized_pair,
+                )
+            ),
+            "allowed_directions": list(
+                allowed_directions_for_macro(
+                    final_macro,
+                    pair_h4_structure.trend,
+                    normalized_pair,
+                )
+            ),
+            "direction_rule": (
+                "BTCUSDT H4 determines the search direction for altcoins; "
+                "pair H4/H1/M15 can reduce confidence but cannot flip the direction."
+                if is_altcoin(normalized_pair)
+                else "BTCUSDT uses its own H4 structure as the directional source."
+            ),
             "altcoin_rule_applied": is_altcoin(normalized_pair),
         },
         "multi_timeframe": {
@@ -2564,6 +2682,21 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "source": m15_source,
             "price_source": price_source,
             "fallback_used": m15_source == "BINANCE_FALLBACK",
+            "directional_bias": final_macro,
+            "directional_regime": directional_regime_label(
+                allowed_directions_for_macro(
+                    final_macro,
+                    pair_h4_structure.trend,
+                    normalized_pair,
+                )
+            ),
+            "allowed_directions": list(
+                allowed_directions_for_macro(
+                    final_macro,
+                    pair_h4_structure.trend,
+                    normalized_pair,
+                )
+            ),
             "sources_by_timeframe": {
                 "pair_m15": m15_source,
                 "pair_h4": pair_h4_source,
@@ -2583,8 +2716,15 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         "strategy": {
             "name": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
-            "architecture": "SMC primary + MTF + RSI14 M15 + VLT/OHLCV",
+            "architecture": (
+                "BTC H4 directional constraint + SMC primary + MTF + "
+                "RSI14 M15 + VLT/OHLCV"
+            ),
             "confidence_semantics": "quality_score_not_profit_probability",
+            "directional_rule": (
+                "Altcoin BTC H4 BULLISH -> BUY only; "
+                "BTC H4 BEARISH -> SELL only; BTC H4 RANGE -> both."
+            ),
         },
     }
 
@@ -2597,6 +2737,27 @@ async def _fetch_if_short(pair: str, interval: str, interval_ms: int, count: int
 # ============================================================================
 # OPTIONAL SELF-TEST UTILITIES
 # ============================================================================
+
+
+def validate_directional_alignment(result: dict[str, Any]) -> tuple[bool, list[str]]:
+    """Validate the v0.2 directional invariant from a strategy result."""
+    errors: list[str] = []
+    direction = str(result.get("direction") or "")
+    analysis = result.get("analysis")
+    macro = analysis.get("macro") if isinstance(analysis, dict) else None
+    if not isinstance(macro, dict):
+        errors.append("analysis.macro tidak tersedia")
+        return False, errors
+
+    allowed = macro.get("allowed_directions")
+    if not isinstance(allowed, list) or not allowed:
+        errors.append("analysis.macro.allowed_directions kosong")
+    elif direction not in allowed:
+        errors.append(
+            f"direction {direction} tidak termasuk allowed_directions {allowed}"
+        )
+
+    return (not errors, errors)
 
 
 def validate_result_contract(result: dict[str, Any]) -> tuple[bool, list[str]]:
