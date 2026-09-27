@@ -407,3 +407,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-27T15:48:05.598325+00:00
 - Strategy: SMC_VLT_RSI v0.1.0
+
+---
+
+## ONTUSDT — BUY
+
+Trade ID: `ONTUSDT-20260927-222939-7FD4B9`
+
+### Setup
+
+- Price Now Reference: 0.05867
+- Entry: 0.05811
+- Reason Entry: ONTUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.057885). H1 me-refine ke BULLISH_FVG 0.05797. M15 memberi execution POI BULLISH_BREAKER 0.05811. Fib H4 berada pada band OVERLAPS_0.618 (score 92).
+- Price Exp: 0.05896
+- Reason Price Exp: Price Exp 0.058952 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.05785
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.05789) + buffer 0.15 ATR M15.
+- TP: 0.05914
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 0.05914 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05896
+- Result Reason: Price Exp 0.058952 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-27T15:29:39.501601+00:00
+- Filled: -
+- Closed: 2026-09-27T15:48:48.416346+00:00
+- Strategy: SMC_VLT_RSI v0.4.0
