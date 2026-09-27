@@ -24,13 +24,13 @@ Prinsip desain v0.2.0
 5. Multi-timeframe target pair tetap menentukan kualitas, lokasi, trigger,
    dan timing; ia tidak boleh membalikkan arah yang ditentukan BTC H4.
 6. Data M15 target = 672 CLOSED candles (7 hari).
-6. Data provider: Bybit public REST -> Binance public REST fallback.
-7. Strategy selalu memilih kandidat terbaik bila market data cukup.
+7. Data provider: Bybit public REST -> Binance public REST fallback.
+8. Strategy selalu memilih kandidat terbaik bila market data cukup.
    Tidak ada hard gate "NO VALID SETUP" hanya karena confidence rendah.
-8. Confidence = quality score setup 0-100, bukan probabilitas profit.
-9. Price Exp adalah batas relevansi setup: bila terlewati sebelum entry,
+9. Confidence = quality score setup 0-100, bukan probabilitas profit.
+10. Price Exp adalah batas relevansi setup: bila terlewati sebelum entry,
    thesis lama dianggap tidak relevan dan pola baru harus dicari.
-10. strategy.py tidak menyentuh state trade, Telegram, WebSocket, GitHub,
+11. strategy.py tidak menyentuh state trade, Telegram, WebSocket, GitHub,
     atau order execution. Ia hanya menganalisis dan mengembalikan dict.
 
 SMC yang dibuat objektif dalam kode:
@@ -72,7 +72,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.2.0"
+STRATEGY_VERSION = "0.3.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -97,21 +97,30 @@ SWING_SPAN_H4 = 2
 
 FVG_MAX_AGE_M15 = 160
 POI_MAX_DISTANCE_ATR = 3.5
+H4_POI_MAX_DISTANCE_ATR = 8.0
+H1_POI_MAX_DISTANCE_ATR = 5.0
+H1_REFINEMENT_OVERLAP_ATR = 2.0
+M15_EXECUTION_OVERLAP_ATR = 1.5
+FIB_DEEP_RATIO = 0.618
+FIB_DEEPEST_RATIO = 0.786
+FIB_SHALLOW_RATIO = 0.382
+FIB_MID_RATIO = 0.500
 EXP_ATR_MULTIPLIER = 1.25
 SL_BUFFER_ATR = 0.15
 
 WEIGHTS = {
     "btc_h4_bias": 15.0,
-    "pair_h4_structure": 15.0,
-    "h1_location": 12.0,
-    "liquidity": 15.0,
-    "smc_trigger": 18.0,
-    "displacement": 10.0,
-    "rsi_m15": 5.0,
-    "vlt": 5.0,
-    "planned_rr": 5.0,
+    "pair_h4_structure": 10.0,
+    "h4_poi": 14.0,
+    "h4_fibonacci": 11.0,
+    "h1_refinement": 10.0,
+    "liquidity": 12.0,
+    "smc_trigger": 14.0,
+    "displacement": 5.0,
+    "rsi_m15": 3.0,
+    "vlt": 3.0,
+    "planned_rr": 3.0,
 }
-
 DIRECTION_BUY = "BUY"
 DIRECTION_SELL = "SELL"
 DIRECTIONS_BOTH = (DIRECTION_BUY, DIRECTION_SELL)
@@ -279,6 +288,34 @@ class LiquidityPool:
     distance_pct: float = 0.0
     distance_atr: float = 0.0
     details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class FibonacciContext:
+    timeframe: str
+    direction: str
+    swing_low: float
+    swing_high: float
+    low_index: int
+    high_index: int
+    anchor_reason: str
+    trend_strength: dict[str, Any]
+    levels: dict[str, float]
+
+    @property
+    def range(self) -> float:
+        return max(self.swing_high - self.swing_low, EPS)
+
+    def price_at(self, ratio: float) -> float:
+        ratio = max(0.0, min(1.0, float(ratio)))
+        if self.direction == "BUY":
+            return self.swing_high - ratio * self.range
+        return self.swing_low + ratio * self.range
+
+    def retracement_ratio(self, price: float) -> float:
+        if self.direction == "BUY":
+            return (self.swing_high - price) / self.range
+        return (price - self.swing_low) / self.range
 
 
 @dataclass(slots=True)
@@ -967,6 +1004,894 @@ def latest_event(structure: StructureSnapshot, event_types: set[str], direction:
     return None
 
 
+
+# ============================================================================
+# TREND STRENGTH / FIBONACCI
+# ============================================================================
+
+
+def trend_strength_metrics(
+    candles: list[Candle],
+    structure: StructureSnapshot,
+) -> dict[str, Any]:
+    """
+    Measure trend energy using the time taken to print new extremes.
+
+    This follows the source material's operational idea: bullish strength is
+    read from the progression/slope of highs, while bearish strength is read
+    from the progression/slope of lows. It is a context measurement, not an
+    entry trigger.
+    """
+    atr_values = atr_series(candles, 14)
+    atr = median_or(atr_values[-30:], max(candles[-1].range, EPS))
+    if structure.trend == "BULLISH":
+        pivots = structure.swing_highs[-6:]
+    elif structure.trend == "BEARISH":
+        pivots = structure.swing_lows[-6:]
+    else:
+        pivots = []
+
+    if len(pivots) < 2:
+        return {
+            "direction": structure.trend,
+            "score": 50.0,
+            "normalized_slope": 0.0,
+            "pivot_count": len(pivots),
+            "interpretation": "DATA_INSUFFICIENT",
+        }
+
+    x0 = pivots[0].index
+    x1 = pivots[-1].index
+    y0 = pivots[0].price
+    y1 = pivots[-1].price
+    bars = max(1, x1 - x0)
+    price_per_bar = (y1 - y0) / bars
+    normalized_slope = price_per_bar / max(atr, EPS)
+
+    if structure.trend == "BULLISH":
+        score = clamp(50.0 + normalized_slope * 55.0)
+        interpretation = "BULLISH_STRONG" if score >= 70 else "BULLISH_MODERATE"
+    elif structure.trend == "BEARISH":
+        score = clamp(50.0 - normalized_slope * 55.0)
+        interpretation = "BEARISH_STRONG" if score >= 70 else "BEARISH_MODERATE"
+    else:
+        score = 50.0
+        interpretation = "RANGE"
+
+    # Compare most recent impulse magnitude with recent corrective movement.
+    impulse_ratio = 1.0
+    if len(pivots) >= 3:
+        impulse_move = abs(pivots[-1].price - pivots[-2].price)
+        prior_move = abs(pivots[-2].price - pivots[-3].price)
+        if prior_move > EPS:
+            impulse_ratio = impulse_move / prior_move
+            score = clamp(score + min(15.0, max(-15.0, (impulse_ratio - 1.0) * 20.0)))
+
+    if structure.trend == "BULLISH":
+        score = clamp(score)
+    elif structure.trend == "BEARISH":
+        score = clamp(score)
+
+    return {
+        "direction": structure.trend,
+        "score": round(score, 2),
+        "normalized_slope": round(normalized_slope, 6),
+        "pivot_count": len(pivots),
+        "bars_between_first_last_extreme": bars,
+        "impulse_ratio": round(impulse_ratio, 4),
+        "interpretation": interpretation,
+    }
+
+
+def _fib_anchor_from_structure(
+    candles: list[Candle],
+    structure: StructureSnapshot,
+    direction: str,
+) -> tuple[float, float, int, int, str] | None:
+    """Choose a non-future-looking impulse for Fibonacci measurement."""
+    events = [
+        e for e in structure.events
+        if e.get("direction") == ("BULLISH" if direction == "BUY" else "BEARISH")
+        and e.get("type") in {"BOS", "MSS"}
+    ]
+
+    if events:
+        event = events[-1]
+        e_idx = int(event["index"])
+        if direction == "BUY":
+            lows = [p for p in structure.swing_lows if p.index < e_idx]
+            if lows:
+                low_pivot = lows[-1]
+                segment = candles[low_pivot.index : e_idx + 1]
+                if segment:
+                    high_idx_local, high_candle = max(
+                        enumerate(segment, start=low_pivot.index),
+                        key=lambda item: item[1].high,
+                    )
+                    return (
+                        low_pivot.price,
+                        high_candle.high,
+                        low_pivot.index,
+                        high_idx_local,
+                        f"Fib ditarik dari swing low sebelum {event['type']} bullish terakhir ke impuls yang menghasilkan breakout.",
+                    )
+        else:
+            highs = [p for p in structure.swing_highs if p.index < e_idx]
+            if highs:
+                high_pivot = highs[-1]
+                segment = candles[high_pivot.index : e_idx + 1]
+                if segment:
+                    low_idx_local, low_candle = min(
+                        enumerate(segment, start=high_pivot.index),
+                        key=lambda item: item[1].low,
+                    )
+                    return (
+                        low_candle.low,
+                        high_pivot.price,
+                        low_idx_local,
+                        high_pivot.index,
+                        f"Fib ditarik dari impuls yang membentuk {event['type']} bearish terakhir, dari swing high ke swing low impuls tersebut.",
+                    )
+
+    # Fallback: use the latest confirmed directional swing pair.
+    if direction == "BUY":
+        lows = structure.swing_lows[-8:]
+        highs = structure.swing_highs[-8:]
+        pairs = [(lo, hi) for lo in lows for hi in highs if hi.index > lo.index]
+        if pairs:
+            lo, hi = max(pairs, key=lambda pair: pair[1].index)
+            return (
+                lo.price,
+                hi.price,
+                lo.index,
+                hi.index,
+                "Fib fallback memakai swing low → swing high terbaru yang terkonfirmasi.",
+            )
+    else:
+        highs = structure.swing_highs[-8:]
+        lows = structure.swing_lows[-8:]
+        pairs = [(hi, lo) for hi in highs for lo in lows if lo.index > hi.index]
+        if pairs:
+            hi, lo = max(pairs, key=lambda pair: pair[1].index)
+            return (
+                lo.price,
+                hi.price,
+                lo.index,
+                hi.index,
+                "Fib fallback memakai swing high → swing low terbaru yang terkonfirmasi.",
+            )
+    return None
+
+
+def build_fibonacci(
+    candles: list[Candle],
+    structure: StructureSnapshot,
+    direction: str,
+    timeframe: str,
+) -> FibonacciContext | None:
+    anchors = _fib_anchor_from_structure(candles, structure, direction)
+    if not anchors:
+        return None
+    low, high, low_index, high_index, reason = anchors
+    if high <= low:
+        return None
+
+    trend_strength = trend_strength_metrics(candles, structure)
+    ratios = (0.0, 0.236, 0.382, 0.5, 0.618, 0.705, 0.786, 1.0)
+    levels = {f"{ratio:.3f}": round_price(
+        high - ratio * (high - low) if direction == "BUY" else low + ratio * (high - low)
+    ) for ratio in ratios}
+
+    return FibonacciContext(
+        timeframe=timeframe,
+        direction=direction,
+        swing_low=low,
+        swing_high=high,
+        low_index=low_index,
+        high_index=high_index,
+        anchor_reason=reason,
+        trend_strength=trend_strength,
+        levels=levels,
+    )
+
+
+def fib_zone_for_direction(
+    fib: FibonacciContext,
+    low_ratio: float = FIB_DEEP_RATIO,
+    high_ratio: float = FIB_DEEPEST_RATIO,
+) -> tuple[float, float]:
+    p1 = fib.price_at(low_ratio)
+    p2 = fib.price_at(high_ratio)
+    return min(p1, p2), max(p1, p2)
+
+
+def fib_confluence_score(
+    zone: Zone,
+    fib: FibonacciContext | None,
+    direction: str,
+) -> tuple[float, dict[str, Any]]:
+    if fib is None:
+        return 50.0, {"available": False}
+
+    midpoint_ratio = fib.retracement_ratio(zone.midpoint)
+    zone_low_ratio = fib.retracement_ratio(zone.low)
+    zone_high_ratio = fib.retracement_ratio(zone.high)
+    ratio_min = min(zone_low_ratio, zone_high_ratio)
+    ratio_max = max(zone_low_ratio, zone_high_ratio)
+
+    # Required directional context: BUY values deeper in discount, SELL values
+    # deeper in premium. A shallower zone is still possible, but it scores less.
+    if ratio_min >= 0.618 and ratio_max <= 0.90:
+        score = 96.0
+        band = "DEEP_0.618_0.786"
+    elif ratio_max >= 0.618 and ratio_min <= 0.786:
+        score = 92.0
+        band = "OVERLAPS_0.618"
+    elif 0.50 <= midpoint_ratio < 0.618:
+        score = 82.0
+        band = "0.500_0.618"
+    elif 0.382 <= midpoint_ratio < 0.50:
+        score = 72.0
+        band = "0.382_0.500"
+    elif midpoint_ratio < 0.382:
+        score = 45.0
+        band = "SHALLOW"
+    else:
+        score = 65.0
+        band = "DEEPER_THAN_0.786"
+
+    # Trend strength changes the *preferred* retracement depth, but does not
+    # invalidate the source's 0.618 filter concept.
+    ts = safe_float(fib.trend_strength.get("score"), 50.0)
+    if ts >= 75 and 0.382 <= midpoint_ratio <= 0.618:
+        score += 4.0
+    elif ts < 55 and midpoint_ratio >= 0.618:
+        score += 4.0
+
+    return clamp(score), {
+        "available": True,
+        "midpoint_ratio": round(midpoint_ratio, 4),
+        "zone_ratio_min": round(ratio_min, 4),
+        "zone_ratio_max": round(ratio_max, 4),
+        "band": band,
+        "deep_filter_ratio": FIB_DEEP_RATIO,
+        "preferred_by_trend_strength": (
+            "0.382-0.618" if ts >= 75 else
+            "0.618-0.786" if ts < 55 else
+            "0.500-0.618"
+        ),
+        "trend_strength": round(ts, 2),
+        "direction": direction,
+    }
+
+
+def zone_overlap_ratio(a: Zone, b: Zone) -> float:
+    overlap = max(0.0, min(a.high, b.high) - max(a.low, b.low))
+    smaller = max(min(a.high - a.low, b.high - b.low), EPS)
+    return clamp(overlap / smaller, 0.0, 1.0)
+
+
+def fib_level_confluence(
+    zone: Zone,
+    fib: FibonacciContext | None,
+    direction: str,
+) -> float:
+    if fib is None:
+        return 0.0
+    fib_zone_low, fib_zone_high = fib_zone_for_direction(fib, 0.618, 0.786)
+    synthetic = Zone(
+        kind="FIB_DEEP_ZONE",
+        low=fib_zone_low,
+        high=fib_zone_high,
+        index=0,
+        source="FIBONACCI",
+    )
+    return zone_overlap_ratio(zone, synthetic) * 100.0
+
+
+def zone_quality_score(
+    zone: Zone,
+    structure: StructureSnapshot,
+    fib: FibonacciContext | None,
+    liquidity: list[LiquidityPool],
+    sweeps: list[dict[str, Any]],
+    direction: str,
+    candles: list[Candle],
+) -> tuple[float, dict[str, Any]]:
+    wanted = "BULLISH" if direction == "BUY" else "BEARISH"
+    score = clamp(zone.strength)
+    details: dict[str, Any] = {
+        "zone_kind": zone.kind,
+        "status": zone.status,
+        "source": zone.source,
+    }
+
+    if zone.status == "ACTIVE":
+        score += 10.0
+    elif zone.status == "MITIGATED":
+        score -= 12.0
+    elif zone.status == "FAILED":
+        score -= 45.0
+
+    be = zone.details.get("break_event")
+    if isinstance(be, dict):
+        if be.get("type") == "MSS":
+            score += 12.0
+        elif be.get("type") == "BOS":
+            score += 8.0
+        score += min(12.0, safe_float(be.get("displacement"), 0.0) * 0.12)
+
+    formation_direction = str(zone.details.get("formation_direction") or "")
+    if formation_direction == wanted:
+        score += 8.0
+    elif formation_direction and formation_direction != wanted:
+        score -= 8.0
+
+    if zone.kind.endswith("FVG"):
+        if zone.details.get("breakaway_gap"):
+            score += 8.0
+        if zone.details.get("rejection_gap"):
+            score -= 10.0
+
+    # A POI formed after a relevant liquidity sweep gets additional context
+    # weight. We use price/time proximity only; no intent is inferred.
+    candidate_sweeps = [
+        s for s in sweeps
+        if s.get("direction") == wanted
+        and int(s.get("index", -999999)) < zone.index
+        and zone.index - int(s.get("index", -999999)) <= 20
+    ]
+    if candidate_sweeps:
+        score += 12.0
+        details["formed_after_liquidity_sweep"] = True
+    else:
+        details["formed_after_liquidity_sweep"] = False
+
+    fib_score, fib_details = fib_confluence_score(zone, fib, direction)
+    score += (fib_score - 50.0) * 0.25
+    details["fibonacci"] = fib_details
+    details["fibonacci_overlap_deep_zone"] = round(fib_level_confluence(zone, fib, direction), 2)
+
+    # Prefer zones with a nearby liquidity objective/context.
+    nearby = [
+        p for p in liquidity
+        if abs(p.level - zone.midpoint) <= max(zone.high - zone.low, EPS) * 2.0
+    ]
+    if nearby:
+        score += min(8.0, max(p.strength for p in nearby) * 0.08)
+        details["nearby_liquidity"] = True
+    else:
+        details["nearby_liquidity"] = False
+
+    if zone.index >= 0 and candles:
+        details["age_candles"] = max(0, len(candles) - 1 - zone.index)
+
+    return clamp(score), details
+
+
+def htf_poi_candidates(
+    candles: list[Candle],
+    structure: StructureSnapshot,
+    direction: str,
+    timeframe: str,
+) -> dict[str, Any]:
+    atr_values = atr_series(candles, 14)
+    rel_vol = relative_volume(candles, 20)
+    fvgs = fvg_zones(candles, atr_values)
+    obs = find_ob_for_displacement(candles, structure, atr_values, rel_vol)
+    breakers = breaker_zones(obs, candles)
+    pools = build_liquidity_pools(candles, structure)
+    sweeps = detect_sweeps(candles, pools, atr_values, min(120, len(candles)))
+    fib_buy = build_fibonacci(candles, structure, "BUY", timeframe)
+    fib_sell = build_fibonacci(candles, structure, "SELL", timeframe)
+
+    zones = [*fvgs, *obs, *breakers]
+    for zone in zones:
+        zone.source = f"{timeframe}_{zone.source}"
+        quality_direction = "BUY" if "BULLISH" in zone.kind else "SELL"
+        fib = fib_buy if quality_direction == "BUY" else fib_sell
+        q, qd = zone_quality_score(
+            zone,
+            structure,
+            fib,
+            pools,
+            sweeps,
+            quality_direction,
+            candles,
+        )
+        zone.strength = q
+        zone.details["timeframe"] = timeframe
+        zone.details["quality"] = qd
+
+    return {
+        "timeframe": timeframe,
+        "atr": atr_values[-1] if atr_values else 0.0,
+        "structure": structure,
+        "fvg": fvgs,
+        "obs": obs,
+        "breakers": breakers,
+        "zones": zones,
+        "liquidity": pools,
+        "sweeps": sweeps,
+        "fib": {"BUY": fib_buy, "SELL": fib_sell},
+        "trend_strength": trend_strength_metrics(candles, structure),
+    }
+
+
+def select_primary_poi(
+    ctx: dict[str, Any],
+    direction: str,
+    current: float,
+) -> tuple[Zone | None, dict[str, Any]]:
+    wanted = "BULLISH" if direction == "BUY" else "BEARISH"
+    fib = ctx.get("fib", {}).get(direction)
+    atr = safe_float(ctx.get("atr"), 0.0)
+    zones = [
+        z for z in ctx.get("zones", [])
+        if wanted in z.kind and z.status != "FAILED"
+    ]
+
+    scored: list[tuple[float, Zone, dict[str, Any]]] = []
+    for zone in zones:
+        dist = abs(current - zone.midpoint) / max(atr, EPS)
+        if dist > H4_POI_MAX_DISTANCE_ATR:
+            continue
+        quality = safe_float(zone.strength, 50.0)
+        fib_score, fib_details = fib_confluence_score(zone, fib, direction)
+        freshness_bonus = 12.0 if zone.status == "ACTIVE" else 0.0
+        distance_penalty = min(30.0, max(0.0, dist - 1.0) * 4.0)
+        overlap = fib_level_confluence(zone, fib, direction)
+        total = quality * 0.55 + fib_score * 0.25 + overlap * 0.10 + freshness_bonus - distance_penalty
+        scored.append((total, zone, {
+            "score": round(clamp(total), 2),
+            "distance_atr": round(dist, 3),
+            "fib": fib_details,
+            "freshness_bonus": freshness_bonus,
+            "distance_penalty": round(distance_penalty, 2),
+        }))
+
+    if not scored:
+        return None, {"available": False, "reason": "Tidak ada H4 POI aktif yang cukup dekat."}
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_zone, details = scored[0]
+    details.update({
+        "available": True,
+        "timeframe": ctx.get("timeframe"),
+        "type": best_zone.kind,
+        "low": round_price(best_zone.low),
+        "high": round_price(best_zone.high),
+        "midpoint": round_price(best_zone.midpoint),
+        "quality": round(best_score, 2),
+        "status": best_zone.status,
+    })
+    return best_zone, details
+
+
+def select_refinement_poi(
+    ctx: dict[str, Any],
+    direction: str,
+    primary: Zone | None,
+    current: float,
+) -> tuple[Zone | None, dict[str, Any]]:
+    wanted = "BULLISH" if direction == "BUY" else "BEARISH"
+    fib = ctx.get("fib", {}).get(direction)
+    atr = safe_float(ctx.get("atr"), 0.0)
+    zones = [
+        z for z in ctx.get("zones", [])
+        if wanted in z.kind and z.status != "FAILED"
+    ]
+    scored: list[tuple[float, Zone, dict[str, Any]]] = []
+    for zone in zones:
+        if primary is not None:
+            overlap = zone_overlap_ratio(zone, primary)
+            center_dist_atr = abs(zone.midpoint - primary.midpoint) / max(atr, EPS)
+            if overlap <= 0 and center_dist_atr > H1_REFINEMENT_OVERLAP_ATR:
+                continue
+        else:
+            overlap = 0.0
+            center_dist_atr = abs(zone.midpoint - current) / max(atr, EPS)
+            if center_dist_atr > H1_POI_MAX_DISTANCE_ATR:
+                continue
+
+        fib_score, fib_details = fib_confluence_score(zone, fib, direction)
+        quality = safe_float(zone.strength, 50.0)
+        freshness = 10.0 if zone.status == "ACTIVE" else 0.0
+        total = quality * 0.55 + fib_score * 0.25 + overlap * 20.0 + freshness
+        scored.append((total, zone, {
+            "score": round(clamp(total), 2),
+            "overlap_with_h4": round(overlap, 3),
+            "center_distance_atr": round(center_dist_atr, 3),
+            "fib": fib_details,
+            "freshness_bonus": freshness,
+        }))
+
+    if not scored:
+        return None, {"available": False, "reason": "Tidak ada H1 refinement yang beririsan/dekat."}
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_zone, details = scored[0]
+    details.update({
+        "available": True,
+        "timeframe": ctx.get("timeframe"),
+        "type": best_zone.kind,
+        "low": round_price(best_zone.low),
+        "high": round_price(best_zone.high),
+        "midpoint": round_price(best_zone.midpoint),
+        "quality": round(best_score, 2),
+        "status": best_zone.status,
+    })
+    return best_zone, details
+
+
+def select_execution_poi(
+    ctx: dict[str, Any],
+    direction: str,
+    parent_zone: Zone | None,
+    current: float,
+) -> tuple[Zone | None, dict[str, Any]]:
+    wanted = "BULLISH" if direction == "BUY" else "BEARISH"
+    atr = safe_float(ctx.get("atr"), 0.0)
+    zones = [
+        z for z in ctx.get("zones", [])
+        if wanted in z.kind and z.status != "FAILED"
+    ]
+    scored: list[tuple[float, Zone, dict[str, Any]]] = []
+    for zone in zones:
+        if direction == "BUY" and zone.low >= current:
+            continue
+        if direction == "SELL" and zone.high <= current:
+            continue
+        if parent_zone is not None:
+            overlap = zone_overlap_ratio(zone, parent_zone)
+            center_dist_atr = abs(zone.midpoint - parent_zone.midpoint) / max(atr, EPS)
+            if overlap <= 0 and center_dist_atr > M15_EXECUTION_OVERLAP_ATR:
+                continue
+        else:
+            overlap = 0.0
+            center_dist_atr = abs(zone.midpoint - current) / max(atr, EPS)
+        freshness = 12.0 if zone.status == "ACTIVE" else 0.0
+        total = safe_float(zone.strength, 50.0) * 0.70 + overlap * 25.0 + freshness - min(15.0, center_dist_atr * 1.5)
+        scored.append((total, zone, {
+            "score": round(clamp(total), 2),
+            "overlap_with_parent": round(overlap, 3),
+            "center_distance_atr": round(center_dist_atr, 3),
+        }))
+
+    if not scored:
+        return None, {"available": False, "reason": "Tidak ada execution POI M15 yang berada di parent zone dan sisi entry."}
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_zone, details = scored[0]
+    details.update({
+        "available": True,
+        "timeframe": ctx.get("timeframe"),
+        "type": best_zone.kind,
+        "low": round_price(best_zone.low),
+        "high": round_price(best_zone.high),
+        "midpoint": round_price(best_zone.midpoint),
+        "quality": round(best_score, 2),
+        "status": best_zone.status,
+    })
+    return best_zone, details
+
+
+def fibonacci_summary(fib: FibonacciContext | None, current: float) -> dict[str, Any]:
+    if fib is None:
+        return {"available": False}
+    ratio = fib.retracement_ratio(current)
+    return {
+        "available": True,
+        "timeframe": fib.timeframe,
+        "direction": fib.direction,
+        "swing_low": round_price(fib.swing_low),
+        "swing_high": round_price(fib.swing_high),
+        "low_index": fib.low_index,
+        "high_index": fib.high_index,
+        "current_retracement_ratio": round(ratio, 4),
+        "current_retracement_pct": round(ratio * 100.0, 2),
+        "levels": fib.levels,
+        "anchor_reason": fib.anchor_reason,
+        "trend_strength": fib.trend_strength,
+        "deep_zone_0618_0786": {
+            "low": round_price(fib_zone_for_direction(fib, 0.618, 0.786)[0]),
+            "high": round_price(fib_zone_for_direction(fib, 0.618, 0.786)[1]),
+        },
+    }
+
+
+def find_target_liquidity_topdown(
+    pools: list[LiquidityPool],
+    direction: str,
+    entry: float,
+    atr: float,
+) -> LiquidityPool | None:
+    wanted = "BUY_SIDE" if direction == "BUY" else "SELL_SIDE"
+    candidates = []
+    tf_priority = {"H4": 4, "H1": 3, "M15": 1}
+    for p in pools:
+        if p.kind != wanted:
+            continue
+        if direction == "BUY" and p.level <= entry:
+            continue
+        if direction == "SELL" and p.level >= entry:
+            continue
+        dist = abs(p.level - entry) / max(atr, EPS)
+        if dist > 8.0:
+            continue
+        source = str(p.details.get("timeframe") or "M15")
+        priority = tf_priority.get(source.split("_")[0], 1)
+        candidates.append((priority, p.strength, -dist, p))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][3]
+
+
+def structural_invalidation_level(
+    direction: str,
+    entry: float,
+    execution: Zone | None,
+    refinement: Zone | None,
+    primary: Zone | None,
+    m15_structure: StructureSnapshot,
+    trigger_sweep: dict[str, Any] | None,
+) -> float:
+    levels: list[float] = []
+    if direction == "BUY":
+        if trigger_sweep and safe_float(trigger_sweep.get("level"), 0.0) < entry:
+            levels.append(safe_float(trigger_sweep.get("level")))
+        for pivot in reversed(m15_structure.swing_lows[-8:]):
+            if pivot.price < entry:
+                levels.append(pivot.price)
+                break
+        for zone in (execution, refinement, primary):
+            if zone and zone.low < entry:
+                levels.append(zone.low)
+        return max(levels) if levels else entry
+
+    if trigger_sweep and safe_float(trigger_sweep.get("level"), 0.0) > entry:
+        levels.append(safe_float(trigger_sweep.get("level")))
+    for pivot in reversed(m15_structure.swing_highs[-8:]):
+        if pivot.price > entry:
+            levels.append(pivot.price)
+            break
+    for zone in (execution, refinement, primary):
+        if zone and zone.high > entry:
+            levels.append(zone.high)
+    return min(levels) if levels else entry
+
+
+def topdown_candidate(
+    *,
+    pair: str,
+    direction: str,
+    current: float,
+    m15_atr: float,
+    primary: Zone | None,
+    refinement: Zone | None,
+    execution: Zone | None,
+    h4_ctx: dict[str, Any],
+    h1_ctx: dict[str, Any],
+    m15_ctx: dict[str, Any],
+    m15_structure: StructureSnapshot,
+    target: LiquidityPool | None,
+    sweep: dict[str, Any] | None,
+    mss: dict[str, Any] | None,
+    bos: dict[str, Any] | None,
+    rsi: float,
+    vlt_direction: str,
+) -> Candidate | None:
+    entry_zone = execution or refinement or primary
+    if entry_zone is None:
+        return None
+
+    # The final entry must remain on the retracement side required by main.py.
+    if direction == "BUY":
+        if entry_zone.midpoint < current:
+            entry = entry_zone.midpoint
+        elif entry_zone.low < current:
+            entry = max(entry_zone.low, current - max(m15_atr * 0.20, (entry_zone.high - entry_zone.low) * 0.25))
+        else:
+            return None
+    else:
+        if entry_zone.midpoint > current:
+            entry = entry_zone.midpoint
+        elif entry_zone.high > current:
+            entry = min(entry_zone.high, current + max(m15_atr * 0.20, (entry_zone.high - entry_zone.low) * 0.25))
+        else:
+            return None
+
+    structural = structural_invalidation_level(
+        direction,
+        entry,
+        execution,
+        refinement,
+        primary,
+        m15_structure,
+        sweep,
+    )
+    if direction == "BUY":
+        sl = structural - m15_atr * SL_BUFFER_ATR
+        if sl >= entry:
+            sl = entry - max(m15_atr * 0.60, entry * 0.002)
+    else:
+        sl = structural + m15_atr * SL_BUFFER_ATR
+        if sl <= entry:
+            sl = entry + max(m15_atr * 0.60, entry * 0.002)
+
+    tp = target.level if target else 0.0
+    if direction == "BUY":
+        if tp <= entry:
+            tp = max(current + 1.75 * m15_atr, entry + 1.75 * m15_atr)
+        tp = max(tp, entry + 1.25 * m15_atr)
+        price_exp = current + max(
+            EXP_ATR_MULTIPLIER * m15_atr,
+            abs(current - entry) * 1.20,
+            (tp - current) * 0.28,
+        )
+        if tp > current:
+            price_exp = min(price_exp, current + (tp - current) * 0.60)
+        if price_exp <= current:
+            price_exp = current + max(m15_atr * 0.6, current * 0.001)
+        if price_exp >= tp:
+            price_exp = current + max(m15_atr * 0.60, (tp - current) * 0.35)
+        if not (sl < entry < current < price_exp < tp):
+            return None
+    else:
+        if tp >= entry or tp <= 0:
+            tp = min(current - 1.75 * m15_atr, entry - 1.75 * m15_atr)
+        tp = min(tp, entry - 1.25 * m15_atr)
+        price_exp = current - max(
+            EXP_ATR_MULTIPLIER * m15_atr,
+            abs(current - entry) * 1.20,
+            (current - tp) * 0.28,
+        )
+        if tp < current:
+            price_exp = max(price_exp, current - (current - tp) * 0.60)
+        if price_exp >= current:
+            price_exp = current - max(m15_atr * 0.60, current * 0.001)
+        if price_exp <= tp:
+            price_exp = current - max(m15_atr * 0.60, (current - tp) * 0.35)
+        if not (tp < price_exp < current < entry < sl):
+            return None
+
+    model = "HTF_POI_M15_MSS" if primary and (mss or sweep) else "HTF_POI_M15_REFINEMENT"
+    hierarchy = {
+        "primary_h4": _zone_evidence(primary, h4_ctx.get("atr"), current),
+        "refinement_h1": _zone_evidence(refinement, h1_ctx.get("atr"), current),
+        "execution_m15": _zone_evidence(execution, m15_ctx.get("atr"), current),
+    }
+    fib_info = {
+        "h4": fib_confluence_score(primary, h4_ctx.get("fib", {}).get(direction), direction)[1] if primary else {"available": False},
+        "h1": fib_confluence_score(refinement, h1_ctx.get("fib", {}).get(direction), direction)[1] if refinement else {"available": False},
+    }
+    evidence = {
+        "top_down": hierarchy,
+        "fibonacci": fib_info,
+        "sweep": sweep,
+        "mss": mss,
+        "bos": bos,
+        "target_liquidity": _liquidity_evidence(target),
+        "direction": direction,
+        "btc_direction_constraint": True,
+        "pair_h4_trend": h4_ctx.get("structure").trend if h4_ctx.get("structure") else None,
+        "notes_architecture": "H4 primary POI -> H1 refinement -> M15 execution confirmation",
+    }
+    entry_reason = _topdown_entry_reason(
+        pair,
+        direction,
+        primary,
+        refinement,
+        execution,
+        h4_ctx,
+        h1_ctx,
+        sweep,
+        mss,
+        bos,
+        rsi,
+        vlt_direction,
+    )
+    sl_reason = (
+        f"SL ditempatkan di bawah/atas structural invalidation terdekat "
+        f"({round_price(structural)}) + buffer {SL_BUFFER_ATR:.2f} ATR M15."
+    )
+    tp_reason = (
+        f"TP diarahkan ke {target.source} {round_price(target.level)} sebagai liquidity target HTF."
+        if target else
+        f"TP fallback {round_price(tp)} menggunakan range/ATR setelah target liquidity HTF tidak tersedia."
+    )
+    exp_reason = (
+        f"Price Exp {round_price(price_exp)} adalah batas ekspansi thesis H4/H1 sebelum entry. "
+        "Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru."
+    )
+
+    return Candidate(
+        direction=direction,
+        model=model,
+        entry=round_price(entry),
+        sl=round_price(sl),
+        tp=round_price(tp),
+        price_exp=round_price(price_exp),
+        entry_reason=entry_reason,
+        sl_reason=sl_reason,
+        tp_reason=tp_reason,
+        price_exp_reason=exp_reason,
+        evidence=evidence,
+    )
+
+
+def _zone_evidence(zone: Zone | None, atr: float | None, current: float | None = None) -> dict[str, Any]:
+    if zone is None:
+        return {"available": False}
+    a = safe_float(atr, 0.0)
+    return {
+        "available": True,
+        "timeframe": zone.details.get("timeframe"),
+        "kind": zone.kind,
+        "low": round_price(zone.low),
+        "high": round_price(zone.high),
+        "midpoint": round_price(zone.midpoint),
+        "status": zone.status,
+        "strength": round(zone.strength, 2),
+        "distance_atr_to_current": round(abs(zone.midpoint - safe_float(current, zone.midpoint)) / max(a, EPS), 3) if a > 0 and current is not None else None,
+        "details": zone.details,
+    }
+
+
+def _liquidity_evidence(pool: LiquidityPool | None) -> dict[str, Any]:
+    if pool is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "kind": pool.kind,
+        "level": round_price(pool.level),
+        "strength": round(pool.strength, 2),
+        "source": pool.source,
+        "distance_pct": round(pool.distance_pct, 4),
+        "distance_atr": round(pool.distance_atr, 3),
+        "timeframe": pool.details.get("timeframe"),
+    }
+
+
+def _topdown_entry_reason(
+    pair: str,
+    direction: str,
+    primary: Zone | None,
+    refinement: Zone | None,
+    execution: Zone | None,
+    h4_ctx: dict[str, Any],
+    h1_ctx: dict[str, Any],
+    sweep: dict[str, Any] | None,
+    mss: dict[str, Any] | None,
+    bos: dict[str, Any] | None,
+    rsi: float,
+    vlt_direction: str,
+) -> str:
+    fragments = [
+        f"{pair} {direction}: thesis dimulai dari POI H4",
+        f"({primary.kind} {round_price(primary.midpoint)})" if primary else "(H4 POI tidak tersedia)",
+    ]
+    if refinement:
+        fragments.append(f"H1 me-refine ke {refinement.kind} {round_price(refinement.midpoint)}")
+    if execution:
+        fragments.append(f"M15 memberi execution POI {execution.kind} {round_price(execution.midpoint)}")
+    fib = h4_ctx.get("fib", {}).get(direction)
+    if primary and fib:
+        fib_score, fib_details = fib_confluence_score(primary, fib, direction)
+        if fib_details.get("band"):
+            fragments.append(f"Fib H4 berada pada band {fib_details['band']} (score {fib_score:.0f})")
+    if sweep:
+        fragments.append("terdapat liquidity sweep searah reversal")
+    if mss:
+        fragments.append("diikuti MSS pada M15")
+    elif bos:
+        fragments.append("diikuti BOS pada M15")
+    if rsi >= 50 and direction == "BUY":
+        fragments.append(f"RSI 14 M15 {rsi:.1f} mendukung momentum")
+    elif rsi <= 50 and direction == "SELL":
+        fragments.append(f"RSI 14 M15 {rsi:.1f} mendukung momentum")
+    if vlt_direction == ("BULLISH" if direction == "BUY" else "BEARISH"):
+        fragments.append("VLT/OHLCV searah dengan setup")
+    return ". ".join(fragments) + "."
+
 # ============================================================================
 # LIQUIDITY
 # ============================================================================
@@ -1176,6 +2101,9 @@ def fvg_zones(candles: list[Candle], atr_values: list[float]) -> list[Zone]:
                     strength=strength,
                     details={
                         "gap_atr": size / max(atr, EPS),
+                        "formation_direction": "BULLISH" if c.bullish else "BEARISH",
+                        "breakaway_gap": bool(c.bullish and c.body_ratio >= 0.55),
+                        "rejection_gap": bool(not c.bullish),
                     },
                 )
             )
@@ -1199,6 +2127,9 @@ def fvg_zones(candles: list[Candle], atr_values: list[float]) -> list[Zone]:
                     strength=strength,
                     details={
                         "gap_atr": size / max(atr, EPS),
+                        "formation_direction": "BEARISH" if c.bearish else "BULLISH",
+                        "breakaway_gap": bool(c.bearish and c.body_ratio >= 0.55),
+                        "rejection_gap": bool(not c.bearish),
                     },
                 )
             )
@@ -1249,6 +2180,7 @@ def find_ob_for_displacement(
                 details={
                     "break_event": event,
                     "relative_volume": round(rel_vol[i], 3),
+                    "formation_direction": "BULLISH",
                 },
             )
         else:
@@ -1268,6 +2200,7 @@ def find_ob_for_displacement(
                 details={
                     "break_event": event,
                     "relative_volume": round(rel_vol[i], 3),
+                    "formation_direction": "BEARISH",
                 },
             )
 
@@ -1437,6 +2370,17 @@ def analyze_notes(notes: list[dict[str, Any]]) -> dict[str, Any]:
             "status": "APPLIED",
             "detail": "Jarak liquidity pool dihitung dalam persen harga dan ATR.",
         })
+
+    applied.append({
+        "rule": "HTF_POI_HIERARCHY",
+        "status": "APPLIED",
+        "detail": "Primary POI H4 -> refinement H1 -> execution confirmation M15.",
+    })
+    applied.append({
+        "rule": "FIBONACCI_CONFLUENCE",
+        "status": "APPLIED",
+        "detail": "Fibonacci retracement dihitung dari impuls/swing terkonfirmasi pada H4 dan H1; 0.618 menjadi filter confluence utama, bukan trigger tunggal.",
+    })
 
     return {
         "raw_notes": texts,
@@ -1782,13 +2726,23 @@ def smc_trigger_score(candidate: Candidate) -> float:
         score += 22
     if candidate.evidence.get("sweep"):
         score += 12
+
     poi_kind = str(candidate.evidence.get("poi", {}).get("kind", ""))
-    if "FVG" in poi_kind:
+    topdown = candidate.evidence.get("top_down") or {}
+    execution = topdown.get("execution_m15") or {}
+    execution_kind = str(execution.get("kind") or "")
+    combined_kinds = f"{poi_kind} {execution_kind}"
+    if "FVG" in combined_kinds:
         score += 8
-    if "OB" in poi_kind:
-        score += 6
-    if "BREAKER" in poi_kind:
+    if "OB" in combined_kinds:
+        score += 7
+    if "BREAKER" in combined_kinds:
         score += 4
+
+    if candidate.evidence.get("btc_direction_constraint"):
+        score += 4
+    if candidate.evidence.get("trigger_status") == "M15_CONFIRMATION_AVAILABLE":
+        score += 5
     return clamp(score)
 
 
@@ -1806,11 +2760,16 @@ def score_candidate(
     m15_rsi_slope: float,
     vlt: dict[str, Any],
     latest_displacement: float,
+    h4_poi_score: float | None = None,
+    h4_fib_score: float | None = None,
+    h1_refinement_score: float | None = None,
 ) -> Candidate:
     scores = {
         "btc_h4_bias": macro_bias_score(candidate.direction, macro_trend),
         "pair_h4_structure": structure_direction_score(candidate.direction, pair_h4_trend),
-        "h1_location": location_score(candidate.direction, candidate.entry, h1_dr),
+        "h4_poi": clamp(h4_poi_score if h4_poi_score is not None else 50.0),
+        "h4_fibonacci": clamp(h4_fib_score if h4_fib_score is not None else 50.0),
+        "h1_refinement": clamp(h1_refinement_score if h1_refinement_score is not None else location_score(candidate.direction, candidate.entry, h1_dr)),
         "liquidity": liquidity_score(candidate, target, sweep, current, m15_atr),
         "smc_trigger": smc_trigger_score(candidate),
         "displacement": displacement_score_for_candidate(candidate, latest_displacement, vlt["relative_volume"]),
@@ -2025,16 +2984,21 @@ def _collect_directional_candidates(
     obs: list[Zone],
     breakers: list[Zone],
     m15_atr_values: list[float],
+    h4_ctx: dict[str, Any] | None = None,
+    h1_ctx: dict[str, Any] | None = None,
+    m15_ctx: dict[str, Any] | None = None,
+    topdown_liquidity: list[LiquidityPool] | None = None,
 ) -> list[Candidate]:
     atr = m15_atr_values[-1]
     rsi_ctx = _latest_rsi_context(m15)
     rsi = rsi_ctx["rsi14"]
-    vlt = volume_trend_score(m15)
+    vlt = volume_trend_score(m15, m15_atr_values)
+    m15_rel_vol = relative_volume(m15, 20)
     latest_disp = displacement_strength(
         m15,
         len(m15) - 1,
         m15_atr_values,
-        relative_volume(m15, 20),
+        m15_rel_vol,
     )
     h1_dr = dealing_range(h1, h1_structure)
 
@@ -2046,19 +3010,16 @@ def _collect_directional_candidates(
     )
     candidates: list[Candidate] = []
 
-    # IMPORTANT: the macro directional regime controls the search space.
-    # We do not generate both directions and let scoring decide whether to
-    # violate the BTC H4 bias. Pair H4/H1/M15 only determine the quality and
-    # timing of the allowed direction.
+    h4_ctx = h4_ctx or htf_poi_candidates(h4, h4_structure, DIRECTION_BUY, "H4")
+    h1_ctx = h1_ctx or htf_poi_candidates(h1, h1_structure, DIRECTION_BUY, "H1")
+    m15_ctx = m15_ctx or htf_poi_candidates(m15, m15_structure, DIRECTION_BUY, "M15")
+    combined_liquidity = topdown_liquidity or [*h4_ctx.get("liquidity", []), *h1_ctx.get("liquidity", []), *m15_ctx.get("liquidity", [])]
+
     for direction in allowed_directions:
-        # Prefer recent FVGs. OB/breaker zones can live longer because their
-        # meaning is tied to the structural event that created them.
-        recent_fvg = [
-            z for z in fvg
-            if len(m15) - 1 - z.index <= FVG_MAX_AGE_M15
-        ]
-        matching_zones = [*recent_fvg, *obs, *breakers]
-        poi = find_matching_poi(matching_zones, direction, current, atr)
+        primary, primary_details = select_primary_poi(h4_ctx, direction, current)
+        refinement, refinement_details = select_refinement_poi(h1_ctx, direction, primary, current)
+        parent = refinement or primary
+        execution, execution_details = select_execution_poi(m15_ctx, direction, parent, current)
 
         sweep, mss = find_recent_sweep_mss(sweeps, m15_structure, direction)
         recent_bos = latest_event(
@@ -2069,57 +3030,130 @@ def _collect_directional_candidates(
             candle_count=len(m15),
         )
 
-        if sweep and mss and poi:
-            target = find_target_liquidity(liquidity, direction, poi.midpoint, current, atr)
-            cand = candidate_from_poi(
+        # Primary model: HTF POI -> H1 refinement -> M15 confirmation.
+        if primary is not None:
+            target = find_target_liquidity_topdown(
+                combined_liquidity,
                 direction,
-                "LIQUIDITY_SWEEP_MSS",
-                poi,
-                current,
+                execution.midpoint if execution else refinement.midpoint if refinement else primary.midpoint,
                 atr,
-                target,
-                {
-                    "sweep": sweep,
-                    "mss": mss,
-                    "poi": poi.kind,
-                    "sweep_index": sweep["index"],
-                    "macro_trend": macro_trend,
-                    "allowed_directions": list(allowed_directions),
-                },
-                rsi,
-                vlt["direction"],
-                h4_structure,
-                h1_dr,
             )
-            if cand:
+            cand = topdown_candidate(
+                pair=pair,
+                direction=direction,
+                current=current,
+                m15_atr=atr,
+                primary=primary,
+                refinement=refinement,
+                execution=execution,
+                h4_ctx=h4_ctx,
+                h1_ctx=h1_ctx,
+                m15_ctx=m15_ctx,
+                m15_structure=m15_structure,
+                target=target,
+                sweep=sweep,
+                mss=mss,
+                bos=recent_bos,
+                rsi=rsi,
+                vlt_direction=vlt["direction"],
+            )
+            if cand is not None:
+                cand.evidence["poi_selection"] = {
+                    "h4": primary_details,
+                    "h1": refinement_details,
+                    "m15": execution_details,
+                }
+                # Dedicated top-down scoring.
+                h4_fib = h4_ctx.get("fib", {}).get(direction)
+                h1_fib = h1_ctx.get("fib", {}).get(direction)
+                h4_poi_score = safe_float(primary_details.get("quality"), 50.0)
+                h4_fib_score = fib_confluence_score(primary, h4_fib, direction)[0] if primary else 50.0
+                h1_ref_score = safe_float(refinement_details.get("quality"), 50.0) if refinement else 35.0
+                trigger_event = mss or recent_bos
+                trigger_disp = safe_float(trigger_event.get("displacement"), latest_disp) if trigger_event else latest_disp
+                score_candidate(
+                    cand,
+                    macro_trend=macro_trend,
+                    pair_h4_trend=h4_structure.trend,
+                    h1_dr=h1_dr,
+                    target=target,
+                    sweep=sweep,
+                    current=current,
+                    m15_atr=atr,
+                    m15_rsi=rsi,
+                    m15_rsi_slope=rsi_ctx["slope"],
+                    vlt=vlt,
+                    latest_displacement=trigger_disp,
+                    h4_poi_score=h4_poi_score,
+                    h4_fib_score=h4_fib_score,
+                    h1_refinement_score=h1_ref_score,
+                )
+                # Trigger quality is materially lower when no M15 structural
+                # confirmation exists, but we do not hard-gate the setup.
+                if not (sweep or mss or recent_bos):
+                    cand.confidence = round(max(0.0, cand.confidence - 18.0), 2)
+                    cand.evidence["trigger_status"] = "WAITING_FOR_M15_CONFIRMATION"
+                else:
+                    cand.evidence["trigger_status"] = "M15_CONFIRMATION_AVAILABLE"
                 candidates.append(cand)
 
-        if recent_bos and poi:
-            target = find_target_liquidity(liquidity, direction, poi.midpoint, current, atr)
-            cand = candidate_from_poi(
-                direction,
-                "BOS_PULLBACK",
-                poi,
-                current,
-                atr,
-                target,
-                {
-                    "bos": recent_bos,
-                    "poi": poi.kind,
-                    "macro_trend": macro_trend,
-                    "allowed_directions": list(allowed_directions),
-                },
-                rsi,
-                vlt["direction"],
-                h4_structure,
-                h1_dr,
-            )
-            if cand:
-                candidates.append(cand)
+        # Secondary legacy-style candidate is kept only as a resilience path;
+        # it remains inside the BTC-defined direction and is scored lower than
+        # a top-down candidate when both exist.
+        if not candidates or not primary:
+            recent_fvg = [
+                z for z in fvg
+                if len(m15) - 1 - z.index <= FVG_MAX_AGE_M15
+            ]
+            matching_zones = [*recent_fvg, *obs, *breakers]
+            poi = find_matching_poi(matching_zones, direction, current, atr)
+            if poi:
+                target = find_target_liquidity(liquidity, direction, poi.midpoint, current, atr)
+                cand = candidate_from_poi(
+                    direction,
+                    "M15_SMC_FALLBACK",
+                    poi,
+                    current,
+                    atr,
+                    target,
+                    {
+                        "poi": poi.kind,
+                        "sweep": sweep,
+                        "mss": mss,
+                        "bos": recent_bos,
+                        "macro_trend": macro_trend,
+                        "allowed_directions": list(allowed_directions),
+                        "top_down_primary_available": primary is not None,
+                    },
+                    rsi,
+                    vlt["direction"],
+                    h4_structure,
+                    h1_dr,
+                )
+                if cand:
+                    score_candidate(
+                        cand,
+                        macro_trend=macro_trend,
+                        pair_h4_trend=h4_structure.trend,
+                        h1_dr=h1_dr,
+                        target=target,
+                        sweep=sweep,
+                        current=current,
+                        m15_atr=atr,
+                        m15_rsi=rsi,
+                        m15_rsi_slope=rsi_ctx["slope"],
+                        vlt=vlt,
+                        latest_displacement=latest_disp,
+                        h4_poi_score=35.0,
+                        h4_fib_score=35.0,
+                        h1_refinement_score=location_score(direction, cand.entry, h1_dr),
+                    )
+                    cand.confidence = round(max(0.0, cand.confidence - 10.0), 2)
+                    candidates.append(cand)
 
-        # Breaker retest is secondary: only use explicit breaker zone.
+        # Preserve secondary breaker retest as an explicit model.
         breaker = find_matching_poi(breakers, direction, current, atr)
-        if breaker:
+        if breaker and primary is None:
             target = find_target_liquidity(liquidity, direction, breaker.midpoint, current, atr)
             cand = candidate_from_poi(
                 direction,
@@ -2140,80 +3174,58 @@ def _collect_directional_candidates(
                 h1_dr,
             )
             if cand:
+                score_candidate(
+                    cand,
+                    macro_trend=macro_trend,
+                    pair_h4_trend=h4_structure.trend,
+                    h1_dr=h1_dr,
+                    target=target,
+                    sweep=sweep,
+                    current=current,
+                    m15_atr=atr,
+                    m15_rsi=rsi,
+                    m15_rsi_slope=rsi_ctx["slope"],
+                    vlt=vlt,
+                    latest_displacement=latest_disp,
+                    h4_poi_score=30.0,
+                    h4_fib_score=30.0,
+                    h1_refinement_score=location_score(direction, cand.entry, h1_dr),
+                )
                 candidates.append(cand)
 
-    # If there are no SMC candidates, create a low-confidence fallback candidate
-    # in the allowed macro direction. When the macro regime is neutral, keep a
-    # deterministic BUY fallback unless pair H4 is bearish, in which case use
-    # SELL. This still preserves the "always choose best available" contract.
+    # Deterministic fallback remains, but it can now carry the HTF context.
     if not candidates:
         if len(allowed_directions) == 1:
             direction = allowed_directions[0]
         else:
             direction = DIRECTION_BUY if h4_structure.trend != "BEARISH" else DIRECTION_SELL
-
         fallback = fallback_candidate(
             direction,
             current,
             atr,
             h1_dr,
             h4_structure,
-            liquidity,
+            combined_liquidity,
         )
-        fallback.evidence.update(
-            {
-                "macro_trend": macro_trend,
-                "allowed_directions": list(allowed_directions),
-                "directional_regime": directional_regime_label(
-                    allowed_directions
-                ),
-            }
-        )
+        fallback.evidence.update({
+            "macro_trend": macro_trend,
+            "allowed_directions": list(allowed_directions),
+            "directional_regime": directional_regime_label(allowed_directions),
+            "top_down": {
+                "h4_primary_poi": False,
+                "h1_refinement": False,
+                "m15_execution": False,
+            },
+        })
         candidates.append(fallback)
 
     # Defensive invariant: no candidate may escape the macro-defined search
-    # space. This protects future strategy extensions from accidentally
-    # creating a counter-direction candidate.
+    # space.
     candidates = [c for c in candidates if c.direction in allowed_directions]
     if not candidates:
         raise RuntimeError(
             "Directional strategy invariant failed: no candidate remains "
             f"for allowed directions {list(allowed_directions)}."
-        )
-
-    for candidate in candidates:
-        target = None
-        if candidate.direction == "BUY":
-            pools = [p for p in liquidity if p.kind == "BUY_SIDE"]
-        else:
-            pools = [p for p in liquidity if p.kind == "SELL_SIDE"]
-        if pools:
-            target = min(
-                pools,
-                key=lambda p: abs(p.level - candidate.tp),
-            )
-
-        sweep = None
-        for s in reversed(sweeps):
-            if s["direction"] != ("BULLISH" if candidate.direction == "BUY" else "BEARISH"):
-                continue
-            if len(m15) - 1 - int(s["index"]) <= 40:
-                sweep = s
-                break
-
-        score_candidate(
-            candidate,
-            macro_trend=macro_trend,
-            pair_h4_trend=h4_structure.trend,
-            h1_dr=h1_dr,
-            target=target,
-            sweep=sweep,
-            current=current,
-            m15_atr=atr,
-            m15_rsi=rsi,
-            m15_rsi_slope=rsi_ctx["slope"],
-            vlt=vlt,
-            latest_displacement=latest_disp,
         )
 
     return candidates
@@ -2244,6 +3256,7 @@ def _zone_summary(zones: list[Zone], current: float, atr: float, total_candles: 
     for z in zones[:12]:
         row = {
             "kind": z.kind,
+            "timeframe": z.details.get("timeframe"),
             "low": round_price(z.low),
             "high": round_price(z.high),
             "midpoint": round_price(z.midpoint),
@@ -2254,6 +3267,8 @@ def _zone_summary(zones: list[Zone], current: float, atr: float, total_candles: 
         }
         if total_candles is not None:
             row["age_candles"] = max(0, total_candles - 1 - z.index)
+        if isinstance(z.details.get("quality"), dict):
+            row["quality_details"] = z.details.get("quality")
         rows.append(row)
     return rows
 
@@ -2429,11 +3444,29 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     pair_h4_structure = build_structure(pair_h4, SWING_SPAN_H4)
     btc_h4_structure = build_structure(btc_h4, SWING_SPAN_H4)
 
-    liquidity = build_liquidity_pools(m15, m15_structure)
-    sweeps = detect_sweeps(m15, liquidity, m15_atr_values, 100)
-    fvg = fvg_zones(m15, m15_atr_values)
-    obs = find_ob_for_displacement(m15, m15_structure, m15_atr_values, m15_rel_volume)
-    breakers = breaker_zones(obs, m15)
+    # Full top-down POI contexts. H4 is the primary analytical layer, H1
+    # refines it, and M15 is the execution layer.
+    h4_ctx = htf_poi_candidates(pair_h4, pair_h4_structure, DIRECTION_BUY, "H4")
+    h1_ctx = htf_poi_candidates(h1, h1_structure, DIRECTION_BUY, "H1")
+    m15_ctx = htf_poi_candidates(m15, m15_structure, DIRECTION_BUY, "M15")
+
+    liquidity = list(m15_ctx.get("liquidity", []))
+    sweeps = list(m15_ctx.get("sweeps", []))
+    fvg = list(m15_ctx.get("fvg", []))
+    obs = list(m15_ctx.get("obs", []))
+    breakers = list(m15_ctx.get("breakers", []))
+
+    # Tag each liquidity pool with its timeframe so target selection can prefer
+    # external HTF liquidity over micro/internal targets.
+    for pool in h4_ctx.get("liquidity", []):
+        pool.details["timeframe"] = "H4"
+        pool.source = f"H4_{pool.source}" if not pool.source.startswith("H4_") else pool.source
+    for pool in h1_ctx.get("liquidity", []):
+        pool.details["timeframe"] = "H1"
+        pool.source = f"H1_{pool.source}" if not pool.source.startswith("H1_") else pool.source
+    for pool in m15_ctx.get("liquidity", []):
+        pool.details["timeframe"] = "M15"
+        pool.source = f"M15_{pool.source}" if not pool.source.startswith("M15_") else pool.source
 
     # Add H1/H4 liquidity context as broader external references.
     for structure, source in (
@@ -2450,6 +3483,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
                     source=source,
                     distance_pct=distance_pct(current, p.price),
                     distance_atr=abs(p.price - current) / max(m15_atr_values[-1], EPS),
+                    details={"timeframe": source.split("_")[0]},
                 )
             )
         for p in structure.swing_lows[-8:]:
@@ -2462,6 +3496,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
                     source=source,
                     distance_pct=distance_pct(current, p.price),
                     distance_atr=abs(p.price - current) / max(m15_atr_values[-1], EPS),
+                    details={"timeframe": source.split("_")[0]},
                 )
             )
 
@@ -2485,6 +3520,10 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         obs=obs,
         breakers=breakers,
         m15_atr_values=m15_atr_values,
+        h4_ctx=h4_ctx,
+        h1_ctx=h1_ctx,
+        m15_ctx=m15_ctx,
+        topdown_liquidity=[*h4_ctx.get("liquidity", []), *h1_ctx.get("liquidity", []), *m15_ctx.get("liquidity", [])],
     )
 
     best = _best_candidate(candidates)
@@ -2595,7 +3634,12 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "altcoin_rule_applied": is_altcoin(normalized_pair),
         },
         "multi_timeframe": {
-            "h4": _structure_summary(pair_h4_structure, pair_h4),
+            "h4": {
+                **_structure_summary(pair_h4_structure, pair_h4),
+                "trend_strength": trend_strength_metrics(pair_h4, pair_h4_structure),
+                "fibonacci": fibonacci_summary(h4_ctx.get("fib", {}).get(best.direction), current),
+                "poi": _zone_summary(h4_ctx.get("zones", [])[:10], current, h4_ctx.get("atr", m15_atr_values[-1]), len(pair_h4)),
+            },
             "h1": {
                 **_structure_summary(h1_structure, h1),
                 "dealing_range": {
@@ -2609,6 +3653,9 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
                         else "EQUILIBRIUM"
                     ),
                 },
+                "trend_strength": trend_strength_metrics(h1, h1_structure),
+                "fibonacci": fibonacci_summary(h1_ctx.get("fib", {}).get(best.direction), current),
+                "poi": _zone_summary(h1_ctx.get("zones", [])[:10], current, h1_ctx.get("atr", m15_atr_values[-1]), len(h1)),
             },
             "m15": {
                 **_structure_summary(m15_structure, m15),
@@ -2624,10 +3671,32 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
                     2,
                 ),
                 "atr14": round(m15_atr_values[-1], 8),
+                "trend_strength": trend_strength_metrics(m15, m15_structure),
+                "fibonacci": fibonacci_summary(m15_ctx.get("fib", {}).get(best.direction), current),
+                "poi": _zone_summary(m15_ctx.get("zones", [])[:10], current, m15_atr_values[-1], len(m15)),
             },
         },
         "smc": {
             "liquidity_sweeps_recent": sweeps[-12:],
+            "htf_poi_hierarchy": {
+                "h4_primary_candidates": _zone_summary(h4_ctx.get("zones", [])[:12], current, h4_ctx.get("atr", m15_atr_values[-1]), len(pair_h4)),
+                "h1_refinement_candidates": _zone_summary(h1_ctx.get("zones", [])[:12], current, h1_ctx.get("atr", m15_atr_values[-1]), len(h1)),
+                "m15_execution_candidates": _zone_summary(m15_ctx.get("zones", [])[:12], current, m15_ctx.get("atr", m15_atr_values[-1]), len(m15)),
+            },
+            "fibonacci": {
+                "h4_buy": fibonacci_summary(h4_ctx.get("fib", {}).get("BUY"), current),
+                "h4_sell": fibonacci_summary(h4_ctx.get("fib", {}).get("SELL"), current),
+                "h1_buy": fibonacci_summary(h1_ctx.get("fib", {}).get("BUY"), current),
+                "h1_sell": fibonacci_summary(h1_ctx.get("fib", {}).get("SELL"), current),
+                "m15_buy": fibonacci_summary(m15_ctx.get("fib", {}).get("BUY"), current),
+                "m15_sell": fibonacci_summary(m15_ctx.get("fib", {}).get("SELL"), current),
+            },
+            "trend_strength": {
+                "btc_h4": trend_strength_metrics(btc_h4, btc_h4_structure),
+                "pair_h4": trend_strength_metrics(pair_h4, pair_h4_structure),
+                "h1": trend_strength_metrics(h1, h1_structure),
+                "m15": trend_strength_metrics(m15, m15_structure),
+            },
             "fvg_recent": _zone_summary(fvg[-10:], current, m15_atr_values[-1], len(m15)),
             "order_blocks": _zone_summary(obs, current, m15_atr_values[-1], len(m15)),
             "breakers": _zone_summary(breakers, current, m15_atr_values[-1], len(m15)),
@@ -2712,13 +3781,17 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "h1_derived_candles": len(h1_derived),
             "h4_derived_candles": len(h4_derived),
             "tick_size": round_price(tick_size) if tick_size else None,
+            "htf_poi_hierarchy": "H4_PRIMARY -> H1_REFINEMENT -> M15_EXECUTION",
+            "fibonacci_enabled": True,
+            "fibonacci_deep_filter": 0.618,
         },
         "strategy": {
             "name": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
             "architecture": (
-                "BTC H4 directional constraint + SMC primary + MTF + "
-                "RSI14 M15 + VLT/OHLCV"
+                "BTC H4 directional constraint + H4 primary POI + "
+                "H4/H1 Fibonacci confluence + H1 refinement + M15 execution + "
+                "SMC + RSI14 M15 + VLT/OHLCV"
             ),
             "confidence_semantics": "quality_score_not_profit_probability",
             "directional_rule": (
@@ -2740,7 +3813,7 @@ async def _fetch_if_short(pair: str, interval: str, interval_ms: int, count: int
 
 
 def validate_directional_alignment(result: dict[str, Any]) -> tuple[bool, list[str]]:
-    """Validate the v0.2 directional invariant from a strategy result."""
+    """Validate the v0.3 directional/top-down invariant from a strategy result."""
     errors: list[str] = []
     direction = str(result.get("direction") or "")
     analysis = result.get("analysis")
