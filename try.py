@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+"""
+try.py - Telegram Launcher
+
+Tugas launcher:
+1. Menjalankan polling Telegram.
+2. /try menyinkronkan main.py + strategy.py dari GitHub lalu reload main.py.
+3. /end menghentikan main.py.
+4. /ganti mengganti main.py atau strategy.py di GitHub dan menyalin versi baru
+   ke runtime lokal.
+5. Meneruskan command/update lain ke main.py.
+6. Menyediakan endpoint HTTP sederhana untuk Render health check.
+
+main.py tetap menjadi engine. strategy.py tetap menjadi modul analisis terpisah.
+"""
+
+import ast
 import asyncio
 import base64
-import gc
-import html
 import importlib.util
 import logging
 import os
-import re
-import shutil
 import sys
-import tarfile
 import tempfile
 import threading
 import time
@@ -23,264 +34,84 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify
 
 
-# ============================================================
-# TRY.PY
-# Launcher / Telegram Gateway
-#
-# Tugas try.py:
-#   1. Menjalankan polling Telegram.
-#   2. /try  -> sync versi terbaru dari GitHub lalu load main.py.
-#   3. /ganti -> mengganti file di GitHub melalui Telegram.
-#   4. /end  -> menghentikan main.py dan membersihkan runtime launcher.
-#   5. Command lain -> diteruskan ke main.py.
-#
-# Tidak ada:
-#   - logic trading
-#   - Binance
-#   - strategy
-#   - PnL
-#   - trade storage
-#   - checkpoint
-#   - persistent runtime state
-#
-# Catatan:
-#   GitHub adalah sumber file aplikasi.
-#   Saat /try dipanggil, branch GitHub terbaru disalin ke working
-#   directory lalu main.py terbaru di-load.
-#
-#   /end tidak menulis state/runtime ke disk. Launcher tetap idle
-#   agar /try dapat dipanggil lagi.
-# ============================================================
-
+# -----------------------------------------------------------------------------
+# CONFIG
+# -----------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
-
-# Environment tidak pernah diambil dari GitHub archive.
-load_dotenv(BASE_DIR / "trades.env")
 load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / "trades.env")
 
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
+MAIN_FILE = (os.getenv("MAIN_FILE") or "main.py").strip()
+STRATEGY_FILE = (os.getenv("STRATEGY_FILE") or "strategy.py").strip()
 GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
 REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
 GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
-MAIN_FILE = (os.getenv("MAIN_FILE") or "main.py").strip()
-
 PORT = int(os.getenv("PORT", "10000"))
 TG_POLL_TIMEOUT = max(5, int(os.getenv("TG_POLL_TIMEOUT", "30")))
-TG_ERROR_BACKOFF_MAX = max(10, int(os.getenv("TG_ERROR_BACKOFF_MAX", "60")))
 HTTP_TIMEOUT = max(10, int(os.getenv("HTTP_TIMEOUT", "30")))
+GITHUB_REQUEST_SECONDS = max(10, int(os.getenv("GITHUB_REQUEST_SECONDS", "30")))
 
 try:
     ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 except ValueError as exc:
     raise RuntimeError("ALLOWED_USER_ID harus berupa integer.") from exc
 
-
 if not TELEGRAM_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN belum diset.")
-
+    raise RuntimeError("TELEGRAM_TOKEN belum diset di .env")
 if not ALLOWED_USER_ID:
-    raise RuntimeError("ALLOWED_USER_ID belum diset atau bernilai 0.")
-
-if not REPO_NAME:
-    raise RuntimeError("REPO_NAME belum diset.")
-
+    raise RuntimeError("ALLOWED_USER_ID belum diset di .env")
 if not GITHUB_TOKEN:
-    raise RuntimeError("GITHUB_TOKEN belum diset.")
+    raise RuntimeError("GITHUB_TOKEN belum diset di .env")
+if not REPO_NAME or "/" not in REPO_NAME:
+    raise RuntimeError("REPO_NAME belum diset atau formatnya tidak valid.")
 
 
+# -----------------------------------------------------------------------------
+# STATE
+# -----------------------------------------------------------------------------
+log = logging.getLogger("launcher")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
-log = logging.getLogger("try.launcher")
-
-app = Flask(__name__)
-
-_MAIN_LOCK = asyncio.Lock()
-_SYNC_LOCK = threading.RLock()
-
-_MAIN_MODULE: ModuleType | None = None
-_MAIN_RUNNING = False
-
-_STOP = threading.Event()
-
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+TG_FILE_API = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}"
+GITHUB_API = "https://api.github.com"
+
+MAIN_LOCK = asyncio.Lock()
+MAIN_MODULE: ModuleType | None = None
+MAIN_RUNNING = False
+STOP_EVENT = asyncio.Event()
+
+# /ganti state. Hanya ada satu user yang diizinkan sehingga state global cukup.
+GANTI_WAITING_SELECTION = False
+GANTI_TARGET: str | None = None
 
 
-# ============================================================
-# HTTP / Render health
-# ============================================================
+# -----------------------------------------------------------------------------
+# PATH HELPERS
+# -----------------------------------------------------------------------------
+def safe_runtime_path(relative_path: str) -> Path:
+    """Resolve path lokal dan cegah path keluar dari folder launcher."""
+    raw = Path(str(relative_path).strip())
+    if raw.is_absolute():
+        raise ValueError(f"Runtime path harus relatif: {relative_path}")
 
-@app.get("/")
-def index():
-    return jsonify(
-        {
-            "ok": True,
-            "service": "SMCAutoTrade launcher",
-            "main_running": _MAIN_RUNNING,
-        }
-    )
-
-
-@app.get("/healthz")
-def healthz():
-    return jsonify(
-        {
-            "ok": True,
-            "service": "SMCAutoTrade launcher",
-            "telegram_polling": not _STOP.is_set(),
-            "main_running": _MAIN_RUNNING,
-            "timestamp": time.time(),
-        }
-    )
-
-
-def run_flask() -> None:
-    app.run(
-        host="0.0.0.0",
-        port=PORT,
-        debug=False,
-        use_reloader=False,
-        threaded=True,
-    )
-
-
-# ============================================================
-# Telegram
-# ============================================================
-
-def tg_call(
-    method: str,
-    payload: dict | None = None,
-    timeout: int = HTTP_TIMEOUT,
-):
+    root = BASE_DIR.resolve()
+    path = (BASE_DIR / raw).resolve()
     try:
-        response = requests.post(
-            f"{TG_API}/{method}",
-            json=payload or {},
-            timeout=timeout,
-        )
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Telegram {method}: network error: {exc}") from exc
-
-    if response.status_code == 409:
-        raise RuntimeError(
-            f"Telegram {method}: HTTP 409 {response.text[:500]}"
-        )
-
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"Telegram {method}: HTTP {response.status_code}: "
-            f"{response.text[:800]}"
-        )
-
-    try:
-        body = response.json()
+        path.relative_to(root)
     except ValueError as exc:
-        raise RuntimeError(f"Telegram {method}: invalid JSON") from exc
-
-    if not body.get("ok"):
-        raise RuntimeError(f"Telegram {method}: {body}")
-
-    return body.get("result")
+        raise ValueError(f"Runtime path keluar dari BASE_DIR: {relative_path}") from exc
+    return path
 
 
-def tg_send(chat_id: int, text: str) -> None:
-    text = str(text)
+def github_content_url(path: str) -> str:
+    encoded = "/".join(quote(part, safe="") for part in path.strip("/").split("/"))
+    return f"{GITHUB_API}/repos/{REPO_NAME}/contents/{encoded}"
 
-    # Telegram message limit aman di bawah 4096 karakter.
-    for start in range(0, len(text), 3900):
-        chunk = text[start : start + 3900]
-
-        try:
-            tg_call(
-                "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": chunk,
-                },
-            )
-        except Exception:
-            log.exception("Gagal kirim Telegram ke %s", chat_id)
-            return
-
-
-def tg_send_document(chat_id: int, file_path: str | Path, caption: str = "") -> None:
-    """Kirim file lokal sebagai Telegram document.
-
-    Callback ini dipakai main.py untuk /analyze. Sengaja sinkron agar
-    kompatibel dengan asyncio.to_thread() di main.py.
-    """
-    path = Path(file_path)
-
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"File Telegram tidak ditemukan: {path}"
-        )
-
-    try:
-        with path.open("rb") as document:
-            response = requests.post(
-                f"{TG_API}/sendDocument",
-                data={
-                    "chat_id": int(chat_id),
-                    "caption": str(caption or ""),
-                },
-                files={
-                    "document": (
-                        path.name,
-                        document,
-                        "application/octet-stream",
-                    )
-                },
-                timeout=60,
-            )
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Telegram sendDocument: network error: {exc}"
-        ) from exc
-
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"Telegram sendDocument: HTTP {response.status_code}: "
-            f"{response.text[:800]}"
-        )
-
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise RuntimeError(
-            "Telegram sendDocument: invalid JSON"
-        ) from exc
-
-    if not body.get("ok"):
-        raise RuntimeError(
-            f"Telegram sendDocument: {body}"
-        )
-
-
-def tg_get_file_bytes(file_id: str) -> bytes:
-    info = tg_call(
-        "getFile",
-        {"file_id": file_id},
-        timeout=20,
-    )
-
-    file_path = str(info["file_path"])
-
-    response = requests.get(
-        f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
-        timeout=60,
-    )
-    response.raise_for_status()
-
-    return response.content
-
-
-# ============================================================
-# GitHub
-# ============================================================
 
 def github_headers() -> dict[str, str]:
     return {
@@ -290,778 +121,738 @@ def github_headers() -> dict[str, str]:
     }
 
 
-def github_file_sha(path: str) -> str | None:
-    encoded = "/".join(
-        quote(part, safe="")
-        for part in path.split("/")
+# -----------------------------------------------------------------------------
+# SMALL HTTP SERVER - Render health check
+# -----------------------------------------------------------------------------
+app = Flask(__name__)
+
+
+@app.get("/")
+def index():
+    return jsonify(
+        {
+            "ok": True,
+            "service": "telegram-launcher",
+            "main_running": MAIN_RUNNING,
+            "main_file": MAIN_FILE,
+            "strategy_file": STRATEGY_FILE,
+        }
     )
 
-    response = requests.get(
-        f"https://api.github.com/repos/{REPO_NAME}/contents/{encoded}",
-        headers=github_headers(),
-        params={"ref": GITHUB_BRANCH},
-        timeout=HTTP_TIMEOUT,
+
+@app.get("/healthz")
+def healthz():
+    return jsonify(
+        {
+            "ok": True,
+            "service": "telegram-launcher",
+            "main_running": MAIN_RUNNING,
+            "timestamp": time.time(),
+            "main_file": MAIN_FILE,
+            "strategy_file": STRATEGY_FILE,
+        }
     )
 
-    if response.status_code == 404:
-        return None
 
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"GitHub GET {path}: HTTP {response.status_code} "
-            f"{response.text[:600]}"
-        )
-
-    return response.json().get("sha")
-
-
-def validate_github_path(path: str) -> str:
-    path = str(path or "").strip().replace("\\", "/").lstrip("/")
-
-    if not path or ".." in Path(path).parts:
-        raise ValueError("Path GitHub tidak valid.")
-
-    if not re.fullmatch(r"[A-Za-z0-9._/\-]+", path):
-        raise ValueError(
-            "Path GitHub hanya boleh berisi huruf, angka, titik, "
-            "underscore, slash, dan tanda minus."
-        )
-
-    filename = Path(path).name
-
-    # Jangan pernah izinkan secret environment diubah melalui Telegram.
-    if (
-        filename in {".env", "trades.env"}
-        or filename.startswith(".env.")
-    ):
-        raise ValueError(
-            "File environment/secret tidak boleh dipush lewat /ganti."
-        )
-
-    return path
-
-
-def github_replace(path: str, content: bytes) -> str:
-    path = validate_github_path(path)
-
-    sha = github_file_sha(path)
-
-    encoded = "/".join(
-        quote(part, safe="")
-        for part in path.split("/")
+def run_http_server() -> None:
+    app.run(
+        host="0.0.0.0",
+        port=PORT,
+        debug=False,
+        use_reloader=False,
+        threaded=True,
     )
 
-    payload = {
-        "message": f"Update {path} via Telegram /ganti",
-        "content": base64.b64encode(content).decode("ascii"),
-        "branch": GITHUB_BRANCH,
-    }
 
-    if sha:
-        payload["sha"] = sha
-
-    response = requests.put(
-        f"https://api.github.com/repos/{REPO_NAME}/contents/{encoded}",
-        headers=github_headers(),
-        json=payload,
-        timeout=60,
+# -----------------------------------------------------------------------------
+# TELEGRAM
+# -----------------------------------------------------------------------------
+def tg_call(
+    method: str,
+    payload: dict | None = None,
+    timeout: int = HTTP_TIMEOUT,
+):
+    response = requests.post(
+        f"{TG_API}/{method}",
+        json=payload or {},
+        timeout=timeout,
     )
 
     if response.status_code >= 400:
         raise RuntimeError(
-            f"GitHub PUT {path}: HTTP {response.status_code} "
+            f"Telegram {method}: HTTP {response.status_code}: {response.text[:800]}"
+        )
+
+    body = response.json()
+    if not body.get("ok"):
+        raise RuntimeError(f"Telegram {method}: {body}")
+
+    return body.get("result")
+
+
+def tg_send(chat_id: int, text: str) -> None:
+    text = str(text)
+    for start in range(0, len(text), 3900):
+        chunk = text[start : start + 3900]
+        try:
+            tg_call("sendMessage", {"chat_id": chat_id, "text": chunk})
+        except Exception:
+            log.exception("Gagal mengirim Telegram ke chat_id=%s", chat_id)
+            return
+
+
+def tg_send_document(chat_id: int, document_path: str, caption: str = "") -> None:
+    path = Path(str(document_path))
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"Dokumen tidak ditemukan: {path}")
+
+    with path.open("rb") as document:
+        response = requests.post(
+            f"{TG_API}/sendDocument",
+            data={
+                "chat_id": str(chat_id),
+                "caption": str(caption or "")[:1024],
+            },
+            files={
+                "document": (path.name, document),
+            },
+            timeout=HTTP_TIMEOUT,
+        )
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Telegram sendDocument: HTTP {response.status_code}: "
             f"{response.text[:800]}"
         )
 
-    return str(
-        (response.json().get("commit") or {}).get("sha") or ""
-    )[:12]
+    body = response.json()
+    if not body.get("ok"):
+        raise RuntimeError(f"Telegram sendDocument: {body}")
 
 
-def safe_extract(
-    tar: tarfile.TarFile,
-    destination: Path,
-) -> list[Path]:
-    """
-    Extract hanya file biasa dari archive GitHub.
-    .env dan folder .git tidak pernah disalin.
-    """
-    written: list[Path] = []
-    root = destination.resolve()
+def download_telegram_document(file_id: str) -> tuple[bytes, str]:
+    result = tg_call("getFile", {"file_id": file_id}, timeout=HTTP_TIMEOUT)
+    file_path = str((result or {}).get("file_path") or "").strip()
+    if not file_path:
+        raise RuntimeError("Telegram getFile tidak mengembalikan file_path.")
 
-    for member in tar.getmembers():
-        if not member.isfile():
-            continue
-
-        name = member.name.replace("\\", "/")
-        parts = name.split("/", 1)
-
-        # GitHub tarball biasanya punya root directory:
-        # <repo>-<sha>/path/to/file
-        if len(parts) != 2:
-            continue
-
-        rel = Path(parts[1])
-
-        if not rel.parts or ".." in rel.parts:
-            raise RuntimeError(
-                f"GitHub archive path tidak aman: {name}"
-            )
-
-        if rel.name in {".env", "trades.env"}:
-            continue
-
-        if rel.name.startswith(".env."):
-            continue
-
-        if any(part == ".git" for part in rel.parts):
-            continue
-
-        target = (destination / rel).resolve()
-
-        try:
-            target.relative_to(root)
-        except ValueError as exc:
-            raise RuntimeError(
-                f"GitHub archive mencoba keluar dari folder: {name}"
-            ) from exc
-
-        target.parent.mkdir(
-            parents=True,
-            exist_ok=True,
+    response = requests.get(
+        f"{TG_FILE_API}/{file_path}",
+        timeout=HTTP_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Telegram file download: HTTP {response.status_code}: "
+            f"{response.text[:800]}"
         )
 
-        source = tar.extractfile(member)
-
-        if source is None:
-            continue
-
-        with source, target.open("wb") as output:
-            shutil.copyfileobj(source, output)
-
-        written.append(rel)
-
-    return written
+    return response.content, Path(file_path).name
 
 
-def sync_repository() -> tuple[int, int]:
-    """
-    Mengambil versi branch GitHub TERBARU ke working directory.
+# -----------------------------------------------------------------------------
+# SOURCE VALIDATION
+# -----------------------------------------------------------------------------
+def _function_names(source: str) -> set[str]:
+    tree = ast.parse(source)
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+    return names
 
-    Penting:
-    - Tidak menghapus apa pun di GitHub.
-    - Tidak pernah melakukan DELETE ke GitHub.
-    - File di GitHub menjadi sumber versi yang dijalankan.
-    """
-    url = (
-        f"https://api.github.com/repos/{REPO_NAME}/tarball/"
-        f"{quote(GITHUB_BRANCH, safe='')}"
-    )
 
-    with _SYNC_LOCK:
-        response = requests.get(
-            url,
-            headers=github_headers(),
-            timeout=120,
-        )
+def validate_python_source(source: bytes, relative_path: str) -> None:
+    text = source.decode("utf-8")
+    try:
+        compile(text, relative_path, "exec")
+        names = _function_names(text)
+    except SyntaxError as exc:
+        location = f"line {exc.lineno or '?'}"
+        raise RuntimeError(
+            f"{relative_path} memiliki syntax error di {location}: {exc.msg}"
+        ) from exc
 
-        if response.status_code >= 400:
+    normalized = Path(relative_path).name.lower()
+    if normalized == Path(MAIN_FILE).name.lower():
+        required = {"on_start", "handle_update", "on_stop"}
+        missing = sorted(required - names)
+        if missing:
             raise RuntimeError(
-                f"GitHub tarball gagal: HTTP {response.status_code} "
-                f"{response.text[:800]}"
+                f"{relative_path} wajib memiliki function: {', '.join(missing)}"
             )
 
-        with tempfile.TemporaryDirectory(
-            prefix="repo-sync-"
-        ) as temp_dir:
-            archive = Path(temp_dir) / "repo.tar.gz"
-            stage = Path(temp_dir) / "stage"
+    if normalized == Path(STRATEGY_FILE).name.lower():
+        if "generate_setup" not in names:
+            raise RuntimeError(
+                f"{relative_path} wajib menyediakan function generate_setup()."
+            )
 
-            archive.write_bytes(response.content)
-            stage.mkdir()
 
-            with tarfile.open(archive, "r:gz") as tar:
-                written = safe_extract(tar, stage)
-
-            if not written:
-                raise RuntimeError(
-                    "GitHub repository kosong atau tidak berisi "
-                    "file yang bisa disinkronkan."
-                )
-
-            changed = 0
-
-            for rel in written:
-                src = stage / rel
-                dst = BASE_DIR / rel
-
-                dst.parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-
-                try:
-                    is_same = (
-                        dst.exists()
-                        and dst.read_bytes() == src.read_bytes()
-                    )
-                except OSError:
-                    is_same = False
-
-                if not is_same:
-                    shutil.copy2(src, dst)
-                    changed += 1
-
-    log.info(
-        "[SYNC] GitHub -> local | files=%s changed=%s",
-        len(written),
-        changed,
+# -----------------------------------------------------------------------------
+# GITHUB
+# -----------------------------------------------------------------------------
+def github_get_file(path: str) -> tuple[bytes, str | None]:
+    response = requests.get(
+        github_content_url(path),
+        headers=github_headers(),
+        params={"ref": GITHUB_BRANCH},
+        timeout=GITHUB_REQUEST_SECONDS,
     )
 
-    return len(written), changed
-
-
-# ============================================================
-# main.py lifecycle
-# ============================================================
-
-def load_main_module(path: Path) -> ModuleType:
-    if not path.exists():
+    if response.status_code == 404:
         raise FileNotFoundError(
-            f"{path.name} tidak ditemukan setelah sync GitHub."
+            f"File {path} tidak ditemukan di GitHub branch {GITHUB_BRANCH}."
         )
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"GitHub GET {path}: HTTP {response.status_code}: "
+            f"{response.text[:800]}"
+        )
+
+    body = response.json()
+    if body.get("type") != "file":
+        raise RuntimeError(f"GitHub path bukan file: {path}")
+
+    encoded = str(body.get("content") or "").replace("\n", "")
+    try:
+        content = base64.b64decode(encoded)
+    except Exception as exc:
+        raise RuntimeError(f"GitHub file {path} gagal di-decode.") from exc
+
+    return content, str(body.get("sha") or "") or None
+
+
+def github_put_file(path: str, content: bytes, commit_message: str) -> str:
+    last_error: Exception | None = None
+
+    for _attempt in range(3):
+        try:
+            try:
+                _old_content, sha = github_get_file(path)
+            except FileNotFoundError:
+                sha = None
+
+            payload = {
+                "message": commit_message,
+                "content": base64.b64encode(content).decode("ascii"),
+                "branch": GITHUB_BRANCH,
+            }
+            if sha:
+                payload["sha"] = sha
+
+            response = requests.put(
+                github_content_url(path),
+                headers=github_headers(),
+                json=payload,
+                timeout=GITHUB_REQUEST_SECONDS,
+            )
+
+            if response.status_code == 409:
+                raise RuntimeError("GITHUB_CONFLICT")
+
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"GitHub PUT {path}: HTTP {response.status_code}: "
+                    f"{response.text[:800]}"
+                )
+
+            body = response.json()
+            return str((body.get("content") or {}).get("sha") or "")
+
+        except RuntimeError as exc:
+            last_error = exc
+            if str(exc) != "GITHUB_CONFLICT":
+                raise
+            time.sleep(0.5)
+        except Exception as exc:
+            last_error = exc
+            raise
+
+    raise RuntimeError(f"GitHub gagal memperbarui {path}: {last_error}")
+
+
+def atomic_write(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_name = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temp_name, path)
+        temp_name = None
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+# -----------------------------------------------------------------------------
+# SYNC MAIN + STRATEGY
+# -----------------------------------------------------------------------------
+def sync_runtime_files() -> list[str]:
+    """Download main.py + strategy.py dari GitHub dan replace secara atomik.
+
+    Kedua file divalidasi sebelum satu pun file lokal diganti. Jadi /try tidak
+    meninggalkan runtime dalam keadaan setengah-ter-update ketika salah satu
+    sumber invalid.
+    """
+    targets = [MAIN_FILE, STRATEGY_FILE]
+    downloaded: dict[str, bytes] = {}
+
+    for target in targets:
+        content, _sha = github_get_file(target)
+        validate_python_source(content, target)
+        downloaded[target] = content
+
+    for target, content in downloaded.items():
+        atomic_write(safe_runtime_path(target), content)
+
+    return targets
+
+
+# -----------------------------------------------------------------------------
+# MAIN LOADER
+# -----------------------------------------------------------------------------
+def load_main_module() -> ModuleType:
+    path = safe_runtime_path(MAIN_FILE)
+    if not path.exists():
+        raise FileNotFoundError(f"{MAIN_FILE} tidak ditemukan di {BASE_DIR}")
 
     source = path.read_text(encoding="utf-8")
+    code = compile(source, str(path), "exec")
 
-    # Validasi syntax sebelum module dijalankan.
-    compile(source, str(path), "exec")
+    module_name = "trading_main_runtime"
+    sys.modules.pop(module_name, None)
 
-    module_name = (
-        f"launcher_main_{int(time.time() * 1000)}"
-    )
-
-    spec = importlib.util.spec_from_file_location(
-        module_name,
-        path,
-    )
-
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise ImportError(
-            f"Tidak bisa membuat module spec untuk {path}"
-        )
+        raise ImportError(f"Tidak dapat membuat module spec untuk {MAIN_FILE}")
 
     module = importlib.util.module_from_spec(spec)
-
-    # Dibutuhkan oleh beberapa kasus dataclass/type annotation.
     sys.modules[module_name] = module
 
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        sys.modules.pop(module_name, None)
-        raise
-
+    exec(code, module.__dict__)
     return module
 
 
-async def start_main(chat_id: int) -> str:
-    global _MAIN_MODULE, _MAIN_RUNNING
+async def _call(module: ModuleType, function_name: str, context: dict) -> object:
+    function = getattr(module, function_name, None)
+    if function is None:
+        return None
 
-    async with _MAIN_LOCK:
-        if _MAIN_RUNNING and _MAIN_MODULE is not None:
-            return (
-                f"▶️ <b>{html.escape(MAIN_FILE)}</b> "
-                "sudah berjalan."
-            )
+    result = function(context)
+    if asyncio.iscoroutine(result):
+        return await result
+    return result
 
-        # /try selalu mengambil versi GitHub terbaru dulu.
-        total, changed = await asyncio.to_thread(
-            sync_repository
-        )
 
-        # Pastikan tidak ada module main lama yang dipakai.
-        old_module = _MAIN_MODULE
+async def start_or_reload_main(chat_id: int) -> None:
+    """Sync main.py + strategy.py lalu start/reload main.py."""
+    global MAIN_MODULE, MAIN_RUNNING, GANTI_TARGET, GANTI_WAITING_SELECTION
 
-        if old_module is not None:
-            old_name = getattr(
-                old_module,
-                "__name__",
-                None,
-            )
+    async with MAIN_LOCK:
+        # Sync dilakukan SEBELUM main lama dihentikan.
+        synced = await asyncio.to_thread(sync_runtime_files)
+        log.info("/try sync selesai: %s", ", ".join(synced))
 
-            _MAIN_MODULE = None
+        old_module = MAIN_MODULE
 
-            if old_name:
-                sys.modules.pop(
-                    old_name,
-                    None,
+        if old_module is not None and MAIN_RUNNING:
+            log.info("/try diterima saat main aktif -> reload main.py")
+            MAIN_RUNNING = False
+            try:
+                await _call(
+                    old_module,
+                    "on_stop",
+                    {
+                        "chat_id": chat_id,
+                        "user_id": ALLOWED_USER_ID,
+                        "send_message": tg_send,
+                        "send_document": tg_send_document,
+                        "launcher": "try.py",
+                        "main_file": str(safe_runtime_path(MAIN_FILE)),
+                        "strategy_file": str(safe_runtime_path(STRATEGY_FILE)),
+                    },
                 )
+            except Exception:
+                log.exception("on_stop() main lama gagal")
 
-            gc.collect()
-
-        path = BASE_DIR / MAIN_FILE
-        module = load_main_module(path)
-
-        on_start = getattr(
-            module,
-            "on_start",
-            None,
-        )
-
-        handle_update = getattr(
-            module,
-            "handle_update",
-            None,
-        )
-
-        on_stop = getattr(
-            module,
-            "on_stop",
-            None,
-        )
-
-        if not callable(on_start):
-            raise RuntimeError(
-                f"{MAIN_FILE} wajib memiliki async on_start(context)."
-            )
-
-        if not callable(handle_update):
-            raise RuntimeError(
-                f"{MAIN_FILE} wajib memiliki async handle_update(update, context)."
-            )
-
-        if not callable(on_stop):
-            raise RuntimeError(
-                f"{MAIN_FILE} wajib memiliki async on_stop(context)."
-            )
-
-        context = {
-            "launcher": "try.py",
-            "chat_id": chat_id,
-            "user_id": ALLOWED_USER_ID,
-            "start_file": str(path),
-            "is_running": lambda: _MAIN_RUNNING,
-            "send_message": tg_send,
-            "send_document": tg_send_document,
-        }
-
-        result = on_start(dict(context))
-
-        if asyncio.iscoroutine(result):
-            result = await result
-
-        if result is False:
-            raise RuntimeError(
-                "main.py menolak startup melalui on_start()."
-            )
-
-        _MAIN_MODULE = module
-        _MAIN_RUNNING = True
-
-        return (
-            f"🟢 <b>{html.escape(MAIN_FILE)} aktif.</b>\n\n"
-            f"GitHub sync: {total} file diperiksa, "
-            f"{changed} file diperbarui.\n"
-            f"Versi yang dijalankan: <code>{html.escape(MAIN_FILE)}</code>\n\n"
-            "Semua command selain command launcher "
-            "diteruskan ke main.py."
-        )
-
-
-async def stop_main() -> str:
-    global _MAIN_MODULE, _MAIN_RUNNING
-
-    async with _MAIN_LOCK:
-        module = _MAIN_MODULE
-
-        if module is None or not _MAIN_RUNNING:
-            # Tetap bersihkan referensi bila ada sisa.
-            _MAIN_MODULE = None
-            _MAIN_RUNNING = False
-            gc.collect()
-
-            return (
-                "ℹ️ <b>main.py</b> sedang tidak berjalan.\n"
-                "Launcher tetap standby."
-            )
-
-        _MAIN_RUNNING = False
+        MAIN_MODULE = None
+        sys.modules.pop("trading_main_runtime", None)
 
         try:
-            on_stop = getattr(
-                module,
-                "on_stop",
-                None,
-            )
+            module = load_main_module()
 
-            if callable(on_stop):
-                context = {
-                    "launcher": "try.py",
-                    "user_id": ALLOWED_USER_ID,
-                    "is_running": lambda: _MAIN_RUNNING,
-                    "send_message": tg_send,
-                    "send_document": tg_send_document,
-                }
-
-                result = on_stop(context)
-
-                if asyncio.iscoroutine(result):
-                    await result
-
-        except Exception:
-            log.exception(
-                "[END] cleanup main.py gagal"
-            )
-
-        finally:
-            old_name = getattr(
-                module,
-                "__name__",
-                None,
-            )
-
-            _MAIN_MODULE = None
-
-            if old_name:
-                sys.modules.pop(
-                    old_name,
-                    None,
+            required = ("on_start", "handle_update", "on_stop")
+            missing = [
+                name
+                for name in required
+                if not callable(getattr(module, name, None))
+            ]
+            if missing:
+                raise RuntimeError(
+                    f"{MAIN_FILE} wajib memiliki function: {', '.join(missing)}"
                 )
 
-            gc.collect()
+            context = {
+                "chat_id": chat_id,
+                "user_id": ALLOWED_USER_ID,
+                "send_message": tg_send,
+                "send_document": tg_send_document,
+                "launcher": "try.py",
+                "main_file": str(safe_runtime_path(MAIN_FILE)),
+                "strategy_file": str(safe_runtime_path(STRATEGY_FILE)),
+                "is_running": lambda: MAIN_RUNNING,
+            }
 
-        # Tidak menulis state/checkpoint apa pun.
-        return (
-            "⏹️ <b>main.py dihentikan.</b>\n\n"
-            "Semua runtime main.py di-memory sudah dilepas.\n"
-            "Tidak ada state/checkpoint main.py yang disimpan.\n\n"
-            "Launcher tetap standby dan tidak menyimpan sesi trade."
-        )
+            MAIN_RUNNING = True
+            MAIN_MODULE = module
+
+            result = await _call(module, "on_start", context)
+            if result is False:
+                MAIN_RUNNING = False
+                MAIN_MODULE = None
+                sys.modules.pop("trading_main_runtime", None)
+                raise RuntimeError("main.py menolak startup melalui on_start().")
+
+            GANTI_WAITING_SELECTION = False
+            GANTI_TARGET = None
+            log.info("main.py aktif")
+
+        except Exception:
+            MAIN_RUNNING = False
+            MAIN_MODULE = None
+            sys.modules.pop("trading_main_runtime", None)
+            raise
 
 
-# ============================================================
-# Forward command ke main.py
-# ============================================================
+async def stop_main() -> bool:
+    """Hentikan main.py. Return True jika sebelumnya aktif."""
+    global MAIN_MODULE, MAIN_RUNNING
 
-async def forward_update(update: dict) -> None:
-    module = _MAIN_MODULE
+    async with MAIN_LOCK:
+        module = MAIN_MODULE
+        was_running = bool(module is not None and MAIN_RUNNING)
+        MAIN_RUNNING = False
+        MAIN_MODULE = None
 
-    message = update.get("message") or {}
+        if module is not None:
+            try:
+                await _call(
+                    module,
+                    "on_stop",
+                    {
+                        "chat_id": ALLOWED_USER_ID,
+                        "user_id": ALLOWED_USER_ID,
+                        "send_message": tg_send,
+                        "send_document": tg_send_document,
+                        "launcher": "try.py",
+                        "main_file": str(safe_runtime_path(MAIN_FILE)),
+                        "strategy_file": str(safe_runtime_path(STRATEGY_FILE)),
+                    },
+                )
+            except Exception:
+                log.exception("on_stop() gagal")
 
-    if module is None or not _MAIN_RUNNING:
-        chat_id = int(
-            (message.get("chat") or {}).get("id") or 0
-        )
+        sys.modules.pop("trading_main_runtime", None)
+        return was_running
 
-        if chat_id:
-            tg_send(
-                chat_id,
-                "ℹ️ main.py belum berjalan.\n"
-                "Gunakan /try terlebih dahulu.",
-            )
 
-        return
-
-    handler = getattr(
-        module,
-        "handle_update",
-        None,
+# -----------------------------------------------------------------------------
+# /GANTI
+# -----------------------------------------------------------------------------
+def _ganti_menu() -> str:
+    return (
+        "🔄 GANTI FILE\n\n"
+        "Pilih file yang ingin diganti:\n\n"
+        f"1. {MAIN_FILE}\n"
+        f"2. {STRATEGY_FILE}\n\n"
+        "Setelah memilih, kirim file .py sebagai Document Telegram."
     )
 
+
+def _resolve_ganti_target(value: str) -> str | None:
+    answer = str(value or "").strip().lower()
+    main_name = Path(MAIN_FILE).name.lower()
+    strategy_name = Path(STRATEGY_FILE).name.lower()
+
+    if answer in {"1", main_name, MAIN_FILE.lower(), "/ganti " + main_name}:
+        return MAIN_FILE
+    if answer in {"2", strategy_name, STRATEGY_FILE.lower(), "/ganti " + strategy_name}:
+        return STRATEGY_FILE
+    return None
+
+
+async def start_ganti(chat_id: int, argument: str = "") -> None:
+    global GANTI_WAITING_SELECTION, GANTI_TARGET
+
+    target = _resolve_ganti_target(argument) if argument else None
+    if target:
+        GANTI_WAITING_SELECTION = False
+        GANTI_TARGET = target
+        tg_send(
+            chat_id,
+            f"📎 TARGET GANTI: {target}\n\n"
+            "Sekarang kirim file Python sebagai Document Telegram.\n"
+            "Gunakan /back untuk membatalkan.",
+        )
+        return
+
+    GANTI_WAITING_SELECTION = True
+    GANTI_TARGET = None
+    tg_send(chat_id, _ganti_menu())
+
+
+async def _handle_ganti_selection(chat_id: int, text: str) -> None:
+    global GANTI_WAITING_SELECTION, GANTI_TARGET
+
+    target = _resolve_ganti_target(text)
+    if not target:
+        tg_send(
+            chat_id,
+            "❌ Pilihan tidak valid.\n\n" + _ganti_menu(),
+        )
+        return
+
+    GANTI_WAITING_SELECTION = False
+    GANTI_TARGET = target
+    tg_send(
+        chat_id,
+        f"📎 TARGET GANTI: {target}\n\n"
+        "Sekarang kirim file Python sebagai Document Telegram.\n"
+        "Gunakan /back untuk membatalkan.",
+    )
+
+
+async def handle_ganti_document(chat_id: int, document: dict) -> None:
+    global GANTI_WAITING_SELECTION, GANTI_TARGET
+
+    target = GANTI_TARGET
+    if not target:
+        tg_send(chat_id, "❌ Belum ada target /ganti. Kirim /ganti terlebih dahulu.")
+        return
+
+    file_id = str(document.get("file_id") or "").strip()
+    original_name = str(document.get("file_name") or "document.py").strip()
+
+    if not file_id:
+        tg_send(chat_id, "❌ Telegram document tidak memiliki file_id.")
+        return
+
+    if not original_name.lower().endswith(".py"):
+        tg_send(chat_id, "❌ /ganti hanya menerima file Python (.py).")
+        return
+
+    tg_send(chat_id, f"⏳ Memproses {original_name} → {target} ...")
+
+    try:
+        content, telegram_name = await asyncio.to_thread(
+            download_telegram_document,
+            file_id,
+        )
+        del telegram_name
+
+        validate_python_source(content, target)
+
+        sha = await asyncio.to_thread(
+            github_put_file,
+            target,
+            content,
+            f"launcher: replace {target}",
+        )
+
+        atomic_write(
+            safe_runtime_path(target),
+            content,
+        )
+
+        GANTI_WAITING_SELECTION = False
+        GANTI_TARGET = None
+
+        tg_send(
+            chat_id,
+            "✅ FILE BERHASIL DIGANTI\n\n"
+            f"Target: {target}\n"
+            f"GitHub: {REPO_NAME}/{target}\n"
+            f"Branch: {GITHUB_BRANCH}\n"
+            f"Commit SHA: {(sha[:10] + '...') if sha else '-'}\n\n"
+            "Runtime lokal juga sudah diperbarui.\n"
+            "Gunakan /try untuk reload main.py + memastikan kedua file "
+            "sinkron kembali dari GitHub.",
+        )
+
+    except Exception as exc:
+        log.exception("/ganti gagal untuk %s", target)
+        tg_send(
+            chat_id,
+            "❌ /ganti gagal\n\n"
+            f"Target: {target}\n"
+            f"Error: {exc}",
+        )
+
+
+# -----------------------------------------------------------------------------
+# ROUTER
+# -----------------------------------------------------------------------------
+def authorized(message: dict) -> bool:
+    chat_id = int((message.get("chat") or {}).get("id") or 0)
+    user_id = int((message.get("from") or {}).get("id") or 0)
+    return chat_id == ALLOWED_USER_ID and user_id == ALLOWED_USER_ID
+
+
+def get_command(text: str) -> str:
+    if not text:
+        return ""
+    return text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+
+
+def get_argument(text: str) -> str:
+    parts = str(text or "").strip().split(maxsplit=1)
+    return parts[1].strip() if len(parts) == 2 else ""
+
+
+async def route_message(message: dict, update: dict) -> None:
+    global GANTI_WAITING_SELECTION, GANTI_TARGET
+
+    if not authorized(message):
+        return
+
+    chat_id = int((message.get("chat") or {}).get("id") or 0)
+    text = str(message.get("text") or "").strip()
+    command = get_command(text)
+    document = message.get("document")
+
+    # /back selalu tersedia di launcher untuk membatalkan /ganti.
+    if command == "/back" and (GANTI_WAITING_SELECTION or GANTI_TARGET):
+        GANTI_WAITING_SELECTION = False
+        GANTI_TARGET = None
+        tg_send(chat_id, "✅ /ganti dibatalkan.")
+        return
+
+    if command == "/try":
+        try:
+            await start_or_reload_main(chat_id)
+            if MAIN_RUNNING:
+                tg_send(
+                    chat_id,
+                    "🔄 /try selesai.\n"
+                    f"Sinkron: {MAIN_FILE} + {STRATEGY_FILE}\n"
+                    "main.py aktif.",
+                )
+            else:
+                tg_send(chat_id, "❌ main.py gagal aktif.")
+        except Exception as exc:
+            log.exception("Gagal menjalankan /try")
+            tg_send(chat_id, f"❌ Gagal menjalankan /try\n\n{exc}")
+        return
+
+    if command == "/end":
+        try:
+            stopped = await stop_main()
+            if stopped:
+                tg_send(chat_id, "🛑 main.py dihentikan. Runtime state main.py sudah dibersihkan oleh on_stop().")
+            else:
+                tg_send(chat_id, "ℹ️ main.py memang sedang tidak aktif.")
+        except Exception as exc:
+            log.exception("Gagal menjalankan /end")
+            tg_send(chat_id, f"❌ /end gagal\n\n{exc}")
+        return
+
+    if command == "/ganti":
+        await start_ganti(chat_id, get_argument(text))
+        return
+
+    if command == "/healthz":
+        tg_send(
+            chat_id,
+            "HEALTHZ\n\n"
+            f"Launcher: ONLINE\n"
+            f"Main: {'RUNNING' if MAIN_RUNNING else 'STOPPED'}\n"
+            f"Main File: {MAIN_FILE}\n"
+            f"Strategy File: {STRATEGY_FILE}",
+        )
+        return
+
+    # Upload document diprioritaskan jika /ganti sedang menunggu file.
+    if document is not None and GANTI_TARGET:
+        await handle_ganti_document(chat_id, document)
+        return
+
+    if GANTI_WAITING_SELECTION and text:
+        await _handle_ganti_selection(chat_id, text)
+        return
+
+    # Selain command launcher: teruskan semuanya ke main.py.
+    module = MAIN_MODULE
+    if module is None or not MAIN_RUNNING:
+        tg_send(chat_id, "ℹ️ main.py belum aktif. Kirim /try terlebih dahulu.")
+        return
+
+    try:
+        context = {
+            "chat_id": chat_id,
+            "user_id": int((message.get("from") or {}).get("id") or 0),
+            "send_message": tg_send,
+            "send_document": tg_send_document,
+            "launcher": "try.py",
+            "main_file": str(safe_runtime_path(MAIN_FILE)),
+            "strategy_file": str(safe_runtime_path(STRATEGY_FILE)),
+            "is_running": lambda: MAIN_RUNNING,
+        }
+
+        await _call_update(module, update, context)
+    except Exception as exc:
+        log.exception("main.py gagal memproses update")
+        tg_send(chat_id, f"❌ main.py error\n{exc}")
+
+
+async def _call_update(module: ModuleType, update: dict, context: dict) -> None:
+    handler = getattr(module, "handle_update", None)
     if not callable(handler):
-        return
+        raise RuntimeError(f"{MAIN_FILE} tidak memiliki handle_update().")
 
-    context = {
-        "launcher": "try.py",
-        "chat_id": (message.get("chat") or {}).get("id"),
-        "user_id": (message.get("from") or {}).get("id"),
-        "start_file": str(BASE_DIR / MAIN_FILE),
-        "is_running": lambda: _MAIN_RUNNING,
-        "send_message": tg_send,
-        "send_document": tg_send_document,
-    }
-
-    result = handler(
-        update,
-        context,
-    )
-
+    result = handler(update, context)
     if asyncio.iscoroutine(result):
         await result
 
 
-# ============================================================
-# /ganti
-# ============================================================
-
-async def handle_ganti(message: dict) -> str:
-    """
-    /ganti tetap ada.
-
-    Cara pakai:
-      Kirim file Telegram sebagai DOCUMENT
-      caption:
-        /ganti
-        /ganti main.py
-        /ganti strategy/strategy_01.py
-
-    Jika tanpa path pada caption, nama file Telegram digunakan.
-
-    File di GitHub DIUPDATE, bukan dihapus.
-    """
-    document = message.get("document")
-
-    if not isinstance(document, dict):
-        return (
-            "📦 <b>/ganti</b>\n\n"
-            "Kirim file sebagai <b>document</b> dengan caption:\n\n"
-            "<code>/ganti</code>\n"
-            "atau\n"
-            "<code>/ganti folder/nama.py</code>\n\n"
-            "File akan di-update ke GitHub."
-        )
-
-    caption = str(
-        message.get("caption") or ""
-    ).strip()
-
-    parts = caption.split(
-        maxsplit=1
-    )
-
-    requested_path = (
-        parts[1].strip()
-        if len(parts) == 2
-        else str(
-            document.get("file_name") or ""
-        )
-    )
-
-    if not requested_path:
-        return "❌ Nama/path file tidak ditemukan."
-
-    try:
-        path = validate_github_path(
-            requested_path
-        )
-
-        file_id = str(
-            document.get("file_id") or ""
-        )
-
-        if not file_id:
-            raise ValueError(
-                "file_id Telegram tidak ditemukan."
-            )
-
-        content = await asyncio.to_thread(
-            tg_get_file_bytes,
-            file_id,
-        )
-
-        commit = await asyncio.to_thread(
-            github_replace,
-            path,
-            content,
-        )
-
-        return (
-            "✅ <b>/ganti berhasil</b>\n\n"
-            f"File: <code>{html.escape(str(document.get('file_name') or path))}</code>\n"
-            f"GitHub: <code>{html.escape(path)}</code>\n"
-            f"Branch: <code>{html.escape(GITHUB_BRANCH)}</code>\n"
-            f"Commit: <code>{html.escape(commit or 'created')}</code>\n\n"
-            "File di GitHub tetap tersimpan.\n"
-            "Untuk menjalankan versi terbaru, gunakan "
-            "<code>/end</code> lalu <code>/try</code>."
-        )
-
-    except Exception as exc:
-        log.exception(
-            "[GANTI] gagal"
-        )
-
-        return (
-            "❌ <b>/ganti gagal</b>\n"
-            f"<code>{html.escape(str(exc)[:800])}</code>"
-        )
-
-
-# ============================================================
-# Router
-# ============================================================
-
-def authorized(message: dict) -> bool:
-    chat_id = int(
-        (message.get("chat") or {}).get("id") or 0
-    )
-
-    user_id = int(
-        (message.get("from") or {}).get("id") or 0
-    )
-
-    return (
-        chat_id == ALLOWED_USER_ID
-        and user_id == ALLOWED_USER_ID
-    )
-
-
-async def route_message(
-    message: dict,
-    update: dict,
-) -> None:
-    if not authorized(message):
-        return
-
-    chat_id = int(
-        (message.get("chat") or {}).get("id")
-    )
-
-    text = str(
-        message.get("text") or ""
-    ).strip()
-
-    caption = str(
-        message.get("caption") or ""
-    ).strip()
-
-    # /ganti memakai document Telegram.
-    if (
-        isinstance(message.get("document"), dict)
-        and caption.lower().startswith("/ganti")
-    ):
-        tg_send(
-            chat_id,
-            await handle_ganti(message),
-        )
-        return
-
-    command = (
-        text.split(maxsplit=1)[0]
-        .split("@", 1)[0]
-        .lower()
-        if text
-        else ""
-    )
-
-    try:
-        # /try = sync GitHub -> load main.py terbaru.
-        if command == "/try":
-            tg_send(
-                chat_id,
-                await start_main(chat_id),
-            )
-            return
-
-        # /end = hentikan main + bersihkan runtime.
-        if command == "/end":
-            tg_send(
-                chat_id,
-                await stop_main(),
-            )
-            return
-
-        # /ganti = update file ke GitHub.
-        if command == "/ganti":
-            tg_send(
-                chat_id,
-                await handle_ganti(message),
-            )
-            return
-
-        # /healthz tetap menjadi command launcher.
-        if command == "/healthz":
-            if not _MAIN_RUNNING:
-                tg_send(
-                    chat_id,
-                    "🩺 <b>LAUNCHER</b>\n\n"
-                    "Launcher: 🟢 READY\n"
-                    "main.py: ⚪ OFFLINE\n\n"
-                    "Gunakan /try untuk menjalankan "
-                    "versi terbaru dari GitHub.",
-                )
-            else:
-                tg_send(
-                    chat_id,
-                    "🩺 <b>LAUNCHER</b>\n\n"
-                    "Launcher: 🟢 READY\n"
-                    "main.py: 🟢 ONLINE",
-                )
-
-            return
-
-        # /help hanya ditangani launcher ketika main belum aktif.
-        # Setelah main aktif, /help diteruskan ke main.py.
-        if command in {"/help", "/start"} and not _MAIN_RUNNING:
-            tg_send(
-                chat_id,
-                "🤖 <b>Launcher</b>\n\n"
-                "/try — ambil versi terbaru dari GitHub lalu jalankan main.py\n"
-                "/end — hentikan main.py dan bersihkan runtime\n"
-                "/ganti — update/replace file di GitHub\n"
-                "/healthz — cek launcher dan main.py\n"
-                "/help — menu launcher\n\n"
-                "Setelah /try, command lain diteruskan ke main.py.",
-            )
-
-            return
-
-        # Semua command lain masuk ke main.py.
-        await forward_update(update)
-
-    except Exception as exc:
-        log.exception(
-            "[ROUTER] command %s gagal",
-            command or "<empty>",
-        )
-
-        tg_send(
-            chat_id,
-            "❌ <b>Command gagal</b>\n"
-            f"<code>{html.escape(str(exc)[:800])}</code>",
-        )
-
-
-# ============================================================
-# Telegram polling
-# ============================================================
-
+# -----------------------------------------------------------------------------
+# TELEGRAM POLLING
+# -----------------------------------------------------------------------------
 async def telegram_loop() -> None:
     offset: int | None = None
     backoff = 2
 
     try:
-        tg_call(
-            "deleteWebhook",
-            {"drop_pending_updates": False},
-            timeout=20,
-        )
+        tg_call("deleteWebhook", {"drop_pending_updates": False}, timeout=20)
     except Exception:
-        log.exception(
-            "Gagal deleteWebhook"
-        )
+        log.exception("Gagal deleteWebhook")
 
-    try:
-        tg_send(
-            ALLOWED_USER_ID,
-            "🚀 <b>SMCAutoTrade Launcher SIAP</b>\n\n"
-            "Status: 🟢 ONLINE\n"
-            "main.py: ⚪ OFFLINE\n\n"
-            "Gunakan /try untuk menjalankan "
-            "versi terbaru dari GitHub.",
-        )
-    except Exception:
-        log.exception(
-            "Gagal kirim launcher welcome"
-        )
+    tg_send(
+        ALLOWED_USER_ID,
+        "🚀 Launcher online.\n\n"
+        "Gunakan /try untuk sinkronisasi + menjalankan main.py.\n"
+        "Gunakan /ganti untuk mengganti main.py / strategy.py.",
+    )
 
-    while not _STOP.is_set():
+    while not STOP_EVENT.is_set():
         try:
             payload = {
                 "timeout": TG_POLL_TIMEOUT,
                 "allowed_updates": ["message"],
             }
-
             if offset is not None:
                 payload["offset"] = offset
 
@@ -1071,64 +862,38 @@ async def telegram_loop() -> None:
                 payload,
                 TG_POLL_TIMEOUT + 10,
             )
-
             backoff = 2
 
             for update in updates or []:
-                update_id = update.get(
-                    "update_id"
-                )
-
+                update_id = update.get("update_id")
                 if isinstance(update_id, int):
                     offset = update_id + 1
 
-                message = update.get(
-                    "message"
-                )
-
+                message = update.get("message")
                 if isinstance(message, dict):
-                    await route_message(
-                        message,
-                        update,
-                    )
+                    await route_message(message, update)
 
         except Exception as exc:
-            log.warning(
-                "[TG POLLING] %s",
-                exc,
-            )
-
+            log.warning("Telegram polling error: %s", exc)
             await asyncio.sleep(backoff)
-            backoff = min(
-                backoff * 2,
-                TG_ERROR_BACKOFF_MAX,
-            )
+            backoff = min(backoff * 2, 60)
 
 
-# ============================================================
-# Program
-# ============================================================
-
+# -----------------------------------------------------------------------------
+# PROCESS ENTRY POINT
+# -----------------------------------------------------------------------------
 async def async_main() -> None:
     threading.Thread(
-        target=run_flask,
-        name="render-http",
+        target=run_http_server,
+        name="http-health",
         daemon=True,
     ).start()
 
     try:
         await telegram_loop()
-
     finally:
-        _STOP.set()
-
-        # Saat proses host dimatikan, pastikan main juga dibersihkan.
-        try:
-            await stop_main()
-        except Exception:
-            log.exception(
-                "Cleanup main.py saat shutdown gagal."
-            )
+        STOP_EVENT.set()
+        await stop_main()
 
 
 if __name__ == "__main__":
