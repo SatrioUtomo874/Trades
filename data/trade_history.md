@@ -374,3 +374,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-27T15:34:10.265791+00:00
 - Strategy: SMC_VLT_RSI v0.4.0
+
+---
+
+## KSMUSDT — BUY
+
+Trade ID: `KSMUSDT-20260927-213650-BA13C3`
+
+### Setup
+
+- Price Now Reference: 4.787
+- Entry: 4.721
+- Reason Entry: Model BREAKER_RETEST: area BULLISH_BREAKER di 4.721. Struktur pasangan mendukung bullish.
+- Price Exp: 4.802
+- Reason Price Exp: Price Exp 4.80196 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 4.712
+- Reason SL: SL di bawah low BULLISH_BREAKER (4.716) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 4.821
+- Reason TP: TP diarahkan ke EQUAL_LEVELS 4.7865 (0.51 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 4.803
+- Result Reason: Price Exp 4.80196 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- PnL: -
+- Created: 2026-09-27T14:36:50.630832+00:00
+- Filled: -
+- Closed: 2026-09-27T15:48:05.598325+00:00
+- Strategy: SMC_VLT_RSI v0.1.0
