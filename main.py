@@ -28,6 +28,8 @@ Prinsip:
 - /setup menyimpan snapshot setup aktif ke data/setups.json.
 - /open memulihkan snapshot setup tersebut setelah main.py diganti.
 - /auto menjembatani main.py ke strategy.py dan meminta konfirmasi user.
+- /wrong menghapus active setup yang benar-benar salah tanpa mencatat history.
+- /remove menghapus satu trade dari histori GitHub beserta event dan journal terkait.
 - strategy.py wajib menyediakan generate_setup(pair, context).
 """
 
@@ -3492,6 +3494,29 @@ class TradingEngine:
             )
             return
 
+        if kind == "WRONG":
+            self.flow = None
+            await self.reply(
+                "WRONG dibatalkan."
+            )
+            return
+
+        if kind == "REMOVE":
+            if self.flow["step"] == "SELECT":
+                self.flow = None
+                await self.reply(
+                    "REMOVE dibatalkan."
+                )
+                return
+
+            self.flow["step"] = "SELECT"
+            self.flow["data"] = {}
+
+            await self.reply(
+                self._render_remove()
+            )
+            return
+
         if kind == "DEL":
             if self.flow["step"] == "SELECT":
                 self.flow = None
@@ -4041,6 +4066,575 @@ class TradingEngine:
             await self.reply(
                 f"❌ {exc}\n\n"
                 f"{self._render_filled()}"
+            )
+
+    # --------------------------------------------------------
+    # WRONG — remove active setup WITHOUT ANY HISTORY RECORD
+    # --------------------------------------------------------
+
+    def _render_wrong(self) -> str:
+        if not self.flow:
+            return ""
+
+        items = self._trade_list_text()
+
+        if not items:
+            return (
+                "WRONG\n\n"
+                "Tidak ada active setup."
+            )
+
+        lines = [
+            "⚠️ WRONG",
+            "",
+            "Pilih setup yang benar-benar salah:",
+            "",
+        ]
+
+        for number, trade in items:
+            lines.append(
+                f"{number}. "
+                f"{trade.pair} "
+                f"{trade.direction} | "
+                f"{trade.status}"
+            )
+
+        lines.extend([
+            "",
+            "Setup akan dihapus dari active session.",
+            "Tidak dibuat record TRADE, EVENT, atau JOURNAL.",
+            "",
+            "Ketik nomor setup.",
+        ])
+
+        return "\n".join(lines)
+
+    async def _start_wrong(self) -> None:
+        if self.flow:
+            await self.reply(
+                "Masih ada sesi yang sedang berjalan.\n"
+                "Gunakan /back terlebih dahulu."
+            )
+            return
+
+        if not self.active_trades:
+            await self.reply(
+                "Tidak ada active setup."
+            )
+            return
+
+        self.flow = {
+            "kind": "WRONG",
+            "step": "SELECT",
+            "data": {},
+        }
+
+        await self.reply(
+            self._render_wrong()
+        )
+
+    async def _persist_active_setups_silently(self) -> None:
+        """Persist current active setups without creating history records/events."""
+        async with self._trade_lock:
+            records = [
+                trade.to_record()
+                for trade in self.active_trades.values()
+                if trade.result is None and trade.status in {
+                    "PENDING",
+                    "FILLED",
+                }
+            ]
+
+        payload = {
+            "version": 1,
+            "saved_at": iso_utc(),
+            "saved_at_wib": format_wib(now_utc()),
+            "count": len(records),
+            "setups": records,
+        }
+
+        content = json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+
+        await self.github.replace_file(
+            SETUPS_PATH,
+            content,
+            f"wrong: update active setup snapshot ({len(records)} remaining)",
+        )
+
+    async def _handle_wrong_input(
+        self,
+        text: str,
+    ) -> None:
+        if not self.flow:
+            return
+
+        try:
+            if self.flow["step"] != "SELECT":
+                self.flow = None
+                return
+
+            number = safe_int(
+                text,
+                "Nomor setup",
+            )
+
+            items = self._trade_list_text()
+
+            if not 1 <= number <= len(items):
+                raise ValueError(
+                    "Nomor setup tidak valid."
+                )
+
+            _index, trade = items[number - 1]
+            trade_id = trade.trade_id
+
+            # WRONG sengaja tidak memanggil _finalize_trade(),
+            # _record_event(), atau _write_history().
+            self.active_trades.pop(
+                trade_id,
+                None,
+            )
+
+            try:
+                # Bila setup pernah disimpan dengan /setup, snapshot GitHub
+                # harus ikut menghapus setup yang salah agar /open tidak
+                # menghidupkannya kembali. Ini bukan history.
+                await self._persist_active_setups_silently()
+            except Exception:
+                # Jangan biarkan RAM dan snapshot GitHub berbeda jika write gagal.
+                self.active_trades[trade_id] = trade
+                raise
+
+            if not any(
+                item.pair == trade.pair
+                for item in self.active_trades.values()
+            ):
+                try:
+                    await self.ws.remove_symbol(trade.pair)
+                except Exception:
+                    log.exception(
+                        "Gagal unsubscribe WebSocket %s setelah WRONG.",
+                        trade.pair,
+                    )
+
+            self.flow = None
+
+            await self.reply(
+                "🚫 SETUP DITANDAI WRONG\n\n"
+                f"Trade ID: {trade.trade_id}\n"
+                f"Pair: {trade.pair}\n"
+                f"Direction: {trade.direction.title()}\n"
+                "History: TIDAK DICATAT\n"
+                "Events: TIDAK DICATAT\n"
+                "Journal: TIDAK DICATAT\n\n"
+                "Setup dihapus dari active session."
+            )
+
+        except Exception as exc:
+            await self.reply(
+                f"❌ WRONG gagal.\n\n{exc}\n\n"
+                f"{self._render_wrong()}"
+            )
+
+    # --------------------------------------------------------
+    # REMOVE — delete existing HISTORY TRADE DATA
+    # --------------------------------------------------------
+
+    def _history_list_for_remove(self) -> list[tuple[int, dict[str, Any]]]:
+        rows: list[tuple[int, dict[str, Any]]] = []
+
+        for number, record in enumerate(reversed(self.history_records), start=1):
+            if isinstance(record, dict):
+                rows.append((number, record))
+
+        return rows
+
+    def _render_remove(self) -> str:
+        if not self.flow:
+            return ""
+
+        rows = self._history_list_for_remove()
+
+        if not rows:
+            return (
+                "🧹 REMOVE HISTORY\n\n"
+                "Tidak ada data trade di history."
+            )
+
+        lines = [
+            "🧹 REMOVE HISTORY",
+            "",
+            "Pilih data trade yang ingin dihapus:",
+            "",
+        ]
+
+        display_limit = 20
+        for number, record in rows[:display_limit]:
+            trade_id = str(record.get("trade_id") or "-")
+            pair = str(record.get("pair") or "-")
+            direction = str(record.get("direction") or "-")
+            result = str(record.get("result") or "-")
+            closed = str(
+                record.get("closed_at")
+                or record.get("created_at")
+                or "-"
+            )
+
+            lines.append(
+                f"{number}. {pair} {direction} | {result}"
+            )
+            lines.append(
+                f"   ID: {trade_id}"
+            )
+            lines.append(
+                f"   Time: {closed}"
+            )
+
+        if len(rows) > display_limit:
+            lines.extend([
+                "",
+                f"... dan {len(rows) - display_limit} data lainnya.",
+            ])
+
+        lines.extend([
+            "",
+            "Data akan dihapus dari:",
+            "- data/trades.json",
+            "- data/events.jsonl",
+            "- data/trade_history.md",
+            "",
+            "Ketik nomor data.",
+        ])
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _remove_trade_markdown_block(
+        content: str,
+        trade_id: str,
+    ) -> tuple[str, bool]:
+        marker = f"Trade ID: `{trade_id}`"
+        chunks = content.split("\n---\n\n")
+
+        if len(chunks) == 1:
+            return content, False
+
+        kept = [chunks[0]]
+        removed = False
+
+        for block in chunks[1:]:
+            if marker in block:
+                removed = True
+                continue
+            kept.append(block)
+
+        if not removed:
+            return content, False
+
+        return "\n---\n\n".join(kept), True
+
+    async def _remove_history_trade(self, trade_id: str) -> dict[str, int | bool]:
+        """Remove one historical trade and all related event/journal data.
+
+        The live GitHub files are re-read before mutation so the operation
+        targets current repository state rather than a stale RAM snapshot.
+        """
+        trade_id = str(trade_id or "").strip()
+        if not trade_id:
+            raise ValueError("Trade ID tidak valid.")
+
+        async with self._history_lock:
+            raw_trades, _ = await self.github.get_file(HISTORY_TRADES_PATH)
+            raw_events, _ = await self.github.get_file(HISTORY_EVENTS_PATH)
+            raw_journal, _ = await self.github.get_file(HISTORY_MARKDOWN_PATH)
+
+            if not raw_trades:
+                raise ValueError("History trade kosong di GitHub.")
+
+            try:
+                trade_records = json.loads(raw_trades.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"{HISTORY_TRADES_PATH} bukan JSON valid."
+                ) from exc
+
+            if not isinstance(trade_records, list):
+                raise RuntimeError(
+                    f"{HISTORY_TRADES_PATH} harus berisi JSON list."
+                )
+
+            removed_trade_count = sum(
+                1
+                for record in trade_records
+                if isinstance(record, dict)
+                and str(record.get("trade_id") or "") == trade_id
+            )
+
+            if removed_trade_count == 0:
+                raise ValueError(
+                    f"Trade ID {trade_id} tidak ditemukan di history GitHub."
+                )
+
+            filtered_trades = [
+                record
+                for record in trade_records
+                if not (
+                    isinstance(record, dict)
+                    and str(record.get("trade_id") or "") == trade_id
+                )
+            ]
+
+            event_lines: list[str] = []
+            removed_event_count = 0
+
+            if raw_events:
+                for line in raw_events.decode(
+                    "utf-8",
+                    errors="replace",
+                ).splitlines():
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+
+                    try:
+                        item = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        # Preserve existing invalid event lines instead of
+                        # silently deleting unrelated data.
+                        event_lines.append(line)
+                        continue
+
+                    if (
+                        isinstance(item, dict)
+                        and str(item.get("trade_id") or "") == trade_id
+                    ):
+                        removed_event_count += 1
+                        continue
+
+                    event_lines.append(
+                        json.dumps(
+                            item,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    )
+
+            if raw_events is not None:
+                filtered_events = (
+                    "\n".join(event_lines) + ("\n" if event_lines else "")
+                ).encode("utf-8")
+            else:
+                filtered_events = b""
+
+            journal_text = (
+                raw_journal.decode("utf-8", errors="replace")
+                if raw_journal
+                else ""
+            )
+            filtered_journal_text, removed_journal = self._remove_trade_markdown_block(
+                journal_text,
+                trade_id,
+            )
+
+            trades_bytes = json.dumps(
+                filtered_trades,
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8")
+
+            events_bytes = filtered_events
+            journal_bytes = filtered_journal_text.encode("utf-8")
+
+            # Keep GitHub writes in one history lock so no concurrent history
+            # writer can interleave with this removal.
+            await self.github.replace_file(
+                HISTORY_TRADES_PATH,
+                trades_bytes,
+                f"remove history trade: {trade_id}",
+            )
+
+            await self.github.replace_file(
+                HISTORY_EVENTS_PATH,
+                events_bytes,
+                f"remove history events: {trade_id}",
+            )
+
+            if raw_journal is not None:
+                await self.github.replace_file(
+                    HISTORY_MARKDOWN_PATH,
+                    journal_bytes,
+                    f"remove history journal: {trade_id}",
+                )
+
+            # analysis/* is derived from history. Remove stale exports so
+            # /analyze will regenerate them from the current dataset.
+            analysis_deleted = 0
+            for path in (ANALYSIS_JSON_PATH, ANALYSIS_MD_PATH):
+                try:
+                    if await self.github.delete_file(
+                        path,
+                        f"remove history: invalidate {path}",
+                    ):
+                        analysis_deleted += 1
+                except Exception:
+                    log.exception(
+                        "Gagal menghapus derived analysis %s setelah REMOVE %s.",
+                        path,
+                        trade_id,
+                    )
+
+            # Update RAM only after all primary history writes succeeded.
+            self.history_records = filtered_trades
+            self.history_events = []
+            for item in event_lines:
+                try:
+                    parsed = json.loads(item)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    self.history_events.append(parsed)
+
+            self.last_history_refresh = now_utc()
+
+            return {
+                "removed_trades": removed_trade_count,
+                "removed_events": removed_event_count,
+                "removed_journal": bool(removed_journal),
+                "analysis_deleted": analysis_deleted,
+            }
+
+    async def _start_remove(self) -> None:
+        if self.flow:
+            await self.reply(
+                "Masih ada sesi yang sedang berjalan.\n"
+                "Gunakan /back terlebih dahulu."
+            )
+            return
+
+        await self._load_history()
+
+        if not self.history_records:
+            await self.reply(
+                "Tidak ada data trade di history."
+            )
+            return
+
+        self.flow = {
+            "kind": "REMOVE",
+            "step": "SELECT",
+            "data": {},
+        }
+
+        await self.reply(
+            self._render_remove()
+        )
+
+    async def _handle_remove_input(
+        self,
+        text: str,
+    ) -> None:
+        if not self.flow:
+            return
+
+        try:
+            step = self.flow["step"]
+
+            if step == "SELECT":
+                number = safe_int(
+                    text,
+                    "Nomor data",
+                )
+
+                rows = self._history_list_for_remove()
+                if not 1 <= number <= len(rows):
+                    raise ValueError(
+                        "Nomor data tidak valid."
+                    )
+
+                _display_number, record = rows[number - 1]
+                trade_id = str(record.get("trade_id") or "").strip()
+                if not trade_id:
+                    raise ValueError(
+                        "Data history yang dipilih tidak memiliki Trade ID."
+                    )
+
+                self.flow["data"] = {
+                    "trade_id": trade_id,
+                    "record": copy.deepcopy(record),
+                }
+                self.flow["step"] = "CONFIRM"
+
+                await self.reply(
+                    "⚠️ KONFIRMASI REMOVE\n\n"
+                    f"Trade ID: {trade_id}\n"
+                    f"Pair: {record.get('pair') or '-'}\n"
+                    f"Direction: {record.get('direction') or '-'}\n"
+                    f"Result: {record.get('result') or '-'}\n"
+                    f"Created: {record.get('created_at') or '-'}\n\n"
+                    "Data ini akan dihapus dari trades, events, dan journal.\n"
+                    "File analysis lama juga dihapus karena menjadi stale.\n\n"
+                    "1. HAPUS PERMANEN\n"
+                    "2. BATAL"
+                )
+                return
+
+            if step == "CONFIRM":
+                answer = text.strip()
+
+                if answer == "2":
+                    self.flow = None
+                    await self.reply(
+                        "✅ REMOVE dibatalkan."
+                    )
+                    return
+
+                if answer != "1":
+                    raise ValueError(
+                        "Jawab 1 untuk hapus permanen atau 2 untuk batal."
+                    )
+
+                trade_id = str(
+                    self.flow["data"].get("trade_id") or ""
+                ).strip()
+
+                # Simpan konteks flow. Saat network I/O berjalan kita tidak
+                # ingin /back mengubah state di tengah operasi, tetapi jika
+                # operasi gagal kita kembalikan user ke menu REMOVE yang fresh.
+                self.flow = None
+
+                try:
+                    result = await self._remove_history_trade(trade_id)
+                except Exception:
+                    self.flow = {
+                        "kind": "REMOVE",
+                        "step": "SELECT",
+                        "data": {},
+                    }
+                    try:
+                        await self._load_history()
+                    except Exception:
+                        pass
+                    raise
+
+                await self.reply(
+                    "🧹 HISTORY DIHAPUS\n\n"
+                    f"Trade ID: {trade_id}\n"
+                    f"Trade record: {result['removed_trades']} dihapus\n"
+                    f"Event: {result['removed_events']} dihapus\n"
+                    f"Journal: {'dihapus' if result['removed_journal'] else 'tidak ditemukan'}\n"
+                    f"Analysis lama: {result['analysis_deleted']} file dihapus\n\n"
+                    "Data tersebut tidak lagi dihitung oleh /stats maupun /analyze."
+                )
+                return
+
+        except Exception as exc:
+            await self.reply(
+                f"❌ REMOVE gagal.\n\n{exc}\n\n"
+                f"{self._render_remove()}"
             )
 
     # --------------------------------------------------------
@@ -5799,7 +6393,9 @@ class TradingEngine:
             "/setup - simpan semua setup aktif /trade ke GitHub\n"
             "/open - buka kembali setup yang tersimpan di GitHub\n"
             "/trail - mengubah SL setup\n"
-            "/del - menghapus setup\n"
+            "/del - menghapus setup dan mencatat DELETED di history\n"
+            "/wrong - menghapus setup yang benar-benar salah TANPA pencatatan history\n"
+            "/remove - menghapus data trade yang sudah masuk history\n"
             "/filled - ubah setup PENDING menjadi FILLED secara manual\n"
             "/stats - statistik histori\n"
             "/catatan [teks] - tambah catatan / tanpa teks = lihat catatan\n"
@@ -5869,6 +6465,8 @@ class TradingEngine:
                     "/add",
                     "/trail",
                     "/del",
+                    "/wrong",
+                    "/remove",
                     "/filled",
                     "/trade",
                     "/setup",
@@ -5925,6 +6523,14 @@ class TradingEngine:
 
             if command == "/del":
                 await self._start_del()
+                return
+
+            if command == "/wrong":
+                await self._start_wrong()
+                return
+
+            if command == "/remove":
+                await self._start_remove()
                 return
 
             if command == "/filled":
@@ -5990,6 +6596,18 @@ class TradingEngine:
 
             if self.flow["kind"] == "DEL":
                 await self._handle_del_input(
+                    text
+                )
+                return
+
+            if self.flow["kind"] == "WRONG":
+                await self._handle_wrong_input(
+                    text
+                )
+                return
+
+            if self.flow["kind"] == "REMOVE":
+                await self._handle_remove_input(
                     text
                 )
                 return
