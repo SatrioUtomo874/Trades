@@ -572,3 +572,36 @@ Tidak ada trailing.
 - Filled: 2026-09-27T15:31:43.276207+00:00
 - Closed: 2026-09-27T18:44:38.002359+00:00
 - Strategy: SMC_VLT_RSI v0.4.0
+
+---
+
+## AVAXUSDT — BUY
+
+Trade ID: `AVAXUSDT-20260922-195523-78EDEF`
+
+### Setup
+
+- Price Now Reference: 10.815
+- Entry: 10.13
+- Reason Entry: RSI H4 OverBought (62.50) dan Divergent. Middle FVG + OB. Liquidity Pool 34%. RSI M15 sempat oversold tapi sekarang netral (ada kesempatan turun)
+- Price Exp: 11.45
+- Reason Price Exp: Telat Entry
+- SL: 9.485
+- Reason SL: di bawah OB
+- TP: 11.448
+- Reason TP: Swing High H4 (RR Supaya 1:2)
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 11.448
+- Result Reason: Swing High H4 (RR Supaya 1:2)
+- PnL: 13.01085883514313919052319842%
+- Created: 2026-09-22T12:55:23.645025+00:00
+- Filled: 2026-09-23T14:13:14.890022+00:00
+- Closed: 2026-09-29T07:54:00.636719+00:00
+- Strategy: MANUAL v1.0
