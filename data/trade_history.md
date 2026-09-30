@@ -428,3 +428,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T13:38:17.147381+00:00
 - Closed: 2026-09-30T13:40:05.647700+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## RUNEUSDT — BUY
+
+Trade ID: `RUNEUSDT-20260930-203629-3B6426`
+
+### Setup
+
+- Price Now Reference: 0.8014
+- Entry: 0.7993
+- Reason Entry: RUNEUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.70385). H1 me-refine ke BULLISH_FVG 0.69685. M15 memberi execution POI BULLISH_FVG 0.79935. Fib H4 berada pada band SHALLOW (score 45). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 77.4 mendukung momentum. VLT/OHLCV searah dengan setup.
+- Price Exp: 0.8055
+- Reason Price Exp: Price Exp 0.80549 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.7982
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.7993) + buffer 0.15 ATR M15.
+- TP: 0.8083
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.801 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.789
+- Result Reason: SL ditempatkan di bawah/atas structural invalidation terdekat (0.7993) + buffer 0.15 ATR M15.
+- PnL: -1.288627549105467283873389216%
+- Created: 2026-09-30T13:36:29.670012+00:00
+- Filled: 2026-09-30T13:39:38.876158+00:00
+- Closed: 2026-09-30T13:40:27.651006+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
