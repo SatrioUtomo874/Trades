@@ -803,3 +803,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T11:01:55.074628+00:00
 - Strategy: SMC_VLT_RSI v0.5.0
+
+---
+
+## 1000000MOGUSDT — SELL
+
+Trade ID: `1000000MOGUSDT-20260930-175241-E9C48F`
+
+### Setup
+
+- Price Now Reference: 0.1194
+- Entry: 0.1197
+- Reason Entry: 1000000MOGUSDT SELL: thesis dimulai dari POI H4. (BEARISH_BREAKER 0.1215). H1 me-refine ke BEARISH_BREAKER 0.12005. M15 memberi execution POI BEARISH_BREAKER 0.11965. Fib H4 berada pada band DEEPER_THAN_0.786 (score 65).
+- Price Exp: 0.1188
+- Reason Price Exp: Price Exp 0.1188 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.1204
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.1203) + buffer 0.15 ATR M15.
+- TP: 0.1184
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.1184 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1188
+- Result Reason: Price Exp 0.1188 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T10:52:41.857309+00:00
+- Filled: -
+- Closed: 2026-09-30T11:02:12.103623+00:00
+- Strategy: SMC_VLT_RSI v0.5.0
