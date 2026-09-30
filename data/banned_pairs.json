@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T11:02:20.726913+00:00",
+  "saved_at": "2026-09-30T11:08:39.491703+00:00",
   "bans": [
     {
       "pair": "1000000MOGUSDT",
@@ -36,6 +36,13 @@
       "until": "2026-09-30T18:53:44.102480+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "NILUSDT",
+      "banned_at": "2026-09-30T11:08:39.491686+00:00",
+      "until": "2026-10-01T11:08:39.491654+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "PIPPINUSDT",
