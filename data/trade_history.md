@@ -494,3 +494,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T13:26:44.605883+00:00
 - Closed: 2026-09-30T13:40:55.718504+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## NOMUSDT — BUY
+
+Trade ID: `NOMUSDT-20260930-204252-144C61`
+
+### Setup
+
+- Price Now Reference: 0.002386
+- Entry: 0.002321
+- Reason Entry: Model M15_SMC_FALLBACK: area BULLISH_FVG di 0.002321. Ada sell-side liquidity sweep sebelum perubahan struktur. M15 membentuk MSS bullish dengan displacement. Struktur pasangan mendukung bullish. RSI 14 M15 berada di 68.2, mendukung momentum bullish. Volume/price pressure OHLCV mendukung bullish.
+- Price Exp: 0.002414
+- Reason Price Exp: Price Exp 0.0024139556 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 0.002287
+- Reason SL: SL di bawah low BULLISH_FVG (0.002295) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 0.002449
+- Reason TP: TP diarahkan ke M15_RECENT_RANGE_HIGH 0.00244 (1.31 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.002438
+- Result Reason: Price Exp 0.0024139556 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- PnL: -
+- Created: 2026-09-30T13:42:52.458335+00:00
+- Filled: -
+- Closed: 2026-09-30T13:42:52.898814+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
