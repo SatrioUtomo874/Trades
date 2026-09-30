@@ -968,3 +968,36 @@ Tidak ada trailing.
 - Filled: 2026-09-28T03:32:59.723994+00:00
 - Closed: 2026-09-30T13:30:49.991690+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## ENAUSDT — BUY
+
+Trade ID: `ENAUSDT-20260926-234822-1F3682`
+
+### Setup
+
+- Price Now Reference: 0.27441
+- Entry: 0.24743
+- Reason Entry: Liquidity Pool 79%. Zona Fibo 0.382. RSI H4 (76). Middle FVG
+- Price Exp: 0.29613
+- Reason Price Exp: TP
+- SL: 0.22794
+- Reason SL: di bawah Pool Liquidity
+- TP: 0.29613
+- Reason TP: Support D1
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.26842
+- Result Reason: Manual /close. PnL positif, sehingga hasil dicatat sebagai TP (PnL +8.48%).
+- PnL: 8.48320737178191811825566827%
+- Created: 2026-09-26T16:48:22.527777+00:00
+- Filled: 2026-09-29T01:37:35.825454+00:00
+- Closed: 2026-09-30T13:31:20.744880+00:00
+- Strategy: MANUAL v1.0
