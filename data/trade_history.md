@@ -593,3 +593,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T13:25:21.146677+00:00
 - Closed: 2026-09-30T13:43:57.002389+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## STRKUSDT — BUY
+
+Trade ID: `STRKUSDT-20260930-204258-1064C6`
+
+### Setup
+
+- Price Now Reference: 0.04233
+- Entry: 0.04223
+- Reason Entry: STRKUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.03877). H1 me-refine ke BULLISH_BREAKER 0.03954. M15 memberi execution POI BULLISH_BREAKER 0.04223. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 63.1 mendukung momentum.
+- Price Exp: 0.04259
+- Reason Price Exp: Price Exp 0.0425849 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.04201
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.04208) + buffer 0.15 ATR M15.
+- TP: 0.04276
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 0.04225 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.04259
+- Result Reason: Price Exp 0.0425849 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T13:42:58.672056+00:00
+- Filled: -
+- Closed: 2026-09-30T13:47:06.345054+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
