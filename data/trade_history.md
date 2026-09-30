@@ -704,3 +704,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T11:00:45.410094+00:00
 - Strategy: SMC_VLT_RSI v0.5.0
+
+---
+
+## CGPTUSDT — SELL
+
+Trade ID: `CGPTUSDT-20260930-175243-777E28`
+
+### Setup
+
+- Price Now Reference: 0.02185
+- Entry: 0.02224
+- Reason Entry: CGPTUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.02226). H1 me-refine ke BEARISH_FVG 0.022255. M15 memberi execution POI BEARISH_FVG 0.022235. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69).
+- Price Exp: 0.02173
+- Reason Price Exp: Price Exp 0.021736 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.02227
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.02225) + buffer 0.15 ATR M15.
+- TP: 0.02166
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.02166 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02173
+- Result Reason: Price Exp 0.021736 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T10:52:43.871065+00:00
+- Filled: -
+- Closed: 2026-09-30T11:00:55.663021+00:00
+- Strategy: SMC_VLT_RSI v0.5.0
