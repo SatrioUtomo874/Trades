@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:38:58.556254+00:00",
+  "saved_at": "2026-09-30T13:39:03.354537+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -146,6 +146,13 @@
       "pair": "COAIUSDT",
       "banned_at": "2026-09-30T11:00:53.035443+00:00",
       "until": "2026-09-30T19:00:53.035411+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "COTIUSDT",
+      "banned_at": "2026-09-30T13:39:03.354492+00:00",
+      "until": "2026-09-30T21:39:03.354469+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
