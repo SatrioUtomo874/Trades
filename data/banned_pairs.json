@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:44:37.453191+00:00",
+  "saved_at": "2026-09-30T13:45:13.845942+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -595,6 +595,13 @@
       "banned_at": "2026-09-30T13:17:41.748134+00:00",
       "until": "2026-09-30T21:17:41.748099+00:00",
       "reason": "Confidence 65.4 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "SPKUSDT",
+      "banned_at": "2026-09-30T13:45:13.845885+00:00",
+      "until": "2026-09-30T21:45:13.845853+00:00",
+      "reason": "Confidence 67.77 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
