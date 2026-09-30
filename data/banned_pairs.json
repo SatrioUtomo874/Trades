@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:18:29.553947+00:00",
+  "saved_at": "2026-09-30T13:18:34.258816+00:00",
   "bans": [
     {
       "pair": "1000000MOGUSDT",
@@ -42,6 +42,13 @@
       "banned_at": "2026-09-30T13:17:37.247407+00:00",
       "until": "2026-09-30T21:17:37.247373+00:00",
       "reason": "Confidence 68.96 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "LINKUSDT",
+      "banned_at": "2026-09-30T13:18:34.258803+00:00",
+      "until": "2026-09-30T21:18:34.258780+00:00",
+      "reason": "Confidence 58.42 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
