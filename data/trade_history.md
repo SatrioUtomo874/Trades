@@ -65,3 +65,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T13:35:29.653344+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## HYPEUSDT — SELL
+
+Trade ID: `HYPEUSDT-20260930-202207-27A594`
+
+### Setup
+
+- Price Now Reference: 87.54
+- Entry: 88.36
+- Reason Entry: HYPEUSDT SELL: thesis dimulai dari POI H4. (BEARISH_OB 88.46). H1 me-refine ke BEARISH_OB 88.235. M15 memberi execution POI BEARISH_BREAKER 88.36. Fib H4 berada pada band OVERLAPS_0.618 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 86.55
+- Reason Price Exp: Price Exp 86.556 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 88.57
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (88.5) + buffer 0.15 ATR M15.
+- TP: 85.56
+- Reason TP: TP diarahkan ke H4_SWING_LOW 85.56 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 86.55
+- Result Reason: Price Exp 86.556 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T13:22:07.116085+00:00
+- Filled: -
+- Closed: 2026-09-30T13:35:54.856308+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
