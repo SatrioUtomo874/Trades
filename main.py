@@ -31,10 +31,12 @@ Prinsip:
 - /scan menjalankan scanner otomatis: universe Binance ∩ Bybit -> directional H4 -> strategy -> threshold -> validator -> /trade.
 - /threshold mengatur ambang confidence scanner.
 - /max membatasi total active PENDING + FILLED dan dapat mem-pause/resume /scan otomatis.
+- /close PAIR|all menutup paksa active setup dan tetap mencatat hasil ke history.
 - /banned dan /unban mengelola ban pair; ban otomatis diterapkan untuk Price Exp/TP/SL/Margin Influence.
 - /wrong menghapus active setup yang benar-benar salah tanpa mencatat history.
 - /remove menghapus satu trade dari histori GitHub beserta event dan journal terkait.
 - strategy.py wajib menyediakan generate_setup(pair, context); mode SCAN juga mendukung kontrak optimized scan structure dan validate_setup.
+- SCAN maksimal 50 pair dianalisis per cycle; pair mismatch H4 diban 24 jam dan below-threshold diban 8 jam.
 """
 
 import asyncio
@@ -53,7 +55,7 @@ import traceback
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -146,6 +148,7 @@ HISTORY_REFRESH_SECONDS = 30
 # SCAN configuration. /max and /threshold can override these at runtime.
 DEFAULT_SCAN_THRESHOLD = Decimal("70")
 SCAN_PAIR_DELAY_SECONDS = 1.0
+SCAN_MAX_PAIRS_PER_CYCLE = 50
 SCAN_CYCLE_DELAY_SECONDS = 30.0
 SCAN_VALIDATION_TOLERANCE = Decimal("0.90")
 SCAN_BANNED_PRICE_EXP_HOURS = Decimal("8")
@@ -177,20 +180,28 @@ log = logging.getLogger("main.trading_engine")
 
 
 class TelegramErrorHandler(logging.Handler):
-    """Forward WARNING/ERROR logs from background tasks to Telegram."""
+    """Forward WARNING/ERROR logs + scan-cycle completion summaries to Telegram."""
 
     def __init__(self, engine: "TradingEngine") -> None:
-        super().__init__(level=logging.WARNING)
+        # INFO disaring manual di emit(); hanya summary cycle tertentu yang lolos.
+        super().__init__(level=logging.INFO)
         self.engine = engine
         self.loop: asyncio.AbstractEventLoop | None = None
-        self._last_signature = ""
-        self._last_sent = 0.0
 
     def attach(self) -> None:
         try:
             self.loop = asyncio.get_running_loop()
         except RuntimeError:
             self.loop = None
+
+    @staticmethod
+    def _should_forward(record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        if record.levelno != logging.INFO:
+            return False
+        message = record.getMessage().strip()
+        return bool(re.match(r"^\[SCAN\] Cycle #\d+ completed ", message))
 
     def emit(self, record: logging.LogRecord) -> None:
         if self.loop is None or self.engine is None:
@@ -200,16 +211,8 @@ class TelegramErrorHandler(logging.Handler):
         if "Gagal mengirim Telegram" in record.getMessage():
             return
 
-        message = record.getMessage()
-        signature = f"{record.name}|{record.levelno}|{message}"
-        now = time.monotonic()
-
-        # Deduplicate spam identik selama 5 detik.
-        if signature == self._last_signature and now - self._last_sent < 5:
+        if not self._should_forward(record):
             return
-
-        self._last_signature = signature
-        self._last_sent = now
 
         try:
             self.loop.call_soon_threadsafe(
@@ -369,6 +372,13 @@ def quantized_price(value: Decimal, tick_size: Decimal) -> Decimal:
     if tick_size <= 0:
         return value
     steps = (value / tick_size).to_integral_value(rounding=ROUND_DOWN)
+    return steps * tick_size
+
+
+def quantized_price_ceiling(value: Decimal, tick_size: Decimal) -> Decimal:
+    if tick_size <= 0:
+        return value
+    steps = (value / tick_size).to_integral_value(rounding=ROUND_UP)
     return steps * tick_size
 
 
@@ -1551,6 +1561,7 @@ class TradingEngine:
         self._scan_cycle_number = 0
         self._scan_last_report: dict[str, Any] = {}
         self._scan_margin_streak: dict[str, int] = {}
+        self._close_batch_in_progress = False
 
         self.banned_pairs: dict[str, dict[str, Any]] = {}
         self._ban_lock = asyncio.Lock()
@@ -1612,7 +1623,13 @@ class TradingEngine:
                     )
                 )
 
-            title = "⚠️ WARNING BACKEND" if record.levelno < logging.ERROR else "🚨 ERROR BACKEND"
+            message = record.getMessage()
+            if record.levelno >= logging.ERROR:
+                title = "🚨 ERROR BACKEND"
+            elif record.levelno >= logging.WARNING:
+                title = "⚠️ WARNING BACKEND"
+            else:
+                title = "🔄 SCAN INFO"
             text = (
                 f"{title}\n\n"
                 f"Module: {record.name}\n"
@@ -1663,6 +1680,11 @@ class TradingEngine:
         self._running = True
 
         if not self._telegram_error_handler_added:
+            # Hapus bridge dari engine lama agar /try reload tidak menggandakan
+            # WARNING/ERROR ke Telegram. Render StreamHandler tetap dipertahankan.
+            for handler in list(log.handlers):
+                if isinstance(handler, TelegramErrorHandler) and handler is not self._telegram_error_handler:
+                    log.removeHandler(handler)
             self._telegram_error_handler.attach()
             log.addHandler(self._telegram_error_handler)
             self._telegram_error_handler_added = True
@@ -2453,6 +2475,7 @@ class TradingEngine:
                 f"Runtime State: {runtime}\n"
                 f"Threshold: {decimal_to_str(self.scan_threshold)}\n"
                 f"Max Active Trade: {self.max_active_trades}\n"
+                f"Max Pair/Cycle: {SCAN_MAX_PAIRS_PER_CYCLE}\n"
                 f"Interval Cycle: {SCAN_CYCLE_DELAY_SECONDS:g}s\n"
                 f"Delay Pair: {SCAN_PAIR_DELAY_SECONDS:g}s"
             )
@@ -2951,7 +2974,11 @@ class TradingEngine:
         module = await self._load_strategy_runtime()
         btc_raw, btc_fallback = await self._scan_get_structure(module, "BTCUSDT", cycle)
         btc_analysis = btc_raw.get("analysis") if isinstance(btc_raw, dict) else {}
-        btc_trend = str(btc_raw.get("trend") or self._extract_structure_trend(btc_analysis, "btc_h4") or "UNKNOWN").upper()
+        btc_trend = str(
+            btc_raw.get("trend")
+            or self._extract_structure_trend(btc_analysis, "btc_h4")
+            or "UNKNOWN"
+        ).upper()
         if btc_fallback is not None:
             btc_analysis = btc_fallback.get("analysis") or btc_analysis
             btc_trend = self._extract_structure_trend(btc_analysis, "btc_h4") or btc_trend
@@ -2963,14 +2990,7 @@ class TradingEngine:
         already_trade = 0
         banned_count = 0
         margin_blocked = 0
-        eligible = []
-        directional = []
-        rejected_structure = 0
-        structure_errors = 0
-        analysis_errors = 0
-        threshold_candidates: list[dict[str, Any]] = []
-        direction_counts: dict[str, int] = {"BULLISH": 0, "BEARISH": 0, "RANGE": 0, "UNKNOWN": 0}
-        start_pair_count = len(rows)
+        eligible: list[str] = []
 
         active_pairs = {trade.pair for trade in self.active_trades.values()}
         for row in rows:
@@ -2983,7 +3003,11 @@ class TradingEngine:
             if self._is_pair_banned(pair):
                 banned_count += 1
                 continue
-            price = row.get("bybit_price") or row.get("binance_price") or Decimal("0")
+
+            # Margin/quantity legality follows the Binance execution symbol,
+            # therefore prefer Binance ticker price and only fall back to Bybit
+            # when Binance did not return a usable price.
+            price = row.get("binance_price") or row.get("bybit_price") or Decimal("0")
             try:
                 margin_block, margin_reason = await self._process_margin_filter(pair, price)
             except Exception:
@@ -2997,79 +3021,177 @@ class TradingEngine:
             eligible.append(pair)
 
         log.info(
-            "[SCAN] Cycle #%s universe common=%s already_trade=%s banned=%s margin_blocked=%s eligible=%s",
-            cycle, universe["common_count"], already_trade, banned_count, margin_blocked, len(eligible),
+            "[SCAN] Cycle #%s universe common=%s already_trade=%s banned=%s margin_blocked=%s eligible=%s top_batch=%s",
+            cycle,
+            universe["common_count"],
+            already_trade,
+            banned_count,
+            margin_blocked,
+            len(eligible),
+            min(SCAN_MAX_PAIRS_PER_CYCLE, len(eligible)),
         )
 
-        total_eligible = len(eligible)
+        # Satu cycle hanya boleh melakukan full structure/setup analysis
+        # terhadap maksimal 50 pair. Karena rows sudah diurutkan dari volume
+        # terbesar ke terkecil, eligible[:50] adalah batch top-volume cycle ini.
+        batch = eligible[:SCAN_MAX_PAIRS_PER_CYCLE]
+        deferred = max(0, len(eligible) - len(batch))
+        volume_rank_by_pair = {
+            row["pair"]: index
+            for index, row in enumerate(rows, start=1)
+        }
+
+        directional: list[str] = []
+        threshold_candidates: list[dict[str, Any]] = []
+        rejected_structure = 0
+        analysis_errors = 0
+        threshold_banned = 0
+        structure_banned = 0
         scanned = 0
-        for index, pair in enumerate(eligible, start=1):
-            if len(self.active_trades) >= self.max_active_trades:
-                self._scan_auto_paused = True
-                log.info("[SCAN] Cycle #%s stopped early at max active trade.", cycle)
-                break
+        direction_counts: dict[str, int] = {
+            "BULLISH": 0,
+            "BEARISH": 0,
+            "RANGE": 0,
+            "UNKNOWN": 0,
+        }
 
-            scanned += 1
-            log.info("[SCAN] Cycle #%s pair %s/%s: %s", cycle, index, total_eligible, pair)
-            try:
-                structure, reused_setup = await self._scan_get_structure(module, pair, cycle)
-                pair_trend = str(structure.get("trend") or "UNKNOWN").upper()
-                direction_counts[pair_trend if pair_trend in direction_counts else "UNKNOWN"] += 1
+        if btc_trend not in {"BULLISH", "BEARISH", "RANGE"}:
+            log.error(
+                "[SCAN] Cycle #%s dibatalkan: BTC H4 trend tidak valid (%s)",
+                cycle,
+                btc_trend,
+            )
+        else:
+            for index, pair in enumerate(batch, start=1):
+                if len(self.active_trades) >= self.max_active_trades:
+                    self._scan_auto_paused = True
+                    log.info("[SCAN] Cycle #%s stopped early at max active trade.", cycle)
+                    break
 
-                aligned = (
-                    (btc_trend == "BULLISH" and pair_trend == "BULLISH")
-                    or (btc_trend == "BEARISH" and pair_trend == "BEARISH")
-                    or (btc_trend == "RANGE" and pair_trend in {"BULLISH", "BEARISH", "RANGE"})
+                scanned += 1
+                log.info(
+                    "[SCAN] Cycle #%s pair %s/%s (volume-rank=%s): %s",
+                    cycle,
+                    index,
+                    len(batch),
+                    volume_rank_by_pair.get(pair, index),
+                    pair,
                 )
-                if not aligned:
-                    rejected_structure += 1
-                    log.info("[SCAN] %s rejected structure pair=%s BTC=%s", pair, pair_trend, btc_trend)
-                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-                    continue
-                directional.append(pair)
 
-                candidate = reused_setup
-                if candidate is None:
-                    candidate = await self._scan_generate_for_pair(module, pair, cycle)
-                candidate["analysis"] = candidate.get("analysis") or {}
-                candidate["analysis"].setdefault("scan", {})
-                candidate["analysis"]["scan"].update({
-                    "cycle": cycle,
-                    "btc_h4_trend": btc_trend,
-                    "pair_h4_trend": pair_trend,
-                    "rank_volume": index,
-                })
-                confidence = Decimal(str(candidate["confidence"]))
-                if confidence < self.scan_threshold:
-                    log.info(
-                        "[SCAN] %s below threshold confidence=%s threshold=%s",
-                        pair, decimal_to_str(confidence), decimal_to_str(self.scan_threshold),
+                try:
+                    structure, reused_setup = await self._scan_get_structure(module, pair, cycle)
+                    pair_trend = str(structure.get("trend") or "UNKNOWN").upper()
+                    direction_counts[pair_trend if pair_trend in direction_counts else "UNKNOWN"] += 1
+
+                    aligned = (
+                        (btc_trend == "BULLISH" and pair_trend == "BULLISH")
+                        or (btc_trend == "BEARISH" and pair_trend == "BEARISH")
+                        or (btc_trend == "RANGE" and pair_trend in {"BULLISH", "BEARISH", "RANGE"})
                     )
-                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-                    continue
-                threshold_candidates.append(candidate)
-                log.info("[SCAN] %s threshold PASS confidence=%s", pair, decimal_to_str(confidence))
-            except Exception:
-                analysis_errors += 1
-                log.exception("[SCAN] analysis error %s", pair)
-            await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                    if not aligned:
+                        rejected_structure += 1
+                        structure_banned += 1
+                        await self._ban_pair(
+                            pair,
+                            hours=SCAN_BANNED_TP_SL_HOURS,
+                            reason=(
+                                f"H4 structure {pair_trend} tidak searah dengan BTC H4 {btc_trend}; "
+                                "pair dikeluarkan dari batch scanner."
+                            ),
+                            source="AUTO_STRUCTURE_MISMATCH",
+                        )
+                        log.info(
+                            "[SCAN] %s rejected + banned 24h | pair=%s BTC=%s",
+                            pair,
+                            pair_trend,
+                            btc_trend,
+                        )
+                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                        continue
 
+                    directional.append(pair)
+
+                    candidate = reused_setup
+                    if candidate is None:
+                        candidate = await self._scan_generate_for_pair(module, pair, cycle)
+
+                    candidate["analysis"] = candidate.get("analysis") or {}
+                    candidate["analysis"].setdefault("scan", {})
+                    candidate["analysis"]["scan"].update({
+                        "cycle": cycle,
+                        "btc_h4_trend": btc_trend,
+                        "pair_h4_trend": pair_trend,
+                        "batch_rank": index,
+                        "batch_limit": SCAN_MAX_PAIRS_PER_CYCLE,
+                    })
+
+                    confidence = Decimal(str(candidate["confidence"]))
+                    if confidence < self.scan_threshold:
+                        threshold_banned += 1
+                        await self._ban_pair(
+                            pair,
+                            hours=SCAN_BANNED_PRICE_EXP_HOURS,
+                            reason=(
+                                f"Confidence {decimal_to_str(confidence)} di bawah threshold "
+                                f"{decimal_to_str(self.scan_threshold)}."
+                            ),
+                            source="AUTO_BELOW_THRESHOLD",
+                        )
+                        log.info(
+                            "[SCAN] %s below threshold + banned 8h | confidence=%s threshold=%s",
+                            pair,
+                            decimal_to_str(confidence),
+                            decimal_to_str(self.scan_threshold),
+                        )
+                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                        continue
+
+                    threshold_candidates.append(candidate)
+                    log.info(
+                        "[SCAN] %s threshold PASS confidence=%s",
+                        pair,
+                        decimal_to_str(confidence),
+                    )
+                except Exception:
+                    analysis_errors += 1
+                    log.exception("[SCAN] analysis error %s", pair)
+
+                await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+
+        # Kandidat yang threshold-pass selalu divalidasi berdasarkan confidence
+        # terbesar terlebih dahulu.
         threshold_candidates.sort(
             key=lambda item: Decimal(str(item.get("confidence") or "0")),
             reverse=True,
         )
-        initial_conf_values = [Decimal(str(x["confidence"])) for x in threshold_candidates]
+        initial_conf_values = [
+            Decimal(str(x["confidence"]))
+            for x in threshold_candidates
+        ]
+
         validated: list[dict[str, Any]] = []
         validator_rejects = 0
         validator_missing = 0
 
         if threshold_candidates:
-            log.info("[SCAN] Cycle #%s validator started candidates=%s", cycle, len(threshold_candidates))
+            log.info(
+                "[SCAN] Cycle #%s validator started candidates=%s",
+                cycle,
+                len(threshold_candidates),
+            )
+
         for rank, candidate in enumerate(threshold_candidates, start=1):
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
                 break
-            log.info("[SCAN] Cycle #%s validator %s/%s: %s", cycle, rank, len(threshold_candidates), candidate["pair"])
+
+            log.info(
+                "[SCAN] Cycle #%s validator %s/%s: %s",
+                cycle,
+                rank,
+                len(threshold_candidates),
+                candidate["pair"],
+            )
             try:
                 checked = await self._scan_validate_candidate(module, candidate, cycle)
                 if checked is None:
@@ -3078,14 +3200,21 @@ class TradingEngine:
                     validated.append(checked)
             except Exception:
                 validator_rejects += 1
-                log.exception("[SCAN] validator error %s", candidate["pair"])
+                log.exception(
+                    "[SCAN] validator error %s",
+                    candidate["pair"],
+                )
+
             await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
 
-        final_added = []
+        final_added: list[Trade] = []
+        final_add_errors = 0
+
         for candidate in validated:
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
                 break
+
             try:
                 meta = {
                     "strategy_name": candidate.get("strategy_name") or "SMC_VLT_RSI",
@@ -3095,16 +3224,26 @@ class TradingEngine:
                     "strategy_data_source": candidate.get("data_source") or "BYBIT",
                     "strategy_analysis": candidate.get("analysis") or {},
                 }
-                trade = self._build_trade_from_setup(candidate, strategy_meta=meta)
+                trade = self._build_trade_from_setup(
+                    candidate,
+                    strategy_meta=meta,
+                )
                 self.active_trades[trade.trade_id] = trade
                 final_added.append(trade)
                 await self.ws.add_symbol(trade.pair)
                 log.info(
                     "[SCAN] FINAL ADD %s confidence=%s trade_id=%s",
-                    trade.pair, decimal_to_str(trade.strategy_confidence), trade.trade_id,
+                    trade.pair,
+                    decimal_to_str(trade.strategy_confidence),
+                    trade.trade_id,
                 )
             except Exception:
-                log.exception("[SCAN] gagal memasukkan validated setup %s ke /trade", candidate.get("pair"))
+                final_add_errors += 1
+                log.exception(
+                    "[SCAN] gagal memasukkan validated setup %s ke /trade",
+                    candidate.get("pair"),
+                )
+
             await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
 
         if len(self.active_trades) >= self.max_active_trades:
@@ -3112,125 +3251,196 @@ class TradingEngine:
 
         avg_initial = (
             sum(initial_conf_values, Decimal("0")) / Decimal(len(initial_conf_values))
-            if initial_conf_values else None
+            if initial_conf_values
+            else None
         )
-        validated_conf_values = [Decimal(str(x["confidence"])) for x in validated if x.get("confidence") is not None]
+        validated_conf_values = [
+            Decimal(str(x["confidence"]))
+            for x in validated
+            if x.get("confidence") is not None
+        ]
         avg_validated = (
             sum(validated_conf_values, Decimal("0")) / Decimal(len(validated_conf_values))
-            if validated_conf_values else None
+            if validated_conf_values
+            else None
         )
-        highest = max(validated_conf_values) if validated_conf_values else (max(initial_conf_values) if initial_conf_values else None)
-        lowest = min(validated_conf_values) if validated_conf_values else (min(initial_conf_values) if initial_conf_values else None)
+        highest = (
+            max(validated_conf_values)
+            if validated_conf_values
+            else (max(initial_conf_values) if initial_conf_values else None)
+        )
+        lowest = (
+            min(validated_conf_values)
+            if validated_conf_values
+            else (min(initial_conf_values) if initial_conf_values else None)
+        )
+        validation_ratios: list[Decimal] = []
+        for checked in validated:
+            try:
+                scan_meta = (checked.get("analysis") or {}).get("scan")
+                ratio = Decimal(str(scan_meta.get("validation_ratio_percent"))) if isinstance(scan_meta, dict) and scan_meta.get("validation_ratio_percent") not in (None, "") else None
+            except (InvalidOperation, AttributeError):
+                ratio = None
+            if ratio is not None:
+                validation_ratios.append(ratio)
+
+        avg_validation_ratio = (
+            sum(validation_ratios, Decimal("0")) / Decimal(len(validation_ratios))
+            if validation_ratios
+            else None
+        )
         duration = time.monotonic() - started
+
         self._scan_last_report = {
             "cycle": cycle,
             "btc_h4_trend": btc_trend,
             "btc_analysis": btc_analysis,
             "universe": {
                 "common": universe["common_count"],
+                "binance": universe.get("binance_count"),
+                "bybit": universe.get("bybit_count"),
                 "already_trade": already_trade,
                 "banned": banned_count,
                 "margin_blocked": margin_blocked,
                 "eligible": len(eligible),
+                "batch_limit": SCAN_MAX_PAIRS_PER_CYCLE,
+                "batch_selected": len(batch),
+                "deferred_to_next_cycle": deferred,
             },
             "direction": {
                 "aligned": len(directional),
                 "rejected_structure": rejected_structure,
+                "structure_banned_24h": structure_banned,
                 "counts": direction_counts,
             },
             "analysis": {
-                "eligible_scanned": scanned,
+                "scanned": scanned,
                 "threshold_candidates": len(threshold_candidates),
+                "below_threshold_banned_8h": threshold_banned,
                 "validator_valid": len(validated),
                 "validator_missing": validator_missing,
                 "validator_errors_or_rejects": validator_rejects,
                 "final_added": len(final_added),
+                "final_add_errors": final_add_errors,
                 "analysis_errors": analysis_errors,
             },
             "confidence": {
                 "average_initial": avg_initial,
                 "average_validated": avg_validated,
+                "average_validation_ratio_percent": avg_validation_ratio,
                 "highest": highest,
                 "lowest": lowest,
                 "threshold": self.scan_threshold,
             },
             "duration_seconds": duration,
+            "next_cycle_delay_seconds": SCAN_CYCLE_DELAY_SECONDS,
         }
 
+        # Informasi proses detail tetap di Render; ringkasan cycle completion
+        # dikirim ke Telegram oleh TelegramErrorHandler karena itu adalah INFO
+        # khusus yang kita izinkan.
         log.info(
-            "[SCAN] Cycle #%s completed | aligned=%s threshold=%s validated=%s added=%s avg_initial=%s avg_validated=%s duration=%.2fs",
-            cycle, len(directional), len(threshold_candidates), len(validated), len(final_added),
-            decimal_to_str(avg_initial), decimal_to_str(avg_validated), duration,
+            "[SCAN] Cycle #%s completed | scanned=%s aligned=%s threshold=%s validated=%s added=%s avg_initial=%s avg_validated=%s duration=%.2fs",
+            cycle,
+            scanned,
+            len(directional),
+            len(threshold_candidates),
+            len(validated),
+            len(final_added),
+            decimal_to_str(avg_initial),
+            decimal_to_str(avg_validated),
+            duration,
         )
 
-        btc_lines = []
+        btc_lines: list[str] = []
         if isinstance(btc_analysis, dict):
             btc_node = btc_analysis.get("btc_h4")
             if isinstance(btc_node, dict):
-                for key in ("trend", "last_bos", "last_mss", "protected_high", "protected_low"):
+                for key in (
+                    "trend",
+                    "last_bos",
+                    "last_mss",
+                    "protected_high",
+                    "protected_low",
+                    "swing_high_count",
+                    "swing_low_count",
+                ):
                     if key in btc_node:
                         btc_lines.append(f"{key}: {btc_node.get(key)}")
 
         await self.reply(
-            "🔄 SCAN CYCLE #{cycle}\n\n"
+            "🔄 SCAN CYCLE #{cycle} SELESAI\n\n"
             "BTC H4:\n"
             "Trend: {btc}\n"
-            "{btc_detail}\n"
+            "{btc_detail}\n\n"
             "UNIVERSE:\n"
             "Common Binance ∩ Bybit: {common}\n"
             "Already in /trade: {active}\n"
             "Banned: {banned}\n"
-            "Margin detector: {margin_detector}\n"
             "Margin blocked: {margin}\n"
-            "Eligible: {eligible}\n\n"
+            "Eligible: {eligible}\n"
+            "Batch max: {batch_max}\n"
+            "Batch selected: {batch_selected}\n"
+            "Deferred next cycle: {deferred}\n\n"
             "DIRECTION:\n"
-            "Searah/Allowed dengan BTC: {aligned}\n"
-            "Bullish: {bullish} | Bearish: {bearish} | Range: {range} | Unknown: {unknown}\n\n"
+            "Searah dengan BTC: {aligned}\n"
+            "Tidak searah + ban 24h: {misaligned}\n"
+            "H4 Bullish: {bullish} | Bearish: {bearish} | Range: {range} | Unknown: {unknown}\n\n"
             "ANALYSIS:\n"
-            "Scanned: {scanned}\n"
+            "Scanned: {scanned}/{batch_max}\n"
             ">= Threshold: {threshold_candidates}\n"
+            "Below threshold + ban 8h: {threshold_banned}\n"
             "Validator valid: {valid}\n"
-            "Validator missing/reject: {vrej}\n"
+            "Validator reject/missing: {vrej}\n"
             "Analysis errors: {errors}\n"
-            "Final masuk /trade: {added}\n\n"
+            "Final masuk /trade: {added}\n"
+            "Final add errors: {add_errors}\n\n"
             "CONFIDENCE:\n"
             "Threshold: {threshold}\n"
             "Average Initial: {avg_initial}\n"
             "Average Validated: {avg_validated}\n"
+            "Average Validation Ratio: {validation_ratio}%\n"
             "Highest: {high}\n"
             "Lowest: {low}\n\n"
             "CYCLE:\n"
             "Duration: {duration:.2f}s\n"
-            "Next cycle: {next_delay:g}s"
-        .format(
-            cycle=cycle,
-            btc=btc_trend,
-            btc_detail="\n".join(btc_lines) if btc_lines else "Detail structure: tersedia di strategy analysis",
-            common=universe["common_count"],
-            active=already_trade,
-            banned=banned_count,
-            margin_detector=("ON" if self._margin_config()[0] is not None and self._margin_config()[1] is not None else "OFF"),
-            margin=margin_blocked,
-            eligible=len(eligible),
-            aligned=len(directional),
-            bullish=direction_counts["BULLISH"],
-            bearish=direction_counts["BEARISH"],
-            range=direction_counts["RANGE"],
-            unknown=direction_counts["UNKNOWN"],
-            scanned=scanned,
-            threshold_candidates=len(threshold_candidates),
-            valid=len(validated),
-            vrej=validator_missing + validator_rejects,
-            errors=analysis_errors,
-            added=len(final_added),
-            threshold=decimal_to_str(self.scan_threshold),
-            avg_initial=decimal_to_str(avg_initial),
-            avg_validated=decimal_to_str(avg_validated),
-            high=decimal_to_str(highest),
-            low=decimal_to_str(lowest),
-            duration=duration,
-            next_delay=SCAN_CYCLE_DELAY_SECONDS,
-        ))
+            "Next cycle delay: {next_delay:g}s"
+            .format(
+                cycle=cycle,
+                btc=btc_trend,
+                btc_detail="\n".join(btc_lines) if btc_lines else "Detail structure: tersedia di strategy analysis",
+                common=universe["common_count"],
+                active=already_trade,
+                banned=banned_count,
+                margin=margin_blocked,
+                eligible=len(eligible),
+                batch_max=SCAN_MAX_PAIRS_PER_CYCLE,
+                batch_selected=len(batch),
+                deferred=deferred,
+                aligned=len(directional),
+                misaligned=rejected_structure,
+                bullish=direction_counts["BULLISH"],
+                bearish=direction_counts["BEARISH"],
+                range=direction_counts["RANGE"],
+                unknown=direction_counts["UNKNOWN"],
+                scanned=scanned,
+                threshold_candidates=len(threshold_candidates),
+                threshold_banned=threshold_banned,
+                valid=len(validated),
+                vrej=validator_missing + validator_rejects,
+                errors=analysis_errors,
+                added=len(final_added),
+                add_errors=final_add_errors,
+                threshold=decimal_to_str(self.scan_threshold),
+                avg_initial=decimal_to_str(avg_initial),
+                avg_validated=decimal_to_str(avg_validated),
+                validation_ratio=decimal_to_str(avg_validation_ratio),
+                high=decimal_to_str(highest),
+                low=decimal_to_str(lowest),
+                duration=duration,
+                next_delay=SCAN_CYCLE_DELAY_SECONDS,
+            )
+        )
 
     async def reset_github_records(self) -> None:
         """Hapus seluruh file pencatatan bot dari GitHub.
@@ -4101,11 +4311,43 @@ class TradingEngine:
         ):
             raise ValueError("Setup belum lengkap.")
 
-        # Shared technical validation for both /add and /auto. Strategy.py
-        # decides the setup; main.py only ensures all prices are legal for
-        # the symbol and preserve the existing setup geometry.
+        pair = normalize_symbol(str(pair))
+        direction = str(direction).upper().strip()
+        meta = strategy_meta or {}
+        strategy_source = str(meta.get("strategy_source") or "MANUAL").upper().strip()
+
+        # Strategy menghasilkan harga dari data Bybit. Sebelum setup masuk ke
+        # /trade, harga executable dinormalisasi ke tick size Binance sehingga
+        # setup seperti TUTUSDT tidak gagal hanya karena precision berbeda.
+        # Price Now Reference bukan harga order, jadi tidak diwajibkan mengikuti
+        # tick size Binance.
+        if strategy_source in {"AUTO", "SCAN"}:
+            symbol_meta = self._get_symbol(pair)
+            tick = symbol_meta.tick_size
+            if direction == "BUY":
+                sl = quantized_price(sl, tick)
+                entry = quantized_price(entry, tick)
+                price_exp = quantized_price_ceiling(price_exp, tick)
+                tp = quantized_price_ceiling(tp, tick)
+            else:
+                sl = quantized_price_ceiling(sl, tick)
+                entry = quantized_price_ceiling(entry, tick)
+                price_exp = quantized_price(price_exp, tick)
+                tp = quantized_price(tp, tick)
+
+            log.info(
+                "[PRICE] strategy %s normalized to Binance tick | tick=%s entry=%s exp=%s sl=%s tp=%s",
+                pair,
+                decimal_to_str(tick),
+                decimal_to_str(entry),
+                decimal_to_str(price_exp),
+                decimal_to_str(sl),
+                decimal_to_str(tp),
+            )
+
+        # Price Now Reference hanya data konteks. Entry / Exp / SL / TP adalah
+        # harga yang harus legal pada Binance.
         for price_value in (
-            reference,
             entry,
             price_exp,
             sl,
@@ -4131,8 +4373,6 @@ class TradingEngine:
             raise ValueError(
                 "Struktur harga setup tidak valid."
             )
-
-        meta = strategy_meta or {}
 
         return Trade(
             trade_id=generate_trade_id(pair),
@@ -5986,6 +6226,150 @@ class TradingEngine:
             )
 
     # --------------------------------------------------------
+    # FORCE CLOSE
+    # --------------------------------------------------------
+
+    async def _close_one_trade(self, trade: Trade) -> tuple[bool, str]:
+        """Force-close one active setup in simulation.
+
+        PENDING is recorded as MANUAL_CLOSE_PENDING. FILLED uses the latest
+        live WebSocket price; positive PnL maps to TP, negative to SL, and
+        exactly zero to MANUAL_CLOSE.
+        """
+        current = self.active_trades.get(trade.trade_id)
+        if current is None:
+            return False, "Setup sudah tidak aktif."
+
+        if current.status == "PENDING":
+            await self._finalize_trade(
+                copy.deepcopy(current),
+                result="MANUAL_CLOSE_PENDING",
+                exit_price=None,
+                reason="Manual /close pada setup PENDING sebelum entry.",
+                send_notification=False,
+            )
+            return True, "PENDING ditutup."
+
+        if current.status != "FILLED":
+            return False, f"Status setup tidak dapat di-close: {current.status}."
+
+        snapshot = self.prices.get(current.pair)
+        if snapshot is None or not snapshot.live:
+            raise ValueError(
+                f"{current.pair}: harga live WebSocket belum tersedia/stale; "
+                "FILLED tidak ditutup agar PnL tidak salah."
+            )
+
+        exit_price = snapshot.price
+        pnl = pct_change(
+            current.direction,
+            current.fill_price or current.entry,
+            exit_price,
+        )
+
+        if pnl > 0:
+            result = "TP"
+            reason = (
+                "Manual /close. PnL positif, sehingga hasil dicatat sebagai TP "
+                f"(PnL {format_pct(pnl)})."
+            )
+        elif pnl < 0:
+            result = "SL"
+            reason = (
+                "Manual /close. PnL negatif, sehingga hasil dicatat sebagai SL "
+                f"(PnL {format_pct(pnl)})."
+            )
+        else:
+            result = "MANUAL_CLOSE"
+            reason = "Manual /close. PnL tepat 0%; tidak dikategorikan TP atau SL."
+
+        await self._finalize_trade(
+            copy.deepcopy(current),
+            result=result,
+            exit_price=exit_price,
+            reason=reason,
+            send_notification=False,
+        )
+        return True, f"{current.status} ditutup sebagai {result}."
+
+    async def _handle_close_command(self, text: str) -> None:
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            raise ValueError("Gunakan /close PAIR atau /close all.")
+
+        target = parts[1].strip()
+        is_batch = target.lower() == "all"
+
+        if is_batch:
+            trades = list(self.active_trades.values())
+            if not trades:
+                await self.reply("🔒 /close all: tidak ada active setup.")
+                return
+
+            success = 0
+            failed = 0
+            details: list[str] = []
+            self._close_batch_in_progress = True
+            try:
+                for trade in trades:
+                    try:
+                        ok, detail = await self._close_one_trade(trade)
+                        if ok:
+                            success += 1
+                        else:
+                            failed += 1
+                        details.append(f"{trade.pair} → {detail}")
+                    except Exception as exc:
+                        failed += 1
+                        log.exception("[CLOSE] gagal menutup %s", trade.trade_id)
+                        details.append(f"{trade.pair} → ERROR: {exc}")
+            finally:
+                self._close_batch_in_progress = False
+                # Setelah semua close diproses, baru scanner boleh resume.
+                await self._resume_scan_after_capacity_change()
+
+            await self.reply(
+                "🔒 CLOSE ALL SELESAI\n\n"
+                f"Diproses: {len(trades)}\n"
+                f"Berhasil: {success}\n"
+                f"Gagal: {failed}\n\n"
+                + "\n".join(details)
+            )
+            return
+
+        pair = normalize_symbol(target)
+        matches = [
+            trade
+            for trade in self.active_trades.values()
+            if trade.pair == pair
+        ]
+        if not matches:
+            raise ValueError(f"Tidak ada active setup untuk {pair}.")
+
+        results: list[str] = []
+        if len(matches) > 1:
+            self._close_batch_in_progress = True
+        try:
+            for trade in matches:
+                try:
+                    ok, detail = await self._close_one_trade(trade)
+                    results.append(f"{trade.trade_id}: {detail}")
+                    if not ok:
+                        log.warning("[CLOSE] setup %s tidak ditutup: %s", trade.trade_id, detail)
+                except Exception as exc:
+                    log.exception("[CLOSE] gagal menutup %s", trade.trade_id)
+                    results.append(f"{trade.trade_id}: ERROR: {exc}")
+        finally:
+            if len(matches) > 1:
+                self._close_batch_in_progress = False
+                await self._resume_scan_after_capacity_change()
+
+        await self.reply(
+            f"🔒 CLOSE {pair}\n\n"
+            + "\n".join(results)
+        )
+
+    # --------------------------------------------------------
     # TRADE DISPLAY
     # --------------------------------------------------------
 
@@ -6109,6 +6493,34 @@ class TradingEngine:
             )
         )
 
+        filled_pnls: list[Decimal] = []
+        stale_filled = 0
+        for trade in self.active_trades.values():
+            if trade.status != "FILLED":
+                continue
+            snapshot = self.prices.get(trade.pair)
+            if snapshot is None:
+                stale_filled += 1
+                continue
+            if not snapshot.live:
+                stale_filled += 1
+            try:
+                filled_pnls.append(
+                    pct_change(
+                        trade.direction,
+                        trade.fill_price or trade.entry,
+                        snapshot.price,
+                    )
+                )
+            except Exception:
+                log.exception("Gagal menghitung temporary PnL %s.", trade.trade_id)
+
+        total_temp_pnl = (
+            sum(filled_pnls, Decimal("0"))
+            if filled_pnls
+            else None
+        )
+
         blocks = [
             "╭──────────────╮",
             "│  📊 TRADE   │",
@@ -6116,6 +6528,8 @@ class TradingEngine:
             "",
             f"Active  {len(items)}   •   ⏳ {pending}   •   ✅ {filled}",
             f"Trail   {trailing}   •   📡 Live Feed {live}",
+            f"Temporary Total PnL (FILLED): {format_pct(total_temp_pnl) if total_temp_pnl is not None else '-'}",
+            f"PnL source: {len(filled_pnls)}/{filled} setup • stale/no feed: {stale_filled}",
             "",
         ]
 
@@ -6254,6 +6668,16 @@ class TradingEngine:
         except Exception:
             log.exception("Gagal memperbarui ban otomatis untuk %s %s.", trade.pair, result)
 
+        # Snapshot active setup harus ikut dibersihkan agar /open tidak
+        # menghidupkan kembali trade yang sudah ditutup setelah /setup.
+        try:
+            await self._persist_active_setups_silently()
+        except Exception:
+            log.exception(
+                "Gagal menyinkronkan data/setups.json setelah close %s.",
+                trade.trade_id,
+            )
+
         if need_unsubscribe:
             try:
                 await self.ws.remove_symbol(
@@ -6270,7 +6694,8 @@ class TradingEngine:
                 trade
             )
 
-        await self._resume_scan_after_capacity_change()
+        if not self._close_batch_in_progress:
+            await self._resume_scan_after_capacity_change()
 
     async def _notify_close(
         self,
@@ -6283,6 +6708,8 @@ class TradingEngine:
             "SL": "🛑 SL TERCAPAI",
             "EXPIRED": "⏳ PRICE EXPIRED",
             "DELETED": "🗑️ DELETED",
+            "MANUAL_CLOSE_PENDING": "🔒 PENDING DITUTUP",
+            "MANUAL_CLOSE": "🔒 POSISI DITUTUP MANUAL",
         }.get(
             result,
             "TRADE CLOSED",
@@ -6558,6 +6985,18 @@ class TradingEngine:
             if record.get("result") == "DELETED"
         )
 
+        manual_close_pending = sum(
+            1
+            for record in records
+            if record.get("result") == "MANUAL_CLOSE_PENDING"
+        )
+
+        manual_close_filled = sum(
+            1
+            for record in records
+            if record.get("result") == "MANUAL_CLOSE"
+        )
+
         total_filled = tp + sl
 
         tp_rate = (
@@ -6725,6 +7164,8 @@ class TradingEngine:
             "expired_rate_all": expired_rate_all,
             "deleted": deleted,
             "deleted_rate_all": deleted_rate_all,
+            "manual_close_pending": manual_close_pending,
+            "manual_close_filled": manual_close_filled,
             "win_rate": win_rate,
             "gross_pnl_percent": gross_net,
             "average_win_percent": average_win,
@@ -6823,7 +7264,9 @@ class TradingEngine:
             f"SL: {stats['sl']} ({format_pct(stats['sl_rate']).replace('+', '')} dari trade entry)\n"
             f"Win Rate: {format_pct(stats['win_rate']).replace('+', '')}\n"
             f"Expired: {stats['expired']} ({format_pct(stats['expired_rate_all']).replace('+', '')} dari seluruh history)\n"
-            f"Deleted: {stats['deleted']} ({format_pct(stats['deleted_rate_all']).replace('+', '')} dari seluruh history)\n\n"
+            f"Deleted: {stats['deleted']} ({format_pct(stats['deleted_rate_all']).replace('+', '')} dari seluruh history)\n"
+            f"Manual Close Pending: {stats['manual_close_pending']}\n"
+            f"Manual Close Filled @ 0%: {stats['manual_close_filled']}\n\n"
             "CONFIDENCE\n"
             f"Rerata Confidence Semua History: {fmt_confidence(stats['average_confidence_all'])}\n"
             f"Rerata Confidence TP: {fmt_confidence(stats['average_confidence_tp'])}\n"
@@ -6845,7 +7288,8 @@ class TradingEngine:
             f"{outcome_conclusion}\n"
             f"{confidence_conclusion}\n"
             f"{stats['expired']} setup berakhir Expired dan {stats['deleted']} setup berakhir Deleted.\n"
-            "Expired dan Deleted tidak dihitung sebagai win/loss."
+            f"Manual Close Pending: {stats['manual_close_pending']}; Manual Close Filled @ 0%: {stats['manual_close_filled']}.\n"
+            "Expired, Deleted, dan manual close non-TP/SL tidak dihitung sebagai win/loss."
         )
 
     # --------------------------------------------------------
@@ -7800,6 +8244,7 @@ class TradingEngine:
             "/wrong - menghapus setup yang benar-benar salah TANPA pencatatan history\n"
             "/remove - menghapus data trade yang sudah masuk history\n"
             "/filled - ubah setup PENDING menjadi FILLED secara manual\n"
+            "/close PAIR|all - tutup paksa setup dan catat hasil\n"
             "/scan on|off - scanner otomatis\n"
             "/threshold [angka] - ambang confidence scanner\n"
             "/max [angka] - batas total PENDING + FILLED\n"
@@ -7876,6 +8321,7 @@ class TradingEngine:
                     "/wrong",
                     "/remove",
                     "/filled",
+                    "/close",
                     "/scan",
                     "/threshold",
                     "/max",
@@ -7948,6 +8394,14 @@ class TradingEngine:
 
             if command == "/filled":
                 await self._start_filled()
+                return
+
+            if command == "/close":
+                try:
+                    await self._handle_close_command(text)
+                except Exception as exc:
+                    log.exception("CLOSE command gagal.")
+                    await self.reply(f"❌ /close gagal.\n\n{exc}")
                 return
 
             if command == "/scan":
