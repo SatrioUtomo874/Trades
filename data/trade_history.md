@@ -197,3 +197,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T13:37:00.282733+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## ZENUSDT — SELL
+
+Trade ID: `ZENUSDT-20260930-203634-63F343`
+
+### Setup
+
+- Price Now Reference: 7.493
+- Entry: 7.703
+- Reason Entry: ZENUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 7.6735). H1 me-refine ke BEARISH_BREAKER 7.703. M15 memberi execution POI BEARISH_BREAKER 7.703. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 7.481
+- Reason Price Exp: Price Exp 7.4816 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 7.819
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (7.806) + buffer 0.15 ATR M15.
+- TP: 7.474
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 7.474 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 7.44
+- Result Reason: Price Exp 7.4816 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T13:36:34.658750+00:00
+- Filled: -
+- Closed: 2026-09-30T13:37:28.745214+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
