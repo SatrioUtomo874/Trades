@@ -737,3 +737,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T11:00:55.663021+00:00
 - Strategy: SMC_VLT_RSI v0.5.0
+
+---
+
+## PIPPINUSDT — SELL
+
+Trade ID: `PIPPINUSDT-20260930-175247-8EE2A2`
+
+### Setup
+
+- Price Now Reference: 0.019
+- Entry: 0.01901
+- Reason Entry: PIPPINUSDT SELL: thesis dimulai dari POI H4. (BEARISH_OB 0.019075). H1 me-refine ke BEARISH_FVG 0.01901. M15 memberi execution POI BEARISH_FVG 0.019005. Fib H4 berada pada band OVERLAPS_0.618 (score 96).
+- Price Exp: 0.01884
+- Reason Price Exp: Price Exp 0.0188468 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.01907
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.01903) + buffer 0.15 ATR M15.
+- TP: 0.01874
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.01877 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.01884
+- Result Reason: Price Exp 0.0188468 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T10:52:47.899622+00:00
+- Filled: -
+- Closed: 2026-09-30T11:01:38.692413+00:00
+- Strategy: SMC_VLT_RSI v0.5.0
