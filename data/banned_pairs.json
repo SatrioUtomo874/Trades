@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:34:40.254284+00:00",
+  "saved_at": "2026-09-30T13:35:17.050111+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -78,6 +78,13 @@
       "until": "2026-09-30T21:33:04.350969+00:00",
       "reason": "Confidence 67.88 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "AVAXUSDT",
+      "banned_at": "2026-09-30T13:35:17.050070+00:00",
+      "until": "2026-10-01T13:35:17.050042+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "BERAUSDT",
