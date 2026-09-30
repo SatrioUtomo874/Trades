@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T14:04:33.744493+00:00",
+  "saved_at": "2026-09-30T14:04:41.545516+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -757,6 +757,13 @@
       "until": "2026-09-30T21:47:17.387783+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "STXUSDT",
+      "banned_at": "2026-09-30T14:04:41.545436+00:00",
+      "until": "2026-09-30T22:04:41.545401+00:00",
+      "reason": "Confidence 69.85 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "SUIUSDT",
