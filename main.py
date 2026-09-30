@@ -28,9 +28,13 @@ Prinsip:
 - /setup menyimpan snapshot setup aktif ke data/setups.json.
 - /open memulihkan snapshot setup tersebut setelah main.py diganti.
 - /auto menjembatani main.py ke strategy.py dan meminta konfirmasi user.
+- /scan menjalankan scanner otomatis: universe Binance ∩ Bybit -> directional H4 -> strategy -> threshold -> validator -> /trade.
+- /threshold mengatur ambang confidence scanner.
+- /max membatasi total active PENDING + FILLED dan dapat mem-pause/resume /scan otomatis.
+- /banned dan /unban mengelola ban pair; ban otomatis diterapkan untuk Price Exp/TP/SL/Margin Influence.
 - /wrong menghapus active setup yang benar-benar salah tanpa mencatat history.
 - /remove menghapus satu trade dari histori GitHub beserta event dan journal terkait.
-- strategy.py wajib menyediakan generate_setup(pair, context).
+- strategy.py wajib menyediakan generate_setup(pair, context); mode SCAN juga mendukung kontrak optimized scan structure dan validate_setup.
 """
 
 import asyncio
@@ -48,7 +52,7 @@ import time
 import traceback
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from typing import Any
@@ -139,6 +143,22 @@ PRICE_STALE_SECONDS = 15
 MAX_ACTIVE_TRADES = 100
 HISTORY_REFRESH_SECONDS = 30
 
+# SCAN configuration. /max and /threshold can override these at runtime.
+DEFAULT_SCAN_THRESHOLD = Decimal("70")
+SCAN_PAIR_DELAY_SECONDS = 1.0
+SCAN_CYCLE_DELAY_SECONDS = 30.0
+SCAN_VALIDATION_TOLERANCE = Decimal("0.90")
+SCAN_BANNED_PRICE_EXP_HOURS = Decimal("8")
+SCAN_BANNED_TP_SL_HOURS = Decimal("24")
+SCAN_MARGIN_TOLERANCE = Decimal("0.10")
+SCAN_MARGIN_FAIL_CONFIRMATIONS = 3
+BANNED_PATH = "data/banned_pairs.json"
+
+# Optional margin/leverage inputs used only by the conservative Margin Influence detector.
+# They may be supplied by the future /margin and /leverage execution layer.
+CONFIG_MARGIN_USD = os.getenv("MARGIN_USD", "").strip()
+CONFIG_LEVERAGE = os.getenv("LEVERAGE", "").strip()
+
 if not ALLOWED_USER_ID:
     raise RuntimeError("ALLOWED_USER_ID belum diset.")
 
@@ -157,10 +177,10 @@ log = logging.getLogger("main.trading_engine")
 
 
 class TelegramErrorHandler(logging.Handler):
-    """Forward ERROR/EXCEPTION logs from background tasks to Telegram."""
+    """Forward WARNING/ERROR logs from background tasks to Telegram."""
 
     def __init__(self, engine: "TradingEngine") -> None:
-        super().__init__(level=logging.ERROR)
+        super().__init__(level=logging.WARNING)
         self.engine = engine
         self.loop: asyncio.AbstractEventLoop | None = None
         self._last_signature = ""
@@ -200,6 +220,20 @@ class TelegramErrorHandler(logging.Handler):
         except Exception:
             # Error handler tidak boleh menjatuhkan aplikasi.
             pass
+
+
+# Render selalu menerima INFO proses + WARNING/ERROR. Telegram menerima WARNING/ERROR.
+if not log.handlers:
+    _render_handler = logging.StreamHandler()
+    _render_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    log.addHandler(_render_handler)
+log.setLevel(logging.INFO)
+log.propagate = False
 
 
 # ============================================================
@@ -358,6 +392,10 @@ class SymbolMeta:
     tick_size: Decimal
     min_price: Decimal = Decimal("0")
     max_price: Decimal = Decimal("0")
+    min_qty: Decimal = Decimal("0")
+    max_qty: Decimal = Decimal("0")
+    step_size: Decimal = Decimal("0")
+    min_notional: Decimal = Decimal("0")
 
 
 @dataclass(slots=True)
@@ -573,19 +611,32 @@ class BinanceREST:
             tick_size = Decimal("0")
             min_price = Decimal("0")
             max_price = Decimal("0")
+            min_qty = Decimal("0")
+            max_qty = Decimal("0")
+            step_size = Decimal("0")
+            min_notional = Decimal("0")
 
             for filt in raw.get("filters", []):
-                if filt.get("filterType") == "PRICE_FILTER":
-                    tick_size = Decimal(
-                        str(filt.get("tickSize") or "0")
-                    )
-                    min_price = Decimal(
-                        str(filt.get("minPrice") or "0")
-                    )
-                    max_price = Decimal(
-                        str(filt.get("maxPrice") or "0")
-                    )
-                    break
+                kind = str(filt.get("filterType") or "")
+                if kind == "PRICE_FILTER":
+                    tick_size = Decimal(str(filt.get("tickSize") or "0"))
+                    min_price = Decimal(str(filt.get("minPrice") or "0"))
+                    max_price = Decimal(str(filt.get("maxPrice") or "0"))
+                elif kind in {"LOT_SIZE", "MARKET_LOT_SIZE"}:
+                    candidate_step = Decimal(str(filt.get("stepSize") or "0"))
+                    candidate_min = Decimal(str(filt.get("minQty") or "0"))
+                    candidate_max = Decimal(str(filt.get("maxQty") or "0"))
+                    # Prefer LOT_SIZE for normal quantity validation.
+                    if kind == "LOT_SIZE" or step_size <= 0:
+                        step_size = candidate_step
+                        min_qty = candidate_min
+                        max_qty = candidate_max
+                elif kind in {"MIN_NOTIONAL", "NOTIONAL"}:
+                    min_notional = Decimal(str(
+                        filt.get("minNotional")
+                        or filt.get("notional")
+                        or "0"
+                    ))
 
             result[symbol] = SymbolMeta(
                 symbol=symbol,
@@ -595,6 +646,10 @@ class BinanceREST:
                 tick_size=tick_size,
                 min_price=min_price,
                 max_price=max_price,
+                min_qty=min_qty,
+                max_qty=max_qty,
+                step_size=step_size,
+                min_notional=min_notional,
             )
 
         return result
@@ -606,6 +661,97 @@ class BinanceREST:
         )
 
         return parse_decimal(str(payload["price"]))
+
+    async def get_24h_tickers(self) -> list[dict[str, Any]]:
+        payload = await self._get("/fapi/v1/ticker/24hr")
+        if not isinstance(payload, list):
+            raise RuntimeError("Binance 24h ticker response bukan list.")
+        return payload
+
+
+# ============================================================
+# BYBIT PUBLIC MARKET DATA
+# ============================================================
+
+class BybitPublicREST:
+    """Public Bybit V5 market-data client for linear USDT perpetuals."""
+
+    BASE_URL = "https://api.bybit.com"
+
+    async def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        def request() -> Any:
+            response = requests.get(
+                f"{self.BASE_URL}{path}",
+                params=params or {},
+                timeout=HTTP_REQUEST_SECONDS,
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Bybit REST {path}: HTTP {response.status_code}: "
+                    f"{response.text[:500]}"
+                )
+            body = response.json()
+            if body.get("retCode") not in (0, None):
+                raise RuntimeError(
+                    f"Bybit REST {path}: retCode={body.get('retCode')} "
+                    f"retMsg={body.get('retMsg')}"
+                )
+            return body
+
+        return await asyncio.to_thread(request)
+
+    async def get_linear_perpetual_symbols(self) -> set[str]:
+        symbols: set[str] = set()
+        cursor: str | None = None
+
+        while True:
+            params: dict[str, Any] = {
+                "category": "linear",
+                "status": "Trading",
+                "limit": 1000,
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            body = await self._get(
+                "/v5/market/instruments-info",
+                params=params,
+            )
+            result = body.get("result") or {}
+
+            for item in result.get("list") or []:
+                symbol = normalize_symbol(str(item.get("symbol") or ""))
+                contract_type = str(item.get("contractType") or "")
+                quote_coin = str(item.get("quoteCoin") or "")
+                status = str(item.get("status") or "")
+                if (
+                    symbol
+                    and quote_coin == "USDT"
+                    and contract_type == "LinearPerpetual"
+                    and status == "Trading"
+                ):
+                    symbols.add(symbol)
+
+            cursor = str(result.get("nextPageCursor") or "") or None
+            if not cursor:
+                break
+
+        return symbols
+
+    async def get_linear_tickers(self) -> list[dict[str, Any]]:
+        body = await self._get(
+            "/v5/market/tickers",
+            params={"category": "linear"},
+        )
+        result = body.get("result") or {}
+        rows = result.get("list") or []
+        if not isinstance(rows, list):
+            raise RuntimeError("Bybit ticker response bukan list.")
+        return rows
 
 
 # ============================================================
@@ -1370,6 +1516,7 @@ class TradingEngine:
         self.session_id = generate_session_id()
 
         self.rest = BinanceREST()
+        self.bybit = BybitPublicREST()
         self.github = GitHubStore()
 
         self.symbols: dict[str, SymbolMeta] = {}
@@ -1392,6 +1539,23 @@ class TradingEngine:
         self._auto_task: asyncio.Task[Any] | None = None
         self._auto_job_id: str | None = None
 
+        # SCAN runtime state. Manual ON/OFF intent is kept separate from the
+        # temporary capacity pause caused by /max. /scan defaults OFF on restart.
+        self.scan_threshold = DEFAULT_SCAN_THRESHOLD
+        self.max_active_trades = MAX_ACTIVE_TRADES
+        self.scan_margin_usd = self._parse_optional_decimal(CONFIG_MARGIN_USD)
+        self.scan_leverage = self._parse_optional_decimal(CONFIG_LEVERAGE)
+        self._scan_user_enabled = False
+        self._scan_auto_paused = False
+        self._scan_task: asyncio.Task[Any] | None = None
+        self._scan_cycle_number = 0
+        self._scan_last_report: dict[str, Any] = {}
+        self._scan_margin_streak: dict[str, int] = {}
+
+        self.banned_pairs: dict[str, dict[str, Any]] = {}
+        self._ban_lock = asyncio.Lock()
+        self._strategy_runtime_module = None
+
         self.ws = BinanceWebSocket(
             self._on_price
         )
@@ -1407,6 +1571,16 @@ class TradingEngine:
         self._telegram_error_handler_added = False
 
         self.last_history_refresh: datetime | None = None
+
+    @staticmethod
+    def _parse_optional_decimal(value: Any) -> Decimal | None:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except InvalidOperation:
+            return None
+        return parsed if parsed > 0 else None
 
     # --------------------------------------------------------
     # Telegram send
@@ -1438,8 +1612,9 @@ class TradingEngine:
                     )
                 )
 
+            title = "⚠️ WARNING BACKEND" if record.levelno < logging.ERROR else "🚨 ERROR BACKEND"
             text = (
-                "🚨 ERROR BACKEND\n\n"
+                f"{title}\n\n"
                 f"Module: {record.name}\n"
                 f"Level: {record.levelname}\n"
                 f"Message: {record.getMessage()}\n"
@@ -1494,8 +1669,10 @@ class TradingEngine:
 
         await self._load_history()
         await self._load_notes()
+        await self._load_banned_pairs()
 
         self.symbols = await self.rest.get_exchange_info()
+        log.info("[MAIN] Binance symbols loaded: %s", len(self.symbols))
 
         await self.ws.start()
 
@@ -1516,6 +1693,14 @@ class TradingEngine:
             return
 
         self._running = False
+
+        if self._scan_task is not None and not self._scan_task.done():
+            self._scan_task.cancel()
+            try:
+                await self._scan_task
+            except asyncio.CancelledError:
+                pass
+        self._scan_task = None
 
         if self._auto_task is not None and not self._auto_task.done():
             self._auto_task.cancel()
@@ -1965,7 +2150,7 @@ class TradingEngine:
                 )
                 continue
 
-            if len(self.active_trades) >= MAX_ACTIVE_TRADES:
+            if len(self.active_trades) >= self.max_active_trades:
                 skipped += 1
                 skipped_details.append(
                     f"{trade.trade_id}: batas active trade tercapai"
@@ -2014,6 +2199,1038 @@ class TradingEngine:
         ])
 
         await self.reply("\n".join(lines))
+        await self._resume_scan_after_capacity_change()
+
+    # --------------------------------------------------------
+    # BANNED PAIRS
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _parse_ban_until(value: Any) -> datetime | None:
+        if value in (None, "", False):
+            return None
+        try:
+            parsed = parse_iso(str(value))
+        except Exception:
+            return None
+        return parsed
+
+    async def _load_banned_pairs(self) -> None:
+        raw, _ = await self.github.get_file(BANNED_PATH)
+        loaded: dict[str, dict[str, Any]] = {}
+
+        if raw:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+                rows = payload.get("bans", payload) if isinstance(payload, dict) else payload
+                if isinstance(rows, list):
+                    for item in rows:
+                        if not isinstance(item, dict):
+                            continue
+                        pair = normalize_symbol(str(item.get("pair") or ""))
+                        if not pair:
+                            continue
+                        loaded[pair] = {
+                            "pair": pair,
+                            "banned_at": item.get("banned_at") or iso_utc(),
+                            "until": item.get("until"),
+                            "reason": str(item.get("reason") or "").strip(),
+                            "source": str(item.get("source") or "MANUAL").strip(),
+                        }
+                elif isinstance(rows, dict):
+                    for raw_pair, item in rows.items():
+                        pair = normalize_symbol(str(raw_pair))
+                        if not pair or not isinstance(item, dict):
+                            continue
+                        loaded[pair] = {
+                            "pair": pair,
+                            "banned_at": item.get("banned_at") or iso_utc(),
+                            "until": item.get("until"),
+                            "reason": str(item.get("reason") or "").strip(),
+                            "source": str(item.get("source") or "MANUAL").strip(),
+                        }
+            except Exception:
+                log.exception("Gagal membaca %s; daftar ban di-reset di RAM.", BANNED_PATH)
+                loaded = {}
+
+        self.banned_pairs = loaded
+        await self._purge_expired_bans(persist=False)
+        log.info("[BAN] Loaded active banned pairs: %s", len(self.banned_pairs))
+
+    async def _persist_banned_pairs(self) -> None:
+        async with self._ban_lock:
+            rows = [self.banned_pairs[pair] for pair in sorted(self.banned_pairs)]
+            payload = {
+                "version": 1,
+                "saved_at": iso_utc(),
+                "bans": rows,
+            }
+            await self.github.replace_file(
+                BANNED_PATH,
+                json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                f"ban: update {len(rows)} pair(s)",
+            )
+
+    async def _purge_expired_bans(self, *, persist: bool = True) -> None:
+        now = now_utc()
+        removed = []
+        for pair, item in list(self.banned_pairs.items()):
+            until = self._parse_ban_until(item.get("until"))
+            if until is not None and until <= now:
+                self.banned_pairs.pop(pair, None)
+                removed.append(pair)
+        if removed:
+            log.info("[BAN] Expired bans removed: %s", ", ".join(sorted(removed)))
+            if persist:
+                await self._persist_banned_pairs()
+
+    def _is_pair_banned(self, pair: str) -> bool:
+        pair = normalize_symbol(pair)
+        item = self.banned_pairs.get(pair)
+        if not item:
+            return False
+        until = self._parse_ban_until(item.get("until"))
+        if until is not None and until <= now_utc():
+            return False
+        return True
+
+    def _ban_remaining_text(self, item: dict[str, Any]) -> str:
+        until = self._parse_ban_until(item.get("until"))
+        if until is None:
+            return "PERMANENT"
+        seconds = max(0, int((until - now_utc()).total_seconds()))
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{hours}j {minutes}m"
+
+    async def _ban_pair(
+        self,
+        pair: str,
+        *,
+        hours: Decimal | None = None,
+        reason: str = "",
+        source: str = "MANUAL",
+    ) -> None:
+        pair = normalize_symbol(pair)
+        if not pair:
+            raise ValueError("Pair ban tidak valid.")
+        until: str | None
+        if hours is None:
+            until = None
+        else:
+            if hours <= 0:
+                raise ValueError("Durasi ban harus > 0 jam.")
+            until = iso_utc(now_utc() + timedelta(hours=float(hours)))
+
+        new_source = str(source or "MANUAL").strip()
+        new_reason = str(reason or "").strip()
+        existing = self.banned_pairs.get(pair)
+
+        # Automatic bans may extend/protect an existing ban, but never weaken
+        # a permanent or longer-running ban. Manual /banned explicitly wins.
+        preserve_existing = False
+        if existing and new_source != "MANUAL":
+            existing_until = self._parse_ban_until(existing.get("until"))
+            new_until_dt = self._parse_ban_until(until)
+            if existing_until is None and new_until_dt is not None:
+                until = None
+                preserve_existing = True
+            elif (
+                existing_until is not None
+                and new_until_dt is not None
+                and existing_until > new_until_dt
+            ):
+                until = existing.get("until")
+                preserve_existing = True
+            elif existing_until is None and new_until_dt is None:
+                preserve_existing = True
+
+            if preserve_existing:
+                new_reason = str(existing.get("reason") or new_reason).strip()
+                new_source = str(existing.get("source") or new_source).strip()
+
+        self.banned_pairs[pair] = {
+            "pair": pair,
+            "banned_at": existing.get("banned_at") if existing and new_source != "MANUAL" else iso_utc(),
+            "until": until,
+            "reason": new_reason,
+            "source": new_source,
+        }
+        await self._persist_banned_pairs()
+        log.info(
+            "[BAN] %s | duration=%s | source=%s | reason=%s",
+            pair,
+            "PERMANENT" if until is None else f"{hours}h",
+            source,
+            reason or "-",
+        )
+
+    async def _auto_ban_for_result(self, trade: Trade, result: str) -> None:
+        result = str(result or "").upper()
+        if result == "EXPIRED":
+            await self._ban_pair(
+                trade.pair,
+                hours=SCAN_BANNED_PRICE_EXP_HOURS,
+                reason="Setup berakhir karena Price Exp tercapai sebelum entry.",
+                source="AUTO_PRICE_EXP",
+            )
+        elif result in {"TP", "SL"}:
+            await self._ban_pair(
+                trade.pair,
+                hours=SCAN_BANNED_TP_SL_HOURS,
+                reason=f"Setup berakhir {result}; pair dikunci sementara dari scanner.",
+                source=f"AUTO_{result}",
+            )
+
+    async def _handle_banned_command(self, text: str) -> None:
+        await self._purge_expired_bans()
+        parts = text.split(maxsplit=3)
+        if len(parts) == 1:
+            if not self.banned_pairs:
+                await self.reply("🚫 BAN LIST KOSONG")
+                return
+            lines = ["🚫 BAN LIST", ""]
+            for pair in sorted(self.banned_pairs):
+                item = self.banned_pairs[pair]
+                reason = item.get("reason") or "Tanpa alasan"
+                lines.append(
+                    f"{pair} | {self._ban_remaining_text(item)} | {reason}"
+                )
+            await self.reply("\n".join(lines))
+            return
+
+        pair = normalize_symbol(parts[1])
+        hours: Decimal | None = None
+        reason = ""
+        if len(parts) >= 3:
+            try:
+                hours = Decimal(parts[2])
+                reason = parts[3].strip() if len(parts) == 4 else ""
+            except InvalidOperation:
+                # /banned PAIR alasan
+                hours = None
+                reason = " ".join(parts[2:]).strip()
+
+        await self._ban_pair(pair, hours=hours, reason=reason, source="MANUAL")
+        await self.reply(
+            "🚫 PAIR DIBANNED\n\n"
+            f"Pair: {pair}\n"
+            f"Durasi: {'PERMANENT' if hours is None else f'{hours} jam'}\n"
+            f"Alasan: {reason or 'Tanpa alasan'}"
+        )
+
+    async def _handle_unban_command(self, text: str) -> None:
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            await self.reply("Gunakan /unban PAIR atau /unban all")
+            return
+        target = normalize_symbol(parts[1])
+        if parts[1].strip().lower() == "all":
+            count = len(self.banned_pairs)
+            self.banned_pairs.clear()
+            await self._persist_banned_pairs()
+            await self.reply(f"✅ SEMUA BAN DIHAPUS\n\nTotal: {count}")
+            return
+        if target not in self.banned_pairs:
+            await self.reply(f"Pair {target} tidak ada di ban list.")
+            return
+        self.banned_pairs.pop(target, None)
+        await self._persist_banned_pairs()
+        await self.reply(f"✅ UNBAN {target}")
+
+    # --------------------------------------------------------
+    # SCAN CONFIG / COMMANDS
+    # --------------------------------------------------------
+
+    async def _handle_scan_command(self, text: str) -> None:
+        parts = text.split()
+        if len(parts) == 1:
+            state = "ON" if self._scan_user_enabled else "OFF"
+            runtime = "PAUSED_BY_MAX" if self._scan_auto_paused else state
+            await self.reply(
+                "🔎 SCAN STATUS\n\n"
+                f"User State: {state}\n"
+                f"Runtime State: {runtime}\n"
+                f"Threshold: {decimal_to_str(self.scan_threshold)}\n"
+                f"Max Active Trade: {self.max_active_trades}\n"
+                f"Interval Cycle: {SCAN_CYCLE_DELAY_SECONDS:g}s\n"
+                f"Delay Pair: {SCAN_PAIR_DELAY_SECONDS:g}s"
+            )
+            return
+
+        mode = parts[1].lower()
+        if mode not in {"on", "off"}:
+            raise ValueError("Gunakan /scan on atau /scan off.")
+
+        if mode == "off":
+            self._scan_user_enabled = False
+            self._scan_auto_paused = False
+            await self._stop_scan_task()
+            await self.reply("🛑 SCAN OFF")
+            return
+
+        self._scan_user_enabled = True
+        if len(self.active_trades) >= self.max_active_trades:
+            self._scan_auto_paused = True
+            await self._stop_scan_task()
+            await self.reply(
+                "⏸️ SCAN belum berjalan karena MAX ACTIVE TRADE tercapai.\n"
+                f"Max: {self.max_active_trades}"
+            )
+            return
+
+        self._scan_auto_paused = False
+        await self._start_scan_task()
+        await self.reply(
+            "🟢 SCAN ON\n\n"
+            f"Threshold: {decimal_to_str(self.scan_threshold)}\n"
+            f"Max Active Trade: {self.max_active_trades}"
+        )
+
+    async def _handle_threshold_command(self, text: str) -> None:
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            await self.reply(f"🎚 Threshold saat ini: {decimal_to_str(self.scan_threshold)}")
+            return
+        value = Decimal(parts[1])
+        if value < 0 or value > 100:
+            raise ValueError("Threshold harus 0–100.")
+        self.scan_threshold = value
+        await self.reply(f"✅ Threshold diubah menjadi {decimal_to_str(value)}")
+
+    async def _handle_max_command(self, text: str) -> None:
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            await self.reply(f"📌 Max Active Trade: {self.max_active_trades}")
+            return
+        value = int(parts[1])
+        if value <= 0:
+            raise ValueError("/max harus berupa angka > 0.")
+        self.max_active_trades = value
+        if len(self.active_trades) >= self.max_active_trades:
+            if self._scan_user_enabled:
+                self._scan_auto_paused = True
+                await self._stop_scan_task()
+            await self.reply(
+                f"✅ /max = {value}\n"
+                "SCAN akan pause otomatis karena kapasitas sudah penuh."
+            )
+            return
+        was_paused = self._scan_auto_paused
+        self._scan_auto_paused = False
+        if self._scan_user_enabled and (was_paused or self._scan_task is None):
+            await self._start_scan_task()
+        await self.reply(f"✅ /max = {value}")
+
+    async def _stop_scan_task(self) -> None:
+        task = self._scan_task
+        self._scan_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _start_scan_task(self) -> None:
+        if not self._running:
+            return
+        if not self._scan_user_enabled:
+            return
+        if len(self.active_trades) >= self.max_active_trades:
+            self._scan_auto_paused = True
+            return
+        if self._scan_task is not None and not self._scan_task.done():
+            return
+        self._scan_auto_paused = False
+        self._scan_task = asyncio.create_task(
+            self._scan_loop(),
+            name="main-scan-loop",
+        )
+        log.info("[SCAN] scanner task started")
+
+    async def _resume_scan_after_capacity_change(self) -> None:
+        if self.flow is not None:
+            return
+        if (
+            self._scan_user_enabled
+            and len(self.active_trades) < self.max_active_trades
+        ):
+            self._scan_auto_paused = False
+            await self._start_scan_task()
+
+    # --------------------------------------------------------
+    # STRATEGY BRIDGE FOR SCAN
+    # --------------------------------------------------------
+
+    async def _load_strategy_runtime(self):
+        strategy_path = BASE_DIR / "strategy.py"
+        if not strategy_path.is_file():
+            raise RuntimeError(f"strategy.py tidak ditemukan: {strategy_path}")
+        module_name = f"trading_strategy_scan_{int(time.time() * 1000)}"
+        spec = importlib.util.spec_from_file_location(module_name, strategy_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Loader strategy.py tidak tersedia.")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        self._strategy_runtime_module = module
+        return module
+
+    async def _call_strategy_function(self, module, name: str, *args, **kwargs):
+        fn = getattr(module, name, None)
+        if not callable(fn):
+            return None
+        if inspect.iscoroutinefunction(fn):
+            result = await fn(*args, **kwargs)
+        else:
+            result = await asyncio.to_thread(fn, *args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    def _extract_structure_trend(self, analysis: dict[str, Any] | None, key: str) -> str | None:
+        if not isinstance(analysis, dict):
+            return None
+        direct = analysis.get(key)
+        if isinstance(direct, dict) and direct.get("trend"):
+            return str(direct.get("trend")).upper()
+        macro = analysis.get("macro")
+        if isinstance(macro, dict):
+            node = macro.get(key)
+            if isinstance(node, dict) and node.get("trend"):
+                return str(node.get("trend")).upper()
+        mtf = analysis.get("multi_timeframe")
+        if isinstance(mtf, dict) and key == "pair_h4":
+            node = mtf.get("h4")
+            if isinstance(node, dict) and node.get("trend"):
+                return str(node.get("trend")).upper()
+        return None
+
+    def _make_scan_context(self, pair: str, cycle_number: int) -> dict[str, Any]:
+        return {
+            "pair": pair,
+            "session_id": self.session_id,
+            "mode": "SCAN",
+            "scan_cycle": cycle_number,
+            "market": "USDT Futures",
+            "primary_data_source": "BYBIT_PUBLIC",
+            "data_provider": "BYBIT_PUBLIC_ONLY",
+            "allow_binance_fallback": False,
+            "timeframe": "15m",
+            "candles_requested": 672,
+            "notes": copy.deepcopy(self.notes),
+            "engine_version": "SCAN_BRIDGE_1",
+        }
+
+    async def _scan_generate_for_pair(self, module, pair: str, cycle_number: int) -> dict[str, Any]:
+        result = await self._call_strategy_function(
+            module,
+            "generate_setup",
+            pair,
+            self._make_scan_context(pair, cycle_number),
+        )
+        normalized = self._normalize_auto_result(result, pair)
+        data_source = str(normalized.get("data_source") or "").upper()
+        analysis = normalized.get("raw_result") if isinstance(normalized.get("raw_result"), dict) else {}
+        data_info = analysis.get("data") if isinstance(analysis, dict) else {}
+        if not data_source.startswith("BYBIT"):
+            raise RuntimeError(
+                f"SCAN menolak {pair}: strategy mengembalikan data source {data_source or '-'}, bukan BYBIT PUBLIC."
+            )
+        if bool(data_info.get("fallback_used")):
+            raise RuntimeError(
+                f"SCAN menolak {pair}: strategy melaporkan fallback data aktif."
+            )
+        sources = data_info.get("sources_by_timeframe")
+        if isinstance(sources, dict):
+            non_bybit = [
+                f"{key}={value}"
+                for key, value in sources.items()
+                if value and not str(value).upper().startswith("BYBIT")
+            ]
+            if non_bybit:
+                raise RuntimeError(
+                    f"SCAN menolak {pair}: ada timeframe bukan BYBIT PUBLIC ({', '.join(non_bybit)})."
+                )
+        return normalized
+
+    async def _scan_get_structure(self, module, pair: str, cycle_number: int) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        # Optimized contract expected in the next strategy revision:
+        # analyze_scan_structure(pair, context) -> {trend, analysis...}
+        for name in ("analyze_scan_structure", "get_scan_structure", "analyze_structure"):
+            result = await self._call_strategy_function(
+                module,
+                name,
+                pair,
+                self._make_scan_context(pair, cycle_number),
+            )
+            if result is not None:
+                if not isinstance(result, dict):
+                    raise ValueError(f"strategy.{name}() harus mengembalikan dict.")
+                return result, None
+
+        # Backward-compatible fallback: current strategy already returns pair_h4 and btc_h4
+        # inside analysis, so one full generation can serve as structure + candidate setup.
+        log.info(
+            "[SCAN] structure API optimized belum tersedia; fallback generate_setup(%s)",
+            pair,
+        )
+        normalized = await self._scan_generate_for_pair(module, pair, cycle_number)
+        return {
+            "trend": self._extract_structure_trend(normalized.get("analysis"), "pair_h4"),
+            "btc_h4_trend": self._extract_structure_trend(normalized.get("analysis"), "btc_h4"),
+            "analysis": normalized.get("analysis") or {},
+        }, normalized
+
+    def _normalize_validator_result(
+        self,
+        raw_result: Any,
+        pair: str,
+        initial: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool, str]:
+        if not isinstance(raw_result, dict):
+            raise ValueError("strategy.validate_setup() harus mengembalikan dict.")
+        payload = copy.deepcopy(raw_result)
+        replacement = payload.get("setup")
+        if replacement is None and all(k in payload for k in ("direction", "entry", "price_exp", "sl", "tp")):
+            replacement = payload
+        if replacement is None:
+            replacement = copy.deepcopy(initial)
+        elif not isinstance(replacement, dict):
+            raise ValueError("Field setup validator harus berupa dict.")
+        else:
+            merged = copy.deepcopy(initial)
+            merged.update(replacement)
+            replacement = merged
+        replacement["pair"] = pair
+        if replacement.get("price_now_reference") in (None, ""):
+            replacement["price_now_reference"] = initial.get("price_now_reference")
+        if not replacement.get("entry_reason"):
+            replacement["entry_reason"] = initial.get("entry_reason")
+        if not replacement.get("price_exp_reason"):
+            replacement["price_exp_reason"] = initial.get("price_exp_reason")
+        if not replacement.get("sl_reason"):
+            replacement["sl_reason"] = initial.get("sl_reason")
+        if not replacement.get("tp_reason"):
+            replacement["tp_reason"] = initial.get("tp_reason")
+        if "confidence" not in payload:
+            replacement["confidence"] = initial["confidence"]
+        else:
+            replacement["confidence"] = payload["confidence"]
+        valid = bool(payload.get("valid", True))
+        reason = str(payload.get("reason") or payload.get("validation_reason") or "").strip()
+        return replacement, valid, reason
+
+    async def _scan_validate_candidate(self, module, candidate: dict[str, Any], cycle_number: int) -> dict[str, Any] | None:
+        raw = await self._call_strategy_function(
+            module,
+            "validate_setup",
+            candidate["pair"],
+            copy.deepcopy(candidate),
+            self._make_scan_context(candidate["pair"], cycle_number),
+        )
+        if raw is None:
+            log.info(
+                "[SCAN] Validator strategy belum tersedia untuk %s; candidate tidak dimasukkan /trade.",
+                candidate["pair"],
+            )
+            return None
+
+        replacement, valid, reason = self._normalize_validator_result(
+            raw,
+            candidate["pair"],
+            candidate,
+        )
+        replacement = self._normalize_auto_result(replacement, candidate["pair"])
+        initial_conf = Decimal(str(candidate["confidence"]))
+        final_conf = Decimal(str(replacement["confidence"]))
+        tolerance_floor = initial_conf * SCAN_VALIDATION_TOLERANCE
+        within_tolerance = final_conf >= tolerance_floor
+        if not valid or not within_tolerance:
+            log.info(
+                "[SCAN] validator reject %s | initial=%s final=%s floor=%s valid=%s reason=%s",
+                candidate["pair"], decimal_to_str(initial_conf), decimal_to_str(final_conf),
+                decimal_to_str(tolerance_floor), valid, reason or "-",
+            )
+            return None
+
+        initial_analysis = candidate.get("analysis") if isinstance(candidate.get("analysis"), dict) else {}
+        final_analysis = replacement.get("analysis") if isinstance(replacement.get("analysis"), dict) else {}
+        merged_analysis = {
+            "scan": {
+                "initial_confidence": decimal_to_str(initial_conf),
+                "validated_confidence": decimal_to_str(final_conf),
+                "validation_ratio_percent": decimal_to_str(
+                    (final_conf / initial_conf * Decimal("100")) if initial_conf else Decimal("0")
+                ),
+                "validation_tolerance_percent": "90",
+                "validation_reason": reason or "Validator menyatakan setup valid.",
+                "setup_replaced": replacement != candidate,
+                "scan_cycle": cycle_number,
+            },
+            **initial_analysis,
+            "validator": final_analysis,
+        }
+        replacement["analysis"] = merged_analysis
+        return replacement
+
+    # --------------------------------------------------------
+    # SCAN UNIVERSE / MARGIN FILTER
+    # --------------------------------------------------------
+
+    async def _build_scan_universe(self) -> dict[str, Any]:
+        await self._purge_expired_bans()
+        # Symbol rules can change while the process is alive; refresh once per cycle.
+        self.symbols = await self.rest.get_exchange_info()
+        binance_tickers = await self.rest.get_24h_tickers()
+        bybit_symbols = await self.bybit.get_linear_perpetual_symbols()
+        bybit_tickers = await self.bybit.get_linear_tickers()
+
+        bn: dict[str, dict[str, Any]] = {}
+        for item in binance_tickers:
+            pair = normalize_symbol(str(item.get("symbol") or ""))
+            if pair not in self.symbols:
+                continue
+            if pair not in bybit_symbols:
+                continue
+            quote_volume = item.get("quoteVolume")
+            if quote_volume in (None, ""):
+                quote_volume = item.get("volume")
+            try:
+                volume = Decimal(str(quote_volume or "0"))
+            except InvalidOperation:
+                volume = Decimal("0")
+            bn[pair] = {
+                "volume_quote": volume,
+                "price": Decimal(str(item.get("lastPrice") or "0")),
+            }
+
+        by: dict[str, dict[str, Any]] = {}
+        for item in bybit_tickers:
+            pair = normalize_symbol(str(item.get("symbol") or ""))
+            if pair not in bybit_symbols:
+                continue
+            try:
+                turnover = Decimal(str(item.get("turnover24h") or "0"))
+            except InvalidOperation:
+                turnover = Decimal("0")
+            try:
+                price = Decimal(str(item.get("lastPrice") or "0"))
+            except InvalidOperation:
+                price = Decimal("0")
+            by[pair] = {"volume_quote": turnover, "price": price}
+
+        common = sorted(set(bn) & set(by))
+        rows = []
+        for pair in common:
+            combined = bn[pair]["volume_quote"] + by[pair]["volume_quote"]
+            rows.append({
+                "pair": pair,
+                "binance_volume_quote": bn[pair]["volume_quote"],
+                "bybit_volume_quote": by[pair]["volume_quote"],
+                "combined_volume_quote": combined,
+                "binance_price": bn[pair]["price"],
+                "bybit_price": by[pair]["price"],
+            })
+        rows.sort(key=lambda x: x["combined_volume_quote"], reverse=True)
+        return {
+            "rows": rows,
+            "binance_count": len(bn),
+            "bybit_count": len(by),
+            "common_count": len(rows),
+        }
+
+    def _margin_config(self) -> tuple[Decimal | None, Decimal | None]:
+        return self.scan_margin_usd, self.scan_leverage
+
+    def _margin_influence_reason(self, pair: str, price: Decimal) -> str | None:
+        margin, leverage = self._margin_config()
+        if margin is None or leverage is None or price <= 0:
+            return None
+        meta = self.symbols.get(pair)
+        if meta is None:
+            return None
+        target = margin * leverage
+        low_target = target * (Decimal("1") - SCAN_MARGIN_TOLERANCE)
+        high_target = target * (Decimal("1") + SCAN_MARGIN_TOLERANCE)
+        if target <= 0:
+            return None
+
+        raw_qty = target / price
+        candidates = []
+        if meta.step_size > 0:
+            floor_qty = (raw_qty / meta.step_size).to_integral_value(rounding=ROUND_DOWN) * meta.step_size
+            ceil_qty = floor_qty + meta.step_size
+            candidates.extend([floor_qty, ceil_qty])
+        else:
+            candidates.append(raw_qty)
+
+        best_notional: Decimal | None = None
+        for qty in candidates:
+            if qty <= 0:
+                continue
+            if meta.min_qty > 0 and qty < meta.min_qty:
+                continue
+            if meta.max_qty > 0 and qty > meta.max_qty:
+                continue
+            notional = qty * price
+            if meta.min_notional > 0 and notional < meta.min_notional:
+                continue
+            if low_target <= notional <= high_target:
+                return None
+            distance = abs(notional - target)
+            if best_notional is None or distance < abs(best_notional - target):
+                best_notional = notional
+
+        if best_notional is None:
+            return (
+                f"Tidak ada quantity legal pada target notional {decimal_to_str(target)} "
+                f"(toleransi ±{decimal_to_str(SCAN_MARGIN_TOLERANCE*100)}%)."
+            )
+        return (
+            f"Quantity terdekat menghasilkan notional {decimal_to_str(best_notional)}, "
+            f"di luar target {decimal_to_str(target)} ±{decimal_to_str(SCAN_MARGIN_TOLERANCE*100)}%."
+        )
+
+    async def _process_margin_filter(self, pair: str, price: Decimal) -> tuple[bool, str | None]:
+        reason = self._margin_influence_reason(pair, price)
+        if reason is None:
+            self._scan_margin_streak[pair] = 0
+            return False, None
+        streak = self._scan_margin_streak.get(pair, 0) + 1
+        self._scan_margin_streak[pair] = streak
+        log.info(
+            "[SCAN] Margin Influence candidate %s streak=%s/%s | %s",
+            pair, streak, SCAN_MARGIN_FAIL_CONFIRMATIONS, reason,
+        )
+        if streak >= SCAN_MARGIN_FAIL_CONFIRMATIONS:
+            await self._ban_pair(
+                pair,
+                hours=None,
+                reason=(
+                    f"Margin Influence terdeteksi {streak} cycle berturut-turut; "
+                    f"{reason}"
+                ),
+                source="AUTO_MARGIN_INFLUENCE",
+            )
+            return True, reason
+        return True, f"Konfirmasi margin {streak}/{SCAN_MARGIN_FAIL_CONFIRMATIONS}: {reason}"
+
+    # --------------------------------------------------------
+    # SCAN LOOP
+    # --------------------------------------------------------
+
+    async def _scan_loop(self) -> None:
+        while self._running and self._scan_user_enabled and not self._scan_auto_paused:
+            try:
+                await self._run_scan_cycle()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("[SCAN] cycle fatal error")
+                await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
+            if not (self._running and self._scan_user_enabled and not self._scan_auto_paused):
+                break
+            try:
+                await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
+            except asyncio.CancelledError:
+                raise
+
+    async def _run_scan_cycle(self) -> None:
+        if len(self.active_trades) >= self.max_active_trades:
+            self._scan_auto_paused = True
+            log.info("[SCAN] auto-pause: max active trade reached (%s)", self.max_active_trades)
+            return
+
+        self._scan_cycle_number += 1
+        cycle = self._scan_cycle_number
+        started = time.monotonic()
+        log.info("[SCAN] Cycle #%s started", cycle)
+
+        module = await self._load_strategy_runtime()
+        btc_raw, btc_fallback = await self._scan_get_structure(module, "BTCUSDT", cycle)
+        btc_analysis = btc_raw.get("analysis") if isinstance(btc_raw, dict) else {}
+        btc_trend = str(btc_raw.get("trend") or self._extract_structure_trend(btc_analysis, "btc_h4") or "UNKNOWN").upper()
+        if btc_fallback is not None:
+            btc_analysis = btc_fallback.get("analysis") or btc_analysis
+            btc_trend = self._extract_structure_trend(btc_analysis, "btc_h4") or btc_trend
+
+        log.info("[SCAN] Cycle #%s BTC H4 trend=%s", cycle, btc_trend)
+
+        universe = await self._build_scan_universe()
+        rows = universe["rows"]
+        already_trade = 0
+        banned_count = 0
+        margin_blocked = 0
+        eligible = []
+        directional = []
+        rejected_structure = 0
+        structure_errors = 0
+        analysis_errors = 0
+        threshold_candidates: list[dict[str, Any]] = []
+        direction_counts: dict[str, int] = {"BULLISH": 0, "BEARISH": 0, "RANGE": 0, "UNKNOWN": 0}
+        start_pair_count = len(rows)
+
+        active_pairs = {trade.pair for trade in self.active_trades.values()}
+        for row in rows:
+            pair = row["pair"]
+            if pair == "BTCUSDT":
+                continue
+            if pair in active_pairs:
+                already_trade += 1
+                continue
+            if self._is_pair_banned(pair):
+                banned_count += 1
+                continue
+            price = row.get("bybit_price") or row.get("binance_price") or Decimal("0")
+            try:
+                margin_block, margin_reason = await self._process_margin_filter(pair, price)
+            except Exception:
+                log.exception("[SCAN] margin filter gagal %s", pair)
+                margin_block = False
+                margin_reason = None
+            if margin_block:
+                margin_blocked += 1
+                continue
+
+            eligible.append(pair)
+
+        log.info(
+            "[SCAN] Cycle #%s universe common=%s already_trade=%s banned=%s margin_blocked=%s eligible=%s",
+            cycle, universe["common_count"], already_trade, banned_count, margin_blocked, len(eligible),
+        )
+
+        total_eligible = len(eligible)
+        scanned = 0
+        for index, pair in enumerate(eligible, start=1):
+            if len(self.active_trades) >= self.max_active_trades:
+                self._scan_auto_paused = True
+                log.info("[SCAN] Cycle #%s stopped early at max active trade.", cycle)
+                break
+
+            scanned += 1
+            log.info("[SCAN] Cycle #%s pair %s/%s: %s", cycle, index, total_eligible, pair)
+            try:
+                structure, reused_setup = await self._scan_get_structure(module, pair, cycle)
+                pair_trend = str(structure.get("trend") or "UNKNOWN").upper()
+                direction_counts[pair_trend if pair_trend in direction_counts else "UNKNOWN"] += 1
+
+                aligned = (
+                    (btc_trend == "BULLISH" and pair_trend == "BULLISH")
+                    or (btc_trend == "BEARISH" and pair_trend == "BEARISH")
+                    or (btc_trend == "RANGE" and pair_trend in {"BULLISH", "BEARISH", "RANGE"})
+                )
+                if not aligned:
+                    rejected_structure += 1
+                    log.info("[SCAN] %s rejected structure pair=%s BTC=%s", pair, pair_trend, btc_trend)
+                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                    continue
+                directional.append(pair)
+
+                candidate = reused_setup
+                if candidate is None:
+                    candidate = await self._scan_generate_for_pair(module, pair, cycle)
+                candidate["analysis"] = candidate.get("analysis") or {}
+                candidate["analysis"].setdefault("scan", {})
+                candidate["analysis"]["scan"].update({
+                    "cycle": cycle,
+                    "btc_h4_trend": btc_trend,
+                    "pair_h4_trend": pair_trend,
+                    "rank_volume": index,
+                })
+                confidence = Decimal(str(candidate["confidence"]))
+                if confidence < self.scan_threshold:
+                    log.info(
+                        "[SCAN] %s below threshold confidence=%s threshold=%s",
+                        pair, decimal_to_str(confidence), decimal_to_str(self.scan_threshold),
+                    )
+                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                    continue
+                threshold_candidates.append(candidate)
+                log.info("[SCAN] %s threshold PASS confidence=%s", pair, decimal_to_str(confidence))
+            except Exception:
+                analysis_errors += 1
+                log.exception("[SCAN] analysis error %s", pair)
+            await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+
+        threshold_candidates.sort(
+            key=lambda item: Decimal(str(item.get("confidence") or "0")),
+            reverse=True,
+        )
+        initial_conf_values = [Decimal(str(x["confidence"])) for x in threshold_candidates]
+        validated: list[dict[str, Any]] = []
+        validator_rejects = 0
+        validator_missing = 0
+
+        if threshold_candidates:
+            log.info("[SCAN] Cycle #%s validator started candidates=%s", cycle, len(threshold_candidates))
+        for rank, candidate in enumerate(threshold_candidates, start=1):
+            if len(self.active_trades) >= self.max_active_trades:
+                self._scan_auto_paused = True
+                break
+            log.info("[SCAN] Cycle #%s validator %s/%s: %s", cycle, rank, len(threshold_candidates), candidate["pair"])
+            try:
+                checked = await self._scan_validate_candidate(module, candidate, cycle)
+                if checked is None:
+                    validator_missing += 1
+                else:
+                    validated.append(checked)
+            except Exception:
+                validator_rejects += 1
+                log.exception("[SCAN] validator error %s", candidate["pair"])
+            await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+
+        final_added = []
+        for candidate in validated:
+            if len(self.active_trades) >= self.max_active_trades:
+                self._scan_auto_paused = True
+                break
+            try:
+                meta = {
+                    "strategy_name": candidate.get("strategy_name") or "SMC_VLT_RSI",
+                    "strategy_version": candidate.get("strategy_version") or "SCAN",
+                    "strategy_source": "SCAN",
+                    "strategy_confidence": candidate.get("confidence"),
+                    "strategy_data_source": candidate.get("data_source") or "BYBIT",
+                    "strategy_analysis": candidate.get("analysis") or {},
+                }
+                trade = self._build_trade_from_setup(candidate, strategy_meta=meta)
+                self.active_trades[trade.trade_id] = trade
+                final_added.append(trade)
+                await self.ws.add_symbol(trade.pair)
+                log.info(
+                    "[SCAN] FINAL ADD %s confidence=%s trade_id=%s",
+                    trade.pair, decimal_to_str(trade.strategy_confidence), trade.trade_id,
+                )
+            except Exception:
+                log.exception("[SCAN] gagal memasukkan validated setup %s ke /trade", candidate.get("pair"))
+            await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+
+        if len(self.active_trades) >= self.max_active_trades:
+            self._scan_auto_paused = True
+
+        avg_initial = (
+            sum(initial_conf_values, Decimal("0")) / Decimal(len(initial_conf_values))
+            if initial_conf_values else None
+        )
+        validated_conf_values = [Decimal(str(x["confidence"])) for x in validated if x.get("confidence") is not None]
+        avg_validated = (
+            sum(validated_conf_values, Decimal("0")) / Decimal(len(validated_conf_values))
+            if validated_conf_values else None
+        )
+        highest = max(validated_conf_values) if validated_conf_values else (max(initial_conf_values) if initial_conf_values else None)
+        lowest = min(validated_conf_values) if validated_conf_values else (min(initial_conf_values) if initial_conf_values else None)
+        duration = time.monotonic() - started
+        self._scan_last_report = {
+            "cycle": cycle,
+            "btc_h4_trend": btc_trend,
+            "btc_analysis": btc_analysis,
+            "universe": {
+                "common": universe["common_count"],
+                "already_trade": already_trade,
+                "banned": banned_count,
+                "margin_blocked": margin_blocked,
+                "eligible": len(eligible),
+            },
+            "direction": {
+                "aligned": len(directional),
+                "rejected_structure": rejected_structure,
+                "counts": direction_counts,
+            },
+            "analysis": {
+                "eligible_scanned": scanned,
+                "threshold_candidates": len(threshold_candidates),
+                "validator_valid": len(validated),
+                "validator_missing": validator_missing,
+                "validator_errors_or_rejects": validator_rejects,
+                "final_added": len(final_added),
+                "analysis_errors": analysis_errors,
+            },
+            "confidence": {
+                "average_initial": avg_initial,
+                "average_validated": avg_validated,
+                "highest": highest,
+                "lowest": lowest,
+                "threshold": self.scan_threshold,
+            },
+            "duration_seconds": duration,
+        }
+
+        log.info(
+            "[SCAN] Cycle #%s completed | aligned=%s threshold=%s validated=%s added=%s avg_initial=%s avg_validated=%s duration=%.2fs",
+            cycle, len(directional), len(threshold_candidates), len(validated), len(final_added),
+            decimal_to_str(avg_initial), decimal_to_str(avg_validated), duration,
+        )
+
+        btc_lines = []
+        if isinstance(btc_analysis, dict):
+            btc_node = btc_analysis.get("btc_h4")
+            if isinstance(btc_node, dict):
+                for key in ("trend", "last_bos", "last_mss", "protected_high", "protected_low"):
+                    if key in btc_node:
+                        btc_lines.append(f"{key}: {btc_node.get(key)}")
+
+        await self.reply(
+            "🔄 SCAN CYCLE #{cycle}\n\n"
+            "BTC H4:\n"
+            "Trend: {btc}\n"
+            "{btc_detail}\n"
+            "UNIVERSE:\n"
+            "Common Binance ∩ Bybit: {common}\n"
+            "Already in /trade: {active}\n"
+            "Banned: {banned}\n"
+            "Margin detector: {margin_detector}\n"
+            "Margin blocked: {margin}\n"
+            "Eligible: {eligible}\n\n"
+            "DIRECTION:\n"
+            "Searah/Allowed dengan BTC: {aligned}\n"
+            "Bullish: {bullish} | Bearish: {bearish} | Range: {range} | Unknown: {unknown}\n\n"
+            "ANALYSIS:\n"
+            "Scanned: {scanned}\n"
+            ">= Threshold: {threshold_candidates}\n"
+            "Validator valid: {valid}\n"
+            "Validator missing/reject: {vrej}\n"
+            "Analysis errors: {errors}\n"
+            "Final masuk /trade: {added}\n\n"
+            "CONFIDENCE:\n"
+            "Threshold: {threshold}\n"
+            "Average Initial: {avg_initial}\n"
+            "Average Validated: {avg_validated}\n"
+            "Highest: {high}\n"
+            "Lowest: {low}\n\n"
+            "CYCLE:\n"
+            "Duration: {duration:.2f}s\n"
+            "Next cycle: {next_delay:g}s"
+        .format(
+            cycle=cycle,
+            btc=btc_trend,
+            btc_detail="\n".join(btc_lines) if btc_lines else "Detail structure: tersedia di strategy analysis",
+            common=universe["common_count"],
+            active=already_trade,
+            banned=banned_count,
+            margin_detector=("ON" if self._margin_config()[0] is not None and self._margin_config()[1] is not None else "OFF"),
+            margin=margin_blocked,
+            eligible=len(eligible),
+            aligned=len(directional),
+            bullish=direction_counts["BULLISH"],
+            bearish=direction_counts["BEARISH"],
+            range=direction_counts["RANGE"],
+            unknown=direction_counts["UNKNOWN"],
+            scanned=scanned,
+            threshold_candidates=len(threshold_candidates),
+            valid=len(validated),
+            vrej=validator_missing + validator_rejects,
+            errors=analysis_errors,
+            added=len(final_added),
+            threshold=decimal_to_str(self.scan_threshold),
+            avg_initial=decimal_to_str(avg_initial),
+            avg_validated=decimal_to_str(avg_validated),
+            high=decimal_to_str(highest),
+            low=decimal_to_str(lowest),
+            duration=duration,
+            next_delay=SCAN_CYCLE_DELAY_SECONDS,
+        ))
 
     async def reset_github_records(self) -> None:
         """Hapus seluruh file pencatatan bot dari GitHub.
@@ -2684,10 +3901,10 @@ class TradingEngine:
             )
             return
 
-        if len(self.active_trades) >= MAX_ACTIVE_TRADES:
+        if len(self.active_trades) >= self.max_active_trades:
             await self.reply(
                 "Maksimum active trade tercapai.\n"
-                f"Batas: {MAX_ACTIVE_TRADES}"
+                f"Batas: {self.max_active_trades}"
             )
             return
 
@@ -3058,10 +4275,10 @@ class TradingEngine:
             )
             return
 
-        if len(self.active_trades) >= MAX_ACTIVE_TRADES:
+        if len(self.active_trades) >= self.max_active_trades:
             await self.reply(
                 "Maksimum active trade tercapai.\n"
-                f"Batas: {MAX_ACTIVE_TRADES}"
+                f"Batas: {self.max_active_trades}"
             )
             return
 
@@ -4222,6 +5439,7 @@ class TradingEngine:
                     )
 
             self.flow = None
+            await self._resume_scan_after_capacity_change()
 
             await self.reply(
                 "🚫 SETUP DITANDAI WRONG\n\n"
@@ -4752,6 +5970,7 @@ class TradingEngine:
                 )
 
             self.flow = None
+            await self._resume_scan_after_capacity_change()
 
             await self.reply(
                 "🗑️ SETUP DIHAPUS\n\n"
@@ -5030,6 +6249,11 @@ class TradingEngine:
             trade
         )
 
+        try:
+            await self._auto_ban_for_result(trade, result)
+        except Exception:
+            log.exception("Gagal memperbarui ban otomatis untuk %s %s.", trade.pair, result)
+
         if need_unsubscribe:
             try:
                 await self.ws.remove_symbol(
@@ -5045,6 +6269,8 @@ class TradingEngine:
             await self._notify_close(
                 trade
             )
+
+        await self._resume_scan_after_capacity_change()
 
     async def _notify_close(
         self,
@@ -5299,6 +6525,13 @@ class TradingEngine:
         self,
         records: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        """Calculate descriptive history statistics.
+
+        Confidence statistics are calculated only from records that actually
+        contain a numeric ``strategy_confidence``. "Successfully entered"
+        means a historical record with ``filled_at`` present or a TP/SL
+        outcome; EXPIRED records without a fill are therefore excluded.
+        """
         total_records = len(records)
 
         tp = sum(
@@ -5327,86 +6560,190 @@ class TradingEngine:
 
         total_filled = tp + sl
 
-        if total_filled:
-            win_rate = (
-                Decimal(tp)
-                / Decimal(total_filled)
-                * Decimal("100")
-            )
-        else:
-            win_rate = Decimal("0")
+        tp_rate = (
+            Decimal(tp)
+            / Decimal(total_filled)
+            * Decimal("100")
+            if total_filled
+            else Decimal("0")
+        )
+        sl_rate = (
+            Decimal(sl)
+            / Decimal(total_filled)
+            * Decimal("100")
+            if total_filled
+            else Decimal("0")
+        )
+        win_rate = tp_rate
 
-        pnls = []
-
+        pnls: list[Decimal] = []
         for record in records:
             value = record.get("pnl_percent")
-
             if value is None:
                 continue
-
             try:
-                pnls.append(
-                    Decimal(str(value))
-                )
+                pnls.append(Decimal(str(value)))
             except InvalidOperation:
                 continue
 
-        gross_net = sum(
-            pnls,
-            Decimal("0"),
-        )
+        gross_net = sum(pnls, Decimal("0"))
 
-        wins = [
-            value
-            for value in pnls
-            if value > 0
-        ]
-
-        losses = [
-            value
-            for value in pnls
-            if value < 0
-        ]
+        wins = [value for value in pnls if value > 0]
+        losses = [value for value in pnls if value < 0]
 
         average_win = (
-            sum(
-                wins,
-                Decimal("0"),
-            )
-            / Decimal(len(wins))
+            sum(wins, Decimal("0")) / Decimal(len(wins))
             if wins
             else Decimal("0")
         )
-
         average_loss = (
-            sum(
-                losses,
-                Decimal("0"),
-            )
-            / Decimal(len(losses))
+            sum(losses, Decimal("0")) / Decimal(len(losses))
             if losses
             else Decimal("0")
         )
 
         trail_count = sum(
-            len(
-                record.get("trail_history") or []
-            )
+            len(record.get("trail_history") or [])
             for record in records
         )
+
+        def average_decimal(
+            values: list[Decimal],
+        ) -> Decimal | None:
+            if not values:
+                return None
+            return sum(values, Decimal("0")) / Decimal(len(values))
+
+        def read_decimal(
+            record: dict[str, Any],
+            key: str,
+        ) -> Decimal | None:
+            value = record.get(key)
+            if value in (None, ""):
+                return None
+            try:
+                return Decimal(str(value))
+            except InvalidOperation:
+                return None
+
+        confidence_all: list[Decimal] = []
+        confidence_tp: list[Decimal] = []
+        confidence_sl: list[Decimal] = []
+        confidence_entered: list[Decimal] = []
+
+        planned_rr_entered: list[Decimal] = []
+        holding_tp: list[Decimal] = []
+        holding_sl: list[Decimal] = []
+        pending_entered: list[Decimal] = []
+
+        auto_records = 0
+        manual_records = 0
+        confidence_missing_entered = 0
+        entered_records_count = 0
+
+        for record in records:
+            confidence = read_decimal(record, "strategy_confidence")
+            result = str(record.get("result") or "").upper()
+            has_entry = (
+                result in {"TP", "SL"}
+                or record.get("filled_at") not in (None, "")
+            )
+
+            if has_entry:
+                entered_records_count += 1
+
+            if confidence is not None:
+                confidence_all.append(confidence)
+                if result == "TP":
+                    confidence_tp.append(confidence)
+                elif result == "SL":
+                    confidence_sl.append(confidence)
+                if has_entry:
+                    confidence_entered.append(confidence)
+            elif has_entry:
+                confidence_missing_entered += 1
+
+            if has_entry:
+                rr = read_decimal(record, "planned_rr")
+                if rr is not None:
+                    planned_rr_entered.append(rr)
+
+                holding = read_decimal(record, "holding_seconds")
+                if holding is not None:
+                    if result == "TP":
+                        holding_tp.append(holding)
+                    elif result == "SL":
+                        holding_sl.append(holding)
+
+                pending = read_decimal(record, "pending_seconds")
+                if pending is not None:
+                    pending_entered.append(pending)
+
+            source = str(record.get("strategy_source") or "").upper()
+            if source == "AUTO":
+                auto_records += 1
+            elif source == "MANUAL":
+                manual_records += 1
+
+        expired_rate_all = (
+            Decimal(expired)
+            / Decimal(total_records)
+            * Decimal("100")
+            if total_records
+            else Decimal("0")
+        )
+        deleted_rate_all = (
+            Decimal(deleted)
+            / Decimal(total_records)
+            * Decimal("100")
+            if total_records
+            else Decimal("0")
+        )
+
+        avg_confidence_all = average_decimal(confidence_all)
+        avg_confidence_tp = average_decimal(confidence_tp)
+        avg_confidence_sl = average_decimal(confidence_sl)
+        avg_confidence_entered = average_decimal(confidence_entered)
+        avg_planned_rr_entered = average_decimal(planned_rr_entered)
+        avg_holding_tp = average_decimal(holding_tp)
+        avg_holding_sl = average_decimal(holding_sl)
+        avg_pending_entered = average_decimal(pending_entered)
+
+        confidence_gap_tp_sl: Decimal | None = None
+        if avg_confidence_tp is not None and avg_confidence_sl is not None:
+            confidence_gap_tp_sl = avg_confidence_tp - avg_confidence_sl
 
         return {
             "total_records": total_records,
             "total_filled": total_filled,
+            "entered_records_count": entered_records_count,
             "tp": tp,
             "sl": sl,
+            "tp_rate": tp_rate,
+            "sl_rate": sl_rate,
             "expired": expired,
+            "expired_rate_all": expired_rate_all,
             "deleted": deleted,
+            "deleted_rate_all": deleted_rate_all,
             "win_rate": win_rate,
             "gross_pnl_percent": gross_net,
             "average_win_percent": average_win,
             "average_loss_percent": average_loss,
             "trail_count": trail_count,
+            "confidence_count_all": len(confidence_all),
+            "confidence_count_entered": len(confidence_entered),
+            "confidence_missing_entered": confidence_missing_entered,
+            "average_confidence_all": avg_confidence_all,
+            "average_confidence_tp": avg_confidence_tp,
+            "average_confidence_sl": avg_confidence_sl,
+            "average_confidence_entered": avg_confidence_entered,
+            "confidence_gap_tp_sl": confidence_gap_tp_sl,
+            "average_planned_rr_entered": avg_planned_rr_entered,
+            "average_holding_tp_seconds": avg_holding_tp,
+            "average_holding_sl_seconds": avg_holding_sl,
+            "average_pending_entered_seconds": avg_pending_entered,
+            "auto_records": auto_records,
+            "manual_records": manual_records,
         }
 
     async def show_stats(self) -> None:
@@ -5428,23 +6765,86 @@ class TradingEngine:
             if trade.status == "FILLED"
         )
 
+        def fmt_confidence(value: Decimal | None) -> str:
+            if value is None:
+                return "-"
+            return decimal_to_str(value)
+
+        confidence_gap = stats["confidence_gap_tp_sl"]
+        if confidence_gap is None:
+            confidence_conclusion = (
+                "Belum cukup data confidence yang terisi di kedua outcome."
+            )
+        elif confidence_gap > 0:
+            confidence_conclusion = (
+                "Secara historis, rerata confidence setup TP lebih tinggi "
+                f"{decimal_to_str(confidence_gap)} poin daripada setup SL."
+            )
+        elif confidence_gap < 0:
+            confidence_conclusion = (
+                "Secara historis, rerata confidence setup TP lebih rendah "
+                f"{decimal_to_str(abs(confidence_gap))} poin daripada setup SL."
+            )
+        else:
+            confidence_conclusion = (
+                "Secara historis, rerata confidence setup TP dan SL sama."
+            )
+
+        if stats["total_filled"]:
+            outcome_conclusion = (
+                f"Dari {stats['total_filled']} trade yang berakhir TP/SL, "
+                f"TP {stats['tp']} ({format_pct(stats['tp_rate']).replace('+', '')}) dan "
+                f"SL {stats['sl']} ({format_pct(stats['sl_rate']).replace('+', '')})."
+            )
+        else:
+            outcome_conclusion = (
+                "Belum ada trade historis yang berakhir TP/SL."
+            )
+
+        confidence_coverage = (
+            Decimal(stats["confidence_count_entered"])
+            / Decimal(stats["entered_records_count"])
+            * Decimal("100")
+            if stats["entered_records_count"]
+            else Decimal("0")
+        )
+
+        rr_text = fmt_confidence(stats["average_planned_rr_entered"])
+
         await self.reply(
             "📊 STATS\n\n"
             f"Total Setup History: {stats['total_records']}\n"
-            f"Total Trade Filled: {stats['total_filled']}\n"
+            f"Total Setup Pernah Entry: {stats['entered_records_count']}\n"
+            f"Total Trade Selesai TP/SL: {stats['total_filled']}\n"
             f"Active Pending: {active_pending}\n"
             f"Active Filled: {active_filled}\n\n"
-            f"TP: {stats['tp']}\n"
-            f"SL: {stats['sl']}\n"
-            f"Expired: {stats['expired']}\n"
-            f"Deleted: {stats['deleted']}\n\n"
+            "OUTCOME\n"
+            f"TP: {stats['tp']} ({format_pct(stats['tp_rate']).replace('+', '')} dari trade entry)\n"
+            f"SL: {stats['sl']} ({format_pct(stats['sl_rate']).replace('+', '')} dari trade entry)\n"
             f"Win Rate: {format_pct(stats['win_rate']).replace('+', '')}\n"
-            f"PnL History: {format_pct(stats['gross_pnl_percent'])}\n"
+            f"Expired: {stats['expired']} ({format_pct(stats['expired_rate_all']).replace('+', '')} dari seluruh history)\n"
+            f"Deleted: {stats['deleted']} ({format_pct(stats['deleted_rate_all']).replace('+', '')} dari seluruh history)\n\n"
+            "CONFIDENCE\n"
+            f"Rerata Confidence Semua History: {fmt_confidence(stats['average_confidence_all'])}\n"
+            f"Rerata Confidence TP: {fmt_confidence(stats['average_confidence_tp'])}\n"
+            f"Rerata Confidence SL: {fmt_confidence(stats['average_confidence_sl'])}\n"
+            f"Rerata Confidence Setup Berhasil Entry: {fmt_confidence(stats['average_confidence_entered'])}\n"
+            f"Coverage Confidence pada Trade Entry: {decimal_to_str(confidence_coverage)}%\n"
+            f"Entry tanpa Confidence: {stats['confidence_missing_entered']}\n\n"
+            "ANGKA TAMBAHAN\n"
+            f"Net PnL History: {format_pct(stats['gross_pnl_percent'])}\n"
             f"Average Win: {format_pct(stats['average_win_percent'])}\n"
             f"Average Loss: {format_pct(stats['average_loss_percent'])}\n"
-            f"Total Trail Event: {stats['trail_count']}\n\n"
-            "Definisi Win Rate:\n"
-            "TP / (TP + SL)\n"
+            f"Average Planned RR (trade entry): {rr_text}\n"
+            f"Average Pending Time: {duration_text(float(stats['average_pending_entered_seconds'])) if stats['average_pending_entered_seconds'] is not None else '-'}\n"
+            f"Average Holding TP: {duration_text(float(stats['average_holding_tp_seconds'])) if stats['average_holding_tp_seconds'] is not None else '-'}\n"
+            f"Average Holding SL: {duration_text(float(stats['average_holding_sl_seconds'])) if stats['average_holding_sl_seconds'] is not None else '-'}\n"
+            f"Total Trail Event: {stats['trail_count']}\n"
+            f"History AUTO: {stats['auto_records']} | MANUAL: {stats['manual_records']}\n\n"
+            "KESIMPULAN BERBASIS ANGKA\n"
+            f"{outcome_conclusion}\n"
+            f"{confidence_conclusion}\n"
+            f"{stats['expired']} setup berakhir Expired dan {stats['deleted']} setup berakhir Deleted.\n"
             "Expired dan Deleted tidak dihitung sebagai win/loss."
         )
 
@@ -6380,7 +7780,10 @@ class TradingEngine:
             f"Pending: {pending}\n"
             f"Filled: {filled}\n\n"
             f"History Records: {len(self.history_records)}\n"
-            f"Catatan: {len(self.notes)}\n"
+            f"Catatan: {len(self.notes)}\n\n"
+            f"Scan: {'ON' if self._scan_user_enabled else 'OFF'}"
+            f" | Runtime: {'PAUSED_BY_MAX' if self._scan_auto_paused else ('RUNNING' if self._scan_task is not None and not self._scan_task.done() else 'OFF')}\n"
+            f"Threshold: {decimal_to_str(self.scan_threshold)} | Max: {self.max_active_trades}\n"
         )
 
     async def show_help(self) -> None:
@@ -6397,6 +7800,11 @@ class TradingEngine:
             "/wrong - menghapus setup yang benar-benar salah TANPA pencatatan history\n"
             "/remove - menghapus data trade yang sudah masuk history\n"
             "/filled - ubah setup PENDING menjadi FILLED secara manual\n"
+            "/scan on|off - scanner otomatis\n"
+            "/threshold [angka] - ambang confidence scanner\n"
+            "/max [angka] - batas total PENDING + FILLED\n"
+            "/banned [PAIR] [jam] [alasan] - ban pair / lihat daftar ban\n"
+            "/unban PAIR|all - hapus ban\n"
             "/stats - statistik histori\n"
             "/catatan [teks] - tambah catatan / tanpa teks = lihat catatan\n"
             "/reset - hapus seluruh pencatatan GitHub\n"
@@ -6468,6 +7876,11 @@ class TradingEngine:
                     "/wrong",
                     "/remove",
                     "/filled",
+                    "/scan",
+                    "/threshold",
+                    "/max",
+                    "/banned",
+                    "/unban",
                     "/trade",
                     "/setup",
                     "/open",
@@ -6535,6 +7948,46 @@ class TradingEngine:
 
             if command == "/filled":
                 await self._start_filled()
+                return
+
+            if command == "/scan":
+                try:
+                    await self._handle_scan_command(text)
+                except Exception as exc:
+                    log.exception("SCAN command gagal.")
+                    await self.reply(f"❌ /scan gagal.\n\n{exc}")
+                return
+
+            if command == "/threshold":
+                try:
+                    await self._handle_threshold_command(text)
+                except Exception as exc:
+                    log.exception("THRESHOLD command gagal.")
+                    await self.reply(f"❌ /threshold gagal.\n\n{exc}")
+                return
+
+            if command == "/max":
+                try:
+                    await self._handle_max_command(text)
+                except Exception as exc:
+                    log.exception("MAX command gagal.")
+                    await self.reply(f"❌ /max gagal.\n\n{exc}")
+                return
+
+            if command == "/banned":
+                try:
+                    await self._handle_banned_command(text)
+                except Exception as exc:
+                    log.exception("BANNED command gagal.")
+                    await self.reply(f"❌ /banned gagal.\n\n{exc}")
+                return
+
+            if command == "/unban":
+                try:
+                    await self._handle_unban_command(text)
+                except Exception as exc:
+                    log.exception("UNBAN command gagal.")
+                    await self.reply(f"❌ /unban gagal.\n\n{exc}")
                 return
 
             if command == "/stats":
