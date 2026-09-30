@@ -164,3 +164,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T13:36:40.139686+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## APTUSDT — SELL
+
+Trade ID: `APTUSDT-20260930-202747-553074`
+
+### Setup
+
+- Price Now Reference: 0.8183
+- Entry: 0.8288
+- Reason Entry: APTUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.82). H1 me-refine ke BEARISH_FVG 0.82295. M15 memberi execution POI BEARISH_BREAKER 0.8288. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.8057
+- Reason Price Exp: Price Exp 0.8057 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.8316
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.8304) + buffer 0.15 ATR M15.
+- TP: 0.7951
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.79515 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.8057
+- Result Reason: Price Exp 0.8057 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T13:27:47.979148+00:00
+- Filled: -
+- Closed: 2026-09-30T13:37:00.282733+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
