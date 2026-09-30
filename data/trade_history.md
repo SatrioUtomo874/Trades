@@ -725,3 +725,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T14:02:23.889542+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## MINAUSDT — BUY
+
+Trade ID: `MINAUSDT-20260930-204837-8ED1BA`
+
+### Setup
+
+- Price Now Reference: 0.14671
+- Entry: 0.14326
+- Reason Entry: MINAUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.14387). H1 me-refine ke BULLISH_FVG 0.14298. M15 memberi execution POI BULLISH_FVG 0.14326. Fib H4 berada pada band OVERLAPS_0.618 (score 92). RSI 14 M15 58.7 mendukung momentum. VLT/OHLCV searah dengan setup.
+- Price Exp: 0.14677
+- Reason Price Exp: Price Exp 0.146764 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.14293
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.14317) + buffer 0.15 ATR M15.
+- TP: 0.1468
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 0.1468 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.14679
+- Result Reason: Price Exp 0.146764 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T13:48:37.172053+00:00
+- Filled: -
+- Closed: 2026-09-30T14:04:18.551282+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
