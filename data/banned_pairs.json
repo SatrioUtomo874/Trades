@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:51:07.946478+00:00",
+  "saved_at": "2026-09-30T13:51:22.457523+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -372,6 +372,13 @@
       "until": "2026-10-01T13:36:29.018161+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "HUMAUSDT",
+      "banned_at": "2026-09-30T13:51:22.457469+00:00",
+      "until": "2026-09-30T21:51:22.457443+00:00",
+      "reason": "Confidence 55.71 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "HYPEUSDT",
