@@ -395,3 +395,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T13:39:43.769008+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## AZTECUSDT — BUY
+
+Trade ID: `AZTECUSDT-20260930-203628-468630`
+
+### Setup
+
+- Price Now Reference: 0.01741
+- Entry: 0.01739
+- Reason Entry: AZTECUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.015785). H1 me-refine ke BULLISH_BREAKER 0.017005. M15 memberi execution POI BULLISH_BREAKER 0.01739. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 61.5 mendukung momentum. VLT/OHLCV searah dengan setup.
+- Price Exp: 0.01759
+- Reason Price Exp: Price Exp 0.017584 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.01728
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.01731) + buffer 0.15 ATR M15.
+- TP: 0.0177
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 0.0177 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.01724
+- Result Reason: SL ditempatkan di bawah/atas structural invalidation terdekat (0.01731) + buffer 0.15 ATR M15.
+- PnL: -0.8625646923519263944795859689%
+- Created: 2026-09-30T13:36:28.661886+00:00
+- Filled: 2026-09-30T13:38:17.147381+00:00
+- Closed: 2026-09-30T13:40:05.647700+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
