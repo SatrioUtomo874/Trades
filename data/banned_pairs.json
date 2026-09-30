@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T14:06:02.752386+00:00",
+  "saved_at": "2026-09-30T14:06:14.358517+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -287,6 +287,13 @@
       "banned_at": "2026-09-30T13:19:38.256101+00:00",
       "until": "2026-09-30T21:19:38.256076+00:00",
       "reason": "Confidence 63.83 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "CVXUSDT",
+      "banned_at": "2026-09-30T14:06:14.358431+00:00",
+      "until": "2026-09-30T22:06:14.358396+00:00",
+      "reason": "Confidence 61.12 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
