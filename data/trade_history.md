@@ -605,3 +605,36 @@ Tidak ada trailing.
 - Filled: 2026-09-23T14:13:14.890022+00:00
 - Closed: 2026-09-29T07:54:00.636719+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## TREEUSDT — SELL
+
+Trade ID: `TREEUSDT-20260930-175242-449B94`
+
+### Setup
+
+- Price Now Reference: 0.0453
+- Entry: 0.04536
+- Reason Entry: TREEUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.04783). H1 me-refine ke BEARISH_FVG 0.045395. M15 memberi execution POI BEARISH_FVG 0.04536. Fib H4 berada pada band DEEP_0.618_0.786 (score 100).
+- Price Exp: 0.045
+- Reason Price Exp: Price Exp 0.0450028 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.04546
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.04542) + buffer 0.15 ATR M15.
+- TP: 0.0446
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.0446 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.04551
+- Result Reason: SL ditempatkan di bawah/atas structural invalidation terdekat (0.04542) + buffer 0.15 ATR M15.
+- PnL: -0.3306878306878306878306878307%
+- Created: 2026-09-30T10:52:42.864237+00:00
+- Filled: 2026-09-30T10:52:59.026474+00:00
+- Closed: 2026-09-30T10:53:01.789409+00:00
+- Strategy: SMC_VLT_RSI v0.5.0
