@@ -791,3 +791,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T14:03:17.596423+00:00
 - Closed: 2026-09-30T14:05:46.512942+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## SOONUSDT — BUY
+
+Trade ID: `SOONUSDT-20260930-202219-CD6C43`
+
+### Setup
+
+- Price Now Reference: 0.4694
+- Entry: 0.4415
+- Reason Entry: Model M15_SMC_FALLBACK: area BULLISH_FVG di 0.44155. Ada sell-side liquidity sweep sebelum perubahan struktur. M15 membentuk MSS bullish dengan displacement. Struktur pasangan mendukung bullish. RSI 14 M15 berada di 62.2, mendukung momentum bullish.
+- Price Exp: 0.477
+- Reason Price Exp: Price Exp 0.4769211 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 0.4384
+- Reason SL: SL di bawah low BULLISH_FVG (0.4405) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 0.4862
+- Reason TP: TP diarahkan ke M15_SWING_HIGH 0.4654 (0.16 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.477
+- Result Reason: Price Exp 0.4769211 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- PnL: -
+- Created: 2026-09-30T13:22:19.245440+00:00
+- Filled: -
+- Closed: 2026-09-30T14:08:24.853406+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
