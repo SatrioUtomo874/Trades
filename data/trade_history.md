@@ -758,3 +758,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T14:04:18.551282+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## BANKUSDT — SELL
+
+Trade ID: `BANKUSDT-20260930-210024-A21514`
+
+### Setup
+
+- Price Now Reference: 0.03198
+- Entry: 0.03203
+- Reason Entry: Model M15_SMC_FALLBACK: area BEARISH_FVG di 0.032025. Ada buy-side liquidity sweep sebelum perubahan struktur. M15 membentuk MSS bearish dengan displacement.
+- Price Exp: 0.03187
+- Reason Price Exp: Price Exp 0.0318741 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 0.03208
+- Reason SL: SL di atas high BEARISH_FVG (0.03205) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 0.03174
+- Reason TP: TP diarahkan ke H1_SWING 0.03183 (0.80 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.03208
+- Result Reason: SL di atas high BEARISH_FVG (0.03205) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- PnL: -0.1561036528254761161411177022%
+- Created: 2026-09-30T14:00:24.460282+00:00
+- Filled: 2026-09-30T14:03:17.596423+00:00
+- Closed: 2026-09-30T14:05:46.512942+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
