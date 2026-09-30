@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:40:06.747959+00:00",
+  "saved_at": "2026-09-30T13:40:17.945834+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -111,6 +111,13 @@
       "pair": "AVAXUSDT",
       "banned_at": "2026-09-30T13:35:17.050070+00:00",
       "until": "2026-10-01T13:35:17.050042+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
+    },
+    {
+      "pair": "AZTECUSDT",
+      "banned_at": "2026-09-30T13:40:17.945749+00:00",
+      "until": "2026-10-01T13:40:17.945715+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
     },
