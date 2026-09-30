@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T14:10:46.759192+00:00",
+  "saved_at": "2026-09-30T14:10:57.857314+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -855,6 +855,13 @@
       "until": "2026-09-30T22:08:34.916655+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "SOPHUSDT",
+      "banned_at": "2026-09-30T14:10:57.857239+00:00",
+      "until": "2026-09-30T22:10:57.857210+00:00",
+      "reason": "Confidence 69.77 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "SPKUSDT",
