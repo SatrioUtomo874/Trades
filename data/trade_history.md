@@ -836,3 +836,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T11:02:12.103623+00:00
 - Strategy: SMC_VLT_RSI v0.5.0
+
+---
+
+## NILUSDT — SELL
+
+Trade ID: `NILUSDT-20260930-175239-19063D`
+
+### Setup
+
+- Price Now Reference: 0.08952
+- Entry: 0.08961
+- Reason Entry: Model M15_SMC_FALLBACK: area BEARISH_OB di 0.089605. Struktur pasangan mendukung bearish.
+- Price Exp: 0.08806
+- Reason Price Exp: Price Exp 0.0880665 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 0.09052
+- Reason SL: SL di atas high BEARISH_OB (0.09029) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 0.08629
+- Reason TP: TP diarahkan ke M15_SWING_LOW 0.08629 (1.84 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.09052
+- Result Reason: SL di atas high BEARISH_OB (0.09029) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- PnL: -1.015511661644905702488561544%
+- Created: 2026-09-30T10:52:39.840837+00:00
+- Filled: 2026-09-30T10:52:40.307302+00:00
+- Closed: 2026-09-30T11:08:30.727167+00:00
+- Strategy: SMC_VLT_RSI v0.5.0
