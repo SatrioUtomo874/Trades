@@ -527,3 +527,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T13:42:52.898814+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## LDOUSDT — SELL
+
+Trade ID: `LDOUSDT-20260930-204302-DC68E6`
+
+### Setup
+
+- Price Now Reference: 0.4711
+- Entry: 0.4715
+- Reason Entry: Model M15_SMC_FALLBACK: area BEARISH_FVG di 0.4715. Struktur pasangan mendukung bearish.
+- Price Exp: 0.468
+- Reason Price Exp: Price Exp 0.4680605 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 0.473
+- Reason SL: SL di atas high BEARISH_FVG (0.4721) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 0.4643
+- Reason TP: TP diarahkan ke H4_SWING 0.4668 (0.80 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.473
+- Result Reason: SL di atas high BEARISH_FVG (0.4721) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- PnL: -0.3181336161187698833510074231%
+- Created: 2026-09-30T13:43:02.705955+00:00
+- Filled: 2026-09-30T13:43:12.245390+00:00
+- Closed: 2026-09-30T13:43:19.863046+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
