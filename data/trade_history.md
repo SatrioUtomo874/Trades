@@ -935,3 +935,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T13:27:11.130008+00:00
 - Closed: 2026-09-30T13:27:16.451312+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## 1000PEPEUSDT — BUY
+
+Trade ID: `1000PEPEUSDT-20260922-193547-29F3A0`
+
+### Setup
+
+- Price Now Reference: 0.0049115
+- Entry: 0.0041686
+- Reason Entry: RSI H4 OverBought + RSI Divergent tapi, RSI M15 Oversold (41.89). Liquidity Pool Bullish 36%. Middle FVG H4. Discount Zone Fibonachi H4
+- Price Exp: 0.005275
+- Reason Price Exp: di atas TP
+- SL: 0.0038454
+- Reason SL: Dibawah garih volumatic trend dan order block, di bawah Liquidity Pool
+- TP: 0.0052748
+- Reason TP: Swing High H4 RR: 3.42
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.0044809
+- Result Reason: Manual /close. PnL positif, sehingga hasil dicatat sebagai TP (PnL +7.49%).
+- PnL: 7.491723840138175886388715636%
+- Created: 2026-09-22T12:35:47.195079+00:00
+- Filled: 2026-09-28T03:32:59.723994+00:00
+- Closed: 2026-09-30T13:30:49.991690+00:00
+- Strategy: MANUAL v1.0
