@@ -461,3 +461,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T13:39:38.876158+00:00
 - Closed: 2026-09-30T13:40:27.651006+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## BCHUSDT — SELL
+
+Trade ID: `BCHUSDT-20260930-202215-0D5028`
+
+### Setup
+
+- Price Now Reference: 315.1
+- Entry: 315.9
+- Reason Entry: Model M15_SMC_FALLBACK: area BEARISH_OB di 315.85. Struktur pasangan mendukung bearish.
+- Price Exp: 313.2
+- Reason Price Exp: Price Exp 313.255 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 317.4
+- Reason SL: SL di atas high BEARISH_OB (317.1) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 311
+- Reason TP: TP diarahkan ke M15_SWING_LOW 311.0 (2.52 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 307.98
+- Result Reason: TP diarahkan ke M15_SWING_LOW 311.0 (2.52 ATR dari current) sebagai target liquidity.
+- PnL: 2.507122507122507122507122507%
+- Created: 2026-09-30T13:22:15.204815+00:00
+- Filled: 2026-09-30T13:26:44.605883+00:00
+- Closed: 2026-09-30T13:40:55.718504+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
