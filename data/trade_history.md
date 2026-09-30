@@ -362,3 +362,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T13:29:25.499848+00:00
 - Closed: 2026-09-30T13:39:14.864506+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## QUSDT — SELL
+
+Trade ID: `QUSDT-20260930-203630-2A2D9F`
+
+### Setup
+
+- Price Now Reference: 0.02311
+- Entry: 0.02319
+- Reason Entry: Model M15_SMC_FALLBACK: area BEARISH_FVG di 0.023185. Ada buy-side liquidity sweep sebelum perubahan struktur. M15 membentuk MSS bearish dengan displacement. RSI 14 M15 berada di 49.5, mendukung momentum bearish.
+- Price Exp: 0.02295
+- Reason Price Exp: Price Exp 0.022957 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 0.02323
+- Reason SL: SL di atas high BEARISH_FVG (0.02319) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 0.02277
+- Reason TP: TP diarahkan ke H1_SWING 0.02277 (1.32 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02294
+- Result Reason: Price Exp 0.022957 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- PnL: -
+- Created: 2026-09-30T13:36:30.676962+00:00
+- Filled: -
+- Closed: 2026-09-30T13:39:43.769008+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
