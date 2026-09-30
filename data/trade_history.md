@@ -671,3 +671,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T10:53:35.831418+00:00
 - Strategy: SMC_VLT_RSI v0.5.0
+
+---
+
+## COAIUSDT — SELL
+
+Trade ID: `COAIUSDT-20260930-175232-C9AA83`
+
+### Setup
+
+- Price Now Reference: 0.3081
+- Entry: 0.3175
+- Reason Entry: COAIUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.31705). H1 me-refine ke BEARISH_FVG 0.3172. M15 memberi execution POI BEARISH_FVG 0.31745. Fib H4 berada pada band DEEP_0.618_0.786 (score 100).
+- Price Exp: 0.308
+- Reason Price Exp: Price Exp 0.30798 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.3179
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.3176) + buffer 0.15 ATR M15.
+- TP: 0.3079
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.3079 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.308
+- Result Reason: Price Exp 0.30798 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T10:52:32.799668+00:00
+- Filled: -
+- Closed: 2026-09-30T11:00:45.410094+00:00
+- Strategy: SMC_VLT_RSI v0.5.0
