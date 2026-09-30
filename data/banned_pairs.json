@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:26:16.949617+00:00",
+  "saved_at": "2026-09-30T13:27:27.251407+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -351,6 +351,13 @@
       "until": "2026-09-30T21:20:07.060505+00:00",
       "reason": "Confidence 68.78 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ZECUSDT",
+      "banned_at": "2026-09-30T13:27:27.251377+00:00",
+      "until": "2026-10-01T13:27:27.251343+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     }
   ]
 }
