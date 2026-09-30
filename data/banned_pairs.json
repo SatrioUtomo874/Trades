@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T11:00:53.035457+00:00",
+  "saved_at": "2026-09-30T11:01:03.742956+00:00",
   "bans": [
+    {
+      "pair": "CGPTUSDT",
+      "banned_at": "2026-09-30T11:01:03.742943+00:00",
+      "until": "2026-09-30T19:01:03.742913+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
     {
       "pair": "COAIUSDT",
       "banned_at": "2026-09-30T11:00:53.035443+00:00",
