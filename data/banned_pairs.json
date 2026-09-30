@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T11:01:03.742956+00:00",
+  "saved_at": "2026-09-30T11:01:46.226066+00:00",
   "bans": [
     {
       "pair": "CGPTUSDT",
@@ -20,6 +20,13 @@
       "pair": "MAVUSDT",
       "banned_at": "2026-09-30T10:53:44.102510+00:00",
       "until": "2026-09-30T18:53:44.102480+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "PIPPINUSDT",
+      "banned_at": "2026-09-30T11:01:46.226054+00:00",
+      "until": "2026-09-30T19:01:46.226023+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
