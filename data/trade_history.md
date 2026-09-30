@@ -770,3 +770,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T11:01:38.692413+00:00
 - Strategy: SMC_VLT_RSI v0.5.0
+
+---
+
+## CLOUSDT — SELL
+
+Trade ID: `CLOUSDT-20260930-175250-443619`
+
+### Setup
+
+- Price Now Reference: 0.06068
+- Entry: 0.0608
+- Reason Entry: CLOUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.06072). H1 me-refine ke BEARISH_FVG 0.060685. M15 memberi execution POI BEARISH_FVG 0.060795. Fib H4 berada pada band DEEP_0.618_0.786 (score 100). RSI 14 M15 49.6 mendukung momentum.
+- Price Exp: 0.06016
+- Reason Price Exp: Price Exp 0.0601676 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.06086
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.0608) + buffer 0.15 ATR M15.
+- TP: 0.05885
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.05885 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.06016
+- Result Reason: Price Exp 0.0601676 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T10:52:50.913352+00:00
+- Filled: -
+- Closed: 2026-09-30T11:01:55.074628+00:00
+- Strategy: SMC_VLT_RSI v0.5.0
