@@ -638,3 +638,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T10:52:59.026474+00:00
 - Closed: 2026-09-30T10:53:01.789409+00:00
 - Strategy: SMC_VLT_RSI v0.5.0
+
+---
+
+## MAVUSDT — SELL
+
+Trade ID: `MAVUSDT-20260930-175240-ACDAE2`
+
+### Setup
+
+- Price Now Reference: 0.011865
+- Entry: 0.011911
+- Reason Entry: MAVUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.011908). M15 memberi execution POI BEARISH_FVG 0.011911. Fib H4 berada pada band 0.382_0.500 (score 72).
+- Price Exp: 0.011838
+- Reason Price Exp: Price Exp 0.0118388 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.011923
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.011912) + buffer 0.15 ATR M15.
+- TP: 0.011821
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.011889 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.011838
+- Result Reason: Price Exp 0.0118388 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T10:52:40.848037+00:00
+- Filled: -
+- Closed: 2026-09-30T10:53:35.831418+00:00
+- Strategy: SMC_VLT_RSI v0.5.0
