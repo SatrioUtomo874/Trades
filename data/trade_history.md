@@ -692,3 +692,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T13:48:35.834320+00:00
 - Closed: 2026-09-30T13:55:14.165137+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## BTWUSDT — BUY
+
+Trade ID: `BTWUSDT-20260930-203635-AEC528`
+
+### Setup
+
+- Price Now Reference: 1.20279
+- Entry: 1.1851
+- Reason Entry: BTWUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 1.1772). H1 me-refine ke BULLISH_FVG 1.17849. M15 memberi execution POI BULLISH_FVG 1.18511. Fib H4 berada pada band SHALLOW (score 45). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 60.3 mendukung momentum.
+- Price Exp: 1.2691
+- Reason Price Exp: Price Exp 1.26905 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 1.173
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (1.17949) + buffer 0.15 ATR M15.
+- TP: 1.4395
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 1.43945 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 1.2691
+- Result Reason: Price Exp 1.26905 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T13:36:35.667328+00:00
+- Filled: -
+- Closed: 2026-09-30T14:02:23.889542+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
