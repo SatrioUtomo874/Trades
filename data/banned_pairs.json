@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:20:07.060554+00:00",
+  "saved_at": "2026-09-30T13:20:15.260640+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -15,6 +15,13 @@
       "until": "2026-09-30T19:02:20.726865+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "1000BONKUSDT",
+      "banned_at": "2026-09-30T13:20:15.260604+00:00",
+      "until": "2026-09-30T21:20:15.257529+00:00",
+      "reason": "Confidence 65.79 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "ADAUSDT",
