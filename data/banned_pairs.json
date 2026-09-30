@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:18:39.151543+00:00",
+  "saved_at": "2026-09-30T13:18:53.251885+00:00",
   "bans": [
     {
       "pair": "1000000MOGUSDT",
@@ -8,6 +8,13 @@
       "until": "2026-09-30T19:02:20.726865+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "ADAUSDT",
+      "banned_at": "2026-09-30T13:18:53.251862+00:00",
+      "until": "2026-09-30T21:18:53.251822+00:00",
+      "reason": "Confidence 68.53 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "CGPTUSDT",
