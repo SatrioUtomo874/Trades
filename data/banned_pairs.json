@@ -1,11 +1,18 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T11:01:46.226066+00:00",
+  "saved_at": "2026-09-30T11:02:02.919916+00:00",
   "bans": [
     {
       "pair": "CGPTUSDT",
       "banned_at": "2026-09-30T11:01:03.742943+00:00",
       "until": "2026-09-30T19:01:03.742913+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "CLOUSDT",
+      "banned_at": "2026-09-30T11:02:02.919900+00:00",
+      "until": "2026-09-30T19:02:02.919865+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
