@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T14:03:55.563139+00:00",
+  "saved_at": "2026-09-30T14:04:14.046901+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -21,6 +21,13 @@
       "banned_at": "2026-09-30T13:20:15.260604+00:00",
       "until": "2026-09-30T21:20:15.257529+00:00",
       "reason": "Confidence 65.79 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "1000FLOKIUSDT",
+      "banned_at": "2026-09-30T14:04:14.046811+00:00",
+      "until": "2026-09-30T22:04:14.046769+00:00",
+      "reason": "Confidence 69.57 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
