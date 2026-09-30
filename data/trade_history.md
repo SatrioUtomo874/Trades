@@ -869,3 +869,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T10:52:40.307302+00:00
 - Closed: 2026-09-30T11:08:30.727167+00:00
 - Strategy: SMC_VLT_RSI v0.5.0
+
+---
+
+## RVNUSDT — SELL
+
+Trade ID: `RVNUSDT-20260930-175251-ECE25F`
+
+### Setup
+
+- Price Now Reference: 0.002368
+- Entry: 0.002372
+- Reason Entry: RVNUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.002381). H1 me-refine ke BEARISH_FVG 0.0023955. M15 memberi execution POI BEARISH_FVG 0.002372. Fib H4 berada pada band SHALLOW (score 45).
+- Price Exp: 0.00236
+- Reason Price Exp: Price Exp 0.0023602557 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.002377
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.002374) + buffer 0.15 ATR M15.
+- TP: 0.002355
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.002362 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.002377
+- Result Reason: SL ditempatkan di bawah/atas structural invalidation terdekat (0.002374) + buffer 0.15 ATR M15.
+- PnL: -0.2107925801011804384485666105%
+- Created: 2026-09-30T10:52:51.921046+00:00
+- Filled: 2026-09-30T10:54:26.412862+00:00
+- Closed: 2026-09-30T11:09:26.283889+00:00
+- Strategy: SMC_VLT_RSI v0.5.0
