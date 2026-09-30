@@ -74,7 +74,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.6.0"
+STRATEGY_VERSION = "0.6.1"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -93,6 +93,16 @@ PAIR_H4_CANDLES_REQUIRED = 120
 BTC_H4_CANDLES_REQUIRED = 240
 
 HTTP_TIMEOUT_SECONDS = 20
+
+# Bybit public REST can return retCode=10006 (API rate limit).
+# The scanner already spaces pairs by 1s, but each pair may need several
+# timeframe requests and the validator adds more requests. Keep one shared
+# request gate across all BybitProvider instances so the module never bursts
+# requests after creating a fresh provider for every fetch_series() call.
+BYBIT_MIN_REQUEST_INTERVAL_SECONDS = 0.12
+BYBIT_RATE_LIMIT_RETRIES = 3
+BYBIT_RATE_LIMIT_SAFETY_SECONDS = 0.75
+BYBIT_RATE_LIMIT_FALLBACK_SECONDS = 2.0
 
 SWING_SPAN_M15 = 3
 SWING_SPAN_H1 = 2
@@ -372,9 +382,161 @@ class HTTPProvider:
         return await asyncio.to_thread(request)
 
 
+class BybitRateLimitError(RuntimeError):
+    """Bybit public API rate-limit could not be cleared within bounded retries."""
+
+    bybit_rate_limited = True
+
+    def __init__(self, message: str, retry_after_seconds: float) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = max(0.0, float(retry_after_seconds))
+
+
 class BybitProvider(HTTPProvider):
+    # Class-level state is intentionally shared by every BybitProvider instance
+    # created inside fetch_series()/fetch_price().
+    _request_lock: asyncio.Lock | None = None
+    _last_request_monotonic: float = 0.0
+    _cooldown_until_monotonic: float = 0.0
+
     def __init__(self) -> None:
         super().__init__(BYBIT_BASE_URL, "BYBIT")
+
+    @classmethod
+    def _get_request_lock(cls) -> asyncio.Lock:
+        if cls._request_lock is None:
+            cls._request_lock = asyncio.Lock()
+        return cls._request_lock
+
+    @classmethod
+    def _set_cooldown(cls, seconds: float) -> float:
+        seconds = max(0.0, float(seconds))
+        cls._cooldown_until_monotonic = max(
+            cls._cooldown_until_monotonic,
+            time.monotonic() + seconds,
+        )
+        return max(0.0, cls._cooldown_until_monotonic - time.monotonic())
+
+    @classmethod
+    def _retry_after_from_headers(cls, headers: Any) -> float | None:
+        if not headers:
+            return None
+        raw = headers.get("X-Bapi-Limit-Reset-Timestamp")
+        if raw in (None, ""):
+            return None
+        try:
+            reset_ms = int(float(raw))
+        except (TypeError, ValueError):
+            return None
+        now_ms = int(time.time() * 1000)
+        # Bybit documents this header as the next available time window when
+        # the endpoint limit has been exceeded. Add a small safety margin.
+        return max(0.0, (reset_ms - now_ms) / 1000.0) + BYBIT_RATE_LIMIT_SAFETY_SECONDS
+
+    async def get(self, path: str, params: dict[str, Any]) -> Any:
+        """GET Bybit public API with pacing + bounded rate-limit backoff.
+
+        retCode=10006 is handled by waiting until the server-provided reset
+        timestamp when available, then retrying a bounded number of times. No
+        Binance fallback is introduced here, so SCAN remains Bybit-public-only.
+        """
+        url = f"{self.base_url}{path}"
+        last_retry_after = BYBIT_RATE_LIMIT_FALLBACK_SECONDS
+
+        for attempt in range(BYBIT_RATE_LIMIT_RETRIES + 1):
+            lock = self._get_request_lock()
+            async with lock:
+                now = time.monotonic()
+                cooldown = max(
+                    0.0,
+                    self.__class__._cooldown_until_monotonic - now,
+                )
+                if cooldown > 0:
+                    await asyncio.sleep(cooldown)
+
+                spacing = (
+                    self.__class__._last_request_monotonic
+                    + BYBIT_MIN_REQUEST_INTERVAL_SECONDS
+                    - time.monotonic()
+                )
+                if spacing > 0:
+                    await asyncio.sleep(spacing)
+
+                def request() -> tuple[int, Any, dict[str, Any]]:
+                    response = requests.get(
+                        url,
+                        params=params,
+                        timeout=HTTP_TIMEOUT_SECONDS,
+                    )
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = None
+                    headers = dict(response.headers)
+                    return response.status_code, payload, headers
+
+                status_code, payload, headers = await asyncio.to_thread(request)
+                self.__class__._last_request_monotonic = time.monotonic()
+
+            if status_code >= 400:
+                # HTTP 429 is system-level frequency protection. Give it a
+                # bounded delay rather than hammering the endpoint again.
+                if status_code == 429:
+                    retry_after = None
+                    raw = headers.get("Retry-After")
+                    if raw not in (None, ""):
+                        try:
+                            retry_after = max(0.0, float(raw))
+                        except (TypeError, ValueError):
+                            retry_after = None
+                    retry_after = (
+                        retry_after
+                        if retry_after is not None
+                        else BYBIT_RATE_LIMIT_FALLBACK_SECONDS
+                    ) + BYBIT_RATE_LIMIT_SAFETY_SECONDS
+                    last_retry_after = retry_after
+                    self.__class__._set_cooldown(retry_after)
+                    if attempt < BYBIT_RATE_LIMIT_RETRIES:
+                        continue
+                    raise BybitRateLimitError(
+                        f"Bybit HTTP 429 setelah {BYBIT_RATE_LIMIT_RETRIES + 1} percobaan.",
+                        retry_after,
+                    )
+
+                raise RuntimeError(
+                    f"Bybit HTTP {status_code}: "
+                    f"{(payload or {}) if isinstance(payload, dict) else 'invalid response'}"
+                )
+
+            if not isinstance(payload, dict):
+                raise RuntimeError("Respons Bybit bukan JSON object.")
+
+            try:
+                ret_code = int(payload.get("retCode", -1))
+            except (TypeError, ValueError):
+                ret_code = -1
+
+            if ret_code == 10006:
+                retry_after = self._retry_after_from_headers(headers)
+                if retry_after is None:
+                    retry_after = BYBIT_RATE_LIMIT_FALLBACK_SECONDS * (2 ** attempt)
+                last_retry_after = retry_after
+                self.__class__._set_cooldown(retry_after)
+                if attempt < BYBIT_RATE_LIMIT_RETRIES:
+                    continue
+                raise BybitRateLimitError(
+                    "Bybit retCode=10006: Too many visits. "
+                    f"Retry bounded {BYBIT_RATE_LIMIT_RETRIES + 1}x; "
+                    f"cooldown terakhir {retry_after:.2f}s.",
+                    retry_after,
+                )
+
+            return payload
+
+        raise BybitRateLimitError(
+            "Bybit public API rate limit belum pulih.",
+            last_retry_after,
+        )
 
     async def klines(
         self,
