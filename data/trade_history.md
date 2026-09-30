@@ -824,3 +824,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T14:08:24.853406+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## PHAROSUSDT — BUY
+
+Trade ID: `PHAROSUSDT-20260930-204259-E72460`
+
+### Setup
+
+- Price Now Reference: 0.7412
+- Entry: 0.7272
+- Reason Entry: Model M15_SMC_FALLBACK: area BULLISH_FVG di 0.7272. Ada sell-side liquidity sweep sebelum perubahan struktur. M15 membentuk MSS bullish dengan displacement. Struktur pasangan mendukung bullish. RSI 14 M15 berada di 62.6, mendukung momentum bullish. Volume/price pressure OHLCV mendukung bullish.
+- Price Exp: 0.7491
+- Reason Price Exp: Price Exp 0.7490051 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 0.7217
+- Reason SL: SL di bawah low BULLISH_FVG (0.7238) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 0.7586
+- Reason TP: TP diarahkan ke H4_SWING 0.7412 (0.00 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.7491
+- Result Reason: Price Exp 0.7490051 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- PnL: -
+- Created: 2026-09-30T13:42:59.682179+00:00
+- Filled: -
+- Closed: 2026-09-30T14:08:47.451409+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
