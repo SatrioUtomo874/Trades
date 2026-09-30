@@ -9,7 +9,7 @@ Strategy intelligence untuk main.py dengan top-down POI hierarchy dan entry reac
 Kontrak utama:
     async def generate_setup(pair, context) -> dict
 
-Prinsip desain v0.4.0
+Prinsip desain v0.5.0
 ---------------------
 1. SMC adalah kerangka utama; RSI 14 M15 dan VLT/OHLCV adalah konfirmasi.
 2. Semua keputusan struktur memakai CLOSED candles saja.
@@ -24,14 +24,15 @@ Prinsip desain v0.4.0
 5. Multi-timeframe target pair tetap menentukan kualitas, lokasi, trigger,
    dan timing; ia tidak boleh membalikkan arah yang ditentukan BTC H4.
 6. Data M15 target = 672 CLOSED candles (7 hari).
-7. Data provider: Bybit public REST -> Binance public REST fallback.
+7. Data provider: Bybit public REST sebagai sumber utama; mode SCAN melarang seluruh fallback Binance.
 8. Strategy selalu memilih kandidat terbaik bila market data cukup.
    Tidak ada hard gate "NO VALID SETUP" hanya karena confidence rendah.
 9. Confidence = quality score setup 0-100, bukan probabilitas profit.
 10. Price Exp adalah batas relevansi setup: bila terlewati sebelum entry,
    thesis lama dianggap tidak relevan dan pola baru harus dicari.
-11. strategy.py tidak menyentuh state trade, Telegram, WebSocket, GitHub,
-    atau order execution. Ia hanya menganalisis dan mengembalikan dict.
+11. strategy.py menyediakan analyze_btc_regime(), analyze_scan_structure(), dan validate_setup() untuk scanner;
+    strategy.py tetap tidak menyentuh state trade, Telegram, WebSocket, GitHub, atau order execution.
+12. Validator menghitung ulang data pair terbaru, membandingkan thesis awal, dan boleh mengembalikan setup baru jika lebih baik.
 
 SMC yang dibuat objektif dalam kode:
     - Swing High / Swing Low
@@ -72,7 +73,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.4.0"
+STRATEGY_VERSION = "0.5.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -130,6 +131,11 @@ DIRECTION_SELL = "SELL"
 DIRECTIONS_BOTH = (DIRECTION_BUY, DIRECTION_SELL)
 
 EPS = 1e-12
+
+# Cache khusus scan: BTC H4 dihitung sekali per cycle lalu dipakai ulang oleh
+# seluruh pair agar directional regime dalam satu cycle konsisten dan tidak
+# membebani API berulang-ulang. Tidak digunakan untuk order/trade state.
+_SCAN_BTC_REGIME_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 # ============================================================================
@@ -462,6 +468,26 @@ class BybitProvider(HTTPProvider):
         return safe_float(rows[0].get("lastPrice"), 0.0)
 
 
+    async def tick_size(self, symbol: str) -> float:
+        payload = await self.get(
+            "/v5/market/instruments-info",
+            {
+                "category": "linear",
+                "symbol": symbol,
+            },
+        )
+        if int(payload.get("retCode", -1)) != 0:
+            raise RuntimeError(
+                f"Bybit instruments-info retCode={payload.get('retCode')}: "
+                f"{payload.get('retMsg', 'unknown error')}"
+            )
+        rows = ((payload.get("result") or {}).get("list") or [])
+        if not rows:
+            raise RuntimeError(f"Bybit instruments-info tidak memiliki {symbol}.")
+        tick = safe_float((rows[0].get("priceFilter") or {}).get("tickSize"), 0.0)
+        return tick
+
+
 class BinanceProvider(HTTPProvider):
     def __init__(self) -> None:
         super().__init__(BINANCE_BASE_URL, "BINANCE_FALLBACK")
@@ -573,12 +599,25 @@ async def fetch_series(
     interval: str,
     count: int,
     interval_ms: int,
+    *,
+    allow_fallback: bool = True,
 ) -> tuple[list[Candle], str]:
+    """Fetch candles, using Bybit first and optionally Binance as fallback.
+
+    SCAN passes allow_fallback=False so every analytical timeframe is sourced
+    exclusively from Bybit public REST.
+    """
     bybit = BybitProvider()
     try:
         candles = await bybit.klines(pair, interval, count, interval_ms)
         return candles, "BYBIT"
     except Exception as bybit_exc:
+        if not allow_fallback:
+            raise RuntimeError(
+                f"Bybit public gagal untuk {pair} {interval}; "
+                f"SCAN melarang fallback Binance: {bybit_exc}"
+            ) from bybit_exc
+
         binance = BinanceProvider()
         try:
             candles = await binance.klines(pair, interval, count, interval_ms)
@@ -590,14 +629,21 @@ async def fetch_series(
             ) from binance_exc
 
 
-async def fetch_price(pair: str, preferred_source: str | None = None) -> tuple[float, str]:
+async def fetch_price(
+    pair: str,
+    preferred_source: str | None = None,
+    *,
+    allow_fallback: bool = True,
+) -> tuple[float, str]:
     errors: list[str] = []
     providers = []
 
-    if preferred_source == "BINANCE_FALLBACK":
+    if allow_fallback and preferred_source == "BINANCE_FALLBACK":
         providers = [BinanceProvider(), BybitProvider()]
-    else:
+    elif allow_fallback:
         providers = [BybitProvider(), BinanceProvider()]
+    else:
+        providers = [BybitProvider()]
 
     for provider in providers:
         try:
@@ -605,10 +651,21 @@ async def fetch_price(pair: str, preferred_source: str | None = None) -> tuple[f
         except Exception as exc:
             errors.append(f"{provider.name}: {exc}")
 
-    raise RuntimeError("Gagal mengambil current price. " + " | ".join(errors))
+    raise RuntimeError(
+        "Gagal mengambil current price. " + " | ".join(errors)
+    )
 
 
-async def get_tick_size(pair: str) -> float:
+async def get_tick_size(
+    pair: str,
+    *,
+    source: str = "BYBIT",
+) -> float:
+    if str(source).upper().startswith("BYBIT"):
+        try:
+            return await BybitProvider().tick_size(pair)
+        except Exception:
+            return 0.0
     try:
         return await BinanceProvider().tick_size(pair)
     except Exception:
@@ -3453,6 +3510,12 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     """
     context = context or {}
     normalized_pair = normalize_pair(pair)
+    scan_mode = str(context.get("mode") or "").upper() == "SCAN"
+    allow_binance_fallback = (
+        bool(context.get("allow_binance_fallback", True))
+        and not scan_mode
+    )
+    force_fresh_btc = bool(context.get("force_fresh_btc_regime", False))
 
     if not normalized_pair.endswith("USDT"):
         raise ValueError("strategy.py hanya mendukung USDT perpetual.")
@@ -3468,6 +3531,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         M15,
         M15_CANDLES_REQUIRED,
         M15_MS,
+        allow_fallback=allow_binance_fallback,
     )
 
     # ------------------------------------------------------------------
@@ -3481,13 +3545,28 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         H4,
         PAIR_H4_CANDLES_REQUIRED,
         H4_MS,
+        allow_fallback=allow_binance_fallback,
     )
-    btc_h4, btc_h4_source = await fetch_series(
-        "BTCUSDT",
-        H4,
-        BTC_H4_CANDLES_REQUIRED,
-        H4_MS,
-    )
+
+    btc_cache_key = _scan_cache_key(context) if scan_mode else None
+    cached_btc = _SCAN_BTC_REGIME_CACHE.get(btc_cache_key) if btc_cache_key else None
+    if cached_btc and not force_fresh_btc:
+        btc_h4 = cached_btc["candles"]
+        btc_h4_source = cached_btc["source"]
+    else:
+        btc_h4, btc_h4_source = await fetch_series(
+            "BTCUSDT",
+            H4,
+            BTC_H4_CANDLES_REQUIRED,
+            H4_MS,
+            allow_fallback=allow_binance_fallback,
+        )
+        if btc_cache_key and btc_h4_source == "BYBIT":
+            _SCAN_BTC_REGIME_CACHE[btc_cache_key] = {
+                "candles": btc_h4,
+                "source": btc_h4_source,
+                "created_at": time.time(),
+            }
 
     # H1 derived from the same M15 dataset, preserving the 672-candle scope.
     h1_derived = resample_candles(m15, H1_MS)
@@ -3495,16 +3574,29 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     h1 = h1_derived
     if len(h1) < 20:
         # Should never happen with 672 closed M15 candles, but keep a safe fallback.
-        h1 = await _fetch_if_short(normalized_pair, H1, H1_MS, 168)
+        h1 = await _fetch_if_short(
+            normalized_pair,
+            H1,
+            H1_MS,
+            168,
+            allow_fallback=allow_binance_fallback,
+        )
 
     # ------------------------------------------------------------------
     # 3) Current price. Prefer the same provider as target M15 data.
     # ------------------------------------------------------------------
-    current, price_source = await fetch_price(normalized_pair, m15_source)
+    current, price_source = await fetch_price(
+        normalized_pair,
+        m15_source,
+        allow_fallback=allow_binance_fallback,
+    )
     if current <= 0:
         raise RuntimeError("Current price tidak valid.")
 
-    tick_size = await get_tick_size(normalized_pair)
+    tick_size = await get_tick_size(
+        normalized_pair,
+        source="BYBIT" if scan_mode else ("BINANCE" if m15_source == "BINANCE_FALLBACK" else "BYBIT"),
+    )
 
     # ------------------------------------------------------------------
     # 4) Build all technical contexts.
@@ -3836,6 +3928,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         "data": {
             "source": m15_source,
             "price_source": price_source,
+            "scan_mode": scan_mode,
+            "data_policy": "BYBIT_PUBLIC_ONLY" if scan_mode else "BYBIT_WITH_BINANCE_FALLBACK",
             "fallback_used": m15_source == "BINANCE_FALLBACK",
             "directional_bias": final_macro,
             "directional_regime": directional_regime_label(
@@ -3867,6 +3961,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "h1_derived_candles": len(h1_derived),
             "h4_derived_candles": len(h4_derived),
             "tick_size": round_price(tick_size) if tick_size else None,
+            "tick_size_source": "BYBIT" if scan_mode else ("BINANCE" if m15_source == "BINANCE_FALLBACK" else "BYBIT"),
             "htf_poi_hierarchy": "H4_PRIMARY -> H1_RETRACEMENT_PATH_REFINEMENT -> M15_EXECUTION",
             "fibonacci_enabled": True,
             "fibonacci_deep_filter": 0.618,
@@ -3880,6 +3975,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
                 "entry reachability guard + SMC + RSI14 M15 + VLT/OHLCV"
             ),
             "confidence_semantics": "quality_score_not_profit_probability",
+            "scan_contract": "analyze_scan_structure -> generate_setup -> validate_setup",
+            "validator_tolerance": "main.py enforces >= 90% of initial confidence",
             "directional_rule": (
                 "Altcoin BTC H4 BULLISH -> BUY only; "
                 "BTC H4 BEARISH -> SELL only; BTC H4 RANGE -> both."
@@ -3888,8 +3985,267 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     }
 
 
-async def _fetch_if_short(pair: str, interval: str, interval_ms: int, count: int) -> list[Candle]:
-    candles, _source = await fetch_series(pair, interval, count, interval_ms)
+# ============================================================================
+# SCAN / VALIDATION CONTRACTS
+# ============================================================================
+
+
+def _scan_cache_key(context: dict[str, Any] | None) -> tuple[str, str] | None:
+    context = context or {}
+    cycle = context.get("scan_cycle")
+    session = str(context.get("session_id") or "")
+    if cycle in (None, ""):
+        return None
+    return session, str(cycle)
+
+
+def _prune_scan_btc_cache(session_id: str, keep_cycles: int = 4) -> None:
+    """Keep only the latest few BTC cycle snapshots for bounded memory use."""
+    session_id = str(session_id or "")
+    if not session_id:
+        return
+    items = []
+    for key, value in _SCAN_BTC_REGIME_CACHE.items():
+        if key[0] != session_id:
+            continue
+        try:
+            cycle = int(key[1])
+        except (TypeError, ValueError):
+            cycle = -1
+        items.append((cycle, key, value.get("created_at", 0.0)))
+    for _cycle, key, _created in sorted(items, reverse=True)[keep_cycles:]:
+        _SCAN_BTC_REGIME_CACHE.pop(key, None)
+
+
+def _scan_context(context: dict[str, Any] | None) -> dict[str, Any]:
+    base = dict(context or {})
+    base["mode"] = "SCAN"
+    base["data_provider"] = "BYBIT_PUBLIC_ONLY"
+    base["primary_data_source"] = "BYBIT_PUBLIC"
+    base["allow_binance_fallback"] = False
+    return base
+
+
+def _btc_regime_payload(
+    candles: list[Candle],
+    source: str,
+) -> dict[str, Any]:
+    structure = build_structure(candles, SWING_SPAN_H4)
+    strength = trend_strength_metrics(candles, structure)
+    atr_values = atr_series(candles, 14)
+    fibs = {
+        direction: fibonacci_summary(build_fibonacci(candles, structure, direction, "H4"), candles[-1].close)
+        for direction in DIRECTIONS_BOTH
+    }
+    return {
+        "trend": structure.trend,
+        "structure": _structure_summary(structure, candles),
+        "trend_strength": strength,
+        "fibonacci": fibs,
+        "source": source,
+        "candles": len(candles),
+        "closed_candles_only": True,
+    }
+
+
+async def analyze_btc_regime(
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Analyze BTCUSDT H4 once per scan cycle and return the cycle regime."""
+    context = _scan_context(context)
+    key = _scan_cache_key(context)
+    force_fresh = bool(context.get("force_fresh_btc_regime", False))
+    if key and key in _SCAN_BTC_REGIME_CACHE and not force_fresh:
+        cached = _SCAN_BTC_REGIME_CACHE[key]
+        return {
+            "pair": "BTCUSDT",
+            **{k: v for k, v in cached.items() if k != "candles"},
+            "cached": True,
+        }
+
+    candles, source = await fetch_series(
+        "BTCUSDT",
+        H4,
+        BTC_H4_CANDLES_REQUIRED,
+        H4_MS,
+        allow_fallback=False,
+    )
+    payload = _btc_regime_payload(candles, source)
+    if key:
+        _SCAN_BTC_REGIME_CACHE[key] = {
+            **payload,
+            "candles": candles,
+            "created_at": time.time(),
+        }
+        _prune_scan_btc_cache(key[0])
+    return {"pair": "BTCUSDT", **payload, "cached": False}
+
+
+async def analyze_scan_structure(
+    pair: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Lightweight H4 structure scan used before full candidate generation.
+
+    For BTCUSDT this returns the macro BTC regime. For altcoins it fetches only
+    pair H4 from Bybit public REST, while inheriting the same BTC regime cache.
+    No M15/H1 candidate generation occurs here.
+    """
+    context = _scan_context(context)
+    normalized_pair = normalize_pair(pair)
+
+    btc = await analyze_btc_regime(context)
+    btc_trend = str(btc.get("trend") or "RANGE").upper()
+
+    if normalized_pair == "BTCUSDT":
+        return {
+            "pair": normalized_pair,
+            "trend": btc_trend,
+            "btc_h4_trend": btc_trend,
+            "aligned": True,
+            "analysis": {"btc_h4": btc["structure"], "trend_strength": btc["trend_strength"], "fibonacci": btc["fibonacci"]},
+            "data": {
+                "source": btc.get("source", "BYBIT"),
+                "timeframe": "H4",
+                "candles_used": btc.get("candles"),
+                "closed_candles_only": True,
+                "data_policy": "BYBIT_PUBLIC_ONLY",
+            },
+        }
+
+    pair_h4, source = await fetch_series(
+        normalized_pair,
+        H4,
+        PAIR_H4_CANDLES_REQUIRED,
+        H4_MS,
+        allow_fallback=False,
+    )
+    structure = build_structure(pair_h4, SWING_SPAN_H4)
+    strength = trend_strength_metrics(pair_h4, structure)
+    aligned = (
+        (btc_trend == "BULLISH" and structure.trend == "BULLISH")
+        or (btc_trend == "BEARISH" and structure.trend == "BEARISH")
+        or (btc_trend == "RANGE" and structure.trend in {"BULLISH", "BEARISH", "RANGE"})
+    )
+    fib = {
+        direction: fibonacci_summary(build_fibonacci(pair_h4, structure, direction, "H4"), pair_h4[-1].close)
+        for direction in DIRECTIONS_BOTH
+    }
+    return {
+        "pair": normalized_pair,
+        "trend": structure.trend,
+        "btc_h4_trend": btc_trend,
+        "aligned": aligned,
+        "analysis": {
+            "pair_h4": _structure_summary(structure, pair_h4),
+            "trend_strength": strength,
+            "fibonacci": fib,
+            "btc_h4": btc["structure"],
+        },
+        "data": {
+            "source": source,
+            "timeframe": "H4",
+            "candles_used": len(pair_h4),
+            "closed_candles_only": True,
+            "data_policy": "BYBIT_PUBLIC_ONLY",
+        },
+    }
+
+
+def _setup_signature(setup: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(setup.get("direction") or ""),
+        safe_float(setup.get("entry")),
+        safe_float(setup.get("price_exp")),
+        safe_float(setup.get("sl")),
+        safe_float(setup.get("tp")),
+    )
+
+
+async def validate_setup(
+    pair: str,
+    initial_setup: dict[str, Any],
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Re-analyze a candidate with fresh Bybit data and return a validation result."""
+    if not isinstance(initial_setup, dict):
+        raise ValueError("initial_setup harus berupa dict.")
+
+    context = _scan_context(context)
+    context["validation"] = True
+    # Keep BTC directional regime stable for the cycle, but always refresh pair data.
+    context["force_fresh_btc_regime"] = False
+
+    fresh = await generate_setup(pair, context)
+
+    initial_direction = str(initial_setup.get("direction") or "").upper()
+    fresh_direction = str(fresh.get("direction") or "").upper()
+    initial_conf = safe_float(initial_setup.get("confidence"), 0.0)
+    fresh_conf = safe_float(fresh.get("confidence"), 0.0)
+
+    macro = (fresh.get("analysis") or {}).get("macro") or {}
+    allowed = macro.get("allowed_directions") or []
+    direction_valid = fresh_direction in allowed
+    same_direction = initial_direction == fresh_direction
+
+    initial_sig = _setup_signature(initial_setup)
+    fresh_sig = _setup_signature(fresh)
+    replacement = initial_sig != fresh_sig
+    confidence_ratio = (fresh_conf / initial_conf * 100.0) if initial_conf > EPS else 0.0
+
+    structural_valid = bool(direction_valid and same_direction)
+    if not structural_valid:
+        valid_reason = (
+            f"Thesis berubah/tidak konsisten: initial={initial_direction}, "
+            f"validated={fresh_direction}, allowed={allowed}."
+        )
+    elif replacement and fresh_conf > initial_conf:
+        valid_reason = "Validator menemukan setup baru dengan confidence lebih tinggi; setup validator digunakan."
+    else:
+        valid_reason = "Struktur dan arah tetap konsisten; setup dihitung ulang dengan data Bybit terbaru."
+
+    fresh_analysis = fresh.get("analysis") or {}
+    fresh_analysis = dict(fresh_analysis)
+    fresh_analysis["validation"] = {
+        "initial_confidence": round(initial_conf, 2),
+        "validated_confidence": round(fresh_conf, 2),
+        "confidence_ratio_percent": round(confidence_ratio, 2),
+        "initial_direction": initial_direction,
+        "validated_direction": fresh_direction,
+        "direction_valid": direction_valid,
+        "same_direction": same_direction,
+        "setup_replaced": replacement,
+        "replacement_is_higher_confidence": replacement and fresh_conf > initial_conf,
+        "reason": valid_reason,
+    }
+    fresh = dict(fresh)
+    fresh["analysis"] = fresh_analysis
+
+    return {
+        "valid": structural_valid,
+        "reason": valid_reason,
+        "validation_reason": valid_reason,
+        "confidence": fresh_conf,
+        "setup": fresh,
+        "validation": fresh_analysis["validation"],
+    }
+
+
+async def _fetch_if_short(
+    pair: str,
+    interval: str,
+    interval_ms: int,
+    count: int,
+    *,
+    allow_fallback: bool = True,
+) -> list[Candle]:
+    candles, _source = await fetch_series(
+        pair,
+        interval,
+        count,
+        interval_ms,
+        allow_fallback=allow_fallback,
+    )
     return candles
 
 
@@ -3952,4 +4308,4 @@ def validate_result_contract(result: dict[str, Any]) -> tuple[bool, list[str]]:
 
 if __name__ == "__main__":
     print(f"{STRATEGY_NAME} v{STRATEGY_VERSION}")
-    print("Module contract: async generate_setup(pair, context)")
+    print("Module contracts: async generate_setup(pair, context), async analyze_btc_regime(context), async analyze_scan_structure(pair, context), async validate_setup(pair, initial_setup, context)")
