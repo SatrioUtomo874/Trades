@@ -263,3 +263,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T13:37:50.753656+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## BRUSDT — SELL
+
+Trade ID: `BRUSDT-20260930-203633-CE5760`
+
+### Setup
+
+- Price Now Reference: 0.75302
+- Entry: 0.76571
+- Reason Entry: BRUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.804255). H1 me-refine ke BEARISH_FVG 0.77457. M15 memberi execution POI BEARISH_OB 0.765705. Fib H4 berada pada band SHALLOW (score 45). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 35.0 mendukung momentum. VLT/OHLCV searah dengan setup.
+- Price Exp: 0.7482
+- Reason Price Exp: Price Exp 0.748208 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.77061
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.76923) + buffer 0.15 ATR M15.
+- TP: 0.745
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.745 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.74487
+- Result Reason: Price Exp 0.748208 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T13:36:33.650661+00:00
+- Filled: -
+- Closed: 2026-09-30T13:38:21.348748+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
