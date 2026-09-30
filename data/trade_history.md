@@ -98,3 +98,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T13:35:54.856308+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## HBARUSDT — BUY
+
+Trade ID: `HBARUSDT-20260930-202218-7CE6A4`
+
+### Setup
+
+- Price Now Reference: 0.10831
+- Entry: 0.10775
+- Reason Entry: Model M15_SMC_FALLBACK: area BULLISH_FVG di 0.107755. Struktur pasangan mendukung bullish. RSI 14 M15 berada di 62.9, mendukung momentum bullish.
+- Price Exp: 0.1096
+- Reason Price Exp: Price Exp 0.1095921 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 0.10756
+- Reason SL: SL di bawah low BULLISH_FVG (0.10772) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 0.131
+- Reason TP: Tidak ada liquidity target yang cukup dekat; TP fallback 0.131 berdasarkan ATR / range.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.10756
+- Result Reason: SL di bawah low BULLISH_FVG (0.10772) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- PnL: -0.1763341067285382830626450116%
+- Created: 2026-09-30T13:22:18.233724+00:00
+- Filled: 2026-09-30T13:35:51.257666+00:00
+- Closed: 2026-09-30T13:36:18.962515+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
