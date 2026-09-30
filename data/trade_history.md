@@ -1001,3 +1001,36 @@ Tidak ada trailing.
 - Filled: 2026-09-29T01:37:35.825454+00:00
 - Closed: 2026-09-30T13:31:20.744880+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## ASTERUSDT — BUY
+
+Trade ID: `ASTERUSDT-20260930-202211-84901C`
+
+### Setup
+
+- Price Now Reference: 0.775
+- Entry: 0.7688
+- Reason Entry: Model M15_SMC_FALLBACK: area BULLISH_OB di 0.76885. Ada sell-side liquidity sweep sebelum perubahan struktur. M15 membentuk MSS bullish dengan displacement. Struktur pasangan mendukung bullish. RSI 14 M15 berada di 62.9, mendukung momentum bullish.
+- Price Exp: 0.7791
+- Reason Price Exp: Price Exp 0.7790772 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 0.7655
+- Reason SL: SL di bawah low BULLISH_OB (0.7666) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 0.7841
+- Reason TP: TP diarahkan ke M15_RECENT_RANGE_HIGH 0.7815 (0.90 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.7791
+- Result Reason: Price Exp 0.7790772 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- PnL: -
+- Created: 2026-09-30T13:22:11.166641+00:00
+- Filled: -
+- Closed: 2026-09-30T13:32:07.293880+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
