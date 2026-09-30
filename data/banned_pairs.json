@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:20:26.950939+00:00",
+  "saved_at": "2026-09-30T13:20:37.453756+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -70,6 +70,13 @@
       "banned_at": "2026-09-30T13:18:05.256331+00:00",
       "until": "2026-09-30T21:18:05.256303+00:00",
       "reason": "Confidence 66.49 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ETHFIUSDT",
+      "banned_at": "2026-09-30T13:20:37.453729+00:00",
+      "until": "2026-09-30T21:20:37.453691+00:00",
+      "reason": "Confidence 67.23 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
