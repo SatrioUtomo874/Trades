@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:35:39.845370+00:00",
+  "saved_at": "2026-09-30T13:36:06.057463+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -218,6 +218,13 @@
       "until": "2026-09-30T21:34:17.659094+00:00",
       "reason": "Confidence 64.75 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "HYPEUSDT",
+      "banned_at": "2026-09-30T13:36:06.057418+00:00",
+      "until": "2026-09-30T21:36:06.057383+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ICPUSDT",
