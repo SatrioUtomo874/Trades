@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T14:06:14.358517+00:00",
+  "saved_at": "2026-09-30T14:08:34.916764+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -820,6 +820,13 @@
       "until": "2026-09-30T21:17:41.748099+00:00",
       "reason": "Confidence 65.4 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "SOONUSDT",
+      "banned_at": "2026-09-30T14:08:34.916681+00:00",
+      "until": "2026-09-30T22:08:34.916655+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "SPKUSDT",
