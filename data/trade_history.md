@@ -560,3 +560,36 @@ Tidak ada trailing.
 - Filled: 2026-09-30T13:43:12.245390+00:00
 - Closed: 2026-09-30T13:43:19.863046+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## PAXGUSDT — SELL
+
+Trade ID: `PAXGUSDT-20260930-202214-73AA43`
+
+### Setup
+
+- Price Now Reference: 4199.4
+- Entry: 4201.5
+- Reason Entry: Model M15_SMC_FALLBACK: area BEARISH_FVG di 4201.5. Ada buy-side liquidity sweep sebelum perubahan struktur. M15 membentuk MSS bearish dengan displacement. Struktur pasangan mendukung bearish.
+- Price Exp: 4195
+- Reason Price Exp: Price Exp 4195.0 menjadi batas ekspansi sebelum entry. Jika harga mencapai batas ini lebih dulu, setup lama dianggap expired dan pola baru perlu dicari.
+- SL: 4204.5
+- Reason SL: SL di atas high BEARISH_FVG (4203.3) + buffer 0.15 ATR sebagai batas invalidasi struktur.
+- TP: 4189.6
+- Reason TP: TP diarahkan ke M15_SWING_LOW 4190.9 (2.21 ATR dari current) sebagai target liquidity.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 4189.59
+- Result Reason: TP diarahkan ke M15_SWING_LOW 4190.9 (2.21 ATR dari current) sebagai target liquidity.
+- PnL: 0.2834701892181363798643341664%
+- Created: 2026-09-30T13:22:14.195473+00:00
+- Filled: 2026-09-30T13:25:21.146677+00:00
+- Closed: 2026-09-30T13:43:57.002389+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
