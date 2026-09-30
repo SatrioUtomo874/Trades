@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:35:17.050111+00:00",
+  "saved_at": "2026-09-30T13:35:39.845370+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -239,6 +239,13 @@
       "until": "2026-09-30T21:26:07.650709+00:00",
       "reason": "Confidence 69.96 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "JUPUSDT",
+      "banned_at": "2026-09-30T13:35:39.845324+00:00",
+      "until": "2026-09-30T21:35:39.845290+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "LINKUSDT",
