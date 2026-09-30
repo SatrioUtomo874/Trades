@@ -659,3 +659,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T13:48:43.905158+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## UAIUSDT — SELL
+
+Trade ID: `UAIUSDT-20260930-204835-C93E1A`
+
+### Setup
+
+- Price Now Reference: 0.2977
+- Entry: 0.2979
+- Reason Entry: UAIUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.36905). H1 me-refine ke BEARISH_FVG 0.3725. M15 memberi execution POI BEARISH_BREAKER 0.29785. Fib H4 berada pada band DEEPER_THAN_0.786 (score 65). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.2912
+- Reason Price Exp: Price Exp 0.29126 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.2995
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.299) + buffer 0.15 ATR M15.
+- TP: 0.2747
+- Reason TP: TP diarahkan ke H4_RECENT_RANGE_LOW 0.2747 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.2995
+- Result Reason: SL ditempatkan di bawah/atas structural invalidation terdekat (0.299) + buffer 0.15 ATR M15.
+- PnL: -0.5370929842228935884525008392%
+- Created: 2026-09-30T13:48:35.072888+00:00
+- Filled: 2026-09-30T13:48:35.834320+00:00
+- Closed: 2026-09-30T13:55:14.165137+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
