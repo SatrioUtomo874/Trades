@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:51:22.457523+00:00",
+  "saved_at": "2026-09-30T13:51:27.462403+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -806,6 +806,13 @@
       "until": "2026-09-30T21:37:39.948070+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "ZESTUSDT",
+      "banned_at": "2026-09-30T13:51:27.462330+00:00",
+      "until": "2026-09-30T21:51:27.462293+00:00",
+      "reason": "Confidence 62.26 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     }
   ]
 }
