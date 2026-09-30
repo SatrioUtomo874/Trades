@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:36:29.018234+00:00",
+  "saved_at": "2026-09-30T13:36:48.099970+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -281,6 +281,13 @@
       "until": "2026-09-30T21:25:46.353507+00:00",
       "reason": "Confidence 69.21 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "LTCUSDT",
+      "banned_at": "2026-09-30T13:36:48.099923+00:00",
+      "until": "2026-09-30T21:36:48.099898+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "MAVUSDT",
