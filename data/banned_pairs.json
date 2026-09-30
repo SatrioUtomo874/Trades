@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:47:17.387890+00:00",
+  "saved_at": "2026-09-30T13:48:52.357711+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -323,6 +323,13 @@
       "until": "2026-09-30T21:40:44.453456+00:00",
       "reason": "Confidence 61.84 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "FLOWUSDT",
+      "banned_at": "2026-09-30T13:48:52.357645+00:00",
+      "until": "2026-09-30T21:48:52.357616+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "GRAMUSDT",
