@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:17:49.358154+00:00",
+  "saved_at": "2026-09-30T13:17:57.747856+00:00",
   "bans": [
     {
       "pair": "1000000MOGUSDT",
@@ -43,6 +43,13 @@
       "until": "2026-09-30T18:53:44.102480+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "NEARUSDT",
+      "banned_at": "2026-09-30T13:17:57.747836+00:00",
+      "until": "2026-09-30T21:17:57.747799+00:00",
+      "reason": "Confidence 60.65 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "NILUSDT",
