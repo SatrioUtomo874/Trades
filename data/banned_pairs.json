@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:27:27.251407+00:00",
+  "saved_at": "2026-09-30T13:30:58.156065+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -22,6 +22,13 @@
       "until": "2026-09-30T21:20:15.257529+00:00",
       "reason": "Confidence 65.79 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "1000PEPEUSDT",
+      "banned_at": "2026-09-30T13:30:58.156030+00:00",
+      "until": "2026-10-01T13:30:58.156002+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "ADAUSDT",
