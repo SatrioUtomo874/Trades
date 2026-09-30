@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-09-30T13:34:32.354168+00:00",
+  "saved_at": "2026-09-30T13:34:40.254284+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -134,6 +134,13 @@
       "until": "2026-10-01T13:31:32.342310+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "ENSUSDT",
+      "banned_at": "2026-09-30T13:34:40.254251+00:00",
+      "until": "2026-09-30T21:34:40.254227+00:00",
+      "reason": "Confidence 62.96 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "ESPORTSUSDT",
