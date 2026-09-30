@@ -626,3 +626,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T13:47:06.345054+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## FLOWUSDT — SELL
+
+Trade ID: `FLOWUSDT-20260930-204836-34F0B1`
+
+### Setup
+
+- Price Now Reference: 0.03256
+- Entry: 0.03269
+- Reason Entry: FLOWUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.03307). H1 me-refine ke BEARISH_FVG 0.032725. M15 memberi execution POI BEARISH_FVG 0.03269. Fib H4 berada pada band OVERLAPS_0.618 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.03237
+- Reason Price Exp: Price Exp 0.0323706 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.0328
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.03274) + buffer 0.15 ATR M15.
+- TP: 0.03224
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.03253 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.03237
+- Result Reason: Price Exp 0.0323706 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T13:48:36.159070+00:00
+- Filled: -
+- Closed: 2026-09-30T13:48:43.905158+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
