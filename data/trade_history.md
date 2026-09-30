@@ -296,3 +296,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T13:38:21.348748+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## COTIUSDT — SELL
+
+Trade ID: `COTIUSDT-20260930-203632-D4A888`
+
+### Setup
+
+- Price Now Reference: 0.013401
+- Entry: 0.014139
+- Reason Entry: COTIUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.014213). H1 me-refine ke BEARISH_FVG 0.014101. M15 memberi execution POI BEARISH_FVG 0.0141385. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.013332
+- Reason Price Exp: Price Exp 0.013332 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.014284
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.014267) + buffer 0.15 ATR M15.
+- TP: 0.013286
+- Reason TP: TP diarahkan ke H1_SWING_LOW 0.013286 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.013317
+- Result Reason: Price Exp 0.013332 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-09-30T13:36:32.554797+00:00
+- Filled: -
+- Closed: 2026-09-30T13:38:48.911826+00:00
+- Strategy: SMC_VLT_RSI v0.6.0
