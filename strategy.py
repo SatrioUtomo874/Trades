@@ -4,25 +4,26 @@ from __future__ import annotations
 STRATEGY.PY
 ===========
 
-Strategy intelligence untuk main.py dengan top-down POI hierarchy dan entry reachability guard.
+Strategy intelligence untuk main.py dengan multi-timeframe regime engine, top-down POI hierarchy, dan entry reachability guard.
 
 Kontrak utama:
     async def generate_setup(pair, context) -> dict
 
-Prinsip desain v0.5.0
+Prinsip desain v0.6.0
 ---------------------
-1. SMC adalah kerangka utama; RSI 14 M15 dan VLT/OHLCV adalah konfirmasi.
+1. SMC adalah kerangka utama; regime ditentukan multi-timeframe, lalu RSI 14 M15 dan VLT/OHLCV menjadi konfirmasi eksekusi.
 2. Semua keputusan struktur memakai CLOSED candles saja.
 3. Target pair dianalisis multi-timeframe:
-      H4 -> bias struktur pasangan
-      H1 -> lokasi / dealing range / POI
-      M15 -> timing / trigger / RSI / VLT
-4. Untuk altcoin, BTCUSDT H4 adalah directional constraint utama:
+      D1/H4 -> external regime dan structure utama
+      H1 -> konfirmasi struktur / lokasi / dealing range / POI
+      M15 -> current state / timing / trigger / RSI / VLT
+4. Untuk altcoin, BTCUSDT menjadi directional constraint berbasis multi-timeframe regime:
       BULLISH -> hanya cari BUY
       BEARISH -> hanya cari SELL
-      RANGE   -> BUY dan SELL boleh dicari.
-5. Multi-timeframe target pair tetap menentukan kualitas, lokasi, trigger,
-   dan timing; ia tidak boleh membalikkan arah yang ditentukan BTC H4.
+      RANGE/TRANSITION -> BUY dan SELL boleh dicari.
+5. Regime pair dihitung independen memakai D1/H4/H1/M15. Untuk scanner, pair
+   yang tidak searah dengan BTC tidak diteruskan. Dalam /auto, perbedaan regime
+   menurunkan kualitas kandidat.
 6. Data M15 target = 672 CLOSED candles (7 hari).
 7. Data provider: Bybit public REST sebagai sumber utama; mode SCAN melarang seluruh fallback Binance.
 8. Strategy selalu memilih kandidat terbaik bila market data cukup.
@@ -73,7 +74,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.5.0"
+STRATEGY_VERSION = "0.6.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -81,6 +82,7 @@ BINANCE_BASE_URL = "https://fapi.binance.com"
 M15 = "15"
 H1 = "60"
 H4 = "240"
+D1 = "D"
 
 M15_MS = 15 * 60 * 1000
 H1_MS = 60 * 60 * 1000
@@ -1025,10 +1027,48 @@ def build_structure(
         elif high_bias + low_bias <= -2:
             trend = "BEARISH"
 
-    bullish_highs = [p for p in highs if p.index < len(candles)]
-    bullish_lows = [p for p in lows if p.index < len(candles)]
-    protected_high = bullish_highs[-1].price if bullish_highs else None
-    protected_low = bullish_lows[-1].price if bullish_lows else None
+    confirmed_highs = [p for p in highs if p.confirmed_at_index < len(candles)]
+    confirmed_lows = [p for p in lows if p.confirmed_at_index < len(candles)]
+
+    # Final structural regime: do not let one internal break flip the whole
+    # timeframe. Require agreement from the latest confirmed high/low
+    # progression, or a recent structural break that is still supported by the
+    # opposite protected swing.
+    atr_now = max(median_or(atr_values[-20:], candles[-1].range), EPS)
+    high_bull = len(confirmed_highs) >= 2 and confirmed_highs[-1].price > confirmed_highs[-2].price + 0.35 * atr_now
+    high_bear = len(confirmed_highs) >= 2 and confirmed_highs[-1].price < confirmed_highs[-2].price - 0.35 * atr_now
+    low_bull = len(confirmed_lows) >= 2 and confirmed_lows[-1].price > confirmed_lows[-2].price + 0.35 * atr_now
+    low_bear = len(confirmed_lows) >= 2 and confirmed_lows[-1].price < confirmed_lows[-2].price - 0.35 * atr_now
+    if high_bull and low_bull:
+        trend = "BULLISH"
+    elif high_bear and low_bear:
+        trend = "BEARISH"
+    else:
+        # Mixed structure: require a clear majority before declaring a direction.
+        bullish_parts = int(high_bull) + int(low_bull)
+        bearish_parts = int(high_bear) + int(low_bear)
+        if bullish_parts > bearish_parts and bullish_parts >= 1 and trend == "BULLISH":
+            trend = "BULLISH"
+        elif bearish_parts > bullish_parts and bearish_parts >= 1 and trend == "BEARISH":
+            trend = "BEARISH"
+        else:
+            trend = "RANGE"
+
+    last_bull_break = next((e for e in reversed(events) if e.get("direction") == "BULLISH" and e.get("type") in {"BOS", "MSS"}), None)
+    last_bear_break = next((e for e in reversed(events) if e.get("direction") == "BEARISH" and e.get("type") in {"BOS", "MSS"}), None)
+    if trend == "BULLISH":
+        ref = int(last_bull_break.get("index")) if last_bull_break else len(candles)
+        protected_candidates = [p for p in confirmed_lows if p.index < ref]
+        protected_low = protected_candidates[-1].price if protected_candidates else (confirmed_lows[-1].price if confirmed_lows else None)
+        protected_high = confirmed_highs[-1].price if confirmed_highs else None
+    elif trend == "BEARISH":
+        ref = int(last_bear_break.get("index")) if last_bear_break else len(candles)
+        protected_candidates = [p for p in confirmed_highs if p.index < ref]
+        protected_high = protected_candidates[-1].price if protected_candidates else (confirmed_highs[-1].price if confirmed_highs else None)
+        protected_low = confirmed_lows[-1].price if confirmed_lows else None
+    else:
+        protected_high = confirmed_highs[-1].price if confirmed_highs else None
+        protected_low = confirmed_lows[-1].price if confirmed_lows else None
 
     last_bos = next(
         (e for e in reversed(events) if e["type"] == "BOS"),
@@ -2627,11 +2667,13 @@ def find_recent_sweep_mss(
     max_gap: int = 12,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     for sweep in reversed(sweeps):
-        if sweep["direction"] != direction:
+        expected_sweep = "BULLISH" if direction == DIRECTION_BUY else "BEARISH"
+        if sweep.get("direction") != expected_sweep:
             continue
         s_idx = int(sweep["index"])
         for event in reversed(structure.events):
-            if event["type"] != "MSS" or event["direction"] != direction:
+            expected_break = "BULLISH" if direction == DIRECTION_BUY else "BEARISH"
+            if event.get("type") != "MSS" or event.get("direction") != expected_break:
                 continue
             e_idx = int(event["index"])
             if e_idx <= s_idx:
@@ -3084,19 +3126,88 @@ def _structure_summary(structure: StructureSnapshot, candles: list[Candle]) -> d
     }
 
 
-def _select_macro_trend(
-    btc_h4: StructureSnapshot,
-    target_h4: StructureSnapshot,
-    pair: str,
-) -> str:
-    """Return the higher-timeframe directional source used by the strategy.
+def _structure_direction_evidence(candles: list[Candle], structure: StructureSnapshot) -> dict[str, Any]:
+    """Directional evidence that resists flips from one minor/internal break."""
+    if not candles:
+        return {"bullish_score": 0.0, "bearish_score": 0.0, "state": "RANGE", "reason": "NO_DATA"}
+    atr_values = atr_series(candles, 14)
+    atr = max(median_or(atr_values[-20:], candles[-1].range), EPS)
+    highs = structure.swing_highs[-6:]
+    lows = structure.swing_lows[-6:]
+    bull = 0.0
+    bear = 0.0
+    reasons: list[str] = []
+    if len(highs) >= 2:
+        dh = highs[-1].price - highs[-2].price
+        if dh > 0.35 * atr:
+            bull += 30.0; reasons.append("HH_SIGNIFICANT")
+        elif dh < -0.35 * atr:
+            bear += 30.0; reasons.append("LH_SIGNIFICANT")
+    if len(lows) >= 2:
+        dl = lows[-1].price - lows[-2].price
+        if dl > 0.35 * atr:
+            bull += 30.0; reasons.append("HL_SIGNIFICANT")
+        elif dl < -0.35 * atr:
+            bear += 30.0; reasons.append("LL_SIGNIFICANT")
+    recent_labels = [x.get("label") for x in structure.labels[-10:]]
+    bull += min(16.0, (recent_labels.count("HH") + recent_labels.count("HL")) * 4.0)
+    bear += min(16.0, (recent_labels.count("LH") + recent_labels.count("LL")) * 4.0)
+    recent_events = structure.events[-8:]
+    latest_bull = next((e for e in reversed(recent_events) if e.get("direction") == "BULLISH" and e.get("type") in {"BOS", "MSS"}), None)
+    latest_bear = next((e for e in reversed(recent_events) if e.get("direction") == "BEARISH" and e.get("type") in {"BOS", "MSS"}), None)
+    if latest_bull: bull += 18.0 if latest_bull.get("type") == "MSS" else 12.0
+    if latest_bear: bear += 18.0 if latest_bear.get("type") == "MSS" else 12.0
+    closes = [c.close for c in candles]
+    slope = linear_slope(closes[-20:], min(20, len(closes))) if len(closes) >= 5 else 0.0
+    normalized_slope = slope / max(atr, EPS)
+    if normalized_slope > 0.08: bull += 10.0
+    elif normalized_slope < -0.08: bear += 10.0
+    gap = abs(bull - bear)
+    if bull >= 54 and gap >= 14 and bull > bear: regime = "BULLISH"
+    elif bear >= 54 and gap >= 14 and bear > bull: regime = "BEARISH"
+    elif max(bull, bear) < 50 or gap < 10: regime = "RANGE"
+    else: regime = "TRANSITION"
+    state = regime
+    if regime == "BULLISH" and normalized_slope < -0.05: state = "BULLISH_PULLBACK"
+    elif regime == "BULLISH" and normalized_slope >= 0.05: state = "BULLISH_CONTINUATION"
+    elif regime == "BEARISH" and normalized_slope > 0.05: state = "BEARISH_PULLBACK"
+    elif regime == "BEARISH" and normalized_slope <= -0.05: state = "BEARISH_CONTINUATION"
+    return {"bullish_score": round(clamp(bull),2), "bearish_score": round(clamp(bear),2), "gap": round(gap,2), "raw_structure": structure.trend, "state": state, "dominant": "BULLISH" if bull > bear else "BEARISH" if bear > bull else "RANGE", "normalized_slope": round(normalized_slope,6), "reasons": reasons}
 
-    For altcoins, BTCUSDT H4 is the primary directional source. For BTCUSDT
-    itself, the target's own H4 structure is used so BTC is not self-compared.
-    """
-    if pair == "BTCUSDT":
-        return target_h4.trend
-    return btc_h4.trend
+
+def _timeframe_regime_report(candles: list[Candle], timeframe: str, span: int) -> dict[str, Any]:
+    structure = build_structure(candles, span)
+    evidence = _structure_direction_evidence(candles, structure)
+    strength = trend_strength_metrics(candles, structure)
+    atr_values = atr_series(candles, 14)
+    trend = "BULLISH" if evidence["bullish_score"] > evidence["bearish_score"] else "BEARISH" if evidence["bearish_score"] > evidence["bullish_score"] else "RANGE"
+    return {"timeframe": timeframe, "trend": trend, "regime": evidence["state"], "state": evidence["state"], "bullish_score": evidence["bullish_score"], "bearish_score": evidence["bearish_score"], "evidence": evidence, "structure": _structure_summary(structure, candles), "trend_strength": strength, "atr": round(atr_values[-1],10) if atr_values else None, "candles": len(candles)}
+
+
+def build_multi_timeframe_regime(timeframes: dict[str, tuple[list[Candle], int]]) -> dict[str, Any]:
+    """Determine direction from multiple timeframes; M15 cannot flip strong HTF structure."""
+    weights = {"D1":0.18, "H4":0.42, "H1":0.30, "M15":0.10}
+    reports = {}; bull = 0.0; bear = 0.0; total = 0.0
+    for tf,(candles,span) in timeframes.items():
+        if not candles: continue
+        r = _timeframe_regime_report(candles, tf, span); reports[tf]=r
+        w=weights.get(tf,0.20); bull += w*r["bullish_score"]; bear += w*r["bearish_score"]; total += w
+    if total > EPS: bull/=total; bear/=total
+    gap=abs(bull-bear)
+    if bull>=57 and bull-bear>=15: trend="BULLISH"
+    elif bear>=57 and bear-bull>=15: trend="BEARISH"
+    else: trend="RANGE"
+    states=[str((reports.get(tf) or {}).get("state") or "") for tf in ("H4","H1","M15")]
+    if trend=="BULLISH": state="BULLISH_PULLBACK" if any("PULLBACK" in x for x in states) else "BULLISH_CONTINUATION" if any("CONTINUATION" in x for x in states) else "BULLISH"
+    elif trend=="BEARISH": state="BEARISH_PULLBACK" if any("PULLBACK" in x for x in states) else "BEARISH_CONTINUATION" if any("CONTINUATION" in x for x in states) else "BEARISH"
+    else: state="TRANSITION" if gap>=6 else "RANGE"
+    confidence=clamp(50+gap*2+abs(max(bull,bear)-50)*0.45)
+    return {"trend":trend,"regime":trend,"state":state,"confidence":round(confidence,2),"bullish_score":round(bull,2),"bearish_score":round(bear,2),"gap":round(gap,2),"dominant_strength":round(max(bull,bear),2),"timeframes":reports,"regime_rule":"D1+H4 define external direction; H1 confirms; M15 classifies current state and cannot flip external regime alone."}
+
+
+def _select_macro_trend(btc_h4: StructureSnapshot, target_h4: StructureSnapshot, pair: str, *, btc_regime: str | None=None, pair_regime: str | None=None) -> str:
+    if pair=="BTCUSDT": return pair_regime or target_h4.trend
+    return btc_regime or btc_h4.trend
 
 
 def allowed_directions_for_macro(
@@ -3107,13 +3218,13 @@ def allowed_directions_for_macro(
     """Define the strategy search-space from the macro directional regime.
 
     Core rule:
-        Altcoin + BTC H4 bullish -> BUY only.
-        Altcoin + BTC H4 bearish -> SELL only.
-        Altcoin + BTC H4 range   -> both directions allowed.
+        Altcoin + BTC regime bullish -> BUY only.
+        Altcoin + BTC regime bearish -> SELL only.
+        Altcoin + BTC regime range/transition -> both directions allowed.
 
-    For BTCUSDT itself, target H4 is the macro source.
+    For BTCUSDT itself, the pair's own multi-timeframe regime is the source.
 
-    Pair H4 never reverses the macro direction. It only affects confidence.
+    Pair regime does not override the BTC regime for altcoins; it determines alignment and setup quality.
     """
     trend = pair_h4_trend if pair == "BTCUSDT" else macro_trend
     if trend == "BULLISH":
@@ -3155,6 +3266,8 @@ def _collect_directional_candidates(
     h1_ctx: dict[str, Any] | None = None,
     m15_ctx: dict[str, Any] | None = None,
     topdown_liquidity: list[LiquidityPool] | None = None,
+    macro_trend_override: str | None = None,
+    pair_regime_override: str | None = None,
 ) -> list[Candidate]:
     atr = m15_atr_values[-1]
     rsi_ctx = _latest_rsi_context(m15)
@@ -3164,8 +3277,9 @@ def _collect_directional_candidates(
     latest_disp = displacement_strength(m15, len(m15) - 1, m15_atr_values, m15_rel_vol)
     h1_dr = dealing_range(h1, h1_structure)
 
-    macro_trend = _select_macro_trend(btc_structure, h4_structure, pair)
-    allowed_directions = allowed_directions_for_macro(macro_trend, h4_structure.trend, pair)
+    macro_trend = _select_macro_trend(btc_structure, h4_structure, pair, btc_regime=macro_trend_override, pair_regime=pair_regime_override)
+    pair_directional_regime = pair_regime_override or h4_structure.trend
+    allowed_directions = allowed_directions_for_macro(macro_trend, pair_directional_regime, pair)
     candidates: list[Candidate] = []
 
     h4_ctx = h4_ctx or htf_poi_candidates(h4, h4_structure, DIRECTION_BUY, "H4")
@@ -3551,22 +3665,16 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     btc_cache_key = _scan_cache_key(context) if scan_mode else None
     cached_btc = _SCAN_BTC_REGIME_CACHE.get(btc_cache_key) if btc_cache_key else None
     if cached_btc and not force_fresh_btc:
-        btc_h4 = cached_btc["candles"]
-        btc_h4_source = cached_btc["source"]
+        btc_h4 = cached_btc.get("candles_h4") or cached_btc.get("candles")
+        btc_h4_source = str(cached_btc.get("sources_by_timeframe", {}).get("H4") or cached_btc.get("source") or "BYBIT")
+        btc_h1 = cached_btc.get("candles_h1") or []
+        btc_h1_source = str(cached_btc.get("sources_by_timeframe", {}).get("H1") or "BYBIT")
     else:
-        btc_h4, btc_h4_source = await fetch_series(
-            "BTCUSDT",
-            H4,
-            BTC_H4_CANDLES_REQUIRED,
-            H4_MS,
-            allow_fallback=allow_binance_fallback,
-        )
-        if btc_cache_key and btc_h4_source == "BYBIT":
-            _SCAN_BTC_REGIME_CACHE[btc_cache_key] = {
-                "candles": btc_h4,
-                "source": btc_h4_source,
-                "created_at": time.time(),
-            }
+        btc_h4, btc_h4_source = await fetch_series("BTCUSDT", H4, BTC_H4_CANDLES_REQUIRED, H4_MS, allow_fallback=allow_binance_fallback)
+        btc_h1, btc_h1_source = await fetch_series("BTCUSDT", H1, 168, H1_MS, allow_fallback=allow_binance_fallback)
+        if btc_cache_key and btc_h4_source == "BYBIT" and btc_h1_source == "BYBIT":
+            btc_payload=_btc_regime_payload(btc_h4,btc_h1,{"D1":"BYBIT_DERIVED","H4":btc_h4_source,"H1":btc_h1_source})
+            _SCAN_BTC_REGIME_CACHE[btc_cache_key]={**btc_payload,"candles_h4":btc_h4,"candles_h1":btc_h1,"created_at":time.time()}
 
     # H1 derived from the same M15 dataset, preserving the 672-candle scope.
     h1_derived = resample_candles(m15, H1_MS)
@@ -3610,6 +3718,10 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     h1_structure = build_structure(h1, SWING_SPAN_H1)
     pair_h4_structure = build_structure(pair_h4, SWING_SPAN_H4)
     btc_h4_structure = build_structure(btc_h4, SWING_SPAN_H4)
+    pair_d1 = resample_candles(pair_h4, 24 * 60 * 60 * 1000)
+    pair_regime = build_multi_timeframe_regime({"D1": (pair_d1, 2), "H4": (pair_h4, SWING_SPAN_H4), "H1": (h1, SWING_SPAN_H1), "M15": (m15, SWING_SPAN_M15)})
+    btc_d1 = resample_candles(btc_h4, 24 * 60 * 60 * 1000)
+    btc_regime = build_multi_timeframe_regime({"D1": (btc_d1, 2), "H4": (btc_h4, SWING_SPAN_H4), "H1": (btc_h1, SWING_SPAN_H1)})
 
     # Full top-down POI contexts. H4 is the primary analytical layer, H1
     # refines it, and M15 is the execution layer.
@@ -3691,6 +3803,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         h1_ctx=h1_ctx,
         m15_ctx=m15_ctx,
         topdown_liquidity=[*h4_ctx.get("liquidity", []), *h1_ctx.get("liquidity", []), *m15_ctx.get("liquidity", [])],
+        macro_trend_override=btc_regime["trend"],
+        pair_regime_override=pair_regime["trend"],
     )
 
     best = _best_candidate(candidates)
@@ -3727,7 +3841,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             best.tp = round_price(max(step, best.entry - step))
 
     # Recalculate confidence after the final level geometry is locked.
-    final_macro = _select_macro_trend(btc_h4_structure, pair_h4_structure, normalized_pair)
+    final_macro = _select_macro_trend(btc_h4_structure, pair_h4_structure, normalized_pair, btc_regime=btc_regime["trend"], pair_regime=pair_regime["trend"])
     h1_dr = dealing_range(h1, h1_structure)
     final_target = None
     for pool in sorted(liquidity, key=lambda x: (x.strength, -abs(x.level - best.tp)), reverse=True):
@@ -3748,7 +3862,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     score_candidate(
         best,
         macro_trend=final_macro,
-        pair_h4_trend=pair_h4_structure.trend,
+        pair_h4_trend=pair_regime["trend"],
         h1_dr=h1_dr,
         target=final_target,
         sweep=final_sweep,
@@ -3777,26 +3891,28 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "pair": normalized_pair,
             "btc_h4": _structure_summary(btc_h4_structure, btc_h4),
             "pair_h4": _structure_summary(pair_h4_structure, pair_h4),
+            "btc_regime": btc_regime,
+            "pair_regime": pair_regime,
             "macro_bias": final_macro,
             "directional_regime": directional_regime_label(
                 allowed_directions_for_macro(
                     final_macro,
-                    pair_h4_structure.trend,
+                    pair_regime["trend"],
                     normalized_pair,
                 )
             ),
             "allowed_directions": list(
                 allowed_directions_for_macro(
                     final_macro,
-                    pair_h4_structure.trend,
+                    pair_regime["trend"],
                     normalized_pair,
                 )
             ),
             "direction_rule": (
-                "BTCUSDT H4 determines the search direction for altcoins; "
-                "pair H4/H1/M15 can reduce confidence but cannot flip the direction."
+                "BTC multi-timeframe regime determines search direction for altcoins; "
+                "pair regime must align in SCAN and can refine setup quality/timing."
                 if is_altcoin(normalized_pair)
-                else "BTCUSDT uses its own H4 structure as the directional source."
+                else "BTCUSDT uses its own multi-timeframe regime as the directional source."
             ),
             "altcoin_rule_applied": is_altcoin(normalized_pair),
         },
@@ -3935,14 +4051,14 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "directional_regime": directional_regime_label(
                 allowed_directions_for_macro(
                     final_macro,
-                    pair_h4_structure.trend,
+                    pair_regime["trend"],
                     normalized_pair,
                 )
             ),
             "allowed_directions": list(
                 allowed_directions_for_macro(
                     final_macro,
-                    pair_h4_structure.trend,
+                    pair_regime["trend"],
                     normalized_pair,
                 )
             ),
@@ -3958,11 +4074,12 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "closed_candles_only": True,
             "pair_h4_candles": len(pair_h4),
             "btc_h4_candles": len(btc_h4),
+            "btc_h1_candles": len(btc_h1),
             "h1_derived_candles": len(h1_derived),
             "h4_derived_candles": len(h4_derived),
             "tick_size": round_price(tick_size) if tick_size else None,
             "tick_size_source": "BYBIT" if scan_mode else ("BINANCE" if m15_source == "BINANCE_FALLBACK" else "BYBIT"),
-            "htf_poi_hierarchy": "H4_PRIMARY -> H1_RETRACEMENT_PATH_REFINEMENT -> M15_EXECUTION",
+            "htf_poi_hierarchy": "D1/H4/H1/M15_REGIME -> H4_PRIMARY -> H1_RETRACEMENT_PATH_REFINEMENT -> M15_EXECUTION",
             "fibonacci_enabled": True,
             "fibonacci_deep_filter": 0.618,
         },
@@ -3970,7 +4087,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "name": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
             "architecture": (
-                "BTC H4 directional constraint + relevant/near H4 POI hierarchy + "
+                "BTC multi-timeframe regime constraint + relevant/near H4 POI hierarchy + "
                 "H4/H1 Fibonacci confluence + retracement-path refinement + M15 execution + "
                 "entry reachability guard + SMC + RSI14 M15 + VLT/OHLCV"
             ),
@@ -3978,8 +4095,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "scan_contract": "analyze_scan_structure -> generate_setup -> validate_setup",
             "validator_tolerance": "main.py enforces >= 90% of initial confidence",
             "directional_rule": (
-                "Altcoin BTC H4 BULLISH -> BUY only; "
-                "BTC H4 BEARISH -> SELL only; BTC H4 RANGE -> both."
+                "Altcoin BTC regime BULLISH -> BUY only; "
+                "BTC regime BEARISH -> SELL only; BTC RANGE/TRANSITION -> both."
             ),
         },
     }
@@ -4026,130 +4143,37 @@ def _scan_context(context: dict[str, Any] | None) -> dict[str, Any]:
     return base
 
 
-def _btc_regime_payload(
-    candles: list[Candle],
-    source: str,
-) -> dict[str, Any]:
-    structure = build_structure(candles, SWING_SPAN_H4)
-    strength = trend_strength_metrics(candles, structure)
-    atr_values = atr_series(candles, 14)
-    fibs = {
-        direction: fibonacci_summary(build_fibonacci(candles, structure, direction, "H4"), candles[-1].close)
-        for direction in DIRECTIONS_BOTH
-    }
-    return {
-        "trend": structure.trend,
-        "structure": _structure_summary(structure, candles),
-        "trend_strength": strength,
-        "fibonacci": fibs,
-        "source": source,
-        "candles": len(candles),
-        "closed_candles_only": True,
-    }
+def _btc_regime_payload(h4_candles: list[Candle], h1_candles: list[Candle], source_by_tf: dict[str,str]) -> dict[str,Any]:
+    d1_candles=resample_candles(h4_candles,24*60*60*1000)
+    regime=build_multi_timeframe_regime({"D1":(d1_candles,2),"H4":(h4_candles,SWING_SPAN_H4),"H1":(h1_candles,SWING_SPAN_H1)})
+    h4_structure=build_structure(h4_candles,SWING_SPAN_H4)
+    return {"trend":regime["trend"],"regime":regime["trend"],"state":regime["state"],"confidence":regime["confidence"],"bullish_score":regime["bullish_score"],"bearish_score":regime["bearish_score"],"gap":regime["gap"],"structure":_structure_summary(h4_structure,h4_candles),"trend_strength":trend_strength_metrics(h4_candles,h4_structure),"fibonacci":{d:fibonacci_summary(build_fibonacci(h4_candles,h4_structure,d,"H4"),h4_candles[-1].close) for d in DIRECTIONS_BOTH},"timeframes":regime["timeframes"],"sources_by_timeframe":source_by_tf,"candles":len(h4_candles),"closed_candles_only":True}
 
 
-async def analyze_btc_regime(
-    context: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Analyze BTCUSDT H4 once per scan cycle and return the cycle regime."""
-    context = _scan_context(context)
-    key = _scan_cache_key(context)
-    force_fresh = bool(context.get("force_fresh_btc_regime", False))
-    if key and key in _SCAN_BTC_REGIME_CACHE and not force_fresh:
-        cached = _SCAN_BTC_REGIME_CACHE[key]
-        return {
-            "pair": "BTCUSDT",
-            **{k: v for k, v in cached.items() if k != "candles"},
-            "cached": True,
-        }
-
-    candles, source = await fetch_series(
-        "BTCUSDT",
-        H4,
-        BTC_H4_CANDLES_REQUIRED,
-        H4_MS,
-        allow_fallback=False,
-    )
-    payload = _btc_regime_payload(candles, source)
+async def analyze_btc_regime(context: dict[str,Any] | None=None) -> dict[str,Any]:
+    context=_scan_context(context); key=_scan_cache_key(context); force=bool(context.get("force_fresh_btc_regime",False))
+    if key and key in _SCAN_BTC_REGIME_CACHE and not force:
+        cached=_SCAN_BTC_REGIME_CACHE[key]
+        return {"pair":"BTCUSDT",**{k:v for k,v in cached.items() if k not in {"candles_h4","candles_h1"}},"cached":True}
+    h4,h4_source=await fetch_series("BTCUSDT",H4,BTC_H4_CANDLES_REQUIRED,H4_MS,allow_fallback=False)
+    h1,h1_source=await fetch_series("BTCUSDT",H1,168,H1_MS,allow_fallback=False)
+    payload=_btc_regime_payload(h4,h1,{"D1":h4_source+"_DERIVED","H4":h4_source,"H1":h1_source})
     if key:
-        _SCAN_BTC_REGIME_CACHE[key] = {
-            **payload,
-            "candles": candles,
-            "created_at": time.time(),
-        }
+        _SCAN_BTC_REGIME_CACHE[key]={**payload,"candles_h4":h4,"candles_h1":h1,"created_at":time.time()}
         _prune_scan_btc_cache(key[0])
-    return {"pair": "BTCUSDT", **payload, "cached": False}
+    return {"pair":"BTCUSDT",**payload,"cached":False}
 
 
-async def analyze_scan_structure(
-    pair: str,
-    context: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Lightweight H4 structure scan used before full candidate generation.
-
-    For BTCUSDT this returns the macro BTC regime. For altcoins it fetches only
-    pair H4 from Bybit public REST, while inheriting the same BTC regime cache.
-    No M15/H1 candidate generation occurs here.
-    """
-    context = _scan_context(context)
-    normalized_pair = normalize_pair(pair)
-
-    btc = await analyze_btc_regime(context)
-    btc_trend = str(btc.get("trend") or "RANGE").upper()
-
-    if normalized_pair == "BTCUSDT":
-        return {
-            "pair": normalized_pair,
-            "trend": btc_trend,
-            "btc_h4_trend": btc_trend,
-            "aligned": True,
-            "analysis": {"btc_h4": btc["structure"], "trend_strength": btc["trend_strength"], "fibonacci": btc["fibonacci"]},
-            "data": {
-                "source": btc.get("source", "BYBIT"),
-                "timeframe": "H4",
-                "candles_used": btc.get("candles"),
-                "closed_candles_only": True,
-                "data_policy": "BYBIT_PUBLIC_ONLY",
-            },
-        }
-
-    pair_h4, source = await fetch_series(
-        normalized_pair,
-        H4,
-        PAIR_H4_CANDLES_REQUIRED,
-        H4_MS,
-        allow_fallback=False,
-    )
-    structure = build_structure(pair_h4, SWING_SPAN_H4)
-    strength = trend_strength_metrics(pair_h4, structure)
-    aligned = (
-        (btc_trend == "BULLISH" and structure.trend == "BULLISH")
-        or (btc_trend == "BEARISH" and structure.trend == "BEARISH")
-        or (btc_trend == "RANGE" and structure.trend in {"BULLISH", "BEARISH", "RANGE"})
-    )
-    fib = {
-        direction: fibonacci_summary(build_fibonacci(pair_h4, structure, direction, "H4"), pair_h4[-1].close)
-        for direction in DIRECTIONS_BOTH
-    }
-    return {
-        "pair": normalized_pair,
-        "trend": structure.trend,
-        "btc_h4_trend": btc_trend,
-        "aligned": aligned,
-        "analysis": {
-            "pair_h4": _structure_summary(structure, pair_h4),
-            "trend_strength": strength,
-            "fibonacci": fib,
-            "btc_h4": btc["structure"],
-        },
-        "data": {
-            "source": source,
-            "timeframe": "H4",
-            "candles_used": len(pair_h4),
-            "closed_candles_only": True,
-            "data_policy": "BYBIT_PUBLIC_ONLY",
-        },
-    }
+async def analyze_scan_structure(pair: str, context: dict[str,Any] | None=None) -> dict[str,Any]:
+    context=_scan_context(context); symbol=normalize_pair(pair); btc=await analyze_btc_regime(context); btc_trend=str(btc.get("trend") or "RANGE").upper()
+    if symbol=="BTCUSDT":
+        return {"pair":symbol,"trend":btc_trend,"regime":btc.get("regime",btc_trend),"state":btc.get("state",btc_trend),"confidence":btc.get("confidence",50),"btc_h4_trend":btc_trend,"aligned":True,"analysis":{"btc_regime":btc},"data":{"source":"BYBIT","timeframe":"D1/H4/H1","candles_used":btc.get("candles"),"closed_candles_only":True,"data_policy":"BYBIT_PUBLIC_ONLY"}}
+    h4,h4_source=await fetch_series(symbol,H4,PAIR_H4_CANDLES_REQUIRED,H4_MS,allow_fallback=False)
+    h1,h1_source=await fetch_series(symbol,H1,168,H1_MS,allow_fallback=False)
+    d1=resample_candles(h4,24*60*60*1000)
+    regime=build_multi_timeframe_regime({"D1":(d1,2),"H4":(h4,SWING_SPAN_H4),"H1":(h1,SWING_SPAN_H1)})
+    aligned=(btc_trend=="RANGE" and regime["trend"] in {"BULLISH","BEARISH","RANGE"}) or (btc_trend==regime["trend"] and btc_trend in {"BULLISH","BEARISH"})
+    return {"pair":symbol,"trend":regime["trend"],"regime":regime["trend"],"state":regime["state"],"confidence":regime["confidence"],"btc_h4_trend":btc_trend,"btc_regime":btc.get("regime",btc_trend),"aligned":aligned,"analysis":{"pair_regime":regime,"btc_regime":btc},"data":{"source":"BYBIT","timeframe":"D1/H4/H1","candles_used":{"D1":len(d1),"H4":len(h4),"H1":len(h1)},"closed_candles_only":True,"data_policy":"BYBIT_PUBLIC_ONLY","sources_by_timeframe":{"D1":h4_source+"_DERIVED","H4":h4_source,"H1":h1_source}}}
 
 
 def _setup_signature(setup: dict[str, Any]) -> tuple[Any, ...]:
@@ -4187,17 +4211,19 @@ async def validate_setup(
     allowed = macro.get("allowed_directions") or []
     direction_valid = fresh_direction in allowed
     same_direction = initial_direction == fresh_direction
+    fresh_pair_regime = str((macro.get("pair_regime") or {}).get("trend") or "RANGE")
+    regime_valid = (fresh_direction == DIRECTION_BUY and fresh_pair_regime == "BULLISH") or (fresh_direction == DIRECTION_SELL and fresh_pair_regime == "BEARISH")
 
     initial_sig = _setup_signature(initial_setup)
     fresh_sig = _setup_signature(fresh)
     replacement = initial_sig != fresh_sig
     confidence_ratio = (fresh_conf / initial_conf * 100.0) if initial_conf > EPS else 0.0
 
-    structural_valid = bool(direction_valid and same_direction)
+    structural_valid = bool(direction_valid and same_direction and regime_valid)
     if not structural_valid:
         valid_reason = (
-            f"Thesis berubah/tidak konsisten: initial={initial_direction}, "
-            f"validated={fresh_direction}, allowed={allowed}."
+            f"Thesis/regime berubah atau tidak konsisten: initial={initial_direction}, "
+            f"validated={fresh_direction}, pair_regime={fresh_pair_regime}, allowed={allowed}."
         )
     elif replacement and fresh_conf > initial_conf:
         valid_reason = "Validator menemukan setup baru dengan confidence lebih tinggi; setup validator digunakan."
@@ -4214,6 +4240,8 @@ async def validate_setup(
         "validated_direction": fresh_direction,
         "direction_valid": direction_valid,
         "same_direction": same_direction,
+        "fresh_pair_regime": fresh_pair_regime,
+        "regime_valid": regime_valid,
         "setup_replaced": replacement,
         "replacement_is_higher_confidence": replacement and fresh_conf > initial_conf,
         "reason": valid_reason,
@@ -4255,7 +4283,7 @@ async def _fetch_if_short(
 
 
 def validate_directional_alignment(result: dict[str, Any]) -> tuple[bool, list[str]]:
-    """Validate the v0.3 directional/top-down invariant from a strategy result."""
+    """Validate directional invariant plus final pair-regime compatibility."""
     errors: list[str] = []
     direction = str(result.get("direction") or "")
     analysis = result.get("analysis")
@@ -4271,6 +4299,13 @@ def validate_directional_alignment(result: dict[str, Any]) -> tuple[bool, list[s
         errors.append(
             f"direction {direction} tidak termasuk allowed_directions {allowed}"
         )
+
+    pair_regime = macro.get("pair_regime") if isinstance(macro.get("pair_regime"), dict) else {}
+    pair_trend = str(pair_regime.get("trend") or "")
+    if direction == "BUY" and pair_trend != "BULLISH":
+        errors.append(f"BUY membutuhkan pair_regime BULLISH, saat ini {pair_trend or '-'}")
+    if direction == "SELL" and pair_trend != "BEARISH":
+        errors.append(f"SELL membutuhkan pair_regime BEARISH, saat ini {pair_trend or '-'}")
 
     return (not errors, errors)
 
