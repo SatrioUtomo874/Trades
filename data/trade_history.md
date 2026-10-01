@@ -230,3 +230,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-01T14:19:10.690102+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## SUPERUSDT — BUY
+
+Trade ID: `SUPERUSDT-20261001-194231-3C7D81`
+
+### Setup
+
+- Price Now Reference: 0.19845
+- Entry: 0.19274
+- Reason Entry: SUPERUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.16847). H1 me-refine ke BULLISH_BREAKER 0.19292. M15 memberi execution POI BULLISH_FVG 0.192745. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.19992
+- Reason Price Exp: Price Exp 0.199914 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.19005
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.19117) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.20089
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.20089 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.19993
+- Result Reason: Price Exp 0.199914 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-01T12:42:31.554245+00:00
+- Filled: -
+- Closed: 2026-10-01T14:40:27.835995+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
