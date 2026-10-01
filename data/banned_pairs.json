@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T14:05:27.536190+00:00",
+  "saved_at": "2026-10-01T14:05:43.452252+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -36,13 +36,6 @@
       "until": "2026-10-02T11:09:18.850173+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "1000PEPEUSDT",
-      "banned_at": "2026-09-30T13:30:58.156030+00:00",
-      "until": "2026-10-01T13:30:58.156002+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
     },
     {
       "pair": "1000RATSUSDT",
@@ -176,13 +169,6 @@
       "until": "2026-10-02T11:25:07.045168+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "ALGOUSDT",
-      "banned_at": "2026-09-30T13:39:27.947930+00:00",
-      "until": "2026-10-01T13:39:27.947895+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
     },
     {
       "pair": "ALICEUSDT",
@@ -353,13 +339,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "AVAXUSDT",
-      "banned_at": "2026-09-30T13:35:17.050070+00:00",
-      "until": "2026-10-01T13:35:17.050042+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
       "pair": "AXLUSDT",
       "banned_at": "2026-10-01T11:19:01.167111+00:00",
       "until": "2026-10-02T11:19:01.167084+00:00",
@@ -372,13 +351,6 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.682, di luar target 5 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
-      "pair": "AZTECUSDT",
-      "banned_at": "2026-09-30T13:40:17.945749+00:00",
-      "until": "2026-10-01T13:40:17.945715+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
     },
     {
       "pair": "B2USDT",
@@ -456,13 +428,6 @@
       "until": "2026-10-01T19:08:43.356070+00:00",
       "reason": "Confidence 57.88 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "BCHUSDT",
-      "banned_at": "2026-09-30T13:41:05.879537+00:00",
-      "until": "2026-10-01T13:41:05.879498+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
     },
     {
       "pair": "BEATUSDT",
@@ -927,13 +892,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "ENAUSDT",
-      "banned_at": "2026-09-30T13:31:32.342342+00:00",
-      "until": "2026-10-01T13:31:32.342310+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
-    },
-    {
       "pair": "ENJUSDT",
       "banned_at": "2026-10-01T11:10:44.061319+00:00",
       "until": "2026-10-02T11:10:44.061295+00:00",
@@ -1198,13 +1156,6 @@
       "until": "2026-10-02T11:25:19.346861+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "HBARUSDT",
-      "banned_at": "2026-09-30T13:36:29.018188+00:00",
-      "until": "2026-10-01T13:36:29.018161+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
     },
     {
       "pair": "HEIUSDT",
@@ -1499,13 +1450,6 @@
       "until": "2026-10-02T10:49:47.559833+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "LDOUSDT",
-      "banned_at": "2026-09-30T13:43:29.593230+00:00",
-      "until": "2026-10-01T13:43:29.593201+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
     },
     {
       "pair": "LIGHTUSDT",
@@ -1942,13 +1886,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "PAXGUSDT",
-      "banned_at": "2026-09-30T13:44:08.835367+00:00",
-      "until": "2026-10-01T13:44:08.835340+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
-    },
-    {
       "pair": "PENDLEUSDT",
       "banned_at": "2026-10-01T10:48:14.615927+00:00",
       "until": null,
@@ -2225,13 +2162,6 @@
       "pair": "RSRUSDT",
       "banned_at": "2026-10-01T13:06:08.336388+00:00",
       "until": "2026-10-02T13:06:08.336363+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "RUNEUSDT",
-      "banned_at": "2026-09-30T13:40:43.565187+00:00",
-      "until": "2026-10-01T13:40:43.565156+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
     },
@@ -2621,13 +2551,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "UAIUSDT",
-      "banned_at": "2026-09-30T13:55:25.724318+00:00",
-      "until": "2026-10-01T13:55:25.724288+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
       "pair": "UBUSDT",
       "banned_at": "2026-10-01T11:09:53.248464+00:00",
       "until": "2026-10-02T11:09:53.248440+00:00",
@@ -2892,13 +2815,6 @@
       "until": "2026-10-02T11:20:17.178807+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "ZECUSDT",
-      "banned_at": "2026-09-30T13:27:27.251377+00:00",
-      "until": "2026-10-01T13:27:27.251343+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
     },
     {
       "pair": "ZENUSDT",
