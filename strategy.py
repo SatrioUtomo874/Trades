@@ -392,6 +392,17 @@ class BybitRateLimitError(RuntimeError):
         self.retry_after_seconds = max(0.0, float(retry_after_seconds))
 
 
+class InsufficientHistoryError(RuntimeError):
+    """Provider tidak punya cukup candle closed (listing baru / data kosong)."""
+
+    insufficient_history = True
+
+    def __init__(self, message: str, available: int = 0, required: int = 0) -> None:
+        super().__init__(message)
+        self.available = int(available)
+        self.required = int(required)
+
+
 class BybitProvider(HTTPProvider):
     # Class-level state is intentionally shared by every BybitProvider instance
     # created inside fetch_series()/fetch_price().
@@ -607,9 +618,11 @@ class BybitProvider(HTTPProvider):
 
         candles = [collected[k] for k in sorted(collected)]
         if len(candles) < count:
-            raise RuntimeError(
+            raise InsufficientHistoryError(
                 f"Bybit hanya mengembalikan {len(candles)} candle closed "
-                f"untuk {symbol} {interval}; diperlukan {count}."
+                f"untuk {symbol} {interval}; diperlukan {count}.",
+                available=len(candles),
+                required=count,
             )
         return candles[-count:]
 
@@ -715,9 +728,11 @@ class BinanceProvider(HTTPProvider):
 
         candles = [collected[k] for k in sorted(collected)]
         if len(candles) < count:
-            raise RuntimeError(
+            raise InsufficientHistoryError(
                 f"Binance hanya mengembalikan {len(candles)} candle closed "
-                f"untuk {symbol} {_binance_interval(interval)}; diperlukan {count}."
+                f"untuk {symbol} {_binance_interval(interval)}; diperlukan {count}.",
+                available=len(candles),
+                required=count,
             )
         return candles[-count:]
 
@@ -777,10 +792,17 @@ async def fetch_series(
         return candles, "BYBIT"
     except Exception as bybit_exc:
         if not allow_fallback:
-            raise RuntimeError(
+            message = (
                 f"Bybit public gagal untuk {pair} {interval}; "
                 f"SCAN melarang fallback Binance: {bybit_exc}"
-            ) from bybit_exc
+            )
+            if isinstance(bybit_exc, InsufficientHistoryError):
+                raise InsufficientHistoryError(
+                    message,
+                    available=bybit_exc.available,
+                    required=bybit_exc.required,
+                ) from bybit_exc
+            raise RuntimeError(message) from bybit_exc
 
         binance = BinanceProvider()
         try:
