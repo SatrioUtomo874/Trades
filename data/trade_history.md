@@ -890,3 +890,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-01T10:46:22.306873+00:00
 - Strategy: SMC_VLT_RSI v0.6.2
+
+---
+
+## SUSHIUSDT — BUY
+
+Trade ID: `SUSHIUSDT-20261001-174710-01A708`
+
+### Setup
+
+- Price Now Reference: 0.2635
+- Entry: 0.2589
+- Reason Entry: SUSHIUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.21035). H1 me-refine ke BULLISH_BREAKER 0.2602. M15 memberi execution POI BULLISH_BREAKER 0.25895. Fib H4 berada pada band DEEP_0.618_0.786 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.2639
+- Reason Price Exp: Price Exp 0.26389 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.2579
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.2582) + buffer 0.15 ATR M15.
+- TP: 0.2642
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.26415 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.264
+- Result Reason: Price Exp 0.26389 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-01T10:47:10.458307+00:00
+- Filled: -
+- Closed: 2026-10-01T10:47:13.147147+00:00
+- Strategy: SMC_VLT_RSI v0.6.2
