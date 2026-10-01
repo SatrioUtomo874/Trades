@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T13:15:59.722210+00:00",
+  "saved_at": "2026-10-01T13:16:24.966475+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -652,6 +652,13 @@
       "until": "2026-10-01T18:49:30.746419+00:00",
       "reason": "Confidence 56.44 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "CETUSUSDT",
+      "banned_at": "2026-10-01T13:16:24.966395+00:00",
+      "until": "2026-10-02T13:16:24.966371+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "CFGUSDT",
