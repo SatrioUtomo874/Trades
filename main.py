@@ -167,7 +167,7 @@ SCAN_CYCLE_DELAY_SECONDS = 30.0
 SCAN_VALIDATION_TOLERANCE = Decimal("0.90")
 SCAN_BANNED_PRICE_EXP_HOURS = Decimal("8")
 SCAN_BANNED_TP_SL_HOURS = Decimal("24")
-SCAN_BANNED_INSUFFICIENT_HISTORY_HOURS = Decimal("4")
+SCAN_BANNED_HISTORY_HOURS = Decimal("24")
 SCAN_MARGIN_TOLERANCE = Decimal("0.10")
 SCAN_MARGIN_FAIL_CONFIRMATIONS = 3
 BANNED_PATH = "data/banned_pairs.json"
@@ -4394,26 +4394,6 @@ class TradingEngine:
             reason or "-",
         )
 
-    async def _skip_insufficient_history(self, pair: str, exc: Exception) -> None:
-        available = getattr(exc, "available", "?")
-        required = getattr(exc, "required", "?")
-        log.info(
-            "[SCAN] %s dilewati: histori candle kurang (%s/%s); cooldown %sj",
-            pair,
-            available,
-            required,
-            decimal_to_str(SCAN_BANNED_INSUFFICIENT_HISTORY_HOURS),
-        )
-        try:
-            await self._ban_pair(
-                pair,
-                hours=SCAN_BANNED_INSUFFICIENT_HISTORY_HOURS,
-                reason=f"Histori candle kurang ({available}/{required}); dicoba lagi setelah cooldown.",
-                source="AUTO_INSUFFICIENT_HISTORY",
-            )
-        except Exception:
-            log.warning("[SCAN] cooldown histori kurang gagal disimpan %s", pair, exc_info=True)
-
     async def _auto_ban_for_result(self, trade: Trade, result: str) -> None:
         result = str(result or "").upper()
         if result == "EXPIRED":
@@ -5195,10 +5175,8 @@ class TradingEngine:
                         decimal_to_str(confidence),
                     )
                 except Exception as exc:
-                    if getattr(exc, "insufficient_history", False):
-                        await self._skip_insufficient_history(pair, exc)
-                    elif getattr(exc, "bybit_rate_limited", False):
-                        analysis_errors += 1
+                    analysis_errors += 1
+                    if getattr(exc, "bybit_rate_limited", False):
                         retry_after = getattr(exc, "retry_after_seconds", 0.0)
                         log.warning(
                             "[SCAN] analysis %s dilewati setelah Bybit rate-limit backoff | retry_after=%.2fs | %s",
@@ -5206,8 +5184,19 @@ class TradingEngine:
                             float(retry_after or 0.0),
                             exc,
                         )
+                    elif getattr(exc, "insufficient_history", False):
+                        # Listing baru / candle kurang: ban sementara, tanpa traceback.
+                        try:
+                            await self._ban_pair(
+                                pair,
+                                hours=SCAN_BANNED_HISTORY_HOURS,
+                                reason=f"Riwayat candle belum cukup: {exc}",
+                                source="AUTO_INSUFFICIENT_HISTORY",
+                            )
+                        except Exception as ban_exc:
+                            log.warning("[SCAN] gagal ban %s (riwayat kurang): %s", pair, ban_exc)
+                        log.info("[SCAN] %s dilewati, riwayat candle kurang | %s", pair, exc)
                     else:
-                        analysis_errors += 1
                         log.exception("[SCAN] analysis error %s", pair)
 
                 await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
