@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T11:12:05.047641+00:00",
+  "saved_at": "2026-10-01T11:13:26.551171+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1060,13 +1060,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "NILUSDT",
-      "banned_at": "2026-09-30T11:08:39.491686+00:00",
-      "until": "2026-10-01T11:08:39.491654+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
       "pair": "NMRUSDT",
       "banned_at": "2026-10-01T10:48:12.224353+00:00",
       "until": null,
@@ -1315,13 +1308,6 @@
       "pair": "RUNEUSDT",
       "banned_at": "2026-09-30T13:40:43.565187+00:00",
       "until": "2026-10-01T13:40:43.565156+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "RVNUSDT",
-      "banned_at": "2026-09-30T11:09:34.041512+00:00",
-      "until": "2026-10-01T11:09:34.041488+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
     },
