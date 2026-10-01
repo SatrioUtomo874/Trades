@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T11:15:48.345386+00:00",
+  "saved_at": "2026-10-01T11:15:52.849082+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -664,6 +664,13 @@
       "pair": "FLOCKUSDT",
       "banned_at": "2026-10-01T10:45:06.251521+00:00",
       "until": "2026-10-02T10:45:06.251499+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "FOGOUSDT",
+      "banned_at": "2026-10-01T11:15:52.848985+00:00",
+      "until": "2026-10-02T11:15:52.848952+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
