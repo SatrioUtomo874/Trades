@@ -230,3 +230,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-01T11:37:52.547291+00:00
 - Strategy: SMC_VLT_RSI v0.6.2
+
+---
+
+## PONSUSDT — BUY
+
+Trade ID: `PONSUSDT-20261001-180740-A1FCFF`
+
+### Setup
+
+- Price Now Reference: 0.5432
+- Entry: 0.5361
+- Reason Entry: PONSUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 0.53325). H1 me-refine ke BULLISH_FVG 0.5298. M15 memberi execution POI BULLISH_BREAKER 0.53615. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 55.6 mendukung momentum.
+- Price Exp: 0.5517
+- Reason Price Exp: Price Exp 0.55166 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.527
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.5279) + buffer 0.15 ATR M15.
+- TP: 0.5628
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 0.5628 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.5517
+- Result Reason: Price Exp 0.55166 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-01T11:07:40.681876+00:00
+- Filled: -
+- Closed: 2026-10-01T11:52:31.686899+00:00
+- Strategy: SMC_VLT_RSI v0.6.2
