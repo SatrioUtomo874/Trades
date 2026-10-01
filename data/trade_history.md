@@ -65,3 +65,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T12:42:28.516437+00:00
 - Closed: 2026-10-01T13:05:59.012167+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## SAFEUSDT — BUY
+
+Trade ID: `SAFEUSDT-20261001-194227-A9D439`
+
+### Setup
+
+- Price Now Reference: 0.1124
+- Entry: 0.1121
+- Reason Entry: SAFEUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.099585). H1 me-refine ke BULLISH_BREAKER 0.11208. M15 memberi execution POI BULLISH_FVG 0.112205. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 50.3 mendukung momentum.
+- Price Exp: 0.11514
+- Reason Price Exp: Price Exp 0.115136 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.1092
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.1115) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.11696
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.11696 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.10919
+- Result Reason: SL di luar invalidasi struktur H1/H4 (0.1115) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- PnL: -2.595896520963425512934879572%
+- Created: 2026-10-01T12:42:27.345195+00:00
+- Filled: 2026-10-01T13:03:29.264889+00:00
+- Closed: 2026-10-01T13:15:50.307606+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
