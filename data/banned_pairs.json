@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T16:49:16.676363+00:00",
+  "saved_at": "2026-10-01T17:27:35.945306+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -645,6 +645,13 @@
       "until": "2026-10-02T11:06:17.546972+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "CHILLGUYUSDT",
+      "banned_at": "2026-10-01T17:27:35.945218+00:00",
+      "until": "2026-10-02T17:27:35.945184+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "CHIPUSDT",
