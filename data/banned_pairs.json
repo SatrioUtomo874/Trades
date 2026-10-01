@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T10:40:44.048361+00:00",
+  "saved_at": "2026-10-01T10:40:52.355556+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -155,6 +155,13 @@
       "until": "2026-10-01T11:08:39.491654+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "NOMUSDT",
+      "banned_at": "2026-10-01T10:40:52.355539+00:00",
+      "until": "2026-10-01T18:40:52.355515+00:00",
+      "reason": "Confidence 52.68 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "ONDOUSDT",
