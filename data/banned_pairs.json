@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T10:48:10.303517+00:00",
+  "saved_at": "2026-10-01T10:48:12.224424+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -456,6 +456,13 @@
       "until": "2026-10-01T11:08:39.491654+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "NMRUSDT",
+      "banned_at": "2026-10-01T10:48:12.224353+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.668, di luar target 5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "NOMUSDT",
