@@ -164,3 +164,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T12:57:36.403467+00:00
 - Closed: 2026-10-01T13:17:18.379277+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## KATUSDT — BUY
+
+Trade ID: `KATUSDT-20261001-194230-2EDF02`
+
+### Setup
+
+- Price Now Reference: 0.004908
+- Entry: 0.004892
+- Reason Entry: KATUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 0.0049025). H1 me-refine ke BULLISH_BREAKER 0.0048915. M15 memberi execution POI BULLISH_BREAKER 0.004892. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.005002
+- Reason Price Exp: Price Exp 0.0050011 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.004831
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.004859) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.005241
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.0052405 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.004831
+- Result Reason: SL di luar invalidasi struktur H1/H4 (0.004859) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- PnL: -1.24693376941946034341782502%
+- Created: 2026-10-01T12:42:30.545694+00:00
+- Filled: 2026-10-01T12:53:01.464056+00:00
+- Closed: 2026-10-01T14:05:16.154129+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
