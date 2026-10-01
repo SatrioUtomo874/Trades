@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T11:21:40.748756+00:00",
+  "saved_at": "2026-10-01T11:22:49.090909+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -190,6 +190,13 @@
       "until": "2026-10-01T19:19:49.050378+00:00",
       "reason": "Confidence 66.74 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ARKMUSDT",
+      "banned_at": "2026-10-01T11:22:49.090769+00:00",
+      "until": "2026-10-01T19:22:49.090743+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ARKUSDT",
