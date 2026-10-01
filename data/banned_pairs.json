@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T11:00:36.678122+00:00",
+  "saved_at": "2026-10-01T11:01:44.288091+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1205,6 +1205,13 @@
       "until": "2026-10-02T10:46:19.059810+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ZROUSDT",
+      "banned_at": "2026-10-01T11:01:44.287998+00:00",
+      "until": "2026-10-02T11:01:44.287963+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     }
   ]
 }
