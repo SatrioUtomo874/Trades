@@ -428,3 +428,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-01T16:47:59.650393+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## CHILLGUYUSDT — BUY
+
+Trade ID: `CHILLGUYUSDT-20261001-235256-9FC32A`
+
+### Setup
+
+- Price Now Reference: 0.013243
+- Entry: 0.01318
+- Reason Entry: CHILLGUYUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 0.0129215). H1 me-refine ke BULLISH_FVG 0.01318. M15 memberi execution POI BULLISH_FVG 0.013204. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.013444
+- Reason Price Exp: Price Exp 0.0134431 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.012936
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.013148) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1. SL dilebarkan ke risiko minimum 1.0 ATR H1.
+- TP: 0.013577
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.0135765 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.013577
+- Result Reason: TP diarahkan ke H4_EQUAL_LEVELS 0.0135765 sebagai liquidity target HTF.
+- PnL: 3.012139605462830274062185543%
+- Created: 2026-10-01T16:52:56.343409+00:00
+- Filled: 2026-10-01T16:55:24.431451+00:00
+- Closed: 2026-10-01T17:27:21.021789+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
