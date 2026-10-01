@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T10:49:23.949204+00:00",
+  "saved_at": "2026-10-01T10:49:30.746535+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -203,6 +203,13 @@
       "banned_at": "2026-10-01T10:49:11.757129+00:00",
       "until": "2026-10-01T18:49:11.757099+00:00",
       "reason": "Confidence 41.73 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "CELOUSDT",
+      "banned_at": "2026-10-01T10:49:30.746456+00:00",
+      "until": "2026-10-01T18:49:30.746419+00:00",
+      "reason": "Confidence 56.44 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
