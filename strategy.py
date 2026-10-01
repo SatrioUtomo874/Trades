@@ -9,7 +9,7 @@ Strategy intelligence untuk main.py dengan multi-timeframe regime engine, top-do
 Kontrak utama:
     async def generate_setup(pair, context) -> dict
 
-Prinsip desain v0.6.2
+Prinsip desain v0.7.0
 ---------------------
 1. SMC adalah kerangka utama; regime ditentukan multi-timeframe, lalu RSI 14 M15 dan VLT/OHLCV menjadi konfirmasi eksekusi.
 2. Semua keputusan struktur memakai CLOSED candles saja.
@@ -74,7 +74,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.6.2"
+STRATEGY_VERSION = "0.7.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -123,6 +123,18 @@ FIB_SHALLOW_RATIO = 0.382
 FIB_MID_RATIO = 0.500
 EXP_ATR_MULTIPLIER = 1.25
 SL_BUFFER_ATR = 0.15
+# Model risiko multi-timeframe: SL, Price Exp, dan target dihitung dari ATR H1
+# dan invalidasi struktur H1/H4 (bukan noise M15).
+SL_BUFFER_H1_ATR = 0.30
+SL_MIN_H1_ATR = 1.0
+SL_MAX_H1_ATR = 4.0
+SL_MIN_PCT = 0.5
+SL_SWING_EXTEND_H1_ATR = 1.0
+EXP_H1_ATR_MULTIPLIER = 1.5
+MIN_PLANNED_RR = 1.5
+TP_FALLBACK_RR = 2.0
+FALLBACK_CONFIDENCE_CAP = 60.0
+LOW_QUALITY_MODELS = {"M15_SMC_FALLBACK", "STRUCTURE_PULLBACK_FALLBACK"}
 
 WEIGHTS = {
     # BTC H4 is a directional search constraint, not a soft score component.
@@ -393,14 +405,9 @@ class BybitRateLimitError(RuntimeError):
 
 
 class InsufficientHistoryError(RuntimeError):
-    """Provider tidak punya cukup candle closed (listing baru / data kosong)."""
+    """Pair belum punya cukup candle closed (mis. listing baru)."""
 
     insufficient_history = True
-
-    def __init__(self, message: str, available: int = 0, required: int = 0) -> None:
-        super().__init__(message)
-        self.available = int(available)
-        self.required = int(required)
 
 
 class BybitProvider(HTTPProvider):
@@ -620,9 +627,7 @@ class BybitProvider(HTTPProvider):
         if len(candles) < count:
             raise InsufficientHistoryError(
                 f"Bybit hanya mengembalikan {len(candles)} candle closed "
-                f"untuk {symbol} {interval}; diperlukan {count}.",
-                available=len(candles),
-                required=count,
+                f"untuk {symbol} {interval}; diperlukan {count}."
             )
         return candles[-count:]
 
@@ -728,11 +733,9 @@ class BinanceProvider(HTTPProvider):
 
         candles = [collected[k] for k in sorted(collected)]
         if len(candles) < count:
-            raise InsufficientHistoryError(
+            raise RuntimeError(
                 f"Binance hanya mengembalikan {len(candles)} candle closed "
-                f"untuk {symbol} {_binance_interval(interval)}; diperlukan {count}.",
-                available=len(candles),
-                required=count,
+                f"untuk {symbol} {_binance_interval(interval)}; diperlukan {count}."
             )
         return candles[-count:]
 
@@ -792,17 +795,15 @@ async def fetch_series(
         return candles, "BYBIT"
     except Exception as bybit_exc:
         if not allow_fallback:
-            message = (
+            error_cls = (
+                InsufficientHistoryError
+                if getattr(bybit_exc, "insufficient_history", False)
+                else RuntimeError
+            )
+            raise error_cls(
                 f"Bybit public gagal untuk {pair} {interval}; "
                 f"SCAN melarang fallback Binance: {bybit_exc}"
-            )
-            if isinstance(bybit_exc, InsufficientHistoryError):
-                raise InsufficientHistoryError(
-                    message,
-                    available=bybit_exc.available,
-                    required=bybit_exc.required,
-                ) from bybit_exc
-            raise RuntimeError(message) from bybit_exc
+            ) from bybit_exc
 
         binance = BinanceProvider()
         try:
@@ -2044,6 +2045,43 @@ def structural_invalidation_level(
     return min(levels) if levels else entry
 
 
+def htf_invalidation_level(
+    direction: str,
+    entry: float,
+    zone: Zone,
+    h1_structure: StructureSnapshot | None,
+    h1_atr: float,
+) -> float:
+    """Invalidasi struktur di sisi jauh zona entry HTF, diperluas ke swing H1 terdekat."""
+    reach = h1_atr * SL_SWING_EXTEND_H1_ATR
+    if direction == "BUY":
+        level = zone.low if zone.low < entry else entry
+        if h1_structure is not None:
+            for pivot in reversed(h1_structure.swing_lows[-8:]):
+                if pivot.price < level and level - pivot.price <= reach:
+                    return pivot.price
+        return level
+    level = zone.high if zone.high > entry else entry
+    if h1_structure is not None:
+        for pivot in reversed(h1_structure.swing_highs[-8:]):
+            if pivot.price > level and pivot.price - level <= reach:
+                return pivot.price
+    return level
+
+
+def enforce_risk_floor(candidate: Candidate, h1_atr: float) -> None:
+    """Lebarkan SL ke risiko minimum agar tidak tersapu noise intraday."""
+    min_risk = max(h1_atr * SL_MIN_H1_ATR, candidate.entry * SL_MIN_PCT / 100.0)
+    if min_risk <= 0 or abs(candidate.entry - candidate.sl) >= min_risk:
+        return
+    if candidate.direction == "BUY":
+        candidate.sl = round_price(candidate.entry - min_risk)
+    else:
+        candidate.sl = round_price(candidate.entry + min_risk)
+    candidate.sl_reason += f" SL dilebarkan ke risiko minimum {SL_MIN_H1_ATR:.1f} ATR H1."
+    candidate.evidence["risk_floor_applied"] = True
+
+
 def topdown_candidate(
     *,
     pair: str,
@@ -2064,23 +2102,22 @@ def topdown_candidate(
     rsi: float,
     vlt_direction: str,
 ) -> Candidate | None:
-    # Prefer the most precise available zone, but only if it is realistically
-    # reachable from current. Never turn a distant H4 context zone into a fake
-    # executable pending entry when a nearer H1/M15 refinement exists.
+    h1_atr = safe_float(h1_ctx.get("atr"), 0.0)
+    if h1_atr <= 0:
+        h1_atr = m15_atr * 3.0
+    h4_atr = safe_float(h4_ctx.get("atr"), h1_atr * 2.0)
+
     entry_zone = None
     entry_zone_tf = None
     reach_score = 0.0
     reach_details: dict[str, Any] = {}
 
-    for zone, tf in ((execution, "M15"), (refinement, "H1"), (primary, "H4")):
+    # Zona entry mengikuti HTF: H1 refinement dulu, lalu H4 primary.
+    # M15 hanya mempersempit entry bila overlap dengan zona HTF tersebut.
+    for zone, tf in ((refinement, "H1"), (primary, "H4")):
         if zone is None or not _zone_is_retracement_side(zone, direction, current):
             continue
-        score, details = entry_reachability(
-            direction,
-            current,
-            zone.midpoint,
-            safe_float(h4_ctx.get("atr"), m15_atr * 4.0),
-        )
+        score, details = entry_reachability(direction, current, zone.midpoint, h4_atr)
         if not details["allowed"]:
             continue
         entry_zone = zone
@@ -2093,58 +2130,73 @@ def topdown_candidate(
         return None
 
     entry = entry_zone.midpoint
+    if (
+        execution is not None
+        and _zone_is_retracement_side(execution, direction, current)
+        and zone_overlap_ratio(execution, entry_zone) > 0
+    ):
+        low = max(execution.low, entry_zone.low)
+        high = min(execution.high, entry_zone.high)
+        refined = (low + high) / 2.0
+        if high > low and (
+            (direction == "BUY" and refined < current)
+            or (direction == "SELL" and refined > current)
+        ):
+            entry = refined
+            entry_zone_tf = f"{entry_zone_tf}+M15"
 
-    structural = structural_invalidation_level(
+    structural = htf_invalidation_level(
         direction,
         entry,
-        execution,
-        refinement,
-        primary,
-        m15_structure,
-        sweep,
+        entry_zone,
+        h1_ctx.get("structure"),
+        h1_atr,
     )
-    if direction == "BUY":
-        sl = structural - m15_atr * SL_BUFFER_ATR
-        if sl >= entry:
-            sl = entry - max(m15_atr * 0.60, entry * 0.002)
-    else:
-        sl = structural + m15_atr * SL_BUFFER_ATR
-        if sl <= entry:
-            sl = entry + max(m15_atr * 0.60, entry * 0.002)
+    buffer = h1_atr * SL_BUFFER_H1_ATR
+    sl = structural - buffer if direction == "BUY" else structural + buffer
+    min_risk = max(h1_atr * SL_MIN_H1_ATR, entry * SL_MIN_PCT / 100.0)
+    risk = abs(entry - sl)
+    if risk < min_risk:
+        risk = min_risk
+        sl = entry - risk if direction == "BUY" else entry + risk
+    if risk > h1_atr * SL_MAX_H1_ATR:
+        return None
 
     tp = target.level if target else 0.0
     if direction == "BUY":
         if tp <= entry:
-            tp = max(current + 1.75 * m15_atr, entry + 1.75 * m15_atr)
-        tp = max(tp, entry + 1.25 * m15_atr)
+            tp = entry + TP_FALLBACK_RR * risk
+        if (tp - entry) / risk < MIN_PLANNED_RR:
+            return None
         price_exp = current + max(
-            EXP_ATR_MULTIPLIER * m15_atr,
+            EXP_H1_ATR_MULTIPLIER * h1_atr,
             abs(current - entry) * 1.20,
             (tp - current) * 0.28,
         )
         if tp > current:
             price_exp = min(price_exp, current + (tp - current) * 0.60)
         if price_exp <= current:
-            price_exp = current + max(m15_atr * 0.6, current * 0.001)
+            price_exp = current + max(h1_atr * 0.60, current * 0.001)
         if price_exp >= tp:
-            price_exp = current + max(m15_atr * 0.60, (tp - current) * 0.35)
+            price_exp = current + max(h1_atr * 0.60, (tp - current) * 0.35)
         if not (sl < entry < current < price_exp < tp):
             return None
     else:
         if tp >= entry or tp <= 0:
-            tp = min(current - 1.75 * m15_atr, entry - 1.75 * m15_atr)
-        tp = min(tp, entry - 1.25 * m15_atr)
+            tp = entry - TP_FALLBACK_RR * risk
+        if tp <= 0 or (entry - tp) / risk < MIN_PLANNED_RR:
+            return None
         price_exp = current - max(
-            EXP_ATR_MULTIPLIER * m15_atr,
+            EXP_H1_ATR_MULTIPLIER * h1_atr,
             abs(current - entry) * 1.20,
             (current - tp) * 0.28,
         )
         if tp < current:
             price_exp = max(price_exp, current - (current - tp) * 0.60)
         if price_exp >= current:
-            price_exp = current - max(m15_atr * 0.60, current * 0.001)
+            price_exp = current - max(h1_atr * 0.60, current * 0.001)
         if price_exp <= tp:
-            price_exp = current - max(m15_atr * 0.60, (current - tp) * 0.35)
+            price_exp = current - max(h1_atr * 0.60, (current - tp) * 0.35)
         if not (tp < price_exp < current < entry < sl):
             return None
 
@@ -2170,7 +2222,13 @@ def topdown_candidate(
         "pair_h4_trend": h4_ctx.get("structure").trend if h4_ctx.get("structure") else None,
         "entry_zone_timeframe": entry_zone_tf,
         "entry_reachability": {"score": round(reach_score, 2), **reach_details},
-        "notes_architecture": "H4 primary POI -> H1 retracement-path refinement -> M15 execution confirmation",
+        "risk_model": {
+            "h1_atr": round_price(h1_atr),
+            "risk": round_price(risk),
+            "risk_h1_atr": round(risk / max(h1_atr, EPS), 2),
+            "planned_rr": round(abs(tp - entry) / max(risk, EPS), 2),
+        },
+        "notes_architecture": "H4 primary POI -> H1 entry zone + SL anchor -> M15 timing refinement",
     }
     entry_reason = _topdown_entry_reason(
         pair,
@@ -2187,13 +2245,13 @@ def topdown_candidate(
         vlt_direction,
     )
     sl_reason = (
-        f"SL ditempatkan di bawah/atas structural invalidation terdekat "
-        f"({round_price(structural)}) + buffer {SL_BUFFER_ATR:.2f} ATR M15."
+        f"SL di luar invalidasi struktur H1/H4 ({round_price(structural)}) + buffer "
+        f"{SL_BUFFER_H1_ATR:.2f} ATR H1; risiko minimum {SL_MIN_H1_ATR:.1f} ATR H1."
     )
     tp_reason = (
         f"TP diarahkan ke {target.source} {round_price(target.level)} sebagai liquidity target HTF."
         if target else
-        f"TP fallback {round_price(tp)} menggunakan range/ATR setelah target liquidity HTF tidak tersedia."
+        f"TP fallback {round_price(tp)} menggunakan RR minimum dari risiko karena target liquidity HTF tidak tersedia."
     )
     exp_reason = (
         f"Price Exp {round_price(price_exp)} adalah batas ekspansi thesis H4/H1 sebelum entry. "
@@ -3029,17 +3087,18 @@ def candidate_rr_score(candidate: Candidate) -> float:
     risk = abs(candidate.entry - candidate.sl)
     reward = abs(candidate.tp - candidate.entry)
     rr = reward / max(risk, EPS)
-    if rr >= 3:
-        return 100.0
-    if rr >= 2.5:
-        return 94.0
+    # RR ekstrem tinggi biasanya tanda SL terlalu ketat, bukan setup bagus.
+    if rr >= 8:
+        return 40.0
+    if rr >= 5:
+        return 70.0
     if rr >= 2:
-        return 86.0
+        return 100.0
     if rr >= 1.5:
-        return 72.0
+        return 78.0
     if rr >= 1.0:
-        return 48.0
-    return 20.0
+        return 40.0
+    return 15.0
 
 
 def macro_bias_score(direction: str, macro_trend: str) -> float:
@@ -3508,8 +3567,8 @@ def _collect_directional_candidates(
             target = find_target_liquidity_topdown(
                 combined_liquidity,
                 direction,
-                execution.midpoint if execution else refinement.midpoint if refinement else primary.midpoint,
-                atr,
+                refinement.midpoint if refinement else primary.midpoint,
+                safe_float(h1_ctx.get("atr"), atr * 3.0),
             )
             cand = topdown_candidate(
                 pair=pair,
@@ -3633,6 +3692,7 @@ def _collect_directional_candidates(
                     )
                     cand.confidence = round(max(0.0, cand.confidence - 10.0), 2)
                     cand.evidence["confidence_penalty"] = 10.0
+                    cand.confidence = min(cand.confidence, FALLBACK_CONFIDENCE_CAP)
                     cand.evidence["trigger_status"] = "M15_FALLBACK"
                     candidates.append(cand)
 
@@ -4002,6 +4062,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     )
 
     best = _best_candidate(candidates)
+    h1_floor_atr = safe_float(h1_ctx.get("atr"), 0.0)
+    enforce_risk_floor(best, h1_floor_atr)
 
     # Quantize to actual Binance price tick when available, then re-check the
     # geometry that main.py will enforce.
@@ -4018,6 +4080,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             pair_h4_structure,
             liquidity,
         )
+        enforce_risk_floor(best, h1_floor_atr)
         align_candidate_to_tick(best, tick_size, current)
 
     if not _ensure_price_geometry(best, current):
@@ -4094,6 +4157,15 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     risk = abs(best.entry - best.sl)
     reward = abs(best.tp - best.entry)
     planned_rr = reward / max(risk, EPS)
+
+    # Batas confidence: RR buruk atau model fallback M15 tidak boleh terlihat sebagai setup HTF.
+    best.evidence["planned_rr"] = round(planned_rr, 2)
+    if planned_rr < 1.0:
+        best.confidence = min(best.confidence, 40.0)
+    elif planned_rr < MIN_PLANNED_RR:
+        best.confidence = min(best.confidence, 60.0)
+    if best.model in LOW_QUALITY_MODELS:
+        best.confidence = min(best.confidence, FALLBACK_CONFIDENCE_CAP)
 
     # ------------------------------------------------------------------
     # Compact but rich machine-readable analysis.
