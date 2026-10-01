@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T15:01:03.547385+00:00",
+  "saved_at": "2026-10-01T15:09:58.571923+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -330,6 +330,13 @@
       "until": "2026-10-02T11:24:23.749322+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "AUSDT",
+      "banned_at": "2026-10-01T15:09:58.571799+00:00",
+      "until": "2026-10-02T15:09:58.571749+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "AVAAIUSDT",
