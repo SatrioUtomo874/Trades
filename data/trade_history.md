@@ -131,3 +131,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T12:42:25.931956+00:00
 - Closed: 2026-10-01T13:16:13.892322+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## OGNUSDT — BUY
+
+Trade ID: `OGNUSDT-20261001-194232-D3FC40`
+
+### Setup
+
+- Price Now Reference: 0.020514
+- Entry: 0.0205
+- Reason Entry: OGNUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.0181845). H1 me-refine ke BULLISH_OB 0.020501. M15 memberi execution POI BULLISH_FVG 0.0205105. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.02084
+- Reason Price Exp: Price Exp 0.0208339 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.02028
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.020386) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.02118
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.021179 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.02028
+- Result Reason: SL di luar invalidasi struktur H1/H4 (0.020386) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- PnL: -1.073170731707317073170731707%
+- Created: 2026-10-01T12:42:32.566284+00:00
+- Filled: 2026-10-01T12:57:36.403467+00:00
+- Closed: 2026-10-01T13:17:18.379277+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
