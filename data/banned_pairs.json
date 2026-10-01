@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T12:40:39.550349+00:00",
+  "saved_at": "2026-10-01T13:00:28.744749+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -855,6 +855,13 @@
       "until": "2026-10-01T18:49:06.446016+00:00",
       "reason": "Confidence 63.45 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "DYDXUSDT",
+      "banned_at": "2026-10-01T13:00:28.744667+00:00",
+      "until": "2026-10-01T21:00:28.744641+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "DYMUSDT",
