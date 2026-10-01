@@ -296,3 +296,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T12:44:29.544957+00:00
 - Closed: 2026-10-01T14:46:40.109444+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## CLANKERUSDT — BUY
+
+Trade ID: `CLANKERUSDT-20261001-194233-D1CE80`
+
+### Setup
+
+- Price Now Reference: 14.137
+- Entry: 13.99
+- Reason Entry: CLANKERUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 11.637). H1 me-refine ke BULLISH_FVG 13.959. M15 memberi execution POI BULLISH_BREAKER 13.9945. Fib H4 berada pada band DEEP_0.618_0.786 (score 100). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 51.4 mendukung momentum.
+- Price Exp: 14.29
+- Reason Price Exp: Price Exp 14.284 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 13.75
+- Reason SL: SL di luar invalidasi struktur H1/H4 (13.807) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 14.39
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 14.382 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 13.75
+- Result Reason: SL di luar invalidasi struktur H1/H4 (13.807) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- PnL: -1.715511079342387419585418156%
+- Created: 2026-10-01T12:42:33.579059+00:00
+- Filled: 2026-10-01T13:22:44.698520+00:00
+- Closed: 2026-10-01T14:53:27.575631+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
