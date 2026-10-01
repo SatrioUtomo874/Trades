@@ -395,3 +395,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-01T16:47:40.633985+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## BELUSDT — SELL
+
+Trade ID: `BELUSDT-20261001-234511-9A495D`
+
+### Setup
+
+- Price Now Reference: 0.12762
+- Entry: 0.12893
+- Reason Entry: BELUSDT SELL: thesis dimulai dari POI H4. (BEARISH_OB 0.133095). H1 me-refine ke BEARISH_BREAKER 0.129155. M15 memberi execution POI BEARISH_OB 0.12893. Fib H4 berada pada band OVERLAPS_0.618 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.12576
+- Reason Price Exp: Price Exp 0.1257601 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.13017
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.12959) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.12168
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.12168 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: MANUAL_CLOSE_PENDING
+- Exit Price: -
+- Result Reason: Manual /close pada setup REAL PENDING sebelum entry.
+- PnL: -
+- Created: 2026-10-01T16:45:11.641488+00:00
+- Filled: -
+- Closed: 2026-10-01T16:47:59.650393+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
