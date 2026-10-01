@@ -5261,6 +5261,7 @@ class TradingEngine:
 
         final_added: list[Trade] = []
         final_add_errors = 0
+        final_margin_banned: list[str] = []
 
         for candidate in validated:
             if len(self.active_trades) >= self.max_active_trades:
@@ -5292,7 +5293,10 @@ class TradingEngine:
                             reason=f"Real quantity tidak memenuhi target margin ±10%: {exc}",
                             source="AUTO_MARGIN_INFLUENCE",
                         )
-                        raise
+                        final_margin_banned.append(trade.pair)
+                        log.info("[SCAN] %s diban permanen (margin influence): %s", trade.pair, exc)
+                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                        continue
                     if trade.status == "CLOSED":
                         continue
                 self.active_trades[trade.trade_id] = trade
@@ -5389,6 +5393,7 @@ class TradingEngine:
                 "validator_errors_or_rejects": validator_rejects,
                 "final_added": len(final_added),
                 "final_add_errors": final_add_errors,
+                "final_margin_banned": list(final_margin_banned),
                 "analysis_errors": analysis_errors,
             },
             "confidence": {
@@ -5461,7 +5466,8 @@ class TradingEngine:
             "Validator reject/missing: {vrej}\n"
             "Analysis errors: {errors}\n"
             "Final masuk /trade: {added}\n"
-            "Final add errors: {add_errors}\n\n"
+            "Final add errors: {add_errors}\n"
+            "Final ban margin influence: {margin_banned}\n\n"
             "CONFIDENCE:\n"
             "Threshold: {threshold}\n"
             "Average Initial: {avg_initial}\n"
@@ -5498,6 +5504,10 @@ class TradingEngine:
                 errors=analysis_errors,
                 added=len(final_added),
                 add_errors=final_add_errors,
+                margin_banned=(
+                    str(len(final_margin_banned))
+                    + (f" ({', '.join(final_margin_banned[:10])})" if final_margin_banned else "")
+                ),
                 threshold=decimal_to_str(self.scan_threshold),
                 avg_initial=decimal_to_str(avg_initial),
                 avg_validated=decimal_to_str(avg_validated),
