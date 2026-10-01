@@ -164,3 +164,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-01T11:22:38.696240+00:00
 - Strategy: SMC_VLT_RSI v0.6.2
+
+---
+
+## TUTUSDT — BUY
+
+Trade ID: `TUTUSDT-20261001-180739-4E324D`
+
+### Setup
+
+- Price Now Reference: 0.024596
+- Entry: 0.02449
+- Reason Entry: TUTUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.024398). H1 me-refine ke BULLISH_FVG 0.0244085. M15 memberi execution POI BULLISH_BREAKER 0.024491. Fib H4 berada pada band DEEP_0.618_0.786 (score 100). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.02467
+- Reason Price Exp: Price Exp 0.0246619 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.0244
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.024432) + buffer 0.15 ATR M15.
+- TP: 0.02471
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 0.024522 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02467
+- Result Reason: Price Exp 0.0246619 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-01T11:07:39.672777+00:00
+- Filled: -
+- Closed: 2026-10-01T11:23:20.042264+00:00
+- Strategy: SMC_VLT_RSI v0.6.2
