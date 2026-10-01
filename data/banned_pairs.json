@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T11:40:16.148060+00:00",
+  "saved_at": "2026-10-01T11:40:20.248428+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2547,6 +2547,13 @@
       "pair": "ZENUSDT",
       "banned_at": "2026-10-01T10:44:17.248160+00:00",
       "until": "2026-10-02T10:44:17.248137+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ZEREBROUSDT",
+      "banned_at": "2026-10-01T11:40:20.248312+00:00",
+      "until": "2026-10-02T11:40:20.248288+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
