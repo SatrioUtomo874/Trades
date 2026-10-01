@@ -329,3 +329,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T13:22:44.698520+00:00
 - Closed: 2026-10-01T14:53:27.575631+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## AUSDT — BUY
+
+Trade ID: `AUSDT-20261001-194239-7E7187`
+
+### Setup
+
+- Price Now Reference: 0.09688
+- Entry: 0.09608
+- Reason Entry: AUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.083125). H1 me-refine ke BULLISH_BREAKER 0.095985. M15 memberi execution POI BULLISH_FVG 0.09624. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.0986
+- Reason Price Exp: Price Exp 0.0985942 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.09442
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.09477) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.10041
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.10041 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.09442
+- Result Reason: SL di luar invalidasi struktur H1/H4 (0.09477) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- PnL: -1.727726894254787676935886761%
+- Created: 2026-10-01T12:42:39.644103+00:00
+- Filled: 2026-10-01T13:05:00.443645+00:00
+- Closed: 2026-10-01T15:09:46.699281+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
