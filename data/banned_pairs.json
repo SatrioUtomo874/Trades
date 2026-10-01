@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T10:46:07.564369+00:00",
+  "saved_at": "2026-10-01T10:46:11.147151+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -15,6 +15,13 @@
       "until": "2026-10-01T13:30:58.156002+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "2ZUSDT",
+      "banned_at": "2026-10-01T10:46:11.147111+00:00",
+      "until": "2026-10-02T10:46:11.147087+00:00",
+      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "ADAUSDT",
