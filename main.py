@@ -145,6 +145,8 @@ BINANCE_RECV_WINDOW = 5000
 BINANCE_RATE_LIMIT_FALLBACK_SECONDS = 60
 BINANCE_RATE_LIMIT_SAFETY_SECONDS = 60
 REAL_RECONCILE_INTERVAL_SECONDS = 1.0
+REAL_PENDING_POLL_SECONDS = 2.0
+REAL_PROTECT_CHECK_SECONDS = 60.0
 DEFAULT_MARGIN_USDT = Decimal("0.5")
 DEFAULT_LEVERAGE = 10
 REAL_NOTIONAL_MIN_RATIO = Decimal("0.90")
@@ -314,6 +316,17 @@ def parse_decimal(value: str) -> Decimal:
     if not number.is_finite() or number <= 0:
         raise ValueError("Harga harus lebih besar dari 0.")
 
+    return number
+
+
+def parse_signed_decimal(value: str) -> Decimal:
+    """Parse angka bertanda (positionAmt negatif untuk SHORT)."""
+    try:
+        number = Decimal(str(value).strip())
+    except InvalidOperation as exc:
+        raise ValueError("Angka bertanda tidak valid.") from exc
+    if not number.is_finite():
+        raise ValueError("Angka bertanda tidak valid.")
     return number
 
 
@@ -1575,7 +1588,7 @@ class BinanceWebSocket:
     @property
     def status(self) -> str:
         if self.connected:
-            if self.last_message_at is None:
+            if self.last_message_at is None or not self._desired_symbols:
                 return "CONNECTED"
             age = (
                 now_utc() - self.last_message_at
@@ -1830,10 +1843,22 @@ class BinanceWebSocket:
                     backoff = WS_RECONNECT_MIN
 
                     while not self._stop.is_set():
-                        raw = await asyncio.wait_for(
-                            ws.recv(),
-                            timeout=PRICE_STALE_SECONDS + 30,
-                        )
+                        try:
+                            raw = await asyncio.wait_for(
+                                ws.recv(),
+                                timeout=PRICE_STALE_SECONDS + 30,
+                            )
+                        except asyncio.TimeoutError:
+                            # Pair sepi bisa tanpa trade >45s; cek koneksi via ping.
+                            try:
+                                pong_waiter = await ws.ping()
+                                await asyncio.wait_for(pong_waiter, timeout=10)
+                            except Exception as exc:
+                                raise ConnectionError(
+                                    "Ping WebSocket tidak dibalas."
+                                ) from exc
+                            self.last_message_at = now_utc()
+                            continue
 
                         if raw is None:
                             raise ConnectionError(
@@ -2043,6 +2068,23 @@ class GitHubStore:
             content = str(
                 body.get("content") or ""
             ).replace("\n", "")
+
+            if not content and int(body.get("size") or 0) > 0:
+                # File >1 MB: kolom content kosong, ambil isi lewat media type raw.
+                raw_headers = dict(self._headers())
+                raw_headers["Accept"] = "application/vnd.github.raw+json"
+                raw_response = requests.get(
+                    self._url(path),
+                    headers=raw_headers,
+                    params={"ref": self.branch},
+                    timeout=GITHUB_REQUEST_SECONDS,
+                )
+                if raw_response.status_code >= 400:
+                    raise RuntimeError(
+                        f"GitHub GET raw {path}: HTTP "
+                        f"{raw_response.status_code}: {raw_response.text[:500]}"
+                    )
+                return raw_response.content, str(body.get("sha") or "")
 
             try:
                 decoded = base64.b64decode(
@@ -2314,6 +2356,8 @@ class TradingEngine:
         self.leverage = int(leverage_cfg) if leverage_cfg and leverage_cfg == leverage_cfg.to_integral_value() else DEFAULT_LEVERAGE
         self.real = BinanceRealClient()
         self._real_reconcile_guard: dict[str, float] = {}
+        self._real_poll_guard: dict[str, float] = {}
+        self._real_protect_fail: dict[str, int] = {}
 
         self.symbols: dict[str, SymbolMeta] = {}
         self.prices: dict[str, PriceSnapshot] = {}
@@ -2881,16 +2925,19 @@ class TradingEngine:
             return "LONG" if direction == "BUY" else "SHORT"
         return "BOTH"
 
+    @staticmethod
     def _client_id(prefix: str, trade_id: str) -> str:
         safe = re.sub(r"[^A-Za-z0-9_:\-./]", "-", trade_id)
         return (f"{prefix}-{safe}")[:36]
 
+    @staticmethod
     def _ceil_to_step(value: Decimal, step: Decimal) -> Decimal:
         if step <= 0:
             return value
         steps = (value / step).to_integral_value(rounding=ROUND_CEILING)
         return steps * step
 
+    @staticmethod
     def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
         if step <= 0:
             return value
@@ -3184,7 +3231,7 @@ class TradingEngine:
         trade.real_error = None
         trade.status = "FILLED"
 
-        await self._ensure_real_protective_orders(trade)
+        await self._protect_or_close(trade)
         return True
 
     async def _ensure_real_protective_orders(self, trade: Trade) -> None:
@@ -3413,6 +3460,109 @@ class TradingEngine:
                 if exc.code not in {-2011, -2013}:
                     raise
 
+    def _real_poll_due(self, trade: Trade, kind: str, interval: float) -> bool:
+        """Throttle polling REST Binance per trade agar tidak memicu ban."""
+        key = f"{kind}:{trade.trade_id}"
+        now = time.monotonic()
+        if now - self._real_poll_guard.get(key, 0.0) < interval:
+            return False
+        self._real_poll_guard[key] = now
+        return True
+
+    async def _protect_or_close(self, trade: Trade) -> None:
+        """Pasang TP/SL (retry 3x); jika tetap gagal, tutup posisi dengan market."""
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                await self._ensure_real_protective_orders(trade)
+                return
+            except BinanceRateLimitError as exc:
+                # Saat ban, close juga ditolak; verifikasi berkala mengulang nanti.
+                await self._handle_real_exception(exc, "PLACE TP/SL", trade)
+                return
+            except Exception as exc:
+                last_exc = exc
+                log.warning(
+                    "TP/SL %s gagal dipasang (%s/3): %s",
+                    trade.trade_id,
+                    attempt + 1,
+                    exc,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(2.0)
+        await self._emergency_close(trade, f"TP/SL gagal dipasang 3x: {last_exc}")
+
+    async def _verify_real_protection(self, trade: Trade) -> None:
+        """Pastikan posisi REAL selalu punya TP/SL; gagal berulang -> close paksa."""
+        try:
+            await self._reconcile_real_trade(trade)
+            self._real_protect_fail.pop(trade.trade_id, None)
+        except BinanceRateLimitError as exc:
+            self._notify_rate_limit(exc, "VERIFY TP/SL")
+        except Exception as exc:
+            count = self._real_protect_fail.get(trade.trade_id, 0) + 1
+            self._real_protect_fail[trade.trade_id] = count
+            log.warning("Verifikasi TP/SL %s gagal (%s/3): %s", trade.trade_id, count, exc)
+            if count >= 3 and trade.status == "FILLED":
+                await self._emergency_close(trade, f"TP/SL tidak bisa dipastikan aktif: {exc}")
+
+    async def _emergency_close(self, trade: Trade, reason: str) -> None:
+        """Market close paksa posisi REAL tanpa proteksi, lalu catat hasilnya."""
+        log.error("EMERGENCY CLOSE %s: %s", trade.trade_id, reason)
+        exit_price: Decimal | None = None
+        try:
+            position = await self.real.get_position(trade.pair, trade.direction)
+            if position is not None:
+                response = await self.real.place_market_close(
+                    symbol=trade.pair,
+                    position=position,
+                    entry_direction=trade.direction,
+                )
+                for _ in range(3):
+                    await asyncio.sleep(0.25)
+                    if await self.real.get_position(trade.pair, trade.direction) is None:
+                        break
+                for key in ("avgPrice", "price"):
+                    try:
+                        exit_price = parse_decimal(str(response.get(key) or "0"))
+                        break
+                    except (InvalidOperation, ValueError):
+                        continue
+        except Exception as exc:
+            await self._handle_real_exception(exc, "EMERGENCY CLOSE", trade)
+            await self.reply(
+                f"🚨 EMERGENCY CLOSE GAGAL {trade.pair}\n\n"
+                "Posisi mungkin TANPA TP/SL. Tutup manual di Binance!\n"
+                f"{exc}"
+            )
+            return
+
+        try:
+            await self._cancel_bot_algo_orders(trade)
+        except Exception as exc:
+            log.warning("Cancel algo setelah emergency close %s gagal: %s", trade.trade_id, exc)
+
+        if exit_price is None:
+            snapshot = self.prices.get(trade.pair)
+            exit_price = snapshot.price if snapshot is not None else (trade.fill_price or trade.entry)
+
+        pnl = pct_change(trade.direction, trade.fill_price or trade.entry, exit_price)
+        result = "TP" if pnl > 0 else "SL" if pnl < 0 else "MANUAL_CLOSE"
+        trade.real_state = "REAL_CLOSED"
+        if trade.trade_id not in self.active_trades:
+            self.active_trades[trade.trade_id] = trade
+        await self.reply(
+            f"🚨 EMERGENCY CLOSE {trade.pair}\n\n"
+            f"{reason}\n"
+            f"Posisi ditutup market ({result}, PnL {format_pct(pnl)})."
+        )
+        await self._finalize_trade(
+            trade,
+            result=result,
+            exit_price=exit_price,
+            reason=f"Emergency close: {reason}",
+        )
+
     async def _real_exit_trigger(self, trade: Trade, result: str, price: Decimal) -> bool:
         now = time.monotonic()
         last = self._real_reconcile_guard.get(trade.trade_id, 0.0)
@@ -3507,7 +3657,7 @@ class TradingEngine:
 
         position_side = str(position.get("positionSide") or self._position_side_for_direction(trade.direction))
         exit_side = "SELL" if trade.direction == "BUY" else "BUY"
-        new_client = self._client_id("SL", f"{trade.trade_id}-{uuid4().hex[:6]}")
+        new_client = f"{self._client_id('SL', trade.trade_id)[:29]}-{uuid4().hex[:6]}"
 
         # Place new protection first, then remove old protection to avoid a gap.
         new_order = await self.real.place_close_algo(
@@ -3707,15 +3857,33 @@ class TradingEngine:
                     )
                     return
 
+            already_flagged = trade.real_state == "REAL_ERROR"
             trade.real_state = "REAL_ERROR"
             trade.real_error = (
                 "Position Binance tidak ada saat /open dan penyebab penutupan "
                 "tidak dapat dipastikan dari tracked algo order."
             )
-            log.warning(
-                "REAL position %s tidak ditemukan saat /open dan hasil close tidak dapat dipastikan.",
-                trade.trade_id,
-            )
+            if not already_flagged:
+                log.warning(
+                    "REAL position %s tidak ditemukan saat /open dan hasil close tidak dapat dipastikan.",
+                    trade.trade_id,
+                )
+
+    async def _clear_margin_bans(self) -> None:
+        """Ban margin hanya valid untuk konfigurasi margin/leverage lamanya."""
+        stale = [
+            pair
+            for pair, item in self.banned_pairs.items()
+            if item.get("source") == "AUTO_MARGIN_INFLUENCE"
+        ]
+        for pair in stale:
+            self.banned_pairs.pop(pair, None)
+        self._scan_margin_streak.clear()
+        if stale:
+            try:
+                await self._persist_banned_pairs()
+            except Exception:
+                log.exception("Gagal menyimpan ban setelah reset ban margin.")
 
     async def _set_margin_command(self, argument: str) -> None:
         if not argument:
@@ -3728,6 +3896,7 @@ class TradingEngine:
         if margin <= 0:
             raise ValueError("Margin harus lebih besar dari 0.")
         self.margin_usdt = margin
+        await self._clear_margin_bans()
         await self.reply(
             "✅ MARGIN DIPERBARUI\n\n"
             f"Margin default: {decimal_to_str(self.margin_usdt)} USDT\n"
@@ -3746,6 +3915,7 @@ class TradingEngine:
         if not 1 <= leverage <= 125:
             raise ValueError("Leverage harus 1 sampai 125x.")
         self.leverage = leverage
+        await self._clear_margin_bans()
         await self.reply(
             "✅ LEVERAGE DIPERBARUI\n\n"
             f"Leverage default: {self.leverage}x\n"
@@ -3995,6 +4165,13 @@ class TradingEngine:
                 )
                 continue
 
+            if trade.real_enabled and not self.real_mode:
+                skipped += 1
+                skipped_details.append(
+                    f"{trade.trade_id}: setup REAL butuh /real on dulu"
+                )
+                continue
+
             if len(self.active_trades) >= self.max_active_trades:
                 skipped += 1
                 skipped_details.append(
@@ -4004,7 +4181,13 @@ class TradingEngine:
 
             self.active_trades[trade.trade_id] = trade
             loaded += 1
-            symbols_to_subscribe.add(trade.pair)
+            if trade.real_enabled:
+                try:
+                    await self._reconcile_real_trade(trade)
+                except Exception as exc:
+                    await self._handle_real_exception(exc, "RECONCILE /open", trade)
+            if trade.trade_id in self.active_trades:
+                symbols_to_subscribe.add(trade.pair)
 
         for symbol in sorted(symbols_to_subscribe):
             try:
@@ -4424,6 +4607,9 @@ class TradingEngine:
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
+        previous = getattr(self, "_strategy_runtime_module", None)
+        if previous is not None:
+            sys.modules.pop(getattr(previous, "__name__", ""), None)
         self._strategy_runtime_module = module
         return module
 
@@ -4692,7 +4878,7 @@ class TradingEngine:
         }
 
     def _margin_config(self) -> tuple[Decimal | None, Decimal | None]:
-        return self.scan_margin_usd, self.scan_leverage
+        return self.margin_usdt, Decimal(self.leverage)
 
     def _margin_influence_reason(self, pair: str, price: Decimal) -> str | None:
         margin, leverage = self._margin_config()
@@ -5094,6 +5280,8 @@ class TradingEngine:
                             source="AUTO_MARGIN_INFLUENCE",
                         )
                         raise
+                    if trade.status == "CLOSED":
+                        continue
                 self.active_trades[trade.trade_id] = trade
                 final_added.append(trade)
                 await self.ws.add_symbol(trade.pair)
@@ -5675,7 +5863,11 @@ class TradingEngine:
 
         def decimal_field(name: str) -> Decimal:
             try:
-                return parse_decimal(str(payload[name]))
+                raw_value = payload[name]
+                if isinstance(raw_value, float):
+                    # Hindari notasi ilmiah (mis. 5e-05) yang ditolak parse_decimal.
+                    raw_value = format(Decimal(repr(raw_value)), "f")
+                return parse_decimal(str(raw_value))
             except Exception as exc:
                 raise ValueError(
                     f"Field {name} dari strategy.py bukan angka valid."
@@ -6118,6 +6310,12 @@ class TradingEngine:
 
         if self.real_mode:
             await self._ensure_real_entry(trade)
+            if trade.status == "CLOSED":
+                self.flow = None
+                self._auto_job_id = None
+                self._auto_task = None
+                await self.reply("🚨 Setup REAL langsung ditutup otomatis karena TP/SL gagal dipasang.")
+                return
 
         self.active_trades[trade.trade_id] = trade
         self.flow = None
@@ -6706,6 +6904,10 @@ class TradingEngine:
 
         if self.real_mode:
             await self._ensure_real_entry(trade)
+            if trade.status == "CLOSED":
+                self.flow = None
+                await self.reply("🚨 Setup REAL langsung ditutup otomatis karena TP/SL gagal dipasang.")
+                return
 
         self.active_trades[
             trade.trade_id
@@ -8829,10 +9031,13 @@ class TradingEngine:
                     )
 
                     if trade.real_enabled and self.real_mode:
-                        if entry_hit:
+                        if entry_hit and self._real_poll_due(trade, "fill", REAL_PENDING_POLL_SECONDS):
                             if await self._confirm_real_fill(trade):
                                 continue
                         if exp_hit and trade.status == "PENDING":
+                            # Jangan EXPIRED lokal sebelum order real dicek.
+                            if not self._real_poll_due(trade, "exp", REAL_PENDING_POLL_SECONDS):
+                                continue
                             await self._real_pending_price_exp(trade)
                             if trade.status != "PENDING":
                                 continue
@@ -8874,17 +9079,20 @@ class TradingEngine:
                         sl_hit = price >= trade.sl
                         tp_hit = price <= trade.tp
 
-                    if trade.real_enabled and self.real_mode and (sl_hit or tp_hit):
-                        result_probe = "SL" if sl_hit else "TP"
-                        if await self._real_exit_trigger(trade, result_probe, price):
-                            result_price = trade.exit_price or price
-                            await self._finalize_trade(
-                                trade,
-                                result=result_probe,
-                                exit_price=result_price,
-                                reason=(trade.sl_reason if result_probe == "SL" else trade.tp_reason),
-                            )
-                            continue
+                    if trade.real_enabled and self.real_mode:
+                        if sl_hit or tp_hit:
+                            result_probe = "SL" if sl_hit else "TP"
+                            if await self._real_exit_trigger(trade, result_probe, price):
+                                result_price = trade.exit_price or price
+                                await self._finalize_trade(
+                                    trade,
+                                    result=result_probe,
+                                    exit_price=result_price,
+                                    reason=(trade.sl_reason if result_probe == "SL" else trade.tp_reason),
+                                )
+                                continue
+                        if self._real_poll_due(trade, "protect", REAL_PROTECT_CHECK_SECONDS):
+                            await self._verify_real_protection(trade)
                     else:
                         if sl_hit:
                             await self._finalize_trade(
@@ -9570,7 +9778,7 @@ class TradingEngine:
             "session_id": self.session_id,
             "source": {
                 "market": "Binance USDⓈ-M Futures",
-                "execution": "SIMULATION ONLY",
+                "execution": "SIMULATION + REAL (lihat real_enabled per trade)",
                 "price_trigger": "aggTrade last price",
             },
             "summary": {
@@ -9664,7 +9872,7 @@ class TradingEngine:
             "## 1. Scope and Data Source",
             "",
             "- Market: Binance USDⓈ-M Futures",
-            "- Execution in this export: Simulation Only",
+            "- Execution in this export: Simulation + Real (see real_enabled per trade)",
             "- Price trigger: Binance `aggTrade` last price",
             "- Historical trade records: "
             f"{len(records)}",
