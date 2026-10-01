@@ -32,3 +32,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T11:08:06.681831+00:00
 - Closed: 2026-10-01T11:08:31.186645+00:00
 - Strategy: SMC_VLT_RSI v0.6.2
+
+---
+
+## ALICEUSDT — BUY
+
+Trade ID: `ALICEUSDT-20261001-180738-4F7933`
+
+### Setup
+
+- Price Now Reference: 0.17054
+- Entry: 0.1704
+- Reason Entry: ALICEUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.15345). H1 me-refine ke BULLISH_FVG 0.15408. M15 memberi execution POI BULLISH_BREAKER 0.170445. Fib H4 berada pada band DEEP_0.618_0.786 (score 100). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 54.6 mendukung momentum. VLT/OHLCV searah dengan setup.
+- Price Exp: 0.1726
+- Reason Price Exp: Price Exp 0.1725023 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.1694
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.16966) + buffer 0.15 ATR M15.
+- TP: 0.1753
+- Reason TP: TP diarahkan ke H4_RECENT_RANGE_HIGH 0.17524 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.1694
+- Result Reason: SL ditempatkan di bawah/atas structural invalidation terdekat (0.16966) + buffer 0.15 ATR M15.
+- PnL: -0.5868544600938967136150234742%
+- Created: 2026-10-01T11:07:38.664583+00:00
+- Filled: 2026-10-01T11:07:41.864844+00:00
+- Closed: 2026-10-01T11:10:05.175017+00:00
+- Strategy: SMC_VLT_RSI v0.6.2
