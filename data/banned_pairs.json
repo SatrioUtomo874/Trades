@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T11:08:41.148700+00:00",
+  "saved_at": "2026-10-01T11:08:45.059081+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -183,6 +183,13 @@
       "until": "2026-10-01T14:05:58.747350+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "BBUSDT",
+      "banned_at": "2026-10-01T11:08:43.356111+00:00",
+      "until": "2026-10-01T19:08:43.356070+00:00",
+      "reason": "Confidence 57.88 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "BCHUSDT",
