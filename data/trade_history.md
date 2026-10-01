@@ -98,3 +98,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T13:03:29.264889+00:00
 - Closed: 2026-10-01T13:15:50.307606+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## CETUSUSDT — BUY
+
+Trade ID: `CETUSUSDT-20261001-194224-34E8A9`
+
+### Setup
+
+- Price Now Reference: 0.027975
+- Entry: 0.02792
+- Reason Entry: CETUSUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 0.0273885). H1 me-refine ke BULLISH_FVG 0.0279255. M15 memberi execution POI BULLISH_FVG 0.0279165. Fib H4 berada pada band OVERLAPS_0.618 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.02848
+- Reason Price Exp: Price Exp 0.028476 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.02753
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.027651) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.02881
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.02881 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.02753
+- Result Reason: SL di luar invalidasi struktur H1/H4 (0.027651) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- PnL: -1.396848137535816618911174785%
+- Created: 2026-10-01T12:42:24.312334+00:00
+- Filled: 2026-10-01T12:42:25.931956+00:00
+- Closed: 2026-10-01T13:16:13.892322+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
