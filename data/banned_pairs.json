@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T15:10:20.566625+00:00",
+  "saved_at": "2026-10-01T16:40:24.333461+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -71,13 +71,6 @@
       "until": "2026-10-02T11:05:50.145920+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "AAVEUSDT",
-      "banned_at": "2026-10-01T10:47:59.316125+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 16.538, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "ACEUSDT",
@@ -353,25 +346,11 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "AVAXUSDT",
-      "banned_at": "2026-10-01T14:40:58.778716+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 10.971, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "AXLUSDT",
       "banned_at": "2026-10-01T11:19:01.167111+00:00",
       "until": "2026-10-02T11:19:01.167084+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "AXSUSDT",
-      "banned_at": "2026-10-01T10:48:23.365759+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.682, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "B2USDT",
@@ -451,13 +430,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "BCHUSDT",
-      "banned_at": "2026-10-01T14:41:01.494080+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5 (toleransi ±10%).",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "BEATUSDT",
       "banned_at": "2026-10-01T11:04:46.850891+00:00",
       "until": "2026-10-02T11:04:46.850862+00:00",
@@ -535,13 +507,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "BNBUSDT",
-      "banned_at": "2026-10-01T10:47:55.225397+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 7.7149, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "BNTUSDT",
       "banned_at": "2026-10-01T11:41:44.549927+00:00",
       "until": "2026-10-02T11:41:44.549897+00:00",
@@ -577,25 +542,11 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "BSVUSDT",
-      "banned_at": "2026-10-01T10:48:32.922822+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.922, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "BTRUSDT",
       "banned_at": "2026-10-01T11:05:07.554824+00:00",
       "until": "2026-10-01T19:05:07.554784+00:00",
       "reason": "Confidence 45.83 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "BTWUSDT",
-      "banned_at": "2026-10-01T10:48:01.480450+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.7056, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "BUSDT",
@@ -955,13 +906,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "ENSUSDT",
-      "banned_at": "2026-10-01T10:48:21.563818+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.5328, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "EPICUSDT",
       "banned_at": "2026-10-01T10:52:02.457222+00:00",
       "until": "2026-10-01T18:52:02.457197+00:00",
@@ -983,25 +927,11 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "ETCUSDT",
-      "banned_at": "2026-10-01T10:48:10.303468+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5 (toleransi ±10%).",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "ETHFIUSDT",
       "banned_at": "2026-10-01T10:41:39.346352+00:00",
       "until": "2026-10-02T10:41:39.346326+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "ETHUSDT",
-      "banned_at": "2026-10-01T10:47:46.848968+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5 (toleransi ±10%).",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "EULUSDT",
@@ -1291,13 +1221,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "ICPUSDT",
-      "banned_at": "2026-10-01T10:48:08.201548+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 6.61, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "IDUSDT",
       "banned_at": "2026-10-01T11:16:02.754984+00:00",
       "until": "2026-10-02T11:16:02.754952+00:00",
@@ -1529,13 +1452,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "LINKUSDT",
-      "banned_at": "2026-10-01T10:47:57.334135+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5 (toleransi ±10%).",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "LITUSDT",
       "banned_at": "2026-10-01T10:40:06.947292+00:00",
       "until": "2026-10-02T10:40:06.947259+00:00",
@@ -1562,13 +1478,6 @@
       "until": "2026-10-02T10:44:02.047012+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "LTCUSDT",
-      "banned_at": "2026-10-01T10:48:04.008933+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5 (toleransi ±10%).",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "LUMIAUSDT",
@@ -1837,13 +1746,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "NMRUSDT",
-      "banned_at": "2026-10-01T10:48:12.224353+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.668, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "NOMUSDT",
       "banned_at": "2026-10-01T10:40:52.355539+00:00",
       "until": "2026-10-01T18:40:52.355515+00:00",
@@ -1956,20 +1858,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "PAXGUSDT",
-      "banned_at": "2026-10-01T14:41:03.471512+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 8.3585, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
-      "pair": "PENDLEUSDT",
-      "banned_at": "2026-10-01T10:48:14.615927+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 7.2063, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "PENGUUSDT",
       "banned_at": "2026-10-01T10:40:17.145462+00:00",
       "until": "2026-10-02T10:40:17.145436+00:00",
@@ -1984,25 +1872,11 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "PHAROSUSDT",
-      "banned_at": "2026-10-01T10:48:19.141711+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.648, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "PHAUSDT",
       "banned_at": "2026-10-01T10:41:59.744822+00:00",
       "until": "2026-10-02T10:41:59.744788+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "PIEVERSEUSDT",
-      "banned_at": "2026-10-01T10:48:26.200066+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.6764, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "PIPPINUSDT",
@@ -2124,13 +1998,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "QNTUSDT",
-      "banned_at": "2026-10-01T10:47:50.882295+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 28.581, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "QTUMUSDT",
       "banned_at": "2026-10-01T11:14:44.652430+00:00",
       "until": "2026-10-01T19:14:44.652392+00:00",
@@ -2243,13 +2110,6 @@
       "source": "AUTO_SL"
     },
     {
-      "pair": "RUNEUSDT",
-      "banned_at": "2026-10-01T14:41:06.668982+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.5209, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "RVNUSDT",
       "banned_at": "2026-10-01T11:18:29.358982+00:00",
       "until": "2026-10-01T19:18:29.358955+00:00",
@@ -2360,13 +2220,6 @@
       "until": "2026-10-02T11:06:47.568353+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "SOLUSDT",
-      "banned_at": "2026-10-01T10:47:49.004028+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.9015, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "SOMIUSDT",
@@ -2586,13 +2439,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "TRBUSDT",
-      "banned_at": "2026-10-01T10:48:16.722872+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 6.1317, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "TREEUSDT",
       "banned_at": "2026-10-01T11:21:13.767545+00:00",
       "until": "2026-10-02T11:21:13.767524+00:00",
@@ -2661,20 +2507,6 @@
       "until": "2026-10-01T19:40:33.757787+00:00",
       "reason": "Confidence 56.22 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "UNIUSDT",
-      "banned_at": "2026-10-01T10:47:53.142960+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 9.053, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
-      "pair": "USDCUSDT",
-      "banned_at": "2026-10-01T10:48:28.287039+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.999724, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "USELESSUSDT",
@@ -2810,13 +2642,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "XAUTUSDT",
-      "banned_at": "2026-10-01T10:48:06.443487+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 8.34994, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "XLMUSDT",
       "banned_at": "2026-10-01T10:40:22.260213+00:00",
       "until": "2026-10-01T18:40:22.260177+00:00",
@@ -2887,13 +2712,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "YFIUSDT",
-      "banned_at": "2026-10-01T10:48:30.788143+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 7.356, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
       "pair": "YGGUSDT",
       "banned_at": "2026-10-01T11:23:47.764206+00:00",
       "until": "2026-10-02T11:23:47.764177+00:00",
@@ -2913,13 +2731,6 @@
       "until": "2026-10-02T11:20:17.178807+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "ZECUSDT",
-      "banned_at": "2026-10-01T14:40:55.551910+00:00",
-      "until": null,
-      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.53256, di luar target 5 ±10%.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "ZENUSDT",
