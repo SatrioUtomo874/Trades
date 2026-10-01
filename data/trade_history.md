@@ -65,3 +65,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T11:07:41.864844+00:00
 - Closed: 2026-10-01T11:10:05.175017+00:00
 - Strategy: SMC_VLT_RSI v0.6.2
+
+---
+
+## FLOWUSDT — BUY
+
+Trade ID: `FLOWUSDT-20261001-180737-D2BDB4`
+
+### Setup
+
+- Price Now Reference: 0.03161
+- Entry: 0.03158
+- Reason Entry: FLOWUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.031605). H1 me-refine ke BULLISH_FVG 0.031565. M15 memberi execution POI BULLISH_FVG 0.031585. Fib H4 berada pada band DEEP_0.618_0.786 (score 100). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 52.0 mendukung momentum.
+- Price Exp: 0.03178
+- Reason Price Exp: Price Exp 0.0317717 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.03154
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.03158) + buffer 0.15 ATR M15.
+- TP: 0.03188
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 0.03161 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.03154
+- Result Reason: SL ditempatkan di bawah/atas structural invalidation terdekat (0.03158) + buffer 0.15 ATR M15.
+- PnL: -0.1266624445851804939835338822%
+- Created: 2026-10-01T11:07:37.655150+00:00
+- Filled: 2026-10-01T11:07:39.312109+00:00
+- Closed: 2026-10-01T11:17:17.400111+00:00
+- Strategy: SMC_VLT_RSI v0.6.2
