@@ -65,3 +65,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T10:44:11.248437+00:00
 - Closed: 2026-10-01T11:01:35.770977+00:00
 - Strategy: SMC_VLT_RSI v0.6.2
+
+---
+
+## GIGGLEUSDT — BUY
+
+Trade ID: `GIGGLEUSDT-20261001-175229-2334DD`
+
+### Setup
+
+- Price Now Reference: 37.53
+- Entry: 37.49
+- Reason Entry: GIGGLEUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 36.015). H1 me-refine ke BULLISH_OB 36.005. M15 memberi execution POI BULLISH_BREAKER 37.49. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 37.81
+- Reason Price Exp: Price Exp 37.80054 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 37.36
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (37.4) + buffer 0.15 ATR M15.
+- TP: 38.33
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 38.33 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 37.36
+- Result Reason: SL ditempatkan di bawah/atas structural invalidation terdekat (37.4) + buffer 0.15 ATR M15.
+- PnL: -0.3467591357695385436116297679%
+- Created: 2026-10-01T10:52:29.671133+00:00
+- Filled: 2026-10-01T10:58:00.758119+00:00
+- Closed: 2026-10-01T11:01:52.999534+00:00
+- Strategy: SMC_VLT_RSI v0.6.2
