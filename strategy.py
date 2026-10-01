@@ -9,7 +9,7 @@ Strategy intelligence untuk main.py dengan multi-timeframe regime engine, top-do
 Kontrak utama:
     async def generate_setup(pair, context) -> dict
 
-Prinsip desain v0.6.0
+Prinsip desain v0.6.2
 ---------------------
 1. SMC adalah kerangka utama; regime ditentukan multi-timeframe, lalu RSI 14 M15 dan VLT/OHLCV menjadi konfirmasi eksekusi.
 2. Semua keputusan struktur memakai CLOSED candles saja.
@@ -74,7 +74,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.6.1"
+STRATEGY_VERSION = "0.6.2"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -849,14 +849,22 @@ def resample_candles(candles: list[Candle], bucket_ms: int) -> list[Candle]:
         bucket = (candle.time_ms // bucket_ms) * bucket_ms
         buckets.setdefault(bucket, []).append(candle)
 
+    # Infer base candle size so D1 can be built from H4 and H1 from M15.
+    spans = sorted(
+        b.time_ms - a.time_ms
+        for a, b in zip(candles, candles[1:])
+        if b.time_ms > a.time_ms
+    )
+    base_ms = spans[len(spans) // 2] if spans else M15_MS
+    expected = max(1, bucket_ms // base_ms) if bucket_ms % base_ms == 0 else 1
+
     result: list[Candle] = []
     for start in sorted(buckets):
         rows = sorted(buckets[start], key=lambda x: x.time_ms)
         if not rows:
             continue
         # A bucket is only valid if it has all expected component candles.
-        expected = bucket_ms // M15_MS
-        if bucket_ms % M15_MS == 0 and len(rows) < expected:
+        if len(rows) < expected:
             continue
         result.append(
             Candle(
@@ -3538,6 +3546,7 @@ def _collect_directional_candidates(
             )
             if not (sweep or mss or recent_bos):
                 cand.confidence = round(max(0.0, cand.confidence - 18.0), 2)
+                cand.evidence["confidence_penalty"] = 18.0
 
             candidates.append(cand)
             topdown_count += 1
@@ -3601,6 +3610,7 @@ def _collect_directional_candidates(
                         h1_refinement_score=location_score(direction, cand.entry, h1_dr),
                     )
                     cand.confidence = round(max(0.0, cand.confidence - 10.0), 2)
+                    cand.evidence["confidence_penalty"] = 10.0
                     cand.evidence["trigger_status"] = "M15_FALLBACK"
                     candidates.append(cand)
 
@@ -4021,25 +4031,43 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             final_sweep = sweep
             break
 
-    score_candidate(
-        best,
-        macro_trend=final_macro,
-        pair_h4_trend=pair_regime["trend"],
-        h1_dr=h1_dr,
-        target=final_target,
-        sweep=final_sweep,
-        current=current,
-        m15_atr=m15_atr_values[-1],
-        m15_rsi=m15_rsi_ctx["rsi14"],
-        m15_rsi_slope=m15_rsi_ctx["slope"],
-        vlt=m15_vlt,
-        latest_displacement=displacement_strength(
-            m15,
-            len(m15) - 1,
-            m15_atr_values,
-            m15_rel_volume,
-        ),
-    )
+    if best.scores:
+        # Pertahankan skor komponen top-down (POI, Fib, H1) dan penalti;
+        # hanya komponen yang bergantung geometri final dihitung ulang.
+        reach_score, reach_details = entry_reachability(
+            best.direction,
+            current,
+            best.entry,
+            safe_float(h4_ctx.get("atr"), m15_atr_values[-1] * 4.0),
+        )
+        best.evidence["entry_reachability"] = {"score": reach_score, **reach_details}
+        best.scores["planned_rr"] = round(candidate_rr_score(best), 2)
+        best.scores["entry_reachability"] = round(reach_score, 2)
+        penalty = safe_float(best.evidence.get("confidence_penalty"), 0.0)
+        best.confidence = round(
+            clamp(sum(WEIGHTS[name] * best.scores[name] / 100.0 for name in WEIGHTS) - penalty),
+            2,
+        )
+    else:
+        score_candidate(
+            best,
+            macro_trend=final_macro,
+            pair_h4_trend=pair_regime["trend"],
+            h1_dr=h1_dr,
+            target=final_target,
+            sweep=final_sweep,
+            current=current,
+            m15_atr=m15_atr_values[-1],
+            m15_rsi=m15_rsi_ctx["rsi14"],
+            m15_rsi_slope=m15_rsi_ctx["slope"],
+            vlt=m15_vlt,
+            latest_displacement=displacement_strength(
+                m15,
+                len(m15) - 1,
+                m15_atr_values,
+                m15_rel_volume,
+            ),
+        )
 
     risk = abs(best.entry - best.sl)
     reward = abs(best.tp - best.entry)
