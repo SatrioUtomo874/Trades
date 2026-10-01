@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T10:41:39.346376+00:00",
+  "saved_at": "2026-10-01T10:41:45.849016+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -85,6 +85,13 @@
       "until": "2026-10-01T13:41:05.879498+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "BRUSDT",
+      "banned_at": "2026-10-01T10:41:45.848993+00:00",
+      "until": "2026-10-02T10:41:45.848974+00:00",
+      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "CRVUSDT",
