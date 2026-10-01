@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T12:39:21.550309+00:00",
+  "saved_at": "2026-10-01T12:39:33.945321+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2388,6 +2388,13 @@
       "until": "2026-10-01T18:47:23.895878+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "SXTUSDT",
+      "banned_at": "2026-10-01T12:39:33.945227+00:00",
+      "until": "2026-10-01T20:39:33.945191+00:00",
+      "reason": "Confidence 40 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "SYRUPUSDT",
