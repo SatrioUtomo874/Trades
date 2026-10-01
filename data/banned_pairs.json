@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T10:39:50.862005+00:00",
+  "saved_at": "2026-10-01T10:39:56.357262+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -155,6 +155,13 @@
       "until": "2026-10-01T10:53:07.871518+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "TRUMPUSDT",
+      "banned_at": "2026-10-01T10:39:56.357240+00:00",
+      "until": "2026-10-01T18:39:56.357208+00:00",
+      "reason": "Confidence 58.62 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "UAIUSDT",
