@@ -857,3 +857,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-09-30T14:08:47.451409+00:00
 - Strategy: SMC_VLT_RSI v0.6.0
+
+---
+
+## WLDUSDT — BUY
+
+Trade ID: `WLDUSDT-20261001-174247-5F13F3`
+
+### Setup
+
+- Price Now Reference: 0.5196
+- Entry: 0.5149
+- Reason Entry: WLDUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.5098). H1 me-refine ke BULLISH_BREAKER 0.51435. M15 memberi execution POI BULLISH_BREAKER 0.51495. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.5213
+- Reason Price Exp: Price Exp 0.5212485 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.5139
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.5148) + buffer 0.15 ATR M15.
+- TP: 0.5224
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 0.5223 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.5213
+- Result Reason: Price Exp 0.5212485 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-01T10:42:47.482247+00:00
+- Filled: -
+- Closed: 2026-10-01T10:46:22.306873+00:00
+- Strategy: SMC_VLT_RSI v0.6.2
