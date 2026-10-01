@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T10:39:29.155084+00:00",
+  "saved_at": "2026-10-01T10:39:40.354644+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -15,6 +15,13 @@
       "until": "2026-10-01T13:39:27.947895+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "ARKUSDT",
+      "banned_at": "2026-10-01T10:39:40.354623+00:00",
+      "until": "2026-10-01T18:39:40.354594+00:00",
+      "reason": "Confidence 52.45 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "AVAXUSDT",
