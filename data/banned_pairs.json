@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T12:39:15.349284+00:00",
+  "saved_at": "2026-10-01T12:39:21.550309+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -764,6 +764,13 @@
       "until": "2026-10-01T15:03:56.158934+00:00",
       "reason": "Histori candle kurang (0/120); dicoba lagi setelah cooldown.",
       "source": "AUTO_INSUFFICIENT_HISTORY"
+    },
+    {
+      "pair": "CUSDT",
+      "banned_at": "2026-10-01T12:39:21.550192+00:00",
+      "until": "2026-10-01T20:39:21.550145+00:00",
+      "reason": "Confidence 40 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "CVCUSDT",
