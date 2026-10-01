@@ -131,3 +131,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T11:12:50.772971+00:00
 - Closed: 2026-10-01T11:17:49.976929+00:00
 - Strategy: SMC_VLT_RSI v0.6.2
+
+---
+
+## ARKMUSDT — BUY
+
+Trade ID: `ARKMUSDT-20261001-180748-70679B`
+
+### Setup
+
+- Price Now Reference: 0.12954
+- Entry: 0.1236
+- Reason Entry: ARKMUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.110785). H1 me-refine ke BULLISH_FVG 0.123375. M15 memberi execution POI BULLISH_FVG 0.123605. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.1305
+- Reason Price Exp: Price Exp 0.130465 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.123
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (0.12314) + buffer 0.15 ATR M15.
+- TP: 0.1311
+- Reason TP: TP fallback 0.1310816 menggunakan range/ATR setelah target liquidity HTF tidak tersedia.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1305
+- Result Reason: Price Exp 0.130465 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-01T11:07:48.773813+00:00
+- Filled: -
+- Closed: 2026-10-01T11:22:38.696240+00:00
+- Strategy: SMC_VLT_RSI v0.6.2
