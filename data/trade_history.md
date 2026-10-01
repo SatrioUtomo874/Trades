@@ -98,3 +98,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T11:07:39.312109+00:00
 - Closed: 2026-10-01T11:17:17.400111+00:00
 - Strategy: SMC_VLT_RSI v0.6.2
+
+---
+
+## LPTUSDT — BUY
+
+Trade ID: `LPTUSDT-20261001-181246-B2C8AD`
+
+### Setup
+
+- Price Now Reference: 1.7278
+- Entry: 1.726
+- Reason Entry: LPTUSDT BUY: thesis dimulai dari POI H4. (BULLISH_OB 1.69945). H1 me-refine ke BULLISH_BREAKER 1.7182. M15 memberi execution POI BULLISH_BREAKER 1.72675. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 1.736
+- Reason Price Exp: Price Exp 1.73554 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 1.721
+- Reason SL: SL ditempatkan di bawah/atas structural invalidation terdekat (1.7231) + buffer 0.15 ATR M15.
+- TP: 1.741
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 1.7407 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 1.721
+- Result Reason: SL ditempatkan di bawah/atas structural invalidation terdekat (1.7231) + buffer 0.15 ATR M15.
+- PnL: -0.2896871378910776361529548088%
+- Created: 2026-10-01T11:12:46.985205+00:00
+- Filled: 2026-10-01T11:12:50.772971+00:00
+- Closed: 2026-10-01T11:17:49.976929+00:00
+- Strategy: SMC_VLT_RSI v0.6.2
