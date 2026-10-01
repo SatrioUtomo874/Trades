@@ -263,3 +263,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-01T14:40:27.835995+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## DOTUSDT — BUY
+
+Trade ID: `DOTUSDT-20261001-194235-7162D7`
+
+### Setup
+
+- Price Now Reference: 1.202
+- Entry: 1.1962
+- Reason Entry: DOTUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 1.01945). H1 me-refine ke BULLISH_BREAKER 1.19625. M15 memberi execution POI BULLISH_BREAKER 1.1971. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 1.2321
+- Reason Price Exp: Price Exp 1.23208 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 1.1761
+- Reason SL: SL di luar invalidasi struktur H1/H4 (1.1878) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 1.2787
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 1.27865 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 1.1761
+- Result Reason: SL di luar invalidasi struktur H1/H4 (1.1878) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- PnL: -1.680321016552415983949172379%
+- Created: 2026-10-01T12:42:35.603783+00:00
+- Filled: 2026-10-01T12:44:29.544957+00:00
+- Closed: 2026-10-01T14:46:40.109444+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
