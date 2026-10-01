@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T11:04:46.850943+00:00",
+  "saved_at": "2026-10-01T11:04:50.864694+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -888,6 +888,13 @@
       "pair": "POWERUSDT",
       "banned_at": "2026-10-01T11:04:24.161335+00:00",
       "until": "2026-10-02T11:04:24.161314+00:00",
+      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "PROMPTUSDT",
+      "banned_at": "2026-10-01T11:04:50.864659+00:00",
+      "until": "2026-10-02T11:04:50.864638+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
