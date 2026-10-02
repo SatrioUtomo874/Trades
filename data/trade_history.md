@@ -593,3 +593,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T19:20:59.936214+00:00
 - Closed: 2026-10-02T09:24:48.822515+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## SPKUSDT — BUY
+
+Trade ID: `SPKUSDT-20261002-152410-D16C67`
+
+### Setup
+
+- Price Now Reference: 0.02442
+- Entry: 0.02438
+- Reason Entry: SPKUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.024235). H1 me-refine ke BULLISH_BREAKER 0.024285. M15 memberi execution POI BULLISH_BREAKER 0.024385. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 63.0 mendukung momentum. VLT/OHLCV searah dengan setup.
+- Price Exp: 0.02498
+- Reason Price Exp: Price Exp 0.024975 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.024
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.02412) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.02637
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.026365 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.02637
+- Result Reason: TP diarahkan ke H4_EQUAL_LEVELS 0.026365 sebagai liquidity target HTF.
+- PnL: 8.162428219852337981952420016%
+- Created: 2026-10-02T08:24:10.972505+00:00
+- Filled: 2026-10-02T08:25:13.429873+00:00
+- Closed: 2026-10-02T13:03:09.141811+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
