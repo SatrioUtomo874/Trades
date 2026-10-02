@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T13:23:45.952958+00:00",
+  "saved_at": "2026-10-02T13:23:51.552324+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -463,6 +463,13 @@
       "until": "2026-10-03T13:03:21.621393+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "STXUSDT",
+      "banned_at": "2026-10-02T13:23:51.552273+00:00",
+      "until": "2026-10-02T21:23:51.552239+00:00",
+      "reason": "Confidence 40 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "SUSHIUSDT",
