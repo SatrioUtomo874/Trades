@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T02:58:37.049897+00:00",
-  "saved_at_wib": "02-10-2026, 09:58 WIB",
+  "saved_at": "2026-10-02T05:12:50.020851+00:00",
+  "saved_at_wib": "02-10-2026, 12:12 WIB",
   "count": 1,
   "setups": [
     {
@@ -27,7 +27,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "2.691667926810827158626946923",
+      "pnl_percent": "2.858006955995765915620747013",
       "planned_rr": "4.172413793103448275862068966",
       "pending_seconds": 6597.075441,
       "holding_seconds": null,
