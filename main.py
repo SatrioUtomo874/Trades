@@ -53,6 +53,7 @@ import logging
 import os
 import re
 import time
+from collections import deque
 import traceback
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -806,6 +807,65 @@ class Trade:
 # BINANCE REST MARKET DATA
 # ============================================================
 
+BINANCE_IP_WEIGHT_LIMIT = 2400
+# Bobot per endpoint (estimasi dari dokumentasi Binance; default 1).
+ENDPOINT_WEIGHTS = {
+    "/fapi/v1/ticker/24hr": 40,
+    "/fapi/v2/positionRisk": 5,
+    "/fapi/v3/balance": 5,
+    "/fapi/v2/account": 5,
+    "/fapi/v1/accountConfig": 5,
+}
+
+
+class ApiStats:
+    """Hitung request Binance per endpoint + bobot IP dari header Binance."""
+
+    def __init__(self) -> None:
+        self.calls: deque[tuple[float, str, int]] = deque(maxlen=50000)
+        self.total = 0
+        self.limit_hits = 0
+        self.last_limit_at: datetime | None = None
+        self.used_weight: int | None = None
+        self.used_weight_at: float | None = None
+        self.max_used_weight = 0
+
+    def record(self, path: str, status: int, used_weight: str | None) -> None:
+        now = time.monotonic()
+        self.calls.append((now, path, status))
+        self.total += 1
+        if status in (418, 429):
+            self.limit_hits += 1
+            self.last_limit_at = now_utc()
+        try:
+            weight = int(used_weight) if used_weight not in (None, "") else None
+        except ValueError:
+            weight = None
+        if weight is not None:
+            self.used_weight = weight
+            self.used_weight_at = now
+            self.max_used_weight = max(self.max_used_weight, weight)
+
+    def window(self, seconds: float, end: float | None = None) -> dict[str, int]:
+        end = end if end is not None else time.monotonic()
+        cutoff = end - seconds
+        counts: dict[str, int] = {}
+        for ts, path, _ in reversed(self.calls):
+            if ts > end:
+                continue
+            if ts < cutoff:
+                break
+            counts[path] = counts.get(path, 0) + 1
+        return counts
+
+    @staticmethod
+    def weight_of(counts: dict[str, int]) -> int:
+        return sum(ENDPOINT_WEIGHTS.get(path, 1) * n for path, n in counts.items())
+
+
+API_STATS = ApiStats()
+
+
 class BinanceREST:
     """
     Public market-data REST only.
@@ -829,6 +889,11 @@ class BinanceREST:
                 timeout=HTTP_REQUEST_SECONDS,
             )
 
+            API_STATS.record(
+                path,
+                response.status_code,
+                response.headers.get("X-MBX-USED-WEIGHT-1M"),
+            )
             if response.status_code in {418, 429}:
                 try:
                     retry = float(response.headers.get("Retry-After") or "")
@@ -1246,6 +1311,11 @@ class BinanceRealClient:
                     endpoint=path,
                 ) from exc
 
+        API_STATS.record(
+            path,
+            response.status_code,
+            response.headers.get("X-MBX-USED-WEIGHT-1M"),
+        )
         if response.status_code in {418, 429}:
             retry_after = self._parse_retry_after(response)
             server_seconds = retry_after if retry_after is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
@@ -1302,6 +1372,11 @@ class BinanceRealClient:
             response = requests.get(
                 f"{self.base_url}/fapi/v1/time",
                 timeout=HTTP_REQUEST_SECONDS,
+            )
+            API_STATS.record(
+                "/fapi/v1/time",
+                response.status_code,
+                response.headers.get("X-MBX-USED-WEIGHT-1M"),
             )
             response.raise_for_status()
             body = response.json()
@@ -2953,6 +3028,71 @@ class TradingEngine:
             "Tidak ada order/posisi Binance yang disentuh otomatis."
         )
 
+    @staticmethod
+    def _api_weight_line() -> str:
+        used = API_STATS.used_weight
+        bot = API_STATS.weight_of(API_STATS.window(60, API_STATS.used_weight_at))
+        ip_text = f"{used}/{BINANCE_IP_WEIGHT_LIMIT}" if used is not None else "-"
+        return f"📊 Bobot IP  {ip_text}  (bot ≈{bot}/menit)"
+
+    def _api_report(self) -> str:
+        m1 = API_STATS.window(60)
+        m5 = API_STATS.window(300)
+        w1 = API_STATS.weight_of(m1)
+        w5 = API_STATS.weight_of(m5)
+        used = API_STATS.used_weight
+        at = API_STATS.used_weight_at
+        age = time.monotonic() - at if at is not None else None
+
+        ip_text = "-"
+        verdict = "Belum ada header bobot dari Binance; tunggu beberapa request."
+        if used is not None and age is not None:
+            ip_text = f"{used}/{BINANCE_IP_WEIGHT_LIMIT} ({age:.0f}s lalu) • puncak {API_STATS.max_used_weight}"
+            bot_then = API_STATS.weight_of(API_STATS.window(60, at))
+            if age > 180:
+                verdict = "Header terakhir sudah lama; belum bisa disimpulkan."
+            elif used > bot_then * 2 + 100:
+                verdict = (
+                    f"Bobot IP ({used}) jauh di atas bobot bot (≈{bot_then}): "
+                    "kuota IP dipakai pihak lain."
+                )
+            else:
+                verdict = (
+                    f"Bobot IP ({used}) sejalan dengan bobot bot (≈{bot_then}): "
+                    "pemakaian terutama dari bot."
+                )
+
+        cooldown = self.real.cooldown_remaining
+        last_limit = format_wib(API_STATS.last_limit_at) if API_STATS.last_limit_at else "-"
+        head = card(
+            "📡 BINANCE API",
+            [
+                f"⏱ 1 menit   {sum(m1.values())} req  ≈{w1} bobot",
+                f"⏱ 5 menit   {sum(m5.values())} req  ≈{w5} bobot (≈{w5 / 5:.0f}/menit)",
+                f"📊 Bobot IP  {ip_text}",
+                f"🚦 Limit     {API_STATS.limit_hits}x 429/418 • terakhir {last_limit}",
+                f"⏸ Cooldown   {f'{cooldown:.0f}s tersisa' if cooldown > 0 else 'tidak aktif'}",
+                f"🧮 Total     {API_STATS.total} request sejak bot start",
+            ],
+        )
+        ranked = sorted(
+            m5.items(),
+            key=lambda item: ENDPOINT_WEIGHTS.get(item[0], 1) * item[1],
+            reverse=True,
+        )[:6]
+        lines = [head, "", "Endpoint teratas (5 menit):"]
+        if ranked:
+            for path, count in ranked:
+                lines.append(f"• {path.replace('/fapi/', '')}  {count}x  ≈{ENDPOINT_WEIGHTS.get(path, 1) * count}")
+        else:
+            lines.append("• belum ada request")
+        lines += [
+            "",
+            f"🔎 {verdict}",
+            "Bobot bot = estimasi dari tabel bobot; bobot IP = header Binance (semua pengguna IP yang sama).",
+        ]
+        return "\n".join(lines)
+
     def _fire(self, coro: Any) -> None:
         try:
             task = asyncio.get_running_loop().create_task(coro)
@@ -2984,6 +3124,7 @@ class TradingEngine:
                         f"🔧 Aksi      {action}",
                         f"🌐 Endpoint  {exc.endpoint}",
                         f"⏱ Jeda      {duration_text(bot)}",
+                        self._api_weight_line(),
                         f"▶️ Lanjut    {format_wib(now_utc() + timedelta(seconds=bot))}",
                         "📌 Ditunda: scan, cek fill, verifikasi TP/SL, autostop",
                         "Lanjut otomatis dan dikabari saat Binance tersambung.",
@@ -10841,6 +10982,7 @@ class TradingEngine:
             "/threshold [angka] - ambang confidence scanner\n"
             "/max [angka] - batas total PENDING + FILLED\n"
             "/autostop [persen|off|reset] - matikan scan saat equity turun dari puncak (REAL ON)\n"
+            "/api - statistik request & bobot Binance (diagnosa rate limit)\n"
             "/banned [PAIR] [jam] [alasan] - ban pair / lihat daftar ban\n"
             "/unban PAIR|all - hapus ban\n"
             "/stats - statistik histori\n"
@@ -11055,6 +11197,10 @@ class TradingEngine:
                 except Exception as exc:
                     log.exception("MAX command gagal.")
                     await self.reply(f"❌ /max gagal.\n\n{exc}")
+                return
+
+            if command == "/api":
+                await self.reply(self._api_report())
                 return
 
             if command == "/autostop":
