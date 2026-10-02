@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T22:47:47.146074+00:00",
+  "saved_at": "2026-10-02T22:47:52.171094+00:00",
   "bans": [
+    {
+      "pair": "HYPEUSDT",
+      "banned_at": "2026-10-02T22:47:52.171077+00:00",
+      "until": "2026-10-03T06:47:52.171039+00:00",
+      "reason": "Confidence 56.85 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
     {
       "pair": "SLPUSDT",
       "banned_at": "2026-10-02T09:25:04.145519+00:00",
