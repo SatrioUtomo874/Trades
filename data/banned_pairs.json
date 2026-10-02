@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T22:50:25.350649+00:00",
+  "saved_at": "2026-10-02T22:50:33.247591+00:00",
   "bans": [
     {
       "pair": "ARBUSDT",
@@ -140,6 +140,13 @@
       "banned_at": "2026-10-02T22:48:33.255503+00:00",
       "until": "2026-10-03T06:48:33.255474+00:00",
       "reason": "Confidence 46.3 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "USELESSUSDT",
+      "banned_at": "2026-10-02T22:50:33.247548+00:00",
+      "until": "2026-10-03T06:50:33.247519+00:00",
+      "reason": "Confidence 35.29 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
