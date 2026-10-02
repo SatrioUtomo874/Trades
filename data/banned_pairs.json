@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T22:50:05.460914+00:00",
+  "saved_at": "2026-10-02T22:50:11.053366+00:00",
   "bans": [
     {
       "pair": "ARBUSDT",
@@ -133,6 +133,13 @@
       "banned_at": "2026-10-02T22:48:28.249550+00:00",
       "until": "2026-10-03T06:48:28.249522+00:00",
       "reason": "Confidence 59.9 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "VVVUSDT",
+      "banned_at": "2026-10-02T22:50:11.053337+00:00",
+      "until": "2026-10-03T06:50:11.053307+00:00",
+      "reason": "Confidence 58.27 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
