@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-01T23:07:35.759969+00:00",
+  "saved_at": "2026-10-02T02:58:34.508267+00:00",
   "bans": [
     {
       "pair": "1000000MOGUSDT",
@@ -1961,6 +1961,13 @@
       "until": "2026-10-02T11:20:06.550271+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "VELVETUSDT",
+      "banned_at": "2026-10-02T02:58:34.507874+00:00",
+      "until": "2026-10-02T10:58:34.507184+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "VIRTUALUSDT",
