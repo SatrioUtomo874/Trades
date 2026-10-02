@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T05:17:12.950302+00:00",
+  "saved_at": "2026-10-02T05:17:22.647990+00:00",
   "bans": [
     {
       "pair": "1000000MOGUSDT",
@@ -225,6 +225,13 @@
       "until": "2026-10-02T10:51:14.746080+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ASTERUSDT",
+      "banned_at": "2026-10-02T05:17:22.647914+00:00",
+      "until": "2026-10-02T13:17:22.647878+00:00",
+      "reason": "Confidence 58.57 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "ASTRUSDT",
