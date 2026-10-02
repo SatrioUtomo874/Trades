@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T08:18:44.057813+00:00",
+  "saved_at": "2026-10-02T08:18:46.361277+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -302,6 +302,13 @@
       "until": "2026-10-02T11:16:10.348211+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "AVAXUSDT",
+      "banned_at": "2026-10-02T08:18:46.361207+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 11.128, di luar target 5.5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "AVNTUSDT",
