@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T22:48:45.261636+00:00",
+  "saved_at": "2026-10-02T22:48:52.755559+00:00",
   "bans": [
+    {
+      "pair": "ARBUSDT",
+      "banned_at": "2026-10-02T22:48:52.755543+00:00",
+      "until": "2026-10-03T06:48:52.755520+00:00",
+      "reason": "Confidence 54.68 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
     {
       "pair": "CTUSDT",
       "banned_at": "2026-10-02T22:48:45.261614+00:00",
