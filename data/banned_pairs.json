@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T13:05:50.049743+00:00",
+  "saved_at": "2026-10-02T13:06:01.848512+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -197,6 +197,13 @@
       "until": "2026-10-02T15:42:24.151780+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "ENJUSDT",
+      "banned_at": "2026-10-02T13:06:01.848469+00:00",
+      "until": "2026-10-02T21:06:01.848441+00:00",
+      "reason": "Confidence 55.76 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "ENSUSDT",
