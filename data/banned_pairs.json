@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T13:06:55.959487+00:00",
+  "saved_at": "2026-10-02T13:21:09.048741+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -330,6 +330,13 @@
       "until": "2026-10-02T16:20:53.752205+00:00",
       "reason": "Confidence 63.27 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MONUSDT",
+      "banned_at": "2026-10-02T13:21:09.048645+00:00",
+      "until": "2026-10-02T21:21:09.048604+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "MOVEUSDT",
