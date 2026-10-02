@@ -626,3 +626,36 @@ Tidak ada trailing.
 - Filled: 2026-10-02T08:25:13.429873+00:00
 - Closed: 2026-10-02T13:03:09.141811+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## MONUSDT — BUY
+
+Trade ID: `MONUSDT-20261002-200824-C1484F`
+
+### Setup
+
+- Price Now Reference: 0.03434
+- Entry: 0.03313
+- Reason Entry: MONUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.028655). H1 me-refine ke BULLISH_FVG 0.03309. M15 memberi execution POI BULLISH_FVG 0.033205. Fib H4 berada pada band DEEP_0.618_0.786 (score 100). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 61.4 mendukung momentum.
+- Price Exp: 0.03488
+- Reason Price Exp: Price Exp 0.03488 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.03226
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.03271) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1. SL dilebarkan ke risiko minimum 1.0 ATR H1.
+- TP: 0.03524
+- Reason TP: TP diarahkan ke H4_RECENT_RANGE_HIGH 0.03524 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.03488
+- Result Reason: Price Exp 0.03488 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-02T13:08:24.555885+00:00
+- Filled: -
+- Closed: 2026-10-02T13:20:56.831863+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
