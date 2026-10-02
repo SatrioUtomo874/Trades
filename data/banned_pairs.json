@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T22:47:37.555536+00:00",
+  "saved_at": "2026-10-02T22:47:42.548136+00:00",
   "bans": [
     {
       "pair": "SLPUSDT",
@@ -22,6 +22,13 @@
       "until": "2026-10-03T13:03:21.621393+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "ZECUSDT",
+      "banned_at": "2026-10-02T22:47:42.548121+00:00",
+      "until": "2026-10-03T06:47:42.548091+00:00",
+      "reason": "Confidence 67.85 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     }
   ]
 }
