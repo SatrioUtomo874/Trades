@@ -494,3 +494,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-02T02:58:22.333191+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## DYDXUSDT — BUY
+
+Trade ID: `DYDXUSDT-20261002-122115-0A0142`
+
+### Setup
+
+- Price Now Reference: 0.15006
+- Entry: 0.1439
+- Reason Entry: DYDXUSDT BUY: thesis dimulai dari POI H4. (BULLISH_OB 0.14208). H1 me-refine ke BULLISH_BREAKER 0.143195. M15 memberi execution POI BULLISH_BREAKER 0.143985. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 50.1 mendukung momentum.
+- Price Exp: 0.1525
+- Reason Price Exp: Price Exp 0.152424 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.1388
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.1397) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.154
+- Reason TP: TP diarahkan ke H4_RECENT_RANGE_HIGH 0.154 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1525
+- Result Reason: Price Exp 0.152424 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-02T05:21:15.073715+00:00
+- Filled: -
+- Closed: 2026-10-02T07:42:11.931417+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
