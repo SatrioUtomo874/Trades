@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T13:21:31.715984+00:00",
+  "saved_at": "2026-10-02T13:21:33.932736+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -43,6 +43,13 @@
       "until": "2026-10-02T15:09:58.571749+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "AVAXUSDT",
+      "banned_at": "2026-10-02T13:21:33.932683+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 11.16, di luar target 10 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "AVNTUSDT",
