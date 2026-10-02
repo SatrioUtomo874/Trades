@@ -147,6 +147,9 @@ BINANCE_RATE_LIMIT_SAFETY_SECONDS = 60
 REAL_RECONCILE_INTERVAL_SECONDS = 1.0
 REAL_PENDING_POLL_SECONDS = 2.0
 REAL_PROTECT_CHECK_SECONDS = 60.0
+AUTOSTOP_CHECK_SECONDS = 30.0
+AUTOSTOP_INCLUDE_UNREALIZED = True  # equity = wallet balance + unrealized PnL
+CONFIG_AUTOSTOP = os.getenv("AUTOSTOP_PERCENT", "").strip()
 DEFAULT_MARGIN_USDT = Decimal("0.5")
 DEFAULT_LEVERAGE = 10
 REAL_NOTIONAL_MIN_RATIO = Decimal("0.90")
@@ -213,10 +216,7 @@ class TelegramErrorHandler(logging.Handler):
     def _should_forward(record: logging.LogRecord) -> bool:
         if record.levelno >= logging.WARNING:
             return True
-        if record.levelno != logging.INFO:
-            return False
-        message = record.getMessage().strip()
-        return bool(re.match(r"^\[SCAN\] Cycle #\d+ completed ", message))
+        return False
 
     def emit(self, record: logging.LogRecord) -> None:
         if self.loop is None or self.engine is None:
@@ -392,6 +392,30 @@ def duration_text(seconds: float | int | None) -> str:
         parts.append(f"{secs}s")
 
     return " ".join(parts)
+
+
+def fmt_price(value: Decimal | None) -> str:
+    """Harga untuk tampilan; membuang artefak desimal (mis. 0.013179999999999999)."""
+    if value is None:
+        return "-"
+    try:
+        return decimal_to_str(value.quantize(Decimal("0.0000000001"))) or "0"
+    except InvalidOperation:
+        return decimal_to_str(value) or "0"
+
+
+def fmt_num(value: Any, digits: int = 2) -> str:
+    if value is None:
+        return "-"
+    try:
+        return str(Decimal(str(value)).quantize(Decimal("1").scaleb(-digits)))
+    except (InvalidOperation, ValueError):
+        return str(value)
+
+
+def card(title: str, rows: list[str]) -> str:
+    body = "\n".join(f"│ {row}" for row in rows if row)
+    return f"╭─ {title} ─╮\n{body}\n╰──────────────────╯"
 
 
 def quantized_price(value: Decimal, tick_size: Decimal) -> Decimal:
@@ -2392,6 +2416,17 @@ class TradingEngine:
         self._scan_cycle_number = 0
         self._scan_last_report: dict[str, Any] = {}
         self._scan_margin_streak: dict[str, int] = {}
+
+        # AUTOSTOP: trailing max drawdown atas equity Binance (hanya saat REAL ON).
+        default_autostop = self._parse_optional_decimal(CONFIG_AUTOSTOP)
+        self.autostop_percent: Decimal | None = (
+            default_autostop if default_autostop is not None and default_autostop < 100 else None
+        )
+        self._equity_peak: Decimal | None = None
+        self._equity_last: Decimal | None = None
+        self._autostop_triggered = False
+        self._autostop_failures = 0
+        self._autostop_task: asyncio.Task[Any] | None = None
         self._close_batch_in_progress = False
 
         self.banned_pairs: dict[str, dict[str, Any]] = {}
@@ -2550,6 +2585,8 @@ class TradingEngine:
             return
 
         self._running = False
+
+        await self._stop_autostop_task()
 
         if self._scan_task is not None and not self._scan_task.done():
             self._scan_task.cancel()
@@ -2834,13 +2871,19 @@ class TradingEngine:
 
             self.real_mode = True
             self.real.last_balance = dict(usdt)
+            self._equity_peak = self._equity_from_balance_row(usdt)
+            self._equity_last = self._equity_peak
+            self._autostop_triggered = False
+            self._autostop_failures = 0
+            self._start_autostop_task()
 
             await self.reply(
                 "🔴🤖 REAL MODE AKTIF\n\n"
                 "Private Binance API: ✅ Terhubung\n"
                 f"USDT Available Balance: {decimal_to_str(available)}\n"
                 f"Margin: {decimal_to_str(self.margin_usdt)} USDT\n"
-                f"Leverage: {self.leverage}x\n\n"
+                f"Leverage: {self.leverage}x\n"
+                f"Autostop: {self._autostop_short()}\n\n"
                 "⚠️ Order real sekarang dapat dibuat oleh setup yang memakai mode REAL."
             )
         except BinanceRateLimitError as exc:
@@ -2873,6 +2916,10 @@ class TradingEngine:
             return
 
         self.real_mode = False
+        await self._stop_autostop_task()
+        self._equity_peak = None
+        self._equity_last = None
+        self._autostop_triggered = False
         await self.reply(
             "🔴 REAL MODE OFF\n\n"
             "Tidak ada order real baru yang akan dibuat.\n"
@@ -3232,7 +3279,19 @@ class TradingEngine:
         trade.real_error = None
         trade.status = "FILLED"
 
+        # Notifikasi dulu (cepat), proteksi TP/SL tetap diprioritaskan sebelum pencatatan.
+        await self._notify_filled(trade)
         await self._protect_or_close(trade)
+        try:
+            await self._record_event(
+                trade,
+                "FILLED",
+                event_price=actual_entry,
+                reason=trade.entry_reason,
+                extra={"fill_price": decimal_to_str(actual_entry)},
+            )
+        except Exception:
+            log.exception("Gagal mencatat event FILLED REAL %s", trade.trade_id)
         return True
 
     async def _ensure_real_protective_orders(self, trade: Trade) -> None:
@@ -4422,14 +4481,47 @@ class TradingEngine:
                     "Tidak ada pair yang sedang dibanned."
                 )
                 return
-            lines = ["🚫 BAN LIST", "", f"Total pair banned: {len(self.banned_pairs)}", ""]
+            groups: dict[str, list[str]] = {}
             for pair in sorted(self.banned_pairs):
                 item = self.banned_pairs[pair]
-                reason = item.get("reason") or "Tanpa alasan"
-                lines.append(
-                    f"{pair} | {self._ban_remaining_text(item)} | {reason}"
-                )
-            await self.reply("\n".join(lines))
+                source = str(item.get("source") or "")
+                reason = str(item.get("reason") or "")
+                if source == "AUTO_MARGIN_INFLUENCE":
+                    label = "💸 Margin influence"
+                elif source == "AUTO_INSUFFICIENT_HISTORY":
+                    label = "🕒 Riwayat candle kurang"
+                elif source == "MANUAL":
+                    label = "✋ Manual"
+                elif reason.startswith("H4 structure") or source == "AUTO_STRUCTURE_MISMATCH":
+                    label = "🧭 Tidak searah BTC"
+                elif reason.startswith("Confidence") or source == "AUTO_BELOW_THRESHOLD":
+                    label = "📉 Di bawah threshold"
+                elif reason.startswith("Setup berakhir") or source == "AUTO_PRICE_EXP":
+                    label = "🔒 Setelah trade selesai"
+                else:
+                    label = "📌 Lainnya"
+                remaining = self._ban_remaining_text(item)
+                short = remaining.split(" ")[0] if remaining != "PERMANENT" else "∞"
+                groups.setdefault(label, []).append(f"{pair} {short}")
+
+            chunks: list[str] = []
+            current = f"🚫 BAN LIST  •  {len(self.banned_pairs)} pair\n"
+            for label, entries in groups.items():
+                block = f"\n{label} ({len(entries)})\n" + "  ·  ".join(entries) + "\n"
+                if len(current) + len(block) > 3500:
+                    chunks.append(current)
+                    current = ""
+                while len(block) > 3500:
+                    cut = block.rfind("  ·  ", 0, 3500)
+                    cut = cut if cut > 0 else 3500
+                    chunks.append(current + block[:cut])
+                    current = ""
+                    block = block[cut:].lstrip(" ·\n")
+                current += block
+            if current.strip():
+                chunks.append(current)
+            for chunk in chunks:
+                await self.reply(chunk)
             return
 
         pair = normalize_symbol(parts[1])
@@ -4519,6 +4611,179 @@ class TradingEngine:
             "🟢 SCAN ON\n\n"
             f"Threshold: {decimal_to_str(self.scan_threshold)}\n"
             f"Max Active Trade: {self.max_active_trades}"
+        )
+
+    # --------------------------------------------------------
+    # AUTOSTOP (trailing max drawdown equity, hanya saat REAL ON)
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _equity_from_balance_row(row: dict[str, Any]) -> Decimal:
+        wallet = parse_signed_decimal(str(row.get("balance") or "0"))
+        if not AUTOSTOP_INCLUDE_UNREALIZED:
+            return wallet
+        return wallet + parse_signed_decimal(str(row.get("crossUnPnl") or "0"))
+
+    async def _read_equity(self) -> Decimal:
+        balances = await self.real.get_futures_balance()
+        usdt = next(
+            (row for row in balances if str(row.get("asset") or "").upper() == "USDT"),
+            None,
+        )
+        if usdt is None:
+            raise BinanceAPIError(
+                "USDT tidak ditemukan pada Futures balance.",
+                endpoint="/fapi/v3/balance",
+            )
+        return self._equity_from_balance_row(usdt)
+
+    @staticmethod
+    def _fmt_usd(value: Decimal | None) -> str:
+        if value is None:
+            return "-"
+        return decimal_to_str(value.quantize(Decimal("0.0001"))) or "0"
+
+    def _autostop_floor(self) -> Decimal | None:
+        if self.autostop_percent is None or self._equity_peak is None:
+            return None
+        return self._equity_peak * (Decimal("100") - self.autostop_percent) / Decimal("100")
+
+    def _autostop_short(self) -> str:
+        if self.autostop_percent is None:
+            return "OFF (atur dengan /autostop [persen])"
+        state = "TERPICU" if self._autostop_triggered else "aktif"
+        return f"{decimal_to_str(self.autostop_percent)}% dari puncak equity ({state})"
+
+    def _autostop_status_text(self) -> str:
+        lines = ["🛡️ AUTOSTOP", ""]
+        if self.autostop_percent is None:
+            lines.append("Threshold: OFF")
+        else:
+            lines.append(f"Threshold: {decimal_to_str(self.autostop_percent)}% dari puncak equity")
+        if not self.real_mode:
+            lines.append("Real Mode: OFF (autostop bekerja hanya saat /real on)")
+            return "\n".join(lines)
+        lines.append("Real Mode: ON")
+        lines.append(f"Peak Equity: {self._fmt_usd(self._equity_peak)} USDT")
+        lines.append(f"Equity Terakhir: {self._fmt_usd(self._equity_last)} USDT")
+        floor = self._autostop_floor()
+        if floor is not None:
+            lines.append(f"Batas Stop: {self._fmt_usd(floor)} USDT")
+        lines.append(f"Status: {'TERPICU (scan dimatikan)' if self._autostop_triggered else 'AMAN'}")
+        return "\n".join(lines)
+
+    def _start_autostop_task(self) -> None:
+        if not self._running:
+            return
+        if self._autostop_task is not None and not self._autostop_task.done():
+            return
+        self._autostop_task = asyncio.create_task(
+            self._autostop_loop(),
+            name="main-autostop-loop",
+        )
+
+    async def _stop_autostop_task(self) -> None:
+        task = self._autostop_task
+        self._autostop_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _autostop_loop(self) -> None:
+        while self._running and self.real_mode:
+            try:
+                await asyncio.sleep(AUTOSTOP_CHECK_SECONDS)
+                await self._autostop_check()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("[AUTOSTOP] check error")
+
+    async def _autostop_check(self) -> None:
+        if not self.real_mode or self.real.cooldown_remaining > 0:
+            return
+        try:
+            equity = await self._read_equity()
+        except BinanceRateLimitError as exc:
+            self._notify_rate_limit(exc, "AUTOSTOP")
+            return
+        except Exception as exc:
+            self._autostop_failures += 1
+            if self._autostop_failures == 3:
+                log.warning("[AUTOSTOP] gagal membaca saldo 3x berturut-turut: %s", exc)
+            return
+        self._autostop_failures = 0
+        self._equity_last = equity
+        # Puncak hanya naik; turun tidak mengubah puncak.
+        if self._equity_peak is None or equity > self._equity_peak:
+            self._equity_peak = equity
+        floor = self._autostop_floor()
+        if floor is None or self._autostop_triggered or equity > floor:
+            return
+
+        self._autostop_triggered = True
+        self._scan_user_enabled = False
+        self._scan_auto_paused = False
+        drawdown = (self._equity_peak - equity) / self._equity_peak * Decimal("100")
+        log.info("[AUTOSTOP] terpicu: equity=%s peak=%s", equity, self._equity_peak)
+        await self.reply(
+            "🛑 AUTOSTOP TERPICU\n\n"
+            f"Equity turun {decimal_to_str(drawdown.quantize(Decimal('0.01')))}% dari puncak "
+            f"(batas {decimal_to_str(self.autostop_percent)}%).\n"
+            f"Peak: {self._fmt_usd(self._equity_peak)} USDT\n"
+            f"Sekarang: {self._fmt_usd(equity)} USDT\n"
+            f"Batas: {self._fmt_usd(floor)} USDT\n\n"
+            "SCAN dimatikan; cycle yang sedang berjalan tidak memasukkan setup baru.\n"
+            "Posisi dan order yang sudah ada tidak ditutup.\n\n"
+            "Mulai lagi: /autostop [persen] lalu /scan on"
+        )
+
+    async def _autostop_rebaseline(self) -> None:
+        equity = await self._read_equity()
+        self._equity_peak = equity
+        self._equity_last = equity
+        self._autostop_triggered = False
+        self._autostop_failures = 0
+
+    async def _handle_autostop_command(self, text: str) -> None:
+        parts = text.split()
+        if len(parts) == 1:
+            await self.reply(self._autostop_status_text())
+            return
+
+        arg = parts[1].lower()
+        if arg == "off":
+            self.autostop_percent = None
+            await self.reply("🛑 AUTOSTOP OFF")
+            return
+        if arg == "reset":
+            if not self.real_mode:
+                raise ValueError("Autostop bekerja hanya saat /real on.")
+            await self._autostop_rebaseline()
+            await self.reply("♻️ Puncak equity diset ulang ke saldo sekarang.\n\n" + self._autostop_status_text())
+            return
+
+        try:
+            value = Decimal(arg.replace(",", "."))
+        except InvalidOperation:
+            raise ValueError("Gunakan /autostop [persen], /autostop off, atau /autostop reset.")
+        if not value.is_finite() or value <= 0 or value >= 100:
+            raise ValueError("Autostop harus di antara 0 dan 100 (persen).")
+
+        self.autostop_percent = value
+        if self.real_mode and self._autostop_triggered:
+            await self._autostop_rebaseline()
+        suffix = (
+            "" if self.real_mode
+            else "\n\nBaseline saldo diambil saat /real on."
+        )
+        await self.reply(
+            f"✅ AUTOSTOP = {decimal_to_str(value)}%\n\n"
+            + self._autostop_status_text()
+            + suffix
         )
 
     async def _handle_threshold_command(self, text: str) -> None:
@@ -4985,12 +5250,14 @@ class TradingEngine:
         started = time.monotonic()
         log.info("[SCAN] Cycle #%s started", cycle)
         await self.reply(
-            "🤖⚡ <b>SCAN #{}</b> DIMULAI ⚡🤖\n\n"
-            "🛰️ Radar market diaktifkan\n"
-            "📡 Menentukan regime BTC...\n"
-            "🔎 Menyusun universe Binance ∩ Bybit...\n"
-            "🎯 Batch maksimum: 50 pair\n\n"
-            "Status: <b>SCANNING...</b>".format(cycle)
+            card(
+                f"🛰️ SCAN #{cycle} DIMULAI",
+                [
+                    "📡 Regime BTC → universe Binance ∩ Bybit",
+                    f"🎯 Batch maksimum {SCAN_MAX_PAIRS_PER_CYCLE} pair",
+                    "⏳ Memindai...",
+                ],
+            )
         )
 
         module = await self._load_strategy_runtime()
@@ -5264,6 +5531,8 @@ class TradingEngine:
         final_margin_banned: list[str] = []
 
         for candidate in validated:
+            if not self._scan_user_enabled:
+                break
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
                 break
@@ -5440,83 +5709,40 @@ class TradingEngine:
                     if key in btc_node:
                         btc_lines.append(f"{key}: {btc_node.get(key)}")
 
+        ratio_line = (
+            f"   Rasio validasi   {fmt_num(avg_validation_ratio)}%\n"
+            if avg_validation_ratio is not None
+            else ""
+        )
+        margin_line = f"├ Ban margin       {len(final_margin_banned)}"
+        if final_margin_banned:
+            margin_line += f"  ({', '.join(final_margin_banned[:10])})"
         await self.reply(
-            "🔄 SCAN CYCLE #{cycle} SELESAI\n\n"
-            "BTC H4:\n"
-            "Trend: {btc}\n"
-            "{btc_detail}\n\n"
-            "UNIVERSE:\n"
-            "Common Binance ∩ Bybit: {common}\n"
-            "Already in /trade: {active}\n"
-            "Banned: {banned}\n"
-            "Margin blocked: {margin}\n"
-            "Eligible: {eligible}\n"
-            "Batch max: {batch_max}\n"
-            "Batch selected: {batch_selected}\n"
-            "Deferred next cycle: {deferred}\n\n"
-            "DIRECTION:\n"
-            "Searah dengan BTC: {aligned}\n"
-            "Tidak searah + ban 24h: {misaligned}\n"
-            "H4 Bullish: {bullish} | Bearish: {bearish} | Range: {range} | Unknown: {unknown}\n\n"
-            "ANALYSIS:\n"
-            "Scanned: {scanned}/{batch_max}\n"
-            ">= Threshold: {threshold_candidates}\n"
-            "Below threshold + ban 8h: {threshold_banned}\n"
-            "Validator valid: {valid}\n"
-            "Validator reject/missing: {vrej}\n"
-            "Analysis errors: {errors}\n"
-            "Final masuk /trade: {added}\n"
-            "Final add errors: {add_errors}\n"
-            "Final ban margin influence: {margin_banned}\n\n"
-            "CONFIDENCE:\n"
-            "Threshold: {threshold}\n"
-            "Average Initial: {avg_initial}\n"
-            "Average Validated: {avg_validated}\n"
-            "Average Validation Ratio: {validation_ratio}%\n"
-            "Highest: {high}\n"
-            "Lowest: {low}\n\n"
-            "CYCLE:\n"
-            "Duration: {duration:.2f}s\n"
-            "Next cycle delay: {next_delay:g}s"
-            .format(
-                cycle=cycle,
-                btc=btc_trend,
-                btc_detail="\n".join(btc_lines) if btc_lines else "Detail structure: tersedia di strategy analysis",
-                common=universe["common_count"],
-                active=already_trade,
-                banned=banned_count,
-                margin=margin_blocked,
-                eligible=len(eligible),
-                batch_max=SCAN_MAX_PAIRS_PER_CYCLE,
-                batch_selected=len(batch),
-                deferred=deferred,
-                aligned=len(directional),
-                misaligned=rejected_structure,
-                bullish=direction_counts["BULLISH"],
-                bearish=direction_counts["BEARISH"],
-                range=direction_counts["RANGE"],
-                unknown=direction_counts["UNKNOWN"],
-                scanned=scanned,
-                threshold_candidates=len(threshold_candidates),
-                threshold_banned=threshold_banned,
-                valid=len(validated),
-                vrej=validator_missing + validator_rejects,
-                errors=analysis_errors,
-                added=len(final_added),
-                add_errors=final_add_errors,
-                margin_banned=(
-                    str(len(final_margin_banned))
-                    + (f" ({', '.join(final_margin_banned[:10])})" if final_margin_banned else "")
-                ),
-                threshold=decimal_to_str(self.scan_threshold),
-                avg_initial=decimal_to_str(avg_initial),
-                avg_validated=decimal_to_str(avg_validated),
-                validation_ratio=decimal_to_str(avg_validation_ratio),
-                high=decimal_to_str(highest),
-                low=decimal_to_str(lowest),
-                duration=duration,
-                next_delay=SCAN_CYCLE_DELAY_SECONDS,
-            )
+            f"╭─ 🔄 SCAN #{cycle} SELESAI ─╮\n"
+            f"│ ₿ BTC H4   {btc_trend}\n"
+            f"│ ⏱ {duration:.0f}s  •  siklus berikut {SCAN_CYCLE_DELAY_SECONDS:g}s\n"
+            "╰──────────────────╯\n\n"
+            "🌐 UNIVERSE\n"
+            f"├ Binance ∩ Bybit  {universe['common_count']}\n"
+            f"├ Banned           {banned_count}\n"
+            f"├ Sudah di /trade  {already_trade}\n"
+            f"├ Margin blocked   {margin_blocked}\n"
+            f"└ Eligible         {len(eligible)}  (batch {len(batch)}/{SCAN_MAX_PAIRS_PER_CYCLE}, tunda {deferred})\n\n"
+            "🧭 ARAH vs BTC\n"
+            f"├ Searah {len(directional)}  •  tidak searah {rejected_structure} (ban 24j)\n"
+            f"└ H4  🟢 {direction_counts['BULLISH']}  🔴 {direction_counts['BEARISH']}"
+            f"  ⚪ {direction_counts['RANGE']}  ❓ {direction_counts['UNKNOWN']}\n\n"
+            "🔬 ANALISIS\n"
+            f"├ Dipindai         {scanned}/{SCAN_MAX_PAIRS_PER_CYCLE}\n"
+            f"├ ≥ Threshold      {len(threshold_candidates)}  (di bawah {threshold_banned}, ban 8j)\n"
+            f"├ Validator lolos  {len(validated)}  (tolak {validator_missing + validator_rejects})\n"
+            f"├ Masuk /trade     {len(final_added)}  (error {final_add_errors})\n"
+            f"{margin_line}\n"
+            f"└ Error analisis   {analysis_errors}\n\n"
+            f"🎯 CONFIDENCE (min {decimal_to_str(self.scan_threshold)})\n"
+            f"├ Awal {fmt_num(avg_initial)}  →  Valid {fmt_num(avg_validated)}\n"
+            f"{ratio_line}"
+            f"└ Tertinggi {fmt_num(highest)}  •  Terendah {fmt_num(lowest)}"
         )
 
     async def reset_github_records(self) -> None:
@@ -8904,52 +9130,46 @@ class TradingEngine:
         trade: Trade,
     ) -> None:
         result = trade.result or "CLOSED"
-
         title = {
             "TP": "✅ TP TERCAPAI",
             "SL": "🛑 SL TERCAPAI",
             "EXPIRED": "⏳ PRICE EXPIRED",
             "DELETED": "🗑️ DELETED",
             "MANUAL_CLOSE_PENDING": "🔒 PENDING DITUTUP",
-            "MANUAL_CLOSE": "🔒 POSISI DITUTUP MANUAL",
-        }.get(
-            result,
-            "TRADE CLOSED",
-        )
+            "MANUAL_CLOSE": "🔒 DITUTUP MANUAL",
+        }.get(result, "🏁 TRADE CLOSED")
 
-        pnl = (
-            format_pct(trade.pnl_percent)
-            if trade.pnl_percent is not None
-            else "-"
-        )
+        icon = "🟢" if trade.direction == "BUY" else "🔴"
+        mode = "REAL" if trade.real_enabled else "SIMULASI"
+        reason = (trade.result_reason or "").strip()[:240]
 
         if result == "EXPIRED":
-            # Notifikasi khusus supaya jelas bahwa EXPIRED berasal dari
-            # Price Exp, bukan dari TP/SL atau aturan lain.
-            await self.reply(
-                f"{title}\n\n"
-                f"Pair: {trade.pair}\n"
-                f"Direction: {trade.direction.title()}\n"
-                f"Entry: {decimal_to_str(trade.entry)}\n"
-                f"Price Exp: {decimal_to_str(trade.price_exp)}\n"
-                f"Harga Pemicu: {decimal_to_str(trade.exit_price)}\n"
-                f"Result: EXPIRED\n"
-                f"PnL: -\n\n"
-                "Pemicu: PRICE EXP SAJA\n"
-                f"Reason Price Exp: {trade.result_reason or '-'}"
-            )
+            rows = [
+                f"{icon} {trade.pair}  •  {trade.direction}",
+                f"🎯 Entry    {fmt_price(trade.entry)}",
+                f"⛔ Exp      {fmt_price(trade.price_exp)}",
+                f"📡 Pemicu   {fmt_price(trade.exit_price)}",
+                f"⚙️ Mode     {mode}",
+            ]
+            if reason:
+                rows.append(f"🧠 {reason}")
+            await self.reply(card(title, rows))
             return
 
-        await self.reply(
-            f"{title}\n\n"
-            f"Pair: {trade.pair}\n"
-            f"Direction: {trade.direction.title()}\n"
-            f"Entry: {decimal_to_str(trade.fill_price or trade.entry)}\n"
-            f"Exit: {decimal_to_str(trade.exit_price)}\n"
-            f"Result: {result}\n"
-            f"PnL: {pnl}\n\n"
-            f"Reason: {trade.result_reason or '-'}"
-        )
+        pnl = format_pct(trade.pnl_percent) if trade.pnl_percent is not None else "-"
+        rows = [
+            f"{icon} {trade.pair}  •  {trade.direction}",
+            f"🎯 Entry   {fmt_price(trade.fill_price or trade.entry)}",
+            f"🏁 Exit    {fmt_price(trade.exit_price)}",
+            f"📈 PnL     {pnl}",
+        ]
+        if trade.filled_at is not None and trade.closed_at is not None:
+            held = (trade.closed_at - trade.filled_at).total_seconds()
+            rows.append(f"⏱ Durasi  {duration_text(held)}")
+        rows.append(f"⚙️ Mode    {mode}")
+        if reason:
+            rows.append(f"🧠 {reason}")
+        await self.reply(card(title, rows))
 
     async def _fill_trade(
         self,
@@ -8986,15 +9206,25 @@ class TradingEngine:
             },
         )
 
-        await self.reply(
-            "✅ ENTRY FILLED\n\n"
-            f"Pair: {trade.pair}\n"
-            f"Direction: {trade.direction.title()}\n"
-            f"Entry: {decimal_to_str(trade.entry)}\n"
-            f"Fill Price: {decimal_to_str(trade.entry)}\n"
-            f"Reason Entry: {trade.entry_reason}\n"
-            "Status: FILLED"
-        )
+        await self._notify_filled(trade)
+
+    async def _notify_filled(self, trade: Trade) -> None:
+        icon = "🟢" if trade.direction == "BUY" else "🔴"
+        rows = [
+            f"{icon} {trade.pair}  •  {trade.direction}",
+            f"🎯 Entry   {fmt_price(trade.entry)}",
+            f"✅ Fill    {fmt_price(trade.fill_price or trade.entry)}",
+            f"🛡 SL      {fmt_price(trade.sl)}",
+            f"🏁 TP      {fmt_price(trade.tp)}",
+            f"⛔ Exp     {fmt_price(trade.price_exp)}",
+        ]
+        if trade.real_enabled and trade.quantity is not None:
+            rows.append(f"📦 Qty     {fmt_price(trade.quantity)}")
+        rows.append(f"⚙️ Mode    {'REAL' if trade.real_enabled else 'SIMULASI'}")
+        reason = (trade.entry_reason or "").strip()
+        if reason:
+            rows.append(f"🧠 {reason[:200]}")
+        await self.reply(card("✅ ENTRY FILLED", rows))
 
     # --------------------------------------------------------
     # LIVE PRICE EVENT
@@ -10424,6 +10654,7 @@ class TradingEngine:
             f"Scan: {'ON' if self._scan_user_enabled else 'OFF'}"
             f" | Runtime: {'PAUSED_BY_MAX' if self._scan_auto_paused else ('RUNNING' if self._scan_task is not None and not self._scan_task.done() else 'OFF')}\n"
             f"Threshold: {decimal_to_str(self.scan_threshold)} | Max: {self.max_active_trades}\n"
+            f"Autostop: {self._autostop_short()}\n"
             f"Margin: {decimal_to_str(self.margin_usdt)} USDT | Leverage: {self.leverage}x | Target Notional: {decimal_to_str(self.margin_usdt * Decimal(self.leverage))} USDT\n"
         )
 
@@ -10448,6 +10679,7 @@ class TradingEngine:
             "/scan on|off - scanner otomatis\n"
             "/threshold [angka] - ambang confidence scanner\n"
             "/max [angka] - batas total PENDING + FILLED\n"
+            "/autostop [persen|off|reset] - matikan scan saat equity turun dari puncak (REAL ON)\n"
             "/banned [PAIR] [jam] [alasan] - ban pair / lihat daftar ban\n"
             "/unban PAIR|all - hapus ban\n"
             "/stats - statistik histori\n"
@@ -10528,6 +10760,7 @@ class TradingEngine:
                     "/margin",
                     "/leverage",
                     "/max",
+                    "/autostop",
                     "/banned",
                     "/unban",
                     "/trade",
@@ -10661,6 +10894,14 @@ class TradingEngine:
                 except Exception as exc:
                     log.exception("MAX command gagal.")
                     await self.reply(f"❌ /max gagal.\n\n{exc}")
+                return
+
+            if command == "/autostop":
+                try:
+                    await self._handle_autostop_command(text)
+                except Exception as exc:
+                    log.exception("AUTOSTOP command gagal.")
+                    await self.reply(f"❌ /autostop gagal.\n\n{exc}")
                 return
 
             if command == "/banned":
