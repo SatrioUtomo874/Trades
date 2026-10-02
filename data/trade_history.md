@@ -560,3 +560,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-02T08:18:05.928167+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## SLPUSDT — BUY
+
+Trade ID: `SLPUSDT-20261002-003102-35D092`
+
+### Setup
+
+- Price Now Reference: 0.0006696
+- Entry: 0.0006613
+- Reason Entry: SLPUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.0006239). H1 me-refine ke BULLISH_BREAKER 0.00065975. M15 memberi execution POI BULLISH_BREAKER 0.00066135. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 50.5 mendukung momentum.
+- Price Exp: 0.0006813
+- Reason Price Exp: Price Exp 0.0006812521 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.0006497
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.0006521) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.0007097
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.0007097 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.0007099
+- Result Reason: TP diarahkan ke H4_EQUAL_LEVELS 0.0007097 sebagai liquidity target HTF.
+- PnL: 7.349160743989112354453349463%
+- Created: 2026-10-01T17:31:02.860773+00:00
+- Filled: 2026-10-01T19:20:59.936214+00:00
+- Closed: 2026-10-02T09:24:48.822515+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
