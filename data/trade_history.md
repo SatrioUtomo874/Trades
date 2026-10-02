@@ -527,3 +527,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-02T07:42:11.931417+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## DUSKUSDT — BUY
+
+Trade ID: `DUSKUSDT-20261002-122117-CCEE29`
+
+### Setup
+
+- Price Now Reference: 0.0894
+- Entry: 0.08425
+- Reason Entry: DUSKUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 0.08405). H1 me-refine ke BULLISH_FVG 0.084255. M15 memberi execution POI BULLISH_BREAKER 0.084345. Fib H4 berada pada band DEEP_0.618_0.786 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 60.5 mendukung momentum.
+- Price Exp: 0.08941
+- Reason Price Exp: Price Exp 0.089406 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.08189
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.08242) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.08941
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.08941 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.08941
+- Result Reason: Price Exp 0.089406 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-02T05:21:17.840360+00:00
+- Filled: -
+- Closed: 2026-10-02T08:18:05.928167+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
