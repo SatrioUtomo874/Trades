@@ -144,8 +144,8 @@ GITHUB_REQUEST_SECONDS = 30
 BINANCE_RECV_WINDOW = 5000
 BINANCE_RATE_LIMIT_FALLBACK_SECONDS = 60
 BINANCE_RATE_LIMIT_SAFETY_SECONDS = 60
-REAL_RECONCILE_INTERVAL_SECONDS = 1.0
-REAL_PENDING_POLL_SECONDS = 2.0
+REAL_RECONCILE_INTERVAL_SECONDS = 2.0
+REAL_PENDING_POLL_SECONDS = 5.0
 REAL_PROTECT_CHECK_SECONDS = 60.0
 AUTOSTOP_CHECK_SECONDS = 30.0
 AUTOSTOP_INCLUDE_UNREALIZED = True  # equity = wallet balance + unrealized PnL
@@ -829,6 +829,22 @@ class BinanceREST:
                 timeout=HTTP_REQUEST_SECONDS,
             )
 
+            if response.status_code in {418, 429}:
+                try:
+                    retry = float(response.headers.get("Retry-After") or "")
+                except ValueError:
+                    retry = None
+                server = retry if retry is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
+                raise BinanceRateLimitError(
+                    f"Binance REST {path}: HTTP {response.status_code}",
+                    status_code=response.status_code,
+                    code=None,
+                    endpoint=path,
+                    server_cooldown_seconds=server,
+                    bot_cooldown_seconds=server + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                    retry_after_known=retry is not None,
+                )
+
             if response.status_code >= 400:
                 raise RuntimeError(
                     f"Binance REST {path}: HTTP "
@@ -1179,7 +1195,7 @@ class BinanceRealClient:
 
         remaining = self.cooldown_remaining
         if remaining > 0:
-            raise BinanceRateLimitError(
+            blocked = BinanceRateLimitError(
                 f"REST Binance sedang ditahan oleh rate-limit cooldown ({remaining:.0f}s tersisa).",
                 status_code=429,
                 code=None,
@@ -1188,6 +1204,8 @@ class BinanceRealClient:
                 bot_cooldown_seconds=remaining,
                 retry_after_known=False,
             )
+            blocked.internal = True
+            raise blocked
 
         base_params = dict(params or {})
         payload = self._signed_query(base_params) if signed else base_params
@@ -2427,6 +2445,12 @@ class TradingEngine:
         self._autostop_triggered = False
         self._autostop_failures = 0
         self._autostop_task: asyncio.Task[Any] | None = None
+
+        # Rate limit Binance: satu notifikasi per jeda + watcher yang melanjutkan.
+        self._rl_task: asyncio.Task[Any] | None = None
+        self._rl_notified_until = 0.0
+        self._rl_started_at: float | None = None
+        self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._close_batch_in_progress = False
 
         self.banned_pairs: dict[str, dict[str, Any]] = {}
@@ -2587,6 +2611,7 @@ class TradingEngine:
         self._running = False
 
         await self._stop_autostop_task()
+        await self._stop_rate_limit_task()
 
         if self._scan_task is not None and not self._scan_task.done():
             self._scan_task.cancel()
@@ -2928,31 +2953,144 @@ class TradingEngine:
             "Tidak ada order/posisi Binance yang disentuh otomatis."
         )
 
+    def _fire(self, coro: Any) -> None:
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            coro.close()
+            return
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     def _notify_rate_limit(self, exc: BinanceRateLimitError, action: str) -> None:
-        server = max(0.0, exc.server_cooldown_seconds)
+        """Satu pesan per jeda limit; penolakan cooldown internal tidak dikirim."""
+        self._start_rate_limit_watcher()
+        if getattr(exc, "internal", False):
+            return
         bot = max(0.0, exc.bot_cooldown_seconds)
-        retry_known = getattr(exc, "retry_after_known", False)
-        if retry_known:
-            timing = f"Retry-After Binance={server:.0f}s; bot pause={bot:.0f}s"
-        elif exc.code is None and exc.status_code == 429:
-            timing = (
-                "Cooldown internal bot sedang berjalan; "
-                f"sisa jeda={bot:.0f}s"
+        now = time.monotonic()
+        if now + bot <= self._rl_notified_until + 5.0:
+            return
+        self._rl_notified_until = now + bot
+        if self._rl_started_at is None:
+            self._rl_started_at = now
+        log.info("Binance API LIMIT | action=%s | endpoint=%s | HTTP=%s | code=%s | %s",
+                 action, exc.endpoint, exc.status_code, exc.code, str(exc)[:300])
+        self._fire(
+            self.reply(
+                card(
+                    "⏸ BINANCE API LIMIT",
+                    [
+                        f"🔧 Aksi      {action}",
+                        f"🌐 Endpoint  {exc.endpoint}",
+                        f"⏱ Jeda      {duration_text(bot)}",
+                        f"▶️ Lanjut    {format_wib(now_utc() + timedelta(seconds=bot))}",
+                        "📌 Ditunda: scan, cek fill, verifikasi TP/SL, autostop",
+                        "Lanjut otomatis dan dikabari saat Binance tersambung.",
+                    ],
+                )
             )
-        else:
-            timing = (
-                "Retry-After tidak diberikan; "
-                f"fallback Binance={server:.0f}s; bot pause={bot:.0f}s"
-            )
-        log.warning(
-            "Binance API LIMIT | action=%s | endpoint=%s | HTTP=%s | code=%s | %s | message=%s",
-            action,
-            exc.endpoint,
-            exc.status_code,
-            exc.code,
-            timing,
-            str(exc),
         )
+
+    def _start_rate_limit_watcher(self) -> None:
+        if not self._running:
+            return
+        if self._rl_task is not None and not self._rl_task.done():
+            return
+        try:
+            self._rl_task = asyncio.get_running_loop().create_task(
+                self._rate_limit_watcher(),
+                name="main-rate-limit-watcher",
+            )
+        except RuntimeError:
+            return
+
+    async def _stop_rate_limit_task(self) -> None:
+        task = self._rl_task
+        self._rl_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _rate_limit_watcher(self) -> None:
+        """Tunggu jeda selesai, tes koneksi, lalu kerjakan yang tertunda."""
+        failures = 0
+        while self._running:
+            remaining = self.real.cooldown_remaining
+            if remaining > 0:
+                await asyncio.sleep(min(remaining + 1.0, 60.0))
+                continue
+            try:
+                await self.real._public_server_time()
+            except Exception as exc:
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", None)
+                if status in (418, 429):
+                    retry = self.real._parse_retry_after(response)
+                    server = retry if retry is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
+                    bot = server + BINANCE_RATE_LIMIT_SAFETY_SECONDS
+                    self.real._cooldown_until = max(
+                        self.real._cooldown_until, time.monotonic() + bot
+                    )
+                    self._notify_rate_limit(
+                        BinanceRateLimitError(
+                            f"HTTP {status}",
+                            status_code=status,
+                            code=None,
+                            endpoint="/fapi/v1/time",
+                            server_cooldown_seconds=server,
+                            bot_cooldown_seconds=bot,
+                            retry_after_known=retry is not None,
+                        ),
+                        "CEK KONEKSI",
+                    )
+                    continue
+                failures += 1
+                log.info("[RATE LIMIT] cek koneksi gagal (%s/6): %s", failures, exc)
+                if failures >= 6:
+                    return
+                await asyncio.sleep(15)
+                continue
+
+            started = self._rl_started_at
+            self._rl_started_at = None
+            self._rl_notified_until = 0.0
+            if started is not None:
+                await self.reply(
+                    card(
+                        "▶️ BINANCE API TERSAMBUNG",
+                        [
+                            f"⏱ Terhenti  {duration_text(time.monotonic() - started)}",
+                            "✅ Melanjutkan: scan, cek fill & TP/SL, autostop",
+                        ],
+                    )
+                )
+            await self._resume_after_rate_limit()
+            if self.real.cooldown_remaining > 0:
+                continue
+            return
+
+    async def _resume_after_rate_limit(self) -> None:
+        """Kerjakan pengecekan REAL yang tertunda selama jeda."""
+        if not self.real_mode:
+            return
+        for trade in list(self.active_trades.values()):
+            if not (trade.real_enabled and trade.status in {"PENDING", "FILLED"}):
+                continue
+            if self.real.cooldown_remaining > 0:
+                return
+            try:
+                await self._reconcile_real_trade(trade)
+            except BinanceRateLimitError as exc:
+                self._notify_rate_limit(exc, "LANJUT TERTUNDA")
+                return
+            except Exception as exc:
+                log.info("[RATE LIMIT] reconcile %s gagal: %s", trade.trade_id, exc)
+            await asyncio.sleep(0.5)
+        await self._autostop_check()
 
     async def _handle_real_exception(self, exc: Exception, action: str, trade: Trade | None = None) -> None:
         pair = trade.pair if trade else "-"
@@ -3554,6 +3692,8 @@ class TradingEngine:
 
     async def _verify_real_protection(self, trade: Trade) -> None:
         """Pastikan posisi REAL selalu punya TP/SL; gagal berulang -> close paksa."""
+        if self.real.cooldown_remaining > 0:
+            return
         try:
             await self._reconcile_real_trade(trade)
             self._real_protect_fail.pop(trade.trade_id, None)
@@ -5226,9 +5366,20 @@ class TradingEngine:
     async def _scan_loop(self) -> None:
         while self._running and self._scan_user_enabled and not self._scan_auto_paused:
             try:
+                while self._running and self._scan_user_enabled and self.real.cooldown_remaining > 0:
+                    await asyncio.sleep(min(self.real.cooldown_remaining + 1.0, 30.0))
+                if not (self._running and self._scan_user_enabled):
+                    break
                 await self._run_scan_cycle()
             except asyncio.CancelledError:
                 raise
+            except BinanceRateLimitError as exc:
+                self.real._cooldown_until = max(
+                    self.real._cooldown_until,
+                    time.monotonic() + exc.bot_cooldown_seconds,
+                )
+                self._notify_rate_limit(exc, "SCAN")
+                continue
             except Exception:
                 log.exception("[SCAN] cycle fatal error")
                 await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
@@ -5553,8 +5704,12 @@ class TradingEngine:
                     strategy_meta=meta,
                 )
                 if self.real_mode:
+                    if self.real.cooldown_remaining > 0:
+                        break
                     try:
                         await self._ensure_real_entry(trade)
+                    except BinanceRateLimitError:
+                        break
                     except MarginInfluenceError as exc:
                         await self._ban_pair(
                             trade.pair,
@@ -9284,6 +9439,8 @@ class TradingEngine:
                     )
 
                     if trade.real_enabled and self.real_mode:
+                        if self.real.cooldown_remaining > 0:
+                            continue
                         if entry_hit and self._real_poll_due(trade, "fill", REAL_PENDING_POLL_SECONDS):
                             if await self._confirm_real_fill(trade):
                                 continue
@@ -9333,6 +9490,8 @@ class TradingEngine:
                         tp_hit = price <= trade.tp
 
                     if trade.real_enabled and self.real_mode:
+                        if self.real.cooldown_remaining > 0:
+                            continue
                         if sl_hit or tp_hit:
                             result_probe = "SL" if sl_hit else "TP"
                             if await self._real_exit_trigger(trade, result_probe, price):
@@ -9364,6 +9523,8 @@ class TradingEngine:
                             )
                             continue
 
+            except BinanceRateLimitError as exc:
+                self._notify_rate_limit(exc, f"PRICE EVENT {symbol}")
             except Exception:
                 log.exception(
                     "Gagal memproses price event "
