@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T22:47:57.257805+00:00",
+  "saved_at": "2026-10-02T22:48:01.850635+00:00",
   "bans": [
+    {
+      "pair": "DOGEUSDT",
+      "banned_at": "2026-10-02T22:48:01.850621+00:00",
+      "until": "2026-10-03T06:48:01.850592+00:00",
+      "reason": "Confidence 59.61 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
     {
       "pair": "HYPEUSDT",
       "banned_at": "2026-10-02T22:47:52.171077+00:00",
