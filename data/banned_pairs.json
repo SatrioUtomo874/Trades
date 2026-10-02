@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T13:21:19.848359+00:00",
+  "saved_at": "2026-10-02T13:21:23.458006+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -169,6 +169,13 @@
       "until": "2026-10-02T16:20:15.059475+00:00",
       "reason": "Confidence 48.77 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ETHUSDT",
+      "banned_at": "2026-10-02T13:21:23.457964+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 10 (toleransi ±10%).",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "GALAUSDT",
