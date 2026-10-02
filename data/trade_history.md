@@ -461,3 +461,36 @@ Tidak ada trailing.
 - Filled: 2026-10-01T16:55:24.431451+00:00
 - Closed: 2026-10-01T17:27:21.021789+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## VELVETUSDT — BUY
+
+Trade ID: `VELVETUSDT-20261001-235253-31517D`
+
+### Setup
+
+- Price Now Reference: 0.0589
+- Entry: 0.0576
+- Reason Entry: VELVETUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.05735). H1 me-refine ke BULLISH_FVG 0.05765. M15 memberi execution POI BULLISH_BREAKER 0.05775. Fib H4 berada pada band OVERLAPS_0.618 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.0607
+- Reason Price Exp: Price Exp 0.0606387 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.0564
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.0574) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1. SL dilebarkan ke risiko minimum 1.0 ATR H1.
+- TP: 0.0619
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.0619 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0607
+- Result Reason: Price Exp 0.0606387 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-01T16:52:53.667609+00:00
+- Filled: -
+- Closed: 2026-10-02T02:58:22.333191+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
