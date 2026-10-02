@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T22:48:28.249590+00:00",
+  "saved_at": "2026-10-02T22:48:33.255521+00:00",
   "bans": [
     {
       "pair": "DOGEUSDT",
@@ -50,6 +50,13 @@
       "until": "2026-10-03T13:03:21.621393+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "TAOUSDT",
+      "banned_at": "2026-10-02T22:48:33.255503+00:00",
+      "until": "2026-10-03T06:48:33.255474+00:00",
+      "reason": "Confidence 46.3 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "USUSDT",
