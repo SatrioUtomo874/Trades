@@ -1,14 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T13:21:09.048741+00:00",
+  "saved_at": "2026-10-02T13:21:19.848359+00:00",
   "bans": [
-    {
-      "pair": "0GUSDT",
-      "banned_at": "2026-10-02T05:18:14.453351+00:00",
-      "until": "2026-10-02T13:18:14.453311+00:00",
-      "reason": "Confidence 58.14 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
     {
       "pair": "1000PEPEUSDT",
       "banned_at": "2026-10-02T09:25:22.152055+00:00",
@@ -21,13 +14,6 @@
       "banned_at": "2026-10-02T13:04:20.153592+00:00",
       "until": "2026-10-02T21:04:20.153538+00:00",
       "reason": "Confidence 46.96 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "AEROUSDT",
-      "banned_at": "2026-10-02T05:17:35.261301+00:00",
-      "until": "2026-10-02T13:17:35.261262+00:00",
-      "reason": "Confidence 40 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
@@ -45,13 +31,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "ASTERUSDT",
-      "banned_at": "2026-10-02T05:17:22.647914+00:00",
-      "until": "2026-10-02T13:17:22.647878+00:00",
-      "reason": "Confidence 58.57 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "AUSDT",
       "banned_at": "2026-10-01T15:09:58.571799+00:00",
       "until": "2026-10-02T15:09:58.571749+00:00",
@@ -62,20 +41,6 @@
       "pair": "AVNTUSDT",
       "banned_at": "2026-10-02T07:45:41.355369+00:00",
       "until": "2026-10-02T15:45:41.355332+00:00",
-      "reason": "Confidence 40 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "AXSUSDT",
-      "banned_at": "2026-10-02T05:19:04.456624+00:00",
-      "until": "2026-10-02T13:19:04.456585+00:00",
-      "reason": "Confidence 54.8 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "BANKUSDT",
-      "banned_at": "2026-10-02T05:18:58.253116+00:00",
-      "until": "2026-10-02T13:18:58.253077+00:00",
       "reason": "Confidence 40 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
@@ -94,13 +59,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "BTWUSDT",
-      "banned_at": "2026-10-02T05:16:40.647882+00:00",
-      "until": "2026-10-02T13:16:40.647846+00:00",
-      "reason": "Confidence 40 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "CAPUSDT",
       "banned_at": "2026-10-02T07:42:54.753143+00:00",
       "until": "2026-10-02T15:42:54.753108+00:00",
@@ -113,20 +71,6 @@
       "until": "2026-10-02T15:43:48.054423+00:00",
       "reason": "Confidence 46.36 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "CELOUSDT",
-      "banned_at": "2026-10-02T05:19:19.952839+00:00",
-      "until": "2026-10-02T13:19:19.952812+00:00",
-      "reason": "Confidence 66.22 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "CETUSUSDT",
-      "banned_at": "2026-10-01T13:16:24.966395+00:00",
-      "until": "2026-10-02T13:16:24.966371+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
     },
     {
       "pair": "CFXUSDT",
@@ -255,27 +199,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "HBARUSDT",
-      "banned_at": "2026-10-02T05:16:58.149431+00:00",
-      "until": "2026-10-02T13:16:58.149395+00:00",
-      "reason": "Confidence 58.37 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "HUMAUSDT",
-      "banned_at": "2026-10-02T05:18:23.054925+00:00",
-      "until": "2026-10-02T13:18:23.054889+00:00",
-      "reason": "Confidence 58.13 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "HYPEUSDT",
-      "banned_at": "2026-10-02T05:16:22.346829+00:00",
-      "until": "2026-10-02T13:16:22.346790+00:00",
-      "reason": "Confidence 56.38 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "ICPUSDT",
       "banned_at": "2026-10-02T09:25:49.446868+00:00",
       "until": "2026-10-02T17:25:49.446829+00:00",
@@ -294,13 +217,6 @@
       "banned_at": "2026-10-02T07:45:07.845965+00:00",
       "until": "2026-10-02T15:45:07.845931+00:00",
       "reason": "Confidence 65.59 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "LDOUSDT",
-      "banned_at": "2026-10-02T05:17:58.250237+00:00",
-      "until": "2026-10-02T13:17:58.250196+00:00",
-      "reason": "Confidence 40 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
@@ -339,34 +255,6 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "MOVEUSDT",
-      "banned_at": "2026-10-02T05:17:47.851744+00:00",
-      "until": "2026-10-02T13:17:47.851705+00:00",
-      "reason": "Confidence 40 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "MOVRUSDT",
-      "banned_at": "2026-10-02T05:16:16.253473+00:00",
-      "until": "2026-10-02T13:16:16.253436+00:00",
-      "reason": "Confidence 40 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "NIGHTUSDT",
-      "banned_at": "2026-10-02T05:17:03.648496+00:00",
-      "until": "2026-10-02T13:17:03.648456+00:00",
-      "reason": "Confidence 59.95 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "OGNUSDT",
-      "banned_at": "2026-10-01T13:17:28.530841+00:00",
-      "until": "2026-10-02T13:17:28.530809+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
       "pair": "OPUSDT",
       "banned_at": "2026-10-02T13:06:39.549822+00:00",
       "until": "2026-10-02T21:06:39.549782+00:00",
@@ -395,13 +283,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "PLUMEUSDT",
-      "banned_at": "2026-10-02T05:18:07.945622+00:00",
-      "until": "2026-10-02T13:18:07.945586+00:00",
-      "reason": "Confidence 40 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "PROVEUSDT",
       "banned_at": "2026-10-02T08:21:40.345613+00:00",
       "until": "2026-10-02T16:21:40.345557+00:00",
@@ -416,25 +297,11 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "RSRUSDT",
-      "banned_at": "2026-10-01T13:06:08.336388+00:00",
-      "until": "2026-10-02T13:06:08.336363+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
       "pair": "RVNUSDT",
       "banned_at": "2026-10-02T09:27:53.948095+00:00",
       "until": "2026-10-02T17:27:53.948063+00:00",
       "reason": "Confidence 40 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "SAFEUSDT",
-      "banned_at": "2026-10-01T13:15:59.722121+00:00",
-      "until": "2026-10-02T13:15:59.722095+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
     },
     {
       "pair": "SANDUSDT",
@@ -479,13 +346,6 @@
       "source": "AUTO_TP"
     },
     {
-      "pair": "STXUSDT",
-      "banned_at": "2026-10-02T05:17:12.950241+00:00",
-      "until": "2026-10-02T13:17:12.950213+00:00",
-      "reason": "Confidence 40 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "SUSHIUSDT",
       "banned_at": "2026-10-02T07:44:45.756975+00:00",
       "until": "2026-10-02T15:44:45.756952+00:00",
@@ -504,13 +364,6 @@
       "banned_at": "2026-10-02T13:06:55.959438+00:00",
       "until": "2026-10-02T21:06:55.959407+00:00",
       "reason": "Confidence 63.83 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "TUTUSDT",
-      "banned_at": "2026-10-02T05:19:41.760925+00:00",
-      "until": "2026-10-02T13:19:41.760885+00:00",
-      "reason": "Confidence 49.58 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
@@ -553,13 +406,6 @@
       "banned_at": "2026-10-02T13:05:28.250231+00:00",
       "until": "2026-10-02T21:05:28.250191+00:00",
       "reason": "Confidence 57.24 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "WIFUSDT",
-      "banned_at": "2026-10-02T05:17:41.349492+00:00",
-      "until": "2026-10-02T13:17:41.349455+00:00",
-      "reason": "Confidence 53.18 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
