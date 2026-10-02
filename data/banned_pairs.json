@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T13:21:44.363777+00:00",
+  "saved_at": "2026-10-02T13:21:54.658027+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -497,6 +497,13 @@
       "banned_at": "2026-10-02T13:04:58.546361+00:00",
       "until": "2026-10-02T21:04:58.546327+00:00",
       "reason": "Confidence 57.18 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "XRPUSDT",
+      "banned_at": "2026-10-02T13:21:54.657981+00:00",
+      "until": "2026-10-02T21:21:54.657955+00:00",
+      "reason": "Confidence 58.95 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     }
   ]
