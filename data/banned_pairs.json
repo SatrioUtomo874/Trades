@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T13:22:45.947434+00:00",
+  "saved_at": "2026-10-02T13:22:54.153397+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -302,6 +302,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 10 (toleransi ±10%).",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "MAGMAUSDT",
+      "banned_at": "2026-10-02T13:22:54.153361+00:00",
+      "until": "2026-10-02T21:22:54.153336+00:00",
+      "reason": "Confidence 40 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "MANAUSDT",
