@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T13:21:54.658027+00:00",
+  "saved_at": "2026-10-02T13:22:06.545611+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -238,6 +238,13 @@
       "banned_at": "2026-10-02T08:21:50.258126+00:00",
       "until": "2026-10-02T16:21:50.258093+00:00",
       "reason": "Confidence 38.55 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "HYPEUSDT",
+      "banned_at": "2026-10-02T13:22:06.545537+00:00",
+      "until": "2026-10-02T21:22:06.545500+00:00",
+      "reason": "Confidence 59.96 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
