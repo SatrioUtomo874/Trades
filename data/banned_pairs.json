@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:48:50.826703+00:00",
+  "saved_at": "2026-10-03T01:48:56.232209+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -253,6 +253,13 @@
       "until": "2026-10-04T01:17:27.647927+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ASTRUSDT",
+      "banned_at": "2026-10-03T01:48:56.232006+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: ASTRUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.561021624, avail=0.4115807)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "ATHUSDT",
