@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:43:55.527954+00:00",
+  "saved_at": "2026-10-03T01:44:00.019991+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -99,6 +99,13 @@
       "until": "2026-10-04T01:18:58.961431+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "AIGENSYNUSDT",
+      "banned_at": "2026-10-03T01:44:00.019819+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: AIGENSYNUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.56147685, avail=0.41629039)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "AIXBTUSDT",
