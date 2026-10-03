@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T22:51:56.046765+00:00",
+  "saved_at": "2026-10-03T22:52:00.566534+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1723,6 +1723,13 @@
       "until": "2026-10-04T00:51:39.647143+00:00",
       "reason": "Confidence 37.92 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MAVUSDT",
+      "banned_at": "2026-10-03T22:52:00.566416+00:00",
+      "until": "2026-10-04T22:52:00.566394+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "MEGAUSDT",
