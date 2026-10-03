@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:22:33.151690+00:00",
+  "saved_at": "2026-10-03T01:22:36.563467+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -141,6 +141,13 @@
       "until": "2026-10-03T06:49:18.757862+00:00",
       "reason": "Confidence 59.3 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "CAKEUSDT",
+      "banned_at": "2026-10-03T01:22:36.563405+00:00",
+      "until": "2026-10-04T01:22:36.563384+00:00",
+      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "CAPUSDT",
