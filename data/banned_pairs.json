@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T22:49:11.351890+00:00",
+  "saved_at": "2026-10-03T22:49:15.561528+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1239,6 +1239,13 @@
       "banned_at": "2026-10-03T01:37:00.948662+00:00",
       "until": "2026-10-04T01:37:00.948631+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "HUSDT",
+      "banned_at": "2026-10-03T22:49:15.561412+00:00",
+      "until": "2026-10-04T22:49:15.561384+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
