@@ -692,3 +692,36 @@ Tidak ada trailing.
 - Filled: 2026-10-02T23:35:39.726265+00:00
 - Closed: 2026-10-03T01:16:13.135682+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## FILUSDT — SELL
+
+Trade ID: `FILUSDT-20261003-055205-538C5D`
+
+### Setup
+
+- Price Now Reference: 1.0241
+- Entry: 1.0295
+- Reason Entry: FILUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 1.0783). H1 me-refine ke BEARISH_BREAKER 1.03025. M15 memberi execution POI BEARISH_FVG 1.0266. Fib H4 berada pada band DEEP_0.618_0.786 (score 100). terdapat liquidity sweep searah reversal. diikuti MSS pada M15.
+- Price Exp: 0.9921
+- Reason Price Exp: Price Exp 0.992124 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 1.0512
+- Reason SL: SL di luar invalidasi struktur H1/H4 (1.046) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- TP: 0.9099
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.9099 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 1.0512
+- Result Reason: SL di luar invalidasi struktur H1/H4 (1.046) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1.
+- PnL: -2.107819329771743769579342377%
+- Created: 2026-10-02T22:52:05.245426+00:00
+- Filled: 2026-10-02T23:21:58.928671+00:00
+- Closed: 2026-10-03T02:18:25.846492+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
