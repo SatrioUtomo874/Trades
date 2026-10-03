@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:53:58.844974+00:00",
+  "saved_at": "2026-10-03T01:54:05.222662+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -140,6 +140,13 @@
       "banned_at": "2026-10-03T01:44:00.019819+00:00",
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: AIGENSYNUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.56147685, avail=0.41629039)",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "AIOUSDT",
+      "banned_at": "2026-10-03T01:54:05.222391+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: AIOUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.56128662, avail=0.42803013)",
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
