@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T02:18:39.346935+00:00",
+  "saved_at": "2026-10-03T03:01:00.751779+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2750,6 +2750,13 @@
       "pair": "TNSRUSDT",
       "banned_at": "2026-10-03T01:35:58.755946+00:00",
       "until": "2026-10-03T09:35:58.755915+00:00",
+      "reason": "Confidence 40 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "TOWNSUSDT",
+      "banned_at": "2026-10-03T03:01:00.751596+00:00",
+      "until": "2026-10-03T11:01:00.751550+00:00",
       "reason": "Confidence 40 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
