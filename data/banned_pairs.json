@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:20:58.446184+00:00",
+  "saved_at": "2026-10-03T01:21:02.560149+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -421,6 +421,13 @@
       "until": "2026-10-03T13:03:21.621393+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "STRKUSDT",
+      "banned_at": "2026-10-03T01:21:02.560098+00:00",
+      "until": "2026-10-04T01:21:02.560069+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "SUIUSDT",
