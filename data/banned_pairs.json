@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T22:50:52.546088+00:00",
+  "saved_at": "2026-10-03T22:50:58.251840+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2955,6 +2955,13 @@
       "until": "2026-10-04T01:46:15.247083+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ZESTUSDT",
+      "banned_at": "2026-10-03T22:50:58.251728+00:00",
+      "until": "2026-10-04T06:50:58.251700+00:00",
+      "reason": "Confidence 39.54 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "ZETAUSDT",
