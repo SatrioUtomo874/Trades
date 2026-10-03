@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:16:28.770517+00:00",
+  "saved_at": "2026-10-03T01:16:41.746652+00:00",
   "bans": [
     {
       "pair": "ARBUSDT",
@@ -148,6 +148,13 @@
       "until": "2026-10-03T13:03:21.621393+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "SUIUSDT",
+      "banned_at": "2026-10-03T01:16:41.746623+00:00",
+      "until": "2026-10-03T09:16:41.746588+00:00",
+      "reason": "Confidence 40 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "TAOUSDT",
