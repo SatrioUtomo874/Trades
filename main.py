@@ -172,6 +172,7 @@ SCAN_VALIDATION_TOLERANCE = Decimal("0.90")
 SCAN_BANNED_PRICE_EXP_HOURS = Decimal("8")
 SCAN_BANNED_TP_SL_HOURS = Decimal("24")
 SCAN_BANNED_HISTORY_HOURS = Decimal("24")
+SCAN_BANNED_LEVERAGE_HOURS = Decimal("4")
 SCAN_MARGIN_TOLERANCE = Decimal("0.10")
 SCAN_MARGIN_FAIL_CONFIRMATIONS = 3
 BANNED_PATH = "data/banned_pairs.json"
@@ -1174,6 +1175,10 @@ class BinanceRateLimitError(BinanceAPIError):
                 else None
             ),
         )
+
+
+class LeverageNotSupportedError(RuntimeError):
+    """Leverage yang diatur melebihi batas pair di Binance (code -4028)."""
 
 
 class MarginInfluenceError(RuntimeError):
@@ -3392,6 +3397,11 @@ class TradingEngine:
                 break
             except BinanceAPIError as exc:
                 last_exc = exc
+                if exc.code == -4028:
+                    last_exc = LeverageNotSupportedError(
+                        f"{trade.pair}: leverage {trade.leverage}x tidak didukung Binance untuk pair ini."
+                    )
+                    break
                 if is_qty_filter_error(exc) and attempt == 0:
                     log.warning(
                         "REAL quantity filter rejected for %s; refreshing exchangeInfo and recalculating once.",
@@ -3435,6 +3445,8 @@ class TradingEngine:
                     trade.trade_id,
                     last_exc,
                 )
+            elif isinstance(last_exc, LeverageNotSupportedError):
+                log.info("LEVERAGE TIDAK DIDUKUNG | pair=%s | %s", trade.pair, last_exc)
             elif last_exc is not None:
                 await self._handle_real_exception(last_exc, "PLACE LIMIT ENTRY", trade)
             raise last_exc or RuntimeError("Real entry gagal.")
@@ -4215,7 +4227,7 @@ class TradingEngine:
         stale = [
             pair
             for pair, item in self.banned_pairs.items()
-            if item.get("source") == "AUTO_MARGIN_INFLUENCE"
+            if item.get("source") in {"AUTO_MARGIN_INFLUENCE", "AUTO_LEVERAGE_UNSUPPORTED"}
         ]
         for pair in stale:
             self.banned_pairs.pop(pair, None)
@@ -4769,6 +4781,8 @@ class TradingEngine:
                 reason = str(item.get("reason") or "")
                 if source == "AUTO_MARGIN_INFLUENCE":
                     label = "💸 Margin influence"
+                elif source == "AUTO_LEVERAGE_UNSUPPORTED":
+                    label = "⚙️ Leverage tidak didukung"
                 elif source == "AUTO_INSUFFICIENT_HISTORY":
                     label = "🕒 Riwayat candle kurang"
                 elif source == "MANUAL":
@@ -5821,6 +5835,7 @@ class TradingEngine:
         final_added: list[Trade] = []
         final_add_errors = 0
         final_margin_banned: list[str] = []
+        final_leverage_banned: list[str] = []
 
         for candidate in validated:
             if not self._scan_user_enabled:
@@ -5860,6 +5875,23 @@ class TradingEngine:
                         )
                         final_margin_banned.append(trade.pair)
                         log.info("[SCAN] %s diban permanen (margin influence): %s", trade.pair, exc)
+                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                        continue
+                    except LeverageNotSupportedError as exc:
+                        await self._ban_pair(
+                            trade.pair,
+                            hours=SCAN_BANNED_LEVERAGE_HOURS,
+                            reason=str(exc),
+                            source="AUTO_LEVERAGE_UNSUPPORTED",
+                        )
+                        final_leverage_banned.append(trade.pair)
+                        log.info("[SCAN] %s dilewati, diban %sj (leverage tidak didukung)", trade.pair, SCAN_BANNED_LEVERAGE_HOURS)
+                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                        continue
+                    except BinanceAPIError as exc:
+                        # Sudah dilog sekali oleh _handle_real_exception; jangan ulang traceback.
+                        final_add_errors += 1
+                        log.info("[SCAN] %s gagal entry real: %s", trade.pair, exc)
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
                         continue
                     if trade.status == "CLOSED":
@@ -5959,6 +5991,7 @@ class TradingEngine:
                 "final_added": len(final_added),
                 "final_add_errors": final_add_errors,
                 "final_margin_banned": list(final_margin_banned),
+                "final_leverage_banned": list(final_leverage_banned),
                 "analysis_errors": analysis_errors,
             },
             "confidence": {
@@ -6013,6 +6046,9 @@ class TradingEngine:
         margin_line = f"├ Ban margin       {len(final_margin_banned)}"
         if final_margin_banned:
             margin_line += f"  ({', '.join(final_margin_banned[:10])})"
+        leverage_line = f"├ Ban leverage      {len(final_leverage_banned)}"
+        if final_leverage_banned:
+            leverage_line += f"  ({', '.join(final_leverage_banned[:10])})"
         await self.reply(
             f"╭─ 🔄 SCAN #{cycle} SELESAI ─╮\n"
             f"│ ₿ BTC H4   {btc_trend}\n"
@@ -6034,6 +6070,7 @@ class TradingEngine:
             f"├ Validator lolos  {len(validated)}  (tolak {validator_missing + validator_rejects})\n"
             f"├ Masuk /trade     {len(final_added)}  (error {final_add_errors})\n"
             f"{margin_line}\n"
+            f"{leverage_line}\n"
             f"└ Error analisis   {analysis_errors}\n\n"
             f"🎯 CONFIDENCE (min {decimal_to_str(self.scan_threshold)})\n"
             f"├ Awal {fmt_num(avg_initial)}  →  Valid {fmt_num(avg_validated)}\n"
