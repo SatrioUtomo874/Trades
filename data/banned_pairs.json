@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:34:24.533427+00:00",
+  "saved_at": "2026-10-03T01:34:31.431444+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -260,6 +260,13 @@
       "until": "2026-10-04T01:26:51.351224+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "BIGTIMEUSDT",
+      "banned_at": "2026-10-03T01:34:31.430987+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: BIGTIMEUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.560911821, avail=0.45912832)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "BILLUSDT",
