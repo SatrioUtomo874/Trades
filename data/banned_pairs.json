@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:39:08.233724+00:00",
+  "saved_at": "2026-10-03T01:39:13.448270+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1534,6 +1534,13 @@
       "until": "2026-10-03T09:25:04.145488+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "SLXUSDT",
+      "banned_at": "2026-10-03T01:39:13.448127+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: SLXUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5608368, avail=0.43348377)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "SNXUSDT",
