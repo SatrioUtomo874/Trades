@@ -791,3 +791,36 @@ Tidak ada trailing.
 - Filled: 2026-10-03T07:12:02.531796+00:00
 - Closed: 2026-10-03T08:55:56.845199+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## ASTRUSDT — BUY
+
+Trade ID: `ASTRUSDT-20261003-114935-8E06FD`
+
+### Setup
+
+- Price Now Reference: 0.007439
+- Entry: 0.007401
+- Reason Entry: ASTRUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.0074075). H1 me-refine ke BULLISH_FVG 0.007401. M15 memberi execution POI BULLISH_BREAKER 0.0074035. Fib H4 berada pada band DEEP_0.618_0.786 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 56.3 mendukung momentum. VLT/OHLCV searah dengan setup.
+- Price Exp: 0.007571
+- Reason Price Exp: Price Exp 0.007571 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.007308
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.007375) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1. SL dilebarkan ke risiko minimum 1.0 ATR H1.
+- TP: 0.007659
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.007659 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.007308
+- Result Reason: SL di luar invalidasi struktur H1/H4 (0.007375) + buffer 0.30 ATR H1; risiko minimum 1.0 ATR H1. SL dilebarkan ke risiko minimum 1.0 ATR H1.
+- PnL: -1.25658694770976895014187272%
+- Created: 2026-10-03T04:49:35.936548+00:00
+- Filled: 2026-10-03T07:25:16.835245+00:00
+- Closed: 2026-10-03T09:30:21.325993+00:00
+- Strategy: SMC_VLT_RSI v0.7.0
