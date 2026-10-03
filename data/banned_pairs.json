@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:28:38.847178+00:00",
+  "saved_at": "2026-10-03T01:28:42.948782+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -995,6 +995,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: SUPERUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.56176704, avail=0.41663878)",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "SUSHIUSDT",
+      "banned_at": "2026-10-03T01:28:42.948684+00:00",
+      "until": "2026-10-04T01:28:42.948653+00:00",
+      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "SYRUPUSDT",
