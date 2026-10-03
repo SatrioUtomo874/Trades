@@ -824,3 +824,36 @@ Tidak ada trailing.
 - Filled: 2026-10-03T07:25:16.835245+00:00
 - Closed: 2026-10-03T09:30:21.325993+00:00
 - Strategy: SMC_VLT_RSI v0.7.0
+
+---
+
+## TAOUSDT — BUY
+
+Trade ID: `TAOUSDT-20261004-044019-0CC926`
+
+### Setup
+
+- Price Now Reference: 298.81
+- Entry: 291.18
+- Reason Entry: TAOUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 296.49). H1 me-refine ke BULLISH_OB 291.53. M15 memberi execution POI BULLISH_OB 291.185. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 59.3 mendukung momentum. VLT/OHLCV searah dengan setup. Kerangka RSI TREND_PULLBACK_RSI: RSI H1 regime melawan arah; RSI H1 koreksi ke 38 lalu berbalik (58).
+- Price Exp: 302.17
+- Reason Price Exp: Price Exp 302.17 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 285.78
+- Reason SL: SL di luar invalidasi struktur H1/H4 (288.43) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1. SL dilebarkan ke risiko minimum 1.5 ATR H1.
+- TP: 304.42
+- Reason TP: TP diarahkan ke H4_SWING_HIGH 304.41 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 302.17
+- Result Reason: Price Exp 302.17 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-03T21:40:19.891527+00:00
+- Filled: -
+- Closed: 2026-10-03T22:05:43.900233+00:00
+- Strategy: SMC_VLT_RSI v0.9.0
