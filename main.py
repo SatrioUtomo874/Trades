@@ -149,6 +149,9 @@ REAL_RECONCILE_INTERVAL_SECONDS = 2.0
 REAL_PENDING_POLL_SECONDS = 5.0
 REAL_PROTECT_CHECK_SECONDS = 60.0
 AUTOSTOP_CHECK_SECONDS = 30.0
+# Setup scan berkorelasi tinggi (alt searah): batasi eksposur sekaligus.
+SCAN_MAX_NEW_PER_CYCLE = int(os.getenv("SCAN_MAX_NEW_PER_CYCLE", "3") or "3")
+SCAN_MAX_PER_DIRECTION = int(os.getenv("SCAN_MAX_PER_DIRECTION", "6") or "6")
 AUTOSTOP_INCLUDE_UNREALIZED = True  # equity = wallet balance + unrealized PnL
 CONFIG_AUTOSTOP = os.getenv("AUTOSTOP_PERCENT", "").strip()
 DEFAULT_MARGIN_USDT = Decimal("0.5")
@@ -173,6 +176,7 @@ SCAN_BANNED_PRICE_EXP_HOURS = Decimal("8")
 SCAN_BANNED_TP_SL_HOURS = Decimal("24")
 SCAN_BANNED_HISTORY_HOURS = Decimal("24")
 SCAN_BANNED_LEVERAGE_HOURS = Decimal("4")
+SCAN_BANNED_WAITING_HOURS = Decimal("2")  # menunggu trigger RSI
 SCAN_MARGIN_TOLERANCE = Decimal("0.10")
 SCAN_MARGIN_FAIL_CONFIRMATIONS = 3
 BANNED_PATH = "data/banned_pairs.json"
@@ -671,6 +675,8 @@ class Trade:
     result_reason: str | None = None
 
     pnl_percent: Decimal | None = None
+    max_favorable_pct: Decimal | None = None
+    max_adverse_pct: Decimal | None = None
 
     trail_history: list[dict[str, Any]] = field(default_factory=list)
 
@@ -760,6 +766,16 @@ class Trade:
             "pnl_percent": (
                 decimal_to_str(self.pnl_percent)
                 if self.pnl_percent is not None
+                else None
+            ),
+            "max_favorable_pct": (
+                decimal_to_str(self.max_favorable_pct)
+                if self.max_favorable_pct is not None
+                else None
+            ),
+            "max_adverse_pct": (
+                decimal_to_str(self.max_adverse_pct)
+                if self.max_adverse_pct is not None
                 else None
             ),
 
@@ -5723,18 +5739,26 @@ class TradingEngine:
                     confidence = Decimal(str(candidate["confidence"]))
                     if confidence < self.scan_threshold:
                         threshold_banned += 1
+                        gates = (
+                            ((candidate.get("analysis") or {}).get("selected_setup") or {}).get("evidence")
+                            or {}
+                        ).get("gates") or {}
+                        waiting = bool(gates.get("waiting"))
+                        ban_hours = SCAN_BANNED_WAITING_HOURS if waiting else SCAN_BANNED_PRICE_EXP_HOURS
                         await self._ban_pair(
                             pair,
-                            hours=SCAN_BANNED_PRICE_EXP_HOURS,
+                            hours=ban_hours,
                             reason=(
                                 f"Confidence {decimal_to_str(confidence)} di bawah threshold "
                                 f"{decimal_to_str(self.scan_threshold)}."
+                                + (" Menunggu trigger RSI." if waiting else "")
                             ),
                             source="AUTO_BELOW_THRESHOLD",
                         )
                         log.info(
-                            "[SCAN] %s below threshold + banned 8h | confidence=%s threshold=%s",
+                            "[SCAN] %s below threshold + banned %sh | confidence=%s threshold=%s",
                             pair,
+                            decimal_to_str(ban_hours),
                             decimal_to_str(confidence),
                             decimal_to_str(self.scan_threshold),
                         )
@@ -5835,6 +5859,7 @@ class TradingEngine:
         final_added: list[Trade] = []
         final_add_errors = 0
         final_margin_banned: list[str] = []
+        final_capped = 0
         final_leverage_banned: list[str] = []
 
         for candidate in validated:
@@ -5843,6 +5868,16 @@ class TradingEngine:
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
                 break
+
+            if len(final_added) >= SCAN_MAX_NEW_PER_CYCLE:
+                final_capped += 1
+                continue
+            cand_dir = str(candidate.get("direction") or "").upper()
+            if cand_dir and sum(
+                1 for t in self.active_trades.values() if t.direction == cand_dir
+            ) >= SCAN_MAX_PER_DIRECTION:
+                final_capped += 1
+                continue
 
             try:
                 meta = {
@@ -6066,9 +6101,9 @@ class TradingEngine:
             f"  ⚪ {direction_counts['RANGE']}  ❓ {direction_counts['UNKNOWN']}\n\n"
             "🔬 ANALISIS\n"
             f"├ Dipindai         {scanned}/{SCAN_MAX_PAIRS_PER_CYCLE}\n"
-            f"├ ≥ Threshold      {len(threshold_candidates)}  (di bawah {threshold_banned}, ban 8j)\n"
+            f"├ ≥ Threshold      {len(threshold_candidates)}  (di bawah {threshold_banned}, ban 2-8j)\n"
             f"├ Validator lolos  {len(validated)}  (tolak {validator_missing + validator_rejects})\n"
-            f"├ Masuk /trade     {len(final_added)}  (error {final_add_errors})\n"
+            f"├ Masuk /trade     {len(final_added)}  (error {final_add_errors}, dibatasi {final_capped})\n"
             f"{margin_line}\n"
             f"{leverage_line}\n"
             f"└ Error analisis   {analysis_errors}\n\n"
@@ -9657,6 +9692,11 @@ class TradingEngine:
                             current.fill_price or current.entry,
                             price,
                         )
+                        # Catat ekskursi terbaik/terburuk untuk kalibrasi SL/TP berikutnya.
+                        if current.max_favorable_pct is None or current.pnl_percent > current.max_favorable_pct:
+                            current.max_favorable_pct = current.pnl_percent
+                        if current.max_adverse_pct is None or current.pnl_percent < current.max_adverse_pct:
+                            current.max_adverse_pct = current.pnl_percent
 
                         trade = current
 
