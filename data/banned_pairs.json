@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:23:02.846837+00:00",
+  "saved_at": "2026-10-03T01:23:08.146602+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -127,6 +127,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: AXSUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5477247, avail=0.41805518)",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "BATUSDT",
+      "banned_at": "2026-10-03T01:23:08.146511+00:00",
+      "until": "2026-10-03T09:23:08.146473+00:00",
+      "reason": "Confidence 40 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "BOMEUSDT",
