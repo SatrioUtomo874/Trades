@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:53:27.449862+00:00",
+  "saved_at": "2026-10-03T01:53:58.844974+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1323,6 +1323,13 @@
       "banned_at": "2026-10-03T01:29:39.631002+00:00",
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: IOTAUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.561013005, avail=0.46905727)",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "IOTXUSDT",
+      "banned_at": "2026-10-03T01:53:58.844386+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: IOTXUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.561040341, avail=0.42861835)",
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
