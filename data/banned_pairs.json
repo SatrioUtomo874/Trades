@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:19:02.660879+00:00",
+  "saved_at": "2026-10-03T01:19:07.561098+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -169,6 +169,13 @@
       "until": "2026-10-04T01:17:14.446428+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "GRAMUSDT",
+      "banned_at": "2026-10-03T01:19:07.561053+00:00",
+      "until": "2026-10-03T09:19:07.561014+00:00",
+      "reason": "Confidence 59.46 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "HBARUSDT",
