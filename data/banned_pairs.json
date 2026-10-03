@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:29:49.929793+00:00",
+  "saved_at": "2026-10-03T01:29:55.127768+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1043,6 +1043,13 @@
       "banned_at": "2026-10-03T01:24:30.333157+00:00",
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: SUPERUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.56176704, avail=0.41663878)",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "SUSDT",
+      "banned_at": "2026-10-03T01:29:55.127667+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: SUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.56084139, avail=0.44765601)",
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
