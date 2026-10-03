@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-02T22:50:41.058242+00:00",
+  "saved_at": "2026-10-03T01:16:28.770517+00:00",
   "bans": [
     {
       "pair": "ARBUSDT",
@@ -22,6 +22,13 @@
       "until": "2026-10-03T22:48:45.261549+00:00",
       "reason": "Riwayat candle belum cukup: Bybit public gagal untuk CTUSDT 240; SCAN melarang fallback Binance: Bybit hanya mengembalikan 9 candle closed untuk CTUSDT 240; diperlukan 120.",
       "source": "AUTO_INSUFFICIENT_HISTORY"
+    },
+    {
+      "pair": "DASHUSDT",
+      "banned_at": "2026-10-03T01:16:28.770490+00:00",
+      "until": "2026-10-04T01:16:28.770458+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "DOGEUSDT",
