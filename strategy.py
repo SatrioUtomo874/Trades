@@ -9,9 +9,13 @@ Strategy intelligence untuk main.py dengan multi-timeframe regime engine, top-do
 Kontrak utama:
     async def generate_setup(pair, context) -> dict
 
-Prinsip desain v0.7.0
+Prinsip desain v0.9.0
 ---------------------
-1. SMC adalah kerangka utama; regime ditentukan multi-timeframe, lalu RSI 14 M15 dan VLT/OHLCV menjadi konfirmasi eksekusi.
+1. Keputusan = REGIME -> ARCHETYPE -> GATE. SMC memberi lokasi (POI/likuiditas), RSI multi-timeframe
+   memberi regime dan trigger: setup wajib masuk archetype TREND_PULLBACK_RSI (koreksi RSI H1 ke value
+   zone lalu berbalik / hidden divergence) atau DIVERGENCE_REVERSAL (divergence reguler, idealnya
+   setelah sweep). Tanpa trigger RSI, confidence dibatasi di bawah threshold. Momentum RSI menjadi
+   pengali confidence, bukan sekadar tambahan poin. VLT/OHLCV tetap konfirmasi volume.
 2. Semua keputusan struktur memakai CLOSED candles saja.
 3. Target pair dianalisis multi-timeframe:
       D1/H4 -> external regime dan structure utama
@@ -74,7 +78,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.7.0"
+STRATEGY_VERSION = "0.9.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -125,30 +129,47 @@ EXP_ATR_MULTIPLIER = 1.25
 SL_BUFFER_ATR = 0.15
 # Model risiko multi-timeframe: SL, Price Exp, dan target dihitung dari ATR H1
 # dan invalidasi struktur H1/H4 (bukan noise M15).
-SL_BUFFER_H1_ATR = 0.30
-SL_MIN_H1_ATR = 1.0
-SL_MAX_H1_ATR = 4.0
+SL_BUFFER_H1_ATR = 0.40
+SL_MIN_H1_ATR = 1.5
+SL_MAX_H1_ATR = 5.0
 SL_MIN_PCT = 0.5
 SL_SWING_EXTEND_H1_ATR = 1.0
+SL_SWEEP_EXTEND_H1_ATR = 1.5
 EXP_H1_ATR_MULTIPLIER = 1.5
-MIN_PLANNED_RR = 1.5
-TP_FALLBACK_RR = 2.0
+MIN_PLANNED_RR = 2.0
+TP_FALLBACK_RR = 2.5
 FALLBACK_CONFIDENCE_CAP = 60.0
+# Kerangka momentum RSI (regime -> archetype -> gate).
+RSI_PERIOD = 14
+RSI_REGIME_WINDOW = 60
+DIV_MAX_AGE = {"H4": 6, "H1": 24, "M15": 40}
+DIV_MIN_RSI_DIFF = 3.0
+DIV_MIN_PRICE_PCT = 0.05
+OVEREXT_H1_BUY = 72.0
+OVEREXT_M15_BUY = 78.0
+OVEREXT_H1_SELL = 28.0
+OVEREXT_M15_SELL = 22.0
+EQUILIBRIUM_BUY_MAX = 0.60
+EQUILIBRIUM_SELL_MIN = 0.40
+MOMENTUM_FACTOR_FLOOR = 0.50
+VETO_CONFIDENCE_CAP = 55.0
+UNCONFIRMED_CONFIDENCE_CAP = 64.0
 LOW_QUALITY_MODELS = {"M15_SMC_FALLBACK", "STRUCTURE_PULLBACK_FALLBACK"}
 
 WEIGHTS = {
-    # BTC H4 is a directional search constraint, not a soft score component.
-    "pair_h4_structure": 12.0,
-    "h4_poi": 13.0,
-    "h4_fibonacci": 12.0,
-    "h1_refinement": 12.0,
-    "liquidity": 11.0,
-    "smc_trigger": 15.0,
-    "displacement": 7.0,
-    "rsi_m15": 4.0,
-    "vlt": 4.0,
-    "planned_rr": 5.0,
+    # BTC regime is a directional constraint; the always-saturated gates
+    # (H1 refinement, M15 trigger) keep small weights so scores can separate.
+    "htf_alignment": 14.0,
+    "h4_poi": 10.0,
+    "h4_fibonacci": 14.0,
+    "h1_refinement": 6.0,
+    "liquidity": 8.0,
+    "smc_trigger": 6.0,
+    "displacement": 8.0,
+    "vlt": 8.0,
+    "planned_rr": 8.0,
     "entry_reachability": 5.0,
+    "risk_quality": 5.0,
 }
 DIRECTION_BUY = "BUY"
 DIRECTION_SELL = "SELL"
@@ -2051,21 +2072,29 @@ def htf_invalidation_level(
     zone: Zone,
     h1_structure: StructureSnapshot | None,
     h1_atr: float,
+    sweep_level: float | None = None,
 ) -> float:
-    """Invalidasi struktur di sisi jauh zona entry HTF, diperluas ke swing H1 terdekat."""
+    """Invalidasi di sisi jauh zona HTF, diperluas ke swing H1 dan ekstrem sweep terdekat."""
     reach = h1_atr * SL_SWING_EXTEND_H1_ATR
+    sweep_reach = h1_atr * SL_SWEEP_EXTEND_H1_ATR
     if direction == "BUY":
         level = zone.low if zone.low < entry else entry
         if h1_structure is not None:
             for pivot in reversed(h1_structure.swing_lows[-8:]):
                 if pivot.price < level and level - pivot.price <= reach:
-                    return pivot.price
+                    level = pivot.price
+                    break
+        if sweep_level and sweep_level < level and level - sweep_level <= sweep_reach:
+            level = sweep_level
         return level
     level = zone.high if zone.high > entry else entry
     if h1_structure is not None:
         for pivot in reversed(h1_structure.swing_highs[-8:]):
             if pivot.price > level and pivot.price - level <= reach:
-                return pivot.price
+                level = pivot.price
+                break
+    if sweep_level and sweep_level > level and sweep_level - level <= sweep_reach:
+        level = sweep_level
     return level
 
 
@@ -2151,6 +2180,7 @@ def topdown_candidate(
         entry_zone,
         h1_ctx.get("structure"),
         h1_atr,
+        safe_float(sweep.get("level"), 0.0) if sweep else None,
     )
     buffer = h1_atr * SL_BUFFER_H1_ATR
     sl = structural - buffer if direction == "BUY" else structural + buffer
@@ -2163,9 +2193,11 @@ def topdown_candidate(
         return None
 
     tp = target.level if target else 0.0
+    tp_from_target = target is not None
     if direction == "BUY":
         if tp <= entry:
             tp = entry + TP_FALLBACK_RR * risk
+            tp_from_target = False
         if (tp - entry) / risk < MIN_PLANNED_RR:
             return None
         price_exp = current + max(
@@ -2184,6 +2216,7 @@ def topdown_candidate(
     else:
         if tp >= entry or tp <= 0:
             tp = entry - TP_FALLBACK_RR * risk
+            tp_from_target = False
         if tp <= 0 or (entry - tp) / risk < MIN_PLANNED_RR:
             return None
         price_exp = current - max(
@@ -2250,7 +2283,7 @@ def topdown_candidate(
     )
     tp_reason = (
         f"TP diarahkan ke {target.source} {round_price(target.level)} sebagai liquidity target HTF."
-        if target else
+        if (target and tp_from_target) else
         f"TP fallback {round_price(tp)} menggunakan RR minimum dari risiko karena target liquidity HTF tidak tersedia."
     )
     exp_reason = (
@@ -3204,6 +3237,307 @@ def smc_trigger_score(candidate: Candidate) -> float:
     return clamp(score)
 
 
+def htf_alignment_score(
+    direction: str,
+    regime: dict[str, Any] | None,
+    fallback_trend: str,
+) -> float:
+    """Kesepakatan D1/H4/H1/M15 dengan arah setup (continuation > pullback > range)."""
+    want = "BULLISH" if direction == "BUY" else "BEARISH"
+    frames = (regime or {}).get("timeframes") or {}
+    weights = {"D1": 0.20, "H4": 0.40, "H1": 0.25, "M15": 0.15}
+    total = 0.0
+    used = 0.0
+    for name, weight in weights.items():
+        item = frames.get(name)
+        if not isinstance(item, dict):
+            continue
+        state = str(item.get("regime") or "")
+        trend = str(item.get("trend") or "")
+        if state.startswith(want):
+            score = 100.0 if state.endswith("CONTINUATION") else 85.0
+        elif state in ("RANGE", "TRANSITION", ""):
+            score = 50.0
+        elif trend == want:
+            score = 60.0
+        else:
+            score = 10.0
+        total += weight * score
+        used += weight
+    if used <= 0:
+        return structure_direction_score(direction, fallback_trend)
+    return clamp(total / used)
+
+
+def risk_quality_score(risk_h1_atr: float) -> float:
+    """Jarak SL ideal 1.5-3 ATR H1; terlalu ketat atau terlalu lebar dihukum."""
+    if risk_h1_atr <= 0:
+        return 40.0
+    if 1.5 <= risk_h1_atr <= 3.0:
+        return 100.0
+    if risk_h1_atr < 1.5:
+        return clamp(100.0 - (1.5 - risk_h1_atr) * 100.0)
+    if risk_h1_atr <= 4.0:
+        return 100.0 - (risk_h1_atr - 3.0) * 25.0
+    if risk_h1_atr <= 5.0:
+        return 75.0 - (risk_h1_atr - 4.0) * 35.0
+    return 20.0
+
+
+def rsi_pivot_divergence(
+    candles: list[Candle],
+    rsi_values: list[float],
+    pivots: list[Pivot],
+    direction: str,
+    max_age: int,
+) -> dict[str, Any] | None:
+    """Divergence RSI vs dua pivot terakhir. BUY: swing low, SELL: swing high."""
+    if len(pivots) < 2 or not candles:
+        return None
+    last = len(candles) - 1
+    p1, p2 = pivots[-2], pivots[-1]
+    if last - p2.index > max_age or p1.index < RSI_PERIOD:
+        return None
+    if p2.index >= len(rsi_values) or p1.index >= len(rsi_values):
+        return None
+    r1, r2 = rsi_values[p1.index], rsi_values[p2.index]
+    move_pct = (p2.price - p1.price) / max(abs(p1.price), EPS) * 100.0
+    if direction == "BUY":
+        if move_pct <= -DIV_MIN_PRICE_PCT and r2 >= r1 + DIV_MIN_RSI_DIFF:
+            kind = "REGULAR"
+        elif move_pct >= DIV_MIN_PRICE_PCT and r2 <= r1 - DIV_MIN_RSI_DIFF:
+            kind = "HIDDEN"
+        else:
+            return None
+    else:
+        if move_pct >= DIV_MIN_PRICE_PCT and r2 <= r1 - DIV_MIN_RSI_DIFF:
+            kind = "REGULAR"
+        elif move_pct <= -DIV_MIN_PRICE_PCT and r2 >= r1 + DIV_MIN_RSI_DIFF:
+            kind = "HIDDEN"
+        else:
+            return None
+    return {
+        "kind": kind,
+        "strength": round(clamp(abs(r2 - r1) * 5.0), 1),
+        "rsi_prev": round(r1, 1),
+        "rsi_last": round(r2, 1),
+        "pivot_age": last - p2.index,
+    }
+
+
+def build_rsi_context(
+    candles: list[Candle],
+    structure: StructureSnapshot,
+    tf: str,
+) -> dict[str, Any]:
+    """Ringkasan RSI satu timeframe: regime range, kondisi 12 bar, dan divergence."""
+    values = rsi_series(candles, RSI_PERIOD)
+    empty = {
+        "valid": False,
+        "tf": tf,
+        "cur": 50.0,
+        "slope": 0.0,
+        "regime": "NEUTRAL",
+        "min12": 50.0,
+        "max12": 50.0,
+        "div": {"BUY": None, "SELL": None},
+    }
+    if len(values) < RSI_PERIOD + 10:
+        return empty
+    tail = values[-RSI_REGIME_WINDOW:]
+    avg = sum(tail) / len(tail)
+    lo, hi = min(tail), max(tail)
+    if avg >= 52.0 and lo >= 33.0:
+        regime = "BULL_RANGE"
+    elif avg <= 48.0 and hi <= 67.0:
+        regime = "BEAR_RANGE"
+    else:
+        regime = "NEUTRAL"
+    last12 = values[-12:]
+    max_age = DIV_MAX_AGE.get(tf, 24)
+    return {
+        "valid": True,
+        "tf": tf,
+        "cur": round(values[-1], 2),
+        "slope": round(linear_slope(values, 8), 3),
+        "avg": round(avg, 1),
+        "lo": round(lo, 1),
+        "hi": round(hi, 1),
+        "regime": regime,
+        "min12": round(min(last12), 1),
+        "max12": round(max(last12), 1),
+        "div": {
+            "BUY": rsi_pivot_divergence(candles, values, structure.swing_lows, "BUY", max_age),
+            "SELL": rsi_pivot_divergence(candles, values, structure.swing_highs, "SELL", max_age),
+        },
+    }
+
+
+def simple_rsi_state(candles: list[Candle]) -> dict[str, Any]:
+    values = rsi_series(candles, RSI_PERIOD)
+    if len(values) < RSI_PERIOD + 10:
+        return {"valid": False, "cur": 50.0, "slope": 0.0}
+    return {"valid": True, "cur": round(values[-1], 2), "slope": round(linear_slope(values, 8), 3)}
+
+
+def evaluate_momentum(
+    direction: str,
+    rsi_pack: dict[str, Any] | None,
+    has_sweep: bool,
+) -> dict[str, Any]:
+    """Regime RSI -> archetype -> veto. Hasilnya menjadi pengali confidence."""
+    if not rsi_pack:
+        return {"score": 50.0, "archetype": "N/A", "waiting": False, "vetoes": [], "tags": []}
+    buy = direction == "BUY"
+    h4r = rsi_pack.get("H4") or {}
+    h1r = rsi_pack.get("H1") or {}
+    m15r = rsi_pack.get("M15") or {}
+    btcr = rsi_pack.get("BTC") or {}
+    good = "BULL_RANGE" if buy else "BEAR_RANGE"
+    bad = "BEAR_RANGE" if buy else "BULL_RANGE"
+    side = "bullish" if buy else "bearish"
+    score = 50.0
+    tags: list[str] = []
+    vetoes: list[str] = []
+
+    divs = []
+    for tf, ctx in (("H4", h4r), ("H1", h1r), ("M15", m15r)):
+        item = (ctx.get("div") or {}).get(direction)
+        if item:
+            divs.append((tf, item))
+    reg_div = next(((tf, d) for tf, d in divs if d["kind"] == "REGULAR"), None)
+    hid_div = next(((tf, d) for tf, d in divs if d["kind"] == "HIDDEN"), None)
+
+    # 1) Regime RSI H4 (bobot besar) dan H1.
+    for name, ctx, up, down in (("H4", h4r, 15.0, 22.0), ("H1", h1r, 10.0, 10.0)):
+        if not ctx.get("valid"):
+            continue
+        regime = ctx.get("regime")
+        if regime == good:
+            score += up
+            tags.append(f"RSI {name} regime {side}")
+        elif regime == bad:
+            if reg_div:
+                score -= 5.0
+                tags.append(f"RSI {name} melawan arah, tertahan divergence reguler")
+            else:
+                score -= down
+                tags.append(f"RSI {name} regime melawan arah")
+                if name == "H4":
+                    vetoes.append("RSI H4 melawan arah tanpa divergence")
+
+    # 2) Koreksi RSI H1 ke value zone lalu berbalik (trend pullback).
+    pullback = False
+    if h1r.get("valid"):
+        cur = h1r["cur"]
+        slope = h1r["slope"]
+        if buy:
+            dipped = h1r["min12"] <= 48.0
+            turning = cur >= h1r["min12"] + 3.0 and slope > 0
+            pressing = slope <= -0.8
+            extreme = h1r["min12"]
+        else:
+            dipped = h1r["max12"] >= 52.0
+            turning = cur <= h1r["max12"] - 3.0 and slope < 0
+            pressing = slope >= 0.8
+            extreme = h1r["max12"]
+        pullback = dipped and turning
+        if pullback:
+            score += 20.0
+            tags.append(f"RSI H1 koreksi ke {extreme:.0f} lalu berbalik ({cur:.0f})")
+        elif pressing and not reg_div:
+            score -= 15.0
+            tags.append("RSI H1 masih menekan melawan arah")
+
+    # 3) Divergence.
+    if reg_div:
+        tf, d = reg_div
+        score += 15.0 + 10.0 * d["strength"] / 100.0
+        tags.append(f"divergence reguler RSI {tf} ({d['rsi_prev']:.0f}->{d['rsi_last']:.0f})")
+    if hid_div:
+        tf, d = hid_div
+        score += 12.0 + 8.0 * d["strength"] / 100.0
+        tags.append(f"hidden divergence RSI {tf} ({d['rsi_prev']:.0f}->{d['rsi_last']:.0f})")
+
+    # 4) Timing M15.
+    if m15r.get("valid"):
+        m_slope = m15r["slope"]
+        if (buy and m_slope > 0) or (not buy and m_slope < 0):
+            score += 5.0
+        elif abs(m_slope) >= 1.0:
+            score -= 5.0
+
+    # 5) Overextension: jangan mengejar harga.
+    h1_cur = h1r.get("cur", 50.0)
+    m15_cur = m15r.get("cur", 50.0)
+    if (buy and (h1_cur >= OVEREXT_H1_BUY or m15_cur >= OVEREXT_M15_BUY)) or (
+        not buy and (h1_cur <= OVEREXT_H1_SELL or m15_cur <= OVEREXT_M15_SELL)
+    ):
+        score -= 20.0
+        vetoes.append("RSI overextended (mengejar harga)")
+        tags.append(f"RSI terlalu ekstrem (H1 {h1_cur:.0f}, M15 {m15_cur:.0f})")
+
+    # 6) Momentum BTC H1 (alt berkorelasi).
+    if btcr.get("valid"):
+        weak = btcr["cur"] < 45.0 and btcr["slope"] < 0
+        strong = btcr["cur"] > 55.0 and btcr["slope"] > 0
+        if (buy and weak) or (not buy and strong):
+            score -= 15.0
+            tags.append("momentum RSI BTC H1 melawan arah")
+        elif (buy and strong) or (not buy and weak):
+            score += 5.0
+
+    if reg_div:
+        archetype = "SWEEP_DIVERGENCE_REVERSAL" if has_sweep else "DIVERGENCE_REVERSAL"
+    elif pullback or hid_div:
+        archetype = "TREND_PULLBACK_RSI"
+    else:
+        archetype = "UNCONFIRMED"
+    return {
+        "score": round(clamp(score), 1),
+        "archetype": archetype,
+        "waiting": archetype == "UNCONFIRMED",
+        "vetoes": vetoes,
+        "tags": tags,
+    }
+
+
+def momentum_note(momentum: dict[str, Any]) -> str:
+    archetype = momentum.get("archetype")
+    if archetype in (None, "N/A"):
+        return ""
+    head = (
+        "Belum ada trigger RSI (butuh koreksi ke value zone atau divergence)"
+        if archetype == "UNCONFIRMED"
+        else f"Kerangka RSI {archetype}"
+    )
+    body = "; ".join(momentum.get("tags") or [])
+    note = f"{head}: {body}." if body else f"{head}."
+    vetoes = momentum.get("vetoes") or []
+    if vetoes:
+        note += " Veto: " + "; ".join(vetoes) + "."
+    return note
+
+
+def momentum_factor(score: float) -> float:
+    return MOMENTUM_FACTOR_FLOOR + (1.0 - MOMENTUM_FACTOR_FLOOR) * clamp(score) / 100.0
+
+
+def combine_confidence(scores: dict[str, float], evidence: dict[str, Any]) -> float:
+    """Skor struktur x pengali momentum RSI, lalu penalti dan batas gate."""
+    total_weight = sum(WEIGHTS.values())
+    base = sum(WEIGHTS[name] * scores.get(name, 50.0) for name in WEIGHTS) / total_weight
+    gates = evidence.get("gates") or {}
+    momentum_score = safe_float((evidence.get("momentum") or {}).get("score"), 50.0)
+    confidence = base * momentum_factor(momentum_score)
+    confidence -= safe_float(evidence.get("confidence_penalty"), 0.0)
+    if gates.get("waiting"):
+        confidence = min(confidence, UNCONFIRMED_CONFIDENCE_CAP)
+    if gates.get("vetoes"):
+        confidence = min(confidence, VETO_CONFIDENCE_CAP)
+    return round(clamp(confidence), 2)
+
+
 def score_candidate(
     candidate: Candidate,
     *,
@@ -3221,30 +3555,48 @@ def score_candidate(
     h4_poi_score: float | None = None,
     h4_fib_score: float | None = None,
     h1_refinement_score: float | None = None,
+    pair_regime: dict[str, Any] | None = None,
+    momentum: dict[str, Any] | None = None,
 ) -> Candidate:
     reach = candidate.evidence.get("entry_reachability") or {}
     reach_score = safe_float(reach.get("score"), 50.0)
     scores = {
-        "pair_h4_structure": structure_direction_score(candidate.direction, pair_h4_trend),
+        "htf_alignment": htf_alignment_score(candidate.direction, pair_regime, pair_h4_trend),
         "h4_poi": clamp(h4_poi_score if h4_poi_score is not None else 50.0),
         "h4_fibonacci": clamp(h4_fib_score if h4_fib_score is not None else 50.0),
         "h1_refinement": clamp(h1_refinement_score if h1_refinement_score is not None else location_score(candidate.direction, candidate.entry, h1_dr)),
         "liquidity": liquidity_score(candidate, target, sweep, current, m15_atr),
         "smc_trigger": smc_trigger_score(candidate),
         "displacement": displacement_score_for_candidate(candidate, latest_displacement, vlt["relative_volume"]),
-        "rsi_m15": rsi_score(candidate.direction, m15_rsi, m15_rsi_slope),
         "vlt": _vlt_direction_score(candidate.direction, vlt),
         "planned_rr": candidate_rr_score(candidate),
         "entry_reachability": reach_score,
+        "risk_quality": risk_quality_score(
+            safe_float((candidate.evidence.get("risk_model") or {}).get("risk_h1_atr"), 0.0)
+        ),
     }
 
-    confidence = sum(
-        WEIGHTS[name] * scores[name] / 100.0
-        for name in WEIGHTS
-    )
+    if momentum is not None:
+        candidate.evidence["momentum"] = momentum
+    mom = candidate.evidence.get("momentum") or {}
+    vetoes = list(mom.get("vetoes") or [])
+    ratio = location_ratio(candidate.entry, h1_dr)
+    if candidate.direction == "BUY" and ratio > EQUILIBRIUM_BUY_MAX:
+        vetoes.append(f"BUY di zona premium H1 (lokasi {ratio:.2f})")
+    elif candidate.direction == "SELL" and ratio < EQUILIBRIUM_SELL_MIN:
+        vetoes.append(f"SELL di zona discount H1 (lokasi {ratio:.2f})")
+    candidate.evidence["gates"] = {
+        "vetoes": vetoes,
+        "waiting": bool(mom.get("waiting")),
+        "archetype": mom.get("archetype"),
+    }
+    note = momentum_note({**mom, "vetoes": vetoes}) if mom else ""
+    if note and "Kerangka RSI" not in candidate.entry_reason and "trigger RSI" not in candidate.entry_reason:
+        candidate.entry_reason = f"{candidate.entry_reason} {note}".strip()
 
+    scores["momentum"] = safe_float(mom.get("score"), 50.0)
     candidate.scores = {k: round(v, 2) for k, v in scores.items()}
-    candidate.confidence = round(clamp(confidence), 2)
+    candidate.confidence = combine_confidence(scores, candidate.evidence)
     return candidate
 
 
@@ -3519,6 +3871,8 @@ def _collect_directional_candidates(
     topdown_liquidity: list[LiquidityPool] | None = None,
     macro_trend_override: str | None = None,
     pair_regime_override: str | None = None,
+    pair_regime_detail: dict[str, Any] | None = None,
+    rsi_pack: dict[str, Any] | None = None,
 ) -> list[Candidate]:
     atr = m15_atr_values[-1]
     rsi_ctx = _latest_rsi_context(m15)
@@ -3618,6 +3972,8 @@ def _collect_directional_candidates(
                 m15_rsi_slope=rsi_ctx["slope"],
                 vlt=vlt,
                 latest_displacement=trigger_disp,
+                pair_regime=pair_regime_detail,
+                momentum=evaluate_momentum(direction, rsi_pack, bool(sweep)),
                 h4_poi_score=h4_poi_score,
                 h4_fib_score=h4_fib_score,
                 h1_refinement_score=h1_ref_score,
@@ -3686,6 +4042,8 @@ def _collect_directional_candidates(
                         m15_rsi_slope=rsi_ctx["slope"],
                         vlt=vlt,
                         latest_displacement=latest_disp,
+                        pair_regime=pair_regime_detail,
+                        momentum=evaluate_momentum(direction, rsi_pack, bool(last_sweep)),
                         h4_poi_score=25.0,
                         h4_fib_score=25.0,
                         h1_refinement_score=location_score(direction, cand.entry, h1_dr),
@@ -3982,6 +4340,12 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     h4_ctx = htf_poi_candidates(pair_h4, pair_h4_structure, DIRECTION_BUY, "H4")
     h1_ctx = htf_poi_candidates(h1, h1_structure, DIRECTION_BUY, "H1")
     m15_ctx = htf_poi_candidates(m15, m15_structure, DIRECTION_BUY, "M15")
+    rsi_pack = {
+        "H4": build_rsi_context(pair_h4, pair_h4_structure, "H4"),
+        "H1": build_rsi_context(h1, h1_structure, "H1"),
+        "M15": build_rsi_context(m15, m15_structure, "M15"),
+        "BTC": simple_rsi_state(btc_h1),
+    }
 
     liquidity = list(m15_ctx.get("liquidity", []))
     sweeps = list(m15_ctx.get("sweeps", []))
@@ -4059,6 +4423,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         topdown_liquidity=[*h4_ctx.get("liquidity", []), *h1_ctx.get("liquidity", []), *m15_ctx.get("liquidity", [])],
         macro_trend_override=btc_regime["trend"],
         pair_regime_override=pair_regime["trend"],
+        pair_regime_detail=pair_regime,
+        rsi_pack=rsi_pack,
     )
 
     best = _best_candidate(candidates)
@@ -4128,16 +4494,18 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         best.evidence["entry_reachability"] = {"score": reach_score, **reach_details}
         best.scores["planned_rr"] = round(candidate_rr_score(best), 2)
         best.scores["entry_reachability"] = round(reach_score, 2)
-        penalty = safe_float(best.evidence.get("confidence_penalty"), 0.0)
-        best.confidence = round(
-            clamp(sum(WEIGHTS[name] * best.scores[name] / 100.0 for name in WEIGHTS) - penalty),
-            2,
-        )
+        if h1_floor_atr > 0:
+            best.scores["risk_quality"] = round(
+                risk_quality_score(abs(best.entry - best.sl) / h1_floor_atr), 2
+            )
+        best.confidence = combine_confidence(best.scores, best.evidence)
     else:
         score_candidate(
             best,
             macro_trend=final_macro,
             pair_h4_trend=pair_regime["trend"],
+            pair_regime=pair_regime,
+            momentum=evaluate_momentum(best.direction, rsi_pack, bool(final_sweep)),
             h1_dr=h1_dr,
             target=final_target,
             sweep=final_sweep,
@@ -4227,6 +4595,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "m15": {
                 **_structure_summary(m15_structure, m15),
                 "rsi14": m15_rsi_ctx,
+                "rsi_pack": rsi_pack,
                 "vlt": m15_vlt,
                 "latest_displacement_score": round(
                     displacement_strength(
