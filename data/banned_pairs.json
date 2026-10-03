@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:26:51.351327+00:00",
+  "saved_at": "2026-10-03T01:26:56.651839+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -869,6 +869,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: SUPERUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.56176704, avail=0.41663878)",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "SYRUPUSDT",
+      "banned_at": "2026-10-03T01:26:56.651758+00:00",
+      "until": "2026-10-03T09:26:56.651720+00:00",
+      "reason": "Confidence 38.74 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "TAOUSDT",
