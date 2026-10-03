@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:43:27.345005+00:00",
+  "saved_at": "2026-10-03T01:43:55.527954+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1373,6 +1373,13 @@
       "until": "2026-10-03T09:40:25.552825+00:00",
       "reason": "Confidence 61.18 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ONUSDT",
+      "banned_at": "2026-10-03T01:43:55.527777+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: ONUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=11, nearest_notional=84)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "OPENUSDT",
