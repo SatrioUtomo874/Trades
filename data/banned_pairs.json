@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:50:15.263296+00:00",
+  "saved_at": "2026-10-03T01:50:19.753645+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1750,6 +1750,13 @@
       "banned_at": "2026-10-03T01:20:58.446139+00:00",
       "until": "2026-10-04T01:20:58.446105+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "POLYXUSDT",
+      "banned_at": "2026-10-03T01:50:19.753444+00:00",
+      "until": "2026-10-04T01:50:19.753412+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
