@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:32:29.651423+00:00",
+  "saved_at": "2026-10-03T01:32:34.846373+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -568,6 +568,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: HUMAUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.56118105, avail=0.4148959)",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "HUSDT",
+      "banned_at": "2026-10-03T01:32:34.846272+00:00",
+      "until": "2026-10-03T09:32:34.846239+00:00",
+      "reason": "Confidence 63.57 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "HYPEUSDT",
