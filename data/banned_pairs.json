@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-03T01:19:37.962378+00:00",
+  "saved_at": "2026-10-03T01:19:41.774774+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -127,6 +127,13 @@
       "until": "2026-10-04T01:16:28.770458+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "DEXEUSDT",
+      "banned_at": "2026-10-03T01:19:41.774732+00:00",
+      "until": "2026-10-04T01:19:41.774633+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "DOGEUSDT",
