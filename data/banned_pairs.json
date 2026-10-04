@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T04:13:48.447435+00:00",
+  "saved_at": "2026-10-04T04:13:54.456522+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -526,6 +526,13 @@
       "until": "2026-10-05T00:44:26.365548+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "KSMUSDT",
+      "banned_at": "2026-10-04T04:13:54.456408+00:00",
+      "until": "2026-10-04T06:13:54.456372+00:00",
+      "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "LABUSDT",
