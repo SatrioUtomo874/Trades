@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T04:12:40.649310+00:00",
+  "saved_at": "2026-10-04T04:12:46.052930+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -428,6 +428,13 @@
       "until": "2026-10-04T12:09:14.072120+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "INITUSDT",
+      "banned_at": "2026-10-04T04:12:46.052868+00:00",
+      "until": "2026-10-04T06:12:46.052844+00:00",
+      "reason": "Confidence 45.3 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "INJUSDT",
