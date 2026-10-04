@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T00:40:07.666827+00:00",
+  "saved_at": "2026-10-04T00:40:10.949540+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -15,6 +15,13 @@
       "until": "2026-10-04T02:39:42.364116+00:00",
       "reason": "Confidence 42.43 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ARBUSDT",
+      "banned_at": "2026-10-04T00:40:10.949520+00:00",
+      "until": "2026-10-05T00:40:10.949497+00:00",
+      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "AVAXUSDT",
