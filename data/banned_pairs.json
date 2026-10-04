@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T00:39:06.648116+00:00",
+  "saved_at": "2026-10-04T00:39:11.145751+00:00",
   "bans": [
     {
       "pair": "BTWUSDT",
@@ -78,6 +78,13 @@
       "until": "2026-10-05T00:38:27.462809+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ZROUSDT",
+      "banned_at": "2026-10-04T00:39:11.145733+00:00",
+      "until": "2026-10-04T02:39:11.145704+00:00",
+      "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     }
   ]
 }
