@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T00:02:18.558496+00:00",
+  "saved_at": "2026-10-04T00:02:23.450524+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -848,6 +848,13 @@
       "until": "2026-10-04T01:58:15.468232+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "CTUSDT",
+      "banned_at": "2026-10-04T00:02:23.446795+00:00",
+      "until": "2026-10-05T00:02:23.446760+00:00",
+      "reason": "Riwayat candle belum cukup: Bybit public gagal untuk CTUSDT 240; SCAN melarang fallback Binance: Bybit hanya mengembalikan 16 candle closed untuk CTUSDT 240; diperlukan 120.",
+      "source": "AUTO_INSUFFICIENT_HISTORY"
     },
     {
       "pair": "CUSDT",
