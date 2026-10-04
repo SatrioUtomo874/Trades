@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T00:39:24.158036+00:00",
+  "saved_at": "2026-10-04T00:39:28.757049+00:00",
   "bans": [
+    {
+      "pair": "1000PEPEUSDT",
+      "banned_at": "2026-10-04T00:39:28.757032+00:00",
+      "until": "2026-10-04T02:39:28.757006+00:00",
+      "reason": "Confidence 27.2 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
     {
       "pair": "BTWUSDT",
       "banned_at": "2026-10-04T00:38:58.852325+00:00",
