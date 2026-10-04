@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T08:22:53.009817+00:00",
+  "saved_at": "2026-10-04T08:23:03.746099+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -8,20 +8,6 @@
       "until": "2026-10-05T00:48:52.047277+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "1000BONKUSDT",
-      "banned_at": "2026-10-04T04:11:38.859269+00:00",
-      "until": "2026-10-04T06:11:38.859245+00:00",
-      "reason": "Confidence 33.25 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "1000PEPEUSDT",
-      "banned_at": "2026-10-04T04:10:18.951386+00:00",
-      "until": "2026-10-04T06:10:18.951351+00:00",
-      "reason": "Confidence 26.47 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "1INCHUSDT",
@@ -94,13 +80,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "API3USDT",
-      "banned_at": "2026-10-04T04:13:38.958589+00:00",
-      "until": "2026-10-04T06:13:38.958541+00:00",
-      "reason": "Confidence 32.75 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "APTUSDT",
       "banned_at": "2026-10-04T00:41:32.051990+00:00",
       "until": "2026-10-05T00:41:32.051960+00:00",
@@ -129,25 +108,11 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "ARUSDT",
-      "banned_at": "2026-10-04T04:11:17.656685+00:00",
-      "until": "2026-10-04T06:11:17.656655+00:00",
-      "reason": "Confidence 37.68 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "ASTERUSDT",
       "banned_at": "2026-10-04T00:41:39.765387+00:00",
       "until": "2026-10-05T00:41:39.765361+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "ATHUSDT",
-      "banned_at": "2026-10-04T04:10:46.751534+00:00",
-      "until": "2026-10-04T06:10:46.751502+00:00",
-      "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "ATOMUSDT",
@@ -267,20 +232,6 @@
       "until": "2026-10-05T00:43:37.556695+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "CLOUSDT",
-      "banned_at": "2026-10-04T04:13:31.946481+00:00",
-      "until": "2026-10-04T06:13:31.946450+00:00",
-      "reason": "Confidence 53.15 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "COMPUSDT",
-      "banned_at": "2026-10-04T04:13:15.144910+00:00",
-      "until": "2026-10-04T06:13:15.144880+00:00",
-      "reason": "Confidence 37.71 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "COTIUSDT",
@@ -430,13 +381,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "GRAMUSDT",
-      "banned_at": "2026-10-04T04:12:14.851361+00:00",
-      "until": "2026-10-04T06:12:14.851320+00:00",
-      "reason": "Confidence 37.46 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "GRASSUSDT",
       "banned_at": "2026-10-04T00:42:33.148070+00:00",
       "until": "2026-10-05T00:42:33.148047+00:00",
@@ -479,13 +423,6 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "INITUSDT",
-      "banned_at": "2026-10-04T04:12:46.052868+00:00",
-      "until": "2026-10-04T06:12:46.052844+00:00",
-      "reason": "Confidence 45.3 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "INJUSDT",
       "banned_at": "2026-10-04T00:40:34.045372+00:00",
       "until": "2026-10-05T00:40:34.045340+00:00",
@@ -514,13 +451,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "JTOUSDT",
-      "banned_at": "2026-10-04T04:11:24.545588+00:00",
-      "until": "2026-10-04T06:11:24.545540+00:00",
-      "reason": "Confidence 22.65 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "JUPUSDT",
       "banned_at": "2026-10-04T00:44:37.467584+00:00",
       "until": "2026-10-05T00:44:37.467544+00:00",
@@ -533,13 +463,6 @@
       "until": "2026-10-05T00:44:26.365548+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "KSMUSDT",
-      "banned_at": "2026-10-04T04:13:54.456408+00:00",
-      "until": "2026-10-04T06:13:54.456372+00:00",
-      "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "LABUSDT",
@@ -605,13 +528,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "MANAUSDT",
-      "banned_at": "2026-10-04T04:10:29.344268+00:00",
-      "until": "2026-10-04T06:10:29.344230+00:00",
-      "reason": "Confidence 37.96 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "MARSCOINUSDT",
       "banned_at": "2026-10-04T00:41:36.165089+00:00",
       "until": "2026-10-05T00:41:36.165065+00:00",
@@ -652,13 +568,6 @@
       "until": "2026-10-05T00:42:26.046333+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "MORPHOUSDT",
-      "banned_at": "2026-10-04T04:11:54.356170+00:00",
-      "until": "2026-10-04T06:11:54.356143+00:00",
-      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "MOVEUSDT",
@@ -836,13 +745,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "RENDERUSDT",
-      "banned_at": "2026-10-04T04:11:59.145609+00:00",
-      "until": "2026-10-04T06:11:59.145558+00:00",
-      "reason": "Confidence 24.66 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "RESOLVUSDT",
       "banned_at": "2026-10-04T00:41:06.058093+00:00",
       "until": "2026-10-04T08:41:06.058064+00:00",
@@ -941,24 +843,10 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "SUPERUSDT",
-      "banned_at": "2026-10-04T04:10:41.354683+00:00",
-      "until": "2026-10-04T06:10:41.354657+00:00",
-      "reason": "Confidence 45.93 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "SUSDT",
       "banned_at": "2026-10-04T00:45:38.348953+00:00",
       "until": "2026-10-04T08:45:38.348916+00:00",
       "reason": "Confidence 39.53 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "SYRUPUSDT",
-      "banned_at": "2026-10-04T04:12:33.853913+00:00",
-      "until": "2026-10-04T06:12:33.853887+00:00",
-      "reason": "Confidence 63.49 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
@@ -1018,13 +906,6 @@
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
-      "pair": "USELESSUSDT",
-      "banned_at": "2026-10-04T04:10:58.049655+00:00",
-      "until": "2026-10-04T06:10:58.049623+00:00",
-      "reason": "Confidence 30.13 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "USUSDT",
       "banned_at": "2026-10-04T00:40:37.661667+00:00",
       "until": "2026-10-05T00:40:37.661642+00:00",
@@ -1046,24 +927,10 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "VVVUSDT",
-      "banned_at": "2026-10-04T04:11:44.251256+00:00",
-      "until": "2026-10-04T06:11:44.251229+00:00",
-      "reason": "Confidence 25.44 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "WIFUSDT",
       "banned_at": "2026-10-04T00:44:14.056788+00:00",
       "until": "2026-10-04T08:44:14.056762+00:00",
       "reason": "Confidence 40 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "WLDUSDT",
-      "banned_at": "2026-10-04T04:10:01.856478+00:00",
-      "until": "2026-10-04T06:10:01.856446+00:00",
-      "reason": "Confidence 29.61 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
@@ -1130,13 +997,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "ZAMAUSDT",
-      "banned_at": "2026-10-04T04:11:07.851288+00:00",
-      "until": "2026-10-04T06:11:07.851258+00:00",
-      "reason": "Confidence 33.49 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "ZECUSDT",
       "banned_at": "2026-10-04T00:38:27.462830+00:00",
       "until": "2026-10-05T00:38:27.462809+00:00",
@@ -1155,13 +1015,6 @@
       "banned_at": "2026-10-04T00:46:57.552495+00:00",
       "until": "2026-10-04T08:46:57.552464+00:00",
       "reason": "Confidence 40 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "ZROUSDT",
-      "banned_at": "2026-10-04T04:10:13.248815+00:00",
-      "until": "2026-10-04T06:10:13.248773+00:00",
-      "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     }
   ]
