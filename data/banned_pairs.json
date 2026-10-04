@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T04:13:58.549952+00:00",
+  "saved_at": "2026-10-04T08:22:53.009817+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -197,6 +197,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5.5 (toleransi ±10%).",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "BIGTIMEUSDT",
+      "banned_at": "2026-10-04T08:22:53.009123+00:00",
+      "until": "2026-10-04T16:22:53.008466+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "BIOUSDT",
