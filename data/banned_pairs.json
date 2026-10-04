@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T00:38:51.046270+00:00",
+  "saved_at": "2026-10-04T00:38:54.465052+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -57,6 +57,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Tidak ada quantity legal pada target notional 11 (toleransi ±10%).",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "MAGMAUSDT",
+      "banned_at": "2026-10-04T00:38:54.465038+00:00",
+      "until": "2026-10-05T00:38:54.465019+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "NEARUSDT",
