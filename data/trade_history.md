@@ -890,3 +890,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-04T04:08:57.634037+00:00
 - Strategy: SMC_VLT_RSI v0.9.0
+
+---
+
+## BIGTIMEUSDT — BUY
+
+Trade ID: `BIGTIMEUSDT-20261004-111413-CC8F88`
+
+### Setup
+
+- Price Now Reference: 0.009109
+- Entry: 0.009059
+- Reason Entry: BIGTIMEUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 0.009045). H1 me-refine ke BULLISH_BREAKER 0.009057. M15 memberi execution POI BULLISH_BREAKER 0.0090595. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 68.6 mendukung momentum. Kerangka RSI TREND_PULLBACK_RSI: RSI H4 regime bullish; RSI H1 koreksi ke 39 lalu berbalik (50).
+- Price Exp: 0.009298
+- Reason Price Exp: Price Exp 0.0092973557 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.008826
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.008877) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- TP: 0.009642
+- Reason TP: TP fallback 0.0096413205 menggunakan RR minimum dari risiko karena target liquidity HTF tidak tersedia.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.009299
+- Result Reason: Price Exp 0.0092973557 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-04T04:14:13.160177+00:00
+- Filled: -
+- Closed: 2026-10-04T08:22:37.530054+00:00
+- Strategy: SMC_VLT_RSI v0.9.0
