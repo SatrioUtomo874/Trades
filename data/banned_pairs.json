@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T00:39:11.145751+00:00",
+  "saved_at": "2026-10-04T00:39:14.145839+00:00",
   "bans": [
     {
       "pair": "BTWUSDT",
@@ -13,6 +13,13 @@
       "pair": "DOGEUSDT",
       "banned_at": "2026-10-04T00:39:02.048898+00:00",
       "until": "2026-10-05T00:39:02.048876+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ENAUSDT",
+      "banned_at": "2026-10-04T00:39:14.145822+00:00",
+      "until": "2026-10-05T00:39:14.145794+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
