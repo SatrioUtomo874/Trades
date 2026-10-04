@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T00:47:47.568848+00:00",
+  "saved_at": "2026-10-04T00:47:51.449605+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -764,6 +764,13 @@
       "until": "2026-10-04T02:47:21.155224+00:00",
       "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "YGGUSDT",
+      "banned_at": "2026-10-04T00:47:51.449535+00:00",
+      "until": "2026-10-05T00:47:51.449514+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "ZAMAUSDT",
