@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-04T00:40:22.665461+00:00",
+  "saved_at": "2026-10-04T00:40:26.057705+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -36,6 +36,13 @@
       "until": "2026-10-04T08:38:58.852301+00:00",
       "reason": "Confidence 34.13 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "CTUSDT",
+      "banned_at": "2026-10-04T00:40:26.057680+00:00",
+      "until": "2026-10-05T00:40:26.057653+00:00",
+      "reason": "Riwayat candle belum cukup: Bybit public gagal untuk CTUSDT 240; SCAN melarang fallback Binance: Bybit hanya mengembalikan 16 candle closed untuk CTUSDT 240; diperlukan 120.",
+      "source": "AUTO_INSUFFICIENT_HISTORY"
     },
     {
       "pair": "DOGEUSDT",
