@@ -41,6 +41,7 @@ Prinsip:
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import hmac
 import copy
@@ -149,6 +150,8 @@ REAL_RECONCILE_INTERVAL_SECONDS = 2.0
 REAL_PENDING_POLL_SECONDS = 5.0
 REAL_PROTECT_CHECK_SECONDS = 60.0
 AUTOSTOP_CHECK_SECONDS = 30.0
+# Pemasangan TP/SL boleh jalan setelah jeda server selesai (tanpa jeda aman bot).
+REAL_PRIORITY: contextvars.ContextVar[bool] = contextvars.ContextVar("real_priority", default=False)
 # Setup scan berkorelasi tinggi (alt searah): batasi eksposur sekaligus.
 SCAN_MAX_NEW_PER_CYCLE = int(os.getenv("SCAN_MAX_NEW_PER_CYCLE", "3") or "3")
 SCAN_MAX_PER_DIRECTION = int(os.getenv("SCAN_MAX_PER_DIRECTION", "6") or "6")
@@ -1211,6 +1214,7 @@ class BinanceRealClient:
         self.recv_window = BINANCE_RECV_WINDOW
         self._time_offset_ms = 0
         self._cooldown_until = 0.0
+        self._server_cooldown_until = 0.0
         self._request_lock = asyncio.Lock()
         self._dual_side_position: bool | None = None
         self.last_balance: dict[str, Any] | None = None
@@ -1222,6 +1226,15 @@ class BinanceRealClient:
     @property
     def cooldown_remaining(self) -> float:
         return max(0.0, self._cooldown_until - time.monotonic())
+
+    @property
+    def server_cooldown_remaining(self) -> float:
+        return max(0.0, self._server_cooldown_until - time.monotonic())
+
+    def apply_cooldown(self, server_seconds: float, bot_seconds: float) -> None:
+        now = time.monotonic()
+        self._cooldown_until = max(self._cooldown_until, now + bot_seconds)
+        self._server_cooldown_until = max(self._server_cooldown_until, now + server_seconds)
 
     def _signed_query(self, params: dict[str, Any]) -> dict[str, Any]:
         result = dict(params)
@@ -1279,7 +1292,9 @@ class BinanceRealClient:
                 endpoint=path,
             )
 
-        remaining = self.cooldown_remaining
+        remaining = (
+            self.server_cooldown_remaining if REAL_PRIORITY.get() else self.cooldown_remaining
+        )
         if remaining > 0:
             blocked = BinanceRateLimitError(
                 f"REST Binance sedang ditahan oleh rate-limit cooldown ({remaining:.0f}s tersisa).",
@@ -1341,10 +1356,7 @@ class BinanceRealClient:
             retry_after = self._parse_retry_after(response)
             server_seconds = retry_after if retry_after is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
             bot_seconds = server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS
-            self._cooldown_until = max(
-                self._cooldown_until,
-                time.monotonic() + bot_seconds,
-            )
+            self.apply_cooldown(server_seconds, bot_seconds)
             code, msg = self._extract_binance_error(response)
             raise BinanceRateLimitError(
                 msg,
@@ -2547,6 +2559,9 @@ class TradingEngine:
         self._rl_notified_until = 0.0
         self._rl_started_at: float | None = None
         self._bg_tasks: set[asyncio.Task[Any]] = set()
+        # Antrian saat API dibatasi (bisa menumpuk): konfirmasi fill & TP/SL tertunda.
+        self._deferred_fill: dict[str, float] = {}
+        self._deferred_protect: dict[str, float] = {}
         self._close_batch_in_progress = False
 
         self.banned_pairs: dict[str, dict[str, Any]] = {}
@@ -2683,8 +2698,13 @@ class TradingEngine:
         await self._load_notes()
         await self._load_banned_pairs()
 
-        self.symbols = await self.rest.get_exchange_info()
-        log.info("[MAIN] Binance symbols loaded: %s", len(self.symbols))
+        try:
+            self.symbols = await self.rest.get_exchange_info()
+            log.info("[MAIN] Binance symbols loaded: %s", len(self.symbols))
+        except BinanceRateLimitError as exc:
+            self.real.apply_cooldown(exc.server_cooldown_seconds, exc.bot_cooldown_seconds)
+            self._notify_rate_limit(exc, "START")
+            log.info("[MAIN] exchangeInfo tertunda (rate limit); symbols dimuat ulang saat API pulih.")
 
         await self.ws.start()
 
@@ -3147,7 +3167,8 @@ class TradingEngine:
                         f"⏱ Jeda      {duration_text(bot)}",
                         self._api_weight_line(),
                         f"▶️ Lanjut    {format_wib(now_utc() + timedelta(seconds=bot))}",
-                        "📌 Ditunda: scan, cek fill, verifikasi TP/SL, autostop",
+                        "📌 Ditunda: scan, verifikasi TP/SL, autostop",
+                        "👀 Harga tetap dipantau via WebSocket; fill dicatat dan TP/SL dipasang otomatis (antrian) begitu API pulih.",
                         "Lanjut otomatis dan dikabari saat Binance tersambung.",
                     ],
                 )
@@ -3181,9 +3202,16 @@ class TradingEngine:
         """Tunggu jeda selesai, tes koneksi, lalu kerjakan yang tertunda."""
         failures = 0
         while self._running:
-            remaining = self.real.cooldown_remaining
-            if remaining > 0:
-                await asyncio.sleep(min(remaining + 1.0, 60.0))
+            bot_rem = self.real.cooldown_remaining
+            srv_rem = self.real.server_cooldown_remaining
+            if bot_rem > 0:
+                if self._deferred_any() and srv_rem <= 0:
+                    await self._flush_deferred()
+                    if self._deferred_any():
+                        await asyncio.sleep(2.0)
+                        continue
+                wait = srv_rem if (self._deferred_any() and srv_rem > 0) else bot_rem
+                await asyncio.sleep(min(wait + 1.0, 60.0))
                 continue
             try:
                 await self.real._public_server_time()
@@ -3194,9 +3222,7 @@ class TradingEngine:
                     retry = self.real._parse_retry_after(response)
                     server = retry if retry is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
                     bot = server + BINANCE_RATE_LIMIT_SAFETY_SECONDS
-                    self.real._cooldown_until = max(
-                        self.real._cooldown_until, time.monotonic() + bot
-                    )
+                    self.real.apply_cooldown(server, bot)
                     self._notify_rate_limit(
                         BinanceRateLimitError(
                             f"HTTP {status}",
@@ -3237,8 +3263,19 @@ class TradingEngine:
 
     async def _resume_after_rate_limit(self) -> None:
         """Kerjakan pengecekan REAL yang tertunda selama jeda."""
+        if not self.symbols:
+            try:
+                self.symbols = await self.rest.get_exchange_info()
+                log.info("[MAIN] Binance symbols loaded: %s", len(self.symbols))
+            except BinanceRateLimitError as exc:
+                self.real.apply_cooldown(exc.server_cooldown_seconds, exc.bot_cooldown_seconds)
+                self._notify_rate_limit(exc, "LOAD SYMBOLS")
+                return
+            except Exception as exc:
+                log.info("[RATE LIMIT] load symbols gagal: %s", exc)
         if not self.real_mode:
             return
+        await self._flush_deferred()
         for trade in list(self.active_trades.values()):
             if not (trade.real_enabled and trade.status in {"PENDING", "FILLED"}):
                 continue
@@ -3836,17 +3873,19 @@ class TradingEngine:
         self._real_poll_guard[key] = now
         return True
 
-    async def _protect_or_close(self, trade: Trade) -> None:
-        """Pasang TP/SL (retry 3x); jika tetap gagal, tutup posisi dengan market."""
+    async def _protect_or_close(self, trade: Trade) -> bool:
+        """Pasang TP/SL (retry 3x). Saat API dibatasi, antre; gagal terus -> close paksa."""
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
                 await self._ensure_real_protective_orders(trade)
-                return
+                self._deferred_protect.pop(trade.trade_id, None)
+                return True
             except BinanceRateLimitError as exc:
-                # Saat ban, close juga ditolak; verifikasi berkala mengulang nanti.
+                # Antre; watcher memasang otomatis begitu jeda server selesai.
+                self._deferred_protect.setdefault(trade.trade_id, time.monotonic())
                 await self._handle_real_exception(exc, "PLACE TP/SL", trade)
-                return
+                return False
             except Exception as exc:
                 last_exc = exc
                 log.warning(
@@ -3858,6 +3897,77 @@ class TradingEngine:
                 if attempt < 2:
                     await asyncio.sleep(2.0)
         await self._emergency_close(trade, f"TP/SL gagal dipasang 3x: {last_exc}")
+        self._deferred_protect.pop(trade.trade_id, None)
+        return False
+
+    def _deferred_any(self) -> bool:
+        return bool(self._deferred_fill or self._deferred_protect)
+
+    def _defer_fill_check(self, trade: Trade, price: Decimal) -> None:
+        """Harga menyentuh entry saat API dibatasi: antre konfirmasi fill + TP/SL."""
+        if trade.trade_id in self._deferred_fill:
+            return
+        self._deferred_fill[trade.trade_id] = time.monotonic()
+        icon = "🟢" if trade.direction == "BUY" else "🔴"
+        self._fire(
+            self.reply(
+                card(
+                    "⚠️ KEMUNGKINAN FILLED",
+                    [
+                        f"{icon} {trade.pair}  •  {trade.direction}",
+                        f"📡 Harga {fmt_price(price)} menyentuh entry {fmt_price(trade.entry)}",
+                        "⏳ Konfirmasi order + TP/SL ditunda (Binance API limit)",
+                        f"🛡 SL {fmt_price(trade.sl)}  •  🏁 TP {fmt_price(trade.tp)}",
+                        "▶️ Dipasang otomatis begitu API pulih",
+                    ],
+                )
+            )
+        )
+
+    async def _flush_deferred(self) -> None:
+        """Konfirmasi fill + pasang TP/SL SEMUA trade yang antre (stack), tanpa jeda aman bot."""
+        if not self.real_mode:
+            self._deferred_fill.clear()
+            self._deferred_protect.clear()
+            return
+        protected: list[str] = []
+        for trade_id in list(dict.fromkeys([*self._deferred_protect, *self._deferred_fill])):
+            trade = self.active_trades.get(trade_id)
+            if trade is None or trade.status not in {"PENDING", "FILLED"}:
+                self._deferred_fill.pop(trade_id, None)
+                self._deferred_protect.pop(trade_id, None)
+                continue
+            if self.real.server_cooldown_remaining > 0:
+                break
+            token = REAL_PRIORITY.set(True)
+            try:
+                if trade.status == "PENDING":
+                    await self._confirm_real_fill(trade)
+                else:
+                    await self._protect_or_close(trade)
+                self._deferred_fill.pop(trade_id, None)
+                if trade.status == "FILLED" and trade_id not in self._deferred_protect:
+                    protected.append(trade.pair)
+            except BinanceRateLimitError as exc:
+                self._notify_rate_limit(exc, "PROTEKSI TERTUNDA")
+                break
+            except Exception as exc:
+                log.warning("[RATE LIMIT] proteksi tertunda %s gagal: %s", trade_id, exc)
+                self._deferred_fill.pop(trade_id, None)
+                self._deferred_protect.pop(trade_id, None)
+            finally:
+                REAL_PRIORITY.reset(token)
+            await asyncio.sleep(0.3)
+        if protected:
+            await self.reply(
+                card(
+                    "🛡️ PROTEKSI TERTUNDA TERPASANG",
+                    [
+                        f"✅ {len(protected)} posisi: {', '.join(protected[:10])}",
+                        "TP/SL aktif di Binance.",
+                    ],
+                )
+            )
 
     async def _verify_real_protection(self, trade: Trade) -> None:
         """Pastikan posisi REAL selalu punya TP/SL; gagal berulang -> close paksa."""
@@ -5545,10 +5655,7 @@ class TradingEngine:
             except asyncio.CancelledError:
                 raise
             except BinanceRateLimitError as exc:
-                self.real._cooldown_until = max(
-                    self.real._cooldown_until,
-                    time.monotonic() + exc.bot_cooldown_seconds,
-                )
+                self.real.apply_cooldown(exc.server_cooldown_seconds, exc.bot_cooldown_seconds)
                 self._notify_rate_limit(exc, "SCAN")
                 continue
             except Exception:
@@ -6327,6 +6434,12 @@ class TradingEngine:
         symbol: str,
     ) -> SymbolMeta:
         normalized = normalize_symbol(symbol)
+
+        if not self.symbols:
+            raise ValueError(
+                "Data symbol Binance belum dimuat (API sedang dibatasi). "
+                "Coba lagi setelah jeda selesai."
+            )
 
         meta = self.symbols.get(
             normalized
@@ -9653,6 +9766,9 @@ class TradingEngine:
 
                     if trade.real_enabled and self.real_mode:
                         if self.real.cooldown_remaining > 0:
+                            # API dibatasi: harga tetap dipantau; fill diantrekan.
+                            if entry_hit:
+                                self._defer_fill_check(trade, price)
                             continue
                         if entry_hit and self._real_poll_due(trade, "fill", REAL_PENDING_POLL_SECONDS):
                             if await self._confirm_real_fill(trade):
