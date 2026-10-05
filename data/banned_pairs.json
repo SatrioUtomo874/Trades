@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T12:41:36.754139+00:00",
+  "saved_at": "2026-10-05T12:41:40.949805+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -370,6 +370,13 @@
       "pair": "LYNUSDT",
       "banned_at": "2026-10-05T10:25:25.951221+00:00",
       "until": "2026-10-06T10:25:25.951188+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "MAGICUSDT",
+      "banned_at": "2026-10-05T12:41:40.949754+00:00",
+      "until": "2026-10-06T12:41:40.949730+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
