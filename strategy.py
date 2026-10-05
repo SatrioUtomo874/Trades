@@ -78,7 +78,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.9.0"
+STRATEGY_VERSION = "0.10.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -4994,6 +4994,106 @@ def validate_result_contract(result: dict[str, Any]) -> tuple[bool, list[str]]:
     return (not errors, errors)
 
 
+# --------------------------------------------------------------------------
+# TRAILING: otak yang mengusulkan SL baru; main.py yang memvalidasi dan mengeksekusi.
+# Tiga sumber: R-ladder, struktur M15 (higher low / lower high setelah entry), dan
+# kelelahan RSI (divergence berlawanan / RSI ekstrem). Yang paling melindungi dipakai.
+# --------------------------------------------------------------------------
+TRAIL_R_LADDER = [(1.0, 0.0), (1.5, 0.5), (2.0, 1.0), (3.0, 2.0)]
+TRAIL_FEE_BUFFER_PCT = 0.12
+STRUCT_TRAIL_MIN_R = 1.0
+STRUCT_TRAIL_BUFFER_ATR = 0.5
+EXHAUST_MIN_R = 1.5
+EXHAUST_GIVEBACK_R = 0.8
+TRAIL_MIN_GAP_R = 0.30
+
+
+async def analyze_trailing(
+    trade: dict[str, Any],
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Usulan SL trailing untuk posisi FILLED. context.fetch_structure=False -> hanya R-ladder."""
+    context = context or {}
+    direction = str(trade.get("direction") or "").upper()
+    buy = direction == "BUY"
+    fill = safe_float(trade.get("fill_price"))
+    initial_sl = safe_float(trade.get("initial_sl"))
+    current_sl = safe_float(trade.get("sl"))
+    price = safe_float(trade.get("price"))
+    risk = abs(fill - initial_sl)
+    result: dict[str, Any] = {
+        "new_sl": None,
+        "source": None,
+        "reason": "",
+        "r_now": 0.0,
+        "candidates": {},
+    }
+    if direction not in {"BUY", "SELL"} or fill <= 0 or risk <= 0 or price <= 0:
+        return result
+    r_now = (price - fill) / risk if buy else (fill - price) / risk
+    result["r_now"] = round(r_now, 3)
+
+    candidates: dict[str, tuple[float, str]] = {}
+    lock_r = None
+    for trigger, lock in TRAIL_R_LADDER:
+        if r_now >= trigger:
+            lock_r = lock
+    if lock_r is not None:
+        gain = max(lock_r * risk, fill * TRAIL_FEE_BUFFER_PCT / 100.0)
+        candidates["R_LADDER"] = (
+            fill + gain if buy else fill - gain,
+            f"R-ladder: harga +{r_now:.2f}R, SL dikunci di {lock_r:.1f}R.",
+        )
+
+    if context.get("fetch_structure", True) and r_now >= STRUCT_TRAIL_MIN_R:
+        try:
+            pair = normalize_pair(str(trade.get("pair") or ""))
+            m15, _ = await fetch_series(pair, M15, 200, M15_MS, allow_fallback=False)
+            atr_vals = atr_series(m15, 14)
+            atr = atr_vals[-1] if atr_vals else 0.0
+            structure = build_structure(m15, SWING_SPAN_M15)
+            filled_ms = int(trade.get("filled_at_ms") or 0)
+            buffer = max(atr * STRUCT_TRAIL_BUFFER_ATR, price * 0.001)
+
+            pivots = structure.swing_lows if buy else structure.swing_highs
+            for pivot in reversed(pivots):
+                if pivot.index >= len(m15) or m15[pivot.index].time_ms < filled_ms:
+                    continue
+                if (buy and pivot.price > current_sl) or (not buy and pivot.price < current_sl):
+                    candidates["STRUCTURE"] = (
+                        pivot.price - buffer if buy else pivot.price + buffer,
+                        f"struktur M15: {'higher low' if buy else 'lower high'} "
+                        f"{round_price(pivot.price)} terbentuk setelah entry.",
+                    )
+                    break
+
+            rsi_ctx = build_rsi_context(m15, structure, "M15")
+            adverse = "SELL" if buy else "BUY"
+            div = (rsi_ctx.get("div") or {}).get(adverse)
+            cur = safe_float(rsi_ctx.get("cur"), 50.0)
+            exhausted = cur >= 80.0 if buy else cur <= 20.0
+            if r_now >= EXHAUST_MIN_R and ((div and div.get("kind") == "REGULAR") or exhausted):
+                why = "divergence reguler berlawanan" if div and div.get("kind") == "REGULAR" else f"RSI M15 ekstrem ({cur:.0f})"
+                candidates["RSI_EXHAUSTION"] = (
+                    price - EXHAUST_GIVEBACK_R * risk if buy else price + EXHAUST_GIVEBACK_R * risk,
+                    f"kelelahan momentum: {why}; ruang balik dibatasi {EXHAUST_GIVEBACK_R:.1f}R.",
+                )
+        except Exception as exc:
+            result["structure_error"] = str(exc)[:160]
+
+    if not candidates:
+        return result
+    pick = max if buy else min
+    source, (level, reason) = pick(candidates.items(), key=lambda item: item[1][0])
+    result["candidates"] = {name: round_price(value[0]) for name, value in candidates.items()}
+    improves = level > current_sl if buy else level < current_sl
+    gap = (price - level) if buy else (level - price)
+    if not improves or gap < risk * TRAIL_MIN_GAP_R:
+        return result
+    result.update(new_sl=round_price(level), source=source, reason=reason)
+    return result
+
+
 if __name__ == "__main__":
     print(f"{STRATEGY_NAME} v{STRATEGY_VERSION}")
-    print("Module contracts: async generate_setup(pair, context), async analyze_btc_regime(context), async analyze_scan_structure(pair, context), async validate_setup(pair, initial_setup, context)")
+    print("Module contracts: async generate_setup(pair, context), async analyze_btc_regime(context), async analyze_scan_structure(pair, context), async validate_setup(pair, initial_setup, context), async analyze_trailing(trade, context)")
