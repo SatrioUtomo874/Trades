@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T10:24:33.358885+00:00",
+  "saved_at": "2026-10-05T10:24:36.749088+00:00",
   "bans": [
+    {
+      "pair": "DOGEUSDT",
+      "banned_at": "2026-10-05T10:24:36.749075+00:00",
+      "until": "2026-10-06T10:24:36.749045+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
     {
       "pair": "NEARUSDT",
       "banned_at": "2026-10-05T10:24:28.866006+00:00",
