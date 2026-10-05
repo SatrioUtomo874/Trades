@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T19:08:41.449329+00:00",
+  "saved_at": "2026-10-05T19:08:46.955255+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -722,6 +722,13 @@
       "until": "2026-10-06T10:30:06.948871+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "REUSDT",
+      "banned_at": "2026-10-05T19:08:46.955211+00:00",
+      "until": "2026-10-05T21:08:46.955189+00:00",
+      "reason": "Confidence 34.5 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "RLCUSDT",
