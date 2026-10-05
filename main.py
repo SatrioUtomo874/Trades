@@ -29,6 +29,7 @@ Prinsip:
 - /open memulihkan snapshot setup tersebut setelah main.py diganti.
 - /auto menjembatani main.py ke strategy.py dan meminta konfirmasi user.
 - /scan menjalankan scanner otomatis: universe Binance ∩ Bybit -> directional H4 -> strategy -> threshold -> validator -> /trade.
+- /H4 mengatur gate scheduler scanner pada close H4: 03:00, 07:00, 11:00, 15:00, 19:00, 23:00 WIB.
 - /threshold mengatur ambang confidence scanner.
 - /max membatasi total active PENDING + FILLED dan dapat mem-pause/resume /scan otomatis.
 - /close PAIR|all menutup paksa active setup dan tetap mencatat hasil ke history.
@@ -181,6 +182,11 @@ DEFAULT_SCAN_THRESHOLD = Decimal("70")
 SCAN_PAIR_DELAY_SECONDS = 1.0
 SCAN_MAX_PAIRS_PER_CYCLE = 50
 SCAN_CYCLE_DELAY_SECONDS = 30.0
+# H4 scanner gate: scanner baru membuka window pada penutupan H4 WIB.
+# Binance H4 boundaries dipetakan ke 03,07,11,15,19,23 WIB.
+H4_SCAN_HOURS_WIB = (3, 7, 11, 15, 19, 23)
+H4_SCAN_TRIGGER_LEEWAY_SECONDS = 60.0
+H4_SCAN_SCHEDULER_POLL_SECONDS = 5.0
 SCAN_VALIDATION_TOLERANCE = Decimal("0.90")
 SCAN_BANNED_PRICE_EXP_HOURS = Decimal("8")
 SCAN_BANNED_TP_SL_HOURS = Decimal("24")
@@ -2571,6 +2577,14 @@ class TradingEngine:
         self._scan_cycle_number = 0
         self._scan_last_report: dict[str, Any] = {}
         self._scan_margin_streak: dict[str, int] = {}
+
+        # H4 scanner gate. H4 defaults OFF per fresh main.py session.
+        # _h4_window_active means the current H4 close has opened a scanning
+        # window; it is closed again when max active trade is reached.
+        self._h4_enabled = False
+        self._h4_window_active = False
+        self._h4_last_trigger_slot: str | None = None
+        self._scan_generation = 0
 
         # AUTOSTOP: trailing max drawdown atas equity Binance (hanya saat REAL ON).
         default_autostop = self._parse_optional_decimal(CONFIG_AUTOSTOP)
@@ -5720,16 +5734,167 @@ class TradingEngine:
     # SCAN CONFIG / COMMANDS
     # --------------------------------------------------------
 
+    def _h4_slot_key(self, dt: datetime) -> str:
+        return dt.astimezone(TZ).strftime("%Y%m%d-%H%M")
+
+    def _h4_latest_scheduled_slot(self, now: datetime | None = None) -> datetime | None:
+        """Return the most recent scheduled H4 close at/before now (WIB)."""
+        local = (now or now_utc()).astimezone(TZ)
+        candidates: list[datetime] = []
+        for day_offset in (0, -1):
+            day = local.date() + timedelta(days=day_offset)
+            for hour in H4_SCAN_HOURS_WIB:
+                candidates.append(
+                    datetime(day.year, day.month, day.day, hour, 0, 0, tzinfo=TZ)
+                )
+        past = [item for item in candidates if item <= local]
+        return max(past) if past else None
+
+    def _h4_next_scheduled_slot(self, now: datetime | None = None) -> datetime:
+        """Return the next H4 close strictly after now (WIB)."""
+        local = (now or now_utc()).astimezone(TZ)
+        today = local.date()
+        for hour in H4_SCAN_HOURS_WIB:
+            candidate = datetime(today.year, today.month, today.day, hour, 0, 0, tzinfo=TZ)
+            if candidate > local:
+                return candidate
+        tomorrow = today + timedelta(days=1)
+        return datetime(
+            tomorrow.year,
+            tomorrow.month,
+            tomorrow.day,
+            H4_SCAN_HOURS_WIB[0],
+            0,
+            0,
+            tzinfo=TZ,
+        )
+
+    def _h4_trigger_slot(self, now: datetime | None = None) -> datetime | None:
+        """Return an unconsumed H4 slot that is due now."""
+        local = (now or now_utc()).astimezone(TZ)
+        latest = self._h4_latest_scheduled_slot(local)
+        if latest is None:
+            return None
+        elapsed = (local - latest).total_seconds()
+        if elapsed < 0 or elapsed > H4_SCAN_TRIGGER_LEEWAY_SECONDS:
+            return None
+        if self._h4_slot_key(latest) == self._h4_last_trigger_slot:
+            return None
+        return latest
+
+    def _h4_next_slot_text(self, now: datetime | None = None) -> str:
+        local = (now or now_utc()).astimezone(TZ)
+        due = self._h4_trigger_slot(local)
+        slot = due or self._h4_next_scheduled_slot(local)
+        return slot.strftime("%d-%m-%Y %H:%M WIB")
+
+    def _h4_window_text(self) -> str:
+        if not self._h4_enabled:
+            return "OFF"
+        if self._h4_window_active:
+            return "ACTIVE"
+        return "WAITING_H4"
+
+    def _h4_status_text(self) -> str:
+        lines = [
+            "🕓 H4 SCANNER GATE",
+            "",
+            f"H4 Mode: {'ON' if self._h4_enabled else 'OFF'}",
+            f"Scan: {'ON' if self._scan_user_enabled else 'OFF'}",
+            f"Window: {self._h4_window_text()}",
+            f"Active: {len(self.active_trades)}/{self.max_active_trades}",
+        ]
+        if self._h4_enabled:
+            lines.extend([
+                f"Next H4: {self._h4_next_slot_text()}",
+                "Jadwal: 03:00 • 07:00 • 11:00 • 15:00 • 19:00 • 23:00 WIB",
+                (
+                    "Status: scanner akan terus berjalan sampai MAX penuh."
+                    if self._h4_window_active
+                    else "Status: menunggu close H4 berikutnya."
+                ),
+            ])
+        else:
+            lines.append("Status: scanner berjalan normal tanpa gate H4.")
+        return "\n".join(lines)
+
+    async def _handle_h4_command(self, text: str) -> None:
+        parts = text.split()
+        if len(parts) == 1:
+            await self.reply(self._h4_status_text())
+            return
+
+        mode = parts[1].lower()
+        if mode not in {"on", "off"}:
+            raise ValueError("Gunakan /H4 on atau /H4 off.")
+
+        if mode == "off":
+            was_enabled = self._h4_enabled
+            was_window_active = self._h4_window_active
+            self._h4_enabled = False
+            self._h4_window_active = False
+            self._h4_last_trigger_slot = None
+
+            # Jika masih berada di H4 window yang sedang berjalan, jangan
+            # membatalkan cycle: H4 gate dicabut dan scan boleh lanjut normal.
+            # Jika masih WAITING_H4, restart task agar tidak tetap tidur sampai
+            # jadwal berikutnya.
+            if self._scan_user_enabled and was_enabled:
+                if was_window_active:
+                    self._scan_auto_paused = False
+                    if self._scan_task is None or self._scan_task.done():
+                        await self._start_scan_task()
+                else:
+                    self._scan_generation += 1
+                    await self._stop_scan_task()
+                    self._scan_auto_paused = False
+                    await self._start_scan_task()
+
+            await self.reply(
+                "🟢 H4 OFF\n\n"
+                "SCAN kembali memakai mode normal.\n"
+                f"Active: {len(self.active_trades)}/{self.max_active_trades}"
+            )
+            return
+
+        # H4 ON selalu memulai ulang scheduler boundary. Jika scan sedang
+        # berjalan bebas, current cycle dibatalkan dan hasilnya di-invalidasi.
+        self._h4_enabled = True
+        self._h4_window_active = False
+        self._h4_last_trigger_slot = None
+        self._scan_generation += 1
+
+        if self._scan_user_enabled:
+            await self._stop_scan_task()
+            self._scan_auto_paused = False
+            await self._start_scan_task()
+
+        await self.reply(
+            "🕓 H4 ON\n\n"
+            "Scanning sekarang menunggu jadwal close H4.\n"
+            f"Next H4: {self._h4_next_slot_text()}\n"
+            "Jadwal: 03:00 • 07:00 • 11:00 • 15:00 • 19:00 • 23:00 WIB\n"
+            f"Active: {len(self.active_trades)}/{self.max_active_trades}"
+        )
+
     async def _handle_scan_command(self, text: str) -> None:
         parts = text.split()
         if len(parts) == 1:
             state = "ON" if self._scan_user_enabled else "OFF"
-            runtime = "PAUSED_BY_MAX" if self._scan_auto_paused else state
+            runtime = (
+                "WAITING_H4"
+                if self._scan_user_enabled and self._h4_enabled and not self._h4_window_active
+                else "PAUSED_BY_MAX" if self._scan_auto_paused
+                else state
+            )
             await self.reply(
                 "🔎 SCAN STATUS\n\n"
                 f"User State: {state}\n"
                 f"Runtime State: {runtime}\n"
-                f"Threshold: {decimal_to_str(self.scan_threshold)}\n"
+                f"H4 Mode: {'ON' if self._h4_enabled else 'OFF'}\n"
+                f"H4 Window: {self._h4_window_text()}\n"
+                + (f"Next H4: {self._h4_next_slot_text()}\n" if self._h4_enabled else "")
+                + f"Threshold: {decimal_to_str(self.scan_threshold)}\n"
                 f"Max Active Trade: {self.max_active_trades}\n"
                 f"Max Pair/Cycle: {SCAN_MAX_PAIRS_PER_CYCLE}\n"
                 f"Interval Cycle: {SCAN_CYCLE_DELAY_SECONDS:g}s\n"
@@ -5744,11 +5909,28 @@ class TradingEngine:
         if mode == "off":
             self._scan_user_enabled = False
             self._scan_auto_paused = False
+            self._h4_window_active = False
+            self._scan_generation += 1
             await self._stop_scan_task()
             await self.reply("🛑 SCAN OFF")
             return
 
         self._scan_user_enabled = True
+        self._scan_auto_paused = False
+        if self._h4_enabled:
+            if len(self.active_trades) >= self.max_active_trades:
+                self._scan_auto_paused = True
+            await self._start_scan_task()
+            await self.reply(
+                "🟢 SCAN ON\n\n"
+                "H4 Mode: ON\n"
+                f"Window: {self._h4_window_text()}\n"
+                f"Next H4: {self._h4_next_slot_text()}\n"
+                f"Threshold: {decimal_to_str(self.scan_threshold)}\n"
+                f"Max Active Trade: {self.max_active_trades}"
+            )
+            return
+
         if len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
             await self._stop_scan_task()
@@ -5758,7 +5940,6 @@ class TradingEngine:
             )
             return
 
-        self._scan_auto_paused = False
         await self._start_scan_task()
         await self.reply(
             "🟢 SCAN ON\n\n"
@@ -5959,6 +6140,26 @@ class TradingEngine:
         if value <= 0:
             raise ValueError("/max harus berupa angka > 0.")
         self.max_active_trades = value
+
+        if self._h4_enabled:
+            # Dalam H4 mode scheduler tetap dipertahankan; window aktif hanya
+            # boleh berjalan jika capacity tersedia. Jika menjadi penuh, window
+            # ditutup dan slot berikutnya menjadi trigger selanjutnya.
+            if len(self.active_trades) >= self.max_active_trades:
+                self._h4_window_active = False
+                self._scan_auto_paused = bool(self._scan_user_enabled)
+            else:
+                self._scan_auto_paused = False
+            if self._scan_user_enabled:
+                await self._start_scan_task()
+            await self.reply(
+                f"✅ /max = {value}\n"
+                f"H4 Mode: ON | Window: {self._h4_window_text()}\n"
+                f"Active: {len(self.active_trades)}/{self.max_active_trades}\n"
+                f"Next H4: {self._h4_next_slot_text()}"
+            )
+            return
+
         if len(self.active_trades) >= self.max_active_trades:
             if self._scan_user_enabled:
                 self._scan_auto_paused = True
@@ -5989,25 +6190,33 @@ class TradingEngine:
             return
         if not self._scan_user_enabled:
             return
-        if len(self.active_trades) >= self.max_active_trades:
+        if not self._h4_enabled and len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
             return
         if self._scan_task is not None and not self._scan_task.done():
             return
-        self._scan_auto_paused = False
+        # H4 mode may legitimately keep a scheduler task alive while full so
+        # it can wait for the next close and re-evaluate capacity there.
+        if not self._h4_enabled:
+            self._scan_auto_paused = False
         self._scan_task = asyncio.create_task(
             self._scan_loop(),
             name="main-scan-loop",
         )
-        log.info("[SCAN] scanner task started")
+        log.info("[SCAN] scanner task started | H4=%s window=%s", self._h4_enabled, self._h4_window_active)
 
     async def _resume_scan_after_capacity_change(self) -> None:
         if self.flow is not None:
             return
-        if (
-            self._scan_user_enabled
-            and len(self.active_trades) < self.max_active_trades
-        ):
+        if not self._scan_user_enabled:
+            return
+        if self._h4_enabled:
+            # H4 scheduler owns the lifecycle. Never launch a fresh scan outside
+            # an active H4 window merely because capacity became available.
+            if self._scan_task is None or self._scan_task.done():
+                await self._start_scan_task()
+            return
+        if len(self.active_trades) < self.max_active_trades:
             self._scan_auto_paused = False
             await self._start_scan_task()
 
@@ -6376,14 +6585,80 @@ class TradingEngine:
     # SCAN LOOP
     # --------------------------------------------------------
 
+    async def _wait_for_h4_trigger(self) -> datetime | None:
+        """Wait until the next H4 close, while remaining responsive to /H4 off."""
+        while self._running and self._scan_user_enabled and self._h4_enabled and not self._h4_window_active:
+            due = self._h4_trigger_slot()
+            if due is not None:
+                slot_key = self._h4_slot_key(due)
+                self._h4_last_trigger_slot = slot_key
+                return due
+
+            next_slot = self._h4_next_scheduled_slot()
+            wait_seconds = max(0.25, (next_slot - now_utc().astimezone(TZ)).total_seconds())
+            # Short sleep chunks allow /H4 off, /scan off, and max/capacity
+            # state changes to be noticed without waiting for the full interval.
+            await asyncio.sleep(min(wait_seconds, H4_SCAN_SCHEDULER_POLL_SECONDS))
+        return None
+
     async def _scan_loop(self) -> None:
-        while self._running and self._scan_user_enabled and not self._scan_auto_paused:
+        while self._running and self._scan_user_enabled:
             try:
+                if self._h4_enabled:
+                    if not self._h4_window_active:
+                        slot = await self._wait_for_h4_trigger()
+                        if slot is None:
+                            break
+                        if len(self.active_trades) >= self.max_active_trades:
+                            self._scan_auto_paused = True
+                            log.info(
+                                "[SCAN][H4] slot %s dilewati karena MAX active=%s/%s; tunggu slot berikutnya.",
+                                self._h4_slot_key(slot),
+                                len(self.active_trades),
+                                self.max_active_trades,
+                            )
+                            continue
+                        self._h4_window_active = True
+                        self._scan_auto_paused = False
+                        log.info(
+                            "[SCAN][H4] scan window dibuka pada slot %s",
+                            self._h4_slot_key(slot),
+                        )
+
+                # Dalam mode normal, capacity full menghentikan task seperti perilaku lama.
+                if not self._h4_enabled and len(self.active_trades) >= self.max_active_trades:
+                    self._scan_auto_paused = True
+                    break
+
                 while self._running and self._scan_user_enabled and self.real.cooldown_remaining > 0:
                     await asyncio.sleep(min(self.real.cooldown_remaining + 1.0, 30.0))
                 if not (self._running and self._scan_user_enabled):
                     break
+
+                # H4 can be disabled while sleeping on a scheduler boundary;
+                # after the state flips, the next iteration becomes normal scan.
                 await self._run_scan_cycle()
+
+                if len(self.active_trades) >= self.max_active_trades:
+                    if self._h4_enabled:
+                        self._h4_window_active = False
+                        self._scan_auto_paused = True
+                        log.info(
+                            "[SCAN][H4] window slot %s selesai: MAX active=%s/%s.",
+                            self._h4_last_trigger_slot or "-",
+                            len(self.active_trades),
+                            self.max_active_trades,
+                        )
+                        continue
+                    self._scan_auto_paused = True
+                    break
+
+                if not (self._running and self._scan_user_enabled):
+                    break
+
+                # In H4 mode, keep scanning inside the active window. In normal
+                # mode retain the original cycle delay.
+                await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
             except asyncio.CancelledError:
                 raise
             except BinanceRateLimitError as exc:
@@ -6392,13 +6667,8 @@ class TradingEngine:
                 continue
             except Exception:
                 log.exception("[SCAN] cycle fatal error")
+                # A fatal cycle must not silently bypass an active H4 gate.
                 await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
-            if not (self._running and self._scan_user_enabled and not self._scan_auto_paused):
-                break
-            try:
-                await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
-            except asyncio.CancelledError:
-                raise
 
     async def _run_scan_cycle(self) -> None:
         if len(self.active_trades) >= self.max_active_trades:
@@ -6408,8 +6678,12 @@ class TradingEngine:
 
         self._scan_cycle_number += 1
         cycle = self._scan_cycle_number
+        scan_generation = self._scan_generation
         started = time.monotonic()
-        log.info("[SCAN] Cycle #%s started", cycle)
+        log.info(
+            "[SCAN] Cycle #%s started | generation=%s | H4=%s window=%s",
+            cycle, scan_generation, self._h4_enabled, self._h4_window_active,
+        )
         await self.reply(
             card(
                 f"🛰️ SCAN #{cycle} DIMULAI",
@@ -6422,6 +6696,9 @@ class TradingEngine:
         )
 
         module = await self._load_strategy_runtime()
+        if scan_generation != self._scan_generation or not self._scan_user_enabled:
+            log.info("[SCAN] Cycle #%s dibatalkan sebelum analisis: generation berubah/off.", cycle)
+            return
         btc_raw, btc_fallback = await self._scan_get_structure(module, "BTCUSDT", cycle)
         btc_analysis = btc_raw.get("analysis") if isinstance(btc_raw, dict) else {}
         btc_trend = str(
@@ -6513,6 +6790,9 @@ class TradingEngine:
             )
         else:
             for index, pair in enumerate(batch, start=1):
+                if scan_generation != self._scan_generation or not self._scan_user_enabled:
+                    log.info("[SCAN] Cycle #%s dibatalkan di tengah batch: generation berubah/off.", cycle)
+                    return
                 if len(self.active_trades) >= self.max_active_trades:
                     self._scan_auto_paused = True
                     log.info("[SCAN] Cycle #%s stopped early at max active trade.", cycle)
@@ -6660,6 +6940,9 @@ class TradingEngine:
             )
 
         for rank, candidate in enumerate(threshold_candidates, start=1):
+            if scan_generation != self._scan_generation or not self._scan_user_enabled:
+                log.info("[SCAN] Cycle #%s validator dibatalkan: generation berubah/off.", cycle)
+                return
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
                 break
@@ -6702,6 +6985,9 @@ class TradingEngine:
         final_leverage_banned: list[str] = []
 
         for candidate in validated:
+            if scan_generation != self._scan_generation or not self._scan_user_enabled:
+                log.info("[SCAN] Cycle #%s final add dibatalkan: generation berubah/off; tidak ada candidate lama yang dimasukkan.", cycle)
+                return
             if not self._scan_user_enabled:
                 break
             if len(self.active_trades) >= self.max_active_trades:
@@ -11910,8 +12196,11 @@ class TradingEngine:
             f"History Records: {len(self.history_records)}\n"
             f"Catatan: {len(self.notes)}\n\n"
             f"Scan: {'ON' if self._scan_user_enabled else 'OFF'}"
-            f" | Runtime: {'PAUSED_BY_MAX' if self._scan_auto_paused else ('RUNNING' if self._scan_task is not None and not self._scan_task.done() else 'OFF')}\n"
-            f"Threshold: {decimal_to_str(self.scan_threshold)} | Max: {self.max_active_trades}\n"
+            f" | Runtime: {'WAITING_H4' if self._scan_user_enabled and self._h4_enabled and not self._h4_window_active else ('PAUSED_BY_MAX' if self._scan_auto_paused else ('RUNNING' if self._scan_task is not None and not self._scan_task.done() else 'OFF'))}\n"
+            f"H4 Gate: {'ON' if self._h4_enabled else 'OFF'}\n"
+            f"H4 Window: {self._h4_window_text()}\n"
+            + (f"H4 Next: {self._h4_next_slot_text()}\n" if self._h4_enabled else "")
+            + f"Threshold: {decimal_to_str(self.scan_threshold)} | Max: {self.max_active_trades}\n"
             f"Autostop: {self._autostop_short()}\n"
             f"Margin: {decimal_to_str(self.margin_usdt)} USDT | Leverage: {self.leverage}x | Target Notional: {decimal_to_str(self.margin_usdt * Decimal(self.leverage))} USDT\n"
         )
@@ -11935,6 +12224,7 @@ class TradingEngine:
             "/margin [USDT] - atur margin target\n"
             "/leverage [angka] - atur leverage target\n"
             "/scan on|off - scanner otomatis\n"
+            "/H4 on|off - gate scanner berdasarkan close H4 03/07/11/15/19/23 WIB\n"
             "/threshold [angka] - ambang confidence scanner\n"
             "/max [angka] - batas total PENDING + FILLED\n"
             "/autostop [persen|off|reset] - matikan scan saat equity turun dari puncak (REAL ON)\n"
@@ -12014,6 +12304,7 @@ class TradingEngine:
                     "/filled",
                     "/close",
                     "/scan",
+                    "/h4",
                     "/threshold",
                     "/real",
                     "/margin",
@@ -12137,6 +12428,14 @@ class TradingEngine:
                 except Exception as exc:
                     log.exception("SCAN command gagal.")
                     await self.reply(f"❌ /scan gagal.\n\n{exc}")
+                return
+
+            if command == "/h4":
+                try:
+                    await self._handle_h4_command(text)
+                except Exception as exc:
+                    log.exception("H4 command gagal.")
+                    await self.reply(f"❌ /H4 gagal.\n\n{exc}")
                 return
 
             if command == "/threshold":
