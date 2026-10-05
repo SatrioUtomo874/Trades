@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T19:24:17.150346+00:00",
+  "saved_at": "2026-10-05T19:24:22.958226+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -519,6 +519,13 @@
       "until": "2026-10-06T10:31:17.760695+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "GRIFFAINUSDT",
+      "banned_at": "2026-10-05T19:24:22.958168+00:00",
+      "until": "2026-10-05T21:24:22.958144+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "GRTUSDT",
