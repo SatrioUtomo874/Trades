@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T12:40:51.465261+00:00",
+  "saved_at": "2026-10-05T12:41:01.046222+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -245,6 +245,13 @@
       "banned_at": "2026-10-05T10:26:16.555309+00:00",
       "until": "2026-10-05T18:26:16.555285+00:00",
       "reason": "Confidence 50.27 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "FLUIDUSDT",
+      "banned_at": "2026-10-05T12:41:01.046158+00:00",
+      "until": "2026-10-05T14:41:01.046119+00:00",
+      "reason": "Confidence 48.22 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
