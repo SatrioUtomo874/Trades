@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T10:26:21.956070+00:00",
+  "saved_at": "2026-10-05T10:26:25.746613+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -29,6 +29,13 @@
       "until": "2026-10-05T12:26:21.956006+00:00",
       "reason": "Confidence 46.52 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "BRUSDT",
+      "banned_at": "2026-10-05T10:26:25.746560+00:00",
+      "until": "2026-10-06T10:26:25.746524+00:00",
+      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "BTWUSDT",
