@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T12:43:26.867444+00:00",
+  "saved_at": "2026-10-05T12:43:32.750798+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -763,6 +763,13 @@
       "banned_at": "2026-10-05T12:39:49.447947+00:00",
       "until": "2026-10-05T14:39:49.447918+00:00",
       "reason": "Confidence 40 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "SUPERUSDT",
+      "banned_at": "2026-10-05T12:43:32.750726+00:00",
+      "until": "2026-10-05T20:43:32.750690+00:00",
+      "reason": "Confidence 48.42 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
