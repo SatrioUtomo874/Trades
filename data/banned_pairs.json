@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T12:41:40.949805+00:00",
+  "saved_at": "2026-10-05T12:41:46.248419+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -399,6 +399,13 @@
       "banned_at": "2026-10-05T10:29:07.653658+00:00",
       "until": "2026-10-05T18:29:07.653617+00:00",
       "reason": "Confidence 66.45 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MEGAUSDT",
+      "banned_at": "2026-10-05T12:41:46.248359+00:00",
+      "until": "2026-10-05T20:41:46.248327+00:00",
+      "reason": "Confidence 40 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
