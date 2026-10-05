@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T10:30:20.748119+00:00",
+  "saved_at": "2026-10-05T10:30:26.150685+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -364,6 +364,13 @@
       "banned_at": "2026-10-05T10:27:25.256268+00:00",
       "until": "2026-10-05T12:27:25.256243+00:00",
       "reason": "Confidence 47.36 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "SKYUSDT",
+      "banned_at": "2026-10-05T10:30:26.150649+00:00",
+      "until": "2026-10-05T12:30:26.150618+00:00",
+      "reason": "Confidence 50.42 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
