@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T10:26:16.555324+00:00",
+  "saved_at": "2026-10-05T10:26:21.956070+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -22,6 +22,13 @@
       "until": "2026-10-06T10:25:41.666007+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "AXSUSDT",
+      "banned_at": "2026-10-05T10:26:21.956044+00:00",
+      "until": "2026-10-05T12:26:21.956006+00:00",
+      "reason": "Confidence 46.52 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "BTWUSDT",
