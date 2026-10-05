@@ -712,6 +712,18 @@ class Trade:
     sl_algo_id: int | None = None
     tp_client_algo_id: str | None = None
     sl_client_algo_id: str | None = None
+
+    # Transactional SL replacement state.
+    # ACTIVE SL is kept in sl_* until the replacement has been independently
+    # confirmed on Binance. pending_sl_* describes the candidate being
+    # installed/confirmed; it must never replace the active metadata early.
+    pending_sl_algo_id: int | None = None
+    pending_sl_client_algo_id: str | None = None
+    pending_sl_price: Decimal | None = None
+    pending_sl_state: str = "NONE"
+    pending_sl_created_at: datetime | None = None
+    pending_sl_error: str | None = None
+
     real_error: str | None = None
     last_real_check_monotonic: float = 0.0
     real_exit_check: str | None = None
@@ -825,6 +837,16 @@ class Trade:
             "sl_algo_id": self.sl_algo_id,
             "tp_client_algo_id": self.tp_client_algo_id,
             "sl_client_algo_id": self.sl_client_algo_id,
+            "pending_sl_algo_id": self.pending_sl_algo_id,
+            "pending_sl_client_algo_id": self.pending_sl_client_algo_id,
+            "pending_sl_price": decimal_to_str(self.pending_sl_price),
+            "pending_sl_state": self.pending_sl_state,
+            "pending_sl_created_at": (
+                iso_utc(self.pending_sl_created_at)
+                if self.pending_sl_created_at
+                else None
+            ),
+            "pending_sl_error": self.pending_sl_error,
             "real_error": self.real_error,
             "real_exit_check": self.real_exit_check,
         }
@@ -2573,6 +2595,10 @@ class TradingEngine:
         self._trail_busy: set[str] = set()
         self._trail_next_check: dict[str, float] = {}
         self._deferred_trail: dict[str, tuple[Decimal, str, str, Decimal]] = {}
+        # Serialize the two-phase SL transition separately from the trailing
+        # calculator. Recovery/reconcile may run even when no price tick is
+        # currently processing the trade.
+        self._sl_transition_busy: set[str] = set()
         self._close_batch_in_progress = False
 
         self.banned_pairs: dict[str, dict[str, Any]] = {}
@@ -3649,6 +3675,366 @@ class TradingEngine:
             log.exception("Gagal mencatat event FILLED REAL %s", trade.trade_id)
         return True
 
+    def _clear_pending_sl(self, trade: Trade) -> None:
+        trade.pending_sl_algo_id = None
+        trade.pending_sl_client_algo_id = None
+        trade.pending_sl_price = None
+        trade.pending_sl_state = "NONE"
+        trade.pending_sl_created_at = None
+        trade.pending_sl_error = None
+
+    @staticmethod
+    def _is_open_algo_status(status: str) -> bool:
+        return status.upper() in {"NEW", "PENDING", "WORKING", "ACCEPTED"}
+
+    def _find_owned_sl_orders(
+        self,
+        trade: Trade,
+        open_algos: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        prefix = f"SL-{trade.trade_id}"
+        tracked = {
+            str(value)
+            for value in (
+                trade.sl_algo_id,
+                trade.sl_client_algo_id,
+                trade.pending_sl_algo_id,
+                trade.pending_sl_client_algo_id,
+            )
+            if value not in (None, "")
+        }
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in open_algos:
+            client_id = str(item.get("clientAlgoId") or "")
+            algo_id = str(item.get("algoId") or "")
+            owned = (
+                client_id in tracked
+                or algo_id in tracked
+                or client_id == prefix
+                or client_id.startswith(prefix + "-")
+            )
+            if not owned:
+                continue
+            marker = algo_id or client_id
+            if marker and marker in seen:
+                continue
+            seen.add(marker)
+            result.append(item)
+        return result
+
+    def _find_specific_algo(
+        self,
+        open_algos: list[dict[str, Any]],
+        *,
+        algo_id: int | None = None,
+        client_algo_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        wanted_id = str(algo_id) if algo_id is not None else None
+        wanted_client = str(client_algo_id or "") or None
+        for item in open_algos:
+            if wanted_id is not None and str(item.get("algoId") or "") == wanted_id:
+                return item
+            if wanted_client and str(item.get("clientAlgoId") or "") == wanted_client:
+                return item
+        return None
+
+    async def _confirm_sl_algo_active(
+        self,
+        trade: Trade,
+        *,
+        algo_id: int | None,
+        client_algo_id: str | None,
+        expected_price: Decimal,
+        attempts: int = 3,
+    ) -> dict[str, Any] | None:
+        """Confirm a specific SL is actually present in Binance open-algo state."""
+        for attempt in range(max(1, attempts)):
+            open_algos = await self.real.get_open_algo_orders(trade.pair)
+            item = self._find_specific_algo(
+                open_algos,
+                algo_id=algo_id,
+                client_algo_id=client_algo_id,
+            )
+            if item is not None:
+                status = str(item.get("algoStatus") or "NEW").upper()
+                raw_trigger = item.get("triggerPrice")
+                try:
+                    trigger = Decimal(str(raw_trigger)) if raw_trigger not in (None, "") else None
+                except InvalidOperation:
+                    trigger = None
+                if self._is_open_algo_status(status) and trigger is not None and trigger == expected_price:
+                    return item
+            if attempt + 1 < max(1, attempts):
+                await asyncio.sleep(0.35)
+        return None
+
+    async def _cancel_specific_algo_confirmed(
+        self,
+        trade: Trade,
+        *,
+        algo_id: int | None,
+        client_algo_id: str | None,
+        attempts: int = 3,
+    ) -> bool:
+        if algo_id is None and not client_algo_id:
+            return True
+
+        last_exists: bool = True
+        for attempt in range(max(1, attempts)):
+            open_algos = await self.real.get_open_algo_orders(trade.pair)
+            item = self._find_specific_algo(
+                open_algos,
+                algo_id=algo_id,
+                client_algo_id=client_algo_id,
+            )
+            if item is None:
+                return True
+            last_exists = True
+            current_id = item.get("algoId")
+            current_client = str(item.get("clientAlgoId") or "") or None
+            try:
+                await self.real.cancel_algo_order(
+                    symbol=trade.pair,
+                    algo_id=(int(current_id) if current_id not in (None, "") else None),
+                    client_algo_id=(current_client if current_id in (None, "") else None),
+                )
+            except BinanceAPIError as exc:
+                if exc.code not in {-2011, -2013}:
+                    raise
+            if attempt + 1 < max(1, attempts):
+                await asyncio.sleep(0.35)
+        # One final read after the last cancel request.
+        open_algos = await self.real.get_open_algo_orders(trade.pair)
+        last_exists = (
+            self._find_specific_algo(
+                open_algos,
+                algo_id=algo_id,
+                client_algo_id=client_algo_id,
+            )
+            is not None
+        )
+        return not last_exists
+
+    async def _resume_sl_transition(self, trade: Trade) -> bool:
+        """Resume/finish an in-flight SL replacement without ever discarding the active SL prematurely."""
+        if not self.real_mode or not trade.real_enabled or trade.status != "FILLED":
+            return False
+        if trade.pending_sl_state == "NONE" or trade.pending_sl_price is None:
+            return False
+
+        position = await self.real.get_position(trade.pair, trade.direction)
+        if position is None:
+            return False
+
+        if trade.trade_id in self._sl_transition_busy:
+            return False
+        self._sl_transition_busy.add(trade.trade_id)
+        try:
+            target = trade.pending_sl_price
+            pending_id = trade.pending_sl_algo_id
+            pending_client = trade.pending_sl_client_algo_id
+            old_id = trade.sl_algo_id
+            old_client = trade.sl_client_algo_id
+
+            # First recover a possibly-created candidate by clientAlgoId. This
+            # prevents duplicate placement when the POST response was lost.
+            if pending_id is None and pending_client:
+                open_algos = await self.real.get_open_algo_orders(trade.pair)
+                recovered = self._find_specific_algo(
+                    open_algos,
+                    client_algo_id=pending_client,
+                )
+                if recovered is not None:
+                    raw_recovered_id = recovered.get("algoId")
+                    try:
+                        trade.pending_sl_algo_id = int(raw_recovered_id) if raw_recovered_id not in (None, "") else None
+                    except (TypeError, ValueError):
+                        trade.pending_sl_algo_id = None
+                    pending_id = trade.pending_sl_algo_id
+
+            # If the candidate still was not created, create it now.
+            if pending_id is None:
+                pending_client = (
+                    pending_client
+                    or f"{self._client_id('SL', trade.trade_id)[:29]}-{uuid4().hex[:6]}"
+                )
+                trade.pending_sl_client_algo_id = pending_client
+                trade.pending_sl_created_at = trade.pending_sl_created_at or now_utc()
+                trade.pending_sl_state = "PLACING"
+                trade.pending_sl_error = None
+                try:
+                    order = await self.real.place_close_algo(
+                        symbol=trade.pair,
+                        side=("SELL" if trade.direction == "BUY" else "BUY"),
+                        position_side=str(position.get("positionSide") or self._position_side_for_direction(trade.direction)),
+                        order_type="STOP_MARKET",
+                        trigger_price=target,
+                        client_algo_id=pending_client,
+                    )
+                except Exception as exc:
+                    trade.pending_sl_state = (
+                        "RATE_LIMIT_WAIT" if isinstance(exc, BinanceRateLimitError) else "PLACE_FAILED"
+                    )
+                    trade.pending_sl_error = str(exc)[:500]
+                    if isinstance(exc, BinanceRateLimitError):
+                        self._notify_rate_limit(exc, "PLACE TRAILING SL")
+                        self._start_rate_limit_watcher()
+                    # IMPORTANT: active SL metadata and Binance order are untouched.
+                    return False
+                trade.pending_sl_client_algo_id = str(order.get("clientAlgoId") or pending_client)
+                raw_algo_id = order.get("algoId")
+                try:
+                    trade.pending_sl_algo_id = int(raw_algo_id) if raw_algo_id not in (None, "") else None
+                except (TypeError, ValueError):
+                    trade.pending_sl_algo_id = None
+                pending_id = trade.pending_sl_algo_id
+                pending_client = trade.pending_sl_client_algo_id
+
+            # Resolve the old SL early when its exact metadata is missing.
+            # This lets us distinguish "new not yet visible, old still safe"
+            # from the rare case where neither protection exists.
+            open_algos = await self.real.get_open_algo_orders(trade.pair)
+            if old_id is None and not old_client:
+                owned = self._find_owned_sl_orders(trade, open_algos)
+                other_sl = [
+                    item
+                    for item in owned
+                    if not self._find_specific_algo(
+                        [item],
+                        algo_id=pending_id,
+                        client_algo_id=pending_client,
+                    )
+                ]
+                if len(other_sl) == 1:
+                    old_item = other_sl[0]
+                    try:
+                        old_id = int(old_item.get("algoId")) if old_item.get("algoId") not in (None, "") else None
+                    except (TypeError, ValueError):
+                        old_id = None
+                    old_client = str(old_item.get("clientAlgoId") or "") or None
+
+            trade.pending_sl_state = "CONFIRMING_NEW"
+            confirmed_new = await self._confirm_sl_algo_active(
+                trade,
+                algo_id=pending_id,
+                client_algo_id=pending_client,
+                expected_price=target,
+            )
+            if confirmed_new is None:
+                trade.pending_sl_state = "NEW_UNCONFIRMED"
+                trade.pending_sl_error = "SL baru belum dapat dikonfirmasi sebagai open algo order di Binance."
+                # Critical invariant: if old SL is still visible, keep it and
+                # retry. If old SL is also gone while the position remains open,
+                # there is no longer a safe protection layer; close immediately.
+                latest_open_algos = await self.real.get_open_algo_orders(trade.pair)
+                old_still_open = self._find_specific_algo(
+                    latest_open_algos,
+                    algo_id=old_id,
+                    client_algo_id=old_client,
+                )
+                if old_still_open is None:
+                    position_after = await self.real.get_position(trade.pair, trade.direction)
+                    if position_after is not None:
+                        trade.pending_sl_state = "NO_PROTECTION"
+                        trade.pending_sl_error = "SL lama dan SL baru tidak sama-sama terkonfirmasi sementara posisi masih terbuka."
+                        await self._emergency_close(
+                            trade,
+                            f"Tidak ada SL terkonfirmasi untuk {trade.pair} saat replacement trailing.",
+                        )
+                # Never cancel the old SL when it is still present.
+                return False
+
+            trade.pending_sl_state = "NEW_CONFIRMED"
+            trade.pending_sl_error = None
+
+            # There is no old SL to remove only when metadata is absent and
+            # Binance also reports no other bot-owned SL besides the new one.
+            open_algos = await self.real.get_open_algo_orders(trade.pair)
+            old_item = self._find_specific_algo(
+                open_algos,
+                algo_id=old_id,
+                client_algo_id=old_client,
+            )
+            if old_item is None and (old_id is not None or old_client):
+                # Metadata says an old SL exists, yet it is no longer open.
+                # Safe to promote the already-confirmed candidate.
+                old_id = None
+                old_client = None
+
+            if old_id is None and not old_client:
+                owned = self._find_owned_sl_orders(trade, open_algos)
+                other_sl = [
+                    item
+                    for item in owned
+                    if not self._find_specific_algo(
+                        [item],
+                        algo_id=pending_id,
+                        client_algo_id=pending_client,
+                    )
+                ]
+                if len(other_sl) == 1:
+                    old_item = other_sl[0]
+                    try:
+                        old_id = int(old_item.get("algoId")) if old_item.get("algoId") not in (None, "") else None
+                    except (TypeError, ValueError):
+                        old_id = None
+                    old_client = str(old_item.get("clientAlgoId") or "") or None
+                elif len(other_sl) > 1:
+                    trade.pending_sl_state = "AMBIGUOUS_OLD_SL"
+                    trade.pending_sl_error = "Lebih dari satu SL lama terdeteksi; bot tidak akan menghapus order secara membabi buta."
+                    return False
+
+            if old_id is not None or old_client:
+                trade.pending_sl_state = "CANCELING_OLD"
+                old_canceled = await self._cancel_specific_algo_confirmed(
+                    trade,
+                    algo_id=old_id,
+                    client_algo_id=old_client,
+                )
+                if not old_canceled:
+                    trade.pending_sl_state = "WAITING_OLD_CANCEL"
+                    trade.pending_sl_error = "SL baru sudah confirmed, namun SL lama belum berhasil dihapus."
+                    # Both protections may temporarily coexist; retry later.
+                    return False
+
+            # Final invariant: NEW is still open and OLD is gone.
+            trade.pending_sl_state = "FINAL_CONFIRM"
+            final_new = await self._confirm_sl_algo_active(
+                trade,
+                algo_id=pending_id,
+                client_algo_id=pending_client,
+                expected_price=target,
+                attempts=2,
+            )
+            open_algos = await self.real.get_open_algo_orders(trade.pair)
+            final_old = self._find_specific_algo(
+                open_algos,
+                algo_id=old_id,
+                client_algo_id=old_client,
+            )
+            if final_new is None:
+                position_after = await self.real.get_position(trade.pair, trade.direction)
+                if position_after is not None:
+                    raise RuntimeError(
+                        f"SL baru {decimal_to_str(target)} hilang setelah SL lama dihapus sementara posisi masih terbuka."
+                    )
+                return False
+            if final_old is not None:
+                trade.pending_sl_state = "WAITING_OLD_CANCEL"
+                trade.pending_sl_error = "Verifikasi akhir masih menemukan SL lama di Binance."
+                return False
+
+            # COMMIT POINT. Only here does pending become active local state.
+            trade.sl = target
+            trade.sl_algo_id = pending_id
+            trade.sl_client_algo_id = pending_client
+            self._clear_pending_sl(trade)
+            trade.real_error = None
+            return True
+        finally:
+            self._sl_transition_busy.discard(trade.trade_id)
+
     async def _ensure_real_protective_orders(self, trade: Trade) -> None:
         if not self.real_mode or not trade.real_enabled:
             return
@@ -3657,7 +4043,15 @@ class TradingEngine:
         if position is None:
             return
 
-        position_side = str(position.get("positionSide") or self._position_side_for_direction(trade.direction))
+        # Complete any interrupted two-phase SL transition first. If it cannot
+        # be completed, the existing active SL remains the protection of record.
+        if trade.pending_sl_state != "NONE" and trade.pending_sl_price is not None:
+            await self._resume_sl_transition(trade)
+
+        position_side = str(
+            position.get("positionSide")
+            or self._position_side_for_direction(trade.direction)
+        )
         exit_side = "SELL" if trade.direction == "BUY" else "BUY"
 
         open_algos = await self.real.get_open_algo_orders(trade.pair)
@@ -3683,28 +4077,48 @@ class TradingEngine:
                     return item
             return None
 
-        existing_sl = find_existing("SL", trade.sl_algo_id, trade.sl_client_algo_id)
-        if existing_sl is not None:
-            trade.sl_client_algo_id = str(existing_sl.get("clientAlgoId") or trade.sl_client_algo_id or "") or None
-            try:
-                trade.sl_algo_id = int(existing_sl.get("algoId"))
-            except (TypeError, ValueError):
-                trade.sl_algo_id = trade.sl_algo_id
+        # If a replacement is still pending, do not create another SL while
+        # the old one is still the active local protection.
+        if trade.pending_sl_state != "NONE":
+            existing_sl = find_existing("SL", trade.sl_algo_id, trade.sl_client_algo_id)
+            if existing_sl is None and trade.pending_sl_algo_id is None and trade.pending_sl_client_algo_id:
+                # _resume_sl_transition may have failed before POST; leave the
+                # pending state intact so periodic reconcile can retry.
+                pass
         else:
-            sl_client = trade.sl_client_algo_id or self._client_id("SL", trade.trade_id)
-            sl_order = await self.real.place_close_algo(
-                symbol=trade.pair,
-                side=exit_side,
-                position_side=position_side,
-                order_type="STOP_MARKET",
-                trigger_price=trade.sl,
-                client_algo_id=sl_client,
-            )
-            trade.sl_client_algo_id = str(sl_order.get("clientAlgoId") or sl_client)
-            try:
-                trade.sl_algo_id = int(sl_order.get("algoId"))
-            except (TypeError, ValueError):
-                trade.sl_algo_id = None
+            existing_sl = find_existing("SL", trade.sl_algo_id, trade.sl_client_algo_id)
+            if existing_sl is not None:
+                trade.sl_client_algo_id = str(existing_sl.get("clientAlgoId") or trade.sl_client_algo_id or "") or None
+                try:
+                    trade.sl_algo_id = int(existing_sl.get("algoId"))
+                except (TypeError, ValueError):
+                    pass
+            else:
+                sl_client = trade.sl_client_algo_id or self._client_id("SL", trade.trade_id)
+                sl_order = await self.real.place_close_algo(
+                    symbol=trade.pair,
+                    side=exit_side,
+                    position_side=position_side,
+                    order_type="STOP_MARKET",
+                    trigger_price=trade.sl,
+                    client_algo_id=sl_client,
+                )
+                trade.sl_client_algo_id = str(sl_order.get("clientAlgoId") or sl_client)
+                try:
+                    trade.sl_algo_id = int(sl_order.get("algoId"))
+                except (TypeError, ValueError):
+                    trade.sl_algo_id = None
+                confirmed = await self._confirm_sl_algo_active(
+                    trade,
+                    algo_id=trade.sl_algo_id,
+                    client_algo_id=trade.sl_client_algo_id,
+                    expected_price=trade.sl,
+                    attempts=3,
+                )
+                if confirmed is None:
+                    raise RuntimeError(
+                        f"SL awal {decimal_to_str(trade.sl)} berhasil dikirim namun belum confirmed aktif."
+                    )
 
         existing_tp = find_existing("TP", trade.tp_algo_id, trade.tp_client_algo_id)
         if existing_tp is not None:
@@ -3712,7 +4126,7 @@ class TradingEngine:
             try:
                 trade.tp_algo_id = int(existing_tp.get("algoId"))
             except (TypeError, ValueError):
-                trade.tp_algo_id = trade.tp_algo_id
+                pass
         else:
             tp_client = trade.tp_client_algo_id or self._client_id("TP", trade.trade_id)
             tp_order = await self.real.place_close_algo(
@@ -3830,7 +4244,7 @@ class TradingEngine:
         trade.real_error = None
 
     async def _cancel_bot_algo_orders(self, trade: Trade, only: str | None = None) -> None:
-        """Cancel algo TP/SL milik trade ini (only="SL"/"TP" untuk salah satu)."""
+        """Cancel tracked bot algo orders. SL replacement uses specific IDs separately."""
         open_algos = await self.real.get_open_algo_orders(trade.pair)
         kinds = ("TP", "SL") if only is None else (only,)
         ids = {"TP": trade.tp_algo_id, "SL": trade.sl_algo_id}
@@ -4183,17 +4597,55 @@ class TradingEngine:
 
         trade.real_state = "REAL_CLOSED"
 
-    async def _replace_real_sl(self, trade: Trade, new_sl: Decimal) -> None:
-        """Ganti SL real. Algo tidak bisa di-amend dan dua SL closePosition sejalur ditolak
-        Binance (-4130): hapus SL lama, lalu pasang baru (retry, antre saat limit, close paksa)."""
+    async def _replace_real_sl(self, trade: Trade, new_sl: Decimal) -> bool:
+        """Two-phase SL replacement: PLACE NEW -> CONFIRM NEW -> CANCEL OLD -> VERIFY BOTH.
+
+        The active SL metadata is never mutated until the complete transaction
+        succeeds. Any exception before NEW is confirmed leaves the old SL alive.
+        """
         if not self.real_mode or not trade.real_enabled or trade.status != "FILLED":
-            return
-        # Gagal hapus -> SL lama tetap utuh dan trade.sl tidak berubah.
-        await self._cancel_bot_algo_orders(trade, only="SL")
-        trade.sl = new_sl
-        trade.sl_algo_id = None
-        trade.sl_client_algo_id = f"{self._client_id('SL', trade.trade_id)[:29]}-{uuid4().hex[:6]}"
-        await self._protect_or_close(trade)
+            return False
+
+        if trade.pending_sl_state != "NONE" and trade.pending_sl_price is not None:
+            # Resume the existing transition rather than creating a second candidate.
+            if trade.pending_sl_price != new_sl:
+                buy = trade.direction == "BUY"
+                better = new_sl > trade.pending_sl_price if buy else new_sl < trade.pending_sl_price
+                if better:
+                    trade.pending_sl_price = new_sl
+                    trade.pending_sl_error = None
+                else:
+                    new_sl = trade.pending_sl_price
+            return await self._resume_sl_transition(trade)
+
+        trade.pending_sl_algo_id = None
+        trade.pending_sl_client_algo_id = None
+        trade.pending_sl_price = new_sl
+        trade.pending_sl_state = "PLACING"
+        trade.pending_sl_created_at = now_utc()
+        trade.pending_sl_error = None
+
+        try:
+            return await self._resume_sl_transition(trade)
+        except BinanceRateLimitError as exc:
+            # Old SL is untouched. Leave pending state for periodic reconcile.
+            trade.pending_sl_state = "RATE_LIMIT_WAIT"
+            trade.pending_sl_error = str(exc)[:500]
+            self._notify_rate_limit(exc, "REPLACE TRAIL SL")
+            return False
+        except Exception as exc:
+            # The transition may have reached a later state; never clear pending
+            # metadata here. Reconcile can safely resume it.
+            trade.pending_sl_error = str(exc)[:500]
+            if trade.pending_sl_state == "NONE":
+                trade.pending_sl_state = "ERROR"
+            log.warning(
+                "[TRAIL] transactional SL replacement %s gagal pada state=%s: %s",
+                trade.trade_id,
+                trade.pending_sl_state,
+                exc,
+            )
+            return False
 
     def _trail_params(self) -> tuple[list[tuple[float, float]], Decimal]:
         """Tangga R dan buffer fee: strategy.py (otak) lebih utama, main.py sebagai cadangan."""
@@ -4404,8 +4856,8 @@ class TradingEngine:
             )
             return
         old_sl = trade.sl
-        await self._replace_real_sl(trade, new_sl)
-        if trade.status != "FILLED":
+        replaced = await self._replace_real_sl(trade, new_sl)
+        if not replaced or trade.status != "FILLED":
             return
         ref_price = price if price is not None else new_sl
         metrics = self._trail_metrics(trade, ref_price)
@@ -4419,6 +4871,11 @@ class TradingEngine:
 
     async def _auto_trail(self, trade: Trade, price: Decimal) -> None:
         if not AUTO_TRAIL_ENABLED or trade.status != "FILLED" or trade.trade_id in self._trail_busy:
+            return
+        if trade.pending_sl_state != "NONE":
+            # A replacement is already in flight/recovery. Never start a third SL
+            # or hammer Binance on every WebSocket price tick. The periodic
+            # protection reconcile resumes the transaction.
             return
         real = trade.real_enabled and self.real_mode
         if real and self.real.cooldown_remaining > 0:
@@ -4440,7 +4897,9 @@ class TradingEngine:
         self._trail_busy.add(trade.trade_id)
         try:
             if real:
-                await self._replace_real_sl(trade, new_sl)
+                replaced = await self._replace_real_sl(trade, new_sl)
+                if not replaced:
+                    return
             else:
                 trade.sl = new_sl
         except BinanceRateLimitError as exc:
@@ -4524,23 +4983,52 @@ class TradingEngine:
         if trade.status == "FILLED":
             position = await self.real.get_position(trade.pair, trade.direction)
             if position is not None:
+                if trade.pending_sl_state != "NONE" and trade.pending_sl_price is not None:
+                    await self._resume_sl_transition(trade)
                 await self._ensure_real_protective_orders(trade)
                 trade.real_state = "REAL_FILLED"
                 trade.real_error = None
                 return
 
-            # Position zero. Determine whether one of the bot's tracked algos
-            # is already triggered. If so, finalize through the normal close
-            # pipeline so the setup is removed from /trade, history is written
-            # once, and WebSocket symbol cleanup still happens.
-            for result, algo_id, fallback_price in (
-                ("TP", trade.tp_algo_id, trade.tp),
-                ("SL", trade.sl_algo_id, trade.sl),
-            ):
-                if algo_id is None:
+            # Position zero. Check a pending replacement first: it may have
+            # triggered after the new SL was confirmed and before the old SL
+            # cleanup/promotion completed.
+            tracked_exit_algos: list[tuple[str, int | None, str | None, Decimal]] = []
+            if trade.pending_sl_algo_id is not None or trade.pending_sl_client_algo_id:
+                tracked_exit_algos.append(
+                    (
+                        "SL",
+                        trade.pending_sl_algo_id,
+                        trade.pending_sl_client_algo_id,
+                        trade.pending_sl_price or trade.sl,
+                    )
+                )
+            tracked_exit_algos.extend(
+                [
+                    ("TP", trade.tp_algo_id, trade.tp_client_algo_id, trade.tp),
+                    ("SL", trade.sl_algo_id, trade.sl_client_algo_id, trade.sl),
+                ]
+            )
+
+            seen_exit_keys: set[tuple[str, int | None, str | None]] = set()
+            for result, algo_id, client_algo_id, fallback_price in tracked_exit_algos:
+                key = (result, algo_id, client_algo_id)
+                if key in seen_exit_keys:
+                    continue
+                seen_exit_keys.add(key)
+                if algo_id is None and not client_algo_id:
                     continue
                 try:
-                    algo = await self.real.get_algo_order(algo_id=algo_id)
+                    if algo_id is not None:
+                        algo = await self.real.get_algo_order(algo_id=algo_id)
+                    else:
+                        open_algos = await self.real.get_open_algo_orders(trade.pair)
+                        algo = self._find_specific_algo(
+                            open_algos,
+                            client_algo_id=client_algo_id,
+                        )
+                        if algo is None:
+                            continue
                 except BinanceAPIError as exc:
                     if exc.code == -2013:
                         continue
@@ -4557,6 +5045,11 @@ class TradingEngine:
                     trade.real_state = "REAL_CLOSED"
                     trade.real_error = None
                     trade.real_exit_check = result
+                    if result == "SL" and (
+                        algo_id == trade.pending_sl_algo_id
+                        or (client_algo_id and client_algo_id == trade.pending_sl_client_algo_id)
+                    ):
+                        self._clear_pending_sl(trade)
                     await self._finalize_trade(
                         trade,
                         result=result,
@@ -4815,6 +5308,12 @@ class TradingEngine:
             sl_algo_id=(int(record.get("sl_algo_id")) if str(record.get("sl_algo_id") or "").isdigit() else None),
             tp_client_algo_id=(str(record.get("tp_client_algo_id")) if record.get("tp_client_algo_id") not in (None, "") else None),
             sl_client_algo_id=(str(record.get("sl_client_algo_id")) if record.get("sl_client_algo_id") not in (None, "") else None),
+            pending_sl_algo_id=(int(record.get("pending_sl_algo_id")) if str(record.get("pending_sl_algo_id") or "").isdigit() else None),
+            pending_sl_client_algo_id=(str(record.get("pending_sl_client_algo_id")) if record.get("pending_sl_client_algo_id") not in (None, "") else None),
+            pending_sl_price=(parse_decimal(str(record.get("pending_sl_price"))) if record.get("pending_sl_price") not in (None, "") else None),
+            pending_sl_state=str(record.get("pending_sl_state") or "NONE"),
+            pending_sl_created_at=parse_iso(record.get("pending_sl_created_at")),
+            pending_sl_error=(str(record.get("pending_sl_error")) if record.get("pending_sl_error") not in (None, "") else None),
             real_error=(str(record.get("real_error")) if record.get("real_error") not in (None, "") else None),
             real_exit_check=(str(record.get("real_exit_check")) if record.get("real_exit_check") not in (None, "") else None),
         )
@@ -8377,9 +8876,14 @@ class TradingEngine:
         }
 
         if trade.real_enabled and trade.status == "FILLED":
-            await self._replace_real_sl(trade, new_sl)
+            replaced = await self._replace_real_sl(trade, new_sl)
+            if not replaced:
+                raise RuntimeError(
+                    "SL baru belum berhasil dikonfirmasi. SL lama tetap dipertahankan; trailing belum di-commit."
+                )
+        else:
+            trade.sl = new_sl
 
-        trade.sl = new_sl
         trade.trailing = True
         trade.trail_history.append(
             trail_item
