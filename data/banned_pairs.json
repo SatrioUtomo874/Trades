@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T10:30:26.150685+00:00",
+  "saved_at": "2026-10-05T10:30:30.446176+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -483,6 +483,13 @@
       "banned_at": "2026-10-05T10:24:25.662420+00:00",
       "until": "2026-10-06T10:24:25.662397+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ZAMAUSDT",
+      "banned_at": "2026-10-05T10:30:30.446139+00:00",
+      "until": "2026-10-06T10:30:30.446108+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
