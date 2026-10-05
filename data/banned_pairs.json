@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T19:23:19.240700+00:00",
+  "saved_at": "2026-10-05T19:23:22.131879+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -183,6 +183,13 @@
       "until": "2026-10-06T03:10:26.654558+00:00",
       "reason": "Confidence 34.23 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "AVAXUSDT",
+      "banned_at": "2026-10-05T19:23:22.131809+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 10.894, di luar target 5.5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "AVNTUSDT",
