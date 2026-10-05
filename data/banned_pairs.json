@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T12:42:05.766641+00:00",
+  "saved_at": "2026-10-05T12:42:09.849365+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -559,6 +559,13 @@
       "pair": "PONSUSDT",
       "banned_at": "2026-10-05T10:26:06.547214+00:00",
       "until": "2026-10-06T10:26:06.547188+00:00",
+      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "PORTALUSDT",
+      "banned_at": "2026-10-05T12:42:09.849299+00:00",
+      "until": "2026-10-06T12:42:09.849268+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
