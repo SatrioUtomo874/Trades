@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T16:07:55.445060+00:00",
+  "saved_at": "2026-10-05T16:08:01.154954+00:00",
   "bans": [
+    {
+      "pair": "1000BONKUSDT",
+      "banned_at": "2026-10-05T16:08:01.154922+00:00",
+      "until": "2026-10-06T00:08:01.154895+00:00",
+      "reason": "Confidence 66.78 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
     {
       "pair": "1000FLOKIUSDT",
       "banned_at": "2026-10-05T10:29:45.946557+00:00",
