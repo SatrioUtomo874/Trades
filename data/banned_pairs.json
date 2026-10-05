@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T12:42:46.059138+00:00",
+  "saved_at": "2026-10-05T12:42:50.366805+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -169,6 +169,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 7.8837, di luar target 5.5 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "BOMEUSDT",
+      "banned_at": "2026-10-05T12:42:50.366743+00:00",
+      "until": "2026-10-06T12:42:50.366714+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "BRUSDT",
