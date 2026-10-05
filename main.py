@@ -150,6 +150,13 @@ REAL_RECONCILE_INTERVAL_SECONDS = 2.0
 REAL_PENDING_POLL_SECONDS = 5.0
 REAL_PROTECT_CHECK_SECONDS = 60.0
 AUTOSTOP_CHECK_SECONDS = 30.0
+# Auto-trailing: saat profit >= trigger_R, SL pindah ke entry +/- lock_R x risiko awal.
+AUTO_TRAIL_ENABLED = os.getenv("AUTO_TRAIL", "1").strip().lower() not in {"0", "false", "off"}
+TRAIL_R_LADDER = [(1.0, 0.0), (1.5, 0.5), (2.0, 1.0), (3.0, 2.0)]
+TRAIL_FEE_BUFFER_PCT = Decimal("0.12")  # lantai kunci >= fee taker round-trip + slippage
+TRAIL_MIN_STEP_R = Decimal("0.10")
+TRAIL_MIN_GAP_R = Decimal("0.30")
+TRAIL_STRATEGY_INTERVAL_SECONDS = 90.0
 # Pemasangan TP/SL boleh jalan setelah jeda server selesai (tanpa jeda aman bot).
 REAL_PRIORITY: contextvars.ContextVar[bool] = contextvars.ContextVar("real_priority", default=False)
 # Setup scan berkorelasi tinggi (alt searah): batasi eksposur sekaligus.
@@ -2562,6 +2569,10 @@ class TradingEngine:
         # Antrian saat API dibatasi (bisa menumpuk): konfirmasi fill & TP/SL tertunda.
         self._deferred_fill: dict[str, float] = {}
         self._deferred_protect: dict[str, float] = {}
+        self._deferred_cleanup: dict[str, Trade] = {}
+        self._trail_busy: set[str] = set()
+        self._trail_next_check: dict[str, float] = {}
+        self._deferred_trail: dict[str, tuple[Decimal, str, str, Decimal]] = {}
         self._close_batch_in_progress = False
 
         self.banned_pairs: dict[str, dict[str, Any]] = {}
@@ -3818,23 +3829,15 @@ class TradingEngine:
         trade.real_state = "REAL_CLOSED"
         trade.real_error = None
 
-    async def _cancel_bot_algo_orders(self, trade: Trade) -> None:
-        """Cancel this bot trade's TP/SL algos without touching unrelated algos."""
+    async def _cancel_bot_algo_orders(self, trade: Trade, only: str | None = None) -> None:
+        """Cancel algo TP/SL milik trade ini (only="SL"/"TP" untuk salah satu)."""
         open_algos = await self.real.get_open_algo_orders(trade.pair)
-        tracked_ids = {
-            str(value)
-            for value in (trade.tp_algo_id, trade.sl_algo_id)
-            if value is not None
-        }
-        tracked_clients = {
-            str(value)
-            for value in (trade.tp_client_algo_id, trade.sl_client_algo_id)
-            if value
-        }
-        prefixes = (
-            f"TP-{trade.trade_id}",
-            f"SL-{trade.trade_id}",
-        )
+        kinds = ("TP", "SL") if only is None else (only,)
+        ids = {"TP": trade.tp_algo_id, "SL": trade.sl_algo_id}
+        clients = {"TP": trade.tp_client_algo_id, "SL": trade.sl_client_algo_id}
+        tracked_ids = {str(ids[k]) for k in kinds if ids[k] is not None}
+        tracked_clients = {str(clients[k]) for k in kinds if clients[k]}
+        prefixes = tuple(f"{k}-{trade.trade_id}" for k in kinds)
 
         for item in open_algos:
             algo_id = str(item.get("algoId") or "")
@@ -3842,9 +3845,7 @@ class TradingEngine:
             owned = (
                 algo_id in tracked_ids
                 or client_id in tracked_clients
-                or client_id.startswith(prefixes[0] + "-")
-                or client_id.startswith(prefixes[1] + "-")
-                or client_id in prefixes
+                or any(client_id == p or client_id.startswith(p + "-") for p in prefixes)
             )
             if not owned:
                 continue
@@ -3863,6 +3864,22 @@ class TradingEngine:
             except BinanceAPIError as exc:
                 if exc.code not in {-2011, -2013}:
                     raise
+
+    async def _cleanup_real_leftovers(self, trade: Trade) -> None:
+        """OCO manual: setelah salah satu TP/SL tercapai, hapus algo yang tersisa."""
+        if not self.real_mode:
+            return
+        if self.real.cooldown_remaining > 0:
+            self._deferred_cleanup[trade.trade_id] = trade
+            return
+        try:
+            await self._cancel_bot_algo_orders(trade)
+            self._deferred_cleanup.pop(trade.trade_id, None)
+        except BinanceRateLimitError as exc:
+            self._deferred_cleanup[trade.trade_id] = trade
+            self._notify_rate_limit(exc, "HAPUS ORDER SISA")
+        except Exception as exc:
+            log.warning("Hapus algo sisa %s gagal: %s", trade.trade_id, exc)
 
     def _real_poll_due(self, trade: Trade, kind: str, interval: float) -> bool:
         """Throttle polling REST Binance per trade agar tidak memicu ban."""
@@ -3901,7 +3918,9 @@ class TradingEngine:
         return False
 
     def _deferred_any(self) -> bool:
-        return bool(self._deferred_fill or self._deferred_protect)
+        return bool(
+            self._deferred_fill or self._deferred_protect or self._deferred_cleanup or self._deferred_trail
+        )
 
     def _defer_fill_check(self, trade: Trade, price: Decimal) -> None:
         """Harga menyentuh entry saat API dibatasi: antre konfirmasi fill + TP/SL."""
@@ -3929,6 +3948,8 @@ class TradingEngine:
         if not self.real_mode:
             self._deferred_fill.clear()
             self._deferred_protect.clear()
+            self._deferred_cleanup.clear()
+            self._deferred_trail.clear()
             return
         protected: list[str] = []
         for trade_id in list(dict.fromkeys([*self._deferred_protect, *self._deferred_fill])):
@@ -3955,6 +3976,44 @@ class TradingEngine:
                 log.warning("[RATE LIMIT] proteksi tertunda %s gagal: %s", trade_id, exc)
                 self._deferred_fill.pop(trade_id, None)
                 self._deferred_protect.pop(trade_id, None)
+            finally:
+                REAL_PRIORITY.reset(token)
+            await asyncio.sleep(0.3)
+        for trade_id, old_trade in list(self._deferred_cleanup.items()):
+            if self.real.server_cooldown_remaining > 0:
+                break
+            token = REAL_PRIORITY.set(True)
+            try:
+                await self._cancel_bot_algo_orders(old_trade)
+                self._deferred_cleanup.pop(trade_id, None)
+            except BinanceRateLimitError as exc:
+                self._notify_rate_limit(exc, "HAPUS ORDER SISA")
+                break
+            except Exception as exc:
+                log.warning("Hapus algo sisa %s gagal: %s", trade_id, exc)
+                self._deferred_cleanup.pop(trade_id, None)
+            finally:
+                REAL_PRIORITY.reset(token)
+            await asyncio.sleep(0.3)
+        for trade_id, item in list(self._deferred_trail.items()):
+            trade = self.active_trades.get(trade_id)
+            if trade is None or trade.status != "FILLED":
+                self._deferred_trail.pop(trade_id, None)
+                continue
+            if self.real.server_cooldown_remaining > 0:
+                break
+            snapshot = self.prices.get(trade.pair)
+            price = snapshot.price if snapshot is not None else None
+            token = REAL_PRIORITY.set(True)
+            try:
+                await self._apply_deferred_trail(trade, item, price)
+                self._deferred_trail.pop(trade_id, None)
+            except BinanceRateLimitError as exc:
+                self._notify_rate_limit(exc, "TRAILING TERTUNDA")
+                break
+            except Exception as exc:
+                log.warning("[TRAIL] trailing tertunda %s gagal: %s", trade_id, exc)
+                self._deferred_trail.pop(trade_id, None)
             finally:
                 REAL_PRIORITY.reset(token)
             await asyncio.sleep(0.3)
@@ -4026,12 +4085,15 @@ class TradingEngine:
             exit_price = snapshot.price if snapshot is not None else (trade.fill_price or trade.entry)
 
         pnl = pct_change(trade.direction, trade.fill_price or trade.entry, exit_price)
-        result = "TP" if pnl > 0 else "SL" if pnl < 0 else "MANUAL_CLOSE"
+        if trade.trailing and pnl >= 0:
+            result = "TRAIL"
+        else:
+            result = "TP" if pnl > 0 else "SL" if pnl < 0 else "MANUAL_CLOSE"
         trade.real_state = "REAL_CLOSED"
         if trade.trade_id not in self.active_trades:
             self.active_trades[trade.trade_id] = trade
         await self.reply(
-            f"🚨 EMERGENCY CLOSE {trade.pair}\n\n"
+            f"{'🔒 TRAILING TERTUNDA' if result == 'TRAIL' else '🚨 EMERGENCY CLOSE'} {trade.pair}\n\n"
             f"{reason}\n"
             f"Posisi ditutup market ({result}, PnL {format_pct(pnl)})."
         )
@@ -4070,8 +4132,6 @@ class TradingEngine:
             except BinanceAPIError as exc:
                 if exc.code not in {-2013}:
                     raise
-
-        await self._cancel_bot_algo_orders(trade)
 
         if trade.exit_price is None:
             trade.exit_price = price
@@ -4124,108 +4184,281 @@ class TradingEngine:
         trade.real_state = "REAL_CLOSED"
 
     async def _replace_real_sl(self, trade: Trade, new_sl: Decimal) -> None:
+        """Ganti SL real. Algo tidak bisa di-amend dan dua SL closePosition sejalur ditolak
+        Binance (-4130): hapus SL lama, lalu pasang baru (retry, antre saat limit, close paksa)."""
         if not self.real_mode or not trade.real_enabled or trade.status != "FILLED":
             return
+        # Gagal hapus -> SL lama tetap utuh dan trade.sl tidak berubah.
+        await self._cancel_bot_algo_orders(trade, only="SL")
+        trade.sl = new_sl
+        trade.sl_algo_id = None
+        trade.sl_client_algo_id = f"{self._client_id('SL', trade.trade_id)[:29]}-{uuid4().hex[:6]}"
+        await self._protect_or_close(trade)
 
-        position = await self.real.get_position(trade.pair, trade.direction)
-        if position is None:
-            raise BinanceAPIError(
-                f"Position Binance {trade.pair} tidak ditemukan saat /trail.",
-                endpoint="/fapi/v2/positionRisk",
+    def _trail_params(self) -> tuple[list[tuple[float, float]], Decimal]:
+        """Tangga R dan buffer fee: strategy.py (otak) lebih utama, main.py sebagai cadangan."""
+        module = getattr(self, "_strategy_runtime_module", None)
+        ladder = getattr(module, "TRAIL_R_LADDER", None) or TRAIL_R_LADDER
+        fee = getattr(module, "TRAIL_FEE_BUFFER_PCT", None)
+        return list(ladder), (Decimal(str(fee)) if fee is not None else TRAIL_FEE_BUFFER_PCT)
+
+    def _trail_initial_sl(self, trade: Trade) -> Decimal:
+        try:
+            if trade.trail_history:
+                return Decimal(str(trade.trail_history[0]["old_sl"]))
+        except (InvalidOperation, KeyError, TypeError):
+            pass
+        return trade.sl
+
+    def _trail_metrics(self, trade: Trade, price: Decimal) -> tuple[Decimal, Decimal, Decimal] | None:
+        fill = trade.fill_price or trade.entry
+        risk = abs(fill - self._trail_initial_sl(trade))
+        if risk <= 0:
+            return None
+        r_now = (price - fill) / risk if trade.direction == "BUY" else (fill - price) / risk
+        return fill, risk, r_now
+
+    def _trail_target(
+        self,
+        trade: Trade,
+        price: Decimal,
+        extra: tuple[Decimal, str, str] | None = None,
+    ) -> tuple[Decimal, Decimal, Decimal, str, str] | None:
+        """SL baru terbaik dari R-ladder + usulan strategy: (sl, r_now, lock_r, sumber, catatan)."""
+        metrics = self._trail_metrics(trade, price)
+        if metrics is None:
+            return None
+        fill, risk, r_now = metrics
+        buy = trade.direction == "BUY"
+        ladder, fee_pct = self._trail_params()
+        cands: list[tuple[Decimal, str, str]] = []
+        lock_r = None
+        for trigger, lock in ladder:
+            if r_now >= Decimal(str(trigger)):
+                lock_r = Decimal(str(lock))
+        if lock_r is not None:
+            gain = max(lock_r * risk, fill * fee_pct / Decimal("100"))
+            cands.append(
+                (
+                    fill + gain if buy else fill - gain,
+                    "R_LADDER",
+                    f"R-ladder: harga {fmt_num(r_now)}R, SL dikunci di {fmt_num(lock_r)}R.",
+                )
+            )
+        if extra is not None:
+            cands.append(extra)
+        if not cands:
+            return None
+        raw_sl, source, note = (max if buy else min)(cands, key=lambda item: item[0])
+        meta = self.symbols.get(trade.pair)
+        if meta is not None and meta.tick_size > 0:
+            tick = meta.tick_size
+            new_sl = (raw_sl / tick).to_integral_value(rounding=ROUND_DOWN if buy else ROUND_UP) * tick
+        else:
+            new_sl = raw_sl
+        improves = new_sl > trade.sl if buy else new_sl < trade.sl
+        if not improves or abs(new_sl - trade.sl) < risk * TRAIL_MIN_STEP_R:
+            return None
+        gap = (price - new_sl) if buy else (new_sl - price)
+        if gap < risk * TRAIL_MIN_GAP_R:
+            return None
+        lock_eff = (new_sl - fill) / risk if buy else (fill - new_sl) / risk
+        return new_sl, r_now, lock_eff, source, note
+
+    async def _strategy_trailing(self, trade: Trade, price: Decimal) -> tuple[Decimal, str, str] | None:
+        """Minta analyze_trailing di strategy.py (struktur M15 + RSI); dibatasi per trade."""
+        now = time.monotonic()
+        if now < self._trail_next_check.get(trade.trade_id, 0.0):
+            return None
+        self._trail_next_check[trade.trade_id] = now + TRAIL_STRATEGY_INTERVAL_SECONDS
+        try:
+            module = getattr(self, "_strategy_runtime_module", None) or await self._load_strategy_runtime()
+            meta = self.symbols.get(trade.pair)
+            payload = {
+                "pair": trade.pair,
+                "direction": trade.direction,
+                "fill_price": float(trade.fill_price or trade.entry),
+                "initial_sl": float(self._trail_initial_sl(trade)),
+                "sl": float(trade.sl),
+                "price": float(price),
+                "tick_size": float(meta.tick_size) if meta is not None else 0.0,
+                "filled_at_ms": int(trade.filled_at.timestamp() * 1000) if trade.filled_at else 0,
+            }
+            result = await self._call_strategy_function(
+                module, "analyze_trailing", payload, {"fetch_structure": True}
+            )
+        except Exception as exc:
+            log.info("[TRAIL] analisa strategy %s gagal: %s", trade.trade_id, exc)
+            return None
+        if not isinstance(result, dict) or result.get("new_sl") is None:
+            return None
+        try:
+            level = Decimal(str(result["new_sl"]))
+        except InvalidOperation:
+            return None
+        return level, str(result.get("source") or "STRATEGY"), str(result.get("reason") or "")
+
+    async def _commit_trail(
+        self,
+        trade: Trade,
+        old_sl: Decimal,
+        new_sl: Decimal,
+        price: Decimal,
+        r_now: Decimal,
+        lock_eff: Decimal,
+        source: str,
+        note: str,
+        real: bool,
+    ) -> None:
+        """Catat trailing yang sudah berhasil: riwayat, event, dan notifikasi."""
+        reason = f"Auto trail [{source}]: {note}"
+        trade.trailing = True
+        trade.trail_history.append(
+            {
+                "old_sl": decimal_to_str(old_sl),
+                "new_sl": decimal_to_str(new_sl),
+                "price": decimal_to_str(price),
+                "reason": reason,
+                "source": source,
+                "timestamp": iso_utc(),
+                "timestamp_wib": format_wib(now_utc()),
+            }
+        )
+        try:
+            await self._record_event(
+                trade,
+                "TRAIL",
+                event_price=price,
+                reason=reason,
+                extra={
+                    "old_sl": decimal_to_str(old_sl),
+                    "new_sl": decimal_to_str(new_sl),
+                    "auto": True,
+                    "source": source,
+                },
+            )
+        except Exception:
+            log.exception("Gagal mencatat event TRAIL %s", trade.trade_id)
+        locked = pct_change(trade.direction, trade.fill_price or trade.entry, new_sl)
+        rows = [
+            f"{'🟢' if trade.direction == 'BUY' else '🔴'} {trade.pair}  •  {trade.direction}",
+            f"📡 Harga {fmt_price(price)}  (+{fmt_num(r_now)}R)",
+            f"🛡 SL {fmt_price(old_sl)} → {fmt_price(new_sl)}",
+            f"🔐 Terkunci {format_pct(locked)}  ({fmt_num(lock_eff)}R)",
+            f"🧭 {source}: {note}"[:220],
+            f"⚙️ Mode {'REAL' if real else 'SIMULASI'}",
+        ]
+        if trade.trade_id in self._deferred_protect:
+            rows.append("⏳ SL baru dipasang otomatis begitu API pulih")
+        await self.reply(card("🔒 TRAILING OTOMATIS", rows))
+
+    def _queue_trail(self, trade: Trade, new_sl: Decimal, source: str, note: str, r_now: Decimal) -> None:
+        """Antre trailing saat API dibatasi; per trade disimpan target paling melindungi (puncak)."""
+        buy = trade.direction == "BUY"
+        prev = self._deferred_trail.get(trade.trade_id)
+        if prev is not None and (prev[0] >= new_sl if buy else prev[0] <= new_sl):
+            return
+        self._deferred_trail[trade.trade_id] = (new_sl, source, note, r_now)
+        self._start_rate_limit_watcher()
+        if prev is None:
+            self._fire(
+                self.reply(
+                    card(
+                        "⏸ TRAILING DITUNDA",
+                        [
+                            f"{'🟢' if trade.direction == 'BUY' else '🔴'} {trade.pair}  •  {trade.direction}",
+                            f"🛡 Target SL {fmt_price(new_sl)}  (+{fmt_num(r_now)}R)",
+                            "⏳ Binance API limit; target mengikuti puncak harga",
+                            "▶️ Dijalankan otomatis begitu API pulih",
+                        ],
+                    )
+                )
             )
 
-        position_side = str(position.get("positionSide") or self._position_side_for_direction(trade.direction))
-        exit_side = "SELL" if trade.direction == "BUY" else "BUY"
-        new_client = f"{self._client_id('SL', trade.trade_id)[:29]}-{uuid4().hex[:6]}"
+    def _defer_trail(self, trade: Trade, price: Decimal) -> None:
+        if not AUTO_TRAIL_ENABLED or trade.status != "FILLED":
+            return
+        target = self._trail_target(trade, price)
+        if target is None:
+            return
+        new_sl, r_now, _lock, source, note = target
+        self._queue_trail(trade, new_sl, source, note, r_now)
 
-        # Place new protection first, then remove old protection to avoid a gap.
-        new_order = await self.real.place_close_algo(
-            symbol=trade.pair,
-            side=exit_side,
-            position_side=position_side,
-            order_type="STOP_MARKET",
-            trigger_price=new_sl,
-            client_algo_id=new_client,
+    async def _apply_deferred_trail(
+        self,
+        trade: Trade,
+        item: tuple[Decimal, str, str, Decimal],
+        price: Decimal | None,
+    ) -> None:
+        new_sl, source, note, r_peak = item
+        buy = trade.direction == "BUY"
+        if (buy and new_sl <= trade.sl) or (not buy and new_sl >= trade.sl):
+            return
+        if price is not None and ((buy and price <= new_sl) or (not buy and price >= new_sl)):
+            # Harga sudah melewati SL trailing saat API dibatasi: setara SL ter-trigger.
+            trade.trailing = True
+            await self._emergency_close(
+                trade,
+                f"Trailing tertunda: harga {fmt_price(price)} sudah melewati "
+                f"SL trailing {fmt_price(new_sl)} [{source}].",
+            )
+            return
+        old_sl = trade.sl
+        await self._replace_real_sl(trade, new_sl)
+        if trade.status != "FILLED":
+            return
+        ref_price = price if price is not None else new_sl
+        metrics = self._trail_metrics(trade, ref_price)
+        lock_eff = Decimal("0")
+        if metrics is not None:
+            fill, risk, _r = metrics
+            lock_eff = (new_sl - fill) / risk if buy else (fill - new_sl) / risk
+        await self._commit_trail(
+            trade, old_sl, new_sl, ref_price, r_peak, lock_eff, source, f"(tertunda) {note}", True
         )
 
-        # Record the newly created protection immediately so an exception during
-        # old-order cancellation can never leave the new SL orphaned.
-        new_client_id = str(new_order.get("clientAlgoId") or new_client)
+    async def _auto_trail(self, trade: Trade, price: Decimal) -> None:
+        if not AUTO_TRAIL_ENABLED or trade.status != "FILLED" or trade.trade_id in self._trail_busy:
+            return
+        real = trade.real_enabled and self.real_mode
+        if real and self.real.cooldown_remaining > 0:
+            self._defer_trail(trade, price)
+            return
+        metrics = self._trail_metrics(trade, price)
+        if metrics is None:
+            return
+        extra = None
+        if metrics[2] >= Decimal("1.0"):
+            extra = await self._strategy_trailing(trade, price)
+        target = self._trail_target(trade, price, extra)
+        if target is None:
+            return
+        new_sl, r_now, lock_eff, source, note = target
+        if real and not self._real_poll_due(trade, "trail", 3.0):
+            return
+        old_sl = trade.sl
+        self._trail_busy.add(trade.trade_id)
         try:
-            new_algo_id = int(new_order.get("algoId"))
-        except (TypeError, ValueError):
-            new_algo_id = None
+            if real:
+                await self._replace_real_sl(trade, new_sl)
+            else:
+                trade.sl = new_sl
+        except BinanceRateLimitError as exc:
+            # SL lama masih utuh (hapus gagal); antre target agar tidak hilang saat harga berbalik.
+            self._queue_trail(trade, new_sl, source, note, r_now)
+            self._notify_rate_limit(exc, "AUTO TRAIL")
+            return
+        except Exception as exc:
+            # Backoff ~60 detik agar tidak mengulang tiap tick.
+            self._real_poll_guard[f"trail:{trade.trade_id}"] = time.monotonic() + 57.0
+            log.warning("[TRAIL] %s gagal memindah SL: %s", trade.trade_id, exc)
+            return
+        finally:
+            self._trail_busy.discard(trade.trade_id)
 
-        old_id = trade.sl_algo_id
-
-        if old_id is not None:
-            try:
-                await self.real.cancel_algo_order(
-                    symbol=trade.pair,
-                    algo_id=old_id,
-                )
-            except BinanceAPIError as exc:
-                if exc.code not in {-2011, -2013}:
-                    # First reconcile the old/new protection state. If the old
-                    # order is still open, rollback the new order so we do not
-                    # accidentally maintain two competing SLs.
-                    try:
-                        open_algos = await self.real.get_open_algo_orders(trade.pair)
-                    except Exception:
-                        # We keep the newly created protection tracked because
-                        # its existence is known, and surface the original error.
-                        trade.sl_client_algo_id = new_client_id
-                        trade.sl_algo_id = new_algo_id
-                        trade.real_error = (
-                            "Old SL cancellation failed and Binance open-algo "
-                            "reconciliation also failed."
-                        )
-                        raise
-
-                    old_still_open = any(
-                        str(item.get("algoId") or "") == str(old_id)
-                        for item in open_algos
-                    )
-                    new_is_open = any(
-                        (
-                            str(item.get("algoId") or "") == str(new_algo_id)
-                            if new_algo_id is not None
-                            else False
-                        )
-                        or str(item.get("clientAlgoId") or "") == new_client_id
-                        for item in open_algos
-                    )
-
-                    if old_still_open and new_is_open:
-                        try:
-                            await self.real.cancel_algo_order(
-                                symbol=trade.pair,
-                                algo_id=new_algo_id if new_algo_id is not None else None,
-                                client_algo_id=(
-                                    None if new_algo_id is not None else new_client_id
-                                ),
-                            )
-                        except Exception:
-                            trade.sl_client_algo_id = new_client_id
-                            trade.sl_algo_id = new_algo_id
-                            trade.real_error = (
-                                "Old dan new SL sama-sama terdeteksi aktif; "
-                                "rollback new SL gagal."
-                            )
-                            raise
-
-                        raise exc
-
-                    if not old_still_open and new_is_open:
-                        # Old order is already gone; the new order is the active protection.
-                        trade.sl_client_algo_id = new_client_id
-                        trade.sl_algo_id = new_algo_id
-                    else:
-                        raise exc
-
-        trade.sl_client_algo_id = new_client_id
-        trade.sl_algo_id = new_algo_id
-        trade.real_error = None
+        if trade.status != "FILLED":
+            return
+        await self._commit_trail(trade, old_sl, new_sl, price, r_now, lock_eff, source, note, real)
 
     async def _reconcile_real_trade(self, trade: Trade) -> None:
         if not self.real_mode or not trade.real_enabled:
@@ -4881,7 +5114,7 @@ class TradingEngine:
                 reason="Setup berakhir karena Price Exp tercapai sebelum entry.",
                 source="AUTO_PRICE_EXP",
             )
-        elif result in {"TP", "SL"}:
+        elif result in {"TP", "SL", "TRAIL"}:
             await self._ban_pair(
                 trade.pair,
                 hours=SCAN_BANNED_TP_SL_HOURS,
@@ -9538,6 +9771,17 @@ class TradingEngine:
             if current.result is not None:
                 return
 
+            # SL hasil trailing yang menutup di atas entry dihitung TRAIL (profit terkunci).
+            if (
+                result == "SL"
+                and current.trailing
+                and current.fill_price is not None
+                and exit_price is not None
+                and pct_change(current.direction, current.fill_price, exit_price) >= 0
+            ):
+                result = "TRAIL"
+                reason = f"SL trailing tercapai; profit terkunci. {reason}"
+
             current.status = "CLOSED"
             current.result = result
             current.closed_at = now_utc()
@@ -9571,6 +9815,9 @@ class TradingEngine:
         await self._write_history(
             trade
         )
+
+        if trade.real_enabled and result in {"TP", "SL", "TRAIL"}:
+            await self._cleanup_real_leftovers(trade)
 
         try:
             await self._auto_ban_for_result(trade, result)
@@ -9614,6 +9861,7 @@ class TradingEngine:
         title = {
             "TP": "✅ TP TERCAPAI",
             "SL": "🛑 SL TERCAPAI",
+            "TRAIL": "🔒 TRAILING SL TERCAPAI",
             "EXPIRED": "⏳ PRICE EXPIRED",
             "DELETED": "🗑️ DELETED",
             "MANUAL_CLOSE_PENDING": "🔒 PENDING DITUTUP",
@@ -9825,6 +10073,7 @@ class TradingEngine:
 
                     if trade.real_enabled and self.real_mode:
                         if self.real.cooldown_remaining > 0:
+                            self._defer_trail(trade, price)
                             continue
                         if sl_hit or tp_hit:
                             result_probe = "SL" if sl_hit else "TP"
@@ -9857,6 +10106,8 @@ class TradingEngine:
                             )
                             continue
 
+                    await self._auto_trail(trade, price)
+
             except BinanceRateLimitError as exc:
                 self._notify_rate_limit(exc, f"PRICE EVENT {symbol}")
             except Exception:
@@ -9885,7 +10136,13 @@ class TradingEngine:
         tp = sum(
             1
             for record in records
-            if record.get("result") == "TP"
+            if record.get("result") in {"TP", "TRAIL"}
+        )
+
+        trail_exit = sum(
+            1
+            for record in records
+            if record.get("result") == "TRAIL"
         )
 
         sl = sum(
@@ -10005,7 +10262,7 @@ class TradingEngine:
             confidence = read_decimal(record, "strategy_confidence")
             result = str(record.get("result") or "").upper()
             has_entry = (
-                result in {"TP", "SL"}
+                result in {"TP", "SL", "TRAIL"}
                 or record.get("filled_at") not in (None, "")
             )
 
@@ -10014,7 +10271,7 @@ class TradingEngine:
 
             if confidence is not None:
                 confidence_all.append(confidence)
-                if result == "TP":
+                if result in {"TP", "TRAIL"}:
                     confidence_tp.append(confidence)
                 elif result == "SL":
                     confidence_sl.append(confidence)
@@ -10030,7 +10287,7 @@ class TradingEngine:
 
                 holding = read_decimal(record, "holding_seconds")
                 if holding is not None:
-                    if result == "TP":
+                    if result in {"TP", "TRAIL"}:
                         holding_tp.append(holding)
                     elif result == "SL":
                         holding_sl.append(holding)
@@ -10078,6 +10335,7 @@ class TradingEngine:
             "total_filled": total_filled,
             "entered_records_count": entered_records_count,
             "tp": tp,
+            "trail_exit": trail_exit,
             "sl": sl,
             "tp_rate": tp_rate,
             "sl_rate": sl_rate,
@@ -10182,6 +10440,7 @@ class TradingEngine:
             f"Active Filled: {active_filled}\n\n"
             "OUTCOME\n"
             f"TP: {stats['tp']} ({format_pct(stats['tp_rate']).replace('+', '')} dari trade entry)\n"
+            f"  ↳ termasuk TRAIL (SL trailing, profit terkunci): {stats.get('trail_exit', 0)}\n"
             f"SL: {stats['sl']} ({format_pct(stats['sl_rate']).replace('+', '')} dari trade entry)\n"
             f"Win Rate: {format_pct(stats['win_rate']).replace('+', '')}\n"
             f"Expired: {stats['expired']} ({format_pct(stats['expired_rate_all']).replace('+', '')} dari seluruh history)\n"
