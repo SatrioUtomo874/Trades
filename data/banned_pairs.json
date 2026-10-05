@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-05T12:39:38.558710+00:00",
+  "saved_at": "2026-10-05T12:39:40.921441+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -400,6 +400,13 @@
       "until": "2026-10-05T18:27:14.659705+00:00",
       "reason": "Confidence 43.48 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "PAXGUSDT",
+      "banned_at": "2026-10-05T12:39:40.921400+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 8.33342, di luar target 5.5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "PENGUUSDT",
