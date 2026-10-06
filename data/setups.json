@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T12:31:04.050633+00:00",
-  "saved_at_wib": "06-10-2026, 19:31 WIB",
+  "saved_at": "2026-10-06T12:33:22.852904+00:00",
+  "saved_at_wib": "06-10-2026, 19:33 WIB",
   "count": 4,
   "setups": [
     {
@@ -13034,7 +13034,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "-0.2513227513227513227513227513",
+      "pnl_percent": "-0.05291005291005291005291005291",
       "max_favorable_pct": "0.8201058201058201058201058201",
       "max_adverse_pct": "-1.455026455026455026455026455",
       "planned_rr": "3.158620689655172413793103448",
@@ -26103,9 +26103,9 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "-1.134477033757609297177642501",
+      "pnl_percent": "-0.9684560044272274488101826231",
       "max_favorable_pct": "0.5810736026563364692861095739",
-      "max_adverse_pct": "-1.189817376867736579966795794",
+      "max_adverse_pct": "-1.245157719977863862755949087",
       "planned_rr": "3.84375",
       "pending_seconds": 4772.265232,
       "holding_seconds": null,
