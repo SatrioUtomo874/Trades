@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T00:02:48.049547+00:00",
+  "saved_at": "2026-10-06T00:02:53.958820+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -652,6 +652,13 @@
       "until": "2026-10-06T01:04:18.358636+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "KAIAUSDT",
+      "banned_at": "2026-10-06T00:02:53.958769+00:00",
+      "until": "2026-10-06T02:02:53.958743+00:00",
+      "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "KAITOUSDT",
