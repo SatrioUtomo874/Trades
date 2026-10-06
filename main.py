@@ -345,13 +345,22 @@ def parse_decimal(value: str) -> Decimal:
 
 
 def parse_signed_decimal(value: str) -> Decimal:
-    """Parse angka bertanda (positionAmt negatif untuk SHORT)."""
+    """Parse angka bertanda untuk field yang sah bernilai negatif/0/positif."""
+    text = str(value or "").strip().replace(",", ".")
     try:
-        number = Decimal(str(value).strip())
+        number = Decimal(text)
     except InvalidOperation as exc:
         raise ValueError("Angka bertanda tidak valid.") from exc
     if not number.is_finite():
         raise ValueError("Angka bertanda tidak valid.")
+    return number
+
+
+def parse_nonnegative_decimal(value: str) -> Decimal:
+    """Parse angka yang boleh 0 tetapi tidak boleh negatif."""
+    number = parse_signed_decimal(value)
+    if number < 0:
+        raise ValueError("Angka tidak boleh negatif.")
     return number
 
 
@@ -5368,16 +5377,30 @@ class TradingEngine:
         created_at = parse_iso(record.get("created_at")) or now_utc()
         filled_at = parse_iso(record.get("filled_at"))
 
-        fill_price = (
-            parse_decimal(str(record["fill_price"]))
-            if record.get("fill_price") not in (None, "")
-            else None
-        )
-        pnl_percent = (
-            parse_decimal(str(record["pnl_percent"]))
-            if record.get("pnl_percent") not in (None, "")
-            else None
-        )
+        def saved_number(
+            field: str,
+            parser: Any,
+            *,
+            required: bool = False,
+        ) -> Decimal | None:
+            raw = record.get(field)
+            if raw in (None, ""):
+                if required:
+                    raise ValueError(
+                        f"Setup {record.get('trade_id', '-')} field '{field}' kosong."
+                    )
+                return None
+            try:
+                return parser(str(raw))
+            except (ValueError, TypeError, InvalidOperation) as exc:
+                raise ValueError(
+                    f"Setup {record.get('trade_id', '-')} field '{field}' tidak valid: {exc}"
+                ) from exc
+
+        fill_price = saved_number("fill_price", parse_decimal)
+        pnl_percent = saved_number("pnl_percent", parse_signed_decimal)
+        max_favorable_pct = saved_number("max_favorable_pct", parse_signed_decimal)
+        max_adverse_pct = saved_number("max_adverse_pct", parse_signed_decimal)
 
         trail_history = record.get("trail_history")
         if not isinstance(trail_history, list):
@@ -5390,14 +5413,14 @@ class TradingEngine:
             session_id=self.session_id,
             pair=normalize_symbol(str(record["pair"])),
             direction=str(record["direction"]).upper().strip(),
-            price_now_reference=parse_decimal(str(record["price_now_reference"])),
-            entry=parse_decimal(str(record["entry"])),
+            price_now_reference=saved_number("price_now_reference", parse_decimal, required=True),
+            entry=saved_number("entry", parse_decimal, required=True),
             entry_reason=str(record.get("entry_reason") or ""),
-            price_exp=parse_decimal(str(record["price_exp"])),
+            price_exp=saved_number("price_exp", parse_decimal, required=True),
             price_exp_reason=str(record.get("price_exp_reason") or ""),
-            sl=parse_decimal(str(record["sl"])),
+            sl=saved_number("sl", parse_decimal, required=True),
             sl_reason=str(record.get("sl_reason") or ""),
-            tp=parse_decimal(str(record["tp"])),
+            tp=saved_number("tp", parse_decimal, required=True),
             tp_reason=str(record.get("tp_reason") or ""),
             status=status,
             trailing=bool(record.get("trailing", False)),
@@ -5409,14 +5432,14 @@ class TradingEngine:
             result=None,
             result_reason=None,
             pnl_percent=pnl_percent if status == "FILLED" else None,
+            max_favorable_pct=max_favorable_pct,
+            max_adverse_pct=max_adverse_pct,
             trail_history=copy.deepcopy(trail_history),
             strategy_name=str(record.get("strategy_name") or "MANUAL"),
             strategy_version=str(record.get("strategy_version") or "1.0"),
             strategy_source=str(record.get("strategy_source") or "MANUAL"),
             strategy_confidence=(
-                parse_decimal(str(record["strategy_confidence"]))
-                if record.get("strategy_confidence") not in (None, "")
-                else None
+                saved_number("strategy_confidence", parse_nonnegative_decimal)
             ),
             strategy_data_source=(
                 str(record.get("strategy_data_source"))
@@ -5429,14 +5452,14 @@ class TradingEngine:
                 else {}
             ),
             margin_usdt=(
-                parse_decimal(str(record.get("margin_usdt")))
+                saved_number("margin_usdt", parse_decimal)
                 if record.get("margin_usdt") not in (None, "")
                 else self.margin_usdt
             ),
             leverage=int(record.get("leverage") or self.leverage),
-            quantity=(parse_decimal(str(record.get("quantity"))) if record.get("quantity") not in (None, "") else None),
-            target_notional=(parse_decimal(str(record.get("target_notional"))) if record.get("target_notional") not in (None, "") else None),
-            actual_notional=(parse_decimal(str(record.get("actual_notional"))) if record.get("actual_notional") not in (None, "") else None),
+            quantity=saved_number("quantity", parse_decimal),
+            target_notional=saved_number("target_notional", parse_decimal),
+            actual_notional=saved_number("actual_notional", parse_decimal),
             real_enabled=bool(record.get("real_enabled", False)),
             real_state=str(record.get("real_state") or "SIMULATION"),
             position_side=(str(record.get("position_side")) if record.get("position_side") not in (None, "") else None),
@@ -5448,7 +5471,7 @@ class TradingEngine:
             sl_client_algo_id=(str(record.get("sl_client_algo_id")) if record.get("sl_client_algo_id") not in (None, "") else None),
             pending_sl_algo_id=(int(record.get("pending_sl_algo_id")) if str(record.get("pending_sl_algo_id") or "").isdigit() else None),
             pending_sl_client_algo_id=(str(record.get("pending_sl_client_algo_id")) if record.get("pending_sl_client_algo_id") not in (None, "") else None),
-            pending_sl_price=(parse_decimal(str(record.get("pending_sl_price"))) if record.get("pending_sl_price") not in (None, "") else None),
+            pending_sl_price=saved_number("pending_sl_price", parse_decimal),
             pending_sl_state=str(record.get("pending_sl_state") or "NONE"),
             pending_sl_created_at=parse_iso(record.get("pending_sl_created_at")),
             pending_sl_error=(str(record.get("pending_sl_error")) if record.get("pending_sl_error") not in (None, "") else None),
