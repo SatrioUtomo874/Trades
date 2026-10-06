@@ -1088,3 +1088,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-06T04:50:56.133023+00:00
 - Strategy: SMC_VLT_RSI v0.10.0
+
+---
+
+## EDENUSDT — BUY
+
+Trade ID: `EDENUSDT-20261006-071035-094C43`
+
+### Setup
+
+- Price Now Reference: 0.06129
+- Entry: 0.05927
+- Reason Entry: EDENUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 0.05901). H1 me-refine ke BULLISH_FVG 0.05917. M15 memberi execution POI BULLISH_FVG 0.05927. Fib H4 berada pada band OVERLAPS_0.618 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 53.4 mendukung momentum. Kerangka RSI TREND_PULLBACK_RSI: RSI H1 regime bullish; hidden divergence RSI H1 (63->55).
+- Price Exp: 0.06346
+- Reason Price Exp: Price Exp 0.063459 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.05791
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.05827) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- TP: 0.06491
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.064905 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.06346
+- Result Reason: Price Exp 0.063459 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-06T00:10:35.953870+00:00
+- Filled: -
+- Closed: 2026-10-06T10:48:39.239775+00:00
+- Strategy: SMC_VLT_RSI v0.10.0
