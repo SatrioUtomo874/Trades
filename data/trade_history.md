@@ -1154,3 +1154,36 @@ Tidak ada trailing.
 - Filled: 2026-10-06T02:45:31.529195+00:00
 - Closed: 2026-10-06T12:30:44.824815+00:00
 - Strategy: SMC_VLT_RSI v0.10.0
+
+---
+
+## ZILUSDT — BUY
+
+Trade ID: `ZILUSDT-20261006-150514-E8D68E`
+
+### Setup
+
+- Price Now Reference: 0.003668
+- Entry: 0.003614
+- Reason Entry: ZILUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.003533). H1 me-refine ke BULLISH_FVG 0.0036145. M15 memberi execution POI BULLISH_FVG 0.0036155. Fib H4 berada pada band DEEP_0.618_0.786 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 67.0 mendukung momentum. Kerangka RSI SWEEP_DIVERGENCE_REVERSAL: RSI H4 melawan arah, tertahan divergence reguler; RSI H1 regime bullish; divergence reguler RSI M15 (40->45); hidden divergence RSI H1 (53->50).
+- Price Exp: 0.003733
+- Reason Price Exp: Price Exp 0.0037322 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.00355
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.003569) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1. SL dilebarkan ke risiko minimum 1.5 ATR H1.
+- TP: 0.00386
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.00386 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.00355
+- Result Reason: SL di luar invalidasi struktur H1/H4 (0.003569) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1. SL dilebarkan ke risiko minimum 1.5 ATR H1.
+- PnL: -1.770890979524073049252905368%
+- Created: 2026-10-06T08:05:14.867995+00:00
+- Filled: 2026-10-06T09:24:47.133227+00:00
+- Closed: 2026-10-06T14:48:53.820620+00:00
+- Strategy: SMC_VLT_RSI v0.10.0
