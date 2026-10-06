@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T12:04:57.949145+00:00",
+  "saved_at": "2026-10-06T12:31:01.338388+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -50,6 +50,13 @@
       "until": "2026-10-06T14:00:56.447253+00:00",
       "reason": "Confidence 39.14 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "AIGENSYNUSDT",
+      "banned_at": "2026-10-06T12:31:01.338316+00:00",
+      "until": "2026-10-07T12:31:01.338290+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "AIOUSDT",
