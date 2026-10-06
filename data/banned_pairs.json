@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T16:00:29.562041+00:00",
+  "saved_at": "2026-10-06T16:00:35.860672+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -924,6 +924,13 @@
       "banned_at": "2026-10-05T16:10:24.074740+00:00",
       "until": "2026-10-06T16:10:24.074712+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ZROUSDT",
+      "banned_at": "2026-10-06T16:00:35.860641+00:00",
+      "until": "2026-10-07T16:00:35.860620+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     }
   ]
