@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T02:08:43.446940+00:00",
+  "saved_at": "2026-10-06T02:08:50.048040+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -665,6 +665,13 @@
       "banned_at": "2026-10-05T19:07:19.457032+00:00",
       "until": "2026-10-06T03:07:19.457007+00:00",
       "reason": "Confidence 36.41 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "FLUXUSDT",
+      "banned_at": "2026-10-06T02:08:50.047956+00:00",
+      "until": "2026-10-06T04:08:50.047924+00:00",
+      "reason": "Confidence 43.55 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
