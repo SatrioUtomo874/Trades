@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T00:09:02.546370+00:00",
+  "saved_at": "2026-10-06T00:09:14.150559+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1344,6 +1344,13 @@
       "banned_at": "2026-10-06T00:01:34.650071+00:00",
       "until": "2026-10-06T08:01:34.650037+00:00",
       "reason": "Confidence 44.71 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "SAHARAUSDT",
+      "banned_at": "2026-10-06T00:09:14.150486+00:00",
+      "until": "2026-10-06T08:09:14.150457+00:00",
+      "reason": "Confidence 34.14 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
