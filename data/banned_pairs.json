@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T12:04:00.845874+00:00",
+  "saved_at": "2026-10-06T12:04:05.162093+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -288,6 +288,13 @@
       "until": "2026-10-06T12:42:05.766528+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "CTUSDT",
+      "banned_at": "2026-10-06T12:04:05.162033+00:00",
+      "until": "2026-10-07T12:04:05.162011+00:00",
+      "reason": "Riwayat candle belum cukup: Bybit public gagal untuk CTUSDT 240; SCAN melarang fallback Binance: Bybit hanya mengembalikan 31 candle closed untuk CTUSDT 240; diperlukan 120.",
+      "source": "AUTO_INSUFFICIENT_HISTORY"
     },
     {
       "pair": "CVCUSDT",
