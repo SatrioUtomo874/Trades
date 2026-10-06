@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T02:09:13.745216+00:00",
+  "saved_at": "2026-10-06T02:09:20.350693+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1555,6 +1555,13 @@
       "until": "2026-10-06T19:24:11.161917+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "STEEMUSDT",
+      "banned_at": "2026-10-06T02:09:20.350614+00:00",
+      "until": "2026-10-06T10:09:20.350583+00:00",
+      "reason": "Confidence 28.73 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "STXUSDT",
