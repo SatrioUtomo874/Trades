@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T12:41:52.477292+00:00",
+  "saved_at": "2026-10-06T14:49:12.828449+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -28,13 +28,6 @@
       "banned_at": "2026-10-05T16:10:48.863129+00:00",
       "until": "2026-10-06T16:10:48.863099+00:00",
       "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "ACEUSDT",
-      "banned_at": "2026-10-05T12:42:36.845966+00:00",
-      "until": "2026-10-06T12:42:36.845933+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
@@ -73,13 +66,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "APEUSDT",
-      "banned_at": "2026-10-05T12:42:46.059081+00:00",
-      "until": "2026-10-06T12:42:46.059061+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
       "pair": "API3USDT",
       "banned_at": "2026-10-05T19:08:23.758532+00:00",
       "until": "2026-10-06T19:08:23.758510+00:00",
@@ -99,13 +85,6 @@
       "until": "2026-10-06T20:02:23.256856+00:00",
       "reason": "Confidence 32.82 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "ARUSDT",
-      "banned_at": "2026-10-05T12:42:18.364857+00:00",
-      "until": "2026-10-06T12:42:18.364836+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "ARXUSDT",
@@ -174,13 +153,6 @@
       "pair": "BIOUSDT",
       "banned_at": "2026-10-05T16:09:13.857803+00:00",
       "until": "2026-10-06T16:09:13.857779+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "BOMEUSDT",
-      "banned_at": "2026-10-05T12:42:50.366743+00:00",
-      "until": "2026-10-06T12:42:50.366714+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
@@ -258,13 +230,6 @@
       "pair": "COMPUSDT",
       "banned_at": "2026-10-05T19:24:50.659793+00:00",
       "until": "2026-10-06T19:24:50.659768+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "COTIUSDT",
-      "banned_at": "2026-10-05T12:42:05.766548+00:00",
-      "until": "2026-10-06T12:42:05.766528+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
@@ -367,13 +332,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "ENJUSDT",
-      "banned_at": "2026-10-05T12:42:59.748664+00:00",
-      "until": "2026-10-06T12:42:59.748646+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
       "pair": "ENSUSDT",
       "banned_at": "2026-10-05T16:09:53.946735+00:00",
       "until": "2026-10-06T16:09:53.946701+00:00",
@@ -416,13 +374,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "FFUSDT",
-      "banned_at": "2026-10-05T12:42:54.946029+00:00",
-      "until": "2026-10-06T12:42:54.945995+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
       "pair": "FILUSDT",
       "banned_at": "2026-10-06T12:01:27.155193+00:00",
       "until": "2026-10-06T20:01:27.155167+00:00",
@@ -447,13 +398,6 @@
       "pair": "FOGOUSDT",
       "banned_at": "2026-10-05T19:09:26.648776+00:00",
       "until": "2026-10-06T19:09:26.648754+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "GRTUSDT",
-      "banned_at": "2026-10-05T12:42:14.163350+00:00",
-      "until": "2026-10-06T12:42:14.163330+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
@@ -484,13 +428,6 @@
       "until": "2026-10-06T16:04:19.446383+00:00",
       "reason": "Confidence 35.22 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "HUMAUSDT",
-      "banned_at": "2026-10-05T12:43:09.451000+00:00",
-      "until": "2026-10-06T12:43:09.450970+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "HYPEUSDT",
@@ -570,13 +507,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "LAUSDT",
-      "banned_at": "2026-10-05T12:43:37.761623+00:00",
-      "until": "2026-10-06T12:43:37.761594+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
       "pair": "LITUSDT",
       "banned_at": "2026-10-06T12:02:29.251540+00:00",
       "until": "2026-10-06T14:02:29.251507+00:00",
@@ -605,13 +535,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "MAGICUSDT",
-      "banned_at": "2026-10-05T12:41:40.949754+00:00",
-      "until": "2026-10-06T12:41:40.949730+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
       "pair": "MARSCOINUSDT",
       "banned_at": "2026-10-05T19:07:54.857299+00:00",
       "until": "2026-10-06T19:07:54.857279+00:00",
@@ -638,13 +561,6 @@
       "until": "2026-10-06T14:03:02.659771+00:00",
       "reason": "Confidence 18.08 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "MORPHOUSDT",
-      "banned_at": "2026-10-05T12:43:26.867380+00:00",
-      "until": "2026-10-06T12:43:26.867359+00:00",
-      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "MOVEUSDT",
@@ -738,13 +654,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "ORDIUSDT",
-      "banned_at": "2026-10-05T12:42:32.466436+00:00",
-      "until": "2026-10-06T12:42:32.466415+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
       "pair": "PARTIUSDT",
       "banned_at": "2026-10-06T12:04:24.446066+00:00",
       "until": "2026-10-06T14:04:24.446026+00:00",
@@ -780,13 +689,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "PLUMEUSDT",
-      "banned_at": "2026-10-05T12:42:01.667122+00:00",
-      "until": "2026-10-06T12:42:01.667097+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
       "pair": "PONSUSDT",
       "banned_at": "2026-10-06T12:03:09.448870+00:00",
       "until": "2026-10-06T20:03:09.448831+00:00",
@@ -801,13 +703,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "PORTALUSDT",
-      "banned_at": "2026-10-05T12:42:09.849299+00:00",
-      "until": "2026-10-06T12:42:09.849268+00:00",
-      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
       "pair": "PROVEUSDT",
       "banned_at": "2026-10-06T08:02:11.645673+00:00",
       "until": "2026-10-06T16:02:11.645634+00:00",
@@ -818,13 +713,6 @@
       "pair": "PTBUSDT",
       "banned_at": "2026-10-05T19:09:42.660321+00:00",
       "until": "2026-10-06T19:09:42.660304+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "PYTHUSDT",
-      "banned_at": "2026-10-05T12:42:40.850500+00:00",
-      "until": "2026-10-06T12:42:40.850473+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
@@ -871,13 +759,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "ROBOUSDT",
-      "banned_at": "2026-10-05T12:43:22.746730+00:00",
-      "until": "2026-10-06T12:43:22.746703+00:00",
-      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
       "pair": "RVNUSDT",
       "banned_at": "2026-10-05T16:08:06.956982+00:00",
       "until": "2026-10-06T16:08:06.956957+00:00",
@@ -916,13 +797,6 @@
       "pair": "SPKUSDT",
       "banned_at": "2026-10-05T19:25:34.666436+00:00",
       "until": "2026-10-06T19:25:34.666413+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "SPXUSDT",
-      "banned_at": "2026-10-05T12:42:22.467931+00:00",
-      "until": "2026-10-06T12:42:22.467903+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
@@ -1032,13 +906,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "VELVETUSDT",
-      "banned_at": "2026-10-05T12:43:18.153086+00:00",
-      "until": "2026-10-06T12:43:18.153047+00:00",
-      "reason": "H4 structure BEARISH tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
       "pair": "VETUSDT",
       "banned_at": "2026-10-05T16:10:14.659373+00:00",
       "until": "2026-10-06T16:10:14.659352+00:00",
@@ -1058,13 +925,6 @@
       "until": "2026-10-06T16:00:17.253677+00:00",
       "reason": "Confidence 67.11 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "WUSDT",
-      "banned_at": "2026-10-05T12:43:13.465017+00:00",
-      "until": "2026-10-06T12:43:13.464990+00:00",
-      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
-      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "XPLUSDT",
@@ -1100,6 +960,13 @@
       "until": "2026-10-06T20:00:16.952798+00:00",
       "reason": "Confidence 55.57 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ZILUSDT",
+      "banned_at": "2026-10-06T14:49:12.828403+00:00",
+      "until": "2026-10-07T14:49:12.828372+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "ZKCUSDT",
