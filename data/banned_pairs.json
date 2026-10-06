@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T08:04:39.947289+00:00",
+  "saved_at": "2026-10-06T10:48:55.325537+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -568,6 +568,13 @@
       "until": "2026-10-06T19:24:40.147482+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "EDENUSDT",
+      "banned_at": "2026-10-06T10:48:55.324840+00:00",
+      "until": "2026-10-06T18:48:55.324803+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "EDGEUSDT",
