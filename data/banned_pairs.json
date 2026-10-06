@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T16:40:37.148182+00:00",
+  "saved_at": "2026-10-06T16:40:41.945678+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2387,6 +2387,13 @@
       "banned_at": "2026-10-06T16:40:21.566653+00:00",
       "until": "2026-10-07T16:40:21.566632+00:00",
       "reason": "H4 structure BULLISH tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "TAIKOUSDT",
+      "banned_at": "2026-10-06T16:40:41.945506+00:00",
+      "until": "2026-10-07T16:40:41.945480+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
