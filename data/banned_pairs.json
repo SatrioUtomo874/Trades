@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T16:05:06.974286+00:00",
+  "saved_at": "2026-10-06T16:05:12.758680+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -820,6 +820,13 @@
       "until": "2026-10-06T19:09:42.660304+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BULLISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "PYTHUSDT",
+      "banned_at": "2026-10-06T16:05:12.758622+00:00",
+      "until": "2026-10-07T00:05:12.758589+00:00",
+      "reason": "Confidence 34.67 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "QUSDT",
