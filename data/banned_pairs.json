@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T16:42:56.545355+00:00",
+  "saved_at": "2026-10-06T16:43:00.652543+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2339,6 +2339,13 @@
       "until": "2026-10-06T20:01:38.548785+00:00",
       "reason": "Confidence 55 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "SAPIENUSDT",
+      "banned_at": "2026-10-06T16:43:00.652360+00:00",
+      "until": "2026-10-07T16:43:00.652334+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "SEIUSDT",
