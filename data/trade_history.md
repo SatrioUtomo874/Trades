@@ -1055,3 +1055,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-06T00:13:03.341819+00:00
 - Strategy: SMC_VLT_RSI v0.10.0
+
+---
+
+## ESPUSDT — BUY
+
+Trade ID: `ESPUSDT-20261006-070505-096D1D`
+
+### Setup
+
+- Price Now Reference: 0.11307
+- Entry: 0.10902
+- Reason Entry: ESPUSDT BUY: thesis dimulai dari POI H4. (BULLISH_FVG 0.10824). H1 me-refine ke BULLISH_FVG 0.10902. M15 memberi execution POI BULLISH_FVG 0.112415. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 57.8 mendukung momentum. Kerangka RSI TREND_PULLBACK_RSI: RSI H4 regime bullish; hidden divergence RSI M15 (55->50).
+- Price Exp: 0.11336
+- Reason Price Exp: Price Exp 0.113352 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.10685
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.10876) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1. SL dilebarkan ke risiko minimum 1.5 ATR H1.
+- TP: 0.11354
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.11354 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.11336
+- Result Reason: Price Exp 0.113352 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-06T00:05:05.760437+00:00
+- Filled: -
+- Closed: 2026-10-06T04:50:56.133023+00:00
+- Strategy: SMC_VLT_RSI v0.10.0
