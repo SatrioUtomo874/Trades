@@ -186,7 +186,9 @@ SCAN_CYCLE_DELAY_SECONDS = 30.0
 # Binance H4 boundaries dipetakan ke 03,07,11,15,19,23 WIB.
 H4_SCAN_HOURS_WIB = (3, 7, 11, 15, 19, 23)
 H4_SCAN_TRIGGER_LEEWAY_SECONDS = 60.0
+H4_SCAN_SLOT_VALIDITY_SECONDS = 3600.0  # slot tetap valid maksimal +1 jam bila tertahan Binance.
 H4_SCAN_SCHEDULER_POLL_SECONDS = 5.0
+POSITION_CACHE_MAX_AGE_SECONDS = 30.0
 SCAN_VALIDATION_TOLERANCE = Decimal("0.90")
 SCAN_BANNED_PRICE_EXP_HOURS = Decimal("8")
 SCAN_BANNED_TP_SL_HOURS = Decimal("24")
@@ -1235,6 +1237,10 @@ class LeverageNotSupportedError(RuntimeError):
     """Leverage yang diatur melebihi batas pair di Binance (code -4028)."""
 
 
+class RealPositionConflictError(RuntimeError):
+    """Real entry ditolak karena symbol sudah memiliki exposure Binance."""
+
+
 class MarginInfluenceError(RuntimeError):
     pass
 
@@ -1252,7 +1258,14 @@ class BinanceRealClient:
         self._server_cooldown_until = 0.0
         self._request_lock = asyncio.Lock()
         self._dual_side_position: bool | None = None
+        # Snapshot terakhir dari Futures balance. Semua consumer lokal (autostop
+        # dan /trade) membaca cache ini agar tidak melakukan request berulang.
         self.last_balance: dict[str, Any] | None = None
+        self.last_balance_at: float | None = None
+        # Position snapshot per symbol; dipakai sebagai filter awal sebelum final
+        # safety-check fresh pada saat real entry.
+        self.last_positions: dict[str, list[dict[str, Any]]] = {}
+        self.last_positions_at: dict[str, float] = {}
 
     @property
     def configured(self) -> bool:
@@ -1453,14 +1466,60 @@ class BinanceRealClient:
         return await asyncio.to_thread(request)
 
     async def get_futures_balance(self) -> list[dict[str, Any]]:
-        """Read USD-M futures balances; /real ON uses it for the activation test and entry checks use availableBalance."""
+        """Read USD-M Futures balance and refresh the local USDT cache."""
         payload = await self._request("GET", "/fapi/v3/balance")
         if not isinstance(payload, list):
             raise BinanceAPIError(
                 "Respons /fapi/v3/balance tidak berbentuk list.",
                 endpoint="/fapi/v3/balance",
             )
-        return [item for item in payload if isinstance(item, dict)]
+        rows = [item for item in payload if isinstance(item, dict)]
+        usdt = next(
+            (row for row in rows if str(row.get("asset") or "").upper() == "USDT"),
+            None,
+        )
+        if usdt is not None:
+            self.last_balance = dict(usdt)
+            self.last_balance_at = time.monotonic()
+        return rows
+
+    def cached_usdt_balance(self) -> dict[str, Any] | None:
+        """Return the latest Binance USDT balance without making a REST request."""
+        return dict(self.last_balance) if self.last_balance is not None else None
+
+    def cached_position(self, symbol: str, desired_side: str | None = None) -> dict[str, Any] | None:
+        """Return a fresh cached non-zero position for symbol/direction, if known."""
+        key = symbol.upper()
+        cached_at = self.last_positions_at.get(key)
+        if cached_at is None or time.monotonic() - cached_at > POSITION_CACHE_MAX_AGE_SECONDS:
+            return None
+        rows = self.last_positions.get(key, [])
+        if not rows:
+            return None
+        dual = bool(self._dual_side_position)
+        target_side = (
+            ("LONG" if desired_side == "BUY" else "SHORT")
+            if dual and desired_side in {"BUY", "SELL"}
+            else None
+        )
+        for item in rows:
+            if target_side is not None and str(item.get("positionSide") or "BOTH") != target_side:
+                continue
+            amount = item.get("_position_amount_decimal")
+            if not isinstance(amount, Decimal):
+                try:
+                    amount = parse_signed_decimal(str(amount or item.get("positionAmt") or "0"))
+                except (InvalidOperation, ValueError):
+                    continue
+            if amount == 0:
+                continue
+            if not dual and desired_side in {"BUY", "SELL"}:
+                if desired_side == "BUY" and amount <= 0:
+                    continue
+                if desired_side == "SELL" and amount >= 0:
+                    continue
+            return dict(item)
+        return None
 
     async def get_account_info(self) -> dict[str, Any]:
         payload = await self._request("GET", "/fapi/v2/account")
@@ -1469,8 +1528,27 @@ class BinanceRealClient:
                 "Respons /fapi/v2/account tidak berbentuk object.",
                 endpoint="/fapi/v2/account",
             )
-        self.last_balance = payload
         positions = payload.get("positions") or []
+        cached_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for item in positions:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol") or "").upper()
+            if not symbol:
+                continue
+            try:
+                amount = parse_signed_decimal(str(item.get("positionAmt") or "0"))
+            except ValueError:
+                continue
+            if amount == 0:
+                continue
+            copied = dict(item)
+            copied["_abs_position_amt"] = abs(amount)
+            copied["_position_amount_decimal"] = amount
+            cached_by_symbol.setdefault(symbol, []).append(copied)
+        now_mono = time.monotonic()
+        self.last_positions = cached_by_symbol
+        self.last_positions_at = {symbol: now_mono for symbol in cached_by_symbol}
         sides = {
             str(item.get("positionSide") or "")
             for item in positions
@@ -1597,6 +1675,8 @@ class BinanceRealClient:
             copied["_abs_position_amt"] = abs(amount)
             copied["_position_amount_decimal"] = amount
             result.append(copied)
+        self.last_positions[symbol.upper()] = [dict(item) for item in result]
+        self.last_positions_at[symbol.upper()] = time.monotonic()
         return result
 
     async def get_position(self, symbol: str, desired_side: str) -> dict[str, Any] | None:
@@ -2584,6 +2664,10 @@ class TradingEngine:
         self._h4_enabled = False
         self._h4_window_active = False
         self._h4_last_trigger_slot: str | None = None
+        self._h4_window_slot: datetime | None = None
+        self._h4_window_deadline: datetime | None = None
+        self._h4_invalid_slot_key: str | None = None
+        self._h4_opening_gate = False
         self._scan_generation = 0
 
         # AUTOSTOP: trailing max drawdown atas equity Binance (hanya saat REAL ON).
@@ -3060,10 +3144,17 @@ class TradingEngine:
             # Cache the current exchange account position mode once so the
             # first real order can choose BOTH/LONG/SHORT correctly.
             await self.real.ensure_position_mode()
+            try:
+                await self.real.get_account_info()
+            except Exception as exc:
+                # Position cache is an optimization/filter; real entry still has
+                # its final fresh positionRisk safety check.
+                log.info("[REAL MODE] initial position snapshot gagal: %s", exc)
 
             self.real_mode = True
             self.real.last_balance = dict(usdt)
-            self._equity_peak = self._equity_from_balance_row(usdt)
+            self.real.last_balance_at = time.monotonic()
+            self._equity_peak = self._current_equity_cached()
             self._equity_last = self._equity_peak
             self._autostop_triggered = False
             self._autostop_failures = 0
@@ -3218,8 +3309,8 @@ class TradingEngine:
                         f"⏱ Jeda      {duration_text(bot)}",
                         self._api_weight_line(),
                         f"▶️ Lanjut    {format_wib(now_utc() + timedelta(seconds=bot))}",
-                        "📌 Ditunda: scan, verifikasi TP/SL, autostop",
-                        "👀 Harga tetap dipantau via WebSocket; fill dicatat dan TP/SL dipasang otomatis (antrian) begitu API pulih.",
+                        "📌 Ditunda: scan & operasi REAL yang membutuhkan REST. Autostop tetap dihitung dari snapshot lokal.",
+                        "👀 Harga tetap dipantau via WebSocket; autostop tetap aktif secara lokal dan tidak menunggu REST.",
                         "Lanjut otomatis dan dikabari saat Binance tersambung.",
                     ],
                 )
@@ -3326,6 +3417,22 @@ class TradingEngine:
                 log.info("[RATE LIMIT] load symbols gagal: %s", exc)
         if not self.real_mode:
             return
+        try:
+            await self.real.get_futures_balance()
+        except BinanceRateLimitError as exc:
+            self.real.apply_cooldown(exc.server_cooldown_seconds, exc.bot_cooldown_seconds)
+            self._notify_rate_limit(exc, "REFRESH BALANCE")
+            return
+        except Exception as exc:
+            log.info("[RATE LIMIT] refresh balance gagal: %s", exc)
+        try:
+            await self.real.get_account_info()
+        except BinanceRateLimitError as exc:
+            self.real.apply_cooldown(exc.server_cooldown_seconds, exc.bot_cooldown_seconds)
+            self._notify_rate_limit(exc, "REFRESH POSITIONS")
+            return
+        except Exception as exc:
+            log.info("[RATE LIMIT] refresh positions gagal: %s", exc)
         await self._flush_deferred()
         for trade in list(self.active_trades.values()):
             if not (trade.real_enabled and trade.status in {"PENDING", "FILLED"}):
@@ -3423,6 +3530,17 @@ class TradingEngine:
 
         client_id = self._client_id("ENT", trade.trade_id)
 
+        cached_position = self.real.cached_position(trade.pair, trade.direction)
+        if cached_position is not None:
+            amount = cached_position.get("_position_amount_decimal") or cached_position.get("positionAmt") or "0"
+            side = cached_position.get("positionSide") or "BOTH"
+            trade.real_state = "REAL_CONFLICT"
+            trade.real_error = (
+                f"Position Binance sudah ada pada {trade.pair} ({side}:{amount}). "
+                "Entry baru tidak dibuat."
+            )
+            raise RealPositionConflictError(trade.real_error)
+
         async def prepare_and_place(force_refresh: bool = False) -> dict[str, Any]:
             if force_refresh:
                 self.symbols = await self.rest.get_exchange_info(force=True)
@@ -3439,11 +3557,12 @@ class TradingEngine:
                     f"{item.get('positionSide', 'BOTH')}:{item.get('positionAmt', '0')}"
                     for item in existing_positions
                 )
-                raise BinanceAPIError(
+                trade.real_state = "REAL_CONFLICT"
+                trade.real_error = (
                     f"Position Binance sudah ada pada {trade.pair} ({descriptions}). "
-                    "Bot tidak membuat real entry baru pada symbol yang sudah memiliki exposure.",
-                    endpoint="/fapi/v2/positionRisk",
+                    "Entry baru tidak dibuat agar exposure tidak bertambah."
                 )
+                raise RealPositionConflictError(trade.real_error)
 
             # IMPORTANT: leverage first. maxNotionalValue from the response is
             # part of the quantity calculation; availableBalance is also read
@@ -3499,6 +3618,10 @@ class TradingEngine:
                 last_exc = exc
                 self._notify_rate_limit(exc, f"PLACE LIMIT {trade.pair}")
                 break
+            except RealPositionConflictError:
+                # Conflict sudah merupakan keputusan safety yang final; jangan
+                # ubah state menjadi REAL_ERROR dan jangan kirim backend error.
+                raise
             except BinanceAPIError as exc:
                 last_exc = exc
                 if exc.code == -4028:
@@ -5788,11 +5911,52 @@ class TradingEngine:
         slot = due or self._h4_next_scheduled_slot(local)
         return slot.strftime("%d-%m-%Y %H:%M WIB")
 
+    def _h4_slot_deadline(self, slot: datetime) -> datetime:
+        return slot + timedelta(seconds=H4_SCAN_SLOT_VALIDITY_SECONDS)
+
+    def _h4_window_remaining_seconds(self, now: datetime | None = None) -> float | None:
+        if not self._h4_window_active or self._h4_window_deadline is None:
+            return None
+        current = (now or now_utc()).astimezone(TZ)
+        return (self._h4_window_deadline - current).total_seconds()
+
+    def _h4_window_expired(self, now: datetime | None = None) -> bool:
+        remaining = self._h4_window_remaining_seconds(now)
+        return remaining is not None and remaining <= 0
+
+    def _invalidate_h4_window(self, reason: str) -> None:
+        slot_key = self._h4_slot_key(self._h4_window_slot) if self._h4_window_slot else self._h4_last_trigger_slot
+        self._h4_invalid_slot_key = slot_key
+        self._h4_window_active = False
+        self._h4_window_slot = None
+        self._h4_window_deadline = None
+        self._h4_opening_gate = False
+        self._scan_auto_paused = True
+        log.warning("[SCAN][H4] slot %s invalid: %s", slot_key or "-", reason)
+        self._fire(
+            self.reply(
+                card(
+                    "⛔ H4 SLOT INVALID",
+                    [
+                        f"🕓 Slot      {slot_key or '-'} WIB",
+                        "⏱ Batas     +1 jam dari jadwal",
+                        f"📌 Alasan    {reason}",
+                        "▶️ Berikut  menunggu jadwal H4 selanjutnya.",
+                    ],
+                )
+            )
+        )
+
     def _h4_window_text(self) -> str:
         if not self._h4_enabled:
             return "OFF"
         if self._h4_window_active:
+            remaining = self._h4_window_remaining_seconds()
+            if remaining is not None:
+                return f"ACTIVE ({max(0, remaining):.0f}s)"
             return "ACTIVE"
+        if self._h4_invalid_slot_key == self._h4_last_trigger_slot and self._h4_invalid_slot_key:
+            return "WAITING_NEXT_H4"
         return "WAITING_H4"
 
     def _h4_status_text(self) -> str:
@@ -5834,6 +5998,10 @@ class TradingEngine:
             self._h4_enabled = False
             self._h4_window_active = False
             self._h4_last_trigger_slot = None
+            self._h4_window_slot = None
+            self._h4_window_deadline = None
+            self._h4_invalid_slot_key = None
+            self._h4_opening_gate = False
 
             # Jika masih berada di H4 window yang sedang berjalan, jangan
             # membatalkan cycle: H4 gate dicabut dan scan boleh lanjut normal.
@@ -5862,6 +6030,10 @@ class TradingEngine:
         self._h4_enabled = True
         self._h4_window_active = False
         self._h4_last_trigger_slot = None
+        self._h4_window_slot = None
+        self._h4_window_deadline = None
+        self._h4_invalid_slot_key = None
+        self._h4_opening_gate = False
         self._scan_generation += 1
 
         if self._scan_user_enabled:
@@ -5953,23 +6125,46 @@ class TradingEngine:
 
     @staticmethod
     def _equity_from_balance_row(row: dict[str, Any]) -> Decimal:
-        wallet = parse_signed_decimal(str(row.get("balance") or "0"))
-        if not AUTOSTOP_INCLUDE_UNREALIZED:
-            return wallet
-        return wallet + parse_signed_decimal(str(row.get("crossUnPnl") or "0"))
+        # Autostop uses the cached Binance wallet balance as its fixed base and
+        # adds current local REAL temporary PnL separately. This avoids double
+        # counting Binance crossUnPnl while still remaining REST-independent
+        # during a rate-limit window.
+        return parse_signed_decimal(str(row.get("balance") or "0"))
 
-    async def _read_equity(self) -> Decimal:
-        balances = await self.real.get_futures_balance()
-        usdt = next(
-            (row for row in balances if str(row.get("asset") or "").upper() == "USDT"),
-            None,
-        )
-        if usdt is None:
+    def _read_equity_cached(self) -> Decimal:
+        balance = self.real.cached_usdt_balance()
+        if balance is None:
             raise BinanceAPIError(
-                "USDT tidak ditemukan pada Futures balance.",
-                endpoint="/fapi/v3/balance",
+                "Snapshot USDT Binance belum tersedia. /real harus berhasil diaktifkan terlebih dahulu.",
+                endpoint="CACHE:/fapi/v3/balance",
             )
-        return self._equity_from_balance_row(usdt)
+        return self._equity_from_balance_row(balance)
+
+    def _temporary_real_pnl_usdt(self) -> Decimal:
+        """Hitung unrealized PnL lokal dari REAL FILLED trades dan harga live."""
+        total = Decimal("0")
+        for trade in self.active_trades.values():
+            if trade.status != "FILLED" or not trade.real_enabled or trade.quantity is None:
+                continue
+            snapshot = self.prices.get(trade.pair)
+            fill = trade.fill_price or trade.entry
+            if snapshot is None or fill <= 0 or trade.quantity <= 0:
+                continue
+            if trade.direction == "BUY":
+                total += (snapshot.price - fill) * trade.quantity
+            else:
+                total += (fill - snapshot.price) * trade.quantity
+        return total
+
+    def _current_equity_cached(self) -> Decimal:
+        balance = self.real.cached_usdt_balance()
+        if balance is None:
+            raise BinanceAPIError(
+                "Snapshot USDT Binance belum tersedia.",
+                endpoint="CACHE:/fapi/v3/balance",
+            )
+        wallet = parse_signed_decimal(str(balance.get("balance") or "0"))
+        return wallet + self._temporary_real_pnl_usdt()
 
     @staticmethod
     def _fmt_usd(value: Decimal | None) -> str:
@@ -6037,17 +6232,16 @@ class TradingEngine:
                 log.exception("[AUTOSTOP] check error")
 
     async def _autostop_check(self) -> None:
-        if not self.real_mode or self.real.cooldown_remaining > 0:
+        # Autostop is intentionally REST-independent. It uses the latest cached
+        # Binance wallet balance plus current WebSocket-derived temporary PnL.
+        if not self.real_mode:
             return
         try:
-            equity = await self._read_equity()
-        except BinanceRateLimitError as exc:
-            self._notify_rate_limit(exc, "AUTOSTOP")
-            return
+            equity = self._current_equity_cached()
         except Exception as exc:
             self._autostop_failures += 1
             if self._autostop_failures == 3:
-                log.warning("[AUTOSTOP] gagal membaca saldo 3x berturut-turut: %s", exc)
+                log.warning("[AUTOSTOP] snapshot equity lokal belum tersedia 3x berturut-turut: %s", exc)
             return
         self._autostop_failures = 0
         self._equity_last = equity
@@ -6076,7 +6270,7 @@ class TradingEngine:
         )
 
     async def _autostop_rebaseline(self) -> None:
-        equity = await self._read_equity()
+        equity = self._current_equity_cached()
         self._equity_peak = equity
         self._equity_last = equity
         self._autostop_triggered = False
@@ -6619,10 +6813,15 @@ class TradingEngine:
                             )
                             continue
                         self._h4_window_active = True
+                        self._h4_window_slot = slot
+                        self._h4_window_deadline = self._h4_slot_deadline(slot)
+                        self._h4_invalid_slot_key = None
+                        self._h4_opening_gate = True
                         self._scan_auto_paused = False
                         log.info(
-                            "[SCAN][H4] scan window dibuka pada slot %s",
+                            "[SCAN][H4] scan window dibuka pada slot %s | deadline=%s",
                             self._h4_slot_key(slot),
+                            self._h4_window_deadline.astimezone(TZ).strftime("%d-%m-%Y %H:%M:%S WIB"),
                         )
 
                 # Dalam mode normal, capacity full menghentikan task seperti perilaku lama.
@@ -6631,17 +6830,39 @@ class TradingEngine:
                     break
 
                 while self._running and self._scan_user_enabled and self.real.cooldown_remaining > 0:
-                    await asyncio.sleep(min(self.real.cooldown_remaining + 1.0, 30.0))
+                    if self._h4_enabled and self._h4_window_expired():
+                        self._invalidate_h4_window("Binance rate-limit/cooldown melewati +1 jam dari jadwal H4.")
+                        break
+                    wait_for_cooldown = self.real.cooldown_remaining
+                    wait_for_h4 = self._h4_window_remaining_seconds() if self._h4_enabled else None
+                    waits = [wait_for_cooldown, 30.0]
+                    if wait_for_h4 is not None:
+                        waits.append(max(0.25, wait_for_h4))
+                    await asyncio.sleep(max(0.25, min(waits)))
                 if not (self._running and self._scan_user_enabled):
                     break
+                if self._h4_enabled and not self._h4_window_active:
+                    continue
+                if self._h4_enabled and self._h4_opening_gate and self._h4_window_expired():
+                    self._invalidate_h4_window("Slot H4 sudah melewati batas valid +1 jam sebelum scan dimulai.")
+                    continue
 
                 # H4 can be disabled while sleeping on a scheduler boundary;
                 # after the state flips, the next iteration becomes normal scan.
                 await self._run_scan_cycle()
 
+                # Satu cycle berhasil dimulai/selesai tanpa rate-limit fatal:
+                # opening gate selesai, sehingga window berjalan terus sampai MAX.
+                if self._h4_enabled and self._h4_window_active and self._h4_opening_gate:
+                    self._h4_opening_gate = False
+                    self._h4_window_deadline = None
+
                 if len(self.active_trades) >= self.max_active_trades:
                     if self._h4_enabled:
                         self._h4_window_active = False
+                        self._h4_window_slot = None
+                        self._h4_window_deadline = None
+                        self._h4_opening_gate = False
                         self._scan_auto_paused = True
                         log.info(
                             "[SCAN][H4] window slot %s selesai: MAX active=%s/%s.",
@@ -7024,6 +7245,21 @@ class TradingEngine:
                         break
                     try:
                         await self._ensure_real_entry(trade)
+                    except RealPositionConflictError as exc:
+                        log.info("[SCAN] %s dilewati: %s", trade.pair, exc)
+                        final_add_errors += 1
+                        await self.reply(
+                            card(
+                                "⚠️ REAL ENTRY DIBLOKIR",
+                                [
+                                    f"Pair      {trade.pair}",
+                                    f"Alasan    {exc}",
+                                    "Exposure Binance sudah ada; setup tidak dibuat sebagai real entry baru.",
+                                ],
+                            )
+                        )
+                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                        continue
                     except BinanceRateLimitError:
                         break
                     except MarginInfluenceError as exc:
@@ -8057,7 +8293,23 @@ class TradingEngine:
         )
 
         if self.real_mode:
-            await self._ensure_real_entry(trade)
+            try:
+                await self._ensure_real_entry(trade)
+            except RealPositionConflictError as exc:
+                self.flow = None
+                self._auto_job_id = None
+                self._auto_task = None
+                await self.reply(
+                    card(
+                        "⚠️ REAL ENTRY DIBLOKIR",
+                        [
+                            f"Pair   {trade.pair}",
+                            f"Alasan {exc}",
+                            "Setup tidak diaktifkan agar exposure Binance tidak bertambah.",
+                        ],
+                    )
+                )
+                return
             if trade.status == "CLOSED":
                 self.flow = None
                 self._auto_job_id = None
@@ -8651,7 +8903,21 @@ class TradingEngine:
         )
 
         if self.real_mode:
-            await self._ensure_real_entry(trade)
+            try:
+                await self._ensure_real_entry(trade)
+            except RealPositionConflictError as exc:
+                self.flow = None
+                await self.reply(
+                    card(
+                        "⚠️ REAL ENTRY DIBLOKIR",
+                        [
+                            f"Pair   {trade.pair}",
+                            f"Alasan {exc}",
+                            "Setup tidak dibuat agar exposure Binance tidak bertambah.",
+                        ],
+                    )
+                )
+                return
             if trade.status == "CLOSED":
                 self.flow = None
                 await self.reply("🚨 Setup REAL langsung ditutup otomatis karena TP/SL gagal dipasang.")
@@ -10304,6 +10570,23 @@ class TradingEngine:
     # TRADE DISPLAY
     # --------------------------------------------------------
 
+    @staticmethod
+    def _distance_pct(current: Decimal, target: Decimal) -> Decimal | None:
+        if current <= 0 or target <= 0:
+            return None
+        return abs(target - current) / current * Decimal("100")
+
+    @staticmethod
+    def _temporary_trade_pnl_usdt(trade: Trade, price: Decimal) -> Decimal | None:
+        if trade.status != "FILLED" or not trade.real_enabled or trade.quantity is None:
+            return None
+        fill = trade.fill_price or trade.entry
+        if fill <= 0 or trade.quantity <= 0:
+            return None
+        if trade.direction == "BUY":
+            return (price - fill) * trade.quantity
+        return (fill - price) * trade.quantity
+
     def _render_trade(
         self,
         number: int,
@@ -10316,6 +10599,9 @@ class TradingEngine:
         current_text = "-"
         feed = "NO DATA"
         pnl_text = "-"
+        entry_distance_text = "-"
+        tp_distance_text = "-"
+        sl_distance_text = "-"
 
         if snapshot:
             current_text = (
@@ -10335,14 +10621,24 @@ class TradingEngine:
             else:
                 feed = "STALE"
 
-            if trade.status == "FILLED":
+            if trade.status == "PENDING":
+                distance = self._distance_pct(snapshot.price, trade.entry)
+                if distance is not None:
+                    entry_distance_text = f"{decimal_to_str(distance.quantize(Decimal('0.01')))}%"
+            elif trade.status == "FILLED":
                 pnl_text = format_pct(
                     pct_change(
                         trade.direction,
-                        trade.entry,
+                        trade.fill_price or trade.entry,
                         snapshot.price,
                     )
                 )
+                tp_distance = self._distance_pct(snapshot.price, trade.tp)
+                sl_distance = self._distance_pct(snapshot.price, trade.sl)
+                if tp_distance is not None:
+                    tp_distance_text = f"{decimal_to_str(tp_distance.quantize(Decimal('0.01')))}%"
+                if sl_distance is not None:
+                    sl_distance_text = f"{decimal_to_str(sl_distance.quantize(Decimal('0.01')))}%"
 
         direction_icon = "🟢" if trade.direction == "BUY" else "🔴"
         status_icon = {
@@ -10377,13 +10673,19 @@ class TradingEngine:
             f"│ 🎯 Entry {decimal_to_str(trade.entry)}   →   TP {decimal_to_str(trade.tp)}",
             f"│ 🛡 SL    {decimal_to_str(trade.sl)}",
             f"│ ⛔ Exp   {decimal_to_str(trade.price_exp)}",
-            f"│ 📈 PnL   {pnl_text}",
-            f"│ ⚙️ Mode   {mode}",
+            (
+                f"│ 📍 Jarak Entry  {entry_distance_text}"
+                if trade.status == "PENDING"
+                else f"│ 📈 PnL   {pnl_text}"
+            ),
+            f"│ 🎯 Jarak TP     {tp_distance_text}" if trade.status == "FILLED" else "",
+            f"│ 🛡 Jarak SL     {sl_distance_text}" if trade.status == "FILLED" else "",
+            f"│ ⚙️ Mode   {mode} / {execution}",
             f"│ 🧠 {reason}",
             "╰────────────────────────╯",
         ]
 
-        return "\n".join(lines)
+        return "\n".join(line for line in lines if line != "")
 
     async def show_trades(self) -> None:
         items = self._trade_list_text()
@@ -10425,10 +10727,11 @@ class TradingEngine:
             )
         )
 
-        filled_pnls: list[Decimal] = []
+        temp_pnl_usdt = Decimal("0")
+        temp_pnl_count = 0
         stale_filled = 0
         for trade in self.active_trades.values():
-            if trade.status != "FILLED":
+            if trade.status != "FILLED" or not trade.real_enabled:
                 continue
             snapshot = self.prices.get(trade.pair)
             if snapshot is None:
@@ -10437,21 +10740,23 @@ class TradingEngine:
             if not snapshot.live:
                 stale_filled += 1
             try:
-                filled_pnls.append(
-                    pct_change(
-                        trade.direction,
-                        trade.fill_price or trade.entry,
-                        snapshot.price,
-                    )
-                )
+                pnl_usdt = self._temporary_trade_pnl_usdt(trade, snapshot.price)
+                if pnl_usdt is not None:
+                    temp_pnl_usdt += pnl_usdt
+                    temp_pnl_count += 1
             except Exception:
                 log.exception("Gagal menghitung temporary PnL %s.", trade.trade_id)
 
-        total_temp_pnl = (
-            sum(filled_pnls, Decimal("0"))
-            if filled_pnls
-            else None
-        )
+        balance_row = self.real.cached_usdt_balance() if self.real_mode else None
+        balance_text = "-"
+        total_balance_text = "-"
+        balance_cache_age = "-"
+        if balance_row is not None:
+            wallet_balance = parse_signed_decimal(str(balance_row.get("balance") or "0"))
+            balance_text = self._fmt_usd(wallet_balance)
+            total_balance_text = self._fmt_usd(wallet_balance + temp_pnl_usdt)
+            if self.real.last_balance_at is not None:
+                balance_cache_age = duration_text(max(0.0, time.monotonic() - self.real.last_balance_at))
 
         blocks = [
             "╭──────────────╮",
@@ -10460,8 +10765,11 @@ class TradingEngine:
             "",
             f"Active  {len(items)}   •   ⏳ {pending}   •   ✅ {filled}",
             f"Trail   {trailing}   •   📡 Live Feed {live}",
-            f"Temporary Total PnL (FILLED): {format_pct(total_temp_pnl) if total_temp_pnl is not None else '-'}",
-            f"PnL source: {len(filled_pnls)}/{filled} setup • stale/no feed: {stale_filled}",
+            f"💰 Saldo Binance       {balance_text} USDT",
+            f"📊 Temporary Total PnL {self._fmt_usd(temp_pnl_usdt)} USDT",
+            f"💵 Saldo + Temp PnL    {total_balance_text} USDT",
+            f"🧊 Balance Cache       {balance_cache_age} ago • {temp_pnl_count}/{filled} REAL FILLED",
+            f"PnL stale/no feed: {stale_filled}",
             "",
         ]
 
