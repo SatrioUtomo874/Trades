@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T00:09:52.653459+00:00",
+  "saved_at": "2026-10-06T00:13:21.207915+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -708,6 +708,13 @@
       "until": "2026-10-06T02:01:15.055182+00:00",
       "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "GRIFFAINUSDT",
+      "banned_at": "2026-10-06T00:13:21.207526+00:00",
+      "until": "2026-10-06T08:13:21.207489+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "GRTUSDT",
