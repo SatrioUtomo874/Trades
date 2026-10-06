@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T16:06:00.364556+00:00",
+  "saved_at": "2026-10-06T16:06:04.048887+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -652,6 +652,13 @@
       "until": "2026-10-06T20:04:13.544949+00:00",
       "reason": "Confidence 39.82 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MAGICUSDT",
+      "banned_at": "2026-10-06T16:06:04.048821+00:00",
+      "until": "2026-10-07T16:06:04.048517+00:00",
+      "reason": "H4 structure BULLISH tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "MAGMAUSDT",
