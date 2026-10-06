@@ -1121,3 +1121,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-06T10:48:39.239775+00:00
 - Strategy: SMC_VLT_RSI v0.10.0
+
+---
+
+## AIGENSYNUSDT — BUY
+
+Trade ID: `AIGENSYNUSDT-20261006-071033-ED2F1B`
+
+### Setup
+
+- Price Now Reference: 0.02135
+- Entry: 0.02104
+- Reason Entry: AIGENSYNUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 0.02096). H1 me-refine ke BULLISH_FVG 0.02103. M15 memberi execution POI BULLISH_BREAKER 0.021105. Fib H4 berada pada band OVERLAPS_0.618 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 60.5 mendukung momentum. Kerangka RSI TREND_PULLBACK_RSI: RSI H1 regime bullish; RSI H1 koreksi ke 45 lalu berbalik (65); hidden divergence RSI H1 (52->46).
+- Price Exp: 0.02172
+- Reason Price Exp: Price Exp 0.021716 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.02067
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.02074) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- TP: 0.02224
+- Reason TP: TP diarahkan ke H4_RECENT_RANGE_HIGH 0.02224 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.02224
+- Result Reason: TP diarahkan ke H4_RECENT_RANGE_HIGH 0.02224 sebagai liquidity target HTF.
+- PnL: 5.703422053231939163498098859%
+- Created: 2026-10-06T00:10:33.290149+00:00
+- Filled: 2026-10-06T02:45:31.529195+00:00
+- Closed: 2026-10-06T12:30:44.824815+00:00
+- Strategy: SMC_VLT_RSI v0.10.0
