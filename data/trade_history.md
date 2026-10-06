@@ -1187,3 +1187,36 @@ Tidak ada trailing.
 - Filled: 2026-10-06T09:24:47.133227+00:00
 - Closed: 2026-10-06T14:48:53.820620+00:00
 - Strategy: SMC_VLT_RSI v0.10.0
+
+---
+
+## SSVUSDT — SELL
+
+Trade ID: `SSVUSDT-20261006-232703-5FE6BF`
+
+### Setup
+
+- Price Now Reference: 3.096
+- Entry: 3.195
+- Reason Entry: SSVUSDT SELL: thesis dimulai dari POI H4. (BEARISH_OB 3.194). H1 me-refine ke BEARISH_FVG 3.195. M15 memberi execution POI BEARISH_BREAKER 3.098. Fib H4 berada pada band DEEPER_THAN_0.786 (score 69). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 45.4 mendukung momentum. Kerangka RSI SWEEP_DIVERGENCE_REVERSAL: divergence reguler RSI M15 (64->58); hidden divergence RSI H1 (50->55).
+- Price Exp: 3.09
+- Reason Price Exp: Price Exp 3.0903 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 3.235
+- Reason SL: SL di luar invalidasi struktur H1/H4 (3.205) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- TP: 3.086
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 3.0865 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 3.09
+- Result Reason: Price Exp 3.0903 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-06T16:27:03.057504+00:00
+- Filled: -
+- Closed: 2026-10-06T16:30:05.226170+00:00
+- Strategy: SMC_VLT_RSI v0.10.0
