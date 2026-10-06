@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-06T00:02:42.560369+00:00",
+  "saved_at": "2026-10-06T00:02:48.049547+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1029,6 +1029,13 @@
       "banned_at": "2026-10-06T00:02:12.755360+00:00",
       "until": "2026-10-06T08:02:12.755275+00:00",
       "reason": "Confidence 52.44 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "RIVERUSDT",
+      "banned_at": "2026-10-06T00:02:48.049481+00:00",
+      "until": "2026-10-06T08:02:48.049443+00:00",
+      "reason": "Confidence 35.24 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
