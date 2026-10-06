@@ -3139,7 +3139,7 @@ class TradingEngine:
                     "USDT tidak ditemukan pada Futures balance.",
                     endpoint="/fapi/v3/balance",
                 )
-            available = parse_decimal(str(usdt.get("availableBalance") or "0"))
+            wallet_balance = parse_signed_decimal(str(usdt.get("balance") or "0"))
 
             # Cache the current exchange account position mode once so the
             # first real order can choose BOTH/LONG/SHORT correctly.
@@ -3163,7 +3163,8 @@ class TradingEngine:
             await self.reply(
                 "🔴🤖 REAL MODE AKTIF\n\n"
                 "Private Binance API: ✅ Terhubung\n"
-                f"USDT Available Balance: {decimal_to_str(available)}\n"
+                f"USDT Balance: {decimal_to_str(wallet_balance)}\n"
+                f"Current Equity: {self._fmt_usd(self._equity_last)} USDT\n"
                 f"Margin: {decimal_to_str(self.margin_usdt)} USDT\n"
                 f"Leverage: {self.leverage}x\n"
                 f"Autostop: {self._autostop_short()}\n\n"
