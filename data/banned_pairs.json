@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:45:47.219094+00:00",
+  "saved_at": "2026-10-07T07:45:53.224423+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -183,6 +183,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Tidak ada quantity legal pada target notional 5.3 (toleransi ±10%).",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "LYNUSDT",
+      "banned_at": "2026-10-07T07:45:53.224391+00:00",
+      "until": "2026-10-07T15:45:53.224358+00:00",
+      "reason": "Confidence 38.1 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "MINAUSDT",
