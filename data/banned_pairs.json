@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:51:12.624065+00:00",
+  "saved_at": "2026-10-07T07:51:18.622901+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -315,6 +315,13 @@
       "banned_at": "2026-10-07T07:45:06.218838+00:00",
       "until": "2026-10-07T15:45:06.218812+00:00",
       "reason": "Confidence 44.52 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "LPTUSDT",
+      "banned_at": "2026-10-07T07:51:18.622861+00:00",
+      "until": "2026-10-07T15:51:18.622839+00:00",
+      "reason": "Confidence 35.81 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
