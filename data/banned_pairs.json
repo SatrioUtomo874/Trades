@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:44:51.111982+00:00",
+  "saved_at": "2026-10-07T07:44:56.015514+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -84,6 +84,13 @@
       "banned_at": "2026-10-07T07:43:02.414253+00:00",
       "until": "2026-10-07T15:43:02.414222+00:00",
       "reason": "Confidence 52.71 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "DOTUSDT",
+      "banned_at": "2026-10-07T07:44:56.015485+00:00",
+      "until": "2026-10-07T15:44:56.015452+00:00",
+      "reason": "Confidence 34.35 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
