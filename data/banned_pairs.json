@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:00:12.224762+00:00",
+  "saved_at": "2026-10-07T08:00:17.320845+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -497,6 +497,13 @@
       "banned_at": "2026-10-07T07:59:37.421634+00:00",
       "until": "2026-10-07T09:59:37.421548+00:00",
       "reason": "Confidence 52.72 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "JASMYUSDT",
+      "banned_at": "2026-10-07T08:00:17.320780+00:00",
+      "until": "2026-10-07T16:00:17.320756+00:00",
+      "reason": "Confidence 60.54 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
