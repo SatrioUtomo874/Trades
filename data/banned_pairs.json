@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T05:45:49.398974+00:00",
+  "saved_at": "2026-10-07T05:45:53.890620+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2702,6 +2702,13 @@
       "banned_at": "2026-10-07T05:40:27.356237+00:00",
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 6.3297, di luar target 5.3 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "TREEUSDT",
+      "banned_at": "2026-10-07T05:45:53.890433+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: TREEUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5359161, avail=0.48182404)",
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
