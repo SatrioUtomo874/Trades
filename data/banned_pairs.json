@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:39:57.123407+00:00",
+  "saved_at": "2026-10-07T08:41:18.498145+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -512,6 +512,13 @@
       "until": "2026-10-07T15:48:00.424135+00:00",
       "reason": "Confidence 34.11 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "BUSDT",
+      "banned_at": "2026-10-07T08:41:18.497946+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: BUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5263413, avail=0.48182405)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "C98USDT",
