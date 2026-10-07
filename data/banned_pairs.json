@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T05:31:47.120085+00:00",
+  "saved_at": "2026-10-07T05:31:52.618470+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2150,6 +2150,13 @@
       "until": "2026-10-07T16:00:53.663032+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "XMRUSDT",
+      "banned_at": "2026-10-07T05:31:52.618418+00:00",
+      "until": "2026-10-07T07:31:52.618393+00:00",
+      "reason": "Confidence 63.72 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "XNYUSDT",
