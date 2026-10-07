@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:29:00.309458+00:00",
+  "saved_at": "2026-10-07T08:29:09.511975+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1246,6 +1246,13 @@
       "banned_at": "2026-10-07T07:51:12.624025+00:00",
       "until": "2026-10-07T15:51:12.624002+00:00",
       "reason": "Confidence 55 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MANTAUSDT",
+      "banned_at": "2026-10-07T08:29:09.511850+00:00",
+      "until": "2026-10-07T16:29:09.511819+00:00",
+      "reason": "Confidence 37.56 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
