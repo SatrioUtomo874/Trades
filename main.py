@@ -1309,6 +1309,10 @@ class RealPositionConflictError(RuntimeError):
     """Real entry ditolak karena symbol sudah memiliki exposure Binance."""
 
 
+class InsufficientBalanceError(RuntimeError):
+    """Saldo tersedia akun kurang untuk margin entry (kondisi akun, bukan sifat pair)."""
+
+
 class MarginInfluenceError(RuntimeError):
     pass
 
@@ -2900,6 +2904,7 @@ class TradingEngine:
         await self._load_history()
         await self._load_notes()
         await self._load_banned_pairs()
+        await self._purge_balance_bans()
 
         try:
             self.symbols = await self.rest.get_exchange_info()
@@ -3610,6 +3615,8 @@ class TradingEngine:
             max_notional=effective_max_notional,
         )
         if quantity is None:
+            if str(reason).startswith("INSUFFICIENT_AVAILABLE_BALANCE"):
+                raise InsufficientBalanceError(f"{meta.symbol}: {reason}")
             raise MarginInfluenceError(f"{meta.symbol}: {reason}")
         actual = quantity * entry
         return quantity, margin * Decimal(leverage), actual
@@ -3701,7 +3708,7 @@ class TradingEngine:
             try:
                 order = await prepare_and_place(force_refresh=attempt == 1)
                 break
-            except MarginInfluenceError as exc:
+            except (InsufficientBalanceError, MarginInfluenceError) as exc:
                 last_exc = exc
                 break
             except BinanceRateLimitError as exc:
@@ -3762,6 +3769,8 @@ class TradingEngine:
                     trade.trade_id,
                     last_exc,
                 )
+            elif isinstance(last_exc, InsufficientBalanceError):
+                log.info("SALDO KURANG | pair=%s | %s", trade.pair, last_exc)
             elif isinstance(last_exc, LeverageNotSupportedError):
                 log.info("LEVERAGE TIDAK DIDUKUNG | pair=%s | %s", trade.pair, last_exc)
             elif last_exc is not None:
@@ -5695,6 +5704,23 @@ class TradingEngine:
             return None
         return parsed
 
+    async def _purge_balance_bans(self) -> None:
+        """Hapus ban permanen salah kaprah akibat saldo tersedia kurang (bukan sifat pair)."""
+        stale = [
+            pair
+            for pair, item in self.banned_pairs.items()
+            if item.get("source") == "AUTO_MARGIN_INFLUENCE"
+            and "INSUFFICIENT_AVAILABLE_BALANCE" in str(item.get("reason") or "")
+        ]
+        for pair in stale:
+            self.banned_pairs.pop(pair, None)
+        if stale:
+            try:
+                await self._persist_banned_pairs()
+            except Exception:
+                log.exception("Gagal menyimpan ban setelah pembersihan ban saldo-kurang.")
+            log.info("[BAN] %s ban saldo-kurang dibersihkan", len(stale))
+
     async def _load_banned_pairs(self) -> None:
         raw, _ = await self.github.get_file(BANNED_PATH)
         loaded: dict[str, dict[str, Any]] = {}
@@ -7311,6 +7337,7 @@ class TradingEngine:
         final_margin_banned: list[str] = []
         final_capped = 0
         final_leverage_banned: list[str] = []
+        final_balance_note: str | None = None
 
         for candidate in validated:
             if scan_generation != self._scan_generation or not self._scan_user_enabled:
@@ -7368,6 +7395,11 @@ class TradingEngine:
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
                         continue
                     except BinanceRateLimitError:
+                        break
+                    except InsufficientBalanceError as exc:
+                        # Kondisi akun, bukan sifat pair: tanpa ban; hentikan entry real siklus ini.
+                        final_balance_note = str(exc).split(": ", 1)[-1]
+                        log.info("[SCAN] saldo tersedia kurang, entry real ditunda: %s", exc)
                         break
                     except MarginInfluenceError as exc:
                         await self._ban_pair(
@@ -7552,6 +7584,9 @@ class TradingEngine:
         leverage_line = f"├ Ban leverage      {len(final_leverage_banned)}"
         if final_leverage_banned:
             leverage_line += f"  ({', '.join(final_leverage_banned[:10])})"
+        balance_text = (
+            f"├ Saldo kurang     entry real ditunda ({final_balance_note})\n" if final_balance_note else ""
+        )
         await self.reply(
             f"╭─ 🔄 SCAN #{cycle} SELESAI ─╮\n"
             f"│ ₿ BTC H4   {btc_trend}\n"
@@ -7575,6 +7610,7 @@ class TradingEngine:
             f"├ Masuk /trade     {len(final_added)}  (error {final_add_errors}, dibatasi {final_capped})\n"
             f"{margin_line}\n"
             f"{leverage_line}\n"
+            f"{balance_text}"
             f"└ Error analisis   {analysis_errors}\n\n"
             f"🎯 CONFIDENCE (min {decimal_to_str(self.scan_threshold)})\n"
             f"├ Awal {fmt_num(avg_initial)}  →  Valid {fmt_num(avg_validated)}\n"
