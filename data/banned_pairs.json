@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T05:40:29.837432+00:00",
+  "saved_at": "2026-10-07T05:40:33.018193+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -897,6 +897,13 @@
       "until": "2026-10-07T16:05:47.752042+00:00",
       "reason": "H4 structure BULLISH tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ETCUSDT",
+      "banned_at": "2026-10-07T05:40:33.018100+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5.3 (toleransi ±10%).",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "ETHFIUSDT",
