@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:34:22.024881+00:00",
+  "saved_at": "2026-10-07T08:34:27.611132+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -385,6 +385,13 @@
       "banned_at": "2026-10-07T08:27:55.022935+00:00",
       "until": "2026-10-07T10:27:55.022914+00:00",
       "reason": "Confidence 43.75 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "BLURUSDT",
+      "banned_at": "2026-10-07T08:34:27.610997+00:00",
+      "until": "2026-10-07T10:34:27.610968+00:00",
+      "reason": "Confidence 62.75 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
