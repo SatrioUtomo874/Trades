@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:59:31.719353+00:00",
+  "saved_at": "2026-10-07T07:59:37.421727+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -470,6 +470,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Quantity terdekat menghasilkan notional 6.47, di luar target 5.3 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "IOTAUSDT",
+      "banned_at": "2026-10-07T07:59:37.421634+00:00",
+      "until": "2026-10-07T09:59:37.421548+00:00",
+      "reason": "Confidence 52.72 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "JTOUSDT",
