@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T05:45:45.098254+00:00",
+  "saved_at": "2026-10-07T05:45:49.398974+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -497,6 +497,13 @@
       "banned_at": "2026-10-07T05:40:22.671080+00:00",
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5.3 (toleransi ±10%).",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "BEATUSDT",
+      "banned_at": "2026-10-07T05:45:49.398823+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: BEATUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5342496, avail=0.48182404)",
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
