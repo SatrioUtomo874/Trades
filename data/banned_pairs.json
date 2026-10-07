@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:08:25.790400+00:00",
+  "saved_at": "2026-10-07T08:08:30.500672+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1211,6 +1211,13 @@
       "banned_at": "2026-10-07T07:57:41.601174+00:00",
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: SPXUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5170392, avail=0.48182406)",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "STABLEUSDT",
+      "banned_at": "2026-10-07T08:08:30.500529+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: STABLEUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.53503033, avail=0.48182405)",
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
