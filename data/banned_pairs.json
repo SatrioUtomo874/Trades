@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:45:53.224423+00:00",
+  "saved_at": "2026-10-07T07:46:02.114593+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -196,6 +196,13 @@
       "banned_at": "2026-10-07T07:44:51.111953+00:00",
       "until": "2026-10-07T09:44:51.111914+00:00",
       "reason": "Confidence 26.74 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MONUSDT",
+      "banned_at": "2026-10-07T07:46:02.114529+00:00",
+      "until": "2026-10-07T15:46:02.114495+00:00",
+      "reason": "Confidence 44.7 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
