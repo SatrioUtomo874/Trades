@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:34:41.628177+00:00",
+  "saved_at": "2026-10-07T07:34:51.223191+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1933,6 +1933,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: NAORISUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5362797, avail=0.48182404)",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "NEARUSDT",
+      "banned_at": "2026-10-07T07:34:51.223095+00:00",
+      "until": "2026-10-07T15:34:51.223070+00:00",
+      "reason": "Confidence 38.25 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "NEOUSDT",
