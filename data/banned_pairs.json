@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:48:29.616029+00:00",
+  "saved_at": "2026-10-07T07:48:34.418600+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -154,6 +154,13 @@
       "banned_at": "2026-10-07T07:44:06.723240+00:00",
       "until": "2026-10-07T15:44:06.723211+00:00",
       "reason": "Confidence 55 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "GRASSUSDT",
+      "banned_at": "2026-10-07T07:48:34.418541+00:00",
+      "until": "2026-10-07T15:48:34.418516+00:00",
+      "reason": "Confidence 40.82 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
