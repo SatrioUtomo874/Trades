@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:30:59.218599+00:00",
+  "saved_at": "2026-10-07T07:31:05.413480+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1832,8 +1832,8 @@
     {
       "pair": "MINAUSDT",
       "banned_at": "2026-10-07T05:30:46.014954+00:00",
-      "until": "2026-10-07T07:30:46.014926+00:00",
-      "reason": "Confidence 29.83 di bawah threshold 70. Menunggu trigger RSI.",
+      "until": "2026-10-07T09:31:05.413306+00:00",
+      "reason": "Confidence 25.96 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
