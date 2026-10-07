@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:01:38.618038+00:00",
+  "saved_at": "2026-10-07T08:01:44.417243+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -364,6 +364,13 @@
       "banned_at": "2026-10-07T08:01:33.316652+00:00",
       "until": "2026-10-07T10:01:33.316616+00:00",
       "reason": "Confidence 31.98 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "EDENUSDT",
+      "banned_at": "2026-10-07T08:01:44.417173+00:00",
+      "until": "2026-10-07T16:01:44.417148+00:00",
+      "reason": "Confidence 38.29 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
