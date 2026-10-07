@@ -46,6 +46,8 @@ import contextvars
 import hashlib
 import hmac
 import copy
+import ctypes
+import gc
 import html  # kept out of user output; used only for safe GitHub text if needed
 import importlib
 import inspect
@@ -182,6 +184,7 @@ DEFAULT_SCAN_THRESHOLD = Decimal("70")
 SCAN_PAIR_DELAY_SECONDS = 1.0
 SCAN_MAX_PAIRS_PER_CYCLE = 50
 SCAN_CYCLE_DELAY_SECONDS = 30.0
+MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "400") or "400")
 # H4 scanner gate: scanner baru membuka window pada penutupan H4 WIB.
 # Binance H4 boundaries dipetakan ke 03,07,11,15,19,23 WIB.
 H4_SCAN_HOURS_WIB = (3, 7, 11, 15, 19, 23)
@@ -219,6 +222,62 @@ if not REPO_NAME or "/" not in REPO_NAME:
 # ============================================================
 
 log = logging.getLogger("main.trading_engine")
+
+
+HEAVY_ANALYSIS_KEYS = frozenset(
+    {
+        "smc", "raw_result", "htf_poi_hierarchy", "breakers", "order_blocks", "fvg_recent",
+        "h4_primary_ranking_for_direction", "liquidity_pools", "liquidity_sweeps_recent",
+        "recent_events", "last_pivot_labels", "zones", "candles", "pivots",
+    }
+)
+VALIDATOR_DUPLICATE_KEYS = frozenset({"macro", "multi_timeframe", "smc"})
+
+
+def _shrink_value(value: Any, depth: int = 0) -> Any:
+    if depth > 8:
+        return None
+    if isinstance(value, dict):
+        return {k: _shrink_value(v, depth + 1) for k, v in value.items() if k not in HEAVY_ANALYSIS_KEYS}
+    if isinstance(value, (list, tuple)):
+        return [_shrink_value(v, depth + 1) for v in value[:8]]
+    if isinstance(value, str) and len(value) > 500:
+        return value[:500]
+    return value
+
+
+def compact_analysis(analysis: Any) -> dict[str, Any]:
+    """Pangkas analisis strategy (salinan ganda, daftar zona) agar RAM dan file history kecil."""
+    if not isinstance(analysis, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in analysis.items():
+        if key in HEAVY_ANALYSIS_KEYS:
+            continue
+        if key == "validator" and isinstance(value, dict):
+            value = {k: v for k, v in value.items() if k not in VALIDATOR_DUPLICATE_KEYS}
+        out[key] = _shrink_value(value)
+    return out
+
+
+def rss_mb() -> float:
+    try:
+        with open("/proc/self/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+    except Exception:
+        pass
+    return -1.0
+
+
+def release_memory() -> None:
+    """Kembalikan memori bebas ke OS (gc + malloc_trim)."""
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
 
 
 class TelegramErrorHandler(logging.Handler):
@@ -2925,6 +2984,23 @@ class TradingEngine:
     # History
     # --------------------------------------------------------
 
+    def _shed_memory(self) -> None:
+        """Katup darurat: buang detail analisis trade lama di RAM agar proses tidak di-kill OOM."""
+        dropped = 0
+        for record in self.history_records[:-40]:
+            analysis = record.get("strategy_analysis")
+            if isinstance(analysis, dict) and len(analysis) > 2:
+                record["strategy_analysis"] = {k: analysis[k] for k in ("confidence", "scan") if k in analysis}
+                dropped += 1
+        release_memory()
+        if dropped:
+            log.warning(
+                "[MEM] RAM %.0f MB di atas batas %.0f MB; analisis %s trade lama dipangkas.",
+                rss_mb(),
+                MEMORY_SOFT_LIMIT_MB,
+                dropped,
+            )
+
     async def _load_history(self) -> None:
         raw_trades, _ = await self.github.get_file(
             HISTORY_TRADES_PATH
@@ -2939,7 +3015,11 @@ class TradingEngine:
                 )
 
                 if isinstance(payload, list):
+                    for record in payload:
+                        if isinstance(record, dict) and isinstance(record.get("strategy_analysis"), dict):
+                            record["strategy_analysis"] = compact_analysis(record["strategy_analysis"])
                     self.history_records = payload
+                    raw_trades = None
                 else:
                     self.history_records = []
 
@@ -5447,7 +5527,7 @@ class TradingEngine:
                 else None
             ),
             strategy_analysis=(
-                copy.deepcopy(record.get("strategy_analysis"))
+                compact_analysis(record.get("strategy_analysis"))
                 if isinstance(record.get("strategy_analysis"), dict)
                 else {}
             ),
@@ -6874,6 +6954,9 @@ class TradingEngine:
                 # H4 can be disabled while sleeping on a scheduler boundary;
                 # after the state flips, the next iteration becomes normal scan.
                 await self._run_scan_cycle()
+                release_memory()
+                if rss_mb() > MEMORY_SOFT_LIMIT_MB:
+                    self._shed_memory()
 
                 # Satu cycle berhasil dimulai/selesai tanpa rate-limit fatal:
                 # opening gate selesai, sehingga window berjalan terus sampai MAX.
@@ -7256,7 +7339,7 @@ class TradingEngine:
                     "strategy_source": "SCAN",
                     "strategy_confidence": candidate.get("confidence"),
                     "strategy_data_source": candidate.get("data_source") or "BYBIT",
-                    "strategy_analysis": candidate.get("analysis") or {},
+                    "strategy_analysis": compact_analysis(candidate.get("analysis")),
                 }
                 meta["margin_usdt"] = self.margin_usdt
                 meta["leverage"] = self.leverage
@@ -7473,6 +7556,7 @@ class TradingEngine:
             f"╭─ 🔄 SCAN #{cycle} SELESAI ─╮\n"
             f"│ ₿ BTC H4   {btc_trend}\n"
             f"│ ⏱ {duration:.0f}s  •  siklus berikut {SCAN_CYCLE_DELAY_SECONDS:g}s\n"
+            f"│ 💾 RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
             "╰──────────────────╯\n\n"
             "🌐 UNIVERSE\n"
             f"├ Binance ∩ Bybit  {universe['common_count']}\n"
@@ -7990,8 +8074,10 @@ class TradingEngine:
             "candles_used": data_info.get(
                 "candles_used"
             ),
-            "analysis": self._json_safe(analysis),
-            "raw_result": self._json_safe(payload),
+            "analysis": self._json_safe(compact_analysis(analysis)),
+            "raw_result": self._json_safe(
+                {k: v for k, v in compact_analysis(payload).items() if k != "analysis"}
+            ),
         }
 
         return normalized
@@ -8304,8 +8390,8 @@ class TradingEngine:
                     "candles_requested", 672
                 ),
                 "candles_used": result.get("candles_used"),
-                "analysis": result.get("analysis", {}),
-                "raw_result": result.get("raw_result", {}),
+                "analysis": compact_analysis(result.get("analysis")),
+                "raw_result": compact_analysis(result.get("raw_result")),
             },
         }
 
@@ -8505,7 +8591,7 @@ class TradingEngine:
                 else None
             ),
             strategy_analysis=(
-                copy.deepcopy(meta.get("strategy_analysis"))
+                compact_analysis(meta.get("strategy_analysis"))
                 if isinstance(meta.get("strategy_analysis"), dict)
                 else {}
             ),
