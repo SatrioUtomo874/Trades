@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:36:27.793880+00:00",
+  "saved_at": "2026-10-07T07:37:03.611040+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1123,13 +1123,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "FFUSDT",
-      "banned_at": "2026-10-07T05:36:11.214205+00:00",
-      "until": "2026-10-07T07:36:11.214168+00:00",
-      "reason": "Confidence 35.99 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "FHEUSDT",
       "banned_at": "2026-10-07T07:00:14.404313+00:00",
       "until": null,
@@ -1429,13 +1422,6 @@
       "until": "2026-10-07T16:16:32.446440+00:00",
       "reason": "H4 structure BULLISH tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "IMXUSDT",
-      "banned_at": "2026-10-07T05:36:27.524104+00:00",
-      "until": "2026-10-07T07:36:27.524077+00:00",
-      "reason": "Confidence 58.03 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "INITUSDT",
