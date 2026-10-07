@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T06:30:58.117793+00:00",
+  "saved_at": "2026-10-07T07:00:14.404449+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1128,6 +1128,13 @@
       "until": "2026-10-07T07:36:11.214168+00:00",
       "reason": "Confidence 35.99 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "FHEUSDT",
+      "banned_at": "2026-10-07T07:00:14.404313+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: FHEUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.53552422, avail=0.48182404)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "FIDAUSDT",
