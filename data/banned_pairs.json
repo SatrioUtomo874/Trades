@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:39:38.718078+00:00",
+  "saved_at": "2026-10-07T07:39:47.818855+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2177,6 +2177,13 @@
       "banned_at": "2026-10-07T07:30:59.218431+00:00",
       "until": "2026-10-07T09:30:59.218395+00:00",
       "reason": "Confidence 30.15 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "POPCATUSDT",
+      "banned_at": "2026-10-07T07:39:47.818735+00:00",
+      "until": "2026-10-07T09:39:47.818708+00:00",
+      "reason": "Confidence 28.56 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
