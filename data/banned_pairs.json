@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:51:07.417078+00:00",
+  "saved_at": "2026-10-07T07:51:12.624065+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -343,6 +343,13 @@
       "banned_at": "2026-10-07T07:50:51.313750+00:00",
       "until": "2026-10-07T15:50:51.313716+00:00",
       "reason": "Confidence 39.32 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MANAUSDT",
+      "banned_at": "2026-10-07T07:51:12.624025+00:00",
+      "until": "2026-10-07T15:51:12.624002+00:00",
+      "reason": "Confidence 55 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
