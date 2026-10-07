@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:50:46.221896+00:00",
+  "saved_at": "2026-10-07T07:50:51.313805+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -315,6 +315,13 @@
       "banned_at": "2026-10-07T07:45:53.224391+00:00",
       "until": "2026-10-07T15:45:53.224358+00:00",
       "reason": "Confidence 38.1 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MAGMAUSDT",
+      "banned_at": "2026-10-07T07:50:51.313750+00:00",
+      "until": "2026-10-07T15:50:51.313716+00:00",
+      "reason": "Confidence 39.32 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
