@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:50:19.413480+00:00",
+  "saved_at": "2026-10-07T07:50:24.717682+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -41,6 +41,13 @@
       "pair": "AKEUSDT",
       "banned_at": "2026-10-07T07:49:54.413593+00:00",
       "until": "2026-10-07T09:49:54.413540+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ALGOUSDT",
+      "banned_at": "2026-10-07T07:50:24.717633+00:00",
+      "until": "2026-10-07T09:50:24.717604+00:00",
       "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
