@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:51:39.320696+00:00",
+  "saved_at": "2026-10-07T07:52:12.003495+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -365,6 +365,13 @@
       "until": "2026-10-07T15:45:53.224358+00:00",
       "reason": "Confidence 38.1 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MAGICUSDT",
+      "banned_at": "2026-10-07T07:52:12.003417+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: MAGICUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.53502831, avail=0.48182406)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "MAGMAUSDT",
