@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:36:03.319131+00:00",
+  "saved_at": "2026-10-07T07:36:09.719782+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -971,8 +971,8 @@
     {
       "pair": "DYDXUSDT",
       "banned_at": "2026-10-07T05:35:43.012953+00:00",
-      "until": "2026-10-07T07:35:43.012924+00:00",
-      "reason": "Confidence 39.75 di bawah threshold 70. Menunggu trigger RSI.",
+      "until": "2026-10-07T09:36:09.719543+00:00",
+      "reason": "Confidence 31.41 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
