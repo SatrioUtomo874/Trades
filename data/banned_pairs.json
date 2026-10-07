@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:38:43.511474+00:00",
+  "saved_at": "2026-10-07T07:38:49.311839+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2759,6 +2759,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: TREEUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5359161, avail=0.48182404)",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "TRIAUSDT",
+      "banned_at": "2026-10-07T07:38:49.311698+00:00",
+      "until": "2026-10-07T09:38:49.311662+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "TRUMPUSDT",
