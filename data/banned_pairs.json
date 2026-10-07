@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T11:23:17.723928+00:00",
+  "saved_at": "2026-10-07T11:23:22.915669+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -798,6 +798,13 @@
       "banned_at": "2026-10-07T11:17:56.912875+00:00",
       "until": "2026-10-07T19:17:56.912837+00:00",
       "reason": "Confidence 67.22 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "KAITOUSDT",
+      "banned_at": "2026-10-07T11:23:22.915562+00:00",
+      "until": "2026-10-07T13:23:22.915525+00:00",
+      "reason": "Confidence 37.64 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
