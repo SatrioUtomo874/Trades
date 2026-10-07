@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:19:25.088720+00:00",
+  "saved_at": "2026-10-07T08:19:29.592016+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -449,6 +449,13 @@
       "until": "2026-10-07T09:55:09.512452+00:00",
       "reason": "Confidence 38.85 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "COAIUSDT",
+      "banned_at": "2026-10-07T08:19:29.591881+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: COAIUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5398248, avail=0.48182405)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "COMPUSDT",
