@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:28:18.411997+00:00",
+  "saved_at": "2026-10-07T08:28:23.711558+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1561,6 +1561,13 @@
       "banned_at": "2026-10-07T08:11:16.119343+00:00",
       "until": "2026-10-07T10:11:16.119322+00:00",
       "reason": "Confidence 26.8 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "POLYXUSDT",
+      "banned_at": "2026-10-07T08:28:23.711410+00:00",
+      "until": "2026-10-07T10:28:23.711375+00:00",
+      "reason": "Confidence 43.41 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
