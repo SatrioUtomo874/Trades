@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:30:00.511639+00:00",
+  "saved_at": "2026-10-07T07:30:44.234254+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2194,13 +2194,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "PONSUSDT",
-      "banned_at": "2026-10-07T05:30:35.015422+00:00",
-      "until": "2026-10-07T07:30:35.015392+00:00",
-      "reason": "Confidence 35.65 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "POPCATUSDT",
       "banned_at": "2026-10-07T05:38:35.224110+00:00",
       "until": "2026-10-07T07:38:35.224081+00:00",
@@ -2772,13 +2765,6 @@
       "banned_at": "2026-10-07T05:37:56.621289+00:00",
       "until": "2026-10-07T07:37:56.621264+00:00",
       "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "TRUMPUSDT",
-      "banned_at": "2026-10-07T05:30:22.621703+00:00",
-      "until": "2026-10-07T07:30:22.621670+00:00",
-      "reason": "Confidence 34.79 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
