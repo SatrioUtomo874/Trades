@@ -1220,3 +1220,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-06T16:30:05.226170+00:00
 - Strategy: SMC_VLT_RSI v0.10.0
+
+---
+
+## ZAMAUSDT — SELL
+
+Trade ID: `ZAMAUSDT-20261007-123354-092BD0`
+
+### Setup
+
+- Price Now Reference: 0.07928
+- Entry: 0.08714
+- Reason Entry: ZAMAUSDT SELL: thesis dimulai dari POI H4. (BEARISH_BREAKER 0.08767). H1 me-refine ke BEARISH_OB 0.08714. M15 memberi execution POI BEARISH_FVG 0.080935. Fib H4 berada pada band OVERLAPS_0.618 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 27.1 mendukung momentum. VLT/OHLCV searah dengan setup. Kerangka RSI TREND_PULLBACK_RSI: RSI H1 regime bearish; RSI H1 koreksi ke 55 lalu berbalik (31).
+- Price Exp: 0.07811
+- Reason Price Exp: Price Exp 0.078119 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.08926
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.08775) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1. SL dilebarkan ke risiko minimum 1.5 ATR H1.
+- TP: 0.07734
+- Reason TP: TP diarahkan ke H4_EQUAL_LEVELS 0.077345 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.07811
+- Result Reason: Price Exp 0.078119 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-07T05:33:54.518686+00:00
+- Filled: -
+- Closed: 2026-10-07T09:33:05.589129+00:00
+- Strategy: SMC_VLT_RSI v0.10.0
