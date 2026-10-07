@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:33:18.813372+00:00",
+  "saved_at": "2026-10-07T08:33:24.313225+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1316,6 +1316,13 @@
       "banned_at": "2026-10-07T07:59:43.924366+00:00",
       "until": "2026-10-07T09:59:43.924333+00:00",
       "reason": "Confidence 33.77 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MELANIAUSDT",
+      "banned_at": "2026-10-07T08:33:24.313094+00:00",
+      "until": "2026-10-07T10:33:24.313066+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
