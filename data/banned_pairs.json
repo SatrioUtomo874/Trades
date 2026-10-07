@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:57:36.911154+00:00",
+  "saved_at": "2026-10-07T07:57:41.601264+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -799,6 +799,13 @@
       "until": "2026-10-07T15:53:57.115233+00:00",
       "reason": "Confidence 64.98 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "SPXUSDT",
+      "banned_at": "2026-10-07T07:57:41.601174+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: SPXUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5170392, avail=0.48182406)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "STRKUSDT",
