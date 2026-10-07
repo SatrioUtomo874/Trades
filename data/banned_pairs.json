@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:46:34.823097+00:00",
+  "saved_at": "2026-10-07T07:47:02.792318+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -337,6 +337,13 @@
       "until": "2026-10-07T09:43:51.912065+00:00",
       "reason": "Confidence 51.46 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "TIAUSDT",
+      "banned_at": "2026-10-07T07:47:02.792276+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: TIAUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5259474, avail=0.48182403)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "TRBUSDT",
