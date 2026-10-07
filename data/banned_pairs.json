@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T05:45:53.890620+00:00",
+  "saved_at": "2026-10-07T05:45:58.893694+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2003,6 +2003,13 @@
       "until": "2026-10-07T13:36:39.120823+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "OPGUSDT",
+      "banned_at": "2026-10-07T05:45:58.893525+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: OPGUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.540552, avail=0.48182405)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "OPNUSDT",
