@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:36:09.719782+00:00",
+  "saved_at": "2026-10-07T07:36:27.793880+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2276,6 +2276,13 @@
       "until": "2026-10-07T16:20:37.753233+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "QUSDT",
+      "banned_at": "2026-10-07T07:36:27.793727+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: QUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.53515961, avail=0.48182404)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "RAREUSDT",
