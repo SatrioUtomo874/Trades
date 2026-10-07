@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:22:26.211812+00:00",
+  "saved_at": "2026-10-07T08:22:32.117543+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1744,6 +1744,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: TIAUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5259474, avail=0.48182403)",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "TOWNSUSDT",
+      "banned_at": "2026-10-07T08:22:32.117435+00:00",
+      "until": "2026-10-07T10:22:32.117408+00:00",
+      "reason": "Confidence 42.31 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "TRBUSDT",
