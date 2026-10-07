@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:55:50.323960+00:00",
+  "saved_at": "2026-10-07T07:55:56.211421+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -210,6 +210,13 @@
       "banned_at": "2026-10-07T07:44:01.413635+00:00",
       "until": "2026-10-07T09:44:01.413605+00:00",
       "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "CARVUSDT",
+      "banned_at": "2026-10-07T07:55:56.211329+00:00",
+      "until": "2026-10-07T09:55:56.211292+00:00",
+      "reason": "Confidence 26.62 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
