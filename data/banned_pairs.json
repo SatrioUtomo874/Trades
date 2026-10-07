@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:47:02.792318+00:00",
+  "saved_at": "2026-10-07T07:47:07.393070+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -323,6 +323,13 @@
       "until": "2026-10-07T15:43:42.222052+00:00",
       "reason": "Confidence 34.71 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "STRKUSDT",
+      "banned_at": "2026-10-07T07:47:07.393021+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: STRKUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.535377972, avail=0.48182405)",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "SUIUSDT",
