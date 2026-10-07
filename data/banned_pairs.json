@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T05:32:28.136697+00:00",
+  "saved_at": "2026-10-07T05:32:34.114354+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -120,6 +120,13 @@
       "until": "2026-10-07T12:31:01.338290+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "AKEUSDT",
+      "banned_at": "2026-10-07T05:32:34.114280+00:00",
+      "until": "2026-10-07T07:32:34.114247+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "ALGOUSDT",
