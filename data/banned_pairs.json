@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:42:07.794708+00:00",
+  "saved_at": "2026-10-07T07:42:18.615938+00:00",
   "bans": [
+    {
+      "pair": "AAVEUSDT",
+      "banned_at": "2026-10-07T07:42:18.615915+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Quantity terdekat menghasilkan notional 17.605, di luar target 5.3 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
     {
       "pair": "AVAXUSDT",
       "banned_at": "2026-10-07T07:42:06.165651+00:00",
