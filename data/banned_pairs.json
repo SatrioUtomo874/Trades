@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:33:07.722479+00:00",
+  "saved_at": "2026-10-07T08:33:13.122217+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1926,6 +1926,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: SPXUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.5170392, avail=0.48182406)",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "SQDUSDT",
+      "banned_at": "2026-10-07T08:33:13.122071+00:00",
+      "until": "2026-10-07T10:33:13.122042+00:00",
+      "reason": "Confidence 27.23 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "STABLEUSDT",
