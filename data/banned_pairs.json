@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:33:13.122217+00:00",
+  "saved_at": "2026-10-07T08:33:18.813372+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -344,6 +344,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: BICOUSDT: INSUFFICIENT_AVAILABLE_BALANCE (need=0.53468996, avail=0.48182404)",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "BIGTIMEUSDT",
+      "banned_at": "2026-10-07T08:33:18.813215+00:00",
+      "until": "2026-10-07T10:33:18.813188+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "BILLUSDT",
