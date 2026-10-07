@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:12:34.616295+00:00",
+  "saved_at": "2026-10-07T08:12:40.610532+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -883,6 +883,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Tidak ada quantity legal pada target notional 5.3 (toleransi ±10%).",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "LUNA2USDT",
+      "banned_at": "2026-10-07T08:12:40.610408+00:00",
+      "until": "2026-10-07T10:12:40.610372+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "LYNUSDT",
