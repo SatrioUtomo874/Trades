@@ -1,12 +1,19 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:42:01.021625+00:00",
+  "saved_at": "2026-10-07T07:42:02.770424+00:00",
   "bans": [
     {
       "pair": "ETHUSDT",
       "banned_at": "2026-10-07T07:42:01.021600+00:00",
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Tidak ada quantity legal pada target notional 5.3 (toleransi ±10%).",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "UNIUSDT",
+      "banned_at": "2026-10-07T07:42:02.770400+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Quantity terdekat menghasilkan notional 8.189, di luar target 5.3 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
     }
   ]
