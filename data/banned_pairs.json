@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T08:41:18.498145+00:00",
+  "saved_at": "2026-10-07T09:33:18.294283+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2542,6 +2542,13 @@
       "until": "2026-10-07T10:12:14.510011+00:00",
       "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ZAMAUSDT",
+      "banned_at": "2026-10-07T09:33:18.294120+00:00",
+      "until": "2026-10-07T17:33:18.294092+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ZENUSDT",
