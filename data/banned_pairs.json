@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-07T07:38:54.621822+00:00",
+  "saved_at": "2026-10-07T07:39:38.718078+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -154,13 +154,6 @@
       "banned_at": "2026-10-07T05:36:33.310852+00:00",
       "until": "2026-10-07T13:36:33.310823+00:00",
       "reason": "Confidence 34.28 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "AIXBTUSDT",
-      "banned_at": "2026-10-07T05:38:53.215158+00:00",
-      "until": "2026-10-07T07:38:53.215123+00:00",
-      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
@@ -644,13 +637,6 @@
       "banned_at": "2026-10-07T05:41:31.216560+00:00",
       "until": "2026-10-07T13:41:31.216521+00:00",
       "reason": "Confidence 39.62 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "BTRUSDT",
-      "banned_at": "2026-10-07T05:38:41.416435+00:00",
-      "until": "2026-10-07T07:38:41.416412+00:00",
-      "reason": "Confidence 40 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
@@ -2145,13 +2131,6 @@
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
-      "pair": "PIEVERSEUSDT",
-      "banned_at": "2026-10-07T05:38:20.316495+00:00",
-      "until": "2026-10-07T07:38:20.316473+00:00",
-      "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "PIPPINUSDT",
       "banned_at": "2026-10-06T16:19:09.547452+00:00",
       "until": "2026-10-07T16:19:09.547426+00:00",
@@ -2198,13 +2177,6 @@
       "banned_at": "2026-10-07T07:30:59.218431+00:00",
       "until": "2026-10-07T09:30:59.218395+00:00",
       "reason": "Confidence 30.15 di bawah threshold 70. Menunggu trigger RSI.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "POPCATUSDT",
-      "banned_at": "2026-10-07T05:38:35.224110+00:00",
-      "until": "2026-10-07T07:38:35.224081+00:00",
-      "reason": "Confidence 30.77 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
