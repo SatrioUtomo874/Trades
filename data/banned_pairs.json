@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T05:00:14.709714+00:00",
+  "saved_at": "2026-10-08T05:01:06.113423+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -351,6 +351,13 @@
       "until": "2026-10-08T06:49:46.117548+00:00",
       "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ETHUSDT",
+      "banned_at": "2026-10-08T05:01:06.113337+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5.5 (toleransi ±10%).",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "FARTCOINUSDT",
