@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T11:56:50.220095+00:00",
+  "saved_at": "2026-10-08T11:56:56.025108+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -323,6 +323,13 @@
       "until": "2026-10-08T13:51:15.733876+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "LDOUSDT",
+      "banned_at": "2026-10-08T11:56:56.025043+00:00",
+      "until": "2026-10-08T13:56:56.025008+00:00",
+      "reason": "Confidence 37.25 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "LINKUSDT",
