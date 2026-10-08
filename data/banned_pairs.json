@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T11:53:33.712937+00:00",
+  "saved_at": "2026-10-08T11:53:39.731440+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -336,6 +336,13 @@
       "banned_at": "2026-10-08T04:48:41.027023+00:00",
       "until": "2026-10-08T12:48:41.026989+00:00",
       "reason": "Confidence 53.59 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "XRPUSDT",
+      "banned_at": "2026-10-08T11:53:39.731395+00:00",
+      "until": "2026-10-08T13:53:39.731360+00:00",
+      "reason": "Confidence 48.24 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
