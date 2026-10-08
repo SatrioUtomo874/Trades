@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T05:54:22.123992+00:00",
+  "saved_at": "2026-10-08T05:54:27.921025+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -952,6 +952,13 @@
       "banned_at": "2026-10-08T05:07:13.518926+00:00",
       "until": "2026-10-08T07:07:13.518903+00:00",
       "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "HANAUSDT",
+      "banned_at": "2026-10-08T05:54:27.920888+00:00",
+      "until": "2026-10-08T07:54:27.920860+00:00",
+      "reason": "Confidence 51.33 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
