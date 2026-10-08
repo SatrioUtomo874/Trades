@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T11:54:36.633950+00:00",
+  "saved_at": "2026-10-08T11:54:40.611170+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -148,6 +148,13 @@
       "until": "2026-10-09T11:53:17.403133+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "FILUSDT",
+      "banned_at": "2026-10-08T11:54:40.611123+00:00",
+      "until": "2026-10-09T11:54:40.611090+00:00",
+      "reason": "H4 structure BULLISH tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "FLOWUSDT",
