@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T05:52:37.614174+00:00",
+  "saved_at": "2026-10-08T05:52:40.776247+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1632,6 +1632,13 @@
       "until": "2026-10-08T07:07:19.318994+00:00",
       "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "RONINUSDT",
+      "banned_at": "2026-10-08T05:52:38.647359+00:00",
+      "until": "2026-10-08T13:52:38.647333+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ROSEUSDT",
