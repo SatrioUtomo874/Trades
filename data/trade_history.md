@@ -1418,3 +1418,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-08T13:42:28.793335+00:00
 - Strategy: SMC_VLT_RSI v1.1.0
+
+---
+
+## KERNELUSDT — SELL
+
+Trade ID: `KERNELUSDT-20261008-130156-A07699`
+
+### Setup
+
+- Price Now Reference: 0.05037
+- Entry: 0.05285
+- Reason Entry: KERNELUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.052805). H1 me-refine ke BEARISH_FVG 0.05309. M15 memberi execution POI BEARISH_FVG 0.05285. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 37.5 mendukung momentum. VLT/OHLCV searah dengan setup. Kerangka RSI SWEEP_DIVERGENCE_REVERSAL: RSI H1 regime bearish; divergence reguler RSI M15 (58->55). Gerbang pasar: TP ke pool H4 H4_SWING_LOW 0.04989.
+- Price Exp: 0.05008
+- Reason Price Exp: Price Exp 0.050082 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.05386
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.05366) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- TP: 0.04989
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.04989 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05008
+- Result Reason: Price Exp 0.050082 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-08T06:01:56.195499+00:00
+- Filled: -
+- Closed: 2026-10-08T15:13:25.498275+00:00
+- Strategy: SMC_VLT_RSI v1.1.0
