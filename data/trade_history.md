@@ -1286,3 +1286,36 @@ Tidak ada trailing.
 - Filled: 2026-10-07T11:21:59.888790+00:00
 - Closed: 2026-10-08T01:49:04.686079+00:00
 - Strategy: SMC_VLT_RSI v0.10.0
+
+---
+
+## KITEUSDT — SELL
+
+Trade ID: `KITEUSDT-20261008-120029-3E4CA6`
+
+### Setup
+
+- Price Now Reference: 0.13263
+- Entry: 0.13744
+- Reason Entry: KITEUSDT SELL: thesis dimulai dari POI H4. (BEARISH_OB 0.138195). H1 me-refine ke BEARISH_FVG 0.137435. M15 memberi execution POI BEARISH_FVG 0.138035. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 40.3 mendukung momentum. VLT/OHLCV searah dengan setup. Kerangka RSI SWEEP_DIVERGENCE_REVERSAL: RSI H1 regime bearish; divergence reguler RSI H1 (44->40). Gerbang pasar: TP ke pool H4 H4_SWING_LOW 0.13189.
+- Price Exp: 0.13218
+- Reason Price Exp: Price Exp 0.132186 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.14001
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.13751) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1. SL dilebarkan ke risiko minimum 1.5 ATR H1.
+- TP: 0.13189
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.13189 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.13218
+- Result Reason: Price Exp 0.132186 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-08T05:00:29.421916+00:00
+- Filled: -
+- Closed: 2026-10-08T05:51:03.999731+00:00
+- Strategy: SMC_VLT_RSI v1.1.0
