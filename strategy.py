@@ -16,6 +16,11 @@ Prinsip desain v0.9.0
    zone lalu berbalik / hidden divergence) atau DIVERGENCE_REVERSAL (divergence reguler, idealnya
    setelah sweep). Tanpa trigger RSI, confidence dibatasi di bawah threshold. Momentum RSI menjadi
    pengali confidence, bukan sekadar tambahan poin. VLT/OHLCV tetap konfirmasi volume.
+   Gerbang kualitas pasar (v1.0): tanpa konfirmasi struktur M15 (MSS/BOS) setup hanya menunggu; pisau jatuh,
+   pasca pompa, EMA melawan arah tanpa MSS, SL > 4.5% harga, dan RSI breakdown ditolak; TP dipangkas maks 3.5R.
+   Model likuiditas (v1.1): pool yang sudah disapu dibuang; entry ditolak jika masih ada pool signifikan
+   di bawah harga yang belum disapu; entry di retest leg sweep->MSS (FVG/OTE); SL di luar pool yang bisa
+   diburu; TP ke pool signifikan terdekat dengan RR >= 2 (tanpa pool = tanpa setup).
 2. Semua keputusan struktur memakai CLOSED candles saja.
 3. Target pair dianalisis multi-timeframe:
       D1/H4 -> external regime dan structure utama
@@ -78,7 +83,7 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "0.10.0"
+STRATEGY_VERSION = "1.1.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -154,6 +159,23 @@ EQUILIBRIUM_SELL_MIN = 0.40
 MOMENTUM_FACTOR_FLOOR = 0.50
 VETO_CONFIDENCE_CAP = 55.0
 UNCONFIRMED_CONFIDENCE_CAP = 64.0
+# Gerbang kualitas pasar: anti pisau jatuh, pasca pompa, dan setup tanpa konfirmasi struktur.
+KNIFE_MOVE_24H_PCT = 18.0
+POST_PUMP_7D_PCT = 60.0
+POST_PUMP_DROP_PCT = 25.0
+DRY_VOLUME_RATIO = 0.45
+TRIGGER_MAX_AGE_M15 = 32
+SL_MAX_PCT = 4.5
+MAX_PLANNED_RR = 3.5
+RSI_PULLBACK_FLOOR = 32.0
+RSI_PULLBACK_CEIL_SELL = 68.0
+# Model likuiditas: pool signifikan, belum disapu, magnet terdekat, dan retest leg.
+SIGNIFICANT_POOL_MIN = 70.0
+MAGNET_MAX_H1_ATR = 3.0
+SL_POOL_REACH_H1_ATR = 0.75
+SL_POOL_BUFFER_H1_ATR = 0.25
+OTE_LOW = 0.62
+OTE_HIGH = 0.79
 LOW_QUALITY_MODELS = {"M15_SMC_FALLBACK", "STRUCTURE_PULLBACK_FALLBACK"}
 
 WEIGHTS = {
@@ -2130,6 +2152,9 @@ def topdown_candidate(
     bos: dict[str, Any] | None,
     rsi: float,
     vlt_direction: str,
+    leg: dict[str, Any] | None = None,
+    target_pools: list[LiquidityPool] | None = None,
+    sl_pools: list[LiquidityPool] | None = None,
 ) -> Candidate | None:
     h1_atr = safe_float(h1_ctx.get("atr"), 0.0)
     if h1_atr <= 0:
@@ -2174,6 +2199,22 @@ def topdown_candidate(
             entry = refined
             entry_zone_tf = f"{entry_zone_tf}+M15"
 
+    leg_used = False
+    if leg:
+        anchored = entry_zone.low - h1_atr <= leg["extreme"] <= entry_zone.high + h1_atr
+        if anchored:
+            if (direction == "BUY" and leg["entry"] < current) or (direction == "SELL" and leg["entry"] > current):
+                leg_score, leg_details = entry_reachability(direction, current, leg["entry"], h4_atr)
+                if not leg_details["allowed"]:
+                    return None
+                entry = leg["entry"]
+                reach_score, reach_details = leg_score, leg_details
+                leg_used = True
+                entry_zone_tf = f"{entry_zone_tf}+LEG"
+            else:
+                # Retest sudah terlewat: jangan mengejar harga.
+                return None
+
     structural = htf_invalidation_level(
         direction,
         entry,
@@ -2182,18 +2223,48 @@ def topdown_candidate(
         h1_atr,
         safe_float(sweep.get("level"), 0.0) if sweep else None,
     )
+    if leg_used:
+        structural = min(structural, leg["extreme"]) if direction == "BUY" else max(structural, leg["extreme"])
     buffer = h1_atr * SL_BUFFER_H1_ATR
     sl = structural - buffer if direction == "BUY" else structural + buffer
+    sl_pool_adjusted = None
+    for guard in sl_pools or []:
+        if direction == "BUY" and sl > guard.level >= sl - h1_atr * SL_POOL_REACH_H1_ATR:
+            sl = guard.level - h1_atr * SL_POOL_BUFFER_H1_ATR
+            sl_pool_adjusted = round_price(guard.level)
+        elif direction == "SELL" and sl < guard.level <= sl + h1_atr * SL_POOL_REACH_H1_ATR:
+            sl = guard.level + h1_atr * SL_POOL_BUFFER_H1_ATR
+            sl_pool_adjusted = round_price(guard.level)
     min_risk = max(h1_atr * SL_MIN_H1_ATR, entry * SL_MIN_PCT / 100.0)
     risk = abs(entry - sl)
     if risk < min_risk:
         risk = min_risk
         sl = entry - risk if direction == "BUY" else entry + risk
-    if risk > h1_atr * SL_MAX_H1_ATR:
+    if risk > h1_atr * SL_MAX_H1_ATR or risk / max(entry, EPS) * 100.0 > SL_MAX_PCT:
         return None
 
+    if target_pools is not None:
+        picked = None
+        for pool in target_pools:
+            reward = (pool.level - entry) if direction == "BUY" else (entry - pool.level)
+            if reward / risk >= MIN_PLANNED_RR:
+                picked = pool
+                break
+        if picked is None:
+            # Tanpa pool target yang layak, tidak ada setup (bukan TP di udara).
+            return None
+        target = picked
     tp = target.level if target else 0.0
     tp_from_target = target is not None
+    tp_clipped = False
+    if tp_from_target:
+        reach = MAX_PLANNED_RR * risk
+        if direction == "BUY" and tp > entry + reach:
+            tp = entry + reach
+            tp_clipped = True
+        elif direction == "SELL" and 0 < tp < entry - reach:
+            tp = entry - reach
+            tp_clipped = True
     if direction == "BUY":
         if tp <= entry:
             tp = entry + TP_FALLBACK_RR * risk
@@ -2261,6 +2332,15 @@ def topdown_candidate(
             "risk_h1_atr": round(risk / max(h1_atr, EPS), 2),
             "planned_rr": round(abs(tp - entry) / max(risk, EPS), 2),
         },
+        "liquidity_model": {
+            "leg_used": leg_used,
+            "leg_kind": leg.get("kind") if (leg and leg_used) else None,
+            "leg_extreme": round_price(leg["extreme"]) if (leg and leg_used) else None,
+            "sl_pool_adjusted": sl_pool_adjusted,
+            "target_pool": (
+                f"{pool_timeframe(target)} {target.source} {round_price(target.level)}" if target else None
+            ),
+        },
         "notes_architecture": "H4 primary POI -> H1 entry zone + SL anchor -> M15 timing refinement",
     }
     entry_reason = _topdown_entry_reason(
@@ -2281,11 +2361,18 @@ def topdown_candidate(
         f"SL di luar invalidasi struktur H1/H4 ({round_price(structural)}) + buffer "
         f"{SL_BUFFER_H1_ATR:.2f} ATR H1; risiko minimum {SL_MIN_H1_ATR:.1f} ATR H1."
     )
-    tp_reason = (
-        f"TP diarahkan ke {target.source} {round_price(target.level)} sebagai liquidity target HTF."
-        if (target and tp_from_target) else
-        f"TP fallback {round_price(tp)} menggunakan RR minimum dari risiko karena target liquidity HTF tidak tersedia."
-    )
+    if target and tp_from_target and not tp_clipped:
+        tp_reason = f"TP diarahkan ke {target.source} {round_price(target.level)} sebagai liquidity target HTF."
+    elif target and tp_clipped:
+        tp_reason = (
+            f"TP dipangkas ke {MAX_PLANNED_RR:.1f}R ({round_price(tp)}) karena target {target.source} "
+            f"{round_price(target.level)} terlalu jauh untuk satu ayunan."
+        )
+    else:
+        tp_reason = (
+            f"TP fallback {round_price(tp)} menggunakan RR minimum dari risiko "
+            "karena target liquidity HTF tidak tersedia."
+        )
     exp_reason = (
         f"Price Exp {round_price(price_exp)} adalah batas ekspansi thesis H4/H1 sebelum entry. "
         "Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru."
@@ -2527,9 +2614,13 @@ def detect_sweeps(
         c = candles[i]
         atr = atr_values[i]
         for pool in relevant:
-            tol = max(pool.level * 0.0002, atr * 0.03)
+            tol = max(pool.level * 0.0004, atr * 0.10)
             if pool.kind == "SELL_SIDE":
-                swept = c.low < pool.level - tol and c.close > pool.level
+                swept = (
+                    c.low < pool.level - tol
+                    and c.close > pool.level
+                    and (c.close - c.low) / max(c.range, EPS) >= 0.40
+                )
                 if swept:
                     result.append(
                         {
@@ -2543,7 +2634,11 @@ def detect_sweeps(
                         }
                     )
             elif pool.kind == "BUY_SIDE":
-                swept = c.high > pool.level + tol and c.close < pool.level
+                swept = (
+                    c.high > pool.level + tol
+                    and c.close < pool.level
+                    and (c.high - c.close) / max(c.range, EPS) >= 0.40
+                )
                 if swept:
                     result.append(
                         {
@@ -3432,12 +3527,14 @@ def evaluate_momentum(
         cur = h1r["cur"]
         slope = h1r["slope"]
         if buy:
-            dipped = h1r["min12"] <= 48.0
+            dipped = RSI_PULLBACK_FLOOR <= h1r["min12"] <= 48.0
+            broken = h1r["min12"] < RSI_PULLBACK_FLOOR
             turning = cur >= h1r["min12"] + 3.0 and slope > 0
             pressing = slope <= -0.8
             extreme = h1r["min12"]
         else:
-            dipped = h1r["max12"] >= 52.0
+            dipped = 52.0 <= h1r["max12"] <= RSI_PULLBACK_CEIL_SELL
+            broken = h1r["max12"] > RSI_PULLBACK_CEIL_SELL
             turning = cur <= h1r["max12"] - 3.0 and slope < 0
             pressing = slope >= 0.8
             extreme = h1r["max12"]
@@ -3448,6 +3545,9 @@ def evaluate_momentum(
         elif pressing and not reg_div:
             score -= 15.0
             tags.append("RSI H1 masih menekan melawan arah")
+        elif broken and not reg_div:
+            score -= 12.0
+            tags.append("RSI H1 jatuh ke zona breakdown, bukan koreksi sehat")
 
     # 3) Divergence.
     if reg_div:
@@ -3528,7 +3628,9 @@ def combine_confidence(scores: dict[str, float], evidence: dict[str, Any]) -> fl
     total_weight = sum(WEIGHTS.values())
     base = sum(WEIGHTS[name] * scores.get(name, 50.0) for name in WEIGHTS) / total_weight
     gates = evidence.get("gates") or {}
-    momentum_score = safe_float((evidence.get("momentum") or {}).get("score"), 50.0)
+    momentum_score = safe_float((evidence.get("momentum") or {}).get("score"), 50.0) + safe_float(
+        gates.get("score_adj"), 0.0
+    )
     confidence = base * momentum_factor(momentum_score)
     confidence -= safe_float(evidence.get("confidence_penalty"), 0.0)
     if gates.get("waiting"):
@@ -3536,6 +3638,296 @@ def combine_confidence(scores: dict[str, float], evidence: dict[str, Any]) -> fl
     if gates.get("vetoes"):
         confidence = min(confidence, VETO_CONFIDENCE_CAP)
     return round(clamp(confidence), 2)
+
+
+def pool_timeframe(pool: LiquidityPool) -> str:
+    return str(pool.details.get("timeframe") or "M15").split("_")[0]
+
+
+def pool_significance(pool: LiquidityPool) -> float:
+    tf_bonus = {"H4": 20.0, "H1": 10.0}.get(pool_timeframe(pool), 0.0)
+    source = str(pool.source)
+    src_bonus = 10.0 if source == "EQUAL_LEVELS" else 5.0 if source.startswith("RECENT_RANGE") else 0.0
+    return clamp(pool.strength + tf_bonus + src_bonus)
+
+
+def pool_consumed(pool: LiquidityPool, candles: list[Candle], atr: float) -> bool:
+    """Pool sudah diambil jika harga menembusnya setelah terbentuk."""
+    tol = max(pool.level * 0.0002, atr * 0.05)
+    for c in candles[max(pool.index + 1, 0):]:
+        if pool.kind == "SELL_SIDE" and c.low < pool.level - tol:
+            return True
+        if pool.kind == "BUY_SIDE" and c.high > pool.level + tol:
+            return True
+    return False
+
+
+def live_pools(
+    pools: list[LiquidityPool],
+    candles_by_tf: dict[str, list[Candle]],
+    atr_by_tf: dict[str, float],
+) -> list[LiquidityPool]:
+    live: list[LiquidityPool] = []
+    for pool in pools:
+        tf = pool_timeframe(pool)
+        candles = candles_by_tf.get(tf)
+        if candles and pool_consumed(pool, candles, atr_by_tf.get(tf, 0.0)):
+            continue
+        live.append(pool)
+    return live
+
+
+def nearest_magnet(
+    direction: str,
+    live: list[LiquidityPool],
+    price: float,
+    h1_atr: float,
+) -> dict[str, Any] | None:
+    """Pool signifikan terdekat di sisi lawan yang belum disapu (harga cenderung menujunya dulu)."""
+    want = "SELL_SIDE" if direction == "BUY" else "BUY_SIDE"
+    best: dict[str, Any] | None = None
+    for pool in live:
+        if pool.kind != want or pool_significance(pool) < SIGNIFICANT_POOL_MIN:
+            continue
+        dist = (price - pool.level) if direction == "BUY" else (pool.level - price)
+        if dist <= 0:
+            continue
+        d_atr = dist / max(h1_atr, EPS)
+        if d_atr > MAGNET_MAX_H1_ATR:
+            continue
+        if best is None or d_atr < best["d_atr"]:
+            best = {
+                "level": round_price(pool.level),
+                "d_atr": round(d_atr, 2),
+                "tf": pool_timeframe(pool),
+                "source": pool.source,
+            }
+    return best
+
+
+def ranked_targets(
+    live: list[LiquidityPool],
+    direction: str,
+    ref_entry: float,
+    h1_atr: float,
+) -> list[LiquidityPool]:
+    """Pool target signifikan yang belum disapu, dari yang terdekat."""
+    want = "BUY_SIDE" if direction == "BUY" else "SELL_SIDE"
+    ranked: list[tuple[float, LiquidityPool]] = []
+    for pool in live:
+        if pool.kind != want or pool_significance(pool) < SIGNIFICANT_POOL_MIN:
+            continue
+        dist = (pool.level - ref_entry) if direction == "BUY" else (ref_entry - pool.level)
+        if dist <= 0 or dist / max(h1_atr, EPS) > 8.0:
+            continue
+        ranked.append((dist, pool))
+    ranked.sort(key=lambda item: item[0])
+    return [pool for _dist, pool in ranked]
+
+
+def sl_guard_pools(
+    live: list[LiquidityPool],
+    direction: str,
+    entry: float,
+) -> list[LiquidityPool]:
+    """Pool signifikan di sisi stop yang berpotensi diburu."""
+    want = "SELL_SIDE" if direction == "BUY" else "BUY_SIDE"
+    return [
+        pool
+        for pool in live
+        if pool.kind == want
+        and pool_significance(pool) >= SIGNIFICANT_POOL_MIN
+        and ((pool.level < entry) if direction == "BUY" else (pool.level > entry))
+    ]
+
+
+def sweep_mss_leg(
+    direction: str,
+    sweep: dict[str, Any] | None,
+    mss: dict[str, Any] | None,
+    m15: list[Candle],
+    fvg: list[Zone],
+) -> dict[str, Any] | None:
+    """Leg sweep -> MSS dan zona retest: FVG di dalam OTE, atau OTE 0.62-0.79."""
+    if not sweep or not mss:
+        return None
+    try:
+        s_idx = int(sweep["index"])
+        e_idx = int(mss["index"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if e_idx <= s_idx or e_idx >= len(m15):
+        return None
+    buy = direction == "BUY"
+    seg = m15[s_idx : e_idx + 1]
+    if buy:
+        extreme = min(c.low for c in seg)
+        peak = max(c.high for c in seg)
+    else:
+        extreme = max(c.high for c in seg)
+        peak = min(c.low for c in seg)
+    span = abs(peak - extreme)
+    if span <= 0 or span / max(abs(extreme), EPS) * 100.0 < 0.3:
+        return None
+    if buy:
+        band_hi = peak - OTE_LOW * span
+        band_lo = peak - OTE_HIGH * span
+    else:
+        band_lo = peak + OTE_LOW * span
+        band_hi = peak + OTE_HIGH * span
+    wanted = "BULLISH_FVG" if buy else "BEARISH_FVG"
+    zones = [
+        z
+        for z in fvg
+        if z.kind == wanted and s_idx <= z.index <= e_idx + 1 and z.high >= band_lo and z.low <= band_hi
+    ]
+    if zones:
+        zone = max(zones, key=lambda item: item.strength)
+        entry = (max(zone.low, band_lo) + min(zone.high, band_hi)) / 2.0
+        kind = "FVG_OTE"
+    else:
+        entry = (band_lo + band_hi) / 2.0
+        kind = "OTE"
+    return {
+        "entry": entry,
+        "kind": kind,
+        "extreme": extreme,
+        "peak": peak,
+        "ote": [round_price(band_lo), round_price(band_hi)],
+        "sweep_idx": s_idx,
+        "mss_idx": e_idx,
+    }
+
+
+def ema_values(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    k = 2.0 / (period + 1.0)
+    out = [values[0]]
+    for value in values[1:]:
+        out.append(value * k + out[-1] * (1.0 - k))
+    return out
+
+
+def market_quality_pack(
+    m15: list[Candle],
+    h1: list[Candle],
+    pair_h4: list[Candle],
+) -> dict[str, Any]:
+    """Konteks pasar: guncangan 24j/7h, jarak dari ekstrem, tumpukan EMA, dan partisipasi volume."""
+    if len(m15) < 100 or len(h1) < 50:
+        return {"valid": False}
+    now = m15[-1].close
+    win24 = m15[-96:]
+    hi24 = max(c.high for c in win24)
+    lo24 = min(c.low for c in win24)
+    win48 = h1[-48:]
+    hi48 = max(c.high for c in win48)
+    lo48 = min(c.low for c in win48)
+    chg7d = 0.0
+    if len(pair_h4) > 43:
+        base = pair_h4[-43].close
+        chg7d = (pair_h4[-1].close - base) / max(abs(base), EPS) * 100.0
+    c15 = [c.close for c in m15]
+    c1 = [c.close for c in h1]
+    e7, e25, e50 = (ema_values(c15, n)[-1] for n in (7, 25, 50))
+    h1_e25 = ema_values(c1, 25)[-1]
+    vol_recent = sum(c.volume for c in m15[-8:]) / 8.0
+    vol_base = sum(c.volume for c in win24) / max(len(win24), 1)
+    return {
+        "valid": True,
+        "chg24": round((now - m15[-97].close) / max(abs(m15[-97].close), EPS) * 100.0, 2),
+        "drop24": round((hi24 - now) / max(hi24, EPS) * 100.0, 2),
+        "rise24": round((now - lo24) / max(lo24, EPS) * 100.0, 2),
+        "drop48": round((hi48 - now) / max(hi48, EPS) * 100.0, 2),
+        "rise48": round((now - lo48) / max(lo48, EPS) * 100.0, 2),
+        "chg7d": round(chg7d, 2),
+        "bear15": bool(e7 < e25 < e50 and now < e25),
+        "bull15": bool(e7 > e25 > e50 and now > e25),
+        "h1_below_ema25": bool(c1[-1] < h1_e25),
+        "h1_above_ema25": bool(c1[-1] > h1_e25),
+        "vol_ratio": round(vol_recent / max(vol_base, EPS), 2),
+    }
+
+
+def trigger_info(
+    m15: list[Candle],
+    sweep: dict[str, Any] | None,
+    mss: dict[str, Any] | None,
+    bos: dict[str, Any] | None,
+    magnet: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    age = 999
+    if mss:
+        try:
+            age = len(m15) - 1 - int(mss.get("index"))
+        except (TypeError, ValueError):
+            age = 999
+    return {"sweep": bool(sweep), "mss": bool(mss), "mss_age": age, "bos": bool(bos), "magnet": magnet}
+
+
+def evaluate_market_gates(
+    direction: str,
+    quality: dict[str, Any] | None,
+    trigger: dict[str, Any] | None,
+    entry: float,
+    sl: float,
+) -> dict[str, Any]:
+    """Veto dan status menunggu berdasarkan konteks pasar dan konfirmasi struktur M15."""
+    buy = direction == "BUY"
+    vetoes: list[str] = []
+    notes: list[str] = []
+    adj = 0.0
+    trig = trigger or {}
+    mss_ok = bool(trig.get("mss")) and int(trig.get("mss_age", 999)) <= TRIGGER_MAX_AGE_M15
+    bos_ok = bool(trig.get("bos"))
+    waiting = not (mss_ok or bos_ok)
+    risk_pct = abs(entry - sl) / max(abs(entry), EPS) * 100.0
+    if risk_pct > SL_MAX_PCT:
+        vetoes.append(f"SL terlalu lebar ({risk_pct:.1f}% > {SL_MAX_PCT:.1f}% harga)")
+    if waiting:
+        notes.append("belum ada konfirmasi struktur M15 (butuh MSS atau BOS)")
+    magnet = trig.get("magnet")
+    if magnet:
+        lvl = safe_float(magnet.get("level"))
+        if (buy and entry > lvl) or ((not buy) and entry < lvl):
+            vetoes.append(
+                f"Entry terlalu cepat: likuiditas {'sell' if buy else 'buy'}-side {magnet.get('tf')} "
+                f"{lvl} belum disapu ({magnet.get('d_atr')} ATR H1 dari harga)"
+            )
+    q = quality or {}
+    if not q.get("valid"):
+        return {"vetoes": vetoes, "waiting": waiting, "notes": notes, "score_adj": adj}
+
+    adverse24 = q["drop24"] if buy else q["rise24"]
+    adverse48 = q["drop48"] if buy else q["rise48"]
+    word = "turun" if buy else "naik"
+    if adverse24 >= KNIFE_MOVE_24H_PCT and not mss_ok:
+        vetoes.append(f"Pisau jatuh: harga {word} {adverse24:.0f}% dari ekstrem 24j tanpa MSS M15")
+    if buy and q["chg7d"] >= POST_PUMP_7D_PCT and adverse48 >= POST_PUMP_DROP_PCT and not (
+        mss_ok and q["h1_above_ema25"]
+    ):
+        vetoes.append(
+            f"Pasca pompa: +{q['chg7d']:.0f}% dalam 7 hari lalu turun {adverse48:.0f}% dari high 48j"
+        )
+    if (not buy) and q["chg7d"] <= -POST_PUMP_7D_PCT and adverse48 >= POST_PUMP_DROP_PCT and not (
+        mss_ok and q["h1_below_ema25"]
+    ):
+        vetoes.append(
+            f"Pasca dump: {q['chg7d']:.0f}% dalam 7 hari lalu naik {adverse48:.0f}% dari low 48j"
+        )
+    against15 = q["bear15"] if buy else q["bull15"]
+    against1 = q["h1_below_ema25"] if buy else q["h1_above_ema25"]
+    if against15 and against1:
+        if mss_ok:
+            adj -= 5.0
+            notes.append("EMA M15/H1 masih melawan arah, tetapi MSS M15 sudah terkonfirmasi")
+        else:
+            vetoes.append("EMA 7/25/50 M15 dan H1 melawan arah tanpa MSS M15")
+    if q["vol_ratio"] < DRY_VOLUME_RATIO:
+        adj -= 8.0
+        notes.append(f"partisipasi volume rendah ({q['vol_ratio']:.2f}x rata-rata 24j)")
+    return {"vetoes": vetoes, "waiting": waiting, "notes": notes, "score_adj": adj}
 
 
 def score_candidate(
@@ -3557,6 +3949,8 @@ def score_candidate(
     h1_refinement_score: float | None = None,
     pair_regime: dict[str, Any] | None = None,
     momentum: dict[str, Any] | None = None,
+    quality: dict[str, Any] | None = None,
+    trigger: dict[str, Any] | None = None,
 ) -> Candidate:
     reach = candidate.evidence.get("entry_reachability") or {}
     reach_score = safe_float(reach.get("score"), 50.0)
@@ -3585,13 +3979,33 @@ def score_candidate(
         vetoes.append(f"BUY di zona premium H1 (lokasi {ratio:.2f})")
     elif candidate.direction == "SELL" and ratio < EQUILIBRIUM_SELL_MIN:
         vetoes.append(f"SELL di zona discount H1 (lokasi {ratio:.2f})")
+    gate = evaluate_market_gates(candidate.direction, quality, trigger, candidate.entry, candidate.sl)
+    vetoes.extend(gate["vetoes"])
+    lm = candidate.evidence.get("liquidity_model") or {}
+    if lm.get("leg_used"):
+        gate["notes"].append(
+            f"entry di retest leg sweep->MSS ({lm.get('leg_kind')}, ekstrem sweep {lm.get('leg_extreme')})"
+        )
+    if lm.get("sl_pool_adjusted"):
+        gate["notes"].append(f"SL digeser ke luar pool likuiditas {lm.get('sl_pool_adjusted')}")
+    if lm.get("target_pool"):
+        gate["notes"].append(f"TP ke pool {lm.get('target_pool')}")
     candidate.evidence["gates"] = {
         "vetoes": vetoes,
-        "waiting": bool(mom.get("waiting")),
+        "waiting": bool(mom.get("waiting")) or bool(gate["waiting"]),
         "archetype": mom.get("archetype"),
+        "notes": gate["notes"],
+        "score_adj": gate["score_adj"],
     }
     note = momentum_note({**mom, "vetoes": vetoes}) if mom else ""
-    if note and "Kerangka RSI" not in candidate.entry_reason and "trigger RSI" not in candidate.entry_reason:
+    if gate["notes"]:
+        note = f"{note} Gerbang pasar: " + "; ".join(gate["notes"]) + "."
+    if (
+        note
+        and "Kerangka RSI" not in candidate.entry_reason
+        and "trigger RSI" not in candidate.entry_reason
+        and "Gerbang pasar" not in candidate.entry_reason
+    ):
         candidate.entry_reason = f"{candidate.entry_reason} {note}".strip()
 
     scores["momentum"] = safe_float(mom.get("score"), 50.0)
@@ -3873,6 +4287,7 @@ def _collect_directional_candidates(
     pair_regime_override: str | None = None,
     pair_regime_detail: dict[str, Any] | None = None,
     rsi_pack: dict[str, Any] | None = None,
+    quality_pack: dict[str, Any] | None = None,
 ) -> list[Candidate]:
     atr = m15_atr_values[-1]
     rsi_ctx = _latest_rsi_context(m15)
@@ -3895,9 +4310,16 @@ def _collect_directional_candidates(
         *h1_ctx.get("liquidity", []),
         *m15_ctx.get("liquidity", []),
     ]
+    h1_atr_ctx = safe_float(h1_ctx.get("atr"), atr * 3.0)
+    live = live_pools(
+        combined_liquidity,
+        {"H4": h4, "H1": h1, "M15": m15},
+        {"H4": safe_float(h4_ctx.get("atr"), h1_atr_ctx * 2.0), "H1": h1_atr_ctx, "M15": atr},
+    )
 
     for direction in allowed_directions:
         primary_ranked = rank_primary_pois(h4_ctx, direction, current, limit=MAX_PRIMARY_POI_CANDIDATES)
+        magnet = nearest_magnet(direction, live, current, h1_atr_ctx)
         topdown_count = 0
         last_sweep = None
         last_mss = None
@@ -3918,12 +4340,10 @@ def _collect_directional_candidates(
             )
             last_sweep, last_mss, last_bos = sweep, mss, recent_bos
 
-            target = find_target_liquidity_topdown(
-                combined_liquidity,
-                direction,
-                refinement.midpoint if refinement else primary.midpoint,
-                safe_float(h1_ctx.get("atr"), atr * 3.0),
-            )
+            ref_entry = refinement.midpoint if refinement else primary.midpoint
+            target = find_target_liquidity_topdown(live, direction, ref_entry, h1_atr_ctx)
+            target_pools = ranked_targets(live, direction, ref_entry, h1_atr_ctx)
+            leg = sweep_mss_leg(direction, sweep, mss, m15, fvg)
             cand = topdown_candidate(
                 pair=pair,
                 direction=direction,
@@ -3942,6 +4362,9 @@ def _collect_directional_candidates(
                 bos=recent_bos,
                 rsi=rsi,
                 vlt_direction=vlt["direction"],
+                leg=leg,
+                target_pools=target_pools,
+                sl_pools=sl_guard_pools(live, direction, ref_entry),
             )
             if cand is None:
                 continue
@@ -3974,6 +4397,8 @@ def _collect_directional_candidates(
                 latest_displacement=trigger_disp,
                 pair_regime=pair_regime_detail,
                 momentum=evaluate_momentum(direction, rsi_pack, bool(sweep)),
+                quality=quality_pack,
+                trigger=trigger_info(m15, sweep, mss, recent_bos, magnet),
                 h4_poi_score=h4_poi_score,
                 h4_fib_score=h4_fib_score,
                 h1_refinement_score=h1_ref_score,
@@ -4044,6 +4469,8 @@ def _collect_directional_candidates(
                         latest_displacement=latest_disp,
                         pair_regime=pair_regime_detail,
                         momentum=evaluate_momentum(direction, rsi_pack, bool(last_sweep)),
+                        quality=quality_pack,
+                        trigger=trigger_info(m15, last_sweep, last_mss, last_bos, magnet),
                         h4_poi_score=25.0,
                         h4_fib_score=25.0,
                         h1_refinement_score=location_score(direction, cand.entry, h1_dr),
@@ -4346,6 +4773,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         "M15": build_rsi_context(m15, m15_structure, "M15"),
         "BTC": simple_rsi_state(btc_h1),
     }
+    quality_pack = market_quality_pack(m15, h1, pair_h4)
 
     liquidity = list(m15_ctx.get("liquidity", []))
     sweeps = list(m15_ctx.get("sweeps", []))
@@ -4425,6 +4853,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         pair_regime_override=pair_regime["trend"],
         pair_regime_detail=pair_regime,
         rsi_pack=rsi_pack,
+        quality_pack=quality_pack,
     )
 
     best = _best_candidate(candidates)
@@ -4506,6 +4935,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             pair_h4_trend=pair_regime["trend"],
             pair_regime=pair_regime,
             momentum=evaluate_momentum(best.direction, rsi_pack, bool(final_sweep)),
+            quality=quality_pack,
+            trigger=None,
             h1_dr=h1_dr,
             target=final_target,
             sweep=final_sweep,
@@ -4596,6 +5027,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
                 **_structure_summary(m15_structure, m15),
                 "rsi14": m15_rsi_ctx,
                 "rsi_pack": rsi_pack,
+                "market_quality": quality_pack,
                 "vlt": m15_vlt,
                 "latest_displacement_score": round(
                     displacement_strength(
