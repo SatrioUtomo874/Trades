@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T15:07:05.415023+00:00",
+  "saved_at": "2026-10-08T15:13:41.042637+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -687,6 +687,13 @@
       "until": "2026-10-08T15:46:07.426971+00:00",
       "reason": "Confidence 52.41 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "KERNELUSDT",
+      "banned_at": "2026-10-08T15:13:41.042490+00:00",
+      "until": "2026-10-08T23:13:41.042465+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "KITEUSDT",
