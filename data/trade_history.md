@@ -1385,3 +1385,36 @@ Tidak ada trailing.
 - Filled: 2026-10-08T10:24:14.503868+00:00
 - Closed: 2026-10-08T11:53:03.786782+00:00
 - Strategy: SMC_VLT_RSI v1.1.0
+
+---
+
+## AEROUSDT — SELL
+
+Trade ID: `AEROUSDT-20261008-190119-72C4E4`
+
+### Setup
+
+- Price Now Reference: 0.7759
+- Entry: 0.8246
+- Reason Entry: AEROUSDT SELL: thesis dimulai dari POI H4. (BEARISH_FVG 0.8299). H1 me-refine ke BEARISH_FVG 0.8252. M15 memberi execution POI BEARISH_FVG 0.8246. Fib H4 berada pada band OVERLAPS_0.618 (score 96). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 46.7 mendukung momentum. VLT/OHLCV searah dengan setup. Kerangka RSI TREND_PULLBACK_RSI: RSI H1 regime bearish; hidden divergence RSI M15 (43->48). Gerbang pasar: TP ke pool M15 M15_EQUAL_LEVELS 0.7684.
+- Price Exp: 0.7714
+- Reason Price Exp: Price Exp 0.7714 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.8413
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.8305) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- TP: 0.7684
+- Reason TP: TP diarahkan ke M15_EQUAL_LEVELS 0.7684 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.7714
+- Result Reason: Price Exp 0.7714 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-08T12:01:19.215837+00:00
+- Filled: -
+- Closed: 2026-10-08T13:42:28.793335+00:00
+- Strategy: SMC_VLT_RSI v1.1.0
