@@ -1352,3 +1352,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-08T05:52:24.285908+00:00
 - Strategy: SMC_VLT_RSI v1.1.0
+
+---
+
+## FIDAUSDT — SELL
+
+Trade ID: `FIDAUSDT-20261008-121654-3DCF4D`
+
+### Setup
+
+- Price Now Reference: 0.0207
+- Entry: 0.02145
+- Reason Entry: FIDAUSDT SELL: thesis dimulai dari POI H4. (BEARISH_BREAKER 0.021605). H1 me-refine ke BEARISH_BREAKER 0.021445. M15 memberi execution POI BEARISH_FVG 0.0215. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 48.0 mendukung momentum. VLT/OHLCV searah dengan setup. Kerangka RSI SWEEP_DIVERGENCE_REVERSAL: RSI H1 regime bearish; divergence reguler RSI M15 (63->58); hidden divergence RSI H1 (39->54). Gerbang pasar: TP ke pool H4 H4_RECENT_RANGE_LOW 0.01987.
+- Price Exp: 0.02029
+- Reason Price Exp: Price Exp 0.0202902 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.02186
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.02169) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- TP: 0.02001
+- Reason TP: TP dipangkas ke 3.5R (0.0200171) karena target H4_RECENT_RANGE_LOW 0.01987 terlalu jauh untuk satu ayunan.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.02187
+- Result Reason: SL di luar invalidasi struktur H1/H4 (0.02169) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- PnL: -1.958041958041958041958041958%
+- Created: 2026-10-08T05:16:54.518864+00:00
+- Filled: 2026-10-08T10:24:14.503868+00:00
+- Closed: 2026-10-08T11:53:03.786782+00:00
+- Strategy: SMC_VLT_RSI v1.1.0
