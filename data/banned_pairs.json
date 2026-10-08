@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T05:01:15.408837+00:00",
+  "saved_at": "2026-10-08T05:01:17.930709+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -190,6 +190,13 @@
       "until": "2026-10-08T06:56:50.820640+00:00",
       "reason": "Confidence 61.29 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "BNBUSDT",
+      "banned_at": "2026-10-08T05:01:17.930634+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 7.6786, di luar target 5.5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "BOMEUSDT",
