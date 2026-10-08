@@ -1319,3 +1319,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-08T05:51:03.999731+00:00
 - Strategy: SMC_VLT_RSI v1.1.0
+
+---
+
+## RONINUSDT — SELL
+
+Trade ID: `RONINUSDT-20261008-121657-20E7D9`
+
+### Setup
+
+- Price Now Reference: 0.06317
+- Entry: 0.06637
+- Reason Entry: RONINUSDT SELL: thesis dimulai dari POI H4. (BEARISH_BREAKER 0.067025). H1 me-refine ke BEARISH_BREAKER 0.066365. M15 memberi execution POI BEARISH_BREAKER 0.06621. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 47.8 mendukung momentum. Kerangka RSI TREND_PULLBACK_RSI: RSI H1 regime bearish; hidden divergence RSI H1 (43->48). Gerbang pasar: TP ke pool H4 H4_SWING_LOW 0.06222.
+- Price Exp: 0.0626
+- Reason Price Exp: Price Exp 0.0626 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.06774
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.06722) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- TP: 0.06222
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.06222 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0626
+- Result Reason: Price Exp 0.0626 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- PnL: -
+- Created: 2026-10-08T05:16:57.205843+00:00
+- Filled: -
+- Closed: 2026-10-08T05:52:24.285908+00:00
+- Strategy: SMC_VLT_RSI v1.1.0
