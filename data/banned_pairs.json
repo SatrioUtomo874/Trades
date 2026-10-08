@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T04:56:12.917846+00:00",
+  "saved_at": "2026-10-08T04:56:18.115487+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -512,6 +512,13 @@
       "until": "2026-10-09T01:49:16.884899+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "SAGAUSDT",
+      "banned_at": "2026-10-08T04:56:18.115428+00:00",
+      "until": "2026-10-08T06:56:18.115389+00:00",
+      "reason": "Confidence 64 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "SANDUSDT",
