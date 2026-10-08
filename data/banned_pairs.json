@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T05:55:26.123013+00:00",
+  "saved_at": "2026-10-08T05:55:30.922986+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2296,6 +2296,13 @@
       "banned_at": "2026-10-08T04:57:13.115180+00:00",
       "until": "2026-10-08T06:57:13.115153+00:00",
       "reason": "Confidence 46.36 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ZORAUSDT",
+      "banned_at": "2026-10-08T05:55:30.922866+00:00",
+      "until": "2026-10-08T13:55:30.922839+00:00",
+      "reason": "Confidence 40 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
