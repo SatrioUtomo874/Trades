@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T05:01:41.549904+00:00",
+  "saved_at": "2026-10-08T05:01:51.219667+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -602,6 +602,13 @@
       "banned_at": "2026-10-08T04:54:34.509540+00:00",
       "until": "2026-10-08T06:54:34.509507+00:00",
       "reason": "Confidence 44.88 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MAGMAUSDT",
+      "banned_at": "2026-10-08T05:01:51.219588+00:00",
+      "until": "2026-10-08T13:01:51.219538+00:00",
+      "reason": "Confidence 67.25 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
