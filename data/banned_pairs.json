@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T11:53:26.117682+00:00",
+  "saved_at": "2026-10-08T11:53:30.314009+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -274,6 +274,13 @@
       "until": "2026-10-08T13:52:38.647333+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "SOLUSDT",
+      "banned_at": "2026-10-08T11:53:30.313969+00:00",
+      "until": "2026-10-09T11:53:30.313942+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "SPORTFUNUSDT",
