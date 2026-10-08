@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T11:54:58.927286+00:00",
+  "saved_at": "2026-10-08T11:55:04.222996+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -316,6 +316,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 6.6597, di luar target 5.5 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "PENGUUSDT",
+      "banned_at": "2026-10-08T11:55:04.222958+00:00",
+      "until": "2026-10-08T13:55:04.222933+00:00",
+      "reason": "Confidence 43.33 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "PONSUSDT",
