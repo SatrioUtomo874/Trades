@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T11:55:37.020099+00:00",
+  "saved_at": "2026-10-08T11:55:40.826557+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -148,6 +148,13 @@
       "until": "2026-10-08T13:53:54.117802+00:00",
       "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "DOTUSDT",
+      "banned_at": "2026-10-08T11:55:40.826509+00:00",
+      "until": "2026-10-09T11:55:40.826486+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "ENAUSDT",
