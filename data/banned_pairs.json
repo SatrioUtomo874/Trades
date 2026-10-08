@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T05:07:13.519003+00:00",
+  "saved_at": "2026-10-08T05:07:19.319096+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1135,6 +1135,13 @@
       "until": "2026-10-09T01:49:16.884899+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "ROBOUSDT",
+      "banned_at": "2026-10-08T05:07:19.319017+00:00",
+      "until": "2026-10-08T07:07:19.318994+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "RUNEUSDT",
