@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T23:10:48.114004+00:00",
+  "saved_at": "2026-10-08T23:10:53.512860+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1091,6 +1091,13 @@
       "pair": "MEMEUSDT",
       "banned_at": "2026-10-08T23:05:34.415071+00:00",
       "until": "2026-10-09T07:05:34.415032+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "METISUSDT",
+      "banned_at": "2026-10-08T23:10:53.512781+00:00",
+      "until": "2026-10-09T07:10:53.512758+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
