@@ -4,68 +4,56 @@ from __future__ import annotations
 STRATEGY.PY
 ===========
 
-Strategy intelligence untuk main.py dengan multi-timeframe regime engine, top-down POI hierarchy, dan entry reachability guard.
+Structural Prediction Engine V2 untuk main.py: market structure → thesis →
+liquidity map → adaptive Fibonacci → FVG/OB refinement → projected RSI →
+entry zone → prediction invalidation → structural SL → target map → RR →
+thesis quality.
 
-Kontrak utama:
+Kontrak utama tetap kompatibel dengan main.py:
     async def generate_setup(pair, context) -> dict
+    async def analyze_btc_regime(context) -> dict
+    async def analyze_scan_structure(pair, context) -> dict
+    async def validate_setup(pair, initial_setup, context) -> dict
+    async def analyze_trailing(trade, context) -> dict
 
-Prinsip desain v0.9.0
----------------------
-1. Keputusan = REGIME -> ARCHETYPE -> GATE. SMC memberi lokasi (POI/likuiditas), RSI multi-timeframe
-   memberi regime dan trigger: setup wajib masuk archetype TREND_PULLBACK_RSI (koreksi RSI H1 ke value
-   zone lalu berbalik / hidden divergence) atau DIVERGENCE_REVERSAL (divergence reguler, idealnya
-   setelah sweep). Tanpa trigger RSI, confidence dibatasi di bawah threshold. Momentum RSI menjadi
-   pengali confidence, bukan sekadar tambahan poin. VLT/OHLCV tetap konfirmasi volume.
-   Gerbang kualitas pasar (v1.0): tanpa konfirmasi struktur M15 (MSS/BOS) setup hanya menunggu; pisau jatuh,
-   pasca pompa, EMA melawan arah tanpa MSS, SL > 4.5% harga, dan RSI breakdown ditolak; TP dipangkas maks 3.5R.
-   Model likuiditas (v1.1): pool yang sudah disapu dibuang; entry ditolak jika masih ada pool signifikan
-   di bawah harga yang belum disapu; entry di retest leg sweep->MSS (FVG/OTE); SL di luar pool yang bisa
-   diburu; TP ke pool signifikan terdekat dengan RR >= 2 (tanpa pool = tanpa setup).
-2. Semua keputusan struktur memakai CLOSED candles saja.
-3. Target pair dianalisis multi-timeframe:
-      D1/H4 -> external regime dan structure utama
-      H1 -> konfirmasi struktur / lokasi / dealing range / POI
-      M15 -> current state / timing / trigger / RSI / VLT
-4. Untuk altcoin, BTCUSDT menjadi directional constraint berbasis multi-timeframe regime:
-      BULLISH -> hanya cari BUY
-      BEARISH -> hanya cari SELL
-      RANGE/TRANSITION -> BUY dan SELL boleh dicari.
-5. Regime pair dihitung independen memakai D1/H4/H1/M15. Untuk scanner, pair
-   yang tidak searah dengan BTC tidak diteruskan. Dalam /auto, perbedaan regime
-   menurunkan kualitas kandidat.
-6. Data M15 target = 672 CLOSED candles (7 hari).
-7. Data provider: Bybit public REST sebagai sumber utama; mode SCAN melarang seluruh fallback Binance.
-8. Strategy selalu memilih kandidat terbaik bila market data cukup.
-   Tidak ada hard gate "NO VALID SETUP" hanya karena confidence rendah.
-9. Confidence = quality score setup 0-100, bukan probabilitas profit.
-10. Price Exp adalah batas relevansi setup: bila terlewati sebelum entry,
-   thesis lama dianggap tidak relevan dan pola baru harus dicari.
-11. strategy.py menyediakan analyze_btc_regime(), analyze_scan_structure(), dan validate_setup() untuk scanner;
-    strategy.py tetap tidak menyentuh state trade, Telegram, WebSocket, GitHub, atau order execution.
-12. Validator menghitung ulang data pair terbaru, membandingkan thesis awal, dan boleh mengembalikan setup baru jika lebih baik.
+Prinsip inti V2:
+1. H4 structure menjadi sumber thesis utama; BTC menjadi macro directional
+   constraint untuk altcoin. D1/H1/M15 menjadi konteks dan refinement, bukan
+   alasan untuk mengganti thesis H4 secara gegabah.
+2. Semua keputusan struktur menggunakan CLOSED candles saja.
+3. Liquidity dibangun sebagai zone map dari swing/equal/repeated/range levels
+   lintas H4/H1/M15, kemudian diberi significance dan role.
+4. Fibonacci adaptif: impulse clean → 0.382–0.500 sebagai lokasi utama;
+   impulse struggle → 0.618–0.786 sebagai deeper retracement; weak impulse
+   tetap dianalisis namun kualitasnya dibatasi.
+5. FVG/OB hanya menjadi refinement setelah liquidity × Fibonacci menghasilkan
+   lokasi yang relevan.
+6. RSI digunakan dalam dua keadaan: current momentum dan projected RSI at
+   entry zone melalui beberapa bounded scenario path. Projection adalah scenario
+   analysis, bukan prediksi exact future price path.
+7. Entry adalah zone, bukan angka arbitrary. SL mengikuti prediction
+   invalidation structure dan dapat memakai liquidity guard; tidak memaksa ATR
+   floor yang merusak thesis. TP memprioritaskan significant liquidity dan
+   H4/H1 structural targets dengan RR minimum.
+8. Confidence adalah thesis-quality score 0–100, bukan probabilitas profit.
+9. Waiting state tetap informatif; fallback harus tetap rendah kualitas.
+10. strategy.py tidak menyentuh state trade, Telegram, WebSocket, GitHub, atau
+    order execution.
 
 SMC yang dibuat objektif dalam kode:
     - Swing High / Swing Low
     - HH / HL / LH / LL
-    - BOS
-    - CHOCH
-    - MSS (CHOCH + displacement)
+    - BOS / CHOCH / MSS
     - Equal High / Equal Low
-    - Swing liquidity
-    - Liquidity sweep
-    - Fair Value Gap (FVG)
-    - Order Block (OB)
-    - Breaker Block (basic, dari OB failure)
-    - Premium / Discount / Equilibrium
-    - Displacement
-    - ATR / RSI(14) / relative-volume / trend slope (VLT-style)
+    - Liquidity pool / sweep / magnet
+    - Fair Value Gap / Order Block / Breaker
+    - Premium / Discount / Fibonacci
+    - Displacement / ATR / RSI(14) / relative-volume / trend slope
 
 Catatan penting:
-- SMC bukan standar teknikal tunggal dengan definisi universal. Karena itu
-  istilah di atas diberi definisi operasional yang deterministik agar dapat
-  dites dari trade history.
-- "VLT" di sini adalah modul custom berbasis OHLCV. Ia bukan klaim memiliki
-  true order-flow / footprint / delta data.
+- SMC bukan standar teknikal tunggal dengan definisi universal; semua istilah
+  diberi definisi operasional deterministik agar dapat diuji pada histori.
+- VLT di sini adalah modul custom berbasis OHLCV, bukan true footprint/order-flow.
 """
 
 import asyncio
@@ -83,7 +71,8 @@ import requests
 # ============================================================================
 
 STRATEGY_NAME = "SMC_VLT_RSI"
-STRATEGY_VERSION = "1.1.0"
+STRATEGY_ENGINE = "V2"
+STRATEGY_VERSION = "2.1.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -177,6 +166,116 @@ SL_POOL_BUFFER_H1_ATR = 0.25
 OTE_LOW = 0.62
 OTE_HIGH = 0.79
 LOW_QUALITY_MODELS = {"M15_SMC_FALLBACK", "STRUCTURE_PULLBACK_FALLBACK"}
+
+
+# ============================================================================
+# STRUCTURAL PREDICTION ENGINE V2 CONFIG
+# ============================================================================
+
+# Liquidity clustering / map.
+LIQ_MIN_TOLERANCE_PCT = 0.0010       # 0.10% of price
+LIQ_ATR_TOLERANCE = 0.15            # adaptive clustering tolerance
+LIQ_MIN_TOUCHES = 1
+LIQ_H4_BONUS = 20.0
+LIQ_H1_BONUS = 10.0
+LIQ_EQUAL_BONUS = 10.0
+LIQ_RECENT_BONUS = 8.0
+LIQ_MULTI_SOURCE_BONUS = 8.0
+LIQ_RANGE_EXTREME_BONUS = 5.0
+LIQ_SWEEP_PENALTY = 30.0
+LIQ_ZONE_MAX_PER_TF = 30
+LIQ_SIGNIFICANT_THRESHOLD_V2 = 70.0
+LIQ_NEAR_ENTRY_ATR = 0.80
+LIQ_MAGNET_MAX_H1_ATR_V2 = 3.0
+
+# Adaptive Fibonacci.
+FIB_NORMAL_LOW = 0.382
+FIB_NORMAL_HIGH = 0.500
+FIB_DEEP_LOW = 0.618
+FIB_DEEP_HIGH = 0.786
+FIB_SECONDARY_SHALLOW_LOW = 0.500
+FIB_SECONDARY_SHALLOW_HIGH = 0.618
+FIB_IMPULSE_MIN_MOVE_PCT = 1.0
+FIB_CLEAN_QUALITY = 72.0
+FIB_STRUGGLE_QUALITY = 48.0
+FIB_MIN_STRUCTURE_PRESERVED = True
+
+# Refinement / entry zone.
+REFINEMENT_MIN_OVERLAP = 0.10
+REFINEMENT_GOOD_OVERLAP = 0.35
+ENTRY_ZONE_MIN_WIDTH_PCT = 0.03
+ENTRY_ZONE_MAX_WIDTH_PCT = 1.80
+ENTRY_ZONE_MAX_COMPONENTS = 8
+ENTRY_SELECTION_RSI_WEIGHT = 0.35
+ENTRY_SELECTION_CONFLUENCE_WEIGHT = 0.35
+ENTRY_SELECTION_RISK_WEIGHT = 0.15
+ENTRY_SELECTION_REACH_WEIGHT = 0.15
+
+# Projected RSI.
+RSI_PROJECTION_MIN_STEPS_M15 = 3
+RSI_PROJECTION_MAX_STEPS_M15 = 12
+RSI_PROJECTION_STEPS_H1 = 2
+RSI_PROJECTION_STEPS_H4 = 4
+RSI_PROJECTION_SCENARIOS = ("FAST_RETRACE", "NORMAL_RETRACE", "SLOW_RETRACE")
+RSI_BUY_IDEAL_MAX_M15 = 40.0
+RSI_BUY_ACCEPTABLE_MAX_M15 = 48.0
+RSI_BUY_WARNING_MAX_M15 = 55.0
+RSI_SELL_IDEAL_MIN_M15 = 60.0
+RSI_SELL_ACCEPTABLE_MIN_M15 = 52.0
+RSI_SELL_WARNING_MIN_M15 = 45.0
+RSI_H4_BREAKDOWN_BUY = 35.0
+RSI_H4_BREAKDOWN_SELL = 65.0
+RSI_PROJECTION_MIN_CONSENSUS = 55.0
+
+# Structural invalidation / SL V2.
+MIN_INVALIDATION_STRENGTH = 55.0
+SL_INVALIDATION_BUFFER_ATR = 0.10
+SL_INVALIDATION_BUFFER_MAX_ATR = 0.35
+SL_MIN_BUFFER_PCT = 0.03
+SL_MAX_RISK_H1_ATR_V2 = 5.0
+SL_MAX_RISK_PCT_V2 = 4.5
+SL_TOO_TIGHT_ATR_RATIO = 0.25
+SL_IDEAL_H1_ATR_LOW = 0.70
+SL_IDEAL_H1_ATR_HIGH = 3.00
+
+# Target / RR V2.
+TARGET_MIN_RR = 2.0
+TARGET_PREFERRED_RR_LOW = 2.0
+TARGET_PREFERRED_RR_HIGH = 3.5
+TARGET_MAX_DISTANCE_H1_ATR = 8.0
+TARGET_MAJOR_BARRIER_THRESHOLD = 82.0
+TARGET_OBSTACLE_PENALTY = 15.0
+TARGET_H4_SWING_BONUS = 25.0
+TARGET_H1_SWING_BONUS = 15.0
+TARGET_EXTREME_BONUS = 20.0
+TARGET_LIQUIDITY_BASE = 35.0
+
+# Thesis scoring V2. Weights total 100.
+THESIS_WEIGHTS_V2 = {
+    "structure_alignment": 15.0,
+    "liquidity_confluence": 18.0,
+    "fib_location": 12.0,
+    "fvg_ob_refinement": 8.0,
+    "rsi_projection": 12.0,
+    "momentum_current": 5.0,
+    "invalidation_quality": 12.0,
+    "target_quality": 10.0,
+    "rr_quality": 5.0,
+    "entry_reachability": 3.0,
+}
+THESIS_WAITING_CAP_V2 = 68.0
+THESIS_VETO_CAP_V2 = 55.0
+THESIS_FALLBACK_CAP_V2 = 60.0
+THESIS_MIN_QUALITY_V2 = 45.0
+
+# Thesis freshness / trigger age.
+THESIS_MAX_TRIGGER_AGE_M15 = 32
+THESIS_EXPIRY_ATR_MULT = 1.50
+
+# V2 model names.
+PRIMARY_V2_MODEL = "STRUCTURAL_PREDICTION_V2"
+WAITING_V2_MODEL = "STRUCTURAL_PREDICTION_V2_WAITING"
+FALLBACK_V2_MODEL = "STRUCTURAL_PREDICTION_V2_FALLBACK"
 
 WEIGHTS = {
     # BTC regime is a directional constraint; the always-saturated gates
@@ -396,6 +495,26 @@ class FibonacciContext:
 
 
 @dataclass(slots=True)
+class LiquidityZone:
+    side: str                  # BUY_SIDE / SELL_SIDE
+    low: float
+    high: float
+    midpoint: float
+    strength: float
+    timeframe: str
+    touches: int
+    source_types: list[str]
+    first_index: int
+    last_index: int
+    swept: bool = False
+    sweep_index: int | None = None
+    distance_pct: float = 0.0
+    distance_atr: float = 0.0
+    significance: float = 0.0
+    role: str = "INTERNAL_LIQUIDITY"
+
+
+@dataclass(slots=True)
 class Candidate:
     direction: str
     model: str
@@ -411,6 +530,17 @@ class Candidate:
     scores: dict[str, float] = field(default_factory=dict)
     confidence: float = 0.0
     notes: list[str] = field(default_factory=list)
+    # V2 analytical objects. Defaults preserve compatibility with all V1 callers.
+    entry_low: float = 0.0
+    entry_high: float = 0.0
+    thesis_status: str = ""
+    thesis_type: str = ""
+    liquidity_zone: dict[str, Any] | None = None
+    fib_zone: dict[str, Any] | None = None
+    refinement_zone: dict[str, Any] | None = None
+    projected_rsi: dict[str, Any] | None = None
+    invalidation: dict[str, Any] | None = None
+    target_map: list[dict[str, Any]] | None = None
 
 
 # ============================================================================
@@ -4650,467 +4780,2058 @@ def align_candidate_to_tick(candidate: Candidate, tick_size: float, current: flo
     return candidate
 
 
+
 # ============================================================================
-# PUBLIC CONTRACT
+# STRUCTURAL PREDICTION ENGINE V2
 # ============================================================================
 
-async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
-    """
-    Analyze one symbol and return exactly the setup contract main.py expects.
 
-    context fields used:
-        notes, timeframe, candles_requested, market, session_id
-    """
+def _v2_tf_span(timeframe: str) -> int:
+    return {
+        "D1": 2,
+        "H4": SWING_SPAN_H4,
+        "H1": SWING_SPAN_H1,
+        "M15": SWING_SPAN_M15,
+    }.get(str(timeframe).upper(), SWING_SPAN_M15)
+
+
+def _v2_structure_signature(structure: StructureSnapshot) -> tuple[Any, ...]:
+    def _event_sig(event: dict[str, Any] | None) -> tuple[Any, ...] | None:
+        if not event:
+            return None
+        return (
+            event.get("type"),
+            event.get("direction"),
+            event.get("index"),
+            round(safe_float(event.get("level")), 8),
+        )
+
+    return (
+        structure.trend,
+        _event_sig(structure.last_bos),
+        _event_sig(structure.last_mss),
+        round(safe_float(structure.protected_high), 8),
+        round(safe_float(structure.protected_low), 8),
+        tuple((p.kind, p.index, round(p.price, 8)) for p in structure.swing_highs[-3:]),
+        tuple((p.kind, p.index, round(p.price, 8)) for p in structure.swing_lows[-3:]),
+    )
+
+
+def _v2_pivot_raw_levels(
+    structure: StructureSnapshot,
+    timeframe: str,
+) -> list[dict[str, Any]]:
+    raw: list[dict[str, Any]] = []
+    for p in structure.swing_highs[-24:]:
+        raw.append({
+            "side": "BUY_SIDE",
+            "level": p.price,
+            "index": p.index,
+            "source": "SWING_HIGH",
+        })
+    for p in structure.swing_lows[-24:]:
+        raw.append({
+            "side": "SELL_SIDE",
+            "level": p.price,
+            "index": p.index,
+            "source": "SWING_LOW",
+        })
+
+    pivots_high = structure.swing_highs[-24:]
+    pivots_low = structure.swing_lows[-24:]
+    price = 0.0
+    if pivots_high or pivots_low:
+        prices = [p.price for p in (*pivots_high, *pivots_low)]
+        price = median_or(prices, 0.0)
+
+    # Equal/repeated levels from confirmed pivots. We retain source metadata,
+    # then clustering later consolidates everything into zones.
+    for pivots, side in ((pivots_high, "BUY_SIDE"), (pivots_low, "SELL_SIDE")):
+        for i in range(len(pivots) - 1):
+            for j in range(i + 1, min(i + 7, len(pivots))):
+                a, b = pivots[i], pivots[j]
+                if abs(a.price - b.price) <= max(price * LIQ_MIN_TOLERANCE_PCT, 1e-12):
+                    raw.append({
+                        "side": side,
+                        "level": (a.price + b.price) / 2.0,
+                        "index": b.index,
+                        "source": "EQUAL_LEVEL",
+                    })
+
+    return raw
+
+
+def _v2_cluster_liquidity_levels(
+    raw_levels: list[dict[str, Any]],
+    candles: list[Candle],
+    timeframe: str,
+    current: float,
+) -> list[LiquidityZone]:
+    if not candles or not raw_levels:
+        return []
+    atr_values = atr_series(candles, 14)
+    atr = atr_values[-1] if atr_values else max(candles[-1].range, current * 0.005)
+    tolerance = max(current * LIQ_MIN_TOLERANCE_PCT, atr * LIQ_ATR_TOLERANCE)
+    groups: list[dict[str, Any]] = []
+
+    for item in sorted(raw_levels, key=lambda x: (x.get("side", ""), safe_float(x.get("level")))):
+        side = str(item.get("side") or "")
+        level = safe_float(item.get("level"), 0.0)
+        if level <= 0 or side not in {"BUY_SIDE", "SELL_SIDE"}:
+            continue
+        selected = None
+        for group in groups:
+            if group["side"] != side:
+                continue
+            if abs(level - group["midpoint"]) <= tolerance:
+                selected = group
+                break
+        if selected is None:
+            selected = {
+                "side": side,
+                "levels": [],
+                "midpoint": level,
+                "timeframe": timeframe,
+            }
+            groups.append(selected)
+        selected["levels"].append(item)
+        selected["midpoint"] = sum(safe_float(x["level"]) for x in selected["levels"]) / max(len(selected["levels"]), 1)
+
+    result: list[LiquidityZone] = []
+    for group in groups:
+        levels = group["levels"]
+        midpoint = safe_float(group["midpoint"])
+        half = max(
+            max(safe_float(x["level"]) for x in levels) - min(safe_float(x["level"]) for x in levels),
+            atr * 0.05,
+        ) * 0.5
+        low = min(safe_float(x["level"]) for x in levels) - half
+        high = max(safe_float(x["level"]) for x in levels) + half
+        source_types = sorted({str(x.get("source") or "UNKNOWN") for x in levels})
+        touches = len(levels)
+        first_index = min(int(x.get("index", 0)) for x in levels)
+        last_index = max(int(x.get("index", 0)) for x in levels)
+
+        # Recent range extreme as an explicit liquidity source.
+        window_size = 32 if timeframe == "H4" else 48 if timeframe == "H1" else 96
+        window_start = max(0, len(candles) - window_size)
+        window = candles[window_start:]
+        if window:
+            if group["side"] == "BUY_SIDE":
+                extreme_idx = max(range(window_start, len(candles)), key=lambda i: candles[i].high)
+                extreme = candles[extreme_idx].high
+            else:
+                extreme_idx = min(range(window_start, len(candles)), key=lambda i: candles[i].low)
+                extreme = candles[extreme_idx].low
+            if abs(extreme - midpoint) <= tolerance:
+                source_types.append("RECENT_RANGE_EXTREME")
+                # Preserve the actual extreme timestamp for recency/sweep logic.
+                last_index = max(last_index, int(extreme_idx))
+
+        raw_strength = 0.0
+        raw_strength += min(25.0, touches * 8.0)
+        if "EQUAL_LEVEL" in source_types:
+            raw_strength += LIQ_EQUAL_BONUS
+        if timeframe == "H4":
+            raw_strength += LIQ_H4_BONUS
+        elif timeframe == "H1":
+            raw_strength += LIQ_H1_BONUS
+        if last_index >= len(candles) - max(8, len(candles) // 12):
+            raw_strength += LIQ_RECENT_BONUS
+        if len(source_types) >= 2:
+            raw_strength += LIQ_MULTI_SOURCE_BONUS
+        if "RECENT_RANGE_EXTREME" in source_types:
+            raw_strength += LIQ_RANGE_EXTREME_BONUS
+
+        # Confirm whether the level was actually consumed/swept after formation.
+        sweep_tol = max(midpoint * 0.0002, atr * 0.05)
+        swept = False
+        sweep_index: int | None = None
+        for idx in range(min(len(candles) - 1, last_index + 1), len(candles)):
+            c = candles[idx]
+            if group["side"] == "SELL_SIDE" and c.low < midpoint - sweep_tol:
+                swept = True
+                sweep_index = idx
+                break
+            if group["side"] == "BUY_SIDE" and c.high > midpoint + sweep_tol:
+                swept = True
+                sweep_index = idx
+                break
+        significance = clamp(raw_strength - (LIQ_SWEEP_PENALTY if swept else 0.0))
+        result.append(
+            LiquidityZone(
+                side=group["side"],
+                low=round_price(low),
+                high=round_price(high),
+                midpoint=round_price(midpoint),
+                strength=round(clamp(raw_strength), 2),
+                timeframe=timeframe,
+                touches=touches,
+                source_types=sorted(set(source_types)),
+                first_index=first_index,
+                last_index=last_index,
+                swept=swept,
+                sweep_index=sweep_index,
+                distance_pct=round(distance_pct(current, midpoint), 5),
+                distance_atr=round(abs(midpoint - current) / max(atr, EPS), 4),
+                significance=round(significance, 2),
+            )
+        )
+
+    result.sort(key=lambda z: (z.significance, z.strength, z.touches, -z.distance_atr), reverse=True)
+    return result[:LIQ_ZONE_MAX_PER_TF]
+
+
+def _v2_mark_liquidity_roles(
+    zones: list[LiquidityZone],
+    direction: str,
+    current: float,
+    entry_low: float | None = None,
+    entry_high: float | None = None,
+) -> None:
+    entry_low = safe_float(entry_low, 0.0) if entry_low is not None else 0.0
+    entry_high = safe_float(entry_high, 0.0) if entry_high is not None else 0.0
+    for zone in zones:
+        if direction == "BUY":
+            if zone.side == "SELL_SIDE":
+                if entry_low and zone.high <= entry_high:
+                    zone.role = "ENTRY_LIQUIDITY"
+                elif zone.midpoint < current and zone.significance >= LIQ_SIGNIFICANT_THRESHOLD_V2:
+                    zone.role = "SL_GUARD_LIQUIDITY"
+                else:
+                    zone.role = "INTERNAL_LIQUIDITY"
+            else:
+                zone.role = "TARGET_LIQUIDITY" if zone.midpoint > current else "INTERNAL_LIQUIDITY"
+        else:
+            if zone.side == "BUY_SIDE":
+                if entry_high and zone.low >= entry_low:
+                    zone.role = "ENTRY_LIQUIDITY"
+                elif zone.midpoint > current and zone.significance >= LIQ_SIGNIFICANT_THRESHOLD_V2:
+                    zone.role = "SL_GUARD_LIQUIDITY"
+                else:
+                    zone.role = "INTERNAL_LIQUIDITY"
+            else:
+                zone.role = "TARGET_LIQUIDITY" if zone.midpoint < current else "INTERNAL_LIQUIDITY"
+
+
+def _v2_build_liquidity_map(
+    candles_by_tf: dict[str, list[Candle]],
+    structures: dict[str, StructureSnapshot],
+    current: float,
+    direction: str,
+) -> dict[str, Any]:
+    all_zones: list[LiquidityZone] = []
+    for tf in ("H4", "H1", "M15"):
+        candles = candles_by_tf.get(tf) or []
+        structure = structures.get(tf)
+        if not candles or structure is None:
+            continue
+        raw = _v2_pivot_raw_levels(structure, tf)
+        # Recent range boundaries are first-class liquidity references.
+        window = candles[-96:] if tf == "M15" else candles[-48:] if tf == "H1" else candles[-32:]
+        if window:
+            raw.append({"side": "BUY_SIDE", "level": max(c.high for c in window), "index": max(0, len(candles) - len(window)), "source": "RECENT_RANGE_HIGH"})
+            raw.append({"side": "SELL_SIDE", "level": min(c.low for c in window), "index": max(0, len(candles) - len(window)), "source": "RECENT_RANGE_LOW"})
+        zones = _v2_cluster_liquidity_levels(raw, candles, tf, current)
+        all_zones.extend(zones)
+
+    # Deduplicate cross-timeframe zones while preserving the most important TF.
+    all_zones.sort(key=lambda z: (z.significance, z.strength, z.timeframe == "H4", z.timeframe == "H1"), reverse=True)
+    merged: list[LiquidityZone] = []
+    for zone in all_zones:
+        overlap = False
+        for existing in merged:
+            tol = max(current * LIQ_MIN_TOLERANCE_PCT, (zone.distance_atr + existing.distance_atr) * 0.0 + current * 0.0005)
+            if zone.side == existing.side and abs(zone.midpoint - existing.midpoint) <= tol:
+                # Keep separate TF detail in source types; strengthen the more significant zone.
+                existing.low = min(existing.low, zone.low)
+                existing.high = max(existing.high, zone.high)
+                existing.midpoint = round_price((existing.midpoint + zone.midpoint) / 2.0)
+                existing.strength = round(clamp(max(existing.strength, zone.strength) + (5.0 if zone.timeframe != existing.timeframe else 0.0)), 2)
+                existing.significance = round(clamp(max(existing.significance, zone.significance) + (8.0 if zone.timeframe != existing.timeframe else 0.0)), 2)
+                existing.touches += zone.touches
+                existing.source_types = sorted(set(existing.source_types + zone.source_types + [zone.timeframe]))
+                existing.swept = existing.swept and zone.swept
+                overlap = True
+                break
+        if not overlap:
+            merged.append(zone)
+
+    for z in merged:
+        z.distance_pct = round(distance_pct(current, z.midpoint), 5)
+        z.role = "INTERNAL_LIQUIDITY"
+
+    above = sorted([z for z in merged if z.midpoint > current], key=lambda z: z.midpoint)
+    below = sorted([z for z in merged if z.midpoint < current], key=lambda z: z.midpoint, reverse=True)
+    significant_above = [z for z in above if z.significance >= LIQ_SIGNIFICANT_THRESHOLD_V2]
+    significant_below = [z for z in below if z.significance >= LIQ_SIGNIFICANT_THRESHOLD_V2]
+    opposing = [z for z in (below if direction == "BUY" else above) if not z.swept and z.significance >= LIQ_SIGNIFICANT_THRESHOLD_V2]
+    magnet = None
+    for z in opposing:
+        if z.distance_atr <= LIQ_MAGNET_MAX_H1_ATR_V2:
+            magnet = z
+            break
+
+    _v2_mark_liquidity_roles(merged, direction, current)
+    return {
+        "all": merged,
+        "above": above,
+        "below": below,
+        "significant_above": significant_above,
+        "significant_below": significant_below,
+        "magnet": magnet,
+        "direction": direction,
+    }
+
+
+def _v2_zone_overlap_values(
+    a_low: float,
+    a_high: float,
+    b_low: float,
+    b_high: float,
+) -> float:
+    overlap_low = max(a_low, b_low)
+    overlap_high = min(a_high, b_high)
+    overlap = max(0.0, overlap_high - overlap_low)
+    reference = max(min(a_high - a_low, b_high - b_low), EPS)
+    return clamp(overlap / reference)
+
+
+def _v2_assess_impulse_quality(
+    candles: list[Candle],
+    structure: StructureSnapshot,
+    direction: str,
+    fib: FibonacciContext | None,
+) -> dict[str, Any]:
+    if not candles or fib is None:
+        return {
+            "quality": 0.0,
+            "classification": "WEAK",
+            "net_move_pct": 0.0,
+            "body_efficiency": 0.0,
+            "opposite_candle_ratio": 1.0,
+            "displacement_count": 0,
+            "structure_preserved": False,
+        }
+    start = min(fib.low_index, fib.high_index)
+    end = max(fib.low_index, fib.high_index)
+    seg = candles[start : end + 1]
+    if len(seg) < 3:
+        return {
+            "quality": 0.0,
+            "classification": "WEAK",
+            "net_move_pct": 0.0,
+            "body_efficiency": 0.0,
+            "opposite_candle_ratio": 1.0,
+            "displacement_count": 0,
+            "structure_preserved": False,
+        }
+    net_move = abs(seg[-1].close - seg[0].open)
+    net_move_pct = net_move / max(abs(seg[0].open), EPS) * 100.0
+    total_range = sum(max(c.range, EPS) for c in seg)
+    net_eff = min(1.0, net_move / max(total_range, EPS))
+    if direction == "BUY":
+        opposite = sum(1 for c in seg if c.bearish)
+    else:
+        opposite = sum(1 for c in seg if c.bullish)
+    opposite_ratio = opposite / len(seg)
+    body_eff = sum(c.body for c in seg) / max(total_range, EPS)
+    atr_values = atr_series(candles, 14)
+    rel_vol = relative_volume(candles, 20)
+    disp_count = 0
+    for idx in range(start, min(end + 1, len(candles))):
+        if idx < len(atr_values) and idx < len(rel_vol):
+            if displacement_strength(candles, idx, atr_values, rel_vol) >= 60:
+                disp_count += 1
+    preserved = (
+        (direction == "BUY" and structure.trend == "BULLISH" and structure.protected_low is not None)
+        or (direction == "SELL" and structure.trend == "BEARISH" and structure.protected_high is not None)
+    )
+    quality = (
+        clamp(net_move_pct / max(FIB_IMPULSE_MIN_MOVE_PCT * 2.5, 1.0) * 30.0)
+        + clamp(net_eff * 100.0) * 0.30
+        + clamp(body_eff * 100.0) * 0.20
+        + clamp((1.0 - opposite_ratio) * 100.0) * 0.20
+        + min(10.0, disp_count * 2.5)
+    )
+    if not preserved:
+        quality -= 20.0
+    quality = clamp(quality)
+    if quality >= FIB_CLEAN_QUALITY:
+        classification = "CLEAN"
+    elif quality >= FIB_STRUGGLE_QUALITY:
+        classification = "STRUGGLE"
+    else:
+        classification = "WEAK"
+    return {
+        "quality": round(quality, 2),
+        "classification": classification,
+        "net_move_pct": round(net_move_pct, 3),
+        "body_efficiency": round(body_eff, 4),
+        "opposite_candle_ratio": round(opposite_ratio, 4),
+        "displacement_count": disp_count,
+        "structure_preserved": preserved,
+        "anchor_indices": {"start": start, "end": end},
+    }
+
+
+def _v2_build_adaptive_fib_zones(
+    candles: list[Candle],
+    structure: StructureSnapshot,
+    direction: str,
+    timeframe: str,
+) -> dict[str, Any]:
+    fib = build_fibonacci(candles, structure, direction, timeframe)
+    if fib is None and candles:
+        # V2 fallback anchor: use the latest ordered structural extreme pair in a bounded window.
+        window_start = max(0, len(candles) - 120)
+        segment = candles[window_start:]
+        if direction == "BUY":
+            low_rel = min(range(len(segment)), key=lambda i: segment[i].low)
+            later = segment[low_rel:] or segment
+            high_rel_local = max(range(len(later)), key=lambda i: later[i].high)
+            low_idx = window_start + low_rel
+            high_idx = window_start + low_rel + high_rel_local
+            low = segment[low_rel].low
+            high = later[high_rel_local].high
+            reason = "V2 fallback Fib menggunakan structural low -> high terbaru karena anchor event belum cukup eksplisit."
+        else:
+            high_rel = max(range(len(segment)), key=lambda i: segment[i].high)
+            later = segment[high_rel:] or segment
+            low_rel_local = min(range(len(later)), key=lambda i: later[i].low)
+            high_idx = window_start + high_rel
+            low_idx = window_start + high_rel + low_rel_local
+            high = segment[high_rel].high
+            low = later[low_rel_local].low
+            reason = "V2 fallback Fib menggunakan structural high -> low terbaru karena anchor event belum cukup eksplisit."
+        if high > low and high_idx != low_idx:
+            fib = FibonacciContext(
+                timeframe=timeframe,
+                direction=direction,
+                swing_low=low,
+                swing_high=high,
+                low_index=min(low_idx, high_idx),
+                high_index=max(low_idx, high_idx),
+                anchor_reason=reason,
+                trend_strength=trend_strength_metrics(candles, structure),
+                levels={f"{ratio:.3f}": round_price(high - ratio * (high - low) if direction == "BUY" else low + ratio * (high - low)) for ratio in (0.0, 0.236, 0.382, 0.5, 0.618, 0.705, 0.786, 1.0)},
+            )
+    if fib is None:
+        return {"available": False, "zones": [], "fib": None, "impulse_quality": {"classification": "WEAK", "quality": 0.0}}
+    impulse = _v2_assess_impulse_quality(candles, structure, direction, fib)
+    if impulse["classification"] == "CLEAN":
+        primary = (FIB_NORMAL_LOW, FIB_NORMAL_HIGH)
+        secondary = (FIB_SECONDARY_SHALLOW_LOW, FIB_DEEP_LOW)
+    elif impulse["classification"] == "STRUGGLE":
+        primary = (FIB_DEEP_LOW, FIB_DEEP_HIGH)
+        secondary = (FIB_NORMAL_LOW, FIB_NORMAL_HIGH)
+    else:
+        primary = (FIB_DEEP_LOW, FIB_DEEP_HIGH)
+        secondary = (FIB_NORMAL_LOW, FIB_NORMAL_HIGH)
+
+    def _zone(r1: float, r2: float, label: str) -> dict[str, Any]:
+        low, high = fib_zone_for_direction(fib, r1, r2)
+        return {
+            "label": label,
+            "ratio_low": min(r1, r2),
+            "ratio_high": max(r1, r2),
+            "price_low": round_price(low),
+            "price_high": round_price(high),
+            "midpoint": round_price((low + high) / 2.0),
+        }
+
+    return {
+        "available": True,
+        "direction": direction,
+        "timeframe": timeframe,
+        "fib": fib,
+        "impulse_quality": impulse,
+        "primary_zone": _zone(primary[0], primary[1], "PRIMARY"),
+        "secondary_zone": _zone(secondary[0], secondary[1], "SECONDARY"),
+        "deep_zone": _zone(FIB_DEEP_LOW, FIB_DEEP_HIGH, "DEEP_0.618_0.786"),
+        "normal_zone": _zone(FIB_NORMAL_LOW, FIB_NORMAL_HIGH, "NORMAL_0.382_0.500"),
+        "reason": (
+            "Clean impulse → normal retracement preferred (0.382-0.500)."
+            if impulse["classification"] == "CLEAN"
+            else "Struggle impulse → deeper discount/premium retracement preferred (0.618-0.786)."
+            if impulse["classification"] == "STRUGGLE"
+            else "Weak impulse → deep and normal zones retained only as low-confidence candidates."
+        ),
+    }
+
+
+def _v2_zone_as_zone(item: dict[str, Any], kind: str = "V2_ZONE") -> Zone:
+    return Zone(
+        kind=kind,
+        low=safe_float(item.get("price_low")),
+        high=safe_float(item.get("price_high")),
+        index=0,
+        source=str(item.get("label") or kind),
+        strength=50.0,
+        details={},
+    )
+
+
+def _v2_liquidity_fib_candidates(
+    liquidity_map: dict[str, Any],
+    fib_analysis: dict[str, Any],
+    direction: str,
+    current: float,
+    h1_atr: float,
+) -> list[dict[str, Any]]:
+    if not fib_analysis.get("available"):
+        return []
+    zones = [fib_analysis["primary_zone"], fib_analysis["secondary_zone"], fib_analysis["deep_zone"], fib_analysis["normal_zone"]]
+    unique_zones: list[dict[str, Any]] = []
+    seen: set[tuple[float, float]] = set()
+    for z in zones:
+        key = (safe_float(z["price_low"]), safe_float(z["price_high"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_zones.append(z)
+
+    pool_side = "SELL_SIDE" if direction == "BUY" else "BUY_SIDE"
+    pools = [z for z in liquidity_map.get("all", []) if z.side == pool_side and not z.swept]
+    candidates: list[dict[str, Any]] = []
+    for fib_zone in unique_zones:
+        f_low = safe_float(fib_zone["price_low"])
+        f_high = safe_float(fib_zone["price_high"])
+        for pool in pools:
+            overlap = _v2_zone_overlap_values(f_low, f_high, pool.low, pool.high)
+            distance = abs(pool.midpoint - current) / max(h1_atr, EPS)
+            near = overlap > 0 or abs(pool.midpoint - (f_low + f_high) / 2.0) <= 0.70 * max(h1_atr, EPS)
+            if not near or distance > 8.0:
+                continue
+            structure_bonus = 10.0 if pool.timeframe == "H4" else 6.0 if pool.timeframe == "H1" else 2.0
+            confluence = clamp(
+                pool.significance * 0.40
+                + overlap * 30.0
+                + structure_bonus
+                + (10.0 if pool.touches >= 3 else 0.0)
+            )
+            if overlap > 0:
+                low = max(f_low, pool.low)
+                high = min(f_high, pool.high)
+            else:
+                # No direct overlap: retain the stronger zone but only in a bounded
+                # neighborhood; later refinement may tighten it.
+                width = max(min(f_high - f_low, pool.high - pool.low), h1_atr * 0.20)
+                center = (safe_float(fib_zone["midpoint"]) + pool.midpoint) / 2.0
+                low = center - width / 2.0
+                high = center + width / 2.0
+            if high <= low:
+                continue
+            candidates.append({
+                "zone_low": round_price(low),
+                "zone_high": round_price(high),
+                "zone_mid": round_price((low + high) / 2.0),
+                "fib": fib_zone,
+                "pool": pool,
+                "overlap_ratio": round(overlap, 4),
+                "confluence": round(confluence, 2),
+            })
+
+    # Keep best unique location zones.
+    candidates.sort(key=lambda x: (x["confluence"], x["pool"].significance, x["overlap_ratio"]), reverse=True)
+    dedupe: list[dict[str, Any]] = []
+    for item in candidates:
+        if any(
+            _v2_zone_overlap_values(item["zone_low"], item["zone_high"], d["zone_low"], d["zone_high"]) > 0.65
+            for d in dedupe
+        ):
+            continue
+        dedupe.append(item)
+        if len(dedupe) >= 8:
+            break
+    return dedupe
+
+
+def _v2_refine_location(
+    location: dict[str, Any],
+    direction: str,
+    h1_ctx: dict[str, Any],
+    m15_ctx: dict[str, Any],
+) -> dict[str, Any]:
+    low = safe_float(location["zone_low"])
+    high = safe_float(location["zone_high"])
+    parent = Zone("LOCATION_ZONE", low, high, 0, "LIQUIDITY_FIB", strength=location["confluence"])
+    refinements: list[tuple[float, Zone, str]] = []
+    for source_name, ctx in (("H1", h1_ctx), ("M15", m15_ctx)):
+        for z in (ctx.get("fvg") or []) + (ctx.get("obs") or []) + (ctx.get("breakers") or []):
+            overlap = zone_overlap_ratio(parent, z)
+            if overlap >= REFINEMENT_MIN_OVERLAP:
+                q = clamp(z.strength * 0.55 + overlap * 45.0)
+                refinements.append((q, z, source_name))
+    refinements.sort(key=lambda x: x[0], reverse=True)
+    best = refinements[0] if refinements else None
+    if best:
+        q, z, source_name = best
+        refined_low = max(low, z.low)
+        refined_high = min(high, z.high)
+        if refined_high <= refined_low:
+            refined_low, refined_high = low, high
+        return {
+            "low": round_price(refined_low),
+            "high": round_price(refined_high),
+            "midpoint": round_price((refined_low + refined_high) / 2.0),
+            "source": source_name,
+            "kind": z.kind,
+            "quality": round(q, 2),
+            "overlap_ratio": round(zone_overlap_ratio(parent, z), 4),
+            "parent_zone": {"low": low, "high": high},
+        }
+    return {
+        "low": round_price(low),
+        "high": round_price(high),
+        "midpoint": round_price((low + high) / 2.0),
+        "source": "LIQUIDITY_FIB_ONLY",
+        "kind": None,
+        "quality": round(location["confluence"] * 0.55, 2),
+        "overlap_ratio": 0.0,
+        "parent_zone": {"low": low, "high": high},
+    }
+
+
+def _v2_rsi_value_from_closes(closes: list[float], period: int = 14) -> float:
+    if len(closes) <= period:
+        return 50.0
+    gains = [0.0]
+    losses = [0.0]
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+    avg_gain = sum(gains[1 : period + 1]) / period
+    avg_loss = sum(losses[1 : period + 1]) / period
+    for i in range(period + 1, len(closes)):
+        avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
+        avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
+    if avg_loss <= EPS and avg_gain <= EPS:
+        return 50.0
+    if avg_loss <= EPS:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def _v2_simulate_rsi_path(
+    candles: list[Candle],
+    target: float,
+    steps: int,
+    scenario: str,
+) -> float:
+    if not candles:
+        return 50.0
+    base_closes = [c.close for c in candles[-max(80, RSI_PERIOD + 20):]]
+    current = base_closes[-1]
+    steps = max(1, int(steps))
+    path: list[float] = []
+    for i in range(1, steps + 1):
+        x = i / steps
+        if scenario == "FAST_RETRACE":
+            weight = min(1.0, x * 1.65)
+            price = current + (target - current) * weight
+        elif scenario == "SLOW_RETRACE":
+            weight = x * x
+            price = current + (target - current) * weight
+        else:
+            price = current + (target - current) * x
+        path.append(price)
+    return _v2_rsi_value_from_closes(base_closes + path, RSI_PERIOD)
+
+
+def _v2_projection_stats(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"min": 50.0, "median": 50.0, "max": 50.0, "spread": 100.0, "consensus": 0.0}
+    ordered = sorted(values)
+    med = float(median(ordered))
+    spread = max(ordered) - min(ordered)
+    consensus = clamp(100.0 - spread * 2.5)
+    return {
+        "min": round(min(ordered), 2),
+        "median": round(med, 2),
+        "max": round(max(ordered), 2),
+        "spread": round(spread, 2),
+        "consensus": round(consensus, 2),
+    }
+
+
+def _v2_classify_projected_rsi(direction: str, h4: dict[str, Any], m15: dict[str, Any]) -> str:
+    h4_med = safe_float(h4.get("median"), 50.0)
+    m15_med = safe_float(m15.get("median"), 50.0)
+    if direction == "BUY":
+        if m15_med <= RSI_BUY_IDEAL_MAX_M15 and h4_med >= RSI_H4_BREAKDOWN_BUY:
+            return "SUPPORTIVE_BUY_RETRACEMENT"
+        if m15_med <= RSI_BUY_ACCEPTABLE_MAX_M15 and h4_med >= RSI_H4_BREAKDOWN_BUY:
+            return "ACCEPTABLE_BUY_RETRACEMENT"
+        if m15_med <= RSI_BUY_WARNING_MAX_M15:
+            return "WARNING_SHALLOW_BUY_RETRACEMENT"
+        return "WEAK_BUY_RETRACEMENT"
+    if m15_med >= RSI_SELL_IDEAL_MIN_M15 and h4_med <= RSI_H4_BREAKDOWN_SELL:
+        return "SUPPORTIVE_SELL_RETRACEMENT"
+    if m15_med >= RSI_SELL_ACCEPTABLE_MIN_M15 and h4_med <= RSI_H4_BREAKDOWN_SELL:
+        return "ACCEPTABLE_SELL_RETRACEMENT"
+    if m15_med >= RSI_SELL_WARNING_MIN_M15:
+        return "WARNING_SHALLOW_SELL_RETRACEMENT"
+    return "WEAK_SELL_RETRACEMENT"
+
+
+def _v2_project_rsi_to_entry_zone(
+    m15: list[Candle],
+    h4: list[Candle],
+    entry_low: float,
+    entry_high: float,
+    direction: str,
+) -> dict[str, Any]:
+    m15_rsi_now = _latest_rsi_context(m15).get("rsi14", 50.0)
+    h4_rsi_now = _latest_rsi_context(h4).get("rsi14", 50.0)
+    current_price = m15[-1].close if m15 else (entry_low + entry_high) / 2.0
+    midpoint = (entry_low + entry_high) / 2.0
+    if direction == "BUY":
+        entry_target = min(midpoint, current_price - max(current_price * 1e-6, EPS))
+        entry_target = max(entry_low, entry_target)
+    else:
+        entry_target = max(midpoint, current_price + max(current_price * 1e-6, EPS))
+        entry_target = min(entry_high, entry_target)
+    entry_distance_pct = distance_pct(entry_target, current_price) if m15 else 0.0
+    m15_steps = max(RSI_PROJECTION_MIN_STEPS_M15, min(RSI_PROJECTION_MAX_STEPS_M15, int(abs(entry_distance_pct) / 0.5) + 3))
+    m15_values = [
+        _v2_simulate_rsi_path(m15, entry_target, m15_steps, scenario)
+        for scenario in RSI_PROJECTION_SCENARIOS
+    ]
+    h4_values = [
+        _v2_simulate_rsi_path(h4, entry_target, RSI_PROJECTION_STEPS_H4, scenario)
+        for scenario in RSI_PROJECTION_SCENARIOS
+    ]
+    m15_stats = _v2_projection_stats(m15_values)
+    h4_stats = _v2_projection_stats(h4_values)
+    classification = _v2_classify_projected_rsi(direction, h4_stats, m15_stats)
+    consensus = (m15_stats["consensus"] * 0.70) + (h4_stats["consensus"] * 0.30)
+    return {
+        "current": {"H4": round(h4_rsi_now, 2), "M15": round(m15_rsi_now, 2)},
+        "at_entry": {"H4": h4_stats, "M15": m15_stats},
+        "entry_target": round_price(entry_target),
+        "scenario_values": {
+            "H4": {k: round(v, 2) for k, v in zip(RSI_PROJECTION_SCENARIOS, h4_values)},
+            "M15": {k: round(v, 2) for k, v in zip(RSI_PROJECTION_SCENARIOS, m15_values)},
+        },
+        "scenario_consensus": round(consensus, 2),
+        "classification": classification,
+        "distance_pct": round(entry_distance_pct, 4),
+    }
+
+
+def _v2_score_rsi_projection(direction: str, projection: dict[str, Any]) -> float:
+    classification = str(projection.get("classification") or "")
+    consensus = safe_float(projection.get("scenario_consensus"), 0.0)
+    base = {
+        "SUPPORTIVE_BUY_RETRACEMENT": 96.0,
+        "SUPPORTIVE_SELL_RETRACEMENT": 96.0,
+        "ACCEPTABLE_BUY_RETRACEMENT": 82.0,
+        "ACCEPTABLE_SELL_RETRACEMENT": 82.0,
+        "WARNING_SHALLOW_BUY_RETRACEMENT": 58.0,
+        "WARNING_SHALLOW_SELL_RETRACEMENT": 58.0,
+        "WEAK_BUY_RETRACEMENT": 30.0,
+        "WEAK_SELL_RETRACEMENT": 30.0,
+    }.get(classification, 40.0)
+    return clamp(base * 0.70 + consensus * 0.30)
+
+
+def _v2_select_entry_price(
+    direction: str,
+    zone_low: float,
+    zone_high: float,
+    projection: dict[str, Any],
+    current: float,
+    h4_atr: float,
+    confluence: float,
+) -> float:
+    zone_low, zone_high = min(zone_low, zone_high), max(zone_low, zone_high)
+    rsi_med = safe_float((projection.get("at_entry") or {}).get("M15", {}).get("median"), 50.0)
+    if direction == "BUY":
+        ideal_rsi = RSI_BUY_IDEAL_MAX_M15
+        quality = clamp((ideal_rsi - rsi_med + 25.0) / 55.0 * 100.0)
+        bias = clamp((confluence * 0.65 + quality * 0.35) / 100.0)
+        # Stronger projected cooling prefers the deeper part of the zone, but
+        # never beyond zone boundaries.
+        price = zone_high - (zone_high - zone_low) * bias
+        return max(zone_low, min(current - max(h4_atr * 0.01, EPS), price))
+    ideal_rsi = RSI_SELL_IDEAL_MIN_M15
+    quality = clamp((rsi_med - ideal_rsi + 25.0) / 55.0 * 100.0)
+    bias = clamp((confluence * 0.65 + quality * 0.35) / 100.0)
+    price = zone_low + (zone_high - zone_low) * bias
+    return min(zone_high, max(current + max(h4_atr * 0.01, EPS), price))
+
+
+def _v2_find_invalidation_candidates(
+    direction: str,
+    entry: float,
+    h4_structure: StructureSnapshot,
+    h1_structure: StructureSnapshot,
+    liquidity_map: dict[str, Any],
+    sweeps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    if direction == "BUY":
+        if h4_structure.protected_low is not None and h4_structure.protected_low < entry:
+            candidates.append({"level": h4_structure.protected_low, "source": "H4_PROTECTED_LOW", "strength": 96.0})
+        if h1_structure.protected_low is not None and h1_structure.protected_low < entry:
+            candidates.append({"level": h1_structure.protected_low, "source": "H1_PROTECTED_LOW", "strength": 82.0})
+        for pool in liquidity_map.get("below", []):
+            # A pool may straddle the selected entry zone. Its lower boundary
+            # is still a legitimate prediction-invalidation candidate for BUY.
+            if pool.low < entry and pool.significance >= MIN_INVALIDATION_STRENGTH:
+                candidates.append({
+                    "level": pool.low,
+                    "source": f"{pool.timeframe}_SELL_SIDE_LIQUIDITY",
+                    "strength": pool.significance,
+                    "pool": pool,
+                })
+        for sweep in reversed(sweeps[-12:]):
+            if sweep.get("direction") == "BULLISH" and safe_float(sweep.get("level")) < entry:
+                candidates.append({"level": safe_float(sweep.get("level")), "source": "BULLISH_SWEEP_EXTREME", "strength": 90.0, "sweep": sweep})
+    else:
+        if h4_structure.protected_high is not None and h4_structure.protected_high > entry:
+            candidates.append({"level": h4_structure.protected_high, "source": "H4_PROTECTED_HIGH", "strength": 96.0})
+        if h1_structure.protected_high is not None and h1_structure.protected_high > entry:
+            candidates.append({"level": h1_structure.protected_high, "source": "H1_PROTECTED_HIGH", "strength": 82.0})
+        for pool in liquidity_map.get("above", []):
+            # Mirror logic for SELL: the upper boundary of an overlapping pool
+            # can invalidate the bearish thesis.
+            if pool.high > entry and pool.significance >= MIN_INVALIDATION_STRENGTH:
+                candidates.append({
+                    "level": pool.high,
+                    "source": f"{pool.timeframe}_BUY_SIDE_LIQUIDITY",
+                    "strength": pool.significance,
+                    "pool": pool,
+                })
+        for sweep in reversed(sweeps[-12:]):
+            if sweep.get("direction") == "BEARISH" and safe_float(sweep.get("level")) > entry:
+                candidates.append({"level": safe_float(sweep.get("level")), "source": "BEARISH_SWEEP_EXTREME", "strength": 90.0, "sweep": sweep})
+
+    # Remove near-duplicates, keeping the stronger structural source.
+    deduped: list[dict[str, Any]] = []
+    for item in sorted(candidates, key=lambda x: (safe_float(x["level"]), -safe_float(x["strength"])), reverse=direction == "SELL"):
+        if any(abs(safe_float(item["level"]) - safe_float(x["level"])) <= max(entry * 0.0002, entry * SL_MIN_BUFFER_PCT / 100.0) for x in deduped):
+            continue
+        deduped.append(item)
+    return deduped
+
+
+def _v2_select_prediction_invalidation(
+    direction: str,
+    entry: float,
+    h4_structure: StructureSnapshot,
+    h1_structure: StructureSnapshot,
+    liquidity_map: dict[str, Any],
+    sweeps: list[dict[str, Any]],
+    h1_atr: float,
+) -> dict[str, Any] | None:
+    candidates = _v2_find_invalidation_candidates(direction, entry, h4_structure, h1_structure, liquidity_map, sweeps)
+    if not candidates:
+        return None
+    if direction == "BUY":
+        below = [c for c in candidates if safe_float(c["level"]) < entry]
+        below.sort(key=lambda x: (abs(entry - safe_float(x["level"])), -safe_float(x["strength"])))
+    else:
+        below = [c for c in candidates if safe_float(c["level"]) > entry]
+        below.sort(key=lambda x: (abs(entry - safe_float(x["level"])), -safe_float(x["strength"])))
+    if not below:
+        return None
+
+    selected = None
+    for item in below:
+        dist_atr = abs(entry - safe_float(item["level"])) / max(h1_atr, EPS)
+        if dist_atr <= SL_MAX_RISK_H1_ATR_V2 and safe_float(item["strength"]) >= MIN_INVALIDATION_STRENGTH:
+            selected = item
+            break
+    if selected is None:
+        selected = below[0]
+
+    anchor = safe_float(selected["level"])
+    buffer = min(
+        h1_atr * SL_INVALIDATION_BUFFER_ATR,
+        h1_atr * SL_INVALIDATION_BUFFER_MAX_ATR,
+    )
+    buffer = max(buffer, entry * SL_MIN_BUFFER_PCT / 100.0)
+    sl = anchor - buffer if direction == "BUY" else anchor + buffer
+
+    # If a significant liquidity pool sits between entry and structural anchor,
+    # push SL only just beyond the pool; do not create an arbitrary ATR floor.
+    guard_pool = None
+    if direction == "BUY":
+        guards = [
+            z for z in liquidity_map.get("below", [])
+            if z.low < entry and z.significance >= MIN_INVALIDATION_STRENGTH
+        ]
+        guards.sort(key=lambda z: z.midpoint, reverse=True)
+        for pool in guards:
+            if pool.low <= anchor <= pool.high or pool.high >= anchor - h1_atr * 0.35:
+                guard_pool = pool
+                break
+        if guard_pool is not None and guard_pool.low < sl:
+            sl = guard_pool.low - min(h1_atr * SL_INVALIDATION_BUFFER_ATR, h1_atr * 0.20)
+    else:
+        guards = [
+            z for z in liquidity_map.get("above", [])
+            if z.high > entry and z.significance >= MIN_INVALIDATION_STRENGTH
+        ]
+        guards.sort(key=lambda z: z.midpoint)
+        for pool in guards:
+            if pool.low <= anchor <= pool.high or pool.low <= anchor + h1_atr * 0.35:
+                guard_pool = pool
+                break
+        if guard_pool is not None and guard_pool.high > sl:
+            sl = guard_pool.high + min(h1_atr * SL_INVALIDATION_BUFFER_ATR, h1_atr * 0.20)
+
+    risk = abs(entry - sl)
+    risk_h1_atr = risk / max(h1_atr, EPS)
+    risk_pct = risk / max(entry, EPS) * 100.0
+    # HARD SAFETY GATE: never widen a structural stop simply to satisfy an ATR
+    # floor. If prediction invalidation creates excessive risk, reject the
+    # candidate rather than changing the thesis geometry.
+    if risk_h1_atr > SL_MAX_RISK_H1_ATR_V2 or risk_pct > SL_MAX_RISK_PCT_V2:
+        return None
+    quality = 100.0
+    if risk_h1_atr < SL_TOO_TIGHT_ATR_RATIO:
+        quality -= 25.0
+    elif SL_IDEAL_H1_ATR_LOW <= risk_h1_atr <= SL_IDEAL_H1_ATR_HIGH:
+        quality += 0.0
+    elif risk_h1_atr > 3.5:
+        quality -= min(35.0, (risk_h1_atr - 3.5) * 12.0)
+    if risk_pct > SL_MAX_RISK_PCT_V2:
+        quality -= 30.0
+    quality = clamp(quality)
+
+    return {
+        "anchor_level": round_price(anchor),
+        "anchor_source": selected["source"],
+        "anchor_strength": round(safe_float(selected["strength"]), 2),
+        "liquidity_guard": (
+            {
+                "low": guard_pool.low,
+                "high": guard_pool.high,
+                "midpoint": guard_pool.midpoint,
+                "significance": guard_pool.significance,
+                "timeframe": guard_pool.timeframe,
+            }
+            if guard_pool is not None else None
+        ),
+        "buffer": round(buffer, 10),
+        "sl": round_price(sl),
+        "risk": round_price(risk),
+        "risk_h1_atr": round(risk_h1_atr, 3),
+        "risk_pct": round(risk_pct, 3),
+        "quality": round(quality, 2),
+        "classification": (
+            "TIGHT_BUT_STRUCTURAL" if risk_h1_atr < SL_IDEAL_H1_ATR_LOW else
+            "IDEAL" if risk_h1_atr <= SL_IDEAL_H1_ATR_HIGH else
+            "WIDE" if risk_h1_atr <= SL_MAX_RISK_H1_ATR_V2 else
+            "TOO_WIDE"
+        ),
+        "reason": (
+            f"Prediction invalidation berasal dari {selected['source']} di {round_price(anchor)}; "
+            f"SL ditempatkan di luar invalidation" +
+            (f" dan liquidity guard {round_price(guard_pool.midpoint)}." if guard_pool else ".")
+        ),
+    }
+
+
+def _v2_structural_targets(
+    direction: str,
+    entry: float,
+    h4_structure: StructureSnapshot,
+    h1_structure: StructureSnapshot,
+) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    if direction == "BUY":
+        for p in reversed(h1_structure.swing_highs[-10:]):
+            if p.price > entry:
+                targets.append({"level": p.price, "type": "H1_SWING_HIGH", "strength": 70.0 + (5.0 if p.kind == "HIGH" else 0.0), "priority": 80.0})
+        for p in reversed(h4_structure.swing_highs[-10:]):
+            if p.price > entry:
+                labels = [x for x in h4_structure.labels if x.get("index") == p.index]
+                label = labels[-1].get("label") if labels else None
+                bonus = TARGET_EXTREME_BONUS if label == "HH" else 0.0
+                targets.append({"level": p.price, "type": "H4_HIGHER_HIGH" if label == "HH" else "H4_SWING_HIGH", "strength": 78.0 + bonus, "priority": 95.0})
+    else:
+        for p in reversed(h1_structure.swing_lows[-10:]):
+            if p.price < entry:
+                targets.append({"level": p.price, "type": "H1_SWING_LOW", "strength": 70.0, "priority": 80.0})
+        for p in reversed(h4_structure.swing_lows[-10:]):
+            if p.price < entry:
+                labels = [x for x in h4_structure.labels if x.get("index") == p.index]
+                label = labels[-1].get("label") if labels else None
+                bonus = TARGET_EXTREME_BONUS if label == "LL" else 0.0
+                targets.append({"level": p.price, "type": "H4_LOWER_LOW" if label == "LL" else "H4_SWING_LOW", "strength": 78.0 + bonus, "priority": 95.0})
+    return targets
+
+
+def _v2_build_target_map(
+    direction: str,
+    entry: float,
+    sl: float,
+    liquidity_map: dict[str, Any],
+    h4_structure: StructureSnapshot,
+    h1_structure: StructureSnapshot,
+    h1_atr: float,
+    current: float | None = None,
+) -> list[dict[str, Any]]:
+    risk = abs(entry - sl)
+    targets: list[dict[str, Any]] = []
+    pools = liquidity_map.get("above", []) if direction == "BUY" else liquidity_map.get("below", [])
+    wanted = "BUY_SIDE" if direction == "BUY" else "SELL_SIDE"
+    for pool in pools:
+        if pool.side != wanted or pool.swept or pool.significance < 45:
+            continue
+        dist = abs(pool.midpoint - entry)
+        if dist <= 0 or dist / max(h1_atr, EPS) > TARGET_MAX_DISTANCE_H1_ATR:
+            continue
+        if current is not None:
+            if direction == "BUY" and pool.midpoint <= current:
+                continue
+            if direction == "SELL" and pool.midpoint >= current:
+                continue
+        targets.append({
+            "level": pool.midpoint,
+            "type": f"{pool.timeframe}_{wanted}_LIQUIDITY",
+            "strength": pool.significance,
+            "priority": TARGET_LIQUIDITY_BASE + pool.significance * 0.50,
+            "source": pool.source_types,
+            "timeframe": pool.timeframe,
+            "distance_h1_atr": round(dist / max(h1_atr, EPS), 3),
+        })
+
+    structural_targets = _v2_structural_targets(direction, entry, h4_structure, h1_structure)
+    if current is not None:
+        structural_targets = [
+            t for t in structural_targets
+            if (safe_float(t["level"]) > current if direction == "BUY" else safe_float(t["level"]) < current)
+        ]
+    targets.extend(structural_targets)
+
+    # Remove duplicate levels.
+    unique: list[dict[str, Any]] = []
+    for t in sorted(targets, key=lambda x: (safe_float(x["level"]), -safe_float(x.get("strength"))), reverse=direction == "SELL"):
+        if direction == "BUY" and t["level"] <= entry:
+            continue
+        if direction == "SELL" and t["level"] >= entry:
+            continue
+        if any(abs(safe_float(t["level"]) - safe_float(u["level"])) <= max(entry * 0.0003, h1_atr * 0.05) for u in unique):
+            continue
+        reward = abs(safe_float(t["level"]) - entry)
+        rr = reward / max(risk, EPS)
+        # Count meaningful barriers before this target. Both liquidity and
+        # structural targets matter: a farther liquidity pool beyond an H4
+        # higher-high/lower-low is not automatically the better first target.
+        between_liquidity = []
+        for b in pools:
+            if direction == "BUY" and entry < b.midpoint < t["level"]:
+                between_liquidity.append(b)
+            elif direction == "SELL" and t["level"] < b.midpoint < entry:
+                between_liquidity.append(b)
+        structural_levels = _v2_structural_targets(direction, entry, h4_structure, h1_structure)
+        between_structural = []
+        for b in structural_levels:
+            if abs(safe_float(b["level"]) - safe_float(t["level"])) <= max(entry * 0.0003, h1_atr * 0.05):
+                continue
+            if direction == "BUY" and entry < safe_float(b["level"]) < t["level"]:
+                between_structural.append(b)
+            elif direction == "SELL" and t["level"] < safe_float(b["level"]) < entry:
+                between_structural.append(b)
+        major_barriers = [
+            {"level": b.midpoint, "significance": b.significance, "source": b.source_types}
+            for b in between_liquidity
+            if b.significance >= TARGET_MAJOR_BARRIER_THRESHOLD
+        ]
+        major_barriers.extend(
+            {"level": safe_float(b["level"]), "significance": safe_float(b.get("priority"), 50.0), "source": [b.get("type")]}
+            for b in between_structural
+            if safe_float(b.get("priority"), 0.0) >= TARGET_MAJOR_BARRIER_THRESHOLD
+        )
+        obstacle_penalty = min(40.0, len(major_barriers) * TARGET_OBSTACLE_PENALTY)
+        rr_score = (
+            100.0 if TARGET_PREFERRED_RR_LOW <= rr <= TARGET_PREFERRED_RR_HIGH else
+            85.0 if rr > TARGET_PREFERRED_RR_HIGH else
+            45.0 if rr >= TARGET_MIN_RR else 15.0
+        )
+        distance_score = clamp(100.0 - (safe_float(t.get("distance_h1_atr"), reward / max(h1_atr, EPS)) / TARGET_MAX_DISTANCE_H1_ATR) * 100.0)
+        quality = clamp(
+            min(100.0, safe_float(t.get("strength"), 50.0)) * 0.35
+            + safe_float(t.get("priority"), 50.0) * 0.25
+            + distance_score * 0.15
+            + rr_score * 0.20
+            + max(0.0, 5.0 - obstacle_penalty) * 1.0
+        )
+        unique.append({
+            **t,
+            "rr": round(rr, 3),
+            "major_barriers": [
+                {"level": round_price(safe_float(b["level"])), "significance": round(safe_float(b["significance"]), 2), "source": b.get("source")}
+                for b in major_barriers[:5]
+            ],
+            "quality": round(quality, 2),
+        })
+    unique.sort(key=lambda x: (x["quality"], x["rr"], x.get("priority", 0)), reverse=True)
+    return unique[:12]
+
+
+def _v2_select_target(target_map: list[dict[str, Any]], direction: str) -> dict[str, Any] | None:
+    valid = [
+        target for target in target_map
+        if safe_float(target.get("rr")) >= TARGET_MIN_RR
+        and (not target.get("major_barriers") or safe_float(target.get("quality")) >= 55.0)
+    ]
+    if not valid:
+        return None
+
+    # Path-first target selection: prefer the strongest reasonable destination
+    # that is actually in front of price. A farther liquidity pool must not
+    # jump ahead of a nearer H4 HH/LL simply because its liquidity strength is
+    # high. target_map is already quality-ranked after barrier penalties.
+    valid.sort(
+        key=lambda x: (
+            safe_float(x.get("quality"), 0.0),
+            safe_float(x.get("priority"), 0.0),
+            safe_float(x.get("rr"), 0.0),
+        ),
+        reverse=True,
+    )
+    return valid[0]
+
+
+def _v2_structure_alignment_score(
+    direction: str,
+    btc_regime: dict[str, Any],
+    pair_regime: dict[str, Any],
+    h4_structure: StructureSnapshot,
+    h1_structure: StructureSnapshot,
+) -> float:
+    want = "BULLISH" if direction == "BUY" else "BEARISH"
+    score = 50.0
+    btc_trend = str(btc_regime.get("trend") or "RANGE")
+    pair_trend = str(pair_regime.get("trend") or "RANGE")
+    if btc_trend == want:
+        score += 20.0
+    elif btc_trend == "RANGE":
+        score += 5.0
+    else:
+        score -= 25.0
+    if pair_trend == want:
+        score += 20.0
+    elif pair_trend == "RANGE":
+        score += 0.0
+    else:
+        score -= 20.0
+    if h4_structure.trend == want:
+        score += 10.0
+    if h1_structure.trend == want:
+        score += 5.0
+    return clamp(score)
+
+
+def _v2_score_liquidity_confluence(location: dict[str, Any], refinement: dict[str, Any]) -> float:
+    base = safe_float(location.get("confluence"), 0.0)
+    pool = location.get("pool")
+    if pool is not None:
+        base = base * 0.75 + pool.significance * 0.25
+    base = base * 0.80 + safe_float(refinement.get("quality"), 0.0) * 0.20
+    return clamp(base)
+
+
+def _v2_score_fib_location(location: dict[str, Any], fib_analysis: dict[str, Any]) -> float:
+    fib = location.get("fib") or {}
+    low = safe_float(fib.get("price_low"), 0.0)
+    high = safe_float(fib.get("price_high"), 0.0)
+    if high <= low:
+        return 20.0
+    zone_mid = safe_float(location.get("zone_mid"), (low + high) / 2.0)
+    r1 = safe_float(fib.get("ratio_low"), 0.5)
+    r2 = safe_float(fib.get("ratio_high"), 0.5)
+    quality = 60.0
+    if 0.382 <= r1 <= 0.500 and 0.382 <= r2 <= 0.500:
+        quality = 90.0 if fib_analysis.get("impulse_quality", {}).get("classification") == "CLEAN" else 78.0
+    elif 0.618 <= r1 <= 0.786 and 0.618 <= r2 <= 0.786:
+        quality = 96.0 if fib_analysis.get("impulse_quality", {}).get("classification") in {"STRUGGLE", "WEAK"} else 88.0
+    elif r2 >= 0.618 or r1 >= 0.618:
+        quality = 82.0
+    # Zone center remaining near current decreases quality mildly.
+    if current := safe_float(fib_analysis.get("current_price"), 0.0):
+        _ = current
+    return clamp(quality + min(8.0, safe_float(location.get("overlap_ratio"), 0.0) * 8.0))
+
+
+def _v2_momentum_current_score(
+    direction: str,
+    rsi_pack: dict[str, Any],
+    vlt: dict[str, Any],
+    m15_structure: StructureSnapshot,
+) -> float:
+    rsi = rsi_pack.get("M15") or {}
+    cur = safe_float(rsi.get("cur"), 50.0)
+    slope = safe_float(rsi.get("slope"), 0.0)
+    if direction == "BUY":
+        if cur >= 68:
+            score = 35.0
+        elif cur >= 55:
+            score = 55.0
+        elif 35 <= cur < 55:
+            score = 85.0
+        else:
+            score = 72.0
+        score += 8.0 if slope > 0 else -5.0 if slope < -0.8 else 0.0
+    else:
+        if cur <= 32:
+            score = 35.0
+        elif cur <= 45:
+            score = 55.0
+        elif 45 < cur <= 65:
+            score = 85.0
+        else:
+            score = 72.0
+        score += 8.0 if slope < 0 else -5.0 if slope > 0.8 else 0.0
+    vlt_dir = str(vlt.get("direction") or "NEUTRAL")
+    if (direction == "BUY" and vlt_dir == "BULLISH") or (direction == "SELL" and vlt_dir == "BEARISH"):
+        score += 8.0
+    elif vlt_dir in {"BULLISH", "BEARISH"}:
+        score -= 4.0
+    if m15_structure.trend == ("BULLISH" if direction == "BUY" else "BEARISH"):
+        score += 5.0
+    return clamp(score)
+
+
+def _v2_score_refinement(refinement: dict[str, Any]) -> float:
+    if refinement.get("kind") is None:
+        return clamp(safe_float(refinement.get("quality"), 0.0) * 0.60)
+    return clamp(safe_float(refinement.get("quality"), 0.0) * 0.80 + safe_float(refinement.get("overlap_ratio"), 0.0) * 20.0)
+
+
+def _v2_score_invalidation(invalidation: dict[str, Any] | None, entry: float) -> float:
+    if not invalidation:
+        return 0.0
+    quality = safe_float(invalidation.get("quality"), 0.0)
+    risk_h1 = safe_float(invalidation.get("risk_h1_atr"), 0.0)
+    if risk_h1 <= 0:
+        return clamp(quality * 0.50)
+    if risk_h1 > SL_MAX_RISK_H1_ATR_V2:
+        return min(25.0, quality * 0.25)
+    # Structural quality dominates; moderate risk is preferable.
+    geometry = 100.0
+    if risk_h1 < SL_TOO_TIGHT_ATR_RATIO:
+        geometry = 50.0
+    elif SL_IDEAL_H1_ATR_LOW <= risk_h1 <= SL_IDEAL_H1_ATR_HIGH:
+        geometry = 100.0
+    elif risk_h1 <= 4.0:
+        geometry = 82.0
+    else:
+        geometry = 65.0
+    return clamp(quality * 0.75 + geometry * 0.25)
+
+
+def _v2_score_target_quality(target: dict[str, Any] | None) -> float:
+    if not target:
+        return 0.0
+    score = safe_float(target.get("quality"), 50.0)
+    if target.get("major_barriers"):
+        score -= min(30.0, 10.0 * len(target["major_barriers"]))
+    if safe_float(target.get("rr")) >= 2.0:
+        score += 5.0
+    return clamp(score)
+
+
+def _v2_score_rr(rr: float) -> float:
+    if rr < 1.0:
+        return 10.0
+    if rr < 1.5:
+        return 35.0
+    if rr < 2.0:
+        return 55.0
+    if rr <= 3.5:
+        return 100.0
+    if rr <= 5.0:
+        return 88.0
+    if rr <= 7.0:
+        return 72.0
+    return 48.0
+
+
+def _v2_entry_reachability_v2(
+    direction: str,
+    current: float,
+    zone_low: float,
+    zone_high: float,
+    h4_atr: float,
+    projection_consensus: float,
+) -> tuple[float, dict[str, Any]]:
+    midpoint = (zone_low + zone_high) / 2.0
+    pct = distance_pct(current, midpoint)
+    h4_dist = abs(current - midpoint) / max(h4_atr, EPS)
+    width_pct = (zone_high - zone_low) / max(abs(midpoint), EPS) * 100.0
+    physical = clamp(100.0 - (pct / MAX_ENTRY_DISTANCE_PCT) * 100.0)
+    atr_score = clamp(100.0 - (h4_dist / MAX_ENTRY_DISTANCE_H4_ATR) * 100.0)
+    zone_width_score = 100.0 if ENTRY_ZONE_MIN_WIDTH_PCT <= width_pct <= ENTRY_ZONE_MAX_WIDTH_PCT else 65.0
+    score = physical * 0.45 + atr_score * 0.30 + zone_width_score * 0.10 + projection_consensus * 0.15
+    allowed = pct <= MAX_ENTRY_DISTANCE_PCT and h4_dist <= MAX_ENTRY_DISTANCE_H4_ATR
+    return clamp(score), {
+        "allowed": allowed,
+        "distance_pct": round(pct, 4),
+        "distance_h4_atr": round(h4_dist, 3),
+        "zone_width_pct": round(width_pct, 4),
+        "physical_score": round(physical, 2),
+        "atr_score": round(atr_score, 2),
+        "projection_consensus": round(projection_consensus, 2),
+        "score": round(score, 2),
+    }
+
+
+def _v2_price_exp(
+    direction: str,
+    current: float,
+    entry: float,
+    tp: float,
+    h1_atr: float,
+) -> float:
+    if direction == "BUY":
+        exp = current + max(EXP_H1_ATR_MULTIPLIER * h1_atr, abs(current - entry) * 1.20)
+        exp = min(exp, entry + abs(tp - entry) * 0.70)
+        exp = min(exp, tp - max(h1_atr * 0.20, EPS))
+        if exp <= current:
+            exp = current + max(h1_atr * 0.50, current * 0.001)
+        return round_price(exp)
+    exp = current - max(EXP_H1_ATR_MULTIPLIER * h1_atr, abs(current - entry) * 1.20)
+    exp = max(exp, entry - abs(tp - entry) * 0.70)
+    exp = max(exp, tp + max(h1_atr * 0.20, EPS))
+    if exp >= current:
+        exp = current - max(h1_atr * 0.50, current * 0.001)
+    return round_price(exp)
+
+
+def _v2_build_thesis_candidate(
+    *,
+    direction: str,
+    pair: str,
+    current: float,
+    btc_regime: dict[str, Any],
+    pair_regime: dict[str, Any],
+    h4_structure: StructureSnapshot,
+    h1_structure: StructureSnapshot,
+    m15_structure: StructureSnapshot,
+    h4: list[Candle],
+    h1: list[Candle],
+    m15: list[Candle],
+    h1_ctx: dict[str, Any],
+    m15_ctx: dict[str, Any],
+    h4_ctx: dict[str, Any],
+    liquidity_map: dict[str, Any],
+    fib_analysis: dict[str, Any],
+    location: dict[str, Any],
+    rsi_pack: dict[str, Any],
+    m15_vlt: dict[str, Any],
+    quality_pack: dict[str, Any],
+    tick_size: float,
+) -> Candidate | None:
+    # V2: H4 structure is the authoritative thesis direction. Aggregate
+    # D1/H4/H1/M15 regime is retained as a soft quality input so a temporary
+    # H1/M15 pullback does not erase a valid H4 continuation thesis.
+    if direction == "BUY" and h4_structure.trend not in {"BULLISH", "RANGE"}:
+        return None
+    if direction == "SELL" and h4_structure.trend not in {"BEARISH", "RANGE"}:
+        return None
+
+    refinement = _v2_refine_location(location, direction, h1_ctx, m15_ctx)
+    zone_low = safe_float(refinement.get("low"))
+    zone_high = safe_float(refinement.get("high"))
+    if zone_high <= zone_low:
+        return None
+
+    # HARD GATE: do not place an entry beyond an unswept significant opposing
+    # liquidity magnet unless the location itself overlaps that magnet.
+    # Otherwise price is likely to interact with that pool first.
+    magnet = liquidity_map.get("magnet")
+    if magnet is not None and not magnet.swept:
+        overlaps_magnet = _v2_zone_overlap_values(
+            zone_low, zone_high, magnet.low, magnet.high
+        ) > 0.0
+        if direction == "BUY" and magnet.midpoint < current < zone_high and not overlaps_magnet:
+            return None
+        if direction == "SELL" and magnet.midpoint > current > zone_low and not overlaps_magnet:
+            return None
+
+    h4_atr_values = atr_series(h4, 14)
+    h1_atr_values = atr_series(h1, 14)
+    h4_atr = h4_atr_values[-1] if h4_atr_values else max(current * 0.01, EPS)
+    h1_atr = h1_atr_values[-1] if h1_atr_values else max(current * 0.005, EPS)
+    projection = _v2_project_rsi_to_entry_zone(m15, h4, zone_low, zone_high, direction)
+    projection_score = _v2_score_rsi_projection(direction, projection)
+    reach_score, reach_details = _v2_entry_reachability_v2(
+        direction, current, zone_low, zone_high, h4_atr, safe_float(projection.get("scenario_consensus"), 50.0)
+    )
+    if not reach_details["allowed"]:
+        return None
+
+    confluence_score = _v2_score_liquidity_confluence(location, refinement)
+    entry = _v2_select_entry_price(
+        direction,
+        zone_low,
+        zone_high,
+        projection,
+        current,
+        h4_atr,
+        confluence_score,
+    )
+    if tick_size > 0:
+        entry = _round_tick(entry, tick_size, "DOWN" if direction == "BUY" else "UP")
+    if direction == "BUY" and entry >= current:
+        return None
+    if direction == "SELL" and entry <= current:
+        return None
+
+    # Final RSI projection is always calculated against the actual selected
+    # entry, not the raw zone midpoint. This prevents a zone that straddles
+    # current price from producing an impossible "future" RSI scenario.
+    projection = _v2_project_rsi_to_entry_zone(m15, h4, entry, entry, direction)
+    projection_score = _v2_score_rsi_projection(direction, projection)
+
+    invalidation = _v2_select_prediction_invalidation(
+        direction, entry, h4_structure, h1_structure, liquidity_map,
+        list(reversed((h1_ctx.get("sweeps") or []) + (m15_ctx.get("sweeps") or []))),
+        h1_atr,
+    )
+    if invalidation is None:
+        return None
+    sl = safe_float(invalidation["sl"])
+
+    target_map = _v2_build_target_map(direction, entry, sl, liquidity_map, h4_structure, h1_structure, h1_atr, current=current)
+    target = _v2_select_target(target_map, direction)
+    if target is None:
+        return None
+    tp = safe_float(target["level"])
+    if direction == "BUY" and tp <= entry:
+        return None
+    if direction == "SELL" and tp >= entry:
+        return None
+
+    risk = abs(entry - sl)
+    reward = abs(tp - entry)
+    rr = reward / max(risk, EPS)
+    if rr < TARGET_MIN_RR:
+        # Try farther structural target only if the first valid target does not meet RR.
+        alternatives = [x for x in target_map if safe_float(x.get("rr")) >= TARGET_MIN_RR]
+        if not alternatives:
+            return None
+        target = alternatives[0]
+        tp = safe_float(target["level"])
+        reward = abs(tp - entry)
+        rr = reward / max(risk, EPS)
+    if rr < TARGET_MIN_RR:
+        return None
+
+    price_exp = _v2_price_exp(direction, current, entry, tp, h1_atr)
+    if direction == "BUY":
+        if not (sl < entry < current < price_exp < tp):
+            return None
+    else:
+        if not (tp < price_exp < current < entry < sl):
+            return None
+
+    last_mss = latest_event(m15_structure, {"MSS"}, direction=("BULLISH" if direction == "BUY" else "BEARISH"), max_age=THESIS_MAX_TRIGGER_AGE_M15, candle_count=len(m15))
+    last_bos = latest_event(m15_structure, {"BOS"}, direction=("BULLISH" if direction == "BUY" else "BEARISH"), max_age=THESIS_MAX_TRIGGER_AGE_M15, candle_count=len(m15))
+    trigger_ok = bool(last_mss or last_bos)
+    thesis_status = "ACTIVE_TRIGGER_CONFIRMED" if trigger_ok else "WAITING_TRIGGER"
+    thesis_type = "BUY_PULLBACK" if direction == "BUY" else "SELL_PULLBACK"
+    if projection.get("classification") in {"SUPPORTIVE_BUY_RETRACEMENT", "SUPPORTIVE_SELL_RETRACEMENT"} and (rsi_pack.get("H1") or {}).get("div", {}).get(direction):
+        thesis_type += "_RSI_DIVERGENCE"
+
+    structure_score = _v2_structure_alignment_score(direction, btc_regime, pair_regime, h4_structure, h1_structure)
+    fib_score = _v2_score_fib_location(location, fib_analysis)
+    fib_class = str((fib_analysis.get("impulse_quality") or {}).get("classification") or "")
+    refinement_score = _v2_score_refinement(refinement)
+    momentum_score = _v2_momentum_current_score(direction, rsi_pack, m15_vlt, m15_structure)
+    invalidation_score = _v2_score_invalidation(invalidation, entry)
+    target_score = _v2_score_target_quality(target)
+    rr_score = _v2_score_rr(rr)
+
+    scores = {
+        "structure_alignment": round(structure_score, 2),
+        "liquidity_confluence": round(confluence_score, 2),
+        "fib_location": round(fib_score, 2),
+        "fvg_ob_refinement": round(refinement_score, 2),
+        "rsi_projection": round(projection_score, 2),
+        "momentum_current": round(momentum_score, 2),
+        "invalidation_quality": round(invalidation_score, 2),
+        "target_quality": round(target_score, 2),
+        "rr_quality": round(rr_score, 2),
+        "entry_reachability": round(reach_score, 2),
+    }
+    base = sum(THESIS_WEIGHTS_V2[k] * scores[k] for k in THESIS_WEIGHTS_V2) / 100.0
+    penalties: list[dict[str, Any]] = []
+    if fib_class == "WEAK":
+        # Weak impulse is analytically useful, but it must not score like a
+        # clean/struggle impulse. Keep it as a low-confidence candidate rather
+        # than fabricating certainty about the retracement depth.
+        fib_score = min(fib_score, 58.0)
+        scores["fib_location"] = round(fib_score, 2)
+        base = min(base, 62.0)
+        penalties.append({"type": "WEAK_IMPULSE", "amount": 0.0, "cap": 62.0})
+    if not trigger_ok:
+        base = min(base, THESIS_WAITING_CAP_V2)
+        penalties.append({"type": "WAITING_TRIGGER", "amount": round(max(0.0, base - THESIS_WAITING_CAP_V2), 2)})
+    projection_class = str(projection.get("classification") or "")
+    if projection_class.startswith("WEAK"):
+        base -= 10.0
+        penalties.append({"type": "WEAK_RSI_PROJECTION", "amount": 10.0})
+    if safe_float(projection.get("scenario_consensus"), 0.0) < RSI_PROJECTION_MIN_CONSENSUS:
+        base -= 8.0
+        penalties.append({"type": "LOW_RSI_PROJECTION_CONSENSUS", "amount": 8.0})
+    if invalidation.get("classification") == "TOO_WIDE":
+        base -= 18.0
+        penalties.append({"type": "WIDE_INVALIDATION", "amount": 18.0})
+    if target.get("major_barriers"):
+        base -= min(12.0, 4.0 * len(target["major_barriers"]))
+        penalties.append({"type": "TARGET_BARRIER", "amount": min(12.0, 4.0 * len(target["major_barriers"]))})
+    confidence = clamp(base)
+    if not trigger_ok:
+        confidence = min(confidence, THESIS_WAITING_CAP_V2)
+    if confidence < THESIS_MIN_QUALITY_V2:
+        return None
+
+    if tick_size > 0:
+        sl = _round_tick(sl, tick_size, "DOWN" if direction == "BUY" else "UP")
+        tp = _round_tick(tp, tick_size, "UP" if direction == "BUY" else "DOWN")
+        entry = _round_tick(entry, tick_size, "DOWN" if direction == "BUY" else "UP")
+        # Recalculate after tick alignment.
+        risk = abs(entry - sl)
+        reward = abs(tp - entry)
+        rr = reward / max(risk, EPS)
+        if rr < TARGET_MIN_RR:
+            return None
+        price_exp = _round_tick(price_exp, tick_size, "UP" if direction == "BUY" else "DOWN")
+
+    liquidity_zone = location.get("pool")
+    liquidity_evidence = (
+        {
+            "side": liquidity_zone.side,
+            "low": liquidity_zone.low,
+            "high": liquidity_zone.high,
+            "midpoint": liquidity_zone.midpoint,
+            "strength": liquidity_zone.strength,
+            "significance": liquidity_zone.significance,
+            "timeframe": liquidity_zone.timeframe,
+            "touches": liquidity_zone.touches,
+            "source_types": liquidity_zone.source_types,
+            "swept": liquidity_zone.swept,
+            "role": "ENTRY_LIQUIDITY",
+        }
+        if liquidity_zone is not None else None
+    )
+    fib_evidence = {
+        **location.get("fib", {}),
+        "impulse_quality": fib_analysis.get("impulse_quality"),
+        "adaptive_reason": fib_analysis.get("reason"),
+        "liquidity_overlap_ratio": location.get("overlap_ratio"),
+    }
+    final_model = PRIMARY_V2_MODEL if trigger_ok else WAITING_V2_MODEL
+    entry_reason = (
+        f"{pair} {direction}: {thesis_type}. H4 structure {h4_structure.trend}, "
+        f"liquidity {liquidity_zone.timeframe if liquidity_zone else '-'} "
+        f"{round_price(liquidity_zone.midpoint) if liquidity_zone else '-'} dipadukan dengan Fib {location.get('fib', {}).get('label', '-')}; "
+        f"refinement {refinement.get('kind') or 'none'}. "
+        f"Projected M15 RSI {projection['at_entry']['M15']['median']:.1f} pada entry zone."
+    )
+    sl_reason = invalidation["reason"]
+    tp_reason = (
+        f"TP {round_price(tp)} dipilih dari {target.get('type')} dengan RR {rr:.2f}; "
+        f"target quality {target.get('quality', 0):.0f}."
+    )
+    price_exp_reason = (
+        f"Price Exp {price_exp}: retracement thesis dianggap basi jika harga bergerak terlalu jauh "
+        f"tanpa menyentuh entry zone sebelum menembus boundary relevansi."
+    )
+    context_age_m15 = safe_float((quality_pack or {}).get("thesis_age_m15_bars"), 0.0)
+    thesis_age_minutes = safe_float((quality_pack or {}).get("thesis_age_minutes"), 0.0)
+    thesis_freshness = clamp(100.0 - min(60.0, context_age_m15 * 2.5) - min(25.0, thesis_age_minutes / 12.0))
+
+    evidence = {
+        "v2": True,
+        "thesis_freshness": {
+            "age_m15_bars": round(context_age_m15, 2),
+            "age_minutes": round(thesis_age_minutes, 2),
+            "score": round(thesis_freshness, 2),
+        },
+        "thesis": {
+            "type": thesis_type,
+            "status": thesis_status,
+            "btc_regime": btc_regime.get("trend"),
+            "pair_regime": pair_regime.get("trend"),
+            "structure_signature_h4": _v2_structure_signature(h4_structure),
+            "structure_signature_h1": _v2_structure_signature(h1_structure),
+        },
+        "liquidity_map": liquidity_evidence,
+        "fib": fib_evidence,
+        "refinement": refinement,
+        "projected_rsi": projection,
+        "entry_zone": {
+            "low": round_price(zone_low),
+            "high": round_price(zone_high),
+            "selected": round_price(entry),
+            "reachability": reach_details,
+        },
+        "invalidation": invalidation,
+        "target": target,
+        "target_map": target_map,
+        "planned_rr": round(rr, 4),
+        "gates": {
+            "waiting": not trigger_ok,
+            "vetoes": [],
+            "notes": [],
+        },
+        "current_rsi": rsi_pack,
+        "market_quality": quality_pack,
+        "liquidity_role": "ENTRY_LIQUIDITY",
+        "penalties": penalties,
+    }
+    notes = [
+        f"V2 thesis {thesis_type}",
+        f"Fib {location.get('fib', {}).get('label', '-')}",
+        f"Projected M15 RSI median {projection['at_entry']['M15']['median']:.1f}",
+        f"Invalidation {invalidation['anchor_source']} @ {invalidation['anchor_level']}",
+        f"Target {target['type']} @ {target['level']}",
+    ]
+    if not trigger_ok:
+        notes.append("WAITING_TRIGGER: M15 MSS/BOS belum terkonfirmasi")
+
+    return Candidate(
+        direction=direction,
+        model=final_model,
+        entry=round_price(entry),
+        sl=round_price(sl),
+        tp=round_price(tp),
+        price_exp=round_price(price_exp),
+        entry_reason=entry_reason,
+        sl_reason=sl_reason,
+        tp_reason=tp_reason,
+        price_exp_reason=price_exp_reason,
+        evidence=evidence,
+        scores=scores,
+        confidence=round(confidence, 2),
+        notes=notes,
+        entry_low=round_price(zone_low),
+        entry_high=round_price(zone_high),
+        thesis_status=thesis_status,
+        thesis_type=thesis_type,
+        liquidity_zone=liquidity_evidence,
+        fib_zone=fib_evidence,
+        refinement_zone=refinement,
+        projected_rsi=projection,
+        invalidation=invalidation,
+        target_map=target_map,
+    )
+
+
+def _v2_candidate_summary(candidate: Candidate) -> dict[str, Any]:
+    return {
+        "model": candidate.model,
+        "direction": candidate.direction,
+        "entry": candidate.entry,
+        "entry_zone_low": candidate.entry_low,
+        "entry_zone_high": candidate.entry_high,
+        "sl": candidate.sl,
+        "tp": candidate.tp,
+        "price_exp": candidate.price_exp,
+        "planned_rr": round(abs(candidate.tp - candidate.entry) / max(abs(candidate.entry - candidate.sl), EPS), 4),
+        "confidence": candidate.confidence,
+        "thesis_status": candidate.thesis_status,
+        "thesis_type": candidate.thesis_type,
+        "scores": candidate.scores,
+    }
+
+
+def _v2_serialize_liquidity_zone(z: LiquidityZone) -> dict[str, Any]:
+    return {
+        "side": z.side,
+        "low": z.low,
+        "high": z.high,
+        "midpoint": z.midpoint,
+        "strength": z.strength,
+        "significance": z.significance,
+        "timeframe": z.timeframe,
+        "touches": z.touches,
+        "source_types": z.source_types,
+        "first_index": z.first_index,
+        "last_index": z.last_index,
+        "swept": z.swept,
+        "sweep_index": z.sweep_index,
+        "distance_pct": z.distance_pct,
+        "distance_atr": z.distance_atr,
+        "role": z.role,
+    }
+
+
+def _v2_choose_fallback_candidate(
+    direction: str,
+    current: float,
+    h1_atr: float,
+    h1_structure: StructureSnapshot,
+    liquidity_map: dict[str, Any],
+    tick_size: float,
+) -> Candidate:
+    target_pool = None
+    if direction == "BUY":
+        for z in liquidity_map.get("above", []):
+            if z.significance >= 45 and z.midpoint > current:
+                target_pool = z
+                break
+        entry = current - max(h1_atr * 0.55, current * 0.003)
+        sl = entry - max(h1_atr * 1.0, current * 0.008)
+        tp = target_pool.midpoint if target_pool else current + h1_atr * 2.5
+        tp = max(tp, entry + h1_atr * 2.0)
+        exp = min(current + h1_atr * 1.5, tp - h1_atr * 0.2)
+    else:
+        for z in liquidity_map.get("below", []):
+            if z.significance >= 45 and z.midpoint < current:
+                target_pool = z
+                break
+        entry = current + max(h1_atr * 0.55, current * 0.003)
+        sl = entry + max(h1_atr * 1.0, current * 0.008)
+        tp = target_pool.midpoint if target_pool else current - h1_atr * 2.5
+        tp = min(tp, entry - h1_atr * 2.0)
+        exp = max(current - h1_atr * 1.5, tp + h1_atr * 0.2)
+    if tick_size > 0:
+        entry = _round_tick(entry, tick_size, "DOWN" if direction == "BUY" else "UP")
+        sl = _round_tick(sl, tick_size, "DOWN" if direction == "BUY" else "UP")
+        tp = _round_tick(tp, tick_size, "UP" if direction == "BUY" else "DOWN")
+        exp = _round_tick(exp, tick_size, "UP" if direction == "BUY" else "DOWN")
+    rr = abs(tp - entry) / max(abs(entry - sl), EPS)
+    return Candidate(
+        direction=direction,
+        model=FALLBACK_V2_MODEL,
+        entry=round_price(entry),
+        sl=round_price(sl),
+        tp=round_price(tp),
+        price_exp=round_price(exp),
+        entry_reason=f"Fallback V2: structural direction {direction} dipertahankan namun tidak ditemukan thesis location lengkap.",
+        sl_reason="Fallback volatility stop; bukan structural prediction invalidation utama.",
+        tp_reason=f"Fallback target {target_pool.timeframe if target_pool else 'ATR'}.",
+        price_exp_reason="Fallback relevance boundary.",
+        evidence={"v2": True, "fallback": True, "gates": {"waiting": True, "vetoes": [], "notes": []}, "planned_rr": round(rr, 3)},
+        scores={
+            "structure_alignment": 50.0,
+            "liquidity_confluence": 45.0,
+            "fib_location": 35.0,
+            "fvg_ob_refinement": 25.0,
+            "rsi_projection": 35.0,
+            "momentum_current": 50.0,
+            "invalidation_quality": 35.0,
+            "target_quality": 45.0,
+            "rr_quality": _v2_score_rr(rr),
+            "entry_reachability": 55.0,
+        },
+        confidence=THESIS_FALLBACK_CAP_V2,
+        notes=["LOW_QUALITY_FALLBACK"],
+        entry_low=round_price(entry),
+        entry_high=round_price(entry),
+        thesis_status="LOW_QUALITY_FALLBACK",
+        thesis_type=f"{direction}_FALLBACK",
+    )
+
+
+async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
     context = context or {}
     normalized_pair = normalize_pair(pair)
     scan_mode = str(context.get("mode") or "").upper() == "SCAN"
-    allow_binance_fallback = (
-        bool(context.get("allow_binance_fallback", True))
-        and not scan_mode
-    )
+    allow_binance_fallback = bool(context.get("allow_binance_fallback", True)) and not scan_mode
     force_fresh_btc = bool(context.get("force_fresh_btc_regime", False))
-
     if not normalized_pair.endswith("USDT"):
         raise ValueError("strategy.py hanya mendukung USDT perpetual.")
 
     notes = context.get("notes") or []
     notes_context = analyze_notes(notes if isinstance(notes, list) else [])
 
-    # ------------------------------------------------------------------
-    # 1) Target M15: 672 CLOSED candles exactly.
-    # ------------------------------------------------------------------
-    m15, m15_source = await fetch_series(
-        normalized_pair,
-        M15,
-        M15_CANDLES_REQUIRED,
-        M15_MS,
-        allow_fallback=allow_binance_fallback,
-    )
-
-    # ------------------------------------------------------------------
-    # 2) Higher timeframes.
-    #    H1 and target H4 are fetched independently when possible so the
-    #    H4 structure is not limited to only 42 bars from the 672 M15 window.
-    #    We still resample H1/H4 from M15 for an explicitly comparable view.
-    # ------------------------------------------------------------------
-    pair_h4, pair_h4_source = await fetch_series(
-        normalized_pair,
-        H4,
-        PAIR_H4_CANDLES_REQUIRED,
-        H4_MS,
-        allow_fallback=allow_binance_fallback,
-    )
+    # ------------------------------
+    # 1) Market data / closed candles
+    # ------------------------------
+    m15, m15_source = await fetch_series(normalized_pair, M15, M15_CANDLES_REQUIRED, M15_MS, allow_fallback=allow_binance_fallback)
+    pair_h4, pair_h4_source = await fetch_series(normalized_pair, H4, PAIR_H4_CANDLES_REQUIRED, H4_MS, allow_fallback=allow_binance_fallback)
 
     btc_cache_key = _scan_cache_key(context) if scan_mode else None
     cached_btc = _SCAN_BTC_REGIME_CACHE.get(btc_cache_key) if btc_cache_key else None
     if cached_btc and not force_fresh_btc:
         btc_h4 = cached_btc.get("candles_h4") or cached_btc.get("candles")
-        btc_h4_source = str(cached_btc.get("sources_by_timeframe", {}).get("H4") or cached_btc.get("source") or "BYBIT")
         btc_h1 = cached_btc.get("candles_h1") or []
+        btc_h4_source = str(cached_btc.get("sources_by_timeframe", {}).get("H4") or "BYBIT")
         btc_h1_source = str(cached_btc.get("sources_by_timeframe", {}).get("H1") or "BYBIT")
     else:
         btc_h4, btc_h4_source = await fetch_series("BTCUSDT", H4, BTC_H4_CANDLES_REQUIRED, H4_MS, allow_fallback=allow_binance_fallback)
         btc_h1, btc_h1_source = await fetch_series("BTCUSDT", H1, 168, H1_MS, allow_fallback=allow_binance_fallback)
         if btc_cache_key and btc_h4_source == "BYBIT" and btc_h1_source == "BYBIT":
-            btc_payload=_btc_regime_payload(btc_h4,btc_h1,{"D1":"BYBIT_DERIVED","H4":btc_h4_source,"H1":btc_h1_source})
-            _SCAN_BTC_REGIME_CACHE[btc_cache_key]={**btc_payload,"candles_h4":btc_h4,"candles_h1":btc_h1,"created_at":time.time()}
+            btc_payload = _btc_regime_payload(btc_h4, btc_h1, {"D1": "BYBIT_DERIVED", "H4": btc_h4_source, "H1": btc_h1_source})
+            _SCAN_BTC_REGIME_CACHE[btc_cache_key] = {**btc_payload, "candles_h4": btc_h4, "candles_h1": btc_h1, "created_at": time.time()}
+            _prune_scan_btc_cache(btc_cache_key[0])
 
-    # H1 derived from the same M15 dataset, preserving the 672-candle scope.
-    h1_derived = resample_candles(m15, H1_MS)
-    h4_derived = resample_candles(m15, H4_MS)
-    h1 = h1_derived
+    h1 = resample_candles(m15, H1_MS)
     if len(h1) < 20:
-        # Should never happen with 672 closed M15 candles, but keep a safe fallback.
-        h1 = await _fetch_if_short(
-            normalized_pair,
-            H1,
-            H1_MS,
-            168,
-            allow_fallback=allow_binance_fallback,
-        )
+        h1 = await _fetch_if_short(normalized_pair, H1, H1_MS, 168, allow_fallback=allow_binance_fallback)
+    h4_derived = resample_candles(m15, H4_MS)
 
-    # ------------------------------------------------------------------
-    # 3) Current price. Prefer the same provider as target M15 data.
-    # ------------------------------------------------------------------
-    current, price_source = await fetch_price(
-        normalized_pair,
-        m15_source,
-        allow_fallback=allow_binance_fallback,
-    )
+    current, price_source = await fetch_price(normalized_pair, m15_source, allow_fallback=allow_binance_fallback)
     if current <= 0:
         raise RuntimeError("Current price tidak valid.")
+    tick_size = await get_tick_size(normalized_pair, source="BYBIT" if scan_mode else ("BINANCE" if m15_source == "BINANCE_FALLBACK" else "BYBIT"))
 
-    tick_size = await get_tick_size(
-        normalized_pair,
-        source="BYBIT" if scan_mode else ("BINANCE" if m15_source == "BINANCE_FALLBACK" else "BYBIT"),
-    )
-
-    # ------------------------------------------------------------------
-    # 4) Build all technical contexts.
-    # ------------------------------------------------------------------
-    m15_atr_values = atr_series(m15, 14)
-    m15_rsi_ctx = _latest_rsi_context(m15)
-    m15_rel_volume = relative_volume(m15, 20)
-    m15_vlt = volume_trend_score(m15, m15_atr_values)
-
-    m15_structure = build_structure(m15, SWING_SPAN_M15)
-    h1_structure = build_structure(h1, SWING_SPAN_H1)
-    pair_h4_structure = build_structure(pair_h4, SWING_SPAN_H4)
+    # ------------------------------
+    # 2) Structure / regime first
+    # ------------------------------
     btc_h4_structure = build_structure(btc_h4, SWING_SPAN_H4)
-    pair_d1 = resample_candles(pair_h4, 24 * 60 * 60 * 1000)
-    pair_regime = build_multi_timeframe_regime({"D1": (pair_d1, 2), "H4": (pair_h4, SWING_SPAN_H4), "H1": (h1, SWING_SPAN_H1), "M15": (m15, SWING_SPAN_M15)})
+    btc_h1_structure = build_structure(btc_h1, SWING_SPAN_H1)
     btc_d1 = resample_candles(btc_h4, 24 * 60 * 60 * 1000)
     btc_regime = build_multi_timeframe_regime({"D1": (btc_d1, 2), "H4": (btc_h4, SWING_SPAN_H4), "H1": (btc_h1, SWING_SPAN_H1)})
 
-    # Full top-down POI contexts. H4 is the primary analytical layer, H1
-    # refines it, and M15 is the execution layer.
-    h4_ctx = htf_poi_candidates(pair_h4, pair_h4_structure, DIRECTION_BUY, "H4")
+    h4_structure = build_structure(pair_h4, SWING_SPAN_H4)
+    h1_structure = build_structure(h1, SWING_SPAN_H1)
+    m15_structure = build_structure(m15, SWING_SPAN_M15)
+    pair_d1 = resample_candles(pair_h4, 24 * 60 * 60 * 1000)
+    pair_regime = build_multi_timeframe_regime({
+        "D1": (pair_d1, 2),
+        "H4": (pair_h4, SWING_SPAN_H4),
+        "H1": (h1, SWING_SPAN_H1),
+        "M15": (m15, SWING_SPAN_M15),
+    })
+
+    btc_trend = str(btc_regime.get("trend") or "RANGE")
+    # V2 thesis direction is anchored to H4 structure. Aggregate D1/H4/H1/M15
+    # regime remains a soft quality input so a temporary M15/H1 pullback does
+    # not erase a valid H4 pullback thesis. BTC remains the macro constraint.
+    h4_trend = str(h4_structure.trend or "RANGE")
+    pair_trend = h4_trend
+    allowed_directions = allowed_directions_for_macro(btc_trend, h4_trend, normalized_pair)
+    if normalized_pair != "BTCUSDT" and btc_trend in {"BULLISH", "BEARISH"}:
+        allowed_directions = (DIRECTION_BUY,) if btc_trend == "BULLISH" else (DIRECTION_SELL,)
+
+    # ------------------------------
+    # 3) Technical contexts
+    # ------------------------------
+    h4_ctx = htf_poi_candidates(pair_h4, h4_structure, DIRECTION_BUY, "H4")
     h1_ctx = htf_poi_candidates(h1, h1_structure, DIRECTION_BUY, "H1")
     m15_ctx = htf_poi_candidates(m15, m15_structure, DIRECTION_BUY, "M15")
     rsi_pack = {
-        "H4": build_rsi_context(pair_h4, pair_h4_structure, "H4"),
+        "H4": build_rsi_context(pair_h4, h4_structure, "H4"),
         "H1": build_rsi_context(h1, h1_structure, "H1"),
         "M15": build_rsi_context(m15, m15_structure, "M15"),
         "BTC": simple_rsi_state(btc_h1),
     }
     quality_pack = market_quality_pack(m15, h1, pair_h4)
+    m15_atr_values = atr_series(m15, 14)
+    m15_vlt = volume_trend_score(m15, m15_atr_values)
 
-    liquidity = list(m15_ctx.get("liquidity", []))
-    sweeps = list(m15_ctx.get("sweeps", []))
-    fvg = list(m15_ctx.get("fvg", []))
-    obs = list(m15_ctx.get("obs", []))
-    breakers = list(m15_ctx.get("breakers", []))
+    # ------------------------------
+    # 4) Build structure-driven candidates
+    # ------------------------------
+    candidates: list[Candidate] = []
+    directional_regime = directional_regime_label(allowed_directions)
+    for direction in allowed_directions:
+        # Main thesis: pair structure should support the direction.
+        if direction == "BUY" and pair_trend not in {"BULLISH", "RANGE"}:
+            continue
+        if direction == "SELL" and pair_trend not in {"BEARISH", "RANGE"}:
+            continue
 
-    # Tag each liquidity pool with its timeframe so target selection can prefer
-    # external HTF liquidity over micro/internal targets.
-    for pool in h4_ctx.get("liquidity", []):
-        pool.details["timeframe"] = "H4"
-        pool.source = f"H4_{pool.source}" if not pool.source.startswith("H4_") else pool.source
-    for pool in h1_ctx.get("liquidity", []):
-        pool.details["timeframe"] = "H1"
-        pool.source = f"H1_{pool.source}" if not pool.source.startswith("H1_") else pool.source
-    for pool in m15_ctx.get("liquidity", []):
-        pool.details["timeframe"] = "M15"
-        pool.source = f"M15_{pool.source}" if not pool.source.startswith("M15_") else pool.source
-
-    # Add H1/H4 liquidity context as broader external references.
-    for structure, source in (
-        (h1_structure, "H1_SWING"),
-        (pair_h4_structure, "H4_SWING"),
-    ):
-        for p in structure.swing_highs[-8:]:
-            liquidity.append(
-                LiquidityPool(
-                    kind="BUY_SIDE",
-                    level=p.price,
-                    index=p.index,
-                    strength=68.0 if source == "H4_SWING" else 62.0,
-                    source=source,
-                    distance_pct=distance_pct(current, p.price),
-                    distance_atr=abs(p.price - current) / max(m15_atr_values[-1], EPS),
-                    details={"timeframe": source.split("_")[0]},
-                )
-            )
-        for p in structure.swing_lows[-8:]:
-            liquidity.append(
-                LiquidityPool(
-                    kind="SELL_SIDE",
-                    level=p.price,
-                    index=p.index,
-                    strength=68.0 if source == "H4_SWING" else 62.0,
-                    source=source,
-                    distance_pct=distance_pct(current, p.price),
-                    distance_atr=abs(p.price - current) / max(m15_atr_values[-1], EPS),
-                    details={"timeframe": source.split("_")[0]},
-                )
-            )
-
-    # Candidate generation is intentionally based on explicit SMC sequences
-    # inside the BTC-defined directional search space, then fallback if there
-    # is no complete sequence.
-    candidates = _collect_directional_candidates(
-        pair=normalized_pair,
-        current=current,
-        m15=m15,
-        h1=h1,
-        h4=pair_h4,
-        btc_h4=btc_h4,
-        m15_structure=m15_structure,
-        h1_structure=h1_structure,
-        h4_structure=pair_h4_structure,
-        btc_structure=btc_h4_structure,
-        liquidity=liquidity,
-        sweeps=sweeps,
-        fvg=fvg,
-        obs=obs,
-        breakers=breakers,
-        m15_atr_values=m15_atr_values,
-        h4_ctx=h4_ctx,
-        h1_ctx=h1_ctx,
-        m15_ctx=m15_ctx,
-        topdown_liquidity=[*h4_ctx.get("liquidity", []), *h1_ctx.get("liquidity", []), *m15_ctx.get("liquidity", [])],
-        macro_trend_override=btc_regime["trend"],
-        pair_regime_override=pair_regime["trend"],
-        pair_regime_detail=pair_regime,
-        rsi_pack=rsi_pack,
-        quality_pack=quality_pack,
-    )
-
-    best = _best_candidate(candidates)
-    h1_floor_atr = safe_float(h1_ctx.get("atr"), 0.0)
-    enforce_risk_floor(best, h1_floor_atr)
-
-    # Quantize to actual Binance price tick when available, then re-check the
-    # geometry that main.py will enforce.
-    align_candidate_to_tick(best, tick_size, current)
-    if not _ensure_price_geometry(best, current):
-        # Rebuild a guaranteed-valid fallback around the exact live price.
-        direction = best.direction
-        h1_dr = dealing_range(h1, h1_structure)
-        best = fallback_candidate(
+        fib_analysis = _v2_build_adaptive_fib_zones(pair_h4, h4_structure, direction, "H4")
+        if not fib_analysis.get("available"):
+            continue
+        h1_atr_values = atr_series(h1, 14)
+        h1_atr = h1_atr_values[-1] if h1_atr_values else max(current * 0.005, EPS)
+        liquidity_map = _v2_build_liquidity_map(
+            {"H4": pair_h4, "H1": h1, "M15": m15},
+            {"H4": h4_structure, "H1": h1_structure, "M15": m15_structure},
+            current,
             direction,
-            current,
-            m15_atr_values[-1],
-            h1_dr,
-            pair_h4_structure,
-            liquidity,
         )
-        enforce_risk_floor(best, h1_floor_atr)
-        align_candidate_to_tick(best, tick_size, current)
+        location_candidates = _v2_liquidity_fib_candidates(liquidity_map, fib_analysis, direction, current, h1_atr)
+        if not location_candidates:
+            # Still permit a strong Fibonacci location near a significant pool.
+            zone = fib_analysis.get("primary_zone") or fib_analysis.get("secondary_zone")
+            if zone:
+                pools = [
+                    p for p in liquidity_map.get("all", [])
+                    if p.side == ("SELL_SIDE" if direction == "BUY" else "BUY_SIDE") and not p.swept and p.significance >= 60
+                ]
+                if pools:
+                    pools.sort(key=lambda p: abs(p.midpoint - safe_float(zone["midpoint"])))
+                    pool = pools[0]
+                    location_candidates.append({
+                        "zone_low": safe_float(zone["price_low"]),
+                        "zone_high": safe_float(zone["price_high"]),
+                        "zone_mid": safe_float(zone["midpoint"]),
+                        "fib": zone,
+                        "pool": pool,
+                        "overlap_ratio": round(_v2_zone_overlap_values(safe_float(zone["price_low"]), safe_float(zone["price_high"]), pool.low, pool.high), 4),
+                        "confluence": round(clamp(pool.significance * 0.65), 2),
+                    })
 
-    if not _ensure_price_geometry(best, current):
-        # Extremely defensive: use one-tick offsets when exchange tick is known.
-        step = tick_size if tick_size > 0 else max(current * 1e-6, 1e-8)
-        if best.direction == "BUY":
-            best.entry = round_price(current - step)
-            best.sl = round_price(max(step, best.entry - step))
-            best.price_exp = round_price(current + step)
-            best.tp = round_price(best.entry + step)
-        else:
-            best.entry = round_price(current + step)
-            best.sl = round_price(best.entry + step)
-            best.price_exp = round_price(max(step, current - step))
-            best.tp = round_price(max(step, best.entry - step))
-
-    # Recalculate confidence after the final level geometry is locked.
-    final_macro = _select_macro_trend(btc_h4_structure, pair_h4_structure, normalized_pair, btc_regime=btc_regime["trend"], pair_regime=pair_regime["trend"])
-    h1_dr = dealing_range(h1, h1_structure)
-    final_target = None
-    for pool in sorted(liquidity, key=lambda x: (x.strength, -abs(x.level - best.tp)), reverse=True):
-        if best.direction == "BUY" and pool.kind == "BUY_SIDE" and pool.level > best.entry:
-            final_target = pool
-            break
-        if best.direction == "SELL" and pool.kind == "SELL_SIDE" and pool.level < best.entry:
-            final_target = pool
-            break
-
-    final_sweep = None
-    sweep_direction = "BULLISH" if best.direction == "BUY" else "BEARISH"
-    for sweep in reversed(sweeps):
-        if sweep["direction"] == sweep_direction and len(m15) - 1 - int(sweep["index"]) <= 40:
-            final_sweep = sweep
-            break
-
-    if best.scores:
-        # Pertahankan skor komponen top-down (POI, Fib, H1) dan penalti;
-        # hanya komponen yang bergantung geometri final dihitung ulang.
-        reach_score, reach_details = entry_reachability(
-            best.direction,
-            current,
-            best.entry,
-            safe_float(h4_ctx.get("atr"), m15_atr_values[-1] * 4.0),
-        )
-        best.evidence["entry_reachability"] = {"score": reach_score, **reach_details}
-        best.scores["planned_rr"] = round(candidate_rr_score(best), 2)
-        best.scores["entry_reachability"] = round(reach_score, 2)
-        if h1_floor_atr > 0:
-            best.scores["risk_quality"] = round(
-                risk_quality_score(abs(best.entry - best.sl) / h1_floor_atr), 2
+        for location in location_candidates:
+            candidate = _v2_build_thesis_candidate(
+                direction=direction,
+                pair=normalized_pair,
+                current=current,
+                btc_regime=btc_regime,
+                pair_regime=pair_regime,
+                h4_structure=h4_structure,
+                h1_structure=h1_structure,
+                m15_structure=m15_structure,
+                h4=pair_h4,
+                h1=h1,
+                m15=m15,
+                h1_ctx=h1_ctx,
+                m15_ctx=m15_ctx,
+                h4_ctx=h4_ctx,
+                liquidity_map=liquidity_map,
+                fib_analysis=fib_analysis,
+                location=location,
+                rsi_pack=rsi_pack,
+                m15_vlt=m15_vlt,
+                quality_pack=quality_pack,
+                tick_size=tick_size,
             )
-        best.confidence = combine_confidence(best.scores, best.evidence)
-    else:
-        score_candidate(
-            best,
-            macro_trend=final_macro,
-            pair_h4_trend=pair_regime["trend"],
-            pair_regime=pair_regime,
-            momentum=evaluate_momentum(best.direction, rsi_pack, bool(final_sweep)),
-            quality=quality_pack,
-            trigger=None,
-            h1_dr=h1_dr,
-            target=final_target,
-            sweep=final_sweep,
-            current=current,
-            m15_atr=m15_atr_values[-1],
-            m15_rsi=m15_rsi_ctx["rsi14"],
-            m15_rsi_slope=m15_rsi_ctx["slope"],
-            vlt=m15_vlt,
-            latest_displacement=displacement_strength(
-                m15,
-                len(m15) - 1,
-                m15_atr_values,
-                m15_rel_volume,
-            ),
+            if candidate:
+                candidates.append(candidate)
+
+    if not candidates:
+        # Preserve a useful analytical response instead of throwing away the pair.
+        direction = allowed_directions[0] if allowed_directions else ("BUY" if pair_trend != "BEARISH" else "SELL")
+        h1_atr = atr_series(h1, 14)[-1] if h1 else max(current * 0.005, EPS)
+        liquidity_map = _v2_build_liquidity_map(
+            {"H4": pair_h4, "H1": h1, "M15": m15},
+            {"H4": h4_structure, "H1": h1_structure, "M15": m15_structure},
+            current,
+            direction,
         )
+        best = _v2_choose_fallback_candidate(direction, current, h1_atr, h1_structure, liquidity_map, tick_size)
+        candidates = [best]
+    else:
+        candidates.sort(key=lambda c: (c.confidence, c.scores.get("liquidity_confluence", 0.0), c.scores.get("rsi_projection", 0.0)), reverse=True)
+        best = candidates[0]
+
+    # Final geometry validation after tick normalization.
+    if not _ensure_price_geometry(best, current):
+        h1_atr = atr_series(h1, 14)[-1] if h1 else max(current * 0.005, EPS)
+        liquidity_map = _v2_build_liquidity_map(
+            {"H4": pair_h4, "H1": h1, "M15": m15},
+            {"H4": h4_structure, "H1": h1_structure, "M15": m15_structure},
+            current,
+            best.direction,
+        )
+        best = _v2_choose_fallback_candidate(best.direction, current, h1_atr, h1_structure, liquidity_map, tick_size)
+        candidates = [best] + [c for c in candidates if c is not best]
 
     risk = abs(best.entry - best.sl)
     reward = abs(best.tp - best.entry)
     planned_rr = reward / max(risk, EPS)
 
-    # Batas confidence: RR buruk atau model fallback M15 tidak boleh terlihat sebagai setup HTF.
-    best.evidence["planned_rr"] = round(planned_rr, 2)
-    if planned_rr < 1.0:
-        best.confidence = min(best.confidence, 40.0)
-    elif planned_rr < MIN_PLANNED_RR:
-        best.confidence = min(best.confidence, 60.0)
-    if best.model in LOW_QUALITY_MODELS:
-        best.confidence = min(best.confidence, FALLBACK_CONFIDENCE_CAP)
-
-    # ------------------------------------------------------------------
-    # Compact but rich machine-readable analysis.
-    # ------------------------------------------------------------------
+    # Build final analysis using the actual selected candidate's direction/location.
+    final_liquidity_map = _v2_build_liquidity_map(
+        {"H4": pair_h4, "H1": h1, "M15": m15},
+        {"H4": h4_structure, "H1": h1_structure, "M15": m15_structure},
+        current,
+        best.direction,
+    )
+    final_fib = _v2_build_adaptive_fib_zones(pair_h4, h4_structure, best.direction, "H4")
+    final_target_map = best.target_map or []
+    final_projection = best.projected_rsi or {}
+    target_selected = None
+    if final_target_map:
+        target_selected = min(
+            final_target_map,
+            key=lambda x: abs(safe_float(x.get("level"), 0.0) - safe_float(best.tp, 0.0)),
+        )
+    selected_entry_zone = {
+        "low": best.entry_low,
+        "high": best.entry_high,
+        "selected": best.entry,
+        "width_pct": round((best.entry_high - best.entry_low) / max(abs(best.entry), EPS) * 100.0, 4),
+    }
+    liquidity_serialized = {
+        "above": [_v2_serialize_liquidity_zone(z) for z in final_liquidity_map.get("above", [])[:12]],
+        "below": [_v2_serialize_liquidity_zone(z) for z in final_liquidity_map.get("below", [])[:12]],
+        "significant_above": [_v2_serialize_liquidity_zone(z) for z in final_liquidity_map.get("significant_above", [])[:10]],
+        "significant_below": [_v2_serialize_liquidity_zone(z) for z in final_liquidity_map.get("significant_below", [])[:10]],
+        "magnet": _v2_serialize_liquidity_zone(final_liquidity_map["magnet"]) if final_liquidity_map.get("magnet") else None,
+    }
     analysis = {
+        "version": "V2",
         "macro": {
             "pair": normalized_pair,
-            "btc_h4": _structure_summary(btc_h4_structure, btc_h4),
-            "pair_h4": _structure_summary(pair_h4_structure, pair_h4),
             "btc_regime": btc_regime,
+            "btc_h4_structure_trend": btc_h4_structure.trend,
+            "btc_aggregate_regime": btc_regime.get("aggregate_regime", btc_regime.get("regime")),
+            "btc_h4": _structure_summary(btc_h4_structure, btc_h4),
             "pair_regime": pair_regime,
-            "macro_bias": final_macro,
-            "directional_regime": directional_regime_label(
-                allowed_directions_for_macro(
-                    final_macro,
-                    pair_regime["trend"],
-                    normalized_pair,
-                )
-            ),
-            "allowed_directions": list(
-                allowed_directions_for_macro(
-                    final_macro,
-                    pair_regime["trend"],
-                    normalized_pair,
-                )
-            ),
-            "direction_rule": (
-                "BTC multi-timeframe regime determines search direction for altcoins; "
-                "pair regime must align in SCAN and can refine setup quality/timing."
-                if is_altcoin(normalized_pair)
-                else "BTCUSDT uses its own multi-timeframe regime as the directional source."
-            ),
-            "altcoin_rule_applied": is_altcoin(normalized_pair),
+            "pair_h4": _structure_summary(h4_structure, pair_h4),
+            "macro_bias": btc_trend,
+            "allowed_directions": list(allowed_directions),
+            "directional_regime": directional_regime,
         },
-        "multi_timeframe": {
-            "h4": {
-                **_structure_summary(pair_h4_structure, pair_h4),
-                "trend_strength": trend_strength_metrics(pair_h4, pair_h4_structure),
-                "fibonacci": fibonacci_summary(h4_ctx.get("fib", {}).get(best.direction), current),
-                "poi": _zone_summary(h4_ctx.get("zones", [])[:10], current, h4_ctx.get("atr", m15_atr_values[-1]), len(pair_h4)),
-            },
-            "h1": {
-                **_structure_summary(h1_structure, h1),
-                "dealing_range": {
-                    "high": round_price(h1_dr["high"]),
-                    "low": round_price(h1_dr["low"]),
-                    "mid": round_price(h1_dr["mid"]),
-                    "location_current": round(location_ratio(current, h1_dr), 4),
-                    "zone": (
-                        "DISCOUNT" if location_ratio(current, h1_dr) < 0.5
-                        else "PREMIUM" if location_ratio(current, h1_dr) > 0.5
-                        else "EQUILIBRIUM"
-                    ),
-                },
-                "trend_strength": trend_strength_metrics(h1, h1_structure),
-                "fibonacci": fibonacci_summary(h1_ctx.get("fib", {}).get(best.direction), current),
-                "poi": _zone_summary(h1_ctx.get("zones", [])[:10], current, h1_ctx.get("atr", m15_atr_values[-1]), len(h1)),
-            },
-            "m15": {
-                **_structure_summary(m15_structure, m15),
-                "rsi14": m15_rsi_ctx,
-                "rsi_pack": rsi_pack,
-                "market_quality": quality_pack,
-                "vlt": m15_vlt,
-                "latest_displacement_score": round(
-                    displacement_strength(
-                        m15,
-                        len(m15) - 1,
-                        m15_atr_values,
-                        m15_rel_volume,
-                    ),
-                    2,
-                ),
-                "atr14": round(m15_atr_values[-1], 8),
-                "trend_strength": trend_strength_metrics(m15, m15_structure),
-                "fibonacci": fibonacci_summary(m15_ctx.get("fib", {}).get(best.direction), current),
-                "poi": _zone_summary(m15_ctx.get("zones", [])[:10], current, m15_atr_values[-1], len(m15)),
+        "pair_structure": {
+            "H4": _structure_summary(h4_structure, pair_h4),
+            "H1": _structure_summary(h1_structure, h1),
+            "M15": _structure_summary(m15_structure, m15),
+            "signature_h4": _v2_structure_signature(h4_structure),
+            "signature_h1": _v2_structure_signature(h1_structure),
+        },
+        "thesis": {
+            "type": best.thesis_type,
+            "status": best.thesis_status,
+            "reason": best.entry_reason,
+            "freshness": (best.evidence.get("thesis_freshness") if isinstance(best.evidence, dict) else None),
+        },
+        "liquidity_map": liquidity_serialized,
+        "fib_analysis": {
+            "H4": {
+                **{k: v for k, v in final_fib.items() if k != "fib"},
+                "current_price": current,
             },
         },
-        "smc": {
-            "liquidity_sweeps_recent": sweeps[-12:],
-            "htf_poi_hierarchy": {
-                "h4_primary_candidates": _zone_summary(h4_ctx.get("zones", [])[:12], current, h4_ctx.get("atr", m15_atr_values[-1]), len(pair_h4)),
-                "h1_refinement_candidates": _zone_summary(h1_ctx.get("zones", [])[:12], current, h1_ctx.get("atr", m15_atr_values[-1]), len(h1)),
-                "m15_execution_candidates": _zone_summary(m15_ctx.get("zones", [])[:12], current, m15_ctx.get("atr", m15_atr_values[-1]), len(m15)),
-            },
-            "h4_primary_ranking_for_direction": [
-                {
-                    **details,
-                    "rank": idx + 1,
-                }
-                for idx, (_zone, details) in enumerate(
-                    rank_primary_pois(h4_ctx, best.direction, current, limit=MAX_PRIMARY_POI_CANDIDATES)
-                )
-            ],
-            "fibonacci": {
-                "h4_buy": fibonacci_summary(h4_ctx.get("fib", {}).get("BUY"), current),
-                "h4_sell": fibonacci_summary(h4_ctx.get("fib", {}).get("SELL"), current),
-                "h1_buy": fibonacci_summary(h1_ctx.get("fib", {}).get("BUY"), current),
-                "h1_sell": fibonacci_summary(h1_ctx.get("fib", {}).get("SELL"), current),
-                "m15_buy": fibonacci_summary(m15_ctx.get("fib", {}).get("BUY"), current),
-                "m15_sell": fibonacci_summary(m15_ctx.get("fib", {}).get("SELL"), current),
-            },
-            "trend_strength": {
-                "btc_h4": trend_strength_metrics(btc_h4, btc_h4_structure),
-                "pair_h4": trend_strength_metrics(pair_h4, pair_h4_structure),
-                "h1": trend_strength_metrics(h1, h1_structure),
-                "m15": trend_strength_metrics(m15, m15_structure),
-            },
-            "fvg_recent": _zone_summary(fvg[-10:], current, m15_atr_values[-1], len(m15)),
-            "order_blocks": _zone_summary(obs, current, m15_atr_values[-1], len(m15)),
-            "breakers": _zone_summary(breakers, current, m15_atr_values[-1], len(m15)),
-            "liquidity_pools": _liquidity_summary(liquidity, current, m15_atr_values[-1]),
+        "refinement": best.refinement_zone,
+        "rsi": rsi_pack,
+        "rsi_projection": final_projection,
+        "entry_zone": selected_entry_zone,
+        "invalidation": best.invalidation,
+        "target_map": {
+            "candidates": final_target_map,
+            "selected": target_selected,
         },
-        "selected_setup": {
-            "model": best.model,
-            "direction": best.direction,
-            "entry": best.entry,
-            "entry_reason": best.entry_reason,
-            "price_exp": best.price_exp,
-            "price_exp_reason": best.price_exp_reason,
-            "sl": best.sl,
-            "sl_reason": best.sl_reason,
-            "tp": best.tp,
-            "tp_reason": best.tp_reason,
+        "risk": {
+            "risk": round_price(risk),
+            "reward": round_price(reward),
             "planned_rr": round(planned_rr, 4),
-            "evidence": best.evidence,
+            "risk_pct": round(risk / max(best.entry, EPS) * 100.0, 4),
+            "risk_h1_atr": round(risk / max(atr_series(h1, 14)[-1] if h1 else 1.0, EPS), 4),
+            "classification": (best.invalidation or {}).get("classification"),
         },
         "confidence": {
             "score": best.confidence,
             "components": best.scores,
-            "meaning": "Kualitas internal setup 0-100; bukan probabilitas profit.",
+            "weights": THESIS_WEIGHTS_V2,
+            "meaning": "Kualitas internal thesis 0-100; bukan probabilitas profit.",
         },
-        "notes": notes_context,
-        "candidate_set": [_candidate_summary(x) for x in sorted(candidates, key=lambda c: c.confidence, reverse=True)],
+        "candidate_set": [_v2_candidate_summary(c) for c in sorted(candidates, key=lambda c: c.confidence, reverse=True)],
         "price_context": {
             "current": round_price(current),
-            "atr14_m15": round_price(m15_atr_values[-1]),
+            "atr14_m15": round_price(m15_atr_values[-1] if m15_atr_values else 0.0),
             "current_distance_to_entry_pct": round(distance_pct(current, best.entry), 4),
             "entry_distance_to_exp_pct": round(distance_pct(best.entry, best.price_exp), 4),
-            "entry_reachability": best.evidence.get("entry_reachability", {}),
-            "entry_zone_timeframe": best.evidence.get("entry_zone_timeframe"),
+            "entry_zone_timeframe": "H4+H1+M15",
+        },
+        "vlt": m15_vlt,
+        "market_quality": quality_pack,
+        "smc": {
+            "sweeps_recent": (m15_ctx.get("sweeps") or [])[-12:],
+            "fvg_recent": _zone_summary(m15_ctx.get("fvg") or [], current, m15_atr_values[-1] if m15_atr_values else 1.0, len(m15)),
+            "order_blocks": _zone_summary(m15_ctx.get("obs") or [], current, m15_atr_values[-1] if m15_atr_values else 1.0, len(m15)),
+            "breakers": _zone_summary(m15_ctx.get("breakers") or [], current, m15_atr_values[-1] if m15_atr_values else 1.0, len(m15)),
         },
     }
 
-    # Strategy output matches the bridge contract in main.py.
     return {
         "pair": normalized_pair,
         "direction": best.direction,
@@ -5132,25 +6853,14 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "scan_mode": scan_mode,
             "data_policy": "BYBIT_PUBLIC_ONLY" if scan_mode else "BYBIT_WITH_BINANCE_FALLBACK",
             "fallback_used": m15_source == "BINANCE_FALLBACK",
-            "directional_bias": final_macro,
-            "directional_regime": directional_regime_label(
-                allowed_directions_for_macro(
-                    final_macro,
-                    pair_regime["trend"],
-                    normalized_pair,
-                )
-            ),
-            "allowed_directions": list(
-                allowed_directions_for_macro(
-                    final_macro,
-                    pair_regime["trend"],
-                    normalized_pair,
-                )
-            ),
+            "directional_bias": btc_trend,
+            "directional_regime": directional_regime,
+            "allowed_directions": list(allowed_directions),
             "sources_by_timeframe": {
                 "pair_m15": m15_source,
                 "pair_h4": pair_h4_source,
                 "btc_h4": btc_h4_source,
+                "btc_h1": btc_h1_source,
                 "current_price": price_source,
             },
             "timeframe": "15m",
@@ -5160,31 +6870,281 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             "pair_h4_candles": len(pair_h4),
             "btc_h4_candles": len(btc_h4),
             "btc_h1_candles": len(btc_h1),
-            "h1_derived_candles": len(h1_derived),
+            "h1_derived_candles": len(h1),
             "h4_derived_candles": len(h4_derived),
             "tick_size": round_price(tick_size) if tick_size else None,
             "tick_size_source": "BYBIT" if scan_mode else ("BINANCE" if m15_source == "BINANCE_FALLBACK" else "BYBIT"),
-            "htf_poi_hierarchy": "D1/H4/H1/M15_REGIME -> H4_PRIMARY -> H1_RETRACEMENT_PATH_REFINEMENT -> M15_EXECUTION",
-            "fibonacci_enabled": True,
-            "fibonacci_deep_filter": 0.618,
+            "engine": STRATEGY_ENGINE,
         },
         "strategy": {
             "name": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
-            "architecture": (
-                "BTC multi-timeframe regime constraint + relevant/near H4 POI hierarchy + "
-                "H4/H1 Fibonacci confluence + retracement-path refinement + M15 execution + "
-                "entry reachability guard + SMC + RSI14 M15 + VLT/OHLCV"
-            ),
-            "confidence_semantics": "quality_score_not_profit_probability",
+            "engine": STRATEGY_ENGINE,
+            "architecture": "BTC H4/H1 macro structure -> pair H4 thesis -> liquidity map -> adaptive Fibonacci -> FVG/OB refinement -> projected RSI -> entry zone -> prediction invalidation -> structural SL -> liquidity/H4 target map -> RR -> thesis quality",
+            "confidence_semantics": "thesis_quality_score_not_profit_probability",
             "scan_contract": "analyze_scan_structure -> generate_setup -> validate_setup",
             "validator_tolerance": "main.py enforces >= 90% of initial confidence",
-            "directional_rule": (
-                "Altcoin BTC regime BULLISH -> BUY only; "
-                "BTC regime BEARISH -> SELL only; BTC RANGE/TRANSITION -> both."
-            ),
+            "directional_rule": "Altcoin BTC BULLISH -> BUY; BTC BEARISH -> SELL; BTC RANGE -> both.",
         },
     }
+
+
+# ============================================================================
+# BLUEPRINT V2 PUBLIC ANALYSIS HELPERS
+# ============================================================================
+
+
+def build_liquidity_map(
+    candles_by_tf: dict[str, list[Candle]],
+    structures: dict[str, StructureSnapshot],
+    current: float,
+    direction: str,
+) -> dict[str, Any]:
+    """Blueprint-facing name for the V2 liquidity map engine."""
+    return _v2_build_liquidity_map(candles_by_tf, structures, current, direction)
+
+
+def cluster_liquidity_levels(
+    raw_levels: list[dict[str, Any]],
+    candles: list[Candle],
+    timeframe: str,
+    current: float,
+) -> list[LiquidityZone]:
+    """Blueprint-facing name for liquidity clustering."""
+    return _v2_cluster_liquidity_levels(raw_levels, candles, timeframe, current)
+
+
+def assess_impulse_quality(
+    candles: list[Candle],
+    structure: StructureSnapshot,
+    direction: str,
+    fib: FibonacciContext,
+) -> dict[str, Any]:
+    return _v2_assess_impulse_quality(candles, structure, direction, fib)
+
+
+def build_adaptive_fib_zones(
+    candles: list[Candle],
+    structure: StructureSnapshot,
+    direction: str,
+    timeframe: str = "H4",
+) -> dict[str, Any]:
+    return _v2_build_adaptive_fib_zones(candles, structure, direction, timeframe)
+
+
+def liquidity_fib_confluence(
+    liquidity_map: dict[str, Any],
+    fib_analysis: dict[str, Any],
+    direction: str,
+    current: float,
+    h1_atr: float,
+) -> list[dict[str, Any]]:
+    return _v2_liquidity_fib_candidates(liquidity_map, fib_analysis, direction, current, h1_atr)
+
+
+def find_refinement_confluence(
+    location: dict[str, Any],
+    direction: str,
+    h1_ctx: dict[str, Any],
+    m15_ctx: dict[str, Any],
+) -> dict[str, Any]:
+    return _v2_refine_location(location, direction, h1_ctx, m15_ctx)
+
+
+def project_rsi_to_entry_zone(
+    m15: list[Candle],
+    h4: list[Candle],
+    entry_low: float,
+    entry_high: float,
+    direction: str,
+) -> dict[str, Any]:
+    return _v2_project_rsi_to_entry_zone(m15, h4, entry_low, entry_high, direction)
+
+
+def classify_projected_rsi(direction: str, h4: dict[str, Any], m15: dict[str, Any]) -> str:
+    return _v2_classify_projected_rsi(direction, h4, m15)
+
+
+def find_invalidation_candidates(
+    direction: str,
+    entry: float,
+    h4_structure: StructureSnapshot,
+    h1_structure: StructureSnapshot,
+    liquidity_map: dict[str, Any],
+    sweeps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return _v2_find_invalidation_candidates(direction, entry, h4_structure, h1_structure, liquidity_map, sweeps)
+
+
+def select_prediction_invalidation(
+    direction: str,
+    entry: float,
+    h4_structure: StructureSnapshot,
+    h1_structure: StructureSnapshot,
+    liquidity_map: dict[str, Any],
+    sweeps: list[dict[str, Any]],
+    h1_atr: float,
+) -> dict[str, Any] | None:
+    return _v2_select_prediction_invalidation(direction, entry, h4_structure, h1_structure, liquidity_map, sweeps, h1_atr)
+
+
+def build_target_map(
+    direction: str,
+    entry: float,
+    sl: float,
+    liquidity_map: dict[str, Any],
+    h4_structure: StructureSnapshot,
+    h1_structure: StructureSnapshot,
+    h1_atr: float,
+    current: float | None = None,
+) -> list[dict[str, Any]]:
+    return _v2_build_target_map(direction, entry, sl, liquidity_map, h4_structure, h1_structure, h1_atr, current=current)
+
+
+def score_target_quality(target: dict[str, Any] | None) -> float:
+    return _v2_score_target_quality(target)
+
+
+def score_liquidity_zone(zone: LiquidityZone | None) -> float:
+    """Return the final V2 significance score for a liquidity zone."""
+    return clamp(safe_float(zone.significance, 0.0)) if zone is not None else 0.0
+
+
+def classify_liquidity_role(
+    zones: list[LiquidityZone],
+    direction: str,
+    current: float,
+    entry_low: float | None = None,
+    entry_high: float | None = None,
+) -> list[LiquidityZone]:
+    """Assign V2 liquidity roles in-place and return the same list."""
+    _v2_mark_liquidity_roles(zones, direction, current, entry_low, entry_high)
+    return zones
+
+
+def simulate_rsi_path(
+    candles: list[Candle],
+    target: float,
+    steps: int,
+    scenario: str = "NORMAL_RETRACE",
+) -> float:
+    return _v2_simulate_rsi_path(candles, target, steps, scenario)
+
+
+def score_entry_zone(
+    location: dict[str, Any],
+    refinement: dict[str, Any],
+    projection: dict[str, Any],
+    invalidation: dict[str, Any] | None,
+    current: float,
+    direction: str,
+    h4_atr: float,
+) -> float:
+    """Standalone entry-zone quality score for audits/backtests."""
+    zone_low = safe_float(refinement.get("low"), location.get("zone_low", 0.0))
+    zone_high = safe_float(refinement.get("high"), location.get("zone_high", 0.0))
+    if zone_high <= zone_low:
+        return 0.0
+    confluence = _v2_score_liquidity_confluence(location, refinement)
+    rsi_score = _v2_score_rsi_projection(direction, projection)
+    invalidation_score = _v2_score_invalidation(invalidation, (zone_low + zone_high) / 2.0)
+    reach_score, _ = _v2_entry_reachability_v2(
+        direction, current, zone_low, zone_high, h4_atr,
+        safe_float(projection.get("scenario_consensus"), 50.0),
+    )
+    return clamp(
+        confluence * 0.35
+        + rsi_score * 0.30
+        + invalidation_score * 0.20
+        + reach_score * 0.15
+    )
+
+
+def build_thesis(
+    direction: str,
+    btc_regime: dict[str, Any],
+    pair_regime: dict[str, Any],
+    h4_structure: StructureSnapshot,
+    h1_structure: StructureSnapshot | None = None,
+) -> dict[str, Any]:
+    """Blueprint-facing thesis object used by audits and integration tooling."""
+    want = "BULLISH" if direction == DIRECTION_BUY else "BEARISH"
+    btc_trend = str(btc_regime.get("trend") or "RANGE").upper()
+    pair_trend = str(pair_regime.get("trend") or h4_structure.trend or "RANGE").upper()
+    h1_trend = str(h1_structure.trend if h1_structure is not None else "RANGE").upper()
+    macro_aligned = btc_trend in {want, "RANGE"}
+    pair_aligned = pair_trend in {want, "RANGE"}
+    h4_aligned = h4_structure.trend in {want, "RANGE"}
+    return {
+        "direction": direction,
+        "valid": bool(macro_aligned and pair_aligned and h4_aligned),
+        "type": f"H4_{'BULLISH' if direction == DIRECTION_BUY else 'BEARISH'}_PULLBACK",
+        "btc_trend": btc_trend,
+        "pair_trend": pair_trend,
+        "h4_trend": h4_structure.trend,
+        "h1_trend": h1_trend,
+        "macro_aligned": macro_aligned,
+        "pair_aligned": pair_aligned,
+        "h4_aligned": h4_aligned,
+        "structure_signature_h4": _v2_structure_signature(h4_structure),
+        "structure_signature_h1": _v2_structure_signature(h1_structure) if h1_structure is not None else None,
+    }
+
+
+def score_thesis_quality(candidate: Candidate) -> float:
+    """Recompute V2 thesis quality from stored component scores when available."""
+    if not candidate.scores:
+        return float(candidate.confidence)
+    base = sum(
+        THESIS_WEIGHTS_V2[name] * safe_float(candidate.scores.get(name), 0.0)
+        for name in THESIS_WEIGHTS_V2
+    ) / 100.0
+    if candidate.thesis_status == "WAITING_TRIGGER":
+        base = min(base, THESIS_WAITING_CAP_V2)
+    return clamp(base)
+
+
+def validate_thesis_consistency(candidate: Candidate) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if candidate.direction not in {DIRECTION_BUY, DIRECTION_SELL}:
+        errors.append("invalid direction")
+    if candidate.entry_low > candidate.entry_high:
+        errors.append("entry zone inverted")
+    if not (candidate.entry_low <= candidate.entry <= candidate.entry_high):
+        errors.append("entry outside entry zone")
+    if not candidate.liquidity_zone:
+        errors.append("missing liquidity thesis")
+    if not candidate.fib_zone:
+        errors.append("missing fibonacci thesis")
+    if not candidate.invalidation:
+        errors.append("missing prediction invalidation")
+    if candidate.direction == DIRECTION_BUY:
+        if not (candidate.sl < candidate.entry < candidate.tp):
+            errors.append("BUY geometry invalid")
+        if safe_float((candidate.invalidation or {}).get("anchor_level"), candidate.entry) >= candidate.entry:
+            errors.append("BUY invalidation on wrong side")
+    else:
+        if not (candidate.tp < candidate.entry < candidate.sl):
+            errors.append("SELL geometry invalid")
+        if safe_float((candidate.invalidation or {}).get("anchor_level"), candidate.entry) <= candidate.entry:
+            errors.append("SELL invalidation on wrong side")
+    risk = abs(candidate.entry - candidate.sl)
+    reward = abs(candidate.tp - candidate.entry)
+    rr = reward / max(risk, EPS)
+    if rr < TARGET_MIN_RR:
+        errors.append("RR below minimum")
+    if candidate.model != FALLBACK_V2_MODEL and not 0.0 <= candidate.confidence <= 100.0:
+        errors.append("confidence outside 0-100")
+    return (not errors, errors)
+
+
+# ============================================================================
+# PUBLIC CONTRACT
+# ============================================================================
+
+async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Public strategy contract; delegates to the Structural Prediction Engine V2."""
+    return await _generate_setup_v2(pair, context)
 
 
 # ============================================================================
@@ -5229,10 +7189,35 @@ def _scan_context(context: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _btc_regime_payload(h4_candles: list[Candle], h1_candles: list[Candle], source_by_tf: dict[str,str]) -> dict[str,Any]:
-    d1_candles=resample_candles(h4_candles,24*60*60*1000)
-    regime=build_multi_timeframe_regime({"D1":(d1_candles,2),"H4":(h4_candles,SWING_SPAN_H4),"H1":(h1_candles,SWING_SPAN_H1)})
-    h4_structure=build_structure(h4_candles,SWING_SPAN_H4)
-    return {"trend":regime["trend"],"regime":regime["trend"],"state":regime["state"],"confidence":regime["confidence"],"bullish_score":regime["bullish_score"],"bearish_score":regime["bearish_score"],"gap":regime["gap"],"structure":_structure_summary(h4_structure,h4_candles),"trend_strength":trend_strength_metrics(h4_candles,h4_structure),"fibonacci":{d:fibonacci_summary(build_fibonacci(h4_candles,h4_structure,d,"H4"),h4_candles[-1].close) for d in DIRECTIONS_BOTH},"timeframes":regime["timeframes"],"sources_by_timeframe":source_by_tf,"candles":len(h4_candles),"closed_candles_only":True}
+    d1_candles = resample_candles(h4_candles, 24 * 60 * 60 * 1000)
+    regime = build_multi_timeframe_regime({
+        "D1": (d1_candles, 2),
+        "H4": (h4_candles, SWING_SPAN_H4),
+        "H1": (h1_candles, SWING_SPAN_H1),
+    })
+    h4_structure = build_structure(h4_candles, SWING_SPAN_H4)
+    # V2 macro direction is the confirmed BTC H4 structure. The aggregate
+    # D1/H4/H1 regime remains available as a soft context field.
+    return {
+        "trend": h4_structure.trend,
+        "regime": regime["trend"],
+        "aggregate_regime": regime["trend"],
+        "state": regime["state"],
+        "confidence": regime["confidence"],
+        "bullish_score": regime["bullish_score"],
+        "bearish_score": regime["bearish_score"],
+        "gap": regime["gap"],
+        "structure": _structure_summary(h4_structure, h4_candles),
+        "trend_strength": trend_strength_metrics(h4_candles, h4_structure),
+        "fibonacci": {
+            d: fibonacci_summary(build_fibonacci(h4_candles, h4_structure, d, "H4"), h4_candles[-1].close)
+            for d in DIRECTIONS_BOTH
+        },
+        "timeframes": regime["timeframes"],
+        "sources_by_timeframe": source_by_tf,
+        "candles": len(h4_candles),
+        "closed_candles_only": True,
+    }
 
 
 async def analyze_btc_regime(context: dict[str,Any] | None=None) -> dict[str,Any]:
@@ -5253,12 +7238,43 @@ async def analyze_scan_structure(pair: str, context: dict[str,Any] | None=None) 
     context=_scan_context(context); symbol=normalize_pair(pair); btc=await analyze_btc_regime(context); btc_trend=str(btc.get("trend") or "RANGE").upper()
     if symbol=="BTCUSDT":
         return {"pair":symbol,"trend":btc_trend,"regime":btc.get("regime",btc_trend),"state":btc.get("state",btc_trend),"confidence":btc.get("confidence",50),"btc_h4_trend":btc_trend,"aligned":True,"analysis":{"btc_regime":btc},"data":{"source":"BYBIT","timeframe":"D1/H4/H1","candles_used":btc.get("candles"),"closed_candles_only":True,"data_policy":"BYBIT_PUBLIC_ONLY"}}
-    h4,h4_source=await fetch_series(symbol,H4,PAIR_H4_CANDLES_REQUIRED,H4_MS,allow_fallback=False)
-    h1,h1_source=await fetch_series(symbol,H1,168,H1_MS,allow_fallback=False)
-    d1=resample_candles(h4,24*60*60*1000)
-    regime=build_multi_timeframe_regime({"D1":(d1,2),"H4":(h4,SWING_SPAN_H4),"H1":(h1,SWING_SPAN_H1)})
-    aligned=(btc_trend=="RANGE" and regime["trend"] in {"BULLISH","BEARISH","RANGE"}) or (btc_trend==regime["trend"] and btc_trend in {"BULLISH","BEARISH"})
-    return {"pair":symbol,"trend":regime["trend"],"regime":regime["trend"],"state":regime["state"],"confidence":regime["confidence"],"btc_h4_trend":btc_trend,"btc_regime":btc.get("regime",btc_trend),"aligned":aligned,"analysis":{"pair_regime":regime,"btc_regime":btc},"data":{"source":"BYBIT","timeframe":"D1/H4/H1","candles_used":{"D1":len(d1),"H4":len(h4),"H1":len(h1)},"closed_candles_only":True,"data_policy":"BYBIT_PUBLIC_ONLY","sources_by_timeframe":{"D1":h4_source+"_DERIVED","H4":h4_source,"H1":h1_source}}}
+    h4, h4_source = await fetch_series(symbol, H4, PAIR_H4_CANDLES_REQUIRED, H4_MS, allow_fallback=False)
+    h1, h1_source = await fetch_series(symbol, H1, 168, H1_MS, allow_fallback=False)
+    d1 = resample_candles(h4, 24 * 60 * 60 * 1000)
+    h4_structure = build_structure(h4, SWING_SPAN_H4)
+    regime = build_multi_timeframe_regime({
+        "D1": (d1, 2),
+        "H4": (h4, SWING_SPAN_H4),
+        "H1": (h1, SWING_SPAN_H1),
+    })
+    pair_h4_trend = str(h4_structure.trend or "RANGE").upper()
+    aligned = (
+        (btc_trend == "RANGE" and pair_h4_trend in {"BULLISH", "BEARISH", "RANGE"})
+        or (btc_trend == pair_h4_trend and btc_trend in {"BULLISH", "BEARISH"})
+    )
+    return {
+        "pair": symbol,
+        "trend": pair_h4_trend,
+        "regime": regime["trend"],
+        "state": regime["state"],
+        "confidence": regime["confidence"],
+        "btc_h4_trend": btc_trend,
+        "btc_regime": btc.get("regime", btc_trend),
+        "aligned": aligned,
+        "analysis": {
+            "pair_h4": _structure_summary(h4_structure, h4),
+            "pair_regime": regime,
+            "btc_regime": btc,
+        },
+        "data": {
+            "source": "BYBIT",
+            "timeframe": "D1/H4/H1",
+            "candles_used": {"D1": len(d1), "H4": len(h4), "H1": len(h1)},
+            "closed_candles_only": True,
+            "data_policy": "BYBIT_PUBLIC_ONLY",
+            "sources_by_timeframe": {"D1": h4_source + "_DERIVED", "H4": h4_source, "H1": h1_source},
+        },
+    }
 
 
 def _setup_signature(setup: dict[str, Any]) -> tuple[Any, ...]:
@@ -5297,25 +7313,88 @@ async def validate_setup(
     direction_valid = fresh_direction in allowed
     same_direction = initial_direction == fresh_direction
     fresh_pair_regime = str((macro.get("pair_regime") or {}).get("trend") or "RANGE")
-    regime_valid = (fresh_direction == DIRECTION_BUY and fresh_pair_regime == "BULLISH") or (fresh_direction == DIRECTION_SELL and fresh_pair_regime == "BEARISH")
+    pair_h4 = str(((macro.get("pair_h4") or {}).get("trend")) or "RANGE")
+    # V2 validation keeps the H4 structural thesis authoritative. The
+    # multi-timeframe aggregate may temporarily read RANGE during pullback.
+    regime_valid = (fresh_direction == DIRECTION_BUY and pair_h4 == "BULLISH") or (fresh_direction == DIRECTION_SELL and pair_h4 == "BEARISH")
 
     initial_sig = _setup_signature(initial_setup)
     fresh_sig = _setup_signature(fresh)
     replacement = initial_sig != fresh_sig
     confidence_ratio = (fresh_conf / initial_conf * 100.0) if initial_conf > EPS else 0.0
 
-    structural_valid = bool(direction_valid and same_direction and regime_valid)
-    if not structural_valid:
+    initial_analysis = initial_setup.get("analysis") if isinstance(initial_setup.get("analysis"), dict) else {}
+    fresh_analysis = fresh.get("analysis") if isinstance(fresh.get("analysis"), dict) else {}
+    initial_structure = (initial_analysis.get("pair_structure") or {}) if isinstance(initial_analysis, dict) else {}
+    fresh_structure = (fresh_analysis.get("pair_structure") or {}) if isinstance(fresh_analysis, dict) else {}
+    initial_h4_signature = initial_structure.get("signature_h4")
+    fresh_h4_signature = fresh_structure.get("signature_h4")
+    structure_same = (initial_h4_signature is None or fresh_h4_signature is None or initial_h4_signature == fresh_h4_signature)
+
+    initial_zone = initial_analysis.get("entry_zone") or {}
+    fresh_zone = fresh_analysis.get("entry_zone") or {}
+    zone_overlap = 0.0
+    try:
+        ilow, ihigh = float(initial_zone.get("low")), float(initial_zone.get("high"))
+        flow, fhigh = float(fresh_zone.get("low")), float(fresh_zone.get("high"))
+        if ihigh > ilow and fhigh > flow:
+            overlap_low = max(ilow, flow)
+            overlap_high = min(ihigh, fhigh)
+            overlap = max(0.0, overlap_high - overlap_low)
+            zone_overlap = overlap / max(min(ihigh - ilow, fhigh - flow), EPS)
+    except (TypeError, ValueError):
+        zone_overlap = 0.0
+
+    fresh_projection = fresh_analysis.get("rsi_projection") or {}
+    projected_class = str(fresh_projection.get("classification") or "")
+    rsi_projection_valid = not projected_class.startswith("WEAK")
+    fresh_risk = fresh_analysis.get("risk") or {}
+    fresh_target = fresh_analysis.get("target_map") or {}
+    target_selected = fresh_target.get("selected") if isinstance(fresh_target, dict) else None
+    rr_valid = safe_float(fresh_risk.get("planned_rr"), 0.0) >= TARGET_MIN_RR
+    invalidation_valid = bool((fresh_analysis.get("invalidation") or {}).get("sl"))
+    target_valid = bool(target_selected) and rr_valid
+    liquidity_alive = bool((fresh_analysis.get("liquidity_map") or {}).get("significant_below" if fresh_direction == DIRECTION_BUY else "significant_above"))
+
+    thesis_changed = not structure_same or zone_overlap < 0.25
+    core_valid = bool(
+        direction_valid
+        and same_direction
+        and regime_valid
+        and liquidity_alive
+        and invalidation_valid
+        and target_valid
+        and (rsi_projection_valid or str((fresh_analysis.get("thesis") or {}).get("status")) == "WAITING_TRIGGER")
+    )
+    structural_valid = bool(core_valid and (not thesis_changed or fresh_conf >= initial_conf))
+
+    validation_flags = {
+        "same_direction": same_direction,
+        "direction_valid": direction_valid,
+        "h4_structure_same": structure_same,
+        "entry_zone_overlap": round(zone_overlap, 4),
+        "liquidity_alive": liquidity_alive,
+        "projected_rsi_valid": rsi_projection_valid,
+        "invalidation_valid": invalidation_valid,
+        "target_valid": target_valid,
+        "rr_valid": rr_valid,
+        "thesis_changed": thesis_changed,
+    }
+
+    if not core_valid:
         valid_reason = (
-            f"Thesis/regime berubah atau tidak konsisten: initial={initial_direction}, "
-            f"validated={fresh_direction}, pair_regime={fresh_pair_regime}, allowed={allowed}."
+            "Fresh thesis gagal consistency check: "
+            + ", ".join(k for k, v in validation_flags.items() if v is False)
         )
+    elif thesis_changed and fresh_conf > initial_conf:
+        valid_reason = "Validator menemukan thesis baru yang tetap valid dan confidence lebih tinggi; replacement digunakan."
+    elif thesis_changed:
+        valid_reason = "Thesis berubah material namun confidence validator tidak lebih tinggi; candidate ditolak."
     elif replacement and fresh_conf > initial_conf:
         valid_reason = "Validator menemukan setup baru dengan confidence lebih tinggi; setup validator digunakan."
     else:
-        valid_reason = "Struktur dan arah tetap konsisten; setup dihitung ulang dengan data Bybit terbaru."
+        valid_reason = "Struktur thesis, liquidity/zone, invalidation, target, dan RR tetap konsisten dengan data terbaru."
 
-    fresh_analysis = fresh.get("analysis") or {}
     fresh_analysis = dict(fresh_analysis)
     fresh_analysis["validation"] = {
         "initial_confidence": round(initial_conf, 2),
@@ -5329,6 +7408,7 @@ async def validate_setup(
         "regime_valid": regime_valid,
         "setup_replaced": replacement,
         "replacement_is_higher_confidence": replacement and fresh_conf > initial_conf,
+        "consistency": validation_flags,
         "reason": valid_reason,
     }
     fresh = dict(fresh)
@@ -5387,10 +7467,17 @@ def validate_directional_alignment(result: dict[str, Any]) -> tuple[bool, list[s
 
     pair_regime = macro.get("pair_regime") if isinstance(macro.get("pair_regime"), dict) else {}
     pair_trend = str(pair_regime.get("trend") or "")
-    if direction == "BUY" and pair_trend != "BULLISH":
-        errors.append(f"BUY membutuhkan pair_regime BULLISH, saat ini {pair_trend or '-'}")
-    if direction == "SELL" and pair_trend != "BEARISH":
-        errors.append(f"SELL membutuhkan pair_regime BEARISH, saat ini {pair_trend or '-'}")
+    pair_h4 = str((macro.get("pair_h4") or {}).get("trend") or "")
+    if str(result.get("strategy", {}).get("version") or "") == STRATEGY_VERSION:
+        if direction == "BUY" and pair_h4 != "BULLISH":
+            errors.append(f"V2 BUY membutuhkan H4 BULLISH thesis, saat ini {pair_h4 or '-'} (aggregate={pair_trend or '-'})")
+        if direction == "SELL" and pair_h4 != "BEARISH":
+            errors.append(f"V2 SELL membutuhkan H4 BEARISH thesis, saat ini {pair_h4 or '-'} (aggregate={pair_trend or '-'})")
+    else:
+        if direction == "BUY" and pair_trend != "BULLISH":
+            errors.append(f"BUY membutuhkan pair_regime BULLISH, saat ini {pair_trend or '-'}")
+        if direction == "SELL" and pair_trend != "BEARISH":
+            errors.append(f"SELL membutuhkan pair_regime BEARISH, saat ini {pair_trend or '-'}")
 
     return (not errors, errors)
 
@@ -5424,6 +7511,383 @@ def validate_result_contract(result: dict[str, Any]) -> tuple[bool, list[str]]:
     if not 0 <= confidence <= 100:
         errors.append("confidence di luar 0-100")
     return (not errors, errors)
+
+
+
+def validate_liquidity_map(liquidity_map: dict[str, Any], current: float) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    for bucket in ("all", "above", "below"):
+        if not isinstance(liquidity_map.get(bucket), list):
+            errors.append(f"liquidity_map.{bucket} not list")
+    for zone in liquidity_map.get("all", []):
+        if not (zone.low <= zone.midpoint <= zone.high):
+            errors.append("liquidity zone geometry invalid")
+        if not 0.0 <= zone.significance <= 100.0:
+            errors.append("liquidity significance outside 0-100")
+    return (not errors, errors)
+
+
+def validate_fib_zone(fib_analysis: dict[str, Any]) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if not fib_analysis.get("available"):
+        return False, ["fib unavailable"]
+    for name in ("primary_zone", "secondary_zone", "deep_zone", "normal_zone"):
+        zone = fib_analysis.get(name)
+        if not isinstance(zone, dict):
+            errors.append(f"missing {name}")
+            continue
+        low, high = safe_float(zone.get("price_low")), safe_float(zone.get("price_high"))
+        if high < low:
+            errors.append(f"{name} inverted")
+    return (not errors, errors)
+
+
+def validate_entry_zone(entry_low: float, entry_high: float, entry: float, current: float, direction: str) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if entry_low > entry_high:
+        errors.append("entry zone inverted")
+    if not (entry_low - EPS <= entry <= entry_high + EPS):
+        errors.append("entry outside zone")
+    if direction == DIRECTION_BUY and entry >= current:
+        errors.append("BUY entry not below current")
+    if direction == DIRECTION_SELL and entry <= current:
+        errors.append("SELL entry not above current")
+    return (not errors, errors)
+
+
+def validate_invalidation(direction: str, entry: float, invalidation: dict[str, Any] | None, sl: float, h1_atr: float) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if not invalidation:
+        return False, ["missing invalidation"]
+    anchor = safe_float(invalidation.get("anchor_level"), 0.0)
+    if direction == DIRECTION_BUY:
+        if not anchor < entry or not sl < anchor:
+            errors.append("BUY invalidation/SL geometry invalid")
+    else:
+        if not anchor > entry or not sl > anchor:
+            errors.append("SELL invalidation/SL geometry invalid")
+    risk_h1 = abs(entry - sl) / max(h1_atr, EPS)
+    risk_pct = abs(entry - sl) / max(entry, EPS) * 100.0
+    if risk_h1 > SL_MAX_RISK_H1_ATR_V2:
+        errors.append("SL risk exceeds H1 ATR maximum")
+    if risk_pct > SL_MAX_RISK_PCT_V2:
+        errors.append("SL risk exceeds percentage maximum")
+    return (not errors, errors)
+
+
+def validate_target_map(target_map: list[dict[str, Any]], direction: str, entry: float, sl: float) -> tuple[bool, list[str]]:
+    if not target_map:
+        return False, ["empty target map"]
+    risk = abs(entry - sl)
+    for target in target_map:
+        level = safe_float(target.get("level"), 0.0)
+        rr = safe_float(target.get("rr"), 0.0)
+        valid_side = level > entry if direction == DIRECTION_BUY else level < entry
+        if valid_side and rr >= TARGET_MIN_RR and risk > 0:
+            return True, []
+    return False, ["no target satisfies direction and minimum RR"]
+
+
+def validate_rsi_projection(projection: dict[str, Any]) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    for tf in ("M15", "H4"):
+        stats = (projection.get("at_entry") or {}).get(tf) or {}
+        lo = safe_float(stats.get("min"), -1.0)
+        med = safe_float(stats.get("median"), -1.0)
+        hi = safe_float(stats.get("max"), -1.0)
+        if not (0.0 <= lo <= med <= hi <= 100.0):
+            errors.append(f"projected {tf} RSI bounds invalid")
+    consensus = safe_float(projection.get("scenario_consensus"), -1.0)
+    if not 0.0 <= consensus <= 100.0:
+        errors.append("projection consensus outside 0-100")
+    return (not errors, errors)
+
+
+def validate_thesis(candidate: Candidate) -> tuple[bool, list[str]]:
+    return validate_thesis_consistency(candidate)
+
+
+# --------------------------------------------------------------------------
+# STRUCTURAL PREDICTION V2 SELF-TEST
+# --------------------------------------------------------------------------
+
+
+def _v2_make_synthetic_candles(
+    *,
+    start: float = 100.0,
+    bars: int = 220,
+    direction: str = "BUY",
+) -> list[Candle]:
+    """Deterministic closed-candle series for unit/invariant tests."""
+    data: list[Candle] = []
+    price = start
+    for i in range(bars):
+        # Alternating structural impulses and controlled pullbacks.
+        phase = i % 40
+        if direction == "BUY":
+            if phase < 26:
+                drift = 0.45
+            else:
+                drift = -0.28
+        else:
+            if phase < 26:
+                drift = -0.45
+            else:
+                drift = 0.28
+        open_price = price
+        close = max(1.0, price + drift)
+        wick = 0.12 + (0.04 if phase % 7 == 0 else 0.0)
+        high = max(open_price, close) + wick
+        low = min(open_price, close) - wick
+        volume = 1000.0 + (250.0 if phase in {2, 3, 4, 26} else 0.0)
+        data.append(Candle(
+            time_ms=i * M15_MS,
+            open=open_price,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            turnover=volume * close,
+        ))
+        price = close
+    return data
+
+
+def self_test_structural_prediction_v2() -> dict[str, Any]:
+    """Deterministic local regression suite; never hits network."""
+    tests: dict[str, bool] = {}
+
+    # ------------------------------------------------------------------
+    # DATA / STRUCTURE
+    # ------------------------------------------------------------------
+    m15_buy = _v2_make_synthetic_candles(direction="BUY", bars=720)
+    h1_buy = _v2_make_synthetic_candles(direction="BUY", bars=220)
+    h4_buy = _v2_make_synthetic_candles(direction="BUY", bars=160)
+    m15_sell = _v2_make_synthetic_candles(direction="SELL", bars=220)
+    h1_sell = _v2_make_synthetic_candles(direction="SELL", bars=220)
+    h4_sell = _v2_make_synthetic_candles(direction="SELL", bars=160)
+    for series, minimum, name in (
+        (m15_buy, 100, "M15"),
+        (h1_buy, 40, "H1"),
+        (h4_buy, 40, "H4"),
+    ):
+        assert len(series) >= minimum, f"synthetic {name} history too short"
+
+    structures_buy = {
+        "H4": build_structure(h4_buy, SWING_SPAN_H4),
+        "H1": build_structure(h1_buy, SWING_SPAN_H1),
+        "M15": build_structure(m15_buy, SWING_SPAN_M15),
+    }
+    structures_sell = {
+        "H4": build_structure(h4_sell, SWING_SPAN_H4),
+        "H1": build_structure(h1_sell, SWING_SPAN_H1),
+        "M15": build_structure(m15_sell, SWING_SPAN_M15),
+    }
+    assert structures_buy["H4"].trend == "BULLISH", "synthetic BUY H4 structure not bullish"
+    assert structures_sell["H4"].trend == "BEARISH", "synthetic SELL H4 structure not bearish"
+    tests["closed_candles_and_structure"] = True
+
+    # ------------------------------------------------------------------
+    # LIQUIDITY MAP / CLUSTER / ROLE / SWEEP
+    # ------------------------------------------------------------------
+    current_buy = m15_buy[-1].close
+    liq_buy = _v2_build_liquidity_map(
+        {"H4": h4_buy, "H1": h1_buy, "M15": m15_buy},
+        structures_buy,
+        current_buy,
+        DIRECTION_BUY,
+    )
+    ok, errors = validate_liquidity_map(liq_buy, current_buy)
+    assert ok, "; ".join(errors)
+    assert isinstance(liq_buy.get("above"), list) and isinstance(liq_buy.get("below"), list)
+
+    # Explicit equal-level cluster regression.
+    cluster_candles = [
+        Candle(i * M15_MS, 100, 101 + (0.01 if i == 1 else 0), 99, 100.2, 1000, 100000)
+        for i in range(30)
+    ]
+    raw_equal = [
+        {"side": "BUY_SIDE", "level": 101.0, "index": 10, "source": "SWING_HIGH"},
+        {"side": "BUY_SIDE", "level": 101.04, "index": 14, "source": "SWING_HIGH"},
+        {"side": "BUY_SIDE", "level": 101.02, "index": 18, "source": "EQUAL_LEVEL"},
+    ]
+    clusters = _v2_cluster_liquidity_levels(raw_equal, cluster_candles, "H1", 100.0)
+    assert clusters, "equal liquidity levels did not cluster"
+    assert clusters[0].touches >= 2, "cluster touch count missing"
+
+    # Pool swept/consumed regression: after formation price breaks the pool.
+    sweep_candles = [
+        Candle(i * M15_MS, 100, 101, 99 if i < 8 else 96, 100, 1000, 100000)
+        for i in range(10)
+    ]
+    swept = _v2_cluster_liquidity_levels(
+        [{"side": "SELL_SIDE", "level": 99.5, "index": 4, "source": "SWING_LOW"}],
+        sweep_candles,
+        "M15",
+        100.0,
+    )
+    assert swept and swept[0].swept, "liquidity sweep detection failed"
+    tests["liquidity_map_cluster_sweep"] = True
+
+    # ------------------------------------------------------------------
+    # ADAPTIVE FIBONACCI
+    # ------------------------------------------------------------------
+    fib_buy = _v2_build_adaptive_fib_zones(h4_buy, structures_buy["H4"], DIRECTION_BUY, "H4")
+    fib_sell = _v2_build_adaptive_fib_zones(h4_sell, structures_sell["H4"], DIRECTION_SELL, "H4")
+    for fib in (fib_buy, fib_sell):
+        ok, errors = validate_fib_zone(fib)
+        assert ok, "; ".join(errors)
+        assert fib["primary_zone"]["price_low"] <= fib["primary_zone"]["price_high"]
+        assert fib["deep_zone"]["ratio_low"] == FIB_DEEP_LOW
+        assert fib["deep_zone"]["ratio_high"] == FIB_DEEP_HIGH
+    tests["adaptive_fibonacci"] = True
+
+    # ------------------------------------------------------------------
+    # PROJECTED RSI — ensemble bounded and scenario-aware
+    # ------------------------------------------------------------------
+    projection_buy = _v2_project_rsi_to_entry_zone(
+        m15_buy,
+        h4_buy,
+        safe_float(fib_buy["deep_zone"]["price_low"]),
+        safe_float(fib_buy["deep_zone"]["price_high"]),
+        DIRECTION_BUY,
+    )
+    projection_sell = _v2_project_rsi_to_entry_zone(
+        m15_sell,
+        h4_sell,
+        safe_float(fib_sell["deep_zone"]["price_low"]),
+        safe_float(fib_sell["deep_zone"]["price_high"]),
+        DIRECTION_SELL,
+    )
+    for projection in (projection_buy, projection_sell):
+        ok, errors = validate_rsi_projection(projection)
+        assert ok, "; ".join(errors)
+        assert len(projection["scenario_values"]["M15"]) == len(RSI_PROJECTION_SCENARIOS)
+        assert 0.0 <= projection["scenario_consensus"] <= 100.0
+    assert simulate_rsi_path(m15_buy, projection_buy["entry_target"], 4, "FAST_RETRACE") >= 0.0
+    tests["projected_rsi"] = True
+
+    # ------------------------------------------------------------------
+    # INVALIDATION / STRUCTURAL SL
+    # ------------------------------------------------------------------
+    h1_atr_buy = atr_series(h1_buy, 14)[-1]
+    buy_current = current_buy
+    buy_pool = LiquidityZone(
+        "SELL_SIDE", buy_current - 3.0, buy_current - 2.5, buy_current - 2.75,
+        85, "H4", 3, ["EQUAL_LEVEL"], len(h4_buy) - 10, len(h4_buy) - 4,
+        False, None, 0, 0, 85, "SL_GUARD_LIQUIDITY"
+    )
+    liq_buy["below"].insert(0, buy_pool)
+    inv_buy = _v2_select_prediction_invalidation(
+        DIRECTION_BUY, buy_current, structures_buy["H4"], structures_buy["H1"], liq_buy, [], h1_atr_buy
+    )
+    assert inv_buy is not None and inv_buy["sl"] < inv_buy["anchor_level"] < buy_current
+    ok, errors = validate_invalidation(DIRECTION_BUY, buy_current, inv_buy, inv_buy["sl"], h1_atr_buy)
+    assert ok, "; ".join(errors)
+
+    sell_current = m15_sell[-1].close
+    sell_pool = LiquidityZone(
+        "BUY_SIDE", sell_current + 0.8, sell_current + 1.2, sell_current + 1.0,
+        85, "H4", 3, ["EQUAL_LEVEL"], len(h4_sell) - 10, len(h4_sell) - 4,
+        False, None, 0, 0, 85, "SL_GUARD_LIQUIDITY"
+    )
+    liq_sell = _v2_build_liquidity_map(
+        {"H4": h4_sell, "H1": h1_sell, "M15": m15_sell},
+        structures_sell,
+        sell_current,
+        DIRECTION_SELL,
+    )
+    liq_sell["above"].insert(0, sell_pool)
+    h1_atr_sell = atr_series(h1_sell, 14)[-1]
+    inv_sell = _v2_select_prediction_invalidation(
+        DIRECTION_SELL, sell_current, structures_sell["H4"], structures_sell["H1"], liq_sell, [], h1_atr_sell
+    )
+    assert inv_sell is not None and sell_current < inv_sell["anchor_level"] < inv_sell["sl"]
+    ok, errors = validate_invalidation(DIRECTION_SELL, sell_current, inv_sell, inv_sell["sl"], h1_atr_sell)
+    assert ok, "; ".join(errors)
+    tests["prediction_invalidation_and_structural_sl"] = True
+
+    # Tight structural stop is allowed; V2 must not widen it to a 1.5 ATR floor.
+    tight_struct = StructureSnapshot("BULLISH", [], [], [], [], None, None, 110.0, 99.0)
+    tight_map = {
+        "all": [
+            LiquidityZone("SELL_SIDE", 98.9, 99.4, 99.15, 80, "H1", 2, ["SWING_LOW"], 5, 10, False, None, 0, 0, 80, "SL_GUARD_LIQUIDITY")
+        ],
+        "above": [],
+        "below": [
+            LiquidityZone("SELL_SIDE", 98.9, 99.4, 99.15, 80, "H1", 2, ["SWING_LOW"], 5, 10, False, None, 0, 0, 80, "SL_GUARD_LIQUIDITY")
+        ],
+        "significant_above": [],
+        "significant_below": [],
+        "magnet": None,
+    }
+    tight_inv = _v2_select_prediction_invalidation(DIRECTION_BUY, 100.0, tight_struct, tight_struct, tight_map, [], 4.0)
+    assert tight_inv is not None
+    assert tight_inv["risk_h1_atr"] < 1.5, "V2 unexpectedly forced an ATR floor"
+    tests["no_forced_atr_stop_floor"] = True
+
+    # ------------------------------------------------------------------
+    # TARGET MAP / RR / HARD GATES
+    # ------------------------------------------------------------------
+    target_map_buy = _v2_build_target_map(DIRECTION_BUY, buy_current, inv_buy["sl"], liq_buy, structures_buy["H4"], structures_buy["H1"], h1_atr_buy, current=buy_current)
+    if target_map_buy:
+        ok, errors = validate_target_map(target_map_buy, DIRECTION_BUY, buy_current, inv_buy["sl"])
+        assert ok, "; ".join(errors)
+        chosen = _v2_select_target(target_map_buy, DIRECTION_BUY)
+        if chosen is not None:
+            assert chosen["level"] > buy_current and chosen["rr"] >= TARGET_MIN_RR
+
+    # Add an explicit structural destination so the RR gate has a deterministic
+    # SELL target in the synthetic fixture.
+    synthetic_sell_target = LiquidityZone(
+        "SELL_SIDE", sell_current - 5.0, sell_current - 4.0, sell_current - 4.5,
+        90, "H4", 4, ["H4_SWING_LOW"], len(h4_sell) - 8, len(h4_sell) - 3,
+        False, None, 0, 0, 90, "TARGET_LIQUIDITY"
+    )
+    liq_sell["below"].insert(0, synthetic_sell_target)
+    liq_sell["all"].append(synthetic_sell_target)
+    target_map_sell = _v2_build_target_map(DIRECTION_SELL, sell_current, inv_sell["sl"], liq_sell, structures_sell["H4"], structures_sell["H1"], h1_atr_sell, current=sell_current)
+    if target_map_sell:
+        ok, errors = validate_target_map(target_map_sell, DIRECTION_SELL, sell_current, inv_sell["sl"])
+        assert ok, "; ".join(errors)
+        chosen = _v2_select_target(target_map_sell, DIRECTION_SELL)
+        if chosen is not None:
+            assert chosen["level"] < sell_current and chosen["rr"] >= TARGET_MIN_RR
+    tests["target_map_and_rr"] = True
+
+    # Entry-zone geometry validators in both directions.
+    buy_low, buy_high = buy_current - 3.0, buy_current - 2.0
+    sell_low, sell_high = sell_current + 2.0, sell_current + 3.0
+    ok, errors = validate_entry_zone(buy_low, buy_high, (buy_low + buy_high) / 2.0, buy_current, DIRECTION_BUY)
+    assert ok, "; ".join(errors)
+    ok, errors = validate_entry_zone(sell_low, sell_high, (sell_low + sell_high) / 2.0, sell_current, DIRECTION_SELL)
+    assert ok, "; ".join(errors)
+    tests["entry_zone_geometry"] = True
+
+    # ------------------------------------------------------------------
+    # RESULT / THESIS CONTRACTS
+    # ------------------------------------------------------------------
+    minimal_result = {
+        "pair": "TESTUSDT", "direction": "BUY", "price_now_reference": 100.0,
+        "entry": 99.0, "entry_reason": "test", "price_exp": 101.0,
+        "price_exp_reason": "test", "sl": 97.0, "sl_reason": "test",
+        "tp": 104.0, "tp_reason": "test", "confidence": 75.0,
+        "confidence_components": {}, "analysis": {}, "data": {}, "strategy": {},
+    }
+    ok, errors = validate_result_contract(minimal_result)
+    assert ok, "; ".join(errors)
+    ok, errors = validate_directional_alignment({
+        **minimal_result,
+        "analysis": {"macro": {"allowed_directions": ["BUY"], "pair_regime": {"trend": "BULLISH"}}},
+    })
+    assert ok, "; ".join(errors)
+    tests["output_contracts"] = True
+
+    # Exposed blueprint-facing helper contract.
+    assert isinstance(build_thesis(DIRECTION_BUY, {"trend": "BULLISH"}, {"trend": "BULLISH"}, structures_buy["H4"], structures_buy["H1"]), dict)
+    tests["blueprint_public_helpers"] = True
+
+    return {"ok": True, "tests": tests}
 
 
 # --------------------------------------------------------------------------
@@ -5529,3 +7993,4 @@ async def analyze_trailing(
 if __name__ == "__main__":
     print(f"{STRATEGY_NAME} v{STRATEGY_VERSION}")
     print("Module contracts: async generate_setup(pair, context), async analyze_btc_regime(context), async analyze_scan_structure(pair, context), async validate_setup(pair, initial_setup, context), async analyze_trailing(trade, context)")
+    print("V2 self-test:", self_test_structural_prediction_v2())
