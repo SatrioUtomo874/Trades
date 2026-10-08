@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T06:01:13.223485+00:00",
+  "saved_at": "2026-10-08T11:53:17.403946+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -932,6 +932,13 @@
       "until": "2026-10-08T07:03:23.714313+00:00",
       "reason": "Confidence 40 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "FIDAUSDT",
+      "banned_at": "2026-10-08T11:53:17.403162+00:00",
+      "until": "2026-10-09T11:53:17.403133+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "FIGHTUSDT",
