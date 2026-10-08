@@ -1253,3 +1253,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-07T09:33:05.589129+00:00
 - Strategy: SMC_VLT_RSI v0.10.0
+
+---
+
+## RLCUSDT — BUY
+
+Trade ID: `RLCUSDT-20261007-182007-8B1EF2`
+
+### Setup
+
+- Price Now Reference: 0.7475
+- Entry: 0.7385
+- Reason Entry: RLCUSDT BUY: thesis dimulai dari POI H4. (BULLISH_BREAKER 0.35575). H1 me-refine ke BULLISH_FVG 0.7385. M15 memberi execution POI BULLISH_FVG 0.7263. Fib H4 berada pada band OVERLAPS_0.618 (score 92). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 54.0 mendukung momentum. Kerangka RSI TREND_PULLBACK_RSI: RSI H4 regime bullish; RSI H1 regime bullish; RSI H1 koreksi ke 42 lalu berbalik (47); momentum RSI BTC H1 melawan arah.
+- Price Exp: 0.8384
+- Reason Price Exp: Price Exp 0.838332 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.6564
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.7137) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- TP: 1.0719
+- Reason TP: TP diarahkan ke H4_RECENT_RANGE_HIGH 1.0719 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.6564
+- Result Reason: SL di luar invalidasi struktur H1/H4 (0.7137) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- PnL: -11.11712931618144888287068382%
+- Created: 2026-10-07T11:20:07.201553+00:00
+- Filled: 2026-10-07T11:21:59.888790+00:00
+- Closed: 2026-10-08T01:49:04.686079+00:00
+- Strategy: SMC_VLT_RSI v0.10.0
