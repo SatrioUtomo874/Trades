@@ -1451,3 +1451,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-08T15:13:25.498275+00:00
 - Strategy: SMC_VLT_RSI v1.1.0
+
+---
+
+## SIGNUSDT — SELL
+
+Trade ID: `SIGNUSDT-20261008-130153-C9CD7B`
+
+### Setup
+
+- Price Now Reference: 0.012168
+- Entry: 0.012542
+- Reason Entry: SIGNUSDT SELL: thesis dimulai dari POI H4. (BEARISH_OB 0.0125255). H1 me-refine ke BEARISH_BREAKER 0.0125745. M15 memberi execution POI BEARISH_FVG 0.012542. Fib H4 berada pada band DEEP_0.618_0.786 (score 100). terdapat liquidity sweep searah reversal. diikuti MSS pada M15. RSI 14 M15 46.8 mendukung momentum. Kerangka RSI TREND_PULLBACK_RSI: RSI H4 regime bearish; RSI H1 regime bearish; RSI H1 koreksi ke 59 lalu berbalik (51). Gerbang pasar: TP ke pool H4 H4_SWING_LOW 0.011698.
+- Price Exp: 0.011886
+- Reason Price Exp: Price Exp 0.011886 adalah batas ekspansi thesis H4/H1 sebelum entry. Jika tercapai lebih dulu, setup lama dianggap expired dan market harus membentuk pattern baru.
+- SL: 0.012845
+- Reason SL: SL di luar invalidasi struktur H1/H4 (0.012785) + buffer 0.40 ATR H1; risiko minimum 1.5 ATR H1.
+- TP: 0.011698
+- Reason TP: TP diarahkan ke H4_SWING_LOW 0.011698 sebagai liquidity target HTF.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: MANUAL_CLOSE_PENDING
+- Exit Price: -
+- Result Reason: Manual /close pada setup REAL PENDING sebelum entry.
+- PnL: -
+- Created: 2026-10-08T06:01:53.726111+00:00
+- Filled: -
+- Closed: 2026-10-08T15:16:10.092796+00:00
+- Strategy: SMC_VLT_RSI v1.1.0
