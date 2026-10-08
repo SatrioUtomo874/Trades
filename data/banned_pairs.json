@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T11:53:48.521142+00:00",
+  "saved_at": "2026-10-08T11:53:54.117884+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -84,6 +84,13 @@
       "banned_at": "2026-10-08T05:07:37.416285+00:00",
       "until": "2026-10-08T13:07:37.416255+00:00",
       "reason": "Confidence 55 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "DOGEUSDT",
+      "banned_at": "2026-10-08T11:53:54.117839+00:00",
+      "until": "2026-10-08T13:53:54.117802+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
