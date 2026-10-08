@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T15:03:08.021294+00:00",
+  "saved_at": "2026-10-08T15:03:13.832941+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -862,6 +862,13 @@
       "until": "2026-10-09T11:53:57.915693+00:00",
       "reason": "H4 structure BULLISH tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "SEIUSDT",
+      "banned_at": "2026-10-08T15:03:13.832849+00:00",
+      "until": "2026-10-08T17:03:13.832809+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "SENTUSDT",
