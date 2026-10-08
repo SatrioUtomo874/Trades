@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T04:46:47.514017+00:00",
+  "saved_at": "2026-10-08T04:46:52.121185+00:00",
   "bans": [
+    {
+      "pair": "ADAUSDT",
+      "banned_at": "2026-10-08T04:46:52.121173+00:00",
+      "until": "2026-10-08T06:46:52.121151+00:00",
+      "reason": "Confidence 57.71 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
     {
       "pair": "CTUSDT",
       "banned_at": "2026-10-07T07:49:13.132073+00:00",
