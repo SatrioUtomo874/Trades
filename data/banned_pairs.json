@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T04:49:35.915757+00:00",
+  "saved_at": "2026-10-08T04:49:40.923605+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -245,6 +245,13 @@
       "banned_at": "2026-10-08T04:47:45.810112+00:00",
       "until": "2026-10-08T06:47:45.810083+00:00",
       "reason": "Confidence 28.23 di bawah threshold 70. Menunggu trigger RSI.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "TRXUSDT",
+      "banned_at": "2026-10-08T04:49:40.923557+00:00",
+      "until": "2026-10-08T06:49:40.923533+00:00",
+      "reason": "Confidence 55 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
