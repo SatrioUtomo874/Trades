@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-08T11:59:02.820261+00:00",
+  "saved_at": "2026-10-08T11:59:08.511195+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -280,6 +280,13 @@
       "banned_at": "2026-10-08T05:03:50.224158+00:00",
       "until": "2026-10-08T13:03:50.224135+00:00",
       "reason": "Confidence 55 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "GALAUSDT",
+      "banned_at": "2026-10-08T11:59:08.511119+00:00",
+      "until": "2026-10-08T13:59:08.511082+00:00",
+      "reason": "Confidence 30.75 di bawah threshold 70. Menunggu trigger RSI.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
