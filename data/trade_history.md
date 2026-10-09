@@ -1550,3 +1550,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-09T00:33:35.975535+00:00
 - Strategy: SMC_VLT_RSI v2.1.0
+
+---
+
+## DEXEUSDT — SELL
+
+Trade ID: `DEXEUSDT-20261009-055828-A5D164`
+
+### Setup
+
+- Price Now Reference: 1.78
+- Entry: 1.836
+- Reason Entry: DEXEUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 1.835 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_OB. Projected M15 RSI 79.2 pada entry zone.
+- Price Exp: 1.753
+- Reason Price Exp: Price Exp 1.7530000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.844
+- Reason SL: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 1.84154; SL ditempatkan di luar invalidation dan liquidity guard 1.84075.
+- TP: 1.718
+- Reason TP: TP 1.718 dipilih dari H4_SELL_SIDE_LIQUIDITY dengan RR 14.75; target quality 61.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 1.844
+- Result Reason: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 1.84154; SL ditempatkan di luar invalidation dan liquidity guard 1.84075.
+- PnL: -0.4357298474945533769063180828%
+- Created: 2026-10-08T22:58:28.532208+00:00
+- Filled: 2026-10-09T16:50:48.288997+00:00
+- Closed: 2026-10-09T17:49:14.116033+00:00
+- Strategy: SMC_VLT_RSI v2.1.0
