@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T16:56:26.812004+00:00",
+  "saved_at": "2026-10-09T16:56:36.323381+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -757,6 +757,13 @@
       "until": "2026-10-10T11:41:56.529972+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "CTRUSDT",
+      "banned_at": "2026-10-09T16:56:36.323231+00:00",
+      "until": "2026-10-10T00:56:36.323203+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "CTUSDT",
