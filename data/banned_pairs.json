@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:13:04.324236+00:00",
+  "saved_at": "2026-10-09T00:13:08.421305+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -300,6 +300,13 @@
       "pair": "CVXUSDT",
       "banned_at": "2026-10-09T00:12:49.829951+00:00",
       "until": "2026-10-10T00:12:49.829927+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "CYBERUSDT",
+      "banned_at": "2026-10-09T00:13:08.421239+00:00",
+      "until": "2026-10-10T00:13:08.421217+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
