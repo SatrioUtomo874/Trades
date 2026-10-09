@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T20:28:46.523361+00:00",
+  "saved_at": "2026-10-09T20:28:52.310211+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -393,6 +393,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.819, di luar target 5 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "AZTECUSDT",
+      "banned_at": "2026-10-09T20:28:52.310001+00:00",
+      "until": "2026-10-10T04:28:52.309960+00:00",
+      "reason": "Confidence 62 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "B2USDT",
