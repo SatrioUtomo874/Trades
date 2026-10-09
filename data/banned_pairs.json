@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T20:28:57.720273+00:00",
+  "saved_at": "2026-10-09T20:29:10.416320+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2407,6 +2407,13 @@
       "pair": "STEEMUSDT",
       "banned_at": "2026-10-09T20:22:35.422688+00:00",
       "until": "2026-10-10T04:22:35.422665+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "STOUSDT",
+      "banned_at": "2026-10-09T20:29:10.416146+00:00",
+      "until": "2026-10-10T04:29:10.416116+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
