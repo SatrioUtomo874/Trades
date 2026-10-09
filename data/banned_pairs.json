@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:13:18.612477+00:00",
+  "saved_at": "2026-10-09T00:13:23.920400+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -413,6 +413,13 @@
       "banned_at": "2026-10-09T00:03:07.415503+00:00",
       "until": "2026-10-09T08:03:07.415469+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "FORMUSDT",
+      "banned_at": "2026-10-09T00:13:23.920345+00:00",
+      "until": "2026-10-09T08:13:23.920323+00:00",
+      "reason": "Confidence 56 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
