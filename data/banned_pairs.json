@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T11:38:21.663712+00:00",
+  "saved_at": "2026-10-09T11:38:23.355446+00:00",
   "bans": [
+    {
+      "pair": "BNBUSDT",
+      "banned_at": "2026-10-09T11:38:23.355418+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Quantity terdekat menghasilkan notional 7.4211, di luar target 5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
     {
       "pair": "ETHUSDT",
       "banned_at": "2026-10-09T11:38:17.716229+00:00",
