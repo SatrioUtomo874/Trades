@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:09:09.344203+00:00",
+  "saved_at": "2026-10-09T00:09:11.325969+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -105,6 +105,13 @@
       "banned_at": "2026-10-09T00:08:59.653477+00:00",
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 10.055, di luar target 5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "BCHUSDT",
+      "banned_at": "2026-10-09T00:09:11.325912+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5 (toleransi ±10%).",
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
