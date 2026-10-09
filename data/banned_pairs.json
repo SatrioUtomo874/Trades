@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T11:59:53.931683+00:00",
+  "saved_at": "2026-10-09T11:59:58.918770+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -531,6 +531,13 @@
       "pair": "FARTCOINUSDT",
       "banned_at": "2026-10-09T11:41:40.424528+00:00",
       "until": "2026-10-09T19:41:40.424505+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "FIDAUSDT",
+      "banned_at": "2026-10-09T11:59:58.918692+00:00",
+      "until": "2026-10-09T19:59:58.918666+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
