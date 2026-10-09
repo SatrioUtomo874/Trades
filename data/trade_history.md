@@ -1517,3 +1517,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-09T00:04:22.498913+00:00
 - Strategy: SMC_VLT_RSI v2.1.0
+
+---
+
+## GMXUSDT — SELL
+
+Trade ID: `GMXUSDT-20261009-060343-51C85E`
+
+### Setup
+
+- Price Now Reference: 8.093
+- Entry: 8.262
+- Reason Entry: GMXUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 8.24742 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 77.4 pada entry zone.
+- Price Exp: 8.051
+- Reason Price Exp: Price Exp 8.051: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 8.368
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 8.355; SL ditempatkan di luar invalidation dan liquidity guard 8.35325.
+- TP: 7.961
+- Reason TP: TP 7.961 dipilih dari H4_SWING_LOW dengan RR 2.84; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 8.051
+- Result Reason: Price Exp 8.051: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-08T23:03:43.818180+00:00
+- Filled: -
+- Closed: 2026-10-09T00:33:35.975535+00:00
+- Strategy: SMC_VLT_RSI v2.1.0
