@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:01:45.112011+00:00",
+  "saved_at": "2026-10-09T00:01:48.509872+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -14,6 +14,13 @@
       "banned_at": "2026-10-09T00:00:51.823998+00:00",
       "until": "2026-10-10T00:00:51.823978+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "ALGOUSDT",
+      "banned_at": "2026-10-09T00:01:48.509852+00:00",
+      "until": "2026-10-10T00:01:48.509823+00:00",
+      "reason": "H4 structure BULLISH tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
