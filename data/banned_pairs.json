@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:31:27.420393+00:00",
+  "saved_at": "2026-10-09T00:31:33.522226+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1140,6 +1140,13 @@
       "pair": "MORPHOUSDT",
       "banned_at": "2026-10-09T00:07:11.911755+00:00",
       "until": "2026-10-09T08:07:11.911728+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MOVEUSDT",
+      "banned_at": "2026-10-09T00:31:33.522098+00:00",
+      "until": "2026-10-09T08:31:33.522065+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
