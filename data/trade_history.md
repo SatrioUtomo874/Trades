@@ -1484,3 +1484,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-08T15:16:10.092796+00:00
 - Strategy: SMC_VLT_RSI v1.1.0
+
+---
+
+## OPENUSDT — SELL
+
+Trade ID: `OPENUSDT-20261009-055327-CD8F88`
+
+### Setup
+
+- Price Now Reference: 0.10509
+- Entry: 0.1107
+- Reason Entry: OPENUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.12056 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 72.6 pada entry zone.
+- Price Exp: 0.1039
+- Reason Price Exp: Price Exp 0.10393000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1148
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.11449; SL ditempatkan di luar invalidation.
+- TP: 0.101
+- Reason TP: TP 0.10105 dipilih dari H4_SELL_SIDE_LIQUIDITY dengan RR 2.37; target quality 67.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1038
+- Result Reason: Price Exp 0.10393000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-08T22:53:27.217258+00:00
+- Filled: -
+- Closed: 2026-10-09T00:04:22.498913+00:00
+- Strategy: SMC_VLT_RSI v2.1.0
