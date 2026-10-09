@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:09:38.404685+00:00",
+  "saved_at": "2026-10-09T00:09:41.005869+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -161,6 +161,13 @@
       "banned_at": "2026-10-09T00:09:18.477248+00:00",
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.5604, di luar target 5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "CAKEUSDT",
+      "banned_at": "2026-10-09T00:09:41.005816+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 6.4371, di luar target 5 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
