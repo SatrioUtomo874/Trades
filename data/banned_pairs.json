@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T19:52:08.312933+00:00",
+  "saved_at": "2026-10-09T19:52:14.722317+00:00",
   "bans": [
+    {
+      "pair": "0GUSDT",
+      "banned_at": "2026-10-09T19:52:14.722174+00:00",
+      "until": "2026-10-10T03:52:14.722152+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
     {
       "pair": "1000000MOGUSDT",
       "banned_at": "2026-10-09T19:49:55.517921+00:00",
