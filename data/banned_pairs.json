@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T02:31:50.722310+00:00",
+  "saved_at": "2026-10-09T03:00:09.022483+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1905,6 +1905,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 8.98, di luar target 5 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "NEOUSDT",
+      "banned_at": "2026-10-09T03:00:09.022263+00:00",
+      "until": "2026-10-09T11:00:09.022228+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "NEWTUSDT",
