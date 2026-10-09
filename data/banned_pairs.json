@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T16:46:20.820535+00:00",
+  "saved_at": "2026-10-09T16:46:26.919178+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1512,6 +1512,13 @@
       "banned_at": "2026-10-09T12:37:50.118806+00:00",
       "until": "2026-10-09T20:37:50.118773+00:00",
       "reason": "Confidence 69.96 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "MAVIAUSDT",
+      "banned_at": "2026-10-09T16:46:26.919018+00:00",
+      "until": "2026-10-10T00:46:26.918990+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
