@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T20:48:56.123892+00:00",
+  "saved_at": "2026-10-09T20:49:13.809466+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1212,6 +1212,13 @@
       "until": "2026-10-10T11:50:16.427222+00:00",
       "reason": "H4 structure BULLISH tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "HIVEUSDT",
+      "banned_at": "2026-10-09T20:49:13.724410+00:00",
+      "until": "2026-10-10T04:49:13.724371+00:00",
+      "reason": "Confidence 54 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "HMSTRUSDT",
