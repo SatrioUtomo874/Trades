@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:01:00.126208+00:00",
+  "saved_at": "2026-10-09T00:01:09.627381+00:00",
   "bans": [
+    {
+      "pair": "1000PEPEUSDT",
+      "banned_at": "2026-10-09T00:01:09.627358+00:00",
+      "until": "2026-10-09T08:01:09.627319+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
     {
       "pair": "ADAUSDT",
       "banned_at": "2026-10-09T00:00:51.823998+00:00",
