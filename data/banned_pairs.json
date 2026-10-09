@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:03:44.809554+00:00",
+  "saved_at": "2026-10-09T00:04:35.710864+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -197,6 +197,13 @@
       "until": "2026-10-09T08:02:50.515163+00:00",
       "reason": "Confidence 68.25 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "OPENUSDT",
+      "banned_at": "2026-10-09T00:04:35.710830+00:00",
+      "until": "2026-10-09T08:04:35.710792+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "OPUSDT",
