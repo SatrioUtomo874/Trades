@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T22:16:24.057834+00:00",
+  "saved_at": "2026-10-09T23:52:18.952092+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -967,6 +967,13 @@
       "until": "2026-10-10T03:57:00.414642+00:00",
       "reason": "Confidence 58 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "EIGENUSDT",
+      "banned_at": "2026-10-09T23:52:18.951922+00:00",
+      "until": "2026-10-10T23:52:18.951898+00:00",
+      "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TRAIL"
     },
     {
       "pair": "ELSAUSDT",
