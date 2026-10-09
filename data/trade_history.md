@@ -1654,3 +1654,62 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-09T22:16:09.754152+00:00
 - Strategy: SMC_VLT_RSI v2.1.0
+
+---
+
+## EIGENUSDT — SELL
+
+Trade ID: `EIGENUSDT-20261009-073420-455405`
+
+### Setup
+
+- Price Now Reference: 0.2207
+- Entry: 0.2289
+- Reason Entry: EIGENUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.2288 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 70.4 pada entry zone.
+- Price Exp: 0.2166
+- Reason Price Exp: Price Exp 0.21660000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.223
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.2370286; SL ditempatkan di luar invalidation dan liquidity guard 0.2369.
+- TP: 0.2114
+- Reason TP: TP 0.2114 dipilih dari H4_SELL_SIDE_LIQUIDITY dengan RR 2.01; target quality 73.
+
+### Management
+
+Trail #1
+- Old SL: 0.2376
+- New SL: 0.2287
+- Price: 0.2202
+- Reason: Auto trail [R_LADDER]: R-ladder: harga 1.00R, SL dikunci di 0.00R.
+- Time: 09-10-2026, 20:46 WIB
+
+Trail #2
+- Old SL: 0.2287
+- New SL: 0.2265
+- Price: 0.2197
+- Reason: Auto trail [STRUCTURE]: struktur M15: lower high 0.2256 terbentuk setelah entry.
+- Time: 09-10-2026, 21:02 WIB
+
+Trail #3
+- Old SL: 0.2265
+- New SL: 0.2255
+- Price: 0.2196
+- Reason: Auto trail [STRUCTURE]: struktur M15: lower high 0.2246 terbentuk setelah entry.
+- Time: 09-10-2026, 21:42 WIB
+
+Trail #4
+- Old SL: 0.2255
+- New SL: 0.223
+- Price: 0.2183
+- Reason: Auto trail [STRUCTURE]: struktur M15: lower high 0.2221 terbentuk setelah entry.
+- Time: 09-10-2026, 22:30 WIB
+
+### Result
+
+- Result: TRAIL
+- Exit Price: 0.223
+- Result Reason: SL trailing tercapai; profit terkunci. Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.2370286; SL ditempatkan di luar invalidation dan liquidity guard 0.2369.
+- PnL: 2.57754477937964176496286588%
+- Created: 2026-10-09T00:34:20.121086+00:00
+- Filled: 2026-10-09T05:19:03.673381+00:00
+- Closed: 2026-10-09T23:52:06.158220+00:00
+- Strategy: SMC_VLT_RSI v2.1.0
