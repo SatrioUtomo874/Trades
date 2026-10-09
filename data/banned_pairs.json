@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T11:48:13.011696+00:00",
+  "saved_at": "2026-10-09T11:48:15.983367+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -336,6 +336,13 @@
       "banned_at": "2026-10-09T11:38:46.393123+00:00",
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Quantity terdekat menghasilkan notional 6.012, di luar target 5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "INJUSDT",
+      "banned_at": "2026-10-09T11:48:15.983305+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.7032, di luar target 5 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
