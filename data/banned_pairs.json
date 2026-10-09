@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:21:55.815039+00:00",
+  "saved_at": "2026-10-09T00:22:02.118904+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -456,6 +456,13 @@
       "until": "2026-10-10T00:12:42.314361+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "EDENUSDT",
+      "banned_at": "2026-10-09T00:22:02.118818+00:00",
+      "until": "2026-10-09T08:22:02.118794+00:00",
+      "reason": "Confidence 56 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "EDGEUSDT",
