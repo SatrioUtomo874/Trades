@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:00:26.130257+00:00",
+  "saved_at": "2026-10-09T00:00:31.211748+00:00",
   "bans": [
     {
       "pair": "BSVUSDT",
@@ -8,6 +8,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.568, di luar target 5 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "DOGEUSDT",
+      "banned_at": "2026-10-09T00:00:31.211729+00:00",
+      "until": "2026-10-09T08:00:31.211693+00:00",
+      "reason": "Confidence 62 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "HYPEUSDT",
