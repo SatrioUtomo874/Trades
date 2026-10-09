@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T17:30:10.712429+00:00",
+  "saved_at": "2026-10-09T17:42:45.626329+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1274,6 +1274,13 @@
       "banned_at": "2026-10-09T12:06:00.110506+00:00",
       "until": "2026-10-09T20:06:00.110475+00:00",
       "reason": "Confidence 50 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "HYPERUSDT",
+      "banned_at": "2026-10-09T17:42:45.626130+00:00",
+      "until": "2026-10-10T01:42:45.626093+00:00",
+      "reason": "Confidence 69.54 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
