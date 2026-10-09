@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T11:42:26.313313+00:00",
+  "saved_at": "2026-10-09T11:42:31.411893+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -434,6 +434,13 @@
       "banned_at": "2026-10-09T11:41:18.915641+00:00",
       "until": "2026-10-09T19:41:18.915617+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "XMRUSDT",
+      "banned_at": "2026-10-09T11:42:31.411860+00:00",
+      "until": "2026-10-09T19:42:31.411831+00:00",
+      "reason": "Confidence 50 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
