@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T20:17:51.017161+00:00",
+  "saved_at": "2026-10-09T20:18:16.818956+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -610,6 +610,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Quantity terdekat menghasilkan notional 6.0444, di luar target 5 ±10%.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "BUSDT",
+      "banned_at": "2026-10-09T20:18:03.720202+00:00",
+      "until": "2026-10-10T04:18:03.720168+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "CAKEUSDT",
@@ -1660,6 +1667,13 @@
       "until": "2026-10-10T11:39:53.125217+00:00",
       "reason": "H4 structure BULLISH tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "MEUSDT",
+      "banned_at": "2026-10-09T20:18:16.818762+00:00",
+      "until": "2026-10-10T04:18:16.818730+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "MINAUSDT",
