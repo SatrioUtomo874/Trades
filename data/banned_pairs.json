@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T19:02:32.318653+00:00",
+  "saved_at": "2026-10-09T19:40:00.624997+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -897,13 +897,6 @@
       "until": "2026-10-10T11:59:23.831876+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
-    },
-    {
-      "pair": "DOGEUSDT",
-      "banned_at": "2026-10-09T11:39:21.817491+00:00",
-      "until": "2026-10-09T19:39:21.817469+00:00",
-      "reason": "Confidence 62 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "DOLOUSDT",
@@ -1928,13 +1921,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "ONDOUSDT",
-      "banned_at": "2026-10-09T11:39:36.823311+00:00",
-      "until": "2026-10-09T19:39:36.823288+00:00",
-      "reason": "Confidence 56 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "ONGUSDT",
       "banned_at": "2026-10-09T11:55:37.414722+00:00",
       "until": "2026-10-09T19:55:37.414699+00:00",
@@ -2831,13 +2817,6 @@
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
-      "pair": "WLDUSDT",
-      "banned_at": "2026-10-09T11:39:45.513353+00:00",
-      "until": "2026-10-09T19:39:45.513315+00:00",
-      "reason": "Confidence 65.15 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
       "pair": "WLFIUSDT",
       "banned_at": "2026-10-09T11:44:36.326375+00:00",
       "until": "2026-10-10T11:44:36.326353+00:00",
@@ -2912,13 +2891,6 @@
       "banned_at": "2026-10-09T11:48:41.625367+00:00",
       "until": "2026-10-09T19:48:41.625342+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
-      "source": "AUTO_BELOW_THRESHOLD"
-    },
-    {
-      "pair": "XRPUSDT",
-      "banned_at": "2026-10-09T11:39:05.522690+00:00",
-      "until": "2026-10-09T19:39:05.522669+00:00",
-      "reason": "Confidence 67.02 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
