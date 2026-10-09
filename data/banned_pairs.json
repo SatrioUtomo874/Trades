@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:02:25.821634+00:00",
+  "saved_at": "2026-10-09T00:02:31.210335+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -64,6 +64,13 @@
       "until": "2026-10-10T00:00:43.224628+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "HBARUSDT",
+      "banned_at": "2026-10-09T00:02:31.210311+00:00",
+      "until": "2026-10-09T08:02:31.210282+00:00",
+      "reason": "Confidence 54 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "HYPEUSDT",
