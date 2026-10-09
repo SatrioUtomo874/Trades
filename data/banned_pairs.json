@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T12:22:17.212723+00:00",
+  "saved_at": "2026-10-09T12:22:26.418720+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -833,6 +833,13 @@
       "banned_at": "2026-10-09T11:51:15.131930+00:00",
       "until": "2026-10-09T19:51:15.131896+00:00",
       "reason": "Confidence 54 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "GLMUSDT",
+      "banned_at": "2026-10-09T12:22:26.418544+00:00",
+      "until": "2026-10-09T20:22:26.418508+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
