@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T21:33:10.216379+00:00",
+  "saved_at": "2026-10-09T21:42:09.123094+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1078,6 +1078,13 @@
       "banned_at": "2026-10-09T20:28:13.313993+00:00",
       "until": "2026-10-10T04:28:13.313964+00:00",
       "reason": "Confidence 65.48 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "FOGOUSDT",
+      "banned_at": "2026-10-09T21:42:09.122935+00:00",
+      "until": "2026-10-10T05:42:09.122905+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
