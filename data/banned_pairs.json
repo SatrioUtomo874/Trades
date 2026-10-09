@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:08:48.018777+00:00",
+  "saved_at": "2026-10-09T00:08:50.257473+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -365,6 +365,13 @@
       "until": "2026-10-10T00:05:27.411313+00:00",
       "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "NEARUSDT",
+      "banned_at": "2026-10-09T00:08:50.257422+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 8.98, di luar target 5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "NIGHTUSDT",
