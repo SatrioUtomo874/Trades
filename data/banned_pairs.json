@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T11:49:47.513228+00:00",
+  "saved_at": "2026-10-09T11:49:53.221537+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -251,6 +251,13 @@
       "pair": "DOTUSDT",
       "banned_at": "2026-10-09T11:40:36.215532+00:00",
       "until": "2026-10-09T19:40:36.215495+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "EDUUSDT",
+      "banned_at": "2026-10-09T11:49:53.221478+00:00",
+      "until": "2026-10-09T19:49:53.221449+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
