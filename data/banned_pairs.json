@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:12:02.517175+00:00",
+  "saved_at": "2026-10-09T00:12:06.513657+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -603,6 +603,13 @@
       "until": "2026-10-09T08:04:35.710792+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "OPNUSDT",
+      "banned_at": "2026-10-09T00:12:06.513587+00:00",
+      "until": "2026-10-10T00:12:06.513538+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "OPUSDT",
