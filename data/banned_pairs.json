@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:53:15.118000+00:00",
+  "saved_at": "2026-10-09T00:53:20.511471+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1757,6 +1757,13 @@
       "banned_at": "2026-10-09T00:06:03.912105+00:00",
       "until": "2026-10-09T08:06:03.912078+00:00",
       "reason": "Confidence 64 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "POLYXUSDT",
+      "banned_at": "2026-10-09T00:53:20.511315+00:00",
+      "until": "2026-10-09T08:53:20.511287+00:00",
+      "reason": "Confidence 68 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
