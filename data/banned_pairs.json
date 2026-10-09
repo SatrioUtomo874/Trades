@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T11:48:15.983367+00:00",
+  "saved_at": "2026-10-09T11:48:19.202739+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -659,6 +659,13 @@
       "until": "2026-10-10T11:40:10.336665+00:00",
       "reason": "H4 structure BULLISH tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
       "source": "AUTO_STRUCTURE_MISMATCH"
+    },
+    {
+      "pair": "TRBUSDT",
+      "banned_at": "2026-10-09T11:48:19.202682+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Quantity terdekat menghasilkan notional 5.6748, di luar target 5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "TRXUSDT",
