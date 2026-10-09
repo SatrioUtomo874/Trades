@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T12:07:27.523467+00:00",
+  "saved_at": "2026-10-09T12:07:33.510242+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1721,6 +1721,13 @@
       "pair": "ZENUSDT",
       "banned_at": "2026-10-09T11:48:53.924298+00:00",
       "until": "2026-10-09T19:48:53.924274+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ZILUSDT",
+      "banned_at": "2026-10-09T12:07:33.510136+00:00",
+      "until": "2026-10-09T20:07:33.510110+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
