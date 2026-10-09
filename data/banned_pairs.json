@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:33:17.715103+00:00",
+  "saved_at": "2026-10-09T00:33:48.980461+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -750,6 +750,13 @@
       "until": "2026-10-09T08:26:18.817045+00:00",
       "reason": "Confidence 68 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "GMXUSDT",
+      "banned_at": "2026-10-09T00:33:48.980324+00:00",
+      "until": "2026-10-09T08:33:48.980298+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "GPSUSDT",
