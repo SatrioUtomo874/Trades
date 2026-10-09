@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T00:27:17.017934+00:00",
+  "saved_at": "2026-10-09T00:27:22.732234+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -280,6 +280,13 @@
       "banned_at": "2026-10-09T00:19:59.611489+00:00",
       "until": "2026-10-09T08:19:59.611460+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "BICOUSDT",
+      "banned_at": "2026-10-09T00:27:22.732123+00:00",
+      "until": "2026-10-09T08:27:22.732089+00:00",
+      "reason": "Confidence 64 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
