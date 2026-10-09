@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T11:38:33.041350+00:00",
+  "saved_at": "2026-10-09T11:38:34.732267+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -14,6 +14,13 @@
       "banned_at": "2026-10-09T11:38:27.073330+00:00",
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Quantity terdekat menghasilkan notional 10.381, di luar target 5 ±10%.",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "BCHUSDT",
+      "banned_at": "2026-10-09T11:38:34.732240+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Tidak ada quantity legal pada target notional 5 (toleransi ±10%).",
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
