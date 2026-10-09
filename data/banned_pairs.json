@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T20:49:22.722799+00:00",
+  "saved_at": "2026-10-09T20:49:44.920078+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1868,6 +1868,13 @@
       "pair": "ORCAUSDT",
       "banned_at": "2026-10-09T19:43:48.521298+00:00",
       "until": "2026-10-10T03:43:48.521276+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "ORDERUSDT",
+      "banned_at": "2026-10-09T20:49:44.919883+00:00",
+      "until": "2026-10-10T04:49:44.919850+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
