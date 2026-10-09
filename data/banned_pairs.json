@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T11:55:37.414787+00:00",
+  "saved_at": "2026-10-09T11:55:48.813367+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -573,6 +573,13 @@
       "pair": "IOTAUSDT",
       "banned_at": "2026-10-09T11:52:23.814006+00:00",
       "until": "2026-10-09T19:52:23.813978+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "JASMYUSDT",
+      "banned_at": "2026-10-09T11:55:48.813284+00:00",
+      "until": "2026-10-09T19:55:48.813253+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
