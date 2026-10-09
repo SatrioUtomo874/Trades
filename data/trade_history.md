@@ -1583,3 +1583,41 @@ Tidak ada trailing.
 - Filled: 2026-10-09T16:50:48.288997+00:00
 - Closed: 2026-10-09T17:49:14.116033+00:00
 - Strategy: SMC_VLT_RSI v2.1.0
+
+---
+
+## ALPINEUSDT — SELL
+
+Trade ID: `ALPINEUSDT-20261010-005037-BD3170`
+
+### Setup
+
+- Price Now Reference: 0.3702
+- Entry: 0.3708
+- Reason Entry: ALPINEUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.371626 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 68.3 pada entry zone.
+- Price Exp: 0.3643
+- Reason Price Exp: Price Exp 0.3643: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.3704
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.37385; SL ditempatkan di luar invalidation dan liquidity guard 0.371626.
+- TP: 0.3592
+- Reason TP: TP 0.3592 dipilih dari H4_SWING_LOW dengan RR 3.31; target quality 85.
+
+### Management
+
+Trail #1
+- Old SL: 0.3743
+- New SL: 0.3704
+- Price: 0.3673
+- Reason: Auto trail [R_LADDER]: R-ladder: harga +1.00R, SL dikunci di 0.0R.
+- Time: 10-10-2026, 02:35 WIB
+
+### Result
+
+- Result: TRAIL
+- Exit Price: 0.3704
+- Result Reason: SL trailing tercapai; profit terkunci. Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.37385; SL ditempatkan di luar invalidation dan liquidity guard 0.371626.
+- PnL: 0.107874865156418554476806904%
+- Created: 2026-10-09T17:50:37.316599+00:00
+- Filled: 2026-10-09T17:57:06.408522+00:00
+- Closed: 2026-10-09T21:54:45.539280+00:00
+- Strategy: SMC_VLT_RSI v2.1.0
