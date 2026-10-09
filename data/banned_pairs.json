@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T20:07:07.318687+00:00",
+  "saved_at": "2026-10-09T20:07:16.811964+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1952,6 +1952,13 @@
       "pair": "PENGUUSDT",
       "banned_at": "2026-10-09T19:43:42.521064+00:00",
       "until": "2026-10-10T03:43:42.521043+00:00",
+      "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "PEOPLEUSDT",
+      "banned_at": "2026-10-09T20:07:16.811808+00:00",
+      "until": "2026-10-10T04:07:16.811778+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
