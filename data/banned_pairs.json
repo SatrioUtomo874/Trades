@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T20:20:58.617652+00:00",
+  "saved_at": "2026-10-09T20:21:16.418826+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -1919,6 +1919,13 @@
       "until": "2026-10-10T04:08:19.322348+00:00",
       "reason": "Confidence 50 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "PIXELUSDT",
+      "banned_at": "2026-10-09T20:21:16.418629+00:00",
+      "until": "2026-10-10T20:21:16.418592+00:00",
+      "reason": "H4 structure RANGE tidak searah dengan BTC H4 BEARISH; pair dikeluarkan dari batch scanner.",
+      "source": "AUTO_STRUCTURE_MISMATCH"
     },
     {
       "pair": "PLUMEUSDT",
