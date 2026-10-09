@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T01:45:56.824503+00:00",
+  "saved_at": "2026-10-09T01:46:06.421635+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -2324,6 +2324,13 @@
       "banned_at": "2026-10-09T00:36:09.114991+00:00",
       "until": "2026-10-09T08:36:09.114952+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "SKYUSDT",
+      "banned_at": "2026-10-09T01:46:06.421433+00:00",
+      "until": "2026-10-09T09:46:06.421404+00:00",
+      "reason": "Confidence 56 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
     },
     {
