@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-09T11:41:22.231172+00:00",
+  "saved_at": "2026-10-09T11:41:27.220956+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -134,6 +134,13 @@
       "until": null,
       "reason": "Margin Influence terdeteksi 4 cycle berturut-turut; Tidak ada quantity legal pada target notional 5 (toleransi ±10%).",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "HBARUSDT",
+      "banned_at": "2026-10-09T11:41:27.220929+00:00",
+      "until": "2026-10-09T19:41:27.220903+00:00",
+      "reason": "Confidence 54 di bawah threshold 70.",
+      "source": "AUTO_BELOW_THRESHOLD"
     },
     {
       "pair": "HYPEUSDT",
