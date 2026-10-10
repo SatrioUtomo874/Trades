@@ -103,3 +103,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-10T13:31:29.127027+00:00
 - Strategy: SMC_VLT_RSI v2.1.0
+
+---
+
+## CGPTUSDT — BUY
+
+Trade ID: `CGPTUSDT-20261010-161455-01D0B9`
+
+### Setup
+
+- Price Now Reference: 0.02299
+- Entry: 0.02228
+- Reason Entry: CGPTUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.02229 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 24.8 pada entry zone.
+- Price Exp: 0.02385
+- Reason Price Exp: Price Exp 0.023850000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02162
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.02166; SL ditempatkan di luar invalidation.
+- TP: 0.0246
+- Reason TP: TP 0.0246 dipilih dari H4_HIGHER_HIGH dengan RR 3.52; target quality 76.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02385
+- Result Reason: Price Exp 0.023850000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-10T09:14:55.016616+00:00
+- Filled: -
+- Closed: 2026-10-10T15:20:32.622985+00:00
+- Strategy: SMC_VLT_RSI v2.1.0
