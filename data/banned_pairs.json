@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-10T09:37:03.846558+00:00",
+  "saved_at": "2026-10-10T09:43:05.825904+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -505,6 +505,13 @@
       "until": "2026-10-10T12:00:00.177225+00:00",
       "reason": "Confidence 60 di bawah threshold 70.",
       "source": "AUTO_BELOW_THRESHOLD"
+    },
+    {
+      "pair": "BICOUSDT",
+      "banned_at": "2026-10-10T09:43:05.825587+00:00",
+      "until": "2026-10-10T17:43:05.825540+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "BIGTIMEUSDT",
