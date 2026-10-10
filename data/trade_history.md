@@ -70,3 +70,36 @@ Trail #1
 - Filled: 2026-10-10T09:43:48.741812+00:00
 - Closed: 2026-10-10T11:30:55.673925+00:00
 - Strategy: SMC_VLT_RSI v2.1.0
+
+---
+
+## XMRUSDT — SELL
+
+Trade ID: `XMRUSDT-20261010-154937-C29037`
+
+### Setup
+
+- Price Now Reference: 526.66
+- Entry: 534.34
+- Reason Entry: XMRUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 534.3 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 73.9 pada entry zone.
+- Price Exp: 521.66
+- Reason Price Exp: Price Exp 521.66: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 539.83
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 539.15; SL ditempatkan di luar invalidation.
+- TP: 516.24
+- Reason TP: TP 516.24 dipilih dari H1_SWING_LOW dengan RR 3.30; target quality 74.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 521.66
+- Result Reason: Price Exp 521.66: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-10T08:49:37.626740+00:00
+- Filled: -
+- Closed: 2026-10-10T13:31:29.127027+00:00
+- Strategy: SMC_VLT_RSI v2.1.0
