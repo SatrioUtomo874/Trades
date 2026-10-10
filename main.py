@@ -200,7 +200,6 @@ SCAN_BANNED_TP_SL_HOURS = Decimal("24")
 SCAN_BANNED_HISTORY_HOURS = Decimal("24")
 SCAN_BANNED_LEVERAGE_HOURS = Decimal("4")
 SCAN_BANNED_WAITING_HOURS = Decimal("2")  # menunggu trigger RSI
-SCAN_BANNED_MARGIN_REAL_HOURS = Decimal("4")  # gagal qty saat entry real
 SCAN_MARGIN_TOLERANCE = Decimal("0.10")
 SCAN_MARGIN_FAIL_CONFIRMATIONS = 3
 BANNED_PATH = "data/banned_pairs.json"
@@ -5725,8 +5724,8 @@ class TradingEngine:
             for pair, item in self.banned_pairs.items()
             if item.get("source") == "AUTO_MARGIN_INFLUENCE"
             and (
-                item.get("until") in (None, "")
-                or "INSUFFICIENT_AVAILABLE_BALANCE" in str(item.get("reason") or "")
+                "INSUFFICIENT_AVAILABLE_BALANCE" in str(item.get("reason") or "")
+                or "cycle berturut-turut" in str(item.get("reason") or "")
             )
         ]
         for pair in stale:
@@ -5736,7 +5735,7 @@ class TradingEngine:
                 await self._persist_banned_pairs()
             except Exception:
                 log.exception("Gagal menyimpan ban setelah pembersihan ban saldo-kurang.")
-            log.info("[BAN] %s ban margin lama dibersihkan", len(stale))
+            log.info("[BAN] %s ban margin hasil deteksi awal/saldo-kurang dibersihkan", len(stale))
 
     async def _load_banned_pairs(self) -> None:
         raw, _ = await self.github.get_file(BANNED_PATH)
@@ -6992,14 +6991,8 @@ class TradingEngine:
             return None
 
     async def _process_margin_filter(self, pair: str, price: Decimal) -> tuple[bool, str | None]:
-        # Hitungan lokal tanpa API: cukup skip per siklus, tanpa ban; hanya relevan saat real ON.
-        if not self.real_mode:
-            return False, None
-        reason = self._margin_influence_reason(pair, price)
-        if reason is None:
-            return False, None
-        log.debug("[SCAN] Margin Influence skip %s | %s", pair, reason)
-        return True, reason
+        # Deteksi awal dimatikan; margin influence hanya diban saat entry real gagal.
+        return False, None
 
     # --------------------------------------------------------
     # SCAN LOOP
@@ -7175,7 +7168,6 @@ class TradingEngine:
         already_trade = 0
         banned_count = 0
         margin_blocked = 0
-        margin_notes: list[str] = []
         eligible: list[str] = []
 
         active_pairs = {trade.pair for trade in self.active_trades.values()}
@@ -7188,22 +7180,6 @@ class TradingEngine:
                 continue
             if self._is_pair_banned(pair):
                 banned_count += 1
-                continue
-
-            # Margin/quantity legality follows the Binance execution symbol,
-            # therefore prefer Binance ticker price and only fall back to Bybit
-            # when Binance did not return a usable price.
-            price = row.get("binance_price") or row.get("bybit_price") or Decimal("0")
-            try:
-                margin_block, margin_reason = await self._process_margin_filter(pair, price)
-            except Exception:
-                log.exception("[SCAN] margin filter gagal %s", pair)
-                margin_block = False
-                margin_reason = None
-            if margin_block:
-                margin_blocked += 1
-                hint = self._margin_hint(pair, price)
-                margin_notes.append(f"{pair} {hint}" if hint else pair)
                 continue
 
             eligible.append(pair)
@@ -7510,14 +7486,18 @@ class TradingEngine:
                         log.info("[SCAN] saldo tersedia kurang, entry real ditunda: %s", exc)
                         break
                     except MarginInfluenceError as exc:
+                        hint = self._margin_hint(trade.pair, trade.entry)
                         await self._ban_pair(
                             trade.pair,
-                            hours=SCAN_BANNED_MARGIN_REAL_HOURS,
-                            reason=f"Real quantity tidak memenuhi target margin ±10%: {exc}",
+                            hours=None,
+                            reason=(
+                                f"Real quantity tidak memenuhi target margin ±10%: {exc}"
+                                + (f" Margin pas ≈ {hint}." if hint else "")
+                            ),
                             source="AUTO_MARGIN_INFLUENCE",
                         )
                         final_margin_banned.append(trade.pair)
-                        log.info("[SCAN] %s diban %sj (margin influence): %s", trade.pair, SCAN_BANNED_MARGIN_REAL_HOURS, exc)
+                        log.info("[SCAN] %s setup dibatalkan, diban permanen (margin influence): %s", trade.pair, exc)
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
                         continue
                     except LeverageNotSupportedError as exc:
@@ -7686,9 +7666,6 @@ class TradingEngine:
             if avg_validation_ratio is not None
             else ""
         )
-        margin_blocked_text = str(margin_blocked)
-        if margin_notes:
-            margin_blocked_text += "  (margin pas: " + ", ".join(margin_notes[:5]) + ")"
         margin_line = f"├ Ban margin       {len(final_margin_banned)}"
         if final_margin_banned:
             margin_line += f"  ({', '.join(final_margin_banned[:10])})"
@@ -7708,7 +7685,6 @@ class TradingEngine:
             f"├ Binance ∩ Bybit  {universe['common_count']}\n"
             f"├ Banned           {banned_count}\n"
             f"├ Sudah di /trade  {already_trade}\n"
-            f"├ Margin blocked   {margin_blocked_text}\n"
             f"└ Eligible         {len(eligible)}  (batch {len(batch)}/{SCAN_MAX_PAIRS_PER_CYCLE}, tunda {deferred})\n\n"
             "🧭 ARAH vs BTC\n"
             f"├ Searah {len(directional)}  •  tidak searah {rejected_structure} (ban s/d close H4)\n"
