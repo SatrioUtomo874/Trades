@@ -36,8 +36,9 @@ Prinsip:
 - /banned dan /unban mengelola ban pair; ban otomatis diterapkan untuk Price Exp/TP/SL/Margin Influence.
 - /wrong menghapus active setup yang benar-benar salah tanpa mencatat history.
 - /remove menghapus satu trade dari histori GitHub beserta event dan journal terkait.
+- /resetstats mengarsipkan lalu mereset histori trade/event agar stats mulai dari nol (tes strategy baru).
 - strategy.py wajib menyediakan generate_setup(pair, context); mode SCAN juga mendukung kontrak optimized scan structure dan validate_setup.
-- SCAN maksimal 50 pair dianalisis per cycle; pair mismatch H4 diban 24 jam dan below-threshold diban 8 jam.
+- SCAN maksimal 50 pair dianalisis per cycle; pair mismatch H4 dan below-threshold diban sampai close H4 berikutnya.
 """
 
 import asyncio
@@ -198,6 +199,7 @@ SCAN_BANNED_TP_SL_HOURS = Decimal("24")
 SCAN_BANNED_HISTORY_HOURS = Decimal("24")
 SCAN_BANNED_LEVERAGE_HOURS = Decimal("4")
 SCAN_BANNED_WAITING_HOURS = Decimal("2")  # menunggu trigger RSI
+SCAN_BANNED_MARGIN_REAL_HOURS = Decimal("4")  # gagal qty saat entry real
 SCAN_MARGIN_TOLERANCE = Decimal("0.10")
 SCAN_MARGIN_FAIL_CONFIRMATIONS = 3
 BANNED_PATH = "data/banned_pairs.json"
@@ -508,6 +510,15 @@ def fmt_num(value: Any, digits: int = 2) -> str:
 def card(title: str, rows: list[str]) -> str:
     body = "\n".join(f"│ {row}" for row in rows if row)
     return f"╭─ {title} ─╮\n{body}\n╰──────────────────╯"
+
+
+def gauge(percent: Any, width: int = 10) -> str:
+    try:
+        value = max(0.0, min(100.0, float(percent)))
+    except (TypeError, ValueError):
+        value = 0.0
+    filled = round(value / 100 * width)
+    return "▰" * filled + "▱" * (width - filled)
 
 
 def quantized_price(value: Decimal, tick_size: Decimal) -> Decimal:
@@ -2773,6 +2784,7 @@ class TradingEngine:
 
         self.banned_pairs: dict[str, dict[str, Any]] = {}
         self._ban_lock = asyncio.Lock()
+        self._bans_dirty = False
         self._strategy_runtime_module = None
 
         self.ws = BinanceWebSocket(
@@ -2944,6 +2956,7 @@ class TradingEngine:
             except asyncio.CancelledError:
                 pass
         self._scan_task = None
+        await self._flush_bans_if_dirty()
 
         if self._auto_task is not None and not self._auto_task.done():
             self._auto_task.cancel()
@@ -5710,7 +5723,10 @@ class TradingEngine:
             pair
             for pair, item in self.banned_pairs.items()
             if item.get("source") == "AUTO_MARGIN_INFLUENCE"
-            and "INSUFFICIENT_AVAILABLE_BALANCE" in str(item.get("reason") or "")
+            and (
+                item.get("until") in (None, "")
+                or "INSUFFICIENT_AVAILABLE_BALANCE" in str(item.get("reason") or "")
+            )
         ]
         for pair in stale:
             self.banned_pairs.pop(pair, None)
@@ -5719,7 +5735,7 @@ class TradingEngine:
                 await self._persist_banned_pairs()
             except Exception:
                 log.exception("Gagal menyimpan ban setelah pembersihan ban saldo-kurang.")
-            log.info("[BAN] %s ban saldo-kurang dibersihkan", len(stale))
+            log.info("[BAN] %s ban margin lama dibersihkan", len(stale))
 
     async def _load_banned_pairs(self) -> None:
         raw, _ = await self.github.get_file(BANNED_PATH)
@@ -5742,6 +5758,7 @@ class TradingEngine:
                             "until": item.get("until"),
                             "reason": str(item.get("reason") or "").strip(),
                             "source": str(item.get("source") or "MANUAL").strip(),
+                            **({"btc_trend": item["btc_trend"]} if item.get("btc_trend") else {}),
                         }
                 elif isinstance(rows, dict):
                     for raw_pair, item in rows.items():
@@ -5754,6 +5771,7 @@ class TradingEngine:
                             "until": item.get("until"),
                             "reason": str(item.get("reason") or "").strip(),
                             "source": str(item.get("source") or "MANUAL").strip(),
+                            **({"btc_trend": item["btc_trend"]} if item.get("btc_trend") else {}),
                         }
             except Exception:
                 log.exception("Gagal membaca %s; daftar ban di-reset di RAM.", BANNED_PATH)
@@ -5765,17 +5783,52 @@ class TradingEngine:
 
     async def _persist_banned_pairs(self) -> None:
         async with self._ban_lock:
+            self._bans_dirty = False
             rows = [self.banned_pairs[pair] for pair in sorted(self.banned_pairs)]
             payload = {
                 "version": 1,
                 "saved_at": iso_utc(),
                 "bans": rows,
             }
-            await self.github.replace_file(
-                BANNED_PATH,
-                json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
-                f"ban: update {len(rows)} pair(s)",
-            )
+            try:
+                await self.github.replace_file(
+                    BANNED_PATH,
+                    json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                    f"ban: update {len(rows)} pair(s)",
+                )
+            except Exception:
+                self._bans_dirty = True
+                raise
+
+    async def _flush_bans_if_dirty(self) -> None:
+        """Simpan ban ke GitHub sekali untuk banyak perubahan."""
+        if not self._bans_dirty:
+            return
+        try:
+            await self._persist_banned_pairs()
+        except Exception:
+            log.exception("Gagal menyimpan daftar ban ke GitHub.")
+
+    @staticmethod
+    def _hours_to_next_h4_close() -> Decimal:
+        """Jam menuju close candle H4 berikutnya (batas UTC kelipatan 4 jam)."""
+        now_ts = now_utc().timestamp()
+        next_ts = (int(now_ts // 14400) + 1) * 14400
+        return Decimal(str(round(max((next_ts - now_ts) / 3600, 0.001), 4)))
+
+    def _purge_stale_structure_bans(self, btc_trend: str) -> None:
+        """Ban mismatch hanya valid untuk tren BTC saat ban dibuat."""
+        stale = [
+            pair
+            for pair, item in self.banned_pairs.items()
+            if item.get("source") == "AUTO_STRUCTURE_MISMATCH"
+            and item.get("btc_trend") != btc_trend
+        ]
+        for pair in stale:
+            self.banned_pairs.pop(pair, None)
+        if stale:
+            self._bans_dirty = True
+            log.info("[BAN] %s ban mismatch dibersihkan (BTC H4 kini %s)", len(stale), btc_trend)
 
     async def _purge_expired_bans(self, *, persist: bool = True) -> None:
         now = now_utc()
@@ -5787,8 +5840,7 @@ class TradingEngine:
                 removed.append(pair)
         if removed:
             log.info("[BAN] Expired bans removed: %s", ", ".join(sorted(removed)))
-            if persist:
-                await self._persist_banned_pairs()
+            # Tidak ditulis; loader membuang ban kedaluwarsa saat start.
 
     def _is_pair_banned(self, pair: str) -> bool:
         pair = normalize_symbol(pair)
@@ -5816,6 +5868,7 @@ class TradingEngine:
         hours: Decimal | None = None,
         reason: str = "",
         source: str = "MANUAL",
+        extra: dict[str, Any] | None = None,
     ) -> None:
         pair = normalize_symbol(pair)
         if not pair:
@@ -5855,14 +5908,20 @@ class TradingEngine:
                 new_reason = str(existing.get("reason") or new_reason).strip()
                 new_source = str(existing.get("source") or new_source).strip()
 
-        self.banned_pairs[pair] = {
+        entry = {
             "pair": pair,
             "banned_at": existing.get("banned_at") if existing and new_source != "MANUAL" else iso_utc(),
             "until": until,
             "reason": new_reason,
             "source": new_source,
         }
-        await self._persist_banned_pairs()
+        if extra and not preserve_existing:
+            entry.update(extra)
+        self.banned_pairs[pair] = entry
+        if str(source or "MANUAL").strip() == "MANUAL":
+            await self._persist_banned_pairs()
+        else:
+            self._bans_dirty = True
         log.info(
             "[BAN] %s | duration=%s | source=%s | reason=%s",
             pair,
@@ -5887,6 +5946,7 @@ class TradingEngine:
                 reason=f"Setup berakhir {result}; pair dikunci sementara dari scanner.",
                 source=f"AUTO_{result}",
             )
+        await self._flush_bans_if_dirty()
 
     async def _handle_banned_command(self, text: str) -> None:
         await self._purge_expired_bans()
@@ -6876,34 +6936,57 @@ class TradingEngine:
                 f"Tidak ada quantity legal pada target notional {decimal_to_str(target)} "
                 f"(toleransi ±{decimal_to_str(SCAN_MARGIN_TOLERANCE*100)}%)."
             )
+        hint = self._margin_hint(pair, price)
         return (
             f"Quantity terdekat menghasilkan notional {decimal_to_str(best_notional)}, "
             f"di luar target {decimal_to_str(target)} ±{decimal_to_str(SCAN_MARGIN_TOLERANCE*100)}%."
+            + (f" Margin pas ≈ {hint}." if hint else "")
         )
 
+    def _margin_hint(self, pair: str, price: Decimal) -> str | None:
+        """Margin yang menghasilkan qty legal untuk pair ini (leverage saat ini)."""
+        margin, leverage = self._margin_config()
+        meta = self.symbols.get(pair)
+        if margin is None or leverage is None or meta is None or leverage <= 0 or price <= 0:
+            return None
+        try:
+            def legal(qty: Decimal) -> bool:
+                if qty <= 0:
+                    return False
+                if meta.min_qty > 0 and qty < meta.min_qty:
+                    return False
+                if meta.max_qty > 0 and qty > meta.max_qty:
+                    return False
+                return not (meta.min_notional > 0 and qty * price < meta.min_notional)
+
+            raw_qty = margin * leverage / price
+            if meta.step_size > 0:
+                floor_qty = (raw_qty / meta.step_size).to_integral_value(rounding=ROUND_DOWN) * meta.step_size
+                qtys = [floor_qty, floor_qty + meta.step_size]
+            else:
+                qtys = [raw_qty]
+            found = [q for q in qtys if legal(q)]
+            if not found:
+                q0 = meta.min_qty if meta.min_qty > 0 else meta.step_size
+                if meta.min_notional > 0:
+                    q0 = max(q0, meta.min_notional / price)
+                if meta.step_size > 0:
+                    q0 = (q0 / meta.step_size).to_integral_value(rounding=ROUND_CEILING) * meta.step_size
+                found = [q0] if q0 > 0 else []
+            values = sorted({(q * price / leverage).quantize(Decimal("0.01")) for q in found})
+            return "/".join(f"${v}" for v in values) or None
+        except (InvalidOperation, ArithmeticError):
+            return None
+
     async def _process_margin_filter(self, pair: str, price: Decimal) -> tuple[bool, str | None]:
+        # Hitungan lokal tanpa API: cukup skip per siklus, tanpa ban; hanya relevan saat real ON.
+        if not self.real_mode:
+            return False, None
         reason = self._margin_influence_reason(pair, price)
         if reason is None:
-            self._scan_margin_streak[pair] = 0
             return False, None
-        streak = self._scan_margin_streak.get(pair, 0) + 1
-        self._scan_margin_streak[pair] = streak
-        log.info(
-            "[SCAN] Margin Influence candidate %s streak=%s/%s | %s",
-            pair, streak, SCAN_MARGIN_FAIL_CONFIRMATIONS, reason,
-        )
-        if streak >= SCAN_MARGIN_FAIL_CONFIRMATIONS:
-            await self._ban_pair(
-                pair,
-                hours=None,
-                reason=(
-                    f"Margin Influence terdeteksi {streak} cycle berturut-turut; "
-                    f"{reason}"
-                ),
-                source="AUTO_MARGIN_INFLUENCE",
-            )
-            return True, reason
-        return True, f"Konfirmasi margin {streak}/{SCAN_MARGIN_FAIL_CONFIRMATIONS}: {reason}"
+        log.debug("[SCAN] Margin Influence skip %s | %s", pair, reason)
+        return True, reason
 
     # --------------------------------------------------------
     # SCAN LOOP
@@ -7025,6 +7108,12 @@ class TradingEngine:
                 await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
 
     async def _run_scan_cycle(self) -> None:
+        try:
+            await self._run_scan_cycle_inner()
+        finally:
+            await self._flush_bans_if_dirty()
+
+    async def _run_scan_cycle_inner(self) -> None:
         if len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
             log.info("[SCAN] auto-pause: max active trade reached (%s)", self.max_active_trades)
@@ -7065,12 +7154,15 @@ class TradingEngine:
             btc_trend = self._extract_structure_trend(btc_analysis, "btc_h4") or btc_trend
 
         log.info("[SCAN] Cycle #%s BTC H4 trend=%s", cycle, btc_trend)
+        if btc_trend in {"BULLISH", "BEARISH", "RANGE"}:
+            self._purge_stale_structure_bans(btc_trend)
 
         universe = await self._build_scan_universe()
         rows = universe["rows"]
         already_trade = 0
         banned_count = 0
         margin_blocked = 0
+        margin_notes: list[str] = []
         eligible: list[str] = []
 
         active_pairs = {trade.pair for trade in self.active_trades.values()}
@@ -7097,6 +7189,8 @@ class TradingEngine:
                 margin_reason = None
             if margin_block:
                 margin_blocked += 1
+                hint = self._margin_hint(pair, price)
+                margin_notes.append(f"{pair} {hint}" if hint else pair)
                 continue
 
             eligible.append(pair)
@@ -7177,15 +7271,16 @@ class TradingEngine:
                         structure_banned += 1
                         await self._ban_pair(
                             pair,
-                            hours=SCAN_BANNED_TP_SL_HOURS,
+                            hours=self._hours_to_next_h4_close(),
                             reason=(
                                 f"H4 structure {pair_trend} tidak searah dengan BTC H4 {btc_trend}; "
                                 "pair dikeluarkan dari batch scanner."
                             ),
                             source="AUTO_STRUCTURE_MISMATCH",
+                            extra={"btc_trend": btc_trend},
                         )
                         log.info(
-                            "[SCAN] %s rejected + banned 24h | pair=%s BTC=%s",
+                            "[SCAN] %s rejected + banned s/d close H4 | pair=%s BTC=%s",
                             pair,
                             pair_trend,
                             btc_trend,
@@ -7217,7 +7312,7 @@ class TradingEngine:
                             or {}
                         ).get("gates") or {}
                         waiting = bool(gates.get("waiting"))
-                        ban_hours = SCAN_BANNED_WAITING_HOURS if waiting else SCAN_BANNED_PRICE_EXP_HOURS
+                        ban_hours = SCAN_BANNED_WAITING_HOURS if waiting else self._hours_to_next_h4_close()
                         await self._ban_pair(
                             pair,
                             hours=ban_hours,
@@ -7404,12 +7499,12 @@ class TradingEngine:
                     except MarginInfluenceError as exc:
                         await self._ban_pair(
                             trade.pair,
-                            hours=None,
+                            hours=SCAN_BANNED_MARGIN_REAL_HOURS,
                             reason=f"Real quantity tidak memenuhi target margin ±10%: {exc}",
                             source="AUTO_MARGIN_INFLUENCE",
                         )
                         final_margin_banned.append(trade.pair)
-                        log.info("[SCAN] %s diban permanen (margin influence): %s", trade.pair, exc)
+                        log.info("[SCAN] %s diban %sj (margin influence): %s", trade.pair, SCAN_BANNED_MARGIN_REAL_HOURS, exc)
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
                         continue
                     except LeverageNotSupportedError as exc:
@@ -7578,6 +7673,9 @@ class TradingEngine:
             if avg_validation_ratio is not None
             else ""
         )
+        margin_blocked_text = str(margin_blocked)
+        if margin_notes:
+            margin_blocked_text += "  (margin pas: " + ", ".join(margin_notes[:5]) + ")"
         margin_line = f"├ Ban margin       {len(final_margin_banned)}"
         if final_margin_banned:
             margin_line += f"  ({', '.join(final_margin_banned[:10])})"
@@ -7597,15 +7695,15 @@ class TradingEngine:
             f"├ Binance ∩ Bybit  {universe['common_count']}\n"
             f"├ Banned           {banned_count}\n"
             f"├ Sudah di /trade  {already_trade}\n"
-            f"├ Margin blocked   {margin_blocked}\n"
+            f"├ Margin blocked   {margin_blocked_text}\n"
             f"└ Eligible         {len(eligible)}  (batch {len(batch)}/{SCAN_MAX_PAIRS_PER_CYCLE}, tunda {deferred})\n\n"
             "🧭 ARAH vs BTC\n"
-            f"├ Searah {len(directional)}  •  tidak searah {rejected_structure} (ban 24j)\n"
+            f"├ Searah {len(directional)}  •  tidak searah {rejected_structure} (ban s/d close H4)\n"
             f"└ H4  🟢 {direction_counts['BULLISH']}  🔴 {direction_counts['BEARISH']}"
             f"  ⚪ {direction_counts['RANGE']}  ❓ {direction_counts['UNKNOWN']}\n\n"
             "🔬 ANALISIS\n"
             f"├ Dipindai         {scanned}/{SCAN_MAX_PAIRS_PER_CYCLE}\n"
-            f"├ ≥ Threshold      {len(threshold_candidates)}  (di bawah {threshold_banned}, ban 2-8j)\n"
+            f"├ ≥ Threshold      {len(threshold_candidates)}  (di bawah {threshold_banned}, ban 2j/close H4)\n"
             f"├ Validator lolos  {len(validated)}  (tolak {validator_missing + validator_rejects})\n"
             f"├ Masuk /trade     {len(final_added)}  (error {final_add_errors}, dibatasi {final_capped})\n"
             f"{margin_line}\n"
@@ -11574,6 +11672,12 @@ class TradingEngine:
         if avg_confidence_tp is not None and avg_confidence_sl is not None:
             confidence_gap_tp_sl = avg_confidence_tp - avg_confidence_sl
 
+        loss_sum = sum(losses, Decimal("0"))
+        profit_factor = (
+            sum(wins, Decimal("0")) / abs(loss_sum) if loss_sum < 0 else None
+        )
+        expectancy = gross_net / Decimal(len(pnls)) if pnls else None
+
         return {
             "total_records": total_records,
             "total_filled": total_filled,
@@ -11593,6 +11697,8 @@ class TradingEngine:
             "gross_pnl_percent": gross_net,
             "average_win_percent": average_win,
             "average_loss_percent": average_loss,
+            "profit_factor": profit_factor,
+            "expectancy_percent": expectancy,
             "trail_count": trail_count,
             "confidence_count_all": len(confidence_all),
             "confidence_count_entered": len(confidence_entered),
@@ -11612,109 +11718,99 @@ class TradingEngine:
 
     async def show_stats(self) -> None:
         await self._refresh_history_if_needed()
+        stats = self._calculate_stats(self.history_records)
 
-        stats = self._calculate_stats(
-            self.history_records
-        )
+        active_pending = sum(1 for t in self.active_trades.values() if t.status == "PENDING")
+        active_filled = sum(1 for t in self.active_trades.values() if t.status == "FILLED")
 
-        active_pending = sum(
-            1
-            for trade in self.active_trades.values()
-            if trade.status == "PENDING"
-        )
+        def num(value: Decimal | None) -> str:
+            return "-" if value is None else decimal_to_str(value)
 
-        active_filled = sum(
-            1
-            for trade in self.active_trades.values()
-            if trade.status == "FILLED"
-        )
+        def pct(value: Decimal) -> str:
+            return format_pct(value).replace("+", "")
 
-        def fmt_confidence(value: Decimal | None) -> str:
-            if value is None:
-                return "-"
-            return decimal_to_str(value)
+        def dur(value: Decimal | None) -> str:
+            return "-" if value is None else duration_text(float(value))
 
-        confidence_gap = stats["confidence_gap_tp_sl"]
-        if confidence_gap is None:
-            confidence_conclusion = (
-                "Belum cukup data confidence yang terisi di kedua outcome."
-            )
-        elif confidence_gap > 0:
-            confidence_conclusion = (
-                "Secara historis, rerata confidence setup TP lebih tinggi "
-                f"{decimal_to_str(confidence_gap)} poin daripada setup SL."
-            )
-        elif confidence_gap < 0:
-            confidence_conclusion = (
-                "Secara historis, rerata confidence setup TP lebih rendah "
-                f"{decimal_to_str(abs(confidence_gap))} poin daripada setup SL."
-            )
+        gap = stats["confidence_gap_tp_sl"]
+        if gap is None:
+            confidence_conclusion = "Belum cukup data confidence di kedua outcome."
+        elif gap > 0:
+            confidence_conclusion = f"Rerata confidence TP lebih tinggi {decimal_to_str(gap)} poin dari SL."
+        elif gap < 0:
+            confidence_conclusion = f"Rerata confidence TP lebih rendah {decimal_to_str(abs(gap))} poin dari SL."
         else:
-            confidence_conclusion = (
-                "Secara historis, rerata confidence setup TP dan SL sama."
-            )
+            confidence_conclusion = "Rerata confidence TP dan SL sama."
 
         if stats["total_filled"]:
             outcome_conclusion = (
-                f"Dari {stats['total_filled']} trade yang berakhir TP/SL, "
-                f"TP {stats['tp']} ({format_pct(stats['tp_rate']).replace('+', '')}) dan "
-                f"SL {stats['sl']} ({format_pct(stats['sl_rate']).replace('+', '')})."
+                f"Dari {stats['total_filled']} trade TP/SL: "
+                f"TP {stats['tp']} ({pct(stats['tp_rate'])}), "
+                f"SL {stats['sl']} ({pct(stats['sl_rate'])})."
             )
         else:
-            outcome_conclusion = (
-                "Belum ada trade historis yang berakhir TP/SL."
-            )
+            outcome_conclusion = "Belum ada trade yang berakhir TP/SL."
 
-        confidence_coverage = (
-            Decimal(stats["confidence_count_entered"])
-            / Decimal(stats["entered_records_count"])
-            * Decimal("100")
+        coverage = (
+            Decimal(stats["confidence_count_entered"]) / Decimal(stats["entered_records_count"]) * Decimal("100")
             if stats["entered_records_count"]
             else Decimal("0")
         )
 
-        rr_text = fmt_confidence(stats["average_planned_rr_entered"])
+        if stats["profit_factor"] is not None:
+            pf_text = f"{float(stats['profit_factor']):.2f}"
+        elif stats["average_win_percent"] > 0:
+            pf_text = "∞ (belum ada loss)"
+        else:
+            pf_text = "-"
+        expectancy = stats["expectancy_percent"]
+        expectancy_text = "-" if expectancy is None else f"{format_pct(expectancy)} / trade"
 
-        await self.reply(
-            "📊 STATS\n\n"
-            f"Total Setup History: {stats['total_records']}\n"
-            f"Total Setup Pernah Entry: {stats['entered_records_count']}\n"
-            f"Total Trade Selesai TP/SL: {stats['total_filled']}\n"
-            f"Active Pending: {active_pending}\n"
-            f"Active Filled: {active_filled}\n\n"
-            "OUTCOME\n"
-            f"TP: {stats['tp']} ({format_pct(stats['tp_rate']).replace('+', '')} dari trade entry)\n"
-            f"  ↳ termasuk TRAIL (SL trailing, profit terkunci): {stats.get('trail_exit', 0)}\n"
-            f"SL: {stats['sl']} ({format_pct(stats['sl_rate']).replace('+', '')} dari trade entry)\n"
-            f"Win Rate: {format_pct(stats['win_rate']).replace('+', '')}\n"
-            f"Expired: {stats['expired']} ({format_pct(stats['expired_rate_all']).replace('+', '')} dari seluruh history)\n"
-            f"Deleted: {stats['deleted']} ({format_pct(stats['deleted_rate_all']).replace('+', '')} dari seluruh history)\n"
-            f"Manual Close Pending: {stats['manual_close_pending']}\n"
-            f"Manual Close Filled @ 0%: {stats['manual_close_filled']}\n\n"
-            "CONFIDENCE\n"
-            f"Rerata Confidence Semua History: {fmt_confidence(stats['average_confidence_all'])}\n"
-            f"Rerata Confidence TP: {fmt_confidence(stats['average_confidence_tp'])}\n"
-            f"Rerata Confidence SL: {fmt_confidence(stats['average_confidence_sl'])}\n"
-            f"Rerata Confidence Setup Berhasil Entry: {fmt_confidence(stats['average_confidence_entered'])}\n"
-            f"Coverage Confidence pada Trade Entry: {decimal_to_str(confidence_coverage)}%\n"
-            f"Entry tanpa Confidence: {stats['confidence_missing_entered']}\n\n"
-            "ANGKA TAMBAHAN\n"
-            f"Net PnL History: {format_pct(stats['gross_pnl_percent'])}\n"
-            f"Average Win: {format_pct(stats['average_win_percent'])}\n"
-            f"Average Loss: {format_pct(stats['average_loss_percent'])}\n"
-            f"Average Planned RR (trade entry): {rr_text}\n"
-            f"Average Pending Time: {duration_text(float(stats['average_pending_entered_seconds'])) if stats['average_pending_entered_seconds'] is not None else '-'}\n"
-            f"Average Holding TP: {duration_text(float(stats['average_holding_tp_seconds'])) if stats['average_holding_tp_seconds'] is not None else '-'}\n"
-            f"Average Holding SL: {duration_text(float(stats['average_holding_sl_seconds'])) if stats['average_holding_sl_seconds'] is not None else '-'}\n"
-            f"Total Trail Event: {stats['trail_count']}\n"
-            f"History AUTO: {stats['auto_records']} | MANUAL: {stats['manual_records']}\n\n"
-            "KESIMPULAN BERBASIS ANGKA\n"
-            f"{outcome_conclusion}\n"
-            f"{confidence_conclusion}\n"
-            f"{stats['expired']} setup berakhir Expired dan {stats['deleted']} setup berakhir Deleted.\n"
-            f"Manual Close Pending: {stats['manual_close_pending']}; Manual Close Filled @ 0%: {stats['manual_close_filled']}.\n"
-            "Expired, Deleted, dan manual close non-TP/SL tidak dihitung sebagai win/loss."
-        )
+        lines = [
+            card(
+                "📊 STATS",
+                [
+                    f"🗂 Setup {stats['total_records']}  •  ✅ Entry {stats['entered_records_count']}  •  🏁 Selesai {stats['total_filled']}",
+                    f"🟡 Pending {active_pending}  •  🟢 Filled {active_filled}",
+                ],
+            ),
+            "",
+            "🎯 OUTCOME",
+            f"├ Win Rate   {gauge(stats['win_rate'])}  {pct(stats['win_rate'])}",
+            f"├ ✅ TP       {stats['tp']}  ({pct(stats['tp_rate'])})  ↳ TRAIL {stats.get('trail_exit', 0)}",
+            f"├ ❌ SL       {stats['sl']}  ({pct(stats['sl_rate'])})",
+            f"├ ⌛ Expired  {stats['expired']}  ({pct(stats['expired_rate_all'])} history)",
+            f"├ 🗑 Deleted  {stats['deleted']}  ({pct(stats['deleted_rate_all'])} history)",
+            f"└ ✋ Manual   pending {stats['manual_close_pending']}  •  filled@0% {stats['manual_close_filled']}",
+            "",
+            "💰 PERFORMA",
+            f"├ Net PnL        {format_pct(stats['gross_pnl_percent'])}",
+            f"├ Avg Win        {format_pct(stats['average_win_percent'])}",
+            f"├ Avg Loss       {format_pct(stats['average_loss_percent'])}",
+            f"├ Profit Factor  {pf_text}",
+            f"├ Expectancy     {expectancy_text}",
+            f"└ Avg Planned RR {num(stats['average_planned_rr_entered'])}",
+            "",
+            "🧠 CONFIDENCE",
+            f"├ Semua history  {num(stats['average_confidence_all'])}",
+            f"├ TP  {num(stats['average_confidence_tp'])}  •  SL  {num(stats['average_confidence_sl'])}",
+            f"├ Setup entry    {num(stats['average_confidence_entered'])}",
+            f"└ Coverage       {gauge(coverage)}  {decimal_to_str(coverage)}%  (tanpa data {stats['confidence_missing_entered']})",
+            "",
+            "⏱ WAKTU",
+            f"├ Pending  {dur(stats['average_pending_entered_seconds'])}",
+            f"├ Hold TP  {dur(stats['average_holding_tp_seconds'])}",
+            f"└ Hold SL  {dur(stats['average_holding_sl_seconds'])}",
+            "",
+            "🧬 SUMBER",
+            f"└ AUTO {stats['auto_records']}  •  MANUAL {stats['manual_records']}  •  Trail event {stats['trail_count']}",
+            "",
+            "🔬 KESIMPULAN",
+            f"• {outcome_conclusion}",
+            f"• {confidence_conclusion}",
+            "• Expired, Deleted, dan manual close non-TP/SL tidak dihitung win/loss.",
+        ]
+        await self.reply("\n".join(lines))
 
     # --------------------------------------------------------
     # ANALYZE
@@ -12613,6 +12709,87 @@ class TradingEngine:
             )
 
     # --------------------------------------------------------
+    # RESET STATS
+    # --------------------------------------------------------
+
+    async def _start_resetstats(self) -> None:
+        if self.flow is not None:
+            await self.reply(
+                "Masih ada sesi yang sedang berjalan.\n"
+                "Gunakan /back terlebih dahulu."
+            )
+            return
+
+        self.flow = {"kind": "RESETSTATS", "step": "CONFIRM"}
+        await self.reply(
+            card(
+                "⚠️ RESET STATS",
+                [
+                    "📦 Diarsipkan ke data/archive/, lalu dihapus:",
+                    "• trades.json • events.jsonl • trade_history.md",
+                    "• hasil /analyze",
+                    "✅ Catatan, ban, dan active setup tetap aman",
+                ],
+            )
+            + "\n\n1. Ya, reset stats\n2. Batal"
+        )
+
+    async def _handle_resetstats_input(self, text: str) -> None:
+        answer = str(text or "").strip()
+        if answer == "2":
+            self.flow = None
+            await self.reply("✅ RESET STATS dibatalkan.")
+            return
+        if answer != "1":
+            await self.reply("Jawab 1 untuk reset stats atau 2 untuk batal.")
+            return
+
+        self.flow = None
+        try:
+            await self.reset_stats_records()
+        except Exception as exc:
+            log.exception("RESET STATS gagal.")
+            await self.reply(f"❌ /resetstats gagal. Tidak ada data yang dihapus bila arsip gagal.\n\n{exc}")
+
+    async def reset_stats_records(self) -> None:
+        """Arsipkan histori ke data/archive/<waktu>/ lalu hapus; catatan tidak disentuh."""
+        stamp = now_local().strftime("%Y%m%d-%H%M%S")
+        history_paths = (HISTORY_TRADES_PATH, HISTORY_EVENTS_PATH, HISTORY_MARKDOWN_PATH)
+        archived: list[str] = []
+        deleted = 0
+
+        async with self._history_lock:
+            # Arsip semua dulu; gagal satu = batal tanpa menghapus apa pun.
+            for path in history_paths:
+                raw, _ = await self.github.get_file(path)
+                if not raw:
+                    continue
+                target = f"data/archive/{stamp}/{Path(path).name}"
+                await self.github.replace_file(target, raw, f"archive: {path} sebelum reset stats")
+                archived.append(target)
+
+            for path in (*history_paths, ANALYSIS_JSON_PATH, ANALYSIS_MD_PATH):
+                if await self.github.delete_file(path, f"resetstats: delete {path}"):
+                    deleted += 1
+
+            self.history_records.clear()
+            self.history_events.clear()
+            self._history_dirty = False
+            self.last_history_refresh = now_utc()
+
+        await self.reply(
+            card(
+                "♻️ STATS DIRESET",
+                [
+                    f"📦 Arsip    {len(archived)} file" + (f" → data/archive/{stamp}/" if archived else ""),
+                    f"🗑 Dihapus  {deleted} file",
+                    "📊 Stats    mulai dari 0",
+                ],
+            )
+            + "\n\nActive setup /trade tidak disentuh; trade lama yang masih aktif tetap tercatat saat selesai."
+        )
+
+    # --------------------------------------------------------
     # STATUS / HELP
     # --------------------------------------------------------
 
@@ -12686,6 +12863,7 @@ class TradingEngine:
             "/banned [PAIR] [jam] [alasan] - ban pair / lihat daftar ban\n"
             "/unban PAIR|all - hapus ban\n"
             "/stats - statistik histori\n"
+            "/resetstats - arsipkan + reset stats (untuk tes strategy baru)\n"
             "/catatan [teks] - tambah catatan / tanpa teks = lihat catatan\n"
             "/reset - hapus seluruh pencatatan GitHub\n"
             "/analyze - generate full dataset + report, lalu kirim file Telegram\n"
@@ -12775,6 +12953,7 @@ class TradingEngine:
                     "/status",
                     "/catatan",
                     "/reset",
+                    "/resetstats",
                 }:
                     await self.reply(
                         "Masih ada sesi yang sedang berjalan.\n"
@@ -12956,6 +13135,10 @@ class TradingEngine:
                 await self._start_reset()
                 return
 
+            if command == "/resetstats":
+                await self._start_resetstats()
+                return
+
             if command == "/status":
                 await self.show_status()
                 return
@@ -13021,6 +13204,10 @@ class TradingEngine:
                 await self._handle_reset_input(
                     text
                 )
+                return
+
+            if self.flow["kind"] == "RESETSTATS":
+                await self._handle_resetstats_input(text)
                 return
 
         await self.reply(
