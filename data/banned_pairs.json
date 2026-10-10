@@ -1,55 +1,5 @@
 {
   "version": 1,
-  "saved_at": "2026-10-10T15:20:39.317280+00:00",
-  "bans": [
-    {
-      "pair": "ALPINEUSDT",
-      "banned_at": "2026-10-09T21:54:59.035280+00:00",
-      "until": "2026-10-10T21:54:59.035252+00:00",
-      "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TRAIL"
-    },
-    {
-      "pair": "BICOUSDT",
-      "banned_at": "2026-10-10T09:43:05.825587+00:00",
-      "until": "2026-10-10T17:43:05.825540+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "CATIUSDT",
-      "banned_at": "2026-10-10T11:31:02.083326+00:00",
-      "until": "2026-10-11T11:31:02.083304+00:00",
-      "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TRAIL"
-    },
-    {
-      "pair": "CGPTUSDT",
-      "banned_at": "2026-10-10T15:20:39.317149+00:00",
-      "until": "2026-10-10T23:20:39.317122+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "DEXEUSDT",
-      "banned_at": "2026-10-09T17:49:28.591785+00:00",
-      "until": "2026-10-10T17:49:28.591759+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "EIGENUSDT",
-      "banned_at": "2026-10-09T23:52:18.951922+00:00",
-      "until": "2026-10-10T23:52:18.951898+00:00",
-      "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TRAIL"
-    },
-    {
-      "pair": "XMRUSDT",
-      "banned_at": "2026-10-10T13:31:35.511213+00:00",
-      "until": "2026-10-10T21:31:35.511182+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    }
-  ]
+  "saved_at": "2026-10-10T16:14:34.355168+00:00",
+  "bans": []
 }
