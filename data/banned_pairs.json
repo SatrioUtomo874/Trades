@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-10T13:31:35.511356+00:00",
+  "saved_at": "2026-10-10T15:20:39.317280+00:00",
   "bans": [
     {
       "pair": "ALPINEUSDT",
@@ -22,6 +22,13 @@
       "until": "2026-10-11T11:31:02.083304+00:00",
       "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
       "source": "AUTO_TRAIL"
+    },
+    {
+      "pair": "CGPTUSDT",
+      "banned_at": "2026-10-10T15:20:39.317149+00:00",
+      "until": "2026-10-10T23:20:39.317122+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "DEXEUSDT",
