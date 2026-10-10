@@ -32,3 +32,41 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-10T09:43:00.513688+00:00
 - Strategy: SMC_VLT_RSI v2.1.0
+
+---
+
+## CATIUSDT — SELL
+
+Trade ID: `CATIUSDT-20261010-161902-A97732`
+
+### Setup
+
+- Price Now Reference: 0.06309
+- Entry: 0.06369
+- Reason Entry: CATIUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.0636925 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_OB. Projected M15 RSI 56.0 pada entry zone.
+- Price Exp: 0.06251
+- Reason Price Exp: Price Exp 0.06251000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.06362
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.06408; SL ditempatkan di luar invalidation.
+- TP: 0.06201
+- Reason TP: TP 0.06201 dipilih dari H4_LOWER_LOW dengan RR 3.65; target quality 85.
+
+### Management
+
+Trail #1
+- Old SL: 0.06415
+- New SL: 0.06362
+- Price: 0.06323
+- Reason: Auto trail [R_LADDER]: R-ladder: harga 1.00R, SL dikunci di 0.00R.
+- Time: 10-10-2026, 17:22 WIB
+
+### Result
+
+- Result: TRAIL
+- Exit Price: 0.06362
+- Result Reason: SL trailing tercapai; profit terkunci. Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.06408; SL ditempatkan di luar invalidation.
+- PnL: 0.1099073637933741560684565866%
+- Created: 2026-10-10T09:19:02.123183+00:00
+- Filled: 2026-10-10T09:43:48.741812+00:00
+- Closed: 2026-10-10T11:30:55.673925+00:00
+- Strategy: SMC_VLT_RSI v2.1.0
