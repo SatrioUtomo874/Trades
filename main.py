@@ -153,6 +153,7 @@ BINANCE_RATE_LIMIT_SAFETY_SECONDS = 60
 REAL_RECONCILE_INTERVAL_SECONDS = 2.0
 REAL_PENDING_POLL_SECONDS = 5.0
 REAL_PROTECT_CHECK_SECONDS = 60.0
+BALANCE_STALE_SECONDS = 60.0  # /trade segarkan saldo bila cache lebih tua
 AUTOSTOP_CHECK_SECONDS = 30.0
 # Auto-trailing: saat profit >= trigger_R, SL pindah ke entry +/- lock_R x risiko awal.
 AUTO_TRAIL_ENABLED = os.getenv("AUTO_TRAIL", "1").strip().lower() not in {"0", "false", "off"}
@@ -6321,6 +6322,18 @@ class TradingEngine:
         # during a rate-limit window.
         return parse_signed_decimal(str(row.get("balance") or "0"))
 
+    async def _refresh_balance_cache(self) -> None:
+        """Segarkan saldo wallet setelah PnL terealisasi (1 request, bobot 5)."""
+        if not self.real_mode or self.real.cooldown_remaining > 0:
+            return
+        try:
+            await self.real.get_futures_balance()
+        except BinanceRateLimitError as exc:
+            self.real.apply_cooldown(exc.server_cooldown_seconds, exc.bot_cooldown_seconds)
+            self._notify_rate_limit(exc, "REFRESH BALANCE")
+        except Exception as exc:
+            log.info("[REAL] refresh saldo gagal: %s", exc)
+
     def _read_equity_cached(self) -> Decimal:
         balance = self.real.cached_usdt_balance()
         if balance is None:
@@ -10877,6 +10890,18 @@ class TradingEngine:
                         snapshot.price,
                     )
                 )
+                pnl_usdt = self._temporary_trade_pnl_usdt(trade, snapshot.price)
+                if pnl_usdt is not None:
+                    margin_used = (
+                        trade.actual_notional / Decimal(trade.leverage)
+                        if trade.actual_notional and trade.leverage
+                        else trade.margin_usdt
+                    )
+                    sign = "+" if pnl_usdt >= 0 else ""
+                    pnl_text += f"  (≈{sign}{self._fmt_usd(pnl_usdt)} USDT"
+                    if margin_used > 0:
+                        pnl_text += f" • ROI {format_pct(pnl_usdt / margin_used * Decimal('100'))}"
+                    pnl_text += ")"
                 tp_distance = self._distance_pct(snapshot.price, trade.tp)
                 sl_distance = self._distance_pct(snapshot.price, trade.sl)
                 if tp_distance is not None:
@@ -10971,6 +10996,17 @@ class TradingEngine:
             )
         )
 
+        if self.real_mode and (
+            self.real.last_balance_at is None
+            or time.monotonic() - self.real.last_balance_at > BALANCE_STALE_SECONDS
+        ):
+            await self._refresh_balance_cache()
+
+        real_filled = sum(
+            1
+            for trade in self.active_trades.values()
+            if trade.status == "FILLED" and trade.real_enabled
+        )
         temp_pnl_usdt = Decimal("0")
         temp_pnl_count = 0
         stale_filled = 0
@@ -11012,7 +11048,7 @@ class TradingEngine:
             f"💰 Saldo Binance       {balance_text} USDT",
             f"📊 Temporary Total PnL {self._fmt_usd(temp_pnl_usdt)} USDT",
             f"💵 Saldo + Temp PnL    {total_balance_text} USDT",
-            f"🧊 Balance Cache       {balance_cache_age} ago • {temp_pnl_count}/{filled} REAL FILLED",
+            f"🧊 Balance Cache       {balance_cache_age} ago • {temp_pnl_count}/{real_filled} REAL FILLED",
             f"PnL stale/no feed: {stale_filled}",
             "",
         ]
@@ -11160,6 +11196,10 @@ class TradingEngine:
 
         if trade.real_enabled and result in {"TP", "SL", "TRAIL"}:
             await self._cleanup_real_leftovers(trade)
+
+        # PnL terealisasi mengubah saldo wallet; cache lama bikin saldo/autostop meleset.
+        if trade.real_enabled and trade.fill_price is not None:
+            await self._refresh_balance_cache()
 
         try:
             await self._auto_ban_for_result(trade, result)
