@@ -367,3 +367,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-11T22:04:42.100124+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## UNIUSDT — BUY
+
+Trade ID: `UNIUSDT-20261012-044826-25FC4F`
+
+### Setup
+
+- Price Now Reference: 7.655
+- Entry: 7.517
+- Reason Entry: UNIUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 7.52138 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 28.2 pada entry zone.
+- Price Exp: 7.701
+- Reason Price Exp: Price Exp 7.7010000000000005: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 7.502
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 7.5115; SL ditempatkan di luar invalidation dan liquidity guard 7.52138.
+- TP: 7.703
+- Reason TP: TP 7.703 dipilih dari H4_HIGHER_HIGH dengan RR 12.40; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 7.701
+- Result Reason: Price Exp 7.7010000000000005: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-11T21:48:26.887151+00:00
+- Filled: -
+- Closed: 2026-10-11T22:08:44.699544+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
