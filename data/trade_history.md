@@ -301,3 +301,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-11T21:42:46.372699+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## CFGUSDT — BUY
+
+Trade ID: `CFGUSDT-20261012-044825-DEE8F8`
+
+### Setup
+
+- Price Now Reference: 0.1403
+- Entry: 0.1376
+- Reason Entry: CFGUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.1378119 dipadukan dengan Fib SECONDARY; refinement BEARISH_OB. Projected M15 RSI 24.1 pada entry zone.
+- Price Exp: 0.1414
+- Reason Price Exp: Price Exp 0.1414: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1358
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.136; SL ditempatkan di luar invalidation.
+- TP: 0.1429
+- Reason TP: TP 0.1429 dipilih dari H4_SWING_HIGH dengan RR 2.94; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1414
+- Result Reason: Price Exp 0.1414: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-11T21:48:25.882802+00:00
+- Filled: -
+- Closed: 2026-10-11T22:02:43.933981+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
