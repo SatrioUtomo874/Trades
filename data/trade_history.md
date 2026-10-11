@@ -235,3 +235,36 @@ Tidak ada trailing.
 - Filled: 2026-10-11T08:23:14.455371+00:00
 - Closed: 2026-10-11T09:13:44.858024+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## ZROUSDT — SELL
+
+Trade ID: `ZROUSDT-20261011-162904-8AAD41`
+
+### Setup
+
+- Price Now Reference: 2.0165
+- Entry: 2.0381
+- Reason Entry: ZROUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 2.03731 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 64.6 pada entry zone.
+- Price Exp: 1.9927
+- Reason Price Exp: Price Exp 1.9927000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 2.0435
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 2.0401; SL ditempatkan di luar invalidation dan liquidity guard 2.03731.
+- TP: 1.9733
+- Reason TP: TP 1.9733 dipilih dari H4_SWING_LOW dengan RR 12.00; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 2.0435
+- Result Reason: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 2.0401; SL ditempatkan di luar invalidation dan liquidity guard 2.03731.
+- PnL: -0.264952651979785093960060841%
+- Created: 2026-10-11T09:29:04.585478+00:00
+- Filled: 2026-10-11T09:43:29.264641+00:00
+- Closed: 2026-10-11T09:43:31.976707+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
