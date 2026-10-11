@@ -136,3 +136,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-10T15:20:32.622985+00:00
 - Strategy: SMC_VLT_RSI v2.1.0
+
+---
+
+## FILUSDT — BUY
+
+Trade ID: `FILUSDT-20261011-072635-CDDFF2`
+
+### Setup
+
+- Price Now Reference: 1.1126
+- Entry: 1.1064
+- Reason Entry: FILUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 1.1065 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 27.3 pada entry zone.
+- Price Exp: 1.135
+- Reason Price Exp: Price Exp 1.135: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.0777
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 1.0792; SL ditempatkan di luar invalidation.
+- TP: 1.2095
+- Reason TP: TP 1.2095 dipilih dari H4_HIGHER_HIGH dengan RR 3.59; target quality 77.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 1.0777
+- Result Reason: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 1.0792; SL ditempatkan di luar invalidation.
+- PnL: -2.593998553868402024584237166%
+- Created: 2026-10-11T00:26:35.031269+00:00
+- Filled: 2026-10-11T00:54:10.836749+00:00
+- Closed: 2026-10-11T04:00:00.905676+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
