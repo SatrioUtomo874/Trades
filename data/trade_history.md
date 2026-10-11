@@ -400,3 +400,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-11T22:08:44.699544+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## CCUSDT — BUY
+
+Trade ID: `CCUSDT-20261012-043850-46C5DF`
+
+### Setup
+
+- Price Now Reference: 0.12466
+- Entry: 0.11616
+- Reason Entry: CCUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H4 0.11622 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 11.8 pada entry zone.
+- Price Exp: 0.12559
+- Reason Price Exp: Price Exp 0.12559: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.11271
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.1129; SL ditempatkan di luar invalidation dan liquidity guard 0.1129.
+- TP: 0.12677
+- Reason TP: TP 0.12677 dipilih dari H4_SWING_HIGH dengan RR 3.08; target quality 75.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.12559
+- Result Reason: Price Exp 0.12559: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-11T21:38:50.486676+00:00
+- Filled: -
+- Closed: 2026-10-11T22:34:00.558079+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
