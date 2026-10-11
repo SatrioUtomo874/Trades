@@ -1,5 +1,13 @@
 {
   "version": 1,
-  "saved_at": "2026-10-11T14:56:06.387782+00:00",
-  "bans": []
+  "saved_at": "2026-10-11T21:42:56.074755+00:00",
+  "bans": [
+    {
+      "pair": "QTUMUSDT",
+      "banned_at": "2026-10-11T21:42:56.074407+00:00",
+      "until": "2026-10-12T05:42:56.074383+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    }
+  ]
 }
