@@ -63,6 +63,7 @@ import time
 from collections import deque
 import traceback
 import tempfile
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_UP
@@ -324,6 +325,45 @@ if not REPO_NAME or "/" not in REPO_NAME:
 # ============================================================
 
 log = logging.getLogger("main.trading_engine")
+
+# Suppress repeated backend WARNING -> Telegram spam when a known degraded
+# state persists (e.g. an IP cooldown lasting an hour or a stale-cache fallback).
+_LOG_WARNING_THROTTLE: dict[str, tuple[str, float]] = {}
+_LOG_WARNING_THROTTLE_LOCK = threading.Lock()
+
+
+def log_warning_throttled(
+    key: str,
+    message: str,
+    *args: Any,
+    interval_seconds: float = 900.0,
+    fingerprint: str | None = None,
+) -> bool:
+    """Emit the same warning at most once per interval, unless state changes."""
+    rendered = message % args if args else message
+    signature = fingerprint if fingerprint is not None else rendered
+    now = time.monotonic()
+    with _LOG_WARNING_THROTTLE_LOCK:
+        previous = _LOG_WARNING_THROTTLE.get(key)
+        should_emit = (
+            previous is None
+            or previous[0] != signature
+            or now - previous[1] >= max(1.0, float(interval_seconds))
+        )
+        if not should_emit:
+            return False
+        _LOG_WARNING_THROTTLE[key] = (signature, now)
+        if len(_LOG_WARNING_THROTTLE) > 500:
+            # Bound state; the oldest entries are least likely to be useful.
+            for old_key in list(_LOG_WARNING_THROTTLE)[:200]:
+                _LOG_WARNING_THROTTLE.pop(old_key, None)
+    log.warning("%s", rendered)
+    return True
+
+
+def clear_warning_throttle(key: str) -> None:
+    with _LOG_WARNING_THROTTLE_LOCK:
+        _LOG_WARNING_THROTTLE.pop(key, None)
 
 
 HEAVY_ANALYSIS_KEYS = frozenset(
@@ -2475,6 +2515,7 @@ class BinanceREST:
                 self._exchange_info_cached_at = time.monotonic()
                 self._exchange_info_retry_after = 0.0
                 self._exchange_info_last_error = ""
+                clear_warning_throttle("binance-exchange-info-stale")
                 governor = globals().get("BINANCE_REQUEST_GOVERNOR")
                 if governor is not None:
                     governor.configure_order_limits(payload.get("rateLimits") or [])
@@ -2493,7 +2534,13 @@ class BinanceREST:
                 self._exchange_info_last_error = str(exc)[:200]
                 age = time.monotonic() - self._exchange_info_cached_at if self._exchange_info_cache is not None else float("inf")
                 if not force and self._exchange_info_cache is not None and age <= BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS:
-                    log.warning("[BINANCE CACHE] exchangeInfo refresh gagal; memakai cache stale %.0fs untuk scan saja; retry backoff %.0fs.", age, retry_wait)
+                    log_warning_throttled(
+                        "binance-exchange-info-stale",
+                        "[BINANCE CACHE] exchangeInfo refresh gagal; memakai cache stale %.0fs untuk scan saja; retry backoff %.0fs.",
+                        age, retry_wait,
+                        interval_seconds=900.0,
+                        fingerprint="exchangeinfo-stale-cache-fallback",
+                    )
                     return dict(self._exchange_info_cache)
                 raise
 
@@ -2576,6 +2623,7 @@ class BinanceREST:
                 self._ticker_24h_cached_at = time.monotonic()
                 self._ticker_24h_retry_after = 0.0
                 self._ticker_24h_last_error = ""
+                clear_warning_throttle("binance-ticker-stale")
                 return copy.deepcopy(payload)
             except Exception as exc:
                 server_wait = getattr(exc, "server_cooldown_seconds", None)
@@ -2588,7 +2636,27 @@ class BinanceREST:
                 self._ticker_24h_last_error = str(exc)[:200]
                 stale_age = time.monotonic() - self._ticker_24h_cached_at if self._ticker_24h_cache is not None else float("inf")
                 if not force and self._ticker_24h_cache is not None and stale_age <= BINANCE_TICKER_24H_MAX_STALE_SECONDS:
-                    log.warning("[BINANCE CACHE] ticker refresh gagal; memakai snapshot stale %.0fs hanya untuk ranking universe; retry backoff %.0fs.", stale_age, retry_wait)
+                    governor = globals().get("BINANCE_REQUEST_GOVERNOR")
+                    cooldown_now = max(
+                        float(getattr(governor, "server_cooldown_remaining", 0.0) or 0.0),
+                        float(getattr(governor, "bot_cooldown_remaining", 0.0) or 0.0),
+                    )
+                    if cooldown_now > 0:
+                        log_warning_throttled(
+                            "binance-ticker-stale",
+                            "[BINANCE CACHE] ticker refresh terkena cooldown; snapshot stale %.0fs disimpan sebagai cache internal, scanner beralih ke Bybit; cooldown %.0fs.",
+                            stale_age, cooldown_now,
+                            interval_seconds=900.0,
+                            fingerprint="ticker-cooldown-bybit-fallback",
+                        )
+                    else:
+                        log_warning_throttled(
+                            "binance-ticker-stale",
+                            "[BINANCE CACHE] ticker refresh gagal; memakai snapshot stale %.0fs hanya untuk ranking universe; retry backoff %.0fs.",
+                            stale_age, retry_wait,
+                            interval_seconds=900.0,
+                            fingerprint="ticker-stale-cache-fallback",
+                        )
                     return copy.deepcopy(self._ticker_24h_cache)
                 raise
 
@@ -2684,6 +2752,7 @@ class BybitPublicREST:
                     raise RuntimeError("Bybit instruments response menghasilkan universe kosong.")
                 self._instruments_cache = set(symbols)
                 self._instruments_cached_at = time.monotonic()
+                clear_warning_throttle("bybit-instruments-stale")
                 return set(symbols)
             except Exception:
                 # Universe boleh memakai last-known-good sebatas TTL stale khusus
@@ -2691,7 +2760,13 @@ class BybitPublicREST:
                 # mengambil filter Binance dan validasi fresh pada jalur eksekusi.
                 stale_age = time.monotonic() - self._instruments_cached_at if self._instruments_cache is not None else float("inf")
                 if not force and self._instruments_cache is not None and stale_age <= BYBIT_INSTRUMENTS_MAX_STALE_SECONDS:
-                    log.warning("[BYBIT CACHE] refresh daftar instrumen gagal; memakai universe stale %.0fs untuk discovery saja.", stale_age)
+                    log_warning_throttled(
+                        "bybit-instruments-stale",
+                        "[BYBIT CACHE] refresh daftar instrumen gagal; memakai universe stale %.0fs untuk discovery saja.",
+                        stale_age,
+                        interval_seconds=900.0,
+                        fingerprint="bybit-instruments-stale-cache-fallback",
+                    )
                     return set(self._instruments_cache)
                 raise
 
@@ -2713,11 +2788,18 @@ class BybitPublicREST:
                     raise RuntimeError("Bybit ticker response kosong atau bukan list.")
                 self._tickers_cache = copy.deepcopy(rows)
                 self._tickers_cached_at = time.monotonic()
+                clear_warning_throttle("bybit-ticker-stale")
                 return copy.deepcopy(rows)
             except Exception:
                 stale_age = time.monotonic() - self._tickers_cached_at if self._tickers_cache is not None else float("inf")
                 if not force and self._tickers_cache is not None and stale_age <= BYBIT_TICKERS_MAX_STALE_SECONDS:
-                    log.warning("[BYBIT CACHE] ticker refresh gagal; memakai snapshot stale %.0fs untuk ranking universe.", stale_age)
+                    log_warning_throttled(
+                        "bybit-ticker-stale",
+                        "[BYBIT CACHE] ticker refresh gagal; memakai snapshot stale %.0fs untuk ranking universe.",
+                        stale_age,
+                        interval_seconds=900.0,
+                        fingerprint="bybit-ticker-stale-cache-fallback",
+                    )
                     return copy.deepcopy(self._tickers_cache)
                 raise
 
@@ -4696,6 +4778,8 @@ class TradingEngine:
         self._scan_cycle_number = 0
         self._scan_last_report: dict[str, Any] = {}
         self._scan_margin_streak: dict[str, int] = {}
+        self._scan_universe_source_last = "UNKNOWN"
+        self._scan_universe_source_last_notified = "UNKNOWN"
 
         # H4 scanner gate. H4 defaults OFF per fresh main.py session.
         # _h4_window_active means the current H4 close has opened a scanning
@@ -5634,6 +5718,10 @@ class TradingEngine:
             )
             return
 
+        # One notification per active cooldown window. Concurrent endpoints can
+        # all observe the same IP ban; do not fan each observation out to Telegram.
+        if now + bot <= self._rl_notified_until + 5.0:
+            return
         self._start_rate_limit_watcher()
         self._rl_notified_until = now + bot
         if self._rl_started_at is None:
@@ -9161,14 +9249,40 @@ class TradingEngine:
         self._scan_state_counts[state] = self._scan_state_counts.get(state, 0) + 1
         return candidate_id
 
+    def _binance_rest_cooldown_seconds(self) -> float:
+        """Maximum active Binance REST cooldown across public/private clients."""
+        values = [
+            float(getattr(self.real, "cooldown_remaining", 0.0) or 0.0),
+            float(getattr(self.real, "server_cooldown_remaining", 0.0) or 0.0),
+            float(getattr(BINANCE_REQUEST_GOVERNOR, "cooldown_remaining", 0.0) or 0.0),
+            float(getattr(BINANCE_REQUEST_GOVERNOR, "server_cooldown_remaining", 0.0) or 0.0),
+            float(getattr(BINANCE_REQUEST_GOVERNOR, "bot_cooldown_remaining", 0.0) or 0.0),
+        ]
+        return max(values, default=0.0)
+
+    @staticmethod
+    def _resource_pause_fingerprint(reason: str) -> str:
+        lower = str(reason or "").lower()
+        if "ram" in lower or "memory" in lower:
+            return "RAM_PRESSURE"
+        if "bobot request bot" in lower:
+            return "BOT_API_WEIGHT"
+        if "bobot ip binance" in lower:
+            return "BINANCE_IP_WEIGHT"
+        if "sisa waktu h4" in lower:
+            return "H4_WINDOW_NEAR_END"
+        if "proteksi/reconciliation real" in lower:
+            return "REAL_PROTECTION_RECONCILIATION"
+        return str(reason or "UNKNOWN").split(":", 1)[0][:100]
+
     def _scan_resource_guard(self) -> tuple[bool, str]:
         """Pause optional scan/validation work before resource pressure threatens execution."""
-        cooldown = max(
-            float(getattr(self.real, "cooldown_remaining", 0.0) or 0.0),
-            float(BINANCE_REQUEST_GOVERNOR.cooldown_remaining or 0.0),
-        )
-        if cooldown > 0:
-            return False, f"Binance cooldown aktif {cooldown:.0f}s."
+        cooldown = self._binance_rest_cooldown_seconds()
+        # A Binance REST cooldown must not freeze market analysis outright. The
+        # universe builder switches to Bybit tickers plus the last-known-good
+        # Binance symbol/filter cache. REAL order placement remains blocked by
+        # the exchange/client cooldown and is never bypassed by this fallback.
+        binance_rest_degraded = cooldown > 0
 
         usage = rss_mb()
         cgroup_limit = effective_memory_limit_mb()
@@ -9182,15 +9296,19 @@ class TradingEngine:
             if usage_after > 0 and usage_after >= threshold_mb:
                 return False, f"RAM {usage_after:.0f} MB mendekati budget scan {threshold_mb:.0f} MB setelah memory shedding."
 
-        bot_weight = API_STATS.weight_window(60)
-        if bot_weight >= SCAN_API_SOFT_PAUSE_WEIGHT:
-            return False, f"Estimasi bobot request bot {bot_weight}/menit mencapai batas pause scan {SCAN_API_SOFT_PAUSE_WEIGHT}."
-        estimated_ip = BINANCE_REQUEST_GOVERNOR.estimated_used_weight()
-        if estimated_ip >= SCAN_API_SOFT_PAUSE_WEIGHT:
-            snapshot = BINANCE_REQUEST_GOVERNOR.snapshot()
-            age = snapshot.get("header_age_seconds")
-            age_text = f"; header berumur {age:.0f}s" if age is not None else ""
-            return False, f"Estimasi bobot IP Binance {estimated_ip}{age_text}; scan ditunda."
+        # When Binance REST is blocked, its request-weight gate is not useful for
+        # the fallback path (which uses Bybit only). Without a cooldown, retain
+        # the normal API soft guard for Binance-dependent scan cycles.
+        if not binance_rest_degraded:
+            bot_weight = API_STATS.weight_window(60)
+            if bot_weight >= SCAN_API_SOFT_PAUSE_WEIGHT:
+                return False, f"Estimasi bobot request bot {bot_weight}/menit mencapai batas pause scan {SCAN_API_SOFT_PAUSE_WEIGHT}."
+            estimated_ip = BINANCE_REQUEST_GOVERNOR.estimated_used_weight()
+            if estimated_ip >= SCAN_API_SOFT_PAUSE_WEIGHT:
+                snapshot = BINANCE_REQUEST_GOVERNOR.snapshot()
+                age = snapshot.get("header_age_seconds")
+                age_text = f"; header berumur {age:.0f}s" if age is not None else ""
+                return False, f"Estimasi bobot IP Binance {estimated_ip}{age_text}; scan ditunda."
 
         if self._h4_enabled and self._h4_window_active:
             remaining = self._h4_window_remaining_seconds()
@@ -9393,31 +9511,74 @@ class TradingEngine:
     # --------------------------------------------------------
 
     async def _build_scan_universe(self) -> dict[str, Any]:
+        """Build the scan universe with an explicit Bybit-only fallback.
+
+        Binance REST cooldown/429/418 must never be bypassed. During the cooldown
+        the scanner uses Bybit public tickers and the last-known-good Binance
+        symbol/filter metadata. If no reasonably fresh Binance filters exist, it
+        fails closed with an empty universe rather than constructing invalid
+        executable setups.
+        """
         await self._purge_expired_bans()
-        # Exchange filters are TTL-cached; market-wide ticker snapshots are refreshed
-        # only when their bounded TTL expires, not on every scan cycle.
-        self.symbols = await self.rest.get_exchange_info()
-        binance_tickers = await self.rest.get_24h_tickers()
+
+        # Always get the independent market-data source first so it is available
+        # when Binance REST is blocked.
         bybit_symbols = await self.bybit.get_linear_perpetual_symbols()
         bybit_tickers = await self.bybit.get_linear_tickers()
 
-        bn: dict[str, dict[str, Any]] = {}
-        for item in binance_tickers:
-            pair = normalize_symbol(str(item.get("symbol") or ""))
-            if pair not in self.symbols:
-                continue
-            if pair not in bybit_symbols:
-                continue
-            quote_volume = item.get("quoteVolume")
-            if quote_volume in (None, ""):
-                quote_volume = item.get("volume")
+        fallback_reason: str | None = None
+        binance_tickers: list[dict[str, Any]] | None = None
+        cooldown = self._binance_rest_cooldown_seconds()
+        if cooldown > 0:
+            fallback_reason = f"Binance REST cooldown aktif ({cooldown:.0f}s); memakai Bybit untuk discovery."
+        else:
             try:
-                volume = Decimal(str(quote_volume or "0"))
-            except InvalidOperation:
-                volume = Decimal("0")
-            bn[pair] = {
-                "volume_quote": volume,
-                "price": Decimal(str(item.get("lastPrice") or "0")),
+                self.symbols = await self.rest.get_exchange_info()
+                binance_tickers = await self.rest.get_24h_tickers()
+                # A ticker client may return its last-good snapshot after a 429
+                # instead of raising. Re-check the governor after the call so a
+                # newly-established cooldown switches the same cycle to Bybit.
+                cooldown_after_fetch = self._binance_rest_cooldown_seconds()
+                if cooldown_after_fetch > 0:
+                    fallback_reason = (
+                        f"Binance REST cooldown aktif setelah refresh ticker ({cooldown_after_fetch:.0f}s); "
+                        "memakai Bybit untuk discovery."
+                    )
+                    binance_tickers = None
+            except Exception as exc:
+                fallback_reason = f"Binance market data tidak tersedia ({type(exc).__name__}: {str(exc)[:140]})."
+                log_warning_throttled(
+                    "scan-universe-binance-fallback",
+                    "[SCAN FALLBACK] %s Menggunakan Bybit ticker + cache simbol Binance untuk discovery; tidak melewati cooldown server.",
+                    fallback_reason,
+                    interval_seconds=900.0,
+                    fingerprint=("BINANCE_FALLBACK:" + ("COOLDOWN" if self._binance_rest_cooldown_seconds() > 0 else type(exc).__name__)),
+                )
+
+        # Symbol filters are required later to normalize entry/SL/TP to Binance
+        # tick size and validate executable prices. Use last-known-good metadata
+        # only inside the explicit stale budget; never guess tick sizes.
+        exchange_cache = getattr(self.rest, "_exchange_info_cache", None)
+        cache_stamp = float(getattr(self.rest, "_exchange_info_cached_at", 0.0) or 0.0)
+        cache_age = time.monotonic() - cache_stamp if exchange_cache else float("inf")
+        cache_max_age = float(BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS)
+        if exchange_cache and cache_age <= cache_max_age:
+            if not self.symbols:
+                self.symbols = dict(exchange_cache)
+        elif fallback_reason:
+            self.symbols = {}
+            log_warning_throttled(
+                "scan-universe-fallback-no-filters",
+                "[SCAN FALLBACK] tidak ada cache exchangeInfo Binance yang cukup segar; discovery ditahan agar setup tidak dibuat dengan tick size tebakan.",
+                interval_seconds=900.0,
+                fingerprint="NO_VALID_BINANCE_FILTER_CACHE",
+            )
+            self._scan_universe_source_last = "BLOCKED_NO_BINANCE_FILTERS"
+            return {
+                "rows": [], "binance_count": 0, "bybit_count": len(bybit_symbols),
+                "common_count": 0, "source": "BLOCKED_NO_BINANCE_FILTERS",
+                "fallback_reason": fallback_reason,
+                "symbol_filter_cache_age_seconds": None,
             }
 
         by: dict[str, dict[str, Any]] = {}
@@ -9431,9 +9592,71 @@ class TradingEngine:
                 turnover = Decimal("0")
             try:
                 price = Decimal(str(item.get("lastPrice") or "0"))
-            except InvalidOperation:
+            except (InvalidOperation, ValueError):
                 price = Decimal("0")
             by[pair] = {"volume_quote": turnover, "price": price}
+
+        if fallback_reason or binance_tickers is None:
+            if self._binance_rest_cooldown_seconds() > 0:
+                log_warning_throttled(
+                    "scan-universe-binance-fallback",
+                    "[SCAN FALLBACK] Binance REST cooldown aktif selama %.0fs; memakai Bybit ticker + cache simbol Binance untuk discovery.",
+                    self._binance_rest_cooldown_seconds(),
+                    interval_seconds=900.0,
+                    fingerprint="BINANCE_COOLDOWN_BYBIT_FALLBACK",
+                )
+            # Do not touch Binance REST while a server cooldown is active. A
+            # live Binance WebSocket price may enrich the row but is optional;
+            # Bybit turnover/price is sufficient for discovery and analysis.
+            rows = []
+            for pair, values in by.items():
+                if pair not in self.symbols:
+                    continue
+                snapshot = self.prices.get(pair)
+                ws_price = snapshot.price if snapshot is not None and snapshot.live else Decimal("0")
+                rows.append({
+                    "pair": pair,
+                    "binance_volume_quote": Decimal("0"),
+                    "bybit_volume_quote": values["volume_quote"],
+                    "combined_volume_quote": values["volume_quote"],
+                    "binance_price": ws_price,
+                    "bybit_price": values["price"],
+                })
+            rows.sort(key=lambda item: item["combined_volume_quote"], reverse=True)
+            source = "BYBIT_FALLBACK"
+            self._scan_universe_source_last = source
+            if not fallback_reason:
+                fallback_reason = "Binance ticker snapshot tidak tersedia; menggunakan Bybit ticker."
+            if source != getattr(self, "_scan_universe_source_last_notified", None):
+                log.info("[SCAN FALLBACK] universe source=BYBIT_FALLBACK; pairs=%s; reason=%s", len(rows), fallback_reason)
+                self._scan_universe_source_last_notified = source
+            return {
+                "rows": rows,
+                "binance_count": 0,
+                "bybit_count": len(by),
+                "common_count": len(rows),
+                "source": source,
+                "fallback_reason": fallback_reason,
+                "symbol_filter_cache_age_seconds": cache_age if math.isfinite(cache_age) else None,
+            }
+
+        bn: dict[str, dict[str, Any]] = {}
+        for item in binance_tickers:
+            pair = normalize_symbol(str(item.get("symbol") or ""))
+            if pair not in self.symbols or pair not in bybit_symbols:
+                continue
+            quote_volume = item.get("quoteVolume")
+            if quote_volume in (None, ""):
+                quote_volume = item.get("volume")
+            try:
+                volume = Decimal(str(quote_volume or "0"))
+            except InvalidOperation:
+                volume = Decimal("0")
+            try:
+                price = Decimal(str(item.get("lastPrice") or "0"))
+            except (InvalidOperation, ValueError):
+                price = Decimal("0")
+            bn[pair] = {"volume_quote": volume, "price": price}
 
         common = sorted(set(bn) & set(by))
         rows = []
@@ -9447,12 +9670,19 @@ class TradingEngine:
                 "binance_price": bn[pair]["price"],
                 "bybit_price": by[pair]["price"],
             })
-        rows.sort(key=lambda x: x["combined_volume_quote"], reverse=True)
+        rows.sort(key=lambda item: item["combined_volume_quote"], reverse=True)
+        self._scan_universe_source_last = "BINANCE_BYBIT_INTERSECTION"
+        self._scan_universe_source_last_notified = "BINANCE_BYBIT_INTERSECTION"
+        clear_warning_throttle("scan-universe-binance-fallback")
+        clear_warning_throttle("scan-universe-fallback-no-filters")
         return {
             "rows": rows,
             "binance_count": len(bn),
             "bybit_count": len(by),
             "common_count": len(rows),
+            "source": "BINANCE_BYBIT_INTERSECTION",
+            "fallback_reason": None,
+            "symbol_filter_cache_age_seconds": cache_age if math.isfinite(cache_age) else None,
         }
 
     def _margin_config(self) -> tuple[Decimal | None, Decimal | None]:
@@ -9884,16 +10114,10 @@ class TradingEngine:
                     self._scan_auto_paused = True
                     break
 
-                while self._running and self._scan_user_enabled and self.real.cooldown_remaining > 0:
-                    if self._h4_enabled and self._h4_window_expired():
-                        self._invalidate_h4_window("Binance rate-limit/cooldown melewati +1 jam dari jadwal H4.")
-                        break
-                    wait_for_cooldown = self.real.cooldown_remaining
-                    wait_for_h4 = self._h4_window_remaining_seconds() if self._h4_enabled else None
-                    waits = [wait_for_cooldown, 30.0]
-                    if wait_for_h4 is not None:
-                        waits.append(max(0.25, wait_for_h4))
-                    await asyncio.sleep(max(0.25, min(waits)))
+                # Do not stall the whole scanner for a Binance REST cooldown.
+                # _build_scan_universe switches to Bybit-only discovery using
+                # cached Binance symbol filters. Any REAL order operation remains
+                # blocked by the Binance client/governor cooldown.
                 if not (self._running and self._scan_user_enabled):
                     break
                 if self._h4_enabled and not self._h4_window_active:
@@ -9940,9 +10164,14 @@ class TradingEngine:
                 if not (self._running and self._scan_user_enabled):
                     break
 
-                # In H4 mode, keep scanning inside the active window. In normal
-                # mode retain the original cycle delay.
-                await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
+                # Resource pauses are rechecked less frequently; in Bybit fallback
+                # mode also slow the cycle to avoid transferring the Binance limit
+                # into an avoidable Bybit request burst.
+                if self._scan_last_report.get("status") == "PAUSED_RESOURCE":
+                    next_delay = max(float(SCAN_RECHECK_RESOURCE_SECONDS), SCAN_CYCLE_DELAY_SECONDS)
+                else:
+                    next_delay = float(self._scan_last_report.get("next_cycle_delay_seconds", SCAN_CYCLE_DELAY_SECONDS))
+                await asyncio.sleep(max(1.0, next_delay))
             except asyncio.CancelledError:
                 raise
             except BinanceRateLimitError as exc:
@@ -9978,6 +10207,7 @@ class TradingEngine:
                 "cycle": cycle, "status": "PAUSED_RESOURCE", "pause_reason": resource_reason,
                 "duration_seconds": duration, "candidate_queue_size": len(self._candidate_queue),
                 "research_running": self._research_running,
+                "next_cycle_delay_seconds": max(float(SCAN_RECHECK_RESOURCE_SECONDS), SCAN_CYCLE_DELAY_SECONDS),
             }
             api_weight_1m = API_STATS.weight_window(60)
             if self._research_store_available:
@@ -9985,17 +10215,26 @@ class TradingEngine:
                     await asyncio.to_thread(self.research_store.record_cycle, cycle, duration, "PAUSED_RESOURCE", rss_mb(), api_weight_1m, {"pause_reason": resource_reason})
                 except Exception as exc:
                     log.warning("[LEDGER] gagal menyimpan scan cycle yang dijeda: %s", exc)
-            log.warning("[SCAN] Cycle #%s dijeda sebelum request market data: %s", cycle, resource_reason)
-            await self.reply(
-                f"⏸️ SCAN DITUNDA demi resource/safety\n\n{resource_reason}\n\n"
-                "Posisi aktif tetap dikelola. Scanner akan mencoba kembali pada siklus berikutnya."
+            notify_pause = log_warning_throttled(
+                "scan-resource-pause",
+                "[SCAN] Cycle #%s dijeda sebelum request market data: %s",
+                cycle, resource_reason,
+                interval_seconds=900.0,
+                fingerprint=self._resource_pause_fingerprint(resource_reason),
             )
+            if notify_pause:
+                await self.reply(
+                    f"⏸️ SCAN DITUNDA demi resource/safety\n\n{resource_reason}\n\n"
+                    "Posisi aktif tetap dikelola. Scanner akan mencoba kembali setelah jeda pemeriksaan; notifikasi berulang dibatasi."
+                )
+            else:
+                log.info("[SCAN] resource pause berulang disembunyikan dari Telegram (fingerprint=%s).", self._resource_pause_fingerprint(resource_reason))
             return
         await self.reply(
             card(
                 f"🛰️ SCAN #{cycle} DIMULAI",
                 [
-                    "📡 Regime BTC → universe Binance ∩ Bybit",
+                    "📡 Regime BTC → universe Binance ∩ Bybit (fallback Bybit-only saat Binance cooldown)",
                     f"🎯 Batch maksimum {SCAN_MAX_PAIRS_PER_CYCLE} pair",
                     "⏳ Memindai...",
                 ],
@@ -10121,7 +10360,13 @@ class TradingEngine:
                             deferred_pair, None, "WAITING_RESOURCE_BUDGET", resource_reason,
                             cycle, recheck_seconds=SCAN_RECHECK_RESOURCE_SECONDS,
                         )
-                    log.warning("[SCAN] Cycle #%s analysis paused before %s: %s; deferred=%s", cycle, pair, resource_reason, len(deferred_pairs))
+                    log_warning_throttled(
+                        "scan-resource-pause-analysis",
+                        "[SCAN] Cycle #%s analysis paused before %s: %s; deferred=%s",
+                        cycle, pair, resource_reason, len(deferred_pairs),
+                        interval_seconds=900.0,
+                        fingerprint=self._resource_pause_fingerprint(resource_reason),
+                    )
                     break
 
                 scanned += 1
@@ -10209,11 +10454,14 @@ class TradingEngine:
                     analysis_errors += 1
                     if getattr(exc, "bybit_rate_limited", False):
                         retry_after = getattr(exc, "retry_after_seconds", 0.0)
-                        log.warning(
+                        log_warning_throttled(
+                            "scan-bybit-analysis-limit",
                             "[SCAN] analysis %s dilewati setelah Bybit rate-limit backoff | retry_after=%.2fs | %s",
                             pair,
                             float(retry_after or 0.0),
                             exc,
+                            interval_seconds=900.0,
+                            fingerprint="BYBIT_ANALYSIS_RATE_LIMIT",
                         )
                     elif getattr(exc, "insufficient_history", False):
                         await self._record_candidate(pair, None, "DATA_UNAVAILABLE", f"Riwayat candle belum cukup: {exc}", cycle, recheck_seconds=SCAN_RECHECK_ERROR_SECONDS)
@@ -10281,7 +10529,13 @@ class TradingEngine:
                         "WAITING_RESOURCE_BUDGET", resource_reason, cycle,
                         recheck_seconds=SCAN_RECHECK_RESOURCE_SECONDS,
                     )
-                log.warning("[SCAN] Cycle #%s validator paused: %s; deferred=%s", cycle, resource_reason, len(remaining_candidates))
+                log_warning_throttled(
+                    "scan-resource-pause-validator",
+                    "[SCAN] Cycle #%s validator paused: %s; deferred=%s",
+                    cycle, resource_reason, len(remaining_candidates),
+                    interval_seconds=900.0,
+                    fingerprint=self._resource_pause_fingerprint(resource_reason),
+                )
                 break
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
@@ -10307,11 +10561,14 @@ class TradingEngine:
                 validator_rejects += 1
                 if getattr(exc, "bybit_rate_limited", False):
                     retry_after = getattr(exc, "retry_after_seconds", 0.0)
-                    log.warning(
+                    log_warning_throttled(
+                        "scan-bybit-validator-limit",
                         "[SCAN] validator %s dilewati setelah Bybit rate-limit backoff | retry_after=%.2fs | %s",
                         candidate["pair"],
                         float(retry_after or 0.0),
                         exc,
+                        interval_seconds=900.0,
+                        fingerprint="BYBIT_VALIDATOR_RATE_LIMIT",
                     )
                 else:
                     log.exception(
@@ -10340,7 +10597,13 @@ class TradingEngine:
                     "WAITING_RESOURCE_BUDGET", resource_reason, cycle,
                     recheck_seconds=SCAN_RECHECK_RESOURCE_SECONDS,
                 )
-                log.warning("[SCAN] Trade candidate ditunda karena resource/safety guard: %s | %s", candidate.get("pair"), resource_reason)
+                log_warning_throttled(
+                    "scan-resource-pause-final-add",
+                    "[SCAN] Trade candidate ditunda karena resource/safety guard: %s | %s",
+                    candidate.get("pair"), resource_reason,
+                    interval_seconds=900.0,
+                    fingerprint=self._resource_pause_fingerprint(resource_reason),
+                )
                 continue
             if not self._scan_user_enabled:
                 break
@@ -10359,6 +10622,19 @@ class TradingEngine:
                 continue
 
             try:
+                if self.real_mode and self._binance_rest_cooldown_seconds() > 0:
+                    remaining = self._binance_rest_cooldown_seconds()
+                    reason = (
+                        f"Setup valid berdasarkan data market, namun entry REAL ditunda karena Binance REST cooldown aktif ({remaining:.0f}s). "
+                        "Tidak ada request/order yang diterobos; scanner akan mengevaluasi ulang setelah jeda."
+                    )
+                    await self._record_candidate(
+                        candidate["pair"], candidate, "WAITING_RESOURCE_BUDGET", reason,
+                        cycle, recheck_seconds=max(SCAN_RECHECK_RESOURCE_SECONDS, 120),
+                    )
+                    final_balance_note = "Entry REAL ditunda selama Binance cooldown; posisi aktif tetap dikelola."
+                    log.info("[SCAN] %s masuk waiting queue; Binance cooldown tersisa %.0fs.", candidate["pair"], remaining)
+                    continue
                 meta = {
                     "strategy_name": candidate.get("strategy_name") or "SMC_VLT_RSI",
                     "strategy_version": candidate.get("strategy_version") or "SCAN",
@@ -10588,15 +10864,22 @@ class TradingEngine:
             "candidate_queue_size": len(self._candidate_queue),
             "research_running": self._research_running,
             "research_counts": (await asyncio.to_thread(self.research_store.research_counts)) if self._research_store_available else {},
-            "next_cycle_delay_seconds": SCAN_CYCLE_DELAY_SECONDS,
+            "universe_source": universe.get("source", "UNKNOWN"),
+            "universe_fallback_reason": universe.get("fallback_reason"),
+            "next_cycle_delay_seconds": (
+                max(120.0, SCAN_CYCLE_DELAY_SECONDS)
+                if universe.get("source") == "BYBIT_FALLBACK"
+                else SCAN_CYCLE_DELAY_SECONDS
+            ),
         }
 
         # Informasi proses detail tetap di Render; ringkasan cycle completion
         # dikirim ke Telegram oleh TelegramErrorHandler karena itu adalah INFO
         # khusus yang kita izinkan.
         log.info(
-            "[SCAN] Cycle #%s completed | scanned=%s aligned=%s threshold=%s validated=%s added=%s avg_initial=%s avg_validated=%s duration=%.2fs",
+            "[SCAN] Cycle #%s completed | universe_source=%s scanned=%s aligned=%s threshold=%s validated=%s added=%s avg_initial=%s avg_validated=%s duration=%.2fs",
             cycle,
+            universe.get("source", "UNKNOWN"),
             scanned,
             len(directional),
             threshold_pass_count,
@@ -10640,11 +10923,11 @@ class TradingEngine:
         await self.reply(
             f"╭─ 🔄 SCAN #{cycle} SELESAI ─╮\n"
             f"│ ₿ BTC H4   {btc_trend}\n"
-            f"│ ⏱ {duration:.0f}s  •  siklus berikut {SCAN_CYCLE_DELAY_SECONDS:g}s\n"
+            f"│ ⏱ {duration:.0f}s  •  siklus berikut {self._scan_last_report.get('next_cycle_delay_seconds', SCAN_CYCLE_DELAY_SECONDS):g}s\n"
             f"│ 💾 RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
             "╰──────────────────╯\n\n"
             "🌐 UNIVERSE\n"
-            f"├ Binance ∩ Bybit  {universe['common_count']}\n"
+            f"├ Universe {universe.get('source', 'UNKNOWN')}  {universe['common_count']}\n"
             f"├ Banned           {banned_count}\n"
             f"├ Sudah di /trade  {already_trade}\n"
             f"├ Margin blocked   {margin_blocked}\n"
