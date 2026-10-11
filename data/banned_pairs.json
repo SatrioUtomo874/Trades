@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-11T07:29:36.534542+00:00",
+  "saved_at": "2026-10-11T07:29:38.255630+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -47,6 +47,13 @@
     {
       "pair": "LINKUSDT",
       "banned_at": "2026-10-11T07:29:32.411755+00:00",
+      "until": null,
+      "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5 (toleransi ±10%).",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "LTCUSDT",
+      "banned_at": "2026-10-11T07:29:38.255598+00:00",
       "until": null,
       "reason": "Margin Influence terdeteksi 3 cycle berturut-turut; Tidak ada quantity legal pada target notional 5 (toleransi ±10%).",
       "source": "AUTO_MARGIN_INFLUENCE"
