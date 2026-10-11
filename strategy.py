@@ -57,12 +57,14 @@ Catatan penting:
 """
 
 import asyncio
-import contextvars
+import hashlib
+import logging
 import math
+import os
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from statistics import median
 from typing import Any, Iterable
 
@@ -75,9 +77,78 @@ import requests
 
 STRATEGY_NAME = "SMC_VLT_RSI"
 STRATEGY_ENGINE = "V2"
+STRATEGY_SCHEMA_VERSION = 1
+SCORING_FORMULA_VERSION = "V2.1-weights100"
+
+_log = logging.getLogger("strategy")
+
+
+def _env_float(name: str, default: float, lo: float | None = None, hi: float | None = None) -> float:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        value = float(raw)
+        if not math.isfinite(value) or (lo is not None and value < lo) or (hi is not None and value > hi):
+            raise ValueError("out of range")
+        return value
+    except (TypeError, ValueError):
+        _log.error("Config %s=%r tidak valid; memakai default %s", name, raw, default)
+        return default
+
+
+def _env_int(name: str, default: int, lo: int | None = None, hi: int | None = None) -> int:
+    return int(_env_float(name, float(default), None if lo is None else float(lo), None if hi is None else float(hi)))
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Candle cache (RAM, bounded). Nilai akhir harus diukur di host deployment.
+CANDLE_CACHE_ENABLED = _env_bool("CANDLE_CACHE_ENABLED", True)
+CANDLE_CACHE_MAX_MB = _env_float("CANDLE_CACHE_MAX_MB", 24.0, 1.0, 512.0)
+CANDLE_CACHE_MAX_ENTRIES = _env_int("CANDLE_CACHE_MAX_ENTRIES", 600, 10, 20000)
+CANDLE_CACHE_TTL_M15 = _env_float("CANDLE_CACHE_TTL_M15", 45.0, 1.0, 3600.0)
+CANDLE_CACHE_TTL_H1 = _env_float("CANDLE_CACHE_TTL_H1", 180.0, 1.0, 7200.0)
+CANDLE_CACHE_TTL_H4 = _env_float("CANDLE_CACHE_TTL_H4", 600.0, 1.0, 14400.0)
+CANDLE_BYTES_ESTIMATE = 120
+SERIES_MIN_REFETCH_SECONDS = 3.0
+SERIES_PROVIDER_LAG_GRACE_SECONDS = 20.0
+SERIES_MAX_INVALID_FRACTION = 0.02
+VALIDATION_MAX_AGE_M15 = _env_float("VALIDATION_MAX_AGE_M15", 30.0, 1.0, 600.0)
+VALIDATION_MAX_AGE_H4 = _env_float("VALIDATION_MAX_AGE_H4", 300.0, 1.0, 3600.0)
+TRAIL_M15_MAX_AGE_SECONDS = _env_float("TRAIL_M15_MAX_AGE_SECONDS", 60.0, 1.0, 900.0)
+
+# Biaya (estimasi, per sisi). Funding hanya dihitung bila datanya tersedia.
+EST_FEE_PCT_PER_SIDE = _env_float("EST_FEE_PCT_PER_SIDE", 0.05, 0.0, 5.0)
+EST_SLIPPAGE_PCT_PER_SIDE = _env_float("EST_SLIPPAGE_PCT_PER_SIDE", 0.03, 0.0, 5.0)
+MIN_RR_AFTER_COSTS = _env_float("MIN_RR_AFTER_COSTS", 0.0, 0.0, 20.0)  # 0 = hanya laporan
+
+# BTC counter-trend: OFF secara default; aktifkan hanya dengan bukti backtest.
+ALLOW_BTC_COUNTER_TREND = _env_bool("ALLOW_BTC_COUNTER_TREND", False)
+BTC_COUNTER_TREND_PENALTY = _env_float("BTC_COUNTER_TREND_PENALTY", 12.0, 0.0, 60.0)
+BTC_EXTREME_CONFIDENCE = _env_float("BTC_EXTREME_CONFIDENCE", 90.0, 50.0, 100.0)
+
+# Kode state kandidat & alasan (stabil, machine-readable).
+CANDIDATE_STATES = (
+    "DATA_UNAVAILABLE", "REJECTED_HARD", "REJECTED_QUALITY", "WAITING_PRICE",
+    "WAITING_TRIGGER", "READY", "PENDING", "FILLED", "CLOSED", "EXPIRED",
+    "SUPERSEDED", "REPLAY_PENDING", "REPLAY_COMPLETE", "REPLAY_AMBIGUOUS",
+    "REPLAY_UNAVAILABLE",
+)
+REASON_CODES = (
+    "GEOMETRY_INVALID", "ENTRY_OUTSIDE_ZONE", "ZONE_INVERTED", "ZONE_TOO_WIDE",
+    "SL_MISSING", "TP_MISSING", "PRICE_INVALID", "RR_BELOW_MIN", "RR_AFTER_COST_BELOW_MIN",
+    "DATA_STALE", "DATA_INSUFFICIENT", "DATA_INVALID", "TRIGGER_NOT_CONFIRMED",
+    "LOW_QUALITY_FALLBACK", "BELOW_QUALITY_FLOOR", "BTC_COUNTER_TREND",
+    "BTC_HIGH_RISK_CONFLICT", "PRICE_IN_ZONE", "PRICE_NOT_IN_ZONE", "READY_FOR_VALIDATION",
+)
+ENTRY_ZONE_MAX_WIDTH_PCT = 15.0
 STRATEGY_VERSION = "2.2.0"
-STRATEGY_OUTPUT_SCHEMA_VERSION = 1
-STRATEGY_SCORING_FORMULA_VERSION = "THESIS_V2_BASELINE"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -96,29 +167,6 @@ PAIR_H4_CANDLES_REQUIRED = 120
 BTC_H4_CANDLES_REQUIRED = 240
 
 HTTP_TIMEOUT_SECONDS = 20
-
-# Bounded, shared recent-candle cache. This is intentionally an in-memory
-# working-set cache, not a historical archive. M1 research history belongs in
-# the persistent research store managed by main.py.
-CANDLE_CACHE_MAX_ENTRIES = 24
-CANDLE_CACHE_MAX_CANDLES = 12000
-CANDLE_CACHE_APPROX_BYTES_PER_CANDLE = 512
-CANDLE_CACHE_MAX_APPROX_BYTES = 6 * 1024 * 1024
-CANDLE_CACHE_TTL_SECONDS = {
-    "15": 45.0,
-    "60": 180.0,
-    "240": 600.0,
-    "D": 1800.0,
-}
-
-# Validation may request fresher data than ordinary repeated analysis. Context
-# variables preserve the public fetch_series signature for existing callers.
-_SERIES_MAX_AGE_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
-    "strategy_series_max_age_override", default=None
-)
-_SERIES_FORCE_REFRESH: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "strategy_series_force_refresh", default=False
-)
 
 # Bybit public REST can return retCode=10006 (API rate limit).
 # The scanner already spaces pairs by 1s, but each pair may need several
@@ -295,9 +343,6 @@ THESIS_WAITING_CAP_V2 = 68.0
 THESIS_VETO_CAP_V2 = 55.0
 THESIS_FALLBACK_CAP_V2 = 60.0
 THESIS_MIN_QUALITY_V2 = 45.0
-# A candidate with missing/stale critical market data must not pass main.py's
-# legacy confidence-threshold gate even if its last analytical score was high.
-DATA_QUALITY_CONFIDENCE_CAP = 40.0
 
 # Thesis freshness / trigger age.
 THESIS_MAX_TRIGGER_AGE_M15 = 32
@@ -980,180 +1025,233 @@ def _binance_interval(interval: str) -> str:
 # FETCHING / NORMALIZATION
 # ============================================================================
 
-_CANDLE_SERIES_CACHE: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
-_CANDLE_CACHE_LOCK = threading.RLock()
-_CANDLE_INFLIGHT: dict[tuple[Any, ...], asyncio.Task] = {}
-_CANDLE_CACHE_METRICS: dict[str, int] = {
-    "hits": 0,
-    "misses": 0,
-    "refreshes": 0,
-    "evictions": 0,
-    "failures": 0,
-    "deduplicated_waiters": 0,
-}
+class DataInvalidError(RuntimeError):
+    """Seri candle rusak (geometri OHLC tidak masuk akal)."""
 
 
-def clear_candle_cache(*, clear_metrics: bool = False) -> None:
-    """Clear the recent candle working-set cache (also useful for local tests)."""
-    with _CANDLE_CACHE_LOCK:
-        _CANDLE_SERIES_CACHE.clear()
-        if clear_metrics:
-            for key in _CANDLE_CACHE_METRICS:
-                _CANDLE_CACHE_METRICS[key] = 0
+def _valid_candle(c: Candle) -> bool:
+    try:
+        vals = (c.open, c.high, c.low, c.close)
+        if not all(math.isfinite(v) and v > 0 for v in vals):
+            return False
+        return c.high >= c.low and c.low <= min(c.open, c.close) and c.high >= max(c.open, c.close)
+    except (TypeError, ValueError):
+        return False
 
 
-def candle_cache_stats() -> dict[str, Any]:
-    """Return compact diagnostics without exposing or copying cached candles."""
-    with _CANDLE_CACHE_LOCK:
-        entries = list(_CANDLE_SERIES_CACHE.values())
-        return {
-            **_CANDLE_CACHE_METRICS,
-            "entries": len(entries),
-            "candles": sum(len(item.get("candles") or ()) for item in entries),
-            "approx_bytes": sum(int(item.get("approx_bytes") or 0) for item in entries),
-            "max_entries": CANDLE_CACHE_MAX_ENTRIES,
-            "max_candles": CANDLE_CACHE_MAX_CANDLES,
-            "max_approx_bytes": CANDLE_CACHE_MAX_APPROX_BYTES,
-            "last_closed_candle_ms": max(
-                (int(item.get("last_closed_candle_ms") or 0) for item in entries),
-                default=0,
-            ),
-        }
-
-
-def _series_ttl_seconds(interval: str) -> float:
-    return float(CANDLE_CACHE_TTL_SECONDS.get(str(interval), 45.0))
-
-
-def _copy_candles(candles: Iterable[Candle]) -> list[Candle]:
-    # Candle instances are mutable, so copy each object and not just the list.
-    return [replace(candle) for candle in candles]
-
-
-def _sanitize_closed_candles(
-    candles: Iterable[Candle],
-    count: int,
+def normalize_candles(
+    candles: list[Candle],
     interval_ms: int,
     *,
     now_ms: int | None = None,
-) -> list[Candle]:
-    """Validate OHLCV, remove duplicate timestamps, sort and drop open candles."""
-    now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
-    by_timestamp: dict[int, Candle] = {}
-    for item in candles:
-        if not isinstance(item, Candle):
+) -> tuple[list[Candle], dict[str, int]]:
+    """Urutkan, dedupe, buang candle belum close / geometri rusak. Tidak memutasi input."""
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    by_time: dict[int, Candle] = {}
+    stats = {"input": len(candles), "open_dropped": 0, "invalid_dropped": 0, "duplicates": 0, "gaps": 0}
+    for c in candles:
+        if c.time_ms + interval_ms > now_ms:
+            stats["open_dropped"] += 1
             continue
-        try:
-            timestamp = int(item.time_ms)
-            open_price = float(item.open)
-            high = float(item.high)
-            low = float(item.low)
-            close = float(item.close)
-            volume = float(item.volume)
-            turnover = float(item.turnover)
-        except (TypeError, ValueError, OverflowError):
+        if not _valid_candle(c):
+            stats["invalid_dropped"] += 1
             continue
-        values = (open_price, high, low, close, volume, turnover)
-        if not all(math.isfinite(value) for value in values):
-            continue
-        if timestamp < 0 or timestamp + interval_ms > now_ms:
-            continue
-        if min(open_price, high, low, close) <= 0 or volume < 0 or turnover < 0:
-            continue
-        if high < max(open_price, close, low) or low > min(open_price, close, high):
-            continue
-        by_timestamp[timestamp] = Candle(
-            time_ms=timestamp,
-            open=open_price,
-            high=high,
-            low=low,
-            close=close,
-            volume=volume,
-            turnover=turnover,
+        if c.time_ms in by_time:
+            stats["duplicates"] += 1
+        by_time[c.time_ms] = c
+    ordered = [by_time[k] for k in sorted(by_time)]
+    for prev, cur in zip(ordered, ordered[1:]):
+        if cur.time_ms - prev.time_ms > interval_ms:
+            stats["gaps"] += 1
+    seen = max(1, stats["input"] - stats["open_dropped"])
+    if stats["invalid_dropped"] / seen > SERIES_MAX_INVALID_FRACTION:
+        raise DataInvalidError(
+            f"{stats['invalid_dropped']} dari {seen} candle memiliki geometri OHLC tidak valid."
         )
-    ordered = [by_timestamp[key] for key in sorted(by_timestamp)]
-    if len(ordered) < count:
-        raise InsufficientHistoryError(
-            f"Setelah validasi closed-candle, tersedia {len(ordered)} candle; diperlukan {count}."
-        )
-    return ordered[-count:]
+    return ordered, stats
 
 
-def _candle_gap_count(candles: Iterable[Candle], interval_ms: int) -> int:
-    """Count missing intervals in an ordered series without mutating it."""
-    stamps = sorted({int(c.time_ms) for c in candles if isinstance(c, Candle)})
-    if interval_ms <= 0 or len(stamps) < 2:
-        return 0
-    return sum(max(0, (right - left) // interval_ms - 1) for left, right in zip(stamps, stamps[1:]))
+@dataclass(slots=True)
+class _SeriesEntry:
+    candles: list
+    source: str
+    fetched_at: float
+    last_closed_ms: int
+    interval_ms: int
+    approx_bytes: int
+    gaps: int = 0
 
 
-def _cache_entry_is_fresh(
-    entry: dict[str, Any], interval_ms: int, max_age_seconds: float, now_ms: int
-) -> bool:
-    age = max(0.0, time.monotonic() - float(entry.get("created_monotonic") or 0.0))
-    if age > max(0.0, max_age_seconds):
-        return False
-    last_closed = int(entry.get("last_closed_candle_ms") or 0)
-    if last_closed <= 0:
-        return False
-    latest_closed_start = (now_ms // interval_ms) * interval_ms - interval_ms
-    # Allow a series one bar behind for the short cache TTL to avoid repeated
-    # requests during exchange publication lag. The output freshness gate is
-    # stricter and prevents stale data from being used to authorize a setup.
-    if latest_closed_start - last_closed > interval_ms:
-        return False
-    if last_closed + interval_ms > now_ms:
-        return False
-    return True
+_SERIES_CACHE: "OrderedDict[tuple[str, str, str], _SeriesEntry]" = OrderedDict()
+_SERIES_INFLIGHT: dict[tuple, Any] = {}
+_SERIES_STATS: dict[str, int] = {
+    "hits": 0, "misses": 0, "evictions": 0, "refreshes": 0, "failures": 0,
+    "inflight_shared": 0, "stores": 0, "bypass": 0,
+}
+_SERIES_LOCK = threading.Lock()
 
 
-def _store_candle_series(key: tuple[Any, ...], candles: list[Candle], source: str) -> None:
-    copied = tuple(_copy_candles(candles))
-    approx_bytes = len(copied) * CANDLE_CACHE_APPROX_BYTES_PER_CANDLE
-    if len(copied) > CANDLE_CACHE_MAX_CANDLES or approx_bytes > CANDLE_CACHE_MAX_APPROX_BYTES:
+def _series_ttl(interval_ms: int) -> float:
+    if interval_ms <= 15 * 60_000:
+        return CANDLE_CACHE_TTL_M15
+    if interval_ms <= 60 * 60_000:
+        return CANDLE_CACHE_TTL_H1
+    return CANDLE_CACHE_TTL_H4
+
+
+def _expected_last_closed_ms(now_ms: int, interval_ms: int) -> int:
+    return (now_ms // interval_ms) * interval_ms - interval_ms
+
+
+def _series_is_fresh(entry: _SeriesEntry, now: float, max_age: float | None) -> bool:
+    now_ms = int(now * 1000)
+    expected = _expected_last_closed_ms(now_ms, entry.interval_ms)
+    age = now - entry.fetched_at
+    if entry.last_closed_ms < expected:
+        # Candle baru seharusnya sudah ada. Beri jeda singkat agar tidak refetch beruntun,
+        # dan toleransi bila provider memang tidak punya candle itu (diambil >20 dtk setelah close).
+        close_ms = expected + entry.interval_ms
+        if entry.fetched_at * 1000 >= close_ms + SERIES_PROVIDER_LAG_GRACE_SECONDS * 1000:
+            pass
+        else:
+            return age < SERIES_MIN_REFETCH_SECONDS
+    limit = max_age if max_age is not None else _series_ttl(entry.interval_ms)
+    return age <= limit
+
+
+def _series_total_bytes() -> int:
+    return sum(e.approx_bytes for e in _SERIES_CACHE.values())
+
+
+def _series_enforce_bounds() -> None:
+    max_bytes = int(CANDLE_CACHE_MAX_MB * 1024 * 1024)
+    total = _series_total_bytes()
+    while _SERIES_CACHE and (len(_SERIES_CACHE) > CANDLE_CACHE_MAX_ENTRIES or total > max_bytes):
+        _key, evicted = _SERIES_CACHE.popitem(last=False)
+        total -= evicted.approx_bytes
+        _SERIES_STATS["evictions"] += 1
+
+
+def _series_cache_get(
+    pair: str, interval: str, count: int, allow_fallback: bool, max_age: float | None
+) -> tuple[list[Candle], str] | None:
+    providers = ("BYBIT", "BINANCE_FALLBACK") if allow_fallback else ("BYBIT",)
+    now = time.time()
+    with _SERIES_LOCK:
+        for provider in providers:
+            entry = _SERIES_CACHE.get((provider, pair, interval))
+            if entry is None or len(entry.candles) < count:
+                continue
+            if not _series_is_fresh(entry, now, max_age):
+                continue
+            _SERIES_CACHE.move_to_end((provider, pair, interval))
+            _SERIES_STATS["hits"] += 1
+            return list(entry.candles[-count:]), entry.source
+    return None
+
+
+def _series_cache_store(
+    pair: str, interval: str, candles: list[Candle], source: str, interval_ms: int, gaps: int = 0
+) -> None:
+    if not candles:
         return
-    entry = {
-        "candles": copied,
-        "source": str(source),
-        "created_monotonic": time.monotonic(),
-        "created_wall_time": time.time(),
-        "last_closed_candle_ms": int(copied[-1].time_ms) if copied else 0,
-        "approx_bytes": approx_bytes,
-    }
-    with _CANDLE_CACHE_LOCK:
-        _CANDLE_SERIES_CACHE.pop(key, None)
-        _CANDLE_SERIES_CACHE[key] = entry
-        while _CANDLE_SERIES_CACHE and (
-            len(_CANDLE_SERIES_CACHE) > CANDLE_CACHE_MAX_ENTRIES
-            or sum(len(v.get("candles") or ()) for v in _CANDLE_SERIES_CACHE.values()) > CANDLE_CACHE_MAX_CANDLES
-            or sum(int(v.get("approx_bytes") or 0) for v in _CANDLE_SERIES_CACHE.values()) > CANDLE_CACHE_MAX_APPROX_BYTES
-        ):
-            _CANDLE_SERIES_CACHE.popitem(last=False)
-            _CANDLE_CACHE_METRICS["evictions"] += 1
+    key = (source if source in {"BYBIT", "BINANCE_FALLBACK"} else "BYBIT", pair, interval)
+    with _SERIES_LOCK:
+        old = _SERIES_CACHE.get(key)
+        merged = list(candles)
+        if old is not None and old.candles and old.candles[0].time_ms < merged[0].time_ms:
+            merged = [c for c in old.candles if c.time_ms < merged[0].time_ms] + merged
+        _SERIES_CACHE[key] = _SeriesEntry(
+            candles=merged,
+            source=source,
+            fetched_at=time.time(),
+            last_closed_ms=merged[-1].time_ms,
+            interval_ms=interval_ms,
+            approx_bytes=len(merged) * CANDLE_BYTES_ESTIMATE,
+            gaps=gaps,
+        )
+        _SERIES_CACHE.move_to_end(key)
+        _SERIES_STATS["stores"] += 1
+        _series_enforce_bounds()
+
+
+def series_cache_stats() -> dict[str, Any]:
+    with _SERIES_LOCK:
+        hits, misses = _SERIES_STATS["hits"], _SERIES_STATS["misses"]
+        total = hits + misses
+        return {
+            **_SERIES_STATS,
+            "entries": len(_SERIES_CACHE),
+            "approx_mb": round(_series_total_bytes() / 1024 / 1024, 3),
+            "max_mb": CANDLE_CACHE_MAX_MB,
+            "max_entries": CANDLE_CACHE_MAX_ENTRIES,
+            "hit_rate": round(hits / total, 4) if total else None,
+            "enabled": CANDLE_CACHE_ENABLED,
+        }
+
+
+def series_cache_clear(pair: str | None = None) -> int:
+    with _SERIES_LOCK:
+        if pair is None:
+            removed = len(_SERIES_CACHE)
+            _SERIES_CACHE.clear()
+            return removed
+        keys = [k for k in _SERIES_CACHE if k[1] == pair.upper()]
+        for key in keys:
+            _SERIES_CACHE.pop(key, None)
+        return len(keys)
+
+
+def series_cache_shrink(fraction: float = 0.5) -> int:
+    """Buang entri LRU (dipakai saat tekanan memori)."""
+    with _SERIES_LOCK:
+        target = int(len(_SERIES_CACHE) * max(0.0, min(1.0, fraction)))
+        for _ in range(target):
+            _SERIES_CACHE.popitem(last=False)
+            _SERIES_STATS["evictions"] += 1
+        return target
 
 
 async def _fetch_series_uncached(
-    pair: str, interval: str, count: int, interval_ms: int, *, allow_fallback: bool
-) -> tuple[list[Candle], str]:
+    pair: str,
+    interval: str,
+    count: int,
+    interval_ms: int,
+    *,
+    allow_fallback: bool,
+) -> tuple[list[Candle], str, dict[str, int]]:
     bybit = BybitProvider()
     try:
-        candles = await bybit.klines(pair, interval, count, interval_ms)
-        return _sanitize_closed_candles(candles, count, interval_ms), "BYBIT"
+        raw = await bybit.klines(pair, interval, count, interval_ms)
+        source = "BYBIT"
     except Exception as bybit_exc:
         if not allow_fallback:
-            error_cls = InsufficientHistoryError if getattr(bybit_exc, "insufficient_history", False) else RuntimeError
+            error_cls = (
+                InsufficientHistoryError
+                if getattr(bybit_exc, "insufficient_history", False)
+                else RuntimeError
+            )
             raise error_cls(
                 f"Bybit public gagal untuk {pair} {interval}; "
                 f"SCAN melarang fallback Binance: {bybit_exc}"
             ) from bybit_exc
+
         binance = BinanceProvider()
         try:
-            candles = await binance.klines(pair, interval, count, interval_ms)
-            return _sanitize_closed_candles(candles, count, interval_ms), "BINANCE_FALLBACK"
+            raw = await binance.klines(pair, interval, count, interval_ms)
+            source = "BINANCE_FALLBACK"
         except Exception as binance_exc:
             raise RuntimeError(
-                f"Gagal mengambil {pair} {interval}: Bybit={bybit_exc}; Binance={binance_exc}"
+                f"Gagal mengambil {pair} {interval}: "
+                f"Bybit={bybit_exc}; Binance={binance_exc}"
             ) from binance_exc
+    candles, qstats = normalize_candles(raw, interval_ms)
+    if len(candles) < count:
+        raise InsufficientHistoryError(
+            f"{source} hanya memiliki {len(candles)} candle valid untuk {pair} {interval}; diperlukan {count}."
+        )
+    return candles[-count:], source, qstats
+
 
 async def fetch_series(
     pair: str,
@@ -1162,70 +1260,61 @@ async def fetch_series(
     interval_ms: int,
     *,
     allow_fallback: bool = True,
-    force_refresh: bool = False,
     max_age_seconds: float | None = None,
+    force_refresh: bool = False,
+    use_cache: bool = True,
 ) -> tuple[list[Candle], str]:
-    """Fetch closed candles through a bounded LRU cache and single-flight gate.
+    """Ambil candle closed (Bybit dulu; fallback Binance hanya bila diizinkan).
 
-    SCAN keeps its Bybit-only source policy. Existing callers remain compatible;
-    validation may request a shorter cache age or explicit force-refresh.
+    Cache bounded + single-flight. SCAN memakai allow_fallback=False sehingga
+    data analitis tetap eksklusif Bybit public.
     """
-    symbol = normalize_pair(pair)
-    timeframe = str(interval)
-    needed = int(count)
-    duration_ms = int(interval_ms)
-    if needed <= 0 or duration_ms <= 0:
-        raise ValueError("count dan interval_ms harus lebih besar dari nol.")
-    if max_age_seconds is None:
-        max_age_seconds = _SERIES_MAX_AGE_OVERRIDE.get()
-    if max_age_seconds is None:
-        max_age_seconds = _series_ttl_seconds(timeframe)
-    effective_force = bool(force_refresh or _SERIES_FORCE_REFRESH.get())
-    provider_policy = "BYBIT_ONLY" if not allow_fallback else "BYBIT_PREFERRED"
-    key = (provider_policy, symbol, timeframe, duration_ms)
-    now_ms = int(time.time() * 1000)
+    symbol = str(pair).upper()
+    if not (use_cache and CANDLE_CACHE_ENABLED):
+        _SERIES_STATS["bypass"] += 1
+        candles, source, _ = await _fetch_series_uncached(
+            symbol, interval, count, interval_ms, allow_fallback=allow_fallback
+        )
+        return candles, source
 
-    with _CANDLE_CACHE_LOCK:
-        cached = _CANDLE_SERIES_CACHE.get(key)
-        if (
-            not effective_force
-            and cached is not None
-            and len(cached.get("candles") or ()) >= needed
-            and _cache_entry_is_fresh(cached, duration_ms, float(max_age_seconds), now_ms)
-        ):
-            _CANDLE_SERIES_CACHE.move_to_end(key)
-            _CANDLE_CACHE_METRICS["hits"] += 1
-            return _copy_candles(list(cached["candles"])[-needed:]), str(cached["source"])
+    if not force_refresh:
+        hit = _series_cache_get(symbol, interval, count, allow_fallback, max_age_seconds)
+        if hit is not None:
+            return hit
 
-        _CANDLE_CACHE_METRICS["misses"] += 1
-        if cached is not None:
-            _CANDLE_CACHE_METRICS["refreshes"] += 1
-        # A force-refresh caller must not attach itself to a normal/stale
-        # in-flight task. Normal callers still deduplicate with each other.
-        flight_key = (key, needed, effective_force)
-        task = _CANDLE_INFLIGHT.get(flight_key)
-        if task is None or task.done():
-            task = asyncio.create_task(
-                _fetch_series_uncached(symbol, timeframe, needed, duration_ms, allow_fallback=allow_fallback)
-            )
-            _CANDLE_INFLIGHT[flight_key] = task
-        else:
-            _CANDLE_CACHE_METRICS["deduplicated_waiters"] += 1
+    flight_key = (symbol, interval, bool(allow_fallback), int(count))
+    pending = _SERIES_INFLIGHT.get(flight_key)
+    if pending is not None:
+        _SERIES_STATS["inflight_shared"] += 1
+        candles, source = await asyncio.shield(pending)
+        return list(candles), source
 
+    _SERIES_STATS["misses"] += 1
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+    future.add_done_callback(lambda f: f.cancelled() or f.exception())
+    _SERIES_INFLIGHT[flight_key] = future
     try:
-        # One cancelled caller must not cancel a shared fetch used by others.
-        fetched, source = await asyncio.shield(task)
-        _store_candle_series(key, fetched, source)
-        return _copy_candles(fetched), source
-    except Exception:
-        with _CANDLE_CACHE_LOCK:
-            _CANDLE_CACHE_METRICS["failures"] += 1
+        candles, source, qstats = await _fetch_series_uncached(
+            symbol, interval, count, interval_ms, allow_fallback=allow_fallback
+        )
+        _series_cache_store(symbol, interval, candles, source, interval_ms, qstats.get("gaps", 0))
+        if force_refresh:
+            _SERIES_STATS["refreshes"] += 1
+        if not future.done():
+            future.set_result((candles, source))
+        return list(candles), source
+    except BaseException as exc:
+        _SERIES_STATS["failures"] += 1
+        if not future.done():
+            if isinstance(exc, asyncio.CancelledError):
+                future.set_exception(RuntimeError("fetch dibatalkan"))
+            else:
+                future.set_exception(exc)
         raise
     finally:
-        if task.done():
-            with _CANDLE_CACHE_LOCK:
-                if _CANDLE_INFLIGHT.get(flight_key) is task:
-                    _CANDLE_INFLIGHT.pop(flight_key, None)
+        if _SERIES_INFLIGHT.get(flight_key) is future:
+            _SERIES_INFLIGHT.pop(flight_key, None)
 
 
 async def fetch_price(
@@ -4959,13 +5048,8 @@ def _candidate_summary(candidate: Candidate) -> dict[str, Any]:
 
 def _ensure_price_geometry(candidate: Candidate, current: float) -> bool:
     if candidate.direction == "BUY":
-        geometry_ok = candidate.sl < candidate.entry < current < candidate.price_exp and candidate.tp > candidate.entry
-    else:
-        geometry_ok = candidate.price_exp < current < candidate.entry < candidate.sl and candidate.tp < candidate.entry
-    risk = abs(candidate.entry - candidate.sl)
-    reward = abs(candidate.tp - candidate.entry)
-    rounded_rr = reward / max(risk, EPS)
-    return bool(geometry_ok and risk > EPS and rounded_rr + EPS >= TARGET_MIN_RR)
+        return candidate.sl < candidate.entry < current < candidate.price_exp and candidate.tp > candidate.entry
+    return candidate.price_exp < current < candidate.entry < candidate.sl and candidate.tp < candidate.entry
 
 
 def _round_tick(value: float, tick_size: float, direction: str) -> float:
@@ -6786,6 +6870,9 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
     scan_mode = str(context.get("mode") or "").upper() == "SCAN"
     allow_binance_fallback = bool(context.get("allow_binance_fallback", True)) and not scan_mode
     force_fresh_btc = bool(context.get("force_fresh_btc_regime", False))
+    fresh_validation = bool(context.get("validation"))
+    m15_age = VALIDATION_MAX_AGE_M15 if fresh_validation else None
+    h4_age = VALIDATION_MAX_AGE_H4 if fresh_validation else None
     if not normalized_pair.endswith("USDT"):
         raise ValueError("strategy.py hanya mendukung USDT perpetual.")
 
@@ -6795,8 +6882,8 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
     # ------------------------------
     # 1) Market data / closed candles
     # ------------------------------
-    m15, m15_source = await fetch_series(normalized_pair, M15, M15_CANDLES_REQUIRED, M15_MS, allow_fallback=allow_binance_fallback)
-    pair_h4, pair_h4_source = await fetch_series(normalized_pair, H4, PAIR_H4_CANDLES_REQUIRED, H4_MS, allow_fallback=allow_binance_fallback)
+    m15, m15_source = await fetch_series(normalized_pair, M15, M15_CANDLES_REQUIRED, M15_MS, allow_fallback=allow_binance_fallback, max_age_seconds=m15_age)
+    pair_h4, pair_h4_source = await fetch_series(normalized_pair, H4, PAIR_H4_CANDLES_REQUIRED, H4_MS, allow_fallback=allow_binance_fallback, max_age_seconds=h4_age)
 
     btc_cache_key = _scan_cache_key(context) if scan_mode else None
     cached_btc = _SCAN_BTC_REGIME_CACHE.get(btc_cache_key) if btc_cache_key else None
@@ -6848,17 +6935,12 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
     # not erase a valid H4 pullback thesis. BTC remains the macro constraint.
     h4_trend = str(h4_structure.trend or "RANGE")
     pair_trend = h4_trend
-    allow_btc_countertrend = bool(context.get("allow_btc_countertrend", False))
-    countertrend_min_confidence = clamp(safe_float(context.get("countertrend_min_confidence"), 78.0))
-    countertrend_penalty = clamp(safe_float(context.get("countertrend_confidence_penalty"), 10.0), 0.0, 30.0)
     allowed_directions = allowed_directions_for_macro(btc_trend, h4_trend, normalized_pair)
     if normalized_pair != "BTCUSDT" and btc_trend in {"BULLISH", "BEARISH"}:
-        if allow_btc_countertrend:
-            # Opt-in only. Pair H4 structure still hard-gates the direction below,
-            # and the candidate must clear an explicit stronger confidence floor.
-            allowed_directions = DIRECTIONS_BOTH
-        else:
-            allowed_directions = (DIRECTION_BUY,) if btc_trend == "BULLISH" else (DIRECTION_SELL,)
+        allowed_directions = (
+            DIRECTIONS_BOTH if ALLOW_BTC_COUNTER_TREND
+            else ((DIRECTION_BUY,) if btc_trend == "BULLISH" else (DIRECTION_SELL,))
+        )
 
     # ------------------------------
     # 3) Technical contexts
@@ -6946,35 +7028,20 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
                 tick_size=tick_size,
             )
             if candidate:
-                btc_direction = DIRECTION_BUY if btc_trend == "BULLISH" else DIRECTION_SELL if btc_trend == "BEARISH" else None
-                is_countertrend = bool(
-                    allow_btc_countertrend
-                    and normalized_pair != "BTCUSDT"
-                    and btc_direction is not None
-                    and direction != btc_direction
-                )
-                if is_countertrend:
-                    before_penalty = candidate.confidence
-                    candidate.confidence = round(clamp(candidate.confidence - countertrend_penalty), 2)
-                    candidate.notes.append(
-                        f"BTC_COUNTER_TREND: penalti {countertrend_penalty:.1f} poin; "
-                        f"confidence {before_penalty:.1f} -> {candidate.confidence:.1f}."
-                    )
-                    if isinstance(candidate.evidence, dict):
-                        candidate.evidence["btc_alignment"] = "COUNTER_TREND"
-                        candidate.evidence["btc_countertrend_penalty"] = countertrend_penalty
-                    if candidate.confidence < countertrend_min_confidence:
-                        continue
-                elif isinstance(candidate.evidence, dict):
-                    candidate.evidence["btc_alignment"] = "NEUTRAL" if btc_trend == "RANGE" else "ALIGNED"
                 candidates.append(candidate)
+
+    if ALLOW_BTC_COUNTER_TREND and normalized_pair != "BTCUSDT" and btc_trend in {"BULLISH", "BEARISH"}:
+        for _cand in candidates:
+            if classify_btc_alignment(btc_trend, _cand.direction) != "ALIGNED":
+                _cand.confidence = clamp(_cand.confidence - BTC_COUNTER_TREND_PENALTY)
+                if isinstance(_cand.evidence, dict):
+                    _cand.evidence.setdefault("penalties", []).append(
+                        {"type": "BTC_COUNTER_TREND", "amount": BTC_COUNTER_TREND_PENALTY}
+                    )
 
     if not candidates:
         # Preserve a useful analytical response instead of throwing away the pair.
-        if allow_btc_countertrend and normalized_pair != "BTCUSDT" and pair_trend in {"BULLISH", "BEARISH"}:
-            direction = DIRECTION_BUY if pair_trend == "BULLISH" else DIRECTION_SELL
-        else:
-            direction = allowed_directions[0] if allowed_directions else ("BUY" if pair_trend != "BEARISH" else "SELL")
+        direction = allowed_directions[0] if allowed_directions else ("BUY" if pair_trend != "BEARISH" else "SELL")
         h1_atr = atr_series(h1, 14)[-1] if h1 else max(current * 0.005, EPS)
         liquidity_map = _v2_build_liquidity_map(
             {"H4": pair_h4, "H1": h1, "M15": m15},
@@ -7088,6 +7155,7 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
             "score": best.confidence,
             "components": best.scores,
             "weights": THESIS_WEIGHTS_V2,
+            "penalties": (best.evidence.get("penalties") if isinstance(best.evidence, dict) else []) or [],
             "meaning": "Kualitas internal thesis 0-100; bukan probabilitas profit.",
         },
         "candidate_set": [_v2_candidate_summary(c) for c in sorted(candidates, key=lambda c: c.confidence, reverse=True)],
@@ -7105,24 +7173,6 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
             "fvg_recent": _zone_summary(m15_ctx.get("fvg") or [], current, m15_atr_values[-1] if m15_atr_values else 1.0, len(m15)),
             "order_blocks": _zone_summary(m15_ctx.get("obs") or [], current, m15_atr_values[-1] if m15_atr_values else 1.0, len(m15)),
             "breakers": _zone_summary(m15_ctx.get("breakers") or [], current, m15_atr_values[-1] if m15_atr_values else 1.0, len(m15)),
-        },
-        # Compact bridge field used by main.py to distinguish a genuine
-        # waiting trigger from an ordinary low thesis score. Do not serialize
-        # the full evidence/candle objects into the persistent candidate ledger.
-        "selected_setup": {
-            "model": best.model,
-            "direction": best.direction,
-            "entry": best.entry,
-            "sl": best.sl,
-            "tp": best.tp,
-            "thesis_type": best.thesis_type,
-            "thesis_status": best.thesis_status,
-            "entry_reason": best.entry_reason,
-            "evidence": {
-                "gates": (best.evidence.get("gates") or {}) if isinstance(best.evidence, dict) else {},
-                "penalties": (best.evidence.get("penalties") or []) if isinstance(best.evidence, dict) else [],
-                "fallback": bool((best.evidence or {}).get("fallback")) if isinstance(best.evidence, dict) else False,
-            },
         },
     }
 
@@ -7166,21 +7216,13 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
             "btc_h1_candles": len(btc_h1),
             "h1_derived_candles": len(h1),
             "h4_derived_candles": len(h4_derived),
-            "newest_closed_candle_ms": {
-                "pair_m15": int(m15[-1].time_ms) if m15 else None,
-                "pair_h1": int(h1[-1].time_ms) if h1 else None,
-                "pair_h4": int(pair_h4[-1].time_ms) if pair_h4 else None,
-                "btc_h1": int(btc_h1[-1].time_ms) if btc_h1 else None,
-                "btc_h4": int(btc_h4[-1].time_ms) if btc_h4 else None,
+            "data_asof": {
+                "M15": m15[-1].time_ms if m15 else None,
+                "H1": h1[-1].time_ms if h1 else None,
+                "H4": pair_h4[-1].time_ms if pair_h4 else None,
+                "BTC_H4": btc_h4[-1].time_ms if btc_h4 else None,
+                "BTC_H1": btc_h1[-1].time_ms if btc_h1 else None,
             },
-            "candle_gaps_by_timeframe": {
-                "pair_m15": _candle_gap_count(m15, M15_MS),
-                "pair_h1": _candle_gap_count(h1, H1_MS),
-                "pair_h4": _candle_gap_count(pair_h4, H4_MS),
-                "btc_h1": _candle_gap_count(btc_h1, H1_MS),
-                "btc_h4": _candle_gap_count(btc_h4, H4_MS),
-            },
-            "candle_cache": candle_cache_stats(),
             "tick_size": round_price(tick_size) if tick_size else None,
             "tick_size_source": "BYBIT" if scan_mode else ("BINANCE" if m15_source == "BINANCE_FALLBACK" else "BYBIT"),
             "engine": STRATEGY_ENGINE,
@@ -7451,364 +7493,250 @@ def validate_thesis_consistency(candidate: Candidate) -> tuple[bool, list[str]]:
 # PUBLIC CONTRACT
 # ============================================================================
 
-def _candidate_state_from_result(result: dict[str, Any]) -> tuple[str, str, list[str]]:
-    """Classify a setup without inventing prices or converting score to probability."""
-    analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
-    thesis = analysis.get("thesis") if isinstance(analysis.get("thesis"), dict) else {}
-    thesis_status = str(thesis.get("status") or "").upper()
-    direction = str(result.get("direction") or "").upper()
-    model = str((analysis.get("selected_setup") or {}).get("model") or "").upper()
-    confidence = safe_float(result.get("confidence"), 0.0)
-    zone = result.get("entry_zone") if isinstance(result.get("entry_zone"), dict) else analysis.get("entry_zone")
-    zone = zone if isinstance(zone, dict) else {}
-    low = safe_float(zone.get("low"), 0.0)
-    high = safe_float(zone.get("high"), 0.0)
-    current = safe_float(result.get("price_now_reference"), 0.0)
-    selected = safe_float(zone.get("selected"), safe_float(result.get("entry"), 0.0))
-    gates: list[str] = []
-
-    fallback = thesis_status == "LOW_QUALITY_FALLBACK" or "FALLBACK" in model
-    waiting_trigger = thesis_status == "WAITING_TRIGGER"
-    if fallback:
-        gates.append("LOW_QUALITY_FALLBACK")
-        return "REJECTED_QUALITY", "Fallback berfungsi sebagai konteks analisis berkualitas rendah, bukan setup utama.", gates
-
-    if direction not in {DIRECTION_BUY, DIRECTION_SELL}:
-        gates.append("INVALID_DIRECTION")
-        return "REJECTED_QUALITY", "Arah setup tidak valid.", gates
-    if not (low > 0 and high >= low and low - EPS <= selected <= high + EPS):
-        gates.append("INVALID_ENTRY_ZONE")
-        return "REJECTED_QUALITY", "Zona entry tidak valid atau harga terpilih berada di luar zona.", gates
-
-    sl = safe_float(result.get("sl"), 0.0)
-    tp = safe_float(result.get("tp"), 0.0)
-    geometry_ok = (sl < selected < tp) if direction == DIRECTION_BUY else (tp < selected < sl)
-    if not geometry_ok:
-        gates.append("INVALID_SL_TP_GEOMETRY")
-        return "REJECTED_QUALITY", "Geometri entry, SL, dan TP tidak valid untuk arah setup.", gates
-
-    if current <= 0:
-        gates.append("CURRENT_PRICE_UNAVAILABLE")
-        return "WAITING_PRICE", "Harga referensi belum tersedia; setup perlu diperiksa ulang sebelum digunakan.", gates
-
-    price_exp = safe_float(result.get("price_exp"), 0.0)
-    expiry_geometry_ok = (
-        current < price_exp < tp if direction == DIRECTION_BUY
-        else tp < price_exp < current
-    )
-    if not expiry_geometry_ok:
-        gates.append("INVALID_PRICE_EXP_GEOMETRY")
-        return "REJECTED_QUALITY", "Batas Price Exp tidak berada pada sisi harga yang valid untuk setup.", gates
-
-    if waiting_trigger:
-        gates.append("WAITING_FOR_M15_TRIGGER")
-        return "WAITING_TRIGGER", "Zona sudah dianalisis, namun konfirmasi M15 belum lengkap.", gates
-
-    if direction == DIRECTION_BUY:
-        if current < low:
-            gates.append("ENTRY_ZONE_BREACHED_BELOW")
-            return "EXPIRED", "Harga telah menembus seluruh zona entry ke bawah; thesis perlu dievaluasi ulang.", gates
-        if current > high:
-            gates.append("PRICE_NOT_YET_IN_ZONE")
-            return "WAITING_PRICE", "Zona BUY berada di bawah harga saat ini; menunggu harga masuk zona.", gates
-    else:
-        if current > high:
-            gates.append("ENTRY_ZONE_BREACHED_ABOVE")
-            return "EXPIRED", "Harga telah menembus seluruh zona entry ke atas; thesis perlu dievaluasi ulang.", gates
-        if current < low:
-            gates.append("PRICE_NOT_YET_IN_ZONE")
-            return "WAITING_PRICE", "Zona SELL berada di atas harga saat ini; menunggu harga masuk zona.", gates
-
-    if confidence < THESIS_MIN_QUALITY_V2:
-        gates.append("LOW_THESIS_QUALITY")
-        return "REJECTED_QUALITY", "Skor kualitas thesis berada di bawah batas minimum internal.", gates
-    return "READY", "Thesis terkonfirmasi dan harga berada di zona entry.", gates
+# ============================================================================
+# CANDIDATE CONTRACT (schema v1): state, reason codes, geometri, biaya, BTC
+# ============================================================================
 
 
-def _weighted_confidence_audit(result: dict[str, Any]) -> dict[str, Any]:
-    components = result.get("confidence_components") if isinstance(result.get("confidence_components"), dict) else {}
-    weights = dict(THESIS_WEIGHTS_V2)
-    weights_total = sum(safe_float(value) for value in weights.values())
-    present = {name: safe_float(components.get(name), 0.0) for name in weights}
-    weighted_raw = (
-        sum(safe_float(weights[name]) * clamp(present[name]) for name in weights) / weights_total
-        if weights_total > EPS
-        else safe_float(result.get("confidence"), 0.0)
-    )
-    final_score = clamp(safe_float(result.get("confidence"), 0.0))
-    analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
-    thesis = analysis.get("thesis") if isinstance(analysis.get("thesis"), dict) else {}
-    status = str(thesis.get("status") or "").upper()
-    selected = analysis.get("selected_setup") if isinstance(analysis.get("selected_setup"), dict) else {}
-    model = str(selected.get("model") or "").upper()
-    evidence = selected.get("evidence") if isinstance(selected.get("evidence"), dict) else {}
-    evidence_penalties = evidence.get("penalties") if isinstance(evidence.get("penalties"), list) else []
-    caps: list[dict[str, Any]] = []
-    if status == "WAITING_TRIGGER" and weighted_raw > THESIS_WAITING_CAP_V2:
-        caps.append({"reason": "WAITING_TRIGGER", "cap": THESIS_WAITING_CAP_V2})
-    if status == "LOW_QUALITY_FALLBACK" and weighted_raw > THESIS_FALLBACK_CAP_V2:
-        caps.append({"reason": "LOW_QUALITY_FALLBACK", "cap": THESIS_FALLBACK_CAP_V2})
-    if final_score < weighted_raw - 0.01 and not caps:
-        caps.append({"reason": "COMPOSITE_PENALTIES_OR_MODEL_ADJUSTMENTS", "cap": final_score})
-    missing = [name for name in weights if name not in components]
+def classify_btc_alignment(btc_trend: str | None, direction: str | None, btc_confidence: Any = None) -> str:
+    """ALIGNED / NEUTRAL / COUNTER_TREND / HIGH_RISK_CONFLICT."""
+    trend = str(btc_trend or "RANGE").upper()
+    side = str(direction or "").upper()
+    if trend not in {"BULLISH", "BEARISH"} or side not in {"BUY", "SELL"}:
+        return "NEUTRAL"
+    if (trend == "BULLISH" and side == "BUY") or (trend == "BEARISH" and side == "SELL"):
+        return "ALIGNED"
+    if btc_confidence is not None and safe_float(btc_confidence, 0.0) >= BTC_EXTREME_CONFIDENCE:
+        return "HIGH_RISK_CONFLICT"
+    return "COUNTER_TREND"
+
+
+def validate_setup_geometry(
+    direction: str,
+    entry: float,
+    sl: float,
+    tp: float,
+    zone_low: float | None = None,
+    zone_high: float | None = None,
+    tick_size: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Daftar kegagalan geometri (hard gate). Kosong = valid."""
+    issues: list[dict[str, Any]] = []
+
+    def add(code: str, text: str) -> None:
+        issues.append({"code": code, "text": text, "hard": True})
+
+    side = str(direction or "").upper()
+    if side not in {"BUY", "SELL"} or not all(math.isfinite(v) and v > 0 for v in (entry, sl, tp)):
+        add("PRICE_INVALID", "entry/SL/TP tidak valid atau arah tidak dikenal.")
+        return issues
+    if side == "BUY" and not (sl < entry < tp):
+        add("GEOMETRY_INVALID", f"BUY wajib SL < entry < TP; dapat SL={sl}, entry={entry}, TP={tp}.")
+    if side == "SELL" and not (tp < entry < sl):
+        add("GEOMETRY_INVALID", f"SELL wajib TP < entry < SL; dapat TP={tp}, entry={entry}, SL={sl}.")
+    if zone_low is not None and zone_high is not None and zone_low > 0 and zone_high > 0:
+        if zone_low > zone_high:
+            add("ZONE_INVERTED", f"Zona entry terbalik: low={zone_low} > high={zone_high}.")
+        else:
+            tol = max(tick_size, entry * 0.001)
+            if entry < zone_low - tol or entry > zone_high + tol:
+                add("ENTRY_OUTSIDE_ZONE", f"Entry {entry} di luar zona [{zone_low}, {zone_high}].")
+            mid = (zone_low + zone_high) / 2.0
+            if mid > 0 and (zone_high - zone_low) / mid * 100.0 > ENTRY_ZONE_MAX_WIDTH_PCT:
+                add("ZONE_TOO_WIDE", "Zona entry terlalu lebar untuk satu harga representatif.")
+    return issues
+
+
+def estimate_after_cost_rr(
+    direction: str,
+    entry: float,
+    sl: float,
+    tp: float,
+    *,
+    fee_pct: float | None = None,
+    slippage_pct: float | None = None,
+    funding_pct: float = 0.0,
+) -> dict[str, Any]:
+    """RR gross vs setelah biaya (fee + slippage, entry dan exit)."""
+    fee = EST_FEE_PCT_PER_SIDE if fee_pct is None else fee_pct
+    slip = EST_SLIPPAGE_PCT_PER_SIDE if slippage_pct is None else slippage_pct
+    c = (fee + slip) / 100.0
+    buy = str(direction or "").upper() == "BUY"
+    risk = (entry - sl) if buy else (sl - entry)
+    reward = (tp - entry) if buy else (entry - tp)
+    if entry <= 0 or risk <= 0 or reward <= 0:
+        return {"valid": False, "gross_rr": 0.0, "after_cost_rr": 0.0}
+    funding = entry * funding_pct / 100.0
+    cost_tp = (entry + tp) * c + funding
+    cost_sl = (entry + sl) * c + funding
+    net_reward = reward - cost_tp
+    net_risk = risk + cost_sl
     return {
-        "formula_version": STRATEGY_SCORING_FORMULA_VERSION,
-        "component_range": [0, 100],
-        "weights": weights,
-        "weights_total": round(weights_total, 6),
-        "component_scores": present,
-        "missing_components": missing,
-        "weighted_raw_score": round(clamp(weighted_raw), 4),
-        "caps_or_adjustments": caps,
-        "evidence_penalties": evidence_penalties[:12],
-        "final_thesis_quality_score": round(final_score, 4),
-        "meaning": "Skor kualitas thesis; bukan probabilitas profit.",
+        "valid": True,
+        "gross_rr": reward / risk,
+        "after_cost_rr": (net_reward / net_risk) if net_reward > 0 else 0.0,
+        "risk": risk,
+        "reward": reward,
+        "cost_at_tp": cost_tp,
+        "cost_at_sl": cost_sl,
+        "round_trip_cost_pct": c * 2.0 * 100.0,
+        "assumptions": {"fee_pct_per_side": fee, "slippage_pct_per_side": slip, "funding_pct": funding_pct},
     }
 
 
-def _enrich_setup_output(result: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Add blueprint-compatible fields while preserving the legacy setup contract."""
-    if not isinstance(result, dict):
-        raise TypeError("_generate_setup_v2 harus mengembalikan dict.")
-    output = dict(result)
-    context = context or {}
-    analysis = dict(output.get("analysis") or {})
-    data = dict(output.get("data") or {})
-    output["analysis"] = analysis
-    output["data"] = data
-    output["schema_version"] = STRATEGY_OUTPUT_SCHEMA_VERSION
+_DATA_STALE_FACTOR = {"M15": 3, "H1": 3, "H4": 2}
+_TF_MS = {"M15": 15 * 60_000, "H1": 60 * 60_000, "H4": 4 * 60 * 60_000}
 
-    zone = analysis.get("entry_zone") if isinstance(analysis.get("entry_zone"), dict) else {}
-    entry = safe_float(output.get("entry"), 0.0)
-    zone_low = safe_float(zone.get("low"), safe_float(analysis.get("entry_zone_low"), entry))
-    zone_high = safe_float(zone.get("high"), safe_float(analysis.get("entry_zone_high"), entry))
-    zone_selected = safe_float(zone.get("selected"), entry)
-    output["entry_zone"] = {
-        "low": round_price(zone_low),
-        "high": round_price(zone_high),
-        "selected": round_price(zone_selected),
-        "width_pct": round(max(0.0, zone_high - zone_low) / max(abs(zone_selected), EPS) * 100.0, 4),
-    }
 
-    risk_data = analysis.get("risk") if isinstance(analysis.get("risk"), dict) else {}
-    sl = safe_float(output.get("sl"), 0.0)
-    tp = safe_float(output.get("tp"), 0.0)
-    risk_abs = abs(entry - sl)
-    reward_abs = abs(tp - entry)
-    gross_rr = reward_abs / max(risk_abs, EPS)
-    output["planned_rr_gross"] = round(gross_rr, 4)
-
-    cost_raw = context.get("estimated_round_trip_cost_pct")
-    if cost_raw is None:
-        cost_raw = context.get("round_trip_cost_pct")
-    after_cost_rr: float | None = None
-    try:
-        cost_pct = float(cost_raw) if cost_raw not in (None, "") else None
-        if cost_pct is not None and math.isfinite(cost_pct) and 0.0 <= cost_pct < 100.0 and entry > 0 and risk_abs > 0:
-            risk_pct = risk_abs / entry * 100.0
-            reward_pct = reward_abs / entry * 100.0
-            net_reward_pct = reward_pct - cost_pct
-            net_risk_pct = risk_pct + cost_pct
-            after_cost_rr = round(max(0.0, net_reward_pct) / max(net_risk_pct, EPS), 4)
-    except (TypeError, ValueError, OverflowError):
-        after_cost_rr = None
-    output["planned_rr_after_costs"] = after_cost_rr
-
-    thesis = analysis.get("thesis") if isinstance(analysis.get("thesis"), dict) else {}
-    output["setup_archetype"] = str(thesis.get("type") or (analysis.get("selected_setup") or {}).get("thesis_type") or (analysis.get("selected_setup") or {}).get("model") or "STRUCTURAL_PREDICTION_V2")
-    state, state_reason, gate_reasons = _candidate_state_from_result(output)
-    output["candidate_state"] = state
-    output["state_reason"] = state_reason
-    output["gate_reasons"] = list(dict.fromkeys(gate_reasons))
-
-    macro = analysis.get("macro") if isinstance(analysis.get("macro"), dict) else {}
-    btc_trend = str(macro.get("btc_h4_structure_trend") or macro.get("macro_bias") or "UNKNOWN").upper()
-    direction = str(output.get("direction") or "").upper()
-    pair = normalize_pair(str(output.get("pair") or ""))
-    if pair == "BTCUSDT":
-        alignment = "ALIGNED" if (btc_trend == "BULLISH" and direction == "BUY") or (btc_trend == "BEARISH" and direction == "SELL") else "NEUTRAL" if btc_trend == "RANGE" else "HIGH_RISK_CONFLICT"
-    elif btc_trend == "RANGE":
-        alignment = "NEUTRAL"
-    elif (btc_trend == "BULLISH" and direction == "BUY") or (btc_trend == "BEARISH" and direction == "SELL"):
-        alignment = "ALIGNED"
-    elif btc_trend in {"BULLISH", "BEARISH"}:
-        alignment = "COUNTER_TREND"
-    else:
-        alignment = "HIGH_RISK_CONFLICT"
-    output["btc_alignment"] = alignment
-    if alignment == "COUNTER_TREND":
-        output["gate_reasons"].append("BTC_COUNTER_TREND")
-
-    data_asof = data.get("newest_closed_candle_ms") if isinstance(data.get("newest_closed_candle_ms"), dict) else {}
-    output["data_asof"] = {str(k): int(v) if v not in (None, "") else None for k, v in data_asof.items()}
-    now_ms = int(time.time() * 1000)
-    timeframe_for_key = {
-        "pair_m15": M15_MS,
-        "pair_h1": H1_MS,
-        "pair_h4": H4_MS,
-        "btc_h1": H1_MS,
-        "btc_h4": H4_MS,
-    }
-    freshness: dict[str, Any] = {}
-    warnings: list[str] = []
-    for key, interval_ms in timeframe_for_key.items():
-        stamp = data_asof.get(key)
-        if stamp in (None, ""):
-            freshness[key] = {"status": "UNKNOWN", "age_seconds": None}
-            warnings.append(f"MISSING_ASOF_{key.upper()}")
+def _data_quality(data_asof: dict[str, Any] | None, now_ms: int | None = None) -> dict[str, Any]:
+    """Umur candle closed terbaru per timeframe; stale bila terlalu tertinggal."""
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    ages: dict[str, float | None] = {}
+    stale: list[str] = []
+    for tf, span in _TF_MS.items():
+        ts = (data_asof or {}).get(tf)
+        if not ts:
+            ages[tf] = None
             continue
-        age_seconds = max(0.0, (now_ms - int(stamp) - interval_ms) / 1000.0)
-        # A candle's open timestamp is not its close timestamp. The newest
-        # closed M15 candle is normally 0–15 minutes old while the next M15
-        # candle is forming; comparing that age to the cache TTL alone would
-        # incorrectly mark almost every normal M15/H1/H4 response as stale.
-        cache_ttl = _series_ttl_seconds({M15_MS: M15, H1_MS: H1, H4_MS: H4}.get(interval_ms, D1))
-        market_age_limit = (interval_ms / 1000.0) + cache_ttl
-        status = "FRESH" if age_seconds <= market_age_limit else "STALE"
-        freshness[key] = {
-            "status": status,
-            "age_seconds": round(age_seconds, 2),
-            "max_age_seconds": round(market_age_limit, 2),
-            "cache_ttl_seconds": cache_ttl,
-        }
-        if status != "FRESH":
-            warnings.append(f"STALE_{key.upper()}")
-    if data.get("fallback_used"):
-        warnings.append("ANALYSIS_USED_BINANCE_FALLBACK")
-        output["gate_reasons"].append("ANALYSIS_USED_BINANCE_FALLBACK")
-    candle_gaps = data.get("candle_gaps_by_timeframe") if isinstance(data.get("candle_gaps_by_timeframe"), dict) else {}
-    for key, gap_count in candle_gaps.items():
-        if safe_float(gap_count, 0.0) > 0:
-            warnings.append(f"CANDLE_GAPS_{str(key).upper()}")
-    # A few isolated missing bars can occur during exchange maintenance and are
-    # reported as warnings. Material gaps, a stale/missing closed-candle stamp,
-    # or an unverified open-candle policy are a hard analysis-data gate.
-    critical_data_issues: list[str] = []
-    for key, item in freshness.items():
-        if item.get("status") in {"UNKNOWN", "STALE"}:
-            critical_data_issues.append(f"DATA_{item.get('status')}_{key.upper()}")
-    if data.get("closed_candles_only") is not True:
-        critical_data_issues.append("DATA_CLOSED_CANDLE_POLICY_UNCONFIRMED")
-    if str(data.get("source") or "").strip().upper() in {"", "UNKNOWN", "NONE"}:
-        critical_data_issues.append("DATA_SOURCE_UNKNOWN")
-    expected_by_timeframe = {
-        "pair_m15": M15_CANDLES_REQUIRED,
-        "pair_h1": 168,
-        "pair_h4": PAIR_H4_CANDLES_REQUIRED,
-        "btc_h1": 168,
-        "btc_h4": BTC_H4_CANDLES_REQUIRED,
-    }
-    for key, gap_count in candle_gaps.items():
-        expected = expected_by_timeframe.get(str(key), 100)
-        material_gap_threshold = max(2, int(expected * 0.02))
-        if safe_float(gap_count, 0.0) > material_gap_threshold:
-            critical_data_issues.append(f"DATA_MATERIAL_CANDLE_GAPS_{str(key).upper()}")
-    if str(context.get("mode") or "").upper() == "SCAN" and data.get("fallback_used"):
-        critical_data_issues.append("DATA_SCAN_SOURCE_POLICY_VIOLATION")
-    output["freshness"] = freshness
-    output["data_quality"] = {
-        "closed_candles_only": bool(data.get("closed_candles_only", False)),
-        "warnings": list(dict.fromkeys(warnings)),
-        "critical_issues": list(dict.fromkeys(critical_data_issues)),
-        "status": "FAIL" if critical_data_issues else "WARN" if warnings else "OK",
-        "candle_gaps_by_timeframe": dict(candle_gaps),
-        "sources_by_timeframe": dict(data.get("sources_by_timeframe") or {}),
-    }
-    analysis["data_quality_gate"] = {
-        "active": bool(critical_data_issues),
-        "issues": list(dict.fromkeys(critical_data_issues)),
-        "confidence_cap": DATA_QUALITY_CONFIDENCE_CAP if critical_data_issues else None,
-    }
-    if critical_data_issues:
-        output["confidence"] = min(safe_float(output.get("confidence"), 0.0), DATA_QUALITY_CONFIDENCE_CAP)
-        if output.get("candidate_state") != "REJECTED_QUALITY":
-            output["candidate_state"] = "WAITING_DATA"
-            output["state_reason"] = (
-                "Analisis ditahan karena kualitas/freshness data pasar tidak memenuhi syarat: "
-                + ", ".join(dict.fromkeys(critical_data_issues))
-            )
-        output["gate_reasons"] = list(dict.fromkeys(
-            list(output.get("gate_reasons") or []) + list(critical_data_issues) + ["DATA_QUALITY_HARD_GATE"]
-        ))
-    output["analysis_source"] = str(data.get("source") or "UNKNOWN")
-    output["execution_source"] = str(context.get("execution_source") or "BINANCE_USDM")
-    output["risk"] = {
-        "entry_to_sl_distance": round_price(risk_abs),
-        "risk_pct_of_entry": round(risk_abs / max(abs(entry), EPS) * 100.0, 4) if entry else None,
-        "risk_h1_atr": risk_data.get("risk_h1_atr"),
-        "invalidation_anchor": (analysis.get("invalidation") or {}).get("anchor_level") if isinstance(analysis.get("invalidation"), dict) else None,
-        "estimated_round_trip_cost_pct": cost_raw,
-        "planned_rr_gross": output["planned_rr_gross"],
-        "planned_rr_after_costs": after_cost_rr,
-        "rr_cost_estimate_available": after_cost_rr is not None,
-    }
-    live_state = str(output.get("candidate_state") or "UNKNOWN")
-    price_exp = safe_float(output.get("price_exp"), 0.0)
-    invalidation = analysis.get("invalidation") if isinstance(analysis.get("invalidation"), dict) else {}
-    if direction == DIRECTION_BUY:
-        expiry_operator = ">="
-        zone_breach_condition = f"price < {round_price(zone_low)}"
-    else:
-        expiry_operator = "<="
-        zone_breach_condition = f"price > {round_price(zone_high)}"
-    output["monitoring"] = {
-        "candidate_state": live_state,
-        "monitor_live_price": live_state in {"READY", "WAITING_PRICE", "WAITING_TRIGGER"},
-        "entry_zone": dict(output["entry_zone"]),
-        "price_exp": {
-            "level": round_price(price_exp) if price_exp > 0 else None,
-            "operator": expiry_operator,
-            "meaning": "Setup expires if price reaches this threshold before retracing to entry.",
+        age = (now_ms - (int(ts) + span)) / 1000.0
+        ages[tf] = round(max(0.0, age), 1)
+        if age > _DATA_STALE_FACTOR[tf] * span / 1000.0:
+            stale.append(tf)
+    return {"newest_closed_age_seconds": ages, "stale_timeframes": stale, "fresh": not stale}
+
+
+def thesis_weights_total() -> float:
+    return float(sum(THESIS_WEIGHTS_V2.values()))
+
+
+if abs(thesis_weights_total() - 100.0) > 1e-6:
+    _log.error("THESIS_WEIGHTS_V2 total %.4f != 100", thesis_weights_total())
+
+
+def _confidence_breakdown(out: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
+    comps = out.get("confidence_components") or {}
+    raw = sum(THESIS_WEIGHTS_V2[k] * safe_float(comps.get(k), 0.0) for k in THESIS_WEIGHTS_V2) / 100.0
+    conf = safe_float(out.get("confidence"), 0.0)
+    penalties = ((analysis.get("confidence") or {}).get("penalties")) or []
+    return {
+        "scoring_version": SCORING_FORMULA_VERSION,
+        "weights_total": thesis_weights_total(),
+        "components": comps,
+        "raw_weighted_score": round(raw, 2),
+        "penalties": penalties,
+        "caps": {
+            "waiting": THESIS_WAITING_CAP_V2,
+            "veto": THESIS_VETO_CAP_V2,
+            "fallback": THESIS_FALLBACK_CAP_V2,
+            "min_quality": THESIS_MIN_QUALITY_V2,
         },
-        "zone_breach_condition": zone_breach_condition,
-        "structural_invalidation_anchor": invalidation.get("anchor_level"),
-        "structural_sl": round_price(sl) if sl > 0 else None,
-        "recheck_on": ["M15_CLOSE", "H4_CLOSE", "PRICE_EXP_REACHED", "ENTRY_ZONE_BREACHED", "STRUCTURE_INVALIDATED"],
+        "final": round(conf, 2),
+        "delta_from_raw": round(conf - raw, 2),
+        "meaning": "thesis_quality_score_not_profit_probability",
     }
-    output["confidence_audit"] = _weighted_confidence_audit(output)
-    if critical_data_issues:
-        output["confidence_audit"]["caps_or_adjustments"] = [
-            item for item in output["confidence_audit"].get("caps_or_adjustments", [])
-            if item.get("reason") != "COMPOSITE_PENALTIES_OR_MODEL_ADJUSTMENTS"
-        ]
-        output["confidence_audit"]["caps_or_adjustments"].append({
-            "reason": "DATA_QUALITY_HARD_GATE",
-            "cap": DATA_QUALITY_CONFIDENCE_CAP,
-            "issues": list(dict.fromkeys(critical_data_issues)),
+
+
+def _enrich_setup_contract(setup: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Tambahkan field kontrak v1 secara kompatibel; tidak mengubah field lama."""
+    out = dict(setup)
+    analysis = out.get("analysis") if isinstance(out.get("analysis"), dict) else {}
+    data = out.get("data") if isinstance(out.get("data"), dict) else {}
+    pair = str(out.get("pair") or "")
+    direction = str(out.get("direction") or "").upper()
+    entry, sl, tp = (safe_float(out.get(k)) for k in ("entry", "sl", "tp"))
+    zone = analysis.get("entry_zone") if isinstance(analysis.get("entry_zone"), dict) else {}
+    zlow = safe_float(zone.get("low"), entry)
+    zhigh = safe_float(zone.get("high"), entry)
+    tick = safe_float(data.get("tick_size"), 0.0)
+    status = str((analysis.get("thesis") or {}).get("status") or "")
+    conf = safe_float(out.get("confidence"), 0.0)
+
+    gates: list[dict[str, Any]] = validate_setup_geometry(direction, entry, sl, tp, zlow, zhigh, tick)
+    risk_block = analysis.get("risk") if isinstance(analysis.get("risk"), dict) else {}
+    gross_rr = safe_float(risk_block.get("planned_rr"), 0.0)
+    if gross_rr + 1e-9 < TARGET_MIN_RR:
+        gates.append({"code": "RR_BELOW_MIN", "text": f"RR gross {gross_rr:.2f} < {TARGET_MIN_RR}.", "hard": True})
+    cost = estimate_after_cost_rr(direction, entry, sl, tp)
+    if MIN_RR_AFTER_COSTS > 0 and cost.get("valid") and cost["after_cost_rr"] < MIN_RR_AFTER_COSTS:
+        gates.append({
+            "code": "RR_AFTER_COST_BELOW_MIN",
+            "text": f"RR setelah biaya {cost['after_cost_rr']:.2f} < {MIN_RR_AFTER_COSTS}.",
+            "hard": True,
         })
-        output["confidence_audit"]["final_thesis_quality_score"] = round(safe_float(output.get("confidence")), 4)
-    confidence_audit = dict(analysis.get("confidence") or {})
-    confidence_audit["audit"] = output["confidence_audit"]
-    confidence_audit["score"] = output["confidence"]
-    analysis["confidence"] = confidence_audit
-    macro = dict(analysis.get("macro") or {})
-    macro["btc_alignment"] = alignment
-    analysis["macro"] = macro
-    return output
+
+    data_asof = data.get("data_asof") if isinstance(data.get("data_asof"), dict) else {}
+    quality = _data_quality(data_asof) if data_asof else {"fresh": True, "stale_timeframes": [], "newest_closed_age_seconds": {}}
+    if not quality["fresh"]:
+        gates.append({"code": "DATA_STALE", "text": f"Data basi: {','.join(quality['stale_timeframes'])}.", "hard": True})
+
+    btc_trend = data.get("directional_bias")
+    btc_conf = (((analysis.get("macro") or {}).get("btc_regime")) or {}).get("confidence")
+    alignment = "NEUTRAL" if pair == "BTCUSDT" else classify_btc_alignment(btc_trend, direction, btc_conf)
+    if alignment == "COUNTER_TREND":
+        gates.append({"code": "BTC_COUNTER_TREND", "text": "Arah melawan BTC H4 (penalti skor).", "hard": False})
+    elif alignment == "HIGH_RISK_CONFLICT":
+        gates.append({"code": "BTC_HIGH_RISK_CONFLICT", "text": "Melawan BTC saat regime BTC ekstrem.", "hard": True})
+
+    current = safe_float(out.get("price_now_reference"), 0.0)
+    if zlow > 0 and zhigh > 0 and current > 0:
+        price_vs_zone = "IN_ZONE" if zlow <= current <= zhigh else ("ABOVE_ZONE" if current > zhigh else "BELOW_ZONE")
+    else:
+        price_vs_zone = "UNKNOWN"
+
+    hard = [g for g in gates if g.get("hard")]
+    if any(g["code"] == "DATA_STALE" for g in hard):
+        state, reason = "DATA_UNAVAILABLE", "DATA_STALE"
+    elif hard:
+        state, reason = "REJECTED_HARD", hard[0]["code"]
+    elif status == "LOW_QUALITY_FALLBACK":
+        state, reason = "REJECTED_QUALITY", "LOW_QUALITY_FALLBACK"
+        gates.append({"code": "LOW_QUALITY_FALLBACK", "text": "Thesis fallback kualitas rendah.", "hard": False})
+    elif conf < THESIS_MIN_QUALITY_V2:
+        state, reason = "REJECTED_QUALITY", "BELOW_QUALITY_FLOOR"
+    elif "WAITING" in status:
+        state, reason = "WAITING_TRIGGER", "TRIGGER_NOT_CONFIRMED"
+        gates.append({"code": "TRIGGER_NOT_CONFIRMED", "text": "Konfirmasi M15 belum terbentuk.", "hard": False})
+    else:
+        state = "READY"
+        reason = "PRICE_IN_ZONE" if price_vs_zone == "IN_ZONE" else "PRICE_NOT_IN_ZONE"
+
+    sig_h4 = ((analysis.get("pair_structure") or {}).get("signature_h4"))
+    anchor = f"{pair}|{direction}|{STRATEGY_VERSION}|{sig_h4!r}|{round(zlow, 6)}|{round(zhigh, 6)}"
+    thesis_signature = hashlib.sha1(anchor.encode("utf-8")).hexdigest()[:20]
+
+    src = str(data.get("source") or "")
+    out.update({
+        "schema_version": STRATEGY_SCHEMA_VERSION,
+        "candidate_state": state,
+        "state_reason": reason,
+        "gate_reasons": gates,
+        "entry_zone": {"low": zlow, "high": zhigh, "selected": entry},
+        "price_vs_zone": price_vs_zone,
+        "planned_rr_gross": round(gross_rr, 4),
+        "planned_rr_after_costs": round(cost["after_cost_rr"], 4) if cost.get("valid") else None,
+        "cost_assumptions": cost.get("assumptions"),
+        "data_asof": data_asof,
+        "data_quality": quality,
+        "setup_archetype": str((analysis.get("thesis") or {}).get("type") or PRIMARY_V2_MODEL),
+        "analysis_source": "BYBIT_PUBLIC" if src == "BYBIT" else (src or "UNKNOWN"),
+        "btc_alignment": alignment,
+        "thesis_signature": thesis_signature,
+        "scoring_version": SCORING_FORMULA_VERSION,
+        "confidence_breakdown": _confidence_breakdown(out, analysis),
+        "risk": {
+            "entry_to_sl_distance": round_price(abs(entry - sl)) if entry and sl else None,
+            "risk_pct": risk_block.get("risk_pct"),
+            "risk_h1_atr": risk_block.get("risk_h1_atr"),
+            "estimated_round_trip_cost_pct": round(cost.get("round_trip_cost_pct", 0.0), 4) if cost.get("valid") else None,
+            "invalidation_anchor": ((analysis.get("invalidation") or {}).get("anchor") or (analysis.get("invalidation") or {}).get("reason")),
+        },
+    })
+    return out
 
 
 async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Backward-compatible strategy contract plus auditable blueprint metadata."""
-    ctx = dict(context or {})
-    validation_age: float | None = None
-    if ctx.get("validation"):
-        try:
-            validation_age = max(1.0, float(ctx.get("validation_max_age_seconds", 20.0)))
-        except (TypeError, ValueError):
-            validation_age = 20.0
-    elif ctx.get("series_max_age_seconds") not in (None, ""):
-        try:
-            validation_age = max(0.0, float(ctx["series_max_age_seconds"]))
-        except (TypeError, ValueError):
-            validation_age = None
-    age_token = _SERIES_MAX_AGE_OVERRIDE.set(validation_age)
-    force_token = _SERIES_FORCE_REFRESH.set(bool(ctx.get("force_fresh_candles", False)))
-    try:
-        result = await _generate_setup_v2(pair, ctx)
-        return _enrich_setup_output(result, ctx)
-    finally:
-        _SERIES_MAX_AGE_OVERRIDE.reset(age_token)
-        _SERIES_FORCE_REFRESH.reset(force_token)
+    """Public strategy contract; delegates to the Structural Prediction Engine V2."""
+    return _enrich_setup_contract(await _generate_setup_v2(pair, context), context)
 
 
 # ============================================================================
@@ -7880,6 +7808,10 @@ def _btc_regime_payload(h4_candles: list[Candle], h1_candles: list[Candle], sour
         "timeframes": regime["timeframes"],
         "sources_by_timeframe": source_by_tf,
         "candles": len(h4_candles),
+        "last_closed_ms": {
+            "H4": h4_candles[-1].time_ms if h4_candles else None,
+            "H1": h1_candles[-1].time_ms if h1_candles else None,
+        },
         "closed_candles_only": True,
     }
 
@@ -7916,8 +7848,13 @@ async def analyze_scan_structure(pair: str, context: dict[str,Any] | None=None) 
         (btc_trend == "RANGE" and pair_h4_trend in {"BULLISH", "BEARISH", "RANGE"})
         or (btc_trend == pair_h4_trend and btc_trend in {"BULLISH", "BEARISH"})
     )
+    pair_side = "BUY" if pair_h4_trend == "BULLISH" else ("SELL" if pair_h4_trend == "BEARISH" else "")
+    alignment_label = classify_btc_alignment(btc_trend, pair_side, btc.get("confidence"))
+    if ALLOW_BTC_COUNTER_TREND and alignment_label == "COUNTER_TREND":
+        aligned = True
     return {
         "pair": symbol,
+        "btc_alignment": alignment_label,
         "trend": pair_h4_trend,
         "regime": regime["trend"],
         "state": regime["state"],
@@ -8078,21 +8015,46 @@ async def validate_setup(
     fresh = dict(fresh)
     fresh["analysis"] = fresh_analysis
 
+    fresh_state = str(fresh.get("candidate_state") or "")
+    stale_data = fresh_state == "DATA_UNAVAILABLE" or any(
+        g.get("code") == "DATA_STALE" for g in (fresh.get("gate_reasons") or [])
+    )
+    hard_codes = [g.get("code") for g in (fresh.get("gate_reasons") or []) if g.get("hard")]
+    reason_codes = [k.upper() for k, v in validation_flags.items() if v is False]
+    if stale_data:
+        reason_codes.insert(0, "DATA_STALE")
+    reason_codes.extend(c for c in hard_codes if c not in reason_codes)
+    structural_valid = bool(structural_valid and not stale_data and not hard_codes)
+    if stale_data:
+        valid_reason = "Data validasi basi; tidak boleh membuat trade baru dari input basi."
+    if structural_valid:
+        validation_status = "VALID"
+    elif stale_data:
+        validation_status = "STALE_DATA"
+    elif hard_codes:
+        validation_status = "REJECTED_HARD"
+    else:
+        validation_status = "REJECTED_QUALITY"
+    initial_vs_fresh = {
+        "confidence": {"initial": round(initial_conf, 2), "fresh": round(fresh_conf, 2)},
+        "direction": {"initial": initial_direction, "fresh": fresh_direction},
+        "zone_overlap": round(zone_overlap, 4),
+        "entry": {"initial": safe_float(initial_setup.get("entry")), "fresh": safe_float(fresh.get("entry"))},
+        "sl": {"initial": safe_float(initial_setup.get("sl")), "fresh": safe_float(fresh.get("sl"))},
+        "tp": {"initial": safe_float(initial_setup.get("tp")), "fresh": safe_float(fresh.get("tp"))},
+        "setup_replaced": replacement,
+    }
     return {
         "valid": structural_valid,
         "reason": valid_reason,
         "validation_reason": valid_reason,
+        "validation_status": validation_status,
+        "reason_codes": reason_codes,
+        "stale_data": stale_data,
+        "initial_vs_fresh": initial_vs_fresh,
         "confidence": fresh_conf,
         "setup": fresh,
         "validation": fresh_analysis["validation"],
-        "schema_version": STRATEGY_OUTPUT_SCHEMA_VERSION,
-        "candidate_state": "VALIDATED" if structural_valid else "REJECTED_QUALITY",
-        "state_reason": valid_reason,
-        "gate_reasons": [
-            f"VALIDATION_{key.upper()}"
-            for key, value in validation_flags.items()
-            if value is False
-        ],
     }
 
 
@@ -8184,356 +8146,6 @@ def validate_result_contract(result: dict[str, Any]) -> tuple[bool, list[str]]:
         errors.append("confidence di luar 0-100")
     return (not errors, errors)
 
-
-
-def self_test_candle_cache_primitives() -> dict[str, Any]:
-    """Deterministic offline tests for candle filtering and bounded cache behavior."""
-    checks: dict[str, bool] = {}
-    with _CANDLE_CACHE_LOCK:
-        cache_backup = OrderedDict(_CANDLE_SERIES_CACHE)
-        metrics_backup = dict(_CANDLE_CACHE_METRICS)
-        _CANDLE_SERIES_CACHE.clear()
-        for metric in _CANDLE_CACHE_METRICS:
-            _CANDLE_CACHE_METRICS[metric] = 0
-    try:
-        raw = [
-            Candle(13_000, 101.5, 103.0, 101.0, 102.0, 14.0, 1428.0),
-            Candle(10_000, 100.0, 101.0, 99.0, 100.5, 10.0, 1005.0),
-            Candle(11_000, 100.5, 101.0, 100.0, 100.6, 10.0, 1006.0),
-            Candle(11_000, 101.0, 102.0, 100.5, 101.5, 12.0, 1218.0),
-            Candle(12_000, 101.0, 100.0, 99.0, 101.5, 12.0, 1218.0),  # invalid OHLC
-            Candle(100_000, 102.0, 103.0, 101.0, 102.5, 12.0, 1230.0),  # open candle
-        ]
-        clean = _sanitize_closed_candles(raw, 3, 1000, now_ms=100_000)
-        assert [c.time_ms for c in clean] == [10_000, 11_000, 13_000], "closed filtering/sorting/dedup failed"
-        assert clean[1].close == 101.5, "last valid duplicate was not selected"
-        assert _candle_gap_count(clean, 1000) == 1, "candle gap count failed"
-        checks["closed_filter_duplicate_sort_gap"] = True
-        try:
-            _sanitize_closed_candles(raw[:2], 3, 1000, now_ms=100_000)
-        except InsufficientHistoryError:
-            checks["insufficient_history_rejected"] = True
-        else:
-            raise AssertionError("insufficient history was accepted")
-
-        now_ms = int(time.time() * 1000)
-        last_closed = (now_ms // M15_MS) * M15_MS - M15_MS
-        series = [
-            Candle(last_closed - M15_MS, 100.0, 101.0, 99.0, 100.5, 10.0, 1005.0),
-            Candle(last_closed, 100.5, 102.0, 100.0, 101.5, 12.0, 1218.0),
-        ]
-        for index in range(CANDLE_CACHE_MAX_ENTRIES + 6):
-            _store_candle_series(("CACHE_SELFTEST", str(index), M15, M15_MS), series, "BYBIT")
-        stats = candle_cache_stats()
-        assert stats["entries"] <= CANDLE_CACHE_MAX_ENTRIES, "cache entry bound exceeded"
-        assert stats["candles"] <= CANDLE_CACHE_MAX_CANDLES, "cache candle bound exceeded"
-        assert stats["approx_bytes"] <= CANDLE_CACHE_MAX_APPROX_BYTES, "cache byte bound exceeded"
-        assert stats["evictions"] >= 6, "LRU eviction metric did not advance"
-        checks["bounded_lru_eviction"] = True
-
-        key = ("CACHE_SELFTEST", str(CANDLE_CACHE_MAX_ENTRIES + 5), M15, M15_MS)
-        entry = _CANDLE_SERIES_CACHE[key]
-        assert _cache_entry_is_fresh(entry, M15_MS, 30.0, now_ms), "recent closed candle marked stale"
-        assert not _cache_entry_is_fresh(entry, M15_MS, 0.0, now_ms), "zero-age TTL incorrectly accepted cache"
-        original_close = entry["candles"][0].close
-        copied = _copy_candles(list(entry["candles"]))
-        copied[0].close = -999.0
-        assert entry["candles"][0].close == original_close, "caller copy mutation leaked into cache"
-        checks["freshness_and_copy_isolation"] = True
-
-        scan_context = _scan_context({"allow_binance_fallback": True})
-        assert scan_context["allow_binance_fallback"] is False
-        assert scan_context["data_provider"] == "BYBIT_PUBLIC_ONLY"
-        checks["scan_source_policy"] = True
-        return {"ok": True, "tests": checks}
-    finally:
-        with _CANDLE_CACHE_LOCK:
-            _CANDLE_SERIES_CACHE.clear()
-            _CANDLE_SERIES_CACHE.update(cache_backup)
-            _CANDLE_CACHE_METRICS.update(metrics_backup)
-
-
-def self_test_blueprint_output_contracts() -> dict[str, Any]:
-    """Test schema/state, confidence weights, timeframe freshness, and after-cost RR."""
-    components = {name: 75.0 for name in THESIS_WEIGHTS_V2}
-    now_ms = int(time.time() * 1000)
-    asof = {
-        "pair_m15": (now_ms // M15_MS) * M15_MS - M15_MS,
-        "pair_h1": (now_ms // H1_MS) * H1_MS - H1_MS,
-        "pair_h4": (now_ms // H4_MS) * H4_MS - H4_MS,
-        "btc_h1": (now_ms // H1_MS) * H1_MS - H1_MS,
-        "btc_h4": (now_ms // H4_MS) * H4_MS - H4_MS,
-    }
-    base = {
-        "pair": "TESTUSDT", "direction": "BUY", "price_now_reference": 99.0,
-        "entry": 99.0, "entry_reason": "test", "price_exp": 101.0,
-        "price_exp_reason": "test", "sl": 97.0, "sl_reason": "test",
-        "tp": 104.0, "tp_reason": "test", "confidence": 75.0,
-        "confidence_components": components,
-        "analysis": {
-            "entry_zone": {"low": 98.5, "high": 99.5, "selected": 99.0},
-            "thesis": {"type": "PULLBACK", "status": "ACTIVE"},
-            "selected_setup": {"model": PRIMARY_V2_MODEL, "evidence": {"gates": {}, "penalties": []}},
-            "macro": {"btc_h4_structure_trend": "BULLISH"},
-            "risk": {"risk_h1_atr": 1.2},
-            "invalidation": {"anchor_level": 97.5},
-        },
-        "data": {
-            "source": "BYBIT", "closed_candles_only": True,
-            "newest_closed_candle_ms": asof,
-            "sources_by_timeframe": {name: "BYBIT" for name in asof},
-            "candle_gaps_by_timeframe": {name: 0 for name in asof},
-        },
-        "strategy": {"name": STRATEGY_NAME, "version": STRATEGY_VERSION},
-    }
-    no_cost = _enrich_setup_output(base, {})
-    assert no_cost["schema_version"] == STRATEGY_OUTPUT_SCHEMA_VERSION
-    assert no_cost["candidate_state"] == "READY", no_cost["candidate_state"]
-    assert no_cost["entry_zone"]["low"] <= no_cost["entry_zone"]["selected"] <= no_cost["entry_zone"]["high"]
-    assert no_cost["planned_rr_gross"] == 2.5
-    assert no_cost["planned_rr_after_costs"] is None
-    assert no_cost["confidence_audit"]["weights_total"] == 100.0
-    assert all(row["status"] == "FRESH" for row in no_cost["freshness"].values())
-    assert no_cost["monitoring"]["price_exp"]["operator"] == ">="
-    assert no_cost["monitoring"]["monitor_live_price"] is True
-    low_rr_buy = Candidate(
-        direction="BUY", model=PRIMARY_V2_MODEL, entry=98.0, sl=97.0, tp=99.5,
-        price_exp=99.0, entry_reason="test", sl_reason="test", tp_reason="test",
-        price_exp_reason="test", evidence={},
-    )
-    low_rr_sell = Candidate(
-        direction="SELL", model=PRIMARY_V2_MODEL, entry=102.0, sl=103.0, tp=100.5,
-        price_exp=101.0, entry_reason="test", sl_reason="test", tp_reason="test",
-        price_exp_reason="test", evidence={},
-    )
-    assert not _ensure_price_geometry(low_rr_buy, 98.5), "BUY RR below minimum passed final geometry"
-    assert not _ensure_price_geometry(low_rr_sell, 101.5), "SELL RR below minimum passed final geometry"
-    with_cost = _enrich_setup_output(base, {"estimated_round_trip_cost_pct": 0.2})
-    assert with_cost["planned_rr_after_costs"] is not None
-    assert with_cost["planned_rr_after_costs"] < with_cost["planned_rr_gross"]
-    waiting = dict(base)
-    waiting["price_now_reference"] = 100.0
-    assert _enrich_setup_output(waiting, {})["candidate_state"] == "WAITING_PRICE"
-    breached = dict(base)
-    breached["price_now_reference"] = 97.0
-    assert _enrich_setup_output(breached, {})["candidate_state"] == "EXPIRED"
-    waiting_trigger = dict(base)
-    waiting_trigger["analysis"] = dict(base["analysis"])
-    waiting_trigger["analysis"]["thesis"] = {"type": "PULLBACK", "status": "WAITING_TRIGGER"}
-    assert _enrich_setup_output(waiting_trigger, {})["candidate_state"] == "WAITING_TRIGGER"
-    invalid_exp = dict(waiting_trigger)
-    invalid_exp["price_exp"] = 98.0
-    assert _enrich_setup_output(invalid_exp, {})["candidate_state"] == "REJECTED_QUALITY", "waiting trigger hid invalid Price Exp geometry"
-    sell_base = dict(base)
-    sell_base.update({"direction": "SELL", "price_now_reference": 101.0, "entry": 101.0, "price_exp": 97.0, "sl": 103.0, "tp": 96.0})
-    sell_base["analysis"] = dict(base["analysis"])
-    sell_base["analysis"].update({
-        "entry_zone": {"low": 100.5, "high": 101.5, "selected": 101.0},
-        "macro": {"btc_h4_structure_trend": "BEARISH"},
-        "invalidation": {"anchor_level": 102.5},
-    })
-    sell_output = _enrich_setup_output(sell_base, {})
-    assert sell_output["candidate_state"] == "READY", f"valid SELL should be READY, got {sell_output['candidate_state']}"
-    assert sell_output["monitoring"]["price_exp"]["operator"] == "<="
-    missing = dict(base)
-    missing["data"] = {"source": "BYBIT", "closed_candles_only": True}
-    missing_output = _enrich_setup_output(missing, {})
-    assert missing_output["data_quality"]["status"] == "FAIL"
-    assert missing_output["candidate_state"] == "WAITING_DATA"
-    assert missing_output["confidence"] <= DATA_QUALITY_CONFIDENCE_CAP
-    return {"ok": True, "tests": {
-        "schema_and_candidate_state": True,
-        "entry_zone_and_gross_rr": True,
-        "monitoring_expiry_and_invalidation_metadata": True,
-        "cost_adjusted_rr": True,
-        "confidence_weight_audit": True,
-        "timeframe_aware_freshness": True,
-        "post_tick_minimum_rr_gate": True,
-        "waiting_price_expired_trigger_states": True,
-        "sell_state_and_expiry_geometry": True,
-        "missing_asof_hard_gate": True,
-    }}
-
-
-async def self_test_fetch_series_cache_async() -> dict[str, Any]:
-    """Offline single-flight/cache-hit/refresh regression; mocks only the provider boundary."""
-    global _fetch_series_uncached
-    if any(not task.done() for task in _CANDLE_INFLIGHT.values()):
-        raise RuntimeError("Cannot run cache self-test while a candle fetch is active.")
-    original_fetch = _fetch_series_uncached
-    symbol = "CACHESELFTESTUSDT"
-    keys = {
-        ("BYBIT_ONLY", symbol, M15, M15_MS),
-        ("BYBIT_PREFERRED", symbol, M15, M15_MS),
-    }
-    with _CANDLE_CACHE_LOCK:
-        saved_entries = {key: _CANDLE_SERIES_CACHE[key] for key in keys if key in _CANDLE_SERIES_CACHE}
-        saved_metrics = dict(_CANDLE_CACHE_METRICS)
-        for key in keys:
-            _CANDLE_SERIES_CACHE.pop(key, None)
-        for metric in _CANDLE_CACHE_METRICS:
-            _CANDLE_CACHE_METRICS[metric] = 0
-    calls = 0
-
-    async def fake_fetch(pair: str, interval: str, count: int, interval_ms: int, *, allow_fallback: bool):
-        nonlocal calls
-        calls += 1
-        await asyncio.sleep(0.02)
-        now = int(time.time() * 1000)
-        latest = (now // interval_ms) * interval_ms - interval_ms
-        return [
-            Candle(latest - (count - index - 1) * interval_ms,
-                   100.0 + index, 101.0 + index, 99.0 + index,
-                   100.5 + index, 10.0, 1005.0)
-            for index in range(count)
-        ], "BYBIT"
-
-    try:
-        _fetch_series_uncached = fake_fetch
-        first, second = await asyncio.gather(
-            fetch_series(symbol, M15, 3, M15_MS, allow_fallback=False),
-            fetch_series(symbol, M15, 3, M15_MS, allow_fallback=False),
-        )
-        assert calls == 1, f"single-flight expected 1 fetch, got {calls}"
-        assert candle_cache_stats()["deduplicated_waiters"] >= 1
-        assert first[0] is not second[0] and first[0][0] is not second[0][0]
-        cached, _ = await fetch_series(symbol, M15, 3, M15_MS, allow_fallback=False)
-        assert calls == 1 and candle_cache_stats()["hits"] >= 1
-        expected_close = cached[0].close
-        cached[0].close = -1000.0
-        fresh, _ = await fetch_series(symbol, M15, 3, M15_MS, allow_fallback=False)
-        assert fresh[0].close == expected_close
-        await fetch_series(symbol, M15, 3, M15_MS, allow_fallback=False, force_refresh=True)
-        assert calls == 2 and candle_cache_stats()["refreshes"] >= 1
-        # A forced refresh and a normal caller must not share the same stale
-        # in-flight request when they start at the same time.
-        with _CANDLE_CACHE_LOCK:
-            _CANDLE_SERIES_CACHE.pop(("BYBIT_ONLY", symbol, M15, M15_MS), None)
-        await asyncio.gather(
-            fetch_series(symbol, M15, 3, M15_MS, allow_fallback=False),
-            fetch_series(symbol, M15, 3, M15_MS, allow_fallback=False, force_refresh=True),
-        )
-        assert calls == 4, f"force-refresh shared a normal in-flight fetch: calls={calls}"
-        preferred, _ = await fetch_series(symbol, M15, 3, M15_MS, allow_fallback=True)
-        assert calls == 5, "BYBIT_ONLY and BYBIT_PREFERRED cache policies were not isolated"
-        assert len(preferred) == 3
-        return {"ok": True, "tests": {
-            "single_flight_deduplication": True,
-            "cache_hit_and_copy_isolation": True,
-            "force_refresh": True,
-            "force_refresh_inflight_isolation": True,
-            "source_policy_key_isolation": True,
-            "cache_metrics": True,
-        }}
-    finally:
-        _fetch_series_uncached = original_fetch
-        with _CANDLE_CACHE_LOCK:
-            for key in keys:
-                _CANDLE_SERIES_CACHE.pop(key, None)
-            _CANDLE_SERIES_CACHE.update(saved_entries)
-            _CANDLE_CACHE_METRICS.update(saved_metrics)
-
-
-async def self_test_trailing_request_suppression_async() -> dict[str, Any]:
-    """Check R-ladder improvement/geometry and suppression of unnecessary M15 fetches."""
-    global fetch_series
-    original_fetch = fetch_series
-    fetch_calls = 0
-
-    async def fake_fetch(*args: Any, **kwargs: Any) -> tuple[list[Candle], str]:
-        nonlocal fetch_calls
-        fetch_calls += 1
-        raise AssertionError("trailing should not fetch structure if the R-ladder cannot improve SL")
-
-    try:
-        fetch_series = fake_fetch
-        buy_not_improved = await analyze_trailing({
-            "pair": "TESTUSDT", "direction": "BUY", "fill_price": 100.0,
-            "initial_sl": 90.0, "sl": 106.0, "price": 115.0,
-        })
-        sell_not_improved = await analyze_trailing({
-            "pair": "TESTUSDT", "direction": "SELL", "fill_price": 100.0,
-            "initial_sl": 110.0, "sl": 94.0, "price": 85.0,
-        })
-        assert fetch_calls == 0, f"structural trailing made {fetch_calls} unnecessary fetches"
-        assert buy_not_improved.get("new_sl") is None
-        assert sell_not_improved.get("new_sl") is None
-
-        buy_proposal = await analyze_trailing({
-            "pair": "TESTUSDT", "direction": "BUY", "fill_price": 100.0,
-            "initial_sl": 90.0, "sl": 100.0, "price": 115.0,
-        }, {"fetch_structure": False})
-        sell_proposal = await analyze_trailing({
-            "pair": "TESTUSDT", "direction": "SELL", "fill_price": 100.0,
-            "initial_sl": 110.0, "sl": 100.0, "price": 85.0,
-        }, {"fetch_structure": False})
-        assert buy_proposal.get("new_sl") == 105.0 and 105.0 < 115.0
-        assert sell_proposal.get("new_sl") == 95.0 and 95.0 > 85.0
-        assert fetch_calls == 0, "fetch_structure=False still requested candles"
-        return {"ok": True, "tests": {
-            "no_fetch_when_ladder_cannot_improve": True,
-            "buy_sell_trailing_proposals_valid": True,
-            "explicit_structure_disable_respected": True,
-        }}
-    finally:
-        fetch_series = original_fetch
-
-
-async def self_test_validation_divergence_async() -> dict[str, Any]:
-    """Validate a stable thesis and reject a fresh thesis that flips direction; no network."""
-    global generate_setup
-    original_generate = generate_setup
-
-    def make_setup(direction: str = "BUY", signature: str = "H4_A") -> dict[str, Any]:
-        is_buy = direction == "BUY"
-        entry = 99.0 if is_buy else 101.0
-        sl = 97.0 if is_buy else 103.0
-        tp = 104.0 if is_buy else 96.0
-        zone = {"low": 98.5, "high": 99.5} if is_buy else {"low": 100.5, "high": 101.5}
-        return {
-            "pair": "TESTUSDT", "direction": direction, "price_now_reference": 99.0 if is_buy else 101.0,
-            "entry": entry, "price_exp": 101.0 if is_buy else 97.0,
-            "sl": sl, "tp": tp, "confidence": 75.0,
-            "analysis": {
-                "macro": {
-                    "allowed_directions": [direction],
-                    "pair_regime": {"trend": "BULLISH" if is_buy else "BEARISH"},
-                    "pair_h4": {"trend": "BULLISH" if is_buy else "BEARISH"},
-                },
-                "pair_structure": {"signature_h4": signature},
-                "entry_zone": {**zone, "selected": entry},
-                "rsi_projection": {"classification": "STRONG"},
-                "risk": {"planned_rr": 2.5},
-                "invalidation": {"sl": sl},
-                "target_map": {"selected": {"level": tp}},
-                "liquidity_map": {"significant_below" if is_buy else "significant_above": [{"level": sl}]},
-                "thesis": {"status": "ACTIVE"},
-            },
-        }
-
-    holder = {"setup": make_setup()}
-
-    async def fake_generate(_pair: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
-        return holder["setup"]
-
-    try:
-        generate_setup = fake_generate
-        stable = make_setup()
-        accepted = await validate_setup("TESTUSDT", stable, {})
-        assert accepted["valid"] is True, f"stable thesis unexpectedly rejected: {accepted.get('reason')}"
-
-        holder["setup"] = make_setup("SELL", "H4_B")
-        rejected = await validate_setup("TESTUSDT", stable, {})
-        assert rejected["valid"] is False, "validator accepted a changed direction/thesis"
-        assert rejected["validation"]["same_direction"] is False
-        assert any(item == "VALIDATION_SAME_DIRECTION" for item in rejected["gate_reasons"])
-        return {"ok": True, "tests": {
-            "stable_thesis_validated": True,
-            "directional_divergence_rejected": True,
-            "validation_gate_reason_emitted": True,
-        }}
-    finally:
-        generate_setup = original_generate
 
 
 def validate_liquidity_map(liquidity_map: dict[str, Any], current: float) -> tuple[bool, list[str]]:
@@ -8675,16 +8287,9 @@ def _v2_make_synthetic_candles(
     return data
 
 
-def self_test_structural_prediction_v2() -> dict[str, Any]:
+def _self_test_structural_prediction_v2_core() -> dict[str, Any]:
     """Deterministic local regression suite; never hits network."""
     tests: dict[str, bool] = {}
-
-    cache_report = self_test_candle_cache_primitives()
-    assert cache_report["ok"], f"candle cache regression failed: {cache_report}"
-    tests["candle_cache_primitives"] = True
-    output_report = self_test_blueprint_output_contracts()
-    assert output_report["ok"], f"blueprint output contract regression failed: {output_report}"
-    tests["blueprint_output_contracts"] = True
 
     # ------------------------------------------------------------------
     # DATA / STRUCTURE
@@ -8933,6 +8538,272 @@ EXHAUST_GIVEBACK_R = 0.8
 TRAIL_MIN_GAP_R = 0.30
 
 
+
+def _run_coro_sync(coro: Any) -> Any:
+    """Jalankan coroutine pada loop sendiri (aman walau dipanggil dari loop aktif)."""
+    box: dict[str, Any] = {}
+
+    def runner() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            box["v"] = loop.run_until_complete(coro)
+        except BaseException as exc:  # noqa: BLE001
+            box["e"] = exc
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=runner)
+    thread.start()
+    thread.join()
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
+def _synthetic_series(count: int, interval_ms: int, *, end_closed: bool = True, price: float = 100.0) -> list[Candle]:
+    now_ms = int(time.time() * 1000)
+    last_open = (now_ms // interval_ms) * interval_ms - (interval_ms if end_closed else 0)
+    out: list[Candle] = []
+    for i in range(count):
+        t = last_open - (count - 1 - i) * interval_ms
+        px = price + (i % 7) * 0.1
+        out.append(Candle(time_ms=t, open=px, high=px + 0.5, low=px - 0.5, close=px + 0.1, volume=10.0))
+    return out
+
+
+def _self_test_v22() -> dict[str, Any]:
+    """Tes kontrak/cache/geometri/biaya/trailing (tanpa jaringan)."""
+    tests: dict[str, bool] = {}
+    failures: list[dict[str, Any]] = []
+
+    def check(name: str, rule: str, cond: bool, expected: Any = None, actual: Any = None) -> None:
+        tests[name] = bool(cond)
+        if not cond:
+            failures.append({"check": name, "rule": rule, "expected": expected, "actual": actual})
+
+    saved_cache = OrderedDict(_SERIES_CACHE)
+    saved_stats = dict(_SERIES_STATS)
+    saved_entries, saved_mb = CANDLE_CACHE_MAX_ENTRIES, CANDLE_CACHE_MAX_MB
+    saved_fetch = globals()["_fetch_series_uncached"]
+    saved_bybit, saved_binance = BybitProvider.klines, BinanceProvider.klines
+    try:
+        _SERIES_CACHE.clear()
+        for k in _SERIES_STATS:
+            _SERIES_STATS[k] = 0
+
+        check("weights_total_100", "THESIS_WEIGHTS_V2 harus berjumlah 100", abs(thesis_weights_total() - 100.0) < 1e-9, 100.0, thesis_weights_total())
+
+        # ---- normalisasi candle
+        base = _synthetic_series(100, M15_MS)
+        messy = list(reversed(base)) + [base[10]]  # terbalik + duplikat
+        open_c = Candle(time_ms=(int(time.time() * 1000) // M15_MS) * M15_MS, open=1, high=2, low=0.5, close=1.5, volume=1)
+        bad_c = Candle(time_ms=base[0].time_ms - M15_MS, open=10, high=5, low=6, close=7, volume=1)  # high<low
+        norm, qs = normalize_candles(messy + [open_c, bad_c], M15_MS)
+        times = [c.time_ms for c in norm]
+        check("normalize_sorted_unique", "ascending & unik", times == sorted(set(times)), "sorted", times[:3])
+        check("normalize_drops_open_and_invalid", "candle open/invalid dibuang", qs["open_dropped"] == 1 and qs["invalid_dropped"] == 1 and len(norm) == 100, (1, 1, 100), (qs["open_dropped"], qs["invalid_dropped"], len(norm)))
+        invalid_raised = False
+        try:
+            normalize_candles(base[:50] + [Candle(time_ms=base[0].time_ms - (i + 1) * M15_MS, open=10, high=5, low=6, close=7, volume=1) for i in range(10)], M15_MS)
+        except DataInvalidError:
+            invalid_raised = True
+        check("normalize_rejects_invalid_series", "terlalu banyak OHLC rusak -> DataInvalidError", invalid_raised, True, invalid_raised)
+        gap_series = base[:20] + base[25:]
+        _, gstats = normalize_candles(gap_series, M15_MS)
+        check("normalize_counts_gaps", "gap terdeteksi", gstats["gaps"] == 1, 1, gstats["gaps"])
+
+        # ---- cache hit/miss/mutasi
+        _series_cache_store("TESTUSDT", M15, base, "BYBIT", M15_MS)
+        hit = _series_cache_get("TESTUSDT", M15, 50, False, None)
+        check("cache_hit_smaller_lookback", "lookback kecil dilayani seri besar", hit is not None and len(hit[0]) == 50, 50, None if hit is None else len(hit[0]))
+        check("cache_miss_larger_lookback", "tidak mengembalikan 100 bila diminta 672", _series_cache_get("TESTUSDT", M15, 672, False, None) is None, None, "hit")
+        if hit:
+            hit[0].clear()
+        again = _series_cache_get("TESTUSDT", M15, 50, False, None)
+        check("cache_no_shared_mutation", "mutasi list pemanggil tidak mengubah cache", again is not None and len(again[0]) == 50, 50, None if again is None else len(again[0]))
+
+        # ---- TTL & boundary
+        entry = _SERIES_CACHE[("BYBIT", "TESTUSDT", M15)]
+        entry.fetched_at = time.time() - 1000.0
+        check("cache_ttl_expiry", "melewati TTL -> stale", _series_cache_get("TESTUSDT", M15, 50, False, None) is None, None, "hit")
+        expected_ms = _expected_last_closed_ms(int(time.time() * 1000), M15_MS)
+        entry.last_closed_ms = expected_ms - M15_MS
+        entry.fetched_at = (expected_ms + M15_MS) / 1000.0 - 5.0  # diambil 5 dtk sebelum candle terbaru close
+        check("cache_boundary_invalidation", "candle baru close -> cache tidak boleh menyembunyikannya", _series_cache_get("TESTUSDT", M15, 50, False, None) is None, None, "hit")
+
+        # ---- bound entries / bytes
+        _SERIES_CACHE.clear()
+        globals()["CANDLE_CACHE_MAX_ENTRIES"] = 3
+        for i in range(5):
+            _series_cache_store(f"P{i}USDT", M15, base[-20:], "BYBIT", M15_MS)
+        check("cache_bounded_entries", "maks entri dipatuhi", len(_SERIES_CACHE) == 3 and _SERIES_STATS["evictions"] >= 2, 3, len(_SERIES_CACHE))
+        globals()["CANDLE_CACHE_MAX_ENTRIES"] = saved_entries
+        _SERIES_CACHE.clear()
+        globals()["CANDLE_CACHE_MAX_MB"] = 0.01
+        before_ev = _SERIES_STATS["evictions"]
+        _series_cache_store("BIGUSDT", M15, base, "BYBIT", M15_MS)
+        check("cache_bounded_bytes", "maks byte dipatuhi", _series_total_bytes() <= 0.01 * 1024 * 1024 and _SERIES_STATS["evictions"] > before_ev, "<=10KB", _series_total_bytes())
+        globals()["CANDLE_CACHE_MAX_MB"] = saved_mb
+        _SERIES_CACHE.clear()
+
+        # ---- single-flight, force refresh, pemisahan provider
+        calls = {"n": 0}
+
+        async def fake_fetch(pair, interval, count, interval_ms, *, allow_fallback):
+            calls["n"] += 1
+            await asyncio.sleep(0.05)
+            return _synthetic_series(count, interval_ms), "BYBIT", {"gaps": 0}
+
+        globals()["_fetch_series_uncached"] = fake_fetch
+
+        async def concurrent() -> list[Any]:
+            return await asyncio.gather(*[fetch_series("SFUSDT", M15, 60, M15_MS, allow_fallback=False) for _ in range(5)])
+
+        results = _run_coro_sync(concurrent())
+        check("single_flight_dedup", "5 pemanggil serentak -> 1 fetch", calls["n"] == 1 and len(results) == 5, 1, calls["n"])
+        check("returns_independent_lists", "tiap pemanggil mendapat list sendiri", all(results[i][0] is not results[j][0] for i in range(5) for j in range(i + 1, 5)), True, False)
+        n_before = calls["n"]
+        _run_coro_sync(fetch_series("SFUSDT", M15, 60, M15_MS, allow_fallback=False))
+        check("second_call_cache_hit", "panggilan berikutnya dari cache", calls["n"] == n_before, n_before, calls["n"])
+        _run_coro_sync(fetch_series("SFUSDT", M15, 60, M15_MS, allow_fallback=False, force_refresh=True))
+        check("force_refresh_bypasses_cache", "force_refresh memaksa fetch baru", calls["n"] == n_before + 1, n_before + 1, calls["n"])
+        _SERIES_CACHE.clear()
+        _series_cache_store("PSUSDT", M15, base, "BINANCE_FALLBACK", M15_MS)
+        calls["n"] = 0
+        got = _run_coro_sync(fetch_series("PSUSDT", M15, 50, M15_MS, allow_fallback=False))
+        check("provider_separation", "SCAN (tanpa fallback) tidak boleh memakai cache Binance", calls["n"] == 1 and got[1] == "BYBIT", (1, "BYBIT"), (calls["n"], got[1]))
+        globals()["_fetch_series_uncached"] = saved_fetch
+
+        # ---- kebijakan SCAN: tanpa fallback Binance
+        called = {"binance": 0}
+
+        async def bybit_fail(self, *a, **k):
+            raise RuntimeError("bybit down")
+
+        async def binance_ok(self, *a, **k):
+            called["binance"] += 1
+            return base
+
+        BybitProvider.klines = bybit_fail
+        BinanceProvider.klines = binance_ok
+        raised = False
+        try:
+            _run_coro_sync(fetch_series("NOFBUSDT", M15, 50, M15_MS, allow_fallback=False, use_cache=False))
+        except RuntimeError:
+            raised = True
+        check("scan_no_binance_fallback", "allow_fallback=False tidak memanggil Binance", raised and called["binance"] == 0, (True, 0), (raised, called["binance"]))
+        fb = _run_coro_sync(fetch_series("FBUSDT", M15, 50, M15_MS, allow_fallback=True, use_cache=False))
+        check("fallback_allowed_non_scan", "fallback Binance hanya bila diizinkan", fb[1] == "BINANCE_FALLBACK" and called["binance"] == 1, "BINANCE_FALLBACK", fb[1])
+        BybitProvider.klines, BinanceProvider.klines = saved_bybit, saved_binance
+
+        # ---- geometri BUY/SELL
+        check("geometry_buy_valid", "BUY SL<entry<TP valid", validate_setup_geometry("BUY", 100, 98, 106, 99.5, 100.5) == [], [], validate_setup_geometry("BUY", 100, 98, 106, 99.5, 100.5))
+        check("geometry_sell_valid", "SELL TP<entry<SL valid", validate_setup_geometry("SELL", 100, 102, 94, 99.5, 100.5) == [], [], validate_setup_geometry("SELL", 100, 102, 94, 99.5, 100.5))
+        buy_bad = validate_setup_geometry("BUY", 100, 101, 106)
+        sell_bad = validate_setup_geometry("SELL", 100, 98, 94)
+        check("geometry_buy_sl_wrong_side", "SL di sisi salah ditolak", bool(buy_bad) and buy_bad[0]["code"] == "GEOMETRY_INVALID", "GEOMETRY_INVALID", buy_bad)
+        check("geometry_sell_sl_wrong_side", "SELL SL di bawah entry ditolak", bool(sell_bad) and sell_bad[0]["code"] == "GEOMETRY_INVALID", "GEOMETRY_INVALID", sell_bad)
+        outside = validate_setup_geometry("BUY", 100, 98, 106, 90, 95)
+        inverted = validate_setup_geometry("BUY", 100, 98, 106, 101, 99)
+        check("geometry_entry_outside_zone", "entry di luar zona ditolak", any(i["code"] == "ENTRY_OUTSIDE_ZONE" for i in outside), "ENTRY_OUTSIDE_ZONE", outside)
+        check("geometry_zone_inverted", "zona terbalik ditolak", any(i["code"] == "ZONE_INVERTED" for i in inverted), "ZONE_INVERTED", inverted)
+        check("geometry_invalid_prices", "harga nol/NaN ditolak", validate_setup_geometry("BUY", 0, 98, 106)[0]["code"] == "PRICE_INVALID", "PRICE_INVALID", None)
+
+        # ---- RR & biaya
+        rr = estimate_after_cost_rr("BUY", 100, 99.7, 100.6)
+        check("rr_costs_reduce_net", "biaya menurunkan RR bersih", rr["valid"] and rr["after_cost_rr"] < rr["gross_rr"], "net<gross", (rr["gross_rr"], rr["after_cost_rr"]))
+        marginal = estimate_after_cost_rr("SELL", 100, 100.3, 99.6, fee_pct=0.2, slippage_pct=0.2)
+        check("rr_marginal_turns_net_zero", "profit gross marginal jadi nol setelah biaya", marginal["after_cost_rr"] == 0.0, 0.0, marginal["after_cost_rr"])
+        check("rr_impossible_invalid", "RR mustahil -> invalid", estimate_after_cost_rr("BUY", 100, 101, 99)["valid"] is False, False, None)
+
+        # ---- kontrak state kandidat
+        def make(direction="BUY", conf=72.0, status="ACTIVE_TRIGGER_CONFIRMED", entry=100.0, sl=98.0, tp=105.0, rr=2.5, asof_age_ms=0):
+            now_ms = int(time.time() * 1000)
+            return {
+                "pair": "SOLUSDT", "direction": direction, "entry": entry, "sl": sl, "tp": tp, "confidence": conf,
+                "price_now_reference": entry, "confidence_components": {k: 60.0 for k in THESIS_WEIGHTS_V2},
+                "analysis": {"thesis": {"status": status, "type": "BUY_PULLBACK"}, "entry_zone": {"low": entry - 0.3, "high": entry + 0.3},
+                             "risk": {"planned_rr": rr, "risk_pct": 2.0, "risk_h1_atr": 1.1}, "invalidation": {"reason": "swing"},
+                             "pair_structure": {"signature_h4": "abc"}, "macro": {"btc_regime": {"confidence": 60}}, "confidence": {"penalties": []}},
+                "data": {"source": "BYBIT", "tick_size": 0.01, "directional_bias": "BULLISH",
+                         "data_asof": {"M15": ((now_ms - asof_age_ms) // M15_MS) * M15_MS - M15_MS, "H1": ((now_ms - asof_age_ms) // (4 * M15_MS)) * 4 * M15_MS - 4 * M15_MS,
+                                       "H4": ((now_ms - asof_age_ms) // (16 * M15_MS)) * 16 * M15_MS - 16 * M15_MS}},
+            }
+
+        ready = _enrich_setup_contract(make())
+        waiting = _enrich_setup_contract(make(status="WAITING_TRIGGER", conf=60.0))
+        hard = _enrich_setup_contract(make(sl=101.0))
+        stale = _enrich_setup_contract(make(asof_age_ms=3 * 24 * 3600 * 1000))
+        fallback = _enrich_setup_contract(make(status="LOW_QUALITY_FALLBACK", conf=58.0))
+        low_rr = _enrich_setup_contract(make(rr=1.2, tp=102.0))
+        check("state_ready", "setup valid -> READY", ready["candidate_state"] == "READY", "READY", ready["candidate_state"])
+        check("state_waiting_trigger", "trigger belum -> WAITING_TRIGGER", waiting["candidate_state"] == "WAITING_TRIGGER", "WAITING_TRIGGER", waiting["candidate_state"])
+        check("state_rejected_hard_geometry", "SL salah sisi -> REJECTED_HARD", hard["candidate_state"] == "REJECTED_HARD" and hard["state_reason"] == "GEOMETRY_INVALID", "REJECTED_HARD/GEOMETRY_INVALID", (hard["candidate_state"], hard["state_reason"]))
+        check("state_data_unavailable_stale", "data basi -> DATA_UNAVAILABLE", stale["candidate_state"] == "DATA_UNAVAILABLE", "DATA_UNAVAILABLE", stale["candidate_state"])
+        check("state_rejected_quality_fallback", "fallback -> REJECTED_QUALITY", fallback["candidate_state"] == "REJECTED_QUALITY", "REJECTED_QUALITY", fallback["candidate_state"])
+        check("state_rr_below_min", "RR di bawah minimum -> hard reject", low_rr["candidate_state"] == "REJECTED_HARD" and low_rr["state_reason"] == "RR_BELOW_MIN", "RR_BELOW_MIN", low_rr["state_reason"])
+        required = {"schema_version", "candidate_state", "state_reason", "gate_reasons", "entry_zone", "planned_rr_gross", "planned_rr_after_costs", "data_asof", "data_quality", "setup_archetype", "analysis_source", "risk", "thesis_signature", "confidence_breakdown"}
+        check("contract_required_fields", "field kontrak lengkap", required <= set(ready), "semua field", sorted(required - set(ready)))
+        check("contract_preserves_legacy_fields", "field lama tidak hilang", all(k in ready for k in ("pair", "direction", "entry", "sl", "tp", "confidence", "analysis", "data")), True, None)
+        check("contract_signature_stable", "signature thesis deterministik", ready["thesis_signature"] == _enrich_setup_contract(make())["thesis_signature"], True, None)
+        cb = ready["confidence_breakdown"]
+        check("confidence_breakdown", "komponen, raw, cap, final tersedia", abs(cb["raw_weighted_score"] - 60.0) < 0.01 and cb["weights_total"] == 100.0 and "waiting" in cb["caps"], 60.0, cb["raw_weighted_score"])
+
+        # ---- BTC alignment
+        check("btc_alignment_labels", "label ALIGNED/NEUTRAL/COUNTER/HIGH_RISK",
+              (classify_btc_alignment("BULLISH", "BUY"), classify_btc_alignment("RANGE", "BUY"), classify_btc_alignment("BULLISH", "SELL", 50),
+               classify_btc_alignment("BEARISH", "BUY", 95)) == ("ALIGNED", "NEUTRAL", "COUNTER_TREND", "HIGH_RISK_CONFLICT"), None, None)
+
+        # ---- kualitas data
+        dq_old = _data_quality({"M15": int(time.time() * 1000) - 5 * 3600_000})
+        check("data_quality_stale", "M15 lama -> tidak fresh", dq_old["fresh"] is False and "M15" in dq_old["stale_timeframes"], False, dq_old)
+
+        # ---- trailing (R-ladder, tanpa jaringan)
+        async def trail(trade):
+            return await analyze_trailing(trade, {"fetch_structure": False})
+
+        buy = _run_coro_sync(trail({"direction": "BUY", "fill_price": 100.0, "initial_sl": 95.0, "sl": 95.0, "price": 110.0, "pair": "XUSDT"}))
+        sell = _run_coro_sync(trail({"direction": "SELL", "fill_price": 100.0, "initial_sl": 105.0, "sl": 105.0, "price": 90.0, "pair": "XUSDT"}))
+        none_low = _run_coro_sync(trail({"direction": "BUY", "fill_price": 100.0, "initial_sl": 95.0, "sl": 95.0, "price": 100.5, "pair": "XUSDT"}))
+        tighter = _run_coro_sync(trail({"direction": "SELL", "fill_price": 100.0, "initial_sl": 105.0, "sl": 90.5, "price": 90.0, "pair": "XUSDT"}))
+        check("trailing_buy_improves", "BUY: SL baru > SL lama dan < harga", buy["new_sl"] is not None and 95.0 < buy["new_sl"] < 110.0, "95<sl<110", buy["new_sl"])
+        check("trailing_sell_improves", "SELL: SL baru < SL lama dan > harga", sell["new_sl"] is not None and 90.0 < sell["new_sl"] < 105.0, "90<sl<105", sell["new_sl"])
+        check("trailing_no_suggestion_below_threshold", "R rendah -> tidak ada usulan", none_low["new_sl"] is None, None, none_low["new_sl"])
+        check("trailing_never_widens", "tidak pernah melonggarkan SL", tighter["new_sl"] is None or tighter["new_sl"] < 90.5, "None atau lebih ketat", tighter["new_sl"])
+        check("trailing_error_field", "field error terstruktur ada", "error" in buy and buy["schema_version"] == STRATEGY_SCHEMA_VERSION, True, None)
+
+        stats = series_cache_stats()
+        check("cache_stats_observable", "metrik cache tersedia", {"hits", "misses", "evictions", "refreshes", "failures", "entries", "approx_mb", "hit_rate"} <= set(stats), True, sorted(stats))
+    except Exception as exc:  # noqa: BLE001
+        failures.append({"check": "self_test_v22_runtime", "rule": "tes tidak boleh melempar", "expected": "no exception", "actual": f"{type(exc).__name__}: {exc}"})
+        tests["self_test_v22_runtime"] = False
+    finally:
+        globals()["_fetch_series_uncached"] = saved_fetch
+        BybitProvider.klines, BinanceProvider.klines = saved_bybit, saved_binance
+        globals()["CANDLE_CACHE_MAX_ENTRIES"], globals()["CANDLE_CACHE_MAX_MB"] = saved_entries, saved_mb
+        with _SERIES_LOCK:
+            _SERIES_CACHE.clear()
+            _SERIES_CACHE.update(saved_cache)
+            _SERIES_STATS.update(saved_stats)
+    return {"ok": not failures, "tests": tests, "failures": failures}
+
+
+def self_test_structural_prediction_v2() -> dict[str, Any]:
+    """Suite lokal deterministik (tanpa jaringan): core V2 + kontrak/cache v2.2."""
+    tests: dict[str, bool] = {}
+    failures: list[dict[str, Any]] = []
+    try:
+        core = _self_test_structural_prediction_v2_core()
+        tests.update({f"core.{k}": bool(v) for k, v in core.get("tests", {}).items()})
+    except AssertionError as exc:
+        tests["core.suite"] = False
+        failures.append({"check": "core.suite", "rule": "regresi core V2", "expected": "pass", "actual": f"AssertionError: {exc}"})
+    extra = _self_test_v22()
+    tests.update({f"v22.{k}": v for k, v in extra["tests"].items()})
+    failures.extend(extra["failures"])
+    return {"ok": not failures, "tests": tests, "failures": failures}
+
+
 async def analyze_trailing(
     trade: dict[str, Any],
     context: dict[str, Any] | None = None,
@@ -8947,6 +8818,8 @@ async def analyze_trailing(
     price = safe_float(trade.get("price"))
     risk = abs(fill - initial_sl)
     result: dict[str, Any] = {
+        "schema_version": STRATEGY_SCHEMA_VERSION,
+        "error": None,
         "new_sl": None,
         "source": None,
         "reason": "",
@@ -8970,19 +8843,10 @@ async def analyze_trailing(
             f"R-ladder: harga +{r_now:.2f}R, SL dikunci di {lock_r:.1f}R.",
         )
 
-    ladder_can_improve = any(
-        (value[0] > current_sl if buy else value[0] < current_sl)
-        for value in candidates.values()
-    )
-    should_fetch_structure = bool(
-        context.get("fetch_structure", True)
-        and r_now >= STRUCT_TRAIL_MIN_R
-        and ladder_can_improve
-    )
-    if should_fetch_structure:
+    if context.get("fetch_structure", True) and r_now >= STRUCT_TRAIL_MIN_R:
         try:
             pair = normalize_pair(str(trade.get("pair") or ""))
-            m15, _ = await fetch_series(pair, M15, 200, M15_MS, allow_fallback=False)
+            m15, _ = await fetch_series(pair, M15, 200, M15_MS, allow_fallback=False, max_age_seconds=TRAIL_M15_MAX_AGE_SECONDS)
             atr_vals = atr_series(m15, 14)
             atr = atr_vals[-1] if atr_vals else 0.0
             structure = build_structure(m15, SWING_SPAN_M15)
@@ -9014,7 +8878,7 @@ async def analyze_trailing(
                 )
         except Exception as exc:
             result["structure_error"] = str(exc)[:160]
-            result["structure_error_code"] = "OPTIONAL_TRAILING_DATA_UNAVAILABLE"
+            result["error"] = {"code": "STRUCTURE_ANALYSIS_FAILED", "message": str(exc)[:160]}
 
     if not candidates:
         return result
@@ -9033,6 +8897,3 @@ if __name__ == "__main__":
     print(f"{STRATEGY_NAME} v{STRATEGY_VERSION}")
     print("Module contracts: async generate_setup(pair, context), async analyze_btc_regime(context), async analyze_scan_structure(pair, context), async validate_setup(pair, initial_setup, context), async analyze_trailing(trade, context)")
     print("V2 self-test:", self_test_structural_prediction_v2())
-    print("Candle cache self-test:", asyncio.run(self_test_fetch_series_cache_async()))
-    print("Trailing self-test:", asyncio.run(self_test_trailing_request_suppression_async()))
-    print("Validation self-test:", asyncio.run(self_test_validation_divergence_async()))
