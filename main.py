@@ -64,7 +64,7 @@ from collections import deque
 import traceback
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any
@@ -190,8 +190,8 @@ SCAN_CYCLE_DELAY_SECONDS = 30.0
 MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "400") or "400")
 
 # Final Bot Optimization: bounded candidate/research subsystem. Research is OFF
-# by default and can never place orders. Configure BOT_DATA_DIR to a persistent
-# mounted directory on hosts whose application filesystem is ephemeral.
+# by default and can never place orders. Local SQLite is a scratch cache; on Render
+# Free, compact durable candidate/replay metadata is batched to the existing GitHub repo.
 def _safe_env_int(name: str, default: int, low: int, high: int) -> int:
     try:
         value = int(str(os.getenv(name, default)).strip())
@@ -212,7 +212,10 @@ def _safe_env_float(name: str, default: float, low: float, high: float) -> float
 
 
 _BOT_DATA_DIR_RAW = str(os.getenv("BOT_DATA_DIR") or "").strip()
-BOT_DATA_DIR = Path(_BOT_DATA_DIR_RAW).expanduser() if _BOT_DATA_DIR_RAW else (BASE_DIR / "bot_data")
+# Free Render has an ephemeral but writable filesystem; use /tmp as local scratch
+# unless an operator explicitly configures another location. Durability is provided
+# by the batched GitHub ledger below, not by pretending /tmp is persistent.
+BOT_DATA_DIR = Path(_BOT_DATA_DIR_RAW).expanduser() if _BOT_DATA_DIR_RAW else (Path(tempfile.gettempdir()) / "bot_data")
 if not BOT_DATA_DIR.is_absolute():
     BOT_DATA_DIR = BASE_DIR / BOT_DATA_DIR
 BOT_DATA_DIR = BOT_DATA_DIR.resolve()
@@ -231,9 +234,20 @@ RESEARCH_DB_MAX_EVENTS = _safe_env_int("RESEARCH_DB_MAX_EVENTS", 100000, 1000, 1
 RESEARCH_M1_CACHE_MAX_ROWS = _safe_env_int("RESEARCH_M1_CACHE_MAX_ROWS", 500000, 10000, 5000000)
 RESEARCH_M1_CACHE_RETENTION_DAYS = _safe_env_int("RESEARCH_M1_CACHE_RETENTION_DAYS", 14, 1, 365)
 BOT_DATA_DIR_CONFIGURED = bool(str(os.getenv("BOT_DATA_DIR") or "").strip())
-# This flag is an operator acknowledgement, not an automatic filesystem detector.
-# Set it only after BOT_DATA_DIR points inside a persistent disk/datastore mount.
+# This flag only applies to users who actually have a persistent mount. Render Free
+# users should leave it OFF and use the batched GitHub ledger for durable summaries.
 BOT_DATA_PERSISTENCE_CONFIRMED = str(os.getenv("BOT_DATA_PERSISTENCE_CONFIRMED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+RESEARCH_GITHUB_SYNC_ENABLED = str(os.getenv("RESEARCH_GITHUB_SYNC_ENABLED", "1")).strip().lower() in {"1", "true", "yes", "on"}
+RESEARCH_GITHUB_SYNC_INTERVAL_SECONDS = _safe_env_int("RESEARCH_GITHUB_SYNC_INTERVAL_SECONDS", 3600, 300, 7200)
+RESEARCH_GITHUB_MAX_LEDGER_BYTES = _safe_env_int(
+    "RESEARCH_GITHUB_MAX_LEDGER_BYTES",
+    _safe_env_int("RESEARCH_GITHUB_MAX_DAILY_BYTES", 5000000, 250000, 15000000),
+    250000, 15000000,
+)
+RESEARCH_GITHUB_MAX_LEDGER_CANDIDATES = _safe_env_int("RESEARCH_GITHUB_MAX_LEDGER_CANDIDATES", 2000, 100, 10000)
+RESEARCH_GITHUB_BATCH_SIZE = _safe_env_int("RESEARCH_GITHUB_BATCH_SIZE", 250, 10, 1000)
+RESEARCH_SYNC_OUTBOX_MAX = _safe_env_int("RESEARCH_SYNC_OUTBOX_MAX", 10000, 1000, 50000)
+RESEARCH_GITHUB_LEDGER_DIR = str(os.getenv("RESEARCH_GITHUB_LEDGER_DIR", "data/research/ledger")).strip().strip("/") or "data/research/ledger"
 BINANCE_EXCHANGE_INFO_TTL_SECONDS = _safe_env_int("BINANCE_EXCHANGE_INFO_TTL_SECONDS", 21600, 300, 86400)
 BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS = _safe_env_int("BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS", 86400, 300, 172800)
 BINANCE_TICKER_24H_TTL_SECONDS = _safe_env_int("BINANCE_TICKER_24H_TTL_SECONDS", 90, 15, 600)
@@ -1564,6 +1578,15 @@ class ResearchStore:
                     value TEXT NOT NULL,
                     updated_ms INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS research_sync_outbox (
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_ms INTEGER NOT NULL,
+                    PRIMARY KEY(entity_type, entity_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_research_sync_updated
+                    ON research_sync_outbox(updated_ms ASC);
             """)
             conn.execute("UPDATE candidate_snapshots SET replay_status='PENDING', next_replay_ms=NULL WHERE replay_status='PROCESSING'")
             conn.commit()
@@ -1572,8 +1595,8 @@ class ResearchStore:
         """Validate SQLite integrity and a real write/read/delete transaction.
 
         This proves local database usability, not persistence across a Render
-        restart. That separate guarantee requires a mounted disk and explicit
-        operator acknowledgement via BOT_DATA_PERSISTENCE_CONFIRMED=1.
+        restart. Free-tier durability is verified separately through the GitHub
+        ledger; a paid persistent mount remains an optional alternative.
         """
         result: dict[str, Any] = {"path": str(self.path), "integrity": "UNKNOWN", "writable": False, "readable": False}
         with self._connect() as conn:
@@ -1603,7 +1626,239 @@ class ResearchStore:
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
-    def upsert_candidate(self, record: dict[str, Any]) -> None:
+    def _queue_candidate_sync(self, conn: sqlite3.Connection, candidate_id: str, updated_ms: int) -> None:
+        row = conn.execute("""
+            SELECT candidate_id,pair,direction,state,confidence,strategy_name,strategy_version,
+                   data_source,decision_ts_ms,first_seen_ms,last_seen_ms,next_eval_ms,reason,
+                   replay_status,replay_attempts,next_replay_ms,linked_trade_id,payload_json,updated_ms
+            FROM candidate_snapshots WHERE candidate_id=?
+        """, (candidate_id,)).fetchone()
+        if row is None:
+            return
+        item = dict(row)
+        try:
+            item["payload"] = json.loads(item.pop("payload_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            item["payload"] = {}
+            item.pop("payload_json", None)
+        # PROCESSING is only an ephemeral worker state; after a restart it must retry.
+        if item.get("replay_status") == "PROCESSING":
+            item["replay_status"] = "PENDING"
+        wrapped = {"kind": "candidate", "record": item}
+        conn.execute("""
+            INSERT INTO research_sync_outbox(entity_type,entity_id,payload_json,updated_ms)
+            VALUES('candidate',?,?,?)
+            ON CONFLICT(entity_type,entity_id) DO UPDATE SET
+                payload_json=excluded.payload_json,updated_ms=excluded.updated_ms
+        """, (candidate_id, self._json(wrapped), updated_ms))
+
+    def _queue_replay_sync(self, conn: sqlite3.Connection, candidate_id: str, updated_ms: int) -> None:
+        row = conn.execute("""
+            SELECT candidate_id,pair,direction,outcome,pnl_r,mfe_r,mae_r,ambiguous,
+                   entry_timestamp_ms,exit_timestamp_ms,candles_count,price_source,notes,created_ms
+            FROM replay_results WHERE candidate_id=?
+        """, (candidate_id,)).fetchone()
+        if row is None:
+            return
+        wrapped = {"kind": "replay", "record": dict(row)}
+        conn.execute("""
+            INSERT INTO research_sync_outbox(entity_type,entity_id,payload_json,updated_ms)
+            VALUES('replay',?,?,?)
+            ON CONFLICT(entity_type,entity_id) DO UPDATE SET
+                payload_json=excluded.payload_json,updated_ms=excluded.updated_ms
+        """, (candidate_id, self._json(wrapped), updated_ms))
+
+    def sync_outbox_batch(self, limit: int = 250) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 1000))
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT entity_type,entity_id,payload_json,updated_ms
+                FROM research_sync_outbox ORDER BY updated_ms ASC LIMIT ?
+            """, (limit,)).fetchall()
+        out = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            out.append({"entity_type": row["entity_type"], "entity_id": row["entity_id"],
+                        "updated_ms": int(row["updated_ms"]), "payload": payload})
+        return out
+
+    def acknowledge_sync_batch(self, items: list[dict[str, Any]]) -> int:
+        if not items:
+            return 0
+        deleted = 0
+        with self._connect() as conn:
+            for item in items:
+                cursor = conn.execute("""
+                    DELETE FROM research_sync_outbox
+                    WHERE entity_type=? AND entity_id=? AND updated_ms=?
+                """, (str(item.get("entity_type") or ""), str(item.get("entity_id") or ""), int(item.get("updated_ms") or 0)))
+                deleted += cursor.rowcount
+            conn.commit()
+        return deleted
+
+    def restore_candidate(self, remote: dict[str, Any]) -> None:
+        """Restore one compact candidate from durable GitHub JSONL without re-queuing it."""
+        candidate_id = str(remote.get("candidate_id") or "").strip()
+        if not candidate_id:
+            return
+        record = {
+            "candidate_id": candidate_id,
+            "pair": remote.get("pair") or "",
+            "direction": remote.get("direction"),
+            "state": remote.get("state") or "DATA_UNAVAILABLE",
+            "confidence": remote.get("confidence"),
+            "strategy_name": remote.get("strategy_name"),
+            "strategy_version": remote.get("strategy_version"),
+            "data_source": remote.get("data_source"),
+            "decision_ts_ms": remote.get("decision_ts_ms"),
+            "next_eval_ms": remote.get("next_eval_ms"),
+            "reason": remote.get("reason"),
+            "linked_trade_id": remote.get("linked_trade_id"),
+            "payload": remote.get("payload") if isinstance(remote.get("payload"), dict) else {},
+            "replay_eligible": str(remote.get("replay_status") or "") in {"PENDING", "PROCESSING"},
+        }
+        self.upsert_candidate(record, enqueue_sync=False)
+        now_ms = int(time.time() * 1000)
+        replay_status = str(remote.get("replay_status") or ("PENDING" if record["replay_eligible"] else "NOT_ELIGIBLE"))
+        if replay_status == "PROCESSING":
+            replay_status = "PENDING"
+        if replay_status not in {"PENDING", "NOT_ELIGIBLE", "UNAVAILABLE", "REPLAY_COMPLETE", "REPLAY_AMBIGUOUS"}:
+            replay_status = "PENDING"
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE candidate_snapshots SET
+                    first_seen_ms=MIN(first_seen_ms,?), last_seen_ms=MAX(last_seen_ms,?),
+                    replay_status=?, replay_attempts=?, next_replay_ms=?,
+                    linked_trade_id=COALESCE(?,linked_trade_id), updated_ms=?
+                WHERE candidate_id=?
+            """, (int(remote.get("first_seen_ms") or now_ms), int(remote.get("last_seen_ms") or now_ms),
+                  replay_status, max(0, int(remote.get("replay_attempts") or 0)), remote.get("next_replay_ms"),
+                  remote.get("linked_trade_id"), now_ms, candidate_id))
+            conn.commit()
+
+    def restore_replay(self, remote: dict[str, Any]) -> None:
+        candidate_id = str(remote.get("candidate_id") or "").strip()
+        if not candidate_id:
+            return
+        result = {
+            "outcome": remote.get("outcome") or "UNAVAILABLE",
+            "pnl_r": remote.get("pnl_r"), "mfe_r": remote.get("mfe_r"), "mae_r": remote.get("mae_r"),
+            "ambiguous": bool(remote.get("ambiguous")),
+            "entry_timestamp_ms": remote.get("entry_timestamp_ms"),
+            "exit_timestamp_ms": remote.get("exit_timestamp_ms"),
+            "candles_count": remote.get("candles_count") or 0,
+            "price_source": remote.get("price_source") or "BINANCE_USDM",
+            "notes": remote.get("notes") or "Restored from durable GitHub research ledger.",
+        }
+        self.save_replay_result(candidate_id, str(remote.get("pair") or ""), str(remote.get("direction") or "BUY"), result, enqueue_sync=False)
+
+    def restore_remote_items(self, items: list[dict[str, Any]]) -> tuple[int, int]:
+        """Bulk-restore a compact GitHub snapshot in one SQLite transaction."""
+        candidate_items = [x.get("record") for x in items if isinstance(x, dict) and x.get("kind") == "candidate" and isinstance(x.get("record"), dict)]
+        replay_items = [x.get("record") for x in items if isinstance(x, dict) and x.get("kind") == "replay" and isinstance(x.get("record"), dict)]
+        restored_candidates = 0
+        restored_replays = 0
+        now_ms = int(time.time() * 1000)
+        with self._connect() as conn:
+            for remote in candidate_items:
+                candidate_id = str(remote.get("candidate_id") or "").strip()
+                if not candidate_id:
+                    continue
+                try:
+                    payload_json = self._json(remote.get("payload") if isinstance(remote.get("payload"), dict) else {})
+                    decision_ms = max(0, int(remote.get("decision_ts_ms") or now_ms))
+                    first_seen_ms = max(0, int(remote.get("first_seen_ms") or now_ms))
+                    last_seen_ms = max(first_seen_ms, int(remote.get("last_seen_ms") or now_ms))
+                    updated_ms = max(0, int(remote.get("updated_ms") or last_seen_ms))
+                    replay_status = str(remote.get("replay_status") or ("PENDING" if remote.get("direction") in {"BUY", "SELL"} else "NOT_ELIGIBLE"))
+                    if replay_status == "PROCESSING":
+                        replay_status = "PENDING"
+                    if replay_status not in {"PENDING", "NOT_ELIGIBLE", "UNAVAILABLE", "REPLAY_COMPLETE", "REPLAY_AMBIGUOUS"}:
+                        replay_status = "PENDING"
+                    conn.execute("""
+                        INSERT INTO candidate_snapshots(
+                            candidate_id,pair,direction,state,confidence,strategy_name,strategy_version,
+                            data_source,decision_ts_ms,first_seen_ms,last_seen_ms,next_eval_ms,reason,
+                            replay_status,replay_attempts,next_replay_ms,linked_trade_id,payload_json,updated_ms
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(candidate_id) DO UPDATE SET
+                            pair=excluded.pair,direction=excluded.direction,state=excluded.state,
+                            confidence=excluded.confidence,strategy_name=excluded.strategy_name,
+                            strategy_version=excluded.strategy_version,data_source=excluded.data_source,
+                            first_seen_ms=MIN(candidate_snapshots.first_seen_ms,excluded.first_seen_ms),
+                            last_seen_ms=MAX(candidate_snapshots.last_seen_ms,excluded.last_seen_ms),
+                            next_eval_ms=excluded.next_eval_ms,reason=excluded.reason,
+                            replay_status=CASE WHEN candidate_snapshots.replay_status IN ('REPLAY_COMPLETE','REPLAY_AMBIGUOUS') THEN candidate_snapshots.replay_status ELSE excluded.replay_status END,
+                            replay_attempts=MAX(candidate_snapshots.replay_attempts,excluded.replay_attempts),
+                            next_replay_ms=excluded.next_replay_ms,
+                            linked_trade_id=COALESCE(excluded.linked_trade_id,candidate_snapshots.linked_trade_id),
+                            payload_json=CASE WHEN candidate_snapshots.decision_ts_ms=excluded.decision_ts_ms THEN candidate_snapshots.payload_json ELSE excluded.payload_json END,
+                            updated_ms=MAX(candidate_snapshots.updated_ms,excluded.updated_ms)
+                        WHERE excluded.updated_ms >= candidate_snapshots.updated_ms
+                    """, (
+                        candidate_id, str(remote.get("pair") or ""), remote.get("direction"),
+                        str(remote.get("state") or "DATA_UNAVAILABLE"), remote.get("confidence"),
+                        remote.get("strategy_name"), remote.get("strategy_version"), remote.get("data_source"),
+                        decision_ms, first_seen_ms, last_seen_ms, remote.get("next_eval_ms"), remote.get("reason"),
+                        replay_status, max(0, int(remote.get("replay_attempts") or 0)), remote.get("next_replay_ms"),
+                        remote.get("linked_trade_id"), payload_json, updated_ms,
+                    ))
+                    restored_candidates += 1
+                except (TypeError, ValueError, OverflowError, sqlite3.Error) as exc:
+                    log.warning("[RESEARCH] kandidat remote diabaikan (%s): %s", candidate_id, str(exc)[:120])
+
+            for remote in replay_items:
+                candidate_id = str(remote.get("candidate_id") or "").strip()
+                if not candidate_id:
+                    continue
+                try:
+                    # Replay results require a candidate row because SQLite enforces the FK.
+                    if conn.execute("SELECT 1 FROM candidate_snapshots WHERE candidate_id=?", (candidate_id,)).fetchone() is None:
+                        continue
+                    outcome = str(remote.get("outcome") or "UNAVAILABLE")
+                    created_ms = max(0, int(remote.get("created_ms") or now_ms))
+                    conn.execute("""
+                        INSERT INTO replay_results(
+                            candidate_id,pair,direction,outcome,pnl_r,mfe_r,mae_r,ambiguous,
+                            entry_timestamp_ms,exit_timestamp_ms,candles_count,price_source,notes,created_ms
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(candidate_id) DO UPDATE SET
+                            pair=excluded.pair,direction=excluded.direction,outcome=excluded.outcome,
+                            pnl_r=excluded.pnl_r,mfe_r=excluded.mfe_r,mae_r=excluded.mae_r,
+                            ambiguous=excluded.ambiguous,entry_timestamp_ms=excluded.entry_timestamp_ms,
+                            exit_timestamp_ms=excluded.exit_timestamp_ms,candles_count=excluded.candles_count,
+                            price_source=excluded.price_source,notes=excluded.notes,created_ms=excluded.created_ms
+                        WHERE excluded.created_ms >= replay_results.created_ms
+                    """, (
+                        candidate_id, str(remote.get("pair") or ""), str(remote.get("direction") or "BUY"),
+                        outcome, remote.get("pnl_r"), remote.get("mfe_r"), remote.get("mae_r"),
+                        int(bool(remote.get("ambiguous"))), remote.get("entry_timestamp_ms"),
+                        remote.get("exit_timestamp_ms"), max(0, int(remote.get("candles_count") or 0)),
+                        str(remote.get("price_source") or "BINANCE_USDM"), str(remote.get("notes") or "")[:500], created_ms,
+                    ))
+                    status = "REPLAY_AMBIGUOUS" if outcome == "AMBIGUOUS" else "REPLAY_COMPLETE"
+                    conn.execute("""
+                        UPDATE candidate_snapshots SET replay_status=?,next_replay_ms=NULL,
+                            replay_attempts=MAX(replay_attempts,1),updated_ms=MAX(updated_ms,?)
+                        WHERE candidate_id=?
+                    """, (status, created_ms, candidate_id))
+                    restored_replays += 1
+                except (TypeError, ValueError, OverflowError, sqlite3.Error) as exc:
+                    log.warning("[RESEARCH] replay remote diabaikan (%s): %s", candidate_id, str(exc)[:120])
+            # A bounded outbox flush can split candidate and replay rows across batches.
+            # If the candidate says COMPLETE but no replay row reached GitHub yet, retry it.
+            conn.execute("""
+                UPDATE candidate_snapshots SET replay_status='PENDING',next_replay_ms=NULL
+                WHERE replay_status IN ('REPLAY_COMPLETE','REPLAY_AMBIGUOUS')
+                  AND candidate_id NOT IN (SELECT candidate_id FROM replay_results)
+            """)
+            conn.commit()
+        return restored_candidates, restored_replays
+
+    def upsert_candidate(self, record: dict[str, Any], *, enqueue_sync: bool = True) -> None:
         now_ms = int(time.time() * 1000)
         candidate_id = str(record["candidate_id"])
         payload_json = self._json(record.get("payload") or {})
@@ -1679,6 +1934,12 @@ class ResearchStore:
             event_excess = event_count - RESEARCH_DB_MAX_EVENTS
             if event_excess > 0:
                 conn.execute("DELETE FROM candidate_events WHERE event_id IN (SELECT event_id FROM candidate_events ORDER BY event_id ASC LIMIT ?)", (event_excess,))
+            if enqueue_sync:
+                self._queue_candidate_sync(conn, candidate_id, now_ms)
+                outbox_count = int(conn.execute("SELECT COUNT(*) FROM research_sync_outbox").fetchone()[0])
+                outbox_excess = outbox_count - RESEARCH_SYNC_OUTBOX_MAX
+                if outbox_excess > 0:
+                    conn.execute("DELETE FROM research_sync_outbox WHERE rowid IN (SELECT rowid FROM research_sync_outbox ORDER BY updated_ms ASC LIMIT ?)", (outbox_excess,))
             conn.commit()
 
     def record_cycle(self, cycle: int, duration: float, status: str, rss: float, api_weight: int, counts: dict[str, Any]) -> None:
@@ -1757,9 +2018,10 @@ class ResearchStore:
             status = "UNAVAILABLE" if attempts >= max_attempts else "PENDING"
             next_ms = now_ms + min(60 * 60 * 1000, (2 ** attempts) * 60 * 1000)
             conn.execute("UPDATE candidate_snapshots SET replay_status=?,replay_attempts=?,next_replay_ms=?,reason=?,updated_ms=? WHERE candidate_id=?", (status, attempts, next_ms, f"Replay error: {error[:240]}", now_ms, candidate_id))
+            self._queue_candidate_sync(conn, candidate_id, now_ms)
             conn.commit()
 
-    def save_replay_result(self, candidate_id: str, pair: str, direction: str, result: dict[str, Any]) -> None:
+    def save_replay_result(self, candidate_id: str, pair: str, direction: str, result: dict[str, Any], *, enqueue_sync: bool = True) -> None:
         now_ms = int(time.time() * 1000)
         outcome = str(result.get("outcome") or "UNAVAILABLE")
         status = "REPLAY_AMBIGUOUS" if outcome == "AMBIGUOUS" else "REPLAY_COMPLETE"
@@ -1770,6 +2032,13 @@ class ResearchStore:
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (candidate_id, pair, direction, outcome, result.get("pnl_r"), result.get("mfe_r"), result.get("mae_r"), int(bool(result.get("ambiguous"))), result.get("entry_timestamp_ms"), result.get("exit_timestamp_ms"), int(result.get("candles_count") or 0), str(result.get("price_source") or "BINANCE_USDM"), str(result.get("notes") or "")[:500], now_ms))
             conn.execute("UPDATE candidate_snapshots SET replay_status=?,replay_attempts=replay_attempts+1,next_replay_ms=NULL,updated_ms=? WHERE candidate_id=?", (status, now_ms, candidate_id))
+            if enqueue_sync:
+                self._queue_candidate_sync(conn, candidate_id, now_ms)
+                self._queue_replay_sync(conn, candidate_id, now_ms)
+                outbox_count = int(conn.execute("SELECT COUNT(*) FROM research_sync_outbox").fetchone()[0])
+                outbox_excess = outbox_count - RESEARCH_SYNC_OUTBOX_MAX
+                if outbox_excess > 0:
+                    conn.execute("DELETE FROM research_sync_outbox WHERE rowid IN (SELECT rowid FROM research_sync_outbox ORDER BY updated_ms ASC LIMIT ?)", (outbox_excess,))
             conn.commit()
 
     def replay_rows(self, limit: int = 5000) -> list[dict[str, Any]]:
@@ -4083,6 +4352,114 @@ class GitHubStore:
                 f"GitHub gagal menghapus {path}: conflict berulang."
             )
 
+    async def merge_jsonl_bounded(
+        self,
+        path: str,
+        updates: bytes,
+        commit_message: str,
+        max_total_bytes: int,
+        max_candidate_ids: int,
+    ) -> int:
+        """Merge compact research records into one bounded GitHub JSONL snapshot.
+
+        This avoids daily file proliferation and repeated duplicate candidate rows.
+        It is deliberately limited to metadata/results, never candle history.
+        """
+        if not updates:
+            return 0
+        async with self._write_lock:
+            last_error: Exception | None = None
+            for _attempt in range(3):
+                current, sha = await self.get_file(path)
+                records: dict[tuple[str, str], dict[str, Any]] = {}
+
+                def record_timestamp(item: dict[str, Any]) -> int:
+                    record = item.get("record") if isinstance(item.get("record"), dict) else {}
+                    return int(record.get("updated_ms") or record.get("created_ms") or record.get("last_seen_ms") or 0)
+
+                def absorb(raw_bytes: bytes) -> None:
+                    for line in raw_bytes.splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            item = json.loads(line)
+                        except (TypeError, json.JSONDecodeError):
+                            continue
+                        if not isinstance(item, dict) or item.get("kind") not in {"candidate", "replay"}:
+                            continue
+                        record = item.get("record")
+                        if not isinstance(record, dict):
+                            continue
+                        candidate_id = str(record.get("candidate_id") or "").strip()
+                        if not candidate_id:
+                            continue
+                        key = (str(item["kind"]), candidate_id)
+                        previous = records.get(key)
+                        if previous is None or record_timestamp(item) >= record_timestamp(previous):
+                            records[key] = item
+
+                absorb(current or b"")
+                absorb(updates)
+
+                # Keep at most N distinct candidate IDs, prioritizing the newest
+                # candidate or replay activity. Keep both kinds for each selected ID.
+                ids_with_time: dict[str, int] = {}
+                for (_kind, candidate_id), item in records.items():
+                    ids_with_time[candidate_id] = max(ids_with_time.get(candidate_id, 0), record_timestamp(item))
+                keep_ids = set(sorted(ids_with_time, key=ids_with_time.get, reverse=True)[:max(100, int(max_candidate_ids))])
+                records = {key: value for key, value in records.items() if key[1] in keep_ids}
+
+                def serialize(items: dict[tuple[str, str], dict[str, Any]]) -> bytes:
+                    ordered = sorted(items.values(), key=lambda it: (str(it.get("kind")), str((it.get("record") or {}).get("candidate_id", ""))))
+                    return ("\n".join(json.dumps(it, ensure_ascii=False, separators=(",", ":"), allow_nan=False) for it in ordered) + ("\n" if ordered else "")).encode("utf-8")
+
+                content = serialize(records)
+                # If records are unusually large, prune oldest candidate groups in a
+                # bounded loop rather than writing a file that exceeds the safety cap.
+                while len(content) > max(1, int(max_total_bytes)) and len(keep_ids) > 100:
+                    ordered_ids = sorted(keep_ids, key=lambda cid: ids_with_time.get(cid, 0), reverse=True)
+                    keep_ids = set(ordered_ids[:max(100, len(ordered_ids) - max(50, len(ordered_ids) // 10))])
+                    records = {key: value for key, value in records.items() if key[1] in keep_ids}
+                    content = serialize(records)
+                if len(content) > max(1, int(max_total_bytes)):
+                    raise RuntimeError(
+                        f"RESEARCH_GITHUB_LEDGER_CAP: canonical ledger tetap {len(content)} bytes "
+                        f"setelah kompresi logis; batas {int(max_total_bytes)} bytes."
+                    )
+                if content == (current or b""):
+                    return 0
+                payload = {
+                    "message": commit_message,
+                    "content": base64.b64encode(content).decode("ascii"),
+                    "branch": self.branch,
+                }
+                if sha:
+                    payload["sha"] = sha
+
+                def request() -> str:
+                    response = requests.put(
+                        self._url(path), headers=self._headers(), json=payload,
+                        timeout=GITHUB_REQUEST_SECONDS,
+                    )
+                    if response.status_code == 409:
+                        raise RuntimeError("GITHUB_CONFLICT")
+                    if response.status_code >= 400:
+                        raise RuntimeError(
+                            f"GitHub update research ledger {path}: HTTP {response.status_code}: {response.text[:700]}"
+                        )
+                    body = response.json()
+                    return str((body.get("content") or {}).get("sha") or "OK")
+
+                try:
+                    await asyncio.to_thread(request)
+                    return len(content)
+                except RuntimeError as exc:
+                    if str(exc) != "GITHUB_CONFLICT":
+                        raise
+                    last_error = exc
+                    await asyncio.sleep(0.5)
+            raise RuntimeError(f"GitHub research ledger conflict berulang pada {path}: {last_error}")
+
     async def replace_file(
         self,
         path: str,
@@ -4367,14 +4744,22 @@ class TradingEngine:
         self._strategy_runtime_module = None
         self._strategy_runtime_mtime_ns: int | None = None
 
-        # Candidate ledger / Opportunity Queue. The queue is bounded in RAM;
-        # durable snapshots and replay results live in SQLite under BOT_DATA_DIR.
+        # Candidate ledger / Opportunity Queue. RAM and SQLite are bounded/local;
+        # compact candidate snapshots and replay results are synced to GitHub in batches.
         self.research_store = ResearchStore(RESEARCH_DB_PATH)
         self._research_store_available = False
         self._research_store_health: dict[str, Any] = {}
         self._research_enabled_config = RESEARCH_ENABLED_AT_START
         self._research_running = False
         self._research_task: asyncio.Task[Any] | None = None
+        self._research_sync_task: asyncio.Task[Any] | None = None
+        self._research_sync_lock = asyncio.Lock()
+        self._research_remote_ready = False
+        self._research_sync_last_at: datetime | None = None
+        self._research_sync_last_error: str | None = None
+        self._research_sync_write_failed = False
+        self._research_sync_records = 0
+        self._research_local_fallback_used = False
         self._research_last_error: str | None = None
         self._research_last_success_at: datetime | None = None
         self._research_jobs_completed = 0
@@ -4495,11 +4880,104 @@ class TradingEngine:
     def _research_ledger_mode(self) -> str:
         if not self._research_store_available:
             return "LEDGER_UNAVAILABLE"
-        if not BOT_DATA_DIR_CONFIGURED:
-            return "LEDGER_READY_LOCAL_ONLY"
-        if not BOT_DATA_PERSISTENCE_CONFIRMED:
-            return "LEDGER_READY_PERSISTENCE_UNCONFIRMED"
-        return "LEDGER_READY_PERSISTENCE_ACKNOWLEDGED"
+        if self._research_remote_ready and RESEARCH_GITHUB_SYNC_ENABLED:
+            return "LEDGER_READY_GITHUB_BATCHED"
+        if BOT_DATA_DIR_CONFIGURED and BOT_DATA_PERSISTENCE_CONFIRMED:
+            return "LEDGER_READY_PERSISTENT_DISK"
+        return "LEDGER_LOCAL_EPHEMERAL_REMOTE_NOT_READY"
+
+    @staticmethod
+    def _research_ledger_path() -> str:
+        return f"{RESEARCH_GITHUB_LEDGER_DIR}/current.jsonl"
+
+    async def _restore_research_github_ledger(self) -> None:
+        """Hydrate bounded candidate/replay summaries from GitHub; M1 cache stays local."""
+        if not RESEARCH_GITHUB_SYNC_ENABLED:
+            self._research_remote_ready = False
+            return
+        restored_candidates = 0
+        restored_replays = 0
+        path = self._research_ledger_path()
+        try:
+            content, _sha = await self.github.get_file(path)
+            if content:
+                if len(content) > RESEARCH_GITHUB_MAX_LEDGER_BYTES:
+                    raise RuntimeError(f"Ledger riset GitHub melebihi batas ukuran: {path} ({len(content)} bytes).")
+                parsed: list[dict[str, Any]] = []
+                for raw_line in content.splitlines():
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        item = json.loads(raw_line)
+                    except (TypeError, json.JSONDecodeError):
+                        log.warning("[RESEARCH] Abaikan baris JSONL rusak di %s.", path)
+                        continue
+                    if isinstance(item, dict) and item.get("kind") in {"candidate", "replay"}:
+                        parsed.append(item)
+                restored_candidates, restored_replays = await asyncio.to_thread(
+                    self.research_store.restore_remote_items, parsed
+                )
+            self._research_remote_ready = True
+            self._research_sync_last_error = None
+            log.info(
+                "[RESEARCH] GitHub ledger restored: candidates=%s replay_results=%s; path=%s; M1 cache remains local/ephemeral.",
+                restored_candidates, restored_replays, path,
+            )
+        except Exception as exc:
+            self._research_remote_ready = False
+            self._research_sync_last_error = str(exc)[:300]
+            log.warning("[RESEARCH] GitHub ledger restore gagal; worker riset akan tetap terkunci sampai sinkronisasi pulih: %s", exc)
+
+    async def _sync_research_outbox_once(self) -> tuple[int, int]:
+        if not (RESEARCH_GITHUB_SYNC_ENABLED and self._research_store_available and self._research_remote_ready):
+            return 0, 0
+        async with self._research_sync_lock:
+            batch = await asyncio.to_thread(self.research_store.sync_outbox_batch, RESEARCH_GITHUB_BATCH_SIZE)
+            if not batch:
+                return 0, 0
+            lines = []
+            for item in batch:
+                payload = item.get("payload")
+                if not isinstance(payload, dict) or payload.get("kind") not in {"candidate", "replay"}:
+                    continue
+                # The durable ledger stores summaries/results only; never candle caches or credentials.
+                lines.append(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
+            if not lines:
+                return 0, 0
+            payload_bytes = ("\n".join(lines) + "\n").encode("utf-8")
+            path = self._research_ledger_path()
+            try:
+                written_bytes = await self.github.merge_jsonl_bounded(
+                    path, payload_bytes,
+                    f"research ledger sync {now_utc().strftime('%Y-%m-%d %H:%M UTC')}",
+                    RESEARCH_GITHUB_MAX_LEDGER_BYTES,
+                    RESEARCH_GITHUB_MAX_LEDGER_CANDIDATES,
+                )
+                acked = await asyncio.to_thread(self.research_store.acknowledge_sync_batch, batch)
+                self._research_sync_records += acked
+                self._research_sync_last_at = now_utc()
+                self._research_sync_last_error = None
+                self._research_sync_write_failed = False
+                log.info("[RESEARCH] GitHub sync success: rows=%s bytes=%s path=%s", acked, written_bytes, path)
+                return acked, len(payload_bytes)
+            except Exception as exc:
+                self._research_sync_last_error = str(exc)[:300]
+                self._research_sync_write_failed = True
+                log.warning("[RESEARCH] GitHub sync gagal; outbox dipertahankan untuk retry: %s", exc)
+                return 0, 0
+
+    async def _research_github_sync_loop(self) -> None:
+        while self._running and RESEARCH_GITHUB_SYNC_ENABLED:
+            delay = RESEARCH_GITHUB_SYNC_INTERVAL_SECONDS
+            if self._research_sync_last_error:
+                delay = min(delay, 300)
+            await asyncio.sleep(delay)
+            if not self._running:
+                break
+            if not self._research_remote_ready:
+                await self._restore_research_github_ledger()
+                continue
+            await self._sync_research_outbox_once()
 
     # --------------------------------------------------------
     # Lifecycle
@@ -4525,25 +5003,49 @@ class TradingEngine:
             await asyncio.to_thread(self.research_store.initialize)
             self._research_store_health = await asyncio.to_thread(self.research_store.health_check)
             self._research_store_available = True
-            if not BOT_DATA_DIR_CONFIGURED:
+        except Exception as first_exc:
+            # Render Free has no persistent disk. If a previous configuration points
+            # at an unavailable paid mount (/var/data), fall back safely to /tmp for
+            # SQLite scratch and keep durable summaries in GitHub JSONL batches.
+            fallback_db = Path(tempfile.gettempdir()) / "bot_data" / "research.sqlite3"
+            try:
+                fallback_db.parent.mkdir(parents=True, exist_ok=True)
+                self.research_store = ResearchStore(fallback_db)
+                await asyncio.to_thread(self.research_store.initialize)
+                self._research_store_health = await asyncio.to_thread(self.research_store.health_check)
+                self._research_store_available = True
+                self._research_local_fallback_used = True
+                globals()["BOT_DATA_DIR"] = fallback_db.parent.resolve()
+                globals()["RESEARCH_DB_PATH"] = fallback_db.resolve()
+                globals()["BOT_DATA_DIR_CONFIGURED"] = False
+                globals()["BOT_DATA_PERSISTENCE_CONFIRMED"] = False
                 log.warning(
-                    "[RESEARCH] BOT_DATA_DIR tidak ditetapkan; path local %s bukan bukti penyimpanan persisten. Research tetap dikunci.",
-                    RESEARCH_DB_PATH,
+                    "[RESEARCH] Local database path tidak dapat dipakai (%s); fallback ke SQLite sementara %s. Ini aman untuk Render Free; kandidat/hasil ringkas disinkronkan berkala ke GitHub. Cache candle M1 tidak persisten.",
+                    str(first_exc)[:180], fallback_db,
                 )
-            elif not BOT_DATA_PERSISTENCE_CONFIRMED:
-                log.warning(
-                    "[RESEARCH] BOT_DATA_DIR=%s dapat dibaca/ditulis, namun persistence belum dikonfirmasi. Pastikan path berada dalam mount persistent dan set BOT_DATA_PERSISTENCE_CONFIRMED=1; worker tetap dikunci.",
-                    BOT_DATA_DIR,
-                )
-            else:
-                log.info(
-                    "[RESEARCH] SQLite health check OK at %s; persistent storage is operator-confirmed (restart test still required).",
-                    RESEARCH_DB_PATH,
-                )
-        except Exception as exc:
-            self._research_store_available = False
-            self._research_last_error = str(exc)[:300]
-            log.exception("[RESEARCH] Candidate ledger tidak tersedia; trading engine lanjut tanpa ledger.")
+            except Exception as fallback_exc:
+                self._research_store_available = False
+                self._research_last_error = str(fallback_exc)[:300]
+                log.exception("[RESEARCH] Candidate ledger lokal tidak tersedia setelah fallback; trading engine lanjut tanpa ledger.")
+
+        if self._research_store_available:
+            try:
+                self._research_store_health = await asyncio.to_thread(self.research_store.health_check)
+                await self._restore_research_github_ledger()
+                if self._research_remote_ready:
+                    log.info("[RESEARCH] Free-compatible ledger ready: SQLite=%s (ephemeral cache), durable summary=GitHub JSONL.", self.research_store.path)
+                elif BOT_DATA_DIR_CONFIGURED and BOT_DATA_PERSISTENCE_CONFIRMED:
+                    log.info("[RESEARCH] Persistent local store health check OK at %s.", self.research_store.path)
+                else:
+                    log.warning("[RESEARCH] SQLite tersedia lokal, namun GitHub durable ledger belum siap; research worker tetap dikunci. Issue: %s", self._research_sync_last_error or "remote sync disabled")
+                # Keep retrying restore after transient GitHub/API failures; do not
+                # require a full Render restart to recover the research backend.
+                if RESEARCH_GITHUB_SYNC_ENABLED and (self._research_sync_task is None or self._research_sync_task.done()):
+                    self._research_sync_task = asyncio.create_task(self._research_github_sync_loop(), name="main-research-github-sync")
+            except Exception as exc:
+                self._research_store_available = False
+                self._research_last_error = str(exc)[:300]
+                log.exception("[RESEARCH] Inisialisasi candidate ledger gagal; trading engine lanjut tanpa ledger.")
 
         await self._load_history()
         await self._load_notes()
@@ -4591,6 +5093,14 @@ class TradingEngine:
         self._research_task = None
         self._research_running = False
 
+        if self._research_sync_task is not None and not self._research_sync_task.done():
+            self._research_sync_task.cancel()
+            try:
+                await self._research_sync_task
+            except asyncio.CancelledError:
+                pass
+        self._research_sync_task = None
+
         if self._scan_task is not None and not self._scan_task.done():
             self._scan_task.cancel()
             try:
@@ -4609,6 +5119,11 @@ class TradingEngine:
         self._auto_job_id = None
 
         await self.ws.stop()
+
+        # Best-effort final sync on orderly shutdown. Sudden free-instance restarts
+        # can still lose the most recent batch; periodic sync limits that window.
+        if self._research_store_available and self._research_remote_ready:
+            await self._sync_research_outbox_once()
 
         # /end harus benar-benar menghapus state sesi dari RAM.
         self.flow = None
@@ -9039,14 +9554,18 @@ class TradingEngine:
     def _research_safe_to_run(self) -> tuple[bool, str]:
         if not self._research_enabled_config:
             return False, "RESEARCH_ENABLED=0; worker tidak diizinkan."
-        if not BOT_DATA_DIR_CONFIGURED:
-            return False, "BOT_DATA_DIR belum ditetapkan ke mount persisten; ledger hanya local-only."
-        if not BOT_DATA_PERSISTENCE_CONFIRMED:
-            return False, "PERSISTENCE belum dikonfirmasi; pasang persistent disk, set BOT_DATA_DIR dan BOT_DATA_PERSISTENCE_CONFIRMED=1, lalu uji restart."
         if not self._research_store_available:
-            return False, "SQLite research store tidak tersedia."
+            return False, "SQLite research scratch store tidak tersedia."
         if not (self._research_store_health.get("readable") and self._research_store_health.get("writable") and self._research_store_health.get("integrity") == "ok"):
             return False, "SQLite health check belum lulus."
+        # Render Free-compatible mode: local SQLite is only a scratch/cache layer;
+        # compact candidate/replay summaries must have a confirmed GitHub ledger.
+        github_durable = RESEARCH_GITHUB_SYNC_ENABLED and self._research_remote_ready
+        persistent_disk_durable = BOT_DATA_DIR_CONFIGURED and BOT_DATA_PERSISTENCE_CONFIRMED
+        if github_durable and self._research_sync_write_failed and not persistent_disk_durable:
+            return False, "Sinkronisasi ledger GitHub gagal; riset dijeda agar tidak mengandalkan SQLite ephemeral. Worker akan mencoba lagi setelah sync pulih."
+        if not (github_durable or persistent_disk_durable):
+            return False, "Belum ada backend durable: aktifkan RESEARCH_GITHUB_SYNC_ENABLED dan pulihkan ledger GitHub, atau gunakan mount persisten yang benar-benar tersedia. Render Free tidak mendukung persistent disk."
         usage = rss_mb()
         effective_limit = effective_memory_limit_mb()
         memory_cap = min(RESEARCH_MEMORY_BUDGET_MB, effective_limit * 0.70) if effective_limit else RESEARCH_MEMORY_BUDGET_MB
@@ -9183,9 +9702,14 @@ class TradingEngine:
                 f"Env allow: {'ON' if self._research_enabled_config else 'OFF'}\n"
                 f"Store: {'READY' if self._research_store_available else 'UNAVAILABLE'}\n"
                 f"Ledger mode: {self._research_ledger_mode()}\n"
-                f"Database: {RESEARCH_DB_PATH}\n"
-                f"BOT_DATA_DIR explicit: {'YES' if BOT_DATA_DIR_CONFIGURED else 'NO'}\n"
-                f"Persistence acknowledged: {'YES' if BOT_DATA_PERSISTENCE_CONFIRMED else 'NO'} (operator must verify Render mount)\n"
+                f"Database (local scratch): {self.research_store.path if self._research_store_available else RESEARCH_DB_PATH}\n"
+                f"Local fallback used: {'YES' if self._research_local_fallback_used else 'NO'}\n"
+                f"GitHub durable sync: {'ON' if RESEARCH_GITHUB_SYNC_ENABLED else 'OFF'} | remote ready: {'YES' if self._research_remote_ready else 'NO'}\n"
+                f"Last sync: {format_wib(self._research_sync_last_at) if self._research_sync_last_at else '-'} | synced rows: {self._research_sync_records}\n"
+                f"Sync issue: {self._research_sync_last_error or '-'}\n"
+                f"Sync write blocked: {'YES' if self._research_sync_write_failed else 'NO'}\n"
+                f"Remote snapshot cap: {RESEARCH_GITHUB_MAX_LEDGER_BYTES} bytes / {RESEARCH_GITHUB_MAX_LEDGER_CANDIDATES} candidates\n"
+                f"Persistent disk acknowledged: {'YES' if BOT_DATA_PERSISTENCE_CONFIRMED else 'NO'} (optional; not required in GitHub mode)\n"
                 f"SQLite health: {self._research_store_health.get('integrity', 'UNKNOWN')} | read={self._research_store_health.get('readable', False)} write={self._research_store_health.get('writable', False)}\n"
                 f"M1 cache rows: {await asyncio.to_thread(self.research_store.m1_cache_count) if self._research_store_available else 0}\n"
                 f"M1 rows downloaded this session: {self._research_candles_cached}\n"
@@ -9214,14 +9738,13 @@ class TradingEngine:
             if not self._research_enabled_config:
                 await self.reply("❌ Research tidak diizinkan. Set RESEARCH_ENABLED=1, redeploy/restart, lalu gunakan /research on. Worker default OFF demi keamanan resource/API.")
                 return
-            if not BOT_DATA_DIR_CONFIGURED:
-                await self.reply("❌ Research membutuhkan BOT_DATA_DIR yang menunjuk ke path persistent disk yang benar-benar sudah dipasang. Mengatur environment variable saja tidak membuat filesystem persisten.")
-                return
-            if not BOT_DATA_PERSISTENCE_CONFIRMED:
-                await self.reply("❌ Persistence belum dikonfirmasi. Setelah persistent disk benar-benar dipasang, set BOT_DATA_DIR=/var/data/bot_data (sesuaikan mount path), BOT_DATA_PERSISTENCE_CONFIRMED=1, restart, uji /research status lalu controlled restart sebelum /research on.")
-                return
             if not self._research_store_available:
-                await self.reply("❌ Research tidak dapat berjalan karena SQLite store belum siap. Periksa BOT_DATA_DIR dan log startup.")
+                await self.reply("❌ Research tidak dapat berjalan karena SQLite scratch store belum siap. Periksa log startup.")
+                return
+            if not ((RESEARCH_GITHUB_SYNC_ENABLED and self._research_remote_ready) or (BOT_DATA_DIR_CONFIGURED and BOT_DATA_PERSISTENCE_CONFIRMED)):
+                await self.reply(
+                    "❌ Research masih terkunci karena belum ada penyimpanan durable yang siap. Untuk Render Free, set RESEARCH_GITHUB_SYNC_ENABLED=1, pastikan GITHUB_TOKEN/REPO_NAME memiliki izin baca-tulis, restart, lalu periksa /research status sampai 'remote ready: YES'. Tidak perlu persistent disk; SQLite lokal hanya cache sementara dan ringkasan disimpan bertahap di GitHub."
+                )
                 return
             if self._research_task is not None and not self._research_task.done():
                 self._research_running = True
