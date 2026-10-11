@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-11T22:02:53.275408+00:00",
+  "saved_at": "2026-10-11T22:04:49.480742+00:00",
   "bans": [
     {
       "pair": "CFGUSDT",
@@ -13,6 +13,13 @@
       "pair": "QTUMUSDT",
       "banned_at": "2026-10-11T21:42:56.074407+00:00",
       "until": "2026-10-12T05:42:56.074383+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "SQDUSDT",
+      "banned_at": "2026-10-11T22:04:49.480612+00:00",
+      "until": "2026-10-12T06:04:49.480591+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     }
