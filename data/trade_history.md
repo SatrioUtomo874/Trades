@@ -268,3 +268,36 @@ Tidak ada trailing.
 - Filled: 2026-10-11T09:43:29.264641+00:00
 - Closed: 2026-10-11T09:43:31.976707+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## QTUMUSDT — BUY
+
+Trade ID: `QTUMUSDT-20261012-044201-7864AC`
+
+### Setup
+
+- Price Now Reference: 0.996
+- Entry: 0.9874
+- Reason Entry: QTUMUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.98425 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 30.4 pada entry zone.
+- Price Exp: 0.9963
+- Reason Price Exp: Price Exp 0.9963000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.983
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.9845; SL ditempatkan di luar invalidation dan liquidity guard 0.98425.
+- TP: 1
+- Reason TP: TP 1.0 dipilih dari H4_HIGHER_HIGH dengan RR 2.86; target quality 91.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.9964
+- Result Reason: Price Exp 0.9963000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-11T21:42:01.783703+00:00
+- Filled: -
+- Closed: 2026-10-11T21:42:46.372699+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
