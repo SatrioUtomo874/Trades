@@ -55,7 +55,7 @@ import sys
 import json
 import sqlite3
 import math
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 import logging
 import os
 import re
@@ -211,7 +211,11 @@ def _safe_env_float(name: str, default: float, low: float, high: float) -> float
     return max(low, min(high, value))
 
 
-BOT_DATA_DIR = Path(os.getenv("BOT_DATA_DIR") or (BASE_DIR / "bot_data")).expanduser()
+_BOT_DATA_DIR_RAW = str(os.getenv("BOT_DATA_DIR") or "").strip()
+BOT_DATA_DIR = Path(_BOT_DATA_DIR_RAW).expanduser() if _BOT_DATA_DIR_RAW else (BASE_DIR / "bot_data")
+if not BOT_DATA_DIR.is_absolute():
+    BOT_DATA_DIR = BASE_DIR / BOT_DATA_DIR
+BOT_DATA_DIR = BOT_DATA_DIR.resolve()
 RESEARCH_DB_PATH = BOT_DATA_DIR / "research.sqlite3"
 RESEARCH_ENABLED_AT_START = str(os.getenv("RESEARCH_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
 RESEARCH_POLL_SECONDS = _safe_env_int("RESEARCH_POLL_SECONDS", 20, 5, 300)
@@ -227,6 +231,27 @@ RESEARCH_DB_MAX_EVENTS = _safe_env_int("RESEARCH_DB_MAX_EVENTS", 100000, 1000, 1
 RESEARCH_M1_CACHE_MAX_ROWS = _safe_env_int("RESEARCH_M1_CACHE_MAX_ROWS", 500000, 10000, 5000000)
 RESEARCH_M1_CACHE_RETENTION_DAYS = _safe_env_int("RESEARCH_M1_CACHE_RETENTION_DAYS", 14, 1, 365)
 BOT_DATA_DIR_CONFIGURED = bool(str(os.getenv("BOT_DATA_DIR") or "").strip())
+# This flag is an operator acknowledgement, not an automatic filesystem detector.
+# Set it only after BOT_DATA_DIR points inside a persistent disk/datastore mount.
+BOT_DATA_PERSISTENCE_CONFIRMED = str(os.getenv("BOT_DATA_PERSISTENCE_CONFIRMED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+BINANCE_EXCHANGE_INFO_TTL_SECONDS = _safe_env_int("BINANCE_EXCHANGE_INFO_TTL_SECONDS", 21600, 300, 86400)
+BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS = _safe_env_int("BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS", 86400, 300, 172800)
+BINANCE_TICKER_24H_TTL_SECONDS = _safe_env_int("BINANCE_TICKER_24H_TTL_SECONDS", 90, 15, 600)
+BINANCE_TICKER_24H_MAX_STALE_SECONDS = _safe_env_int("BINANCE_TICKER_24H_MAX_STALE_SECONDS", 300, 30, 1800)
+BYBIT_INSTRUMENTS_TTL_SECONDS = _safe_env_int("BYBIT_INSTRUMENTS_TTL_SECONDS", 900, 60, 7200)
+BYBIT_INSTRUMENTS_MAX_STALE_SECONDS = _safe_env_int("BYBIT_INSTRUMENTS_MAX_STALE_SECONDS", 3600, 300, 86400)
+BYBIT_TICKERS_TTL_SECONDS = _safe_env_int("BYBIT_TICKERS_TTL_SECONDS", 60, 15, 600)
+BYBIT_TICKERS_MAX_STALE_SECONDS = _safe_env_int("BYBIT_TICKERS_MAX_STALE_SECONDS", 180, 30, 900)
+BINANCE_GOVERNOR_MAX_WEIGHT_PER_MIN = _safe_env_int("BINANCE_GOVERNOR_MAX_WEIGHT_PER_MIN", 2200, 500, 2350)
+BINANCE_GOVERNOR_HEADER_STALE_SECONDS = _safe_env_int("BINANCE_GOVERNOR_HEADER_STALE_SECONDS", 60, 15, 180)
+BINANCE_UNKNOWN_ENDPOINT_WEIGHT = _safe_env_int("BINANCE_UNKNOWN_ENDPOINT_WEIGHT", 10, 1, 100)
+# Independent account order-rate guard. Exchange limits are read from exchangeInfo
+# when present; these conservative soft limits are only a fallback.
+BINANCE_ORDER_GOVERNOR_HEADROOM_PCT = _safe_env_float("BINANCE_ORDER_GOVERNOR_HEADROOM_PCT", 20.0, 5.0, 80.0)
+BINANCE_ORDER_FALLBACK_LIMIT_10S = _safe_env_int("BINANCE_ORDER_FALLBACK_LIMIT_10S", 60, 5, 300)
+BINANCE_ORDER_FALLBACK_LIMIT_1M = _safe_env_int("BINANCE_ORDER_FALLBACK_LIMIT_1M", 240, 10, 1200)
+BINANCE_ORDER_HEADER_STALE_10S_SECONDS = _safe_env_float("BINANCE_ORDER_HEADER_STALE_10S_SECONDS", 2.0, 0.5, 10.0)
+BINANCE_ORDER_HEADER_STALE_1M_SECONDS = _safe_env_float("BINANCE_ORDER_HEADER_STALE_1M_SECONDS", 10.0, 1.0, 60.0)
 RESEARCH_ROUND_TRIP_COST_PCT = _safe_env_float("RESEARCH_ROUND_TRIP_COST_PCT", 0.0, 0.0, 5.0)
 CANDIDATE_QUEUE_MAX = _safe_env_int("CANDIDATE_QUEUE_MAX", 250, 25, 5000)
 CANDIDATE_TTL_HOURS = _safe_env_int("CANDIDATE_TTL_HOURS", 72, RESEARCH_HORIZON_HOURS + 24, 168)
@@ -1038,16 +1063,400 @@ class Trade:
 # ============================================================
 
 BINANCE_IP_WEIGHT_LIMIT = 2400
-# Bobot per endpoint (estimasi dari dokumentasi Binance; default 1).
+# Registry checked against the current USDⓈ-M Futures documentation. Dynamic
+# endpoints are estimated from their parameters; unknown endpoints are visibly
+# marked unknown and conservatively budgeted, never silently treated as weight 1.
 ENDPOINT_WEIGHTS = {
-    "/fapi/v1/ticker/24hr": 40,
-    "/fapi/v2/positionRisk": 5,
+    "/fapi/v1/exchangeInfo": 1,
+    "/fapi/v1/time": 1,
+    "/fapi/v1/ping": 1,
+    "/fapi/v1/ticker/24hr": 40,  # 1 when a single symbol is requested
+    "/fapi/v1/ticker/price": 1,
+    "/fapi/v2/ticker/price": 1,
+    "/fapi/v1/klines": 10,  # dynamic by limit; this is the highest supported bracket
     "/fapi/v3/balance": 5,
     "/fapi/v2/account": 5,
+    "/fapi/v3/account": 5,
     "/fapi/v1/accountConfig": 5,
-    # Conservative weight for a large M1 replay request (1001-1500 candles).
-    "/fapi/v1/klines": 10,
+    "/fapi/v2/positionRisk": 5,
+    "/fapi/v3/positionRisk": 5,
+    "/fapi/v1/order": 1,
+    "/fapi/v1/openOrders": 40,  # 1 with symbol; higher for all-symbol snapshot
+    "/fapi/v1/algoOrder": 1,  # POST is overridden to IP weight 0 below; GET/DELETE conservatively 1
+    "/fapi/v1/openAlgoOrders": 40,  # 1 with symbol; 40 without symbol
+    "/fapi/v1/algoOpenOrders": 1,  # cancel-all route is called with symbol
+    "/fapi/v1/leverage": 1,
 }
+
+
+def estimate_binance_request_weight(
+    path: str,
+    params: dict[str, Any] | None = None,
+    method: str = "GET",
+) -> tuple[int, bool]:
+    """Return (conservative IP request-weight estimate, registry-known flag)."""
+    clean_path = str(path or "").split("?", 1)[0]
+    query = params or {}
+    method = str(method or "GET").upper()
+    if clean_path == "/fapi/v1/ticker/24hr":
+        return (1 if query.get("symbol") else 40), True
+    if clean_path in {"/fapi/v1/ticker/price", "/fapi/v2/ticker/price"}:
+        return (1 if query.get("symbol") else 2), True
+    if clean_path == "/fapi/v1/klines":
+        try:
+            limit = max(1, min(int(query.get("limit") or 500), 1500))
+        except (TypeError, ValueError):
+            limit = 500
+        weight = 1 if limit < 100 else 2 if limit < 500 else 5 if limit <= 1000 else 10
+        return weight, True
+    if clean_path in {"/fapi/v2/positionRisk", "/fapi/v3/positionRisk"}:
+        return (1 if query.get("symbol") else 5), True
+    if clean_path == "/fapi/v1/openOrders":
+        return (1 if query.get("symbol") else 40), True
+    if clean_path == "/fapi/v1/algoOrder":
+        # Binance USD-M Futures changelog (2026-06-20): POST algoOrder consumes
+        # account order-count limits but has IP request weight 0. GET/DELETE are
+        # conservatively estimated at 1 IP weight; order-count is tracked separately.
+        return (0 if method == "POST" else 1), True
+    if clean_path == "/fapi/v1/openAlgoOrders":
+        return (1 if query.get("symbol") else 40), True
+    if clean_path == "/fapi/v1/algoOpenOrders":
+        return 1, True  # our caller always supplies symbol
+    if clean_path == "/fapi/v1/order" and method in {"POST", "DELETE", "PUT"}:
+        # Order-count limits are tracked separately from request-weight. A small
+        # IP-weight budget is still reserved as a conservative guard.
+        return 1, True
+    if clean_path in ENDPOINT_WEIGHTS:
+        return int(ENDPOINT_WEIGHTS[clean_path]), True
+    return BINANCE_UNKNOWN_ENDPOINT_WEIGHT, False
+
+
+def classify_binance_request_category(
+    method: str,
+    path: str,
+    params: dict[str, Any] | None = None,
+) -> str:
+    method = str(method or "GET").upper()
+    path = str(path or "")
+    params = params or {}
+    if path in {"/fapi/v1/positionRisk", "/fapi/v2/positionRisk", "/fapi/v3/positionRisk", "/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders", "/fapi/v1/algoOpenOrders"}:
+        return "PROTECTION"
+    if path in {"/fapi/v3/balance", "/fapi/v2/account", "/fapi/v3/account", "/fapi/v1/accountConfig"}:
+        return "ACCOUNT"
+    if path == "/fapi/v1/algoOrder" and method == "POST":
+        # In this bot algo-order POST is used to install TP/SL protective orders.
+        return "PROTECTION"
+    if path == "/fapi/v1/order":
+        reduce_only = str(params.get("reduceOnly") or "").strip().lower() in {"true", "1"}
+        close_position = str(params.get("closePosition") or "").strip().lower() in {"true", "1"}
+        if method == "DELETE" or (method in {"POST", "PUT"} and (reduce_only or close_position)):
+            return "PROTECTION"
+        return "ORDER_MANAGEMENT"
+    if path == "/fapi/v1/leverage":
+        return "ORDER_MANAGEMENT"
+    return "ORDER_MANAGEMENT"
+
+
+def estimate_binance_order_count(
+    path: str,
+    params: dict[str, Any] | None = None,
+    method: str = "GET",
+) -> int:
+    """Estimate account order-count usage separately from IP request weight."""
+    clean_path = str(path or "").split("?", 1)[0]
+    method = str(method or "GET").upper()
+    query = params or {}
+    if clean_path in {"/fapi/v1/order", "/fapi/v1/algoOrder"} and method == "POST":
+        return 1
+    if clean_path in {"/fapi/v1/order", "/fapi/v1/algoOrder"} and method == "PUT":
+        return 1
+    if clean_path == "/fapi/v1/batchOrders" and method == "POST":
+        raw = query.get("batchOrders")
+        try:
+            decoded = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(decoded, list):
+                return max(1, min(5, len(decoded))) if decoded else 0
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        # Unknown batch length: reserve the maximum supported conservative count.
+        return 5
+    return 0
+
+
+def classify_binance_limit(
+    status: int | None,
+    code: int | None = None,
+    message: str = "",
+) -> str:
+    msg = str(message or "").lower()
+    if status == 418:
+        return "IP_BAN"
+    if status == 403:
+        return "WAF_OR_SECURITY_403"
+    if status == 429:
+        if code == -1015 or ("order" in msg and any(word in msg for word in ("too many", "limit", "rate"))):
+            return "ORDER_LIMIT"
+        if any(word in msg for word in ("request weight", "weight limit", "ip banned", "too many requests")):
+            return "REQUEST_WEIGHT_LIMIT"
+        return "RATE_LIMIT_429_UNCLASSIFIED"
+    if status is None:
+        return "NETWORK_ERROR"
+    if status >= 500:
+        return "TRANSIENT_SERVER_5XX"
+    return "NONE"
+
+
+class ApiStats:
+    """Bounded Binance REST telemetry, including local weight estimates and IP headers."""
+
+    def __init__(self) -> None:
+        # Preserve the light shape used by existing endpoint-count summaries.
+        self.calls: deque[tuple[float, str, int]] = deque(maxlen=50000)
+        self.weighted_calls: deque[tuple[float, str, int | None, int, str, bool]] = deque(maxlen=50000)
+        self.telemetry: deque[dict[str, Any]] = deque(maxlen=10000)
+        self.total = 0
+        self.limit_hits = 0
+        self.last_limit_at: datetime | None = None
+        self.used_weight: int | None = None
+        self.used_weight_at: float | None = None
+        self.max_used_weight = 0
+        self.latest_order_count_10s: int | None = None
+        self.latest_order_count_1m: int | None = None
+        self.latest_order_count_10s_at: float | None = None
+        self.latest_order_count_1m_at: float | None = None
+        self.last_limit_class = "NONE"
+        self.last_limit_status: int | None = None
+        self.last_limit_code: int | None = None
+        self.last_limit_message = ""
+        self.limit_class_counts: Counter[str] = Counter()
+        self.unknown_weight_total = 0
+
+    @staticmethod
+    def _header_int(headers: Any, name: str) -> int | None:
+        try:
+            raw = headers.get(name)
+            return int(raw) if raw not in (None, "") else None
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    def record(
+        self,
+        path: str,
+        status: int | None,
+        used_weight: str | int | None = None,
+        *,
+        method: str = "GET",
+        category: str = "PUBLIC_MARKET_DATA",
+        latency_ms: float | None = None,
+        code: int | None = None,
+        message: str = "",
+        retry_after: float | None = None,
+        request_weight: int | None = None,
+        weight_known: bool | None = None,
+        headers: Any = None,
+        request_params: dict[str, Any] | None = None,
+    ) -> None:
+        now = time.monotonic()
+        clean_path = str(path or "UNKNOWN").split("?", 1)[0]
+        if request_weight is None or weight_known is None:
+            estimated, known = estimate_binance_request_weight(clean_path, params=request_params, method=method)
+            if request_weight is None:
+                request_weight = estimated
+            if weight_known is None:
+                weight_known = known
+        request_weight = max(0, int(request_weight))
+        self.calls.append((now, clean_path, int(status or 0)))
+        self.weighted_calls.append((now, clean_path, status, request_weight, str(category or "UNKNOWN"), bool(weight_known)))
+        self.total += 1
+        if not weight_known:
+            self.unknown_weight_total += 1
+
+        try:
+            weight = int(used_weight) if used_weight not in (None, "") else None
+        except (TypeError, ValueError):
+            weight = None
+        if weight is None and headers is not None:
+            weight = self._header_int(headers, "X-MBX-USED-WEIGHT-1M")
+        if weight is not None:
+            self.used_weight = weight
+            self.used_weight_at = now
+            self.max_used_weight = max(self.max_used_weight, weight)
+        if headers is not None:
+            order_10s = self._header_int(headers, "X-MBX-ORDER-COUNT-10S")
+            order_1m = self._header_int(headers, "X-MBX-ORDER-COUNT-1M")
+            if order_10s is not None:
+                self.latest_order_count_10s = order_10s
+                self.latest_order_count_10s_at = now
+            if order_1m is not None:
+                self.latest_order_count_1m = order_1m
+                self.latest_order_count_1m_at = now
+
+        limit_class = classify_binance_limit(status, code, message)
+        if limit_class not in {"NONE", "NETWORK_ERROR", "TRANSIENT_SERVER_5XX"}:
+            self.last_limit_class = limit_class
+            self.last_limit_status = status
+            self.last_limit_code = code
+            self.last_limit_message = str(message or "")[:240]
+            self.limit_class_counts[limit_class] += 1
+            if status in (418, 429):
+                self.limit_hits += 1
+                self.last_limit_at = now_utc()
+
+        params_safe = request_params if isinstance(request_params, dict) else {}
+        symbol_safe = str(params_safe.get("symbol") or "").upper()[:32] or None
+        interval_safe = str(params_safe.get("interval") or "")[:16] or None
+        try:
+            limit_safe = max(1, min(1500, int(params_safe.get("limit")))) if params_safe.get("limit") not in (None, "") else None
+        except (TypeError, ValueError):
+            limit_safe = None
+        safe_record = {
+            "timestamp_utc": iso_utc(),
+            "monotonic": now,
+            "method": str(method or "GET").upper(),
+            "endpoint": clean_path,
+            "category": str(category or "UNKNOWN"),
+            "symbol": symbol_safe,
+            "interval": interval_safe,
+            "limit": limit_safe,
+            "status": status,
+            "code": code,
+            "message": str(message or "")[:240],
+            "latency_ms": round(float(latency_ms), 2) if latency_ms is not None else None,
+            "retry_after_seconds": retry_after,
+            "request_weight_estimate": request_weight,
+            "weight_known": bool(weight_known),
+            "ip_used_weight_1m": weight,
+            "order_count_10s": self.latest_order_count_10s,
+            "order_count_1m": self.latest_order_count_1m,
+            "limit_class": limit_class,
+        }
+        self.telemetry.append(safe_record)
+        governor = globals().get("BINANCE_REQUEST_GOVERNOR")
+        if governor is not None:
+            governor.observe_response(
+                used_weight=weight,
+                status=status,
+                code=code,
+                message=message,
+                retry_after=retry_after,
+                order_count_10s=(self._header_int(headers, "X-MBX-ORDER-COUNT-10S") if headers is not None else None),
+                order_count_1m=(self._header_int(headers, "X-MBX-ORDER-COUNT-1M") if headers is not None else None),
+            )
+
+    def window(self, seconds: float, end: float | None = None) -> dict[str, int]:
+        end = end if end is not None else time.monotonic()
+        cutoff = end - seconds
+        counts: dict[str, int] = {}
+        for ts, path, _ in reversed(self.calls):
+            if ts > end:
+                continue
+            if ts < cutoff:
+                break
+            counts[path] = counts.get(path, 0) + 1
+        return counts
+
+    def weight_window(self, seconds: float, end: float | None = None) -> int:
+        end = end if end is not None else time.monotonic()
+        cutoff = end - seconds
+        total = 0
+        for ts, _, _, weight, _, _ in reversed(self.weighted_calls):
+            if ts > end:
+                continue
+            if ts < cutoff:
+                break
+            total += weight
+        return total
+
+    def unknown_weight_window(self, seconds: float, end: float | None = None) -> int:
+        end = end if end is not None else time.monotonic()
+        cutoff = end - seconds
+        count = 0
+        for ts, _, _, _, _, known in reversed(self.weighted_calls):
+            if ts > end:
+                continue
+            if ts < cutoff:
+                break
+            if not known:
+                count += 1
+        return count
+
+    def weighted_breakdown(self, seconds: float, end: float | None = None) -> dict[str, int]:
+        end = end if end is not None else time.monotonic()
+        cutoff = end - seconds
+        counts: dict[str, int] = {}
+        for ts, path, _, weight, _, _ in reversed(self.weighted_calls):
+            if ts > end:
+                continue
+            if ts < cutoff:
+                break
+            counts[path] = counts.get(path, 0) + weight
+        return counts
+
+    def category_weight_window(self, seconds: float, end: float | None = None) -> dict[str, int]:
+        end = end if end is not None else time.monotonic()
+        cutoff = end - seconds
+        counts: dict[str, int] = {}
+        for ts, _, _, weight, category, _ in reversed(self.weighted_calls):
+            if ts > end:
+                continue
+            if ts < cutoff:
+                break
+            counts[category] = counts.get(category, 0) + weight
+        return counts
+
+    def endpoint_health_window(self, seconds: float = 300) -> dict[str, dict[str, Any]]:
+        """Aggregate recent calls/errors/latency per endpoint without retaining unbounded samples."""
+        cutoff = time.monotonic() - max(1.0, float(seconds))
+        result: dict[str, dict[str, Any]] = {}
+        for item in reversed(self.telemetry):
+            stamp = float(item.get("monotonic") or 0.0)
+            if stamp < cutoff:
+                break
+            path = str(item.get("endpoint") or "UNKNOWN")
+            row = result.setdefault(path, {
+                "calls": 0, "errors": 0, "429_418": 0, "last_status": None,
+                "last_latency_ms": None, "last_limit_class": "NONE", "weight": 0,
+                "_latest_set": False,
+            })
+            row["calls"] += 1
+            status = item.get("status")
+            if not row["_latest_set"]:
+                row["last_status"] = status
+                row["last_latency_ms"] = item.get("latency_ms")
+                row["last_limit_class"] = str(item.get("limit_class") or "NONE")
+                row["_latest_set"] = True
+            if status is None or int(status) >= 400:
+                row["errors"] += 1
+            if status in (418, 429):
+                row["429_418"] += 1
+            row["weight"] += max(0, int(item.get("request_weight_estimate") or 0))
+        for row in result.values():
+            row.pop("_latest_set", None)
+        return result
+
+    def recent_limit_counts(self, seconds: float = 3600) -> dict[str, int]:
+        end = time.monotonic()
+        cutoff = end - seconds
+        counts: Counter[str] = Counter()
+        for item in reversed(self.telemetry):
+            if float(item.get("monotonic") or 0.0) < cutoff:
+                break
+            kind = str(item.get("limit_class") or "NONE")
+            if kind not in {"NONE", "NETWORK_ERROR", "TRANSIENT_SERVER_5XX"}:
+                counts[kind] += 1
+        return dict(counts)
+
+    @staticmethod
+    def weight_of(counts: dict[str, int]) -> int:
+        # Backwards-compatible helper; new code should use weight_window().
+        total = 0
+        for path, n in counts.items():
+            weight, _ = estimate_binance_request_weight(path)
+            total += weight * n
+        return total
+
+
+API_STATS = ApiStats()
 
 
 class ResearchStore:
@@ -1158,6 +1567,37 @@ class ResearchStore:
             """)
             conn.execute("UPDATE candidate_snapshots SET replay_status='PENDING', next_replay_ms=NULL WHERE replay_status='PROCESSING'")
             conn.commit()
+
+    def health_check(self) -> dict[str, Any]:
+        """Validate SQLite integrity and a real write/read/delete transaction.
+
+        This proves local database usability, not persistence across a Render
+        restart. That separate guarantee requires a mounted disk and explicit
+        operator acknowledgement via BOT_DATA_PERSISTENCE_CONFIRMED=1.
+        """
+        result: dict[str, Any] = {"path": str(self.path), "integrity": "UNKNOWN", "writable": False, "readable": False}
+        with self._connect() as conn:
+            integrity = conn.execute("PRAGMA quick_check").fetchone()
+            integrity_value = str(integrity[0]) if integrity else "NO_RESULT"
+            result["integrity"] = integrity_value
+            if integrity_value.lower() != "ok":
+                raise RuntimeError(f"SQLite quick_check failed: {integrity_value}")
+            probe_key = "__health_probe__"
+            probe_value = uuid4().hex
+            now_ms = int(time.time() * 1000)
+            conn.execute(
+                "INSERT INTO research_meta(key,value,updated_ms) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_ms=excluded.updated_ms",
+                (probe_key, probe_value, now_ms),
+            )
+            row = conn.execute("SELECT value FROM research_meta WHERE key=?", (probe_key,)).fetchone()
+            if row is None or str(row["value"]) != probe_value:
+                raise RuntimeError("SQLite health probe read-back mismatch.")
+            conn.execute("DELETE FROM research_meta WHERE key=?", (probe_key,))
+            conn.commit()
+            result["writable"] = True
+            result["readable"] = True
+        return result
 
     @staticmethod
     def _json(value: Any) -> str:
@@ -1566,208 +2006,245 @@ def simulate_m1_replay(candidate: dict[str, Any], raw_klines: list[Any], cost_pc
     return {"outcome": "TIME_EXIT", "ambiguous": False, "entry_timestamp_ms": entry_ts, "exit_timestamp_ms": last_ts, "pnl_r": pnl_r, "mfe_r": favorable_max / risk, "mae_r": adverse_max / risk, "candles_count": len(rows), "price_source": "BINANCE_USDM", "notes": f"Tidak ada TP/SL sampai horizon; nilai ditandai TIME_EXIT. Cost model={cost_pct:.4f}% round-trip."}
 
 
-class ApiStats:
-    """Hitung request Binance per endpoint + bobot IP dari header Binance."""
-
-    def __init__(self) -> None:
-        self.calls: deque[tuple[float, str, int]] = deque(maxlen=50000)
-        self.total = 0
-        self.limit_hits = 0
-        self.last_limit_at: datetime | None = None
-        self.used_weight: int | None = None
-        self.used_weight_at: float | None = None
-        self.max_used_weight = 0
-
-    def record(self, path: str, status: int, used_weight: str | None) -> None:
-        now = time.monotonic()
-        self.calls.append((now, path, status))
-        self.total += 1
-        if status in (418, 429):
-            self.limit_hits += 1
-            self.last_limit_at = now_utc()
-        try:
-            weight = int(used_weight) if used_weight not in (None, "") else None
-        except ValueError:
-            weight = None
-        if weight is not None:
-            self.used_weight = weight
-            self.used_weight_at = now
-            self.max_used_weight = max(self.max_used_weight, weight)
-
-    def window(self, seconds: float, end: float | None = None) -> dict[str, int]:
-        end = end if end is not None else time.monotonic()
-        cutoff = end - seconds
-        counts: dict[str, int] = {}
-        for ts, path, _ in reversed(self.calls):
-            if ts > end:
-                continue
-            if ts < cutoff:
-                break
-            counts[path] = counts.get(path, 0) + 1
-        return counts
-
-    @staticmethod
-    def weight_of(counts: dict[str, int]) -> int:
-        return sum(ENDPOINT_WEIGHTS.get(path, 1) * n for path, n in counts.items())
-
-
-API_STATS = ApiStats()
-
-
 class BinanceREST:
-    """
-    Public market-data REST only.
-
-    Tidak ada signing.
-    Tidak ada API order.
-    """
+    """Public USD-M Futures client with TTL caches and the shared request governor."""
 
     def __init__(self) -> None:
         self.base_url = BINANCE_REST_BASE
+        self._exchange_info_cache: dict[str, SymbolMeta] | None = None
+        self._exchange_info_cached_at = 0.0
+        self._exchange_info_retry_after = 0.0
+        self._exchange_info_last_error = ""
+        self._exchange_info_lock = asyncio.Lock()
+        self._ticker_24h_cache: list[dict[str, Any]] | None = None
+        self._ticker_24h_cached_at = 0.0
+        self._ticker_24h_retry_after = 0.0
+        self._ticker_24h_last_error = ""
+        self._ticker_24h_lock = asyncio.Lock()
 
     async def _get(
         self,
         path: str,
         params: dict[str, Any] | None = None,
+        *,
+        request_class: str = "PUBLIC_MARKET_DATA",
     ) -> Any:
-        def request() -> Any:
-            response = requests.get(
+        request_weight, weight_known = await BINANCE_REQUEST_GOVERNOR.acquire(
+            path, params or {}, request_class, method="GET"
+        )
+        started = time.monotonic()
+
+        def request() -> requests.Response:
+            return requests.get(
                 f"{self.base_url}{path}",
                 params=params or {},
                 timeout=HTTP_REQUEST_SECONDS,
             )
 
+        try:
+            response = await asyncio.to_thread(request)
+        except requests.RequestException as exc:
             API_STATS.record(
-                path,
-                response.status_code,
-                response.headers.get("X-MBX-USED-WEIGHT-1M"),
+                path, None, method="GET", category=request_class,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                message=f"{type(exc).__name__}: {exc}", request_weight=request_weight,
+                weight_known=weight_known, request_params=params or {},
             )
-            if response.status_code in {418, 429}:
-                try:
-                    retry = float(response.headers.get("Retry-After") or "")
-                except ValueError:
-                    retry = None
-                server = retry if retry is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
-                raise BinanceRateLimitError(
-                    f"Binance REST {path}: HTTP {response.status_code}",
-                    status_code=response.status_code,
-                    code=None,
-                    endpoint=path,
-                    server_cooldown_seconds=server,
-                    bot_cooldown_seconds=server + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
-                    retry_after_known=retry is not None,
-                )
+            raise
+        latency_ms = (time.monotonic() - started) * 1000.0
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        code = payload.get("code") if isinstance(payload, dict) else None
+        try:
+            code = int(code) if code is not None else None
+        except (TypeError, ValueError):
+            code = None
+        message = (str(payload.get("msg") or "") if isinstance(payload, dict) else response.text[:240]) if response.status_code >= 400 else ""
+        try:
+            retry_after = max(0.0, float(response.headers.get("Retry-After"))) if response.headers.get("Retry-After") is not None else None
+        except (TypeError, ValueError):
+            retry_after = None
+        API_STATS.record(
+            path, response.status_code, response.headers.get("X-MBX-USED-WEIGHT-1M"),
+            method="GET", category=request_class, latency_ms=latency_ms,
+            code=code, message=message, retry_after=retry_after,
+            request_weight=request_weight, weight_known=weight_known, headers=response.headers,
+            request_params=params or {},
+        )
+        if response.status_code in {418, 429}:
+            server = retry_after if retry_after is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
+            exc = BinanceRateLimitError(
+                message or f"Binance REST {path}: HTTP {response.status_code}",
+                status_code=response.status_code, code=code, endpoint=path,
+                server_cooldown_seconds=server,
+                bot_cooldown_seconds=server + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                retry_after_known=retry_after is not None,
+            )
+            exc.limit_class = classify_binance_limit(response.status_code, code, message)
+            raise exc
+        if response.status_code >= 400:
+            raise BinanceAPIError(
+                message or f"Binance REST {path} HTTP {response.status_code}",
+                status_code=response.status_code, code=code, endpoint=path,
+            )
+        if payload is None:
+            raise RuntimeError(f"Binance REST {path}: respons bukan JSON valid.")
+        return payload
 
-            if response.status_code >= 400:
-                raise RuntimeError(
-                    f"Binance REST {path}: HTTP "
-                    f"{response.status_code}: "
-                    f"{response.text[:500]}"
-                )
+    def cache_status(self) -> dict[str, dict[str, Any]]:
+        """Expose cache age/state without making any network request."""
+        now = time.monotonic()
+        exchange_age = now - self._exchange_info_cached_at if self._exchange_info_cache is not None else None
+        ticker_age = now - self._ticker_24h_cached_at if self._ticker_24h_cache is not None else None
 
-            return response.json()
+        def state(age: float | None, ttl: int, max_stale: int, retry_at: float) -> str:
+            if age is None:
+                return "EMPTY"
+            if age <= ttl:
+                return "FRESH"
+            if age <= max_stale:
+                return "STALE_BACKOFF" if now < retry_at else "STALE_REFRESH_DUE"
+            return "EXPIRED"
 
-        return await asyncio.to_thread(request)
+        return {
+            "exchange_info": {
+                "state": state(exchange_age, BINANCE_EXCHANGE_INFO_TTL_SECONDS, BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS, self._exchange_info_retry_after),
+                "age_seconds": exchange_age,
+                "last_error": self._exchange_info_last_error or None,
+            },
+            "ticker_24h": {
+                "state": state(ticker_age, BINANCE_TICKER_24H_TTL_SECONDS, BINANCE_TICKER_24H_MAX_STALE_SECONDS, self._ticker_24h_retry_after),
+                "age_seconds": ticker_age,
+                "last_error": self._ticker_24h_last_error or None,
+            },
+        }
 
     async def get_exchange_info(self, force: bool = False) -> dict[str, SymbolMeta]:
-        payload = await self._get("/fapi/v1/exchangeInfo")
-
-        result: dict[str, SymbolMeta] = {}
-
-        for raw in payload.get("symbols", []):
-            symbol = str(raw.get("symbol") or "").upper()
-            status = str(raw.get("status") or "")
-            contract_type = str(raw.get("contractType") or "")
-            quote_asset = str(raw.get("quoteAsset") or "")
-
-            # Bot ini fokus pada USDⓈ-M USDT perpetual.
-            if status != "TRADING":
-                continue
-
-            if contract_type != "PERPETUAL":
-                continue
-
-            if quote_asset != "USDT":
-                continue
-
-            tick_size = Decimal("0")
-            min_price = Decimal("0")
-            max_price = Decimal("0")
-            min_qty = Decimal("0")
-            max_qty = Decimal("0")
-            market_max_qty = Decimal("0")
-            step_size = Decimal("0")
-            min_notional = Decimal("0")
-            max_notional = Decimal("0")
-
-            for filt in raw.get("filters", []):
-                kind = str(filt.get("filterType") or "")
-                if kind == "PRICE_FILTER":
-                    tick_size = Decimal(str(filt.get("tickSize") or "0"))
-                    min_price = Decimal(str(filt.get("minPrice") or "0"))
-                    max_price = Decimal(str(filt.get("maxPrice") or "0"))
-                elif kind in {"LOT_SIZE", "MARKET_LOT_SIZE"}:
-                    candidate_step = Decimal(str(filt.get("stepSize") or "0"))
-                    candidate_min = Decimal(str(filt.get("minQty") or "0"))
-                    candidate_max = Decimal(str(filt.get("maxQty") or "0"))
-                    if kind == "MARKET_LOT_SIZE":
-                        market_max_qty = candidate_max
-                    if kind == "LOT_SIZE" or step_size <= 0:
-                        step_size = candidate_step
-                        min_qty = candidate_min
-                        max_qty = candidate_max
-                elif kind in {"MIN_NOTIONAL", "NOTIONAL"}:
-                    min_notional = Decimal(str(
-                        filt.get("minNotional")
-                        or filt.get("notional")
-                        or "0"
-                    ))
-                    max_notional = Decimal(str(filt.get("maxNotional") or "0"))
-
-            result[symbol] = SymbolMeta(
-                symbol=symbol,
-                status=status,
-                contract_type=contract_type,
-                quote_asset=quote_asset,
-                tick_size=tick_size,
-                min_price=min_price,
-                max_price=max_price,
-                min_qty=min_qty,
-                max_qty=max_qty,
-                step_size=step_size,
-                min_notional=min_notional,
-                max_notional=max_notional,
-                market_max_qty=market_max_qty,
-                quantity_precision=int(raw.get("quantityPrecision") or 0),
-                price_precision=int(raw.get("pricePrecision") or 0),
+        now = time.monotonic()
+        cached = self._exchange_info_cache
+        cache_age = now - self._exchange_info_cached_at if cached is not None else float("inf")
+        if not force and now < self._exchange_info_retry_after:
+            if cached is not None and cache_age <= BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS:
+                return dict(cached)
+            raise RuntimeError(
+                f"exchangeInfo refresh backoff aktif; retry dalam "
+                f"{self._exchange_info_retry_after - now:.0f}s. "
+                f"Error terakhir: {self._exchange_info_last_error[:160]}"
             )
+        if cached is not None and cache_age < BINANCE_EXCHANGE_INFO_TTL_SECONDS and not force:
+            return dict(cached)
 
-        return result
+        request_started = now
+        async with self._exchange_info_lock:
+            now = time.monotonic()
+            cached = self._exchange_info_cache
+            cache_age = now - self._exchange_info_cached_at if cached is not None else float("inf")
+            if not force and now < self._exchange_info_retry_after:
+                if cached is not None and cache_age <= BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS:
+                    return dict(cached)
+                raise RuntimeError(
+                    f"exchangeInfo refresh backoff aktif; retry dalam "
+                    f"{self._exchange_info_retry_after - now:.0f}s. "
+                    f"Error terakhir: {self._exchange_info_last_error[:160]}"
+                )
+            # Concurrent callers with force=True share the refresh started by the
+            # caller ahead of them, while a later independent force still refreshes.
+            just_refreshed = cached is not None and self._exchange_info_cached_at >= request_started
+            if cached is not None and ((cache_age < BINANCE_EXCHANGE_INFO_TTL_SECONDS and not force) or (force and just_refreshed)):
+                return dict(cached)
+            try:
+                payload = await self._get(
+                    "/fapi/v1/exchangeInfo",
+                    request_class="ORDER_MANAGEMENT" if force else "SCAN_UNIVERSE",
+                )
+                result: dict[str, SymbolMeta] = {}
+                for raw in payload.get("symbols", []):
+                    symbol = str(raw.get("symbol") or "").upper()
+                    status = str(raw.get("status") or "")
+                    contract_type = str(raw.get("contractType") or "")
+                    quote_asset = str(raw.get("quoteAsset") or "")
+                    if status != "TRADING" or contract_type != "PERPETUAL" or quote_asset != "USDT":
+                        continue
+                    tick_size = Decimal("0")
+                    min_price = Decimal("0")
+                    max_price = Decimal("0")
+                    min_qty = Decimal("0")
+                    max_qty = Decimal("0")
+                    market_max_qty = Decimal("0")
+                    step_size = Decimal("0")
+                    min_notional = Decimal("0")
+                    max_notional = Decimal("0")
+                    for filt in raw.get("filters", []):
+                        kind = str(filt.get("filterType") or "")
+                        if kind == "PRICE_FILTER":
+                            tick_size = Decimal(str(filt.get("tickSize") or "0"))
+                            min_price = Decimal(str(filt.get("minPrice") or "0"))
+                            max_price = Decimal(str(filt.get("maxPrice") or "0"))
+                        elif kind in {"LOT_SIZE", "MARKET_LOT_SIZE"}:
+                            candidate_step = Decimal(str(filt.get("stepSize") or "0"))
+                            candidate_min = Decimal(str(filt.get("minQty") or "0"))
+                            candidate_max = Decimal(str(filt.get("maxQty") or "0"))
+                            if kind == "MARKET_LOT_SIZE":
+                                market_max_qty = candidate_max
+                            if kind == "LOT_SIZE" or step_size <= 0:
+                                step_size, min_qty, max_qty = candidate_step, candidate_min, candidate_max
+                        elif kind in {"MIN_NOTIONAL", "NOTIONAL"}:
+                            min_notional = Decimal(str(filt.get("minNotional") or filt.get("notional") or "0"))
+                            max_notional = Decimal(str(filt.get("maxNotional") or "0"))
+                    result[symbol] = SymbolMeta(
+                        symbol=symbol, status=status, contract_type=contract_type,
+                        quote_asset=quote_asset, tick_size=tick_size, min_price=min_price,
+                        max_price=max_price, min_qty=min_qty, max_qty=max_qty,
+                        step_size=step_size, min_notional=min_notional, max_notional=max_notional,
+                        market_max_qty=market_max_qty,
+                        quantity_precision=int(raw.get("quantityPrecision") or 0),
+                        price_precision=int(raw.get("pricePrecision") or 0),
+                    )
+                self._exchange_info_cache = result
+                self._exchange_info_cached_at = time.monotonic()
+                self._exchange_info_retry_after = 0.0
+                self._exchange_info_last_error = ""
+                governor = globals().get("BINANCE_REQUEST_GOVERNOR")
+                if governor is not None:
+                    governor.configure_order_limits(payload.get("rateLimits") or [])
+                return dict(result)
+            except Exception as exc:
+                # Backoff prevents every scan cycle from retrying a failed endpoint.
+                # The exchange-provided Retry-After wins when present; otherwise use
+                # a short bounded delay. Forced refreshes still fail closed.
+                server_wait = getattr(exc, "server_cooldown_seconds", None)
+                try:
+                    retry_wait = float(server_wait) if server_wait is not None else 30.0
+                except (TypeError, ValueError):
+                    retry_wait = 30.0
+                retry_wait = max(5.0, min(float(BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS), retry_wait))
+                self._exchange_info_retry_after = max(self._exchange_info_retry_after, time.monotonic() + retry_wait)
+                self._exchange_info_last_error = str(exc)[:200]
+                age = time.monotonic() - self._exchange_info_cached_at if self._exchange_info_cache is not None else float("inf")
+                if not force and self._exchange_info_cache is not None and age <= BINANCE_EXCHANGE_INFO_MAX_STALE_SECONDS:
+                    log.warning("[BINANCE CACHE] exchangeInfo refresh gagal; memakai cache stale %.0fs untuk scan saja; retry backoff %.0fs.", age, retry_wait)
+                    return dict(self._exchange_info_cache)
+                raise
 
     async def get_symbol_filters(self, symbol: str) -> dict[str, Any]:
-        """Return current Binance symbol filters used by REAL quantity validation."""
-        symbols = await self.get_exchange_info(force=True)
+        """Use TTL rules; caller retries with force refresh after an exchange filter rejection."""
+        symbols = await self.get_exchange_info(force=False)
         meta = symbols.get(normalize_symbol(symbol))
         if meta is None:
             raise ValueError(f"{symbol} tidak ditemukan di Binance exchangeInfo.")
         return {
-            "step_size": meta.step_size,
-            "min_qty": meta.min_qty,
-            "max_qty": meta.max_qty,
-            "market_max_qty": meta.market_max_qty,
-            "min_notional": meta.min_notional,
-            "max_notional": meta.max_notional,
-            "tick_size": meta.tick_size,
-            "quantity_precision": meta.quantity_precision,
-            "price_precision": meta.price_precision,
+            "step_size": meta.step_size, "min_qty": meta.min_qty, "max_qty": meta.max_qty,
+            "market_max_qty": meta.market_max_qty, "min_notional": meta.min_notional,
+            "max_notional": meta.max_notional, "tick_size": meta.tick_size,
+            "quantity_precision": meta.quantity_precision, "price_precision": meta.price_precision,
         }
 
     async def get_price(self, symbol: str) -> Decimal:
         payload = await self._get(
-            "/fapi/v2/ticker/price",
-            params={"symbol": symbol},
+            "/fapi/v2/ticker/price", params={"symbol": symbol}, request_class="TRADE_MANAGEMENT",
         )
-
         return parse_decimal(str(payload["price"]))
 
     async def get_klines(
@@ -1780,24 +2257,71 @@ class BinanceREST:
     ) -> list[list[Any]]:
         """Fetch bounded public Futures klines for offline/shadow replay only."""
         params: dict[str, Any] = {
-            "symbol": normalize_symbol(symbol),
-            "interval": interval,
+            "symbol": normalize_symbol(symbol), "interval": interval,
             "limit": max(1, min(int(limit), 1500)),
         }
         if start_time_ms is not None:
             params["startTime"] = int(start_time_ms)
         if end_time_ms is not None:
             params["endTime"] = int(end_time_ms)
-        payload = await self._get("/fapi/v1/klines", params=params)
+        payload = await self._get("/fapi/v1/klines", params=params, request_class="RESEARCH")
         if not isinstance(payload, list):
             raise RuntimeError("Binance Kline response bukan list.")
         return payload
 
-    async def get_24h_tickers(self) -> list[dict[str, Any]]:
-        payload = await self._get("/fapi/v1/ticker/24hr")
-        if not isinstance(payload, list):
-            raise RuntimeError("Binance 24h ticker response bukan list.")
-        return payload
+    async def get_24h_tickers(self, force: bool = False) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        cached = self._ticker_24h_cache
+        age = now - self._ticker_24h_cached_at if cached is not None else float("inf")
+        if not force and now < self._ticker_24h_retry_after:
+            if cached is not None and age <= BINANCE_TICKER_24H_MAX_STALE_SECONDS:
+                return copy.deepcopy(cached)
+            raise RuntimeError(
+                f"ticker 24h refresh backoff aktif; retry dalam "
+                f"{self._ticker_24h_retry_after - now:.0f}s. "
+                f"Error terakhir: {self._ticker_24h_last_error[:160]}"
+            )
+        if cached is not None and age < BINANCE_TICKER_24H_TTL_SECONDS and not force:
+            return copy.deepcopy(cached)
+        request_started = now
+        async with self._ticker_24h_lock:
+            now = time.monotonic()
+            cached = self._ticker_24h_cache
+            age = now - self._ticker_24h_cached_at if cached is not None else float("inf")
+            if not force and now < self._ticker_24h_retry_after:
+                if cached is not None and age <= BINANCE_TICKER_24H_MAX_STALE_SECONDS:
+                    return copy.deepcopy(cached)
+                raise RuntimeError(
+                    f"ticker 24h refresh backoff aktif; retry dalam "
+                    f"{self._ticker_24h_retry_after - now:.0f}s. "
+                    f"Error terakhir: {self._ticker_24h_last_error[:160]}"
+                )
+            just_refreshed = cached is not None and self._ticker_24h_cached_at >= request_started
+            if cached is not None and ((age < BINANCE_TICKER_24H_TTL_SECONDS and not force) or (force and just_refreshed)):
+                return copy.deepcopy(cached)
+            try:
+                payload = await self._get("/fapi/v1/ticker/24hr", request_class="SCAN_UNIVERSE")
+                if not isinstance(payload, list):
+                    raise RuntimeError("Binance 24h ticker response bukan list.")
+                self._ticker_24h_cache = copy.deepcopy(payload)
+                self._ticker_24h_cached_at = time.monotonic()
+                self._ticker_24h_retry_after = 0.0
+                self._ticker_24h_last_error = ""
+                return copy.deepcopy(payload)
+            except Exception as exc:
+                server_wait = getattr(exc, "server_cooldown_seconds", None)
+                try:
+                    retry_wait = float(server_wait) if server_wait is not None else 30.0
+                except (TypeError, ValueError):
+                    retry_wait = 30.0
+                retry_wait = max(5.0, min(float(BINANCE_TICKER_24H_MAX_STALE_SECONDS), retry_wait))
+                self._ticker_24h_retry_after = max(self._ticker_24h_retry_after, time.monotonic() + retry_wait)
+                self._ticker_24h_last_error = str(exc)[:200]
+                stale_age = time.monotonic() - self._ticker_24h_cached_at if self._ticker_24h_cache is not None else float("inf")
+                if not force and self._ticker_24h_cache is not None and stale_age <= BINANCE_TICKER_24H_MAX_STALE_SECONDS:
+                    log.warning("[BINANCE CACHE] ticker refresh gagal; memakai snapshot stale %.0fs hanya untuk ranking universe; retry backoff %.0fs.", stale_age, retry_wait)
+                    return copy.deepcopy(self._ticker_24h_cache)
+                raise
 
 
 # ============================================================
@@ -1808,6 +2332,29 @@ class BybitPublicREST:
     """Public Bybit V5 market-data client for linear USDT perpetuals."""
 
     BASE_URL = "https://api.bybit.com"
+
+    def __init__(self) -> None:
+        self._instruments_cache: set[str] | None = None
+        self._instruments_cached_at = 0.0
+        self._instruments_lock = asyncio.Lock()
+        self._tickers_cache: list[dict[str, Any]] | None = None
+        self._tickers_cached_at = 0.0
+        self._tickers_lock = asyncio.Lock()
+
+    def cache_status(self) -> dict[str, dict[str, Any]]:
+        now = time.monotonic()
+        instrument_age = now - self._instruments_cached_at if self._instruments_cache is not None else None
+        ticker_age = now - self._tickers_cached_at if self._tickers_cache is not None else None
+        return {
+            "instruments": {
+                "state": "EMPTY" if instrument_age is None else ("FRESH" if instrument_age <= BYBIT_INSTRUMENTS_TTL_SECONDS else ("STALE" if instrument_age <= BYBIT_INSTRUMENTS_MAX_STALE_SECONDS else "EXPIRED")),
+                "age_seconds": instrument_age,
+            },
+            "tickers": {
+                "state": "EMPTY" if ticker_age is None else ("FRESH" if ticker_age <= BYBIT_TICKERS_TTL_SECONDS else ("STALE" if ticker_age <= BYBIT_TICKERS_MAX_STALE_SECONDS else "EXPIRED")),
+                "age_seconds": ticker_age,
+            },
+        }
 
     async def _get(
         self,
@@ -1835,54 +2382,75 @@ class BybitPublicREST:
 
         return await asyncio.to_thread(request)
 
-    async def get_linear_perpetual_symbols(self) -> set[str]:
-        symbols: set[str] = set()
-        cursor: str | None = None
+    async def get_linear_perpetual_symbols(self, force: bool = False) -> set[str]:
+        now = time.monotonic()
+        if self._instruments_cache is not None and now - self._instruments_cached_at < BYBIT_INSTRUMENTS_TTL_SECONDS and not force:
+            return set(self._instruments_cache)
+        request_started = now
+        async with self._instruments_lock:
+            now = time.monotonic()
+            just_refreshed = self._instruments_cache is not None and self._instruments_cached_at >= request_started
+            if self._instruments_cache is not None and ((now - self._instruments_cached_at < BYBIT_INSTRUMENTS_TTL_SECONDS and not force) or (force and just_refreshed)):
+                return set(self._instruments_cache)
+            try:
+                symbols: set[str] = set()
+                cursor: str | None = None
+                while True:
+                    params: dict[str, Any] = {"category": "linear", "status": "Trading", "limit": 1000}
+                    if cursor:
+                        params["cursor"] = cursor
+                    body = await self._get("/v5/market/instruments-info", params=params)
+                    result = body.get("result") or {}
+                    for item in result.get("list") or []:
+                        symbol = normalize_symbol(str(item.get("symbol") or ""))
+                        contract_type = str(item.get("contractType") or "")
+                        quote_coin = str(item.get("quoteCoin") or "")
+                        status = str(item.get("status") or "")
+                        if symbol and quote_coin == "USDT" and contract_type == "LinearPerpetual" and status == "Trading":
+                            symbols.add(symbol)
+                    cursor = str(result.get("nextPageCursor") or "") or None
+                    if not cursor:
+                        break
+                if not symbols:
+                    raise RuntimeError("Bybit instruments response menghasilkan universe kosong.")
+                self._instruments_cache = set(symbols)
+                self._instruments_cached_at = time.monotonic()
+                return set(symbols)
+            except Exception:
+                # Universe boleh memakai last-known-good sebatas TTL stale khusus
+                # untuk menjaga scanner dari gangguan singkat. Trade REAL tetap
+                # mengambil filter Binance dan validasi fresh pada jalur eksekusi.
+                stale_age = time.monotonic() - self._instruments_cached_at if self._instruments_cache is not None else float("inf")
+                if not force and self._instruments_cache is not None and stale_age <= BYBIT_INSTRUMENTS_MAX_STALE_SECONDS:
+                    log.warning("[BYBIT CACHE] refresh daftar instrumen gagal; memakai universe stale %.0fs untuk discovery saja.", stale_age)
+                    return set(self._instruments_cache)
+                raise
 
-        while True:
-            params: dict[str, Any] = {
-                "category": "linear",
-                "status": "Trading",
-                "limit": 1000,
-            }
-            if cursor:
-                params["cursor"] = cursor
-
-            body = await self._get(
-                "/v5/market/instruments-info",
-                params=params,
-            )
-            result = body.get("result") or {}
-
-            for item in result.get("list") or []:
-                symbol = normalize_symbol(str(item.get("symbol") or ""))
-                contract_type = str(item.get("contractType") or "")
-                quote_coin = str(item.get("quoteCoin") or "")
-                status = str(item.get("status") or "")
-                if (
-                    symbol
-                    and quote_coin == "USDT"
-                    and contract_type == "LinearPerpetual"
-                    and status == "Trading"
-                ):
-                    symbols.add(symbol)
-
-            cursor = str(result.get("nextPageCursor") or "") or None
-            if not cursor:
-                break
-
-        return symbols
-
-    async def get_linear_tickers(self) -> list[dict[str, Any]]:
-        body = await self._get(
-            "/v5/market/tickers",
-            params={"category": "linear"},
-        )
-        result = body.get("result") or {}
-        rows = result.get("list") or []
-        if not isinstance(rows, list):
-            raise RuntimeError("Bybit ticker response bukan list.")
-        return rows
+    async def get_linear_tickers(self, force: bool = False) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        if self._tickers_cache is not None and now - self._tickers_cached_at < BYBIT_TICKERS_TTL_SECONDS and not force:
+            return copy.deepcopy(self._tickers_cache)
+        request_started = now
+        async with self._tickers_lock:
+            now = time.monotonic()
+            just_refreshed = self._tickers_cache is not None and self._tickers_cached_at >= request_started
+            if self._tickers_cache is not None and ((now - self._tickers_cached_at < BYBIT_TICKERS_TTL_SECONDS and not force) or (force and just_refreshed)):
+                return copy.deepcopy(self._tickers_cache)
+            try:
+                body = await self._get("/v5/market/tickers", params={"category": "linear"})
+                result = body.get("result") or {}
+                rows = result.get("list") or []
+                if not isinstance(rows, list) or not rows:
+                    raise RuntimeError("Bybit ticker response kosong atau bukan list.")
+                self._tickers_cache = copy.deepcopy(rows)
+                self._tickers_cached_at = time.monotonic()
+                return copy.deepcopy(rows)
+            except Exception:
+                stale_age = time.monotonic() - self._tickers_cached_at if self._tickers_cache is not None else float("inf")
+                if not force and self._tickers_cache is not None and stale_age <= BYBIT_TICKERS_MAX_STALE_SECONDS:
+                    log.warning("[BYBIT CACHE] ticker refresh gagal; memakai snapshot stale %.0fs untuk ranking universe.", stale_age)
+                    return copy.deepcopy(self._tickers_cache)
+                raise
 
 
 # ============================================================
@@ -1931,9 +2499,11 @@ class BinanceRateLimitError(BinanceAPIError):
         bot_cooldown_seconds: float,
         retry_after_known: bool = False,
     ) -> None:
-        self.server_cooldown_seconds = server_cooldown_seconds
-        self.bot_cooldown_seconds = bot_cooldown_seconds
+        self.server_cooldown_seconds = max(0.0, float(server_cooldown_seconds))
+        self.bot_cooldown_seconds = max(0.0, float(bot_cooldown_seconds))
         self.retry_after_known = bool(retry_after_known)
+        self.limit_class = classify_binance_limit(status_code, code, message)
+        self.internal = False
         super().__init__(
             message,
             status_code=status_code,
@@ -1945,6 +2515,321 @@ class BinanceRateLimitError(BinanceAPIError):
                 else None
             ),
         )
+
+
+class BinanceRequestGovernor:
+    """Shared weighted IP governor + independent account order-rate governor.
+
+    This is local admission control, not a guarantee about all traffic sharing a
+    Render egress IP/account. Fresh Binance headers refine both estimates.
+    Server IP cooldowns are absolute: priority never bypasses a 418/IP-weight ban.
+    Account order limits do not unnecessarily stop read-only market-data requests.
+    """
+
+    def __init__(self) -> None:
+        self._requests: deque[tuple[float, int, str, str]] = deque(maxlen=50000)
+        self._orders: deque[tuple[float, int, str, str]] = deque(maxlen=50000)
+        self._lock = asyncio.Lock()
+        self._server_cooldown_until = 0.0
+        self._bot_cooldown_until = 0.0
+        self._order_cooldown_until = 0.0
+        self._last_server_status: int | None = None
+        self._last_server_code: int | None = None
+        self._last_server_message = ""
+        self._last_order_limit_message = ""
+        self._latest_header_weight: int | None = None
+        self._latest_header_at: float | None = None
+        self._external_weight_estimate = 0
+        self._latest_order_count_10s: int | None = None
+        self._latest_order_count_10s_at: float | None = None
+        self._latest_order_count_1m: int | None = None
+        self._latest_order_count_1m_at: float | None = None
+        self._exchange_order_limit_10s = BINANCE_ORDER_FALLBACK_LIMIT_10S
+        self._exchange_order_limit_1m = BINANCE_ORDER_FALLBACK_LIMIT_1M
+        self._order_limits_source = "conservative_fallback"
+
+    @staticmethod
+    def estimate(path: str, params: dict[str, Any] | None = None, method: str = "GET") -> tuple[int, bool]:
+        return estimate_binance_request_weight(path, params, method)
+
+    def _purge(self, now: float) -> None:
+        cutoff = now - 60.0
+        while self._requests and self._requests[0][0] < cutoff:
+            self._requests.popleft()
+
+    def _purge_orders(self, now: float) -> None:
+        cutoff = now - 60.0
+        while self._orders and self._orders[0][0] < cutoff:
+            self._orders.popleft()
+
+    def _local_weight(self, now: float) -> int:
+        self._purge(now)
+        return sum(weight for _, weight, _, _ in self._requests)
+
+    def _local_order_count(self, now: float, window_seconds: float) -> int:
+        self._purge_orders(now)
+        cutoff = now - window_seconds
+        return sum(count for stamp, count, _, _ in self._orders if stamp >= cutoff)
+
+    def estimated_used_weight(self, now: float | None = None) -> int:
+        now = time.monotonic() if now is None else now
+        local = self._local_weight(now)
+        external = 0
+        if self._latest_header_at is not None and now - self._latest_header_at <= BINANCE_GOVERNOR_HEADER_STALE_SECONDS:
+            external = self._external_weight_estimate
+        return max(0, local + external)
+
+    def _effective_order_cap(self, window_seconds: float, category: str) -> int:
+        source_limit = self._exchange_order_limit_10s if window_seconds <= 10 else self._exchange_order_limit_1m
+        headroom_pct = BINANCE_ORDER_GOVERNOR_HEADROOM_PCT
+        if str(category or "").upper() == "PROTECTION":
+            # Protective orders have a larger reserve, yet remain below the
+            # exchange/account hard limit. No reserve can bypass a server cooldown.
+            headroom_pct = max(5.0, headroom_pct / 2.0)
+        return max(1, int(source_limit * (1.0 - headroom_pct / 100.0)))
+
+    def _external_order_count(self, now: float, window_seconds: float, local_count: int) -> int:
+        if window_seconds <= 10:
+            value = self._latest_order_count_10s
+            stamp = self._latest_order_count_10s_at
+            stale_after = BINANCE_ORDER_HEADER_STALE_10S_SECONDS
+        else:
+            value = self._latest_order_count_1m
+            stamp = self._latest_order_count_1m_at
+            stale_after = BINANCE_ORDER_HEADER_STALE_1M_SECONDS
+        if value is None or stamp is None or now - stamp > stale_after:
+            return 0
+        return max(0, int(value) - local_count)
+
+    @property
+    def cooldown_remaining(self) -> float:
+        now = time.monotonic()
+        until = self._server_cooldown_until if REAL_PRIORITY.get() else self._bot_cooldown_until
+        return max(0.0, until - now)
+
+    @property
+    def server_cooldown_remaining(self) -> float:
+        return max(0.0, self._server_cooldown_until - time.monotonic())
+
+    @property
+    def bot_cooldown_remaining(self) -> float:
+        return max(0.0, self._bot_cooldown_until - time.monotonic())
+
+    @property
+    def order_cooldown_remaining(self) -> float:
+        return max(0.0, self._order_cooldown_until - time.monotonic())
+
+    def configure_order_limits(self, rate_limits: Any) -> None:
+        """Use exchangeInfo ORDERS limits when available, otherwise retain fallback caps."""
+        found_10s = None
+        found_1m = None
+        for item in rate_limits if isinstance(rate_limits, list) else []:
+            if not isinstance(item, dict) or str(item.get("rateLimitType") or "").upper() != "ORDERS":
+                continue
+            try:
+                interval = str(item.get("interval") or "").upper()
+                interval_num = max(1, int(item.get("intervalNum") or 1))
+                limit = max(1, int(item.get("limit") or 1))
+            except (TypeError, ValueError):
+                continue
+            duration = interval_num * (1 if interval == "SECOND" else 60 if interval == "MINUTE" else 3600 if interval == "HOUR" else 86400 if interval == "DAY" else 0)
+            if interval == "SECOND" and duration <= 10:
+                # For sub-10s published intervals, treat the limit as the stricter
+                # 10-second safety envelope; longer intervals are not comparable.
+                found_10s = limit if found_10s is None else min(found_10s, limit)
+            elif interval == "MINUTE" and interval_num == 1:
+                found_1m = limit if found_1m is None else min(found_1m, limit)
+        if found_10s is not None:
+            self._exchange_order_limit_10s = found_10s
+        if found_1m is not None:
+            self._exchange_order_limit_1m = found_1m
+        if found_10s is not None or found_1m is not None:
+            self._order_limits_source = "exchangeInfo_ORDERS"
+
+    def observe_response(
+        self,
+        *,
+        used_weight: int | None,
+        status: int | None,
+        code: int | None,
+        message: str,
+        retry_after: float | None,
+        order_count_10s: int | None = None,
+        order_count_1m: int | None = None,
+    ) -> None:
+        now = time.monotonic()
+        if used_weight is not None:
+            local = self._local_weight(now)
+            self._latest_header_weight = max(0, int(used_weight))
+            self._latest_header_at = now
+            # Header can include other services using the same Render egress IP.
+            self._external_weight_estimate = max(0, int(used_weight) - local)
+        if order_count_10s is not None:
+            self._latest_order_count_10s = max(0, int(order_count_10s))
+            self._latest_order_count_10s_at = now
+        if order_count_1m is not None:
+            self._latest_order_count_1m = max(0, int(order_count_1m))
+            self._latest_order_count_1m_at = now
+        if status not in (418, 429):
+            return
+
+        limit_class = classify_binance_limit(status, code, message)
+        server_seconds = max(0.0, float(retry_after)) if retry_after is not None else float(BINANCE_RATE_LIMIT_FALLBACK_SECONDS)
+        self._last_server_status = status
+        self._last_server_code = code
+        self._last_server_message = str(message or "")[:240]
+        if status == 429 and limit_class == "ORDER_LIMIT":
+            # Account-specific new-order count limit. Do not mistake it for an
+            # IP request-weight ban; read-only market data may continue.
+            self._order_cooldown_until = max(self._order_cooldown_until, now + server_seconds)
+            self._last_order_limit_message = str(message or "")[:240]
+            return
+
+        # For HTTP 418 or non-order 429, conservatively gate all REST requests.
+        # REAL_PRIORITY still cannot bypass the server-provided cooldown.
+        self._server_cooldown_until = max(self._server_cooldown_until, now + server_seconds)
+        self._bot_cooldown_until = max(self._bot_cooldown_until, now + server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+
+    @staticmethod
+    def _category_cap(category: str) -> int:
+        budget = BINANCE_GOVERNOR_MAX_WEIGHT_PER_MIN
+        category = str(category or "PUBLIC_MARKET_DATA").upper()
+        if category == "RESEARCH":
+            return min(500, int(budget * 0.25))
+        if category == "SCAN_UNIVERSE":
+            return min(1200, int(budget * 0.60))
+        if category in {"PUBLIC_MARKET_DATA", "MARKET_DATA"}:
+            return int(budget * 0.78)
+        if category in {"ACCOUNT", "PRIVATE_ACCOUNT"}:
+            return int(budget * 0.86)
+        if category in {"TRADE_MANAGEMENT", "ORDER_MANAGEMENT"}:
+            return int(budget * 0.93)
+        return budget
+
+    async def acquire(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        category: str = "PUBLIC_MARKET_DATA",
+        *,
+        method: str = "GET",
+    ) -> tuple[int, bool]:
+        params = params or {}
+        weight, known = self.estimate(path, params, method)
+        order_count = estimate_binance_order_count(path, params, method)
+        category = str(category or "PUBLIC_MARKET_DATA").upper()
+        while True:
+            delay = 0.0
+            async with self._lock:
+                now = time.monotonic()
+                cooldown_until = self._server_cooldown_until if REAL_PRIORITY.get() else self._bot_cooldown_until
+                if cooldown_until > now:
+                    remaining = cooldown_until - now
+                    status = self._last_server_status or 429
+                    error = BinanceRateLimitError(
+                        f"Request ditahan governor global: cooldown Binance {remaining:.1f}s; tidak ada request baru dikirim.",
+                        status_code=status,
+                        code=self._last_server_code,
+                        endpoint=path,
+                        server_cooldown_seconds=remaining,
+                        bot_cooldown_seconds=remaining,
+                        retry_after_known=False,
+                    )
+                    error.internal = True
+                    error.limit_class = "INTERNAL_GLOBAL_COOLDOWN"
+                    raise error
+
+                # Keep order-rate limits independent: market-data GETs must not
+                # wait on an account's new-order cooldown.
+                if order_count > 0 and self._order_cooldown_until > now:
+                    delay = max(0.25, min(5.0, self._order_cooldown_until - now))
+                else:
+                    local = self._local_weight(now)
+                    external = 0
+                    if self._latest_header_at is not None and now - self._latest_header_at <= BINANCE_GOVERNOR_HEADER_STALE_SECONDS:
+                        external = self._external_weight_estimate
+                    used = local + external
+                    cap = self._category_cap(category)
+                    if used + weight > cap:
+                        expiries = [stamp + 60.0 - now for stamp, _, _, _ in self._requests if stamp + 60.0 > now]
+                        if self._latest_header_at is not None:
+                            header_expiry = self._latest_header_at + BINANCE_GOVERNOR_HEADER_STALE_SECONDS - now
+                            if header_expiry > 0 and external > 0:
+                                expiries.append(header_expiry)
+                        delay = max(0.25, min(5.0, min(expiries) if expiries else 1.0))
+                    else:
+                        order_blocked = False
+                        if order_count > 0:
+                            local_10s = self._local_order_count(now, 10.0)
+                            local_1m = self._local_order_count(now, 60.0)
+                            total_10s = local_10s + self._external_order_count(now, 10.0, local_10s)
+                            total_1m = local_1m + self._external_order_count(now, 60.0, local_1m)
+                            cap_10s = self._effective_order_cap(10.0, category)
+                            cap_1m = self._effective_order_cap(60.0, category)
+                            order_blocked = (total_10s + order_count > cap_10s) or (total_1m + order_count > cap_1m)
+                            if order_blocked:
+                                expiries = []
+                                for stamp, _, _, _ in self._orders:
+                                    if stamp + 10.0 > now and local_10s + order_count > cap_10s:
+                                        expiries.append(stamp + 10.0 - now)
+                                    if stamp + 60.0 > now and local_1m + order_count > cap_1m:
+                                        expiries.append(stamp + 60.0 - now)
+                                if self._latest_order_count_10s_at is not None and self._external_order_count(now, 10.0, local_10s) > 0:
+                                    expires = self._latest_order_count_10s_at + BINANCE_ORDER_HEADER_STALE_10S_SECONDS - now
+                                    if expires > 0:
+                                        expiries.append(expires)
+                                if self._latest_order_count_1m_at is not None and self._external_order_count(now, 60.0, local_1m) > 0:
+                                    expires = self._latest_order_count_1m_at + BINANCE_ORDER_HEADER_STALE_1M_SECONDS - now
+                                    if expires > 0:
+                                        expiries.append(expires)
+                                delay = max(0.25, min(5.0, min(expiries) if expiries else 1.0))
+                        if not order_blocked:
+                            self._requests.append((now, weight, category, str(path)))
+                            if order_count > 0:
+                                self._orders.append((now, order_count, category, str(path)))
+                            return weight, known
+            # Never sleep while holding the governor lock. Higher-priority work
+            # may proceed when its own budget allows.
+            await asyncio.sleep(delay)
+
+    def snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        local = self._local_weight(now)
+        age = now - self._latest_header_at if self._latest_header_at is not None else None
+        local_10s = self._local_order_count(now, 10.0)
+        local_1m = self._local_order_count(now, 60.0)
+        external_10s = self._external_order_count(now, 10.0, local_10s)
+        external_1m = self._external_order_count(now, 60.0, local_1m)
+        return {
+            "local_weight_1m": local,
+            "estimated_ip_weight": self.estimated_used_weight(now),
+            "latest_header_weight": self._latest_header_weight,
+            "header_age_seconds": age,
+            "external_weight_estimate": self._external_weight_estimate if age is not None and age <= BINANCE_GOVERNOR_HEADER_STALE_SECONDS else None,
+            "budget": BINANCE_GOVERNOR_MAX_WEIGHT_PER_MIN,
+            "cooldown_seconds": self.cooldown_remaining,
+            "order_cooldown_seconds": self.order_cooldown_remaining,
+            "order_count_10s_local": local_10s,
+            "order_count_1m_local": local_1m,
+            "order_count_10s_estimated": local_10s + external_10s,
+            "order_count_1m_estimated": local_1m + external_1m,
+            "order_limit_10s_exchange": self._exchange_order_limit_10s,
+            "order_limit_1m_exchange": self._exchange_order_limit_1m,
+            "order_cap_10s_normal": self._effective_order_cap(10.0, "ORDER_MANAGEMENT"),
+            "order_cap_10s_protection": self._effective_order_cap(10.0, "PROTECTION"),
+            "order_cap_1m_normal": self._effective_order_cap(60.0, "ORDER_MANAGEMENT"),
+            "order_cap_1m_protection": self._effective_order_cap(60.0, "PROTECTION"),
+            "order_header_10s_age": now - self._latest_order_count_10s_at if self._latest_order_count_10s_at is not None else None,
+            "order_header_1m_age": now - self._latest_order_count_1m_at if self._latest_order_count_1m_at is not None else None,
+            "order_limits_source": self._order_limits_source,
+            "last_limit_status": self._last_server_status,
+            "last_limit_code": self._last_server_code,
+            "last_limit_message": self._last_server_message,
+            "last_order_limit_message": self._last_order_limit_message,
+        }
+
+
+BINANCE_REQUEST_GOVERNOR = BinanceRequestGovernor()
 
 
 class LeverageNotSupportedError(RuntimeError):
@@ -2056,6 +2941,7 @@ class BinanceRealClient:
         signed: bool = True,
         retry_timestamp_error: bool = True,
     ) -> Any:
+        method = method.upper()
         if signed and not self.configured:
             raise BinanceAPIError(
                 "BINANCE_API_KEY / BINANCE_API_SECRET belum tersedia di environment.",
@@ -2076,9 +2962,16 @@ class BinanceRealClient:
                 retry_after_known=False,
             )
             blocked.internal = True
+            blocked.limit_class = "INTERNAL_CLIENT_COOLDOWN"
             raise blocked
 
         base_params = dict(params or {})
+        category = classify_binance_request_category(method, path, base_params)
+        request_weight, weight_known = await BINANCE_REQUEST_GOVERNOR.acquire(
+            path, base_params, category, method=method,
+        )
+        # Sign only after admission control has released any wait, keeping the
+        # signed timestamp fresh when local budget throttling delays the request.
         payload = self._signed_query(base_params) if signed else base_params
         headers = {"Accept": "application/json"}
         if signed:
@@ -2089,7 +2982,7 @@ class BinanceRealClient:
                 "headers": headers,
                 "timeout": HTTP_REQUEST_SECONDS,
             }
-            if method.upper() in {"GET", "DELETE"}:
+            if method in {"GET", "DELETE"}:
                 kwargs["params"] = payload
             else:
                 kwargs["data"] = payload
@@ -2097,38 +2990,57 @@ class BinanceRealClient:
                     **headers,
                     "Content-Type": "application/x-www-form-urlencoded",
                 }
-            return requests.request(
-                method.upper(),
-                f"{self.base_url}{path}",
-                **kwargs,
-            )
+            return requests.request(method, f"{self.base_url}{path}", **kwargs)
 
+        started = time.monotonic()
         async with self._request_lock:
             try:
                 response = await asyncio.to_thread(request_once)
             except requests.RequestException as exc:
+                API_STATS.record(
+                    path, None, method=method, category=category,
+                    latency_ms=(time.monotonic() - started) * 1000.0,
+                    message=f"{type(exc).__name__}: transport request failed",
+                    request_weight=request_weight, weight_known=weight_known,
+                    request_params=base_params,
+                )
                 raise BinanceAPIError(
-                    f"Transport error Binance: {exc}",
-                    endpoint=path,
+                    f"Transport error Binance: {type(exc).__name__}", endpoint=path,
                 ) from exc
             except (OSError, TimeoutError) as exc:
+                API_STATS.record(
+                    path, None, method=method, category=category,
+                    latency_ms=(time.monotonic() - started) * 1000.0,
+                    message=f"{type(exc).__name__}: transport request failed",
+                    request_weight=request_weight, weight_known=weight_known,
+                    request_params=base_params,
+                )
                 raise BinanceAPIError(
-                    f"Transport error Binance: {exc}",
-                    endpoint=path,
+                    f"Transport error Binance: {type(exc).__name__}", endpoint=path,
                 ) from exc
 
+        latency_ms = (time.monotonic() - started) * 1000.0
+        if response.status_code >= 400:
+            code, msg = self._extract_binance_error(response)
+        else:
+            code, msg = None, ""
+        retry_after = self._parse_retry_after(response)
         API_STATS.record(
-            path,
-            response.status_code,
-            response.headers.get("X-MBX-USED-WEIGHT-1M"),
+            path, response.status_code, response.headers.get("X-MBX-USED-WEIGHT-1M"),
+            method=method, category=category, latency_ms=latency_ms,
+            code=code, message=msg, retry_after=retry_after,
+            request_weight=request_weight, weight_known=weight_known, headers=response.headers,
+            request_params=base_params,
         )
         if response.status_code in {418, 429}:
-            retry_after = self._parse_retry_after(response)
             server_seconds = retry_after if retry_after is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
             bot_seconds = server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS
-            self.apply_cooldown(server_seconds, bot_seconds)
-            code, msg = self._extract_binance_error(response)
-            raise BinanceRateLimitError(
+            limit_class = classify_binance_limit(response.status_code, code, msg)
+            if limit_class != "ORDER_LIMIT":
+                self.apply_cooldown(server_seconds, bot_seconds)
+            # ORDER_LIMIT is handled by the account order-rate gate; do not freeze
+            # read-only market data or scanner REST unless Binance also reports an IP limit.
+            exc = BinanceRateLimitError(
                 msg,
                 status_code=response.status_code,
                 code=code,
@@ -2137,23 +3049,20 @@ class BinanceRealClient:
                 bot_cooldown_seconds=bot_seconds,
                 retry_after_known=(retry_after is not None),
             )
+            exc.limit_class = limit_class
+            raise exc
 
         if response.status_code >= 400:
-            code, msg = self._extract_binance_error(response)
             if code == -1021 and retry_timestamp_error:
                 try:
                     server = await self._public_server_time()
                     self._time_offset_ms = int(server) - int(time.time() * 1000)
                     return await self._request(
-                        method,
-                        path,
-                        base_params,
-                        signed=signed,
+                        method, path, base_params, signed=signed,
                         retry_timestamp_error=False,
                     )
                 except Exception:
                     pass
-
             raise BinanceAPIError(
                 msg,
                 status_code=response.status_code,
@@ -2171,21 +3080,52 @@ class BinanceRealClient:
             ) from exc
 
     async def _public_server_time(self) -> int:
-        def request() -> int:
-            response = requests.get(
-                f"{self.base_url}/fapi/v1/time",
-                timeout=HTTP_REQUEST_SECONDS,
-            )
-            API_STATS.record(
-                "/fapi/v1/time",
-                response.status_code,
-                response.headers.get("X-MBX-USED-WEIGHT-1M"),
-            )
-            response.raise_for_status()
-            body = response.json()
-            return int(body["serverTime"])
+        path = "/fapi/v1/time"
+        request_weight, weight_known = await BINANCE_REQUEST_GOVERNOR.acquire(
+            path, {}, "ORDER_MANAGEMENT", method="GET",
+        )
+        started = time.monotonic()
 
-        return await asyncio.to_thread(request)
+        def request() -> requests.Response:
+            return requests.get(f"{self.base_url}{path}", timeout=HTTP_REQUEST_SECONDS)
+
+        try:
+            response = await asyncio.to_thread(request)
+        except requests.RequestException as exc:
+            API_STATS.record(
+                path, None, method="GET", category="ORDER_MANAGEMENT",
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                message=f"{type(exc).__name__}: {exc}", request_weight=request_weight,
+                weight_known=weight_known,
+            )
+            raise
+        latency_ms = (time.monotonic() - started) * 1000.0
+        if response.status_code >= 400:
+            code, msg = self._extract_binance_error(response)
+        else:
+            code, msg = None, ""
+        retry_after = self._parse_retry_after(response)
+        API_STATS.record(
+            path, response.status_code, response.headers.get("X-MBX-USED-WEIGHT-1M"),
+            method="GET", category="ORDER_MANAGEMENT", latency_ms=latency_ms,
+            code=code, message=msg, retry_after=retry_after,
+            request_weight=request_weight, weight_known=weight_known, headers=response.headers,
+        )
+        if response.status_code >= 400:
+            if response.status_code in {418, 429}:
+                server = retry_after if retry_after is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
+                self.apply_cooldown(server, server + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+                error = BinanceRateLimitError(
+                    msg, status_code=response.status_code, code=code, endpoint=path,
+                    server_cooldown_seconds=server,
+                    bot_cooldown_seconds=server + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                    retry_after_known=retry_after is not None,
+                )
+                error.limit_class = classify_binance_limit(response.status_code, code, msg)
+                raise error
+            raise BinanceAPIError(msg, status_code=response.status_code, code=code, endpoint=path)
+        body = response.json()
+        return int(body["serverTime"])
 
     async def get_futures_balance(self) -> list[dict[str, Any]]:
         """Read USD-M Futures balance and refresh the local USDT cache."""
@@ -3406,6 +4346,7 @@ class TradingEngine:
         # Rate limit Binance: satu notifikasi per jeda + watcher yang melanjutkan.
         self._rl_task: asyncio.Task[Any] | None = None
         self._rl_notified_until = 0.0
+        self._order_rl_notified_until = 0.0
         self._rl_started_at: float | None = None
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         # Antrian saat API dibatasi (bisa menumpuk): konfirmasi fill & TP/SL tertunda.
@@ -3430,6 +4371,7 @@ class TradingEngine:
         # durable snapshots and replay results live in SQLite under BOT_DATA_DIR.
         self.research_store = ResearchStore(RESEARCH_DB_PATH)
         self._research_store_available = False
+        self._research_store_health: dict[str, Any] = {}
         self._research_enabled_config = RESEARCH_ENABLED_AT_START
         self._research_running = False
         self._research_task: asyncio.Task[Any] | None = None
@@ -3550,6 +4492,15 @@ class TradingEngine:
             str(caption or ""),
         )
 
+    def _research_ledger_mode(self) -> str:
+        if not self._research_store_available:
+            return "LEDGER_UNAVAILABLE"
+        if not BOT_DATA_DIR_CONFIGURED:
+            return "LEDGER_READY_LOCAL_ONLY"
+        if not BOT_DATA_PERSISTENCE_CONFIRMED:
+            return "LEDGER_READY_PERSISTENCE_UNCONFIRMED"
+        return "LEDGER_READY_PERSISTENCE_ACKNOWLEDGED"
+
     # --------------------------------------------------------
     # Lifecycle
     # --------------------------------------------------------
@@ -3572,11 +4523,23 @@ class TradingEngine:
 
         try:
             await asyncio.to_thread(self.research_store.initialize)
+            self._research_store_health = await asyncio.to_thread(self.research_store.health_check)
             self._research_store_available = True
-            if os.getenv("BOT_DATA_DIR"):
-                log.info("[RESEARCH] SQLite initialized at %s", RESEARCH_DB_PATH)
+            if not BOT_DATA_DIR_CONFIGURED:
+                log.warning(
+                    "[RESEARCH] BOT_DATA_DIR tidak ditetapkan; path local %s bukan bukti penyimpanan persisten. Research tetap dikunci.",
+                    RESEARCH_DB_PATH,
+                )
+            elif not BOT_DATA_PERSISTENCE_CONFIRMED:
+                log.warning(
+                    "[RESEARCH] BOT_DATA_DIR=%s dapat dibaca/ditulis, namun persistence belum dikonfirmasi. Pastikan path berada dalam mount persistent dan set BOT_DATA_PERSISTENCE_CONFIRMED=1; worker tetap dikunci.",
+                    BOT_DATA_DIR,
+                )
             else:
-                log.warning("[RESEARCH] BOT_DATA_DIR tidak ditetapkan; path default %s mungkin tidak persisten setelah host restart.", RESEARCH_DB_PATH)
+                log.info(
+                    "[RESEARCH] SQLite health check OK at %s; persistent storage is operator-confirmed (restart test still required).",
+                    RESEARCH_DB_PATH,
+                )
         except Exception as exc:
             self._research_store_available = False
             self._research_last_error = str(exc)[:300]
@@ -3603,7 +4566,7 @@ class TradingEngine:
             "🟢 MAIN.PY ONLINE\n\n"
             f"Mode: {'REAL' if self.real_mode else 'SIMULATION'}\n"
             "Market: Binance USDⓈ-M Futures\n"
-            f"Candidate Ledger: {'READY' if self._research_store_available else 'UNAVAILABLE'} | Research: OFF\n"
+            f"Candidate Ledger: {self._research_ledger_mode()} | Research: OFF\n"
             "WebSocket: CONNECTING\n"
             f"Session: {self.session_id}\n\n"
             "Active Trade: 0\n\n"
@@ -4008,70 +4971,112 @@ class TradingEngine:
 
     @staticmethod
     def _api_weight_line() -> str:
-        used = API_STATS.used_weight
-        bot = API_STATS.weight_of(API_STATS.window(60, API_STATS.used_weight_at))
-        ip_text = f"{used}/{BINANCE_IP_WEIGHT_LIMIT}" if used is not None else "-"
-        return f"📊 Bobot IP  {ip_text}  (bot ≈{bot}/menit)"
+        snap = BINANCE_REQUEST_GOVERNOR.snapshot()
+        used = snap.get("latest_header_weight")
+        age = snap.get("header_age_seconds")
+        header_text = f"{used}/{BINANCE_IP_WEIGHT_LIMIT}" if used is not None else "-"
+        if age is not None:
+            header_text += f" ({age:.0f}s lalu)"
+        return f"IP header {header_text} | bot≈{API_STATS.weight_window(60)}/menit | governor≈{snap.get('estimated_ip_weight')}/menit"
 
     def _api_report(self) -> str:
         m1 = API_STATS.window(60)
         m5 = API_STATS.window(300)
-        w1 = API_STATS.weight_of(m1)
-        w5 = API_STATS.weight_of(m5)
-        used = API_STATS.used_weight
-        at = API_STATS.used_weight_at
-        age = time.monotonic() - at if at is not None else None
+        w1 = API_STATS.weight_window(60)
+        w5 = API_STATS.weight_window(300)
+        unknown_1m = API_STATS.unknown_weight_window(60)
+        snapshot = BINANCE_REQUEST_GOVERNOR.snapshot()
+        used = snapshot.get("latest_header_weight")
+        age = snapshot.get("header_age_seconds")
+        local_weight = snapshot.get("local_weight_1m", w1)
+        estimated_ip = snapshot.get("estimated_ip_weight", w1)
+        limit_counts = API_STATS.recent_limit_counts(3600)
 
-        ip_text = "-"
-        verdict = "Belum ada header bobot dari Binance; tunggu beberapa request."
-        if used is not None and age is not None:
-            ip_text = f"{used}/{BINANCE_IP_WEIGHT_LIMIT} ({age:.0f}s lalu) • puncak {API_STATS.max_used_weight}"
-            bot_then = API_STATS.weight_of(API_STATS.window(60, at))
-            if age > 180:
-                verdict = "Header terakhir sudah lama; belum bisa disimpulkan."
-            elif used > bot_then * 2 + 100:
-                verdict = (
-                    f"Bobot IP ({used}) jauh di atas bobot bot (≈{bot_then}): "
-                    "kuota IP dipakai pihak lain."
-                )
-            else:
-                verdict = (
-                    f"Bobot IP ({used}) sejalan dengan bobot bot (≈{bot_then}): "
-                    "pemakaian terutama dari bot."
-                )
+        if used is None or age is None or age > BINANCE_GOVERNOR_HEADER_STALE_SECONDS or unknown_1m:
+            verdict = "INSUFFICIENT_DATA: header stale/hilang atau bobot endpoint belum sepenuhnya terkonfirmasi."
+        elif used > local_weight * 1.8 + 100 and (used - local_weight) > 100:
+            verdict = "SHARED_IP_CONTRIBUTION_POSSIBLE: header IP jauh di atas estimasi lokal; indikasi, bukan bukti final."
+        elif local_weight >= BINANCE_GOVERNOR_MAX_WEIGHT_PER_MIN * 0.65:
+            verdict = "BOT_USAGE_LIKELY: request bot memakai bagian besar dari budget lokal; cek top endpoint."
+        elif used <= local_weight + 150:
+            verdict = "BOT_USAGE_LIKELY: header cukup dekat dengan estimasi lokal, dengan toleransi pengukuran."
+        else:
+            verdict = "INSUFFICIENT_DATA: ada selisih header dan penggunaan bot, belum cukup untuk menyimpulkan penyebab."
 
-        cooldown = self.real.cooldown_remaining
+        cooldown = max(self.real.cooldown_remaining, BINANCE_REQUEST_GOVERNOR.cooldown_remaining)
         last_limit = format_wib(API_STATS.last_limit_at) if API_STATS.last_limit_at else "-"
+        header_text = f"{used}/{BINANCE_IP_WEIGHT_LIMIT}" if used is not None else "-"
+        if age is not None:
+            header_text += f" ({age:.0f}s lalu)"
+        categories = API_STATS.category_weight_window(60)
+        category_text = ", ".join(f"{name}:{weight}" for name, weight in sorted(categories.items(), key=lambda item: item[1], reverse=True)[:5]) or "-"
+        limit_text = ", ".join(f"{name}:{count}" for name, count in sorted(limit_counts.items(), key=lambda item: item[1], reverse=True)) or "tidak ada terklasifikasi"
+        binance_cache = self.rest.cache_status()
+        bybit_cache = self.bybit.cache_status()
+
+        def cache_label(cache: dict[str, Any], key: str) -> str:
+            data = cache.get(key) or {}
+            age = data.get("age_seconds")
+            age_text = f"{age:.0f}s" if isinstance(age, (int, float)) else "-"
+            return f"{data.get('state', 'UNKNOWN')} {age_text}"
+
+        cache_text = (
+            f"Binance exchangeInfo={cache_label(binance_cache, 'exchange_info')}, "
+            f"ticker24h={cache_label(binance_cache, 'ticker_24h')} | "
+            f"Bybit instruments={cache_label(bybit_cache, 'instruments')}, "
+            f"tickers={cache_label(bybit_cache, 'tickers')}"
+        )
         head = card(
             "📡 BINANCE API",
             [
-                f"⏱ 1 menit   {sum(m1.values())} req  ≈{w1} bobot",
-                f"⏱ 5 menit   {sum(m5.values())} req  ≈{w5} bobot (≈{w5 / 5:.0f}/menit)",
-                f"📊 Bobot IP  {ip_text}",
-                f"🚦 Limit     {API_STATS.limit_hits}x 429/418 • terakhir {last_limit}",
-                f"⏸ Cooldown   {f'{cooldown:.0f}s tersisa' if cooldown > 0 else 'tidak aktif'}",
-                f"🧮 Total     {API_STATS.total} request sejak bot start",
+                f"⏱ 1 menit   {sum(m1.values())} req | estimasi bobot {w1}",
+                f"⏱ 5 menit   {sum(m5.values())} req | bobot {w5} (≈{w5 / 5:.0f}/menit)",
+                f"📊 Header IP {header_text} | estimasi penggunaan IP {estimated_ip}/{BINANCE_IP_WEIGHT_LIMIT}",
+                f"📌 Bobot belum terkonfirmasi (1m): {unknown_1m}",
+                f"🧾 Header order-count: 10s={API_STATS.latest_order_count_10s if API_STATS.latest_order_count_10s is not None else '-'}{f' ({time.monotonic() - API_STATS.latest_order_count_10s_at:.0f}s lalu)' if API_STATS.latest_order_count_10s_at is not None else ''} | 1m={API_STATS.latest_order_count_1m if API_STATS.latest_order_count_1m is not None else '-'}{f' ({time.monotonic() - API_STATS.latest_order_count_1m_at:.0f}s lalu)' if API_STATS.latest_order_count_1m_at is not None else ''}",
+                f"🛡️ Order governor: 10s≈{snapshot.get('order_count_10s_estimated')}/{snapshot.get('order_cap_10s_normal')} (proteksi {snapshot.get('order_cap_10s_protection')}) | 1m≈{snapshot.get('order_count_1m_estimated')}/{snapshot.get('order_cap_1m_normal')} (proteksi {snapshot.get('order_cap_1m_protection')}) | sumber {snapshot.get('order_limits_source')}",
+                f"⏸ Cooldown order-account: {snapshot.get('order_cooldown_seconds', 0):.0f}s tersisa" if snapshot.get('order_cooldown_seconds', 0) > 0 else "⏸ Cooldown order-account: tidak aktif",
+                f"🚦 429/418: {API_STATS.limit_hits}x | terakhir {last_limit}",
+                f"🧭 Limit terklasifikasi (1j): {limit_text}",
+                f"⏸ Cooldown {cooldown:.0f}s tersisa" if cooldown > 0 else "⏸ Cooldown tidak aktif",
+                f"🧮 Total {API_STATS.total} request sejak bot start",
+                f"🗃 Cache: {cache_text}",
             ],
         )
-        ranked = sorted(
-            m5.items(),
-            key=lambda item: ENDPOINT_WEIGHTS.get(item[0], 1) * item[1],
-            reverse=True,
-        )[:6]
-        lines = [head, "", "Endpoint teratas (5 menit):"]
+        ranked = sorted(API_STATS.weighted_breakdown(300).items(), key=lambda item: item[1], reverse=True)[:6]
+        endpoint_health = API_STATS.endpoint_health_window(300)
+        lines = [head, "", "Endpoint teratas (5 menit; weight perkiraan):"]
         if ranked:
-            for path, count in ranked:
-                lines.append(f"• {path.replace('/fapi/', '')}  {count}x  ≈{ENDPOINT_WEIGHTS.get(path, 1) * count}")
+            for path, weight in ranked:
+                health = endpoint_health.get(path, {})
+                status = health.get("last_status")
+                latency = health.get("last_latency_ms")
+                latency_text = f"{latency:.0f}ms" if isinstance(latency, (int, float)) else "-"
+                lines.append(
+                    f"• {path.replace('/fapi/', '')}: ≈{weight}w | "
+                    f"calls={health.get('calls', 0)} last={status if status is not None else '-'} "
+                    f"{latency_text} | err={health.get('errors', 0)} | 429/418={health.get('429_418', 0)}"
+                )
         else:
             lines.append("• belum ada request")
-        research_safe, research_reason = self._research_safe_to_run() if self._research_running else (False, "worker OFF")
+        recent_errors = [x for x in reversed(API_STATS.telemetry) if (x.get("status") is None or (isinstance(x.get("status"), int) and x.get("status") >= 400)) and float(x.get("monotonic") or 0) >= time.monotonic() - 300][:3]
+        if recent_errors:
+            lines += ["", "Error terbaru (maks. 3):"]
+            for item in recent_errors:
+                symbol = f" {item.get('symbol')}" if item.get('symbol') else ""
+                lines.append(
+                    f"• {item.get('endpoint')} {symbol} HTTP={item.get('status') or '-'} "
+                    f"code={item.get('code') if item.get('code') is not None else '-'} "
+                    f"class={item.get('limit_class') or '-'}"
+                )
         lines += [
             "",
-            f"🔎 {verdict}",
-            f"🧪 Research: {'RUN' if research_safe else 'PAUSED/OFF'} | {research_reason[:160]}",
-            "Bobot bot = estimasi dari tabel bobot; bobot IP = header Binance (semua pengguna IP yang sama).",
+            f"Klasifikasi: {verdict}",
+            f"Kategori request (1m): {category_text}",
+            f"Research: {'RUN' if self._research_running else 'OFF'} | {self._research_safe_to_run()[1][:140] if self._research_running else 'worker OFF'}",
+            "Header IP dapat mencakup layanan lain pada outbound IP bersama; estimasi bobot bot bukan angka authoritative Binance.",
         ]
-        return "\n".join(lines)
+        return "\n".join(lines)[:3900]
 
     def _fire(self, coro: Any) -> None:
         try:
@@ -4083,19 +5088,43 @@ class TradingEngine:
         task.add_done_callback(self._bg_tasks.discard)
 
     def _notify_rate_limit(self, exc: BinanceRateLimitError, action: str) -> None:
-        """Satu pesan per jeda limit; penolakan cooldown internal tidak dikirim."""
-        self._start_rate_limit_watcher()
+        limit_class = getattr(exc, "limit_class", classify_binance_limit(exc.status_code, exc.code, str(exc)))
         if getattr(exc, "internal", False):
             return
-        bot = max(0.0, exc.bot_cooldown_seconds)
         now = time.monotonic()
-        if now + bot <= self._rl_notified_until + 5.0:
+        bot = max(0.0, exc.bot_cooldown_seconds)
+        if limit_class == "ORDER_LIMIT":
+            # Account order-rate rejection is not proof of an IP request-weight limit.
+            # The order governor pauses only new order-count-consuming requests.
+            if now + bot <= self._order_rl_notified_until + 5.0:
+                return
+            self._order_rl_notified_until = now + bot
+            log.warning("Binance ACCOUNT ORDER LIMIT | action=%s | endpoint=%s | HTTP=%s | code=%s | %s",
+                        action, exc.endpoint, exc.status_code, exc.code, str(exc)[:300])
+            self._fire(
+                self.reply(
+                    card(
+                        "⏸ BINANCE ACCOUNT ORDER LIMIT",
+                        [
+                            f"🔧 Aksi      {action}",
+                            f"🌐 Endpoint  {exc.endpoint}",
+                            f"⚠️ HTTP/code {exc.status_code or '-'} / {exc.code if exc.code is not None else '-'}",
+                            f"⏱ Retry-After {f'{exc.server_cooldown_seconds:.0f}s (header)' if exc.retry_after_known else 'tidak tersedia; fallback aktif'}",
+                            "🧾 Yang ditunda: pengiriman order baru yang memakai kuota akun. Market-data GET tidak dihentikan hanya karena limit order.",
+                            "🛡️ Governor menjaga reserve untuk order proteksi; server cooldown/IP ban tetap tidak dapat dilewati.",
+                            self._api_weight_line(),
+                        ],
+                    )
+                )
+            )
             return
+
+        self._start_rate_limit_watcher()
         self._rl_notified_until = now + bot
         if self._rl_started_at is None:
             self._rl_started_at = now
-        log.info("Binance API LIMIT | action=%s | endpoint=%s | HTTP=%s | code=%s | %s",
-                 action, exc.endpoint, exc.status_code, exc.code, str(exc)[:300])
+        log.warning("Binance API LIMIT | action=%s | endpoint=%s | HTTP=%s | code=%s | class=%s | %s",
+                    action, exc.endpoint, exc.status_code, exc.code, limit_class, str(exc)[:300])
         self._fire(
             self.reply(
                 card(
@@ -4103,7 +5132,10 @@ class TradingEngine:
                     [
                         f"🔧 Aksi      {action}",
                         f"🌐 Endpoint  {exc.endpoint}",
-                        f"⏱ Jeda      {duration_text(bot)}",
+                        f"🧭 Kategori  {getattr(exc, 'limit_class', classify_binance_limit(exc.status_code, exc.code, str(exc)))}",
+                        f"⚠️ HTTP/code {exc.status_code or '-'} / {exc.code if exc.code is not None else '-'}",
+                        f"⏱ Retry-After {f'{exc.server_cooldown_seconds:.0f}s (header)' if exc.retry_after_known else 'tidak tersedia; fallback aktif'}",
+                        f"⏱ Jeda bot  {duration_text(bot)}",
                         self._api_weight_line(),
                         f"▶️ Lanjut    {format_wib(now_utc() + timedelta(seconds=bot))}",
                         "📌 Ditunda: scan & operasi REAL yang membutuhkan REST. Autostop tetap dihitung dari snapshot lokal.",
@@ -4141,8 +5173,8 @@ class TradingEngine:
         """Tunggu jeda selesai, tes koneksi, lalu kerjakan yang tertunda."""
         failures = 0
         while self._running:
-            bot_rem = self.real.cooldown_remaining
-            srv_rem = self.real.server_cooldown_remaining
+            bot_rem = max(self.real.cooldown_remaining, BINANCE_REQUEST_GOVERNOR.bot_cooldown_remaining)
+            srv_rem = max(self.real.server_cooldown_remaining, BINANCE_REQUEST_GOVERNOR.server_cooldown_remaining)
             if bot_rem > 0:
                 if self._deferred_any() and srv_rem <= 0:
                     await self._flush_deferred()
@@ -4409,12 +5441,9 @@ class TradingEngine:
             raise RealPositionConflictError(trade.real_error)
 
         async def prepare_and_place(force_refresh: bool = False) -> dict[str, Any]:
-            if force_refresh:
-                self.symbols = await self.rest.get_exchange_info(force=True)
-            else:
-                # REAL entry must use a fresh symbol-filter snapshot; stale
-                # exchangeInfo is a known source of quantity/filter rejects.
-                self.symbols = await self.rest.get_exchange_info(force=True)
+            # Use TTL-cached symbol rules on the normal path. If Binance rejects
+            # a filter/precision value, the one permitted retry forces a refresh.
+            self.symbols = await self.rest.get_exchange_info(force=force_refresh)
             meta = self._get_symbol(trade.pair)
 
             await self.real.ensure_position_mode()
@@ -7619,7 +8648,10 @@ class TradingEngine:
 
     def _scan_resource_guard(self) -> tuple[bool, str]:
         """Pause optional scan/validation work before resource pressure threatens execution."""
-        cooldown = float(getattr(self.real, "cooldown_remaining", 0.0) or 0.0)
+        cooldown = max(
+            float(getattr(self.real, "cooldown_remaining", 0.0) or 0.0),
+            float(BINANCE_REQUEST_GOVERNOR.cooldown_remaining or 0.0),
+        )
         if cooldown > 0:
             return False, f"Binance cooldown aktif {cooldown:.0f}s."
 
@@ -7635,13 +8667,15 @@ class TradingEngine:
             if usage_after > 0 and usage_after >= threshold_mb:
                 return False, f"RAM {usage_after:.0f} MB mendekati budget scan {threshold_mb:.0f} MB setelah memory shedding."
 
-        bot_weight = API_STATS.weight_of(API_STATS.window(60))
+        bot_weight = API_STATS.weight_window(60)
         if bot_weight >= SCAN_API_SOFT_PAUSE_WEIGHT:
-            return False, f"Bobot request bot {bot_weight}/menit mencapai batas pause scan {SCAN_API_SOFT_PAUSE_WEIGHT}."
-        if API_STATS.used_weight is not None and API_STATS.used_weight_at is not None:
-            age = time.monotonic() - API_STATS.used_weight_at
-            if age <= 180 and API_STATS.used_weight >= SCAN_API_SOFT_PAUSE_WEIGHT:
-                return False, f"Header Binance weight IP {API_STATS.used_weight} masih baru ({age:.0f}s); scan ditunda."
+            return False, f"Estimasi bobot request bot {bot_weight}/menit mencapai batas pause scan {SCAN_API_SOFT_PAUSE_WEIGHT}."
+        estimated_ip = BINANCE_REQUEST_GOVERNOR.estimated_used_weight()
+        if estimated_ip >= SCAN_API_SOFT_PAUSE_WEIGHT:
+            snapshot = BINANCE_REQUEST_GOVERNOR.snapshot()
+            age = snapshot.get("header_age_seconds")
+            age_text = f"; header berumur {age:.0f}s" if age is not None else ""
+            return False, f"Estimasi bobot IP Binance {estimated_ip}{age_text}; scan ditunda."
 
         if self._h4_enabled and self._h4_window_active:
             remaining = self._h4_window_remaining_seconds()
@@ -7845,7 +8879,8 @@ class TradingEngine:
 
     async def _build_scan_universe(self) -> dict[str, Any]:
         await self._purge_expired_bans()
-        # Symbol rules can change while the process is alive; refresh once per cycle.
+        # Exchange filters are TTL-cached; market-wide ticker snapshots are refreshed
+        # only when their bounded TTL expires, not on every scan cycle.
         self.symbols = await self.rest.get_exchange_info()
         binance_tickers = await self.rest.get_24h_tickers()
         bybit_symbols = await self.bybit.get_linear_perpetual_symbols()
@@ -8005,22 +9040,28 @@ class TradingEngine:
         if not self._research_enabled_config:
             return False, "RESEARCH_ENABLED=0; worker tidak diizinkan."
         if not BOT_DATA_DIR_CONFIGURED:
-            return False, "BOT_DATA_DIR belum eksplisit; worker mensyaratkan volume persisten yang dikonfigurasi."
+            return False, "BOT_DATA_DIR belum ditetapkan ke mount persisten; ledger hanya local-only."
+        if not BOT_DATA_PERSISTENCE_CONFIRMED:
+            return False, "PERSISTENCE belum dikonfirmasi; pasang persistent disk, set BOT_DATA_DIR dan BOT_DATA_PERSISTENCE_CONFIRMED=1, lalu uji restart."
         if not self._research_store_available:
             return False, "SQLite research store tidak tersedia."
+        if not (self._research_store_health.get("readable") and self._research_store_health.get("writable") and self._research_store_health.get("integrity") == "ok"):
+            return False, "SQLite health check belum lulus."
         usage = rss_mb()
         effective_limit = effective_memory_limit_mb()
         memory_cap = min(RESEARCH_MEMORY_BUDGET_MB, effective_limit * 0.70) if effective_limit else RESEARCH_MEMORY_BUDGET_MB
         if usage > 0 and usage >= memory_cap:
             return False, f"RAM {usage:.0f} MB mencapai budget riset {memory_cap:.0f} MB."
-        weight = API_STATS.weight_of(API_STATS.window(60))
+        weight = API_STATS.weight_window(60)
         reserve_floor = BINANCE_IP_WEIGHT_LIMIT * (1.0 - RESEARCH_MIN_API_HEADROOM_PCT / 100.0)
         if weight >= reserve_floor:
-            return False, f"Bobot REST bot {weight}/menit; headroom riset mensyaratkan <{reserve_floor:.0f}."
-        if API_STATS.used_weight is not None:
-            ip_floor = BINANCE_IP_WEIGHT_LIMIT * (1.0 - RESEARCH_MIN_API_HEADROOM_PCT / 100.0)
-            if API_STATS.used_weight >= ip_floor:
-                return False, f"Header bobot IP Binance {API_STATS.used_weight}; headroom riset tidak cukup."
+            return False, f"Estimasi bobot REST bot {weight}/menit; headroom riset mensyaratkan <{reserve_floor:.0f}."
+        estimated_ip = BINANCE_REQUEST_GOVERNOR.estimated_used_weight()
+        if estimated_ip >= reserve_floor:
+            snap = BINANCE_REQUEST_GOVERNOR.snapshot()
+            age = snap.get("header_age_seconds")
+            source = f"estimasi IP {estimated_ip}; header berumur {age:.0f}s" if age is not None else f"estimasi IP {estimated_ip}"
+            return False, f"Headroom riset tidak cukup ({source}; batas <{reserve_floor:.0f})."
         if self.real_mode:
             unsafe = []
             for trade in self.active_trades.values():
@@ -8114,7 +9155,9 @@ class TradingEngine:
                         self._research_last_error = str(exc)[:300]
                         await asyncio.to_thread(self.research_store.mark_replay_retry, item["candidate_id"], str(exc))
                         if isinstance(exc, BinanceRateLimitError):
-                            log.warning("[RESEARCH] Binance rate limit; job ditunda: %s", exc)
+                            log.warning("[RESEARCH] Binance rate limit (%s); job ditunda: %s", getattr(exc, "limit_class", "RATE_LIMIT"), exc)
+                            self.real.apply_cooldown(exc.server_cooldown_seconds, exc.bot_cooldown_seconds)
+                            self._notify_rate_limit(exc, "RESEARCH M1")
                             await asyncio.sleep(max(30, exc.bot_cooldown_seconds))
                         else:
                             log.warning("[RESEARCH] replay gagal %s: %s", item.get("pair"), exc)
@@ -8133,14 +9176,17 @@ class TradingEngine:
         arg = parts[1].strip().lower() if len(parts) > 1 else "status"
         if arg in {"status", ""}:
             counts = await asyncio.to_thread(self.research_store.research_counts) if self._research_store_available else {}
-            safe, reason = self._research_safe_to_run() if self._research_running else (False, "Worker OFF.")
+            safe, reason = self._research_safe_to_run()
             await self.reply(
                 "🧪 RESEARCH STATUS\n\n"
                 f"Worker: {'RUNNING' if self._research_running and self._research_task and not self._research_task.done() else 'OFF'}\n"
                 f"Env allow: {'ON' if self._research_enabled_config else 'OFF'}\n"
                 f"Store: {'READY' if self._research_store_available else 'UNAVAILABLE'}\n"
+                f"Ledger mode: {self._research_ledger_mode()}\n"
                 f"Database: {RESEARCH_DB_PATH}\n"
-                f"Persistent dir configured: {'YES' if BOT_DATA_DIR_CONFIGURED else 'NO (local default may be ephemeral)'}\n"
+                f"BOT_DATA_DIR explicit: {'YES' if BOT_DATA_DIR_CONFIGURED else 'NO'}\n"
+                f"Persistence acknowledged: {'YES' if BOT_DATA_PERSISTENCE_CONFIRMED else 'NO'} (operator must verify Render mount)\n"
+                f"SQLite health: {self._research_store_health.get('integrity', 'UNKNOWN')} | read={self._research_store_health.get('readable', False)} write={self._research_store_health.get('writable', False)}\n"
                 f"M1 cache rows: {await asyncio.to_thread(self.research_store.m1_cache_count) if self._research_store_available else 0}\n"
                 f"M1 rows downloaded this session: {self._research_candles_cached}\n"
                 f"Jobs complete: {self._research_jobs_completed}\n"
@@ -8148,7 +9194,8 @@ class TradingEngine:
                 f"Queue status: {counts}\n"
                 f"Last success: {format_wib(self._research_last_success_at) if self._research_last_success_at else '-'}\n"
                 f"Last issue: {self._research_last_error or '-'}\n"
-                f"Budget: {reason if self._research_running else 'aktifkan dengan /research on setelah RESEARCH_ENABLED=1'}"
+                f"Eligibility: {reason}"
+                + ("\nWorker belum aktif; gunakan /research on setelah seluruh pemeriksaan lulus." if not self._research_running and safe else "")
             )
             return
         if arg == "off":
@@ -8168,7 +9215,10 @@ class TradingEngine:
                 await self.reply("❌ Research tidak diizinkan. Set RESEARCH_ENABLED=1, redeploy/restart, lalu gunakan /research on. Worker default OFF demi keamanan resource/API.")
                 return
             if not BOT_DATA_DIR_CONFIGURED:
-                await self.reply("❌ Research membutuhkan BOT_DATA_DIR yang menunjuk ke persistent disk/volume. Set variabel itu, restart, lalu gunakan /research on.")
+                await self.reply("❌ Research membutuhkan BOT_DATA_DIR yang menunjuk ke path persistent disk yang benar-benar sudah dipasang. Mengatur environment variable saja tidak membuat filesystem persisten.")
+                return
+            if not BOT_DATA_PERSISTENCE_CONFIRMED:
+                await self.reply("❌ Persistence belum dikonfirmasi. Setelah persistent disk benar-benar dipasang, set BOT_DATA_DIR=/var/data/bot_data (sesuaikan mount path), BOT_DATA_PERSISTENCE_CONFIRMED=1, restart, uji /research status lalu controlled restart sebelum /research on.")
                 return
             if not self._research_store_available:
                 await self.reply("❌ Research tidak dapat berjalan karena SQLite store belum siap. Periksa BOT_DATA_DIR dan log startup.")
@@ -8406,7 +9456,7 @@ class TradingEngine:
                 "duration_seconds": duration, "candidate_queue_size": len(self._candidate_queue),
                 "research_running": self._research_running,
             }
-            api_weight_1m = API_STATS.weight_of(API_STATS.window(60))
+            api_weight_1m = API_STATS.weight_window(60)
             if self._research_store_available:
                 try:
                     await asyncio.to_thread(self.research_store.record_cycle, cycle, duration, "PAUSED_RESOURCE", rss_mb(), api_weight_1m, {"pause_reason": resource_reason})
@@ -8940,7 +9990,7 @@ class TradingEngine:
                 candidate_counts = await asyncio.to_thread(self.research_store.state_counts)
             except Exception as exc:
                 log.warning("[LEDGER] gagal membaca state counts: %s", exc)
-        api_weight_1m = API_STATS.weight_of(API_STATS.window(60))
+        api_weight_1m = API_STATS.weight_window(60)
         cycle_counts = {
             "universe_common": universe.get("common_count", 0),
             "eligible": len(eligible), "batch_selected": len(batch),
@@ -14252,9 +15302,10 @@ class TradingEngine:
             f"Filled: {filled}\n\n"
             f"History Records: {len(self.history_records)}\n"
             f"Catatan: {len(self.notes)}\n"
-            f"Candidate Queue: {len(self._candidate_queue)}/{CANDIDATE_QUEUE_MAX} | Ledger: {'READY' if self._research_store_available else 'OFF'}\n"
-            f"Research Worker: {'RUNNING' if self._research_running and self._research_task and not self._research_task.done() else 'OFF'}\n"
+            f"Candidate Queue: {len(self._candidate_queue)}/{CANDIDATE_QUEUE_MAX} | Ledger: {self._research_ledger_mode()}\n"
+            f"Research Worker: {'RUNNING' if self._research_running and self._research_task and not self._research_task.done() else 'OFF'} | Eligibility: {self._research_safe_to_run()[1][:95]}\n"
             f"RAM RSS: {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else 'unknown')} | Limit: {(f'{effective_memory_limit_mb():.0f} MB' if effective_memory_limit_mb() else f'{MEMORY_SOFT_LIMIT_MB:.0f} MB soft')}\n"
+            f"Binance REST weight: bot≈{API_STATS.weight_window(60)}/min | IP header={BINANCE_REQUEST_GOVERNOR.snapshot().get('latest_header_weight') if BINANCE_REQUEST_GOVERNOR.snapshot().get('latest_header_weight') is not None else '-'} | global cooldown={BINANCE_REQUEST_GOVERNOR.cooldown_remaining:.0f}s | order cooldown={BINANCE_REQUEST_GOVERNOR.order_cooldown_remaining:.0f}s | last limit={API_STATS.last_limit_class}\n"
             f"Scan Duration: {(f'{self._scan_last_duration_seconds:.1f}s last / {sum(self._scan_duration_samples)/len(self._scan_duration_samples):.1f}s avg' if self._scan_duration_samples else '-')}\n\n"
             f"Scan: {'ON' if self._scan_user_enabled else 'OFF'}"
             f" | Runtime: {'WAITING_H4' if self._scan_user_enabled and self._h4_enabled and not self._h4_window_active else ('PAUSED_BY_MAX' if self._scan_auto_paused else ('RUNNING' if self._scan_task is not None and not self._scan_task.done() else 'OFF'))}\n"
