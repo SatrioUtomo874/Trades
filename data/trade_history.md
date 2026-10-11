@@ -65,3 +65,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-11T23:12:09.741922+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## RSRUSDT — BUY
+
+Trade ID: `RSRUSDT-20261012-045138-A25702`
+
+### Setup
+
+- Price Now Reference: 0.0016435
+- Entry: 0.001599
+- Reason Entry: RSRUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H4 0.0016013 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 28.8 pada entry zone.
+- Price Exp: 0.001653
+- Reason Price Exp: Price Exp 0.0016526: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.001578
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.00158015; SL ditempatkan di luar invalidation dan liquidity guard 0.0015813688.
+- TP: 0.001653
+- Reason TP: TP 0.0016527 dipilih dari H4_SWING_HIGH dengan RR 2.44; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.001653
+- Result Reason: Price Exp 0.0016526: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-11T21:51:38.284868+00:00
+- Filled: -
+- Closed: 2026-10-11T23:15:34.240048+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
