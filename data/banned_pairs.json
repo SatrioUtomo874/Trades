@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-12T14:18:59.100685+00:00",
+  "saved_at": "2026-10-12T14:45:59.032467+00:00",
   "bans": [
     {
       "pair": "ASRUSDT",
@@ -57,6 +57,13 @@
       "until": "2026-10-13T12:55:17.439033+00:00",
       "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
       "source": "AUTO_TRAIL"
+    },
+    {
+      "pair": "POLUSDT",
+      "banned_at": "2026-10-12T14:45:59.032325+00:00",
+      "until": "2026-10-13T14:45:59.032301+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "RONINUSDT",
