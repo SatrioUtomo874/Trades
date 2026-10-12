@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-12T10:00:59.967377+00:00",
+  "saved_at": "2026-10-12T10:41:01.352300+00:00",
   "bans": [
     {
       "pair": "ASRUSDT",
@@ -8,13 +8,6 @@
       "until": "2026-10-13T06:21:23.795375+00:00",
       "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
       "source": "AUTO_TRAIL"
-    },
-    {
-      "pair": "BNBUSDT",
-      "banned_at": "2026-10-12T02:01:10.088925+00:00",
-      "until": "2026-10-12T10:01:10.088901+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "CTRUSDT",
@@ -50,6 +43,13 @@
       "until": "2026-10-13T09:35:55.183501+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "ORDERUSDT",
+      "banned_at": "2026-10-12T10:41:01.352133+00:00",
+      "until": "2026-10-13T10:41:01.352109+00:00",
+      "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TRAIL"
     },
     {
       "pair": "RONINUSDT",
