@@ -263,3 +263,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-12T01:50:06.332196+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## BNBUSDT — BUY
+
+Trade ID: `BNBUSDT-20261012-083116-444F29`
+
+### Setup
+
+- Price Now Reference: 752.1
+- Entry: 746.8
+- Reason Entry: BNBUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 746.275 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 22.7 pada entry zone.
+- Price Exp: 753.4
+- Reason Price Exp: Price Exp 753.4000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 743.9
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 744.2; SL ditempatkan di luar invalidation.
+- TP: 753.6
+- Reason TP: TP 753.6 dipilih dari H4_HIGHER_HIGH dengan RR 2.34; target quality 93.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 753.4
+- Result Reason: Price Exp 753.4000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-12T01:31:16.089368+00:00
+- Filled: -
+- Closed: 2026-10-12T02:01:01.655465+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
