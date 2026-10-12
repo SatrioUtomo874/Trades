@@ -721,3 +721,41 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-12T12:12:39.131835+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## ZENUSDT — BUY
+
+Trade ID: `ZENUSDT-20261012-190749-A97684`
+
+### Setup
+
+- Price Now Reference: 6.456
+- Entry: 6.426
+- Reason Entry: ZENUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H4 6.43302 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 30.3 pada entry zone.
+- Price Exp: 6.51
+- Reason Price Exp: Price Exp 6.51: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 6.433
+- Reason SL: Prediction invalidation berasal dari H4_SELL_SIDE_LIQUIDITY di 6.421; SL ditempatkan di luar invalidation dan liquidity guard 6.43302.
+- TP: 6.546
+- Reason TP: TP 6.546 dipilih dari H4_HIGHER_HIGH dengan RR 10.00; target quality 87.
+
+### Management
+
+Trail #1
+- Old SL: 6.414
+- New SL: 6.433
+- Price: 6.438
+- Reason: Auto trail [R_LADDER]: R-ladder: harga 1.00R, SL dikunci di 0.00R.
+- Time: 12-10-2026, 19:35 WIB
+
+### Result
+
+- Result: TRAIL
+- Exit Price: 6.432
+- Result Reason: SL trailing tercapai; profit terkunci. Prediction invalidation berasal dari H4_SELL_SIDE_LIQUIDITY di 6.421; SL ditempatkan di luar invalidation dan liquidity guard 6.43302.
+- PnL: 0.09337068160597572362278244631%
+- Created: 2026-10-12T12:07:49.787528+00:00
+- Filled: 2026-10-12T12:35:27.107070+00:00
+- Closed: 2026-10-12T12:35:49.161367+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
