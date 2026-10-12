@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-12T05:11:05.996086+00:00",
-  "saved_at_wib": "12-10-2026, 12:11 WIB",
+  "saved_at": "2026-10-12T05:16:22.081145+00:00",
+  "saved_at_wib": "12-10-2026, 12:16 WIB",
   "count": 9,
   "setups": [
     {
@@ -5843,7 +5843,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.6234126067882706072500577234",
+      "pnl_percent": "0.5195105056568921727083814362",
       "max_favorable_pct": "0.9235742322789194181482336643",
       "max_adverse_pct": "-0.1731701685522973909027938121",
       "planned_rr": "16.5",
@@ -9132,7 +9132,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "0.6811359963057030708843223274",
-      "realized_r": "0.9152542372881355932203389831"
+      "realized_r": "0.7627118644067796610169491526"
     },
     {
       "trade_id": "HOMEUSDT-20261012-071840-0FE235",
