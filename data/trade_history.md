@@ -395,3 +395,48 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-12T05:10:01.285040+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## LPTUSDT — BUY
+
+Trade ID: `LPTUSDT-20261012-043851-B3AD47`
+
+### Setup
+
+- Price Now Reference: 1.7947
+- Entry: 1.767
+- Reason Entry: LPTUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 1.7674 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 24.4 pada entry zone.
+- Price Exp: 1.811
+- Reason Price Exp: Price Exp 1.8106: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.781
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 1.74251; SL ditempatkan di luar invalidation dan liquidity guard 1.7444.
+- TP: 1.83
+- Reason TP: TP 1.8291 dipilih dari H4_HIGHER_HIGH dengan RR 2.27; target quality 89.
+
+### Management
+
+Trail #1
+- Old SL: 1.739
+- New SL: 1.769
+- Price: 1.795
+- Reason: Auto trail [R_LADDER]: R-ladder: harga 1.00R, SL dikunci di 0.00R.
+- Time: 12-10-2026, 09:08 WIB
+
+Trail #2
+- Old SL: 1.769
+- New SL: 1.781
+- Price: 1.809
+- Reason: Auto trail [R_LADDER]: R-ladder: harga 1.50R, SL dikunci di 0.50R.
+- Time: 12-10-2026, 09:31 WIB
+
+### Result
+
+- Result: TRAIL
+- Exit Price: 1.781
+- Result Reason: SL trailing tercapai; profit terkunci. Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 1.74251; SL ditempatkan di luar invalidation dan liquidity guard 1.7444.
+- PnL: 0.7923033389926428975664968874%
+- Created: 2026-10-11T21:38:51.493903+00:00
+- Filled: 2026-10-12T01:49:05.332240+00:00
+- Closed: 2026-10-12T05:10:50.759842+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
