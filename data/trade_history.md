@@ -688,3 +688,36 @@ Trail #1
 - Filled: 2026-10-12T10:27:48.275794+00:00
 - Closed: 2026-10-12T10:40:50.850911+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## COWUSDT — BUY
+
+Trade ID: `COWUSDT-20261012-181529-49C768`
+
+### Setup
+
+- Price Now Reference: 0.14927
+- Entry: 0.1477
+- Reason Entry: COWUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.1477679 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 23.2 pada entry zone.
+- Price Exp: 0.1496
+- Reason Price Exp: Price Exp 0.14957: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1465
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.14667; SL ditempatkan di luar invalidation dan liquidity guard 0.1466744.
+- TP: 0.1504
+- Reason TP: TP 0.15034 dipilih dari H4_HIGHER_HIGH dengan RR 2.14; target quality 89.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1496
+- Result Reason: Price Exp 0.14957: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-12T11:15:29.187543+00:00
+- Filled: -
+- Closed: 2026-10-12T12:12:39.131835+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
