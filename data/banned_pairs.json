@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-12T02:01:10.089349+00:00",
+  "saved_at": "2026-10-12T02:40:17.323867+00:00",
   "bans": [
     {
       "pair": "1000LUNCUSDT",
@@ -55,6 +55,13 @@
       "pair": "RSRUSDT",
       "banned_at": "2026-10-11T23:15:42.202465+00:00",
       "until": "2026-10-12T07:15:42.202440+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "TLMUSDT",
+      "banned_at": "2026-10-12T02:40:17.323716+00:00",
+      "until": "2026-10-12T10:40:17.323691+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
