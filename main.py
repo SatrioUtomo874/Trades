@@ -172,6 +172,8 @@ REAL_PRIORITY: contextvars.ContextVar[bool] = contextvars.ContextVar("real_prior
 SCAN_MAX_NEW_PER_CYCLE = int(os.getenv("SCAN_MAX_NEW_PER_CYCLE", "3") or "3")
 SCAN_MAX_PER_DIRECTION = int(os.getenv("SCAN_MAX_PER_DIRECTION", "6") or "6")
 AUTOSTOP_INCLUDE_UNREALIZED = True  # equity = wallet balance + unrealized PnL
+SIM_START_BALANCE = Decimal("100")
+SIM_ACCOUNT_PATH = "data/sim_account.json"
 CONFIG_AUTOSTOP = os.getenv("AUTOSTOP_PERCENT", "").strip()
 DEFAULT_MARGIN_USDT = Decimal("0.5")
 DEFAULT_LEVERAGE = 10
@@ -3740,7 +3742,8 @@ class RecheckBook:
         return out
 
     def next_due_ts(self) -> float | None:
-        return min((it["until"] for it in self.items.values()), default=None)
+        now = time.time()
+        return min((it["until"] for it in self.items.values() if it["until"] > now), default=None)
 
     def export(self, now_ts: float, limit: int = 1500) -> dict[str, Any]:
         live = {p: it for p, it in self.items.items() if it["until"] > now_ts}
@@ -3952,8 +3955,17 @@ class CandidateLedger:
         return out[:limit]
 
     def next_watch_due_ts(self) -> float | None:
-        times = [t.timestamp() for r in self.items.values() if r.state in WAITING_CANDIDATE_STATES and (t := _r_parse_iso(r.next_evaluate_after_utc))]
+        now = time.time()
+        times = [
+            t.timestamp() for r in self.items.values()
+            if r.state in WAITING_CANDIDATE_STATES and not r.linked_trade_id
+            and (t := _r_parse_iso(r.next_evaluate_after_utc)) and t.timestamp() > now
+        ]
         return min(times, default=None)
+
+    def postpone(self, rec: CandidateRecord, seconds: float) -> None:
+        rec.next_evaluate_after_utc = _r_iso(_r_now() + timedelta(seconds=seconds))
+        self._pending[rec.candidate_id] = rec.to_dict()
 
     def _evict(self) -> None:
         if len(self.items) <= self.max_size:
@@ -4598,6 +4610,10 @@ class TradingEngine:
         self._autostop_triggered = False
         self._autostop_failures = 0
         self._autostop_task: asyncio.Task[Any] | None = None
+        self.drawdown_percent: Decimal | None = None
+        self._drawdown_triggered = False
+        self.sim_balance: Decimal = SIM_START_BALANCE
+        self._sim_dirty = False
 
         # Rate limit Binance: satu notifikasi per jeda + watcher yang melanjutkan.
         self._rl_task: asyncio.Task[Any] | None = None
@@ -4754,6 +4770,7 @@ class TradingEngine:
         await self._purge_balance_bans()
         self._init_research_layer()
         await self._research_startup()
+        self._start_autostop_task()
 
         try:
             self.symbols = await self.rest.get_exchange_info()
@@ -5145,7 +5162,6 @@ class TradingEngine:
             return
 
         self.real_mode = False
-        await self._stop_autostop_task()
         self._equity_peak = None
         self._equity_last = None
         self._autostop_triggered = False
@@ -8220,6 +8236,193 @@ class TradingEngine:
             return "-"
         return decimal_to_str(value.quantize(Decimal("0.0001"))) or "0"
 
+    # -- saldo simulasi, drawdown
+    def _sim_notional(self, trade: Trade) -> Decimal:
+        qty = (trade.risk_info or {}).get("qty")
+        if qty:
+            try:
+                return Decimal(str(qty)) * (trade.fill_price or trade.entry)
+            except InvalidOperation:
+                pass
+        return trade.margin_usdt * Decimal(trade.leverage)
+
+    def _sim_unrealized(self) -> Decimal:
+        total = Decimal("0")
+        for t in self.active_trades.values():
+            if t.real_enabled or t.status != "FILLED":
+                continue
+            snap = self.prices.get(t.pair)
+            fill = t.fill_price or t.entry
+            if snap is None or fill <= 0:
+                continue
+            total += self._sim_notional(t) * pct_change(t.direction, fill, snap.price) / Decimal("100")
+        return total
+
+    def _sim_used_margin(self) -> Decimal:
+        return sum((t.margin_usdt for t in self.active_trades.values() if not t.real_enabled and t.status in {"PENDING", "FILLED"}), Decimal("0"))
+
+    def _sim_equity(self) -> Decimal:
+        return self.sim_balance + self._sim_unrealized()
+
+    def _sim_has_margin(self, trade: Trade) -> bool:
+        return self._sim_equity() - self._sim_used_margin() >= trade.margin_usdt
+
+    def _sim_apply_close(self, trade: Trade) -> None:
+        """Sinkron; dipanggil di dalam trade lock. PnL USDT = notional x % - estimasi biaya."""
+        if trade.fill_price is None or trade.pnl_percent is None:
+            return
+        notional = self._sim_notional(trade)
+        gross = notional * trade.pnl_percent / Decimal("100")
+        cost = notional * Decimal(str(2 * (EST_FEE_PCT_PER_SIDE + EST_SLIPPAGE_PCT_PER_SIDE))) / Decimal("100")
+        net = gross - cost
+        self.sim_balance += net
+        trade.risk_info = {**(trade.risk_info or {}), "sim_pnl_usdt": decimal_to_str(net), "sim_notional": decimal_to_str(notional)}
+        self._sim_dirty = True
+
+    async def _save_sim_account(self) -> None:
+        payload = {"version": 1, "saved_at": iso_utc(), "balance": decimal_to_str(self.sim_balance), "start_balance": decimal_to_str(SIM_START_BALANCE)}
+        try:
+            await self.github.replace_file(SIM_ACCOUNT_PATH, json.dumps(payload).encode("utf-8"), "sim: account")
+            self._sim_dirty = False
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[SIM] saldo simulasi gagal disimpan: %s", exc)
+
+    async def _load_sim_account(self) -> None:
+        try:
+            raw, _ = await self.github.get_file(SIM_ACCOUNT_PATH)
+            if raw:
+                value = Decimal(str(json.loads(raw.decode("utf-8")).get("balance")))
+                if value.is_finite():
+                    self.sim_balance = value
+        except Exception as exc:  # noqa: BLE001
+            log.info("[SIM] saldo simulasi tidak dimuat: %s", exc)
+
+    def _guard_equity(self) -> Decimal:
+        return self._current_equity_cached() if self.real_mode else self._sim_equity()
+
+    def _drawdown_floor(self) -> Decimal | None:
+        if self.drawdown_percent is None or self._equity_peak is None:
+            return None
+        return self._equity_peak * (Decimal("100") - self.drawdown_percent) / Decimal("100")
+
+    def _drawdown_status_text(self) -> str:
+        lines = ["🧨 DRAWDOWN", ""]
+        lines.append("Threshold: OFF" if self.drawdown_percent is None else f"Threshold: {decimal_to_str(self.drawdown_percent)}% dari puncak equity")
+        lines.append("Mode: REAL" if self.real_mode else f"Mode: SIMULASI (saldo {self._fmt_usd(self.sim_balance)} USDT)")
+        lines.append(f"Peak Equity: {self._fmt_usd(self._equity_peak)} USDT")
+        lines.append(f"Equity Terakhir: {self._fmt_usd(self._equity_last)} USDT")
+        floor = self._drawdown_floor()
+        if floor is not None:
+            lines.append(f"Batas: {self._fmt_usd(floor)} USDT")
+        lines.append(f"Status: {'TERPICU' if self._drawdown_triggered else 'AMAN'}")
+        lines.append("Aksi saat tersentuh: tutup SEMUA isi /trade + scan OFF.")
+        return "\n".join(lines)
+
+    async def _trigger_drawdown(self, equity: Decimal, floor: Decimal) -> None:
+        self._drawdown_triggered = True
+        self._autostop_triggered = True
+        self._scan_user_enabled = False
+        self._scan_auto_paused = False
+        peak = self._equity_peak or equity
+        dd = (peak - equity) / peak * Decimal("100") if peak > 0 else Decimal("0")
+        log.info("[DRAWDOWN] terpicu: equity=%s peak=%s", equity, peak)
+        await self.reply(
+            "🧨 DRAWDOWN TERPICU\n\n"
+            f"Equity turun {decimal_to_str(dd.quantize(Decimal('0.01')))}% dari puncak "
+            f"(batas {decimal_to_str(self.drawdown_percent)}%).\n"
+            f"Peak: {self._fmt_usd(peak)} • Sekarang: {self._fmt_usd(equity)} • Batas: {self._fmt_usd(floor)} USDT\n\n"
+            "SCAN dimatikan. Menutup seluruh isi /trade..."
+        )
+        trades = list(self.active_trades.values())
+        ok_n = fail_n = 0
+        details: list[str] = []
+        self._close_batch_in_progress = True
+        try:
+            for trade in trades:
+                try:
+                    ok, detail = await self._close_one_trade(trade)
+                    ok_n += 1 if ok else 0
+                    fail_n += 0 if ok else 1
+                    details.append(f"{trade.pair} → {detail}")
+                except Exception as exc:  # noqa: BLE001
+                    fail_n += 1
+                    log.exception("[DRAWDOWN] gagal menutup %s", trade.trade_id)
+                    details.append(f"{trade.pair} → ERROR: {exc}")
+        finally:
+            self._close_batch_in_progress = False
+        await self.reply(
+            f"🧨 DRAWDOWN: /trade dibersihkan\nDiproses {len(trades)} • berhasil {ok_n} • gagal {fail_n}\n\n"
+            + "\n".join(details[:25])
+            + ("\n\n⚠️ Ada yang gagal: periksa /trade dan gunakan /del." if fail_n else "")
+            + "\n\nMulai lagi: /drawdown reset lalu /scan on"
+        )
+
+    async def _handle_drawdown_command(self, text: str) -> None:
+        parts = text.split()
+        if len(parts) == 1:
+            await self.reply(self._drawdown_status_text())
+            return
+        arg = parts[1].lower()
+        if arg == "off":
+            self.drawdown_percent = None
+            self._drawdown_triggered = False
+            await self.reply("🧨 DRAWDOWN OFF")
+            return
+        if arg == "reset":
+            await self._autostop_rebaseline()
+            self._drawdown_triggered = False
+            await self.reply("♻️ Puncak equity diset ulang; drawdown aktif lagi. Scan tetap OFF sampai /scan on.\n\n" + self._drawdown_status_text())
+            return
+        try:
+            value = Decimal(arg.replace(",", "."))
+        except InvalidOperation:
+            raise ValueError("Gunakan /drawdown [persen], /drawdown off, atau /drawdown reset.")
+        if not value.is_finite() or value <= 0 or value >= 100:
+            raise ValueError("Drawdown harus di antara 0 dan 100 (persen).")
+        self.drawdown_percent = value
+        if self._drawdown_triggered or self._equity_peak is None:
+            await self._autostop_rebaseline()
+            self._drawdown_triggered = False
+        await self.reply(f"✅ DRAWDOWN = {decimal_to_str(value)}%\n\n" + self._drawdown_status_text()
+                         + "\n\n⚠️ Bila tersentuh, SEMUA setup di /trade ditutup (real: posisi market-close + order dibatalkan).")
+
+    async def _handle_resetbalance_command(self) -> None:
+        if self.real_mode:
+            await self.reply("❌ /resetbalance hanya untuk simulasi. Matikan /real terlebih dahulu.")
+            return
+        active = sum(1 for t in self.active_trades.values() if not t.real_enabled)
+        self.sim_balance = SIM_START_BALANCE
+        self._equity_peak = None
+        self._equity_last = None
+        self._autostop_triggered = False
+        self._drawdown_triggered = False
+        await self._save_sim_account()
+        note = f"\n⚠️ {active} setup simulasi masih aktif; hasilnya masuk ke saldo baru." if active else ""
+        await self.reply(f"♻️ SALDO SIMULASI DIRESET\n\nSaldo: {self._fmt_usd(SIM_START_BALANCE)} USDT\nPeak/autostop/drawdown di-reset.{note}")
+
+    async def _show_balance(self) -> None:
+        if self.real_mode:
+            try:
+                equity = self._current_equity_cached()
+                rows = [f"Mode REAL", f"Equity {self._fmt_usd(equity)} USDT", f"PnL sementara {self._fmt_usd(self._temporary_real_pnl_usdt())} USDT"]
+            except Exception as exc:  # noqa: BLE001
+                rows = ["Mode REAL", f"Saldo belum tersedia: {exc}"]
+        else:
+            unreal = self._sim_unrealized()
+            used = self._sim_used_margin()
+            equity = self.sim_balance + unreal
+            rows = [
+                "Mode SIMULASI",
+                f"Saldo      {self._fmt_usd(self.sim_balance)} USDT",
+                f"Unrealized {self._fmt_usd(unreal)} USDT",
+                f"Equity     {self._fmt_usd(equity)} USDT",
+                f"Margin pakai {self._fmt_usd(used)} • bebas {self._fmt_usd(equity - used)}",
+                f"PnL sejak reset {self._fmt_usd(self.sim_balance - SIM_START_BALANCE)} USDT",
+            ]
+        rows.append(f"Autostop {self._autostop_short()}")
+        rows.append(f"Drawdown {'OFF' if self.drawdown_percent is None else decimal_to_str(self.drawdown_percent) + '% dari puncak'}")
+        await self.reply(card("💼 SALDO", rows))
+
     def _autostop_floor(self) -> Decimal | None:
         if self.autostop_percent is None or self._equity_peak is None:
             return None
@@ -8237,10 +8440,10 @@ class TradingEngine:
             lines.append("Threshold: OFF")
         else:
             lines.append(f"Threshold: {decimal_to_str(self.autostop_percent)}% dari puncak equity")
-        if not self.real_mode:
-            lines.append("Real Mode: OFF (autostop bekerja hanya saat /real on)")
-            return "\n".join(lines)
-        lines.append("Real Mode: ON")
+        if self.real_mode:
+            lines.append("Mode: REAL")
+        else:
+            lines.append(f"Mode: SIMULASI (saldo {self._fmt_usd(self.sim_balance)} USDT)")
         lines.append(f"Peak Equity: {self._fmt_usd(self._equity_peak)} USDT")
         lines.append(f"Equity Terakhir: {self._fmt_usd(self._equity_last)} USDT")
         floor = self._autostop_floor()
@@ -8270,7 +8473,7 @@ class TradingEngine:
                 pass
 
     async def _autostop_loop(self) -> None:
-        while self._running and self.real_mode:
+        while self._running:
             try:
                 await asyncio.sleep(AUTOSTOP_CHECK_SECONDS)
                 await self._autostop_check()
@@ -8282,10 +8485,8 @@ class TradingEngine:
     async def _autostop_check(self) -> None:
         # Autostop is intentionally REST-independent. It uses the latest cached
         # Binance wallet balance plus current WebSocket-derived temporary PnL.
-        if not self.real_mode:
-            return
         try:
-            equity = self._current_equity_cached()
+            equity = self._guard_equity()
         except Exception as exc:
             self._autostop_failures += 1
             if self._autostop_failures == 3:
@@ -8296,6 +8497,9 @@ class TradingEngine:
         # Puncak hanya naik; turun tidak mengubah puncak.
         if self._equity_peak is None or equity > self._equity_peak:
             self._equity_peak = equity
+        dd_floor = self._drawdown_floor()
+        if dd_floor is not None and not self._drawdown_triggered and equity <= dd_floor:
+            await self._trigger_drawdown(equity, dd_floor)
         floor = self._autostop_floor()
         if floor is None or self._autostop_triggered or equity > floor:
             return
@@ -8318,7 +8522,7 @@ class TradingEngine:
         )
 
     async def _autostop_rebaseline(self) -> None:
-        equity = self._current_equity_cached()
+        equity = self._guard_equity()
         self._equity_peak = equity
         self._equity_last = equity
         self._autostop_triggered = False
@@ -8336,8 +8540,6 @@ class TradingEngine:
             await self.reply("🛑 AUTOSTOP OFF")
             return
         if arg == "reset":
-            if not self.real_mode:
-                raise ValueError("Autostop bekerja hanya saat /real on.")
             await self._autostop_rebaseline()
             await self.reply("♻️ Puncak equity diset ulang ke saldo sekarang.\n\n" + self._autostop_status_text())
             return
@@ -8350,12 +8552,9 @@ class TradingEngine:
             raise ValueError("Autostop harus di antara 0 dan 100 (persen).")
 
         self.autostop_percent = value
-        if self.real_mode and self._autostop_triggered:
+        if self._autostop_triggered or self._equity_peak is None:
             await self._autostop_rebaseline()
-        suffix = (
-            "" if self.real_mode
-            else "\n\nBaseline saldo diambil saat /real on."
-        )
+        suffix = ""
         await self.reply(
             f"✅ AUTOSTOP = {decimal_to_str(value)}%\n\n"
             + self._autostop_status_text()
@@ -9005,6 +9204,7 @@ class TradingEngine:
 
     async def _research_startup(self) -> None:
         await self._load_runtime_settings()
+        await self._load_sim_account()
         await self._load_research_state()
         if RESEARCH_ENABLED:
             ok, info = await self._open_research_store(ephemeral_ok=False)
@@ -9028,6 +9228,13 @@ class TradingEngine:
             raw, _ = await self.github.get_file(RUNTIME_SETTINGS_PATH)
             if raw:
                 data = json.loads(raw.decode("utf-8"))
+                guard = data.get("guard") or {}
+                for key, attr in (("autostop", "autostop_percent"), ("drawdown", "drawdown_percent")):
+                    raw_v = guard.get(key)
+                    if raw_v not in (None, ""):
+                        val = Decimal(str(raw_v))
+                        if val.is_finite() and 0 < val < 100:
+                            setattr(self, attr, val)
                 risk = data.get("risk") or {}
                 mode = str(risk.get("mode") or "").upper()
                 if mode in {"LEGACY_NOTIONAL", "RISK_BUDGET"}:
@@ -9045,7 +9252,9 @@ class TradingEngine:
         return None
 
     async def _save_runtime_settings(self) -> None:
-        payload = {"version": 1, "saved_at": iso_utc(), "risk": dict(self._risk_cfg)}
+        payload = {"version": 1, "saved_at": iso_utc(), "risk": dict(self._risk_cfg),
+                   "guard": {"autostop": None if self.autostop_percent is None else str(self.autostop_percent),
+                             "drawdown": None if self.drawdown_percent is None else str(self.drawdown_percent)}}
         await self.github.replace_file(RUNTIME_SETTINGS_PATH, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "settings: risk")
 
     async def _load_research_state(self) -> None:
@@ -9108,7 +9317,7 @@ class TradingEngine:
         keys = ("universe", "usable_data", "structure_analyzed", "direction_thesis", "candidates_evaluated", "hard_rejects",
                 "quality_rejects", "waiting_price", "waiting_trigger", "ready", "validation_pass", "validation_reject",
                 "validation_error", "risk_rejects", "pending_created", "structure_mismatch", "data_unavailable", "data_stale",
-                "budget_stopped", "memory_skipped", "validation_skipped_topn", "rate_limited", "sweep_covered", "sweep_total")
+                "budget_stopped", "memory_skipped", "validation_skipped_topn", "rate_limited", "sweep_covered", "sweep_total", "sim_margin_blocked")
         out: dict[str, Any] = {k: 0 for k in keys}
         out["errors"] = {}
         return out
@@ -9270,6 +9479,9 @@ class TradingEngine:
             f"🛡 Proteksi real {'OK' if self._protection_healthy() else 'ADA ERROR — entry baru ditahan'}",
             f"⚖️ Sizing {self._risk_cfg['mode']}",
         ]
+        if not self.real_mode:
+            rows.append(f"💼 Saldo simulasi {self._fmt_usd(self.sim_balance)} • equity {self._fmt_usd(self._sim_equity())} USDT")
+        rows.append(f"🧨 Drawdown {'OFF' if self.drawdown_percent is None else decimal_to_str(self.drawdown_percent) + '%'} • 🛡 Autostop {'OFF' if self.autostop_percent is None else decimal_to_str(self.autostop_percent) + '%'}")
         stale = self._funnel_last.get("data_stale", 0)
         if stale:
             rows.append(f"⚠️ Data basi pada {stale} pair di scan terakhir")
@@ -9525,6 +9737,11 @@ class TradingEngine:
         self.ledger.expire_due(cycle_now)
         self._sync_ledger_trades()
         due_watch = self.ledger.due_watch(cycle_now, SCAN_WATCH_MAX_PER_CYCLE)
+        active_now = {t.pair for t in self.active_trades.values()}
+        for r_ in list(due_watch):
+            if r_.pair in active_now or self._is_pair_banned(r_.pair) or self._recheck.active(r_.pair, now_ts) is not None:
+                self.ledger.postpone(r_, SCAN_WATCHLIST_INTERVAL)
+                due_watch.remove(r_)
         due_set = {r.pair for r in due_watch}
         waiting_pairs = {r.pair for r in self.ledger.items.values() if r.state in WAITING_CANDIDATE_STATES and not r.linked_trade_id}
         slot = int(now_ts // (4 * 3600))
@@ -9913,6 +10130,12 @@ class TradingEngine:
                         log.info("[SCAN] %s ditolak risk gate: %s", trade.pair, risk_info.get("reason"))
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
                         continue
+                if not self.real_mode and not self._sim_has_margin(trade):
+                    funnel["sim_margin_blocked"] += 1
+                    self.ledger.annotate(trade.candidate_id, "SIM_MARGIN_BLOCKED", "SIM_MARGIN_BLOCKED")
+                    log.info("[SCAN] %s ditahan: margin simulasi tidak cukup.", trade.pair)
+                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                    continue
                 if self.real_mode:
                     if self.real.cooldown_remaining > 0:
                         break
@@ -10009,7 +10232,7 @@ class TradingEngine:
         target_set = set(sweep_targets)
         analyzed_cd = {
             pair_ for pair_, cd_ in self._recheck.items.items()
-            if cd_["until"] > now_ts and cd_.get("state") != "DATA_UNAVAILABLE"
+            if cd_["until"] > now_ts and (cd_.get("state") != "DATA_UNAVAILABLE" or cd_.get("reason") == "INSUFFICIENT_HISTORY")
         }
         funnel["sweep_covered"] = len(target_set & (self._sweep["done"] | analyzed_cd | waiting_pairs))
         funnel["sweep_total"] = len(target_set)
@@ -13634,6 +13857,8 @@ class TradingEngine:
                     current.fill_price,
                     exit_price,
                 )
+                if not current.real_enabled:
+                    self._sim_apply_close(current)
 
             trade = current
 
@@ -13652,6 +13877,8 @@ class TradingEngine:
         await self._write_history(
             trade
         )
+        if self._sim_dirty:
+            await self._save_sim_account()
 
         if trade.real_enabled and result in {"TP", "SL", "TRAIL"}:
             await self._cleanup_real_leftovers(trade)
@@ -15372,6 +15599,9 @@ class TradingEngine:
             "/banned [PAIR] [jam] [alasan] - ban pair / lihat daftar ban\n"
             "/unban PAIR|all - hapus ban\n"
             "/stats - statistik histori + R-metrik\n"
+            "/drawdown [%|off|reset] - tutup SEMUA /trade bila equity turun dari puncak\n"
+            "/balance - saldo (simulasi $100 atau real)\n"
+            "/resetbalance - reset saldo simulasi ke $100\n"
             "/candidates [PAIR] - kandidat, funnel scan, alasan per pair\n"
             "/edge - R, bucket confidence, sapuan threshold, varian\n"
             "/research on|off|status - replay M1 (default OFF)\n"
@@ -15607,6 +15837,10 @@ class TradingEngine:
             if command == "/autostop":
                 try:
                     await self._handle_autostop_command(text)
+                    try:
+                        await self._save_runtime_settings()
+                    except Exception as exc:
+                        log.warning("[AUTOSTOP] pengaturan gagal disimpan: %s", exc)
                 except Exception as exc:
                     log.exception("AUTOSTOP command gagal.")
                     await self.reply(f"❌ /autostop gagal.\n\n{exc}")
@@ -15655,6 +15889,31 @@ class TradingEngine:
             if command == "/status":
                 await self.show_status()
                 await self.reply(self._status_extra_report())
+                return
+
+            if command == "/drawdown":
+                try:
+                    await self._handle_drawdown_command(text)
+                except Exception as exc:
+                    log.exception("DRAWDOWN command gagal.")
+                    await self.reply(f"❌ /drawdown gagal.\n\n{exc}")
+                    return
+                try:
+                    await self._save_runtime_settings()
+                except Exception as exc:
+                    log.warning("[DRAWDOWN] pengaturan gagal disimpan: %s", exc)
+                return
+
+            if command == "/resetbalance":
+                try:
+                    await self._handle_resetbalance_command()
+                except Exception as exc:
+                    log.exception("RESETBALANCE command gagal.")
+                    await self.reply(f"❌ /resetbalance gagal.\n\n{exc}")
+                return
+
+            if command == "/balance":
+                await self._show_balance()
                 return
 
             if command == "/candidates":
