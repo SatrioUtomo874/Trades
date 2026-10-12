@@ -650,3 +650,41 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-12T10:00:50.622712+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## ORDERUSDT — BUY
+
+Trade ID: `ORDERUSDT-20261012-172242-E021A9`
+
+### Setup
+
+- Price Now Reference: 0.03691
+- Entry: 0.03685
+- Reason Entry: ORDERUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0368371 dipadukan dengan Fib PRIMARY; refinement BULLISH_OB. Projected M15 RSI 27.6 pada entry zone.
+- Price Exp: 0.03738
+- Reason Price Exp: Price Exp 0.037380000000000004: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.03689
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.0368107; SL ditempatkan di luar invalidation dan liquidity guard 0.0368371.
+- TP: 0.0376
+- Reason TP: TP 0.0376 dipilih dari H4_HIGHER_HIGH dengan RR 9.38; target quality 91.
+
+### Management
+
+Trail #1
+- Old SL: 0.03677
+- New SL: 0.03689
+- Price: 0.03693
+- Reason: Auto trail [R_LADDER]: R-ladder: harga 1.00R, SL dikunci di 0.00R.
+- Time: 12-10-2026, 17:40 WIB
+
+### Result
+
+- Result: TRAIL
+- Exit Price: 0.03689
+- Result Reason: SL trailing tercapai; profit terkunci. Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.0368107; SL ditempatkan di luar invalidation dan liquidity guard 0.0368371.
+- PnL: 0.10854816824966078697421981%
+- Created: 2026-10-12T10:22:42.386358+00:00
+- Filled: 2026-10-12T10:27:48.275794+00:00
+- Closed: 2026-10-12T10:40:50.850911+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
