@@ -440,3 +440,36 @@ Trail #2
 - Filled: 2026-10-12T01:49:05.332240+00:00
 - Closed: 2026-10-12T05:10:50.759842+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## CTRUSDT — BUY
+
+Trade ID: `CTRUSDT-20261012-121610-345956`
+
+### Setup
+
+- Price Now Reference: 0.012666
+- Entry: 0.012381
+- Reason Entry: CTRUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure BULLISH, liquidity H1 0.0123893 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 11.6 pada entry zone.
+- Price Exp: 0.012678
+- Reason Price Exp: Price Exp 0.012678: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.012207
+- Reason SL: Prediction invalidation berasal dari H4_SELL_SIDE_LIQUIDITY di 0.0122209; SL ditempatkan di luar invalidation dan liquidity guard 0.0122346.
+- TP: 0.012805
+- Reason TP: TP 0.012805 dipilih dari H1_SWING_HIGH dengan RR 2.44; target quality 80.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.012704
+- Result Reason: Price Exp 0.012678: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-12T05:16:10.388656+00:00
+- Filled: -
+- Closed: 2026-10-12T05:16:10.504312+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
