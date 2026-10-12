@@ -296,3 +296,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-12T02:01:01.655465+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## TLMUSDT — BUY
+
+Trade ID: `TLMUSDT-20261012-050742-7A38E2`
+
+### Setup
+
+- Price Now Reference: 0.0014278
+- Entry: 0.001417
+- Reason Entry: TLMUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H4 0.0014177042 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 30.4 pada entry zone.
+- Price Exp: 0.001444
+- Reason Price Exp: Price Exp 0.001444: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.001415
+- Reason SL: Prediction invalidation berasal dari H4_SELL_SIDE_LIQUIDITY di 0.0014161; SL ditempatkan di luar invalidation dan liquidity guard 0.0014177042.
+- TP: 0.001461
+- Reason TP: TP 0.0014604 dipilih dari H4_SWING_HIGH dengan RR 19.64; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.001444
+- Result Reason: Price Exp 0.001444: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-11T22:07:42.989532+00:00
+- Filled: -
+- Closed: 2026-10-12T02:40:06.582233+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
