@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-12T05:23:06.278149+00:00",
+  "saved_at": "2026-10-12T06:21:23.795581+00:00",
   "bans": [
     {
       "pair": "1000LUNCUSDT",
@@ -8,6 +8,13 @@
       "until": "2026-10-12T08:18:48.264825+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "ASRUSDT",
+      "banned_at": "2026-10-12T06:21:23.795408+00:00",
+      "until": "2026-10-13T06:21:23.795375+00:00",
+      "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TRAIL"
     },
     {
       "pair": "BICOUSDT",
