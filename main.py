@@ -3044,20 +3044,61 @@ class ResearchStore:
                     self._conn = None
                     self.ok = False
 
-    def _migrate(self) -> None:
+    _IDENTITY = {
+        "schema_migrations": {"version"}, "candidates": {"candidate_id"}, "candidate_events": {"event_id", "candidate_id"},
+        "replay_jobs": {"job_id", "candidate_id"}, "replay_results": {"replay_id", "candidate_id"},
+        "candle_cache_meta": {"source", "pair", "timeframe"}, "research_runs": {"run_id"},
+    }
+    _EXPECTED = {
+        "candidates": {"schema_version": "INTEGER NOT NULL DEFAULT 1", "created_at_utc": "TEXT NOT NULL DEFAULT ''", "updated_at_utc": "TEXT NOT NULL DEFAULT ''",
+                       "pair": "TEXT NOT NULL DEFAULT ''", "state": "TEXT NOT NULL DEFAULT ''", "strategy_version": "TEXT", "payload_json": "TEXT NOT NULL DEFAULT '{}'",
+                       "next_evaluate_after_utc": "TEXT", "expires_at_utc": "TEXT", "record_type": "TEXT NOT NULL DEFAULT 'CANDIDATE'"},
+        "candidate_events": {"timestamp_utc": "TEXT NOT NULL DEFAULT ''", "event_type": "TEXT NOT NULL DEFAULT ''", "reason_code": "TEXT", "payload_json": "TEXT NOT NULL DEFAULT '{}'"},
+        "replay_jobs": {"status": "TEXT NOT NULL DEFAULT 'PENDING'", "source": "TEXT NOT NULL DEFAULT 'BINANCE_USDM'", "from_ms": "INTEGER NOT NULL DEFAULT 0",
+                        "to_ms": "INTEGER NOT NULL DEFAULT 0", "cursor_ms": "INTEGER NOT NULL DEFAULT 0", "attempts": "INTEGER NOT NULL DEFAULT 0", "last_error": "TEXT",
+                        "updated_at_utc": "TEXT NOT NULL DEFAULT ''", "state_json": "TEXT"},
+        "replay_results": {"strategy_version": "TEXT", "replay_engine_version": "TEXT NOT NULL DEFAULT ''", "outcome": "TEXT NOT NULL DEFAULT ''", "realized_r": "REAL",
+                           "gross_pnl": "REAL", "net_pnl": "REAL", "metrics_json": "TEXT NOT NULL DEFAULT '{}'", "created_at_utc": "TEXT NOT NULL DEFAULT ''",
+                           "parameter_set_id": "TEXT NOT NULL DEFAULT 'baseline'", "record_type": "TEXT NOT NULL DEFAULT 'REPLAY'"},
+        "candle_cache_meta": {"first_ms": "INTEGER", "last_ms": "INTEGER", "row_count": "INTEGER", "path_or_table": "TEXT", "updated_at_utc": "TEXT NOT NULL DEFAULT ''"},
+        "research_runs": {"parameter_set_id": "TEXT", "data_window": "TEXT", "metrics_json": "TEXT NOT NULL DEFAULT '{}'", "created_at_utc": "TEXT NOT NULL DEFAULT ''"},
+    }
+
+    def _columns(self, table: str) -> set[str]:
         assert self._conn is not None
-        done = {r[0] for r in self._conn.execute("SELECT version FROM schema_migrations")} if self._table_exists("schema_migrations") else set()
-        if 1 in done:
-            return
-        self._conn.execute("BEGIN IMMEDIATE")
+        return {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+
+    def _migrate(self) -> None:
+        """Idempoten & self-healing: buat tabel, tambah kolom hilang, simpan tabel lama yang tidak kompatibel."""
+        assert self._conn is not None
+        conn = self._conn
+        tables = [s for s in _SCHEMA_V1 if not s.lstrip().upper().startswith("CREATE INDEX")]
+        indexes = [s for s in _SCHEMA_V1 if s.lstrip().upper().startswith("CREATE INDEX")]
+        conn.execute("PRAGMA legacy_alter_table=ON")
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            for stmt in _SCHEMA_V1:
-                self._conn.execute(stmt)
-            self._conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at_utc) VALUES (1, ?)", (_r_iso(),))
-            self._conn.execute("COMMIT")
+            for table, ident in self._IDENTITY.items():
+                if self._table_exists(table) and not ident <= self._columns(table):
+                    legacy = f"{table}_legacy_{int(time.time())}"
+                    conn.execute(f"ALTER TABLE {table} RENAME TO {legacy}")
+                    rlog.warning("Skema %s tidak kompatibel; tabel lama disimpan sebagai %s", table, legacy)
+            for stmt in tables:
+                conn.execute(stmt)
+            for table, cols in self._EXPECTED.items():
+                have = self._columns(table)
+                for name, decl in cols.items():
+                    if name not in have:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                        rlog.warning("Kolom %s.%s ditambahkan (self-heal skema).", table, name)
+            for stmt in indexes:
+                conn.execute(stmt)
+            conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at_utc) VALUES (1, ?)", (_r_iso(),))
+            conn.execute("COMMIT")
         except Exception:
-            self._conn.execute("ROLLBACK")
+            conn.execute("ROLLBACK")
             raise
+        finally:
+            conn.execute("PRAGMA legacy_alter_table=OFF")
 
     def _table_exists(self, name: str) -> bool:
         assert self._conn is not None
@@ -9322,8 +9363,11 @@ class TradingEngine:
         rows = [f"Status  {st['state']}" + (f" ({st['pause_reason']})" if st["pause_reason"] else ""), f"Antrean {st['queue']} • selesai {st['done']} • job {st['jobs']}",
                 f"API     {st['api_calls']} req ≈{st['api_weight_est']} bobot", f"Storage {'ephemeral' if self.research_ephemeral else ('permanen' if self.research_store else 'tidak aktif')}"]
         if self.research_store and self.research_store.ok:
-            rows.append(f"Hasil replay {self.research_store.replay_counts()}")
-            rows.append(f"Disk candle {self.candle_files.disk_usage_bytes() / 1024 / 1024:.1f} MB")
+            try:
+                rows.append(f"Hasil replay {self.research_store.replay_counts()}")
+                rows.append(f"Disk candle {self.candle_files.disk_usage_bytes() / 1024 / 1024:.1f} MB")
+            except Exception as exc:  # noqa: BLE001
+                rows.append(f"Storage bermasalah: {type(exc).__name__}")
         if st["last_error"]:
             rows.append(f"Error terakhir {st['last_error']}")
         await self.reply(card("🔬 RESEARCH", rows) + "\n\nPerintah: /research on | off | status")
@@ -9340,10 +9384,16 @@ class TradingEngine:
                 for k, m in bucket_report(hist, key).items():
                     lines.append(f"• {label} {k}: {fmt_r_line(m)}")
         if self.research_store and self.research_store.ok:
-            raw = await asyncio.to_thread(self.research_store.replay_rows)
-            rrows = replay_rows_for_stats(raw)
+            try:
+                raw = await asyncio.to_thread(self.research_store.replay_rows)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[%s] replay tidak terbaca: %s", ErrorCategory.PERSISTENCE_ERROR, exc)
+                raw = None
+                lines += ["", f"⚠️ Replay tidak dapat dibaca ({type(exc).__name__}); laporan histori tetap ditampilkan."]
+            rrows = replay_rows_for_stats(raw or [])
             amb = sum(1 for r in rrows if r["ambiguous"])
-            lines += ["", f"🎞 Replay M1 (konservatif; ambigu={amb}/{len(rrows)})", f"└ {fmt_r_line(r_metrics([r['r'] for r in rrows]))}"]
+            if raw is not None:
+                lines += ["", f"🎞 Replay M1 (konservatif; ambigu={amb}/{len(rrows)})", f"└ {fmt_r_line(r_metrics([r['r'] for r in rrows]))}"]
             if rrows:
                 lines.append("Sapuan threshold (conf ≥ T):")
                 for row in threshold_sweep(rrows):
