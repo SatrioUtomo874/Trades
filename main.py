@@ -2776,6 +2776,7 @@ SCAN_WATCHLIST_INTERVAL = _cfg_float("SCAN_WATCHLIST_INTERVAL", 900.0, 60.0, 864
 SCAN_VALIDATE_TOP_N = _cfg_int("SCAN_VALIDATE_TOP_N", 6, 1, 50)
 SCAN_WATCH_MAX_PER_CYCLE = _cfg_int("SCAN_WATCH_MAX_PER_CYCLE", 15, 0, 50)
 SCAN_MIN_API_HEADROOM_PCT = _cfg_float("SCAN_MIN_API_HEADROOM_PCT", 10.0, 0.0, 90.0)
+SCAN_READY_RETRY_SECONDS = _cfg_float("SCAN_READY_RETRY_SECONDS", 300.0, 30.0, 3600.0)
 SCAN_CYCLE_TIME_BUDGET_SECONDS = _cfg_float("SCAN_CYCLE_TIME_BUDGET_SECONDS", 240.0, 30.0, 3600.0)
 RESEARCH_MIN_BUCKET_SAMPLE = _cfg_int("RESEARCH_MIN_BUCKET_SAMPLE", 30, 5, 10000)
 EST_FEE_PCT_PER_SIDE = _cfg_float("EST_FEE_PCT_PER_SIDE", 0.05, 0.0, 5.0)
@@ -3690,7 +3691,7 @@ def next_evaluate_ts(state: str, now_ts: float, retries: int = 0) -> float:
     if state == "DATA_UNAVAILABLE":
         return now_ts + min(60.0 * (2 ** min(retries, 4)), 900.0)
     if state == "READY":
-        return now_ts + 60.0
+        return now_ts + SCAN_READY_RETRY_SECONDS
     return max(next_boundary_ts(now_ts, 4 * 3600), now_ts + 30.0)
 
 
@@ -3722,11 +3723,14 @@ class RecheckBook:
             self.items.pop(pair, None)
         return len(gone)
 
-    def invalidate_btc_mismatch(self, btc_trend: str) -> int:
+    def invalidate_btc_mismatch_pairs(self, btc_trend: str) -> list[str]:
         gone = [p for p, it in self.items.items() if it.get("reason") == "STRUCTURE_MISMATCH" and it.get("btc_trend") != btc_trend]
         for pair in gone:
             self.items.pop(pair, None)
-        return len(gone)
+        return gone
+
+    def invalidate_btc_mismatch(self, btc_trend: str) -> int:
+        return len(self.invalidate_btc_mismatch_pairs(btc_trend))
 
     def counts_by_reason(self, now_ts: float) -> dict[str, int]:
         out: dict[str, int] = {}
@@ -8974,6 +8978,7 @@ class TradingEngine:
         self._last_state_export = 0.0
         self._strategy_module_ref: Any = None
         self._replay_pending_ids: set[str] = set()
+        self._sweep: dict[str, Any] = {"slot": None, "done": set()}
         self._research_day: tuple[str, int] = ("", 0)
         self._day_anchor: tuple[str, Decimal] | None = None
         self._risk_cfg: dict[str, Any] = {
@@ -9051,6 +9056,9 @@ class TradingEngine:
                 n = self.ledger.load_compact(data.get("ledger") or {}, now_utc())
                 m = self._recheck.load(data.get("recheck") or {}, time.time())
                 self._funnel_history.extend(data.get("funnel_history") or [])
+                sw = data.get("sweep") or {}
+                if sw.get("slot") == int(time.time() // (4 * 3600)):
+                    self._sweep = {"slot": sw["slot"], "done": set(sw.get("done") or [])}
                 log.info("[RESEARCH] state dipulihkan: kandidat=%s cooldown=%s", n, m)
         except Exception as exc:  # noqa: BLE001
             log.info("[RESEARCH] state tidak dimuat: %s", exc)
@@ -9061,7 +9069,8 @@ class TradingEngine:
         if not force and (not self.ledger.dirty_export or now - self._last_state_export < RESEARCH_EXPORT_INTERVAL_SECONDS):
             return
         payload = {"version": 1, "saved_at": iso_utc(), "ledger": self.ledger.export_compact(),
-                   "recheck": self._recheck.export(time.time()), "funnel_history": list(self._funnel_history)[-24:]}
+                   "recheck": self._recheck.export(time.time()), "funnel_history": list(self._funnel_history)[-24:],
+                   "sweep": {"slot": self._sweep.get("slot"), "done": sorted(self._sweep.get("done", set()))}}
         try:
             await self.github.replace_file(CANDIDATES_STATE_PATH, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "research: compact state")
             self._last_state_export = now
@@ -9099,7 +9108,7 @@ class TradingEngine:
         keys = ("universe", "usable_data", "structure_analyzed", "direction_thesis", "candidates_evaluated", "hard_rejects",
                 "quality_rejects", "waiting_price", "waiting_trigger", "ready", "validation_pass", "validation_reject",
                 "validation_error", "risk_rejects", "pending_created", "structure_mismatch", "data_unavailable", "data_stale",
-                "budget_stopped", "memory_skipped", "validation_skipped_topn", "rate_limited")
+                "budget_stopped", "memory_skipped", "validation_skipped_topn", "rate_limited", "sweep_covered", "sweep_total")
         out: dict[str, Any] = {k: 0 for k in keys}
         out["errors"] = {}
         return out
@@ -9327,6 +9336,7 @@ class TradingEngine:
             f"👀 Waiting price {f.get('waiting_price', 0)} • trigger {f.get('waiting_trigger', 0)} • ready {f.get('ready', 0)}",
             f"✅ Validasi lolos {f.get('validation_pass', 0)} • tolak {f.get('validation_reject', 0)} • error {f.get('validation_error', 0)} • risk-reject {f.get('risk_rejects', 0)}",
             f"📥 Pending dibuat {f.get('pending_created', 0)}",
+            f"🧹 Tersapu H4 ini {f.get('sweep_covered', 0)}/{f.get('sweep_total', 0)} koin",
         ]
         top = self.ledger.top(8, ACTIVE_CANDIDATE_STATES)
         top_rows = [f"{r.pair} {r.direction or '-'} {r.state} conf {r.confidence:.0f} • {r.state_reason or '-'}" for r in top] or ["belum ada"]
@@ -9502,7 +9512,7 @@ class TradingEngine:
         log.info("[SCAN] Cycle #%s BTC H4 trend=%s", cycle, btc_trend)
         if btc_trend in {"BULLISH", "BEARISH", "RANGE"}:
             self._purge_stale_structure_bans(btc_trend)
-            self._recheck.invalidate_btc_mismatch(btc_trend)
+            self._sweep["done"] -= set(self._recheck.invalidate_btc_mismatch_pairs(btc_trend))
 
         universe = await self._build_scan_universe()
         rows = universe["rows"]
@@ -9517,6 +9527,16 @@ class TradingEngine:
         due_watch = self.ledger.due_watch(cycle_now, SCAN_WATCH_MAX_PER_CYCLE)
         due_set = {r.pair for r in due_watch}
         waiting_pairs = {r.pair for r in self.ledger.items.values() if r.state in WAITING_CANDIDATE_STATES and not r.linked_trade_id}
+        slot = int(now_ts // (4 * 3600))
+        if self._sweep.get("slot") != slot:
+            self._sweep = {"slot": slot, "done": set()}
+        ready_due = {
+            r.pair for r in self.ledger.items.values()
+            if r.state == "READY" and not r.linked_trade_id
+            and (_r_parse_iso(r.next_evaluate_after_utc) or cycle_now) <= cycle_now
+        }
+        sweep_targets: list[str] = []
+        swept_skipped = 0
         watch_deferred = 0
         cooldown_count = 0
         final_risk_rejected = 0
@@ -9536,15 +9556,24 @@ class TradingEngine:
             if self._is_pair_banned(pair):
                 banned_count += 1
                 continue
+            sweep_targets.append(pair)
             if pair in waiting_pairs and pair not in due_set:
                 watch_deferred += 1
                 continue
             if self._recheck.active(pair, now_ts) is not None:
                 cooldown_count += 1
                 continue
+            if pair in self._sweep["done"] and pair not in due_set and pair not in ready_due:
+                swept_skipped += 1
+                continue
 
             eligible.append(pair)
-        eligible = [p for p in eligible if p in due_set] + [p for p in eligible if p not in due_set]
+        due_first = due_set | ready_due
+        eligible = (
+            [p for p in eligible if p in due_first]
+            + [p for p in eligible if p not in due_first and p not in self._retry_counts]
+            + [p for p in eligible if p not in due_first and p in self._retry_counts]
+        )
 
         log.info(
             "[SCAN] Cycle #%s universe common=%s already_trade=%s banned=%s margin_blocked=%s eligible=%s top_batch=%s",
@@ -9614,6 +9643,7 @@ class TradingEngine:
                     break
 
                 scanned += 1
+                self._sweep["done"].add(pair)
                 log.info(
                     "[SCAN] Cycle #%s pair %s/%s (volume-rank=%s): %s",
                     cycle,
@@ -9725,6 +9755,7 @@ class TradingEngine:
                     )
                 except Exception as exc:
                     analysis_errors += 1
+                    self._sweep["done"].discard(pair)
                     err_cat = classify_error(exc)
                     funnel["errors"][err_cat] = funnel["errors"].get(err_cat, 0) + 1
                     if err_cat == ErrorCategory.RATE_LIMIT or getattr(exc, "bybit_rate_limited", False):
@@ -9975,6 +10006,13 @@ class TradingEngine:
             self._scan_auto_paused = True
 
         funnel["usable_data"] = max(0, scanned - analysis_errors)
+        target_set = set(sweep_targets)
+        funnel["sweep_covered"] = len(target_set & self._sweep["done"])
+        funnel["sweep_total"] = len(target_set)
+        sweep_rest = funnel["sweep_total"] - funnel["sweep_covered"]
+        sweep_pct = round(funnel["sweep_covered"] / funnel["sweep_total"] * 100) if funnel["sweep_total"] else 100
+        if sweep_rest == 0 and funnel["sweep_total"]:
+            self._sweep["completed_at"] = self._sweep.get("completed_at") or iso_utc()
         self._scan_durations.append(time.monotonic() - started)
         self._funnel_last = funnel
         self._funnel_history.append({"cycle": cycle, "at": iso_utc(), "duration_s": round(self._scan_durations[-1], 1), **{k: v for k, v in funnel.items() if k != "errors"}, "errors": funnel["errors"]})
@@ -10135,6 +10173,7 @@ class TradingEngine:
             f"├ Validator lolos  {len(validated)}  (tolak {validator_missing + validator_rejects})\n"
             f"├ Masuk /trade     {len(final_added)}  (error {final_add_errors}, dibatasi {final_capped})\n"
             f"├ Watch/cooldown   {len(waiting_pairs)} (tunda {watch_deferred}) / {cooldown_count}  • risk-reject {final_risk_rejected}\n"
+            f"├ Tersapu H4 ini   {funnel['sweep_covered']}/{funnel['sweep_total']} ({sweep_pct}%) • sisa {sweep_rest}" + (f" (~{-(-sweep_rest // SCAN_MAX_PAIRS_PER_CYCLE)} siklus)" if sweep_rest else " ✅") + "\n"
             f"{margin_line}\n"
             f"{leverage_line}\n"
             f"{balance_text}"
