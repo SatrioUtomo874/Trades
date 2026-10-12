@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-12T12:12:50.929071+00:00",
+  "saved_at": "2026-10-12T12:36:02.236455+00:00",
   "bans": [
     {
       "pair": "ASRUSDT",
@@ -78,6 +78,13 @@
       "until": "2026-10-12T13:10:10.960140+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "ZENUSDT",
+      "banned_at": "2026-10-12T12:36:02.236294+00:00",
+      "until": "2026-10-13T12:36:02.236267+00:00",
+      "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TRAIL"
     }
   ]
 }
