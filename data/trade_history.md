@@ -811,3 +811,36 @@ Trail #3
 - Filled: 2026-10-12T12:38:09.944146+00:00
 - Closed: 2026-10-12T12:55:05.463860+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## EDENUSDT — BUY
+
+Trade ID: `EDENUSDT-20261012-200056-0968D3`
+
+### Setup
+
+- Price Now Reference: 0.06131
+- Entry: 0.06068
+- Reason Entry: EDENUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0604317 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 26.9 pada entry zone.
+- Price Exp: 0.06148
+- Reason Price Exp: Price Exp 0.06148000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.06034
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.06043; SL ditempatkan di luar invalidation dan liquidity guard 0.0604317.
+- TP: 0.06182
+- Reason TP: TP 0.06182 dipilih dari H4_HIGHER_HIGH dengan RR 3.35; target quality 91.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.06148
+- Result Reason: Price Exp 0.06148000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-12T13:00:56.981821+00:00
+- Filled: -
+- Closed: 2026-10-12T13:04:24.110991+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
