@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-12T12:55:17.439190+00:00",
+  "saved_at": "2026-10-12T13:04:35.337127+00:00",
   "bans": [
     {
       "pair": "ASRUSDT",
@@ -25,8 +25,8 @@
     },
     {
       "pair": "EDENUSDT",
-      "banned_at": "2026-10-12T04:53:50.080591+00:00",
-      "until": "2026-10-12T12:53:50.080549+00:00",
+      "banned_at": "2026-10-12T13:04:35.336988+00:00",
+      "until": "2026-10-12T21:04:35.336964+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
