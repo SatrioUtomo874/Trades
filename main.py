@@ -10007,7 +10007,11 @@ class TradingEngine:
 
         funnel["usable_data"] = max(0, scanned - analysis_errors)
         target_set = set(sweep_targets)
-        funnel["sweep_covered"] = len(target_set & self._sweep["done"])
+        analyzed_cd = {
+            pair_ for pair_, cd_ in self._recheck.items.items()
+            if cd_["until"] > now_ts and cd_.get("state") != "DATA_UNAVAILABLE"
+        }
+        funnel["sweep_covered"] = len(target_set & (self._sweep["done"] | analyzed_cd | waiting_pairs))
         funnel["sweep_total"] = len(target_set)
         sweep_rest = funnel["sweep_total"] - funnel["sweep_covered"]
         sweep_pct = round(funnel["sweep_covered"] / funnel["sweep_total"] * 100) if funnel["sweep_total"] else 100
@@ -10155,7 +10159,7 @@ class TradingEngine:
         await self.reply(
             f"╭─ 🔄 SCAN #{cycle} SELESAI ─╮\n"
             f"│ ₿ BTC H4   {btc_trend}\n"
-            f"│ ⏱ {duration:.0f}s  •  siklus berikut {SCAN_CYCLE_DELAY_SECONDS:g}s\n"
+            f"│ ⏱ {duration:.0f}s  •  siklus berikut {self._next_scan_delay():.0f}s\n"
             f"│ 💾 RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
             "╰──────────────────╯\n\n"
             "🌐 UNIVERSE\n"
