@@ -98,3 +98,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-11T23:15:34.240048+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## 1000LUNCUSDT — SELL
+
+Trade ID: `1000LUNCUSDT-20261012-071838-A93DC3`
+
+### Setup
+
+- Price Now Reference: 0.0516
+- Entry: 0.05196
+- Reason Entry: 1000LUNCUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.0518508 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 67.9 pada entry zone.
+- Price Exp: 0.05157
+- Reason Price Exp: Price Exp 0.051570000000000005: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.05201
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.05197; SL ditempatkan di luar invalidation dan liquidity guard 0.0518508.
+- TP: 0.05141
+- Reason TP: TP 0.05141 dipilih dari H1_SWING_LOW dengan RR 11.00; target quality 78.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05146
+- Result Reason: Price Exp 0.051570000000000005: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-12T00:18:38.078975+00:00
+- Filled: -
+- Closed: 2026-10-12T00:18:41.221805+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
