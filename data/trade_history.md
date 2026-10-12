@@ -759,3 +759,55 @@ Trail #1
 - Filled: 2026-10-12T12:35:27.107070+00:00
 - Closed: 2026-10-12T12:35:49.161367+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## PNUTUSDT — BUY
+
+Trade ID: `PNUTUSDT-20261012-172243-D01423`
+
+### Setup
+
+- Price Now Reference: 0.05096
+- Entry: 0.05072
+- Reason Entry: PNUTUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H4 0.0490938 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 32.2 pada entry zone.
+- Price Exp: 0.05188
+- Reason Price Exp: Price Exp 0.05188: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0509
+- Reason SL: Prediction invalidation berasal dari H4_SELL_SIDE_LIQUIDITY di 0.050605; SL ditempatkan di luar invalidation dan liquidity guard 0.0507919.
+- TP: 0.05311
+- Reason TP: TP 0.05311 dipilih dari H4_HIGHER_HIGH dengan RR 13.28; target quality 83.
+
+### Management
+
+Trail #1
+- Old SL: 0.05054
+- New SL: 0.05078
+- Price: 0.0509
+- Reason: Auto trail [R_LADDER]: R-ladder: harga +1.00R, SL dikunci di 0.0R.
+- Time: 12-10-2026, 19:42 WIB
+
+Trail #2
+- Old SL: 0.05078
+- New SL: 0.05081
+- Price: 0.05099
+- Reason: Auto trail [R_LADDER]: R-ladder: harga 1.50R, SL dikunci di 0.50R.
+- Time: 12-10-2026, 19:48 WIB
+
+Trail #3
+- Old SL: 0.05081
+- New SL: 0.0509
+- Price: 0.05108
+- Reason: Auto trail [R_LADDER]: R-ladder: harga 2.00R, SL dikunci di 1.00R.
+- Time: 12-10-2026, 19:51 WIB
+
+### Result
+
+- Result: TRAIL
+- Exit Price: 0.0509
+- Result Reason: SL trailing tercapai; profit terkunci. Prediction invalidation berasal dari H4_SELL_SIDE_LIQUIDITY di 0.050605; SL ditempatkan di luar invalidation dan liquidity guard 0.0507919.
+- PnL: 0.3548895899053627760252365931%
+- Created: 2026-10-12T10:22:43.394168+00:00
+- Filled: 2026-10-12T12:38:09.944146+00:00
+- Closed: 2026-10-12T12:55:05.463860+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
