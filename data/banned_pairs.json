@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-12T10:41:01.352300+00:00",
+  "saved_at": "2026-10-12T12:12:50.929071+00:00",
   "bans": [
     {
       "pair": "ASRUSDT",
@@ -8,6 +8,13 @@
       "until": "2026-10-13T06:21:23.795375+00:00",
       "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
       "source": "AUTO_TRAIL"
+    },
+    {
+      "pair": "COWUSDT",
+      "banned_at": "2026-10-12T12:12:50.928954+00:00",
+      "until": "2026-10-12T20:12:50.928935+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "CTRUSDT",
