@@ -506,3 +506,48 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-12T05:22:56.046111+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## ASRUSDT — BUY
+
+Trade ID: `ASRUSDT-20261012-061253-DBAD98`
+
+### Setup
+
+- Price Now Reference: 0.8695
+- Entry: 0.8662
+- Reason Entry: ASRUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.8666 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 32.3 pada entry zone.
+- Price Exp: 0.8755
+- Reason Price Exp: Price Exp 0.8755000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.8681
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.86075; SL ditempatkan di luar invalidation dan liquidity guard 0.8620493.
+- TP: 0.8827
+- Reason TP: TP 0.8827 dipilih dari H4_HIGHER_HIGH dengan RR 2.80; target quality 85.
+
+### Management
+
+Trail #1
+- Old SL: 0.8603
+- New SL: 0.8672
+- Price: 0.8721
+- Reason: Auto trail [R_LADDER]: R-ladder: harga 1.00R, SL dikunci di 0.00R.
+- Time: 12-10-2026, 09:18 WIB
+
+Trail #2
+- Old SL: 0.8672
+- New SL: 0.8681
+- Price: 0.8721
+- Reason: Auto trail [STRUCTURE]: struktur M15: higher low 0.869 terbentuk setelah entry.
+- Time: 12-10-2026, 12:39 WIB
+
+### Result
+
+- Result: TRAIL
+- Exit Price: 0.8681
+- Result Reason: SL trailing tercapai; profit terkunci. Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.86075; SL ditempatkan di luar invalidation dan liquidity guard 0.8620493.
+- PnL: 0.2193488801662433618102054953%
+- Created: 2026-10-11T23:12:53.979878+00:00
+- Filled: 2026-10-12T01:34:06.879342+00:00
+- Closed: 2026-10-12T06:21:15.828376+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
