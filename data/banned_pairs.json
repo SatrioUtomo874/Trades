@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-11T23:15:42.202627+00:00",
+  "saved_at": "2026-10-12T00:18:48.264991+00:00",
   "bans": [
+    {
+      "pair": "1000LUNCUSDT",
+      "banned_at": "2026-10-12T00:18:48.264846+00:00",
+      "until": "2026-10-12T08:18:48.264825+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
     {
       "pair": "FIDAUSDT",
       "banned_at": "2026-10-11T23:12:15.906003+00:00",
