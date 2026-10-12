@@ -551,3 +551,36 @@ Trail #2
 - Filled: 2026-10-12T01:34:06.879342+00:00
 - Closed: 2026-10-12T06:21:15.828376+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## MOODENGUSDT — BUY
+
+Trade ID: `MOODENGUSDT-20261012-045139-6E376B`
+
+### Setup
+
+- Price Now Reference: 0.04342
+- Entry: 0.04251
+- Reason Entry: MOODENGUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0425538 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 26.3 pada entry zone.
+- Price Exp: 0.04396
+- Reason Price Exp: Price Exp 0.043960000000000006: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.04244
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.04249; SL ditempatkan di luar invalidation dan liquidity guard 0.0425538.
+- TP: 0.04457
+- Reason TP: TP 0.04457 dipilih dari H4_HIGHER_HIGH dengan RR 29.43; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.04244
+- Result Reason: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.04249; SL ditempatkan di luar invalidation dan liquidity guard 0.0425538.
+- PnL: -0.1646671371442013643848506234%
+- Created: 2026-10-11T21:51:39.288639+00:00
+- Filled: 2026-10-12T09:35:42.526324+00:00
+- Closed: 2026-10-12T09:35:45.320723+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
