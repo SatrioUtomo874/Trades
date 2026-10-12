@@ -197,3 +197,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-12T00:55:16.897981+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## JELLYJELLYUSDT — SELL
+
+Trade ID: `JELLYJELLYUSDT-20261012-074457-C66F93`
+
+### Setup
+
+- Price Now Reference: 0.05131
+- Entry: 0.05272
+- Reason Entry: JELLYJELLYUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity M15 0.0526867 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 81.1 pada entry zone.
+- Price Exp: 0.05113
+- Reason Price Exp: Price Exp 0.05113: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.05331
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.053275; SL ditempatkan di luar invalidation dan liquidity guard 0.053225.
+- TP: 0.05081
+- Reason TP: TP 0.05081 dipilih dari H1_SELL_SIDE_LIQUIDITY dengan RR 3.24; target quality 73.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05113
+- Result Reason: Price Exp 0.05113: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-12T00:44:57.085742+00:00
+- Filled: -
+- Closed: 2026-10-12T01:29:23.271990+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
