@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-12T12:36:02.236455+00:00",
+  "saved_at": "2026-10-12T12:55:17.439190+00:00",
   "bans": [
     {
       "pair": "ASRUSDT",
@@ -55,6 +55,13 @@
       "pair": "ORDERUSDT",
       "banned_at": "2026-10-12T10:41:01.352133+00:00",
       "until": "2026-10-13T10:41:01.352109+00:00",
+      "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TRAIL"
+    },
+    {
+      "pair": "PNUTUSDT",
+      "banned_at": "2026-10-12T12:55:17.439054+00:00",
+      "until": "2026-10-13T12:55:17.439033+00:00",
       "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
       "source": "AUTO_TRAIL"
     },
