@@ -877,3 +877,36 @@ Tidak ada trailing.
 - Filled: 2026-10-12T13:30:07.073172+00:00
 - Closed: 2026-10-12T14:18:44.286867+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## POLUSDT — BUY
+
+Trade ID: `POLUSDT-20261012-194552-2E5BB1`
+
+### Setup
+
+- Price Now Reference: 0.10673
+- Entry: 0.10507
+- Reason Entry: POLUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.10507 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 46.1 pada entry zone.
+- Price Exp: 0.10873
+- Reason Price Exp: Price Exp 0.10873000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.10295
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.10308; SL ditempatkan di luar invalidation.
+- TP: 0.11097
+- Reason TP: TP 0.11097 dipilih dari H4_HIGHER_HIGH dengan RR 2.78; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.10295
+- Result Reason: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.10308; SL ditempatkan di luar invalidation.
+- PnL: -2.017702484058246883030360712%
+- Created: 2026-10-12T12:45:52.988288+00:00
+- Filled: 2026-10-12T13:04:03.533207+00:00
+- Closed: 2026-10-12T14:45:46.248819+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
