@@ -164,3 +164,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-12T00:47:00.520065+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## BICOUSDT — SELL
+
+Trade ID: `BICOUSDT-20261012-071839-E7BEED`
+
+### Setup
+
+- Price Now Reference: 0.018744
+- Entry: 0.01954
+- Reason Entry: BICOUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.019535 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 84.4 pada entry zone.
+- Price Exp: 0.01864
+- Reason Price Exp: Price Exp 0.018644: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01957
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.019541; SL ditempatkan di luar invalidation dan liquidity guard 0.019535.
+- TP: 0.01857
+- Reason TP: TP 0.018578 dipilih dari H4_LOWER_LOW dengan RR 43.68; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.01864
+- Result Reason: Price Exp 0.018644: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-12T00:18:39.083062+00:00
+- Filled: -
+- Closed: 2026-10-12T00:55:16.897981+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
