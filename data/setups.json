@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-12T09:46:55.886965+00:00",
-  "saved_at_wib": "12-10-2026, 16:46 WIB",
+  "saved_at": "2026-10-12T10:01:01.975251+00:00",
+  "saved_at_wib": "12-10-2026, 17:01 WIB",
   "count": 9,
   "setups": [
     {
@@ -27,9 +27,9 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "-0.4044216770018873011593421407",
+      "pnl_percent": "-0.1078457805338366136424912375",
       "max_favorable_pct": "0.4313831221353464545699649501",
-      "max_adverse_pct": "-0.4044216770018873011593421407",
+      "max_adverse_pct": "-0.4583445672688056079805877595",
       "planned_rr": "3.896551724137931034482758621",
       "pending_seconds": 12332.750701,
       "holding_seconds": null,
@@ -3029,7 +3029,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "0.7818819088703154489080614721",
-      "realized_r": "-0.5172413793103448275862068965"
+      "realized_r": "-0.1379310344827586206896551724"
     },
     {
       "trade_id": "JTOUSDT-20261012-122154-D3894F",
@@ -6028,7 +6028,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "-0.5018820577164366373902132999",
+      "pnl_percent": "-0.1882057716436637390213299875",
       "max_favorable_pct": "0.2718527812630698452530322041",
       "max_adverse_pct": "-0.6273525721455457967377666248",
       "planned_rr": "3.402777777777777777777777778",
@@ -8940,7 +8940,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.5056461731493099121706399",
-      "realized_r": "-0.3333333333333333333333333333"
+      "realized_r": "-0.125"
     },
     {
       "trade_id": "HOMEUSDT-20261012-071840-0FE235",
@@ -17596,7 +17596,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.6248047485160887222742892846",
+      "pnl_percent": "0.4842236800999687597625741956",
       "max_favorable_pct": "1.046547953764448609809434552",
       "max_adverse_pct": "-0.1093408309903155263980006248",
       "planned_rr": "28.71428571428571428571428571",
@@ -20666,7 +20666,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "0.9840674789128397375820056232",
-      "realized_r": "0.6349206349206349206349206349"
+      "realized_r": "0.4920634920634920634920634921"
     },
     {
       "trade_id": "ORDERUSDT-20261012-121050-555DAC",
@@ -20691,9 +20691,9 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "-0.4044216770018873011593421407",
+      "pnl_percent": "-0.1078457805338366136424912375",
       "max_favorable_pct": "0.4313831221353464545699649501",
-      "max_adverse_pct": "-0.4044216770018873011593421407",
+      "max_adverse_pct": "-0.4583445672688056079805877595",
       "planned_rr": "3.896551724137931034482758621",
       "pending_seconds": 12845.933308,
       "holding_seconds": null,
@@ -23691,7 +23691,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "0.7818819088703154489080614721",
-      "realized_r": "-0.5172413793103448275862068965"
+      "realized_r": "-0.1379310344827586206896551724"
     },
     {
       "trade_id": "PNUTUSDT-20261012-132534-910C76",
@@ -23716,9 +23716,9 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.01963093835885355319984295249",
-      "max_favorable_pct": "0.3729878288182175107970160974",
-      "max_adverse_pct": "-0.09815469179426776599921476247",
+      "pnl_percent": "0.4711425206124852767962308598",
+      "max_favorable_pct": "0.4711425206124852767962308598",
+      "max_adverse_pct": "-0.117785630153121319199057715",
       "planned_rr": "5.292682926829268292682926829",
       "pending_seconds": 11110.674067,
       "holding_seconds": null,
@@ -26320,7 +26320,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "0.8048684727129956811935610522",
-      "realized_r": "0.02439024390243902439024390244"
+      "realized_r": "0.5853658536585365853658536585"
     }
   ]
 }
