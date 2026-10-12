@@ -844,3 +844,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-12T13:04:24.110991+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## FUSDT — BUY
+
+Trade ID: `FUSDT-20261012-191831-4D8EE1`
+
+### Setup
+
+- Price Now Reference: 0.00328
+- Entry: 0.003244
+- Reason Entry: FUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.0032375961 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 30.8 pada entry zone.
+- Price Exp: 0.003308
+- Reason Price Exp: Price Exp 0.0033079999999999997: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.003219
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.003222; SL ditempatkan di luar invalidation.
+- TP: 0.003335
+- Reason TP: TP 0.003335 dipilih dari H4_HIGHER_HIGH dengan RR 3.64; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.003219
+- Result Reason: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.003222; SL ditempatkan di luar invalidation.
+- PnL: -0.7706535141800246609124537608%
+- Created: 2026-10-12T12:18:31.380853+00:00
+- Filled: 2026-10-12T13:30:07.073172+00:00
+- Closed: 2026-10-12T14:18:44.286867+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
