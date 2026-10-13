@@ -910,3 +910,36 @@ Tidak ada trailing.
 - Filled: 2026-10-12T13:04:03.533207+00:00
 - Closed: 2026-10-12T14:45:46.248819+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## BNTUSDT — SELL
+
+Trade ID: `BNTUSDT-20261013-091538-916CCC`
+
+### Setup
+
+- Price Now Reference: 0.3169
+- Entry: 0.3268
+- Reason Entry: BNTUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.3267 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 73.5 pada entry zone.
+- Price Exp: 0.316
+- Reason Price Exp: Price Exp 0.316: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.3317
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.329; SL ditempatkan di luar invalidation dan liquidity guard 0.3306082.
+- TP: 0.3114
+- Reason TP: TP 0.3114 dipilih dari H4_LOWER_LOW dengan RR 3.14; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.316
+- Result Reason: Price Exp 0.316: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-13T02:15:38.894783+00:00
+- Filled: -
+- Closed: 2026-10-13T02:34:04.466918+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
