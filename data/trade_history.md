@@ -943,3 +943,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-13T02:34:04.466918+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## RESOLVUSDT — SELL
+
+Trade ID: `RESOLVUSDT-20261013-112555-F82CE2`
+
+### Setup
+
+- Price Now Reference: 0.01779
+- Entry: 0.0182
+- Reason Entry: RESOLVUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.0183888 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 66.9 pada entry zone.
+- Price Exp: 0.01764
+- Reason Price Exp: Price Exp 0.017640000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01844
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.0184; SL ditempatkan di luar invalidation dan liquidity guard 0.0183888.
+- TP: 0.0174
+- Reason TP: TP 0.0174 dipilih dari H4_LOWER_LOW dengan RR 3.33; target quality 88.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.01844
+- Result Reason: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.0184; SL ditempatkan di luar invalidation dan liquidity guard 0.0183888.
+- PnL: -1.318681318681318681318681319%
+- Created: 2026-10-13T04:25:55.089597+00:00
+- Filled: 2026-10-13T05:06:10.555085+00:00
+- Closed: 2026-10-13T05:26:35.766655+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
