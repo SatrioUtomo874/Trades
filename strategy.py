@@ -8536,6 +8536,10 @@ STRUCT_TRAIL_BUFFER_ATR = 0.5
 EXHAUST_MIN_R = 1.5
 EXHAUST_GIVEBACK_R = 0.8
 TRAIL_MIN_GAP_R = 0.30
+TRAIL_REJ_WICK_RATIO = _env_float("TRAIL_REJ_WICK_RATIO", 0.5, 0.2, 0.95)
+TRAIL_REJ_MIN_PROGRESS = _env_float("TRAIL_REJ_MIN_PROGRESS", 0.6, 0.2, 0.95)
+TRAIL_REJ_BUFFER_ATR = _env_float("TRAIL_REJ_BUFFER_ATR", 0.25, 0.0, 2.0)
+TRAIL_REJ_LOOKBACK = _env_int("TRAIL_REJ_LOOKBACK", 8, 3, 40)
 
 
 
@@ -8760,7 +8764,7 @@ def _self_test_v22() -> dict[str, Any]:
 
         # ---- trailing (R-ladder, tanpa jaringan)
         async def trail(trade):
-            return await analyze_trailing(trade, {"fetch_structure": False})
+            return await analyze_trailing(trade, {"fetch_structure": False, "trail_mode": "ladder"})
 
         buy = _run_coro_sync(trail({"direction": "BUY", "fill_price": 100.0, "initial_sl": 95.0, "sl": 95.0, "price": 110.0, "pair": "XUSDT"}))
         sell = _run_coro_sync(trail({"direction": "SELL", "fill_price": 100.0, "initial_sl": 105.0, "sl": 105.0, "price": 90.0, "pair": "XUSDT"}))
@@ -8771,6 +8775,22 @@ def _self_test_v22() -> dict[str, Any]:
         check("trailing_no_suggestion_below_threshold", "R rendah -> tidak ada usulan", none_low["new_sl"] is None, None, none_low["new_sl"])
         check("trailing_never_widens", "tidak pernah melonggarkan SL", tighter["new_sl"] is None or tighter["new_sl"] < 90.5, "None atau lebih ketat", tighter["new_sl"])
         check("trailing_error_field", "field error terstruktur ada", "error" in buy and buy["schema_version"] == STRATEGY_SCHEMA_VERSION, True, None)
+
+        def mk(rows: list[tuple[float, float, float, float]]) -> list[Candle]:
+            return [Candle(time_ms=1_700_000_000_000 + i * M15_MS, open=o, high=h, low=l, close=c, volume=1.0) for i, (o, h, l, c) in enumerate(rows)]
+
+        up = [(100, 101, 99.8, 100.8), (100.8, 102, 100.5, 101.8), (101.8, 103, 101.5, 102.8), (102.8, 104, 102.5, 103.8)]
+        buy_rej = mk(up + [(105, 107, 104.5, 105.2), (105.2, 106.0, 104.8, 105.0), (105.0, 105.5, 104.6, 104.9)])
+        check("rejection_buy_wick_then_lower_high", "BUY: sumbu atas + lower high terdeteksi", (_detect_rejection(buy_rej, True, 100.0, 110.0) or {}).get("kind") == "WICK", "WICK", _detect_rejection(buy_rej, True, 100.0, 110.0))
+        buy_no_lh = mk(up + [(105, 107, 104.5, 105.2), (105.2, 107.5, 104.8, 107.0), (107.0, 108.0, 106.5, 107.8)])
+        check("rejection_requires_lower_high", "tanpa lower high tidak ada rejection", _detect_rejection(buy_no_lh, True, 100.0, 110.0) is None, None, _detect_rejection(buy_no_lh, True, 100.0, 110.0))
+        buy_far = mk([(100, 101, 99.8, 100.8), (100.8, 102.5, 100.5, 101.0), (101.0, 102.0, 100.8, 101.5), (101.5, 102.2, 101.0, 101.2), (101.2, 101.9, 100.9, 101.1)])
+        check("rejection_needs_progress_to_tp", "wick jauh dari TP diabaikan", _detect_rejection(buy_far, True, 100.0, 110.0) is None, None, None)
+        sell_dn = [(100, 100.2, 99, 99.2), (99.2, 99.5, 98, 98.2), (98.2, 98.5, 97, 97.2), (97.2, 97.5, 96, 96.2)]
+        sell_rej = mk(sell_dn + [(95, 95.5, 93, 94.8), (94.8, 95.2, 94.0, 95.0), (95.0, 95.4, 94.2, 95.1)])
+        check("rejection_sell_mirrored", "SELL: sumbu bawah + higher low terdeteksi", (_detect_rejection(sell_rej, False, 100.0, 90.0) or {}).get("kind") == "WICK", "WICK", _detect_rejection(sell_rej, False, 100.0, 90.0))
+        struct_none = _run_coro_sync(analyze_trailing({"direction": "BUY", "fill_price": 100.0, "initial_sl": 95.0, "sl": 95.0, "price": 110.0, "pair": "XUSDT", "tp": 120.0}, {"fetch_structure": False}))
+        check("structure_mode_ignores_r_ladder", "mode structure tidak memakai R-ladder", struct_none["new_sl"] is None and struct_none.get("mode") == "structure", None, struct_none)
 
         stats = series_cache_stats()
         check("cache_stats_observable", "metrik cache tersedia", {"hits", "misses", "evictions", "refreshes", "failures", "entries", "approx_mb", "hit_rate"} <= set(stats), True, sorted(stats))
@@ -8804,11 +8824,111 @@ def self_test_structural_prediction_v2() -> dict[str, Any]:
     return {"ok": not failures, "tests": tests, "failures": failures}
 
 
+def _detect_rejection(post: list[Candle], buy: bool, fill: float, tp: float) -> dict[str, Any] | None:
+    """Rejection M15 (candle closed): sumbu panjang atau sweep gagal di area dekat TP, lalu lower high / higher low."""
+    dist = abs(tp - fill)
+    if dist <= 0 or (buy and tp <= fill) or (not buy and tp >= fill):
+        return None
+    need = TRAIL_REJ_MIN_PROGRESS * dist
+    last = len(post) - 1
+    for idx in range(last - 1, max(-1, last - 1 - TRAIL_REJ_LOOKBACK), -1):
+        c = post[idx]
+        rng = c.high - c.low
+        if rng <= 0:
+            continue
+        reached = (c.high - fill) if buy else (fill - c.low)
+        if reached < need:
+            continue
+        wick = (c.high - max(c.open, c.close)) if buy else (min(c.open, c.close) - c.low)
+        kind = "WICK" if wick / rng >= TRAIL_REJ_WICK_RATIO else None
+        prior = post[max(0, idx - 10):idx]
+        if kind is None and len(prior) >= 3:
+            if buy:
+                ref = max(x.high for x in prior)
+                kind = "SWEEP" if c.high > ref and c.close < ref else None
+            else:
+                ref = min(x.low for x in prior)
+                kind = "SWEEP" if c.low < ref and c.close > ref else None
+        if kind is None:
+            continue
+        confirmed = any((d.high < c.high) if buy else (d.low > c.low) for d in post[idx + 1:])
+        if confirmed:
+            return {"candle_ms": c.time_ms, "kind": kind, "wick_ratio": round(wick / rng, 3), "progress": round(reached / dist, 3)}
+    return None
+
+
+async def _analyze_trailing_rejection(
+    trade: dict[str, Any], context: dict[str, Any], result: dict[str, Any],
+    buy: bool, fill: float, current_sl: float, price: float, risk: float,
+) -> dict[str, Any]:
+    """Mode structure: SL baru hanya setelah rejection; SL ditaruh di invalidation M15."""
+    result["mode"] = "structure"
+    tp = safe_float(trade.get("tp"))
+    if not context.get("fetch_structure", True):
+        return result
+    try:
+        pair = normalize_pair(str(trade.get("pair") or ""))
+        m15, _ = await fetch_series(pair, M15, 200, M15_MS, allow_fallback=False, max_age_seconds=TRAIL_M15_MAX_AGE_SECONDS)
+        if len(m15) < 20:
+            return result
+        last_ms = m15[-1].time_ms
+        result["candle_ms"] = last_ms
+        if int(trade.get("last_trail_candle_ms") or 0) >= last_ms:
+            result["reason"] = "candle M15 ini sudah diproses"
+            return result
+        filled_ms = int(trade.get("filled_at_ms") or 0)
+        post = [c for c in m15 if c.time_ms >= filled_ms]
+        if len(post) < 3:
+            return result
+        rejection = None
+        if not trade.get("armed"):
+            rejection = _detect_rejection(post, buy, fill, tp)
+            if rejection is None:
+                result["reason"] = "belum ada rejection M15"
+                return result
+            result["rejection"] = rejection
+        atr_vals = atr_series(m15, 14)
+        atr = atr_vals[-1] if atr_vals else 0.0
+        structure = build_structure(m15, SWING_SPAN_M15)
+        level_price, label = None, ""
+        for pivot in reversed(structure.swing_lows if buy else structure.swing_highs):
+            if pivot.index >= len(m15) or m15[pivot.index].time_ms < filled_ms:
+                continue
+            if (buy and pivot.price > current_sl) or (not buy and pivot.price < current_sl):
+                level_price, label = pivot.price, ("higher low" if buy else "lower high")
+                break
+        if level_price is None and rejection is not None:
+            seg = [c for c in post if c.time_ms >= rejection["candle_ms"]]
+            level_price = min(c.low for c in seg) if buy else max(c.high for c in seg)
+            label = "ekstrem sejak rejection"
+        if level_price is None:
+            return result
+        buffer = max(atr * TRAIL_REJ_BUFFER_ATR, price * 0.0005)
+        level = level_price - buffer if buy else level_price + buffer
+        cost = 2.0 * (EST_FEE_PCT_PER_SIDE + EST_SLIPPAGE_PCT_PER_SIDE) / 100.0
+        min_lock = fill * (1 + cost) if buy else fill * (1 - cost)
+        result["candidates"] = {"REJECTION_STRUCTURE": round_price(level)}
+        if (buy and level < min_lock) or (not buy and level > min_lock):
+            result["reason"] = "invalidation M15 belum mengunci profit di atas biaya"
+            return result
+        improves = level > current_sl if buy else level < current_sl
+        gap = (price - level) if buy else (level - price)
+        if not improves or gap < risk * TRAIL_MIN_GAP_R:
+            return result
+        tag = f"rejection {rejection['kind']}" if rejection else "trailing lanjut"
+        result.update(new_sl=round_price(level), source="REJECTION_STRUCTURE",
+                      reason=f"{tag}: SL di {label} M15 {round_price(level_price)} (buffer ATR).")
+    except Exception as exc:
+        result["structure_error"] = str(exc)[:160]
+        result["error"] = {"code": "STRUCTURE_ANALYSIS_FAILED", "message": str(exc)[:160]}
+    return result
+
+
 async def analyze_trailing(
     trade: dict[str, Any],
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Usulan SL trailing untuk posisi FILLED. context.fetch_structure=False -> hanya R-ladder."""
+    """Usulan SL trailing posisi FILLED. trail_mode=structure (default): hanya setelah rejection M15; ladder: mode lama."""
     context = context or {}
     direction = str(trade.get("direction") or "").upper()
     buy = direction == "BUY"
@@ -8830,6 +8950,8 @@ async def analyze_trailing(
         return result
     r_now = (price - fill) / risk if buy else (fill - price) / risk
     result["r_now"] = round(r_now, 3)
+    if str(context.get("trail_mode") or "structure").lower() != "ladder":
+        return await _analyze_trailing_rejection(trade, context, result, buy, fill, current_sl, price, risk)
 
     candidates: dict[str, tuple[float, str]] = {}
     lock_r = None
