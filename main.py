@@ -49,7 +49,9 @@ import hmac
 import copy
 import ctypes
 import gc
+import csv
 import gzip
+import io
 import math
 import sqlite3
 import threading
@@ -2808,7 +2810,7 @@ CANDIDATE_STATES = (
 ACTIVE_CANDIDATE_STATES = {"WAITING_PRICE", "WAITING_TRIGGER", "READY", "PENDING", "FILLED"}
 WAITING_CANDIDATE_STATES = {"WAITING_PRICE", "WAITING_TRIGGER"}
 CANDIDATE_SCHEMA_VERSION = 1
-REPLAY_ENGINE_VERSION = "1.0"
+REPLAY_ENGINE_VERSION = "1.1"
 
 
 class ErrorCategory:
@@ -3390,13 +3392,18 @@ class CandleFileStore:
 # ------------------------------------------------------------ replay M1 deterministik
 
 TRAIL_LADDER_REPLAY = tuple(TRAIL_R_LADDER)
+REPLAY_REJ_WICK = _cfg_float("TRAIL_REJ_WICK_RATIO", 0.5, 0.2, 0.95)
+REPLAY_REJ_PROGRESS = _cfg_float("TRAIL_REJ_MIN_PROGRESS", 0.6, 0.2, 0.95)
+REPLAY_REJ_BUFFER_ATR = _cfg_float("TRAIL_REJ_BUFFER_ATR", 0.25, 0.0, 2.0)
+REPLAY_REJ_LOOKBACK = _cfg_int("TRAIL_REJ_LOOKBACK", 8, 3, 40)
+REPLAY_SWING_SPAN = 3
 
 
 class ReplaySim:
     """Replay satu kandidat candle-per-candle (semantik eksplisit; ambigu dilabeli konservatif)."""
 
     def __init__(self, cand: dict[str, Any], *, trailing: bool, fee_pct: float, slippage_pct: float,
-                 expiry_ms: int | None = None, trail_fee_buffer_pct: float = 0.12) -> None:
+                 expiry_ms: int | None = None, trail_fee_buffer_pct: float = 0.12, mode: str | None = None) -> None:
         self.buy = str(cand.get("direction")).upper() == "BUY"
         self.entry = float(cand["entry"])
         self.sl0 = float(cand["sl"])
@@ -3404,7 +3411,8 @@ class ReplaySim:
         self.price_exp = float(cand.get("price_exp") or 0.0)
         self.decision_ms = int(cand.get("decision_ms") or 0)
         self.expiry_ms = expiry_ms
-        self.trailing = trailing
+        self.mode = mode or ("ladder" if trailing else "fixed")
+        self.trailing = self.mode == "ladder"
         self.cost_rate = (fee_pct + slippage_pct) / 100.0
         self.trail_fee_buffer_pct = trail_fee_buffer_pct
         self.risk = abs(self.entry - self.sl0)
@@ -3422,6 +3430,10 @@ class ReplaySim:
         self.gap_minutes = 0
         self.candles = 0
         self._pending_sl: float | None = None
+        self._bars: list[Any] = []
+        self._cur: list[Any] | None = None
+        self._armed = False
+        self.rejection_ms: int | None = None
 
     @property
     def done(self) -> bool:
@@ -3439,6 +3451,95 @@ class ReplaySim:
     def _touch_tp(self, low: float, high: float) -> bool:
         return high >= self.tp if self.buy else low <= self.tp
 
+    def _agg(self, t: int, o: float, h: float, l: float, c: float) -> None:
+        """Bentuk candle M15 dari M1; di penutupan bar, mode structure mengevaluasi trailing."""
+        bucket = t // M15_MS_MAIN * M15_MS_MAIN
+        if self._cur is not None and self._cur[0] != bucket:
+            self._bars.append(tuple(self._cur))
+            if len(self._bars) > 80:
+                del self._bars[:-80]
+            self._cur = None
+            if self.mode == "structure" and self.phase == "OPEN":
+                self._structure_update()
+        if self._cur is None:
+            self._cur = [bucket, o, h, l, c]
+        else:
+            self._cur[2] = max(self._cur[2], h)
+            self._cur[3] = min(self._cur[3], l)
+            self._cur[4] = c
+
+    def _detect_rej(self, post: list[Any]) -> int | None:
+        dist = abs(self.tp - self.entry)
+        if dist <= 0 or (self.buy and self.tp <= self.entry) or (not self.buy and self.tp >= self.entry):
+            return None
+        need = REPLAY_REJ_PROGRESS * dist
+        last = len(post) - 1
+        for idx in range(last - 1, max(-1, last - 1 - REPLAY_REJ_LOOKBACK), -1):
+            t, o, h, l, c = post[idx][:5]
+            rng = h - l
+            if rng <= 0:
+                continue
+            reached = (h - self.entry) if self.buy else (self.entry - l)
+            if reached < need:
+                continue
+            wick = (h - max(o, c)) if self.buy else (min(o, c) - l)
+            ok = wick / rng >= REPLAY_REJ_WICK
+            if not ok:
+                prior = post[max(0, idx - 10):idx]
+                if len(prior) >= 3:
+                    if self.buy:
+                        ref = max(x[2] for x in prior)
+                        ok = h > ref and c < ref
+                    else:
+                        ref = min(x[3] for x in prior)
+                        ok = l < ref and c > ref
+            if ok and any((d[2] < h) if self.buy else (d[3] > l) for d in post[idx + 1:]):
+                return int(t)
+        return None
+
+    def _structure_update(self) -> None:
+        """Mirip live (mode structure): SL di invalidation M15 setelah rejection; pendekatan, bukan salinan persis."""
+        bars = self._bars
+        if self.entry_ms is None or len(bars) < 8 or self.risk <= 0:
+            return
+        post = [b for b in bars if b[0] >= self.entry_ms]
+        if len(post) < 3:
+            return
+        if not self._armed:
+            rej = self._detect_rej(post)
+            if rej is None:
+                return
+            self._armed = True
+            self.rejection_ms = rej
+        trs = [max(bars[i][2] - bars[i][3], abs(bars[i][2] - bars[i - 1][4]), abs(bars[i][3] - bars[i - 1][4])) for i in range(1, len(bars))]
+        atr = sum(trs[-14:]) / min(14, len(trs)) if trs else 0.0
+        span = REPLAY_SWING_SPAN
+        level_price = None
+        for i in range(len(bars) - span - 1, span - 1, -1):
+            b = bars[i]
+            if b[0] < self.entry_ms:
+                break
+            if self.buy and b[3] > self.sl and all(b[3] < bars[i - k][3] and b[3] < bars[i + k][3] for k in range(1, span + 1)):
+                level_price = b[3]
+                break
+            if not self.buy and b[2] < self.sl and all(b[2] > bars[i - k][2] and b[2] > bars[i + k][2] for k in range(1, span + 1)):
+                level_price = b[2]
+                break
+        if level_price is None:
+            seg = [b for b in post if b[0] >= (self.rejection_ms or 0)]
+            level_price = min(b[3] for b in seg) if self.buy else max(b[2] for b in seg)
+        price = bars[-1][4]
+        buffer = max(atr * REPLAY_REJ_BUFFER_ATR, price * 0.0005)
+        level = level_price - buffer if self.buy else level_price + buffer
+        cost = self.cost_rate * 2.0
+        min_lock = self.entry * (1 + cost) if self.buy else self.entry * (1 - cost)
+        if (self.buy and level < min_lock) or (not self.buy and level > min_lock):
+            return
+        better = level > self.sl if self.buy else level < self.sl
+        gap = (price - level) if self.buy else (level - price)
+        if better and gap >= self.risk * 0.30:
+            self._pending_sl = level
+
     def feed(self, candle: tuple) -> bool:
         t, o, h, l, c = int(candle[0]), float(candle[1]), float(candle[2]), float(candle[3]), float(candle[4])
         if self.done or t < self.decision_ms:
@@ -3447,6 +3548,7 @@ class ReplaySim:
             self.gap_minutes += int((t - self.last_ms) // 60_000) - 1
         self.last_ms = t
         self.candles += 1
+        self._agg(t, o, h, l, c)
         if self.phase == "PENDING":
             if self.expiry_ms is not None and t >= self.expiry_ms:
                 self._finish("EXPIRED", t, None)
@@ -3544,13 +3646,14 @@ class ReplaySim:
             "mae_pct": round(self.mae / self.entry * 100, 4) if self.entry > 0 else None,
             "time_to_entry_ms": (self.entry_ms - self.decision_ms) if filled else None,
             "time_to_exit_ms": (self.exit_ms - self.entry_ms) if filled and self.exit_ms else None,
-            "trailing_model": "R_LADDER_CANDLE_APPROX" if self.trailing else "NONE",
+            "trailing_model": {"ladder": "R_LADDER_CANDLE_APPROX", "structure": "REJECTION_M15_APPROX", "fixed": "NONE"}.get(self.mode, "NONE"),
+            "rejection_ms": self.rejection_ms,
             "gap_minutes": self.gap_minutes, "candles": self.candles,
         }
 
     def to_state(self) -> dict[str, Any]:
         keys = ("phase", "sl", "entry_ms", "exit_ms", "exit_price", "outcome", "mfe", "mae", "ambiguity",
-                "optimistic_exit", "last_ms", "gap_minutes", "candles", "_pending_sl")
+                "optimistic_exit", "last_ms", "gap_minutes", "candles", "_pending_sl", "_bars", "_cur", "_armed", "rejection_ms")
         return {k: getattr(self, k) for k in keys}
 
     def restore(self, state: dict[str, Any]) -> None:
@@ -3566,6 +3669,7 @@ class ReplayRunner:
         self.sims = {
             "trail": ReplaySim(cand, trailing=True, fee_pct=fee_pct, slippage_pct=slippage_pct, expiry_ms=expiry_ms),
             "fixed": ReplaySim(cand, trailing=False, fee_pct=fee_pct, slippage_pct=slippage_pct, expiry_ms=expiry_ms),
+            "structure": ReplaySim(cand, trailing=False, mode="structure", fee_pct=fee_pct, slippage_pct=slippage_pct, expiry_ms=expiry_ms),
         }
 
     def feed(self, candle: tuple) -> bool:
@@ -3583,12 +3687,16 @@ class ReplayRunner:
         fixed = self.sims["fixed"].result()
         head["net_r_fixed"] = fixed["net_r"]
         head["outcome_fixed"] = fixed["outcome"]
+        struct = self.sims["structure"].result()
+        head["net_r_structure"] = struct["net_r"]
+        head["outcome_structure"] = struct["outcome"]
+        head["rejection_ms"] = struct.get("rejection_ms")
         head["replay_engine_version"] = REPLAY_ENGINE_VERSION
         head["fee_pct_per_side"] = round(self.sims["trail"].cost_rate * 100.0 - EST_SLIPPAGE_PCT_PER_SIDE, 6)
         head["slippage_pct_per_side"] = EST_SLIPPAGE_PCT_PER_SIDE
         head["funding_modeled"] = False
         head["data_source"] = "BINANCE_USDM_M1"
-        head["limitations"] = ["structural/RSI trailing tidak direplikasi", "funding tidak dimodelkan", "urutan intra-candle M1 tidak diketahui"]
+        head["limitations"] = ["trailing struktur memakai pendekatan M15-dari-M1 (ATR/swing disederhanakan), RSI tidak direplikasi", "funding tidak dimodelkan", "urutan intra-candle M1 tidak diketahui"]
         return head
 
     def to_state(self) -> dict[str, Any]:
@@ -4229,6 +4337,7 @@ def default_variants(baseline_threshold: float) -> list[dict[str, Any]]:
     for rr in (1.2, 1.5):
         variants.append({**base, "id": f"rr_after_cost>={rr}", "min_rr_after_costs": rr})
     variants.append({**base, "id": "allow_counter_trend", "alignment": None})
+    variants.append({**base, "id": "trail_ladder", "r_key": "r_ladder"})
     variants.append({**base, "id": "no_trailing", "r_key": "r_fixed"})
     return variants
 
@@ -4262,7 +4371,8 @@ def replay_rows_for_stats(raw_rows: list[dict[str, Any]]) -> list[dict[str, Any]
             continue
         out.append({"created_at": row["created_at_utc"], "confidence": _f(c.get("confidence")), "direction": c.get("direction"),
                     "btc_alignment": c.get("btc_alignment"), "archetype": c.get("setup_archetype"), "strategy_version": c.get("strategy_version"),
-                    "rr_after_costs": _f(c.get("planned_rr_after_costs")), "r": _f(m.get("net_r")), "r_fixed": _f(m.get("net_r_fixed")),
+                    "rr_after_costs": _f(c.get("planned_rr_after_costs")), "r": _f(m.get("net_r_structure", m.get("net_r"))),
+                    "r_ladder": _f(m.get("net_r")), "r_fixed": _f(m.get("net_r_fixed")), "r_structure": _f(m.get("net_r_structure", m.get("net_r"))),
                     "ambiguous": bool(m.get("ambiguous"))})
     return out
 
@@ -4614,6 +4724,8 @@ class TradingEngine:
         self._drawdown_triggered = False
         self.sim_balance: Decimal = SIM_START_BALANCE
         self._sim_dirty = False
+        self.trail_mode = "structure"
+        self._trail_state: dict[str, dict[str, Any]] = {}
 
         # Rate limit Binance: satu notifikasi per jeda + watcher yang melanjutkan.
         self._rl_task: asyncio.Task[Any] | None = None
@@ -6791,6 +6903,8 @@ class TradingEngine:
         fill, risk, r_now = metrics
         buy = trade.direction == "BUY"
         ladder, fee_pct = self._trail_params()
+        if self.trail_mode != "ladder":
+            ladder = []
         cands: list[tuple[Decimal, str, str]] = []
         lock_r = None
         for trigger, lock in ladder:
@@ -6843,13 +6957,23 @@ class TradingEngine:
                 "price": float(price),
                 "tick_size": float(meta.tick_size) if meta is not None else 0.0,
                 "filled_at_ms": int(trade.filled_at.timestamp() * 1000) if trade.filled_at else 0,
+                "tp": float(trade.tp),
+                "armed": bool(trade.trail_history) or bool(self._trail_state.get(trade.trade_id, {}).get("armed")),
+                "last_trail_candle_ms": int(self._trail_state.get(trade.trade_id, {}).get("last_candle_ms") or 0),
             }
             result = await self._call_strategy_function(
-                module, "analyze_trailing", payload, {"fetch_structure": True}
+                module, "analyze_trailing", payload, {"fetch_structure": True, "trail_mode": self.trail_mode}
             )
         except Exception as exc:
             log.info("[TRAIL] analisa strategy %s gagal: %s", trade.trade_id, exc)
             return None
+        if isinstance(result, dict):
+            st = self._trail_state.setdefault(trade.trade_id, {})
+            if result.get("rejection"):
+                st["armed"] = True
+                st["rejection_ms"] = result["rejection"].get("candle_ms")
+            if result.get("new_sl") is not None and result.get("candle_ms"):
+                st["last_candle_ms"] = int(result["candle_ms"])
         if not isinstance(result, dict) or result.get("new_sl") is None:
             return None
         try:
@@ -8386,6 +8510,110 @@ class TradingEngine:
         await self.reply(f"✅ DRAWDOWN = {decimal_to_str(value)}%\n\n" + self._drawdown_status_text()
                          + "\n\n⚠️ Bila tersentuh, SEMUA setup di /trade ditutup (real: posisi market-close + order dibatalkan).")
 
+    async def _export_dataset(self) -> None:
+        """Ekspor dataset mentah (CSV) ke GitHub agar strategy bisa diuji ulang di luar bot."""
+        def csv_bytes(columns: list[str], rows: list[dict[str, Any]]) -> bytes:
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(columns)
+            for row in rows:
+                writer.writerow([row.get(col, "") for col in columns])
+            return buf.getvalue().encode("utf-8")
+
+        def flat(cand: dict[str, Any]) -> dict[str, Any]:
+            zone = cand.get("entry_zone") or {}
+            row = {
+                "candidate_id": cand.get("candidate_id"), "created_at": cand.get("created_at_utc"), "pair": cand.get("pair"),
+                "state": cand.get("state"), "state_reason": cand.get("state_reason"), "direction": cand.get("direction"),
+                "confidence": cand.get("confidence"), "entry": cand.get("entry"), "sl": cand.get("sl"), "tp": cand.get("tp"),
+                "price_exp": cand.get("price_exp"), "zone_low": zone.get("low"), "zone_high": zone.get("high"),
+                "rr_gross": cand.get("planned_rr_gross"), "rr_after_costs": cand.get("planned_rr_after_costs"),
+                "btc_regime": cand.get("btc_h4_regime"), "pair_regime": cand.get("pair_h4_regime"), "btc_alignment": cand.get("btc_alignment"),
+                "archetype": cand.get("setup_archetype"), "strategy_version": cand.get("strategy_version"),
+                "gate_reasons": "|".join(str(x) for x in (cand.get("gate_reasons") or [])), "price_vs_zone": cand.get("price_vs_zone"),
+                "replay_eligible": cand.get("replay_eligible"), "replay_reason": cand.get("replay_sampling_reason"),
+                "decision_ms": cand.get("decision_ms"),
+            }
+            for key, val in (cand.get("confidence_components") or {}).items():
+                row[f"c_{key}"] = val
+            return row
+
+        store = self.research_store if self.research_store and self.research_store.ok else None
+        if store is not None:
+            cands = [flat(c) for c in await asyncio.to_thread(store.list_candidates, None, 3000)]
+            replay = await asyncio.to_thread(store.replay_rows, 3000)
+        else:
+            cands = [flat(r.to_dict()) for r in self.ledger.items.values()]
+            replay = []
+        replay_rows = []
+        for item in replay:
+            m = item["metrics"]
+            row = flat(item["candidate"])
+            row.update({k: m.get(k) for k in ("outcome", "filled", "ambiguous", "net_r", "gross_r", "net_r_fixed", "net_r_structure", "outcome_fixed",
+                                               "outcome_structure", "rejection_ms", "optimistic_net_r", "mfe_r", "mae_r", "time_to_entry_ms",
+                                               "time_to_exit_ms", "gap_minutes", "replay_engine_version")})
+            row["net_r_ladder"] = m.get("net_r")
+            replay_rows.append(row)
+        trades = []
+        for rec in self.history_records[-3000:]:
+            r_net, r_gross = record_realized_r(rec, net=True), record_realized_r(rec, net=False)
+            trades.append({
+                "trade_id": rec.get("trade_id"), "candidate_id": rec.get("candidate_id"), "pair": rec.get("pair"), "direction": rec.get("direction"),
+                "result": rec.get("result"), "mode": "REAL" if rec.get("real_enabled") else "SIM", "confidence": rec.get("strategy_confidence"),
+                "entry": rec.get("entry"), "fill_price": rec.get("fill_price"), "sl_final": rec.get("sl"), "tp": rec.get("tp"),
+                "pnl_percent": rec.get("pnl_percent"), "r_gross": r_gross, "r_net_est": r_net, "sizing_mode": rec.get("sizing_mode"),
+                "strategy_version": rec.get("strategy_version"), "trail_events": len(rec.get("trail_history") or []),
+                "created_at": rec.get("created_at"), "filled_at": rec.get("filled_at"), "closed_at": rec.get("closed_at"),
+                "sim_pnl_usdt": (rec.get("risk_info") or {}).get("sim_pnl_usdt") if isinstance(rec.get("risk_info"), dict) else None,
+            })
+        def cols(rows: list[dict[str, Any]], head: list[str]) -> list[str]:
+            extra = sorted({k for r in rows for k in r} - set(head))
+            return head + extra
+        mod = self._strategy_module_ref
+        meta = {
+            "exported_at": iso_utc(), "strategy_version": getattr(mod, "STRATEGY_VERSION", None) if mod else None,
+            "replay_engine_version": REPLAY_ENGINE_VERSION, "scan_threshold": str(self.scan_threshold), "trail_mode_live": self.trail_mode,
+            "cost_assumptions_pct_per_side": {"fee": EST_FEE_PCT_PER_SIDE, "slippage": EST_SLIPPAGE_PCT_PER_SIDE},
+            "trail_rejection_params": {"wick_ratio": REPLAY_REJ_WICK, "min_progress": REPLAY_REJ_PROGRESS, "buffer_atr": REPLAY_REJ_BUFFER_ATR, "lookback": REPLAY_REJ_LOOKBACK},
+            "counts": {"candidates": len(cands), "replay": len(replay_rows), "trades": len(trades)},
+            "files": ["candidates_dataset.csv", "replay_dataset.csv", "trades_dataset.csv"],
+            "notes": ["replay: net_r_* sudah dikurangi estimasi biaya; ambigu = SL-first", "replay trailing struktur adalah pendekatan dari M1",
+                      "hasil real/sim (trades) dan replay harus dianalisis terpisah"],
+        }
+        base = "data/research/"
+        files = [("candidates_dataset.csv", csv_bytes(cols(cands, ["candidate_id", "created_at", "pair", "state", "direction", "confidence"]), cands)),
+                 ("replay_dataset.csv", csv_bytes(cols(replay_rows, ["candidate_id", "created_at", "pair", "direction", "confidence", "outcome", "net_r_ladder", "net_r_structure", "net_r_fixed"]), replay_rows)),
+                 ("trades_dataset.csv", csv_bytes(cols(trades, ["trade_id", "pair", "direction", "result", "mode", "confidence"]), trades)),
+                 ("dataset_meta.json", json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8"))]
+        failed = []
+        for name, content in files:
+            try:
+                await self.github.replace_file(base + name, content, f"research: export {name}")
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{name}: {exc}")
+        rows = [f"Kandidat {len(cands)} • replay {len(replay_rows)} • trade {len(trades)}", f"Folder GitHub: {base}",
+                "File: candidates_dataset.csv, replay_dataset.csv, trades_dataset.csv, dataset_meta.json"]
+        if store is None:
+            rows.append("Replay kosong: aktifkan /research on agar ada hasil replay M1.")
+        if failed:
+            rows.append("Gagal: " + "; ".join(failed)[:300])
+        await self.reply(card("📦 EKSPOR DATASET", rows))
+
+    async def _handle_trail_command(self, text: str) -> None:
+        parts = text.split()
+        if len(parts) >= 2:
+            mode = parts[2].lower() if parts[1].lower() == "mode" and len(parts) >= 3 else parts[1].lower()
+            if mode not in {"ladder", "structure"}:
+                raise ValueError("Gunakan /trailmode structure atau /trailmode ladder.")
+            self.trail_mode = mode
+        desc = (
+            "SL baru hanya setelah rejection M15 (sumbu/sweep di dekat TP + lower high/higher low), "
+            "ditaruh di invalidation M15; tanpa tangga R."
+            if self.trail_mode == "structure"
+            else "Mode lama: tangga R + struktur M15 + kelelahan RSI."
+        )
+        await self.reply(card("🪜 TRAILING", [f"Mode  {self.trail_mode.upper()}", desc, "Ganti: /trailmode structure|ladder"]))
+
     async def _handle_resetbalance_command(self) -> None:
         if self.real_mode:
             await self.reply("❌ /resetbalance hanya untuk simulasi. Matikan /real terlebih dahulu.")
@@ -9235,6 +9463,8 @@ class TradingEngine:
                         val = Decimal(str(raw_v))
                         if val.is_finite() and 0 < val < 100:
                             setattr(self, attr, val)
+                if guard.get("trail_mode") in {"ladder", "structure"}:
+                    self.trail_mode = guard["trail_mode"]
                 risk = data.get("risk") or {}
                 mode = str(risk.get("mode") or "").upper()
                 if mode in {"LEGACY_NOTIONAL", "RISK_BUDGET"}:
@@ -9253,7 +9483,7 @@ class TradingEngine:
 
     async def _save_runtime_settings(self) -> None:
         payload = {"version": 1, "saved_at": iso_utc(), "risk": dict(self._risk_cfg),
-                   "guard": {"autostop": None if self.autostop_percent is None else str(self.autostop_percent),
+                   "guard": {"trail_mode": self.trail_mode, "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
                              "drawdown": None if self.drawdown_percent is None else str(self.drawdown_percent)}}
         await self.github.replace_file(RUNTIME_SETTINGS_PATH, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "settings: risk")
 
@@ -13883,6 +14113,7 @@ class TradingEngine:
         if trade.real_enabled and result in {"TP", "SL", "TRAIL"}:
             await self._cleanup_real_leftovers(trade)
 
+        self._trail_state.pop(trade.trade_id, None)
         if getattr(trade, "candidate_id", ""):
             self.ledger.set_state(
                 trade.candidate_id,
@@ -14457,7 +14688,7 @@ class TradingEngine:
         active_filled = sum(1 for t in self.active_trades.values() if t.status == "FILLED")
 
         def num(value: Decimal | None) -> str:
-            return "-" if value is None else decimal_to_str(value)
+            return "-" if value is None else f"{float(value):.2f}"
 
         def pct(value: Decimal) -> str:
             return format_pct(value).replace("+", "")
@@ -14469,9 +14700,9 @@ class TradingEngine:
         if gap is None:
             confidence_conclusion = "Belum cukup data confidence di kedua outcome."
         elif gap > 0:
-            confidence_conclusion = f"Rerata confidence TP lebih tinggi {decimal_to_str(gap)} poin dari SL."
+            confidence_conclusion = f"Rerata confidence TP lebih tinggi {float(gap):.2f} poin dari SL."
         elif gap < 0:
-            confidence_conclusion = f"Rerata confidence TP lebih rendah {decimal_to_str(abs(gap))} poin dari SL."
+            confidence_conclusion = f"Rerata confidence TP lebih rendah {float(abs(gap)):.2f} poin dari SL."
         else:
             confidence_conclusion = "Rerata confidence TP dan SL sama."
 
@@ -14528,7 +14759,7 @@ class TradingEngine:
             f"├ Semua history  {num(stats['average_confidence_all'])}",
             f"├ TP  {num(stats['average_confidence_tp'])}  •  SL  {num(stats['average_confidence_sl'])}",
             f"├ Setup entry    {num(stats['average_confidence_entered'])}",
-            f"└ Coverage       {gauge(coverage)}  {decimal_to_str(coverage)}%  (tanpa data {stats['confidence_missing_entered']})",
+            f"└ Coverage       {gauge(coverage)}  {float(coverage):.0f}%  (tanpa data {stats['confidence_missing_entered']})",
             "",
             "⏱ WAKTU",
             f"├ Pending  {dur(stats['average_pending_entered_seconds'])}",
@@ -15599,6 +15830,8 @@ class TradingEngine:
             "/banned [PAIR] [jam] [alasan] - ban pair / lihat daftar ban\n"
             "/unban PAIR|all - hapus ban\n"
             "/stats - statistik histori + R-metrik\n"
+            "/trailmode [structure|ladder] - mode trailing SL otomatis\n"
+            "/export - ekspor dataset CSV (kandidat, replay, trade) ke GitHub\n"
             "/drawdown [%|off|reset] - tutup SEMUA /trade bila equity turun dari puncak\n"
             "/balance - saldo (simulasi $100 atau real)\n"
             "/resetbalance - reset saldo simulasi ke $100\n"
@@ -15889,6 +16122,26 @@ class TradingEngine:
             if command == "/status":
                 await self.show_status()
                 await self.reply(self._status_extra_report())
+                return
+
+            if command == "/trailmode":
+                try:
+                    await self._handle_trail_command(text)
+                except Exception as exc:
+                    await self.reply(f"❌ /trail gagal.\n\n{exc}")
+                    return
+                try:
+                    await self._save_runtime_settings()
+                except Exception as exc:
+                    log.warning("[TRAIL] pengaturan gagal disimpan: %s", exc)
+                return
+
+            if command == "/export":
+                try:
+                    await self._export_dataset()
+                except Exception as exc:
+                    log.exception("EXPORT command gagal.")
+                    await self.reply(f"❌ /export gagal.\n\n{exc}")
                 return
 
             if command == "/drawdown":
