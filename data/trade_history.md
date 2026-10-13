@@ -976,3 +976,36 @@ Tidak ada trailing.
 - Filled: 2026-10-13T05:06:10.555085+00:00
 - Closed: 2026-10-13T05:26:35.766655+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## SOPHUSDT — SELL
+
+Trade ID: `SOPHUSDT-20261013-152159-0BF578`
+
+### Setup
+
+- Price Now Reference: 0.003341
+- Entry: 0.003508
+- Reason Entry: SOPHUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.0035075 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 77.6 pada entry zone.
+- Price Exp: 0.003321
+- Reason Price Exp: Price Exp 0.0033209999999999997: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.003526
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.00352; SL ditempatkan di luar invalidation.
+- TP: 0.003241
+- Reason TP: TP 0.003241 dipilih dari H1_SWING_LOW dengan RR 14.83; target quality 67.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.003321
+- Result Reason: Price Exp 0.0033209999999999997: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-13T08:21:59.793460+00:00
+- Filled: -
+- Closed: 2026-10-13T09:01:05.138838+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
