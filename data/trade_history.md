@@ -1009,3 +1009,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-13T09:01:05.138838+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## NMRUSDT — SELL
+
+Trade ID: `NMRUSDT-20261013-150907-A00ACE`
+
+### Setup
+
+- Price Now Reference: 12.472
+- Entry: 13.256
+- Reason Entry: NMRUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity M15 13.255 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 77.7 pada entry zone.
+- Price Exp: 12.386
+- Reason Price Exp: Price Exp 12.386000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 13.75
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 13.724; SL ditempatkan di luar invalidation.
+- TP: 12.014
+- Reason TP: TP 12.014 dipilih dari H4_SWING_LOW dengan RR 2.51; target quality 77.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 12.386
+- Result Reason: Price Exp 12.386000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-13T08:09:07.186716+00:00
+- Filled: -
+- Closed: 2026-10-13T09:12:26.049700+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
