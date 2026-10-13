@@ -1042,3 +1042,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-13T09:12:26.049700+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## GRIFFAINUSDT — SELL
+
+Trade ID: `GRIFFAINUSDT-20261013-151844-4652A3`
+
+### Setup
+
+- Price Now Reference: 0.01606
+- Entry: 0.0174
+- Reason Entry: GRIFFAINUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.017393 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_OB. Projected M15 RSI 83.3 pada entry zone.
+- Price Exp: 0.015887
+- Reason Price Exp: Price Exp 0.015887: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.018125
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_HIGH di 0.01809; SL ditempatkan di luar invalidation dan liquidity guard 0.0180827.
+- TP: 0.015648
+- Reason TP: TP 0.015648 dipilih dari H4_LOWER_LOW dengan RR 2.42; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.015886
+- Result Reason: Price Exp 0.015887: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-13T08:18:44.186355+00:00
+- Filled: -
+- Closed: 2026-10-13T09:13:05.810118+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
