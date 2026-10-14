@@ -315,3 +315,55 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-14T16:11:28.988110+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## NEWTUSDT — SELL
+
+Trade ID: `NEWTUSDT-20261013-192251-771ED5`
+
+### Setup
+
+- Price Now Reference: 0.04504
+- Entry: 0.04572
+- Reason Entry: NEWTUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.04572 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 50.7 pada entry zone.
+- Price Exp: 0.04427
+- Reason Price Exp: Price Exp 0.044270000000000004: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0443
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.04644; SL ditempatkan di luar invalidation.
+- TP: 0.04366
+- Reason TP: TP 0.04366 dipilih dari H1_SELL_SIDE_LIQUIDITY dengan RR 2.61; target quality 68.
+
+### Management
+
+Trail #1
+- Old SL: 0.04651
+- New SL: 0.04527
+- Price: 0.04438
+- Reason: Auto trail [REJECTION_STRUCTURE]: trailing lanjut: SL di lower high M15 0.04521 (buffer ATR).
+- Time: 14-10-2026, 20:16 WIB
+
+Trail #2
+- Old SL: 0.04527
+- New SL: 0.04494
+- Price: 0.04398
+- Reason: Auto trail [REJECTION_STRUCTURE]: trailing lanjut: SL di lower high M15 0.04487 (buffer ATR).
+- Time: 14-10-2026, 21:46 WIB
+
+Trail #3
+- Old SL: 0.04494
+- New SL: 0.0443
+- Price: 0.04392
+- Reason: Auto trail [REJECTION_STRUCTURE]: trailing lanjut: SL di lower high M15 0.04423 (buffer ATR).
+- Time: 14-10-2026, 23:01 WIB
+
+### Result
+
+- Result: TP
+- Exit Price: 0.04366
+- Result Reason: TP 0.04366 dipilih dari H1_SELL_SIDE_LIQUIDITY dengan RR 2.61; target quality 68.
+- PnL: 4.505686789151356080489938758%
+- Created: 2026-10-13T12:22:51.193556+00:00
+- Filled: 2026-10-13T13:38:46.207610+00:00
+- Closed: 2026-10-14T16:15:09.101870+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
