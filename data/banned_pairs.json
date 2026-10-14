@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-14T16:11:39.707792+00:00",
+  "saved_at": "2026-10-14T16:15:22.478225+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -36,6 +36,13 @@
       "until": "2026-10-15T00:11:39.707637+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "NEWTUSDT",
+      "banned_at": "2026-10-14T16:15:22.478087+00:00",
+      "until": "2026-10-15T16:15:22.478065+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "SLPUSDT",
