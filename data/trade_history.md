@@ -117,3 +117,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-14T06:19:00.187806+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## ANIMEUSDT — SELL
+
+Trade ID: `ANIMEUSDT-20261013-192453-964978`
+
+### Setup
+
+- Price Now Reference: 0.002986
+- Entry: 0.003096
+- Reason Entry: ANIMEUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity M15 0.0030955 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 68.8 pada entry zone.
+- Price Exp: 0.002958
+- Reason Price Exp: Price Exp 0.0029579999999999997: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.003106
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.003102; SL ditempatkan di luar invalidation.
+- TP: 0.002899
+- Reason TP: TP 0.002899 dipilih dari H4_LOWER_LOW dengan RR 19.70; target quality 80.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.002958
+- Result Reason: Price Exp 0.0029579999999999997: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-13T12:24:53.390471+00:00
+- Filled: -
+- Closed: 2026-10-14T12:30:10.778806+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
