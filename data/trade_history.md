@@ -150,3 +150,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-14T12:30:10.778806+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## 1000BONKUSDT — SELL
+
+Trade ID: `1000BONKUSDT-20261013-190656-6785AD`
+
+### Setup
+
+- Price Now Reference: 0.003172
+- Entry: 0.003323
+- Reason Entry: 1000BONKUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity H1 0.003322 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 73.6 pada entry zone.
+- Price Exp: 0.003148
+- Reason Price Exp: Price Exp 0.0031479999999999998: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.003364
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.003359; SL ditempatkan di luar invalidation.
+- TP: 0.003113
+- Reason TP: TP 0.003113 dipilih dari H4_LOWER_LOW dengan RR 5.12; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.003148
+- Result Reason: Price Exp 0.0031479999999999998: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-13T12:06:56.583807+00:00
+- Filled: -
+- Closed: 2026-10-14T12:30:28.581721+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
