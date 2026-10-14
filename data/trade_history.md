@@ -183,3 +183,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-14T12:30:28.581721+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## SLPUSDT — SELL
+
+Trade ID: `SLPUSDT-20261013-192452-24C126`
+
+### Setup
+
+- Price Now Reference: 0.000601
+- Entry: 0.0006312
+- Reason Entry: SLPUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity H1 0.0006311 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 76.0 pada entry zone.
+- Price Exp: 0.0005974
+- Reason Price Exp: Price Exp 0.0005974: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0006439
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.0006431; SL ditempatkan di luar invalidation.
+- TP: 0.0005973
+- Reason TP: TP 0.0005973 dipilih dari H4_LOWER_LOW dengan RR 2.67; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0005974
+- Result Reason: Price Exp 0.0005974: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-13T12:24:52.381800+00:00
+- Filled: -
+- Closed: 2026-10-14T13:19:55.777553+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
