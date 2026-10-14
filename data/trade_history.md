@@ -282,3 +282,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-14T15:13:15.600012+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## LDOUSDT — SELL
+
+Trade ID: `LDOUSDT-20261014-230610-0A4C4F`
+
+### Setup
+
+- Price Now Reference: 0.4063
+- Entry: 0.4427
+- Reason Entry: LDOUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H4 0.4413 dipadukan dengan Fib SECONDARY; refinement BEARISH_BREAKER. Projected M15 RSI 78.8 pada entry zone.
+- Price Exp: 0.4059
+- Reason Price Exp: Price Exp 0.40590000000000004: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.4589
+- Reason SL: Prediction invalidation berasal dari H4_BUY_SIDE_LIQUIDITY di 0.458192; SL ditempatkan di luar invalidation dan liquidity guard 0.4578.
+- TP: 0.3902
+- Reason TP: TP 0.3902 dipilih dari H4_LOWER_LOW dengan RR 3.24; target quality 79.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.4059
+- Result Reason: Price Exp 0.40590000000000004: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-14T16:06:10.904370+00:00
+- Filled: -
+- Closed: 2026-10-14T16:11:28.988110+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
