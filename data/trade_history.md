@@ -249,3 +249,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-14T14:34:10.946351+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## AKEUSDT — BUY
+
+Trade ID: `AKEUSDT-20261014-213018-3D8F8C`
+
+### Setup
+
+- Price Now Reference: 0.025278
+- Entry: 0.023334
+- Reason Entry: AKEUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure BULLISH, liquidity M15 0.023077 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 22.8 pada entry zone.
+- Price Exp: 0.02564
+- Reason Price Exp: Price Exp 0.02564: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.022359
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.022432; SL ditempatkan di luar invalidation dan liquidity guard 0.0224408.
+- TP: 0.025803
+- Reason TP: TP 0.025803 dipilih dari H4_HIGHER_HIGH dengan RR 2.53; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02564
+- Result Reason: Price Exp 0.02564: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-14T14:30:18.277697+00:00
+- Filled: -
+- Closed: 2026-10-14T15:13:15.600012+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
