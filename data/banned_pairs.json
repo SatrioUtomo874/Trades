@@ -1,74 +1,11 @@
 {
   "version": 1,
-  "saved_at": "2026-10-13T10:54:42.825932+00:00",
+  "saved_at": "2026-10-14T05:37:45.255397+00:00",
   "bans": [
     {
-      "pair": "FHEUSDT",
-      "banned_at": "2026-10-13T09:43:35.461349+00:00",
-      "until": "2026-10-13T17:43:35.461324+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "FUSDT",
-      "banned_at": "2026-10-12T14:18:59.100517+00:00",
-      "until": "2026-10-13T14:18:59.100480+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "GRIFFAINUSDT",
-      "banned_at": "2026-10-13T09:13:16.370223+00:00",
-      "until": "2026-10-13T17:13:16.370205+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "NMRUSDT",
-      "banned_at": "2026-10-13T09:12:36.723089+00:00",
-      "until": "2026-10-13T17:12:36.723065+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "PNUTUSDT",
-      "banned_at": "2026-10-12T12:55:17.439054+00:00",
-      "until": "2026-10-13T12:55:17.439033+00:00",
-      "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TRAIL"
-    },
-    {
-      "pair": "POLUSDT",
-      "banned_at": "2026-10-12T14:45:59.032325+00:00",
-      "until": "2026-10-13T14:45:59.032301+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "RAREUSDT",
-      "banned_at": "2026-10-13T10:54:42.825813+00:00",
-      "until": "2026-10-13T18:54:42.825794+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "RESOLVUSDT",
-      "banned_at": "2026-10-13T05:26:48.966304+00:00",
-      "until": "2026-10-14T05:26:48.966283+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "SOPHUSDT",
-      "banned_at": "2026-10-13T09:01:16.301833+00:00",
-      "until": "2026-10-13T17:01:16.301808+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "ZENUSDT",
-      "banned_at": "2026-10-12T12:36:02.236294+00:00",
-      "until": "2026-10-13T12:36:02.236267+00:00",
+      "pair": "CTRUSDT",
+      "banned_at": "2026-10-14T05:37:45.255268+00:00",
+      "until": "2026-10-15T05:37:45.255248+00:00",
       "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
       "source": "AUTO_TRAIL"
     }
