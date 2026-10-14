@@ -1,18 +1,11 @@
 {
   "version": 1,
-  "saved_at": "2026-10-14T13:20:04.032821+00:00",
+  "saved_at": "2026-10-14T14:34:19.451423+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
       "banned_at": "2026-10-14T12:30:38.874276+00:00",
       "until": "2026-10-14T20:30:38.874250+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "AKEUSDT",
-      "banned_at": "2026-10-14T06:19:07.024425+00:00",
-      "until": "2026-10-14T14:19:07.024403+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
@@ -34,6 +27,13 @@
       "pair": "SLPUSDT",
       "banned_at": "2026-10-14T13:20:04.032676+00:00",
       "until": "2026-10-14T21:20:04.032656+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "XANUSDT",
+      "banned_at": "2026-10-14T14:34:19.451266+00:00",
+      "until": "2026-10-14T22:34:19.451245+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     }
