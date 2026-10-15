@@ -603,3 +603,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T03:02:02.234644+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## CETUSUSDT — SELL
+
+Trade ID: `CETUSUSDT-20261015-095241-275401`
+
+### Setup
+
+- Price Now Reference: 0.023851
+- Entry: 0.02525
+- Reason Entry: CETUSUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.0252415 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 68.6 pada entry zone.
+- Price Exp: 0.02365
+- Reason Price Exp: Price Exp 0.023653: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02583
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_HIGH di 0.025788; SL ditempatkan di luar invalidation dan liquidity guard 0.0257638.
+- TP: 0.02341
+- Reason TP: TP 0.023415 dipilih dari H4_SELL_SIDE_LIQUIDITY dengan RR 3.17; target quality 66.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02365
+- Result Reason: Price Exp 0.023653: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T02:52:41.089037+00:00
+- Filled: -
+- Closed: 2026-10-15T03:03:09.398928+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
