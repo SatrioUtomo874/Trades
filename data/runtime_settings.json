@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T14:49:36.354219+00:00",
+  "saved_at": "2026-10-15T14:49:41.000417+00:00",
   "risk": {
     "mode": "LEGACY_NOTIONAL",
     "per_trade": null,
@@ -12,7 +12,7 @@
   "guard": {
     "trail_mode": "structure",
     "research": true,
-    "autostop": null,
+    "autostop": "15",
     "drawdown": null
   }
 }
