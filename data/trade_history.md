@@ -367,3 +367,36 @@ Trail #3
 - Filled: 2026-10-13T13:38:46.207610+00:00
 - Closed: 2026-10-14T16:15:09.101870+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## IOSTUSDT — SELL
+
+Trade ID: `IOSTUSDT-20261014-231957-4D093F`
+
+### Setup
+
+- Price Now Reference: 0.0008008
+- Entry: 0.0008217
+- Reason Entry: IOSTUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.0008189 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 60.7 pada entry zone.
+- Price Exp: 0.0007974
+- Reason Price Exp: Price Exp 0.0007974: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.000833
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.000832; SL ditempatkan di luar invalidation.
+- TP: 0.000787
+- Reason TP: TP 0.000787 dipilih dari H4_LOWER_LOW dengan RR 3.07; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0007974
+- Result Reason: Price Exp 0.0007974: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-14T16:19:57.507332+00:00
+- Filled: -
+- Closed: 2026-10-15T00:49:26.989026+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
