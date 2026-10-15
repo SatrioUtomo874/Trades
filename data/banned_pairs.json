@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T05:31:52.386000+00:00",
+  "saved_at": "2026-10-15T05:47:48.076635+00:00",
   "bans": [
     {
       "pair": "1INCHUSDT",
@@ -38,11 +38,11 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "CTRUSDT",
-      "banned_at": "2026-10-14T05:37:45.255268+00:00",
-      "until": "2026-10-15T05:37:45.255248+00:00",
-      "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TRAIL"
+      "pair": "DOGEUSDT",
+      "banned_at": "2026-10-15T05:47:48.076468+00:00",
+      "until": "2026-10-15T13:47:48.076437+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "EULUSDT",
