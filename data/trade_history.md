@@ -966,3 +966,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T05:51:31.395074+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## NIGHTUSDT — SELL
+
+Trade ID: `NIGHTUSDT-20261015-093641-F34106`
+
+### Setup
+
+- Price Now Reference: 0.04248
+- Entry: 0.04465
+- Reason Entry: NIGHTUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.044645 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 70.8 pada entry zone.
+- Price Exp: 0.04195
+- Reason Price Exp: Price Exp 0.04195: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.04527
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.045195; SL ditempatkan di luar invalidation dan liquidity guard 0.0451035.
+- TP: 0.0408
+- Reason TP: TP 0.0408 dipilih dari H4_LOWER_LOW dengan RR 6.21; target quality 79.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.04195
+- Result Reason: Price Exp 0.04195: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T02:36:41.284548+00:00
+- Filled: -
+- Closed: 2026-10-15T05:54:32.884102+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
