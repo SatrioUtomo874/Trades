@@ -1395,3 +1395,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T13:20:10.970398+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## DOGEUSDT — SELL
+
+Trade ID: `DOGEUSDT-20261015-163847-61A2A5`
+
+### Setup
+
+- Price Now Reference: 0.08013
+- Entry: 0.08099
+- Reason Entry: DOGEUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.08099 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 61.7 pada entry zone.
+- Price Exp: 0.07857
+- Reason Price Exp: Price Exp 0.07857: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.08245
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.08215; SL ditempatkan di luar invalidation dan liquidity guard 0.082245.
+- TP: 0.07752
+- Reason TP: TP 0.07752 dipilih dari H4_SELL_SIDE_LIQUIDITY dengan RR 2.38; target quality 68.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.07857
+- Result Reason: Price Exp 0.07857: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T09:38:47.565113+00:00
+- Filled: -
+- Closed: 2026-10-15T13:51:22.173348+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
