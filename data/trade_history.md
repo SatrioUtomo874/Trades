@@ -1131,3 +1131,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T10:10:23.572978+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## WAXPUSDT — SELL
+
+Trade ID: `WAXPUSDT-20261015-163850-3FC125`
+
+### Setup
+
+- Price Now Reference: 0.004916
+- Entry: 0.005189
+- Reason Entry: WAXPUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity H1 0.005188 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 82.3 pada entry zone.
+- Price Exp: 0.004882
+- Reason Price Exp: Price Exp 0.004882: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.005307
+- Reason SL: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 0.0052995; SL ditempatkan di luar invalidation dan liquidity guard 0.005290625.
+- TP: 0.004842
+- Reason TP: TP 0.004842 dipilih dari H1_SWING_LOW dengan RR 2.94; target quality 70.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.004882
+- Result Reason: Price Exp 0.004882: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T09:38:50.259330+00:00
+- Filled: -
+- Closed: 2026-10-15T10:23:11.147030+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
