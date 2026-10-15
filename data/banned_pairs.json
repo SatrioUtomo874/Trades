@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T13:20:22.410821+00:00",
+  "saved_at": "2026-10-15T13:51:34.492754+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -34,6 +34,13 @@
       "pair": "CARVUSDT",
       "banned_at": "2026-10-15T13:20:22.410611+00:00",
       "until": "2026-10-15T21:20:22.410552+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "DOGEUSDT",
+      "banned_at": "2026-10-15T13:51:34.492634+00:00",
+      "until": "2026-10-15T21:51:34.492555+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
