@@ -1065,3 +1065,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T06:15:58.469531+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## EVAAUSDT — SELL
+
+Trade ID: `EVAAUSDT-20261015-163613-2EA8EB`
+
+### Setup
+
+- Price Now Reference: 0.5924
+- Entry: 0.6188
+- Reason Entry: EVAAUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.618575 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 82.1 pada entry zone.
+- Price Exp: 0.5882
+- Reason Price Exp: Price Exp 0.5882000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.6371
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.6358962; SL ditempatkan di luar invalidation dan liquidity guard 0.63545.
+- TP: 0.5751
+- Reason TP: TP 0.5751 dipilih dari H1_SWING_LOW dengan RR 2.39; target quality 73.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.5882
+- Result Reason: Price Exp 0.5882000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T09:36:13.763453+00:00
+- Filled: -
+- Closed: 2026-10-15T10:08:41.669153+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
