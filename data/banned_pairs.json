@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T00:49:35.470464+00:00",
+  "saved_at": "2026-10-15T00:49:51.415252+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -34,6 +34,13 @@
       "pair": "IOSTUSDT",
       "banned_at": "2026-10-15T00:49:35.470303+00:00",
       "until": "2026-10-15T08:49:35.470279+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "LAUSDT",
+      "banned_at": "2026-10-15T00:49:51.414803+00:00",
+      "until": "2026-10-15T08:49:51.414778+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
