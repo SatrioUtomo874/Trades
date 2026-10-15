@@ -1230,3 +1230,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T11:31:06.462366+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## AWEUSDT — SELL
+
+Trade ID: `AWEUSDT-20261015-163616-8A5B01`
+
+### Setup
+
+- Price Now Reference: 0.06186
+- Entry: 0.06318
+- Reason Entry: AWEUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.06317 dipadukan dengan Fib SECONDARY; refinement BEARISH_BREAKER. Projected M15 RSI 68.6 pada entry zone.
+- Price Exp: 0.0615
+- Reason Price Exp: Price Exp 0.061500000000000006: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.06394
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.06386; SL ditempatkan di luar invalidation.
+- TP: 0.06078
+- Reason TP: TP 0.06078 dipilih dari H4_LOWER_LOW dengan RR 3.16; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0615
+- Result Reason: Price Exp 0.061500000000000006: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T09:36:16.706682+00:00
+- Filled: -
+- Closed: 2026-10-15T11:43:34.360302+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
