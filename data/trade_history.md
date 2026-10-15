@@ -570,3 +570,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T02:24:19.109918+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## PIEVERSEUSDT — SELL
+
+Trade ID: `PIEVERSEUSDT-20261015-094304-36CCAC`
+
+### Setup
+
+- Price Now Reference: 1.1695
+- Entry: 1.1882
+- Reason Entry: PIEVERSEUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity M15 1.188 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 62.0 pada entry zone.
+- Price Exp: 1.1627
+- Reason Price Exp: Price Exp 1.1627: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.1984
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 1.1968; SL ditempatkan di luar invalidation.
+- TP: 1.1518
+- Reason TP: TP 1.1518 dipilih dari H1_SWING_LOW dengan RR 3.57; target quality 72.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 1.1627
+- Result Reason: Price Exp 1.1627: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T02:43:04.782801+00:00
+- Filled: -
+- Closed: 2026-10-15T03:02:02.234644+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
