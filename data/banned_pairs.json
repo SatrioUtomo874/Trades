@@ -1,11 +1,18 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T03:02:11.040027+00:00",
+  "saved_at": "2026-10-15T03:03:20.256963+00:00",
   "bans": [
     {
       "pair": "BANANAUSDT",
       "banned_at": "2026-10-15T02:22:30.888689+00:00",
       "until": "2026-10-15T10:22:30.888672+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "CETUSUSDT",
+      "banned_at": "2026-10-15T03:03:20.256851+00:00",
+      "until": "2026-10-15T11:03:20.256834+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
