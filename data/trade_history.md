@@ -1098,3 +1098,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T10:08:41.669153+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## BANANAUSDT — SELL
+
+Trade ID: `BANANAUSDT-20261015-164433-882774`
+
+### Setup
+
+- Price Now Reference: 3.523
+- Entry: 3.753
+- Reason Entry: BANANAUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 3.7415 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 86.0 pada entry zone.
+- Price Exp: 3.495
+- Reason Price Exp: Price Exp 3.495: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 3.886
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 3.843; SL ditempatkan di luar invalidation dan liquidity guard 3.86775.
+- TP: 3.45
+- Reason TP: TP 3.45 dipilih dari H1_SWING_LOW dengan RR 2.28; target quality 69.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 3.495
+- Result Reason: Price Exp 3.495: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T09:44:33.886430+00:00
+- Filled: -
+- Closed: 2026-10-15T10:10:23.572978+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
