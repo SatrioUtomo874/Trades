@@ -1527,3 +1527,36 @@ Tidak ada trailing.
 - Filled: 2026-10-15T14:17:53.770755+00:00
 - Closed: 2026-10-15T14:54:48.143092+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## ALCHUSDT — SELL
+
+Trade ID: `ALCHUSDT-20261015-163610-D6E8DE`
+
+### Setup
+
+- Price Now Reference: 0.03715
+- Entry: 0.03754
+- Reason Entry: ALCHUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.03753 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 52.9 pada entry zone.
+- Price Exp: 0.03637
+- Reason Price Exp: Price Exp 0.03637: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.03824
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.03817; SL ditempatkan di luar invalidation.
+- TP: 0.03588
+- Reason TP: TP 0.03588 dipilih dari H4_SELL_SIDE_LIQUIDITY dengan RR 2.37; target quality 74.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.03824
+- Result Reason: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.03817; SL ditempatkan di luar invalidation.
+- PnL: -1.864677677144379328716036228%
+- Created: 2026-10-15T09:36:10.382485+00:00
+- Filled: 2026-10-15T14:40:01.847030+00:00
+- Closed: 2026-10-15T15:03:36.058246+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
