@@ -1593,3 +1593,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T16:15:08.359204+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## HYPEUSDT — SELL
+
+Trade ID: `HYPEUSDT-20261015-230233-357683`
+
+### Setup
+
+- Price Now Reference: 81.806
+- Entry: 82.026
+- Reason Entry: HYPEUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity M15 82.1093 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 70.0 pada entry zone.
+- Price Exp: 81.267
+- Reason Price Exp: Price Exp 81.267: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 82.377
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 82.2565; SL ditempatkan di luar invalidation dan liquidity guard 82.1093.
+- TP: 80.941
+- Reason TP: TP 80.941 dipilih dari H1_SWING_LOW dengan RR 3.09; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 81.267
+- Result Reason: Price Exp 81.267: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T16:02:33.890885+00:00
+- Filled: -
+- Closed: 2026-10-15T16:18:12.678010+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
