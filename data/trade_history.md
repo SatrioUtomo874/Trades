@@ -1329,3 +1329,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T12:30:03.772749+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## KNCUSDT — SELL
+
+Trade ID: `KNCUSDT-20261015-171412-BC1E1F`
+
+### Setup
+
+- Price Now Reference: 0.12249
+- Entry: 0.127
+- Reason Entry: KNCUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.127245 dipadukan dengan Fib SECONDARY; refinement BEARISH_OB. Projected M15 RSI 77.4 pada entry zone.
+- Price Exp: 0.1218
+- Reason Price Exp: Price Exp 0.1218: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1274
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.12723; SL ditempatkan di luar invalidation dan liquidity guard 0.127245.
+- TP: 0.121
+- Reason TP: TP 0.12104 dipilih dari H1_SWING_LOW dengan RR 13.07; target quality 68.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1218
+- Result Reason: Price Exp 0.1218: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T10:14:12.169310+00:00
+- Filled: -
+- Closed: 2026-10-15T12:30:28.660915+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
