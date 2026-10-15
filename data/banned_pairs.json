@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T05:54:57.960985+00:00",
+  "saved_at": "2026-10-15T06:16:08.920916+00:00",
   "bans": [
     {
       "pair": "1INCHUSDT",
@@ -20,6 +20,13 @@
       "pair": "ARKMUSDT",
       "banned_at": "2026-10-15T05:10:41.582401+00:00",
       "until": "2026-10-15T13:10:41.582383+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "AVAXUSDT",
+      "banned_at": "2026-10-15T06:16:08.920790+00:00",
+      "until": "2026-10-15T14:16:08.920772+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
