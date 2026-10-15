@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T02:24:27.747420+00:00",
+  "saved_at": "2026-10-15T03:02:11.040027+00:00",
   "bans": [
     {
       "pair": "BANANAUSDT",
@@ -50,6 +50,13 @@
       "until": "2026-10-16T02:23:24.250874+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "PIEVERSEUSDT",
+      "banned_at": "2026-10-15T03:02:11.039683+00:00",
+      "until": "2026-10-15T11:02:11.039659+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "RENDERUSDT",
