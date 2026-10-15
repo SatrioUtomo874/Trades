@@ -400,3 +400,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T00:49:26.989026+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## LAUSDT — SELL
+
+Trade ID: `LAUSDT-20261014-232313-CE9929`
+
+### Setup
+
+- Price Now Reference: 0.05997
+- Entry: 0.06243
+- Reason Entry: LAUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.06242 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 68.5 pada entry zone.
+- Price Exp: 0.05938
+- Reason Price Exp: Price Exp 0.05938: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.06386
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.06378; SL ditempatkan di luar invalidation.
+- TP: 0.05808
+- Reason TP: TP 0.05808 dipilih dari H4_LOWER_LOW dengan RR 3.04; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05938
+- Result Reason: Price Exp 0.05938: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-14T16:23:13.994946+00:00
+- Filled: -
+- Closed: 2026-10-15T00:49:42.203986+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
