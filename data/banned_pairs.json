@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T16:15:22.579265+00:00",
+  "saved_at": "2026-10-15T16:18:24.915326+00:00",
   "bans": [
     {
       "pair": "1000XECUSDT",
@@ -69,6 +69,13 @@
       "pair": "EVAAUSDT",
       "banned_at": "2026-10-15T10:08:51.966509+00:00",
       "until": "2026-10-15T18:08:51.966488+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "HYPEUSDT",
+      "banned_at": "2026-10-15T16:18:24.915178+00:00",
+      "until": "2026-10-16T00:18:24.915152+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
