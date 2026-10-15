@@ -499,3 +499,41 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T02:22:21.682741+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## PEOPLEUSDT — SELL
+
+Trade ID: `PEOPLEUSDT-20261014-231956-D21138`
+
+### Setup
+
+- Price Now Reference: 0.007686
+- Entry: 0.007828
+- Reason Entry: PEOPLEUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.007828 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 56.9 pada entry zone.
+- Price Exp: 0.007522
+- Reason Price Exp: Price Exp 0.007522: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.007786
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.007943; SL ditempatkan di luar invalidation.
+- TP: 0.007391
+- Reason TP: TP 0.007391 dipilih dari H4_LOWER_LOW dengan RR 3.47; target quality 86.
+
+### Management
+
+Trail #1
+- Old SL: 0.007954
+- New SL: 0.007786
+- Price: 0.007632
+- Reason: Auto trail [REJECTION_STRUCTURE]: rejection SWEEP: SL di lower high M15 0.007774 (buffer ATR).
+- Time: 15-10-2026, 08:46 WIB
+
+### Result
+
+- Result: TP
+- Exit Price: 0.00739
+- Result Reason: TP 0.007391 dipilih dari H4_LOWER_LOW dengan RR 3.47; target quality 86.
+- PnL: 5.595298926928972917731221257%
+- Created: 2026-10-14T16:19:56.501590+00:00
+- Filled: 2026-10-14T17:01:06.516699+00:00
+- Closed: 2026-10-15T02:23:12.836741+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
