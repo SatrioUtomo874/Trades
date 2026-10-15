@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T03:03:20.256963+00:00",
+  "saved_at": "2026-10-15T03:28:05.456022+00:00",
   "bans": [
     {
       "pair": "BANANAUSDT",
@@ -69,6 +69,13 @@
       "pair": "RENDERUSDT",
       "banned_at": "2026-10-15T02:24:27.747264+00:00",
       "until": "2026-10-15T10:24:27.747241+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "XAIUSDT",
+      "banned_at": "2026-10-15T03:28:05.455868+00:00",
+      "until": "2026-10-15T11:28:05.455844+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     }
