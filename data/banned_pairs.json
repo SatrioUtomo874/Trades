@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T01:57:15.274862+00:00",
+  "saved_at": "2026-10-15T02:22:30.888808+00:00",
   "bans": [
+    {
+      "pair": "BANANAUSDT",
+      "banned_at": "2026-10-15T02:22:30.888689+00:00",
+      "until": "2026-10-15T10:22:30.888672+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
     {
       "pair": "CTRUSDT",
       "banned_at": "2026-10-14T05:37:45.255268+00:00",
