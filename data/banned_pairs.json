@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T13:51:34.492754+00:00",
+  "saved_at": "2026-10-15T13:54:31.883877+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -62,6 +62,13 @@
       "pair": "KNCUSDT",
       "banned_at": "2026-10-15T12:30:42.702992+00:00",
       "until": "2026-10-15T20:30:42.702965+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "LPTUSDT",
+      "banned_at": "2026-10-15T13:54:31.883632+00:00",
+      "until": "2026-10-15T21:54:31.883604+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
