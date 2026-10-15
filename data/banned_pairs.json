@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-14T16:15:22.478225+00:00",
+  "saved_at": "2026-10-15T00:49:35.470464+00:00",
   "bans": [
     {
       "pair": "1000BONKUSDT",
@@ -29,6 +29,13 @@
       "until": "2026-10-15T05:37:45.255248+00:00",
       "reason": "Setup berakhir TRAIL; pair dikunci sementara dari scanner.",
       "source": "AUTO_TRAIL"
+    },
+    {
+      "pair": "IOSTUSDT",
+      "banned_at": "2026-10-15T00:49:35.470303+00:00",
+      "until": "2026-10-15T08:49:35.470279+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "LDOUSDT",
