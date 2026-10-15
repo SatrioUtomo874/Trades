@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T05:51:41.584940+00:00",
+  "saved_at": "2026-10-15T05:54:42.673505+00:00",
   "bans": [
     {
       "pair": "1INCHUSDT",
@@ -78,6 +78,13 @@
       "until": "2026-10-15T16:15:22.478065+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "NIGHTUSDT",
+      "banned_at": "2026-10-15T05:54:42.673349+00:00",
+      "until": "2026-10-15T13:54:42.673317+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ORDIUSDT",
