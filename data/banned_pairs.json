@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T13:54:51.837065+00:00",
+  "saved_at": "2026-10-15T14:54:59.463635+00:00",
   "bans": [
+    {
+      "pair": "1000XECUSDT",
+      "banned_at": "2026-10-15T14:54:59.463465+00:00",
+      "until": "2026-10-16T14:54:59.463433+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
+    },
     {
       "pair": "AAVEUSDT",
       "banned_at": "2026-10-15T12:24:25.373836+00:00",
