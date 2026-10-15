@@ -1197,3 +1197,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T11:03:30.378352+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## BSVUSDT — SELL
+
+Trade ID: `BSVUSDT-20261015-183051-5CAEB1`
+
+### Setup
+
+- Price Now Reference: 18.038
+- Entry: 18.32
+- Reason Entry: BSVUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity M15 18.254 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 73.9 pada entry zone.
+- Price Exp: 18.03
+- Reason Price Exp: Price Exp 18.03: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 18.51
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 18.478; SL ditempatkan di luar invalidation dan liquidity guard 18.47575.
+- TP: 17.9
+- Reason TP: TP 17.907 dipilih dari H1_SWING_LOW dengan RR 2.24; target quality 76.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 18.03
+- Result Reason: Price Exp 18.03: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T11:30:51.686217+00:00
+- Filled: -
+- Closed: 2026-10-15T11:31:06.462366+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
