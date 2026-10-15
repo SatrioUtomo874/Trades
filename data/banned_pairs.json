@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T05:47:48.076635+00:00",
+  "saved_at": "2026-10-15T05:51:41.584940+00:00",
   "bans": [
     {
       "pair": "1INCHUSDT",
@@ -97,6 +97,13 @@
       "pair": "PIEVERSEUSDT",
       "banned_at": "2026-10-15T03:02:11.039683+00:00",
       "until": "2026-10-15T11:02:11.039659+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "QTUMUSDT",
+      "banned_at": "2026-10-15T05:51:41.584772+00:00",
+      "until": "2026-10-15T13:51:41.584723+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
