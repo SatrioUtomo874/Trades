@@ -2490,6 +2490,25 @@ class GitHubStore:
 
         return await asyncio.to_thread(request)
 
+    async def list_dir(self, path: str) -> list[str]:
+        def request() -> list[str]:
+            response = requests.get(
+                self._url(path),
+                headers=self._headers(),
+                params={"ref": self.branch},
+                timeout=GITHUB_REQUEST_SECONDS,
+            )
+            if response.status_code == 404:
+                return []
+            if response.status_code >= 400:
+                raise RuntimeError(f"GitHub LIST {path}: HTTP {response.status_code}: {response.text[:300]}")
+            body = response.json()
+            if not isinstance(body, list):
+                return []
+            return [str(item.get("name")) for item in body if item.get("type") == "file"]
+
+        return await asyncio.to_thread(request)
+
     async def delete_file(
         self,
         path: str,
@@ -2783,6 +2802,24 @@ SCAN_MIN_API_HEADROOM_PCT = _cfg_float("SCAN_MIN_API_HEADROOM_PCT", 10.0, 0.0, 9
 SCAN_READY_RETRY_SECONDS = _cfg_float("SCAN_READY_RETRY_SECONDS", 300.0, 30.0, 3600.0)
 SCAN_CYCLE_TIME_BUDGET_SECONDS = _cfg_float("SCAN_CYCLE_TIME_BUDGET_SECONDS", 240.0, 30.0, 3600.0)
 RESEARCH_MIN_BUCKET_SAMPLE = _cfg_int("RESEARCH_MIN_BUCKET_SAMPLE", 30, 5, 10000)
+RESEARCH_AUTO_EXPORT_HOURS = _cfg_float("RESEARCH_AUTO_EXPORT_HOURS", 6.0, 0.25, 168.0)
+RESEARCH_EXPORT_BATCH = _cfg_int("RESEARCH_EXPORT_BATCH", 25, 1, 1000)
+RESEARCH_NEAR_FULL_PCT = _cfg_float("RESEARCH_NEAR_FULL_PCT", 80.0, 30.0, 95.0)
+RESEARCH_DB_MAX_MB = _cfg_float("RESEARCH_DB_MAX_MB", 50.0, 5.0, 5000.0)
+RESEARCH_PUSH_DIR = "data/research/"
+
+
+def _gz_lines(raw: bytes | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        return [ln for ln in gzip.decompress(raw).decode("utf-8").splitlines() if ln.strip()]
+    except (OSError, EOFError, UnicodeDecodeError):
+        return []
+
+
+def _gz_pack(lines: list[str]) -> bytes:
+    return gzip.compress(("\n".join(lines) + "\n").encode("utf-8"), 6)
 EST_FEE_PCT_PER_SIDE = _cfg_float("EST_FEE_PCT_PER_SIDE", 0.05, 0.0, 5.0)
 EST_SLIPPAGE_PCT_PER_SIDE = _cfg_float("EST_SLIPPAGE_PCT_PER_SIDE", 0.03, 0.0, 5.0)
 
@@ -3003,12 +3040,15 @@ _SCHEMA_V1 = (
 )
 
 
+RESEARCH_DB_NAME = "tradingbot_research_v1.sqlite3"
+
+
 class ResearchStore:
     """SQLite stdlib; satu writer, transaksi singkat, tanpa network I/O di dalam transaksi."""
 
     def __init__(self, data_dir: str) -> None:
         self.root = Path(data_dir)
-        self.path = self.root / "research.sqlite3"
+        self.path = self.root / RESEARCH_DB_NAME
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
         self.ok = False
@@ -3235,7 +3275,7 @@ class ResearchStore:
         rows = self._q("SELECT c.pair, j.cursor_ms, j.to_ms FROM replay_jobs j JOIN candidates c ON c.candidate_id=j.candidate_id WHERE j.status IN ('PENDING','RUNNING')")
         return [(r[0], int(r[1]), int(r[2])) for r in rows]
 
-    def save_replay_result(self, candidate_id: str, strategy_version: str, outcome: str, metrics: dict[str, Any], *, parameter_set_id: str = "baseline") -> bool:
+    def save_replay_result(self, candidate_id: str, strategy_version: str, outcome: str, metrics: dict[str, Any], *, parameter_set_id: str = "baseline", created_at: str | None = None) -> bool:
         replay_id = hashlib.sha1(f"{candidate_id}|{REPLAY_ENGINE_VERSION}|{parameter_set_id}".encode()).hexdigest()[:24]
 
         def run(conn: sqlite3.Connection) -> bool:
@@ -3244,7 +3284,7 @@ class ResearchStore:
                        realized_r, gross_pnl, net_pnl, metrics_json, created_at_utc, parameter_set_id)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (replay_id, candidate_id, strategy_version, REPLAY_ENGINE_VERSION, outcome, metrics.get("net_r"),
-                 metrics.get("gross_r"), metrics.get("net_r"), json.dumps(metrics, ensure_ascii=False, default=str), _r_iso(), parameter_set_id),
+                 metrics.get("gross_r"), metrics.get("net_r"), json.dumps(metrics, ensure_ascii=False, default=str), created_at or _r_iso(), parameter_set_id),
             )
             return cur.rowcount > 0
         return self._tx(run)
@@ -3285,6 +3325,83 @@ class ResearchStore:
                 (run_id, parameter_set_id, data_window, json.dumps(metrics, ensure_ascii=False, default=str), _r_iso()),
             )
         self._tx(run)
+
+    def replay_export_rows(self, after_ts: str, limit: int = 400) -> list[dict[str, Any]]:
+        rows = self._q(
+            """SELECT r.candidate_id, r.outcome, r.metrics_json, c.payload_json, r.created_at_utc, r.parameter_set_id
+               FROM replay_results r JOIN candidates c ON c.candidate_id=r.candidate_id
+               WHERE r.created_at_utc > ? ORDER BY r.created_at_utc LIMIT ?""", (after_ts, limit))
+        return [{"candidate_id": a, "outcome": b, "metrics": json.loads(c), "candidate": json.loads(d), "created_at_utc": e, "parameter_set_id": f}
+                for a, b, c, d, e, f in rows]
+
+    def count_replay_after(self, after_ts: str) -> int:
+        return int(self._q("SELECT COUNT(*) FROM replay_results WHERE created_at_utc > ?", (after_ts,))[0][0])
+
+    def count_candidates_after(self, after_ts: str) -> int:
+        return int(self._q("SELECT COUNT(*) FROM candidates WHERE updated_at_utc > ?", (after_ts,))[0][0])
+
+    def candidates_export_rows(self, after_ts: str, limit: int = 800) -> list[dict[str, Any]]:
+        rows = self._q("SELECT payload_json, updated_at_utc FROM candidates WHERE updated_at_utc > ? ORDER BY updated_at_utc LIMIT ?", (after_ts, limit))
+        out = []
+        for pj, ts in rows:
+            rec = json.loads(pj)
+            rec["_updated_at_utc"] = ts
+            out.append(rec)
+        return out
+
+    def import_history(self, candidates: list[dict[str, Any]], results: list[dict[str, Any]]) -> tuple[int, int]:
+        """Pulihkan data dari GitHub; INSERT OR IGNORE agar data live tidak tertimpa."""
+        def run(conn: sqlite3.Connection) -> tuple[int, int]:
+            nc = nr = 0
+            for rec in candidates:
+                rec = {k: v for k, v in rec.items() if not k.startswith("_")}
+                if not rec.get("candidate_id") or not rec.get("pair"):
+                    continue
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO candidates(candidate_id, schema_version, created_at_utc, updated_at_utc, pair, state,
+                           strategy_version, payload_json, next_evaluate_after_utc, expires_at_utc) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (rec["candidate_id"], int(rec.get("schema_version", 1)), rec.get("created_at_utc") or _r_iso(), rec.get("updated_at_utc") or _r_iso(),
+                     rec["pair"], rec.get("state") or "", rec.get("strategy_version"), json.dumps(rec, ensure_ascii=False, default=str),
+                     rec.get("next_evaluate_after_utc"), rec.get("expires_at_utc")))
+                nc += cur.rowcount
+            for res in results:
+                m = res.get("metrics") or {}
+                rid = hashlib.sha1(f"{res['candidate_id']}|{m.get('replay_engine_version', REPLAY_ENGINE_VERSION)}|{res.get('parameter_set_id', 'baseline')}".encode()).hexdigest()[:24]
+                try:
+                    cur = conn.execute(
+                        """INSERT OR IGNORE INTO replay_results(replay_id, candidate_id, strategy_version, replay_engine_version, outcome,
+                               realized_r, gross_pnl, net_pnl, metrics_json, created_at_utc, parameter_set_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (rid, res["candidate_id"], (res.get("candidate") or {}).get("strategy_version"), m.get("replay_engine_version", REPLAY_ENGINE_VERSION),
+                         str(m.get("outcome") or res.get("outcome") or ""), m.get("net_r"), m.get("gross_r"), m.get("net_r"),
+                         json.dumps(m, ensure_ascii=False, default=str), res.get("created_at_utc") or _r_iso(), res.get("parameter_set_id", "baseline")))
+                    nr += cur.rowcount
+                except sqlite3.IntegrityError:
+                    continue
+            return nc, nr
+        return self._tx(run)
+
+    def purge_old(self, days: float) -> int:
+        cutoff = _r_iso(_r_now() - timedelta(days=days))
+        def run(conn: sqlite3.Connection) -> int:
+            n = conn.execute("DELETE FROM candidate_events WHERE timestamp_utc < ?", (cutoff,)).rowcount
+            n += conn.execute("DELETE FROM replay_jobs WHERE status IN ('DONE','FAILED') AND updated_at_utc < ?", (cutoff,)).rowcount
+            return n
+        return self._tx(run)
+
+    def db_size_bytes(self) -> int:
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                total += Path(str(self.path) + suffix).stat().st_size
+            except OSError:
+                pass
+        return total
+
+    def table_counts(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for (name,) in self._q("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+            out[name] = int(self._q(f'SELECT COUNT(*) FROM "{name}"')[0][0])
+        return out
 
     def stats(self) -> dict[str, Any]:
         return {
@@ -9081,6 +9198,12 @@ class TradingEngine:
         tolerance_floor = initial_conf * SCAN_VALIDATION_TOLERANCE
         within_tolerance = final_conf >= tolerance_floor
         if not valid or not within_tolerance:
+            codes = raw.get("reason_codes") if isinstance(raw, dict) else None
+            code = (str(codes[0]) if codes else "VALIDATOR_INVALID") if not valid else "CONFIDENCE_DROP"
+            candidate["_validation_reject"] = {
+                "code": code, "text": str(reason or "")[:160], "initial": float(initial_conf),
+                "final": float(final_conf), "floor": float(tolerance_floor),
+            }
             log.info(
                 "[SCAN] validator reject %s | initial=%s final=%s floor=%s valid=%s reason=%s",
                 candidate["pair"], decimal_to_str(initial_conf), decimal_to_str(final_conf),
@@ -9405,6 +9528,12 @@ class TradingEngine:
         self._last_state_export = 0.0
         self._strategy_module_ref: Any = None
         self._replay_pending_ids: set[str] = set()
+        self._validation_reason_totals: dict[str, int] = {}
+        self._research_saved_on = False
+        self._export_marker: dict[str, Any] = {"replay": "", "cand": "", "trades": 0, "last": ""}
+        self._last_auto_export = 0.0
+        self._export_task: asyncio.Task[Any] | None = None
+        self._last_export_info: dict[str, Any] = {}
         self._sweep: dict[str, Any] = {"slot": None, "done": set()}
         self._research_day: tuple[str, int] = ("", 0)
         self._day_anchor: tuple[str, Decimal] | None = None
@@ -9434,10 +9563,11 @@ class TradingEngine:
         await self._load_runtime_settings()
         await self._load_sim_account()
         await self._load_research_state()
-        if RESEARCH_ENABLED:
-            ok, info = await self._open_research_store(ephemeral_ok=False)
+        if RESEARCH_ENABLED or self._research_saved_on:
+            ok, info = await self._open_research_store(ephemeral_ok=True)
             if ok:
                 self.research_worker.start()
+                await self._after_research_open()
                 log.info("[RESEARCH] aktif | dir=%s", info)
             else:
                 log.warning("[RESEARCH] diminta aktif tetapi storage tidak tersedia: %s", info)
@@ -9445,7 +9575,15 @@ class TradingEngine:
     async def _research_shutdown(self) -> None:
         try:
             await self.research_worker.stop()
+            task, self._export_task = self._export_task, None
+            if task is not None and not task.done():
+                task.cancel()
             await self.ledger.flush()
+            if self.research_store is not None and self.research_store.ok:
+                try:
+                    await asyncio.wait_for(self._auto_export_research("SHUTDOWN"), 25)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[RESEARCH] export saat shutdown gagal: %s", exc)
             await self._export_research_state(force=True)
         finally:
             if self.research_store is not None:
@@ -9465,6 +9603,7 @@ class TradingEngine:
                             setattr(self, attr, val)
                 if guard.get("trail_mode") in {"ladder", "structure"}:
                     self.trail_mode = guard["trail_mode"]
+                self._research_saved_on = bool(guard.get("research", False))
                 risk = data.get("risk") or {}
                 mode = str(risk.get("mode") or "").upper()
                 if mode in {"LEGACY_NOTIONAL", "RISK_BUDGET"}:
@@ -9483,7 +9622,7 @@ class TradingEngine:
 
     async def _save_runtime_settings(self) -> None:
         payload = {"version": 1, "saved_at": iso_utc(), "risk": dict(self._risk_cfg),
-                   "guard": {"trail_mode": self.trail_mode, "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
+                   "guard": {"trail_mode": self.trail_mode, "research": self._research_saved_on, "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
                              "drawdown": None if self.drawdown_percent is None else str(self.drawdown_percent)}}
         await self.github.replace_file(RUNTIME_SETTINGS_PATH, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "settings: risk")
 
@@ -9550,6 +9689,7 @@ class TradingEngine:
                 "budget_stopped", "memory_skipped", "validation_skipped_topn", "rate_limited", "sweep_covered", "sweep_total", "sim_margin_blocked")
         out: dict[str, Any] = {k: 0 for k in keys}
         out["errors"] = {}
+        out["validation_reasons"] = {}
         return out
 
     def _observe_candidate(self, rec: CandidateRecord) -> CandidateRecord:
@@ -9736,7 +9876,7 @@ class TradingEngine:
 
     def _research_summary(self) -> dict[str, Any]:
         return {"candidates": self.ledger.counts(), "funnel_last": self._funnel_last, "funnel_history": list(self._funnel_history)[-12:],
-                "cooldowns": self._recheck.counts_by_reason(time.time()), "research": self.research_worker.status(),
+                "cooldowns": self._recheck.counts_by_reason(time.time()), "validation_reject_reasons": dict(self._validation_reason_totals), "research": self.research_worker.status(),
                 "store": self.research_store.stats() if self.research_store else None, "risk": {k: v for k, v in self._risk_cfg.items()},
                 "scan_durations": list(self._scan_durations)}
 
@@ -9779,6 +9919,7 @@ class TradingEngine:
             f"✅ Validasi lolos {f.get('validation_pass', 0)} • tolak {f.get('validation_reject', 0)} • error {f.get('validation_error', 0)} • risk-reject {f.get('risk_rejects', 0)}",
             f"📥 Pending dibuat {f.get('pending_created', 0)}",
             f"🧹 Tersapu H4 ini {f.get('sweep_covered', 0)}/{f.get('sweep_total', 0)} koin",
+            f"🧾 Tolak validator (sejak start) {self._validation_reason_totals or '-'}",
         ]
         top = self.ledger.top(8, ACTIVE_CANDIDATE_STATES)
         top_rows = [f"{r.pair} {r.direction or '-'} {r.state} conf {r.confidence:.0f} • {r.state_reason or '-'}" for r in top] or ["belum ada"]
@@ -9794,6 +9935,282 @@ class TradingEngine:
             lines.append(f"⚠️ Error per kategori: {errs}")
         await self.reply("\n".join(lines))
 
+    # -- auto-export & pemulihan data riset (kontinu lintas restart)
+    async def _after_research_open(self) -> None:
+        await self._load_export_marker()
+        await self._restore_research_history()
+        if self._export_task is None or self._export_task.done():
+            self._export_task = asyncio.create_task(self._research_export_loop(), name="research-export")
+
+    async def _load_export_marker(self) -> None:
+        try:
+            raw, _ = await self.github.get_file(RESEARCH_PUSH_DIR + "export_state.json")
+            if raw:
+                data = json.loads(raw.decode("utf-8"))
+                self._export_marker.update({k: data.get(k, self._export_marker[k]) for k in self._export_marker})
+        except Exception as exc:  # noqa: BLE001
+            log.info("[RESEARCH] export_state tidak dimuat: %s", exc)
+
+    async def _restore_research_history(self) -> None:
+        """Muat shard bulan ini dan 2 bulan sebelumnya dari GitHub ke SQLite (INSERT OR IGNORE)."""
+        store = self.research_store
+        if store is None or not store.ok:
+            return
+        months = []
+        ref = now_utc()
+        for back in range(3):
+            y, m = ref.year, ref.month - back
+            while m <= 0:
+                y, m = y - 1, m + 12
+            months.append(f"{y}-{m:02d}")
+        cands: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
+        for mon in months:
+            try:
+                raw, _ = await self.github.get_file(f"{RESEARCH_PUSH_DIR}replay_{mon}.jsonl.gz")
+                for ln in _gz_lines(raw):
+                    row = json.loads(ln)
+                    results.append(row)
+                    if row.get("candidate"):
+                        cands.append(row["candidate"])
+                raw, _ = await self.github.get_file(f"{RESEARCH_PUSH_DIR}candidates_{mon}.jsonl.gz")
+                cands.extend(json.loads(ln) for ln in _gz_lines(raw))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[RESEARCH] restore %s gagal: %s", mon, exc)
+        if cands or results:
+            nc, nr = await asyncio.to_thread(store.import_history, cands, results)
+            log.info("[RESEARCH] dipulihkan dari GitHub: kandidat +%s, replay +%s", nc, nr)
+
+    async def _export_due_reason(self) -> str | None:
+        store = self.research_store
+        if store is None or not store.ok:
+            return None
+        marker = self._export_marker
+        pending = await asyncio.to_thread(store.count_replay_after, marker["replay"])
+        if pending >= RESEARCH_EXPORT_BATCH:
+            return "BATCH"
+        quota = (100.0 if self.research_ephemeral else RESEARCH_MAX_DISK_MB) * 1024 * 1024
+        disk_pct = self.candle_files.disk_usage_bytes() / quota * 100.0 if self.candle_files else 0.0
+        db_pct = store.db_size_bytes() / (RESEARCH_DB_MAX_MB * 1024 * 1024) * 100.0
+        if max(disk_pct, db_pct) >= RESEARCH_NEAR_FULL_PCT:
+            return "NEAR_FULL"
+        if (time.time() - self._last_auto_export) / 3600.0 >= RESEARCH_AUTO_EXPORT_HOURS:
+            cand_pending = await asyncio.to_thread(store.count_candidates_after, marker["cand"])
+            if pending > 0 or cand_pending > 0 or len(self.history_records) != int(marker.get("trades") or 0):
+                return "SCHEDULED"
+        return None
+
+    async def _research_export_loop(self) -> None:
+        while True:
+            await asyncio.sleep(300)
+            try:
+                if self.research_store is None or self._resource.level != "NORMAL":
+                    continue
+                reason = await self._export_due_reason()
+                if reason:
+                    await self._auto_export_research(reason)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[%s] auto-export gagal: %s", ErrorCategory.PERSISTENCE_ERROR, exc)
+
+    async def _auto_export_research(self, reason: str) -> dict[str, Any]:
+        """Append idempoten ke shard bulanan (gzip) di GitHub; trades CSV hanya bila berubah."""
+        info: dict[str, Any] = {"reason": reason, "replay": 0, "candidates": 0, "trades": False, "errors": []}
+        store = self.research_store if self.research_store and self.research_store.ok else None
+        marker = self._export_marker
+        base = RESEARCH_PUSH_DIR
+        if store is not None:
+            rows = await asyncio.to_thread(store.replay_export_rows, marker["replay"], 400)
+            by_month: dict[str, list[dict[str, Any]]] = {}
+            for row in rows:
+                by_month.setdefault(str(row["created_at_utc"])[:7], []).append(row)
+            for mon, items in by_month.items():
+                path = f"{base}replay_{mon}.jsonl.gz"
+                try:
+                    raw, _ = await self.github.get_file(path)
+                    lines = _gz_lines(raw)
+                    seen = set()
+                    for ln in lines:
+                        try:
+                            o = json.loads(ln)
+                            seen.add(f"{o.get('candidate_id')}|{o.get('parameter_set_id', 'baseline')}|{(o.get('metrics') or {}).get('replay_engine_version')}")
+                        except ValueError:
+                            continue
+                    added = 0
+                    for it in items:
+                        key = f"{it['candidate_id']}|{it['parameter_set_id']}|{(it['metrics'] or {}).get('replay_engine_version')}"
+                        if key in seen:
+                            continue
+                        lines.append(json.dumps({"candidate_id": it["candidate_id"], "parameter_set_id": it["parameter_set_id"], "created_at_utc": it["created_at_utc"],
+                                                 "candidate": it["candidate"], "metrics": it["metrics"]}, ensure_ascii=False, separators=(",", ":"), default=str))
+                        added += 1
+                    if added:
+                        await self.github.replace_file(path, _gz_pack(lines), f"research: replay shard {mon} (+{added})")
+                    info["replay"] += added
+                    marker["replay"] = max(marker["replay"], max(str(i["created_at_utc"]) for i in items))
+                except Exception as exc:  # noqa: BLE001
+                    info["errors"].append(f"replay {mon}: {exc}")
+                    break
+            min_conf = float(self.scan_threshold) - 15.0
+            crows = await asyncio.to_thread(store.candidates_export_rows, marker["cand"], 800)
+            keep = [c for c in crows if (c.get("confidence") or 0) >= min_conf or c.get("replay_eligible") or c.get("linked_trade_id")]
+            by_month_c: dict[str, list[dict[str, Any]]] = {}
+            for c in keep:
+                by_month_c.setdefault(str(c.get("created_at_utc") or "")[:7] or now_utc().strftime("%Y-%m"), []).append(c)
+            for mon, items in by_month_c.items():
+                path = f"{base}candidates_{mon}.jsonl.gz"
+                try:
+                    raw, _ = await self.github.get_file(path)
+                    table: dict[str, str] = {}
+                    for ln in _gz_lines(raw):
+                        try:
+                            table[json.loads(ln)["candidate_id"]] = ln
+                        except (ValueError, KeyError):
+                            continue
+                    for c in items:
+                        c = {k: v for k, v in c.items() if not k.startswith("_")}
+                        table[c["candidate_id"]] = json.dumps(c, ensure_ascii=False, separators=(",", ":"), default=str)
+                    await self.github.replace_file(path, _gz_pack(sorted(table.values())), f"research: candidates shard {mon}")
+                    info["candidates"] += len(items)
+                except Exception as exc:  # noqa: BLE001
+                    info["errors"].append(f"candidates {mon}: {exc}")
+                    break
+            if crows and not info["errors"]:
+                marker["cand"] = max(str(c.get("_updated_at_utc") or "") for c in crows)
+        if len(self.history_records) != int(marker.get("trades") or 0) and self.history_records:
+            try:
+                rows_t = []
+                for rec in self.history_records[-3000:]:
+                    rows_t.append({"trade_id": rec.get("trade_id"), "candidate_id": rec.get("candidate_id"), "pair": rec.get("pair"), "direction": rec.get("direction"),
+                                   "result": rec.get("result"), "mode": "REAL" if rec.get("real_enabled") else "SIM", "confidence": rec.get("strategy_confidence"),
+                                   "entry": rec.get("entry"), "fill_price": rec.get("fill_price"), "tp": rec.get("tp"), "pnl_percent": rec.get("pnl_percent"),
+                                   "r_net_est": record_realized_r(rec, net=True), "strategy_version": rec.get("strategy_version"),
+                                   "created_at": rec.get("created_at"), "closed_at": rec.get("closed_at")})
+                buf = io.StringIO()
+                w = csv.DictWriter(buf, fieldnames=list(rows_t[0].keys()))
+                w.writeheader()
+                w.writerows(rows_t)
+                await self.github.replace_file(base + "trades_dataset.csv", buf.getvalue().encode("utf-8"), "research: trades dataset")
+                marker["trades"] = len(self.history_records)
+                info["trades"] = True
+            except Exception as exc:  # noqa: BLE001
+                info["errors"].append(f"trades: {exc}")
+        marker["last"] = iso_utc()
+        try:
+            await self.github.replace_file(base + "export_state.json", json.dumps(marker, ensure_ascii=False).encode("utf-8"), "research: export state")
+            self._last_auto_export = time.time()
+        except Exception as exc:  # noqa: BLE001
+            info["errors"].append(f"state: {exc}")
+        if store is not None and not info["errors"] and reason in {"NEAR_FULL", "BATCH", "SCHEDULED"}:
+            try:
+                await asyncio.to_thread(store.purge_old, 3.0)
+                if self.candle_files is not None:
+                    quota = int((100.0 if self.research_ephemeral else RESEARCH_MAX_DISK_MB) * 1024 * 1024 * 0.5)
+                    protected = await asyncio.to_thread(store.pending_job_ranges)
+                    await asyncio.to_thread(self.candle_files.prune, quota, protected)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[RESEARCH] housekeeping gagal: %s", exc)
+        self._last_export_info = info
+        log.info("[RESEARCH] auto-export %s: %s", reason, {k: v for k, v in info.items() if k != "errors"} | {"errors": len(info["errors"])})
+        return info
+
+    # -- reset data riset (ganti strategy)
+    async def _start_resetresearch(self) -> None:
+        if self.flow is not None:
+            await self.reply("Masih ada sesi yang sedang berjalan.\nGunakan /back terlebih dahulu.")
+            return
+        self.flow = {"kind": "RESETRESEARCH", "step": "CONFIRM"}
+        await self.reply(
+            card("⚠️ RESET DATA RISET", [
+                "Dipakai saat ganti strategy: kandidat, replay, cooldown, dan sapuan H4 mulai dari nol.",
+                "Data riset di GitHub (data/research/) diarsipkan atau dihapus.",
+                "✅ Tidak disentuh: histori trade & /stats, ban, saldo simulasi, cache candle M1.",
+            ])
+            + "\n\n1. Arsipkan data lama lalu reset (disarankan)\n2. Hapus permanen lalu reset\n3. Batal"
+        )
+
+    async def _handle_resetresearch_input(self, text: str) -> None:
+        answer = str(text or "").strip()
+        if answer == "3":
+            self.flow = None
+            await self.reply("✅ RESET DATA RISET dibatalkan.")
+            return
+        if answer not in {"1", "2"}:
+            await self.reply("Jawab 1 (arsip + reset), 2 (hapus + reset), atau 3 (batal).")
+            return
+        self.flow = None
+        try:
+            await self.reset_research_data(archive=answer == "1")
+        except Exception as exc:
+            log.exception("RESET RISET gagal.")
+            await self.reply(f"❌ /resetresearch gagal.\n\n{exc}")
+
+    async def reset_research_data(self, archive: bool) -> None:
+        stamp = now_local().strftime("%Y%m%d-%H%M%S")
+        was_on = self.research_worker.enabled or self._research_saved_on
+        await self.research_worker.stop()
+        task, self._export_task = self._export_task, None
+        if task is not None and not task.done():
+            task.cancel()
+        archived = removed = 0
+        errors: list[str] = []
+        names = [n for n in await self.github.list_dir(RESEARCH_PUSH_DIR.rstrip("/"))]
+        targets = [(RESEARCH_PUSH_DIR + n, n) for n in names] + [(CANDIDATES_STATE_PATH, "candidates_state.json")]
+        for path, name in targets:
+            try:
+                if archive:
+                    raw, _ = await self.github.get_file(path)
+                    if raw is None:
+                        continue
+                    await self.github.replace_file(f"{RESEARCH_PUSH_DIR}archive/{stamp}/{name}", raw, f"research: arsip {name}")
+                    archived += 1
+                if path != CANDIDATES_STATE_PATH and await self.github.delete_file(path, f"research: reset {name}"):
+                    removed += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{name}: {exc}")
+
+        directory = str(self.research_store.root) if self.research_store is not None else (BOT_DATA_DIR or str(Path(tempfile.gettempdir()) / "bot_research"))
+        if self.research_store is not None:
+            await asyncio.to_thread(self.research_store.close)
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                (Path(directory) / (RESEARCH_DB_NAME + suffix)).unlink()
+            except OSError:
+                pass
+        self.research_store = None
+        self.candle_files = None
+        self.ledger = CandidateLedger(store=None)
+        self._recheck = RecheckBook()
+        self._sweep = {"slot": None, "done": set()}
+        self._retry_counts.clear()
+        self._replay_pending_ids.clear()
+        self._validation_reason_totals.clear()
+        self._funnel_history.clear()
+        self._funnel_last = {}
+        self._export_marker = {"replay": "", "cand": "", "trades": 0, "last": ""}
+        self._last_auto_export = 0.0
+        self._research_day = ("", 0)
+        reopened = "OFF"
+        if was_on:
+            ok, info = await self._open_research_store(ephemeral_ok=True)
+            if ok:
+                self.research_worker.start()
+                await self._after_research_open()
+                reopened = "ON (database baru)"
+            else:
+                reopened = f"gagal dibuka: {info}"
+        await self._export_research_state(force=True)
+        rows = [
+            f"Arsip   {archived} file → {RESEARCH_PUSH_DIR}archive/{stamp}/" if archive else "Arsip   dilewati (hapus permanen)",
+            f"Dihapus {removed} file di {RESEARCH_PUSH_DIR}",
+            "Kandidat, cooldown, sapuan H4, dan database lokal: direset",
+            f"Research {reopened}",
+        ]
+        if errors:
+            rows.append("Gagal: " + "; ".join(errors)[:300])
+        await self.reply(card("♻️ DATA RISET DIRESET", rows) + "\n\nScan akan menyapu ulang seluruh koin dengan strategy baru. Untuk mereset statistik trade gunakan /resetstats.")
+
     async def _handle_research_command(self, text: str) -> None:
         parts = text.split()
         sub = parts[1].lower() if len(parts) > 1 else "status"
@@ -9804,11 +10221,51 @@ class TradingEngine:
                 await self.reply(card("🔬 RESEARCH", ["Tidak bisa diaktifkan.", str(info)]))
                 return
             rw.start()
-            note = "⚠️ MODE SEMENTARA: data hilang saat Render restart/tidur. Ringkasan kandidat tetap disimpan ke GitHub." if self.research_ephemeral else "Penyimpanan permanen aktif."
+            self._research_saved_on = True
+            await self._after_research_open()
+            try:
+                await self._save_runtime_settings()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[RESEARCH] pengaturan gagal disimpan: %s", exc)
+            note = "Disk sementara, tapi data diekspor otomatis ke GitHub (data/research/) dan dipulihkan saat bot start." if self.research_ephemeral else "Penyimpanan permanen aktif; data tetap diekspor otomatis ke GitHub."
             await self.reply(card("🔬 RESEARCH ON", [f"Dir {info}", note, f"Batas disk {min(RESEARCH_MAX_DISK_MB, 100.0 if self.research_ephemeral else RESEARCH_MAX_DISK_MB):.0f} MB", "Berhenti otomatis bila RAM/API ketat atau proteksi real bermasalah."]))
+            return
+        if sub == "reset":
+            await rw.stop()
+            directory = BOT_DATA_DIR or str(Path(tempfile.gettempdir()) / "bot_research")
+            if self.research_store is not None:
+                directory = str(self.research_store.root)
+                await asyncio.to_thread(self.research_store.close)
+            removed: list[str] = []
+            for suffix in ("", "-wal", "-shm"):
+                target = Path(directory) / (RESEARCH_DB_NAME + suffix)
+                try:
+                    target.unlink()
+                    removed.append(target.name)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    removed.append(f"{target.name} (gagal: {exc})")
+            self.research_store = None
+            self.candle_files = None
+            self.ledger.store = None
+            ok, info = await self._open_research_store(ephemeral_ok=True)
+            if ok:
+                rw.start()
+                await self._after_research_open()
+            await self.reply(card("🔬 RESEARCH RESET", [
+                f"Dihapus: {', '.join(removed) if removed else 'tidak ada file'}",
+                "Database baru dibuat dan worker dijalankan." if ok else f"Gagal membuka database baru: {info}",
+                "Data candle M1 yang sudah diunduh tidak dihapus.",
+            ]))
             return
         if sub == "off":
             await rw.stop()
+            self._research_saved_on = False
+            try:
+                await self._save_runtime_settings()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[RESEARCH] pengaturan gagal disimpan: %s", exc)
             await self.reply("🔬 Research dimatikan. Data yang sudah tersimpan tidak dihapus.")
             return
         st = rw.status()
@@ -9817,6 +10274,8 @@ class TradingEngine:
         if self.research_store and self.research_store.ok:
             try:
                 rows.append(f"Hasil replay {self.research_store.replay_counts()}")
+                rows.append(f"DB {Path(self.research_store.path).name} • tabel {self.research_store.table_counts()}")
+                rows.append(f"Auto-export GitHub: terakhir {self._export_marker.get('last') or '-'} • tiap {RESEARCH_AUTO_EXPORT_HOURS:g} jam / {RESEARCH_EXPORT_BATCH} hasil / {RESEARCH_NEAR_FULL_PCT:.0f}% penuh")
                 rows.append(f"Disk candle {self.candle_files.disk_usage_bytes() / 1024 / 1024:.1f} MB")
             except Exception as exc:  # noqa: BLE001
                 rows.append(f"Storage bermasalah: {type(exc).__name__}")
@@ -10279,7 +10738,11 @@ class TradingEngine:
                 if checked is None:
                     validator_missing += 1
                     funnel["validation_reject"] += 1
-                    self._after_validation(candidate, "VALIDATION_REJECT", "REJECTED_QUALITY", now_ts)
+                    rej = candidate.pop("_validation_reject", None) or {}
+                    vcode = str(rej.get("code") or "UNKNOWN")
+                    funnel["validation_reasons"][vcode] = funnel["validation_reasons"].get(vcode, 0) + 1
+                    self._validation_reason_totals[vcode] = self._validation_reason_totals.get(vcode, 0) + 1
+                    self._after_validation(candidate, f"VALIDATION_REJECT:{vcode}", "REJECTED_QUALITY", now_ts)
                 else:
                     checked["_candidate_id"] = candidate.get("_candidate_id")
                     validated.append(checked)
@@ -15837,9 +16300,10 @@ class TradingEngine:
             "/resetbalance - reset saldo simulasi ke $100\n"
             "/candidates [PAIR] - kandidat, funnel scan, alasan per pair\n"
             "/edge - R, bucket confidence, sapuan threshold, varian\n"
-            "/research on|off|status - replay M1 (default OFF)\n"
+            "/research on|off|status|reset - replay M1 (default OFF)\n"
             "/risk - sizing berbasis risiko (default LEGACY)\n"
             "/resetstats - arsipkan + reset stats (untuk tes strategy baru)\n"
+            "/resetresearch - reset data riset (kandidat/replay) saat ganti strategy\n"
             "/catatan [teks] - tambah catatan / tanpa teks = lihat catatan\n"
             "/reset - hapus seluruh pencatatan GitHub\n"
             "/analyze - generate full dataset + report, lalu kirim file Telegram\n"
@@ -15930,6 +16394,7 @@ class TradingEngine:
                     "/catatan",
                     "/reset",
                     "/resetstats",
+                    "/resetresearch",
                 }:
                     await self.reply(
                         "Masih ada sesi yang sedang berjalan.\n"
@@ -16115,6 +16580,10 @@ class TradingEngine:
                 await self._start_reset()
                 return
 
+            if command == "/resetresearch":
+                await self._start_resetresearch()
+                return
+
             if command == "/resetstats":
                 await self._start_resetstats()
                 return
@@ -16266,6 +16735,10 @@ class TradingEngine:
 
             if self.flow["kind"] == "RESETSTATS":
                 await self._handle_resetstats_input(text)
+                return
+
+            if self.flow["kind"] == "RESETRESEARCH":
+                await self._handle_resetresearch_input(text)
                 return
 
         await self.reply(
