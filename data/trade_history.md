@@ -1560,3 +1560,36 @@ Tidak ada trailing.
 - Filled: 2026-10-15T14:40:01.847030+00:00
 - Closed: 2026-10-15T15:03:36.058246+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## WIFUSDT — SELL
+
+Trade ID: `WIFUSDT-20261015-230841-B0216F`
+
+### Setup
+
+- Price Now Reference: 0.2022
+- Entry: 0.2034
+- Reason Entry: WIFUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.2033 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 78.4 pada entry zone.
+- Price Exp: 0.2015
+- Reason Price Exp: Price Exp 0.2015: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.2046
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.2042; SL ditempatkan di luar invalidation.
+- TP: 0.2007
+- Reason TP: TP 0.2007 dipilih dari H4_LOWER_LOW dengan RR 2.25; target quality 97.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2015
+- Result Reason: Price Exp 0.2015: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T16:08:41.886440+00:00
+- Filled: -
+- Closed: 2026-10-15T16:15:08.359204+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
