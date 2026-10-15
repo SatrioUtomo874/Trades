@@ -1,5 +1,13 @@
 {
   "version": 1,
-  "saved_at": "2026-10-15T09:34:55.873915+00:00",
-  "bans": []
+  "saved_at": "2026-10-15T09:38:53.730680+00:00",
+  "bans": [
+    {
+      "pair": "AAVEUSDT",
+      "banned_at": "2026-10-15T09:38:46.562193+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: AAVEUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=15.844) Margin pas ≈ $1.58.",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    }
+  ]
 }
