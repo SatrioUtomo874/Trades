@@ -999,3 +999,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T05:54:32.884102+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## MMTUSDT — SELL
+
+Trade ID: `MMTUSDT-20261015-124916-0C8BD4`
+
+### Setup
+
+- Price Now Reference: 0.1582
+- Entry: 0.1705
+- Reason Entry: MMTUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.170425 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 73.7 pada entry zone.
+- Price Exp: 0.1568
+- Reason Price Exp: Price Exp 0.1568: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1762
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_HIGH di 0.1759; SL ditempatkan di luar invalidation.
+- TP: 0.1565
+- Reason TP: TP 0.1565 dipilih dari H4_SELL_SIDE_LIQUIDITY dengan RR 2.46; target quality 65.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1568
+- Result Reason: Price Exp 0.1568: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T05:49:16.582817+00:00
+- Filled: -
+- Closed: 2026-10-15T05:54:48.505554+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
