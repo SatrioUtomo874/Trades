@@ -1263,3 +1263,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T11:43:34.360302+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## AAVEUSDT — SELL
+
+Trade ID: `AAVEUSDT-20261015-184555-1AECD4`
+
+### Setup
+
+- Price Now Reference: 149.54
+- Entry: 158.44
+- Reason Entry: AAVEUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity H1 158.42 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_BREAKER. Projected M15 RSI 84.5 pada entry zone.
+- Price Exp: 148.49
+- Reason Price Exp: Price Exp 148.49: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 161.68
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 161.47; SL ditempatkan di luar invalidation dan liquidity guard 161.498.
+- TP: 148.4
+- Reason TP: TP 148.4 dipilih dari H1_SWING_LOW dengan RR 3.10; target quality 70.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 148.49
+- Result Reason: Price Exp 148.49: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T11:45:55.777119+00:00
+- Filled: -
+- Closed: 2026-10-15T12:24:12.663912+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
