@@ -1032,3 +1032,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T05:54:48.505554+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## AVAXUSDT — SELL
+
+Trade ID: `AVAXUSDT-20261015-131552-27A41F`
+
+### Setup
+
+- Price Now Reference: 9.545
+- Entry: 10.066
+- Reason Entry: AVAXUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 10.065 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 73.3 pada entry zone.
+- Price Exp: 9.543
+- Reason Price Exp: Price Exp 9.543000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 10.392
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 10.306; SL ditempatkan di luar invalidation dan liquidity guard 10.36685.
+- TP: 9.32
+- Reason TP: TP 9.32 dipilih dari H4_SELL_SIDE_LIQUIDITY dengan RR 2.29; target quality 66.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 9.543
+- Result Reason: Price Exp 9.543000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T06:15:52.586444+00:00
+- Filled: -
+- Closed: 2026-10-15T06:15:58.469531+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
