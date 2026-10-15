@@ -867,3 +867,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T05:10:30.168707+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## 1INCHUSDT — SELL
+
+Trade ID: `1INCHUSDT-20261015-112007-861653`
+
+### Setup
+
+- Price Now Reference: 0.09121
+- Entry: 0.09517
+- Reason Entry: 1INCHUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.09516 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 72.6 pada entry zone.
+- Price Exp: 0.09111
+- Reason Price Exp: Price Exp 0.09111000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.09724
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.09713; SL ditempatkan di luar invalidation dan liquidity guard 0.0969173.
+- TP: 0.08937
+- Reason TP: TP 0.08937 dipilih dari H4_SELL_SIDE_LIQUIDITY dengan RR 2.80; target quality 64.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.09111
+- Result Reason: Price Exp 0.09111000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T04:20:07.889062+00:00
+- Filled: -
+- Closed: 2026-10-15T05:31:39.297835+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
