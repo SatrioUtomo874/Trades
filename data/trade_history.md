@@ -1494,3 +1494,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T13:54:40.156338+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## 1000XECUSDT — SELL
+
+Trade ID: `1000XECUSDT-20261015-193424-1722C5`
+
+### Setup
+
+- Price Now Reference: 0.006452
+- Entry: 0.006561
+- Reason Entry: 1000XECUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity M15 0.006534 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 62.3 pada entry zone.
+- Price Exp: 0.006381
+- Reason Price Exp: Price Exp 0.0063809999999999995: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.006592
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.006583; SL ditempatkan di luar invalidation.
+- TP: 0.006304
+- Reason TP: TP 0.006304 dipilih dari H1_SWING_LOW dengan RR 8.29; target quality 71.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.006592
+- Result Reason: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.006583; SL ditempatkan di luar invalidation.
+- PnL: -0.4724889498552049992379210486%
+- Created: 2026-10-15T12:34:24.963852+00:00
+- Filled: 2026-10-15T14:17:53.770755+00:00
+- Closed: 2026-10-15T14:54:48.143092+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
