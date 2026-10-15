@@ -834,3 +834,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T05:10:06.112135+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## ARKMUSDT — SELL
+
+Trade ID: `ARKMUSDT-20261015-094620-D104DE`
+
+### Setup
+
+- Price Now Reference: 0.12213
+- Entry: 0.1275
+- Reason Entry: ARKMUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.12739 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 61.4 pada entry zone.
+- Price Exp: 0.1195
+- Reason Price Exp: Price Exp 0.11956000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1287
+- Reason SL: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 0.128405; SL ditempatkan di luar invalidation dan liquidity guard 0.1280775.
+- TP: 0.1161
+- Reason TP: TP 0.11619 dipilih dari H4_LOWER_LOW dengan RR 9.71; target quality 79.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1195
+- Result Reason: Price Exp 0.11956000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T02:46:20.692665+00:00
+- Filled: -
+- Closed: 2026-10-15T05:10:30.168707+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
