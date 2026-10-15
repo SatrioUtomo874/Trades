@@ -1296,3 +1296,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T12:24:12.663912+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## DOODUSDT — SELL
+
+Trade ID: `DOODUSDT-20261015-171409-B14B57`
+
+### Setup
+
+- Price Now Reference: 0.001369
+- Entry: 0.001444
+- Reason Entry: DOODUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.001443 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 78.8 pada entry zone.
+- Price Exp: 0.001358
+- Reason Price Exp: Price Exp 0.0013579999999999998: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.001481
+- Reason SL: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 0.001478; SL ditempatkan di luar invalidation dan liquidity guard 0.001476375.
+- TP: 0.001345
+- Reason TP: TP 0.001345 dipilih dari H1_SWING_LOW dengan RR 2.68; target quality 70.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.001358
+- Result Reason: Price Exp 0.0013579999999999998: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-15T10:14:09.486325+00:00
+- Filled: -
+- Closed: 2026-10-15T12:30:03.772749+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
