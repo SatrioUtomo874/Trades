@@ -433,3 +433,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-15T00:49:42.203986+00:00
 - Strategy: SMC_VLT_RSI v2.2.0
+
+---
+
+## ORDIUSDT — SELL
+
+Trade ID: `ORDIUSDT-20261014-230922-62E619`
+
+### Setup
+
+- Price Now Reference: 3.977
+- Entry: 4.263
+- Reason Entry: ORDIUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 4.262 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 79.5 pada entry zone.
+- Price Exp: 3.952
+- Reason Price Exp: Price Exp 3.952: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 4.453
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 4.44778; SL ditempatkan di luar invalidation dan liquidity guard 4.444.
+- TP: 3.865
+- Reason TP: TP 3.865 dipilih dari H1_SWING_LOW dengan RR 2.09; target quality 64.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 3.952
+- Result Reason: Price Exp 3.952: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-14T16:09:22.283096+00:00
+- Filled: -
+- Closed: 2026-10-15T01:57:05.736243+00:00
+- Strategy: SMC_VLT_RSI v2.2.0
