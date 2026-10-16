@@ -659,3 +659,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T17:04:37.174130+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## REUSDT — SELL
+
+Trade ID: `REUSDT-20261016-163521-7C0F6F`
+
+### Setup
+
+- Price Now Reference: 0.4148
+- Entry: 0.4242
+- Reason Entry: REUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.4242 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 78.4 pada entry zone.
+- Price Exp: 0.4057
+- Reason Price Exp: Price Exp 0.4057: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.4323
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.4319; SL ditempatkan di luar invalidation.
+- TP: 0.3979
+- Reason TP: TP 0.3979 dipilih dari H1_SWING_LOW dengan RR 3.25; target quality 66.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.4057
+- Result Reason: Price Exp 0.4057: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-16T09:35:21.478999+00:00
+- Filled: -
+- Closed: 2026-10-16T17:05:18.658052+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
