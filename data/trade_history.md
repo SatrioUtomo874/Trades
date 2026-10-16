@@ -197,3 +197,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T11:18:43.166488+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## FIDAUSDT — SELL
+
+Trade ID: `FIDAUSDT-20261016-181414-12362F`
+
+### Setup
+
+- Price Now Reference: 0.01932
+- Entry: 0.02016
+- Reason Entry: FIDAUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.02016 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 85.8 pada entry zone.
+- Price Exp: 0.01921
+- Reason Price Exp: Price Exp 0.01921: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02028
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.0202551; SL ditempatkan di luar invalidation dan liquidity guard 0.02025.
+- TP: 0.0191
+- Reason TP: TP 0.0191 dipilih dari H4_LOWER_LOW dengan RR 8.83; target quality 80.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.01921
+- Result Reason: Price Exp 0.01921: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-16T11:14:14.307062+00:00
+- Filled: -
+- Closed: 2026-10-16T12:02:26.849116+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
