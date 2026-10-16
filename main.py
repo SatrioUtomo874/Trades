@@ -10904,6 +10904,8 @@ class TradingEngine:
 
                     threshold_candidates.append(candidate)
                     funnel["ready"] += 1
+                    if cand_rec.state == "WAITING_TRIGGER":
+                        cand_rec.state, cand_rec.state_reason = "READY", "READY_WAITING_TRIGGER_PENALIZED"
                     self._observe_candidate(cand_rec)
                     log.info(
                         "[SCAN] %s threshold PASS confidence=%s",
