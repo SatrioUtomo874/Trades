@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T17:04:46.187830+00:00",
+  "saved_at": "2026-10-16T17:05:28.720742+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -78,6 +78,13 @@
       "until": "2026-10-17T15:33:03.156711+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "REUSDT",
+      "banned_at": "2026-10-16T17:05:28.720549+00:00",
+      "until": "2026-10-17T01:05:28.720525+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "XANUSDT",
