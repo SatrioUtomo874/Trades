@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T20:06:12.235647+00:00",
+  "saved_at": "2026-10-16T21:56:15.947645+00:00",
   "bans": [
     {
       "pair": "ACEUSDT",
@@ -10,25 +10,11 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "AWEUSDT",
-      "banned_at": "2026-10-16T12:58:06.973271+00:00",
-      "until": "2026-10-16T20:58:06.973248+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "DOGEUSDT",
       "banned_at": "2026-10-16T11:13:35.772932+00:00",
       "until": "2026-10-17T11:13:35.772896+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
-    },
-    {
-      "pair": "ETCUSDT",
-      "banned_at": "2026-10-16T20:06:10.453097+00:00",
-      "until": null,
-      "reason": "Real quantity tidak memenuhi target margin ±10%: ETCUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=10.03338) Margin pas ≈ $2.01.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "HOMEUSDT",
