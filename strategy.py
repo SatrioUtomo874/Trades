@@ -78,7 +78,7 @@ import requests
 STRATEGY_NAME = "SMC_VLT_RSI"
 STRATEGY_ENGINE = "V2"
 STRATEGY_SCHEMA_VERSION = 1
-SCORING_FORMULA_VERSION = "V2.1-weights100"
+SCORING_FORMULA_VERSION = "V2.2-volume-rsi"
 
 _log = logging.getLogger("strategy")
 
@@ -148,7 +148,7 @@ REASON_CODES = (
     "BTC_HIGH_RISK_CONFLICT", "PRICE_IN_ZONE", "PRICE_NOT_IN_ZONE", "READY_FOR_VALIDATION",
 )
 ENTRY_ZONE_MAX_WIDTH_PCT = 15.0
-STRATEGY_VERSION = "2.2.0"
+STRATEGY_VERSION = "2.3.0"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -302,6 +302,13 @@ RSI_SELL_WARNING_MIN_M15 = 45.0
 RSI_H4_BREAKDOWN_BUY = 35.0
 RSI_H4_BREAKDOWN_SELL = 65.0
 RSI_PROJECTION_MIN_CONSENSUS = 55.0
+# Momentum RSI: jangan jual saat RSI H4 sudah jenuh turun (beli: jenuh naik); entry harus
+# berada di zona yang diproyeksikan membuat RSI M15 mencapai level momentum.
+RSI_H4_EXHAUST_SELL = _env_float("RSI_H4_EXHAUST_SELL", 40.0, 20.0, 50.0)
+RSI_H4_EXHAUST_BUY = _env_float("RSI_H4_EXHAUST_BUY", 60.0, 50.0, 80.0)
+RSI_SELL_ENTRY_TARGET_M15 = _env_float("RSI_SELL_ENTRY_TARGET_M15", 66.0, 50.0, 85.0)
+RSI_BUY_ENTRY_TARGET_M15 = _env_float("RSI_BUY_ENTRY_TARGET_M15", 34.0, 15.0, 50.0)
+VOLUME_BASELINE_BARS = 30
 
 # Structural invalidation / SL V2.
 MIN_INVALIDATION_STRENGTH = 55.0
@@ -328,16 +335,17 @@ TARGET_LIQUIDITY_BASE = 35.0
 
 # Thesis scoring V2. Weights total 100.
 THESIS_WEIGHTS_V2 = {
-    "structure_alignment": 15.0,
-    "liquidity_confluence": 18.0,
-    "fib_location": 12.0,
-    "fvg_ob_refinement": 8.0,
-    "rsi_projection": 12.0,
+    "structure_alignment": 12.0,
+    "liquidity_confluence": 16.0,
+    "fib_location": 11.0,
+    "fvg_ob_refinement": 7.0,
+    "rsi_projection": 14.0,
     "momentum_current": 5.0,
-    "invalidation_quality": 12.0,
-    "target_quality": 10.0,
+    "invalidation_quality": 11.0,
+    "target_quality": 9.0,
     "rr_quality": 5.0,
     "entry_reachability": 3.0,
+    "volume_confirmation": 7.0,
 }
 THESIS_WAITING_CAP_V2 = 68.0
 THESIS_VETO_CAP_V2 = 55.0
@@ -5866,6 +5874,99 @@ def _v2_score_rsi_projection(direction: str, projection: dict[str, Any]) -> floa
     return clamp(base * 0.70 + consensus * 0.30)
 
 
+def _lin(x: float, pts: list[tuple[float, float]]) -> float:
+    if x <= pts[0][0]:
+        return pts[0][1]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return pts[-1][1]
+
+
+def _v2_volume_context(direction: str, h1: list[Candle], h4: list[Candle]) -> dict[str, Any]:
+    """Konfirmasi volume atas gerakan searah thesis; volume tipis = risiko fake move."""
+    want_down = direction == "SELL"
+
+    def leg(candles: list[Candle], lookback: int) -> dict[str, float] | None:
+        if len(candles) < lookback + 12:
+            return None
+        seg = candles[-lookback:]
+        base = sorted(c.volume for c in candles[-(lookback + VOLUME_BASELINE_BARS):-lookback] if c.volume > 0)
+        total = sum(c.volume for c in seg)
+        if len(base) < 8 or total <= 0:
+            return None
+        median = base[len(base) // 2]
+        with_t = [c for c in seg if c.close != c.open and ((c.close < c.open) == want_down)]
+        counter = [c for c in seg if c.close != c.open and ((c.close < c.open) != want_down)]
+        tv = sum(c.volume for c in with_t) / len(with_t) if with_t else 0.0
+        cv = sum(c.volume for c in counter) / len(counter) if counter else 0.0
+        return {
+            "rvol": tv / median if median > 0 else 1.0,
+            "dominance": sum(c.volume for c in with_t) / total,
+            "trend_vs_counter": tv / cv if cv > 0 else 2.0,
+        }
+
+    legs = {"H1": leg(h1, 24), "H4": leg(h4, 6)}
+    parts: list[tuple[float, float, float]] = []
+    for name, weight in (("H1", 0.6), ("H4", 0.4)):
+        lg = legs[name]
+        if lg is None:
+            continue
+        sc = (0.4 * _lin(lg["rvol"], [(0.5, 10), (0.8, 35), (1.1, 60), (1.5, 85), (2.0, 95)])
+              + 0.3 * _lin(lg["dominance"], [(0.35, 15), (0.5, 55), (0.65, 90)])
+              + 0.3 * _lin(lg["trend_vs_counter"], [(0.6, 10), (1.0, 55), (1.5, 85)]))
+        parts.append((weight, sc, lg["rvol"]))
+    if not parts:
+        return {"score": 50.0, "class": "UNKNOWN", "rvol": 1.0, "legs": {}, "note": "data volume tidak cukup"}
+    wsum = sum(w for w, _, _ in parts)
+    score = sum(w * sc for w, sc, _ in parts) / wsum
+    rvol = sum(w * rv for w, _, rv in parts) / wsum
+    cls = "CONFIRMED" if score >= 65 else ("NEUTRAL" if score >= 45 else "WEAK_VOLUME")
+    h1l = legs["H1"]
+    if cls == "WEAK_VOLUME" and h1l and h1l["rvol"] < 0.8 and h1l["dominance"] < 0.5:
+        cls = "FAKE_MOVE_RISK"
+    return {"score": round(score, 2), "class": cls, "rvol": round(rvol, 3),
+            "legs": {k: {kk: round(vv, 3) for kk, vv in v.items()} for k, v in legs.items() if v}}
+
+
+def _v2_rsi_momentum_gate(direction: str, projection: dict[str, Any]) -> dict[str, Any]:
+    cur_h4 = safe_float((projection.get("current") or {}).get("H4"), 50.0)
+    at_entry = projection.get("at_entry") or {}
+    proj_h4 = safe_float((at_entry.get("H4") or {}).get("median"), cur_h4)
+    m15_med = safe_float((at_entry.get("M15") or {}).get("median"), 50.0)
+    if direction == "SELL":
+        exhausted = min(cur_h4, proj_h4) <= RSI_H4_EXHAUST_SELL
+        ready = m15_med >= RSI_SELL_ENTRY_TARGET_M15
+        target, limit = RSI_SELL_ENTRY_TARGET_M15, RSI_H4_EXHAUST_SELL
+    else:
+        exhausted = max(cur_h4, proj_h4) >= RSI_H4_EXHAUST_BUY
+        ready = m15_med <= RSI_BUY_ENTRY_TARGET_M15
+        target, limit = RSI_BUY_ENTRY_TARGET_M15, RSI_H4_EXHAUST_BUY
+    state = "EXHAUSTED" if exhausted else ("OK" if ready else "WAIT_MOMENTUM")
+    return {"state": state, "h4_current": round(cur_h4, 2), "h4_projected": round(proj_h4, 2),
+            "m15_projected_median": round(m15_med, 2), "m15_target": target, "h4_exhaustion_limit": limit}
+
+
+def _v2_momentum_entry_price(direction: str, m15: list[Candle], h4: list[Candle], zone_low: float, zone_high: float,
+                             current: float, tick_size: float) -> float | None:
+    """Cari harga di zona tempat RSI M15 diproyeksikan mencapai level momentum (terdekat ke harga sekarang)."""
+    lo, hi = min(zone_low, zone_high), max(zone_low, zone_high)
+    if hi <= lo or not m15:
+        return None
+    points = [lo + (hi - lo) * i / 5.0 for i in range(6)]
+    if direction == "SELL":
+        prices = sorted(p for p in points if p > current)
+    else:
+        prices = sorted((p for p in points if p < current), reverse=True)
+    for price in prices:
+        proj = _v2_project_rsi_to_entry_zone(m15, h4, price, price, direction)
+        med = safe_float(((proj.get("at_entry") or {}).get("M15") or {}).get("median"), 50.0)
+        hit = med >= RSI_SELL_ENTRY_TARGET_M15 if direction == "SELL" else med <= RSI_BUY_ENTRY_TARGET_M15
+        if hit:
+            return _round_tick(price, tick_size, "DOWN" if direction == "BUY" else "UP") if tick_size > 0 else price
+    return None
+
+
 def _v2_select_entry_price(
     direction: str,
     zone_low: float,
@@ -6515,11 +6616,17 @@ def _v2_build_thesis_candidate(
     if direction == "SELL" and entry <= current:
         return None
 
+    mom_entry = _v2_momentum_entry_price(direction, m15, h4, zone_low, zone_high, current, tick_size)
+    if mom_entry is not None and ((direction == "BUY" and mom_entry < current) or (direction == "SELL" and mom_entry > current)):
+        entry = mom_entry
+
     # Final RSI projection is always calculated against the actual selected
     # entry, not the raw zone midpoint. This prevents a zone that straddles
     # current price from producing an impossible "future" RSI scenario.
     projection = _v2_project_rsi_to_entry_zone(m15, h4, entry, entry, direction)
     projection_score = _v2_score_rsi_projection(direction, projection)
+    volume_ctx = _v2_volume_context(direction, h1, h4)
+    momentum_gate = _v2_rsi_momentum_gate(direction, projection)
 
     invalidation = _v2_select_prediction_invalidation(
         direction, entry, h4_structure, h1_structure, liquidity_map,
@@ -6567,6 +6674,10 @@ def _v2_build_thesis_candidate(
     last_bos = latest_event(m15_structure, {"BOS"}, direction=("BULLISH" if direction == "BUY" else "BEARISH"), max_age=THESIS_MAX_TRIGGER_AGE_M15, candle_count=len(m15))
     trigger_ok = bool(last_mss or last_bos)
     thesis_status = "ACTIVE_TRIGGER_CONFIRMED" if trigger_ok else "WAITING_TRIGGER"
+    if momentum_gate["state"] == "EXHAUSTED":
+        thesis_status = "EXHAUSTED_MOMENTUM"
+    elif momentum_gate["state"] == "WAIT_MOMENTUM" and trigger_ok:
+        thesis_status = "WAITING_MOMENTUM"
     thesis_type = "BUY_PULLBACK" if direction == "BUY" else "SELL_PULLBACK"
     if projection.get("classification") in {"SUPPORTIVE_BUY_RETRACEMENT", "SUPPORTIVE_SELL_RETRACEMENT"} and (rsi_pack.get("H1") or {}).get("div", {}).get(direction):
         thesis_type += "_RSI_DIVERGENCE"
@@ -6591,6 +6702,7 @@ def _v2_build_thesis_candidate(
         "target_quality": round(target_score, 2),
         "rr_quality": round(rr_score, 2),
         "entry_reachability": round(reach_score, 2),
+        "volume_confirmation": round(volume_ctx["score"], 2),
     }
     base = sum(THESIS_WEIGHTS_V2[k] * scores[k] for k in THESIS_WEIGHTS_V2) / 100.0
     penalties: list[dict[str, Any]] = []
@@ -6605,6 +6717,18 @@ def _v2_build_thesis_candidate(
     if not trigger_ok:
         base = min(base, THESIS_WAITING_CAP_V2)
         penalties.append({"type": "WAITING_TRIGGER", "amount": round(max(0.0, base - THESIS_WAITING_CAP_V2), 2)})
+    if momentum_gate["state"] == "EXHAUSTED":
+        base = min(base, THESIS_VETO_CAP_V2)
+        penalties.append({"type": "RSI_H4_EXHAUSTION", "amount": 0.0, "cap": THESIS_VETO_CAP_V2})
+    elif momentum_gate["state"] == "WAIT_MOMENTUM":
+        base = min(base, THESIS_WAITING_CAP_V2)
+        penalties.append({"type": "WAITING_MOMENTUM", "amount": 0.0, "cap": THESIS_WAITING_CAP_V2})
+    if volume_ctx["class"] == "FAKE_MOVE_RISK":
+        base = min(base - 10.0, 62.0)
+        penalties.append({"type": "FAKE_MOVE_LOW_VOLUME", "amount": 10.0, "cap": 62.0})
+    elif volume_ctx["class"] == "WEAK_VOLUME":
+        base -= 5.0
+        penalties.append({"type": "WEAK_VOLUME", "amount": 5.0})
     projection_class = str(projection.get("classification") or "")
     if projection_class.startswith("WEAK"):
         base -= 10.0
@@ -6620,6 +6744,10 @@ def _v2_build_thesis_candidate(
         penalties.append({"type": "TARGET_BARRIER", "amount": min(12.0, 4.0 * len(target["major_barriers"]))})
     confidence = clamp(base)
     if not trigger_ok:
+        confidence = min(confidence, THESIS_WAITING_CAP_V2)
+    if momentum_gate["state"] == "EXHAUSTED":
+        confidence = min(confidence, THESIS_VETO_CAP_V2)
+    elif momentum_gate["state"] == "WAIT_MOMENTUM":
         confidence = min(confidence, THESIS_WAITING_CAP_V2)
     if confidence < THESIS_MIN_QUALITY_V2:
         return None
@@ -6699,6 +6827,8 @@ def _v2_build_thesis_candidate(
         "fib": fib_evidence,
         "refinement": refinement,
         "projected_rsi": projection,
+        "volume_context": volume_ctx,
+        "rsi_momentum_gate": momentum_gate,
         "entry_zone": {
             "low": round_price(zone_low),
             "high": round_price(zone_high),
@@ -6723,6 +6853,7 @@ def _v2_build_thesis_candidate(
         f"V2 thesis {thesis_type}",
         f"Fib {location.get('fib', {}).get('label', '-')}",
         f"Projected M15 RSI median {projection['at_entry']['M15']['median']:.1f}",
+        f"Volume {volume_ctx['class']} (rvol {volume_ctx['rvol']:.2f}); momentum RSI {momentum_gate['state']}",
         f"Invalidation {invalidation['anchor_source']} @ {invalidation['anchor_level']}",
         f"Target {target['type']} @ {target['level']}",
     ]
@@ -7688,14 +7819,21 @@ def _enrich_setup_contract(setup: dict[str, Any], context: dict[str, Any] | None
         state, reason = "DATA_UNAVAILABLE", "DATA_STALE"
     elif hard:
         state, reason = "REJECTED_HARD", hard[0]["code"]
+    elif status == "EXHAUSTED_MOMENTUM":
+        state, reason = "REJECTED_QUALITY", "RSI_H4_EXHAUSTION"
+        gates.append({"code": "RSI_H4_EXHAUSTION", "text": "Momentum RSI H4 sudah jenuh searah thesis.", "hard": False})
     elif status == "LOW_QUALITY_FALLBACK":
         state, reason = "REJECTED_QUALITY", "LOW_QUALITY_FALLBACK"
         gates.append({"code": "LOW_QUALITY_FALLBACK", "text": "Thesis fallback kualitas rendah.", "hard": False})
     elif conf < THESIS_MIN_QUALITY_V2:
         state, reason = "REJECTED_QUALITY", "BELOW_QUALITY_FLOOR"
     elif "WAITING" in status:
-        state, reason = "WAITING_TRIGGER", "TRIGGER_NOT_CONFIRMED"
-        gates.append({"code": "TRIGGER_NOT_CONFIRMED", "text": "Konfirmasi M15 belum terbentuk.", "hard": False})
+        if status == "WAITING_MOMENTUM":
+            state, reason = "WAITING_TRIGGER", "MOMENTUM_NOT_READY"
+            gates.append({"code": "MOMENTUM_NOT_READY", "text": "RSI M15 di zona entry belum mencapai level momentum.", "hard": False})
+        else:
+            state, reason = "WAITING_TRIGGER", "TRIGGER_NOT_CONFIRMED"
+            gates.append({"code": "TRIGGER_NOT_CONFIRMED", "text": "Konfirmasi M15 belum terbentuk.", "hard": False})
     else:
         state = "READY"
         reason = "PRICE_IN_ZONE" if price_vs_zone == "IN_ZONE" else "PRICE_NOT_IN_ZONE"
