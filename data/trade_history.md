@@ -461,3 +461,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T15:31:48.872369+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## NEARUSDT — BUY
+
+Trade ID: `NEARUSDT-20261016-211316-1A20E5`
+
+### Setup
+
+- Price Now Reference: 5.223
+- Entry: 4.94
+- Reason Entry: Skip
+- Price Exp: 5.92
+- Reason Price Exp: skip
+- SL: 4.752
+- Reason SL: skip
+- TP: 5.925
+- Reason TP: TP
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: impuls BTC turun 1.56% (4 jam); setup BUY NEARUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-16T14:13:16.022230+00:00
+- Filled: -
+- Closed: 2026-10-16T15:32:04.055156+00:00
+- Strategy: MANUAL v1.0
