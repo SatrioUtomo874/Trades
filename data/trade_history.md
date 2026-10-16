@@ -725,3 +725,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T17:18:20.166297+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## ZECUSDT — SELL
+
+Trade ID: `ZECUSDT-20261017-030247-E8176F`
+
+### Setup
+
+- Price Now Reference: 1146.4
+- Entry: 1240.96
+- Reason Entry: ZECUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H4 1245.78 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_BREAKER. Projected M15 RSI 75.6 pada entry zone.
+- Price Exp: 1134.48
+- Reason Price Exp: Price Exp 1134.48: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1254.8
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 1242.86; SL ditempatkan di luar invalidation dan liquidity guard 1245.78.
+- TP: 1122.89
+- Reason TP: TP 1122.89 dipilih dari H4_LOWER_LOW dengan RR 8.53; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: MANUAL_CLOSE_PENDING
+- Exit Price: -
+- Result Reason: Manual /close pada setup REAL PENDING sebelum entry.
+- PnL: -
+- Created: 2026-10-16T20:02:47.286951+00:00
+- Filled: -
+- Closed: 2026-10-16T21:51:07.101927+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
