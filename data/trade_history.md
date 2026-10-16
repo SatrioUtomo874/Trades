@@ -296,3 +296,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T14:10:57.973314+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## ACEUSDT — SELL
+
+Trade ID: `ACEUSDT-20261016-162233-7B3B06`
+
+### Setup
+
+- Price Now Reference: 0.1737
+- Entry: 0.18355
+- Reason Entry: ACEUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.18376 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 80.2 pada entry zone.
+- Price Exp: 0.16936
+- Reason Price Exp: Price Exp 0.16936: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.18729
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.18695; SL ditempatkan di luar invalidation.
+- TP: 0.16328
+- Reason TP: TP 0.16328 dipilih dari H4_LOWER_LOW dengan RR 5.42; target quality 79.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.16936
+- Result Reason: Price Exp 0.16936: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-16T09:22:33.292933+00:00
+- Filled: -
+- Closed: 2026-10-16T15:01:56.871753+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
