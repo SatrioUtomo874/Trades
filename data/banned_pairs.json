@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T09:58:48.883277+00:00",
+  "saved_at": "2026-10-16T11:13:35.773105+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -15,6 +15,13 @@
       "until": "2026-10-16T17:32:17.794404+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "DOGEUSDT",
+      "banned_at": "2026-10-16T11:13:35.772932+00:00",
+      "until": "2026-10-17T11:13:35.772896+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "ETHUSDT",
