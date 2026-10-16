@@ -131,3 +131,36 @@ Tidak ada trailing.
 - Filled: 2026-10-16T11:12:53.378277+00:00
 - Closed: 2026-10-16T11:13:26.464766+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## XRPUSDT — SELL
+
+Trade ID: `XRPUSDT-20261016-161934-D9931C`
+
+### Setup
+
+- Price Now Reference: 1.3405
+- Entry: 1.3464
+- Reason Entry: XRPUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 1.34696 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 66.2 pada entry zone.
+- Price Exp: 1.326
+- Reason Price Exp: Price Exp 1.326: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.3482
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 1.347; SL ditempatkan di luar invalidation dan liquidity guard 1.34696.
+- TP: 1.3173
+- Reason TP: TP 1.3173 dipilih dari H4_LOWER_LOW dengan RR 16.17; target quality 90.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 1.3482
+- Result Reason: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 1.347; SL ditempatkan di luar invalidation dan liquidity guard 1.34696.
+- PnL: -0.1336898395721925133689839572%
+- Created: 2026-10-16T09:19:34.581675+00:00
+- Filled: 2026-10-16T11:13:01.875414+00:00
+- Closed: 2026-10-16T11:13:45.354396+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
