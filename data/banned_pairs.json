@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T09:32:17.794556+00:00",
+  "saved_at": "2026-10-16T09:53:16.317376+00:00",
   "bans": [
+    {
+      "pair": "1000FLOKIUSDT",
+      "banned_at": "2026-10-16T09:53:16.317243+00:00",
+      "until": "2026-10-16T17:53:16.317219+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
     {
       "pair": "DEXEUSDT",
       "banned_at": "2026-10-16T09:32:17.794428+00:00",
