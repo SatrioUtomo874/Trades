@@ -527,3 +527,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T15:32:19.252920+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## BANANAUSDT — BUY
+
+Trade ID: `BANANAUSDT-20261016-220843-F65465`
+
+### Setup
+
+- Price Now Reference: 3.606
+- Entry: 3.48
+- Reason Entry: BANANAUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 3.47925 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 8.2 pada entry zone.
+- Price Exp: 3.758
+- Reason Price Exp: Price Exp 3.758: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 3.332
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 3.336; SL ditempatkan di luar invalidation dan liquidity guard 3.336.
+- TP: 3.917
+- Reason TP: TP 3.917 dipilih dari H4_HIGHER_HIGH dengan RR 2.95; target quality 78.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: impuls BTC turun 1.56% (4 jam); setup BUY BANANAUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-16T15:08:43.893682+00:00
+- Filled: -
+- Closed: 2026-10-16T15:32:33.873814+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
