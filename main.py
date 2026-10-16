@@ -2800,6 +2800,12 @@ SCAN_VALIDATE_TOP_N = _cfg_int("SCAN_VALIDATE_TOP_N", 6, 1, 50)
 SCAN_WATCH_MAX_PER_CYCLE = _cfg_int("SCAN_WATCH_MAX_PER_CYCLE", 15, 0, 50)
 SCAN_MIN_API_HEADROOM_PCT = _cfg_float("SCAN_MIN_API_HEADROOM_PCT", 10.0, 0.0, 90.0)
 SCAN_READY_RETRY_SECONDS = _cfg_float("SCAN_READY_RETRY_SECONDS", 300.0, 30.0, 3600.0)
+SCAN_H4_MAX_CYCLES = _cfg_int("SCAN_H4_MAX_CYCLES", 10, 1, 100)
+BTC_WATCH_SECONDS = _cfg_float("BTC_WATCH_SECONDS", 300.0, 60.0, 3600.0)
+BTC_IMPULSE_PCT = _cfg_float("BTC_IMPULSE_PCT", 1.5, 0.3, 10.0)
+BTC_IMPULSE_BARS = _cfg_int("BTC_IMPULSE_BARS", 16, 6, 96)
+BTC_IMPULSE_VETO_MINUTES = _cfg_float("BTC_IMPULSE_VETO_MINUTES", 120.0, 15.0, 1440.0)
+BTC_IMPULSE_MIN_RVOL = _cfg_float("BTC_IMPULSE_MIN_RVOL", 0.9, 0.3, 3.0)
 SCAN_CYCLE_TIME_BUDGET_SECONDS = _cfg_float("SCAN_CYCLE_TIME_BUDGET_SECONDS", 240.0, 30.0, 3600.0)
 RESEARCH_MIN_BUCKET_SAMPLE = _cfg_int("RESEARCH_MIN_BUCKET_SAMPLE", 30, 5, 10000)
 RESEARCH_AUTO_EXPORT_HOURS = _cfg_float("RESEARCH_AUTO_EXPORT_HOURS", 6.0, 0.25, 168.0)
@@ -5000,6 +5006,7 @@ class TradingEngine:
         self._init_research_layer()
         await self._research_startup()
         self._start_autostop_task()
+        self._start_btc_watch()
 
         try:
             self.symbols = await self.rest.get_exchange_info()
@@ -5040,6 +5047,7 @@ class TradingEngine:
                 pass
         self._scan_task = None
         await self._flush_bans_if_dirty()
+        await self._stop_btc_watch()
         await self._research_shutdown()
 
         if self._auto_task is not None and not self._auto_task.done():
@@ -8246,8 +8254,8 @@ class TradingEngine:
         if self._h4_window_active:
             remaining = self._h4_window_remaining_seconds()
             if remaining is not None:
-                return f"ACTIVE ({max(0, remaining):.0f}s)"
-            return "ACTIVE"
+                return f"ACTIVE ({max(0, remaining):.0f}s) • scan {self._h4_cycle_count}/{self.h4_max_cycles}"
+            return f"ACTIVE • scan {self._h4_cycle_count}/{self.h4_max_cycles}"
         if self._h4_invalid_slot_key == self._h4_last_trigger_slot and self._h4_invalid_slot_key:
             return "WAITING_NEXT_H4"
         return "WAITING_H4"
@@ -9432,6 +9440,7 @@ class TradingEngine:
                         self._h4_window_deadline = self._h4_slot_deadline(slot)
                         self._h4_invalid_slot_key = None
                         self._h4_opening_gate = True
+                        self._h4_cycle_count = 0
                         self._scan_auto_paused = False
                         log.info(
                             "[SCAN][H4] scan window dibuka pada slot %s | deadline=%s",
@@ -9473,6 +9482,26 @@ class TradingEngine:
                 if self._h4_enabled and self._h4_window_active and self._h4_opening_gate:
                     self._h4_opening_gate = False
                     self._h4_window_deadline = None
+
+                if self._h4_enabled and self._h4_window_active:
+                    self._h4_cycle_count += 1
+                    done_reason = None
+                    if self._h4_cycle_count >= self.h4_max_cycles:
+                        done_reason = f"batas {self.h4_max_cycles} siklus scan tercapai"
+                    elif self._last_cycle_analyzed == 0:
+                        done_reason = "tidak ada koin yang perlu dipindai lagi"
+                    if done_reason:
+                        log.info("[SCAN][H4] window slot %s selesai: %s (%s siklus).", self._h4_last_trigger_slot or "-", done_reason, self._h4_cycle_count)
+                        self._h4_window_active = False
+                        self._h4_window_slot = None
+                        self._h4_window_deadline = None
+                        self._h4_opening_gate = False
+                        await self.reply(card("🕓 H4 WINDOW SELESAI", [
+                            f"Siklus scan {self._h4_cycle_count}/{self.h4_max_cycles}",
+                            done_reason,
+                            "Scan berikutnya di close H4 berikutnya.",
+                        ]))
+                        continue
 
                 if len(self.active_trades) >= self.max_active_trades:
                     if self._h4_enabled:
@@ -9529,6 +9558,15 @@ class TradingEngine:
         self._strategy_module_ref: Any = None
         self._replay_pending_ids: set[str] = set()
         self._validation_reason_totals: dict[str, int] = {}
+        self.h4_max_cycles = SCAN_H4_MAX_CYCLES
+        self._h4_cycle_count = 0
+        self._btc_flip_enabled = True
+        self._btc_close_filled = True
+        self._btc_task: asyncio.Task[Any] | None = None
+        self._btc_state: dict[str, Any] = {}
+        self._btc_impulse: dict[str, Any] = {}
+        self._btc_flip_log: deque[dict[str, Any]] = deque(maxlen=50)
+        self._btc_invalidated_total = 0
         self._research_saved_on = False
         self._export_marker: dict[str, Any] = {"replay": "", "cand": "", "trades": 0, "last": ""}
         self._last_auto_export = 0.0
@@ -9604,6 +9642,14 @@ class TradingEngine:
                 if guard.get("trail_mode") in {"ladder", "structure"}:
                     self.trail_mode = guard["trail_mode"]
                 self._research_saved_on = bool(guard.get("research", False))
+                self._btc_flip_enabled = bool(guard.get("btc_flip", True))
+                self._btc_close_filled = bool(guard.get("btc_close_filled", True))
+                try:
+                    cycles = int(guard.get("h4_max_cycles") or self.h4_max_cycles)
+                    if 1 <= cycles <= 100:
+                        self.h4_max_cycles = cycles
+                except (TypeError, ValueError):
+                    pass
                 risk = data.get("risk") or {}
                 mode = str(risk.get("mode") or "").upper()
                 if mode in {"LEGACY_NOTIONAL", "RISK_BUDGET"}:
@@ -9622,7 +9668,7 @@ class TradingEngine:
 
     async def _save_runtime_settings(self) -> None:
         payload = {"version": 1, "saved_at": iso_utc(), "risk": dict(self._risk_cfg),
-                   "guard": {"trail_mode": self.trail_mode, "research": self._research_saved_on, "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
+                   "guard": {"trail_mode": self.trail_mode, "research": self._research_saved_on, "btc_flip": self._btc_flip_enabled, "btc_close_filled": self._btc_close_filled, "h4_max_cycles": self.h4_max_cycles, "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
                              "drawdown": None if self.drawdown_percent is None else str(self.drawdown_percent)}}
         await self.github.replace_file(RUNTIME_SETTINGS_PATH, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "settings: risk")
 
@@ -9852,6 +9898,8 @@ class TradingEngine:
         if not self.real_mode:
             rows.append(f"💼 Saldo simulasi {self._fmt_usd(self.sim_balance)} • equity {self._fmt_usd(self._sim_equity())} USDT")
         rows.append(f"🧨 Drawdown {'OFF' if self.drawdown_percent is None else decimal_to_str(self.drawdown_percent) + '%'} • 🛡 Autostop {'OFF' if self.autostop_percent is None else decimal_to_str(self.autostop_percent) + '%'}")
+        bs = self._btc_state
+        rows.append(f"🪙 BTC watch {'ON' if self._btc_flip_enabled else 'OFF'} • H4 {bs.get('h4_trend', '-')} • impuls {bs.get('impulse') or '-'} • dibatalkan {self._btc_invalidated_total}")
         stale = self._funnel_last.get("data_stale", 0)
         if stale:
             rows.append(f"⚠️ Data basi pada {stale} pair di scan terakhir")
@@ -10210,6 +10258,200 @@ class TradingEngine:
         if errors:
             rows.append("Gagal: " + "; ".join(errors)[:300])
         await self.reply(card("♻️ DATA RISET DIRESET", rows) + "\n\nScan akan menyapu ulang seluruh koin dengan strategy baru. Untuk mereset statistik trade gunakan /resetstats.")
+
+    # -- pantau BTC: batalkan setup pending yang berlawanan
+    def _start_btc_watch(self) -> None:
+        if self._btc_task is None or self._btc_task.done():
+            self._btc_task = asyncio.create_task(self._btc_watch_loop(), name="btc-watch")
+
+    async def _stop_btc_watch(self) -> None:
+        task, self._btc_task = self._btc_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    async def _btc_watch_loop(self) -> None:
+        await asyncio.sleep(45)
+        while self._running:
+            try:
+                if self._btc_flip_enabled:
+                    await self._btc_watch_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[BTCWATCH] gagal: %s", exc)
+            await asyncio.sleep(BTC_WATCH_SECONDS)
+
+    def _btc_impulse_conflict(self, direction: str) -> str | None:
+        imp = self._btc_impulse
+        if not self._btc_flip_enabled or not imp or imp.get("until", 0) <= time.time():
+            return None
+        if (imp["dir"] == "UP" and direction == "SELL") or (imp["dir"] == "DOWN" and direction == "BUY"):
+            return f"BTC_IMPULSE_{imp['dir']}"
+        return None
+
+    async def _btc_impulse_check(self, module: Any) -> tuple[str, float] | None:
+        """Impuls BTC searah harga, hanya dianggap valid bila volumenya mendukung (bukan fake move)."""
+        candles, _ = await module.fetch_series("BTCUSDT", module.M15, BTC_IMPULSE_BARS + 52, module.M15_MS, allow_fallback=False, max_age_seconds=60)
+        window = candles[-BTC_IMPULSE_BARS:]
+        base = candles[:-BTC_IMPULSE_BARS]
+        if len(window) < 8:
+            return None
+        last = window[-1].close
+        lo, hi = min(c.low for c in window), max(c.high for c in window)
+        up = (last - lo) / lo * 100.0 if lo > 0 else 0.0
+        down = (hi - last) / hi * 100.0 if hi > 0 else 0.0
+        if up >= BTC_IMPULSE_PCT and up >= down:
+            side, pct = "UP", up
+        elif down >= BTC_IMPULSE_PCT:
+            side, pct = "DOWN", down
+        else:
+            self._btc_state["rvol"] = None
+            return None
+        vols = sorted(c.volume for c in base if c.volume > 0)
+        med = vols[len(vols) // 2] if vols else 0.0
+        move = [c for c in window if (c.close > c.open) == (side == "UP")]
+        mean_v = sum(c.volume for c in move) / len(move) if move else 0.0
+        rvol = mean_v / med if med > 0 else 1.0
+        self._btc_state["rvol"] = round(rvol, 2)
+        if rvol < BTC_IMPULSE_MIN_RVOL:
+            log.info("[BTCWATCH] impuls %s %.2f%% diabaikan: volume rendah (rvol %.2f < %.2f)", side, pct, rvol, BTC_IMPULSE_MIN_RVOL)
+            self._btc_state["impulse_ignored"] = f"{side} {pct:.2f}% volume rendah (rvol {rvol:.2f})"
+            return None
+        self._btc_state["impulse_ignored"] = None
+        return side, pct
+
+    async def _invalidate_pending_trade(self, trade: Trade, text: str) -> bool:
+        current = self.active_trades.get(trade.trade_id)
+        if current is None or current.status != "PENDING":
+            return False
+        try:
+            if current.real_enabled:
+                if not self.real_mode:
+                    return False
+                if current.entry_order_id is not None or current.entry_client_order_id:
+                    try:
+                        await self.real.cancel_order(
+                            current.pair,
+                            order_id=current.entry_order_id,
+                            client_order_id=(current.entry_client_order_id if current.entry_order_id is None else None),
+                        )
+                    except BinanceAPIError as exc:
+                        if exc.code not in {-2011, -2013}:
+                            raise
+                current.real_state = "REAL_CLOSED"
+            await self._finalize_trade(copy.deepcopy(current), result="INVALID_BTC", exit_price=None, reason=text, send_notification=False)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[BTCWATCH] gagal membatalkan %s: %s", trade.pair, exc)
+            return False
+
+    async def _btc_watch_tick(self) -> None:
+        module = await self._load_strategy_runtime()
+        self._strategy_module_ref = module
+        regime = await module.analyze_btc_regime({})
+        h4_trend = str(regime.get("trend") or "RANGE").upper()
+        impulse = await self._btc_impulse_check(module)
+        now = time.time()
+        if impulse:
+            self._btc_impulse = {"dir": impulse[0], "pct": round(impulse[1], 2), "until": now + BTC_IMPULSE_VETO_MINUTES * 60}
+        self._btc_state = {"h4_trend": h4_trend, "impulse": f"{impulse[0]} {impulse[1]:.2f}%" if impulse else None, "at": iso_utc()}
+        imp_dir = impulse[0] if impulse else None
+        imp_pct = impulse[1] if impulse else 0.0
+
+        def reason_for(direction: str) -> str | None:
+            if direction == "SELL":
+                if h4_trend == "BULLISH":
+                    return "BTC H4 berbalik BULLISH"
+                if imp_dir == "UP":
+                    return f"impuls BTC naik {imp_pct:.2f}% (4 jam)"
+            elif direction == "BUY":
+                if h4_trend == "BEARISH":
+                    return "BTC H4 berbalik BEARISH"
+                if imp_dir == "DOWN":
+                    return f"impuls BTC turun {imp_pct:.2f}% (4 jam)"
+            return None
+
+        cancelled: list[str] = []
+        for trade in [t for t in self.active_trades.values() if t.status == "PENDING"]:
+            reason = reason_for(trade.direction)
+            rec = self.ledger.items.get(trade.candidate_id) if trade.candidate_id else None
+            if not reason or (rec is not None and rec.btc_alignment == "COUNTER_TREND"):
+                continue
+            text = f"BTC berbalik: {reason}; setup {trade.direction} {trade.pair} dibatalkan dan dianggap invalid."
+            if await self._invalidate_pending_trade(trade, text):
+                cancelled.append(f"{trade.pair} {trade.direction} — {reason}")
+                self._btc_invalidated_total += 1
+                self._btc_flip_log.append({"at": iso_utc(), "pair": trade.pair, "direction": trade.direction, "reason": reason, "trade_id": trade.trade_id})
+        closed: list[str] = []
+        if self._btc_close_filled:
+            self._close_batch_in_progress = True
+            try:
+                for trade in [t for t in self.active_trades.values() if t.status == "FILLED"]:
+                    reason = reason_for(trade.direction)
+                    rec = self.ledger.items.get(trade.candidate_id) if trade.candidate_id else None
+                    if not reason or (rec is not None and rec.btc_alignment == "COUNTER_TREND"):
+                        continue
+                    try:
+                        ok, detail = await self._close_one_trade(trade, note=f"BTC berbalik: {reason}")
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("[BTCWATCH] gagal menutup posisi %s: %s", trade.pair, exc)
+                        continue
+                    if ok:
+                        closed.append(f"{trade.pair} {trade.direction} — {detail}")
+                        self._btc_invalidated_total += 1
+                        self._btc_flip_log.append({"at": iso_utc(), "pair": trade.pair, "direction": trade.direction, "reason": f"CLOSE {reason}", "trade_id": trade.trade_id})
+            finally:
+                self._close_batch_in_progress = False
+        for rec in list(self.ledger.items.values()):
+            if rec.state in (WAITING_CANDIDATE_STATES | {"READY"}) and not rec.linked_trade_id and rec.direction:
+                reason = reason_for(rec.direction)
+                if reason:
+                    self.ledger.set_state(rec.candidate_id, "EXPIRED", "CANDIDATE_INVALIDATED", f"BTC_FLIP: {reason}")
+        if cancelled or closed:
+            log.info("[BTCWATCH] dibatalkan=%s ditutup=%s", cancelled, closed)
+            rows = [f"BTC H4 {h4_trend} • impuls {self._btc_state['impulse'] or '-'} • rvol {self._btc_state.get('rvol') or '-'}"]
+            if cancelled:
+                rows += [f"{len(cancelled)} setup pending dibatalkan (INVALID_BTC):", *[f"• {c}" for c in cancelled[:12]]]
+            if closed:
+                rows += [f"{len(closed)} posisi aktif ditutup sekarang:", *[f"• {c}" for c in closed[:12]]]
+            await self.reply(card("🪙 BTC BERBALIK", rows))
+
+    async def _handle_btcwatch_command(self, text: str) -> None:
+        parts = text.split()
+        if len(parts) > 1:
+            if parts[1].lower() in {"on", "off"}:
+                self._btc_flip_enabled = parts[1].lower() == "on"
+            elif parts[1].lower() == "close" and len(parts) > 2 and parts[2].lower() in {"on", "off"}:
+                self._btc_close_filled = parts[2].lower() == "on"
+            else:
+                raise ValueError("Gunakan /btcwatch, /btcwatch on|off, atau /btcwatch close on|off.")
+        bs = self._btc_state
+        imp = self._btc_impulse
+        left = max(0, int((imp.get("until", 0) - time.time()) / 60)) if imp else 0
+        rows = [
+            f"Status   {'ON' if self._btc_flip_enabled else 'OFF'} (cek tiap {BTC_WATCH_SECONDS:g}s)",
+            f"BTC H4   {bs.get('h4_trend', '-')}",
+            f"Impuls   {bs.get('impulse') or '-'} (ambang {BTC_IMPULSE_PCT:g}% / {BTC_IMPULSE_BARS * 15 // 60} jam, volume ≥ {BTC_IMPULSE_MIN_RVOL:g}x)",
+            f"Diabaikan {bs.get('impulse_ignored') or '-'}",
+            f"Tutup posisi FILLED {'ON' if self._btc_close_filled else 'OFF'}",
+            f"Veto scan {imp.get('dir', '-')} sisa {left} menit" if left else "Veto scan  tidak aktif",
+            f"Dibatalkan sejak start {self._btc_invalidated_total}",
+        ]
+        rows += [f"• {e['pair']} {e['direction']} — {e['reason']}" for e in list(self._btc_flip_log)[-5:]]
+        await self.reply(card("🪙 BTC WATCH", rows) + "\n\nSELL dibatalkan/ditutup bila BTC H4 jadi BULLISH atau impuls naik disertai volume; BUY sebaliknya. /btcwatch close off menahan penutupan posisi aktif.")
+
+    async def _handle_h4cycles_command(self, text: str) -> None:
+        parts = text.split()
+        if len(parts) > 1:
+            value = int(parts[1])
+            if not 1 <= value <= 100:
+                raise ValueError("Batas siklus harus 1–100.")
+            self.h4_max_cycles = value
+        await self.reply(f"🕓 Batas scan per window H4: {self.h4_max_cycles} siklus (maks {SCAN_MAX_PAIRS_PER_CYCLE} koin per siklus).\nUbah: /h4cycles <angka>")
 
     async def _handle_research_command(self, text: str) -> None:
         parts = text.split()
@@ -10612,6 +10854,15 @@ class TradingEngine:
                     cand_rec = build_candidate_from_setup(pair, candidate, cycle_id=cycle_id, now=cycle_now, strategy_name="SMC_VLT_RSI")
                     self._retry_counts.pop(pair, None)
                     candidate["_candidate_id"] = cand_rec.candidate_id
+                    veto = self._btc_impulse_conflict(str(candidate.get("direction") or ""))
+                    if veto:
+                        funnel["quality_rejects"] += 1
+                        cand_rec.state, cand_rec.state_reason = "REJECTED_QUALITY", veto
+                        self._observe_candidate(cand_rec)
+                        self._recheck.set(pair, now_ts + SCAN_WATCHLIST_INTERVAL, veto, "REJECTED_QUALITY")
+                        log.info("[SCAN] %s ditolak: %s", pair, veto)
+                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                        continue
                     if cstate in {"DATA_UNAVAILABLE", "REJECTED_HARD", "REJECTED_QUALITY"}:
                         key = {"DATA_UNAVAILABLE": "data_unavailable", "REJECTED_HARD": "hard_rejects"}.get(cstate, "quality_rejects")
                         funnel[key] += 1
@@ -10631,7 +10882,7 @@ class TradingEngine:
                         waiting = bool(gates.get("waiting"))
                         near = float(confidence) >= float(self.scan_threshold) - RESEARCH_NEAR_THRESHOLD_POINTS
                         if waiting or cstate == "WAITING_TRIGGER":
-                            new_state, why = "WAITING_TRIGGER", "TRIGGER_NOT_CONFIRMED"
+                            new_state, why = "WAITING_TRIGGER", ("MOMENTUM_NOT_READY" if cand_rec.state_reason == "MOMENTUM_NOT_READY" else "TRIGGER_NOT_CONFIRMED")
                             funnel["waiting_trigger"] += 1
                         elif near:
                             new_state, why = "WAITING_PRICE", "BELOW_THRESHOLD_WATCH"
@@ -13990,7 +14241,7 @@ class TradingEngine:
     # FORCE CLOSE
     # --------------------------------------------------------
 
-    async def _close_one_trade(self, trade: Trade) -> tuple[bool, str]:
+    async def _close_one_trade(self, trade: Trade, note: str | None = None) -> tuple[bool, str]:
         """Force-close one active setup, using Binance truth when REAL is attached."""
         current = self.active_trades.get(trade.trade_id)
         if current is None:
@@ -14071,6 +14322,8 @@ class TradingEngine:
                 if result == "SL" else
                 "Manual /close REAL. PnL 0% → MANUAL_CLOSE."
             )
+            if note:
+                reason = f"{note} | {reason}"
             current.real_state = "REAL_CLOSED"
             await self._cancel_bot_algo_orders(current)
             await self._finalize_trade(
@@ -14112,6 +14365,8 @@ class TradingEngine:
             if result == "SL" else
             "Manual /close. PnL tepat 0%; tidak dikategorikan TP atau SL."
         )
+        if note:
+            reason = f"{note} | {reason}"
         await self._finalize_trade(
             copy.deepcopy(current),
             result=result,
@@ -14580,7 +14835,7 @@ class TradingEngine:
         if getattr(trade, "candidate_id", ""):
             self.ledger.set_state(
                 trade.candidate_id,
-                "EXPIRED" if result in {"EXPIRED", "DELETED"} and trade.fill_price is None else "CLOSED",
+                "EXPIRED" if result in {"EXPIRED", "DELETED", "INVALID_BTC"} and trade.fill_price is None else "CLOSED",
                 "TRADE_CLOSED", str(result),
             )
 
@@ -15208,7 +15463,8 @@ class TradingEngine:
             f"├ ❌ SL       {stats['sl']}  ({pct(stats['sl_rate'])})",
             f"├ ⌛ Expired  {stats['expired']}  ({pct(stats['expired_rate_all'])} history)",
             f"├ 🗑 Deleted  {stats['deleted']}  ({pct(stats['deleted_rate_all'])} history)",
-            f"└ ✋ Manual   pending {stats['manual_close_pending']}  •  filled@0% {stats['manual_close_filled']}",
+            f"├ ✋ Manual   pending {stats['manual_close_pending']}  •  filled@0% {stats['manual_close_filled']}",
+            f"└ ⛔ Invalid BTC  {sum(1 for r_ in self.history_records if r_.get('result') == 'INVALID_BTC')}  (setup pending dibatalkan karena BTC berbalik)",
             "",
             "💰 PERFORMA",
             f"├ Net PnL        {format_pct(stats['gross_pnl_percent'])}",
@@ -16294,6 +16550,8 @@ class TradingEngine:
             "/unban PAIR|all - hapus ban\n"
             "/stats - statistik histori + R-metrik\n"
             "/trailmode [structure|ladder] - mode trailing SL otomatis\n"
+            "/btcwatch [on|off|close on|off] - batalkan setup pending & tutup posisi aktif bila BTC berbalik\n"
+            "/h4cycles [n] - batas siklus scan per window H4 (default 10)\n"
             "/export - ekspor dataset CSV (kandidat, replay, trade) ke GitHub\n"
             "/drawdown [%|off|reset] - tutup SEMUA /trade bila equity turun dari puncak\n"
             "/balance - saldo (simulasi $100 atau real)\n"
@@ -16611,6 +16869,30 @@ class TradingEngine:
                 except Exception as exc:
                     log.exception("EXPORT command gagal.")
                     await self.reply(f"❌ /export gagal.\n\n{exc}")
+                return
+
+            if command == "/btcwatch":
+                try:
+                    await self._handle_btcwatch_command(text)
+                except Exception as exc:
+                    await self.reply(f"❌ /btcwatch gagal.\n\n{exc}")
+                    return
+                try:
+                    await self._save_runtime_settings()
+                except Exception as exc:
+                    log.warning("[BTCWATCH] pengaturan gagal disimpan: %s", exc)
+                return
+
+            if command == "/h4cycles":
+                try:
+                    await self._handle_h4cycles_command(text)
+                except Exception as exc:
+                    await self.reply(f"❌ /h4cycles gagal.\n\n{exc}")
+                    return
+                try:
+                    await self._save_runtime_settings()
+                except Exception as exc:
+                    log.warning("[H4] pengaturan gagal disimpan: %s", exc)
                 return
 
             if command == "/drawdown":
