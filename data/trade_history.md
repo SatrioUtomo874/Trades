@@ -560,3 +560,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T15:32:33.873814+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## PROVEUSDT — BUY
+
+Trade ID: `PROVEUSDT-20261016-213531-1E567F`
+
+### Setup
+
+- Price Now Reference: 0.1911
+- Entry: 0.1887
+- Reason Entry: PROVEUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.1886143 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 28.3 pada entry zone.
+- Price Exp: 0.1919
+- Reason Price Exp: Price Exp 0.19190000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1883
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.1884976; SL ditempatkan di luar invalidation dan liquidity guard 0.1886143.
+- TP: 0.1932
+- Reason TP: TP 0.1932 dipilih dari H4_SWING_HIGH dengan RR 11.25; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.1892
+- Result Reason: BTC berbalik: impuls BTC turun 1.56% (4 jam) | Manual /close REAL. PnL positif → TP.
+- PnL: 0.2649708532061579507123320833%
+- Created: 2026-10-16T14:35:31.583454+00:00
+- Filled: 2026-10-16T15:22:54.678858+00:00
+- Closed: 2026-10-16T15:32:50.573404+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
