@@ -126,7 +126,7 @@ TRAIL_M15_MAX_AGE_SECONDS = _env_float("TRAIL_M15_MAX_AGE_SECONDS", 60.0, 1.0, 9
 # Biaya (estimasi, per sisi). Funding hanya dihitung bila datanya tersedia.
 EST_FEE_PCT_PER_SIDE = _env_float("EST_FEE_PCT_PER_SIDE", 0.05, 0.0, 5.0)
 EST_SLIPPAGE_PCT_PER_SIDE = _env_float("EST_SLIPPAGE_PCT_PER_SIDE", 0.03, 0.0, 5.0)
-MIN_RR_AFTER_COSTS = _env_float("MIN_RR_AFTER_COSTS", 0.0, 0.0, 20.0)  # 0 = hanya laporan
+MIN_RR_AFTER_COSTS = _env_float("MIN_RR_AFTER_COSTS", 1.5, 0.0, 20.0)  # 0 = hanya laporan
 
 # BTC counter-trend: OFF secara default; aktifkan hanya dengan bukti backtest.
 ALLOW_BTC_COUNTER_TREND = _env_bool("ALLOW_BTC_COUNTER_TREND", False)
@@ -148,7 +148,7 @@ REASON_CODES = (
     "BTC_HIGH_RISK_CONFLICT", "PRICE_IN_ZONE", "PRICE_NOT_IN_ZONE", "READY_FOR_VALIDATION",
 )
 ENTRY_ZONE_MAX_WIDTH_PCT = 15.0
-STRATEGY_VERSION = "2.3.0"
+STRATEGY_VERSION = "2.3.1"
 
 BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
@@ -205,7 +205,9 @@ SL_MAX_H1_ATR = 5.0
 SL_MIN_PCT = 0.5
 SL_SWING_EXTEND_H1_ATR = 1.0
 SL_SWEEP_EXTEND_H1_ATR = 1.5
-EXP_H1_ATR_MULTIPLIER = 1.5
+EXP_H1_ATR_MULTIPLIER = _env_float("EXP_H1_ATR_MULTIPLIER", 2.5, 0.5, 6.0)
+SL_MIN_RISK_H1_ATR = _env_float("SL_MIN_RISK_H1_ATR", 0.6, 0.0, 3.0)
+SL_MIN_RISK_PCT = _env_float("SL_MIN_RISK_PCT", 0.6, 0.0, 5.0)
 MIN_PLANNED_RR = 2.0
 TP_FALLBACK_RR = 2.5
 FALLBACK_CONFIDENCE_CAP = 60.0
@@ -309,6 +311,10 @@ RSI_H4_EXHAUST_BUY = _env_float("RSI_H4_EXHAUST_BUY", 60.0, 50.0, 80.0)
 RSI_SELL_ENTRY_TARGET_M15 = _env_float("RSI_SELL_ENTRY_TARGET_M15", 66.0, 50.0, 85.0)
 RSI_BUY_ENTRY_TARGET_M15 = _env_float("RSI_BUY_ENTRY_TARGET_M15", 34.0, 15.0, 50.0)
 VOLUME_BASELINE_BARS = 30
+RSI_EXHAUST_PENALTY_PER_POINT = _env_float("RSI_EXHAUST_PENALTY_PER_POINT", 1.5, 0.0, 5.0)
+RSI_EXHAUST_MAX_PENALTY = _env_float("RSI_EXHAUST_MAX_PENALTY", 18.0, 0.0, 40.0)
+RSI_TARGET_PENALTY_PER_POINT = _env_float("RSI_TARGET_PENALTY_PER_POINT", 0.6, 0.0, 3.0)
+RSI_TARGET_MAX_PENALTY = _env_float("RSI_TARGET_MAX_PENALTY", 10.0, 0.0, 30.0)
 
 # Structural invalidation / SL V2.
 MIN_INVALIDATION_STRENGTH = 55.0
@@ -347,7 +353,8 @@ THESIS_WEIGHTS_V2 = {
     "entry_reachability": 3.0,
     "volume_confirmation": 7.0,
 }
-THESIS_WAITING_CAP_V2 = 68.0
+THESIS_WAITING_CAP_V2 = 78.0  # batas atas lunak; pengurangnya ada di THESIS_WAITING_PENALTY_V2
+THESIS_WAITING_PENALTY_V2 = _env_float("THESIS_WAITING_PENALTY_V2", 6.0, 0.0, 30.0)
 THESIS_VETO_CAP_V2 = 55.0
 THESIS_FALLBACK_CAP_V2 = 60.0
 THESIS_MIN_QUALITY_V2 = 45.0
@@ -5935,15 +5942,18 @@ def _v2_rsi_momentum_gate(direction: str, projection: dict[str, Any]) -> dict[st
     proj_h4 = safe_float((at_entry.get("H4") or {}).get("median"), cur_h4)
     m15_med = safe_float((at_entry.get("M15") or {}).get("median"), 50.0)
     if direction == "SELL":
-        exhausted = min(cur_h4, proj_h4) <= RSI_H4_EXHAUST_SELL
-        ready = m15_med >= RSI_SELL_ENTRY_TARGET_M15
+        h4_depth = max(0.0, RSI_H4_EXHAUST_SELL - min(cur_h4, proj_h4))
+        shortfall = max(0.0, RSI_SELL_ENTRY_TARGET_M15 - m15_med)
         target, limit = RSI_SELL_ENTRY_TARGET_M15, RSI_H4_EXHAUST_SELL
     else:
-        exhausted = max(cur_h4, proj_h4) >= RSI_H4_EXHAUST_BUY
-        ready = m15_med <= RSI_BUY_ENTRY_TARGET_M15
+        h4_depth = max(0.0, max(cur_h4, proj_h4) - RSI_H4_EXHAUST_BUY)
+        shortfall = max(0.0, m15_med - RSI_BUY_ENTRY_TARGET_M15)
         target, limit = RSI_BUY_ENTRY_TARGET_M15, RSI_H4_EXHAUST_BUY
-    state = "EXHAUSTED" if exhausted else ("OK" if ready else "WAIT_MOMENTUM")
-    return {"state": state, "h4_current": round(cur_h4, 2), "h4_projected": round(proj_h4, 2),
+    exhaustion_pen = min(RSI_EXHAUST_MAX_PENALTY, h4_depth * RSI_EXHAUST_PENALTY_PER_POINT)
+    target_pen = min(RSI_TARGET_MAX_PENALTY, shortfall * RSI_TARGET_PENALTY_PER_POINT)
+    state = "EXHAUSTED" if exhaustion_pen > 0 else ("OK" if target_pen <= 0 else "BELOW_TARGET")
+    return {"state": state, "penalty": round(exhaustion_pen + target_pen, 2), "exhaustion_penalty": round(exhaustion_pen, 2),
+            "target_penalty": round(target_pen, 2), "h4_current": round(cur_h4, 2), "h4_projected": round(proj_h4, 2),
             "m15_projected_median": round(m15_med, 2), "m15_target": target, "h4_exhaustion_limit": limit}
 
 
@@ -5958,7 +5968,7 @@ def _v2_momentum_entry_price(direction: str, m15: list[Candle], h4: list[Candle]
         prices = sorted(p for p in points if p > current)
     else:
         prices = sorted((p for p in points if p < current), reverse=True)
-    for price in prices:
+    for price in prices[:3]:
         proj = _v2_project_rsi_to_entry_zone(m15, h4, price, price, direction)
         med = safe_float(((proj.get("at_entry") or {}).get("M15") or {}).get("median"), 50.0)
         hit = med >= RSI_SELL_ENTRY_TARGET_M15 if direction == "SELL" else med <= RSI_BUY_ENTRY_TARGET_M15
@@ -6114,6 +6124,11 @@ def _v2_select_prediction_invalidation(
         if guard_pool is not None and guard_pool.high > sl:
             sl = guard_pool.high + min(h1_atr * SL_INVALIDATION_BUFFER_ATR, h1_atr * 0.20)
 
+    min_risk = max(h1_atr * SL_MIN_RISK_H1_ATR, entry * SL_MIN_RISK_PCT / 100.0)
+    noise_widened = abs(entry - sl) < min_risk
+    if noise_widened:
+        sl = entry - min_risk if direction == "BUY" else entry + min_risk
+
     risk = abs(entry - sl)
     risk_h1_atr = risk / max(h1_atr, EPS)
     risk_pct = risk / max(entry, EPS) * 100.0
@@ -6135,6 +6150,7 @@ def _v2_select_prediction_invalidation(
 
     return {
         "anchor_level": round_price(anchor),
+        "noise_floor_widened": noise_widened,
         "anchor_source": selected["source"],
         "anchor_strength": round(safe_float(selected["strength"]), 2),
         "liquidity_guard": (
@@ -6674,10 +6690,6 @@ def _v2_build_thesis_candidate(
     last_bos = latest_event(m15_structure, {"BOS"}, direction=("BULLISH" if direction == "BUY" else "BEARISH"), max_age=THESIS_MAX_TRIGGER_AGE_M15, candle_count=len(m15))
     trigger_ok = bool(last_mss or last_bos)
     thesis_status = "ACTIVE_TRIGGER_CONFIRMED" if trigger_ok else "WAITING_TRIGGER"
-    if momentum_gate["state"] == "EXHAUSTED":
-        thesis_status = "EXHAUSTED_MOMENTUM"
-    elif momentum_gate["state"] == "WAIT_MOMENTUM" and trigger_ok:
-        thesis_status = "WAITING_MOMENTUM"
     thesis_type = "BUY_PULLBACK" if direction == "BUY" else "SELL_PULLBACK"
     if projection.get("classification") in {"SUPPORTIVE_BUY_RETRACEMENT", "SUPPORTIVE_SELL_RETRACEMENT"} and (rsi_pack.get("H1") or {}).get("div", {}).get(direction):
         thesis_type += "_RSI_DIVERGENCE"
@@ -6715,17 +6727,17 @@ def _v2_build_thesis_candidate(
         base = min(base, 62.0)
         penalties.append({"type": "WEAK_IMPULSE", "amount": 0.0, "cap": 62.0})
     if not trigger_ok:
-        base = min(base, THESIS_WAITING_CAP_V2)
-        penalties.append({"type": "WAITING_TRIGGER", "amount": round(max(0.0, base - THESIS_WAITING_CAP_V2), 2)})
-    if momentum_gate["state"] == "EXHAUSTED":
-        base = min(base, THESIS_VETO_CAP_V2)
-        penalties.append({"type": "RSI_H4_EXHAUSTION", "amount": 0.0, "cap": THESIS_VETO_CAP_V2})
-    elif momentum_gate["state"] == "WAIT_MOMENTUM":
-        base = min(base, THESIS_WAITING_CAP_V2)
-        penalties.append({"type": "WAITING_MOMENTUM", "amount": 0.0, "cap": THESIS_WAITING_CAP_V2})
+        base = min(base - THESIS_WAITING_PENALTY_V2, THESIS_WAITING_CAP_V2)
+        penalties.append({"type": "WAITING_TRIGGER", "amount": THESIS_WAITING_PENALTY_V2})
+    if momentum_gate["exhaustion_penalty"] > 0:
+        base -= momentum_gate["exhaustion_penalty"]
+        penalties.append({"type": "RSI_H4_EXHAUSTION", "amount": momentum_gate["exhaustion_penalty"]})
+    if momentum_gate["target_penalty"] > 0:
+        base -= momentum_gate["target_penalty"]
+        penalties.append({"type": "RSI_M15_BELOW_TARGET", "amount": momentum_gate["target_penalty"]})
     if volume_ctx["class"] == "FAKE_MOVE_RISK":
-        base = min(base - 10.0, 62.0)
-        penalties.append({"type": "FAKE_MOVE_LOW_VOLUME", "amount": 10.0, "cap": 62.0})
+        base -= 10.0
+        penalties.append({"type": "FAKE_MOVE_LOW_VOLUME", "amount": 10.0})
     elif volume_ctx["class"] == "WEAK_VOLUME":
         base -= 5.0
         penalties.append({"type": "WEAK_VOLUME", "amount": 5.0})
@@ -6744,10 +6756,6 @@ def _v2_build_thesis_candidate(
         penalties.append({"type": "TARGET_BARRIER", "amount": min(12.0, 4.0 * len(target["major_barriers"]))})
     confidence = clamp(base)
     if not trigger_ok:
-        confidence = min(confidence, THESIS_WAITING_CAP_V2)
-    if momentum_gate["state"] == "EXHAUSTED":
-        confidence = min(confidence, THESIS_VETO_CAP_V2)
-    elif momentum_gate["state"] == "WAIT_MOMENTUM":
         confidence = min(confidence, THESIS_WAITING_CAP_V2)
     if confidence < THESIS_MIN_QUALITY_V2:
         return None
@@ -7984,7 +7992,7 @@ async def analyze_scan_structure(pair: str, context: dict[str,Any] | None=None) 
     pair_h4_trend = str(h4_structure.trend or "RANGE").upper()
     aligned = (
         (btc_trend == "RANGE" and pair_h4_trend in {"BULLISH", "BEARISH", "RANGE"})
-        or (btc_trend == pair_h4_trend and btc_trend in {"BULLISH", "BEARISH"})
+        or (btc_trend in {"BULLISH", "BEARISH"} and pair_h4_trend in {btc_trend, "RANGE"})
     )
     pair_side = "BUY" if pair_h4_trend == "BULLISH" else ("SELL" if pair_h4_trend == "BEARISH" else "")
     alignment_label = classify_btc_alignment(btc_trend, pair_side, btc.get("confidence"))
