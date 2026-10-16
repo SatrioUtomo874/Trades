@@ -494,3 +494,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T15:32:04.055156+00:00
 - Strategy: MANUAL v1.0
+
+---
+
+## INJUSDT — BUY
+
+Trade ID: `INJUSDT-20261016-212352-546F3F`
+
+### Setup
+
+- Price Now Reference: 9.106
+- Entry: 8.488
+- Reason Entry: skip
+- Price Exp: 9.389
+- Reason Price Exp: skip
+- SL: 8.218
+- Reason SL: skip
+- TP: 9.39
+- Reason TP: skip
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: impuls BTC turun 1.56% (4 jam); setup BUY INJUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-16T14:23:52.814505+00:00
+- Filled: -
+- Closed: 2026-10-16T15:32:19.252920+00:00
+- Strategy: MANUAL v1.0
