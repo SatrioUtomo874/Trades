@@ -329,3 +329,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T15:01:56.871753+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## XVSUSDT — SELL
+
+Trade ID: `XVSUSDT-20261016-190811-389D11`
+
+### Setup
+
+- Price Now Reference: 3.075
+- Entry: 3.111
+- Reason Entry: XVSUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 3.1102 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 66.3 pada entry zone.
+- Price Exp: 3.031
+- Reason Price Exp: Price Exp 3.031: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 3.116
+- Reason SL: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 3.113; SL ditempatkan di luar invalidation dan liquidity guard 3.1102.
+- TP: 2.987
+- Reason TP: TP 2.987 dipilih dari H4_LOWER_LOW dengan RR 24.80; target quality 80.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 3.03
+- Result Reason: Price Exp 3.031: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-16T12:08:11.883120+00:00
+- Filled: -
+- Closed: 2026-10-16T15:21:55.057656+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
