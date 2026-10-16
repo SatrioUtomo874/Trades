@@ -1,0 +1,34 @@
+# Trading Journal
+
+---
+
+## DEXEUSDT — SELL
+
+Trade ID: `DEXEUSDT-20261016-163205-7639D8`
+
+### Setup
+
+- Price Now Reference: 1.753
+- Entry: 1.831
+- Reason Entry: DEXEUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 1.8305 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 87.1 pada entry zone.
+- Price Exp: 1.751
+- Reason Price Exp: Price Exp 1.7510000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.874
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 1.872; SL ditempatkan di luar invalidation.
+- TP: 1.718
+- Reason TP: TP 1.718 dipilih dari H4_LOWER_LOW dengan RR 2.63; target quality 80.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 1.751
+- Result Reason: Price Exp 1.7510000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-16T09:32:05.790379+00:00
+- Filled: -
+- Closed: 2026-10-16T09:32:09.956041+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
