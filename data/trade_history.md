@@ -692,3 +692,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T17:05:18.658052+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## POWERUSDT — SELL
+
+Trade ID: `POWERUSDT-20261016-232614-754713`
+
+### Setup
+
+- Price Now Reference: 0.0793
+- Entry: 0.08145
+- Reason Entry: POWERUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.08148 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_BREAKER. Projected M15 RSI 73.8 pada entry zone.
+- Price Exp: 0.07774
+- Reason Price Exp: Price Exp 0.07774: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.08161
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.08148; SL ditempatkan di luar invalidation dan liquidity guard 0.08148.
+- TP: 0.07616
+- Reason TP: TP 0.07616 dipilih dari H4_LOWER_LOW dengan RR 33.06; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.07774
+- Result Reason: Price Exp 0.07774: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-16T16:26:14.379057+00:00
+- Filled: -
+- Closed: 2026-10-16T17:18:20.166297+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
