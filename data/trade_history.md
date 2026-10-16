@@ -428,3 +428,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T15:31:33.177438+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## ZECUSDT — BUY
+
+Trade ID: `ZECUSDT-20261016-210852-649267`
+
+### Setup
+
+- Price Now Reference: 1217.11
+- Entry: 1151.32
+- Reason Entry: Liquidity Pool
+- Price Exp: 1274
+- Reason Price Exp: TP
+- SL: 1131.62
+- Reason SL: Liquidity Pool bawahnya
+- TP: 1274.03
+- Reason TP: Liquidity Pool, Swing High atas
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: impuls BTC turun 1.56% (4 jam); setup BUY ZECUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-16T14:08:52.157459+00:00
+- Filled: -
+- Closed: 2026-10-16T15:31:48.872369+00:00
+- Strategy: MANUAL v1.0
