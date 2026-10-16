@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T12:58:06.973413+00:00",
+  "saved_at": "2026-10-16T14:07:23.066631+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -29,13 +29,6 @@
       "until": "2026-10-17T11:13:35.772896+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
-    },
-    {
-      "pair": "ETHUSDT",
-      "banned_at": "2026-10-16T09:16:46.671435+00:00",
-      "until": null,
-      "reason": "Real quantity tidak memenuhi target margin ±10%: ETHUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=9.8544) Margin pas ≈ $2.22.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "FIDAUSDT",
