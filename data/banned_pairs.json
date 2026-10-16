@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T11:13:55.973367+00:00",
+  "saved_at": "2026-10-16T11:18:52.396097+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -34,6 +34,13 @@
       "pair": "MEMEUSDT",
       "banned_at": "2026-10-16T09:58:48.883143+00:00",
       "until": "2026-10-16T17:58:48.883121+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "XANUSDT",
+      "banned_at": "2026-10-16T11:18:52.395979+00:00",
+      "until": "2026-10-16T19:18:52.395960+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
