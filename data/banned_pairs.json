@@ -1,5 +1,13 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T09:14:24.514774+00:00",
-  "bans": []
+  "saved_at": "2026-10-16T09:16:48.671179+00:00",
+  "bans": [
+    {
+      "pair": "ETHUSDT",
+      "banned_at": "2026-10-16T09:16:46.671435+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: ETHUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=9.8544) Margin pas ≈ $2.22.",
+      "source": "AUTO_MARGIN_INFLUENCE"
+    }
+  ]
 }
