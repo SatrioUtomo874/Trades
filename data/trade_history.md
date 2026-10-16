@@ -164,3 +164,36 @@ Tidak ada trailing.
 - Filled: 2026-10-16T11:13:01.875414+00:00
 - Closed: 2026-10-16T11:13:45.354396+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## XANUSDT — SELL
+
+Trade ID: `XANUSDT-20261016-170135-FE44A4`
+
+### Setup
+
+- Price Now Reference: 0.010181
+- Entry: 0.010478
+- Reason Entry: XANUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.010482 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 76.2 pada entry zone.
+- Price Exp: 0.0101
+- Reason Price Exp: Price Exp 0.0101: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.010498
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.010482; SL ditempatkan di luar invalidation.
+- TP: 0.010086
+- Reason TP: TP 0.010086 dipilih dari H4_LOWER_LOW dengan RR 19.60; target quality 85.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0101
+- Result Reason: Price Exp 0.0101: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-16T10:01:35.580854+00:00
+- Filled: -
+- Closed: 2026-10-16T11:18:43.166488+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
