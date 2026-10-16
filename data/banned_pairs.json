@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T15:02:06.342435+00:00",
+  "saved_at": "2026-10-16T15:22:04.280637+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -64,6 +64,13 @@
       "until": "2026-10-17T11:13:55.973169+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "XVSUSDT",
+      "banned_at": "2026-10-16T15:22:04.280452+00:00",
+      "until": "2026-10-16T23:22:04.280428+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ZRXUSDT",
