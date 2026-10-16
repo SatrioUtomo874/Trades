@@ -395,3 +395,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T15:22:34.473098+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## GASUSDT — BUY
+
+Trade ID: `GASUSDT-20261016-210318-1689D5`
+
+### Setup
+
+- Price Now Reference: 1.3228
+- Entry: 1.269
+- Reason Entry: GASUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 1.2694 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_OB. Projected M15 RSI 11.5 pada entry zone.
+- Price Exp: 1.329
+- Reason Price Exp: Price Exp 1.3282: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.249
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 1.2508; SL ditempatkan di luar invalidation dan liquidity guard 1.2508.
+- TP: 1.346
+- Reason TP: TP 1.3453 dipilih dari H4_HIGHER_HIGH dengan RR 3.83; target quality 77.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: impuls BTC turun 1.56% (4 jam); setup BUY GASUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-16T14:03:18.388301+00:00
+- Filled: -
+- Closed: 2026-10-16T15:31:33.177438+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
