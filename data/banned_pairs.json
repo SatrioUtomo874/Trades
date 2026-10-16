@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T16:46:46.050910+00:00",
+  "saved_at": "2026-10-16T17:04:46.187830+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
@@ -41,6 +41,13 @@
       "pair": "FIDAUSDT",
       "banned_at": "2026-10-16T12:02:35.473524+00:00",
       "until": "2026-10-16T20:02:35.473504+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "HOMEUSDT",
+      "banned_at": "2026-10-16T17:04:46.187677+00:00",
+      "until": "2026-10-17T01:04:46.187659+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
