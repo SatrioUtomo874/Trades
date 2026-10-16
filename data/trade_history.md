@@ -593,3 +593,36 @@ Tidak ada trailing.
 - Filled: 2026-10-16T15:22:54.678858+00:00
 - Closed: 2026-10-16T15:32:50.573404+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## MITOUSDT — SELL
+
+Trade ID: `MITOUSDT-20261016-233157-549E12`
+
+### Setup
+
+- Price Now Reference: 0.01397
+- Entry: 0.01414
+- Reason Entry: MITOUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.0141308 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 62.9 pada entry zone.
+- Price Exp: 0.01369
+- Reason Price Exp: Price Exp 0.01369: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01417
+- Reason SL: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 0.014145; SL ditempatkan di luar invalidation dan liquidity guard 0.0141308.
+- TP: 0.01342
+- Reason TP: TP 0.01342 dipilih dari H4_LOWER_LOW dengan RR 24.00; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.01417
+- Result Reason: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 0.014145; SL ditempatkan di luar invalidation dan liquidity guard 0.0141308.
+- PnL: -0.2121640735501979897929174611%
+- Created: 2026-10-16T16:31:57.584962+00:00
+- Filled: 2026-10-16T16:46:12.447130+00:00
+- Closed: 2026-10-16T16:46:35.078627+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
