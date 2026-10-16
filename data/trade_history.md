@@ -362,3 +362,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-16T15:21:55.057656+00:00
 - Strategy: SMC_VLT_RSI v2.3.0
+
+---
+
+## KAITOUSDT — SELL
+
+Trade ID: `KAITOUSDT-20261016-162536-26C798`
+
+### Setup
+
+- Price Now Reference: 0.2976
+- Entry: 0.302
+- Reason Entry: KAITOUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.3022 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 68.7 pada entry zone.
+- Price Exp: 0.2923
+- Reason Price Exp: Price Exp 0.2923: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.3115
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.31115; SL ditempatkan di luar invalidation dan liquidity guard 0.3110226.
+- TP: 0.2807
+- Reason TP: TP 0.2807 dipilih dari H1_SWING_LOW dengan RR 2.24; target quality 67.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2923
+- Result Reason: Price Exp 0.2923: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-16T09:25:36.491237+00:00
+- Filled: -
+- Closed: 2026-10-16T15:22:34.473098+00:00
+- Strategy: SMC_VLT_RSI v2.3.0
