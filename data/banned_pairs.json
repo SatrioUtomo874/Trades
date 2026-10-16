@@ -1,11 +1,18 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T14:11:07.174881+00:00",
+  "saved_at": "2026-10-16T15:02:06.342435+00:00",
   "bans": [
     {
       "pair": "1000FLOKIUSDT",
       "banned_at": "2026-10-16T09:53:16.317243+00:00",
       "until": "2026-10-16T17:53:16.317219+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "ACEUSDT",
+      "banned_at": "2026-10-16T15:02:06.342290+00:00",
+      "until": "2026-10-16T23:02:06.342266+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
