@@ -1,14 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-16T17:18:29.188316+00:00",
+  "saved_at": "2026-10-16T20:06:12.235647+00:00",
   "bans": [
-    {
-      "pair": "1000FLOKIUSDT",
-      "banned_at": "2026-10-16T09:53:16.317243+00:00",
-      "until": "2026-10-16T17:53:16.317219+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
     {
       "pair": "ACEUSDT",
       "banned_at": "2026-10-16T15:02:06.342290+00:00",
@@ -24,13 +17,6 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "DEXEUSDT",
-      "banned_at": "2026-10-16T09:32:17.794428+00:00",
-      "until": "2026-10-16T17:32:17.794404+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "DOGEUSDT",
       "banned_at": "2026-10-16T11:13:35.772932+00:00",
       "until": "2026-10-17T11:13:35.772896+00:00",
@@ -38,11 +24,11 @@
       "source": "AUTO_SL"
     },
     {
-      "pair": "FIDAUSDT",
-      "banned_at": "2026-10-16T12:02:35.473524+00:00",
-      "until": "2026-10-16T20:02:35.473504+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
+      "pair": "ETCUSDT",
+      "banned_at": "2026-10-16T20:06:10.453097+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: ETCUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=10.03338) Margin pas ≈ $2.01.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "HOMEUSDT",
@@ -55,13 +41,6 @@
       "pair": "KAITOUSDT",
       "banned_at": "2026-10-16T15:22:45.492960+00:00",
       "until": "2026-10-16T23:22:45.492936+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "MEMEUSDT",
-      "banned_at": "2026-10-16T09:58:48.883143+00:00",
-      "until": "2026-10-16T17:58:48.883121+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
@@ -90,13 +69,6 @@
       "pair": "REUSDT",
       "banned_at": "2026-10-16T17:05:28.720549+00:00",
       "until": "2026-10-17T01:05:28.720525+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "XANUSDT",
-      "banned_at": "2026-10-16T11:18:52.395979+00:00",
-      "until": "2026-10-16T19:18:52.395960+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
