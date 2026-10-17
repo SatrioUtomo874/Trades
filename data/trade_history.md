@@ -131,3 +131,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T11:20:56.073352+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## EULUSDT — SELL
+
+Trade ID: `EULUSDT-20261017-182059-600B6D`
+
+### Setup
+
+- Price Now Reference: 1.2114
+- Entry: 1.2314
+- Reason Entry: EULUSDT SELL: SELL_PULLBACK. H4 structure RANGE, liquidity M15 1.2329 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 70.1 pada entry zone.
+- Price Exp: 1.2094
+- Reason Price Exp: Price Exp 1.2094: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.2388
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 1.2324; SL ditempatkan di luar invalidation dan liquidity guard 1.2329.
+- TP: 1.2
+- Reason TP: TP 1.2 dipilih dari H4_SELL_SIDE_LIQUIDITY dengan RR 4.24; target quality 65.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 1.2094
+- Result Reason: Price Exp 1.2094: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T11:20:59.189665+00:00
+- Filled: -
+- Closed: 2026-10-17T11:22:29.577667+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
