@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T00:48:24.834507+00:00",
+  "saved_at": "2026-10-17T00:49:54.199774+00:00",
   "bans": [
     {
       "pair": "BSBUSDT",
@@ -29,6 +29,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: ETCUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=9.965) Margin pas ≈ $2.00.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "GRAMUSDT",
+      "banned_at": "2026-10-17T00:49:54.199649+00:00",
+      "until": "2026-10-17T08:49:54.199632+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "HOMEUSDT",
