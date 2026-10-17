@@ -791,3 +791,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:46:50.158281+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## ETHFIUSDT — SELL
+
+Trade ID: `ETHFIUSDT-20261017-161758-94F042`
+
+### Setup
+
+- Price Now Reference: 0.6874
+- Entry: 0.6969
+- Reason Entry: ETHFIUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity M15 0.6969 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 66.1 pada entry zone.
+- Price Exp: 0.6792
+- Reason Price Exp: Price Exp 0.6792: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.7028
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.6994; SL ditempatkan di luar invalidation.
+- TP: 0.6717
+- Reason TP: TP 0.6717 dipilih dari H4_LOWER_LOW dengan RR 4.27; target quality 90.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.6792
+- Result Reason: Price Exp 0.6792: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T09:17:58.478630+00:00
+- Filled: -
+- Closed: 2026-10-17T12:48:11.284667+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
