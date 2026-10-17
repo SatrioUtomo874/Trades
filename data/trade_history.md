@@ -329,3 +329,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T09:03:01.160720+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## UBUSDT — BUY
+
+Trade ID: `UBUSDT-20261017-160646-4FC62F`
+
+### Setup
+
+- Price Now Reference: 0.12654
+- Entry: 0.12405
+- Reason Entry: UBUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.1240847 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 34.7 pada entry zone.
+- Price Exp: 0.12861
+- Reason Price Exp: Price Exp 0.12861: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.12298
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.12404; SL ditempatkan di luar invalidation dan liquidity guard 0.1240847.
+- TP: 0.13056
+- Reason TP: TP 0.13056 dipilih dari H4_SWING_HIGH dengan RR 6.08; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: BTC H4 berbalik BEARISH; setup BUY UBUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-17T09:06:46.453914+00:00
+- Filled: -
+- Closed: 2026-10-17T09:08:56.376187+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
