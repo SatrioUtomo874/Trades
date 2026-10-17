@@ -263,3 +263,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T11:32:03.187242+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## ALLUSDT — SELL
+
+Trade ID: `ALLUSDT-20261017-162927-75CB73`
+
+### Setup
+
+- Price Now Reference: 0.6129
+- Entry: 0.6196
+- Reason Entry: ALLUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.619475 dipadukan dengan Fib SECONDARY; refinement BEARISH_OB. Projected M15 RSI 65.8 pada entry zone.
+- Price Exp: 0.6117
+- Reason Price Exp: Price Exp 0.6117: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.6234
+- Reason SL: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 0.6196078; SL ditempatkan di luar invalidation dan liquidity guard 0.619475.
+- TP: 0.6115
+- Reason TP: TP 0.6115 dipilih dari H1_SWING_LOW dengan RR 2.13; target quality 76.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.6116
+- Result Reason: Price Exp 0.6117: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T09:29:27.079914+00:00
+- Filled: -
+- Closed: 2026-10-17T12:02:04.474132+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
