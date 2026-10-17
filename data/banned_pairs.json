@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T08:58:59.774416+00:00",
+  "saved_at": "2026-10-17T09:00:13.848414+00:00",
   "bans": [
     {
       "pair": "DOGEUSDT",
@@ -36,6 +36,13 @@
       "until": "2026-10-17T15:33:03.156711+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "XMRUSDT",
+      "banned_at": "2026-10-17T09:00:13.847996+00:00",
+      "until": "2026-10-17T17:00:13.847968+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "XRPUSDT",
