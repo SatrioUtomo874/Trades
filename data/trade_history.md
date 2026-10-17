@@ -98,3 +98,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T00:48:18.160981+00:00
 - Strategy: SMC_VLT_RSI v2.3.1
+
+---
+
+## GRAMUSDT — SELL
+
+Trade ID: `GRAMUSDT-20261017-070928-AFB848`
+
+### Setup
+
+- Price Now Reference: 1.352
+- Entry: 1.368
+- Reason Entry: GRAMUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 1.368 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 67.0 pada entry zone.
+- Price Exp: 1.347
+- Reason Price Exp: Price Exp 1.347: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.382
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 1.381; SL ditempatkan di luar invalidation.
+- TP: 1.339
+- Reason TP: TP 1.339 dipilih dari H4_LOWER_LOW dengan RR 2.07; target quality 88.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 1.347
+- Result Reason: Price Exp 1.347: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T00:09:28.278385+00:00
+- Filled: -
+- Closed: 2026-10-17T00:49:47.157349+00:00
+- Strategy: SMC_VLT_RSI v2.3.1
