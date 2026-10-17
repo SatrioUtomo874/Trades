@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T12:10:13.453879+00:00",
+  "saved_at": "2026-10-17T12:12:46.939115+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -125,6 +125,13 @@
       "pair": "STEEMUSDT",
       "banned_at": "2026-10-17T12:10:13.453752+00:00",
       "until": "2026-10-17T20:10:13.453736+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "TAOUSDT",
+      "banned_at": "2026-10-17T12:12:46.938985+00:00",
+      "until": "2026-10-17T20:12:46.938966+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
