@@ -758,3 +758,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:40:14.672459+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## UMAUSDT — SELL
+
+Trade ID: `UMAUSDT-20261017-190732-4E8506`
+
+### Setup
+
+- Price Now Reference: 0.3911
+- Entry: 0.3949
+- Reason Entry: UMAUSDT SELL: SELL_PULLBACK. H4 structure RANGE, liquidity H1 0.39555 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_OB. Projected M15 RSI 71.2 pada entry zone.
+- Price Exp: 0.3886
+- Reason Price Exp: Price Exp 0.3886: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.3973
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.3956; SL ditempatkan di luar invalidation dan liquidity guard 0.39555.
+- TP: 0.386
+- Reason TP: TP 0.386 dipilih dari H4_LOWER_LOW dengan RR 3.71; target quality 89.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.3886
+- Result Reason: Price Exp 0.3886: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T12:07:32.992717+00:00
+- Filled: -
+- Closed: 2026-10-17T12:46:50.158281+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
