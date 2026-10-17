@@ -164,3 +164,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T04:02:18.257618+00:00
 - Strategy: SMC_VLT_RSI v2.3.1
+
+---
+
+## ZRXUSDT — SELL
+
+Trade ID: `ZRXUSDT-20261017-051516-3D9C85`
+
+### Setup
+
+- Price Now Reference: 0.11193
+- Entry: 0.1142
+- Reason Entry: ZRXUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.1142529 dipadukan dengan Fib PRIMARY; refinement BEARISH_OB. Projected M15 RSI 74.0 pada entry zone.
+- Price Exp: 0.1113
+- Reason Price Exp: Price Exp 0.11138: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1148
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.11425; SL ditempatkan di luar invalidation dan liquidity guard 0.1142529.
+- TP: 0.1111
+- Reason TP: TP 0.11115 dipilih dari H4_LOWER_LOW dengan RR 4.29; target quality 85.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1113
+- Result Reason: Price Exp 0.11138: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-16T22:15:16.982103+00:00
+- Filled: -
+- Closed: 2026-10-17T06:23:32.559461+00:00
+- Strategy: SMC_VLT_RSI v2.3.1
