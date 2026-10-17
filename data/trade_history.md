@@ -527,3 +527,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T09:29:50.778876+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## TOSHIUSDT — BUY
+
+Trade ID: `TOSHIUSDT-20261017-162929-4CDB9A`
+
+### Setup
+
+- Price Now Reference: 0.0001082
+- Entry: 0.000105
+- Reason Entry: TOSHIUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H4 0.000105035 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 16.9 pada entry zone.
+- Price Exp: 0.0001086
+- Reason Price Exp: Price Exp 0.0001086: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0001042
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.0001049; SL ditempatkan di luar invalidation dan liquidity guard 0.000105035.
+- TP: 0.0001101
+- Reason TP: TP 0.0001101 dipilih dari H4_SWING_HIGH dengan RR 6.38; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: BTC H4 berbalik BEARISH; setup BUY TOSHIUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-17T09:29:29.762131+00:00
+- Filled: -
+- Closed: 2026-10-17T09:30:04.400267+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
