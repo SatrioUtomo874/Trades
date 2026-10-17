@@ -362,3 +362,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T09:08:56.376187+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## BEAMXUSDT — BUY
+
+Trade ID: `BEAMXUSDT-20261017-160649-B1035B`
+
+### Setup
+
+- Price Now Reference: 0.002927
+- Entry: 0.002871
+- Reason Entry: BEAMXUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure BULLISH, liquidity H4 0.002869 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 26.1 pada entry zone.
+- Price Exp: 0.002946
+- Reason Price Exp: Price Exp 0.002946: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.002838
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.002869; SL ditempatkan di luar invalidation.
+- TP: 0.002948
+- Reason TP: TP 0.002948 dipilih dari H4_HIGHER_HIGH dengan RR 2.33; target quality 95.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: BTC H4 berbalik BEARISH; setup BUY BEAMXUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-17T09:06:49.151376+00:00
+- Filled: -
+- Closed: 2026-10-17T09:09:10.175785+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
