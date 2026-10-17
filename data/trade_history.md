@@ -461,3 +461,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:11:50.159268+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## TAOUSDT — SELL
+
+Trade ID: `TAOUSDT-20261017-155506-537499`
+
+### Setup
+
+- Price Now Reference: 275.54
+- Entry: 277.17
+- Reason Entry: TAOUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity M15 277.171 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 62.0 pada entry zone.
+- Price Exp: 272.27
+- Reason Price Exp: Price Exp 272.27: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 279.15
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 277.21; SL ditempatkan di luar invalidation dan liquidity guard 277.171.
+- TP: 270.18
+- Reason TP: TP 270.18 dipilih dari H4_SWING_LOW dengan RR 3.53; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 272.27
+- Result Reason: Price Exp 272.27: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T08:55:06.287141+00:00
+- Filled: -
+- Closed: 2026-10-17T12:12:37.185441+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
