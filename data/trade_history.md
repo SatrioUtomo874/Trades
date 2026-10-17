@@ -824,3 +824,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:48:11.284667+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## SYNUSDT — SELL
+
+Trade ID: `SYNUSDT-20261017-191118-E19F8D`
+
+### Setup
+
+- Price Now Reference: 0.18083
+- Entry: 0.18212
+- Reason Entry: SYNUSDT SELL: SELL_PULLBACK. H4 structure RANGE, liquidity H1 0.1821225 dipadukan dengan Fib SECONDARY; refinement BEARISH_BREAKER. Projected M15 RSI 65.5 pada entry zone.
+- Price Exp: 0.17879
+- Reason Price Exp: Price Exp 0.17879: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.18357
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.18251; SL ditempatkan di luar invalidation.
+- TP: 0.17737
+- Reason TP: TP 0.17737 dipilih dari H4_LOWER_LOW dengan RR 3.28; target quality 94.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.17879
+- Result Reason: Price Exp 0.17879: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T12:11:18.475939+00:00
+- Filled: -
+- Closed: 2026-10-17T12:51:20.455793+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
