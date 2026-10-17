@@ -395,3 +395,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T09:09:10.175785+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## 1000PEPEUSDT — SELL
+
+Trade ID: `1000PEPEUSDT-20261017-155511-0A1964`
+
+### Setup
+
+- Price Now Reference: 0.0040045
+- Entry: 0.0040512
+- Reason Entry: 1000PEPEUSDT SELL: SELL_PULLBACK. H4 structure RANGE, liquidity H1 0.0040526 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 66.6 pada entry zone.
+- Price Exp: 0.0040002
+- Reason Price Exp: Price Exp 0.0040002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0040767
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.0040526; SL ditempatkan di luar invalidation dan liquidity guard 0.0040526.
+- TP: 0.0039833
+- Reason TP: TP 0.0039833 dipilih dari H4_LOWER_LOW dengan RR 2.66; target quality 90.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0040002
+- Result Reason: Price Exp 0.0040002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T08:55:11.985265+00:00
+- Filled: -
+- Closed: 2026-10-17T09:17:01.273428+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
