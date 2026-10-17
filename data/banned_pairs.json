@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T12:25:42.773380+00:00",
+  "saved_at": "2026-10-17T12:37:08.301362+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -69,6 +69,13 @@
       "pair": "HOMEUSDT",
       "banned_at": "2026-10-17T12:02:35.324881+00:00",
       "until": "2026-10-17T20:02:35.324860+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "IOTXUSDT",
+      "banned_at": "2026-10-17T12:37:08.301220+00:00",
+      "until": "2026-10-17T20:37:08.301201+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
