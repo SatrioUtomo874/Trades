@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T12:48:00.406903+00:00",
+  "saved_at": "2026-10-17T12:48:22.377643+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -55,6 +55,13 @@
       "pair": "DOGEUSDT",
       "banned_at": "2026-10-17T12:21:16.974363+00:00",
       "until": "2026-10-17T20:21:16.974335+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "ETHFIUSDT",
+      "banned_at": "2026-10-17T12:48:22.377437+00:00",
+      "until": "2026-10-17T20:48:22.377412+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
