@@ -428,3 +428,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:10:02.974519+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## RSRUSDT — BUY
+
+Trade ID: `RSRUSDT-20261017-190735-11BF5E`
+
+### Setup
+
+- Price Now Reference: 0.002008
+- Entry: 0.001933
+- Reason Entry: RSRUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.0019169375 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 29.8 pada entry zone.
+- Price Exp: 0.002012
+- Reason Price Exp: Price Exp 0.002012: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.001905
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.0019148609; SL ditempatkan di luar invalidation dan liquidity guard 0.0019169375.
+- TP: 0.002014
+- Reason TP: TP 0.002014 dipilih dari H1_SWING_HIGH dengan RR 2.89; target quality 78.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: BTC H4 berbalik BEARISH; setup BUY RSRUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-17T12:07:35.558810+00:00
+- Filled: -
+- Closed: 2026-10-17T12:11:50.159268+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
