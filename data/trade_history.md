@@ -560,3 +560,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:21:06.386419+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## REUSDT — SELL
+
+Trade ID: `REUSDT-20261017-192300-72CAD9`
+
+### Setup
+
+- Price Now Reference: 0.4034
+- Entry: 0.4088
+- Reason Entry: REUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.40905 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 78.0 pada entry zone.
+- Price Exp: 0.4031
+- Reason Price Exp: Price Exp 0.4031: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.4113
+- Reason SL: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 0.4092; SL ditempatkan di luar invalidation dan liquidity guard 0.40905.
+- TP: 0.4033
+- Reason TP: TP 0.4033 dipilih dari H1_SWING_LOW dengan RR 2.20; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.4031
+- Result Reason: Price Exp 0.4031: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T12:23:00.173663+00:00
+- Filled: -
+- Closed: 2026-10-17T12:24:52.454933+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
