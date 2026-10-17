@@ -263,3 +263,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T08:58:37.453706+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## XMRUSDT — BUY
+
+Trade ID: `XMRUSDT-20261017-155853-B7D961`
+
+### Setup
+
+- Price Now Reference: 559.89
+- Entry: 546.63
+- Reason Entry: XMRUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H4 545.096 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 21.9 pada entry zone.
+- Price Exp: 560.17
+- Reason Price Exp: Price Exp 560.17: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 542.11
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 545.04; SL ditempatkan di luar invalidation dan liquidity guard 545.096.
+- TP: 560.08
+- Reason TP: TP 560.08 dipilih dari H4_HIGHER_HIGH dengan RR 2.98; target quality 88.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 560.2
+- Result Reason: Price Exp 560.17: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T08:58:53.683027+00:00
+- Filled: -
+- Closed: 2026-10-17T09:00:03.072663+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
