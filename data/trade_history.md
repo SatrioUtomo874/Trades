@@ -626,3 +626,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:25:29.969505+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## AIOTUSDT — BUY
+
+Trade ID: `AIOTUSDT-20261017-192700-CD9F07`
+
+### Setup
+
+- Price Now Reference: 0.05343
+- Entry: 0.05223
+- Reason Entry: AIOTUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity M15 0.05223 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 29.7 pada entry zone.
+- Price Exp: 0.05352
+- Reason Price Exp: Price Exp 0.053520000000000005: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.05175
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.052125; SL ditempatkan di luar invalidation.
+- TP: 0.05355
+- Reason TP: TP 0.05355 dipilih dari H4_SWING_HIGH dengan RR 2.75; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: BTC H4 berbalik BEARISH; setup BUY AIOTUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-17T12:27:00.887623+00:00
+- Filled: -
+- Closed: 2026-10-17T12:27:09.674553+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
