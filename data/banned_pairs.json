@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T09:00:13.848414+00:00",
+  "saved_at": "2026-10-17T09:03:09.093097+00:00",
   "bans": [
     {
       "pair": "DOGEUSDT",
@@ -15,6 +15,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: LTCUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=10.02501) Margin pas ≈ $2.01.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "MEGAUSDT",
+      "banned_at": "2026-10-17T09:03:09.092673+00:00",
+      "until": "2026-10-17T17:03:09.092644+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "MITOUSDT",
