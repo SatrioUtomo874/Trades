@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T12:21:16.974543+00:00",
+  "saved_at": "2026-10-17T12:25:15.618463+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -127,6 +127,13 @@
       "until": "2026-10-17T15:33:03.156711+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "REUSDT",
+      "banned_at": "2026-10-17T12:25:15.618219+00:00",
+      "until": "2026-10-17T20:25:15.618189+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "RONINUSDT",
