@@ -395,3 +395,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:06:32.279476+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## STEEMUSDT — SELL
+
+Trade ID: `STEEMUSDT-20261017-190335-78C07B`
+
+### Setup
+
+- Price Now Reference: 0.05356
+- Entry: 0.05438
+- Reason Entry: STEEMUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.054488 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 76.7 pada entry zone.
+- Price Exp: 0.05355
+- Reason Price Exp: Price Exp 0.05355000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.05478
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_HIGH di 0.05474; SL ditempatkan di luar invalidation.
+- TP: 0.05354
+- Reason TP: TP 0.05354 dipilih dari H1_SWING_LOW dengan RR 2.10; target quality 80.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05355
+- Result Reason: Price Exp 0.05355000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T12:03:35.474775+00:00
+- Filled: -
+- Closed: 2026-10-17T12:10:02.974519+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
