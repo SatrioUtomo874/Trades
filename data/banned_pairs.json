@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T12:47:01.275825+00:00",
+  "saved_at": "2026-10-17T12:48:00.406903+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -15,6 +15,13 @@
       "until": "2026-10-17T20:40:25.777024+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "AAVEUSDT",
+      "banned_at": "2026-10-17T12:47:55.360235+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: AAVEUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=15.69) Margin pas ≈ $1.57.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "ALLUSDT",
