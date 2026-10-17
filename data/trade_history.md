@@ -857,3 +857,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:51:20.455793+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## THEUSDT — SELL
+
+Trade ID: `THEUSDT-20261017-194756-4D08BF`
+
+### Setup
+
+- Price Now Reference: 0.05653
+- Entry: 0.0586
+- Reason Entry: THEUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity H1 0.05863 dipadukan dengan Fib SECONDARY; refinement BEARISH_OB. Projected M15 RSI 81.5 pada entry zone.
+- Price Exp: 0.05639
+- Reason Price Exp: Price Exp 0.05639: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.05896
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.05863; SL ditempatkan di luar invalidation dan liquidity guard 0.05863.
+- TP: 0.05637
+- Reason TP: TP 0.05637 dipilih dari H1_SWING_LOW dengan RR 6.19; target quality 69.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05639
+- Result Reason: Price Exp 0.05639: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T12:47:56.377157+00:00
+- Filled: -
+- Closed: 2026-10-17T12:52:17.673391+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
