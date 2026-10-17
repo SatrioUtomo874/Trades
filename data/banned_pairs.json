@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T00:19:31.958778+00:00",
+  "saved_at": "2026-10-17T00:48:24.834507+00:00",
   "bans": [
+    {
+      "pair": "BSBUSDT",
+      "banned_at": "2026-10-17T00:48:24.834373+00:00",
+      "until": "2026-10-17T08:48:24.834353+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
     {
       "pair": "DOGEUSDT",
       "banned_at": "2026-10-16T11:13:35.772932+00:00",
