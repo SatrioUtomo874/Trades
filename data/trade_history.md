@@ -593,3 +593,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:24:52.454933+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## MAVIAUSDT — SELL
+
+Trade ID: `MAVIAUSDT-20261017-191515-0CE2AF`
+
+### Setup
+
+- Price Now Reference: 0.02727
+- Entry: 0.0283
+- Reason Entry: MAVIAUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity M15 0.0283 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_OB. Projected M15 RSI 72.0 pada entry zone.
+- Price Exp: 0.02721
+- Reason Price Exp: Price Exp 0.02721: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02865
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.02861; SL ditempatkan di luar invalidation dan liquidity guard 0.02861.
+- TP: 0.0272
+- Reason TP: TP 0.0272 dipilih dari H1_SWING_LOW dengan RR 3.14; target quality 79.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02721
+- Result Reason: Price Exp 0.02721: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T12:15:15.483444+00:00
+- Filled: -
+- Closed: 2026-10-17T12:25:29.969505+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
