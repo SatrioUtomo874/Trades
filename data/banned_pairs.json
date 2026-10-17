@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T12:25:15.618463+00:00",
+  "saved_at": "2026-10-17T12:25:42.773380+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -90,6 +90,13 @@
       "pair": "MARSCOINUSDT",
       "banned_at": "2026-10-17T09:27:06.938354+00:00",
       "until": "2026-10-17T17:27:06.938335+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "MAVIAUSDT",
+      "banned_at": "2026-10-17T12:25:42.773241+00:00",
+      "until": "2026-10-17T20:25:42.773220+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
