@@ -494,3 +494,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:12:37.185441+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## KAIAUSDT — BUY
+
+Trade ID: `KAIAUSDT-20261017-191900-40CCA0`
+
+### Setup
+
+- Price Now Reference: 0.0438
+- Entry: 0.04257
+- Reason Entry: KAIAUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity M15 0.0425419 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 27.3 pada entry zone.
+- Price Exp: 0.0439
+- Reason Price Exp: Price Exp 0.0439: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.04218
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.04254; SL ditempatkan di luar invalidation dan liquidity guard 0.0425419.
+- TP: 0.04393
+- Reason TP: TP 0.04393 dipilih dari H1_SWING_HIGH dengan RR 3.49; target quality 79.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0439
+- Result Reason: Price Exp 0.0439: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T12:19:00.678511+00:00
+- Filled: -
+- Closed: 2026-10-17T12:19:30.761499+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
