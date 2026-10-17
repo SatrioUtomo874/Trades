@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T00:06:45.025167+00:00",
+  "saved_at": "2026-10-17T00:19:31.958778+00:00",
   "bans": [
     {
       "pair": "DOGEUSDT",
@@ -8,6 +8,13 @@
       "until": "2026-10-17T11:13:35.772896+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "DYMUSDT",
+      "banned_at": "2026-10-17T00:19:31.958632+00:00",
+      "until": "2026-10-17T08:19:31.958609+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ETCUSDT",
