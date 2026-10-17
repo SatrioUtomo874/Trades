@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T07:16:04.782080+00:00",
+  "saved_at": "2026-10-17T08:50:03.151927+00:00",
   "bans": [
     {
       "pair": "BSBUSDT",
@@ -15,20 +15,6 @@
       "until": "2026-10-17T11:13:35.772896+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
-    },
-    {
-      "pair": "DYMUSDT",
-      "banned_at": "2026-10-17T00:19:31.958632+00:00",
-      "until": "2026-10-17T08:19:31.958609+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "ETCUSDT",
-      "banned_at": "2026-10-17T00:06:10.762173+00:00",
-      "until": null,
-      "reason": "Real quantity tidak memenuhi target margin ±10%: ETCUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=9.965) Margin pas ≈ $2.00.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "GRAMUSDT",
@@ -57,13 +43,6 @@
       "until": "2026-10-17T15:33:03.156711+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
-    },
-    {
-      "pair": "STBLUSDT",
-      "banned_at": "2026-10-17T00:06:45.025011+00:00",
-      "until": "2026-10-17T08:06:45.024983+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "XRPUSDT",
