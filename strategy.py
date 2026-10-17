@@ -78,23 +78,14 @@ import requests
 STRATEGY_NAME = "SMC_VLT_RSI"
 STRATEGY_ENGINE = "V2"
 STRATEGY_SCHEMA_VERSION = 1
-SCORING_FORMULA_VERSION = "V2.2-volume-rsi"
+SCORING_FORMULA_VERSION = "V2.4-binance-orderflow-pricelegs"
 
 _log = logging.getLogger("strategy")
 
 
 def _env_float(name: str, default: float, lo: float | None = None, hi: float | None = None) -> float:
-    raw = os.environ.get(name)
-    if raw in (None, ""):
-        return default
-    try:
-        value = float(raw)
-        if not math.isfinite(value) or (lo is not None and value < lo) or (hi is not None and value > hi):
-            raise ValueError("out of range")
-        return value
-    except (TypeError, ValueError):
-        _log.error("Config %s=%r tidak valid; memakai default %s", name, raw, default)
-        return default
+    """Backward-compatible helper: all strategy parameters are code-owned, never env-tuned."""
+    return float(default)
 
 
 def _env_int(name: str, default: int, lo: int | None = None, hi: int | None = None) -> int:
@@ -102,10 +93,8 @@ def _env_int(name: str, default: int, lo: int | None = None, hi: int | None = No
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw in (None, ""):
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    """Backward-compatible helper: strategy switches are fixed in code."""
+    return bool(default)
 
 
 # Candle cache (RAM, bounded). Nilai akhir harus diukur di host deployment.
@@ -148,9 +137,8 @@ REASON_CODES = (
     "BTC_HIGH_RISK_CONFLICT", "PRICE_IN_ZONE", "PRICE_NOT_IN_ZONE", "READY_FOR_VALIDATION",
 )
 ENTRY_ZONE_MAX_WIDTH_PCT = 15.0
-STRATEGY_VERSION = "2.3.1"
+STRATEGY_VERSION = "2.4.0"
 
-BYBIT_BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
 
 M15 = "15"
@@ -168,15 +156,9 @@ BTC_H4_CANDLES_REQUIRED = 240
 
 HTTP_TIMEOUT_SECONDS = 20
 
-# Bybit public REST can return retCode=10006 (API rate limit).
-# The scanner already spaces pairs by 1s, but each pair may need several
-# timeframe requests and the validator adds more requests. Keep one shared
-# request gate across all BybitProvider instances so the module never bursts
-# requests after creating a fresh provider for every fetch_series() call.
-BYBIT_MIN_REQUEST_INTERVAL_SECONDS = 0.12
-BYBIT_RATE_LIMIT_RETRIES = 3
-BYBIT_RATE_LIMIT_SAFETY_SECONDS = 0.75
-BYBIT_RATE_LIMIT_FALLBACK_SECONDS = 2.0
+# Binance public REST requests are serialized and spaced by BinanceProvider.
+# When Binance replies with HTTP 418/429 or error -1003, its provider raises a
+# rate-limit exception for main.py to pause scanning and resume after cooldown.
 
 SWING_SPAN_M15 = 3
 SWING_SPAN_H1 = 2
@@ -341,17 +323,20 @@ TARGET_LIQUIDITY_BASE = 35.0
 
 # Thesis scoring V2. Weights total 100.
 THESIS_WEIGHTS_V2 = {
-    "structure_alignment": 12.0,
-    "liquidity_confluence": 16.0,
-    "fib_location": 11.0,
-    "fvg_ob_refinement": 7.0,
-    "rsi_projection": 14.0,
-    "momentum_current": 5.0,
-    "invalidation_quality": 11.0,
-    "target_quality": 9.0,
-    "rr_quality": 5.0,
+    "structure_alignment": 8.0,
+    "liquidity_confluence": 13.0,
+    "fib_location": 7.0,
+    "fvg_ob_refinement": 5.0,
+    "rsi_projection": 11.0,
+    "momentum_current": 4.0,
+    "invalidation_quality": 8.0,
+    "target_quality": 7.0,
+    "rr_quality": 4.0,
     "entry_reachability": 3.0,
-    "volume_confirmation": 7.0,
+    "volume_confirmation": 5.0,
+    "orderflow_leg": 8.0,
+    "price_leg": 8.0,
+    "support_resistance": 9.0,
 }
 THESIS_WAITING_CAP_V2 = 78.0  # batas atas lunak; pengurangnya ada di THESIS_WAITING_PENALTY_V2
 THESIS_WAITING_PENALTY_V2 = _env_float("THESIS_WAITING_PENALTY_V2", 6.0, 0.0, 30.0)
@@ -658,31 +643,34 @@ class HTTPProvider:
         return await asyncio.to_thread(request)
 
 
-class BybitRateLimitError(RuntimeError):
-    """Bybit public API rate-limit could not be cleared within bounded retries."""
-
-    bybit_rate_limited = True
-
-    def __init__(self, message: str, retry_after_seconds: float) -> None:
-        super().__init__(message)
-        self.retry_after_seconds = max(0.0, float(retry_after_seconds))
-
-
 class InsufficientHistoryError(RuntimeError):
     """Pair belum punya cukup candle closed (mis. listing baru)."""
 
     insufficient_history = True
 
 
-class BybitProvider(HTTPProvider):
-    # Class-level state is intentionally shared by every BybitProvider instance
-    # created inside fetch_series()/fetch_price().
+class BinanceRateLimitError(RuntimeError):
+    """Raised on Binance HTTP 418/429 so main.py can pause and resume scanner."""
+    binance_rate_limited = True
+
+    def __init__(self, message: str, *, status_code: int, endpoint: str, retry_after_seconds: float = 60.0) -> None:
+        self.status_code = int(status_code)
+        self.code = None
+        self.endpoint = endpoint
+        self.server_cooldown_seconds = max(1.0, float(retry_after_seconds))
+        self.bot_cooldown_seconds = self.server_cooldown_seconds + 60.0
+        self.retry_after_seconds = self.server_cooldown_seconds
+        super().__init__(message)
+
+
+class BinanceProvider(HTTPProvider):
     _request_lock: asyncio.Lock | None = None
     _last_request_monotonic: float = 0.0
     _cooldown_until_monotonic: float = 0.0
+    _min_request_interval_seconds: float = 0.12
 
     def __init__(self) -> None:
-        super().__init__(BYBIT_BASE_URL, "BYBIT")
+        super().__init__(BINANCE_BASE_URL, "BINANCE")
 
     @classmethod
     def _get_request_lock(cls) -> asyncio.Lock:
@@ -690,253 +678,46 @@ class BybitProvider(HTTPProvider):
             cls._request_lock = asyncio.Lock()
         return cls._request_lock
 
-    @classmethod
-    def _set_cooldown(cls, seconds: float) -> float:
-        seconds = max(0.0, float(seconds))
-        cls._cooldown_until_monotonic = max(
-            cls._cooldown_until_monotonic,
-            time.monotonic() + seconds,
-        )
-        return max(0.0, cls._cooldown_until_monotonic - time.monotonic())
-
-    @classmethod
-    def _retry_after_from_headers(cls, headers: Any) -> float | None:
-        if not headers:
-            return None
-        raw = headers.get("X-Bapi-Limit-Reset-Timestamp")
-        if raw in (None, ""):
-            return None
-        try:
-            reset_ms = int(float(raw))
-        except (TypeError, ValueError):
-            return None
-        now_ms = int(time.time() * 1000)
-        # Bybit documents this header as the next available time window when
-        # the endpoint limit has been exceeded. Add a small safety margin.
-        return max(0.0, (reset_ms - now_ms) / 1000.0) + BYBIT_RATE_LIMIT_SAFETY_SECONDS
-
     async def get(self, path: str, params: dict[str, Any]) -> Any:
-        """GET Bybit public API with pacing + bounded rate-limit backoff.
-
-        retCode=10006 is handled by waiting until the server-provided reset
-        timestamp when available, then retrying a bounded number of times. No
-        Binance fallback is introduced here, so SCAN remains Bybit-public-only.
-        """
         url = f"{self.base_url}{path}"
-        last_retry_after = BYBIT_RATE_LIMIT_FALLBACK_SECONDS
-
-        for attempt in range(BYBIT_RATE_LIMIT_RETRIES + 1):
-            lock = self._get_request_lock()
-            async with lock:
-                now = time.monotonic()
-                cooldown = max(
-                    0.0,
-                    self.__class__._cooldown_until_monotonic - now,
-                )
-                if cooldown > 0:
-                    await asyncio.sleep(cooldown)
-
-                spacing = (
-                    self.__class__._last_request_monotonic
-                    + BYBIT_MIN_REQUEST_INTERVAL_SECONDS
-                    - time.monotonic()
-                )
-                if spacing > 0:
-                    await asyncio.sleep(spacing)
-
-                def request() -> tuple[int, Any, dict[str, Any]]:
-                    response = requests.get(
-                        url,
-                        params=params,
-                        timeout=HTTP_TIMEOUT_SECONDS,
-                    )
-                    try:
-                        payload = response.json()
-                    except ValueError:
-                        payload = None
-                    headers = dict(response.headers)
-                    return response.status_code, payload, headers
-
-                status_code, payload, headers = await asyncio.to_thread(request)
-                self.__class__._last_request_monotonic = time.monotonic()
-
-            if status_code >= 400:
-                # HTTP 429 is system-level frequency protection. Give it a
-                # bounded delay rather than hammering the endpoint again.
-                if status_code == 429:
-                    retry_after = None
-                    raw = headers.get("Retry-After")
-                    if raw not in (None, ""):
-                        try:
-                            retry_after = max(0.0, float(raw))
-                        except (TypeError, ValueError):
-                            retry_after = None
-                    retry_after = (
-                        retry_after
-                        if retry_after is not None
-                        else BYBIT_RATE_LIMIT_FALLBACK_SECONDS
-                    ) + BYBIT_RATE_LIMIT_SAFETY_SECONDS
-                    last_retry_after = retry_after
-                    self.__class__._set_cooldown(retry_after)
-                    if attempt < BYBIT_RATE_LIMIT_RETRIES:
-                        continue
-                    raise BybitRateLimitError(
-                        f"Bybit HTTP 429 setelah {BYBIT_RATE_LIMIT_RETRIES + 1} percobaan.",
-                        retry_after,
-                    )
-
-                raise RuntimeError(
-                    f"Bybit HTTP {status_code}: "
-                    f"{(payload or {}) if isinstance(payload, dict) else 'invalid response'}"
-                )
-
-            if not isinstance(payload, dict):
-                raise RuntimeError("Respons Bybit bukan JSON object.")
-
+        lock = self._get_request_lock()
+        async with lock:
+            wait = self.__class__._cooldown_until_monotonic - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            spacing = self.__class__._last_request_monotonic + self._min_request_interval_seconds - time.monotonic()
+            if spacing > 0:
+                await asyncio.sleep(spacing)
+            def request() -> tuple[int, Any, dict[str, Any], str]:
+                response = requests.get(url, params=params, timeout=HTTP_TIMEOUT_SECONDS)
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = None
+                return response.status_code, body, dict(response.headers), response.text[:500]
+            status, body, headers, body_text = await asyncio.to_thread(request)
+            self.__class__._last_request_monotonic = time.monotonic()
+        code = body.get("code") if isinstance(body, dict) else None
+        msg = body.get("msg") if isinstance(body, dict) else body_text
+        rate_limited = status in (418, 429) or str(code) == "-1003" or "too many requests" in str(msg).lower()
+        if rate_limited:
+            raw_retry = headers.get("Retry-After") or headers.get("retry-after")
             try:
-                ret_code = int(payload.get("retCode", -1))
+                retry = max(1.0, float(raw_retry)) if raw_retry not in (None, "") else 60.0
             except (TypeError, ValueError):
-                ret_code = -1
-
-            if ret_code == 10006:
-                retry_after = self._retry_after_from_headers(headers)
-                if retry_after is None:
-                    retry_after = BYBIT_RATE_LIMIT_FALLBACK_SECONDS * (2 ** attempt)
-                last_retry_after = retry_after
-                self.__class__._set_cooldown(retry_after)
-                if attempt < BYBIT_RATE_LIMIT_RETRIES:
-                    continue
-                raise BybitRateLimitError(
-                    "Bybit retCode=10006: Too many visits. "
-                    f"Retry bounded {BYBIT_RATE_LIMIT_RETRIES + 1}x; "
-                    f"cooldown terakhir {retry_after:.2f}s.",
-                    retry_after,
-                )
-
-            return payload
-
-        raise BybitRateLimitError(
-            "Bybit public API rate limit belum pulih.",
-            last_retry_after,
-        )
-
-    async def klines(
-        self,
-        symbol: str,
-        interval: str,
-        count: int,
-        interval_ms: int,
-    ) -> list[Candle]:
-        collected: dict[int, Candle] = {}
-        end_ms = int(time.time() * 1000)
-        attempts = 0
-
-        while len(collected) < count and attempts < 5:
-            attempts += 1
-            limit = min(1000, max(200, count - len(collected) + 5))
-            payload = await self.get(
-                "/v5/market/kline",
-                {
-                    "category": "linear",
-                    "symbol": symbol,
-                    "interval": interval,
-                    "end": end_ms,
-                    "limit": limit,
-                },
+                retry = 60.0
+            self.__class__._cooldown_until_monotonic = max(
+                self.__class__._cooldown_until_monotonic, time.monotonic() + retry
             )
-
-            if int(payload.get("retCode", -1)) != 0:
-                raise RuntimeError(
-                    f"Bybit retCode={payload.get('retCode')}: "
-                    f"{payload.get('retMsg', 'unknown error')}"
-                )
-
-            rows = ((payload.get("result") or {}).get("list") or [])
-            if not rows:
-                break
-
-            oldest: int | None = None
-            now_ms = int(time.time() * 1000)
-
-            for row in rows:
-                if len(row) < 7:
-                    continue
-                start = int(row[0])
-                oldest = start if oldest is None else min(oldest, start)
-
-                # Hanya candle yang sudah selesai sepenuhnya.
-                if start + interval_ms > now_ms:
-                    continue
-
-                collected[start] = Candle(
-                    time_ms=start,
-                    open=safe_float(row[1]),
-                    high=safe_float(row[2]),
-                    low=safe_float(row[3]),
-                    close=safe_float(row[4]),
-                    volume=safe_float(row[5]),
-                    turnover=safe_float(row[6]),
-                )
-
-            if oldest is None:
-                break
-
-            end_ms = oldest - 1
-
-            # Prevent an accidental loop on a provider response that did not move.
-            if len(rows) == 1:
-                break
-
-        candles = [collected[k] for k in sorted(collected)]
-        if len(candles) < count:
-            raise InsufficientHistoryError(
-                f"Bybit hanya mengembalikan {len(candles)} candle closed "
-                f"untuk {symbol} {interval}; diperlukan {count}."
+            raise BinanceRateLimitError(
+                f"Binance public REST rate limit HTTP {status} code={code}: {body_text}",
+                status_code=status if status else 429, endpoint=path, retry_after_seconds=retry,
             )
-        return candles[-count:]
-
-    async def last_price(self, symbol: str) -> float:
-        payload = await self.get(
-            "/v5/market/tickers",
-            {
-                "category": "linear",
-                "symbol": symbol,
-            },
-        )
-        if int(payload.get("retCode", -1)) != 0:
-            raise RuntimeError(
-                f"Bybit ticker retCode={payload.get('retCode')}: "
-                f"{payload.get('retMsg', 'unknown error')}"
-            )
-        rows = ((payload.get("result") or {}).get("list") or [])
-        if not rows:
-            raise RuntimeError(f"Bybit ticker tidak memiliki {symbol}.")
-        return safe_float(rows[0].get("lastPrice"), 0.0)
-
-
-    async def tick_size(self, symbol: str) -> float:
-        payload = await self.get(
-            "/v5/market/instruments-info",
-            {
-                "category": "linear",
-                "symbol": symbol,
-            },
-        )
-        if int(payload.get("retCode", -1)) != 0:
-            raise RuntimeError(
-                f"Bybit instruments-info retCode={payload.get('retCode')}: "
-                f"{payload.get('retMsg', 'unknown error')}"
-            )
-        rows = ((payload.get("result") or {}).get("list") or [])
-        if not rows:
-            raise RuntimeError(f"Bybit instruments-info tidak memiliki {symbol}.")
-        tick = safe_float((rows[0].get("priceFilter") or {}).get("tickSize"), 0.0)
-        return tick
-
-
-class BinanceProvider(HTTPProvider):
-    def __init__(self) -> None:
-        super().__init__(BINANCE_BASE_URL, "BINANCE_FALLBACK")
+        if status >= 400:
+            raise RuntimeError(f"Binance REST {path}: HTTP {status} code={code} msg={msg}")
+        if body is None:
+            raise RuntimeError(f"Binance REST {path}: JSON response invalid")
+        return body
 
     async def klines(
         self,
@@ -1150,7 +931,7 @@ def _series_enforce_bounds() -> None:
 def _series_cache_get(
     pair: str, interval: str, count: int, allow_fallback: bool, max_age: float | None
 ) -> tuple[list[Candle], str] | None:
-    providers = ("BYBIT", "BINANCE_FALLBACK") if allow_fallback else ("BYBIT",)
+    providers = ("BINANCE",)
     now = time.time()
     with _SERIES_LOCK:
         for provider in providers:
@@ -1170,7 +951,7 @@ def _series_cache_store(
 ) -> None:
     if not candles:
         return
-    key = (source if source in {"BYBIT", "BINANCE_FALLBACK"} else "BYBIT", pair, interval)
+    key = ("BINANCE", pair, interval)
     with _SERIES_LOCK:
         old = _SERIES_CACHE.get(key)
         merged = list(candles)
@@ -1235,31 +1016,10 @@ async def _fetch_series_uncached(
     *,
     allow_fallback: bool,
 ) -> tuple[list[Candle], str, dict[str, int]]:
-    bybit = BybitProvider()
-    try:
-        raw = await bybit.klines(pair, interval, count, interval_ms)
-        source = "BYBIT"
-    except Exception as bybit_exc:
-        if not allow_fallback:
-            error_cls = (
-                InsufficientHistoryError
-                if getattr(bybit_exc, "insufficient_history", False)
-                else RuntimeError
-            )
-            raise error_cls(
-                f"Bybit public gagal untuk {pair} {interval}; "
-                f"SCAN melarang fallback Binance: {bybit_exc}"
-            ) from bybit_exc
-
-        binance = BinanceProvider()
-        try:
-            raw = await binance.klines(pair, interval, count, interval_ms)
-            source = "BINANCE_FALLBACK"
-        except Exception as binance_exc:
-            raise RuntimeError(
-                f"Gagal mengambil {pair} {interval}: "
-                f"Bybit={bybit_exc}; Binance={binance_exc}"
-            ) from binance_exc
+    # Binance REST is the sole source for all candle timeframes.
+    binance = BinanceProvider()
+    raw = await binance.klines(pair, interval, count, interval_ms)
+    source = "BINANCE"
     candles, qstats = normalize_candles(raw, interval_ms)
     if len(candles) < count:
         raise InsufficientHistoryError(
@@ -1279,10 +1039,9 @@ async def fetch_series(
     force_refresh: bool = False,
     use_cache: bool = True,
 ) -> tuple[list[Candle], str]:
-    """Ambil candle closed (Bybit dulu; fallback Binance hanya bila diizinkan).
+    """Ambil candle closed melalui Binance REST only.
 
-    Cache bounded + single-flight. SCAN memakai allow_fallback=False sehingga
-    data analitis tetap eksklusif Bybit public.
+    Cache bounded + single-flight. Seluruh mode memakai Binance sebagai satu-satunya sumber.
     """
     symbol = str(pair).upper()
     if not (use_cache and CANDLE_CACHE_ENABLED):
@@ -1338,37 +1097,16 @@ async def fetch_price(
     *,
     allow_fallback: bool = True,
 ) -> tuple[float, str]:
-    errors: list[str] = []
-    providers = []
-
-    if allow_fallback and preferred_source == "BINANCE_FALLBACK":
-        providers = [BinanceProvider(), BybitProvider()]
-    elif allow_fallback:
-        providers = [BybitProvider(), BinanceProvider()]
-    else:
-        providers = [BybitProvider()]
-
-    for provider in providers:
-        try:
-            return await provider.last_price(pair), provider.name
-        except Exception as exc:
-            errors.append(f"{provider.name}: {exc}")
-
-    raise RuntimeError(
-        "Gagal mengambil current price. " + " | ".join(errors)
-    )
+    """Fetch last price from Binance REST only; signature retained for compatibility."""
+    price = await BinanceProvider().last_price(pair)
+    return price, "BINANCE"
 
 
 async def get_tick_size(
     pair: str,
     *,
-    source: str = "BYBIT",
+    source: str = "BINANCE",
 ) -> float:
-    if str(source).upper().startswith("BYBIT"):
-        try:
-            return await BybitProvider().tick_size(pair)
-        except Exception:
-            return 0.0
     try:
         return await BinanceProvider().tick_size(pair)
     except Exception:
@@ -3396,7 +3134,7 @@ def analyze_notes(notes: list[dict[str, Any]]) -> dict[str, Any]:
         applied.append({
             "rule": "BTC_H4_BIAS",
             "status": "APPLIED",
-            "detail": "BTCUSDT H4 digunakan sebagai macro bias untuk altcoin.",
+            "detail": "BTCUSDT H4 direkam sebagai konteks numerik; bukan filter arah.",
         })
 
     if "multi-timeframe" in combined or "multi timeframe" in combined or "mtf" in combined:
@@ -6323,11 +6061,8 @@ def _v2_build_target_map(
 
 
 def _v2_select_target(target_map: list[dict[str, Any]], direction: str) -> dict[str, Any] | None:
-    valid = [
-        target for target in target_map
-        if safe_float(target.get("rr")) >= TARGET_MIN_RR
-        and (not target.get("major_barriers") or safe_float(target.get("quality")) >= 55.0)
-    ]
+    # RR and obstacles are scoring dimensions, not candidate-veto conditions.
+    valid = list(target_map)
     if not valid:
         return None
 
@@ -6358,17 +6093,17 @@ def _v2_structure_alignment_score(
     btc_trend = str(btc_regime.get("trend") or "RANGE")
     pair_trend = str(pair_regime.get("trend") or "RANGE")
     if btc_trend == want:
-        score += 20.0
+        score += 8.0
     elif btc_trend == "RANGE":
-        score += 5.0
+        score += 0.0
     else:
-        score -= 25.0
+        score -= 8.0  # soft context only; never a direction veto
     if pair_trend == want:
         score += 20.0
     elif pair_trend == "RANGE":
         score += 0.0
     else:
-        score -= 20.0
+        score -= 20.0  # represented numerically; direction still gets a candidate
     if h4_structure.trend == want:
         score += 10.0
     if h1_structure.trend == want:
@@ -6552,6 +6287,124 @@ def _v2_price_exp(
     return round_price(exp)
 
 
+def _v2_orderflow_leg_score(direction: str, candles: list[Candle]) -> dict[str, Any]:
+    """OHLCV-based orderflow proxy: signed body-volume, displacement and relative volume."""
+    sample = candles[-20:]
+    if len(sample) < 4:
+        return {"score": 50.0, "signed_flow": 0.0, "displacement": 0.0, "relative_volume": 1.0, "bars": len(sample)}
+    signed = 0.0
+    gross = 0.0
+    for c in sample:
+        body_value = (c.close - c.open) * max(c.volume, 0.0)
+        signed += body_value
+        gross += abs(body_value)
+    signed_flow = signed / max(gross, EPS)
+    move = sample[-1].close - sample[0].open
+    path = sum(abs(c.close - c.open) for c in sample)
+    displacement = clamp(abs(move) / max(path, EPS) * 100.0)
+    direction_sign = 1.0 if direction == "BUY" else -1.0
+    aligned_flow = signed_flow * direction_sign
+    volume_base = median([c.volume for c in sample[:-3] if c.volume > 0]) if any(c.volume > 0 for c in sample[:-3]) else 0.0
+    latest_vol = sum(c.volume for c in sample[-3:]) / 3.0
+    rvol = latest_vol / volume_base if volume_base > 0 else 1.0
+    flow_score = 50.0 + 28.0 * aligned_flow
+    displacement_score = 0.20 * displacement
+    volume_score = clamp(50.0 + (rvol - 1.0) * 18.0, 25.0, 85.0)
+    score = clamp(flow_score * 0.55 + displacement_score * 0.20 + volume_score * 0.25)
+    return {"score": round(score, 2), "signed_flow": round(signed_flow, 4), "aligned_flow": round(aligned_flow, 4), "displacement": round(displacement, 2), "relative_volume": round(rvol, 3), "bars": len(sample), "method": "OHLCV_PROXY_NOT_TRUE_FOOTPRINT"}
+
+
+def _v2_price_leg_score(direction: str, candles: list[Candle], zone_low: float, zone_high: float, current: float) -> dict[str, Any]:
+    """Score impulse leg plus retracement depth/location without hard directional veto."""
+    sample = candles[-24:]
+    if len(sample) < 4:
+        return {"score": 50.0, "impulse_pct": 0.0, "retracement_pct": 50.0}
+    first = sample[0].close
+    last = sample[-1].close
+    impulse_pct = (last - first) / max(abs(first), EPS) * 100.0
+    sign = 1.0 if direction == "BUY" else -1.0
+    aligned_impulse = impulse_pct * sign
+    highs = [c.high for c in sample]
+    lows = [c.low for c in sample]
+    full_range = max(max(highs) - min(lows), EPS)
+    if direction == "BUY":
+        leg_low, leg_high = min(lows), max(highs)
+        retracement_pct = clamp((leg_high - current) / max(leg_high - leg_low, EPS) * 100.0)
+    else:
+        leg_high, leg_low = max(highs), min(lows)
+        retracement_pct = clamp((current - leg_low) / max(leg_high - leg_low, EPS) * 100.0)
+    zone_mid = (zone_low + zone_high) / 2.0
+    loc_distance = abs(current - zone_mid) / max(full_range, EPS)
+    impulse_score = clamp(50.0 + aligned_impulse * 10.0, 10.0, 90.0)
+    retrace_fit = clamp(100.0 - abs(retracement_pct - 50.0) * 1.5)
+    location_score = clamp(100.0 - loc_distance * 70.0)
+    score = clamp(impulse_score * 0.45 + retrace_fit * 0.30 + location_score * 0.25)
+    return {"score": round(score, 2), "impulse_pct": round(impulse_pct, 4), "aligned_impulse_pct": round(aligned_impulse, 4), "retracement_pct": round(retracement_pct, 2), "zone_distance_range": round(loc_distance, 4), "bars": len(sample)}
+
+
+def _v2_support_resistance_score(direction: str, current: float, location: dict[str, Any], *contexts: dict[str, Any]) -> dict[str, Any]:
+    """Numeric S/R score combining active FVG/OB/breaker zones, swing pivots, and liquidity."""
+    zones: list[Zone] = []
+    pivots: list[dict[str, Any]] = []
+    wanted_pivot_kind = "LOW" if direction == "BUY" else "HIGH"
+    target_low = safe_float(location.get("zone_low"), current)
+    target_high = safe_float(location.get("zone_high"), current)
+    zone_mid = (target_low + target_high) / 2.0
+    for ctx in contexts:
+        if not isinstance(ctx, dict):
+            continue
+        for z in ctx.get("zones", []) or []:
+            if isinstance(z, Zone) and z.status in {"ACTIVE", "MITIGATED"}:
+                zones.append(z)
+        structure = ctx.get("structure")
+        if isinstance(structure, StructureSnapshot):
+            selected = structure.swing_lows if wanted_pivot_kind == "LOW" else structure.swing_highs
+            for p in selected[-16:]:
+                distance_pct = abs(p.price - zone_mid) / max(abs(current), EPS) * 100.0
+                # Nearer confirmed structural pivots contribute more; distance never rejects the thesis.
+                proximity = clamp(100.0 - distance_pct * 45.0, 10.0, 100.0)
+                recentness = clamp(100.0 - max(0, len(selected) - 1 - selected.index(p)) * 4.0, 35.0, 100.0)
+                pivot_score = clamp(proximity * 0.80 + recentness * 0.20)
+                pivots.append({
+                    "timeframe": ctx.get("timeframe", "UNKNOWN"),
+                    "kind": p.kind,
+                    "price": round_price(p.price),
+                    "distance_pct": round(distance_pct, 4),
+                    "score": round(pivot_score, 2),
+                })
+    zone_scores = []
+    zone_details = []
+    for z in zones:
+        overlap = _v2_zone_overlap_values(target_low, target_high, z.low, z.high)
+        dist = abs(z.midpoint - zone_mid) / max(abs(current), EPS) * 100.0
+        formation = str(z.details.get("formation_direction") or "")
+        direction_match = formation == ("BULLISH" if direction == "BUY" else "BEARISH")
+        kind = str(z.kind).upper()
+        is_ob = "OB" in kind or "ORDER_BLOCK" in kind
+        is_fvg = "FVG" in kind
+        # Explicit weights maintain both OB and FVG evidence within S/R, alongside their refinement score.
+        class_bonus = (12.0 if is_ob else 0.0) + (8.0 if is_fvg else 0.0)
+        score = clamp(z.strength * 0.60 + (22.0 if overlap > 0 else 0.0) + (8.0 if direction_match else 0.0) + class_bonus - min(25.0, dist * 8.0))
+        zone_scores.append(score)
+        if len(zone_details) < 8:
+            zone_details.append({"kind": z.kind, "source": z.source, "strength": round(z.strength, 2), "overlap": round(overlap, 4), "distance_pct": round(dist, 4), "order_block": is_ob, "fvg": is_fvg, "score": round(score, 2)})
+    pool = location.get("pool")
+    pool_score = safe_float(getattr(pool, "significance", 50.0), 50.0) if pool is not None else 35.0
+    zone_score = max(zone_scores) if zone_scores else 35.0
+    pivot_score = max((x["score"] for x in pivots), default=35.0)
+    score = clamp(zone_score * 0.45 + pivot_score * 0.30 + pool_score * 0.25)
+    return {
+        "score": round(score, 2),
+        "zone_count": len(zones),
+        "swing_level_count": len(pivots),
+        "pool_score": round(pool_score, 2),
+        "poi_score": round(zone_score, 2),
+        "swing_sr_score": round(pivot_score, 2),
+        "top_zones": zone_details,
+        "top_swing_levels": sorted(pivots, key=lambda x: x["score"], reverse=True)[:6],
+    }
+
+
 def _v2_build_thesis_candidate(
     *,
     direction: str,
@@ -6579,29 +6432,21 @@ def _v2_build_thesis_candidate(
     # V2: H4 structure is the authoritative thesis direction. Aggregate
     # D1/H4/H1/M15 regime is retained as a soft quality input so a temporary
     # H1/M15 pullback does not erase a valid H4 continuation thesis.
-    if direction == "BUY" and h4_structure.trend not in {"BULLISH", "RANGE"}:
-        return None
-    if direction == "SELL" and h4_structure.trend not in {"BEARISH", "RANGE"}:
-        return None
-
     refinement = _v2_refine_location(location, direction, h1_ctx, m15_ctx)
     zone_low = safe_float(refinement.get("low"))
     zone_high = safe_float(refinement.get("high"))
     if zone_high <= zone_low:
         return None
 
-    # HARD GATE: do not place an entry beyond an unswept significant opposing
-    # liquidity magnet unless the location itself overlaps that magnet.
-    # Otherwise price is likely to interact with that pool first.
+    # Opposing unswept liquidity is a scored obstacle, never a directional veto.
     magnet = liquidity_map.get("magnet")
+    magnet_conflict = False
     if magnet is not None and not magnet.swept:
-        overlaps_magnet = _v2_zone_overlap_values(
-            zone_low, zone_high, magnet.low, magnet.high
-        ) > 0.0
-        if direction == "BUY" and magnet.midpoint < current < zone_high and not overlaps_magnet:
-            return None
-        if direction == "SELL" and magnet.midpoint > current > zone_low and not overlaps_magnet:
-            return None
+        overlaps_magnet = _v2_zone_overlap_values(zone_low, zone_high, magnet.low, magnet.high) > 0.0
+        magnet_conflict = bool(
+            (direction == "BUY" and magnet.midpoint < current < zone_high and not overlaps_magnet)
+            or (direction == "SELL" and magnet.midpoint > current > zone_low and not overlaps_magnet)
+        )
 
     h4_atr_values = atr_series(h4, 14)
     h1_atr_values = atr_series(h1, 14)
@@ -6612,8 +6457,7 @@ def _v2_build_thesis_candidate(
     reach_score, reach_details = _v2_entry_reachability_v2(
         direction, current, zone_low, zone_high, h4_atr, safe_float(projection.get("scenario_consensus"), 50.0)
     )
-    if not reach_details["allowed"]:
-        return None
+    # Reachability is reflected in its score and distance fields, not a veto.
 
     confluence_score = _v2_score_liquidity_confluence(location, refinement)
     entry = _v2_select_entry_price(
@@ -6627,10 +6471,13 @@ def _v2_build_thesis_candidate(
     )
     if tick_size > 0:
         entry = _round_tick(entry, tick_size, "DOWN" if direction == "BUY" else "UP")
+    min_gap = max(tick_size, current * 0.0005, EPS)
     if direction == "BUY" and entry >= current:
-        return None
-    if direction == "SELL" and entry <= current:
-        return None
+        entry = current - min_gap
+    elif direction == "SELL" and entry <= current:
+        entry = current + min_gap
+    if tick_size > 0:
+        entry = _round_tick(entry, tick_size, "DOWN" if direction == "BUY" else "UP")
 
     mom_entry = _v2_momentum_entry_price(direction, m15, h4, zone_low, zone_high, current, tick_size)
     if mom_entry is not None and ((direction == "BUY" and mom_entry < current) or (direction == "SELL" and mom_entry > current)):
@@ -6656,35 +6503,37 @@ def _v2_build_thesis_candidate(
     target_map = _v2_build_target_map(direction, entry, sl, liquidity_map, h4_structure, h1_structure, h1_atr, current=current)
     target = _v2_select_target(target_map, direction)
     if target is None:
-        return None
+        fallback_distance = max(h1_atr * 2.0, abs(entry - safe_float(invalidation.get("sl"), entry)) * 1.5, current * 0.002)
+        fallback_tp = entry + fallback_distance if direction == "BUY" else entry - fallback_distance
+        target = {"level": fallback_tp, "type": "ATR_SCORE_FALLBACK", "quality": 35.0, "rr": fallback_distance / max(abs(entry - sl), EPS), "major_barriers": [], "priority": 25.0}
     tp = safe_float(target["level"])
     if direction == "BUY" and tp <= entry:
-        return None
-    if direction == "SELL" and tp >= entry:
-        return None
+        tp = entry + max(h1_atr * 2.0, current * 0.002)
+    elif direction == "SELL" and tp >= entry:
+        tp = entry - max(h1_atr * 2.0, current * 0.002)
 
     risk = abs(entry - sl)
     reward = abs(tp - entry)
     rr = reward / max(risk, EPS)
     if rr < TARGET_MIN_RR:
-        # Try farther structural target only if the first valid target does not meet RR.
-        alternatives = [x for x in target_map if safe_float(x.get("rr")) >= TARGET_MIN_RR]
-        if not alternatives:
-            return None
-        target = alternatives[0]
-        tp = safe_float(target["level"])
-        reward = abs(tp - entry)
-        rr = reward / max(risk, EPS)
-    if rr < TARGET_MIN_RR:
-        return None
+        # Retain the setup and reflect the RR shortfall numerically in rr_quality.
+        alternatives = sorted(target_map, key=lambda x: safe_float(x.get("rr"), 0.0), reverse=True)
+        if alternatives and safe_float(alternatives[0].get("rr"), 0.0) > rr:
+            target = alternatives[0]
+            tp = safe_float(target["level"])
+            reward = abs(tp - entry)
+            rr = reward / max(risk, EPS)
 
     price_exp = _v2_price_exp(direction, current, entry, tp, h1_atr)
+    # Price Exp is a forecast boundary, not a trade-veto condition.
     if direction == "BUY":
-        if not (sl < entry < current < price_exp < tp):
-            return None
+        price_exp = min(max(price_exp, current + max(h1_atr * 0.1, current * 0.0005)), tp - max(h1_atr * 0.05, EPS))
+        if price_exp <= current or price_exp >= tp:
+            price_exp = current + max((tp - current) * 0.35, current * 0.0005)
     else:
-        if not (tp < price_exp < current < entry < sl):
-            return None
+        price_exp = max(min(price_exp, current - max(h1_atr * 0.1, current * 0.0005)), tp + max(h1_atr * 0.05, EPS))
+        if price_exp >= current or price_exp <= tp:
+            price_exp = current - max((current - tp) * 0.35, current * 0.0005)
 
     last_mss = latest_event(m15_structure, {"MSS"}, direction=("BULLISH" if direction == "BUY" else "BEARISH"), max_age=THESIS_MAX_TRIGGER_AGE_M15, candle_count=len(m15))
     last_bos = latest_event(m15_structure, {"BOS"}, direction=("BULLISH" if direction == "BUY" else "BEARISH"), max_age=THESIS_MAX_TRIGGER_AGE_M15, candle_count=len(m15))
@@ -6702,6 +6551,9 @@ def _v2_build_thesis_candidate(
     invalidation_score = _v2_score_invalidation(invalidation, entry)
     target_score = _v2_score_target_quality(target)
     rr_score = _v2_score_rr(rr)
+    orderflow_leg = _v2_orderflow_leg_score(direction, m15)
+    price_leg = _v2_price_leg_score(direction, m15, zone_low, zone_high, current)
+    sr_score = _v2_support_resistance_score(direction, current, location, h4_ctx, h1_ctx, m15_ctx)
 
     scores = {
         "structure_alignment": round(structure_score, 2),
@@ -6715,6 +6567,9 @@ def _v2_build_thesis_candidate(
         "rr_quality": round(rr_score, 2),
         "entry_reachability": round(reach_score, 2),
         "volume_confirmation": round(volume_ctx["score"], 2),
+        "orderflow_leg": round(orderflow_leg["score"], 2),
+        "price_leg": round(price_leg["score"], 2),
+        "support_resistance": round(sr_score["score"], 2),
     }
     base = sum(THESIS_WEIGHTS_V2[k] * scores[k] for k in THESIS_WEIGHTS_V2) / 100.0
     penalties: list[dict[str, Any]] = []
@@ -6741,6 +6596,9 @@ def _v2_build_thesis_candidate(
     elif volume_ctx["class"] == "WEAK_VOLUME":
         base -= 5.0
         penalties.append({"type": "WEAK_VOLUME", "amount": 5.0})
+    if magnet_conflict:
+        base -= 8.0
+        penalties.append({"type": "OPPOSING_LIQUIDITY_OBSTACLE", "amount": 8.0})
     projection_class = str(projection.get("classification") or "")
     if projection_class.startswith("WEAK"):
         base -= 10.0
@@ -6757,8 +6615,7 @@ def _v2_build_thesis_candidate(
     confidence = clamp(base)
     if not trigger_ok:
         confidence = min(confidence, THESIS_WAITING_CAP_V2)
-    if confidence < THESIS_MIN_QUALITY_V2:
-        return None
+    # No confidence floor veto: low quality remains an observable, scored candidate.
 
     if tick_size > 0:
         sl = _round_tick(sl, tick_size, "DOWN" if direction == "BUY" else "UP")
@@ -6768,8 +6625,7 @@ def _v2_build_thesis_candidate(
         risk = abs(entry - sl)
         reward = abs(tp - entry)
         rr = reward / max(risk, EPS)
-        if rr < TARGET_MIN_RR:
-            return None
+        # RR shortfall remains visible in rr_quality; do not discard the thesis.
         price_exp = _round_tick(price_exp, tick_size, "UP" if direction == "BUY" else "DOWN")
 
     liquidity_zone = location.get("pool")
@@ -6836,6 +6692,9 @@ def _v2_build_thesis_candidate(
         "refinement": refinement,
         "projected_rsi": projection,
         "volume_context": volume_ctx,
+        "orderflow_leg": orderflow_leg,
+        "price_leg": price_leg,
+        "support_resistance": sr_score,
         "rsi_momentum_gate": momentum_gate,
         "entry_zone": {
             "low": round_price(zone_low),
@@ -6993,6 +6852,10 @@ def _v2_choose_fallback_candidate(
             "target_quality": 45.0,
             "rr_quality": _v2_score_rr(rr),
             "entry_reachability": 55.0,
+            "volume_confirmation": 45.0,
+            "orderflow_leg": 50.0,
+            "price_leg": 45.0,
+            "support_resistance": 40.0,
         },
         confidence=THESIS_FALLBACK_CAP_V2,
         notes=["LOW_QUALITY_FALLBACK"],
@@ -7029,13 +6892,13 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
     if cached_btc and not force_fresh_btc:
         btc_h4 = cached_btc.get("candles_h4") or cached_btc.get("candles")
         btc_h1 = cached_btc.get("candles_h1") or []
-        btc_h4_source = str(cached_btc.get("sources_by_timeframe", {}).get("H4") or "BYBIT")
-        btc_h1_source = str(cached_btc.get("sources_by_timeframe", {}).get("H1") or "BYBIT")
+        btc_h4_source = str(cached_btc.get("sources_by_timeframe", {}).get("H4") or "BINANCE")
+        btc_h1_source = str(cached_btc.get("sources_by_timeframe", {}).get("H1") or "BINANCE")
     else:
         btc_h4, btc_h4_source = await fetch_series("BTCUSDT", H4, BTC_H4_CANDLES_REQUIRED, H4_MS, allow_fallback=allow_binance_fallback)
         btc_h1, btc_h1_source = await fetch_series("BTCUSDT", H1, 168, H1_MS, allow_fallback=allow_binance_fallback)
-        if btc_cache_key and btc_h4_source == "BYBIT" and btc_h1_source == "BYBIT":
-            btc_payload = _btc_regime_payload(btc_h4, btc_h1, {"D1": "BYBIT_DERIVED", "H4": btc_h4_source, "H1": btc_h1_source})
+        if btc_cache_key and btc_h4_source == "BINANCE" and btc_h1_source == "BINANCE":
+            btc_payload = _btc_regime_payload(btc_h4, btc_h1, {"D1": "BINANCE_DERIVED", "H4": btc_h4_source, "H1": btc_h1_source})
             _SCAN_BTC_REGIME_CACHE[btc_cache_key] = {**btc_payload, "candles_h4": btc_h4, "candles_h1": btc_h1, "created_at": time.time()}
             _prune_scan_btc_cache(btc_cache_key[0])
 
@@ -7047,7 +6910,7 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
     current, price_source = await fetch_price(normalized_pair, m15_source, allow_fallback=allow_binance_fallback)
     if current <= 0:
         raise RuntimeError("Current price tidak valid.")
-    tick_size = await get_tick_size(normalized_pair, source="BYBIT" if scan_mode else ("BINANCE" if m15_source == "BINANCE_FALLBACK" else "BYBIT"))
+    tick_size = await get_tick_size(normalized_pair, source="BINANCE" if scan_mode else ("BINANCE" if m15_source == "BINANCE" else "BINANCE"))
 
     # ------------------------------
     # 2) Structure / regime first
@@ -7071,15 +6934,11 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
     btc_trend = str(btc_regime.get("trend") or "RANGE")
     # V2 thesis direction is anchored to H4 structure. Aggregate D1/H4/H1/M15
     # regime remains a soft quality input so a temporary M15/H1 pullback does
-    # not erase a valid H4 pullback thesis. BTC remains the macro constraint.
+    # not erase a valid H4 pullback thesis. BTC remains a soft numerical context only.
     h4_trend = str(h4_structure.trend or "RANGE")
     pair_trend = h4_trend
-    allowed_directions = allowed_directions_for_macro(btc_trend, h4_trend, normalized_pair)
-    if normalized_pair != "BTCUSDT" and btc_trend in {"BULLISH", "BEARISH"}:
-        allowed_directions = (
-            DIRECTIONS_BOTH if ALLOW_BTC_COUNTER_TREND
-            else ((DIRECTION_BUY,) if btc_trend == "BULLISH" else (DIRECTION_SELL,))
-        )
+    # BTC and pair direction are scoring inputs only. Always evaluate BUY and SELL theses.
+    allowed_directions = DIRECTIONS_BOTH
 
     # ------------------------------
     # 3) Technical contexts
@@ -7103,12 +6962,7 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
     candidates: list[Candidate] = []
     directional_regime = directional_regime_label(allowed_directions)
     for direction in allowed_directions:
-        # Main thesis: pair structure should support the direction.
-        if direction == "BUY" and pair_trend not in {"BULLISH", "RANGE"}:
-            continue
-        if direction == "SELL" and pair_trend not in {"BEARISH", "RANGE"}:
-            continue
-
+        # Contradictory structure lowers the score; it never removes the direction.
         fib_analysis = _v2_build_adaptive_fib_zones(pair_h4, h4_structure, direction, "H4")
         if not fib_analysis.get("available"):
             continue
@@ -7169,17 +7023,32 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
             if candidate:
                 candidates.append(candidate)
 
-    if ALLOW_BTC_COUNTER_TREND and normalized_pair != "BTCUSDT" and btc_trend in {"BULLISH", "BEARISH"}:
-        for _cand in candidates:
-            if classify_btc_alignment(btc_trend, _cand.direction) != "ALIGNED":
-                _cand.confidence = clamp(_cand.confidence - BTC_COUNTER_TREND_PENALTY)
-                if isinstance(_cand.evidence, dict):
-                    _cand.evidence.setdefault("penalties", []).append(
-                        {"type": "BTC_COUNTER_TREND", "amount": BTC_COUNTER_TREND_PENALTY}
-                    )
+    # BTC alignment is included in structure_alignment as a soft numerical contribution only.
+
+    # Never drop a direction only because one confluence component is missing.
+    # Complete its record with a geometry-safe fallback whose confidence is capped.
+    present_directions = {c.direction for c in candidates}
+    for missing_direction in allowed_directions:
+        if missing_direction in present_directions:
+            continue
+        fallback_atr_values = atr_series(h1, 14)
+        fallback_atr = fallback_atr_values[-1] if fallback_atr_values else max(current * 0.005, EPS)
+        fallback_liquidity = _v2_build_liquidity_map(
+            {"H4": pair_h4, "H1": h1, "M15": m15},
+            {"H4": h4_structure, "H1": h1_structure, "M15": m15_structure},
+            current,
+            missing_direction,
+        )
+        fallback = _v2_choose_fallback_candidate(
+            missing_direction, current, fallback_atr, h1_structure, fallback_liquidity, tick_size
+        )
+        fallback.confidence = min(fallback.confidence, FALLBACK_CONFIDENCE_CAP)
+        fallback.evidence.setdefault("scoring_policy", "NO_ANALYTICAL_VETO_FALLBACK")
+        fallback.notes.append("Fallback scored because one or more confluences were unavailable; not an analytical rejection.")
+        candidates.append(fallback)
 
     if not candidates:
-        # Preserve a useful analytical response instead of throwing away the pair.
+        # This is reachable only if fallback construction itself fails.
         direction = allowed_directions[0] if allowed_directions else ("BUY" if pair_trend != "BEARISH" else "SELL")
         h1_atr = atr_series(h1, 14)[-1] if h1 else max(current * 0.005, EPS)
         liquidity_map = _v2_build_liquidity_map(
@@ -7297,6 +7166,17 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
             "penalties": (best.evidence.get("penalties") if isinstance(best.evidence, dict) else []) or [],
             "meaning": "Kualitas internal thesis 0-100; bukan probabilitas profit.",
         },
+        "score_details": {
+            "orderflow_leg": best.evidence.get("orderflow_leg"),
+            "price_leg": best.evidence.get("price_leg"),
+            "support_resistance": best.evidence.get("support_resistance"),
+            "liquidity_pool": best.evidence.get("liquidity_map"),
+            "fvg_order_block_refinement": best.evidence.get("refinement"),
+            "rsi_momentum": best.evidence.get("rsi_momentum_gate"),
+            "current_rsi": best.evidence.get("current_rsi"),
+            "projected_rsi": best.evidence.get("projected_rsi"),
+            "volume_context": best.evidence.get("volume_context"),
+        },
         "candidate_set": [_v2_candidate_summary(c) for c in sorted(candidates, key=lambda c: c.confidence, reverse=True)],
         "price_context": {
             "current": round_price(current),
@@ -7334,8 +7214,8 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
             "source": m15_source,
             "price_source": price_source,
             "scan_mode": scan_mode,
-            "data_policy": "BYBIT_PUBLIC_ONLY" if scan_mode else "BYBIT_WITH_BINANCE_FALLBACK",
-            "fallback_used": m15_source == "BINANCE_FALLBACK",
+            "data_policy": "BINANCE_PUBLIC_ONLY" if scan_mode else "BINANCE_ONLY",
+            "fallback_used": False,
             "directional_bias": btc_trend,
             "directional_regime": directional_regime,
             "allowed_directions": list(allowed_directions),
@@ -7363,18 +7243,18 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
                 "BTC_H1": btc_h1[-1].time_ms if btc_h1 else None,
             },
             "tick_size": round_price(tick_size) if tick_size else None,
-            "tick_size_source": "BYBIT" if scan_mode else ("BINANCE" if m15_source == "BINANCE_FALLBACK" else "BYBIT"),
+            "tick_size_source": "BINANCE" if scan_mode else ("BINANCE" if m15_source == "BINANCE" else "BINANCE"),
             "engine": STRATEGY_ENGINE,
         },
         "strategy": {
             "name": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
             "engine": STRATEGY_ENGINE,
-            "architecture": "BTC H4/H1 macro structure -> pair H4 thesis -> liquidity map -> adaptive Fibonacci -> FVG/OB refinement -> projected RSI -> entry zone -> prediction invalidation -> structural SL -> liquidity/H4 target map -> RR -> thesis quality",
-            "confidence_semantics": "thesis_quality_score_not_profit_probability",
-            "scan_contract": "analyze_scan_structure -> generate_setup -> validate_setup",
-            "validator_tolerance": "main.py enforces >= 90% of initial confidence",
-            "directional_rule": "Altcoin BTC BULLISH -> BUY; BTC BEARISH -> SELL; BTC RANGE -> both.",
+            "architecture": "Binance-only closed candles -> H4 structure -> orderflow leg/price leg -> liquidity pools + adaptive Fibonacci + FVG/OB + support-resistance -> RSI momentum -> numeric confidence -> score-based validation",
+            "confidence_semantics": "weighted_thesis_quality_score_not_profit_probability",
+            "scan_contract": "analyze_scan_structure -> generate_setup -> score_based_validate_setup",
+            "validator_tolerance": "confidence changes are values, not veto; only stale data or unsafe geometry blocks execution",
+            "directional_rule": "BUY and SELL are always evaluated; BTC and pair context contribute scores only.",
         },
     }
 
@@ -7794,13 +7674,13 @@ def _enrich_setup_contract(setup: dict[str, Any], context: dict[str, Any] | None
     risk_block = analysis.get("risk") if isinstance(analysis.get("risk"), dict) else {}
     gross_rr = safe_float(risk_block.get("planned_rr"), 0.0)
     if gross_rr + 1e-9 < TARGET_MIN_RR:
-        gates.append({"code": "RR_BELOW_MIN", "text": f"RR gross {gross_rr:.2f} < {TARGET_MIN_RR}.", "hard": True})
+        gates.append({"code": "RR_BELOW_MIN", "text": f"RR gross {gross_rr:.2f} < {TARGET_MIN_RR}; direkam sebagai skor.", "hard": False})
     cost = estimate_after_cost_rr(direction, entry, sl, tp)
     if MIN_RR_AFTER_COSTS > 0 and cost.get("valid") and cost["after_cost_rr"] < MIN_RR_AFTER_COSTS:
         gates.append({
             "code": "RR_AFTER_COST_BELOW_MIN",
-            "text": f"RR setelah biaya {cost['after_cost_rr']:.2f} < {MIN_RR_AFTER_COSTS}.",
-            "hard": True,
+            "text": f"RR setelah biaya {cost['after_cost_rr']:.2f} < {MIN_RR_AFTER_COSTS}; direkam sebagai skor.",
+            "hard": False,
         })
 
     data_asof = data.get("data_asof") if isinstance(data.get("data_asof"), dict) else {}
@@ -7811,10 +7691,8 @@ def _enrich_setup_contract(setup: dict[str, Any], context: dict[str, Any] | None
     btc_trend = data.get("directional_bias")
     btc_conf = (((analysis.get("macro") or {}).get("btc_regime")) or {}).get("confidence")
     alignment = "NEUTRAL" if pair == "BTCUSDT" else classify_btc_alignment(btc_trend, direction, btc_conf)
-    if alignment == "COUNTER_TREND":
-        gates.append({"code": "BTC_COUNTER_TREND", "text": "Arah melawan BTC H4 (penalti skor).", "hard": False})
-    elif alignment == "HIGH_RISK_CONFLICT":
-        gates.append({"code": "BTC_HIGH_RISK_CONFLICT", "text": "Melawan BTC saat regime BTC ekstrem.", "hard": True})
+    if alignment in {"COUNTER_TREND", "HIGH_RISK_CONFLICT"}:
+        gates.append({"code": "BTC_CONTEXT_COUNTER_TREND", "text": "Arah berbeda dari BTC H4; dicatat sebagai konteks skor, bukan veto.", "hard": False})
 
     current = safe_float(out.get("price_now_reference"), 0.0)
     if zlow > 0 and zhigh > 0 and current > 0:
@@ -7823,28 +7701,19 @@ def _enrich_setup_contract(setup: dict[str, Any], context: dict[str, Any] | None
         price_vs_zone = "UNKNOWN"
 
     hard = [g for g in gates if g.get("hard")]
+    safety_geometry_codes = {"PRICE_INVALID", "GEOMETRY_INVALID", "ZONE_INVERTED", "ENTRY_OUTSIDE_ZONE", "ZONE_TOO_WIDE"}
+    geometry_errors = [g for g in hard if g.get("code") in safety_geometry_codes]
     if any(g["code"] == "DATA_STALE" for g in hard):
         state, reason = "DATA_UNAVAILABLE", "DATA_STALE"
-    elif hard:
-        state, reason = "REJECTED_HARD", hard[0]["code"]
-    elif status == "EXHAUSTED_MOMENTUM":
-        state, reason = "REJECTED_QUALITY", "RSI_H4_EXHAUSTION"
-        gates.append({"code": "RSI_H4_EXHAUSTION", "text": "Momentum RSI H4 sudah jenuh searah thesis.", "hard": False})
-    elif status == "LOW_QUALITY_FALLBACK":
-        state, reason = "REJECTED_QUALITY", "LOW_QUALITY_FALLBACK"
-        gates.append({"code": "LOW_QUALITY_FALLBACK", "text": "Thesis fallback kualitas rendah.", "hard": False})
-    elif conf < THESIS_MIN_QUALITY_V2:
-        state, reason = "REJECTED_QUALITY", "BELOW_QUALITY_FLOOR"
+    elif geometry_errors:
+        state, reason = "REJECTED_HARD", geometry_errors[0]["code"]  # execution safety only
     elif "WAITING" in status:
-        if status == "WAITING_MOMENTUM":
-            state, reason = "WAITING_TRIGGER", "MOMENTUM_NOT_READY"
-            gates.append({"code": "MOMENTUM_NOT_READY", "text": "RSI M15 di zona entry belum mencapai level momentum.", "hard": False})
-        else:
-            state, reason = "WAITING_TRIGGER", "TRIGGER_NOT_CONFIRMED"
-            gates.append({"code": "TRIGGER_NOT_CONFIRMED", "text": "Konfirmasi M15 belum terbentuk.", "hard": False})
+        state, reason = "WAITING_TRIGGER", "MOMENTUM_NOT_READY" if status == "WAITING_MOMENTUM" else "TRIGGER_NOT_CONFIRMED"
+        gates.append({"code": reason, "text": "Setup belum memiliki trigger penuh; kualitas tetap direpresentasikan oleh confidence.", "hard": False})
     else:
         state = "READY"
-        reason = "PRICE_IN_ZONE" if price_vs_zone == "IN_ZONE" else "PRICE_NOT_IN_ZONE"
+        reason = "PRICE_IN_ZONE" if price_vs_zone == "IN_ZONE" else ("LOW_SCORE_FALLBACK" if status == "LOW_QUALITY_FALLBACK" else "PRICE_NOT_IN_ZONE")
+    # RR gross/net, component quality, RSI exhaustion and BTC conflict remain numeric fields only.
 
     sig_h4 = ((analysis.get("pair_structure") or {}).get("signature_h4"))
     anchor = f"{pair}|{direction}|{STRATEGY_VERSION}|{sig_h4!r}|{round(zlow, 6)}|{round(zhigh, 6)}"
@@ -7864,7 +7733,7 @@ def _enrich_setup_contract(setup: dict[str, Any], context: dict[str, Any] | None
         "data_asof": data_asof,
         "data_quality": quality,
         "setup_archetype": str((analysis.get("thesis") or {}).get("type") or PRIMARY_V2_MODEL),
-        "analysis_source": "BYBIT_PUBLIC" if src == "BYBIT" else (src or "UNKNOWN"),
+        "analysis_source": "BINANCE_PUBLIC" if src == "BINANCE" else (src or "UNKNOWN"),
         "btc_alignment": alignment,
         "thesis_signature": thesis_signature,
         "scoring_version": SCORING_FORMULA_VERSION,
@@ -7920,8 +7789,8 @@ def _prune_scan_btc_cache(session_id: str, keep_cycles: int = 4) -> None:
 def _scan_context(context: dict[str, Any] | None) -> dict[str, Any]:
     base = dict(context or {})
     base["mode"] = "SCAN"
-    base["data_provider"] = "BYBIT_PUBLIC_ONLY"
-    base["primary_data_source"] = "BYBIT_PUBLIC"
+    base["data_provider"] = "BINANCE_PUBLIC_ONLY"
+    base["primary_data_source"] = "BINANCE_PUBLIC"
     base["allow_binance_fallback"] = False
     return base
 
@@ -7979,7 +7848,7 @@ async def analyze_btc_regime(context: dict[str,Any] | None=None) -> dict[str,Any
 async def analyze_scan_structure(pair: str, context: dict[str,Any] | None=None) -> dict[str,Any]:
     context=_scan_context(context); symbol=normalize_pair(pair); btc=await analyze_btc_regime(context); btc_trend=str(btc.get("trend") or "RANGE").upper()
     if symbol=="BTCUSDT":
-        return {"pair":symbol,"trend":btc_trend,"regime":btc.get("regime",btc_trend),"state":btc.get("state",btc_trend),"confidence":btc.get("confidence",50),"btc_h4_trend":btc_trend,"aligned":True,"analysis":{"btc_regime":btc},"data":{"source":"BYBIT","timeframe":"D1/H4/H1","candles_used":btc.get("candles"),"closed_candles_only":True,"data_policy":"BYBIT_PUBLIC_ONLY"}}
+        return {"pair":symbol,"trend":btc_trend,"regime":btc.get("regime",btc_trend),"state":btc.get("state",btc_trend),"confidence":btc.get("confidence",50),"btc_h4_trend":btc_trend,"aligned":True,"analysis":{"btc_regime":btc},"data":{"source":"BINANCE","timeframe":"D1/H4/H1","candles_used":btc.get("candles"),"closed_candles_only":True,"data_policy":"BINANCE_PUBLIC_ONLY"}}
     h4, h4_source = await fetch_series(symbol, H4, PAIR_H4_CANDLES_REQUIRED, H4_MS, allow_fallback=False)
     h1, h1_source = await fetch_series(symbol, H1, 168, H1_MS, allow_fallback=False)
     d1 = resample_candles(h4, 24 * 60 * 60 * 1000)
@@ -7996,8 +7865,7 @@ async def analyze_scan_structure(pair: str, context: dict[str,Any] | None=None) 
     )
     pair_side = "BUY" if pair_h4_trend == "BULLISH" else ("SELL" if pair_h4_trend == "BEARISH" else "")
     alignment_label = classify_btc_alignment(btc_trend, pair_side, btc.get("confidence"))
-    if ALLOW_BTC_COUNTER_TREND and alignment_label == "COUNTER_TREND":
-        aligned = True
+    aligned = True  # kept for compatibility; BTC alignment never blocks a pair
     return {
         "pair": symbol,
         "btc_alignment": alignment_label,
@@ -8007,18 +7875,19 @@ async def analyze_scan_structure(pair: str, context: dict[str,Any] | None=None) 
         "confidence": regime["confidence"],
         "btc_h4_trend": btc_trend,
         "btc_regime": btc.get("regime", btc_trend),
-        "aligned": aligned,
+        "aligned": True,
+        "btc_alignment_score": 80.0 if alignment_label == "ALIGNED" else (50.0 if alignment_label == "NEUTRAL" else 40.0),
         "analysis": {
             "pair_h4": _structure_summary(h4_structure, h4),
             "pair_regime": regime,
             "btc_regime": btc,
         },
         "data": {
-            "source": "BYBIT",
+            "source": "BINANCE",
             "timeframe": "D1/H4/H1",
             "candles_used": {"D1": len(d1), "H4": len(h4), "H1": len(h1)},
             "closed_candles_only": True,
-            "data_policy": "BYBIT_PUBLIC_ONLY",
+            "data_policy": "BINANCE_PUBLIC_ONLY",
             "sources_by_timeframe": {"D1": h4_source + "_DERIVED", "H4": h4_source, "H1": h1_source},
         },
     }
@@ -8039,163 +7908,66 @@ async def validate_setup(
     initial_setup: dict[str, Any],
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Re-analyze a candidate with fresh Bybit data and return a validation result."""
+    """Fresh score-based validation. BTC mismatch and score delta never veto a candidate."""
     if not isinstance(initial_setup, dict):
         raise ValueError("initial_setup harus berupa dict.")
-
-    context = _scan_context(context)
-    context["validation"] = True
-    # Keep BTC directional regime stable for the cycle, but always refresh pair data.
-    context["force_fresh_btc_regime"] = False
-
-    fresh = await generate_setup(pair, context)
-
-    initial_direction = str(initial_setup.get("direction") or "").upper()
-    fresh_direction = str(fresh.get("direction") or "").upper()
+    fresh_context = _scan_context(context)
+    fresh_context["validation"] = True
+    fresh_context["force_fresh_btc_regime"] = False
+    fresh = await generate_setup(pair, fresh_context)
     initial_conf = safe_float(initial_setup.get("confidence"), 0.0)
     fresh_conf = safe_float(fresh.get("confidence"), 0.0)
-
-    macro = (fresh.get("analysis") or {}).get("macro") or {}
-    allowed = macro.get("allowed_directions") or []
-    direction_valid = fresh_direction in allowed
-    same_direction = initial_direction == fresh_direction
-    fresh_pair_regime = str((macro.get("pair_regime") or {}).get("trend") or "RANGE")
-    pair_h4 = str(((macro.get("pair_h4") or {}).get("trend")) or "RANGE")
-    # V2 validation keeps the H4 structural thesis authoritative. The
-    # multi-timeframe aggregate may temporarily read RANGE during pullback.
-    regime_valid = (fresh_direction == DIRECTION_BUY and pair_h4 == "BULLISH") or (fresh_direction == DIRECTION_SELL and pair_h4 == "BEARISH")
-
+    initial_direction = str(initial_setup.get("direction") or "").upper()
+    fresh_direction = str(fresh.get("direction") or "").upper()
+    data = fresh.get("data") if isinstance(fresh.get("data"), dict) else {}
+    analysis = fresh.get("analysis") if isinstance(fresh.get("analysis"), dict) else {}
+    geometry = validate_setup_geometry(
+        fresh_direction,
+        safe_float(fresh.get("entry")),
+        safe_float(fresh.get("sl")),
+        safe_float(fresh.get("tp")),
+        safe_float((analysis.get("entry_zone") or {}).get("low"), safe_float(fresh.get("entry"))),
+        safe_float((analysis.get("entry_zone") or {}).get("high"), safe_float(fresh.get("entry"))),
+        safe_float(data.get("tick_size"), 0.0),
+    )
+    data_quality = fresh.get("data_quality") if isinstance(fresh.get("data_quality"), dict) else {}
+    stale_data = (not data_quality.get("fresh", True)) or fresh.get("candidate_state") == "DATA_UNAVAILABLE"
+    geometry_codes = {"PRICE_INVALID", "GEOMETRY_INVALID", "ZONE_INVERTED", "ENTRY_OUTSIDE_ZONE", "ZONE_TOO_WIDE"}
+    unsafe = any(item.get("code") in geometry_codes for item in geometry)
+    valid = not stale_data and not unsafe
     initial_sig = _setup_signature(initial_setup)
     fresh_sig = _setup_signature(fresh)
-    replacement = initial_sig != fresh_sig
-    confidence_ratio = (fresh_conf / initial_conf * 100.0) if initial_conf > EPS else 0.0
-
-    initial_analysis = initial_setup.get("analysis") if isinstance(initial_setup.get("analysis"), dict) else {}
-    fresh_analysis = fresh.get("analysis") if isinstance(fresh.get("analysis"), dict) else {}
-    initial_structure = (initial_analysis.get("pair_structure") or {}) if isinstance(initial_analysis, dict) else {}
-    fresh_structure = (fresh_analysis.get("pair_structure") or {}) if isinstance(fresh_analysis, dict) else {}
-    initial_h4_signature = initial_structure.get("signature_h4")
-    fresh_h4_signature = fresh_structure.get("signature_h4")
-    structure_same = (initial_h4_signature is None or fresh_h4_signature is None or initial_h4_signature == fresh_h4_signature)
-
-    initial_zone = initial_analysis.get("entry_zone") or {}
-    fresh_zone = fresh_analysis.get("entry_zone") or {}
-    zone_overlap = 0.0
-    try:
-        ilow, ihigh = float(initial_zone.get("low")), float(initial_zone.get("high"))
-        flow, fhigh = float(fresh_zone.get("low")), float(fresh_zone.get("high"))
-        if ihigh > ilow and fhigh > flow:
-            overlap_low = max(ilow, flow)
-            overlap_high = min(ihigh, fhigh)
-            overlap = max(0.0, overlap_high - overlap_low)
-            zone_overlap = overlap / max(min(ihigh - ilow, fhigh - flow), EPS)
-    except (TypeError, ValueError):
-        zone_overlap = 0.0
-
-    fresh_projection = fresh_analysis.get("rsi_projection") or {}
-    projected_class = str(fresh_projection.get("classification") or "")
-    rsi_projection_valid = not projected_class.startswith("WEAK")
-    fresh_risk = fresh_analysis.get("risk") or {}
-    fresh_target = fresh_analysis.get("target_map") or {}
-    target_selected = fresh_target.get("selected") if isinstance(fresh_target, dict) else None
-    rr_valid = safe_float(fresh_risk.get("planned_rr"), 0.0) >= TARGET_MIN_RR
-    invalidation_valid = bool((fresh_analysis.get("invalidation") or {}).get("sl"))
-    target_valid = bool(target_selected) and rr_valid
-    liquidity_alive = bool((fresh_analysis.get("liquidity_map") or {}).get("significant_below" if fresh_direction == DIRECTION_BUY else "significant_above"))
-
-    thesis_changed = not structure_same or zone_overlap < 0.25
-    core_valid = bool(
-        direction_valid
-        and same_direction
-        and regime_valid
-        and liquidity_alive
-        and invalidation_valid
-        and target_valid
-        and (rsi_projection_valid or str((fresh_analysis.get("thesis") or {}).get("status")) == "WAITING_TRIGGER")
-    )
-    structural_valid = bool(core_valid and (not thesis_changed or fresh_conf >= initial_conf))
-
-    validation_flags = {
-        "same_direction": same_direction,
-        "direction_valid": direction_valid,
-        "h4_structure_same": structure_same,
-        "entry_zone_overlap": round(zone_overlap, 4),
-        "liquidity_alive": liquidity_alive,
-        "projected_rsi_valid": rsi_projection_valid,
-        "invalidation_valid": invalidation_valid,
-        "target_valid": target_valid,
-        "rr_valid": rr_valid,
-        "thesis_changed": thesis_changed,
-    }
-
-    if not core_valid:
-        valid_reason = (
-            "Fresh thesis gagal consistency check: "
-            + ", ".join(k for k, v in validation_flags.items() if v is False)
-        )
-    elif thesis_changed and fresh_conf > initial_conf:
-        valid_reason = "Validator menemukan thesis baru yang tetap valid dan confidence lebih tinggi; replacement digunakan."
-    elif thesis_changed:
-        valid_reason = "Thesis berubah material namun confidence validator tidak lebih tinggi; candidate ditolak."
-    elif replacement and fresh_conf > initial_conf:
-        valid_reason = "Validator menemukan setup baru dengan confidence lebih tinggi; setup validator digunakan."
-    else:
-        valid_reason = "Struktur thesis, liquidity/zone, invalidation, target, dan RR tetap konsisten dengan data terbaru."
-
-    fresh_analysis = dict(fresh_analysis)
-    fresh_analysis["validation"] = {
-        "initial_confidence": round(initial_conf, 2),
-        "validated_confidence": round(fresh_conf, 2),
-        "confidence_ratio_percent": round(confidence_ratio, 2),
-        "initial_direction": initial_direction,
-        "validated_direction": fresh_direction,
-        "direction_valid": direction_valid,
-        "same_direction": same_direction,
-        "fresh_pair_regime": fresh_pair_regime,
-        "regime_valid": regime_valid,
-        "setup_replaced": replacement,
-        "replacement_is_higher_confidence": replacement and fresh_conf > initial_conf,
-        "consistency": validation_flags,
-        "reason": valid_reason,
-    }
-    fresh = dict(fresh)
-    fresh["analysis"] = fresh_analysis
-
-    fresh_state = str(fresh.get("candidate_state") or "")
-    stale_data = fresh_state == "DATA_UNAVAILABLE" or any(
-        g.get("code") == "DATA_STALE" for g in (fresh.get("gate_reasons") or [])
-    )
-    hard_codes = [g.get("code") for g in (fresh.get("gate_reasons") or []) if g.get("hard")]
-    reason_codes = [k.upper() for k, v in validation_flags.items() if v is False]
-    if stale_data:
-        reason_codes.insert(0, "DATA_STALE")
-    reason_codes.extend(c for c in hard_codes if c not in reason_codes)
-    structural_valid = bool(structural_valid and not stale_data and not hard_codes)
-    if stale_data:
-        valid_reason = "Data validasi basi; tidak boleh membuat trade baru dari input basi."
-    if structural_valid:
-        validation_status = "VALID"
-    elif stale_data:
-        validation_status = "STALE_DATA"
-    elif hard_codes:
-        validation_status = "REJECTED_HARD"
-    else:
-        validation_status = "REJECTED_QUALITY"
     initial_vs_fresh = {
-        "confidence": {"initial": round(initial_conf, 2), "fresh": round(fresh_conf, 2)},
-        "direction": {"initial": initial_direction, "fresh": fresh_direction},
-        "zone_overlap": round(zone_overlap, 4),
+        "confidence": {"initial": round(initial_conf, 2), "fresh": round(fresh_conf, 2), "delta": round(fresh_conf - initial_conf, 2)},
+        "direction": {"initial": initial_direction, "fresh": fresh_direction, "changed": initial_direction != fresh_direction},
         "entry": {"initial": safe_float(initial_setup.get("entry")), "fresh": safe_float(fresh.get("entry"))},
         "sl": {"initial": safe_float(initial_setup.get("sl")), "fresh": safe_float(fresh.get("sl"))},
         "tp": {"initial": safe_float(initial_setup.get("tp")), "fresh": safe_float(fresh.get("tp"))},
-        "setup_replaced": replacement,
+        "setup_replaced": initial_sig != fresh_sig,
+        "btc_filter": "DISABLED_SCORE_ONLY",
+        "veto_policy": "ONLY_STALE_DATA_OR_UNSAFE_EXECUTION_GEOMETRY",
     }
+    fresh_analysis = dict(analysis)
+    fresh_analysis["validation"] = {
+        "initial_confidence": round(initial_conf, 2),
+        "validated_confidence": round(fresh_conf, 2),
+        "confidence_delta": round(fresh_conf - initial_conf, 2),
+        "initial_direction": initial_direction,
+        "validated_direction": fresh_direction,
+        "direction_changed": initial_direction != fresh_direction,
+        "geometry_issues": geometry,
+        "stale_data": stale_data,
+        "score_only": True,
+        "reason": "Skor/arah direfresh; BTC mismatch tidak mem-veto kandidat." if valid else ("Data candle basi/tidak tersedia." if stale_data else "Geometri order tidak aman."),
+    }
+    fresh = dict(fresh)
+    fresh["analysis"] = fresh_analysis
     return {
-        "valid": structural_valid,
-        "reason": valid_reason,
-        "validation_reason": valid_reason,
-        "validation_status": validation_status,
-        "reason_codes": reason_codes,
+        "valid": valid,
+        "reason": fresh_analysis["validation"]["reason"],
+        "validation_reason": fresh_analysis["validation"]["reason"],
+        "validation_status": "VALID" if valid else ("STALE_DATA" if stale_data else "UNSAFE_GEOMETRY"),
+        "reason_codes": (["DATA_STALE"] if stale_data else [x.get("code") for x in geometry]) if not valid else [],
         "stale_data": stale_data,
         "initial_vs_fresh": initial_vs_fresh,
         "confidence": fresh_conf,
@@ -8228,38 +8000,12 @@ async def _fetch_if_short(
 
 
 def validate_directional_alignment(result: dict[str, Any]) -> tuple[bool, list[str]]:
-    """Validate directional invariant plus final pair-regime compatibility."""
-    errors: list[str] = []
-    direction = str(result.get("direction") or "")
-    analysis = result.get("analysis")
-    macro = analysis.get("macro") if isinstance(analysis, dict) else None
-    if not isinstance(macro, dict):
-        errors.append("analysis.macro tidak tersedia")
-        return False, errors
-
-    allowed = macro.get("allowed_directions")
-    if not isinstance(allowed, list) or not allowed:
-        errors.append("analysis.macro.allowed_directions kosong")
-    elif direction not in allowed:
-        errors.append(
-            f"direction {direction} tidak termasuk allowed_directions {allowed}"
-        )
-
-    pair_regime = macro.get("pair_regime") if isinstance(macro.get("pair_regime"), dict) else {}
-    pair_trend = str(pair_regime.get("trend") or "")
-    pair_h4 = str((macro.get("pair_h4") or {}).get("trend") or "")
-    if str(result.get("strategy", {}).get("version") or "") == STRATEGY_VERSION:
-        if direction == "BUY" and pair_h4 != "BULLISH":
-            errors.append(f"V2 BUY membutuhkan H4 BULLISH thesis, saat ini {pair_h4 or '-'} (aggregate={pair_trend or '-'})")
-        if direction == "SELL" and pair_h4 != "BEARISH":
-            errors.append(f"V2 SELL membutuhkan H4 BEARISH thesis, saat ini {pair_h4 or '-'} (aggregate={pair_trend or '-'})")
-    else:
-        if direction == "BUY" and pair_trend != "BULLISH":
-            errors.append(f"BUY membutuhkan pair_regime BULLISH, saat ini {pair_trend or '-'}")
-        if direction == "SELL" and pair_trend != "BEARISH":
-            errors.append(f"SELL membutuhkan pair_regime BEARISH, saat ini {pair_trend or '-'}")
-
-    return (not errors, errors)
+    """Compatibility check: validate the output side only, never BTC/pair alignment."""
+    direction = str(result.get("direction") or "").upper()
+    if direction not in {"BUY", "SELL"}:
+        return False, ["direction harus BUY/SELL"]
+    # BTC regime, pair regime and H4 alignment are score/context fields, not vetoes.
+    return True, []
 
 
 def validate_result_contract(result: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -8735,7 +8481,7 @@ def _self_test_v22() -> dict[str, Any]:
     saved_stats = dict(_SERIES_STATS)
     saved_entries, saved_mb = CANDLE_CACHE_MAX_ENTRIES, CANDLE_CACHE_MAX_MB
     saved_fetch = globals()["_fetch_series_uncached"]
-    saved_bybit, saved_binance = BybitProvider.klines, BinanceProvider.klines
+    saved_binance = BinanceProvider.klines
     try:
         _SERIES_CACHE.clear()
         for k in _SERIES_STATS:
@@ -8745,6 +8491,28 @@ def _self_test_v22() -> dict[str, Any]:
 
         # ---- normalisasi candle
         base = _synthetic_series(100, M15_MS)
+        # ---- new score-only components (orderflow proxy, price leg, explicit S/R)
+        orderflow = _v2_orderflow_leg_score("BUY", base)
+        price_leg = _v2_price_leg_score("BUY", base, base[-1].close - 0.5, base[-1].close + 0.5, base[-1].close)
+        sr_structure = StructureSnapshot(
+            trend="BULLISH",
+            swing_highs=[Pivot(70, 102.0, "HIGH", 73)],
+            swing_lows=[Pivot(80, 98.9, "LOW", 83)],
+            labels=[], events=[], last_bos=None, last_mss=None,
+            protected_high=102.0, protected_low=98.9,
+        )
+        sr_zone = Zone("BULLISH_OB", 99.0, 100.0, 90, "H4_OB", "ACTIVE", 80.0, {"formation_direction": "BULLISH"})
+        sr_score = _v2_support_resistance_score(
+            "BUY", base[-1].close,
+            {"zone_low": 99.0, "zone_high": 100.0, "pool": None},
+            {"timeframe": "H4", "structure": sr_structure, "zones": [sr_zone]},
+        )
+        check("orderflow_leg_score_only", "orderflow proxy produces score and is explicitly not footprint data", 0 <= orderflow["score"] <= 100 and orderflow["method"] == "OHLCV_PROXY_NOT_TRUE_FOOTPRINT", "score 0..100 with OHLCV proxy label", orderflow)
+        check("price_leg_score_only", "price leg produces numeric score without directional veto", 0 <= price_leg["score"] <= 100 and "impulse_pct" in price_leg, "score 0..100 plus impulse", price_leg)
+        check("support_resistance_uses_swing_and_ob", "S/R integrates swing levels and active OB zones", 0 <= sr_score["score"] <= 100 and sr_score["zone_count"] == 1 and sr_score["swing_level_count"] >= 1, "zone and swing count", sr_score)
+        ok_mismatch, mismatch_errors = validate_directional_alignment({"direction": "BUY", "analysis": {"macro": {"allowed_directions": ["SELL"], "pair_regime": {"trend": "BEARISH"}}}})
+        check("btc_pair_alignment_no_veto", "BTC/pair structure mismatch does not reject BUY/SELL direction", ok_mismatch and not mismatch_errors, True, mismatch_errors)
+
         messy = list(reversed(base)) + [base[10]]  # terbalik + duplikat
         open_c = Candle(time_ms=(int(time.time() * 1000) // M15_MS) * M15_MS, open=1, high=2, low=0.5, close=1.5, volume=1)
         bad_c = Candle(time_ms=base[0].time_ms - M15_MS, open=10, high=5, low=6, close=7, volume=1)  # high<low
@@ -8763,7 +8531,7 @@ def _self_test_v22() -> dict[str, Any]:
         check("normalize_counts_gaps", "gap terdeteksi", gstats["gaps"] == 1, 1, gstats["gaps"])
 
         # ---- cache hit/miss/mutasi
-        _series_cache_store("TESTUSDT", M15, base, "BYBIT", M15_MS)
+        _series_cache_store("TESTUSDT", M15, base, "BINANCE", M15_MS)
         hit = _series_cache_get("TESTUSDT", M15, 50, False, None)
         check("cache_hit_smaller_lookback", "lookback kecil dilayani seri besar", hit is not None and len(hit[0]) == 50, 50, None if hit is None else len(hit[0]))
         check("cache_miss_larger_lookback", "tidak mengembalikan 100 bila diminta 672", _series_cache_get("TESTUSDT", M15, 672, False, None) is None, None, "hit")
@@ -8773,7 +8541,7 @@ def _self_test_v22() -> dict[str, Any]:
         check("cache_no_shared_mutation", "mutasi list pemanggil tidak mengubah cache", again is not None and len(again[0]) == 50, 50, None if again is None else len(again[0]))
 
         # ---- TTL & boundary
-        entry = _SERIES_CACHE[("BYBIT", "TESTUSDT", M15)]
+        entry = _SERIES_CACHE[("BINANCE", "TESTUSDT", M15)]
         entry.fetched_at = time.time() - 1000.0
         check("cache_ttl_expiry", "melewati TTL -> stale", _series_cache_get("TESTUSDT", M15, 50, False, None) is None, None, "hit")
         expected_ms = _expected_last_closed_ms(int(time.time() * 1000), M15_MS)
@@ -8785,13 +8553,13 @@ def _self_test_v22() -> dict[str, Any]:
         _SERIES_CACHE.clear()
         globals()["CANDLE_CACHE_MAX_ENTRIES"] = 3
         for i in range(5):
-            _series_cache_store(f"P{i}USDT", M15, base[-20:], "BYBIT", M15_MS)
+            _series_cache_store(f"P{i}USDT", M15, base[-20:], "BINANCE", M15_MS)
         check("cache_bounded_entries", "maks entri dipatuhi", len(_SERIES_CACHE) == 3 and _SERIES_STATS["evictions"] >= 2, 3, len(_SERIES_CACHE))
         globals()["CANDLE_CACHE_MAX_ENTRIES"] = saved_entries
         _SERIES_CACHE.clear()
         globals()["CANDLE_CACHE_MAX_MB"] = 0.01
         before_ev = _SERIES_STATS["evictions"]
-        _series_cache_store("BIGUSDT", M15, base, "BYBIT", M15_MS)
+        _series_cache_store("BIGUSDT", M15, base, "BINANCE", M15_MS)
         check("cache_bounded_bytes", "maks byte dipatuhi", _series_total_bytes() <= 0.01 * 1024 * 1024 and _SERIES_STATS["evictions"] > before_ev, "<=10KB", _series_total_bytes())
         globals()["CANDLE_CACHE_MAX_MB"] = saved_mb
         _SERIES_CACHE.clear()
@@ -8802,7 +8570,7 @@ def _self_test_v22() -> dict[str, Any]:
         async def fake_fetch(pair, interval, count, interval_ms, *, allow_fallback):
             calls["n"] += 1
             await asyncio.sleep(0.05)
-            return _synthetic_series(count, interval_ms), "BYBIT", {"gaps": 0}
+            return _synthetic_series(count, interval_ms), "BINANCE", {"gaps": 0}
 
         globals()["_fetch_series_uncached"] = fake_fetch
 
@@ -8818,33 +8586,33 @@ def _self_test_v22() -> dict[str, Any]:
         _run_coro_sync(fetch_series("SFUSDT", M15, 60, M15_MS, allow_fallback=False, force_refresh=True))
         check("force_refresh_bypasses_cache", "force_refresh memaksa fetch baru", calls["n"] == n_before + 1, n_before + 1, calls["n"])
         _SERIES_CACHE.clear()
-        _series_cache_store("PSUSDT", M15, base, "BINANCE_FALLBACK", M15_MS)
+        _series_cache_store("PSUSDT", M15, base, "BINANCE", M15_MS)
         calls["n"] = 0
         got = _run_coro_sync(fetch_series("PSUSDT", M15, 50, M15_MS, allow_fallback=False))
-        check("provider_separation", "SCAN (tanpa fallback) tidak boleh memakai cache Binance", calls["n"] == 1 and got[1] == "BYBIT", (1, "BYBIT"), (calls["n"], got[1]))
+        check("provider_separation", "Binance-only SCAN boleh memakai cache Binance", calls["n"] == 0 and got[1] == "BINANCE", (0, "BINANCE"), (calls["n"], got[1]))
         globals()["_fetch_series_uncached"] = saved_fetch
 
-        # ---- kebijakan SCAN: tanpa fallback Binance
+        # ---- one market-data source for all scan modes
         called = {"binance": 0}
-
-        async def bybit_fail(self, *a, **k):
-            raise RuntimeError("bybit down")
 
         async def binance_ok(self, *a, **k):
             called["binance"] += 1
             return base
 
-        BybitProvider.klines = bybit_fail
+        saved_binance = BinanceProvider.klines
         BinanceProvider.klines = binance_ok
-        raised = False
         try:
-            _run_coro_sync(fetch_series("NOFBUSDT", M15, 50, M15_MS, allow_fallback=False, use_cache=False))
-        except RuntimeError:
-            raised = True
-        check("scan_no_binance_fallback", "allow_fallback=False tidak memanggil Binance", raised and called["binance"] == 0, (True, 0), (raised, called["binance"]))
-        fb = _run_coro_sync(fetch_series("FBUSDT", M15, 50, M15_MS, allow_fallback=True, use_cache=False))
-        check("fallback_allowed_non_scan", "fallback Binance hanya bila diizinkan", fb[1] == "BINANCE_FALLBACK" and called["binance"] == 1, "BINANCE_FALLBACK", fb[1])
-        BybitProvider.klines, BinanceProvider.klines = saved_bybit, saved_binance
+            no_fallback = _run_coro_sync(fetch_series("NOFBUSDT", M15, 50, M15_MS, allow_fallback=False, use_cache=False))
+            with_fallback = _run_coro_sync(fetch_series("FBUSDT", M15, 50, M15_MS, allow_fallback=True, use_cache=False))
+            check(
+                "binance_only_provider",
+                "semua mode memakai Binance tanpa cross-exchange fallback",
+                called["binance"] == 2 and no_fallback[1] == "BINANCE" and with_fallback[1] == "BINANCE",
+                (2, "BINANCE", "BINANCE"),
+                (called["binance"], no_fallback[1], with_fallback[1]),
+            )
+        finally:
+            BinanceProvider.klines = saved_binance
 
         # ---- geometri BUY/SELL
         check("geometry_buy_valid", "BUY SL<entry<TP valid", validate_setup_geometry("BUY", 100, 98, 106, 99.5, 100.5) == [], [], validate_setup_geometry("BUY", 100, 98, 106, 99.5, 100.5))
@@ -8875,7 +8643,7 @@ def _self_test_v22() -> dict[str, Any]:
                 "analysis": {"thesis": {"status": status, "type": "BUY_PULLBACK"}, "entry_zone": {"low": entry - 0.3, "high": entry + 0.3},
                              "risk": {"planned_rr": rr, "risk_pct": 2.0, "risk_h1_atr": 1.1}, "invalidation": {"reason": "swing"},
                              "pair_structure": {"signature_h4": "abc"}, "macro": {"btc_regime": {"confidence": 60}}, "confidence": {"penalties": []}},
-                "data": {"source": "BYBIT", "tick_size": 0.01, "directional_bias": "BULLISH",
+                "data": {"source": "BINANCE", "tick_size": 0.01, "directional_bias": "BULLISH",
                          "data_asof": {"M15": ((now_ms - asof_age_ms) // M15_MS) * M15_MS - M15_MS, "H1": ((now_ms - asof_age_ms) // (4 * M15_MS)) * 4 * M15_MS - 4 * M15_MS,
                                        "H4": ((now_ms - asof_age_ms) // (16 * M15_MS)) * 16 * M15_MS - 16 * M15_MS}},
             }
@@ -8890,8 +8658,8 @@ def _self_test_v22() -> dict[str, Any]:
         check("state_waiting_trigger", "trigger belum -> WAITING_TRIGGER", waiting["candidate_state"] == "WAITING_TRIGGER", "WAITING_TRIGGER", waiting["candidate_state"])
         check("state_rejected_hard_geometry", "SL salah sisi -> REJECTED_HARD", hard["candidate_state"] == "REJECTED_HARD" and hard["state_reason"] == "GEOMETRY_INVALID", "REJECTED_HARD/GEOMETRY_INVALID", (hard["candidate_state"], hard["state_reason"]))
         check("state_data_unavailable_stale", "data basi -> DATA_UNAVAILABLE", stale["candidate_state"] == "DATA_UNAVAILABLE", "DATA_UNAVAILABLE", stale["candidate_state"])
-        check("state_rejected_quality_fallback", "fallback -> REJECTED_QUALITY", fallback["candidate_state"] == "REJECTED_QUALITY", "REJECTED_QUALITY", fallback["candidate_state"])
-        check("state_rr_below_min", "RR di bawah minimum -> hard reject", low_rr["candidate_state"] == "REJECTED_HARD" and low_rr["state_reason"] == "RR_BELOW_MIN", "RR_BELOW_MIN", low_rr["state_reason"])
+        check("state_scored_fallback", "fallback tetap kandidat bernilai, bukan rejection kualitas", fallback["candidate_state"] == "READY", "READY", fallback["candidate_state"])
+        check("state_rr_is_score_not_veto", "RR di bawah minimum tetap state READY dengan nilai RR", low_rr["candidate_state"] == "READY" and low_rr["planned_rr_gross"] < TARGET_MIN_RR, ("READY", "low RR"), (low_rr["candidate_state"], low_rr["planned_rr_gross"]))
         required = {"schema_version", "candidate_state", "state_reason", "gate_reasons", "entry_zone", "planned_rr_gross", "planned_rr_after_costs", "data_asof", "data_quality", "setup_archetype", "analysis_source", "risk", "thesis_signature", "confidence_breakdown"}
         check("contract_required_fields", "field kontrak lengkap", required <= set(ready), "semua field", sorted(required - set(ready)))
         check("contract_preserves_legacy_fields", "field lama tidak hilang", all(k in ready for k in ("pair", "direction", "entry", "sl", "tp", "confidence", "analysis", "data")), True, None)
@@ -8945,7 +8713,7 @@ def _self_test_v22() -> dict[str, Any]:
         tests["self_test_v22_runtime"] = False
     finally:
         globals()["_fetch_series_uncached"] = saved_fetch
-        BybitProvider.klines, BinanceProvider.klines = saved_bybit, saved_binance
+        BinanceProvider.klines = saved_binance
         globals()["CANDLE_CACHE_MAX_ENTRIES"], globals()["CANDLE_CACHE_MAX_MB"] = saved_entries, saved_mb
         with _SERIES_LOCK:
             _SERIES_CACHE.clear()
