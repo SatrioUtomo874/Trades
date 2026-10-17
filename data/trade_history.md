@@ -296,3 +296,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T09:00:03.072663+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## MEGAUSDT — SELL
+
+Trade ID: `MEGAUSDT-20261017-160249-DB93B5`
+
+### Setup
+
+- Price Now Reference: 0.04509
+- Entry: 0.04755
+- Reason Entry: MEGAUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure RANGE, liquidity H1 0.047995 dipadukan dengan Fib PRIMARY; refinement BEARISH_OB. Projected M15 RSI 66.2 pada entry zone.
+- Price Exp: 0.04506
+- Reason Price Exp: Price Exp 0.04506: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.04826
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.04799; SL ditempatkan di luar invalidation dan liquidity guard 0.047995.
+- TP: 0.04505
+- Reason TP: TP 0.04505 dipilih dari H4_SWING_LOW dengan RR 3.52; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.04506
+- Result Reason: Price Exp 0.04506: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T09:02:49.796663+00:00
+- Filled: -
+- Closed: 2026-10-17T09:03:01.160720+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
