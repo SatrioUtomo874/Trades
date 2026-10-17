@@ -230,3 +230,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T11:29:18.561275+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## FORMUSDT — SELL
+
+Trade ID: `FORMUSDT-20261017-182956-D636D0`
+
+### Setup
+
+- Price Now Reference: 0.2584
+- Entry: 0.2637
+- Reason Entry: FORMUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure RANGE, liquidity H1 0.2637 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 75.4 pada entry zone.
+- Price Exp: 0.2582
+- Reason Price Exp: Price Exp 0.2582: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.2657
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.2648; SL ditempatkan di luar invalidation.
+- TP: 0.2581
+- Reason TP: TP 0.2581 dipilih dari H4_LOWER_LOW dengan RR 2.80; target quality 95.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2582
+- Result Reason: Price Exp 0.2582: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T11:29:56.190723+00:00
+- Filled: -
+- Closed: 2026-10-17T11:32:03.187242+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
