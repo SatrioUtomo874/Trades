@@ -296,3 +296,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:02:04.474132+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## HOMEUSDT — SELL
+
+Trade ID: `HOMEUSDT-20261017-182958-F9FA70`
+
+### Setup
+
+- Price Now Reference: 0.00504
+- Entry: 0.005113
+- Reason Entry: HOMEUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity M15 0.005119625 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 69.7 pada entry zone.
+- Price Exp: 0.005025
+- Reason Price Exp: Price Exp 0.005025: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.005144
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.005119; SL ditempatkan di luar invalidation dan liquidity guard 0.005119625.
+- TP: 0.005023
+- Reason TP: TP 0.005023 dipilih dari H4_LOWER_LOW dengan RR 2.90; target quality 94.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.005025
+- Result Reason: Price Exp 0.005025: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T11:29:58.870248+00:00
+- Filled: -
+- Closed: 2026-10-17T12:02:25.361178+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
