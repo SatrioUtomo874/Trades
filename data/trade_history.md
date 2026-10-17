@@ -197,3 +197,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T11:28:47.072815+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## BLESSUSDT — SELL
+
+Trade ID: `BLESSUSDT-20261017-181536-9366EF`
+
+### Setup
+
+- Price Now Reference: 0.00757
+- Entry: 0.00762
+- Reason Entry: BLESSUSDT SELL: SELL_PULLBACK. H4 structure RANGE, liquidity H1 0.0076182857 dipadukan dengan Fib SECONDARY; refinement BEARISH_OB. Projected M15 RSI 66.6 pada entry zone.
+- Price Exp: 0.007536
+- Reason Price Exp: Price Exp 0.007535999999999999: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.00767
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.0076265; SL ditempatkan di luar invalidation dan liquidity guard 0.0076182857.
+- TP: 0.0075
+- Reason TP: TP 0.0075 dipilih dari H1_SWING_LOW dengan RR 2.40; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.007532
+- Result Reason: Price Exp 0.007535999999999999: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T11:15:36.085226+00:00
+- Filled: -
+- Closed: 2026-10-17T11:29:18.561275+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
