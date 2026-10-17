@@ -362,3 +362,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:02:45.373330+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## FILUSDT — BUY
+
+Trade ID: `FILUSDT-20261017-190329-3DD220`
+
+### Setup
+
+- Price Now Reference: 1.1243
+- Entry: 1.1176
+- Reason Entry: FILUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure RANGE, liquidity H4 1.1164 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 27.2 pada entry zone.
+- Price Exp: 1.1393
+- Reason Price Exp: Price Exp 1.1393: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.1041
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 1.1164; SL ditempatkan di luar invalidation.
+- TP: 1.1486
+- Reason TP: TP 1.1486 dipilih dari H1_SWING_HIGH dengan RR 2.30; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: BTC H4 berbalik BEARISH; setup BUY FILUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-17T12:03:29.989511+00:00
+- Filled: -
+- Closed: 2026-10-17T12:06:32.279476+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
