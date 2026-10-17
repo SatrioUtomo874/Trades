@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T06:23:40.090871+00:00",
+  "saved_at": "2026-10-17T07:16:04.782080+00:00",
   "bans": [
     {
       "pair": "BSBUSDT",
@@ -43,6 +43,13 @@
       "until": "2026-10-17T16:46:46.050751+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "OGUSDT",
+      "banned_at": "2026-10-17T07:16:04.781955+00:00",
+      "until": "2026-10-17T15:16:04.781936+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "PROVEUSDT",
