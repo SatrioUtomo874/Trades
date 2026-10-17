@@ -230,3 +230,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T07:15:56.059336+00:00
 - Strategy: SMC_VLT_RSI v2.3.1
+
+---
+
+## WLDUSDT — BUY
+
+Trade ID: `WLDUSDT-20261017-155508-251B6D`
+
+### Setup
+
+- Price Now Reference: 0.5205
+- Entry: 0.5112
+- Reason Entry: WLDUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.5110333 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 29.4 pada entry zone.
+- Price Exp: 0.5217
+- Reason Price Exp: Price Exp 0.5217: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.5044
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.5097; SL ditempatkan di luar invalidation.
+- TP: 0.5255
+- Reason TP: TP 0.5255 dipilih dari H4_HIGHER_HIGH dengan RR 2.10; target quality 91.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: BTC H4 berbalik BEARISH; setup BUY WLDUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-17T08:55:08.954890+00:00
+- Filled: -
+- Closed: 2026-10-17T08:58:37.453706+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
