@@ -1,14 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T08:50:03.151927+00:00",
+  "saved_at": "2026-10-17T08:58:59.774416+00:00",
   "bans": [
-    {
-      "pair": "BSBUSDT",
-      "banned_at": "2026-10-17T00:48:24.834373+00:00",
-      "until": "2026-10-17T08:48:24.834353+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
     {
       "pair": "DOGEUSDT",
       "banned_at": "2026-10-16T11:13:35.772932+00:00",
@@ -17,11 +10,11 @@
       "source": "AUTO_SL"
     },
     {
-      "pair": "GRAMUSDT",
-      "banned_at": "2026-10-17T00:49:54.199649+00:00",
-      "until": "2026-10-17T08:49:54.199632+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
+      "pair": "LTCUSDT",
+      "banned_at": "2026-10-17T08:58:57.761921+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: LTCUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=10.02501) Margin pas ≈ $2.01.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "MITOUSDT",
