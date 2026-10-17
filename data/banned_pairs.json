@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T11:13:20.762915+00:00",
+  "saved_at": "2026-10-17T11:21:04.270254+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -22,13 +22,6 @@
       "until": "2026-10-17T17:39:32.620806+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "DOGEUSDT",
-      "banned_at": "2026-10-16T11:13:35.772932+00:00",
-      "until": "2026-10-17T11:13:35.772896+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
     },
     {
       "pair": "FLOCKUSDT",
@@ -66,6 +59,13 @@
       "source": "AUTO_SL"
     },
     {
+      "pair": "NEOUSDT",
+      "banned_at": "2026-10-17T11:21:04.270063+00:00",
+      "until": "2026-10-17T19:21:04.270032+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
       "pair": "OGUSDT",
       "banned_at": "2026-10-17T07:16:04.781955+00:00",
       "until": "2026-10-17T15:16:04.781936+00:00",
@@ -85,13 +85,6 @@
       "until": "2026-10-17T17:00:13.847968+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "XRPUSDT",
-      "banned_at": "2026-10-16T11:13:55.973204+00:00",
-      "until": "2026-10-17T11:13:55.973169+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
     },
     {
       "pair": "ZRXUSDT",
