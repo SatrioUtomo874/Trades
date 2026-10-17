@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T00:06:12.597647+00:00",
+  "saved_at": "2026-10-17T00:06:45.025167+00:00",
   "bans": [
     {
       "pair": "DOGEUSDT",
@@ -48,6 +48,13 @@
       "pair": "REUSDT",
       "banned_at": "2026-10-16T17:05:28.720549+00:00",
       "until": "2026-10-17T01:05:28.720525+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "STBLUSDT",
+      "banned_at": "2026-10-17T00:06:45.025011+00:00",
+      "until": "2026-10-17T08:06:45.024983+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
