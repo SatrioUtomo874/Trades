@@ -65,3 +65,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T00:19:25.656435+00:00
 - Strategy: SMC_VLT_RSI v2.3.1
+
+---
+
+## BSBUSDT — SELL
+
+Trade ID: `BSBUSDT-20261017-045634-740604`
+
+### Setup
+
+- Price Now Reference: 0.08762
+- Entry: 0.08924
+- Reason Entry: BSBUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.0893363 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 72.4 pada entry zone.
+- Price Exp: 0.08754
+- Reason Price Exp: Price Exp 0.08754: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.09001
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.08928; SL ditempatkan di luar invalidation dan liquidity guard 0.0893363.
+- TP: 0.08682
+- Reason TP: TP 0.08682 dipilih dari H4_LOWER_LOW dengan RR 3.14; target quality 90.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.08754
+- Result Reason: Price Exp 0.08754: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-16T21:56:34.981879+00:00
+- Filled: -
+- Closed: 2026-10-17T00:48:18.160981+00:00
+- Strategy: SMC_VLT_RSI v2.3.1
