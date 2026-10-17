@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T12:52:26.612459+00:00",
+  "saved_at": "2026-10-17T16:52:26.117415+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -15,13 +15,6 @@
       "until": "2026-10-17T20:40:25.777024+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "AAVEUSDT",
-      "banned_at": "2026-10-17T12:47:55.360235+00:00",
-      "until": null,
-      "reason": "Real quantity tidak memenuhi target margin ±10%: AAVEUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=15.69) Margin pas ≈ $1.57.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "ALLUSDT",
@@ -106,13 +99,6 @@
       "until": "2026-10-17T20:19:49.684224+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "LTCUSDT",
-      "banned_at": "2026-10-17T08:58:57.761921+00:00",
-      "until": null,
-      "reason": "Real quantity tidak memenuhi target margin ±10%: LTCUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=10, nearest_notional=10.02501) Margin pas ≈ $2.01.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "MARSCOINUSDT",
