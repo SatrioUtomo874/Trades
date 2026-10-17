@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T00:49:54.199774+00:00",
+  "saved_at": "2026-10-17T06:23:40.090871+00:00",
   "bans": [
     {
       "pair": "BSBUSDT",
@@ -38,13 +38,6 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "HOMEUSDT",
-      "banned_at": "2026-10-16T17:04:46.187677+00:00",
-      "until": "2026-10-17T01:04:46.187659+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "MITOUSDT",
       "banned_at": "2026-10-16T16:46:46.050783+00:00",
       "until": "2026-10-17T16:46:46.050751+00:00",
@@ -52,25 +45,11 @@
       "source": "AUTO_SL"
     },
     {
-      "pair": "POWERUSDT",
-      "banned_at": "2026-10-16T17:18:29.188152+00:00",
-      "until": "2026-10-17T01:18:29.188126+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "PROVEUSDT",
       "banned_at": "2026-10-16T15:33:03.156738+00:00",
       "until": "2026-10-17T15:33:03.156711+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
-    },
-    {
-      "pair": "REUSDT",
-      "banned_at": "2026-10-16T17:05:28.720549+00:00",
-      "until": "2026-10-17T01:05:28.720525+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "STBLUSDT",
@@ -85,6 +64,13 @@
       "until": "2026-10-17T11:13:55.973169+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "ZRXUSDT",
+      "banned_at": "2026-10-17T06:23:40.090730+00:00",
+      "until": "2026-10-17T14:23:40.090709+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     }
   ]
 }
