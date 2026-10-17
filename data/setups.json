@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T12:21:19.243479+00:00",
-  "saved_at_wib": "17-10-2026, 19:21 WIB",
+  "saved_at": "2026-10-17T12:25:20.686443+00:00",
+  "saved_at_wib": "17-10-2026, 19:25 WIB",
   "count": 5,
   "setups": [
     {
@@ -27,7 +27,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "1.105305466237942122186495177",
+      "pnl_percent": "1.045016077170418006430868167",
       "max_favorable_pct": "1.205787781350482315112540193",
       "max_adverse_pct": "-0.06028938906752411575562700965",
       "planned_rr": "2.761904761904761904761904762",
@@ -3436,7 +3436,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "0.844051446945337620578778135",
-      "realized_r": "1.30952380952380952380952381"
+      "realized_r": "1.238095238095238095238095238"
     },
     {
       "trade_id": "ETHFIUSDT-20261017-161758-94F042",
