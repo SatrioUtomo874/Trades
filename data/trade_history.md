@@ -461,3 +461,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T09:24:30.971704+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## MARSCOINUSDT — SELL
+
+Trade ID: `MARSCOINUSDT-20261017-160255-258414`
+
+### Setup
+
+- Price Now Reference: 0.07918
+- Entry: 0.08085
+- Reason Entry: MARSCOINUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity M15 0.08084 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 64.9 pada entry zone.
+- Price Exp: 0.07869
+- Reason Price Exp: Price Exp 0.07869000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.08177
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.08122; SL ditempatkan di luar invalidation.
+- TP: 0.07862
+- Reason TP: TP 0.07862 dipilih dari H1_SWING_LOW dengan RR 2.42; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.07869
+- Result Reason: Price Exp 0.07869000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-17T09:02:55.354346+00:00
+- Filled: -
+- Closed: 2026-10-17T09:26:55.773520+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
