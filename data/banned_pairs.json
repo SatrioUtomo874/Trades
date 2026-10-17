@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-17T11:22:38.242007+00:00",
+  "saved_at": "2026-10-17T11:28:55.143619+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -85,6 +85,13 @@
       "until": "2026-10-17T15:33:03.156711+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "TRUSTUSDT",
+      "banned_at": "2026-10-17T11:28:55.143441+00:00",
+      "until": "2026-10-17T19:28:55.143417+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "XMRUSDT",
