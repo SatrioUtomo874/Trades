@@ -131,3 +131,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T00:49:47.157349+00:00
 - Strategy: SMC_VLT_RSI v2.3.1
+
+---
+
+## ENJUSDT — BUY
+
+Trade ID: `ENJUSDT-20261017-071914-18B5C2`
+
+### Setup
+
+- Price Now Reference: 0.02943
+- Entry: 0.02905
+- Reason Entry: ENJUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0288884 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 35.6 pada entry zone.
+- Price Exp: 0.03001
+- Reason Price Exp: Price Exp 0.030010000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02863
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.02891; SL ditempatkan di luar invalidation dan liquidity guard 0.0288884.
+- TP: 0.03042
+- Reason TP: TP 0.03042 dipilih dari H4_HIGHER_HIGH dengan RR 3.26; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALID_BTC
+- Exit Price: -
+- Result Reason: BTC berbalik: BTC H4 berbalik BEARISH; setup BUY ENJUSDT dibatalkan dan dianggap invalid.
+- PnL: -
+- Created: 2026-10-17T00:19:14.266754+00:00
+- Filled: -
+- Closed: 2026-10-17T04:02:18.257618+00:00
+- Strategy: SMC_VLT_RSI v2.3.1
