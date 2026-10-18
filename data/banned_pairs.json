@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-18T16:10:52.754778+00:00",
+  "saved_at": "2026-10-18T16:13:32.702950+00:00",
   "bans": [
     {
       "pair": "ARBUSDT",
@@ -55,6 +55,13 @@
       "pair": "ONTUSDT",
       "banned_at": "2026-10-18T15:46:38.058791+00:00",
       "until": "2026-10-18T23:46:38.058768+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "RENDERUSDT",
+      "banned_at": "2026-10-18T16:13:32.702776+00:00",
+      "until": "2026-10-19T00:13:32.702755+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
