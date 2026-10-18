@@ -527,3 +527,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T18:08:10.934968+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## CRVUSDT — SELL
+
+Trade ID: `CRVUSDT-20261019-010858-07B8C2`
+
+### Setup
+
+- Price Now Reference: 0.3362
+- Entry: 0.3562
+- Reason Entry: CRVUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H4 0.3564 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 85.5 pada entry zone.
+- Price Exp: 0.3354
+- Reason Price Exp: Price Exp 0.33540000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.3685
+- Reason SL: Prediction invalidation berasal dari H4_BUY_SIDE_LIQUIDITY di 0.368; SL ditempatkan di luar invalidation dan liquidity guard 0.3666666.
+- TP: 0.3265
+- Reason TP: TP 0.3265 dipilih dari H4_LOWER_LOW dengan RR 2.41; target quality 79.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.3354
+- Result Reason: Price Exp 0.33540000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T18:08:58.463722+00:00
+- Filled: -
+- Closed: 2026-10-18T18:15:19.826178+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
