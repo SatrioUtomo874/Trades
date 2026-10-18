@@ -428,3 +428,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T16:30:43.538589+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## LSKUSDT — SELL
+
+Trade ID: `LSKUSDT-20261018-231315-4D6AF5`
+
+### Setup
+
+- Price Now Reference: 0.19237
+- Entry: 0.2017
+- Reason Entry: LSKUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity H1 0.203623 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 66.0 pada entry zone.
+- Price Exp: 0.19005
+- Reason Price Exp: Price Exp 0.19005000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.20536
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.20288; SL ditempatkan di luar invalidation dan liquidity guard 0.203623.
+- TP: 0.18975
+- Reason TP: TP 0.18975 dipilih dari H1_SELL_SIDE_LIQUIDITY dengan RR 3.27; target quality 66.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.19005
+- Result Reason: Price Exp 0.19005000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T16:13:15.975033+00:00
+- Filled: -
+- Closed: 2026-10-18T16:44:15.036315+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
