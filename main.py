@@ -7868,18 +7868,16 @@ class TradingEngine:
         return Decimal(str(round(max((next_ts - now_ts) / 3600, 0.001), 4)))
 
     def _purge_stale_structure_bans(self, btc_trend: str) -> None:
-        """Ban mismatch hanya valid untuk tren BTC saat ban dibuat."""
+        """Bersihkan ban mismatch lama: BTC sekarang hanya memodifikasi confidence."""
         stale = [
-            pair
-            for pair, item in self.banned_pairs.items()
+            pair for pair, item in self.banned_pairs.items()
             if item.get("source") == "AUTO_STRUCTURE_MISMATCH"
-            and item.get("btc_trend") != btc_trend
         ]
         for pair in stale:
             self.banned_pairs.pop(pair, None)
         if stale:
             self._bans_dirty = True
-            log.info("[BAN] %s ban mismatch dibersihkan (BTC H4 kini %s)", len(stale), btc_trend)
+            log.info("[BAN] %s ban lama AUTO_STRUCTURE_MISMATCH dibersihkan; BTC H4 %s kini hanya konteks confidence", len(stale), btc_trend)
 
     async def _purge_expired_bans(self, *, persist: bool = True) -> None:
         now = now_utc()
@@ -10860,24 +10858,8 @@ class TradingEngine:
                         or (btc_trend == "BEARISH" and pair_trend == "BEARISH")
                         or (btc_trend == "RANGE" and pair_trend in {"BULLISH", "BEARISH", "RANGE"})
                     )
-                    if not aligned:
-                        rejected_structure += 1
-                        structure_banned += 1
-                        funnel["structure_mismatch"] += 1
-                        funnel["quality_rejects"] += 1
-                        self._recheck.set(pair, next_boundary_ts(now_ts, 4 * 3600), "STRUCTURE_MISMATCH", "REJECTED_QUALITY", btc_trend=btc_trend)
-                        self._observe_candidate(synthetic_observation(
-                            pair, "REJECTED_QUALITY", "STRUCTURE_MISMATCH", cycle_id=cycle_id, now=cycle_now,
-                            btc_h4_regime=btc_trend, pair_h4_regime=pair_trend,
-                        ))
-                        log.info(
-                            "[SCAN] %s rejected + recheck s/d close H4 | pair=%s BTC=%s",
-                            pair,
-                            pair_trend,
-                            btc_trend,
-                        )
-                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-                        continue
+                    # BTC/pair H4 mismatch is context, not a hard rejection.
+                    btc_structure_conflict = not aligned
 
                     directional.append(pair)
                     funnel["structure_analyzed"] += 1
@@ -10898,20 +10880,50 @@ class TradingEngine:
                         "batch_limit": SCAN_MAX_PAIRS_PER_CYCLE,
                     })
 
+                    # BTC regime/impulse modifies confidence; it is not a hard veto.
+                    direction = str(candidate.get("direction") or "").upper()
+                    btc_confidence = 50.0
+                    try:
+                        btc_confidence = float((((structure.get("analysis") or {}).get("btc_regime") or {}).get("confidence")) or 50.0)
+                    except (TypeError, ValueError):
+                        pass
+                    btc_delta = 0.0
+                    if btc_trend in {"BULLISH", "BEARISH"} and direction in {"BUY", "SELL"}:
+                        same_way = (btc_trend == "BULLISH" and direction == "BUY") or (btc_trend == "BEARISH" and direction == "SELL")
+                        if same_way:
+                            btc_delta += 4.0
+                        else:
+                            btc_delta -= 6.0 + 6.0 * max(0.0, min(1.0, (btc_confidence - 50.0) / 50.0))
+                    if btc_structure_conflict:
+                        btc_delta -= 3.0
+                    impulse_conflict = self._btc_impulse_conflict(direction)
+                    if impulse_conflict:
+                        btc_delta -= 8.0
+                    try:
+                        raw_confidence = float(candidate.get("confidence", 0.0))
+                    except (TypeError, ValueError):
+                        raw_confidence = 0.0
+                    adjusted_confidence = max(0.0, min(100.0, raw_confidence + btc_delta))
+                    candidate["confidence"] = adjusted_confidence
+                    candidate["analysis"] = candidate.get("analysis") or {}
+                    candidate["analysis"]["confidence_adjustments"] = candidate["analysis"].get("confidence_adjustments") or {}
+                    candidate["analysis"]["confidence_adjustments"]["btc_context"] = {
+                        "btc_trend": btc_trend, "btc_confidence": btc_confidence,
+                        "pair_trend": pair_trend, "direction": direction,
+                        "structure_conflict": btc_structure_conflict,
+                        "impulse_conflict": bool(impulse_conflict),
+                        "raw_confidence": round(raw_confidence, 2),
+                        "delta": round(btc_delta, 2),
+                        "adjusted_confidence": round(adjusted_confidence, 2),
+                        "policy": "confidence_modifier_not_veto",
+                    }
                     confidence = Decimal(str(candidate["confidence"]))
                     cstate = str(candidate.get("candidate_state") or "READY")
                     cand_rec = build_candidate_from_setup(pair, candidate, cycle_id=cycle_id, now=cycle_now, strategy_name="SMC_VLT_RSI")
                     self._retry_counts.pop(pair, None)
                     candidate["_candidate_id"] = cand_rec.candidate_id
-                    veto = self._btc_impulse_conflict(str(candidate.get("direction") or ""))
-                    if veto:
-                        funnel["quality_rejects"] += 1
-                        cand_rec.state, cand_rec.state_reason = "REJECTED_QUALITY", veto
-                        self._observe_candidate(cand_rec)
-                        self._recheck.set(pair, now_ts + SCAN_WATCHLIST_INTERVAL, veto, "REJECTED_QUALITY")
-                        log.info("[SCAN] %s ditolak: %s", pair, veto)
-                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-                        continue
+                    if impulse_conflict:
+                        log.info("[SCAN] %s BTC impulse conflict; confidence penalty %.1f, not rejected", pair, btc_delta)
                     if cstate in {"DATA_UNAVAILABLE", "REJECTED_HARD", "REJECTED_QUALITY"}:
                         key = {"DATA_UNAVAILABLE": "data_unavailable", "REJECTED_HARD": "hard_rejects"}.get(cstate, "quality_rejects")
                         funnel[key] += 1
