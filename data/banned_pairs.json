@@ -1,11 +1,18 @@
 {
   "version": 1,
-  "saved_at": "2026-10-18T14:53:41.894758+00:00",
+  "saved_at": "2026-10-18T14:55:23.152457+00:00",
   "bans": [
     {
       "pair": "CVXUSDT",
       "banned_at": "2026-10-18T14:53:41.894626+00:00",
       "until": "2026-10-18T22:53:41.894603+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "SIRENUSDT",
+      "banned_at": "2026-10-18T14:55:23.152170+00:00",
+      "until": "2026-10-18T22:55:23.152147+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     }
