@@ -461,3 +461,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T16:44:15.036315+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## STXUSDT — SELL
+
+Trade ID: `STXUSDT-20261018-230449-85D7A8`
+
+### Setup
+
+- Price Now Reference: 0.3575
+- Entry: 0.37
+- Reason Entry: STXUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.37015 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 66.4 pada entry zone.
+- Price Exp: 0.3549
+- Reason Price Exp: Price Exp 0.3549: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.3763
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.3756; SL ditempatkan di luar invalidation.
+- TP: 0.3546
+- Reason TP: TP 0.3546 dipilih dari H4_LOWER_LOW dengan RR 2.44; target quality 88.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.3549
+- Result Reason: Price Exp 0.3549: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T16:04:49.067199+00:00
+- Filled: -
+- Closed: 2026-10-18T17:29:13.531447+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
