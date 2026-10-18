@@ -1,11 +1,18 @@
 {
   "version": 1,
-  "saved_at": "2026-10-18T15:46:38.058907+00:00",
+  "saved_at": "2026-10-18T16:03:34.051853+00:00",
   "bans": [
     {
       "pair": "BSVUSDT",
       "banned_at": "2026-10-18T15:41:25.150731+00:00",
       "until": "2026-10-18T23:41:25.150702+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "CHZUSDT",
+      "banned_at": "2026-10-18T16:03:34.051715+00:00",
+      "until": "2026-10-19T00:03:34.051695+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
