@@ -494,3 +494,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T17:29:13.531447+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## LIGHTUSDT — BUY
+
+Trade ID: `LIGHTUSDT-20261018-233037-2BCCDC`
+
+### Setup
+
+- Price Now Reference: 0.2058
+- Entry: 0.1983
+- Reason Entry: LIGHTUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.1981 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 30.3 pada entry zone.
+- Price Exp: 0.2076
+- Reason Price Exp: Price Exp 0.2076: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1961
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.1981; SL ditempatkan di luar invalidation dan liquidity guard 0.1981.
+- TP: 0.2082
+- Reason TP: TP 0.2082 dipilih dari H4_SWING_HIGH dengan RR 4.50; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2076
+- Result Reason: Price Exp 0.2076: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T16:30:37.178932+00:00
+- Filled: -
+- Closed: 2026-10-18T18:08:10.934968+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
