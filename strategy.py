@@ -79,6 +79,11 @@ STRATEGY_NAME = "SMC_VLT_RSI"
 STRATEGY_ENGINE = "V2"
 STRATEGY_SCHEMA_VERSION = 1
 SCORING_FORMULA_VERSION = "V2.4-binance-orderflow-pricelegs"
+# Explicit provider contract consumed by main.py. Both analysis and active-price
+# monitoring are intentionally Binance USD-M only; no cross-exchange fallback.
+SCAN_PRIMARY_DATA_SOURCE = "BINANCE_PUBLIC"
+PRIMARY_DATA_SOURCE = "BINANCE_PUBLIC"
+STRATEGY_DATA_SOURCE = "BINANCE_PUBLIC"
 
 _log = logging.getLogger("strategy")
 
@@ -668,6 +673,9 @@ class BinanceProvider(HTTPProvider):
     _last_request_monotonic: float = 0.0
     _cooldown_until_monotonic: float = 0.0
     _min_request_interval_seconds: float = 0.12
+    _tick_size_cache: dict[str, float] = {}
+    _tick_size_cache_expires_monotonic: float = 0.0
+    _tick_size_cache_ttl_seconds: float = 1800.0
 
     def __init__(self) -> None:
         super().__init__(BINANCE_BASE_URL, "BINANCE")
@@ -797,19 +805,28 @@ class BinanceProvider(HTTPProvider):
         return price
 
     async def tick_size(self, symbol: str) -> float:
-        payload = await self.get(
-            "/fapi/v1/exchangeInfo",
-            {},
-        )
+        symbol = str(symbol).upper().strip()
+        now = time.monotonic()
+        cache = self.__class__._tick_size_cache
+        if now < self.__class__._tick_size_cache_expires_monotonic and symbol in cache:
+            return cache[symbol]
+
+        # One exchangeInfo fetch populates tick sizes for all symbols. Scan batches
+        # query many symbols sequentially, so this avoids repeated heavy JSON reads.
+        payload = await self.get("/fapi/v1/exchangeInfo", {})
+        refreshed: dict[str, float] = {}
         for raw in payload.get("symbols", []):
-            if str(raw.get("symbol") or "").upper() != symbol:
-                continue
+            raw_symbol = str(raw.get("symbol") or "").upper().strip()
             for filt in raw.get("filters", []):
                 if filt.get("filterType") == "PRICE_FILTER":
                     tick = safe_float(filt.get("tickSize"), 0.0)
-                    if tick > 0:
-                        return tick
-        return 0.0
+                    if raw_symbol and tick > 0:
+                        refreshed[raw_symbol] = tick
+                    break
+        cache.clear()
+        cache.update(refreshed)
+        self.__class__._tick_size_cache_expires_monotonic = now + self.__class__._tick_size_cache_ttl_seconds
+        return cache.get(symbol, 0.0)
 
 
 def _binance_interval(interval: str) -> str:
@@ -6907,10 +6924,23 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
         h1 = await _fetch_if_short(normalized_pair, H1, H1_MS, 168, allow_fallback=allow_binance_fallback)
     h4_derived = resample_candles(m15, H4_MS)
 
-    current, price_source = await fetch_price(normalized_pair, m15_source, allow_fallback=allow_binance_fallback)
+    scan_snapshot = context.get("scan_market_snapshot") if scan_mode else None
+    if not isinstance(scan_snapshot, dict):
+        scan_snapshot = {}
+    snapshot_age_ms = max(0, int(time.time() * 1000) - int(safe_float(scan_snapshot.get("snapshot_at_ms"), 0.0))) if scan_snapshot.get("snapshot_at_ms") else None
+    snapshot_price = safe_float(scan_snapshot.get("price"), 0.0)
+    snapshot_fresh = snapshot_age_ms is not None and snapshot_age_ms <= 120_000
+    if scan_mode and snapshot_fresh and snapshot_price > 0:
+        current = snapshot_price
+        price_source = str(scan_snapshot.get("source") or "BINANCE_PUBLIC_TICKER_24H")
+    else:
+        current, price_source = await fetch_price(normalized_pair, m15_source, allow_fallback=allow_binance_fallback)
     if current <= 0:
         raise RuntimeError("Current price tidak valid.")
-    tick_size = await get_tick_size(normalized_pair, source="BINANCE" if scan_mode else ("BINANCE" if m15_source == "BINANCE" else "BINANCE"))
+
+    tick_size = safe_float(scan_snapshot.get("tick_size"), 0.0) if scan_mode else 0.0
+    if tick_size <= 0:
+        tick_size = await get_tick_size(normalized_pair, source="BINANCE")
 
     # ------------------------------
     # 2) Structure / regime first
@@ -7850,7 +7880,16 @@ async def analyze_scan_structure(pair: str, context: dict[str,Any] | None=None) 
     if symbol=="BTCUSDT":
         return {"pair":symbol,"trend":btc_trend,"regime":btc.get("regime",btc_trend),"state":btc.get("state",btc_trend),"confidence":btc.get("confidence",50),"btc_h4_trend":btc_trend,"aligned":True,"analysis":{"btc_regime":btc},"data":{"source":"BINANCE","timeframe":"D1/H4/H1","candles_used":btc.get("candles"),"closed_candles_only":True,"data_policy":"BINANCE_PUBLIC_ONLY"}}
     h4, h4_source = await fetch_series(symbol, H4, PAIR_H4_CANDLES_REQUIRED, H4_MS, allow_fallback=False)
-    h1, h1_source = await fetch_series(symbol, H1, 168, H1_MS, allow_fallback=False)
+    # Reuse the M15 series already needed by generate_setup and derive H1 locally.
+    # This removes one standalone H1 REST call per scanned pair while preserving
+    # H1 structure/regime detail from the same closed M15 candles.
+    m15, m15_source = await fetch_series(symbol, M15, M15_CANDLES_REQUIRED, M15_MS, allow_fallback=False)
+    h1 = resample_candles(m15, H1_MS)
+    if len(h1) < 20:
+        raise InsufficientHistoryError(
+            f"Riwayat M15 Binance {symbol} hanya membentuk {len(h1)} candle H1; tidak cukup untuk struktur scan."
+        )
+    h1_source = f"{m15_source}_DERIVED"
     d1 = resample_candles(h4, 24 * 60 * 60 * 1000)
     h4_structure = build_structure(h4, SWING_SPAN_H4)
     regime = build_multi_timeframe_regime({
