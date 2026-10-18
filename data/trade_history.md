@@ -296,3 +296,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T16:19:44.641971+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## BRUSDT — SELL
+
+Trade ID: `BRUSDT-20261018-224533-FD97E7`
+
+### Setup
+
+- Price Now Reference: 0.42482
+- Entry: 0.42574
+- Reason Entry: BRUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity H1 0.42954 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 62.9 pada entry zone.
+- Price Exp: 0.39442
+- Reason Price Exp: Price Exp 0.39442000000000005: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.44103
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.42739; SL ditempatkan di luar invalidation.
+- TP: 0.38101
+- Reason TP: TP 0.38101 dipilih dari H4_LOWER_LOW dengan RR 2.93; target quality 90.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.44212
+- Result Reason: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.42739; SL ditempatkan di luar invalidation.
+- PnL: -3.207432653251785797656286475%
+- Created: 2026-10-18T15:45:33.740200+00:00
+- Filled: 2026-10-18T15:45:35.432901+00:00
+- Closed: 2026-10-18T16:27:08.840712+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
