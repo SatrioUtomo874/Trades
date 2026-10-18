@@ -923,3 +923,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T14:53:29.052840+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## SIRENUSDT — BUY
+
+Trade ID: `SIRENUSDT-20261018-215239-6D8EF6`
+
+### Setup
+
+- Price Now Reference: 0.03029
+- Entry: 0.0281
+- Reason Entry: SIRENUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.0280228 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 21.6 pada entry zone.
+- Price Exp: 0.03035
+- Reason Price Exp: Price Exp 0.030350000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0273
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.027934; SL ditempatkan di luar invalidation dan liquidity guard 0.0280228.
+- TP: 0.03041
+- Reason TP: TP 0.03041 dipilih dari H1_SWING_HIGH dengan RR 2.89; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.03035
+- Result Reason: Price Exp 0.030350000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T14:52:39.360674+00:00
+- Filled: -
+- Closed: 2026-10-18T14:55:11.549694+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
