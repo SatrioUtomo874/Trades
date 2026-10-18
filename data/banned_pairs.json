@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-18T18:08:20.807572+00:00",
+  "saved_at": "2026-10-18T18:15:28.899954+00:00",
   "bans": [
     {
       "pair": "ARBUSDT",
@@ -27,6 +27,13 @@
       "pair": "CHZUSDT",
       "banned_at": "2026-10-18T16:03:34.051715+00:00",
       "until": "2026-10-19T00:03:34.051695+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "CRVUSDT",
+      "banned_at": "2026-10-18T18:15:28.899808+00:00",
+      "until": "2026-10-19T02:15:28.899790+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
