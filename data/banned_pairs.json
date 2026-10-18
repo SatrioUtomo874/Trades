@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-18T15:01:42.062735+00:00",
+  "saved_at": "2026-10-18T15:37:48.650790+00:00",
   "bans": [
     {
       "pair": "CVXUSDT",
@@ -15,13 +15,6 @@
       "until": "2026-10-18T22:56:36.825455+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "LTCUSDT",
-      "banned_at": "2026-10-18T15:01:07.438157+00:00",
-      "until": null,
-      "reason": "Real quantity tidak memenuhi target margin ±10%: LTCUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=5.5, nearest_notional=5.52276) Margin pas ≈ $2.01.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "RONINUSDT",
