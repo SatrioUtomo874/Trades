@@ -28,7 +28,7 @@ Prinsip:
 - /setup menyimpan snapshot setup aktif ke data/setups.json.
 - /open memulihkan snapshot setup tersebut setelah main.py diganti.
 - /auto menjembatani main.py ke strategy.py dan meminta konfirmasi user.
-- /scan menjalankan scanner otomatis: universe Binance ∩ Bybit -> directional H4 -> strategy -> threshold -> validator -> /trade.
+- /scan menjalankan scanner otomatis: universe Binance USD-M USDT perpetual -> directional H4 -> strategy.py -> threshold -> validator -> /trade.
 - /H4 mengatur gate scheduler scanner pada close H4: 03:00, 07:00, 11:00, 15:00, 19:00, 23:00 WIB.
 - /threshold mengatur ambang confidence scanner.
 - /max membatasi total active PENDING + FILLED dan dapat mem-pause/resume /scan otomatis.
@@ -38,7 +38,7 @@ Prinsip:
 - /remove menghapus satu trade dari histori GitHub beserta event dan journal terkait.
 - /resetstats mengarsipkan lalu mereset histori trade/event agar stats mulai dari nol (tes strategy baru).
 - strategy.py wajib menyediakan generate_setup(pair, context); mode SCAN juga mendukung kontrak optimized scan structure dan validate_setup.
-- SCAN maksimal 50 pair dianalisis per cycle; pair mismatch H4 dan below-threshold diban sampai close H4 berikutnya.
+- SCAN maksimal 100 pair dianalisis per cycle dari universe Binance USD-M; pair mismatch H4 dan below-threshold mengikuti recheck yang ada.
 """
 
 import asyncio
@@ -130,7 +130,7 @@ TIMEZONE_NAME = "Asia/Jakarta"
 TZ = ZoneInfo(TIMEZONE_NAME)
 
 BINANCE_REST_BASE = "https://fapi.binance.com"
-BINANCE_WS_BASE = "wss://fstream.binance.com/market/ws"
+BINANCE_WS_BASE = "wss://fstream.binance.com/market/stream"
 
 GITHUB_API = "https://api.github.com"
 
@@ -191,8 +191,10 @@ HISTORY_REFRESH_SECONDS = 30
 
 # SCAN configuration. /max and /threshold can override these at runtime.
 DEFAULT_SCAN_THRESHOLD = Decimal("70")
-SCAN_PAIR_DELAY_SECONDS = 1.0
-SCAN_MAX_PAIRS_PER_CYCLE = 50
+# Binance-only scanner throughput. Strategy's REST provider has global spacing and
+# rate-limit cooldown; the main loop also leaves a small per-pair yield.
+SCAN_PAIR_DELAY_SECONDS = 0.20
+SCAN_MAX_PAIRS_PER_CYCLE = 100
 SCAN_CYCLE_DELAY_SECONDS = 30.0
 MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "400") or "400")
 # H4 scanner gate: scanner baru membuka window pada penutupan H4 WIB.
@@ -1051,6 +1053,12 @@ class BinanceREST:
 
     def __init__(self) -> None:
         self.base_url = BINANCE_REST_BASE
+        self._exchange_info_cache: dict[str, SymbolMeta] | None = None
+        self._exchange_info_cached_at = 0.0
+        self._exchange_info_cache_ttl_seconds = 900.0
+        self._ticker_24h_cache: list[dict[str, Any]] | None = None
+        self._ticker_24h_cached_at = 0.0
+        self._ticker_24h_cache_ttl_seconds = 10.0
 
     async def _get(
         self,
@@ -1097,6 +1105,14 @@ class BinanceREST:
         return await asyncio.to_thread(request)
 
     async def get_exchange_info(self, force: bool = False) -> dict[str, SymbolMeta]:
+        now = time.monotonic()
+        if (
+            not force
+            and self._exchange_info_cache is not None
+            and now - self._exchange_info_cached_at <= self._exchange_info_cache_ttl_seconds
+        ):
+            return self._exchange_info_cache
+
         payload = await self._get("/fapi/v1/exchangeInfo")
 
         result: dict[str, SymbolMeta] = {}
@@ -1169,6 +1185,8 @@ class BinanceREST:
                 price_precision=int(raw.get("pricePrecision") or 0),
             )
 
+        self._exchange_info_cache = result
+        self._exchange_info_cached_at = time.monotonic()
         return result
 
     async def get_symbol_filters(self, symbol: str) -> dict[str, Any]:
@@ -1197,96 +1215,20 @@ class BinanceREST:
 
         return parse_decimal(str(payload["price"]))
 
-    async def get_24h_tickers(self) -> list[dict[str, Any]]:
+    async def get_24h_tickers(self, force: bool = False) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        if (
+            not force
+            and self._ticker_24h_cache is not None
+            and now - self._ticker_24h_cached_at <= self._ticker_24h_cache_ttl_seconds
+        ):
+            return self._ticker_24h_cache
         payload = await self._get("/fapi/v1/ticker/24hr")
         if not isinstance(payload, list):
             raise RuntimeError("Binance 24h ticker response bukan list.")
-        return payload
-
-
-# ============================================================
-# BYBIT PUBLIC MARKET DATA
-# ============================================================
-
-class BybitPublicREST:
-    """Public Bybit V5 market-data client for linear USDT perpetuals."""
-
-    BASE_URL = "https://api.bybit.com"
-
-    async def _get(
-        self,
-        path: str,
-        params: dict[str, Any] | None = None,
-    ) -> Any:
-        def request() -> Any:
-            response = requests.get(
-                f"{self.BASE_URL}{path}",
-                params=params or {},
-                timeout=HTTP_REQUEST_SECONDS,
-            )
-            if response.status_code >= 400:
-                raise RuntimeError(
-                    f"Bybit REST {path}: HTTP {response.status_code}: "
-                    f"{response.text[:500]}"
-                )
-            body = response.json()
-            if body.get("retCode") not in (0, None):
-                raise RuntimeError(
-                    f"Bybit REST {path}: retCode={body.get('retCode')} "
-                    f"retMsg={body.get('retMsg')}"
-                )
-            return body
-
-        return await asyncio.to_thread(request)
-
-    async def get_linear_perpetual_symbols(self) -> set[str]:
-        symbols: set[str] = set()
-        cursor: str | None = None
-
-        while True:
-            params: dict[str, Any] = {
-                "category": "linear",
-                "status": "Trading",
-                "limit": 1000,
-            }
-            if cursor:
-                params["cursor"] = cursor
-
-            body = await self._get(
-                "/v5/market/instruments-info",
-                params=params,
-            )
-            result = body.get("result") or {}
-
-            for item in result.get("list") or []:
-                symbol = normalize_symbol(str(item.get("symbol") or ""))
-                contract_type = str(item.get("contractType") or "")
-                quote_coin = str(item.get("quoteCoin") or "")
-                status = str(item.get("status") or "")
-                if (
-                    symbol
-                    and quote_coin == "USDT"
-                    and contract_type == "LinearPerpetual"
-                    and status == "Trading"
-                ):
-                    symbols.add(symbol)
-
-            cursor = str(result.get("nextPageCursor") or "") or None
-            if not cursor:
-                break
-
-        return symbols
-
-    async def get_linear_tickers(self) -> list[dict[str, Any]]:
-        body = await self._get(
-            "/v5/market/tickers",
-            params={"category": "linear"},
-        )
-        result = body.get("result") or {}
-        rows = result.get("list") or []
-        if not isinstance(rows, list):
-            raise RuntimeError("Bybit ticker response bukan list.")
-        return rows
+        self._ticker_24h_cache = [dict(row) for row in payload if isinstance(row, dict)]
+        self._ticker_24h_cached_at = time.monotonic()
+        return self._ticker_24h_cache
 
 
 # ============================================================
@@ -2266,16 +2208,9 @@ class BinanceWebSocket:
                         # SUBSCRIBE response:
                         # {"result": null, "id": ...}
                         #
-                        # /market/ws adalah raw-stream mode.
-                        # Dalam mode ini event aggTrade datang langsung
-                        # di root payload:
-                        # {"e":"aggTrade", ...}
-                        #
-                        # Combined mode (/market/stream) membungkusnya:
-                        # {"stream":"...","data":{"e":"aggTrade", ...}}
-                        #
-                        # Dukung keduanya supaya parser tahan terhadap
-                        # perubahan mode stream di kemudian hari.
+                        # /market/stream memakai combined-stream subscription dan
+                        # membungkus event sebagai {"stream":"...","data":{...}}.
+                        # Parser tetap menerima raw payload untuk kompatibilitas.
                         if "data" in payload and isinstance(
                             payload.get("data"),
                             dict,
@@ -2875,7 +2810,7 @@ def classify_error(exc: BaseException) -> str:
     """Peta exception ke kategori error blueprint (bukan satu catch-all)."""
     name = type(exc).__name__
     text = str(exc).lower()
-    if name in {"BinanceRateLimitError", "BybitRateLimitError"} or "rate limit" in text or "429" in text or "418" in text:
+    if name == "BinanceRateLimitError" or getattr(exc, "binance_rate_limited", False) or "rate limit" in text or "429" in text or "418" in text:
         return ErrorCategory.RATE_LIMIT
     if name == "InsufficientHistoryError" or "candle closed" in text or "diperlukan" in text:
         return ErrorCategory.DATA_INSUFFICIENT
@@ -2925,7 +2860,7 @@ class CandidateRecord:
     scan_cycle_id: str = ""
     created_at_utc: str = ""
     updated_at_utc: str = ""
-    analysis_source: str = "BYBIT_PUBLIC"
+    analysis_source: str = "UNKNOWN"
     execution_source: str = "BINANCE_USDM"
     strategy_name: str = ""
     strategy_version: str = ""
@@ -4019,7 +3954,7 @@ def build_candidate_from_setup(pair: str, setup: dict[str, Any], *, cycle_id: st
     rec = CandidateRecord(
         candidate_id=f"C{signature}", pair=pair, state=state, scan_cycle_id=str(cycle_id),
         created_at_utc=now_iso, updated_at_utc=now_iso,
-        analysis_source=str(setup.get("analysis_source") or "BYBIT_PUBLIC"),
+        analysis_source=str(setup.get("analysis_source") or "UNKNOWN"),
         strategy_name=str(strat.get("name") or strategy_name), strategy_version=str(strat.get("version") or ""),
         direction=direction, btc_h4_regime=str(data.get("directional_bias") or ""),
         pair_h4_regime=str(((analysis.get("macro") or {}).get("pair_h4") or {}).get("trend") or ""),
@@ -4775,8 +4710,13 @@ class TradingEngine:
         self.session_id = generate_session_id()
 
         self.rest = BinanceREST()
-        self.bybit = BybitPublicREST()
         self.github = GitHubStore()
+        # Last all-market Binance 24h ticker snapshot used to seed scan context
+        # (price + symbol tick size), avoiding one ticker and exchangeInfo request
+        # per candidate. Execution still uses fresh price / filters where required.
+        self._scan_market_snapshot: dict[str, dict[str, Any]] = {}
+        self._scan_market_snapshot_at_ms: int = 0
+        self._binance_public_cooldown_until: float = 0.0
 
         # REAL execution is always OFF on every fresh engine session.
         self.real_mode = False
@@ -9065,36 +9005,68 @@ class TradingEngine:
                 return str(node.get("trend")).upper()
         return None
 
-    def _make_scan_context(self, pair: str, cycle_number: int) -> dict[str, Any]:
+    @staticmethod
+    def _scan_strategy_source_policy(module) -> dict[str, str]:
+        """Resolve and enforce the only supported scan provider: Binance public."""
+        declared = ""
+        for attr in ("SCAN_PRIMARY_DATA_SOURCE", "PRIMARY_DATA_SOURCE", "STRATEGY_DATA_SOURCE"):
+            value = getattr(module, attr, None)
+            if value:
+                declared = str(value).strip().upper()
+                break
+        if not declared:
+            declared = "BINANCE_PUBLIC" if getattr(module, "BINANCE_BASE_URL", None) else "BINANCE_PUBLIC"
+        if not declared.startswith("BINANCE"):
+            raise RuntimeError(
+                f"SCAN hanya mendukung BINANCE_PUBLIC; strategy mendeklarasikan {declared!r}. "
+                "Pastikan strategy.py memakai Binance USD-M REST dan Binance WebSocket saja."
+            )
+        return {
+            "source": "BINANCE_PUBLIC",
+            "prefix": "BINANCE",
+            "provider": "BINANCE_PUBLIC_ONLY",
+        }
+
+    def _make_scan_context(self, pair: str, cycle_number: int, module=None) -> dict[str, Any]:
+        policy = self._scan_strategy_source_policy(module) if module is not None else {
+            "source": "BINANCE_PUBLIC", "provider": "BINANCE_PUBLIC_ONLY"
+        }
+        symbol = normalize_symbol(pair)
+        snapshot = copy.deepcopy(self._scan_market_snapshot.get(symbol) or {})
+        if snapshot:
+            snapshot["snapshot_at_ms"] = self._scan_market_snapshot_at_ms
         return {
             "pair": pair,
             "session_id": self.session_id,
             "mode": "SCAN",
             "scan_cycle": cycle_number,
-            "market": "USDT Futures",
-            "primary_data_source": "BYBIT_PUBLIC",
-            "data_provider": "BYBIT_PUBLIC_ONLY",
+            "market": "Binance USD-M USDT perpetuals",
+            "primary_data_source": policy["source"],
+            "data_provider": policy["provider"],
             "allow_binance_fallback": False,
+            "scan_market_snapshot": snapshot,
             "timeframe": "15m",
             "candles_requested": 672,
             "notes": copy.deepcopy(self.notes),
-            "engine_version": "SCAN_BRIDGE_1",
+            "engine_version": "SCAN_BRIDGE_3_BINANCE_ONLY",
         }
 
     async def _scan_generate_for_pair(self, module, pair: str, cycle_number: int) -> dict[str, Any]:
+        policy = self._scan_strategy_source_policy(module)
         result = await self._call_strategy_function(
             module,
             "generate_setup",
             pair,
-            self._make_scan_context(pair, cycle_number),
+            self._make_scan_context(pair, cycle_number, module=module),
         )
         normalized = self._normalize_auto_result(result, pair)
         data_source = str(normalized.get("data_source") or "").upper()
-        analysis = normalized.get("raw_result") if isinstance(normalized.get("raw_result"), dict) else {}
-        data_info = analysis.get("data") if isinstance(analysis, dict) else {}
-        if not data_source.startswith("BYBIT"):
+        raw_payload = normalized.get("raw_result") if isinstance(normalized.get("raw_result"), dict) else {}
+        data_info = raw_payload.get("data") if isinstance(raw_payload, dict) else {}
+        expected_prefix = policy["prefix"]
+        if not data_source.startswith(expected_prefix):
             raise RuntimeError(
-                f"SCAN menolak {pair}: strategy mengembalikan data source {data_source or '-'}, bukan BYBIT PUBLIC."
+                f"SCAN menolak {pair}: strategy mendeklarasikan {policy['source']} tetapi mengembalikan {data_source or '-'}; periksa konsistensi provider strategy.py."
             )
         if bool(data_info.get("fallback_used")):
             raise RuntimeError(
@@ -9102,15 +9074,35 @@ class TradingEngine:
             )
         sources = data_info.get("sources_by_timeframe")
         if isinstance(sources, dict):
-            non_bybit = [
+            nonmatching = [
                 f"{key}={value}"
                 for key, value in sources.items()
-                if value and not str(value).upper().startswith("BYBIT")
+                if value and not str(value).upper().startswith(expected_prefix)
             ]
-            if non_bybit:
+            if nonmatching:
                 raise RuntimeError(
-                    f"SCAN menolak {pair}: ada timeframe bukan BYBIT PUBLIC ({', '.join(non_bybit)})."
+                    f"SCAN menolak {pair}: timeframe tidak konsisten dengan {policy['source']} ({', '.join(nonmatching)})."
                 )
+
+        # Preserve verified Binance source metadata in the normalized setup/ledger.
+        normalized["analysis_source"] = str(
+            raw_payload.get("analysis_source") or policy["source"]
+        ).upper()
+        normalized["data"] = copy.deepcopy(data_info) if isinstance(data_info, dict) else {}
+        normalized["strategy"] = copy.deepcopy(raw_payload.get("strategy") or {})
+        normalized["data_asof"] = copy.deepcopy(
+            raw_payload.get("data_asof") or normalized["data"].get("data_asof") or {}
+        )
+        normalized["entry_zone"] = copy.deepcopy(raw_payload.get("entry_zone") or {})
+        normalized["candidate_state"] = str(raw_payload.get("candidate_state") or "READY")
+        normalized["state_reason"] = str(raw_payload.get("state_reason") or "")
+        normalized["gate_reasons"] = copy.deepcopy(raw_payload.get("gate_reasons") or [])
+        normalized["thesis_signature"] = str(raw_payload.get("thesis_signature") or "")
+        normalized["setup_archetype"] = str(raw_payload.get("setup_archetype") or "")
+        log.debug(
+            "[SCAN] source validated | pair=%s source=%s strategy=%s version=%s",
+            pair, normalized["analysis_source"], normalized.get("strategy_name"), normalized.get("strategy_version"),
+        )
         return normalized
 
     async def _scan_get_structure(self, module, pair: str, cycle_number: int) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -9121,7 +9113,7 @@ class TradingEngine:
                 module,
                 name,
                 pair,
-                self._make_scan_context(pair, cycle_number),
+                self._make_scan_context(pair, cycle_number, module=module),
             )
             if result is not None:
                 if not isinstance(result, dict):
@@ -9186,7 +9178,7 @@ class TradingEngine:
             "validate_setup",
             candidate["pair"],
             copy.deepcopy(candidate),
-            self._make_scan_context(candidate["pair"], cycle_number),
+            self._make_scan_context(candidate["pair"], cycle_number, module=module),
         )
         if raw is None:
             log.info(
@@ -9244,65 +9236,59 @@ class TradingEngine:
     # --------------------------------------------------------
 
     async def _build_scan_universe(self) -> dict[str, Any]:
+        """Build the complete scan universe from Binance USD-M USDT perpetuals only."""
         await self._purge_expired_bans()
-        # Symbol rules can change while the process is alive; refresh once per cycle.
+        # exchangeInfo is cached by BinanceREST and refreshed periodically; ticker
+        # data is a single all-symbol REST snapshot, not one request per coin.
         self.symbols = await self.rest.get_exchange_info()
         binance_tickers = await self.rest.get_24h_tickers()
-        bybit_symbols = await self.bybit.get_linear_perpetual_symbols()
-        bybit_tickers = await self.bybit.get_linear_tickers()
 
-        bn: dict[str, dict[str, Any]] = {}
+        rows: list[dict[str, Any]] = []
+        snapshot: dict[str, dict[str, Any]] = {}
+        snapshot_at_ms = int(time.time() * 1000)
         for item in binance_tickers:
             pair = normalize_symbol(str(item.get("symbol") or ""))
-            if pair not in self.symbols:
-                continue
-            if pair not in bybit_symbols:
-                continue
-            quote_volume = item.get("quoteVolume")
-            if quote_volume in (None, ""):
-                quote_volume = item.get("volume")
+            meta = self.symbols.get(pair)
+            if meta is None:
+                continue  # only TRADING USDT-M PERPETUAL symbols from exchangeInfo
             try:
-                volume = Decimal(str(quote_volume or "0"))
-            except InvalidOperation:
-                volume = Decimal("0")
-            bn[pair] = {
-                "volume_quote": volume,
-                "price": Decimal(str(item.get("lastPrice") or "0")),
-            }
-
-        by: dict[str, dict[str, Any]] = {}
-        for item in bybit_tickers:
-            pair = normalize_symbol(str(item.get("symbol") or ""))
-            if pair not in bybit_symbols:
-                continue
-            try:
-                turnover = Decimal(str(item.get("turnover24h") or "0"))
-            except InvalidOperation:
-                turnover = Decimal("0")
+                quote_volume = Decimal(str(item.get("quoteVolume") or "0"))
+            except (InvalidOperation, TypeError, ValueError):
+                quote_volume = Decimal("0")
             try:
                 price = Decimal(str(item.get("lastPrice") or "0"))
-            except InvalidOperation:
+            except (InvalidOperation, TypeError, ValueError):
                 price = Decimal("0")
-            by[pair] = {"volume_quote": turnover, "price": price}
-
-        common = sorted(set(bn) & set(by))
-        rows = []
-        for pair in common:
-            combined = bn[pair]["volume_quote"] + by[pair]["volume_quote"]
-            rows.append({
+            if price <= 0:
+                continue
+            row = {
                 "pair": pair,
-                "binance_volume_quote": bn[pair]["volume_quote"],
-                "bybit_volume_quote": by[pair]["volume_quote"],
-                "combined_volume_quote": combined,
-                "binance_price": bn[pair]["price"],
-                "bybit_price": by[pair]["price"],
-            })
-        rows.sort(key=lambda x: x["combined_volume_quote"], reverse=True)
+                "binance_volume_quote": quote_volume,
+                "combined_volume_quote": quote_volume,  # compatibility with scan sorting/reporting
+                "binance_price": price,
+                "tick_size": meta.tick_size,
+            }
+            rows.append(row)
+            snapshot[pair] = {
+                "price": float(price),
+                "tick_size": float(meta.tick_size),
+                "quote_volume_24h": float(quote_volume),
+                "source": "BINANCE_PUBLIC_TICKER_24H",
+            }
+
+        rows.sort(key=lambda row: row["binance_volume_quote"], reverse=True)
+        self._scan_market_snapshot = snapshot
+        self._scan_market_snapshot_at_ms = snapshot_at_ms
+        count = len(rows)
+        log.info(
+            "[SCAN][UNIVERSE] Binance USD-M USDT perpetuals=%s | ticker snapshot=%s | provider=BINANCE_PUBLIC",
+            count, len(snapshot),
+        )
         return {
             "rows": rows,
-            "binance_count": len(bn),
-            "bybit_count": len(by),
-            "common_count": len(rows),
+            "binance_count": count,
+            "symbol_count": count,
+            "common_count": count,  # legacy key retained for existing cycle/report consumers
         }
 
     def _margin_config(self) -> tuple[Decimal | None, Decimal | None]:
@@ -9529,10 +9515,33 @@ class TradingEngine:
             except asyncio.CancelledError:
                 raise
             except BinanceRateLimitError as exc:
+                cooldown = max(
+                    float(getattr(exc, "bot_cooldown_seconds", 0.0) or 0.0),
+                    float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
+                    float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                )
+                self._binance_public_cooldown_until = max(
+                    self._binance_public_cooldown_until, time.monotonic() + max(5.0, cooldown)
+                )
                 self.real.apply_cooldown(exc.server_cooldown_seconds, exc.bot_cooldown_seconds)
                 self._notify_rate_limit(exc, "SCAN")
                 continue
-            except Exception:
+            except Exception as exc:
+                if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
+                    cooldown = max(
+                        float(getattr(exc, "bot_cooldown_seconds", 0.0) or 0.0),
+                        float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
+                        float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                    )
+                    cooldown = max(5.0, cooldown)
+                    self._binance_public_cooldown_until = max(
+                        self._binance_public_cooldown_until, time.monotonic() + cooldown
+                    )
+                    log.warning(
+                        "[SCAN] strategy kena Binance Public REST rate limit di luar loop pair; cooldown %.1fs dan scan dilanjutkan setelahnya | %s",
+                        cooldown, exc,
+                    )
+                    continue
                 log.exception("[SCAN] cycle fatal error")
                 # A fatal cycle must not silently bypass an active H4 gate.
                 await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
@@ -10377,7 +10386,14 @@ class TradingEngine:
     async def _btc_watch_tick(self) -> None:
         module = await self._load_strategy_runtime()
         self._strategy_module_ref = module
-        regime = await module.analyze_btc_regime({"mode": "SCAN", "data_provider": "BYBIT_PUBLIC_ONLY", "allow_binance_fallback": False})
+        source_policy = self._scan_strategy_source_policy(module)
+        regime = await module.analyze_btc_regime({
+            "pair": "BTCUSDT",
+            "mode": "SCAN",
+            "primary_data_source": source_policy["source"],
+            "data_provider": source_policy["provider"],
+            "allow_binance_fallback": False,
+        })
         h4_trend = str(regime.get("trend") or "RANGE").upper()
         impulse = await self._btc_impulse_check(module)
         now = time.time()
@@ -10637,6 +10653,13 @@ class TradingEngine:
             await self._flush_research()
 
     async def _run_scan_cycle_inner(self) -> None:
+        public_cooldown = max(0.0, self._binance_public_cooldown_until - time.monotonic())
+        if public_cooldown > 0:
+            log.warning(
+                "[SCAN] ditunda %.1fs karena Binance Public REST cooldown aktif; tidak mengirim request tambahan.",
+                public_cooldown,
+            )
+            return
         if len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
             log.info("[SCAN] auto-pause: max active trade reached (%s)", self.max_active_trades)
@@ -10654,7 +10677,7 @@ class TradingEngine:
             card(
                 f"🛰️ SCAN #{cycle} DIMULAI",
                 [
-                    "📡 Regime BTC → universe Binance ∩ Bybit",
+                    "📡 Regime BTC → universe Binance USD-M USDT perpetual",
                     f"🎯 Batch maksimum {SCAN_MAX_PAIRS_PER_CYCLE} pair",
                     "⏳ Memindai...",
                 ],
@@ -10749,7 +10772,7 @@ class TradingEngine:
         )
 
         log.info(
-            "[SCAN] Cycle #%s universe common=%s already_trade=%s banned=%s margin_blocked=%s eligible=%s top_batch=%s",
+            "[SCAN] Cycle #%s Binance universe=%s already_trade=%s banned=%s margin_blocked=%s eligible=%s top_batch=%s",
             cycle,
             universe["common_count"],
             already_trade,
@@ -10759,9 +10782,9 @@ class TradingEngine:
             min(SCAN_MAX_PAIRS_PER_CYCLE, len(eligible)),
         )
 
-        # Satu cycle hanya boleh melakukan full structure/setup analysis
-        # terhadap maksimal 50 pair. Karena rows sudah diurutkan dari volume
-        # terbesar ke terkecil, eligible[:50] adalah batch top-volume cycle ini.
+        # Satu cycle menganalisis maksimal SCAN_MAX_PAIRS_PER_CYCLE pair.
+        # Universe diranking berdasarkan volume quote Binance; pair sisanya
+        # tetap eligible untuk batch/cycle selanjutnya.
         batch = eligible[:SCAN_MAX_PAIRS_PER_CYCLE]
         deferred = max(0, len(eligible) - len(batch))
         volume_rank_by_pair = {
@@ -10776,6 +10799,7 @@ class TradingEngine:
         threshold_banned = 0
         structure_banned = 0
         scanned = 0
+        rate_limit_pause = False
         direction_counts: dict[str, int] = {
             "BULLISH": 0,
             "BEARISH": 0,
@@ -10942,12 +10966,21 @@ class TradingEngine:
                     self._sweep["done"].discard(pair)
                     err_cat = classify_error(exc)
                     funnel["errors"][err_cat] = funnel["errors"].get(err_cat, 0) + 1
-                    if err_cat == ErrorCategory.RATE_LIMIT or getattr(exc, "bybit_rate_limited", False):
+                    if err_cat == ErrorCategory.RATE_LIMIT or getattr(exc, "binance_rate_limited", False):
                         funnel["rate_limited"] += 1
-                    if getattr(exc, "bybit_rate_limited", False):
-                        retry_after = getattr(exc, "retry_after_seconds", 0.0)
+                    if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
+                        retry_after = max(
+                            float(getattr(exc, "bot_cooldown_seconds", 0.0) or 0.0),
+                            float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
+                            float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                        )
+                        self._binance_public_cooldown_until = max(
+                            self._binance_public_cooldown_until,
+                            time.monotonic() + max(5.0, retry_after),
+                        )
+                        rate_limit_pause = True
                         log.warning(
-                            "[SCAN] analysis %s dilewati setelah Bybit rate-limit backoff | retry_after=%.2fs | %s",
+                            "[SCAN] analysis %s kena Binance Public REST rate limit | cooldown=%.2fs | sisa batch ditunda | %s",
                             pair,
                             float(retry_after or 0.0),
                             exc,
@@ -10965,7 +10998,18 @@ class TradingEngine:
                         self._recheck.set(pair, next_evaluate_ts("DATA_UNAVAILABLE", now_ts, retries), err_cat, "DATA_UNAVAILABLE")
                         self._observe_candidate(synthetic_observation(pair, "DATA_UNAVAILABLE", err_cat, cycle_id=cycle_id, now=cycle_now, retries=retries))
 
-                await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                if not rate_limit_pause:
+                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                else:
+                    log.warning(
+                        "[SCAN] batch dihentikan untuk mematuhi Binance rate limit; pasangan belum diproses akan dicoba pada siklus berikutnya."
+                    )
+                    break
+
+        if rate_limit_pause:
+            # A validator would make more Binance requests immediately after a 429/418.
+            # Defer it to the next cycle too; already observed candidates remain in the ledger.
+            threshold_candidates = []
 
         # Kandidat yang threshold-pass selalu divalidasi berdasarkan confidence
         # terbesar terlebih dahulu.
@@ -11031,10 +11075,19 @@ class TradingEngine:
                 funnel["validation_error"] += 1
                 funnel["errors"][v_cat] = funnel["errors"].get(v_cat, 0) + 1
                 self._after_validation(candidate, v_cat, "DATA_UNAVAILABLE" if v_cat != ErrorCategory.STRATEGY_CONTRACT_ERROR else "REJECTED_QUALITY", now_ts)
-                if getattr(exc, "bybit_rate_limited", False):
-                    retry_after = getattr(exc, "retry_after_seconds", 0.0)
+                if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
+                    retry_after = max(
+                        float(getattr(exc, "bot_cooldown_seconds", 0.0) or 0.0),
+                        float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
+                        float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                    )
+                    self._binance_public_cooldown_until = max(
+                        self._binance_public_cooldown_until,
+                        time.monotonic() + max(5.0, retry_after),
+                    )
+                    rate_limit_pause = True
                     log.warning(
-                        "[SCAN] validator %s dilewati setelah Bybit rate-limit backoff | retry_after=%.2fs | %s",
+                        "[SCAN] validator %s kena Binance Public REST rate limit | cooldown=%.2fs | validasi berikutnya ditunda | %s",
                         candidate["pair"],
                         float(retry_after or 0.0),
                         exc,
@@ -11045,6 +11098,8 @@ class TradingEngine:
                         candidate["pair"],
                     )
 
+            if rate_limit_pause:
+                break
             await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
 
         final_added: list[Trade] = []
@@ -11080,7 +11135,7 @@ class TradingEngine:
                     "strategy_version": candidate.get("strategy_version") or "SCAN",
                     "strategy_source": "SCAN",
                     "strategy_confidence": candidate.get("confidence"),
-                    "strategy_data_source": candidate.get("data_source") or "BYBIT",
+                    "strategy_data_source": candidate.get("analysis_source") or "BINANCE_PUBLIC",
                     "strategy_analysis": compact_analysis(candidate.get("analysis")),
                 }
                 meta["margin_usdt"] = self.margin_usdt
@@ -11262,9 +11317,8 @@ class TradingEngine:
             "btc_h4_trend": btc_trend,
             "btc_analysis": btc_analysis,
             "universe": {
-                "common": universe["common_count"],
+                "symbols": universe["symbol_count"],
                 "binance": universe.get("binance_count"),
-                "bybit": universe.get("bybit_count"),
                 "already_trade": already_trade,
                 "banned": banned_count,
                 "margin_blocked": margin_blocked,
@@ -11357,7 +11411,7 @@ class TradingEngine:
             f"│ 💾 RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
             "╰──────────────────╯\n\n"
             "🌐 UNIVERSE\n"
-            f"├ Binance ∩ Bybit  {universe['common_count']}\n"
+            f"├ Binance USDT Perp {universe['symbol_count']}\n"
             f"├ Banned           {banned_count}\n"
             f"├ Sudah di /trade  {already_trade}\n"
             f"└ Eligible         {len(eligible)}  (batch {len(batch)}/{SCAN_MAX_PAIRS_PER_CYCLE}, tunda {deferred})\n\n"
@@ -11878,6 +11932,24 @@ class TradingEngine:
             "raw_result": self._json_safe(
                 {k: v for k, v in compact_analysis(payload).items() if k != "analysis"}
             ),
+            # Keep the strategy's declared analysis source and data policy explicit.
+            "analysis_source": str(
+                payload.get("analysis_source")
+                or data_info.get("data_policy")
+                or data_info.get("source")
+                or "UNKNOWN"
+            ).strip().upper(),
+            "data": self._json_safe(data_info),
+            "strategy": self._json_safe(strategy_info),
+            "data_asof": self._json_safe(
+                payload.get("data_asof") or data_info.get("data_asof") or {}
+            ),
+            "entry_zone": self._json_safe(payload.get("entry_zone") or {}),
+            "candidate_state": str(payload.get("candidate_state") or "READY"),
+            "state_reason": str(payload.get("state_reason") or ""),
+            "gate_reasons": self._json_safe(payload.get("gate_reasons") or []),
+            "thesis_signature": str(payload.get("thesis_signature") or ""),
+            "setup_archetype": str(payload.get("setup_archetype") or ""),
         }
 
         return normalized
@@ -12114,7 +12186,7 @@ class TradingEngine:
                 "🔎 AUTO ANALYSIS\n\n"
                 f"Pair: {pair}\n"
                 "Sedang menganalisis 672 candle M15 yang sudah close...\n"
-                "Sumber data: strategy.py (Bybit → Binance public fallback)"
+                "Sumber data: Binance USD-M Public REST + Binance WebSocket"
             )
 
             task = asyncio.create_task(
@@ -12301,11 +12373,9 @@ class TradingEngine:
         meta = strategy_meta or {}
         strategy_source = str(meta.get("strategy_source") or "MANUAL").upper().strip()
 
-        # Strategy menghasilkan harga dari data Bybit. Sebelum setup masuk ke
-        # /trade, harga executable dinormalisasi ke tick size Binance sehingga
-        # setup seperti TUTUSDT tidak gagal hanya karena precision berbeda.
-        # Price Now Reference bukan harga order, jadi tidak diwajibkan mengikuti
-        # tick size Binance.
+        # Analisis dan execution sama-sama menggunakan Binance USD-M. Sebelum
+        # setup masuk ke /trade, semua harga order dinormalisasi ke tick size
+        # Binance. Price Now Reference bukan harga order.
         if strategy_source in {"AUTO", "SCAN"}:
             symbol_meta = self._get_symbol(pair)
             tick = symbol_meta.tick_size
