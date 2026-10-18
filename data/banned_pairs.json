@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-18T16:03:34.051853+00:00",
+  "saved_at": "2026-10-18T16:05:11.565424+00:00",
   "bans": [
+    {
+      "pair": "ARBUSDT",
+      "banned_at": "2026-10-18T16:05:11.565247+00:00",
+      "until": "2026-10-19T00:05:11.565222+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
     {
       "pair": "BSVUSDT",
       "banned_at": "2026-10-18T15:41:25.150731+00:00",
