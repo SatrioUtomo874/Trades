@@ -890,3 +890,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-17T12:52:17.673391+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## CVXUSDT — BUY
+
+Trade ID: `CVXUSDT-20261018-215241-5805C2`
+
+### Setup
+
+- Price Now Reference: 1.953
+- Entry: 1.916
+- Reason Entry: CVXUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity H1 1.91494 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 33.9 pada entry zone.
+- Price Exp: 1.957
+- Reason Price Exp: Price Exp 1.957: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.9
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 1.916; SL ditempatkan di luar invalidation dan liquidity guard 1.91494.
+- TP: 1.974
+- Reason TP: TP 1.974 dipilih dari H4_SWING_HIGH dengan RR 3.62; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 1.957
+- Result Reason: Price Exp 1.957: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T14:52:41.357071+00:00
+- Filled: -
+- Closed: 2026-10-18T14:53:29.052840+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
