@@ -32,3 +32,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T15:41:18.341468+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## ONTUSDT — SELL
+
+Trade ID: `ONTUSDT-20261018-224531-85FEDD`
+
+### Setup
+
+- Price Now Reference: 0.05161
+- Entry: 0.05203
+- Reason Entry: ONTUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity H1 0.0520136 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 62.7 pada entry zone.
+- Price Exp: 0.05155
+- Reason Price Exp: Price Exp 0.051550000000000006: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.05235
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.05206; SL ditempatkan di luar invalidation dan liquidity guard 0.0520136.
+- TP: 0.05135
+- Reason TP: TP 0.05135 dipilih dari H1_SWING_LOW dengan RR 2.12; target quality 77.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05155
+- Result Reason: Price Exp 0.051550000000000006: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T15:45:31.769653+00:00
+- Filled: -
+- Closed: 2026-10-18T15:46:29.049206+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
