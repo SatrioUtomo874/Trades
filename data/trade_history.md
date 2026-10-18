@@ -98,3 +98,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T16:03:25.550022+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## ARBUSDT — SELL
+
+Trade ID: `ARBUSDT-20261018-230451-F50E74`
+
+### Setup
+
+- Price Now Reference: 0.17904
+- Entry: 0.18457
+- Reason Entry: ARBUSDT SELL: SELL_PULLBACK. H4 structure RANGE, liquidity H1 0.184685 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 67.3 pada entry zone.
+- Price Exp: 0.17896
+- Reason Price Exp: Price Exp 0.17896: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.18612
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.1848043; SL ditempatkan di luar invalidation dan liquidity guard 0.184685.
+- TP: 0.17884
+- Reason TP: TP 0.17884 dipilih dari H4_LOWER_LOW dengan RR 3.70; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.17896
+- Result Reason: Price Exp 0.17896: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T16:04:51.231189+00:00
+- Filled: -
+- Closed: 2026-10-18T16:05:04.150124+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
