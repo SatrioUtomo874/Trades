@@ -989,3 +989,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T14:56:25.637773+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## RONINUSDT — SELL
+
+Trade ID: `RONINUSDT-20261018-215604-F33421`
+
+### Setup
+
+- Price Now Reference: 0.05782
+- Entry: 0.0628
+- Reason Entry: RONINUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.0628758 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 81.5 pada entry zone.
+- Price Exp: 0.05779
+- Reason Price Exp: Price Exp 0.05779000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.06321
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.06292; SL ditempatkan di luar invalidation dan liquidity guard 0.0628758.
+- TP: 0.06144
+- Reason TP: TP 0.06144 dipilih dari ATR_SCORE_FALLBACK dengan RR 3.32; target quality 35.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05779
+- Result Reason: Price Exp 0.05779000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T14:56:04.533345+00:00
+- Filled: -
+- Closed: 2026-10-18T14:57:13.049722+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
