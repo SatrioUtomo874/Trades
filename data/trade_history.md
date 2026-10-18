@@ -395,3 +395,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T16:29:39.050778+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## EPICUSDT — SELL
+
+Trade ID: `EPICUSDT-20261018-233039-0352E6`
+
+### Setup
+
+- Price Now Reference: 0.2753
+- Entry: 0.3073
+- Reason Entry: EPICUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity H1 0.3077 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 87.3 pada entry zone.
+- Price Exp: 0.2736
+- Reason Price Exp: Price Exp 0.2736: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.317
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.3077; SL ditempatkan di luar invalidation.
+- TP: 0.2598
+- Reason TP: TP 0.2598 dipilih dari H4_LOWER_LOW dengan RR 4.90; target quality 90.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2724
+- Result Reason: Price Exp 0.2736: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T16:30:39.250663+00:00
+- Filled: -
+- Closed: 2026-10-18T16:30:43.538589+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
