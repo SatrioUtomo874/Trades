@@ -362,3 +362,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T16:29:01.535623+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## SHELLUSDT — SELL
+
+Trade ID: `SHELLUSDT-20261018-232826-4B6D91`
+
+### Setup
+
+- Price Now Reference: 0.02136
+- Entry: 0.02177
+- Reason Entry: SHELLUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity H1 0.0217625 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_BREAKER. Projected M15 RSI 66.0 pada entry zone.
+- Price Exp: 0.02129
+- Reason Price Exp: Price Exp 0.021290000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02192
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.02178; SL ditempatkan di luar invalidation dan liquidity guard 0.0217625.
+- TP: 0.02128
+- Reason TP: TP 0.02128 dipilih dari H4_LOWER_LOW dengan RR 3.27; target quality 89.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02129
+- Result Reason: Price Exp 0.021290000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T16:28:26.054719+00:00
+- Filled: -
+- Closed: 2026-10-18T16:29:39.050778+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
