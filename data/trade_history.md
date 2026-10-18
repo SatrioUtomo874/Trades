@@ -164,3 +164,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T16:10:21.252624+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## KAVAUSDT — BUY
+
+Trade ID: `KAVAUSDT-20261018-230942-A9276F`
+
+### Setup
+
+- Price Now Reference: 0.07122
+- Entry: 0.0704
+- Reason Entry: KAVAUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.0703919 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 27.6 pada entry zone.
+- Price Exp: 0.07126
+- Reason Price Exp: Price Exp 0.07126: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.06997
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.0703802; SL ditempatkan di luar invalidation dan liquidity guard 0.0703919.
+- TP: 0.07159
+- Reason TP: TP 0.07159 dipilih dari H4_HIGHER_HIGH dengan RR 2.77; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.07126
+- Result Reason: Price Exp 0.07126: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T16:09:42.160266+00:00
+- Filled: -
+- Closed: 2026-10-18T16:10:43.649926+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
