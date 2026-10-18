@@ -197,3 +197,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T16:10:43.649926+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## RENDERUSDT — SELL
+
+Trade ID: `RENDERUSDT-20261018-231318-9AEE72`
+
+### Setup
+
+- Price Now Reference: 1.777
+- Entry: 1.937
+- Reason Entry: RENDERUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 1.93719 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 85.0 pada entry zone.
+- Price Exp: 1.776
+- Reason Price Exp: Price Exp 1.776: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.95
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 1.93853; SL ditempatkan di luar invalidation dan liquidity guard 1.93719.
+- TP: 1.894
+- Reason TP: TP 1.894 dipilih dari ATR_SCORE_FALLBACK dengan RR 3.31; target quality 35.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 1.776
+- Result Reason: Price Exp 1.776: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T16:13:18.143447+00:00
+- Filled: -
+- Closed: 2026-10-18T16:13:24.550585+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
