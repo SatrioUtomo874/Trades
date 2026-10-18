@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-18T18:08:22.563180+00:00",
-  "saved_at_wib": "19-10-2026, 01:08 WIB",
+  "saved_at": "2026-10-18T18:15:30.649229+00:00",
+  "saved_at_wib": "19-10-2026, 01:15 WIB",
   "count": 6,
   "setups": [
     {
@@ -7278,7 +7278,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.000000000000009523809523809524716553287982",
+      "pnl_percent": "-0.09523809523808572335600907029",
       "max_favorable_pct": "0.6666666666666762539682539683",
       "max_adverse_pct": "-0.2857142857142762176870748299",
       "planned_rr": "4.5",
@@ -10787,7 +10787,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "0.761904761904752453514739229",
-      "realized_r": "0.00000000000001250000000000015625"
+      "realized_r": "-0.1249999999999890624999999999"
     },
     {
       "trade_id": "ZORAUSDT-20261018-233324-FFE0D5",
@@ -10812,7 +10812,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "-0.3799271806237137881905968023",
+      "pnl_percent": "-0.4590786765869874940636378028",
       "max_favorable_pct": "0.3799271806237137881905968023",
       "max_adverse_pct": "-0.5857210701282254234605034035",
       "planned_rr": "2.40641711229946524064171123",
@@ -14181,7 +14181,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "2.928605350641127117302517018",
-      "realized_r": "-0.1297297297297297297297297297"
+      "realized_r": "-0.1567567567567567567567567567"
     },
     {
       "trade_id": "ONUSDT-20261018-234505-D5C020",
