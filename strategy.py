@@ -786,9 +786,9 @@ class BinanceProvider(HTTPProvider):
 
         candles = [collected[k] for k in sorted(collected)]
         if len(candles) < count:
-            raise RuntimeError(
-                f"Binance hanya mengembalikan {len(candles)} candle closed "
-                f"untuk {symbol} {_binance_interval(interval)}; diperlukan {count}."
+            raise InsufficientHistoryError(
+                f"{symbol} {_binance_interval(interval)}: candle closed {len(candles)} "
+                f"dari {count} yang dibutuhkan (kemungkinan listing baru)"
             )
         return candles[-count:]
 
