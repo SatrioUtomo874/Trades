@@ -65,3 +65,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-18T15:46:29.049206+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## CHZUSDT — SELL
+
+Trade ID: `CHZUSDT-20261018-224529-9AEF18`
+
+### Setup
+
+- Price Now Reference: 0.01346
+- Entry: 0.01387
+- Reason Entry: CHZUSDT SELL: SELL_PULLBACK. H4 structure RANGE, liquidity M15 0.013865 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 68.0 pada entry zone.
+- Price Exp: 0.01342
+- Reason Price Exp: Price Exp 0.013420000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01403
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.01401; SL ditempatkan di luar invalidation.
+- TP: 0.01342
+- Reason TP: TP 0.01342 dipilih dari H1_SWING_LOW dengan RR 2.81; target quality 73.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.01342
+- Result Reason: Price Exp 0.013420000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-18T15:45:29.761356+00:00
+- Filled: -
+- Closed: 2026-10-18T16:03:25.550022+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
