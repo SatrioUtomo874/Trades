@@ -329,3 +329,36 @@ Tidak ada trailing.
 - Filled: 2026-10-18T15:45:35.432901+00:00
 - Closed: 2026-10-18T16:27:08.840712+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## SSVUSDT — BUY
+
+Trade ID: `SSVUSDT-20261018-231640-6A50D1`
+
+### Setup
+
+- Price Now Reference: 2.479
+- Entry: 2.478
+- Reason Entry: SSVUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity H1 2.48075 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 23.8 pada entry zone.
+- Price Exp: 2.557
+- Reason Price Exp: Price Exp 2.557: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 2.414
+- Reason SL: Prediction invalidation berasal dari H4_SELL_SIDE_LIQUIDITY di 2.4174; SL ditempatkan di luar invalidation dan liquidity guard 2.419.
+- TP: 2.68
+- Reason TP: TP 2.68 dipilih dari H4_SWING_HIGH dengan RR 3.16; target quality 79.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: MANUAL_CLOSE_PENDING
+- Exit Price: -
+- Result Reason: Manual /close pada setup REAL PENDING sebelum entry.
+- PnL: -
+- Created: 2026-10-18T16:16:40.830263+00:00
+- Filled: -
+- Closed: 2026-10-18T16:29:01.535623+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
