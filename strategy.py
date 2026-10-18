@@ -17,8 +17,8 @@ Kontrak utama tetap kompatibel dengan main.py:
     async def analyze_trailing(trade, context) -> dict
 
 Prinsip inti V2:
-1. H4 structure menjadi sumber thesis utama; BTC menjadi macro directional
-   constraint untuk altcoin. D1/H1/M15 menjadi konteks dan refinement, bukan
+1. H4 structure menjadi sumber thesis utama; BTC hanya konteks confidence
+   (bukan veto arah) untuk altcoin. D1/H1/M15 menjadi konteks dan refinement, bukan
    alasan untuk mengganti thesis H4 secara gegabah.
 2. Semua keputusan struktur menggunakan CLOSED candles saja.
 3. Liquidity dibangun sebagai zone map dari swing/equal/repeated/range levels
@@ -122,8 +122,7 @@ EST_FEE_PCT_PER_SIDE = _env_float("EST_FEE_PCT_PER_SIDE", 0.05, 0.0, 5.0)
 EST_SLIPPAGE_PCT_PER_SIDE = _env_float("EST_SLIPPAGE_PCT_PER_SIDE", 0.03, 0.0, 5.0)
 MIN_RR_AFTER_COSTS = _env_float("MIN_RR_AFTER_COSTS", 1.5, 0.0, 20.0)  # 0 = hanya laporan
 
-# BTC counter-trend: OFF secara default; aktifkan hanya dengan bukti backtest.
-ALLOW_BTC_COUNTER_TREND = _env_bool("ALLOW_BTC_COUNTER_TREND", False)
+# BTC hanya konteks confidence, bukan veto arah.
 BTC_COUNTER_TREND_PENALTY = _env_float("BTC_COUNTER_TREND_PENALTY", 12.0, 0.0, 60.0)
 BTC_EXTREME_CONFIDENCE = _env_float("BTC_EXTREME_CONFIDENCE", 90.0, 50.0, 100.0)
 
@@ -4460,22 +4459,7 @@ def allowed_directions_for_macro(
     pair_h4_trend: str,
     pair: str,
 ) -> tuple[str, ...]:
-    """Define the strategy search-space from the macro directional regime.
-
-    Core rule:
-        Altcoin + BTC regime bullish -> BUY only.
-        Altcoin + BTC regime bearish -> SELL only.
-        Altcoin + BTC regime range/transition -> both directions allowed.
-
-    For BTCUSDT itself, the pair's own multi-timeframe regime is the source.
-
-    Pair regime does not override the BTC regime for altcoins; it determines alignment and setup quality.
-    """
-    trend = pair_h4_trend if pair == "BTCUSDT" else macro_trend
-    if trend == "BULLISH":
-        return (DIRECTION_BUY,)
-    if trend == "BEARISH":
-        return (DIRECTION_SELL,)
+    """BUY dan SELL selalu dievaluasi; BTC/regime hanya memengaruhi skor."""
     return DIRECTIONS_BOTH
 
 
@@ -7477,7 +7461,7 @@ def build_thesis(
     h4_aligned = h4_structure.trend in {want, "RANGE"}
     return {
         "direction": direction,
-        "valid": bool(macro_aligned and pair_aligned and h4_aligned),
+        "valid": bool(pair_aligned and h4_aligned),
         "type": f"H4_{'BULLISH' if direction == DIRECTION_BUY else 'BEARISH'}_PULLBACK",
         "btc_trend": btc_trend,
         "pair_trend": pair_trend,
