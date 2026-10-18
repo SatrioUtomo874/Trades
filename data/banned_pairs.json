@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-18T16:44:24.064179+00:00",
+  "saved_at": "2026-10-18T17:29:21.585480+00:00",
   "bans": [
     {
       "pair": "ARBUSDT",
@@ -125,6 +125,13 @@
       "pair": "SOMIUSDT",
       "banned_at": "2026-10-18T15:01:42.061624+00:00",
       "until": "2026-10-18T23:01:42.061602+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "STXUSDT",
+      "banned_at": "2026-10-18T17:29:21.585309+00:00",
+      "until": "2026-10-19T01:29:21.585286+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     }
