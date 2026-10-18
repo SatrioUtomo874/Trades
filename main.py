@@ -3892,7 +3892,7 @@ class RecheckBook:
         return len(gone)
 
     def invalidate_btc_mismatch_pairs(self, btc_trend: str) -> list[str]:
-        gone = [p for p, it in self.items.items() if it.get("reason") == "STRUCTURE_MISMATCH" and it.get("btc_trend") != btc_trend]
+        gone = [p for p, it in self.items.items() if it.get("reason") == "STRUCTURE_MISMATCH"]
         for pair in gone:
             self.items.pop(pair, None)
         return gone
@@ -9568,14 +9568,11 @@ class TradingEngine:
         self.h4_max_cycles = SCAN_H4_MAX_CYCLES
         self._h4_cycle_count = 0
         self._btc_flip_enabled = True
-        self._btc_close_filled = True
         self._btc_backoff_until = 0.0
         self._btc_last_warn = 0.0
         self._btc_task: asyncio.Task[Any] | None = None
         self._btc_state: dict[str, Any] = {}
         self._btc_impulse: dict[str, Any] = {}
-        self._btc_flip_log: deque[dict[str, Any]] = deque(maxlen=50)
-        self._btc_invalidated_total = 0
         self._research_saved_on = False
         self._export_marker: dict[str, Any] = {"replay": "", "cand": "", "trades": 0, "last": ""}
         self._last_auto_export = 0.0
@@ -9652,7 +9649,6 @@ class TradingEngine:
                     self.trail_mode = guard["trail_mode"]
                 self._research_saved_on = bool(guard.get("research", False))
                 self._btc_flip_enabled = bool(guard.get("btc_flip", True))
-                self._btc_close_filled = bool(guard.get("btc_close_filled", True))
                 try:
                     cycles = int(guard.get("h4_max_cycles") or self.h4_max_cycles)
                     if 1 <= cycles <= 100:
@@ -9677,7 +9673,7 @@ class TradingEngine:
 
     async def _save_runtime_settings(self) -> None:
         payload = {"version": 1, "saved_at": iso_utc(), "risk": dict(self._risk_cfg),
-                   "guard": {"trail_mode": self.trail_mode, "research": self._research_saved_on, "btc_flip": self._btc_flip_enabled, "btc_close_filled": self._btc_close_filled, "h4_max_cycles": self.h4_max_cycles, "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
+                   "guard": {"trail_mode": self.trail_mode, "research": self._research_saved_on, "btc_flip": self._btc_flip_enabled, "h4_max_cycles": self.h4_max_cycles, "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
                              "drawdown": None if self.drawdown_percent is None else str(self.drawdown_percent)}}
         await self.github.replace_file(RUNTIME_SETTINGS_PATH, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "settings: risk")
 
@@ -9908,7 +9904,7 @@ class TradingEngine:
             rows.append(f"💼 Saldo simulasi {self._fmt_usd(self.sim_balance)} • equity {self._fmt_usd(self._sim_equity())} USDT")
         rows.append(f"🧨 Drawdown {'OFF' if self.drawdown_percent is None else decimal_to_str(self.drawdown_percent) + '%'} • 🛡 Autostop {'OFF' if self.autostop_percent is None else decimal_to_str(self.autostop_percent) + '%'}")
         bs = self._btc_state
-        rows.append(f"🪙 BTC watch {'ON' if self._btc_flip_enabled else 'OFF'} • H4 {bs.get('h4_trend', '-')} • impuls {bs.get('impulse') or '-'} • dibatalkan {self._btc_invalidated_total}")
+        rows.append(f"🪙 BTC watch {'ON' if self._btc_flip_enabled else 'OFF'} • H4 {bs.get('h4_trend', '-')} • impuls {bs.get('impulse') or '-'}")
         stale = self._funnel_last.get("data_stale", 0)
         if stale:
             rows.append(f"⚠️ Data basi pada {stale} pair di scan terakhir")
@@ -10268,7 +10264,7 @@ class TradingEngine:
             rows.append("Gagal: " + "; ".join(errors)[:300])
         await self.reply(card("♻️ DATA RISET DIRESET", rows) + "\n\nScan akan menyapu ulang seluruh koin dengan strategy baru. Untuk mereset statistik trade gunakan /resetstats.")
 
-    # -- pantau BTC: batalkan setup pending yang berlawanan
+    # -- pantau BTC: hanya konteks confidence, tidak membatalkan/menutup setup
     def _start_btc_watch(self) -> None:
         if self._btc_task is None or self._btc_task.done():
             self._btc_task = asyncio.create_task(self._btc_watch_loop(), name="btc-watch")
@@ -10356,32 +10352,8 @@ class TradingEngine:
         self._btc_state["impulse_ignored"] = None
         return side, pct
 
-    async def _invalidate_pending_trade(self, trade: Trade, text: str) -> bool:
-        current = self.active_trades.get(trade.trade_id)
-        if current is None or current.status != "PENDING":
-            return False
-        try:
-            if current.real_enabled:
-                if not self.real_mode:
-                    return False
-                if current.entry_order_id is not None or current.entry_client_order_id:
-                    try:
-                        await self.real.cancel_order(
-                            current.pair,
-                            order_id=current.entry_order_id,
-                            client_order_id=(current.entry_client_order_id if current.entry_order_id is None else None),
-                        )
-                    except BinanceAPIError as exc:
-                        if exc.code not in {-2011, -2013}:
-                            raise
-                current.real_state = "REAL_CLOSED"
-            await self._finalize_trade(copy.deepcopy(current), result="INVALID_BTC", exit_price=None, reason=text, send_notification=False)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[BTCWATCH] gagal membatalkan %s: %s", trade.pair, exc)
-            return False
-
     async def _btc_watch_tick(self) -> None:
+        """Perbarui regime & impuls BTC; hanya dipakai sebagai penyesuai confidence."""
         module = await self._load_strategy_runtime()
         self._strategy_module_ref = module
         source_policy = self._scan_strategy_source_policy(module)
@@ -10394,80 +10366,17 @@ class TradingEngine:
         })
         h4_trend = str(regime.get("trend") or "RANGE").upper()
         impulse = await self._btc_impulse_check(module)
-        now = time.time()
         if impulse:
-            self._btc_impulse = {"dir": impulse[0], "pct": round(impulse[1], 2), "until": now + BTC_IMPULSE_VETO_MINUTES * 60}
+            self._btc_impulse = {"dir": impulse[0], "pct": round(impulse[1], 2), "until": time.time() + BTC_IMPULSE_VETO_MINUTES * 60}
         self._btc_state = {"h4_trend": h4_trend, "impulse": f"{impulse[0]} {impulse[1]:.2f}%" if impulse else None, "at": iso_utc()}
-        imp_dir = impulse[0] if impulse else None
-        imp_pct = impulse[1] if impulse else 0.0
-
-        def reason_for(direction: str) -> str | None:
-            if direction == "SELL":
-                if h4_trend == "BULLISH":
-                    return "BTC H4 berbalik BULLISH"
-                if imp_dir == "UP":
-                    return f"impuls BTC naik {imp_pct:.2f}% (4 jam)"
-            elif direction == "BUY":
-                if h4_trend == "BEARISH":
-                    return "BTC H4 berbalik BEARISH"
-                if imp_dir == "DOWN":
-                    return f"impuls BTC turun {imp_pct:.2f}% (4 jam)"
-            return None
-
-        cancelled: list[str] = []
-        for trade in [t for t in self.active_trades.values() if t.status == "PENDING"]:
-            reason = reason_for(trade.direction)
-            rec = self.ledger.items.get(trade.candidate_id) if trade.candidate_id else None
-            if not reason or (rec is not None and rec.btc_alignment == "COUNTER_TREND"):
-                continue
-            text = f"BTC berbalik: {reason}; setup {trade.direction} {trade.pair} dibatalkan dan dianggap invalid."
-            if await self._invalidate_pending_trade(trade, text):
-                cancelled.append(f"{trade.pair} {trade.direction} — {reason}")
-                self._btc_invalidated_total += 1
-                self._btc_flip_log.append({"at": iso_utc(), "pair": trade.pair, "direction": trade.direction, "reason": reason, "trade_id": trade.trade_id})
-        closed: list[str] = []
-        if self._btc_close_filled:
-            self._close_batch_in_progress = True
-            try:
-                for trade in [t for t in self.active_trades.values() if t.status == "FILLED"]:
-                    reason = reason_for(trade.direction)
-                    rec = self.ledger.items.get(trade.candidate_id) if trade.candidate_id else None
-                    if not reason or (rec is not None and rec.btc_alignment == "COUNTER_TREND"):
-                        continue
-                    try:
-                        ok, detail = await self._close_one_trade(trade, note=f"BTC berbalik: {reason}")
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("[BTCWATCH] gagal menutup posisi %s: %s", trade.pair, exc)
-                        continue
-                    if ok:
-                        closed.append(f"{trade.pair} {trade.direction} — {detail}")
-                        self._btc_invalidated_total += 1
-                        self._btc_flip_log.append({"at": iso_utc(), "pair": trade.pair, "direction": trade.direction, "reason": f"CLOSE {reason}", "trade_id": trade.trade_id})
-            finally:
-                self._close_batch_in_progress = False
-        for rec in list(self.ledger.items.values()):
-            if rec.state in (WAITING_CANDIDATE_STATES | {"READY"}) and not rec.linked_trade_id and rec.direction:
-                reason = reason_for(rec.direction)
-                if reason:
-                    self.ledger.set_state(rec.candidate_id, "EXPIRED", "CANDIDATE_INVALIDATED", f"BTC_FLIP: {reason}")
-        if cancelled or closed:
-            log.info("[BTCWATCH] dibatalkan=%s ditutup=%s", cancelled, closed)
-            rows = [f"BTC H4 {h4_trend} • impuls {self._btc_state['impulse'] or '-'} • rvol {self._btc_state.get('rvol') or '-'}"]
-            if cancelled:
-                rows += [f"{len(cancelled)} setup pending dibatalkan (INVALID_BTC):", *[f"• {c}" for c in cancelled[:12]]]
-            if closed:
-                rows += [f"{len(closed)} posisi aktif ditutup sekarang:", *[f"• {c}" for c in closed[:12]]]
-            await self.reply(card("🪙 BTC BERBALIK", rows))
 
     async def _handle_btcwatch_command(self, text: str) -> None:
         parts = text.split()
         if len(parts) > 1:
             if parts[1].lower() in {"on", "off"}:
                 self._btc_flip_enabled = parts[1].lower() == "on"
-            elif parts[1].lower() == "close" and len(parts) > 2 and parts[2].lower() in {"on", "off"}:
-                self._btc_close_filled = parts[2].lower() == "on"
             else:
-                raise ValueError("Gunakan /btcwatch, /btcwatch on|off, atau /btcwatch close on|off.")
+                raise ValueError("Gunakan /btcwatch atau /btcwatch on|off.")
         bs = self._btc_state
         imp = self._btc_impulse
         left = max(0, int((imp.get("until", 0) - time.time()) / 60)) if imp else 0
@@ -10476,12 +10385,9 @@ class TradingEngine:
             f"BTC H4   {bs.get('h4_trend', '-')}",
             f"Impuls   {bs.get('impulse') or '-'} (ambang {BTC_IMPULSE_PCT:g}% / {BTC_IMPULSE_BARS * 15 // 60} jam, volume ≥ {BTC_IMPULSE_MIN_RVOL:g}x)",
             f"Diabaikan {bs.get('impulse_ignored') or '-'}",
-            f"Tutup posisi FILLED {'ON' if self._btc_close_filled else 'OFF'}",
-            f"Veto scan {imp.get('dir', '-')} sisa {left} menit" if left else "Veto scan  tidak aktif",
-            f"Dibatalkan sejak start {self._btc_invalidated_total}",
+            f"Penalti impuls {imp.get('dir', '-')} sisa {left} menit" if left else "Penalti impuls tidak aktif",
         ]
-        rows += [f"• {e['pair']} {e['direction']} — {e['reason']}" for e in list(self._btc_flip_log)[-5:]]
-        await self.reply(card("🪙 BTC WATCH", rows) + "\n\nSELL dibatalkan/ditutup bila BTC H4 jadi BULLISH atau impuls naik disertai volume; BUY sebaliknya. /btcwatch close off menahan penutupan posisi aktif.")
+        await self.reply(card("🪙 BTC WATCH", rows) + "\n\nBTC hanya menyesuaikan confidence (searah naik, berlawanan turun); tidak membatalkan setup dan tidak menutup posisi.")
 
     async def _handle_h4cycles_command(self, text: str) -> None:
         parts = text.split()
@@ -10698,10 +10604,12 @@ class TradingEngine:
             btc_analysis = btc_fallback.get("analysis") or btc_analysis
             btc_trend = self._extract_structure_trend(btc_analysis, "btc_h4") or btc_trend
 
+        if btc_trend not in {"BULLISH", "BEARISH", "RANGE"}:
+            log.warning("[SCAN] Cycle #%s BTC H4 trend tidak valid (%s); dianggap RANGE, scan lanjut", cycle, btc_trend)
+            btc_trend = "RANGE"
         log.info("[SCAN] Cycle #%s BTC H4 trend=%s", cycle, btc_trend)
-        if btc_trend in {"BULLISH", "BEARISH", "RANGE"}:
-            self._purge_stale_structure_bans(btc_trend)
-            self._sweep["done"] -= set(self._recheck.invalidate_btc_mismatch_pairs(btc_trend))
+        self._purge_stale_structure_bans(btc_trend)
+        self._sweep["done"] -= set(self._recheck.invalidate_btc_mismatch_pairs(btc_trend))
 
         universe = await self._build_scan_universe()
         rows = universe["rows"]
@@ -10805,218 +10713,211 @@ class TradingEngine:
             "UNKNOWN": 0,
         }
 
-        if btc_trend not in {"BULLISH", "BEARISH", "RANGE"}:
-            log.error(
-                "[SCAN] Cycle #%s dibatalkan: BTC H4 trend tidak valid (%s)",
+        for index, pair in enumerate(batch, start=1):
+            if scan_generation != self._scan_generation or not self._scan_user_enabled:
+                log.info("[SCAN] Cycle #%s dibatalkan di tengah batch: generation berubah/off.", cycle)
+                return
+            if len(self.active_trades) >= self.max_active_trades:
+                self._scan_auto_paused = True
+                log.info("[SCAN] Cycle #%s stopped early at max active trade.", cycle)
+                break
+
+            if time.monotonic() - started > SCAN_CYCLE_TIME_BUDGET_SECONDS:
+                funnel["budget_stopped"] += 1
+                log.info("[SCAN] Cycle #%s berhenti: anggaran waktu %.0fs habis.", cycle, SCAN_CYCLE_TIME_BUDGET_SECONDS)
+                break
+            if self._resource.level == "CRITICAL" or (self._resource.level == "HIGH" and pair not in due_set):
+                funnel["memory_skipped"] += 1
+                continue
+            if funnel["rate_limited"] >= 3:
+                log.info("[SCAN] Cycle #%s berhenti: rate-limit berulang.", cycle)
+                break
+            headroom = self._api_headroom_pct()
+            if headroom is not None and headroom < SCAN_MIN_API_HEADROOM_PCT and pair not in due_set:
+                funnel["api_stopped"] = funnel.get("api_stopped", 0) + 1
+                log.info("[SCAN] Cycle #%s berhenti: headroom API %.0f%% < %.0f%%.", cycle, headroom, SCAN_MIN_API_HEADROOM_PCT)
+                break
+
+            scanned += 1
+            self._sweep["done"].add(pair)
+            log.info(
+                "[SCAN] Cycle #%s pair %s/%s (volume-rank=%s): %s",
                 cycle,
-                btc_trend,
+                index,
+                len(batch),
+                volume_rank_by_pair.get(pair, index),
+                pair,
             )
-        else:
-            for index, pair in enumerate(batch, start=1):
-                if scan_generation != self._scan_generation or not self._scan_user_enabled:
-                    log.info("[SCAN] Cycle #%s dibatalkan di tengah batch: generation berubah/off.", cycle)
-                    return
-                if len(self.active_trades) >= self.max_active_trades:
-                    self._scan_auto_paused = True
-                    log.info("[SCAN] Cycle #%s stopped early at max active trade.", cycle)
-                    break
 
-                if time.monotonic() - started > SCAN_CYCLE_TIME_BUDGET_SECONDS:
-                    funnel["budget_stopped"] += 1
-                    log.info("[SCAN] Cycle #%s berhenti: anggaran waktu %.0fs habis.", cycle, SCAN_CYCLE_TIME_BUDGET_SECONDS)
-                    break
-                if self._resource.level == "CRITICAL" or (self._resource.level == "HIGH" and pair not in due_set):
-                    funnel["memory_skipped"] += 1
-                    continue
-                if funnel["rate_limited"] >= 3:
-                    log.info("[SCAN] Cycle #%s berhenti: rate-limit berulang.", cycle)
-                    break
-                headroom = self._api_headroom_pct()
-                if headroom is not None and headroom < SCAN_MIN_API_HEADROOM_PCT and pair not in due_set:
-                    funnel["api_stopped"] = funnel.get("api_stopped", 0) + 1
-                    log.info("[SCAN] Cycle #%s berhenti: headroom API %.0f%% < %.0f%%.", cycle, headroom, SCAN_MIN_API_HEADROOM_PCT)
-                    break
+            try:
+                structure, reused_setup = await self._scan_get_structure(module, pair, cycle)
+                pair_trend = str(structure.get("trend") or "UNKNOWN").upper()
+                direction_counts[pair_trend if pair_trend in direction_counts else "UNKNOWN"] += 1
 
-                scanned += 1
-                self._sweep["done"].add(pair)
-                log.info(
-                    "[SCAN] Cycle #%s pair %s/%s (volume-rank=%s): %s",
-                    cycle,
-                    index,
-                    len(batch),
-                    volume_rank_by_pair.get(pair, index),
-                    pair,
+                aligned = (
+                    (btc_trend == "BULLISH" and pair_trend == "BULLISH")
+                    or (btc_trend == "BEARISH" and pair_trend == "BEARISH")
+                    or (btc_trend == "RANGE" and pair_trend in {"BULLISH", "BEARISH", "RANGE"})
                 )
+                # BTC/pair H4 mismatch is context, not a hard rejection.
+                btc_structure_conflict = not aligned
 
+                directional.append(pair)
+                funnel["structure_analyzed"] += 1
+                funnel["direction_thesis"] += 1
+
+                candidate = reused_setup
+                if candidate is None:
+                    candidate = await self._scan_generate_for_pair(module, pair, cycle)
+                funnel["candidates_evaluated"] += 1
+
+                candidate["analysis"] = candidate.get("analysis") or {}
+                candidate["analysis"].setdefault("scan", {})
+                candidate["analysis"]["scan"].update({
+                    "cycle": cycle,
+                    "btc_h4_trend": btc_trend,
+                    "pair_h4_trend": pair_trend,
+                    "batch_rank": index,
+                    "batch_limit": SCAN_MAX_PAIRS_PER_CYCLE,
+                })
+
+                # BTC regime/impulse modifies confidence; it is not a hard veto.
+                direction = str(candidate.get("direction") or "").upper()
+                btc_confidence = 50.0
                 try:
-                    structure, reused_setup = await self._scan_get_structure(module, pair, cycle)
-                    pair_trend = str(structure.get("trend") or "UNKNOWN").upper()
-                    direction_counts[pair_trend if pair_trend in direction_counts else "UNKNOWN"] += 1
-
-                    aligned = (
-                        (btc_trend == "BULLISH" and pair_trend == "BULLISH")
-                        or (btc_trend == "BEARISH" and pair_trend == "BEARISH")
-                        or (btc_trend == "RANGE" and pair_trend in {"BULLISH", "BEARISH", "RANGE"})
-                    )
-                    # BTC/pair H4 mismatch is context, not a hard rejection.
-                    btc_structure_conflict = not aligned
-
-                    directional.append(pair)
-                    funnel["structure_analyzed"] += 1
-                    funnel["direction_thesis"] += 1
-
-                    candidate = reused_setup
-                    if candidate is None:
-                        candidate = await self._scan_generate_for_pair(module, pair, cycle)
-                    funnel["candidates_evaluated"] += 1
-
-                    candidate["analysis"] = candidate.get("analysis") or {}
-                    candidate["analysis"].setdefault("scan", {})
-                    candidate["analysis"]["scan"].update({
-                        "cycle": cycle,
-                        "btc_h4_trend": btc_trend,
-                        "pair_h4_trend": pair_trend,
-                        "batch_rank": index,
-                        "batch_limit": SCAN_MAX_PAIRS_PER_CYCLE,
-                    })
-
-                    # BTC regime/impulse modifies confidence; it is not a hard veto.
-                    direction = str(candidate.get("direction") or "").upper()
-                    btc_confidence = 50.0
-                    try:
-                        btc_confidence = float((((structure.get("analysis") or {}).get("btc_regime") or {}).get("confidence")) or 50.0)
-                    except (TypeError, ValueError):
-                        pass
-                    btc_delta = 0.0
-                    if btc_trend in {"BULLISH", "BEARISH"} and direction in {"BUY", "SELL"}:
-                        same_way = (btc_trend == "BULLISH" and direction == "BUY") or (btc_trend == "BEARISH" and direction == "SELL")
-                        if same_way:
-                            btc_delta += 4.0
-                        else:
-                            btc_delta -= 6.0 + 6.0 * max(0.0, min(1.0, (btc_confidence - 50.0) / 50.0))
-                    if btc_structure_conflict:
-                        btc_delta -= 3.0
-                    impulse_conflict = self._btc_impulse_conflict(direction)
-                    if impulse_conflict:
-                        btc_delta -= 8.0
-                    try:
-                        raw_confidence = float(candidate.get("confidence", 0.0))
-                    except (TypeError, ValueError):
-                        raw_confidence = 0.0
-                    adjusted_confidence = max(0.0, min(100.0, raw_confidence + btc_delta))
-                    candidate["confidence"] = adjusted_confidence
-                    candidate["analysis"] = candidate.get("analysis") or {}
-                    candidate["analysis"]["confidence_adjustments"] = candidate["analysis"].get("confidence_adjustments") or {}
-                    candidate["analysis"]["confidence_adjustments"]["btc_context"] = {
-                        "btc_trend": btc_trend, "btc_confidence": btc_confidence,
-                        "pair_trend": pair_trend, "direction": direction,
-                        "structure_conflict": btc_structure_conflict,
-                        "impulse_conflict": bool(impulse_conflict),
-                        "raw_confidence": round(raw_confidence, 2),
-                        "delta": round(btc_delta, 2),
-                        "adjusted_confidence": round(adjusted_confidence, 2),
-                        "policy": "confidence_modifier_not_veto",
-                    }
-                    confidence = Decimal(str(candidate["confidence"]))
-                    cstate = str(candidate.get("candidate_state") or "READY")
-                    cand_rec = build_candidate_from_setup(pair, candidate, cycle_id=cycle_id, now=cycle_now, strategy_name="SMC_VLT_RSI")
-                    self._retry_counts.pop(pair, None)
-                    candidate["_candidate_id"] = cand_rec.candidate_id
-                    if impulse_conflict:
-                        log.info("[SCAN] %s BTC impulse conflict; confidence penalty %.1f, not rejected", pair, btc_delta)
-                    if cstate in {"DATA_UNAVAILABLE", "REJECTED_HARD", "REJECTED_QUALITY"}:
-                        key = {"DATA_UNAVAILABLE": "data_unavailable", "REJECTED_HARD": "hard_rejects"}.get(cstate, "quality_rejects")
-                        funnel[key] += 1
-                        if cstate == "DATA_UNAVAILABLE":
-                            funnel["data_stale"] += 1
-                        self._observe_candidate(cand_rec)
-                        self._recheck.set(pair, next_evaluate_ts(cstate, now_ts, self._retry_counts.get(pair, 0)), cand_rec.state_reason or cstate, cstate)
-                        log.info("[SCAN] %s %s (%s) | confidence=%s", pair, cstate, cand_rec.state_reason, decimal_to_str(confidence))
-                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-                        continue
-                    if confidence < self.scan_threshold:
-                        threshold_banned += 1
-                        gates = (
-                            ((candidate.get("analysis") or {}).get("selected_setup") or {}).get("evidence")
-                            or {}
-                        ).get("gates") or {}
-                        waiting = bool(gates.get("waiting"))
-                        near = float(confidence) >= float(self.scan_threshold) - RESEARCH_NEAR_THRESHOLD_POINTS
-                        if waiting or cstate == "WAITING_TRIGGER":
-                            new_state, why = "WAITING_TRIGGER", ("MOMENTUM_NOT_READY" if cand_rec.state_reason == "MOMENTUM_NOT_READY" else "TRIGGER_NOT_CONFIRMED")
-                            funnel["waiting_trigger"] += 1
-                        elif near:
-                            new_state, why = "WAITING_PRICE", "BELOW_THRESHOLD_WATCH"
-                            funnel["waiting_price"] += 1
-                        else:
-                            new_state, why = "REJECTED_QUALITY", "BELOW_THRESHOLD"
-                            funnel["quality_rejects"] += 1
-                        cand_rec.state, cand_rec.state_reason = new_state, why
-                        cand_rec.next_evaluate_after_utc = _r_iso(datetime.fromtimestamp(next_evaluate_ts(new_state, now_ts), tz=timezone.utc))
-                        self._observe_candidate(cand_rec)
-                        if new_state == "REJECTED_QUALITY":
-                            self._recheck.set(pair, next_boundary_ts(now_ts, 4 * 3600), "BELOW_THRESHOLD", new_state)
-                        log.info(
-                            "[SCAN] %s below threshold -> %s (%s) | confidence=%s threshold=%s",
-                            pair, new_state, why, decimal_to_str(confidence), decimal_to_str(self.scan_threshold),
-                        )
-                        await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-                        continue
-
-                    threshold_candidates.append(candidate)
-                    funnel["ready"] += 1
-                    if cand_rec.state == "WAITING_TRIGGER":
-                        cand_rec.state, cand_rec.state_reason = "READY", "READY_WAITING_TRIGGER_PENALIZED"
-                    self._observe_candidate(cand_rec)
-                    log.info(
-                        "[SCAN] %s threshold PASS confidence=%s",
-                        pair,
-                        decimal_to_str(confidence),
-                    )
-                except Exception as exc:
-                    analysis_errors += 1
-                    self._sweep["done"].discard(pair)
-                    err_cat = classify_error(exc)
-                    funnel["errors"][err_cat] = funnel["errors"].get(err_cat, 0) + 1
-                    if err_cat == ErrorCategory.RATE_LIMIT or getattr(exc, "binance_rate_limited", False):
-                        funnel["rate_limited"] += 1
-                    if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
-                        retry_after = max(
-                            float(getattr(exc, "bot_cooldown_seconds", 0.0) or 0.0),
-                            float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
-                            float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
-                        )
-                        self._binance_public_cooldown_until = max(
-                            self._binance_public_cooldown_until,
-                            time.monotonic() + max(5.0, retry_after),
-                        )
-                        rate_limit_pause = True
-                        log.warning(
-                            "[SCAN] analysis %s kena Binance Public REST rate limit | cooldown=%.2fs | sisa batch ditunda | %s",
-                            pair,
-                            float(retry_after or 0.0),
-                            exc,
-                        )
-                    elif getattr(exc, "insufficient_history", False):
-                        # Listing baru / candle kurang: ban sementara, tanpa traceback.
-                        funnel["data_unavailable"] += 1
-                        self._recheck.set(pair, now_ts + float(SCAN_BANNED_HISTORY_HOURS) * 3600.0, "INSUFFICIENT_HISTORY", "DATA_UNAVAILABLE")
-                        self._observe_candidate(synthetic_observation(pair, "DATA_UNAVAILABLE", "DATA_INSUFFICIENT", cycle_id=cycle_id, now=cycle_now))
-                        log.info("[SCAN] %s dilewati, riwayat candle kurang | %s", pair, exc)
+                    btc_confidence = float((((structure.get("analysis") or {}).get("btc_regime") or {}).get("confidence")) or 50.0)
+                except (TypeError, ValueError):
+                    pass
+                btc_delta = 0.0
+                if btc_trend in {"BULLISH", "BEARISH"} and direction in {"BUY", "SELL"}:
+                    same_way = (btc_trend == "BULLISH" and direction == "BUY") or (btc_trend == "BEARISH" and direction == "SELL")
+                    if same_way:
+                        btc_delta += 4.0
                     else:
-                        log.exception("[SCAN] analysis error %s", pair)
-                        retries = self._retry_counts[pair] = min(self._retry_counts.get(pair, 0) + 1, 6)
-                        funnel["data_unavailable"] += 1
-                        self._recheck.set(pair, next_evaluate_ts("DATA_UNAVAILABLE", now_ts, retries), err_cat, "DATA_UNAVAILABLE")
-                        self._observe_candidate(synthetic_observation(pair, "DATA_UNAVAILABLE", err_cat, cycle_id=cycle_id, now=cycle_now, retries=retries))
-
-                if not rate_limit_pause:
+                        btc_delta -= 6.0 + 6.0 * max(0.0, min(1.0, (btc_confidence - 50.0) / 50.0))
+                if btc_structure_conflict:
+                    btc_delta -= 3.0
+                impulse_conflict = self._btc_impulse_conflict(direction)
+                if impulse_conflict:
+                    btc_delta -= 8.0
+                try:
+                    raw_confidence = float(candidate.get("confidence", 0.0))
+                except (TypeError, ValueError):
+                    raw_confidence = 0.0
+                adjusted_confidence = max(0.0, min(100.0, raw_confidence + btc_delta))
+                candidate["confidence"] = adjusted_confidence
+                candidate["analysis"] = candidate.get("analysis") or {}
+                candidate["analysis"]["confidence_adjustments"] = candidate["analysis"].get("confidence_adjustments") or {}
+                candidate["analysis"]["confidence_adjustments"]["btc_context"] = {
+                    "btc_trend": btc_trend, "btc_confidence": btc_confidence,
+                    "pair_trend": pair_trend, "direction": direction,
+                    "structure_conflict": btc_structure_conflict,
+                    "impulse_conflict": bool(impulse_conflict),
+                    "raw_confidence": round(raw_confidence, 2),
+                    "delta": round(btc_delta, 2),
+                    "adjusted_confidence": round(adjusted_confidence, 2),
+                    "policy": "confidence_modifier_not_veto",
+                }
+                confidence = Decimal(str(candidate["confidence"]))
+                cstate = str(candidate.get("candidate_state") or "READY")
+                cand_rec = build_candidate_from_setup(pair, candidate, cycle_id=cycle_id, now=cycle_now, strategy_name="SMC_VLT_RSI")
+                self._retry_counts.pop(pair, None)
+                candidate["_candidate_id"] = cand_rec.candidate_id
+                if impulse_conflict:
+                    log.info("[SCAN] %s BTC impulse conflict; confidence penalty %.1f, not rejected", pair, btc_delta)
+                if cstate in {"DATA_UNAVAILABLE", "REJECTED_HARD", "REJECTED_QUALITY"}:
+                    key = {"DATA_UNAVAILABLE": "data_unavailable", "REJECTED_HARD": "hard_rejects"}.get(cstate, "quality_rejects")
+                    funnel[key] += 1
+                    if cstate == "DATA_UNAVAILABLE":
+                        funnel["data_stale"] += 1
+                    self._observe_candidate(cand_rec)
+                    self._recheck.set(pair, next_evaluate_ts(cstate, now_ts, self._retry_counts.get(pair, 0)), cand_rec.state_reason or cstate, cstate)
+                    log.info("[SCAN] %s %s (%s) | confidence=%s", pair, cstate, cand_rec.state_reason, decimal_to_str(confidence))
                     await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-                else:
-                    log.warning(
-                        "[SCAN] batch dihentikan untuk mematuhi Binance rate limit; pasangan belum diproses akan dicoba pada siklus berikutnya."
+                    continue
+                if confidence < self.scan_threshold:
+                    threshold_banned += 1
+                    gates = (
+                        ((candidate.get("analysis") or {}).get("selected_setup") or {}).get("evidence")
+                        or {}
+                    ).get("gates") or {}
+                    waiting = bool(gates.get("waiting"))
+                    near = float(confidence) >= float(self.scan_threshold) - RESEARCH_NEAR_THRESHOLD_POINTS
+                    if waiting or cstate == "WAITING_TRIGGER":
+                        new_state, why = "WAITING_TRIGGER", ("MOMENTUM_NOT_READY" if cand_rec.state_reason == "MOMENTUM_NOT_READY" else "TRIGGER_NOT_CONFIRMED")
+                        funnel["waiting_trigger"] += 1
+                    elif near:
+                        new_state, why = "WAITING_PRICE", "BELOW_THRESHOLD_WATCH"
+                        funnel["waiting_price"] += 1
+                    else:
+                        new_state, why = "REJECTED_QUALITY", "BELOW_THRESHOLD"
+                        funnel["quality_rejects"] += 1
+                    cand_rec.state, cand_rec.state_reason = new_state, why
+                    cand_rec.next_evaluate_after_utc = _r_iso(datetime.fromtimestamp(next_evaluate_ts(new_state, now_ts), tz=timezone.utc))
+                    self._observe_candidate(cand_rec)
+                    if new_state == "REJECTED_QUALITY":
+                        self._recheck.set(pair, next_boundary_ts(now_ts, 4 * 3600), "BELOW_THRESHOLD", new_state)
+                    log.info(
+                        "[SCAN] %s below threshold -> %s (%s) | confidence=%s threshold=%s",
+                        pair, new_state, why, decimal_to_str(confidence), decimal_to_str(self.scan_threshold),
                     )
-                    break
+                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                    continue
+
+                threshold_candidates.append(candidate)
+                funnel["ready"] += 1
+                if cand_rec.state == "WAITING_TRIGGER":
+                    cand_rec.state, cand_rec.state_reason = "READY", "READY_WAITING_TRIGGER_PENALIZED"
+                self._observe_candidate(cand_rec)
+                log.info(
+                    "[SCAN] %s threshold PASS confidence=%s",
+                    pair,
+                    decimal_to_str(confidence),
+                )
+            except Exception as exc:
+                analysis_errors += 1
+                self._sweep["done"].discard(pair)
+                err_cat = classify_error(exc)
+                funnel["errors"][err_cat] = funnel["errors"].get(err_cat, 0) + 1
+                if err_cat == ErrorCategory.RATE_LIMIT or getattr(exc, "binance_rate_limited", False):
+                    funnel["rate_limited"] += 1
+                if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
+                    retry_after = max(
+                        float(getattr(exc, "bot_cooldown_seconds", 0.0) or 0.0),
+                        float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
+                        float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                    )
+                    self._binance_public_cooldown_until = max(
+                        self._binance_public_cooldown_until,
+                        time.monotonic() + max(5.0, retry_after),
+                    )
+                    rate_limit_pause = True
+                    log.warning(
+                        "[SCAN] analysis %s kena Binance Public REST rate limit | cooldown=%.2fs | sisa batch ditunda | %s",
+                        pair,
+                        float(retry_after or 0.0),
+                        exc,
+                    )
+                elif getattr(exc, "insufficient_history", False):
+                    # Listing baru / candle kurang: ban sementara, tanpa traceback.
+                    funnel["data_unavailable"] += 1
+                    self._recheck.set(pair, now_ts + float(SCAN_BANNED_HISTORY_HOURS) * 3600.0, "INSUFFICIENT_HISTORY", "DATA_UNAVAILABLE")
+                    self._observe_candidate(synthetic_observation(pair, "DATA_UNAVAILABLE", "DATA_INSUFFICIENT", cycle_id=cycle_id, now=cycle_now))
+                    log.info("[SCAN] %s dilewati, riwayat candle kurang | %s", pair, exc)
+                else:
+                    log.exception("[SCAN] analysis error %s", pair)
+                    retries = self._retry_counts[pair] = min(self._retry_counts.get(pair, 0) + 1, 6)
+                    funnel["data_unavailable"] += 1
+                    self._recheck.set(pair, next_evaluate_ts("DATA_UNAVAILABLE", now_ts, retries), err_cat, "DATA_UNAVAILABLE")
+                    self._observe_candidate(synthetic_observation(pair, "DATA_UNAVAILABLE", err_cat, cycle_id=cycle_id, now=cycle_now, retries=retries))
+
+            if not rate_limit_pause:
+                await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+            else:
+                log.warning(
+                    "[SCAN] batch dihentikan untuk mematuhi Binance rate limit; pasangan belum diproses akan dicoba pada siklus berikutnya."
+                )
+                break
 
         if rate_limit_pause:
             # A validator would make more Binance requests immediately after a 429/418.
@@ -15573,7 +15474,6 @@ class TradingEngine:
             f"├ ⌛ Expired  {stats['expired']}  ({pct(stats['expired_rate_all'])} history)",
             f"├ 🗑 Deleted  {stats['deleted']}  ({pct(stats['deleted_rate_all'])} history)",
             f"├ ✋ Manual   pending {stats['manual_close_pending']}  •  filled@0% {stats['manual_close_filled']}",
-            f"└ ⛔ Invalid BTC  {sum(1 for r_ in self.history_records if r_.get('result') == 'INVALID_BTC')}  (setup pending dibatalkan karena BTC berbalik)",
             "",
             "💰 PERFORMA",
             f"├ Net PnL        {format_pct(stats['gross_pnl_percent'])}",
@@ -16659,7 +16559,7 @@ class TradingEngine:
             "/unban PAIR|all - hapus ban\n"
             "/stats - statistik histori + R-metrik\n"
             "/trailmode [structure|ladder] - mode trailing SL otomatis\n"
-            "/btcwatch [on|off|close on|off] - batalkan setup pending & tutup posisi aktif bila BTC berbalik\n"
+            "/btcwatch [on|off] - status BTC & penalti impuls confidence (tidak membatalkan/menutup setup)\n"
             "/h4cycles [n] - batas siklus scan per window H4 (default 10)\n"
             "/export - ekspor dataset CSV (kandidat, replay, trade) ke GitHub\n"
             "/drawdown [%|off|reset] - tutup SEMUA /trade bila equity turun dari puncak\n"
