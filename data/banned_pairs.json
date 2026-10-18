@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-18T16:05:11.565424+00:00",
+  "saved_at": "2026-10-18T16:10:31.573006+00:00",
   "bans": [
     {
       "pair": "ARBUSDT",
@@ -34,6 +34,13 @@
       "pair": "ENAUSDT",
       "banned_at": "2026-10-18T14:56:36.825479+00:00",
       "until": "2026-10-18T22:56:36.825455+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "IOTXUSDT",
+      "banned_at": "2026-10-18T16:10:31.572861+00:00",
+      "until": "2026-10-19T00:10:31.572833+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
