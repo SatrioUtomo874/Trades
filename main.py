@@ -159,6 +159,11 @@ BINANCE_RATE_LIMIT_SAFETY_SECONDS = 60
 REAL_RECONCILE_INTERVAL_SECONDS = 2.0
 REAL_PENDING_POLL_SECONDS = 5.0
 REAL_PROTECT_CHECK_SECONDS = 60.0
+BINANCE_RATE_LIMIT_PRIORITY_SAFETY_SECONDS = 60  # jeda tambahan TP/SL & cancel prioritas; 0 = tepat di Retry-After
+BINANCE_BAN_FALLBACK_SECONDS = 120  # 418 tanpa Retry-After: ban minimal 2 menit
+LIMIT_HOLD_WEIGHT_RATIO = 0.80  # bobot IP >= rasio ini: order LIMIT dibatalkan lebih dulu (0 = nonaktif)
+LIMIT_HOLD_RESUME_RATIO = 0.50  # order dipasang ulang hanya bila bobot IP di bawah rasio ini
+LIMIT_HOLD_TICK_SECONDS = 5.0
 BALANCE_STALE_SECONDS = 60.0  # /trade segarkan saldo bila cache lebih tua
 AUTOSTOP_CHECK_SECONDS = 30.0
 # Auto-trailing: saat profit >= trigger_R, SL pindah ke entry +/- lock_R x risiko awal.
@@ -992,7 +997,33 @@ ENDPOINT_WEIGHTS = {
     "/fapi/v3/balance": 5,
     "/fapi/v2/account": 5,
     "/fapi/v1/accountConfig": 5,
+    "/fapi/v1/userTrades": 5,
 }
+
+
+def parse_ban_until_ms(text: Any) -> int | None:
+    match = re.search(r"banned until (\d{10,13})", str(text or ""))
+    if match is None:
+        return None
+    value = int(match.group(1))
+    return value * 1000 if value < 10**11 else value
+
+
+def rate_limit_wait(response: Any, offset_ms: int = 0) -> tuple[float, bool]:
+    """Detik tunggu dari Retry-After dan/atau 'banned until' (ambil yang terpanjang)."""
+    retry: float | None = None
+    try:
+        retry = max(0.0, float(response.headers.get("Retry-After") or ""))
+    except (TypeError, ValueError):
+        retry = None
+    ban_ms = parse_ban_until_ms(getattr(response, "text", ""))
+    if ban_ms is not None:
+        ban_s = max(0.0, ban_ms / 1000.0 - (time.time() + offset_ms / 1000.0))
+        retry = ban_s if retry is None else max(retry, ban_s)
+    if retry is not None:
+        return retry, True
+    status = getattr(response, "status_code", 0)
+    return float(BINANCE_BAN_FALLBACK_SECONDS if status == 418 else BINANCE_RATE_LIMIT_FALLBACK_SECONDS), False
 
 
 class ApiStats:
@@ -1078,11 +1109,7 @@ class BinanceREST:
                 response.headers.get("X-MBX-USED-WEIGHT-1M"),
             )
             if response.status_code in {418, 429}:
-                try:
-                    retry = float(response.headers.get("Retry-After") or "")
-                except ValueError:
-                    retry = None
-                server = retry if retry is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
+                server, known = rate_limit_wait(response)
                 raise BinanceRateLimitError(
                     f"Binance REST {path}: HTTP {response.status_code}",
                     status_code=response.status_code,
@@ -1090,7 +1117,7 @@ class BinanceREST:
                     endpoint=path,
                     server_cooldown_seconds=server,
                     bot_cooldown_seconds=server + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
-                    retry_after_known=retry is not None,
+                    retry_after_known=known,
                 )
 
             if response.status_code >= 400:
@@ -1346,7 +1373,10 @@ class BinanceRealClient:
     def apply_cooldown(self, server_seconds: float, bot_seconds: float) -> None:
         now = time.monotonic()
         self._cooldown_until = max(self._cooldown_until, now + bot_seconds)
-        self._server_cooldown_until = max(self._server_cooldown_until, now + server_seconds)
+        self._server_cooldown_until = max(
+            self._server_cooldown_until,
+            now + server_seconds + BINANCE_RATE_LIMIT_PRIORITY_SAFETY_SECONDS,
+        )
 
     def _signed_query(self, params: dict[str, Any]) -> dict[str, Any]:
         result = dict(params)
@@ -1465,8 +1495,7 @@ class BinanceRealClient:
             response.headers.get("X-MBX-USED-WEIGHT-1M"),
         )
         if response.status_code in {418, 429}:
-            retry_after = self._parse_retry_after(response)
-            server_seconds = retry_after if retry_after is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
+            server_seconds, retry_known = rate_limit_wait(response, self._time_offset_ms)
             bot_seconds = server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS
             self.apply_cooldown(server_seconds, bot_seconds)
             code, msg = self._extract_binance_error(response)
@@ -1477,7 +1506,7 @@ class BinanceRealClient:
                 endpoint=path,
                 server_cooldown_seconds=server_seconds,
                 bot_cooldown_seconds=bot_seconds,
-                retry_after_known=(retry_after is not None),
+                retry_after_known=retry_known,
             )
 
         if response.status_code >= 400:
@@ -1669,6 +1698,15 @@ class BinanceRealClient:
         )
         if not isinstance(payload, list):
             raise BinanceAPIError("Respons openOrders Binance tidak valid.", endpoint="/fapi/v1/openOrders")
+        return [item for item in payload if isinstance(item, dict)]
+
+    async def get_user_trades(self, symbol: str, start_time_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"symbol": symbol, "limit": limit}
+        if start_time_ms:
+            params["startTime"] = int(start_time_ms)
+        payload = await self._request("GET", "/fapi/v1/userTrades", params)
+        if not isinstance(payload, list):
+            raise BinanceAPIError("Respons userTrades Binance tidak valid.", endpoint="/fapi/v1/userTrades")
         return [item for item in payload if isinstance(item, dict)]
 
     async def cancel_order(self, symbol: str, *, order_id: int | None = None, client_order_id: str | None = None) -> dict[str, Any]:
@@ -2763,6 +2801,9 @@ def _gz_pack(lines: list[str]) -> bytes:
     return gzip.compress(("\n".join(lines) + "\n").encode("utf-8"), 6)
 EST_FEE_PCT_PER_SIDE = _cfg_float("EST_FEE_PCT_PER_SIDE", 0.05, 0.0, 5.0)
 EST_SLIPPAGE_PCT_PER_SIDE = _cfg_float("EST_SLIPPAGE_PCT_PER_SIDE", 0.03, 0.0, 5.0)
+# Entry limit = maker tanpa slippage; exit market = taker + slippage.
+EST_ENTRY_FEE_PCT = _cfg_float("EST_ENTRY_FEE_PCT", 0.02, 0.0, 5.0)
+EST_ENTRY_SLIPPAGE_PCT = _cfg_float("EST_ENTRY_SLIPPAGE_PCT", 0.0, 0.0, 5.0)
 
 # Risk sizing: default LEGACY_NOTIONAL; RISK_BUDGET butuh konfigurasi eksplisit.
 RISK_SIZING_MODE_REQUESTED = (os.getenv("RISK_SIZING_MODE") or "LEGACY_NOTIONAL").strip().upper()
@@ -3472,6 +3513,7 @@ class ReplaySim:
         self.mode = mode or ("ladder" if trailing else "fixed")
         self.trailing = self.mode == "ladder"
         self.cost_rate = (fee_pct + slippage_pct) / 100.0
+        self.entry_cost_rate = (EST_ENTRY_FEE_PCT + EST_ENTRY_SLIPPAGE_PCT) / 100.0
         self.trail_fee_buffer_pct = trail_fee_buffer_pct
         self.risk = abs(self.entry - self.sl0)
         self.phase = "PENDING"
@@ -3589,7 +3631,7 @@ class ReplaySim:
         price = bars[-1][4]
         buffer = max(atr * REPLAY_REJ_BUFFER_ATR, price * 0.0005)
         level = level_price - buffer if self.buy else level_price + buffer
-        cost = self.cost_rate * 2.0
+        cost = self.cost_rate + self.entry_cost_rate
         min_lock = self.entry * (1 + cost) if self.buy else self.entry * (1 - cost)
         if (self.buy and level < min_lock) or (not self.buy and level > min_lock):
             return
@@ -3685,13 +3727,13 @@ class ReplaySim:
         gross_r = net_r = 0.0
         if filled and self.exit_price is not None and self.risk > 0:
             unit = (self.exit_price - self.entry) if self.buy else (self.entry - self.exit_price)
-            cost = (self.entry + self.exit_price) * self.cost_rate
+            cost = self.entry * self.entry_cost_rate + self.exit_price * self.cost_rate
             gross_r = unit / self.risk
             net_r = (unit - cost) / self.risk
         optimistic_r = None
         if self.optimistic_exit is not None and filled and self.risk > 0:
             unit = (self.optimistic_exit - self.entry) if self.buy else (self.entry - self.optimistic_exit)
-            optimistic_r = (unit - (self.entry + self.optimistic_exit) * self.cost_rate) / self.risk
+            optimistic_r = (unit - (self.entry * self.entry_cost_rate + self.optimistic_exit * self.cost_rate)) / self.risk
         return {
             "outcome": self.outcome, "filled": filled, "ambiguous": bool(self.ambiguity), "ambiguity": list(self.ambiguity),
             "entry_ms": self.entry_ms, "exit_ms": self.exit_ms, "entry_price": self.entry if filled else None,
@@ -4248,7 +4290,8 @@ def compute_risk_quantity(*, meta: Any, direction: str, entry: Decimal, sl: Deci
     fee = EST_FEE_PCT_PER_SIDE if fee_pct is None else fee_pct
     slip = EST_SLIPPAGE_PCT_PER_SIDE if slippage_pct is None else slippage_pct
     c = Decimal(str((fee + slip) / 100.0))
-    loss_per_unit = dist + (entry + sl) * c
+    ce = Decimal(str((EST_ENTRY_FEE_PCT + EST_ENTRY_SLIPPAGE_PCT) / 100.0))
+    loss_per_unit = dist + entry * ce + sl * c
     budget = _d(equity) * Decimal(str(risk_pct)) / Decimal(100)
     raw_qty = budget / loss_per_unit
     caps: list[tuple[str, Decimal]] = []
@@ -4653,7 +4696,7 @@ def record_realized_r(rec: dict[str, Any], *, net: bool = True) -> float | None:
         risk_pct = abs(base - isl) / base * 100.0
         if risk_pct <= 0:
             return None
-        cost = 2.0 * (EST_FEE_PCT_PER_SIDE + EST_SLIPPAGE_PCT_PER_SIDE) if net else 0.0
+        cost = (EST_FEE_PCT_PER_SIDE + EST_SLIPPAGE_PCT_PER_SIDE + EST_ENTRY_FEE_PCT + EST_ENTRY_SLIPPAGE_PCT) if net else 0.0
         return (float(pnl) - cost) / risk_pct
     except (TypeError, ValueError, KeyError, ZeroDivisionError):
         return None
@@ -4799,6 +4842,12 @@ class TradingEngine:
         self._deferred_fill: dict[str, float] = {}
         self._deferred_protect: dict[str, float] = {}
         self._deferred_cleanup: dict[str, Trade] = {}
+        # Limit hold: order LIMIT dibatalkan saat Binance limit, dipasang ulang bila setup masih valid.
+        self._hold_cancel_queue: dict[str, Trade] = {}
+        self._limit_hold_until = 0.0
+        self._limit_hold_tick_at = 0.0
+        self._limit_hold_reason = ""
+        self._limit_hold_lock = asyncio.Lock()
         self._trail_busy: set[str] = set()
         self._trail_next_check: dict[str, float] = {}
         self._deferred_trail: dict[str, tuple[Decimal, str, str, Decimal]] = {}
@@ -5427,7 +5476,9 @@ class TradingEngine:
     def _notify_rate_limit(self, exc: BinanceRateLimitError, action: str) -> None:
         """Satu pesan per jeda limit; penolakan cooldown internal tidak dikirim."""
         self._start_rate_limit_watcher()
-        if getattr(exc, "internal", False):
+        internal = bool(getattr(exc, "internal", False))
+        self._engage_limit_hold(extend=not internal, reason=f"HTTP {exc.status_code} {exc.endpoint}")
+        if internal:
             return
         bot = max(0.0, exc.bot_cooldown_seconds)
         now = time.monotonic()
@@ -5450,6 +5501,7 @@ class TradingEngine:
                         f"▶️ Lanjut    {format_wib(now_utc() + timedelta(seconds=bot))}",
                         "📌 Ditunda: scan & operasi REAL yang membutuhkan REST. Autostop tetap dihitung dari snapshot lokal.",
                         "👀 Harga tetap dipantau via WebSocket; autostop tetap aktif secara lokal dan tidak menunggu REST.",
+                        "🧹 Order LIMIT entry dibatalkan begitu API boleh dipakai; SL tersentuh = setup dihapus, selain itu dipasang ulang.",
                         "Lanjut otomatis dan dikabari saat Binance tersambung.",
                     ],
                 )
@@ -5500,8 +5552,7 @@ class TradingEngine:
                 response = getattr(exc, "response", None)
                 status = getattr(response, "status_code", None)
                 if status in (418, 429):
-                    retry = self.real._parse_retry_after(response)
-                    server = retry if retry is not None else BINANCE_RATE_LIMIT_FALLBACK_SECONDS
+                    server, known = rate_limit_wait(response, self.real._time_offset_ms)
                     bot = server + BINANCE_RATE_LIMIT_SAFETY_SECONDS
                     self.real.apply_cooldown(server, bot)
                     self._notify_rate_limit(
@@ -5512,7 +5563,7 @@ class TradingEngine:
                             endpoint="/fapi/v1/time",
                             server_cooldown_seconds=server,
                             bot_cooldown_seconds=bot,
-                            retry_after_known=retry is not None,
+                            retry_after_known=known,
                         ),
                         "CEK KONEKSI",
                     )
@@ -5586,6 +5637,7 @@ class TradingEngine:
             except Exception as exc:
                 log.info("[RATE LIMIT] reconcile %s gagal: %s", trade.trade_id, exc)
             await asyncio.sleep(0.5)
+        await self._limit_hold_tick(force=True)
         await self._autostop_check()
 
     async def _handle_real_exception(self, exc: Exception, action: str, trade: Trade | None = None) -> None:
@@ -5665,9 +5717,21 @@ class TradingEngine:
         actual = quantity * entry
         return quantity, margin * Decimal(leverage), actual
 
-    async def _ensure_real_entry(self, trade: Trade) -> None:
+    async def _ensure_real_entry(self, trade: Trade, from_release: bool = False) -> None:
         if not self.real_mode or trade.entry_order_id or trade.entry_client_order_id:
             return
+        if not from_release and self._limit_hold_blocking():
+            blocked = BinanceRateLimitError(
+                "Binance limit: entry baru ditahan sementara.",
+                status_code=429,
+                code=None,
+                endpoint="/fapi/v1/order",
+                server_cooldown_seconds=15.0,
+                bot_cooldown_seconds=15.0,
+                retry_after_known=False,
+            )
+            blocked.internal = True
+            raise blocked
 
         client_id = self._client_id("ENT", trade.trade_id)
 
@@ -5855,6 +5919,8 @@ class TradingEngine:
         verified_order: dict[str, Any] | None = None,
     ) -> bool:
         if not self.real_mode or not trade.real_enabled:
+            return False
+        if trade.real_state == "REAL_LIMIT_HOLD":
             return False
 
         if trade.entry_order_id is None and not trade.entry_client_order_id and verified_order is None:
@@ -6340,6 +6406,7 @@ class TradingEngine:
         exit_side = "SELL" if trade.direction == "BUY" else "BUY"
 
         open_algos = await self.real.get_open_algo_orders(trade.pair)
+        open_algos = await self._adopt_manual_protection(trade, open_algos)
         own_by_client = {
             str(item.get("clientAlgoId") or ""): item
             for item in open_algos
@@ -6619,6 +6686,7 @@ class TradingEngine:
     def _deferred_any(self) -> bool:
         return bool(
             self._deferred_fill or self._deferred_protect or self._deferred_cleanup or self._deferred_trail
+            or self._hold_cancel_queue
         )
 
     def _defer_fill_check(self, trade: Trade, price: Decimal) -> None:
@@ -6642,6 +6710,385 @@ class TradingEngine:
             )
         )
 
+    # --------------------------------------------------------
+    # BINANCE LIMIT HOLD
+    # Order LIMIT entry dibatalkan saat Binance limit (posisi & TP/SL tidak disentuh).
+    # Setup tetap dipantau via WebSocket: SL tersentuh -> dihapus, selain itu dipasang ulang.
+    # --------------------------------------------------------
+    def _held_trades(self) -> list[Trade]:
+        return [
+            t for t in self.active_trades.values()
+            if t.real_enabled and t.status == "PENDING" and t.real_state == "REAL_LIMIT_HOLD"
+        ]
+
+    def _limit_hold_blocking(self) -> bool:
+        return (
+            time.monotonic() < self._limit_hold_until
+            or bool(self._hold_cancel_queue)
+            or bool(self._held_trades())
+        )
+
+    def _engage_limit_hold(self, extend: bool, reason: str = "") -> None:
+        """Antrekan pembatalan semua order LIMIT entry. Tanpa I/O."""
+        if not self.real_mode:
+            return
+        if extend:
+            self._limit_hold_until = max(
+                self._limit_hold_until, time.monotonic() + BINANCE_RATE_LIMIT_SAFETY_SECONDS
+            )
+            if reason:
+                self._limit_hold_reason = reason
+        for trade in self.active_trades.values():
+            if (
+                trade.real_enabled
+                and trade.status == "PENDING"
+                and trade.real_state != "REAL_LIMIT_HOLD"
+                and (trade.entry_order_id is not None or trade.entry_client_order_id)
+            ):
+                self._hold_cancel_queue.setdefault(trade.trade_id, trade)
+
+    async def _cancel_entry_for_hold(self, trade: Trade) -> bool:
+        """True = order batal/sudah tidak ada; False = ternyata sudah terisi (alur fill normal)."""
+        kwargs: dict[str, Any] = {
+            "order_id": trade.entry_order_id,
+            "client_order_id": trade.entry_client_order_id if trade.entry_order_id is None else None,
+        }
+        try:
+            await self.real.cancel_order(trade.pair, **kwargs)
+            return True
+        except BinanceRateLimitError:
+            raise
+        except BinanceAPIError as exc:
+            if exc.code not in {-2011, -2013}:
+                raise
+        try:
+            order = await self.real.get_order(trade.pair, **kwargs)
+        except BinanceRateLimitError:
+            raise
+        except BinanceAPIError as exc:
+            if exc.code == -2013:
+                return True
+            raise
+        if str(order.get("status") or "").upper() in {"FILLED", "PARTIALLY_FILLED"}:
+            await self._confirm_real_fill(trade, verified_order=order)
+            return False
+        return True
+
+    async def _flush_hold_cancels(self) -> None:
+        if not self._hold_cancel_queue or self.real.server_cooldown_remaining > 0:
+            return
+        cancelled_pairs: list[str] = []
+        for trade_id, trade in list(self._hold_cancel_queue.items()):
+            if self.active_trades.get(trade_id) is None or trade.status != "PENDING":
+                self._hold_cancel_queue.pop(trade_id, None)
+                continue
+            token = REAL_PRIORITY.set(True)
+            try:
+                cancelled = await self._cancel_entry_for_hold(trade)
+            except BinanceRateLimitError as exc:
+                self._notify_rate_limit(exc, "BATALKAN ORDER LIMIT")
+                return
+            except Exception as exc:
+                log.warning("[LIMIT HOLD] batal order %s gagal: %s", trade.trade_id, exc)
+                continue
+            finally:
+                REAL_PRIORITY.reset(token)
+            self._hold_cancel_queue.pop(trade_id, None)
+            self._deferred_fill.pop(trade_id, None)
+            if cancelled:
+                trade.entry_order_id = None
+                trade.entry_client_order_id = None
+                trade.real_state = "REAL_LIMIT_HOLD"
+                trade.real_error = None
+                cancelled_pairs.append(trade.pair)
+            await asyncio.sleep(0.3)
+        if cancelled_pairs:
+            try:
+                await self._persist_active_setups_silently()
+            except Exception:
+                log.exception("[LIMIT HOLD] gagal menyimpan setups.json")
+            await self.reply(
+                card(
+                    "🧹 ORDER LIMIT DIBATALKAN",
+                    [
+                        f"📦 {len(cancelled_pairs)} order: {', '.join(cancelled_pairs[:10])}",
+                        f"⚠️ Pemicu  {self._limit_hold_reason or 'Binance limit'}",
+                        "👀 Setup tetap dipantau via WebSocket.",
+                        "🗑 SL tersentuh = dihapus; selain itu dipasang ulang saat API aman.",
+                    ],
+                )
+            )
+
+    @staticmethod
+    def _held_invalid_reason(trade: Trade, price: Decimal) -> str | None:
+        if trade.direction == "BUY":
+            sl_hit, exp_hit = price <= trade.sl, price >= trade.price_exp
+        else:
+            sl_hit, exp_hit = price >= trade.sl, price <= trade.price_exp
+        return "SL" if sl_hit else "EXP" if exp_hit else None
+
+    async def _drop_held_trade(self, trade: Trade, kind: str, price: Decimal, detail: str = "") -> None:
+        if trade.trade_id not in self.active_trades or trade.result is not None:
+            return
+        trade.real_state = "REAL_CLOSED"
+        icon = "🟢" if trade.direction == "BUY" else "🔴"
+        if kind == "EXP":
+            await self._finalize_trade(
+                trade,
+                result="EXPIRED",
+                exit_price=price,
+                reason=trade.price_exp_reason or "Price Exp tercapai saat Binance limit.",
+            )
+            return
+        reason = (
+            "SL tersentuh saat Binance limit; order tidak jadi dipasang."
+            if kind == "SL"
+            else f"Gagal dipasang ulang setelah Binance limit: {detail}"[:240]
+        )
+        await self._finalize_trade(
+            trade, result="DELETED", exit_price=None, reason=reason, send_notification=False
+        )
+        await self.reply(
+            card(
+                "🗑️ SETUP DIHAPUS",
+                [
+                    f"{icon} {trade.pair}  •  {trade.direction}",
+                    f"🎯 Entry {fmt_price(trade.entry)}  •  🛡 SL {fmt_price(trade.sl)}",
+                    f"📡 Harga {fmt_price(price)}",
+                    f"🧠 {reason}",
+                ],
+            )
+        )
+
+    async def _release_limit_hold(self) -> None:
+        held = self._held_trades()
+        if not held or self._hold_cancel_queue:
+            return
+        now = time.monotonic()
+        if self.real.cooldown_remaining > 0 or now < self._limit_hold_until:
+            return
+        used = API_STATS.used_weight
+        if (
+            used is not None
+            and API_STATS.used_weight_at is not None
+            and now - API_STATS.used_weight_at <= 30.0
+            and used >= LIMIT_HOLD_RESUME_RATIO * BINANCE_IP_WEIGHT_LIMIT
+        ):
+            return
+        placed: list[str] = []
+        dropped: list[str] = []
+        for trade in held:
+            snapshot = self.prices.get(trade.pair)
+            if snapshot is None:
+                continue
+            kind = self._held_invalid_reason(trade, snapshot.price)
+            if kind:
+                await self._drop_held_trade(trade, kind, snapshot.price)
+                dropped.append(trade.pair)
+                continue
+            try:
+                await self._ensure_real_entry(trade, from_release=True)
+            except BinanceRateLimitError as exc:
+                trade.real_state = "REAL_LIMIT_HOLD"
+                trade.real_error = None
+                self._notify_rate_limit(exc, f"PASANG ULANG LIMIT {trade.pair}")
+                break
+            except Exception as exc:
+                log.warning("[LIMIT HOLD] pasang ulang %s gagal: %s", trade.trade_id, exc)
+                await self._drop_held_trade(trade, "ERROR", snapshot.price, detail=str(exc))
+                dropped.append(trade.pair)
+                continue
+            placed.append(trade.pair)
+            await asyncio.sleep(0.5)
+        if placed:
+            await self.reply(
+                card(
+                    "▶️ ORDER LIMIT DIPASANG ULANG",
+                    [f"✅ {len(placed)} setup masih valid: {', '.join(placed[:10])}"],
+                )
+            )
+
+    async def _limit_hold_tick(self, force: bool = False) -> None:
+        if not self.real_mode or self._limit_hold_lock.locked():
+            return
+        async with self._limit_hold_lock:
+            now = time.monotonic()
+            used = API_STATS.used_weight
+            fresh = (
+                used is not None
+                and API_STATS.used_weight_at is not None
+                and now - API_STATS.used_weight_at <= 30.0
+            )
+            if (
+                LIMIT_HOLD_WEIGHT_RATIO > 0
+                and fresh
+                and used >= LIMIT_HOLD_WEIGHT_RATIO * BINANCE_IP_WEIGHT_LIMIT
+            ):
+                self._engage_limit_hold(True, f"bobot IP {used}/{BINANCE_IP_WEIGHT_LIMIT}")
+            if self._hold_cancel_queue and self.real.server_cooldown_remaining <= 0:
+                await self._flush_hold_cancels()
+            await self._release_limit_hold()
+
+    # --------------------------------------------------------
+    # POSISI DITUTUP / TP-SL DIUBAH MANUAL DI BINANCE
+    # --------------------------------------------------------
+    async def _external_exit_price(self, trade: Trade) -> Decimal | None:
+        start = trade.filled_at or trade.created_at
+        fills = await self.real.get_user_trades(trade.pair, int(start.timestamp() * 1000) - 5000)
+        exit_side = "SELL" if trade.direction == "BUY" else "BUY"
+        qty_sum = Decimal("0")
+        notional = Decimal("0")
+        for fill in fills:
+            if str(fill.get("side") or "").upper() != exit_side:
+                continue
+            try:
+                qty = parse_decimal(str(fill.get("qty") or "0"))
+                px = parse_decimal(str(fill.get("price") or "0"))
+            except (InvalidOperation, ValueError):
+                continue
+            qty_sum += qty
+            notional += qty * px
+        return notional / qty_sum if qty_sum > 0 else None
+
+    async def _finalize_external_close(self, trade: Trade) -> None:
+        """Posisi hilang tanpa TP/SL bot terpicu: ditutup manual di Binance (atau likuidasi)."""
+        await asyncio.sleep(2.0)
+        if await self.real.get_position(trade.pair, trade.direction) is not None:
+            return  # hanya lag propagasi
+        exit_price: Decimal | None = None
+        try:
+            exit_price = await self._external_exit_price(trade)
+        except BinanceRateLimitError:
+            raise
+        except Exception as exc:
+            log.warning("Harga keluar manual %s tidak terbaca: %s", trade.trade_id, exc)
+        if exit_price is None:
+            snapshot = self.prices.get(trade.pair)
+            exit_price = snapshot.price if snapshot is not None else (trade.fill_price or trade.entry)
+        pnl = pct_change(trade.direction, trade.fill_price or trade.entry, exit_price)
+        result = "TP" if pnl > 0 else "SL" if pnl < 0 else "MANUAL_CLOSE"
+        trade.real_state = "REAL_CLOSED"
+        trade.real_error = None
+        await self._finalize_trade(
+            trade,
+            result=result,
+            exit_price=exit_price,
+            reason=f"Posisi ditutup di luar bot (manual di Binance), harga keluar ≈ {fmt_price(exit_price)}.",
+        )
+
+    async def _adopt_manual_protection(
+        self, trade: Trade, open_algos: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """TP/SL manual (bukan buatan bot) diikuti: bot tidak menimpa atau menduplikasi."""
+        if trade.pending_sl_state != "NONE":
+            return open_algos
+        exit_side = "SELL" if trade.direction == "BUY" else "BUY"
+        ref = trade.fill_price or trade.entry
+        want_ps = str(trade.position_side or "").upper()
+        buy = trade.direction == "BUY"
+        manual_sl: tuple[Decimal, dict[str, Any]] | None = None
+        manual_tp: tuple[Decimal, dict[str, Any]] | None = None
+        for item in open_algos:
+            if str(item.get("clientAlgoId") or "").startswith(("SL-", "TP-", "ENT-")):
+                continue
+            if str(item.get("side") or "").upper() != exit_side:
+                continue
+            ps = str(item.get("positionSide") or "BOTH").upper()
+            if want_ps and ps not in {"BOTH", want_ps}:
+                continue
+            if not (
+                str(item.get("closePosition")).lower() == "true"
+                or str(item.get("reduceOnly")).lower() == "true"
+            ):
+                continue
+            try:
+                trigger = parse_decimal(str(item.get("triggerPrice") or "0"))
+            except (InvalidOperation, ValueError):
+                continue
+            if trigger <= 0:
+                continue
+            is_sl = (trigger < ref) if buy else (trigger > ref)
+            if is_sl:
+                if manual_sl is None or (trigger > manual_sl[0] if buy else trigger < manual_sl[0]):
+                    manual_sl = (trigger, item)
+            elif manual_tp is None or (trigger < manual_tp[0] if buy else trigger > manual_tp[0]):
+                manual_tp = (trigger, item)
+
+        cancelled: set[str] = set()
+
+        async def cancel_bot(items: list[dict[str, Any]]) -> None:
+            for it in items:
+                try:
+                    await self.real.cancel_algo_order(symbol=trade.pair, algo_id=int(it.get("algoId")))
+                    cancelled.add(str(it.get("algoId")))
+                except (TypeError, ValueError):
+                    continue
+                except BinanceRateLimitError:
+                    raise
+                except BinanceAPIError as exc:
+                    if exc.code not in {-2011, -2013}:
+                        raise
+
+        notes: list[str] = []
+        if manual_sl is not None:
+            trigger, item = manual_sl
+            aid, cid = str(item.get("algoId") or ""), str(item.get("clientAlgoId") or "")
+            tracked = {str(v) for v in (trade.sl_algo_id, trade.sl_client_algo_id) if v not in (None, "")}
+            if aid not in tracked and cid not in tracked:
+                bot_sls = [a for a in self._find_owned_sl_orders(trade, open_algos) if str(a.get("algoId")) != aid]
+                old_sl = trade.sl
+                await cancel_bot(bot_sls)
+                trade.sl = trigger
+                trade.sl_reason = "SL manual dari Binance."
+                try:
+                    trade.sl_algo_id = int(aid)
+                except ValueError:
+                    trade.sl_algo_id = None
+                trade.sl_client_algo_id = cid or None
+                trade.risk_info = {**(trade.risk_info or {}), "manual_protect": True}
+                notes.append(f"🛡 SL  {fmt_price(old_sl)} → {fmt_price(trigger)}")
+        if manual_tp is not None:
+            trigger, item = manual_tp
+            aid, cid = str(item.get("algoId") or ""), str(item.get("clientAlgoId") or "")
+            tracked = {str(v) for v in (trade.tp_algo_id, trade.tp_client_algo_id) if v not in (None, "")}
+            if aid not in tracked and cid not in tracked:
+                prefix = f"TP-{trade.trade_id}"
+                bot_tps = [
+                    a for a in open_algos
+                    if str(a.get("algoId")) != aid
+                    and (
+                        str(a.get("clientAlgoId") or "").startswith(prefix)
+                        or str(a.get("algoId") or "") in tracked
+                        or str(a.get("clientAlgoId") or "") in tracked
+                    )
+                ]
+                old_tp = trade.tp
+                await cancel_bot(bot_tps)
+                trade.tp = trigger
+                trade.tp_reason = "TP manual dari Binance."
+                try:
+                    trade.tp_algo_id = int(aid)
+                except ValueError:
+                    trade.tp_algo_id = None
+                trade.tp_client_algo_id = cid or None
+                notes.append(f"🏁 TP  {fmt_price(old_tp)} → {fmt_price(trigger)}")
+        if notes:
+            try:
+                await self._persist_active_setups_silently()
+            except Exception:
+                log.exception("Gagal menyimpan setups.json setelah TP/SL manual %s", trade.trade_id)
+            await self.reply(
+                card(
+                    "🛠 TP/SL MANUAL TERDETEKSI",
+                    [
+                        f"{'🟢' if buy else '🔴'} {trade.pair}  •  {trade.direction}",
+                        *notes,
+                        "Bot mengikuti nilai manual; trailing otomatis nonaktif bila SL manual.",
+                    ],
+                )
+            )
+        return [a for a in open_algos if str(a.get("algoId")) not in cancelled]
+
     async def _flush_deferred(self) -> None:
         """Konfirmasi fill + pasang TP/SL SEMUA trade yang antre (stack), tanpa jeda aman bot."""
         if not self.real_mode:
@@ -6649,7 +7096,9 @@ class TradingEngine:
             self._deferred_protect.clear()
             self._deferred_cleanup.clear()
             self._deferred_trail.clear()
+            self._hold_cancel_queue.clear()
             return
+        await self._flush_hold_cancels()
         protected: list[str] = []
         for trade_id in list(dict.fromkeys([*self._deferred_protect, *self._deferred_fill])):
             trade = self.active_trades.get(trade_id)
@@ -6889,6 +7338,8 @@ class TradingEngine:
         succeeds. Any exception before NEW is confirmed leaves the old SL alive.
         """
         if not self.real_mode or not trade.real_enabled or trade.status != "FILLED":
+            return False
+        if (trade.risk_info or {}).get("manual_protect"):
             return False
 
         if trade.pending_sl_state != "NONE" and trade.pending_sl_price is not None:
@@ -7169,6 +7620,8 @@ class TradingEngine:
     async def _auto_trail(self, trade: Trade, price: Decimal) -> None:
         if not AUTO_TRAIL_ENABLED or trade.status != "FILLED" or trade.trade_id in self._trail_busy:
             return
+        if (trade.risk_info or {}).get("manual_protect"):
+            return
         if trade.pending_sl_state != "NONE":
             # A replacement is already in flight/recovery. Never start a third SL
             # or hammer Binance on every WebSocket price tick. The periodic
@@ -7221,6 +7674,8 @@ class TradingEngine:
             return
 
         if trade.status == "PENDING":
+            if trade.real_state == "REAL_LIMIT_HOLD":
+                return
             position = await self.real.get_position(trade.pair, trade.direction)
             if position is not None:
                 await self._confirm_real_fill(trade)
@@ -7359,17 +7814,7 @@ class TradingEngine:
                     )
                     return
 
-            already_flagged = trade.real_state == "REAL_ERROR"
-            trade.real_state = "REAL_ERROR"
-            trade.real_error = (
-                "Position Binance tidak ada saat /open dan penyebab penutupan "
-                "tidak dapat dipastikan dari tracked algo order."
-            )
-            if not already_flagged:
-                log.warning(
-                    "REAL position %s tidak ditemukan saat /open dan hasil close tidak dapat dipastikan.",
-                    trade.trade_id,
-                )
+            await self._finalize_external_close(trade)
 
     async def _clear_margin_bans(self) -> None:
         """Ban margin hanya valid untuk konfigurasi margin/leverage lamanya."""
@@ -8460,7 +8905,7 @@ class TradingEngine:
             return
         notional = self._sim_notional(trade)
         gross = notional * trade.pnl_percent / Decimal("100")
-        cost = notional * Decimal(str(2 * (EST_FEE_PCT_PER_SIDE + EST_SLIPPAGE_PCT_PER_SIDE))) / Decimal("100")
+        cost = notional * Decimal(str(EST_FEE_PCT_PER_SIDE + EST_SLIPPAGE_PCT_PER_SIDE + EST_ENTRY_FEE_PCT + EST_ENTRY_SLIPPAGE_PCT)) / Decimal("100")
         net = gross - cost
         self.sim_balance += net
         trade.risk_info = {**(trade.risk_info or {}), "sim_pnl_usdt": decimal_to_str(net), "sim_notional": decimal_to_str(notional)}
@@ -14838,7 +15283,7 @@ class TradingEngine:
         if self._sim_dirty:
             await self._save_sim_account()
 
-        if trade.real_enabled and result in {"TP", "SL", "TRAIL"}:
+        if trade.real_enabled and result in {"TP", "SL", "TRAIL", "MANUAL_CLOSE"}:
             await self._cleanup_real_leftovers(trade)
 
         self._trail_state.pop(trade.trade_id, None)
@@ -15025,6 +15470,10 @@ class TradingEngine:
             source="WEBSOCKET",
         )
         self._last_live_price[symbol] = price
+        now_m = time.monotonic()
+        if self.real_mode and now_m - self._limit_hold_tick_at >= LIMIT_HOLD_TICK_SECONDS:
+            self._limit_hold_tick_at = now_m
+            self._fire(self._limit_hold_tick())
 
         # Snapshot daftar trade tanpa menahan lock saat network I/O.
         relevant = [
@@ -15047,6 +15496,11 @@ class TradingEngine:
                     )
 
                     if trade.real_enabled and self.real_mode:
+                        if trade.real_state == "REAL_LIMIT_HOLD":
+                            kind = self._held_invalid_reason(trade, price)
+                            if kind:
+                                await self._drop_held_trade(trade, kind, price)
+                            continue
                         if self.real.cooldown_remaining > 0:
                             # API dibatasi: harga tetap dipantau; fill diantrekan.
                             if entry_hit:
