@@ -593,3 +593,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-19T07:39:37.949565+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## DASHUSDT — SELL
+
+Trade ID: `DASHUSDT-20261019-143538-25B251`
+
+### Setup
+
+- Price Now Reference: 49.16
+- Entry: 49.75
+- Reason Entry: DASHUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 49.78344 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_OB. Projected M15 RSI 71.1 pada entry zone.
+- Price Exp: 48.94
+- Reason Price Exp: Price Exp 48.94: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 50.1
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 49.775; SL ditempatkan di luar invalidation dan liquidity guard 49.78344.
+- TP: 48.6
+- Reason TP: TP 48.6 dipilih dari H4_LOWER_LOW dengan RR 3.29; target quality 94.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 48.94
+- Result Reason: Price Exp 48.94: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-19T07:35:38.657034+00:00
+- Filled: -
+- Closed: 2026-10-19T07:40:18.249497+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
