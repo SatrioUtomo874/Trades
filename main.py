@@ -1122,7 +1122,7 @@ class BinanceREST:
         self._exchange_info_cache_ttl_seconds = 900.0
         self._ticker_24h_cache: list[dict[str, Any]] | None = None
         self._ticker_24h_cached_at = 0.0
-        self._ticker_24h_cache_ttl_seconds = 10.0
+        self._ticker_24h_cache_ttl_seconds = 60.0
 
     async def _get(
         self,
@@ -9467,6 +9467,12 @@ class TradingEngine:
         strategy_path = BASE_DIR / "strategy.py"
         if not strategy_path.is_file():
             raise RuntimeError(f"strategy.py tidak ditemukan: {strategy_path}")
+        # Modul dipakai ulang selama file tidak berubah: cache candle & pacing request tetap hidup.
+        stat = strategy_path.stat()
+        signature = (stat.st_mtime_ns, stat.st_size)
+        current = getattr(self, "_strategy_runtime_module", None)
+        if current is not None and getattr(self, "_strategy_runtime_signature", None) == signature:
+            return current
         module_name = f"trading_strategy_scan_{int(time.time() * 1000)}"
         spec = importlib.util.spec_from_file_location(module_name, strategy_path)
         if spec is None or spec.loader is None:
@@ -9479,6 +9485,7 @@ class TradingEngine:
         if previous is not None:
             sys.modules.pop(getattr(previous, "__name__", ""), None)
         self._strategy_runtime_module = module
+        self._strategy_runtime_signature = signature
         return module
 
     async def _call_strategy_function(self, module, name: str, *args, **kwargs):
