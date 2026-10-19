@@ -112,6 +112,10 @@ CANDLE_CACHE_TTL_H4 = _env_float("CANDLE_CACHE_TTL_H4", 600.0, 1.0, 14400.0)
 CANDLE_BYTES_ESTIMATE = 120
 SERIES_MIN_REFETCH_SECONDS = 3.0
 SERIES_PROVIDER_LAG_GRACE_SECONDS = 20.0
+SERIES_INCREMENTAL_MAX_CANDLES = 60  # cache basi <= N candle: ambil candle baru saja (bobot 1)
+SERIES_MAX_CANDLES = 1500
+SCAN_WEIGHT_BUDGET_PER_MINUTE = _env_int("SCAN_WEIGHT_BUDGET_PER_MINUTE", 1200, 100, 2400)  # jatah scan dari 2400 bobot IP/menit
+SCAN_HEADER_PAUSE_WEIGHT = 1900  # header bobot IP setinggi ini: scan jeda dulu
 SERIES_MAX_INVALID_FRACTION = 0.02
 VALIDATION_MAX_AGE_M15 = _env_float("VALIDATION_MAX_AGE_M15", 30.0, 1.0, 600.0)
 VALIDATION_MAX_AGE_H4 = _env_float("VALIDATION_MAX_AGE_H4", 300.0, 1.0, 3600.0)
@@ -680,11 +684,23 @@ class BinanceRateLimitError(RuntimeError):
         super().__init__(message)
 
 
+def _request_weight(path: str, params: dict[str, Any]) -> int:
+    if path.endswith("/klines"):
+        limit = int(params.get("limit") or 500)
+        return 1 if limit < 100 else 2 if limit < 500 else 5 if limit <= 1000 else 10
+    if path.endswith("/ticker/24hr") and not params.get("symbol"):
+        return 40
+    return 1
+
+
 class BinanceProvider(HTTPProvider):
     _request_lock: asyncio.Lock | None = None
     _last_request_monotonic: float = 0.0
     _cooldown_until_monotonic: float = 0.0
     _min_request_interval_seconds: float = 0.12
+    _weight_log: list = []
+    _used_weight: int = 0
+    _used_weight_at: float = 0.0
     _tick_size_cache: dict[str, float] = {}
     _tick_size_cache_expires_monotonic: float = 0.0
     _tick_size_cache_ttl_seconds: float = 1800.0
@@ -698,6 +714,23 @@ class BinanceProvider(HTTPProvider):
             cls._request_lock = asyncio.Lock()
         return cls._request_lock
 
+    @classmethod
+    async def _pace_weight(cls, weight: int) -> None:
+        """Jaga bobot request scan di bawah jatah per menit agar IP tidak kena 429."""
+        while True:
+            now = time.monotonic()
+            cls._weight_log = [(t, w) for t, w in cls._weight_log if now - t < 60.0]
+            header_age = now - cls._used_weight_at
+            if cls._used_weight >= SCAN_HEADER_PAUSE_WEIGHT and header_age < 20.0:
+                await asyncio.sleep(min(5.0, 20.0 - header_age))
+                continue
+            used = sum(w for _, w in cls._weight_log)
+            if used + weight <= SCAN_WEIGHT_BUDGET_PER_MINUTE or not cls._weight_log:
+                cls._weight_log.append((now, weight))
+                return
+            wait = 60.0 - (now - cls._weight_log[0][0]) + 0.05
+            await asyncio.sleep(min(max(wait, 0.1), 5.0))
+
     async def get(self, path: str, params: dict[str, Any]) -> Any:
         url = f"{self.base_url}{path}"
         lock = self._get_request_lock()
@@ -708,6 +741,7 @@ class BinanceProvider(HTTPProvider):
             spacing = self.__class__._last_request_monotonic + self._min_request_interval_seconds - time.monotonic()
             if spacing > 0:
                 await asyncio.sleep(spacing)
+            await self._pace_weight(_request_weight(path, params or {}))
             def request() -> tuple[int, Any, dict[str, Any], str]:
                 response = requests.get(url, params=params, timeout=HTTP_TIMEOUT_SECONDS)
                 try:
@@ -717,9 +751,16 @@ class BinanceProvider(HTTPProvider):
                 return response.status_code, body, dict(response.headers), response.text[:500]
             status, body, headers, body_text = await asyncio.to_thread(request)
             self.__class__._last_request_monotonic = time.monotonic()
+            raw_used = headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m")
+            if raw_used:
+                try:
+                    self.__class__._used_weight = int(raw_used)
+                    self.__class__._used_weight_at = time.monotonic()
+                except ValueError:
+                    pass
             if REQUEST_OBSERVER is not None:
                 try:
-                    REQUEST_OBSERVER(path, status, headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m"))
+                    REQUEST_OBSERVER(path, status, raw_used)
                 except Exception:
                     pass
         code = body.get("code") if isinstance(body, dict) else None
@@ -808,6 +849,35 @@ class BinanceProvider(HTTPProvider):
                 f"dari {count} yang dibutuhkan (kemungkinan listing baru)"
             )
         return candles[-count:]
+
+    async def klines_tail(self, symbol: str, interval: str, limit: int, interval_ms: int) -> list[Candle]:
+        """Candle closed terbaru saja (limit kecil = bobot 1)."""
+        payload = await self.get(
+            "/fapi/v1/klines",
+            {"symbol": symbol, "interval": _binance_interval(interval), "limit": int(limit)},
+        )
+        if not isinstance(payload, list):
+            raise RuntimeError("Binance klines response bukan list.")
+        now_ms = int(time.time() * 1000)
+        out: list[Candle] = []
+        for row in payload:
+            if len(row) < 7:
+                continue
+            start = int(row[0])
+            if start + interval_ms > now_ms:
+                continue
+            out.append(
+                Candle(
+                    time_ms=start,
+                    open=safe_float(row[1]),
+                    high=safe_float(row[2]),
+                    low=safe_float(row[3]),
+                    close=safe_float(row[4]),
+                    volume=safe_float(row[5]),
+                    turnover=safe_float(row[7]) if len(row) > 7 else 0.0,
+                )
+            )
+        return sorted(out, key=lambda c: c.time_ms)
 
     async def last_price(self, symbol: str) -> float:
         payload = await self.get(
@@ -937,6 +1007,8 @@ def _series_is_fresh(entry: _SeriesEntry, now: float, max_age: float | None) -> 
     now_ms = int(now * 1000)
     expected = _expected_last_closed_ms(now_ms, entry.interval_ms)
     age = now - entry.fetched_at
+    if entry.last_closed_ms >= expected:
+        return True  # candle closed terbaru sudah ada; data closed tidak berubah
     if entry.last_closed_ms < expected:
         # Candle baru seharusnya sudah ada. Beri jeda singkat agar tidak refetch beruntun,
         # dan toleransi bila provider memang tidak punya candle itu (diambil >20 dtk setelah close).
@@ -991,6 +1063,7 @@ def _series_cache_store(
         merged = list(candles)
         if old is not None and old.candles and old.candles[0].time_ms < merged[0].time_ms:
             merged = [c for c in old.candles if c.time_ms < merged[0].time_ms] + merged
+        merged = merged[-SERIES_MAX_CANDLES:]
         _SERIES_CACHE[key] = _SeriesEntry(
             candles=merged,
             source=source,
@@ -1062,6 +1135,30 @@ async def _fetch_series_uncached(
     return candles[-count:], source, qstats
 
 
+async def _fetch_series_incremental(
+    pair: str, interval: str, count: int, interval_ms: int
+) -> tuple[list[Candle], str, dict[str, int]] | None:
+    """Cache lama + candle baru saja, menggantikan fetch ulang penuh."""
+    with _SERIES_LOCK:
+        entry = _SERIES_CACHE.get(("BINANCE", pair, interval))
+        if entry is None or len(entry.candles) < count:
+            return None
+        old = list(entry.candles)
+        last_closed = entry.last_closed_ms
+    expected = _expected_last_closed_ms(int(time.time() * 1000), interval_ms)
+    missing = int((expected - last_closed) // interval_ms)
+    if missing < 1 or missing > SERIES_INCREMENTAL_MAX_CANDLES:
+        return None
+    tail = await BinanceProvider().klines_tail(pair, interval, missing + 2, interval_ms)
+    if not tail or tail[0].time_ms > last_closed + interval_ms:
+        return None  # ada celah: ambil penuh
+    merged = [c for c in old if c.time_ms < tail[0].time_ms] + tail
+    candles, qstats = normalize_candles(merged, interval_ms)
+    if len(candles) < count:
+        return None
+    return candles[-count:], "BINANCE", qstats
+
+
 async def fetch_series(
     pair: str,
     interval: str,
@@ -1103,9 +1200,13 @@ async def fetch_series(
     future.add_done_callback(lambda f: f.cancelled() or f.exception())
     _SERIES_INFLIGHT[flight_key] = future
     try:
-        candles, source, qstats = await _fetch_series_uncached(
-            symbol, interval, count, interval_ms, allow_fallback=allow_fallback
-        )
+        incremental = await _fetch_series_incremental(symbol, interval, count, interval_ms)
+        if incremental is not None:
+            candles, source, qstats = incremental
+        else:
+            candles, source, qstats = await _fetch_series_uncached(
+                symbol, interval, count, interval_ms, allow_fallback=allow_fallback
+            )
         _series_cache_store(symbol, interval, candles, source, interval_ms, qstats.get("gaps", 0))
         if force_refresh:
             _SERIES_STATS["refreshes"] += 1
