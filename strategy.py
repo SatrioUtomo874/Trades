@@ -120,6 +120,18 @@ TRAIL_M15_MAX_AGE_SECONDS = _env_float("TRAIL_M15_MAX_AGE_SECONDS", 60.0, 1.0, 9
 # Biaya (estimasi, per sisi). Funding hanya dihitung bila datanya tersedia.
 EST_FEE_PCT_PER_SIDE = _env_float("EST_FEE_PCT_PER_SIDE", 0.05, 0.0, 5.0)
 EST_SLIPPAGE_PCT_PER_SIDE = _env_float("EST_SLIPPAGE_PCT_PER_SIDE", 0.03, 0.0, 5.0)
+# Entry limit = maker tanpa slippage; exit (SL/TP market) = taker + slippage.
+EST_ENTRY_FEE_PCT = _env_float("EST_ENTRY_FEE_PCT", 0.02, 0.0, 5.0)
+EST_ENTRY_SLIPPAGE_PCT = _env_float("EST_ENTRY_SLIPPAGE_PCT", 0.0, 0.0, 5.0)
+# Entry: batas jarak (ATR H1), kedalaman maksimum di zona, pengali Price Exp.
+ENTRY_MAX_DISTANCE_H1_ATR = 4.0
+ENTRY_MAX_DEPTH_BIAS = 0.50
+EXP_ENTRY_DISTANCE_MULT = 1.5
+# Struktur: swing minimum (ATR) dan buffer break.
+SWING_MIN_ATR_H4 = 1.0
+SWING_MIN_ATR_H1 = 0.8
+STRUCTURE_BREAK_BUFFER_ATR = 0.10
+NO_REFINEMENT_PENALTY = 4.0
 MIN_RR_AFTER_COSTS = _env_float("MIN_RR_AFTER_COSTS", 1.5, 0.0, 20.0)  # 0 = hanya laporan
 
 # BTC hanya konteks confidence, bukan veto arah.
@@ -141,7 +153,7 @@ REASON_CODES = (
     "BTC_HIGH_RISK_CONFLICT", "PRICE_IN_ZONE", "PRICE_NOT_IN_ZONE", "READY_FOR_VALIDATION",
 )
 ENTRY_ZONE_MAX_WIDTH_PCT = 15.0
-STRATEGY_VERSION = "2.4.0"
+STRATEGY_VERSION = "2.5.0"
 
 BINANCE_BASE_URL = "https://fapi.binance.com"
 
@@ -159,6 +171,7 @@ PAIR_H4_CANDLES_REQUIRED = 120
 BTC_H4_CANDLES_REQUIRED = 240
 
 HTTP_TIMEOUT_SECONDS = 20
+REQUEST_OBSERVER: Any = None  # diisi main.py: mencatat request & bobot IP
 
 # Binance public REST requests are serialized and spaced by BinanceProvider.
 # When Binance replies with HTTP 418/429 or error -1003, its provider raises a
@@ -175,7 +188,7 @@ H1_POI_MAX_DISTANCE_ATR = 4.0
 H1_REFINEMENT_OVERLAP_ATR = 2.0
 M15_EXECUTION_OVERLAP_ATR = 1.5
 MAX_ENTRY_DISTANCE_PCT = 10.0
-MAX_ENTRY_DISTANCE_H4_ATR = 4.0
+MAX_ENTRY_DISTANCE_H4_ATR = 2.5
 MAX_PRIMARY_POI_CANDIDATES = 6
 FIB_DEEP_RATIO = 0.618
 FIB_DEEPEST_RATIO = 0.786
@@ -191,9 +204,9 @@ SL_MAX_H1_ATR = 5.0
 SL_MIN_PCT = 0.5
 SL_SWING_EXTEND_H1_ATR = 1.0
 SL_SWEEP_EXTEND_H1_ATR = 1.5
-EXP_H1_ATR_MULTIPLIER = _env_float("EXP_H1_ATR_MULTIPLIER", 2.5, 0.5, 6.0)
-SL_MIN_RISK_H1_ATR = _env_float("SL_MIN_RISK_H1_ATR", 0.6, 0.0, 3.0)
-SL_MIN_RISK_PCT = _env_float("SL_MIN_RISK_PCT", 0.6, 0.0, 5.0)
+EXP_H1_ATR_MULTIPLIER = _env_float("EXP_H1_ATR_MULTIPLIER", 3.5, 0.5, 6.0)
+SL_MIN_RISK_H1_ATR = _env_float("SL_MIN_RISK_H1_ATR", 0.8, 0.0, 3.0)
+SL_MIN_RISK_PCT = _env_float("SL_MIN_RISK_PCT", 1.0, 0.0, 5.0)
 MIN_PLANNED_RR = 2.0
 TP_FALLBACK_RR = 2.5
 FALLBACK_CONFIDENCE_CAP = 60.0
@@ -704,6 +717,11 @@ class BinanceProvider(HTTPProvider):
                 return response.status_code, body, dict(response.headers), response.text[:500]
             status, body, headers, body_text = await asyncio.to_thread(request)
             self.__class__._last_request_monotonic = time.monotonic()
+            if REQUEST_OBSERVER is not None:
+                try:
+                    REQUEST_OBSERVER(path, status, headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m"))
+                except Exception:
+                    pass
         code = body.get("code") if isinstance(body, dict) else None
         msg = body.get("msg") if isinstance(body, dict) else body_text
         rate_limited = status in (418, 429) or str(code) == "-1003" or "too many requests" in str(msg).lower()
@@ -1396,13 +1414,48 @@ def displacement_strength(
     return clamp(score)
 
 
+def _significant_pivots(
+    atr_values: list[float],
+    highs: list[Pivot],
+    lows: list[Pivot],
+    min_atr: float,
+) -> tuple[list[Pivot], list[Pivot]]:
+    """Zigzag ATR: buang swing kecil (noise), pivot sejenis berurutan diambil yang paling ekstrem."""
+    if min_atr <= 0 or len(highs) + len(lows) < 3:
+        return highs, lows
+    kept: list[Pivot] = []
+    for pv in sorted([*highs, *lows], key=lambda x: x.index):
+        if not kept:
+            kept.append(pv)
+            continue
+        last = kept[-1]
+        if pv.kind == last.kind:
+            if (pv.kind == "HIGH" and pv.price > last.price) or (pv.kind == "LOW" and pv.price < last.price):
+                kept[-1] = pv
+            continue
+        atr = max(atr_values[min(pv.index, len(atr_values) - 1)], EPS) if atr_values else EPS
+        if abs(pv.price - last.price) >= min_atr * atr:
+            kept.append(pv)
+    new_highs = [x for x in kept if x.kind == "HIGH"]
+    new_lows = [x for x in kept if x.kind == "LOW"]
+    if len(new_highs) < 2 or len(new_lows) < 2:
+        return highs, lows
+    return new_highs, new_lows
+
+
+def _swing_min_atr(timeframe: str) -> float:
+    return {"H4": SWING_MIN_ATR_H4, "H1": SWING_MIN_ATR_H1}.get(str(timeframe).upper(), 0.0)
+
+
 def build_structure(
     candles: list[Candle],
     span: int,
+    min_swing_atr: float = 0.0,
 ) -> StructureSnapshot:
     highs, lows = detect_pivots(candles, span)
-    labels = label_pivots(highs, lows)
     atr_values = atr_series(candles, 14)
+    highs, lows = _significant_pivots(atr_values, highs, lows, min_swing_atr)
+    labels = label_pivots(highs, lows)
     rel_vol = relative_volume(candles, 20)
 
     events: list[dict[str, Any]] = []
@@ -1422,7 +1475,7 @@ def build_structure(
             current_low = lows[low_ptr]
             low_ptr += 1
 
-        if current_high and current_high.index not in broken_high_indices and candle.close > current_high.price:
+        if current_high and current_high.index not in broken_high_indices and candle.close > current_high.price + STRUCTURE_BREAK_BUFFER_ATR * max(atr_values[i], EPS):
             prior_trend = trend
             if prior_trend == "BEARISH":
                 event_type = "CHOCH"
@@ -1449,7 +1502,7 @@ def build_structure(
             )
             broken_high_indices.add(current_high.index)
 
-        if current_low and current_low.index not in broken_low_indices and candle.close < current_low.price:
+        if current_low and current_low.index not in broken_low_indices and candle.close < current_low.price - STRUCTURE_BREAK_BUFFER_ATR * max(atr_values[i], EPS):
             prior_trend = trend
             if prior_trend == "BULLISH":
                 event_type = "CHOCH"
@@ -4420,7 +4473,7 @@ def _structure_direction_evidence(candles: list[Candle], structure: StructureSna
 
 
 def _timeframe_regime_report(candles: list[Candle], timeframe: str, span: int) -> dict[str, Any]:
-    structure = build_structure(candles, span)
+    structure = build_structure(candles, span, min_swing_atr=_swing_min_atr(timeframe))
     evidence = _structure_direction_evidence(candles, structure)
     strength = trend_strength_metrics(candles, structure)
     atr_values = atr_series(candles, 14)
@@ -5382,8 +5435,8 @@ def _v2_liquidity_fib_candidates(
         for pool in pools:
             overlap = _v2_zone_overlap_values(f_low, f_high, pool.low, pool.high)
             distance = abs(pool.midpoint - current) / max(h1_atr, EPS)
-            near = overlap > 0 or abs(pool.midpoint - (f_low + f_high) / 2.0) <= 0.70 * max(h1_atr, EPS)
-            if not near or distance > 8.0:
+            # POI wajib overlap nyata dengan pool; zona sintetis dari dua level dibuang.
+            if overlap <= 0 or distance > 8.0:
                 continue
             structure_bonus = 10.0 if pool.timeframe == "H4" else 6.0 if pool.timeframe == "H1" else 2.0
             confluence = clamp(
@@ -5392,16 +5445,8 @@ def _v2_liquidity_fib_candidates(
                 + structure_bonus
                 + (10.0 if pool.touches >= 3 else 0.0)
             )
-            if overlap > 0:
-                low = max(f_low, pool.low)
-                high = min(f_high, pool.high)
-            else:
-                # No direct overlap: retain the stronger zone but only in a bounded
-                # neighborhood; later refinement may tighten it.
-                width = max(min(f_high - f_low, pool.high - pool.low), h1_atr * 0.20)
-                center = (safe_float(fib_zone["midpoint"]) + pool.midpoint) / 2.0
-                low = center - width / 2.0
-                high = center + width / 2.0
+            low = max(f_low, pool.low)
+            high = min(f_high, pool.high)
             if high <= low:
                 continue
             candidates.append({
@@ -5441,9 +5486,13 @@ def _v2_refine_location(
     refinements: list[tuple[float, Zone, str]] = []
     for source_name, ctx in (("H1", h1_ctx), ("M15", m15_ctx)):
         for z in (ctx.get("fvg") or []) + (ctx.get("obs") or []) + (ctx.get("breakers") or []):
+            if z.status == "FAILED":
+                continue
             overlap = zone_overlap_ratio(parent, z)
             if overlap >= REFINEMENT_MIN_OVERLAP:
                 q = clamp(z.strength * 0.55 + overlap * 45.0)
+                if z.status == "MITIGATED":
+                    q *= 0.7
                 refinements.append((q, z, source_name))
     refinements.sort(key=lambda x: x[0], reverse=True)
     best = refinements[0] if refinements else None
@@ -5730,14 +5779,14 @@ def _v2_select_entry_price(
     if direction == "BUY":
         ideal_rsi = RSI_BUY_IDEAL_MAX_M15
         quality = clamp((ideal_rsi - rsi_med + 25.0) / 55.0 * 100.0)
-        bias = clamp((confluence * 0.65 + quality * 0.35) / 100.0)
+        bias = min(clamp((confluence * 0.65 + quality * 0.35) / 100.0), ENTRY_MAX_DEPTH_BIAS)
         # Stronger projected cooling prefers the deeper part of the zone, but
         # never beyond zone boundaries.
         price = zone_high - (zone_high - zone_low) * bias
         return max(zone_low, min(current - max(h4_atr * 0.01, EPS), price))
     ideal_rsi = RSI_SELL_IDEAL_MIN_M15
     quality = clamp((rsi_med - ideal_rsi + 25.0) / 55.0 * 100.0)
-    bias = clamp((confluence * 0.65 + quality * 0.35) / 100.0)
+    bias = min(clamp((confluence * 0.65 + quality * 0.35) / 100.0), ENTRY_MAX_DEPTH_BIAS)
     price = zone_low + (zone_high - zone_low) * bias
     return min(zone_high, max(current + max(h4_atr * 0.01, EPS), price))
 
@@ -6274,13 +6323,13 @@ def _v2_price_exp(
     h1_atr: float,
 ) -> float:
     if direction == "BUY":
-        exp = current + max(EXP_H1_ATR_MULTIPLIER * h1_atr, abs(current - entry) * 1.20)
+        exp = current + max(EXP_H1_ATR_MULTIPLIER * h1_atr, abs(current - entry) * EXP_ENTRY_DISTANCE_MULT)
         exp = min(exp, entry + abs(tp - entry) * 0.70)
         exp = min(exp, tp - max(h1_atr * 0.20, EPS))
         if exp <= current:
             exp = current + max(h1_atr * 0.50, current * 0.001)
         return round_price(exp)
-    exp = current - max(EXP_H1_ATR_MULTIPLIER * h1_atr, abs(current - entry) * 1.20)
+    exp = current - max(EXP_H1_ATR_MULTIPLIER * h1_atr, abs(current - entry) * EXP_ENTRY_DISTANCE_MULT)
     exp = max(exp, entry - abs(tp - entry) * 0.70)
     exp = max(exp, tp + max(h1_atr * 0.20, EPS))
     if exp >= current:
@@ -6483,6 +6532,9 @@ def _v2_build_thesis_candidate(
     mom_entry = _v2_momentum_entry_price(direction, m15, h4, zone_low, zone_high, current, tick_size)
     if mom_entry is not None and ((direction == "BUY" and mom_entry < current) or (direction == "SELL" and mom_entry > current)):
         entry = mom_entry
+    # Entry terlalu jauh hampir pasti expired lewat Price Exp.
+    if abs(current - entry) > ENTRY_MAX_DISTANCE_H1_ATR * h1_atr:
+        return None
 
     # Final RSI projection is always calculated against the actual selected
     # entry, not the raw zone midpoint. This prevents a zone that straddles
@@ -6597,6 +6649,9 @@ def _v2_build_thesis_candidate(
     elif volume_ctx["class"] == "WEAK_VOLUME":
         base -= 5.0
         penalties.append({"type": "WEAK_VOLUME", "amount": 5.0})
+    if refinement.get("source") == "LIQUIDITY_FIB_ONLY":
+        base -= NO_REFINEMENT_PENALTY
+        penalties.append({"type": "NO_FVG_OB_REFINEMENT", "amount": NO_REFINEMENT_PENALTY})
     if magnet_conflict:
         base -= 8.0
         penalties.append({"type": "OPPOSING_LIQUIDITY_OBSTACLE", "amount": 8.0})
@@ -6929,13 +6984,13 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
     # ------------------------------
     # 2) Structure / regime first
     # ------------------------------
-    btc_h4_structure = build_structure(btc_h4, SWING_SPAN_H4)
-    btc_h1_structure = build_structure(btc_h1, SWING_SPAN_H1)
+    btc_h4_structure = build_structure(btc_h4, SWING_SPAN_H4, min_swing_atr=SWING_MIN_ATR_H4)
+    btc_h1_structure = build_structure(btc_h1, SWING_SPAN_H1, min_swing_atr=SWING_MIN_ATR_H1)
     btc_d1 = resample_candles(btc_h4, 24 * 60 * 60 * 1000)
     btc_regime = build_multi_timeframe_regime({"D1": (btc_d1, 2), "H4": (btc_h4, SWING_SPAN_H4), "H1": (btc_h1, SWING_SPAN_H1)})
 
-    h4_structure = build_structure(pair_h4, SWING_SPAN_H4)
-    h1_structure = build_structure(h1, SWING_SPAN_H1)
+    h4_structure = build_structure(pair_h4, SWING_SPAN_H4, min_swing_atr=SWING_MIN_ATR_H4)
+    h1_structure = build_structure(h1, SWING_SPAN_H1, min_swing_atr=SWING_MIN_ATR_H1)
     m15_structure = build_structure(m15, SWING_SPAN_M15)
     pair_d1 = resample_candles(pair_h4, 24 * 60 * 60 * 1000)
     pair_regime = build_multi_timeframe_regime({
@@ -6996,6 +7051,7 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
                 pools = [
                     p for p in liquidity_map.get("all", [])
                     if p.side == ("SELL_SIDE" if direction == "BUY" else "BUY_SIDE") and not p.swept and p.significance >= 60
+                    and abs(p.midpoint - safe_float(zone["midpoint"])) <= 1.0 * h1_atr
                 ]
                 if pools:
                     pools.sort(key=lambda p: abs(p.midpoint - safe_float(zone["midpoint"])))
@@ -7594,14 +7650,15 @@ def estimate_after_cost_rr(
     fee = EST_FEE_PCT_PER_SIDE if fee_pct is None else fee_pct
     slip = EST_SLIPPAGE_PCT_PER_SIDE if slippage_pct is None else slippage_pct
     c = (fee + slip) / 100.0
+    ce = (EST_ENTRY_FEE_PCT + EST_ENTRY_SLIPPAGE_PCT) / 100.0
     buy = str(direction or "").upper() == "BUY"
     risk = (entry - sl) if buy else (sl - entry)
     reward = (tp - entry) if buy else (entry - tp)
     if entry <= 0 or risk <= 0 or reward <= 0:
         return {"valid": False, "gross_rr": 0.0, "after_cost_rr": 0.0}
     funding = entry * funding_pct / 100.0
-    cost_tp = (entry + tp) * c + funding
-    cost_sl = (entry + sl) * c + funding
+    cost_tp = entry * ce + tp * c + funding
+    cost_sl = entry * ce + sl * c + funding
     net_reward = reward - cost_tp
     net_risk = risk + cost_sl
     return {
@@ -7612,8 +7669,8 @@ def estimate_after_cost_rr(
         "reward": reward,
         "cost_at_tp": cost_tp,
         "cost_at_sl": cost_sl,
-        "round_trip_cost_pct": c * 2.0 * 100.0,
-        "assumptions": {"fee_pct_per_side": fee, "slippage_pct_per_side": slip, "funding_pct": funding_pct},
+        "round_trip_cost_pct": (c + ce) * 100.0,
+        "assumptions": {"fee_pct_per_side": fee, "slippage_pct_per_side": slip, "entry_fee_pct": EST_ENTRY_FEE_PCT, "entry_slippage_pct": EST_ENTRY_SLIPPAGE_PCT, "funding_pct": funding_pct},
     }
 
 
@@ -7693,8 +7750,8 @@ def _enrich_setup_contract(setup: dict[str, Any], context: dict[str, Any] | None
     if MIN_RR_AFTER_COSTS > 0 and cost.get("valid") and cost["after_cost_rr"] < MIN_RR_AFTER_COSTS:
         gates.append({
             "code": "RR_AFTER_COST_BELOW_MIN",
-            "text": f"RR setelah biaya {cost['after_cost_rr']:.2f} < {MIN_RR_AFTER_COSTS}; direkam sebagai skor.",
-            "hard": False,
+            "text": f"RR setelah biaya {cost['after_cost_rr']:.2f} < {MIN_RR_AFTER_COSTS}; biaya terlalu besar, ditolak.",
+            "hard": True,
         })
 
     data_asof = data.get("data_asof") if isinstance(data.get("data_asof"), dict) else {}
@@ -7721,13 +7778,15 @@ def _enrich_setup_contract(setup: dict[str, Any], context: dict[str, Any] | None
         state, reason = "DATA_UNAVAILABLE", "DATA_STALE"
     elif geometry_errors:
         state, reason = "REJECTED_HARD", geometry_errors[0]["code"]  # execution safety only
+    elif any(g["code"] == "RR_AFTER_COST_BELOW_MIN" for g in hard):
+        state, reason = "REJECTED_QUALITY", "RR_AFTER_COST_BELOW_MIN"
     elif "WAITING" in status:
         state, reason = "WAITING_TRIGGER", "MOMENTUM_NOT_READY" if status == "WAITING_MOMENTUM" else "TRIGGER_NOT_CONFIRMED"
         gates.append({"code": reason, "text": "Setup belum memiliki trigger penuh; kualitas tetap direpresentasikan oleh confidence.", "hard": False})
     else:
         state = "READY"
         reason = "PRICE_IN_ZONE" if price_vs_zone == "IN_ZONE" else ("LOW_SCORE_FALLBACK" if status == "LOW_QUALITY_FALLBACK" else "PRICE_NOT_IN_ZONE")
-    # RR gross/net, component quality, RSI exhaustion and BTC conflict remain numeric fields only.
+    # RR gross, kualitas komponen, RSI exhaustion dan BTC tetap angka; hanya RR setelah biaya yang menolak.
 
     sig_h4 = ((analysis.get("pair_structure") or {}).get("signature_h4"))
     anchor = f"{pair}|{direction}|{STRATEGY_VERSION}|{sig_h4!r}|{round(zlow, 6)}|{round(zhigh, 6)}"
@@ -7816,7 +7875,7 @@ def _btc_regime_payload(h4_candles: list[Candle], h1_candles: list[Candle], sour
         "H4": (h4_candles, SWING_SPAN_H4),
         "H1": (h1_candles, SWING_SPAN_H1),
     })
-    h4_structure = build_structure(h4_candles, SWING_SPAN_H4)
+    h4_structure = build_structure(h4_candles, SWING_SPAN_H4, min_swing_atr=SWING_MIN_ATR_H4)
     # V2 macro direction is the confirmed BTC H4 structure. The aggregate
     # D1/H4/H1 regime remains available as a soft context field.
     return {
@@ -7875,7 +7934,7 @@ async def analyze_scan_structure(pair: str, context: dict[str,Any] | None=None) 
         )
     h1_source = f"{m15_source}_DERIVED"
     d1 = resample_candles(h4, 24 * 60 * 60 * 1000)
-    h4_structure = build_structure(h4, SWING_SPAN_H4)
+    h4_structure = build_structure(h4, SWING_SPAN_H4, min_swing_atr=SWING_MIN_ATR_H4)
     regime = build_multi_timeframe_regime({
         "D1": (d1, 2),
         "H4": (h4, SWING_SPAN_H4),
@@ -8842,7 +8901,7 @@ async def _analyze_trailing_rejection(
             return result
         buffer = max(atr * TRAIL_REJ_BUFFER_ATR, price * 0.0005)
         level = level_price - buffer if buy else level_price + buffer
-        cost = 2.0 * (EST_FEE_PCT_PER_SIDE + EST_SLIPPAGE_PCT_PER_SIDE) / 100.0
+        cost = (EST_FEE_PCT_PER_SIDE + EST_SLIPPAGE_PCT_PER_SIDE + EST_ENTRY_FEE_PCT + EST_ENTRY_SLIPPAGE_PCT) / 100.0
         min_lock = fill * (1 + cost) if buy else fill * (1 - cost)
         result["candidates"] = {"REJECTION_STRUCTURE": round_price(level)}
         if (buy and level < min_lock) or (not buy and level > min_lock):
