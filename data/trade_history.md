@@ -626,3 +626,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-19T07:40:18.249497+00:00
 - Strategy: SMC_VLT_RSI v2.4.0
+
+---
+
+## GWEIUSDT — BUY
+
+Trade ID: `GWEIUSDT-20261019-145400-923F12`
+
+### Setup
+
+- Price Now Reference: 0.02168
+- Entry: 0.02085
+- Reason Entry: GWEIUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H4 0.02071 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_OB. Projected M15 RSI 23.1 pada entry zone.
+- Price Exp: 0.02176
+- Reason Price Exp: Price Exp 0.02176: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02044
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.020755; SL ditempatkan di luar invalidation dan liquidity guard 0.02071.
+- TP: 0.02179
+- Reason TP: TP 0.02179 dipilih dari H4_HIGHER_HIGH dengan RR 2.29; target quality 90.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02176
+- Result Reason: Price Exp 0.02176: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-19T07:54:00.658997+00:00
+- Filled: -
+- Closed: 2026-10-19T07:56:07.035249+00:00
+- Strategy: SMC_VLT_RSI v2.4.0
