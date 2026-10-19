@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-19T07:39:51.153551+00:00",
+  "saved_at": "2026-10-19T07:40:42.958686+00:00",
   "bans": [
     {
       "pair": "BRUSDT",
@@ -8,6 +8,13 @@
       "until": "2026-10-19T16:27:17.733759+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "DASHUSDT",
+      "banned_at": "2026-10-19T07:40:42.958572+00:00",
+      "until": "2026-10-19T15:40:42.958547+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "RENDERUSDT",
