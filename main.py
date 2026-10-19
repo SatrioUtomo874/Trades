@@ -161,7 +161,7 @@ REAL_PENDING_POLL_SECONDS = 5.0
 REAL_PROTECT_CHECK_SECONDS = 60.0
 BINANCE_RATE_LIMIT_PRIORITY_SAFETY_SECONDS = 60  # jeda tambahan TP/SL & cancel prioritas; 0 = tepat di Retry-After
 BINANCE_BAN_FALLBACK_SECONDS = 120  # 418 tanpa Retry-After: ban minimal 2 menit
-LIMIT_HOLD_WEIGHT_RATIO = 0.80  # bobot IP >= rasio ini: order LIMIT dibatalkan lebih dulu (0 = nonaktif)
+LIMIT_HOLD_WEIGHT_RATIO = 0.0  # >0: batalkan order LIMIT lebih awal saat bobot IP >= rasio ini (0 = hanya saat limit terjadi)
 LIMIT_HOLD_RESUME_RATIO = 0.50  # order dipasang ulang hanya bila bobot IP di bawah rasio ini
 LIMIT_HOLD_TICK_SECONDS = 5.0
 BALANCE_STALE_SECONDS = 60.0  # /trade segarkan saldo bila cache lebih tua
@@ -175,6 +175,7 @@ TRAIL_MIN_GAP_R = Decimal("0.30")
 TRAIL_STRATEGY_INTERVAL_SECONDS = 90.0
 # Pemasangan TP/SL boleh jalan setelah jeda server selesai (tanpa jeda aman bot).
 REAL_PRIORITY: contextvars.ContextVar[bool] = contextvars.ContextVar("real_priority", default=False)
+REAL_EARLY: contextvars.ContextVar[bool] = contextvars.ContextVar("real_early", default=False)  # pembatalan order: lepas di Retry-After
 # Setup scan berkorelasi tinggi (alt searah): batasi eksposur sekaligus.
 SCAN_MAX_NEW_PER_CYCLE = int(os.getenv("SCAN_MAX_NEW_PER_CYCLE", "3") or "3")
 SCAN_MAX_PER_DIRECTION = int(os.getenv("SCAN_MAX_PER_DIRECTION", "6") or "6")
@@ -1026,6 +1027,38 @@ def rate_limit_wait(response: Any, offset_ms: int = 0) -> tuple[float, bool]:
     return float(BINANCE_BAN_FALLBACK_SECONDS if status == 418 else BINANCE_RATE_LIMIT_FALLBACK_SECONDS), False
 
 
+def binance_limit_log(exc: Any, cooldown: float, where: str, impact: str) -> str:
+    """Pesan log rate limit Binance yang mudah dibaca."""
+    status = getattr(exc, "status_code", None) or 429
+    server = max(
+        float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
+        float(getattr(exc, "retry_after_seconds", 0.0) or 0.0),
+    )
+    known = bool(getattr(exc, "retry_after_known", True))
+    match = re.search(r"limit of IP\([^)]*\) is (\d+) requests? per minute", str(exc))
+    limit = int(match.group(1)) if match else BINANCE_IP_WEIGHT_LIMIT
+    if status == 418:
+        cause = "IP server diblokir sementara (ban) karena request tetap dikirim setelah kena limit"
+    else:
+        cause = f"total request REST dari IP server melewati batas {limit}/menit"
+    retry_text = f"Retry-After Binance {server:.0f} dtk" if known else f"perkiraan {server:.0f} dtk (Binance tidak kirim Retry-After)"
+    lines = [
+        f"⛔ BINANCE MEMBATASI REQUEST (HTTP {status})",
+        f"• Penyebab  : {cause}",
+        f"• Terjadi di: {where}",
+        f"• Jeda bot  : {cooldown:.0f} dtk ({retry_text} + pengaman {BINANCE_RATE_LIMIT_SAFETY_SECONDS} dtk)",
+    ]
+    now = time.monotonic()
+    if API_STATS.used_weight is not None and API_STATS.used_weight_at is not None and now - API_STATS.used_weight_at <= 120.0:
+        lines.append(f"• Bobot IP  : {API_STATS.used_weight}/{limit} per menit")
+    counts = API_STATS.window(60.0)
+    top = sorted(counts.items(), key=lambda kv: ENDPOINT_WEIGHTS.get(kv[0], 1) * kv[1], reverse=True)[:3]
+    if top:
+        lines.append("• Terbanyak 1 menit terakhir: " + ", ".join(f"{p.replace('/fapi/v1/', '')} {n}x" for p, n in top))
+    lines.append(f"• Dampak    : {impact}")
+    return "\n".join(lines)
+
+
 class ApiStats:
     """Hitung request Binance per endpoint + bobot IP dari header Binance."""
 
@@ -1347,6 +1380,7 @@ class BinanceRealClient:
         self._time_offset_ms = 0
         self._cooldown_until = 0.0
         self._server_cooldown_until = 0.0
+        self._early_cooldown_until = 0.0
         self._request_lock = asyncio.Lock()
         self._dual_side_position: bool | None = None
         # Snapshot terakhir dari Futures balance. Semua consumer lokal (autostop
@@ -1370,9 +1404,14 @@ class BinanceRealClient:
     def server_cooldown_remaining(self) -> float:
         return max(0.0, self._server_cooldown_until - time.monotonic())
 
+    @property
+    def early_cooldown_remaining(self) -> float:
+        return max(0.0, self._early_cooldown_until - time.monotonic())
+
     def apply_cooldown(self, server_seconds: float, bot_seconds: float) -> None:
         now = time.monotonic()
         self._cooldown_until = max(self._cooldown_until, now + bot_seconds)
+        self._early_cooldown_until = max(self._early_cooldown_until, now + server_seconds)
         self._server_cooldown_until = max(
             self._server_cooldown_until,
             now + server_seconds + BINANCE_RATE_LIMIT_PRIORITY_SAFETY_SECONDS,
@@ -1435,7 +1474,9 @@ class BinanceRealClient:
             )
 
         remaining = (
-            self.server_cooldown_remaining if REAL_PRIORITY.get() else self.cooldown_remaining
+            (self.early_cooldown_remaining if REAL_EARLY.get() else self.server_cooldown_remaining)
+            if REAL_PRIORITY.get()
+            else self.cooldown_remaining
         )
         if remaining > 0:
             blocked = BinanceRateLimitError(
@@ -5535,6 +5576,8 @@ class TradingEngine:
         """Tunggu jeda selesai, tes koneksi, lalu kerjakan yang tertunda."""
         failures = 0
         while self._running:
+            if self._hold_cancel_queue and self.real.early_cooldown_remaining <= 0:
+                await self._flush_hold_cancels()
             bot_rem = self.real.cooldown_remaining
             srv_rem = self.real.server_cooldown_remaining
             if bot_rem > 0:
@@ -5544,6 +5587,8 @@ class TradingEngine:
                         await asyncio.sleep(2.0)
                         continue
                 wait = srv_rem if (self._deferred_any() and srv_rem > 0) else bot_rem
+                if self._hold_cancel_queue:
+                    wait = min(wait, max(self.real.early_cooldown_remaining, 1.0))
                 await asyncio.sleep(min(wait + 1.0, 60.0))
                 continue
             try:
@@ -6710,6 +6755,20 @@ class TradingEngine:
             )
         )
 
+    def _on_public_rate_limit(self, exc: Any, cooldown: float) -> None:
+        """429/418 dari REST publik (scan) berlaku untuk seluruh IP: REST real ikut jeda, order LIMIT dibatalkan."""
+        if not self.real_mode:
+            return
+        server = max(
+            float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
+            float(getattr(exc, "retry_after_seconds", 0.0) or 0.0),
+        )
+        self.real.apply_cooldown(server, max(cooldown, server + BINANCE_RATE_LIMIT_SAFETY_SECONDS))
+        if self._rl_started_at is None:
+            self._rl_started_at = time.monotonic()
+        self._start_rate_limit_watcher()
+        self._engage_limit_hold(extend=True, reason=f"HTTP {getattr(exc, 'status_code', 429)} REST publik (scan)")
+
     # --------------------------------------------------------
     # BINANCE LIMIT HOLD
     # Order LIMIT entry dibatalkan saat Binance limit (posisi & TP/SL tidak disentuh).
@@ -6775,7 +6834,7 @@ class TradingEngine:
         return True
 
     async def _flush_hold_cancels(self) -> None:
-        if not self._hold_cancel_queue or self.real.server_cooldown_remaining > 0:
+        if not self._hold_cancel_queue or self.real.early_cooldown_remaining > 0:
             return
         cancelled_pairs: list[str] = []
         for trade_id, trade in list(self._hold_cancel_queue.items()):
@@ -6783,15 +6842,18 @@ class TradingEngine:
                 self._hold_cancel_queue.pop(trade_id, None)
                 continue
             token = REAL_PRIORITY.set(True)
+            early = REAL_EARLY.set(True)
             try:
                 cancelled = await self._cancel_entry_for_hold(trade)
             except BinanceRateLimitError as exc:
                 self._notify_rate_limit(exc, "BATALKAN ORDER LIMIT")
                 return
             except Exception as exc:
-                log.warning("[LIMIT HOLD] batal order %s gagal: %s", trade.trade_id, exc)
+                log.warning("[LIMIT HOLD] batal order %s gagal, order tetap aktif di Binance: %s", trade.trade_id, exc)
+                self._hold_cancel_queue.pop(trade_id, None)
                 continue
             finally:
+                REAL_EARLY.reset(early)
                 REAL_PRIORITY.reset(token)
             self._hold_cancel_queue.pop(trade_id, None)
             self._deferred_fill.pop(trade_id, None)
@@ -6925,7 +6987,7 @@ class TradingEngine:
                 and used >= LIMIT_HOLD_WEIGHT_RATIO * BINANCE_IP_WEIGHT_LIMIT
             ):
                 self._engage_limit_hold(True, f"bobot IP {used}/{BINANCE_IP_WEIGHT_LIMIT}")
-            if self._hold_cancel_queue and self.real.server_cooldown_remaining <= 0:
+            if self._hold_cancel_queue and self.real.early_cooldown_remaining <= 0:
                 await self._flush_hold_cancels()
             await self._release_limit_hold()
 
@@ -9412,6 +9474,7 @@ class TradingEngine:
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
+        module.REQUEST_OBSERVER = API_STATS.record
         previous = getattr(self, "_strategy_runtime_module", None)
         if previous is not None:
             sys.modules.pop(getattr(previous, "__name__", ""), None)
@@ -9981,9 +10044,10 @@ class TradingEngine:
                         self._binance_public_cooldown_until, time.monotonic() + cooldown
                     )
                     log.warning(
-                        "[SCAN] strategy kena Binance Public REST rate limit di luar loop pair; cooldown %.1fs dan scan dilanjutkan setelahnya | %s",
-                        cooldown, exc,
+                        binance_limit_log(exc, cooldown, "analisis struktur/BTC (di luar loop pair)",
+                                          "scan berhenti sementara dan lanjut otomatis setelah jeda; posisi & TP/SL di Binance tidak terpengaruh.")
                     )
+                    self._on_public_rate_limit(exc, cooldown)
                     continue
                 log.exception("[SCAN] cycle fatal error")
                 # A fatal cycle must not silently bypass an active H4 gate.
@@ -11004,8 +11068,8 @@ class TradingEngine:
     async def _run_scan_cycle_inner(self) -> None:
         public_cooldown = max(0.0, self._binance_public_cooldown_until - time.monotonic())
         if public_cooldown > 0:
-            log.warning(
-                "[SCAN] ditunda %.1fs karena Binance Public REST cooldown aktif; tidak mengirim request tambahan.",
+            log.info(
+                "[SCAN] siklus dilewati: jeda limit Binance masih %.0f dtk. Tidak ada request dikirim; scan lanjut otomatis setelah jeda.",
                 public_cooldown,
             )
             return
@@ -11338,11 +11402,10 @@ class TradingEngine:
                     )
                     rate_limit_pause = True
                     log.warning(
-                        "[SCAN] analysis %s kena Binance Public REST rate limit | cooldown=%.2fs | sisa batch ditunda | %s",
-                        pair,
-                        float(retry_after or 0.0),
-                        exc,
+                        binance_limit_log(exc, float(retry_after or 0.0), f"analisis pair {pair}",
+                                          "scan berhenti sementara dan lanjut otomatis setelah jeda; posisi & TP/SL di Binance tidak terpengaruh; pair yang belum dianalisis dicoba lagi di siklus berikutnya.")
                     )
+                    self._on_public_rate_limit(exc, float(retry_after or 0.0))
                 elif getattr(exc, "insufficient_history", False):
                     # Listing baru / candle kurang: ban sementara, tanpa traceback.
                     funnel["data_unavailable"] += 1
@@ -11359,9 +11422,7 @@ class TradingEngine:
             if not rate_limit_pause:
                 await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
             else:
-                log.warning(
-                    "[SCAN] batch dihentikan untuk mematuhi Binance rate limit; pasangan belum diproses akan dicoba pada siklus berikutnya."
-                )
+                log.info("[SCAN] batch dihentikan karena limit Binance (rincian di peringatan di atas).")
                 break
 
         if rate_limit_pause:
@@ -11445,11 +11506,10 @@ class TradingEngine:
                     )
                     rate_limit_pause = True
                     log.warning(
-                        "[SCAN] validator %s kena Binance Public REST rate limit | cooldown=%.2fs | validasi berikutnya ditunda | %s",
-                        candidate["pair"],
-                        float(retry_after or 0.0),
-                        exc,
+                        binance_limit_log(exc, float(retry_after or 0.0), f"validasi setup {candidate['pair']}",
+                                          "validasi berikutnya ditunda; scan berhenti sementara dan lanjut otomatis setelah jeda; posisi & TP/SL di Binance tidak terpengaruh.")
                     )
+                    self._on_public_rate_limit(exc, float(retry_after or 0.0))
                 else:
                     log.exception(
                         "[SCAN] validator error %s",
