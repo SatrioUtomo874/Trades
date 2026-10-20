@@ -2078,3 +2078,36 @@ Tidak ada trailing.
 - Filled: 2026-10-20T10:07:14.950150+00:00
 - Closed: 2026-10-20T14:03:27.450227+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## LQTYUSDT — BUY
+
+Trade ID: `LQTYUSDT-20261020-210448-71E71E`
+
+### Setup
+
+- Price Now Reference: 0.1981
+- Entry: 0.1919
+- Reason Entry: LQTYUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure BULLISH, liquidity M15 0.1917563 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 33.8 pada entry zone.
+- Price Exp: 0.1982
+- Reason Price Exp: Price Exp 0.19820000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1899
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.1915; SL ditempatkan di luar invalidation dan liquidity guard 0.1917563.
+- TP: 0.1982
+- Reason TP: TP 0.1982 dipilih dari H4_HIGHER_HIGH dengan RR 3.15; target quality 88.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1982
+- Result Reason: Price Exp 0.19820000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T14:04:48.859077+00:00
+- Filled: -
+- Closed: 2026-10-20T14:06:02.959796+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
