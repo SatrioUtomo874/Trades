@@ -1055,3 +1055,36 @@ Tidak ada trailing.
 - Filled: 2026-10-20T01:40:14.735405+00:00
 - Closed: 2026-10-20T04:09:50.936682+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## BATUSDT — BUY
+
+Trade ID: `BATUSDT-20261020-064401-EB621F`
+
+### Setup
+
+- Price Now Reference: 0.19635
+- Entry: 0.17902
+- Reason Entry: BATUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity M15 0.1783925 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 28.1 pada entry zone.
+- Price Exp: 0.19833
+- Reason Price Exp: Price Exp 0.19833: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.17457
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.176215; SL ditempatkan di luar invalidation.
+- TP: 0.2066
+- Reason TP: TP 0.2066 dipilih dari H4_HIGHER_HIGH dengan RR 6.20; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.19833
+- Result Reason: Price Exp 0.19833: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-19T23:44:01.536453+00:00
+- Filled: -
+- Closed: 2026-10-20T05:35:37.039085+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
