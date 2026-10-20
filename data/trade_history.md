@@ -1979,3 +1979,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:02:01.355266+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## MEWUSDT — SELL
+
+Trade ID: `MEWUSDT-20261020-105700-571340`
+
+### Setup
+
+- Price Now Reference: 0.000415
+- Entry: 0.0004161
+- Reason Entry: MEWUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.0004161458 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 65.6 pada entry zone.
+- Price Exp: 0.0004083
+- Reason Price Exp: Price Exp 0.0004083: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0004203
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.0004162; SL ditempatkan di luar invalidation dan liquidity guard 0.0004161458.
+- TP: 0.000405
+- Reason TP: TP 0.000405 dipilih dari H1_SWING_LOW dengan RR 2.64; target quality 79.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.0004204
+- Result Reason: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.0004162; SL ditempatkan di luar invalidation dan liquidity guard 0.0004161458.
+- PnL: -1.033405431386678608502372166%
+- Created: 2026-10-20T03:57:00.554246+00:00
+- Filled: 2026-10-20T03:59:45.532071+00:00
+- Closed: 2026-10-20T14:02:33.950463+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
