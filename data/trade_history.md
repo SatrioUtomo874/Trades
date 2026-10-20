@@ -2375,3 +2375,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:17:31.846018+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## IOTXUSDT — BUY
+
+Trade ID: `IOTXUSDT-20261020-211711-F349DA`
+
+### Setup
+
+- Price Now Reference: 0.003988
+- Entry: 0.003811
+- Reason Entry: IOTXUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.00380625 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_BREAKER. Projected M15 RSI 30.8 pada entry zone.
+- Price Exp: 0.00399
+- Reason Price Exp: Price Exp 0.00399: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.00375
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.003808; SL ditempatkan di luar invalidation.
+- TP: 0.00399
+- Reason TP: TP 0.00399 dipilih dari H4_HIGHER_HIGH dengan RR 2.93; target quality 89.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.003991
+- Result Reason: Price Exp 0.00399: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T14:17:11.469794+00:00
+- Filled: -
+- Closed: 2026-10-20T14:18:01.367489+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
