@@ -2672,3 +2672,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T16:28:15.743173+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## PONSUSDT — BUY
+
+Trade ID: `PONSUSDT-20261020-231228-595290`
+
+### Setup
+
+- Price Now Reference: 0.2721
+- Entry: 0.264
+- Reason Entry: PONSUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity H1 0.263825 dipadukan dengan Fib SECONDARY; refinement BULLISH_OB. Projected M15 RSI 34.6 pada entry zone.
+- Price Exp: 0.2756
+- Reason Price Exp: Price Exp 0.2756: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.2583
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.2637; SL ditempatkan di luar invalidation.
+- TP: 0.2805
+- Reason TP: TP 0.2805 dipilih dari H4_SWING_HIGH dengan RR 2.89; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2756
+- Result Reason: Price Exp 0.2756: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T16:12:28.667495+00:00
+- Filled: -
+- Closed: 2026-10-20T16:33:45.626817+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
