@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T14:07:37.753321+00:00",
+  "saved_at": "2026-10-20T14:08:01.813852+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -225,6 +225,13 @@
       "until": "2026-10-21T12:24:26.436665+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "XMRUSDT",
+      "banned_at": "2026-10-20T14:08:01.813528+00:00",
+      "until": "2026-10-20T22:08:01.813503+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ZECUSDT",
