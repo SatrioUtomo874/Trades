@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T01:09:57.214238+00:00",
+  "saved_at": "2026-10-20T02:48:17.079533+00:00",
   "bans": [
     {
       "pair": "ADAUSDT",
@@ -43,6 +43,13 @@
       "until": "2026-10-21T01:09:35.931442+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "NEOUSDT",
+      "banned_at": "2026-10-20T02:48:17.079400+00:00",
+      "until": "2026-10-20T10:48:17.079349+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "SUIUSDT",
