@@ -1121,3 +1121,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T05:45:01.444767+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## MMTUSDT — BUY
+
+Trade ID: `MMTUSDT-20261020-124536-EF3F30`
+
+### Setup
+
+- Price Now Reference: 0.1339
+- Entry: 0.1313
+- Reason Entry: MMTUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.1313 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 30.7 pada entry zone.
+- Price Exp: 0.1341
+- Reason Price Exp: Price Exp 0.1341: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1299
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.1312615; SL ditempatkan di luar invalidation dan liquidity guard 0.1313.
+- TP: 0.1353
+- Reason TP: TP 0.1353 dipilih dari H4_SWING_HIGH dengan RR 2.86; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1341
+- Result Reason: Price Exp 0.1341: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T05:45:36.463967+00:00
+- Filled: -
+- Closed: 2026-10-20T05:50:50.639617+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
