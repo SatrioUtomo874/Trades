@@ -1220,3 +1220,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T06:21:13.433213+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## 牛来USDT — BUY
+
+Trade ID: `牛来USDT-20261020-132256-2ADF13`
+
+### Setup
+
+- Price Now Reference: 0.05974
+- Entry: 0.05626
+- Reason Entry: 牛来USDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity M15 0.056225 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 30.8 pada entry zone.
+- Price Exp: 0.05986
+- Reason Price Exp: Price Exp 0.059860000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.05506
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.05623; SL ditempatkan di luar invalidation dan liquidity guard 0.056225.
+- TP: 0.05993
+- Reason TP: TP 0.05993 dipilih dari H1_SWING_HIGH dengan RR 3.06; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05986
+- Result Reason: Price Exp 0.059860000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T06:22:56.559942+00:00
+- Filled: -
+- Closed: 2026-10-20T06:29:25.741637+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
