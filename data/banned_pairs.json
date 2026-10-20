@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T14:01:50.353828+00:00",
+  "saved_at": "2026-10-20T14:02:15.763268+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -50,6 +50,13 @@
       "until": "2026-10-21T04:10:03.026198+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "CHILLGUYUSDT",
+      "banned_at": "2026-10-20T14:02:15.763107+00:00",
+      "until": "2026-10-20T22:02:15.763082+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "CROSSUSDT",
