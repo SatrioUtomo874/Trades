@@ -2243,3 +2243,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:10:22.189023+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## KATUSDT — BUY
+
+Trade ID: `KATUSDT-20261020-211013-181BF4`
+
+### Setup
+
+- Price Now Reference: 0.004054
+- Entry: 0.003943
+- Reason Entry: KATUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.003943 dipadukan dengan Fib SECONDARY; refinement BEARISH_BREAKER. Projected M15 RSI 42.3 pada entry zone.
+- Price Exp: 0.004069
+- Reason Price Exp: Price Exp 0.004069: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.00388
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.003887; SL ditempatkan di luar invalidation dan liquidity guard 0.0038887.
+- TP: 0.004122
+- Reason TP: TP 0.004122 dipilih dari H1_SWING_HIGH dengan RR 2.84; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.004069
+- Result Reason: Price Exp 0.004069: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T14:10:13.871940+00:00
+- Filled: -
+- Closed: 2026-10-20T14:10:45.762591+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
