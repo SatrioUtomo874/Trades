@@ -1946,3 +1946,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:01:33.254010+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## CHILLGUYUSDT — BUY
+
+Trade ID: `CHILLGUYUSDT-20261020-210048-E8AB38`
+
+### Setup
+
+- Price Now Reference: 0.009749
+- Entry: 0.009489
+- Reason Entry: CHILLGUYUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure RANGE, liquidity H4 0.009483 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 30.4 pada entry zone.
+- Price Exp: 0.009802
+- Reason Price Exp: Price Exp 0.009802: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.009394
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.009483; SL ditempatkan di luar invalidation.
+- TP: 0.009854
+- Reason TP: TP 0.009854 dipilih dari H4_SWING_HIGH dengan RR 3.84; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.009802
+- Result Reason: Price Exp 0.009802: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T14:00:48.351490+00:00
+- Filled: -
+- Closed: 2026-10-20T14:02:01.355266+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
