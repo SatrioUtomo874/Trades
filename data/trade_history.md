@@ -1913,3 +1913,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:00:34.333341+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## ALICEUSDT — BUY
+
+Trade ID: `ALICEUSDT-20261020-210052-26BE97`
+
+### Setup
+
+- Price Now Reference: 0.1437
+- Entry: 0.1414
+- Reason Entry: ALICEUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure RANGE, liquidity H1 0.1413782 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 40.0 pada entry zone.
+- Price Exp: 0.1443
+- Reason Price Exp: Price Exp 0.1443: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1399
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.1412; SL ditempatkan di luar invalidation dan liquidity guard 0.1413782.
+- TP: 0.1443
+- Reason TP: TP 0.1443 dipilih dari H1_SWING_HIGH dengan RR 1.93; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1443
+- Result Reason: Price Exp 0.1443: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T14:00:52.851710+00:00
+- Filled: -
+- Closed: 2026-10-20T14:01:33.254010+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
