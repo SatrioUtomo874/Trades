@@ -2309,3 +2309,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:15:04.753939+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## HAEDALUSDT — BUY
+
+Trade ID: `HAEDALUSDT-20261020-095400-045F98`
+
+### Setup
+
+- Price Now Reference: 0.01806
+- Entry: 0.01769
+- Reason Entry: HAEDALUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.01768 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 33.4 pada entry zone.
+- Price Exp: 0.01813
+- Reason Price Exp: Price Exp 0.01813: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01751
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.01768; SL ditempatkan di luar invalidation dan liquidity guard 0.01768.
+- TP: 0.01831
+- Reason TP: TP 0.01831 dipilih dari H4_SWING_HIGH dengan RR 3.44; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.0183
+- Result Reason: TP 0.01831 dipilih dari H4_SWING_HIGH dengan RR 3.44; target quality 82.
+- PnL: 3.44827586206896551724137931%
+- Created: 2026-10-20T02:54:00.053723+00:00
+- Filled: 2026-10-20T12:08:54.127553+00:00
+- Closed: 2026-10-20T14:15:50.147158+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
