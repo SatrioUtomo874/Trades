@@ -2474,3 +2474,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:56:27.940332+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## CHIPUSDT — BUY
+
+Trade ID: `CHIPUSDT-20261020-222430-F8EA2A`
+
+### Setup
+
+- Price Now Reference: 0.04468
+- Entry: 0.04301
+- Reason Entry: CHIPUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.04299 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 35.9 pada entry zone.
+- Price Exp: 0.04481
+- Reason Price Exp: Price Exp 0.04481: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.04211
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.04297; SL ditempatkan di luar invalidation.
+- TP: 0.04486
+- Reason TP: TP 0.04486 dipilih dari H1_SWING_HIGH dengan RR 2.06; target quality 78.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.04481
+- Result Reason: Price Exp 0.04481: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T15:24:30.342394+00:00
+- Filled: -
+- Closed: 2026-10-20T15:24:56.140986+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
