@@ -2408,3 +2408,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:18:01.367489+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## ZETAUSDT — SELL
+
+Trade ID: `ZETAUSDT-20261020-211309-0EA83C`
+
+### Setup
+
+- Price Now Reference: 0.04207
+- Entry: 0.04208
+- Reason Entry: ZETAUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity H1 0.0420625 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 72.0 pada entry zone.
+- Price Exp: 0.04105
+- Reason Price Exp: Price Exp 0.04105: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.04251
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.04221; SL ditempatkan di luar invalidation.
+- TP: 0.04062
+- Reason TP: TP 0.04062 dipilih dari H4_LOWER_LOW dengan RR 3.40; target quality 91.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.04251
+- Result Reason: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.04221; SL ditempatkan di luar invalidation.
+- PnL: -1.021863117870722433460076046%
+- Created: 2026-10-20T14:13:09.159642+00:00
+- Filled: 2026-10-20T14:13:28.331074+00:00
+- Closed: 2026-10-20T14:36:52.949871+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
