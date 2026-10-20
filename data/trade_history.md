@@ -2210,3 +2210,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:08:18.163633+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## EDGEUSDT — BUY
+
+Trade ID: `EDGEUSDT-20261020-211016-62ED03`
+
+### Setup
+
+- Price Now Reference: 0.2984
+- Entry: 0.2887
+- Reason Entry: EDGEUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.288675 dipadukan dengan Fib SECONDARY; refinement BEARISH_BREAKER. Projected M15 RSI 39.3 pada entry zone.
+- Price Exp: 0.2986
+- Reason Price Exp: Price Exp 0.29860000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.2858
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.2885; SL ditempatkan di luar invalidation dan liquidity guard 0.288675.
+- TP: 0.2987
+- Reason TP: TP 0.2987 dipilih dari H1_SWING_HIGH dengan RR 3.45; target quality 76.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2992
+- Result Reason: Price Exp 0.29860000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T14:10:16.043467+00:00
+- Filled: -
+- Closed: 2026-10-20T14:10:22.189023+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
