@@ -1022,3 +1022,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T03:56:18.332630+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## BSBUSDT — BUY
+
+Trade ID: `BSBUSDT-20261020-081214-F93E4B`
+
+### Setup
+
+- Price Now Reference: 0.08355
+- Entry: 0.08318
+- Reason Entry: BSBUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity M15 0.0831013 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 32.5 pada entry zone.
+- Price Exp: 0.08474
+- Reason Price Exp: Price Exp 0.08474000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.08234
+- Reason SL: SL manual dari Binance.
+- TP: 0.0854
+- Reason TP: TP manual dari Binance.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.0854
+- Result Reason: TP manual dari Binance.
+- PnL: 2.668910795864402821460783345%
+- Created: 2026-10-20T01:12:14.355245+00:00
+- Filled: 2026-10-20T01:40:14.735405+00:00
+- Closed: 2026-10-20T04:09:50.936682+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
