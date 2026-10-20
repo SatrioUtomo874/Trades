@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T00:36:41.264889+00:00",
+  "saved_at": "2026-10-20T15:59:33.414778+00:00",
   "risk": {
     "mode": "LEGACY_NOTIONAL",
     "per_trade": null,
@@ -14,7 +14,7 @@
     "research": true,
     "btc_flip": true,
     "h4_max_cycles": 10,
-    "autostop": "15",
+    "autostop": "16",
     "drawdown": null
   }
 }
