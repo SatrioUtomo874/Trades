@@ -1715,3 +1715,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T13:49:34.960784+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## VETUSDT — BUY
+
+Trade ID: `VETUSDT-20261020-203842-12D3DC`
+
+### Setup
+
+- Price Now Reference: 0.006802
+- Entry: 0.006667
+- Reason Entry: VETUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0066598869 dipadukan dengan Fib SECONDARY; refinement BEARISH_BREAKER. Projected M15 RSI 37.3 pada entry zone.
+- Price Exp: 0.006825
+- Reason Price Exp: Price Exp 0.0068249999999999995: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0066
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.006661; SL ditempatkan di luar invalidation dan liquidity guard 0.0066598869.
+- TP: 0.006828
+- Reason TP: TP 0.006828 dipilih dari H4_SWING_HIGH dengan RR 2.40; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.006825
+- Result Reason: Price Exp 0.0068249999999999995: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T13:38:42.548242+00:00
+- Filled: -
+- Closed: 2026-10-20T13:50:03.059842+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
