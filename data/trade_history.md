@@ -824,3 +824,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T00:25:11.465538+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## LSKUSDT — BUY
+
+Trade ID: `LSKUSDT-20261020-064359-58AF81`
+
+### Setup
+
+- Price Now Reference: 0.20248
+- Entry: 0.19738
+- Reason Entry: LSKUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity H1 0.1974887 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 34.0 pada entry zone.
+- Price Exp: 0.2038
+- Reason Price Exp: Price Exp 0.2038: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.19362
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.197125; SL ditempatkan di luar invalidation dan liquidity guard 0.1974887.
+- TP: 0.20654
+- Reason TP: TP 0.20654 dipilih dari H4_SWING_HIGH dengan RR 2.44; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.19362
+- Result Reason: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.197125; SL ditempatkan di luar invalidation dan liquidity guard 0.1974887.
+- PnL: -1.904954909312001939666393356%
+- Created: 2026-10-19T23:43:59.875646+00:00
+- Filled: 2026-10-20T00:27:00.459585+00:00
+- Closed: 2026-10-20T01:09:24.935708+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
