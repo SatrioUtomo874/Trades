@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T05:54:21.157517+00:00",
-  "saved_at_wib": "20-10-2026, 12:54 WIB",
+  "saved_at": "2026-10-20T06:21:28.354500+00:00",
+  "saved_at_wib": "20-10-2026, 13:21 WIB",
   "count": 6,
   "setups": [
     {
@@ -10744,8 +10744,8 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.5287190579187766982418367278",
-      "max_favorable_pct": "0.7450132179764551253294964208",
+      "pnl_percent": "0.8411439557798677595906785066",
+      "max_favorable_pct": "1.321797644796930930896588936",
       "max_adverse_pct": "-0.09613073780340542445584682984",
       "planned_rr": "2.642857142857142857142857143",
       "pending_seconds": 164.977825,
@@ -14135,7 +14135,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.009372746935825449937076645",
-      "realized_r": "0.5238095238095346938775510204"
+      "realized_r": "0.8333333333333464285714285714"
     },
     {
       "trade_id": "KAITOUSDT-20261020-111311-F029DA",
