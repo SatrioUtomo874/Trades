@@ -1,14 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T12:24:26.436880+00:00",
+  "saved_at": "2026-10-20T12:35:52.032755+00:00",
   "bans": [
-    {
-      "pair": "1000PEPEUSDT",
-      "banned_at": "2026-10-20T03:56:30.357788+00:00",
-      "until": "2026-10-20T11:56:30.357760+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
     {
       "pair": "AAVEUSDT",
       "banned_at": "2026-10-20T03:57:00.349817+00:00",
@@ -71,6 +64,13 @@
       "until": "2026-10-21T10:58:17.248528+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "HEIUSDT",
+      "banned_at": "2026-10-20T12:35:52.032483+00:00",
+      "until": "2026-10-20T20:35:52.032456+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "IOSTUSDT",
