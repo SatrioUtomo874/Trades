@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T03:57:03.480980+00:00",
+  "saved_at": "2026-10-20T04:10:03.026427+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -36,6 +36,13 @@
       "until": "2026-10-20T08:25:26.029220+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "BSBUSDT",
+      "banned_at": "2026-10-20T04:10:03.026236+00:00",
+      "until": "2026-10-21T04:10:03.026198+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "EGLDUSDT",
