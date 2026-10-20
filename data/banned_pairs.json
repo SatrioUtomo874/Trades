@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T06:29:37.370489+00:00",
+  "saved_at": "2026-10-20T07:11:42.158925+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -62,6 +62,13 @@
       "pair": "CROSSUSDT",
       "banned_at": "2026-10-20T06:21:25.969602+00:00",
       "until": "2026-10-20T14:21:25.969582+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "CVCUSDT",
+      "banned_at": "2026-10-20T07:11:42.158759+00:00",
+      "until": "2026-10-20T15:11:42.158738+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
