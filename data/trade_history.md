@@ -2705,3 +2705,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T16:33:45.626817+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## ENSUSDT — BUY
+
+Trade ID: `ENSUSDT-20261020-233607-C4610A`
+
+### Setup
+
+- Price Now Reference: 5.573
+- Entry: 5.395
+- Reason Entry: ENSUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure RANGE, liquidity M15 5.39417 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 34.7 pada entry zone.
+- Price Exp: 5.576
+- Reason Price Exp: Price Exp 5.5760000000000005: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 5.335
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 5.393; SL ditempatkan di luar invalidation dan liquidity guard 5.39417.
+- TP: 5.576
+- Reason TP: TP 5.576 dipilih dari H4_SWING_HIGH dengan RR 3.02; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 5.576
+- Result Reason: Price Exp 5.5760000000000005: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T16:36:07.558438+00:00
+- Filled: -
+- Closed: 2026-10-20T16:47:40.135301+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
