@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T14:18:14.966073+00:00",
+  "saved_at": "2026-10-20T14:37:21.749703+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -62,13 +62,6 @@
       "pair": "CHILLGUYUSDT",
       "banned_at": "2026-10-20T14:02:15.763107+00:00",
       "until": "2026-10-20T22:02:15.763082+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "CROSSUSDT",
-      "banned_at": "2026-10-20T06:21:25.969602+00:00",
-      "until": "2026-10-20T14:21:25.969582+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
@@ -297,11 +290,11 @@
       "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
-      "pair": "牛来USDT",
-      "banned_at": "2026-10-20T06:29:37.370306+00:00",
-      "until": "2026-10-20T14:29:37.370283+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
+      "pair": "ZETAUSDT",
+      "banned_at": "2026-10-20T14:37:21.749538+00:00",
+      "until": "2026-10-21T14:37:21.749509+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     }
   ]
 }
