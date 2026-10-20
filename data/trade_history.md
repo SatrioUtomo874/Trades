@@ -2111,3 +2111,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:06:02.959796+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## TRIAUSDT — BUY
+
+Trade ID: `TRIAUSDT-20261020-210150-D0D695`
+
+### Setup
+
+- Price Now Reference: 0.002483
+- Entry: 0.002363
+- Reason Entry: TRIAUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity M15 0.002363 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 24.7 pada entry zone.
+- Price Exp: 0.002502
+- Reason Price Exp: Price Exp 0.002502: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.002302
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.002306; SL ditempatkan di luar invalidation dan liquidity guard 0.002306.
+- TP: 0.002524
+- Reason TP: TP 0.002524 dipilih dari H4_SWING_HIGH dengan RR 2.64; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.002502
+- Result Reason: Price Exp 0.002502: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T14:01:50.367637+00:00
+- Filled: -
+- Closed: 2026-10-20T14:07:07.552888+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
