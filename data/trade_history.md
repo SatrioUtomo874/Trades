@@ -758,3 +758,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T00:16:25.851886+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## KERNELUSDT — BUY
+
+Trade ID: `KERNELUSDT-20261020-071856-306FAC`
+
+### Setup
+
+- Price Now Reference: 0.04243
+- Entry: 0.0413
+- Reason Entry: KERNELUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity M15 0.0412681 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 33.9 pada entry zone.
+- Price Exp: 0.04251
+- Reason Price Exp: Price Exp 0.042510000000000006: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.04077
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.04122; SL ditempatkan di luar invalidation dan liquidity guard 0.0412681.
+- TP: 0.04254
+- Reason TP: TP 0.04254 dipilih dari H1_SWING_HIGH dengan RR 2.34; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.04251
+- Result Reason: Price Exp 0.042510000000000006: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T00:18:56.764293+00:00
+- Filled: -
+- Closed: 2026-10-20T00:24:21.632989+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
