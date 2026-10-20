@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T13:46:13.450415+00:00",
-  "saved_at_wib": "20-10-2026, 20:46 WIB",
+  "saved_at": "2026-10-20T13:49:51.157634+00:00",
+  "saved_at_wib": "20-10-2026, 20:49 WIB",
   "count": 6,
   "setups": [
     {
@@ -27,7 +27,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "-0.05561735261401557285873192436",
+      "pnl_percent": "0",
       "max_favorable_pct": "0.1668520578420467185761957731",
       "max_adverse_pct": "-0.6674082313681868743047830923",
       "planned_rr": "4.047619047619047619047619048",
@@ -3774,7 +3774,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.167964404894327030033370412",
-      "realized_r": "-0.0476190476190476190476190476"
+      "realized_r": "0"
     },
     {
       "trade_id": "HAEDALUSDT-20261020-095400-045F98",
@@ -3799,7 +3799,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.8479366873940079140757490107",
+      "pnl_percent": "1.017524024872809496890898813",
       "max_favorable_pct": "1.187111362351611079706048615",
       "max_adverse_pct": "-0.1130582249858677218767665348",
       "planned_rr": "3.444444444444444444444444444",
@@ -7388,7 +7388,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.017524024872809496890898813",
-      "realized_r": "0.8333333333333333333333333332"
+      "realized_r": "1"
     },
     {
       "trade_id": "MEWUSDT-20261020-105700-571340",
@@ -7413,7 +7413,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.8892093246815740767212695495",
+      "pnl_percent": "0.6729151646238956496336098565",
       "max_favorable_pct": "2.0668108627733788464207501",
       "max_adverse_pct": "-0.09613073780340542445584682984",
       "planned_rr": "2.642857142857142857142857143",
@@ -10804,7 +10804,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.009372746935825449937076645",
-      "realized_r": "0.8809523809523943877551020408"
+      "realized_r": "0.6666666666666785714285714286"
     },
     {
       "trade_id": "KAITOUSDT-20261020-111311-F029DA",
@@ -10829,7 +10829,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "1.178203240058910162002945508",
+      "pnl_percent": "1.251840942562592047128129602",
       "max_favorable_pct": "1.362297496318114874815905744",
       "max_adverse_pct": "-0.03681885125184094256259204713",
       "planned_rr": "3.214285714285714285714285714",
@@ -14336,7 +14336,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.03092783505154639175257732",
-      "realized_r": "1.142857142857142857142857142"
+      "realized_r": "1.214285714285714285714285713"
     },
     {
       "trade_id": "NEOUSDT-20261020-184545-80619A",
