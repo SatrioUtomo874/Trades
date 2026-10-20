@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T10:20:16.962781+00:00",
+  "saved_at": "2026-10-20T10:58:17.248725+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
@@ -64,6 +64,13 @@
       "until": "2026-10-20T15:42:37.150434+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "FIGHTUSDT",
+      "banned_at": "2026-10-20T10:58:17.248557+00:00",
+      "until": "2026-10-21T10:58:17.248528+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "IOSTUSDT",
