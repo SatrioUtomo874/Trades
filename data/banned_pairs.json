@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T02:49:13.612743+00:00",
+  "saved_at": "2026-10-20T02:51:57.379481+00:00",
   "bans": [
     {
       "pair": "ADAUSDT",
@@ -64,6 +64,13 @@
       "until": "2026-10-20T08:01:37.309376+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "UNIUSDT",
+      "banned_at": "2026-10-20T02:51:54.139836+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: UNIUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=5, nearest_notional=7.177) Margin pas ≈ $0.72.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     }
   ]
 }
