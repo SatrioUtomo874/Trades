@@ -857,3 +857,36 @@ Tidak ada trailing.
 - Filled: 2026-10-20T00:27:00.459585+00:00
 - Closed: 2026-10-20T01:09:24.935708+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## JUPUSDT — SELL
+
+Trade ID: `JUPUSDT-20261020-070406-8F0CDD`
+
+### Setup
+
+- Price Now Reference: 0.2944
+- Entry: 0.2979
+- Reason Entry: JUPUSDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity M15 0.2979375 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 70.5 pada entry zone.
+- Price Exp: 0.2914
+- Reason Price Exp: Price Exp 0.2914: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.3009
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.2985; SL ditempatkan di luar invalidation dan liquidity guard 0.2991.
+- TP: 0.2887
+- Reason TP: TP 0.2887 dipilih dari H4_LOWER_LOW dengan RR 3.07; target quality 92.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2914
+- Result Reason: Price Exp 0.2914: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T00:04:06.587870+00:00
+- Filled: -
+- Closed: 2026-10-20T01:09:45.450676+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
