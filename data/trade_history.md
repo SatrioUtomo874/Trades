@@ -923,3 +923,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T02:48:04.344720+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## JCTUSDT — BUY
+
+Trade ID: `JCTUSDT-20261020-072703-B6135A`
+
+### Setup
+
+- Price Now Reference: 0.00197
+- Entry: 0.001939
+- Reason Entry: JCTUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.00193975 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 37.9 pada entry zone.
+- Price Exp: 0.001995
+- Reason Price Exp: Price Exp 0.001995: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.001909
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.001937; SL ditempatkan di luar invalidation.
+- TP: 0.002019
+- Reason TP: TP 0.002019 dipilih dari H4_SWING_HIGH dengan RR 2.67; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.001995
+- Result Reason: Price Exp 0.001995: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T00:27:03.763164+00:00
+- Filled: -
+- Closed: 2026-10-20T02:49:00.249320+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
