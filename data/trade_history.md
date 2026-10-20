@@ -2639,3 +2639,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T16:21:29.328646+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## SQDUSDT — BUY
+
+Trade ID: `SQDUSDT-20261020-232026-5172DB`
+
+### Setup
+
+- Price Now Reference: 0.019
+- Entry: 0.01827
+- Reason Entry: SQDUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.018265 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_OB. Projected M15 RSI 30.9 pada entry zone.
+- Price Exp: 0.01911
+- Reason Price Exp: Price Exp 0.019110000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01797
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.01816; SL ditempatkan di luar invalidation.
+- TP: 0.01912
+- Reason TP: TP 0.01912 dipilih dari H4_HIGHER_HIGH dengan RR 2.83; target quality 89.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.01911
+- Result Reason: Price Exp 0.019110000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T16:20:26.760957+00:00
+- Filled: -
+- Closed: 2026-10-20T16:28:15.743173+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
