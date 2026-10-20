@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T11:42:23.707880+00:00",
+  "saved_at": "2026-10-20T12:24:26.436880+00:00",
   "bans": [
     {
       "pair": "1000PEPEUSDT",
@@ -113,6 +113,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: UNIUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=5, nearest_notional=7.177) Margin pas ≈ $0.72.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "XANUSDT",
+      "banned_at": "2026-10-20T12:24:26.436698+00:00",
+      "until": "2026-10-21T12:24:26.436665+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "牛来USDT",
