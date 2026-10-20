@@ -1550,3 +1550,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T12:45:04.049465+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## BROCCOLI714USDT — SELL
+
+Trade ID: `BROCCOLI714USDT-20261020-200940-691958`
+
+### Setup
+
+- Price Now Reference: 0.02017
+- Entry: 0.02065
+- Reason Entry: BROCCOLI714USDT SELL: SELL_PULLBACK_RSI_DIVERGENCE. H4 structure BEARISH, liquidity H1 0.02065 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_BREAKER. Projected M15 RSI 71.4 pada entry zone.
+- Price Exp: 0.02015
+- Reason Price Exp: Price Exp 0.02015: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02087
+- Reason SL: Prediction invalidation berasal dari H1_BUY_SIDE_LIQUIDITY di 0.0206568; SL ditempatkan di luar invalidation dan liquidity guard 0.02065.
+- TP: 0.02016
+- Reason TP: TP 0.02016 dipilih dari H1_SWING_LOW dengan RR 2.23; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02015
+- Result Reason: Price Exp 0.02015: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T13:09:40.764391+00:00
+- Filled: -
+- Closed: 2026-10-20T13:15:33.150096+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
