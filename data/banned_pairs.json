@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T13:59:41.292917+00:00",
+  "saved_at": "2026-10-20T14:00:05.075151+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -139,6 +139,13 @@
       "pair": "SSVUSDT",
       "banned_at": "2026-10-20T13:38:01.981343+00:00",
       "until": "2026-10-20T21:38:01.981321+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "TOSHIUSDT",
+      "banned_at": "2026-10-20T14:00:05.074994+00:00",
+      "until": "2026-10-20T22:00:05.074972+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
