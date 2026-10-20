@@ -1286,3 +1286,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T07:11:29.355865+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## DOODUSDT — BUY
+
+Trade ID: `DOODUSDT-20261020-141249-CEC5C4`
+
+### Setup
+
+- Price Now Reference: 0.001337
+- Entry: 0.001318
+- Reason Entry: DOODUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity M15 0.0013173333 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 32.8 pada entry zone.
+- Price Exp: 0.001341
+- Reason Price Exp: Price Exp 0.001341: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.001304
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.001317; SL ditempatkan di luar invalidation dan liquidity guard 0.0013173333.
+- TP: 0.00135
+- Reason TP: TP 0.00135 dipilih dari H4_SWING_HIGH dengan RR 2.29; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.001341
+- Result Reason: Price Exp 0.001341: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T07:12:49.054255+00:00
+- Filled: -
+- Closed: 2026-10-20T07:42:24.829492+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
