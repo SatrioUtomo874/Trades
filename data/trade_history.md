@@ -2507,3 +2507,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T15:24:56.140986+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## SLXUSDT — BUY
+
+Trade ID: `SLXUSDT-20261020-222428-D905AF`
+
+### Setup
+
+- Price Now Reference: 0.04864
+- Entry: 0.04734
+- Reason Entry: SLXUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure RANGE, liquidity H1 0.0473021 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 33.3 pada entry zone.
+- Price Exp: 0.04878
+- Reason Price Exp: Price Exp 0.048780000000000004: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.04686
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.04723; SL ditempatkan di luar invalidation dan liquidity guard 0.0473021.
+- TP: 0.0488
+- Reason TP: TP 0.0488 dipilih dari H4_SWING_HIGH dengan RR 3.04; target quality 85.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.04878
+- Result Reason: Price Exp 0.048780000000000004: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T15:24:28.366974+00:00
+- Filled: -
+- Closed: 2026-10-20T15:40:40.144976+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
