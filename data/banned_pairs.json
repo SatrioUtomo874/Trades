@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T16:06:23.406761+00:00",
+  "saved_at": "2026-10-20T16:16:51.001657+00:00",
   "bans": [
     {
       "pair": "AKTUSDT",
@@ -216,6 +216,13 @@
       "pair": "RAVEUSDT",
       "banned_at": "2026-10-20T13:49:49.044097+00:00",
       "until": "2026-10-20T21:49:49.044073+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "REZUSDT",
+      "banned_at": "2026-10-20T16:16:51.001419+00:00",
+      "until": "2026-10-21T00:16:51.001353+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
