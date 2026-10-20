@@ -1385,3 +1385,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T10:20:03.834834+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## FIGHTUSDT — SELL
+
+Trade ID: `FIGHTUSDT-20261020-095154-BCE5FC`
+
+### Setup
+
+- Price Now Reference: 0.002797
+- Entry: 0.002826
+- Reason Entry: FIGHTUSDT SELL: SELL_PULLBACK. H4 structure RANGE, liquidity H1 0.0028273333 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 69.7 pada entry zone.
+- Price Exp: 0.002769
+- Reason Price Exp: Price Exp 0.0027689999999999998: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.002857
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.002827; SL ditempatkan di luar invalidation dan liquidity guard 0.0028273333.
+- TP: 0.002745
+- Reason TP: TP 0.002745 dipilih dari H1_SWING_LOW dengan RR 2.61; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.002857
+- Result Reason: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.002827; SL ditempatkan di luar invalidation dan liquidity guard 0.0028273333.
+- PnL: -1.096956829440905874026893135%
+- Created: 2026-10-20T02:51:54.351800+00:00
+- Filled: 2026-10-20T08:56:44.741952+00:00
+- Closed: 2026-10-20T10:58:04.545465+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
