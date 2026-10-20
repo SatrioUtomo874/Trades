@@ -2012,3 +2012,36 @@ Tidak ada trailing.
 - Filled: 2026-10-20T03:59:45.532071+00:00
 - Closed: 2026-10-20T14:02:33.950463+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## TRUSTUSDT — BUY
+
+Trade ID: `TRUSTUSDT-20261020-210050-786F48`
+
+### Setup
+
+- Price Now Reference: 0.04992
+- Entry: 0.04813
+- Reason Entry: TRUSTUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity M15 0.04813 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 21.7 pada entry zone.
+- Price Exp: 0.05013
+- Reason Price Exp: Price Exp 0.05013: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.04764
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.047745; SL ditempatkan di luar invalidation dan liquidity guard 0.0477807.
+- TP: 0.05015
+- Reason TP: TP 0.05015 dipilih dari H1_SWING_HIGH dengan RR 4.12; target quality 76.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.05014
+- Result Reason: Price Exp 0.05013: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T14:00:50.560447+00:00
+- Filled: -
+- Closed: 2026-10-20T14:03:03.234122+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
