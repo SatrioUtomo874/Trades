@@ -791,3 +791,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T00:24:21.632989+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## ATOMUSDT — BUY
+
+Trade ID: `ATOMUSDT-20261020-064358-22DFC9`
+
+### Setup
+
+- Price Now Reference: 1.744
+- Entry: 1.698
+- Reason Entry: ATOMUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity M15 1.69193 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 23.3 pada entry zone.
+- Price Exp: 1.747
+- Reason Price Exp: Price Exp 1.747: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.68
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 1.692; SL ditempatkan di luar invalidation dan liquidity guard 1.69193.
+- TP: 1.748
+- Reason TP: TP 1.748 dipilih dari H4_SWING_HIGH dengan RR 2.78; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 1.747
+- Result Reason: Price Exp 1.747: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-19T23:43:58.159201+00:00
+- Filled: -
+- Closed: 2026-10-20T00:25:11.465538+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
