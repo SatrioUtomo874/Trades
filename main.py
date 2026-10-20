@@ -158,6 +158,7 @@ BINANCE_RATE_LIMIT_FALLBACK_SECONDS = 60
 BINANCE_RATE_LIMIT_SAFETY_SECONDS = 60
 REAL_RECONCILE_INTERVAL_SECONDS = 2.0
 REAL_PENDING_POLL_SECONDS = 5.0
+REAL_PENDING_SYNC_SECONDS = 20.0  # sinkron status order LIMIT dengan Binance (tanpa bergantung tick harga)
 REAL_PROTECT_CHECK_SECONDS = 60.0
 BINANCE_RATE_LIMIT_PRIORITY_SAFETY_SECONDS = 60  # jeda tambahan TP/SL & cancel prioritas; 0 = tepat di Retry-After
 BINANCE_BAN_FALLBACK_SECONDS = 120  # 418 tanpa Retry-After: ban minimal 2 menit
@@ -10087,6 +10088,7 @@ class TradingEngine:
         self._btc_backoff_until = 0.0
         self._btc_last_warn = 0.0
         self._btc_task: asyncio.Task[Any] | None = None
+        self._sync_task: asyncio.Task[Any] | None = None
         self._btc_state: dict[str, Any] = {}
         self._btc_impulse: dict[str, Any] = {}
         self._research_saved_on = False
@@ -10784,15 +10786,96 @@ class TradingEngine:
     def _start_btc_watch(self) -> None:
         if self._btc_task is None or self._btc_task.done():
             self._btc_task = asyncio.create_task(self._btc_watch_loop(), name="btc-watch")
+        if self._sync_task is None or self._sync_task.done():
+            self._sync_task = asyncio.create_task(self._pending_sync_loop(), name="pending-sync")
 
     async def _stop_btc_watch(self) -> None:
-        task, self._btc_task = self._btc_task, None
-        if task is not None and not task.done():
-            task.cancel()
+        for attr in ("_btc_task", "_sync_task"):
+            task = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+
+    async def _pending_sync_loop(self) -> None:
+        """Cek status order LIMIT di Binance berkala: fill/batal terdeteksi walau tick harga terlewat."""
+        await asyncio.sleep(15)
+        while self._running:
             try:
-                await task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+                await self._pending_sync_once()
+            except asyncio.CancelledError:
+                raise
+            except BinanceRateLimitError as exc:
+                self._notify_rate_limit(exc, "SINKRON ORDER LIMIT")
+            except Exception:
+                log.exception("[SINKRON] gagal sinkron order LIMIT")
+            await asyncio.sleep(REAL_PENDING_SYNC_SECONDS)
+
+    async def _pending_sync_once(self) -> None:
+        if not self.real_mode or self.real.cooldown_remaining > 0 or self._limit_hold_blocking():
+            return
+        used = API_STATS.used_weight
+        if (
+            used is not None
+            and API_STATS.used_weight_at is not None
+            and time.monotonic() - API_STATS.used_weight_at <= 30.0
+            and used >= 0.7 * BINANCE_IP_WEIGHT_LIMIT
+        ):
+            return  # bobot IP tinggi: tunda sinkron
+        pending = [
+            t for t in list(self.active_trades.values())
+            if t.real_enabled
+            and t.status == "PENDING"
+            and t.real_state != "REAL_LIMIT_HOLD"
+            and t.trade_id not in self._hold_cancel_queue
+            and (t.entry_order_id is not None or t.entry_client_order_id)
+        ]
+        for trade in pending:
+            if trade.status != "PENDING" or trade.trade_id not in self.active_trades:
+                continue
+            try:
+                order = await self.real.get_order(
+                    trade.pair,
+                    order_id=trade.entry_order_id,
+                    client_order_id=trade.entry_client_order_id if trade.entry_order_id is None else None,
+                )
+            except BinanceRateLimitError:
+                raise
+            except BinanceAPIError as exc:
+                log.warning("[SINKRON] order %s tidak terbaca: %s", trade.trade_id, exc)
+                continue
+            status = str(order.get("status") or "").upper()
+            info = trade.risk_info if isinstance(trade.risk_info, dict) else {}
+            if status in {"FILLED", "PARTIALLY_FILLED"}:
+                log.warning("[SINKRON] %s terisi di Binance (%s) tapi belum tercatat di bot; memproses fill.", trade.pair, status)
+                await self._confirm_real_fill(trade, verified_order=order)
+            elif status in {"CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}:
+                if info.get("sync_gone") != status:
+                    # Pengamatan pertama: beri waktu alur bot sendiri (EXPIRED/hold) menyelesaikan trade.
+                    trade.risk_info = {**info, "sync_gone": status}
+                    continue
+                if trade.status == "PENDING" and trade.result is None:
+                    trade.real_state = "REAL_CLOSED"
+                    reason = f"Order LIMIT sudah tidak aktif di Binance ({status}); dibatalkan manual atau oleh Binance."
+                    await self._finalize_trade(
+                        trade, result="DELETED", exit_price=None, reason=reason, send_notification=False
+                    )
+                    await self.reply(
+                        card(
+                            "🗑️ SETUP DIHAPUS",
+                            [
+                                f"{'🟢' if trade.direction == 'BUY' else '🔴'} {trade.pair}  •  {trade.direction}",
+                                f"🎯 Entry {fmt_price(trade.entry)}  •  🛡 SL {fmt_price(trade.sl)}",
+                                f"🧠 {reason}",
+                            ],
+                        )
+                    )
+            elif info.get("sync_gone"):
+                trade.risk_info = {k: v for k, v in info.items() if k != "sync_gone"}
+            await asyncio.sleep(0.2)
 
     async def _btc_watch_loop(self) -> None:
         await asyncio.sleep(45)
