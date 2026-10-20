@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T14:02:15.763268+00:00",
+  "saved_at": "2026-10-20T14:02:53.850733+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -111,6 +111,13 @@
       "pair": "LSKUSDT",
       "banned_at": "2026-10-20T01:09:35.931473+00:00",
       "until": "2026-10-21T01:09:35.931442+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
+    },
+    {
+      "pair": "MEWUSDT",
+      "banned_at": "2026-10-20T14:02:53.850555+00:00",
+      "until": "2026-10-21T14:02:53.850522+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
     },
