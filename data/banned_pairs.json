@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T16:48:23.483267+00:00",
+  "saved_at": "2026-10-20T17:47:57.318450+00:00",
   "bans": [
     {
       "pair": "AKTUSDT",
@@ -195,6 +195,13 @@
       "pair": "MMTUSDT",
       "banned_at": "2026-10-20T13:56:04.764985+00:00",
       "until": "2026-10-20T21:56:04.764961+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "MONUSDT",
+      "banned_at": "2026-10-20T17:47:57.318271+00:00",
+      "until": "2026-10-21T01:47:57.318250+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
