@@ -725,3 +725,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T00:08:16.940099+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## EGLDUSDT — BUY
+
+Trade ID: `EGLDUSDT-20261020-071121-6F8071`
+
+### Setup
+
+- Price Now Reference: 3.609
+- Entry: 3.535
+- Reason Entry: EGLDUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity H1 3.53179 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 26.9 pada entry zone.
+- Price Exp: 3.613
+- Reason Price Exp: Price Exp 3.613: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 3.499
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 3.532; SL ditempatkan di luar invalidation dan liquidity guard 3.53179.
+- TP: 3.614
+- Reason TP: TP 3.614 dipilih dari H1_SWING_HIGH dengan RR 2.19; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 3.613
+- Result Reason: Price Exp 3.613: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T00:11:21.562150+00:00
+- Filled: -
+- Closed: 2026-10-20T00:16:25.851886+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
