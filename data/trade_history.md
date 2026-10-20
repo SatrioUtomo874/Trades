@@ -1451,3 +1451,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T11:42:11.542764+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## XANUSDT — BUY
+
+Trade ID: `XANUSDT-20261020-180057-DBE1FD`
+
+### Setup
+
+- Price Now Reference: 0.009243
+- Entry: 0.009002
+- Reason Entry: XANUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity M15 0.0090060833 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 30.1 pada entry zone.
+- Price Exp: 0.009257
+- Reason Price Exp: Price Exp 0.009257: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.008891
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.0089865; SL ditempatkan di luar invalidation dan liquidity guard 0.0090060833.
+- TP: 0.009351
+- Reason TP: TP 0.009351 dipilih dari H4_SWING_HIGH dengan RR 3.14; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.009345
+- Result Reason: TP 0.009351 dipilih dari H4_SWING_HIGH dengan RR 3.14; target quality 86.
+- PnL: 3.810264385692068429237947123%
+- Created: 2026-10-20T11:00:57.149602+00:00
+- Filled: 2026-10-20T11:34:12.443749+00:00
+- Closed: 2026-10-20T12:24:10.642505+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
