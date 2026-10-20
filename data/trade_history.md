@@ -2441,3 +2441,36 @@ Tidak ada trailing.
 - Filled: 2026-10-20T14:13:28.331074+00:00
 - Closed: 2026-10-20T14:36:52.949871+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## AKTUSDT — BUY
+
+Trade ID: `AKTUSDT-20261020-214657-75F989`
+
+### Setup
+
+- Price Now Reference: 0.7311
+- Entry: 0.6994
+- Reason Entry: AKTUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity M15 0.6994 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 35.0 pada entry zone.
+- Price Exp: 0.7337
+- Reason Price Exp: Price Exp 0.7337: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.6796
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.685; SL ditempatkan di luar invalidation dan liquidity guard 0.6824862.
+- TP: 0.7484
+- Reason TP: TP 0.7484 dipilih dari H4_HIGHER_HIGH dengan RR 2.47; target quality 85.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.7337
+- Result Reason: Price Exp 0.7337: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T14:46:57.445742+00:00
+- Filled: -
+- Closed: 2026-10-20T14:56:27.940332+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
