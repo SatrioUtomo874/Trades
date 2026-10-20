@@ -1847,3 +1847,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T13:59:23.157492+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## TOSHIUSDT — BUY
+
+Trade ID: `TOSHIUSDT-20261020-205918-0E4EFD`
+
+### Setup
+
+- Price Now Reference: 0.0001077
+- Entry: 0.0001049
+- Reason Entry: TOSHIUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H4 0.000104915 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 33.4 pada entry zone.
+- Price Exp: 0.000108
+- Reason Price Exp: Price Exp 0.000108: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0001038
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.0001046; SL ditempatkan di luar invalidation dan liquidity guard 0.000104915.
+- TP: 0.000108
+- Reason TP: TP 0.000108 dipilih dari H1_SWING_HIGH dengan RR 2.82; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.000108
+- Result Reason: Price Exp 0.000108: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T13:59:18.954101+00:00
+- Filled: -
+- Closed: 2026-10-20T13:59:50.047459+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
