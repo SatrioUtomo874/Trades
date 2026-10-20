@@ -1154,3 +1154,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T05:50:50.639617+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## BMTUSDT — BUY
+
+Trade ID: `BMTUSDT-20261020-125357-3A6481`
+
+### Setup
+
+- Price Now Reference: 0.01739
+- Entry: 0.01646
+- Reason Entry: BMTUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity H1 0.0164788 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 24.2 pada entry zone.
+- Price Exp: 0.0174
+- Reason Price Exp: Price Exp 0.017400000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01616
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.01626; SL ditempatkan di luar invalidation dan liquidity guard 0.0163021.
+- TP: 0.0174
+- Reason TP: TP 0.0174 dipilih dari H1_SWING_HIGH dengan RR 3.13; target quality 76.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0174
+- Result Reason: Price Exp 0.017400000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T05:53:57.969976+00:00
+- Filled: -
+- Closed: 2026-10-20T05:54:05.527182+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
