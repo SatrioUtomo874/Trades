@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T13:46:11.101044+00:00",
+  "saved_at": "2026-10-20T13:46:52.676869+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -122,13 +122,6 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "RAVEUSDT",
-      "banned_at": "2026-10-20T05:45:12.343067+00:00",
-      "until": "2026-10-20T13:45:12.343045+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "SSVUSDT",
       "banned_at": "2026-10-20T13:38:01.981343+00:00",
       "until": "2026-10-20T21:38:01.981321+00:00",
@@ -148,6 +141,13 @@
       "until": "2026-10-21T12:24:26.436665+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "ZECUSDT",
+      "banned_at": "2026-10-20T13:46:49.540839+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: ZECUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=5, nearest_notional=4.4896) Margin pas ≈ $0.56.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "牛来USDT",
