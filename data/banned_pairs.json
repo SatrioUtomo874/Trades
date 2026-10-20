@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T14:17:47.923820+00:00",
+  "saved_at": "2026-10-20T14:18:14.966073+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -139,6 +139,13 @@
       "pair": "IOSTUSDT",
       "banned_at": "2026-10-20T10:20:16.962643+00:00",
       "until": "2026-10-20T18:20:16.962621+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "IOTXUSDT",
+      "banned_at": "2026-10-20T14:18:14.965910+00:00",
+      "until": "2026-10-20T22:18:14.965888+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
