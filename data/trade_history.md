@@ -1253,3 +1253,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T06:29:25.741637+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## CVCUSDT — BUY
+
+Trade ID: `CVCUSDT-20261020-133038-1B01E2`
+
+### Setup
+
+- Price Now Reference: 0.0221
+- Entry: 0.02179
+- Reason Entry: CVCUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity M15 0.021785 dipadukan dengan Fib SECONDARY; refinement BEARISH_BREAKER. Projected M15 RSI 31.9 pada entry zone.
+- Price Exp: 0.02213
+- Reason Price Exp: Price Exp 0.02213: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02157
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.02169; SL ditempatkan di luar invalidation dan liquidity guard 0.0216881.
+- TP: 0.02227
+- Reason TP: TP 0.02227 dipilih dari H4_SWING_HIGH dengan RR 2.18; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02213
+- Result Reason: Price Exp 0.02213: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T06:30:38.460586+00:00
+- Filled: -
+- Closed: 2026-10-20T07:11:29.355865+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
