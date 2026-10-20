@@ -2045,3 +2045,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T14:03:03.234122+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## KAITOUSDT — BUY
+
+Trade ID: `KAITOUSDT-20261020-111311-F029DA`
+
+### Setup
+
+- Price Now Reference: 0.2787
+- Entry: 0.2716
+- Reason Entry: KAITOUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.27135 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 33.4 pada entry zone.
+- Price Exp: 0.2803
+- Reason Price Exp: Price Exp 0.2803: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.2688
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.2713; SL ditempatkan di luar invalidation dan liquidity guard 0.2702396.
+- TP: 0.2806
+- Reason TP: TP 0.2806 dipilih dari H4_SWING_HIGH dengan RR 3.21; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.2805
+- Result Reason: TP 0.2806 dipilih dari H4_SWING_HIGH dengan RR 3.21; target quality 86.
+- PnL: 3.276877761413843888070692194%
+- Created: 2026-10-20T04:13:11.366746+00:00
+- Filled: 2026-10-20T10:07:14.950150+00:00
+- Closed: 2026-10-20T14:03:27.450227+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
