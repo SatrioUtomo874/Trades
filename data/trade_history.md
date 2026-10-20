@@ -956,3 +956,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T02:49:00.249320+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## 0GUSDT — SELL
+
+Trade ID: `0GUSDT-20261020-095151-B34B86`
+
+### Setup
+
+- Price Now Reference: 0.2277
+- Entry: 0.2369
+- Reason Entry: 0GUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.2369 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 80.9 pada entry zone.
+- Price Exp: 0.2275
+- Reason Price Exp: Price Exp 0.2275: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.2393
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.2374; SL ditempatkan di luar invalidation.
+- TP: 0.2274
+- Reason TP: TP 0.2274 dipilih dari H4_LOWER_LOW dengan RR 3.96; target quality 88.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2275
+- Result Reason: Price Exp 0.2275: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T02:51:51.156716+00:00
+- Filled: -
+- Closed: 2026-10-20T02:52:06.838340+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
