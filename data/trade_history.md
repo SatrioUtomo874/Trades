@@ -2540,3 +2540,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T15:40:40.144976+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## CROSSUSDT — BUY
+
+Trade ID: `CROSSUSDT-20261020-222513-178180`
+
+### Setup
+
+- Price Now Reference: 0.10376
+- Entry: 0.10141
+- Reason Entry: CROSSUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity M15 0.1015279 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 35.1 pada entry zone.
+- Price Exp: 0.10433
+- Reason Price Exp: Price Exp 0.10433: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.10036
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.101325; SL ditempatkan di luar invalidation dan liquidity guard 0.1015279.
+- TP: 0.10439
+- Reason TP: TP 0.10439 dipilih dari H4_SWING_HIGH dengan RR 2.84; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.10433
+- Result Reason: Price Exp 0.10433: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T15:25:13.555508+00:00
+- Filled: -
+- Closed: 2026-10-20T16:06:05.241931+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
