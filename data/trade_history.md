@@ -890,3 +890,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T01:09:45.450676+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## NEOUSDT — BUY
+
+Trade ID: `NEOUSDT-20261020-081216-323461`
+
+### Setup
+
+- Price Now Reference: 2.187
+- Entry: 2.178
+- Reason Entry: NEOUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 2.177 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 30.6 pada entry zone.
+- Price Exp: 2.218
+- Reason Price Exp: Price Exp 2.218: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 2.156
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 2.177; SL ditempatkan di luar invalidation dan liquidity guard 2.177.
+- TP: 2.234
+- Reason TP: TP 2.234 dipilih dari H4_SWING_HIGH dengan RR 2.55; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 2.218
+- Result Reason: Price Exp 2.218: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T01:12:16.350419+00:00
+- Filled: -
+- Closed: 2026-10-20T02:48:04.344720+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
