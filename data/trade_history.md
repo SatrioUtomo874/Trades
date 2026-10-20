@@ -692,3 +692,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T00:01:26.335058+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## ADAUSDT — SELL
+
+Trade ID: `ADAUSDT-20261020-063504-AB179D`
+
+### Setup
+
+- Price Now Reference: 0.2182
+- Entry: 0.2204
+- Reason Entry: ADAUSDT SELL: SELL_PULLBACK. H4 structure BEARISH, liquidity M15 0.2205375 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 70.0 pada entry zone.
+- Price Exp: 0.2169
+- Reason Price Exp: Price Exp 0.2169: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.2227
+- Reason SL: Prediction invalidation berasal dari BEARISH_SWEEP_EXTREME di 0.2205; SL ditempatkan di luar invalidation dan liquidity guard 0.2205375.
+- TP: 0.2155
+- Reason TP: TP 0.2155 dipilih dari H4_LOWER_LOW dengan RR 2.13; target quality 94.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2169
+- Result Reason: Price Exp 0.2169: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-19T23:35:04.935545+00:00
+- Filled: -
+- Closed: 2026-10-20T00:08:16.940099+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
