@@ -1,11 +1,18 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T02:52:19.523282+00:00",
+  "saved_at": "2026-10-20T03:56:30.357934+00:00",
   "bans": [
     {
       "pair": "0GUSDT",
       "banned_at": "2026-10-20T02:52:19.523147+00:00",
       "until": "2026-10-20T10:52:19.523129+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "1000PEPEUSDT",
+      "banned_at": "2026-10-20T03:56:30.357788+00:00",
+      "until": "2026-10-20T11:56:30.357760+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
