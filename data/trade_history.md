@@ -2573,3 +2573,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T16:06:05.241931+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## REZUSDT — BUY
+
+Trade ID: `REZUSDT-20261020-221656-9B822F`
+
+### Setup
+
+- Price Now Reference: 0.003772
+- Entry: 0.003431
+- Reason Entry: REZUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.0034289166 dipadukan dengan Fib PRIMARY; refinement BULLISH_OB. Projected M15 RSI 28.1 pada entry zone.
+- Price Exp: 0.003816
+- Reason Price Exp: Price Exp 0.003816: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.003362
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.003425; SL ditempatkan di luar invalidation.
+- TP: 0.003824
+- Reason TP: TP 0.003824 dipilih dari H4_SWING_HIGH dengan RR 5.70; target quality 74.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.003816
+- Result Reason: Price Exp 0.003816: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T15:16:56.861950+00:00
+- Filled: -
+- Closed: 2026-10-20T16:16:35.929160+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
