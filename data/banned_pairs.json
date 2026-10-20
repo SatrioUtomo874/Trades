@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T14:11:26.051810+00:00",
+  "saved_at": "2026-10-20T14:15:38.524097+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -106,6 +106,13 @@
       "until": "2026-10-21T10:58:17.248528+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "GRASSUSDT",
+      "banned_at": "2026-10-20T14:15:38.523915+00:00",
+      "until": "2026-10-20T22:15:38.523888+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "HEIUSDT",
