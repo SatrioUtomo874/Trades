@@ -1,32 +1,11 @@
 {
   "version": 1,
-  "saved_at": "2026-10-19T07:56:15.653335+00:00",
+  "saved_at": "2026-10-20T00:01:37.309659+00:00",
   "bans": [
     {
-      "pair": "BRUSDT",
-      "banned_at": "2026-10-18T16:27:17.733793+00:00",
-      "until": "2026-10-19T16:27:17.733759+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "DASHUSDT",
-      "banned_at": "2026-10-19T07:40:42.958572+00:00",
-      "until": "2026-10-19T15:40:42.958547+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "GWEIUSDT",
-      "banned_at": "2026-10-19T07:56:15.653180+00:00",
-      "until": "2026-10-19T15:56:15.653157+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "RENDERUSDT",
-      "banned_at": "2026-10-19T07:39:51.153447+00:00",
-      "until": "2026-10-19T15:39:51.153427+00:00",
+      "pair": "SUIUSDT",
+      "banned_at": "2026-10-20T00:01:37.309415+00:00",
+      "until": "2026-10-20T08:01:37.309376+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     }
