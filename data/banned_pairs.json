@@ -1,11 +1,18 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T00:08:28.961958+00:00",
+  "saved_at": "2026-10-20T00:16:37.837718+00:00",
   "bans": [
     {
       "pair": "ADAUSDT",
       "banned_at": "2026-10-20T00:08:28.961806+00:00",
       "until": "2026-10-20T08:08:28.961765+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "EGLDUSDT",
+      "banned_at": "2026-10-20T00:16:37.837306+00:00",
+      "until": "2026-10-20T08:16:37.837284+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
