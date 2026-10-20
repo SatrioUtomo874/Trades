@@ -1682,3 +1682,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T13:45:57.455419+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## RAVEUSDT — BUY
+
+Trade ID: `RAVEUSDT-20261020-204649-16FD70`
+
+### Setup
+
+- Price Now Reference: 0.1513
+- Entry: 0.1465
+- Reason Entry: RAVEUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H4 0.1465 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 17.9 pada entry zone.
+- Price Exp: 0.1516
+- Reason Price Exp: Price Exp 0.1516: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.145
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.1465; SL ditempatkan di luar invalidation.
+- TP: 0.1516
+- Reason TP: TP 0.1516 dipilih dari H4_SWING_HIGH dengan RR 3.40; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.1516
+- Result Reason: Price Exp 0.1516: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T13:46:49.751071+00:00
+- Filled: -
+- Closed: 2026-10-20T13:49:34.960784+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
