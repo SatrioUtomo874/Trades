@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T12:45:21.451032+00:00",
+  "saved_at": "2026-10-20T13:15:47.792166+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -27,6 +27,13 @@
       "pair": "BMTUSDT",
       "banned_at": "2026-10-20T05:54:18.398835+00:00",
       "until": "2026-10-20T13:54:18.398814+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "BROCCOLI714USDT",
+      "banned_at": "2026-10-20T13:15:47.791992+00:00",
+      "until": "2026-10-20T21:15:47.791971+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
