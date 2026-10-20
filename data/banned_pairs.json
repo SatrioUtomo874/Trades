@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T14:10:36.851995+00:00",
+  "saved_at": "2026-10-20T14:11:01.860463+00:00",
   "bans": [
     {
       "pair": "AAVEUSDT",
@@ -127,6 +127,13 @@
       "until": "2026-10-21T14:03:49.328856+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "KATUSDT",
+      "banned_at": "2026-10-20T14:11:01.860296+00:00",
+      "until": "2026-10-20T22:11:01.860277+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "LQTYUSDT",
