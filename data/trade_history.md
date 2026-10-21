@@ -3365,3 +3365,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T14:23:27.849768+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## HEMIUSDT — BUY
+
+Trade ID: `HEMIUSDT-20261021-200456-E41D9E`
+
+### Setup
+
+- Price Now Reference: 0.005193
+- Entry: 0.005149
+- Reason Entry: HEMIUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.0051467679 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 40.1 pada entry zone.
+- Price Exp: 0.005238
+- Reason Price Exp: Price Exp 0.005238: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.005097
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.005145; SL ditempatkan di luar invalidation dan liquidity guard 0.0051467679.
+- TP: 0.005276
+- Reason TP: TP 0.005276 dipilih dari H4_HIGHER_HIGH dengan RR 2.44; target quality 93.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.005238
+- Result Reason: Price Exp 0.005238: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T13:04:56.164641+00:00
+- Filled: -
+- Closed: 2026-10-21T14:48:39.546704+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
