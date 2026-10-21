@@ -2837,3 +2837,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T00:05:20.834907+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## ONDOUSDT — BUY
+
+Trade ID: `ONDOUSDT-20261021-070831-C0A43F`
+
+### Setup
+
+- Price Now Reference: 0.453
+- Entry: 0.4445
+- Reason Entry: ONDOUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.4444 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 33.2 pada entry zone.
+- Price Exp: 0.4567
+- Reason Price Exp: Price Exp 0.4567: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.4392
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.4444; SL ditempatkan di luar invalidation.
+- TP: 0.4619
+- Reason TP: TP 0.4619 dipilih dari H4_HIGHER_HIGH dengan RR 3.28; target quality 93.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.4567
+- Result Reason: Price Exp 0.4567: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T00:08:31.355001+00:00
+- Filled: -
+- Closed: 2026-10-21T00:32:06.147897+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
