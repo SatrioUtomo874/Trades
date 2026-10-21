@@ -3002,3 +3002,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T01:50:01.334335+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## MYXUSDT — BUY
+
+Trade ID: `MYXUSDT-20261020-232300-3B2038`
+
+### Setup
+
+- Price Now Reference: 0.06038
+- Entry: 0.05627
+- Reason Entry: MYXUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity H1 0.05607 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 29.9 pada entry zone.
+- Price Exp: 0.06101
+- Reason Price Exp: Price Exp 0.06101: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.05392
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.05405; SL ditempatkan di luar invalidation dan liquidity guard 0.05405.
+- TP: 0.0621
+- Reason TP: TP 0.0621 dipilih dari H4_HIGHER_HIGH dengan RR 2.48; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: MANUAL_CLOSE_PENDING
+- Exit Price: -
+- Result Reason: Manual /close pada setup REAL PENDING sebelum entry.
+- PnL: -
+- Created: 2026-10-20T16:23:00.358023+00:00
+- Filled: -
+- Closed: 2026-10-21T06:19:11.643072+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
