@@ -3200,3 +3200,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T11:11:24.039443+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## BBUSDT — BUY
+
+Trade ID: `BBUSDT-20261021-132215-22BA08`
+
+### Setup
+
+- Price Now Reference: 0.008392
+- Entry: 0.008351
+- Reason Entry: BBUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0083536875 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 34.8 pada entry zone.
+- Price Exp: 0.008524
+- Reason Price Exp: Price Exp 0.008524: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.00826
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.008346; SL ditempatkan di luar invalidation dan liquidity guard 0.0083536875.
+- TP: 0.008597
+- Reason TP: TP 0.008597 dipilih dari H4_SWING_HIGH dengan RR 2.70; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.008524
+- Result Reason: Price Exp 0.008524: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T06:22:15.761103+00:00
+- Filled: -
+- Closed: 2026-10-21T11:58:55.442138+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
