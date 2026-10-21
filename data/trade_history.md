@@ -2903,3 +2903,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T00:35:19.837171+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## HANAUSDT — BUY
+
+Trade ID: `HANAUSDT-20261020-234952-ED4C8F`
+
+### Setup
+
+- Price Now Reference: 0.01213
+- Entry: 0.01175
+- Reason Entry: HANAUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.01175 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 44.0 pada entry zone.
+- Price Exp: 0.01215
+- Reason Price Exp: Price Exp 0.012150000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01161
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.0117; SL ditempatkan di luar invalidation.
+- TP: 0.0123
+- Reason TP: TP 0.0123 dipilih dari H4_SWING_HIGH dengan RR 3.93; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.01215
+- Result Reason: Price Exp 0.012150000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T16:49:52.044560+00:00
+- Filled: -
+- Closed: 2026-10-21T00:49:35.436485+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
