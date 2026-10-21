@@ -1,76 +1,13 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T00:05:35.062254+00:00",
+  "saved_at": "2026-10-21T00:32:20.706776+00:00",
   "bans": [
-    {
-      "pair": "AKTUSDT",
-      "banned_at": "2026-10-20T14:56:42.925773+00:00",
-      "until": "2026-10-20T22:56:42.925750+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "ALICEUSDT",
-      "banned_at": "2026-10-20T14:01:50.353674+00:00",
-      "until": "2026-10-20T22:01:50.353650+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "ATOMUSDT",
-      "banned_at": "2026-10-20T12:45:21.450866+00:00",
-      "until": "2026-10-20T20:45:21.450840+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "BARDUSDT",
-      "banned_at": "2026-10-20T13:46:11.100769+00:00",
-      "until": "2026-10-20T21:46:11.100744+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "BATUSDT",
-      "banned_at": "2026-10-20T13:59:41.292760+00:00",
-      "until": "2026-10-20T21:59:41.292738+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "BBUSDT",
-      "banned_at": "2026-10-20T14:17:47.923657+00:00",
-      "until": "2026-10-20T22:17:47.923635+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "BROCCOLI714USDT",
-      "banned_at": "2026-10-20T13:15:47.791992+00:00",
-      "until": "2026-10-20T21:15:47.791971+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
     {
       "pair": "BSBUSDT",
       "banned_at": "2026-10-20T04:10:03.026236+00:00",
       "until": "2026-10-21T04:10:03.026198+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
-    },
-    {
-      "pair": "CHILLGUYUSDT",
-      "banned_at": "2026-10-20T14:02:15.763107+00:00",
-      "until": "2026-10-20T22:02:15.763082+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "CHIPUSDT",
-      "banned_at": "2026-10-20T15:25:12.388167+00:00",
-      "until": "2026-10-20T23:25:12.388148+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "CLANKERUSDT",
@@ -83,27 +20,6 @@
       "pair": "CROSSUSDT",
       "banned_at": "2026-10-20T16:06:23.406589+00:00",
       "until": "2026-10-21T00:06:23.406564+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "CVXUSDT",
-      "banned_at": "2026-10-20T11:42:23.707716+00:00",
-      "until": "2026-10-20T19:42:23.707691+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "EDGEUSDT",
-      "banned_at": "2026-10-20T14:10:36.851827+00:00",
-      "until": "2026-10-20T22:10:36.851803+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "EGLDUSDT",
-      "banned_at": "2026-10-20T14:08:38.317330+00:00",
-      "until": "2026-10-20T22:08:38.317308+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
@@ -122,13 +38,6 @@
       "source": "AUTO_SL"
     },
     {
-      "pair": "GRASSUSDT",
-      "banned_at": "2026-10-20T14:15:38.523915+00:00",
-      "until": "2026-10-20T22:15:38.523888+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "HAEDALUSDT",
       "banned_at": "2026-10-20T14:16:07.049514+00:00",
       "until": "2026-10-21T14:16:07.049476+00:00",
@@ -136,46 +45,11 @@
       "source": "AUTO_TP"
     },
     {
-      "pair": "HEIUSDT",
-      "banned_at": "2026-10-20T12:35:52.032483+00:00",
-      "until": "2026-10-20T20:35:52.032456+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "IOSTUSDT",
-      "banned_at": "2026-10-20T10:20:16.962643+00:00",
-      "until": "2026-10-20T18:20:16.962621+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "IOTXUSDT",
-      "banned_at": "2026-10-20T14:18:14.965910+00:00",
-      "until": "2026-10-20T22:18:14.965888+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "KAITOUSDT",
       "banned_at": "2026-10-20T14:03:49.328888+00:00",
       "until": "2026-10-21T14:03:49.328856+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
-    },
-    {
-      "pair": "KATUSDT",
-      "banned_at": "2026-10-20T14:11:01.860296+00:00",
-      "until": "2026-10-20T22:11:01.860277+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "LQTYUSDT",
-      "banned_at": "2026-10-20T14:06:20.162181+00:00",
-      "until": "2026-10-20T22:06:20.162160+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "LSKUSDT",
@@ -192,13 +66,6 @@
       "source": "AUTO_SL"
     },
     {
-      "pair": "MMTUSDT",
-      "banned_at": "2026-10-20T13:56:04.764985+00:00",
-      "until": "2026-10-20T21:56:04.764961+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "MONUSDT",
       "banned_at": "2026-10-20T17:47:57.318271+00:00",
       "until": "2026-10-21T01:47:57.318250+00:00",
@@ -206,30 +73,9 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "MOODENGUSDT",
-      "banned_at": "2026-10-20T13:36:48.530273+00:00",
-      "until": "2026-10-20T21:36:48.530253+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "NEOUSDT",
-      "banned_at": "2026-10-20T13:58:43.855702+00:00",
-      "until": "2026-10-20T21:58:43.855680+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "NOMUSDT",
-      "banned_at": "2026-10-20T14:00:51.256970+00:00",
-      "until": "2026-10-20T22:00:51.256948+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "PLAYUSDT",
-      "banned_at": "2026-10-20T09:58:05.101576+00:00",
-      "until": "2026-10-20T17:58:05.101551+00:00",
+      "pair": "ONDOUSDT",
+      "banned_at": "2026-10-21T00:32:20.706632+00:00",
+      "until": "2026-10-21T08:32:20.706610+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
@@ -241,23 +87,9 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "RAVEUSDT",
-      "banned_at": "2026-10-20T13:49:49.044097+00:00",
-      "until": "2026-10-20T21:49:49.044073+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "REZUSDT",
       "banned_at": "2026-10-20T16:16:51.001419+00:00",
       "until": "2026-10-21T00:16:51.001353+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "SLXUSDT",
-      "banned_at": "2026-10-20T15:40:54.888874+00:00",
-      "until": "2026-10-20T23:40:54.888848+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
@@ -276,53 +108,11 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "SSVUSDT",
-      "banned_at": "2026-10-20T13:38:01.981343+00:00",
-      "until": "2026-10-20T21:38:01.981321+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "TOSHIUSDT",
-      "banned_at": "2026-10-20T14:00:05.074994+00:00",
-      "until": "2026-10-20T22:00:05.074972+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "TRIAUSDT",
-      "banned_at": "2026-10-20T14:07:37.753160+00:00",
-      "until": "2026-10-20T22:07:37.753133+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "TRUSTUSDT",
-      "banned_at": "2026-10-20T14:03:15.873608+00:00",
-      "until": "2026-10-20T22:03:15.873585+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "VETUSDT",
-      "banned_at": "2026-10-20T13:50:19.324167+00:00",
-      "until": "2026-10-20T21:50:19.324141+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "XANUSDT",
       "banned_at": "2026-10-20T12:24:26.436698+00:00",
       "until": "2026-10-21T12:24:26.436665+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
-    },
-    {
-      "pair": "XMRUSDT",
-      "banned_at": "2026-10-20T14:08:01.813528+00:00",
-      "until": "2026-10-20T22:08:01.813503+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ZETAUSDT",
