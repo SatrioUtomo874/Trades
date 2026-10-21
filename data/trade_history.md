@@ -3101,3 +3101,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T07:33:07.538619+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## COOKIEUSDT — BUY
+
+Trade ID: `COOKIEUSDT-20261021-143254-437296`
+
+### Setup
+
+- Price Now Reference: 0.009523
+- Entry: 0.009392
+- Reason Entry: COOKIEUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.009392 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 34.3 pada entry zone.
+- Price Exp: 0.009543
+- Reason Price Exp: Price Exp 0.009543: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.009298
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.009363; SL ditempatkan di luar invalidation.
+- TP: 0.009607
+- Reason TP: TP 0.009607 dipilih dari H1_SWING_HIGH dengan RR 2.29; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.009543
+- Result Reason: Price Exp 0.009543: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T07:32:54.454742+00:00
+- Filled: -
+- Closed: 2026-10-21T07:35:40.751011+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
