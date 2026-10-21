@@ -3332,3 +3332,36 @@ Tidak ada trailing.
 - Filled: 2026-10-21T10:16:29.339615+00:00
 - Closed: 2026-10-21T14:06:18.630038+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## SCRUSDT — BUY
+
+Trade ID: `SCRUSDT-20261021-190208-0E334C`
+
+### Setup
+
+- Price Now Reference: 0.02087
+- Entry: 0.02047
+- Reason Entry: SCRUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.02044 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 29.6 pada entry zone.
+- Price Exp: 0.021
+- Reason Price Exp: Price Exp 0.021: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02026
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.02043; SL ditempatkan di luar invalidation.
+- TP: 0.02102
+- Reason TP: TP 0.02102 dipilih dari H1_SWING_HIGH dengan RR 2.62; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.021
+- Result Reason: Price Exp 0.021: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T12:02:08.143446+00:00
+- Filled: -
+- Closed: 2026-10-21T14:23:27.849768+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
