@@ -2870,3 +2870,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T00:32:06.147897+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## PEOPLEUSDT — BUY
+
+Trade ID: `PEOPLEUSDT-20261021-073502-BD5F35`
+
+### Setup
+
+- Price Now Reference: 0.007869
+- Entry: 0.007702
+- Reason Entry: PEOPLEUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.00769625 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 32.7 pada entry zone.
+- Price Exp: 0.007879
+- Reason Price Exp: Price Exp 0.007878999999999999: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.007624
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.007663; SL ditempatkan di luar invalidation.
+- TP: 0.007953
+- Reason TP: TP 0.007953 dipilih dari H4_HIGHER_HIGH dengan RR 3.22; target quality 93.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.007879
+- Result Reason: Price Exp 0.007878999999999999: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T00:35:02.559479+00:00
+- Filled: -
+- Closed: 2026-10-21T00:35:19.837171+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
