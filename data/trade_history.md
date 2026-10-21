@@ -3398,3 +3398,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T14:48:39.546704+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## SWARMSUSDT — BUY
+
+Trade ID: `SWARMSUSDT-20261021-215324-D05AA8`
+
+### Setup
+
+- Price Now Reference: 0.007107
+- Entry: 0.00694
+- Reason Entry: SWARMSUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.00693425 dipadukan dengan Fib SECONDARY; refinement BEARISH_BREAKER. Projected M15 RSI 32.2 pada entry zone.
+- Price Exp: 0.00713
+- Reason Price Exp: Price Exp 0.00713: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.00687
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.006932; SL ditempatkan di luar invalidation.
+- TP: 0.007133
+- Reason TP: TP 0.007133 dipilih dari H1_SWING_HIGH dengan RR 2.76; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.007133
+- Result Reason: Price Exp 0.00713: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T14:53:24.453835+00:00
+- Filled: -
+- Closed: 2026-10-21T15:01:56.846682+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
