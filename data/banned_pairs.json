@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T00:49:51.528547+00:00",
+  "saved_at": "2026-10-21T00:53:22.104022+00:00",
   "bans": [
     {
       "pair": "BSBUSDT",
@@ -8,13 +8,6 @@
       "until": "2026-10-21T04:10:03.026198+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
-    },
-    {
-      "pair": "ENSUSDT",
-      "banned_at": "2026-10-20T16:47:56.315024+00:00",
-      "until": "2026-10-21T00:47:56.314996+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "FIGHTUSDT",
@@ -34,6 +27,13 @@
       "pair": "HANAUSDT",
       "banned_at": "2026-10-21T00:49:51.528390+00:00",
       "until": "2026-10-21T08:49:51.528345+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "HBARUSDT",
+      "banned_at": "2026-10-21T00:53:22.103887+00:00",
+      "until": "2026-10-21T08:53:22.103866+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
@@ -76,13 +76,6 @@
       "pair": "PEOPLEUSDT",
       "banned_at": "2026-10-21T00:35:34.764004+00:00",
       "until": "2026-10-21T08:35:34.763983+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "SOMIUSDT",
-      "banned_at": "2026-10-20T16:48:23.483075+00:00",
-      "until": "2026-10-21T00:48:23.483052+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
