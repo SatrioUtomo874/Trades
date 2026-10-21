@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T11:11:41.341758+00:00",
+  "saved_at": "2026-10-21T11:59:10.457878+00:00",
   "bans": [
+    {
+      "pair": "BBUSDT",
+      "banned_at": "2026-10-21T11:59:10.457739+00:00",
+      "until": "2026-10-21T19:59:10.457714+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
     {
       "pair": "COOKIEUSDT",
       "banned_at": "2026-10-21T07:35:58.651426+00:00",
@@ -24,32 +31,11 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "FIGHTUSDT",
-      "banned_at": "2026-10-20T10:58:17.248557+00:00",
-      "until": "2026-10-21T10:58:17.248528+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
       "pair": "HAEDALUSDT",
       "banned_at": "2026-10-20T14:16:07.049514+00:00",
       "until": "2026-10-21T14:16:07.049476+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
-    },
-    {
-      "pair": "HANAUSDT",
-      "banned_at": "2026-10-21T00:49:51.528390+00:00",
-      "until": "2026-10-21T08:49:51.528345+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "HBARUSDT",
-      "banned_at": "2026-10-21T00:53:22.103887+00:00",
-      "until": "2026-10-21T08:53:22.103866+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "KAITOUSDT",
@@ -80,25 +66,11 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "PEOPLEUSDT",
-      "banned_at": "2026-10-21T00:35:34.764004+00:00",
-      "until": "2026-10-21T08:35:34.763983+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "QNTUSDT",
       "banned_at": "2026-10-21T01:52:56.036099+00:00",
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: QNTUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=8, nearest_notional=19.004) Margin pas ≈ $1.90.",
       "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
-      "pair": "RAVEUSDT",
-      "banned_at": "2026-10-21T01:50:16.526382+00:00",
-      "until": "2026-10-21T09:50:16.526339+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "XANUSDT",
