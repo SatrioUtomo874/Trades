@@ -3266,3 +3266,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T11:59:46.757803+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## CYBERUSDT — BUY
+
+Trade ID: `CYBERUSDT-20261021-190206-27EC30`
+
+### Setup
+
+- Price Now Reference: 0.3235
+- Entry: 0.3179
+- Reason Entry: CYBERUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure BULLISH, liquidity H1 0.3186813 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 32.5 pada entry zone.
+- Price Exp: 0.3245
+- Reason Price Exp: Price Exp 0.3245: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.3145
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.3178; SL ditempatkan di luar invalidation dan liquidity guard 0.3186813.
+- TP: 0.3272
+- Reason TP: TP 0.3272 dipilih dari H4_HIGHER_HIGH dengan RR 2.74; target quality 94.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.3245
+- Result Reason: Price Exp 0.3245: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T12:02:06.159195+00:00
+- Filled: -
+- Closed: 2026-10-21T13:04:08.049247+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
