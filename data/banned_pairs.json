@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T07:33:21.928962+00:00",
+  "saved_at": "2026-10-21T07:35:58.651579+00:00",
   "bans": [
+    {
+      "pair": "COOKIEUSDT",
+      "banned_at": "2026-10-21T07:35:58.651426+00:00",
+      "until": "2026-10-21T15:35:58.651401+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
     {
       "pair": "EDGEUSDT",
       "banned_at": "2026-10-21T07:33:21.928812+00:00",
