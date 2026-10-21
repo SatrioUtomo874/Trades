@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T14:06:39.562234+00:00",
+  "saved_at": "2026-10-21T14:23:46.885773+00:00",
   "bans": [
     {
       "pair": "BBUSDT",
@@ -45,25 +45,11 @@
       "source": "AUTO_TP"
     },
     {
-      "pair": "KAITOUSDT",
-      "banned_at": "2026-10-20T14:03:49.328888+00:00",
-      "until": "2026-10-21T14:03:49.328856+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
-    },
-    {
       "pair": "KATUSDT",
       "banned_at": "2026-10-21T11:11:41.341615+00:00",
       "until": "2026-10-21T19:11:41.341593+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "MEWUSDT",
-      "banned_at": "2026-10-20T14:02:53.850555+00:00",
-      "until": "2026-10-21T14:02:53.850522+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
     },
     {
       "pair": "OPUSDT",
@@ -85,6 +71,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: QNTUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=8, nearest_notional=19.004) Margin pas ≈ $1.90.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "SCRUSDT",
+      "banned_at": "2026-10-21T14:23:46.885472+00:00",
+      "until": "2026-10-21T22:23:46.885447+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "TWTUSDT",
