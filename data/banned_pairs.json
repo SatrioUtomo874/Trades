@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-20T17:47:57.318450+00:00",
+  "saved_at": "2026-10-21T00:05:35.062254+00:00",
   "bans": [
     {
       "pair": "AKTUSDT",
@@ -330,6 +330,13 @@
       "until": "2026-10-21T14:37:21.749509+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "币安人生USDT",
+      "banned_at": "2026-10-21T00:05:35.061774+00:00",
+      "until": "2026-10-21T08:05:35.061748+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     }
   ]
 }
