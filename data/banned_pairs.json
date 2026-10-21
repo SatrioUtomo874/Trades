@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T08:32:18.807424+00:00",
+  "saved_at": "2026-10-21T11:11:41.341758+00:00",
   "bans": [
     {
       "pair": "COOKIEUSDT",
@@ -59,18 +59,18 @@
       "source": "AUTO_TP"
     },
     {
+      "pair": "KATUSDT",
+      "banned_at": "2026-10-21T11:11:41.341615+00:00",
+      "until": "2026-10-21T19:11:41.341593+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
       "pair": "MEWUSDT",
       "banned_at": "2026-10-20T14:02:53.850555+00:00",
       "until": "2026-10-21T14:02:53.850522+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
-    },
-    {
-      "pair": "ONDOUSDT",
-      "banned_at": "2026-10-21T00:32:20.706632+00:00",
-      "until": "2026-10-21T08:32:20.706610+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ORCAUSDT",
@@ -113,13 +113,6 @@
       "until": "2026-10-21T14:37:21.749509+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
-    },
-    {
-      "pair": "币安人生USDT",
-      "banned_at": "2026-10-21T00:05:35.061774+00:00",
-      "until": "2026-10-21T08:05:35.061748+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     }
   ]
 }
