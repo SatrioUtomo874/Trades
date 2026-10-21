@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T00:05:40.318283+00:00",
-  "saved_at_wib": "21-10-2026, 07:05 WIB",
+  "saved_at": "2026-10-21T00:32:22.752673+00:00",
+  "saved_at_wib": "21-10-2026, 07:32 WIB",
   "count": 4,
   "setups": [
     {
@@ -27,7 +27,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "1.390433815350389321468298109",
+      "pnl_percent": "1.612903225806451612903225806",
       "max_favorable_pct": "2.892102335928809788654060067",
       "max_adverse_pct": "-0.6674082313681868743047830923",
       "planned_rr": "4.047619047619047619047619048",
@@ -3774,7 +3774,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.167964404894327030033370412",
-      "realized_r": "1.19047619047619047619047619"
+      "realized_r": "1.38095238095238095238095238"
     },
     {
       "trade_id": "WALUSDT-20261020-211713-F2C6C5",
