@@ -3134,3 +3134,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T07:35:40.751011+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## ORCAUSDT — BUY
+
+Trade ID: `ORCAUSDT-20261021-143643-43AD6E`
+
+### Setup
+
+- Price Now Reference: 1.827
+- Entry: 1.762
+- Reason Entry: ORCAUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity M15 1.76 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 29.7 pada entry zone.
+- Price Exp: 1.839
+- Reason Price Exp: Price Exp 1.839: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 1.726
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 1.73; SL ditempatkan di luar invalidation.
+- TP: 1.84
+- Reason TP: TP 1.84 dipilih dari H4_SWING_HIGH dengan RR 2.17; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 1.839
+- Result Reason: Price Exp 1.839: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T07:36:43.560806+00:00
+- Filled: -
+- Closed: 2026-10-21T08:32:03.831938+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
