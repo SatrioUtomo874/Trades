@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T01:50:16.526539+00:00",
+  "saved_at": "2026-10-21T01:52:59.585714+00:00",
   "bans": [
     {
       "pair": "BSBUSDT",
@@ -45,25 +45,11 @@
       "source": "AUTO_TP"
     },
     {
-      "pair": "LSKUSDT",
-      "banned_at": "2026-10-20T01:09:35.931473+00:00",
-      "until": "2026-10-21T01:09:35.931442+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
       "pair": "MEWUSDT",
       "banned_at": "2026-10-20T14:02:53.850555+00:00",
       "until": "2026-10-21T14:02:53.850522+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
-    },
-    {
-      "pair": "MONUSDT",
-      "banned_at": "2026-10-20T17:47:57.318271+00:00",
-      "until": "2026-10-21T01:47:57.318250+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "ONDOUSDT",
@@ -78,6 +64,13 @@
       "until": "2026-10-21T08:35:34.763983+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "QNTUSDT",
+      "banned_at": "2026-10-21T01:52:56.036099+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: QNTUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=8, nearest_notional=19.004) Margin pas ≈ $1.90.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "RAVEUSDT",
