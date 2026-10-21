@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T00:35:34.764138+00:00",
+  "saved_at": "2026-10-21T00:49:51.528547+00:00",
   "bans": [
     {
       "pair": "BSBUSDT",
@@ -29,6 +29,13 @@
       "until": "2026-10-21T14:16:07.049476+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "HANAUSDT",
+      "banned_at": "2026-10-21T00:49:51.528390+00:00",
+      "until": "2026-10-21T08:49:51.528345+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "KAITOUSDT",
@@ -69,13 +76,6 @@
       "pair": "PEOPLEUSDT",
       "banned_at": "2026-10-21T00:35:34.764004+00:00",
       "until": "2026-10-21T08:35:34.763983+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "PONSUSDT",
-      "banned_at": "2026-10-20T16:34:00.013465+00:00",
-      "until": "2026-10-21T00:34:00.013442+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
