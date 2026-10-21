@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T15:12:16.897935+00:00",
+  "saved_at": "2026-10-21T15:26:03.846296+00:00",
   "bans": [
     {
       "pair": "BBUSDT",
@@ -76,6 +76,13 @@
       "pair": "SCRUSDT",
       "banned_at": "2026-10-21T14:23:46.885472+00:00",
       "until": "2026-10-21T22:23:46.885447+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "SENTUSDT",
+      "banned_at": "2026-10-21T15:26:03.846144+00:00",
+      "until": "2026-10-21T23:26:03.846121+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
