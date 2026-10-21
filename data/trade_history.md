@@ -3035,3 +3035,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T06:19:11.643072+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## FHEUSDT — BUY
+
+Trade ID: `FHEUSDT-20261021-075611-A388A8`
+
+### Setup
+
+- Price Now Reference: 0.0181
+- Entry: 0.01733
+- Reason Entry: FHEUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.017305 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 17.0 pada entry zone.
+- Price Exp: 0.01817
+- Reason Price Exp: Price Exp 0.018170000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01715
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.0173; SL ditempatkan di luar invalidation.
+- TP: 0.01818
+- Reason TP: TP 0.01818 dipilih dari H4_HIGHER_HIGH dengan RR 4.72; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.01818
+- Result Reason: Price Exp 0.018170000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T00:56:11.856293+00:00
+- Filled: -
+- Closed: 2026-10-21T07:30:07.934427+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
