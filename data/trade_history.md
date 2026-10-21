@@ -3233,3 +3233,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T11:58:55.442138+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## TWTUSDT — BUY
+
+Trade ID: `TWTUSDT-20261021-181408-8D683A`
+
+### Setup
+
+- Price Now Reference: 0.4703
+- Entry: 0.4637
+- Reason Entry: TWTUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.4631625 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 37.1 pada entry zone.
+- Price Exp: 0.4722
+- Reason Price Exp: Price Exp 0.4722: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.459
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.4632; SL ditempatkan di luar invalidation dan liquidity guard 0.4631625.
+- TP: 0.4758
+- Reason TP: TP 0.4758 dipilih dari H4_HIGHER_HIGH dengan RR 2.57; target quality 93.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.4722
+- Result Reason: Price Exp 0.4722: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T11:14:08.166928+00:00
+- Filled: -
+- Closed: 2026-10-21T11:59:46.757803+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
