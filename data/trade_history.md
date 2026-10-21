@@ -2804,3 +2804,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-20T17:47:41.639536+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## 币安人生USDT — BUY
+
+Trade ID: `币安人生USDT-20261021-004918-203D2C`
+
+### Setup
+
+- Price Now Reference: 0.498
+- Entry: 0.49
+- Reason Entry: 币安人生USDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure BULLISH, liquidity M15 0.4899438 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 34.7 pada entry zone.
+- Price Exp: 0.5006
+- Reason Price Exp: Price Exp 0.5006: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.4851
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.4897; SL ditempatkan di luar invalidation dan liquidity guard 0.4899438.
+- TP: 0.5009
+- Reason TP: TP 0.5009 dipilih dari H4_HIGHER_HIGH dengan RR 2.22; target quality 89.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.5006
+- Result Reason: Price Exp 0.5006: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-20T17:49:18.762719+00:00
+- Filled: -
+- Closed: 2026-10-21T00:05:20.834907+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
