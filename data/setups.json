@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T12:00:08.382988+00:00",
-  "saved_at_wib": "21-10-2026, 19:00 WIB",
-  "count": 3,
+  "saved_at": "2026-10-21T13:04:27.324414+00:00",
+  "saved_at_wib": "21-10-2026, 20:04 WIB",
+  "count": 4,
   "setups": [
     {
       "trade_id": "1000CATUSDT-20261020-072700-57CB83",
@@ -27,7 +27,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "1.612903225806451612903225806",
+      "pnl_percent": "2.002224694104560622914349277",
       "max_favorable_pct": "2.892102335928809788654060067",
       "max_adverse_pct": "-0.6674082313681868743047830923",
       "planned_rr": "4.047619047619047619047619048",
@@ -3774,7 +3774,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.167964404894327030033370412",
-      "realized_r": "1.38095238095238095238095238"
+      "realized_r": "1.714285714285714285714285714"
     },
     {
       "trade_id": "WALUSDT-20261020-211713-F2C6C5",
@@ -7519,7 +7519,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.4710060999150644737858080457",
+      "pnl_percent": "0.5791058605513087792448459578",
       "max_favorable_pct": "1.6523820554397343834452938",
       "max_adverse_pct": "-0.1389854065323141070187630299",
       "planned_rr": "3.884146341463414634146341463",
@@ -11044,7 +11044,3488 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.266311481738861863948729828",
-      "realized_r": "0.3719512195121951219512195121"
+      "realized_r": "0.4573170731707317073170731706"
+    },
+    {
+      "trade_id": "SCRUSDT-20261021-190208-0E334C",
+      "session_id": "20261020-082903-6E4A",
+      "pair": "SCRUSDT",
+      "direction": "BUY",
+      "price_now_reference": "0.02087",
+      "entry": "0.02047",
+      "entry_reason": "SCRUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.02044 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 29.6 pada entry zone.",
+      "price_exp": "0.021",
+      "price_exp_reason": "Price Exp 0.021: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.",
+      "sl": "0.02026",
+      "sl_reason": "Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.02043; SL ditempatkan di luar invalidation.",
+      "tp": "0.02102",
+      "tp_reason": "TP 0.02102 dipilih dari H1_SWING_HIGH dengan RR 2.62; target quality 82.",
+      "status": "PENDING",
+      "trailing": false,
+      "created_at": "2026-10-21T12:02:08.143446+00:00",
+      "filled_at": null,
+      "closed_at": null,
+      "fill_price": null,
+      "exit_price": null,
+      "result": null,
+      "result_reason": null,
+      "pnl_percent": null,
+      "max_favorable_pct": null,
+      "max_adverse_pct": null,
+      "planned_rr": "2.619047619047619047619047619",
+      "pending_seconds": null,
+      "holding_seconds": null,
+      "trail_history": [],
+      "strategy_name": "SMC_VLT_RSI",
+      "strategy_version": "2.5.0",
+      "strategy_source": "SCAN",
+      "strategy_confidence": "81.59",
+      "strategy_data_source": "BINANCE_PUBLIC",
+      "strategy_analysis": {
+        "scan": {
+          "cycle": 220,
+          "btc_h4_trend": "BULLISH",
+          "pair_h4_trend": "BULLISH",
+          "batch_rank": 80,
+          "batch_limit": 100
+        },
+        "version": "V2",
+        "macro": {
+          "pair": "SCRUSDT",
+          "btc_regime": {
+            "trend": "BULLISH",
+            "regime": "BULLISH",
+            "state": "BULLISH_CONTINUATION",
+            "confidence": 100.0,
+            "bullish_score": 70.0,
+            "bearish_score": 32.27,
+            "gap": 37.73,
+            "dominant_strength": 70.0,
+            "timeframes": {
+              "D1": {
+                "timeframe": "D1",
+                "trend": "BEARISH",
+                "regime": "RANGE",
+                "state": "RANGE",
+                "bullish_score": 54.0,
+                "bearish_score": 56.0,
+                "evidence": {
+                  "bullish_score": 54.0,
+                  "bearish_score": 56.0,
+                  "gap": 2.0,
+                  "raw_structure": "RANGE",
+                  "state": "RANGE",
+                  "dominant": "BEARISH",
+                  "normalized_slope": -0.090661,
+                  "reasons": [
+                    "LH_SIGNIFICANT",
+                    "HL_SIGNIFICANT"
+                  ]
+                },
+                "structure": {
+                  "trend": "RANGE",
+                  "last_bos": {
+                    "index": 6,
+                    "type": "BOS",
+                    "direction": "BULLISH",
+                    "level": 79570.9,
+                    "displacement": 74.94,
+                    "prior_trend": "RANGE",
+                    "confirmed": true
+                  },
+                  "last_mss": null,
+                  "protected_high": 84340.2,
+                  "protected_low": 80622.0,
+                  "swing_high_count": 5,
+                  "swing_low_count": 6,
+                  "bars": 39
+                },
+                "trend_strength": {
+                  "direction": "RANGE",
+                  "score": 50.0,
+                  "normalized_slope": 0.0,
+                  "pivot_count": 0,
+                  "interpretation": "DATA_INSUFFICIENT"
+                },
+                "atr": 2102.3619317112
+              },
+              "H4": {
+                "timeframe": "H4",
+                "trend": "BULLISH",
+                "regime": "BULLISH_CONTINUATION",
+                "state": "BULLISH_CONTINUATION",
+                "bullish_score": 64.0,
+                "bearish_score": 28.0,
+                "evidence": {
+                  "bullish_score": 64.0,
+                  "bearish_score": 28.0,
+                  "gap": 36.0,
+                  "raw_structure": "BULLISH",
+                  "state": "BULLISH_CONTINUATION",
+                  "dominant": "BULLISH",
+                  "normalized_slope": 0.071816,
+                  "reasons": [
+                    "HL_SIGNIFICANT"
+                  ]
+                },
+                "structure": {
+                  "trend": "BULLISH",
+                  "last_bos": {
+                    "index": 199,
+                    "type": "BOS",
+                    "direction": "BEARISH",
+                    "level": 82912.8,
+                    "displacement": 100.0,
+                    "prior_trend": "BEARISH",
+                    "confirmed": true
+                  },
+                  "last_mss": {
+                    "index": 189,
+                    "type": "MSS",
+                    "direction": "BEARISH",
+                    "level": 82241.5,
+                    "displacement": 93.78,
+                    "prior_trend": "BULLISH",
+                    "confirmed": true
+                  },
+                  "protected_high": 83420.0,
+                  "protected_low": 82241.5,
+                  "swing_high_count": 22,
+                  "swing_low_count": 21,
+                  "bars": 240
+                },
+                "trend_strength": {
+                  "direction": "BULLISH",
+                  "score": 34.76,
+                  "normalized_slope": -0.020645,
+                  "pivot_count": 6,
+                  "bars_between_first_last_extreme": 43,
+                  "impulse_ratio": 0.2948,
+                  "interpretation": "BULLISH_MODERATE"
+                },
+                "atr": 793.3194113642
+              },
+              "H1": {
+                "timeframe": "H1",
+                "trend": "BULLISH",
+                "regime": "BULLISH_CONTINUATION",
+                "state": "BULLISH_CONTINUATION",
+                "bullish_score": 88.0,
+                "bearish_score": 24.0,
+                "evidence": {
+                  "bullish_score": 88.0,
+                  "bearish_score": 24.0,
+                  "gap": 64.0,
+                  "raw_structure": "BULLISH",
+                  "state": "BULLISH_CONTINUATION",
+                  "dominant": "BULLISH",
+                  "normalized_slope": 0.069463,
+                  "reasons": [
+                    "HH_SIGNIFICANT",
+                    "HL_SIGNIFICANT"
+                  ]
+                },
+                "structure": {
+                  "trend": "BULLISH",
+                  "last_bos": {
+                    "index": 166,
+                    "type": "BOS",
+                    "direction": "BULLISH",
+                    "level": 83194.6,
+                    "displacement": 33.26,
+                    "prior_trend": "BULLISH",
+                    "confirmed": true
+                  },
+                  "last_mss": {
+                    "index": 147,
+                    "type": "MSS",
+                    "direction": "BULLISH",
+                    "level": 82238.9,
+                    "displacement": 100.0,
+                    "prior_trend": "BEARISH",
+                    "confirmed": true
+                  },
+                  "protected_high": 83686.2,
+                  "protected_low": 82594.8,
+                  "swing_high_count": 21,
+                  "swing_low_count": 20,
+                  "bars": 168
+                },
+                "trend_strength": {
+                  "direction": "BULLISH",
+                  "score": 70.77,
+                  "normalized_slope": 0.104962,
+                  "pivot_count": 6,
+                  "bars_between_first_last_extreme": 38,
+                  "impulse_ratio": 2.181,
+                  "interpretation": "BULLISH_MODERATE"
+                },
+                "atr": 382.2414767019
+              }
+            },
+            "regime_rule": "D1+H4 define external direction; H1 confirms; M15 classifies current state and cannot flip external regime alone."
+          },
+          "btc_h4_structure_trend": "BULLISH",
+          "btc_aggregate_regime": "BULLISH",
+          "btc_h4": {
+            "trend": "BULLISH",
+            "last_bos": {
+              "index": 199,
+              "type": "BOS",
+              "direction": "BEARISH",
+              "level": 82912.8,
+              "displacement": 100.0,
+              "prior_trend": "BEARISH",
+              "confirmed": true
+            },
+            "last_mss": {
+              "index": 189,
+              "type": "MSS",
+              "direction": "BEARISH",
+              "level": 82241.5,
+              "displacement": 93.78,
+              "prior_trend": "BULLISH",
+              "confirmed": true
+            },
+            "protected_high": 83420.0,
+            "protected_low": 82241.5,
+            "swing_high_count": 22,
+            "swing_low_count": 21,
+            "bars": 240
+          },
+          "pair_regime": {
+            "trend": "BULLISH",
+            "regime": "BULLISH",
+            "state": "BULLISH_CONTINUATION",
+            "confidence": 100.0,
+            "bullish_score": 73.36,
+            "bearish_score": 31.76,
+            "gap": 41.6,
+            "dominant_strength": 73.36,
+            "timeframes": {
+              "D1": {
+                "timeframe": "D1",
+                "trend": "BEARISH",
+                "regime": "BEARISH_CONTINUATION",
+                "state": "BEARISH_CONTINUATION",
+                "bullish_score": 0.0,
+                "bearish_score": 60.0,
+                "evidence": {
+                  "bullish_score": 0.0,
+                  "bearish_score": 60.0,
+                  "gap": 60.0,
+                  "raw_structure": "BEARISH",
+                  "state": "BEARISH_CONTINUATION",
+                  "dominant": "BEARISH",
+                  "normalized_slope": -0.135448,
+                  "reasons": [
+                    "LL_SIGNIFICANT"
+                  ]
+                },
+                "structure": {
+                  "trend": "BEARISH",
+                  "last_bos": {
+                    "index": 12,
+                    "type": "BOS",
+                    "direction": "BEARISH",
+                    "level": 0.0235,
+                    "displacement": 4.43,
+                    "prior_trend": "RANGE",
+                    "confirmed": true
+                  },
+                  "last_mss": null,
+                  "protected_high": 0.03238,
+                  "protected_low": 0.01886,
+                  "swing_high_count": 1,
+                  "swing_low_count": 3,
+                  "bars": 19
+                },
+                "trend_strength": {
+                  "direction": "BEARISH",
+                  "score": 71.78,
+                  "normalized_slope": -0.123296,
+                  "pivot_count": 3,
+                  "bars_between_first_last_extreme": 14,
+                  "impulse_ratio": 3.4887,
+                  "interpretation": "BEARISH_MODERATE"
+                },
+                "atr": 0.0029039496
+              },
+              "H4": {
+                "timeframe": "H4",
+                "trend": "BULLISH",
+                "regime": "BULLISH_CONTINUATION",
+                "state": "BULLISH_CONTINUATION",
+                "bullish_score": 98.0,
+                "bearish_score": 28.0,
+                "evidence": {
+                  "bullish_score": 98.0,
+                  "bearish_score": 28.0,
+                  "gap": 70.0,
+                  "raw_structure": "BULLISH",
+                  "state": "BULLISH_CONTINUATION",
+                  "dominant": "BULLISH",
+                  "normalized_slope": 0.108966,
+                  "reasons": [
+                    "HH_SIGNIFICANT",
+                    "HL_SIGNIFICANT"
+                  ]
+                },
+                "structure": {
+                  "trend": "BULLISH",
+                  "last_bos": {
+                    "index": 114,
+                    "type": "BOS",
+                    "direction": "BULLISH",
+                    "level": 0.02019,
+                    "displacement": 100.0,
+                    "prior_trend": "BULLISH",
+                    "confirmed": true
+                  },
+                  "last_mss": null,
+                  "protected_high": 0.022,
+                  "protected_low": 0.01934,
+                  "swing_high_count": 11,
+                  "swing_low_count": 11,
+                  "bars": 120
+                },
+                "trend_strength": {
+                  "direction": "BULLISH",
+                  "score": 57.59,
+                  "normalized_slope": -0.13472,
+                  "pivot_count": 6,
+                  "bars_between_first_last_extreme": 49,
+                  "impulse_ratio": 8.2273,
+                  "interpretation": "BULLISH_MODERATE"
+                },
+                "atr": 0.0005949467
+              },
+              "H1": {
+                "timeframe": "H1",
+                "trend": "BULLISH",
+                "regime": "BULLISH",
+                "state": "BULLISH",
+                "bullish_score": 88.0,
+                "bearish_score": 28.0,
+                "evidence": {
+                  "bullish_score": 88.0,
+                  "bearish_score": 28.0,
+                  "gap": 60.0,
+                  "raw_structure": "BULLISH",
+                  "state": "BULLISH",
+                  "dominant": "BULLISH",
+                  "normalized_slope": 0.045776,
+                  "reasons": [
+                    "HH_SIGNIFICANT",
+                    "HL_SIGNIFICANT"
+                  ]
+                },
+                "structure": {
+                  "trend": "BULLISH",
+                  "last_bos": {
+                    "index": 145,
+                    "type": "BOS",
+                    "direction": "BULLISH",
+                    "level": 0.02001,
+                    "displacement": 88.03,
+                    "prior_trend": "BULLISH",
+                    "confirmed": true
+                  },
+                  "last_mss": {
+                    "index": 134,
+                    "type": "MSS",
+                    "direction": "BULLISH",
+                    "level": 0.01978,
+                    "displacement": 91.42,
+                    "prior_trend": "BEARISH",
+                    "confirmed": true
+                  },
+                  "protected_high": 0.02122,
+                  "protected_low": 0.01959,
+                  "swing_high_count": 18,
+                  "swing_low_count": 18,
+                  "bars": 168
+                },
+                "trend_strength": {
+                  "direction": "BULLISH",
+                  "score": 43.25,
+                  "normalized_slope": 0.149968,
+                  "pivot_count": 6,
+                  "bars_between_first_last_extreme": 35,
+                  "impulse_ratio": 0.2041,
+                  "interpretation": "BULLISH_MODERATE"
+                },
+                "atr": 0.0002537818
+              },
+              "M15": {
+                "timeframe": "M15",
+                "trend": "BULLISH",
+                "regime": "BULLISH",
+                "state": "BULLISH",
+                "bullish_score": 58.0,
+                "bearish_score": 8.0,
+                "evidence": {
+                  "bullish_score": 58.0,
+                  "bearish_score": 8.0,
+                  "gap": 50.0,
+                  "raw_structure": "BULLISH",
+                  "state": "BULLISH",
+                  "dominant": "BULLISH",
+                  "normalized_slope": 0.030836,
+                  "reasons": [
+                    "HH_SIGNIFICANT"
+                  ]
+                },
+                "structure": {
+                  "trend": "BULLISH",
+                  "last_bos": {
+                    "index": 660,
+                    "type": "BOS",
+                    "direction": "BULLISH",
+                    "level": 0.0209,
+                    "displacement": 87.13,
+                    "prior_trend": "BULLISH",
+                    "confirmed": true
+                  },
+                  "last_mss": {
+                    "index": 570,
+                    "type": "MSS",
+                    "direction": "BULLISH",
+                    "level": 0.01994,
+                    "displacement": 67.98,
+                    "prior_trend": "BEARISH",
+                    "confirmed": true
+                  },
+                  "protected_high": 0.02122,
+                  "protected_low": 0.02066,
+                  "swing_high_count": 65,
+                  "swing_low_count": 57,
+                  "bars": 672
+                },
+                "trend_strength": {
+                  "direction": "BULLISH",
+                  "score": 55.48,
+                  "normalized_slope": 0.099648,
+                  "pivot_count": 6,
+                  "bars_between_first_last_extreme": 44,
+                  "impulse_ratio": 1.0,
+                  "interpretation": "BULLISH_MODERATE"
+                },
+                "atr": 0.0001183544
+              }
+            },
+            "regime_rule": "D1+H4 define external direction; H1 confirms; M15 classifies current state and cannot flip external regime alone."
+          },
+          "pair_h4": {
+            "trend": "BULLISH",
+            "last_bos": {
+              "index": 114,
+              "type": "BOS",
+              "direction": "BULLISH",
+              "level": 0.02019,
+              "displacement": 100.0,
+              "prior_trend": "BULLISH",
+              "confirmed": true
+            },
+            "last_mss": null,
+            "protected_high": 0.022,
+            "protected_low": 0.01934,
+            "swing_high_count": 11,
+            "swing_low_count": 11,
+            "bars": 120
+          },
+          "macro_bias": "BULLISH",
+          "allowed_directions": [
+            "BUY",
+            "SELL"
+          ],
+          "directional_regime": "NEUTRAL_BOTH"
+        },
+        "pair_structure": {
+          "H4": {
+            "trend": "BULLISH",
+            "last_bos": {
+              "index": 114,
+              "type": "BOS",
+              "direction": "BULLISH",
+              "level": 0.02019,
+              "displacement": 100.0,
+              "prior_trend": "BULLISH",
+              "confirmed": true
+            },
+            "last_mss": null,
+            "protected_high": 0.022,
+            "protected_low": 0.01934,
+            "swing_high_count": 11,
+            "swing_low_count": 11,
+            "bars": 120
+          },
+          "H1": {
+            "trend": "BULLISH",
+            "last_bos": {
+              "index": 145,
+              "type": "BOS",
+              "direction": "BULLISH",
+              "level": 0.02001,
+              "displacement": 88.03,
+              "prior_trend": "BULLISH",
+              "confirmed": true
+            },
+            "last_mss": {
+              "index": 134,
+              "type": "MSS",
+              "direction": "BULLISH",
+              "level": 0.01978,
+              "displacement": 91.42,
+              "prior_trend": "BEARISH",
+              "confirmed": true
+            },
+            "protected_high": 0.02122,
+            "protected_low": 0.01959,
+            "swing_high_count": 18,
+            "swing_low_count": 18,
+            "bars": 168
+          },
+          "M15": {
+            "trend": "BULLISH",
+            "last_bos": {
+              "index": 660,
+              "type": "BOS",
+              "direction": "BULLISH",
+              "level": 0.0209,
+              "displacement": 87.13,
+              "prior_trend": "BULLISH",
+              "confirmed": true
+            },
+            "last_mss": {
+              "index": 570,
+              "type": "MSS",
+              "direction": "BULLISH",
+              "level": 0.01994,
+              "displacement": 67.98,
+              "prior_trend": "BEARISH",
+              "confirmed": true
+            },
+            "protected_high": 0.02122,
+            "protected_low": 0.02066,
+            "swing_high_count": 65,
+            "swing_low_count": 57,
+            "bars": 672
+          },
+          "signature_h4": [
+            "BULLISH",
+            [
+              "BOS",
+              "BULLISH",
+              114,
+              0.02019
+            ],
+            null,
+            0.022,
+            0.01934,
+            [
+              [
+                "HIGH",
+                105,
+                0.01997
+              ],
+              [
+                "HIGH",
+                111,
+                0.02019
+              ],
+              [
+                "HIGH",
+                114,
+                0.022
+              ]
+            ],
+            [
+              [
+                "LOW",
+                107,
+                0.01934
+              ],
+              [
+                "LOW",
+                111,
+                0.01934
+              ],
+              [
+                "LOW",
+                114,
+                0.01959
+              ]
+            ]
+          ],
+          "signature_h1": [
+            "BULLISH",
+            [
+              "BOS",
+              "BULLISH",
+              145,
+              0.02001
+            ],
+            [
+              "MSS",
+              "BULLISH",
+              134,
+              0.01978
+            ],
+            0.02122,
+            0.01959,
+            [
+              [
+                "HIGH",
+                147,
+                0.022
+              ],
+              [
+                "HIGH",
+                157,
+                0.02102
+              ],
+              [
+                "HIGH",
+                165,
+                0.02122
+              ]
+            ],
+            [
+              [
+                "LOW",
+                144,
+                0.01959
+              ],
+              [
+                "LOW",
+                151,
+                0.02043
+              ],
+              [
+                "LOW",
+                158,
+                0.02063
+              ]
+            ]
+          ]
+        },
+        "thesis": {
+          "type": "BUY_PULLBACK",
+          "status": "ACTIVE_TRIGGER_CONFIRMED",
+          "reason": "SCRUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.02044 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 29.6 pada entry zone.",
+          "freshness": {
+            "age_m15_bars": 0.0,
+            "age_minutes": 0.0,
+            "score": 100.0
+          }
+        },
+        "liquidity_map": {
+          "above": [
+            {
+              "side": "BUY_SIDE",
+              "low": 0.02089,
+              "high": 0.02093,
+              "midpoint": 0.020905,
+              "strength": 51.0,
+              "significance": 21.0,
+              "timeframe": "M15",
+              "touches": 4,
+              "source_types": [
+                "EQUAL_LEVEL",
+                "SWING_HIGH"
+              ],
+              "first_index": 625,
+              "last_index": 650,
+              "swept": true,
+              "sweep_index": 657,
+              "distance_pct": 0.0718,
+              "distance_atr": 0.1267,
+              "role": "TARGET_LIQUIDITY"
+            },
+            {
+              "side": "BUY_SIDE",
+              "low": 0.0210137,
+              "high": 0.0210263,
+              "midpoint": 0.02102,
+              "strength": 31.0,
+              "significance": 8.0,
+              "timeframe": "H1",
+              "touches": 2,
+              "source_types": [
+                "M15",
+                "SWING_HIGH"
+              ],
+              "first_index": 157,
+              "last_index": 157,
+              "swept": true,
+              "sweep_index": 165,
+              "distance_pct": 0.62231,
+              "distance_atr": 0.5123,
+              "role": "TARGET_LIQUIDITY"
+            },
+            {
+              "side": "BUY_SIDE",
+              "low": 0.0210937,
+              "high": 0.0211063,
+              "midpoint": 0.0211,
+              "strength": 18.0,
+              "significance": 0.0,
+              "timeframe": "H1",
+              "touches": 1,
+              "source_types": [
+                "SWING_HIGH"
+              ],
+              "first_index": 79,
+              "last_index": 79,
+              "swept": true,
+              "sweep_index": 147,
+              "distance_pct": 1.00527,
+              "distance_atr": 0.8275,
+              "role": "TARGET_LIQUIDITY"
+            },
+            {
+              "side": "BUY_SIDE",
+              "low": 0.0212137,
+              "high": 0.0212263,
+              "midpoint": 0.02122,
+              "strength": 31.0,
+              "significance": 34.0,
+              "timeframe": "H1",
+              "touches": 2,
+              "source_types": [
+                "M15",
+                "SWING_HIGH"
+              ],
+              "first_index": 165,
+              "last_index": 165,
+              "swept": false,
+              "sweep_index": null,
+              "distance_pct": 1.5797,
+              "distance_atr": 1.3003,
+              "role": "TARGET_LIQUIDITY"
+            },
+            {
+              "side": "SELL_SIDE",
+              "low": 0.0212537,
+              "high": 0.0212663,
+              "midpoint": 0.02126,
+              "strength": 18.0,
+              "significance": 0.0,
+              "timeframe": "H1",
+              "touches": 1,
+              "source_types": [
+                "SWING_LOW"
+              ],
+              "first_index": 53,
+              "last_index": 53,
+              "swept": true,
+              "sweep_index": 71,
+              "distance_pct": 1.77118,
+              "distance_atr": 1.4579,
+              "role": "INTERNAL_LIQUIDITY"
+            },
+            {
+              "side": "BUY_SIDE",
+              "low": 0.0213137,
+              "high": 0.0213263,
+              "midpoint": 0.02132,
+              "strength": 18.0,
+              "significance": 0.0,
+              "timeframe": "H1",
+              "touches": 1,
+              "source_types": [
+                "SWING_HIGH"
+              ],
+              "first_index": 21,
+              "last_index": 21,
+              "swept": true,
+              "sweep_index": 26,
+              "distance_pct": 2.0584,
+              "distance_atr": 1.6944,
+              "role": "TARGET_LIQUIDITY"
+            },
+            {
+              "side": "SELL_SIDE",
+              "low": 0.0214037,
+              "high": 0.0214163,
+              "midpoint": 0.02141,
+              "strength": 18.0,
+              "significance": 0.0,
+              "timeframe": "H1",
+              "touches": 1,
+              "source_types": [
+                "SWING_LOW"
+              ],
+              "first_index": 63,
+              "last_index": 63,
+              "swept": true,
+              "sweep_index": 70,
+              "distance_pct": 2.48923,
+              "distance_atr": 2.049,
+              "role": "INTERNAL_LIQUIDITY"
+            },
+            {
+              "side": "BUY_SIDE",
+              "low": 0.0217437,
+              "high": 0.0217563,
+              "midpoint": 0.02175,
+              "strength": 18.0,
+              "significance": 0.0,
+              "timeframe": "H1",
+              "touches": 1,
+              "source_types": [
+                "SWING_HIGH"
+              ],
+              "first_index": 56,
+              "last_index": 56,
+              "swept": true,
+              "sweep_index": 65,
+              "distance_pct": 4.1168,
+              "distance_atr": 3.3887,
+              "role": "TARGET_LIQUIDITY"
+            }
+          ],
+          "below": [
+            {
+              "side": "BUY_SIDE",
+              "low": 0.020847,
+              "high": 0.020853,
+              "midpoint": 0.02085,
+              "strength": 8.0,
+              "significance": 0.0,
+              "timeframe": "M15",
+              "touches": 1,
+              "source_types": [
+                "SWING_HIGH"
+              ],
+              "first_index": 595,
+              "last_index": 595,
+              "swept": true,
+              "sweep_index": 625,
+              "distance_pct": 0.19148,
+              "distance_atr": 0.338,
+              "role": "INTERNAL_LIQUIDITY"
+            },
+            {
+              "side": "SELL_SIDE",
+              "low": 0.0208137,
+              "high": 0.0208263,
+              "midpoint": 0.02082,
+              "strength": 18.0,
+              "significance": 0.0,
+              "timeframe": "H1",
+              "touches": 1,
+              "source_types": [
+                "SWING_LOW"
+              ],
+              "first_index": 25,
+              "last_index": 25,
+              "swept": true,
+              "sweep_index": 73,
+              "distance_pct": 0.33509,
+              "distance_atr": 0.2758,
+              "role": "INTERNAL_LIQUIDITY"
+            },
+            {
+              "side": "BUY_SIDE",
+              "low": 0.020797,
+              "high": 0.020803,
+              "midpoint": 0.0208,
+              "strength": 8.0,
+              "significance": 0.0,
+              "timeframe": "M15",
+              "touches": 1,
+              "source_types": [
+                "SWING_HIGH"
+              ],
+              "first_index": 603,
+              "last_index": 603,
+              "swept": true,
+              "sweep_index": 625,
+              "distance_pct": 0.43083,
+              "distance_atr": 0.7604,
+              "role": "INTERNAL_LIQUIDITY"
+            },
+            {
+              "side": "BUY_SIDE",
+              "low": 0.020747,
+              "high": 0.020753,
+              "midpoint": 0.02075,
+              "strength": 16.0,
+              "significance": 0.0,
+              "timeframe": "M15",
+              "touches": 1,
+              "source_types": [
+                "SWING_HIGH"
+              ],
+              "first_index": 618,
+              "last_index": 618,
+              "swept": true,
+              "sweep_index": 624,
+              "distance_pct": 0.67018,
+              "distance_atr": 1.1829,
+              "role": "INTERNAL_LIQUIDITY"
+            },
+            {
+              "side": "BUY_SIDE",
+              "low": 0.020707,
+              "high": 0.020713,
+              "midpoint": 0.02071,
+              "strength": 8.0,
+              "significance": 0.0,
+              "timeframe": "M15",
+              "touches": 1,
+              "source_types": [
+                "SWING_HIGH"
+              ],
+              "first_index": 612,
+              "last_index": 612,
+              "swept": true,
+              "sweep_index": 616,
+              "distance_pct": 0.86166,
+              "distance_atr": 1.5209,
+              "role": "INTERNAL_LIQUIDITY"
+            },
+            {
+              "side": "SELL_SIDE",
+              "low": 0.02065,
+              "high": 0.02069,
+              "midpoint": 0.02067,
+              "strength": 24.0,
+              "significance": 0.0,
+              "timeframe": "M15",
+              "touches": 2,
+              "source_types": [
+                "SWING_LOW"
+              ],
+              "first_index": 628,
+              "last_index": 643,
+              "swept": true,
+              "sweep_index": 646,
+              "distance_pct": 1.05314,
+              "distance_atr": 1.8588,
+              "role": "INTERNAL_LIQUIDITY"
+            },
+            {
+              "side": "SELL_SIDE",
+              "low": 0.0206237,
+              "high": 0.0206363,
+              "midpoint": 0.02063,
+              "strength": 31.0,
+              "significance": 34.0,
+              "timeframe": "H1",
+              "touches": 2,
+              "source_types": [
+                "M15",
+                "SWING_LOW"
+              ],
+              "first_index": 158,
+              "last_index": 158,
+              "swept": false,
+              "sweep_index": null,
+              "distance_pct": 1.24461,
+              "distance_atr": 1.0245,
+              "role": "INTERNAL_LIQUIDITY"
+            },
+            {
+              "side": "SELL_SIDE",
+              "low": 0.020597,
+              "high": 0.020603,
+              "midpoint": 0.0206,
+              "strength": 16.0,
+              "significance": 16.0,
+              "timeframe": "M15",
+              "touches": 1,
+              "source_types": [
+                "SWING_LOW"
+              ],
+              "first_index": 621,
+              "last_index": 621,
+              "swept": false,
+              "sweep_index": null,
+              "distance_pct": 1.38822,
+              "distance_atr": 2.4503,
+              "role": "INTERNAL_LIQUIDITY"
+            }
+          ],
+          "significant_above": [],
+          "significant_below": [
+            {
+              "side": "SELL_SIDE",
+              "low": 0.0193251,
+              "high": 0.0193549,
+              "midpoint": 0.01934,
+              "strength": 80.0,
+              "significance": 86.0,
+              "timeframe": "H4",
+              "touches": 10,
+              "source_types": [
+                "EQUAL_LEVEL",
+                "H1",
+                "M15",
+                "RECENT_RANGE_EXTREME",
+                "RECENT_RANGE_LOW",
+                "SWING_LOW"
+              ],
+              "first_index": 107,
+              "last_index": 111,
+              "swept": false,
+              "sweep_index": null,
+              "distance_pct": 7.41982,
+              "distance_atr": 2.6053,
+              "role": "SL_GUARD_LIQUIDITY"
+            }
+          ],
+          "magnet": {
+            "side": "SELL_SIDE",
+            "low": 0.0193251,
+            "high": 0.0193549,
+            "midpoint": 0.01934,
+            "strength": 80.0,
+            "significance": 86.0,
+            "timeframe": "H4",
+            "touches": 10,
+            "source_types": [
+              "EQUAL_LEVEL",
+              "H1",
+              "M15",
+              "RECENT_RANGE_EXTREME",
+              "RECENT_RANGE_LOW",
+              "SWING_LOW"
+            ],
+            "first_index": 107,
+            "last_index": 111,
+            "swept": false,
+            "sweep_index": null,
+            "distance_pct": 7.41982,
+            "distance_atr": 2.6053,
+            "role": "SL_GUARD_LIQUIDITY"
+          }
+        },
+        "fib_analysis": {
+          "H4": {
+            "available": true,
+            "direction": "BUY",
+            "timeframe": "H4",
+            "impulse_quality": {
+              "quality": 92.13,
+              "classification": "CLEAN",
+              "net_move_pct": 4.962,
+              "body_efficiency": 0.3896,
+              "opposite_candle_ratio": 0.25,
+              "displacement_count": 1,
+              "structure_preserved": true,
+              "anchor_indices": {
+                "start": 111,
+                "end": 114
+              }
+            },
+            "primary_zone": {
+              "label": "PRIMARY",
+              "ratio_low": 0.382,
+              "ratio_high": 0.5,
+              "price_low": 0.02067,
+              "price_high": 0.0209839,
+              "midpoint": 0.0208269
+            },
+            "secondary_zone": {
+              "label": "SECONDARY",
+              "ratio_low": 0.5,
+              "ratio_high": 0.618,
+              "price_low": 0.0203561,
+              "price_high": 0.02067,
+              "midpoint": 0.0205131
+            },
+            "deep_zone": {
+              "label": "DEEP_0.618_0.786",
+              "ratio_low": 0.618,
+              "ratio_high": 0.786,
+              "price_low": 0.0199092,
+              "price_high": 0.0203561,
+              "midpoint": 0.0201327
+            },
+            "normal_zone": {
+              "label": "NORMAL_0.382_0.500",
+              "ratio_low": 0.382,
+              "ratio_high": 0.5,
+              "price_low": 0.02067,
+              "price_high": 0.0209839,
+              "midpoint": 0.0208269
+            },
+            "reason": "Clean impulse → normal retracement preferred (0.382-0.500).",
+            "current_price": 0.02089
+          }
+        },
+        "refinement": {
+          "low": 0.020415,
+          "high": 0.020475,
+          "midpoint": 0.020445,
+          "source": "M15",
+          "kind": "BULLISH_BREAKER",
+          "quality": 100.0,
+          "overlap_ratio": 1.0,
+          "parent_zone": {
+            "low": 0.020415,
+            "high": 0.020475
+          }
+        },
+        "rsi": {
+          "H4": {
+            "valid": true,
+            "tf": "H4",
+            "cur": 53.52,
+            "slope": 1.905,
+            "avg": 39.5,
+            "lo": 22.4,
+            "hi": 53.5,
+            "regime": "BEAR_RANGE",
+            "min12": 37.3,
+            "max12": 53.5,
+            "div": {
+              "BUY": null,
+              "SELL": null
+            }
+          },
+          "H1": {
+            "valid": true,
+            "tf": "H1",
+            "cur": 59.92,
+            "slope": 0.56,
+            "avg": 53.8,
+            "lo": 37.0,
+            "hi": 73.1,
+            "regime": "BULL_RANGE",
+            "min12": 57.1,
+            "max12": 65.8,
+            "div": {
+              "BUY": null,
+              "SELL": null
+            }
+          },
+          "M15": {
+            "valid": true,
+            "tf": "M15",
+            "cur": 49.91,
+            "slope": -0.299,
+            "avg": 55.3,
+            "lo": 44.4,
+            "hi": 72.6,
+            "regime": "BULL_RANGE",
+            "min12": 48.0,
+            "max12": 72.6,
+            "div": {
+              "BUY": null,
+              "SELL": null
+            }
+          },
+          "BTC": {
+            "valid": true,
+            "cur": 65.34,
+            "slope": 1.927
+          }
+        },
+        "rsi_projection": {
+          "current": {
+            "H4": 53.52,
+            "M15": 49.91
+          },
+          "at_entry": {
+            "H4": {
+              "min": 47.6,
+              "median": 47.84,
+              "max": 48.13,
+              "spread": 0.53,
+              "consensus": 98.69
+            },
+            "M15": {
+              "min": 28.71,
+              "median": 29.55,
+              "max": 30.62,
+              "spread": 1.91,
+              "consensus": 95.23
+            }
+          },
+          "entry_target": 0.02047,
+          "scenario_values": {
+            "H4": {
+              "FAST_RETRACE": 48.13,
+              "NORMAL_RETRACE": 47.84,
+              "SLOW_RETRACE": 47.6
+            },
+            "M15": {
+              "FAST_RETRACE": 30.62,
+              "NORMAL_RETRACE": 29.55,
+              "SLOW_RETRACE": 28.71
+            }
+          },
+          "scenario_consensus": 96.27,
+          "classification": "SUPPORTIVE_BUY_RETRACEMENT",
+          "distance_pct": 1.9541
+        },
+        "entry_zone": {
+          "low": 0.020415,
+          "high": 0.020475,
+          "selected": 0.02047,
+          "width_pct": 0.2931
+        },
+        "invalidation": {
+          "anchor_level": 0.02043,
+          "noise_floor_widened": true,
+          "anchor_source": "BULLISH_SWEEP_EXTREME",
+          "anchor_strength": 90.0,
+          "liquidity_guard": null,
+          "buffer": 2.53782e-05,
+          "sl": 0.0202653,
+          "risk": 0.0002047,
+          "risk_h1_atr": 0.807,
+          "risk_pct": 1.0,
+          "quality": 100.0,
+          "classification": "IDEAL",
+          "reason": "Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.02043; SL ditempatkan di luar invalidation."
+        },
+        "target_map": {
+          "candidates": [
+            {
+              "level": 0.02102,
+              "type": "H1_SWING_HIGH",
+              "strength": 75.0,
+              "priority": 80.0,
+              "rr": 2.687,
+              "major_barriers": [],
+              "quality": 82.19
+            },
+            {
+              "level": 0.0211,
+              "type": "H1_SWING_HIGH",
+              "strength": 75.0,
+              "priority": 80.0,
+              "rr": 3.078,
+              "major_barriers": [],
+              "quality": 81.6
+            },
+            {
+              "level": 0.02122,
+              "type": "H1_SWING_HIGH",
+              "strength": 75.0,
+              "priority": 80.0,
+              "rr": 3.664,
+              "major_barriers": [],
+              "quality": 77.71
+            },
+            {
+              "level": 0.022,
+              "type": "H4_SWING_HIGH",
+              "strength": 78.0,
+              "priority": 95.0,
+              "rr": 7.474,
+              "major_barriers": [],
+              "quality": 76.75
+            },
+            {
+              "level": 0.02627,
+              "type": "H4_HIGHER_HIGH",
+              "strength": 98.0,
+              "priority": 95.0,
+              "rr": 28.334,
+              "major_barriers": [
+                {
+                  "level": 0.022,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02256,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.0251,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02593,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                }
+              ],
+              "quality": 75.05
+            },
+            {
+              "level": 0.03238,
+              "type": "H4_SWING_HIGH",
+              "strength": 78.0,
+              "priority": 95.0,
+              "rr": 58.183,
+              "major_barriers": [
+                {
+                  "level": 0.022,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02256,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.0251,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02627,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_HIGHER_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02593,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                }
+              ],
+              "quality": 68.05
+            },
+            {
+              "level": 0.02852,
+              "type": "H4_SWING_HIGH",
+              "strength": 78.0,
+              "priority": 95.0,
+              "rr": 39.326,
+              "major_barriers": [
+                {
+                  "level": 0.022,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02256,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.0251,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02627,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_HIGHER_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02593,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                }
+              ],
+              "quality": 68.05
+            },
+            {
+              "level": 0.02806,
+              "type": "H4_SWING_HIGH",
+              "strength": 78.0,
+              "priority": 95.0,
+              "rr": 37.079,
+              "major_barriers": [
+                {
+                  "level": 0.022,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02256,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.0251,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02627,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_HIGHER_HIGH"
+                  ]
+                },
+                {
+                  "level": 0.02593,
+                  "significance": 95.0,
+                  "source": [
+                    "H4_SWING_HIGH"
+                  ]
+                }
+              ],
+              "quality": 68.05
+            }
+          ],
+          "selected": {
+            "level": 0.02102,
+            "type": "H1_SWING_HIGH",
+            "strength": 75.0,
+            "priority": 80.0,
+            "rr": 2.687,
+            "major_barriers": [],
+            "quality": 82.19
+          }
+        },
+        "risk": {
+          "risk": 0.00021,
+          "reward": 0.00055,
+          "planned_rr": 2.619,
+          "risk_pct": 1.0259,
+          "risk_h1_atr": 0.8275,
+          "classification": "IDEAL"
+        },
+        "confidence": {
+          "score": 81.65,
+          "components": {
+            "structure_alignment": 93.0,
+            "liquidity_confluence": 67.2,
+            "fib_location": 90.0,
+            "fvg_ob_refinement": 100.0,
+            "rsi_projection": 96.08,
+            "momentum_current": 90.0,
+            "invalidation_quality": 100.0,
+            "target_quality": 87.19,
+            "rr_quality": 100.0,
+            "entry_reachability": 80.77,
+            "volume_confirmation": 70.68,
+            "orderflow_leg": 46.88,
+            "price_leg": 63.05,
+            "support_resistance": 79.4
+          },
+          "weights": {
+            "structure_alignment": 8.0,
+            "liquidity_confluence": 13.0,
+            "fib_location": 7.0,
+            "fvg_ob_refinement": 5.0,
+            "rsi_projection": 11.0,
+            "momentum_current": 4.0,
+            "invalidation_quality": 8.0,
+            "target_quality": 7.0,
+            "rr_quality": 4.0,
+            "entry_reachability": 3.0,
+            "volume_confirmation": 5.0,
+            "orderflow_leg": 8.0,
+            "price_leg": 8.0,
+            "support_resistance": 9.0
+          },
+          "penalties": [],
+          "meaning": "Kualitas internal thesis 0-100; bukan probabilitas profit."
+        },
+        "score_details": {
+          "orderflow_leg": {
+            "score": 46.88,
+            "signed_flow": 0.3611,
+            "aligned_flow": 0.3611,
+            "displacement": 11.71,
+            "relative_volume": 1.189,
+            "bars": 20,
+            "method": "OHLCV_PROXY_NOT_TRUE_FOOTPRINT"
+          },
+          "price_leg": {
+            "score": 63.05,
+            "impulse_pct": 0.7726,
+            "aligned_impulse_pct": 0.7726,
+            "retracement_pct": 58.93,
+            "zone_distance_range": 0.7946,
+            "bars": 24
+          },
+          "support_resistance": {
+            "score": 79.4,
+            "zone_count": 212,
+            "swing_level_count": 43,
+            "pool_score": 50.0,
+            "poi_score": 84.26,
+            "swing_sr_score": 96.62,
+            "top_zones": [
+              {
+                "kind": "BULLISH_FVG",
+                "source": "H4_FVG",
+                "strength": 79.03,
+                "overlap": 0.0,
+                "distance_pct": 26.2805,
+                "order_block": false,
+                "fvg": true,
+                "score": 38.42
+              },
+              {
+                "kind": "BEARISH_FVG",
+                "source": "H4_FVG",
+                "strength": 84.98,
+                "overlap": 0.0,
+                "distance_pct": 33.7721,
+                "order_block": false,
+                "fvg": true,
+                "score": 33.99
+              },
+              {
+                "kind": "BEARISH_FVG",
+                "source": "H4_FVG",
+                "strength": 84.6,
+                "overlap": 0.0,
+                "distance_pct": 25.8258,
+                "order_block": false,
+                "fvg": true,
+                "score": 33.76
+              },
+              {
+                "kind": "BULLISH_FVG",
+                "source": "H4_FVG",
+                "strength": 77.02,
+                "overlap": 0.0,
+                "distance_pct": 26.7113,
+                "order_block": false,
+                "fvg": true,
+                "score": 37.21
+              },
+              {
+                "kind": "BULLISH_FVG",
+                "source": "H4_FVG",
+                "strength": 90.83,
+                "overlap": 0.0,
+                "distance_pct": 31.7377,
+                "order_block": false,
+                "fvg": true,
+                "score": 45.5
+              },
+              {
+                "kind": "BEARISH_FVG",
+                "source": "H4_FVG",
+                "strength": 55.68,
+                "overlap": 0.0,
+                "distance_pct": 31.977,
+                "order_block": false,
+                "fvg": true,
+                "score": 24.41
+              },
+              {
+                "kind": "BEARISH_FVG",
+                "source": "H4_FVG",
+                "strength": 81.98,
+                "overlap": 0.0,
+                "distance_pct": 31.4983,
+                "order_block": false,
+                "fvg": true,
+                "score": 32.19
+              },
+              {
+                "kind": "BEARISH_FVG",
+                "source": "H4_FVG",
+                "strength": 54.73,
+                "overlap": 0.0,
+                "distance_pct": 26.9746,
+                "order_block": false,
+                "fvg": true,
+                "score": 23.84
+              }
+            ],
+            "top_swing_levels": [
+              {
+                "timeframe": "H1",
+                "kind": "LOW",
+                "price": 0.02043,
+                "distance_pct": 0.0718,
+                "score": 96.62
+              },
+              {
+                "timeframe": "M15",
+                "kind": "LOW",
+                "price": 0.02044,
+                "distance_pct": 0.0239,
+                "score": 95.94
+              },
+              {
+                "timeframe": "M15",
+                "kind": "LOW",
+                "price": 0.02043,
+                "distance_pct": 0.0718,
+                "score": 93.42
+              },
+              {
+                "timeframe": "H1",
+                "kind": "LOW",
+                "price": 0.02046,
+                "distance_pct": 0.0718,
+                "score": 90.22
+              },
+              {
+                "timeframe": "H4",
+                "kind": "LOW",
+                "price": 0.02039,
+                "distance_pct": 0.2633,
+                "score": 87.32
+              },
+              {
+                "timeframe": "H1",
+                "kind": "LOW",
+                "price": 0.02039,
+                "distance_pct": 0.2633,
+                "score": 78.52
+              }
+            ]
+          },
+          "liquidity_pool": {
+            "side": "SELL_SIDE",
+            "low": 0.020415,
+            "high": 0.020475,
+            "midpoint": 0.02044,
+            "strength": 47.0,
+            "significance": 50.0,
+            "timeframe": "M15",
+            "touches": 5,
+            "source_types": [
+              "EQUAL_LEVEL",
+              "H1",
+              "SWING_LOW"
+            ],
+            "swept": false,
+            "role": "ENTRY_LIQUIDITY"
+          },
+          "fvg_order_block_refinement": {
+            "low": 0.020415,
+            "high": 0.020475,
+            "midpoint": 0.020445,
+            "source": "M15",
+            "kind": "BULLISH_BREAKER",
+            "quality": 100.0,
+            "overlap_ratio": 1.0,
+            "parent_zone": {
+              "low": 0.020415,
+              "high": 0.020475
+            }
+          },
+          "rsi_momentum": {
+            "state": "OK",
+            "penalty": 0.0,
+            "exhaustion_penalty": 0.0,
+            "target_penalty": 0.0,
+            "h4_current": 53.52,
+            "h4_projected": 47.84,
+            "m15_projected_median": 29.55,
+            "m15_target": 34.0,
+            "h4_exhaustion_limit": 60.0
+          },
+          "current_rsi": {
+            "H4": {
+              "valid": true,
+              "tf": "H4",
+              "cur": 53.52,
+              "slope": 1.905,
+              "avg": 39.5,
+              "lo": 22.4,
+              "hi": 53.5,
+              "regime": "BEAR_RANGE",
+              "min12": 37.3,
+              "max12": 53.5,
+              "div": {
+                "BUY": null,
+                "SELL": null
+              }
+            },
+            "H1": {
+              "valid": true,
+              "tf": "H1",
+              "cur": 59.92,
+              "slope": 0.56,
+              "avg": 53.8,
+              "lo": 37.0,
+              "hi": 73.1,
+              "regime": "BULL_RANGE",
+              "min12": 57.1,
+              "max12": 65.8,
+              "div": {
+                "BUY": null,
+                "SELL": null
+              }
+            },
+            "M15": {
+              "valid": true,
+              "tf": "M15",
+              "cur": 49.91,
+              "slope": -0.299,
+              "avg": 55.3,
+              "lo": 44.4,
+              "hi": 72.6,
+              "regime": "BULL_RANGE",
+              "min12": 48.0,
+              "max12": 72.6,
+              "div": {
+                "BUY": null,
+                "SELL": null
+              }
+            },
+            "BTC": {
+              "valid": true,
+              "cur": 65.34,
+              "slope": 1.927
+            }
+          },
+          "projected_rsi": {
+            "current": {
+              "H4": 53.52,
+              "M15": 49.91
+            },
+            "at_entry": {
+              "H4": {
+                "min": 47.6,
+                "median": 47.84,
+                "max": 48.13,
+                "spread": 0.53,
+                "consensus": 98.69
+              },
+              "M15": {
+                "min": 28.71,
+                "median": 29.55,
+                "max": 30.62,
+                "spread": 1.91,
+                "consensus": 95.23
+              }
+            },
+            "entry_target": 0.02047,
+            "scenario_values": {
+              "H4": {
+                "FAST_RETRACE": 48.13,
+                "NORMAL_RETRACE": 47.84,
+                "SLOW_RETRACE": 47.6
+              },
+              "M15": {
+                "FAST_RETRACE": 30.62,
+                "NORMAL_RETRACE": 29.55,
+                "SLOW_RETRACE": 28.71
+              }
+            },
+            "scenario_consensus": 96.27,
+            "classification": "SUPPORTIVE_BUY_RETRACEMENT",
+            "distance_pct": 1.9541
+          },
+          "volume_context": {
+            "score": 70.68,
+            "class": "CONFIRMED",
+            "rvol": 1.844,
+            "legs": {
+              "H1": {
+                "rvol": 1.808,
+                "dominance": 0.472,
+                "trend_vs_counter": 0.768
+              },
+              "H4": {
+                "rvol": 1.897,
+                "dominance": 0.735,
+                "trend_vs_counter": 1.385
+              }
+            }
+          }
+        },
+        "candidate_set": [
+          {
+            "model": "STRUCTURAL_PREDICTION_V2",
+            "direction": "BUY",
+            "entry": 0.02047,
+            "entry_zone_low": 0.020415,
+            "entry_zone_high": 0.020475,
+            "sl": 0.02026,
+            "tp": 0.02102,
+            "price_exp": 0.02101,
+            "planned_rr": 2.619,
+            "confidence": 81.65,
+            "thesis_status": "ACTIVE_TRIGGER_CONFIRMED",
+            "thesis_type": "BUY_PULLBACK",
+            "scores": {
+              "structure_alignment": 93.0,
+              "liquidity_confluence": 67.2,
+              "fib_location": 90.0,
+              "fvg_ob_refinement": 100.0,
+              "rsi_projection": 96.08,
+              "momentum_current": 90.0,
+              "invalidation_quality": 100.0,
+              "target_quality": 87.19,
+              "rr_quality": 100.0,
+              "entry_reachability": 80.77,
+              "volume_confirmation": 70.68,
+              "orderflow_leg": 46.88,
+              "price_leg": 63.05,
+              "support_resistance": 79.4
+            }
+          },
+          {
+            "model": "STRUCTURAL_PREDICTION_V2",
+            "direction": "BUY",
+            "entry": 0.02063,
+            "entry_zone_low": 0.0206237,
+            "entry_zone_high": 0.0206363,
+            "sl": 0.02042,
+            "tp": 0.0211,
+            "price_exp": 0.02096,
+            "planned_rr": 2.2381,
+            "confidence": 80.2,
+            "thesis_status": "ACTIVE_TRIGGER_CONFIRMED",
+            "thesis_type": "BUY_PULLBACK",
+            "scores": {
+              "structure_alignment": 93.0,
+              "liquidity_confluence": 55.96,
+              "fib_location": 90.0,
+              "fvg_ob_refinement": 97.61,
+              "rsi_projection": 96.42,
+              "momentum_current": 90.0,
+              "invalidation_quality": 100.0,
+              "target_quality": 87.78,
+              "rr_quality": 100.0,
+              "entry_reachability": 88.76,
+              "volume_confirmation": 70.68,
+              "orderflow_leg": 46.88,
+              "price_leg": 68.83,
+              "support_resistance": 83.5
+            }
+          },
+          {
+            "model": "STRUCTURAL_PREDICTION_V2",
+            "direction": "BUY",
+            "entry": 0.0206,
+            "entry_zone_low": 0.0206,
+            "entry_zone_high": 0.020603,
+            "sl": 0.02039,
+            "tp": 0.02102,
+            "price_exp": 0.02092,
+            "planned_rr": 2.0,
+            "confidence": 76.95,
+            "thesis_status": "ACTIVE_TRIGGER_CONFIRMED",
+            "thesis_type": "BUY_PULLBACK",
+            "scores": {
+              "structure_alignment": 93.0,
+              "liquidity_confluence": 41.14,
+              "fib_location": 90.0,
+              "fvg_ob_refinement": 69.61,
+              "rsi_projection": 96.37,
+              "momentum_current": 90.0,
+              "invalidation_quality": 100.0,
+              "target_quality": 88.15,
+              "rr_quality": 100.0,
+              "entry_reachability": 84.05,
+              "volume_confirmation": 70.68,
+              "orderflow_leg": 46.88,
+              "price_leg": 67.94,
+              "support_resistance": 78.28
+            }
+          },
+          {
+            "model": "STRUCTURAL_PREDICTION_V2_WAITING",
+            "direction": "SELL",
+            "entry": 0.02122,
+            "entry_zone_low": 0.0212137,
+            "entry_zone_high": 0.0212263,
+            "sl": 0.02203,
+            "tp": 0.01886,
+            "price_exp": 0.02,
+            "planned_rr": 2.9136,
+            "confidence": 50.24,
+            "thesis_status": "WAITING_TRIGGER",
+            "thesis_type": "SELL_PULLBACK",
+            "scores": {
+              "structure_alignment": 22.0,
+              "liquidity_confluence": 50.56,
+              "fib_location": 98.0,
+              "fvg_ob_refinement": 76.0,
+              "rsi_projection": 96.13,
+              "momentum_current": 93.0,
+              "invalidation_quality": 95.5,
+              "target_quality": 39.5,
+              "rr_quality": 100.0,
+              "entry_reachability": 85.7,
+              "volume_confirmation": 59.22,
+              "orderflow_leg": 35.76,
+              "price_leg": 59.69,
+              "support_resistance": 82.0
+            }
+          }
+        ],
+        "price_context": {
+          "current": 0.02089,
+          "atr14_m15": 0.0001183544,
+          "current_distance_to_entry_pct": 2.0105,
+          "entry_distance_to_exp_pct": 2.638,
+          "entry_zone_timeframe": "H4+H1+M15"
+        },
+        "vlt": {
+          "direction": "NEUTRAL",
+          "score": 50.0,
+          "relative_volume": 0.971,
+          "slope": 3.62406015037598e-06,
+          "signed_pressure": 0.06915295051488111
+        },
+        "market_quality": {
+          "valid": true,
+          "chg24": 5.67,
+          "drop24": 5.14,
+          "rise24": 6.53,
+          "drop48": 5.14,
+          "rise48": 7.91,
+          "chg7d": -8.98,
+          "bear15": false,
+          "bull15": false,
+          "h1_below_ema25": false,
+          "h1_above_ema25": true,
+          "vol_ratio": 0.7
+        },
+        "confidence_adjustments": {
+          "btc_context": {
+            "btc_trend": "BULLISH",
+            "btc_confidence": 100.0,
+            "pair_trend": "BULLISH",
+            "direction": "BUY",
+            "structure_conflict": false,
+            "impulse_conflict": false,
+            "raw_confidence": 81.65,
+            "delta": 4.0,
+            "adjusted_confidence": 85.65,
+            "policy": "confidence_modifier_not_veto"
+          }
+        },
+        "validator": {
+          "version": "V2",
+          "pair_structure": {
+            "H4": {
+              "trend": "BULLISH",
+              "last_bos": {
+                "index": 114,
+                "type": "BOS",
+                "direction": "BULLISH",
+                "level": 0.02019,
+                "displacement": 100.0,
+                "prior_trend": "BULLISH",
+                "confirmed": true
+              },
+              "last_mss": null,
+              "protected_high": 0.022,
+              "protected_low": 0.01934,
+              "swing_high_count": 11,
+              "swing_low_count": 11,
+              "bars": 120
+            },
+            "H1": {
+              "trend": "BULLISH",
+              "last_bos": {
+                "index": 145,
+                "type": "BOS",
+                "direction": "BULLISH",
+                "level": 0.02001,
+                "displacement": 88.03,
+                "prior_trend": "BULLISH",
+                "confirmed": true
+              },
+              "last_mss": {
+                "index": 134,
+                "type": "MSS",
+                "direction": "BULLISH",
+                "level": 0.01978,
+                "displacement": 91.42,
+                "prior_trend": "BEARISH",
+                "confirmed": true
+              },
+              "protected_high": 0.02122,
+              "protected_low": 0.01959,
+              "swing_high_count": 18,
+              "swing_low_count": 18,
+              "bars": 168
+            },
+            "M15": {
+              "trend": "BULLISH",
+              "last_bos": {
+                "index": 660,
+                "type": "BOS",
+                "direction": "BULLISH",
+                "level": 0.0209,
+                "displacement": 87.13,
+                "prior_trend": "BULLISH",
+                "confirmed": true
+              },
+              "last_mss": {
+                "index": 570,
+                "type": "MSS",
+                "direction": "BULLISH",
+                "level": 0.01994,
+                "displacement": 67.98,
+                "prior_trend": "BEARISH",
+                "confirmed": true
+              },
+              "protected_high": 0.02122,
+              "protected_low": 0.02066,
+              "swing_high_count": 65,
+              "swing_low_count": 57,
+              "bars": 672
+            },
+            "signature_h4": [
+              "BULLISH",
+              [
+                "BOS",
+                "BULLISH",
+                114,
+                0.02019
+              ],
+              null,
+              0.022,
+              0.01934,
+              [
+                [
+                  "HIGH",
+                  105,
+                  0.01997
+                ],
+                [
+                  "HIGH",
+                  111,
+                  0.02019
+                ],
+                [
+                  "HIGH",
+                  114,
+                  0.022
+                ]
+              ],
+              [
+                [
+                  "LOW",
+                  107,
+                  0.01934
+                ],
+                [
+                  "LOW",
+                  111,
+                  0.01934
+                ],
+                [
+                  "LOW",
+                  114,
+                  0.01959
+                ]
+              ]
+            ],
+            "signature_h1": [
+              "BULLISH",
+              [
+                "BOS",
+                "BULLISH",
+                145,
+                0.02001
+              ],
+              [
+                "MSS",
+                "BULLISH",
+                134,
+                0.01978
+              ],
+              0.02122,
+              0.01959,
+              [
+                [
+                  "HIGH",
+                  147,
+                  0.022
+                ],
+                [
+                  "HIGH",
+                  157,
+                  0.02102
+                ],
+                [
+                  "HIGH",
+                  165,
+                  0.02122
+                ]
+              ],
+              [
+                [
+                  "LOW",
+                  144,
+                  0.01959
+                ],
+                [
+                  "LOW",
+                  151,
+                  0.02043
+                ],
+                [
+                  "LOW",
+                  158,
+                  0.02063
+                ]
+              ]
+            ]
+          },
+          "thesis": {
+            "type": "BUY_PULLBACK",
+            "status": "ACTIVE_TRIGGER_CONFIRMED",
+            "reason": "SCRUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.02044 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 29.6 pada entry zone.",
+            "freshness": {
+              "age_m15_bars": 0.0,
+              "age_minutes": 0.0,
+              "score": 100.0
+            }
+          },
+          "liquidity_map": {
+            "above": [
+              {
+                "side": "BUY_SIDE",
+                "low": 0.02089,
+                "high": 0.02093,
+                "midpoint": 0.020905,
+                "strength": 51.0,
+                "significance": 21.0,
+                "timeframe": "M15",
+                "touches": 4,
+                "source_types": [
+                  "EQUAL_LEVEL",
+                  "SWING_HIGH"
+                ],
+                "first_index": 625,
+                "last_index": 650,
+                "swept": true,
+                "sweep_index": 657,
+                "distance_pct": 0.1677,
+                "distance_atr": 0.2957,
+                "role": "TARGET_LIQUIDITY"
+              },
+              {
+                "side": "BUY_SIDE",
+                "low": 0.0210137,
+                "high": 0.0210263,
+                "midpoint": 0.02102,
+                "strength": 31.0,
+                "significance": 8.0,
+                "timeframe": "H1",
+                "touches": 2,
+                "source_types": [
+                  "M15",
+                  "SWING_HIGH"
+                ],
+                "first_index": 157,
+                "last_index": 157,
+                "swept": true,
+                "sweep_index": 165,
+                "distance_pct": 0.71874,
+                "distance_atr": 0.5911,
+                "role": "TARGET_LIQUIDITY"
+              },
+              {
+                "side": "BUY_SIDE",
+                "low": 0.0210937,
+                "high": 0.0211063,
+                "midpoint": 0.0211,
+                "strength": 18.0,
+                "significance": 0.0,
+                "timeframe": "H1",
+                "touches": 1,
+                "source_types": [
+                  "SWING_HIGH"
+                ],
+                "first_index": 79,
+                "last_index": 79,
+                "swept": true,
+                "sweep_index": 147,
+                "distance_pct": 1.10206,
+                "distance_atr": 0.9063,
+                "role": "TARGET_LIQUIDITY"
+              },
+              {
+                "side": "BUY_SIDE",
+                "low": 0.0212137,
+                "high": 0.0212263,
+                "midpoint": 0.02122,
+                "strength": 31.0,
+                "significance": 34.0,
+                "timeframe": "H1",
+                "touches": 2,
+                "source_types": [
+                  "M15",
+                  "SWING_HIGH"
+                ],
+                "first_index": 165,
+                "last_index": 165,
+                "swept": false,
+                "sweep_index": null,
+                "distance_pct": 1.67705,
+                "distance_atr": 1.3791,
+                "role": "TARGET_LIQUIDITY"
+              },
+              {
+                "side": "SELL_SIDE",
+                "low": 0.0212537,
+                "high": 0.0212663,
+                "midpoint": 0.02126,
+                "strength": 18.0,
+                "significance": 0.0,
+                "timeframe": "H1",
+                "touches": 1,
+                "source_types": [
+                  "SWING_LOW"
+                ],
+                "first_index": 53,
+                "last_index": 53,
+                "swept": true,
+                "sweep_index": 71,
+                "distance_pct": 1.86871,
+                "distance_atr": 1.5368,
+                "role": "INTERNAL_LIQUIDITY"
+              },
+              {
+                "side": "BUY_SIDE",
+                "low": 0.0213137,
+                "high": 0.0213263,
+                "midpoint": 0.02132,
+                "strength": 18.0,
+                "significance": 0.0,
+                "timeframe": "H1",
+                "touches": 1,
+                "source_types": [
+                  "SWING_HIGH"
+                ],
+                "first_index": 21,
+                "last_index": 21,
+                "swept": true,
+                "sweep_index": 26,
+                "distance_pct": 2.15621,
+                "distance_atr": 1.7732,
+                "role": "TARGET_LIQUIDITY"
+              },
+              {
+                "side": "SELL_SIDE",
+                "low": 0.0214037,
+                "high": 0.0214163,
+                "midpoint": 0.02141,
+                "strength": 18.0,
+                "significance": 0.0,
+                "timeframe": "H1",
+                "touches": 1,
+                "source_types": [
+                  "SWING_LOW"
+                ],
+                "first_index": 63,
+                "last_index": 63,
+                "swept": true,
+                "sweep_index": 70,
+                "distance_pct": 2.58745,
+                "distance_atr": 2.1278,
+                "role": "INTERNAL_LIQUIDITY"
+              },
+              {
+                "side": "BUY_SIDE",
+                "low": 0.0217437,
+                "high": 0.0217563,
+                "midpoint": 0.02175,
+                "strength": 18.0,
+                "significance": 0.0,
+                "timeframe": "H1",
+                "touches": 1,
+                "source_types": [
+                  "SWING_HIGH"
+                ],
+                "first_index": 56,
+                "last_index": 56,
+                "swept": true,
+                "sweep_index": 65,
+                "distance_pct": 4.21658,
+                "distance_atr": 3.4675,
+                "role": "TARGET_LIQUIDITY"
+              }
+            ],
+            "below": [
+              {
+                "side": "BUY_SIDE",
+                "low": 0.020847,
+                "high": 0.020853,
+                "midpoint": 0.02085,
+                "strength": 8.0,
+                "significance": 0.0,
+                "timeframe": "M15",
+                "touches": 1,
+                "source_types": [
+                  "SWING_HIGH"
+                ],
+                "first_index": 595,
+                "last_index": 595,
+                "swept": true,
+                "sweep_index": 625,
+                "distance_pct": 0.09583,
+                "distance_atr": 0.169,
+                "role": "INTERNAL_LIQUIDITY"
+              },
+              {
+                "side": "SELL_SIDE",
+                "low": 0.0208137,
+                "high": 0.0208263,
+                "midpoint": 0.02082,
+                "strength": 18.0,
+                "significance": 0.0,
+                "timeframe": "H1",
+                "touches": 1,
+                "source_types": [
+                  "SWING_LOW"
+                ],
+                "first_index": 25,
+                "last_index": 25,
+                "swept": true,
+                "sweep_index": 73,
+                "distance_pct": 0.23958,
+                "distance_atr": 0.197,
+                "role": "INTERNAL_LIQUIDITY"
+              },
+              {
+                "side": "BUY_SIDE",
+                "low": 0.020797,
+                "high": 0.020803,
+                "midpoint": 0.0208,
+                "strength": 8.0,
+                "significance": 0.0,
+                "timeframe": "M15",
+                "touches": 1,
+                "source_types": [
+                  "SWING_HIGH"
+                ],
+                "first_index": 603,
+                "last_index": 603,
+                "swept": true,
+                "sweep_index": 625,
+                "distance_pct": 0.33541,
+                "distance_atr": 0.5914,
+                "role": "INTERNAL_LIQUIDITY"
+              },
+              {
+                "side": "BUY_SIDE",
+                "low": 0.020747,
+                "high": 0.020753,
+                "midpoint": 0.02075,
+                "strength": 16.0,
+                "significance": 0.0,
+                "timeframe": "M15",
+                "touches": 1,
+                "source_types": [
+                  "SWING_HIGH"
+                ],
+                "first_index": 618,
+                "last_index": 618,
+                "swept": true,
+                "sweep_index": 624,
+                "distance_pct": 0.57499,
+                "distance_atr": 1.0139,
+                "role": "INTERNAL_LIQUIDITY"
+              },
+              {
+                "side": "BUY_SIDE",
+                "low": 0.020707,
+                "high": 0.020713,
+                "midpoint": 0.02071,
+                "strength": 8.0,
+                "significance": 0.0,
+                "timeframe": "M15",
+                "touches": 1,
+                "source_types": [
+                  "SWING_HIGH"
+                ],
+                "first_index": 612,
+                "last_index": 612,
+                "swept": true,
+                "sweep_index": 616,
+                "distance_pct": 0.76665,
+                "distance_atr": 1.3519,
+                "role": "INTERNAL_LIQUIDITY"
+              },
+              {
+                "side": "SELL_SIDE",
+                "low": 0.02065,
+                "high": 0.02069,
+                "midpoint": 0.02067,
+                "strength": 24.0,
+                "significance": 0.0,
+                "timeframe": "M15",
+                "touches": 2,
+                "source_types": [
+                  "SWING_LOW"
+                ],
+                "first_index": 628,
+                "last_index": 643,
+                "swept": true,
+                "sweep_index": 646,
+                "distance_pct": 0.95831,
+                "distance_atr": 1.6898,
+                "role": "INTERNAL_LIQUIDITY"
+              },
+              {
+                "side": "SELL_SIDE",
+                "low": 0.0206237,
+                "high": 0.0206363,
+                "midpoint": 0.02063,
+                "strength": 31.0,
+                "significance": 34.0,
+                "timeframe": "H1",
+                "touches": 2,
+                "source_types": [
+                  "M15",
+                  "SWING_LOW"
+                ],
+                "first_index": 158,
+                "last_index": 158,
+                "swept": false,
+                "sweep_index": null,
+                "distance_pct": 1.14998,
+                "distance_atr": 0.9457,
+                "role": "INTERNAL_LIQUIDITY"
+              },
+              {
+                "side": "SELL_SIDE",
+                "low": 0.020597,
+                "high": 0.020603,
+                "midpoint": 0.0206,
+                "strength": 16.0,
+                "significance": 16.0,
+                "timeframe": "M15",
+                "touches": 1,
+                "source_types": [
+                  "SWING_LOW"
+                ],
+                "first_index": 621,
+                "last_index": 621,
+                "swept": false,
+                "sweep_index": null,
+                "distance_pct": 1.29372,
+                "distance_atr": 2.2813,
+                "role": "INTERNAL_LIQUIDITY"
+              }
+            ],
+            "significant_above": [],
+            "significant_below": [
+              {
+                "side": "SELL_SIDE",
+                "low": 0.0193251,
+                "high": 0.0193549,
+                "midpoint": 0.01934,
+                "strength": 80.0,
+                "significance": 86.0,
+                "timeframe": "H4",
+                "touches": 10,
+                "source_types": [
+                  "EQUAL_LEVEL",
+                  "H1",
+                  "M15",
+                  "RECENT_RANGE_EXTREME",
+                  "RECENT_RANGE_LOW",
+                  "SWING_LOW"
+                ],
+                "first_index": 107,
+                "last_index": 111,
+                "swept": false,
+                "sweep_index": null,
+                "distance_pct": 7.3311,
+                "distance_atr": 2.5717,
+                "role": "SL_GUARD_LIQUIDITY"
+              }
+            ],
+            "magnet": {
+              "side": "SELL_SIDE",
+              "low": 0.0193251,
+              "high": 0.0193549,
+              "midpoint": 0.01934,
+              "strength": 80.0,
+              "significance": 86.0,
+              "timeframe": "H4",
+              "touches": 10,
+              "source_types": [
+                "EQUAL_LEVEL",
+                "H1",
+                "M15",
+                "RECENT_RANGE_EXTREME",
+                "RECENT_RANGE_LOW",
+                "SWING_LOW"
+              ],
+              "first_index": 107,
+              "last_index": 111,
+              "swept": false,
+              "sweep_index": null,
+              "distance_pct": 7.3311,
+              "distance_atr": 2.5717,
+              "role": "SL_GUARD_LIQUIDITY"
+            }
+          },
+          "fib_analysis": {
+            "H4": {
+              "available": true,
+              "direction": "BUY",
+              "timeframe": "H4",
+              "impulse_quality": {
+                "quality": 92.13,
+                "classification": "CLEAN",
+                "net_move_pct": 4.962,
+                "body_efficiency": 0.3896,
+                "opposite_candle_ratio": 0.25,
+                "displacement_count": 1,
+                "structure_preserved": true,
+                "anchor_indices": {
+                  "start": 111,
+                  "end": 114
+                }
+              },
+              "primary_zone": {
+                "label": "PRIMARY",
+                "ratio_low": 0.382,
+                "ratio_high": 0.5,
+                "price_low": 0.02067,
+                "price_high": 0.0209839,
+                "midpoint": 0.0208269
+              },
+              "secondary_zone": {
+                "label": "SECONDARY",
+                "ratio_low": 0.5,
+                "ratio_high": 0.618,
+                "price_low": 0.0203561,
+                "price_high": 0.02067,
+                "midpoint": 0.0205131
+              },
+              "deep_zone": {
+                "label": "DEEP_0.618_0.786",
+                "ratio_low": 0.618,
+                "ratio_high": 0.786,
+                "price_low": 0.0199092,
+                "price_high": 0.0203561,
+                "midpoint": 0.0201327
+              },
+              "normal_zone": {
+                "label": "NORMAL_0.382_0.500",
+                "ratio_low": 0.382,
+                "ratio_high": 0.5,
+                "price_low": 0.02067,
+                "price_high": 0.0209839,
+                "midpoint": 0.0208269
+              },
+              "reason": "Clean impulse → normal retracement preferred (0.382-0.500).",
+              "current_price": 0.02087
+            }
+          },
+          "refinement": {
+            "low": 0.020415,
+            "high": 0.020475,
+            "midpoint": 0.020445,
+            "source": "M15",
+            "kind": "BULLISH_BREAKER",
+            "quality": 100.0,
+            "overlap_ratio": 1.0,
+            "parent_zone": {
+              "low": 0.020415,
+              "high": 0.020475
+            }
+          },
+          "rsi": {
+            "H4": {
+              "valid": true,
+              "tf": "H4",
+              "cur": 53.52,
+              "slope": 1.905,
+              "avg": 39.5,
+              "lo": 22.4,
+              "hi": 53.5,
+              "regime": "BEAR_RANGE",
+              "min12": 37.3,
+              "max12": 53.5,
+              "div": {
+                "BUY": null,
+                "SELL": null
+              }
+            },
+            "H1": {
+              "valid": true,
+              "tf": "H1",
+              "cur": 59.92,
+              "slope": 0.56,
+              "avg": 53.8,
+              "lo": 37.0,
+              "hi": 73.1,
+              "regime": "BULL_RANGE",
+              "min12": 57.1,
+              "max12": 65.8,
+              "div": {
+                "BUY": null,
+                "SELL": null
+              }
+            },
+            "M15": {
+              "valid": true,
+              "tf": "M15",
+              "cur": 49.91,
+              "slope": -0.299,
+              "avg": 55.3,
+              "lo": 44.4,
+              "hi": 72.6,
+              "regime": "BULL_RANGE",
+              "min12": 48.0,
+              "max12": 72.6,
+              "div": {
+                "BUY": null,
+                "SELL": null
+              }
+            },
+            "BTC": {
+              "valid": true,
+              "cur": 65.34,
+              "slope": 1.927
+            }
+          },
+          "rsi_projection": {
+            "current": {
+              "H4": 53.52,
+              "M15": 49.91
+            },
+            "at_entry": {
+              "H4": {
+                "min": 47.6,
+                "median": 47.84,
+                "max": 48.13,
+                "spread": 0.53,
+                "consensus": 98.69
+              },
+              "M15": {
+                "min": 28.71,
+                "median": 29.55,
+                "max": 30.62,
+                "spread": 1.91,
+                "consensus": 95.23
+              }
+            },
+            "entry_target": 0.02047,
+            "scenario_values": {
+              "H4": {
+                "FAST_RETRACE": 48.13,
+                "NORMAL_RETRACE": 47.84,
+                "SLOW_RETRACE": 47.6
+              },
+              "M15": {
+                "FAST_RETRACE": 30.62,
+                "NORMAL_RETRACE": 29.55,
+                "SLOW_RETRACE": 28.71
+              }
+            },
+            "scenario_consensus": 96.27,
+            "classification": "SUPPORTIVE_BUY_RETRACEMENT",
+            "distance_pct": 1.9541
+          },
+          "entry_zone": {
+            "low": 0.020415,
+            "high": 0.020475,
+            "selected": 0.02047,
+            "width_pct": 0.2931
+          },
+          "invalidation": {
+            "anchor_level": 0.02043,
+            "noise_floor_widened": true,
+            "anchor_source": "BULLISH_SWEEP_EXTREME",
+            "anchor_strength": 90.0,
+            "liquidity_guard": null,
+            "buffer": 2.53782e-05,
+            "sl": 0.0202653,
+            "risk": 0.0002047,
+            "risk_h1_atr": 0.807,
+            "risk_pct": 1.0,
+            "quality": 100.0,
+            "classification": "IDEAL",
+            "reason": "Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.02043; SL ditempatkan di luar invalidation."
+          },
+          "target_map": {
+            "candidates": [
+              {
+                "level": 0.02102,
+                "type": "H1_SWING_HIGH",
+                "strength": 75.0,
+                "priority": 80.0,
+                "rr": 2.687,
+                "major_barriers": [],
+                "quality": 82.19
+              },
+              {
+                "level": 0.0211,
+                "type": "H1_SWING_HIGH",
+                "strength": 75.0,
+                "priority": 80.0,
+                "rr": 3.078,
+                "major_barriers": [],
+                "quality": 81.6
+              },
+              {
+                "level": 0.02122,
+                "type": "H1_SWING_HIGH",
+                "strength": 75.0,
+                "priority": 80.0,
+                "rr": 3.664,
+                "major_barriers": [],
+                "quality": 77.71
+              },
+              {
+                "level": 0.022,
+                "type": "H4_SWING_HIGH",
+                "strength": 78.0,
+                "priority": 95.0,
+                "rr": 7.474,
+                "major_barriers": [],
+                "quality": 76.75
+              },
+              {
+                "level": 0.02627,
+                "type": "H4_HIGHER_HIGH",
+                "strength": 98.0,
+                "priority": 95.0,
+                "rr": 28.334,
+                "major_barriers": [
+                  {
+                    "level": 0.022,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02256,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.0251,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02593,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  }
+                ],
+                "quality": 75.05
+              },
+              {
+                "level": 0.03238,
+                "type": "H4_SWING_HIGH",
+                "strength": 78.0,
+                "priority": 95.0,
+                "rr": 58.183,
+                "major_barriers": [
+                  {
+                    "level": 0.022,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02256,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.0251,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02627,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_HIGHER_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02593,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  }
+                ],
+                "quality": 68.05
+              },
+              {
+                "level": 0.02852,
+                "type": "H4_SWING_HIGH",
+                "strength": 78.0,
+                "priority": 95.0,
+                "rr": 39.326,
+                "major_barriers": [
+                  {
+                    "level": 0.022,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02256,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.0251,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02627,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_HIGHER_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02593,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  }
+                ],
+                "quality": 68.05
+              },
+              {
+                "level": 0.02806,
+                "type": "H4_SWING_HIGH",
+                "strength": 78.0,
+                "priority": 95.0,
+                "rr": 37.079,
+                "major_barriers": [
+                  {
+                    "level": 0.022,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02256,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.0251,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02627,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_HIGHER_HIGH"
+                    ]
+                  },
+                  {
+                    "level": 0.02593,
+                    "significance": 95.0,
+                    "source": [
+                      "H4_SWING_HIGH"
+                    ]
+                  }
+                ],
+                "quality": 68.05
+              }
+            ],
+            "selected": {
+              "level": 0.02102,
+              "type": "H1_SWING_HIGH",
+              "strength": 75.0,
+              "priority": 80.0,
+              "rr": 2.687,
+              "major_barriers": [],
+              "quality": 82.19
+            }
+          },
+          "risk": {
+            "risk": 0.00021,
+            "reward": 0.00055,
+            "planned_rr": 2.619,
+            "risk_pct": 1.0259,
+            "risk_h1_atr": 0.8275,
+            "classification": "IDEAL"
+          },
+          "confidence": {
+            "score": 81.59,
+            "components": {
+              "structure_alignment": 93.0,
+              "liquidity_confluence": 67.2,
+              "fib_location": 90.0,
+              "fvg_ob_refinement": 100.0,
+              "rsi_projection": 96.08,
+              "momentum_current": 90.0,
+              "invalidation_quality": 100.0,
+              "target_quality": 87.19,
+              "rr_quality": 100.0,
+              "entry_reachability": 81.6,
+              "volume_confirmation": 70.68,
+              "orderflow_leg": 46.88,
+              "price_leg": 62.07,
+              "support_resistance": 79.4
+            },
+            "weights": {
+              "structure_alignment": 8.0,
+              "liquidity_confluence": 13.0,
+              "fib_location": 7.0,
+              "fvg_ob_refinement": 5.0,
+              "rsi_projection": 11.0,
+              "momentum_current": 4.0,
+              "invalidation_quality": 8.0,
+              "target_quality": 7.0,
+              "rr_quality": 4.0,
+              "entry_reachability": 3.0,
+              "volume_confirmation": 5.0,
+              "orderflow_leg": 8.0,
+              "price_leg": 8.0,
+              "support_resistance": 9.0
+            },
+            "penalties": [],
+            "meaning": "Kualitas internal thesis 0-100; bukan probabilitas profit."
+          },
+          "score_details": {
+            "orderflow_leg": {
+              "score": 46.88,
+              "signed_flow": 0.3611,
+              "aligned_flow": 0.3611,
+              "displacement": 11.71,
+              "relative_volume": 1.189,
+              "bars": 20,
+              "method": "OHLCV_PROXY_NOT_TRUE_FOOTPRINT"
+            },
+            "price_leg": {
+              "score": 62.07,
+              "impulse_pct": 0.7726,
+              "aligned_impulse_pct": 0.7726,
+              "retracement_pct": 62.5,
+              "zone_distance_range": 0.7589,
+              "bars": 24
+            },
+            "support_resistance": {
+              "score": 79.4,
+              "zone_count": 212,
+              "swing_level_count": 43,
+              "pool_score": 50.0,
+              "poi_score": 84.25,
+              "swing_sr_score": 96.61,
+              "top_zones": [
+                {
+                  "kind": "BULLISH_FVG",
+                  "source": "H4_FVG",
+                  "strength": 79.03,
+                  "overlap": 0.0,
+                  "distance_pct": 26.3057,
+                  "order_block": false,
+                  "fvg": true,
+                  "score": 38.42
+                },
+                {
+                  "kind": "BEARISH_FVG",
+                  "source": "H4_FVG",
+                  "strength": 84.98,
+                  "overlap": 0.0,
+                  "distance_pct": 33.8045,
+                  "order_block": false,
+                  "fvg": true,
+                  "score": 33.99
+                },
+                {
+                  "kind": "BEARISH_FVG",
+                  "source": "H4_FVG",
+                  "strength": 84.6,
+                  "overlap": 0.0,
+                  "distance_pct": 25.8505,
+                  "order_block": false,
+                  "fvg": true,
+                  "score": 33.76
+                },
+                {
+                  "kind": "BULLISH_FVG",
+                  "source": "H4_FVG",
+                  "strength": 77.02,
+                  "overlap": 0.0,
+                  "distance_pct": 26.7369,
+                  "order_block": false,
+                  "fvg": true,
+                  "score": 37.21
+                },
+                {
+                  "kind": "BULLISH_FVG",
+                  "source": "H4_FVG",
+                  "strength": 90.83,
+                  "overlap": 0.0,
+                  "distance_pct": 31.7681,
+                  "order_block": false,
+                  "fvg": true,
+                  "score": 45.5
+                },
+                {
+                  "kind": "BEARISH_FVG",
+                  "source": "H4_FVG",
+                  "strength": 55.68,
+                  "overlap": 0.0,
+                  "distance_pct": 32.0077,
+                  "order_block": false,
+                  "fvg": true,
+                  "score": 24.41
+                },
+                {
+                  "kind": "BEARISH_FVG",
+                  "source": "H4_FVG",
+                  "strength": 81.98,
+                  "overlap": 0.0,
+                  "distance_pct": 31.5285,
+                  "order_block": false,
+                  "fvg": true,
+                  "score": 32.19
+                },
+                {
+                  "kind": "BEARISH_FVG",
+                  "source": "H4_FVG",
+                  "strength": 54.73,
+                  "overlap": 0.0,
+                  "distance_pct": 27.0005,
+                  "order_block": false,
+                  "fvg": true,
+                  "score": 23.84
+                }
+              ],
+              "top_swing_levels": [
+                {
+                  "timeframe": "H1",
+                  "kind": "LOW",
+                  "price": 0.02043,
+                  "distance_pct": 0.0719,
+                  "score": 96.61
+                },
+                {
+                  "timeframe": "M15",
+                  "kind": "LOW",
+                  "price": 0.02044,
+                  "distance_pct": 0.024,
+                  "score": 95.94
+                },
+                {
+                  "timeframe": "M15",
+                  "kind": "LOW",
+                  "price": 0.02043,
+                  "distance_pct": 0.0719,
+                  "score": 93.41
+                },
+                {
+                  "timeframe": "H1",
+                  "kind": "LOW",
+                  "price": 0.02046,
+                  "distance_pct": 0.0719,
+                  "score": 90.21
+                },
+                {
+                  "timeframe": "H4",
+                  "kind": "LOW",
+                  "price": 0.02039,
+                  "distance_pct": 0.2635,
+                  "score": 87.31
+                },
+                {
+                  "timeframe": "H1",
+                  "kind": "LOW",
+                  "price": 0.02039,
+                  "distance_pct": 0.2635,
+                  "score": 78.51
+                }
+              ]
+            },
+            "liquidity_pool": {
+              "side": "SELL_SIDE",
+              "low": 0.020415,
+              "high": 0.020475,
+              "midpoint": 0.02044,
+              "strength": 47.0,
+              "significance": 50.0,
+              "timeframe": "M15",
+              "touches": 5,
+              "source_types": [
+                "EQUAL_LEVEL",
+                "H1",
+                "SWING_LOW"
+              ],
+              "swept": false,
+              "role": "ENTRY_LIQUIDITY"
+            },
+            "fvg_order_block_refinement": {
+              "low": 0.020415,
+              "high": 0.020475,
+              "midpoint": 0.020445,
+              "source": "M15",
+              "kind": "BULLISH_BREAKER",
+              "quality": 100.0,
+              "overlap_ratio": 1.0,
+              "parent_zone": {
+                "low": 0.020415,
+                "high": 0.020475
+              }
+            },
+            "rsi_momentum": {
+              "state": "OK",
+              "penalty": 0.0,
+              "exhaustion_penalty": 0.0,
+              "target_penalty": 0.0,
+              "h4_current": 53.52,
+              "h4_projected": 47.84,
+              "m15_projected_median": 29.55,
+              "m15_target": 34.0,
+              "h4_exhaustion_limit": 60.0
+            },
+            "current_rsi": {
+              "H4": {
+                "valid": true,
+                "tf": "H4",
+                "cur": 53.52,
+                "slope": 1.905,
+                "avg": 39.5,
+                "lo": 22.4,
+                "hi": 53.5,
+                "regime": "BEAR_RANGE",
+                "min12": 37.3,
+                "max12": 53.5,
+                "div": {
+                  "BUY": null,
+                  "SELL": null
+                }
+              },
+              "H1": {
+                "valid": true,
+                "tf": "H1",
+                "cur": 59.92,
+                "slope": 0.56,
+                "avg": 53.8,
+                "lo": 37.0,
+                "hi": 73.1,
+                "regime": "BULL_RANGE",
+                "min12": 57.1,
+                "max12": 65.8,
+                "div": {
+                  "BUY": null,
+                  "SELL": null
+                }
+              },
+              "M15": {
+                "valid": true,
+                "tf": "M15",
+                "cur": 49.91,
+                "slope": -0.299,
+                "avg": 55.3,
+                "lo": 44.4,
+                "hi": 72.6,
+                "regime": "BULL_RANGE",
+                "min12": 48.0,
+                "max12": 72.6,
+                "div": {
+                  "BUY": null,
+                  "SELL": null
+                }
+              },
+              "BTC": {
+                "valid": true,
+                "cur": 65.34,
+                "slope": 1.927
+              }
+            },
+            "projected_rsi": {
+              "current": {
+                "H4": 53.52,
+                "M15": 49.91
+              },
+              "at_entry": {
+                "H4": {
+                  "min": 47.6,
+                  "median": 47.84,
+                  "max": 48.13,
+                  "spread": 0.53,
+                  "consensus": 98.69
+                },
+                "M15": {
+                  "min": 28.71,
+                  "median": 29.55,
+                  "max": 30.62,
+                  "spread": 1.91,
+                  "consensus": 95.23
+                }
+              },
+              "entry_target": 0.02047,
+              "scenario_values": {
+                "H4": {
+                  "FAST_RETRACE": 48.13,
+                  "NORMAL_RETRACE": 47.84,
+                  "SLOW_RETRACE": 47.6
+                },
+                "M15": {
+                  "FAST_RETRACE": 30.62,
+                  "NORMAL_RETRACE": 29.55,
+                  "SLOW_RETRACE": 28.71
+                }
+              },
+              "scenario_consensus": 96.27,
+              "classification": "SUPPORTIVE_BUY_RETRACEMENT",
+              "distance_pct": 1.9541
+            },
+            "volume_context": {
+              "score": 70.68,
+              "class": "CONFIRMED",
+              "rvol": 1.844,
+              "legs": {
+                "H1": {
+                  "rvol": 1.808,
+                  "dominance": 0.472,
+                  "trend_vs_counter": 0.768
+                },
+                "H4": {
+                  "rvol": 1.897,
+                  "dominance": 0.735,
+                  "trend_vs_counter": 1.385
+                }
+              }
+            }
+          },
+          "candidate_set": [
+            {
+              "model": "STRUCTURAL_PREDICTION_V2",
+              "direction": "BUY",
+              "entry": 0.02047,
+              "entry_zone_low": 0.020415,
+              "entry_zone_high": 0.020475,
+              "sl": 0.02026,
+              "tp": 0.02102,
+              "price_exp": 0.021,
+              "planned_rr": 2.619,
+              "confidence": 81.59,
+              "thesis_status": "ACTIVE_TRIGGER_CONFIRMED",
+              "thesis_type": "BUY_PULLBACK",
+              "scores": {
+                "structure_alignment": 93.0,
+                "liquidity_confluence": 67.2,
+                "fib_location": 90.0,
+                "fvg_ob_refinement": 100.0,
+                "rsi_projection": 96.08,
+                "momentum_current": 90.0,
+                "invalidation_quality": 100.0,
+                "target_quality": 87.19,
+                "rr_quality": 100.0,
+                "entry_reachability": 81.6,
+                "volume_confirmation": 70.68,
+                "orderflow_leg": 46.88,
+                "price_leg": 62.07,
+                "support_resistance": 79.4
+              }
+            },
+            {
+              "model": "STRUCTURAL_PREDICTION_V2",
+              "direction": "BUY",
+              "entry": 0.02063,
+              "entry_zone_low": 0.0206237,
+              "entry_zone_high": 0.0206363,
+              "sl": 0.02042,
+              "tp": 0.0211,
+              "price_exp": 0.02096,
+              "planned_rr": 2.2381,
+              "confidence": 80.15,
+              "thesis_status": "ACTIVE_TRIGGER_CONFIRMED",
+              "thesis_type": "BUY_PULLBACK",
+              "scores": {
+                "structure_alignment": 93.0,
+                "liquidity_confluence": 55.96,
+                "fib_location": 90.0,
+                "fvg_ob_refinement": 97.61,
+                "rsi_projection": 96.42,
+                "momentum_current": 90.0,
+                "invalidation_quality": 100.0,
+                "target_quality": 87.78,
+                "rr_quality": 100.0,
+                "entry_reachability": 89.59,
+                "volume_confirmation": 70.68,
+                "orderflow_leg": 46.88,
+                "price_leg": 67.85,
+                "support_resistance": 83.5
+              }
+            },
+            {
+              "model": "STRUCTURAL_PREDICTION_V2",
+              "direction": "BUY",
+              "entry": 0.0206,
+              "entry_zone_low": 0.0206,
+              "entry_zone_high": 0.020603,
+              "sl": 0.02039,
+              "tp": 0.02102,
+              "price_exp": 0.0209,
+              "planned_rr": 2.0,
+              "confidence": 76.89,
+              "thesis_status": "ACTIVE_TRIGGER_CONFIRMED",
+              "thesis_type": "BUY_PULLBACK",
+              "scores": {
+                "structure_alignment": 93.0,
+                "liquidity_confluence": 41.14,
+                "fib_location": 90.0,
+                "fvg_ob_refinement": 69.61,
+                "rsi_projection": 96.37,
+                "momentum_current": 90.0,
+                "invalidation_quality": 100.0,
+                "target_quality": 88.15,
+                "rr_quality": 100.0,
+                "entry_reachability": 84.88,
+                "volume_confirmation": 70.68,
+                "orderflow_leg": 46.88,
+                "price_leg": 66.96,
+                "support_resistance": 78.28
+              }
+            },
+            {
+              "model": "STRUCTURAL_PREDICTION_V2_WAITING",
+              "direction": "SELL",
+              "entry": 0.02122,
+              "entry_zone_low": 0.0212137,
+              "entry_zone_high": 0.0212263,
+              "sl": 0.02203,
+              "tp": 0.01886,
+              "price_exp": 0.01998,
+              "planned_rr": 2.9136,
+              "confidence": 50.04,
+              "thesis_status": "WAITING_TRIGGER",
+              "thesis_type": "SELL_PULLBACK",
+              "scores": {
+                "structure_alignment": 22.0,
+                "liquidity_confluence": 50.56,
+                "fib_location": 98.0,
+                "fvg_ob_refinement": 76.0,
+                "rsi_projection": 96.13,
+                "momentum_current": 93.0,
+                "invalidation_quality": 95.5,
+                "target_quality": 39.5,
+                "rr_quality": 100.0,
+                "entry_reachability": 84.86,
+                "volume_confirmation": 59.22,
+                "orderflow_leg": 35.76,
+                "price_leg": 57.46,
+                "support_resistance": 82.0
+              }
+            }
+          ],
+          "price_context": {
+            "current": 0.02087,
+            "atr14_m15": 0.0001183544,
+            "current_distance_to_entry_pct": 1.9166,
+            "entry_distance_to_exp_pct": 2.5892,
+            "entry_zone_timeframe": "H4+H1+M15"
+          },
+          "vlt": {
+            "direction": "NEUTRAL",
+            "score": 50.0,
+            "relative_volume": 0.971,
+            "slope": 3.62406015037598e-06,
+            "signed_pressure": 0.06915295051488111
+          },
+          "market_quality": {
+            "valid": true,
+            "chg24": 5.67,
+            "drop24": 5.14,
+            "rise24": 6.53,
+            "drop48": 5.14,
+            "rise48": 7.91,
+            "chg7d": -8.98,
+            "bear15": false,
+            "bull15": false,
+            "h1_below_ema25": false,
+            "h1_above_ema25": true,
+            "vol_ratio": 0.7
+          },
+          "validation": {
+            "initial_confidence": 85.65,
+            "validated_confidence": 81.59,
+            "confidence_delta": -4.06,
+            "initial_direction": "BUY",
+            "validated_direction": "BUY",
+            "direction_changed": false,
+            "geometry_issues": [],
+            "stale_data": false,
+            "score_only": true,
+            "reason": "Skor/arah direfresh; BTC mismatch tidak mem-veto kandidat."
+          }
+        }
+      },
+      "margin_usdt": "0.8",
+      "leverage": 10,
+      "quantity": "391",
+      "target_notional": "8",
+      "actual_notional": "8.00377",
+      "real_enabled": true,
+      "real_state": "REAL_PENDING",
+      "position_side": "BOTH",
+      "entry_order_id": 1482048618,
+      "entry_client_order_id": "ENT-SCRUSDT-20261021-190208-0E334C",
+      "tp_algo_id": null,
+      "sl_algo_id": null,
+      "tp_client_algo_id": null,
+      "sl_client_algo_id": null,
+      "pending_sl_algo_id": null,
+      "pending_sl_client_algo_id": null,
+      "pending_sl_price": null,
+      "pending_sl_state": "NONE",
+      "pending_sl_created_at": null,
+      "pending_sl_error": null,
+      "real_error": null,
+      "real_exit_check": null,
+      "candidate_id": "C53b8c8d92e63efdea918",
+      "sizing_mode": "LEGACY_NOTIONAL",
+      "risk_info": {},
+      "risk_pct_initial": "1.025891548607718612603810454",
+      "realized_r": null
     }
   ]
 }
