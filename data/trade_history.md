@@ -3299,3 +3299,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T13:04:08.049247+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## OPUSDT — BUY
+
+Trade ID: `OPUSDT-20261021-153518-E254EE`
+
+### Setup
+
+- Price Now Reference: 0.13199
+- Entry: 0.12951
+- Reason Entry: OPUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.12951 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 35.9 pada entry zone.
+- Price Exp: 0.13397
+- Reason Price Exp: Price Exp 0.13397: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.12787
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.12951; SL ditempatkan di luar invalidation.
+- TP: 0.13588
+- Reason TP: TP 0.13588 dipilih dari H4_HIGHER_HIGH dengan RR 3.88; target quality 89.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.12784
+- Result Reason: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.12951; SL ditempatkan di luar invalidation.
+- PnL: -1.289475716160914215118523666%
+- Created: 2026-10-21T08:35:18.767237+00:00
+- Filled: 2026-10-21T10:16:29.339615+00:00
+- Closed: 2026-10-21T14:06:18.630038+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
