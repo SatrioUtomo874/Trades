@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T11:59:10.457878+00:00",
+  "saved_at": "2026-10-21T12:00:04.998585+00:00",
   "bans": [
     {
       "pair": "BBUSDT",
@@ -71,6 +71,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: QNTUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=8, nearest_notional=19.004) Margin pas ≈ $1.90.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "TWTUSDT",
+      "banned_at": "2026-10-21T12:00:04.998452+00:00",
+      "until": "2026-10-21T20:00:04.998432+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "XANUSDT",
