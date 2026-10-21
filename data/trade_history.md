@@ -2936,3 +2936,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T00:49:35.436485+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## HBARUSDT — BUY
+
+Trade ID: `HBARUSDT-20261021-075217-A8A581`
+
+### Setup
+
+- Price Now Reference: 0.08437
+- Entry: 0.08212
+- Reason Entry: HBARUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H4 0.0820031 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 25.8 pada entry zone.
+- Price Exp: 0.08446
+- Reason Price Exp: Price Exp 0.08446000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.08129
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.08185; SL ditempatkan di luar invalidation dan liquidity guard 0.0820031.
+- TP: 0.0845
+- Reason TP: TP 0.0845 dipilih dari H4_SWING_HIGH dengan RR 2.87; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.08446
+- Result Reason: Price Exp 0.08446000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T00:52:17.560288+00:00
+- Filled: -
+- Closed: 2026-10-21T00:53:07.937614+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
