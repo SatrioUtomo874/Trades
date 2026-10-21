@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T14:23:46.885773+00:00",
+  "saved_at": "2026-10-21T14:48:56.943866+00:00",
   "bans": [
     {
       "pair": "BBUSDT",
@@ -38,11 +38,11 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "HAEDALUSDT",
-      "banned_at": "2026-10-20T14:16:07.049514+00:00",
-      "until": "2026-10-21T14:16:07.049476+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
+      "pair": "HEMIUSDT",
+      "banned_at": "2026-10-21T14:48:56.943726+00:00",
+      "until": "2026-10-21T22:48:56.943704+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "KATUSDT",
