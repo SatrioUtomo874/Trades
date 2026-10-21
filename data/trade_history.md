@@ -3431,3 +3431,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T15:01:56.846682+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## USELESSUSDT — BUY
+
+Trade ID: `USELESSUSDT-20261021-220730-713BAA`
+
+### Setup
+
+- Price Now Reference: 0.16224
+- Entry: 0.15593
+- Reason Entry: USELESSUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.1560028 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 36.0 pada entry zone.
+- Price Exp: 0.16446
+- Reason Price Exp: Price Exp 0.16446000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.15247
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.15581; SL ditempatkan di luar invalidation dan liquidity guard 0.1560028.
+- TP: 0.16811
+- Reason TP: TP 0.16811 dipilih dari H4_HIGHER_HIGH dengan RR 3.52; target quality 85.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.16446
+- Result Reason: Price Exp 0.16446000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-21T15:07:30.660041+00:00
+- Filled: -
+- Closed: 2026-10-21T15:11:59.349712+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
