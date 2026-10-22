@@ -3563,3 +3563,36 @@ Tidak ada trailing.
 - Filled: 2026-10-22T01:31:25.946937+00:00
 - Closed: 2026-10-22T02:21:02.750478+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## WALUSDT — BUY
+
+Trade ID: `WALUSDT-20261020-211713-F2C6C5`
+
+### Setup
+
+- Price Now Reference: 0.03996
+- Entry: 0.03829
+- Reason Entry: WALUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity M15 0.03829 dipadukan dengan Fib PRIMARY; refinement BEARISH_BREAKER. Projected M15 RSI 35.5 pada entry zone.
+- Price Exp: 0.04187
+- Reason Price Exp: Price Exp 0.041870000000000004: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.03726
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.03734; SL ditempatkan di luar invalidation dan liquidity guard 0.03734.
+- TP: 0.0434
+- Reason TP: TP 0.0434 dipilih dari H4_HIGHER_HIGH dengan RR 4.96; target quality 77.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: DELETED
+- Exit Price: -
+- Result Reason: Order LIMIT sudah tidak aktif di Binance (CANCELED); dibatalkan manual atau oleh Binance.
+- PnL: -
+- Created: 2026-10-20T14:17:13.554033+00:00
+- Filled: -
+- Closed: 2026-10-22T02:27:49.534433+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
