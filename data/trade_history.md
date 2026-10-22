@@ -494,3 +494,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T15:17:52.984613+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## MEGAUSDT — BUY
+
+Trade ID: `MEGAUSDT-20261022-221724-D58812`
+
+### Setup
+
+- Price Now Reference: 0.04295
+- Entry: 0.04282
+- Reason Entry: MEGAUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.042785 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_BREAKER. Projected M15 RSI 30.8 pada entry zone.
+- Price Exp: 0.04387
+- Reason Price Exp: Price Exp 0.043870000000000006: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.04214
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.042425; SL ditempatkan di luar invalidation dan liquidity guard 0.0424775.
+- TP: 0.04431
+- Reason TP: TP 0.04431 dipilih dari H1_SWING_HIGH dengan RR 2.19; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T15:17:24.614161+00:00
+- Filled: -
+- Closed: 2026-10-22T15:30:03.132668+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
