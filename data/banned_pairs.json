@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T14:03:13.479118+00:00",
+  "saved_at": "2026-10-22T14:05:25.730157+00:00",
   "bans": [
     {
       "pair": "APRUSDT",
@@ -15,6 +15,13 @@
       "until": "2026-10-22T22:03:13.478967+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "BCHUSDT",
+      "banned_at": "2026-10-22T14:05:22.500821+00:00",
+      "until": null,
+      "reason": "Real quantity tidak memenuhi target margin ±10%: BCHUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=8, nearest_notional=7.8938) Margin pas ≈ $2.01.",
+      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "ENSOUSDT",
