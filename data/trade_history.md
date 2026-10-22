@@ -758,3 +758,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T16:50:15.199603+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## PHAROSUSDT — BUY
+
+Trade ID: `PHAROSUSDT-20261022-230238-CEB189`
+
+### Setup
+
+- Price Now Reference: 0.6244
+- Entry: 0.6164
+- Reason Entry: PHAROSUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity M15 0.6178687 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 47.8 pada entry zone. | M15 review: entry direfine 0.6181→0.6164; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.6327
+- Reason Price Exp: Price Exp 0.6327: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.6095
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.6176; SL ditempatkan di luar invalidation dan liquidity guard 0.6178687.
+- TP: 0.6389
+- Reason TP: TP 0.6389 dipilih dari H4_SWING_HIGH dengan RR 2.42; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.6094
+- Result Reason: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.6176; SL ditempatkan di luar invalidation dan liquidity guard 0.6178687.
+- PnL: -1.135626216742375081116158339%
+- Created: 2026-10-22T16:02:38.008263+00:00
+- Filled: 2026-10-22T16:48:11.890791+00:00
+- Closed: 2026-10-22T19:41:22.114618+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
