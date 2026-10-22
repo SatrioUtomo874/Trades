@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T19:41:33.989630+00:00",
+  "saved_at": "2026-10-22T20:03:17.106875+00:00",
   "bans": [
     {
       "pair": "2ZUSDT",
@@ -99,6 +99,13 @@
       "until": "2026-10-23T19:41:33.989455+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "SLXUSDT",
+      "banned_at": "2026-10-22T20:03:17.106712+00:00",
+      "until": "2026-10-23T04:03:17.106683+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "TUTUSDT",
