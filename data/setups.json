@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T14:32:37.127226+00:00",
-  "saved_at_wib": "22-10-2026, 21:32 WIB",
+  "saved_at": "2026-10-22T14:45:18.335425+00:00",
+  "saved_at_wib": "22-10-2026, 21:45 WIB",
   "count": 4,
   "setups": [
     {
@@ -46,8 +46,8 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "2.086839447997307303938067991",
-      "max_favorable_pct": "2.288791652642208010770784248",
+      "pnl_percent": "2.1204981487714574217435207",
+      "max_favorable_pct": "2.322450353416358128576236957",
       "max_adverse_pct": "-0.1346348030966004712218108381",
       "planned_rr": "2.571428571428571428571428571",
       "pending_seconds": 1369.380669,
@@ -3538,7 +3538,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.884887243352406597105351733",
-      "realized_r": "1.107142857142857142857142858"
+      "realized_r": "1.125"
     },
     {
       "trade_id": "DOSUSDT-20261022-202846-840931",
