@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T20:03:17.106875+00:00",
+  "saved_at": "2026-10-22T20:45:16.495713+00:00",
   "bans": [
     {
       "pair": "2ZUSDT",
@@ -29,6 +29,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: BCHUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=8, nearest_notional=7.8938) Margin pas ≈ $2.01.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "CROSSUSDT",
+      "banned_at": "2026-10-22T20:45:16.495562+00:00",
+      "until": "2026-10-23T20:45:16.495532+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "DOLOUSDT",
