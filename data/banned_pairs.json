@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T15:17:46.170694+00:00",
+  "saved_at": "2026-10-22T15:18:02.509549+00:00",
   "bans": [
     {
       "pair": "2ZUSDT",
@@ -85,6 +85,13 @@
       "until": "2026-10-23T15:15:41.205567+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "YBUSDT",
+      "banned_at": "2026-10-22T15:18:02.509171+00:00",
+      "until": "2026-10-22T23:18:02.509148+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     }
   ]
 }
