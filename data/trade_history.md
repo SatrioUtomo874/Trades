@@ -395,3 +395,36 @@ Tidak ada trailing.
 - Filled: 2026-10-22T15:11:49.615239+00:00
 - Closed: 2026-10-22T15:15:51.902639+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## TREEUSDT — BUY
+
+Trade ID: `TREEUSDT-20261022-214710-F2F752`
+
+### Setup
+
+- Price Now Reference: 0.03832
+- Entry: 0.03694
+- Reason Entry: TREEUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0369825 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 21.2 pada entry zone. | M15 review: entry direfine 0.037→0.03694; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.03903
+- Reason Price Exp: Price Exp 0.03903: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0366
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.036945; SL ditempatkan di luar invalidation dan liquidity guard 0.0369825.
+- TP: 0.03989
+- Reason TP: TP 0.03989 dipilih dari H4_HIGHER_HIGH dengan RR 7.22; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T14:47:10.916524+00:00
+- Filled: -
+- Closed: 2026-10-22T15:16:18.602993+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
