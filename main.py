@@ -2831,9 +2831,16 @@ class ErrorCategory:
     PROTECTION_ERROR = "PROTECTION_ERROR"
 
 
+def _is_no_setup_error(exc: BaseException) -> bool:
+    """True bila strategy melaporkan 'tidak ada setup valid' (hasil normal, bukan error)."""
+    return bool(getattr(exc, "no_setup", False)) or str(exc).startswith("NO_VALID_LIQUIDITY_SETUP")
+
+
 def classify_error(exc: BaseException) -> str:
     name = type(exc).__name__
     message = str(exc).lower()
+    if _is_no_setup_error(exc):
+        return ErrorCategory.VALIDATION_REJECT
     if name == "BinanceRateLimitError" or getattr(exc, "binance_rate_limited", False) or "429" in message or "418" in message or "rate limit" in message:
         return ErrorCategory.RATE_LIMIT
     if name == "InsufficientHistoryError" or "candle closed" in message or "diperlukan" in message:
@@ -9529,6 +9536,14 @@ class TradingEngine:
                     decimal_to_str(confidence),
                 )
             except Exception as exc:
+                if _is_no_setup_error(exc):
+                    funnel["quality_rejects"] += 1
+                    self._retry_counts.pop(pair, None)
+                    self._recheck.set(pair, max(now_ts + 30.0, next_boundary_ts(now_ts, 900)), "NO_VALID_LIQUIDITY_SETUP", "REJECTED_QUALITY")
+                    self._observe_candidate(synthetic_observation(pair, "REJECTED_QUALITY", "NO_VALID_LIQUIDITY_SETUP", cycle_id=cycle_id, now=cycle_now))
+                    log.info("[SCAN] %s tidak ada setup valid (zona/invalidation/target RR neto >= 2R); dicek lagi di candle M15 berikutnya.", pair)
+                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                    continue
                 analysis_errors += 1
                 self._sweep["done"].discard(pair)
                 if h4_coverage_mode:
@@ -9640,6 +9655,14 @@ class TradingEngine:
                     validated.append(checked)
                     funnel["validation_pass"] += 1
             except Exception as exc:
+                if _is_no_setup_error(exc):
+                    validator_missing += 1
+                    funnel["validation_reject"] += 1
+                    funnel["validation_reasons"]["NO_VALID_LIQUIDITY_SETUP"] = funnel["validation_reasons"].get("NO_VALID_LIQUIDITY_SETUP", 0) + 1
+                    self._after_validation(candidate, "VALIDATION_REJECT:NO_VALID_LIQUIDITY_SETUP", "REJECTED_QUALITY", now_ts)
+                    log.info("[SCAN] validator %s: setup sudah tidak valid saat dicek ulang.", candidate["pair"])
+                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                    continue
                 validator_rejects += 1
                 v_cat = classify_error(exc)
                 funnel["validation_error"] += 1
@@ -13810,7 +13833,15 @@ class TradingEngine:
                 is_live = live is not None and live.live
                 if action == "CANCEL_PENDING" and trade.status == "PENDING":
                     if trade.real_enabled:
-                        log.warning("[M15 REVIEW][SHADOW] %s REAL PENDING: rekomendasi cancel tidak dieksekusi otomatis; perlu verifikasi order/state. %s", trade.trade_id, reason)
+                        if os.getenv("M15_REVIEW_REAL_CANCEL", "1").strip().lower() in {"0", "false", "no", "off"} or not self.real_mode:
+                            log.warning("[M15 REVIEW][SHADOW] %s REAL PENDING: cancel tidak dieksekusi (dimatikan/real off). %s", trade.trade_id, reason)
+                            continue
+                        try:
+                            await self._m15_cancel_real_pending(trade, reason)
+                        except Exception:
+                            # Biarkan candle ini dicoba ulang; order di Binance tetap aman.
+                            self._m15_review_last_close_by_trade.pop(trade.trade_id, None)
+                            raise
                         continue
                     await self._finalize_trade(copy.deepcopy(trade), result="INVALIDATED", exit_price=None, reason=f"M15 close invalidation: {reason}")
                     continue
@@ -13882,6 +13913,28 @@ class TradingEngine:
                 self._m15_review_busy.discard(trade.trade_id)
             await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
         return all_resolved
+
+    async def _m15_cancel_real_pending(self, trade: Trade, reason: str) -> None:
+        """Batalkan order LIMIT entry REAL yang thesis-nya invalid, lalu tutup setup (INVALIDATED)."""
+        if trade.entry_order_id is not None or trade.entry_client_order_id:
+            token = REAL_PRIORITY.set(True)
+            try:
+                cancelled = await self._cancel_entry_for_hold(trade)
+            finally:
+                REAL_PRIORITY.reset(token)
+            if not cancelled:
+                log.info("[M15 REVIEW] %s sudah terisi saat dibatalkan; lanjut alur fill normal.", trade.trade_id)
+                return
+        if self.active_trades.get(trade.trade_id) is not trade or trade.status != "PENDING":
+            return
+        trade.entry_order_id = None
+        trade.entry_client_order_id = None
+        trade.real_state = "REAL_CLOSED"
+        await self._finalize_trade(
+            copy.deepcopy(trade), result="INVALIDATED", exit_price=None,
+            reason=f"M15 close invalidation (order REAL dibatalkan): {reason}",
+        )
+        log.info("[M15 REVIEW] %s order REAL dibatalkan & setup ditutup: %s", trade.trade_id, reason[:140])
 
     async def _try_apply_pending_m15_exit(self, trade: Trade, live_price: Decimal) -> None:
         """Apply a previously confirmed structural exit only after a fresh price event."""
