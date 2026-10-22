@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T16:15:11.005389+00:00",
+  "saved_at": "2026-10-22T16:15:22.099852+00:00",
   "saved_at_wib": "22-10-2026, 23:15 WIB",
   "count": 5,
   "setups": [
@@ -7312,8 +7312,8 @@
       "pair": "PHAROSUSDT",
       "direction": "BUY",
       "price_now_reference": "0.6244",
-      "entry": "0.6181",
-      "entry_reason": "PHAROSUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity M15 0.6178687 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 47.8 pada entry zone.",
+      "entry": "0.6164",
+      "entry_reason": "PHAROSUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity M15 0.6178687 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 47.8 pada entry zone. | M15 review: entry direfine 0.6181→0.6164; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga",
       "price_exp": "0.6327",
       "price_exp_reason": "Price Exp 0.6327: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.",
       "price_exp_diagnostics": {
@@ -7351,7 +7351,7 @@
       "pnl_percent": null,
       "max_favorable_pct": null,
       "max_adverse_pct": null,
-      "planned_rr": "2.418604651162790697674418605",
+      "planned_rr": "3.260869565217391304347826087",
       "pending_seconds": null,
       "holding_seconds": null,
       "trail_history": [],
@@ -10948,11 +10948,11 @@
       "leverage": 10,
       "quantity": "13",
       "target_notional": "8",
-      "actual_notional": "8.0353",
+      "actual_notional": "8.0132",
       "real_enabled": true,
       "real_state": "REAL_PENDING",
       "position_side": "BOTH",
-      "entry_order_id": 233875059,
+      "entry_order_id": 233885893,
       "entry_client_order_id": "ENT-PHAROSUSDT-20261022-230238-CEB18",
       "tp_algo_id": null,
       "sl_algo_id": null,
@@ -10969,7 +10969,7 @@
       "candidate_id": "Cc440f66bb974f427c59d",
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
-      "risk_pct_initial": "1.39136062125869600388286685",
+      "risk_pct_initial": "1.119402985074626865671641791",
       "realized_r": null
     },
     {
