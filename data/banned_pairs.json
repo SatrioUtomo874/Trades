@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-21T15:26:03.846296+00:00",
+  "saved_at": "2026-10-22T01:43:23.737766+00:00",
   "bans": [
+    {
+      "pair": "1000CATUSDT",
+      "banned_at": "2026-10-22T01:43:23.737605+00:00",
+      "until": "2026-10-23T01:43:23.737573+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
+    },
     {
       "pair": "BBUSDT",
       "banned_at": "2026-10-21T11:59:10.457739+00:00",
@@ -10,30 +17,9 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "COOKIEUSDT",
-      "banned_at": "2026-10-21T07:35:58.651426+00:00",
-      "until": "2026-10-21T15:35:58.651401+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "CYBERUSDT",
       "banned_at": "2026-10-21T13:04:24.381033+00:00",
       "until": "2026-10-21T21:04:24.381008+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "EDGEUSDT",
-      "banned_at": "2026-10-21T07:33:21.928812+00:00",
-      "until": "2026-10-21T15:33:21.928790+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "FHEUSDT",
-      "banned_at": "2026-10-21T07:30:23.243552+00:00",
-      "until": "2026-10-21T15:30:23.243522+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
