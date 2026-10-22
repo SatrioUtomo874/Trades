@@ -560,3 +560,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T15:30:18.740378+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## BARDUSDT — BUY
+
+Trade ID: `BARDUSDT-20261022-221949-176934`
+
+### Setup
+
+- Price Now Reference: 0.1067
+- Entry: 0.105
+- Reason Entry: BARDUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H4 0.105 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 18.0 pada entry zone.
+- Price Exp: 0.1073
+- Reason Price Exp: Price Exp 0.1073: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1039
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.105; SL ditempatkan di luar invalidation.
+- TP: 0.1082
+- Reason TP: TP 0.1082 dipilih dari H4_SWING_HIGH dengan RR 2.91; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T15:19:49.007665+00:00
+- Filled: -
+- Closed: 2026-10-22T15:30:36.801256+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
