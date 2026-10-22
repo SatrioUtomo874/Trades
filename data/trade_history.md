@@ -824,3 +824,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T20:03:04.994645+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## TRBUSDT — SELL
+
+Trade ID: `TRBUSDT-20261023-030612-6F72B6`
+
+### Setup
+
+- Price Now Reference: 17.904
+- Entry: 18.434
+- Reason Entry: TRBUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity M15 18.44886 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 79.9 pada entry zone.
+- Price Exp: 17.816
+- Reason Price Exp: Price Exp 17.816: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 18.676
+- Reason SL: Prediction invalidation berasal dari M15_BUY_SIDE_LIQUIDITY di 18.658; SL ditempatkan di luar invalidation dan liquidity guard 18.6475.
+- TP: 17.808
+- Reason TP: TP 17.808 dipilih dari H4_LOWER_LOW dengan RR 2.59; target quality 88.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T20:06:12.388735+00:00
+- Filled: -
+- Closed: 2026-10-22T20:15:28.903166+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
