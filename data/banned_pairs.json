@@ -1,27 +1,5 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T11:16:04.980385+00:00",
-  "bans": [
-    {
-      "pair": "1000CATUSDT",
-      "banned_at": "2026-10-22T01:43:23.737605+00:00",
-      "until": "2026-10-23T01:43:23.737573+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
-    },
-    {
-      "pair": "GUSDT",
-      "banned_at": "2026-10-22T02:21:19.243733+00:00",
-      "until": "2026-10-23T02:21:19.243709+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "OPUSDT",
-      "banned_at": "2026-10-21T14:06:39.562074+00:00",
-      "until": "2026-10-22T14:06:39.562007+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    }
-  ]
+  "saved_at": "2026-10-22T11:16:11.434674+00:00",
+  "bans": []
 }
