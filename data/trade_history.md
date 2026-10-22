@@ -857,3 +857,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T20:15:28.903166+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## CROSSUSDT — BUY
+
+Trade ID: `CROSSUSDT-20261023-030237-88B6BF`
+
+### Setup
+
+- Price Now Reference: 0.10305
+- Entry: 0.10123
+- Reason Entry: CROSSUSDT BUY: BUY_PULLBACK. H4 structure BEARISH, liquidity M15 0.1012375 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 38.0 pada entry zone. | M15 review: entry direfine 0.10134→0.10123; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.10348
+- Reason Price Exp: Price Exp 0.10348: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.10032
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.101275; SL ditempatkan di luar invalidation dan liquidity guard 0.1012375.
+- TP: 0.10439
+- Reason TP: TP 0.10439 dipilih dari H4_SWING_HIGH dengan RR 2.99; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.10093
+- Result Reason: AUTO M15 STRUCTURE REVIEW: M15 close menembus protected swing terakhir; struktur posisi invalid | Manual /close REAL. PnL negatif → SL.
+- PnL: -0.2963548355230662846982119925%
+- Created: 2026-10-22T20:02:37.114129+00:00
+- Filled: 2026-10-22T20:40:57.594710+00:00
+- Closed: 2026-10-22T20:45:03.888199+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
