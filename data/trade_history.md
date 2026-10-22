@@ -65,3 +65,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T13:08:26.888106+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## GTCUSDT — BUY
+
+Trade ID: `GTCUSDT-20261022-202521-89A0D0`
+
+### Setup
+
+- Price Now Reference: 0.30709
+- Entry: 0.26481
+- Reason Entry: GTCUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.2645 dipadukan dengan Fib SECONDARY; refinement BEARISH_BREAKER. Projected M15 RSI 32.9 pada entry zone.
+- Price Exp: 0.31357
+- Reason Price Exp: Price Exp 0.31357: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.25445
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.2645; SL ditempatkan di luar invalidation.
+- TP: 0.3247
+- Reason TP: TP 0.3247 dipilih dari H4_HIGHER_HIGH dengan RR 5.78; target quality 89.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.31357
+- Result Reason: PRICE_EXP_TOUCH_BEFORE_ENTRY | Price Exp 0.31357: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-22T13:25:21.009835+00:00
+- Filled: -
+- Closed: 2026-10-22T13:29:10.799901+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
