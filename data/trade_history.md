@@ -890,3 +890,36 @@ Tidak ada trailing.
 - Filled: 2026-10-22T20:40:57.594710+00:00
 - Closed: 2026-10-22T20:45:03.888199+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## PARTIUSDT — BUY
+
+Trade ID: `PARTIUSDT-20261023-030240-44C2D2`
+
+### Setup
+
+- Price Now Reference: 0.03294
+- Entry: 0.03265
+- Reason Entry: PARTIUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.0326485 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 43.5 pada entry zone.
+- Price Exp: 0.03413
+- Reason Price Exp: Price Exp 0.03413: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.03195
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.03242; SL ditempatkan di luar invalidation dan liquidity guard 0.0326485.
+- TP: 0.03476
+- Reason TP: TP 0.03476 dipilih dari H4_SWING_HIGH dengan RR 3.01; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.03234
+- Result Reason: AUTO M15 STRUCTURE REVIEW: M15 close menembus protected swing terakhir; struktur posisi invalid | Manual /close REAL. PnL negatif → SL.
+- PnL: -0.9494640122511485451761102603%
+- Created: 2026-10-22T20:02:40.504112+00:00
+- Filled: 2026-10-22T20:08:05.878014+00:00
+- Closed: 2026-10-22T20:45:25.107925+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
