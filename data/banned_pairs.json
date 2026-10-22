@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T15:18:02.509549+00:00",
+  "saved_at": "2026-10-22T16:19:13.201773+00:00",
   "bans": [
     {
       "pair": "2ZUSDT",
@@ -36,6 +36,13 @@
       "until": "2026-10-23T14:45:15.286799+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "DOSUSDT",
+      "banned_at": "2026-10-22T16:19:13.201641+00:00",
+      "until": "2026-10-23T00:19:13.201622+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "DYMUSDT",
