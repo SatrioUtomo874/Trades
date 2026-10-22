@@ -659,3 +659,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T16:18:59.176752+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## FFUSDT — BUY
+
+Trade ID: `FFUSDT-20261022-230236-F11CBB`
+
+### Setup
+
+- Price Now Reference: 0.10337
+- Entry: 0.10226
+- Reason Entry: FFUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure BULLISH, liquidity H4 0.1022445 dipadukan dengan Fib SECONDARY; refinement BEARISH_FVG. Projected M15 RSI 34.0 pada entry zone. | M15 review: entry direfine 0.10233→0.10226; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.10549
+- Reason Price Exp: Price Exp 0.10549000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.10113
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.10229; SL ditempatkan di luar invalidation dan liquidity guard 0.1022445.
+- TP: 0.10684
+- Reason TP: TP 0.10684 dipilih dari H4_SWING_HIGH dengan RR 3.76; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T16:02:36.118164+00:00
+- Filled: -
+- Closed: 2026-10-22T16:45:02.682164+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
