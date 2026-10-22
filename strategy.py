@@ -669,6 +669,12 @@ class InsufficientHistoryError(RuntimeError):
     insufficient_history = True
 
 
+class NoValidSetupError(RuntimeError):
+    """Hasil normal: tidak ada setup yang lolos syarat; bukan error teknis."""
+
+    no_setup = True
+
+
 class BinanceRateLimitError(RuntimeError):
     """Raised on Binance HTTP 418/429 so main.py can pause and resume scanner."""
     binance_rate_limited = True
@@ -7276,7 +7282,7 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
     # Missing structural thesis is not repaired with arbitrary ATR-based entry/TP.
     # Only candidates with a real liquidity/structure target and net RR >= 2R survive.
     if not candidates:
-        raise RuntimeError(
+        raise NoValidSetupError(
             f"NO_VALID_LIQUIDITY_SETUP:{normalized_pair}: tidak ada setup dengan zona liquidity/SMC, "
             "invalidation struktural, dan target riil yang memenuhi RR neto >= 2R."
         )
@@ -7293,7 +7299,7 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
 
     # Final geometry validation after tick normalization.
     if not _ensure_price_geometry(best, current):
-        raise RuntimeError(f"NO_VALID_LIQUIDITY_SETUP:{normalized_pair}: geometri harga gagal setelah normalisasi tick; kandidat ditolak.")
+        raise NoValidSetupError(f"NO_VALID_LIQUIDITY_SETUP:{normalized_pair}: geometri harga gagal setelah normalisasi tick; kandidat ditolak.")
 
     risk = abs(best.entry - best.sl)
     reward = abs(best.tp - best.entry)
@@ -8188,7 +8194,19 @@ async def validate_setup(
     fresh_context = _scan_context(context)
     fresh_context["validation"] = True
     fresh_context["force_fresh_btc_regime"] = False
-    fresh = await generate_setup(pair, fresh_context)
+    try:
+        fresh = await generate_setup(pair, fresh_context)
+    except NoValidSetupError as exc:
+        return {
+            "valid": False,
+            "reason": str(exc)[:200],
+            "validation_reason": str(exc)[:200],
+            "validation_status": "QUALITY_REJECT",
+            "reason_codes": ["NO_VALID_LIQUIDITY_SETUP"],
+            "stale_data": False,
+            "confidence": safe_float(initial_setup.get("confidence"), 0.0),
+            "setup": initial_setup,
+        }
     initial_conf = safe_float(initial_setup.get("confidence"), 0.0)
     fresh_conf = safe_float(fresh.get("confidence"), 0.0)
     initial_direction = str(initial_setup.get("direction") or "").upper()
