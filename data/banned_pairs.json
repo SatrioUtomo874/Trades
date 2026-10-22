@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T15:15:41.205682+00:00",
+  "saved_at": "2026-10-22T15:16:07.287989+00:00",
   "bans": [
+    {
+      "pair": "2ZUSDT",
+      "banned_at": "2026-10-22T15:16:07.287859+00:00",
+      "until": "2026-10-23T15:16:07.287832+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
+    },
     {
       "pair": "APRUSDT",
       "banned_at": "2026-10-22T12:03:03.080163+00:00",
