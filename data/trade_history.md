@@ -329,3 +329,36 @@ Tidak ada trailing.
 - Filled: 2026-10-22T13:51:33.593803+00:00
 - Closed: 2026-10-22T15:15:04.102064+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## TUTUSDT — BUY
+
+Trade ID: `TUTUSDT-20261022-203207-529D40`
+
+### Setup
+
+- Price Now Reference: 0.01874
+- Entry: 0.01854
+- Reason Entry: TUTUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0185667 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 36.6 pada entry zone. | M15 review: entry direfine 0.01856→0.01854; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.01939
+- Reason Price Exp: Price Exp 0.01939: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01837
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.01854; SL ditempatkan di luar invalidation dan liquidity guard 0.0185667.
+- TP: 0.01988
+- Reason TP: TP 0.01988 dipilih dari H4_HIGHER_HIGH dengan RR 6.95; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.01854
+- Result Reason: AUTO M15 STRUCTURE REVIEW: M15 close menembus protected swing terakhir; struktur posisi invalid | Manual /close REAL. PnL positif → TP.
+- PnL: 0.00000000000001618122977346278578984300541%
+- Created: 2026-10-22T13:32:07.593852+00:00
+- Filled: 2026-10-22T15:12:23.792954+00:00
+- Closed: 2026-10-22T15:15:26.714175+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
