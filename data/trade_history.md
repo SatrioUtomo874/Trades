@@ -3629,3 +3629,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T02:28:11.728923+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## APRUSDT — BUY
+
+Trade ID: `APRUSDT-20261022-190239-6C8AE8`
+
+### Setup
+
+- Price Now Reference: 0.02764
+- Entry: 0.02623
+- Reason Entry: APRUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0261182 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 30.0 pada entry zone.
+- Price Exp: 0.02767
+- Reason Price Exp: Price Exp 0.027670000000000004: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02553
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.02615; SL ditempatkan di luar invalidation dan liquidity guard 0.0261182.
+- TP: 0.02771
+- Reason TP: TP 0.02771 dipilih dari H1_SWING_HIGH dengan RR 2.11; target quality 83.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02767
+- Result Reason: PRICE_EXP_TOUCH_BEFORE_ENTRY | Price Exp 0.027670000000000004: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-22T12:02:39.195204+00:00
+- Filled: -
+- Closed: 2026-10-22T12:02:46.782391+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
