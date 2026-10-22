@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T15:00:18.908095+00:00",
+  "saved_at": "2026-10-22T15:00:32.500695+00:00",
   "saved_at_wib": "22-10-2026, 22:00 WIB",
   "count": 4,
   "setups": [
@@ -46,7 +46,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "1.514641534836755301245371929",
+      "pnl_percent": "1.615617637159205654661730057",
       "max_favorable_pct": "2.322450353416358128576236957",
       "max_adverse_pct": "-0.1346348030966004712218108381",
       "planned_rr": "2.571428571428571428571428571",
@@ -3538,7 +3538,7 @@
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
       "risk_pct_initial": "1.884887243352406597105351733",
-      "realized_r": "0.8035714285714285714285714289"
+      "realized_r": "0.8571428571428571428571428572"
     },
     {
       "trade_id": "DOSUSDT-20261022-202846-840931",
@@ -10671,8 +10671,8 @@
       "pair": "TREEUSDT",
       "direction": "BUY",
       "price_now_reference": "0.03832",
-      "entry": "0.037",
-      "entry_reason": "TREEUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0369825 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 21.2 pada entry zone.",
+      "entry": "0.03694",
+      "entry_reason": "TREEUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0369825 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 21.2 pada entry zone. | M15 review: entry direfine 0.037→0.03694; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga",
       "price_exp": "0.03903",
       "price_exp_reason": "Price Exp 0.03903: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.",
       "price_exp_diagnostics": {
@@ -10710,7 +10710,7 @@
       "pnl_percent": null,
       "max_favorable_pct": null,
       "max_adverse_pct": null,
-      "planned_rr": "7.225",
+      "planned_rr": "8.676470588235294117647058824",
       "pending_seconds": null,
       "holding_seconds": null,
       "trail_history": [],
@@ -14175,13 +14175,13 @@
       },
       "margin_usdt": "0.8",
       "leverage": 10,
-      "quantity": "216",
+      "quantity": "217",
       "target_notional": "8",
-      "actual_notional": "7.992",
+      "actual_notional": "8.01598",
       "real_enabled": true,
       "real_state": "REAL_PENDING",
       "position_side": "BOTH",
-      "entry_order_id": 1173249611,
+      "entry_order_id": 1173254129,
       "entry_client_order_id": "ENT-TREEUSDT-20261022-214710-F2F752",
       "tp_algo_id": null,
       "sl_algo_id": null,
@@ -14198,7 +14198,7 @@
       "candidate_id": "C0657861caecd2012528f",
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
-      "risk_pct_initial": "1.081081081081081081081081081",
+      "risk_pct_initial": "0.920411478072550081212777477",
       "realized_r": null
     }
   ]
