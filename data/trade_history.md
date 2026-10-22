@@ -923,3 +923,36 @@ Tidak ada trailing.
 - Filled: 2026-10-22T20:08:05.878014+00:00
 - Closed: 2026-10-22T20:45:25.107925+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## INJUSDT — BUY
+
+Trade ID: `INJUSDT-20261023-031624-9A7C8E`
+
+### Setup
+
+- Price Now Reference: 7.963
+- Entry: 7.859
+- Reason Entry: INJUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 7.863 dipadukan dengan Fib PRIMARY; refinement BULLISH_OB. Projected M15 RSI 28.4 pada entry zone. | M15 review: entry direfine 7.866→7.859; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 8.282
+- Reason Price Exp: Price Exp 8.282: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 7.756
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 7.863; SL ditempatkan di luar invalidation dan liquidity guard 7.863.
+- TP: 8.459
+- Reason TP: TP 8.459 dipilih dari H4_HIGHER_HIGH dengan RR 5.39; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T20:16:24.315456+00:00
+- Filled: -
+- Closed: 2026-10-22T22:00:04.091703+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
