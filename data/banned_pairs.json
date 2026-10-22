@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T20:45:16.495713+00:00",
+  "saved_at": "2026-10-22T20:45:39.602352+00:00",
   "bans": [
     {
       "pair": "2ZUSDT",
@@ -99,6 +99,13 @@
       "until": "2026-10-22T22:32:35.100613+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "PARTIUSDT",
+      "banned_at": "2026-10-22T20:45:39.602206+00:00",
+      "until": "2026-10-23T20:45:39.602177+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "PHAROSUSDT",
