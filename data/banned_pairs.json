@@ -1,11 +1,18 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T12:03:03.080326+00:00",
+  "saved_at": "2026-10-22T12:20:31.588661+00:00",
   "bans": [
     {
       "pair": "APRUSDT",
       "banned_at": "2026-10-22T12:03:03.080163+00:00",
       "until": "2026-10-22T20:03:03.080135+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "ENSOUSDT",
+      "banned_at": "2026-10-22T12:20:31.588532+00:00",
+      "until": "2026-10-22T20:20:31.588511+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     }
