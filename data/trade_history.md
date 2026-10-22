@@ -527,3 +527,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T15:30:03.132668+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## 1000CHEEMSUSDT — BUY
+
+Trade ID: `1000CHEEMSUSDT-20261022-221947-F6AB3D`
+
+### Setup
+
+- Price Now Reference: 0.0004395
+- Entry: 0.0004392
+- Reason Entry: 1000CHEEMSUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0004392 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 35.9 pada entry zone.
+- Price Exp: 0.0004485
+- Reason Price Exp: Price Exp 0.0004485: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0004348
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.0004391151; SL ditempatkan di luar invalidation dan liquidity guard 0.0004392.
+- TP: 0.0004524
+- Reason TP: TP 0.0004524 dipilih dari H4_SWING_HIGH dengan RR 3.00; target quality 85.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T15:19:47.004154+00:00
+- Filled: -
+- Closed: 2026-10-22T15:30:18.740378+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
