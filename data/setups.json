@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T13:30:13.999848+00:00",
+  "saved_at": "2026-10-22T13:30:28.300912+00:00",
   "saved_at_wib": "22-10-2026, 20:30 WIB",
   "count": 3,
   "setups": [
@@ -10,8 +10,8 @@
       "pair": "APTUSDT",
       "direction": "BUY",
       "price_now_reference": "0.7748",
-      "entry": "0.7699",
-      "entry_reason": "APTUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.76935 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 32.6 pada entry zone.",
+      "entry": "0.7686",
+      "entry_reason": "APTUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.76935 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 32.6 pada entry zone. | M15 review: entry direfine 0.7699→0.7686; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga",
       "price_exp": "0.7837",
       "price_exp_reason": "Price Exp 0.7837000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.",
       "price_exp_diagnostics": {
@@ -49,7 +49,7 @@
       "pnl_percent": null,
       "max_favorable_pct": null,
       "max_adverse_pct": null,
-      "planned_rr": "2.305882352941176470588235294",
+      "planned_rr": "2.902777777777777777777777778",
       "pending_seconds": null,
       "holding_seconds": null,
       "trail_history": [],
@@ -3913,11 +3913,11 @@
       "leverage": 10,
       "quantity": "10.4",
       "target_notional": "8",
-      "actual_notional": "8.00696",
+      "actual_notional": "7.99344",
       "real_enabled": true,
       "real_state": "REAL_PENDING",
       "position_side": "BOTH",
-      "entry_order_id": 20925183080,
+      "entry_order_id": 20925203959,
       "entry_client_order_id": "ENT-APTUSDT-20261022-202524-FF6A89",
       "tp_algo_id": null,
       "sl_algo_id": null,
@@ -3934,7 +3934,7 @@
       "candidate_id": "Cf1a005ae563a30ce7def",
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
-      "risk_pct_initial": "1.104039485647486686582673074",
+      "risk_pct_initial": "0.9367681498829039812646370023",
       "realized_r": null
     },
     {
