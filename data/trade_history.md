@@ -3530,3 +3530,36 @@ Tidak ada trailing.
 - Filled: 2026-10-20T10:08:40.050075+00:00
 - Closed: 2026-10-22T01:43:06.857635+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## GUSDT — BUY
+
+Trade ID: `GUSDT-20261021-212417-7E76F6`
+
+### Setup
+
+- Price Now Reference: 0.003923
+- Entry: 0.003897
+- Reason Entry: GUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.00389725 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 42.1 pada entry zone.
+- Price Exp: 0.004124
+- Reason Price Exp: Price Exp 0.004124: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.003844
+- Reason SL: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.0038953477; SL ditempatkan di luar invalidation dan liquidity guard 0.00389725.
+- TP: 0.004221
+- Reason TP: TP 0.004221 dipilih dari H4_SWING_HIGH dengan RR 6.11; target quality 79.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.003844
+- Result Reason: Prediction invalidation berasal dari M15_SELL_SIDE_LIQUIDITY di 0.0038953477; SL ditempatkan di luar invalidation dan liquidity guard 0.00389725.
+- PnL: -1.360020528611752630228380806%
+- Created: 2026-10-21T14:24:17.265817+00:00
+- Filled: 2026-10-22T01:31:25.946937+00:00
+- Closed: 2026-10-22T02:21:02.750478+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
