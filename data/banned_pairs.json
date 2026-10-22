@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T01:43:23.737766+00:00",
+  "saved_at": "2026-10-22T02:21:19.243862+00:00",
   "bans": [
     {
       "pair": "1000CATUSDT",
@@ -10,32 +10,11 @@
       "source": "AUTO_TP"
     },
     {
-      "pair": "BBUSDT",
-      "banned_at": "2026-10-21T11:59:10.457739+00:00",
-      "until": "2026-10-21T19:59:10.457714+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "CYBERUSDT",
-      "banned_at": "2026-10-21T13:04:24.381033+00:00",
-      "until": "2026-10-21T21:04:24.381008+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "HEMIUSDT",
-      "banned_at": "2026-10-21T14:48:56.943726+00:00",
-      "until": "2026-10-21T22:48:56.943704+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "KATUSDT",
-      "banned_at": "2026-10-21T11:11:41.341615+00:00",
-      "until": "2026-10-21T19:11:41.341593+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
+      "pair": "GUSDT",
+      "banned_at": "2026-10-22T02:21:19.243733+00:00",
+      "until": "2026-10-23T02:21:19.243709+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "OPUSDT",
@@ -45,53 +24,11 @@
       "source": "AUTO_SL"
     },
     {
-      "pair": "ORCAUSDT",
-      "banned_at": "2026-10-21T08:32:18.807173+00:00",
-      "until": "2026-10-21T16:32:18.807126+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "QNTUSDT",
       "banned_at": "2026-10-21T01:52:56.036099+00:00",
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: QNTUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=8, nearest_notional=19.004) Margin pas ≈ $1.90.",
       "source": "AUTO_MARGIN_INFLUENCE"
-    },
-    {
-      "pair": "SCRUSDT",
-      "banned_at": "2026-10-21T14:23:46.885472+00:00",
-      "until": "2026-10-21T22:23:46.885447+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "SENTUSDT",
-      "banned_at": "2026-10-21T15:26:03.846144+00:00",
-      "until": "2026-10-21T23:26:03.846121+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "SWARMSUSDT",
-      "banned_at": "2026-10-21T15:02:15.257528+00:00",
-      "until": "2026-10-21T23:02:15.257504+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "TWTUSDT",
-      "banned_at": "2026-10-21T12:00:04.998452+00:00",
-      "until": "2026-10-21T20:00:04.998432+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "USELESSUSDT",
-      "banned_at": "2026-10-21T15:12:16.897792+00:00",
-      "until": "2026-10-21T23:12:16.897771+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     }
   ]
 }
