@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T16:19:13.201773+00:00",
+  "saved_at": "2026-10-22T16:50:27.840593+00:00",
   "bans": [
     {
       "pair": "2ZUSDT",
@@ -69,6 +69,13 @@
       "pair": "GTCUSDT",
       "banned_at": "2026-10-22T13:29:19.241914+00:00",
       "until": "2026-10-22T21:29:19.241891+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "IDUSDT",
+      "banned_at": "2026-10-22T16:50:27.840424+00:00",
+      "until": "2026-10-23T00:50:27.840395+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
