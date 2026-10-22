@@ -725,3 +725,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T16:45:24.498921+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## IDUSDT — SELL
+
+Trade ID: `IDUSDT-20261022-230240-8ECBA9`
+
+### Setup
+
+- Price Now Reference: 0.03133
+- Entry: 0.0319
+- Reason Entry: IDUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity M15 0.0318805 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 61.1 pada entry zone. | M15 review: entry direfine 0.03187→0.0319; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.03103
+- Reason Price Exp: Price Exp 0.031030000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.03219
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_HIGH di 0.03189; SL ditempatkan di luar invalidation dan liquidity guard 0.0318805.
+- TP: 0.03067
+- Reason TP: TP 0.03067 dipilih dari H4_LOWER_LOW dengan RR 3.75; target quality 90.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.03103
+- Result Reason: PRICE_EXP_TOUCH_BEFORE_ENTRY | Price Exp 0.031030000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-22T16:02:40.189805+00:00
+- Filled: -
+- Closed: 2026-10-22T16:50:15.199603+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
