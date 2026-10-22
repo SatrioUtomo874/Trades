@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T12:52:31.676638+00:00",
+  "saved_at": "2026-10-22T13:08:35.331912+00:00",
   "bans": [
     {
       "pair": "APRUSDT",
@@ -20,6 +20,13 @@
       "pair": "ENSOUSDT",
       "banned_at": "2026-10-22T12:20:31.588532+00:00",
       "until": "2026-10-22T20:20:31.588511+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "KGENUSDT",
+      "banned_at": "2026-10-22T13:08:35.331749+00:00",
+      "until": "2026-10-22T21:08:35.331721+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     }
