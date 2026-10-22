@@ -3596,3 +3596,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T02:27:49.534433+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## AVNTUSDT — BUY
+
+Trade ID: `AVNTUSDT-20261022-084357-41320C`
+
+### Setup
+
+- Price Now Reference: 0.11622
+- Entry: 0.11339
+- Reason Entry: AVNTUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.11336 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 19.5 pada entry zone.
+- Price Exp: 0.1165
+- Reason Price Exp: Price Exp 0.1165: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.11219
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.11336; SL ditempatkan di luar invalidation.
+- TP: 0.11782
+- Reason TP: TP 0.11782 dipilih dari H4_HIGHER_HIGH dengan RR 3.69; target quality 89.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: DELETED
+- Exit Price: -
+- Result Reason: Order LIMIT sudah tidak aktif di Binance (CANCELED); dibatalkan manual atau oleh Binance.
+- PnL: -
+- Created: 2026-10-22T01:43:57.470479+00:00
+- Filled: -
+- Closed: 2026-10-22T02:28:11.728923+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
