@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T15:15:16.297927+00:00",
+  "saved_at": "2026-10-22T15:15:41.205682+00:00",
   "bans": [
     {
       "pair": "APRUSDT",
@@ -64,6 +64,13 @@
       "until": "2026-10-22T22:32:35.100613+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "TUTUSDT",
+      "banned_at": "2026-10-22T15:15:41.205583+00:00",
+      "until": "2026-10-23T15:15:41.205567+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     }
   ]
 }
