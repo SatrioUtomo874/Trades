@@ -956,3 +956,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T22:00:04.091703+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## GRASSUSDT — BUY
+
+Trade ID: `GRASSUSDT-20261023-030610-53810E`
+
+### Setup
+
+- Price Now Reference: 0.6331
+- Entry: 0.6178
+- Reason Entry: GRASSUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.6182 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 28.3 pada entry zone. | M15 review: entry direfine 0.6185→0.6178; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.6433
+- Reason Price Exp: Price Exp 0.6433: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.6075
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.6182; SL ditempatkan di luar invalidation.
+- TP: 0.6538
+- Reason TP: TP 0.6538 dipilih dari H4_SWING_HIGH dengan RR 3.21; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T20:06:10.219763+00:00
+- Filled: -
+- Closed: 2026-10-22T22:45:03.200058+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
