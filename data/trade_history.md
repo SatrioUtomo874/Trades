@@ -131,3 +131,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T13:30:03.102875+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## APTUSDT — BUY
+
+Trade ID: `APTUSDT-20261022-202524-FF6A89`
+
+### Setup
+
+- Price Now Reference: 0.7748
+- Entry: 0.7686
+- Reason Entry: APTUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.76935 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 32.6 pada entry zone. | M15 review: entry direfine 0.7699→0.7686; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.7837
+- Reason Price Exp: Price Exp 0.7837000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.7614
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.7638; SL ditempatkan di luar invalidation.
+- TP: 0.7895
+- Reason TP: TP 0.7895 dipilih dari H4_SWING_HIGH dengan RR 2.31; target quality 88.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.7837
+- Result Reason: PRICE_EXP_TOUCH_BEFORE_ENTRY | Price Exp 0.7837000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-22T13:25:24.891608+00:00
+- Filled: -
+- Closed: 2026-10-22T14:03:06.106683+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
