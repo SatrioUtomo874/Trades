@@ -461,3 +461,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T15:17:35.401073+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## YBUSDT — BUY
+
+Trade ID: `YBUSDT-20261022-221728-B69F83`
+
+### Setup
+
+- Price Now Reference: 0.06459
+- Entry: 0.06107
+- Reason Entry: YBUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.06104 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 21.2 pada entry zone.
+- Price Exp: 0.06485
+- Reason Price Exp: Price Exp 0.06485: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.05927
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.05941; SL ditempatkan di luar invalidation dan liquidity guard 0.059435.
+- TP: 0.06646
+- Reason TP: TP 0.06646 dipilih dari H4_HIGHER_HIGH dengan RR 2.99; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.06486
+- Result Reason: PRICE_EXP_TOUCH_BEFORE_ENTRY | Price Exp 0.06485: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-22T15:17:28.680642+00:00
+- Filled: -
+- Closed: 2026-10-22T15:17:52.984613+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
