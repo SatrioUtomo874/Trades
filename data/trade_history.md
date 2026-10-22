@@ -164,3 +164,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T14:03:06.106683+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## HEIUSDT — BUY
+
+Trade ID: `HEIUSDT-20261022-210522-C93D41`
+
+### Setup
+
+- Price Now Reference: 0.1113
+- Entry: 0.10942
+- Reason Entry: HEIUSDT BUY: BUY_PULLBACK. H4 structure RANGE, liquidity H1 0.1097709 dipadukan dengan Fib SECONDARY; refinement BEARISH_BREAKER. Projected M15 RSI 33.4 pada entry zone. | M15 review: entry direfine 0.11013→0.10942; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.11212
+- Reason Price Exp: Price Exp 0.11212000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.10894
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.10975; SL ditempatkan di luar invalidation dan liquidity guard 0.1097709.
+- TP: 0.11297
+- Reason TP: TP 0.11297 dipilih dari H4_SWING_HIGH dengan RR 2.39; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T14:05:22.704852+00:00
+- Filled: -
+- Closed: 2026-10-22T14:30:04.596376+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
