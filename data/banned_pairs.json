@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T14:32:35.100848+00:00",
+  "saved_at": "2026-10-22T14:45:15.286974+00:00",
   "bans": [
     {
       "pair": "APRUSDT",
@@ -22,6 +22,13 @@
       "until": null,
       "reason": "Real quantity tidak memenuhi target margin ±10%: BCHUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=8, nearest_notional=7.8938) Margin pas ≈ $2.01.",
       "source": "AUTO_MARGIN_INFLUENCE"
+    },
+    {
+      "pair": "DOLOUSDT",
+      "banned_at": "2026-10-22T14:45:15.286826+00:00",
+      "until": "2026-10-23T14:45:15.286799+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "ENSOUSDT",
