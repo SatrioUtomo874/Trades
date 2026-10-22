@@ -13846,12 +13846,8 @@ class TradingEngine:
                     await self._finalize_trade(copy.deepcopy(trade), result="INVALIDATED", exit_price=None, reason=f"M15 close invalidation: {reason}")
                     continue
                 if action == "REPRICE_PENDING" and trade.status == "PENDING":
-                    if trade.real_enabled:
-                        log.warning("[M15 REVIEW][SHADOW] %s REAL PENDING: usulan reprice=%s tidak dieksekusi otomatis karena perlu cancel/replace order terkonfirmasi.", trade.trade_id, result.get("suggested_entry"))
-                        continue
-                    new_entry_raw = result.get("suggested_entry")
                     try:
-                        new_entry = Decimal(str(new_entry_raw))
+                        new_entry = Decimal(str(result.get("suggested_entry")))
                     except (InvalidOperation, TypeError, ValueError):
                         continue
                     meta = self.symbols.get(trade.pair)
@@ -13859,15 +13855,21 @@ class TradingEngine:
                         new_entry = quantized_price(new_entry, meta.tick_size) if trade.direction == "BUY" else quantized_price_ceiling(new_entry, meta.tick_size)
                     geometry_ok = (trade.sl < new_entry < trade.tp and (not is_live or new_entry < live.price)) if trade.direction == "BUY" else (trade.tp < new_entry < trade.sl and (not is_live or new_entry > live.price))
                     rr_after = abs(trade.tp - new_entry) / max(abs(new_entry - trade.sl), Decimal("1e-30"))
-                    if geometry_ok and rr_after >= Decimal("2") and ((trade.direction == "BUY" and new_entry < trade.entry) or (trade.direction == "SELL" and new_entry > trade.entry)):
-                        old_entry = trade.entry
-                        trade.entry = new_entry
-                        trade.price_now_reference = live.price if is_live else trade.price_now_reference
-                        trade.entry_reason = f"{trade.entry_reason} | M15 review: entry direfine {decimal_to_str(old_entry)}→{decimal_to_str(new_entry)}; {reason}"[:1000]
-                        await self._record_event(trade, "M15_REPRICE", event_price=live.price if is_live else None, reason=reason, extra={"old_entry": decimal_to_str(old_entry), "new_entry": decimal_to_str(new_entry), "candle_close_ms": candle_ms})
+                    better = new_entry < trade.entry if trade.direction == "BUY" else new_entry > trade.entry
+                    if not (geometry_ok and rr_after >= Decimal("2") and better):
+                        continue
+                    if trade.real_enabled:
+                        if self.real_mode:
+                            await self._m15_reprice_real_pending(trade, new_entry, reason, candle_ms, live.price if is_live else None)
+                        continue
+                    old_entry = trade.entry
+                    trade.entry = new_entry
+                    trade.price_now_reference = live.price if is_live else trade.price_now_reference
+                    trade.entry_reason = f"{trade.entry_reason} | M15 review: entry direfine {decimal_to_str(old_entry)}→{decimal_to_str(new_entry)}; {reason}"[:1000]
+                    await self._record_event(trade, "M15_REPRICE", event_price=live.price if is_live else None, reason=reason, extra={"old_entry": decimal_to_str(old_entry), "new_entry": decimal_to_str(new_entry), "candle_close_ms": candle_ms})
                     continue
                 if action == "EXIT_NOW" and trade.status == "FILLED":
-                    real_actions_enabled = os.getenv("M15_REVIEW_REAL_ACTIONS", "0").strip().lower() in {"1", "true", "yes", "on"}
+                    real_actions_enabled = os.getenv("M15_REVIEW_REAL_ACTIONS", "1").strip().lower() in {"1", "true", "yes", "on"}
                     if trade.real_enabled and not real_actions_enabled:
                         log.warning("[M15 REVIEW][SHADOW] %s REAL FILLED EXIT_NOW: %s", trade.trade_id, reason)
                         continue
@@ -13936,6 +13938,43 @@ class TradingEngine:
         )
         log.info("[M15 REVIEW] %s order REAL dibatalkan & setup ditutup: %s", trade.trade_id, reason[:140])
 
+    async def _m15_reprice_real_pending(self, trade: Trade, new_entry: Decimal, reason: str, candle_ms: int, live_price: Decimal | None) -> None:
+        """Cancel order LIMIT REAL lama, pasang ulang di entry baru. Gagal pasang ulang = setup dibuang."""
+        old_entry = trade.entry
+        token = REAL_PRIORITY.set(True)
+        try:
+            cancelled = await self._cancel_entry_for_hold(trade)
+        except Exception:
+            self._m15_review_last_close_by_trade.pop(trade.trade_id, None)
+            raise
+        finally:
+            REAL_PRIORITY.reset(token)
+        if not cancelled:
+            log.info("[M15 REVIEW] %s sudah terisi saat reprice; lanjut alur fill normal.", trade.trade_id)
+            return
+        if self.active_trades.get(trade.trade_id) is not trade or trade.status != "PENDING":
+            return
+        trade.entry_order_id = None
+        trade.entry_client_order_id = None
+        trade.entry = new_entry
+        trade.entry_reason = f"{trade.entry_reason} | M15 review: entry direfine {decimal_to_str(old_entry)}→{decimal_to_str(new_entry)}; {reason}"[:1000]
+        try:
+            await self._ensure_real_entry(trade, from_release=True)
+        except BinanceRateLimitError as exc:
+            trade.real_state = "REAL_LIMIT_HOLD"
+            trade.real_error = None
+            self._notify_rate_limit(exc, f"REPRICE LIMIT {trade.pair}")
+        except Exception as exc:
+            log.warning("[M15 REVIEW] reprice %s gagal pasang ulang, setup dibuang: %s", trade.trade_id, str(exc)[:160])
+            await self._m15_cancel_real_pending(trade, f"reprice gagal ({str(exc)[:80]}): {reason}")
+            return
+        await self._record_event(trade, "M15_REPRICE", event_price=live_price, reason=reason, extra={"old_entry": decimal_to_str(old_entry), "new_entry": decimal_to_str(new_entry), "candle_close_ms": candle_ms, "real": True})
+        try:
+            await self._persist_active_setups_silently()
+        except Exception:
+            log.exception("[M15 REVIEW] gagal menyimpan setups.json setelah reprice")
+        log.info("[M15 REVIEW] %s order REAL di-reprice %s→%s", trade.trade_id, decimal_to_str(old_entry), decimal_to_str(new_entry))
+
     async def _try_apply_pending_m15_exit(self, trade: Trade, live_price: Decimal) -> None:
         """Apply a previously confirmed structural exit only after a fresh price event."""
         pending = self._m15_pending_exits.get(trade.trade_id)
@@ -13947,7 +13986,7 @@ class TradingEngine:
         if trade.real_enabled:
             if not self.real_mode or self.real.cooldown_remaining > 0:
                 return
-            if os.getenv("M15_REVIEW_REAL_ACTIONS", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+            if os.getenv("M15_REVIEW_REAL_ACTIONS", "1").strip().lower() not in {"1", "true", "yes", "on"}:
                 self._m15_pending_exits.pop(trade.trade_id, None)
                 log.warning("[M15 REVIEW][SHADOW] structural exit tidak dieksekusi untuk REAL %s; %s", trade.trade_id, pending.get("reason"))
                 return
