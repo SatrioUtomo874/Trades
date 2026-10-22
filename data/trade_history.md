@@ -626,3 +626,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T15:30:54.090144+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## DOSUSDT — BUY
+
+Trade ID: `DOSUSDT-20261022-202846-840931`
+
+### Setup
+
+- Price Now Reference: 0.2081
+- Entry: 0.2013
+- Reason Entry: DOSUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.2016281 dipadukan dengan Fib PRIMARY; refinement BEARISH_FVG. Projected M15 RSI 30.6 pada entry zone. | M15 review: entry direfine 0.2018→0.2013; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.2128
+- Reason Price Exp: Price Exp 0.21280000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.1991
+- Reason SL: Prediction invalidation berasal dari H1_SELL_SIDE_LIQUIDITY di 0.2013756; SL ditempatkan di luar invalidation dan liquidity guard 0.2016281.
+- TP: 0.2174
+- Reason TP: TP 0.2174 dipilih dari H4_HIGHER_HIGH dengan RR 5.78; target quality 84.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.2128
+- Result Reason: PRICE_EXP_TOUCH_BEFORE_ENTRY | Price Exp 0.21280000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-22T13:28:46.304965+00:00
+- Filled: -
+- Closed: 2026-10-22T16:18:59.176752+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
