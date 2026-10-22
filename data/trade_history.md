@@ -593,3 +593,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T15:30:36.801256+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## SONICUSDT — BUY
+
+Trade ID: `SONICUSDT-20261022-221950-D671F5`
+
+### Setup
+
+- Price Now Reference: 0.02075
+- Entry: 0.02062
+- Reason Entry: SONICUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.02062 dipadukan dengan Fib SECONDARY; refinement BULLISH_FVG. Projected M15 RSI 27.1 pada entry zone.
+- Price Exp: 0.02156
+- Reason Price Exp: Price Exp 0.021560000000000003: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0202
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.02023; SL ditempatkan di luar invalidation.
+- TP: 0.02272
+- Reason TP: TP 0.02272 dipilih dari H4_HIGHER_HIGH dengan RR 5.00; target quality 86.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T15:19:50.898886+00:00
+- Filled: -
+- Closed: 2026-10-22T15:30:54.090144+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
