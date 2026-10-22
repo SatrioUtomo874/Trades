@@ -3497,3 +3497,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-21T15:25:45.041239+00:00
 - Strategy: SMC_VLT_RSI v2.5.0
+
+---
+
+## 1000CATUSDT — BUY
+
+Trade ID: `1000CATUSDT-20261020-072700-57CB83`
+
+### Setup
+
+- Price Now Reference: 0.001872
+- Entry: 0.001798
+- Reason Entry: 1000CATUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.0017970834 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 22.0 pada entry zone.
+- Price Exp: 0.001882
+- Reason Price Exp: Price Exp 0.001882: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.001777
+- Reason SL: Prediction invalidation berasal dari H4_PROTECTED_LOW di 0.001797; SL ditempatkan di luar invalidation dan liquidity guard 0.0017970834.
+- TP: 0.001883
+- Reason TP: TP 0.001883 dipilih dari H4_SWING_HIGH dengan RR 4.05; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.00181
+- Result Reason: Posisi ditutup di luar bot (manual di Binance), harga keluar ≈ 0.00181.
+- PnL: 0.6674082313681868743047830923%
+- Created: 2026-10-20T00:27:00.662200+00:00
+- Filled: 2026-10-20T10:08:40.050075+00:00
+- Closed: 2026-10-22T01:43:06.857635+00:00
+- Strategy: SMC_VLT_RSI v2.5.0
