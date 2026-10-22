@@ -3662,3 +3662,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T12:02:46.782391+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## ENSOUSDT — BUY
+
+Trade ID: `ENSOUSDT-20261022-190620-2818B9`
+
+### Setup
+
+- Price Now Reference: 0.6647
+- Entry: 0.6588
+- Reason Entry: ENSOUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure BULLISH, liquidity H1 0.6588 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_FVG. Projected M15 RSI 34.8 pada entry zone.
+- Price Exp: 0.674
+- Reason Price Exp: Price Exp 0.674: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.6494
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.6537; SL ditempatkan di luar invalidation.
+- TP: 0.6805
+- Reason TP: TP 0.6805 dipilih dari H4_SWING_HIGH dengan RR 2.31; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.674
+- Result Reason: PRICE_EXP_TOUCH_BEFORE_ENTRY | Price Exp 0.674: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-22T12:06:20.312951+00:00
+- Filled: -
+- Closed: 2026-10-22T12:20:14.886462+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
