@@ -428,3 +428,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T15:16:18.602993+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## DYMUSDT — BUY
+
+Trade ID: `DYMUSDT-20261022-221726-9AE33B`
+
+### Setup
+
+- Price Now Reference: 0.01844
+- Entry: 0.01749
+- Reason Entry: DYMUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.01748 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 19.0 pada entry zone.
+- Price Exp: 0.01845
+- Reason Price Exp: Price Exp 0.01845: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.01709
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.01748; SL ditempatkan di luar invalidation.
+- TP: 0.01847
+- Reason TP: TP 0.01847 dipilih dari H4_SWING_HIGH dengan RR 2.45; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.01847
+- Result Reason: PRICE_EXP_TOUCH_BEFORE_ENTRY | Price Exp 0.01845: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-22T15:17:26.499862+00:00
+- Filled: -
+- Closed: 2026-10-22T15:17:35.401073+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
