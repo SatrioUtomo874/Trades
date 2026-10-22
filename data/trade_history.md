@@ -296,3 +296,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T15:00:06.925506+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## EDGEUSDT — BUY
+
+Trade ID: `EDGEUSDT-20261022-202844-AC1406`
+
+### Setup
+
+- Price Now Reference: 0.3004
+- Entry: 0.2971
+- Reason Entry: EDGEUSDT BUY: BUY_PULLBACK_RSI_DIVERGENCE. H4 structure BULLISH, liquidity M15 0.2973 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 31.1 pada entry zone. | M15 review: entry direfine 0.2974→0.2971; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.3073
+- Reason Price Exp: Price Exp 0.3073: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.2915
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.2973; SL ditempatkan di luar invalidation.
+- TP: 0.3115
+- Reason TP: TP 0.3115 dipilih dari H4_SWING_HIGH dengan RR 2.39; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.2959
+- Result Reason: AUTO M15 STRUCTURE REVIEW: M15 close menembus protected swing terakhir; struktur posisi invalid | Manual /close REAL. PnL negatif → SL.
+- PnL: -0.4039044092898014136654325143%
+- Created: 2026-10-22T13:28:44.213134+00:00
+- Filled: 2026-10-22T13:51:33.593803+00:00
+- Closed: 2026-10-22T15:15:04.102064+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
