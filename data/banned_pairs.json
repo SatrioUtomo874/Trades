@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-22T14:45:15.286974+00:00",
+  "saved_at": "2026-10-22T15:15:16.297927+00:00",
   "bans": [
     {
       "pair": "APRUSDT",
@@ -29,6 +29,13 @@
       "until": "2026-10-23T14:45:15.286799+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "EDGEUSDT",
+      "banned_at": "2026-10-22T15:15:16.297672+00:00",
+      "until": "2026-10-23T15:15:16.297639+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "ENSOUSDT",
