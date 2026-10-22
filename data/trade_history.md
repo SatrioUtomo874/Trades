@@ -230,3 +230,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T14:32:26.090074+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## DOLOUSDT — BUY
+
+Trade ID: `DOLOUSDT-20261022-213508-372545`
+
+### Setup
+
+- Price Now Reference: 0.0242
+- Entry: 0.02419
+- Reason Entry: DOLOUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.0241784 dipadukan dengan Fib PRIMARY; refinement BULLISH_FVG. Projected M15 RSI 27.3 pada entry zone.
+- Price Exp: 0.02508
+- Reason Price Exp: Price Exp 0.02508: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02392
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.02419; SL ditempatkan di luar invalidation dan liquidity guard 0.0241784.
+- TP: 0.02545
+- Reason TP: TP 0.02545 dipilih dari H4_SWING_HIGH dengan RR 4.67; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.02424
+- Result Reason: AUTO M15 STRUCTURE REVIEW: M15 close menembus protected swing terakhir; struktur posisi invalid | Manual /close REAL. PnL positif → TP.
+- PnL: 0.2066969822240595287308805291%
+- Created: 2026-10-22T14:35:08.710748+00:00
+- Filled: 2026-10-22T14:35:22.587198+00:00
+- Closed: 2026-10-22T14:45:04.402758+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
