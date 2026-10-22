@@ -362,3 +362,36 @@ Tidak ada trailing.
 - Filled: 2026-10-22T15:12:23.792954+00:00
 - Closed: 2026-10-22T15:15:26.714175+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## 2ZUSDT — BUY
+
+Trade ID: `2ZUSDT-20261022-220212-69B408`
+
+### Setup
+
+- Price Now Reference: 0.03002
+- Entry: 0.02975
+- Reason Entry: 2ZUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity M15 0.02975 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 36.4 pada entry zone.
+- Price Exp: 0.03152
+- Reason Price Exp: Price Exp 0.03152: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.0294
+- Reason SL: Prediction invalidation berasal dari H1_PROTECTED_LOW di 0.02975; SL ditempatkan di luar invalidation.
+- TP: 0.03277
+- Reason TP: TP 0.03277 dipilih dari H4_HIGHER_HIGH dengan RR 8.63; target quality 82.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.02971
+- Result Reason: AUTO M15 STRUCTURE REVIEW: M15 close menembus protected swing terakhir; struktur posisi invalid | Manual /close REAL. PnL negatif → SL.
+- PnL: -0.1344537815125882578913918509%
+- Created: 2026-10-22T15:02:12.812793+00:00
+- Filled: 2026-10-22T15:11:49.615239+00:00
+- Closed: 2026-10-22T15:15:51.902639+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
