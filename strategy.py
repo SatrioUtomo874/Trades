@@ -4,7 +4,7 @@ from __future__ import annotations
 STRATEGY.PY
 ===========
 
-Structural Prediction Engine V2 untuk main.py: market structure → thesis →
+ICT Liquidity-First Structural Prediction Engine V2.9 untuk main.py: market structure → thesis →
 liquidity map → adaptive Fibonacci → FVG/OB refinement → projected RSI →
 entry zone → prediction invalidation → structural SL → target map → RR →
 thesis quality.
@@ -40,13 +40,25 @@ Prinsip inti V2:
 10. strategy.py tidak menyentuh state trade, Telegram, WebSocket, GitHub, atau
     order execution.
 
+Prioritas ICT Liquidity (rujukan: ICT Liquidity.txt + combined.txt):
+    1. Petakan BSL/SSL, equal highs/lows, swing pools, PDH/PDL, PWH/PWL,
+       PMH/PML, dan high/low sesi yang telah selesai.
+    2. Bedakan sweep/reclaim (potensi reversal) dari liquidity run (continuation);
+       sweep saja tidak berarti reversal dan target DOL bukan kepastian.
+    3. Setelah sweep, tunggu MSS/CHOCH/BOS; cari retest ke FVG/OB/breaker yang
+       masih fresh dan selaras dengan premium/discount/Fibonacci.
+    4. Ukur DOL/IRL/ERL, inducement potensial, gray pools, dan hambatan rute.
+    5. Gunakan struktur HTF, displacement/volume, dan kualitas zona sebagai
+       konteks. Inducement disimpulkan dari harga OHLCV, bukan niat institusi.
+
 SMC yang dibuat objektif dalam kode:
     - Swing High / Swing Low
     - HH / HL / LH / LL
     - BOS / CHOCH / MSS
     - Equal High / Equal Low
-    - Liquidity pool / sweep / magnet
-    - Fair Value Gap / Order Block / Breaker
+    - BSL / SSL / IRL / ERL / DOL / liquidity pool / sweep / run
+    - PDH/PDL / PWH/PWL / PMH/PML / session highs-lows
+    - Fair Value Gap / fresh Order Block / Breaker
     - Premium / Discount / Fibonacci
     - Displacement / ATR / RSI(14) / relative-volume / trend slope
 
@@ -63,6 +75,7 @@ import math
 import os
 import threading
 import time
+from datetime import datetime, timezone, timedelta
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from statistics import median
@@ -78,7 +91,7 @@ import requests
 STRATEGY_NAME = "SMC_VLT_RSI"
 STRATEGY_ENGINE = "V2"
 STRATEGY_SCHEMA_VERSION = 1
-SCORING_FORMULA_VERSION = "V2.5-binance-orderflow-volume-pricelegs"
+SCORING_FORMULA_VERSION = "V2.9-ICT-DIRECTIONAL-FRESH-POI-HTF-GATED"
 # Explicit provider contract consumed by main.py. Both analysis and active-price
 # monitoring are intentionally Binance USD-M only; no cross-exchange fallback.
 SCAN_PRIMARY_DATA_SOURCE = "BINANCE_PUBLIC"
@@ -157,7 +170,7 @@ REASON_CODES = (
     "BTC_HIGH_RISK_CONFLICT", "PRICE_IN_ZONE", "PRICE_NOT_IN_ZONE", "READY_FOR_VALIDATION",
 )
 ENTRY_ZONE_MAX_WIDTH_PCT = 15.0
-STRATEGY_VERSION = "2.6.0"
+STRATEGY_VERSION = "2.9.0"
 
 BINANCE_BASE_URL = "https://fapi.binance.com"
 
@@ -171,7 +184,7 @@ H1_MS = 60 * 60 * 1000
 H4_MS = 4 * 60 * 60 * 1000
 
 M15_CANDLES_REQUIRED = 672
-PAIR_H4_CANDLES_REQUIRED = 120
+PAIR_H4_CANDLES_REQUIRED = 400
 BTC_H4_CANDLES_REQUIRED = 240
 
 HTTP_TIMEOUT_SECONDS = 20
@@ -268,6 +281,33 @@ LIQ_SIGNIFICANT_THRESHOLD_V2 = 70.0
 LIQ_NEAR_ENTRY_ATR = 0.80
 LIQ_MAGNET_MAX_H1_ATR_V2 = 3.0
 
+# ICT liquidity sequencing. Local OHLCV inference is deliberately conservative:
+# a wick through a range followed by a close back inside is a sweep; a strong
+# close beyond the range with displacement/volume support is a liquidity run.
+ICT_EVENT_LOOKBACK_M15 = 32
+ICT_SWEEP_WICK_RATIO = 0.35
+ICT_RUN_MIN_BODY_ATR = 0.55
+ICT_RUN_MIN_REL_VOLUME = 1.10
+ICT_SEQUENCE_REQUIRED_FOR_HIGH_CONFIDENCE = True
+ICT_WAITING_CONFIDENCE_CAP = 64.0
+ICT_CONFLICT_CONFIDENCE_CAP = 52.0
+ICT_REFERENCE_ZONE_ATR = 0.05
+ICT_SESSION_LEVEL_STRENGTH = 70.0
+ICT_SWEEP_CONFIRM_MAX_M15_BARS = 16  # sweep must still be recent (<= 4 hours)
+ICT_MICRO_CHOCH_LOOKBACK = 5
+ICT_SWEEP_CONFIRM_MIN_BODY_ATR = 0.25
+ICT_SWEEP_CONFIRM_MIN_REL_VOLUME = 0.75
+# Liquidity-first evidence gates: a raw 20-bar break is not a liquidity thesis
+# unless it maps to an independently detected pool in the multi-timeframe map.
+ICT_POOL_MATCH_MAX_ATR = 0.75
+ICT_POOL_MATCH_MAX_PRICE_PCT = 0.15
+ICT_POOL_MIN_STRENGTH = 12.0
+ICT_HTF_REVERSAL_MAX_BARS = 16
+ICT_REQUIRE_FRESH_POI_FOR_READY = True
+ICT_NO_FRESH_POI_CONFIDENCE_CAP = 64.0
+ICT_NO_REAL_DOL_CONFIDENCE_CAP = 64.0
+ICT_HTF_CONFLICT_CONFIDENCE_CAP = 52.0
+
 # Adaptive Fibonacci.
 FIB_NORMAL_LOW = 0.382
 FIB_NORMAL_HIGH = 0.500
@@ -343,20 +383,23 @@ TARGET_LIQUIDITY_BASE = 35.0
 
 # Thesis scoring V2. Weights total 100.
 THESIS_WEIGHTS_V2 = {
+    # Liquidity sequence and mapped pools are the thesis; fresh POI is entry
+    # confirmation; momentum/RSI/orderflow proxies stay secondary.
     "structure_alignment": 8.0,
-    "liquidity_confluence": 13.0,
-    "fib_location": 7.0,
-    "fvg_ob_refinement": 5.0,
-    "rsi_projection": 11.0,
-    "momentum_current": 4.0,
+    "liquidity_confluence": 19.0,
+    "ict_liquidity_sequence": 25.0,
+    "fib_location": 6.0,
+    "fvg_ob_refinement": 6.0,
+    "rsi_projection": 5.0,
+    "momentum_current": 2.0,
     "invalidation_quality": 8.0,
     "target_quality": 7.0,
-    "rr_quality": 4.0,
+    "rr_quality": 3.0,
     "entry_reachability": 3.0,
     "volume_confirmation": 5.0,
-    "orderflow_leg": 8.0,
-    "price_leg": 8.0,
-    "support_resistance": 9.0,
+    "orderflow_leg": 1.0,
+    "price_leg": 1.0,
+    "support_resistance": 1.0,
 }
 THESIS_WAITING_CAP_V2 = 78.0  # batas atas lunak; pengurangnya ada di THESIS_WAITING_PENALTY_V2
 THESIS_WAITING_PENALTY_V2 = _env_float("THESIS_WAITING_PENALTY_V2", 6.0, 0.0, 30.0)
@@ -5237,6 +5280,249 @@ def _v2_mark_liquidity_roles(
                 zone.role = "TARGET_LIQUIDITY" if zone.midpoint < current else "INTERNAL_LIQUIDITY"
 
 
+def _v2_month_start_ms(time_ms: int) -> int:
+    dt = datetime.fromtimestamp(time_ms / 1000.0, tz=timezone.utc)
+    return int(datetime(dt.year, dt.month, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _v2_next_month_start_ms(month_start_ms: int) -> int:
+    dt = datetime.fromtimestamp(month_start_ms / 1000.0, tz=timezone.utc)
+    if dt.month == 12:
+        nxt = datetime(dt.year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        nxt = datetime(dt.year, dt.month + 1, 1, tzinfo=timezone.utc)
+    return int(nxt.timestamp() * 1000)
+
+
+def _v2_complete_daily_from_h4(h4: list[Candle], asof_ms: int) -> list[Candle]:
+    """Aggregate only fully closed UTC days containing six consecutive H4 bars."""
+    day_ms = 24 * 60 * 60_000
+    groups: dict[int, list[Candle]] = {}
+    for candle in h4:
+        bucket = (candle.time_ms // day_ms) * day_ms
+        groups.setdefault(bucket, []).append(candle)
+    out: list[Candle] = []
+    for start, rows in sorted(groups.items()):
+        rows.sort(key=lambda x: x.time_ms)
+        if start + day_ms > asof_ms or len(rows) != 6:
+            continue
+        if any(c.time_ms != start + i * H4_MS for i, c in enumerate(rows)):
+            continue
+        out.append(Candle(
+            time_ms=start, open=rows[0].open,
+            high=max(c.high for c in rows), low=min(c.low for c in rows),
+            close=rows[-1].close, volume=sum(c.volume for c in rows),
+            turnover=sum(c.turnover for c in rows),
+        ))
+    return out
+
+
+def _v2_ref_level_consumed(
+    side: str, level: float, formed_ms: int, candles: list[Candle], current: float, atr: float,
+) -> tuple[bool, int | None]:
+    """A target pool is consumed only by a post-formation trade through its level."""
+    tol = max(level * 0.0002, atr * 0.05)
+    if side == "BUY_SIDE" and current > level + tol:
+        return True, None
+    if side == "SELL_SIDE" and current < level - tol:
+        return True, None
+    for idx, candle in enumerate(candles):
+        if candle.time_ms < formed_ms:
+            continue
+        if side == "BUY_SIDE" and candle.high > level + tol:
+            return True, idx
+        if side == "SELL_SIDE" and candle.low < level - tol:
+            return True, idx
+    return False, None
+
+
+def _v2_ict_reference_levels(
+    candles_by_tf: dict[str, list[Candle]],
+    structures: dict[str, StructureSnapshot],
+    current: float,
+) -> tuple[list[LiquidityZone], dict[str, Any]]:
+    """First-class PDH/PDL, PWH/PWL, PMH/PML, completed session and trendline pools.
+
+    Period levels are emitted only when their full historical interval is present.
+    The reference transcript names the levels but doesn't define session hours;
+    we use explicit fixed UTC windows (Asia 00-08, London 07-16, New York 13-22)
+    as an approximation, and publish the hours in the returned audit metadata.
+    """
+    h4 = candles_by_tf.get("H4") or []
+    h1 = candles_by_tf.get("H1") or []
+    m15 = candles_by_tf.get("M15") or []
+    if not h4 or not m15:
+        return [], {"available": False, "missing": [x for x, v in (("H4", h4), ("M15", m15)) if not v]}
+    asof_ms = max(m15[-1].time_ms + M15_MS, h4[-1].time_ms + H4_MS)
+    h1_atr_vals = atr_series(h1, 14) if h1 else []
+    h4_atr_vals = atr_series(h4, 14)
+    base_atr = h1_atr_vals[-1] if h1_atr_vals else (h4_atr_vals[-1] if h4_atr_vals else current * 0.005)
+    h4_atr = h4_atr_vals[-1] if h4_atr_vals else base_atr
+    zone_half = max(current * 0.0002, base_atr * ICT_REFERENCE_ZONE_ATR)
+    result: list[LiquidityZone] = []
+    available: dict[str, Any] = {"PDH": False, "PDL": False, "PWH": False, "PWL": False,
+                                 "PMH": False, "PML": False, "ASIA": False, "LONDON": False,
+                                 "NEW_YORK": False, "TRENDLINE_LIQUIDITY": False}
+
+    def add_level(side: str, level: float, source: str, timeframe: str, strength: float,
+                  formed_ms: int, history: list[Candle] | None = None) -> None:
+        if not math.isfinite(level) or level <= 0:
+            return
+        history = history if history is not None else h4
+        swept, swept_index = _v2_ref_level_consumed(side, level, formed_ms, history, current, base_atr)
+        dist_atr = abs(level - current) / max(base_atr, EPS)
+        idx = max(0, len(history) - 1)
+        result.append(LiquidityZone(
+            side=side, low=round_price(level - zone_half), high=round_price(level + zone_half),
+            midpoint=round_price(level), strength=round(clamp(strength), 2), timeframe=timeframe,
+            touches=1, source_types=[source], first_index=idx, last_index=idx,
+            swept=swept, sweep_index=swept_index,
+            distance_pct=round(distance_pct(current, level), 5),
+            distance_atr=round(dist_atr, 4), significance=round(clamp(strength - (LIQ_SWEEP_PENALTY if swept else 0.0)), 2),
+            role="EXTERNAL_LIQUIDITY",
+        ))
+
+    # Only candles that form a complete UTC day may define a prior-day level.
+    daily = _v2_complete_daily_from_h4(h4, asof_ms)
+    day_ms = 24 * 60 * 60_000
+    if daily:
+        prev_day = daily[-1]
+        # A stale day caused by missing history must not be mislabeled as PDH/PDL.
+        if 0 <= asof_ms - (prev_day.time_ms + day_ms) <= day_ms:
+            add_level("BUY_SIDE", prev_day.high, "PDH", "D1", 78.0, prev_day.time_ms + day_ms)
+            add_level("SELL_SIDE", prev_day.low, "PDL", "D1", 78.0, prev_day.time_ms + day_ms)
+            available["PDH"] = available["PDL"] = True
+
+        # Previous completed Monday-Sunday UTC week. We don't infer a weekly range
+        # from a partial week or from gaps in the daily source.
+        weeks: dict[int, list[Candle]] = {}
+        for day in daily:
+            dt = datetime.fromtimestamp(day.time_ms / 1000.0, tz=timezone.utc)
+            monday = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc) - timedelta(days=dt.weekday())
+            wk_start = int(monday.timestamp() * 1000)
+            weeks.setdefault(wk_start, []).append(day)
+        asof_dt = datetime.fromtimestamp(asof_ms / 1000.0, tz=timezone.utc)
+        current_monday_dt = datetime(asof_dt.year, asof_dt.month, asof_dt.day, tzinfo=timezone.utc) - timedelta(days=asof_dt.weekday())
+        current_week_start = int(current_monday_dt.timestamp() * 1000)
+        full_weeks: list[tuple[int, list[Candle]]] = []
+        week_ms = 7 * day_ms
+        for wk_start, rows in sorted(weeks.items()):
+            rows = sorted(rows, key=lambda x: x.time_ms)
+            if wk_start >= current_week_start or wk_start + week_ms > asof_ms or len(rows) != 7:
+                continue
+            if any(c.time_ms != wk_start + i * day_ms for i, c in enumerate(rows)):
+                continue
+            full_weeks.append((wk_start, rows))
+        if full_weeks:
+            wk_start, rows = full_weeks[-1]
+            formed_ms = wk_start + week_ms
+            add_level("BUY_SIDE", max(c.high for c in rows), "PWH", "W1", 88.0, formed_ms)
+            add_level("SELL_SIDE", min(c.low for c in rows), "PWL", "W1", 88.0, formed_ms)
+            available["PWH"] = available["PWL"] = True
+
+        # Previous fully completed calendar month; missing dates suppress the level.
+        months: dict[int, list[Candle]] = {}
+        for day in daily:
+            month_start = _v2_month_start_ms(day.time_ms)
+            months.setdefault(month_start, []).append(day)
+        current_month_start = _v2_month_start_ms(asof_ms)
+        full_months: list[tuple[int, list[Candle]]] = []
+        for month_start, rows in sorted(months.items()):
+            month_end = _v2_next_month_start_ms(month_start)
+            days_expected = (month_end - month_start) // day_ms
+            rows = sorted(rows, key=lambda x: x.time_ms)
+            if month_end > current_month_start or month_end > asof_ms or len(rows) != days_expected:
+                continue
+            if any(c.time_ms != month_start + i * day_ms for i, c in enumerate(rows)):
+                continue
+            full_months.append((month_start, rows))
+        if full_months:
+            month_start, rows = full_months[-1]
+            formed_ms = _v2_next_month_start_ms(month_start)
+            add_level("BUY_SIDE", max(c.high for c in rows), "PMH", "MN1", 94.0, formed_ms)
+            add_level("SELL_SIDE", min(c.low for c in rows), "PML", "MN1", 94.0, formed_ms)
+            available["PMH"] = available["PML"] = True
+
+    # Completed session liquidity levels from closed M15 bars only.
+    session_specs = {"ASIA": (0, 8), "LONDON": (7, 16), "NEW_YORK": (13, 22)}
+    session_groups: dict[tuple[str, int], list[Candle]] = {}
+    for candle in m15:
+        dt = datetime.fromtimestamp(candle.time_ms / 1000.0, tz=timezone.utc)
+        for name, (start_hour, end_hour) in session_specs.items():
+            if start_hour <= dt.hour < end_hour:
+                day_start = int(datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc).timestamp() * 1000)
+                session_groups.setdefault((name, day_start), []).append(candle)
+    for name, (start_hour, end_hour) in session_specs.items():
+        expected = (end_hour - start_hour) * 4
+        candidates: list[tuple[int, list[Candle]]] = []
+        for (group_name, day_start), rows in session_groups.items():
+            if group_name != name:
+                continue
+            start_ms = day_start + start_hour * 60 * 60_000
+            end_ms = day_start + end_hour * 60 * 60_000
+            rows = sorted(rows, key=lambda x: x.time_ms)
+            if end_ms > asof_ms or len(rows) != expected:
+                continue
+            if any(c.time_ms != start_ms + i * M15_MS for i, c in enumerate(rows)):
+                continue
+            candidates.append((end_ms, rows))
+        if candidates:
+            formed_ms, rows = max(candidates, key=lambda x: x[0])
+            add_level("BUY_SIDE", max(c.high for c in rows), f"{name}_HIGH", "SESSION", ICT_SESSION_LEVEL_STRENGTH, formed_ms, m15)
+            add_level("SELL_SIDE", min(c.low for c in rows), f"{name}_LOW", "SESSION", ICT_SESSION_LEVEL_STRENGTH, formed_ms, m15)
+            available[name] = True
+
+    # Trendline liquidity proxy: project a well-ordered 3-pivot H1 trendline to
+    # the latest closed H1 bar; only keep a nearby line on the proper side.
+    st = structures.get("H1")
+    if st and len(h1) >= 10:
+        trendline_found = False
+        for pivots, side, label, monotonic in (
+            (st.swing_lows[-3:], "SELL_SIDE", "ASCENDING_SUPPORT_TRENDLINE_SSL", "up"),
+            (st.swing_highs[-3:], "BUY_SIDE", "DESCENDING_RESISTANCE_TRENDLINE_BSL", "down"),
+        ):
+            if len(pivots) != 3:
+                continue
+            prices = [p.price for p in pivots]
+            if monotonic == "up" and not (prices[0] < prices[1] < prices[2]):
+                continue
+            if monotonic == "down" and not (prices[0] > prices[1] > prices[2]):
+                continue
+            dx = pivots[2].index - pivots[0].index
+            if dx <= 0:
+                continue
+            slope = (prices[2] - prices[0]) / dx
+            projected = prices[2] + slope * max(0, len(h1) - 1 - pivots[2].index)
+            if projected <= 0 or abs(projected - current) > 3.0 * max(base_atr, EPS):
+                continue
+            if side == "SELL_SIDE" and projected < current:
+                formed_ms = h1[pivots[2].index].time_ms + H1_MS * 2
+                add_level(side, projected, label, "H1", 68.0, formed_ms)
+                trendline_found = True
+            elif side == "BUY_SIDE" and projected > current:
+                formed_ms = h1[pivots[2].index].time_ms + H1_MS * 2
+                add_level(side, projected, label, "H1", 68.0, formed_ms)
+                trendline_found = True
+        available["TRENDLINE_LIQUIDITY"] = trendline_found
+
+    return result, {
+        "available": True,
+        "period_levels": available,
+        "session_hours_utc": {"ASIA": "00:00-08:00", "LONDON": "07:00-16:00", "NEW_YORK": "13:00-22:00"},
+        "session_hours_note": "fixed UTC approximations; source transcript did not specify timezone/session boundaries",
+        "daily_bars_available": len(daily),
+        "asof_utc": datetime.fromtimestamp(asof_ms / 1000.0, tz=timezone.utc).isoformat(),
+    }
+
+
+def base_atr_for_liquidity(candles_by_tf: dict[str, list[Candle]]) -> float:
+    h1 = candles_by_tf.get("H1") or []
+    h4 = candles_by_tf.get("H4") or []
+    source = h1 if h1 else h4
+    values = atr_series(source, 14) if source else []
+    return values[-1] if values else (source[-1].range if source else 1.0)
+
+
 def _v2_build_liquidity_map(
     candles_by_tf: dict[str, list[Candle]],
     structures: dict[str, StructureSnapshot],
@@ -5280,6 +5566,28 @@ def _v2_build_liquidity_map(
         if not overlap:
             merged.append(zone)
 
+    # Add explicit ICT dealing-range reference levels. These levels are only
+    # created from completed periods; incomplete day/week/month/session ranges
+    # are not presented as confirmed liquidity pools.
+    reference_zones, reference_availability = _v2_ict_reference_levels(candles_by_tf, structures, current)
+    timeframe_rank = {"M15": 1, "H1": 2, "H4": 3, "SESSION": 4, "D1": 5, "W1": 6, "MN1": 7}
+    for ref in reference_zones:
+        ref.distance_pct = round(distance_pct(current, ref.midpoint), 5)
+        ref.distance_atr = round(abs(ref.midpoint - current) / max(base_atr_for_liquidity(candles_by_tf), EPS), 4)
+        existing = next((z for z in merged if z.side == ref.side and abs(z.midpoint - ref.midpoint) <= max(current * 0.0005, ref.high - ref.low)), None)
+        if existing is not None:
+            existing.source_types = sorted(set(existing.source_types + ref.source_types))
+            existing.touches = max(existing.touches, ref.touches)
+            existing.strength = round(clamp(max(existing.strength, ref.strength) + 3.0), 2)
+            existing.significance = round(clamp(max(existing.significance, ref.significance) + 4.0), 2)
+            existing.low = min(existing.low, ref.low)
+            existing.high = max(existing.high, ref.high)
+            existing.swept = bool(existing.swept or ref.swept)
+            if timeframe_rank.get(ref.timeframe, 0) > timeframe_rank.get(existing.timeframe, 0):
+                existing.timeframe = ref.timeframe
+                existing.role = ref.role
+        else:
+            merged.append(ref)
     for z in merged:
         z.distance_pct = round(distance_pct(current, z.midpoint), 5)
         z.role = "INTERNAL_LIQUIDITY"
@@ -5304,6 +5612,330 @@ def _v2_build_liquidity_map(
         "significant_below": significant_below,
         "magnet": magnet,
         "direction": direction,
+        "ict_reference_availability": reference_availability,
+    }
+
+
+def _v2_ict_liquidity_context(
+    m15: list[Candle],
+    h4: list[Candle],
+    liquidity_map: dict[str, Any],
+    direction: str,
+    m15_structure: StructureSnapshot,
+    h4_structure: StructureSnapshot,
+    current: float,
+) -> dict[str, Any]:
+    """Classify the latest internal/external liquidity interaction without assuming every sweep reverses."""
+    desired = "BULLISH" if direction == "BUY" else "BEARISH"
+    zones = liquidity_map.get("all") or []
+    h4_window = h4[-32:] if h4 else []
+    dealing_high = max((c.high for c in h4_window), default=current)
+    dealing_low = min((c.low for c in h4_window), default=current)
+    if not m15:
+        return {"available": False, "score": 35.0, "direction": direction,
+                "classification": "NO_M15_HISTORY", "confirmed_for_direction": False}
+    atrs = atr_series(m15, 14)
+    relvol = relative_volume(m15, 20)
+    candidates: list[dict[str, Any]] = []
+    # Scan only the recent closed M15 bars. The range is recomputed from bars
+    # strictly before each candidate bar; no later candle participates in a signal.
+    start = max(20, len(m15) - ICT_EVENT_LOOKBACK_M15)
+    for i in range(start, len(m15)):
+        prior = m15[max(0, i - 20):i]
+        if len(prior) < 12:
+            continue
+        c = m15[i]
+        atr = atrs[i] if i < len(atrs) else max(c.range, current * 0.001)
+        tolerance = max(c.close * 0.00025, atr * 0.08)
+        prior_high = max(x.high for x in prior)
+        prior_low = min(x.low for x in prior)
+        rng = max(c.range, EPS)
+        upper_wick = (c.high - max(c.open, c.close)) / rng
+        lower_wick = (min(c.open, c.close) - c.low) / rng
+        body_atr = c.body / max(atr, EPS)
+        rv = relvol[i] if i < len(relvol) else 1.0
+        close_pos = (c.close - c.low) / rng
+        # A sweep needs a breach + reclaim. A run needs a decisive close outside
+        # the range with participation/displacement. They are different states.
+        event = None
+        if c.high > prior_high + tolerance and c.close < prior_high and upper_wick >= ICT_SWEEP_WICK_RATIO:
+            event = {"kind": "BUY_SIDE_SWEEP", "direction": "SELL", "liquidity_side": "BUY_SIDE",
+                     "level": prior_high, "wick_ratio": upper_wick, "break_distance": c.high - prior_high,
+                     "turtle_soup": True}
+        elif c.low < prior_low - tolerance and c.close > prior_low and lower_wick >= ICT_SWEEP_WICK_RATIO:
+            event = {"kind": "SELL_SIDE_SWEEP", "direction": "BUY", "liquidity_side": "SELL_SIDE",
+                     "level": prior_low, "wick_ratio": lower_wick, "break_distance": prior_low - c.low,
+                     "turtle_soup": True}
+        elif c.close > prior_high + tolerance and close_pos >= 0.70 and body_atr >= ICT_RUN_MIN_BODY_ATR and (rv >= ICT_RUN_MIN_REL_VOLUME or body_atr >= 1.0):
+            event = {"kind": "BUY_SIDE_LIQUIDITY_RUN", "direction": "BUY", "liquidity_side": "BUY_SIDE",
+                     "level": prior_high, "wick_ratio": upper_wick, "break_distance": c.close - prior_high,
+                     "turtle_soup": False}
+        elif c.close < prior_low - tolerance and close_pos <= 0.30 and body_atr >= ICT_RUN_MIN_BODY_ATR and (rv >= ICT_RUN_MIN_REL_VOLUME or body_atr >= 1.0):
+            event = {"kind": "SELL_SIDE_LIQUIDITY_RUN", "direction": "SELL", "liquidity_side": "SELL_SIDE",
+                     "level": prior_low, "wick_ratio": lower_wick, "break_distance": prior_low - c.close,
+                     "turtle_soup": False}
+        if event:
+            nearest_pool = min(
+                (z for z in zones if z.side == event["liquidity_side"]),
+                key=lambda z: abs(z.midpoint - safe_float(event["level"])),
+                default=None,
+            )
+            pool_distance = abs(nearest_pool.midpoint - safe_float(event["level"])) if nearest_pool else math.inf
+            pool_distance_atr = pool_distance / max(atr, EPS) if math.isfinite(pool_distance) else math.inf
+            pool_tolerance = max(atr * ICT_POOL_MATCH_MAX_ATR, c.close * ICT_POOL_MATCH_MAX_PRICE_PCT / 100.0)
+            pool_match_valid = bool(
+                nearest_pool is not None
+                and pool_distance <= pool_tolerance
+                and safe_float(nearest_pool.strength, 0.0) >= ICT_POOL_MIN_STRENGTH
+            )
+            # Ignore isolated range breaks with no nearby mapped liquidity pool.
+            if not pool_match_valid:
+                continue
+            source_types = set(nearest_pool.source_types if nearest_pool else [])
+            named_external = bool(source_types.intersection({
+                "PDH", "PDL", "PWH", "PWL", "PMH", "PML",
+                "ASIA_HIGH", "ASIA_LOW", "LONDON_HIGH", "LONDON_LOW",
+                "NEW_YORK_HIGH", "NEW_YORK_LOW",
+            }))
+            range_span = max(dealing_high - dealing_low, EPS)
+            near_h4_extreme = (
+                abs(safe_float(event["level"]) - dealing_high) <= range_span * 0.12
+                or abs(safe_float(event["level"]) - dealing_low) <= range_span * 0.12
+            )
+            external_pool = bool(named_external or (safe_float(nearest_pool.strength, 0.0) >= 60.0 and near_h4_extreme))
+            event.update({
+                "index": i, "time_ms": c.time_ms,
+                "relative_volume": round(rv, 3), "body_atr": round(body_atr, 3),
+                "close_position": round(close_pos, 3),
+                "range_reference": "PREVIOUS_20_CLOSED_M15_BARS",
+                "pool_match_valid": True,
+                "pool_match_distance_atr": round(pool_distance_atr, 4),
+                "pool_strength": round(safe_float(nearest_pool.strength), 2),
+                "pool_significance": round(safe_float(nearest_pool.significance), 2),
+                "pool_class": "EXTERNAL_RANGE_LIQUIDITY" if external_pool else "INTERNAL_RANGE_LIQUIDITY",
+                "external_pool": external_pool,
+                "matched_pool": _v2_serialize_liquidity_zone(nearest_pool) if nearest_pool else None,
+            })
+            candidates.append(event)
+    latest = candidates[-1] if candidates else None
+
+    # Draw-on-liquidity (DOL): the nearest valid, unconsumed liquidity pool in
+    # the proposed trade direction; it is a possible objective, never a promise.
+    target_side = "BUY_SIDE" if direction == "BUY" else "SELL_SIDE"
+    target_pool = None
+    forward = [z for z in zones if z.side == target_side and not z.swept and
+               ((z.midpoint > current) if direction == "BUY" else (z.midpoint < current)) and z.significance >= 55.0]
+    if forward:
+        # Prefer meaningful external/HTF liquidity but do not skip arbitrarily
+        # closer unswept pools; distance and timeframe contribute to rank.
+        def dol_rank(z: LiquidityZone) -> tuple[float, float, float]:
+            src = set(z.source_types)
+            ext_bonus = 26.0 if src.intersection({"PMH", "PML", "PWH", "PWL"}) else 18.0 if src.intersection({"PDH", "PDL"}) else 8.0 if z.timeframe in {"H4", "W1", "MN1", "D1"} else 0.0
+            dist = abs(z.midpoint - current)
+            return (z.significance + ext_bonus - min(30.0, dist / max(base_atr_for_liquidity({"H4": h4}) , EPS) * 3.0), -dist, z.strength)
+        target_pool = max(forward, key=dol_rank)
+    target_level = target_pool.midpoint if target_pool else None
+    target_external = bool(target_pool and (
+        set(target_pool.source_types).intersection({"PMH", "PML", "PWH", "PWL", "PDH", "PDL"}) or
+        (direction == "BUY" and target_pool.midpoint >= dealing_high) or
+        (direction == "SELL" and target_pool.midpoint <= dealing_low)
+    ))
+    barriers = []
+    if target_pool:
+        for z in zones:
+            if z is target_pool or z.side != target_side or z.swept or z.significance < 65:
+                continue
+            between = current < z.midpoint < target_pool.midpoint if direction == "BUY" else target_pool.midpoint < z.midpoint < current
+            if between:
+                barriers.append({"level": z.midpoint, "timeframe": z.timeframe, "significance": z.significance,
+                                 "source_types": z.source_types})
+    resistance_count = len(barriers)
+    resistance_class = "LOW_RESISTANCE_LIQUIDITY_RUN" if resistance_count <= 1 else (
+        "MODERATE_RESISTANCE_LIQUIDITY_RUN" if resistance_count == 2 else "HIGH_RESISTANCE_LIQUIDITY_RUN")
+
+    # Gray pools are unswept equal highs/lows: still potential liquidity, not
+    # guaranteed magnets. IRL/ERL is classified against the current H4 range.
+    gray_pools = [
+        {"side": z.side, "level": z.midpoint, "timeframe": z.timeframe, "significance": z.significance,
+         "source_types": z.source_types}
+        for z in zones if not z.swept and z.significance >= 60 and "EQUAL_LEVEL" in z.source_types
+    ][:12]
+    entry_side = "SELL_SIDE" if direction == "BUY" else "BUY_SIDE"
+    entry_pool = min(
+        (z for z in zones if z.side == entry_side and not z.swept),
+        key=lambda z: abs(z.midpoint - current), default=None,
+    )
+    entry_range_class = "EXTERNAL_RANGE_LIQUIDITY" if entry_pool and (
+        entry_pool.midpoint < dealing_low or entry_pool.midpoint > dealing_high
+    ) else "INTERNAL_RANGE_LIQUIDITY"
+
+    # ICT sequence confirmation: a sweep is only a reversal candidate after a
+    # subsequent MSS/CHOCH/BOS. A qualified range-break run can itself represent
+    # continuation BOS, but only when the HTF structure is not opposing it.
+    # This also prevents the old failure mode where CHOCH was ignored entirely.
+    confirm_events: list[dict[str, Any]] = []
+    want_struct = "BULLISH" if direction == "BUY" else "BEARISH"
+    if latest:
+        for ev in m15_structure.events:
+            if ev.get("type") not in {"MSS", "BOS", "CHOCH"} or ev.get("direction") != want_struct:
+                continue
+            if not bool(ev.get("confirmed", True)):
+                continue
+            ev_idx = int(ev.get("index", -1))
+            if ev_idx < 0 or len(m15) - 1 - ev_idx > THESIS_MAX_TRIGGER_AGE_M15:
+                continue
+            gap = ev_idx - int(latest["index"])
+            if latest["kind"].endswith("_SWEEP"):
+                if 1 <= gap <= ICT_SWEEP_CONFIRM_MAX_M15_BARS:
+                    confirm_events.append(ev)
+            elif gap >= 0:
+                confirm_events.append(ev)
+    confirm_event = max(confirm_events, key=lambda x: int(x.get("index", -1)), default=None)
+    event_matches = bool(latest and latest.get("direction") == direction)
+
+    # If a true sweep/reclaim is followed by a clear closed-candle break of a
+    # small post-sweep swing, accept it as a micro-CHOCH. The data still must show
+    # an actual close beyond a post-sweep reference; merely touching a level is
+    # not enough. This is an OHLCV approximation of the M5/M15 structure shift.
+    if latest and event_matches and latest["kind"].endswith("_SWEEP") and confirm_event is None:
+        sweep_index = int(latest.get("index", -1))
+        bars_after = len(m15) - 1 - sweep_index
+        if 2 <= bars_after <= ICT_SWEEP_CONFIRM_MAX_M15_BARS:
+            last_bar = m15[-1]
+            ref_bars = m15[max(sweep_index + 1, len(m15) - ICT_MICRO_CHOCH_LOOKBACK - 1):-1]
+            atr_now = atrs[-1] if atrs else max(last_bar.range, current * 0.001)
+            rv_now = relvol[-1] if relvol else 1.0
+            break_buffer = max(current * 0.00015, atr_now * 0.025)
+            if ref_bars and last_bar.body / max(atr_now, EPS) >= ICT_SWEEP_CONFIRM_MIN_BODY_ATR and rv_now >= ICT_SWEEP_CONFIRM_MIN_REL_VOLUME:
+                if direction == "BUY":
+                    micro_level = max(c.high for c in ref_bars)
+                    micro_break = last_bar.close > micro_level + break_buffer and last_bar.close > last_bar.open
+                else:
+                    micro_level = min(c.low for c in ref_bars)
+                    micro_break = last_bar.close < micro_level - break_buffer and last_bar.close < last_bar.open
+                if micro_break:
+                    confirm_event = {
+                        "type": "CHOCH", "direction": want_struct,
+                        "index": len(m15) - 1, "level": round_price(micro_level),
+                        "displacement": round(last_bar.body / max(atr_now, EPS), 3),
+                        "confirmed": True, "source": "POST_SWEEP_MICRO_BREAK",
+                    }
+
+    # Countertrend reversals need an external sweep/reclaim and a recent H4
+    # MSS/CHOCH in the proposed direction. Continuation runs must respect H4.
+    h4_shift_recent = False
+    for ev in h4_structure.events:
+        if ev.get("type") not in {"MSS", "CHOCH"} or ev.get("direction") != want_struct or not bool(ev.get("confirmed", True)):
+            continue
+        ev_idx = int(ev.get("index", -1))
+        if ev_idx >= 0 and len(h4) - 1 - ev_idx <= ICT_HTF_REVERSAL_MAX_BARS:
+            h4_shift_recent = True
+            break
+    h4_aligned = h4_structure.trend in {want_struct, "RANGE"}
+    is_sweep = bool(latest and latest.get("kind", "").endswith("_SWEEP"))
+    is_run = bool(latest and "_LIQUIDITY_RUN" in latest.get("kind", ""))
+    external_pool_event = bool(latest and latest.get("external_pool"))
+    countertrend_sweep_ok = bool(is_sweep and external_pool_event and h4_shift_recent)
+    context_conflict = bool(latest and event_matches and (
+        (is_run and h4_structure.trend not in {want_struct, "RANGE"})
+        or (is_run and h4_structure.trend == "RANGE" and not external_pool_event)
+        or (is_sweep and h4_structure.trend not in {want_struct, "RANGE"} and not countertrend_sweep_ok)
+    ))
+    run_context_confirmed = bool(
+        latest and event_matches and is_run
+        and h4_structure.trend in {want_struct, "RANGE"}
+        and (h4_structure.trend == want_struct or external_pool_event)
+        and safe_float(latest.get("body_atr"), 0.0) >= ICT_RUN_MIN_BODY_ATR
+        and (safe_float(latest.get("relative_volume"), 1.0) >= ICT_RUN_MIN_REL_VOLUME
+             or safe_float(latest.get("body_atr"), 0.0) >= 1.0)
+    )
+    if context_conflict:
+        confirm_event = None
+    elif run_context_confirmed and confirm_event is None:
+        confirm_event = {
+            "type": "BOS", "direction": want_struct,
+            "index": int(latest["index"]), "level": round_price(safe_float(latest.get("level"))),
+            "confirmed": True, "source": "QUALIFIED_MAPPED_LIQUIDITY_RUN",
+        }
+    sequence_confirmed = bool(
+        event_matches and confirm_event and latest and latest.get("pool_match_valid")
+        and not context_conflict and (not is_run or run_context_confirmed)
+        and (not is_sweep or h4_structure.trend in {want_struct, "RANGE"} or countertrend_sweep_ok)
+    )
+    if latest is None:
+        classification = "NO_RECENT_LIQUIDITY_EVENT"
+        score = 38.0 if h4_structure.trend not in {"RANGE", "NEUTRAL"} else 32.0
+        reason = "Belum ada mapped sweep-reclaim atau mapped liquidity-run terkonfirmasi pada M15 terbaru."
+    elif not event_matches:
+        classification = "OPPOSING_LIQUIDITY_EVENT"
+        score = 10.0
+        reason = f"Peristiwa terbaru {latest['kind']} mendukung {latest['direction']}, bukan {direction}."
+    elif context_conflict:
+        classification = "LIQUIDITY_EVENT_CONFLICTS_HTF"
+        score = 22.0
+        reason = "Event M15 konflik dengan H4: run harus searah HTF; sweep countertrend memerlukan external pool dan H4 MSS/CHOCH searah."
+    elif not sequence_confirmed:
+        classification = "LIQUIDITY_EVENT_WAITING_FOR_STRUCTURE"
+        score = 54.0 if external_pool_event else 46.0
+        reason = "Mapped liquidity event ditemukan, tetapi struktur tertutup atau konteks belum mengonfirmasi arah."
+    elif latest["kind"].endswith("_SWEEP"):
+        confirm_type = str((confirm_event or {}).get("type") or "MSS")
+        if confirm_type == "CHOCH":
+            classification = "TURTLE_SOUP_SWEEP_CHOCH" if latest.get("turtle_soup") else "SWEEP_CHOCH"
+            score = 86.0 if latest.get("relative_volume", 1.0) >= 0.9 else 78.0
+            reason = "Sweep/reclaim diikuti CHOCH atau micro-break tertutup; ini konfirmasi awal, bukan jaminan reversal."
+        else:
+            classification = "TURTLE_SOUP_SWEEP_MSS" if latest.get("turtle_soup") else "SWEEP_MSS"
+            score = 96.0 if latest.get("relative_volume", 1.0) >= 0.9 else 84.0
+            reason = "Sweep/reclaim berlanjut ke MSS/BOS setelah sweep; reversal dikonfirmasi struktur, bukan sweep saja."
+        if not external_pool_event:
+            score -= 10.0
+            reason += " Event berada pada internal liquidity, jadi skornya lebih rendah dari external sweep."
+        if h4_structure.trend not in {want_struct, "RANGE"} and countertrend_sweep_ok:
+            score -= 5.0
+            reason += " Countertrend diterima hanya setelah external sweep dan H4 MSS/CHOCH terbaru searah."
+    else:
+        classification = "LIQUIDITY_RUN_PULLBACK"
+        score = 92.0 if latest.get("relative_volume", 1.0) >= ICT_RUN_MIN_REL_VOLUME else 80.0
+        if not external_pool_event:
+            score -= 8.0
+        reason = "Break/close melewati mapped pool didukung displacement/volume serta BOS searah; continuation, bukan reversal."
+
+    return {
+        "available": True,
+        "direction": direction,
+        "classification": classification,
+        "score": round(score, 2),
+        "latest_event": latest,
+        "structure_confirmation": confirm_event,
+        "event_matches_direction": event_matches,
+        "sequence_confirmed": sequence_confirmed,
+        "confirmed_for_direction": sequence_confirmed,
+        "h4_structure": h4_structure.trend,
+        "h4_aligned": h4_aligned,
+        "h4_shift_recent_in_trade_direction": h4_shift_recent,
+        "external_pool_event": external_pool_event,
+        "countertrend_sweep_requirements_met": countertrend_sweep_ok,
+        "reason": reason,
+        "draw_on_liquidity": {
+            "side": target_side, "level": round_price(target_level) if target_level else None,
+            "timeframe": target_pool.timeframe if target_pool else None,
+            "source_types": target_pool.source_types if target_pool else [],
+            "significance": target_pool.significance if target_pool else None,
+            "external_range_liquidity": target_external,
+            "certainty": "POTENTIAL_OBJECTIVE_NOT_GUARANTEED",
+        },
+        "liquidity_resistance": {"class": resistance_class, "obstacle_count": resistance_count, "obstacles": barriers[:8]},
+        "entry_liquidity_class": entry_range_class,
+        "dealing_range_h4": {"high": round_price(dealing_high), "low": round_price(dealing_low)},
+        "gray_pools": gray_pools,
+        "inducement": {
+            "interpretation": "POTENTIAL_INDUCEMENT_IF_LOCAL_BREAKOUT_IS_RECLAIMED_BEFORE_EXTERNAL_DRAW",
+            "identified": bool(latest and latest.get("turtle_soup")),
+            "note": "Inducement is an inferred move from OHLCV, not a claim about institutional intent.",
+        },
+        "trendline_liquidity_available": any("TRENDLINE_LIQUIDITY" in z.source_types for z in zones),
+        "context_warning": "Liquidity already taken is not an automatic reversal; untouched liquidity is not a guaranteed target. Confirm with structure and context.",
     }
 
 
@@ -5567,20 +6199,40 @@ def _v2_refine_location(
     direction: str,
     h1_ctx: dict[str, Any],
     m15_ctx: dict[str, Any],
+    current: float | None = None,
 ) -> dict[str, Any]:
+    """Refine the liquidity/Fibonacci entry area only with a fresh POI of the correct side.
+
+    ICT/SMC POI direction is explicit: BUY accepts bullish FVG/OB/breaker,
+    SELL accepts bearish FVG/OB/breaker. A POI also has to be on the retracement
+    side of current price so a pending limit does not use an already-crossed zone.
+    """
     low = safe_float(location["zone_low"])
     high = safe_float(location["zone_high"])
     parent = Zone("LOCATION_ZONE", low, high, 0, "LIQUIDITY_FIB", strength=location["confluence"])
+    wanted = {
+        "BUY": {"BULLISH_FVG", "BULLISH_OB", "BULLISH_BREAKER"},
+        "SELL": {"BEARISH_FVG", "BEARISH_OB", "BEARISH_BREAKER"},
+    }.get(str(direction).upper(), set())
+    if current is None:
+        current = safe_float(m15_ctx.get("current_price"), safe_float(h1_ctx.get("current_price"), 0.0))
+    current = safe_float(current)
     refinements: list[tuple[float, Zone, str]] = []
     for source_name, ctx in (("H1", h1_ctx), ("M15", m15_ctx)):
         for z in (ctx.get("fvg") or []) + (ctx.get("obs") or []) + (ctx.get("breakers") or []):
-            if z.status == "FAILED":
+            # combined.txt prioritizes a fresh zone. Mitigated/failed zones may
+            # explain history but are not fresh pending-entry POIs.
+            if z.status != "ACTIVE" or z.kind not in wanted:
+                continue
+            # Do not treat a zone already on the far side of price as a future pullback.
+            if current > 0 and (
+                (direction == "BUY" and z.midpoint >= current)
+                or (direction == "SELL" and z.midpoint <= current)
+            ):
                 continue
             overlap = zone_overlap_ratio(parent, z)
             if overlap >= REFINEMENT_MIN_OVERLAP:
                 q = clamp(z.strength * 0.55 + overlap * 45.0)
-                if z.status == "MITIGATED":
-                    q *= 0.7
                 refinements.append((q, z, source_name))
     refinements.sort(key=lambda x: x[0], reverse=True)
     best = refinements[0] if refinements else None
@@ -5596,6 +6248,9 @@ def _v2_refine_location(
             "midpoint": round_price((refined_low + refined_high) / 2.0),
             "source": source_name,
             "kind": z.kind,
+            "zone_status": z.status,
+            "zone_index": int(z.index),
+            "zone_source": z.source,
             "quality": round(q, 2),
             "overlap_ratio": round(zone_overlap_ratio(parent, z), 4),
             "parent_zone": {"low": low, "high": high},
@@ -5606,6 +6261,9 @@ def _v2_refine_location(
         "midpoint": round_price((low + high) / 2.0),
         "source": "LIQUIDITY_FIB_ONLY",
         "kind": None,
+        "zone_status": "NONE",
+        "zone_index": None,
+        "zone_source": None,
         "quality": round(location["confluence"] * 0.55, 2),
         "overlap_ratio": 0.0,
         "parent_zone": {"low": low, "high": high},
@@ -6114,11 +6772,15 @@ def _v2_build_target_map(
                 continue
             if direction == "SELL" and pool.midpoint >= current:
                 continue
+        tf_priority_bonus = {"MN1": 24.0, "W1": 20.0, "D1": 15.0, "SESSION": 9.0, "H4": 8.0, "H1": 4.0}.get(pool.timeframe, 0.0)
+        source_priority_bonus = 6.0 if set(pool.source_types).intersection({"PMH", "PML", "PWH", "PWL"}) else (
+            4.0 if set(pool.source_types).intersection({"PDH", "PDL"}) else 0.0
+        )
         targets.append({
             "level": pool.midpoint,
             "type": f"{pool.timeframe}_{wanted}_LIQUIDITY",
             "strength": pool.significance,
-            "priority": TARGET_LIQUIDITY_BASE + pool.significance * 0.50,
+            "priority": TARGET_LIQUIDITY_BASE + pool.significance * 0.50 + tf_priority_bonus + source_priority_bonus,
             "source": pool.source_types,
             "timeframe": pool.timeframe,
             "distance_h1_atr": round(dist / max(h1_atr, EPS), 3),
@@ -6626,7 +7288,8 @@ def _v2_build_thesis_candidate(
     # V2: H4 structure is the authoritative thesis direction. Aggregate
     # D1/H4/H1/M15 regime is retained as a soft quality input so a temporary
     # H1/M15 pullback does not erase a valid H4 continuation thesis.
-    refinement = _v2_refine_location(location, direction, h1_ctx, m15_ctx)
+    ict_context = _v2_ict_liquidity_context(m15, h4, liquidity_map, direction, m15_structure, h4_structure, current)
+    refinement = _v2_refine_location(location, direction, h1_ctx, m15_ctx, current)
     zone_low = safe_float(refinement.get("low"))
     zone_high = safe_float(refinement.get("high"))
     if zone_high <= zone_low:
@@ -6735,6 +7398,8 @@ def _v2_build_thesis_candidate(
     last_mss = latest_event(m15_structure, {"MSS"}, direction=("BULLISH" if direction == "BUY" else "BEARISH"), max_age=THESIS_MAX_TRIGGER_AGE_M15, candle_count=len(m15))
     last_bos = latest_event(m15_structure, {"BOS"}, direction=("BULLISH" if direction == "BUY" else "BEARISH"), max_age=THESIS_MAX_TRIGGER_AGE_M15, candle_count=len(m15))
     trigger_ok = bool(last_mss or last_bos)
+    if ict_context.get("confirmed_for_direction") and isinstance(ict_context.get("structure_confirmation"), dict):
+        trigger_ok = True
     thesis_status = "ACTIVE_TRIGGER_CONFIRMED" if trigger_ok else "WAITING_TRIGGER"
     thesis_type = "BUY_PULLBACK" if direction == "BUY" else "SELL_PULLBACK"
     if projection.get("classification") in {"SUPPORTIVE_BUY_RETRACEMENT", "SUPPORTIVE_SELL_RETRACEMENT"} and (rsi_pack.get("H1") or {}).get("div", {}).get(direction):
@@ -6755,6 +7420,7 @@ def _v2_build_thesis_candidate(
     scores = {
         "structure_alignment": round(structure_score, 2),
         "liquidity_confluence": round(confluence_score, 2),
+        "ict_liquidity_sequence": round(safe_float(ict_context.get("score"), 0.0), 2),
         "fib_location": round(fib_score, 2),
         "fvg_ob_refinement": round(refinement_score, 2),
         "rsi_projection": round(projection_score, 2),
@@ -6793,9 +7459,16 @@ def _v2_build_thesis_candidate(
     elif volume_ctx["class"] == "WEAK_VOLUME":
         base -= 5.0
         penalties.append({"type": "WEAK_VOLUME", "amount": 5.0})
-    if refinement.get("source") == "LIQUIDITY_FIB_ONLY":
-        base -= NO_REFINEMENT_PENALTY
-        penalties.append({"type": "NO_FVG_OB_REFINEMENT", "amount": NO_REFINEMENT_PENALTY})
+    fresh_poi = bool(
+        refinement.get("source") in {"H1", "M15"}
+        and refinement.get("zone_status") == "ACTIVE"
+        and refinement.get("kind")
+        and refinement.get("overlap_ratio", 0.0) >= REFINEMENT_MIN_OVERLAP
+    )
+    if not fresh_poi:
+        penalty = max(NO_REFINEMENT_PENALTY, 8.0)
+        base -= penalty
+        penalties.append({"type": "NO_FRESH_FVG_OB_BREAKER", "amount": penalty, "cap": ICT_NO_FRESH_POI_CONFIDENCE_CAP})
     if magnet_conflict:
         base -= 8.0
         penalties.append({"type": "OPPOSING_LIQUIDITY_OBSTACLE", "amount": 8.0})
@@ -6810,12 +7483,63 @@ def _v2_build_thesis_candidate(
         base -= 18.0
         penalties.append({"type": "WIDE_INVALIDATION", "amount": 18.0})
     if target.get("major_barriers"):
-        base -= min(12.0, 4.0 * len(target["major_barriers"]))
-        penalties.append({"type": "TARGET_BARRIER", "amount": min(12.0, 4.0 * len(target["major_barriers"]))})
+        raw_barrier_penalty = min(12.0, 4.0 * len(target["major_barriers"]))
+        effective_barrier_penalty = raw_barrier_penalty
+        route = ict_context.get("liquidity_resistance") if isinstance(ict_context.get("liquidity_resistance"), dict) else {}
+        if ict_context.get("confirmed_for_direction") and (ict_context.get("draw_on_liquidity") or {}).get("external_range_liquidity"):
+            route_class = str(route.get("class") or "")
+            # The target map and ICT route scan use different pool thresholds;
+            # cap only the duplicated penalty when a confirmed external DOL has a
+            # demonstrably clear route. Hard entry/SL/RR checks remain unchanged.
+            if route_class == "LOW_RESISTANCE_LIQUIDITY_RUN":
+                effective_barrier_penalty = min(effective_barrier_penalty, 6.0)
+            elif route_class == "MODERATE_RESISTANCE_LIQUIDITY_RUN":
+                effective_barrier_penalty = min(effective_barrier_penalty, 8.0)
+        base -= effective_barrier_penalty
+        penalties.append({
+            "type": "TARGET_BARRIER", "amount": round(effective_barrier_penalty, 2),
+            "raw_amount": round(raw_barrier_penalty, 2),
+            "ict_route_class": str(route.get("class") or "UNKNOWN"),
+        })
     confidence = clamp(base)
     if not trigger_ok:
         confidence = min(confidence, THESIS_WAITING_CAP_V2)
-    # No confidence floor veto: low quality remains an observable, scored candidate.
+    if ICT_SEQUENCE_REQUIRED_FOR_HIGH_CONFIDENCE and not ict_context.get("confirmed_for_direction"):
+        classification = str(ict_context.get("classification") or "")
+        if classification == "OPPOSING_LIQUIDITY_EVENT":
+            base_penalty = max(0.0, confidence - ICT_CONFLICT_CONFIDENCE_CAP)
+            confidence = clamp(min(confidence - 18.0, ICT_CONFLICT_CONFIDENCE_CAP))
+            thesis_status = "WAITING_LIQUIDITY_ALIGNMENT"
+            penalties.append({"type": "OPPOSING_ICT_LIQUIDITY_EVENT", "amount": round(max(18.0, base_penalty), 2), "cap": ICT_CONFLICT_CONFIDENCE_CAP})
+        else:
+            base_penalty = max(0.0, confidence - ICT_WAITING_CONFIDENCE_CAP)
+            confidence = clamp(min(confidence - (8.0 if classification == "LIQUIDITY_EVENT_WAITING_FOR_STRUCTURE" else 12.0), ICT_WAITING_CONFIDENCE_CAP))
+            thesis_status = "WAITING_LIQUIDITY_CONFIRMATION"
+            penalties.append({"type": "ICT_LIQUIDITY_SEQUENCE_NOT_CONFIRMED", "amount": round(max(8.0, base_penalty), 2), "cap": ICT_WAITING_CONFIDENCE_CAP})
+        # A liquidity touch alone cannot create high-confidence reversal/continuation.
+        final_model = WAITING_V2_MODEL
+    elif ict_context.get("confirmed_for_direction"):
+        thesis_status = "ACTIVE_TRIGGER_CONFIRMED"
+        final_model = PRIMARY_V2_MODEL
+
+    # A tradable setup must connect mapped liquidity -> confirmed structure -> fresh POI retest.
+    # An ATR-only TP fallback is useful diagnostically, but not a high-confidence liquidity target.
+    target_is_fallback = str(target.get("type") or "") == "ATR_SCORE_FALLBACK"
+    if ICT_REQUIRE_FRESH_POI_FOR_READY and not fresh_poi:
+        confidence = min(confidence, ICT_NO_FRESH_POI_CONFIDENCE_CAP)
+        thesis_status = "WAITING_FRESH_POI_RETEST"
+        final_model = WAITING_V2_MODEL
+        penalties.append({"type": "FRESH_POI_REQUIRED_FOR_READY", "amount": 0.0, "cap": ICT_NO_FRESH_POI_CONFIDENCE_CAP})
+    if target_is_fallback:
+        confidence = min(confidence, ICT_NO_REAL_DOL_CONFIDENCE_CAP)
+        thesis_status = "WAITING_DOL_TARGET"
+        final_model = WAITING_V2_MODEL
+        penalties.append({"type": "NO_REAL_DOL_TARGET", "amount": 0.0, "cap": ICT_NO_REAL_DOL_CONFIDENCE_CAP})
+    if str(ict_context.get("classification") or "") == "LIQUIDITY_EVENT_CONFLICTS_HTF":
+        confidence = min(confidence, ICT_HTF_CONFLICT_CONFIDENCE_CAP)
+        thesis_status = "WAITING_HTF_LIQUIDITY_ALIGNMENT"
+        final_model = WAITING_V2_MODEL
+    # No confidence floor veto: weak liquidity narratives remain visible as waiting candidates.
 
     if tick_size > 0:
         sl = _round_tick(sl, tick_size, "DOWN" if direction == "BUY" else "UP")
@@ -6856,13 +7580,18 @@ def _v2_build_thesis_candidate(
         "adaptive_reason": fib_analysis.get("reason"),
         "liquidity_overlap_ratio": location.get("overlap_ratio"),
     }
-    final_model = PRIMARY_V2_MODEL if trigger_ok else WAITING_V2_MODEL
+    if not ict_context.get("confirmed_for_direction"):
+        final_model = WAITING_V2_MODEL
+    elif trigger_ok:
+        final_model = PRIMARY_V2_MODEL
     entry_reason = (
-        f"{pair} {direction}: {thesis_type}. H4 structure {h4_structure.trend}, "
-        f"liquidity {liquidity_zone.timeframe if liquidity_zone else '-'} "
+        f"{pair} {direction}: {thesis_type}. ICT {ict_context.get('classification')}; "
+        f"H4 structure {h4_structure.trend}, liquidity {liquidity_zone.timeframe if liquidity_zone else '-'} "
         f"{round_price(liquidity_zone.midpoint) if liquidity_zone else '-'} dipadukan dengan Fib {location.get('fib', {}).get('label', '-')}; "
-        f"refinement {refinement.get('kind') or 'none'}. "
-        f"Projected M15 RSI {projection['at_entry']['M15']['median']:.1f} pada entry zone."
+        f"refinement {refinement.get('kind') or 'none'} ({'fresh' if fresh_poi else 'no fresh POI'}). "
+        f"Pool={((ict_context.get('latest_event') or {}).get('pool_class') or 'NONE')}; "
+        f"DOL {((ict_context.get('draw_on_liquidity') or {}).get('level'))}; "
+        f"projected M15 RSI {projection['at_entry']['M15']['median']:.1f}."
     )
     sl_reason = invalidation["reason"]
     tp_reason = (
@@ -6870,8 +7599,8 @@ def _v2_build_thesis_candidate(
         f"target quality {target.get('quality', 0):.0f}."
     )
     price_exp_reason = (
-        f"Price Exp {price_exp}: retracement thesis dianggap basi jika harga bergerak terlalu jauh "
-        f"tanpa menyentuh entry zone sebelum menembus boundary relevansi."
+        f"Price Exp {price_exp}: setup pending batal bila harga mencapai batas ekspansi sebelum retest entry. "
+        f"ICT event={ict_context.get('classification')}; DOL bukan jaminan harga akan dituju."
     )
     context_age_m15 = safe_float((quality_pack or {}).get("thesis_age_m15_bars"), 0.0)
     thesis_age_minutes = safe_float((quality_pack or {}).get("thesis_age_minutes"), 0.0)
@@ -6893,6 +7622,9 @@ def _v2_build_thesis_candidate(
             "structure_signature_h1": _v2_structure_signature(h1_structure),
         },
         "liquidity_map": liquidity_evidence,
+        "ict_liquidity": ict_context,
+        "fresh_poi_gate": {"passed": fresh_poi, "source": refinement.get("source"), "kind": refinement.get("kind"), "status": refinement.get("zone_status"), "overlap_ratio": refinement.get("overlap_ratio")},
+        "dol_gate": {"passed": not target_is_fallback, "target_type": target.get("type"), "level": ((ict_context.get("draw_on_liquidity") or {}).get("level"))},
         "fib": fib_evidence,
         "refinement": refinement,
         "projected_rsi": projection,
@@ -6928,6 +7660,8 @@ def _v2_build_thesis_candidate(
         f"Volume {volume_ctx['class']} (rvol {volume_ctx['rvol']:.2f}); momentum RSI {momentum_gate['state']}",
         f"Invalidation {invalidation['anchor_source']} @ {invalidation['anchor_level']}",
         f"Target {target['type']} @ {target['level']}",
+        f"ICT {ict_context.get('classification')}: {ict_context.get('reason')}",
+        f"DOL {((ict_context.get('draw_on_liquidity') or {}).get('level'))}; resistance {((ict_context.get('liquidity_resistance') or {}).get('class'))}; entry liquidity {ict_context.get('entry_liquidity_class')}",
     ]
     if not trigger_ok:
         notes.append("WAITING_TRIGGER: M15 MSS/BOS belum terkonfirmasi")
@@ -6972,6 +7706,7 @@ def _v2_candidate_summary(candidate: Candidate) -> dict[str, Any]:
         "price_exp": candidate.price_exp,
         "planned_rr": round(abs(candidate.tp - candidate.entry) / max(abs(candidate.entry - candidate.sl), EPS), 4),
         "confidence": candidate.confidence,
+        "ict_liquidity_sequence_score": safe_float(candidate.scores.get("ict_liquidity_sequence"), 0.0),
         "thesis_status": candidate.thesis_status,
         "thesis_type": candidate.thesis_type,
         "scores": candidate.scores,
@@ -7049,6 +7784,7 @@ def _v2_choose_fallback_candidate(
         scores={
             "structure_alignment": 50.0,
             "liquidity_confluence": 45.0,
+            "ict_liquidity_sequence": 20.0,
             "fib_location": 35.0,
             "fvg_ob_refinement": 25.0,
             "rsi_projection": 35.0,
@@ -7244,27 +7980,18 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
 
     # BTC alignment is included in structure_alignment as a soft numerical contribution only.
 
-    # Never drop a direction only because one confluence component is missing.
-    # Complete its record with a geometry-safe fallback whose confidence is capped.
-    present_directions = {c.direction for c in candidates}
-    for missing_direction in allowed_directions:
-        if missing_direction in present_directions:
-            continue
-        fallback_atr_values = atr_series(h1, 14)
-        fallback_atr = fallback_atr_values[-1] if fallback_atr_values else max(current * 0.005, EPS)
-        fallback_liquidity = _v2_build_liquidity_map(
-            {"H4": pair_h4, "H1": h1, "M15": m15},
-            {"H4": h4_structure, "H1": h1_structure, "M15": m15_structure},
-            current,
-            missing_direction,
-        )
-        fallback = _v2_choose_fallback_candidate(
-            missing_direction, current, fallback_atr, h1_structure, fallback_liquidity, tick_size
-        )
-        fallback.confidence = min(fallback.confidence, FALLBACK_CONFIDENCE_CAP)
-        fallback.evidence.setdefault("scoring_policy", "NO_ANALYTICAL_VETO_FALLBACK")
-        fallback.notes.append("Fallback scored because one or more confluences were unavailable; not an analytical rejection.")
-        candidates.append(fallback)
+    # A generic fallback is only a last resort. It must never displace a real
+    # liquidity×Fibonacci candidate whose confidence is lower but whose evidence
+    # is specific and auditable. This was a critical selection bug: a fallback
+    # capped at 60 had been winning over true ICT candidates penalized for waiting.
+    analytical_candidates = [
+        c for c in candidates
+        if not bool((c.evidence or {}).get("fallback")) and c.model != FALLBACK_V2_MODEL
+    ]
+    if analytical_candidates:
+        candidates = analytical_candidates
+    else:
+        candidates = []
 
     if not candidates:
         # This is reachable only if fallback construction itself fails.
@@ -7279,7 +8006,24 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
         best = _v2_choose_fallback_candidate(direction, current, h1_atr, h1_structure, liquidity_map, tick_size)
         candidates = [best]
     else:
-        candidates.sort(key=lambda c: (c.confidence, c.scores.get("liquidity_confluence", 0.0), c.scores.get("rsi_projection", 0.0)), reverse=True)
+        def _candidate_liquidity_rank(c: Candidate) -> tuple[float, ...]:
+            ict = (c.evidence or {}).get("ict_liquidity") if isinstance((c.evidence or {}).get("ict_liquidity"), dict) else {}
+            latest_evt = ict.get("latest_event") if isinstance(ict.get("latest_event"), dict) else {}
+            refinement_ev = (c.evidence or {}).get("refinement") if isinstance((c.evidence or {}).get("refinement"), dict) else {}
+            target_ev = (c.evidence or {}).get("target") if isinstance((c.evidence or {}).get("target"), dict) else {}
+            fresh_poi_rank = 1.0 if refinement_ev.get("source") in {"H1", "M15"} and refinement_ev.get("zone_status") == "ACTIVE" else 0.0
+            real_target_rank = 1.0 if str(target_ev.get("type") or "") != "ATR_SCORE_FALLBACK" else 0.0
+            return (
+                1.0 if ict.get("confirmed_for_direction") else 0.0,
+                1.0 if latest_evt.get("external_pool") else 0.0,
+                real_target_rank,
+                fresh_poi_rank,
+                safe_float(ict.get("score"), 0.0),
+                safe_float(c.scores.get("liquidity_confluence"), 0.0),
+                safe_float(c.confidence, 0.0),
+                safe_float(c.scores.get("fvg_ob_refinement"), 0.0),
+            )
+        candidates.sort(key=_candidate_liquidity_rank, reverse=True)
         best = candidates[0]
 
     # Final geometry validation after tick normalization.
@@ -7354,7 +8098,8 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
             "reason": best.entry_reason,
             "freshness": (best.evidence.get("thesis_freshness") if isinstance(best.evidence, dict) else None),
         },
-        "liquidity_map": liquidity_serialized,
+        "liquidity_map": {**liquidity_serialized, "reference_availability": final_liquidity_map.get("ict_reference_availability", {})},
+        "ict_liquidity": best.evidence.get("ict_liquidity"),
         "fib_analysis": {
             "H4": {
                 **{k: v for k, v in final_fib.items() if k != "fib"},
@@ -7395,6 +8140,7 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
             "current_rsi": best.evidence.get("current_rsi"),
             "projected_rsi": best.evidence.get("projected_rsi"),
             "volume_context": best.evidence.get("volume_context"),
+            "ict_liquidity": best.evidence.get("ict_liquidity"),
         },
         "candidate_set": [_v2_candidate_summary(c) for c in sorted(candidates, key=lambda c: c.confidence, reverse=True)],
         "price_context": {
@@ -7469,7 +8215,7 @@ async def _generate_setup_v2(pair: str, context: dict[str, Any] | None = None) -
             "name": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
             "engine": STRATEGY_ENGINE,
-            "architecture": "Binance-only closed candles -> H4 structure -> orderflow leg/price leg -> liquidity pools + adaptive Fibonacci + FVG/OB + support-resistance -> RSI momentum -> numeric confidence -> score-based validation",
+            "architecture": "Binance-only closed candles -> mapped ICT liquidity pools/events -> H4 context gate -> MSS/CHOCH/BOS -> direction-matched fresh FVG/OB/breaker retest -> adaptive Fib -> structural invalidation -> DOL/liquidity target -> volume/RSI secondary filters -> quality score",
             "confidence_semantics": "weighted_thesis_quality_score_not_profit_probability",
             "scan_contract": "analyze_scan_structure -> generate_setup -> score_based_validate_setup",
             "validator_tolerance": "confidence changes are values, not veto; only stale data or unsafe geometry blocks execution",
@@ -7536,8 +8282,9 @@ def find_refinement_confluence(
     direction: str,
     h1_ctx: dict[str, Any],
     m15_ctx: dict[str, Any],
+    current: float | None = None,
 ) -> dict[str, Any]:
-    return _v2_refine_location(location, direction, h1_ctx, m15_ctx)
+    return _v2_refine_location(location, direction, h1_ctx, m15_ctx, current)
 
 
 def project_rsi_to_entry_zone(
@@ -7972,7 +8719,7 @@ def _enrich_setup_contract(setup: dict[str, Any], context: dict[str, Any] | None
 
 
 async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Public strategy contract; delegates to the Structural Prediction Engine V2."""
+    """Public strategy contract; delegates to the ICT Liquidity-First Structural Prediction Engine V2.9."""
     return _enrich_setup_contract(await _generate_setup_v2(pair, context), context)
 
 
@@ -8948,6 +9695,18 @@ def _self_test_v22() -> dict[str, Any]:
 
         stats = series_cache_stats()
         check("cache_stats_observable", "metrik cache tersedia", {"hits", "misses", "evictions", "refreshes", "failures", "entries", "approx_mb", "hit_rate"} <= set(stats), True, sorted(stats))
+
+        # ---- ICT directional freshness: a SELL cannot inherit a bullish POI and vice versa.
+        ict_location = {"zone_low": 99.0, "zone_high": 101.0, "confluence": 80.0, "fib": {"label": "TEST"}}
+        ict_bullish_poi = Zone("BULLISH_OB", 99.2, 100.2, 20, "H1_OB", "ACTIVE", 90.0, {"formation_direction": "BULLISH"})
+        ict_bearish_poi = Zone("BEARISH_OB", 99.3, 100.3, 22, "H1_OB", "ACTIVE", 95.0, {"formation_direction": "BEARISH"})
+        ict_empty_m15 = {"fvg": [], "obs": [], "breakers": []}
+        ict_buy_refinement = _v2_refine_location(ict_location, "BUY", {"fvg": [], "obs": [ict_bullish_poi, ict_bearish_poi], "breakers": []}, ict_empty_m15, 102.0)
+        ict_sell_refinement = _v2_refine_location(ict_location, "SELL", {"fvg": [], "obs": [ict_bullish_poi, ict_bearish_poi], "breakers": []}, ict_empty_m15, 98.0)
+        check("ict_poi_direction_matches_setup", "BUY hanya bullish POI; SELL hanya bearish POI", ict_buy_refinement.get("kind") == "BULLISH_OB" and ict_sell_refinement.get("kind") == "BEARISH_OB", ("BULLISH_OB", "BEARISH_OB"), (ict_buy_refinement.get("kind"), ict_sell_refinement.get("kind")))
+        ict_buy_wrong_side = _v2_refine_location(ict_location, "BUY", {"fvg": [], "obs": [ict_bullish_poi], "breakers": []}, ict_empty_m15, 98.0)
+        ict_sell_wrong_side = _v2_refine_location(ict_location, "SELL", {"fvg": [], "obs": [ict_bearish_poi], "breakers": []}, ict_empty_m15, 102.0)
+        check("ict_poi_must_be_retracement_side", "POI yang sudah berada di sisi salah harga tidak dianggap entry pullback", ict_buy_wrong_side.get("zone_status") == "NONE" and ict_sell_wrong_side.get("zone_status") == "NONE", ("NONE", "NONE"), (ict_buy_wrong_side.get("zone_status"), ict_sell_wrong_side.get("zone_status")))
     except Exception as exc:  # noqa: BLE001
         failures.append({"check": "self_test_v22_runtime", "rule": "tes tidak boleh melempar", "expected": "no exception", "actual": f"{type(exc).__name__}: {exc}"})
         tests["self_test_v22_runtime"] = False
