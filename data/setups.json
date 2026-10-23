@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-23T00:15:31.454510+00:00",
+  "saved_at": "2026-10-23T00:15:44.047029+00:00",
   "saved_at_wib": "23-10-2026, 07:15 WIB",
   "count": 3,
   "setups": [
@@ -7335,8 +7335,8 @@
       "pair": "INXUSDT",
       "direction": "BUY",
       "price_now_reference": "0.004153",
-      "entry": "0.00407",
-      "entry_reason": "INXUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.004069 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_BREAKER. Projected M15 RSI 25.8 pada entry zone.",
+      "entry": "0.004067",
+      "entry_reason": "INXUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.004069 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_BREAKER. Projected M15 RSI 25.8 pada entry zone. | M15 review: entry direfine 0.00407→0.004067; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga",
       "price_exp": "0.004159",
       "price_exp_reason": "Price Exp 0.0041589999999999995: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.",
       "price_exp_diagnostics": {
@@ -7374,7 +7374,7 @@
       "pnl_percent": null,
       "max_favorable_pct": null,
       "max_adverse_pct": null,
-      "planned_rr": "3.09756097560975609756097561",
+      "planned_rr": "3.421052631578947368421052632",
       "pending_seconds": null,
       "holding_seconds": null,
       "trail_history": [],
@@ -10780,13 +10780,13 @@
       },
       "margin_usdt": "0.8",
       "leverage": 10,
-      "quantity": "1966",
+      "quantity": "1967",
       "target_notional": "8",
-      "actual_notional": "8.00162",
+      "actual_notional": "7.999789",
       "real_enabled": true,
       "real_state": "REAL_PENDING",
       "position_side": "BOTH",
-      "entry_order_id": 653506080,
+      "entry_order_id": 653513755,
       "entry_client_order_id": "ENT-INXUSDT-20261023-070243-F7DD7F",
       "tp_algo_id": null,
       "sl_algo_id": null,
@@ -10803,7 +10803,7 @@
       "candidate_id": "Cabfa01a03e0a126684ff",
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
-      "risk_pct_initial": "1.007371007371007371007371007",
+      "risk_pct_initial": "0.9343496434718465699532825178",
       "realized_r": null
     }
   ]
