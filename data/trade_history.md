@@ -989,3 +989,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-22T22:45:03.200058+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## ONGUSDT — BUY
+
+Trade ID: `ONGUSDT-20261022-232154-B1A3F6`
+
+### Setup
+
+- Price Now Reference: 0.07781
+- Entry: 0.0767
+- Reason Entry: ONGUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.07673 dipadukan dengan Fib SECONDARY; refinement BULLISH_BREAKER. Projected M15 RSI 30.1 pada entry zone. | M15 review: entry direfine 0.07675→0.0767; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.07842
+- Reason Price Exp: Price Exp 0.07842: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.07598
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.07673; SL ditempatkan di luar invalidation.
+- TP: 0.07913
+- Reason TP: TP 0.07913 dipilih dari H1_SWING_HIGH dengan RR 3.09; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: INVALIDATED
+- Exit Price: -
+- Result Reason: M15 close invalidation (order REAL dibatalkan): thesis pending invalid: M15 close menembus protected swing/seluruh entry POI
+- PnL: -
+- Created: 2026-10-22T16:21:54.504723+00:00
+- Filled: -
+- Closed: 2026-10-23T00:15:03.908031+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
