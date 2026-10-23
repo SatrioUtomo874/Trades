@@ -1,20 +1,13 @@
 {
   "version": 1,
-  "saved_at": "2026-10-23T14:52:57.883910+00:00",
+  "saved_at": "2026-10-23T16:00:30.203836+00:00",
   "bans": [
     {
-      "pair": "2ZUSDT",
-      "banned_at": "2026-10-22T15:16:07.287859+00:00",
-      "until": "2026-10-23T15:16:07.287832+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "BARDUSDT",
-      "banned_at": "2026-10-23T00:59:52.777411+00:00",
-      "until": "2026-10-23T08:59:52.777353+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
+      "pair": "ARKMUSDT",
+      "banned_at": "2026-10-23T16:00:30.203720+00:00",
+      "until": "2026-10-24T16:00:30.203698+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "BRUSDT",
@@ -31,27 +24,6 @@
       "source": "AUTO_SL"
     },
     {
-      "pair": "DOLOUSDT",
-      "banned_at": "2026-10-22T14:45:15.286826+00:00",
-      "until": "2026-10-23T14:45:15.286799+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
-    },
-    {
-      "pair": "EDGEUSDT",
-      "banned_at": "2026-10-22T15:15:16.297672+00:00",
-      "until": "2026-10-23T15:15:16.297639+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "GRASSUSDT",
-      "banned_at": "2026-10-23T06:50:36.090491+00:00",
-      "until": "2026-10-23T14:50:36.090467+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "PARTIUSDT",
       "banned_at": "2026-10-22T20:45:39.602206+00:00",
       "until": "2026-10-23T20:45:39.602177+00:00",
@@ -64,13 +36,6 @@
       "until": "2026-10-23T19:41:33.989455+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
-    },
-    {
-      "pair": "TUTUSDT",
-      "banned_at": "2026-10-22T15:15:41.205583+00:00",
-      "until": "2026-10-23T15:15:41.205567+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
     }
   ]
 }
