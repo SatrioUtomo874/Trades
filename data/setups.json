@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-23T00:30:11.701392+00:00",
+  "saved_at": "2026-10-23T00:30:24.711214+00:00",
   "saved_at_wib": "23-10-2026, 07:30 WIB",
   "count": 4,
   "setups": [
@@ -10849,8 +10849,8 @@
       "pair": "ONGUSDT",
       "direction": "SELL",
       "price_now_reference": "0.07727",
-      "entry": "0.07954",
-      "entry_reason": "ONGUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity M15 0.079565 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 77.7 pada entry zone.",
+      "entry": "0.07959",
+      "entry_reason": "ONGUSDT SELL: SELL_PULLBACK. H4 structure BULLISH, liquidity M15 0.079565 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_BREAKER. Projected M15 RSI 77.7 pada entry zone. | M15 review: entry direfine 0.07954→0.07959; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga",
       "price_exp": "0.07704",
       "price_exp_reason": "Price Exp 0.07704000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.",
       "price_exp_diagnostics": {
@@ -10888,7 +10888,7 @@
       "pnl_percent": null,
       "max_favorable_pct": null,
       "max_adverse_pct": null,
-      "planned_rr": "4.4625",
+      "planned_rr": "4.826666666666666666666666667",
       "pending_seconds": null,
       "holding_seconds": null,
       "trail_history": [],
@@ -14436,11 +14436,11 @@
       "leverage": 10,
       "quantity": "101",
       "target_notional": "8",
-      "actual_notional": "8.03354",
+      "actual_notional": "8.03859",
       "real_enabled": true,
       "real_state": "REAL_PENDING",
       "position_side": "BOTH",
-      "entry_order_id": 3369774220,
+      "entry_order_id": 3369775372,
       "entry_client_order_id": "ENT-ONGUSDT-20261023-072815-FB6DCA",
       "tp_algo_id": null,
       "sl_algo_id": null,
@@ -14457,7 +14457,7 @@
       "candidate_id": "C1f0e36ab8fd11beed4da",
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
-      "risk_pct_initial": "1.005783253708825748051294946",
+      "risk_pct_initial": "0.9423294383716547304937806257",
       "realized_r": null
     }
   ]
