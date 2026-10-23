@@ -1055,3 +1055,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-23T00:28:05.977578+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## COLLECTUSDT — BUY
+
+Trade ID: `COLLECTUSDT-20261023-070241-1F69F9`
+
+### Setup
+
+- Price Now Reference: 0.02387
+- Entry: 0.02321
+- Reason Entry: COLLECTUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.02321 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 29.5 pada entry zone. | M15 review: entry direfine 0.02323→0.02321; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.02398
+- Reason Price Exp: Price Exp 0.02398: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02284
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.02321; SL ditempatkan di luar invalidation dan liquidity guard 0.02321.
+- TP: 0.0243
+- Reason TP: TP 0.0243 dipilih dari H4_HIGHER_HIGH dengan RR 2.74; target quality 89.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02398
+- Result Reason: PRICE_EXP_TOUCH_BEFORE_ENTRY | Price Exp 0.02398: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-23T00:02:41.887929+00:00
+- Filled: -
+- Closed: 2026-10-23T00:34:33.301184+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
