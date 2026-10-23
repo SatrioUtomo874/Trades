@@ -1121,3 +1121,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-23T00:59:40.890162+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## RUNEUSDT — BUY
+
+Trade ID: `RUNEUSDT-20261023-110925-87ED8C`
+
+### Setup
+
+- Price Now Reference: 0.6469
+- Entry: 0.6309
+- Reason Entry: RUNEUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.6294438 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_OB. Projected M15 RSI 27.6 pada entry zone.
+- Price Exp: 0.6566
+- Reason Price Exp: Price Exp 0.6566000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.6224
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.6296; SL ditempatkan di luar invalidation dan liquidity guard 0.6294438.
+- TP: 0.6587
+- Reason TP: TP 0.6587 dipilih dari H4_SWING_HIGH dengan RR 3.27; target quality 81.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: MANUAL_CLOSE_PENDING
+- Exit Price: -
+- Result Reason: Manual /close pada setup REAL PENDING sebelum entry.
+- PnL: -
+- Created: 2026-10-23T04:09:25.006871+00:00
+- Filled: -
+- Closed: 2026-10-23T06:31:37.695290+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
