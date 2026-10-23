@@ -8626,9 +8626,20 @@ class TradingEngine:
                             self._h4_window_deadline.astimezone(TZ).strftime("%d-%m-%Y %H:%M:%S WIB"),
                         )
 
-                # Dalam mode normal, capacity full menghentikan task seperti perilaku lama.
-                if not self._h4_enabled and len(self.active_trades) >= self.max_active_trades:
+                # /max berlaku untuk mode normal maupun H4. H4 membatasi jumlah
+                # full-universe sweeps, bukan izin untuk terus menganalisis saat
+                # kapasitas setup aktif sudah penuh.
+                if len(self.active_trades) >= self.max_active_trades:
                     self._scan_auto_paused = True
+                    log.info(
+                        "[SCAN] auto-pause: max active trade reached (%s/%s); H4 window ditutup.",
+                        len(self.active_trades), self.max_active_trades,
+                    )
+                    if self._h4_enabled:
+                        self._h4_window_active = False
+                        self._h4_window_slot = None
+                        self._h4_window_deadline = None
+                        self._h4_opening_gate = False
                     break
 
                 while self._running and self._scan_user_enabled and self.real.cooldown_remaining > 0:
@@ -9346,9 +9357,17 @@ class TradingEngine:
                 public_cooldown,
             )
             return
-        if len(self.active_trades) >= self.max_active_trades and not (self._h4_enabled and self._h4_window_active):
+        if len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
-            log.info("[SCAN] auto-pause: max active trade reached (%s)", self.max_active_trades)
+            if self._h4_enabled and self._h4_window_active:
+                self._h4_window_active = False
+                self._h4_window_slot = None
+                self._h4_window_deadline = None
+                self._h4_opening_gate = False
+            log.info(
+                "[SCAN] auto-pause: max active trade reached (%s/%s); cycle tidak dimulai.",
+                len(self.active_trades), self.max_active_trades,
+            )
             return
 
         self._last_cycle_started_analysis = True
@@ -9397,8 +9416,13 @@ class TradingEngine:
         universe = await self._build_scan_universe()
         rows = universe["rows"]
         if self._h4_enabled and self._h4_window_active:
-            required_pass_cycles = math.ceil(len(rows) / max(1, SCAN_MAX_PAIRS_PER_CYCLE))
-            self._h4_cycle_limit = max(self.h4_max_cycles, required_pass_cycles * 2 + 2)
+            # Siklus batch bisa lebih dari dua karena satu full-universe sweep
+            # mungkin membutuhkan beberapa batch. Jumlah target sweep tetap tepat 2;
+            # h4_max_cycles hanya menjadi safety ceiling untuk mencegah loop macet.
+            self._h4_cycle_limit = max(
+                self.h4_max_cycles,
+                math.ceil(len(rows) / max(1, SCAN_MAX_PAIRS_PER_CYCLE)) * 2 + 2,
+            )
         funnel = self._new_funnel()
         funnel["universe"] = len(rows)
         cycle_now = now_utc()
@@ -9474,7 +9498,12 @@ class TradingEngine:
         # universe. A full pass is complete only when every non-active/non-banned
         # symbol has been marked done; then reset per-symbol cooldown/watch gates for
         # the second pass. This does not open trades when MAX ACTIVE is full.
-        if self._h4_enabled and self._h4_window_active and not eligible and sweep_targets:
+        if self._h4_enabled and self._h4_window_active and not eligible:
+            if not sweep_targets:
+                self._h4_sweeps_completed = 2
+                self._last_cycle_analyzed = 0
+                log.info("[SCAN][H4] Tidak ada pair eligible pada universe; window ditutup agar tidak loop.")
+                return
             completed_targets = set(sweep_targets).issubset(self._sweep["done"])
             if completed_targets:
                 self._h4_sweeps_completed = int(getattr(self, "_h4_sweeps_completed", 0)) + 1
@@ -10547,21 +10576,32 @@ class TradingEngine:
             )
 
         def decimal_field(name: str) -> Decimal:
+            # Field harga wajib positif. Confidence berbeda: 0 adalah skor sah
+            # untuk setup berkualitas sangat rendah dan tidak boleh diparse
+            # melalui parse_decimal(), yang memang menolak nilai <= 0.
             try:
                 raw_value = payload[name]
                 if isinstance(raw_value, float):
-                    # Hindari notasi ilmiah (mis. 5e-05) yang ditolak parse_decimal.
                     raw_value = format(Decimal(repr(raw_value)), "f")
-                return parse_decimal(str(raw_value))
+                value = Decimal(str(raw_value).strip().replace(",", "."))
+                if not value.is_finite() or value <= 0:
+                    raise ValueError("nilai harus finite dan lebih besar dari 0")
+                return value
             except Exception as exc:
                 raise ValueError(
                     f"Field {name} dari strategy.py bukan angka valid."
                 ) from exc
 
-        confidence = decimal_field("confidence")
-        if confidence < 0 or confidence > 100:
+        try:
+            raw_confidence = payload["confidence"]
+            confidence = Decimal(str(raw_confidence).strip().replace(",", "."))
+        except Exception as exc:
             raise ValueError(
-                "Confidence strategy.py harus berada pada 0–100."
+                "Field confidence dari strategy.py bukan angka valid."
+            ) from exc
+        if not confidence.is_finite() or confidence < 0 or confidence > 100:
+            raise ValueError(
+                "Confidence strategy.py harus berupa angka finite pada 0–100."
             )
 
         reasons = {}
