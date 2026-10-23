@@ -1022,3 +1022,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-23T00:15:03.908031+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## INXUSDT — BUY
+
+Trade ID: `INXUSDT-20261023-070243-F7DD7F`
+
+### Setup
+
+- Price Now Reference: 0.004153
+- Entry: 0.004067
+- Reason Entry: INXUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.004069 dipadukan dengan Fib DEEP_0.618_0.786; refinement BEARISH_BREAKER. Projected M15 RSI 25.8 pada entry zone. | M15 review: entry direfine 0.00407→0.004067; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga
+- Price Exp: 0.004159
+- Reason Price Exp: Price Exp 0.0041589999999999995: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.004029
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.004069; SL ditempatkan di luar invalidation.
+- TP: 0.004197
+- Reason TP: TP 0.004197 dipilih dari H4_SWING_HIGH dengan RR 3.10; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.00416
+- Result Reason: PRICE_EXP_TOUCH_BEFORE_ENTRY | Price Exp 0.0041589999999999995: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- PnL: -
+- Created: 2026-10-23T00:02:43.593655+00:00
+- Filled: -
+- Closed: 2026-10-23T00:28:05.977578+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
