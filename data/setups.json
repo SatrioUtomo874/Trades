@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-23T00:28:24.976096+00:00",
-  "saved_at_wib": "23-10-2026, 07:28 WIB",
+  "saved_at": "2026-10-23T00:30:11.701392+00:00",
+  "saved_at_wib": "23-10-2026, 07:30 WIB",
   "count": 4,
   "setups": [
     {
@@ -7335,8 +7335,8 @@
       "pair": "BARDUSDT",
       "direction": "BUY",
       "price_now_reference": "0.1068",
-      "entry": "0.1054",
-      "entry_reason": "BARDUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.1054 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 30.9 pada entry zone.",
+      "entry": "0.1053",
+      "entry_reason": "BARDUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.1054 dipadukan dengan Fib DEEP_0.618_0.786; refinement BULLISH_FVG. Projected M15 RSI 30.9 pada entry zone. | M15 review: entry direfine 0.1054→0.1053; entry dapat dipindahkan lebih dalam di zona POI tanpa mengejar harga",
       "price_exp": "0.1074",
       "price_exp_reason": "Price Exp 0.10740000000000001: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.",
       "price_exp_diagnostics": {
@@ -7374,7 +7374,7 @@
       "pnl_percent": null,
       "max_favorable_pct": null,
       "max_adverse_pct": null,
-      "planned_rr": "2.545454545454545454545454545",
+      "planned_rr": "2.9",
       "pending_seconds": null,
       "holding_seconds": null,
       "trail_history": [],
@@ -10819,11 +10819,11 @@
       "leverage": 10,
       "quantity": "76",
       "target_notional": "8",
-      "actual_notional": "8.0104",
+      "actual_notional": "8.0028",
       "real_enabled": true,
       "real_state": "REAL_PENDING",
       "position_side": "BOTH",
-      "entry_order_id": 1219709715,
+      "entry_order_id": 1219712812,
       "entry_client_order_id": "ENT-BARDUSDT-20261023-071648-D14B3F",
       "tp_algo_id": null,
       "sl_algo_id": null,
@@ -10840,7 +10840,7 @@
       "candidate_id": "Cb26fc035d236d37e340a",
       "sizing_mode": "LEGACY_NOTIONAL",
       "risk_info": {},
-      "risk_pct_initial": "1.043643263757115749525616698",
+      "risk_pct_initial": "0.9496676163342830009496676163",
       "realized_r": null
     },
     {
