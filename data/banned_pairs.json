@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-23T00:59:52.777752+00:00",
+  "saved_at": "2026-10-23T04:06:48.801176+00:00",
   "bans": [
     {
       "pair": "2ZUSDT",
@@ -15,13 +15,6 @@
       "until": "2026-10-23T08:59:52.777353+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "BCHUSDT",
-      "banned_at": "2026-10-22T14:05:22.500821+00:00",
-      "until": null,
-      "reason": "Real quantity tidak memenuhi target margin ±10%: BCHUSDT: MARGIN_DEVIATION_OUT_OF_BOUND (target=8, nearest_notional=7.8938) Margin pas ≈ $2.01.",
-      "source": "AUTO_MARGIN_INFLUENCE"
     },
     {
       "pair": "COLLECTUSDT",
@@ -45,25 +38,11 @@
       "source": "AUTO_TP"
     },
     {
-      "pair": "DOSUSDT",
-      "banned_at": "2026-10-22T16:19:13.201641+00:00",
-      "until": "2026-10-23T00:19:13.201622+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
       "pair": "EDGEUSDT",
       "banned_at": "2026-10-22T15:15:16.297672+00:00",
       "until": "2026-10-23T15:15:16.297639+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
-    },
-    {
-      "pair": "IDUSDT",
-      "banned_at": "2026-10-22T16:50:27.840424+00:00",
-      "until": "2026-10-23T00:50:27.840395+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "INXUSDT",
@@ -85,13 +64,6 @@
       "until": "2026-10-23T19:41:33.989455+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
-    },
-    {
-      "pair": "SLXUSDT",
-      "banned_at": "2026-10-22T20:03:17.106712+00:00",
-      "until": "2026-10-23T04:03:17.106683+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "TUTUSDT",
