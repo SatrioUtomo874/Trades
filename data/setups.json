@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "saved_at": "2026-10-23T16:28:44.027942+00:00",
-  "saved_at_wib": "23-10-2026, 23:28 WIB",
+  "saved_at": "2026-10-23T17:06:51.873326+00:00",
+  "saved_at_wib": "24-10-2026, 00:06 WIB",
   "count": 1,
   "setups": [
     {
       "trade_id": "GTCUSDT-20261023-220235-511AA7",
-      "session_id": "20261023-222847-3763",
+      "session_id": "20261023-233010-A8E6",
       "pair": "GTCUSDT",
       "direction": "BUY",
       "price_now_reference": "0.29064",
