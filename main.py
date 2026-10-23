@@ -22,9 +22,6 @@ Prinsip:
     data/events.jsonl
     data/trade_history.md
 - /stats membaca histori dan menghitung statistik.
-- /analyze membuat:
-    analysis/full_data.json
-    analysis/analysis.md
 - /setup menyimpan snapshot setup aktif ke data/setups.json.
 - /open memulihkan snapshot setup tersebut setelah main.py diganti.
 - /auto menjembatani main.py ke strategy.py dan meminta konfirmasi user.
@@ -51,6 +48,7 @@ import ctypes
 import gc
 import io
 import math
+import threading
 import html  # kept out of user output; used only for safe GitHub text if needed
 import importlib
 import inspect
@@ -62,7 +60,6 @@ import re
 import time
 from collections import deque
 import traceback
-import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_UP
@@ -165,11 +162,11 @@ BALANCE_STALE_SECONDS = 60.0  # /trade segarkan saldo bila cache lebih tua
 AUTOSTOP_CHECK_SECONDS = 30.0
 # Auto-trailing: saat profit >= trigger_R, SL pindah ke entry +/- lock_R x risiko awal.
 AUTO_TRAIL_ENABLED = os.getenv("AUTO_TRAIL", "1").strip().lower() not in {"0", "false", "off"}
-TRAIL_R_LADDER = [(0.75, 0.10), (1.0, 0.25), (1.25, 0.50), (1.5, 0.75), (2.0, 1.0), (2.5, 1.5), (3.0, 2.0)]
+TRAIL_R_LADDER = [(0.75, -0.05), (1.0, 0.15), (1.25, 0.40), (1.5, 0.65), (2.0, 1.10), (2.5, 1.60), (3.0, 2.10)]
 TRAIL_FEE_BUFFER_PCT = Decimal("0.12")  # lantai kunci >= fee taker round-trip + slippage
-TRAIL_MIN_STEP_R = Decimal("0.05")
-TRAIL_MIN_GAP_R = Decimal("0.25")
-TRAIL_STRATEGY_INTERVAL_SECONDS = 90.0
+TRAIL_MIN_STEP_R = Decimal("0.10")
+TRAIL_MIN_GAP_R = Decimal("0.30")
+TRAIL_STRATEGY_INTERVAL_SECONDS = 20.0
 # Pemasangan TP/SL boleh jalan setelah jeda server selesai (tanpa jeda aman bot).
 REAL_PRIORITY: contextvars.ContextVar[bool] = contextvars.ContextVar("real_priority", default=False)
 REAL_EARLY: contextvars.ContextVar[bool] = contextvars.ContextVar("real_early", default=False)  # pembatalan order: lepas di Retry-After
@@ -204,7 +201,7 @@ MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "400") or "400")
 # Binance H4 boundaries dipetakan ke 03,07,11,15,19,23 WIB.
 H4_SCAN_HOURS_WIB = (3, 7, 11, 15, 19, 23)
 H4_SCAN_TRIGGER_LEEWAY_SECONDS = 60.0
-H4_SCAN_SLOT_VALIDITY_SECONDS = 4 * 3600 - 60.0  # coverage slot harus selesai sebelum jadwal H4 berikutnya.
+H4_SCAN_SLOT_VALIDITY_SECONDS = 3600.0  # slot tetap valid maksimal +1 jam bila tertahan Binance.
 H4_SCAN_SCHEDULER_POLL_SECONDS = 5.0
 POSITION_CACHE_MAX_AGE_SECONDS = 30.0
 SCAN_VALIDATION_TOLERANCE = Decimal("0.90")
@@ -216,6 +213,7 @@ SCAN_BANNED_WAITING_HOURS = Decimal("2")  # menunggu trigger RSI
 SCAN_MARGIN_TOLERANCE = Decimal("0.10")
 SCAN_MARGIN_FAIL_CONFIRMATIONS = 3
 BANNED_PATH = "data/banned_pairs.json"
+CANDIDATES_STATE_PATH = "data/candidates_state.json"
 RUNTIME_SETTINGS_PATH = "data/runtime_settings.json"
 
 # Optional margin/leverage inputs used only by the conservative Margin Influence detector.
@@ -869,8 +867,6 @@ class Trade:
 
             "price_exp": decimal_to_str(self.price_exp),
             "price_exp_reason": self.price_exp_reason,
-            "price_exp_diagnostics": (self.strategy_analysis or {}).get("price_exp_diagnostics") if isinstance(self.strategy_analysis, dict) else None,
-            "price_exp_outcome_class": ("PRICE_EXP_TOUCH_BEFORE_ENTRY" if self.result == "EXPIRED" and self.fill_price is None else None),
 
             "sl": decimal_to_str(self.sl),
             "sl_reason": self.sl_reason,
@@ -2743,10 +2739,13 @@ class GitHubStore:
 # ============================================================
 
 # ============================================================
-# OPERATIONAL SCAN STATE (operational scanner state only)
+# SCAN STATE / RESILIENCE LAYER
+# Ledger kandidat RAM, proteksi resource, recheck, dan risk sizing.
+# Seluruh state kandidat bersifat sementara di RAM sesi aktif.
 # ============================================================
 
-rlog = logging.getLogger("trading_engine")
+rlog = logging.getLogger("trading-engine-state")
+
 
 def _cfg_float(name: str, default: float, lo: float | None = None, hi: float | None = None) -> float:
     raw = os.getenv(name)
@@ -2760,8 +2759,19 @@ def _cfg_float(name: str, default: float, lo: float | None = None, hi: float | N
     except (TypeError, ValueError):
         rlog.error("Config %s=%r tidak valid; memakai default %s", name, raw, default)
         return default
+
+
 def _cfg_int(name: str, default: int, lo: int | None = None, hi: int | None = None) -> int:
     return int(_cfg_float(name, float(default), None if lo is None else float(lo), None if hi is None else float(hi)))
+
+
+def _cfg_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _cfg_opt_float(name: str, lo: float, hi: float) -> float | None:
     raw = os.getenv(name)
     if raw in (None, ""):
@@ -2776,27 +2786,34 @@ def _cfg_opt_float(name: str, lo: float, hi: float) -> float | None:
         return None
 
 
-# Small bounded in-memory state for live scanning; only operational records are persisted.
-CANDIDATE_QUEUE_MAX = 300
-CANDIDATE_TTL_HOURS = 12.0
-SCAN_FULL_UNIVERSE_INTERVAL = 1800.0
-SCAN_WATCHLIST_INTERVAL = 900.0
-SCAN_VALIDATE_TOP_N = 6
-SCAN_WATCH_MAX_PER_CYCLE = 15
-SCAN_MIN_API_HEADROOM_PCT = 10.0
-SCAN_READY_RETRY_SECONDS = 300.0
-SCAN_H4_COVERAGE_PASSES = 2
-SCAN_RECHECK_BUFFER_POINTS = 8.0
+SCAN_NEAR_THRESHOLD_POINTS = _cfg_float("SCAN_NEAR_THRESHOLD_POINTS", 8.0, 1.0, 40.0)
+MIN_BUCKET_SAMPLE = _cfg_int("MIN_BUCKET_SAMPLE", 30, 5, 10000)
+CANDIDATE_QUEUE_MAX = _cfg_int("CANDIDATE_QUEUE_MAX", 300, 20, 5000)
+CANDIDATE_TTL_HOURS = _cfg_float("CANDIDATE_TTL_HOURS", 12.0, 0.5, 168.0)
+SCAN_FULL_UNIVERSE_INTERVAL = _cfg_float("SCAN_FULL_UNIVERSE_INTERVAL", 1800.0, 60.0, 86400.0)
+SCAN_WATCHLIST_INTERVAL = _cfg_float("SCAN_WATCHLIST_INTERVAL", 900.0, 60.0, 86400.0)
+SCAN_VALIDATE_TOP_N = _cfg_int("SCAN_VALIDATE_TOP_N", 6, 1, 50)
+SCAN_WATCH_MAX_PER_CYCLE = _cfg_int("SCAN_WATCH_MAX_PER_CYCLE", 15, 0, 50)
+SCAN_MIN_API_HEADROOM_PCT = _cfg_float("SCAN_MIN_API_HEADROOM_PCT", 10.0, 0.0, 90.0)
+SCAN_READY_RETRY_SECONDS = _cfg_float("SCAN_READY_RETRY_SECONDS", 300.0, 30.0, 3600.0)
+SCAN_H4_MAX_CYCLES = _cfg_int("SCAN_H4_MAX_CYCLES", 20, 1, 100)  # headroom for two full passes plus sweep-boundary cycles
 BTC_WATCH_SECONDS = _cfg_float("BTC_WATCH_SECONDS", 300.0, 60.0, 3600.0)
 BTC_IMPULSE_PCT = _cfg_float("BTC_IMPULSE_PCT", 1.5, 0.3, 10.0)
 BTC_IMPULSE_BARS = _cfg_int("BTC_IMPULSE_BARS", 16, 6, 96)
 BTC_IMPULSE_VETO_MINUTES = _cfg_float("BTC_IMPULSE_VETO_MINUTES", 120.0, 15.0, 1440.0)
 BTC_IMPULSE_MIN_RVOL = _cfg_float("BTC_IMPULSE_MIN_RVOL", 0.9, 0.3, 3.0)
 SCAN_CYCLE_TIME_BUDGET_SECONDS = _cfg_float("SCAN_CYCLE_TIME_BUDGET_SECONDS", 240.0, 30.0, 3600.0)
+
+
+
+
 EST_FEE_PCT_PER_SIDE = _cfg_float("EST_FEE_PCT_PER_SIDE", 0.05, 0.0, 5.0)
 EST_SLIPPAGE_PCT_PER_SIDE = _cfg_float("EST_SLIPPAGE_PCT_PER_SIDE", 0.03, 0.0, 5.0)
+# Entry limit = maker tanpa slippage; exit market = taker + slippage.
 EST_ENTRY_FEE_PCT = _cfg_float("EST_ENTRY_FEE_PCT", 0.02, 0.0, 5.0)
 EST_ENTRY_SLIPPAGE_PCT = _cfg_float("EST_ENTRY_SLIPPAGE_PCT", 0.0, 0.0, 5.0)
+
+# Risk sizing: default LEGACY_NOTIONAL; RISK_BUDGET butuh konfigurasi eksplisit.
 RISK_SIZING_MODE_REQUESTED = (os.getenv("RISK_SIZING_MODE") or "LEGACY_NOTIONAL").strip().upper()
 RISK_PER_TRADE_PCT = _cfg_opt_float("RISK_PER_TRADE_PCT", 0.01, 10.0)
 MAX_PORTFOLIO_RISK_PCT = _cfg_opt_float("MAX_PORTFOLIO_RISK_PCT", 0.01, 50.0)
@@ -2807,12 +2824,16 @@ if RISK_SIZING_MODE_REQUESTED not in {"LEGACY_NOTIONAL", "RISK_BUDGET"}:
     rlog.error("RISK_SIZING_MODE=%r tidak dikenal; memakai LEGACY_NOTIONAL.", RISK_SIZING_MODE_REQUESTED)
     RISK_SIZING_MODE = "LEGACY_NOTIONAL"
 elif RISK_SIZING_MODE_REQUESTED == "RISK_BUDGET" and (RISK_PER_TRADE_PCT is None or MAX_PORTFOLIO_RISK_PCT is None):
-    rlog.error("RISK_BUDGET membutuhkan RISK_PER_TRADE_PCT dan MAX_PORTFOLIO_RISK_PCT eksplisit; kembali ke LEGACY_NOTIONAL.")
+    rlog.error("RISK_BUDGET butuh RISK_PER_TRADE_PCT dan MAX_PORTFOLIO_RISK_PCT eksplisit; kembali ke LEGACY_NOTIONAL.")
     RISK_SIZING_MODE = "LEGACY_NOTIONAL"
 else:
     RISK_SIZING_MODE = RISK_SIZING_MODE_REQUESTED
 
-CANDIDATE_STATES = ("DATA_UNAVAILABLE", "REJECTED_HARD", "REJECTED_QUALITY", "WAITING_PRICE", "WAITING_TRIGGER", "READY", "PENDING", "FILLED", "CLOSED", "EXPIRED", "SUPERSEDED")
+CANDIDATE_STATES = (
+    "DATA_UNAVAILABLE", "REJECTED_HARD", "REJECTED_QUALITY", "WAITING_PRICE", "WAITING_TRIGGER",
+    "READY", "PENDING", "FILLED", "CLOSED", "EXPIRED", "SUPERSEDED",
+    
+)
 ACTIVE_CANDIDATE_STATES = {"WAITING_PRICE", "WAITING_TRIGGER", "READY", "PENDING", "FILLED"}
 WAITING_CANDIDATE_STATES = {"WAITING_PRICE", "WAITING_TRIGGER"}
 CANDIDATE_SCHEMA_VERSION = 1
@@ -2827,35 +2848,32 @@ class ErrorCategory:
     STRATEGY_CONTRACT_ERROR = "STRATEGY_CONTRACT_ERROR"
     VALIDATION_REJECT = "VALIDATION_REJECT"
     RISK_REJECT = "RISK_REJECT"
+    PERSISTENCE_ERROR = "PERSISTENCE_ERROR"
     EXECUTION_UNKNOWN = "EXECUTION_UNKNOWN"
     PROTECTION_ERROR = "PROTECTION_ERROR"
 
 
-def _is_no_setup_error(exc: BaseException) -> bool:
-    """True bila strategy melaporkan 'tidak ada setup valid' (hasil normal, bukan error)."""
-    return bool(getattr(exc, "no_setup", False)) or str(exc).startswith("NO_VALID_LIQUIDITY_SETUP")
-
-
 def classify_error(exc: BaseException) -> str:
+    """Peta exception ke kategori error blueprint (bukan satu catch-all)."""
     name = type(exc).__name__
-    message = str(exc).lower()
-    if _is_no_setup_error(exc):
-        return ErrorCategory.VALIDATION_REJECT
-    if name == "BinanceRateLimitError" or getattr(exc, "binance_rate_limited", False) or "429" in message or "418" in message or "rate limit" in message:
+    text = str(exc).lower()
+    if name == "BinanceRateLimitError" or getattr(exc, "binance_rate_limited", False) or "rate limit" in text or "429" in text or "418" in text:
         return ErrorCategory.RATE_LIMIT
-    if name == "InsufficientHistoryError" or "candle closed" in message or "diperlukan" in message:
+    if name == "InsufficientHistoryError" or "candle closed" in text or "diperlukan" in text:
         return ErrorCategory.DATA_INSUFFICIENT
     if name == "DataInvalidError":
         return ErrorCategory.DATA_INVALID
-    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timeout" in message or "timed out" in message:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timed out" in text or "timeout" in text:
         return ErrorCategory.NETWORK_TIMEOUT
     if name in {"InsufficientBalanceError", "MarginInfluenceError", "RiskRejectError"}:
         return ErrorCategory.RISK_REJECT
-    return ErrorCategory.STRATEGY_CONTRACT_ERROR if isinstance(exc, (KeyError, TypeError, ValueError, AttributeError)) or "strategy" in message else ErrorCategory.DATA_INVALID
+    if isinstance(exc, (KeyError, TypeError, ValueError, AttributeError)):
+        return ErrorCategory.STRATEGY_CONTRACT_ERROR
+    return ErrorCategory.STRATEGY_CONTRACT_ERROR if "strategy" in text else ErrorCategory.DATA_INVALID
 
 
 class RiskRejectError(RuntimeError):
-    """Penolakan risk budget; tidak otomatis dianggap kesalahan pair."""
+    """Entry ditolak oleh risk budget / batas portofolio (bukan alasan ban)."""
 
 
 def _r_now() -> datetime:
@@ -2863,10 +2881,7 @@ def _r_now() -> datetime:
 
 
 def _r_iso(dt: datetime | None = None) -> str:
-    value = dt or _r_now()
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return (dt or _r_now()).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _r_parse_iso(value: str | None) -> datetime | None:
@@ -2876,15 +2891,15 @@ def _r_parse_iso(value: str | None) -> datetime | None:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
     except ValueError:
         try:
-            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
         except ValueError:
             return None
 
 
+# ------------------------------------------------------------ models
+
 @dataclass
-class ScanObservation:
-    """Ringkasan singkat satu hasil analisis untuk cooldown/urutan scanner di RAM."""
+class CandidateRecord:
     candidate_id: str
     pair: str
     state: str
@@ -2927,10 +2942,52 @@ class ScanObservation:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ScanObservation":
-        allowed = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in data.items() if k in allowed})
+    def from_dict(cls, data: dict[str, Any]) -> "CandidateRecord":
+        names = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in data.items() if k in names})
 
+
+@dataclass
+class CandidateEvent:
+    candidate_id: str
+    event_type: str
+    new_state: str
+    old_state: str = ""
+    reason_code: str = ""
+    strategy_version: str = ""
+    scan_cycle_id: str = ""
+    metrics: dict[str, Any] = field(default_factory=dict)
+    timestamp_utc: str = field(default_factory=_r_iso)
+    event_id: str = field(default_factory=lambda: uuid4().hex)
+
+
+
+
+
+
+# ------------------------------------------------------------ storage (SQLite)
+
+
+
+
+
+
+
+# ------------------------------------------------------------ M1 candle files (bukan GitHub)
+
+
+
+# ------------------------------------------------------------ candidate lifecycle
+
+
+
+
+
+
+
+
+
+# ------------------------------------------------------------ resource / memory pressure
 
 def detect_memory_limit_mb() -> float | None:
     """Batas memori container (cgroup v2/v1) bila terdeteksi."""
@@ -2944,6 +3001,8 @@ def detect_memory_limit_mb() -> float | None:
         except (OSError, ValueError):
             continue
     return None
+
+
 class ResourceMonitor:
     LEVELS = ("NORMAL", "WARNING", "HIGH", "CRITICAL")
 
@@ -2987,11 +3046,16 @@ class ResourceMonitor:
         return self.level in {"NORMAL", "WARNING"} or (self.level == "HIGH" and near_zone)
 
 
+# ------------------------------------------------------------ waktu & event-driven recheck
+
 H4_MS_MAIN = 4 * 3600 * 1000
 M15_MS_MAIN = 15 * 60 * 1000
 
+
 def next_boundary_ts(now_ts: float, interval_seconds: int) -> float:
     return (int(now_ts // interval_seconds) + 1) * interval_seconds
+
+
 def next_evaluate_ts(state: str, now_ts: float, retries: int = 0) -> float:
     """Jadwal evaluasi ulang berbasis event (candle close), bukan ban panjang."""
     if state in WAITING_CANDIDATE_STATES:
@@ -3001,6 +3065,8 @@ def next_evaluate_ts(state: str, now_ts: float, retries: int = 0) -> float:
     if state == "READY":
         return now_ts + SCAN_READY_RETRY_SECONDS
     return max(next_boundary_ts(now_ts, 4 * 3600), now_ts + 30.0)
+
+
 class RecheckBook:
     """Cooldown sementara per pair (bukan ban). Habis saat candle relevan maju atau jadwal lewat."""
 
@@ -3066,6 +3132,8 @@ class RecheckBook:
         return n
 
 
+# ------------------------------------------------------------ candidate builder, priority, ledger
+
 def _f(value: Any, default: float = 0.0) -> float:
     try:
         out = float(value)
@@ -3075,169 +3143,219 @@ def _f(value: Any, default: float = 0.0) -> float:
 
 
 def build_candidate_from_setup(pair: str, setup: dict[str, Any], *, cycle_id: str, now: datetime, state_override: str | None = None,
-                               reason_override: str | None = None, strategy_name: str = "", ttl_hours: float | None = None) -> ScanObservation:
+                               reason_override: str | None = None, strategy_name: str = "", ttl_hours: float | None = None) -> CandidateRecord:
     analysis = setup.get("analysis") if isinstance(setup.get("analysis"), dict) else {}
     data = setup.get("data") if isinstance(setup.get("data"), dict) else {}
     strat = setup.get("strategy") if isinstance(setup.get("strategy"), dict) else {}
     signature = str(setup.get("thesis_signature") or "")
+    direction = str(setup.get("direction") or "").upper()
     if not signature:
-        signature = hashlib.sha1(f"{pair}|{setup.get('direction')}|{setup.get('entry')}|{setup.get('sl')}|{setup.get('tp')}".encode()).hexdigest()[:20]
+        signature = hashlib.sha1(f"{pair}|{direction}|{setup.get('entry')}|{setup.get('sl')}|{setup.get('tp')}".encode()).hexdigest()[:20]
     now_iso = _r_iso(now)
     expires = now + timedelta(hours=ttl_hours if ttl_hours is not None else CANDIDATE_TTL_HOURS)
     state = state_override or str(setup.get("candidate_state") or "READY")
     reason = reason_override or str(setup.get("state_reason") or "")
-    rec = ScanObservation(
-        candidate_id=f"C{signature}", pair=pair, state=state, scan_cycle_id=str(cycle_id), created_at_utc=now_iso, updated_at_utc=now_iso,
-        analysis_source=str(setup.get("analysis_source") or "UNKNOWN"), strategy_name=str(strat.get("name") or strategy_name),
-        strategy_version=str(strat.get("version") or ""), direction=str(setup.get("direction") or "").upper(),
-        btc_h4_regime=str(data.get("directional_bias") or ""), pair_h4_regime=str(((analysis.get("macro") or {}).get("pair_h4") or {}).get("trend") or ""),
+    rec = CandidateRecord(
+        candidate_id=f"C{signature}", pair=pair, state=state, scan_cycle_id=str(cycle_id),
+        created_at_utc=now_iso, updated_at_utc=now_iso,
+        analysis_source=str(setup.get("analysis_source") or "UNKNOWN"),
+        strategy_name=str(strat.get("name") or strategy_name), strategy_version=str(strat.get("version") or ""),
+        direction=direction, btc_h4_regime=str(data.get("directional_bias") or ""),
+        pair_h4_regime=str(((analysis.get("macro") or {}).get("pair_h4") or {}).get("trend") or ""),
         btc_alignment=str(setup.get("btc_alignment") or ""), setup_archetype=str(setup.get("setup_archetype") or ""),
         confidence=_f(setup.get("confidence")), confidence_components=dict(setup.get("confidence_components") or {}),
-        entry_zone=dict(setup.get("entry_zone") or {}), entry=_f(setup.get("entry")), sl=_f(setup.get("sl")), tp=_f(setup.get("tp")),
-        price_exp=_f(setup.get("price_exp")), planned_rr_gross=setup.get("planned_rr_gross"), planned_rr_after_costs=setup.get("planned_rr_after_costs"),
+        entry_zone=dict(setup.get("entry_zone") or {}), entry=_f(setup.get("entry")), sl=_f(setup.get("sl")),
+        tp=_f(setup.get("tp")), price_exp=_f(setup.get("price_exp")),
+        planned_rr_gross=setup.get("planned_rr_gross"), planned_rr_after_costs=setup.get("planned_rr_after_costs"),
         data_asof=dict(setup.get("data_asof") or {}), gate_reasons=[g.get("code") if isinstance(g, dict) else g for g in (setup.get("gate_reasons") or [])][:8],
-        state_reason=reason, price_vs_zone=str(setup.get("price_vs_zone") or ""), expires_at_utc=_r_iso(expires),
-        thesis_signature=signature, decision_ms=int(now.timestamp() * 1000),
+        state_reason=reason, price_vs_zone=str(setup.get("price_vs_zone") or ""),
+        expires_at_utc=_r_iso(expires), thesis_signature=signature, decision_ms=int(now.timestamp() * 1000),
     )
     rec.next_evaluate_after_utc = _r_iso(datetime.fromtimestamp(next_evaluate_ts(state, now.timestamp()), tz=timezone.utc))
     return rec
 
 
 def synthetic_observation(pair: str, state: str, reason: str, *, cycle_id: str, now: datetime, bucket_ms: int = H4_MS_MAIN,
-                          strategy_version: str = "", retries: int = 0, btc_h4_regime: str = "", pair_h4_regime: str = "") -> ScanObservation:
+                          strategy_version: str = "", retries: int = 0, btc_h4_regime: str = "", pair_h4_regime: str = "") -> CandidateRecord:
+    """Hasil scan tanpa setup (mismatch, data tak tersedia, dsb.) tetap tercatat dan terhitung."""
     bucket = int(now.timestamp() * 1000) // bucket_ms
     cid = "S" + hashlib.sha1(f"{pair}|{state}|{reason}|{bucket}".encode()).hexdigest()[:20]
     now_iso = _r_iso(now)
-    rec = ScanObservation(candidate_id=cid, pair=pair, state=state, scan_cycle_id=str(cycle_id), created_at_utc=now_iso, updated_at_utc=now_iso,
-                          strategy_version=strategy_version, state_reason=reason, btc_h4_regime=btc_h4_regime, pair_h4_regime=pair_h4_regime,
-                          expires_at_utc=_r_iso(now + timedelta(hours=CANDIDATE_TTL_HOURS)), retries=retries, decision_ms=int(now.timestamp() * 1000))
+    rec = CandidateRecord(
+        candidate_id=cid, pair=pair, state=state, scan_cycle_id=str(cycle_id), created_at_utc=now_iso, updated_at_utc=now_iso,
+        strategy_version=strategy_version, state_reason=reason, btc_h4_regime=btc_h4_regime, pair_h4_regime=pair_h4_regime,
+        expires_at_utc=_r_iso(now + timedelta(hours=CANDIDATE_TTL_HOURS)), retries=retries, decision_ms=int(now.timestamp() * 1000),
+    )
     rec.next_evaluate_after_utc = _r_iso(datetime.fromtimestamp(next_evaluate_ts(state, now.timestamp(), retries), tz=timezone.utc))
     return rec
 
 
-def candidate_priority(rec: ScanObservation, *, now_ts: float | None = None, distance_pct: float | None = None) -> float:
-    """Prioritas jadwal scan; bukan prediksi probabilitas profit."""
+def candidate_priority(rec: CandidateRecord, *, now_ts: float | None = None, distance_pct: float | None = None,
+                       bucket_expectancy: float | None = None, bucket_n: int = 0) -> float:
+    """Prioritas jadwal re-evaluasi/validasi (0-100). BUKAN pengganti confidence."""
     conf = max(0.0, min(rec.confidence, 100.0)) / 100.0
     rr = rec.planned_rr_after_costs if rec.planned_rr_after_costs is not None else (rec.planned_rr_gross or 0.0)
-    rr_n = max(0.0, min(_f(rr), 8.0)) / 8.0
-    proximity = 0.3 if distance_pct is None else max(0.0, 1.0 - min(abs(distance_pct), 5.0) / 5.0)
-    if distance_pct is None:
-        proximity = max(proximity, {"IN_ZONE": 1.0, "ABOVE_ZONE": 0.5, "BELOW_ZONE": 0.5}.get(rec.price_vs_zone, 0.3))
-    freshness = 1.0
-    stamp = _f((rec.data_asof or {}).get("M15"), 0.0)
-    if now_ts is not None and stamp:
-        freshness = max(0.0, 1.0 - max(0.0, now_ts - stamp / 1000.0) / 3600.0)
-    alignment = {"ALIGNED": 1.0, "NEUTRAL": 0.6, "COUNTER_TREND": 0.2}.get(rec.btc_alignment, 0.4)
-    return round((0.38 * conf + 0.16 * rr_n + 0.26 * proximity + 0.10 * freshness + 0.10 * alignment) * 100.0, 3)
+    rr_n = max(0.0, min(_f(rr), 4.0)) / 4.0
+    prox = 0.3 if distance_pct is None else max(0.0, 1.0 - min(abs(distance_pct), 5.0) / 5.0)
+    zone_bonus = {"IN_ZONE": 1.0, "ABOVE_ZONE": 0.5, "BELOW_ZONE": 0.5}.get(rec.price_vs_zone, 0.3)
+    prox = max(prox, zone_bonus) if distance_pct is None else prox
+    fresh = 1.0
+    if now_ts is not None and rec.data_asof.get("M15"):
+        age = max(0.0, now_ts - rec.data_asof["M15"] / 1000.0)
+        fresh = max(0.0, 1.0 - age / 3600.0)
+    align = {"ALIGNED": 1.0, "NEUTRAL": 0.6, "COUNTER_TREND": 0.2}.get(rec.btc_alignment, 0.4)
+    score = 0.35 * conf + 0.20 * rr_n + 0.25 * prox + 0.10 * fresh + 0.10 * align
+    if bucket_expectancy is not None and bucket_n >= MIN_BUCKET_SAMPLE:
+        score = 0.9 * score + 0.1 * max(0.0, min(1.0, 0.5 + bucket_expectancy / 4.0))
+    return round(score * 100.0, 3)
 
 
-class ScanRuntimeState:
-    """Kumpulan state scanner sementara, dibatasi di RAM dan tidak diekspor ke GitHub."""
+class CandidateLedger:
+    """Ledger kandidat operasional di RAM untuk deduplikasi dan lifecycle setup."""
+
     def __init__(self, max_size: int = CANDIDATE_QUEUE_MAX) -> None:
-        self.max_size = max(20, int(max_size))
-        self.items: dict[str, ScanObservation] = {}
+        self.max_size = max_size
+        self.items: dict[str, CandidateRecord] = {}
         self.by_pair: dict[str, str] = {}
+        self.recent_events: deque[CandidateEvent] = deque(maxlen=300)
         self.evictions = 0
 
-    def observe(self, rec: ScanObservation, event_type: str | None = None, metrics: dict[str, Any] | None = None) -> ScanObservation:
+    # -- observasi & transisi
+    def observe(self, rec: CandidateRecord, event_type: str | None = None, metrics: dict[str, Any] | None = None) -> CandidateRecord:
         existing = self.items.get(rec.candidate_id)
-        previous_id = self.by_pair.get(rec.pair)
-        if previous_id and previous_id != rec.candidate_id:
-            previous = self.items.get(previous_id)
-            if previous and previous.state in (WAITING_CANDIDATE_STATES | {"REJECTED_QUALITY", "READY"}) and not previous.linked_trade_id:
-                previous.state = "SUPERSEDED"
-                previous.state_reason = "SUPERSEDED_BY_NEW_THESIS"
-        if existing:
+        old_state = existing.state if existing else ""
+        prev_id = self.by_pair.get(rec.pair)
+        if prev_id and prev_id != rec.candidate_id:
+            prev = self.items.get(prev_id)
+            if prev and prev.state in (WAITING_CANDIDATE_STATES | {"REJECTED_QUALITY", "READY"}) and not prev.linked_trade_id:
+                self._transition(prev, "SUPERSEDED", "CANDIDATE_SUPERSEDED", "SUPERSEDED_BY_NEW_THESIS", {"new_candidate": rec.candidate_id})
+        if existing is not None:
             rec.created_at_utc = existing.created_at_utc
             rec.linked_trade_id = existing.linked_trade_id or rec.linked_trade_id
             if existing.state in {"PENDING", "FILLED", "CLOSED"} and rec.state in {"READY", "WAITING_PRICE", "WAITING_TRIGGER"}:
-                rec.state = existing.state
-        rec.priority = candidate_priority(rec, now_ts=time.time())
+                rec.state = existing.state  # state trading tidak diturunkan oleh scan ulang
         self.items[rec.candidate_id] = rec
         self.by_pair[rec.pair] = rec.candidate_id
+        material = (not existing) or existing.state != rec.state or existing.state_reason != rec.state_reason
+        if material:
+            etype = event_type or self._event_for(rec.state, bool(existing))
+            self._emit(rec, etype, old_state, rec.state_reason, metrics)
         self._evict()
         return rec
 
-    def _transition(self, rec: ScanObservation, state: str, reason: str) -> None:
+    @staticmethod
+    def _event_for(state: str, existed: bool) -> str:
+        return {
+            "WAITING_PRICE": "CANDIDATE_WAITING", "WAITING_TRIGGER": "CANDIDATE_WAITING", "REJECTED_HARD": "CANDIDATE_REJECTED",
+            "REJECTED_QUALITY": "CANDIDATE_REJECTED", "DATA_UNAVAILABLE": "CANDIDATE_REJECTED", "EXPIRED": "CANDIDATE_EXPIRED",
+            "READY": "CANDIDATE_VALIDATED" if existed else "CANDIDATE_CREATED",
+        }.get(state, "CANDIDATE_RECHECKED" if existed else "CANDIDATE_CREATED")
+
+    def _emit(self, rec: CandidateRecord, etype: str, old_state: str, reason: str, metrics: dict[str, Any] | None) -> None:
+        ev = CandidateEvent(candidate_id=rec.candidate_id, event_type=etype, new_state=rec.state, old_state=old_state,
+                            reason_code=reason, strategy_version=rec.strategy_version, scan_cycle_id=rec.scan_cycle_id,
+                            metrics={"confidence": rec.confidence, "rr_after_costs": rec.planned_rr_after_costs, **(metrics or {})})
+        self.recent_events.append(ev)
+
+    def _transition(self, rec: CandidateRecord, state: str, etype: str, reason: str, metrics: dict[str, Any] | None = None) -> None:
+        old = rec.state
         rec.state = state
         rec.state_reason = reason
         rec.updated_at_utc = _r_iso()
+        self._emit(rec, etype, old, reason, metrics)
 
     def link_trade(self, candidate_id: str, trade_id: str, state: str = "PENDING") -> None:
         rec = self.items.get(candidate_id)
-        if rec:
-            rec.linked_trade_id = trade_id
-            self._transition(rec, state, "TRADE_CREATED")
+        if rec is None:
+            return
+        rec.linked_trade_id = trade_id
+        self._transition(rec, state, "TRADE_LINKED", "TRADE_CREATED", {"trade_id": trade_id})
 
     def annotate(self, candidate_id: str, etype: str, reason: str, metrics: dict[str, Any] | None = None) -> None:
+        """Catat alasan baru tanpa mengubah state (mis. RISK_REJECTED)."""
         rec = self.items.get(candidate_id)
-        if rec:
-            rec.state_reason = reason
-            rec.updated_at_utc = _r_iso()
+        if rec is None:
+            return
+        rec.state_reason = reason
+        rec.updated_at_utc = _r_iso()
+        self._emit(rec, etype, rec.state, reason, metrics)
 
     def set_state(self, candidate_id: str, state: str, etype: str, reason: str) -> None:
         rec = self.items.get(candidate_id)
-        if rec and rec.state != state:
-            self._transition(rec, state, reason)
+        if rec is not None and rec.state != state:
+            self._transition(rec, state, etype, reason)
 
+    
     def expire_due(self, now: datetime) -> int:
-        count = 0
+        n = 0
         for rec in list(self.items.values()):
-            expiry = _r_parse_iso(rec.expires_at_utc)
-            if expiry and expiry <= now and rec.state in (WAITING_CANDIDATE_STATES | {"READY", "REJECTED_QUALITY", "DATA_UNAVAILABLE"}) and not rec.linked_trade_id:
-                self._transition(rec, "EXPIRED", "TTL_REACHED")
-                count += 1
-        return count
+            exp = _r_parse_iso(rec.expires_at_utc)
+            if exp and exp <= now and rec.state in (WAITING_CANDIDATE_STATES | {"READY", "REJECTED_QUALITY", "DATA_UNAVAILABLE"}) and not rec.linked_trade_id:
+                self._transition(rec, "EXPIRED", "CANDIDATE_EXPIRED", "TTL_REACHED")
+                n += 1
+        return n
 
-    def due_watch(self, now: datetime, limit: int) -> list[ScanObservation]:
-        rows = []
+    def due_watch(self, now: datetime, limit: int) -> list[CandidateRecord]:
+        out = []
         for rec in self.items.values():
             if rec.state in WAITING_CANDIDATE_STATES and not rec.linked_trade_id:
-                due = _r_parse_iso(rec.next_evaluate_after_utc)
-                if due is None or due <= now:
-                    rows.append(rec)
-        rows.sort(key=lambda r: r.priority, reverse=True)
-        return rows[:max(0, limit)]
+                nxt = _r_parse_iso(rec.next_evaluate_after_utc)
+                if nxt is None or nxt <= now:
+                    out.append(rec)
+        out.sort(key=lambda r: r.priority, reverse=True)
+        return out[:limit]
 
     def next_watch_due_ts(self) -> float | None:
         now = time.time()
-        times = [stamp.timestamp() for rec in self.items.values() if rec.state in WAITING_CANDIDATE_STATES and not rec.linked_trade_id
-                 and (stamp := _r_parse_iso(rec.next_evaluate_after_utc)) and stamp.timestamp() > now]
+        times = [
+            t.timestamp() for r in self.items.values()
+            if r.state in WAITING_CANDIDATE_STATES and not r.linked_trade_id
+            and (t := _r_parse_iso(r.next_evaluate_after_utc)) and t.timestamp() > now
+        ]
         return min(times, default=None)
 
-    def postpone(self, rec: ScanObservation, seconds: float) -> None:
-        rec.next_evaluate_after_utc = _r_iso(_r_now() + timedelta(seconds=max(1.0, seconds)))
+    def postpone(self, rec: CandidateRecord, seconds: float) -> None:
+        rec.next_evaluate_after_utc = _r_iso(_r_now() + timedelta(seconds=seconds))
 
     def _evict(self) -> None:
         if len(self.items) <= self.max_size:
             return
-        priorities = {"SUPERSEDED": 0, "EXPIRED": 0, "CLOSED": 0, "DATA_UNAVAILABLE": 1, "REJECTED_HARD": 1, "REJECTED_QUALITY": 2, "WAITING_PRICE": 3, "WAITING_TRIGGER": 3}
-        candidates = [rec for rec in self.items.values() if rec.state in priorities and not rec.linked_trade_id]
-        candidates.sort(key=lambda rec: (priorities[rec.state], rec.priority))
-        for rec in candidates[:max(0, len(self.items) - self.max_size)]:
+        order = {"SUPERSEDED": 0, "EXPIRED": 0, "CLOSED": 0, "DATA_UNAVAILABLE": 1, "REJECTED_HARD": 1, "REJECTED_QUALITY": 2, "WAITING_PRICE": 3, "WAITING_TRIGGER": 3}
+        evictable = [r for r in self.items.values() if r.state in order and not r.linked_trade_id]
+        evictable.sort(key=lambda r: (order[r.state], r.priority))
+        for rec in evictable[: len(self.items) - self.max_size]:
             self.items.pop(rec.candidate_id, None)
             if self.by_pair.get(rec.pair) == rec.candidate_id:
                 self.by_pair.pop(rec.pair, None)
             self.evictions += 1
 
     def counts(self) -> dict[str, int]:
-        output: dict[str, int] = {}
+        out: dict[str, int] = {}
         for rec in self.items.values():
-            output[rec.state] = output.get(rec.state, 0) + 1
-        return output
+            out[rec.state] = out.get(rec.state, 0) + 1
+        return out
 
     def oldest_active_age_seconds(self, now: datetime) -> float | None:
-        ages = [(now - created).total_seconds() for rec in self.items.values() if rec.state in ACTIVE_CANDIDATE_STATES
-                and (created := _r_parse_iso(rec.created_at_utc))]
+        ages = [(now - t).total_seconds() for r in self.items.values() if r.state in ACTIVE_CANDIDATE_STATES and (t := _r_parse_iso(r.created_at_utc))]
         return max(ages, default=None)
 
-    def top(self, limit: int = 10, states: set[str] | None = None) -> list[ScanObservation]:
-        pool = [rec for rec in self.items.values() if states is None or rec.state in states]
-        return sorted(pool, key=lambda rec: rec.priority, reverse=True)[:limit]
+    def top(self, limit: int = 10, states: set[str] | None = None) -> list[CandidateRecord]:
+        pool = [r for r in self.items.values() if states is None or r.state in states]
+        return sorted(pool, key=lambda r: r.priority, reverse=True)[:limit]
 
+    # -- persistensi
+
+
+
+
+
+
+# ------------------------------------------------------------ risk sizing (opt-in)
 
 def _d(value: Any) -> Decimal:
     return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
 def compute_risk_quantity(*, meta: Any, direction: str, entry: Decimal, sl: Decimal, equity: Decimal | None, risk_pct: float | None,
                           leverage: int, margin_cap_usdt: Decimal | None = None, available_balance: Decimal | None = None,
                           max_notional: Decimal | None = None, fee_pct: float | None = None, slippage_pct: float | None = None) -> dict[str, Any]:
@@ -3301,6 +3419,8 @@ def compute_risk_quantity(*, meta: Any, direction: str, entry: Decimal, sl: Deci
     out.update({"ok": True, "reason": "OK", "qty": qty, "planned_loss_usdt": planned, "notional": qty * entry,
                 "margin_required": qty * entry / lev, "risk_pct_of_equity": float(planned / _d(equity) * 100)})
     return out
+
+
 def portfolio_risk_check(*, active: list[tuple[str, Decimal]], new_direction: str, new_loss: Decimal, equity: Decimal | None,
                          max_portfolio_pct: float | None, max_direction_pct: float | None = None,
                          daily_drawdown_pct: float | None = None, max_daily_dd_pct: float | None = None,
@@ -3320,6 +3440,10 @@ def portfolio_risk_check(*, active: list[tuple[str, Decimal]], new_direction: st
     if max_daily_dd_pct is not None and daily_drawdown_pct is not None and daily_drawdown_pct >= max_daily_dd_pct:
         return False, "DAILY_DRAWDOWN_LIMIT", info
     return True, "OK", info
+
+
+# ------------------------------------------------------------ statistik R, bucket, sweep, tournament
+
 def r_metrics(values: list[float]) -> dict[str, Any]:
     vals = [v for v in values if isinstance(v, (int, float)) and math.isfinite(v)]
     n = len(vals)
@@ -3338,7 +3462,7 @@ def r_metrics(values: list[float]) -> dict[str, Any]:
         peak = max(peak, cum)
         mdd = max(mdd, peak - cum)
     half = 1.96 * sd / math.sqrt(n) if n > 1 else None
-    reliable = n >= 30
+    reliable = n >= MIN_BUCKET_SAMPLE
     return {
         "n": n, "mean_r": round(mean, 4), "median_r": round(median, 4), "expectancy_r": round(mean, 4),
         "win_rate": round(len(wins) / n * 100, 2), "avg_win_r": round(gross_win / len(wins), 4) if wins else 0.0,
@@ -3347,8 +3471,26 @@ def r_metrics(values: list[float]) -> dict[str, Any]:
         "max_drawdown_r": round(mdd, 4), "sd_r": round(sd, 4),
         "ci95_r": None if half is None else [round(mean - half, 4), round(mean + half, 4)],
         "reliable": reliable,
-        "warning": None if reliable else f"sampel {n} < {30}: jangan disimpulkan",
+        "warning": None if reliable else f"sampel {n} < {MIN_BUCKET_SAMPLE}: jangan disimpulkan",
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ------------------------------------------------------------ R dari histori trade (real/sim)
@@ -3476,7 +3618,8 @@ class TradingEngine:
         self._scan_margin_streak: dict[str, int] = {}
 
         # H4 scanner gate. H4 defaults OFF per fresh main.py session.
-        # Each open window covers the same universe twice; MAX limits new trades only.
+        # _h4_window_active means the current H4 close has opened a scanning
+        # window; it is closed again when max active trade is reached.
         self._h4_enabled = False
         self._h4_window_active = False
         self._h4_last_trigger_slot: str | None = None
@@ -3500,9 +3643,8 @@ class TradingEngine:
         self._drawdown_triggered = False
         self.sim_balance: Decimal = SIM_START_BALANCE
         self._sim_dirty = False
-        self.trail_mode = "structure"
+        self.trail_mode = "ladder"
         self._trail_state: dict[str, dict[str, Any]] = {}
-        self._pending_trail_intents: dict[str, dict[str, Any]] = {}
 
         # Rate limit Binance: satu notifikasi per jeda + watcher yang melanjutkan.
         self._rl_task: asyncio.Task[Any] | None = None
@@ -3663,9 +3805,8 @@ class TradingEngine:
         await self._load_notes()
         await self._load_banned_pairs()
         await self._purge_balance_bans()
-        self._init_operational_state()
-        await self._load_runtime_settings()
-        self._start_m15_review_task()
+        self._init_scan_state()
+        await self._runtime_startup()
         self._start_autostop_task()
         self._start_btc_watch()
 
@@ -3709,7 +3850,7 @@ class TradingEngine:
         self._scan_task = None
         await self._flush_bans_if_dirty()
         await self._stop_btc_watch()
-        await self._stop_m15_review_task()
+        await self._runtime_shutdown()
 
         if self._auto_task is not None and not self._auto_task.done():
             self._auto_task.cancel()
@@ -6310,7 +6451,7 @@ class TradingEngine:
             trade, old_sl, new_sl, ref_price, r_peak, lock_eff, source, f"(tertunda) {note}", True
         )
 
-    async def _auto_trail(self, trade: Trade, price: Decimal, *, forced_sl: Decimal | None = None, source: str = "AUTO_TRAIL", note: str = "") -> None:
+    async def _auto_trail(self, trade: Trade, price: Decimal) -> None:
         if not AUTO_TRAIL_ENABLED or trade.status != "FILLED" or trade.trade_id in self._trail_busy:
             return
         if (trade.risk_info or {}).get("manual_protect"):
@@ -6328,12 +6469,8 @@ class TradingEngine:
         if metrics is None:
             return
         extra = None
-        if metrics[2] >= Decimal("0.75"):
+        if metrics[2] >= Decimal("1.0"):
             extra = await self._strategy_trailing(trade, price)
-        if forced_sl is not None:
-            forced_source = str(source or "M15_STRUCTURE_REVIEW")
-            forced_note = str(note or "closed M15 structure review")
-            extra = (forced_sl, forced_source, forced_note)
         target = self._trail_target(trade, price, extra)
         if target is None:
             return
@@ -7320,40 +7457,13 @@ class TradingEngine:
                     "⛔ H4 SLOT INVALID",
                     [
                         f"🕓 Slot      {slot_key or '-'} WIB",
-                        "⏱ Batas     sebelum close H4 berikutnya",
+                        "⏱ Batas     +1 jam dari jadwal",
                         f"📌 Alasan    {reason}",
-                        f"PASS 1 {len(self._h4_completed_by_pass.get(1, set()))}/{len(self._h4_universe_snapshot)} • PASS 2 {len(self._h4_completed_by_pass.get(2, set()))}/{len(self._h4_universe_snapshot)}",
-                        "Status INCOMPLETE; tidak mengklaim dua pass selesai.",
+                        "▶️ Berikut  menunggu jadwal H4 selanjutnya.",
                     ],
                 )
             )
         )
-
-    def _advance_h4_coverage_after_cycle(self) -> None:
-        """Advance only when every symbol in the slot snapshot was actually analyzed."""
-        if not (self._h4_enabled and self._h4_window_active):
-            return
-        total = set(self._h4_universe_snapshot)
-        if not total:
-            return
-        pass_index = self._h4_pass_index
-        completed = self._h4_completed_by_pass.setdefault(pass_index, set())
-        missing = total - completed
-        if missing:
-            return
-        if pass_index == 1:
-            self._h4_pass_index = 2
-            log.info("[SCAN][H4] PASS 1 COMPLETE %s/%s; memulai PASS 2 untuk universe snapshot yang sama.", len(completed), len(total))
-            self._fire(self.reply(card("🕓 H4 PASS 1 COMPLETE", [f"Coverage: {len(completed)}/{len(total)} pair", "PASS 2 dimulai; seluruh universe dihitung ulang.", f"MAX active {len(self.active_trades)}/{self.max_active_trades} tidak menghentikan coverage."])))
-            return
-        failed = self._h4_failed_by_pass.get(2, {})
-        self._h4_window_active = False
-        self._h4_window_slot = None
-        self._h4_window_deadline = None
-        self._h4_opening_gate = False
-        self._scan_auto_paused = len(self.active_trades) >= self.max_active_trades
-        log.info("[SCAN][H4] COMPLETE 2/2 | pass1=%s/%s pass2=%s/%s explicit_failures=%s", len(self._h4_completed_by_pass.get(1, set())), len(total), len(completed), len(total), len(failed))
-        self._fire(self.reply(card("✅ H4 COVERAGE COMPLETE", [f"PASS 1: {len(self._h4_completed_by_pass.get(1, set()))}/{len(total)}", f"PASS 2: {len(completed)}/{len(total)}", f"Failure/nonfatal detail: {len(failed)}", "MAX membatasi trade baru saja; coverage H4 selesai 2/2.", "Slot berikutnya menunggu close H4 terjadwal."])))
 
     def _h4_window_text(self) -> str:
         if not self._h4_enabled:
@@ -7361,8 +7471,8 @@ class TradingEngine:
         if self._h4_window_active:
             remaining = self._h4_window_remaining_seconds()
             if remaining is not None:
-                return f"ACTIVE ({max(0, remaining):.0f}s) • pass {self._h4_pass_index}/2: {len(self._h4_completed_by_pass.get(self._h4_pass_index, set()))}/{len(self._h4_universe_snapshot)}"
-            return f"ACTIVE • pass {self._h4_pass_index}/2: {len(self._h4_completed_by_pass.get(self._h4_pass_index, set()))}/{len(self._h4_universe_snapshot)}"
+                return f"ACTIVE ({max(0, remaining):.0f}s) • scan {self._h4_cycle_count}/{self.h4_max_cycles}"
+            return f"ACTIVE • scan {self._h4_cycle_count}/{self.h4_max_cycles}"
         if self._h4_invalid_slot_key == self._h4_last_trigger_slot and self._h4_invalid_slot_key:
             return "WAITING_NEXT_H4"
         return "WAITING_H4"
@@ -7381,7 +7491,7 @@ class TradingEngine:
                 f"Next H4: {self._h4_next_slot_text()}",
                 "Jadwal: 03:00 • 07:00 • 11:00 • 15:00 • 19:00 • 23:00 WIB",
                 (
-                    "Status: coverage tetap berjalan walau MAX penuh; pembukaan trade baru dibatasi."
+                    "Status: scanner akan terus berjalan sampai MAX penuh."
                     if self._h4_window_active
                     else "Status: menunggu close H4 berikutnya."
                 ),
@@ -7408,9 +7518,6 @@ class TradingEngine:
             self._h4_last_trigger_slot = None
             self._h4_window_slot = None
             self._h4_window_deadline = None
-            self._h4_universe_snapshot = []
-            self._h4_universe_rows = []
-            self._h4_completed_by_pass = {1: set(), 2: set()}
             self._h4_invalid_slot_key = None
             self._h4_opening_gate = False
 
@@ -7501,7 +7608,8 @@ class TradingEngine:
         self._scan_user_enabled = True
         self._scan_auto_paused = False
         if self._h4_enabled:
-            self._scan_auto_paused = len(self.active_trades) >= self.max_active_trades
+            if len(self.active_trades) >= self.max_active_trades:
+                self._scan_auto_paused = True
             await self._start_scan_task()
             await self.reply(
                 "🟢 SCAN ON\n\n"
@@ -7745,7 +7853,6 @@ class TradingEngine:
                          + "\n\n⚠️ Bila tersentuh, SEMUA setup di /trade ditutup (real: posisi market-close + order dibatalkan).")
 
 
-
     async def _handle_trail_command(self, text: str) -> None:
         parts = text.split()
         if len(parts) >= 2:
@@ -7754,9 +7861,10 @@ class TradingEngine:
                 raise ValueError("Gunakan /trailmode structure atau /trailmode ladder.")
             self.trail_mode = mode
         desc = (
-            "SL struktur M15 + liquidity, dikombinasikan dengan tangga R dan buffer biaya."
+            "SL baru hanya setelah rejection M15 (sumbu/sweep di dekat TP + lower high/higher low), "
+            "ditaruh di invalidation M15; tanpa tangga R."
             if self.trail_mode == "structure"
-            else "Mode lama: tangga R + struktur M15 + kelelahan RSI."
+            else "Mode aktif: tangga R lebih dini + struktur M15 + kelelahan RSI."
         )
         await self.reply(card("🪜 TRAILING", [f"Mode  {self.trail_mode.upper()}", desc, "Ganti: /trailmode structure|ladder"]))
 
@@ -7957,8 +8065,14 @@ class TradingEngine:
         self.max_active_trades = value
 
         if self._h4_enabled:
-            # MAX menahan pembukaan trade baru; scan H4 tetap menuntaskan pass 1 dan 2.
-            self._scan_auto_paused = bool(len(self.active_trades) >= self.max_active_trades)
+            # Dalam H4 mode scheduler tetap dipertahankan; window aktif hanya
+            # boleh berjalan jika capacity tersedia. Jika menjadi penuh, window
+            # ditutup dan slot berikutnya menjadi trigger selanjutnya.
+            if len(self.active_trades) >= self.max_active_trades:
+                self._h4_window_active = False
+                self._scan_auto_paused = bool(self._scan_user_enabled)
+            else:
+                self._scan_auto_paused = False
             if self._scan_user_enabled:
                 await self._start_scan_task()
             await self.reply(
@@ -8495,20 +8609,17 @@ class TradingEngine:
                         slot = await self._wait_for_h4_trigger()
                         if slot is None:
                             break
+                        # H4 tetap menganalisis universe walau kapasitas trade penuh.
+                        # Gate kapasitas tetap berlaku pada tahap pembukaan posisi.
                         self._h4_window_active = True
                         self._h4_window_slot = slot
                         self._h4_window_deadline = self._h4_slot_deadline(slot)
                         self._h4_invalid_slot_key = None
                         self._h4_opening_gate = True
                         self._h4_cycle_count = 0
-                        self._h4_pass_index = 1
-                        self._h4_completed_by_pass = {1: set(), 2: set()}
-                        self._h4_failed_by_pass = {1: {}, 2: {}}
-                        self._h4_universe_snapshot = []
-                        self._h4_universe_rows = []
-                        self._h4_universe_meta = {}
-                        self._sweep = {"slot": self._h4_slot_key(slot), "done": set()}
-                        self._scan_auto_paused = len(self.active_trades) >= self.max_active_trades
+                        self._h4_cycle_limit = self.h4_max_cycles
+                        self._h4_sweeps_completed = 0
+                        self._scan_auto_paused = False
                         log.info(
                             "[SCAN][H4] scan window dibuka pada slot %s | deadline=%s",
                             self._h4_slot_key(slot),
@@ -8522,7 +8633,7 @@ class TradingEngine:
 
                 while self._running and self._scan_user_enabled and self.real.cooldown_remaining > 0:
                     if self._h4_enabled and self._h4_window_expired():
-                        self._invalidate_h4_window("Binance rate-limit/cooldown membuat dua coverage pass tidak selesai sebelum slot H4 berikutnya.")
+                        self._invalidate_h4_window("Binance rate-limit/cooldown melewati +1 jam dari jadwal H4.")
                         break
                     wait_for_cooldown = self.real.cooldown_remaining
                     wait_for_h4 = self._h4_window_remaining_seconds() if self._h4_enabled else None
@@ -8535,7 +8646,7 @@ class TradingEngine:
                 if self._h4_enabled and not self._h4_window_active:
                     continue
                 if self._h4_enabled and self._h4_opening_gate and self._h4_window_expired():
-                    self._invalidate_h4_window("Slot H4 lama tidak boleh mengejar coverage di luar batas sebelum close berikutnya.")
+                    self._invalidate_h4_window("Slot H4 sudah melewati batas valid +1 jam sebelum scan dimulai.")
                     continue
 
                 # H4 can be disabled while sleeping on a scheduler boundary;
@@ -8544,14 +8655,35 @@ class TradingEngine:
                 release_memory()
                 await self._update_pressure()
 
-                if self._h4_enabled and self._h4_window_active:
+                # Satu cycle berhasil dimulai/selesai tanpa rate-limit fatal:
+                # opening gate selesai, sehingga window berjalan terus sampai MAX.
+                if (self._h4_enabled and self._h4_window_active and self._h4_opening_gate
+                        and getattr(self, "_last_cycle_started_analysis", False)):
                     self._h4_opening_gate = False
-                    self._h4_cycle_count += 1
-                    self._advance_h4_coverage_after_cycle()
-                    if self._h4_window_expired():
-                        self._invalidate_h4_window("Dua coverage pass belum selesai sebelum slot H4 berikutnya.")
+                    self._h4_window_deadline = None
+
+                if self._h4_enabled and self._h4_window_active:
+                    if getattr(self, "_last_cycle_started_analysis", False):
+                        self._h4_cycle_count += 1
+                    done_reason = None
+                    if getattr(self, "_h4_sweeps_completed", 0) >= 2:
+                        done_reason = "2 full universe sweeps selesai"
+                    elif self._h4_cycle_count >= getattr(self, "_h4_cycle_limit", self.h4_max_cycles):
+                        done_reason = f"batas {getattr(self, '_h4_cycle_limit', self.h4_max_cycles)} siklus scan tercapai"
+                    if done_reason:
+                        log.info("[SCAN][H4] window slot %s selesai: %s (%s siklus).", self._h4_last_trigger_slot or "-", done_reason, self._h4_cycle_count)
+                        self._h4_window_active = False
+                        self._h4_window_slot = None
+                        self._h4_window_deadline = None
+                        self._h4_opening_gate = False
+                        await self.reply(card("🕓 H4 WINDOW SELESAI", [
+                            f"Siklus scan {self._h4_cycle_count}/{self.h4_max_cycles}",
+                            done_reason,
+                            "Scan berikutnya di close H4 berikutnya.",
+                        ]))
                         continue
-                elif len(self.active_trades) >= self.max_active_trades:
+
+                if len(self.active_trades) >= self.max_active_trades and not self._h4_enabled:
                     self._scan_auto_paused = True
                     break
 
@@ -8597,31 +8729,27 @@ class TradingEngine:
                 await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
 
     # ------------------------------------------------------------------
-    # OPERATIONAL STATE / RESILIENCE LAYER
+    # SCAN STATE / RESILIENCE LAYER
     # ------------------------------------------------------------------
 
-    def _init_operational_state(self) -> None:
+    def _init_scan_state(self) -> None:
         self._resource = ResourceMonitor(MEMORY_SOFT_LIMIT_MB)
         self._recheck = RecheckBook()
-        self.scan_state = ScanRuntimeState()
+        self.ledger = CandidateLedger()
         self._funnel_last: dict[str, Any] = {}
-        self._funnel_history: deque[dict[str, Any]] = deque(maxlen=24)
+        self._funnel_history: deque[dict[str, Any]] = deque(maxlen=48)
         self._scan_durations: deque[float] = deque(maxlen=20)
         self._retry_counts: dict[str, int] = {}
         self._scan_cycle_active = False
         self._last_cycle_analyzed = 0
+        self._last_cycle_started_analysis = False
+        self._last_state_export = 0.0
         self._strategy_module_ref: Any = None
         self._validation_reason_totals: dict[str, int] = {}
+        self.h4_max_cycles = SCAN_H4_MAX_CYCLES
+        self._h4_cycle_limit = SCAN_H4_MAX_CYCLES
         self._h4_cycle_count = 0
-        self._h4_pass_index = 1
-        self._h4_completed_by_pass: dict[int, set[str]] = {1: set(), 2: set()}
-        self._h4_universe_snapshot: list[str] = []
-        self._h4_universe_skipped: set[str] = set()
-        self._sweep: dict[str, Any] = {"slot": None, "done": set()}
-        self._m15_review_task: asyncio.Task[Any] | None = None
-        self._m15_review_last_close_by_trade: dict[str, int] = {}
-        self._m15_review_retry: dict[tuple[str, int], tuple[int, float]] = {}
-        self._m15_review_busy: set[str] = set()
+        self._h4_sweeps_completed = 0
         self._btc_flip_enabled = True
         self._btc_backoff_until = 0.0
         self._btc_last_warn = 0.0
@@ -8629,108 +8757,109 @@ class TradingEngine:
         self._sync_task: asyncio.Task[Any] | None = None
         self._btc_state: dict[str, Any] = {}
         self._btc_impulse: dict[str, Any] = {}
+        self._sweep: dict[str, Any] = {"slot": None, "done": set()}
         self._day_anchor: tuple[str, Decimal] | None = None
         self._risk_cfg: dict[str, Any] = {
-            "mode": RISK_SIZING_MODE, "per_trade": RISK_PER_TRADE_PCT,
-            "portfolio": MAX_PORTFOLIO_RISK_PCT, "direction": MAX_DIRECTION_RISK_PCT,
-            "dd": MAX_DAILY_DRAWDOWN_PCT, "paper_equity": PAPER_EQUITY_USDT,
+            "mode": RISK_SIZING_MODE, "per_trade": RISK_PER_TRADE_PCT, "portfolio": MAX_PORTFOLIO_RISK_PCT,
+            "direction": MAX_DIRECTION_RISK_PCT, "dd": MAX_DAILY_DRAWDOWN_PCT, "paper_equity": PAPER_EQUITY_USDT,
         }
-        self._h4_universe_rows: list[dict[str, Any]] = []
-        self._h4_universe_meta: dict[str, Any] = {}
-        self._h4_failed_by_pass: dict[int, dict[str, str]] = {1: {}, 2: {}}
-        self._m15_review_last_global_close_ms = 0
-        self._m15_review_last_notice_at = 0.0
-        self._m15_pending_exits: dict[str, dict[str, Any]] = {}
+
+
+    async def _runtime_startup(self) -> None:
+        # Load normal runtime settings and simulation balance only.
+        await self._load_runtime_settings()
+        await self._load_sim_account()
+
+    async def _runtime_shutdown(self) -> None:
+        # Runtime state is session-local; no persistent worker/database.
+        return
 
     async def _load_runtime_settings(self) -> None:
-        """Load only the small set of operational risk and scanner settings."""
         try:
-            raw, _sha = await self.github.get_file(RUNTIME_SETTINGS_PATH)
-            if not raw:
-                return
-            data = json.loads(raw.decode("utf-8"))
-            guard = data.get("guard") or {}
-            for key, attr in (("autostop", "autostop_percent"), ("drawdown", "drawdown_percent")):
-                raw_value = guard.get(key)
-                if raw_value not in (None, ""):
-                    value = Decimal(str(raw_value))
-                    if value.is_finite() and 0 < value < 100:
-                        setattr(self, attr, value)
-            if guard.get("trail_mode") in {"ladder", "structure"}:
-                self.trail_mode = guard["trail_mode"]
-            self._btc_flip_enabled = bool(guard.get("btc_flip", True))
-            risk = data.get("risk") or {}
-            mode = str(risk.get("mode") or "").upper()
-            if mode in {"LEGACY_NOTIONAL", "RISK_BUDGET"}:
-                for key in ("per_trade", "portfolio", "direction", "dd", "paper_equity"):
-                    if key in risk:
-                        self._risk_cfg[key] = risk[key]
-                self._risk_cfg["mode"] = mode
-                self._validate_risk_cfg(announce=False)
-            log.info("[CONFIG] runtime settings operasional berhasil dimuat.")
-        except Exception as exc:
-            log.info("[CONFIG] runtime settings tidak dimuat; memakai default aman: %s", exc)
+            raw, _ = await self.github.get_file(RUNTIME_SETTINGS_PATH)
+            if raw:
+                data = json.loads(raw.decode("utf-8"))
+                guard = data.get("guard") or {}
+                for key, attr in (("autostop", "autostop_percent"), ("drawdown", "drawdown_percent")):
+                    raw_v = guard.get(key)
+                    if raw_v not in (None, ""):
+                        val = Decimal(str(raw_v))
+                        if val.is_finite() and 0 < val < 100:
+                            setattr(self, attr, val)
+                if guard.get("trail_mode") in {"ladder", "structure"}:
+                    self.trail_mode = guard["trail_mode"]
+                self._btc_flip_enabled = bool(guard.get("btc_flip", True))
+                try:
+                    cycles = int(guard.get("h4_max_cycles") or self.h4_max_cycles)
+                    if 1 <= cycles <= 100:
+                        self.h4_max_cycles = cycles
+                except (TypeError, ValueError):
+                    pass
+                risk = data.get("risk") or {}
+                mode = str(risk.get("mode") or "").upper()
+                if mode in {"LEGACY_NOTIONAL", "RISK_BUDGET"}:
+                    self._risk_cfg.update({k: risk.get(k) for k in ("per_trade", "portfolio", "direction", "dd", "paper_equity")})
+                    self._risk_cfg["mode"] = mode
+                    self._validate_risk_cfg(announce=False)
+        except Exception as exc:  # noqa: BLE001
+            log.info("[RISK] runtime settings tidak dimuat: %s", exc)
 
     def _validate_risk_cfg(self, announce: bool = True) -> str | None:
         cfg = self._risk_cfg
-        if cfg.get("mode") == "RISK_BUDGET" and (not cfg.get("per_trade") or not cfg.get("portfolio")):
+        if cfg["mode"] == "RISK_BUDGET" and (not cfg.get("per_trade") or not cfg.get("portfolio")):
             cfg["mode"] = "LEGACY_NOTIONAL"
-            message = "RISK_BUDGET membutuhkan per_trade dan portfolio; kembali ke LEGACY_NOTIONAL."
-            if announce:
-                log.warning("[RISK] %s", message)
-            return message
+            return "RISK_BUDGET butuh /risk pertrade dan /risk portfolio; kembali ke LEGACY_NOTIONAL."
         return None
 
     async def _save_runtime_settings(self) -> None:
-        """Persist compact operational controls; do not persist raw market or candidate payloads."""
-        payload = {
-            "version": 2,
-            "saved_at": iso_utc(),
-            "risk": dict(self._risk_cfg),
-            "guard": {
-                "trail_mode": self.trail_mode,
-                "btc_flip": self._btc_flip_enabled,
-                "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
-                "drawdown": None if self.drawdown_percent is None else str(self.drawdown_percent),
-            },
-        }
-        await self.github.replace_file(RUNTIME_SETTINGS_PATH, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "settings: operational risk")
+        payload = {"version": 1, "saved_at": iso_utc(), "risk": dict(self._risk_cfg),
+                   "guard": {"trail_mode": self.trail_mode, "btc_flip": self._btc_flip_enabled, "h4_max_cycles": self.h4_max_cycles, "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
+                             "drawdown": None if self.drawdown_percent is None else str(self.drawdown_percent)}}
+        await self.github.replace_file(RUNTIME_SETTINGS_PATH, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "settings: risk")
+
+
+
+
+
 
     def _new_funnel(self) -> dict[str, Any]:
         keys = ("universe", "usable_data", "structure_analyzed", "direction_thesis", "candidates_evaluated", "hard_rejects",
                 "quality_rejects", "waiting_price", "waiting_trigger", "ready", "validation_pass", "validation_reject",
                 "validation_error", "risk_rejects", "pending_created", "structure_mismatch", "data_unavailable", "data_stale",
                 "budget_stopped", "memory_skipped", "validation_skipped_topn", "rate_limited", "sweep_covered", "sweep_total", "sim_margin_blocked")
-        result: dict[str, Any] = {key: 0 for key in keys}
-        result["errors"] = {}
-        result["validation_reasons"] = {}
-        return result
+        out: dict[str, Any] = {k: 0 for k in keys}
+        out["errors"] = {}
+        out["validation_reasons"] = {}
+        return out
 
-    def _observe_candidate(self, rec: ScanObservation) -> ScanObservation:
-        return self.scan_state.observe(rec)
+    def _observe_candidate(self, rec: CandidateRecord) -> CandidateRecord:
+        rec.priority = candidate_priority(rec, now_ts=time.time())
+        rec = self.ledger.observe(rec)
+        return rec
 
     def _priority_of(self, candidate: dict[str, Any]) -> float:
-        rec = self.scan_state.items.get(str(candidate.get("_candidate_id") or ""))
+        rec = self.ledger.items.get(str(candidate.get("_candidate_id") or ""))
         return rec.priority if rec is not None else float(candidate.get("confidence") or 0)
 
     def _after_validation(self, candidate: dict[str, Any], reason: str, state: str, now_ts: float) -> None:
         cid = str(candidate.get("_candidate_id") or "")
         if cid:
-            self.scan_state.set_state(cid, state, "CANDIDATE_REJECTED", reason)
+            self.ledger.set_state(cid, state, "CANDIDATE_REJECTED", reason)
         self._recheck.set(str(candidate.get("pair") or ""), now_ts + SCAN_WATCHLIST_INTERVAL, reason, state)
 
     def _sync_ledger_trades(self) -> None:
         live = {t.candidate_id: t for t in self.active_trades.values() if getattr(t, "candidate_id", "")}
         for cid, trade in live.items():
-            self.scan_state.set_state(cid, "FILLED" if trade.status == "FILLED" else "PENDING", "TRADE_STATE", f"TRADE_{trade.status}")
+            self.ledger.set_state(cid, "FILLED" if trade.status == "FILLED" else "PENDING", "TRADE_STATE", f"TRADE_{trade.status}")
 
     def _next_scan_delay(self) -> float:
         if self._last_cycle_analyzed > 0:
             return SCAN_CYCLE_DELAY_SECONDS
         now = time.time()
-        due = [value for value in (self._recheck.next_due_ts(), self.scan_state.next_watch_due_ts()) if value is not None]
-        delay = min(SCAN_WATCHLIST_INTERVAL, 300.0) if not due else min(min(due) - now, SCAN_WATCHLIST_INTERVAL)
+        dues = [d for d in (self._recheck.next_due_ts(), self.ledger.next_watch_due_ts()) if d is not None]
+        delay = min(SCAN_WATCHLIST_INTERVAL, 300.0) if not dues else min(min(dues) - now, SCAN_WATCHLIST_INTERVAL)
         delay = max(SCAN_CYCLE_DELAY_SECONDS, delay)
+        # Jangan tidur melewati close H4 berikutnya (slot /H4 harus tepat waktu).
         return max(1.0, min(delay, next_boundary_ts(now, 4 * 3600) - now))
 
     def _api_headroom_pct(self) -> float | None:
@@ -8748,12 +8877,15 @@ class TradingEngine:
         rss = rss_mb()
         level, changed, alarm = self._resource.update(rss)
         module = self._strategy_module_ref
-        if level in {"HIGH", "CRITICAL"} and module is not None and hasattr(module, "series_cache_shrink"):
-            module.series_cache_shrink(0.5 if level == "HIGH" else 1.0)
+        if level in {"HIGH", "CRITICAL"}:
+            if module is not None and hasattr(module, "series_cache_shrink"):
+                module.series_cache_shrink(0.5 if level == "HIGH" else 1.0)
+            if level == "CRITICAL":
+                self._shed_memory()
         if alarm:
             await self.reply(card("🧠 TEKANAN MEMORI", [
-                f"Level {level}", f"RSS {rss:.0f}/{self._resource.limit_mb:.0f} MB ({self._resource.pressure_pct(rss):.0f}%)",
-                "Cache candle dipangkas; proteksi posisi diprioritaskan."
+                f"Level  {level}", f"RSS    {rss:.0f}/{self._resource.limit_mb:.0f} MB ({self._resource.pressure_pct(rss):.0f}%)",
+                "Cache candle dikurangi; analisis mendalam ditunda; scan tetap jalan.",
             ]))
 
     # -- risk sizing (opt-in)
@@ -8831,44 +8963,44 @@ class TradingEngine:
     def _status_extra_report(self) -> str:
         rss = rss_mb()
         self._resource.update(rss)
-        mod = self._strategy_module_ref
         try:
+            import sys as _sys
+            mod = self._strategy_module_ref
             cache = mod.series_cache_stats() if mod is not None and hasattr(mod, "series_cache_stats") else {}
-        except Exception:
+        except Exception:  # noqa: BLE001
             cache = {}
-        durations = list(self._scan_durations)
-        counts = self.scan_state.counts()
-        age = self.scan_state.oldest_active_age_seconds(now_utc())
+        durs = list(self._scan_durations)
+        counts = self.ledger.counts()
+        now_dt = now_utc()
+        age = self.ledger.oldest_active_age_seconds(now_dt)
         rows = [
-            f"🧠 RAM {rss:.0f}/{self._resource.limit_mb:.0f} MB ({self._resource.pressure_pct(rss):.0f}%) • {self._resource.level}",
-            f"🗃 Cache candle {cache.get('entries', 0)} • {cache.get('approx_mb', 0)} MB • hit {('-' if cache.get('hit_rate') is None else str(round(cache['hit_rate'] * 100)) + '%')}",
-            f"🛰 Scan {('-' if not durations else f'{durations[-1]:.0f}s')} terakhir • {self._last_cycle_analyzed} pair dianalisis",
-            f"📋 State scan sementara {sum(counts.values())}: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "kosong"),
-            f"⏳ Kandidat menunggu aktif tertua {'-' if age is None else f'{age / 60:.0f} mnt'} • cooldown {sum(self._recheck.counts_by_reason(time.time()).values())} pair",
-            f"📡 API headroom {self._pct_bar(self._api_headroom_pct())} • rate-limit {API_STATS.limit_hits}x",
-            f"🛡 Proteksi REAL {'OK' if self._protection_healthy() else 'ADA ERROR — entry baru ditahan'}",
+            f"🧠 RAM {rss:.0f}/{self._resource.limit_mb:.0f} MB ({self._resource.pressure_pct(rss):.0f}%) • {self._resource.level} • puncak {self._resource.peak_rss_mb:.0f} • batas {self._resource.limit_source}",
+            f"🗃 Cache candle {cache.get('entries', 0)} entri • {cache.get('approx_mb', 0)} MB • hit {('-' if cache.get('hit_rate') is None else str(round(cache['hit_rate'] * 100)) + '%')} • evict {cache.get('evictions', 0)} • gagal {cache.get('failures', 0)}",
+            f"🛰 Scan terakhir {('-' if not durs else f'{durs[-1]:.0f}s')} • rata² {('-' if not durs else f'{sum(durs) / len(durs):.0f}s')} • analisis {self._last_cycle_analyzed} pair",
+            f"📋 Kandidat {sum(counts.values())}: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "kosong"),
+            f"⏳ Kandidat aktif tertua {'-' if age is None else f'{age / 60:.0f} mnt'} • cooldown {sum(self._recheck.counts_by_reason(time.time()).values())} pair",
+            "📦 Ledger kandidat hanya berada di RAM sesi aktif",
+            f"📡 API headroom {self._pct_bar(self._api_headroom_pct())} • 429/418 {API_STATS.limit_hits}x",
+            f"🛡 Proteksi real {'OK' if self._protection_healthy() else 'ADA ERROR — entry baru ditahan'}",
             f"⚖️ Sizing {self._risk_cfg['mode']}",
         ]
-        if self._h4_enabled:
-            total = len(self._h4_universe_snapshot)
-            done = len(self._h4_completed_by_pass.get(self._h4_pass_index, set()))
-            rows.append(f"🕓 H4 coverage pass {self._h4_pass_index}/2 • {done}/{total} pair")
         if not self.real_mode:
             rows.append(f"💼 Saldo simulasi {self._fmt_usd(self.sim_balance)} • equity {self._fmt_usd(self._sim_equity())} USDT")
         rows.append(f"🧨 Drawdown {'OFF' if self.drawdown_percent is None else decimal_to_str(self.drawdown_percent) + '%'} • 🛡 Autostop {'OFF' if self.autostop_percent is None else decimal_to_str(self.autostop_percent) + '%'}")
-        state = self._btc_state
-        rows.append(f"🪙 BTC watch {'ON' if self._btc_flip_enabled else 'OFF'} • H4 {state.get('h4_trend', '-')} • impuls {state.get('impulse') or '-'}")
+        bs = self._btc_state
+        rows.append(f"🪙 BTC watch {'ON' if self._btc_flip_enabled else 'OFF'} • H4 {bs.get('h4_trend', '-')} • impuls {bs.get('impulse') or '-'}")
         stale = self._funnel_last.get("data_stale", 0)
-        if stale: rows.append(f"⚠️ Data basi pada {stale} pair scan terakhir")
+        if stale:
+            rows.append(f"⚠️ Data basi pada {stale} pair di scan terakhir")
         return card("🧭 DIAGNOSTIK", rows)
 
     def _api_extra_report(self) -> str:
         head = self._api_headroom_pct()
-        return "\n\n" + card("🧭 PRIORITAS API", [
-            f"📉 Headroom {self._pct_bar(head)} • 429/418 {API_STATS.limit_hits}x",
-            "Prioritas: proteksi/close REAL > sinkron status order > review trade aktif > scanner baru.",
-            "Saat limit aktif, request baru ditahan sampai cooldown aman."
-        ])
+        rows = [
+            f"📉 Headroom API {self._pct_bar(head)}",
+            "Prioritas: proteksi posisi > scan > validasi.",
+        ]
+        return "\n\n" + card("🧭 PRIORITAS API", rows)
 
     def _stats_r_lines(self) -> list[str]:
         rows = history_r_rows(self.history_records)
@@ -8880,12 +9012,53 @@ class TradingEngine:
         return lines
 
 
+    async def show_candidate_detail(self, pair: str) -> None:
+        pair = normalize_symbol(pair)
+        recs = [r for r in self.ledger.items.values() if r.pair == pair]
+        cd = self._recheck.items.get(pair)
+        ban = self.banned_pairs.get(pair)
+        if not recs and cd is None and ban is None:
+            await self.reply(f"Belum ada catatan kandidat untuk {pair} di sesi ini.")
+            return
+        rows = []
+        for r in sorted(recs, key=lambda x: x.updated_at_utc, reverse=True)[:3]:
+            comps = ", ".join(f"{k}={float(v):.0f}" for k, v in list(r.confidence_components.items())[:10]) if r.confidence_components else "-"
+            rows += [f"{r.state} • {r.direction or '-'} • conf {r.confidence:.0f} • {r.state_reason or '-'}",
+                     f"  entry {r.entry} sl {r.sl} tp {r.tp} • RR {r.planned_rr_gross}/{r.planned_rr_after_costs}",
+                     f"  gate {r.gate_reasons or '-'} • BTC {r.btc_alignment or '-'}", f"  komponen {comps}",
+                     f"  evaluasi ulang {r.next_evaluate_after_utc or '-'}"]
+        if cd:
+            rows.append(f"Cooldown recheck: {cd['reason']} s/d {datetime.fromtimestamp(cd['until'], tz=timezone.utc).strftime('%H:%M:%S')} UTC")
+        if ban:
+            rows.append(f"BAN: {ban.get('source')} • {ban.get('reason')}")
+        await self.reply(card(f"🔎 {pair}", rows))
 
-
-
-
-
-
+    async def show_candidates(self) -> None:
+        self._sync_ledger_trades()
+        counts = self.ledger.counts()
+        f = self._funnel_last
+        funnel_rows = [
+            f"🌐 Universe {f.get('universe', 0)} → data {f.get('usable_data', 0)} → struktur {f.get('structure_analyzed', 0)} → searah {f.get('direction_thesis', 0)}",
+            f"🧪 Dievaluasi {f.get('candidates_evaluated', 0)} • hard {f.get('hard_rejects', 0)} • kualitas {f.get('quality_rejects', 0)} (mismatch {f.get('structure_mismatch', 0)})",
+            f"👀 Waiting price {f.get('waiting_price', 0)} • trigger {f.get('waiting_trigger', 0)} • ready {f.get('ready', 0)}",
+            f"✅ Validasi lolos {f.get('validation_pass', 0)} • tolak {f.get('validation_reject', 0)} • error {f.get('validation_error', 0)} • risk-reject {f.get('risk_rejects', 0)}",
+            f"📥 Pending dibuat {f.get('pending_created', 0)}",
+            f"🧹 Tersapu H4 ini {f.get('sweep_covered', 0)}/{f.get('sweep_total', 0)} koin",
+            f"🧾 Tolak validator (sejak start) {self._validation_reason_totals or '-'}",
+        ]
+        top = self.ledger.top(8, ACTIVE_CANDIDATE_STATES)
+        top_rows = [f"{r.pair} {r.direction or '-'} {r.state} conf {r.confidence:.0f} • {r.state_reason or '-'}" for r in top] or ["belum ada"]
+        persisted = "RAM sesi aktif (tidak disimpan sebagai riset)"
+        errs = f.get("errors") or {}
+        lines = [
+            card("🧬 KANDIDAT", [f"Total {sum(counts.values())} • penyimpanan {persisted}"] + [f"{k} {v}" for k, v in sorted(counts.items())]),
+            "", card("🪜 FUNNEL (scan terakhir)", funnel_rows),
+            "", "🥇 Teratas", *[f"• {x}" for x in top_rows],
+            "", f"⏸ Cooldown recheck: {self._recheck.counts_by_reason(time.time()) or 'tidak ada'}",
+        ]
+        if errs:
+            lines.append(f"⚠️ Error per kategori: {errs}")
+        await self.reply("\n".join(lines))
 
     # -- auto-export & pemulihan data riset (kontinu lintas restart)
 
@@ -8894,16 +9067,7 @@ class TradingEngine:
 
 
 
-
-
-
-
-
-
     # -- reset data riset (ganti strategy)
-
-
-
 
 
 
@@ -9114,20 +9278,15 @@ class TradingEngine:
         await self.reply(card("🪙 BTC WATCH", rows) + "\n\nBTC hanya menyesuaikan confidence (searah naik, berlawanan turun); tidak membatalkan setup dan tidak menutup posisi.")
 
     async def _handle_h4cycles_command(self, text: str) -> None:
-        await self.reply("🕓 H4 memakai tepat 2 coverage pass penuh per slot. Satu pass dapat terdiri dari banyak batch; jumlah batch tidak dapat diatur manual.")
+        parts = text.split()
+        if len(parts) > 1:
+            value = int(parts[1])
+            if not 1 <= value <= 100:
+                raise ValueError("Batas siklus harus 1–100.")
+            self.h4_max_cycles = value
+        await self.reply(f"🕓 Batas scan per window H4: {self.h4_max_cycles} siklus (maks {SCAN_MAX_PAIRS_PER_CYCLE} koin per siklus).\nUbah: /h4cycles <angka>")
 
 
-
-    async def _build_edge_text(self) -> str:
-        rows = history_r_rows(self.history_records)
-        metrics = r_metrics([item["r"] for item in rows])
-        return "\n".join([
-            card("📐 HASIL HISTORI TRADE", [
-                "Sumber: histori trade yang sudah ditutup; statistik deskriptif bukan jaminan hasil mendatang.",
-                fmt_r_line(metrics),
-                f"Sampel {'cukup untuk ringkasan' if metrics.get('reliable') else 'masih kecil; jangan menyimpulkan edge'}"
-            ])
-        ])
 
     async def _handle_risk_command(self, text: str) -> None:
         parts = text.split()
@@ -9179,6 +9338,7 @@ class TradingEngine:
             await self._flush_bans_if_dirty()
 
     async def _run_scan_cycle_inner(self) -> None:
+        self._last_cycle_started_analysis = False
         public_cooldown = max(0.0, self._binance_public_cooldown_until - time.monotonic())
         if public_cooldown > 0:
             log.info(
@@ -9186,12 +9346,12 @@ class TradingEngine:
                 public_cooldown,
             )
             return
-        h4_coverage_mode = bool(self._h4_enabled and self._h4_window_active)
-        if len(self.active_trades) >= self.max_active_trades and not h4_coverage_mode:
+        if len(self.active_trades) >= self.max_active_trades and not (self._h4_enabled and self._h4_window_active):
             self._scan_auto_paused = True
             log.info("[SCAN] auto-pause: max active trade reached (%s)", self.max_active_trades)
             return
 
+        self._last_cycle_started_analysis = True
         self._scan_cycle_number += 1
         cycle = self._scan_cycle_number
         scan_generation = self._scan_generation
@@ -9234,41 +9394,32 @@ class TradingEngine:
         self._purge_stale_structure_bans(btc_trend)
         self._sweep["done"] -= set(self._recheck.invalidate_btc_mismatch_pairs(btc_trend))
 
-        if h4_coverage_mode and self._h4_universe_rows:
-            rows = list(self._h4_universe_rows)
-            universe = dict(self._h4_universe_meta)
-            universe["rows"] = rows
-        else:
-            universe = await self._build_scan_universe()
-            rows = universe["rows"]
-            if h4_coverage_mode:
-                self._h4_universe_rows = list(rows)
-                self._h4_universe_meta = {k: v for k, v in universe.items() if k != "rows"}
-                self._h4_universe_snapshot = [str(r["pair"]) for r in rows if r.get("pair") and r["pair"] != "BTCUSDT"]
-                self._h4_completed_by_pass = {1: set(), 2: set()}
-                self._h4_failed_by_pass = {1: {}, 2: {}}
-                log.info("[SCAN][H4] snapshot universe slot=%s total=%s; setiap pass dihitung dari snapshot yang sama.", self._h4_last_trigger_slot or "-", len(self._h4_universe_snapshot))
+        universe = await self._build_scan_universe()
+        rows = universe["rows"]
+        if self._h4_enabled and self._h4_window_active:
+            required_pass_cycles = math.ceil(len(rows) / max(1, SCAN_MAX_PAIRS_PER_CYCLE))
+            self._h4_cycle_limit = max(self.h4_max_cycles, required_pass_cycles * 2 + 2)
         funnel = self._new_funnel()
         funnel["universe"] = len(rows)
         cycle_now = now_utc()
         now_ts = cycle_now.timestamp()
         cycle_id = f"{self.session_id}-{cycle}"
         self._recheck.purge(now_ts)
-        self.scan_state.expire_due(cycle_now)
+        self.ledger.expire_due(cycle_now)
         self._sync_ledger_trades()
-        due_watch = self.scan_state.due_watch(cycle_now, SCAN_WATCH_MAX_PER_CYCLE)
+        due_watch = self.ledger.due_watch(cycle_now, SCAN_WATCH_MAX_PER_CYCLE)
         active_now = {t.pair for t in self.active_trades.values()}
         for r_ in list(due_watch):
             if r_.pair in active_now or self._is_pair_banned(r_.pair) or self._recheck.active(r_.pair, now_ts) is not None:
-                self.scan_state.postpone(r_, SCAN_WATCHLIST_INTERVAL)
+                self.ledger.postpone(r_, SCAN_WATCHLIST_INTERVAL)
                 due_watch.remove(r_)
         due_set = {r.pair for r in due_watch}
-        waiting_pairs = {r.pair for r in self.scan_state.items.values() if r.state in WAITING_CANDIDATE_STATES and not r.linked_trade_id}
+        waiting_pairs = {r.pair for r in self.ledger.items.values() if r.state in WAITING_CANDIDATE_STATES and not r.linked_trade_id}
         slot = int(now_ts // (4 * 3600))
         if self._sweep.get("slot") != slot:
             self._sweep = {"slot": slot, "done": set()}
         ready_due = {
-            r.pair for r in self.scan_state.items.values()
+            r.pair for r in self.ledger.items.values()
             if r.state == "READY" and not r.linked_trade_id
             and (_r_parse_iso(r.next_evaluate_after_utc) or cycle_now) <= cycle_now
         }
@@ -9283,39 +9434,64 @@ class TradingEngine:
         eligible: list[str] = []
 
         active_pairs = {trade.pair for trade in self.active_trades.values()}
-        h4_completed = self._h4_completed_by_pass.setdefault(self._h4_pass_index, set()) if h4_coverage_mode else set()
-        h4_snapshot_set = set(self._h4_universe_snapshot) if h4_coverage_mode else set()
+        h4_full_pass = self._h4_enabled and self._h4_window_active
         for row in rows:
             pair = row["pair"]
             if pair == "BTCUSDT":
                 continue
-            if h4_coverage_mode:
-                # Coverage pass includes active/banned/cooldown pairs as analysis-only outcomes.
-                sweep_targets.append(pair)
-                if pair not in h4_snapshot_set:
-                    continue
-                if pair in h4_completed:
-                    swept_skipped += 1
-                    continue
-                eligible.append(pair)
-                continue
             if pair in active_pairs:
                 already_trade += 1
+                if h4_full_pass:
+                    # Existing positions are still structurally analyzed in each H4
+                    # pass, but they are never sent through setup creation again.
+                    sweep_targets.append(pair)
+                    if pair not in self._sweep["done"]:
+                        eligible.append(pair)
                 continue
             if self._is_pair_banned(pair):
                 banned_count += 1
                 continue
             sweep_targets.append(pair)
-            if pair in waiting_pairs and pair not in due_set:
-                watch_deferred += 1
-                continue
-            if self._recheck.active(pair, now_ts) is not None:
-                cooldown_count += 1
-                continue
-            if pair in self._sweep["done"] and pair not in due_set and pair not in ready_due:
-                swept_skipped += 1
-                continue
+            if h4_full_pass:
+                # One pass = each eligible symbol once; bypass cooldown/watch gates,
+                # but never re-analyze a symbol already covered in this pass.
+                if pair in self._sweep["done"]:
+                    swept_skipped += 1
+                    continue
+            else:
+                if pair in waiting_pairs and pair not in due_set:
+                    watch_deferred += 1
+                    continue
+                if self._recheck.active(pair, now_ts) is not None:
+                    cooldown_count += 1
+                    continue
+                if pair in self._sweep["done"] and pair not in due_set and pair not in ready_due:
+                    swept_skipped += 1
+                    continue
+
             eligible.append(pair)
+        # H4 mode intentionally performs two complete passes of the current Binance
+        # universe. A full pass is complete only when every non-active/non-banned
+        # symbol has been marked done; then reset per-symbol cooldown/watch gates for
+        # the second pass. This does not open trades when MAX ACTIVE is full.
+        if self._h4_enabled and self._h4_window_active and not eligible and sweep_targets:
+            completed_targets = set(sweep_targets).issubset(self._sweep["done"])
+            if completed_targets:
+                self._h4_sweeps_completed = int(getattr(self, "_h4_sweeps_completed", 0)) + 1
+                log.info(
+                    "[SCAN][H4] full universe sweep %s/2 complete (%s pairs).",
+                    self._h4_sweeps_completed, len(sweep_targets),
+                )
+                if self._h4_sweeps_completed < 2:
+                    self._sweep["done"].clear()
+                    for pair in sweep_targets:
+                        self._recheck.items.pop(pair, None)
+                    waiting_pairs.clear()
+                    ready_due.clear()
+                else:
+                    self._last_cycle_analyzed = 0
+                    return
+
         due_first = due_set | ready_due
         eligible = (
             [p for p in eligible if p in due_first]
@@ -9363,7 +9539,7 @@ class TradingEngine:
             if scan_generation != self._scan_generation or not self._scan_user_enabled:
                 log.info("[SCAN] Cycle #%s dibatalkan di tengah batch: generation berubah/off.", cycle)
                 return
-            if len(self.active_trades) >= self.max_active_trades and not h4_coverage_mode:
+            if len(self.active_trades) >= self.max_active_trades and not (self._h4_enabled and self._h4_window_active):
                 self._scan_auto_paused = True
                 log.info("[SCAN] Cycle #%s stopped early at max active trade.", cycle)
                 break
@@ -9385,8 +9561,7 @@ class TradingEngine:
                 break
 
             scanned += 1
-            if not h4_coverage_mode:
-                self._sweep["done"].add(pair)
+            self._sweep["done"].add(pair)
             log.info(
                 "[SCAN] Cycle #%s pair %s/%s (volume-rank=%s): %s",
                 cycle,
@@ -9398,9 +9573,6 @@ class TradingEngine:
 
             try:
                 structure, reused_setup = await self._scan_get_structure(module, pair, cycle)
-                if h4_coverage_mode:
-                    self._h4_completed_by_pass.setdefault(self._h4_pass_index, set()).add(pair)
-                    self._h4_failed_by_pass.setdefault(self._h4_pass_index, {}).pop(pair, None)
                 pair_trend = str(structure.get("trend") or "UNKNOWN").upper()
                 direction_counts[pair_trend if pair_trend in direction_counts else "UNKNOWN"] += 1
 
@@ -9412,20 +9584,14 @@ class TradingEngine:
                 # BTC/pair H4 mismatch is context, not a hard rejection.
                 btc_structure_conflict = not aligned
 
-                if h4_coverage_mode and (pair in active_pairs or self._is_pair_banned(pair) or len(self.active_trades) >= self.max_active_trades):
-                    if pair in active_pairs:
-                        already_trade += 1
-                    elif self._is_pair_banned(pair):
-                        banned_count += 1
-                    else:
-                        self._scan_auto_paused = True
-                    # H4 has been analyzed; never create a duplicate/cap-breaching trade.
-                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-                    continue
-
                 directional.append(pair)
                 funnel["structure_analyzed"] += 1
                 funnel["direction_thesis"] += 1
+
+                if pair in active_pairs:
+                    log.info("[SCAN][H4] %s active; struktur diperiksa, setup baru tidak dibuat.", pair)
+                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                    continue
 
                 candidate = reused_setup
                 if candidate is None:
@@ -9503,7 +9669,7 @@ class TradingEngine:
                         or {}
                     ).get("gates") or {}
                     waiting = bool(gates.get("waiting"))
-                    near = float(confidence) >= float(self.scan_threshold) - SCAN_RECHECK_BUFFER_POINTS
+                    near = float(confidence) >= float(self.scan_threshold) - SCAN_NEAR_THRESHOLD_POINTS
                     if waiting or cstate == "WAITING_TRIGGER":
                         new_state, why = "WAITING_TRIGGER", ("MOMENTUM_NOT_READY" if cand_rec.state_reason == "MOMENTUM_NOT_READY" else "TRIGGER_NOT_CONFIRMED")
                         funnel["waiting_trigger"] += 1
@@ -9536,22 +9702,8 @@ class TradingEngine:
                     decimal_to_str(confidence),
                 )
             except Exception as exc:
-                if _is_no_setup_error(exc):
-                    funnel["quality_rejects"] += 1
-                    self._retry_counts.pop(pair, None)
-                    self._recheck.set(pair, max(now_ts + 30.0, next_boundary_ts(now_ts, 900)), "NO_VALID_LIQUIDITY_SETUP", "REJECTED_QUALITY")
-                    self._observe_candidate(synthetic_observation(pair, "REJECTED_QUALITY", "NO_VALID_LIQUIDITY_SETUP", cycle_id=cycle_id, now=cycle_now))
-                    log.info("[SCAN] %s tidak ada setup valid (zona/invalidation/target RR neto >= 2R); dicek lagi di candle M15 berikutnya.", pair)
-                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-                    continue
                 analysis_errors += 1
                 self._sweep["done"].discard(pair)
-                if h4_coverage_mode:
-                    # Failure is diagnostic only: do NOT mark this pair complete.
-                    # It remains absent from completed_by_pass and is retried in a later batch.
-                    self._h4_failed_by_pass.setdefault(self._h4_pass_index, {})[pair] = (
-                        f"{type(exc).__name__}:{str(exc)[:180]}"
-                    )
                 err_cat = classify_error(exc)
                 funnel["errors"][err_cat] = funnel["errors"].get(err_cat, 0) + 1
                 if err_cat == ErrorCategory.RATE_LIMIT or getattr(exc, "binance_rate_limited", False):
@@ -9626,7 +9778,7 @@ class TradingEngine:
             if scan_generation != self._scan_generation or not self._scan_user_enabled:
                 log.info("[SCAN] Cycle #%s validator dibatalkan: generation berubah/off.", cycle)
                 return
-            if len(self.active_trades) >= self.max_active_trades:
+            if len(self.active_trades) >= self.max_active_trades and not (self._h4_enabled and self._h4_window_active):
                 self._scan_auto_paused = True
                 break
 
@@ -9655,14 +9807,6 @@ class TradingEngine:
                     validated.append(checked)
                     funnel["validation_pass"] += 1
             except Exception as exc:
-                if _is_no_setup_error(exc):
-                    validator_missing += 1
-                    funnel["validation_reject"] += 1
-                    funnel["validation_reasons"]["NO_VALID_LIQUIDITY_SETUP"] = funnel["validation_reasons"].get("NO_VALID_LIQUIDITY_SETUP", 0) + 1
-                    self._after_validation(candidate, "VALIDATION_REJECT:NO_VALID_LIQUIDITY_SETUP", "REJECTED_QUALITY", now_ts)
-                    log.info("[SCAN] validator %s: setup sudah tidak valid saat dicek ulang.", candidate["pair"])
-                    await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-                    continue
                 validator_rejects += 1
                 v_cat = classify_error(exc)
                 funnel["validation_error"] += 1
@@ -9708,6 +9852,9 @@ class TradingEngine:
             if not self._scan_user_enabled:
                 break
             if len(self.active_trades) >= self.max_active_trades:
+                if self._h4_enabled and self._h4_window_active:
+                    final_capped += 1
+                    continue
                 self._scan_auto_paused = True
                 break
 
@@ -9744,13 +9891,13 @@ class TradingEngine:
                     if not risk_ok:
                         final_risk_rejected += 1
                         funnel["risk_rejects"] += 1
-                        self.scan_state.annotate(trade.candidate_id, "RISK_REJECTED", f"RISK_REJECT:{risk_info.get('reason')}")
+                        self.ledger.annotate(trade.candidate_id, "RISK_REJECTED", f"RISK_REJECT:{risk_info.get('reason')}")
                         log.info("[SCAN] %s ditolak risk gate: %s", trade.pair, risk_info.get("reason"))
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
                         continue
                 if not self.real_mode and not self._sim_has_margin(trade):
                     funnel["sim_margin_blocked"] += 1
-                    self.scan_state.annotate(trade.candidate_id, "SIM_MARGIN_BLOCKED", "SIM_MARGIN_BLOCKED")
+                    self.ledger.annotate(trade.candidate_id, "SIM_MARGIN_BLOCKED", "SIM_MARGIN_BLOCKED")
                     log.info("[SCAN] %s ditahan: margin simulasi tidak cukup.", trade.pair)
                     await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
                     continue
@@ -9799,7 +9946,7 @@ class TradingEngine:
                     except RiskRejectError as exc:
                         final_risk_rejected += 1
                         funnel["risk_rejects"] += 1
-                        self.scan_state.annotate(trade.candidate_id, "RISK_REJECTED", f"RISK_REJECT:{exc}")
+                        self.ledger.annotate(trade.candidate_id, "RISK_REJECTED", f"RISK_REJECT:{exc}")
                         log.info("[SCAN] %s ditolak risk sizing: %s", trade.pair, exc)
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
                         continue
@@ -9825,7 +9972,7 @@ class TradingEngine:
                 self.active_trades[trade.trade_id] = trade
                 final_added.append(trade)
                 if trade.candidate_id:
-                    self.scan_state.link_trade(trade.candidate_id, trade.trade_id, "PENDING")
+                    self.ledger.link_trade(trade.candidate_id, trade.trade_id, "PENDING")
                 funnel["pending_created"] += 1
                 await self.ws.add_symbol(trade.pair)
                 log.info(
@@ -9843,7 +9990,7 @@ class TradingEngine:
 
             await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
 
-        if len(self.active_trades) >= self.max_active_trades:
+        if len(self.active_trades) >= self.max_active_trades and not (self._h4_enabled and self._h4_window_active):
             self._scan_auto_paused = True
 
         funnel["usable_data"] = max(0, scanned - analysis_errors)
@@ -11882,16 +12029,19 @@ class TradingEngine:
                             )
 
                 elif trade.status == "FILLED":
-                    snapshot = self.prices.get(trade.pair)
-                    # During stale feed accept a syntactically valid SL intent. It will be
-                    # revalidated against the next fresh WebSocket price before any mutation/order.
+                    snapshot = self.prices.get(
+                        trade.pair
+                    )
+
+                    # Manual /trail remains available during a stale WebSocket.
+                    # Always validate numeric format, monotonic SL improvement,
+                    # entry/TP geometry above. Compare against current price only
+                    # when the feed is explicitly live; stale price is not truth.
                     if snapshot is not None and snapshot.live:
                         if trade.direction == "BUY" and new_sl >= snapshot.price:
-                            raise ValueError("New SL Buy harus berada di bawah Current Price live.")
+                            raise ValueError("New SL Buy harus berada di bawah Current Price.")
                         if trade.direction == "SELL" and new_sl <= snapshot.price:
-                            raise ValueError("New SL Sell harus berada di atas Current Price live.")
-                    else:
-                        data["defer_until_live"] = True
+                            raise ValueError("New SL Sell harus berada di atas Current Price.")
 
                 if trade.direction == "BUY":
                     if new_sl >= trade.tp:
@@ -11956,109 +12106,78 @@ class TradingEngine:
     async def _confirm_trail(self) -> None:
         data = self.flow["data"]
         trade: Trade = data["trade"]
+
         new_sl: Decimal = data["new_sl"]
-        current = self.active_trades.get(trade.trade_id)
-        if current is None or current.status not in {"PENDING", "FILLED"}:
-            self.flow = None
-            await self.reply("TRAIL dibatalkan: setup sudah tidak aktif.")
-            return
-        trade = current
         old_sl = trade.sl
-        reason = str(data.get("reason") or "Manual trailing")
-        if new_sl <= 0:
-            raise ValueError("New SL harus lebih besar dari nol.")
-        self._validate_price(trade.pair, new_sl)
-        if trade.direction == "BUY":
-            if new_sl <= old_sl or new_sl >= trade.tp or (trade.status == "PENDING" and new_sl >= trade.entry):
-                raise ValueError("BUY trail melanggar improve-only/urutan SL-entry-TP.")
-        else:
-            if new_sl >= old_sl or new_sl <= trade.tp or (trade.status == "PENDING" and new_sl <= trade.entry):
-                raise ValueError("SELL trail melanggar improve-only/urutan TP-entry-SL.")
 
-        snapshot = self.prices.get(trade.pair)
-        if trade.status == "FILLED" and (snapshot is None or not snapshot.live):
-            # Persist the user's intent in RAM only. Never claim SL changed and never issue a real order yet.
-            self._pending_trail_intents[trade.trade_id] = {
-                "new_sl": str(new_sl), "old_sl": str(old_sl), "reason": reason,
-                "created_at": iso_utc(), "created_monotonic": time.monotonic(),
-            }
-            self.flow = None
-            await self.reply(
-                "🕒 TRAILING DISIAPKAN — MENUNGGU HARGA LIVE\n\n"
-                f"Pair: {trade.pair} • {trade.direction}\nOld SL aktif: {decimal_to_str(old_sl)}\nSL tujuan: {decimal_to_str(new_sl)}\n"
-                "Feed WebSocket masih stale. SL aktif tidak diubah dan order REAL belum dikirim.\n"
-                "Begitu tick fresh datang, bot memeriksa kembali sisi harga, tick size, dan aturan improve-only; intent dibuang bila sudah tidak aman."
-            )
-            return
+        snapshot = self.prices.get(
+            trade.pair
+        )
 
-        current_price = snapshot.price if snapshot else None
-        if trade.status == "FILLED" and current_price is not None:
-            if (trade.direction == "BUY" and new_sl >= current_price) or (trade.direction == "SELL" and new_sl <= current_price):
-                raise ValueError("Harga sudah melewati SL tujuan; tidak diterapkan.")
+        current_price = (
+            snapshot.price
+            if snapshot
+            else None
+        )
+
+        trail_item = {
+            "old_sl": decimal_to_str(
+                old_sl
+            ),
+            "new_sl": decimal_to_str(
+                new_sl
+            ),
+            "price": decimal_to_str(
+                current_price
+            ),
+            "reason": data["reason"],
+            "timestamp": iso_utc(),
+            "timestamp_wib": format_wib(
+                now_utc()
+            ),
+        }
+
         if trade.real_enabled and trade.status == "FILLED":
             replaced = await self._replace_real_sl(trade, new_sl)
             if not replaced:
-                raise RuntimeError("SL baru belum berhasil dikonfirmasi. SL lama tetap dipertahankan; trailing belum di-commit.")
+                raise RuntimeError(
+                    "SL baru belum berhasil dikonfirmasi. SL lama tetap dipertahankan; trailing belum di-commit."
+                )
         else:
             trade.sl = new_sl
-        trail_item = {
-            "old_sl": decimal_to_str(old_sl), "new_sl": decimal_to_str(new_sl),
-            "price": decimal_to_str(current_price), "reason": reason,
-            "timestamp": iso_utc(), "timestamp_wib": format_wib(now_utc()),
-            "source": "MANUAL_TRAIL",
-        }
+
         trade.trailing = True
-        trade.trail_history.append(trail_item)
-        await self._record_event(trade, "TRAIL", event_price=current_price, reason=reason,
-                                 extra={"old_sl": decimal_to_str(old_sl), "new_sl": decimal_to_str(new_sl), "source": "MANUAL_TRAIL"})
-        self.flow = None
-        await self.reply(
-            "✅ TRAILING DIPERBARUI\n\n"
-            f"Pair: {trade.pair}\nDirection: {trade.direction.title()}\nOld SL: {decimal_to_str(old_sl)}\n"
-            f"New SL: {decimal_to_str(new_sl)}\nReason: {reason}\nStatus: {trade.status}\nMode: TRAILING"
+        trade.trail_history.append(
+            trail_item
         )
 
-    async def _try_apply_pending_manual_trail(self, trade: Trade, live_price: Decimal) -> None:
-        intent = self._pending_trail_intents.get(trade.trade_id)
-        if not intent or trade.status != "FILLED" or trade.trade_id not in self.active_trades:
-            return
-        try:
-            if self.real.cooldown_remaining > 0 and trade.real_enabled:
-                return
-            new_sl = Decimal(str(intent.get("new_sl")))
-            old_sl = trade.sl
-            # Revalidate against the *fresh* price and current SL, not stale values at input time.
-            self._validate_price(trade.pair, new_sl)
-            improving = new_sl > old_sl if trade.direction == "BUY" else new_sl < old_sl
-            safe_side = new_sl < live_price if trade.direction == "BUY" else new_sl > live_price
-            correct_tp_side = new_sl < trade.tp if trade.direction == "BUY" else new_sl > trade.tp
-            if not (improving and safe_side and correct_tp_side):
-                self._pending_trail_intents.pop(trade.trade_id, None)
-                await self.reply(f"⚠️ TRAIL intent {trade.pair} dibuang: harga live terbaru membuat SL tujuan tidak aman atau tidak lagi improve-only.")
-                return
-            if trade.real_enabled:
-                if not self.real_mode:
-                    return
-                applied = await self._replace_real_sl(trade, new_sl)
-                if not applied:
-                    return
-            else:
-                trade.sl = new_sl
-            trail_item = {"old_sl": decimal_to_str(old_sl), "new_sl": decimal_to_str(new_sl), "price": decimal_to_str(live_price),
-                          "reason": str(intent.get("reason") or "Manual trail deferred"), "timestamp": iso_utc(),
-                          "timestamp_wib": format_wib(now_utc()), "source": "MANUAL_TRAIL_DEFERRED_WS"}
-            trade.trailing = True
-            trade.trail_history.append(trail_item)
-            self._pending_trail_intents.pop(trade.trade_id, None)
-            await self._record_event(trade, "TRAIL", event_price=live_price, reason=trail_item["reason"], extra={"old_sl": decimal_to_str(old_sl), "new_sl": decimal_to_str(new_sl), "source": trail_item["source"]})
-            await self.reply(
-                f"✅ TRAIL INTENT DITERAPKAN SETELAH HARGA LIVE\n{trade.pair}\n"
-                f"SL: {decimal_to_str(old_sl)} → {decimal_to_str(new_sl)}\nPrice: {decimal_to_str(live_price)}"
-            )
-        except BinanceRateLimitError as exc:
-            self._notify_rate_limit(exc, "APPLY DEFERRED MANUAL TRAIL")
-        except Exception as exc:
-            log.warning("[TRAIL] deferred intent %s tetap tertunda: %s", trade.trade_id, str(exc)[:180])
+        await self._record_event(
+            trade,
+            "TRAIL",
+            event_price=current_price,
+            reason=data["reason"],
+            extra={
+                "old_sl": decimal_to_str(
+                    old_sl
+                ),
+                "new_sl": decimal_to_str(
+                    new_sl
+                ),
+            },
+        )
+
+        self.flow = None
+
+        await self.reply(
+            "✅ TRAILING DIPERBARUI\n\n"
+            f"Pair: {trade.pair}\n"
+            f"Direction: {trade.direction.title()}\n"
+            f"Old SL: {decimal_to_str(old_sl)}\n"
+            f"New SL: {decimal_to_str(new_sl)}\n"
+            f"Reason: {data['reason']}\n"
+            f"Status: {trade.status}\n"
+            "Mode: TRAILING"
+        )
 
     # --------------------------------------------------------
     # MANUAL FILL
@@ -12644,8 +12763,7 @@ class TradingEngine:
                     f"remove history journal: {trade_id}",
                 )
 
-            # analysis/* is derived from history. Remove stale exports so
-            # /analyze will regenerate them from the current dataset.
+            # Remove stale derived-analysis snapshots when source history changes.
             analysis_deleted = 0
             for path in (ANALYSIS_JSON_PATH, ANALYSIS_MD_PATH):
                 try:
@@ -12802,7 +12920,7 @@ class TradingEngine:
                     f"Event: {result['removed_events']} dihapus\n"
                     f"Journal: {'dihapus' if result['removed_journal'] else 'tidak ditemukan'}\n"
                     f"Analysis lama: {result['analysis_deleted']} file dihapus\n\n"
-                    "Data tersebut tidak lagi dihitung oleh /stats maupun /analyze."
+                    "Data tersebut tidak lagi dihitung oleh /stats."
                 )
                 return
 
@@ -13540,10 +13658,8 @@ class TradingEngine:
             await self._cleanup_real_leftovers(trade)
 
         self._trail_state.pop(trade.trade_id, None)
-        self._pending_trail_intents.pop(trade.trade_id, None)
-        self._m15_review_last_close_by_trade.pop(trade.trade_id, None)
         if getattr(trade, "candidate_id", ""):
-            self.scan_state.set_state(
+            self.ledger.set_state(
                 trade.candidate_id,
                 "EXPIRED" if result in {"EXPIRED", "DELETED", "INVALID_BTC"} and trade.fill_price is None else "CLOSED",
                 "TRADE_CLOSED", str(result),
@@ -13597,7 +13713,6 @@ class TradingEngine:
             "SL": "🛑 SL TERCAPAI",
             "TRAIL": "🔒 TRAILING SL TERCAPAI",
             "EXPIRED": "⏳ PRICE EXPIRED",
-            "INVALIDATED": "🧭 SETUP INVALIDATED M15",
             "DELETED": "🗑️ DELETED",
             "MANUAL_CLOSE_PENDING": "🔒 PENDING DITUTUP",
             "MANUAL_CLOSE": "🔒 DITUTUP MANUAL",
@@ -13696,313 +13811,6 @@ class TradingEngine:
     # LIVE PRICE EVENT
     # --------------------------------------------------------
 
-    # --------------------------------------------------------
-    # CLOSED M15 REVIEW LOOP
-    # --------------------------------------------------------
-
-    def _start_m15_review_task(self) -> None:
-        if self._m15_review_task is None or self._m15_review_task.done():
-            self._m15_review_task = asyncio.create_task(self._m15_review_loop(), name="m15-active-trade-review")
-
-    async def _stop_m15_review_task(self) -> None:
-        task, self._m15_review_task = self._m15_review_task, None
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-    async def _m15_review_loop(self) -> None:
-        """Review every scheduled closed M15 candle once; retry missing data and cooldowns safely."""
-        while self._running:
-            try:
-                now_ms = int(time.time() * 1000)
-                latest_closed_ms = (now_ms // M15_MS_MAIN) * M15_MS_MAIN
-                next_boundary_ms = latest_closed_ms + M15_MS_MAIN
-                has_active = any(t.status in {"PENDING", "FILLED"} for t in self.active_trades.values())
-                if not has_active:
-                    # Do not build a backlog while no setup exists.
-                    self._m15_review_last_global_close_ms = latest_closed_ms
-                    await asyncio.sleep(max(2.0, min(15.0, (next_boundary_ms + 2_000 - now_ms) / 1000.0)))
-                    continue
-
-                if self._m15_review_last_global_close_ms <= 0:
-                    # On first start, review the latest candle only; do not process old no-trade history.
-                    self._m15_review_last_global_close_ms = latest_closed_ms - M15_MS_MAIN
-                review_close_ms = self._m15_review_last_global_close_ms + M15_MS_MAIN
-                if review_close_ms > latest_closed_ms or now_ms < review_close_ms + 2_000:
-                    target_ms = min(review_close_ms, next_boundary_ms) + 2_000
-                    await asyncio.sleep(max(1.0, min(15.0, (target_ms - now_ms) / 1000.0)))
-                    continue
-
-                cooldown = max(
-                    0.0,
-                    self._binance_public_cooldown_until - time.monotonic(),
-                    self.real.cooldown_remaining if self.real_mode else 0.0,
-                )
-                if cooldown > 0:
-                    if time.monotonic() - self._m15_review_last_notice_at >= 900:
-                        self._m15_review_last_notice_at = time.monotonic()
-                        log.info("[M15 REVIEW] candle=%s ditunda karena Binance cooldown %.0fs; candle tetap antre untuk review.", review_close_ms, cooldown)
-                    await asyncio.sleep(max(3.0, min(30.0, cooldown)))
-                    continue
-
-                module = await self._load_strategy_runtime()
-                complete = await self._review_active_trades_on_m15_close(module, review_close_ms)
-                if complete:
-                    self._m15_review_last_global_close_ms = review_close_ms
-                else:
-                    # Keep the same candle queued; per-trade dedupe skips reviews already completed.
-                    await asyncio.sleep(10.0)
-                await asyncio.sleep(max(1.0, min(5.0, (next_boundary_ms + 2_000 - int(time.time() * 1000)) / 1000.0)))
-            except asyncio.CancelledError:
-                raise
-            except BinanceRateLimitError as exc:
-                self._notify_rate_limit(exc, "M15 REVIEW")
-                await asyncio.sleep(max(5.0, min(60.0, self.real.cooldown_remaining or 15.0)))
-            except Exception as exc:
-                log.warning("[M15 REVIEW] cycle gagal tanpa mengubah trade state: %s", str(exc)[:240])
-                await asyncio.sleep(15.0)
-
-    async def _review_active_trades_on_m15_close(self, module: Any, review_close_ms: int) -> bool:
-        all_resolved = True
-        btc_context: dict[str, Any] = {"ok": False, "btc_h4_trend": self._btc_state.get("h4_trend", "UNKNOWN"), "btc_rsi_h1": None}
-        context_builder = getattr(module, "review_market_context", None)
-        if callable(context_builder):
-            try:
-                btc_context = await self._call_strategy_function(module, "review_market_context", {"review_close_ms": review_close_ms})
-            except Exception as exc:
-                log.info("[M15 REVIEW] BTC context tidak segar; gunakan status watcher: %s", str(exc)[:120])
-        trades = sorted(
-            [t for t in list(self.active_trades.values()) if t.status in {"PENDING", "FILLED"}],
-            key=lambda t: (0 if t.real_enabled and t.status == "FILLED" else 1, 0 if t.status == "FILLED" else 1, t.created_at),
-        )
-        for trade in trades:
-            if trade.trade_id in self._m15_review_busy:
-                all_resolved = False
-                continue
-            if self.active_trades.get(trade.trade_id) is not trade:
-                continue
-            if self._m15_review_last_close_by_trade.get(trade.trade_id, 0) >= review_close_ms:
-                continue
-            if max(0.0, self._binance_public_cooldown_until - time.monotonic()) > 0:
-                # Keep candle unmarked; scanner resumes later when API is allowed.
-                break
-            self._m15_review_busy.add(trade.trade_id)
-            try:
-                snapshot = self.prices.get(trade.pair)
-                analysis_payload = trade.strategy_analysis if isinstance(trade.strategy_analysis, dict) else {}
-                payload = {
-                    "pair": trade.pair, "direction": trade.direction, "status": trade.status,
-                    "entry": float(trade.entry), "sl": float(trade.sl), "tp": float(trade.tp),
-                    "price_exp": float(trade.price_exp), "fill_price": float(trade.fill_price or trade.entry),
-                    "initial_sl": float(self._trail_initial_sl(trade)),
-                    "price_now": float(snapshot.price) if snapshot is not None and snapshot.live else None,
-                    "strategy_analysis": analysis_payload,
-                    "created_at_ms": int(trade.created_at.timestamp() * 1000),
-                    "filled_at_ms": int(trade.filled_at.timestamp() * 1000) if trade.filled_at else 0,
-                }
-                result = await self._call_strategy_function(
-                    module, "review_active_trade", payload,
-                    {"review_close_ms": review_close_ms, "btc": btc_context},
-                )
-                if not isinstance(result, dict):
-                    all_resolved = False
-                    log.warning("[M15 REVIEW] kontrak strategy invalid %s; candle akan dicoba ulang", trade.trade_id)
-                    continue
-                action = str(result.get("action") or "DEFER_DATA").upper()
-                candle_ms = int(result.get("candle_close_ms") or 0)
-                if action == "DEFER_DATA" or candle_ms <= 0:
-                    all_resolved = False
-                    log.info("[M15 REVIEW] defer %s candle=%s: %s", trade.trade_id, review_close_ms, str(result.get("reason") or "data belum siap")[:160])
-                    continue
-                if candle_ms != review_close_ms:
-                    all_resolved = False
-                    log.info("[M15 REVIEW] menunda %s: candle close %s tidak sama dengan jadwal %s", trade.trade_id, candle_ms, review_close_ms)
-                    continue
-                self._m15_review_last_close_by_trade[trade.trade_id] = candle_ms
-                if trade.trade_id not in self.active_trades:
-                    continue
-                evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else {}
-                reason = str(result.get("reason") or action)
-                log.info("[M15 REVIEW] %s %s candle=%s close=%s RSI=%s BTC=%s | %s", trade.trade_id, action, candle_ms, evidence.get("close"), evidence.get("rsi_m15"), evidence.get("btc_h4_trend"), reason[:180])
-
-                # A filled trade must have fresh live price before any exit or SL update.
-                live = self.prices.get(trade.pair)
-                is_live = live is not None and live.live
-                if action == "CANCEL_PENDING" and trade.status == "PENDING":
-                    if trade.real_enabled:
-                        if os.getenv("M15_REVIEW_REAL_CANCEL", "1").strip().lower() in {"0", "false", "no", "off"} or not self.real_mode:
-                            log.warning("[M15 REVIEW][SHADOW] %s REAL PENDING: cancel tidak dieksekusi (dimatikan/real off). %s", trade.trade_id, reason)
-                            continue
-                        try:
-                            await self._m15_cancel_real_pending(trade, reason)
-                        except Exception:
-                            # Biarkan candle ini dicoba ulang; order di Binance tetap aman.
-                            self._m15_review_last_close_by_trade.pop(trade.trade_id, None)
-                            raise
-                        continue
-                    await self._finalize_trade(copy.deepcopy(trade), result="INVALIDATED", exit_price=None, reason=f"M15 close invalidation: {reason}")
-                    continue
-                if action == "REPRICE_PENDING" and trade.status == "PENDING":
-                    try:
-                        new_entry = Decimal(str(result.get("suggested_entry")))
-                    except (InvalidOperation, TypeError, ValueError):
-                        continue
-                    meta = self.symbols.get(trade.pair)
-                    if meta and meta.tick_size > 0 and not validate_tick(new_entry, meta.tick_size):
-                        new_entry = quantized_price(new_entry, meta.tick_size) if trade.direction == "BUY" else quantized_price_ceiling(new_entry, meta.tick_size)
-                    geometry_ok = (trade.sl < new_entry < trade.tp and (not is_live or new_entry < live.price)) if trade.direction == "BUY" else (trade.tp < new_entry < trade.sl and (not is_live or new_entry > live.price))
-                    rr_after = abs(trade.tp - new_entry) / max(abs(new_entry - trade.sl), Decimal("1e-30"))
-                    better = new_entry < trade.entry if trade.direction == "BUY" else new_entry > trade.entry
-                    if not (geometry_ok and rr_after >= Decimal("2") and better):
-                        continue
-                    if trade.real_enabled:
-                        if self.real_mode:
-                            await self._m15_reprice_real_pending(trade, new_entry, reason, candle_ms, live.price if is_live else None)
-                        continue
-                    old_entry = trade.entry
-                    trade.entry = new_entry
-                    trade.price_now_reference = live.price if is_live else trade.price_now_reference
-                    trade.entry_reason = f"{trade.entry_reason} | M15 review: entry direfine {decimal_to_str(old_entry)}→{decimal_to_str(new_entry)}; {reason}"[:1000]
-                    await self._record_event(trade, "M15_REPRICE", event_price=live.price if is_live else None, reason=reason, extra={"old_entry": decimal_to_str(old_entry), "new_entry": decimal_to_str(new_entry), "candle_close_ms": candle_ms})
-                    continue
-                if action == "EXIT_NOW" and trade.status == "FILLED":
-                    real_actions_enabled = os.getenv("M15_REVIEW_REAL_ACTIONS", "1").strip().lower() in {"1", "true", "yes", "on"}
-                    if trade.real_enabled and not real_actions_enabled:
-                        log.warning("[M15 REVIEW][SHADOW] %s REAL FILLED EXIT_NOW: %s", trade.trade_id, reason)
-                        continue
-                    if not is_live:
-                        self._m15_pending_exits[trade.trade_id] = {"reason": reason, "candle_close_ms": candle_ms, "created_at": iso_utc()}
-                        log.warning("[M15 REVIEW] %s EXIT_NOW diantrikan sampai harga WebSocket LIVE; candle=%s alasan=%s", trade.trade_id, candle_ms, reason[:140])
-                        continue
-                    try:
-                        ok, detail = await self._close_one_trade(trade, note=f"AUTO M15 STRUCTURE REVIEW: {reason}")
-                        if not ok:
-                            log.warning("[M15 REVIEW] close %s gagal: %s", trade.trade_id, detail)
-                    except BinanceRateLimitError as exc:
-                        self._notify_rate_limit(exc, "M15 STRUCTURE EXIT")
-                    except Exception as exc:
-                        log.warning("[M15 REVIEW] close %s ditahan/ gagal: %s", trade.trade_id, str(exc)[:180])
-                    continue
-                if action == "TIGHTEN_SL" and trade.status == "FILLED":
-                    # Structure review can nominate SL; automated safety layer validates live-side and improves-only.
-                    if is_live:
-                        suggested_sl = result.get("suggested_sl")
-                        if suggested_sl is not None:
-                            try:
-                                proposed = Decimal(str(suggested_sl))
-                                self._validate_price(trade.pair, proposed)
-                                safe_side = proposed < live.price if trade.direction == "BUY" else proposed > live.price
-                                improves = proposed > trade.sl if trade.direction == "BUY" else proposed < trade.sl
-                                if safe_side and improves:
-                                    await self._auto_trail(trade, live.price, forced_sl=proposed, source="M15_STRUCTURE_REVIEW", note=reason)
-                                    continue
-                            except Exception as exc:
-                                log.info("[M15 REVIEW] proposed SL ditolak %s: %s", trade.trade_id, str(exc)[:140])
-                        await self._auto_trail(trade, live.price)
-                    else:
-                        log.info("[M15 REVIEW] %s ingin tighten tetapi harga live stale; tidak menulis SL.", trade.trade_id)
-            except BinanceRateLimitError as exc:
-                all_resolved = False
-                self._notify_rate_limit(exc, "M15 REVIEW TRADE")
-                break
-            except Exception as exc:
-                all_resolved = False
-                log.warning("[M15 REVIEW] %s gagal aman (trade state tidak diubah): %s", trade.trade_id, str(exc)[:200])
-            finally:
-                self._m15_review_busy.discard(trade.trade_id)
-            await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
-        return all_resolved
-
-    async def _m15_cancel_real_pending(self, trade: Trade, reason: str) -> None:
-        """Batalkan order LIMIT entry REAL yang thesis-nya invalid, lalu tutup setup (INVALIDATED)."""
-        if trade.entry_order_id is not None or trade.entry_client_order_id:
-            token = REAL_PRIORITY.set(True)
-            try:
-                cancelled = await self._cancel_entry_for_hold(trade)
-            finally:
-                REAL_PRIORITY.reset(token)
-            if not cancelled:
-                log.info("[M15 REVIEW] %s sudah terisi saat dibatalkan; lanjut alur fill normal.", trade.trade_id)
-                return
-        if self.active_trades.get(trade.trade_id) is not trade or trade.status != "PENDING":
-            return
-        trade.entry_order_id = None
-        trade.entry_client_order_id = None
-        trade.real_state = "REAL_CLOSED"
-        await self._finalize_trade(
-            copy.deepcopy(trade), result="INVALIDATED", exit_price=None,
-            reason=f"M15 close invalidation (order REAL dibatalkan): {reason}",
-        )
-        log.info("[M15 REVIEW] %s order REAL dibatalkan & setup ditutup: %s", trade.trade_id, reason[:140])
-
-    async def _m15_reprice_real_pending(self, trade: Trade, new_entry: Decimal, reason: str, candle_ms: int, live_price: Decimal | None) -> None:
-        """Cancel order LIMIT REAL lama, pasang ulang di entry baru. Gagal pasang ulang = setup dibuang."""
-        old_entry = trade.entry
-        token = REAL_PRIORITY.set(True)
-        try:
-            cancelled = await self._cancel_entry_for_hold(trade)
-        except Exception:
-            self._m15_review_last_close_by_trade.pop(trade.trade_id, None)
-            raise
-        finally:
-            REAL_PRIORITY.reset(token)
-        if not cancelled:
-            log.info("[M15 REVIEW] %s sudah terisi saat reprice; lanjut alur fill normal.", trade.trade_id)
-            return
-        if self.active_trades.get(trade.trade_id) is not trade or trade.status != "PENDING":
-            return
-        trade.entry_order_id = None
-        trade.entry_client_order_id = None
-        trade.entry = new_entry
-        trade.entry_reason = f"{trade.entry_reason} | M15 review: entry direfine {decimal_to_str(old_entry)}→{decimal_to_str(new_entry)}; {reason}"[:1000]
-        try:
-            await self._ensure_real_entry(trade, from_release=True)
-        except BinanceRateLimitError as exc:
-            trade.real_state = "REAL_LIMIT_HOLD"
-            trade.real_error = None
-            self._notify_rate_limit(exc, f"REPRICE LIMIT {trade.pair}")
-        except Exception as exc:
-            log.warning("[M15 REVIEW] reprice %s gagal pasang ulang, setup dibuang: %s", trade.trade_id, str(exc)[:160])
-            await self._m15_cancel_real_pending(trade, f"reprice gagal ({str(exc)[:80]}): {reason}")
-            return
-        await self._record_event(trade, "M15_REPRICE", event_price=live_price, reason=reason, extra={"old_entry": decimal_to_str(old_entry), "new_entry": decimal_to_str(new_entry), "candle_close_ms": candle_ms, "real": True})
-        try:
-            await self._persist_active_setups_silently()
-        except Exception:
-            log.exception("[M15 REVIEW] gagal menyimpan setups.json setelah reprice")
-        log.info("[M15 REVIEW] %s order REAL di-reprice %s→%s", trade.trade_id, decimal_to_str(old_entry), decimal_to_str(new_entry))
-
-    async def _try_apply_pending_m15_exit(self, trade: Trade, live_price: Decimal) -> None:
-        """Apply a previously confirmed structural exit only after a fresh price event."""
-        pending = self._m15_pending_exits.get(trade.trade_id)
-        if not pending or trade.status != "FILLED" or self.active_trades.get(trade.trade_id) is not trade:
-            self._m15_pending_exits.pop(trade.trade_id, None)
-            return
-        if not (self.prices.get(trade.pair) and self.prices[trade.pair].live):
-            return
-        if trade.real_enabled:
-            if not self.real_mode or self.real.cooldown_remaining > 0:
-                return
-            if os.getenv("M15_REVIEW_REAL_ACTIONS", "1").strip().lower() not in {"1", "true", "yes", "on"}:
-                self._m15_pending_exits.pop(trade.trade_id, None)
-                log.warning("[M15 REVIEW][SHADOW] structural exit tidak dieksekusi untuk REAL %s; %s", trade.trade_id, pending.get("reason"))
-                return
-        try:
-            ok, detail = await self._close_one_trade(
-                trade, note=f"AUTO M15 STRUCTURE REVIEW candle={pending.get('candle_close_ms')}: {pending.get('reason')}"
-            )
-            if ok or trade.trade_id not in self.active_trades:
-                self._m15_pending_exits.pop(trade.trade_id, None)
-            else:
-                log.warning("[M15 REVIEW] pending structural exit %s belum selesai: %s", trade.trade_id, detail)
-        except BinanceRateLimitError as exc:
-            self._notify_rate_limit(exc, "DEFERRED M15 STRUCTURE EXIT")
-        except Exception as exc:
-            log.warning("[M15 REVIEW] pending structural exit %s gagal aman: %s", trade.trade_id, str(exc)[:180])
-
     async def _on_price(
         self,
         symbol: str,
@@ -14050,15 +13858,6 @@ class TradingEngine:
                 continue
 
             try:
-                if trade.status == "FILLED" and trade.trade_id in self._m15_pending_exits:
-                    await self._try_apply_pending_m15_exit(trade, price)
-                    trade = self.active_trades.get(trade.trade_id, trade)
-                    if trade.trade_id not in self.active_trades:
-                        continue
-                if trade.status == "FILLED" and trade.trade_id in self._pending_trail_intents:
-                    await self._try_apply_pending_manual_trail(trade, price)
-                    # The intent may have changed SL. Continue normal trigger checks with the updated object.
-                    trade = self.active_trades.get(trade.trade_id, trade)
                 if trade.status == "PENDING":
                     entry_hit = (
                         price <= trade.entry if trade.direction == "BUY" else price >= trade.entry
@@ -14098,7 +13897,7 @@ class TradingEngine:
                             trade,
                             result="EXPIRED",
                             exit_price=price,
-                            reason=f"PRICE_EXP_TOUCH_BEFORE_ENTRY | {trade.price_exp_reason}",
+                            reason=trade.price_exp_reason,
                         )
                         continue
 
@@ -14535,842 +14334,7 @@ class TradingEngine:
     # ANALYZE
     # --------------------------------------------------------
 
-    def _build_analysis(
-        self,
-        records: list[dict[str, Any]],
-        events: list[dict[str, Any]],
-        notes: list[dict[str, Any]] | None = None,
-    ) -> tuple[dict[str, Any], str]:
-        """Build a complete JSON export and an AI-friendly Markdown report.
 
-        The report is intentionally descriptive and traceable to the stored
-        trade/event/note data. Calculated percentages are derived directly
-        from those records and do not invent strategy conclusions.
-        """
-        notes_data = list(notes if notes is not None else self.notes)
-        active_records = [
-            trade.to_record()
-            for trade in self.active_trades.values()
-        ]
-
-        stats = self._calculate_stats(
-            records
-        )
-
-        total_setup_history = stats["total_records"]
-        historical_filled = stats["total_filled"]
-        expired = stats["expired"]
-        deleted = stats["deleted"]
-
-        def percent(numerator: int, denominator: int) -> Decimal:
-            if denominator <= 0:
-                return Decimal("0")
-            return (
-                Decimal(numerator)
-                / Decimal(denominator)
-                * Decimal("100")
-            )
-
-        historical_fill_rate = percent(
-            historical_filled,
-            total_setup_history,
-        )
-        expiration_rate = percent(
-            expired,
-            total_setup_history,
-        )
-        deletion_rate = percent(
-            deleted,
-            total_setup_history,
-        )
-
-        by_pair: dict[str, list[dict[str, Any]]] = {}
-
-        for record in records:
-            pair = str(
-                record.get("pair") or "UNKNOWN"
-            )
-            by_pair.setdefault(
-                pair,
-                [],
-            ).append(record)
-
-        pair_rows: list[dict[str, Any]] = []
-
-        for pair, pair_records in sorted(
-            by_pair.items()
-        ):
-            pair_stats = self._calculate_stats(
-                pair_records
-            )
-
-            pair_rows.append(
-                {
-                    "pair": pair,
-                    "records": pair_stats[
-                        "total_records"
-                    ],
-                    "filled": pair_stats[
-                        "total_filled"
-                    ],
-                    "tp": pair_stats["tp"],
-                    "sl": pair_stats["sl"],
-                    "expired": pair_stats["expired"],
-                    "deleted": pair_stats["deleted"],
-                    "win_rate": decimal_to_str(
-                        pair_stats["win_rate"]
-                    ),
-                    "pnl_percent": decimal_to_str(
-                        pair_stats[
-                            "gross_pnl_percent"
-                        ]
-                    ),
-                }
-            )
-
-        by_direction: dict[str, list[dict[str, Any]]] = {}
-
-        for record in records:
-            direction = str(
-                record.get("direction") or "UNKNOWN"
-            )
-            by_direction.setdefault(
-                direction,
-                [],
-            ).append(record)
-
-        direction_rows: list[dict[str, Any]] = []
-
-        for direction, direction_records in sorted(
-            by_direction.items()
-        ):
-            direction_stats = self._calculate_stats(
-                direction_records
-            )
-
-            direction_rows.append(
-                {
-                    "direction": direction,
-                    "records": direction_stats[
-                        "total_records"
-                    ],
-                    "filled": direction_stats[
-                        "total_filled"
-                    ],
-                    "tp": direction_stats["tp"],
-                    "sl": direction_stats["sl"],
-                    "expired": direction_stats["expired"],
-                    "deleted": direction_stats["deleted"],
-                    "win_rate": decimal_to_str(
-                        direction_stats["win_rate"]
-                    ),
-                    "pnl_percent": decimal_to_str(
-                        direction_stats[
-                            "gross_pnl_percent"
-                        ]
-                    ),
-                }
-            )
-
-        strategy_groups: dict[
-            tuple[str, str],
-            list[dict[str, Any]],
-        ] = {}
-
-        for record in records:
-            key = (
-                str(
-                    record.get("strategy_name")
-                    or "MANUAL"
-                ),
-                str(
-                    record.get("strategy_version")
-                    or "1.0"
-                ),
-            )
-
-            strategy_groups.setdefault(
-                key,
-                [],
-            ).append(record)
-
-        strategy_rows: list[dict[str, Any]] = []
-
-        for (name, version), group in sorted(
-            strategy_groups.items()
-        ):
-            group_stats = self._calculate_stats(
-                group
-            )
-
-            strategy_rows.append(
-                {
-                    "strategy_name": name,
-                    "strategy_version": version,
-                    "records": group_stats[
-                        "total_records"
-                    ],
-                    "filled": group_stats[
-                        "total_filled"
-                    ],
-                    "tp": group_stats["tp"],
-                    "sl": group_stats["sl"],
-                    "expired": group_stats["expired"],
-                    "deleted": group_stats["deleted"],
-                    "win_rate": decimal_to_str(
-                        group_stats["win_rate"]
-                    ),
-                    "pnl_percent": decimal_to_str(
-                        group_stats[
-                            "gross_pnl_percent"
-                        ]
-                    ),
-                }
-            )
-
-        total_trailing_trades = sum(
-            1
-            for record in records
-            if record.get("trail_history")
-        )
-
-        event_counts: dict[str, int] = {}
-        for event in events:
-            event_name = str(
-                event.get("event") or "UNKNOWN"
-            ).upper()
-            event_counts[event_name] = (
-                event_counts.get(event_name, 0) + 1
-            )
-
-        active_pending = sum(
-            1
-            for trade in active_records
-            if trade.get("status") == "PENDING"
-        )
-        active_filled = sum(
-            1
-            for trade in active_records
-            if trade.get("status") == "FILLED"
-        )
-
-        pending_seconds = []
-        holding_seconds = []
-        planned_rr_values = []
-
-        for record in records:
-            try:
-                if record.get("pending_seconds") is not None:
-                    pending_seconds.append(
-                        Decimal(str(record["pending_seconds"]))
-                    )
-            except (InvalidOperation, TypeError, ValueError):
-                pass
-
-            try:
-                if record.get("holding_seconds") is not None:
-                    holding_seconds.append(
-                        Decimal(str(record["holding_seconds"]))
-                    )
-            except (InvalidOperation, TypeError, ValueError):
-                pass
-
-            try:
-                if record.get("planned_rr") is not None:
-                    planned_rr_values.append(
-                        Decimal(str(record["planned_rr"]))
-                    )
-            except (InvalidOperation, TypeError, ValueError):
-                pass
-
-        avg_pending_seconds = (
-            sum(pending_seconds, Decimal("0"))
-            / Decimal(len(pending_seconds))
-            if pending_seconds
-            else None
-        )
-        avg_holding_seconds = (
-            sum(holding_seconds, Decimal("0"))
-            / Decimal(len(holding_seconds))
-            if holding_seconds
-            else None
-        )
-        avg_planned_rr = (
-            sum(planned_rr_values, Decimal("0"))
-            / Decimal(len(planned_rr_values))
-            if planned_rr_values
-            else None
-        )
-
-        expiration_reasons: dict[str, int] = {}
-        for record in records:
-            if record.get("result") != "EXPIRED":
-                continue
-            reason = str(
-                record.get("result_reason") or "-"
-            ).strip() or "-"
-            expiration_reasons[reason] = (
-                expiration_reasons.get(reason, 0) + 1
-            )
-
-        # Data-quality / interpretation flags are descriptive only.
-        exp_equals_tp = sum(
-            1
-            for record in records
-            if (
-                record.get("price_exp") is not None
-                and record.get("tp") is not None
-                and str(record.get("price_exp"))
-                == str(record.get("tp"))
-            )
-        )
-
-        expired_reason_contains_tp = sum(
-            1
-            for record in records
-            if (
-                record.get("result") == "EXPIRED"
-                and "tp" in str(
-                    record.get("result_reason") or ""
-                ).lower()
-            )
-        )
-
-        full_data = {
-            "generated_at": iso_utc(),
-            "generated_at_wib": format_wib(
-                now_utc()
-            ),
-            "session_id": self.session_id,
-            "source": {
-                "market": "Binance USDⓈ-M Futures",
-                "execution": "SIMULATION + REAL (lihat real_enabled per trade)",
-                "price_trigger": "aggTrade last price",
-            },
-            "summary": {
-                "total_setup_history": total_setup_history,
-                "total_filled_trades": historical_filled,
-                "tp": stats["tp"],
-                "sl": stats["sl"],
-                "expired": expired,
-                "deleted": deleted,
-                "win_rate_percent": decimal_to_str(
-                    stats["win_rate"]
-                ),
-                "historical_fill_rate_percent": decimal_to_str(
-                    historical_fill_rate
-                ),
-                "expiration_rate_percent": decimal_to_str(
-                    expiration_rate
-                ),
-                "deletion_rate_percent": decimal_to_str(
-                    deletion_rate
-                ),
-                "pnl_percent_sum": decimal_to_str(
-                    stats["gross_pnl_percent"]
-                ),
-                "average_win_percent": decimal_to_str(
-                    stats["average_win_percent"]
-                ),
-                "average_loss_percent": decimal_to_str(
-                    stats["average_loss_percent"]
-                ),
-                "average_pending_seconds": (
-                    decimal_to_str(avg_pending_seconds)
-                    if avg_pending_seconds is not None
-                    else None
-                ),
-                "average_holding_seconds": (
-                    decimal_to_str(avg_holding_seconds)
-                    if avg_holding_seconds is not None
-                    else None
-                ),
-                "average_planned_rr": (
-                    decimal_to_str(avg_planned_rr)
-                    if avg_planned_rr is not None
-                    else None
-                ),
-                "trail_event_count": stats[
-                    "trail_count"
-                ],
-                "trailing_trade_count": total_trailing_trades,
-            },
-            "active_session": {
-                "active_trade_count": len(
-                    active_records
-                ),
-                "pending_count": active_pending,
-                "filled_count": active_filled,
-                "active_trade_ids": list(
-                    self.active_trades.keys()
-                ),
-                "trades": active_records,
-            },
-            "trades": records,
-            "events": events,
-            "notes": notes_data,
-            "analysis": {
-                "by_pair": pair_rows,
-                "by_direction": direction_rows,
-                "by_strategy": strategy_rows,
-                "event_counts": dict(
-                    sorted(event_counts.items())
-                ),
-                "expiration_reasons": dict(
-                    sorted(expiration_reasons.items())
-                ),
-                "data_quality_flags": {
-                    "price_exp_equals_tp_count": exp_equals_tp,
-                    "expired_reason_mentions_tp_count": expired_reason_contains_tp,
-                },
-            },
-        }
-
-        # --------------------------------------------------------
-        # Markdown report: human-readable + AI-readable.
-        # --------------------------------------------------------
-        report_lines = [
-            "# Trading Analysis & AI Reading Report",
-            "",
-            f"Generated: {format_wib(now_utc())}",
-            f"Session: `{self.session_id or '-'}`",
-            "",
-            "## 1. Scope and Data Source",
-            "",
-            "- Market: Binance USDⓈ-M Futures",
-            "- Execution in this export: Simulation + Real (see real_enabled per trade)",
-            "- Price trigger: Binance `aggTrade` last price",
-            "- Historical trade records: "
-            f"{len(records)}",
-            "- Event records: "
-            f"{len(events)}",
-            "- User notes: "
-            f"{len(notes_data)}",
-            "- Active setups at export time: "
-            f"{len(active_records)}",
-            "",
-            "## 2. Executive Summary",
-            "",
-            f"- Total historical setup records: {total_setup_history}",
-            f"- Historical filled-and-closed trades: {historical_filled}",
-            f"- Historical TP: {stats['tp']}",
-            f"- Historical SL: {stats['sl']}",
-            f"- Historical Expired: {expired}",
-            f"- Historical Deleted: {deleted}",
-            f"- Historical fill rate: {decimal_to_str(historical_fill_rate)}%",
-            f"- Historical expiration rate: {decimal_to_str(expiration_rate)}%",
-            f"- Historical deletion rate: {decimal_to_str(deletion_rate)}%",
-            f"- Win Rate: {decimal_to_str(stats['win_rate'])}%",
-            f"- Historical PnL sum: {decimal_to_str(stats['gross_pnl_percent'])}%",
-            f"- Average win: {decimal_to_str(stats['average_win_percent'])}%",
-            f"- Average loss: {decimal_to_str(stats['average_loss_percent'])}%",
-            f"- Average planned RR: {decimal_to_str(avg_planned_rr) if avg_planned_rr is not None else '-'}",
-            f"- Average pending duration among completed filled trades: {duration_text(avg_pending_seconds) if avg_pending_seconds is not None else '-'}",
-            f"- Average holding duration among completed filled trades: {duration_text(avg_holding_seconds) if avg_holding_seconds is not None else '-'}",
-            f"- Trailing trade count: {total_trailing_trades}",
-            f"- Total trail events: {stats['trail_count']}",
-            "",
-            "**Win Rate definition:** TP / (TP + SL).",
-            "Expired dan Deleted tidak dihitung sebagai win/loss.",
-            "Historical metrics above only use records already closed and stored in history.",
-            "Active setup data is reported separately and is not counted as historical closed performance.",
-            "",
-            "## 3. Current Active Session",
-            "",
-            f"- Active setups: {len(active_records)}",
-            f"- Pending: {active_pending}",
-            f"- Filled: {active_filled}",
-        ]
-
-        if active_records:
-            report_lines.extend([
-                "",
-                "| Pair | Direction | Status | Entry | SL | TP | Price Exp | Trailing |",
-                "|---|---|---|---:|---:|---:|---:|---|",
-            ])
-            for record in active_records:
-                report_lines.append(
-                    "| "
-                    f"{record.get('pair', '-') } | "
-                    f"{record.get('direction', '-') } | "
-                    f"{record.get('status', '-') } | "
-                    f"{record.get('entry', '-') } | "
-                    f"{record.get('sl', '-') } | "
-                    f"{record.get('tp', '-') } | "
-                    f"{record.get('price_exp', '-') } | "
-                    f"{'YES' if record.get('trailing') else 'NO'} |"
-                )
-        else:
-            report_lines.append("")
-            report_lines.append("Tidak ada active setup saat export.")
-
-        report_lines.extend([
-            "",
-            "## 4. By Pair",
-            "",
-            "| Pair | Setup | Filled | TP | SL | Expired | Deleted | Win Rate | PnL % |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
-        ])
-
-        for row in pair_rows:
-            report_lines.append(
-                "| "
-                f"{row['pair']} | "
-                f"{row['records']} | "
-                f"{row['filled']} | "
-                f"{row['tp']} | "
-                f"{row['sl']} | "
-                f"{row['expired']} | "
-                f"{row['deleted']} | "
-                f"{row['win_rate'] or '0'}% | "
-                f"{row['pnl_percent'] or '0'} |"
-            )
-
-        report_lines.extend([
-            "",
-            "## 5. By Direction",
-            "",
-            "| Direction | Setup | Filled | TP | SL | Expired | Deleted | Win Rate | PnL % |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
-        ])
-
-        for row in direction_rows:
-            report_lines.append(
-                "| "
-                f"{row['direction']} | "
-                f"{row['records']} | "
-                f"{row['filled']} | "
-                f"{row['tp']} | "
-                f"{row['sl']} | "
-                f"{row['expired']} | "
-                f"{row['deleted']} | "
-                f"{row['win_rate'] or '0'}% | "
-                f"{row['pnl_percent'] or '0'} |"
-            )
-
-        report_lines.extend([
-            "",
-            "## 6. By Strategy",
-            "",
-            "| Strategy | Version | Setup | Filled | TP | SL | Expired | Win Rate | PnL % |",
-            "|---|---|---:|---:|---:|---:|---:|---:|---:|",
-        ])
-
-        for row in strategy_rows:
-            report_lines.append(
-                "| "
-                f"{row['strategy_name']} | "
-                f"{row['strategy_version']} | "
-                f"{row['records']} | "
-                f"{row['filled']} | "
-                f"{row['tp']} | "
-                f"{row['sl']} | "
-                f"{row['expired']} | "
-                f"{row['win_rate'] or '0'}% | "
-                f"{row['pnl_percent'] or '0'} |"
-            )
-
-        report_lines.extend([
-            "",
-            "## 7. Event Distribution",
-            "",
-            "| Event | Count |",
-            "|---|---:|",
-        ])
-        if event_counts:
-            for name, count in sorted(event_counts.items()):
-                report_lines.append(
-                    f"| {name} | {count} |"
-                )
-        else:
-            report_lines.append("| - | 0 |")
-
-        report_lines.extend([
-            "",
-            "## 8. Expiration Reasons",
-            "",
-            "| Reason | Count |",
-            "|---|---:|",
-        ])
-        if expiration_reasons:
-            for reason, count in sorted(
-                expiration_reasons.items(),
-                key=lambda item: (-item[1], item[0]),
-            ):
-                safe_reason = reason.replace("|", "\\|").replace("\n", " ")
-                report_lines.append(
-                    f"| {safe_reason} | {count} |"
-                )
-        else:
-            report_lines.append("| - | 0 |")
-
-        report_lines.extend([
-            "",
-            "## 9. Data Quality / Interpretation Flags",
-            "",
-            f"- Records where Price Exp exactly equals TP: {exp_equals_tp}",
-            f"- Expired records whose reason text mentions TP: {expired_reason_contains_tp}",
-            "- These are flags for review, not automatic strategy judgments.",
-            "",
-            "## 10. Trade-by-Trade Detail",
-            "",
-        ])
-
-        if records:
-            for index, record in enumerate(records, start=1):
-                report_lines.extend([
-                    f"### Trade {index}: {record.get('trade_id', '-')}",
-                    "",
-                    f"- Pair: {record.get('pair', '-')}",
-                    f"- Direction: {record.get('direction', '-')}",
-                    f"- Status: {record.get('status', '-')}",
-                    f"- Result: {record.get('result', '-')}",
-                    f"- Price Now Reference: {record.get('price_now_reference', '-')}",
-                    f"- Entry: {record.get('entry', '-')}",
-                    f"- Reason Entry: {record.get('entry_reason', '-')}",
-                    f"- Price Exp: {record.get('price_exp', '-')}",
-                    f"- Reason Price Exp: {record.get('price_exp_reason', '-')}",
-                    f"- SL: {record.get('sl', '-')}",
-                    f"- Reason SL: {record.get('sl_reason', '-')}",
-                    f"- TP: {record.get('tp', '-')}",
-                    f"- Reason TP: {record.get('tp_reason', '-')}",
-                    f"- Created: {record.get('created_at', '-')}",
-                    f"- Filled: {record.get('filled_at', '-')}",
-                    f"- Closed: {record.get('closed_at', '-')}",
-                    f"- Fill Price: {record.get('fill_price', '-')}",
-                    f"- Exit Price: {record.get('exit_price', '-')}",
-                    f"- Result Reason: {record.get('result_reason', '-')}",
-                    f"- PnL %: {record.get('pnl_percent', '-')}",
-                    f"- Planned RR: {record.get('planned_rr', '-')}",
-                    f"- Pending Seconds: {record.get('pending_seconds', '-')}",
-                    f"- Holding Seconds: {record.get('holding_seconds', '-')}",
-                    f"- Trailing: {'YES' if record.get('trailing') else 'NO'}",
-                    f"- Trail History Count: {len(record.get('trail_history') or [])}",
-                    f"- Strategy: {record.get('strategy_name', '-')}",
-                    f"- Strategy Version: {record.get('strategy_version', '-')}",
-                    "",
-                ])
-        else:
-            report_lines.append("Tidak ada trade record historis.")
-            report_lines.append("")
-
-        report_lines.extend([
-            "## 11. User Notes (/catatan)",
-            "",
-        ])
-
-        if notes_data:
-            for index, note in enumerate(notes_data, start=1):
-                note_text = str(
-                    note.get("text") or ""
-                ).strip()
-                created = str(
-                    note.get("created_at_wib")
-                    or note.get("created_at")
-                    or "-"
-                )
-                report_lines.extend([
-                    f"### Note {index}",
-                    "",
-                    f"- Note ID: {note.get('note_id', '-')}",
-                    f"- Time: {created}",
-                    f"- Text: {note_text or '-'}",
-                    "",
-                ])
-        else:
-            report_lines.append("Belum ada catatan.")
-            report_lines.append("")
-
-        report_lines.extend([
-            "## 12. AI-Readable Conclusions",
-            "",
-        ])
-
-        if total_setup_history == 0:
-            report_lines.extend([
-                "1. Belum ada historical setup yang closed di dataset.",
-                "2. Tidak ada dasar statistik untuk menilai outcome historis.",
-            ])
-        else:
-            report_lines.extend([
-                f"1. Dari {total_setup_history} historical setup, {expired} berakhir EXPIRED dan {historical_filled} berakhir sebagai filled trade yang kemudian closed.",
-                f"2. Expiration rate historis adalah {decimal_to_str(expiration_rate)}%; angka ini menggambarkan frekuensi setup berakhir sebelum menjadi trade yang selesai, bukan win/loss rate.",
-                f"3. Historical filled sample berjumlah {historical_filled}; TP={stats['tp']} dan SL={stats['sl']}. Win Rate historis menurut definisi sistem adalah {decimal_to_str(stats['win_rate'])}%.",
-                f"4. Historical PnL sum hanya berasal dari record yang memiliki PnL, dengan nilai {decimal_to_str(stats['gross_pnl_percent'])}%.",
-                f"5. Active session saat export memiliki {len(active_records)} setup ({active_pending} PENDING, {active_filled} FILLED); setup aktif tidak dimasukkan ke historical closed performance.",
-                f"6. Total trailing event yang tercatat adalah {stats['trail_count']} dan jumlah trade historis yang memiliki trailing adalah {total_trailing_trades}.",
-            ])
-
-            directions = sorted({
-                str(record.get("direction") or "UNKNOWN")
-                for record in records
-            })
-            if directions:
-                report_lines.append(
-                    "7. Direction historis yang muncul: "
-                    + ", ".join(directions)
-                    + "."
-                )
-            else:
-                report_lines.append(
-                    "7. Tidak ada direction historis yang dapat dianalisis."
-                )
-
-            pairs = sorted({
-                str(record.get("pair") or "UNKNOWN")
-                for record in records
-            })
-            report_lines.append(
-                "8. Pair historis yang muncul: "
-                + (", ".join(pairs) if pairs else "-")
-                + "."
-            )
-
-            if expiration_reasons:
-                top_reason, top_count = sorted(
-                    expiration_reasons.items(),
-                    key=lambda item: (-item[1], item[0]),
-                )[0]
-                report_lines.append(
-                    "9. Reason EXPIRED yang paling sering tercatat adalah "
-                    f"'{top_reason}' ({top_count} record)."
-                )
-            else:
-                report_lines.append(
-                    "9. Tidak ada reason EXPIRED yang tercatat."
-                )
-
-            report_lines.append(
-                "10. Dataset ini belum cukup untuk menyimpulkan efektivitas strategi secara umum; kesimpulan yang valid di sini bersifat deskriptif terhadap data yang tersimpan."
-            )
-
-        report_lines.extend([
-            "",
-            "## 13. Guidance for Future AI Analysis",
-            "",
-            "Gunakan bagian berikut sebagai aturan membaca dataset:",
-            "",
-            "- `trades` = historical records yang sudah closed.",
-            "- `active_session.trades` = setup yang masih aktif saat export dan belum termasuk historical closed performance.",
-            "- `events` = kronologi event yang tercatat; satu trade dapat memiliki beberapa event.",
-            "- `notes` = catatan manual pengguna; jangan perlakukan isi catatan sebagai fakta pasar tanpa konteks tambahan.",
-            "- Expired dan Deleted tidak dihitung sebagai win/loss pada Win Rate.",
-            "- PnL hanya relevan pada trade yang memiliki `pnl_percent`.",
-            "- Reason Entry / Price Exp / SL / TP adalah alasan yang ditulis pengguna, bukan label otomatis yang diverifikasi oleh bot.",
-            "- Jangan menganggap active FILLED sebagai historical closed trade.",
-            "- Saat membandingkan periode atau strategi, gunakan sample size dan pisahkan pending/expired dari TP/SL.",
-            "",
-            "## 14. Raw Data Location",
-            "",
-            "- Full JSON export: `analysis/full_data.json`",
-            "- Full Markdown report: `analysis/analysis.md`",
-            "- Historical trades source: `data/trades.json`",
-            "- Event source: `data/events.jsonl`",
-            "- User notes source: `data/notes.json`",
-            "",
-            "---",
-            "Generated by main.py analysis exporter.",
-        ])
-
-        return (
-            full_data,
-            "\n".join(report_lines)
-            + "\n",
-        )
-
-    async def analyze(self) -> None:
-        # Gunakan history RAM yang sudah dimuat saat startup dan
-        # terus diperbarui selama session.
-        # Refresh notes so /analyze selalu mengambil data /catatan terbaru dari GitHub.
-        await self._load_notes()
-
-        full_data, report = self._build_analysis(
-            self.history_records,
-            self.history_events,
-            self.notes,
-        )
-
-        full_data_bytes = json.dumps(
-            full_data,
-            ensure_ascii=False,
-            indent=2,
-        ).encode("utf-8")
-        report_bytes = report.encode("utf-8")
-
-        temp_paths: list[Path] = []
-
-        try:
-            commit_json = await self.github.replace_file(
-                ANALYSIS_JSON_PATH,
-                full_data_bytes,
-                "analysis: update full dataset",
-            )
-
-            commit_md = await self.github.replace_file(
-                ANALYSIS_MD_PATH,
-                report_bytes,
-                "analysis: update report",
-            )
-
-            # Buat salinan sementara untuk dikirim sebagai Telegram Document.
-            with tempfile.NamedTemporaryFile(
-                mode="wb",
-                suffix=".json",
-                prefix="trading_analysis_",
-                delete=False,
-            ) as json_file:
-                json_file.write(full_data_bytes)
-                json_path = Path(json_file.name)
-                temp_paths.append(json_path)
-
-            with tempfile.NamedTemporaryFile(
-                mode="wb",
-                suffix=".md",
-                prefix="trading_analysis_",
-                delete=False,
-            ) as md_file:
-                md_file.write(report_bytes)
-                md_path = Path(md_file.name)
-                temp_paths.append(md_path)
-
-            stats = self._calculate_stats(
-                self.history_records
-            )
-
-            await self.reply(
-                "📊 ANALYZE SELESAI\n\n"
-                f"Total Setup History: {stats['total_records']}\n"
-                f"Total Trade Filled: {stats['total_filled']}\n"
-                f"Win Rate: {decimal_to_str(stats['win_rate'])}%\n"
-                f"PnL History: {decimal_to_str(stats['gross_pnl_percent'])}%\n\n"
-                "File hasil analisis dikirim sebagai dokumen Telegram."
-            )
-
-            await self.send_document_file(
-                json_path,
-                "📄 Full dataset — trading history export",
-            )
-            await self.send_document_file(
-                md_path,
-                "📄 Analysis report — trading history report",
-            )
-
-        except Exception as exc:
-            log.exception(
-                "ANALYZE gagal."
-            )
-
-            await self.reply(
-                "❌ /analyze gagal.\n\n"
-                f"{exc}"
-            )
-
-        finally:
-            for path in temp_paths:
-                try:
-                    path.unlink(missing_ok=True)
-                except Exception:
-                    pass
 
     # --------------------------------------------------------
     # RESET
@@ -15395,7 +14359,7 @@ class TradingEngine:
             "• histori trade\n"
             "• events\n"
             "• journal\n"
-            "• hasil /analyze\n"
+
             "• seluruh /catatan\n\n"
             "Active setup tidak dihapus.\n\n"
             "1. Ya, hapus semua pencatatan\n"
@@ -15446,7 +14410,6 @@ class TradingEngine:
                 [
                     "📦 Diarsipkan ke data/archive/, lalu dihapus:",
                     "• trades.json • events.jsonl • trade_history.md",
-                    "• hasil /analyze",
                     "✅ Catatan, ban, dan active setup tetap aman",
                 ],
             )
@@ -15584,15 +14547,15 @@ class TradingEngine:
             "/stats - statistik histori + R-metrik\n"
             "/trailmode [structure|ladder] - mode trailing SL otomatis\n"
             "/btcwatch [on|off] - status BTC & penalti impuls confidence (tidak membatalkan/menutup setup)\n"
+            "/h4cycles [n] - batas siklus scan per window H4 (default 20; disesuaikan ukuran universe)\n"
             "/drawdown [%|off|reset] - tutup SEMUA /trade bila equity turun dari puncak\n"
             "/balance - saldo (simulasi $100 atau real)\n"
             "/resetbalance - reset saldo simulasi ke $100\n"
-            "/edge - R, bucket confidence, sapuan threshold, varian\n"
+            "/candidates [PAIR] - kandidat, funnel scan, alasan per pair\n"
             "/risk - sizing berbasis risiko (default LEGACY)\n"
             "/resetstats - arsipkan + reset stats (untuk tes strategy baru)\n"
             "/catatan [teks] - tambah catatan / tanpa teks = lihat catatan\n"
             "/reset - hapus seluruh pencatatan GitHub\n"
-            "/analyze - generate full dataset + report, lalu kirim file Telegram\n"
             "/status - status engine dan WebSocket\n"
             "/help - menu command\n\n"
             "Launcher:\n"
@@ -15675,7 +14638,6 @@ class TradingEngine:
                     "/setup",
                     "/open",
                     "/stats",
-                    "/analyze",
                     "/status",
                     "/catatan",
                     "/reset",
@@ -15849,10 +14811,6 @@ class TradingEngine:
                 await self.show_stats()
                 return
 
-            if command == "/analyze":
-                await self.analyze()
-                return
-
             if command == "/catatan":
                 argument = text[len(text.split(maxsplit=1)[0]):].strip()
                 if argument:
@@ -15864,7 +14822,6 @@ class TradingEngine:
             if command == "/reset":
                 await self._start_reset()
                 return
-
 
             if command == "/resetstats":
                 await self._start_resetstats()
@@ -15887,7 +14844,6 @@ class TradingEngine:
                     log.warning("[TRAIL] pengaturan gagal disimpan: %s", exc)
                 return
 
-
             if command == "/btcwatch":
                 try:
                     await self._handle_btcwatch_command(text)
@@ -15900,6 +14856,17 @@ class TradingEngine:
                     log.warning("[BTCWATCH] pengaturan gagal disimpan: %s", exc)
                 return
 
+            if command == "/h4cycles":
+                try:
+                    await self._handle_h4cycles_command(text)
+                except Exception as exc:
+                    await self.reply(f"❌ /h4cycles gagal.\n\n{exc}")
+                    return
+                try:
+                    await self._save_runtime_settings()
+                except Exception as exc:
+                    log.warning("[H4] pengaturan gagal disimpan: %s", exc)
+                return
 
             if command == "/drawdown":
                 try:
@@ -15926,14 +14893,12 @@ class TradingEngine:
                 await self._show_balance()
                 return
 
-
-
-            if command == "/edge":
-                try:
-                    await self.reply(await self._build_edge_text())
-                except Exception as exc:
-                    log.exception("EDGE command gagal.")
-                    await self.reply(f"❌ /edge gagal.\n\n{exc}")
+            if command == "/candidates":
+                arg = text.split()[1] if len(text.split()) > 1 else ""
+                if arg:
+                    await self.show_candidate_detail(arg)
+                else:
+                    await self.show_candidates()
                 return
 
             if command == "/risk":
@@ -16010,7 +14975,6 @@ class TradingEngine:
             if self.flow["kind"] == "RESETSTATS":
                 await self._handle_resetstats_input(text)
                 return
-
 
         await self.reply(
             "Tidak ada sesi input aktif.\n"
