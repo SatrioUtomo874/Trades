@@ -1154,3 +1154,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-10-23T06:31:37.695290+00:00
 - Strategy: SMC_VLT_RSI v2.6.0
+
+---
+
+## SKYAIUSDT — BUY
+
+Trade ID: `SKYAIUSDT-20261023-110927-4F084E`
+
+### Setup
+
+- Price Now Reference: 0.0309
+- Entry: 0.02941
+- Reason Entry: SKYAIUSDT BUY: BUY_PULLBACK. H4 structure BULLISH, liquidity H1 0.029395 dipadukan dengan Fib PRIMARY; refinement BULLISH_BREAKER. Projected M15 RSI 28.1 pada entry zone.
+- Price Exp: 0.03095
+- Reason Price Exp: Price Exp 0.030950000000000002: retracement thesis dianggap basi jika harga bergerak terlalu jauh tanpa menyentuh entry zone sebelum menembus boundary relevansi.
+- SL: 0.02881
+- Reason SL: Prediction invalidation berasal dari BULLISH_SWEEP_EXTREME di 0.0294; SL ditempatkan di luar invalidation dan liquidity guard 0.029395.
+- TP: 0.03098
+- Reason TP: TP 0.03098 dipilih dari H4_SWING_HIGH dengan RR 2.62; target quality 87.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: MANUAL_CLOSE_PENDING
+- Exit Price: -
+- Result Reason: Manual /close pada setup REAL PENDING sebelum entry.
+- PnL: -
+- Created: 2026-10-23T04:09:27.085872+00:00
+- Filled: -
+- Closed: 2026-10-23T06:31:53.704295+00:00
+- Strategy: SMC_VLT_RSI v2.6.0
