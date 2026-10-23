@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-10-23T06:50:36.090628+00:00",
+  "saved_at": "2026-10-23T14:52:57.883910+00:00",
   "bans": [
     {
       "pair": "2ZUSDT",
@@ -17,11 +17,11 @@
       "source": "AUTO_PRICE_EXP"
     },
     {
-      "pair": "COLLECTUSDT",
-      "banned_at": "2026-10-23T00:34:46.600540+00:00",
-      "until": "2026-10-23T08:34:46.600520+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
+      "pair": "BRUSDT",
+      "banned_at": "2026-10-23T14:52:57.883736+00:00",
+      "until": "2026-10-24T14:52:57.883699+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "CROSSUSDT",
@@ -48,13 +48,6 @@
       "pair": "GRASSUSDT",
       "banned_at": "2026-10-23T06:50:36.090491+00:00",
       "until": "2026-10-23T14:50:36.090467+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
-    },
-    {
-      "pair": "INXUSDT",
-      "banned_at": "2026-10-23T00:28:22.815871+00:00",
-      "until": "2026-10-23T08:28:22.815850+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
     },
