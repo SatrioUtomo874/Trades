@@ -6724,7 +6724,11 @@ class TradingEngine:
         module = self._strategy_module_ref
         level = "OK" if pct < 70 else "TINGGI" if pct < 90 else "KRITIS"
         if level != "OK" and module is not None and hasattr(module, "series_cache_shrink"):
-            module.series_cache_shrink(0.5 if level == "TINGGI" else 1.0)
+            try:
+                module.series_cache_shrink(0.5 if level == "TINGGI" else 1.0)
+            except Exception as exc:  # noqa: BLE001
+                # A cache helper failure must not prevent emergency history cleanup.
+                log.warning("[MEM] strategy.series_cache_shrink gagal: %s", exc)
         if level == "KRITIS":
             self._shed_memory()
             release_memory()
@@ -6840,8 +6844,6 @@ class TradingEngine:
                     continue
 
                 await self._run_scan_cycle()
-                release_memory()
-                await self._ram_guard()
 
                 if self._h4_enabled and self._h4_window_active and self._h4_opening_gate and self._last_cycle_analyzed > 0:
                     self._h4_opening_gate = False
@@ -6885,14 +6887,6 @@ class TradingEngine:
                     continue
                 log.exception("[SCAN] cycle fatal error")
                 await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
-
-    async def _run_scan_cycle(self) -> None:
-        self._scan_cycle_active = True
-        try:
-            await self._run_scan_cycle_inner()
-        finally:
-            self._scan_cycle_active = False
-            await self._flush_bans_if_dirty()
 
     async def _run_scan_cycle_inner(self) -> None:
         """Satu batch (<= SCAN_MAX_PAIRS_PER_CYCLE pair) dari sapuan berjalan. Tidak menganalisis bila MAX penuh."""
@@ -6951,6 +6945,7 @@ class TradingEngine:
         stats = {"scanned": 0, "below": 0, "rejected": 0, "errors": 0, "valid": 0, "added": 0}
         direction_counts = {"BULLISH": 0, "BEARISH": 0, "RANGE": 0, "UNKNOWN": 0}
         candidates: list[dict[str, Any]] = []
+        qualified_candidates = 0  # all >= threshold; full objects retained only for top N
         rate_limited = 0
         stopped_early = False
 
@@ -7010,7 +7005,11 @@ class TradingEngine:
                 elif Decimal(str(candidate["confidence"])) < self.scan_threshold:
                     stats["below"] += 1
                 else:
+                    qualified_candidates += 1
                     candidates.append(candidate)
+                    candidates.sort(key=lambda item: Decimal(str(item.get("confidence") or "0")), reverse=True)
+                    if len(candidates) > SCAN_VALIDATE_TOP_N:
+                        del candidates[SCAN_VALIDATE_TOP_N:]
             except Exception as exc:
                 stats["errors"] += 1
                 self._sweep_done.discard(pair)
@@ -7066,13 +7065,13 @@ class TradingEngine:
         duration = time.monotonic() - started
         self._scan_durations.append(duration)
         self._scan_last_report = {"cycle": cycle, "btc_h4_trend": btc_trend, **stats, "duration_seconds": duration}
-        log.info("[SCAN] batch #%s selesai | scanned=%s kandidat=%s valid=%s masuk=%s %.1fs sapuan_selesai=%s",
-                 cycle, stats["scanned"], len(candidates), stats["valid"], stats["added"], duration, self._sweep_complete)
+        log.info("[SCAN] batch #%s selesai | scanned=%s kandidat_lolos_threshold=%s kandidat_disimpan=%s valid=%s masuk=%s %.1fs sapuan_selesai=%s",
+                 cycle, stats["scanned"], qualified_candidates, len(candidates), stats["valid"], stats["added"], duration, self._sweep_complete)
         await self.reply(
             f"🔄 SCAN #{cycle} SELESAI • {duration:.0f}s • RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
             f"├ Dipindai {stats['scanned']}  • tersapu {len(self._sweep_done)}/{total_targets}\n"
             f"├ H4 🟢 {direction_counts['BULLISH']} 🔴 {direction_counts['BEARISH']} ⚪ {direction_counts['RANGE']}\n"
-            f"├ ≥ Threshold {len(candidates)} • validator lolos {stats['valid']} • masuk /trade {len(added)}\n"
+            f"├ ≥ Threshold {qualified_candidates} • validator top {len(candidates)} • lolos {stats['valid']} • masuk /trade {len(added)}\n"
             f"├ Di bawah threshold {stats['below']} • ditolak {stats['rejected']} • error {stats['errors']}\n"
             f"└ Sapuan {'✅ selesai' if self._sweep_complete else 'berlanjut'}"
             + ("\n" + "\n".join(notes) if notes else "")
@@ -8606,8 +8605,16 @@ class TradingEngine:
             await self._run_scan_cycle_inner()
         finally:
             self._scan_cycle_active = False
-            await self._flush_bans_if_dirty()
-            await self._flush_research()
+            # Always flush pending ban updates, then run memory cleanup even if
+            # the scan itself raised. The deleted research subsystem is not used.
+            try:
+                await self._flush_bans_if_dirty()
+            finally:
+                release_memory()
+                try:
+                    await self._ram_guard()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[MEM] RAM guard gagal setelah scan cycle: %s", exc)
 
 
     async def reset_github_records(self) -> None:
