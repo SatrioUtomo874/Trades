@@ -1,19 +1,10 @@
 {
-  "version": 1,
-  "saved_at": "2026-10-23T17:07:52.314077+00:00",
-  "risk": {
-    "mode": "LEGACY_NOTIONAL",
-    "per_trade": null,
-    "portfolio": null,
-    "direction": null,
-    "dd": null,
-    "paper_equity": null
-  },
+  "version": 2,
+  "saved_at": "2026-10-24T03:02:03.293432+00:00",
   "guard": {
     "trail_mode": "structure",
-    "btc_flip": true,
-    "h4_max_cycles": 20,
+    "h4_sweeps": 2,
     "autostop": "16",
-    "drawdown": null
+    "drawdown": "16"
   }
 }
