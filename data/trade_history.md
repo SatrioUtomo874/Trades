@@ -98,3 +98,36 @@ Tidak ada trailing.
 - Filled: 2026-10-25T10:20:43.187522+00:00
 - Closed: 2026-10-25T13:57:06.381228+00:00
 - Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
+
+---
+
+## SLXUSDT — SELL
+
+Trade ID: `SLXUSDT-20261025-220024-609A0A`
+
+### Setup
+
+- Price Now Reference: 0.05083
+- Entry: 0.05083
+- Reason Entry: M5 closed-candle confirmation score 72.16/72.00; POI_TOUCH_CURRENT_BAR;REJECTION_WICK;RELATIVE_VOLUME_SUPPORT;OPPOSING_MOVE_STALL_OR_SWEEP; entry modeled at closed M5 price 0.05083.
+- Price Exp: 0.04837
+- Reason Price Exp: Reference ekspansi 0.0483735 dari target liquidity M5_SELL_SIDE_LIQUIDITY; bukan target TP.
+- SL: 0.05167
+- Reason SL: SL struktur H1_PROTECTED_HIGH di luar anchor 0.05154 dengan buffer 0.0001229741; risk 0.87 ATR H1.
+- TP: 0.04794
+- Reason TP: TP ke liquidity M5_SELL_SIDE_LIQUIDITY di 0.04794; sumber EQUAL_LEVELS; RR gross 3.47R (minimum 2.0R, tanpa batas maksimum).
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.05167
+- Result Reason: SL struktur H1_PROTECTED_HIGH di luar anchor 0.05154 dengan buffer 0.0001229741; risk 0.87 ATR H1.
+- PnL: -1.433058500196309383588535532%
+- Created: 2026-10-25T15:00:24.302284+00:00
+- Filled: 2026-10-25T15:00:29.497118+00:00
+- Closed: 2026-10-25T15:29:00.673241+00:00
+- Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
