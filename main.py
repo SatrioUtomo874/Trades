@@ -7108,6 +7108,16 @@ class TradingEngine:
                     "poi_confirm_window_m5": M5_WATCH_POI_WINDOW_BARS,
                     "watch_timeout_m5": M5_WATCH_TIMEOUT_BARS,
                     "last_m5_open_ms": 0,
+                    "m5_last_monitor_score": None,
+                    "m5_last_monitor_reason": "WAITING_FOR_FIRST_CLOSED_M5_CANDLE",
+                    "m5_last_monitor_components": {},
+                    "m5_last_monitor_poi_touch": False,
+                    "m5_last_m5_open_ms": 0,
+                    "m5_last_m5_close_ms": 0,
+                    "m5_last_m5_close": None,
+                    "m5_last_error": None,
+                    "m5_last_error_at_ms": None,
+                    "m5_retry_after_monotonic": 0.0,
                     "watch_cycle": cycle,
                     "watch_generation": generation,
                     "watch_origin": origin,
@@ -7192,11 +7202,25 @@ class TradingEngine:
             processed = True
             history = ordered[max(0, index - 24):index + 1]
             if len(history) < 7:
+                active["m5_last_monitor_reason"] = "INSUFFICIENT_M5_HISTORY"
                 continue
             score_info = _score_m5_confirmation(active, history)
             score = _m5_safe_float(score_info.get("score"), 0.0)
 
             op, hi, lo, close = (candle_value(bar, field) for field in ("open", "high", "low", "close"))
+            # Read-only /candidates diagnostics: preserve evidence for every newly
+            # closed M5 candle even before the POI has been touched. This does not
+            # change admission rules or make the diagnostic score an entry signal.
+            active["m5_last_monitor_score"] = score
+            active["m5_last_monitor_reason"] = str(score_info.get("reason") or "")[:500]
+            active["m5_last_monitor_components"] = score_info.get("components", {}) if isinstance(score_info.get("components"), dict) else {}
+            active["m5_last_monitor_poi_touch"] = bool(score_info.get("poi_touch"))
+            active["m5_last_m5_open_ms"] = bar_open
+            active["m5_last_m5_close_ms"] = bar_open + bar_ms
+            active["m5_last_m5_close"] = close
+            active["m5_last_m5_open"] = op
+            active["m5_last_m5_high"] = hi
+            active["m5_last_m5_low"] = lo
             sl = _m5_safe_float(active.get("sl"), 0.0)
             tp = _m5_safe_float(active.get("tp"), 0.0)
             price_exp = _m5_safe_float(active.get("price_exp"), 0.0)
@@ -7331,6 +7355,8 @@ class TradingEngine:
                         result = self._process_live_m5_watch(pair, watch, candles, {
                             "latest_closed_open_ms": latest_open,
                         })
+                        watch["m5_last_error"] = None
+                        watch["m5_last_error_at_ms"] = None
                         status = str((result or {}).get("status") or "WAITING").upper()
                         watch["m5_watch_status"] = status
                         if status == "EXPIRED":
@@ -7495,6 +7521,8 @@ class TradingEngine:
                             await self._drop_m5_watch(pair, "INVALID_BINANCE_KLINE_INTERVAL")
                             continue
                         log.warning("[M5-WATCH] %s processing failed: %s", pair, error_text[:240])
+                        watch["m5_last_error"] = error_text[:240]
+                        watch["m5_last_error_at_ms"] = int(time.time() * 1000)
                         # Avoid rapid retries against a sick endpoint/cache; closed-bar catch-up is safe.
                         watch["m5_retry_after_monotonic"] = time.monotonic() + 15.0
                         if "invalid direction" in error_lower or "watch state" in error_lower:
@@ -7509,6 +7537,270 @@ class TradingEngine:
             except Exception as exc:
                 log.exception("[M5-WATCH] watcher cycle failed: %s", exc)
                 await asyncio.sleep(5.0)
+
+    async def _handle_candidates_command(self, text: str = "/candidates") -> None:
+        """Report all active M5-WATCH candidates without touching Binance or mutating watch state.
+
+        Output is split into Telegram-safe chunks. Optional /candidates N shows one
+        page; /candidates all (or no argument) displays every current watch.
+        """
+        parts = str(text or "/candidates").split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else "all"
+        per_page = 3
+        now_ms = int(time.time() * 1000)
+
+        def num(value: Any, default: float = 0.0) -> float:
+            try:
+                v = float(value)
+                return v if math.isfinite(v) else default
+            except (TypeError, ValueError, OverflowError):
+                return default
+
+        def price(value: Any) -> str:
+            v = num(value, float("nan"))
+            if not math.isfinite(v) or v <= 0:
+                return "-"
+            return f"{v:.10g}"
+
+        def dt_text(value: Any) -> str:
+            try:
+                ms = int(value or 0)
+                if ms <= 0:
+                    return "-"
+                return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(TZ).strftime("%d-%m %H:%M:%S WIB")
+            except (TypeError, ValueError, OverflowError, OSError):
+                return "-"
+
+        def elapsed_text(seconds: float) -> str:
+            seconds = max(0, int(seconds))
+            h, rem = divmod(seconds, 3600)
+            m, sec = divmod(rem, 60)
+            if h:
+                return f"{h}j {m}m"
+            if m:
+                return f"{m}m {sec}d"
+            return f"{sec}d"
+
+        def compact_reason(value: Any, limit: int = 110) -> str:
+            raw = re.sub(r"\s+", " ", str(value or "-"))
+            if len(raw) > limit:
+                return raw[: limit - 1] + "…"
+            return raw
+
+        # Lock only long enough to copy display fields. No API calls, no strategy
+        # calls, no price refresh, and no candidate state changes from this command.
+        async with self._scan_watch_lock:
+            watch_rows: list[dict[str, Any]] = []
+            for pair, watch in self._scan_watchlist.items():
+                setup = watch.get("setup") if isinstance(watch.get("setup"), dict) else watch
+                components = watch.get("m5_last_monitor_components")
+                if not isinstance(components, dict):
+                    components = watch.get("m5_confirmation_last_components")
+                if not isinstance(components, dict):
+                    components = {}
+                zone_low = num(watch.get("entry_zone_low"), 0.0)
+                zone_high = num(watch.get("entry_zone_high"), 0.0)
+                score_raw = watch.get("m5_last_monitor_score")
+                if score_raw is None:
+                    score_raw = watch.get("m5_confirmation_score")
+                score = None if score_raw is None else num(score_raw, 0.0)
+                threshold = num(watch.get("m5_confirmation_threshold"), M5_WATCH_CONFIRM_THRESHOLD)
+                bars = max(0, int(num(watch.get("watch_bars_m5"), 0)))
+                timeout = max(1, int(num(watch.get("watch_timeout_m5"), M5_WATCH_TIMEOUT_BARS)))
+                poi_touched = bool(watch.get("poi_touched"))
+                touch_age = max(0, int(num(watch.get("poi_touch_age_m5"), 0)))
+                poi_window = max(1, int(num(watch.get("poi_confirm_window_m5"), M5_WATCH_POI_WINDOW_BARS)))
+                started_ms = int(num(watch.get("watch_started_ms"), 0))
+                last_close_ms = int(num(watch.get("m5_last_m5_close_ms"), 0))
+                last_close = watch.get("m5_last_m5_close")
+                if last_close is None:
+                    last_close = watch.get("confirmation_price")
+                score_reason = watch.get("m5_last_monitor_reason") or watch.get("m5_confirmation_reason") or "WAITING_FOR_FIRST_CLOSED_M5_CANDLE"
+                if watch.get("m5_last_error"):
+                    phase = "RETRY_WAIT"
+                elif poi_touched:
+                    phase = "POI_TOUCHED / WAITING_M5_CONFIRMATION"
+                else:
+                    phase = "WAITING_FOR_POI"
+                watch_rows.append({
+                    "pair": str(pair),
+                    "direction": str(watch.get("direction") or setup.get("direction") or "?"),
+                    "confidence": num(setup.get("confidence"), 0.0),
+                    "phase": phase,
+                    "status": str(watch.get("m5_watch_status") or "WAITING"),
+                    "zone_low": zone_low,
+                    "zone_high": zone_high,
+                    "score": score,
+                    "threshold": threshold,
+                    "bars": bars,
+                    "timeout": timeout,
+                    "bars_remaining": max(0, timeout - bars),
+                    "poi_touched": poi_touched,
+                    "touch_time": watch.get("poi_touch_time_ms"),
+                    "touch_age": touch_age,
+                    "poi_window": poi_window,
+                    "poi_window_remaining": max(0, poi_window - touch_age),
+                    "started_ms": started_ms,
+                    "last_close_ms": last_close_ms,
+                    "last_close": last_close,
+                    "components": components,
+                    "reason": score_reason,
+                    "last_error": watch.get("m5_last_error"),
+                    "last_error_at": watch.get("m5_last_error_at_ms"),
+                    "retrying": time.monotonic() < num(watch.get("m5_retry_after_monotonic"), 0.0),
+                    "origin": str(watch.get("watch_origin") or "SCAN"),
+                    "cycle": watch.get("watch_cycle"),
+                    "watch_bars_pct": min(100.0, 100.0 * bars / timeout),
+                    "entry": setup.get("entry"),
+                    "sl": setup.get("sl"),
+                    "tp": setup.get("tp"),
+                    "price_exp": setup.get("price_exp"),
+                })
+
+        # Most actionable candidates first: POI touched, then score closest to
+        # threshold, then highest strategy confidence. Stable pair sort is final tie-break.
+        watch_rows.sort(key=lambda x: (
+            0 if x["poi_touched"] else 1,
+            -(x["score"] if x["score"] is not None else -1.0),
+            -x["confidence"],
+            x["pair"],
+        ))
+
+        total = len(watch_rows)
+        pages = max(1, (total + per_page - 1) // per_page)
+        chosen_page: int | None = None
+        if arg not in {"all", "semua", ""}:
+            try:
+                chosen_page = int(arg)
+            except ValueError:
+                await self.reply("Format: /candidates atau /candidates 2 untuk halaman tertentu atau /candidates all untuk seluruh watch.")
+                return
+            if chosen_page < 1 or chosen_page > pages:
+                await self.reply(f"Halaman tidak valid. Halaman tersedia: 1–{pages}. Gunakan /candidates atau /candidates all untuk semua kandidat.")
+                return
+
+        touched_count = sum(1 for x in watch_rows if x["poi_touched"])
+        retry_count = sum(1 for x in watch_rows if x["last_error"])
+        scored_count = sum(1 for x in watch_rows if x["score"] is not None)
+        report = self._scan_last_report if isinstance(self._scan_last_report, dict) else {}
+        scan_state = "ON" if self._scan_user_enabled else "OFF"
+        runtime_state = (
+            "PAUSED_BY_MAX" if self._scan_auto_paused else
+            "RUNNING" if self._scan_task is not None and not self._scan_task.done() else
+            "WAITING_H4" if self._scan_user_enabled and self._h4_enabled and not self._h4_window_active else
+            "OFF"
+        )
+        report_universe = max(0, int(num(report.get("universe_total"), 0)))
+        sweep_done_live = len(getattr(self, "_sweep_done", set()))
+        headroom = self._api_headroom_pct()
+        ram = rss_mb()
+        pending_trades = sum(1 for t in self.active_trades.values() if getattr(t, "status", "") == "PENDING")
+        filled_trades = sum(1 for t in self.active_trades.values() if getattr(t, "status", "") == "FILLED")
+        summary = [
+            "📋 CANDIDATES — LIVE M5 WATCH",
+            f"Scan {scan_state} • Runtime {runtime_state} • H4 gate {'ON' if self._h4_enabled else 'OFF'}",
+            f"H4 window {self._h4_window_text()} • Next slot {self._h4_next_slot_text() if self._h4_enabled else 'continuous mode'}",
+            f"H4 pass {self._h4_cycle_count}/{self.h4_sweeps if self._h4_enabled else '∞'} • progress sweep {sweep_done_live}/{report_universe or '?'} pair",
+            f"Trades {len(self.active_trades)}/{self.max_active_trades} (PENDING {pending_trades}, FILLED {filled_trades}) • Watch {total}/{M5_WATCH_MAX_CANDIDATES} • POI touched {touched_count} • Retry/error {retry_count}",
+            f"M5 scored {scored_count}/{total} • threshold {M5_WATCH_CONFIRM_THRESHOLD:.1f} • POI window {M5_WATCH_POI_WINDOW_BARS} bars • timeout {M5_WATCH_TIMEOUT_BARS} bars",
+            f"API headroom {'-' if headroom is None else f'{headroom:.0f}%'} • RAM {'-' if ram <= 0 else f'{ram:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB'} • Binance limit hits {API_STATS.limit_hits}",
+        ]
+        if report:
+            summary.append(
+                "Last scan: cycle {cycle} • analyzed {scanned} • ≥threshold {qualified} • validator valid {valid} • queued {added} • {duration:.1f}s".format(
+                    cycle=report.get("cycle", "-"),
+                    scanned=int(num(report.get("scanned"), 0)),
+                    qualified=int(num(report.get("qualified", report.get("qualified_candidates", 0)), 0)),
+                    valid=int(num(report.get("valid"), 0)),
+                    added=int(num(report.get("added"), 0)),
+                    duration=num(report.get("duration_seconds"), 0.0),
+                )
+            )
+        summary.append("Score adalah evidence score, bukan probabilitas profit. Harga yang ditampilkan berasal dari candle M5 terakhir yang sudah tutup.")
+
+        if not watch_rows:
+            summary.extend([
+                "",
+                "Tidak ada kandidat yang sedang M5-WATCH saat ini.",
+                "Kandidat yang sudah entry, expired, atau ditolak akan keluar dari daftar aktif.",
+                "Gunakan /status untuk detail engine dan /api untuk bobot request Binance.",
+            ])
+            await self.reply("\n".join(summary))
+            return
+
+        def render_row(row: dict[str, Any], number: int) -> str:
+            score = row["score"]
+            threshold = row["threshold"]
+            if score is None:
+                score_text = f"belum ada skor / {threshold:.1f}"
+                delta_text = ""
+            else:
+                gap = threshold - score
+                score_text = f"{score:.1f}/{threshold:.1f}"
+                delta_text = f" • {'kurang' if gap > 0 else 'ambang tercapai'} {abs(gap):.1f}"
+            close = num(row["last_close"], 0.0)
+            zone_low, zone_high = row["zone_low"], row["zone_high"]
+            if close > 0 and zone_low > 0 and zone_high >= zone_low:
+                if zone_low <= close <= zone_high:
+                    location = "di dalam POI"
+                elif close < zone_low:
+                    location = f"di bawah POI ({(zone_low - close) / zone_low * 100:.2f}%)"
+                else:
+                    location = f"di atas POI ({(close - zone_high) / zone_high * 100:.2f}%)"
+            else:
+                location = "harga M5 belum tersedia"
+            c = row["components"]
+            comp_text = (
+                f"rej {num(c.get('rejection_wick')):.0f}/20 · close {num(c.get('directional_close')):.0f}/15 · "
+                f"struct {num(c.get('micro_structure')):.0f}/30 · flow {num(c.get('taker_flow_and_relative_volume')):.0f}/20 · "
+                f"opp {num(c.get('opposing_move_weakness')):.0f}/15"
+            ) if c else "komponen: menunggu candle closed yang cukup"
+            if row["poi_touched"]:
+                touch_line = f"POI: TERSENTUH {dt_text(row['touch_time'])} • jendela konfirmasi {row['touch_age']}/{row['poi_window']} bar; sisa {row['poi_window_remaining']}"
+            else:
+                touch_line = "POI: BELUM TERSENTUH • konfirmasi belum dimulai"
+            age_text = elapsed_text((now_ms - row["started_ms"]) / 1000) if row["started_ms"] else "-"
+            err_line = ""
+            if row["last_error"]:
+                retry_text = " • retry dijeda" if row["retrying"] else ""
+                err_line = f"⚠️ Error terakhir ({dt_text(row['last_error_at'])}){retry_text}: {compact_reason(row['last_error'], 140)}\n"
+            return (
+                f"{number}. {row['pair']} {row['direction']} • thesis {row['confidence']:.1f}/100\n"
+                f"   Tahap: {row['phase']} • {row['status']} • asal {row['origin']} / cycle {row['cycle'] or '-'}\n"
+                f"   Progress: {row['bars']}/{row['timeout']} candle ({row['watch_bars_pct']:.0f}%) • sisa timeout {row['bars_remaining']} bar (~{row['bars_remaining'] * 5}m) • umur {age_text}\n"
+                f"   Skor M5: {score_text}{delta_text}\n"
+                f"   {touch_line}\n"
+                f"   POI {price(zone_low)} – {price(zone_high)} • close M5 {price(close)} ({location}) • candle close {dt_text(row['last_close_ms'])}\n"
+                f"   Evidence: {comp_text}\n"
+                f"   Alasan: {compact_reason(row['reason'])}\n"
+                f"   Level kandidat awal: Entry {price(row['entry'])} • SL {price(row['sl'])} • TP {price(row['tp'])} • Exp {price(row['price_exp'])}\n"
+                f"{err_line}"
+            ).rstrip()
+
+        if chosen_page is not None:
+            start = (chosen_page - 1) * per_page
+            selected = watch_rows[start:start + per_page]
+            chunks = ["\n".join(summary + [f"\nHalaman {chosen_page}/{pages} • menampilkan {len(selected)} dari {total} watch.", ""])]
+            body = "\n\n".join(render_row(row, start + i + 1) for i, row in enumerate(selected))
+            chunks.append(body)
+            chunks.append(f"Halaman berikutnya: /candidates {chosen_page + 1}" if chosen_page < pages else "Akhir daftar. Perintah ini read-only dan tidak membuat request candle.")
+            for chunk in chunks:
+                if chunk.strip():
+                    await self.reply(chunk[:3900])
+            return
+
+        # /candidates with no argument or /candidates all shows the complete list.
+        await self.reply("\n".join(summary + [f"\nSemua {total} kandidat aktif ditampilkan di bawah (dipecah agar sesuai batas Telegram).", ""]))
+        buffer = ""
+        for i, row in enumerate(watch_rows, 1):
+            block = render_row(row, i) + "\n\n"
+            if buffer and len(buffer) + len(block) > 3400:
+                await self.reply(buffer.rstrip())
+                buffer = ""
+            buffer += block
+        if buffer:
+            await self.reply(buffer.rstrip())
+        await self.reply("Akhir daftar. Gunakan /candidates N untuk melihat satu halaman; /candidates tetap menampilkan semua kandidat aktif. Perintah ini read-only dan tidak meminta candle baru ke Binance.")
 
     async def _run_scan_cycle_inner(self) -> None:
         """Satu batch (<= SCAN_MAX_PAIRS_PER_CYCLE pair) dari sapuan berjalan. Tidak menganalisis bila MAX penuh."""
@@ -7686,7 +7978,15 @@ class TradingEngine:
         stats["added"] = queued
         duration = time.monotonic() - started
         self._scan_durations.append(duration)
-        self._scan_last_report = {"cycle": cycle, "btc_h4_trend": btc_trend, **stats, "duration_seconds": duration}
+        self._scan_last_report = {
+            "cycle": cycle, "btc_h4_trend": btc_trend, **stats,
+            "duration_seconds": duration,
+            "qualified_candidates": qualified_candidates,
+            "universe_total": total_targets,
+            "sweep_done": len(self._sweep_done),
+            "sweep_complete": self._sweep_complete,
+            "stopped_early": stopped_early,
+        }
         log.info("[SCAN] batch #%s selesai | scanned=%s kandidat_lolos_threshold=%s kandidat_disimpan=%s valid=%s queued_m5=%s %.1fs sapuan_selesai=%s",
                  cycle, stats["scanned"], qualified_candidates, len(candidates), stats["valid"], stats["added"], duration, self._sweep_complete)
         await self.reply(
@@ -14437,6 +14737,7 @@ class TradingEngine:
             "/margin [USDT] - atur margin target\n"
             "/leverage [angka] - atur leverage target\n"
             "/scan on|off - scanner otomatis\n"
+            "/candidates - progress lengkap kandidat yang sedang M5-WATCH (read-only)\n"
             "/H4 on|off - gate scanner berdasarkan close H4 03/07/11/15/19/23 WIB\n"
             "/threshold [angka] - ambang confidence scanner\n"
             "/max [angka] - batas total PENDING + FILLED\n"
@@ -14523,6 +14824,7 @@ class TradingEngine:
                     "/filled",
                     "/close",
                     "/scan",
+                    "/candidates",
                     "/h4",
                     "/threshold",
                     "/real",
@@ -14648,6 +14950,14 @@ class TradingEngine:
                 except Exception as exc:
                     log.exception("SCAN command gagal.")
                     await self.reply(f"❌ /scan gagal.\n\n{exc}")
+                return
+
+            if command == "/candidates":
+                try:
+                    await self._handle_candidates_command(text)
+                except Exception as exc:
+                    log.exception("CANDIDATES command gagal.")
+                    await self.reply(f"❌ /candidates gagal.\n\n{exc}")
                 return
 
             if command == "/h4":
