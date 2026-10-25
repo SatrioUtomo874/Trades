@@ -223,12 +223,19 @@ MAX_ACTIVE_TRADES = 100
 HISTORY_REFRESH_SECONDS = 30
 
 # SCAN configuration. /max and /threshold can override these at runtime.
-DEFAULT_SCAN_THRESHOLD = Decimal("70")
+DEFAULT_SCAN_THRESHOLD = Decimal("40")
 # Binance-only scanner throughput. Strategy's REST provider has global spacing and
 # rate-limit cooldown; the main loop also leaves a small per-pair yield.
 SCAN_PAIR_DELAY_SECONDS = 0.20
 SCAN_MAX_PAIRS_PER_CYCLE = 100
 SCAN_CYCLE_DELAY_SECONDS = 30.0
+# Monitor only validated watch candidates; never scan the full universe outside H4 slots.
+M5_WATCH_POLL_SECONDS = 3.0
+M5_WATCH_CANDLES = 98  # <100 Klines weight; enough warm history for the M5 confirmation model.
+M5_WATCH_MAX_CANDIDATES = 64
+M5_WATCH_CONFIRM_THRESHOLD = 58.0
+M5_WATCH_POI_WINDOW_BARS = 36
+M5_WATCH_TIMEOUT_BARS = 96  # max 8h after H4/M15 candidate creation.
 MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "400") or "400")
 # H4 scanner gate: scanner baru membuka window pada penutupan H4 WIB.
 # Binance H4 boundaries dipetakan ke 03,07,11,15,19,23 WIB.
@@ -2888,14 +2895,17 @@ class TradingEngine:
         self._scan_user_enabled = False
         self._scan_auto_paused = False
         self._scan_task: asyncio.Task[Any] | None = None
+        self._m5_watch_task: asyncio.Task[Any] | None = None
+        self._scan_watchlist: dict[str, dict[str, Any]] = {}
+        self._scan_watch_lock = asyncio.Lock()
         self._scan_cycle_number = 0
         self._scan_last_report: dict[str, Any] = {}
         self._scan_margin_streak: dict[str, int] = {}
 
-        # H4 scanner gate. H4 defaults OFF per fresh main.py session.
-        # _h4_window_active means the current H4 close has opened a scanning
-        # window; it is closed again when max active trade is reached.
-        self._h4_enabled = False
+        # H4 scanner gate defaults ON so the universe scanner never runs continuously
+        # by accident. /H4 off explicitly enables the legacy continuous scanner mode.
+        # _h4_window_active means an eligible scheduled H4 close opened a scan window.
+        self._h4_enabled = True
         self._h4_window_active = False
         self._h4_last_trigger_slot: str | None = None
         self._h4_window_slot: datetime | None = None
@@ -2918,7 +2928,7 @@ class TradingEngine:
         self._drawdown_triggered = False
         self.sim_balance: Decimal = SIM_START_BALANCE
         self._sim_dirty = False
-        self.trail_mode = "hybrid"
+        self.trail_mode = "structure_m15"
         self._trail_state: dict[str, dict[str, Any]] = {}
 
         # Rate limit Binance: satu notifikasi per jeda + watcher yang melanjutkan.
@@ -5526,7 +5536,7 @@ class TradingEngine:
         fill, risk, r_now = metrics
         buy = trade.direction == "BUY"
         ladder, fee_pct = self._trail_params()
-        if self.trail_mode == "structure":
+        if self.trail_mode in {"structure", "structure_m15"}:
             ladder = []
         cands: list[tuple[Decimal, str, str]] = []
         lock_r = None
@@ -6686,14 +6696,20 @@ class TradingEngine:
             raw, _ = await self.github.get_file(RUNTIME_SETTINGS_PATH)
             if not raw:
                 return
-            guard = (json.loads(raw.decode("utf-8")).get("guard") or {})
+            settings_doc = json.loads(raw.decode("utf-8"))
+            settings_version = int(settings_doc.get("version") or 1)
+            guard = (settings_doc.get("guard") or {})
             for key, attr in (("autostop", "autostop_percent"), ("drawdown", "drawdown_percent")):
                 raw_v = guard.get(key)
                 if raw_v not in (None, ""):
                     val = Decimal(str(raw_v))
                     if val.is_finite() and 0 < val < 100:
                         setattr(self, attr, val)
-            if guard.get("trail_mode") in {"hybrid", "ladder", "structure"}:
+            if settings_version < 3:
+                # The backtest strategy now uses protected M15 structure trailing.
+                # Migrate once from legacy persisted modes; explicit v3 choices survive reload.
+                self.trail_mode = "structure_m15"
+            elif guard.get("trail_mode") in {"structure_m15", "hybrid", "ladder", "structure"}:
                 self.trail_mode = guard["trail_mode"]
             try:
                 sweeps = int(guard.get("h4_sweeps") or self.h4_sweeps)
@@ -6706,7 +6722,7 @@ class TradingEngine:
 
     async def _save_runtime_settings(self) -> None:
         payload = {
-            "version": 2, "saved_at": iso_utc(),
+            "version": 3, "saved_at": iso_utc(),
             "guard": {
                 "trail_mode": self.trail_mode, "h4_sweeps": self.h4_sweeps,
                 "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
@@ -6888,6 +6904,302 @@ class TradingEngine:
                 log.exception("[SCAN] cycle fatal error")
                 await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
 
+    async def _queue_m5_watch_candidates(
+        self, module, candidates: list[dict[str, Any]], generation: int, cycle: int,
+        *, origin: str = "SCAN"
+    ) -> tuple[int, list[str]]:
+        """Queue validated H4/M15 setups; never open a trade before closed-M5 confirmation."""
+        added = 0
+        notes: list[str] = []
+        origin = str(origin or "SCAN").upper()
+        if generation != self._scan_generation or (not self._scan_user_enabled and origin != "AUTO"):
+            return 0, ["SCAN generation berubah atau scanner OFF; kandidat tidak diantrekan."]
+        async with self._scan_watch_lock:
+            for raw in sorted(candidates, key=lambda x: float(x.get("confidence") or 0), reverse=True):
+                pair = normalize_symbol(str(raw.get("pair") or ""))
+                direction = str(raw.get("direction") or "").upper()
+                if not pair or direction not in {"BUY", "SELL"}:
+                    continue
+                if pair in self._scan_watchlist:
+                    continue  # one direction/setup per pair; do not reset an in-progress M5 watch
+                if len(self._scan_watchlist) >= M5_WATCH_MAX_CANDIDATES:
+                    notes.append(f"{pair}: M5 watch cap {M5_WATCH_MAX_CANDIDATES} tercapai")
+                    continue
+                zone = raw.get("entry_zone") if isinstance(raw.get("entry_zone"), dict) else {}
+                analysis = raw.get("analysis") if isinstance(raw.get("analysis"), dict) else {}
+                if not zone:
+                    zone = analysis.get("entry_zone") if isinstance(analysis.get("entry_zone"), dict) else {}
+                try:
+                    zone_low = float(zone.get("low", raw.get("entry")))
+                    zone_high = float(zone.get("high", raw.get("entry")))
+                except (TypeError, ValueError):
+                    continue
+                if not (math.isfinite(zone_low) and math.isfinite(zone_high) and zone_low > 0 and zone_high >= zone_low):
+                    notes.append(f"{pair}: zona POI M5 tidak valid")
+                    continue
+
+                setup = copy.deepcopy(raw)
+                setup.pop("raw_result", None)
+                setup["analysis"] = compact_analysis(setup.get("analysis"))
+                setup["watch_origin"] = origin
+                watch = dict(setup)
+                watch.update({
+                    "setup": setup,
+                    "pair": pair,
+                    "direction": direction,
+                    "entry_zone_low": zone_low,
+                    "entry_zone_high": zone_high,
+                    "watch_started_ms": int(time.time() * 1000),
+                    "watch_bars_m5": 0,
+                    "poi_touched": False,
+                    "poi_touch_time_ms": None,
+                    "poi_touch_age_m5": None,
+                    "m5_retest_pending": False,
+                    "m5_retest_bars_waited": 0,
+                    "m5_confirmation_threshold": M5_WATCH_CONFIRM_THRESHOLD,
+                    "poi_confirm_window_m5": M5_WATCH_POI_WINDOW_BARS,
+                    "watch_timeout_m5": M5_WATCH_TIMEOUT_BARS,
+                    "last_m5_open_ms": 0,
+                    "watch_cycle": cycle,
+                    "watch_generation": generation,
+                    "watch_origin": origin,
+                    "m5_watch_status": "WAITING",
+                })
+                self._scan_watchlist[pair] = watch
+                added += 1
+                log.info("[M5-WATCH] %s %s queued | conf=%.1f | POI %.10g..%.10g | cycle=%s",
+                         pair, direction, float(setup.get("confidence") or 0), zone_low, zone_high, cycle)
+        return added, notes
+
+    async def _drop_m5_watch(self, pair: str, reason: str) -> None:
+        async with self._scan_watch_lock:
+            self._scan_watchlist.pop(pair, None)
+        log.info("[M5-WATCH] %s removed | %s", pair, str(reason)[:180])
+
+    async def _m5_watch_loop(self) -> None:
+        """Poll only known candidates on closed M5 bars; this is not a universe scanner."""
+        while self._running and (self._scan_user_enabled or bool(self._scan_watchlist)):
+            try:
+                if not self._scan_watchlist:
+                    await asyncio.sleep(M5_WATCH_POLL_SECONDS)
+                    continue
+                if len(self.active_trades) >= self.max_active_trades:
+                    await asyncio.sleep(10.0)
+                    continue
+                if time.monotonic() < self._binance_public_cooldown_until or self.real.cooldown_remaining > 0:
+                    await asyncio.sleep(min(5.0, max(1.0, self._binance_public_cooldown_until - time.monotonic())))
+                    continue
+                headroom = self._api_headroom_pct()
+                if headroom is not None and headroom < SCAN_MIN_API_HEADROOM_PCT:
+                    log.debug("[M5-WATCH] paused low API headroom %.1f%%", headroom)
+                    await asyncio.sleep(M5_WATCH_POLL_SECONDS * 2)
+                    continue
+
+                module = await self._load_strategy_runtime()
+                fetch = getattr(module, "fetch_series", None)
+                process = getattr(module, "process_live_m5_watch", None)
+                finalize = getattr(module, "finalize_confirmed_setup", None)
+                if not callable(fetch) or not callable(process) or not callable(finalize):
+                    log.error("[M5-WATCH] strategy contract missing fetch_series/process_live_m5_watch/finalize_confirmed_setup")
+                    await asyncio.sleep(15.0)
+                    continue
+
+                async with self._scan_watch_lock:
+                    snapshot = list(self._scan_watchlist.items())
+                entry_signals_seen = 0
+                for pair, watch in snapshot:
+                    if not self._running:
+                        break
+                    origin = str(watch.get("watch_origin") or "SCAN").upper()
+                    if not self._scan_user_enabled and origin != "AUTO":
+                        await self._drop_m5_watch(pair, "SCAN_DISABLED")
+                        continue
+                    if origin != "AUTO" and watch.get("watch_generation") != self._scan_generation:
+                        await self._drop_m5_watch(pair, "SCAN_GENERATION_CHANGED")
+                        continue
+                    if pair not in self._scan_watchlist:
+                        continue
+                    if time.monotonic() < float(watch.get("m5_retry_after_monotonic") or 0.0):
+                        continue
+                    if time.monotonic() < self._binance_public_cooldown_until:
+                        break
+                    if len(self.active_trades) >= self.max_active_trades:
+                        # Keep updating invalidation/expiry; actual trade admission is separately gated.
+                        capacity_full = True
+                    else:
+                        capacity_full = False
+                    try:
+                        candles, source = await fetch(
+                            pair,
+                            getattr(module, "M5", "5"),
+                            M5_WATCH_CANDLES,
+                            getattr(module, "M5_MS", 300_000),
+                            allow_fallback=False,
+                        )
+                        if not candles:
+                            continue
+                        latest_open = int(candles[-1].time_ms)
+                        previous_open = int(watch.get("last_m5_open_ms") or 0)
+                        if previous_open and latest_open <= previous_open:
+                            continue  # avoid redundant Python work on the same closed candle
+                        result = process(pair, watch, candles, {
+                            "latest_closed_open_ms": latest_open,
+                            "retest_timeout_bars": getattr(module, "M5_CONFIRM_RETEST_TIMEOUT_BARS", 12),
+                        })
+                        status = str((result or {}).get("status") or "WAITING").upper()
+                        watch["m5_watch_status"] = status
+                        if status == "EXPIRED":
+                            await self._drop_m5_watch(pair, str((result or {}).get("reason") or "EXPIRED"))
+                            continue
+                        if status != "ENTRY_SIGNAL":
+                            continue
+                        entry_signals_seen += 1
+                        if capacity_full or len(self.active_trades) >= self.max_active_trades:
+                            await self._drop_m5_watch(pair, "MAX_ACTIVE_REACHED_AT_M5_CONFIRMATION")
+                            log.info("[M5-WATCH] %s M5 setup valid tetapi dibuang karena MAX penuh", pair)
+                            continue
+                        if entry_signals_seen > SCAN_MAX_NEW_PER_CYCLE:
+                            await self._drop_m5_watch(pair, "M5_CONFIRMATION_STALE_ENTRY_CAP")
+                            continue
+
+                        entry_price = float((result or {}).get("entry_price") or 0.0)
+                        if not math.isfinite(entry_price) or entry_price <= 0:
+                            await self._drop_m5_watch(pair, "INVALID_M5_CONFIRMATION_PRICE")
+                            continue
+                        setup = copy.deepcopy(watch.get("setup") or {})
+                        confirmation_context = {
+                            "source": "BINANCE_PUBLIC",
+                            "confirmation_time_ms": int((result or {}).get("confirmation_time_ms") or 0),
+                            "m5_confirmation": {
+                                "version": getattr(module, "M5_CONFIRMATION_VERSION", "UNKNOWN"),
+                                "score": float((result or {}).get("m5_confirmation_score") or 0.0),
+                                "threshold": float((result or {}).get("m5_confirmation_threshold") or M5_WATCH_CONFIRM_THRESHOLD),
+                                "reason": str((watch or {}).get("m5_confirmation_reason") or ""),
+                                "components": (result or {}).get("m5_confirmation_components") or {},
+                                "retest_zone_type": (result or {}).get("m5_retest_zone_type"),
+                            },
+                        }
+                        try:
+                            final = await finalize(pair, setup, entry_price, confirmation_context)
+                        except Exception as exc:
+                            if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
+                                wait = max(
+                                    float(getattr(exc, "bot_cooldown_seconds", 0.0) or 0.0),
+                                    float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
+                                    float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                                    5.0,
+                                )
+                                self._binance_public_cooldown_until = max(self._binance_public_cooldown_until, time.monotonic() + wait)
+                                self._on_public_rate_limit(exc, wait)
+                                log.warning("[M5-WATCH] %s confirmation finalizer rate-limited; watch removed to avoid late execution", pair)
+                                await self._drop_m5_watch(pair, "FINALIZER_RATE_LIMIT; WAIT_FOR_NEW_H4_CANDIDATE")
+                                break
+                            raise
+                        if not isinstance(final, dict) or not final.get("valid"):
+                            reason = str((final or {}).get("reason") or "FINAL_LEVELS_REJECTED") if isinstance(final, dict) else "INVALID_FINALIZER_RESULT"
+                            detail = str((final or {}).get("detail") or "")[:130] if isinstance(final, dict) else ""
+                            log.info("[M5-WATCH] %s M5 signal rejected by structural SL/liquidity TP | %s %s", pair, reason, detail)
+                            await self._drop_m5_watch(pair, reason)
+                            continue
+
+                        def finite_positive(value: Any) -> float | None:
+                            try:
+                                v = float(value)
+                                return v if math.isfinite(v) and v > 0 else None
+                            except (TypeError, ValueError):
+                                return None
+                        final_entry = finite_positive(final.get("entry")) or entry_price
+                        final_sl = finite_positive(final.get("sl"))
+                        final_tp = finite_positive(final.get("tp"))
+                        final_exp = finite_positive(final.get("price_exp"))
+                        if None in (final_sl, final_tp, final_exp):
+                            await self._drop_m5_watch(pair, "FINAL_LEVELS_NON_POSITIVE")
+                            continue
+                        rr = abs(final_tp - final_entry) / max(abs(final_entry - final_sl), 1e-12)
+                        direction = str(setup.get("direction") or "").upper()
+                        entry_unchanged = abs(final_entry - entry_price) <= max(entry_price * 1e-8, 1e-10)
+                        geometry_ok = entry_unchanged and (
+                            (direction == "BUY" and final_sl < final_entry < final_exp and final_tp > final_entry)
+                            or (direction == "SELL" and final_exp < final_entry < final_sl and final_tp < final_entry)
+                        )
+                        if not geometry_ok or rr + 1e-9 < float(getattr(module, "CONFIRMED_MIN_RR", 2.0)):
+                            await self._drop_m5_watch(pair, f"FINAL_GEOMETRY_OR_RR_INVALID rr={rr:.3f}")
+                            continue
+
+                        candidate = copy.deepcopy(setup)
+                        candidate.update({
+                            "pair": pair,
+                            "entry": Decimal(str(final_entry)),
+                            "sl": Decimal(str(final_sl)),
+                            "tp": Decimal(str(final_tp)),
+                            "price_exp": Decimal(str(final_exp)),
+                            # Execution is placed only after M5 closed-candle confirmation. The
+                            # reference equals the signal close, so its legacy geometry is relaxed
+                            # only for this explicit entry_model marker.
+                            "price_now_reference": Decimal(str(final_entry)),
+                            "entry_reason": (
+                                f"M5 close confirmation: sweep -> post-sweep MSS close + displacement -> "
+                                f"{(result or {}).get('m5_retest_zone_type') or 'MSS/FVG'} retest + rejection; "
+                                f"entry modeled at closed M5 price {final_entry:.10g}."
+                            ),
+                            "sl_reason": str(final.get("sl_reason") or "Confirmed structural invalidation SL"),
+                            "tp_reason": str(final.get("tp_reason") or "Unmitigated structural liquidity TP, minimum 2R"),
+                            "price_exp_reason": str(final.get("price_exp_reason") or "Structural target expansion reference"),
+                            "m5_confirmed_entry": True,
+                            "entry_model": "H4_M15_M5_CONFIRM_STRUCTURAL",
+                            "planned_rr_gross": rr,
+                        })
+                        base_conf = float(candidate.get("confidence") or 0.0)
+                        m5_score = float((result or {}).get("m5_confirmation_score") or 0.0)
+                        # Keep score as confidence evidence, not as a win probability.
+                        final_conf = max(0.0, min(100.0, 0.50 * base_conf + 0.35 * m5_score + 0.15 * min(100.0, max(0.0, 50.0 + 25.0 * (rr - 1.0)))))
+                        candidate["confidence"] = Decimal(str(round(final_conf, 4)))
+                        analysis = candidate.get("analysis") if isinstance(candidate.get("analysis"), dict) else {}
+                        analysis["m5_confirmation"] = confirmation_context["m5_confirmation"] | {
+                            "entry": final_entry, "sl": final_sl, "tp": final_tp, "rr": round(rr, 4),
+                            "confirmation_time_ms": confirmation_context["confirmation_time_ms"],
+                            "finalizer": {k: v for k, v in final.items() if k not in {"candidates_considered", "confirmed_candles_used"}},
+                        }
+                        candidate["analysis"] = compact_analysis(analysis)
+                        candidate["strategy_name"] = str(getattr(module, "STRATEGY_NAME", "SMC_VLT_RSI_M5_CONFIRMED"))
+                        candidate["strategy_version"] = str(getattr(module, "STRATEGY_VERSION", "5.6"))
+                        candidate["analysis_source"] = "BINANCE_PUBLIC"
+
+                        added, notes = await self._open_validated([candidate], self._scan_generation)
+                        if added:
+                            await self._drop_m5_watch(pair, "TRADE_REGISTERED_AFTER_M5_CONFIRMATION")
+                            log.info("[M5-WATCH] %s %s trade registered | entry=%s sl=%s tp=%s RR=%.2f score=%.1f",
+                                     pair, direction, decimal_to_str(candidate["entry"]), decimal_to_str(candidate["sl"]), decimal_to_str(candidate["tp"]), rr, m5_score)
+                        else:
+                            await self._drop_m5_watch(pair, "M5_SIGNAL_NOT_ADMITTED: " + "; ".join(notes[:2]))
+                    except Exception as exc:
+                        if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
+                            wait = max(
+                                float(getattr(exc, "bot_cooldown_seconds", 0.0) or 0.0),
+                                float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
+                                float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                                5.0,
+                            )
+                            self._binance_public_cooldown_until = max(self._binance_public_cooldown_until, time.monotonic() + wait)
+                            self._on_public_rate_limit(exc, wait)
+                            log.warning("[M5-WATCH] %s halted on Binance rate limit: %s", pair, str(exc)[:180])
+                            break
+                        log.warning("[M5-WATCH] %s processing failed: %s", pair, str(exc)[:240])
+                        # Avoid rapid retries against a sick endpoint/cache; closed-bar catch-up is safe.
+                        watch["m5_retry_after_monotonic"] = time.monotonic() + 15.0
+                        if "invalid direction" in str(exc).lower() or "watch state" in str(exc).lower():
+                            await self._drop_m5_watch(pair, "INVALID_WATCH_STATE")
+                    # Yield between symbols. Candle provider itself serializes REST requests.
+                    await asyncio.sleep(0.03)
+
+                await self._ram_guard()
+                await asyncio.sleep(M5_WATCH_POLL_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("[M5-WATCH] watcher cycle failed: %s", exc)
+                await asyncio.sleep(5.0)
+
     async def _run_scan_cycle_inner(self) -> None:
         """Satu batch (<= SCAN_MAX_PAIRS_PER_CYCLE pair) dari sapuan berjalan. Tidak menganalisis bila MAX penuh."""
         self._last_cycle_analyzed = 0
@@ -7060,19 +7372,19 @@ class TradingEngine:
                 log.warning("[SCAN] validator %s gagal: %s", candidate.get("pair"), str(exc)[:160])
             await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
 
-        added, notes = await self._open_validated(validated, generation)
-        stats["added"] = len(added)
+        queued, notes = await self._queue_m5_watch_candidates(module, validated, generation, cycle)
+        stats["added"] = queued
         duration = time.monotonic() - started
         self._scan_durations.append(duration)
         self._scan_last_report = {"cycle": cycle, "btc_h4_trend": btc_trend, **stats, "duration_seconds": duration}
-        log.info("[SCAN] batch #%s selesai | scanned=%s kandidat_lolos_threshold=%s kandidat_disimpan=%s valid=%s masuk=%s %.1fs sapuan_selesai=%s",
+        log.info("[SCAN] batch #%s selesai | scanned=%s kandidat_lolos_threshold=%s kandidat_disimpan=%s valid=%s queued_m5=%s %.1fs sapuan_selesai=%s",
                  cycle, stats["scanned"], qualified_candidates, len(candidates), stats["valid"], stats["added"], duration, self._sweep_complete)
         await self.reply(
             f"🔄 SCAN #{cycle} SELESAI • {duration:.0f}s • RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
             f"├ Dipindai {stats['scanned']}  • tersapu {len(self._sweep_done)}/{total_targets}\n"
             f"├ H4 🟢 {direction_counts['BULLISH']} 🔴 {direction_counts['BEARISH']} ⚪ {direction_counts['RANGE']}\n"
-            f"├ ≥ Threshold {qualified_candidates} • validator top {len(candidates)} • lolos {stats['valid']} • masuk /trade {len(added)}\n"
-            f"├ Di bawah threshold {stats['below']} • ditolak {stats['rejected']} • error {stats['errors']}\n"
+            f"├ ≥ Threshold {qualified_candidates} • validator top {len(candidates)} • valid {stats['valid']} • masuk M5 watch {queued}\n"
+            f"├ M5 watch aktif {len(self._scan_watchlist)} • di bawah threshold {stats['below']} • ditolak {stats['rejected']} • error {stats['errors']}\n"
             f"└ Sapuan {'✅ selesai' if self._sweep_complete else 'berlanjut'}"
             + ("\n" + "\n".join(notes) if notes else "")
         )
@@ -7081,7 +7393,8 @@ class TradingEngine:
         added: list[Trade] = []
         notes: list[str] = []
         for candidate in validated:
-            if generation != self._scan_generation or not self._scan_user_enabled:
+            manual_m5_auto = bool(candidate.get("m5_confirmed_entry")) and str(candidate.get("watch_origin") or "").upper() == "AUTO"
+            if generation != self._scan_generation or (not self._scan_user_enabled and not manual_m5_auto):
                 break
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
@@ -7095,7 +7408,7 @@ class TradingEngine:
                 meta = {
                     "strategy_name": candidate.get("strategy_name") or "SMC_VLT_RSI",
                     "strategy_version": candidate.get("strategy_version") or "SCAN",
-                    "strategy_source": "SCAN",
+                    "strategy_source": "AUTO" if str(candidate.get("watch_origin") or "").upper() == "AUTO" else "SCAN",
                     "strategy_confidence": candidate.get("confidence"),
                     "strategy_data_source": candidate.get("analysis_source") or "BINANCE_PUBLIC",
                     "strategy_analysis": compact_analysis(candidate.get("analysis")),
@@ -7449,7 +7762,9 @@ class TradingEngine:
             self._h4_window_active = False
             self._scan_generation += 1
             await self._stop_scan_task()
-            await self.reply("🛑 SCAN OFF")
+            async with self._scan_watch_lock:
+                self._scan_watchlist.clear()
+            await self.reply("🛑 SCAN OFF • M5 watchlist dibersihkan")
             return
 
         self._scan_user_enabled = True
@@ -7704,15 +8019,16 @@ class TradingEngine:
         parts = text.split()
         if len(parts) >= 2:
             mode = parts[2].lower() if parts[1].lower() == "mode" and len(parts) >= 3 else parts[1].lower()
-            if mode not in {"hybrid", "ladder", "structure"}:
-                raise ValueError("Gunakan /trailmode hybrid, structure, atau ladder.")
+            if mode not in {"structure_m15", "hybrid", "ladder", "structure"}:
+                raise ValueError("Gunakan /trailmode structure_m15, hybrid, structure, atau ladder.")
             self.trail_mode = mode
         desc = {
-            "hybrid": "Aktif: tangga R + struktur M15 + fractal + chandelier + rejection + pembalikan arus buyer/seller; TP runner (RR tak terbatas).",
-            "structure": "SL baru hanya setelah rejection M15 dekat TP; tanpa tangga R.",
-            "ladder": "Mode lama: tangga R + struktur M15 + kelelahan RSI.",
+            "structure_m15": "Default versi ini: protected M15 higher-low/lower-high terkonfirmasi; aktif setelah MFE >= 1R; buffer ATR; tanpa R-ladder/M5 trailing.",
+            "hybrid": "Tangga R + struktur M15 + fractal + chandelier + rejection + arus buyer/seller.",
+            "structure": "Mode legacy: struktur M5.",
+            "ladder": "Mode legacy: tangga R + analisis M15.",
         }[self.trail_mode]
-        await self.reply(card("🪜 TRAILING", [f"Mode  {self.trail_mode.upper()}", desc, "Ganti: /trailmode hybrid|structure|ladder"]))
+        await self.reply(card("🪜 TRAILING", [f"Mode  {self.trail_mode.upper()}", desc, "Ganti: /trailmode structure_m15|hybrid|structure|ladder"]))
 
     async def _handle_resetbalance_command(self) -> None:
         if self.real_mode:
@@ -7953,12 +8269,24 @@ class TradingEngine:
                 await task
             except asyncio.CancelledError:
                 pass
+        watch_task = self._m5_watch_task
+        self._m5_watch_task = None
+        if watch_task is not None and not watch_task.done():
+            watch_task.cancel()
+            try:
+                await watch_task
+            except asyncio.CancelledError:
+                pass
 
     async def _start_scan_task(self) -> None:
         if not self._running:
             return
         if not self._scan_user_enabled:
             return
+        # The M5 monitor handles only queued candidate pairs. It may run while the
+        # H4 universe scanner is sleeping between scheduled H4 windows.
+        if self._m5_watch_task is None or self._m5_watch_task.done():
+            self._m5_watch_task = asyncio.create_task(self._m5_watch_loop(), name="main-m5-watch-loop")
         if not self._h4_enabled and len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
             return
@@ -9407,120 +9735,74 @@ class TradingEngine:
         )
 
     async def _confirm_auto(self) -> None:
+        """User approval accepts a candidate for M5 confirmation; it is not an immediate entry."""
         if not self.flow or self.flow.get("kind") != "AUTO":
             raise RuntimeError("AUTO flow tidak aktif.")
-
         result = self.flow.get("data")
         if not isinstance(result, dict):
             raise ValueError("Hasil AUTO belum tersedia.")
+        pair = normalize_symbol(str(result.get("pair") or ""))
+        if not pair:
+            raise ValueError("Pair AUTO tidak tersedia.")
+        if len(self.active_trades) >= self.max_active_trades:
+            await self.reply("⏸️ MAX ACTIVE TRADE penuh. Kandidat AUTO tidak dimasukkan ke watchlist.")
+            self.flow = None
+            self._auto_job_id = None
+            self._auto_task = None
+            return
 
-        data = {
-            "pair": result["pair"],
-            "direction": result["direction"],
-            "price_now_reference": result["price_now_reference"],
-            "entry": result["entry"],
-            "entry_reason": result["entry_reason"],
-            "price_exp": result["price_exp"],
-            "price_exp_reason": result["price_exp_reason"],
-            "sl": result["sl"],
-            "sl_reason": result["sl_reason"],
-            "tp": result["tp"],
-            "tp_reason": result["tp_reason"],
-        }
-
-        strategy_meta = {
-            "strategy_name": result["strategy_name"],
-            "strategy_version": result["strategy_version"],
-            "strategy_source": "AUTO",
-            "strategy_confidence": result["confidence"],
-            "strategy_data_source": result["data_source"],
-            "strategy_analysis": {
-                "confidence_components": result.get(
-                    "confidence_components", {}
-                ),
-                "timeframe": result.get("timeframe", "15m"),
-                "candles_requested": result.get(
-                    "candles_requested", 672
-                ),
-                "candles_used": result.get("candles_used"),
-                "analysis": compact_analysis(result.get("analysis")),
-                "raw_result": compact_analysis(result.get("raw_result")),
-            },
-        }
-
-        strategy_meta["margin_usdt"] = self.margin_usdt
-        strategy_meta["leverage"] = self.leverage
-        trade = self._build_trade_from_setup(
-            data,
-            strategy_meta=strategy_meta,
-        )
-
-        if self.real_mode:
-            try:
-                await self._ensure_real_entry(trade)
-            except RealPositionConflictError as exc:
+        try:
+            module = await self._load_strategy_runtime()
+            candidate = copy.deepcopy(result)
+            candidate.pop("raw_result", None)
+            candidate["pair"] = pair
+            candidate["analysis"] = candidate.get("analysis") if isinstance(candidate.get("analysis"), dict) else {}
+            candidate["analysis_source"] = candidate.get("data_source") or "BINANCE_PUBLIC"
+            cycle = self._scan_cycle_number + 1
+            checked = await self._scan_validate_candidate(module, candidate, cycle)
+            if checked is None:
                 self.flow = None
                 self._auto_job_id = None
                 self._auto_task = None
                 await self.reply(
-                    card(
-                        "⚠️ REAL ENTRY DIBLOKIR",
-                        [
-                            f"Pair   {trade.pair}",
-                            f"Alasan {exc}",
-                            "Setup tidak diaktifkan agar exposure Binance tidak bertambah.",
-                        ],
-                    )
+                    f"❌ AUTO {pair} ditolak validator strategy.py. Tidak ada order yang dibuat."
                 )
                 return
-            if trade.status == "CLOSED":
+            if pair in self._scan_watchlist:
                 self.flow = None
                 self._auto_job_id = None
                 self._auto_task = None
-                await self.reply("🚨 Setup REAL langsung ditutup otomatis karena TP/SL gagal dipasang.")
+                await self.reply(f"⚠️ {pair} sudah memiliki M5 watch aktif. Kandidat AUTO duplikat tidak ditambahkan.")
                 return
-
-        self.active_trades[trade.trade_id] = trade
-        self.flow = None
-        self._auto_job_id = None
-        self._auto_task = None
-
-        try:
-            await self.ws.add_symbol(trade.pair)
-        except Exception:
-            log.exception(
-                "Subscription WebSocket %s gagal saat /auto.",
-                trade.pair,
+            queued, notes = await self._queue_m5_watch_candidates(
+                module, [checked], self._scan_generation, cycle, origin="AUTO"
             )
-
-        level_note = ""
-        if trade.price_exp == trade.tp:
-            level_note = (
-                "\n\n⚠️ Catatan: Price Exp sama dengan TP. "
-                "Saat status PENDING, sentuhan level ini tetap dihitung "
-                "sebagai PRICE EXPIRED, bukan TP."
+            if queued != 1:
+                self.flow = None
+                self._auto_job_id = None
+                self._auto_task = None
+                await self.reply("❌ Kandidat AUTO gagal masuk ke M5 watch. " + ("; ".join(notes[:2]) if notes else "Tidak ada slot watch."))
+                return
+            if self._m5_watch_task is None or self._m5_watch_task.done():
+                self._m5_watch_task = asyncio.create_task(self._m5_watch_loop(), name="main-m5-watch-loop")
+            self.flow = None
+            self._auto_job_id = None
+            self._auto_task = None
+            zone = checked.get("entry_zone") if isinstance(checked.get("entry_zone"), dict) else {}
+            await self.reply(
+                "🕯 AUTO CANDIDATE DITERIMA — MENUNGGU KONFIRMASI M5\n\n"
+                f"Pair: {pair}\nDirection: {checked.get('direction')}\n"
+                f"Confidence H4/M15: {float(checked.get('confidence') or 0):.1f}/100\n"
+                f"POI: {zone.get('low', checked.get('entry'))} – {zone.get('high', checked.get('entry'))}\n\n"
+                "Belum ada order yang dikirim. Sistem menunggu candle M5 close, lalu sweep/reclaim → post-sweep MSS + displacement → retest/rejection. "
+                "Jika lolos, SL struktural dan TP liquidity dihitung ulang; bila tidak, watch akan expired."
             )
-
-        await self.reply(
-            "✅ SETUP AUTO DITAMBAHKAN\n\n"
-            f"Trade ID: {trade.trade_id}\n"
-            f"Pair: {trade.pair}\n"
-            f"Direction: {trade.direction.title()}\n"
-            f"Price Now: {decimal_to_str(trade.price_now_reference)}\n"
-            f"Price Entry: {decimal_to_str(trade.entry)}\n"
-            f"Reason Entry: {trade.entry_reason}\n\n"
-            f"Price Exp: {decimal_to_str(trade.price_exp)}\n"
-            f"Reason Price Exp: {trade.price_exp_reason}\n\n"
-            f"Price SL: {decimal_to_str(trade.sl)}\n"
-            f"Reason SL: {trade.sl_reason}\n\n"
-            f"Price TP: {decimal_to_str(trade.tp)}\n"
-            f"Reason TP: {trade.tp_reason}\n\n"
-            f"Confidence: {decimal_to_str(result['confidence'])}/100\n"
-            f"Strategy: {trade.strategy_name} v{trade.strategy_version}\n"
-            f"Data Source: {trade.strategy_data_source or '-'}\n\n"
-            "Status: PENDING"
-            f"{level_note}"
-        )
+        except Exception as exc:
+            self.flow = None
+            self._auto_job_id = None
+            self._auto_task = None
+            log.exception("AUTO confirmation/watch queue failed for %s", pair)
+            await self.reply(f"❌ AUTO {pair} gagal masuk M5 watch: {str(exc)[:220]}. Belum ada order yang dibuat.")
 
     def _build_trade_from_setup(
         self,
@@ -9594,16 +9876,18 @@ class TradingEngine:
                 price_value,
             )
 
-        if direction == "BUY":
-            valid_geometry = (
-                sl < entry < reference < price_exp
-                and tp > entry
-            )
+        m5_confirmed = bool(data.get("m5_confirmed_entry")) and str(data.get("entry_model") or "") == "H4_M15_M5_CONFIRM_STRUCTURAL"
+        if m5_confirmed:
+            # For an M5 close-trigger model, reference is deliberately the confirmation
+            # close itself; do not require it to sit strictly between reference and entry.
+            if direction == "BUY":
+                valid_geometry = sl < entry < price_exp and tp > entry and reference > 0
+            else:
+                valid_geometry = price_exp < entry < sl and tp < entry and reference > 0
+        elif direction == "BUY":
+            valid_geometry = (sl < entry < reference < price_exp and tp > entry)
         else:
-            valid_geometry = (
-                price_exp < reference < entry < sl
-                and tp < entry
-            )
+            valid_geometry = (price_exp < reference < entry < sl and tp < entry)
 
         if not valid_geometry:
             raise ValueError(
