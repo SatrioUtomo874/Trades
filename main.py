@@ -28,7 +28,7 @@ Prinsip:
 - /setup menyimpan snapshot setup aktif ke data/setups.json.
 - /open memulihkan snapshot setup tersebut setelah main.py diganti.
 - /auto menjembatani main.py ke strategy.py dan meminta konfirmasi user.
-- /scan menjalankan scanner otomatis: universe Binance USD-M USDT perpetual -> directional H4 -> strategy.py -> threshold -> validator -> /trade.
+- /scan menjalankan universe Binance USD-M USDT perpetual -> directional H4 -> strategy.py -> threshold -> validator -> M5 close confirmation sesuai scorer backtest -> structural finalizer -> /trade.
 - /H4 mengatur gate scheduler scanner pada close H4: 03:00, 07:00, 11:00, 15:00, 19:00, 23:00 WIB.
 - /threshold mengatur ambang confidence scanner.
 - /max membatasi total active PENDING + FILLED dan dapat mem-pause/resume /scan otomatis.
@@ -37,7 +37,7 @@ Prinsip:
 - /wrong menghapus active setup yang benar-benar salah tanpa mencatat history.
 - /remove menghapus satu trade dari histori GitHub beserta event dan journal terkait.
 - /resetstats mengarsipkan lalu mereset histori trade/event agar stats mulai dari nol (tes strategy baru).
-- strategy.py wajib menyediakan generate_setup(pair, context); mode SCAN juga mendukung kontrak optimized scan structure dan validate_setup.
+- strategy.py wajib menyediakan generate_setup(pair, context), fetch_series(), validate_setup(), finalize_confirmed_setup(), dan analyze_trailing(). Scorer M5 berada di main.py agar sama dengan backtester yang diunggah.
 - SCAN: batch 100 pair; mode H4 = seluruh koin disapu 2x per window (bukan 2 batch), MAX penuh = tidak menganalisis.
 - Tanpa lapisan riset/replay: main = data->eksekusi->pencatatan, strategy = otak (analisis + trailing).
 
@@ -80,6 +80,7 @@ import gzip
 import io
 import math
 import sqlite3
+import statistics
 import threading
 import html  # kept out of user output; used only for safe GitHub text if needed
 import importlib
@@ -233,8 +234,8 @@ SCAN_CYCLE_DELAY_SECONDS = 30.0
 M5_WATCH_POLL_SECONDS = 3.0
 M5_WATCH_CANDLES = 98  # <100 Klines weight; enough warm history for the M5 confirmation model.
 M5_WATCH_MAX_CANDIDATES = 64
-M5_WATCH_CONFIRM_THRESHOLD = 58.0
-M5_WATCH_POI_WINDOW_BARS = 36
+M5_WATCH_CONFIRM_THRESHOLD = 72.0
+M5_WATCH_POI_WINDOW_BARS = 12
 M5_WATCH_TIMEOUT_BARS = 96  # max 8h after H4/M15 candidate creation.
 MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "400") or "400")
 # H4 scanner gate: scanner baru membuka window pada penutupan H4 WIB.
@@ -2824,6 +2825,153 @@ def classify_error(exc: BaseException) -> str:
 
 class RiskRejectError(RuntimeError):
     """Entry ditolak oleh batas risiko (bukan alasan ban)."""
+
+
+
+# ============================================================================
+# LIVE M5 CONFIRMATION — scoring logic ported from backtest(20261025-071811).py
+# ============================================================================
+
+def _m5_safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else default
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _m5_clamp01(value: float) -> float:
+    return max(0.0, min(1.0, _m5_safe_float(value, 0.0)))
+
+
+def _score_m5_confirmation(active: dict[str, Any], candles: list[Any]) -> dict[str, Any]:
+    """Score a closed M5 confirmation using only bars available at this close.
+
+    V5 removes the old saturated structure/opposing-weakness points. The components
+    are continuous and evidence-based. This score is not a win-probability estimate.
+    """
+    result = {"score": 0.0, "poi_touch": False, "reason": "INSUFFICIENT_M5_HISTORY", "components": {}}
+    if len(candles) < 7:
+        return result
+    bar = candles[-1]
+    direction = str(active.get("direction") or "").upper()
+    if direction not in {"BUY", "SELL"}:
+        result["reason"] = "INVALID_DIRECTION"
+        return result
+
+    zone_low = _m5_safe_float(active.get("entry_zone_low"), _m5_safe_float(active.get("entry")))
+    zone_high = _m5_safe_float(active.get("entry_zone_high"), _m5_safe_float(active.get("entry")))
+    touch = bool(zone_low > 0 and zone_high >= zone_low and bar.low <= zone_high and bar.high >= zone_low)
+    result["poi_touch"] = touch
+
+    op, hi, lo, cl = map(_m5_safe_float, (bar.open, bar.high, bar.low, bar.close))
+    span = max(hi - lo, 1e-12)
+    body = abs(cl - op)
+    body_ratio = body / span
+    close_pos = _m5_clamp01((cl - lo) / span)
+    directional_close_pos = close_pos if direction == "BUY" else 1.0 - close_pos
+    directional_body = cl > op if direction == "BUY" else cl < op
+
+    lower_wick = max(0.0, min(op, cl) - lo)
+    upper_wick = max(0.0, hi - max(op, cl))
+    wick_ratio = lower_wick / span if direction == "BUY" else upper_wick / span
+    rejection_score = 20.0 * _m5_clamp01((wick_ratio - 0.12) / 0.48) * _m5_clamp01((directional_close_pos - 0.42) / 0.48)
+    close_score = 15.0 * _m5_clamp01((directional_close_pos - 0.40) / 0.50) * (0.65 + 0.35 * float(directional_body))
+
+    # ATR estimated from closed bars only (current candle is closed at this point).
+    ranges = []
+    for i in range(max(1, len(candles) - 14), len(candles)):
+        c = candles[i]
+        prev_close = _m5_safe_float(candles[i - 1].close)
+        ranges.append(max(
+            _m5_safe_float(c.high) - _m5_safe_float(c.low),
+            abs(_m5_safe_float(c.high) - prev_close),
+            abs(_m5_safe_float(c.low) - prev_close),
+        ))
+    atr = max(sum(ranges) / len(ranges), 1e-12) if ranges else span
+
+    prior = candles[-6:-1]  # five completed bars strictly before confirmation bar
+    prior_high = max(_m5_safe_float(c.high) for c in prior)
+    prior_low = min(_m5_safe_float(c.low) for c in prior)
+    prior_close = _m5_safe_float(prior[-1].close)
+    if direction == "BUY":
+        break_distance_atr = (cl - prior_high) / atr
+        breached = cl > prior_high
+        favorable_progress = cl > prior_close
+    else:
+        break_distance_atr = (prior_low - cl) / atr
+        breached = cl < prior_low
+        favorable_progress = cl < prior_close
+
+    if breached and directional_body:
+        displacement_quality = _m5_clamp01(max(0.0, break_distance_atr) / 0.30)
+        body_quality = _m5_clamp01(body / (0.55 * atr))
+        structure_score = 12.0 + 10.0 * displacement_quality + 8.0 * body_quality
+    elif favorable_progress and directional_close_pos >= 0.65 and directional_body:
+        structure_score = 7.0 + 5.0 * _m5_clamp01(body / (0.60 * atr))
+    else:
+        structure_score = 0.0
+
+    prior_volumes = [max(0.0, _m5_safe_float(c.volume)) for c in candles[-21:-1] if _m5_safe_float(c.volume) > 0]
+    median_volume = statistics.median(prior_volumes) if prior_volumes else 0.0
+    current_volume = max(0.0, _m5_safe_float(bar.volume))
+    volume_ratio = current_volume / median_volume if median_volume > 0 else 1.0
+    taker_buy = max(0.0, _m5_safe_float(getattr(bar, "taker_buy", 0.0)))
+    delta = max(-1.0, min(1.0, (2.0 * taker_buy / max(current_volume, 1e-12)) - 1.0))
+    directional_delta = delta if direction == "BUY" else -delta
+    delta_score = 10.0 * _m5_clamp01((directional_delta + 0.10) / 0.50)
+    volume_score = 10.0 * _m5_clamp01((volume_ratio - 0.70) / 1.30)
+    flow_score = delta_score + volume_score
+
+    counter = candles[-5:-1]
+    closes = [_m5_safe_float(c.close) for c in counter]
+    if direction == "BUY":
+        counter_steps = sum(1 for a, b in zip(closes, closes[1:]) if b < a)
+        counter_move_atr = (closes[0] - closes[-1]) / atr
+        swept_reclaimed = lo < min(_m5_safe_float(c.low) for c in prior) and close_pos >= 0.65
+    else:
+        counter_steps = sum(1 for a, b in zip(closes, closes[1:]) if b > a)
+        counter_move_atr = (closes[-1] - closes[0]) / atr
+        swept_reclaimed = hi > max(_m5_safe_float(c.high) for c in prior) and close_pos <= 0.35
+    stalled_counter = counter_steps >= 2 and counter_move_atr >= 0.30 and favorable_progress and directional_close_pos >= 0.60
+    opposing_weakness = 15.0 if swept_reclaimed or (stalled_counter and breached and directional_body) else 7.0 if stalled_counter else 0.0
+
+    components = {
+        "poi_touch_current_bar": 100.0 if touch else 0.0,
+        "rejection_wick": round(rejection_score, 2),
+        "directional_close": round(close_score, 2),
+        "micro_structure": round(structure_score, 2),
+        "taker_delta_score": round(delta_score, 2),
+        "relative_volume_score": round(volume_score, 2),
+        "taker_flow_and_relative_volume": round(flow_score, 2),
+        "opposing_move_weakness": round(opposing_weakness, 2),
+        "atr_m5": round(atr, 10),
+        "break_distance_atr": round(break_distance_atr, 4),
+        "body_ratio": round(body_ratio, 4),
+        "lower_wick_ratio" if direction == "BUY" else "upper_wick_ratio": round(wick_ratio, 4),
+        "close_position": round(close_pos, 4),
+        "directional_close_position": round(directional_close_pos, 4),
+        "volume_ratio": round(volume_ratio, 4),
+        "signed_taker_delta": round(delta, 4),
+        "counter_move_steps": int(counter_steps),
+        "counter_move_atr": round(counter_move_atr, 4),
+    }
+    score = rejection_score + close_score + structure_score + flow_score + opposing_weakness
+    reasons = []
+    if touch:
+        reasons.append("POI_TOUCH_CURRENT_BAR")
+    if rejection_score >= 8.0:
+        reasons.append("REJECTION_WICK")
+    if structure_score >= 15.0:
+        reasons.append("DIRECTIONAL_STRUCTURE_BREAK")
+    if delta_score >= 6.0:
+        reasons.append("TAKER_FLOW_SUPPORT")
+    if volume_score >= 5.0:
+        reasons.append("RELATIVE_VOLUME_SUPPORT")
+    if opposing_weakness >= 7.0:
+        reasons.append("OPPOSING_MOVE_STALL_OR_SWEEP")
+    result.update({"score": round(min(100.0, score), 2), "reason": ";".join(reasons) or "NO_CLEAR_M5_CONFIRMATION", "components": components})
+    return result
 
 
 class TradingEngine:
@@ -6976,6 +7124,145 @@ class TradingEngine:
             self._scan_watchlist.pop(pair, None)
         log.info("[M5-WATCH] %s removed | %s", pair, str(reason)[:180])
 
+    def _process_live_m5_watch(
+        self,
+        pair: str,
+        active: dict[str, Any],
+        candles: list[Any],
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Advance an H4/M15 candidate one closed M5 candle at a time.
+
+        The confidence score and state transitions match the supplied local
+        backtester: POI touch -> M5 evidence score -> structural finalizer. This
+        method does no network I/O; the watcher supplies closed Binance candles.
+        """
+        context = context or {}
+        if not isinstance(active, dict):
+            return {"status": "EXPIRED", "reason": "INVALID_WATCH_STATE"}
+        ordered = sorted(
+            (c for c in (candles or []) if hasattr(c, "time_ms")),
+            key=lambda c: int(getattr(c, "time_ms", 0)),
+        )
+        if len(ordered) < 7:
+            return {"status": "WAITING", "reason": "INSUFFICIENT_M5_HISTORY", "pair": str(pair).upper()}
+
+        direction = str(active.get("direction") or "").upper()
+        if direction not in {"BUY", "SELL"}:
+            return {"status": "EXPIRED", "reason": "INVALID_DIRECTION", "pair": str(pair).upper()}
+
+        bar_ms = 300_000
+        last_seen = int(_m5_safe_float(active.get("last_m5_open_ms"), 0.0))
+        latest_open = int(_m5_safe_float(context.get("latest_closed_open_ms"), getattr(ordered[-1], "time_ms", 0)))
+        watch_started_ms = int(_m5_safe_float(active.get("watch_started_ms"), 0.0))
+        threshold = _m5_safe_float(active.get("m5_confirmation_threshold"), M5_WATCH_CONFIRM_THRESHOLD)
+        poi_window = max(1, int(_m5_safe_float(active.get("poi_confirm_window_m5"), M5_WATCH_POI_WINDOW_BARS)))
+        watch_timeout = max(7, int(_m5_safe_float(active.get("watch_timeout_m5"), M5_WATCH_TIMEOUT_BARS)))
+
+        def candle_value(candle: Any, name: str) -> float:
+            return _m5_safe_float(getattr(candle, name, 0.0), 0.0)
+
+        def expire(reason: str, bar: Any | None = None) -> dict[str, Any]:
+            active["status"] = "EXPIRED"
+            active["m5_terminal_reason"] = reason
+            return {
+                "status": "EXPIRED", "reason": reason, "pair": str(pair).upper(),
+                "bar_time_ms": int(getattr(bar, "time_ms", 0)) if bar is not None else None,
+                "watch_bars_m5": int(active.get("watch_bars_m5") or 0),
+                "poi_touched": bool(active.get("poi_touched")),
+            }
+
+        processed = False
+        for index, bar in enumerate(ordered):
+            bar_open = int(getattr(bar, "time_ms", 0))
+            previous_open = int(_m5_safe_float(active.get("last_m5_open_ms"), last_seen))
+            if bar_open <= previous_open:
+                continue
+
+            # Never use a candle that closed before the candidate entered WATCH.
+            if watch_started_ms and bar_open + bar_ms <= watch_started_ms:
+                active["last_m5_open_ms"] = bar_open
+                continue
+
+            if previous_open and bar_open != previous_open + bar_ms:
+                return expire("M5_HISTORY_GAP", bar)
+
+            active["last_m5_open_ms"] = bar_open
+            active["watch_bars_m5"] = int(active.get("watch_bars_m5") or 0) + 1
+            processed = True
+            history = ordered[max(0, index - 24):index + 1]
+            if len(history) < 7:
+                continue
+            score_info = _score_m5_confirmation(active, history)
+            score = _m5_safe_float(score_info.get("score"), 0.0)
+
+            op, hi, lo, close = (candle_value(bar, field) for field in ("open", "high", "low", "close"))
+            sl = _m5_safe_float(active.get("sl"), 0.0)
+            tp = _m5_safe_float(active.get("tp"), 0.0)
+            price_exp = _m5_safe_float(active.get("price_exp"), 0.0)
+
+            # Mirror backtest priority: invalidate old structure/target before a
+            # same-candle score can become an entry.
+            if sl > 0 and ((direction == "BUY" and lo <= sl) or (direction == "SELL" and hi >= sl)):
+                return expire("STRUCTURE_INVALIDATED_BEFORE_CONFIRMATION", bar)
+            if price_exp > 0 and ((direction == "BUY" and hi >= price_exp) or (direction == "SELL" and lo <= price_exp)):
+                return expire("PRICE_EXP_BEFORE_CONFIRMATION", bar)
+            if tp > 0 and ((direction == "BUY" and hi >= tp) or (direction == "SELL" and lo <= tp)):
+                return expire("TARGET_REACHED_BEFORE_CONFIRMATION", bar)
+
+            if bool(score_info.get("poi_touch")):
+                if not active.get("poi_touched"):
+                    active["poi_touched"] = True
+                    active["poi_touch_time_ms"] = bar_open + bar_ms
+                active["poi_touch_age_m5"] = 0
+            elif active.get("poi_touched"):
+                active["poi_touch_age_m5"] = int(active.get("poi_touch_age_m5") or 0) + 1
+
+            if active.get("poi_touched"):
+                if int(active.get("poi_touch_age_m5") or 0) > poi_window:
+                    return expire("INVALID_NO_CONFIRMATION", bar)
+                active["m5_confirmation_last_score"] = score
+                active["m5_confirmation_last_reason"] = str(score_info.get("reason") or "")[:500]
+                active["m5_confirmation_last_components"] = score_info.get("components", {})
+                active["m5_confirmation_score"] = score
+                active["m5_confirmation_threshold"] = threshold
+                active["m5_confirmation_reason"] = str(score_info.get("reason") or "")[:500]
+                active["m5_confirmation_components"] = score_info.get("components", {})
+                if score >= threshold:
+                    if not math.isfinite(close) or close <= 0:
+                        return expire("CONFIRMED_LEVELS_REJECTED:INVALID_CONFIRMATION_PRICE", bar)
+                    # Catch-up can process missed bars after a REST outage. Never
+                    # send an order using a historical close that is no longer live.
+                    if bar_open != latest_open:
+                        return expire("MISSED_LIVE_CONFIRMATION_CANDLE", bar)
+                    active["confirmation_time_ms"] = bar_open + bar_ms
+                    active["confirmation_price"] = close
+                    active["status"] = "ENTRY_SIGNAL"
+                    components = score_info.get("components", {})
+                    return {
+                        "status": "ENTRY_SIGNAL", "reason": str(score_info.get("reason") or "M5_CONFIRMATION_VALID"),
+                        "pair": str(pair).upper(), "entry_price": close,
+                        "confirmation_time_ms": bar_open + bar_ms,
+                        "m5_confirmation_score": score,
+                        "m5_confirmation_threshold": threshold,
+                        "m5_confirmation_components": components if isinstance(components, dict) else {},
+                        "m5_confirmation_version": "BACKTEST_SCORE_V1",
+                        "m5_retest_zone_type": "BACKTEST_SCORE_CLOSE",
+                        "m5_retest_bar_open_ms": bar_open,
+                    }
+
+            if int(active.get("watch_bars_m5") or 0) >= watch_timeout:
+                return expire("INVALID_NO_CONFIRMATION" if active.get("poi_touched") else "EXPIRED_BEFORE_POI", bar)
+
+        if processed:
+            return {
+                "status": "WAITING", "reason": str(active.get("m5_confirmation_reason") or "WAITING_FOR_M5_CLOSE"),
+                "pair": str(pair).upper(), "watch_bars_m5": int(active.get("watch_bars_m5") or 0),
+                "poi_touched": bool(active.get("poi_touched")),
+                "last_m5_open_ms": int(active.get("last_m5_open_ms") or 0),
+            }
+        return {"status": "WAITING", "reason": "NO_NEW_M5_CLOSE", "pair": str(pair).upper()}
+
     async def _m5_watch_loop(self) -> None:
         """Poll only known candidates on closed M5 bars; this is not a universe scanner."""
         while self._running and (self._scan_user_enabled or bool(self._scan_watchlist)):
@@ -6997,10 +7284,9 @@ class TradingEngine:
 
                 module = await self._load_strategy_runtime()
                 fetch = getattr(module, "fetch_series", None)
-                process = getattr(module, "process_live_m5_watch", None)
                 finalize = getattr(module, "finalize_confirmed_setup", None)
-                if not callable(fetch) or not callable(process) or not callable(finalize):
-                    log.error("[M5-WATCH] strategy contract missing fetch_series/process_live_m5_watch/finalize_confirmed_setup")
+                if not callable(fetch) or not callable(finalize):
+                    log.error("[M5-WATCH] strategy contract missing fetch_series/finalize_confirmed_setup")
                     await asyncio.sleep(15.0)
                     continue
 
@@ -7042,9 +7328,8 @@ class TradingEngine:
                         previous_open = int(watch.get("last_m5_open_ms") or 0)
                         if previous_open and latest_open <= previous_open:
                             continue  # avoid redundant Python work on the same closed candle
-                        result = process(pair, watch, candles, {
+                        result = self._process_live_m5_watch(pair, watch, candles, {
                             "latest_closed_open_ms": latest_open,
-                            "retest_timeout_bars": getattr(module, "M5_CONFIRM_RETEST_TIMEOUT_BARS", 12),
                         })
                         status = str((result or {}).get("status") or "WAITING").upper()
                         watch["m5_watch_status"] = status
@@ -7067,11 +7352,20 @@ class TradingEngine:
                             await self._drop_m5_watch(pair, "INVALID_M5_CONFIRMATION_PRICE")
                             continue
                         setup = copy.deepcopy(watch.get("setup") or {})
+                        finalizer_setup = copy.deepcopy(setup)
+                        for field_name in (
+                            "poi_touched", "poi_touch_time_ms", "poi_touch_age_m5",
+                            "watch_bars_m5", "m5_confirmation_score", "m5_confirmation_threshold",
+                            "m5_confirmation_reason", "m5_confirmation_components",
+                            "confirmation_time_ms", "confirmation_price",
+                        ):
+                            if field_name in watch:
+                                finalizer_setup[field_name] = copy.deepcopy(watch[field_name])
                         confirmation_context = {
                             "source": "BINANCE_PUBLIC",
                             "confirmation_time_ms": int((result or {}).get("confirmation_time_ms") or 0),
                             "m5_confirmation": {
-                                "version": getattr(module, "M5_CONFIRMATION_VERSION", "UNKNOWN"),
+                                "version": str((result or {}).get("m5_confirmation_version") or "BACKTEST_SCORE_V1"),
                                 "score": float((result or {}).get("m5_confirmation_score") or 0.0),
                                 "threshold": float((result or {}).get("m5_confirmation_threshold") or M5_WATCH_CONFIRM_THRESHOLD),
                                 "reason": str((watch or {}).get("m5_confirmation_reason") or ""),
@@ -7080,7 +7374,7 @@ class TradingEngine:
                             },
                         }
                         try:
-                            final = await finalize(pair, setup, entry_price, confirmation_context)
+                            final = await finalize(pair, finalizer_setup, entry_price, confirmation_context)
                         except Exception as exc:
                             if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
                                 wait = max(
@@ -7127,20 +7421,22 @@ class TradingEngine:
                             continue
 
                         candidate = copy.deepcopy(setup)
+                        base_conf = float(candidate.get("confidence") or 0.0)
+                        m5_score = float((result or {}).get("m5_confirmation_score") or 0.0)
+                        m5_threshold = float((result or {}).get("m5_confirmation_threshold") or M5_WATCH_CONFIRM_THRESHOLD)
+                        m5_reason = str((result or {}).get("reason") or "M5 confirmation score threshold passed")
                         candidate.update({
                             "pair": pair,
                             "entry": Decimal(str(final_entry)),
                             "sl": Decimal(str(final_sl)),
                             "tp": Decimal(str(final_tp)),
                             "price_exp": Decimal(str(final_exp)),
-                            # Execution is placed only after M5 closed-candle confirmation. The
-                            # reference equals the signal close, so its legacy geometry is relaxed
-                            # only for this explicit entry_model marker.
+                            # Entry is evaluated on the close of the latest completed
+                            # M5 candle, using the same score model as the supplied backtest.
                             "price_now_reference": Decimal(str(final_entry)),
                             "entry_reason": (
-                                f"M5 close confirmation: sweep -> post-sweep MSS close + displacement -> "
-                                f"{(result or {}).get('m5_retest_zone_type') or 'MSS/FVG'} retest + rejection; "
-                                f"entry modeled at closed M5 price {final_entry:.10g}."
+                                f"M5 closed-candle confirmation score {m5_score:.2f}/{m5_threshold:.2f}; "
+                                f"{m5_reason}; entry modeled at closed M5 price {final_entry:.10g}."
                             ),
                             "sl_reason": str(final.get("sl_reason") or "Confirmed structural invalidation SL"),
                             "tp_reason": str(final.get("tp_reason") or "Unmitigated structural liquidity TP, minimum 2R"),
@@ -7149,15 +7445,15 @@ class TradingEngine:
                             "entry_model": "H4_M15_M5_CONFIRM_STRUCTURAL",
                             "planned_rr_gross": rr,
                         })
-                        base_conf = float(candidate.get("confidence") or 0.0)
-                        m5_score = float((result or {}).get("m5_confirmation_score") or 0.0)
                         # Keep score as confidence evidence, not as a win probability.
-                        final_conf = max(0.0, min(100.0, 0.50 * base_conf + 0.35 * m5_score + 0.15 * min(100.0, max(0.0, 50.0 + 25.0 * (rr - 1.0)))))
-                        candidate["confidence"] = Decimal(str(round(final_conf, 4)))
+                        confirmation_adjusted_confidence = round(max(0.0, min(100.0, 0.50 * base_conf + 0.35 * m5_score + 0.15 * min(100.0, max(0.0, 50.0 + 25.0 * (rr - 1.0))))), 4)
+                        # Backtest retains the original thesis confidence and stores the
+                        # post-confirmation blend separately; keep the same semantics here.
                         analysis = candidate.get("analysis") if isinstance(candidate.get("analysis"), dict) else {}
                         analysis["m5_confirmation"] = confirmation_context["m5_confirmation"] | {
                             "entry": final_entry, "sl": final_sl, "tp": final_tp, "rr": round(rr, 4),
                             "confirmation_time_ms": confirmation_context["confirmation_time_ms"],
+                            "confirmation_adjusted_confidence": confirmation_adjusted_confidence,
                             "finalizer": {k: v for k, v in final.items() if k not in {"candidates_considered", "confirmed_candles_used"}},
                         }
                         candidate["analysis"] = compact_analysis(analysis)
