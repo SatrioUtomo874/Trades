@@ -65,3 +65,36 @@ Tidak ada trailing.
 - Filled: 2026-10-25T10:40:12.074151+00:00
 - Closed: 2026-10-25T12:31:20.576186+00:00
 - Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
+
+---
+
+## FOLKSUSDT — BUY
+
+Trade ID: `FOLKSUSDT-20261025-172038-5A07EC`
+
+### Setup
+
+- Price Now Reference: 2.391
+- Entry: 2.391
+- Reason Entry: M5 closed-candle confirmation score 80.00/72.00; POI_TOUCH_CURRENT_BAR;DIRECTIONAL_STRUCTURE_BREAK;TAKER_FLOW_SUPPORT;RELATIVE_VOLUME_SUPPORT;OPPOSING_MOVE_STALL_OR_SWEEP; entry modeled at closed M5 price 2.391.
+- Price Exp: 2.456
+- Reason Price Exp: Reference ekspansi 2.4556 dari target liquidity H1_SWING_HIGH; bukan target TP.
+- SL: 2.356
+- Reason SL: SL struktur M15_PROTECTED_LOW di luar anchor 2.359 dengan buffer 0.0026280658; risk 1.15 ATR H1.
+- TP: 2.467
+- Reason TP: TP manual dari Binance.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 2.477
+- Result Reason: TP manual dari Binance.
+- PnL: 3.596821413634462567963195316%
+- Created: 2026-10-25T10:20:39.000541+00:00
+- Filled: 2026-10-25T10:20:43.187522+00:00
+- Closed: 2026-10-25T13:57:06.381228+00:00
+- Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
