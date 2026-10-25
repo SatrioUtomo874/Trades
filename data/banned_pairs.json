@@ -1,39 +1,11 @@
 {
   "version": 1,
-  "saved_at": "2026-10-23T16:00:30.203836+00:00",
+  "saved_at": "2026-10-25T12:31:28.766042+00:00",
   "bans": [
     {
-      "pair": "ARKMUSDT",
-      "banned_at": "2026-10-23T16:00:30.203720+00:00",
-      "until": "2026-10-24T16:00:30.203698+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
-    },
-    {
-      "pair": "BRUSDT",
-      "banned_at": "2026-10-23T14:52:57.883736+00:00",
-      "until": "2026-10-24T14:52:57.883699+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
-    },
-    {
-      "pair": "CROSSUSDT",
-      "banned_at": "2026-10-22T20:45:16.495562+00:00",
-      "until": "2026-10-23T20:45:16.495532+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "PARTIUSDT",
-      "banned_at": "2026-10-22T20:45:39.602206+00:00",
-      "until": "2026-10-23T20:45:39.602177+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "PHAROSUSDT",
-      "banned_at": "2026-10-22T19:41:33.989483+00:00",
-      "until": "2026-10-23T19:41:33.989455+00:00",
+      "pair": "WCTUSDT",
+      "banned_at": "2026-10-25T12:31:28.765899+00:00",
+      "until": "2026-10-26T12:31:28.765866+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
     }
