@@ -9317,12 +9317,27 @@ class TradingEngine:
             )
 
         def decimal_field(name: str) -> Decimal:
+            """Parse field numerik dari strategy dengan aturan per-field yang benar.
+
+            Harga/level order wajib positif. Confidence berbeda: 0 adalah skor
+            yang sah (contohnya kandidat yang ditandai REJECTED_HARD oleh strategy),
+            jadi jangan lewat parse_decimal(), yang sengaja menolak nilai <= 0.
+            """
             try:
                 raw_value = payload[name]
-                if isinstance(raw_value, float):
-                    # Hindari notasi ilmiah (mis. 5e-05) yang ditolak parse_decimal.
-                    raw_value = format(Decimal(repr(raw_value)), "f")
-                return parse_decimal(str(raw_value))
+                if isinstance(raw_value, bool) or raw_value is None:
+                    raise ValueError("boolean/null bukan angka")
+                # Decimal() juga menerima angka ilmiah dari kontrak strategy; ini
+                # berguna untuk confidence kecil tanpa mengendurkan validasi harga.
+                value = Decimal(str(raw_value).strip())
+                if not value.is_finite():
+                    raise ValueError("angka harus finite")
+                if name == "confidence":
+                    # Nol sah; batas 0..100 diperiksa khusus setelah parsing.
+                    return value
+                if value <= 0:
+                    raise ValueError("harga/level harus positif")
+                return value
             except Exception as exc:
                 raise ValueError(
                     f"Field {name} dari strategy.py bukan angka valid."
