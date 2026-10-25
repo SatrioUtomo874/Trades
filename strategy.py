@@ -991,8 +991,31 @@ class BinanceProvider(HTTPProvider):
 
 
 def _binance_interval(interval: str) -> str:
-    mapping = {"15": "15m", "60": "1h", "240": "4h", "D": "1d"}
-    return mapping.get(str(interval), str(interval))
+    """Normalize internal timeframe aliases to Binance Futures kline intervals.
+
+    Strategy constants intentionally use compact values (M5="5", M15="15",
+    H1="60", H4="240", D1="D"). Binance REST requires interval tokens such
+    as 5m, 15m, 1h, 4h, and 1d. Keep already-valid Binance tokens unchanged,
+    including the case-sensitive monthly token ``1M``.
+    """
+    raw = str(interval or "").strip()
+    valid = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
+    if raw in valid:
+        return raw
+
+    aliases = {
+        "1": "1m", "3": "3m", "5": "5m", "15": "15m", "30": "30m",
+        "60": "1h", "120": "2h", "240": "4h", "360": "6h",
+        "480": "8h", "720": "12h", "D": "1d", "W": "1w",
+        "M1": "1m", "M3": "3m", "M5": "5m", "M15": "15m", "M30": "30m",
+        "H1": "1h", "H2": "2h", "H4": "4h", "H6": "6h", "H8": "8h", "H12": "12h",
+        "D1": "1d", "W1": "1w",
+    }
+    if raw in aliases:
+        return aliases[raw]
+    # Accept common case variants of internal labels (m5, h4, d1) without
+    # accidentally converting valid Binance "1m" minute candles to "1M" month.
+    return aliases.get(raw.upper(), raw)
 
 
 # ============================================================================
