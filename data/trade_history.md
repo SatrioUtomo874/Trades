@@ -131,3 +131,36 @@ Tidak ada trailing.
 - Filled: 2026-10-25T15:00:29.497118+00:00
 - Closed: 2026-10-25T15:29:00.673241+00:00
 - Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
+
+---
+
+## PENDLEUSDT — BUY
+
+Trade ID: `PENDLEUSDT-20261026-050525-E05613`
+
+### Setup
+
+- Price Now Reference: 1.9787
+- Entry: 1.9787
+- Reason Entry: M5 closed-candle confirmation score 78.14/72.00; DIRECTIONAL_STRUCTURE_BREAK;TAKER_FLOW_SUPPORT;RELATIVE_VOLUME_SUPPORT;OPPOSING_MOVE_STALL_OR_SWEEP; entry modeled at closed M5 price 1.9787.
+- Price Exp: 1.9977
+- Reason Price Exp: Reference ekspansi 1.99765 dari target liquidity H1_SWING_HIGH; bukan target TP.
+- SL: 1.9709
+- Reason SL: SL struktur M5_PROTECTED_LOW di luar anchor 1.9734 dengan buffer 0.0024694455; risk 0.37 ATR H1.
+- TP: 2.001
+- Reason TP: TP ke liquidity H1_SWING_HIGH di 2.001; sumber SWING_HIGH; RR gross 2.87R (minimum 2.0R, tanpa batas maksimum).
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 1.9709
+- Result Reason: SL struktur M5_PROTECTED_LOW di luar anchor 1.9734 dengan buffer 0.0024694455; risk 0.37 ATR H1.
+- PnL: -0.1823246391491365179525914129%
+- Created: 2026-10-25T22:05:25.391851+00:00
+- Filled: 2026-10-25T22:05:28.761436+00:00
+- Closed: 2026-10-25T22:06:52.472782+00:00
+- Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
