@@ -7184,10 +7184,24 @@ class TradingEngine:
                             self._on_public_rate_limit(exc, wait)
                             log.warning("[M5-WATCH] %s halted on Binance rate limit: %s", pair, str(exc)[:180])
                             break
-                        log.warning("[M5-WATCH] %s processing failed: %s", pair, str(exc)[:240])
+                        error_text = str(exc)
+                        error_lower = error_text.lower()
+                        # Invalid kline interval is a permanent strategy/configuration error,
+                        # not a transient candle failure. Remove this watch after one clear
+                        # diagnostic rather than requesting the same invalid endpoint every
+                        # 15 seconds and flooding Telegram/backend warnings.
+                        if "/fapi/v1/klines" in error_lower and ("-1120" in error_lower or "invalid interval" in error_lower):
+                            log.error(
+                                "[M5-WATCH] %s removed: strategy.py supplied an invalid Binance kline interval. "
+                                "Update main.py and strategy.py together; internal interval '5' must map to '5m'. Error: %s",
+                                pair, error_text[:200],
+                            )
+                            await self._drop_m5_watch(pair, "INVALID_BINANCE_KLINE_INTERVAL")
+                            continue
+                        log.warning("[M5-WATCH] %s processing failed: %s", pair, error_text[:240])
                         # Avoid rapid retries against a sick endpoint/cache; closed-bar catch-up is safe.
                         watch["m5_retry_after_monotonic"] = time.monotonic() + 15.0
-                        if "invalid direction" in str(exc).lower() or "watch state" in str(exc).lower():
+                        if "invalid direction" in error_lower or "watch state" in error_lower:
                             await self._drop_m5_watch(pair, "INVALID_WATCH_STATE")
                     # Yield between symbols. Candle provider itself serializes REST requests.
                     await asyncio.sleep(0.03)
