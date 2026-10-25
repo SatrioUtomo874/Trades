@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-10-25T12:31:30.845654+00:00",
-  "saved_at_wib": "25-10-2026, 19:31 WIB",
+  "saved_at": "2026-10-25T13:19:27.773948+00:00",
+  "saved_at_wib": "25-10-2026, 20:19 WIB",
   "count": 1,
   "setups": [
     {
@@ -17,7 +17,7 @@
       "sl": "2.356",
       "sl_reason": "SL struktur M15_PROTECTED_LOW di luar anchor 2.359 dengan buffer 0.0026280658; risk 1.15 ATR H1.",
       "tp": "2.467",
-      "tp_reason": "TP ke liquidity H1_SWING_HIGH di 2.467; sumber SWING_HIGH; RR gross 2.19R (minimum 2.0R, tanpa batas maksimum).",
+      "tp_reason": "TP manual dari Binance.",
       "status": "FILLED",
       "trailing": false,
       "created_at": "2026-10-25T10:20:39.000541+00:00",
@@ -27,7 +27,7 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.04182350480970305311585110832",
+      "pnl_percent": "0.2927645336679213718109577583",
       "max_favorable_pct": "0.6273525721455457967377666248",
       "max_adverse_pct": "-0.3764115432873274780426599749",
       "planned_rr": "2.171428571428571428571428571",
@@ -3719,9 +3719,9 @@
       "position_side": "BOTH",
       "entry_order_id": 1052428063,
       "entry_client_order_id": "ENT-FOLKSUSDT-20261025-172038-5A07EC",
-      "tp_algo_id": 4000001994911655,
+      "tp_algo_id": 4000001995175179,
       "sl_algo_id": 4000001994911641,
-      "tp_client_algo_id": "TP-FOLKSUSDT-20261025-172038-5A07EC",
+      "tp_client_algo_id": "aos_OPfPWcnThWEYydU2o2xm",
       "sl_client_algo_id": "SL-FOLKSUSDT-20261025-172038-5A07EC",
       "pending_sl_algo_id": null,
       "pending_sl_client_algo_id": null,
@@ -3735,7 +3735,7 @@
       "sizing_mode": "",
       "risk_info": {},
       "risk_pct_initial": "1.463822668339606859054788791",
-      "realized_r": "0.02857142857142857142857142858"
+      "realized_r": "0.2000000000000000000000000001"
     }
   ]
 }
