@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-10-25T12:31:28.766042+00:00",
+  "saved_at": "2026-10-25T13:57:14.793780+00:00",
   "bans": [
+    {
+      "pair": "FOLKSUSDT",
+      "banned_at": "2026-10-25T13:57:14.793635+00:00",
+      "until": "2026-10-26T13:57:14.793603+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
+    },
     {
       "pair": "WCTUSDT",
       "banned_at": "2026-10-25T12:31:28.765899+00:00",
