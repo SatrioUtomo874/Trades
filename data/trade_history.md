@@ -230,3 +230,36 @@ Tidak ada trailing.
 - Filled: 2026-10-26T00:55:31.864093+00:00
 - Closed: 2026-10-26T01:39:04.388664+00:00
 - Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
+
+---
+
+## NILUSDT — SELL
+
+Trade ID: `NILUSDT-20261026-063050-0D8F1F`
+
+### Setup
+
+- Price Now Reference: 0.09026
+- Entry: 0.09026
+- Reason Entry: M5 closed-candle confirmation score 78.56/72.00; POI_TOUCH_CURRENT_BAR;REJECTION_WICK;DIRECTIONAL_STRUCTURE_BREAK;RELATIVE_VOLUME_SUPPORT;OPPOSING_MOVE_STALL_OR_SWEEP; entry modeled at closed M5 price 0.09026.
+- Price Exp: 0.08791
+- Reason Price Exp: Reference ekspansi 0.087914 dari target liquidity H1_SWING_LOW; bukan target TP.
+- SL: 0.09158
+- Reason SL: SL struktur M15_PROTECTED_HIGH di luar anchor 0.09134 dengan buffer 0.000238877; risk 0.58 ATR H1.
+- TP: 0.0875
+- Reason TP: TP ke liquidity H1_SWING_LOW di 0.0875; sumber SWING_LOW; RR gross 2.09R (minimum 2.0R, tanpa batas maksimum).
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.09158
+- Result Reason: SL struktur M15_PROTECTED_HIGH di luar anchor 0.09134 dengan buffer 0.000238877; risk 0.58 ATR H1.
+- PnL: -1.462441834699756259694216707%
+- Created: 2026-10-25T23:30:50.389740+00:00
+- Filled: 2026-10-26T00:10:41.175684+00:00
+- Closed: 2026-10-26T01:56:21.274546+00:00
+- Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
