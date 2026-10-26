@@ -164,3 +164,36 @@ Tidak ada trailing.
 - Filled: 2026-10-25T22:05:28.761436+00:00
 - Closed: 2026-10-25T22:06:52.472782+00:00
 - Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
+
+---
+
+## TRIAUSDT — BUY
+
+Trade ID: `TRIAUSDT-20261026-065509-5AE40B`
+
+### Setup
+
+- Price Now Reference: 0.002597
+- Entry: 0.002597
+- Reason Entry: M5 closed-candle confirmation score 76.04/72.00; POI_TOUCH_CURRENT_BAR;DIRECTIONAL_STRUCTURE_BREAK;TAKER_FLOW_SUPPORT;RELATIVE_VOLUME_SUPPORT;OPPOSING_MOVE_STALL_OR_SWEEP; entry modeled at closed M5 price 0.002597.
+- Price Exp: 0.002628
+- Reason Price Exp: Reference ekspansi 0.0026276 dari target liquidity M5_BUY_SIDE_LIQUIDITY; bukan target TP.
+- SL: 0.00258
+- Reason SL: SL struktur M15_PROTECTED_LOW di luar anchor 0.002585 dengan buffer 4.3383e-06; risk 0.31 ATR H1.
+- TP: 0.002633
+- Reason TP: TP ke liquidity M5_BUY_SIDE_LIQUIDITY di 0.002633; sumber EQUAL_LEVELS; RR gross 2.20R (minimum 2.0R, tanpa batas maksimum).
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.002633
+- Result Reason: TP ke liquidity M5_BUY_SIDE_LIQUIDITY di 0.002633; sumber EQUAL_LEVELS; RR gross 2.20R (minimum 2.0R, tanpa batas maksimum).
+- PnL: 1.386214863303812090874085483%
+- Created: 2026-10-25T23:55:09.092136+00:00
+- Filled: 2026-10-26T00:00:08.771086+00:00
+- Closed: 2026-10-26T00:12:13.969471+00:00
+- Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
