@@ -770,9 +770,17 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
             'sl': _finite(SL * dr),
             'tp': _finite(TP * dr),
             'current_price': _finite(c5[last_k] * dr) if last_k >= 0 else None,
+            'last_m5_open_time_ms': int(ot[last_k]) if 0 <= last_k < len(ot) else None,
+            'last_m5_close_time_ms': int(ot[last_k] + STEP) if 0 <= last_k < len(ot) else None,
             'order_time_ms': int(ot[k_set]) if st in (6, 7) and 0 <= k_set < len(ot) else None,
+            'order_close_time_ms': int(ot[k_set] + STEP) if st in (6, 7) and 0 <= k_set < len(ot) else None,
             'fill_time_ms': int(ot[kf]) if st == 7 and 0 <= kf < len(ot) else None,
             'mss_time_ms': int(ot[k_mss]) if st in (5, 6, 7) and 0 <= k_mss < len(ot) else None,
+            'mss_close_time_ms': int(ot[k_mss] + STEP) if st in (5, 6, 7) and 0 <= k_mss < len(ot) else None,
+            'mss_close_price': _finite(c5[k_mss] * dr) if st in (5, 6, 7) and 0 <= k_mss < len(c5) else None,
+            'sl_anchor': _finite(L * dr) if st in (5, 6, 7) else None,
+            'waiting_bos_bars_elapsed': int(last_k - k_mss) if st == 5 else None,
+            'bos_timeout_m5_bars': int(P['BOS_WIN']),
             'pending_bars_elapsed': int(last_k - k_set) if st == 6 else None,
             'position_bars_held': int(last_k - kf) if st == 7 else None,
             'setup_id': int(setup_id),
@@ -991,6 +999,7 @@ def _analyze_v10_arrays(pair: str, a5: dict[str, np.ndarray], ot: np.ndarray,
     bias = (d1_bias[0], d1_bias[1], d1_bias[2], h4_bias[0], h4_bias[1], h4_bias[2])
 
     states = []
+    waiting_states = []
     summaries = {}
     for direction in (1, -1):
         _trades, counts, _events, state = run_frame(
@@ -1000,16 +1009,23 @@ def _analyze_v10_arrays(pair: str, a5: dict[str, np.ndarray], ot: np.ndarray,
         state['counts'] = counts
         summaries[state['direction']] = {
             'state': state['state'], 'last_event': state['last_event'],
+            'setup_id': state.get('setup_id'), 'poi_id': state.get('poi_id'),
+            'attempt_id': state.get('attempt_id'), 'poi_type': state.get('poi_type'),
+            'aoi': state.get('aoi'), 'poi': state.get('poi'),
+            'mss_close_time_ms': state.get('mss_close_time_ms'),
             'placed': counts.get('placed', 0), 'filled': counts.get('filled', 0),
-            'mss': counts.get('mss', 0), 'aoi': counts.get('aoi', 0), 'poi': counts.get('poi', 0),
+            'mss': counts.get('mss', 0), 'aoi_count': counts.get('aoi', 0), 'poi_count': counts.get('poi', 0),
         }
         if state['state'] in (6, 7):
             states.append(state)
+        elif state['state'] == 5:
+            waiting_states.append(state)
 
-    # Backtest V10 found no concurrent LONG/SHORT positions per symbol. If both
-    # state machines are live after a truncated replay, prefer the newest order.
+    # Prefer a strategy-confirmed V10 order/position. Otherwise expose state 5
+    # (MSS already confirmed on M15; waiting for a fresh M5 BOS close-cross).
     states.sort(key=lambda x: int(x.get('order_time_ms') or 0), reverse=True)
-    selected = states[0] if states else None
+    waiting_states.sort(key=lambda x: int(x.get('mss_close_time_ms') or 0), reverse=True)
+    selected = states[0] if states else (waiting_states[0] if waiting_states else None)
     result = {
         'pair': pair,
         'selected_state': selected,
@@ -1018,12 +1034,13 @@ def _analyze_v10_arrays(pair: str, a5: dict[str, np.ndarray], ot: np.ndarray,
         'current_h4_bias': int(h4_bias[0][-1]) if len(h4_bias[0]) else 0,
         'data': data_info,
         'active_state_count': len(states),
+        'waiting_m5_bos_count': len(waiting_states),
     }
     return result
 
 
 async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Replay the V10 state machine over closed Binance M5 candles; return a paper setup only for state 6/7."""
+    """Replay V10 on closed Binance M5 candles; expose state 5 candidates and state 6/7 paper setups."""
     symbol = str(pair or '').strip().upper()
     if not symbol:
         raise ValueError('Pair kosong')
@@ -1033,7 +1050,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     if not callable(provider):
         raise RuntimeError('Market-data provider belum dipasang oleh main.py')
 
-    fetched = provider(symbol, '5m', M5_HISTORY_CANDLES, M5_INTERVAL_MS, force_refresh=False)
+    force_refresh = bool((context or {}).get('force_refresh', False))
+    fetched = provider(symbol, '5m', M5_HISTORY_CANDLES, M5_INTERVAL_MS, force_refresh=force_refresh)
     if asyncio.iscoroutine(fetched):
         candles, source = await fetched
     else:
@@ -1052,7 +1070,9 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     v10_analysis = {
         'engine': STRATEGY_ENGINE,
         'variant': 'E_GE2_ATR',
-        'state': 'NO_ACTIVE_ORDER' if state is None else ('PENDING_LIMIT' if state['state'] == 6 else 'OPEN_POSITION'),
+        'state': ('NO_ACTIVE_ORDER' if state is None else
+                  'WAITING_M5_BOS' if state['state'] == 5 else
+                  'PENDING_LIMIT' if state['state'] == 6 else 'OPEN_POSITION'),
         'direction_states': analysis['direction_states'],
         'd1_bias': 'LONG' if analysis['current_d1_bias'] == 1 else 'SHORT' if analysis['current_d1_bias'] == -1 else 'NEUTRAL',
         'h4_bias_context': 'LONG' if analysis['current_h4_bias'] == 1 else 'SHORT' if analysis['current_h4_bias'] == -1 else 'NEUTRAL',
@@ -1078,14 +1098,89 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         'active_state_count': analysis['active_state_count'],
     }
 
+    if state is not None and int(state.get('state', -1)) == 5:
+        direction_name = str(state.get('direction') or '')
+        direction = 'BUY' if direction_name == 'LONG' else 'SELL'
+        watch_key = '|'.join((symbol, direction_name, str(state.get('setup_id')), str(state.get('poi_id')), str(state.get('attempt_id'))))
+        watch_id = hashlib.sha256(watch_key.encode('utf-8')).hexdigest()[:24]
+        poi = state.get('poi') if isinstance(state.get('poi'), list) else None
+        aoi = state.get('aoi') if isinstance(state.get('aoi'), list) else None
+        mss_time_ms = state.get('mss_time_ms')
+        mss_close_time_ms = state.get('mss_close_time_ms')
+        v10_analysis.update({
+            'state': 'WAITING_M5_BOS',
+            'direction': direction_name,
+            'poi_type': state.get('poi_type'),
+            'aoi': aoi,
+            'poi': poi,
+            'setup_id': state.get('setup_id'),
+            'poi_id': state.get('poi_id'),
+            'attempt_id': state.get('attempt_id'),
+            'mss_time_ms': mss_time_ms,
+            'mss_close_time_ms': mss_close_time_ms,
+            'mss_close_price': state.get('mss_close_price'),
+            'sl_anchor': state.get('sl_anchor'),
+            'waiting_bos_bars_elapsed': state.get('waiting_bos_bars_elapsed'),
+            'bos_timeout_m5_bars': state.get('bos_timeout_m5_bars'),
+            'last_m5_close_time_ms': state.get('last_m5_close_time_ms'),
+            'same_poi_rearm_after_failed_attempt': True,
+        })
+        v10_meta = {
+            'name': STRATEGY_NAME, 'version': STRATEGY_VERSION, 'variant': 'E_GE2_ATR',
+        }
+        data_contract = {
+            'source': 'BINANCE_PUBLIC', 'timeframe': '5m',
+            'candles_used': int(data_info['candles_m5']),
+            'fallback_used': False,
+            'sources_by_timeframe': {
+                '5m': 'BINANCE_PUBLIC', '15m': 'BINANCE_PUBLIC_DERIVED_M5',
+                '4h': 'BINANCE_PUBLIC_DERIVED_M5', '1d': 'BINANCE_PUBLIC_DERIVED_M5',
+            },
+            'candles_requested': M5_HISTORY_CANDLES,
+            'data_asof': {'5m_close_time_ms': data_info['last_close_time_ms']},
+            **data_info,
+        }
+        return {
+            'pair': symbol,
+            'direction': direction,
+            'price_now_reference': state.get('current_price'),
+            'confidence': RULE_PASS_SCORE,
+            'confidence_components': {'v10_prerequisites_passed': RULE_PASS_SCORE},
+            'candidate_state': 'WAITING_M5_BOS',
+            'state_reason': 'D1 bias + D1 FVG AOI + H4 directional POI + literal M15 MSS valid; waiting for fresh M5 close-cross BOS after MSS.',
+            'strategy_name': STRATEGY_NAME, 'strategy_version': STRATEGY_VERSION,
+            'strategy': v10_meta, 'analysis': {'v10': v10_analysis},
+            'data_source': 'BINANCE_PUBLIC', 'analysis_source': 'BINANCE_PUBLIC',
+            'data': data_contract,
+            'entry_zone': ({'low': min(poi), 'high': max(poi), 'kind': f'H4_{state.get("poi_type") or "POI"}', 'timeframe': '4h'} if poi else {}),
+            'thesis_signature': watch_id, 'candidate_id': watch_id, 'v10_candidate_id': watch_id,
+            'v10_watch_id': watch_id,
+            'v10_setup_id': int(state.get('setup_id') or 0),
+            'v10_poi_id': int(state.get('poi_id') or 0),
+            'v10_attempt_id': int(state.get('attempt_id') or 0),
+            'v10_poi': poi, 'v10_aoi': aoi, 'v10_poi_type': state.get('poi_type'),
+            'v10_mss_time_ms': mss_time_ms, 'v10_mss_close_time_ms': mss_close_time_ms,
+            'v10_mss_close_price': state.get('mss_close_price'),
+            'v10_sl_anchor': state.get('sl_anchor'),
+            'v10_waiting_bos_bars': int(state.get('waiting_bos_bars_elapsed') or 0),
+            'v10_bos_timeout_bars': int(state.get('bos_timeout_m5_bars') or V10_LIVE_PARAMS['BOS_WIN']),
+            'v10_last_m5_close_ms': state.get('last_m5_close_time_ms'),
+            'v10_last_m5_close': state.get('current_price'),
+            'm5_confirmed_entry': False,
+            'entry_model': 'V10_MSS_M15_WAIT_BOS_M5_CLOSE',
+        }
+
     if state is None:
-        waiting_reason = 'V10 state machine belum menghasilkan order yang aktif atau posisi terbuka.'
+        waiting_reason = 'V10 state machine belum menghasilkan AOI/POI/MSS yang sedang menunggu BOS.'
         return {
             'pair': symbol, 'direction': 'BUY' if analysis['current_d1_bias'] >= 0 else 'SELL',
             'confidence': 0.0, 'candidate_state': 'WAITING_TRIGGER',
             'strategy_name': STRATEGY_NAME, 'strategy_version': STRATEGY_VERSION,
             'strategy': {'name': STRATEGY_NAME, 'version': STRATEGY_VERSION, 'variant': 'E_GE2_ATR'},
             'analysis': {'v10': v10_analysis},
+            'price_now_reference': float(arrays['c'][-1]) if len(arrays.get('c', [])) else None,
+            'v10_last_m5_close_ms': int(data_info['last_close_time_ms']),
+            'v10_last_m5_close': float(arrays['c'][-1]) if len(arrays.get('c', [])) else None,
             'state_reason': waiting_reason, 'data_source': 'BINANCE_PUBLIC',
             'analysis_source': 'BINANCE_PUBLIC',
             'data': {
@@ -1122,6 +1217,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     fill_time_ms = state.get('fill_time_ms')
     order_id_source = f"{symbol}|{state['direction']}|{order_time_ms}|{state.get('setup_id')}|{state.get('poi_id')}|{state.get('attempt_id')}"
     candidate_id = hashlib.sha256(order_id_source.encode('utf-8')).hexdigest()[:24]
+    watch_id_source = '|'.join((symbol, str(state['direction']), str(state.get('setup_id')), str(state.get('poi_id')), str(state.get('attempt_id'))))
+    watch_id = hashlib.sha256(watch_id_source.encode('utf-8')).hexdigest()[:24]
     order_distance = state.get('entry_context', {}).get('order_distance_to_d1_protected_swing_atr')
     if state['direction'] == 'LONG':
         try:
@@ -1153,7 +1250,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         'pending_bars_elapsed': state.get('pending_bars_elapsed'),
         'position_bars_held': state.get('position_bars_held'),
         'setup_id': state.get('setup_id'), 'poi_id': state.get('poi_id'),
-        'attempt_id': state.get('attempt_id'),
+        'attempt_id': state.get('attempt_id'), 'watch_id': watch_id,
     })
     data_contract = {
         'source': 'BINANCE_PUBLIC',
@@ -1194,6 +1291,13 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         'setup_archetype': 'TACTICAL_V10_E_GE2_ATR',
         'thesis_signature': candidate_id,
         'candidate_id': candidate_id,
+        'v10_watch_id': watch_id,
+        'v10_setup_id': int(state.get('setup_id') or 0),
+        'v10_poi_id': int(state.get('poi_id') or 0),
+        'v10_attempt_id': int(state.get('attempt_id') or 0),
+        'v10_order_time_ms': int(order_time_ms) if order_time_ms is not None else None,
+        'v10_order_close_time_ms': int(state.get('order_close_time_ms') or 0),
+        'v10_bos_time_ms': int(order_time_ms) if order_time_ms is not None else None,
         'm5_confirmed_entry': True,
         'entry_model': 'V10_MSS_M15_BOS_M5_LIMIT',
         'v10_position_state': position_state,
@@ -1223,8 +1327,33 @@ async def validate_setup(pair: str, initial_setup: dict[str, Any], context: dict
     setup = dict(initial_setup)
     if setup.get('strategy_name') != STRATEGY_NAME:
         return {'valid': False, 'reason': 'Strategy bukan Tactical V10 E_GE2_ATR', 'confidence': 0.0}
-    if setup.get('candidate_state') not in {'READY', 'FILLED'}:
-        return {'valid': False, 'reason': 'V10 belum berada di state order/position aktif', 'confidence': 0.0}
+    candidate_state = str(setup.get('candidate_state') or '').upper()
+    if candidate_state == 'WAITING_M5_BOS':
+        try:
+            direction = str(setup.get('direction') or '').upper()
+            watch_id = str(setup.get('v10_watch_id') or setup.get('v10_candidate_id') or '')
+            setup_id = int(setup.get('v10_setup_id'))
+            poi_id = int(setup.get('v10_poi_id'))
+            attempt_id = int(setup.get('v10_attempt_id'))
+            mss_close_ms = int(setup.get('v10_mss_close_time_ms'))
+            poi = setup.get('v10_poi')
+            if direction not in {'BUY', 'SELL'} or not watch_id or len(watch_id) < 16:
+                raise ValueError('Identitas kandidat V10 tidak lengkap')
+            if min(setup_id, poi_id, attempt_id) <= 0 or mss_close_ms <= 0 or not isinstance(poi, list) or len(poi) != 2:
+                raise ValueError('State AOI/POI/MSS kandidat V10 tidak lengkap')
+            low, high = sorted((float(poi[0]), float(poi[1])))
+            if not (np.isfinite(low) and np.isfinite(high) and low > 0 and high >= low):
+                raise ValueError('POI kandidat V10 tidak valid')
+        except Exception as exc:
+            return {'valid': False, 'reason': str(exc), 'confidence': 0.0}
+        setup['pair'] = str(pair).upper()
+        return {
+            'valid': True, 'setup': setup, 'confidence': RULE_PASS_SCORE,
+            'reason': 'Lulus prasyarat D1/H4/M15 V10; menunggu fresh M5 BOS close-cross.',
+            'reason_codes': [],
+        }
+    if candidate_state not in {'READY', 'FILLED'}:
+        return {'valid': False, 'reason': 'V10 belum berada pada WAITING_M5_BOS atau state order/position aktif', 'confidence': 0.0}
     try:
         direction = str(setup['direction']).upper()
         entry, sl, tp = (float(setup[k]) for k in ('entry', 'sl', 'tp'))
