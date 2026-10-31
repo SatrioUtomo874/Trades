@@ -263,3 +263,36 @@ Tidak ada trailing.
 - Filled: 2026-10-26T00:10:41.175684+00:00
 - Closed: 2026-10-26T01:56:21.274546+00:00
 - Strategy: SMC_VLT_RSI v5.4.0-CONFIRMED-STRUCTURAL-RR2-M15-STRUCTURE-TRAIL
+
+---
+
+## EGLDUSDT — SELL
+
+Trade ID: `EGLDUSDT-20261031-215956-C3231E`
+
+### Setup
+
+- Price Now Reference: 3.409
+- Entry: 3.234
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | paper fill 3.234
+- Price Exp: 2.812
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 3.445
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 2.812
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 3.445
+- Result Reason: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- PnL: -6.524427952999381570810142239%
+- Created: 2026-10-29T23:40:00+00:00
+- Filled: 2026-10-30T05:35:00+00:00
+- Closed: 2026-10-31T15:11:09.251020+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.0.0
