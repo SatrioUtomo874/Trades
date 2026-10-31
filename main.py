@@ -198,8 +198,8 @@ DEFAULT_SCAN_THRESHOLD = Decimal("40")
 # Binance-only scanner throughput. Strategy's REST provider has global spacing and
 # rate-limit cooldown; the main loop also leaves a small per-pair yield.
 SCAN_PAIR_DELAY_SECONDS = 0.20
-SCAN_MAX_PAIRS_PER_CYCLE = 100
-SCAN_CYCLE_DELAY_SECONDS = 30.0
+SCAN_MAX_PAIRS_PER_CYCLE = 100       # ukuran batch logis; lanjut lintas time-slice sampai penuh
+SCAN_CYCLE_DELAY_SECONDS = 5.0       # lanjutkan batch aktif segera setelah time-slice selesai
 # Monitor only validated watch candidates; never scan the full universe outside H4 slots.
 M5_WATCH_POLL_SECONDS = 3.0
 M5_WATCH_MAX_CANDIDATES = 64
@@ -2992,7 +2992,7 @@ SCAN_VALIDATE_TOP_N = 6            # validator hanya untuk kandidat confidence t
 SCAN_MIN_API_HEADROOM_PCT = 10.0   # berhenti sementara bila sisa bobot IP di bawah ini
 SCAN_CYCLE_TIME_BUDGET_SECONDS = 240.0
 SCAN_BATCH_GAP_SECONDS = 5.0       # jeda antar batch di dalam window H4
-SCAN_SWEEP_GAP_NORMAL_SECONDS = 300.0  # mode tanpa H4: jeda setelah satu sapuan penuh
+SCAN_SWEEP_GAP_NORMAL_SECONDS = 0.0    # jeda 5s utama ditangani oleh SCAN_CYCLE_DELAY_SECONDS
 H4_SWEEPS_PER_WINDOW = 2           # 1 sapuan = seluruh koin dianalisis 1x
 PENDING_TTL_HOURS = 12.0           # limit entry yang belum terisi dibatalkan setelah ini
 TRAIL_TP_EXTEND_POLL_SECONDS = 5.0
@@ -6829,7 +6829,10 @@ class TradingEngine:
         self._strategy_module_ref: Any = None
         self._sync_task: asyncio.Task[Any] | None = None
         self.h4_sweeps = H4_SWEEPS_PER_WINDOW
-        self._h4_cycle_count = 0          # sapuan penuh yang sudah selesai di window ini
+        self._h4_cycle_count = 0          # sapuan penuh yang sudah selesai di window H4 ini
+        self._scan_sweep_number = 0        # nomor putaran penuh global (semua mode)
+        self._scan_sweep_pairs: list[str] = []  # snapshot universe tetap selama satu putaran
+        self._scan_sweep_cursor = 0        # indeks pair berikutnya yang belum dianalisis
         self._sweep_done: set[str] = set()
         self._sweep_complete = False
         self._skip_until: dict[str, float] = {}
@@ -6837,6 +6840,51 @@ class TradingEngine:
         self._last_cycle_analyzed = 0
         self._tp_extend: dict[str, tuple[Decimal, str]] = {}
         self._ram_level = "OK"
+        self._runtime_settings_lock = asyncio.Lock()
+
+    def _prepare_scan_sweep(self, current_targets: list[str]) -> None:
+        """Keep a stable round-robin order for the active full-universe sweep.
+
+        Current market volume ranking is captured at sweep start. Newly listed or
+        newly eligible pairs are appended to the unprocessed tail; removed/banned
+        pairs are removed from that tail. The already processed prefix never moves.
+        """
+        ordered = list(dict.fromkeys(str(p).upper() for p in current_targets if p))
+        if not self._scan_sweep_pairs:
+            self._scan_sweep_pairs = ordered
+            self._scan_sweep_cursor = 0
+            self._sweep_done = set()
+            return
+
+        # A process may restart after the last pair was committed but before
+        # the outer loop advanced the pass counter. Complete that boundary once.
+        if self._scan_sweep_cursor >= len(self._scan_sweep_pairs):
+            self._scan_sweep_number += 1
+            self._scan_sweep_pairs = ordered
+            self._scan_sweep_cursor = 0
+            self._sweep_done = set()
+            log.info("[SCAN][CURSOR] putaran sebelumnya selesai saat restart; mulai dari pair pertama.")
+            return
+
+        cursor = max(0, min(int(self._scan_sweep_cursor), len(self._scan_sweep_pairs)))
+        processed = self._scan_sweep_pairs[:cursor]
+        processed_set = set(processed)
+        current_set = set(ordered)
+        old_remaining = [p for p in self._scan_sweep_pairs[cursor:] if p in current_set]
+        old_remaining_set = set(old_remaining)
+        new_remaining = [p for p in ordered if p not in processed_set and p not in old_remaining_set]
+        self._scan_sweep_pairs = processed + old_remaining + new_remaining
+        self._scan_sweep_cursor = len(processed)
+        self._sweep_done = processed_set
+
+    def _scan_batch_bounds(self) -> tuple[int, int, int]:
+        """Return 0-based logical batch [start, end) and full universe size."""
+        total = len(self._scan_sweep_pairs)
+        cursor = max(0, min(int(self._scan_sweep_cursor), total))
+        size = max(1, int(SCAN_MAX_PAIRS_PER_CYCLE))
+        start = (cursor // size) * size
+        end = min(start + size, total) if total else 0
+        return start, end, total
 
     def _start_sync_task(self) -> None:
         if self._sync_task is None or self._sync_task.done():
@@ -6877,19 +6925,59 @@ class TradingEngine:
                     self.h4_sweeps = sweeps
             except (TypeError, ValueError):
                 pass
+            progress = settings_doc.get("scan_progress") or {}
+            if isinstance(progress, dict):
+                saved_pairs = progress.get("pairs") or []
+                try:
+                    saved_cursor = int(progress.get("cursor") or 0)
+                    saved_sweep_number = int(progress.get("sweep_number") or 0)
+                except (TypeError, ValueError):
+                    saved_cursor, saved_sweep_number = 0, 0
+                self._scan_sweep_number = max(0, saved_sweep_number)
+                if isinstance(saved_pairs, list):
+                    clean_pairs = []
+                    for value in saved_pairs:
+                        pair = normalize_symbol(str(value or ""))
+                        if pair and pair not in clean_pairs and pair not in {"BTCUSDT", "ETHUSDT"}:
+                            clean_pairs.append(pair)
+                    if clean_pairs and 0 <= saved_cursor <= len(clean_pairs):
+                        self._scan_sweep_pairs = clean_pairs
+                        self._scan_sweep_cursor = saved_cursor
+                        self._sweep_done = set(clean_pairs[:saved_cursor])
+                        log.info(
+                            "[SCAN][CURSOR] progres dipulihkan | putaran=%s posisi=%s/%s",
+                            self._scan_sweep_number + 1, saved_cursor, len(clean_pairs),
+                        )
         except Exception as exc:  # noqa: BLE001
             log.info("[SETTINGS] runtime settings tidak dimuat: %s", exc)
 
     async def _save_runtime_settings(self) -> None:
-        payload = {
-            "version": 3, "saved_at": iso_utc(),
-            "guard": {
-                "trail_mode": self.trail_mode, "h4_sweeps": self.h4_sweeps,
-                "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
-                "drawdown": None if self.drawdown_percent is None else str(self.drawdown_percent),
-            },
-        }
-        await self.github.replace_file(RUNTIME_SETTINGS_PATH, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "settings")
+        lock = getattr(self, "_runtime_settings_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._runtime_settings_lock = lock
+        async with lock:
+            payload = {
+                "version": 3, "saved_at": iso_utc(),
+                "guard": {
+                    "trail_mode": self.trail_mode, "h4_sweeps": self.h4_sweeps,
+                    "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
+                    "drawdown": None if self.drawdown_percent is None else str(self.drawdown_percent),
+                },
+                "scan_progress": {
+                    "version": 1,
+                    "pairs": list(self._scan_sweep_pairs),
+                    "cursor": int(self._scan_sweep_cursor),
+                    "sweep_number": int(self._scan_sweep_number),
+                    "batch_size": int(SCAN_MAX_PAIRS_PER_CYCLE),
+                    "updated_at": iso_utc(),
+                },
+            }
+            await self.github.replace_file(
+                RUNTIME_SETTINGS_PATH,
+                json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                "settings",
+            )
 
     async def _ram_guard(self) -> None:
         """Jaga RAM: kecilkan cache candle bertahap saat mendekati batas lunak."""
@@ -6927,7 +7015,7 @@ class TradingEngine:
         rows = [
             f"🧠 RAM {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB • level {self._ram_level}",
             f"🗃 Cache candle {cache.get('entries', 0)} entri • {cache.get('approx_mb', 0)} MB",
-            f"🛰 Batch terakhir {('-' if not durs else f'{durs[-1]:.0f}s')} • sapuan {self._h4_cycle_count}/{self.h4_sweeps} • tersapu {len(self._sweep_done)} pair",
+            f"🛰 Batch terakhir {('-' if not durs else f'{durs[-1]:.0f}s')} • putaran {self._scan_sweep_number + 1} • posisi {self._scan_sweep_cursor}/{len(self._scan_sweep_pairs) or '-'}",
             f"📡 API headroom {('-' if head is None else f'{head:.0f}%')} • 429/418 {API_STATS.limit_hits}x",
             f"🪜 Trail {self.trail_mode.upper()}",
         ]
@@ -6962,7 +7050,7 @@ class TradingEngine:
         self._h4_window_slot = None
         self._h4_window_deadline = None
         self._h4_opening_gate = False
-        self._sweep_done = set()
+        self._sweep_done = set(self._scan_sweep_pairs[:self._scan_sweep_cursor])
         self._sweep_complete = False
 
     async def _scan_loop(self) -> None:
@@ -6984,7 +7072,7 @@ class TradingEngine:
                         self._h4_invalid_slot_key = None
                         self._h4_opening_gate = True
                         self._h4_cycle_count = 0
-                        self._sweep_done = set()
+                        self._sweep_done = set(self._scan_sweep_pairs[:self._scan_sweep_cursor])
                         self._sweep_complete = False
                         self._scan_auto_paused = False
                         log.info("[SCAN][H4] window dibuka slot %s | target %s sapuan penuh", self._h4_slot_key(slot), self.h4_sweeps)
@@ -7028,8 +7116,15 @@ class TradingEngine:
 
                 if self._sweep_complete:
                     self._h4_cycle_count += 1
+                    self._scan_sweep_number += 1
+                    self._scan_sweep_pairs = []
+                    self._scan_sweep_cursor = 0
                     self._sweep_done = set()
                     self._sweep_complete = False
+                    try:
+                        await self._save_runtime_settings()
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("[SCAN][CURSOR] progres putaran selesai gagal disimpan: %s", exc)
                     if self._h4_enabled and self._h4_window_active:
                         log.info("[SCAN][H4] sapuan penuh %s/%s selesai", self._h4_cycle_count, self.h4_sweeps)
                         if self._h4_cycle_count >= self.h4_sweeps:
@@ -7664,14 +7759,23 @@ class TradingEngine:
             if self._skip_until.get(pair, 0.0) > now_m:
                 continue
             targets.append(pair)
-        pending = [p for p in targets if p not in self._sweep_done]
-        batch = pending[:SCAN_MAX_PAIRS_PER_CYCLE]
-        total_targets = len(targets)
+        # Freeze the pair order for one full universe rotation. A logical batch
+        # is exactly 100 pair positions; the 240s runtime budget may process it
+        # over several scan-loop passes, but the cursor never jumps or restarts.
+        self._prepare_scan_sweep(targets)
+        batch_start, batch_end, total_targets = self._scan_batch_bounds()
+        batch = self._scan_sweep_pairs[self._scan_sweep_cursor:batch_end]
+        batch_number = (batch_start // max(1, SCAN_MAX_PAIRS_PER_CYCLE)) + 1 if total_targets else 0
+        batch_count = (total_targets + max(1, SCAN_MAX_PAIRS_PER_CYCLE) - 1) // max(1, SCAN_MAX_PAIRS_PER_CYCLE)
+        batch_start_label = batch_start + 1 if batch else 0
+        batch_end_label = batch_end
+        completed_before = self._scan_sweep_cursor
 
         await self.reply(card(f"🧭 TACTICAL V10 E_GE2_ATR • SCAN #{cycle}", [
             "D1 bias → D1 FVG AOI → H4 FVG (LONG) / OB (SHORT)",
             "M15 literal MSS → M5 BOS → M5 limit entry • fixed SL / RR 1:2",
-            f"Sapuan {self._h4_cycle_count + 1}/{self.h4_sweeps if self._h4_enabled else '∞'} • batch {len(batch)} • sisa {max(0, len(pending) - len(batch))} • excluded BTC/ETH • banned {banned}",
+            f"Putaran {self._scan_sweep_number + 1} • batch {batch_number}/{batch_count} • koin {batch_start_label}-{batch_end_label}/{total_targets}",
+            f"Progres batch {max(0, completed_before - batch_start)}/{max(0, batch_end - batch_start)} • setelah batch sisa {max(0, total_targets - batch_end)} • excluded BTC/ETH • banned {banned}",
         ]))
 
         stats = {"scanned": 0, "below": 0, "rejected": 0, "errors": 0, "valid": 0, "added": 0, "waiting": 0, "waiting_m5_bos": 0, "watch_queued": 0}
@@ -7699,7 +7803,7 @@ class TradingEngine:
                 break
 
             stats["scanned"] += 1
-            self._sweep_done.add(pair)
+            pair_completed = False
             try:
                 candidate = await self._scan_generate_for_pair(module, pair, cycle)
                 v10 = (candidate.get("analysis") or {}).get("v10", {})
@@ -7730,9 +7834,9 @@ class TradingEngine:
                     candidates.append(candidate)
                     if len(candidates) > SCAN_VALIDATE_TOP_N:
                         del candidates[SCAN_VALIDATE_TOP_N:]
+                pair_completed = True
             except Exception as exc:
                 stats["errors"] += 1
-                self._sweep_done.discard(pair)
                 if classify_error(exc) == ErrorCategory.RATE_LIMIT or getattr(exc, "binance_rate_limited", False):
                     rate_limited += 1
                 if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
@@ -7747,17 +7851,23 @@ class TradingEngine:
                     stopped_early = True
                     break
                 if getattr(exc, "insufficient_history", False):
-                    self._sweep_done.add(pair)
                     self._skip_until[pair] = time.time() + float(SCAN_BANNED_HISTORY_HOURS) * 3600.0
                     log.info("[SCAN V10] %s dilewati: riwayat M5 kurang dari 65 hari lengkap | %s", pair, exc)
+                    pair_completed = True
                 else:
-                    self._sweep_done.add(pair)
                     log.warning("[SCAN V10] analisis %s gagal: %s", pair, str(exc)[:180])
+                    pair_completed = True
+            if pair_completed:
+                self._scan_sweep_cursor += 1
+                self._sweep_done.add(pair)
             await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
 
         self._last_cycle_analyzed = stats["scanned"]
-        remaining = [p for p in targets if p not in self._sweep_done]
-        self._sweep_complete = (not remaining) and (not stopped_early) and total_targets > 0
+        self._sweep_done = set(self._scan_sweep_pairs[:self._scan_sweep_cursor])
+        self._sweep_complete = (
+            self._scan_sweep_cursor >= total_targets
+            and total_targets > 0
+        )
 
         notes: list[str] = []
         validated: list[dict[str, Any]] = []
@@ -7802,24 +7912,40 @@ class TradingEngine:
         stats["added"] = len(added_trades)
         duration = time.monotonic() - started
         self._scan_durations.append(duration)
+        batch_processed = max(0, self._scan_sweep_cursor - batch_start)
+        batch_total = max(0, batch_end - batch_start)
+        progress_pct = (self._scan_sweep_cursor / total_targets * 100.0) if total_targets else 0.0
         self._scan_last_report = {
             "cycle": cycle, "strategy": "TACTICAL_V10_E_GE2_ATR", **stats,
             "duration_seconds": duration, "qualified_candidates": qualified_candidates,
-            "universe_total": total_targets, "sweep_done": len(self._sweep_done),
+            "universe_total": total_targets, "sweep_done": self._scan_sweep_cursor,
+            "sweep_number": self._scan_sweep_number + 1,
+            "batch_number": batch_number, "batch_total": batch_count,
+            "batch_start": batch_start_label, "batch_end": batch_end_label,
+            "batch_processed": batch_processed, "batch_size": batch_total,
+            "progress_pct": progress_pct,
             "sweep_complete": self._sweep_complete, "stopped_early": stopped_early,
         }
+        try:
+            await self._save_runtime_settings()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[SCAN][CURSOR] progres round-robin gagal disimpan: %s", exc)
         log.info(
-            "[SCAN V10] batch #%s selesai | scanned=%s waiting=%s waiting_m5_bos=%s watch_queued=%s candidates=%s valid=%s paper_added=%s %.1fs sweep_complete=%s",
-            cycle, stats["scanned"], stats["waiting"], stats["waiting_m5_bos"], stats["watch_queued"], qualified_candidates, stats["valid"], stats["added"], duration, self._sweep_complete,
+            "[SCAN V10] cycle #%s | round=%s batch=%s/%s range=%s-%s processed=%s/%s progress=%s/%s (%.1f%%) | scanned=%s waiting=%s waiting_m5_bos=%s watch_queued=%s candidates=%s valid=%s paper_added=%s %.1fs sweep_complete=%s",
+            cycle, self._scan_sweep_number + 1, batch_number, batch_count, batch_start_label, batch_end_label,
+            batch_processed, batch_total, self._scan_sweep_cursor, total_targets, progress_pct,
+            stats["scanned"], stats["waiting"], stats["waiting_m5_bos"], stats["watch_queued"], qualified_candidates, stats["valid"], stats["added"], duration, self._sweep_complete,
         )
         await self.reply(
             f"🧭 TACTICAL V10 E_GE2_ATR • SCAN #{cycle} SELESAI • {duration:.0f}s • RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
-            f"├ Dipindai {stats['scanned']} • tersapu {len(self._sweep_done)}/{total_targets} • waiting trigger {stats['waiting']}\n"
+            f"├ Putaran {self._scan_sweep_number + 1} • progres {self._scan_sweep_cursor}/{total_targets} ({progress_pct:.1f}%)\n"
+            f"├ Batch {batch_number}/{batch_count} • pair {batch_start_label}-{batch_end_label} • selesai {batch_processed}/{batch_total}\n"
+            f"├ Dicoba sesi ini {stats['scanned']} • waiting trigger {stats['waiting']}\n"
             f"├ D1 🟢 {direction_counts['BULLISH']} 🔴 {direction_counts['BEARISH']} ⚪ {direction_counts['RANGE']}\n"
             f"├ V10 qualifying {qualified_candidates} • waiting M5 BOS {stats['waiting_m5_bos']} • masuk watch {stats['watch_queued']}\n"
             f"├ valid {stats['valid']} • paper trade baru {stats['added']}\n"
             f"├ ditolak {stats['rejected']} • error {stats['errors']} • BTC/ETH excluded\n"
-            f"└ Sapuan {'✅ selesai' if self._sweep_complete else 'berlanjut'}"
+            f"└ {'PUTARAN PENUH SELESAI • putaran berikutnya kembali ke pair pertama' if self._sweep_complete else f'Batch berlanjut • posisi berikutnya {self._scan_sweep_cursor + 1}/{total_targets}'}"
             + ("\n" + "\n".join(notes) if notes else "")
         )
 
@@ -8201,7 +8327,8 @@ class TradingEngine:
                 + (f"Next H4: {self._h4_next_slot_text()}\n" if self._h4_enabled else "")
                 + f"Threshold: {decimal_to_str(self.scan_threshold)}\n"
                 f"Max Active Trade: {self.max_active_trades}\n"
-                f"Max Pair/Cycle: {SCAN_MAX_PAIRS_PER_CYCLE}\n"
+                f"Batch Pair: {SCAN_MAX_PAIRS_PER_CYCLE} (urutan round-robin)\n"
+                f"Progress: putaran {self._scan_sweep_number + 1} • {self._scan_sweep_cursor}/{len(self._scan_sweep_pairs) or '-'} pair\n"
                 f"Interval Cycle: {SCAN_CYCLE_DELAY_SECONDS:g}s\n"
                 f"Delay Pair: {SCAN_PAIR_DELAY_SECONDS:g}s"
             )
