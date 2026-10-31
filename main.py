@@ -1,70 +1,37 @@
 from __future__ import annotations
 
 """
-MAIN.PY
-========
-Trading simulator engine untuk try.py launcher.
+MAIN.PY — Tactical V10 E_GE2_ATR paper engine.
 
-Kontrak dengan try.py:
+Kontrak try.py:
     async def on_start(context)
     async def handle_update(update, context)
     async def on_stop(context)
 
-Prinsip:
-- Binance USDⓈ-M Futures = market data publik + real execution opsional.
-- REAL selalu OFF pada session baru dan hanya aktif setelah /real on.
-- Price Now pada /add diambil REST satu kali.
-- Harga live setelah setup dibuat berasal dari Binance WebSocket.
-- Active trade hanya ada di RAM selama sesi main.py.
-- /end membersihkan seluruh active state.
-- Histori permanen ditulis langsung ke GitHub:
-    data/trades.json
-    data/events.jsonl
-    data/trade_history.md
-- /stats membaca histori dan menghitung statistik.
-- /analyze membuat:
-    analysis/full_data.json
-    analysis/analysis.md
-- /setup menyimpan snapshot setup aktif ke data/setups.json.
-- /open memulihkan snapshot setup tersebut setelah main.py diganti.
-- /auto menjembatani main.py ke strategy.py dan meminta konfirmasi user.
-- /scan menjalankan universe Binance USD-M USDT perpetual -> directional H4 -> strategy.py -> threshold -> validator -> M5 close confirmation sesuai scorer backtest -> structural finalizer -> /trade.
-- /H4 mengatur gate scheduler scanner pada close H4: 03:00, 07:00, 11:00, 15:00, 19:00, 23:00 WIB.
-- /threshold mengatur ambang confidence scanner.
-- /max membatasi total active PENDING + FILLED dan dapat mem-pause/resume /scan otomatis.
-- /close PAIR|all menutup paksa active setup dan tetap mencatat hasil ke history.
-- /banned dan /unban mengelola ban pair; ban otomatis diterapkan untuk Price Exp/TP/SL/Margin Influence.
-- /wrong menghapus active setup yang benar-benar salah tanpa mencatat history.
-- /remove menghapus satu trade dari histori GitHub beserta event dan journal terkait.
-- /resetstats mengarsipkan lalu mereset histori trade/event agar stats mulai dari nol (tes strategy baru).
-- strategy.py wajib menyediakan generate_setup(pair, context), fetch_series(), validate_setup(), finalize_confirmed_setup(), dan analyze_trailing(). Scorer M5 berada di main.py agar sama dengan backtester yang diunggah.
-- SCAN: batch 100 pair; mode H4 = seluruh koin disapu 2x per window (bukan 2 batch), MAX penuh = tidak menganalisis.
-- Tanpa lapisan riset/replay: main = data->eksekusi->pencatatan, strategy = otak (analisis + trailing).
+Arsitektur aktif:
+- main.py adalah satu-satunya pemilik Binance USD-M public REST, WebSocket,
+  candle cache, pagination, rate-limit cooldown, Telegram, dan paper ledger.
+- strategy.py adalah Tactical V10 E_GE2_ATR state machine; tidak memiliki
+  koneksi jaringan atau candle cache mandiri.
+- Pipeline sinyal: D1 bias -> D1 FVG AOI -> H4 FVG (LONG) / H4 OB (SHORT)
+  -> literal MSS M15 -> fresh BOS close-cross M5 -> M5 limit entry.
+- LONG wajib memiliki jarak ke D1 protected swing low >= 2.0 ATR D1 saat BOS.
+  SHORT tidak memakai filter jarak tambahan.
+- LONG entry zone: FVG M5 dengan OB fallback. SHORT entry zone: FVG M5 saja.
+- SL memakai 12 candle M15 tertutup, TP RR 1:2, biaya simulasi 8 bps,
+  pending limit berakhir setelah lebih dari 72 candle M5, max hold 2016 candle M5.
+- BTCUSDT dan ETHUSDT dikecualikan dari universe V10. BTC tidak menjadi veto
+  atau confidence modifier.
+- Semua analisis memakai candle Binance yang sudah tertutup. Data H4/M15/D1
+  diturunkan dari M5 dengan batas candle UTC yang sama seperti backtest.
+- Build ini hanya untuk pemindaian dan paper monitoring; private order API
+  dinonaktifkan dan /real on tidak dapat mengaktifkannya.
 
-RINGKASAN PEKERJAAN V3 (main.py)
-================================
-Masalah global -> solusi:
-1. Lapisan riset (ResearchStore/ReplaySim/CandidateLedger/RecheckBook/btc-watch/risk-budget/export dataset/command
-   /research /candidates /edge /risk /btcwatch /export /resetresearch) DIHAPUS. main = data -> eksekusi -> pencatatan;
-   strategy.py = otak. Pengaruh BTC tetap hanya modifier confidence (bukan veto).
-2. /trail saat WebSocket stale: harga acuan WS live -> bila stale coba REST sekali -> bila gagal TIDAK memblokir
-   (peringatan saja; format SL tetap divalidasi, Binance menolak bila level sudah terlewati).
-3. H4 ON: window dibuka hanya di jadwal H4. Target = H4_SWEEPS_PER_WINDOW (2) SAPUAN PENUH = seluruh koin
-   (~500) dianalisis 2x (bukan 2 batch/scan). Batch 100 pair, jeda 5 dtk. /h4sweep n mengubah jumlahnya.
-   MAX penuh = TIDAK menganalisis: slot dilewati; di tengah window sapuan dijeda dan lanjut bila ada slot kosong
-   sebelum close H4 berikutnya. Window berakhir di close H4 berikutnya bila sapuan belum selesai.
-4. Trail lebih aktif: mode default "hybrid" (sebelumnya "structure" = hampir tak pernah trail karena baru jalan
-   setelah rejection >=60% jarak TP dan tangga R dimatikan). Kini: tangga R (diperpanjang sampai 10R),
-   struktur M15, fractal 9 candle, chandelier ATR, rejection, pembalikan arus buyer/seller. Aktif sejak +0.8R,
-   cek tiap 45 dtk (sebelumnya 90 dtk, mulai 1R), min step 0.05R, min gap 0.25R.
-5. RR tak terbatas (min tetap 1:2): TP awal tetap target struktural terbaik; saat harga >=80% jarak TP dan momentum
-   masih searah (tanpa rejection, delta tidak berbalik) TP DIGESER ke target H4/H1 berikutnya atau +ekstensi R
-   (REAL: pasang TP baru -> batalkan TP lama; SIM: ubah TP). Berulang sampai trailing SL menutup.
-6. Price Exp / expired: TTL pending 12 jam (PENDING_TTL_HOURS) agar limit basi tidak menggantung; selebihnya
-   kalibrasi di strategy.py.
-7. API & RAM: harga/fill dari WebSocket; REST candle incremental + cache dibatasi; scan berhenti bila headroom
-   bobot IP <10%; limit Binance -> scan jeda, posisi/TP/SL tetap di Binance; _ram_guard mengecilkan cache candle
-   bertahap (70% / 90% dari MEMORY_SOFT_LIMIT_MB). Ban pair & setup tersimpan di GitHub (seperti sebelumnya).
+Catatan parity:
+- Hasil Tactical V10 E_GE2_ATR yang tersimpan adalah hasil development 2023–2025,
+  bukan bukti performa out-of-sample 2026.
+- Paper monitoring memakai urutan tick WebSocket; tie SL/TP intrabar pada satu
+  candle tidak dapat dipastikan identik dengan backtest OHLC yang memprioritaskan SL.
 """
 
 import asyncio
@@ -91,7 +58,7 @@ import logging
 import os
 import re
 import time
-from collections import deque
+from collections import deque, OrderedDict
 import traceback
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -1032,6 +999,9 @@ ENDPOINT_WEIGHTS = {
     "/fapi/v2/account": 5,
     "/fapi/v1/accountConfig": 5,
     "/fapi/v1/userTrades": 5,
+    "/fapi/v1/klines": 5,  # konservatif untuk limit candle 500-1000
+    "/fapi/v1/exchangeInfo": 1,
+    "/fapi/v2/ticker/price": 1,
 }
 
 
@@ -1156,46 +1126,273 @@ class BinanceREST:
         self._ticker_24h_cache: list[dict[str, Any]] | None = None
         self._ticker_24h_cached_at = 0.0
         self._ticker_24h_cache_ttl_seconds = 60.0
+        # One REST owner for the whole process. Kline cache is bounded by both
+        # entry count and candle count; strategy.py never opens its own socket.
+        self._request_lock = asyncio.Lock()
+        self._last_request_monotonic = 0.0
+        self._rest_cooldown_until = 0.0
+        self._kline_cache: OrderedDict[tuple[str, str, int], tuple[float, list[list[Any]]]] = OrderedDict()
+        self._kline_locks: dict[tuple[str, str, int], asyncio.Lock] = {}
+        self._kline_cache_candles = 0
+        self._kline_cache_max_entries = 96
+        self._kline_cache_max_candles = 220_000
+        self._kline_cache_ttl = {"5m": 300.0, "15m": 45.0, "1h": 120.0, "4h": 300.0, "1d": 900.0}
 
     async def _get(
         self,
         path: str,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        def request() -> Any:
-            response = requests.get(
-                f"{self.base_url}{path}",
-                params=params or {},
-                timeout=HTTP_REQUEST_SECONDS,
-            )
+        """Serialized public REST request with central cooldown and telemetry."""
+        params = params or {}
+        async with self._request_lock:
+            wait = self._rest_cooldown_until - time.monotonic()
+            if wait > 0:
+                log.warning("[BINANCE REST] cooldown aktif %.1fs; request %s ditahan", wait, path)
+                await asyncio.sleep(wait)
+            spacing = self._last_request_monotonic + 0.12 - time.monotonic()
+            if spacing > 0:
+                await asyncio.sleep(spacing)
 
-            API_STATS.record(
-                path,
-                response.status_code,
-                response.headers.get("X-MBX-USED-WEIGHT-1M"),
-            )
-            if response.status_code in {418, 429}:
-                server, known = rate_limit_wait(response)
+            def request() -> tuple[int, Any, dict[str, str], str]:
+                response = requests.get(
+                    f"{self.base_url}{path}", params=params,
+                    timeout=HTTP_REQUEST_SECONDS,
+                )
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                return response.status_code, payload, dict(response.headers), response.text[:500]
+
+            status, payload, headers, body_text = await asyncio.to_thread(request)
+            self._last_request_monotonic = time.monotonic()
+            used = headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m")
+            API_STATS.record(path, status, used)
+
+            code = payload.get("code") if isinstance(payload, dict) else None
+            message = payload.get("msg") if isinstance(payload, dict) else body_text
+            limited = status in {418, 429} or str(code) in {"-1003", "-1015"} or "too many requests" in str(message).lower()
+            if limited:
+                server_seconds, known = rate_limit_wait(type("ResponseLike", (), {
+                    "headers": headers, "status_code": status, "text": body_text,
+                })())
+                cooldown = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+                self._rest_cooldown_until = max(self._rest_cooldown_until, time.monotonic() + cooldown)
                 raise BinanceRateLimitError(
-                    f"Binance REST {path}: HTTP {response.status_code}",
-                    status_code=response.status_code,
-                    code=None,
+                    f"Binance REST {path}: HTTP {status}, code={code}, {message}",
+                    status_code=status or 429,
+                    code=int(code) if str(code).lstrip("-").isdigit() else None,
                     endpoint=path,
-                    server_cooldown_seconds=server,
-                    bot_cooldown_seconds=server + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
+                    server_cooldown_seconds=server_seconds,
+                    bot_cooldown_seconds=cooldown,
                     retry_after_known=known,
                 )
+            if status >= 400:
+                raise RuntimeError(f"Binance REST {path}: HTTP {status}: {message}")
+            if payload is None:
+                raise RuntimeError(f"Binance REST {path}: respons JSON tidak valid")
+            return payload
 
-            if response.status_code >= 400:
+    @staticmethod
+    def _interval_ms(interval: str) -> int:
+        token = str(interval or "").strip().lower()
+        aliases = {
+            "5": 300_000, "5m": 300_000, "15": 900_000, "15m": 900_000,
+            "60": 3_600_000, "1h": 3_600_000, "240": 14_400_000,
+            "4h": 14_400_000, "d": 86_400_000, "1d": 86_400_000,
+        }
+        if token not in aliases:
+            raise ValueError(f"Interval Binance tidak didukung: {interval}")
+        return aliases[token]
+
+    @staticmethod
+    def _binance_interval(interval: str) -> str:
+        token = str(interval or "").strip()
+        aliases = {"5": "5m", "15": "15m", "60": "1h", "240": "4h", "D": "1d"}
+        return aliases.get(token, aliases.get(token.upper(), token.lower()))
+
+    async def get_klines(
+        self, symbol: str, interval: str, count: int, interval_ms: int | None = None,
+        *, force_refresh: bool = False,
+    ) -> list[list[Any]]:
+        """Single-flight wrapper: concurrent identical candle reads share one fetch."""
+        symbol = normalize_symbol(symbol)
+        api_interval = self._binance_interval(interval)
+        # One lock per symbol/timeframe, regardless of requested lookback size.
+        # A larger fresh cache entry can satisfy smaller lookbacks without another REST call.
+        lock_key = (symbol, api_interval, 0)
+        lock = self._kline_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            result = await self._get_klines_locked(
+                symbol, api_interval, count, interval_ms, force_refresh=force_refresh
+            )
+        if len(self._kline_locks) > 512:
+            for old_key, old_lock in list(self._kline_locks.items()):
+                if old_key != lock_key and not old_lock.locked():
+                    self._kline_locks.pop(old_key, None)
+                    if len(self._kline_locks) <= 384:
+                        break
+        return result
+
+    async def _get_klines_locked(
+        self, symbol: str, interval: str, count: int, interval_ms: int | None = None,
+        *, force_refresh: bool = False,
+    ) -> list[list[Any]]:
+        """Return closed USD-M klines; expired histories are extended, not re-downloaded."""
+        symbol = normalize_symbol(symbol)
+        count = max(1, min(20_000, int(count)))
+        api_interval = self._binance_interval(interval)
+        span_ms = int(interval_ms or self._interval_ms(api_interval))
+        key = (symbol, api_interval, count)
+        now = time.monotonic()
+        ttl = self._kline_cache_ttl.get(api_interval, 60.0)
+        cached_exact = self._kline_cache.get(key)
+
+        if cached_exact and len(cached_exact[1]) >= count:
+            cached_rows = [list(row) for row in cached_exact[1][-count:]]
+            if not force_refresh and now - cached_exact[0] <= ttl:
+                self._kline_cache.move_to_end(key)
+                return cached_rows
+
+            # Incremental refresh: retain the historical warm-up window and fetch
+            # only bars after its newest CLOSED candle. This is critical for V10's
+            # 18,720-bar replay; the first fetch is paginated, later ones are tiny.
+            now_ms = int(time.time() * 1000)
+            last_open = max(int(row[0]) for row in cached_rows)
+            next_open = last_open + span_ms
+            merged = {int(row[0]): list(row) for row in cached_rows}
+            attempts = 0
+            while next_open + span_ms <= now_ms and attempts < 24:
+                attempts += 1
+                remaining_closed = max(1, (now_ms - next_open) // span_ms)
+                page_limit = min(1000, int(remaining_closed) + 1)
+                payload = await self._get("/fapi/v1/klines", {
+                    "symbol": symbol, "interval": api_interval,
+                    "startTime": next_open, "limit": page_limit,
+                })
+                if not isinstance(payload, list) or not payload:
+                    break
+                page_max_open = None
+                for row in payload:
+                    if not isinstance(row, (list, tuple)) or len(row) < 7:
+                        continue
+                    try:
+                        open_ms = int(row[0])
+                    except (TypeError, ValueError):
+                        continue
+                    page_max_open = open_ms if page_max_open is None else max(page_max_open, open_ms)
+                    if open_ms >= next_open and open_ms + span_ms <= now_ms:
+                        merged[open_ms] = list(row)
+                if page_max_open is None or len(payload) < page_limit:
+                    break
+                advanced = page_max_open + span_ms
+                if advanced <= next_open:
+                    break
+                next_open = advanced
+
+            rows = [merged[t] for t in sorted(merged)][-count:]
+            if len(rows) < count:
                 raise RuntimeError(
-                    f"Binance REST {path}: HTTP "
-                    f"{response.status_code}: "
-                    f"{response.text[:500]}"
+                    f"Riwayat incremental Binance {symbol} {api_interval} tidak lengkap: {len(rows)}/{count}."
                 )
+            old = self._kline_cache.pop(key, None)
+            if old:
+                self._kline_cache_candles -= len(old[1])
+            self._kline_cache[key] = (time.monotonic(), rows)
+            self._kline_cache_candles += len(rows)
+            self._kline_cache.move_to_end(key)
+            while (len(self._kline_cache) > self._kline_cache_max_entries
+                   or self._kline_cache_candles > self._kline_cache_max_candles):
+                _old_key, (_at, old_rows) = self._kline_cache.popitem(last=False)
+                self._kline_cache_candles = max(0, self._kline_cache_candles - len(old_rows))
+            return [list(row) for row in rows]
 
-            return response.json()
+        if not force_refresh:
+            reusable = [
+                (cache_key, cache_value)
+                for cache_key, cache_value in self._kline_cache.items()
+                if cache_key[0] == symbol and cache_key[1] == api_interval
+                and len(cache_value[1]) >= count and now - cache_value[0] <= ttl
+            ]
+            if reusable:
+                cache_key, cached = min(reusable, key=lambda item: len(item[1][1]))
+                self._kline_cache.move_to_end(cache_key)
+                return [list(row) for row in cached[1][-count:]]
 
-        return await asyncio.to_thread(request)
+        # Cold start only: page backward to collect the bounded closed-candle window.
+        now_ms = int(time.time() * 1000)
+        end_ms = now_ms
+        collected: dict[int, list[Any]] = {}
+        attempts = 0
+        while len(collected) < count and attempts < 24:
+            attempts += 1
+            remaining = count - len(collected)
+            page_limit = min(1000, max(1, remaining + 1))
+            payload = await self._get("/fapi/v1/klines", {
+                "symbol": symbol, "interval": api_interval,
+                "endTime": end_ms, "limit": page_limit,
+            })
+            if not isinstance(payload, list) or not payload:
+                break
+            oldest: int | None = None
+            for row in payload:
+                if not isinstance(row, (list, tuple)) or len(row) < 7:
+                    continue
+                try:
+                    open_ms = int(row[0])
+                except (TypeError, ValueError):
+                    continue
+                oldest = open_ms if oldest is None else min(oldest, open_ms)
+                if open_ms + span_ms <= now_ms:
+                    collected[open_ms] = list(row)
+            if oldest is None or len(payload) < page_limit:
+                break
+            end_ms = oldest - 1
+
+        rows = [collected[t] for t in sorted(collected)][-count:]
+        if len(rows) < count:
+            error = RuntimeError(
+                f"Riwayat closed candle Binance {symbol} {api_interval}: {len(rows)}/{count}; "
+                "dibutuhkan 66 hari kalender candle M5 agar tersisa minimal 65 hari setelah alignment UTC."
+            )
+            error.insufficient_history = True
+            raise error
+
+        old = self._kline_cache.pop(key, None)
+        if old:
+            self._kline_cache_candles -= len(old[1])
+        self._kline_cache[key] = (time.monotonic(), rows)
+        self._kline_cache_candles += len(rows)
+        while (len(self._kline_cache) > self._kline_cache_max_entries
+               or self._kline_cache_candles > self._kline_cache_max_candles):
+            _old_key, (_at, old_rows) = self._kline_cache.popitem(last=False)
+            self._kline_cache_candles = max(0, self._kline_cache_candles - len(old_rows))
+        return [list(row) for row in rows]
+
+    def kline_cache_stats(self) -> dict[str, Any]:
+        approx_bytes = self._kline_cache_candles * 160
+        return {
+            "entries": len(self._kline_cache),
+            "candles": self._kline_cache_candles,
+            "approx_mb": round(approx_bytes / (1024 * 1024), 3),
+            "max_entries": self._kline_cache_max_entries,
+            "max_candles": self._kline_cache_max_candles,
+            "owner": "main.py",
+        }
+
+    def trim_kline_cache(self, fraction: float = 0.5, pair: str | None = None) -> int:
+        """Evict least-recently-used kline entries; fraction=1 clears matching entries."""
+        fraction = max(0.0, min(1.0, float(fraction)))
+        keys = [key for key in self._kline_cache if pair is None or key[0] == normalize_symbol(pair)]
+        target = len(keys) if fraction >= 1.0 else int(len(keys) * fraction)
+        removed = 0
+        for key in keys[:target]:
+            old = self._kline_cache.pop(key, None)
+            if old is not None:
+                self._kline_cache_candles = max(0, self._kline_cache_candles - len(old[1]))
+                removed += 1
+        return removed
 
     async def get_exchange_info(self, force: bool = False) -> dict[str, SymbolMeta]:
         now = time.monotonic()
@@ -1325,8 +1522,10 @@ class BinanceREST:
 
 
 # ============================================================
-# BINANCE REAL EXECUTION
+# BINANCE REAL EXECUTION (LOCKED OFF IN THIS BUILD)
 # ============================================================
+
+REAL_EXECUTION_ENABLED = False  # Do not change in this paper-monitoring build.
 
 class BinanceAPIError(RuntimeError):
     def __init__(
@@ -1500,6 +1699,11 @@ class BinanceRealClient:
         signed: bool = True,
         retry_timestamp_error: bool = True,
     ) -> Any:
+        if not REAL_EXECUTION_ENABLED:
+            raise BinanceAPIError(
+                "Private Binance API dinonaktifkan pada build paper-only.",
+                endpoint=path,
+            )
         if signed and not self.configured:
             raise BinanceAPIError(
                 "BINANCE_API_KEY / BINANCE_API_SECRET belum tersedia di environment.",
@@ -3259,8 +3463,8 @@ class TradingEngine:
 
         await self.reply(
             "🟢 MAIN.PY ONLINE\n\n"
-            f"Mode: {'REAL' if self.real_mode else 'SIMULATION'}\n"
-            "Market: Binance USDⓈ-M Futures\n"
+            "Mode: PAPER / SIMULATION (REAL EXECUTION DISABLED)\n"
+            "Market data: Binance USDⓈ-M public API + WebSocket\n"
             "WebSocket: CONNECTING\n"
             f"Session: {self.session_id}\n\n"
             "Active Trade: 0\n\n"
@@ -3547,71 +3751,13 @@ class TradingEngine:
         await self.reply("\n\n".join(lines))
 
     async def _set_real_on(self) -> None:
-        if self.real_mode:
-            await self.reply("🟢 REAL MODE SUDAH ON")
-            return
-
-        if not self.real.configured:
-            raise ValueError(
-                "BINANCE_API_KEY dan BINANCE_API_SECRET belum tersedia di environment."
-            )
-
-        if self.real.cooldown_remaining > 0:
-            remaining = self.real.cooldown_remaining
-            raise ValueError(
-                f"Binance sedang cooldown rate-limit. Tunggu sekitar {remaining:.0f} detik."
-            )
-
-        try:
-            # Exactly one private balance request when /real is enabled.
-            balances = await self.real.get_futures_balance()
-            usdt = next(
-                (row for row in balances if str(row.get("asset") or "").upper() == "USDT"),
-                None,
-            )
-            if usdt is None:
-                raise BinanceAPIError(
-                    "USDT tidak ditemukan pada Futures balance.",
-                    endpoint="/fapi/v3/balance",
-                )
-            wallet_balance = parse_signed_decimal(str(usdt.get("balance") or "0"))
-
-            # Cache the current exchange account position mode once so the
-            # first real order can choose BOTH/LONG/SHORT correctly.
-            await self.real.ensure_position_mode()
-            try:
-                await self.real.get_account_info()
-            except Exception as exc:
-                # Position cache is an optimization/filter; real entry still has
-                # its final fresh positionRisk safety check.
-                log.info("[REAL MODE] initial position snapshot gagal: %s", exc)
-
-            self.real_mode = True
-            self.real.last_balance = dict(usdt)
-            self.real.last_balance_at = time.monotonic()
-            self._equity_peak = self._current_equity_cached()
-            self._equity_last = self._equity_peak
-            self._autostop_triggered = False
-            self._autostop_failures = 0
-            self._start_autostop_task()
-
-            await self.reply(
-                "🔴🤖 REAL MODE AKTIF\n\n"
-                "Private Binance API: ✅ Terhubung\n"
-                f"USDT Balance: {decimal_to_str(wallet_balance)}\n"
-                f"Current Equity: {self._fmt_usd(self._equity_last)} USDT\n"
-                f"Margin: {decimal_to_str(self.margin_usdt)} USDT\n"
-                f"Leverage: {self.leverage}x\n"
-                f"Autostop: {self._autostop_short()}\n\n"
-                "⚠️ Order real sekarang dapat dibuat oleh setup yang memakai mode REAL."
-            )
-        except BinanceRateLimitError as exc:
-            self._notify_rate_limit(exc, "REAL MODE ON")
-            raise
-        except Exception as exc:
-            self.real_mode = False
-            await self._handle_real_exception(exc, "REAL MODE ON")
-            raise
+        """Real order execution is intentionally unavailable in this build."""
+        self.real_mode = False
+        await self.reply(
+            "🔒 REAL EXECUTION DINONAKTIFKAN PADA BUILD INI\n\n"
+            "Bot hanya mengambil market data publik Binance dan menjalankan setup/paper monitoring. "
+            "Perintah /real on tidak tersedia."
+        )
 
     async def _set_real_off(self) -> None:
         if not self.real_mode:
@@ -3969,6 +4115,7 @@ class TradingEngine:
         return quantity, margin * Decimal(leverage), actual
 
     async def _ensure_real_entry(self, trade: Trade, from_release: bool = False) -> None:
+        raise RuntimeError("REAL EXECUTION dinonaktifkan; entry hanya boleh berupa simulasi/paper.")
         if not self.real_mode or trade.entry_order_id or trade.entry_client_order_id:
             return
         if not from_release and self._limit_hold_blocking():
@@ -6928,7 +7075,7 @@ class TradingEngine:
         head = self._api_headroom_pct()
         return "\n\n" + card("🧭 PRIORITAS API", [
             f"📉 Headroom  {('-' if head is None else f'{head:.0f}%')} (scan berhenti < {SCAN_MIN_API_HEADROOM_PCT:.0f}%)",
-            "Prioritas: proteksi/real > trailing > scan > validasi.",
+            "Prioritas: feed harga > pengelolaan paper setup > scan > validasi.",
             "Harga & fill dibaca dari WebSocket; REST dipakai hemat (cache candle + incremental).",
         ])
 
@@ -7803,10 +7950,10 @@ class TradingEngine:
         await self.reply("Akhir daftar. Gunakan /candidates N untuk melihat satu halaman; /candidates tetap menampilkan semua kandidat aktif. Perintah ini read-only dan tidak meminta candle baru ke Binance.")
 
     async def _run_scan_cycle_inner(self) -> None:
-        """Satu batch (<= SCAN_MAX_PAIRS_PER_CYCLE pair) dari sapuan berjalan. Tidak menganalisis bila MAX penuh."""
+        """Jalankan Tactical V10 E_GE2_ATR terhadap universe Binance secara paper-only."""
         self._last_cycle_analyzed = 0
         if max(0.0, self._binance_public_cooldown_until - time.monotonic()) > 0:
-            log.info("[SCAN] batch dilewati: jeda limit Binance; lanjut otomatis setelah jeda.")
+            log.info("[SCAN V10] batch dilewati: jeda limit Binance; lanjut otomatis setelah cooldown.")
             return
         if len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
@@ -7820,17 +7967,11 @@ class TradingEngine:
         self._strategy_module_ref = module
         if generation != self._scan_generation or not self._scan_user_enabled:
             return
+        if str(getattr(module, "STRATEGY_NAME", "")) != "TACTICAL_V10_E_GE2_ATR":
+            raise RuntimeError("SCAN menolak strategy yang bukan TACTICAL_V10_E_GE2_ATR.")
 
-        btc_raw, btc_fallback = await self._scan_get_structure(module, "BTCUSDT", cycle)
-        btc_analysis = btc_raw.get("analysis") if isinstance(btc_raw, dict) else {}
-        btc_trend = str(btc_raw.get("trend") or self._extract_structure_trend(btc_analysis, "btc_h4") or "UNKNOWN").upper()
-        if btc_fallback is not None:
-            btc_analysis = btc_fallback.get("analysis") or btc_analysis
-            btc_trend = self._extract_structure_trend(btc_analysis, "btc_h4") or btc_trend
-        if btc_trend not in {"BULLISH", "BEARISH", "RANGE"}:
-            btc_trend = "RANGE"
-        self._purge_stale_structure_bans(btc_trend)
-
+        # V10 uses per-symbol D1 bias and does not use BTC as a confidence modifier or veto.
+        self._purge_stale_structure_bans("RANGE")
         universe = await self._build_scan_universe()
         rows = universe["rows"]
         now_m = time.time()
@@ -7839,7 +7980,7 @@ class TradingEngine:
         banned = 0
         for row in rows:
             pair = row["pair"]
-            if pair == "BTCUSDT" or pair in active_pairs:
+            if pair in {"BTCUSDT", "ETHUSDT"} or pair in active_pairs:
                 continue
             if self._is_pair_banned(pair):
                 banned += 1
@@ -7851,77 +7992,59 @@ class TradingEngine:
         batch = pending[:SCAN_MAX_PAIRS_PER_CYCLE]
         total_targets = len(targets)
 
-        await self.reply(card(f"🛰️ SCAN #{cycle}", [
-            f"₿ BTC H4 {btc_trend}",
-            f"🔁 Sapuan {self._h4_cycle_count + 1}/{self.h4_sweeps if self._h4_enabled else '∞'} • batch {len(batch)} • sisa {max(0, len(pending) - len(batch))} • banned {banned}",
+        await self.reply(card(f"🧭 TACTICAL V10 E_GE2_ATR • SCAN #{cycle}", [
+            "D1 bias → D1 FVG AOI → H4 FVG (LONG) / OB (SHORT)",
+            "M15 literal MSS → M5 BOS → M5 limit entry • fixed SL / RR 1:2",
+            f"Sapuan {self._h4_cycle_count + 1}/{self.h4_sweeps if self._h4_enabled else '∞'} • batch {len(batch)} • sisa {max(0, len(pending) - len(batch))} • excluded BTC/ETH • banned {banned}",
         ]))
 
-        stats = {"scanned": 0, "below": 0, "rejected": 0, "errors": 0, "valid": 0, "added": 0}
+        stats = {"scanned": 0, "below": 0, "rejected": 0, "errors": 0, "valid": 0, "added": 0, "waiting": 0}
         direction_counts = {"BULLISH": 0, "BEARISH": 0, "RANGE": 0, "UNKNOWN": 0}
         candidates: list[dict[str, Any]] = []
-        qualified_candidates = 0  # all >= threshold; full objects retained only for top N
+        qualified_candidates = 0
         rate_limited = 0
         stopped_early = False
 
-        for index, pair in enumerate(batch, start=1):
+        for pair in batch:
             if generation != self._scan_generation or not self._scan_user_enabled:
                 return
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
                 stopped_early = True
                 break
-            if time.monotonic() - started > SCAN_CYCLE_TIME_BUDGET_SECONDS:
-                stopped_early = True
-                break
-            if rate_limited >= 3:
+            if time.monotonic() - started > SCAN_CYCLE_TIME_BUDGET_SECONDS or rate_limited >= 3:
                 stopped_early = True
                 break
             headroom = self._api_headroom_pct()
             if headroom is not None and headroom < SCAN_MIN_API_HEADROOM_PCT:
-                log.info("[SCAN] batch berhenti: headroom API %.0f%% < %.0f%%.", headroom, SCAN_MIN_API_HEADROOM_PCT)
+                log.info("[SCAN V10] batch berhenti: headroom API %.0f%% < %.0f%%.", headroom, SCAN_MIN_API_HEADROOM_PCT)
                 stopped_early = True
                 break
 
             stats["scanned"] += 1
             self._sweep_done.add(pair)
             try:
-                structure, reused = await self._scan_get_structure(module, pair, cycle)
-                pair_trend = str(structure.get("trend") or "UNKNOWN").upper()
-                direction_counts[pair_trend if pair_trend in direction_counts else "UNKNOWN"] += 1
-                candidate = reused if reused is not None else await self._scan_generate_for_pair(module, pair, cycle)
-
-                # BTC = konteks confidence, bukan veto.
-                direction = str(candidate.get("direction") or "").upper()
-                try:
-                    btc_conf = float((((structure.get("analysis") or {}).get("btc_regime") or {}).get("confidence")) or 50.0)
-                except (TypeError, ValueError):
-                    btc_conf = 50.0
-                delta = 0.0
-                if btc_trend in {"BULLISH", "BEARISH"} and direction in {"BUY", "SELL"}:
-                    same = (btc_trend == "BULLISH" and direction == "BUY") or (btc_trend == "BEARISH" and direction == "SELL")
-                    delta += 4.0 if same else -(6.0 + 6.0 * max(0.0, min(1.0, (btc_conf - 50.0) / 50.0)))
-                aligned = btc_trend == "RANGE" or btc_trend == pair_trend
-                if not aligned:
-                    delta -= 3.0
-                try:
-                    raw_conf = float(candidate.get("confidence", 0.0))
-                except (TypeError, ValueError):
-                    raw_conf = 0.0
-                candidate["confidence"] = max(0.0, min(100.0, raw_conf + delta))
-                candidate["analysis"] = candidate.get("analysis") or {}
-                candidate["analysis"].setdefault("scan", {}).update({"cycle": cycle, "btc_h4_trend": btc_trend, "pair_h4_trend": pair_trend})
-                candidate["analysis"].setdefault("confidence_adjustments", {})["btc_context"] = {
-                    "btc_trend": btc_trend, "pair_trend": pair_trend, "raw_confidence": round(raw_conf, 2), "delta": round(delta, 2), "policy": "confidence_modifier_not_veto",
-                }
-                cstate = str(candidate.get("candidate_state") or "READY")
-                if cstate in {"DATA_UNAVAILABLE", "REJECTED_HARD", "REJECTED_QUALITY"}:
+                candidate = await self._scan_generate_for_pair(module, pair, cycle)
+                v10 = (candidate.get("analysis") or {}).get("v10", {})
+                d1_bias = str(v10.get("d1_bias") or "NEUTRAL").upper()
+                pair_trend = "BULLISH" if d1_bias == "LONG" else "BEARISH" if d1_bias == "SHORT" else "RANGE"
+                direction_counts[pair_trend] += 1
+                candidate.setdefault("analysis", {}).setdefault("scan", {}).update({
+                    "cycle": cycle,
+                    "engine": "TACTICAL_V10_STATE_MACHINE",
+                    "btc_context": "NOT_USED",
+                    "entry_confirmation": "V10_MSS_M15_THEN_BOS_M5",
+                })
+                cstate = str(candidate.get("candidate_state") or "READY").upper()
+                if cstate == "WAITING_TRIGGER":
+                    stats["waiting"] += 1
+                elif cstate not in {"READY", "FILLED"}:
                     stats["rejected"] += 1
-                elif Decimal(str(candidate["confidence"])) < self.scan_threshold:
-                    stats["below"] += 1
                 else:
+                    # 100 means all V10 conditions passed; it is NOT win probability.
+                    candidate["confidence"] = Decimal("100")
                     qualified_candidates += 1
                     candidates.append(candidate)
-                    candidates.sort(key=lambda item: Decimal(str(item.get("confidence") or "0")), reverse=True)
                     if len(candidates) > SCAN_VALIDATE_TOP_N:
                         del candidates[SCAN_VALIDATE_TOP_N:]
             except Exception as exc:
@@ -7936,28 +8059,25 @@ class TradingEngine:
                         float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
                     )
                     self._binance_public_cooldown_until = max(self._binance_public_cooldown_until, time.monotonic() + max(5.0, wait))
-                    log.warning(binance_limit_log(exc, wait, f"analisis pair {pair}",
-                                                  "scan berhenti sementara dan lanjut otomatis setelah jeda; pair yang belum dianalisis dilanjutkan setelahnya."))
+                    log.warning(binance_limit_log(exc, wait, f"Tactical V10 {pair}", "scan dijeda; candle dan state paper tetap disimpan."))
                     self._on_public_rate_limit(exc, wait)
                     stopped_early = True
                     break
                 if getattr(exc, "insufficient_history", False):
                     self._sweep_done.add(pair)
                     self._skip_until[pair] = time.time() + float(SCAN_BANNED_HISTORY_HOURS) * 3600.0
-                    log.info("[SCAN] %s dilewati 24 jam, riwayat candle kurang | %s", pair, exc)
+                    log.info("[SCAN V10] %s dilewati: riwayat M5 kurang dari 65 hari lengkap | %s", pair, exc)
                 else:
-                    self._sweep_done.add(pair)  # jangan ulang pair bermasalah dalam sapuan yang sama
-                    log.warning("[SCAN] analisis %s gagal: %s", pair, str(exc)[:160])
+                    self._sweep_done.add(pair)
+                    log.warning("[SCAN V10] analisis %s gagal: %s", pair, str(exc)[:180])
             await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
 
         self._last_cycle_analyzed = stats["scanned"]
         remaining = [p for p in targets if p not in self._sweep_done]
         self._sweep_complete = (not remaining) and (not stopped_early) and total_targets > 0
 
-        # ---- validator (kandidat confidence tertinggi) lalu buka setup
-        candidates.sort(key=lambda c: Decimal(str(c.get("confidence") or "0")), reverse=True)
         validated: list[dict[str, Any]] = []
-        for candidate in candidates[:SCAN_VALIDATE_TOP_N]:
+        for candidate in candidates:
             if generation != self._scan_generation or not self._scan_user_enabled or len(self.active_trades) >= self.max_active_trades:
                 break
             try:
@@ -7971,38 +8091,42 @@ class TradingEngine:
                     self._binance_public_cooldown_until = max(self._binance_public_cooldown_until, time.monotonic() + wait)
                     self._on_public_rate_limit(exc, wait)
                     break
-                log.warning("[SCAN] validator %s gagal: %s", candidate.get("pair"), str(exc)[:160])
-            await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+                log.warning("[SCAN V10] validator %s gagal: %s", candidate.get("pair"), str(exc)[:180])
 
-        queued, notes = await self._queue_m5_watch_candidates(module, validated, generation, cycle)
-        stats["added"] = queued
+        added_trades, notes = await self._open_validated(validated, generation)
+        stats["added"] = len(added_trades)
         duration = time.monotonic() - started
         self._scan_durations.append(duration)
         self._scan_last_report = {
-            "cycle": cycle, "btc_h4_trend": btc_trend, **stats,
-            "duration_seconds": duration,
-            "qualified_candidates": qualified_candidates,
-            "universe_total": total_targets,
-            "sweep_done": len(self._sweep_done),
-            "sweep_complete": self._sweep_complete,
-            "stopped_early": stopped_early,
+            "cycle": cycle, "strategy": "TACTICAL_V10_E_GE2_ATR", **stats,
+            "duration_seconds": duration, "qualified_candidates": qualified_candidates,
+            "universe_total": total_targets, "sweep_done": len(self._sweep_done),
+            "sweep_complete": self._sweep_complete, "stopped_early": stopped_early,
         }
-        log.info("[SCAN] batch #%s selesai | scanned=%s kandidat_lolos_threshold=%s kandidat_disimpan=%s valid=%s queued_m5=%s %.1fs sapuan_selesai=%s",
-                 cycle, stats["scanned"], qualified_candidates, len(candidates), stats["valid"], stats["added"], duration, self._sweep_complete)
+        log.info(
+            "[SCAN V10] batch #%s selesai | scanned=%s waiting=%s candidates=%s valid=%s paper_added=%s %.1fs sweep_complete=%s",
+            cycle, stats["scanned"], stats["waiting"], qualified_candidates, stats["valid"], stats["added"], duration, self._sweep_complete,
+        )
         await self.reply(
-            f"🔄 SCAN #{cycle} SELESAI • {duration:.0f}s • RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
-            f"├ Dipindai {stats['scanned']}  • tersapu {len(self._sweep_done)}/{total_targets}\n"
-            f"├ H4 🟢 {direction_counts['BULLISH']} 🔴 {direction_counts['BEARISH']} ⚪ {direction_counts['RANGE']}\n"
-            f"├ ≥ Threshold {qualified_candidates} • validator top {len(candidates)} • valid {stats['valid']} • masuk M5 watch {queued}\n"
-            f"├ M5 watch aktif {len(self._scan_watchlist)} • di bawah threshold {stats['below']} • ditolak {stats['rejected']} • error {stats['errors']}\n"
+            f"🧭 TACTICAL V10 E_GE2_ATR • SCAN #{cycle} SELESAI • {duration:.0f}s • RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
+            f"├ Dipindai {stats['scanned']} • tersapu {len(self._sweep_done)}/{total_targets} • waiting trigger {stats['waiting']}\n"
+            f"├ D1 🟢 {direction_counts['BULLISH']} 🔴 {direction_counts['BEARISH']} ⚪ {direction_counts['RANGE']}\n"
+            f"├ V10 qualifying {qualified_candidates} • valid {stats['valid']} • paper trade baru {stats['added']}\n"
+            f"├ ditolak {stats['rejected']} • error {stats['errors']} • BTC/ETH excluded\n"
             f"└ Sapuan {'✅ selesai' if self._sweep_complete else 'berlanjut'}"
             + ("\n" + "\n".join(notes) if notes else "")
         )
 
     async def _open_validated(self, validated: list[dict[str, Any]], generation: int) -> tuple[list[Trade], list[str]]:
+        if self.real_mode:
+            self.real_mode = False
+            raise RuntimeError("REAL EXECUTION lock aktif: setup tidak boleh dikirim ke Binance.")
         added: list[Trade] = []
         notes: list[str] = []
         for candidate in validated:
+            v10_candidate_id = str(candidate.get("v10_candidate_id") or candidate.get("candidate_id") or "")
+            if v10_candidate_id and v10_candidate_id in getattr(self, "_v10_opened_candidate_ids", set()):
+                continue
             manual_m5_auto = bool(candidate.get("m5_confirmed_entry")) and str(candidate.get("watch_origin") or "").upper() == "AUTO"
             if generation != self._scan_generation or (not self._scan_user_enabled and not manual_m5_auto):
                 break
@@ -8016,7 +8140,7 @@ class TradingEngine:
                 continue
             try:
                 meta = {
-                    "strategy_name": candidate.get("strategy_name") or "SMC_VLT_RSI",
+                    "strategy_name": candidate.get("strategy_name") or "TACTICAL_V10_E_GE2_ATR",
                     "strategy_version": candidate.get("strategy_version") or "SCAN",
                     "strategy_source": "AUTO" if str(candidate.get("watch_origin") or "").upper() == "AUTO" else "SCAN",
                     "strategy_confidence": candidate.get("confidence"),
@@ -8062,8 +8186,19 @@ class TradingEngine:
                         continue
                 self.active_trades[trade.trade_id] = trade
                 added.append(trade)
+                if v10_candidate_id:
+                    if not hasattr(self, "_v10_opened_candidate_ids"):
+                        self._v10_opened_candidate_ids = set()
+                    self._v10_opened_candidate_ids.add(v10_candidate_id)
                 await self.ws.add_symbol(trade.pair)
-                log.info("[SCAN] FINAL ADD %s confidence=%s trade_id=%s", trade.pair, decimal_to_str(trade.strategy_confidence), trade.trade_id)
+                if trade.strategy_name == "TACTICAL_V10_E_GE2_ATR" and trade.status == "FILLED":
+                    await self._record_event(
+                        trade, "FILLED", event_price=trade.fill_price or trade.entry,
+                        reason="V10 replay menunjukkan posisi sudah terisi sebelum snapshot live.",
+                        extra={"fill_price": decimal_to_str(trade.fill_price or trade.entry), "candidate_id": v10_candidate_id},
+                    )
+                    await self._notify_filled(trade)
+                log.info("[SCAN V10] PAPER ADD %s status=%s candidate=%s trade_id=%s", trade.pair, trade.status, v10_candidate_id or "-", trade.trade_id)
             except Exception:
                 log.exception("[SCAN] gagal memasukkan setup %s ke /trade", candidate.get("pair"))
             await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
@@ -8511,7 +8646,10 @@ class TradingEngine:
             return
         notional = self._sim_notional(trade)
         gross = notional * trade.pnl_percent / Decimal("100")
-        cost = notional * Decimal(str(EST_FEE_PCT_PER_SIDE + EST_SLIPPAGE_PCT_PER_SIDE + EST_ENTRY_FEE_PCT + EST_ENTRY_SLIPPAGE_PCT)) / Decimal("100")
+        if trade.strategy_name == "TACTICAL_V10_E_GE2_ATR":
+            cost = notional * Decimal("0.08") / Decimal("100")  # 8 bps round-trip, V10 backtest setting
+        else:
+            cost = notional * Decimal(str(EST_FEE_PCT_PER_SIDE + EST_SLIPPAGE_PCT_PER_SIDE + EST_ENTRY_FEE_PCT + EST_ENTRY_SLIPPAGE_PCT)) / Decimal("100")
         net = gross - cost
         self.sim_balance += net
         trade.risk_info = {**(trade.risk_info or {}), "sim_pnl_usdt": decimal_to_str(net), "sim_notional": decimal_to_str(notional)}
@@ -8893,10 +9031,8 @@ class TradingEngine:
             return
         if not self._scan_user_enabled:
             return
-        # The M5 monitor handles only queued candidate pairs. It may run while the
-        # H4 universe scanner is sleeping between scheduled H4 windows.
-        if self._m5_watch_task is None or self._m5_watch_task.done():
-            self._m5_watch_task = asyncio.create_task(self._m5_watch_loop(), name="main-m5-watch-loop")
+        # Tactical V10 owns its complete D1→H4→M15→M5 state machine. The legacy
+        # second-stage M5 watch loop is intentionally not started for this engine.
         if not self._h4_enabled and len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
             return
@@ -8949,12 +9085,72 @@ class TradingEngine:
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
         module.REQUEST_OBSERVER = API_STATS.record
+        self._configure_strategy_provider(module)
         previous = getattr(self, "_strategy_runtime_module", None)
         if previous is not None:
             sys.modules.pop(getattr(previous, "__name__", ""), None)
         self._strategy_runtime_module = module
         self._strategy_runtime_signature = signature
         return module
+
+    async def _strategy_fetch_series(
+        self, module, pair: str, interval: str, count: int, interval_ms: int, *, force_refresh: bool = False
+    ):
+        rows = await self.rest.get_klines(
+            pair, interval, count, interval_ms, force_refresh=force_refresh
+        )
+        candles = []
+        candle_type = getattr(module, "Candle", None)
+        if candle_type is None:
+            raise RuntimeError("strategy.py tidak menyediakan dataclass Candle.")
+        for row in rows:
+            try:
+                candles.append(candle_type(
+                    time_ms=int(row[0]), open=float(row[1]), high=float(row[2]),
+                    low=float(row[3]), close=float(row[4]), volume=float(row[5]),
+                    turnover=float(row[7]) if len(row) > 7 else 0.0,
+                    taker_buy=float(row[9]) if len(row) > 9 else 0.0,
+                ))
+            except (TypeError, ValueError, IndexError):
+                continue
+        if len(candles) < int(count):
+            raise RuntimeError(
+                f"Riwayat closed candle {pair} {interval}: {len(candles)}/{count}; "
+                "pair dilewati sampai data mencukupi."
+            )
+        return candles[-int(count):], "BINANCE"
+
+    async def _strategy_fetch_price(self, pair: str):
+        symbol = normalize_symbol(pair)
+        snapshot = self.prices.get(symbol)
+        if snapshot is not None and snapshot.live and snapshot.price > 0:
+            return float(snapshot.price), "BINANCE_WS"
+        return float(await self.rest.get_price(symbol)), "BINANCE_REST"
+
+    async def _strategy_get_tick_size(self, pair: str):
+        symbol = normalize_symbol(pair)
+        meta = self.symbols.get(symbol)
+        if meta is None:
+            self.symbols = await self.rest.get_exchange_info()
+            meta = self.symbols.get(symbol)
+        return float(meta.tick_size) if meta is not None else 0.0
+
+    def _configure_strategy_provider(self, module) -> None:
+        configure = getattr(module, "configure_market_data_provider", None)
+        if not callable(configure):
+            raise RuntimeError(
+                "strategy.py harus mendukung configure_market_data_provider(); "
+                "jalur REST internal strategi tidak lagi diizinkan."
+            )
+        configure(
+            get_series=lambda pair, interval, count, interval_ms, force_refresh=False: self._strategy_fetch_series(
+                module, pair, interval, count, interval_ms, force_refresh=force_refresh
+            ),
+            get_price=self._strategy_fetch_price,
+            get_tick_size=self._strategy_get_tick_size,
+            get_cache_stats=self.rest.kline_cache_stats,
+            trim_cache=self.rest.trim_kline_cache,
+        )
 
     async def _call_strategy_function(self, module, name: str, *args, **kwargs):
         fn = getattr(module, name, None)
@@ -9026,10 +9222,11 @@ class TradingEngine:
             "data_provider": policy["provider"],
             "allow_binance_fallback": False,
             "scan_market_snapshot": snapshot,
-            "timeframe": "15m",
-            "candles_requested": 672,
+            "timeframe": "5m",
+            "candles_requested": 19008,
+            "strategy_engine": "TACTICAL_V10_E_GE2_ATR",
             "notes": copy.deepcopy(self.notes),
-            "engine_version": "SCAN_BRIDGE_3_BINANCE_ONLY",
+            "engine_version": "TACTICAL_V10_BRIDGE_1",
         }
 
     async def _scan_generate_for_pair(self, module, pair: str, cycle_number: int) -> dict[str, Any]:
@@ -9040,6 +9237,28 @@ class TradingEngine:
             pair,
             self._make_scan_context(pair, cycle_number, module=module),
         )
+        if isinstance(result, dict) and str(result.get("candidate_state") or "").upper() == "WAITING_TRIGGER":
+            data_info = result.get("data") if isinstance(result.get("data"), dict) else {}
+            data_source = str(result.get("data_source") or "").upper()
+            if not data_source.startswith(policy["prefix"]):
+                raise RuntimeError(f"SCAN menolak {pair}: V10 mengembalikan sumber data {data_source or '-'}.")
+            if data_info.get("fallback_used"):
+                raise RuntimeError(f"SCAN menolak {pair}: V10 melaporkan fallback data aktif.")
+            return {
+                "pair": pair,
+                "direction": str(result.get("direction") or "").upper(),
+                "confidence": Decimal("0"),
+                "candidate_state": "WAITING_TRIGGER",
+                "strategy_name": str(result.get("strategy_name") or "TACTICAL_V10_E_GE2_ATR"),
+                "strategy_version": str(result.get("strategy_version") or "10.0.0"),
+                "strategy": copy.deepcopy(result.get("strategy") or {}),
+                "analysis": compact_analysis(result.get("analysis") or {}),
+                "data_source": data_source,
+                "analysis_source": str(result.get("analysis_source") or policy["source"]).upper(),
+                "data": copy.deepcopy(data_info),
+                "state_reason": str(result.get("state_reason") or ""),
+                "raw_result": copy.deepcopy(result),
+            }
         normalized = self._normalize_auto_result(result, pair)
         data_source = str(normalized.get("data_source") or "").upper()
         raw_payload = normalized.get("raw_result") if isinstance(normalized.get("raw_result"), dict) else {}
@@ -10040,7 +10259,7 @@ class TradingEngine:
             "strategy_name": str(
                 strategy_info.get("name")
                 or payload.get("strategy_name")
-                or "SMC_VLT_RSI"
+                or "TACTICAL_V10_E_GE2_ATR"
             ).strip(),
             "strategy_version": str(
                 strategy_info.get("version")
@@ -10084,6 +10303,19 @@ class TradingEngine:
             "gate_reasons": self._json_safe(payload.get("gate_reasons") or []),
             "thesis_signature": str(payload.get("thesis_signature") or ""),
             "setup_archetype": str(payload.get("setup_archetype") or ""),
+            # Preserve Tactical V10 lifecycle fields across both normalization passes
+            # (generate_setup -> validator -> normalized ledger/trade record).
+            "candidate_id": str(payload.get("candidate_id") or ""),
+            "v10_candidate_id": str(payload.get("v10_candidate_id") or payload.get("candidate_id") or ""),
+            "v10_position_state": str(payload.get("v10_position_state") or "PENDING"),
+            "v10_order_created_at": payload.get("v10_order_created_at"),
+            "v10_filled_at": payload.get("v10_filled_at"),
+            "v10_fill_price": payload.get("v10_fill_price"),
+            "v10_pending_bars_elapsed": payload.get("v10_pending_bars_elapsed"),
+            "v10_position_bars_held": payload.get("v10_position_bars_held"),
+            "v10_max_hold_seconds": payload.get("v10_max_hold_seconds"),
+            "m5_confirmed_entry": bool(payload.get("m5_confirmed_entry")),
+            "entry_model": str(payload.get("entry_model") or ""),
         }
 
         return normalized
@@ -10121,6 +10353,9 @@ class TradingEngine:
                     "Periksa syntax/import strategy.py."
                 ) from exc
 
+            strategy_module.REQUEST_OBSERVER = API_STATS.record
+            self._configure_strategy_provider(strategy_module)
+
             generate_setup = getattr(
                 strategy_module,
                 "generate_setup",
@@ -10136,11 +10371,12 @@ class TradingEngine:
                 "pair": pair,
                 "session_id": self.session_id,
                 "market": "Binance USDⓈ-M Futures",
-                "timeframe": "15m",
-                "candles_requested": 672,
-                "price_trigger": "aggTrade last price",
+                "timeframe": "5m",
+                "candles_requested": 19008,
+                "strategy_engine": "TACTICAL_V10_E_GE2_ATR",
+                "price_trigger": "aggTrade last price for paper monitoring only",
                 "notes": copy.deepcopy(self.notes),
-                "engine_version": "AUTO_BRIDGE_1",
+                "engine_version": "TACTICAL_V10_AUTO_BRIDGE_1",
             }
 
             if inspect.iscoroutinefunction(generate_setup):
@@ -10157,6 +10393,20 @@ class TradingEngine:
 
             if inspect.isawaitable(result):
                 result = await result
+
+            if isinstance(result, dict) and str(result.get("candidate_state") or "").upper() == "WAITING_TRIGGER":
+                if self.flow and self.flow.get("kind") == "AUTO" and self.flow.get("job_id") == job_id:
+                    self.flow = None
+                    self._auto_job_id = None
+                    self._auto_task = None
+                    v10 = (result.get("analysis") or {}).get("v10", {})
+                    await self.reply(
+                        f"🧭 TACTICAL V10 • {pair} BELUM MEMILIKI SETUP AKTIF\n\n"
+                        f"D1 bias: {v10.get('d1_bias', 'NEUTRAL')}\n"
+                        "State machine belum mencapai state 6 (limit order) atau state 7 (filled position). "
+                        "Tidak ada kandidat yang dimasukkan ke /trade. Jalankan /auto lagi pada pemindaian berikutnya."
+                    )
+                return
 
             normalized = self._normalize_auto_result(
                 result,
@@ -10220,8 +10470,8 @@ class TradingEngine:
             "",
             f"Pair: {result['pair']}",
             f"Data: {result.get('data_source', '-')}",
-            f"Timeframe: {result.get('timeframe', '15m')}",
-            f"Candle: {result.get('candles_used') or result.get('candles_requested') or 672}",
+            f"Timeframe: {result.get('timeframe', '5m')}",
+            f"Candle: {result.get('candles_used') or result.get('candles_requested') or 19008}",
             "",
             f"Direction: {result['direction']}",
             f"Price Now: {decimal_to_str(result['price_now_reference'])}",
@@ -10230,13 +10480,13 @@ class TradingEngine:
             f"SL: {decimal_to_str(result['sl'])}",
             f"TP: {decimal_to_str(result['tp'])}",
             "",
-            f"Confidence: {decimal_to_str(result['confidence'])}/100",
+            f"V10 Rule-Pass Score: {decimal_to_str(result['confidence'])}/100 (bukan probabilitas menang)",
         ]
 
         if components:
             lines.extend([
                 "",
-                "Confidence Components:",
+                "Rule Components:",
             ])
             for name, score in components.items():
                 lines.append(
@@ -10317,10 +10567,10 @@ class TradingEngine:
             self.flow["step"] = "ANALYZING"
 
             await self.reply(
-                "🔎 AUTO ANALYSIS\n\n"
+                "🔎 TACTICAL V10 ANALYSIS\n\n"
                 f"Pair: {pair}\n"
-                "Sedang menganalisis 672 candle M15 yang sudah close...\n"
-                "Sumber data: Binance USD-M Public REST + Binance WebSocket"
+                "Sedang replay state machine pada 19.008 candle M5 yang sudah close (66 hari buffer; sekitar 65 hari setelah alignment UTC)...\n"
+                "Sumber data: Binance USD-M Public REST; WebSocket untuk paper monitoring."
             )
 
             task = asyncio.create_task(
@@ -10360,7 +10610,7 @@ class TradingEngine:
         )
 
     async def _confirm_auto(self) -> None:
-        """User approval accepts a candidate for M5 confirmation; it is not an immediate entry."""
+        """User approval registers a validated V10 state-6/7 paper setup."""
         if not self.flow or self.flow.get("kind") != "AUTO":
             raise RuntimeError("AUTO flow tidak aktif.")
         result = self.flow.get("data")
@@ -10390,7 +10640,25 @@ class TradingEngine:
                 self._auto_job_id = None
                 self._auto_task = None
                 await self.reply(
-                    f"❌ AUTO {pair} ditolak validator strategy.py. Tidak ada order yang dibuat."
+                    f"❌ AUTO {pair} ditolak validasi geometri V10. Tidak ada setup paper yang dibuat."
+                )
+                return
+            if checked.get("strategy_name") == "TACTICAL_V10_E_GE2_ATR":
+                checked["watch_origin"] = "AUTO"
+                added, notes = await self._open_validated([checked], self._scan_generation)
+                self.flow = None
+                self._auto_job_id = None
+                self._auto_task = None
+                if not added:
+                    await self.reply("❌ Setup V10 tidak dapat dimasukkan ke /trade. " + ("; ".join(notes[:2]) if notes else "Batas slot atau margin paper tercapai."))
+                    return
+                trade = added[0]
+                await self.reply(
+                    "✅ TACTICAL V10 • PAPER SETUP TERDAFTAR\n\n"
+                    f"Pair: {trade.pair} • {trade.direction}\n"
+                    f"State: {trade.status}\n"
+                    f"Entry: {fmt_price(trade.entry)} • SL: {fmt_price(trade.sl)} • TP: {fmt_price(trade.tp)}\n"
+                    "Tidak ada order yang dikirim ke Binance. Posisi dipantau sebagai simulasi berdasarkan harga WebSocket."
                 )
                 return
             if pair in self._scan_watchlist:
@@ -10501,7 +10769,7 @@ class TradingEngine:
                 price_value,
             )
 
-        m5_confirmed = bool(data.get("m5_confirmed_entry")) and str(data.get("entry_model") or "") == "H4_M15_M5_CONFIRM_STRUCTURAL"
+        m5_confirmed = bool(data.get("m5_confirmed_entry")) and str(data.get("entry_model") or "") == "V10_MSS_M15_BOS_M5_LIMIT"
         if m5_confirmed:
             # For an M5 close-trigger model, reference is deliberately the confirmation
             # close itself; do not require it to sit strictly between reference and entry.
@@ -10519,7 +10787,7 @@ class TradingEngine:
                 "Struktur harga setup tidak valid."
             )
 
-        return Trade(
+        trade = Trade(
             trade_id=generate_trade_id(pair),
             session_id=self.session_id,
             pair=pair,
@@ -10564,6 +10832,25 @@ class TradingEngine:
             ),
             leverage=int(meta.get("leverage") or self.leverage),
         )
+        if trade.strategy_name == "TACTICAL_V10_E_GE2_ATR":
+            trade.created_at = parse_iso(str(data.get("v10_order_created_at") or "")) or trade.created_at
+            trade.candidate_id = str(data.get("v10_candidate_id") or data.get("candidate_id") or "")
+            trade.risk_info = {
+                **(trade.risk_info or {}),
+                "strategy_variant": "E_GE2_ATR",
+                "v10_position_state": str(data.get("v10_position_state") or "PENDING").upper(),
+                "v10_max_hold_seconds": int(data.get("v10_max_hold_seconds") or (2016 * 300)),
+                "v10_pending_window_seconds": 73 * 300,
+                "v10_round_trip_cost_bps": 8,
+                "v10_analysis": compact_analysis(data.get("analysis") or {}).get("v10", {}),
+            }
+            if str(data.get("v10_position_state") or "PENDING").upper() == "FILLED":
+                trade.status = "FILLED"
+                trade.filled_at = parse_iso(str(data.get("v10_filled_at") or "")) or trade.created_at
+                raw_fill = data.get("v10_fill_price")
+                trade.fill_price = parse_decimal(str(raw_fill)) if raw_fill not in (None, "") else trade.entry
+                trade.pnl_percent = Decimal("0")
+        return trade
 
     # --------------------------------------------------------
     # ADD flow
@@ -13069,6 +13356,7 @@ class TradingEngine:
             "SL": "🛑 SL TERCAPAI",
             "TRAIL": "🔒 TRAILING SL TERCAPAI",
             "EXPIRED": "⏳ PRICE EXPIRED",
+            "INVALID_FILL": "⚠️ V10 LIMIT INVALIDATED AT SL",
             "DELETED": "🗑️ DELETED",
             "MANUAL_CLOSE_PENDING": "🔒 PENDING DITUTUP",
             "MANUAL_CLOSE": "🔒 DITUTUP MANUAL",
@@ -13111,36 +13399,55 @@ class TradingEngine:
         trade: Trade,
         price: Decimal,
     ) -> None:
+        invalid_v10_fill = False
         async with self._trade_lock:
-            current = self.active_trades.get(
-                trade.trade_id
+            current = self.active_trades.get(trade.trade_id)
+            if current is None or current.status != "PENDING":
+                return
+
+            if current.strategy_name == "TACTICAL_V10_E_GE2_ATR":
+                # Backtest mirror-fill rule: LONG=min(open, limit), SHORT=max(open, limit).
+                fill_price = min(current.entry, price) if current.direction == "BUY" else max(current.entry, price)
+                # Match V10's invalid_fill_touch guard: never open a position whose
+                # assumed limit fill is already at/beyond its protective SL.
+                invalid_v10_fill = (
+                    fill_price <= current.sl if current.direction == "BUY"
+                    else fill_price >= current.sl
+                )
+                if not invalid_v10_fill:
+                    current.fill_price = fill_price
+                    current.risk_info = {
+                        **(current.risk_info or {}),
+                        "v10_paper_fill_price": decimal_to_str(current.fill_price),
+                    }
+            else:
+                current.fill_price = current.entry
+
+            if not invalid_v10_fill:
+                current.status = "FILLED"
+                current.filled_at = now_utc()
+                current.pnl_percent = Decimal("0")
+                trade = current
+
+        if invalid_v10_fill:
+            await self._finalize_trade(
+                trade,
+                result="INVALID_FILL",
+                exit_price=price,
+                reason="V10 invalid_fill_touch: limit tersentuh tetapi asumsi harga fill sudah mencapai/melewati SL; posisi tidak dibuka.",
             )
-
-            if current is None:
-                return
-
-            if current.status != "PENDING":
-                return
-
-            current.status = "FILLED"
-            current.filled_at = now_utc()
-            current.fill_price = current.entry
-            current.pnl_percent = Decimal("0")
-
-            trade = current
+            return
 
         await self._record_event(
             trade,
             "FILLED",
-            event_price=price,
+            event_price=trade.fill_price or price,
             reason=trade.entry_reason,
             extra={
-                "fill_price": decimal_to_str(
-                    trade.entry
-                ),
+                "fill_price": decimal_to_str(trade.fill_price or trade.entry),
+                "limit_price": decimal_to_str(trade.entry),
             },
         )
-
         await self._notify_filled(trade)
 
     async def _notify_filled(self, trade: Trade) -> None:
@@ -13221,15 +13528,19 @@ class TradingEngine:
                     exp_hit = (
                         price >= trade.price_exp if trade.direction == "BUY" else price <= trade.price_exp
                     )
+                    if trade.strategy_name == "TACTICAL_V10_E_GE2_ATR":
+                        pending_ttl_seconds = 73 * 5 * 60
+                        pending_ttl_label = "bar M5 ke-73 (sekitar 6 jam 5 menit), sesuai PEND_WIN=72"
+                    else:
+                        pending_ttl_seconds = PENDING_TTL_HOURS * 3600.0
+                        pending_ttl_label = f"{PENDING_TTL_HOURS:g} jam"
                     if (
                         not exp_hit
                         and trade.strategy_source != "MANUAL"
-                        and (now_utc() - trade.created_at).total_seconds() > PENDING_TTL_HOURS * 3600.0
+                        and (now_utc() - trade.created_at).total_seconds() > pending_ttl_seconds
                     ):
                         exp_hit = True
-                        trade.price_exp_reason = (
-                            f"TTL {PENDING_TTL_HOURS:g} jam: limit entry belum tersentuh, thesis dianggap basi."
-                        )
+                        trade.price_exp_reason = f"TTL {pending_ttl_label}: limit entry belum tersentuh."
 
                     if trade.real_enabled and self.real_mode:
                         if trade.real_state == "REAL_LIMIT_HOLD":
@@ -13267,6 +13578,14 @@ class TradingEngine:
                         continue
 
                 elif trade.status == "FILLED":
+                    if trade.strategy_name == "TACTICAL_V10_E_GE2_ATR" and trade.filled_at is not None:
+                        max_hold_seconds = int((trade.risk_info or {}).get("v10_max_hold_seconds") or (2016 * 300))
+                        if (now_utc() - trade.filled_at).total_seconds() >= max_hold_seconds:
+                            await self._finalize_trade(
+                                trade, result="TO", exit_price=price,
+                                reason="V10 maximum holding period: 2016 candle M5 sejak fill (sekitar 7 hari).",
+                            )
+                            continue
                     async with self._trade_lock:
                         current = self.active_trades.get(
                             trade.trade_id
@@ -13314,23 +13633,29 @@ class TradingEngine:
                             await self._verify_real_protection(trade)
                     else:
                         if sl_hit:
+                            v10_exit = trade.strategy_name == "TACTICAL_V10_E_GE2_ATR"
+                            sl_exit_price = (
+                                min(price, trade.sl) if trade.direction == "BUY" else max(price, trade.sl)
+                            ) if v10_exit else price
                             await self._finalize_trade(
                                 trade,
                                 result="SL",
-                                exit_price=price,
+                                exit_price=sl_exit_price,
                                 reason=trade.sl_reason,
                             )
                             continue
                         if tp_hit:
+                            tp_exit_price = trade.tp if trade.strategy_name == "TACTICAL_V10_E_GE2_ATR" else price
                             await self._finalize_trade(
                                 trade,
                                 result="TP",
-                                exit_price=price,
+                                exit_price=tp_exit_price,
                                 reason=trade.tp_reason,
                             )
                             continue
 
-                    await self._auto_trail(trade, price)
+                    if trade.strategy_name != "TACTICAL_V10_E_GE2_ATR":
+                        await self._auto_trail(trade, price)
 
             except BinanceRateLimitError as exc:
                 self._notify_rate_limit(exc, f"PRICE EVENT {symbol}")
@@ -14699,7 +15024,7 @@ class TradingEngine:
             "Main: ONLINE\n"
             f"Mode: {'REAL OFF' if not self.real_mode else 'REAL ON'}\n"
             f"Session: {self.session_id}\n\n"
-            f"Binance REST: {'REAL API READY' if self.real.configured else 'PUBLIC ONLY'}\n"
+            f"Binance REST: PUBLIC MARKET DATA ONLY (REAL EXECUTION DISABLED)\n"
             f"WebSocket: {self.ws.status}\n"
             f"Symbols Subscribed: {len(self.ws.symbols())}\n"
             f"Fresh Price Feed: {fresh_prices}\n\n"
@@ -14733,7 +15058,7 @@ class TradingEngine:
             "/remove - menghapus data trade yang sudah masuk history\n"
             "/filled - ubah setup PENDING menjadi FILLED secara manual\n"
             "/close PAIR|all - tutup paksa setup dan catat hasil\n"
-            "/real on|off - aktif/nonaktifkan real execution\n"
+            "/real on - tidak tersedia pada build paper-only\n"
             "/margin [USDT] - atur margin target\n"
             "/leverage [angka] - atur leverage target\n"
             "/scan on|off - scanner otomatis\n"
