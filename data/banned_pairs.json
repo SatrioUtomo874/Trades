@@ -1,53 +1,11 @@
 {
   "version": 1,
-  "saved_at": "2026-10-26T01:56:33.190531+00:00",
+  "saved_at": "2026-10-31T15:11:39.768401+00:00",
   "bans": [
     {
-      "pair": "FOLKSUSDT",
-      "banned_at": "2026-10-25T13:57:14.793635+00:00",
-      "until": "2026-10-26T13:57:14.793603+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
-    },
-    {
-      "pair": "NILUSDT",
-      "banned_at": "2026-10-26T01:56:33.190353+00:00",
-      "until": "2026-10-27T01:56:33.190324+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "PENDLEUSDT",
-      "banned_at": "2026-10-25T22:07:01.488522+00:00",
-      "until": "2026-10-26T22:07:01.488493+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "PLAYUSDT",
-      "banned_at": "2026-10-26T01:39:14.364555+00:00",
-      "until": "2026-10-27T01:39:14.364528+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "SLXUSDT",
-      "banned_at": "2026-10-25T15:29:11.176581+00:00",
-      "until": "2026-10-26T15:29:11.176550+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
-    },
-    {
-      "pair": "TRIAUSDT",
-      "banned_at": "2026-10-26T00:12:22.271778+00:00",
-      "until": "2026-10-27T00:12:22.271753+00:00",
-      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
-      "source": "AUTO_TP"
-    },
-    {
-      "pair": "WCTUSDT",
-      "banned_at": "2026-10-25T12:31:28.765899+00:00",
-      "until": "2026-10-26T12:31:28.765866+00:00",
+      "pair": "EGLDUSDT",
+      "banned_at": "2026-10-31T15:11:39.768270+00:00",
+      "until": "2026-11-01T15:11:39.768239+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
     }
