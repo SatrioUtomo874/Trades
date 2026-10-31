@@ -14,7 +14,10 @@ Arsitektur aktif:
 - strategy.py adalah Tactical V10 E_GE2_ATR state machine; tidak memiliki
   koneksi jaringan atau candle cache mandiri.
 - Pipeline sinyal: D1 bias -> D1 FVG AOI -> H4 FVG (LONG) / H4 OB (SHORT)
-  -> literal MSS M15 -> fresh BOS close-cross M5 -> M5 limit entry.
+  -> literal MSS M15 -> persistent candidate queue -> fresh BOS close-cross M5
+  (evaluated only on closed M5 candles) -> M5 limit entry.
+- /candidates menampilkan hanya state-5 yang menunggu BOS; state re-arm menunggu
+  MSS berikutnya dipantau internal agar replay V10 tidak kehilangan attempt berikutnya.
 - LONG wajib memiliki jarak ke D1 protected swing low >= 2.0 ATR D1 saat BOS.
   SHORT tidak memakai filter jarak tambahan.
 - LONG entry zone: FVG M5 dengan OB fallback. SHORT entry zone: FVG M5 saja.
@@ -47,7 +50,6 @@ import gzip
 import io
 import math
 import sqlite3
-import statistics
 import threading
 import html  # kept out of user output; used only for safe GitHub text if needed
 import importlib
@@ -131,6 +133,7 @@ GITHUB_API = "https://api.github.com"
 HISTORY_TRADES_PATH = "data/trades.json"
 HISTORY_EVENTS_PATH = "data/events.jsonl"
 HISTORY_MARKDOWN_PATH = "data/trade_history.md"
+V10_CANDIDATES_PATH = "data/v10_candidates.json"
 
 ANALYSIS_JSON_PATH = "analysis/full_data.json"
 ANALYSIS_MD_PATH = "analysis/analysis.md"
@@ -199,11 +202,10 @@ SCAN_MAX_PAIRS_PER_CYCLE = 100
 SCAN_CYCLE_DELAY_SECONDS = 30.0
 # Monitor only validated watch candidates; never scan the full universe outside H4 slots.
 M5_WATCH_POLL_SECONDS = 3.0
-M5_WATCH_CANDLES = 98  # <100 Klines weight; enough warm history for the M5 confirmation model.
 M5_WATCH_MAX_CANDIDATES = 64
-M5_WATCH_CONFIRM_THRESHOLD = 72.0
-M5_WATCH_POI_WINDOW_BARS = 12
-M5_WATCH_TIMEOUT_BARS = 96  # max 8h after H4/M15 candidate creation.
+V10_BOS_TIMEOUT_M5_BARS = 144  # Tactical V10: BOS_WIN=144, dihitung dari close MSS.
+V10_WATCH_INTERVAL_MS = 300_000
+V10_CANDIDATE_SCHEMA_VERSION = 1
 MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "400") or "400")
 # H4 scanner gate: scanner baru membuka window pada penutupan H4 WIB.
 # Binance H4 boundaries dipetakan ke 03,07,11,15,19,23 WIB.
@@ -3032,152 +3034,6 @@ class RiskRejectError(RuntimeError):
 
 
 
-# ============================================================================
-# LIVE M5 CONFIRMATION — scoring logic ported from backtest(20261025-071811).py
-# ============================================================================
-
-def _m5_safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        number = float(value)
-        return number if math.isfinite(number) else default
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _m5_clamp01(value: float) -> float:
-    return max(0.0, min(1.0, _m5_safe_float(value, 0.0)))
-
-
-def _score_m5_confirmation(active: dict[str, Any], candles: list[Any]) -> dict[str, Any]:
-    """Score a closed M5 confirmation using only bars available at this close.
-
-    V5 removes the old saturated structure/opposing-weakness points. The components
-    are continuous and evidence-based. This score is not a win-probability estimate.
-    """
-    result = {"score": 0.0, "poi_touch": False, "reason": "INSUFFICIENT_M5_HISTORY", "components": {}}
-    if len(candles) < 7:
-        return result
-    bar = candles[-1]
-    direction = str(active.get("direction") or "").upper()
-    if direction not in {"BUY", "SELL"}:
-        result["reason"] = "INVALID_DIRECTION"
-        return result
-
-    zone_low = _m5_safe_float(active.get("entry_zone_low"), _m5_safe_float(active.get("entry")))
-    zone_high = _m5_safe_float(active.get("entry_zone_high"), _m5_safe_float(active.get("entry")))
-    touch = bool(zone_low > 0 and zone_high >= zone_low and bar.low <= zone_high and bar.high >= zone_low)
-    result["poi_touch"] = touch
-
-    op, hi, lo, cl = map(_m5_safe_float, (bar.open, bar.high, bar.low, bar.close))
-    span = max(hi - lo, 1e-12)
-    body = abs(cl - op)
-    body_ratio = body / span
-    close_pos = _m5_clamp01((cl - lo) / span)
-    directional_close_pos = close_pos if direction == "BUY" else 1.0 - close_pos
-    directional_body = cl > op if direction == "BUY" else cl < op
-
-    lower_wick = max(0.0, min(op, cl) - lo)
-    upper_wick = max(0.0, hi - max(op, cl))
-    wick_ratio = lower_wick / span if direction == "BUY" else upper_wick / span
-    rejection_score = 20.0 * _m5_clamp01((wick_ratio - 0.12) / 0.48) * _m5_clamp01((directional_close_pos - 0.42) / 0.48)
-    close_score = 15.0 * _m5_clamp01((directional_close_pos - 0.40) / 0.50) * (0.65 + 0.35 * float(directional_body))
-
-    # ATR estimated from closed bars only (current candle is closed at this point).
-    ranges = []
-    for i in range(max(1, len(candles) - 14), len(candles)):
-        c = candles[i]
-        prev_close = _m5_safe_float(candles[i - 1].close)
-        ranges.append(max(
-            _m5_safe_float(c.high) - _m5_safe_float(c.low),
-            abs(_m5_safe_float(c.high) - prev_close),
-            abs(_m5_safe_float(c.low) - prev_close),
-        ))
-    atr = max(sum(ranges) / len(ranges), 1e-12) if ranges else span
-
-    prior = candles[-6:-1]  # five completed bars strictly before confirmation bar
-    prior_high = max(_m5_safe_float(c.high) for c in prior)
-    prior_low = min(_m5_safe_float(c.low) for c in prior)
-    prior_close = _m5_safe_float(prior[-1].close)
-    if direction == "BUY":
-        break_distance_atr = (cl - prior_high) / atr
-        breached = cl > prior_high
-        favorable_progress = cl > prior_close
-    else:
-        break_distance_atr = (prior_low - cl) / atr
-        breached = cl < prior_low
-        favorable_progress = cl < prior_close
-
-    if breached and directional_body:
-        displacement_quality = _m5_clamp01(max(0.0, break_distance_atr) / 0.30)
-        body_quality = _m5_clamp01(body / (0.55 * atr))
-        structure_score = 12.0 + 10.0 * displacement_quality + 8.0 * body_quality
-    elif favorable_progress and directional_close_pos >= 0.65 and directional_body:
-        structure_score = 7.0 + 5.0 * _m5_clamp01(body / (0.60 * atr))
-    else:
-        structure_score = 0.0
-
-    prior_volumes = [max(0.0, _m5_safe_float(c.volume)) for c in candles[-21:-1] if _m5_safe_float(c.volume) > 0]
-    median_volume = statistics.median(prior_volumes) if prior_volumes else 0.0
-    current_volume = max(0.0, _m5_safe_float(bar.volume))
-    volume_ratio = current_volume / median_volume if median_volume > 0 else 1.0
-    taker_buy = max(0.0, _m5_safe_float(getattr(bar, "taker_buy", 0.0)))
-    delta = max(-1.0, min(1.0, (2.0 * taker_buy / max(current_volume, 1e-12)) - 1.0))
-    directional_delta = delta if direction == "BUY" else -delta
-    delta_score = 10.0 * _m5_clamp01((directional_delta + 0.10) / 0.50)
-    volume_score = 10.0 * _m5_clamp01((volume_ratio - 0.70) / 1.30)
-    flow_score = delta_score + volume_score
-
-    counter = candles[-5:-1]
-    closes = [_m5_safe_float(c.close) for c in counter]
-    if direction == "BUY":
-        counter_steps = sum(1 for a, b in zip(closes, closes[1:]) if b < a)
-        counter_move_atr = (closes[0] - closes[-1]) / atr
-        swept_reclaimed = lo < min(_m5_safe_float(c.low) for c in prior) and close_pos >= 0.65
-    else:
-        counter_steps = sum(1 for a, b in zip(closes, closes[1:]) if b > a)
-        counter_move_atr = (closes[-1] - closes[0]) / atr
-        swept_reclaimed = hi > max(_m5_safe_float(c.high) for c in prior) and close_pos <= 0.35
-    stalled_counter = counter_steps >= 2 and counter_move_atr >= 0.30 and favorable_progress and directional_close_pos >= 0.60
-    opposing_weakness = 15.0 if swept_reclaimed or (stalled_counter and breached and directional_body) else 7.0 if stalled_counter else 0.0
-
-    components = {
-        "poi_touch_current_bar": 100.0 if touch else 0.0,
-        "rejection_wick": round(rejection_score, 2),
-        "directional_close": round(close_score, 2),
-        "micro_structure": round(structure_score, 2),
-        "taker_delta_score": round(delta_score, 2),
-        "relative_volume_score": round(volume_score, 2),
-        "taker_flow_and_relative_volume": round(flow_score, 2),
-        "opposing_move_weakness": round(opposing_weakness, 2),
-        "atr_m5": round(atr, 10),
-        "break_distance_atr": round(break_distance_atr, 4),
-        "body_ratio": round(body_ratio, 4),
-        "lower_wick_ratio" if direction == "BUY" else "upper_wick_ratio": round(wick_ratio, 4),
-        "close_position": round(close_pos, 4),
-        "directional_close_position": round(directional_close_pos, 4),
-        "volume_ratio": round(volume_ratio, 4),
-        "signed_taker_delta": round(delta, 4),
-        "counter_move_steps": int(counter_steps),
-        "counter_move_atr": round(counter_move_atr, 4),
-    }
-    score = rejection_score + close_score + structure_score + flow_score + opposing_weakness
-    reasons = []
-    if touch:
-        reasons.append("POI_TOUCH_CURRENT_BAR")
-    if rejection_score >= 8.0:
-        reasons.append("REJECTION_WICK")
-    if structure_score >= 15.0:
-        reasons.append("DIRECTIONAL_STRUCTURE_BREAK")
-    if delta_score >= 6.0:
-        reasons.append("TAKER_FLOW_SUPPORT")
-    if volume_score >= 5.0:
-        reasons.append("RELATIVE_VOLUME_SUPPORT")
-    if opposing_weakness >= 7.0:
-        reasons.append("OPPOSING_MOVE_STALL_OR_SWEEP")
-    result.update({"score": round(min(100.0, score), 2), "reason": ";".join(reasons) or "NO_CLEAR_M5_CONFIRMATION", "components": components})
-    return result
-
-
 class TradingEngine:
     def __init__(self, context: dict[str, Any]) -> None:
         self.context = dict(context)
@@ -3250,6 +3106,10 @@ class TradingEngine:
         self._m5_watch_task: asyncio.Task[Any] | None = None
         self._scan_watchlist: dict[str, dict[str, Any]] = {}
         self._scan_watch_lock = asyncio.Lock()
+        self._candidate_persist_lock = asyncio.Lock()
+        self._candidate_persist_dirty = False
+        self._candidate_last_persist_at = 0.0
+        self._v10_opened_candidate_ids: set[str] = set()
         self._scan_cycle_number = 0
         self._scan_last_report: dict[str, Any] = {}
         self._scan_margin_streak: dict[str, int] = {}
@@ -3446,6 +3306,7 @@ class TradingEngine:
         await self._purge_balance_bans()
         self._init_scan_state()
         await self._load_runtime_settings()
+        await self._load_v10_candidates()
         self._start_autostop_task()
         self._start_sync_task()
 
@@ -3458,6 +3319,7 @@ class TradingEngine:
             log.info("[MAIN] exchangeInfo tertunda (rate limit); symbols dimuat ulang saat API pulih.")
 
         await self.ws.start()
+        self._ensure_v10_m5_watch_task()
 
         self.last_history_refresh = now_utc()
 
@@ -3468,7 +3330,8 @@ class TradingEngine:
             "WebSocket: CONNECTING\n"
             f"Session: {self.session_id}\n\n"
             "Active Trade: 0\n\n"
-            "Gunakan /add untuk membuat setup."
+            "Gunakan /scan untuk pencarian kandidat dan /candidates untuk melihat setup yang menunggu close BOS M5.\n"
+            "Gunakan /add untuk membuat setup manual."
         )
 
     async def stop(self) -> None:
@@ -3487,6 +3350,8 @@ class TradingEngine:
             except asyncio.CancelledError:
                 pass
         self._scan_task = None
+        await self._stop_v10_m5_watch_task()
+        await self._persist_v10_candidates(force=True)
         await self._flush_bans_if_dirty()
         await self._stop_sync_task()
 
@@ -7199,448 +7064,403 @@ class TradingEngine:
                 log.exception("[SCAN] cycle fatal error")
                 await asyncio.sleep(SCAN_CYCLE_DELAY_SECONDS)
 
+    def _build_v10_watch_record(
+        self, raw: dict[str, Any], cycle: int, origin: str = "SCAN",
+        *, preserve_started_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a compact state-5 candidate record; no entry/order exists yet."""
+        setup = self._json_safe(copy.deepcopy(raw))
+        pair = normalize_symbol(str(raw.get("pair") or ""))
+        direction = str(raw.get("direction") or "").upper()
+        watch_id = str(raw.get("v10_watch_id") or raw.get("v10_candidate_id") or "")
+        poi = raw.get("v10_poi")
+        if not isinstance(poi, list) or len(poi) != 2:
+            v10 = ((raw.get("analysis") or {}).get("v10") or {}) if isinstance(raw.get("analysis"), dict) else {}
+            poi = v10.get("poi")
+        if not pair or direction not in {"BUY", "SELL"} or not watch_id:
+            raise ValueError("Identitas pair/direction/watch ID kandidat V10 tidak lengkap.")
+        if not isinstance(poi, list) or len(poi) != 2:
+            raise ValueError(f"{pair}: kandidat V10 tidak mempunyai rentang POI H4.")
+        poi_low, poi_high = sorted((float(poi[0]), float(poi[1])))
+        if not (math.isfinite(poi_low) and math.isfinite(poi_high) and 0 < poi_low <= poi_high):
+            raise ValueError(f"{pair}: rentang POI H4 tidak valid.")
+        data_info = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        data_asof = data_info.get("data_asof") if isinstance(data_info.get("data_asof"), dict) else {}
+        latest_close_ms = int(
+            raw.get("v10_last_m5_close_ms")
+            or data_asof.get("5m_close_time_ms")
+            or data_info.get("last_close_time_ms")
+            or 0
+        )
+        mss_close_ms = int(raw.get("v10_mss_close_time_ms") or 0)
+        if latest_close_ms <= 0:
+            raise ValueError(f"{pair}: timestamp candle M5 terakhir tidak tersedia.")
+        if mss_close_ms <= 0:
+            raise ValueError(f"{pair}: timestamp close MSS M15 kandidat tidak tersedia.")
+        now_ms = int(time.time() * 1000)
+        analysis = raw.get("analysis") if isinstance(raw.get("analysis"), dict) else {}
+        v10 = analysis.get("v10") if isinstance(analysis.get("v10"), dict) else {}
+        timeout = max(1, int(raw.get("v10_bos_timeout_bars") or V10_BOS_TIMEOUT_M5_BARS))
+        bars_elapsed = max(0, int(raw.get("v10_waiting_bos_bars") or 0))
+        return {
+            "pair": pair,
+            "direction": direction,
+            "setup": setup,
+            "candidate_id": watch_id,
+            "v10_watch_id": watch_id,
+            "v10_setup_id": int(raw.get("v10_setup_id") or 0),
+            "v10_poi_id": int(raw.get("v10_poi_id") or 0),
+            "v10_attempt_id": int(raw.get("v10_attempt_id") or 0),
+            "v10_poi_type": str(raw.get("v10_poi_type") or v10.get("poi_type") or ""),
+            "v10_poi": [poi_low, poi_high],
+            "v10_aoi": copy.deepcopy(raw.get("v10_aoi") or v10.get("aoi")),
+            "v10_mss_time_ms": int(raw.get("v10_mss_time_ms") or 0),
+            "v10_mss_close_time_ms": mss_close_ms,
+            "v10_mss_close_price": raw.get("v10_mss_close_price"),
+            "v10_sl_anchor": raw.get("v10_sl_anchor"),
+            "v10_waiting_bos_bars": bars_elapsed,
+            "v10_bos_timeout_bars": timeout,
+            "entry_zone_low": poi_low,
+            "entry_zone_high": poi_high,
+            "watch_started_ms": int(preserve_started_ms or now_ms),
+            "last_processed_m5_close_ms": latest_close_ms,
+            "last_m5_close_ms": latest_close_ms,
+            "last_m5_close": raw.get("v10_last_m5_close") or raw.get("price_now_reference"),
+            "watch_bars_m5": bars_elapsed,
+            "watch_timeout_m5": timeout,
+            "watch_cycle": int(cycle),
+            "watch_generation": int(self._scan_generation),
+            "watch_origin": str(origin or "SCAN").upper(),
+            "m5_watch_status": "WAITING_M5_BOS",
+            "m5_last_error": None,
+            "m5_last_error_at_ms": None,
+            "m5_retry_after_monotonic": 0.0,
+            "last_v10_state_reason": str(raw.get("state_reason") or "Waiting for fresh M5 BOS close-cross."),
+            "last_v10_event": "MSS_CONFIRMED",
+            "last_update_ms": now_ms,
+        }
+
+    async def _persist_v10_candidates(self, *, force: bool = False) -> bool:
+        """Persist active candidate queue in GitHub so it survives Render restarts."""
+        if not force and not self._candidate_persist_dirty:
+            return True
+        async with self._candidate_persist_lock:
+            if not force and not self._candidate_persist_dirty:
+                return True
+            async with self._scan_watch_lock:
+                rows = [copy.deepcopy(row) for row in self._scan_watchlist.values()]
+            payload = {
+                "version": V10_CANDIDATE_SCHEMA_VERSION,
+                "engine": "TACTICAL_V10_E_GE2_ATR",
+                "saved_at": iso_utc(),
+                "candidate_count": len(rows),
+                "candidates": rows,
+            }
+            try:
+                encoded = json.dumps(self._json_safe(payload), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                await self.github.replace_file(V10_CANDIDATES_PATH, encoded, "v10: update M5 candidate watchlist")
+                self._candidate_persist_dirty = False
+                self._candidate_last_persist_at = time.monotonic()
+                log.info("[V10-WATCH] persisted %s active candidates to %s", len(rows), V10_CANDIDATES_PATH)
+                return True
+            except Exception as exc:
+                log.warning("[V10-WATCH] candidate persistence failed: %s", str(exc)[:220])
+                self._candidate_persist_dirty = True
+                return False
+
+    async def _load_v10_candidates(self) -> None:
+        """Restore only state-5 V10 candidates; replay will reconcile them to latest M5 close."""
+        try:
+            raw, _sha = await self.github.get_file(V10_CANDIDATES_PATH)
+            if not raw:
+                return
+            document = json.loads(raw.decode("utf-8"))
+            if not isinstance(document, dict) or int(document.get("version") or 0) != V10_CANDIDATE_SCHEMA_VERSION:
+                log.warning("[V10-WATCH] stored candidate file has unsupported schema; ignoring it")
+                return
+            restored: dict[str, dict[str, Any]] = {}
+            for item in document.get("candidates") or []:
+                if not isinstance(item, dict):
+                    continue
+                pair = normalize_symbol(str(item.get("pair") or ""))
+                setup = item.get("setup") if isinstance(item.get("setup"), dict) else {}
+                if not pair or pair in {"BTCUSDT", "ETHUSDT"}:
+                    continue
+                watch_status = str(item.get("m5_watch_status") or "WAITING_M5_BOS").upper()
+                setup_state = str(setup.get("candidate_state") or "").upper()
+                if watch_status == "WAITING_M5_BOS" and setup_state != "WAITING_M5_BOS":
+                    continue
+                if watch_status == "WAITING_NEW_MSS" and setup_state != "WAITING_TRIGGER":
+                    continue
+                if watch_status not in {"WAITING_M5_BOS", "WAITING_NEW_MSS"}:
+                    continue
+                if not item.get("v10_watch_id") or pair in restored:
+                    continue
+                item = copy.deepcopy(item)
+                item["pair"] = pair
+                item["m5_retry_after_monotonic"] = 0.0
+                item["m5_last_error"] = None
+                item["m5_last_error_at_ms"] = None
+                restored[pair] = item
+            async with self._scan_watch_lock:
+                self._scan_watchlist.update(restored)
+            if restored:
+                log.info("[V10-WATCH] restored %s candidates from GitHub; waiting for WebSocket startup and replay reconciliation", len(restored))
+        except Exception as exc:
+            log.warning("[V10-WATCH] could not restore candidate queue: %s", str(exc)[:220])
+
+    def _ensure_v10_m5_watch_task(self) -> None:
+        if not self._running or not self._scan_watchlist:
+            return
+        if self._m5_watch_task is None or self._m5_watch_task.done():
+            self._m5_watch_task = asyncio.create_task(self._m5_watch_loop(), name="main-v10-m5-candidate-watch")
+
     async def _queue_m5_watch_candidates(
         self, module, candidates: list[dict[str, Any]], generation: int, cycle: int,
         *, origin: str = "SCAN"
     ) -> tuple[int, list[str]]:
-        """Queue validated H4/M15 setups; never open a trade before closed-M5 confirmation."""
+        """Admit only Tactical V10 state-5 candidates into the M5 BOS watch queue."""
         added = 0
         notes: list[str] = []
         origin = str(origin or "SCAN").upper()
         if generation != self._scan_generation or (not self._scan_user_enabled and origin != "AUTO"):
-            return 0, ["SCAN generation berubah atau scanner OFF; kandidat tidak diantrekan."]
+            return 0, ["SCAN generation berubah atau scanner OFF; kandidat baru tidak diantrekan."]
         async with self._scan_watch_lock:
-            for raw in sorted(candidates, key=lambda x: float(x.get("confidence") or 0), reverse=True):
-                pair = normalize_symbol(str(raw.get("pair") or ""))
-                direction = str(raw.get("direction") or "").upper()
-                if not pair or direction not in {"BUY", "SELL"}:
+            for raw in candidates:
+                if str(raw.get("candidate_state") or "").upper() != "WAITING_M5_BOS":
                     continue
-                if pair in self._scan_watchlist:
-                    continue  # one direction/setup per pair; do not reset an in-progress M5 watch
-                if len(self._scan_watchlist) >= M5_WATCH_MAX_CANDIDATES:
-                    notes.append(f"{pair}: M5 watch cap {M5_WATCH_MAX_CANDIDATES} tercapai")
-                    continue
-                zone = raw.get("entry_zone") if isinstance(raw.get("entry_zone"), dict) else {}
-                analysis = raw.get("analysis") if isinstance(raw.get("analysis"), dict) else {}
-                if not zone:
-                    zone = analysis.get("entry_zone") if isinstance(analysis.get("entry_zone"), dict) else {}
                 try:
-                    zone_low = float(zone.get("low", raw.get("entry")))
-                    zone_high = float(zone.get("high", raw.get("entry")))
-                except (TypeError, ValueError):
+                    watch = self._build_v10_watch_record(raw, cycle, origin)
+                except Exception as exc:
+                    notes.append(f"{raw.get('pair')}: {str(exc)[:140]}")
                     continue
-                if not (math.isfinite(zone_low) and math.isfinite(zone_high) and zone_low > 0 and zone_high >= zone_low):
-                    notes.append(f"{pair}: zona POI M5 tidak valid")
+                pair = watch["pair"]
+                existing = self._scan_watchlist.get(pair)
+                if existing and str(existing.get("v10_watch_id")) == watch["v10_watch_id"]:
+                    # Preserve the original clock; refresh only the causal snapshot.
+                    existing.update({
+                        "setup": watch["setup"],
+                        "last_processed_m5_close_ms": max(
+                            int(existing.get("last_processed_m5_close_ms") or 0),
+                            int(watch.get("last_processed_m5_close_ms") or 0),
+                        ),
+                        "last_m5_close_ms": watch.get("last_m5_close_ms"),
+                        "last_m5_close": watch.get("last_m5_close"),
+                        "v10_waiting_bos_bars": watch.get("v10_waiting_bos_bars"),
+                        "watch_bars_m5": watch.get("watch_bars_m5"),
+                        "last_v10_state_reason": watch.get("last_v10_state_reason"),
+                        "watch_cycle": cycle,
+                    })
                     continue
-
-                setup = copy.deepcopy(raw)
-                setup.pop("raw_result", None)
-                setup["analysis"] = compact_analysis(setup.get("analysis"))
-                setup["watch_origin"] = origin
-                watch = dict(setup)
-                watch.update({
-                    "setup": setup,
-                    "pair": pair,
-                    "direction": direction,
-                    "entry_zone_low": zone_low,
-                    "entry_zone_high": zone_high,
-                    "watch_started_ms": int(time.time() * 1000),
-                    "watch_bars_m5": 0,
-                    "poi_touched": False,
-                    "poi_touch_time_ms": None,
-                    "poi_touch_age_m5": None,
-                    "m5_retest_pending": False,
-                    "m5_retest_bars_waited": 0,
-                    "m5_confirmation_threshold": M5_WATCH_CONFIRM_THRESHOLD,
-                    "poi_confirm_window_m5": M5_WATCH_POI_WINDOW_BARS,
-                    "watch_timeout_m5": M5_WATCH_TIMEOUT_BARS,
-                    "last_m5_open_ms": 0,
-                    "m5_last_monitor_score": None,
-                    "m5_last_monitor_reason": "WAITING_FOR_FIRST_CLOSED_M5_CANDLE",
-                    "m5_last_monitor_components": {},
-                    "m5_last_monitor_poi_touch": False,
-                    "m5_last_m5_open_ms": 0,
-                    "m5_last_m5_close_ms": 0,
-                    "m5_last_m5_close": None,
-                    "m5_last_error": None,
-                    "m5_last_error_at_ms": None,
-                    "m5_retry_after_monotonic": 0.0,
-                    "watch_cycle": cycle,
-                    "watch_generation": generation,
-                    "watch_origin": origin,
-                    "m5_watch_status": "WAITING",
-                })
+                if existing is None and len(self._scan_watchlist) >= M5_WATCH_MAX_CANDIDATES:
+                    notes.append(f"{pair}: batas {M5_WATCH_MAX_CANDIDATES} kandidat aktif tercapai")
+                    continue
+                if existing and (
+                    int(existing.get("v10_setup_id") or 0) == int(watch.get("v10_setup_id") or 0)
+                    and int(existing.get("v10_poi_id") or 0) == int(watch.get("v10_poi_id") or 0)
+                ):
+                    watch["watch_started_ms"] = int(existing.get("watch_started_ms") or watch["watch_started_ms"])
                 self._scan_watchlist[pair] = watch
                 added += 1
-                log.info("[M5-WATCH] %s %s queued | conf=%.1f | POI %.10g..%.10g | cycle=%s",
-                         pair, direction, float(setup.get("confidence") or 0), zone_low, zone_high, cycle)
+                log.info(
+                    "[V10-WATCH] %s %s queued | watch=%s | POI=%s %.10g..%.10g | MSS close=%s | BOS wait=%s/144",
+                    pair, watch["direction"], watch["v10_watch_id"], watch["v10_poi_type"],
+                    watch["entry_zone_low"], watch["entry_zone_high"],
+                    watch["v10_mss_close_time_ms"], watch["v10_waiting_bos_bars"],
+                )
+        if added or candidates:
+            self._candidate_persist_dirty = True
+            await self._persist_v10_candidates()
+            self._ensure_v10_m5_watch_task()
         return added, notes
 
-    async def _drop_m5_watch(self, pair: str, reason: str) -> None:
+    async def _drop_m5_watch(self, pair: str, reason: str, *, persist: bool = True) -> bool:
+        pair = normalize_symbol(pair)
         async with self._scan_watch_lock:
-            self._scan_watchlist.pop(pair, None)
-        log.info("[M5-WATCH] %s removed | %s", pair, str(reason)[:180])
-
-    def _process_live_m5_watch(
-        self,
-        pair: str,
-        active: dict[str, Any],
-        candles: list[Any],
-        context: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Advance an H4/M15 candidate one closed M5 candle at a time.
-
-        The confidence score and state transitions match the supplied local
-        backtester: POI touch -> M5 evidence score -> structural finalizer. This
-        method does no network I/O; the watcher supplies closed Binance candles.
-        """
-        context = context or {}
-        if not isinstance(active, dict):
-            return {"status": "EXPIRED", "reason": "INVALID_WATCH_STATE"}
-        ordered = sorted(
-            (c for c in (candles or []) if hasattr(c, "time_ms")),
-            key=lambda c: int(getattr(c, "time_ms", 0)),
-        )
-        if len(ordered) < 7:
-            return {"status": "WAITING", "reason": "INSUFFICIENT_M5_HISTORY", "pair": str(pair).upper()}
-
-        direction = str(active.get("direction") or "").upper()
-        if direction not in {"BUY", "SELL"}:
-            return {"status": "EXPIRED", "reason": "INVALID_DIRECTION", "pair": str(pair).upper()}
-
-        bar_ms = 300_000
-        last_seen = int(_m5_safe_float(active.get("last_m5_open_ms"), 0.0))
-        latest_open = int(_m5_safe_float(context.get("latest_closed_open_ms"), getattr(ordered[-1], "time_ms", 0)))
-        watch_started_ms = int(_m5_safe_float(active.get("watch_started_ms"), 0.0))
-        threshold = _m5_safe_float(active.get("m5_confirmation_threshold"), M5_WATCH_CONFIRM_THRESHOLD)
-        poi_window = max(1, int(_m5_safe_float(active.get("poi_confirm_window_m5"), M5_WATCH_POI_WINDOW_BARS)))
-        watch_timeout = max(7, int(_m5_safe_float(active.get("watch_timeout_m5"), M5_WATCH_TIMEOUT_BARS)))
-
-        def candle_value(candle: Any, name: str) -> float:
-            return _m5_safe_float(getattr(candle, name, 0.0), 0.0)
-
-        def expire(reason: str, bar: Any | None = None) -> dict[str, Any]:
-            active["status"] = "EXPIRED"
-            active["m5_terminal_reason"] = reason
-            return {
-                "status": "EXPIRED", "reason": reason, "pair": str(pair).upper(),
-                "bar_time_ms": int(getattr(bar, "time_ms", 0)) if bar is not None else None,
-                "watch_bars_m5": int(active.get("watch_bars_m5") or 0),
-                "poi_touched": bool(active.get("poi_touched")),
-            }
-
-        processed = False
-        for index, bar in enumerate(ordered):
-            bar_open = int(getattr(bar, "time_ms", 0))
-            previous_open = int(_m5_safe_float(active.get("last_m5_open_ms"), last_seen))
-            if bar_open <= previous_open:
-                continue
-
-            # Never use a candle that closed before the candidate entered WATCH.
-            if watch_started_ms and bar_open + bar_ms <= watch_started_ms:
-                active["last_m5_open_ms"] = bar_open
-                continue
-
-            if previous_open and bar_open != previous_open + bar_ms:
-                return expire("M5_HISTORY_GAP", bar)
-
-            active["last_m5_open_ms"] = bar_open
-            active["watch_bars_m5"] = int(active.get("watch_bars_m5") or 0) + 1
-            processed = True
-            history = ordered[max(0, index - 24):index + 1]
-            if len(history) < 7:
-                active["m5_last_monitor_reason"] = "INSUFFICIENT_M5_HISTORY"
-                continue
-            score_info = _score_m5_confirmation(active, history)
-            score = _m5_safe_float(score_info.get("score"), 0.0)
-
-            op, hi, lo, close = (candle_value(bar, field) for field in ("open", "high", "low", "close"))
-            # Read-only /candidates diagnostics: preserve evidence for every newly
-            # closed M5 candle even before the POI has been touched. This does not
-            # change admission rules or make the diagnostic score an entry signal.
-            active["m5_last_monitor_score"] = score
-            active["m5_last_monitor_reason"] = str(score_info.get("reason") or "")[:500]
-            active["m5_last_monitor_components"] = score_info.get("components", {}) if isinstance(score_info.get("components"), dict) else {}
-            active["m5_last_monitor_poi_touch"] = bool(score_info.get("poi_touch"))
-            active["m5_last_m5_open_ms"] = bar_open
-            active["m5_last_m5_close_ms"] = bar_open + bar_ms
-            active["m5_last_m5_close"] = close
-            active["m5_last_m5_open"] = op
-            active["m5_last_m5_high"] = hi
-            active["m5_last_m5_low"] = lo
-            sl = _m5_safe_float(active.get("sl"), 0.0)
-            tp = _m5_safe_float(active.get("tp"), 0.0)
-            price_exp = _m5_safe_float(active.get("price_exp"), 0.0)
-
-            # Mirror backtest priority: invalidate old structure/target before a
-            # same-candle score can become an entry.
-            if sl > 0 and ((direction == "BUY" and lo <= sl) or (direction == "SELL" and hi >= sl)):
-                return expire("STRUCTURE_INVALIDATED_BEFORE_CONFIRMATION", bar)
-            if price_exp > 0 and ((direction == "BUY" and hi >= price_exp) or (direction == "SELL" and lo <= price_exp)):
-                return expire("PRICE_EXP_BEFORE_CONFIRMATION", bar)
-            if tp > 0 and ((direction == "BUY" and hi >= tp) or (direction == "SELL" and lo <= tp)):
-                return expire("TARGET_REACHED_BEFORE_CONFIRMATION", bar)
-
-            if bool(score_info.get("poi_touch")):
-                if not active.get("poi_touched"):
-                    active["poi_touched"] = True
-                    active["poi_touch_time_ms"] = bar_open + bar_ms
-                active["poi_touch_age_m5"] = 0
-            elif active.get("poi_touched"):
-                active["poi_touch_age_m5"] = int(active.get("poi_touch_age_m5") or 0) + 1
-
-            if active.get("poi_touched"):
-                if int(active.get("poi_touch_age_m5") or 0) > poi_window:
-                    return expire("INVALID_NO_CONFIRMATION", bar)
-                active["m5_confirmation_last_score"] = score
-                active["m5_confirmation_last_reason"] = str(score_info.get("reason") or "")[:500]
-                active["m5_confirmation_last_components"] = score_info.get("components", {})
-                active["m5_confirmation_score"] = score
-                active["m5_confirmation_threshold"] = threshold
-                active["m5_confirmation_reason"] = str(score_info.get("reason") or "")[:500]
-                active["m5_confirmation_components"] = score_info.get("components", {})
-                if score >= threshold:
-                    if not math.isfinite(close) or close <= 0:
-                        return expire("CONFIRMED_LEVELS_REJECTED:INVALID_CONFIRMATION_PRICE", bar)
-                    # Catch-up can process missed bars after a REST outage. Never
-                    # send an order using a historical close that is no longer live.
-                    if bar_open != latest_open:
-                        return expire("MISSED_LIVE_CONFIRMATION_CANDLE", bar)
-                    active["confirmation_time_ms"] = bar_open + bar_ms
-                    active["confirmation_price"] = close
-                    active["status"] = "ENTRY_SIGNAL"
-                    components = score_info.get("components", {})
-                    return {
-                        "status": "ENTRY_SIGNAL", "reason": str(score_info.get("reason") or "M5_CONFIRMATION_VALID"),
-                        "pair": str(pair).upper(), "entry_price": close,
-                        "confirmation_time_ms": bar_open + bar_ms,
-                        "m5_confirmation_score": score,
-                        "m5_confirmation_threshold": threshold,
-                        "m5_confirmation_components": components if isinstance(components, dict) else {},
-                        "m5_confirmation_version": "BACKTEST_SCORE_V1",
-                        "m5_retest_zone_type": "BACKTEST_SCORE_CLOSE",
-                        "m5_retest_bar_open_ms": bar_open,
-                    }
-
-            if int(active.get("watch_bars_m5") or 0) >= watch_timeout:
-                return expire("INVALID_NO_CONFIRMATION" if active.get("poi_touched") else "EXPIRED_BEFORE_POI", bar)
-
-        if processed:
-            return {
-                "status": "WAITING", "reason": str(active.get("m5_confirmation_reason") or "WAITING_FOR_M5_CLOSE"),
-                "pair": str(pair).upper(), "watch_bars_m5": int(active.get("watch_bars_m5") or 0),
-                "poi_touched": bool(active.get("poi_touched")),
-                "last_m5_open_ms": int(active.get("last_m5_open_ms") or 0),
-            }
-        return {"status": "WAITING", "reason": "NO_NEW_M5_CLOSE", "pair": str(pair).upper()}
+            removed = self._scan_watchlist.pop(pair, None)
+        if removed is not None:
+            self._candidate_persist_dirty = True
+            if persist:
+                await self._persist_v10_candidates()
+        log.info("[V10-WATCH] %s removed | %s", pair, str(reason)[:180])
+        return removed is not None
 
     async def _m5_watch_loop(self) -> None:
-        """Poll only known candidates on closed M5 bars; this is not a universe scanner."""
-        while self._running and (self._scan_user_enabled or bool(self._scan_watchlist)):
+        """Replay the exact V10 state machine once per newly closed M5 candle per candidate."""
+        while self._running:
             try:
-                if not self._scan_watchlist:
-                    await asyncio.sleep(M5_WATCH_POLL_SECONDS)
-                    continue
-                if len(self.active_trades) >= self.max_active_trades:
-                    await asyncio.sleep(10.0)
-                    continue
+                async with self._scan_watch_lock:
+                    snapshot = list(self._scan_watchlist.items())
+                if not snapshot:
+                    return
                 if time.monotonic() < self._binance_public_cooldown_until or self.real.cooldown_remaining > 0:
-                    await asyncio.sleep(min(5.0, max(1.0, self._binance_public_cooldown_until - time.monotonic())))
+                    await asyncio.sleep(M5_WATCH_POLL_SECONDS)
                     continue
                 headroom = self._api_headroom_pct()
                 if headroom is not None and headroom < SCAN_MIN_API_HEADROOM_PCT:
-                    log.debug("[M5-WATCH] paused low API headroom %.1f%%", headroom)
                     await asyncio.sleep(M5_WATCH_POLL_SECONDS * 2)
                     continue
 
                 module = await self._load_strategy_runtime()
-                fetch = getattr(module, "fetch_series", None)
-                finalize = getattr(module, "finalize_confirmed_setup", None)
-                if not callable(fetch) or not callable(finalize):
-                    log.error("[M5-WATCH] strategy contract missing fetch_series/finalize_confirmed_setup")
+                generate = getattr(module, "generate_setup", None)
+                if not callable(generate):
+                    log.error("[V10-WATCH] strategy.generate_setup tidak tersedia")
                     await asyncio.sleep(15.0)
                     continue
 
-                async with self._scan_watch_lock:
-                    snapshot = list(self._scan_watchlist.items())
-                entry_signals_seen = 0
+                changed = False
+                now_ms = int(time.time() * 1000)
+                expected_close_ms = (now_ms // V10_WATCH_INTERVAL_MS) * V10_WATCH_INTERVAL_MS
+                # Let Binance publish the just-closed kline before refreshing REST.
+                if now_ms - expected_close_ms < 1200:
+                    await asyncio.sleep(1.5)
+                    continue
+
                 for pair, watch in snapshot:
                     if not self._running:
                         break
-                    origin = str(watch.get("watch_origin") or "SCAN").upper()
-                    if not self._scan_user_enabled and origin != "AUTO":
-                        await self._drop_m5_watch(pair, "SCAN_DISABLED")
-                        continue
-                    if origin != "AUTO" and watch.get("watch_generation") != self._scan_generation:
-                        await self._drop_m5_watch(pair, "SCAN_GENERATION_CHANGED")
-                        continue
                     if pair not in self._scan_watchlist:
                         continue
                     if time.monotonic() < float(watch.get("m5_retry_after_monotonic") or 0.0):
                         continue
                     if time.monotonic() < self._binance_public_cooldown_until:
                         break
-                    if len(self.active_trades) >= self.max_active_trades:
-                        # Keep updating invalidation/expiry; actual trade admission is separately gated.
-                        capacity_full = True
-                    else:
-                        capacity_full = False
+                    previous_close_ms = int(watch.get("last_processed_m5_close_ms") or 0)
+                    if expected_close_ms <= previous_close_ms:
+                        continue
                     try:
-                        candles, source = await fetch(
-                            pair,
-                            getattr(module, "M5", "5"),
-                            M5_WATCH_CANDLES,
-                            getattr(module, "M5_MS", 300_000),
-                            allow_fallback=False,
-                        )
-                        if not candles:
-                            continue
-                        latest_open = int(candles[-1].time_ms)
-                        previous_open = int(watch.get("last_m5_open_ms") or 0)
-                        if previous_open and latest_open <= previous_open:
-                            continue  # avoid redundant Python work on the same closed candle
-                        result = self._process_live_m5_watch(pair, watch, candles, {
-                            "latest_closed_open_ms": latest_open,
-                        })
-                        watch["m5_last_error"] = None
-                        watch["m5_last_error_at_ms"] = None
-                        status = str((result or {}).get("status") or "WAITING").upper()
-                        watch["m5_watch_status"] = status
-                        if status == "EXPIRED":
-                            await self._drop_m5_watch(pair, str((result or {}).get("reason") or "EXPIRED"))
-                            continue
-                        if status != "ENTRY_SIGNAL":
-                            continue
-                        entry_signals_seen += 1
-                        if capacity_full or len(self.active_trades) >= self.max_active_trades:
-                            await self._drop_m5_watch(pair, "MAX_ACTIVE_REACHED_AT_M5_CONFIRMATION")
-                            log.info("[M5-WATCH] %s M5 setup valid tetapi dibuang karena MAX penuh", pair)
-                            continue
-                        if entry_signals_seen > SCAN_MAX_NEW_PER_CYCLE:
-                            await self._drop_m5_watch(pair, "M5_CONFIRMATION_STALE_ENTRY_CAP")
-                            continue
-
-                        entry_price = float((result or {}).get("entry_price") or 0.0)
-                        if not math.isfinite(entry_price) or entry_price <= 0:
-                            await self._drop_m5_watch(pair, "INVALID_M5_CONFIRMATION_PRICE")
-                            continue
-                        setup = copy.deepcopy(watch.get("setup") or {})
-                        finalizer_setup = copy.deepcopy(setup)
-                        for field_name in (
-                            "poi_touched", "poi_touch_time_ms", "poi_touch_age_m5",
-                            "watch_bars_m5", "m5_confirmation_score", "m5_confirmation_threshold",
-                            "m5_confirmation_reason", "m5_confirmation_components",
-                            "confirmation_time_ms", "confirmation_price",
-                        ):
-                            if field_name in watch:
-                                finalizer_setup[field_name] = copy.deepcopy(watch[field_name])
-                        confirmation_context = {
-                            "source": "BINANCE_PUBLIC",
-                            "confirmation_time_ms": int((result or {}).get("confirmation_time_ms") or 0),
-                            "m5_confirmation": {
-                                "version": str((result or {}).get("m5_confirmation_version") or "BACKTEST_SCORE_V1"),
-                                "score": float((result or {}).get("m5_confirmation_score") or 0.0),
-                                "threshold": float((result or {}).get("m5_confirmation_threshold") or M5_WATCH_CONFIRM_THRESHOLD),
-                                "reason": str((watch or {}).get("m5_confirmation_reason") or ""),
-                                "components": (result or {}).get("m5_confirmation_components") or {},
-                                "retest_zone_type": (result or {}).get("m5_retest_zone_type"),
-                            },
-                        }
-                        try:
-                            final = await finalize(pair, finalizer_setup, entry_price, confirmation_context)
-                        except Exception as exc:
-                            if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
-                                wait = max(
-                                    float(getattr(exc, "bot_cooldown_seconds", 0.0) or 0.0),
-                                    float(getattr(exc, "server_cooldown_seconds", 0.0) or 0.0),
-                                    float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS,
-                                    5.0,
-                                )
-                                self._binance_public_cooldown_until = max(self._binance_public_cooldown_until, time.monotonic() + wait)
-                                self._on_public_rate_limit(exc, wait)
-                                log.warning("[M5-WATCH] %s confirmation finalizer rate-limited; watch removed to avoid late execution", pair)
-                                await self._drop_m5_watch(pair, "FINALIZER_RATE_LIMIT; WAIT_FOR_NEW_H4_CANDIDATE")
-                                break
-                            raise
-                        if not isinstance(final, dict) or not final.get("valid"):
-                            reason = str((final or {}).get("reason") or "FINAL_LEVELS_REJECTED") if isinstance(final, dict) else "INVALID_FINALIZER_RESULT"
-                            detail = str((final or {}).get("detail") or "")[:130] if isinstance(final, dict) else ""
-                            log.info("[M5-WATCH] %s M5 signal rejected by structural SL/liquidity TP | %s %s", pair, reason, detail)
-                            await self._drop_m5_watch(pair, reason)
-                            continue
-
-                        def finite_positive(value: Any) -> float | None:
-                            try:
-                                v = float(value)
-                                return v if math.isfinite(v) and v > 0 else None
-                            except (TypeError, ValueError):
-                                return None
-                        final_entry = finite_positive(final.get("entry")) or entry_price
-                        final_sl = finite_positive(final.get("sl"))
-                        final_tp = finite_positive(final.get("tp"))
-                        final_exp = finite_positive(final.get("price_exp"))
-                        if None in (final_sl, final_tp, final_exp):
-                            await self._drop_m5_watch(pair, "FINAL_LEVELS_NON_POSITIVE")
-                            continue
-                        rr = abs(final_tp - final_entry) / max(abs(final_entry - final_sl), 1e-12)
-                        direction = str(setup.get("direction") or "").upper()
-                        entry_unchanged = abs(final_entry - entry_price) <= max(entry_price * 1e-8, 1e-10)
-                        geometry_ok = entry_unchanged and (
-                            (direction == "BUY" and final_sl < final_entry < final_exp and final_tp > final_entry)
-                            or (direction == "SELL" and final_exp < final_entry < final_sl and final_tp < final_entry)
-                        )
-                        if not geometry_ok or rr + 1e-9 < float(getattr(module, "CONFIRMED_MIN_RR", 2.0)):
-                            await self._drop_m5_watch(pair, f"FINAL_GEOMETRY_OR_RR_INVALID rr={rr:.3f}")
-                            continue
-
-                        candidate = copy.deepcopy(setup)
-                        base_conf = float(candidate.get("confidence") or 0.0)
-                        m5_score = float((result or {}).get("m5_confirmation_score") or 0.0)
-                        m5_threshold = float((result or {}).get("m5_confirmation_threshold") or M5_WATCH_CONFIRM_THRESHOLD)
-                        m5_reason = str((result or {}).get("reason") or "M5 confirmation score threshold passed")
-                        candidate.update({
+                        context = {
                             "pair": pair,
-                            "entry": Decimal(str(final_entry)),
-                            "sl": Decimal(str(final_sl)),
-                            "tp": Decimal(str(final_tp)),
-                            "price_exp": Decimal(str(final_exp)),
-                            # Entry is evaluated on the close of the latest completed
-                            # M5 candle, using the same score model as the supplied backtest.
-                            "price_now_reference": Decimal(str(final_entry)),
-                            "entry_reason": (
-                                f"M5 closed-candle confirmation score {m5_score:.2f}/{m5_threshold:.2f}; "
-                                f"{m5_reason}; entry modeled at closed M5 price {final_entry:.10g}."
-                            ),
-                            "sl_reason": str(final.get("sl_reason") or "Confirmed structural invalidation SL"),
-                            "tp_reason": str(final.get("tp_reason") or "Unmitigated structural liquidity TP, minimum 2R"),
-                            "price_exp_reason": str(final.get("price_exp_reason") or "Structural target expansion reference"),
-                            "m5_confirmed_entry": True,
-                            "entry_model": "H4_M15_M5_CONFIRM_STRUCTURAL",
-                            "planned_rr_gross": rr,
-                        })
-                        # Keep score as confidence evidence, not as a win probability.
-                        confirmation_adjusted_confidence = round(max(0.0, min(100.0, 0.50 * base_conf + 0.35 * m5_score + 0.15 * min(100.0, max(0.0, 50.0 + 25.0 * (rr - 1.0))))), 4)
-                        # Backtest retains the original thesis confidence and stores the
-                        # post-confirmation blend separately; keep the same semantics here.
-                        analysis = candidate.get("analysis") if isinstance(candidate.get("analysis"), dict) else {}
-                        analysis["m5_confirmation"] = confirmation_context["m5_confirmation"] | {
-                            "entry": final_entry, "sl": final_sl, "tp": final_tp, "rr": round(rr, 4),
-                            "confirmation_time_ms": confirmation_context["confirmation_time_ms"],
-                            "confirmation_adjusted_confidence": confirmation_adjusted_confidence,
-                            "finalizer": {k: v for k, v in final.items() if k not in {"candidates_considered", "confirmed_candles_used"}},
+                            "mode": "CANDIDATE_WATCH",
+                            "strategy_engine": "TACTICAL_V10_STATE_MACHINE",
+                            "primary_data_source": "BINANCE_PUBLIC",
+                            "allow_binance_fallback": False,
+                            "force_refresh": True,
+                            "candidate_watch_id": watch.get("v10_watch_id"),
                         }
-                        candidate["analysis"] = compact_analysis(analysis)
-                        candidate["strategy_name"] = str(getattr(module, "STRATEGY_NAME", "SMC_VLT_RSI_M5_CONFIRMED"))
-                        candidate["strategy_version"] = str(getattr(module, "STRATEGY_VERSION", "5.6"))
-                        candidate["analysis_source"] = "BINANCE_PUBLIC"
+                        raw = await self._call_strategy_function(module, "generate_setup", pair, context)
+                        if not isinstance(raw, dict):
+                            raise RuntimeError("strategy.generate_setup tidak mengembalikan dict")
+                        data_info = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+                        data_asof = data_info.get("data_asof") if isinstance(data_info.get("data_asof"), dict) else {}
+                        data_source = str(raw.get("data_source") or data_info.get("source") or "").upper()
+                        if not data_source.startswith("BINANCE") or data_info.get("fallback_used"):
+                            raise RuntimeError(f"Sumber candle watcher tidak valid: {data_source or '-'}")
+                        closed_ms = int(data_asof.get("5m_close_time_ms") or data_info.get("last_close_time_ms") or 0)
+                        if closed_ms <= previous_close_ms:
+                            continue
 
-                        added, notes = await self._open_validated([candidate], self._scan_generation)
-                        if added:
-                            await self._drop_m5_watch(pair, "TRADE_REGISTERED_AFTER_M5_CONFIRMATION")
-                            log.info("[M5-WATCH] %s %s trade registered | entry=%s sl=%s tp=%s RR=%.2f score=%.1f",
-                                     pair, direction, decimal_to_str(candidate["entry"]), decimal_to_str(candidate["sl"]), decimal_to_str(candidate["tp"]), rr, m5_score)
-                        else:
-                            await self._drop_m5_watch(pair, "M5_SIGNAL_NOT_ADMITTED: " + "; ".join(notes[:2]))
+                        state = str(raw.get("candidate_state") or "WAITING_TRIGGER").upper()
+                        old_watch_id = str(watch.get("v10_watch_id") or "")
+                        new_watch_id = str(raw.get("v10_watch_id") or raw.get("v10_candidate_id") or "")
+
+                        if state == "WAITING_M5_BOS":
+                            same_thesis = (
+                                int(raw.get("v10_setup_id") or 0) == int(watch.get("v10_setup_id") or 0)
+                                and int(raw.get("v10_poi_id") or 0) == int(watch.get("v10_poi_id") or 0)
+                            )
+                            new_record = self._build_v10_watch_record(
+                                raw, int(watch.get("watch_cycle") or self._scan_cycle_number),
+                                str(watch.get("watch_origin") or "SCAN"),
+                                preserve_started_ms=int(watch.get("watch_started_ms") or now_ms) if same_thesis else None,
+                            )
+                            if new_watch_id != old_watch_id:
+                                log.info("[V10-WATCH] %s state machine re-armed candidate %s -> %s", pair, old_watch_id, new_watch_id)
+                            else:
+                                new_record["last_processed_m5_close_ms"] = max(previous_close_ms, closed_ms)
+                                new_record["last_m5_close_ms"] = closed_ms
+                            async with self._scan_watch_lock:
+                                self._scan_watchlist[pair] = new_record
+                            changed = True
+                            log.debug(
+                                "[V10-WATCH] %s %s waiting BOS | bar=%s/%s | close=%s",
+                                pair, new_record["direction"], new_record["v10_waiting_bos_bars"],
+                                new_record["v10_bos_timeout_bars"], new_record.get("last_m5_close"),
+                            )
+                            continue
+
+                        if state in {"READY", "FILLED"}:
+                            result_watch_id = str(raw.get("v10_watch_id") or "")
+                            order_time_ms = int(raw.get("v10_order_time_ms") or raw.get("v10_bos_time_ms") or 0)
+                            same_thesis = (
+                                int(raw.get("v10_setup_id") or 0) == int(watch.get("v10_setup_id") or 0)
+                                and int(raw.get("v10_poi_id") or 0) == int(watch.get("v10_poi_id") or 0)
+                            )
+                            # attempt_id may legitimately advance after the same POI
+                            # re-arms; the order must still belong to this thesis and
+                            # be timestamped at/after the last processed M5 close.
+                            if not same_thesis or order_time_ms < previous_close_ms:
+                                await self._drop_m5_watch(pair, "V10_CONFIRMED_STATE_ID_MISMATCH_OR_OLD_BOS", persist=False)
+                                changed = True
+                                continue
+                            # The same state-machine attempt has now passed its M5
+                            # close-cross BOS and produced the V10 pending limit.
+                            candidate = self._normalize_auto_result(raw, pair)
+                            candidate["watch_origin"] = str(watch.get("watch_origin") or "SCAN").upper()
+                            candidate["m5_confirmed_entry"] = True
+                            checked = await self._scan_validate_candidate(
+                                module, candidate, int(watch.get("watch_cycle") or self._scan_cycle_number)
+                            )
+                            if checked is None:
+                                await self._drop_m5_watch(pair, "V10_BOS_CONFIRMED_BUT_VALIDATOR_REJECTED", persist=False)
+                                changed = True
+                                continue
+                            checked["watch_origin"] = candidate["watch_origin"]
+                            checked["m5_confirmed_entry"] = True
+                            added, notes = await self._open_validated([checked], self._scan_generation)
+                            if added:
+                                trade = added[0]
+                                await self._drop_m5_watch(pair, "V10_M5_BOS_CONFIRMED_PAPER_SETUP_CREATED", persist=False)
+                                await self.reply(
+                                    "✅ TACTICAL V10 • M5 BOS CONFIRMED (PAPER)\n\n"
+                                    f"Pair: {trade.pair} • {trade.direction}\n"
+                                    f"State: {trade.status}\n"
+                                    f"Entry limit: {fmt_price(trade.entry)} • SL: {fmt_price(trade.sl)} • TP: {fmt_price(trade.tp)}\n"
+                                    "Konfirmasi berasal dari close candle M5 sesuai state machine V10. Tidak ada order yang dikirim ke Binance."
+                                )
+                            else:
+                                await self._drop_m5_watch(pair, "V10_BOS_CONFIRMED_NOT_ADMITTED: " + "; ".join(notes[:2]), persist=False)
+                            changed = True
+                            continue
+
+                        # A failed BOS/entry attempt may re-arm the same POI as
+                        # state 4 (waiting for a fresh literal M15 MSS). Keep an
+                        # internal monitor so the next V10 attempt is not missed.
+                        direction = str(watch.get("direction") or "").upper()
+                        v10_info = ((raw.get("analysis") or {}).get("v10") or {}) if isinstance(raw.get("analysis"), dict) else {}
+                        direction_states = v10_info.get("direction_states") if isinstance(v10_info.get("direction_states"), dict) else {}
+                        direction_key = "LONG" if direction == "BUY" else "SHORT"
+                        direction_state = direction_states.get(direction_key) if isinstance(direction_states.get(direction_key), dict) else {}
+                        state_number = int(direction_state.get("state") or -1)
+                        same_thesis = (
+                            int(direction_state.get("setup_id") or 0) == int(watch.get("v10_setup_id") or 0)
+                            and int(direction_state.get("poi_id") or 0) == int(watch.get("v10_poi_id") or 0)
+                            and int(watch.get("v10_setup_id") or 0) > 0
+                            and int(watch.get("v10_poi_id") or 0) > 0
+                        )
+                        last_event = str(direction_state.get("last_event") or "STATE_5_NO_LONGER_ACTIVE")
+                        reason = str(raw.get("state_reason") or last_event)
+                        if state == "WAITING_TRIGGER" and state_number == 4 and same_thesis:
+                            watch.update({
+                                "setup": self._json_safe(copy.deepcopy(raw)),
+                                "m5_watch_status": "WAITING_NEW_MSS",
+                                "last_processed_m5_close_ms": closed_ms,
+                                "last_m5_close_ms": closed_ms,
+                                "last_m5_close": (raw.get("v10_last_m5_close") or raw.get("price_now_reference") or watch.get("last_m5_close")),
+                                "last_v10_state_reason": reason,
+                                "last_v10_event": last_event,
+                                "v10_waiting_bos_bars": 0,
+                                "watch_bars_m5": 0,
+                                "m5_last_error": None,
+                                "m5_last_error_at_ms": None,
+                                "m5_retry_after_monotonic": 0.0,
+                            })
+                            changed = True
+                            log.info("[V10-WATCH] %s re-armed | waiting fresh M15 MSS on same POI setup=%s poi=%s", pair, watch.get("v10_setup_id"), watch.get("v10_poi_id"))
+                            continue
+                        await self._drop_m5_watch(pair, f"V10_CANDIDATE_ENDED:{last_event}:{reason[:100]}", persist=False)
+                        changed = True
+
                     except Exception as exc:
                         if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
                             wait = max(
@@ -7651,303 +7471,159 @@ class TradingEngine:
                             )
                             self._binance_public_cooldown_until = max(self._binance_public_cooldown_until, time.monotonic() + wait)
                             self._on_public_rate_limit(exc, wait)
-                            log.warning("[M5-WATCH] %s halted on Binance rate limit: %s", pair, str(exc)[:180])
                             break
-                        error_text = str(exc)
-                        error_lower = error_text.lower()
-                        # Invalid kline interval is a permanent strategy/configuration error,
-                        # not a transient candle failure. Remove this watch after one clear
-                        # diagnostic rather than requesting the same invalid endpoint every
-                        # 15 seconds and flooding Telegram/backend warnings.
-                        if "/fapi/v1/klines" in error_lower and ("-1120" in error_lower or "invalid interval" in error_lower):
-                            log.error(
-                                "[M5-WATCH] %s removed: strategy.py supplied an invalid Binance kline interval. "
-                                "Update main.py and strategy.py together; internal interval '5' must map to '5m'. Error: %s",
-                                pair, error_text[:200],
-                            )
-                            await self._drop_m5_watch(pair, "INVALID_BINANCE_KLINE_INTERVAL")
-                            continue
-                        log.warning("[M5-WATCH] %s processing failed: %s", pair, error_text[:240])
-                        watch["m5_last_error"] = error_text[:240]
+                        watch["m5_last_error"] = str(exc)[:240]
                         watch["m5_last_error_at_ms"] = int(time.time() * 1000)
-                        # Avoid rapid retries against a sick endpoint/cache; closed-bar catch-up is safe.
                         watch["m5_retry_after_monotonic"] = time.monotonic() + 15.0
-                        if "invalid direction" in error_lower or "watch state" in error_lower:
-                            await self._drop_m5_watch(pair, "INVALID_WATCH_STATE")
-                    # Yield between symbols. Candle provider itself serializes REST requests.
-                    await asyncio.sleep(0.03)
+                        changed = True
+                        log.warning("[V10-WATCH] %s replay failed: %s", pair, str(exc)[:200])
+                    await asyncio.sleep(0.05)
 
+                if changed:
+                    self._candidate_persist_dirty = True
+                    await self._persist_v10_candidates()
                 await self._ram_guard()
                 await asyncio.sleep(M5_WATCH_POLL_SECONDS)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.exception("[M5-WATCH] watcher cycle failed: %s", exc)
+                log.exception("[V10-WATCH] watcher cycle failed: %s", exc)
                 await asyncio.sleep(5.0)
 
     async def _handle_candidates_command(self, text: str = "/candidates") -> None:
-        """Report all active M5-WATCH candidates without touching Binance or mutating watch state.
-
-        Output is split into Telegram-safe chunks. Optional /candidates N shows one
-        page; /candidates all (or no argument) displays every current watch.
-        """
+        """Display the persisted V10 state-5 queue; command is strictly read-only."""
         parts = str(text or "/candidates").split(maxsplit=1)
         arg = parts[1].strip().lower() if len(parts) > 1 else "all"
-        per_page = 3
+        per_page = 4
         now_ms = int(time.time() * 1000)
 
-        def num(value: Any, default: float = 0.0) -> float:
+        def number(value: Any, default: float = 0.0) -> float:
             try:
-                v = float(value)
-                return v if math.isfinite(v) else default
+                result = float(value)
+                return result if math.isfinite(result) else default
             except (TypeError, ValueError, OverflowError):
                 return default
 
         def price(value: Any) -> str:
-            v = num(value, float("nan"))
-            if not math.isfinite(v) or v <= 0:
-                return "-"
-            return f"{v:.10g}"
+            result = number(value, float("nan"))
+            return f"{result:.10g}" if math.isfinite(result) and result > 0 else "-"
 
         def dt_text(value: Any) -> str:
             try:
                 ms = int(value or 0)
-                if ms <= 0:
-                    return "-"
-                return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(TZ).strftime("%d-%m %H:%M:%S WIB")
+                return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(TZ).strftime("%d-%m %H:%M:%S WIB") if ms > 0 else "-"
             except (TypeError, ValueError, OverflowError, OSError):
                 return "-"
 
-        def elapsed_text(seconds: float) -> str:
-            seconds = max(0, int(seconds))
-            h, rem = divmod(seconds, 3600)
-            m, sec = divmod(rem, 60)
-            if h:
-                return f"{h}j {m}m"
-            if m:
-                return f"{m}m {sec}d"
-            return f"{sec}d"
-
-        def compact_reason(value: Any, limit: int = 110) -> str:
-            raw = re.sub(r"\s+", " ", str(value or "-"))
-            if len(raw) > limit:
-                return raw[: limit - 1] + "…"
-            return raw
-
-        # Lock only long enough to copy display fields. No API calls, no strategy
-        # calls, no price refresh, and no candidate state changes from this command.
         async with self._scan_watch_lock:
-            watch_rows: list[dict[str, Any]] = []
+            rows = []
+            rearm_monitor_count = 0
             for pair, watch in self._scan_watchlist.items():
-                setup = watch.get("setup") if isinstance(watch.get("setup"), dict) else watch
-                components = watch.get("m5_last_monitor_components")
-                if not isinstance(components, dict):
-                    components = watch.get("m5_confirmation_last_components")
-                if not isinstance(components, dict):
-                    components = {}
-                zone_low = num(watch.get("entry_zone_low"), 0.0)
-                zone_high = num(watch.get("entry_zone_high"), 0.0)
-                score_raw = watch.get("m5_last_monitor_score")
-                if score_raw is None:
-                    score_raw = watch.get("m5_confirmation_score")
-                score = None if score_raw is None else num(score_raw, 0.0)
-                threshold = num(watch.get("m5_confirmation_threshold"), M5_WATCH_CONFIRM_THRESHOLD)
-                bars = max(0, int(num(watch.get("watch_bars_m5"), 0)))
-                timeout = max(1, int(num(watch.get("watch_timeout_m5"), M5_WATCH_TIMEOUT_BARS)))
-                poi_touched = bool(watch.get("poi_touched"))
-                touch_age = max(0, int(num(watch.get("poi_touch_age_m5"), 0)))
-                poi_window = max(1, int(num(watch.get("poi_confirm_window_m5"), M5_WATCH_POI_WINDOW_BARS)))
-                started_ms = int(num(watch.get("watch_started_ms"), 0))
-                last_close_ms = int(num(watch.get("m5_last_m5_close_ms"), 0))
-                last_close = watch.get("m5_last_m5_close")
-                if last_close is None:
-                    last_close = watch.get("confirmation_price")
-                score_reason = watch.get("m5_last_monitor_reason") or watch.get("m5_confirmation_reason") or "WAITING_FOR_FIRST_CLOSED_M5_CANDLE"
-                if watch.get("m5_last_error"):
-                    phase = "RETRY_WAIT"
-                elif poi_touched:
-                    phase = "POI_TOUCHED / WAITING_M5_CONFIRMATION"
-                else:
-                    phase = "WAITING_FOR_POI"
-                watch_rows.append({
-                    "pair": str(pair),
-                    "direction": str(watch.get("direction") or setup.get("direction") or "?"),
-                    "confidence": num(setup.get("confidence"), 0.0),
-                    "phase": phase,
-                    "status": str(watch.get("m5_watch_status") or "WAITING"),
-                    "zone_low": zone_low,
-                    "zone_high": zone_high,
-                    "score": score,
-                    "threshold": threshold,
+                watch_status = str(watch.get("m5_watch_status") or "WAITING_M5_BOS").upper()
+                if watch_status == "WAITING_NEW_MSS":
+                    rearm_monitor_count += 1
+                    continue
+                if watch_status != "WAITING_M5_BOS":
+                    continue
+                setup = watch.get("setup") if isinstance(watch.get("setup"), dict) else {}
+                analysis = setup.get("analysis") if isinstance(setup.get("analysis"), dict) else {}
+                v10 = analysis.get("v10") if isinstance(analysis.get("v10"), dict) else {}
+                bars = max(0, int(number(watch.get("v10_waiting_bos_bars", watch.get("watch_bars_m5")), 0)))
+                timeout = max(1, int(number(watch.get("v10_bos_timeout_bars", watch.get("watch_timeout_m5")), V10_BOS_TIMEOUT_M5_BARS)))
+                last_close_ms = int(number(watch.get("last_m5_close_ms"), 0))
+                rows.append({
+                    "pair": pair,
+                    "direction": str(watch.get("direction") or "?"),
+                    "poi_type": str(watch.get("v10_poi_type") or v10.get("poi_type") or "?"),
+                    "poi_low": number(watch.get("entry_zone_low"), 0),
+                    "poi_high": number(watch.get("entry_zone_high"), 0),
+                    "mss_close_ms": int(number(watch.get("v10_mss_close_time_ms"), 0)),
+                    "mss_price": watch.get("v10_mss_close_price"),
+                    "sl_anchor": watch.get("v10_sl_anchor"),
                     "bars": bars,
                     "timeout": timeout,
-                    "bars_remaining": max(0, timeout - bars),
-                    "poi_touched": poi_touched,
-                    "touch_time": watch.get("poi_touch_time_ms"),
-                    "touch_age": touch_age,
-                    "poi_window": poi_window,
-                    "poi_window_remaining": max(0, poi_window - touch_age),
-                    "started_ms": started_ms,
+                    "remaining": max(0, timeout - bars),
                     "last_close_ms": last_close_ms,
-                    "last_close": last_close,
-                    "components": components,
-                    "reason": score_reason,
+                    "last_close": watch.get("last_m5_close"),
+                    "started_ms": int(number(watch.get("watch_started_ms"), 0)),
+                    "status": str(watch.get("m5_watch_status") or "WAITING_M5_BOS"),
+                    "reason": str(watch.get("last_v10_state_reason") or setup.get("state_reason") or "Waiting for fresh M5 BOS close-cross"),
+                    "event": str(watch.get("last_v10_event") or "MSS_CONFIRMED"),
                     "last_error": watch.get("m5_last_error"),
-                    "last_error_at": watch.get("m5_last_error_at_ms"),
-                    "retrying": time.monotonic() < num(watch.get("m5_retry_after_monotonic"), 0.0),
+                    "error_at": watch.get("m5_last_error_at_ms"),
                     "origin": str(watch.get("watch_origin") or "SCAN"),
                     "cycle": watch.get("watch_cycle"),
-                    "watch_bars_pct": min(100.0, 100.0 * bars / timeout),
-                    "entry": setup.get("entry"),
-                    "sl": setup.get("sl"),
-                    "tp": setup.get("tp"),
-                    "price_exp": setup.get("price_exp"),
+                    "watch_id": str(watch.get("v10_watch_id") or ""),
+                    "d1_bias": str(v10.get("d1_bias") or ("LONG" if watch.get("direction") == "BUY" else "SHORT")),
                 })
 
-        # Most actionable candidates first: POI touched, then score closest to
-        # threshold, then highest strategy confidence. Stable pair sort is final tie-break.
-        watch_rows.sort(key=lambda x: (
-            0 if x["poi_touched"] else 1,
-            -(x["score"] if x["score"] is not None else -1.0),
-            -x["confidence"],
-            x["pair"],
-        ))
-
-        total = len(watch_rows)
+        rows.sort(key=lambda r: (r["bars"], r["pair"]))
+        total = len(rows)
         pages = max(1, (total + per_page - 1) // per_page)
-        chosen_page: int | None = None
+        selected_page: int | None = None
         if arg not in {"all", "semua", ""}:
             try:
-                chosen_page = int(arg)
+                selected_page = int(arg)
             except ValueError:
-                await self.reply("Format: /candidates atau /candidates 2 untuk halaman tertentu atau /candidates all untuk seluruh watch.")
+                await self.reply("Format: /candidates atau /candidates 2 untuk halaman tertentu atau /candidates all untuk semua kandidat.")
                 return
-            if chosen_page < 1 or chosen_page > pages:
-                await self.reply(f"Halaman tidak valid. Halaman tersedia: 1–{pages}. Gunakan /candidates atau /candidates all untuk semua kandidat.")
+            if selected_page < 1 or selected_page > pages:
+                await self.reply(f"Halaman tidak valid. Halaman tersedia: 1–{pages}.")
                 return
 
-        touched_count = sum(1 for x in watch_rows if x["poi_touched"])
-        retry_count = sum(1 for x in watch_rows if x["last_error"])
-        scored_count = sum(1 for x in watch_rows if x["score"] is not None)
-        report = self._scan_last_report if isinstance(self._scan_last_report, dict) else {}
-        scan_state = "ON" if self._scan_user_enabled else "OFF"
-        runtime_state = (
-            "PAUSED_BY_MAX" if self._scan_auto_paused else
-            "RUNNING" if self._scan_task is not None and not self._scan_task.done() else
-            "WAITING_H4" if self._scan_user_enabled and self._h4_enabled and not self._h4_window_active else
-            "OFF"
-        )
-        report_universe = max(0, int(num(report.get("universe_total"), 0)))
-        sweep_done_live = len(getattr(self, "_sweep_done", set()))
-        headroom = self._api_headroom_pct()
-        ram = rss_mb()
-        pending_trades = sum(1 for t in self.active_trades.values() if getattr(t, "status", "") == "PENDING")
-        filled_trades = sum(1 for t in self.active_trades.values() if getattr(t, "status", "") == "FILLED")
-        summary = [
-            "📋 CANDIDATES — LIVE M5 WATCH",
-            f"Scan {scan_state} • Runtime {runtime_state} • H4 gate {'ON' if self._h4_enabled else 'OFF'}",
-            f"H4 window {self._h4_window_text()} • Next slot {self._h4_next_slot_text() if self._h4_enabled else 'continuous mode'}",
-            f"H4 pass {self._h4_cycle_count}/{self.h4_sweeps if self._h4_enabled else '∞'} • progress sweep {sweep_done_live}/{report_universe or '?'} pair",
-            f"Trades {len(self.active_trades)}/{self.max_active_trades} (PENDING {pending_trades}, FILLED {filled_trades}) • Watch {total}/{M5_WATCH_MAX_CANDIDATES} • POI touched {touched_count} • Retry/error {retry_count}",
-            f"M5 scored {scored_count}/{total} • threshold {M5_WATCH_CONFIRM_THRESHOLD:.1f} • POI window {M5_WATCH_POI_WINDOW_BARS} bars • timeout {M5_WATCH_TIMEOUT_BARS} bars",
-            f"API headroom {'-' if headroom is None else f'{headroom:.0f}%'} • RAM {'-' if ram <= 0 else f'{ram:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB'} • Binance limit hits {API_STATS.limit_hits}",
+        watcher_state = "RUNNING" if self._m5_watch_task is not None and not self._m5_watch_task.done() else "STOPPED"
+        header = [
+            "🕯 TACTICAL V10 • M5 CANDIDATE WATCHLIST",
+            f"Menunggu BOS M5: {total} • monitor re-arm MSS: {rearm_monitor_count} • total pair diawasi: {total + rearm_monitor_count}/{M5_WATCH_MAX_CANDIDATES}",
+            f"Watcher: {watcher_state} • Scanner: {'ON' if self._scan_user_enabled else 'OFF'}",
+            f"Trigger: fresh BOS close-cross M5 setelah literal MSS M15 • Timeout state machine: {V10_BOS_TIMEOUT_M5_BARS} candle M5",
+            "Belum ada entry/order selama status WAITING_M5_BOS.",
         ]
-        if report:
-            summary.append(
-                "Last scan: cycle {cycle} • analyzed {scanned} • ≥threshold {qualified} • validator valid {valid} • queued {added} • {duration:.1f}s".format(
-                    cycle=report.get("cycle", "-"),
-                    scanned=int(num(report.get("scanned"), 0)),
-                    qualified=int(num(report.get("qualified", report.get("qualified_candidates", 0)), 0)),
-                    valid=int(num(report.get("valid"), 0)),
-                    added=int(num(report.get("added"), 0)),
-                    duration=num(report.get("duration_seconds"), 0.0),
-                )
+        if not rows:
+            no_candidate_text = (
+                f"Belum ada kandidat yang menunggu BOS M5. Ada {rearm_monitor_count} setup yang dipantau untuk menunggu MSS M15 ulang."
+                if rearm_monitor_count else
+                "Belum ada kandidat yang menunggu BOS M5. Scan akan memasukkan setup setelah prasyarat D1/H4/M15 terpenuhi."
             )
-        summary.append("Score adalah evidence score, bukan probabilitas profit. Harga yang ditampilkan berasal dari candle M5 terakhir yang sudah tutup.")
-
-        if not watch_rows:
-            summary.extend([
-                "",
-                "Tidak ada kandidat yang sedang M5-WATCH saat ini.",
-                "Kandidat yang sudah entry, expired, atau ditolak akan keluar dari daftar aktif.",
-                "Gunakan /status untuk detail engine dan /api untuk bobot request Binance.",
-            ])
-            await self.reply("\n".join(summary))
+            await self.reply("\n".join(header + ["", no_candidate_text]))
             return
 
-        def render_row(row: dict[str, Any], number: int) -> str:
-            score = row["score"]
-            threshold = row["threshold"]
-            if score is None:
-                score_text = f"belum ada skor / {threshold:.1f}"
-                delta_text = ""
-            else:
-                gap = threshold - score
-                score_text = f"{score:.1f}/{threshold:.1f}"
-                delta_text = f" • {'kurang' if gap > 0 else 'ambang tercapai'} {abs(gap):.1f}"
-            close = num(row["last_close"], 0.0)
-            zone_low, zone_high = row["zone_low"], row["zone_high"]
-            if close > 0 and zone_low > 0 and zone_high >= zone_low:
-                if zone_low <= close <= zone_high:
-                    location = "di dalam POI"
-                elif close < zone_low:
-                    location = f"di bawah POI ({(zone_low - close) / zone_low * 100:.2f}%)"
-                else:
-                    location = f"di atas POI ({(close - zone_high) / zone_high * 100:.2f}%)"
-            else:
-                location = "harga M5 belum tersedia"
-            c = row["components"]
-            comp_text = (
-                f"rej {num(c.get('rejection_wick')):.0f}/20 · close {num(c.get('directional_close')):.0f}/15 · "
-                f"struct {num(c.get('micro_structure')):.0f}/30 · flow {num(c.get('taker_flow_and_relative_volume')):.0f}/20 · "
-                f"opp {num(c.get('opposing_move_weakness')):.0f}/15"
-            ) if c else "komponen: menunggu candle closed yang cukup"
-            if row["poi_touched"]:
-                touch_line = f"POI: TERSENTUH {dt_text(row['touch_time'])} • jendela konfirmasi {row['touch_age']}/{row['poi_window']} bar; sisa {row['poi_window_remaining']}"
-            else:
-                touch_line = "POI: BELUM TERSENTUH • konfirmasi belum dimulai"
-            age_text = elapsed_text((now_ms - row["started_ms"]) / 1000) if row["started_ms"] else "-"
-            err_line = ""
+        chosen = rows if selected_page is None else rows[(selected_page - 1) * per_page:selected_page * per_page]
+        start_number = 1 if selected_page is None else (selected_page - 1) * per_page + 1
+        blocks = []
+        for index, row in enumerate(chosen, start_number):
+            phase = "RETRY" if row["last_error"] else "WAITING M5 BOS"
+            age_minutes = max(0, (now_ms - row["started_ms"]) // 60_000) if row["started_ms"] else 0
+            block = (
+                f"{index}. {row['pair']} • {row['direction']} • {phase}\n"
+                f"   D1: {row['d1_bias']} • H4 POI: {row['poi_type']} ({price(row['poi_low'])} – {price(row['poi_high'])})\n"
+                f"   MSS M15 close: {dt_text(row['mss_close_ms'])} @ {price(row['mss_price'])} • SL anchor: {price(row['sl_anchor'])}\n"
+                f"   BOS wait: {row['bars']}/{row['timeout']} candle • batas tersisa {row['remaining']} candle ({row['remaining'] * 5} menit)\n"
+                f"   M5 terakhir: {dt_text(row['last_close_ms'])} • close {price(row['last_close'])} • umur kandidat {age_minutes} menit\n"
+                f"   Asal: {row['origin']} / cycle {row['cycle'] or '-'} • ID {row['watch_id']}\n"
+                f"   Status V10: {row['event']} • {row['reason']}"
+            )
             if row["last_error"]:
-                retry_text = " • retry dijeda" if row["retrying"] else ""
-                err_line = f"⚠️ Error terakhir ({dt_text(row['last_error_at'])}){retry_text}: {compact_reason(row['last_error'], 140)}\n"
-            return (
-                f"{number}. {row['pair']} {row['direction']} • thesis {row['confidence']:.1f}/100\n"
-                f"   Tahap: {row['phase']} • {row['status']} • asal {row['origin']} / cycle {row['cycle'] or '-'}\n"
-                f"   Progress: {row['bars']}/{row['timeout']} candle ({row['watch_bars_pct']:.0f}%) • sisa timeout {row['bars_remaining']} bar (~{row['bars_remaining'] * 5}m) • umur {age_text}\n"
-                f"   Skor M5: {score_text}{delta_text}\n"
-                f"   {touch_line}\n"
-                f"   POI {price(zone_low)} – {price(zone_high)} • close M5 {price(close)} ({location}) • candle close {dt_text(row['last_close_ms'])}\n"
-                f"   Evidence: {comp_text}\n"
-                f"   Alasan: {compact_reason(row['reason'])}\n"
-                f"   Level kandidat awal: Entry {price(row['entry'])} • SL {price(row['sl'])} • TP {price(row['tp'])} • Exp {price(row['price_exp'])}\n"
-                f"{err_line}"
-            ).rstrip()
+                block += f"\n   ⚠️ Error {dt_text(row['error_at'])}: {str(row['last_error'])[:160]}"
+            blocks.append(block)
 
-        if chosen_page is not None:
-            start = (chosen_page - 1) * per_page
-            selected = watch_rows[start:start + per_page]
-            chunks = ["\n".join(summary + [f"\nHalaman {chosen_page}/{pages} • menampilkan {len(selected)} dari {total} watch.", ""])]
-            body = "\n\n".join(render_row(row, start + i + 1) for i, row in enumerate(selected))
-            chunks.append(body)
-            chunks.append(f"Halaman berikutnya: /candidates {chosen_page + 1}" if chosen_page < pages else "Akhir daftar. Perintah ini read-only dan tidak membuat request candle.")
-            for chunk in chunks:
-                if chunk.strip():
-                    await self.reply(chunk[:3900])
+        if selected_page is not None:
+            await self.reply("\n".join(header + [f"Halaman {selected_page}/{pages} • {total} kandidat aktif.", ""]))
+            await self.reply("\n\n".join(blocks))
+            if selected_page < pages:
+                await self.reply(f"Halaman berikutnya: /candidates {selected_page + 1}")
             return
 
-        # /candidates with no argument or /candidates all shows the complete list.
-        await self.reply("\n".join(summary + [f"\nSemua {total} kandidat aktif ditampilkan di bawah (dipecah agar sesuai batas Telegram).", ""]))
+        await self.reply("\n".join(header + [f"\nSemua {total} kandidat aktif:", ""]))
         buffer = ""
-        for i, row in enumerate(watch_rows, 1):
-            block = render_row(row, i) + "\n\n"
-            if buffer and len(buffer) + len(block) > 3400:
-                await self.reply(buffer.rstrip())
+        for block in blocks:
+            if buffer and len(buffer) + len(block) + 2 > 3400:
+                await self.reply(buffer)
                 buffer = ""
-            buffer += block
+            buffer = (buffer + "\n\n" + block).strip()
         if buffer:
-            await self.reply(buffer.rstrip())
-        await self.reply("Akhir daftar. Gunakan /candidates N untuk melihat satu halaman; /candidates tetap menampilkan semua kandidat aktif. Perintah ini read-only dan tidak meminta candle baru ke Binance.")
+            await self.reply(buffer)
+        await self.reply("Akhir daftar. /candidates bersifat read-only dan tidak membuat request Binance.")
 
     async def _run_scan_cycle_inner(self) -> None:
         """Jalankan Tactical V10 E_GE2_ATR terhadap universe Binance secara paper-only."""
@@ -7998,9 +7674,10 @@ class TradingEngine:
             f"Sapuan {self._h4_cycle_count + 1}/{self.h4_sweeps if self._h4_enabled else '∞'} • batch {len(batch)} • sisa {max(0, len(pending) - len(batch))} • excluded BTC/ETH • banned {banned}",
         ]))
 
-        stats = {"scanned": 0, "below": 0, "rejected": 0, "errors": 0, "valid": 0, "added": 0, "waiting": 0}
+        stats = {"scanned": 0, "below": 0, "rejected": 0, "errors": 0, "valid": 0, "added": 0, "waiting": 0, "waiting_m5_bos": 0, "watch_queued": 0}
         direction_counts = {"BULLISH": 0, "BEARISH": 0, "RANGE": 0, "UNKNOWN": 0}
         candidates: list[dict[str, Any]] = []
+        waiting_candidates: list[dict[str, Any]] = []
         qualified_candidates = 0
         rate_limited = 0
         stopped_early = False
@@ -8038,6 +7715,12 @@ class TradingEngine:
                 cstate = str(candidate.get("candidate_state") or "READY").upper()
                 if cstate == "WAITING_TRIGGER":
                     stats["waiting"] += 1
+                elif cstate == "WAITING_M5_BOS":
+                    # D1/AOI + H4 POI + literal MSS M15 are valid; only fresh
+                    # M5 BOS close-cross is pending. Queue it, do not create a trade.
+                    candidate["confidence"] = Decimal("100")
+                    waiting_candidates.append(candidate)
+                    stats["waiting_m5_bos"] += 1
                 elif cstate not in {"READY", "FILLED"}:
                     stats["rejected"] += 1
                 else:
@@ -8076,6 +7759,7 @@ class TradingEngine:
         remaining = [p for p in targets if p not in self._sweep_done]
         self._sweep_complete = (not remaining) and (not stopped_early) and total_targets > 0
 
+        notes: list[str] = []
         validated: list[dict[str, Any]] = []
         for candidate in candidates:
             if generation != self._scan_generation or not self._scan_user_enabled or len(self.active_trades) >= self.max_active_trades:
@@ -8093,7 +7777,28 @@ class TradingEngine:
                     break
                 log.warning("[SCAN V10] validator %s gagal: %s", candidate.get("pair"), str(exc)[:180])
 
-        added_trades, notes = await self._open_validated(validated, generation)
+        # Validate and enqueue only state-5 candidates. They remain outside
+        # /trade until the V10 state machine confirms a fresh M5 BOS close-cross.
+        validated_waiting: list[dict[str, Any]] = []
+        for candidate in waiting_candidates:
+            if generation != self._scan_generation or not self._scan_user_enabled:
+                break
+            try:
+                checked = await self._scan_validate_candidate(module, candidate, cycle)
+                if checked is not None:
+                    validated_waiting.append(checked)
+            except Exception as exc:
+                log.warning("[SCAN V10] candidate validator %s gagal: %s", candidate.get("pair"), str(exc)[:160])
+        queued_count, watch_notes = await self._queue_m5_watch_candidates(
+            module, validated_waiting, generation, cycle, origin="SCAN"
+        )
+        stats["watch_queued"] = queued_count
+        notes.extend(watch_notes)
+        if queued_count:
+            self._ensure_v10_m5_watch_task()
+
+        added_trades, trade_notes = await self._open_validated(validated, generation)
+        notes.extend(trade_notes)
         stats["added"] = len(added_trades)
         duration = time.monotonic() - started
         self._scan_durations.append(duration)
@@ -8104,14 +7809,15 @@ class TradingEngine:
             "sweep_complete": self._sweep_complete, "stopped_early": stopped_early,
         }
         log.info(
-            "[SCAN V10] batch #%s selesai | scanned=%s waiting=%s candidates=%s valid=%s paper_added=%s %.1fs sweep_complete=%s",
-            cycle, stats["scanned"], stats["waiting"], qualified_candidates, stats["valid"], stats["added"], duration, self._sweep_complete,
+            "[SCAN V10] batch #%s selesai | scanned=%s waiting=%s waiting_m5_bos=%s watch_queued=%s candidates=%s valid=%s paper_added=%s %.1fs sweep_complete=%s",
+            cycle, stats["scanned"], stats["waiting"], stats["waiting_m5_bos"], stats["watch_queued"], qualified_candidates, stats["valid"], stats["added"], duration, self._sweep_complete,
         )
         await self.reply(
             f"🧭 TACTICAL V10 E_GE2_ATR • SCAN #{cycle} SELESAI • {duration:.0f}s • RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
             f"├ Dipindai {stats['scanned']} • tersapu {len(self._sweep_done)}/{total_targets} • waiting trigger {stats['waiting']}\n"
             f"├ D1 🟢 {direction_counts['BULLISH']} 🔴 {direction_counts['BEARISH']} ⚪ {direction_counts['RANGE']}\n"
-            f"├ V10 qualifying {qualified_candidates} • valid {stats['valid']} • paper trade baru {stats['added']}\n"
+            f"├ V10 qualifying {qualified_candidates} • waiting M5 BOS {stats['waiting_m5_bos']} • masuk watch {stats['watch_queued']}\n"
+            f"├ valid {stats['valid']} • paper trade baru {stats['added']}\n"
             f"├ ditolak {stats['rejected']} • error {stats['errors']} • BTC/ETH excluded\n"
             f"└ Sapuan {'✅ selesai' if self._sweep_complete else 'berlanjut'}"
             + ("\n" + "\n".join(notes) if notes else "")
@@ -8127,8 +7833,12 @@ class TradingEngine:
             v10_candidate_id = str(candidate.get("v10_candidate_id") or candidate.get("candidate_id") or "")
             if v10_candidate_id and v10_candidate_id in getattr(self, "_v10_opened_candidate_ids", set()):
                 continue
-            manual_m5_auto = bool(candidate.get("m5_confirmed_entry")) and str(candidate.get("watch_origin") or "").upper() == "AUTO"
-            if generation != self._scan_generation or (not self._scan_user_enabled and not manual_m5_auto):
+            paper_m5_confirmed = (
+                bool(candidate.get("m5_confirmed_entry"))
+                and str(candidate.get("entry_model") or "") == "V10_MSS_M15_BOS_M5_LIMIT"
+                and str(candidate.get("watch_origin") or "").upper() in {"AUTO", "SCAN"}
+            )
+            if generation != self._scan_generation or (not self._scan_user_enabled and not paper_m5_confirmed):
                 break
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
@@ -8507,9 +8217,8 @@ class TradingEngine:
             self._h4_window_active = False
             self._scan_generation += 1
             await self._stop_scan_task()
-            async with self._scan_watch_lock:
-                self._scan_watchlist.clear()
-            await self.reply("🛑 SCAN OFF • M5 watchlist dibersihkan")
+            self._ensure_v10_m5_watch_task()
+            await self.reply("🛑 SCAN OFF • pencarian pair baru berhenti; kandidat yang sudah masuk antrean tetap dipantau sampai BOS, invalidasi, atau timeout V10.")
             return
 
         self._scan_user_enabled = True
@@ -9009,6 +8718,7 @@ class TradingEngine:
         await self.reply(f"✅ /max = {value}")
 
     async def _stop_scan_task(self) -> None:
+        """Stop universe scanning only; existing V10 candidates keep being watched."""
         task = self._scan_task
         self._scan_task = None
         if task is not None and not task.done():
@@ -9017,22 +8727,25 @@ class TradingEngine:
                 await task
             except asyncio.CancelledError:
                 pass
-        watch_task = self._m5_watch_task
+
+    async def _stop_v10_m5_watch_task(self) -> None:
+        task = self._m5_watch_task
         self._m5_watch_task = None
-        if watch_task is not None and not watch_task.done():
-            watch_task.cancel()
+        if task is not None and not task.done():
+            task.cancel()
             try:
-                await watch_task
+                await task
             except asyncio.CancelledError:
                 pass
 
     async def _start_scan_task(self) -> None:
         if not self._running:
             return
+        self._ensure_v10_m5_watch_task()
         if not self._scan_user_enabled:
             return
-        # Tactical V10 owns its complete D1→H4→M15→M5 state machine. The legacy
-        # second-stage M5 watch loop is intentionally not started for this engine.
+        # Start the dedicated V10 candidate watcher independently from the
+        # universe scanner. Existing candidates remain monitored when /scan is OFF.
         if not self._h4_enabled and len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
             return
@@ -10106,6 +9819,76 @@ class TradingEngine:
                     merged[key] = value
             payload = merged
 
+        # A Tactical V10 candidate is intentionally incomplete: MSS is confirmed,
+        # but no M5 BOS/entry exists yet. Keep it out of the trade normalizer.
+        if str(payload.get("candidate_state") or "").upper() == "WAITING_M5_BOS":
+            result_pair = normalize_symbol(str(payload.get("pair") or pair))
+            direction = str(payload.get("direction") or "").upper().strip()
+            data_info = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            strategy_info = payload.get("strategy") if isinstance(payload.get("strategy"), dict) else {}
+            analysis = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else {}
+            entry_zone = payload.get("entry_zone") if isinstance(payload.get("entry_zone"), dict) else {}
+            watch_id = str(payload.get("v10_watch_id") or payload.get("v10_candidate_id") or "")
+            poi = payload.get("v10_poi")
+            try:
+                confidence = Decimal(str(payload.get("confidence", 100)))
+                mss_close_ms = int(payload.get("v10_mss_close_time_ms"))
+                if not isinstance(poi, list) or len(poi) != 2:
+                    raise ValueError("POI H4 tidak tersedia")
+                poi_low, poi_high = sorted((float(poi[0]), float(poi[1])))
+            except Exception as exc:
+                raise ValueError(f"Kandidat V10 menunggu BOS tidak lengkap: {exc}") from exc
+            if result_pair != pair or direction not in {"BUY", "SELL"}:
+                raise ValueError("Identitas pair/direction kandidat V10 tidak valid")
+            if not watch_id or len(watch_id) < 16 or mss_close_ms <= 0:
+                raise ValueError("ID kandidat atau waktu close MSS V10 tidak valid")
+            if not (math.isfinite(poi_low) and math.isfinite(poi_high) and 0 < poi_low <= poi_high):
+                raise ValueError("Rentang POI H4 kandidat V10 tidak valid")
+            if not confidence.is_finite() or confidence != Decimal("100"):
+                raise ValueError("Confidence kandidat V10 harus berupa status kelengkapan aturan 100")
+            return {
+                "pair": result_pair,
+                "direction": direction,
+                "price_now_reference": payload.get("price_now_reference"),
+                "entry": None, "entry_reason": "Menunggu fresh M5 BOS close-cross.",
+                "price_exp": None, "price_exp_reason": "Belum ada entry sebelum BOS M5.",
+                "sl": None, "sl_reason": "Anchor SL V10 ditetapkan pada MSS; order baru setelah BOS.",
+                "tp": None, "tp_reason": "Target RR 1:2 dihitung setelah entry zone BOS tersedia.",
+                "confidence": confidence,
+                "confidence_components": self._json_safe(payload.get("confidence_components") or {}),
+                "strategy_name": str(strategy_info.get("name") or payload.get("strategy_name") or "TACTICAL_V10_E_GE2_ATR"),
+                "strategy_version": str(strategy_info.get("version") or payload.get("strategy_version") or "10.0.0"),
+                "data_source": str(data_info.get("source") or payload.get("data_source") or "UNKNOWN"),
+                "timeframe": "5m", "candles_requested": data_info.get("candles_requested"),
+                "candles_used": data_info.get("candles_used"),
+                "analysis_source": str(payload.get("analysis_source") or data_info.get("source") or "UNKNOWN").upper(),
+                "data": self._json_safe(data_info), "strategy": self._json_safe(strategy_info),
+                "analysis": self._json_safe(compact_analysis(analysis)),
+                "data_asof": self._json_safe(payload.get("data_asof") or data_info.get("data_asof") or {}),
+                "entry_zone": self._json_safe(entry_zone),
+                "candidate_state": "WAITING_M5_BOS",
+                "state_reason": str(payload.get("state_reason") or "Menunggu BOS M5 V10."),
+                "gate_reasons": self._json_safe(payload.get("gate_reasons") or []),
+                "thesis_signature": watch_id, "setup_archetype": "TACTICAL_V10_E_GE2_ATR",
+                "candidate_id": watch_id, "v10_candidate_id": watch_id, "v10_watch_id": watch_id,
+                "v10_setup_id": int(payload.get("v10_setup_id") or 0),
+                "v10_poi_id": int(payload.get("v10_poi_id") or 0),
+                "v10_attempt_id": int(payload.get("v10_attempt_id") or 0),
+                "v10_poi": self._json_safe(poi), "v10_aoi": self._json_safe(payload.get("v10_aoi")),
+                "v10_poi_type": str(payload.get("v10_poi_type") or ""),
+                "v10_mss_time_ms": int(payload.get("v10_mss_time_ms") or 0),
+                "v10_mss_close_time_ms": mss_close_ms,
+                "v10_mss_close_price": payload.get("v10_mss_close_price"),
+                "v10_sl_anchor": payload.get("v10_sl_anchor"),
+                "v10_waiting_bos_bars": int(payload.get("v10_waiting_bos_bars") or 0),
+                "v10_bos_timeout_bars": int(payload.get("v10_bos_timeout_bars") or V10_BOS_TIMEOUT_M5_BARS),
+                "v10_last_m5_close_ms": int(payload.get("v10_last_m5_close_ms") or 0),
+                "v10_last_m5_close": payload.get("v10_last_m5_close"),
+                "m5_confirmed_entry": False,
+                "entry_model": "V10_MSS_M15_WAIT_BOS_M5_CLOSE",
+                "raw_result": self._json_safe(payload),
+            }
+
         required = (
             "direction",
             "entry",
@@ -10316,6 +10099,13 @@ class TradingEngine:
             "v10_max_hold_seconds": payload.get("v10_max_hold_seconds"),
             "m5_confirmed_entry": bool(payload.get("m5_confirmed_entry")),
             "entry_model": str(payload.get("entry_model") or ""),
+            "v10_watch_id": str(payload.get("v10_watch_id") or ""),
+            "v10_setup_id": payload.get("v10_setup_id"),
+            "v10_poi_id": payload.get("v10_poi_id"),
+            "v10_attempt_id": payload.get("v10_attempt_id"),
+            "v10_order_time_ms": payload.get("v10_order_time_ms"),
+            "v10_order_close_time_ms": payload.get("v10_order_close_time_ms"),
+            "v10_bos_time_ms": payload.get("v10_bos_time_ms"),
         }
 
         return normalized
@@ -10464,6 +10254,26 @@ class TradingEngine:
         result: dict[str, Any],
     ) -> str:
         components = result.get("confidence_components") or {}
+        if str(result.get("candidate_state") or "").upper() == "WAITING_M5_BOS":
+            v10 = ((result.get("analysis") or {}).get("v10") or {}) if isinstance(result.get("analysis"), dict) else {}
+            zone = result.get("entry_zone") if isinstance(result.get("entry_zone"), dict) else {}
+            return "\n".join([
+                "🕯 TACTICAL V10 • CANDIDATE MENUNGGU BOS M5",
+                "",
+                f"Pair: {result.get('pair')}",
+                f"Direction: {result.get('direction')}",
+                f"D1 bias: {v10.get('d1_bias', '-')}",
+                f"AOI: D1 FVG • POI: H4 {result.get('v10_poi_type') or v10.get('poi_type') or '-'}",
+                f"POI H4: {zone.get('low', '-')} – {zone.get('high', '-')}",
+                f"MSS M15 close: {result.get('v10_mss_close_time_ms') or '-'}",
+                f"BOS wait: {result.get('v10_waiting_bos_bars', 0)}/{result.get('v10_bos_timeout_bars', V10_BOS_TIMEOUT_M5_BARS)} candle M5",
+                "",
+                "Belum ada entry, SL/TP order, atau paper trade. Watcher menunggu fresh BOS close-cross pada candle M5 yang sudah tutup.",
+                "",
+                "Tambahkan kandidat ke antrean?",
+                "1. ✅ Ya, masukkan ke /candidates",
+                "2. ❌ Tidak",
+            ])
 
         lines = [
             "🤖 AUTO ANALYSIS SELESAI",
@@ -10525,13 +10335,8 @@ class TradingEngine:
             )
             return
 
-        if len(self.active_trades) >= self.max_active_trades:
-            await self.reply(
-                "Maksimum active trade tercapai.\n"
-                f"Batas: {self.max_active_trades}"
-            )
-            return
-
+        # AUTO may discover a state-5 candidate even when all paper-trade slots
+        # are occupied; capacity is checked only if/when M5 BOS is confirmed.
         job_id = uuid4().hex
         self._auto_job_id = job_id
         self.flow = {
@@ -10619,8 +10424,9 @@ class TradingEngine:
         pair = normalize_symbol(str(result.get("pair") or ""))
         if not pair:
             raise ValueError("Pair AUTO tidak tersedia.")
-        if len(self.active_trades) >= self.max_active_trades:
-            await self.reply("⏸️ MAX ACTIVE TRADE penuh. Kandidat AUTO tidak dimasukkan ke watchlist.")
+        incoming_state = str(result.get("candidate_state") or "").upper()
+        if incoming_state in {"READY", "FILLED"} and len(self.active_trades) >= self.max_active_trades:
+            await self.reply("⏸️ MAX ACTIVE TRADE penuh. Setup AUTO yang sudah BOS-confirmed tidak dimasukkan ke paper trade.")
             self.flow = None
             self._auto_job_id = None
             self._auto_task = None
@@ -10643,8 +10449,10 @@ class TradingEngine:
                     f"❌ AUTO {pair} ditolak validasi geometri V10. Tidak ada setup paper yang dibuat."
                 )
                 return
-            if checked.get("strategy_name") == "TACTICAL_V10_E_GE2_ATR":
+            if (checked.get("strategy_name") == "TACTICAL_V10_E_GE2_ATR"
+                    and str(checked.get("candidate_state") or "").upper() in {"READY", "FILLED"}):
                 checked["watch_origin"] = "AUTO"
+                checked["m5_confirmed_entry"] = True
                 added, notes = await self._open_validated([checked], self._scan_generation)
                 self.flow = None
                 self._auto_job_id = None
@@ -10676,19 +10484,18 @@ class TradingEngine:
                 self._auto_task = None
                 await self.reply("❌ Kandidat AUTO gagal masuk ke M5 watch. " + ("; ".join(notes[:2]) if notes else "Tidak ada slot watch."))
                 return
-            if self._m5_watch_task is None or self._m5_watch_task.done():
-                self._m5_watch_task = asyncio.create_task(self._m5_watch_loop(), name="main-m5-watch-loop")
+            self._ensure_v10_m5_watch_task()
             self.flow = None
             self._auto_job_id = None
             self._auto_task = None
             zone = checked.get("entry_zone") if isinstance(checked.get("entry_zone"), dict) else {}
             await self.reply(
-                "🕯 AUTO CANDIDATE DITERIMA — MENUNGGU KONFIRMASI M5\n\n"
+                "🕯 TACTICAL V10 AUTO CANDIDATE DITERIMA — WAITING M5 BOS\n\n"
                 f"Pair: {pair}\nDirection: {checked.get('direction')}\n"
-                f"Confidence H4/M15: {float(checked.get('confidence') or 0):.1f}/100\n"
-                f"POI: {zone.get('low', checked.get('entry'))} – {zone.get('high', checked.get('entry'))}\n\n"
-                "Belum ada order yang dikirim. Sistem menunggu candle M5 close, lalu sweep/reclaim → post-sweep MSS + displacement → retest/rejection. "
-                "Jika lolos, SL struktural dan TP liquidity dihitung ulang; bila tidak, watch akan expired."
+                f"D1 bias + AOI FVG • H4 {checked.get('v10_poi_type') or 'POI'} • literal MSS M15\n"
+                f"POI: {zone.get('low', '-')} – {zone.get('high', '-')}\n\n"
+                "Kandidat masuk /candidates. Watcher hanya mengevaluasi fresh BOS close-cross pada candle M5 yang sudah tutup. "
+                "Jika BOS lolos, simulasi pending entry V10 dibuat; jika setup invalid atau timeout state machine, kandidat dikeluarkan. Tidak ada order Binance."
             )
         except Exception as exc:
             self.flow = None
