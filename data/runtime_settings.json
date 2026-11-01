@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-01T21:43:09.245719+00:00",
+  "saved_at": "2026-11-01T21:47:27.547331+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -415,7 +415,6 @@
       "CTSIUSDT",
       "VTHOUSDT",
       "SONICUSDT",
-      "PORTALUSDT",
       "DOGSUSDT",
       "NEWTUSDT",
       "SAFEUSDT",
@@ -518,9 +517,9 @@
       "FLUXUSDT",
       "FRAXUSDT"
     ],
-    "cursor": 76,
+    "cursor": 98,
     "sweep_number": 6,
     "batch_size": 50,
-    "updated_at": "2026-11-01T21:43:09.245753+00:00"
+    "updated_at": "2026-11-01T21:47:27.547368+00:00"
   }
 }
