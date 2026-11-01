@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T08:52:55.912624+00:00",
+  "saved_at": "2026-11-01T12:17:39.874873+00:00",
   "bans": [
     {
       "pair": "ASTERUSDT",
@@ -36,6 +36,13 @@
       "until": "2026-11-02T06:06:08.032396+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "TRADOORUSDT",
+      "banned_at": "2026-11-01T12:17:39.874726+00:00",
+      "until": "2026-11-02T12:17:39.874693+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "WETUSDT",
