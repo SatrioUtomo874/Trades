@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-01T15:38:22.173776+00:00",
+  "saved_at": "2026-11-01T15:41:06.279053+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -513,9 +513,9 @@
       "EGLDUSDT",
       "WETUSDT"
     ],
-    "cursor": 300,
+    "cursor": 313,
     "sweep_number": 5,
     "batch_size": 50,
-    "updated_at": "2026-11-01T15:38:22.173827+00:00"
+    "updated_at": "2026-11-01T15:41:06.279091+00:00"
   }
 }
