@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T06:01:02.960801+00:00",
+  "saved_at": "2026-11-01T06:06:08.032582+00:00",
   "bans": [
     {
       "pair": "EGLDUSDT",
@@ -13,6 +13,13 @@
       "pair": "PIXELUSDT",
       "banned_at": "2026-11-01T06:01:02.960652+00:00",
       "until": "2026-11-02T06:01:02.960616+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
+    },
+    {
+      "pair": "RVNUSDT",
+      "banned_at": "2026-11-01T06:06:08.032431+00:00",
+      "until": "2026-11-02T06:06:08.032396+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
     }
