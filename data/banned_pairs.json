@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T16:21:40.414261+00:00",
+  "saved_at": "2026-11-01T16:21:54.911915+00:00",
   "bans": [
+    {
+      "pair": "1000LUNCUSDT",
+      "banned_at": "2026-11-01T16:21:54.911770+00:00",
+      "until": "2026-11-02T16:21:54.911737+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
+    },
     {
       "pair": "ASTERUSDT",
       "banned_at": "2026-11-01T08:52:55.912484+00:00",
