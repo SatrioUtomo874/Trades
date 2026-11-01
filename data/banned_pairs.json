@@ -1,11 +1,18 @@
 {
   "version": 1,
-  "saved_at": "2026-10-31T15:11:39.768401+00:00",
+  "saved_at": "2026-11-01T06:01:02.960801+00:00",
   "bans": [
     {
       "pair": "EGLDUSDT",
       "banned_at": "2026-10-31T15:11:39.768270+00:00",
       "until": "2026-11-01T15:11:39.768239+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
+    },
+    {
+      "pair": "PIXELUSDT",
+      "banned_at": "2026-11-01T06:01:02.960652+00:00",
+      "until": "2026-11-02T06:01:02.960616+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
     }
