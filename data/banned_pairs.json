@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T16:22:08.873505+00:00",
+  "saved_at": "2026-11-01T16:22:23.504045+00:00",
   "bans": [
     {
       "pair": "1000LUNCUSDT",
@@ -20,6 +20,13 @@
       "pair": "AXLUSDT",
       "banned_at": "2026-11-01T16:21:24.882497+00:00",
       "until": "2026-11-02T16:21:24.882466+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
+    },
+    {
+      "pair": "BASUSDT",
+      "banned_at": "2026-11-01T16:22:23.503909+00:00",
+      "until": "2026-11-02T16:22:23.503877+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
     },
