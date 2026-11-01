@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T12:17:39.874873+00:00",
+  "saved_at": "2026-11-01T16:21:09.877355+00:00",
   "bans": [
     {
       "pair": "ASTERUSDT",
@@ -10,11 +10,11 @@
       "source": "AUTO_SL"
     },
     {
-      "pair": "EGLDUSDT",
-      "banned_at": "2026-10-31T15:11:39.768270+00:00",
-      "until": "2026-11-01T15:11:39.768239+00:00",
-      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
-      "source": "AUTO_SL"
+      "pair": "HYPEUSDT",
+      "banned_at": "2026-11-01T16:21:09.877183+00:00",
+      "until": "2026-11-02T16:21:09.877152+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "IDUSDT",
@@ -43,13 +43,6 @@
       "until": "2026-11-02T12:17:39.874693+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
-    },
-    {
-      "pair": "WETUSDT",
-      "banned_at": "2026-11-01T07:15:15.874883+00:00",
-      "until": "2026-11-01T15:15:15.874842+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     }
   ]
 }
