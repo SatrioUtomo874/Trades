@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T06:06:08.032582+00:00",
+  "saved_at": "2026-11-01T07:15:15.875052+00:00",
   "bans": [
     {
       "pair": "EGLDUSDT",
@@ -22,6 +22,13 @@
       "until": "2026-11-02T06:06:08.032396+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "WETUSDT",
+      "banned_at": "2026-11-01T07:15:15.874883+00:00",
+      "until": "2026-11-01T15:15:15.874842+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     }
   ]
 }
