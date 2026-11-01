@@ -197,3 +197,36 @@ Tidak ada trailing.
 - Filled: 2026-10-31T21:45:00+00:00
 - Closed: 2026-11-01T12:17:29.174602+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.0.0
+
+---
+
+## HYPEUSDT — BUY
+
+Trade ID: `HYPEUSDT-20261101-111406-9EEFFE`
+
+### Setup
+
+- Price Now Reference: 87.815
+- Entry: 87.486
+- Reason Entry: Tactical V10 E_GE2_ATR | LONG | D1 bias | H4 POI FVG | MSS literal M15 → BOS M5 | M5 entry FVG | paper fill 87.486
+- Price Exp: 89.991
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 86.304
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 89.991
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 88.213
+- Result Reason: Manual /close. PnL positif, sehingga hasil dicatat sebagai TP (PnL +0.83%).
+- PnL: 0.8309901012733465925976727705%
+- Created: 2026-10-31T10:15:00+00:00
+- Filled: 2026-10-31T10:20:00+00:00
+- Closed: 2026-11-01T16:21:00.450541+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.0.0
