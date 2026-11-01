@@ -1,430 +1,9 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T12:17:42.277115+00:00",
-  "saved_at_wib": "01-11-2026, 19:17 WIB",
+  "saved_at": "2026-11-01T16:21:11.672980+00:00",
+  "saved_at_wib": "01-11-2026, 23:21 WIB",
   "count": 6,
   "setups": [
-    {
-      "trade_id": "HYPEUSDT-20261101-111406-9EEFFE",
-      "session_id": "20261101-110928-774C",
-      "pair": "HYPEUSDT",
-      "direction": "BUY",
-      "price_now_reference": "87.815",
-      "entry": "87.486",
-      "entry_reason": "Tactical V10 E_GE2_ATR | LONG | D1 bias | H4 POI FVG | MSS literal M15 → BOS M5 | M5 entry FVG | paper fill 87.486",
-      "price_exp": "89.991",
-      "price_exp_reason": "Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.",
-      "sl": "86.304",
-      "sl_reason": "V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.",
-      "tp": "89.991",
-      "tp_reason": "V10 fixed target dengan RR gross 1:2 dari harga order limit.",
-      "status": "FILLED",
-      "trailing": false,
-      "created_at": "2026-10-31T10:15:00+00:00",
-      "filled_at": "2026-10-31T10:20:00+00:00",
-      "closed_at": null,
-      "fill_price": "87.486",
-      "exit_price": null,
-      "result": null,
-      "result_reason": null,
-      "pnl_percent": "0.2663283268180051665409322634",
-      "max_favorable_pct": "1.044738586745307820679880209",
-      "max_adverse_pct": "-0.3223372882518345792469652287",
-      "planned_rr": "2.119289340101522842639593909",
-      "pending_seconds": 300.0,
-      "holding_seconds": null,
-      "trail_history": [],
-      "strategy_name": "TACTICAL_V10_E_GE2_ATR",
-      "strategy_version": "10.0.0",
-      "strategy_source": "SCAN",
-      "strategy_confidence": "100",
-      "strategy_data_source": "BINANCE_PUBLIC",
-      "strategy_analysis": {
-        "scan": {
-          "cycle": 1,
-          "engine": "TACTICAL_V10_STATE_MACHINE",
-          "btc_context": "NOT_USED",
-          "entry_confirmation": "V10_MSS_M15_THEN_BOS_M5"
-        },
-        "v10": {
-          "engine": "TACTICAL_V10_STATE_MACHINE",
-          "variant": "E_GE2_ATR",
-          "state": "OPEN_POSITION",
-          "direction_states": {
-            "LONG": {
-              "state": 7,
-              "last_event": "ENTRY_FILLED",
-              "setup_id": 2,
-              "poi_id": 1,
-              "attempt_id": 1,
-              "poi_type": "FVG",
-              "aoi": [
-                82.48,
-                88.55
-              ],
-              "poi": [
-                79.556,
-                87.328
-              ],
-              "mss_close_time_ms": 1793437200000,
-              "placed": 1,
-              "filled": 1,
-              "mss": 1,
-              "aoi_count": 2,
-              "poi_count": 1
-            },
-            "SHORT": {
-              "state": -1,
-              "last_event": "SETUP_RESET_BIAS_CHANGE",
-              "setup_id": 3,
-              "poi_id": 0,
-              "attempt_id": 0,
-              "poi_type": "",
-              "aoi": null,
-              "poi": null,
-              "mss_close_time_ms": null,
-              "placed": 0,
-              "filled": 0,
-              "mss": 1,
-              "aoi_count": 3,
-              "poi_count": 1
-            }
-          },
-          "d1_bias": "LONG",
-          "h4_bias_context": "SHORT",
-          "configuration": {
-            "long_d1_bias": "BULLISH",
-            "long_poi_h4": "FVG_ONLY",
-            "short_d1_bias": "BEARISH",
-            "short_poi_h4": "OB_ONLY",
-            "mss": "LITERAL_M15",
-            "bos": "FRESH_CLOSE_CROSS_M5_AFTER_MSS",
-            "long_distance_to_d1_protected_swing": "[2.0, +inf) ATR_D1",
-            "short_distance_filter": "NONE",
-            "entry_long_m5": "FVG_PRIORITY_OB_FALLBACK",
-            "entry_short_m5": "FVG_ONLY",
-            "sl": "12_COMPLETED_M15_CANDLES",
-            "rr": 2.0,
-            "round_trip_cost_bps_backtest": 8.0,
-            "pending_window_m5_bars": 72,
-            "max_hold_m5_bars": 2016,
-            "same_poi_rearm_after_failed_attempt": true
-          },
-          "backtest_reference": {
-            "variant": "E_GE2_ATR",
-            "all_trades": 250,
-            "win_rate_pct": 38.8,
-            "expectancy_R": 0.095607,
-            "profit_factor": 1.143644,
-            "total_R": 23.90169,
-            "max_drawdown_R": 15.840089,
-            "long_trades": 64,
-            "long_expectancy_R": 0.109999,
-            "long_profit_factor": 1.170716,
-            "short_trades": 186,
-            "short_expectancy_R": 0.090655,
-            "short_profit_factor": 1.134724,
-            "oos_2026_available": false
-          },
-          "data": {
-            "candles_m5": 18770,
-            "missing_candles_filled": 0,
-            "longest_missing_run": 0,
-            "first_time_ms": 1787875200000,
-            "last_open_time_ms": 1793505900000,
-            "last_close_time_ms": 1793506200000,
-            "history_days": 65.17
-          },
-          "active_state_count": 1,
-          "direction": "LONG",
-          "poi_type": "FVG",
-          "entry_zone": "FVG",
-          "order_time": "2026-10-31T10:15:00+00:00",
-          "fill_time": "2026-10-31T10:20:00+00:00",
-          "protected_distance_at_order_atr": 2.7454728219284936,
-          "aoi": [
-            82.48,
-            88.55
-          ],
-          "poi": [
-            79.556,
-            87.328
-          ],
-          "mss_time_ms": 1793436900000,
-          "pending_bars_elapsed": null,
-          "position_bars_held": 213,
-          "setup_id": 2,
-          "poi_id": 1,
-          "attempt_id": 1,
-          "watch_id": "93237da327955a972138965e"
-        },
-        "validator": {
-          "v10": {
-            "engine": "TACTICAL_V10_STATE_MACHINE",
-            "variant": "E_GE2_ATR",
-            "state": "OPEN_POSITION",
-            "direction_states": {
-              "LONG": {
-                "state": 7,
-                "last_event": "ENTRY_FILLED",
-                "setup_id": 2,
-                "poi_id": 1,
-                "attempt_id": 1,
-                "poi_type": "FVG",
-                "aoi": [
-                  82.48,
-                  88.55
-                ],
-                "poi": [
-                  79.556,
-                  87.328
-                ],
-                "mss_close_time_ms": 1793437200000,
-                "placed": 1,
-                "filled": 1,
-                "mss": 1,
-                "aoi_count": 2,
-                "poi_count": 1
-              },
-              "SHORT": {
-                "state": -1,
-                "last_event": "SETUP_RESET_BIAS_CHANGE",
-                "setup_id": 3,
-                "poi_id": 0,
-                "attempt_id": 0,
-                "poi_type": "",
-                "aoi": null,
-                "poi": null,
-                "mss_close_time_ms": null,
-                "placed": 0,
-                "filled": 0,
-                "mss": 1,
-                "aoi_count": 3,
-                "poi_count": 1
-              }
-            },
-            "d1_bias": "LONG",
-            "h4_bias_context": "SHORT",
-            "configuration": {
-              "long_d1_bias": "BULLISH",
-              "long_poi_h4": "FVG_ONLY",
-              "short_d1_bias": "BEARISH",
-              "short_poi_h4": "OB_ONLY",
-              "mss": "LITERAL_M15",
-              "bos": "FRESH_CLOSE_CROSS_M5_AFTER_MSS",
-              "long_distance_to_d1_protected_swing": "[2.0, +inf) ATR_D1",
-              "short_distance_filter": "NONE",
-              "entry_long_m5": "FVG_PRIORITY_OB_FALLBACK",
-              "entry_short_m5": "FVG_ONLY",
-              "sl": "12_COMPLETED_M15_CANDLES",
-              "rr": 2.0,
-              "round_trip_cost_bps_backtest": 8.0,
-              "pending_window_m5_bars": 72,
-              "max_hold_m5_bars": 2016,
-              "same_poi_rearm_after_failed_attempt": true
-            },
-            "backtest_reference": {
-              "variant": "E_GE2_ATR",
-              "all_trades": 250,
-              "win_rate_pct": 38.8,
-              "expectancy_R": 0.095607,
-              "profit_factor": 1.143644,
-              "total_R": 23.90169,
-              "max_drawdown_R": 15.840089,
-              "long_trades": 64,
-              "long_expectancy_R": 0.109999,
-              "long_profit_factor": 1.170716,
-              "short_trades": 186,
-              "short_expectancy_R": 0.090655,
-              "short_profit_factor": 1.134724,
-              "oos_2026_available": false
-            },
-            "data": {
-              "candles_m5": 18770,
-              "missing_candles_filled": 0,
-              "longest_missing_run": 0,
-              "first_time_ms": 1787875200000,
-              "last_open_time_ms": 1793505900000,
-              "last_close_time_ms": 1793506200000,
-              "history_days": 65.17
-            },
-            "active_state_count": 1,
-            "direction": "LONG",
-            "poi_type": "FVG",
-            "entry_zone": "FVG",
-            "order_time": "2026-10-31T10:15:00+00:00",
-            "fill_time": "2026-10-31T10:20:00+00:00",
-            "protected_distance_at_order_atr": 2.7454728219284936,
-            "aoi": [
-              82.48,
-              88.55
-            ],
-            "poi": [
-              79.556,
-              87.328
-            ],
-            "mss_time_ms": 1793436900000,
-            "pending_bars_elapsed": null,
-            "position_bars_held": 213,
-            "setup_id": 2,
-            "poi_id": 1,
-            "attempt_id": 1,
-            "watch_id": "93237da327955a972138965e"
-          },
-          "scan": {
-            "cycle": 1,
-            "engine": "TACTICAL_V10_STATE_MACHINE",
-            "btc_context": "NOT_USED",
-            "entry_confirmation": "V10_MSS_M15_THEN_BOS_M5"
-          }
-        }
-      },
-      "margin_usdt": "0.5",
-      "leverage": 10,
-      "quantity": null,
-      "target_notional": null,
-      "actual_notional": null,
-      "real_enabled": false,
-      "real_state": "SIMULATION",
-      "position_side": null,
-      "entry_order_id": null,
-      "entry_client_order_id": null,
-      "tp_algo_id": null,
-      "sl_algo_id": null,
-      "tp_client_algo_id": null,
-      "sl_client_algo_id": null,
-      "pending_sl_algo_id": null,
-      "pending_sl_client_algo_id": null,
-      "pending_sl_price": null,
-      "pending_sl_state": "NONE",
-      "pending_sl_created_at": null,
-      "pending_sl_error": null,
-      "real_error": null,
-      "real_exit_check": null,
-      "candidate_id": "623369d3cc9fccde2cc587de",
-      "sizing_mode": "",
-      "risk_info": {
-        "strategy_variant": "E_GE2_ATR",
-        "v10_position_state": "FILLED",
-        "v10_max_hold_seconds": 604800,
-        "v10_pending_window_seconds": 21900,
-        "v10_round_trip_cost_bps": 8,
-        "v10_analysis": {
-          "engine": "TACTICAL_V10_STATE_MACHINE",
-          "variant": "E_GE2_ATR",
-          "state": "OPEN_POSITION",
-          "direction_states": {
-            "LONG": {
-              "state": 7,
-              "last_event": "ENTRY_FILLED",
-              "setup_id": 2,
-              "poi_id": 1,
-              "attempt_id": 1,
-              "poi_type": "FVG",
-              "aoi": [
-                82.48,
-                88.55
-              ],
-              "poi": [
-                79.556,
-                87.328
-              ],
-              "mss_close_time_ms": 1793437200000,
-              "placed": 1,
-              "filled": 1,
-              "mss": 1,
-              "aoi_count": 2,
-              "poi_count": 1
-            },
-            "SHORT": {
-              "state": -1,
-              "last_event": "SETUP_RESET_BIAS_CHANGE",
-              "setup_id": 3,
-              "poi_id": 0,
-              "attempt_id": 0,
-              "poi_type": "",
-              "aoi": null,
-              "poi": null,
-              "mss_close_time_ms": null,
-              "placed": 0,
-              "filled": 0,
-              "mss": 1,
-              "aoi_count": 3,
-              "poi_count": 1
-            }
-          },
-          "d1_bias": "LONG",
-          "h4_bias_context": "SHORT",
-          "configuration": {
-            "long_d1_bias": "BULLISH",
-            "long_poi_h4": "FVG_ONLY",
-            "short_d1_bias": "BEARISH",
-            "short_poi_h4": "OB_ONLY",
-            "mss": "LITERAL_M15",
-            "bos": "FRESH_CLOSE_CROSS_M5_AFTER_MSS",
-            "long_distance_to_d1_protected_swing": "[2.0, +inf) ATR_D1",
-            "short_distance_filter": "NONE",
-            "entry_long_m5": "FVG_PRIORITY_OB_FALLBACK",
-            "entry_short_m5": "FVG_ONLY",
-            "sl": "12_COMPLETED_M15_CANDLES",
-            "rr": 2.0,
-            "round_trip_cost_bps_backtest": 8.0,
-            "pending_window_m5_bars": 72,
-            "max_hold_m5_bars": 2016,
-            "same_poi_rearm_after_failed_attempt": true
-          },
-          "backtest_reference": {
-            "variant": "E_GE2_ATR",
-            "all_trades": 250,
-            "win_rate_pct": 38.8,
-            "expectancy_R": 0.095607,
-            "profit_factor": 1.143644,
-            "total_R": 23.90169,
-            "max_drawdown_R": 15.840089,
-            "long_trades": 64,
-            "long_expectancy_R": 0.109999,
-            "long_profit_factor": 1.170716,
-            "short_trades": 186,
-            "short_expectancy_R": 0.090655,
-            "short_profit_factor": 1.134724,
-            "oos_2026_available": false
-          },
-          "data": {
-            "candles_m5": 18770,
-            "missing_candles_filled": 0,
-            "longest_missing_run": 0,
-            "first_time_ms": 1787875200000,
-            "last_open_time_ms": 1793505900000,
-            "last_close_time_ms": 1793506200000,
-            "history_days": 65.17
-          },
-          "active_state_count": 1,
-          "direction": "LONG",
-          "poi_type": "FVG",
-          "entry_zone": "FVG",
-          "order_time": "2026-10-31T10:15:00+00:00",
-          "fill_time": "2026-10-31T10:20:00+00:00",
-          "protected_distance_at_order_atr": 2.7454728219284936,
-          "aoi": [
-            82.48,
-            88.55
-          ],
-          "poi": [
-            79.556,
-            87.328
-          ],
-          "mss_time_ms": 1793436900000,
-          "pending_bars_elapsed": null,
-          "position_bars_held": 213,
-          "setup_id": 2,
-          "poi_id": 1,
-          "attempt_id": 1,
-          "watch_id": "93237da327955a972138965e"
-        }
-      },
-      "risk_pct_initial": "1.351073314587476853439407448",
-      "realized_r": "0.1971235194585448392554991539"
-    },
     {
       "trade_id": "AXLUSDT-20261101-114526-48F9A7",
       "session_id": "20261101-110928-774C",
@@ -448,8 +27,8 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "1.010989010989010989010989011",
-      "max_favorable_pct": "1.054945054945054945054945055",
+      "pnl_percent": "1.054945054945054945054945055",
+      "max_favorable_pct": "1.296703296703296703296703297",
       "max_adverse_pct": "-0.3956043956043956043956043956",
       "planned_rr": "2",
       "pending_seconds": 4782.073829,
@@ -842,7 +421,7 @@
         "v10_paper_fill_price": "0.0455"
       },
       "risk_pct_initial": "0.6813186813186813186813186813",
-      "realized_r": "1.483870967741935483870967742"
+      "realized_r": "1.548387096774193548387096774"
     },
     {
       "trade_id": "FUSDT-20261101-120232-402A09",
@@ -867,8 +446,8 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "2.367066895368782161234991424",
-      "max_favorable_pct": "2.675814751286449399656946827",
+      "pnl_percent": "2.881646655231560891938250429",
+      "max_favorable_pct": "3.361921097770154373927958834",
       "max_adverse_pct": "-1.132075471698113207547169811",
       "planned_rr": "2",
       "pending_seconds": 900.0,
@@ -1263,7 +842,7 @@
         }
       },
       "risk_pct_initial": "2.092624356775300171526586621",
-      "realized_r": "1.13114754098360655737704918"
+      "realized_r": "1.377049180327868852459016393"
     },
     {
       "trade_id": "1000LUNCUSDT-20261101-162757-EFBA92",
@@ -1288,9 +867,9 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.6062019118675681977150851014",
+      "pnl_percent": "0.4663091629750524597808346934",
       "max_favorable_pct": "0.6994637444625786896712520401",
-      "max_adverse_pct": "0.139892748892515737934250408",
+      "max_adverse_pct": "-0.139892748892515737934250408",
       "planned_rr": "2.043478260869565217391304348",
       "pending_seconds": 900.0,
       "holding_seconds": null,
@@ -1681,7 +1260,7 @@
         }
       },
       "risk_pct_initial": "0.5362555374213103287479598974",
-      "realized_r": "1.130434782608695652173913043"
+      "realized_r": "0.8695652173913043478260869565"
     },
     {
       "trade_id": "MEUSDT-20261101-180102-FE7E65",
@@ -1706,9 +1285,9 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "0.8896797153024911032028469751",
+      "pnl_percent": "0.8362989323843416370106761566",
       "max_favorable_pct": "0.9786476868327402135231316726",
-      "max_adverse_pct": "0.035587188612099644128113879",
+      "max_adverse_pct": "-0.4804270462633451957295373665",
       "planned_rr": "2",
       "pending_seconds": 300.0,
       "holding_seconds": null,
@@ -2102,7 +1681,7 @@
         }
       },
       "risk_pct_initial": "0.8362989323843416370106761566",
-      "realized_r": "1.063829787234042553191489362"
+      "realized_r": "1"
     },
     {
       "trade_id": "BASUSDT-20261101-181100-31D21D",
@@ -2127,8 +1706,8 @@
       "exit_price": null,
       "result": null,
       "result_reason": null,
-      "pnl_percent": "1.925091671031953902566788895",
-      "max_favorable_pct": "2.003666841278156102671555788",
+      "pnl_percent": "1.512572027239392352016762703",
+      "max_favorable_pct": "2.252488213724463069669984285",
       "max_adverse_pct": "0.4059717129387113672079622839",
       "planned_rr": "2",
       "pending_seconds": 1500.0,
@@ -2523,7 +2102,425 @@
         }
       },
       "risk_pct_initial": "11.4916186485070717653221582",
-      "realized_r": "0.1675213675213675213675213675"
+      "realized_r": "0.1316239316239316239316239316"
+    },
+    {
+      "trade_id": "VVVUSDT-20261101-204529-6CAFDC",
+      "session_id": "20261101-110928-774C",
+      "pair": "VVVUSDT",
+      "direction": "SELL",
+      "price_now_reference": "23.202",
+      "entry": "23.356",
+      "entry_reason": "Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | order limit 23.356",
+      "price_exp": "22.958",
+      "price_exp_reason": "Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.",
+      "sl": "23.555",
+      "sl_reason": "V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.",
+      "tp": "22.958",
+      "tp_reason": "V10 fixed target dengan RR gross 1:2 dari harga order limit.",
+      "status": "PENDING",
+      "trailing": false,
+      "created_at": "2026-11-01T13:40:00+00:00",
+      "filled_at": null,
+      "closed_at": null,
+      "fill_price": null,
+      "exit_price": null,
+      "result": null,
+      "result_reason": null,
+      "pnl_percent": null,
+      "max_favorable_pct": null,
+      "max_adverse_pct": null,
+      "planned_rr": "2",
+      "pending_seconds": null,
+      "holding_seconds": null,
+      "trail_history": [],
+      "strategy_name": "TACTICAL_V10_E_GE2_ATR",
+      "strategy_version": "10.0.0",
+      "strategy_source": "SCAN",
+      "strategy_confidence": "100",
+      "strategy_data_source": "BINANCE_PUBLIC",
+      "strategy_analysis": {
+        "scan": {
+          "initial_confidence": "100",
+          "validated_confidence": "100",
+          "validation_ratio_percent": "100",
+          "validation_tolerance_percent": "90",
+          "validation_reason": "Lulus validasi geometri; tidak menambahkan filter di luar V10.",
+          "setup_replaced": true,
+          "scan_cycle": 160
+        },
+        "v10": {
+          "engine": "TACTICAL_V10_STATE_MACHINE",
+          "variant": "E_GE2_ATR",
+          "state": "PENDING_LIMIT",
+          "direction_states": {
+            "LONG": {
+              "state": -1,
+              "last_event": "SETUP_RESET_BIAS_CHANGE",
+              "setup_id": 3,
+              "poi_id": 0,
+              "attempt_id": 0,
+              "poi_type": "",
+              "aoi": null,
+              "poi": null,
+              "mss_close_time_ms": null,
+              "placed": 0,
+              "filled": 0,
+              "mss": 0,
+              "aoi_count": 3,
+              "poi_count": 0
+            },
+            "SHORT": {
+              "state": 6,
+              "last_event": "ORDER_PLACED",
+              "setup_id": 3,
+              "poi_id": 1,
+              "attempt_id": 3,
+              "poi_type": "OB",
+              "aoi": [
+                23.484,
+                23.624
+              ],
+              "poi": [
+                23.345,
+                23.996
+              ],
+              "mss_close_time_ms": 1793536200000,
+              "placed": 1,
+              "filled": 0,
+              "mss": 3,
+              "aoi_count": 3,
+              "poi_count": 2
+            }
+          },
+          "d1_bias": "SHORT",
+          "h4_bias_context": "LONG",
+          "configuration": {
+            "long_d1_bias": "BULLISH",
+            "long_poi_h4": "FVG_ONLY",
+            "short_d1_bias": "BEARISH",
+            "short_poi_h4": "OB_ONLY",
+            "mss": "LITERAL_M15",
+            "bos": "FRESH_CLOSE_CROSS_M5_AFTER_MSS",
+            "long_distance_to_d1_protected_swing": "[2.0, +inf) ATR_D1",
+            "short_distance_filter": "NONE",
+            "entry_long_m5": "FVG_PRIORITY_OB_FALLBACK",
+            "entry_short_m5": "FVG_ONLY",
+            "sl": "12_COMPLETED_M15_CANDLES",
+            "rr": 2.0,
+            "round_trip_cost_bps_backtest": 8.0,
+            "pending_window_m5_bars": 72,
+            "max_hold_m5_bars": 2016,
+            "same_poi_rearm_after_failed_attempt": true
+          },
+          "backtest_reference": {
+            "variant": "E_GE2_ATR",
+            "all_trades": 250,
+            "win_rate_pct": 38.8,
+            "expectancy_R": 0.095607,
+            "profit_factor": 1.143644,
+            "total_R": 23.90169,
+            "max_drawdown_R": 15.840089,
+            "long_trades": 64,
+            "long_expectancy_R": 0.109999,
+            "long_profit_factor": 1.170716,
+            "short_trades": 186,
+            "short_expectancy_R": 0.090655,
+            "short_profit_factor": 1.134724,
+            "oos_2026_available": false
+          },
+          "data": {
+            "candles_m5": 18885,
+            "missing_candles_filled": 0,
+            "longest_missing_run": 0,
+            "first_time_ms": 1787875200000,
+            "last_open_time_ms": 1793540400000,
+            "last_close_time_ms": 1793540700000,
+            "history_days": 65.57
+          },
+          "active_state_count": 1,
+          "direction": "SHORT",
+          "poi_type": "OB",
+          "entry_zone": "FVG",
+          "order_time": "2026-11-01T13:40:00+00:00",
+          "fill_time": null,
+          "protected_distance_at_order_atr": 1.4135800493005088,
+          "aoi": [
+            23.484,
+            23.624
+          ],
+          "poi": [
+            23.345,
+            23.996
+          ],
+          "mss_time_ms": 1793535900000,
+          "pending_bars_elapsed": 0,
+          "position_bars_held": null,
+          "setup_id": 3,
+          "poi_id": 1,
+          "attempt_id": 3,
+          "watch_id": "9aecb69a14f94c67e4540b4a"
+        },
+        "validator": {
+          "v10": {
+            "engine": "TACTICAL_V10_STATE_MACHINE",
+            "variant": "E_GE2_ATR",
+            "state": "PENDING_LIMIT",
+            "direction_states": {
+              "LONG": {
+                "state": -1,
+                "last_event": "SETUP_RESET_BIAS_CHANGE",
+                "setup_id": 3,
+                "poi_id": 0,
+                "attempt_id": 0,
+                "poi_type": "",
+                "aoi": null,
+                "poi": null,
+                "mss_close_time_ms": null,
+                "placed": 0,
+                "filled": 0,
+                "mss": 0,
+                "aoi_count": 3,
+                "poi_count": 0
+              },
+              "SHORT": {
+                "state": 6,
+                "last_event": "ORDER_PLACED",
+                "setup_id": 3,
+                "poi_id": 1,
+                "attempt_id": 3,
+                "poi_type": "OB",
+                "aoi": [
+                  23.484,
+                  23.624
+                ],
+                "poi": [
+                  23.345,
+                  23.996
+                ],
+                "mss_close_time_ms": 1793536200000,
+                "placed": 1,
+                "filled": 0,
+                "mss": 3,
+                "aoi_count": 3,
+                "poi_count": 2
+              }
+            },
+            "d1_bias": "SHORT",
+            "h4_bias_context": "LONG",
+            "configuration": {
+              "long_d1_bias": "BULLISH",
+              "long_poi_h4": "FVG_ONLY",
+              "short_d1_bias": "BEARISH",
+              "short_poi_h4": "OB_ONLY",
+              "mss": "LITERAL_M15",
+              "bos": "FRESH_CLOSE_CROSS_M5_AFTER_MSS",
+              "long_distance_to_d1_protected_swing": "[2.0, +inf) ATR_D1",
+              "short_distance_filter": "NONE",
+              "entry_long_m5": "FVG_PRIORITY_OB_FALLBACK",
+              "entry_short_m5": "FVG_ONLY",
+              "sl": "12_COMPLETED_M15_CANDLES",
+              "rr": 2.0,
+              "round_trip_cost_bps_backtest": 8.0,
+              "pending_window_m5_bars": 72,
+              "max_hold_m5_bars": 2016,
+              "same_poi_rearm_after_failed_attempt": true
+            },
+            "backtest_reference": {
+              "variant": "E_GE2_ATR",
+              "all_trades": 250,
+              "win_rate_pct": 38.8,
+              "expectancy_R": 0.095607,
+              "profit_factor": 1.143644,
+              "total_R": 23.90169,
+              "max_drawdown_R": 15.840089,
+              "long_trades": 64,
+              "long_expectancy_R": 0.109999,
+              "long_profit_factor": 1.170716,
+              "short_trades": 186,
+              "short_expectancy_R": 0.090655,
+              "short_profit_factor": 1.134724,
+              "oos_2026_available": false
+            },
+            "data": {
+              "candles_m5": 18885,
+              "missing_candles_filled": 0,
+              "longest_missing_run": 0,
+              "first_time_ms": 1787875200000,
+              "last_open_time_ms": 1793540400000,
+              "last_close_time_ms": 1793540700000,
+              "history_days": 65.57
+            },
+            "active_state_count": 1,
+            "direction": "SHORT",
+            "poi_type": "OB",
+            "entry_zone": "FVG",
+            "order_time": "2026-11-01T13:40:00+00:00",
+            "fill_time": null,
+            "protected_distance_at_order_atr": 1.4135800493005088,
+            "aoi": [
+              23.484,
+              23.624
+            ],
+            "poi": [
+              23.345,
+              23.996
+            ],
+            "mss_time_ms": 1793535900000,
+            "pending_bars_elapsed": 0,
+            "position_bars_held": null,
+            "setup_id": 3,
+            "poi_id": 1,
+            "attempt_id": 3,
+            "watch_id": "9aecb69a14f94c67e4540b4a"
+          }
+        }
+      },
+      "margin_usdt": "0.5",
+      "leverage": 10,
+      "quantity": null,
+      "target_notional": null,
+      "actual_notional": null,
+      "real_enabled": false,
+      "real_state": "SIMULATION",
+      "position_side": null,
+      "entry_order_id": null,
+      "entry_client_order_id": null,
+      "tp_algo_id": null,
+      "sl_algo_id": null,
+      "tp_client_algo_id": null,
+      "sl_client_algo_id": null,
+      "pending_sl_algo_id": null,
+      "pending_sl_client_algo_id": null,
+      "pending_sl_price": null,
+      "pending_sl_state": "NONE",
+      "pending_sl_created_at": null,
+      "pending_sl_error": null,
+      "real_error": null,
+      "real_exit_check": null,
+      "candidate_id": "d39a8fe0f540c01b9d147c0c",
+      "sizing_mode": "",
+      "risk_info": {
+        "strategy_variant": "E_GE2_ATR",
+        "v10_position_state": "PENDING",
+        "v10_max_hold_seconds": 604800,
+        "v10_pending_window_seconds": 21900,
+        "v10_round_trip_cost_bps": 8,
+        "v10_analysis": {
+          "engine": "TACTICAL_V10_STATE_MACHINE",
+          "variant": "E_GE2_ATR",
+          "state": "PENDING_LIMIT",
+          "direction_states": {
+            "LONG": {
+              "state": -1,
+              "last_event": "SETUP_RESET_BIAS_CHANGE",
+              "setup_id": 3,
+              "poi_id": 0,
+              "attempt_id": 0,
+              "poi_type": "",
+              "aoi": null,
+              "poi": null,
+              "mss_close_time_ms": null,
+              "placed": 0,
+              "filled": 0,
+              "mss": 0,
+              "aoi_count": 3,
+              "poi_count": 0
+            },
+            "SHORT": {
+              "state": 6,
+              "last_event": "ORDER_PLACED",
+              "setup_id": 3,
+              "poi_id": 1,
+              "attempt_id": 3,
+              "poi_type": "OB",
+              "aoi": [
+                23.484,
+                23.624
+              ],
+              "poi": [
+                23.345,
+                23.996
+              ],
+              "mss_close_time_ms": 1793536200000,
+              "placed": 1,
+              "filled": 0,
+              "mss": 3,
+              "aoi_count": 3,
+              "poi_count": 2
+            }
+          },
+          "d1_bias": "SHORT",
+          "h4_bias_context": "LONG",
+          "configuration": {
+            "long_d1_bias": "BULLISH",
+            "long_poi_h4": "FVG_ONLY",
+            "short_d1_bias": "BEARISH",
+            "short_poi_h4": "OB_ONLY",
+            "mss": "LITERAL_M15",
+            "bos": "FRESH_CLOSE_CROSS_M5_AFTER_MSS",
+            "long_distance_to_d1_protected_swing": "[2.0, +inf) ATR_D1",
+            "short_distance_filter": "NONE",
+            "entry_long_m5": "FVG_PRIORITY_OB_FALLBACK",
+            "entry_short_m5": "FVG_ONLY",
+            "sl": "12_COMPLETED_M15_CANDLES",
+            "rr": 2.0,
+            "round_trip_cost_bps_backtest": 8.0,
+            "pending_window_m5_bars": 72,
+            "max_hold_m5_bars": 2016,
+            "same_poi_rearm_after_failed_attempt": true
+          },
+          "backtest_reference": {
+            "variant": "E_GE2_ATR",
+            "all_trades": 250,
+            "win_rate_pct": 38.8,
+            "expectancy_R": 0.095607,
+            "profit_factor": 1.143644,
+            "total_R": 23.90169,
+            "max_drawdown_R": 15.840089,
+            "long_trades": 64,
+            "long_expectancy_R": 0.109999,
+            "long_profit_factor": 1.170716,
+            "short_trades": 186,
+            "short_expectancy_R": 0.090655,
+            "short_profit_factor": 1.134724,
+            "oos_2026_available": false
+          },
+          "data": {
+            "candles_m5": 18885,
+            "missing_candles_filled": 0,
+            "longest_missing_run": 0,
+            "first_time_ms": 1787875200000,
+            "last_open_time_ms": 1793540400000,
+            "last_close_time_ms": 1793540700000,
+            "history_days": 65.57
+          },
+          "active_state_count": 1,
+          "direction": "SHORT",
+          "poi_type": "OB",
+          "entry_zone": "FVG",
+          "order_time": "2026-11-01T13:40:00+00:00",
+          "fill_time": null,
+          "protected_distance_at_order_atr": 1.4135800493005088,
+          "aoi": [
+            23.484,
+            23.624
+          ],
+          "poi": [
+            23.345,
+            23.996
+          ],
+          "mss_time_ms": 1793535900000,
+          "pending_bars_elapsed": 0,
+          "position_bars_held": null,
+          "setup_id": 3,
+          "poi_id": 1,
+          "attempt_id": 3,
+          "watch_id": "9aecb69a14f94c67e4540b4a"
+        }
+      },
+      "risk_pct_initial": "0.8520294570988182908032197294",
+      "realized_r": null
     }
   ]
 }
