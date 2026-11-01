@@ -296,3 +296,36 @@ Tidak ada trailing.
 - Filled: 2026-10-31T15:25:00+00:00
 - Closed: 2026-11-01T16:21:30.678589+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.0.0
+
+---
+
+## 1000LUNCUSDT — SELL
+
+Trade ID: `1000LUNCUSDT-20261101-162757-EFBA92`
+
+### Setup
+
+- Price Now Reference: 0.04267
+- Entry: 0.04289
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | paper fill 0.04289
+- Price Exp: 0.04242
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.04312
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.04242
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.0427
+- Result Reason: Manual /close. PnL positif, sehingga hasil dicatat sebagai TP (PnL +0.44%).
+- PnL: 0.4429937048262998367917929587%
+- Created: 2026-11-01T08:15:00+00:00
+- Filled: 2026-11-01T08:30:00+00:00
+- Closed: 2026-11-01T16:21:44.796530+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.0.0
