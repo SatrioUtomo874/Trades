@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T19:13:10.727583+00:00",
+  "saved_at": "2026-11-01T20:08:08.516669+00:00",
   "bans": [
+    {
+      "pair": "BROCCOLIF3BUSDT",
+      "banned_at": "2026-11-01T20:08:08.516539+00:00",
+      "until": "2026-11-02T04:08:08.516508+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    },
     {
       "pair": "FUSDT",
       "banned_at": "2026-11-01T19:13:10.727439+00:00",
