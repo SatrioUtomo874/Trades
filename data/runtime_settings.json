@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-01T15:16:56.290959+00:00",
+  "saved_at": "2026-11-01T15:23:00.484875+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -510,11 +510,12 @@
       "1000CHEEMSUSDT",
       "FRAXUSDT",
       "XVSUSDT",
-      "EGLDUSDT"
+      "EGLDUSDT",
+      "WETUSDT"
     ],
-    "cursor": 214,
+    "cursor": 235,
     "sweep_number": 5,
     "batch_size": 50,
-    "updated_at": "2026-11-01T15:16:56.291002+00:00"
+    "updated_at": "2026-11-01T15:23:00.484908+00:00"
   }
 }
