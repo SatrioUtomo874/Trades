@@ -11,6 +11,8 @@ Kontrak try.py:
 Arsitektur aktif:
 - main.py adalah satu-satunya pemilik Binance USD-M public REST, WebSocket,
   candle cache, pagination, rate-limit cooldown, Telegram, dan paper ledger.
+- Universe scan memakai batch 50 pair; candle cache non-watch dihapus setelah
+  analisis, dan RAM pressure menghentikan scanner sementara tanpa mematikan M5 watcher.
 - strategy.py adalah Tactical V10 E_GE2_ATR state machine; tidak memiliki
   koneksi jaringan atau candle cache mandiri.
 - Pipeline sinyal: D1 bias -> D1 FVG AOI -> H4 FVG (LONG) / H4 OB (SHORT)
@@ -198,7 +200,7 @@ DEFAULT_SCAN_THRESHOLD = Decimal("40")
 # Binance-only scanner throughput. Strategy's REST provider has global spacing and
 # rate-limit cooldown; the main loop also leaves a small per-pair yield.
 SCAN_PAIR_DELAY_SECONDS = 0.20
-SCAN_MAX_PAIRS_PER_CYCLE = 100       # ukuran batch logis; lanjut lintas time-slice sampai penuh
+SCAN_MAX_PAIRS_PER_CYCLE = 50        # satu batch logis berisi tepat 50 pair; lanjut lintas time-slice sampai penuh
 SCAN_CYCLE_DELAY_SECONDS = 5.0       # lanjutkan batch aktif segera setelah time-slice selesai
 # Monitor only validated watch candidates; never scan the full universe outside H4 slots.
 M5_WATCH_POLL_SECONDS = 3.0
@@ -207,6 +209,9 @@ V10_BOS_TIMEOUT_M5_BARS = 144  # Tactical V10: BOS_WIN=144, dihitung dari close 
 V10_WATCH_INTERVAL_MS = 300_000
 V10_CANDIDATE_SCHEMA_VERSION = 1
 MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "400") or "400")
+MEMORY_SCAN_PAUSE_PCT = float(os.getenv("MEMORY_SCAN_PAUSE_PCT", "85") or "85")
+MEMORY_SCAN_RESUME_PCT = float(os.getenv("MEMORY_SCAN_RESUME_PCT", "72") or "72")
+MEMORY_SCAN_POLL_SECONDS = 10.0
 # H4 scanner gate: scanner baru membuka window pada penutupan H4 WIB.
 # Binance H4 boundaries dipetakan ke 03,07,11,15,19,23 WIB.
 H4_SCAN_HOURS_WIB = (3, 7, 11, 15, 19, 23)
@@ -1373,7 +1378,9 @@ class BinanceREST:
         return [list(row) for row in rows]
 
     def kline_cache_stats(self) -> dict[str, Any]:
-        approx_bytes = self._kline_cache_candles * 160
+        # Rows are retained as Python lists of Binance string fields; use a
+        # conservative per-candle estimate rather than the JSON payload size.
+        approx_bytes = self._kline_cache_candles * 768
         return {
             "entries": len(self._kline_cache),
             "candles": self._kline_cache_candles,
@@ -1390,6 +1397,19 @@ class BinanceREST:
         target = len(keys) if fraction >= 1.0 else int(len(keys) * fraction)
         removed = 0
         for key in keys[:target]:
+            old = self._kline_cache.pop(key, None)
+            if old is not None:
+                self._kline_cache_candles = max(0, self._kline_cache_candles - len(old[1]))
+                removed += 1
+        return removed
+
+    def retain_kline_cache_for(self, pairs: set[str] | list[str] | tuple[str, ...]) -> int:
+        """Keep full candle history only for pairs currently in the V10 watchlist."""
+        keep = {normalize_symbol(value) for value in pairs if value}
+        removed = 0
+        for key in list(self._kline_cache.keys()):
+            if key[0] in keep:
+                continue
             old = self._kline_cache.pop(key, None)
             if old is not None:
                 self._kline_cache_candles = max(0, self._kline_cache_candles - len(old[1]))
@@ -6840,6 +6860,8 @@ class TradingEngine:
         self._last_cycle_analyzed = 0
         self._tp_extend: dict[str, tuple[Decimal, str]] = {}
         self._ram_level = "OK"
+        self._scan_paused_for_ram = False
+        self._ram_pause_notified = False
         self._runtime_settings_lock = asyncio.Lock()
 
     def _prepare_scan_sweep(self, current_targets: list[str]) -> None:
@@ -6927,27 +6949,41 @@ class TradingEngine:
                 pass
             progress = settings_doc.get("scan_progress") or {}
             if isinstance(progress, dict):
-                saved_pairs = progress.get("pairs") or []
-                try:
-                    saved_cursor = int(progress.get("cursor") or 0)
-                    saved_sweep_number = int(progress.get("sweep_number") or 0)
-                except (TypeError, ValueError):
-                    saved_cursor, saved_sweep_number = 0, 0
-                self._scan_sweep_number = max(0, saved_sweep_number)
-                if isinstance(saved_pairs, list):
-                    clean_pairs = []
-                    for value in saved_pairs:
-                        pair = normalize_symbol(str(value or ""))
-                        if pair and pair not in clean_pairs and pair not in {"BTCUSDT", "ETHUSDT"}:
-                            clean_pairs.append(pair)
-                    if clean_pairs and 0 <= saved_cursor <= len(clean_pairs):
-                        self._scan_sweep_pairs = clean_pairs
-                        self._scan_sweep_cursor = saved_cursor
-                        self._sweep_done = set(clean_pairs[:saved_cursor])
-                        log.info(
-                            "[SCAN][CURSOR] progres dipulihkan | putaran=%s posisi=%s/%s",
-                            self._scan_sweep_number + 1, saved_cursor, len(clean_pairs),
-                        )
+                # One-time reset: v1 stored 100-pair batches. Only restore the
+                # new v2 cursor after the operator-approved reset to 50 pairs.
+                progress_version = int(progress.get("version") or 1)
+                saved_batch_size = int(progress.get("batch_size") or 100)
+                if progress_version >= 2 and saved_batch_size == SCAN_MAX_PAIRS_PER_CYCLE:
+                    saved_pairs = progress.get("pairs") or []
+                    try:
+                        saved_cursor = int(progress.get("cursor") or 0)
+                        saved_sweep_number = int(progress.get("sweep_number") or 0)
+                    except (TypeError, ValueError):
+                        saved_cursor, saved_sweep_number = 0, 0
+                    self._scan_sweep_number = max(0, saved_sweep_number)
+                    if isinstance(saved_pairs, list):
+                        clean_pairs = []
+                        for value in saved_pairs:
+                            pair = normalize_symbol(str(value or ""))
+                            if pair and pair not in clean_pairs and pair not in {"BTCUSDT", "ETHUSDT"}:
+                                clean_pairs.append(pair)
+                        if clean_pairs and 0 <= saved_cursor <= len(clean_pairs):
+                            self._scan_sweep_pairs = clean_pairs
+                            self._scan_sweep_cursor = saved_cursor
+                            self._sweep_done = set(clean_pairs[:saved_cursor])
+                            log.info(
+                                "[SCAN][CURSOR] progres v2 dipulihkan | putaran=%s posisi=%s/%s batch=%s",
+                                self._scan_sweep_number + 1, saved_cursor, len(clean_pairs), SCAN_MAX_PAIRS_PER_CYCLE,
+                            )
+                else:
+                    self._scan_sweep_pairs = []
+                    self._scan_sweep_cursor = 0
+                    self._scan_sweep_number = 0
+                    self._sweep_done = set()
+                    log.info(
+                        "[SCAN][CURSOR] progres lama di-reset; mulai pair pertama dengan batch %s.",
+                        SCAN_MAX_PAIRS_PER_CYCLE,
+                    )
         except Exception as exc:  # noqa: BLE001
             log.info("[SETTINGS] runtime settings tidak dimuat: %s", exc)
 
@@ -6958,14 +6994,14 @@ class TradingEngine:
             self._runtime_settings_lock = lock
         async with lock:
             payload = {
-                "version": 3, "saved_at": iso_utc(),
+                "version": 4, "saved_at": iso_utc(),
                 "guard": {
                     "trail_mode": self.trail_mode, "h4_sweeps": self.h4_sweeps,
                     "autostop": None if self.autostop_percent is None else str(self.autostop_percent),
                     "drawdown": None if self.drawdown_percent is None else str(self.drawdown_percent),
                 },
                 "scan_progress": {
-                    "version": 1,
+                    "version": 2,
                     "pairs": list(self._scan_sweep_pairs),
                     "cursor": int(self._scan_sweep_cursor),
                     "sweep_number": int(self._scan_sweep_number),
@@ -6980,24 +7016,65 @@ class TradingEngine:
             )
 
     async def _ram_guard(self) -> None:
-        """Jaga RAM: kecilkan cache candle bertahap saat mendekati batas lunak."""
+        """Pause universe scanning under RAM pressure; preserve only active-watch candle data."""
+        try:
+            async with self._scan_watch_lock:
+                watch_pairs = set(self._scan_watchlist)
+        except Exception:
+            watch_pairs = set(self._scan_watchlist)
+
+        # The scanner's 66-day replay cache is intentionally ephemeral. Only
+        # pairs still waiting in the V10 M5 watchlist may keep candle history.
+        removed = self.rest.retain_kline_cache_for(watch_pairs)
+        if removed:
+            release_memory()
         rss = rss_mb()
         if rss <= 0 or MEMORY_SOFT_LIMIT_MB <= 0:
             return
+
         pct = rss / MEMORY_SOFT_LIMIT_MB * 100.0
-        module = self._strategy_module_ref
-        level = "OK" if pct < 70 else "TINGGI" if pct < 90 else "KRITIS"
-        if level != "OK" and module is not None and hasattr(module, "series_cache_shrink"):
-            try:
-                module.series_cache_shrink(0.5 if level == "TINGGI" else 1.0)
-            except Exception as exc:  # noqa: BLE001
-                # A cache helper failure must not prevent emergency history cleanup.
-                log.warning("[MEM] strategy.series_cache_shrink gagal: %s", exc)
+        was_paused = bool(getattr(self, "_scan_paused_for_ram", False))
+        if pct >= MEMORY_SCAN_PAUSE_PCT:
+            self._scan_paused_for_ram = True
+        elif was_paused and pct <= MEMORY_SCAN_RESUME_PCT:
+            self._scan_paused_for_ram = False
+
+        level = "KRITIS" if pct >= 90 else "TINGGI" if pct >= 75 else "OK"
         if level == "KRITIS":
             self._shed_memory()
             release_memory()
-        if level != self._ram_level and level != "OK":
-            await self.reply(card("🧠 TEKANAN MEMORI", [f"Level  {level}", f"RSS    {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB ({pct:.0f}%)", "Cache candle dikurangi; scan tetap jalan."]))
+            rss = rss_mb()
+            pct = rss / MEMORY_SOFT_LIMIT_MB * 100.0 if rss > 0 else pct
+
+        if self._scan_paused_for_ram and not was_paused:
+            self._ram_pause_notified = True
+            log.warning(
+                "[MEM] RAM %.0f MB (%.0f%% dari batas %.0f MB); universe scan PAUSED. M5 watcher tetap berjalan; candle cache watch=%s, non-watch dibuang=%s.",
+                rss, pct, MEMORY_SOFT_LIMIT_MB, len(watch_pairs), removed,
+            )
+            await self.reply(card("🧠 SCAN DIJEDA • RAM TINGGI", [
+                f"RAM {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB ({pct:.0f}%)",
+                f"Batas jeda {MEMORY_SCAN_PAUSE_PCT:.0f}% • lanjut otomatis di bawah {MEMORY_SCAN_RESUME_PCT:.0f}%",
+                f"Candle cache hanya untuk {len(watch_pairs)} pair yang sedang WATCH.",
+                "Universe scanner dihentikan sementara; M5 candidate watcher tetap aktif.",
+            ]))
+        elif was_paused and not self._scan_paused_for_ram:
+            self._ram_pause_notified = False
+            log.info(
+                "[MEM] RAM pulih %.0f MB (%.0f%%); universe scan dilanjutkan dari cursor terakhir.",
+                rss, pct,
+            )
+            await self.reply(card("🧠 RAM PULIH • SCAN DILANJUTKAN", [
+                f"RAM {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB ({pct:.0f}%)",
+                f"Cursor dipertahankan: {self._scan_sweep_cursor}/{len(self._scan_sweep_pairs)} pair.",
+                "M5 watcher tetap berjalan selama scan dijeda.",
+            ]))
+        elif level != self._ram_level and level != "OK":
+            await self.reply(card("🧠 TEKANAN MEMORI", [
+                f"Level {level}", f"RSS {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB ({pct:.0f}%)",
+                f"Cache non-watch dibuang: {removed} entri.",
+            ]))
+
         self._ram_level = level
 
     def _next_scan_delay(self) -> float:
@@ -7007,14 +7084,14 @@ class TradingEngine:
         rss = rss_mb()
         try:
             mod = self._strategy_module_ref
-            cache = mod.series_cache_stats() if mod is not None and hasattr(mod, "series_cache_stats") else {}
+            cache = self.rest.kline_cache_stats()
         except Exception:  # noqa: BLE001
             cache = {}
         durs = list(self._scan_durations)
         head = self._api_headroom_pct()
         rows = [
-            f"🧠 RAM {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB • level {self._ram_level}",
-            f"🗃 Cache candle {cache.get('entries', 0)} entri • {cache.get('approx_mb', 0)} MB",
+            f"🧠 RAM {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB • level {self._ram_level} • scan {'PAUSED' if self._scan_paused_for_ram else 'ACTIVE'}",
+            f"🗃 Cache candle {cache.get('entries', 0)} entri / {cache.get('candles', 0)} candle • {cache.get('approx_mb', 0)} MB (watch-only)",
             f"🛰 Batch terakhir {('-' if not durs else f'{durs[-1]:.0f}s')} • putaran {self._scan_sweep_number + 1} • posisi {self._scan_sweep_cursor}/{len(self._scan_sweep_pairs) or '-'}",
             f"📡 API headroom {('-' if head is None else f'{head:.0f}%')} • 429/418 {API_STATS.limit_hits}x",
             f"🪜 Trail {self.trail_mode.upper()}",
@@ -7056,6 +7133,12 @@ class TradingEngine:
     async def _scan_loop(self) -> None:
         while self._running and self._scan_user_enabled:
             try:
+                await self._ram_guard()
+                if self._scan_paused_for_ram:
+                    # Candidate watcher is an independent task and continues to
+                    # process M5 closes. This loop performs no new universe scan.
+                    await asyncio.sleep(MEMORY_SCAN_POLL_SECONDS)
+                    continue
                 if self._h4_enabled:
                     if not self._h4_window_active:
                         slot = await self._wait_for_h4_trigger()
@@ -7577,6 +7660,9 @@ class TradingEngine:
                 if changed:
                     self._candidate_persist_dirty = True
                     await self._persist_v10_candidates()
+                async with self._scan_watch_lock:
+                    watched_pairs_now = set(self._scan_watchlist)
+                self.rest.retain_kline_cache_for(watched_pairs_now)
                 await self._ram_guard()
                 await asyncio.sleep(M5_WATCH_POLL_SECONDS)
             except asyncio.CancelledError:
@@ -7723,6 +7809,10 @@ class TradingEngine:
     async def _run_scan_cycle_inner(self) -> None:
         """Jalankan Tactical V10 E_GE2_ATR terhadap universe Binance secara paper-only."""
         self._last_cycle_analyzed = 0
+        await self._ram_guard()
+        if self._scan_paused_for_ram:
+            log.warning("[SCAN V10] scan tidak dimulai: RAM berada pada zona jeda; M5 watcher tetap aktif.")
+            return
         if max(0.0, self._binance_public_cooldown_until - time.monotonic()) > 0:
             log.info("[SCAN V10] batch dilewati: jeda limit Binance; lanjut otomatis setelah cooldown.")
             return
@@ -7760,7 +7850,7 @@ class TradingEngine:
                 continue
             targets.append(pair)
         # Freeze the pair order for one full universe rotation. A logical batch
-        # is exactly 100 pair positions; the 240s runtime budget may process it
+        # is exactly 50 pair positions; the 240s runtime budget may process it
         # over several scan-loop passes, but the cursor never jumps or restarts.
         self._prepare_scan_sweep(targets)
         batch_start, batch_end, total_targets = self._scan_batch_bounds()
@@ -7789,6 +7879,11 @@ class TradingEngine:
         for pair in batch:
             if generation != self._scan_generation or not self._scan_user_enabled:
                 return
+            await self._ram_guard()
+            if self._scan_paused_for_ram:
+                stopped_early = True
+                log.warning("[SCAN V10] batch dihentikan pada batas pair karena RAM; watcher aktif, cursor dilanjutkan setelah memori pulih.")
+                break
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
                 stopped_early = True
@@ -7907,9 +8002,33 @@ class TradingEngine:
         if queued_count:
             self._ensure_v10_m5_watch_task()
 
+        candidate_pairs_seen = {
+            normalize_symbol(str(item.get("pair") or ""))
+            for item in waiting_candidates if item.get("pair")
+        }
+        async with self._scan_watch_lock:
+            current_watch_pairs = set(self._scan_watchlist)
+        stats["watch_current"] = len(candidate_pairs_seen & current_watch_pairs)
+        stats["not_watch"] = max(0, stats["scanned"] - stats["watch_current"])
+
         added_trades, trade_notes = await self._open_validated(validated, generation)
         notes.extend(trade_notes)
         stats["added"] = len(added_trades)
+
+        # Do not retain market history/analysis for coins that did not enter
+        # the candidate watchlist. Watch candidates keep their 66-day candle
+        # buffer so the next close can be replayed incrementally.
+        async with self._scan_watch_lock:
+            current_watch_pairs = set(self._scan_watchlist)
+        removed_cache_entries = self.rest.retain_kline_cache_for(current_watch_pairs)
+        self._scan_market_snapshot.clear()
+        self._scan_market_snapshot_at_ms = 0
+        candidates.clear()
+        waiting_candidates.clear()
+        validated.clear()
+        validated_waiting.clear()
+        release_memory()
+
         duration = time.monotonic() - started
         self._scan_durations.append(duration)
         batch_processed = max(0, self._scan_sweep_cursor - batch_start)
@@ -7942,7 +8061,8 @@ class TradingEngine:
             f"├ Batch {batch_number}/{batch_count} • pair {batch_start_label}-{batch_end_label} • selesai {batch_processed}/{batch_total}\n"
             f"├ Dicoba sesi ini {stats['scanned']} • waiting trigger {stats['waiting']}\n"
             f"├ D1 🟢 {direction_counts['BULLISH']} 🔴 {direction_counts['BEARISH']} ⚪ {direction_counts['RANGE']}\n"
-            f"├ V10 qualifying {qualified_candidates} • waiting M5 BOS {stats['waiting_m5_bos']} • masuk watch {stats['watch_queued']}\n"
+            f"├ V10 qualifying {qualified_candidates} • waiting M5 BOS {stats['waiting_m5_bos']}\n"
+            f"├ Masuk watch {stats.get('watch_current', 0)} • tidak masuk watch {stats.get('not_watch', 0)} • cache dibuang {removed_cache_entries} entri\n"
             f"├ valid {stats['valid']} • paper trade baru {stats['added']}\n"
             f"├ ditolak {stats['rejected']} • error {stats['errors']} • BTC/ETH excluded\n"
             f"└ {'PUTARAN PENUH SELESAI • putaran berikutnya kembali ke pair pertama' if self._sweep_complete else f'Batch berlanjut • posisi berikutnya {self._scan_sweep_cursor + 1}/{total_targets}'}"
@@ -14968,7 +15088,7 @@ class TradingEngine:
             f"History Records: {len(self.history_records)}\n"
             f"Catatan: {len(self.notes)}\n\n"
             f"Scan: {'ON' if self._scan_user_enabled else 'OFF'}"
-            f" | Runtime: {'WAITING_H4' if self._scan_user_enabled and self._h4_enabled and not self._h4_window_active else ('PAUSED_BY_MAX' if self._scan_auto_paused else ('RUNNING' if self._scan_task is not None and not self._scan_task.done() else 'OFF'))}\n"
+            f" | Runtime: {'PAUSED_BY_RAM' if self._scan_paused_for_ram else ('WAITING_H4' if self._scan_user_enabled and self._h4_enabled and not self._h4_window_active else ('PAUSED_BY_MAX' if self._scan_auto_paused else ('RUNNING' if self._scan_task is not None and not self._scan_task.done() else 'OFF')))}\n"
             f"H4 Gate: {'ON' if self._h4_enabled else 'OFF'}\n"
             f"H4 Window: {self._h4_window_text()}\n"
             + (f"H4 Next: {self._h4_next_slot_text()}\n" if self._h4_enabled else "")
