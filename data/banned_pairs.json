@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T16:21:09.877355+00:00",
+  "saved_at": "2026-11-01T16:21:24.882628+00:00",
   "bans": [
     {
       "pair": "ASTERUSDT",
@@ -8,6 +8,13 @@
       "until": "2026-11-02T08:52:55.912449+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "AXLUSDT",
+      "banned_at": "2026-11-01T16:21:24.882497+00:00",
+      "until": "2026-11-02T16:21:24.882466+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "HYPEUSDT",
