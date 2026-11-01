@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T16:21:54.911915+00:00",
+  "saved_at": "2026-11-01T16:22:08.873505+00:00",
   "bans": [
     {
       "pair": "1000LUNCUSDT",
@@ -43,6 +43,13 @@
       "until": "2026-11-02T07:38:41.277318+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "MEUSDT",
+      "banned_at": "2026-11-01T16:22:08.873374+00:00",
+      "until": "2026-11-02T16:22:08.873339+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "PIXELUSDT",
