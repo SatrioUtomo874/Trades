@@ -395,3 +395,36 @@ Tidak ada trailing.
 - Filled: 2026-10-29T22:25:00+00:00
 - Closed: 2026-11-01T16:22:12.893971+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.0.0
+
+---
+
+## VVVUSDT — SELL
+
+Trade ID: `VVVUSDT-20261101-204529-6CAFDC`
+
+### Setup
+
+- Price Now Reference: 23.202
+- Entry: 23.356
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | order limit 23.356
+- Price Exp: 22.958
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 23.555
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 22.958
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: MANUAL_CLOSE_PENDING
+- Exit Price: -
+- Result Reason: Manual /close pada setup PENDING sebelum entry.
+- PnL: -
+- Created: 2026-11-01T13:40:00+00:00
+- Filled: -
+- Closed: 2026-11-01T16:22:28.147022+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.0.0
