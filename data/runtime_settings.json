@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-01T15:45:40.177810+00:00",
+  "saved_at": "2026-11-01T17:58:55.844809+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -511,11 +511,29 @@
       "FRAXUSDT",
       "XVSUSDT",
       "EGLDUSDT",
-      "WETUSDT"
+      "WETUSDT",
+      "HYPEUSDT",
+      "牛来USDT",
+      "MARSCOINUSDT",
+      "ASTERUSDT",
+      "PONSUSDT",
+      "CTUSDT",
+      "VVVUSDT",
+      "PIXELUSDT",
+      "PREDICTUSDT",
+      "FUSDT",
+      "1000LUNCUSDT",
+      "RVNUSDT",
+      "哈基米USDT",
+      "AXLUSDT",
+      "IDUSDT",
+      "TRADOORUSDT",
+      "MEUSDT",
+      "BASUSDT"
     ],
-    "cursor": 323,
+    "cursor": 329,
     "sweep_number": 5,
     "batch_size": 50,
-    "updated_at": "2026-11-01T15:45:40.177842+00:00"
+    "updated_at": "2026-11-01T17:58:55.844843+00:00"
   }
 }
