@@ -5,8 +5,11 @@ Menggunakan implementasi state machine dan parameter eksperimen V10 yang sama
 dengan backtest. main.py memasok candle Binance M5 tertutup melalui provider
 injeksi; modul ini tidak melakukan HTTP/WebSocket dan tidak memiliki cache data.
 
-Pipeline: D1 bias -> AOI FVG D1 -> POI FVG H4 (LONG) / OB H4 (SHORT)
+Pipeline: D1 bias -> AOI FVG D1 -> POI FVG H4 + filter VA70 (LONG) / OB H4 baseline (SHORT)
 -> literal MSS M15 -> BOS M5 -> entry limit FVG/OB sesuai konfigurasi arah.
+
+VA70 hanya berlaku untuk LONG: POI H4 harus overlap Value Area 70% dari profil volume
+M5 (kausal, candle tertutup saja). SHORT tetap baseline tanpa filter volume profile.
 """
 import argparse
 import hashlib
@@ -27,7 +30,11 @@ P = dict(NP=2, RR=2.0, COST=8e-4, SL_BUF=0.0,
          SHORT_BIAS_MODE='d1_only', LONG_RECOVERY_MODE='none', LONG_RECOVERY_MIN24H_PCT=-1.0,
          LONG_QUALITY_MODE='none', LONG_BIAS_AGE_MIN_DAYS=7.0, LONG_BIAS_AGE_MAX_DAYS=14.0,
          LONG_PROTECTED_SWING_MIN_ATR=1.0, LONG_PROTECTED_SWING_MAX_ATR=None, FRESH_ENTRY=True, SL_BUF_ATR=0.0,
-         REQUIRE_POI_RETOUCH_AFTER_FAILED_ATTEMPT=False)
+         REQUIRE_POI_RETOUCH_AFTER_FAILED_ATTEMPT=False,
+         VP_MODE='none', VP_MODE_LONG=None, VP_MODE_SHORT=None,
+         VP_LOOKBACK_M5=2016, VP_MIN_BARS=1440, VP_BINS=48, VP_VALUE_AREA_PCT=0.70,
+         VP_HVN_REL_THRESHOLD=0.60, VP_LVN_REL_THRESHOLD=0.20, VP_LVN_NEIGHBOR_MIN_REL=0.35,
+         VP_POC_MAX_DISTANCE_ATR=0.25)
 STEP, DAY = 300000, 86400000
 
 
@@ -61,6 +68,160 @@ def entry_zone_for_direction(params, dr):
     if mode in ('fvg_only', 'ob_only', 'fvg_or_ob'):
         return mode
     return params.get('ENTRY_ZONE', 'fvg_or_ob')
+
+
+def vp_mode_for_direction(params, dr):
+    """Resolve Volume Profile mode independently for LONG and SHORT."""
+    key = 'VP_MODE_LONG' if dr == 1 else 'VP_MODE_SHORT'
+    mode = params.get(key)
+    if mode in ('none', 'poc_near', 'value_area', 'hvn', 'exclude_lvn', 'hvn_no_lvn'):
+        return mode
+    return params.get('VP_MODE', 'none')
+
+
+def build_volume_profile(m5, bar, params):
+    """Build the causal M5 Volume Profile used by the VP70 research experiment.
+
+    The whole Binance quote notional of each completed M5 candle is allocated
+    to that candle's HLC3 typical price. This is an OHLCV approximation, not a
+    trade-by-trade volume-at-price/footprint profile.
+    """
+    lookback = int(params.get('VP_LOOKBACK_M5', 2016))
+    min_bars = int(params.get('VP_MIN_BARS', 1440))
+    bins = int(params.get('VP_BINS', 48))
+    bar = int(bar)
+    start = max(0, bar - lookback + 1)
+    if bar - start + 1 < min_bars or bins < 8:
+        return None
+    high = np.asarray(m5['h'][start:bar + 1], dtype=float)
+    low = np.asarray(m5['l'][start:bar + 1], dtype=float)
+    close = np.asarray(m5['c'][start:bar + 1], dtype=float)
+    volume_source = m5.get('qv', m5.get('v'))
+    if volume_source is None:
+        return None
+    quote_volume = np.asarray(volume_source[start:bar + 1], dtype=float)
+    typical = (high + low + close) / 3.0
+    valid = (np.isfinite(typical) & np.isfinite(quote_volume) & (quote_volume > 0)
+             & np.isfinite(high) & np.isfinite(low))
+    if int(valid.sum()) < min_bars or float(quote_volume[valid].sum()) <= 0:
+        return None
+    price_low = float(np.nanmin(low[valid]))
+    price_high = float(np.nanmax(high[valid]))
+    if not np.isfinite(price_low) or not np.isfinite(price_high):
+        return None
+    if price_high <= price_low:
+        pad = max(abs(price_low) * 1e-8, 1e-10)
+        price_low -= pad
+        price_high += pad
+    edges = np.linspace(price_low, price_high, bins + 1)
+    hist, _ = np.histogram(typical[valid], bins=edges, weights=quote_volume[valid])
+    hist = hist.astype(float)
+    total = float(hist.sum())
+    if not np.isfinite(total) or total <= 0:
+        return None
+    poc_i = int(np.argmax(hist))
+    poc_price = float((edges[poc_i] + edges[poc_i + 1]) / 2.0)
+    target = total * float(params.get('VP_VALUE_AREA_PCT', 0.70))
+    va_lo = va_hi = poc_i
+    covered = float(hist[poc_i])
+    # Expand from POC to the larger adjacent bin; ties expand left, matching research.
+    while covered < target and (va_lo > 0 or va_hi < bins - 1):
+        left_v = float(hist[va_lo - 1]) if va_lo > 0 else -1.0
+        right_v = float(hist[va_hi + 1]) if va_hi < bins - 1 else -1.0
+        if right_v > left_v:
+            va_hi += 1
+            covered += max(0.0, right_v)
+        else:
+            va_lo -= 1
+            covered += max(0.0, left_v)
+    max_v = float(hist.max())
+    hvn_threshold = max_v * float(params.get('VP_HVN_REL_THRESHOLD', 0.60))
+    lvn_threshold = max_v * float(params.get('VP_LVN_REL_THRESHOLD', 0.20))
+    hvn_idx, lvn_idx = [], []
+    for i in range(bins):
+        left = hist[i - 1] if i > 0 else -np.inf
+        right = hist[i + 1] if i < bins - 1 else -np.inf
+        if hist[i] >= left and hist[i] >= right and hist[i] >= hvn_threshold:
+            hvn_idx.append(i)
+        if (0 < i < bins - 1 and hist[i] <= left and hist[i] <= right
+                and hist[i] <= lvn_threshold
+                and left >= max_v * float(params.get('VP_LVN_NEIGHBOR_MIN_REL', 0.35))
+                and right >= max_v * float(params.get('VP_LVN_NEIGHBOR_MIN_REL', 0.35))):
+            lvn_idx.append(i)
+    if poc_i not in hvn_idx:
+        hvn_idx.append(poc_i)
+    return {
+        'edges': edges, 'hist': hist, 'total': total,
+        'poc_price': poc_price,
+        'va_low': float(edges[va_lo]), 'va_high': float(edges[va_hi + 1]),
+        'hvn_idx': np.asarray(sorted(set(hvn_idx)), dtype=int),
+        'lvn_idx': np.asarray(sorted(set(lvn_idx)), dtype=int),
+        'bars': int(bar - start + 1), 'valid_bars': int(valid.sum()),
+        'start_bar': int(start), 'end_bar': int(bar),
+        'bin_count': int(bins), 'value_area_fraction': float(covered / total),
+    }
+
+
+def volume_profile_poi_metrics(profile, poi_top, poi_bottom, atr_h4):
+    """Measure overlap between an H4 POI and the causal M5 profile."""
+    if profile is None:
+        return {
+            'vp_available': False, 'vp_poc_price': np.nan,
+            'vp_poc_distance_atr': np.nan, 'vp_va70_low': np.nan,
+            'vp_va70_high': np.nan, 'vp_va70_overlap': False,
+            'vp_hvn_overlap': False, 'vp_lvn_overlap': False,
+            'vp_poi_volume_share': np.nan, 'vp_hvn_nodes': 0,
+            'vp_lvn_nodes': 0, 'vp_profile_bars': 0,
+            'vp_profile_valid_bars': 0,
+        }
+    lo, hi = sorted((float(poi_top), float(poi_bottom)))
+    edges, hist = profile['edges'], profile['hist']
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    overlap = (edges[:-1] <= hi) & (edges[1:] >= lo)
+    hvn_idx, lvn_idx = profile['hvn_idx'], profile['lvn_idx']
+    hvn_overlap = bool(np.any(overlap[hvn_idx])) if len(hvn_idx) else False
+    lvn_overlap = bool(np.any(overlap[lvn_idx])) if len(lvn_idx) else False
+    va_overlap = bool(hi >= profile['va_low'] and lo <= profile['va_high'])
+    poc = float(profile['poc_price'])
+    poc_dist = 0.0 if lo <= poc <= hi else min(abs(poc - lo), abs(poc - hi))
+    poc_dist_atr = poc_dist / float(atr_h4) if np.isfinite(atr_h4) and float(atr_h4) > 0 else np.nan
+    in_zone = (centers >= lo) & (centers <= hi)
+    volume_share = float(hist[in_zone].sum() / profile['total']) if profile['total'] > 0 else np.nan
+    return {
+        'vp_available': True, 'vp_poc_price': poc,
+        'vp_poc_distance_atr': float(poc_dist_atr) if np.isfinite(poc_dist_atr) else np.nan,
+        'vp_va70_low': float(profile['va_low']), 'vp_va70_high': float(profile['va_high']),
+        'vp_va70_overlap': va_overlap, 'vp_hvn_overlap': hvn_overlap,
+        'vp_lvn_overlap': lvn_overlap, 'vp_poi_volume_share': volume_share,
+        'vp_hvn_nodes': int(len(hvn_idx)), 'vp_lvn_nodes': int(len(lvn_idx)),
+        'vp_profile_bars': int(profile['bars']),
+        'vp_profile_valid_bars': int(profile['valid_bars']),
+    }
+
+
+def volume_profile_qualifies(mode, metrics, params):
+    """Return pass/fail and audit reason for one H4 POI candidate."""
+    if mode == 'none':
+        return True, 'no_volume_profile_filter'
+    if not metrics.get('vp_available', False):
+        return False, 'volume_profile_unavailable_or_insufficient_history'
+    if mode == 'value_area':
+        ok = bool(metrics.get('vp_va70_overlap', False))
+        return ok, 'poi_overlaps_value_area_70' if ok else 'poi_outside_value_area_70'
+    if mode == 'poc_near':
+        distance = metrics.get('vp_poc_distance_atr', np.nan)
+        ok = np.isfinite(distance) and distance <= float(params.get('VP_POC_MAX_DISTANCE_ATR', 0.25))
+        return bool(ok), 'poc_within_distance' if ok else 'poc_too_far_from_poi'
+    if mode == 'hvn':
+        ok = bool(metrics.get('vp_hvn_overlap', False))
+        return ok, 'poi_overlaps_hvn' if ok else 'poi_not_overlapping_hvn'
+    if mode == 'exclude_lvn':
+        ok = not bool(metrics.get('vp_lvn_overlap', False))
+        return ok, 'poi_avoids_lvn' if ok else 'poi_overlaps_lvn'
+    if mode == 'hvn_no_lvn':
+        ok = bool(metrics.get('vp_hvn_overlap', False)) and not bool(metrics.get('vp_lvn_overlap', False))
+        return ok, 'hvn_without_lvn_overlap' if ok else 'requires_hvn_and_no_lvn_overlap'
+    raise ValueError(f'Unknown VP_MODE: {mode}')
 
 
 def short_bias_confirmation_allowed(dr, mode, h4_bias):
@@ -187,7 +348,13 @@ def agg(a, k):
 
 
 def frame(a5, dr):  # dr=-1: cermin harga supaya logika SHORT = logika LONG
-    b = a5 if dr == 1 else dict(o=-a5['o'], h=-a5['l'], l=-a5['h'], c=-a5['c'])
+    if dr == 1:
+        b = dict(a5)
+    else:
+        b = dict(o=-a5['o'], h=-a5['l'], l=-a5['h'], c=-a5['c'])
+        for key in ('v', 'qv'):  # volume netral arah
+            if key in a5:
+                b[key] = a5[key]
     return dict(m5=b, m15=agg(b, 3), h4=agg(b, 48), d1=agg(b, 288))
 
 
@@ -448,11 +615,11 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
         }
     sh5 = deque(maxlen=400); sh15 = deque(maxlen=200); sl15 = deque(maxlen=200)
     cnt = dict(bias=0, aoi=0, aoi_touch=0, poi=0, poi_touch=0, mss=0, placed=0, filled=0, poi_broken=0, aoi_broken=0,
-                mss_timeout=0, mss_low_broken=0, bos_timeout=0, order_expired=0, no_entry_zone=0, order_rejected=0, invalid_fill_touch=0, bias_reset=0, short_bias_h4_reject=0, long_momentum_filtered=0, long_quality_filtered=0)
+                mss_timeout=0, mss_low_broken=0, bos_timeout=0, order_expired=0, no_entry_zone=0, order_rejected=0, invalid_fill_touch=0, bias_reset=0, short_bias_h4_reject=0, long_momentum_filtered=0, long_quality_filtered=0, poi_vp_candidates_seen=0, poi_vp_rejected=0, poi_vp_accepted=0, poi_vp_profile_unavailable=0)
     trades = []; events = []; setup_id = 0; poi_id = 0; poi_type = ''; st = -1; cur = -1; active = False; org1 = 0
     event_seq = 0; attempt_seq = 0; current_attempt_id = 0
     retouch_required = False; poi_exit_seen_after_failure = False
-    aoi = (np.nan, np.nan); poi = (np.nan, np.nan); k_aoi = k_poi = k_touch = m_touch = k_mss = i_lo5 = k_set = kf = 0
+    aoi = (np.nan, np.nan); poi = (np.nan, np.nan); poi_vp_context = {}; k_aoi = k_poi = k_touch = m_touch = k_mss = i_lo5 = k_set = kf = 0
     L = E = SL = TP = fp = np.nan; zone = ''; ctx = {}
     def emit(event, k, **extra):
         nonlocal event_seq
@@ -648,6 +815,7 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
                                    poi_type=poi_type, poi_qualification_mode=poi_mode_for_direction(P, dr),
                                    entry_qualification_mode=entry_zone_for_direction(P, dr),
                                    short_bias_mode=P.get('SHORT_BIAS_MODE', 'd1_only'),
+                                   vp_mode=vp_mode_for_direction(P, dr), **poi_vp_context,
                                    long_recovery_mode=long_filter_mode, long_quality_mode=quality_mode,
                                    long_bias_age_min_days=float(P.get('LONG_BIAS_AGE_MIN_DAYS', 7.0)),
                                    long_bias_age_max_days=float(P.get('LONG_BIAS_AGE_MAX_DAYS', 14.0)),
@@ -677,8 +845,17 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
                 emit('POI_TIMEOUT', k); st = 0
             if st == 2:
                 best = None
+                best_vp_metrics = {}
                 poi_mode = poi_mode_for_direction(P, dr)
+                vp_mode = vp_mode_for_direction(P, dr)
                 allowed_poi_types = poi_candidate_types(P, dr)
+                # Profile is built once at the completed H4 POI-evaluation close.
+                # It includes only closed M5 candles up to and including k.
+                vp_profile = build_volume_profile(m5, k, P) if vp_mode != 'none' else None
+                h4_idx_now = min(h, len(atr4) - 1)
+                atr_h4_now = float(atr4[h4_idx_now]) if 0 <= h4_idx_now < len(atr4) else np.nan
+                candidates_seen_here = 0
+                rejected_here = 0
                 for j in range(h, max(1, h - P['POI_LB']) - 1, -1):
                     candidates = []
                     if 'FVG' in allowed_poi_types:
@@ -688,10 +865,32 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
                     for top, bot, typ in candidates:
                         if np.isnan(top) or top >= c5[k] or top < aoi[1] or bot > aoi[0]: continue
                         if j < h and l4[j + 1:h + 1].min() <= top: continue
-                        if best is None or top > best[0]: best = (top, bot, typ)
+                        candidates_seen_here += 1
+                        cnt['poi_vp_candidates_seen'] += 1
+                        vp_metrics = volume_profile_poi_metrics(vp_profile, top, bot, atr_h4_now)
+                        vp_allowed, vp_reason = volume_profile_qualifies(vp_mode, vp_metrics, P)
+                        if not vp_allowed:
+                            rejected_here += 1
+                            cnt['poi_vp_rejected'] += 1
+                            if not vp_metrics.get('vp_available', False):
+                                cnt['poi_vp_profile_unavailable'] += 1
+                            emit('POI_VP_REJECTED', k, poi_type=typ, candidate_poi_low=float(min(top, bot) * dr),
+                                 candidate_poi_high=float(max(top, bot) * dr), vp_mode=vp_mode,
+                                 vp_reject_reason=vp_reason, **vp_metrics)
+                            continue
+                        if vp_mode != 'none':
+                            cnt['poi_vp_accepted'] += 1
+                        if best is None or top > best[0]:
+                            best = (top, bot, typ)
+                            best_vp_metrics = dict(vp_metrics)
                 if best:
                     poi = (best[0], best[1]); zone = best[2]; poi_type = best[2]; k_poi = k; st = 3; cnt['poi'] += 1; poi_id += 1; retouch_required = False; poi_exit_seen_after_failure = False
-                    emit('POI_CREATED', k, poi_type=poi_type, poi_qualification_mode=poi_mode_for_direction(P, dr))
+                    poi_vp_context = dict(best_vp_metrics)
+                    emit('POI_CREATED', k, poi_type=poi_type, poi_qualification_mode=poi_mode,
+                         vp_mode=vp_mode, **poi_vp_context)
+                elif candidates_seen_here and rejected_here:
+                    emit('POI_VP_FILTERED_ALL', k, vp_mode=vp_mode,
+                         candidates_seen=candidates_seen_here, candidates_rejected=rejected_here)
         # --- close D1: bias baru, AOI ---
         if (k + 1) % 288 == 0:
             d = (k + 1) // 288 - 1
@@ -708,7 +907,7 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
                 # TRADE_EXIT remains joinable to its ENTRY_FILLED/BOS/MSS events.
                 if st != 7:
                     current_attempt_id = 0; retouch_required = False; poi_exit_seen_after_failure = False
-                    aoi = (np.nan, np.nan); poi = (np.nan, np.nan); poi_type = ''
+                    aoi = (np.nan, np.nan); poi = (np.nan, np.nan); poi_type = ''; poi_vp_context = {}
                 if active:
                     cnt['bias'] += 1; emit('BIAS_ACTIVATED', k, bias_dir='LONG' if dr == 1 else 'SHORT', bias_origin_d1_bar=int(org1))
                 if st != 7: st = 0 if active else -1
@@ -737,7 +936,7 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
                         if j < d and l1[j + 1:d + 1].min() <= top: continue
                         if best is None or top > best[0]: best = (top, bot)
                     if best:
-                        aoi = best; k_aoi = k; st = 1; cnt['aoi'] += 1; setup_id += 1; poi_id = 0; poi_type = ''
+                        aoi = best; k_aoi = k; st = 1; cnt['aoi'] += 1; setup_id += 1; poi_id = 0; poi_type = ''; poi_vp_context = {}
                         emit('AOI_CREATED', k, short_bias_mode=P.get('SHORT_BIAS_MODE', 'd1_only'),
                              h4_bias_at_arm=current_h4_bias)
     if include_state:
@@ -783,6 +982,8 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
             'bos_timeout_m5_bars': int(P['BOS_WIN']),
             'pending_bars_elapsed': int(last_k - k_set) if st == 6 else None,
             'position_bars_held': int(last_k - kf) if st == 7 else None,
+            'vp_mode': vp_mode_for_direction(P, dr),
+            'poi_vp_context': dict(poi_vp_context) if isinstance(poi_vp_context, dict) else {},
             'setup_id': int(setup_id),
             'poi_id': int(poi_id),
             'attempt_id': int(current_attempt_id),
@@ -806,7 +1007,7 @@ import time
 from typing import Any, Callable
 
 STRATEGY_NAME = 'TACTICAL_V10_E_GE2_ATR'
-STRATEGY_VERSION = '10.0.0'
+STRATEGY_VERSION = '10.1.0-LONG-VA70-SHORT-BASELINE'
 STRATEGY_ENGINE = 'TACTICAL_V10_STATE_MACHINE'
 STRATEGY_SCHEMA_VERSION = 10
 EXCLUDED_SYMBOLS = frozenset({'BTCUSDT', 'ETHUSDT'})
@@ -859,6 +1060,17 @@ V10_LIVE_PARAMS.update({
     'SL_BUF': 0.0,
     'SL_BUF_ATR': 0.0,
     'REQUIRE_POI_RETOUCH_AFTER_FAILED_ATTEMPT': False,
+    'VP_MODE': 'none',
+    'VP_MODE_LONG': 'value_area',
+    'VP_MODE_SHORT': 'none',
+    'VP_LOOKBACK_M5': 2016,
+    'VP_MIN_BARS': 1440,
+    'VP_BINS': 48,
+    'VP_VALUE_AREA_PCT': 0.70,
+    'VP_HVN_REL_THRESHOLD': 0.60,
+    'VP_LVN_REL_THRESHOLD': 0.20,
+    'VP_LVN_NEIGHBOR_MIN_REL': 0.35,
+    'VP_POC_MAX_DISTANCE_ATR': 0.25,
 })
 
 @dataclass(frozen=True)
@@ -903,7 +1115,7 @@ def market_data_provider_status() -> dict[str, Any]:
     }
 
 
-def _as_candle_tuple(item: Any) -> tuple[int, float, float, float, float]:
+def _as_candle_tuple(item: Any) -> tuple[int, float, float, float, float, float, float]:
     if isinstance(item, dict):
         get = item.get
     else:
@@ -914,7 +1126,26 @@ def _as_candle_tuple(item: Any) -> tuple[int, float, float, float, float]:
         raise ValueError('OHLC M5 invalid/non-finite')
     if h < max(o, l, c) or l > min(o, h, c):
         raise ValueError('Geometri OHLC M5 invalid')
-    return t, o, h, l, c
+    try:
+        base_volume = float(get('volume', 0.0) or 0.0)
+    except (TypeError, ValueError):
+        base_volume = 0.0
+    try:
+        quote_volume = float(get('turnover', 0.0) or 0.0)
+    except (TypeError, ValueError):
+        quote_volume = 0.0
+    if not np.isfinite(quote_volume) or quote_volume <= 0:
+        try:
+            quote_volume = float(get('quote_volume', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            quote_volume = 0.0
+    if not np.isfinite(base_volume) or base_volume < 0:
+        base_volume = 0.0
+    if not np.isfinite(quote_volume) or quote_volume <= 0:
+        quote_volume = c * base_volume
+    if not np.isfinite(quote_volume) or quote_volume < 0:
+        quote_volume = 0.0
+    return t, o, h, l, c, base_volume, quote_volume
 
 
 def _prepare_m5_arrays(candles: list[Any]) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, Any]]:
@@ -943,10 +1174,12 @@ def _prepare_m5_arrays(candles: list[Any]) -> tuple[dict[str, np.ndarray], np.nd
     h = np.full(n, np.nan, dtype=float)
     l = np.full(n, np.nan, dtype=float)
     c = np.full(n, np.nan, dtype=float)
+    v = np.zeros(n, dtype=float)
+    qv = np.zeros(n, dtype=float)
     for i, t in enumerate(grid):
         values = lookup.get(int(t))
         if values is not None:
-            o[i], h[i], l[i], c[i] = values
+            o[i], h[i], l[i], c[i], v[i], qv[i] = values
     missing = ~np.isfinite(c)
     missing_count = int(missing.sum())
     max_gap = 0
@@ -964,7 +1197,7 @@ def _prepare_m5_arrays(candles: list[Any]) -> tuple[dict[str, np.ndarray], np.nd
         raise ValueError('Riwayat M5 masih mengandung nilai invalid setelah normalisasi')
     if max_gap > 12:
         raise ValueError(f'Gap data M5 terlalu panjang: {max_gap} candle / {max_gap * 5} menit')
-    arrays = {'o': o, 'h': h, 'l': l, 'c': c}
+    arrays = {'o': o, 'h': h, 'l': l, 'c': c, 'v': v, 'qv': qv}
     info = {
         'candles_m5': int(n),
         'missing_candles_filled': missing_count,
@@ -973,6 +1206,7 @@ def _prepare_m5_arrays(candles: list[Any]) -> tuple[dict[str, np.ndarray], np.nd
         'last_open_time_ms': int(grid[-1]),
         'last_close_time_ms': int(grid[-1] + M5_INTERVAL_MS),
         'history_days': round(n / 288.0, 2),
+        'volume_profile_quote_volume_bars': int(np.count_nonzero(qv > 0)),
     }
     return arrays, grid, info
 
@@ -1013,8 +1247,14 @@ def _analyze_v10_arrays(pair: str, a5: dict[str, np.ndarray], ot: np.ndarray,
             'attempt_id': state.get('attempt_id'), 'poi_type': state.get('poi_type'),
             'aoi': state.get('aoi'), 'poi': state.get('poi'),
             'mss_close_time_ms': state.get('mss_close_time_ms'),
+            'vp_mode': state.get('vp_mode'), 'poi_vp_context': state.get('poi_vp_context'),
             'placed': counts.get('placed', 0), 'filled': counts.get('filled', 0),
             'mss': counts.get('mss', 0), 'aoi_count': counts.get('aoi', 0), 'poi_count': counts.get('poi', 0),
+            'vp_candidates_seen': counts.get('poi_vp_candidates_seen', 0),
+            'vp_rejected': counts.get('poi_vp_rejected', 0),
+            'vp_accepted': counts.get('poi_vp_accepted', 0),
+            'vp_profile_unavailable': counts.get('poi_vp_profile_unavailable', 0),
+            'last_vp_reject_reason': next((e.get('vp_reject_reason') for e in reversed(_events) if e.get('event') == 'POI_VP_REJECTED'), None),
         }
         if state['state'] in (6, 7):
             states.append(state)
@@ -1078,6 +1318,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         'h4_bias_context': 'LONG' if analysis['current_h4_bias'] == 1 else 'SHORT' if analysis['current_h4_bias'] == -1 else 'NEUTRAL',
         'configuration': {
             'long_d1_bias': 'BULLISH', 'long_poi_h4': 'FVG_ONLY',
+            'long_volume_profile': 'VALUE_AREA_70_OVERLAP_ONLY',
+            'short_volume_profile': 'BASELINE_NO_FILTER',
             'short_d1_bias': 'BEARISH', 'short_poi_h4': 'OB_ONLY',
             'mss': 'LITERAL_M15', 'bos': 'FRESH_CLOSE_CROSS_M5_AFTER_MSS',
             'long_distance_to_d1_protected_swing': '[2.0, +inf) ATR_D1',
@@ -1086,9 +1328,11 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             'rr': 2.0, 'round_trip_cost_bps_backtest': ROUND_TRIP_COST_BPS,
             'pending_window_m5_bars': PENDING_WINDOW_M5, 'max_hold_m5_bars': MAX_HOLD_M5,
             'same_poi_rearm_after_failed_attempt': True,
+            'volume_profile': {'lookback_m5_bars': 2016, 'minimum_valid_bars': 1440, 'bins': 48, 'value_area_pct': 0.70, 'weight': 'BINANCE_QUOTE_VOLUME_HLC3', 'causal': True},
         },
+        # Angka di bawah milik baseline E_GE2_ATR TANPA VA70; bukan hasil LONG+VA70.
         'backtest_reference': {
-            'variant': 'E_GE2_ATR', 'all_trades': 250, 'win_rate_pct': 38.8,
+            'variant': 'E_GE2_ATR (baseline tanpa VA70)', 'all_trades': 250, 'win_rate_pct': 38.8,
             'expectancy_R': 0.095607, 'profit_factor': 1.143644, 'total_R': 23.901690,
             'max_drawdown_R': 15.840089, 'long_trades': 64, 'long_expectancy_R': 0.109999,
             'long_profit_factor': 1.170716, 'short_trades': 186, 'short_expectancy_R': 0.090655,
@@ -1124,6 +1368,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             'bos_timeout_m5_bars': state.get('bos_timeout_m5_bars'),
             'last_m5_close_time_ms': state.get('last_m5_close_time_ms'),
             'same_poi_rearm_after_failed_attempt': True,
+            'vp_mode': state.get('vp_mode'),
+            'poi_vp_context': state.get('poi_vp_context') or {},
         })
         v10_meta = {
             'name': STRATEGY_NAME, 'version': STRATEGY_VERSION, 'variant': 'E_GE2_ATR',
@@ -1159,6 +1405,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
             'v10_poi_id': int(state.get('poi_id') or 0),
             'v10_attempt_id': int(state.get('attempt_id') or 0),
             'v10_poi': poi, 'v10_aoi': aoi, 'v10_poi_type': state.get('poi_type'),
+            'v10_vp_mode': state.get('vp_mode'), 'v10_poi_vp_context': state.get('poi_vp_context') or {},
             'v10_mss_time_ms': mss_time_ms, 'v10_mss_close_time_ms': mss_close_time_ms,
             'v10_mss_close_price': state.get('mss_close_price'),
             'v10_sl_anchor': state.get('sl_anchor'),
@@ -1221,6 +1468,9 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     watch_id = hashlib.sha256(watch_id_source.encode('utf-8')).hexdigest()[:24]
     order_distance = state.get('entry_context', {}).get('order_distance_to_d1_protected_swing_atr')
     if state['direction'] == 'LONG':
+        vp_ctx = state.get('poi_vp_context') or {}
+        if state.get('vp_mode') != 'value_area' or not vp_ctx.get('vp_available') or not vp_ctx.get('vp_va70_overlap'):
+            raise RuntimeError(f'LONG {symbol} tidak punya bukti POI overlap VA70 (reason: volume_profile_missing_or_outside_va70)')
         try:
             distance = float(order_distance)
         except (TypeError, ValueError):
@@ -1251,6 +1501,8 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         'position_bars_held': state.get('position_bars_held'),
         'setup_id': state.get('setup_id'), 'poi_id': state.get('poi_id'),
         'attempt_id': state.get('attempt_id'), 'watch_id': watch_id,
+        'vp_mode': state.get('vp_mode'),
+        'poi_vp_context': state.get('poi_vp_context') or {},
     })
     data_contract = {
         'source': 'BINANCE_PUBLIC',
@@ -1295,6 +1547,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         'v10_setup_id': int(state.get('setup_id') or 0),
         'v10_poi_id': int(state.get('poi_id') or 0),
         'v10_attempt_id': int(state.get('attempt_id') or 0),
+        'v10_vp_mode': state.get('vp_mode'), 'v10_poi_vp_context': state.get('poi_vp_context') or {},
         'v10_order_time_ms': int(order_time_ms) if order_time_ms is not None else None,
         'v10_order_close_time_ms': int(state.get('order_close_time_ms') or 0),
         'v10_bos_time_ms': int(order_time_ms) if order_time_ms is not None else None,

@@ -15,7 +15,7 @@ Arsitektur aktif:
   analisis, dan RAM pressure menghentikan scanner sementara tanpa mematikan M5 watcher.
 - strategy.py adalah Tactical V10 E_GE2_ATR state machine; tidak memiliki
   koneksi jaringan atau candle cache mandiri.
-- Pipeline sinyal: D1 bias -> D1 FVG AOI -> H4 FVG (LONG) / H4 OB (SHORT)
+- Pipeline sinyal: D1 bias -> D1 FVG AOI -> H4 FVG + filter VA70 (LONG) / H4 OB baseline (SHORT)
   -> literal MSS M15 -> persistent candidate queue -> fresh BOS close-cross M5
   (evaluated only on closed M5 candles) -> M5 limit entry.
 - /candidates menampilkan hanya state-5 yang menunggu BOS; state re-arm menunggu
@@ -23,6 +23,9 @@ Arsitektur aktif:
 - LONG wajib memiliki jarak ke D1 protected swing low >= 2.0 ATR D1 saat BOS.
   SHORT tidak memakai filter jarak tambahan.
 - LONG entry zone: FVG M5 dengan OB fallback. SHORT entry zone: FVG M5 saja.
+- VA70 (LONG saja): POI H4 harus overlap Value Area 70% profil volume M5 (7 hari, 48 bin,
+  quote volume di HLC3 = proxy OHLCV, bukan volume-at-price tick). SHORT tanpa filter volume.
+- /stats menampilkan Max Drawdown dari kurva trade selesai + floating posisi FILLED.
 - SL memakai 12 candle M15 tertutup, TP RR 1:2, biaya simulasi 8 bps,
   pending limit berakhir setelah lebih dari 72 candle M5, max hold 2016 candle M5.
 - BTCUSDT dan ETHUSDT dikecualikan dari universe V10. BTC tidak menjadi veto
@@ -7862,7 +7865,7 @@ class TradingEngine:
         completed_before = self._scan_sweep_cursor
 
         await self.reply(card(f"🧭 TACTICAL V10 E_GE2_ATR • SCAN #{cycle}", [
-            "D1 bias → D1 FVG AOI → H4 FVG (LONG) / OB (SHORT)",
+            "D1 bias → D1 FVG AOI → H4 FVG + VA70 (LONG) / OB baseline (SHORT)",
             "M15 literal MSS → M5 BOS → M5 limit entry • fixed SL / RR 1:2",
             f"Putaran {self._scan_sweep_number + 1} • batch {batch_number}/{batch_count} • koin {batch_start_label}-{batch_end_label}/{total_targets}",
             f"Progres batch {max(0, completed_before - batch_start)}/{max(0, batch_end - batch_start)} • setelah batch sisa {max(0, total_targets - batch_end)} • excluded BTC/ETH • banned {banned}",
@@ -9210,7 +9213,7 @@ class TradingEngine:
                 "confidence": Decimal("0"),
                 "candidate_state": "WAITING_TRIGGER",
                 "strategy_name": str(result.get("strategy_name") or "TACTICAL_V10_E_GE2_ATR"),
-                "strategy_version": str(result.get("strategy_version") or "10.0.0"),
+                "strategy_version": str(result.get("strategy_version") or "10.1.0-LONG-VA70-SHORT-BASELINE"),
                 "strategy": copy.deepcopy(result.get("strategy") or {}),
                 "analysis": compact_analysis(result.get("analysis") or {}),
                 "data_source": data_source,
@@ -10104,7 +10107,7 @@ class TradingEngine:
                 "confidence": confidence,
                 "confidence_components": self._json_safe(payload.get("confidence_components") or {}),
                 "strategy_name": str(strategy_info.get("name") or payload.get("strategy_name") or "TACTICAL_V10_E_GE2_ATR"),
-                "strategy_version": str(strategy_info.get("version") or payload.get("strategy_version") or "10.0.0"),
+                "strategy_version": str(strategy_info.get("version") or payload.get("strategy_version") or "10.1.0-LONG-VA70-SHORT-BASELINE"),
                 "data_source": str(data_info.get("source") or payload.get("data_source") or "UNKNOWN"),
                 "timeframe": "5m", "candles_requested": data_info.get("candles_requested"),
                 "candles_used": data_info.get("candles_used"),
@@ -13723,6 +13726,56 @@ class TradingEngine:
     # STATS
     # --------------------------------------------------------
 
+    @staticmethod
+    def _drawdown_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
+        """Kurva kumulatif trade selesai (urut waktu close): peak, posisi akhir, max drawdown.
+
+        Dua kurva: PnL% kumulatif (gross) dan R (net biaya 8 bps untuk V10).
+        """
+        floor_dt = datetime.min.replace(tzinfo=timezone.utc)
+        rows: list[tuple[datetime, int, Decimal, Decimal | None]] = []
+        for index, record in enumerate(records):
+            raw_pnl = record.get("pnl_percent")
+            if raw_pnl in (None, ""):
+                continue
+            try:
+                pnl = Decimal(str(raw_pnl))
+            except InvalidOperation:
+                continue
+            if not pnl.is_finite():
+                continue
+            when = parse_iso(record.get("closed_at")) or parse_iso(record.get("filled_at")) or floor_dt
+            r_value: Decimal | None = None
+            raw_risk = record.get("risk_pct_initial")
+            if raw_risk not in (None, ""):
+                try:
+                    risk = Decimal(str(raw_risk))
+                    if risk.is_finite() and risk > 0:
+                        cost = Decimal("0.08") if record.get("strategy_name") == "TACTICAL_V10_E_GE2_ATR" else Decimal("0")
+                        r_value = (pnl - cost) / risk
+                except InvalidOperation:
+                    pass
+            rows.append((when, index, pnl, r_value))
+        rows.sort(key=lambda row: (row[0], row[1]))
+
+        def curve(values: list[Decimal]) -> tuple[Decimal, Decimal, Decimal]:
+            peak = cum = max_dd = Decimal("0")
+            for value in values:
+                cum += value
+                peak = max(peak, cum)
+                max_dd = max(max_dd, peak - cum)
+            return cum, peak, max_dd
+
+        pct_cum, pct_peak, pct_dd = curve([row[2] for row in rows])
+        r_values = [row[3] for row in rows if row[3] is not None]
+        r_cum, r_peak, r_dd = curve(r_values)
+        return {
+            "dd_trade_count": len(rows),
+            "dd_cum_percent": pct_cum, "dd_peak_percent": pct_peak, "max_drawdown_percent": pct_dd,
+            "dd_r_count": len(r_values),
+            "dd_cum_r": r_cum, "dd_peak_r": r_peak, "max_drawdown_r": r_dd,
+        }
+
     def _calculate_stats(
         self,
         records: list[dict[str, Any]],
@@ -13975,6 +14028,7 @@ class TradingEngine:
             "average_pending_entered_seconds": avg_pending_entered,
             "auto_records": auto_records,
             "manual_records": manual_records,
+            **self._drawdown_metrics(records),
         }
 
     async def show_stats(self) -> None:
@@ -14027,6 +14081,43 @@ class TradingEngine:
         expectancy = stats["expectancy_percent"]
         expectancy_text = "-" if expectancy is None else f"{format_pct(expectancy)} / trade"
 
+        # Max Drawdown live: kurva trade selesai + floating posisi FILLED saat ini.
+        float_pct = float_r = Decimal("0")
+        float_r_ok = True
+        for open_trade in self.active_trades.values():
+            if open_trade.status != "FILLED":
+                continue
+            snap = self.prices.get(open_trade.pair)
+            fill = open_trade.fill_price or open_trade.entry
+            if snap is None or not fill or fill <= 0:
+                continue
+            move = pct_change(open_trade.direction, fill, snap.price)
+            float_pct += move
+            try:
+                risk = Decimal(str(open_trade._risk_pct_initial()))
+                cost = Decimal("0.08") if open_trade.strategy_name == "TACTICAL_V10_E_GE2_ATR" else Decimal("0")
+                float_r += (move - cost) / risk
+            except (InvalidOperation, TypeError, ZeroDivisionError):
+                float_r_ok = False
+
+        def dd_live(cum: Decimal, peak: Decimal, max_dd: Decimal, floating: Decimal) -> tuple[Decimal, Decimal]:
+            live_cum = cum + floating
+            now_dd = max(peak, live_cum) - live_cum
+            return max(max_dd, now_dd), now_dd
+
+        max_dd_pct, now_dd_pct = dd_live(
+            stats["dd_cum_percent"], stats["dd_peak_percent"], stats["max_drawdown_percent"], float_pct)
+        if stats["dd_r_count"] or (float_r_ok and float_r):
+            max_dd_r, now_dd_r = dd_live(
+                stats["dd_cum_r"], stats["dd_peak_r"], stats["max_drawdown_r"], float_r if float_r_ok else Decimal("0"))
+            dd_max_text = f"-{float(max_dd_r):.2f}R  •  -{float(max_dd_pct):.2f}%"
+            dd_now_text = f"-{float(now_dd_r):.2f}R  •  -{float(now_dd_pct):.2f}%"
+        else:
+            dd_max_text = f"-{float(max_dd_pct):.2f}%"
+            dd_now_text = f"-{float(now_dd_pct):.2f}%"
+        if not stats["dd_trade_count"] and not float_pct:
+            dd_max_text = dd_now_text = "-"
+
         lines = [
             card(
                 "📊 STATS",
@@ -14050,7 +14141,9 @@ class TradingEngine:
             f"├ Avg Loss       {format_pct(stats['average_loss_percent'])}",
             f"├ Profit Factor  {pf_text}",
             f"├ Expectancy     {expectancy_text}",
-            f"└ Avg Planned RR {num(stats['average_planned_rr_entered'])}",
+            f"├ Avg Planned RR {num(stats['average_planned_rr_entered'])}",
+            f"├ Max Drawdown   {dd_max_text}",
+            f"└ DD sekarang    {dd_now_text}  (incl. floating)",
             "",
             "🧠 CONFIDENCE",
             f"├ Semua history  {num(stats['average_confidence_all'])}",
@@ -14070,6 +14163,7 @@ class TradingEngine:
             f"• {outcome_conclusion}",
             f"• {confidence_conclusion}",
             "• Expired, Deleted, dan manual close non-TP/SL tidak dihitung win/loss.",
+            "• Max Drawdown = penurunan terdalam dari puncak kurva trade selesai (urut waktu close) + floating posisi FILLED; R net biaya 8 bps, % = PnL kumulatif.",
         ]
         await self.reply("\n".join(lines))
 
