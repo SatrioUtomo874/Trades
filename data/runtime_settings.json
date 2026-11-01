@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-01T08:12:52.180586+00:00",
+  "saved_at": "2026-11-01T09:28:17.873764+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -278,7 +278,6 @@
       "ENSUSDT",
       "TAKEUSDT",
       "EDGEUSDT",
-      "1000LUNCUSDT",
       "SLXUSDT",
       "LUMIAUSDT",
       "NOMUSDT",
@@ -515,9 +514,9 @@
       "XVSUSDT",
       "BANANAUSDT"
     ],
-    "cursor": 115,
+    "cursor": 116,
     "sweep_number": 2,
     "batch_size": 50,
-    "updated_at": "2026-11-01T08:12:52.180629+00:00"
+    "updated_at": "2026-11-01T09:28:17.873814+00:00"
   }
 }
