@@ -1,5 +1,13 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T16:34:47.011457+00:00",
-  "bans": []
+  "saved_at": "2026-11-01T19:13:10.727583+00:00",
+  "bans": [
+    {
+      "pair": "FUSDT",
+      "banned_at": "2026-11-01T19:13:10.727439+00:00",
+      "until": "2026-11-02T19:13:10.727402+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
+    }
+  ]
 }
