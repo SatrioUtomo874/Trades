@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-01T04:18:18.778404+00:00",
+  "saved_at": "2026-11-01T04:18:38.278977+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -530,9 +530,9 @@
       "XVSUSDT",
       "BANANAUSDT"
     ],
-    "cursor": 49,
+    "cursor": 50,
     "sweep_number": 0,
     "batch_size": 50,
-    "updated_at": "2026-11-01T04:18:18.778436+00:00"
+    "updated_at": "2026-11-01T04:18:38.279020+00:00"
   }
 }
