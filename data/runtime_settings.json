@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-01T18:03:04.442625+00:00",
+  "saved_at": "2026-11-01T18:05:01.546459+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -495,7 +495,6 @@
       "SPACEUSDT",
       "GUAUSDT",
       "SCRUSDT",
-      "MOCAUSDT",
       "BANANAUSDT",
       "BELUSDT",
       "SAPIENUSDT",
@@ -531,9 +530,9 @@
       "MEUSDT",
       "BASUSDT"
     ],
-    "cursor": 350,
+    "cursor": 360,
     "sweep_number": 5,
     "batch_size": 50,
-    "updated_at": "2026-11-01T18:03:04.442672+00:00"
+    "updated_at": "2026-11-01T18:05:01.546496+00:00"
   }
 }
