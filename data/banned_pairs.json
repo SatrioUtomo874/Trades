@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-11-01T07:38:41.277649+00:00",
+  "saved_at": "2026-11-01T08:52:55.912624+00:00",
   "bans": [
+    {
+      "pair": "ASTERUSDT",
+      "banned_at": "2026-11-01T08:52:55.912484+00:00",
+      "until": "2026-11-02T08:52:55.912449+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
+    },
     {
       "pair": "EGLDUSDT",
       "banned_at": "2026-10-31T15:11:39.768270+00:00",
