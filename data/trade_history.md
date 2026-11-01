@@ -230,3 +230,36 @@ Tidak ada trailing.
 - Filled: 2026-10-31T10:20:00+00:00
 - Closed: 2026-11-01T16:21:00.450541+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.0.0
+
+---
+
+## AXLUSDT — SELL
+
+Trade ID: `AXLUSDT-20261101-114526-48F9A7`
+
+### Setup
+
+- Price Now Reference: 0.04537
+- Entry: 0.0455
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | order limit 0.0455
+- Price Exp: 0.04488
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.04581
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.04488
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.04502
+- Result Reason: Manual /close. PnL positif, sehingga hasil dicatat sebagai TP (PnL +1.05%).
+- PnL: 1.054945054945054945054945055%
+- Created: 2026-11-01T04:40:00+00:00
+- Filled: 2026-11-01T05:59:42.073829+00:00
+- Closed: 2026-11-01T16:21:15.269284+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.0.0
