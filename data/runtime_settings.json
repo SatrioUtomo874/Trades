@@ -1,10 +1,10 @@
 {
   "version": 4,
-  "saved_at": "2026-11-02T09:45:02.212336+00:00",
+  "saved_at": "2026-11-02T09:45:06.092097+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
-    "autostop": "10",
+    "autostop": "20",
     "drawdown": "16"
   },
   "scan_progress": {
@@ -521,6 +521,6 @@
     "cursor": 393,
     "sweep_number": 11,
     "batch_size": 50,
-    "updated_at": "2026-11-02T09:45:02.212382+00:00"
+    "updated_at": "2026-11-02T09:45:06.092146+00:00"
   }
 }
