@@ -12,7 +12,7 @@ Arsitektur aktif:
 - main.py adalah satu-satunya pemilik Binance USD-M public REST, private execution REST,
   WebSocket market data, candle cache, pagination, rate-limit cooldown, Telegram,
   paper ledger, dan real-order ledger.
-- Universe scan memakai batch 50 pair; candle cache non-watch dihapus setelah
+- Universe scan memakai batch 50 pair; candle cache non-watch langsung dihapus setelah
   analisis, dan RAM pressure menghentikan scanner sementara tanpa mematikan M5 watcher.
 - strategy.py adalah Tactical V10 E_GE2_ATR state machine; tidak memiliki
   koneksi jaringan atau candle cache mandiri.
@@ -84,6 +84,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import requests
+import numpy as np
 from dotenv import load_dotenv
 
 from websockets.exceptions import ConnectionClosed
@@ -219,7 +220,7 @@ SCAN_MAX_PAIRS_PER_CYCLE = 50        # satu batch logis berisi tepat 50 pair; la
 SCAN_CYCLE_DELAY_SECONDS = 5.0       # lanjutkan batch aktif segera setelah time-slice selesai
 # Monitor only validated watch candidates; never scan the full universe outside H4 slots.
 M5_WATCH_POLL_SECONDS = 3.0
-M5_WATCH_MAX_CANDIDATES = 64
+M5_WATCH_MAX_CANDIDATES = max(2, min(64, int(os.getenv("M5_WATCH_MAX_CANDIDATES", "16") or "16")))
 V10_BOS_TIMEOUT_M5_BARS = 144  # Tactical V10: BOS_WIN=144, dihitung dari close MSS.
 V10_WATCH_INTERVAL_MS = 300_000
 V10_CANDIDATE_SCHEMA_VERSION = 1
@@ -572,6 +573,24 @@ def fmt_num(value: Any, digits: int = 2) -> str:
         return str(value)
 
 
+def as_decimal_number(value: Any, field_name: str = "nilai") -> Decimal:
+    """Convert numeric strategy/API values (including float/NumPy scalars) safely.
+
+    Decimal(str(value)) avoids importing a float's binary representation into
+    financial calculations. It also rejects NaN and infinities before they can
+    reach tick-size arithmetic or Binance order construction.
+    """
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{field_name} bukan angka yang valid.")
+    try:
+        result = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} bukan angka yang valid: {value!r}") from exc
+    if not result.is_finite():
+        raise ValueError(f"{field_name} harus berupa angka finite.")
+    return result
+
+
 def card(title: str, rows: list[str]) -> str:
     body = "\n".join(f"│ {row}" for row in rows if row)
     return f"╭─ {title} ─╮\n{body}\n╰──────────────────╯"
@@ -587,6 +606,9 @@ def gauge(percent: Any, width: int = 10) -> str:
 
 
 def quantized_price(value: Decimal, tick_size: Decimal) -> Decimal:
+    # Defensif: strategy V10 can return float while exchange filters are Decimal.
+    value = as_decimal_number(value, "harga")
+    tick_size = as_decimal_number(tick_size, "tick size")
     if tick_size <= 0:
         return value
     steps = (value / tick_size).to_integral_value(rounding=ROUND_DOWN)
@@ -594,6 +616,9 @@ def quantized_price(value: Decimal, tick_size: Decimal) -> Decimal:
 
 
 def quantized_price_ceiling(value: Decimal, tick_size: Decimal) -> Decimal:
+    # Defensif: never allow float / Decimal TypeError in execution path.
+    value = as_decimal_number(value, "harga")
+    tick_size = as_decimal_number(tick_size, "tick size")
     if tick_size <= 0:
         return value
     steps = (value / tick_size).to_integral_value(rounding=ROUND_UP)
@@ -601,6 +626,8 @@ def quantized_price_ceiling(value: Decimal, tick_size: Decimal) -> Decimal:
 
 
 def validate_tick(value: Decimal, tick_size: Decimal) -> bool:
+    value = as_decimal_number(value, "harga")
+    tick_size = as_decimal_number(tick_size, "tick size")
     if tick_size <= 0:
         return True
     remainder = value % tick_size
@@ -1155,6 +1182,15 @@ class ApiStats:
 
 API_STATS = ApiStats()
 
+# Compact representation of only the eight Binance kline fields consumed by V10:
+# open time, OHLC, base volume, quote volume, and taker-buy base volume.
+# A 66-day M5 history is about 1.2 MB instead of a much larger object graph
+# of nested Python lists and strings.
+KLINE_CACHE_DTYPE = np.dtype([
+    ("t", "<i8"), ("o", "<f8"), ("h", "<f8"), ("l", "<f8"),
+    ("c", "<f8"), ("v", "<f8"), ("qv", "<f8"), ("tb", "<f8"),
+])
+
 
 class BinanceREST:
     """
@@ -1177,11 +1213,11 @@ class BinanceREST:
         self._request_lock = asyncio.Lock()
         self._last_request_monotonic = 0.0
         self._rest_cooldown_until = 0.0
-        self._kline_cache: OrderedDict[tuple[str, str, int], tuple[float, list[list[Any]]]] = OrderedDict()
+        self._kline_cache: OrderedDict[tuple[str, str, int], tuple[float, np.ndarray]] = OrderedDict()
         self._kline_locks: dict[tuple[str, str, int], asyncio.Lock] = {}
         self._kline_cache_candles = 0
-        self._kline_cache_max_entries = 96
-        self._kline_cache_max_candles = 220_000
+        self._kline_cache_max_entries = 32
+        self._kline_cache_max_candles = 350_000
         self._kline_cache_ttl = {"5m": 300.0, "15m": 45.0, "1h": 120.0, "4h": 300.0, "1d": 900.0}
 
     async def _get(
@@ -1258,15 +1294,70 @@ class BinanceREST:
         aliases = {"5": "5m", "15": "15m", "60": "1h", "240": "4h", "D": "1d"}
         return aliases.get(token, aliases.get(token.upper(), token.lower()))
 
+    @staticmethod
+    def _pack_kline_rows(rows: list[list[Any]], span_ms: int, now_ms: int) -> np.ndarray:
+        """Convert Binance JSON kline rows immediately into a compact numeric array."""
+        packed: list[tuple[int, float, float, float, float, float, float, float]] = []
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 10:
+                continue
+            try:
+                open_ms = int(row[0])
+                if open_ms + span_ms > now_ms:
+                    continue  # closed candles only
+                values = (
+                    float(row[1]), float(row[2]), float(row[3]), float(row[4]),
+                    float(row[5]), float(row[7]), float(row[9]),
+                )
+                if not all(math.isfinite(value) for value in values):
+                    continue
+                if min(values[0:4]) <= 0 or values[1] < max(values[0], values[2], values[3]):
+                    continue
+                if values[2] > min(values[0], values[1], values[3]):
+                    continue
+                packed.append((open_ms, *values))
+            except (TypeError, ValueError, IndexError, OverflowError):
+                continue
+        if not packed:
+            return np.empty(0, dtype=KLINE_CACHE_DTYPE)
+        return np.asarray(packed, dtype=KLINE_CACHE_DTYPE)
+
+    @staticmethod
+    def _merge_packed_klines(parts: list[np.ndarray], count: int) -> np.ndarray:
+        nonempty = [part for part in parts if isinstance(part, np.ndarray) and part.size]
+        if not nonempty:
+            return np.empty(0, dtype=KLINE_CACHE_DTYPE)
+        rows = nonempty[0] if len(nonempty) == 1 else np.concatenate(nonempty)
+        if rows.size > 1 and np.any(rows["t"][1:] <= rows["t"][:-1]):
+            order = np.argsort(rows["t"], kind="stable")
+            rows = rows[order]
+            # Keep the last copy of a duplicated open timestamp, matching the old dict merge.
+            keep = np.r_[rows["t"][1:] != rows["t"][:-1], True]
+            rows = rows[keep]
+        if rows.shape[0] > count:
+            rows = rows[-count:]
+        return np.ascontiguousarray(rows)
+
+    def _store_kline_cache(self, key: tuple[str, str, int], rows: np.ndarray) -> None:
+        old = self._kline_cache.pop(key, None)
+        if old is not None:
+            self._kline_cache_candles -= int(old[1].shape[0])
+        packed = np.ascontiguousarray(rows, dtype=KLINE_CACHE_DTYPE)
+        self._kline_cache[key] = (time.monotonic(), packed)
+        self._kline_cache_candles += int(packed.shape[0])
+        self._kline_cache.move_to_end(key)
+        while (len(self._kline_cache) > self._kline_cache_max_entries
+               or self._kline_cache_candles > self._kline_cache_max_candles):
+            _old_key, (_at, old_rows) = self._kline_cache.popitem(last=False)
+            self._kline_cache_candles = max(0, self._kline_cache_candles - int(old_rows.shape[0]))
+
     async def get_klines(
         self, symbol: str, interval: str, count: int, interval_ms: int | None = None,
         *, force_refresh: bool = False,
-    ) -> list[list[Any]]:
-        """Single-flight wrapper: concurrent identical candle reads share one fetch."""
+    ) -> np.ndarray:
+        """Single-flight wrapper; returns a read-only-by-convention compact kline array."""
         symbol = normalize_symbol(symbol)
         api_interval = self._binance_interval(interval)
-        # One lock per symbol/timeframe, regardless of requested lookback size.
-        # A larger fresh cache entry can satisfy smaller lookbacks without another REST call.
         lock_key = (symbol, api_interval, 0)
         lock = self._kline_locks.setdefault(lock_key, asyncio.Lock())
         async with lock:
@@ -1284,8 +1375,8 @@ class BinanceREST:
     async def _get_klines_locked(
         self, symbol: str, interval: str, count: int, interval_ms: int | None = None,
         *, force_refresh: bool = False,
-    ) -> list[list[Any]]:
-        """Return closed USD-M klines; expired histories are extended, not re-downloaded."""
+    ) -> np.ndarray:
+        """Return closed USD-M klines in compact arrays; refresh only bars after the cached close."""
         symbol = normalize_symbol(symbol)
         count = max(1, min(20_000, int(count)))
         api_interval = self._binance_interval(interval)
@@ -1295,19 +1386,16 @@ class BinanceREST:
         ttl = self._kline_cache_ttl.get(api_interval, 60.0)
         cached_exact = self._kline_cache.get(key)
 
-        if cached_exact and len(cached_exact[1]) >= count:
-            cached_rows = [list(row) for row in cached_exact[1][-count:]]
+        if cached_exact and cached_exact[1].shape[0] >= count:
+            cached_rows = cached_exact[1][-count:]
             if not force_refresh and now - cached_exact[0] <= ttl:
                 self._kline_cache.move_to_end(key)
                 return cached_rows
 
-            # Incremental refresh: retain the historical warm-up window and fetch
-            # only bars after its newest CLOSED candle. This is critical for V10's
-            # 18,720-bar replay; the first fetch is paginated, later ones are tiny.
             now_ms = int(time.time() * 1000)
-            last_open = max(int(row[0]) for row in cached_rows)
+            last_open = int(cached_rows["t"][-1])
             next_open = last_open + span_ms
-            merged = {int(row[0]): list(row) for row in cached_rows}
+            additions: list[np.ndarray] = []
             attempts = 0
             while next_open + span_ms <= now_ms and attempts < 24:
                 attempts += 1
@@ -1321,15 +1409,17 @@ class BinanceREST:
                     break
                 page_max_open = None
                 for row in payload:
-                    if not isinstance(row, (list, tuple)) or len(row) < 7:
-                        continue
-                    try:
-                        open_ms = int(row[0])
-                    except (TypeError, ValueError):
-                        continue
-                    page_max_open = open_ms if page_max_open is None else max(page_max_open, open_ms)
-                    if open_ms >= next_open and open_ms + span_ms <= now_ms:
-                        merged[open_ms] = list(row)
+                    if isinstance(row, (list, tuple)) and row:
+                        try:
+                            open_ms = int(row[0])
+                        except (TypeError, ValueError):
+                            continue
+                        page_max_open = open_ms if page_max_open is None else max(page_max_open, open_ms)
+                packed = self._pack_kline_rows(payload, span_ms, now_ms)
+                if packed.size:
+                    packed = packed[packed["t"] >= next_open]
+                    if packed.size:
+                        additions.append(packed)
                 if page_max_open is None or len(payload) < page_limit:
                     break
                 advanced = page_max_open + span_ms
@@ -1337,43 +1427,36 @@ class BinanceREST:
                     break
                 next_open = advanced
 
-            rows = [merged[t] for t in sorted(merged)][-count:]
-            if len(rows) < count:
+            rows = self._merge_packed_klines([cached_rows, *additions], count)
+            if rows.shape[0] < count:
                 raise RuntimeError(
-                    f"Riwayat incremental Binance {symbol} {api_interval} tidak lengkap: {len(rows)}/{count}."
+                    f"Riwayat incremental Binance {symbol} {api_interval} tidak lengkap: "
+                    f"{rows.shape[0]}/{count}."
                 )
-            old = self._kline_cache.pop(key, None)
-            if old:
-                self._kline_cache_candles -= len(old[1])
-            self._kline_cache[key] = (time.monotonic(), rows)
-            self._kline_cache_candles += len(rows)
-            self._kline_cache.move_to_end(key)
-            while (len(self._kline_cache) > self._kline_cache_max_entries
-                   or self._kline_cache_candles > self._kline_cache_max_candles):
-                _old_key, (_at, old_rows) = self._kline_cache.popitem(last=False)
-                self._kline_cache_candles = max(0, self._kline_cache_candles - len(old_rows))
-            return [list(row) for row in rows]
+            self._store_kline_cache(key, rows)
+            return self._kline_cache[key][1]
 
         if not force_refresh:
             reusable = [
                 (cache_key, cache_value)
                 for cache_key, cache_value in self._kline_cache.items()
                 if cache_key[0] == symbol and cache_key[1] == api_interval
-                and len(cache_value[1]) >= count and now - cache_value[0] <= ttl
+                and cache_value[1].shape[0] >= count and now - cache_value[0] <= ttl
             ]
             if reusable:
-                cache_key, cached = min(reusable, key=lambda item: len(item[1][1]))
+                cache_key, cached = min(reusable, key=lambda item: item[1][1].shape[0])
                 self._kline_cache.move_to_end(cache_key)
-                return [list(row) for row in cached[1][-count:]]
+                return cached[1][-count:]
 
-        # Cold start only: page backward to collect the bounded closed-candle window.
+        # Cold start: convert each response page immediately and discard JSON strings.
         now_ms = int(time.time() * 1000)
         end_ms = now_ms
-        collected: dict[int, list[Any]] = {}
+        chunks: list[np.ndarray] = []
+        collected_count = 0
         attempts = 0
-        while len(collected) < count and attempts < 24:
+        while collected_count < count and attempts < 24:
             attempts += 1
-            remaining = count - len(collected)
+            remaining = count - collected_count
             page_limit = min(1000, max(1, remaining + 1))
             payload = await self._get("/fapi/v1/klines", {
                 "symbol": symbol, "interval": api_interval,
@@ -1383,43 +1466,35 @@ class BinanceREST:
                 break
             oldest: int | None = None
             for row in payload:
-                if not isinstance(row, (list, tuple)) or len(row) < 7:
-                    continue
-                try:
-                    open_ms = int(row[0])
-                except (TypeError, ValueError):
-                    continue
-                oldest = open_ms if oldest is None else min(oldest, open_ms)
-                if open_ms + span_ms <= now_ms:
-                    collected[open_ms] = list(row)
+                if isinstance(row, (list, tuple)) and row:
+                    try:
+                        open_ms = int(row[0])
+                    except (TypeError, ValueError):
+                        continue
+                    oldest = open_ms if oldest is None else min(oldest, open_ms)
+            packed = self._pack_kline_rows(payload, span_ms, now_ms)
+            if packed.size:
+                chunks.append(packed)
+                collected_count += int(packed.shape[0])
             if oldest is None or len(payload) < page_limit:
                 break
             end_ms = oldest - 1
 
-        rows = [collected[t] for t in sorted(collected)][-count:]
-        if len(rows) < count:
+        rows = self._merge_packed_klines(chunks, count)
+        if rows.shape[0] < count:
             error = RuntimeError(
-                f"Riwayat closed candle Binance {symbol} {api_interval}: {len(rows)}/{count}; "
+                f"Riwayat closed candle Binance {symbol} {api_interval}: {rows.shape[0]}/{count}; "
                 "dibutuhkan 66 hari kalender candle M5 agar tersisa minimal 65 hari setelah alignment UTC."
             )
             error.insufficient_history = True
             raise error
 
-        old = self._kline_cache.pop(key, None)
-        if old:
-            self._kline_cache_candles -= len(old[1])
-        self._kline_cache[key] = (time.monotonic(), rows)
-        self._kline_cache_candles += len(rows)
-        while (len(self._kline_cache) > self._kline_cache_max_entries
-               or self._kline_cache_candles > self._kline_cache_max_candles):
-            _old_key, (_at, old_rows) = self._kline_cache.popitem(last=False)
-            self._kline_cache_candles = max(0, self._kline_cache_candles - len(old_rows))
-        return [list(row) for row in rows]
+        self._store_kline_cache(key, rows)
+        # Return the cached ndarray itself; consumer promises not to mutate it.
+        return self._kline_cache[key][1]
 
     def kline_cache_stats(self) -> dict[str, Any]:
-        # Rows are retained as Python lists of Binance string fields; use a
-        # conservative per-candle estimate rather than the JSON payload size.
-        approx_bytes = self._kline_cache_candles * 768
+        approx_bytes = sum(int(rows.nbytes) for _at, rows in self._kline_cache.values())
         return {
             "entries": len(self._kline_cache),
             "candles": self._kline_cache_candles,
@@ -1427,6 +1502,7 @@ class BinanceREST:
             "max_entries": self._kline_cache_max_entries,
             "max_candles": self._kline_cache_max_candles,
             "owner": "main.py",
+            "storage": "numpy_structured_array",
         }
 
     def trim_kline_cache(self, fraction: float = 0.5, pair: str | None = None) -> int:
@@ -1438,12 +1514,12 @@ class BinanceREST:
         for key in keys[:target]:
             old = self._kline_cache.pop(key, None)
             if old is not None:
-                self._kline_cache_candles = max(0, self._kline_cache_candles - len(old[1]))
+                self._kline_cache_candles = max(0, self._kline_cache_candles - int(old[1].shape[0]))
                 removed += 1
         return removed
 
     def retain_kline_cache_for(self, pairs: set[str] | list[str] | tuple[str, ...]) -> int:
-        """Keep full candle history only for pairs currently in the V10 watchlist."""
+        """Keep only compact full-history arrays for pairs currently in V10 WATCH."""
         keep = {normalize_symbol(value) for value in pairs if value}
         removed = 0
         for key in list(self._kline_cache.keys()):
@@ -1451,7 +1527,7 @@ class BinanceREST:
                 continue
             old = self._kline_cache.pop(key, None)
             if old is not None:
-                self._kline_cache_candles = max(0, self._kline_cache_candles - len(old[1]))
+                self._kline_cache_candles = max(0, self._kline_cache_candles - int(old[1].shape[0]))
                 removed += 1
         return removed
 
@@ -7255,13 +7331,23 @@ class TradingEngine:
                 "settings",
             )
 
-    async def _ram_guard(self) -> None:
-        """Pause universe scanning under RAM pressure; preserve only active-watch candle data."""
+    async def _ram_guard(self, preserve_pairs: set[str] | None = None) -> None:
+        """Pause universe scanning under RAM pressure; preserve only active and just-qualified WATCH candle data."""
         try:
             async with self._scan_watch_lock:
-                watch_pairs = set(self._scan_watchlist)
+                watch_snapshot = list(self._scan_watchlist.values())
+                watch_pairs = {normalize_symbol(str(item.get("pair") or "")) for item in watch_snapshot if item.get("pair")}
+                watch_bos_count = sum(1 for item in watch_snapshot if str(item.get("m5_watch_status") or "").upper() == "WAITING_M5_BOS")
+                watch_rearm_count = sum(1 for item in watch_snapshot if str(item.get("m5_watch_status") or "").upper() == "WAITING_NEW_MSS")
         except Exception:
             watch_pairs = set(self._scan_watchlist)
+            watch_bos_count = len(watch_pairs)
+            watch_rearm_count = 0
+        pending_new_count = 0
+        if preserve_pairs:
+            pending_pairs = {normalize_symbol(pair) for pair in preserve_pairs if pair}
+            pending_new_count = len(pending_pairs - watch_pairs)
+            watch_pairs.update(pending_pairs)
 
         # The scanner's 66-day replay cache is intentionally ephemeral. Only
         # pairs still waiting in the V10 M5 watchlist may keep candle history.
@@ -7279,6 +7365,7 @@ class TradingEngine:
         elif was_paused and pct <= MEMORY_SCAN_RESUME_PCT:
             self._scan_paused_for_ram = False
 
+        cache_stats = self.rest.kline_cache_stats()
         level = "KRITIS" if pct >= 90 else "TINGGI" if pct >= 75 else "OK"
         if level == "KRITIS":
             self._shed_memory()
@@ -7295,7 +7382,7 @@ class TradingEngine:
             await self.reply(card("🧠 SCAN DIJEDA • RAM TINGGI", [
                 f"RAM {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB ({pct:.0f}%)",
                 f"Batas jeda {MEMORY_SCAN_PAUSE_PCT:.0f}% • lanjut otomatis di bawah {MEMORY_SCAN_RESUME_PCT:.0f}%",
-                f"Candle cache hanya untuk {len(watch_pairs)} pair yang sedang WATCH.",
+                f"Cache numeric {cache_stats.get('approx_mb', 0)} MB • BOS WATCH={watch_bos_count}, re-arm MSS={watch_rearm_count}, baru lolos={pending_new_count} (total {len(watch_pairs)} pair).",
                 "Universe scanner dihentikan sementara; M5 candidate watcher tetap aktif.",
             ]))
         elif was_paused and not self._scan_paused_for_ram:
@@ -7312,7 +7399,7 @@ class TradingEngine:
         elif level != self._ram_level and level != "OK":
             await self.reply(card("🧠 TEKANAN MEMORI", [
                 f"Level {level}", f"RSS {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB ({pct:.0f}%)",
-                f"Cache non-watch dibuang: {removed} entri.",
+                f"Cache numeric {cache_stats.get('approx_mb', 0)} MB • non-watch dibuang {removed} entri.",
             ]))
 
         self._ram_level = level
@@ -7331,7 +7418,7 @@ class TradingEngine:
         head = self._api_headroom_pct()
         rows = [
             f"🧠 RAM {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB • level {self._ram_level} • scan {'PAUSED' if self._scan_paused_for_ram else 'ACTIVE'}",
-            f"🗃 Cache candle {cache.get('entries', 0)} entri / {cache.get('candles', 0)} candle • {cache.get('approx_mb', 0)} MB (watch-only)",
+            f"🗃 Cache candle {cache.get('entries', 0)} entri / {cache.get('candles', 0)} candle • {cache.get('approx_mb', 0)} MB (numeric/compact)",
             f"🛰 Batch terakhir {('-' if not durs else f'{durs[-1]:.0f}s')} • putaran {self._scan_sweep_number + 1} • posisi {self._scan_sweep_cursor}/{len(self._scan_sweep_pairs) or '-'}",
             f"📡 API headroom {('-' if head is None else f'{head:.0f}%')} • 429/418 {API_STATS.limit_hits}x",
             f"🪜 Trail {self.trail_mode.upper()}",
@@ -7487,7 +7574,16 @@ class TradingEngine:
         *, preserve_started_ms: int | None = None,
     ) -> dict[str, Any]:
         """Create a compact state-5 candidate record; no entry/order exists yet."""
-        setup = self._json_safe(copy.deepcopy(raw))
+        raw_analysis = raw.get("analysis") if isinstance(raw.get("analysis"), dict) else {}
+        raw_v10 = raw_analysis.get("v10") if isinstance(raw_analysis.get("v10"), dict) else {}
+        setup = {
+            "candidate_state": str(raw.get("candidate_state") or "WAITING_M5_BOS"),
+            "state_reason": str(raw.get("state_reason") or "Waiting for fresh M5 BOS close-cross.")[:240],
+            "analysis": {"v10": {
+                "d1_bias": str(raw_v10.get("d1_bias") or "NEUTRAL"),
+                "poi_type": str(raw_v10.get("poi_type") or raw.get("v10_poi_type") or ""),
+            }},
+        }
         pair = normalize_symbol(str(raw.get("pair") or ""))
         direction = str(raw.get("direction") or "").upper()
         watch_id = str(raw.get("v10_watch_id") or raw.get("v10_candidate_id") or "")
@@ -7615,6 +7711,18 @@ class TradingEngine:
                 if not item.get("v10_watch_id") or pair in restored:
                     continue
                 item = copy.deepcopy(item)
+                # Older schema-v1 snapshots may contain the full replay analysis.
+                # The watcher regenerates it from current candles, so retain only metadata.
+                setup_analysis = setup.get("analysis") if isinstance(setup.get("analysis"), dict) else {}
+                setup_v10 = setup_analysis.get("v10") if isinstance(setup_analysis.get("v10"), dict) else {}
+                item["setup"] = {
+                    "candidate_state": setup_state,
+                    "state_reason": str(setup.get("state_reason") or "Restored candidate; reconciling with latest closed M5 candle.")[:240],
+                    "analysis": {"v10": {
+                        "d1_bias": str(setup_v10.get("d1_bias") or "NEUTRAL"),
+                        "poi_type": str(setup_v10.get("poi_type") or item.get("v10_poi_type") or ""),
+                    }},
+                }
                 item["pair"] = pair
                 item["m5_retry_after_monotonic"] = 0.0
                 item["m5_last_error"] = None
@@ -8150,7 +8258,10 @@ class TradingEngine:
         for pair in batch:
             if generation != self._scan_generation or not self._scan_user_enabled:
                 return
-            await self._ram_guard()
+            await self._ram_guard({
+                normalize_symbol(str(item.get("pair") or ""))
+                for item in waiting_candidates if item.get("pair")
+            })
             if self._scan_paused_for_ram:
                 stopped_early = True
                 log.warning("[SCAN V10] batch dihentikan pada batas pair karena RAM; watcher aktif, cursor dilanjutkan setelah memori pulih.")
@@ -8201,7 +8312,14 @@ class TradingEngine:
                     stats["historical_bos_skipped"] += 1
                     log.info("[SCAN V10] %s historical BOS ignored; only a new M5-WATCH confirmation can create an entry", pair)
                 pair_completed = True
+                if cstate != "WAITING_M5_BOS":
+                    self.rest.trim_kline_cache(fraction=1.0, pair=pair)
+                candidate = None
+                v10 = None
             except Exception as exc:
+                self.rest.trim_kline_cache(fraction=1.0, pair=pair)
+                candidate = None
+                v10 = None
                 stats["errors"] += 1
                 if classify_error(exc) == ErrorCategory.RATE_LIMIT or getattr(exc, "binance_rate_limited", False):
                     rate_limited += 1
@@ -9438,26 +9556,14 @@ class TradingEngine:
         rows = await self.rest.get_klines(
             pair, interval, count, interval_ms, force_refresh=force_refresh
         )
-        candles = []
-        candle_type = getattr(module, "Candle", None)
-        if candle_type is None:
-            raise RuntimeError("strategy.py tidak menyediakan dataclass Candle.")
-        for row in rows:
-            try:
-                candles.append(candle_type(
-                    time_ms=int(row[0]), open=float(row[1]), high=float(row[2]),
-                    low=float(row[3]), close=float(row[4]), volume=float(row[5]),
-                    turnover=float(row[7]) if len(row) > 7 else 0.0,
-                    taker_buy=float(row[9]) if len(row) > 9 else 0.0,
-                ))
-            except (TypeError, ValueError, IndexError):
-                continue
-        if len(candles) < int(count):
+        if not isinstance(rows, np.ndarray) or rows.dtype.names != KLINE_CACHE_DTYPE.names:
+            raise RuntimeError("Provider candle tidak mengembalikan format compact KLINE_CACHE_DTYPE.")
+        if rows.shape[0] < int(count):
             raise RuntimeError(
-                f"Riwayat closed candle {pair} {interval}: {len(candles)}/{count}; "
+                f"Riwayat closed candle {pair} {interval}: {rows.shape[0]}/{count}; "
                 "pair dilewati sampai data mencukupi."
             )
-        return candles[-int(count):], "BINANCE"
+        return rows[-int(count):], "BINANCE"
 
     async def _strategy_fetch_price(self, pair: str):
         symbol = normalize_symbol(pair)
@@ -11165,6 +11271,17 @@ class TradingEngine:
         direction = str(direction).upper().strip()
         meta = strategy_meta or {}
         strategy_source = str(meta.get("strategy_source") or "MANUAL").upper().strip()
+
+        # Strategy V10 intentionally uses NumPy floats for fast replay. Convert
+        # every execution price at this boundary before any Decimal/tick math.
+        # This applies to MANUAL, AUTO, and SCAN so no float can leak into Trade.
+        reference = as_decimal_number(reference, f"{pair} price_now_reference")
+        entry = as_decimal_number(entry, f"{pair} entry")
+        price_exp = as_decimal_number(price_exp, f"{pair} price_exp")
+        sl = as_decimal_number(sl, f"{pair} SL")
+        tp = as_decimal_number(tp, f"{pair} TP")
+        if any(value <= 0 for value in (reference, entry, price_exp, sl, tp)):
+            raise ValueError(f"Setup {pair} memiliki harga nol atau negatif.")
 
         # Analisis dan execution sama-sama menggunakan Binance USD-M. Sebelum
         # setup masuk ke /trade, semua harga order dinormalisasi ke tick size
