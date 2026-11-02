@@ -461,3 +461,36 @@ Tidak ada trailing.
 - Filled: 2026-11-01T15:20:00+00:00
 - Closed: 2026-11-02T07:57:32.242545+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
+
+---
+
+## BASUSDT — SELL
+
+Trade ID: `BASUSDT-20261102-075618-8696D1`
+
+### Setup
+
+- Price Now Reference: 0.014895
+- Entry: 0.015272
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | paper fill 0.015272
+- Price Exp: 0.011762
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.017027
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.011762
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.01472
+- Result Reason: Manual /close. PnL positif, sehingga hasil dicatat sebagai TP (PnL +3.61%).
+- PnL: 3.614457831325301204819277108%
+- Created: 2026-10-29T22:00:00+00:00
+- Filled: 2026-10-29T22:25:00+00:00
+- Closed: 2026-11-02T07:57:54.598594+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
