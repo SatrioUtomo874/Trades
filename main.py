@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-MAIN.PY — Tactical V10 E_GE2_ATR paper engine.
+MAIN.PY — Tactical V10 E_GE2_ATR real/paper execution engine.
 
 Kontrak try.py:
     async def on_start(context)
@@ -9,8 +9,9 @@ Kontrak try.py:
     async def on_stop(context)
 
 Arsitektur aktif:
-- main.py adalah satu-satunya pemilik Binance USD-M public REST, WebSocket,
-  candle cache, pagination, rate-limit cooldown, Telegram, dan paper ledger.
+- main.py adalah satu-satunya pemilik Binance USD-M public REST, private execution REST,
+  WebSocket market data, candle cache, pagination, rate-limit cooldown, Telegram,
+  paper ledger, dan real-order ledger.
 - Universe scan memakai batch 50 pair; candle cache non-watch dihapus setelah
   analisis, dan RAM pressure menghentikan scanner sementara tanpa mematikan M5 watcher.
 - strategy.py adalah Tactical V10 E_GE2_ATR state machine; tidak memiliki
@@ -32,8 +33,12 @@ Arsitektur aktif:
   atau confidence modifier.
 - Semua analisis memakai candle Binance yang sudah tertutup. Data H4/M15/D1
   diturunkan dari M5 dengan batas candle UTC yang sama seperti backtest.
-- Build ini hanya untuk pemindaian dan paper monitoring; private order API
-  dinonaktifkan dan /real on tidak dapat mengaktifkannya.
+- REAL execution dapat diaktifkan dengan /real on setelah preflight API berhasil.
+  Mode default adalah Binance USD-M Demo Trading; LIVE memerlukan pengaturan env
+  eksplisit dan acknowledgement terpisah. REAL selalu OFF saat proses baru start.
+- Scanner hanya mendaftarkan state-5 ke M5 WATCH. State READY/FILLED hasil replay
+  historis pada saat scan awal tidak dikejar; order hanya dibuat setelah watcher
+  membuktikan BOS pada candle M5 terbaru yang baru saja ditutup.
 
 Catatan parity:
 - Hasil Tactical V10 E_GE2_ATR yang tersimpan adalah hasil development 2023–2025,
@@ -130,8 +135,24 @@ BINANCE_API_SECRET_1 = (os.getenv("BINANCE_API_SECRET_1") or "").strip()
 TIMEZONE_NAME = "Asia/Jakarta"
 TZ = ZoneInfo(TIMEZONE_NAME)
 
+# Market data always comes from the production public USD-M feed so scan and
+# strategy candles remain representative. Private order/account requests use the
+# selected account environment (Demo by default; LIVE is explicit opt-in).
 BINANCE_REST_BASE = "https://fapi.binance.com"
 BINANCE_WS_BASE = "wss://fstream.binance.com/market/stream"
+BINANCE_TRADING_MODE = (os.getenv("BINANCE_TRADING_MODE", "demo") or "demo").strip().lower()
+if BINANCE_TRADING_MODE not in {"demo", "live"}:
+    raise RuntimeError("BINANCE_TRADING_MODE harus 'demo' atau 'live'.")
+BINANCE_REAL_REST_BASE = (
+    "https://demo-fapi.binance.com"
+    if BINANCE_TRADING_MODE == "demo"
+    else "https://fapi.binance.com"
+)
+REAL_EXECUTION_ENABLED = (os.getenv("REAL_EXECUTION_ENABLED", "1") or "1").strip().lower() not in {
+    "0", "false", "off", "no", "disabled"
+}
+BINANCE_LIVE_TRADING_ACK = (os.getenv("BINANCE_LIVE_TRADING_ACK", "") or "").strip()
+LIVE_TRADING_ACK_REQUIRED = "I_ACCEPT_REAL_BINANCE_FUTURES_RISK"
 
 GITHUB_API = "https://api.github.com"
 
@@ -493,6 +514,30 @@ def format_pct(value: Decimal | None) -> str:
     if value is None:
         return "-"
     return f"{value.quantize(Decimal('0.01')):+.2f}%"
+
+
+def v10_bos_is_fresh(
+    *,
+    order_time_ms: int,
+    order_close_time_ms: int,
+    previous_close_time_ms: int,
+    latest_close_time_ms: int,
+) -> bool:
+    """True only when the BOS order was created on the immediately new closed M5 bar."""
+    try:
+        order_time_ms = int(order_time_ms)
+        order_close_time_ms = int(order_close_time_ms)
+        previous_close_time_ms = int(previous_close_time_ms)
+        latest_close_time_ms = int(latest_close_time_ms)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return (
+        previous_close_time_ms > 0
+        and latest_close_time_ms > previous_close_time_ms
+        and order_time_ms >= previous_close_time_ms
+        and order_time_ms < latest_close_time_ms
+        and order_close_time_ms == latest_close_time_ms
+    )
 
 
 def duration_text(seconds: float | int | None) -> str:
@@ -1547,10 +1592,10 @@ class BinanceREST:
 
 
 # ============================================================
-# BINANCE REAL EXECUTION (LOCKED OFF IN THIS BUILD)
+# BINANCE REAL EXECUTION
 # ============================================================
-
-REAL_EXECUTION_ENABLED = False  # Do not change in this paper-monitoring build.
+# REAL_EXECUTION_ENABLED is an environment-level kill switch. The bot starts
+# with real_mode=False every session and requires the explicit /real on command.
 
 class BinanceAPIError(RuntimeError):
     def __init__(
@@ -1630,7 +1675,7 @@ class BinanceRealClient:
     """Signed USD-M Futures client used only when /real is ON."""
 
     def __init__(self) -> None:
-        self.base_url = BINANCE_REST_BASE
+        self.base_url = BINANCE_REAL_REST_BASE
         self.api_key = BINANCE_API_KEY
         self.api_secret = BINANCE_API_SECRET
         self.recv_window = BINANCE_RECV_WINDOW
@@ -1726,7 +1771,7 @@ class BinanceRealClient:
     ) -> Any:
         if not REAL_EXECUTION_ENABLED:
             raise BinanceAPIError(
-                "Private Binance API dinonaktifkan pada build paper-only.",
+                "REAL_EXECUTION_ENABLED=0; private Binance API dinonaktifkan oleh environment.",
                 endpoint=path,
             )
         if signed and not self.configured:
@@ -3329,6 +3374,7 @@ class TradingEngine:
         await self._purge_balance_bans()
         self._init_scan_state()
         await self._load_runtime_settings()
+        await self._restore_real_setups_on_startup()
         await self._load_v10_candidates()
         self._start_autostop_task()
         self._start_sync_task()
@@ -3342,19 +3388,24 @@ class TradingEngine:
             log.info("[MAIN] exchangeInfo tertunda (rate limit); symbols dimuat ulang saat API pulih.")
 
         await self.ws.start()
+        for recovered_trade in list(self.active_trades.values()):
+            try:
+                await self.ws.add_symbol(recovered_trade.pair)
+            except Exception as exc:
+                log.warning("[RECOVERY] WebSocket subscribe %s gagal: %s", recovered_trade.pair, exc)
         self._ensure_v10_m5_watch_task()
 
         self.last_history_refresh = now_utc()
 
         await self.reply(
             "🟢 MAIN.PY ONLINE\n\n"
-            "Mode: PAPER / SIMULATION (REAL EXECUTION DISABLED)\n"
-            "Market data: Binance USDⓈ-M public API + WebSocket\n"
+            f"Mode: REAL tersedia • default OFF • environment {BINANCE_TRADING_MODE.upper()}\n"
+            "Market data: Binance USDⓈ-M public REST + WebSocket\n"
             "WebSocket: CONNECTING\n"
             f"Session: {self.session_id}\n\n"
-            "Active Trade: 0\n\n"
-            "Gunakan /scan untuk pencarian kandidat dan /candidates untuk melihat setup yang menunggu close BOS M5.\n"
-            "Gunakan /add untuk membuat setup manual."
+            f"Active Trade dipulihkan: {len(self.active_trades)}\n"
+            "Gunakan /real on untuk preflight akun, /scan on untuk scanner, dan /candidates untuk memantau WATCH.\n"
+            "Entry V10 hanya setelah fresh BOS close M5; /real tetap OFF setiap proses baru."
         )
 
     async def stop(self) -> None:
@@ -3375,6 +3426,10 @@ class TradingEngine:
         self._scan_task = None
         await self._stop_v10_m5_watch_task()
         await self._persist_v10_candidates(force=True)
+        try:
+            await self._persist_active_setups_silently()
+        except Exception:
+            log.exception("[RECOVERY] active setup snapshot gagal saat shutdown")
         await self._flush_bans_if_dirty()
         await self._stop_sync_task()
 
@@ -3639,12 +3694,84 @@ class TradingEngine:
         await self.reply("\n\n".join(lines))
 
     async def _set_real_on(self) -> None:
-        """Real order execution is intentionally unavailable in this build."""
-        self.real_mode = False
+        """Enable REAL execution only after a signed-account and balance preflight."""
+        if self.real_mode:
+            await self.reply(
+                f"🟢 REAL MODE SUDAH ON\n\nEnvironment: {BINANCE_TRADING_MODE.upper()}\n"
+                f"REST: {self.real.base_url}"
+            )
+            return
+        if not REAL_EXECUTION_ENABLED:
+            raise RuntimeError(
+                "REAL_EXECUTION_ENABLED dimatikan oleh environment. Set ke 1 lalu restart."
+            )
+        if not self.real.configured:
+            raise RuntimeError(
+                "API key belum tersedia. Isi BINANCE_API_KEY dan BINANCE_API_SECRET "
+                "pada environment server, lalu restart bot."
+            )
+        if BINANCE_TRADING_MODE == "live" and BINANCE_LIVE_TRADING_ACK != LIVE_TRADING_ACK_REQUIRED:
+            raise RuntimeError(
+                "LIVE diblokir. Untuk akun produksi, set BINANCE_LIVE_TRADING_ACK="
+                f"{LIVE_TRADING_ACK_REQUIRED}. Gunakan mode demo untuk uji awal."
+            )
+
+        # Re-apply the selected private endpoint before signed preflight.
+        self.real.base_url = BINANCE_REAL_REST_BASE
+        try:
+            balances = await self.real.get_futures_balance()
+            usdt = next(
+                (row for row in balances if str(row.get("asset") or "").upper() == "USDT"),
+                None,
+            )
+            if usdt is None:
+                raise BinanceAPIError(
+                    "Akun USD-M tidak mengembalikan aset USDT.",
+                    endpoint="/fapi/v3/balance",
+                )
+            available = parse_signed_decimal(str(usdt.get("availableBalance") or "0"))
+            if available < 0:
+                raise BinanceAPIError(
+                    "Available USDT Futures bernilai negatif; preflight ditolak.",
+                    endpoint="/fapi/v3/balance",
+                )
+            await self.real.get_account_info()
+            await self.real.ensure_position_mode()
+            if not self.symbols:
+                self.symbols = await self.rest.get_exchange_info()
+        except Exception as exc:
+            self.real_mode = False
+            raise RuntimeError(
+                f"Preflight Binance {BINANCE_TRADING_MODE.upper()} gagal; REAL tetap OFF: {exc}"
+            ) from exc
+
+        self.real_mode = True
+        try:
+            self._equity_peak = self._current_equity_cached()
+            self._equity_last = self._equity_peak
+            self._autostop_triggered = False
+        except Exception:
+            self._equity_peak = None
+            self._equity_last = None
+
+        # Reconcile previously persisted REAL trades before allowing new entries.
+        for trade in list(self.active_trades.values()):
+            if not (trade.real_enabled and trade.result is None):
+                continue
+            try:
+                await self._reconcile_real_trade(trade)
+            except Exception as exc:
+                await self._handle_real_exception(exc, "REAL STARTUP RECONCILE", trade)
+
+        mode_label = "DEMO TRADING (saldo simulasi Binance)" if BINANCE_TRADING_MODE == "demo" else "LIVE FUTURES (uang sungguhan)"
         await self.reply(
-            "🔒 REAL EXECUTION DINONAKTIFKAN PADA BUILD INI\n\n"
-            "Bot hanya mengambil market data publik Binance dan menjalankan setup/paper monitoring. "
-            "Perintah /real on tidak tersedia."
+            "🟢 REAL EXECUTION AKTIF\n\n"
+            f"Environment: {mode_label}\n"
+            f"Available USDT: {decimal_to_str(available)}\n"
+            f"Margin/order: {decimal_to_str(self.margin_usdt)} USDT • Leverage: {self.leverage}x\n\n"
+            "Scanner hanya memasukkan state MSS ke /candidates. Entry LIMIT baru dikirim "
+            "setelah watcher mengonfirmasi BOS pada candle M5 tertutup yang terbaru.\n"
+            "Posisi baru akan berstatus FILLED setelah Binance mengonfirmasi order dan position."
         )
 
     async def _set_real_off(self) -> None:
@@ -4002,10 +4129,38 @@ class TradingEngine:
         actual = quantity * entry
         return quantity, margin * Decimal(leverage), actual
 
+    def _real_entry_client_id(self, trade: Trade) -> str:
+        """Stable Binance client ID per entry attempt; persisted before every POST."""
+        try:
+            attempt = max(0, int((trade.risk_info or {}).get("real_entry_attempt") or 0))
+        except (TypeError, ValueError):
+            attempt = 0
+        if trade.strategy_name == "TACTICAL_V10_E_GE2_ATR":
+            candidate_key = re.sub(r"[^A-Za-z0-9_-]", "", str(trade.candidate_id or ""))[:28]
+            if not candidate_key:
+                raise RuntimeError("V10 real entry ditolak: candidate_id deterministik tidak tersedia.")
+            suffix = f"-R{attempt}" if attempt else ""
+            return f"V10-{candidate_key}{suffix}"[:36]
+        if attempt == 0:
+            return self._client_id("ENT", trade.trade_id)
+        # Generic/manual trade IDs can already occupy all 36 characters.
+        # Use a compact stable digest for subsequent hold/re-entry attempts.
+        digest = hashlib.sha256(str(trade.trade_id).encode("utf-8")).hexdigest()[:20]
+        return f"ENT-{digest}-R{attempt}"[:36]
+
     async def _ensure_real_entry(self, trade: Trade, from_release: bool = False) -> None:
-        raise RuntimeError("REAL EXECUTION dinonaktifkan; entry hanya boleh berupa simulasi/paper.")
-        if not self.real_mode or trade.entry_order_id or trade.entry_client_order_id:
+        if not REAL_EXECUTION_ENABLED:
+            raise RuntimeError("REAL_EXECUTION_ENABLED=0; private order API dinonaktifkan.")
+        if not self.real_mode:
+            raise RuntimeError("REAL MODE OFF; aktifkan /real on setelah preflight Binance.")
+        # A client ID preassigned in REAL_SUBMITTING is the idempotency key for
+        # this in-flight request, not proof that an order already exists.
+        if trade.entry_order_id is not None:
             return
+        if trade.entry_client_order_id and trade.real_state != "REAL_SUBMITTING":
+            return
+        client_id = trade.entry_client_order_id or self._real_entry_client_id(trade)
+        trade.entry_client_order_id = client_id
         if not from_release and self._limit_hold_blocking():
             blocked = BinanceRateLimitError(
                 "Binance limit: entry baru ditahan sementara.",
@@ -4019,8 +4174,6 @@ class TradingEngine:
             blocked.internal = True
             raise blocked
 
-        client_id = self._client_id("ENT", trade.trade_id)
-
         cached_position = self.real.cached_position(trade.pair, trade.direction)
         if cached_position is not None:
             amount = cached_position.get("_position_amount_decimal") or cached_position.get("positionAmt") or "0"
@@ -4033,6 +4186,27 @@ class TradingEngine:
             raise RealPositionConflictError(trade.real_error)
 
         async def prepare_and_place(force_refresh: bool = False) -> dict[str, Any]:
+            nonlocal submission_attempted, order_lookup_confirmed_absent
+            # Idempotency across restart/retry: recover the same V10 candidate order
+            # before attempting another POST with its deterministic clientOrderId.
+            try:
+                existing_order = await self.real.get_order(
+                    trade.pair, client_order_id=client_id
+                )
+                if existing_order.get("orderId") is not None:
+                    existing_qty = parse_decimal(str(existing_order.get("origQty") or "0"))
+                    existing_price = parse_decimal(str(existing_order.get("price") or trade.entry))
+                    existing_order["_quantity"] = existing_qty
+                    existing_order["_target_notional"] = trade.margin_usdt * Decimal(trade.leverage)
+                    existing_order["_actual_notional"] = existing_qty * existing_price
+                    existing_order["_position_side"] = str(
+                        existing_order.get("positionSide") or self._position_side_for_direction(trade.direction)
+                    )
+                    return existing_order
+            except BinanceAPIError as lookup_exc:
+                if lookup_exc.code != -2013:
+                    raise
+                order_lookup_confirmed_absent = True
             if force_refresh:
                 self.symbols = await self.rest.get_exchange_info(force=True)
             else:
@@ -4082,6 +4256,11 @@ class TradingEngine:
             )
 
             position_side = self._position_side_for_direction(trade.direction)
+            submission_attempted = True
+            trade.entry_client_order_id = client_id
+            trade.status = "PENDING"
+            trade.fill_price = None
+            trade.filled_at = None
             order = await self.real.place_limit_entry(
                 symbol=trade.pair,
                 side=trade.direction,
@@ -4098,6 +4277,8 @@ class TradingEngine:
 
         last_exc: Exception | None = None
         order: dict[str, Any] | None = None
+        submission_attempted = False
+        order_lookup_confirmed_absent = False
         for attempt in range(2):
             try:
                 order = await prepare_and_place(force_refresh=attempt == 1)
@@ -4154,6 +4335,27 @@ class TradingEngine:
                 break
 
         if order is None:
+            ambiguous_submit = submission_attempted and (
+                last_exc is None
+                or not isinstance(last_exc, BinanceAPIError)
+                or last_exc.status_code is None
+                or last_exc.status_code >= 500
+            )
+            ambiguous_lookup = not order_lookup_confirmed_absent and not submission_attempted
+            if ambiguous_submit or ambiguous_lookup:
+                # A timeout/5xx or failed idempotency lookup is not proof that
+                # Binance has no order. Retain the candidate and reconcile by ID;
+                # never send a blind duplicate.
+                trade.real_enabled = True
+                trade.status = "PENDING"
+                trade.entry_client_order_id = client_id
+                trade.real_state = "REAL_UNKNOWN"
+                trade.real_error = str(last_exc or "Order lookup/submission outcome is unknown.")
+                raise BinanceAPIError(
+                    f"Status order belum pasti untuk {trade.pair}; bot menyimpan clientOrderId "
+                    "dan akan reconcile tanpa mengirim entry duplikat.",
+                    endpoint="/fapi/v1/order",
+                ) from last_exc
             trade.real_state = "REAL_ERROR"
             trade.real_error = str(last_exc or "Real entry gagal.")
             if isinstance(last_exc, MarginInfluenceError):
@@ -4179,6 +4381,10 @@ class TradingEngine:
         trade.real_enabled = True
         trade.real_state = "REAL_PENDING"
         trade.real_error = None
+        trade.status = "PENDING"
+        trade.fill_price = None
+        trade.filled_at = None
+        trade.pnl_percent = Decimal("0")
         trade.position_side = str(order.get("_position_side") or self._position_side_for_direction(trade.direction))
         try:
             trade.entry_order_id = int(order.get("orderId"))
@@ -4193,6 +4399,13 @@ class TradingEngine:
             )
 
         status = str(order.get("status") or "NEW").upper()
+        if status in {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}:
+            trade.real_state = "REAL_CLOSED"
+            trade.real_error = f"Order deterministik yang ditemukan sudah berstatus {status}; tidak dibuat ulang."
+            trade.status = "CLOSED"
+            trade.result = "EXPIRED"
+            trade.closed_at = now_utc()
+            return
         if status in {"FILLED", "PARTIALLY_FILLED"}:
             await self._confirm_real_fill(trade, verified_order=order)
 
@@ -4307,6 +4520,11 @@ class TradingEngine:
             )
         except Exception:
             log.exception("Gagal mencatat event FILLED REAL %s", trade.trade_id)
+        if trade.trade_id in self.active_trades:
+            try:
+                await self._persist_active_setups_silently()
+            except Exception:
+                log.exception("[REAL] gagal menyimpan status FILLED/proteksi %s", trade.trade_id)
         return True
 
     def _clear_pending_sl(self, trade: Trade) -> None:
@@ -4944,8 +5162,21 @@ class TradingEngine:
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
+                before = (
+                    trade.sl_algo_id, trade.sl_client_algo_id,
+                    trade.tp_algo_id, trade.tp_client_algo_id,
+                )
                 await self._ensure_real_protective_orders(trade)
+                after = (
+                    trade.sl_algo_id, trade.sl_client_algo_id,
+                    trade.tp_algo_id, trade.tp_client_algo_id,
+                )
                 self._deferred_protect.pop(trade.trade_id, None)
+                if before != after and trade.trade_id in self.active_trades:
+                    try:
+                        await self._persist_active_setups_silently()
+                    except Exception:
+                        log.exception("[REAL] gagal menyimpan perubahan protective algo %s", trade.trade_id)
                 return True
             except BinanceRateLimitError as exc:
                 # Antre; watcher memasang otomatis begitu jeda server selesai.
@@ -5096,6 +5327,13 @@ class TradingEngine:
             self._hold_cancel_queue.pop(trade_id, None)
             self._deferred_fill.pop(trade_id, None)
             if cancelled:
+                risk_info = trade.risk_info if isinstance(trade.risk_info, dict) else {}
+                try:
+                    previous_attempt = max(0, int(risk_info.get("real_entry_attempt") or 0))
+                except (TypeError, ValueError):
+                    previous_attempt = 0
+                risk_info["real_entry_attempt"] = previous_attempt + 1
+                trade.risk_info = risk_info
                 trade.entry_order_id = None
                 trade.entry_client_order_id = None
                 trade.real_state = "REAL_LIMIT_HOLD"
@@ -5586,6 +5824,10 @@ class TradingEngine:
         return True
 
     async def _real_delete_cleanup(self, trade: Trade) -> None:
+        if trade.real_state == "REAL_SUBMITTING":
+            raise RuntimeError(
+                "Order masih dalam proses submit. Tunggu status Binance terkonfirmasi sebelum /del atau /wrong."
+            )
         # Cancel entry order if it is still open.
         if trade.entry_order_id is not None or trade.entry_client_order_id:
             try:
@@ -5844,6 +6086,11 @@ class TradingEngine:
             )
         except Exception:
             log.exception("Gagal mencatat event TRAIL %s", trade.trade_id)
+        if real and trade.trade_id in self.active_trades:
+            try:
+                await self._persist_active_setups_silently()
+            except Exception:
+                log.exception("[REAL] gagal menyimpan trailing state %s", trade.trade_id)
         locked = pct_change(trade.direction, trade.fill_price or trade.entry, new_sl)
         rows = [
             f"{'🟢' if trade.direction == 'BUY' else '🔴'} {trade.pair}  •  {trade.direction}",
@@ -5977,6 +6224,10 @@ class TradingEngine:
 
     async def _reconcile_real_trade(self, trade: Trade) -> None:
         if not self.real_mode or not trade.real_enabled:
+            return
+        if trade.real_state == "REAL_SUBMITTING":
+            # The current coroutine owns the POST/query transaction. A concurrent
+            # reconcile could observe -2013 before the POST response arrives.
             return
 
         if trade.status == "PENDING":
@@ -7563,6 +7814,7 @@ class TradingEngine:
                         if state in {"READY", "FILLED"}:
                             result_watch_id = str(raw.get("v10_watch_id") or "")
                             order_time_ms = int(raw.get("v10_order_time_ms") or raw.get("v10_bos_time_ms") or 0)
+                            order_close_time_ms = int(raw.get("v10_order_close_time_ms") or 0)
                             same_thesis = (
                                 int(raw.get("v10_setup_id") or 0) == int(watch.get("v10_setup_id") or 0)
                                 and int(raw.get("v10_poi_id") or 0) == int(watch.get("v10_poi_id") or 0)
@@ -7570,8 +7822,16 @@ class TradingEngine:
                             # attempt_id may legitimately advance after the same POI
                             # re-arms; the order must still belong to this thesis and
                             # be timestamped at/after the last processed M5 close.
-                            if not same_thesis or order_time_ms < previous_close_ms:
-                                await self._drop_m5_watch(pair, "V10_CONFIRMED_STATE_ID_MISMATCH_OR_OLD_BOS", persist=False)
+                            if (
+                                not same_thesis
+                                or not v10_bos_is_fresh(
+                                    order_time_ms=order_time_ms,
+                                    order_close_time_ms=order_close_time_ms,
+                                    previous_close_time_ms=previous_close_ms,
+                                    latest_close_time_ms=closed_ms,
+                                )
+                            ):
+                                await self._drop_m5_watch(pair, "V10_CONFIRMED_STATE_ID_MISMATCH_OR_STALE_BOS", persist=False)
                                 changed = True
                                 continue
                             # The same state-machine attempt has now passed its M5
@@ -7591,14 +7851,37 @@ class TradingEngine:
                             added, notes = await self._open_validated([checked], self._scan_generation)
                             if added:
                                 trade = added[0]
-                                await self._drop_m5_watch(pair, "V10_M5_BOS_CONFIRMED_PAPER_SETUP_CREATED", persist=False)
-                                await self.reply(
-                                    "✅ TACTICAL V10 • M5 BOS CONFIRMED (PAPER)\n\n"
-                                    f"Pair: {trade.pair} • {trade.direction}\n"
-                                    f"State: {trade.status}\n"
-                                    f"Entry limit: {fmt_price(trade.entry)} • SL: {fmt_price(trade.sl)} • TP: {fmt_price(trade.tp)}\n"
-                                    "Konfirmasi berasal dari close candle M5 sesuai state machine V10. Tidak ada order yang dikirim ke Binance."
+                                is_real = bool(trade.real_enabled)
+                                drop_reason = (
+                                    "V10_M5_BOS_CONFIRMED_REAL_LIMIT_SUBMITTED"
+                                    if is_real else "V10_M5_BOS_CONFIRMED_PAPER_SETUP_CREATED"
                                 )
+                                await self._drop_m5_watch(pair, drop_reason, persist=False)
+                                if is_real:
+                                    if trade.real_state == "REAL_UNKNOWN":
+                                        await self.reply(
+                                            "⚠️ TACTICAL V10 • BOS M5 CONFIRMED — ORDER STATUS UNKNOWN\n\n"
+                                            f"Pair: {trade.pair} • {trade.direction}\n"
+                                            f"Client Order ID: {trade.entry_client_order_id or '-'}\n"
+                                            "Bot tidak mengirim ulang order. Status akan direkonsiliasi dari Binance; periksa juga tab Orders pada akun Demo/LIVE."
+                                        )
+                                    else:
+                                        await self.reply(
+                                            "🟢 TACTICAL V10 • M5 BOS CONFIRMED — REAL LIMIT SUBMITTED\n\n"
+                                            f"Pair: {trade.pair} • {trade.direction}\n"
+                                            f"State: {trade.real_state} / {trade.status}\n"
+                                            f"Client Order ID: {trade.entry_client_order_id or '-'}\n"
+                                            f"Entry LIMIT: {fmt_price(trade.entry)} • SL target: {fmt_price(trade.sl)} • TP target: {fmt_price(trade.tp)}\n"
+                                            "Order dikirim ke Binance. Status FILLED menunggu konfirmasi order + posisi dari Binance."
+                                        )
+                                else:
+                                    await self.reply(
+                                        "✅ TACTICAL V10 • M5 BOS CONFIRMED (PAPER)\n\n"
+                                        f"Pair: {trade.pair} • {trade.direction}\n"
+                                        f"State: {trade.status}\n"
+                                        f"Entry limit: {fmt_price(trade.entry)} • SL: {fmt_price(trade.sl)} • TP: {fmt_price(trade.tp)}\n"
+                                        "Konfirmasi berasal dari close candle M5 sesuai state machine V10. Tidak ada order yang dikirim ke Binance."
+                                    )
                             else:
                                 await self._drop_m5_watch(pair, "V10_BOS_CONFIRMED_NOT_ADMITTED: " + "; ".join(notes[:2]), persist=False)
                             changed = True
@@ -7810,7 +8093,7 @@ class TradingEngine:
         await self.reply("Akhir daftar. /candidates bersifat read-only dan tidak membuat request Binance.")
 
     async def _run_scan_cycle_inner(self) -> None:
-        """Jalankan Tactical V10 E_GE2_ATR terhadap universe Binance secara paper-only."""
+        """Pindai universe Binance dan antrekan hanya MSS M15 ke M5 WATCH."""
         self._last_cycle_analyzed = 0
         await self._ram_guard()
         if self._scan_paused_for_ram:
@@ -7871,11 +8154,10 @@ class TradingEngine:
             f"Progres batch {max(0, completed_before - batch_start)}/{max(0, batch_end - batch_start)} • setelah batch sisa {max(0, total_targets - batch_end)} • excluded BTC/ETH • banned {banned}",
         ]))
 
-        stats = {"scanned": 0, "below": 0, "rejected": 0, "errors": 0, "valid": 0, "added": 0, "waiting": 0, "waiting_m5_bos": 0, "watch_queued": 0}
+        stats = {"scanned": 0, "below": 0, "rejected": 0, "errors": 0,
+                 "waiting": 0, "waiting_m5_bos": 0, "watch_queued": 0, "historical_bos_skipped": 0}
         direction_counts = {"BULLISH": 0, "BEARISH": 0, "RANGE": 0, "UNKNOWN": 0}
-        candidates: list[dict[str, Any]] = []
         waiting_candidates: list[dict[str, Any]] = []
-        qualified_candidates = 0
         rate_limited = 0
         stopped_early = False
 
@@ -7926,12 +8208,12 @@ class TradingEngine:
                 elif cstate not in {"READY", "FILLED"}:
                     stats["rejected"] += 1
                 else:
-                    # 100 means all V10 conditions passed; it is NOT win probability.
-                    candidate["confidence"] = Decimal("100")
-                    qualified_candidates += 1
-                    candidates.append(candidate)
-                    if len(candidates) > SCAN_VALIDATE_TOP_N:
-                        del candidates[SCAN_VALIDATE_TOP_N:]
+                    # A READY/FILLED state found during the broad historical replay
+                    # has already crossed BOS before this scan snapshot. Do not chase
+                    # it. Only a state-5 candidate followed by a fresh watcher close
+                    # can reach the real/paper entry path.
+                    stats["historical_bos_skipped"] += 1
+                    log.info("[SCAN V10] %s historical BOS ignored; only a new M5-WATCH confirmation can create an entry", pair)
                 pair_completed = True
             except Exception as exc:
                 stats["errors"] += 1
@@ -7968,22 +8250,8 @@ class TradingEngine:
         )
 
         notes: list[str] = []
-        validated: list[dict[str, Any]] = []
-        for candidate in candidates:
-            if generation != self._scan_generation or not self._scan_user_enabled or len(self.active_trades) >= self.max_active_trades:
-                break
-            try:
-                checked = await self._scan_validate_candidate(module, candidate, cycle)
-                if checked is not None:
-                    validated.append(checked)
-                    stats["valid"] += 1
-            except Exception as exc:
-                if getattr(exc, "binance_rate_limited", False) or type(exc).__name__ == "BinanceRateLimitError":
-                    wait = max(float(getattr(exc, "retry_after_seconds", 0.0) or 0.0) + BINANCE_RATE_LIMIT_SAFETY_SECONDS, 5.0)
-                    self._binance_public_cooldown_until = max(self._binance_public_cooldown_until, time.monotonic() + wait)
-                    self._on_public_rate_limit(exc, wait)
-                    break
-                log.warning("[SCAN V10] validator %s gagal: %s", candidate.get("pair"), str(exc)[:180])
+        # The broad scan never creates an entry directly. It only validates
+        # state-5 records, then hands them to the independent M5 close watcher.
 
         # Validate and enqueue only state-5 candidates. They remain outside
         # /trade until the V10 state machine confirms a fresh M5 BOS close-cross.
@@ -8014,9 +8282,8 @@ class TradingEngine:
         stats["watch_current"] = len(candidate_pairs_seen & current_watch_pairs)
         stats["not_watch"] = max(0, stats["scanned"] - stats["watch_current"])
 
-        added_trades, trade_notes = await self._open_validated(validated, generation)
-        notes.extend(trade_notes)
-        stats["added"] = len(added_trades)
+        # Real/paper entry creation is exclusively handled after a fresh BOS
+        # close-cross in _m5_watch_loop; never call _open_validated from scan cycle.
 
         # Do not retain market history/analysis for coins that did not enter
         # the candidate watchlist. Watch candidates keep their 66-day candle
@@ -8026,9 +8293,7 @@ class TradingEngine:
         removed_cache_entries = self.rest.retain_kline_cache_for(current_watch_pairs)
         self._scan_market_snapshot.clear()
         self._scan_market_snapshot_at_ms = 0
-        candidates.clear()
         waiting_candidates.clear()
-        validated.clear()
         validated_waiting.clear()
         release_memory()
 
@@ -8039,7 +8304,7 @@ class TradingEngine:
         progress_pct = (self._scan_sweep_cursor / total_targets * 100.0) if total_targets else 0.0
         self._scan_last_report = {
             "cycle": cycle, "strategy": "TACTICAL_V10_E_GE2_ATR", **stats,
-            "duration_seconds": duration, "qualified_candidates": qualified_candidates,
+            "duration_seconds": duration, "qualified_candidates": 0,
             "universe_total": total_targets, "sweep_done": self._scan_sweep_cursor,
             "sweep_number": self._scan_sweep_number + 1,
             "batch_number": batch_number, "batch_total": batch_count,
@@ -8053,10 +8318,11 @@ class TradingEngine:
         except Exception as exc:  # noqa: BLE001
             log.warning("[SCAN][CURSOR] progres round-robin gagal disimpan: %s", exc)
         log.info(
-            "[SCAN V10] cycle #%s | round=%s batch=%s/%s range=%s-%s processed=%s/%s progress=%s/%s (%.1f%%) | scanned=%s waiting=%s waiting_m5_bos=%s watch_queued=%s candidates=%s valid=%s paper_added=%s %.1fs sweep_complete=%s",
+            "[SCAN V10] cycle #%s | round=%s batch=%s/%s range=%s-%s processed=%s/%s progress=%s/%s (%.1f%%) | scanned=%s waiting=%s waiting_m5_bos=%s watch_queued=%s historical_bos_skipped=%s %.1fs sweep_complete=%s",
             cycle, self._scan_sweep_number + 1, batch_number, batch_count, batch_start_label, batch_end_label,
             batch_processed, batch_total, self._scan_sweep_cursor, total_targets, progress_pct,
-            stats["scanned"], stats["waiting"], stats["waiting_m5_bos"], stats["watch_queued"], qualified_candidates, stats["valid"], stats["added"], duration, self._sweep_complete,
+            stats["scanned"], stats["waiting"], stats["waiting_m5_bos"], stats["watch_queued"],
+            stats["historical_bos_skipped"], duration, self._sweep_complete,
         )
         await self.reply(
             f"🧭 TACTICAL V10 E_GE2_ATR • SCAN #{cycle} SELESAI • {duration:.0f}s • RAM {(f'{rss_mb():.0f} MB' if rss_mb() > 0 else '-')}\n"
@@ -8064,23 +8330,71 @@ class TradingEngine:
             f"├ Batch {batch_number}/{batch_count} • pair {batch_start_label}-{batch_end_label} • selesai {batch_processed}/{batch_total}\n"
             f"├ Dicoba sesi ini {stats['scanned']} • waiting trigger {stats['waiting']}\n"
             f"├ D1 🟢 {direction_counts['BULLISH']} 🔴 {direction_counts['BEARISH']} ⚪ {direction_counts['RANGE']}\n"
-            f"├ V10 qualifying {qualified_candidates} • waiting M5 BOS {stats['waiting_m5_bos']}\n"
+            f"├ V10 waiting M5 BOS {stats['waiting_m5_bos']} • historical BOS skipped {stats['historical_bos_skipped']}\n"
             f"├ Masuk watch {stats.get('watch_current', 0)} • tidak masuk watch {stats.get('not_watch', 0)} • cache dibuang {removed_cache_entries} entri\n"
-            f"├ valid {stats['valid']} • paper trade baru {stats['added']}\n"
             f"├ ditolak {stats['rejected']} • error {stats['errors']} • BTC/ETH excluded\n"
             f"└ {'PUTARAN PENUH SELESAI • putaran berikutnya kembali ke pair pertama' if self._sweep_complete else f'Batch berlanjut • posisi berikutnya {self._scan_sweep_cursor + 1}/{total_targets}'}"
             + ("\n" + "\n".join(notes) if notes else "")
         )
 
     async def _open_validated(self, validated: list[dict[str, Any]], generation: int) -> tuple[list[Trade], list[str]]:
-        if self.real_mode:
-            self.real_mode = False
-            raise RuntimeError("REAL EXECUTION lock aktif: setup tidak boleh dikirim ke Binance.")
+        if self.real_mode and not REAL_EXECUTION_ENABLED:
+            raise RuntimeError("REAL_EXECUTION_ENABLED=0; setup tidak boleh dikirim ke Binance.")
         added: list[Trade] = []
         notes: list[str] = []
+
+        async def discard_known_unsubmitted(trade: Trade) -> None:
+            """Remove a pre-registered candidate only when no Binance order can exist."""
+            self.active_trades.pop(trade.trade_id, None)
+            try:
+                await self._persist_active_setups_silently()
+            except Exception:
+                log.exception("[REAL] gagal membersihkan snapshot trade yang ditolak %s", trade.trade_id)
+
+        async def retain_uncertain_submission(trade: Trade, reason: str) -> None:
+            # Preserve a state already confirmed by Binance. Only convert an
+            # unconfirmed in-flight submission into REAL_UNKNOWN; never demote a
+            # verified FILLED position back to PENDING because a later log/save
+            # or protection request raised an exception.
+            if trade.real_state in {"REAL_SUBMITTING", "REAL_UNKNOWN"}:
+                trade.real_enabled = True
+                trade.status = "PENDING"
+                trade.real_state = "REAL_UNKNOWN"
+                trade.real_error = reason[:500]
+            else:
+                trade.real_enabled = True
+                if reason and trade.real_error is None:
+                    trade.real_error = reason[:500]
+            self.active_trades[trade.trade_id] = trade
+            if all(item.trade_id != trade.trade_id for item in added):
+                added.append(trade)
+            try:
+                await self.ws.add_symbol(trade.pair)
+            except Exception:
+                log.exception("[REAL] gagal menambahkan %s ke WebSocket untuk reconcile", trade.pair)
+            try:
+                await self._persist_active_setups_silently()
+            except Exception:
+                log.exception("[REAL] gagal menyimpan trade berstatus REAL_UNKNOWN %s", trade.trade_id)
+            note_label = (
+                "status order belum pasti"
+                if trade.real_state == "REAL_UNKNOWN"
+                else f"order/posisi tersimpan ({trade.real_state})"
+            )
+            notes.append(
+                f"⚠️ {trade.pair}: {note_label}; disimpan untuk reconcile tanpa duplikasi. {reason[:100]}"
+            )
+
         for candidate in validated:
             v10_candidate_id = str(candidate.get("v10_candidate_id") or candidate.get("candidate_id") or "")
             if v10_candidate_id and v10_candidate_id in getattr(self, "_v10_opened_candidate_ids", set()):
+                continue
+            if v10_candidate_id and any(
+                trade.result is None and trade.candidate_id == v10_candidate_id
+                for trade in self.active_trades.values()
+            ):
+                self._v10_opened_candidate_ids.add(v10_candidate_id)
+                log.info("[V10-WATCH] duplicate candidate %s already linked to an active trade; no new order", v10_candidate_id)
                 continue
             paper_m5_confirmed = (
                 bool(candidate.get("m5_confirmed_entry"))
@@ -8089,6 +8403,12 @@ class TradingEngine:
             )
             if generation != self._scan_generation or (not self._scan_user_enabled and not paper_m5_confirmed):
                 break
+            if self.real_mode and not paper_m5_confirmed:
+                notes.append(f"{candidate.get('pair')}: REAL hanya menerima konfirmasi dari M5 WATCH.")
+                continue
+            if self.real_mode and str(candidate.get("candidate_state") or "").upper() not in {"READY", "FILLED"}:
+                notes.append(f"{candidate.get('pair')}: kandidat belum memiliki BOS M5 terkonfirmasi.")
+                continue
             if len(self.active_trades) >= self.max_active_trades:
                 self._scan_auto_paused = True
                 break
@@ -8097,6 +8417,10 @@ class TradingEngine:
             cand_dir = str(candidate.get("direction") or "").upper()
             if cand_dir and sum(1 for t in self.active_trades.values() if t.direction == cand_dir) >= SCAN_MAX_PER_DIRECTION:
                 continue
+            if self.real_mode and self.real.cooldown_remaining > 0:
+                notes.append(f"⏸ {candidate.get('pair')}: entry ditahan karena Binance REST cooldown.")
+                break
+            trade: Trade | None = None
             try:
                 meta = {
                     "strategy_name": candidate.get("strategy_name") or "TACTICAL_V10_E_GE2_ATR",
@@ -8108,40 +8432,86 @@ class TradingEngine:
                     "margin_usdt": self.margin_usdt,
                     "leverage": self.leverage,
                 }
-                trade = self._build_trade_from_setup(candidate, strategy_meta=meta)
+                execution_candidate = copy.deepcopy(candidate)
+                if self.real_mode and str(candidate.get("strategy_name") or "") == "TACTICAL_V10_E_GE2_ATR":
+                    # The strategy replay may report a same-candle paper fill. REAL
+                    # must still submit the original V10 LIMIT, never inherit that fill.
+                    limit_entry = candidate.get("v10_limit_entry_price")
+                    if limit_entry in (None, ""):
+                        raise ValueError("V10 real candidate tidak memiliki v10_limit_entry_price.")
+                    execution_candidate["entry"] = limit_entry
+                trade = self._build_trade_from_setup(execution_candidate, strategy_meta=meta)
+                if self.real_mode:
+                    trade.status = "PENDING"
+                    trade.fill_price = None
+                    trade.filled_at = None
+                    trade.pnl_percent = Decimal("0")
+                    trade.real_enabled = True
+                    trade.real_state = "REAL_SUBMITTING"
+                    trade.entry_client_order_id = self._real_entry_client_id(trade)
+                    # Insert + persist BEFORE the order POST. If an immediate fill
+                    # occurs, fill/protection handlers can now find the trade; if
+                    # the process dies after POST, the client ID survives restart.
+                    self.active_trades[trade.trade_id] = trade
+                    try:
+                        await self._persist_active_setups_silently()
+                    except Exception as persist_exc:
+                        self.active_trades.pop(trade.trade_id, None)
+                        notes.append(
+                            f"⛔ {trade.pair}: snapshot REAL pra-entry gagal; order tidak dikirim. "
+                            f"{str(persist_exc)[:120]}"
+                        )
+                        log.exception("[REAL] pre-submit snapshot gagal untuk %s; entry dibatalkan", trade.pair)
+                        continue
                 if not self.real_mode and not self._sim_has_margin(trade):
                     notes.append(f"⏸ {trade.pair}: margin simulasi tidak cukup")
                     continue
                 if self.real_mode:
-                    if self.real.cooldown_remaining > 0:
-                        break
                     try:
                         await self._ensure_real_entry(trade)
                     except RealPositionConflictError as exc:
+                        await discard_known_unsubmitted(trade)
                         notes.append(f"⚠️ {trade.pair}: {exc}")
                         continue
-                    except BinanceRateLimitError:
+                    except BinanceRateLimitError as exc:
+                        if trade.real_state in {"REAL_UNKNOWN", "REAL_PENDING", "REAL_SYNCING", "REAL_FILLED"} or trade.entry_order_id is not None:
+                            await retain_uncertain_submission(trade, str(exc))
+                        else:
+                            await discard_known_unsubmitted(trade)
                         break
                     except InsufficientBalanceError as exc:
+                        await discard_known_unsubmitted(trade)
                         notes.append(f"⏸ saldo kurang, entry real ditunda ({str(exc).split(': ', 1)[-1]})")
                         break
                     except MarginInfluenceError as exc:
+                        await discard_known_unsubmitted(trade)
                         hint = self._margin_hint(trade.pair, trade.entry)
                         await self._ban_pair(trade.pair, hours=None, source="AUTO_MARGIN_INFLUENCE",
                                              reason=f"Real quantity tidak memenuhi target margin ±10%: {exc}" + (f" Margin pas ≈ {hint}." if hint else ""))
                         notes.append(f"🚫 {trade.pair}: ban permanen (margin influence)")
                         continue
                     except RiskRejectError as exc:
+                        await discard_known_unsubmitted(trade)
                         log.info("[SCAN] %s ditolak risk sizing: %s", trade.pair, exc)
                         continue
                     except LeverageNotSupportedError as exc:
+                        await discard_known_unsubmitted(trade)
                         await self._ban_pair(trade.pair, hours=SCAN_BANNED_LEVERAGE_HOURS, reason=str(exc), source="AUTO_LEVERAGE_UNSUPPORTED")
                         notes.append(f"🚫 {trade.pair}: ban {SCAN_BANNED_LEVERAGE_HOURS}j (leverage)")
                         continue
                     except BinanceAPIError as exc:
-                        log.info("[SCAN] %s gagal entry real: %s", trade.pair, exc)
+                        if trade.real_state == "REAL_UNKNOWN" or trade.entry_order_id is not None or trade.real_state in {"REAL_PENDING", "REAL_SYNCING", "REAL_FILLED"}:
+                            await retain_uncertain_submission(trade, str(exc))
+                        else:
+                            await discard_known_unsubmitted(trade)
+                            log.info("[SCAN] %s gagal entry real: %s", trade.pair, exc)
                         continue
                     if trade.status == "CLOSED":
+                        self.active_trades.pop(trade.trade_id, None)
+                        try:
+                            await self._persist_active_setups_silently()
+                        except Exception:
+                            log.exception("[REAL] gagal membersihkan snapshot terminal %s", trade.trade_id)
                         continue
                 self.active_trades[trade.trade_id] = trade
                 added.append(trade)
@@ -8150,19 +8520,39 @@ class TradingEngine:
                         self._v10_opened_candidate_ids = set()
                     self._v10_opened_candidate_ids.add(v10_candidate_id)
                 await self.ws.add_symbol(trade.pair)
-                if trade.strategy_name == "TACTICAL_V10_E_GE2_ATR" and trade.status == "FILLED":
+                if (not trade.real_enabled) and trade.strategy_name == "TACTICAL_V10_E_GE2_ATR" and trade.status == "FILLED":
                     await self._record_event(
                         trade, "FILLED", event_price=trade.fill_price or trade.entry,
                         reason="V10 replay menunjukkan posisi sudah terisi sebelum snapshot live.",
                         extra={"fill_price": decimal_to_str(trade.fill_price or trade.entry), "candidate_id": v10_candidate_id},
                     )
                     await self._notify_filled(trade)
-                log.info("[SCAN V10] PAPER ADD %s status=%s candidate=%s trade_id=%s", trade.pair, trade.status, v10_candidate_id or "-", trade.trade_id)
-            except Exception:
-                log.exception("[SCAN] gagal memasukkan setup %s ke /trade", candidate.get("pair"))
+                log.info("[SCAN V10] %s ADD %s status=%s candidate=%s trade_id=%s",
+                         "REAL" if trade.real_enabled else "PAPER", trade.pair, trade.status,
+                         v10_candidate_id or "-", trade.trade_id)
+            except Exception as exc:
+                if self.real_mode and trade is not None and trade.real_enabled and (
+                    trade.real_state in {"REAL_UNKNOWN", "REAL_PENDING", "REAL_SYNCING", "REAL_FILLED"}
+                    or trade.entry_order_id is not None
+                ):
+                    await retain_uncertain_submission(trade, str(exc))
+                else:
+                    if trade is not None and trade.real_state == "REAL_SUBMITTING":
+                        await discard_known_unsubmitted(trade)
+                    log.exception("[SCAN] gagal memasukkan setup %s ke /trade", candidate.get("pair"))
             await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
         if len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
+        if any(trade.real_enabled for trade in added):
+            try:
+                await self._persist_active_setups_silently()
+            except Exception as exc:
+                log.exception("[REAL] order telah dikirim tetapi snapshot setup gagal tersimpan")
+                await self.reply(
+                    "⚠️ REAL ORDER SUDAH DICATAT DI MEMORI, TETAPI SNAPSHOT GITHUB GAGAL.\n\n"
+                    f"Detail: {str(exc)[:180]}\n"
+                    "Hindari restart sebelum /setup berhasil. Periksa order di Binance sekarang."
+                )
         return added, notes
 
     # --------------------------------------------------------
@@ -9187,6 +9577,7 @@ class TradingEngine:
             "scan_market_snapshot": snapshot,
             "timeframe": "5m",
             "candles_requested": 19008,
+            "force_refresh": True,
             "strategy_engine": "TACTICAL_V10_E_GE2_ATR",
             "notes": copy.deepcopy(self.notes),
             "engine_version": "TACTICAL_V10_BRIDGE_1",
@@ -10344,6 +10735,10 @@ class TradingEngine:
             "v10_order_created_at": payload.get("v10_order_created_at"),
             "v10_filled_at": payload.get("v10_filled_at"),
             "v10_fill_price": payload.get("v10_fill_price"),
+            "v10_limit_entry_price": payload.get("v10_limit_entry_price") or (
+                (payload.get("raw_result") or {}).get("v10_limit_entry_price")
+                if isinstance(payload.get("raw_result"), dict) else None
+            ),
             "v10_pending_bars_elapsed": payload.get("v10_pending_bars_elapsed"),
             "v10_position_bars_held": payload.get("v10_position_bars_held"),
             "v10_max_hold_seconds": payload.get("v10_max_hold_seconds"),
@@ -10675,11 +11070,16 @@ class TradingEngine:
         if not pair:
             raise ValueError("Pair AUTO tidak tersedia.")
         incoming_state = str(result.get("candidate_state") or "").upper()
-        if incoming_state in {"READY", "FILLED"} and len(self.active_trades) >= self.max_active_trades:
-            await self.reply("⏸️ MAX ACTIVE TRADE penuh. Setup AUTO yang sudah BOS-confirmed tidak dimasukkan ke paper trade.")
+        if incoming_state in {"READY", "FILLED"}:
             self.flow = None
             self._auto_job_id = None
             self._auto_task = None
+            await self.reply(
+                "⏭️ AUTO tidak mengejar BOS historis.\n\n"
+                "Replay menemukan BOS/limit yang sudah terbentuk sebelum snapshot terbaru. "
+                "Setup tidak dikirim ke Binance maupun dibuat sebagai trade. Jalankan scan lagi "
+                "agar kandidat MSS baru masuk WATCH dan menunggu BOS M5 berikutnya."
+            )
             return
 
         try:
@@ -10701,22 +11101,14 @@ class TradingEngine:
                 return
             if (checked.get("strategy_name") == "TACTICAL_V10_E_GE2_ATR"
                     and str(checked.get("candidate_state") or "").upper() in {"READY", "FILLED"}):
-                checked["watch_origin"] = "AUTO"
-                checked["m5_confirmed_entry"] = True
-                added, notes = await self._open_validated([checked], self._scan_generation)
                 self.flow = None
                 self._auto_job_id = None
                 self._auto_task = None
-                if not added:
-                    await self.reply("❌ Setup V10 tidak dapat dimasukkan ke /trade. " + ("; ".join(notes[:2]) if notes else "Batas slot atau margin paper tercapai."))
-                    return
-                trade = added[0]
                 await self.reply(
-                    "✅ TACTICAL V10 • PAPER SETUP TERDAFTAR\n\n"
-                    f"Pair: {trade.pair} • {trade.direction}\n"
-                    f"State: {trade.status}\n"
-                    f"Entry: {fmt_price(trade.entry)} • SL: {fmt_price(trade.sl)} • TP: {fmt_price(trade.tp)}\n"
-                    "Tidak ada order yang dikirim ke Binance. Posisi dipantau sebagai simulasi berdasarkan harga WebSocket."
+                    "⏭️ AUTO tidak mengejar BOS yang terbentuk selama validasi.\n\n"
+                    "Kandidat sudah melewati state WAITING M5 BOS sebelum masuk WATCH. "
+                    "Tidak ada order maupun setup yang dibuat. Jalankan AUTO/SCAN kembali "
+                    "agar MSS baru dipantau dari awal."
                 )
                 return
             if pair in self._scan_watchlist:
@@ -10745,7 +11137,9 @@ class TradingEngine:
                 f"D1 bias + AOI FVG • H4 {checked.get('v10_poi_type') or 'POI'} • literal MSS M15\n"
                 f"POI: {zone.get('low', '-')} – {zone.get('high', '-')}\n\n"
                 "Kandidat masuk /candidates. Watcher hanya mengevaluasi fresh BOS close-cross pada candle M5 yang sudah tutup. "
-                "Jika BOS lolos, simulasi pending entry V10 dibuat; jika setup invalid atau timeout state machine, kandidat dikeluarkan. Tidak ada order Binance."
+                + ("Jika BOS lolos, Binance LIMIT REAL dikirim sesuai entry V10 dan status fill diverifikasi ke exchange. "
+                   if self.real_mode else "Jika BOS lolos, pending setup paper V10 dibuat tanpa order Binance. ")
+                + "Jika setup invalid atau timeout state machine, kandidat dikeluarkan."
             )
         except Exception as exc:
             self.flow = None
@@ -11317,9 +11711,33 @@ class TradingEngine:
         )
 
         if self.real_mode:
+            trade.status = "PENDING"
+            trade.fill_price = None
+            trade.filled_at = None
+            trade.pnl_percent = Decimal("0")
+            trade.real_enabled = True
+            trade.real_state = "REAL_SUBMITTING"
+            trade.entry_client_order_id = self._real_entry_client_id(trade)
+            self.active_trades[trade.trade_id] = trade
+            try:
+                await self._persist_active_setups_silently()
+            except Exception as persist_exc:
+                self.active_trades.pop(trade.trade_id, None)
+                self.flow = None
+                await self.reply(
+                    "⛔ REAL ENTRY DIBATALKAN\n\n"
+                    "Snapshot setup gagal disimpan sebelum submit; tidak ada order yang dikirim.\n"
+                    f"Detail: {str(persist_exc)[:180]}"
+                )
+                return
             try:
                 await self._ensure_real_entry(trade)
             except RealPositionConflictError as exc:
+                self.active_trades.pop(trade.trade_id, None)
+                try:
+                    await self._persist_active_setups_silently()
+                except Exception:
+                    log.exception("[REAL ADD] gagal membersihkan snapshot setelah position conflict")
                 self.flow = None
                 await self.reply(
                     card(
@@ -11332,10 +11750,45 @@ class TradingEngine:
                     )
                 )
                 return
+            except Exception as exc:
+                if trade.real_state in {"REAL_UNKNOWN", "REAL_PENDING", "REAL_SYNCING", "REAL_FILLED"} or trade.entry_order_id is not None:
+                    self.active_trades[trade.trade_id] = trade
+                    try:
+                        await self.ws.add_symbol(trade.pair)
+                        await self._persist_active_setups_silently()
+                    except Exception:
+                        log.exception("[REAL ADD] gagal menyimpan order yang statusnya belum pasti")
+                    self.flow = None
+                    self._fire(self.reply(
+                        "⚠️ REAL ADD STATUS PERLU RECONCILE\n\n"
+                        f"Pair: {trade.pair}\nClient Order ID: {trade.entry_client_order_id or '-'}\n"
+                        f"State: {trade.real_state}\nDetail: {str(exc)[:180]}\n"
+                        "Bot tidak mengirim ulang order secara buta. Periksa order di Binance."
+                    ))
+                    return
+                self.active_trades.pop(trade.trade_id, None)
+                try:
+                    await self._persist_active_setups_silently()
+                except Exception:
+                    log.exception("[REAL ADD] gagal membersihkan snapshot setelah penolakan")
+                raise
             if trade.status == "CLOSED":
+                self.active_trades.pop(trade.trade_id, None)
+                try:
+                    await self._persist_active_setups_silently()
+                except Exception:
+                    log.exception("[REAL ADD] gagal menyimpan hasil emergency close")
                 self.flow = None
                 await self.reply("🚨 Setup REAL langsung ditutup otomatis karena TP/SL gagal dipasang.")
                 return
+            try:
+                await self._persist_active_setups_silently()
+            except Exception:
+                log.exception("[REAL ADD] gagal memperbarui snapshot setelah Binance menerima order")
+                await self.reply(
+                    "⚠️ REAL order sudah diproses Binance, tetapi snapshot detail order gagal diperbarui. "
+                    "Client Order ID: " + str(trade.entry_client_order_id or "-")
+                )
 
         self.active_trades[
             trade.trade_id
@@ -11375,8 +11828,9 @@ class TradingEngine:
             f"Reason SL: {trade.sl_reason}\n\n"
             f"Price TP: {decimal_to_str(trade.tp)}\n"
             f"Reason TP: {trade.tp_reason}\n\n"
-            "Status: PENDING"
-            f"{level_note}"
+            f"Status: {trade.status}"
+            + (f"\nREAL: {trade.real_state} • Client Order ID: {trade.entry_client_order_id or '-'}" if trade.real_enabled else "\nMode: PAPER")
+            + f"{level_note}"
         )
 
     # --------------------------------------------------------
@@ -12122,6 +12576,76 @@ class TradingEngine:
             self._render_wrong()
         )
 
+    async def _restore_real_setups_on_startup(self) -> int:
+        """Restore real exposure metadata even though REAL starts OFF each session.
+
+        This is deliberately read-only: no private Binance call or order action is
+        made until the user explicitly runs /real on and the account preflight passes.
+        """
+        try:
+            raw, _sha = await self.github.get_file(SETUPS_PATH)
+        except Exception as exc:
+            log.warning("[RECOVERY] tidak dapat membaca %s: %s", SETUPS_PATH, exc)
+            return 0
+        if not raw:
+            return 0
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            log.error("[RECOVERY] %s bukan JSON valid; tidak ada setup REAL dipulihkan: %s", SETUPS_PATH, exc)
+            return 0
+        if isinstance(payload, list):
+            records = payload
+        elif isinstance(payload, dict):
+            records = payload.get("setups", [])
+        else:
+            log.error("[RECOVERY] format %s tidak dikenal; snapshot tidak dipulihkan", SETUPS_PATH)
+            return 0
+        if not isinstance(records, list):
+            log.error("[RECOVERY] key setups pada %s bukan list", SETUPS_PATH)
+            return 0
+
+        restored = 0
+        skipped = 0
+        for record in records:
+            if not isinstance(record, dict) or not bool(record.get("real_enabled")):
+                continue
+            if str(record.get("status") or "").upper() not in {"PENDING", "FILLED"}:
+                continue
+            if record.get("result") not in (None, "") or record.get("closed_at") not in (None, ""):
+                continue
+            trade_id = str(record.get("trade_id") or "")
+            if not trade_id or trade_id in self.active_trades:
+                skipped += 1
+                continue
+            if len(self.active_trades) >= self.max_active_trades:
+                log.error("[RECOVERY] batas active trade tercapai; setup REAL berikutnya tidak dipulihkan")
+                break
+            try:
+                trade = self._trade_from_saved_record(record)
+            except Exception as exc:
+                skipped += 1
+                log.error("[RECOVERY] setup REAL %s invalid dan tidak dipulihkan: %s", trade_id, exc)
+                continue
+            if not trade.real_enabled:
+                continue
+            if trade.real_state == "REAL_SUBMITTING":
+                trade.real_state = "REAL_UNKNOWN"
+                trade.real_error = (
+                    "Proses restart ketika pengiriman order berlangsung; status akan dicek "
+                    "dengan clientOrderId. Bot tidak akan mengirim ulang otomatis."
+                )
+            self.active_trades[trade.trade_id] = trade
+            if trade.candidate_id:
+                self._v10_opened_candidate_ids.add(trade.candidate_id)
+            restored += 1
+        if restored or skipped:
+            log.warning(
+                "[RECOVERY] real setup restored=%s skipped=%s; REAL remains OFF until /real on preflight",
+                restored, skipped,
+            )
+        return restored
+
     async def _persist_active_setups_silently(self) -> None:
         """Persist current active setups without creating history records/events."""
         async with self._trade_lock:
@@ -12782,6 +13306,8 @@ class TradingEngine:
         if current.real_enabled:
             if not self.real_mode:
                 raise ValueError("Setup REAL membutuhkan /real on untuk /close.")
+            if current.real_state == "REAL_SUBMITTING":
+                raise ValueError("Order masih dalam proses submit. Tunggu status Binance sebelum /close.")
             if current.status == "PENDING":
                 # Cancel only this bot-owned entry; do not invent a fill.
                 if current.entry_order_id is not None or current.entry_client_order_id:
@@ -13575,6 +14101,15 @@ class TradingEngine:
 
         for trade in relevant:
             if trade.trade_id not in self.active_trades:
+                continue
+            if trade.real_enabled and not self.real_mode:
+                # Restored REAL exposure is deliberately inert while a new process
+                # awaits explicit /real on + signed-account reconciliation. Never
+                # paper-fill or locally close an actual Binance order/position.
+                continue
+            if trade.real_enabled and trade.real_state == "REAL_SUBMITTING":
+                # Do not query for a fill until the submitting coroutine has received
+                # the POST result and stored the exchange identifiers.
                 continue
 
             try:
@@ -15172,7 +15707,9 @@ class TradingEngine:
             "Main: ONLINE\n"
             f"Mode: {'REAL OFF' if not self.real_mode else 'REAL ON'}\n"
             f"Session: {self.session_id}\n\n"
-            f"Binance REST: PUBLIC MARKET DATA ONLY (REAL EXECUTION DISABLED)\n"
+            f"Environment: {BINANCE_TRADING_MODE.upper()} • REAL API switch {'ON' if REAL_EXECUTION_ENABLED else 'OFF'}\n"
+            f"Market REST: {BINANCE_REST_BASE}\n"
+            f"Private REST: {BINANCE_REAL_REST_BASE}\n"
             f"WebSocket: {self.ws.status}\n"
             f"Symbols Subscribed: {len(self.ws.symbols())}\n"
             f"Fresh Price Feed: {fresh_prices}\n\n"
@@ -15206,7 +15743,7 @@ class TradingEngine:
             "/remove - menghapus data trade yang sudah masuk history\n"
             "/filled - ubah setup PENDING menjadi FILLED secara manual\n"
             "/close PAIR|all - tutup paksa setup dan catat hasil\n"
-            "/real on - tidak tersedia pada build paper-only\n"
+            "/real on|off - aktifkan/matikan eksekusi Binance (DEMO default; LIVE explicit env)\n"
             "/margin [USDT] - atur margin target\n"
             "/leverage [angka] - atur leverage target\n"
             "/scan on|off - scanner otomatis\n"
