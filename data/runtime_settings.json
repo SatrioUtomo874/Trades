@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-02T06:51:04.659510+00:00",
+  "saved_at": "2026-11-02T06:52:43.541743+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -511,9 +511,9 @@
       "ASRUSDT",
       "FRAXUSDT"
     ],
-    "cursor": 92,
+    "cursor": 100,
     "sweep_number": 11,
     "batch_size": 50,
-    "updated_at": "2026-11-02T06:51:04.659558+00:00"
+    "updated_at": "2026-11-02T06:52:43.541797+00:00"
   }
 }
