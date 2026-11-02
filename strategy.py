@@ -1557,6 +1557,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
         'v10_order_created_at': order_created_at,
         'v10_filled_at': fill_created_at,
         'v10_fill_price': fill_price,
+        'v10_limit_entry_price': limit_price,
         'v10_pending_bars_elapsed': state.get('pending_bars_elapsed'),
         'v10_position_bars_held': state.get('position_bars_held'),
         'v10_max_hold_seconds': MAX_HOLD_M5 * 5 * 60,
