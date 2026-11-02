@@ -428,3 +428,36 @@ Tidak ada trailing.
 - Filled: 2026-11-01T20:25:00+00:00
 - Closed: 2026-11-02T07:57:13.443773+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
+
+---
+
+## AVAAIUSDT — SELL
+
+Trade ID: `AVAAIUSDT-20261102-071253-396394`
+
+### Setup
+
+- Price Now Reference: 0.007
+- Entry: 0.007031
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | paper fill 0.007031
+- Price Exp: 0.00658
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.007256
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.00658
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.006915
+- Result Reason: Manual /close. PnL positif, sehingga hasil dicatat sebagai TP (PnL +1.65%).
+- PnL: 1.649836438628929028587683118%
+- Created: 2026-11-01T14:40:00+00:00
+- Filled: 2026-11-01T15:20:00+00:00
+- Closed: 2026-11-02T07:57:32.242545+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
