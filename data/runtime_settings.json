@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-02T16:51:52.803603+00:00",
+  "saved_at": "2026-11-02T16:54:03.592592+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -525,9 +525,9 @@
       "FUSDT",
       "BASUSDT"
     ],
-    "cursor": 349,
+    "cursor": 350,
     "sweep_number": 14,
     "batch_size": 50,
-    "updated_at": "2026-11-02T16:51:52.803640+00:00"
+    "updated_at": "2026-11-02T16:54:03.592634+00:00"
   }
 }
