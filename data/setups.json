@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-11-02T16:57:56.767873+00:00",
-  "saved_at_wib": "02-11-2026, 23:57 WIB",
+  "saved_at": "2026-11-02T17:01:59.176450+00:00",
+  "saved_at_wib": "03-11-2026, 00:01 WIB",
   "count": 1,
   "setups": [
     {
@@ -583,7 +583,7 @@
             "vp_profile_valid_bars": 0
           }
         },
-        "real_entry_attempt": 1
+        "real_entry_attempt": 2
       },
       "risk_pct_initial": "1.839080459770114942528735632",
       "realized_r": "0"
