@@ -560,3 +560,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-11-02T07:58:33.548141+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
+
+---
+
+## MOODENGUSDT — SELL
+
+Trade ID: `MOODENGUSDT-20261102-235513-BFFF2D`
+
+### Setup
+
+- Price Now Reference: 0.03457
+- Entry: 0.0348
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | order limit 0.0348
+- Price Exp: 0.03351
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.03544
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.03351
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: DELETED
+- Exit Price: -
+- Result Reason: Gagal dipasang ulang setelah Binance limit: /fapi/v1/order: Status order belum pasti untuk MOODENGUSDT; bot menyimpan clientOrderId dan akan reconcile tanpa mengirim entry duplikat.
+- PnL: 0%
+- Created: 2026-11-02T16:50:00+00:00
+- Filled: -
+- Closed: 2026-11-02T21:47:03.091797+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
