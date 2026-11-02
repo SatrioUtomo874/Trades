@@ -164,3 +164,36 @@ Tidak ada trailing.
 - Filled: 2026-11-01T23:13:29.668069+00:00
 - Closed: 2026-11-02T00:06:51.441153+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
+
+---
+
+## WETUSDT — SELL
+
+Trade ID: `WETUSDT-20261102-013858-3D6B93`
+
+### Setup
+
+- Price Now Reference: 0.0552
+- Entry: 0.05571
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | order limit 0.05571
+- Price Exp: 0.05325
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.05694
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.05325
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.05325
+- Result Reason: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+- PnL: 4.415724286483575659666128164%
+- Created: 2026-11-01T18:15:00+00:00
+- Filled: 2026-11-02T00:02:10.441559+00:00
+- Closed: 2026-11-02T00:19:32.621137+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
