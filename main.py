@@ -33,9 +33,10 @@ Arsitektur aktif:
   atau confidence modifier.
 - Semua analisis memakai candle Binance yang sudah tertutup. Data H4/M15/D1
   diturunkan dari M5 dengan batas candle UTC yang sama seperti backtest.
-- REAL execution dapat diaktifkan dengan /real on setelah preflight API berhasil.
-  Mode default adalah Binance USD-M Demo Trading; LIVE memerlukan pengaturan env
-  eksplisit dan acknowledgement terpisah. REAL selalu OFF saat proses baru start.
+- REAL execution diarahkan khusus ke Binance USD-M Futures LIVE melalui
+  https://fapi.binance.com. Kredensial dibaca dari BINANCE_API_KEY dan
+  BINANCE_API_SECRET. REAL selalu OFF saat proses baru start dan hanya aktif
+  setelah /real on lolos signed-account preflight.
 - Scanner hanya mendaftarkan state-5 ke M5 WATCH. State READY/FILLED hasil replay
   historis pada saat scan awal tidak dikejar; order hanya dibuat setelah watcher
   membuktikan BOS pada candle M5 terbaru yang baru saja ditutup.
@@ -129,30 +130,20 @@ MAIN_FILE = (os.getenv("MAIN_FILE") or "main.py").strip()
 # BinanceREST tetap public-only untuk market data/scanner.
 BINANCE_API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
 BINANCE_API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
-BINANCE_API_KEY_1 = (os.getenv("BINANCE_API_KEY_1") or "").strip()
-BINANCE_API_SECRET_1 = (os.getenv("BINANCE_API_SECRET_1") or "").strip()
 
 TIMEZONE_NAME = "Asia/Jakarta"
 TZ = ZoneInfo(TIMEZONE_NAME)
 
-# Market data always comes from the production public USD-M feed so scan and
-# strategy candles remain representative. Private order/account requests use the
-# selected account environment (Demo by default; LIVE is explicit opt-in).
+# LIVE-only build: public market data and private account/order requests both
+# target Binance USD-M production. The two credentials below are read from
+# BINANCE_API_KEY and BINANCE_API_SECRET; no Demo/Testnet mode is supported.
 BINANCE_REST_BASE = "https://fapi.binance.com"
 BINANCE_WS_BASE = "wss://fstream.binance.com/market/stream"
-BINANCE_TRADING_MODE = (os.getenv("BINANCE_TRADING_MODE", "demo") or "demo").strip().lower()
-if BINANCE_TRADING_MODE not in {"demo", "live"}:
-    raise RuntimeError("BINANCE_TRADING_MODE harus 'demo' atau 'live'.")
-BINANCE_REAL_REST_BASE = (
-    "https://demo-fapi.binance.com"
-    if BINANCE_TRADING_MODE == "demo"
-    else "https://fapi.binance.com"
-)
+BINANCE_TRADING_MODE = "live"
+BINANCE_REAL_REST_BASE = "https://fapi.binance.com"
 REAL_EXECUTION_ENABLED = (os.getenv("REAL_EXECUTION_ENABLED", "1") or "1").strip().lower() not in {
     "0", "false", "off", "no", "disabled"
 }
-BINANCE_LIVE_TRADING_ACK = (os.getenv("BINANCE_LIVE_TRADING_ACK", "") or "").strip()
-LIVE_TRADING_ACK_REQUIRED = "I_ACCEPT_REAL_BINANCE_FUTURES_RISK"
 
 GITHUB_API = "https://api.github.com"
 
@@ -3710,13 +3701,8 @@ class TradingEngine:
                 "API key belum tersedia. Isi BINANCE_API_KEY dan BINANCE_API_SECRET "
                 "pada environment server, lalu restart bot."
             )
-        if BINANCE_TRADING_MODE == "live" and BINANCE_LIVE_TRADING_ACK != LIVE_TRADING_ACK_REQUIRED:
-            raise RuntimeError(
-                "LIVE diblokir. Untuk akun produksi, set BINANCE_LIVE_TRADING_ACK="
-                f"{LIVE_TRADING_ACK_REQUIRED}. Gunakan mode demo untuk uji awal."
-            )
-
-        # Re-apply the selected private endpoint before signed preflight.
+        # This package is LIVE-only: always pin the private client to the
+        # production USD-M endpoint. There is deliberately no Demo fallback.
         self.real.base_url = BINANCE_REAL_REST_BASE
         try:
             balances = await self.real.get_futures_balance()
@@ -3763,7 +3749,7 @@ class TradingEngine:
             except Exception as exc:
                 await self._handle_real_exception(exc, "REAL STARTUP RECONCILE", trade)
 
-        mode_label = "DEMO TRADING (saldo simulasi Binance)" if BINANCE_TRADING_MODE == "demo" else "LIVE FUTURES (uang sungguhan)"
+        mode_label = "BINANCE USD-M FUTURES LIVE (uang sungguhan)"
         await self.reply(
             "🟢 REAL EXECUTION AKTIF\n\n"
             f"Environment: {mode_label}\n"
@@ -7863,7 +7849,7 @@ class TradingEngine:
                                             "⚠️ TACTICAL V10 • BOS M5 CONFIRMED — ORDER STATUS UNKNOWN\n\n"
                                             f"Pair: {trade.pair} • {trade.direction}\n"
                                             f"Client Order ID: {trade.entry_client_order_id or '-'}\n"
-                                            "Bot tidak mengirim ulang order. Status akan direkonsiliasi dari Binance; periksa juga tab Orders pada akun Demo/LIVE."
+                                            "Bot tidak mengirim ulang order. Status akan direkonsiliasi dari Binance; periksa juga tab Orders pada Binance USD-M Futures LIVE."
                                         )
                                     else:
                                         await self.reply(
@@ -15743,7 +15729,7 @@ class TradingEngine:
             "/remove - menghapus data trade yang sudah masuk history\n"
             "/filled - ubah setup PENDING menjadi FILLED secara manual\n"
             "/close PAIR|all - tutup paksa setup dan catat hasil\n"
-            "/real on|off - aktifkan/matikan eksekusi Binance (DEMO default; LIVE explicit env)\n"
+            "/real on|off - aktifkan/matikan eksekusi Binance USD-M Futures LIVE\n"
             "/margin [USDT] - atur margin target\n"
             "/leverage [angka] - atur leverage target\n"
             "/scan on|off - scanner otomatis\n"
