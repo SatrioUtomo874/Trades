@@ -362,3 +362,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-11-02T06:55:52.449986+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
+
+---
+
+## XAIUSDT — SELL
+
+Trade ID: `XAIUSDT-20261102-012122-1D0C3C`
+
+### Setup
+
+- Price Now Reference: 0.007016
+- Entry: 0.00711
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | paper fill 0.00711
+- Price Exp: 0.006818
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.007158
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.006818
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: TP
+- Exit Price: 0.006892
+- Result Reason: Manual /close. PnL positif, sehingga hasil dicatat sebagai TP (PnL +3.07%).
+- PnL: 3.066104078762306610407876231%
+- Created: 2026-11-01T14:20:00+00:00
+- Filled: 2026-11-01T14:25:00+00:00
+- Closed: 2026-11-02T07:56:51.044907+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
