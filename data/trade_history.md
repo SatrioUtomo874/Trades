@@ -329,3 +329,36 @@ Tidak ada trailing.
 - Filled: 2026-10-31T10:20:00+00:00
 - Closed: 2026-11-02T06:44:07.414524+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
+
+---
+
+## STOUSDT — SELL
+
+Trade ID: `STOUSDT-20261102-121524-BB7CEB`
+
+### Setup
+
+- Price Now Reference: 0.0302
+- Entry: 0.03039
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | order limit 0.03039
+- Price Exp: 0.02963
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.03077
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.02963
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.02963
+- Result Reason: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- PnL: -
+- Created: 2026-11-02T05:10:00+00:00
+- Filled: -
+- Closed: 2026-11-02T06:55:52.449986+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
