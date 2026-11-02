@@ -18,7 +18,6 @@ import pickle
 from collections import deque
 from pathlib import Path
 import numpy as np
-import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view as swv
 
 P = dict(NP=2, RR=2.0, COST=8e-4, SL_BUF=0.0,
@@ -318,7 +317,8 @@ def find_data(arg):
     raise SystemExit('Folder data tidak ketemu. Jalankan get.py dulu, atau taruh script di folder yang berisi M5_Data (atau pakai --data PATH)')
 
 
-def load(d):  # toleran: header, timestamp mikrodetik, candle hilang (diisi datar)
+def load(d):  # offline CSV helper; pandas is lazy-imported and never loaded by the live scanner
+    import pandas as pd
     fs = sorted(Path(d).glob('*.csv'))
     df = pd.concat([pd.read_csv(f, header=None, usecols=[0, 1, 2, 3, 4], names=['ot', 'o', 'h', 'l', 'c']) for f in fs], ignore_index=True)
     df = df.apply(pd.to_numeric, errors='coerce').dropna()
@@ -382,7 +382,26 @@ def atr_array(x, period=14):
     h, l, c = x['h'], x['l'], x['c']
     prev = np.r_[c[0], c[:-1]]
     tr = np.maximum(h - l, np.maximum(np.abs(h - prev), np.abs(l - prev)))
-    return pd.Series(tr).rolling(period, min_periods=period).mean().to_numpy()
+    period = max(1, int(period))
+    out = np.full(len(tr), np.nan, dtype=float)
+    if len(tr) >= period:
+        prefix = np.cumsum(np.r_[0.0, tr], dtype=float)
+        out[period - 1:] = (prefix[period:] - prefix[:-period]) / period
+    return out
+
+
+def rolling_median_min_periods(values, window=30, min_periods=10):
+    """Pandas-compatible trailing median without importing pandas into the live worker."""
+    values = np.asarray(values, dtype=float)
+    window = max(1, int(window))
+    min_periods = max(1, int(min_periods))
+    out = np.full(len(values), np.nan, dtype=float)
+    for i in range(len(values)):
+        segment = values[max(0, i - window + 1):i + 1]
+        finite = segment[np.isfinite(segment)]
+        if finite.size >= min_periods:
+            out[i] = float(np.median(finite))
+    return out
 
 
 def protected_swing_low_timeline(x, n):
@@ -530,10 +549,16 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
     h4_protected_low = protected_swing_low_timeline(h4, NP)
     # Range/volatility context is precomputed once per symbol. For an intraday event,
     # the 30-day reference uses only the latest fully completed D1 candles.
-    trail_hi24 = pd.Series(h5).rolling(288, min_periods=288).max().to_numpy()
-    trail_lo24 = pd.Series(l5).rolling(288, min_periods=288).min().to_numpy()
+    trail_hi24 = np.full(len(h5), np.nan, dtype=float)
+    trail_lo24 = np.full(len(l5), np.nan, dtype=float)
+    if len(h5) >= 288:
+        high_windows = swv(h5, 288)
+        low_windows = swv(l5, 288)
+        trail_hi24[287:] = high_windows.max(axis=1)
+        trail_lo24[287:] = low_windows.min(axis=1)
+        del high_windows, low_windows
     daily_range_pct = (d1['h'] - d1['l']) / np.maximum(np.abs(d1['c']), 1e-12) * 100.0
-    median_daily_range_pct = pd.Series(daily_range_pct).rolling(30, min_periods=10).median().to_numpy()
+    median_daily_range_pct = rolling_median_min_periods(daily_range_pct, 30, 10)
 
     def snapshot_context(k):
         'Causal D1/H4 state and M5 context known by the close of bar k.'
@@ -1148,7 +1173,92 @@ def _as_candle_tuple(item: Any) -> tuple[int, float, float, float, float, float,
     return t, o, h, l, c, base_volume, quote_volume
 
 
-def _prepare_m5_arrays(candles: list[Any]) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, Any]]:
+def _prepare_m5_arrays(candles: Any) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, Any]]:
+    """Align closed M5 bars. Prefer the compact structured-array provider to avoid Python row/dict copies."""
+    if isinstance(candles, np.ndarray) and candles.dtype.names:
+        names = set(candles.dtype.names)
+        required = {"t", "o", "h", "l", "c", "v", "qv"}
+        if not required.issubset(names):
+            raise ValueError(f"Format compact candle kurang field: {sorted(required - names)}")
+        times = np.asarray(candles["t"], dtype=np.int64)
+        source = {key: np.asarray(candles[key], dtype=float) for key in ("o", "h", "l", "c", "v", "qv")}
+        valid = (times > 0)
+        for key in ("o", "h", "l", "c", "v", "qv"):
+            valid &= np.isfinite(source[key])
+        valid &= (source["o"] > 0) & (source["h"] > 0) & (source["l"] > 0) & (source["c"] > 0)
+        valid &= source["h"] >= np.maximum.reduce((source["o"], source["l"], source["c"]))
+        valid &= source["l"] <= np.minimum.reduce((source["o"], source["h"], source["c"]))
+        if not np.any(valid):
+            raise ValueError("Tidak ada candle M5 valid pada compact array")
+        if not np.all(valid):
+            times = times[valid]
+            source = {key: value[valid] for key, value in source.items()}
+        # Binance response is chronological; guard/order only when a provider sends duplicates or disorder.
+        if times.size > 1 and np.any(times[1:] <= times[:-1]):
+            order = np.argsort(times, kind="stable")
+            times = times[order]
+            source = {key: value[order] for key, value in source.items()}
+            keep = np.r_[times[1:] != times[:-1], True]
+            times = times[keep]
+            source = {key: value[keep] for key, value in source.items()}
+        if len(times) < M5_MIN_HISTORY_CANDLES:
+            raise ValueError(f"Riwayat M5 tidak cukup: {len(times):,}/{M5_MIN_HISTORY_CANDLES:,} candle minimum")
+
+        first_raw = int(times[0])
+        t0 = ((first_raw + D1_INTERVAL_MS - 1) // D1_INTERVAL_MS) * D1_INTERVAL_MS
+        t1 = (int(times[-1]) // M5_INTERVAL_MS) * M5_INTERVAL_MS
+        if t1 < t0 or (t1 - t0) // M5_INTERVAL_MS + 1 < M5_MIN_HISTORY_CANDLES:
+            raise ValueError("Riwayat M5 setelah alignment UTC kurang dari 60 hari")
+        grid = np.arange(t0, t1 + M5_INTERVAL_MS, M5_INTERVAL_MS, dtype=np.int64)
+        indices = np.searchsorted(times, grid)
+        found = indices < len(times)
+        found &= times[np.minimum(indices, len(times) - 1)] == grid
+        n = len(grid)
+        o = np.full(n, np.nan, dtype=float)
+        h = np.full(n, np.nan, dtype=float)
+        l = np.full(n, np.nan, dtype=float)
+        c = np.full(n, np.nan, dtype=float)
+        v = np.zeros(n, dtype=float)
+        qv = np.zeros(n, dtype=float)
+        if np.any(found):
+            src_idx = indices[found]
+            o[found], h[found], l[found], c[found] = (source[key][src_idx] for key in ("o", "h", "l", "c"))
+            v[found], qv[found] = source["v"][src_idx], source["qv"][src_idx]
+        missing = ~np.isfinite(c)
+        missing_count = int(missing.sum())
+        max_gap = 0
+        if missing_count:
+            absent = np.flatnonzero(missing)
+            if absent.size:
+                # Longest run without a Python per-candle loop.
+                breaks = np.flatnonzero(np.diff(absent) > 1)
+                starts = np.r_[0, breaks + 1]
+                ends = np.r_[breaks, len(absent) - 1]
+                max_gap = int(np.max(absent[ends] - absent[starts] + 1))
+            known = np.flatnonzero(~missing)
+            if not known.size:
+                raise ValueError("Riwayat M5 tidak memiliki close valid untuk mengisi gap")
+            last_known = np.maximum.accumulate(np.where(~missing, np.arange(n), -1))
+            last_known[:known[0]] = known[0]
+            c = c[last_known]
+            o = np.where(np.isfinite(o), o, c)
+            h = np.where(np.isfinite(h), h, c)
+            l = np.where(np.isfinite(l), l, c)
+        if not all(np.isfinite(x).all() for x in (o, h, l, c)):
+            raise ValueError("Riwayat M5 masih mengandung nilai invalid setelah normalisasi")
+        if max_gap > 12:
+            raise ValueError(f"Gap data M5 terlalu panjang: {max_gap} candle / {max_gap * 5} menit")
+        arrays = {"o": o, "h": h, "l": l, "c": c, "v": v, "qv": qv}
+        info = {
+            "candles_m5": int(n), "missing_candles_filled": missing_count,
+            "longest_missing_run": int(max_gap), "first_time_ms": int(grid[0]),
+            "last_open_time_ms": int(grid[-1]), "last_close_time_ms": int(grid[-1] + M5_INTERVAL_MS),
+            "history_days": round(n / 288.0, 2),
+            "volume_profile_quote_volume_bars": int(np.count_nonzero(qv > 0)),
+        }
+        return arrays, grid, info
+
+    # Compatibility path for tests/older external callers passing Candle objects or dicts.
     rows = []
     for item in candles:
         try:
@@ -1188,8 +1298,12 @@ def _prepare_m5_arrays(candles: list[Any]) -> tuple[dict[str, np.ndarray], np.nd
         gap = gap + 1 if absent else 0
         max_gap = max(max_gap, gap)
     if missing_count:
-        c_series = pd.Series(c).ffill().bfill()
-        c = c_series.to_numpy(dtype=float)
+        known = np.flatnonzero(~missing)
+        if not known.size:
+            raise ValueError('Riwayat M5 tidak memiliki close valid untuk mengisi gap')
+        last_known = np.maximum.accumulate(np.where(~missing, np.arange(n), -1))
+        last_known[:known[0]] = known[0]
+        c = c[last_known]
         o = np.where(np.isfinite(o), o, c)
         h = np.where(np.isfinite(h), h, c)
         l = np.where(np.isfinite(l), l, c)
@@ -1299,7 +1413,7 @@ async def generate_setup(pair: str, context: dict[str, Any] | None = None) -> di
     if str(source or '').upper() not in {'BINANCE', 'BINANCE_PUBLIC', 'BINANCE_REST'}:
         raise RuntimeError(f'Sumber candle tidak diizinkan untuk V10: {source!r}')
 
-    arrays, timestamps, data_info = _prepare_m5_arrays(list(candles))
+    arrays, timestamps, data_info = _prepare_m5_arrays(candles)
     now_ms = int(time.time() * 1000)
     stale_ms = now_ms - int(data_info['last_close_time_ms'])
     if stale_ms > 10 * 60_000:
