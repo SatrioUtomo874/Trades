@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "saved_at": "2026-11-02T04:04:36.739497+00:00",
+  "saved_at": "2026-11-02T06:26:07.043270+00:00",
   "bans": [
     {
-      "pair": "BROCCOLIF3BUSDT",
-      "banned_at": "2026-11-01T20:08:08.516539+00:00",
-      "until": "2026-11-02T04:08:08.516508+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
+      "pair": "CYBERUSDT",
+      "banned_at": "2026-11-02T06:26:07.043092+00:00",
+      "until": "2026-11-03T06:26:07.043013+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     },
     {
       "pair": "FUSDT",
@@ -36,13 +36,6 @@
       "until": "2026-11-03T00:07:03.921581+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
-    },
-    {
-      "pair": "THEUSDT",
-      "banned_at": "2026-11-01T21:15:08.038696+00:00",
-      "until": "2026-11-02T05:15:08.038666+00:00",
-      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
-      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "VVVUSDT",
