@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-02T06:44:20.243852+00:00",
+  "saved_at": "2026-11-02T06:56:01.747253+00:00",
   "bans": [
     {
       "pair": "CYBERUSDT",
@@ -43,6 +43,13 @@
       "until": "2026-11-03T00:07:03.921581+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
+    },
+    {
+      "pair": "STOUSDT",
+      "banned_at": "2026-11-02T06:56:01.747096+00:00",
+      "until": "2026-11-02T14:56:01.747057+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
     },
     {
       "pair": "VVVUSDT",
