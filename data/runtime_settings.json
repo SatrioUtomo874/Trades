@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-02T04:17:48.555607+00:00",
+  "saved_at": "2026-11-02T04:20:44.343745+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -513,9 +513,9 @@
       "FRAXUSDT",
       "BROCCOLIF3BUSDT"
     ],
-    "cursor": 388,
+    "cursor": 400,
     "sweep_number": 9,
     "batch_size": 50,
-    "updated_at": "2026-11-02T04:17:48.555648+00:00"
+    "updated_at": "2026-11-02T04:20:44.343784+00:00"
   }
 }
