@@ -395,3 +395,36 @@ Tidak ada trailing.
 - Filled: 2026-11-01T14:25:00+00:00
 - Closed: 2026-11-02T07:56:51.044907+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
+
+---
+
+## PORTALUSDT — SELL
+
+Trade ID: `PORTALUSDT-20261102-043917-9DEC0C`
+
+### Setup
+
+- Price Now Reference: 0.01317
+- Entry: 0.01297
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | paper fill 0.01297
+- Price Exp: 0.01203
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.01344
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.01203
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.01301
+- Result Reason: Manual /close. PnL negatif, sehingga hasil dicatat sebagai SL (PnL -0.31%).
+- PnL: -0.3084040092521202775636083269%
+- Created: 2026-11-01T20:10:00+00:00
+- Filled: 2026-11-01T20:25:00+00:00
+- Closed: 2026-11-02T07:57:13.443773+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
