@@ -131,3 +131,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-11-02T00:00:00.542366+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
+
+---
+
+## STEEMUSDT — SELL
+
+Trade ID: `STEEMUSDT-20261102-052522-96744E`
+
+### Setup
+
+- Price Now Reference: 0.04991
+- Entry: 0.05017
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | order limit 0.05017
+- Price Exp: 0.04942
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.05054
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.04942
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: SL
+- Exit Price: 0.05054
+- Result Reason: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- PnL: -0.7174172977281785571941012356%
+- Created: 2026-11-01T22:20:00+00:00
+- Filled: 2026-11-01T23:13:29.668069+00:00
+- Closed: 2026-11-02T00:06:51.441153+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
