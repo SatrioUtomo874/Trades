@@ -98,3 +98,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-11-01T21:15:01.157838+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
+
+---
+
+## MOCAUSDT — SELL
+
+Trade ID: `MOCAUSDT-20261102-010014-7FFA2C`
+
+### Setup
+
+- Price Now Reference: 0.008131
+- Entry: 0.008135
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | order limit 0.008135
+- Price Exp: 0.007959
+- Reason Price Exp: TTL bar M5 ke-73 (sekitar 6 jam 5 menit), sesuai PEND_WIN=72: limit entry belum tersentuh.
+- SL: 0.008223
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.007959
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.008083
+- Result Reason: TTL bar M5 ke-73 (sekitar 6 jam 5 menit), sesuai PEND_WIN=72: limit entry belum tersentuh.
+- PnL: -
+- Created: 2026-11-01T17:55:00+00:00
+- Filled: -
+- Closed: 2026-11-02T00:00:00.542366+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
