@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-02T07:57:08.264161+00:00",
+  "saved_at": "2026-11-02T07:57:26.641898+00:00",
   "bans": [
     {
       "pair": "CYBERUSDT",
@@ -34,6 +34,13 @@
       "pair": "MOVEUSDT",
       "banned_at": "2026-11-02T03:25:17.846770+00:00",
       "until": "2026-11-03T03:25:17.846733+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
+    },
+    {
+      "pair": "PORTALUSDT",
+      "banned_at": "2026-11-02T07:57:26.641742+00:00",
+      "until": "2026-11-03T07:57:26.641709+00:00",
       "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
       "source": "AUTO_SL"
     },
