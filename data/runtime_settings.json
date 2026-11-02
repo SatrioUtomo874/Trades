@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-02T05:16:10.552073+00:00",
+  "saved_at": "2026-11-02T05:20:20.754764+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -348,7 +348,6 @@
       "ALICEUSDT",
       "XTZUSDT",
       "SLPUSDT",
-      "STOUSDT",
       "ESPUSDT",
       "AUCTIONUSDT",
       "API3USDT",
@@ -510,11 +509,12 @@
       "XVSUSDT",
       "ASRUSDT",
       "ASTRUSDT",
-      "FRAXUSDT"
+      "FRAXUSDT",
+      "THEUSDT"
     ],
-    "cursor": 150,
+    "cursor": 170,
     "sweep_number": 10,
     "batch_size": 50,
-    "updated_at": "2026-11-02T05:16:10.552109+00:00"
+    "updated_at": "2026-11-02T05:20:20.754806+00:00"
   }
 }
