@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "saved_at": "2026-11-02T07:57:26.641898+00:00",
+  "saved_at": "2026-11-02T07:57:48.748924+00:00",
   "bans": [
+    {
+      "pair": "AVAAIUSDT",
+      "banned_at": "2026-11-02T07:57:48.748761+00:00",
+      "until": "2026-11-03T07:57:48.748734+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
+    },
     {
       "pair": "CYBERUSDT",
       "banned_at": "2026-11-02T06:26:07.043092+00:00",
