@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-02T06:26:07.043270+00:00",
+  "saved_at": "2026-11-02T06:44:20.243852+00:00",
   "bans": [
     {
       "pair": "CYBERUSDT",
@@ -15,6 +15,13 @@
       "until": "2026-11-02T19:13:10.727402+00:00",
       "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
       "source": "AUTO_TP"
+    },
+    {
+      "pair": "HYPEUSDT",
+      "banned_at": "2026-11-02T06:44:20.243684+00:00",
+      "until": "2026-11-03T06:44:20.243650+00:00",
+      "reason": "Setup berakhir SL; pair dikunci sementara dari scanner.",
+      "source": "AUTO_SL"
     },
     {
       "pair": "MOCAUSDT",
