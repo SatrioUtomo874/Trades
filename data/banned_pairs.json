@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-11-02T00:07:03.921773+00:00",
+  "saved_at": "2026-11-02T00:19:49.643171+00:00",
   "bans": [
     {
       "pair": "BROCCOLIF3BUSDT",
@@ -36,6 +36,13 @@
       "until": "2026-11-02T05:15:08.038666+00:00",
       "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
       "source": "AUTO_PRICE_EXP"
+    },
+    {
+      "pair": "WETUSDT",
+      "banned_at": "2026-11-02T00:19:49.642979+00:00",
+      "until": "2026-11-03T00:19:49.642944+00:00",
+      "reason": "Setup berakhir TP; pair dikunci sementara dari scanner.",
+      "source": "AUTO_TP"
     }
   ]
 }
