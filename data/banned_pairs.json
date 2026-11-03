@@ -1,5 +1,13 @@
 {
   "version": 1,
-  "saved_at": "2026-11-02T15:54:44.292129+00:00",
-  "bans": []
+  "saved_at": "2026-11-03T02:57:58.721690+00:00",
+  "bans": [
+    {
+      "pair": "TURBOUSDT",
+      "banned_at": "2026-11-03T02:57:58.721551+00:00",
+      "until": "2026-11-03T10:57:58.721517+00:00",
+      "reason": "Setup berakhir karena Price Exp tercapai sebelum entry.",
+      "source": "AUTO_PRICE_EXP"
+    }
+  ]
 }
