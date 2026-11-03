@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "saved_at": "2026-11-03T00:46:12.277794+00:00",
-  "saved_at_wib": "03-11-2026, 07:46 WIB",
+  "saved_at": "2026-11-03T00:48:57.181304+00:00",
+  "saved_at_wib": "03-11-2026, 07:48 WIB",
   "count": 1,
   "setups": [
     {
@@ -392,10 +392,10 @@
       "target_notional": "10",
       "actual_notional": "10.0001786",
       "real_enabled": true,
-      "real_state": "REAL_PENDING",
+      "real_state": "REAL_LIMIT_HOLD",
       "position_side": "BOTH",
-      "entry_order_id": 8376779145,
-      "entry_client_order_id": "V10-deec7578e83fe9a790821d86",
+      "entry_order_id": null,
+      "entry_client_order_id": null,
       "tp_algo_id": null,
       "sl_algo_id": null,
       "tp_client_algo_id": null,
@@ -582,7 +582,8 @@
             "vp_profile_bars": 0,
             "vp_profile_valid_bars": 0
           }
-        }
+        },
+        "real_entry_attempt": 1
       },
       "risk_pct_initial": "0.6877397169686549398227747652",
       "realized_r": "0"
