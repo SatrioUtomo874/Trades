@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-03T08:02:27.305141+00:00",
+  "saved_at": "2026-11-03T08:02:52.795999+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -522,11 +522,17 @@
       "ASRUSDT",
       "BNTUSDT",
       "JOEUSDT",
-      "XVSUSDT"
+      "XVSUSDT",
+      "牛来USDT",
+      "PONSUSDT",
+      "CTUSDT",
+      "MARSCOINUSDT",
+      "PREDICTUSDT",
+      "哈基米USDT"
     ],
-    "cursor": 107,
+    "cursor": 109,
     "sweep_number": 15,
     "batch_size": 50,
-    "updated_at": "2026-11-03T08:02:27.305190+00:00"
+    "updated_at": "2026-11-03T08:02:52.796050+00:00"
   }
 }
