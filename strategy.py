@@ -525,7 +525,7 @@ def mk(sym, dr, ot, kf, k, fp, E, sl, tp, ex, res, zone, ctx, P):
                 R_net=(ex - fp) / risk - P['COST'] * abs(fp) / risk, **ctx)
 
 
-def run_frame(sym, dr, F, bias, ot, P, include_state=False):
+def run_frame(sym, dr, F, bias, ot, P, include_state=False, *, collect_events=True, collect_trades=True, show_progress=True):
     NP = P['NP']; m5, m15, h4, d1 = F['m5'], F['m15'], F['h4'], F['d1']
     o5, h5, l5, c5 = m5['o'], m5['h'], m5['l'], m5['c']
     o15, h15, l15, c15 = m15['o'], m15['h'], m15['l'], m15['c']
@@ -643,11 +643,19 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
                 mss_timeout=0, mss_low_broken=0, bos_timeout=0, order_expired=0, no_entry_zone=0, order_rejected=0, invalid_fill_touch=0, bias_reset=0, short_bias_h4_reject=0, long_momentum_filtered=0, long_quality_filtered=0, poi_vp_candidates_seen=0, poi_vp_rejected=0, poi_vp_accepted=0, poi_vp_profile_unavailable=0)
     trades = []; events = []; setup_id = 0; poi_id = 0; poi_type = ''; st = -1; cur = -1; active = False; org1 = 0
     event_seq = 0; attempt_seq = 0; current_attempt_id = 0
+    last_event_name = "NONE"; last_vp_reject_reason = None
     retouch_required = False; poi_exit_seen_after_failure = False
     aoi = (np.nan, np.nan); poi = (np.nan, np.nan); poi_vp_context = {}; k_aoi = k_poi = k_touch = m_touch = k_mss = i_lo5 = k_set = kf = 0
     L = E = SL = TP = fp = np.nan; zone = ''; ctx = {}
     def emit(event, k, **extra):
-        nonlocal event_seq
+        nonlocal event_seq, last_event_name, last_vp_reject_reason
+        last_event_name = str(event)
+        if event == 'POI_VP_REJECTED':
+            last_vp_reject_reason = extra.get('vp_reject_reason')
+        # Live mode needs only the latest event label and VP reject reason. Avoid
+        # allocating hundreds of historical dictionaries during each replay.
+        if not collect_events:
+            return
         event_seq += 1
         # Event fields are in actual market price coordinates, also for mirrored SHORT runs.
         rec = dict(sym=sym, dir='LONG' if dr == 1 else 'SHORT', event=event, event_seq=int(event_seq), bar=int(k),
@@ -672,7 +680,7 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
             poi_exit_seen_after_failure = False
     progress_step = max(1, len(o5) // 10)
     for k in range(len(o5)):
-        if k > 0 and k % progress_step == 0:
+        if show_progress and k > 0 and k % progress_step == 0:
             print(f'    {sym} {"LONG" if dr == 1 else "SHORT"}: simulasi {min(100, round(k / max(len(o5)-1, 1) * 100))}% ({k:,}/{len(o5):,} candle)', flush=True)
         # --- intrabar: posisi & order ---
         if st == 7 and k > kf:
@@ -681,7 +689,8 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
             elif h5[k] >= TP: ex, res = TP, 'TP'
             elif k - kf >= P['HOLD']: ex, res = c5[k], 'TO'
             if ex is not None:
-                trades.append(mk(sym, dr, ot, kf, k, fp, E, SL, TP, ex, res, zone, ctx, P)); emit('TRADE_EXIT', k, result=res, exit_price=float(ex * dr), entry_price=float(fp * dr), sl_price=float(SL * dr), tp_price=float(TP * dr)); st = 0 if active else -1; current_attempt_id = 0
+                if collect_trades: trades.append(mk(sym, dr, ot, kf, k, fp, E, SL, TP, ex, res, zone, ctx, P))
+                emit('TRADE_EXIT', k, result=res, exit_price=float(ex * dr), entry_price=float(fp * dr), sl_price=float(SL * dr), tp_price=float(TP * dr)); st = 0 if active else -1; current_attempt_id = 0
         elif st == 6:
             if l5[k] <= E:
                 f = min(o5[k], E)
@@ -692,7 +701,8 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
                     if l5[k] <= SL: ex, res = SL, 'SL'
                     elif h5[k] >= TP: ex, res = TP, 'TP'
                     if ex is not None:
-                        trades.append(mk(sym, dr, ot, kf, k, fp, E, SL, TP, ex, res, zone, ctx, P)); emit('TRADE_EXIT', k, result=res, exit_price=float(ex * dr), entry_price=float(fp * dr), sl_price=float(SL * dr), tp_price=float(TP * dr)); st = 0 if active else -1; current_attempt_id = 0
+                        if collect_trades: trades.append(mk(sym, dr, ot, kf, k, fp, E, SL, TP, ex, res, zone, ctx, P))
+                        emit('TRADE_EXIT', k, result=res, exit_price=float(ex * dr), entry_price=float(fp * dr), sl_price=float(SL * dr), tp_price=float(TP * dr)); st = 0 if active else -1; current_attempt_id = 0
                 else:
                     cnt['invalid_fill_touch'] += 1; emit('ORDER_INVALIDATED_AT_TOUCH', k, reason='fill_price_not_above_sl', fill_price=float(f*dr), order_price=float(E*dr), sl_price=float(SL*dr))
                     rearm_after_failure(k)
@@ -1013,7 +1023,8 @@ def run_frame(sym, dr, F, bias, ot, P, include_state=False):
             'poi_id': int(poi_id),
             'attempt_id': int(current_attempt_id),
             'entry_context': dict(ctx) if isinstance(ctx, dict) else {},
-            'last_event': str(events[-1].get('event')) if events else 'NONE',
+            'last_event': last_event_name,
+            'last_vp_reject_reason': last_vp_reject_reason,
         }
         return trades, cnt, events, state_snapshot
     return trades, cnt, events
@@ -1351,7 +1362,8 @@ def _analyze_v10_arrays(pair: str, a5: dict[str, np.ndarray], ot: np.ndarray,
     summaries = {}
     for direction in (1, -1):
         _trades, counts, _events, state = run_frame(
-            pair, direction, frames[direction], bias, ot, V10_LIVE_PARAMS, include_state=True
+            pair, direction, frames[direction], bias, ot, V10_LIVE_PARAMS,
+            include_state=True, collect_events=False, collect_trades=False, show_progress=False
         )
         state['direction'] = 'LONG' if direction == 1 else 'SHORT'
         state['counts'] = counts
@@ -1368,7 +1380,7 @@ def _analyze_v10_arrays(pair: str, a5: dict[str, np.ndarray], ot: np.ndarray,
             'vp_rejected': counts.get('poi_vp_rejected', 0),
             'vp_accepted': counts.get('poi_vp_accepted', 0),
             'vp_profile_unavailable': counts.get('poi_vp_profile_unavailable', 0),
-            'last_vp_reject_reason': next((e.get('vp_reject_reason') for e in reversed(_events) if e.get('event') == 'POI_VP_REJECTED'), None),
+            'last_vp_reject_reason': state.get('last_vp_reject_reason'),
         }
         if state['state'] in (6, 7):
             states.append(state)
