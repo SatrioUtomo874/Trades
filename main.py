@@ -168,6 +168,8 @@ RESET_PATHS = (
 
 HTTP_REQUEST_SECONDS = 20
 GITHUB_REQUEST_SECONDS = 30
+# Pace public Binance REST calls below the IP-weight ceiling during cold history sync.
+BINANCE_PUBLIC_REQUEST_SPACING_SECONDS = 0.18
 BINANCE_RECV_WINDOW = 5000
 BINANCE_RATE_LIMIT_FALLBACK_SECONDS = 60
 BINANCE_RATE_LIMIT_SAFETY_SECONDS = 60
@@ -224,7 +226,7 @@ M5_WATCH_MAX_CANDIDATES = max(2, min(64, int(os.getenv("M5_WATCH_MAX_CANDIDATES"
 V10_BOS_TIMEOUT_M5_BARS = 144  # Tactical V10: BOS_WIN=144, dihitung dari close MSS.
 V10_WATCH_INTERVAL_MS = 300_000
 V10_CANDIDATE_SCHEMA_VERSION = 1
-MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "400") or "400")
+MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "360") or "360")
 MEMORY_SCAN_PAUSE_PCT = float(os.getenv("MEMORY_SCAN_PAUSE_PCT", "85") or "85")
 MEMORY_SCAN_RESUME_PCT = float(os.getenv("MEMORY_SCAN_RESUME_PCT", "72") or "72")
 MEMORY_SCAN_POLL_SECONDS = 10.0
@@ -1182,13 +1184,13 @@ class ApiStats:
 
 API_STATS = ApiStats()
 
-# Compact representation of only the eight Binance kline fields consumed by V10:
-# open time, OHLC, base volume, quote volume, and taker-buy base volume.
-# A 66-day M5 history is about 1.2 MB instead of a much larger object graph
+# Compact representation of only the seven fields consumed by V10:
+# open time, OHLC, base volume, and quote volume. Taker-buy volume is unused.
+# A 66-day M5 history is about 1.02 MiB instead of a much larger object graph
 # of nested Python lists and strings.
 KLINE_CACHE_DTYPE = np.dtype([
     ("t", "<i8"), ("o", "<f8"), ("h", "<f8"), ("l", "<f8"),
-    ("c", "<f8"), ("v", "<f8"), ("qv", "<f8"), ("tb", "<f8"),
+    ("c", "<f8"), ("v", "<f8"), ("qv", "<f8"),
 ])
 
 
@@ -1207,12 +1209,29 @@ class BinanceREST:
         self._exchange_info_cache_ttl_seconds = 900.0
         self._ticker_24h_cache: list[dict[str, Any]] | None = None
         self._ticker_24h_cached_at = 0.0
-        self._ticker_24h_cache_ttl_seconds = 60.0
+        # Universe ranking is based on rolling 24h volume; refreshing every 5 minutes
+        # is sufficient and avoids repeating the 40-weight all-symbol ticker call per batch.
+        self._ticker_24h_cache_ttl_seconds = 300.0
         # One REST owner for the whole process. Kline cache is bounded by both
         # entry count and candle count; strategy.py never opens its own socket.
         self._request_lock = asyncio.Lock()
+        # Reuse TCP/TLS connections for sequential REST calls; request lock means
+        # this session is never used concurrently by the public market-data client.
+        self._session = requests.Session()
         self._last_request_monotonic = 0.0
         self._rest_cooldown_until = 0.0
+        # Compressed-in-RAM policy: keep the existing small LRU RAM cache, but also
+        # keep raw NumPy kline arrays on Render ephemeral disk so later H4 sweeps
+        # only fetch candles added since the previous scan. This is a cache, not state storage.
+        self._kline_disk_cache_dir = Path(
+            os.getenv("BINANCE_KLINE_DISK_CACHE_DIR")
+            or (Path(tempfile.gettempdir()) / "tactical_v10_kline_cache")
+        )
+        self._kline_disk_cache_max_bytes = max(32, int(os.getenv("KLINE_DISK_CACHE_MAX_MB", "512") or "512")) * 1024 * 1024
+        self._kline_disk_cache_lock = threading.RLock()
+        self._kline_disk_cache_hits = 0
+        self._kline_disk_cache_misses = 0
+        self._kline_disk_cache_writes = 0
         self._kline_cache: OrderedDict[tuple[str, str, int], tuple[float, np.ndarray]] = OrderedDict()
         self._kline_locks: dict[tuple[str, str, int], asyncio.Lock] = {}
         self._kline_cache_candles = 0
@@ -1232,12 +1251,12 @@ class BinanceREST:
             if wait > 0:
                 log.warning("[BINANCE REST] cooldown aktif %.1fs; request %s ditahan", wait, path)
                 await asyncio.sleep(wait)
-            spacing = self._last_request_monotonic + 0.12 - time.monotonic()
+            spacing = self._last_request_monotonic + BINANCE_PUBLIC_REQUEST_SPACING_SECONDS - time.monotonic()
             if spacing > 0:
                 await asyncio.sleep(spacing)
 
             def request() -> tuple[int, Any, dict[str, str], str]:
-                response = requests.get(
+                response = self._session.get(
                     f"{self.base_url}{path}", params=params,
                     timeout=HTTP_REQUEST_SECONDS,
                 )
@@ -1297,7 +1316,7 @@ class BinanceREST:
     @staticmethod
     def _pack_kline_rows(rows: list[list[Any]], span_ms: int, now_ms: int) -> np.ndarray:
         """Convert Binance JSON kline rows immediately into a compact numeric array."""
-        packed: list[tuple[int, float, float, float, float, float, float, float]] = []
+        packed: list[tuple[int, float, float, float, float, float, float]] = []
         for row in rows:
             if not isinstance(row, (list, tuple)) or len(row) < 10:
                 continue
@@ -1305,9 +1324,11 @@ class BinanceREST:
                 open_ms = int(row[0])
                 if open_ms + span_ms > now_ms:
                     continue  # closed candles only
+                # V10 consumes OHLC + base/quote volume. Taker-buy volume (row[9])
+                # is not used by strategy.py, so omit it from the compact cache.
                 values = (
                     float(row[1]), float(row[2]), float(row[3]), float(row[4]),
-                    float(row[5]), float(row[7]), float(row[9]),
+                    float(row[5]), float(row[7]),
                 )
                 if not all(math.isfinite(value) for value in values):
                     continue
@@ -1351,6 +1372,119 @@ class BinanceREST:
             _old_key, (_at, old_rows) = self._kline_cache.popitem(last=False)
             self._kline_cache_candles = max(0, self._kline_cache_candles - int(old_rows.shape[0]))
 
+    def _kline_disk_path(self, key: tuple[str, str, int]) -> Path:
+        symbol, interval, count = key
+        safe_symbol = re.sub(r"[^A-Z0-9]", "", str(symbol).upper())
+        safe_interval = re.sub(r"[^a-z0-9]", "", str(interval).lower())
+        return self._kline_disk_cache_dir / f"{safe_symbol}_{safe_interval}_{int(count)}.npy"
+
+    def _load_kline_disk_cache(
+        self, key: tuple[str, str, int], count: int
+    ) -> tuple[float, np.ndarray] | None:
+        """Load a validated read-only .npy memmap; disk is only a rebuildable cache."""
+        path = self._kline_disk_path(key)
+        try:
+            stat = path.stat()
+            if stat.st_size <= 0:
+                raise ValueError("file cache kosong")
+            rows = np.load(path, mmap_mode="r", allow_pickle=False)
+            if (
+                not isinstance(rows, np.ndarray)
+                or rows.ndim != 1
+                or rows.dtype != KLINE_CACHE_DTYPE
+                or rows.shape[0] < int(count)
+            ):
+                try:
+                    rows._mmap.close()
+                except Exception:
+                    pass
+                raise ValueError("schema/ukuran cache tidak cocok")
+            rows = rows[-int(count):]
+            age_seconds = max(0.0, time.time() - stat.st_mtime)
+            self._kline_disk_cache_hits += 1
+            return time.monotonic() - age_seconds, rows
+        except FileNotFoundError:
+            self._kline_disk_cache_misses += 1
+            return None
+        except Exception as exc:
+            self._kline_disk_cache_misses += 1
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            log.warning("[KLINE CACHE] disk cache %s diabaikan: %s", path.name, str(exc)[:120])
+            return None
+
+    def _prune_kline_disk_cache(self, keep_path: Path | None = None) -> None:
+        """Bound ephemeral disk use without touching the in-memory/watch cache."""
+        try:
+            files = []
+            total_bytes = 0
+            for path in self._kline_disk_cache_dir.glob("*.npy"):
+                try:
+                    stat = path.stat()
+                    files.append((stat.st_mtime, stat.st_size, path))
+                    total_bytes += stat.st_size
+                except OSError:
+                    continue
+            if total_bytes <= self._kline_disk_cache_max_bytes:
+                return
+            files.sort(key=lambda item: item[0])
+            for _mtime, size, path in files:
+                if total_bytes <= self._kline_disk_cache_max_bytes:
+                    break
+                if keep_path is not None and path == keep_path:
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                    total_bytes -= size
+                except OSError:
+                    continue
+        except Exception as exc:
+            log.debug("[KLINE CACHE] prune disk dilewati: %s", str(exc)[:120])
+
+    def _write_kline_disk_cache(self, key: tuple[str, str, int], rows: np.ndarray) -> None:
+        """Atomically persist one compact history; failure never blocks Binance trading."""
+        path = self._kline_disk_path(key)
+        tmp_path: Path | None = None
+        try:
+            with self._kline_disk_cache_lock:
+                self._kline_disk_cache_dir.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", prefix=path.name + ".", suffix=".tmp",
+                    dir=self._kline_disk_cache_dir, delete=False,
+                ) as handle:
+                    tmp_path = Path(handle.name)
+                    np.save(handle, rows, allow_pickle=False)
+                    handle.flush()
+                os.replace(tmp_path, path)
+                self._kline_disk_cache_writes += 1
+                self._prune_kline_disk_cache(keep_path=path)
+        except Exception as exc:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            log.warning("[KLINE CACHE] gagal menyimpan disk cache %s: %s", path.name, str(exc)[:120])
+
+    def _adopt_disk_kline_cache(
+        self, key: tuple[str, str, int], cached: tuple[float, np.ndarray]
+    ) -> None:
+        """Attach a read-only memmap to the bounded RAM LRU without copying its bytes."""
+        old = self._kline_cache.pop(key, None)
+        if old is not None:
+            self._kline_cache_candles = max(0, self._kline_cache_candles - int(old[1].shape[0]))
+        self._kline_cache[key] = cached
+        self._kline_cache_candles += int(cached[1].shape[0])
+        self._kline_cache.move_to_end(key)
+        while (
+            len(self._kline_cache) > self._kline_cache_max_entries
+            or self._kline_cache_candles > self._kline_cache_max_candles
+        ):
+            _old_key, (_at, old_rows) = self._kline_cache.popitem(last=False)
+            self._kline_cache_candles = max(0, self._kline_cache_candles - int(old_rows.shape[0]))
+
     async def get_klines(
         self, symbol: str, interval: str, count: int, interval_ms: int | None = None,
         *, force_refresh: bool = False,
@@ -1385,6 +1519,11 @@ class BinanceREST:
         now = time.monotonic()
         ttl = self._kline_cache_ttl.get(api_interval, 60.0)
         cached_exact = self._kline_cache.get(key)
+        if cached_exact is None:
+            disk_cached = self._load_kline_disk_cache(key, count)
+            if disk_cached is not None:
+                self._adopt_disk_kline_cache(key, disk_cached)
+                cached_exact = self._kline_cache.get(key)
 
         if cached_exact and cached_exact[1].shape[0] >= count:
             cached_rows = cached_exact[1][-count:]
@@ -1434,6 +1573,8 @@ class BinanceREST:
                     f"{rows.shape[0]}/{count}."
                 )
             self._store_kline_cache(key, rows)
+            # Never block the Telegram/WebSocket event loop with disk writes.
+            await asyncio.to_thread(self._write_kline_disk_cache, key, self._kline_cache[key][1])
             return self._kline_cache[key][1]
 
         if not force_refresh:
@@ -1490,19 +1631,37 @@ class BinanceREST:
             raise error
 
         self._store_kline_cache(key, rows)
+        await asyncio.to_thread(self._write_kline_disk_cache, key, self._kline_cache[key][1])
         # Return the cached ndarray itself; consumer promises not to mutate it.
         return self._kline_cache[key][1]
 
     def kline_cache_stats(self) -> dict[str, Any]:
         approx_bytes = sum(int(rows.nbytes) for _at, rows in self._kline_cache.values())
+        disk_bytes = 0
+        disk_entries = 0
+        try:
+            for path in self._kline_disk_cache_dir.glob("*.npy"):
+                try:
+                    disk_bytes += path.stat().st_size
+                    disk_entries += 1
+                except OSError:
+                    continue
+        except OSError:
+            pass
         return {
             "entries": len(self._kline_cache),
             "candles": self._kline_cache_candles,
             "approx_mb": round(approx_bytes / (1024 * 1024), 3),
             "max_entries": self._kline_cache_max_entries,
             "max_candles": self._kline_cache_max_candles,
+            "disk_entries": disk_entries,
+            "disk_mb": round(disk_bytes / (1024 * 1024), 2),
+            "disk_max_mb": round(self._kline_disk_cache_max_bytes / (1024 * 1024), 0),
+            "disk_hits": self._kline_disk_cache_hits,
+            "disk_misses": self._kline_disk_cache_misses,
+            "disk_writes": self._kline_disk_cache_writes,
             "owner": "main.py",
-            "storage": "numpy_structured_array",
+            "storage": "numpy_structured_array + bounded_ephemeral_npy_cache",
         }
 
     def trim_kline_cache(self, fraction: float = 0.5, pair: str | None = None) -> int:
@@ -3124,7 +3283,8 @@ class GitHubStore:
 # ============================================================
 
 SCAN_VALIDATE_TOP_N = 6            # validator hanya untuk kandidat confidence tertinggi per batch
-SCAN_MIN_API_HEADROOM_PCT = 10.0   # berhenti sementara bila sisa bobot IP di bawah ini
+SCAN_MIN_API_HEADROOM_PCT = 30.0   # scan universe berhenti lebih awal untuk melindungi watcher dan eksekusi REAL
+M5_WATCH_MIN_API_HEADROOM_PCT = 10.0  # watcher kandidat tetap diprioritaskan sampai sisa bobot tinggal 10%
 SCAN_CYCLE_TIME_BUDGET_SECONDS = 240.0
 SCAN_BATCH_GAP_SECONDS = 5.0       # jeda antar batch di dalam window H4
 SCAN_SWEEP_GAP_NORMAL_SECONDS = 0.0    # jeda 5s utama ditangani oleh SCAN_CYCLE_DELAY_SECONDS
@@ -7418,7 +7578,7 @@ class TradingEngine:
         head = self._api_headroom_pct()
         rows = [
             f"🧠 RAM {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB • level {self._ram_level} • scan {'PAUSED' if self._scan_paused_for_ram else 'ACTIVE'}",
-            f"🗃 Cache candle {cache.get('entries', 0)} entri / {cache.get('candles', 0)} candle • {cache.get('approx_mb', 0)} MB (numeric/compact)",
+            f"🗃 Cache RAM {cache.get('entries', 0)} entri / {cache.get('candles', 0)} candle • {cache.get('approx_mb', 0)} MB | disk {cache.get('disk_entries', 0)} pair / {cache.get('disk_mb', 0)} MB | hit {cache.get('disk_hits', 0)}",
             f"🛰 Batch terakhir {('-' if not durs else f'{durs[-1]:.0f}s')} • putaran {self._scan_sweep_number + 1} • posisi {self._scan_sweep_cursor}/{len(self._scan_sweep_pairs) or '-'}",
             f"📡 API headroom {('-' if head is None else f'{head:.0f}%')} • 429/418 {API_STATS.limit_hits}x",
             f"🪜 Trail {self.trail_mode.upper()}",
@@ -7823,7 +7983,7 @@ class TradingEngine:
                     await asyncio.sleep(M5_WATCH_POLL_SECONDS)
                     continue
                 headroom = self._api_headroom_pct()
-                if headroom is not None and headroom < SCAN_MIN_API_HEADROOM_PCT:
+                if headroom is not None and headroom < M5_WATCH_MIN_API_HEADROOM_PCT:
                     await asyncio.sleep(M5_WATCH_POLL_SECONDS * 2)
                     continue
 
