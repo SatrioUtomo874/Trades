@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-03T23:16:08.903617+00:00",
+  "saved_at": "2026-11-03T23:18:31.800149+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -531,9 +531,9 @@
       "哈基米USDT",
       "TURBOUSDT"
     ],
-    "cursor": 171,
+    "cursor": 176,
     "sweep_number": 15,
     "batch_size": 50,
-    "updated_at": "2026-11-03T23:16:08.903662+00:00"
+    "updated_at": "2026-11-03T23:18:31.800177+00:00"
   }
 }
