@@ -593,3 +593,36 @@ Tidak ada trailing.
 - Filled: -
 - Closed: 2026-11-02T21:47:03.091797+00:00
 - Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
+
+---
+
+## TURBOUSDT — SELL
+
+Trade ID: `TURBOUSDT-20261103-074605-E66ED0`
+
+### Setup
+
+- Price Now Reference: 0.0007542
+- Entry: 0.0007561
+- Reason Entry: Tactical V10 E_GE2_ATR | SHORT | D1 bias | H4 POI OB | MSS literal M15 → BOS M5 | M5 entry FVG | order limit 0.0007561
+- Price Exp: 0.0007457
+- Reason Price Exp: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- SL: 0.0007613
+- Reason SL: V10 SL: ekstrem range 12 candle M15 terakhir pada konfirmasi MSS literal.
+- TP: 0.0007457
+- Reason TP: V10 fixed target dengan RR gross 1:2 dari harga order limit.
+
+### Management
+
+Tidak ada trailing.
+
+### Result
+
+- Result: EXPIRED
+- Exit Price: 0.0007457
+- Result Reason: Pending V10: invalidasi bila harga menyentuh TP sebelum limit terisi atau melewati 72 candle M5.
+- PnL: 0%
+- Created: 2026-11-03T00:40:00+00:00
+- Filled: -
+- Closed: 2026-11-03T02:57:50.683389+00:00
+- Strategy: TACTICAL_V10_E_GE2_ATR v10.1.0-LONG-VA70-SHORT-BASELINE
