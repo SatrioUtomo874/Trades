@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "saved_at": "2026-11-03T08:04:05.702499+00:00",
+  "saved_at": "2026-11-03T08:04:44.104175+00:00",
   "guard": {
     "trail_mode": "structure_m15",
     "h4_sweeps": 2,
@@ -530,9 +530,9 @@
       "PREDICTUSDT",
       "哈基米USDT"
     ],
-    "cursor": 109,
+    "cursor": 114,
     "sweep_number": 15,
     "batch_size": 50,
-    "updated_at": "2026-11-03T08:04:05.702527+00:00"
+    "updated_at": "2026-11-03T08:04:44.104204+00:00"
   }
 }
