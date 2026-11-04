@@ -3,7 +3,7 @@
   "timeframe": "H4",
   "ema_filter_length": 100,
   "scan_enabled": false,
-  "max_active_trades": 8,
+  "max_active_trades": 6,
   "margin_usdt": "0.5",
   "leverage": 10,
   "min_margin_enabled": true,
@@ -14,5 +14,5 @@
   "autostop_source": "PAPER",
   "last_processed_candles": {},
   "last_position_candles": {},
-  "updated_at": "2026-11-04T16:19:09.219768+00:00"
+  "updated_at": "2026-11-04T16:19:12.981054+00:00"
 }
