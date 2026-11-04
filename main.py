@@ -127,11 +127,15 @@ WS_RECONNECT_MIN = 2
 WS_RECONNECT_MAX = 60
 PRICE_STALE_SECONDS = 15
 HISTORY_REFRESH_SECONDS = 30
+AUTOSTOP_CHECK_SECONDS = 5.0
+AUTOSTOP_BALANCE_REFRESH_SECONDS = 60.0
+AUTOSTOP_PERSIST_SECONDS = 60.0
 MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "360") or "360")
 
 DEFAULT_MARGIN_USDT = Decimal(os.getenv("DEFAULT_MARGIN_USDT", "0.5") or "0.5")
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "10") or "10")
 SIM_START_BALANCE = Decimal(os.getenv("SIM_START_BALANCE", "100") or "100")
+CONFIG_AUTOSTOP = (os.getenv("AUTOSTOP_PERCENT") or "").strip()
 REAL_NOTIONAL_MIN_RATIO = Decimal("0.90")
 REAL_NOTIONAL_MAX_RATIO = Decimal("1.10")
 REAL_FEE_BUFFER = Decimal("0.001")
@@ -3337,6 +3341,27 @@ class TradingEngine:
         self.timeframe = "H4"
         self.scan_enabled = False
 
+        # Account safety: trailing equity drawdown guard. It pauses NEW scanning
+        # only; it never silently closes existing positions or cancels live orders.
+        self.autostop_percent: Decimal | None = None
+        if CONFIG_AUTOSTOP:
+            try:
+                configured_guard = Decimal(CONFIG_AUTOSTOP.replace(",", "."))
+                if configured_guard.is_finite() and Decimal("0") < configured_guard < Decimal("100"):
+                    self.autostop_percent = configured_guard
+                else:
+                    log.warning("AUTOSTOP_PERCENT harus >0 dan <100; konfigurasi env diabaikan.")
+            except (InvalidOperation, ValueError):
+                log.warning("AUTOSTOP_PERCENT tidak valid; konfigurasi env diabaikan.")
+        self._equity_peak: Decimal | None = None
+        self._equity_last: Decimal | None = None
+        self._autostop_triggered = False
+        self._autostop_last_check = 0.0
+        self._autostop_last_persist = 0.0
+        self._autostop_dirty = False
+        self._autostop_missing_price_notice_at = 0.0
+        self._autostop_source: str | None = None
+
         self.symbols: dict[str, SymbolMeta] = {}
         self.prices: dict[str, PriceSnapshot] = {}
         self.active_trades: dict[str, Trade] = {}
@@ -3458,6 +3483,39 @@ class TradingEngine:
             self.margin_usdt = parse_decimal(payload.get("margin_usdt") or DEFAULT_MARGIN_USDT)
             self.leverage = max(1, min(125, int(payload.get("leverage") or DEFAULT_LEVERAGE)))
             self.min_margin_enabled = bool(payload.get("min_margin_enabled", False))
+            if "autostop_percent" in payload:
+                raw_autostop = payload.get("autostop_percent")
+                if raw_autostop in (None, "", "0", 0):
+                    self.autostop_percent = None
+                else:
+                    try:
+                        guard_value = Decimal(str(raw_autostop))
+                        if guard_value.is_finite() and Decimal("0") < guard_value < Decimal("100"):
+                            self.autostop_percent = guard_value
+                        else:
+                            self.autostop_percent = None
+                            log.warning("Nilai autostop_percent di runtime settings tidak valid; guard OFF.")
+                    except (InvalidOperation, ValueError, TypeError):
+                        self.autostop_percent = None
+                        log.warning("Nilai autostop_percent di runtime settings tidak valid; guard OFF.")
+            raw_peak = payload.get("autostop_peak_equity")
+            raw_last = payload.get("autostop_last_equity")
+            try:
+                peak = Decimal(str(raw_peak)) if raw_peak not in (None, "") else None
+                self._equity_peak = peak if peak is not None and peak.is_finite() and peak > 0 else None
+            except (InvalidOperation, ValueError, TypeError):
+                self._equity_peak = None
+            try:
+                last = Decimal(str(raw_last)) if raw_last not in (None, "") else None
+                self._equity_last = last if last is not None and last.is_finite() else None
+            except (InvalidOperation, ValueError, TypeError):
+                self._equity_last = None
+            self._autostop_triggered = bool(payload.get("autostop_triggered", False))
+            saved_source = str(payload.get("autostop_source") or "").upper()
+            self._autostop_source = saved_source if saved_source in {"REAL", "PAPER"} else None
+            if self._autostop_triggered:
+                # A triggered guard must never resume scanning automatically after restart.
+                self.scan_enabled = False
             processed = payload.get("last_processed_candles") or {}
             if isinstance(processed, dict):
                 self.last_processed_candles = {str(k): int(v) for k, v in processed.items() if str(v).isdigit()}
@@ -3477,6 +3535,11 @@ class TradingEngine:
                 "margin_usdt": decimal_to_str(self.margin_usdt),
                 "leverage": self.leverage,
                 "min_margin_enabled": self.min_margin_enabled,
+                "autostop_percent": decimal_to_str(self.autostop_percent),
+                "autostop_peak_equity": decimal_to_str(self._equity_peak),
+                "autostop_last_equity": decimal_to_str(self._equity_last),
+                "autostop_triggered": self._autostop_triggered,
+                "autostop_source": self._autostop_source,
                 "last_processed_candles": dict(list(self.last_processed_candles.items())[-3000:]),
                 "last_position_candles": dict(list(self.last_position_candles.items())[-3000:]),
                 "updated_at": iso_utc(),
@@ -4881,6 +4944,8 @@ class TradingEngine:
         """Serialized recovery loop: never poll REST during an IP cooldown."""
         while self._running:
             try:
+                # Local-only guard runs even while Binance REST is rate-limited.
+                await self._autostop_check()
                 cooldown = self._binance_cooldown_remaining()
                 if cooldown > 0:
                     self._was_in_binance_cooldown = True
@@ -4924,7 +4989,27 @@ class TradingEngine:
                         except Exception:
                             log.exception("[USER WS] start/reconnect ditunda")
 
-                # Commands are FIFO and only one is executed per pass. /real off
+                # Refresh the REAL wallet snapshot at a low cadence. Autostop itself
+                # never calls REST and therefore remains live during an IP cooldown.
+                has_real_exposure = self.real_mode or any(
+                    t.real_enabled and t.status in {"PENDING", "FILLED"}
+                    for t in self.active_trades.values()
+                )
+                balance_age = (
+                    time.monotonic() - self.real.last_balance_at
+                    if self.real.last_balance_at is not None else float("inf")
+                )
+                if has_real_exposure and balance_age >= AUTOSTOP_BALANCE_REFRESH_SECONDS:
+                    try:
+                        await self.real.get_futures_balance()
+                    except BinanceRateLimitError:
+                        # _request() records the cooldown; cached equity + WebSocket
+                        # prices continue to be used until REST becomes available.
+                        pass
+                    except Exception as exc:
+                        log.warning("[AUTOSTOP] balance snapshot refresh gagal: %s", exc)
+
+                # Commands are FIFO and only one API-dependent command per pass. /real off
                 # remains immediate and can cancel a queued /real on.
                 await self._process_deferred_commands()
 
@@ -5098,6 +5183,25 @@ class TradingEngine:
     async def _on_user_data_event(self, event: dict[str, Any]) -> None:
         """Apply authoritative Binance ORDER_TRADE_UPDATE without REST calls."""
         event_name = str(event.get("e") or "")
+        if event_name == "ACCOUNT_UPDATE":
+            account = event.get("a") if isinstance(event.get("a"), dict) else {}
+            balances = account.get("B") if isinstance(account.get("B"), list) else []
+            for item in balances:
+                if not isinstance(item, dict) or str(item.get("a") or "").upper() != "USDT":
+                    continue
+                cached = self.real.cached_usdt_balance() or {"asset": "USDT"}
+                if item.get("wb") not in (None, ""):
+                    cached["balance"] = str(item.get("wb"))
+                if item.get("cw") not in (None, ""):
+                    cached["crossWalletBalance"] = str(item.get("cw"))
+                self.real.last_balance = cached
+                self.real.last_balance_at = time.monotonic()
+                break
+            # ACCOUNT_UPDATE is authoritative for wallet changes. Unrealized PnL
+            # remains calculated locally from fresh market WebSocket prices to avoid
+            # mixing partial position updates with a stale account-wide total.
+            await self._autostop_check()
+            return
         if event_name != "ORDER_TRADE_UPDATE":
             if event_name == "MARGIN_CALL":
                 await self.reply("🚨 BINANCE MARGIN_CALL diterima. Periksa posisi dan risiko akun LIVE segera.")
@@ -5202,6 +5306,8 @@ class TradingEngine:
             # real orders, so fills do not depend solely on REST polling.
             await self.user_ws.start()
             self.real_mode = True
+            if self.autostop_percent is not None and self._equity_peak is None:
+                await self._autostop_check(force=True)
             await self.reply(
                 "🟢 REAL ON. Order baru akan dikirim ke Binance USD-M Futures LIVE.\n"
                 f"Private User Data WS: {self.user_ws.status}. Fill order dipantau lewat WebSocket; REST hanya untuk reconciliation/aksi yang memang memerlukannya.\n"
@@ -5238,6 +5344,18 @@ class TradingEngine:
             await self.reply(f"Scanner: {'ON' if self.scan_enabled else 'OFF'}\nGunakan /scan on atau /scan off.")
             return
         enable = parts[1].lower() == "on"
+        if enable and self._autostop_triggered:
+            await self.reply(
+                "⛔ Scanner masih dikunci oleh AUTOSTOP. Periksa equity/posisi, "
+                "jalankan /autostop reset, lalu /scan on untuk mengaktifkan kembali."
+            )
+            return
+        if enable and self.autostop_percent is not None and self._equity_peak is None:
+            await self.reply(
+                "⏳ AUTOSTOP belum memiliki baseline equity yang valid. Tunggu balance/mark price "
+                "tersedia, lalu cek /autostop sebelum mengaktifkan scanner."
+            )
+            return
         self.scan_enabled = enable
         if enable:
             self._scan_trigger_now = True
@@ -5476,6 +5594,228 @@ class TradingEngine:
                 )
         await self.reply("\n\n".join(lines) + "\n\nSL: NONE • TP: NONE • Exit: opposite bubble")
 
+    # -------------------------- Account safety --------------------------
+    def _autostop_source_name(self) -> str:
+        return "REAL" if (
+            self.real_mode or any(
+                t.real_enabled and t.status in {"PENDING", "FILLED"}
+                for t in self.active_trades.values()
+            )
+        ) else "PAPER"
+
+    def _autostop_equity(self) -> Decimal | None:
+        """Cached equity only: no Binance REST request is made from the guard."""
+        real_exposure = self._autostop_source_name() == "REAL"
+        floating = Decimal("0")
+        if real_exposure:
+            balance = self.real.cached_usdt_balance()
+            if balance is None:
+                return None
+            try:
+                equity = parse_signed_decimal(str(balance.get("balance") or "0"))
+            except ValueError:
+                return None
+            positions = [
+                t for t in self.active_trades.values()
+                if t.real_enabled and t.status == "FILLED" and t.quantity and t.quantity > 0
+            ]
+            for trade in positions:
+                snapshot = self.prices.get(trade.pair)
+                if snapshot is None or not snapshot.live or trade.fill_price is None:
+                    # Missing/stale mark price must not be interpreted as zero PnL.
+                    return None
+                move = (
+                    snapshot.price - trade.fill_price
+                    if trade.direction == "LONG"
+                    else trade.fill_price - snapshot.price
+                )
+                floating += move * trade.quantity
+            return equity + floating
+
+        # PAPER guard uses the simulation starting balance, realized PAPER PnL,
+        # and locally marked PAPER positions. REAL records are never mixed in.
+        realized = sum((
+            Decimal(str(r.get("pnl_usdt") or "0"))
+            for r in self.history_records
+            if r.get("strategy_name") == volumatic.STRATEGY_NAME
+            and not bool(r.get("real_enabled"))
+            and r.get("result") == "CLOSED"
+        ), Decimal("0"))
+        for trade in self.active_trades.values():
+            if trade.real_enabled or trade.status != "FILLED" or not trade.quantity or trade.quantity <= 0:
+                continue
+            snapshot = self.prices.get(trade.pair)
+            if snapshot is None or not snapshot.live or trade.fill_price is None:
+                return None
+            move = (
+                snapshot.price - trade.fill_price
+                if trade.direction == "LONG"
+                else trade.fill_price - snapshot.price
+            )
+            floating += move * trade.quantity
+        return SIM_START_BALANCE + realized + floating
+
+    def _autostop_floor(self) -> Decimal | None:
+        if self.autostop_percent is None or self._equity_peak is None:
+            return None
+        return self._equity_peak * (Decimal("100") - self.autostop_percent) / Decimal("100")
+
+    def _autostop_status_text(self) -> str:
+        source = self._autostop_source or self._autostop_source_name()
+        floor = self._autostop_floor()
+        state = "TRIGGERED" if self._autostop_triggered else ("ARMED" if self.autostop_percent is not None else "OFF")
+        lines = [
+            "╔══ ACCOUNT GUARD / AUTOSTOP ══╗",
+            f"STATE   : {state}",
+            f"SOURCE  : {source}",
+            f"LIMIT   : {decimal_to_str(self.autostop_percent) + '%' if self.autostop_percent is not None else 'OFF'}",
+            f"PEAK    : {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '-'} USDT",
+            f"EQUITY  : {fmt_num(self._equity_last, 4) if self._equity_last is not None else '-'} USDT",
+            f"FLOOR   : {fmt_num(floor, 4) if floor is not None else '-'} USDT",
+            f"SCANNER : {'LOCKED OFF' if self._autostop_triggered else ('ON' if self.scan_enabled else 'OFF')}",
+            "ACTION  : pause new scans; keep existing orders/positions managed",
+            "",
+            "Commands: /autostop 10 | /autostop off | /autostop reset",
+        ]
+        return "\n".join(lines)
+
+    async def _autostop_check(self, force: bool = False) -> None:
+        if self.autostop_percent is None or self._autostop_triggered:
+            return
+        now_mono = time.monotonic()
+        if not force and now_mono - self._autostop_last_check < AUTOSTOP_CHECK_SECONDS:
+            return
+        self._autostop_last_check = now_mono
+        equity = self._autostop_equity()
+        if equity is None or not equity.is_finite() or equity <= 0:
+            if now_mono - self._autostop_missing_price_notice_at >= 300.0:
+                self._autostop_missing_price_notice_at = now_mono
+                log.warning("[AUTOSTOP] equity snapshot belum valid; guard tetap armed dan menunggu balance/mark price fresh.")
+            return
+
+        current_source = self._autostop_source_name()
+        source_changed = self._autostop_source is not None and self._autostop_source != current_source
+        if source_changed and not self._autostop_triggered:
+            # PAPER and REAL accounts have different equity bases. Never compare
+            # the first REAL snapshot against a previous PAPER high-water mark.
+            self._equity_peak = equity
+            log.info("[AUTOSTOP] equity source changed %s -> %s; baseline re-established.", self._autostop_source, current_source)
+        self._autostop_source = current_source
+        self._equity_last = equity
+        peak_changed = source_changed or self._equity_peak is None or equity > self._equity_peak
+        if peak_changed:
+            self._equity_peak = equity
+            self._autostop_dirty = True
+
+        floor = self._autostop_floor()
+        triggered_now = bool(
+            floor is not None and not self._autostop_triggered and equity <= floor
+        )
+        if triggered_now:
+            self._autostop_triggered = True
+            self.scan_enabled = False
+            self._scan_trigger_now = False
+            drawdown = (
+                (self._equity_peak - equity) / self._equity_peak * Decimal("100")
+                if self._equity_peak and self._equity_peak > 0 else Decimal("0")
+            )
+            log.critical(
+                "[AUTOSTOP] TRIGGERED | equity=%s peak=%s floor=%s dd=%s%%",
+                decimal_to_str(equity), decimal_to_str(self._equity_peak),
+                decimal_to_str(floor), decimal_to_str(drawdown),
+            )
+            await self._save_runtime_settings()
+            self._autostop_dirty = False
+            self._autostop_last_persist = now_mono
+            await self._record_event(
+                "AUTOSTOP_TRIGGERED", None,
+                equity=decimal_to_str(equity), peak_equity=decimal_to_str(self._equity_peak),
+                floor_equity=decimal_to_str(floor), drawdown_percent=decimal_to_str(drawdown),
+                threshold_percent=decimal_to_str(self.autostop_percent),
+            )
+            await self.reply(
+                "🛑 AUTOSTOP TRIGGERED\n\n"
+                f"Drawdown dari peak: {drawdown.quantize(Decimal('0.01'))}% "
+                f"(limit {self.autostop_percent}%).\n"
+                f"Peak: {fmt_num(self._equity_peak, 4)} USDT\n"
+                f"Equity: {fmt_num(equity, 4)} USDT\n"
+                f"Floor: {fmt_num(floor, 4)} USDT\n\n"
+                "SCANNER dikunci OFF untuk mencegah entry baru. Pending order dan posisi "
+                "yang sudah ada TIDAK ditutup otomatis; manajemen reversal/close tetap berjalan.\n\n"
+                "Setelah memeriksa akun: /autostop reset, lalu /scan on."
+            )
+            return
+
+        if self._autostop_dirty and (now_mono - self._autostop_last_persist >= AUTOSTOP_PERSIST_SECONDS):
+            self._autostop_last_persist = now_mono
+            await self._save_runtime_settings()
+            self._autostop_dirty = False
+
+    async def _handle_autostop_command(self, text: str) -> None:
+        parts = text.split()
+        if len(parts) == 1:
+            await self.reply(self._autostop_status_text())
+            return
+        if len(parts) != 2:
+            raise ValueError("Gunakan /autostop [persen], /autostop off, atau /autostop reset.")
+
+        arg = parts[1].lower()
+        if arg == "off":
+            self.autostop_percent = None
+            self._autostop_triggered = False
+            self._equity_peak = None
+            self._equity_last = None
+            self._autostop_source = None
+            self._autostop_dirty = False
+            await self._save_runtime_settings()
+            await self.reply(
+                "🛡 AUTOSTOP OFF. Scanner tidak otomatis dinyalakan kembali; "
+                "gunakan /scan on setelah meninjau risiko akun."
+            )
+            return
+
+        if arg == "reset":
+            equity = self._autostop_equity()
+            self._equity_peak = equity if equity is not None and equity > 0 else None
+            self._equity_last = equity if equity is not None and equity > 0 else None
+            self._autostop_source = self._autostop_source_name() if equity is not None else None
+            self._autostop_triggered = False
+            self._autostop_last_persist = 0.0
+            self._autostop_dirty = False
+            await self._save_runtime_settings()
+            await self.reply(
+                "♻ AUTOSTOP RE-ARMED. Peak equity diambil dari snapshot saat ini "
+                "(atau akan diinisialisasi saat snapshot valid tersedia). Scanner tetap OFF; "
+                "nyalakan kembali secara manual setelah memeriksa akun.\n\n"
+                + self._autostop_status_text()
+            )
+            return
+
+        try:
+            value = Decimal(arg.replace(",", "."))
+        except (InvalidOperation, ValueError):
+            raise ValueError("Gunakan /autostop [persen], /autostop off, atau /autostop reset.")
+        if not value.is_finite() or value <= 0 or value >= 100:
+            raise ValueError("Persentase autostop harus lebih dari 0 dan kurang dari 100.")
+
+        was_off = self.autostop_percent is None
+        self.autostop_percent = value
+        if was_off or self._autostop_triggered or self._equity_peak is None:
+            equity = self._autostop_equity()
+            self._equity_peak = equity if equity is not None and equity > 0 else None
+            self._equity_last = equity if equity is not None and equity > 0 else None
+            self._autostop_source = self._autostop_source_name() if equity is not None else None
+        self._autostop_triggered = False
+        self._autostop_last_persist = 0.0
+        self._autostop_dirty = False
+        await self._save_runtime_settings()
+        await self.reply(
+            f"🛡 AUTOSTOP ARMED • {decimal_to_str(value)}% dari peak equity\n\n"
+            + self._autostop_status_text()
+            + "\n\nAutostop akan menghentikan scanner saat batas tercapai; "
+              "posisi/order yang sudah ada tetap dikelola."
+        )
+
     @staticmethod
     def _max_drawdown(values: list[float]) -> float:
         peak = 0.0
@@ -5488,57 +5828,94 @@ class TradingEngine:
         return max_dd
 
     async def show_stats(self) -> None:
-        closed = [r for r in self.history_records if r.get("strategy_name") == volumatic.STRATEGY_NAME and r.get("result") == "CLOSED"]
+        closed = [
+            r for r in self.history_records
+            if r.get("strategy_name") == volumatic.STRATEGY_NAME and r.get("result") == "CLOSED"
+        ]
         active = [t for t in self.active_trades.values() if t.status in {"PENDING", "FILLED"}]
         realized = [float(Decimal(str(r.get("pnl_usdt") or "0"))) for r in closed]
         wins = [x for x in realized if x > 0]
         losses = [x for x in realized if x < 0]
+        be = len(realized) - len(wins) - len(losses)
         gross_profit, gross_loss = sum(wins), abs(sum(losses))
         win_rate = len(wins) / len(realized) * 100 if realized else 0.0
         avg_win = sum(wins) / len(wins) if wins else 0.0
         avg_loss = sum(losses) / len(losses) if losses else 0.0
         floating = 0.0
-        for t in active:
-            if t.status != "FILLED": continue
-            price = self._current_price(t.pair)
-            if price is None or t.fill_price is None: continue
-            move = price - t.fill_price if t.direction == "LONG" else t.fill_price - price
-            floating += float(move * (t.quantity or Decimal("0")))
-        pnls_by_time = sorted(closed, key=lambda r: str(r.get("closed_at") or ""))
-        dd = self._max_drawdown([float(Decimal(str(r.get("pnl_usdt") or "0"))) for r in pnls_by_time])
-        pf = gross_profit / gross_loss if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
-        pending = sum(t.status == "PENDING" for t in active)
-        filled = sum(t.status == "FILLED" for t in active)
-        expired = sum(r.get("result") == "EXPIRED" for r in self.history_records if r.get("strategy_name") == volumatic.STRATEGY_NAME)
-        total_r = sum(float(Decimal(str(r.get("realized_r") or "0"))) for r in closed if r.get("realized_r") is not None)
+        for trade in active:
+            if trade.status != "FILLED" or trade.fill_price is None:
+                continue
+            price = self._current_price(trade.pair)
+            if price is None:
+                continue
+            move = price - trade.fill_price if trade.direction == "LONG" else trade.fill_price - price
+            floating += float(move * (trade.quantity or Decimal("0")))
+
+        chronological = sorted(closed, key=lambda r: str(r.get("closed_at") or ""))
+        dd = self._max_drawdown([float(Decimal(str(r.get("pnl_usdt") or "0"))) for r in chronological])
+        pf_text = f"{gross_profit / gross_loss:.2f}" if gross_loss > 0 else ("∞" if gross_profit > 0 else "—")
         total_pnl = sum(realized)
         expectancy = total_pnl / len(realized) if realized else 0.0
-        holding_seconds = []
+        total_r = sum(
+            float(Decimal(str(r.get("realized_r") or "0")))
+            for r in closed if r.get("realized_r") is not None
+        )
+        holding = []
         for record in closed:
-            filled_at = parse_iso(record.get("filled_at"))
-            closed_at = parse_iso(record.get("closed_at"))
-            if filled_at is not None and closed_at is not None and closed_at >= filled_at:
-                holding_seconds.append((closed_at - filled_at).total_seconds())
-        average_holding = duration_text(sum(holding_seconds) / len(holding_seconds)) if holding_seconds else "-"
+            opened = parse_iso(record.get("filled_at"))
+            finished = parse_iso(record.get("closed_at"))
+            if opened and finished and finished >= opened:
+                holding.append((finished - opened).total_seconds())
+        avg_holding = duration_text(sum(holding) / len(holding)) if holding else "—"
+
+        pending = sum(t.status == "PENDING" for t in active)
+        filled = sum(t.status == "FILLED" for t in active)
+        expired = sum(
+            r.get("result") == "EXPIRED"
+            for r in self.history_records
+            if r.get("strategy_name") == volumatic.STRATEGY_NAME
+        )
         lines = [
-            "VOLUMATIC TREND • STATISTICS",
-            f"Scanner timeframe: {self.timeframe}",
-            f"Total closed: {len(closed)} | Win/Loss/BE: {len(wins)}/{len(losses)}/{len(realized)-len(wins)-len(losses)}",
-            f"Win rate: {win_rate:.2f}%",
-            f"Average win: {avg_win:.4f} USDT | Average loss: {avg_loss:.4f} USDT",
-            f"Profit factor: {pf:.3f}" if np.isfinite(pf) else "Profit factor: ∞",
-            f"Realized PnL: {total_pnl:+.4f} USDT | Floating: {floating:+.4f} USDT",
-            f"Expectancy: {expectancy:+.4f} USDT/trade | Average holding: {average_holding}",
-            f"Max drawdown (realized equity): {dd:.4f} USDT",
-            f"Total R: {total_r:+.3f}R",
-            f"Active: {len(active)} / {self.max_active_trades} | Pending: {pending} | Filled: {filled} | Expired: {expired}",
+            "╔════ VOLUMATIC / TELEMETRY ════╗",
+            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  {self.timeframe}   MODE  {'REAL' if self.real_mode else 'PAPER'}",
+            "────────────────────────────────",
+            "[ PERFORMANCE ]",
+            f"CLOSED       {len(closed):>5}     W/L/BE   {len(wins)}/{len(losses)}/{be}",
+            f"WIN RATE     {win_rate:>6.2f}%   PF       {pf_text}",
+            f"PNL REALIZED {total_pnl:+.4f} USDT",
+            f"PNL FLOATING {floating:+.4f} USDT",
+            f"EXPECTANCY   {expectancy:+.4f} USDT/trade",
+            f"AVG W/L      {avg_win:+.4f} / {avg_loss:+.4f} USDT",
+            f"MAX DD       {dd:.4f} USDT   TOTAL R  {total_r:+.3f}R",
+            f"AVG HOLD     {avg_holding}",
+            "────────────────────────────────",
+            "[ EXPOSURE ]",
+            f"ACTIVE       {len(active):>3}/{self.max_active_trades:<3}  PENDING  {pending:<3} FILLED {filled:<3}",
+            f"EXPIRED      {expired}",
         ]
         for tf in ("H4", "D1"):
-            for direction in ("LONG", "SHORT"):
-                subset = [r for r in closed if r.get("timeframe") == tf and r.get("direction") == direction]
-                pnl = sum(float(Decimal(str(r.get("pnl_usdt") or "0"))) for r in subset)
-                lines.append(f"{tf} {direction}: {len(subset)} trades | PnL {pnl:+.4f} USDT")
-        lines.append("Catatan: PnL belum memasukkan funding/komisi aktual Binance; R memakai reference risk 0.30 ATR, bukan SL aktif.")
+            long_rows = [r for r in closed if r.get("timeframe") == tf and r.get("direction") == "LONG"]
+            short_rows = [r for r in closed if r.get("timeframe") == tf and r.get("direction") == "SHORT"]
+            long_pnl = sum(float(Decimal(str(r.get("pnl_usdt") or "0"))) for r in long_rows)
+            short_pnl = sum(float(Decimal(str(r.get("pnl_usdt") or "0"))) for r in short_rows)
+            lines.append(
+                f"{tf:<2}  L {len(long_rows):>3} ({long_pnl:+.3f})  "
+                f"S {len(short_rows):>3} ({short_pnl:+.3f}) USDT"
+            )
+        guard_state = (
+            "TRIGGERED" if self._autostop_triggered else
+            (f"ARMED {decimal_to_str(self.autostop_percent)}%" if self.autostop_percent is not None else "OFF")
+        )
+        lines += [
+            "────────────────────────────────",
+            "[ SAFETY ]",
+            f"AUTOSTOP     {guard_state}",
+            f"EQUITY       {fmt_num(self._equity_last, 4) if self._equity_last is not None else '—'} USDT",
+            f"PEAK / FLOOR {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '—'} / {fmt_num(self._autostop_floor(), 4) if self._autostop_floor() is not None else '—'} USDT",
+            f"SCANNER      {'LOCKED' if self._autostop_triggered else ('ON' if self.scan_enabled else 'OFF')}",
+            "────────────────────────────────",
+            "PnL belum termasuk seluruh fee/funding aktual. R = reference risk 0.30 ATR; bukan SL aktif.",
+        ]
         await self.reply("\n".join(lines))
 
     async def show_status(self) -> None:
@@ -5554,6 +5931,7 @@ class TradingEngine:
             f"Pending: {pending} | Filled: {filled} | Max: {self.max_active_trades}\n"
             f"Binance REST cooldown: {self._binance_cooldown_remaining():.0f}s | Deferred commands: {len(self.deferred_commands)}\n"
             f"REAL entry: {'ON' if self.real_mode else 'OFF'} | Margin mode: {'MINIMUM AUTO' if self.min_margin_enabled else 'FIXED'} | Fixed margin: {self.margin_usdt} USDT | Leverage: {self.leverage}x\n"
+            f"AUTOSTOP: {'TRIGGERED' if self._autostop_triggered else (decimal_to_str(self.autostop_percent) + '%' if self.autostop_percent is not None else 'OFF')} | Peak: {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '-'} USDT\n"
             f"History: {len(self.history_records)} | Events: {len(self.history_events)} | Session: {self.session_id}"
         )
 
@@ -5571,6 +5949,7 @@ class TradingEngine:
             "/close PAIR|all - tutup posisi atau batalkan pending\n"
             "/remove TRADE_ID|PAIR - hapus record dari statistik (event audit tetap)\n"
             "/real on|off - aktif/nonaktifkan entry baru REAL\n"
+            "/autostop [persen|off|reset] - hentikan scanner saat equity turun dari peak\n"
             "/margin [USDT] - margin target entry baru (dipakai saat /min off)\n"
             "/min on|off - gunakan margin minimum valid Binance atau margin tetap\n"
             "/leverage [angka] - leverage entry baru\n"
@@ -5602,6 +5981,7 @@ class TradingEngine:
             if arg == "off":
                 await self._cancel_queued_real_on()
             await self._set_real(text)
+        elif command == "/autostop": await self._handle_autostop_command(text)
         elif command == "/trade": await self.show_trades()
         elif command == "/stats": await self.show_stats()
         elif command == "/status": await self.show_status()
