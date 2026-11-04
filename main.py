@@ -80,7 +80,7 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0") or "0")
 GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
 REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
 GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
-MAIN_FILE = (os.getenv("MAIN_FILE") or "main.py").strip()
+MAIN_FILE = (os.getenv("MAIN_FILE") or "main_volumatic_ema_filter.py").strip()
 BINANCE_API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
 BINANCE_API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
 
@@ -517,6 +517,9 @@ class Trade:
     entry: Decimal                    # LIMIT price
     expires_at: datetime              # close of the next candle
     signal_close_price: Decimal | None = None  # exact close used as LIMIT price
+    ema_filter_length: int | None = 100
+    ema_filter_value: Decimal | None = None
+    ema_filter_passed: bool | None = None
     status: str = "PENDING"
     created_at: datetime = field(default_factory=now_utc)
     filled_at: datetime | None = None
@@ -569,6 +572,9 @@ class Trade:
             "signal_atr": decimal_to_str(self.signal_atr),
             "reference_sl": decimal_to_str(self.reference_sl),
             "entry": decimal_to_str(self.entry), "signal_close_price": decimal_to_str(self.signal_close_price),
+            "ema_filter_length": self.ema_filter_length,
+            "ema_filter_value": decimal_to_str(self.ema_filter_value),
+            "ema_filter_passed": self.ema_filter_passed,
             "expires_at": iso_utc(self.expires_at),
             "status": self.status, "created_at": iso_utc(self.created_at),
             "filled_at": iso_utc(self.filled_at) if self.filled_at else None,
@@ -642,6 +648,9 @@ class Trade:
             entry_order_id=int(row["entry_order_id"]) if row.get("entry_order_id") not in (None, "") else None,
             entry_client_order_id=row.get("entry_client_order_id"), real_error=row.get("real_error"),
             signal_close_price=dec("signal_close_price", dec("entry", Decimal("0"))),
+            ema_filter_length=(int(row["ema_filter_length"]) if row.get("ema_filter_length") not in (None, "", 0, "0") else None),
+            ema_filter_value=dec("ema_filter_value"),
+            ema_filter_passed=(bool(row.get("ema_filter_passed")) if row.get("ema_filter_passed") is not None else None),
             entry_executed_qty=dec("entry_executed_qty"),
             entry_order_status=str(row.get("entry_order_status") or "UNKNOWN").upper(),
             entry_order_terminal=bool(row.get("entry_order_terminal", False)),
@@ -3339,6 +3348,7 @@ class TradingEngine:
         self.min_margin_enabled = False
         self.max_active_trades = MAX_ACTIVE_TRADES
         self.timeframe = "H4"
+        self.ema_filter_length: int | None = volumatic.DEFAULT_EMA_FILTER_LENGTH
         self.scan_enabled = False
 
         # Account safety: trailing equity drawdown guard. It pauses NEW scanning
@@ -3478,6 +3488,12 @@ class TradingEngine:
             payload = json.loads(raw.decode("utf-8"))
             tf = str(payload.get("timeframe") or "H4").upper()
             self.timeframe = tf if tf in volumatic.TIMEFRAME_MS else "H4"
+            raw_ema_filter = payload.get("ema_filter_length", volumatic.DEFAULT_EMA_FILTER_LENGTH)
+            try:
+                self.ema_filter_length = volumatic.normalize_ema_filter_length(raw_ema_filter)
+            except ValueError:
+                self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
+                log.warning("ema_filter_length tidak valid; default EMA %s dipakai.", self.ema_filter_length)
             self.scan_enabled = bool(payload.get("scan_enabled", False))
             self.max_active_trades = max(1, min(1000, int(payload.get("max_active_trades") or MAX_ACTIVE_TRADES)))
             self.margin_usdt = parse_decimal(payload.get("margin_usdt") or DEFAULT_MARGIN_USDT)
@@ -3530,6 +3546,7 @@ class TradingEngine:
             payload = {
                 "strategy": volumatic.STRATEGY_NAME,
                 "timeframe": self.timeframe,
+                "ema_filter_length": self.ema_filter_length,
                 "scan_enabled": self.scan_enabled,
                 "max_active_trades": self.max_active_trades,
                 "margin_usdt": decimal_to_str(self.margin_usdt),
@@ -4003,11 +4020,16 @@ class TradingEngine:
             return
         async with self._scan_cycle_lock:
             timeframe = self.timeframe
+            ema_filter_length = self.ema_filter_length  # one consistent EMA setting for the whole scan cycle
             interval_ms = volumatic.TIMEFRAME_MS[timeframe]
             universe = await self._universe()
             started = time.monotonic()
             processed = signals = errors = 0
-            log.info("[SCAN] Volumatic %s cycle mulai | universe=%s | batch=%s", timeframe, len(universe), SCAN_MAX_PAIRS_PER_CYCLE)
+            log.info(
+                "[SCAN] Volumatic %s cycle mulai | EMA=%s | universe=%s | batch=%s",
+                timeframe, f"EMA{ema_filter_length}" if ema_filter_length is not None else "OFF",
+                len(universe), SCAN_MAX_PAIRS_PER_CYCLE,
+            )
             await self._expire_due_pending()
             for offset in range(0, len(universe), SCAN_MAX_PAIRS_PER_CYCLE):
                 if not self._running or not self.scan_enabled:
@@ -4047,7 +4069,8 @@ class TradingEngine:
                             processed += 1
                             continue
                         signal = volumatic.detect_latest_signal(
-                            candles, symbol=symbol, timeframe=timeframe, interval_ms=interval_ms
+                            candles, symbol=symbol, timeframe=timeframe, interval_ms=interval_ms,
+                            ema_filter_length=ema_filter_length,
                         )
                         if signal:
                             signals += 1
@@ -4143,6 +4166,47 @@ class TradingEngine:
                     await self._close_trade(existing, market_reference_price, "OPPOSITE_BUBBLE_MARKET")
                 elif existing.trade_id in self.active_trades:
                     raise RuntimeError(f"Order lama {pair} belum selesai direkonsiliasi; reversal ditahan.")
+            # EMA is a symmetric directional entry filter only. Opposite positions
+            # above have already been canceled/market-closed and must stay closed
+            # even when this new direction is rejected by EMA.
+            filter_length_raw = signal.get("ema_filter_length", self.ema_filter_length)
+            try:
+                filter_length = volumatic.normalize_ema_filter_length(filter_length_raw)
+            except ValueError:
+                filter_length = self.ema_filter_length
+            filter_value_raw = signal.get("ema_filter_value")
+            filter_value: Decimal | None = None
+            if filter_value_raw not in (None, ""):
+                try:
+                    candidate_filter_value = Decimal(str(filter_value_raw))
+                    if candidate_filter_value.is_finite() and candidate_filter_value > 0:
+                        filter_value = candidate_filter_value
+                except (InvalidOperation, ValueError, TypeError):
+                    filter_value = None
+            filter_passed = bool(signal.get("ema_filter_passed", False))
+            filter_ready = bool(signal.get("ema_filter_ready", filter_length is None))
+            if filter_length is not None and (not filter_ready or filter_value is None or not filter_passed):
+                await self._record_event(
+                    "SIGNAL_REJECTED_BY_EMA", None, pair=pair,
+                    direction=direction, signal=signal.get("signal"),
+                    timeframe=signal.get("timeframe"),
+                    ema_filter_length=filter_length,
+                    ema_filter_value=decimal_to_str(filter_value),
+                    signal_close_price=str(signal.get("close_price") or signal.get("signal_close_price") or ""),
+                    reason=("EMA_NOT_READY" if not filter_ready or filter_value is None else "CLOSE_NOT_ON_ALLOWED_SIDE"),
+                )
+                log.info(
+                    "[SIGNAL] %s %s ditolak EMA%s | close=%s ema=%s ready=%s; opposite exposure sudah diselesaikan.",
+                    pair, direction, filter_length,
+                    signal.get("close_price"), filter_value, filter_ready,
+                )
+                await self.reply(
+                    f"⛔ VOLUMATIC {direction} DIBLOKIR EMA{filter_length} • {pair}\n"
+                    f"Signal close: {signal.get('close_price')} | EMA{filter_length}: "
+                    f"{decimal_to_str(filter_value) if filter_value is not None else 'WARMING UP'}\n"
+                    "Posisi/order arah berlawanan sudah ditutup/dibatalkan; entry baru tidak dibuat."
+                )
+                return
             if int(time.time() * 1000) >= int(expiry_ms):
                 await self._record_event(
                     "SIGNAL_EXPIRED_DURING_REVERSAL", None, pair=pair,
@@ -4179,6 +4243,9 @@ class TradingEngine:
                 signal=str(signal["signal"]), signal_time=signal_close,
                 bubble_price=bubble_price, signal_atr=atr_value, reference_sl=reference_value,
                 entry=limit_price, expires_at=expiry_dt, signal_close_price=signal_close_price,
+                ema_filter_length=filter_length,
+                ema_filter_value=filter_value,
+                ema_filter_passed=(bool(filter_passed) if filter_length is not None else None),
                 margin_usdt=self.margin_usdt,
                 leverage=self.leverage, min_margin_mode=self.min_margin_enabled,
                 target_notional=self.margin_usdt * Decimal(self.leverage),
@@ -4240,6 +4307,7 @@ class TradingEngine:
                 f"Bubble line (EMA1): {fmt_price(trade.bubble_price)}\n"
                 f"Signal candle close: {fmt_price(trade.signal_close_price or trade.entry)}\n"
                 f"LIMIT entry: {fmt_price(trade.entry)}\n"
+                f"EMA filter: {('OFF' if trade.ema_filter_length is None else f'EMA{trade.ema_filter_length} @ {fmt_price(trade.ema_filter_value)}')}\n"
                 f"Margin: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
                 f"Sizing: {'MINIMUM AUTO' if trade.min_margin_mode else 'FIXED TARGET'}\n"
                 f"Quantity: {format_qty(trade.quantity or Decimal('0'))}\n"
@@ -5067,6 +5135,7 @@ class TradingEngine:
         do not create a stale reverse LIMIT whose one-candle window has passed.
         """
         by_key: dict[str, Trade] = {}
+        ema_filter_length = self.ema_filter_length  # consistent filter for this position-monitor pass
         for trade in self.active_trades.values():
             if trade.status == "FILLED":
                 by_key.setdefault(f"{trade.timeframe}:{trade.pair}", trade)
@@ -5094,6 +5163,7 @@ class TradingEngine:
                 events = volumatic.detect_signals_since(
                     candles, symbol=seed_trade.pair, timeframe=tf,
                     after_close_time_ms=checkpoint, interval_ms=span,
+                    ema_filter_length=ema_filter_length,
                 )
                 for signal in events:
                     signal_close_ms = int(signal["signal_close_time_ms"])
@@ -5318,6 +5388,46 @@ class TradingEngine:
             await self.reply("🟡 REAL OFF untuk entry baru. Pending/posisi REAL yang sudah ada tetap direkonsiliasi dan dikelola sampai selesai.")
         else:
             await self.reply(f"REAL: {'ON' if self.real_mode else 'OFF'}\nGunakan /real on atau /real off.")
+
+    async def _handle_ema(self, text: str) -> None:
+        parts = str(text or "").split()
+        if len(parts) == 1:
+            active = f"EMA{self.ema_filter_length}" if self.ema_filter_length is not None else "OFF"
+            await self.reply(
+                f"Directional EMA filter: {active}\n"
+                "BLUE/LONG hanya jika candle close > EMA.\n"
+                "RED/SHORT hanya jika candle close < EMA.\n"
+                "Opposite position tetap ditutup meskipun entry baru ditolak.\n\n"
+                "Pilihan: /EMA 50 | /EMA 100 | /EMA 200 | /EMA off"
+            )
+            return
+        if len(parts) != 2:
+            await self.reply("Gunakan /EMA 50, /EMA 100, /EMA 200, atau /EMA off.")
+            return
+        try:
+            selected = volumatic.normalize_ema_filter_length(parts[1])
+        except ValueError:
+            await self.reply("❌ EMA hanya mendukung 50, 100, 200, atau off.")
+            return
+        old = self.ema_filter_length
+        self.ema_filter_length = selected
+        await self._save_runtime_settings()
+        old_text = f"EMA{old}" if old is not None else "OFF"
+        new_text = f"EMA{selected}" if selected is not None else "OFF"
+        if selected is None:
+            message = (
+                f"✅ EMA filter OFF ({old_text} → OFF).\n"
+                "Filter arah dinonaktifkan: BLUE dapat membuka LONG dan RED dapat membuka SHORT."
+            )
+        else:
+            message = (
+                f"✅ EMA filter diubah: {old_text} → EMA{selected}.\n"
+                f"BLUE/LONG hanya jika close candle > EMA{selected}; "
+                f"RED/SHORT hanya jika close candle < EMA{selected}.\n"
+                "Close posisi berlawanan tetap dilakukan walaupun entry arah baru ditolak."
+            )
+        await self.reply(message + "\nPengaturan disimpan dan berlaku untuk sinyal baru.")
+        log.info("[CONFIG] EMA directional filter: %s -> %s", old_text, new_text)
 
     async def _handle_timeframe(self, text: str) -> None:
         parts = text.split()
@@ -5556,13 +5666,18 @@ class TradingEngine:
         if not active:
             await self.reply("Tidak ada pending order atau posisi aktif.")
             return
-        lines = [f"ACTIVE TRADES • {len(active)}/{self.max_active_trades} slots\nTimeframe scanner: {self.timeframe}\n"]
+        current_ema = f"EMA{self.ema_filter_length}" if self.ema_filter_length is not None else "OFF"
+        lines = [
+            f"ACTIVE TRADES • {len(active)}/{self.max_active_trades} slots\n"
+            f"Scanner TF: {self.timeframe} • EMA filter: {current_ema}\n"
+        ]
         for t in sorted(active, key=lambda x: (x.status, x.pair)):
             price = self._current_price(t.pair)
             if t.status == "PENDING":
                 lines.append(
                     f"⏳ {t.pair} • PENDING {t.direction} ({t.timeframe})\n"
                     f"Signal: {t.signal} | Candle close: {fmt_price(t.signal_close_price or t.entry)} | Limit: {fmt_price(t.entry)}\n"
+                    f"EMA at signal: {('OFF' if t.ema_filter_length is None else f'EMA{t.ema_filter_length} @ {fmt_price(t.ema_filter_value)}')}\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
                     + (
@@ -5586,6 +5701,7 @@ class TradingEngine:
                 lines.append(
                     f"{'🟢' if t.direction == 'LONG' else '🔴'} {t.pair} • {t.direction} FILLED ({t.timeframe})\n"
                     f"Entry: {fmt_price(entry)} | Live: {fmt_price(price)}\n"
+                    f"EMA at signal: {('OFF' if t.ema_filter_length is None else f'EMA{t.ema_filter_length} @ {fmt_price(t.ema_filter_value)}')}\n"
                     f"Floating: {fmt_num(pnl_pct, 2)}% | {fmt_num(pnl_usdt, 4)} USDT\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin est.: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
@@ -5877,7 +5993,7 @@ class TradingEngine:
         )
         lines = [
             "╔════ VOLUMATIC / TELEMETRY ════╗",
-            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  {self.timeframe}   MODE  {'REAL' if self.real_mode else 'PAPER'}",
+            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  {self.timeframe}   EMA  {('EMA' + str(self.ema_filter_length)) if self.ema_filter_length is not None else 'OFF'}   MODE  {'REAL' if self.real_mode else 'PAPER'}",
             "────────────────────────────────",
             "[ PERFORMANCE ]",
             f"CLOSED       {len(closed):>5}     W/L/BE   {len(wins)}/{len(losses)}/{be}",
@@ -5926,7 +6042,7 @@ class TradingEngine:
             "VOLUMATIC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            f"Timeframe: {self.timeframe}\nScanner: {'ON' if self.scan_enabled else 'OFF'}\n"
+            f"Timeframe: {self.timeframe}\nEMA filter: {('EMA' + str(self.ema_filter_length)) if self.ema_filter_length is not None else 'OFF'}\nScanner: {'ON' if self.scan_enabled else 'OFF'}\n"
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
             f"Pending: {pending} | Filled: {filled} | Max: {self.max_active_trades}\n"
             f"Binance REST cooldown: {self._binance_cooldown_remaining():.0f}s | Deferred commands: {len(self.deferred_commands)}\n"
@@ -5940,6 +6056,7 @@ class TradingEngine:
             "COMMAND VOLUMATIC TREND\n\n"
             "/scan on|off - aktif/nonaktifkan scanner closed-candle\n"
             "/timeframe [H4|D1] - pilih timeframe (default H4)\n"
+            "/EMA [50|100|200|off] - filter arah LONG/SHORT berdasarkan EMA timeframe aktif\n"
             "/max [angka] - batas total pending + filled\n"
             "/trade - lihat pending order dan posisi aktif\n"
             "/stats - statistik trade, PnL, win rate, DD, R\n"
@@ -5971,6 +6088,7 @@ class TradingEngine:
         if command in {"/try", "/end", "/ganti", "/healthz"}:
             return
         if command == "/timeframe": await self._handle_timeframe(text)
+        elif command == "/ema": await self._handle_ema(text)
         elif command == "/scan": await self._handle_scan(text)
         elif command == "/max": await self._handle_max(text)
         elif command == "/margin": await self._handle_margin(text)
