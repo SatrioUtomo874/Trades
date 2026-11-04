@@ -1076,6 +1076,7 @@ ENDPOINT_WEIGHTS = {
     "/fapi/v1/userTrades": 5,
     "/fapi/v1/klines": 5,  # konservatif untuk limit candle 500-1000
     "/fapi/v1/exchangeInfo": 1,
+    "/fapi/v1/time": 1,
     "/fapi/v2/ticker/price": 1,
 }
 
@@ -1800,6 +1801,13 @@ class BinanceREST:
         )
 
         return parse_decimal(str(payload["price"]))
+
+    async def get_server_time(self) -> int:
+        """One-weight public probe used only to refresh Binance IP-weight headers."""
+        payload = await self._get("/fapi/v1/time")
+        if not isinstance(payload, dict) or payload.get("serverTime") is None:
+            raise RuntimeError("Binance server time response tidak valid.")
+        return int(payload["serverTime"])
 
     async def get_24h_tickers(self, force: bool = False) -> list[dict[str, Any]]:
         now = time.monotonic()
@@ -7334,6 +7342,11 @@ class TradingEngine:
         self._skip_until: dict[str, float] = {}
         self._scan_durations: deque[float] = deque(maxlen=20)
         self._last_cycle_analyzed = 0
+        # API-budget pause is distinct from Binance 429/418 cooldown. Keep the
+        # sweep cursor untouched and wait for the next one-minute weight reset.
+        self._scan_api_waiting = False
+        self._scan_api_wait_notified = False
+        self._scan_api_wait_last_headroom: float | None = None
         self._tp_extend: dict[str, tuple[Decimal, str]] = {}
         self._ram_level = "OK"
         self._scan_paused_for_ram = False
@@ -7580,7 +7593,7 @@ class TradingEngine:
             f"🧠 RAM {rss:.0f}/{MEMORY_SOFT_LIMIT_MB:.0f} MB • level {self._ram_level} • scan {'PAUSED' if self._scan_paused_for_ram else 'ACTIVE'}",
             f"🗃 Cache RAM {cache.get('entries', 0)} entri / {cache.get('candles', 0)} candle • {cache.get('approx_mb', 0)} MB | disk {cache.get('disk_entries', 0)} pair / {cache.get('disk_mb', 0)} MB | hit {cache.get('disk_hits', 0)}",
             f"🛰 Batch terakhir {('-' if not durs else f'{durs[-1]:.0f}s')} • putaran {self._scan_sweep_number + 1} • posisi {self._scan_sweep_cursor}/{len(self._scan_sweep_pairs) or '-'}",
-            f"📡 API headroom {('-' if head is None else f'{head:.0f}%')} • 429/418 {API_STATS.limit_hits}x",
+            f"📡 API headroom {('-' if head is None else f'{head:.0f}%')} • scanner {'WAIT KUOTA' if self._scan_api_waiting else 'ACTIVE'} • 429/418 {API_STATS.limit_hits}x",
             f"🪜 Trail {self.trail_mode.upper()}",
         ]
         if not self.real_mode:
@@ -7617,9 +7630,83 @@ class TradingEngine:
         self._sweep_done = set(self._scan_sweep_pairs[:self._scan_sweep_cursor])
         self._sweep_complete = False
 
+    async def _wait_for_scan_api_headroom(self) -> None:
+        """Wait for the Binance one-minute request-weight window without spinning empty scans."""
+        if not self._scan_api_waiting:
+            return
+
+        # Signed execution cooldown has its own server timing. Do not probe the
+        # public endpoint while that cooldown is active.
+        real_cooldown = float(self.real.cooldown_remaining or 0.0)
+        public_cooldown = max(0.0, self._binance_public_cooldown_until - time.monotonic())
+        cooldown = max(real_cooldown, public_cooldown)
+        if cooldown > 0:
+            await asyncio.sleep(min(max(1.0, cooldown), 30.0))
+            return
+
+        headroom = self._api_headroom_pct()
+        if not self._scan_api_wait_notified:
+            next_pair = (
+                self._scan_sweep_pairs[self._scan_sweep_cursor]
+                if self._scan_sweep_cursor < len(self._scan_sweep_pairs) else "-"
+            )
+            await self.reply(card("⏸ SCANNER MENUNGGU KUOTA API", [
+                f"Headroom IP {('-' if headroom is None else f'{headroom:.0f}%')} • batas mulai scan {SCAN_MIN_API_HEADROOM_PCT:.0f}%",
+                f"Cursor aman {self._scan_sweep_cursor}/{len(self._scan_sweep_pairs)} • pair berikutnya {next_pair}",
+                "Tidak ada pair yang dilewati. Scanner menunggu reset bobot Binance; M5 watcher tetap berjalan.",
+            ]))
+            self._scan_api_wait_notified = True
+
+        # Binance request weights reset on the next minute boundary. Sleep in
+        # short chunks so stop commands and expiry of an H4 scan window respond.
+        wait_seconds = max(1.5, 60.0 - (time.time() % 60.0) + 1.2)
+        while wait_seconds > 0 and self._running and self._scan_user_enabled:
+            if self._h4_enabled and self._h4_window_active and self._h4_window_expired():
+                self._invalidate_h4_window(
+                    "Kuota API belum pulih sebelum batas window H4; cursor tetap disimpan untuk slot berikutnya."
+                )
+                self._scan_api_waiting = False
+                self._scan_api_wait_notified = False
+                return
+            step = min(5.0, wait_seconds)
+            await asyncio.sleep(step)
+            wait_seconds -= step
+
+        if not (self._running and self._scan_user_enabled):
+            return
+
+        # A single low-weight request obtains a fresh X-MBX-USED-WEIGHT-1M
+        # header after the boundary. If it is still tight, the next loop waits
+        # for the following boundary instead of hammering Binance every 5s.
+        await self.rest.get_server_time()
+        refreshed = self._api_headroom_pct()
+        if refreshed is None or refreshed >= SCAN_MIN_API_HEADROOM_PCT:
+            self._scan_api_waiting = False
+            self._scan_api_wait_notified = False
+            self._scan_api_wait_last_headroom = refreshed
+            log.info(
+                "[SCAN][API] headroom pulih (%s); melanjutkan dari cursor %s/%s.",
+                "unknown" if refreshed is None else f"{refreshed:.0f}%",
+                self._scan_sweep_cursor, len(self._scan_sweep_pairs),
+            )
+            await self.reply(card("▶️ KUOTA API PULIH • SCAN DILANJUTKAN", [
+                f"Headroom IP {('-' if refreshed is None else f'{refreshed:.0f}%')}",
+                f"Melanjutkan pair {self._scan_sweep_cursor + 1}/{len(self._scan_sweep_pairs)}",
+                "Cursor tidak di-reset; M5 watcher tetap berjalan.",
+            ]))
+        else:
+            self._scan_api_wait_last_headroom = refreshed
+            log.info(
+                "[SCAN][API] headroom masih %.0f%% (< %.0f%%); cursor %s dipertahankan sampai reset berikutnya.",
+                refreshed, SCAN_MIN_API_HEADROOM_PCT, self._scan_sweep_cursor,
+            )
+
     async def _scan_loop(self) -> None:
         while self._running and self._scan_user_enabled:
             try:
+                if self._scan_api_waiting:
+                    await self._wait_for_scan_api_headroom()
+                    continue
                 await self._ram_guard()
                 if self._scan_paused_for_ram:
                     # Candidate watcher is an independent task and continues to
@@ -7678,6 +7765,9 @@ class TradingEngine:
                     continue
 
                 await self._run_scan_cycle()
+                if self._scan_api_waiting:
+                    await self._wait_for_scan_api_headroom()
+                    continue
 
                 if self._h4_enabled and self._h4_window_active and self._h4_opening_gate and self._last_cycle_analyzed > 0:
                     self._h4_opening_gate = False
@@ -8359,6 +8449,15 @@ class TradingEngine:
         if len(self.active_trades) >= self.max_active_trades:
             self._scan_auto_paused = True
             return
+        headroom_at_start = self._api_headroom_pct()
+        if headroom_at_start is not None and headroom_at_start < SCAN_MIN_API_HEADROOM_PCT:
+            self._scan_api_waiting = True
+            self._scan_api_wait_last_headroom = headroom_at_start
+            log.info(
+                "[SCAN][API] scan tidak dimulai: headroom %.0f%% < %.0f%%; cursor %s dipertahankan.",
+                headroom_at_start, SCAN_MIN_API_HEADROOM_PCT, self._scan_sweep_cursor,
+            )
+            return
 
         self._scan_cycle_number += 1
         cycle = self._scan_cycle_number
@@ -8435,7 +8534,12 @@ class TradingEngine:
                 break
             headroom = self._api_headroom_pct()
             if headroom is not None and headroom < SCAN_MIN_API_HEADROOM_PCT:
-                log.info("[SCAN V10] batch berhenti: headroom API %.0f%% < %.0f%%.", headroom, SCAN_MIN_API_HEADROOM_PCT)
+                self._scan_api_waiting = True
+                self._scan_api_wait_last_headroom = headroom
+                log.info(
+                    "[SCAN V10] batch berhenti: headroom API %.0f%% < %.0f%%; pair berikutnya %s dipertahankan di cursor %s.",
+                    headroom, SCAN_MIN_API_HEADROOM_PCT, pair, self._scan_sweep_cursor,
+                )
                 stopped_early = True
                 break
 
