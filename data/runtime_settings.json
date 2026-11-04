@@ -6,7 +6,12 @@
   "margin_usdt": "0.5",
   "leverage": 10,
   "min_margin_enabled": true,
+  "autostop_percent": null,
+  "autostop_peak_equity": null,
+  "autostop_last_equity": null,
+  "autostop_triggered": false,
+  "autostop_source": null,
   "last_processed_candles": {},
   "last_position_candles": {},
-  "updated_at": "2026-11-04T15:25:28.110671+00:00"
+  "updated_at": "2026-11-04T15:55:41.467852+00:00"
 }
