@@ -21,10 +21,12 @@ from typing import Any, Mapping
 import numpy as np
 
 STRATEGY_NAME = "VOLUMATIC_TREND"
-STRATEGY_VERSION = "1.2.0"
+STRATEGY_VERSION = "1.3.0"
 TREND_LENGTH = 40
 ATR_LENGTH = 200
 REFERENCE_BUFFER_ATR = 0.30
+SUPPORTED_EMA_FILTERS = (50, 100, 200)
+DEFAULT_EMA_FILTER_LENGTH = 100
 TIMEFRAME_MS = {"H4": 14_400_000, "D1": 86_400_000}
 TIMEFRAME_INTERVALS = {"H4": "4h", "D1": "1d"}
 SUPPORTED_TIMEFRAMES = tuple(TIMEFRAME_MS)
@@ -47,6 +49,10 @@ class VolumaticSignal:
     ema1: float
     ema2: float
     trend: str
+    ema_filter_length: int | None
+    ema_filter_value: float | None
+    ema_filter_passed: bool
+    ema_filter_ready: bool
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +75,10 @@ class VolumaticSignal:
             "ema1": self.ema1,
             "ema2": self.ema2,
             "trend": self.trend,
+            "ema_filter_length": self.ema_filter_length,
+            "ema_filter_value": self.ema_filter_value,
+            "ema_filter_passed": self.ema_filter_passed,
+            "ema_filter_ready": self.ema_filter_ready,
         }
 
 
@@ -176,11 +186,25 @@ def _rma_tv(values: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
+def normalize_ema_filter_length(value: Any) -> int | None:
+    """Normalize /EMA selection. None/"off" disables the directional filter."""
+    if value is None or (isinstance(value, str) and value.strip().lower() in {"off", "none", "0", ""}):
+        return None
+    try:
+        length = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("EMA filter harus 50, 100, 200, atau OFF.") from exc
+    if length not in SUPPORTED_EMA_FILTERS:
+        raise ValueError("EMA filter hanya mendukung 50, 100, 200, atau OFF.")
+    return length
+
+
 def calculate_indicators(
     candles: Any,
     *,
     trend_length: int = TREND_LENGTH,
     atr_length: int = ATR_LENGTH,
+    ema_filter_length: int | None = None,
 ) -> dict[str, np.ndarray]:
     """Calculate EMA-SWMA, EMA close, ATR-RMA, trend, and confirmed flips.
 
@@ -202,6 +226,12 @@ def calculate_indicators(
 
     ema1 = _ema_tv(swma, trend_length)
     ema2 = _ema_tv(closes, trend_length)
+    filter_length = normalize_ema_filter_length(ema_filter_length)
+    ema_filter = (
+        _ema_tv(closes, filter_length)
+        if filter_length is not None
+        else np.full(n, np.nan, dtype=np.float64)
+    )
 
     tr = np.full(n, np.nan, dtype=np.float64)
     tr[0] = highs[0] - lows[0]
@@ -243,6 +273,8 @@ def calculate_indicators(
         "swma": swma,
         "ema1": ema1,
         "ema2": ema2,
+        "ema_filter": ema_filter,
+        "ema_filter_length": np.asarray([filter_length if filter_length is not None else 0], dtype=np.int16),
         "tr": tr,
         "atr": atr,
         "trend": trend,
@@ -275,6 +307,25 @@ def _signal_from_indicators(
         reference_sl = bubble_price + float(reference_buffer_atr) * signal_atr
 
     direction = "LONG" if code == 1 else "SHORT"
+    signal_close_price = float(indicators["close"][i])
+    raw_filter_length = int(indicators.get("ema_filter_length", np.asarray([0]))[0])
+    filter_length = raw_filter_length or None
+    raw_filter_value = float(indicators["ema_filter"][i]) if filter_length is not None else float("nan")
+    filter_ready = filter_length is None or np.isfinite(raw_filter_value)
+    if filter_length is None:
+        filter_passed = True
+        filter_value: float | None = None
+    elif not filter_ready:
+        # Fail closed for new exposure while preserving the opposite-bubble exit.
+        filter_passed = False
+        filter_value = None
+    else:
+        filter_value = raw_filter_value
+        filter_passed = (
+            signal_close_price > raw_filter_value
+            if direction == "LONG"
+            else signal_close_price < raw_filter_value
+        )
     signal_close_ms = int(indicators["timestamp"][i]) + int(interval_ms)
     return VolumaticSignal(
         symbol=str(symbol).upper(),
@@ -287,11 +338,15 @@ def _signal_from_indicators(
         bubble_visual_time_ms=int(indicators["timestamp"][bubble_index]),
         bubble_price=bubble_price,
         signal_atr=signal_atr,
-        close_price=float(indicators["close"][i]),
+        close_price=signal_close_price,
         reference_sl=float(reference_sl) if reference_sl is not None else float("nan"),
         ema1=float(indicators["ema1"][i]),
         ema2=float(indicators["ema2"][i]),
         trend="BULLISH" if code == 1 else "BEARISH",
+        ema_filter_length=filter_length,
+        ema_filter_value=filter_value,
+        ema_filter_passed=bool(filter_passed),
+        ema_filter_ready=bool(filter_ready),
     ).to_dict()
 
 
@@ -304,13 +359,17 @@ def detect_latest_signal(
     atr_length: int = ATR_LENGTH,
     reference_buffer_atr: float = REFERENCE_BUFFER_ATR,
     interval_ms: int | None = None,
+    ema_filter_length: int | None = None,
 ) -> dict[str, Any] | None:
     """Return a signal only when the newest supplied (already closed) candle flips."""
     tf = str(timeframe).upper()
     if tf not in TIMEFRAME_MS:
         raise ValueError(f"Timeframe tidak didukung: {timeframe}. Gunakan H4 atau D1.")
     span_ms = int(interval_ms or TIMEFRAME_MS[tf])
-    indicators = calculate_indicators(candles, trend_length=trend_length, atr_length=atr_length)
+    indicators = calculate_indicators(
+        candles, trend_length=trend_length, atr_length=atr_length,
+        ema_filter_length=ema_filter_length,
+    )
     index = len(indicators["close"]) - 1
     return _signal_from_indicators(
         indicators, index=index, symbol=symbol, timeframe=tf, interval_ms=span_ms,
@@ -328,6 +387,7 @@ def detect_signals_since(
     atr_length: int = ATR_LENGTH,
     reference_buffer_atr: float = REFERENCE_BUFFER_ATR,
     interval_ms: int | None = None,
+    ema_filter_length: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return every confirmed bubble newer than a checkpoint, oldest first.
 
@@ -340,7 +400,10 @@ def detect_signals_since(
     if tf not in TIMEFRAME_MS:
         raise ValueError(f"Timeframe tidak didukung: {timeframe}. Gunakan H4 atau D1.")
     span_ms = int(interval_ms or TIMEFRAME_MS[tf])
-    indicators = calculate_indicators(candles, trend_length=trend_length, atr_length=atr_length)
+    indicators = calculate_indicators(
+        candles, trend_length=trend_length, atr_length=atr_length,
+        ema_filter_length=ema_filter_length,
+    )
     codes = indicators["signal"]
     indices = np.flatnonzero(codes)
     output: list[dict[str, Any]] = []
@@ -367,6 +430,7 @@ def signals_since(
     atr_length: int = ATR_LENGTH,
     reference_buffer_atr: float = REFERENCE_BUFFER_ATR,
     interval_ms: int | None = None,
+    ema_filter_length: int | None = None,
 ) -> list[dict[str, Any]]:
     """Launcher-compatible public API for retrieving confirmed bubble events.
 
@@ -385,6 +449,7 @@ def signals_since(
         atr_length=atr_length,
         reference_buffer_atr=reference_buffer_atr,
         interval_ms=interval_ms,
+        ema_filter_length=ema_filter_length,
     )
 
 
@@ -395,9 +460,13 @@ def analyze(
     timeframe: str,
     trend_length: int = TREND_LENGTH,
     atr_length: int = ATR_LENGTH,
+    ema_filter_length: int | None = None,
 ) -> dict[str, Any]:
     """Full latest-bar analysis response, including no-signal state."""
-    indicators = calculate_indicators(candles, trend_length=trend_length, atr_length=atr_length)
+    indicators = calculate_indicators(
+        candles, trend_length=trend_length, atr_length=atr_length,
+        ema_filter_length=ema_filter_length,
+    )
     tf = str(timeframe).upper()
     if tf not in TIMEFRAME_MS:
         raise ValueError("Timeframe harus H4 atau D1.")
@@ -405,6 +474,7 @@ def analyze(
     signal = detect_latest_signal(
         candles, symbol=symbol, timeframe=tf,
         trend_length=trend_length, atr_length=atr_length,
+        ema_filter_length=ema_filter_length,
     )
     return {
         "strategy": STRATEGY_NAME,
@@ -414,6 +484,8 @@ def analyze(
         "latest_open_time_ms": int(indicators["timestamp"][i]),
         "latest_close_time_ms": int(indicators["timestamp"][i]) + TIMEFRAME_MS[tf],
         "latest_close": float(indicators["close"][i]),
+        "ema_filter_length": normalize_ema_filter_length(ema_filter_length),
+        "ema_filter_value": (float(indicators["ema_filter"][i]) if np.isfinite(indicators["ema_filter"][i]) else None),
         "trend": (
             "BULLISH" if indicators["trend"][i] == 1
             else "BEARISH" if indicators["trend"][i] == -1
@@ -455,6 +527,7 @@ def trade_result_r(direction: str, entry_price: float, exit_price: float, initia
 __all__ = [
     "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "ATR_LENGTH",
     "REFERENCE_BUFFER_ATR", "TIMEFRAME_MS", "TIMEFRAME_INTERVALS", "SUPPORTED_TIMEFRAMES", "VolumaticSignal",
+    "SUPPORTED_EMA_FILTERS", "DEFAULT_EMA_FILTER_LENGTH", "normalize_ema_filter_length",
     "calculate_indicators", "detect_latest_signal", "detect_signals_since", "signals_since", "analyze",
     "reference_risk", "trade_result_r",
 ]
