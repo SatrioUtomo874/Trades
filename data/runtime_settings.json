@@ -2,7 +2,7 @@
   "strategy": "VOLUMATIC_TREND",
   "timeframe": "H4",
   "scan_enabled": false,
-  "max_active_trades": 100,
+  "max_active_trades": 8,
   "margin_usdt": "0.5",
   "leverage": 10,
   "min_margin_enabled": true,
@@ -13,5 +13,5 @@
   "autostop_source": null,
   "last_processed_candles": {},
   "last_position_candles": {},
-  "updated_at": "2026-11-04T15:55:41.467852+00:00"
+  "updated_at": "2026-11-04T15:58:24.969201+00:00"
 }
