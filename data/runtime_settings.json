@@ -13,8 +13,11 @@
   "autostop_triggered": false,
   "autostop_source": "REAL",
   "last_processed_candles": {
-    "H4:0GUSDT": 1793808000000
+    "H4:0GUSDT": 1793808000000,
+    "H4:1000000MOGUSDT": 1793808000000,
+    "H4:1000BONKUSDT": 1793808000000,
+    "H4:1000CATUSDT": 1793808000000
   },
   "last_position_candles": {},
-  "updated_at": "2026-11-04T17:05:14.406255+00:00"
+  "updated_at": "2026-11-04T17:05:42.501973+00:00"
 }
