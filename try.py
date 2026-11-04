@@ -282,9 +282,13 @@ def validate_python_source(source: bytes, relative_path: str) -> None:
             )
 
     if normalized == Path(STRATEGY_FILE).name.lower():
-        if "generate_setup" not in names:
+        # Volumatic memakai sinyal bubble yang dikonfirmasi pada candle close.
+        # API strategi ini adalah signals_since(), bukan generate_setup()
+        # milik Tactical versi lama.
+        if "signals_since" not in names:
             raise RuntimeError(
-                f"{relative_path} wajib menyediakan function generate_setup()."
+                f"{relative_path} tidak kompatibel dengan Volumatic. "
+                "Wajib menyediakan function signals_since()."
             )
 
 
@@ -578,10 +582,13 @@ async def stop_main() -> bool:
 def _ganti_menu() -> str:
     return (
         "🔄 GANTI FILE\n\n"
-        "Pilih file yang ingin diganti:\n\n"
-        f"1. {MAIN_FILE}\n"
-        f"2. {STRATEGY_FILE}\n\n"
-        "Setelah memilih, kirim file .py sebagai Document Telegram."
+        f"Kirim {Path(MAIN_FILE).name} atau {Path(STRATEGY_FILE).name} "
+        "langsung sebagai Document Telegram.\n"
+        "Target akan dikenali otomatis dari nama file.\n\n"
+        "Jika nama file berbeda, gunakan:\n"
+        f"/ganti {MAIN_FILE}\n"
+        f"/ganti {STRATEGY_FILE}\n\n"
+        "Gunakan /back untuk membatalkan."
     )
 
 
@@ -850,10 +857,17 @@ async def route_message(message: dict, update: dict) -> None:
             return
 
         if GANTI_WAITING_SELECTION:
+            inferred_target = infer_ganti_target_from_document(document)
+            if inferred_target:
+                GANTI_WAITING_SELECTION = False
+                GANTI_TARGET = inferred_target
+                await handle_ganti_document(chat_id, document)
+                return
             tg_send(
                 chat_id,
-                "❌ Pilih target /ganti terlebih dahulu dengan 1 atau 2.\n\n"
-                + _ganti_menu(),
+                "❌ Nama file tidak dikenali. Kirim file dengan nama "
+                f"{Path(MAIN_FILE).name} atau {Path(STRATEGY_FILE).name}, "
+                "atau gunakan /ganti main.py / /ganti strategy.py lalu kirim ulang.",
             )
             return
 
