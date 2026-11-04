@@ -8,8 +8,8 @@
   "leverage": 10,
   "min_margin_enabled": true,
   "autostop_percent": "70",
-  "autostop_peak_equity": "8.12996021",
-  "autostop_last_equity": "8.10704821",
+  "autostop_peak_equity": "8.14141621",
+  "autostop_last_equity": "8.14141621",
   "autostop_triggered": false,
   "autostop_source": "REAL",
   "last_processed_candles": {
@@ -19,5 +19,5 @@
     "H4:1000CATUSDT": 1793808000000
   },
   "last_position_candles": {},
-  "updated_at": "2026-11-04T20:22:47.555204+00:00"
+  "updated_at": "2026-11-04T20:26:50.005104+00:00"
 }
